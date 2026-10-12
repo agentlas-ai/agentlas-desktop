@@ -18,7 +18,9 @@
   cursor: pointer;
 }
 
-.trigger:hover,
+.trigger:hover {
+  color: var(--ink);
+}
 .trigger:focus-visible {
   background: var(--paper-3);
   outline: 3px solid rgba(96, 122, 54, 0.13);

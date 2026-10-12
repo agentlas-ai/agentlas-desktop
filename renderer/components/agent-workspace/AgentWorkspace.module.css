@@ -23,7 +23,7 @@
 .rosterGroup > .rosterRow { flex: 1; min-width: 0; }
 .rosterFoot { display: flex; padding: 9px; gap: 6px; border-top: 1px solid var(--paper-edge); }
 .iconButton { display: inline-grid; place-items: center; width: 28px; height: 28px; flex: 0 0 28px; border: 0; border-radius: 5px; padding: 0; color: var(--ink-soft); background: transparent; }
-.iconButton:hover { background: var(--paper-3); color: var(--ink); }
+.iconButton:hover { color: var(--ink); }
 .technical { margin-top: 18px; font-size: 11px; color: var(--muted-deep); }
 .technical summary { cursor: pointer; }
 .rowWrap { position: relative; flex: 1; min-width: 0; }
@@ -47,7 +47,7 @@
 .body { display: flex; flex: 1; min-height: 0; min-width: 0; overflow: hidden; position: relative; }
 .rail { width: 46px; flex: 0 0 46px; border-right: 1px solid var(--paper-edge); background: var(--paper-2); display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 7px 0; }
 .railButton { position: relative; display: grid; place-items: center; width: 38px; height: 38px; border: 0; background: transparent; color: var(--muted-deep); border-radius: 6px; }
-.railButton:hover { color: var(--ink); background: var(--paper-3); }
+.railButton:hover { color: var(--ink); }
 .railActive { color: var(--ink); background: var(--paper-edge); }
 .railActive::before { content: ""; position: absolute; left: -4px; width: 2px; height: 22px; background: var(--attention); border-radius: 2px; }
 .badge { position: absolute; right: 1px; top: 1px; background: var(--attention); color: var(--paper); border-radius: 8px; min-width: 14px; padding: 1px 3px; font-size: 9px; line-height: 12px; }
@@ -70,7 +70,7 @@
 .fileMenu button:hover { background: var(--paper-3); }
 .fileMenu .danger { color: var(--danger); }
 .button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; border: 1px solid var(--paper-edge-strong); border-radius: 5px; color: var(--ink); background: var(--paper); padding: 6px 9px; font-size: 11px !important; white-space: nowrap; text-decoration: none; }
-.button:hover { background: var(--paper-3); }
+.button:hover { color: var(--ink); }
 .primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
 .primary:hover { background: var(--ink-soft); color: var(--paper); }
 .danger { color: var(--danger); }
@@ -90,7 +90,7 @@
 .listPane { width: 240px; flex: 0 0 240px; display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--paper-edge); background: var(--paper-2); }
 .listRows { flex: 1; min-height: 0; overflow: auto; padding: 5px; }
 .listItem { width: 100%; border: 1px solid transparent; border-radius: 6px; padding: 9px; color: var(--ink-soft); background: transparent; text-align: left; display: block; margin: 2px 0; }
-.listItem:hover { background: var(--paper-3); }
+.listItem:hover { color: var(--ink); }
 .listItemTitle { display: flex; align-items: flex-start; gap: 7px; font-size: 12px; color: var(--ink); line-height: 1.5; }
 .listItemTitle > span { flex: 1; min-width: 0; }
 .listItemSub { display: flex; align-items: center; gap: 5px; margin-top: 6px; font-size: 10px; color: var(--muted-deep); }
@@ -189,7 +189,8 @@
 .popupSearch kbd { font-size:12px; color:var(--muted-deep); }
 .popupFiles { display:flex; flex-direction:column; gap:4px; max-height:min(420px,48dvh); overflow:auto; margin-top:12px; }
 .popupFile { display:flex; align-items:center; gap:12px; width:100%; min-height:52px; border:0; border-radius:10px; padding:10px; text-align:left; background:transparent; color:var(--ink-soft); }
-.popupFile:hover,.popupFile:focus-visible { background:var(--popup-control-bg); }
+.popupFile:hover { color: var(--ink); }
+.popupFile:focus-visible { background:var(--popup-control-bg); }
 .popupFile > span { min-width:0; display:flex; flex-direction:column; gap:3px; }
 .popupFile strong { font-size:13px; font-weight:600; }
 .popupFile small { font-size:11px; color:var(--muted-deep); overflow-wrap:anywhere; }

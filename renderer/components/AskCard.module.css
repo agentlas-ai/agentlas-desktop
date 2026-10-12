@@ -76,7 +76,7 @@
   cursor: pointer;
 }
 
-.close:hover { background: var(--ask-option-hover); color: var(--ask-title-ink); }
+.close:hover { color: var(--ask-title-ink); }
 
 .options {
   display: grid;
@@ -214,7 +214,7 @@
   cursor: pointer;
 }
 
-.skip:hover { background: var(--ask-option-hover); color: var(--ask-title-ink); }
+.skip:hover { color: var(--ask-title-ink); }
 
 /* 여러 개 고르는 질문의 체크 상자 — 고른 상태를 화살표 강조와 구분한다. */
 .check {
@@ -288,7 +288,7 @@
   color: var(--ask-skip-ink);
 }
 
-.actionSecondary:hover:not(:disabled) { background: var(--ask-option-hover); color: var(--ask-title-ink); }
+.actionSecondary:hover:not(:disabled) { color: var(--ask-title-ink); }
 
 .actionPrimary {
   display: inline-flex;

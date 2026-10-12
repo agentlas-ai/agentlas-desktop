@@ -56,7 +56,7 @@
   cursor: pointer;
 }
 
-.headAction:hover { background: var(--doc-hover); color: var(--doc-ink); }
+.headAction:hover { color: var(--doc-ink); }
 .headAction:disabled { opacity: .45; cursor: default; }
 
 .menuAnchor { position: relative; display: inline-flex; }
@@ -132,7 +132,7 @@
   cursor: pointer;
 }
 
-.expand:hover { background: var(--doc-hover); color: var(--doc-ink); }
+.expand:hover { color: var(--doc-ink); }
 
 /* 문서 활자 — 대화 거품과 다른 위계를 갖는다. */
 .body {

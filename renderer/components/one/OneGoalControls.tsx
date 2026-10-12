@@ -271,7 +271,7 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, onStoppe
   }, [modelNoteOpen]);
   useEffect(() => {
     if (view.review) setHelpOpen(false);
-  }, [view.review?.attemptSetDigest]);
+  }, [view.review?.version]);
   // The (?) bubble is a transient explanation: any outside press or Escape closes it.
   useEffect(() => {
     if (!helpOpen) return;
@@ -287,15 +287,10 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, onStoppe
   const ko = locale === "ko";
   // Electron serializes IPC failures into an error message. This exact code
   // mapping changes explanation only; Main alone decides whether resume runs.
-  const uncertainResume = /(?:^|:\s*)auto_goal_resume_attempt_unsettled$/.test(view.error ?? "");
-  const reviewCancelled = /(?:^|:\s*)goal_resume_uncertain_review_cancelled$/.test(view.error ?? "");
-  const reviewChanged = /(?:^|:\s*)(?:goal_resume_uncertain_review_changed|automation_goal_execution_review_changed)$/.test(view.error ?? "");
-  const reviewRequired = /(?:^|:\s*)(?:goal_resume_uncertain_review_required|automation_goal_execution_review_required)$/.test(view.error ?? "");
+  const reviewChanged = /(?:^|:\s*)automation_goal_execution_review_changed$/.test(view.error ?? "");
+  const reviewRequired = /(?:^|:\s*)automation_goal_execution_review_required$/.test(view.error ?? "");
   const ownershipReviewUnavailable = /(?:^|:\s*)automation_goal_execution_review_unavailable$/.test(view.error ?? "");
   const automationSetupRequired = /(?:^|:\s*)automation_goal_execution_setup_required$/.test(view.error ?? "");
-  const reviewUnverifiable = /(?:^|:\s*)goal_resume_uncertain_review_unverifiable$/.test(view.error ?? "");
-  const reviewTooLarge = /(?:^|:\s*)goal_resume_uncertain_review_too_large$/.test(view.error ?? "");
-  const automationReviewRequired = /(?:^|:\s*)goal_resume_uncertain_automation_reconciliation_required$/.test(view.error ?? "");
   const claimedWaitReconciliation = /(?:^|:\s*)goal_wait_claimed_reconciliation_required$/.test(view.error ?? "");
   const lifecycleConfirmationUnavailable = /(?:^|:\s*)goal_legacy_lifecycle_confirmation_unavailable$/.test(view.error ?? "");
   const lifecycleNotOngoing = /(?:^|:\s*)goal_legacy_lifecycle_not_ongoing$/.test(view.error ?? "");
@@ -377,8 +372,7 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, onStoppe
   const pendingModel = view.handoff?.requested.model ?? view.handoff?.requested.kind ?? null;
   const review = view.review;
   const closeReview = () => { session.current?.closeReview(); };
-  // One sentence per state. Attempt IDs, timestamps and tool previews stay in
-  // the ledger; the person only needs to know what happens if they continue.
+  // One sentence per state: the person only needs to know what happens if they continue.
   const reviewSentence = !review ? null
     : review.blocker === "running"
       ? (ko ? "아직 끝나지 않은 작업이 있어요. 끝나면 다시 눌러 주세요." : "A task is still finishing. Try again once it is done.")
@@ -389,16 +383,7 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, onStoppe
     : review.blocker === "automation"
       ? (ko ? "예약 자동화가 붙은 목표라, 같은 게시가 두 번 나가지 않도록 여기서는 이어가지 않았어요."
         : "This goal has a scheduled automation, so it was not continued here to avoid posting the same thing twice.")
-    : review.blocker === "too_many"
-      ? (ko ? `멈춘 작업이 ${review.attempts.length}건이라 한 번에 이어갈 수 없어요. 목표는 멈춘 채로 둡니다.`
-        : `${review.attempts.length} tasks were interrupted — too many to continue at once. The goal stays paused.`)
-    : review.blocker === "missing_activity"
-      ? (ko ? "일부 작업의 기록이 없어 안전하게 이어갈 수 없어요. 목표는 멈춘 채로 둡니다."
-        : "Some tasks have no record, so it is not safe to continue. The goal stays paused.")
-    : !review.attempts.length && review.automationOwnership
-      ? (ko ? "이 Goal과 함께 재개하고 멈출 자동화를 확인해 주세요." : "Confirm the automation that will resume and stop with this Goal.")
-    : (ko ? `멈추기 전 작업 ${review.attempts.length}건은 이미 처리됐을 수 있어 다시 하지 않고, 다음 작업부터 이어갑니다.`
-      : `The ${review.attempts.length} interrupted task(s) may already have gone through, so they will not be redone — work continues from the next step.`);
+    : (ko ? "이 Goal과 함께 재개하고 멈출 자동화를 확인해 주세요." : "Confirm the automation that will resume and stop with this Goal.");
   const plainAutomationNote = surface.automation.reconciliationHold > 0
     ? (ko ? "예약 자동화 하나가 오류 뒤 멈춰 다음 실행이 잡혀 있지 않아요." : "A scheduled automation stopped after an error and has no next run.")
     : surface.automation.held > 0
@@ -505,26 +490,16 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, onStoppe
     </form>}
     {view.error && <p className={styles.error} role="alert">{claimedWaitReconciliation
       ? (ko ? "이전 호출의 전달·실행 결과가 불확실해 재개하지 않았습니다. 실제 결과를 확인할 때까지 목표와 작업 기록을 보존합니다." : "The previous dispatch outcome is uncertain, so the goal was not resumed. The goal and work history are preserved until its actual result is reviewed.")
-      : reviewCancelled
-        ? (ko ? "확인을 취소했습니다. 목표는 중단 상태이며 기록은 보존됩니다." : "Review cancelled. The goal remains paused and its history is preserved.")
       : reviewChanged
         ? (ko ? "그사이 작업 상태가 바뀌었어요. 다시 눌러 주세요." : "The work changed in the meantime. Press it again.")
       : reviewRequired
-        ? (ko ? "멈춘 작업을 먼저 정리해야 해요. 재개를 다시 눌러 주세요." : "The interrupted work needs settling first. Press Resume again.")
+        ? (ko ? "자동화 연결을 먼저 확인해야 해요. 재개를 다시 눌러 주세요." : "The automation connection needs review first. Press Resume again.")
       : ownershipReviewUnavailable
         ? (ko ? "자동화와 Goal의 연결을 확인할 수 없습니다. 최신 목표와 자동화 설정을 확인한 뒤 다시 이어가 주세요."
           : "The automation's connection to this Goal could not be verified. Check the current Goal and automation settings, then continue again.")
       : automationSetupRequired
         ? (ko ? "자동화 모델과 실행 대상 설정이 필요합니다. 다시 재개를 누르면 설정 화면을 열 수 있습니다."
           : "The automation's model or target needs configuration. Press Resume again to open its settings.")
-      : reviewUnverifiable
-        ? (ko ? "일부 작업의 기록이 없어 안전하게 이어갈 수 없어요. 목표는 멈춘 채로 둡니다." : "Some tasks have no record, so it is not safe to continue. The goal stays paused.")
-      : reviewTooLarge
-        ? (ko ? "멈춘 작업이 너무 많아 한 번에 이어갈 수 없어요. 목표는 멈춘 채로 둡니다." : "Too many tasks were interrupted to continue at once. The goal stays paused.")
-      : automationReviewRequired
-        ? (ko ? "예약 자동화가 붙은 목표라, 같은 게시가 두 번 나가지 않도록 여기서는 이어가지 않았어요." : "This goal has a scheduled automation, so it was not continued here to avoid posting the same thing twice.")
-      : uncertainResume
-      ? (ko ? "이전 실행의 결과를 먼저 확인해야 합니다. 목표와 작업 기록은 보존되어 있습니다." : "The previous action's outcome needs confirmation first. Your goal and work history are preserved.")
       : lifecycleConfirmationUnavailable
         ? (ko ? "저장된 요청의 지속 목표 여부를 현재 모델로 확인하지 못해 재개하지 않았습니다. 목표와 작업 기록은 그대로 보존되어 있습니다. 모델 연결 상태를 확인한 뒤 다시 시도해 주세요." : "The current model could not confirm whether the saved request is ongoing, so the goal was not resumed. The goal and work history are preserved; check the model connection and try again.")
       : lifecycleNotOngoing

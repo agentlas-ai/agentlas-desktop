@@ -1,5 +1,6 @@
 .chip { flex: 0 0 auto; min-height: 22px; padding: 1px 9px; border: 1px solid var(--paper-edge); border-radius: 999px; background: var(--paper); color: var(--ink); font-size: 11px; line-height: 1.4; cursor: pointer; }
-.chip:hover, .chip:focus-visible { background: var(--paper-2); }
+.chip:hover { color: var(--ink); }
+.chip:focus-visible { background: var(--paper-2); }
 .backdrop { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(0, 0, 0, 0.32); }
 .dialog { box-sizing: border-box; display: flex; flex-direction: column; width: min(640px, 100%); max-height: min(720px, calc(100vh - 32px)); border: 1px solid var(--paper-edge); border-radius: 12px; background: var(--paper); color: var(--ink); box-shadow: 0 16px 40px rgba(0, 0, 0, 0.22); font-size: 13px; }
 .head { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--paper-edge); }

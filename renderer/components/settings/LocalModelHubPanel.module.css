@@ -5,7 +5,8 @@
 .search:focus-within { border-radius:5px; }
 .menus { position:relative; display:flex; gap:3px; }
 .icon { width:30px; height:30px; display:grid; place-items:center; background:transparent; color:var(--muted-deep); border:0; border-radius:7px; cursor:pointer; }
-.icon:hover,.icon[aria-expanded=true] { background:var(--paper-2); }
+.icon:hover { color: var(--ink); }
+.icon[aria-expanded=true] { background:var(--paper-2); }
 .popover { position:absolute; right:0; top:36px; z-index:20; }
 .provenance { margin:4px 12px 8px; color:var(--muted-deep); font:inherit; }
 .provenance code { display:block; overflow-wrap:anywhere; margin:7px 0; font-size:10px; }

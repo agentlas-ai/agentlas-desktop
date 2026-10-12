@@ -101,8 +101,11 @@
 }
 
 .actions button:hover,
+.message button:hover {
+  border-color: rgb(167 243 208 / 60%);
+  color: var(--ink);
+}
 .actions button:focus-visible,
-.message button:hover,
 .message button:focus-visible {
   border-color: rgb(167 243 208 / 60%);
   background: rgb(167 243 208 / 10%);
@@ -135,8 +138,10 @@
 .shell { border-color: var(--design-line); }
 .toolbar, .address { color: var(--design-ink); background: var(--design-bg); border-color: var(--design-line); }
 .actions button, .message button { border-color: var(--design-line); color: var(--design-ink); background: transparent; }
-.actions button:hover, .actions button:focus-visible,
-.message button:hover, .message button:focus-visible { border-color: var(--design-accent); background: var(--design-accent-soft); }
+.actions button:hover,
+.message button:hover { border-color: var(--design-accent); color: var(--ink); }
+.actions button:focus-visible,
+.message button:focus-visible { border-color: var(--design-accent); background: var(--design-accent-soft); }
 
 .message {
   position: absolute;

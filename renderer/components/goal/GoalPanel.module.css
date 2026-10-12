@@ -24,7 +24,10 @@
   display: inline-grid; place-items: center; min-width: 22px; height: 22px; padding: 0 4px;
   border: 0; border-radius: 5px; background: transparent; color: var(--muted-deep); font: inherit; font-size: 11px; cursor: pointer;
 }
-.iconButton:hover, .iconButton:focus-visible, .actions button:hover, .actions button:focus-visible { color: var(--ink); background: var(--paper-2, var(--paper)); outline: none; }
+.iconButton:hover,
+.actions button:hover { color: var(--ink); }
+.iconButton:focus-visible,
+.actions button:focus-visible { color: var(--ink); background: var(--paper-2, var(--paper)); outline: none; }
 .actions button:disabled { opacity: 0.35; cursor: default; background: transparent; }
 .actions button[data-confirm="true"] { color: var(--danger, var(--accent)); font-weight: 600; }
 .down svg { transform: rotate(180deg); }

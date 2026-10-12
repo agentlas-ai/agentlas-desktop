@@ -1,5 +1,5 @@
 .control { display:inline-flex; align-items:center; justify-content:center; width:36px; height:36px; flex-shrink:0; border:1px solid var(--paper-edge); border-radius:9px; background:var(--paper); color:var(--ink-soft); cursor:pointer; }
-.control:hover { background:var(--paper-3); color:var(--ink); }
+.control:hover { color:var(--ink); }
 .control:focus-visible, .menu>summary:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
 .control:disabled { opacity:.45; cursor:default; }
 .primary { background:var(--accent); color:var(--white); border-color:var(--accent); }

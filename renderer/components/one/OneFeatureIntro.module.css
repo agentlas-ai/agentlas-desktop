@@ -307,7 +307,7 @@
   cursor: pointer;
 }
 
-.button:hover,
+.button:hover { color: var(--ink); }
 .button:focus-visible { background: var(--paper-2); outline: 2px solid transparent; }
 
 .buttonPrimary {

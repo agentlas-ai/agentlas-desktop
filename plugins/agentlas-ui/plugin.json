@@ -1,0 +1,70 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "agentlas-ui",
+  "name": "Chat UI Schema",
+  "version": "1.0.0",
+  "builtin": true,
+  "publisher": {
+    "name": "Agentlas",
+    "url": "https://agentlas.cloud"
+  },
+  "surface": {
+    "displayName": "Chat UI Schema",
+    "displayNameKo": "채팅 UI 스키마",
+    "tagline": "Native chat components, read on demand",
+    "taglineKo": "채팅 네이티브 컴포넌트 스키마를 필요할 때 읽습니다",
+    "description": "Agentlas built-in read-only server that returns the chat's native component schema (comparisons, tables, step flows, metrics, charts) when the model decides to draw one. Nothing else.",
+    "descriptionKo": "모델이 비교표·단계 흐름·지표·차트를 그리기로 했을 때 채팅 네이티브 컴포넌트 스키마만 돌려주는 Agentlas 내장 읽기 전용 서버입니다.",
+    "category": "data",
+    "brandColor": "#0F766E",
+    "defaultPrompts": []
+  },
+  "invocation": {
+    "mention": "@ui-schema",
+    "implicit": "always",
+    "standalone": false
+  },
+  "provides": {
+    "tools": [
+      {
+        "id": "agentlas-ui",
+        "capability": "data",
+        "kind": "builtin",
+        "resolver": "ui-schema",
+        "envKeys": [],
+        "form": "inline",
+        "surface": {
+          "name": "채팅 UI 스키마",
+          "nameEn": "Chat UI Schema",
+          "description": "채팅 컴포넌트 스키마를 읽기 전용으로 돌려주는 Agentlas 내장 MCP.",
+          "descriptionEn": "Agentlas built-in read-only MCP that returns the chat component schema.",
+          "category": "data",
+          "brandColor": "#0F766E",
+          "mark": "UI"
+        }
+      }
+    ]
+  },
+  "requires": {
+    "prereq": [
+      {
+        "id": "node",
+        "provided-by": "app"
+      }
+    ],
+    "os": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
+  },
+  "permissions": {
+    "fileWrite": "none",
+    "network": "none",
+    "shell": "deny"
+  },
+  "state": {
+    "files": [],
+    "assets": false
+  }
+}

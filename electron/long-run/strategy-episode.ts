@@ -8,7 +8,7 @@ import { captureGoalEpisode, assertGoalEpisodeCapture, withGoalEpisodeSelfChange
   type GoalEpisodeDisposition } from "./episode-disposition";
 import { readGoalPlan, updateGoalPlanNode, withCurrentGoalPlan } from "../store/goal-plans";
 import { getChatGoalRevision } from "../store/chat-goals";
-import { listLongRunTasks, unsettledLongRunAttemptCount } from "../store/long-runs";
+import { listLongRunTasks } from "../store/long-runs";
 import { getAutomation, listAutomations } from "../store/automations";
 import { readCurrentGoalAutomationBinding, getAutomationDefinitionDigest } from "./automation-provenance";
 import { getLatestAutomationStrategyRevision } from "../store/automation-strategy-revisions";
@@ -175,7 +175,7 @@ function current(captureId: string, now: number): StrategyCapture {
   const c = assertGoalEpisodeCapture(captureId, now).custody!;
   const wait = latestGoalWaitSubscription(value.goalId);
   if (wait && ["pending", "claimed"].includes(wait.state)) throw new Error("goal_strategy_wait_exists");
-  if (!c.effectsSettled || unsettledLongRunAttemptCount(c.runId)) throw new Error("goal_strategy_effects_unknown");
+  if (!c.effectsSettled) throw new Error("goal_strategy_effects_unknown");
   if (hash(listLongRunTasks(c.runId)) !== value.taskDigest || hash(sourceFor(value.source.automationId)) !== hash(value.source))
     throw new Error("goal_strategy_source_stale");
   if (getChatGoalRevision(value.goalId)?.lifecycle !== "finite" || Date.parse(value.deadline) <= now) throw new Error("goal_strategy_deadline_reached");

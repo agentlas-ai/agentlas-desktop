@@ -68,8 +68,11 @@
   overflow-x: auto;
   border-bottom: 1px solid var(--paper-edge);
   background: var(--paper);
-  scrollbar-width: thin;
+  /* A visible horizontal scrollbar took height under the tabs and lifted them; they still scroll by wheel/trackpad. */
+  scrollbar-width: none;
 }
+
+.tabs::-webkit-scrollbar { display: none; }
 
 .tabs.inline {
   flex: 0 1 auto;

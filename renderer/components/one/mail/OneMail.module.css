@@ -61,7 +61,9 @@
   cursor: pointer;
 }
 
-.composeButton:hover,
+.composeButton:hover {
+  color: var(--ink);
+}
 .composeButton:focus-visible {
   background: var(--paper-3);
   outline: 2px solid transparent;
@@ -93,7 +95,9 @@
   cursor: pointer;
 }
 
-.navItem:hover,
+.navItem:hover {
+  color: var(--ink);
+}
 .navItem:focus-visible {
   background: var(--paper-3);
   outline: 2px solid transparent;
@@ -229,7 +233,9 @@
   cursor: pointer;
 }
 
-.iconButton:hover:not(:disabled),
+.iconButton:hover:not(:disabled) {
+  color: var(--ink);
+}
 .iconButton:focus-visible {
   background: var(--paper-3);
   outline: 2px solid transparent;
@@ -606,7 +612,9 @@
 .chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chip:disabled { cursor: default; opacity: 0.6; }
 
-.chip:hover:not(:disabled),
+.chip:hover:not(:disabled) {
+  color: var(--ink);
+}
 .chip:focus-visible {
   background: var(--paper-3);
   outline: 2px solid transparent;
@@ -640,7 +648,9 @@
   cursor: pointer;
 }
 
-.chipRemove:hover:not(:disabled),
+.chipRemove:hover:not(:disabled) {
+  color: var(--ink);
+}
 .chipRemove:focus-visible {
   background: var(--paper-edge);
 }
@@ -691,7 +701,7 @@
 .primary:focus-visible,
 .secondary:focus-visible { outline: 2px solid var(--ink-soft); outline-offset: 2px; }
 
-.secondary:hover:not(:disabled) { background: var(--paper-3); }
+.secondary:hover:not(:disabled) { color: var(--ink); }
 
 .ghostButton {
   min-height: 28px;
@@ -710,7 +720,9 @@
   white-space: nowrap;
 }
 
-.ghostButton:hover,
+.ghostButton:hover {
+  color: var(--ink);
+}
 .ghostButton:focus-visible {
   background: var(--paper-3);
   outline: 2px solid transparent;
@@ -953,7 +965,7 @@
 }
 
 .suggestion[data-selected="true"] { border-color: var(--ink-soft); background: var(--paper-3); color: var(--ink); font-weight: 650; }
-.suggestion:hover,
+.suggestion:hover { color: var(--ink); }
 .suggestion:focus-visible { background: var(--paper-3); outline: 2px solid transparent; }
 
 .lockChip {
@@ -1144,7 +1156,9 @@
 
 .directoryRow { cursor: default; }
 
-.contactRow:hover,
+.contactRow:hover {
+  color: var(--ink);
+}
 .contactRow:focus-visible {
   background: var(--paper-2);
   outline: 2px solid transparent;
@@ -1312,7 +1326,7 @@
 .stickyActions .blockPrimary { order: 2; }
 .blockPrimary { border: 1px solid var(--black); background: var(--black); color: var(--white); }
 .blockSecondary { border: 1px solid var(--paper-edge-strong, var(--paper-edge)); background: var(--paper); color: var(--ink); }
-.blockSecondary:hover:not(:disabled) { background: var(--paper-2); }
+.blockSecondary:hover:not(:disabled) { color: var(--ink); }
 .blockPrimary:disabled,
 .blockSecondary:disabled { cursor: not-allowed; opacity: 0.45; }
 
@@ -1379,7 +1393,7 @@
   white-space: nowrap;
   cursor: pointer;
 }
-.copyButton:hover { background: var(--paper-3); }
+.copyButton:hover { color: var(--ink); }
 :global([data-one-bottom-sheet-toolbar]) .topTabs { margin-bottom: 0; }
 
 /* Domain card: inline refusal / status right under the card header. */

@@ -397,7 +397,8 @@ function readOfficialBundleVersion(appPath, subject) {
 function verifyOuterDmg(dmgPath, subject) {
   run("hdiutil", ["verify", dmgPath], { code: "dmg-integrity-rejected", subject });
   run("codesign", ["--verify", "--strict", dmgPath], { code: "dmg-signature-rejected", subject });
-  run("xcrun", ["stapler", "validate", dmgPath], { code: "dmg-notarization-rejected", subject });
+  // Apple ticket lookup drops connections (Error 68): retry before it counts.
+  run("xcrun", ["stapler", "validate", dmgPath], { code: "dmg-notarization-rejected", subject, retries: 5, retryDelayMs: 20_000 });
   run(
     "spctl",
     ["-a", "-t", "open", "--context", "context:primary-signature", "-vv", dmgPath],

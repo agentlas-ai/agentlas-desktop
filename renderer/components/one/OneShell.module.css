@@ -33,10 +33,12 @@
 }
 
 .headerAction:hover,
-.headerAction:focus-visible,
 .iconButton:hover,
+.ghostButton:hover {
+  color: var(--ink);
+}
+.headerAction:focus-visible,
 .iconButton:focus-visible,
-.ghostButton:hover,
 .ghostButton:focus-visible {
   background: var(--paper-2);
   outline: 2px solid transparent;
@@ -71,7 +73,9 @@
   padding: 0 11px;
 }
 
-.workLink:hover,
+.workLink:hover {
+  color: var(--ink);
+}
 .workLink:focus-visible {
   background: var(--paper-2);
   outline: 2px solid transparent;
@@ -207,8 +211,10 @@
 }
 
 .railCollapseButton:hover,
+.sidebarRevealButton:hover {
+  color: var(--ink);
+}
 .railCollapseButton:focus-visible,
-.sidebarRevealButton:hover,
 .sidebarRevealButton:focus-visible {
   background: var(--paper-3);
   outline: 2px solid transparent;
@@ -246,8 +252,10 @@
 }
 
 .railPrimaryButton:hover,
+.railUtilities button:hover {
+  color: var(--ink);
+}
 .railPrimaryButton:focus-visible,
-.railUtilities button:hover,
 .railUtilities button:focus-visible {
   background: var(--paper-3);
   outline: 2px solid transparent;
@@ -311,7 +319,9 @@
   cursor: pointer;
 }
 
-.taskButton:hover,
+.taskButton:hover {
+  color: var(--ink);
+}
 .taskButton:focus-visible {
   background: var(--paper-3);
   outline: 2px solid transparent;
@@ -360,7 +370,9 @@
   opacity: 1;
 }
 
-.conversationDelete:hover,
+.conversationDelete:hover {
+  color: var(--danger);
+}
 .conversationDelete:focus-visible {
   background: var(--danger-soft);
   color: var(--danger);
@@ -721,14 +733,15 @@
 }
 
 .taskToolbarMenu > button:hover {
-  background: var(--paper-3);
   color: var(--ink);
 }
 
 .taskToolbar > button:hover,
+.taskToolbarMenu > button:hover {
+  color: var(--ink);
+}
 .taskToolbar > button:focus-visible,
 .taskToolbar > button[data-active="true"],
-.taskToolbarMenu > button:hover,
 .taskToolbarMenu > button:focus-visible,
 .taskToolbarMenu > button[aria-expanded="true"] {
   background: var(--paper-3);
@@ -851,7 +864,7 @@
   .taskforceToolbarPortraits { display: none !important; }
 }
 
-.taskToolbar > .taskforceMembersButton:hover,
+.taskToolbar > .taskforceMembersButton:hover { border-color: var(--muted); color: var(--ink); }
 .taskToolbar > .taskforceMembersButton:focus-visible { border-color: var(--muted); background: var(--paper-3); }
 
 .taskToolbarMenu { position: relative; flex: 0 0 auto; }
@@ -1581,7 +1594,9 @@
   cursor: pointer;
 }
 
-.decisionInlineClose:hover,
+.decisionInlineClose:hover {
+  color: var(--ink);
+}
 .decisionInlineClose:focus-visible {
   color: var(--ink);
   background: var(--paper-3);
@@ -1656,8 +1671,11 @@
 }
 
 .decisionCompactChoices button:hover,
+.decisionCompactActions button:hover {
+  border-color: var(--muted);
+  color: var(--ink);
+}
 .decisionCompactChoices button:focus-visible,
-.decisionCompactActions button:hover,
 .decisionCompactActions button:focus-visible {
   border-color: var(--muted);
   background: var(--paper-3);
@@ -1752,13 +1770,15 @@
 .decisionMultiOption[aria-pressed="true"] > span { border-color: var(--ok); background: var(--ok); }
 .decisionMultiOption:hover, .decisionMultiOption:focus-visible { border-color: var(--accent); outline: 2px solid transparent; }
 .decisionButton { min-height: 44px; padding: 0 14px; border-color: var(--warn-soft); background: var(--paper); }
-.decisionButton:hover, .decisionButton:focus-visible { border-color: var(--warn-soft); background: var(--warn-soft); outline: 2px solid transparent; }
+.decisionButton:hover { border-color: var(--warn-soft); color: var(--ink); }
+.decisionButton:focus-visible { border-color: var(--warn-soft); background: var(--warn-soft); outline: 2px solid transparent; }
 .decisionPrimaryButton { min-height: 48px; display: grid; justify-items: start; gap: 2px; padding: 9px 15px; border-color: var(--ok); color: var(--white); background: var(--ok); font-weight: 720; text-align: left; }
 .decisionPrimaryButton small { color: rgba(255, 255, 255, .82); font-size: 10px; font-weight: 520; line-height: 1.45; }
 .decisionPrimaryButton:hover, .decisionPrimaryButton:focus-visible { border-color: var(--ok); background: var(--ok); outline: 2px solid transparent; }
 .decisionRejectButton { min-height: 44px; display: grid; justify-items: start; gap: 2px; padding: 8px 14px; border-color: var(--warn-soft); color: var(--ink-soft); background: var(--paper); text-align: left; }
 .decisionRejectButton small { color: var(--muted-deep); font-size: 10px; line-height: 1.4; }
-.decisionRejectButton:hover, .decisionRejectButton:focus-visible { border-color: var(--warn-soft); background: var(--warn-soft); outline: 2px solid transparent; }
+.decisionRejectButton:hover { border-color: var(--warn-soft); color: var(--ink); }
+.decisionRejectButton:focus-visible { border-color: var(--warn-soft); background: var(--warn-soft); outline: 2px solid transparent; }
 .decisionHint { color: var(--muted-deep) !important; font-size: 10px !important; }
 .decisionCard[data-variant="choice"] {
   width: min(100%, 680px);
@@ -1950,7 +1970,7 @@
   white-space: nowrap;
   cursor: pointer;
 }
-.admissionAction:hover,
+.admissionAction:hover { color: var(--ink); }
 .admissionAction:focus-visible { background: var(--paper-3); outline: none; }
 
 /* Follow-up receipts separate state and copy from actions in narrow composer panels. */
@@ -2042,8 +2062,10 @@
 }
 
 .steeringDraftSend:hover,
+.steeringDraftDiscard:hover {
+  color: var(--ink);
+}
 .steeringDraftSend:focus-visible,
-.steeringDraftDiscard:hover,
 .steeringDraftDiscard:focus-visible {
   background: var(--paper-3);
   outline: 2px solid transparent;
@@ -2125,7 +2147,7 @@
   font-size: 17px;
   cursor: pointer;
 }
-.attachmentChip > button:hover,
+.attachmentChip > button:hover { color: var(--ink); }
 .attachmentChip > button:focus-visible { background: var(--paper-3); outline: 2px solid var(--muted); }
 
 .attachmentError {
@@ -2175,7 +2197,7 @@
   color: var(--accent);
   font-size: 17px;
 }
-.oneMemoryUseOnceChip button:hover,
+.oneMemoryUseOnceChip button:hover { color: var(--ink); }
 .oneMemoryUseOnceChip button:focus-visible { background: var(--paper-3); outline: 2px solid var(--ok-soft); }
 
 .composer {
@@ -2305,7 +2327,7 @@
   cursor: pointer;
 }
 
-.composerPopoverRow:hover,
+.composerPopoverRow:hover { color: var(--ink); }
 .composerPopoverRow:focus-visible,
 .composerPopoverRow[data-selected="true"] { background: var(--paper-3); outline: none; }
 .composerPopoverIcon { display: grid; place-items: center; color: var(--ink-soft); }
@@ -2455,7 +2477,7 @@
   color: var(--ink-soft);
   cursor: pointer;
 }
-.attachmentButton:hover,
+.attachmentButton:hover { color: var(--ink); }
 .attachmentButton:focus-visible { background: var(--paper-3); outline: 3px solid rgba(96, 122, 54, .13); }
 .attachmentButton:disabled { color: var(--muted); cursor: default; }
 
@@ -2485,9 +2507,9 @@
 .composerChip > svg { flex: 0 0 auto; }
 
 .composerChip:hover,
+.composerQuickMode:hover { color: var(--ink); }
 .composerChip:focus-visible,
 .composerChip[aria-expanded="true"],
-.composerQuickMode:hover,
 .composerQuickMode:focus-visible { background: var(--paper-3); outline: none; }
 .composerQuickMode[data-active="true"] {
   /* Fast is an armed per-turn execution preference. Keep the pressed bolt
@@ -2763,7 +2785,7 @@
   border-radius: 12px;
 }
 
-.searchHit:hover,
+.searchHit:hover { color: var(--ink); }
 .searchHit:focus-within { background: var(--paper-2); }
 .searchHit[data-active="true"] { background: var(--paper-3); }
 .searchHit[data-archived="true"] { opacity: .78; }
@@ -3022,7 +3044,7 @@
   color: var(--muted-deep);
   cursor: pointer;
 }
-.steeringQueueRemove:hover { background: var(--paper-3); color: var(--ink); }
+.steeringQueueRemove:hover { color: var(--ink); }
 
 .failureCard {
   position: relative;
@@ -3036,7 +3058,8 @@
   color: var(--ink);
 }
 .failureCardClose { position: absolute; top: 12px; right: 12px; width: 32px; height: 32px; display: inline-grid; place-items: center; padding: 0; border: 0; border-radius: 9px; background: transparent; color: var(--muted-deep); cursor: pointer; }
-.failureCardClose:hover, .failureCardClose:focus-visible { background: var(--paper-3); color: var(--ink-soft); }
+.failureCardClose:hover { color: var(--ink-soft); }
+.failureCardClose:focus-visible { background: var(--paper-3); color: var(--ink-soft); }
 .failureCardClose:focus-visible { outline: 2px solid rgba(96, 122, 54, .3); outline-offset: 2px; }
 .failureCardHeader { display: flex; align-items: center; gap: 8px; }
 .failureCardHeader strong { color: var(--ink-soft); }
@@ -3262,7 +3285,9 @@
   cursor: pointer;
 }
 
-.homeChatHeader > button:hover,
+.homeChatHeader > button:hover {
+  color: var(--ink);
+}
 .homeChatHeader > button:focus-visible,
 .homeChatHeader > button[data-active="true"] {
   background: var(--paper-3);
@@ -3394,7 +3419,7 @@
   color: var(--muted-deep);
   cursor: pointer;
 }
-.homeHistoryExpand:hover,
+.homeHistoryExpand:hover { border-color: var(--paper-edge-strong); color: var(--ink); }
 .homeHistoryExpand:focus-visible { border-color: var(--paper-edge-strong); background: var(--paper-2); color: var(--ink); outline: none; }
 
 .homeHistoryCollapse {
@@ -3412,7 +3437,7 @@
   color: var(--muted-deep);
   cursor: pointer;
 }
-.homeHistoryCollapse:hover,
+.homeHistoryCollapse:hover { border-color: var(--paper-edge-strong); color: var(--ink); }
 .homeHistoryCollapse:focus-visible { border-color: var(--paper-edge-strong); background: var(--paper-2); color: var(--ink); outline: none; }
 
 /* Conversation fidelity: compact neutral bubbles with Markdown hierarchy
@@ -3949,7 +3974,6 @@
 }
 
 .splitPaneClose:hover {
-  background: var(--paper-3);
   color: var(--ink);
 }
 
@@ -3984,7 +4008,6 @@
 }
 
 .splitPaneFocus:hover {
-  background: var(--paper-3);
   color: var(--ink);
 }
 
@@ -4056,7 +4079,7 @@
 }
 
 .sessionSheetRow:hover {
-  background: var(--paper-2);
+  color: var(--ink);
 }
 
 .sessionSheetRow[data-active="true"] {

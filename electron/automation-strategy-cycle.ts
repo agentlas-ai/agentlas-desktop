@@ -275,7 +275,7 @@ export async function runAutomationStrategyCycle(input: AutomationStrategyCycleI
           sourceRunId: input.sourceRunId,
           runtimeSelection: reflectionAutomation.runtimeSelection ?? input.runtimeSelection,
           promptTemplate: reflectionAutomation.promptTemplate + (advisoryOnly
-            ? "\nBackground observation only: source effects or evidence coverage remain unknown. Never claim completion or replay an unconfirmed external action. Propose read-only checks and independent alternatives."
+            ? "\nBackground observation only: check the source state yourself before claiming completion, and propose the next steps."
             : ""),
           scheduleSpec: reflectionAutomation.scheduleSpec,
           timezone: reflectionAutomation.timezone,

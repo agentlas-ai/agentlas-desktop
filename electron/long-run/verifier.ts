@@ -1,4 +1,3 @@
-import { AUTOMATIC_GOAL_RETRY_CAP, automaticGoalRetryCount, isAutomaticGoal } from "./auto-goal-retry-cap";
 import { ownsHostGoalLoop } from "./host-goal-surface";
 import { currentBrowserDownloadProofs } from "./download-proof";
 import { currentBuiltinFileProofs } from "./file-proof";
@@ -36,6 +35,8 @@ import { getInvocationRunReceipt, listRunEvents } from "../store/run-events";
 import { getDb } from "../store/db";
 import {
   goalVerificationDisposition,
+  NO_PROGRESS_RETRY_LIMIT,
+  VERIFICATION_NO_PROGRESS_REASON,
   type CheckpointCriterion,
   type GoalVerificationDisposition,
   type GoalVerificationPrerequisiteCode,
@@ -888,10 +889,20 @@ export function longRunVerifiersSettled(): boolean {
   return controllers.size === 0;
 }
 
-/** Evidence gathering and typed repair both have bounded retries. Unknown or
- * prerequisite failures remain fail closed. */
-const INCONCLUSIVE_RETRY_LIMIT = 3;
-const REPAIRABLE_FAILURE_STREAK_LIMIT = 3;
+/** No retry COUNT limits evidence gathering or typed repair (owner 2026-10-12). Only idle spin does:
+ * NO_PROGRESS_RETRY_LIMIT consecutive retries with zero tool calls and an unchanged failed-criteria set
+ * (shared/long-run-checkpoint.ts). Unknown or prerequisite failures still wait as blocked. */
+
+/** Completed tool calls the invocation executed (run_events toolCompleted=1 rows; one call = one completed row). */
+function completedToolCallCount(invocationRunId: string | null | undefined): number | null {
+  if (!invocationRunId) return null;
+  try {
+    const row = getDb().prepare(`SELECT COUNT(*) AS n FROM run_events WHERE run_id = ?
+      AND json_extract(payload_json, '$.toolCompleted') = 1`).get(invocationRunId) as { n: number } | undefined;
+    const n = Number(row?.n);
+    return Number.isSafeInteger(n) && n >= 0 ? n : null;
+  } catch { return null; }
+}
 
 type CriterionJudgeLabel =
   | "passed"
@@ -1068,8 +1079,8 @@ function verificationRecoveryEpoch(runId: string): VerificationRecoveryEpoch {
       || startSeq < 0 || retries < 0 || checkpointSeq < 0) throw new Error("verification_retry_epoch_invalid");
     return { inconclusiveRetries: retries, priorCheckpointInEpoch: checkpointSeq > startSeq };
   } catch {
-    // 셀 수 없으면 재시도하지 않는다 — 모르는 채로 무한히 도는 것보다 멈추는 편이 낫다.
-    return { inconclusiveRetries: INCONCLUSIVE_RETRY_LIMIT, priorCheckpointInEpoch: false };
+    // Unknown history is never a reason to stop: no streak can be proven, so the Goal retries.
+    return { inconclusiveRetries: 0, priorCheckpointInEpoch: false };
   }
 }
 
@@ -1189,7 +1200,7 @@ export async function verifyGoalCompletionClaim(input: {
       } catch (error) {
         if (controller.signal.aborted) throw error;
         if (!input.background && getLongRunByGoalId(input.goalId)?.status !== "verifying") {
-          settleLongRunWorkerAttempt({attemptId:attempt.attemptId,state:"interrupted",sideEffectState:"none",errorCode:"criterion_proof_boundary_changed"});
+          settleLongRunWorkerAttempt({attemptId:attempt.attemptId,state:"interrupted",errorCode:"criterion_proof_boundary_changed"});
           return null;
         }
         appendLongRunEvent({runId:run.id,kind:"verification.criterion_proof_unavailable",actorKind:"host",payload:{attemptId:attempt.attemptId,
@@ -1364,7 +1375,7 @@ export async function verifyGoalCompletionClaim(input: {
       const currentByRef = new Map(current.proofs.map(item => [item.ref,JSON.stringify(item)]));
       const capturedByRef = new Map(downloadProofs.map(item => [item.ref,JSON.stringify(item)]));
       if (current.reasonCode || [...chosenDownloadRefs].some(ref => !currentByRef.has(ref) || currentByRef.get(ref) !== capturedByRef.get(ref))) {
-        settleLongRunWorkerAttempt({attemptId:attempt.attemptId,state:"interrupted",sideEffectState:"none",errorCode:"verification_download_changed"});
+        settleLongRunWorkerAttempt({attemptId:attempt.attemptId,state:"interrupted",errorCode:"verification_download_changed"});
         return null;
       }
     }
@@ -1379,13 +1390,13 @@ export async function verifyGoalCompletionClaim(input: {
       let current: ReturnType<typeof captureGoalVerificationBoundary> | null = null;
       try { current = captureGoalVerificationBoundary(input.goalId, input.invocationRunId, { background: input.background }); } catch { /* Refuse stale result. */ }
       if (current?.digest !== verificationBoundary.digest) {
-        settleLongRunWorkerAttempt({attemptId: attempt.attemptId, state: "interrupted", sideEffectState: "none", errorCode: "verification_boundary_changed"});
+        settleLongRunWorkerAttempt({attemptId: attempt.attemptId, state: "interrupted", errorCode: "verification_boundary_changed"});
         return null;
       }
     }
     const chosenHostFiles = hostFileObservations.filter(observation => (judgments ?? []).some(row => (row.evidenceRefs ?? []).includes(observation.ref)));
     if (run.rootChatId && chosenHostFiles.some(observation => !hostFileObservationStillHolds(observation, run.rootChatId!, run.id))) {
-      settleLongRunWorkerAttempt({attemptId:attempt.attemptId,state:"interrupted",sideEffectState:"none",errorCode:"verification_file_changed"});
+      settleLongRunWorkerAttempt({attemptId:attempt.attemptId,state:"interrupted",errorCode:"verification_file_changed"});
       return null;
     }
     const chosenFileRefs = new Set((judgments ?? []).flatMap(row => row.evidenceRefs ?? []).filter(ref => ref.startsWith("file-proof:")));
@@ -1394,7 +1405,7 @@ export async function verifyGoalCompletionClaim(input: {
       const currentByRef = new Map(currentFiles.map(file => [file.ref,JSON.stringify(file)]));
       const capturedByRef = new Map(fileProofs.map(file => [file.ref,JSON.stringify(file)]));
       if ([...chosenFileRefs].some(ref => currentByRef.get(ref) !== capturedByRef.get(ref) || !currentByRef.has(ref))) {
-        settleLongRunWorkerAttempt({attemptId:attempt.attemptId,state:"interrupted",sideEffectState:"none",errorCode:"verification_file_changed"});
+        settleLongRunWorkerAttempt({attemptId:attempt.attemptId,state:"interrupted",errorCode:"verification_file_changed"});
         return null;
       }
     }
@@ -1404,7 +1415,7 @@ export async function verifyGoalCompletionClaim(input: {
       const currentByRef = new Map(current.map(proof => [proof.ref,JSON.stringify(proof)]));
       const capturedByRef = new Map(executionProofs.map(proof => [proof.ref,JSON.stringify(proof)]));
       if ([...chosenExecutionRefs].some(ref => !currentByRef.has(ref) || currentByRef.get(ref) !== capturedByRef.get(ref))) {
-        settleLongRunWorkerAttempt({attemptId:attempt.attemptId,state:"interrupted",sideEffectState:"none",errorCode:"verification_execution_changed"});
+        settleLongRunWorkerAttempt({attemptId:attempt.attemptId,state:"interrupted",errorCode:"verification_execution_changed"});
         return null;
       }
     }
@@ -1414,7 +1425,6 @@ export async function verifyGoalCompletionClaim(input: {
     settleLongRunWorkerAttempt({
       attemptId: attempt.attemptId,
       state: "completed",
-      sideEffectState: "none",
     });
     const checkpointVerdicts: CheckpointCriterion[] = verdicts.map(({ judgmentRuntimeReceipt: _, ...verdict }) => verdict);
     for (const verdict of verdicts) {
@@ -1459,19 +1469,19 @@ export async function verifyGoalCompletionClaim(input: {
         ? Math.max(0, priorCheckpoint.recoveryStreak ?? 0) + 1
         : 1
       : 0;
-    const hasRepairableFailure = checkpointVerdicts.some((verdict) => verdict.verdict === "failed"
-      && verdict.recoveryClass === "repairable");
-    // System-admitted Goals share one host-continuation budget (auto-goal-retry-cap.ts); at the cap the
-    // verifier blocks and the sweep settles with evidence or asks the owner once.
-    const automatic = isAutomaticGoal(run);
-    const retryLimit = automatic ? AUTOMATIC_GOAL_RETRY_CAP
-      : hasRepairableFailure ? REPAIRABLE_FAILURE_STREAK_LIMIT : INCONCLUSIVE_RETRY_LIMIT;
-    const automaticRetries = automatic ? automaticGoalRetryCount(run.id) : 0;
-    let disposition = goalVerificationDisposition({ completed, verdicts: checkpointVerdicts,
-      retriesSoFar: Math.max(recoveryEpoch.inconclusiveRetries, automaticRetries), retryLimit,
-      recoveryStreak: automatic ? Math.max(recoveryStreak, automaticRetries) : recoveryStreak });
+    // Progress rule (owner 2026-10-12): the retry in flight made no progress when its turn executed zero tool calls and
+    // the failed-criteria set is the one the previous checkpoint already had. Unknown tool count is not "no progress".
+    const turnToolCalls = completedToolCallCount(input.invocationRunId);
+    const noProgressRetries = recoveryFingerprint && turnToolCalls === 0
+      && recoveryEpoch.priorCheckpointInEpoch && priorCheckpoint?.recoveryFingerprint === recoveryFingerprint
+      ? Math.max(0, priorCheckpoint.noProgressRetries ?? 0) + 1
+      : 0;
+    let disposition = goalVerificationDisposition({ completed, verdicts: checkpointVerdicts, noProgressRetries });
     if (settlement === "cycle_completed") disposition = "cycle_completed";
-    if (!completed && disposition !== "cycle_completed" && disposition !== "interrupted") disposition = "retry_required";
+    // Since 1.2.54 the verifier never parks a Goal: every unfinished verdict continues. The one exception is idle
+    // spin (owner 2026-10-12 "공회전만 막고"), which blocks so the AGI incident path takes over (agi/goal-facts.ts).
+    const idleSpin = noProgressRetries >= NO_PROGRESS_RETRY_LIMIT;
+    if (!completed && disposition !== "cycle_completed" && disposition !== "interrupted" && !idleSpin) disposition = "retry_required";
     if (!completed && disposition !== "cycle_completed") {
       const current = getLongRunByGoalId(input.goalId);
       // A finished background check can inherit verifying from the controller.
@@ -1499,6 +1509,7 @@ export async function verifyGoalCompletionClaim(input: {
                 : `verification_inconclusive_retry:${retriesSoFar + 1}`
               : prerequisite?.prerequisiteCode
                 ? `verification_prerequisite:${prerequisite.prerequisiteCode}`
+                : noProgressRetries >= NO_PROGRESS_RETRY_LIMIT ? `${VERIFICATION_NO_PROGRESS_REASON}:${noProgressRetries}`
                 : repairableFail ? "verification_repair_stalled"
                   : hardFail ? "verification_failed" : "verification_inconclusive",
           });
@@ -1537,7 +1548,7 @@ export async function verifyGoalCompletionClaim(input: {
     const checkpoint = disposition === "interrupted" ? null : recordTaskCheckpoint({
       goalId: input.goalId, workerId, attempt: attempt.attempt,
       invocationRunId: input.invocationRunId, disposition, verdicts: checkpointVerdicts,
-      recoveryFingerprint, recoveryStreak,
+      recoveryFingerprint, recoveryStreak, noProgressRetries,
       evidenceRefs: durableEvidence.refs, projectDir: input.projectDir,
     });
     let cycleCheckpointId: string | null = null;
@@ -1613,7 +1624,6 @@ export async function verifyGoalCompletionClaim(input: {
     settleLongRunWorkerAttempt({
       attemptId: attempt.attemptId,
       state: "interrupted",
-      sideEffectState: "none",
       errorCode: controller.signal.aborted ? "verification_interrupted" : transient ? goalVerificationReasonCode(error) : "verification_failed",
       errorMessage: error instanceof Error ? error.message : String(error),
     });

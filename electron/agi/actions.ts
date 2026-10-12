@@ -4,7 +4,6 @@
  * The unblocker never gets a shell or a free-form write. It emits `agentlas.agi-unblock.v1` action requests; Main
  * validates each one and executes it through the product's existing paths, writing a durable receipt first:
  *
- *   settle_uncertain_effect  existing attempt settlement, only with evidence from a later in-scope run
  *   create_teammate          oneTeamCreateMember (D2: allowed without asking, Hub teammates included)
  *   invite_teammate          oneTeamInvite (group chats)
  *   dispatch_teammate        oneTeamStartSession, brief bound to a plan node (depth 1)
@@ -41,7 +40,26 @@ import { assertAgiDecisionControl, agiDecisionAbortSignal, retainAgiDecisionCont
 import type { AgiUnblockInput } from "./monitor";
 
 export const AGI_ACTION_SCHEMA = "agentlas.agi-unblock.v1" as const;
-export const AGI_MAX_ACTIONS_PER_ATTEMPT = 4;
+/**
+ * Owner 2026-10-12: there is no per-attempt action COUNT cap (a cap that turns a goal into a dead end is forbidden).
+ * The only guard inside one attempt is against idle spin: an action identical (kind + canonical args) to one already
+ * executed in the same attempt is refused with this code. Distinct actions are unlimited.
+ */
+export const AGI_REPEAT_IN_ATTEMPT_CODE = "agi.action.repeat-in-attempt";
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value as Record<string, unknown>).sort().filter((key) => (value as Record<string, unknown>)[key] !== undefined)
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/** Digest of what the model asked for (before any host escalation rewrite). */
+export function agiActionRepeatDigest(action: unknown, args: unknown): string {
+  return createHash("sha256").update(canonicalJson({ action: String(action ?? ""), args: args ?? {} })).digest("hex");
+}
 
 /**
  * Actions a repeat never escalates: a defect record and a wait are idempotent by design (resting again is the intended
@@ -133,10 +151,6 @@ export interface AgiExecutorDeps {
   goal(goalId: string): AgiGoalView | null;
   /** continueGoalForAlive (blocked-goal-sweep.ts) — the existing continuation path. */
   continueGoal(runId: string, expectedVersion: number): { action: string; detail: string };
-  /** Reuse Main's validated observation receipt for exactly these already-settled attempts. */
-  settleUncertain(runId: string, input: { attemptIds: string[]; evidence: string; evidenceRunId: string }): void;
-  /** An in-scope Main observation receipt; an unrelated successful tool is not proof. */
-  resolveEvidence(goalId: string, ref: string): { runId: string; summary: string } | null;
   team?: {
     create(chatId: string, permission: AgiGoalView["permission"], input: { name: string; role?: string; personality?: string }): { memberId: string; created: boolean };
     invite(chatId: string, permission: AgiGoalView["permission"], member: string): { memberId: string; joined: boolean; memberName?: string };
@@ -260,8 +274,6 @@ export class AgiActionExecutor {
       if (goal.status !== "running" || (goal.pauseReason && OWNER_BOUNDARY_PAUSES.has(goal.pauseReason))) return "agi.action.owner-boundary";
       if (goal.permission !== "write" && goal.permission !== "full") return "agi.plan.permission-read";
       const history = this.history(incident.id);
-      if (history.filter(h => h.attempt === batch.plan.attempt && h.action !== "file_defect").length + 2 > AGI_MAX_ACTIONS_PER_ATTEMPT)
-        return "agi.budget.actions-per-attempt";
       // A repeated or failed replan does not run again as part of this batch. The code is not a stop: a model attempt
       // whose actions all come back refused hands the incident to the deterministic path, which escalates
       // (repeatEscalation: the runtime's own tools, another runtime, the next work turn). A rest is never limited.
@@ -361,8 +373,14 @@ export class AgiActionExecutor {
     if (["completed", "failed", "cancelled", "cancelling"].includes(goal.status) && request.action !== "file_defect") return refuse("agi.action.goal-terminal");
     // 4. per-attempt action cap, circuit breaker, ruled-out actions
     const history = this.history(incident.id);
-    const counted = history.filter((entry) => entry.attempt === request.attempt && entry.action !== "file_defect");
-    if (!["file_defect", "start_work_turn"].includes(request.action) && counted.length >= AGI_MAX_ACTIONS_PER_ATTEMPT) return refuse("agi.budget.actions-per-attempt");
+    // No count cap. Spin guard only: the identical (action, canonical args) already executed in this attempt is refused.
+    // A rest and a defect record are idempotent by design and exempt.
+    const repeatDigest = agiActionRepeatDigest(request.action, request.args);
+    if (!["file_defect", "rest"].includes(request.action) && this.deps.db.prepare(
+      `SELECT 1 FROM agi_action_receipts WHERE incident_id = ? AND attempt = ? AND status = 'settled'
+        AND json_extract(result_json, '$.detail.repeatDigest') = ? LIMIT 1`).get(incident.id, request.attempt, repeatDigest)) {
+      return refuse(AGI_REPEAT_IN_ATTEMPT_CODE);
+    }
     // Owner 2026-10-12: a repeat is not refused. It used to be (agi.action.circuit-open 2,376 times in production, almost
     // all of them a rest), which left the goal where it was; the next deterministic move runs instead.
     const repeated = history.filter((entry) => entry.action === request.action).length >= MAX_SAME_MOVE_PER_CAUSE;
@@ -418,6 +436,7 @@ export class AgiActionExecutor {
       result = { actionId: request.actionId, action: request.action, ok: false, code };
     }
     if (typeof request.args?.escalatedFrom === "string") result = { ...result, detail: { ...(result.detail ?? {}), escalatedFrom: request.args.escalatedFrom } };
+    result = { ...result, detail: { ...(result.detail ?? {}), repeatDigest } };
     const settled = this.settle(request, result);
     this.incidents.reflect(incident.id, { atMs: this.deps.now(), action: request.action, result: settled.ok ? "ok" : `refused:${settled.code}`,
       evidenceRefs: Array.isArray(settled.detail?.evidenceRefs) ? settled.detail!.evidenceRefs as string[] : [],
@@ -469,15 +488,6 @@ export class AgiActionExecutor {
     const args = request.args ?? {};
     const writeCapable = goal.permission === "write" || goal.permission === "full";
     switch (request.action) {
-      case "settle_uncertain_effect": {
-        const ref = text(args.evidenceRef, 200);
-        const attemptIds = Array.isArray(args.attemptIds) ? args.attemptIds.filter((id): id is string => typeof id === "string").slice(0, 50) : [];
-        if (!ref || !attemptIds.length) return no("agi.settle.evidence-required");
-        const evidence = this.deps.resolveEvidence(goal.goalId, ref);
-        if (!evidence) return no("agi.settle.evidence-unresolved");
-        this.deps.settleUncertain(goal.runId, { attemptIds, evidence: `${ref}: ${evidence.summary}`.slice(0, 500), evidenceRunId: evidence.runId });
-        return ok("agi.settle.settled", { attemptIds, evidenceRefs: [ref] });
-      }
       case "create_teammate": {
         if (!this.deps.team || !goal.chatId) return no("agi.team.unavailable");
         if (!writeCapable) return no("agi.team.permission-read");
@@ -731,7 +741,6 @@ function teammateLabel(detail: Record<string, unknown>): string {
 export function noticeLine(action: AgiActionKind, receipt: AgiActionReceipt): { ko: string; en: string } | null {
   const detail = receipt.detail ?? {};
   switch (action) {
-    case "settle_uncertain_effect": return { ko: "AGI: 이전 작업은 이미 반영돼 있었어요 — 실행 기록으로 정리했어요", en: "AGI: the earlier action had already gone through — settled it from the run record" };
     case "create_teammate": return { ko: `AGI: ${String(detail.name ?? "")} 팀원을 만들었어요`, en: `AGI: created teammate ${String(detail.name ?? "")}` };
     // The model may name a teammate by its member id (a UUID). The owner sees
     // the resolved display name; the raw argument stays in the receipt.

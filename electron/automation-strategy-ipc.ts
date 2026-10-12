@@ -70,7 +70,7 @@ export function registerAutomationStrategyIpc(deps: {
       if (["proposal_missing", "proposal_automation_missing", "proposal_automation_mismatch"].includes(code)) return { ok: false, code: "not_found" };
       if (["proposal_apply_not_allowlisted", "proposal_apply_graph_patch_risky", "proposal_not_approved",
         "proposal_review_unavailable", "proposal_goal_amendment_required", "proposal_goal_amendment_input_invalid",
-        "proposal_goal_amendment_criterion_rewrite", "proposal_goal_amendment_attempt_unsettled",
+        "proposal_goal_amendment_criterion_rewrite",
         "proposal_goal_amendment_run_unavailable", "proposal_goal_amendment_run_binding_failed",
         "proposal_goal_amendment_already_applied", "proposal_goal_amendment_contract_change_required",
         "proposal_goal_amendment_invalid", "proposal_goal_ownership_unverified"].includes(code)) {

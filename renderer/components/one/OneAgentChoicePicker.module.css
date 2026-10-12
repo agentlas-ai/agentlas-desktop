@@ -23,7 +23,7 @@
 .trigger:has(> .placeholder) { grid-template-columns: minmax(0, 1fr) auto; }
 .trigger:focus-visible,
 .trigger[data-open="true"] { outline: none; border-color: var(--one-sheet-accent, var(--ink)); box-shadow: var(--one-sheet-focus, none); }
-.trigger:hover:not(:disabled) { background: var(--one-sheet-control-surface, var(--white)); border-color: var(--muted, #b8bbbf); }
+.trigger:hover:not(:disabled) { border-color: var(--muted, #b8bbbf); color: var(--ink); }
 .trigger:disabled { cursor: default; opacity: .55; }
 .trigger > svg { color: var(--muted-deep); }
 .triggerName { overflow: hidden; font-weight: 570; text-overflow: ellipsis; white-space: nowrap; }

@@ -19,7 +19,9 @@
   cursor: pointer;
 }
 
-.trigger:hover,
+.trigger:hover {
+  color: var(--ink);
+}
 .trigger:focus-visible {
   background: var(--paper-2);
 }

@@ -19,7 +19,7 @@ import { latestRuntimePlan } from "./plan";
 import { restoreExactDesktopRuntimeSelection } from "./exact-runtime-binding";
 import { listAgentSurfaces } from "../store/agent-surfaces";
 import { appendLongRunEvent, getLongRun, getLongRunAttemptGoalRevision, getLongRunGoalRevisionBinding, transitionLongRun,
-  listLongRunTasks, pendingBlockedGoalRetry, recordLongRunCycle, unsettledLongRunAttemptCount, scheduleBlockedGoalRetry, nextBlockedGoalRetrySlot, longRunOwnerHold } from "../store/long-runs";
+  listLongRunTasks, pendingBlockedGoalRetry, recordLongRunCycle, scheduleBlockedGoalRetry, nextBlockedGoalRetrySlot, longRunOwnerHold } from "../store/long-runs";
 import { desktopAppInstanceId, assertDesktopLongRunAdmissionOpen } from "./app-runtime-coordinator";
 import { latestTaskCheckpoint, recordTaskCheckpoint } from "./checkpoint";
 import { reconcileHostPausedLongRuns } from "./startup-reconciler";
@@ -45,7 +45,7 @@ function scheduleStartupContinuation(runId: string, reason: string): boolean {
   const slot = nextBlockedGoalRetrySlot(runId, Date.now(), { startup: true });
   scheduleBlockedGoalRetry({ runId, expectedVersion: run.version, kind: "resume", fromReason: reason,
     retryIndex: slot.retryIndex, nextAt: slot.nextAt, detail: "startup_advisory_fresh_context",
-    trigger: "startup-advisory", effectUncertain: true, appInstanceId: desktopAppInstanceId() });
+    trigger: "startup-advisory", appInstanceId: desktopAppInstanceId() });
   return true;
 }
 
@@ -75,12 +75,11 @@ export function scheduleUnverifiedOngoingGoalCycles(): CheckpointStartupResult[]
           const current = getLongRun(id);
           if (!current || current.version !== candidate.version || current.status !== "blocked"
             || current.blockedReason !== candidate.blockedReason
-            || unsettledLongRunAttemptCount(id)
             || getChatGoalRevision(current.goalId)?.lifecycle !== "ongoing") throw new Error("ongoing_verification_recovery_changed");
           const effect = readInvocationEffectBoundary({ invocationRunId: producer.invocationRunId,
             expectedChatId: producer.chat.id });
           if (!effect.terminal || effect.snapshotDigest !== producer.effect.snapshotDigest)
-            throw new Error("goal_wait_effects_uncertain");
+            throw new Error("ongoing_verification_recovery_changed");
           transitionLongRun({ runId: id, to: "queued", actorKind: "host",
             reason: "ongoing-observation-recovered", expectedVersion: current.version });
           transitionLongRun({ runId: id, to: "running", actorKind: "host",
@@ -214,19 +213,17 @@ function preflightMissingStartupCheckpoint(candidate: NonNullable<ReturnType<typ
   // steer rows. A cancelled/failed steer is still a user direction that the
   // old invocation must not cause us to silently replay around.
 
-  const unsettled = unsettledLongRunAttemptCount(candidate.id);
-  if (unsettled > 0) startupReplayRefusal("attempt_unsettled");
-  const producer = getDb().prepare(`SELECT a.id, a.task_id, a.invocation_run_id, a.state, a.side_effect_state, a.attempt,
+  const producer = getDb().prepare(`SELECT a.id, a.task_id, a.invocation_run_id, a.state, a.attempt,
       a.runtime_selection_json, w.id AS worker_id, w.runtime_selection_json AS worker_runtime_selection_json,
       w.workspace_binding_json
     FROM long_run_worker_attempts a
     JOIN long_run_workers w ON w.id = a.worker_id AND w.run_id = a.run_id
     WHERE a.run_id = ? AND w.role = 'controller'
     ORDER BY a.rowid DESC LIMIT 1`).get(candidate.id) as {
-      id: string; task_id: string; invocation_run_id: string | null; state: string; side_effect_state: string; attempt: number;
+      id: string; task_id: string; invocation_run_id: string | null; state: string; attempt: number;
       runtime_selection_json: string; worker_id: string; worker_runtime_selection_json: string; workspace_binding_json: string;
     } | undefined;
-  if (!producer || !producer.invocation_run_id || producer.state !== "completed" || producer.side_effect_state !== "committed") {
+  if (!producer || !producer.invocation_run_id || producer.state !== "completed") {
     startupReplayRefusal("controller_attempt_not_settled");
   }
   if (getLongRunAttemptGoalRevision(candidate.id, producer.id) !== revision.revision) {
@@ -368,18 +365,17 @@ export async function resumeLegacyOngoingBlockedGoals(dispatcher: CheckpointStar
         if (legacyStartupWaitBlocksRecovery(wait)) {
           refuse("goal_wait_subscription_recovery_pending"); continue;
         }
-        if (unsettledLongRunAttemptCount(id)) { refuse("attempt_unsettled"); continue; }
         const newestUser = getDb().prepare(`SELECT id FROM chat_messages WHERE chat_id = ? AND role = 'user'
           ORDER BY rowid DESC LIMIT 1`).get(chat.id) as { id: string } | undefined;
         if (newestUser?.id !== snapshot.revision.sourceMessage.messageId) { refuse("newer_user_direction"); continue; }
-        const producer = getDb().prepare(`SELECT a.id, a.invocation_run_id, a.state, a.side_effect_state,
+        const producer = getDb().prepare(`SELECT a.id, a.invocation_run_id, a.state,
           a.attempt, w.id AS worker_id, w.workspace_binding_json
           FROM long_run_worker_attempts a JOIN long_run_workers w ON w.id = a.worker_id AND w.run_id = a.run_id
           WHERE a.run_id = ? AND w.role = 'controller' ORDER BY a.rowid DESC LIMIT 1`).get(id) as {
-          id: string; invocation_run_id: string | null; state: string; side_effect_state: string;
+          id: string; invocation_run_id: string | null; state: string;
           attempt: number; worker_id: string; workspace_binding_json: string;
         } | undefined;
-        if (!producer?.invocation_run_id || producer.state !== "completed" || producer.side_effect_state !== "committed"
+        if (!producer?.invocation_run_id || producer.state !== "completed"
           || getLongRunAttemptGoalRevision(id, producer.id) !== snapshot.revision.revision) {
           refuse("producer_not_settled"); continue;
         }
@@ -404,7 +400,6 @@ export async function resumeLegacyOngoingBlockedGoals(dispatcher: CheckpointStar
             || !currentSnapshot || currentSnapshot.payloadJson !== prepared.snapshot.payloadJson
             || currentChat?.goalId !== candidate.goalId || currentChat.originSurface !== "one"
             || getLongRunGoalRevisionBinding(id)?.revision !== currentSnapshot.revision.revision
-            || unsettledLongRunAttemptCount(id)
             || JSON.stringify(exactLegacyGoalLifecycleRuntimeSelection({ longRunId: id, chatId: chat.id })) !== JSON.stringify(selection)
             || dispatcher.activeChatIds().includes(chat.id)) throw new Error("legacy_lifecycle_startup_conflict");
           const latestUser = getDb().prepare(`SELECT id FROM chat_messages WHERE chat_id = ? AND role = 'user'
@@ -474,7 +469,7 @@ export async function resumeLegacyOngoingBlockedGoals(dispatcher: CheckpointStar
 
 /** Called only after auth, plugins, IPC and queued user directions have been
  * reconciled. A host pause or a continuation failure before dispatch can use
- * a settled checkpoint; an uncertain effect or prior dispatch cannot replay. */
+ * a settled checkpoint; a prior dispatch cannot replay. */
 export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispatcher): CheckpointStartupResult[] {
   try {
     assertDesktopLongRunAdmissionOpen();
@@ -533,13 +528,10 @@ export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispat
     ]);
     let successorRunId: string | null = null;
     try {
-      if (failedBeforeContinuation) {
-        if (unsettledLongRunAttemptCount(candidate.id)) { refuse("attempt-unsettled"); continue; }
-      } else {
+      if (!failedBeforeContinuation) {
         const decision = reconcileHostPausedLongRuns([candidate.id])[0]?.decision;
         if (!decision?.resume) {
           const reason = decision && !decision.resume ? decision.reason : "run_missing";
-          if (reason === "attempt-unsettled" && blockForReview(reason)) continue;
           refuse(reason);
           continue;
         }

@@ -24,7 +24,10 @@
 .rows { display: grid; gap: 6px; }
 .agentActions { display: flex; justify-content: center; margin: 2px 7px 5px; }
 .addRow, .createAgentButton { min-width: 0; min-height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 0 8px; border: 1px solid var(--paper-edge-strong); border-radius: 9px; background: var(--paper); color: var(--ink-soft); font: inherit; font-size: 9px; font-weight: 650; cursor: pointer; }
-.addRow:hover, .addRow:focus-visible, .createAgentButton:hover, .createAgentButton:focus-visible { border-color: var(--muted); background: var(--paper-3); color: var(--ink); outline: none; }
+.addRow:hover,
+.createAgentButton:hover { border-color: var(--muted); color: var(--ink); }
+.addRow:focus-visible,
+.createAgentButton:focus-visible { border-color: var(--muted); background: var(--paper-3); color: var(--ink); outline: none; }
 .addRow:focus-visible, .createAgentButton:focus-visible { box-shadow: 0 0 0 2px rgba(48, 53, 50, .14); }
 .addRow:disabled { border-color: var(--paper-edge); background: var(--paper-2); color: var(--muted); cursor: not-allowed; }
 .createAgentButton { width: 36px; min-width: 36px; padding: 0; }
@@ -64,7 +67,8 @@ button.failureDot:focus-visible { outline: 2px solid var(--danger); outline-offs
 .searchSection { display: grid; gap: 3px; }
 .searchSection > strong { padding: 0 4px; color: var(--muted-deep); font-size: 8px; letter-spacing: .08em; text-transform: uppercase; }
 .searchSection > button { display: flex; min-width: 0; align-items: center; gap: 7px; padding: 5px 6px; border: 0; border-radius: 7px; background: transparent; text-align: left; cursor: pointer; }
-.searchSection > button:hover, .searchSection > button:focus-visible { background: var(--paper-3); outline: 2px solid transparent; }
+.searchSection > button:hover { color: var(--ink); }
+.searchSection > button:focus-visible { background: var(--paper-3); outline: 2px solid transparent; }
 .searchSection > button > span { display: grid; min-width: 0; gap: 2px; }
 .searchSection > button > .searchMemberFeedback { display: flex; flex: 0 0 auto; align-items: center; margin-left: auto; }
 .searchMemberFeedback .unreadDot, .searchMemberFeedback .failureDot { margin-top: 0; }
@@ -154,7 +158,10 @@ button.failureDot:focus-visible { outline: 2px solid var(--danger); outline-offs
   font-size: 10px;
 }
 
-.searchToggle:hover,
+.searchToggle:hover {
+  border-color: transparent;
+  color: var(--ink-soft);
+}
 .searchToggle:focus-visible {
   border-color: transparent;
   background: var(--paper-3);
@@ -257,7 +264,10 @@ button.failureDot:focus-visible { outline: 2px solid var(--danger); outline-offs
   pointer-events: auto;
 }
 
-.oneEditButton:hover,
+.oneEditButton:hover {
+  color: var(--ink);
+  box-shadow: 0 0 0 1px var(--paper-edge);
+}
 .oneEditButton:focus-visible {
   background: var(--paper);
   color: var(--ink);
@@ -326,7 +336,10 @@ button.failureDot:focus-visible { outline: 2px solid var(--danger); outline-offs
   border-radius: 7px !important;
 }
 
-.editButton:hover,
+.editButton:hover {
+  color: var(--ink);
+  box-shadow: 0 0 0 1px var(--paper-edge);
+}
 .editButton:focus-visible {
   background: var(--paper) !important;
   color: var(--ink);
@@ -439,7 +452,7 @@ button.failureDot:focus-visible { outline: 2px solid var(--danger); outline-offs
 .addSearch { min-height: var(--one-sheet-control-height); display: grid; grid-template-columns: 22px minmax(0, 1fr) 28px; align-items: center; gap: 7px; padding: 0 11px; border: 1px solid var(--one-sheet-control-border); border-radius: var(--one-sheet-control-radius); background: var(--one-sheet-control-surface); color: var(--one-sheet-muted); }
 .addSearch input { min-width: 0; border: 0; outline: 0; background: transparent; color: var(--one-sheet-ink); font: inherit; font-size: 12px; }
 .addSearch > button { width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: 7px; background: transparent; color: var(--one-sheet-muted); cursor: pointer; }
-.addSearch > button:hover { background: var(--one-sheet-card-muted); }
+.addSearch > button:hover { color: var(--ink); }
 /* 후보 목록이 이 시트의 본론이다. 아래 칸들이 자라도 목록이 먼저 눌리면 안 된다
    (오너 지적 2026-08-25: "허브 에이전트 조그맣게 보이는데 저게 고를 수가 있냐").
    min-height 는 카드 두 줄 + 다음 줄이 살짝 보이는 높이 — 스크롤할 게 있다는 신호. */

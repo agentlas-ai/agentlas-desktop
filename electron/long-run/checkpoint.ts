@@ -9,8 +9,8 @@ import { createHash } from "node:crypto";
 import type { CheckpointCriterion, GoalVerificationDisposition, LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
 import { getDb } from "../store/db";
 import { getChatGoalRevision } from "../store/chat-goals";
-import { appendLongRunEvent, getLongRunByGoalId, getLongRunGoalRevisionBinding, latestLongRunAttemptSafeEpoch,
-  listLongRunTasks, longRunContinueDecision, unsettledLongRunAttempts } from "../store/long-runs";
+import { appendLongRunEvent, getLongRunByGoalId, getLongRunGoalRevisionBinding,
+  listLongRunTasks, longRunContinueDecision } from "../store/long-runs";
 import type { InstructionSnapshot } from "../../shared/runtime-instructions";
 
 /** Bind a checkpoint to its own Main invocation, never another turn in the chat. */
@@ -39,6 +39,7 @@ export function recordTaskCheckpoint(input: {
   verdicts: CheckpointCriterion[];
   recoveryFingerprint?: string | null;
   recoveryStreak?: number;
+  noProgressRetries?: number;
   evidenceRefs: string[];
   projectDir?: string | null;
 }): LongRunTaskCheckpoint {
@@ -47,7 +48,6 @@ export function recordTaskCheckpoint(input: {
     if (!run || run.surface === "science") throw new Error("long_run_checkpoint_run_invalid");
     const tasks = listLongRunTasks(run.id);
     const revision = getChatGoalRevision(run.goalId);
-    const attempts = unsettledLongRunAttempts(run.id);
     let boundary: ReturnType<typeof readInvocationEffectBoundary> | null = null;
     if (input.invocationRunId && run.rootChatId) {
       try { boundary = readInvocationEffectBoundary({ invocationRunId: input.invocationRunId, expectedChatId: run.rootChatId }); }
@@ -68,19 +68,19 @@ export function recordTaskCheckpoint(input: {
       sourceDigest: surface.artifactRef?.sourceDigest ?? null, dataDigest: surface.artifactRef?.dataDigest ?? null,
       stateRevision: surface.stateRevision ?? null, stateSchemaDigest: surface.artifactRef?.stateSchemaDigest ?? null,
     })) : [];
-    const effects = getDb().prepare("SELECT id, invocation_run_id, state, side_effect_state, native_coordinate_json FROM long_run_worker_attempts WHERE run_id = ? ORDER BY started_at, id")
-      .all(run.id) as Array<{ id: string; invocation_run_id: string | null; state: string; side_effect_state: string; native_coordinate_json: string | null }>;
-    const nativeAttempt = effects.find((effect) => effect.invocation_run_id === input.invocationRunId);
+    const attemptRows = getDb().prepare("SELECT id, invocation_run_id, native_coordinate_json FROM long_run_worker_attempts WHERE run_id = ? ORDER BY started_at, id")
+      .all(run.id) as Array<{ id: string; invocation_run_id: string | null; native_coordinate_json: string | null }>;
+    const nativeAttempt = attemptRows.find((attempt) => attempt.invocation_run_id === input.invocationRunId);
     const nativeCoordinate = nativeAttempt?.native_coordinate_json ? JSON.parse(nativeAttempt.native_coordinate_json) : null;
     const observedFiles = instructionSnapshot?.sources.map(({ sourceRef, contentHash }) => ({ sourceRef, contentHash })) ?? [];
     const producer = getDb().prepare(
-      `SELECT a.id, a.invocation_run_id, a.state, a.side_effect_state, w.workspace_binding_json
+      `SELECT a.id, a.invocation_run_id, a.state, w.workspace_binding_json
        FROM long_run_worker_attempts AS a
        JOIN long_run_workers AS w ON w.id = a.worker_id AND w.run_id = a.run_id
        WHERE a.run_id = ? AND w.role = 'controller'
        ORDER BY a.rowid DESC LIMIT 1`,
     ).get(run.id) as { id: string; invocation_run_id: string | null; state: string;
-      side_effect_state: string; workspace_binding_json: string } | undefined;
+      workspace_binding_json: string } | undefined;
     let producerWorkspace: string | null | undefined;
     try {
       const value = producer ? JSON.parse(producer.workspace_binding_json)?.cwd : undefined;
@@ -95,14 +95,13 @@ export function recordTaskCheckpoint(input: {
           && current.revision === instructionSnapshot.revision;
       } catch { /* Changed or unavailable instructions cannot mint settled authority. */ }
     }
-    // A checkpoint may describe uncertainty, but only the newest completed Main
-    // controller run with an exact workspace and complete effect receipt can mint
-    // settled replay authority.
+    // Only the newest completed Main controller run with an exact workspace and a finished
+    // effect receipt can mint settled replay authority.
     const settledProducer = Boolean(input.invocationRunId && producer && workspacePath && instructionBindingExact
       && producer.invocation_run_id === input.invocationRunId
-      && producer.state === "completed" && producer.side_effect_state === "committed"
+      && producer.state === "completed"
       && producerWorkspace !== undefined && producerWorkspace === workspacePath
-      // Finished is enough (owner 2026-10-05): an unknown outside outcome is the next turn's to check, not a lock.
+      // Finished is enough (owner 2026-10-05, 2026-10-12): the host does not judge outside effects; the next turn checks.
       && boundary?.terminal === true);
     const pathHash = createHash("sha256").update(workspacePath ?? "").digest("hex");
     const eventCursor = getLongRunByGoalId(input.goalId)!.lastEventSeq;
@@ -120,7 +119,8 @@ export function recordTaskCheckpoint(input: {
       nextActions: input.verdicts.filter((item) => item.verdict !== "passed"),
       recoveryFingerprint: input.recoveryFingerprint ?? null,
       recoveryStreak: Math.max(0, Math.floor(input.recoveryStreak ?? 0)),
-      sideEffects: { state: attempts.length || !settledProducer ? "uncertain" : "settled", attemptRefs: attempts.map((item) => item.id),
+      noProgressRetries: Math.max(0, Math.floor(input.noProgressRetries ?? 0)),
+      sideEffects: { state: settledProducer ? "settled" : "uncertain", attemptRefs: [],
         ...(settledProducer && boundary?.terminalEventId && boundary.receiptEventId && boundary.snapshotDigest ? { boundary: {
           invocationRunId: boundary.invocationRunId, terminalEventId: boundary.terminalEventId,
           receiptEventId: boundary.receiptEventId, snapshotDigest: boundary.snapshotDigest,
@@ -138,8 +138,6 @@ export function recordTaskCheckpoint(input: {
         originalConstraints: revision?.originalRequest.text ?? null,
         historyRangeRef: run.rootChatId ? { chatId: run.rootChatId, firstMessageId: history[0]?.id ?? null,
           lastMessageId: history.at(-1)?.id ?? null, messageCount: history.length } : null,
-        externalActionReceipts: effects.map((effect) => ({ attemptId: effect.id, invocationRunId: effect.invocation_run_id,
-          state: effect.state, sideEffectState: effect.side_effect_state })),
         pathHash, observedContentSnapshot: instructionSnapshot ? { scope: "loaded-instructions", files: observedFiles,
           digest: createHash("sha256").update(JSON.stringify(observedFiles)).digest("hex") } : null,
         toolInvocationRefs: input.invocationRunId ? [`invocation:${input.invocationRunId}`] : [],
@@ -158,10 +156,6 @@ export function latestTaskCheckpoint(goalId: string): LongRunTaskCheckpoint | nu
   const row = getDb().prepare("SELECT seq, payload_json FROM long_run_events WHERE run_id = ? AND kind = 'run.task_checkpoint' ORDER BY seq DESC LIMIT 1")
     .get(run.id) as { seq: number; payload_json: string } | undefined;
   if (!row) return null;
-  const safeEpoch = latestLongRunAttemptSafeEpoch(run.id);
-  // An acknowledgment invalidates every earlier checkpoint. Only a fresh Main
-  // turn may establish the next settled continuation boundary.
-  if (safeEpoch && row.seq <= safeEpoch.eventSeq) return null;
   const checkpoint = JSON.parse(row.payload_json).checkpoint as LongRunTaskCheckpoint;
   const revision = getChatGoalRevision(goalId);
   if (!["agentlas.task-checkpoint.v1", "agentlas.task-checkpoint.v2"].includes(checkpoint.schemaVersion) || checkpoint.goalId !== goalId
@@ -246,11 +240,6 @@ export function claimCheckpointContinuation(goalId: string, checkpointId: string
       || checkpoint.sideEffects.state !== "settled" || !(decision?.continue || diagnosticClaim || observationClaim)) return false;
     try { prepareCheckpointContinuation(checkpoint); } catch { return false; }
     const db = getDb();
-    // An exact user or read-only observation safe epoch settles older uncertain
-    // attempts without rewriting their audit rows. Use the same adjudication as
-    // checkpoint creation; the raw attempt state would reject every later wait
-    // successor even after that durable settlement.
-    if (unsettledLongRunAttempts(checkpoint.capsule.runId).length && !observationClaim) return false;
     if (db.prepare("SELECT 1 FROM long_run_events WHERE run_id = ? AND kind = 'run.checkpoint_continuation' AND json_extract(payload_json, '$.checkpointId') = ?")
       .get(checkpoint.capsule.runId, checkpointId)) return false;
     appendLongRunEvent({ runId: checkpoint.capsule.runId, kind: "run.checkpoint_continuation", actorKind: "host", payload: { checkpointId, invocationRunId } });

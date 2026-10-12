@@ -15,7 +15,7 @@
   padding: 5px 8px 5px 10px;
   cursor: pointer;
 }
-.trigger:hover:not(:disabled) { background: var(--paper-3); }
+.trigger:hover:not(:disabled) { color: var(--ink); }
 .trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .trigger:disabled { opacity: 0.55; cursor: not-allowed; }
 .trigger[aria-expanded="true"] { background: var(--paper-3); }

@@ -819,6 +819,8 @@ export class LocalModelHubManager {
         "--port", String(port),
         "--ctx-size", String(contextTokens),
         "--parallel", "1",
+        // KV prefix reuse across turns even when a small edit shifts the tail (llama-server default is off).
+        "--cache-reuse", "256",
         "--jinja",
         "--no-webui",
         "--api-key", authToken,

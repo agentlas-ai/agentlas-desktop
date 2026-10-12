@@ -24,7 +24,7 @@ export type PassFailureAction =
 export interface PassFailureVerdict {
   action: PassFailureAction;
   /** Machine reason. The UI maps this to words; nothing downstream parses prose. */
-  reason: "usage_limited" | "context_capacity" | "context_measurement" | "transient" | "unsupported" | "unauthorized" | "refused" | "effect_verification_required" | "unknown";
+  reason: "usage_limited" | "context_capacity" | "context_measurement" | "transient" | "unsupported" | "unauthorized" | "refused" | "unknown";
   /** Milliseconds to wait before the next attempt when `action` is "retry". */
   retryAfterMs: number;
   /** Verbatim runtime hint (reset time, and so on) when the runtime supplied one. */
@@ -91,10 +91,6 @@ export function passFailureVerdict(
     case "unavailable":
     case "empty":
     case "exit":
-      // AGY's failed terminal cannot attest complete native effect coverage,
-      // even when no tool events reached us. Preserve the mandate, but never
-      // blindly repeat a possibly submitted external action on a capacity code.
-      if (failure.runtime === "antigravity") return { action: "pause", reason: "effect_verification_required", retryAfterMs: 0, ...hint };
       // Capacity, network, a truncated stream: the same request often succeeds shortly after.
       return transientAttemptsSoFar < MAX_TRANSIENT_RETRIES
         ? {

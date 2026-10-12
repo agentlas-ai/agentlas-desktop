@@ -12,8 +12,7 @@ export const LONG_RUN_SCHEMA_VERSION = "agentlas.long-run.v1" as const;
 export const RUNTIME_ADAPTER_SCHEMA_VERSION = "agentlas.runtime-adapter.v1" as const;
 
 /** A durable wait claim may have reached the runtime before the host died.
- * Ordinary Resume's blanket uncertain-attempt acknowledgment is not enough
- * to authorize replaying that successor. Stop remains available. */
+ * Ordinary Resume does not authorize replaying that successor. Stop remains available. */
 export function isClaimedWaitRecoveryBlocker(reason: string | null | undefined): boolean {
   return reason === "goal_wait_claimed_dispatch_uncertain" || reason === "goal_wait_claimed_binding_changed";
 }
@@ -323,7 +322,6 @@ export interface ContinuityCapsule {
   instructionSnapshot?: InstructionSnapshot | null;
   artifactVersions?: CheckpointArtifactVersion[];
   historyRangeRef?: { chatId: string; firstMessageId: string | null; lastMessageId: string | null; messageCount: number } | null;
-  externalActionReceipts?: Array<{ attemptId: string; invocationRunId: string | null; state: string; sideEffectState: string }>;
 }
 
 export function defaultRuntimeFeatureMap(): Record<RuntimeFeature, RuntimeFeatureSupport> {

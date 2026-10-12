@@ -1399,7 +1399,7 @@ export function wrapSystemPrompt(
       "Do not emit memory, automation, app, workbench, or surface control blocks.",
       "",
       ASK_PROTOCOL,
-      intellectUiSectionText(planPromptSections(userPrompt), locale),
+      intellectUiSectionText({ toolless: true }),
       "",
       tStatus(locale, "sysAgentDef"),
       restrictedAgentPrompt,
@@ -1492,7 +1492,7 @@ export function wrapSystemPrompt(
     ...(capabilityPriority ? [capabilityPriority] : []),
     "",
     ASK_PROTOCOL,
-    intellectUiSectionText(sectionPlan, locale),
+    intellectUiSectionText(),
     "",
     // 항상-켜진 백그라운드 스킬 — 사용자가 "API/MCP"를 몰라도 에이전트가 브라우저로 가입·로그인·키
     // 발급을 손잡고 안내한 뒤 저장하게 한다. 사용자에게는 보이지 않는다(시스템 프롬프트 내부).

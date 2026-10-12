@@ -4,7 +4,7 @@
  * R15: the model is called only when the diff has no deterministic fix. This handler is that deterministic part:
  * for the attempt's diagnosis it files every defect it found (local only; sending needs the owner's press, D5), then
  * walks the ordered alternative paths and executes the first one whose arguments are host facts (start the unblocked
- * tactic's turn, settle an uncertain effect from a later run's receipt, run the login ladder for the named domain,
+ * tactic's turn, run the login ladder for the named domain,
  * restart the Agentlas Browser, record a runtime switch). Paths that need a judgement to fill their arguments
  * (create/dispatch a teammate, replan, retry with another tool, the owner ask) are left to the model-backed attempt
  * (plan P4) and the handler rests. Action ids are derived from (incident, attempt, action), so a crash replay finds its
@@ -27,10 +27,6 @@ function deterministicArgs(action: AgiActionKind, input: AgiUnblockInput, facts:
   const d = input.diagnosis;
   switch (action) {
     case "start_work_turn": return { nodeId: d.eligibleTactics[0] ?? null };
-    case "settle_uncertain_effect": {
-      const later = facts?.signals.find((signal) => signal.kind === "later_run_receipt");
-      return later && later.kind === "later_run_receipt" ? { evidenceRef: later.ref, attemptIds: later.attemptIds } : null;
-    }
     case "run_login_recovery": {
       const wall = facts?.signals.find((signal) => signal.kind === "login_wall");
       return wall && wall.kind === "login_wall" && wall.domain !== "unknown" ? { domain: wall.domain } : null;

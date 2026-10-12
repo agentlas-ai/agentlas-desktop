@@ -409,7 +409,7 @@ export const scienceDesktopTools = {
         .get(runId(scope), input.toolCallId) as { signature?: string } | undefined;
       if (previous) {
         if (previous.signature !== signatureSha256) throw new Error("science_desktop_tool_call_id_reused");
-        throw new Error("science_desktop_tool_effect_uncertain_not_replayed");
+        throw new Error("science_desktop_tool_dispatch_not_replayed");
       }
       assertInventoryCurrent(scope, inventory);
       recordRunEvent({ runId: runId(scope), chatId: binding.chatId,

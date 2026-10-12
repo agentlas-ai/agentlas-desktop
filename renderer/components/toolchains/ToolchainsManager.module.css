@@ -6,7 +6,7 @@
 .search { display: flex; align-items: center; gap: 8px; width: min(320px, 46vw); height: 34px; padding: 0 12px; border-radius: 10px; background: var(--paper-3); color: var(--muted-deep); }
 .search input { flex: 1; min-width: 0; border: 0; background: transparent; outline: none; font: inherit; font-size: 13px; color: var(--ink); }
 .refresh { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border: 0; border-radius: 10px; background: transparent; color: var(--muted-deep); cursor: pointer; }
-.refresh:hover { background: var(--paper-3); }
+.refresh:hover { color: var(--ink); }
 .refresh[data-busy="true"] svg { animation: spin 1s linear infinite; }
 
 .lanes { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px 0 6px; }
@@ -38,7 +38,7 @@
 .backdrop { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgba(20, 20, 20, 0.28); }
 .sheet { position: relative; width: min(520px, 100%); max-height: min(720px, calc(100vh - 48px)); overflow: auto; padding: 24px 24px 20px; border-radius: 18px; background: var(--paper); color: var(--ink); }
 .close { position: absolute; top: 14px; right: 14px; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: 0; border-radius: 8px; background: transparent; color: var(--muted-deep); cursor: pointer; }
-.close:hover { background: var(--paper-3); }
+.close:hover { color: var(--ink); }
 .sheetHead { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 16px; align-items: center; padding-right: 28px; }
 .sheetHead h3 { margin: 0; font-size: 17px; font-weight: 600; line-height: 1.3; }
 .sheetHead p { margin: 4px 0 0; font-size: 12.5px; line-height: 1.5; color: var(--muted-deep); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }

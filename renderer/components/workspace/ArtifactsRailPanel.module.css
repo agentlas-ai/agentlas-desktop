@@ -166,7 +166,9 @@
   color: var(--ink-soft);
   cursor: pointer;
 }
-.back:hover,
+.back:hover {
+  color: var(--ink);
+}
 .back:focus-visible {
   background: var(--paper-2, rgba(0, 0, 0, 0.04));
   color: var(--ink);

@@ -207,10 +207,10 @@ export function callAgiReadTool(deps: AgiReadDeps, ctx: AgiReadContext, tool: st
         ? [...new Set((args.attemptIds as unknown[]).filter((id): id is string => typeof id === "string" && ID.test(id)))].slice(0, AGI_READ_CAPS[name].rows)
         : [];
       const rows = (wanted.length
-        ? db.prepare(`SELECT id, invocation_run_id, state, side_effect_state, started_at, completed_at FROM long_run_worker_attempts
+        ? db.prepare(`SELECT id, invocation_run_id, state, started_at, completed_at FROM long_run_worker_attempts
             WHERE run_id = ? AND id IN (${wanted.map(() => "?").join(",")}) ORDER BY started_at DESC LIMIT ?`)
           .all(scope.runId, ...wanted, AGI_READ_CAPS[name].rows)
-        : db.prepare(`SELECT id, invocation_run_id, state, side_effect_state, started_at, completed_at FROM long_run_worker_attempts
+        : db.prepare(`SELECT id, invocation_run_id, state, started_at, completed_at FROM long_run_worker_attempts
             WHERE run_id = ? ORDER BY started_at DESC LIMIT ?`).all(scope.runId, AGI_READ_CAPS[name].rows)) as Array<Record<string, unknown>>;
       return capped(name, { runId: scope.runId, ...(wanted.length ? { attemptIds: wanted } : {}) }, rows.reverse());
     }

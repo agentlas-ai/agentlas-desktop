@@ -1,10 +1,14 @@
 .rail { min-width: 0; display: grid; gap: 3px; margin: 0 0 7px; padding: 0 0 8px; border-bottom: 1px solid var(--paper-3); }
 .railHeader { min-height: 27px; display: flex; align-items: center; justify-content: space-between; padding: 0 5px 0 8px; color: var(--muted-deep); font-size: 9px; font-weight: 720; letter-spacing: .08em; text-transform: uppercase; }
 .railHeader button { width: 26px; height: 26px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--muted-deep); cursor: pointer; }
-.railHeader button:hover, .railHeader button:focus-visible { background: var(--paper-3); outline: none; }
+.railHeader button:hover { color: var(--ink); }
+.railHeader button:focus-visible { background: var(--paper-3); outline: none; }
 .railList { min-width: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(74px, 1fr)); gap: 4px; padding: 0 4px; }
 .taskforceRow, .emptyRow { width: 100%; min-width: 0; min-height: 68px; display: grid; grid-template-rows: 40px minmax(0, auto); justify-items: center; align-content: center; gap: 3px; padding: 5px 2px; border: 0; border-radius: 10px; background: transparent; color: var(--ink); font: inherit; text-align: center; cursor: pointer; }
-.taskforceRow:hover, .taskforceRow:focus-visible, .emptyRow:hover, .emptyRow:focus-visible { background: var(--paper-3); outline: none; }
+.taskforceRow:hover,
+.emptyRow:hover { color: var(--ink); }
+.taskforceRow:focus-visible,
+.emptyRow:focus-visible { background: var(--paper-3); outline: none; }
 .taskforceRow[data-active="true"] { background: var(--paper-3); }
 .portraitStack { position: relative; display: block; width: 62px; height: 40px; isolation: isolate; }
 .portraitStack > span { position: absolute; width: 30px; height: 30px; margin: 0; }
@@ -37,7 +41,8 @@
 .memberReplacement select { min-width: 0; min-height: 36px; border: 1px solid var(--paper-edge); border-radius: 8px; background: var(--paper); color: var(--ink); font: inherit; }
 .memberRow { min-width: 0; min-height: 64px; display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: center; gap: 14px; padding: 10px 16px 10px 14px; border: 1px solid var(--paper-3); border-radius: 12px; background: var(--paper); color: var(--ink); font: inherit; text-align: left; }
 button.memberRow { cursor: pointer; }
-button.memberRow:hover, button.memberRow:focus-visible { border-color: var(--muted); background: var(--paper-2); outline: none; }
+button.memberRow:hover { border-color: var(--muted); color: var(--ink); }
+button.memberRow:focus-visible { border-color: var(--muted); background: var(--paper-2); outline: none; }
 .memberRow > span:nth-child(2) { min-width: 0; display: grid; gap: 3px; }
 .memberRow strong, .memberRow small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .memberRow strong { font-size: 13px; }

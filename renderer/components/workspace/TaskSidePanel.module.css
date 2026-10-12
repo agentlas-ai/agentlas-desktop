@@ -314,7 +314,7 @@
   color: var(--muted-deep);
   cursor: pointer;
 }
-.artifactHeaderActions > button:hover,
+.artifactHeaderActions > button:hover { color: var(--ink-soft); }
 .artifactHeaderActions > button:focus-visible { background: var(--paper-3); color: var(--ink-soft); outline: none; }
 .artifactHistoryDetails { position: static; }
 .artifactHistoryDetails > summary {
@@ -328,7 +328,7 @@
   cursor: pointer;
 }
 .artifactHistoryDetails > summary::-webkit-details-marker { display: none; }
-.artifactHistoryDetails > summary:hover,
+.artifactHistoryDetails > summary:hover { color: var(--ink-soft); }
 .artifactHistoryDetails > summary:focus-visible,
 .artifactHistoryDetails[open] > summary { background: var(--paper-3); color: var(--ink-soft); outline: none; }
 .artifactHistoryPopup {
@@ -638,7 +638,8 @@ button.artifactVisual { cursor: pointer; }
 .artifactPreviewCopy strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .artifactPreviewCopy strong { color: var(--ink); font-size: 11px; }
 .artifactPreviewCopy button { width: 32px; height: 32px; display: grid; place-items: center; padding: 0; border: 1px solid var(--paper-edge-strong); border-radius: 8px; background: var(--paper); color: var(--ink-soft); font: inherit; cursor: pointer; }
-.artifactPreviewCopy button:hover, .artifactPreviewCopy button:focus-visible { border-color: var(--muted); background: var(--paper-3); outline: none; }
+.artifactPreviewCopy button:hover { border-color: var(--muted); color: var(--ink); }
+.artifactPreviewCopy button:focus-visible { border-color: var(--muted); background: var(--paper-3); outline: none; }
 
 /*
  * 세로 flex 여야 툴바(탭·주소창·안내)가 제 높이를 갖고 화면 칸이 나머지를 전부 먹는다.
@@ -720,7 +721,7 @@ button.artifactVisual { cursor: pointer; }
   text-overflow: ellipsis;
   cursor: pointer;
 }
-.browserGoneNotice > button:hover,
+.browserGoneNotice > button:hover { border-color: var(--warn-soft); color: var(--ink); }
 .browserGoneNotice > button:focus-visible { border-color: var(--warn-soft); background: var(--warn-soft); outline: none; }
 .browserTabBar {
   min-width: 0;
@@ -800,7 +801,8 @@ button.artifactVisual { cursor: pointer; }
   color: var(--muted-deep);
   cursor: pointer;
 }
-.browserTabClose:hover, .browserTabClose:focus-visible { background: var(--paper-3); color: var(--ink-soft); outline: none; }
+.browserTabClose:hover { color: var(--ink-soft); }
+.browserTabClose:focus-visible { background: var(--paper-3); color: var(--ink-soft); outline: none; }
 .browserNewTab,
 .browserNavigationBar > button,
 .browserMenuAnchor > button {
@@ -817,13 +819,13 @@ button.artifactVisual { cursor: pointer; }
   cursor: pointer;
 }
 .browserNewTab:hover,
-.browserNewTab:focus-visible,
 .browserNavigationBar > button:hover,
+.browserMenuAnchor > button:hover { color: var(--ink); }
+.browserNewTab:focus-visible,
 .browserNavigationBar > button:focus-visible,
-.browserMenuAnchor > button:hover,
 .browserMenuAnchor > button:focus-visible { background: var(--paper-3); color: var(--ink); outline: none; }
 .browserNavigationBar > button:disabled { color: var(--white-soft); cursor: default; }
-.browserNavigationBar > button:disabled:hover { background: transparent; }
+.browserNavigationBar > button:disabled:hover { color: var(--ink); }
 .browserLiveBadge {
   min-height: 21px;
   display: inline-flex;
@@ -967,7 +969,8 @@ button.artifactVisual { cursor: pointer; }
   white-space: nowrap;
   cursor: pointer;
 }
-.browserEmpty > button:hover, .browserEmpty > button:focus-visible { border-color: var(--muted); background: var(--paper-3); outline: none; }
+.browserEmpty > button:hover { border-color: var(--muted); color: var(--ink); }
+.browserEmpty > button:focus-visible { border-color: var(--muted); background: var(--paper-3); outline: none; }
 .browserEmpty strong { color: var(--ink-soft); font-size: 13px; }
 .browserEmpty small { max-width: 290px; color: var(--muted-deep); font-size: 10px; line-height: 1.55; }
 
@@ -1073,7 +1076,7 @@ button.artifactVisual { cursor: pointer; }
 .artifactTab:hover .artifactTabClose,
 .artifactTab[data-active="true"] .artifactTabClose { opacity: 1; }
 
-.artifactTabClose:hover { background: var(--paper-3); color: var(--ink); }
+.artifactTabClose:hover { color: var(--ink); }
 
 .artifactAddWrap { position: relative; display: inline-flex; flex: 0 0 auto; }
 
@@ -1091,7 +1094,7 @@ button.artifactVisual { cursor: pointer; }
   cursor: pointer;
 }
 
-.artifactAddWrap > button:hover { background: var(--paper-3); color: var(--ink); }
+.artifactAddWrap > button:hover { color: var(--ink); }
 
 .artifactAddMenu {
   /* A portal escapes the horizontal tab scroller and the output rail clip. */
@@ -1147,7 +1150,7 @@ button.artifactVisual { cursor: pointer; }
   cursor: pointer;
 }
 
-.artifactEmptyList > button:hover { background: var(--paper-2); color: var(--ink); }
+.artifactEmptyList > button:hover { color: var(--ink); }
 
 /* ===========================================================================
  * 모션 — 결과 패널 폭 / 미리보기 분할선 / 기록 높이 / 손잡이
@@ -1319,7 +1322,7 @@ button.artifactVisual { cursor: pointer; }
 .workerPanelHeader { display: flex; align-items: center; gap: 10px; padding: 15px 18px; border-bottom: 1px solid var(--paper-edge); position: sticky; top: 0; background: var(--paper); z-index: 1; }
 .workerPanelHeader strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
 .workerPanelHeader button { display: inline-flex; align-items: center; justify-content: center; border: 0; background: transparent; color: var(--ink-soft); padding: 5px; border-radius: 6px; cursor: pointer; }
-.workerPanelHeader button:hover { background: var(--paper-2); }
+.workerPanelHeader button:hover { color: var(--ink); }
 .workerPanelFeed { padding: 12px 18px 28px; min-width: 0; }
 .workerFeedItem { margin: 10px 0; min-width: 0; }
 .workerReport { min-width: 0; max-width: 100%; padding: 14px 0; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }

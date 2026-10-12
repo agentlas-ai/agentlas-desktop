@@ -28,7 +28,6 @@ export type AgiOwnerClass = "our_defect" | "agent_resolvable" | "human_only";
 
 /** The typed actions the executor knows (P3). The classifier only orders them; it never runs them. */
 export const AGI_ACTION_KINDS = [
-  "settle_uncertain_effect",
   "create_teammate",
   "invite_teammate",
   "dispatch_teammate",
@@ -65,12 +64,6 @@ export type AgiBlockerSignal =
   | { kind: "pre_run_refused"; code: string }
   /** The continuation row is parked on needs_input, or the goal asked the owner a question. */
   | { kind: "needs_input"; code?: string }
-  /** An attempt's outward effect is unknown (interrupted mid-effect). */
-  | { kind: "effect_uncertain"; attemptIds: string[] }
-  /** Effect observation hit its cap; looksAfterExhausted counts observations dispatched after that event. */
-  | { kind: "effect_observation_exhausted"; attemptIds: string[]; looksAfterExhausted: number }
-  /** A later run's host receipt (tool ledger) recorded the outward effect the uncertain attempt was for. */
-  | { kind: "later_run_receipt"; runId: string; attemptIds: string[]; ref: string }
   /** The goal tried to register a wait and the host refused it (goal_wait_*). */
   | { kind: "wait_registration_refused"; code: string }
   /** The progress-key stall detector (long_runs.stall_streak / stall_replan events). */
@@ -174,9 +167,6 @@ function signalKey(signal: AgiBlockerSignal): Record<string, unknown> {
     case "run_failed": return { k: signal.kind, c: signal.code, r: signal.runId ?? null };
     case "pre_run_refused": return { k: signal.kind, c: signal.code };
     case "needs_input": return { k: signal.kind, c: signal.code ?? null };
-    case "effect_uncertain": return { k: signal.kind, a: [...signal.attemptIds].sort() };
-    case "effect_observation_exhausted": return { k: signal.kind, a: [...signal.attemptIds].sort() };
-    case "later_run_receipt": return { k: signal.kind, r: signal.runId, a: [...signal.attemptIds].sort() };
     case "wait_registration_refused": return { k: signal.kind, c: signal.code };
     case "stall_detected": return { k: signal.kind };
     case "missed_due_run": return { k: signal.kind, d: signal.dueAt };
@@ -247,7 +237,6 @@ function causeOfRunCode(code: string): { cause: FailureCauseKind; ourDefect: boo
 function refsOf(facts: AgiBlockerFacts, signal: AgiBlockerSignal | null): string[] {
   const refs = new Set<string>(facts.evidenceRefs ?? []);
   if (facts.runId) refs.add(`long_run:${facts.runId}`);
-  if (signal?.kind === "later_run_receipt") refs.add(signal.ref);
   if (signal?.kind === "run_failed" && signal.runId) refs.add(`run:${signal.runId}`);
   return [...refs];
 }
@@ -319,12 +308,8 @@ export function classifyAgiBlocker(facts: AgiBlockerFacts): AgiBlockerDiagnosis 
   }
 
   // Secondary defect findings that ride along with any primary class.
-  const exhausted = find("effect_observation_exhausted");
-  const later = find("later_run_receipt");
   const waitRefused = find("wait_registration_refused");
   const repeated = find("repeated_notice");
-  if (exhausted && exhausted.looksAfterExhausted > 0) addDefect("effect_observation_repeated_after_exhausted", "stall", exhausted);
-  if (later && (exhausted || find("effect_uncertain"))) addDefect("owner_turn_effect_did_not_settle_goal_attempt", "wrong-result", later);
   if (waitRefused) addDefect(`wait_registration_refused:${waitRefused.code}`, "stall", waitRefused);
   if (repeated && repeated.count >= 2) addDefect(`repeated_notice:${repeated.code}`, "ui", repeated);
   const browser = find("browser_unavailable");
@@ -344,14 +329,6 @@ export function classifyAgiBlocker(facts: AgiBlockerFacts): AgiBlockerDiagnosis 
     return base({ display: "blocked", attemptDue: true, primarySignal: "login_wall", causeKind: "auth",
       ownerClass: wall.sourceSession === "present" ? "our_defect" : "agent_resolvable", boundary: null,
       altPaths: ["run_login_recovery", ...branchWork], reasonCode: "login_wall", signal: wall });
-  }
-  // 4. Uncertain outward effect: settle from a later host receipt when one exists; never redo the effect.
-  const uncertain = find("effect_uncertain");
-  if (exhausted || uncertain) {
-    const settle: AgiActionKind[] = later ? ["settle_uncertain_effect"] : [];
-    return base({ display: "blocked", attemptDue: true, primarySignal: exhausted ? "effect_observation_exhausted" : "effect_uncertain",
-      causeKind: "effect_uncertain", ownerClass: "agent_resolvable", boundary: null,
-      altPaths: [...settle, ...branchWork], reasonCode: later ? "effect_settleable_from_receipt" : "effect_uncertain", signal: exhausted ?? uncertain ?? null });
   }
   // 5. Browser unreachable: our defect; restart the Agentlas browser (D6 allows it) and keep other branches moving.
   if (browser) {

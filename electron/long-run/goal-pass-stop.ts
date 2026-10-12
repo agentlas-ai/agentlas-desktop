@@ -55,7 +55,6 @@ export interface GoalPassStop {
 
 /** 멈춘 사유 → 지속 정책의 원인 어휘. 러너가 쓴 타입과 판정 사유만 본다. */
 export function goalPassStopCause(stop: Pick<GoalPassStop, "reason" | "failureKind" | "retryAfterAt">): FailureCause {
-  if (stop.reason === "effect_verification_required") return { kind: "effect_uncertain" };
   if (stop.failureKind === "quota" || stop.reason === "usage_limited") {
     return { kind: "quota", retryAfterAt: stop.retryAfterAt ?? null };
   }
@@ -139,7 +138,6 @@ export function parkGoalAfterPassStop(input: {
     nextAt,
     detail: `persistence:${move.kind}:${cause.kind}`,
     trigger: "goal-pass-stop",
-    effectUncertain: cause.kind === "effect_uncertain",
     appInstanceId: desktopAppInstanceId(),
   });
   notifyOnce(input, blocked.id, decision, nextAtMs, nowMs);

@@ -11,8 +11,6 @@ import { completeChatGoalContract } from "../store/chat-goals";
 import { appendChatMessage, getChat, setChatGoalBinding } from "../store/chats";
 import { cappedGoalOwnerReviewMessage } from "./goal-wait-refusal";
 
-export const AUTOMATIC_GOAL_RETRY_CAP = 2;
-
 export function isAutomaticGoal(run: Pick<LongRunRecord, "goalId">): boolean {
   return run.goalId.startsWith("goal:auto-message:");
 }

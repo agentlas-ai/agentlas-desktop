@@ -37,7 +37,9 @@
   cursor: pointer;
 }
 
-.close:hover,
+.close:hover {
+  color: var(--black);
+}
 .close:focus-visible {
   background: var(--fill-1);
   color: var(--black);

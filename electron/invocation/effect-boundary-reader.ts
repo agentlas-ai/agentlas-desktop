@@ -1,4 +1,3 @@
-import { receiptSettlesAttempts } from "../long-run/attempt-effect-receipt";
 import { isPredispatchApprovalRefusal } from "../../shared/tool-failure";
 import { verifyScienceSchemaRejection, type ScienceSchemaRejectionSettlement } from "./science-schema-rejection";
 import type { ScienceNativeFailureObservation } from "./science-native-failure";
@@ -26,8 +25,6 @@ export interface InvocationEffectBoundary {
   artifactRefs: string[]; sourceRefs: string[]; pendingEffectRefs: string[];
   /** Failed calls settled because their recorded name and arguments prove no outside effect (audit only). */
   noEffectFailureIds?: string[];
-  /** Ledger ref of the read-only observation whose done/not_done verdict settled a quiesced boundary. */
-  settledByObservation?: string;
 }
 interface EventRow { id: string; seq: number; kind: string; chat_id: string | null; agent_id?: string | null; node_id?: string | null; payload_json: string }
 const terminalKinds = new Set(["invoke_completed", "invoke_waiting", "invoke_failed", "invoke_threw", "invoke_cancelled", "invoke_interrupted"]);
@@ -54,10 +51,8 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
       || (terminal?.kind === "invoke_waiting" && payload(terminal).runtimeQuiesced === true);
     const effectRow = [...rows].reverse().find(row => row.kind === "runtime_effect_boundary");
     const boundary = effectRow ? payload(effectRow) : null;
-    const attemptRows = getDb().prepare("SELECT id, run_id, state, side_effect_state FROM long_run_worker_attempts WHERE invocation_run_id = ? ORDER BY id")
-      .all(input.invocationRunId) as Array<{ id: string; run_id: string; state: string; side_effect_state: string }>;
-    // The digest below hashes `attempts`; keep its shape exactly as before (no run_id).
-    const attempts = attemptRows.map(({ id, state, side_effect_state }) => ({ id, state, side_effect_state }));
+    const attempts = getDb().prepare("SELECT id, state FROM long_run_worker_attempts WHERE invocation_run_id = ? ORDER BY id")
+      .all(input.invocationRunId) as Array<{ id: string; state: string }>;
     const pending = new Set<string>();
     let exactBoundary: Record<string, unknown> | null = null;
     try {
@@ -100,7 +95,7 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
     }
     if (!terminal) pending.add(`invocation:${input.invocationRunId}:terminal-pending`);
     if (terminal && !runtimeQuiesced) pending.add(`event:${terminal.id}:effects-unconfirmed`);
-    for (const attempt of attempts) if (attempt.state === "running" || attempt.state === "uncertain" || attempt.side_effect_state === "uncertain") pending.add(`attempt:${attempt.id}`);
+    for (const attempt of attempts) if (attempt.state === "running" || attempt.state === "uncertain") pending.add(`attempt:${attempt.id}`);
     if (!effectRow || !boundary || boundary.schemaVersion !== "agentlas.runtime-effect-boundary.v1"
       || boundary.terminalEventId !== terminal?.id || boundary.terminalSeq !== terminal?.seq
       || boundary.coverage !== "complete" || boundary.ledgerComplete !== true || boundary.effects !== "settled"
@@ -265,37 +260,12 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
     const explainedByNoEffectFailure = (ref: string): boolean => (ref === "runtime-effect-boundary-unconfirmed" && boundaryOnlyFailed)
       || (ref === "runtime-effect-operation-snapshot-incomplete" && snapshotOnlyFailed)
       || noEffectFailedIds.some(id => ref === `tool:${id}:outcome-pending` || (ref.startsWith("operation:") && ref.endsWith(`:${id}:failed`)));
-    let openEffectRefs = noEffectFailedIds.length ? pendingEffectRefs.filter((ref) => !explainedByNoEffectFailure(ref)) : pendingEffectRefs;
-    // The rest of a quiesced boundary (nothing running; only failed calls such as a click whose element was gone)
-    // is settled once the goal's read-only observation looked at the live page and recorded done / not_done for
-    // exactly this invocation (effect-observation.ts settle_boundary). Owner direction 2026-09-27: an uncertain
-    // effect is reconciled by looking, never by asking a person; the look's verdict is the effect's resolution.
-    let settledByObservation: string | null = null;
-    if (openEffectRefs.length && quiesced) {
-      const runIds = [...new Set(attemptRows.map((row) => row.run_id))];
-      for (const runId of runIds) {
-        const row = getDb().prepare(`SELECT seq, json_extract(payload_json, '$.verdict') AS verdict,
-          json_extract(payload_json, '$.externalOutcomeProof') AS proof FROM long_run_events
-          WHERE run_id = ? AND kind = 'run.effect_observation' AND json_extract(payload_json, '$.action') = 'settle_boundary'
-            AND EXISTS (SELECT 1 FROM json_each(payload_json, '$.targetIds') WHERE value = ?)
-          ORDER BY seq DESC LIMIT 1`).get(runId, `invocation:${input.invocationRunId}`) as { seq: number; verdict: string | null; proof: string | null } | undefined;
-        // A look that saw the result absent, and an outcome continued under the owner's repeat-risk policy
-        // (owner 2026-10-05), settle it as well as the host's own receipt does.
-        if (row && (row.verdict === "done"
-          || (row.verdict === "not_done" && row.proof === "observed_read_only_by_model")
-          || (row.verdict === "unknown" && row.proof === "owner_policy_accepts_repeat_risk")
-          || (row.verdict === "not_done"
-          && row.proof === "host_receipt_closed_ledger"
-          && receiptSettlesAttempts([{ id: `invocation:${input.invocationRunId}`, invocationRunId: input.invocationRunId }])))) { settledByObservation = `long-run:${runId}:event:${row.seq}`; break; }
-      }
-      if (settledByObservation) openEffectRefs = [];
-    }
+    const openEffectRefs = noEffectFailedIds.length ? pendingEffectRefs.filter((ref) => !explainedByNoEffectFailure(ref)) : pendingEffectRefs;
     const result: InvocationEffectBoundary = { invocationRunId: input.invocationRunId, terminalEventId: terminal?.id ?? null, receiptEventId: effectRow?.id ?? null, snapshotDigest: null,
       terminal: Boolean(terminal), effects: openEffectRefs.length ? "uncertain" : "settled",
       ...(openEffectRefs.length && quiesced ? { quiesced: true } : {}),
       artifactRefs: [...artifactRefs].sort(), sourceRefs: [...sourceRefs].sort(), pendingEffectRefs: openEffectRefs,
-      ...(noEffectFailedIds.length ? { noEffectFailureIds: [...noEffectFailedIds].sort() } : {}),
-      ...(settledByObservation ? { settledByObservation } : {}) };
+      ...(noEffectFailedIds.length ? { noEffectFailureIds: [...noEffectFailedIds].sort() } : {}) };
     if (terminal) {
       const digest = createHash("sha256").update(JSON.stringify({ input, terminal, effectRow, attempts,
         tools: [...tools].map(([id, tool]) => ({ id, ...tool })), result })).digest("hex");

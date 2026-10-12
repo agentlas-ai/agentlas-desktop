@@ -1,5 +1,5 @@
 import { longRunMonetaryRefusal, type LongRunCostAccounting } from "./budget";
-import { getLongRun, unsettledLongRunAttemptCount, type LongRunRecord } from "../store/long-runs";
+import { getLongRun, type LongRunRecord } from "../store/long-runs";
 
 /**
  * Whether a goal that the host paused may pick itself up again.
@@ -9,12 +9,9 @@ import { getLongRun, unsettledLongRunAttemptCount, type LongRunRecord } from "..
  * the first time the person closed the window — the state said "paused", and no code path in the
  * product could take it out of that state on its own.
  *
- * Auto-resume cannot simply be switched on, though: an attempt that was mid-flight when the host
- * died has an unknown side effect, and repeating it could send the same message or write the same
- * file twice. So the rule is narrow and provable: resume only a goal that was *between* turns.
- *
- * That is not a corner case, it is the common one. A long goal spends almost all of its life
- * between turns, which is exactly when a person closes their laptop.
+ * The rule is narrow: resume only a goal the host itself paused, within budget. Whether an
+ * interrupted attempt had an outside effect is not judged here (owner 2026-10-12); the resumed turn
+ * reads the previous-turn note and checks for itself.
  */
 export type StartupResumeDecision =
   | { resume: true }
@@ -23,8 +20,6 @@ export type StartupResumeDecision =
 export type StartupResumeRefusal =
   /** The person paused it, or a blocker stopped it. Only a host pause is ours to undo. */
   | "not-a-host-pause"
-  /** Something was mid-flight; its side effects are unknown, so a person decides. */
-  | "attempt-unsettled"
   /** Cycles, wallclock, or cost are genuinely spent. An absent limit is not a spent one. */
   | "budget-spent"
   | "budget-cost-unavailable"
@@ -37,7 +32,6 @@ const HOST_PAUSE_REASONS = new Set(["app_closed", "crash_recovery"]);
 export function startupResumeDecision(input: {
   status: string;
   pauseReason: string | null;
-  unsettledAttempts: number;
   cycleCount: number;
   costUsedUsd: number;
   costAccounting?: LongRunCostAccounting;
@@ -48,7 +42,6 @@ export function startupResumeDecision(input: {
   if (!input.pauseReason || !HOST_PAUSE_REASONS.has(input.pauseReason)) {
     return { resume: false, reason: "not-a-host-pause" };
   }
-  if (input.unsettledAttempts > 0) return { resume: false, reason: "attempt-unsettled" };
   const now = input.now ?? Date.now();
   const cyclesSpent = input.budget.maxCycles != null && input.cycleCount >= input.budget.maxCycles;
   const deadlinePassed = input.budget.wallclockDeadline != null
@@ -79,13 +72,11 @@ export function reconcileHostPausedLongRuns(runIds: readonly string[]): StartupR
       entries.push({ runId, decision: { resume: false, reason: "not-paused" } });
       continue;
     }
-    const unsettledAttempts = unsettledLongRunAttemptCount(runId);
     entries.push({
       runId,
       decision: startupResumeDecision({
         status: run.status,
         pauseReason: run.pauseReason ?? null,
-        unsettledAttempts,
         cycleCount: run.cycleCount,
         costUsedUsd: run.costUsedUsd,
         costAccounting: run.costAccounting,

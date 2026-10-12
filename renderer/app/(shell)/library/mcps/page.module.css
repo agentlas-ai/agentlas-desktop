@@ -46,7 +46,8 @@
 .customSection { max-width: 660px; }
 .securityNote { display: flex; gap: 8px; color: var(--muted-deep); font-size: 11px; line-height: 1.7; margin-top: 20px; }
 .securityNote svg { flex-shrink: 0; margin-top: 3px; }
-.navItem:hover, .installedItem:hover, .pluginRow:hover, .iconButton:hover, .addMenu button:hover { background: var(--paper-2); }
+.navItem:hover, .installedItem:hover, .pluginRow:hover, .addMenu button:hover { background: var(--paper-2); }
+.iconButton:hover { color: var(--ink); }
 .sidebar .navItem:hover, .sidebar .installedItem:hover { background: var(--paper-edge); }
 .workspace button:focus-visible, .workspace a:focus-visible, .workspace input:focus-visible, .search:focus-within { outline: 2px solid var(--accent); outline-offset: 3px; }
 @media (max-width: 1120px) { .main { padding: 30px 30px 50px; } .header { gap: 17px; } .toolbar { width: 100%; } .search { width: min(320px, 100%); margin-right: auto; } .grid { gap: 4px 18px; } }

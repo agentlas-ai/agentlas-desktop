@@ -37,6 +37,7 @@ import { classifyTool } from "../shared/tool-taxonomy";
 import { couldHaveChangedTheOutsideWorld, isHostPreflightTool, isHostSupervisorNotice } from "../shared/tool-activity";
 import { BROWSER_APPROVAL_CLASSIFIER_SOURCE } from "./mcp-tools/browser-cdp-launcher";
 import { AGENTLAS_SYSTEM_TIME_CATALOG_ID, AGENTLAS_SYSTEM_TIME_TOOL_NAMES } from "./mcp-tools/system-time-server";
+import { AGENTLAS_UI_CATALOG_ID, AGENTLAS_UI_TOOL_NAMES } from "./ui-schema/mcp-server";
 
 export type OutwardEffectKind = "browser_commit" | "social_engage" | "external_mutation" | "shell_send" | "deliverable_file";
 
@@ -161,6 +162,8 @@ export function summarizeOutwardEffects(calls: OutwardToolCall[], ctx: OutwardEf
     const args = parseArgs(call.args);
     if (toolServer(name) === AGENTLAS_SYSTEM_TIME_CATALOG_ID
       && (AGENTLAS_SYSTEM_TIME_TOOL_NAMES as readonly string[]).includes(leaf)) { localWork += 1; continue; }
+    if (toolServer(name) === AGENTLAS_UI_CATALOG_ID
+      && (AGENTLAS_UI_TOOL_NAMES as readonly string[]).includes(leaf)) { localWork += 1; continue; }
     if (isBrowserTool(name, leaf)) {
       const approval = browserApproval();
       let klass: BrowserClass = null;

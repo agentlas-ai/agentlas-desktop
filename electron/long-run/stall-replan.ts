@@ -92,7 +92,6 @@ export async function reflectOngoingStall(input: {
       verdict: item.verdict, recoveryClass: item.recoveryClass ?? "unknown",
       prerequisiteCode: item.prerequisiteCode ?? null })),
     effectBoundary: checkpoint.sideEffects.boundary,
-    externalActionReceipts: checkpoint.capsule.externalActionReceipts ?? [],
   });
   if (evidence.length > MAX_INPUT_CHARS) return { status: "unavailable", reason: "stall_replan_input_too_large" };
   const call = input.callModel ?? callConnectedModelDetailed;

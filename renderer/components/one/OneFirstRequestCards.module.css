@@ -128,7 +128,7 @@
 
 .use:hover {
   border-color: var(--ink-soft);
-  background: var(--paper-3);
+  color: var(--ink);
 }
 
 .use:focus-visible {
@@ -154,7 +154,9 @@
   cursor: pointer;
 }
 
-.seatLink:hover,
+.seatLink:hover {
+  color: var(--ink);
+}
 .seatLink:focus-visible {
   background: var(--paper-3);
   color: var(--ink);
@@ -190,7 +192,6 @@
 
 .newSession.newSession:hover {
   border-color: var(--paper-edge-strong);
-  background: var(--paper-3);
   color: var(--ink);
 }
 

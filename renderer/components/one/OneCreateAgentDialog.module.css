@@ -238,7 +238,7 @@
   cursor: pointer;
 }
 
-.secondaryButton:hover:not(:disabled) { border-color: var(--muted); background: var(--paper-3); }
+.secondaryButton:hover:not(:disabled) { border-color: var(--muted); color: var(--ink); }
 .secondaryButton:disabled { cursor: not-allowed; opacity: .45; }
 
 .existingPicker {
@@ -264,7 +264,7 @@
   cursor: pointer;
 }
 
-.existingTrigger:hover { background: var(--paper-2); }
+.existingTrigger:hover { color: var(--ink); }
 
 .existingIcon {
   width: 30px;
@@ -338,7 +338,7 @@
   cursor: pointer;
 }
 
-.actions button:hover:not(:disabled) { background: var(--paper-3); }
+.actions button:hover:not(:disabled) { color: var(--ink); }
 .actions .primaryButton { border-color: var(--black); background: var(--black); color: var(--white); }
 .actions .primaryButton:hover:not(:disabled) { background: var(--black); }
 .actions button:disabled { cursor: not-allowed; opacity: .45; }
@@ -408,7 +408,7 @@
   font-weight: 680;
   cursor: pointer;
 }
-.editorExtras button:hover:not(:disabled) { background: var(--paper-3); }
+.editorExtras button:hover:not(:disabled) { color: var(--ink); }
 .editorExtras button:disabled { cursor: not-allowed; opacity: .45; }
 .editorExtras .archiveExtra { color: var(--danger); }
 
@@ -469,7 +469,7 @@
   font-weight: 680;
   cursor: pointer;
 }
-.footerActions button:hover:not(:disabled) { background: var(--paper-3); }
+.footerActions button:hover:not(:disabled) { color: var(--ink); }
 .footerActions .primaryButton { border-color: var(--black); background: var(--black); color: var(--white); }
 .footerActions .primaryButton:hover:not(:disabled) { background: var(--black); }
 .footerActions button:disabled { cursor: not-allowed; opacity: .45; }

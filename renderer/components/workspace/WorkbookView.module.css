@@ -51,7 +51,8 @@
   color: var(--ink-soft);
   cursor: pointer;
 }
-.close:hover, .close:focus-visible { background: var(--paper-3); color: var(--ink); outline: none; }
+.close:hover { color: var(--ink); }
+.close:focus-visible { background: var(--paper-3); color: var(--ink); outline: none; }
 .body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .pane { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .pane[hidden] { display: none; }

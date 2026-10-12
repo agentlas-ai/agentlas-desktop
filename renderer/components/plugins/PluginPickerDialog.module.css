@@ -82,7 +82,7 @@
 }
 
 .close:hover {
-  background: var(--paper-edge, rgba(0, 0, 0, 0.06));
+  color: var(--ink);
 }
 
 /* toolbar */
@@ -113,7 +113,7 @@
 }
 
 .filterButton:hover {
-  background: var(--paper-edge, rgba(0, 0, 0, 0.05));
+  color: var(--ink);
 }
 
 .filterMenu {
@@ -155,7 +155,7 @@
 }
 
 .filterItem:hover {
-  background: var(--paper-edge, rgba(0, 0, 0, 0.06));
+  color: var(--ink);
 }
 
 .check {
@@ -438,7 +438,7 @@
 }
 
 .ghost:hover:not(:disabled) {
-  background: var(--paper-edge, rgba(0, 0, 0, 0.05));
+  color: var(--ink);
 }
 
 .primary {

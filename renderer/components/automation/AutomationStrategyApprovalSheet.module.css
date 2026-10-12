@@ -35,7 +35,8 @@
 .head h2 { margin: 0; font-size: var(--ask-title-size); font-weight: var(--ask-title-weight); line-height: 1.4; }
 .head p { margin: 0; color: var(--ask-option-note-ink); font-size: var(--ask-option-note-size); }
 .close { flex: 0 0 auto; width: 32px; height: 32px; margin: -4px -4px 0 0; border: 0; border-radius: 6px; background: transparent; color: var(--ask-footer-ink); font-size: 18px; line-height: 1; cursor: pointer; }
-.close:hover, .close:focus-visible { background: var(--ask-option-hover); color: var(--ask-title-ink); }
+.close:hover { color: var(--ask-title-ink); }
+.close:focus-visible { background: var(--ask-option-hover); color: var(--ask-title-ink); }
 
 .summary { display: grid; gap: 5px; padding: 10px 12px; border-radius: var(--ask-option-radius); background: var(--ask-option-active); }
 .summary strong { font-size: var(--ask-option-title-size); font-weight: var(--ask-option-title-weight); line-height: 1.35; }
@@ -68,7 +69,8 @@
 
 .actions { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 7px; }
 .actions button { min-height: 32px; padding: 0 11px; border: 1px solid var(--ask-skip-line); border-radius: 9px; background: var(--ask-card-bg); color: var(--ask-skip-ink); font: inherit; font-size: var(--ask-footer-size); font-weight: 650; cursor: pointer; }
-.actions button:hover, .actions button:focus-visible { background: var(--ask-option-hover); color: var(--ask-title-ink); }
+.actions button:hover { color: var(--ask-title-ink); }
+.actions button:focus-visible { background: var(--ask-option-hover); color: var(--ask-title-ink); }
 .actions button:disabled { opacity: .5; cursor: wait; }
 .actions .primary { border-color: var(--black, var(--ask-title-ink)); background: var(--black, var(--ask-title-ink)); color: var(--white, #fff); }
 .actions .primary:hover, .actions .primary:focus-visible { background: var(--ink, #191a1c); color: var(--white, #fff); }

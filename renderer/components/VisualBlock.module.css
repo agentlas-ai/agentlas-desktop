@@ -83,7 +83,9 @@
   cursor: pointer;
   white-space: nowrap;
 }
-.tools button:hover,
+.tools button:hover {
+  color: var(--ink);
+}
 .tools button:focus-visible {
   background: var(--paper-2, rgba(0, 0, 0, 0.04));
   color: var(--ink);

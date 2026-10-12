@@ -36,7 +36,8 @@ export function linkedLocalFileItem(candidate: LinkedLocalCandidate, chatId: str
   const absolute = paths.map(asLocalAbsolute).find((value): value is string => Boolean(value));
   if (!absolute) return null;
   const name = (typeof candidate.name === "string" && candidate.name.trim()) || absolute.split(/[\\/]/).pop() || absolute;
-  const viewerKind = viewerKindForChatFile(name, "file");
+  // The name may be a link label ("24-second motion video") with no extension; the kind comes from the real file.
+  const viewerKind = viewerKindForChatFile(absolute.split(/[\\/]/).pop() || name, "file");
   const isText = TEXT_KINDS.has(viewerKind);
   if (!isText && !MEDIA_EXT.test(absolute)) return null;
   const fileUrl = isText ? null : `agentlas://localfile/?p=${encodeURIComponent(absolute)}`;

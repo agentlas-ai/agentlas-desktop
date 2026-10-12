@@ -32,6 +32,7 @@ import {
 import type { InstalledMcpServer, McpServerStatus } from "../../shared/types";
 import { serializeMcpResultForPreview } from "../../shared/mcp-result-rendering";
 import { isCanonicalSystemTimeMcpServer } from "./system-time-server";
+import { AGENTLAS_UI_CATALOG_ID, isCanonicalUiSchemaMcpServer } from "../ui-schema/mcp-server";
 import { isCanonicalComputerUseMcpServer } from "../computer-use/mcp-server";
 import { COMPUTER_USE_CONTROL_FILE_ENV, computerUseControlInfoPath } from "../computer-use/channel";
 import {
@@ -568,6 +569,9 @@ async function createTransport(
   if (server.catalogId === "cua-driver" && !isCanonicalComputerUseMcpServer(server)) {
     throw new Error("Agentlas Computer Use MCP launch contract is invalid");
   }
+  if (server.catalogId === AGENTLAS_UI_CATALOG_ID && !isCanonicalUiSchemaMcpServer(server)) {
+    throw new Error("Agentlas UI schema MCP launch contract is invalid");
+  }
   if (server.transport === "stdio") {
     if (!server.command) throw new Error("stdio server has no command");
     // uvx 로 도는 공식 벤더 서버가 13개다. uv 는 이 앱이 마련해 준다 — 사용자가 따로
@@ -584,6 +588,7 @@ async function createTransport(
       server.catalogId === "agentlas-browser" ||
       server.catalogId === "playwright" ||
       isCanonicalSystemTimeMcpServer(server) ||
+      isCanonicalUiSchemaMcpServer(server) ||
       isCanonicalComputerUseMcpServer(server)
     ) {
       stdioEnv.ELECTRON_RUN_AS_NODE = "1";

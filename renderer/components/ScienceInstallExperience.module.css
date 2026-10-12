@@ -53,7 +53,10 @@
   -webkit-backdrop-filter: blur(12px);
 }
 
-.close:hover,
+.close:hover {
+  border-color: rgba(24, 27, 32, 0.25);
+  color: var(--ink);
+}
 .close:focus-visible {
   background: var(--paper);
   border-color: rgba(24, 27, 32, 0.25);
@@ -208,7 +211,9 @@
   color: var(--ink-soft);
 }
 
-.secondary:hover,
+.secondary:hover {
+  color: var(--ink);
+}
 .secondary:focus-visible {
   background: var(--paper-3);
   color: var(--ink);

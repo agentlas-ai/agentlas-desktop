@@ -41,7 +41,7 @@
   line-height: 20px;
   overflow-wrap: anywhere;
 }
-.card .actions button:hover:not(:disabled) { background: var(--fill-2); color: var(--ink); }
+.card .actions button:hover:not(:disabled) { color: var(--ink); }
 .card .actions button:active:not(:disabled) { background: color-mix(in srgb, var(--ink) 22%, transparent); color: var(--ink); }
 .card .actions button:focus-visible { outline-offset: -2px; }
 @media (prefers-reduced-motion: reduce) {

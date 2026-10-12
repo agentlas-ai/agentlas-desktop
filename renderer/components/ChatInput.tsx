@@ -2180,8 +2180,6 @@ export function ComposerGoalBar({
       "verification_prerequisite:entitlement_required": ["계정의 이용 권한이나 크레딧 확인이 필요해 멈춤", "Stopped because account access or credits need attention"],
       "verification_prerequisite:environment_unavailable": ["필요한 실행 환경을 사용할 수 없어 멈춤", "Stopped because a required environment is unavailable"],
       "verification_prerequisite:user_stopped": ["사용자 요청으로 멈춤", "Stopped at your request"],
-      "verification_prerequisite:uncertain_side_effect": ["이전 작업의 실행 결과를 확인해야 해 멈춤", "Stopped because an earlier action's outcome needs confirmation"],
-      "checkpoint_side_effects_uncertain": ["이전 작업의 실행 결과를 확인해야 해 멈춤", "Stopped because an earlier action's outcome needs confirmation"],
     };
     const verificationReason = verificationReasons[reason];
     if (verificationReason) return verificationReason[locale === "ko" ? 0 : 1];

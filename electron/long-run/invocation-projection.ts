@@ -10,15 +10,12 @@ import {
   startLongRunWorkerAttempt,
 } from "../store/long-runs";
 import { captureLongRunRuntimeSelection } from "./exact-runtime-binding";
-import { isEffectStatusOnlyTool } from "../invocation/effect-boundary";
 import { resolveDesktopRuntimeAdapter } from "./runtime-adapters";
 
 interface ProjectedWorker {
   workerId: string;
   attemptId: string;
   settled: boolean;
-  /** A tool call that is not a host status line was seen for this attempt, so something may have happened outside. */
-  outward?: boolean;
 }
 
 export interface DesktopInvocationProjectionInput {
@@ -127,31 +124,24 @@ export class DesktopLongRunInvocationProjection {
     const worker = agentId ? this.ensureWorker(agentId, selection) : null;
 
     if (worker && worker.attemptId && !worker.settled) {
-      if (event.kind === "tool-use" && event.tool && !isEffectStatusOnlyTool(event.tool)) worker.outward = true;
-      // An attempt that ends without a single tool call did nothing outside: "none", not "uncertain". Production
-      // 2026-10-12: a Yotube controller attempt that only routed plugins and then failed runner-failed was recorded
-      // uncertain; every later checkpoint, AGI fact and teammate brief carried "its outside effect is uncertain, do not
-      // redo the voice/upload/playlist", for a turn that never reached ElevenLabs or YouTube.
-      const failedEffect = worker.outward ? "uncertain" as const : "none" as const;
+      // The host records the attempt's state only; whether it had an outside effect is the model's call (owner 2026-10-12).
       const lifecycle = event.agentLifecycle;
       if (event.kind === "error" || lifecycle?.state === "failed") {
         settleLongRunWorkerAttempt({
           attemptId: worker.attemptId,
           state: "failed",
-          sideEffectState: failedEffect,
           errorCode: event.error?.code ?? lifecycle?.reason ?? "worker_failed",
           errorMessage: event.error?.message ?? null,
         });
         worker.settled = true;
       } else if (event.done === true || lifecycle?.state === "idle" || lifecycle?.reason === "turn-complete") {
-        settleLongRunWorkerAttempt({ attemptId: worker.attemptId, state: "completed", sideEffectState: "committed" });
+        settleLongRunWorkerAttempt({ attemptId: worker.attemptId, state: "completed" });
         worker.settled = true;
       } else if (lifecycle?.state === "closed") {
         const normal = ["reaped", "evicted", "turn-complete"].includes(lifecycle.reason);
         settleLongRunWorkerAttempt({
           attemptId: worker.attemptId,
           state: normal ? "completed" : "interrupted",
-          sideEffectState: normal ? "committed" : failedEffect,
           ...(!normal ? { errorCode: lifecycle.reason } : {}),
         });
         worker.settled = true;
@@ -183,7 +173,6 @@ export class DesktopLongRunInvocationProjection {
       settleLongRunWorkerAttempt({
         attemptId: worker.attemptId,
         state: completed ? "completed" : "interrupted",
-        sideEffectState: completed ? "committed" : "uncertain",
         ...(!completed ? { errorCode: "parent_invocation_interrupted" } : {}),
       });
       worker.settled = true;

@@ -40,6 +40,7 @@ import {
 } from "../opencrab/constants";
 import type { BrowserApprovalRequestEvent, InstalledMcpServer } from "../../shared/types";
 import { isAuthenticSystemTimeMcpLaunch, isCanonicalSystemTimeMcpServer } from "./system-time-server";
+import { isAuthenticUiSchemaMcpLaunch, isCanonicalUiSchemaMcpServer } from "../ui-schema/mcp-server";
 import { BROWSER_APPROVAL_FILE_ENV, browserApprovalInfoPath } from "../browser/approval-channel";
 import { registerBrowserApprovalAuthority } from "../browser/approval-authority";
 import { WORKSPACE_PREVIEW_CONTROL_ENV, type WorkspacePreviewOwnerGrant } from "../workspace-preview/channel";
@@ -862,6 +863,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       // Official built-ins never fall through to generic stdio/remote paths.
       continue;
     }
+    if (s.catalogId === "agentlas-ui" && !isCanonicalUiSchemaMcpServer(s)) continue;
     if (s.catalogId === "cua-driver" && !isCanonicalComputerUseMcpServer(s)) {
       // The native input capability must never fall through to a mutable or
       // externally installed executable with the same catalog id.
@@ -1134,7 +1136,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           || isAuthenticComputerUseMcpLaunch(command, args)
           || isAuthenticWorkspacePreviewMcpLaunch(command, args)
           || isAuthenticAgentMailMcpLaunch(command, args)
-          || isAuthenticOneTeamMcpLaunch(command, args))
+          || isAuthenticOneTeamMcpLaunch(command, args)
+          || isAuthenticUiSchemaMcpLaunch(command, args))
       ) {
         // The keyless built-in already has an exact, compressed in-memory
         // launch contract. Bypass the mutable per-run wrapper so no pathname is

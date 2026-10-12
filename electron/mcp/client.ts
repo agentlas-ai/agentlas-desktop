@@ -1,4 +1,5 @@
 import { placeTurnContextForRuntime } from "../runtime/serving-prefix";
+import { acpDisabledFor } from "../runtime/acp";
 import { currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { withOneHistoryNativeInvocation } from "../one/personal-integrations-runtime";
 import { withAdapterEffectObserver } from "../invocation/adapter-effect-context";
@@ -268,6 +269,7 @@ import { recordResolvedAlias } from "../runtime/model-discovery-store";
 import { setResolvedCliModelAlias } from "../../shared/models";
 import { buildMcpConfigFile, isKeylessPlaywrightMcpDuplicate, type BrowserApprovalScope } from "../mcp-tools/mcp-config";
 import { AGENTLAS_WORKSPACE_PREVIEW_CATALOG_ID } from "../workspace-preview/mcp-server";
+import { AGENTLAS_UI_CATALOG_ID } from "../ui-schema/mcp-server";
 import type { WorkspacePreviewOwnerGrant } from "../workspace-preview/channel";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import { resolveMcpNeeds } from "../mcp-tools/need-resolver";
@@ -4006,6 +4008,9 @@ ${effectiveUserPrompt}`;
           ...(workspacePreviewOwnerGrant
             ? [AGENTLAS_WORKSPACE_PREVIEW_CATALOG_ID]
             : []),
+          // The model reads the UI schema through this read-only tool instead of a keyword-gated
+          // prompt section. Every ordinary turn gets it; Site/Agent App runs keep their own closed set.
+          ...(!req.agentAppMode ? [AGENTLAS_UI_CATALOG_ID] : []),
         ])],
         ...(req.requiredToolCatalogIds?.length
           ? { requiredToolCatalogIds: req.requiredToolCatalogIds }
@@ -5456,19 +5461,11 @@ ${effectiveUserPrompt}`;
       : "[Document marker]\nIf this answer is a document to read (a report, plan, research write-up, or proposal — something with sections that will be opened again later), begin the answer with exactly these three lines and write the markdown body below them.\n---\ndocument: <document title>\n---\nIt is then rendered as a document rather than chat, and the person can take it away as Markdown or PDF. Do not use it for short answers, small talk, or a paragraph or two. Whether to use it is your judgment. Never explain or mention this marker.\n[/Document marker]");
   }
   /*
-   * 차트·시각물 계약(오너 2026-09-29 "클로드 데탑처럼 비주얼라이즈"). 대화 화면은 ```chart(Vega-Lite)와
-   * ```visual(독립 HTML)을 그 자리에서 그린다 — 모델이 그 사실을 모르면 영원히 표만 쓴다. 세션 내내
-   * 같은 문장이라 stable 블록(resume 턴에서는 러너가 생략).
+   * 차트·시각물·agentlas-ui 계약은 더 이상 턴 맥락에 넣지 않는다(오너 2026-10-12: 사용자 프롬프트
+   * 단어장이 아니라 모델이 도구로 판단). 시스템 프롬프트의 한 줄 규칙이 read_ui_schema 호출을 지시하고,
+   * 그 도구(agentlas-ui 내장 MCP)가 스키마와 차트·시각물 안내를 돌려준다.
    */
-  // Loaded only for a request about charts, comparisons, trends or diagrams (prompt-sections.ts);
-  // cumulative like the Surface gate, so it never leaves a conversation once it has appeared.
   const sectionGateText = cumulativeSurfaceGateText(history, effectiveUserPrompt);
-  if (!req.agentAppMode && executionContext?.source !== "science" && planPromptSections(sectionGateText).intellectUi) {
-    turnContextParts.push(locale === "ko"
-      ? "[차트·시각물 블록]\n이 대화 화면은 두 가지를 테두리 없이 그 자리에 그립니다. 비교·추이·분포처럼 그림이 글보다 빠를 때 쓰세요. 여러 개면 제목에 1. 2. 번호를 붙이세요.\n1) 차트(우선): ```chart 펜스에 Vega-Lite JSON 하나. title 은 {text, subtitle}(부제 한 줄), 데이터는 data.values 에 직접(5,000행 이하), 눈금에 단위(axis.format 예: \".1%\", \"+d\"). 보조 계열은 strokeDash 로 점선+작은 점, 막대는 xOffset 으로 묶음. 색·폰트·격자는 화면이 정하니 넣지 마세요. url·expr·calculate·문자열 filter·href·image 는 그려지지 않습니다.\n2) 맞춤 시각물: ```visual title=파일_이름 펜스에 HTML 조각(doctype·html·body 없이, 인라인 <svg>·<style>·<script>만, 외부 자원·네트워크 불가). 배경은 투명, 색은 CSS 변수만: var(--color-text-primary|secondary|tertiary) var(--color-background-primary|secondary) var(--color-border-tertiary) var(--color-chart-1)~(--color-chart-6) var(--font-sans) var(--border-radius-md|lg). sendPrompt(text) 를 부르면 사람의 입력창에 문장이 채워집니다(보내지는 않음).\n큰 표 자료는 .xlsx/.csv 로 저장하고 경로를 적으세요 — 오른쪽 패널에서 열립니다. 이 안내를 언급하지 마세요.\n[/차트·시각물 블록]"
-      : "[Chart and visual blocks]\nThis chat draws two things in place, borderless. Use them when a picture beats prose — comparisons, trends, distributions. Number the titles (1. 2.) when there are several.\n1) Charts (preferred): one Vega-Lite JSON object in a ```chart fence. Use title {text, subtitle} (one-line subtitle), inline data.values (at most 5,000 rows), and units on ticks (axis.format such as \".1%\" or \"+d\"). Draw a secondary series dashed with small points via strokeDash; group bars with xOffset. Colors, fonts and gridlines come from the app — do not set them. url, expr, calculate, string filters, href and image are not drawn.\n2) Custom visuals: an HTML fragment in a ```visual title=file_name fence (no doctype/html/body; inline <svg>, <style>, <script> only; no external resources or network). Transparent background; colors only through CSS variables: var(--color-text-primary|secondary|tertiary) var(--color-background-primary|secondary) var(--color-border-tertiary) var(--color-chart-1)…(--color-chart-6) var(--font-sans) var(--border-radius-md|lg). Calling sendPrompt(text) fills the person's composer (it does not send).\nSave large tabular data as .xlsx/.csv and mention its path — it opens in the right panel. Do not mention these instructions.\n[/Chart and visual blocks]");
-    stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
-  }
   // 표면 안내는 프롬프트가 아니라 이 턴의 맥락으로 들어간다.
   if (executionContext?.surfaceContext?.trim()) {
     turnContextParts.push(executionContext.surfaceContext.trim());
@@ -5816,7 +5813,10 @@ ${effectiveUserPrompt}`;
   // section whose feature is first used on a later turn (account connecting, media routing, the
   // agentlas-ui schema) rides the stable turn context: delivered when it first appears, then acknowledged.
   if (!req.agentAppMode && !isAliveControllerRun && !restrictedReadBoundary && executionContext?.source !== "science"
-    && (active.kind === "claude-code" || active.kind === "codex" || active.kind === "kimi" || active.kind === "antigravity")) {
+    && (active.kind === "claude-code" || active.kind === "codex" || active.kind === "kimi" || active.kind === "antigravity"
+      // Grok, Cursor and open ACP seats run as resident ACP sessions too (acpOrLegacyRunner): a resumed
+      // turn gets only the turn context, so without this they never saw a section first needed later.
+      || active.kind === "acp" || ((active.kind === "grok" || active.kind === "cursor") && !acpDisabledFor(active.kind)))) {
     const sectionBlocks = onDemandSectionTurnBlocks(sectionGateText, locale);
     // Codex alone has built-in image generation; its thread was seeded before the first image request, so the contract follows here.
     if (active.kind === "codex" && planPromptSections(sectionGateText).media) sectionBlocks.push(imageOutputContract());

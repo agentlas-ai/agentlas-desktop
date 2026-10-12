@@ -155,7 +155,7 @@
   font-weight: 650;
   cursor: pointer;
 }
-.replies:hover { background: var(--paper-2); }
+.replies:hover { color: var(--ink); }
 .replies:focus-visible { outline: 2px solid rgba(96, 122, 54, .28); outline-offset: 2px; }
 
 .markdown { min-width: 0; }

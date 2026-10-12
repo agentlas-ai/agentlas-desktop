@@ -186,13 +186,16 @@
   padding: 0 8px;
 }
 
+.state > button:hover,
+.addTeam:hover:not(:disabled),
+.chevron:hover {
+  border-color: color-mix(in srgb, var(--accent) 36%, var(--paper-edge));
+  color: var(--ink);
+}
 .selectedRow > button:hover,
 .selectedRow > button:focus-visible,
-.state > button:hover,
 .state > button:focus-visible,
-.addTeam:hover:not(:disabled),
 .addTeam:focus-visible:not(:disabled),
-.chevron:hover,
 .chevron:focus-visible {
   border-color: color-mix(in srgb, var(--accent) 36%, var(--paper-edge));
   background: color-mix(in srgb, var(--accent) 6%, var(--paper));
@@ -271,7 +274,9 @@
   cursor: pointer;
 }
 
-.sourceToggle:hover,
+.sourceToggle:hover {
+  color: var(--ink);
+}
 .sourceToggle:focus-visible {
   background: var(--paper-2);
 }
@@ -344,7 +349,7 @@
 }
 
 .firmRow:hover {
-  background: var(--paper-2);
+  color: var(--ink);
 }
 
 .chevron,
@@ -415,7 +420,9 @@
   cursor: pointer;
 }
 
-.candidate:hover:not(:disabled),
+.candidate:hover:not(:disabled) {
+  color: var(--ink);
+}
 .candidate:focus-visible:not(:disabled) {
   background: color-mix(in srgb, var(--accent) 6%, var(--paper));
 }
@@ -621,8 +628,10 @@
 }
 
 .autoTeamButton:hover:not(:disabled),
-.autoTeamButton:focus-visible,
 .autoTeamActions > button:hover:not(:disabled) {
+  color: var(--ink);
+}
+.autoTeamButton:focus-visible {
   background: var(--paper-3);
 }
 

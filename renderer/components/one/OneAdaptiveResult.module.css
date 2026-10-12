@@ -369,7 +369,7 @@
 .mediaOutput button { flex: 0 0 auto; }
 .mediaMeta button:hover,
 .mediaOutput button:hover,
-.mediaUnavailable button:hover { background: var(--paper-2); }
+.mediaUnavailable button:hover { color: var(--ink); }
 .mediaMeta button:focus-visible,
 .mediaOutput button:focus-visible,
 .mediaUnavailable button:focus-visible { outline: 3px solid rgba(96, 122, 54, 0.22); outline-offset: 2px; }
@@ -453,7 +453,7 @@
   color: var(--muted-deep);
   cursor: pointer;
 }
-.alertClose:hover,
+.alertClose:hover { color: var(--ink-soft); }
 .alertClose:focus-visible { background: var(--paper-3); color: var(--ink-soft); }
 .alertClose:focus-visible { outline: 2px solid rgba(96, 122, 54, .3); outline-offset: 2px; }
 
@@ -644,7 +644,7 @@
   color: var(--white);
 }
 
-.action:hover,
+.action:hover { color: var(--ink); }
 .action:focus-visible { background: var(--paper-2); outline: 2px solid transparent; }
 .actionPrimary:hover,
 .actionPrimary:focus-visible { background: var(--ok); outline: 3px solid rgba(96, 122, 54, 0.2); }
@@ -691,7 +691,9 @@
   cursor: pointer;
 }
 
-.acceptanceButton:hover,
+.acceptanceButton:hover {
+  color: var(--ink);
+}
 .acceptanceButton:focus-visible {
   background: var(--paper-3);
   color: var(--ink);

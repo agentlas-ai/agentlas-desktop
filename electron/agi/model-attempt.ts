@@ -22,7 +22,7 @@ import { runtimeFailureBlocksReplay } from "../runtime/selection";
 import { RuntimeJudgmentRefusal } from "../runtime/judgment-refusal";
 import { createObservedUsageAccumulator, createRuntimeUsageCollector } from "../../shared/observed-usage";
 import { AGI_ACTION_KINDS, AGI_NON_ALTERNATIVE_ACTIONS, type AgiActionKind } from "./blocker";
-import { AGI_ACTION_SCHEMA, AGI_MAX_ACTIONS_PER_ATTEMPT, type AgiActionExecutor, type AgiActionReceipt } from "./actions";
+import { AGI_ACTION_SCHEMA, type AgiActionExecutor, type AgiActionReceipt } from "./actions";
 import { admitAgiTokens, chargeAgiTokens, readAgiTokenLimits } from "./budget";
 import { AGI_READ_TOOL_NAMES, type AgiReadResult } from "./read-tools";
 import type { AgiUnblockInput, AgiUnblockResult } from "./monitor";
@@ -60,6 +60,10 @@ export function ensureAgiModelAttemptSchema(db: Database.Database): void {
   db.exec("CREATE INDEX IF NOT EXISTS idx_agi_model_running_goal ON agi_model_attempts(goal_id) WHERE status='running'");
 }
 
+/** Structural bound on the JSON array for schema/payload size safety only. It is NOT a policy cap on how many actions an
+ * attempt may take (owner 2026-10-12); the executor's only in-attempt guard is the identical-repeat refusal. */
+export const AGI_MAX_ACTIONS_STRUCTURAL = 32;
+
 /** Strict JSON schema for the model answer (every property required for strict-mode runtimes). */
 export const AGI_DECISION_JSON_SCHEMA: Record<string, unknown> = {
   type: "object", additionalProperties: false,
@@ -70,7 +74,7 @@ export const AGI_DECISION_JSON_SCHEMA: Record<string, unknown> = {
       properties: { summary: { type: "string" }, ownerClass: { type: "string", enum: ["our_defect", "agent_resolvable", "human_only"] } } },
     reads: { type: "array", maxItems: AGI_MAX_EXTRA_READS, items: { type: "object", additionalProperties: false, required: ["tool", "argsJson"],
       properties: { tool: { type: "string", enum: [...AGI_READ_TOOL_NAMES] }, argsJson: { type: "string" } } } },
-    actions: { type: "array", maxItems: AGI_MAX_ACTIONS_PER_ATTEMPT + 1, items: { type: "object", additionalProperties: false, required: ["action", "argsJson"],
+    actions: { type: "array", maxItems: AGI_MAX_ACTIONS_STRUCTURAL, items: { type: "object", additionalProperties: false, required: ["action", "argsJson"],
       properties: { action: { type: "string", enum: [...AGI_ACTION_KINDS] }, argsJson: { type: "string" } } } },
     reflection: { type: "string" },
   },
@@ -79,7 +83,7 @@ export const AGI_DECISION_JSON_SCHEMA: Record<string, unknown> = {
 const SYSTEM_PROMPT = `You are Agentlas AGI, the goal manager and unblocker for ONE stuck goal. The host (Main) observed a typed blocker
 and gives you capped, redacted evidence. You have NO tools and NO shell. You answer only with the JSON schema.
 Your job: clear the block or route around it so the goal keeps moving, choosing ONLY from typed actions. Rules:
-- Every action is executed by the host with guards; a refused action changes nothing. Up to ${AGI_MAX_ACTIONS_PER_ATTEMPT} actions.
+- Every action is executed by the host with guards; a refused action changes nothing. Repeating an identical action in one attempt is refused.
 - Never ask the owner for something an agent can do. ask_owner_once is only for a real boundary
   (payment, credential, security_consent, purpose_change), only AFTER an alternative path in the same answer or earlier
   (e.g. continue the zero-cost path first), and at most once per boundary. owner_stop is never asked.
@@ -87,9 +91,8 @@ Your job: clear the block or route around it so the goal keeps moving, choosing 
   failed), merge duplicates within a strategy, retire, or reorder. Never change intent.
 - If the plan needs a role nobody on the team has, create_teammate (then invite_teammate in group chats) and
   dispatch_teammate the concrete work bound to an active tactic id. Teammates may be created without asking.
-- Uncertain outward effects: no observation controller exists any more and none will settle them. ${UNCERTAIN_EFFECT_POLICY}
-  Never park a goal on them: do not dispatch a wait for a reviewer, dispatch the work that checks and, where allowed, redoes it.
-  settle_uncertain_effect still requires an evidenceRef "run:<observationRunId>" from a Main observation receipt; do not use it otherwise.
+- An earlier attempt that was interrupted or failed is a recorded fact in the evidence, not a verdict about outside effects. ${UNCERTAIN_EFFECT_POLICY}
+  Never park a goal on it: do not dispatch a wait for a reviewer, dispatch the work that checks and, where allowed, redoes it.
 - A login wall: run_login_recovery(domain) first. A dead Agentlas Browser: restart_agentlas_browser. The app itself:
   request_app_restart (asks once; never restarts by itself).
 - A tool path that crashed: retry_node_with(nodeId, capability, path) naming one installed path from the evidence.
@@ -97,7 +100,7 @@ Your job: clear the block or route around it so the goal keeps moving, choosing 
 - If you need more evidence first, put up to ${AGI_MAX_EXTRA_READS} read requests in "reads" and leave "actions" empty; you get
   exactly one more round. In the second round "reads" must be empty.
 - argsJson is a JSON object string with the action's arguments, e.g. {"name":"Blender Animator","role":"3D animation"}.
-Action arguments: settle_uncertain_effect{attemptIds[],evidenceRef}; create_teammate{name,role?,personality?};
+Action arguments: create_teammate{name,role?,personality?};
 invite_teammate{member}; dispatch_teammate{member,brief,nodeId}; switch_runtime{reason}; retry_node_with{nodeId,capability,path};
 replan_tree{ops:[{op:"split",nodeId,into:[{description}]}|{op:"merge",keep,retire[]}|{op:"retire",nodeId}|{op:"reorder",nodeId,ord}]};
 start_work_turn{nodeId}; run_login_recovery{domain}; restart_agentlas_browser{}; request_app_restart{reason};
@@ -105,7 +108,7 @@ file_defect{code,category,evidenceRefs[],workaround?}; ask_owner_once{boundary,a
 reflection: one sentence "tried X, evidence Y, ruled out Z" for the incident record.`;
 
 /** Host execution order: alternatives first, the work turn after the changes it depends on, the ask last. */
-const EXECUTION_ORDER: AgiActionKind[] = ["settle_uncertain_effect", "run_login_recovery", "restart_agentlas_browser", "create_teammate",
+const EXECUTION_ORDER: AgiActionKind[] = ["run_login_recovery", "restart_agentlas_browser", "create_teammate",
   "invite_teammate", "dispatch_teammate", "replan_tree", "retry_node_with", "switch_runtime", "start_work_turn", "file_defect",
   "request_app_restart", "ask_owner_once", "rest"];
 
@@ -135,7 +138,7 @@ export function parseAgiDecision(text: string): Decision | null {
     .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object")
     .filter((entry) => (AGI_READ_TOOL_NAMES as readonly string[]).includes(String(entry.tool)))
     .map((entry) => ({ tool: String(entry.tool), args: parseArgs(entry.argsJson) }));
-  const actions = (Array.isArray(value.actions) ? value.actions : []).slice(0, AGI_MAX_ACTIONS_PER_ATTEMPT + 1)
+  const actions = (Array.isArray(value.actions) ? value.actions : []).slice(0, AGI_MAX_ACTIONS_STRUCTURAL)
     .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object")
     .filter((entry) => (AGI_ACTION_KINDS as readonly string[]).includes(String(entry.action)))
     .map((entry) => ({ action: entry.action as AgiActionKind, args: parseArgs(entry.argsJson) }));
@@ -156,7 +159,7 @@ export function agiEvidenceReads(input: AgiUnblockInput): Array<{ tool: string; 
   const runRef = [...d.evidenceRefs].reverse().map((ref) => /^run:([A-Za-z0-9._:@-]+?)(?::tool:.*)?$/.exec(ref)?.[1]).find(Boolean);
   if (runRef) reads.push({ tool: "tool_ledger", args: { runId: runRef } });
   const family = d.primarySignal === "browser_unavailable" ? "cdp" : d.primarySignal === "login_wall" ? "login"
-    : d.primarySignal === "tool_crash" ? "blender" : d.primarySignal === "wait_registration_refused" || d.causeKind === "effect_uncertain" ? "wait"
+    : d.primarySignal === "tool_crash" ? "blender" : d.primarySignal === "wait_registration_refused" ? "wait"
       : d.primarySignal === "run_failed" ? "runtime" : null;
   if (family) reads.push({ tool: "main_log_slice", args: { family } });
   return reads;

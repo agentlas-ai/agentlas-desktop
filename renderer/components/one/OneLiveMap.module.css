@@ -10,7 +10,8 @@
 .liveBadge i { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px rgba(33, 164, 97, .14); }
 .locations { min-width: 0; max-height: 320px; display: grid; align-content: start; gap: 6px; overflow: auto; padding: 0; margin: 0; list-style: none; }
 .locations button { width: 100%; min-width: 0; display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 9px; padding: 9px; border: 1px solid var(--paper-edge); border-radius: 11px; background: var(--paper); color: var(--ink-soft); font: inherit; text-align: left; cursor: pointer; transition: border-color 140ms ease, background 140ms ease, transform 140ms ease; }
-.locations button:hover, .locations button:focus-visible { border-color: var(--ok-soft); background: var(--paper-2); outline: none; transform: translateY(-1px); }
+.locations button:hover { border-color: var(--ok-soft); transform: translateY(-1px); color: var(--ink); }
+.locations button:focus-visible { border-color: var(--ok-soft); background: var(--paper-2); outline: none; transform: translateY(-1px); }
 .locations b { width: 28px; height: 28px; display: grid; place-items: center; border: 2px solid var(--ok); border-radius: 50%; color: var(--ok); font-size: 11px; }
 .locations span { min-width: 0; display: grid; gap: 3px; }
 .locations strong { overflow: hidden; color: var(--ink); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
@@ -40,7 +41,7 @@
 .stage,
 .locations button { border-color: var(--map-line); }
 .locations button { background: var(--map-panel); color: var(--map-ink); }
-.locations button:hover,
+.locations button:hover { border-color: var(--map-accent); color: var(--ink); }
 .locations button:focus-visible { border-color: var(--map-accent); background: color-mix(in srgb, var(--map-accent) 8%, var(--map-panel)); }
 .locations strong,
 .locations b,

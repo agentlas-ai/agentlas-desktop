@@ -1944,31 +1944,16 @@ export interface GoalAutomationExecutionReview {
   snapshotDigest: string;
 }
 
-/** Main-owned snapshot for an in-place review before manually resuming a Goal. */
+/** Main-owned snapshot for an in-place review (automation connection) before manually resuming a Goal. */
 export interface GoalResumeReview {
   runId: string;
   version: number;
-  attemptIds: string[];
-  attemptSetDigest: string;
-  blocker: "running" | "too_many" | "automation" | "missing_activity" | "automation_setup" | null;
+  blocker: "running" | "automation" | "automation_setup" | null;
   automationOwnership?: GoalAutomationExecutionReview;
   automationSetup?: { automationId: string; reason: "runtime" | "hub" };
-  attempts: Array<{
-    id: string;
-    invocationRunId: string | null;
-    startedAt: string;
-    state: "running" | "completed" | "failed" | "interrupted" | "cancelled" | "uncertain";
-    sideEffectState: "none" | "committed" | "uncertain";
-    taskTitle: string;
-    taskObjective: string;
-    /** Sanitized activity preview already available in the local ledger, not external proof. */
-    recordedActivity: string[];
-  }>;
 }
 
-export type GoalResumeConfirmation = Pick<GoalResumeReview,
-  "runId" | "version" | "attemptIds" | "attemptSetDigest"> & {
-    reviewedAttemptIds: string[];
+export type GoalResumeConfirmation = Pick<GoalResumeReview, "runId" | "version"> & {
     automationOwnership?: GoalAutomationExecutionReview & { acknowledged: true };
   };
 
@@ -8127,10 +8112,10 @@ export interface AgentlasIpc {
     pauseGoal: (id: string, goalId: string) => Promise<ChatGoalContext | null>;
     /** Detach this exact goal; retain chat, files and audit history. */
     deleteGoal: (id: string, goalId: string) => Promise<Chat>;
-    /** Explicit resume; uncertain interrupted effects remain blocked. */
+    /** Explicit resume. */
     resumeGoal: (id: string, expectedVersion: number, expectedGoalId: string,
       confirmation?: GoalResumeConfirmation) => Promise<ChatGoalContext | null>;
-    /** Read the exact unsettled attempts before an explicit manual resume. */
+    /** Read the automation connection to confirm before an explicit manual resume (null when nothing needs review). */
     getGoalResumeReview: (id: string, expectedVersion: number, expectedGoalId: string) => Promise<GoalResumeReview | null>;
     /** 스웜 모드 on/off — 여러 워커가 목표를 분해해 병렬 협업. */
     setSwarmMode: (id: string, enabled: boolean) => Promise<Chat>;

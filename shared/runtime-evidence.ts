@@ -36,7 +36,7 @@ export function decodeRuntimeEvidence(value: unknown): RuntimeEvidenceEnvelope |
 }
 /** Kind and typed result facts only; model text cannot manufacture verification. */
 export function runtimeEvidencePhase(kind: string, payload: Record<string, unknown> = {}): RuntimeEvidencePhase {
-  if (payload.sideEffectState === "uncertain" || payload.state === "uncertain") return "uncertain";
+  if (payload.state === "uncertain") return "uncertain";
   if (kind === "verification.recorded") return payload.verdict === "passed" ? "verified" : payload.verdict === "failed" ? "failed" : "uncertain";
   if (kind === "mcp_error" || kind === "invoke_failed" || payload.toolIsError === true) return "failed";
   if (kind === "invoke_started" || kind === "worker.attempt_started"

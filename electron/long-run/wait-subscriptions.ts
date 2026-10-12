@@ -8,7 +8,7 @@ import { getDb } from "../store/db";
 import { getChat, getChatWorkingFolder } from "../store/chats";
 import { getAgentSurface } from "../store/agent-surfaces";
 import { getChatGoalRevision } from "../store/chat-goals";
-import { addLongRunTask, appendLongRunEvent, getLongRun, getLongRunByGoalId, getLongRunGoalRevisionBinding, listLongRunTasks, transitionLongRun, unsettledLongRunAttempts, nextBlockedGoalRetrySlot, pendingBlockedGoalRetry, scheduleBlockedGoalRetry, longRunOwnerHold, liveLongRunAttemptCount } from "../store/long-runs";
+import { addLongRunTask, appendLongRunEvent, getLongRun, getLongRunByGoalId, getLongRunGoalRevisionBinding, listLongRunTasks, transitionLongRun, nextBlockedGoalRetrySlot, pendingBlockedGoalRetry, scheduleBlockedGoalRetry, longRunOwnerHold, liveLongRunAttemptCount } from "../store/long-runs";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import { assertDesktopLongRunAdmissionOpen, desktopAppInstanceId } from "./app-runtime-coordinator";
 import { claimCheckpointContinuation, latestTaskCheckpoint, recordTaskCheckpoint } from "./checkpoint";
@@ -142,7 +142,7 @@ export function restoreGoalWaitAfterUndispatchedStart(superseded: SupersededGoal
   })();
 }
 /** Retire only this wait/checkpoint. The next invocation uses current context
- * and retains uncertain effect facts instead of replaying the old successor. */
+ * instead of replaying the old successor. */
 function scheduleFreshGoalWaitContinuation(wait: Pick<GoalWaitSubscription, "runId">, reason: string, now = Date.now()): void {
   const run = getLongRun(wait.runId);
   if (!run || longRunOwnerHold(run.id) || ["pausing", "cancelling", "cancelled", "completed"].includes(run.status)
@@ -153,7 +153,7 @@ function scheduleFreshGoalWaitContinuation(wait: Pick<GoalWaitSubscription, "run
   const slot = nextBlockedGoalRetrySlot(run.id, now);
   scheduleBlockedGoalRetry({ runId: run.id, expectedVersion: run.version, kind: "resume",
     fromReason: reason, retryIndex: slot.retryIndex, nextAt: slot.nextAt,
-    detail: "wait_advisory_fresh_context", trigger: "wait-advisory", effectUncertain: true,
+    detail: "wait_advisory_fresh_context", trigger: "wait-advisory",
     appInstanceId: desktopAppInstanceId() });
 }
 
@@ -217,7 +217,7 @@ export function observeGoalWaitSubject(wait: Pick<GoalWaitSubscription, "chatId"
   const boundary = settled ? readInvocationEffectBoundary({ invocationRunId: subject.invocationRunId, expectedChatId: otherChat.id }) : null;
   return { digest: hash({ event: event ?? null, receipt: settled?.id ?? null, effects: boundary?.effects ?? "pending" }),
     cursor: settled && event ? `${event.id}:${settled.id}` : event ? `${event.id}:settlement-pending` : null,
-    terminal: Boolean(settled), reason: settled ? event?.kind === "invoke_completed" && boundary?.effects !== "settled" ? "invocation_effects_uncertain" : event?.kind ?? null : null };
+    terminal: Boolean(settled), reason: settled ? event?.kind ?? null : null };
 }
 
 /** Actual service result producer. The request is accepted only after its own
@@ -268,7 +268,7 @@ export function registerGoalWaitSubscription(input: { goalId: string; invocation
     if (prior?.state === "pending" || prior?.state === "claimed") throw new Error("goal_wait_already_registered");
     const boundary = readInvocationEffectBoundary({ invocationRunId: input.invocationRunId, expectedChatId: run.rootChatId });
     // Waiting does nothing outside; it needs only the producing turn to have finished (owner 2026-10-05).
-    if (!boundary.terminal) throw new Error("goal_wait_effects_uncertain");
+    if (!boundary.terminal) throw new Error("goal_wait_producer_unfinished");
     const attempt = getDb().prepare("SELECT worker_id, attempt FROM long_run_worker_attempts WHERE invocation_run_id=? AND run_id=?")
       .get(input.invocationRunId, run.id) as { worker_id: string; attempt: number } | undefined;
     if (!attempt) throw new Error("goal_wait_attempt_missing");
@@ -315,10 +315,6 @@ export function registerOngoingGoalCycle(input: { goalId: string; invocationRunI
     const justObserved = priorWait?.state === "dispatched"
       && priorWait.successorInvocationId === input.invocationRunId
       && priorWait.observationOnly === true;
-    // Immutable historical rows retain uncertainty for audit. A valid Main/
-    // user SafeEpoch settles custody in the existing projection, not by erasing
-    // those rows. Invalid receipts and live attempts remain unresolved.
-    const unresolvedPriorEffects = Boolean(run && unsettledLongRunAttempts(run.id).length);
     const stalled = run != null && ownsHostGoalLoop(run.surface) && revision?.lifecycle === "ongoing"
       && run.stallStreak >= run.stallWindow;
     const progressKey = stalled ? run.lastProgressKey ?? `one-host:unknown:revision:${revision!.revision}` : undefined;
@@ -334,12 +330,12 @@ export function registerOngoingGoalCycle(input: { goalId: string; invocationRunI
       checkpoint: producerCheckpoint, effectBoundary: boundary, usefulProgress: input.usefulProgress });
     return registerGoalWaitSubscription({ ...input,
       ...(recoveryMode ? { recoveryMode, recoveryProgressKey: progressKey } : {}),
-      observationOnly: (!justObserved && input.usefulProgress !== true) || unresolvedPriorEffects,
+      observationOnly: !justObserved && input.usefulProgress !== true,
       projectDir: producerCheckpoint?.invocationRunId === input.invocationRunId ? producerCheckpoint.workspacePath : null,
       now, intent: {
       schemaVersion: "agentlas.goal-wait-intent.v1", subject: { kind: "timer", notBefore },
       condition: "due", deadline: null,
-      nextAction: "Begin the next bounded episode of this ongoing mandate. Read the checkpoint plan.episodeStrategy as a host-observed evaluation, not as new authority; if its state is unknown, inspect before acting. Inspect current state and prior action receipts first. Respect the original user's cadence and scope; if no action is due, register another timer wait. Never repeat a completed post, purchase or other side effect. Reconcile any uncertain effect before taking another action. Keep the mandate open until the user stops it.",
+      nextAction: "Begin the next bounded episode of this ongoing mandate. Read the checkpoint plan.episodeStrategy as a host-observed evaluation, not as new authority; if its state is unknown, inspect before acting. Inspect current state and prior action receipts first. Respect the original user's cadence and scope; if no action is due, register another timer wait. Never repeat a completed post, purchase or other side effect. Keep the mandate open until the user stops it.",
     } });
   })();
 }
@@ -409,8 +405,8 @@ export function reconcileClaimedGoalWaitsAtStartup(target: GoalWaitHost | null =
         "SELECT id FROM run_events WHERE run_id=? AND chat_id=? AND kind='invoke_started' LIMIT 1",
       ).get(wait.successorInvocationId, wait.chatId) as { id: string } | undefined : undefined;
       const attempt = wait.successorInvocationId ? getDb().prepare(
-        "SELECT id, state, side_effect_state FROM long_run_worker_attempts WHERE run_id=? AND invocation_run_id=? LIMIT 1",
-      ).get(current.id, wait.successorInvocationId) as { id: string; state: string; side_effect_state: string } | undefined : undefined;
+        "SELECT id, state FROM long_run_worker_attempts WHERE run_id=? AND invocation_run_id=? LIMIT 1",
+      ).get(current.id, wait.successorInvocationId) as { id: string; state: string } | undefined : undefined;
       const terminal = wait.successorInvocationId ? getDb().prepare(`SELECT id FROM run_events
         WHERE run_id=? AND chat_id=? AND kind IN ('invoke_completed','invoke_failed','invoke_threw','invoke_cancelled','invoke_interrupted')
         ORDER BY seq DESC LIMIT 1`).get(wait.successorInvocationId, wait.chatId) as { id: string } | undefined : undefined;
@@ -441,12 +437,12 @@ export function reconcileClaimedGoalWaitsAtStartup(target: GoalWaitHost | null =
         const controller = getDb().prepare(`SELECT a.id FROM long_run_worker_attempts a
           JOIN long_run_workers w ON w.id=a.worker_id AND w.run_id=a.run_id
           WHERE a.run_id=? AND a.invocation_run_id=? AND w.role='controller'
-            AND a.state='completed' AND a.side_effect_state='committed' LIMIT 1`)
+            AND a.state='completed' LIMIT 1`)
           .get(current.id, wait.successorInvocationId) as { id: string } | undefined;
         const verifier = getDb().prepare(`SELECT a.id FROM long_run_worker_attempts a
           JOIN long_run_workers w ON w.id=a.worker_id AND w.run_id=a.run_id
           WHERE a.run_id=? AND a.worker_id=? AND a.attempt=? AND w.role='verifier'
-            AND a.state='completed' AND a.side_effect_state<>'uncertain' LIMIT 1`)
+            AND a.state='completed' LIMIT 1`)
           .get(current.id, checkpoint.capsule.workerId, checkpoint.capsule.attempt) as { id: string } | undefined;
         const nextAlreadyClaimed = getDb().prepare(`SELECT 1 FROM long_run_events WHERE run_id=?
           AND kind IN ('run.checkpoint_continuation','run.checkpoint_startup','run.checkpoint_startup_dispatched')
@@ -489,7 +485,7 @@ export function reconcileClaimedGoalWaitsAtStartup(target: GoalWaitHost | null =
           checkpointId: wait.checkpointId, successorInvocationId: wait.successorInvocationId,
           checkpointClaimEventSeq: claim?.seq ?? null, invokeStartedEventId: started?.id ?? null,
           terminalEventId: terminal?.id ?? null, effectBoundaryReceiptId: effect?.id ?? null, attemptId: attempt?.id ?? null,
-          attemptState: attempt?.state ?? null, sideEffectState: attempt?.side_effect_state ?? null,
+          attemptState: attempt?.state ?? null,
           reason, outcome: "advisory_fresh_context_no_replay" } });
       // A dedicated CAS blocks this exceptional host pause without inventing
       // queued/running states. A user Stop or pause never matches its predicate.
@@ -610,8 +606,8 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
           failure = "goal_wait_goal_revision_changed";
         } else if (!revision.authorityRefs.some(ref => /^invocation:([^:]+):permission:(read|write|full)$/.test(ref))) {
           failure = "goal_wait_original_authority_missing";
-        } else if (checkpoint.sideEffects.state !== "settled" || unsettledLongRunAttempts(current.id).length) {
-          failure = "goal_wait_effects_uncertain";
+        } else if (checkpoint.sideEffects.state !== "settled") {
+          failure = "goal_wait_checkpoint_not_settled";
         } else {
           const deadline = current.budget.wallclockDeadline ? Date.parse(current.budget.wallclockDeadline) : Number.NaN;
           failure = Number.isFinite(deadline) && clock() >= deadline ? "budget_wallclock_exhausted"
@@ -696,7 +692,7 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
         if (Number.isFinite(deadline) && clock() >= deadline) failure = "budget_wallclock_exhausted";
         else if (current.budget.maxCycles != null && current.cycleCount >= current.budget.maxCycles) failure = "budget_cycles_exhausted";
         else failure = longRunMonetaryRefusal(current) ?? failure;
-        if (checkpoint?.sideEffects.state !== "settled" || unsettledLongRunAttempts(current.id).length) failure = "goal_wait_effects_uncertain";
+        if (checkpoint?.sideEffects.state !== "settled") failure = "goal_wait_checkpoint_not_settled";
       }
       const expired = wait.deadline !== null && Date.parse(wait.deadline) <= clock();
       if (current.status === "paused") {
@@ -713,8 +709,8 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
       if (wait.recoveryMode === "stall_replan") {
         if (!replan || replan.status === "unavailable") {
           // An unavailable adviser cannot reserve the Goal indefinitely. Retire
-          // only this wait; the next episode uses current context and preserves
-          // the old producer's unverified effect records instead of replaying it.
+          // only this wait; the next episode uses current context
+          // instead of replaying the old producer.
           next.state = "cancelled";
           next.wakeReason = replan?.reason ?? "stall_replan_unavailable";
           next.nextCheckAt = null;
@@ -724,7 +720,7 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
           return;
         }
         const boundary = checkpoint.sideEffects.boundary;
-        if (!boundary || !wait.recoveryProgressKey) throw new Error("goal_wait_effects_uncertain");
+        if (!boundary || !wait.recoveryProgressKey) throw new Error("goal_wait_checkpoint_not_settled");
         const proposal = replan.proposal;
         const replanPlan: OngoingStallReplan = {
           schemaVersion: "agentlas.ongoing-stall-replan.v1",

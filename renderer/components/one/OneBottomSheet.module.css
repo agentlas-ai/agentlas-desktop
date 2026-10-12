@@ -193,7 +193,7 @@
 }
 
 .closeButton:hover {
-  background: var(--one-sheet-card-muted);
+  color: var(--ink);
 }
 
 .closeButton:focus-visible {

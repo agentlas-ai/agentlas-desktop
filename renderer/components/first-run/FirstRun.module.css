@@ -200,7 +200,7 @@
 }
 
 .secondary:hover:not(:disabled) {
-  background: var(--paper-edge);
+  color: var(--ink);
 }
 
 .ghost {
@@ -522,7 +522,7 @@
 }
 
 .aiCard button:hover:not(:disabled) {
-  background: var(--paper-edge);
+  color: var(--ink);
 }
 
 .aiCard button[data-connected="true"] {
@@ -660,7 +660,6 @@
 }
 
 .close:hover {
-  background: var(--paper-3);
   color: var(--ink);
 }
 

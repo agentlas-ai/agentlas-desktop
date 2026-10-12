@@ -62,7 +62,7 @@
   font-size: 12px;
   font-weight: 680;
 }
-.exitButton:hover { border-color: var(--ok-soft); background: var(--paper-2); color: var(--ok); }
+.exitButton:hover { border-color: var(--ok-soft); color: var(--ok); }
 
 .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .brand > span:last-child { display: grid; gap: 2px; min-width: 0; }
@@ -97,7 +97,7 @@
 .composer:focus-within { box-shadow: 0 20px 60px rgb(19 52 43 / 0.1), 0 2px 8px rgb(19 52 43 / 0.04); }
 .surfaceSwitch { display: flex; gap: 5px; padding: 11px 12px 0; }
 .surfaceSwitch button { height: 28px; padding: 0 11px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--muted-deep); cursor: pointer; font-size: 11px; font-weight: 650; }
-.surfaceSwitch button:hover { background: var(--soft); color: var(--ink); }
+.surfaceSwitch button:hover { color: var(--ink); }
 .surfaceSwitch button[data-selected="true"] { border-color: var(--ok-soft); background: var(--ok-soft); color: var(--teal-dark); }
 .composer textarea { width: 100%; min-height: 92px; display: block; resize: none; padding: 18px 20px 12px; border: 0; outline: 0; background: transparent; color: var(--ink); font-size: 16px; line-height: 1.55; }
 .composer textarea:focus-visible { outline: none; }
@@ -218,14 +218,14 @@
 .cardMeta p { overflow: hidden; margin: 0; color: var(--muted-deep); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .cardActions { display: flex; align-items: center; gap: 3px; flex: 0 0 auto; }
 .mcpButton { display: inline-flex; align-items: center; gap: 4px; padding: 5px 7px; border: 1px solid var(--ok-soft); border-radius: 999px; background: var(--paper-2); color: var(--ink-soft); cursor: pointer; font-size: 9px; font-weight: 670; }
-.mcpButton:hover { border-color: var(--ok-soft); background: var(--ok-soft); color: var(--teal); }
+.mcpButton:hover { border-color: var(--ok-soft); color: var(--teal); }
 .mcpButton[data-status="ready"] { border-color: var(--ok-soft); background: var(--ok-soft); color: var(--ok); }
 .mcpButton[data-status="review"] { border-color: var(--warn-soft); background: var(--warn-soft); color: var(--warn); }
 .mcpButton[data-status="offline"] { border-color: var(--paper-3); background: var(--paper-2); color: var(--muted-deep); }
 .mcpButton[data-status="off"] { border-color: var(--paper-3); background: var(--paper-2); color: var(--muted-deep); }
 .mcpButton[data-status="blocked"] { border-color: var(--danger-soft); background: var(--danger-soft); color: var(--danger); }
 .openButton { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; padding: 6px 8px; border: 0; border-radius: 7px; background: transparent; color: var(--teal); cursor: pointer; font-size: 10px; font-weight: 670; }
-.openButton:hover { background: var(--ok-soft); }
+.openButton:hover { color: var(--ink); }
 .cardFooter { min-height: 35px; display: flex; align-items: center; gap: 8px; padding: 0 15px 10px; color: var(--muted-deep); font-size: 9px; }
 .cardFooter time { margin-right: auto; }
 .liveBadge,
@@ -268,7 +268,7 @@
 .pickerSearch { margin: 15px 26px 10px; }
 .choiceList { min-height: 220px; max-height: 350px; overflow-y: auto; display: grid; align-content: start; gap: 6px; padding: 0 26px 16px; }
 .choice { width: 100%; display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 9px 10px; border: 1px solid var(--ok-soft); border-radius: 11px; background: var(--paper); color: var(--ink); cursor: pointer; text-align: left; }
-.choice:hover { border-color: var(--ok-soft); background: var(--paper); }
+.choice:hover { border-color: var(--ok-soft); color: var(--ink); }
 .choice[data-selected="true"] { border-color: var(--ok); background: var(--ok-soft); box-shadow: 0 0 0 2px rgb(77 169 143 / 0.1); }
 .choiceAvatar { width: 35px; height: 35px; display: grid; place-items: center; border-radius: 10px; background: var(--ok); color: var(--ok-soft); font-size: 12px; font-weight: 740; }
 .choiceCopy { min-width: 0; display: grid; gap: 3px; }

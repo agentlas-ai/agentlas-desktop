@@ -76,6 +76,8 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const [pinned,setPinned]=useState(false);
   const [windowError,setWindowError]=useState(false);
   const composerInput=useRef<HTMLTextAreaElement>(null);
+  // One line stays a single pill; a second line (typed or wrapped) opens the two-row composer and it stays open until the draft is empty.
+  const [composerExpanded,setComposerExpanded]=useState(false);
   const [snapshot,setSnapshot]=useState<OneSupervisorSnapshot|null>(null);
   const historyScope=snapshot?.conversationChatId ?? null;
   const historyScopeRef=useRef(historyScope);historyScopeRef.current=historyScope;
@@ -147,6 +149,13 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const workspaceRoot=useRef<HTMLDivElement>(null);const contextBar=useRef<HTMLDivElement>(null);
   const composerDock=useRef<HTMLDivElement>(null);
   useEffect(()=>{const resize=()=>setViewportWidth(window.innerWidth);window.addEventListener('resize',resize);resize();return()=>window.removeEventListener('resize',resize);},[]);
+  useLayoutEffect(()=>{
+    if(!text){setComposerExpanded(false);return;}
+    if(text.includes("\n")){setComposerExpanded(true);return;}
+    const input=composerInput.current;if(!input)return;
+    input.style.height="auto";
+    if(input.scrollHeight>input.clientHeight+1&&input.scrollHeight>28)setComposerExpanded(true);
+  },[text]);
   useLayoutEffect(()=>{const element=composerDock.current;if(!element)return;const measure=()=>{setComposerHeight(element.getBoundingClientRect().height);if(contextBar.current&&workspaceRoot.current)setContextBottom(contextBar.current.getBoundingClientRect().bottom-workspaceRoot.current.getBoundingClientRect().top);};measure();const observer=new ResizeObserver(measure);observer.observe(element);if(contextBar.current)observer.observe(contextBar.current);if(workspaceRoot.current)observer.observe(workspaceRoot.current);return()=>observer.disconnect();},[]);
   const panelMaxWidth=personalOnePanelMaximum(viewportWidth,detached);
   const shownPanelWidth=Math.min(panelMaxWidth,autoPanelWidth?Math.max(360,Math.round(viewportWidth*0.56)):panelWidth);
@@ -471,9 +480,9 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
         </div>)}</div>}
         {attachmentError&&<p role="alert" className={styles.feedback}>{attachmentError}</p>}
         <MessageReplyPreview reply={messageReply} locale={locale} onDismiss={()=>setMessageReply(null)}/>
-        <form className={styles.composer} onSubmit={event=>{event.preventDefault();void send();}}>
+        <form className={styles.composer} data-expanded={composerExpanded} onSubmit={event=>{event.preventDefault();void send();}}>
           <div ref={plusMenu} className={styles.plus}>
-            <button type="button" className={styles.iconButton} aria-label={copy("추가","Add")} aria-haspopup="menu" aria-expanded={plusOpen} data-hover="own" onClick={()=>setPlusOpen(value=>!value)}><IconPlus size={19}/></button>
+            <button type="button" className={styles.iconButton} aria-label={copy("추가","Add")} aria-haspopup="menu" aria-expanded={plusOpen} data-hover="own" onClick={()=>setPlusOpen(value=>!value)}><IconPlus size={20}/></button>
             {plusOpen&&<div className={styles.plusMenu} role="menu" aria-label={copy("추가","Add")}>
               <button type="button" role="menuitem" data-hover="own" disabled={attachmentBusy} onClick={()=>{setPlusOpen(false);attachmentPicker.current?.click();}}><span className={styles.plusIcon}><IconPlus size={15}/></span><strong>{copy("사진 및 파일 첨부","Attach photos and files")}</strong></button>
               <div className={styles.plusDivider}/>
@@ -490,8 +499,8 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
             </div>}
           </div>
           <textarea ref={composerInput} aria-label={ko?name+"에게 메시지":"Message "+name} value={text} onChange={event=>{if(draftIdentity.current===null)initialDraftEdit.current={edited:true,value:event.target.value};setText(event.target.value);event.currentTarget.style.height="auto";event.currentTarget.style.height=Math.min(140,event.currentTarget.scrollHeight)+"px";}} onKeyDown={event=>{if(event.key==="Enter"&&!event.shiftKey&&!event.nativeEvent.isComposing&&event.keyCode!==229){event.preventDefault();void send();}}} maxLength={8000} rows={1} placeholder={copy("메시지 보내기","Send a message")}/>
-          <OneVoiceInputHelp locale={ko?"ko":"en"} composerRef={composerInput} />
-          <button className={styles.send} type="submit" aria-label={copy("보내기","Send")} disabled={!snapshot||savedRequestError||attachmentBusy||(!text.trim()&&!attachments.length)}><IconArrowUp size={18}/></button>
+          <div className={styles.voice}><OneVoiceInputHelp locale={ko?"ko":"en"} composerRef={composerInput} /></div>
+          <button className={styles.send} type="submit" aria-label={copy("보내기","Send")} disabled={!snapshot||savedRequestError||attachmentBusy||(!text.trim()&&!attachments.length)}><IconArrowUp size={16}/></button>
         </form>
         {activeReply?.runId&&<button className={styles.stopReply} onClick={()=>void write("stopReply",{runId:activeReply.runId!}).then(value=>{showReceipt(value);void sync();}).catch(()=>setError(true))}>{copy("이 답변 중지","Stop this reply")}</button>}
       </div>

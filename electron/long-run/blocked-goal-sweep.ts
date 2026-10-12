@@ -9,8 +9,8 @@ import { adoptExplicitGoalGrant } from "./explicit-goal-authority";
 import { appendChatMessage, getChat } from "../store/chats";
 import { getChatGoalRevision } from "../store/chat-goals";
 import {
-  appendLongRunEvent, bindCurrentGoalRevisionToLongRun, getLongRun, getLongRunAttemptReview, liveLongRunAttemptCount, nextBlockedGoalRetrySlot,
-  pendingBlockedGoalRetry, reopenDueBlockedGoalRetry, committedTurnSinceRetry, settleDueBoundaryRetryByTurn, scheduleBlockedGoalRetry, transitionLongRun,
+  appendLongRunEvent, bindCurrentGoalRevisionToLongRun, getLongRun, liveLongRunAttemptCount, nextBlockedGoalRetrySlot,
+  pendingBlockedGoalRetry, reopenDueBlockedGoalRetry, scheduleBlockedGoalRetry, transitionLongRun,
   BLOCKED_GOAL_SWEEP_EVENT_KIND, BLOCKED_GOAL_SWEEP_SCHEMA, type LongRunRecord,
   longRunOwnerHold, LONG_RUN_OWNER_HOLD_CODE,
 } from "../store/long-runs";
@@ -20,7 +20,6 @@ import {
   failDesktopLongRunResumeDispatch,
 } from "./app-runtime-coordinator";
 import { latestGoalWaitSubscription } from "./wait-subscriptions";
-import { isEffectUncertainBlockReason, maybeDispatchEffectObservation, sweepDueGoalEffectObservations } from "./effect-observation";
 import { type EffectObservationDispatcher } from "./effect-observation-tickets";
 import { currentUiLocale } from "../ui-locale";
 import { holdingAgentResidency } from "../runtime/agent-residency";
@@ -88,13 +87,13 @@ function logSweepFailureCause(stage: string, runId: string, code: string, error:
 }
 
 function scheduleRetry(run: LongRunRecord, kind: "observe" | "resume", detail: string, trigger: string,
-  options: { effectUncertain: boolean; fromReason?: string | null; dispatchFailed?: boolean }): BlockedGoalSweepResult {
+  options: { fromReason?: string | null; dispatchFailed?: boolean } = {}): BlockedGoalSweepResult {
   const slot = nextBlockedGoalRetrySlot(run.id);
   scheduleBlockedGoalRetry({ runId: run.id, expectedVersion: run.version, kind,
     fromReason: options.fromReason !== undefined ? options.fromReason : run.blockedReason,
     retryIndex: slot.retryIndex, nextAt: slot.nextAt, detail,
     trigger: options.dispatchFailed ? `dispatch-failed:${trigger}` : trigger,
-    effectUncertain: options.effectUncertain, appInstanceId: desktopAppInstanceId() });
+    appInstanceId: desktopAppInstanceId() });
   if (slot.retryIndex === 0) {
     const minutes = Math.max(1, Math.round((Date.parse(slot.nextAt) - Date.now()) / 60_000));
     notify(run, "effect-retrying", kind === "observe"
@@ -132,7 +131,7 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
         const latest = getLongRun(run.id);
         if (latest && !pendingBlockedGoalRetry(latest.id)) scheduleBlockedGoalRetry({ runId: latest.id, expectedVersion: latest.version,
           kind: "resume", fromReason: "wake_budget_reached", retryIndex: 0, nextAt: verdict.retryAt, detail: "wake_budget_reached",
-          trigger, effectUncertain: false, appInstanceId: desktopAppInstanceId() });
+          trigger, appInstanceId: desktopAppInstanceId() });
       } catch (error) { console.warn("[blocked-goal-sweep] budget park unavailable:", error); }
     }
     return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: verdict.reason };
@@ -173,9 +172,7 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
         try { current = bindCurrentGoalRevisionToLongRun(latest.id, latest.version); continue; }
         catch { /* fall through to a scheduled retry */ }
       }
-      const effectQuestion = code === "auto_goal_resume_attempt_unsettled" || isEffectUncertainBlockReason(latest.blockedReason)
-        || code === "goal_wait_claimed_reconciliation_required" || code === "goal_resume_effect_boundary_uncertain";
-      return scheduleRetry(latest, "resume", code, trigger, { effectUncertain: effectQuestion });
+      return scheduleRetry(latest, "resume", code, trigger);
     }
   }
   if (!prepared) return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: "blocked_goal_resume_unavailable" };
@@ -192,7 +189,7 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
     try { failDesktopLongRunResumeDispatch(prepared.queuedId, code); } catch { /* keep the original dispatch failure */ }
     const latest = getLongRun(run.id);
     if (!latest) return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: code };
-    return scheduleRetry(latest, "resume", code, trigger, { effectUncertain: false, fromReason: run.blockedReason, dispatchFailed: true });
+    return scheduleRetry(latest, "resume", code, trigger, { fromReason: run.blockedReason, dispatchFailed: true });
   }
 }
 
@@ -262,7 +259,6 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
     }
   }
 
-  let epoch = 0;
   if (run.status !== "blocked") {
     const retry = pendingBlockedGoalRetry(run.id);
     if (retry) {
@@ -274,7 +270,7 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
         if (run.status === "paused") {
           scheduleBlockedGoalRetry({ runId: run.id, expectedVersion: run.version, kind: retry.kind, fromReason: retry.fromReason,
             retryIndex: retry.retryIndex, nextAt: retry.nextAt, detail: "host_pause_carried_retry", trigger,
-            effectUncertain: retry.effectUncertain, appInstanceId: desktopAppInstanceId() });
+            appInstanceId: desktopAppInstanceId() });
         }
         return defer(`retry_at:${retry.nextAt}`);
       }
@@ -284,15 +280,10 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
       if (chatLive || liveLongRunAttemptCount(run.id) > 0) {
         return defer("chat_busy");
       }
-      // A turn that ran after this effect-uncertain retry was scheduled and committed is newer evidence than
-      // any look: settle the boundary and take the ordinary resume path, instead of re-blocking on it.
-      const settledBy = retry.kind === "observe" && isEffectUncertainBlockReason(retry.fromReason)
-        && getLongRunAttemptReview(run.id).attempts.length === 0 ? committedTurnSinceRetry(run.id, retry.seq) : null;
-      run = settledBy ? settleDueBoundaryRetryByTurn(run.id, run.version, settledBy) : reopenDueBlockedGoalRetry(run.id, run.version);
-      epoch = retry.retryIndex + 1;
+      run = reopenDueBlockedGoalRetry(run.id, run.version);
     } else if (run.status === "paused" && run.pauseReason === "runtime_unavailable") {
       // A host dispatch failure pause is not a person's decision: put it on the automatic retry schedule.
-      return scheduleRetry(run, "resume", "host_dispatch_pause", trigger, { effectUncertain: false, fromReason: "invocation_failed", dispatchFailed: true });
+      return scheduleRetry(run, "resume", "host_dispatch_pause", trigger, { fromReason: "invocation_failed", dispatchFailed: true });
     } else if (!["queued", "running"].includes(run.status) && !hostPauseRefusedThisInstance(run)) {
       return null;
     }
@@ -303,18 +294,8 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
   if (run.rootChatId && dispatcher.activeChatIds().includes(run.rootChatId)) return defer("chat_busy");
   // 오너 요청이 줄 서 있으면 그 요청이 먼저다 — 옛 목표를 앞질러 재개하지 않는다.
   if (run.rootChatId && dispatcher.hasQueuedOwnerRequest?.(run.rootChatId)) return defer("owner_request_queued");
-  const review = getLongRunAttemptReview(run.id);
   if (liveLongRunAttemptCount(run.id) > 0) return defer("attempt_running");
-
-  // Historical effect evidence is observed separately. Its absence, failure
-  // or inconclusive result never owns the next Goal episode.
-  if (isEffectUncertainBlockReason(run.blockedReason) || review.attempts.some(attempt => attempt.sideEffectState === "uncertain")) {
-    try { maybeDispatchEffectObservation(dispatcher, run.goalId, `blocked-sweep:${trigger}`, { epoch }); }
-    catch (error) { console.warn("[blocked-goal-sweep] advisory observation unavailable:", error); }
-    const current = getLongRun(run.id);
-    if (!current || longRunOwnerHold(run.id)) return defer("goal_state_changed");
-    run = current;
-  }
+  // The host does not judge an earlier attempt's outside effects (owner 2026-10-12); the resumed turn checks for itself.
 
   // 2a. Its turn was refused because another turn holds this Work project: wait for that turn to end
   // (resumeGoalsWaitingOnProject is called when it settles). No model start, no retry schedule, no notice.
@@ -323,12 +304,12 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
   }
   // 2. Effects are settled (or absent): continue the goal itself.
   const chat = run.rootChatId ? getChat(run.rootChatId) : null;
-  if (!chat || chat.goalId !== run.goalId) return scheduleRetry(run, "resume", "goal_chat_binding_missing", trigger, { effectUncertain: false });
+  if (!chat || chat.goalId !== run.goalId) return scheduleRetry(run, "resume", "goal_chat_binding_missing", trigger);
   // It used to be cancelled here (goal_authority_missing) the first time it stopped — including a real owner Goal
   // paused by quitting mid-turn (reproduced 2026-09-25). An explicit Goal's grant was adopted above; one with no
   // recorded goal-mode turn (defined by IPC only) is kept as it is: the host never invents authority, and never
   // cancels an owner-defined Goal for lacking one — the owner's next message grants it.
-  if (!getChatGoalRevision(run.goalId)) return scheduleRetry(run, "resume", "goal_owner_grant_unrecorded", trigger, { effectUncertain: false });
+  if (!getChatGoalRevision(run.goalId)) return scheduleRetry(run, "resume", "goal_owner_grant_unrecorded", trigger);
   if (budget.dispatches >= BLOCKED_GOAL_SWEEP_MAX_DISPATCHES) return defer("dispatch_budget");
   budget.dispatches += 1;
   return resume(run, dispatcher, trigger);
@@ -390,9 +371,6 @@ export function continueGoalForAlive(runId: string, expectedVersion: number, dis
  */
 export function sweepBlockedGoals(dispatcher: EffectObservationDispatcher, trigger: "startup" | "periodic"): BlockedGoalSweepResult[] {
   try { assertDesktopLongRunAdmissionOpen(); } catch { return []; }
-  // Observer retries have their own due time and never consume the foreground retry slot.
-  try { sweepDueGoalEffectObservations(dispatcher); }
-  catch (error) { console.warn("[blocked-goal-sweep] observer sweep unavailable:", error); }
   const results: BlockedGoalSweepResult[] = [];
   const budget = { dispatches: 0 };
   // The per-sweep dispatch budget is first come, first served, so the order is the fairness rule. Id order always

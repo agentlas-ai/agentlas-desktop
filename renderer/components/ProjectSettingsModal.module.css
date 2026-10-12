@@ -17,7 +17,7 @@
 .header h2 { font:650 21px/1.4 var(--font-body); margin:0 0 8px; letter-spacing:-.5px; }
 .header p { margin:0; font-size:12px; line-height:1.7; color:var(--muted-deep); }
 .close { display:grid; place-items:center; border:0; background:none; color:var(--ink-soft); width:30px; height:30px; flex-shrink:0; cursor:pointer; border-radius:7px; }
-.close:hover { background:var(--paper-2); }
+.close:hover { color: var(--ink); }
 .content { padding:0 30px 24px; overflow:auto; min-height:0; flex:1; overscroll-behavior:contain; font-size:13px; }
 .sourceBody { display:grid; gap:25px; padding-top:12px; }
 .field { display:grid; gap:9px; min-width:0; font-size:12px; }
@@ -36,7 +36,7 @@
 .folder>div>span { font-size:11px; color:var(--muted-deep); line-height:1.6; overflow-wrap:anywhere; }
 .secondary,.primary { display:inline-flex; align-items:center; justify-content:center; gap:8px; padding:9px 14px; min-height:36px; font:inherit; font-size:12px; font-weight:550; border-radius:8px; white-space:nowrap; cursor:pointer; }
 .secondary { color:var(--ink); background:var(--paper); border:1px solid var(--paper-edge); }
-.secondary:hover { background:var(--paper-2); }
+.secondary:hover { color: var(--ink); }
 .primary { background:var(--accent); color:var(--white,white); border:1px solid var(--accent); }
 .instructions { border-top:1px solid var(--paper-edge); padding-top:18px; margin-top:4px; }
 .instructions summary { font-size:12px; cursor:pointer; padding:0 0 12px; }
@@ -53,7 +53,7 @@
 .backgroundError button { border:0; background:none; color:var(--ink-soft); cursor:pointer; font:18px/1 var(--font-body); }
 .choices { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }
 .choice { position:relative; display:flex; flex-direction:column; align-items:flex-start; padding:25px 22px; gap:9px; text-align:left; min-width:0; border:1px solid var(--paper-edge); border-radius:14px; background:var(--paper); color:var(--ink); cursor:pointer; font:inherit; transition:border-color .15s, background .15s; }
-.choice:hover { border-color:var(--accent); background:color-mix(in srgb,var(--accent) 3%,var(--paper)); }
+.choice:hover { border-color:var(--accent); color: var(--ink); }
 .choiceIcon { display:grid; place-items:center; width:44px; height:44px; margin-bottom:13px; background:var(--paper-2); border-radius:10px; color:var(--accent); }
 .choice strong { font-size:15px; font-weight:650; }
 .choice>span:not(.choiceIcon) { font-size:12px; line-height:1.6; color:var(--muted-deep); }

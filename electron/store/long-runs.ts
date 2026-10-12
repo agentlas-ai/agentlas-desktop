@@ -1,4 +1,3 @@
-import { attemptReceiptProvesNoEffect, receiptSettlesAttempts } from "../long-run/attempt-effect-receipt";
 import { ownsHostGoalLoop } from "../long-run/host-goal-surface";
 import { normalizeLongRunUsage, readLongRunCostAccounting, type LongRunUsageInput, type LongRunCostAccounting } from "../long-run/budget";
 import { decodeRuntimeEvidence, runtimeEvidencePhase, type RuntimeCorrelation, type RuntimeEvidencePhase } from "../../shared/runtime-evidence";
@@ -6,7 +5,6 @@ import { createHash, randomUUID } from "node:crypto";
 import { mcpEffectArgumentsDigest, mcpEffectOutputDigest } from "../mcp-tools/effect-receipts";
 import {
   LONG_RUN_ACTIVE_STATUSES,
-  GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN,
   LONG_RUN_OPEN_TASK_STATES,
   LONG_RUN_TERMINAL_STATUSES,
   assertLongRunTransition,
@@ -346,372 +344,7 @@ function appendEventInDb(input: {
   return seq;
 }
 
-/**
- * 사람이 직접 "재개"를 누르거나 멈춘 목표에 말을 건 순간, 재시작으로 끊긴 시도의 불확실한 부작용은
- * 그 사람이 인지한 것으로 본다. 이 함수는 그 인지를 원장에 남기고 그 시도 id 를 돌려준다.
- *
- * 실측(페르소나 루프 라운드 1, 2026-09-13): 앱 재시작 뒤 'interrupted'+side_effect 'uncertain' 시도가 남아
- * 재개 단추·타이핑·자동 재개가 전부 auto_goal_resume_attempt_unsettled 로 거부됐고, 그 상태를 풀 길이
- * 아무 데도 없어 대화가 영구 막다른 길이 됐다. 살아 있는(state='running') 시도만 진짜로 막는다.
- */
-export interface LongRunAttemptSafeEpoch {
-  schemaVersion: "agentlas.long-run-attempt-safe-epoch.v1";
-  throughEventSeq: number;
-  attemptSetDigest: string;
-}
-
-export interface LongRunAttemptAcknowledgment {
-  attemptIds: string[];
-  version: number;
-  safeEpoch: LongRunAttemptSafeEpoch | null;
-}
-
-/** A read-only, exact ledger view to show before an explicit human attestation.
- * This is not evidence that the external effects did or did not occur. */
-export interface LongRunAttemptReview {
-  runId: string;
-  version: number;
-  attemptIds: string[];
-  attemptSetDigest: string;
-  attempts: Array<{ id: string; invocationRunId: string | null; startedAt: string;
-    state: LongRunAttemptState; sideEffectState: "none" | "committed" | "uncertain";
-    taskTitle: string; taskObjective: string }>;
-}
-
-export type LongRunAttemptReviewConfirmation = Pick<LongRunAttemptReview, "runId" | "version" | "attemptIds" | "attemptSetDigest">;
-/** 사람에게 목록을 보이지 않으므로 사람 검토 상한이 아니라 한 번의 확인 기록 크기 상한이다. */
-export const MAX_GOAL_RESUME_REVIEW_ATTEMPTS = 500;
-
-interface UnsettledLongRunAttempt {
-  id: string;
-  state: LongRunAttemptState;
-  sideEffectState: "none" | "committed" | "uncertain";
-  startEventSeq: number | null;
-}
-
-interface LongRunAttemptSafeEpochRecord extends LongRunAttemptSafeEpoch {
-  eventSeq: number;
-  attemptIds: string[];
-}
-
-interface LongRunAcknowledgedAttemptReceipt {
-  attemptId: string;
-  state: LongRunAttemptState;
-  sideEffectState: "none" | "committed" | "uncertain";
-  updatedAt: string;
-  completedAt: string | null;
-  lastAttemptEventSeq: number;
-}
-
-function longRunAttemptSetDigest(runId: string, throughEventSeq: number, receipts: readonly LongRunAcknowledgedAttemptReceipt[]): string {
-  return `sha256:${createHash("sha256").update(JSON.stringify({ runId, throughEventSeq, receipts })).digest("hex")}`;
-}
-
-/** Read the latest exact human acknowledgment. Malformed or legacy prose is
- * never replay authority: it fails closed and leaves every uncertain attempt
- * unsettled. The event sequence is the epoch; attempt rows remain immutable
- * audit evidence. */
-export function latestLongRunAttemptSafeEpoch(runId: string): LongRunAttemptSafeEpochRecord | null {
-  const db = getDb();
-  return db.transaction((): LongRunAttemptSafeEpochRecord | null => {
-    type EpochRow = { seq: number; kind: string; actor_kind: string; payload_json: string };
-    const epochFilter = `((kind = 'run.user_control' AND actor_kind = 'user'
-        AND json_extract(payload_json, '$.action') = 'acknowledge_uncertain_attempts')
-      OR (kind = '${EFFECT_OBSERVATION_EVENT_KIND}' AND actor_kind = 'host'
-        AND json_extract(payload_json, '$.action') = 'settle_uncertain_attempts'))`;
-    const row = db.prepare(`SELECT seq, kind, actor_kind, payload_json FROM long_run_events
-      WHERE run_id = ? AND ${epochFilter} ORDER BY seq DESC LIMIT 1`).get(runId) as EpochRow | undefined;
-    if (!row) return null;
-    try {
-      // Each cumulative entry needs a direct, typed review of the same immutable
-      // receipt. A later good observation cannot launder an older AGI guess.
-      const decodeEpoch = (entry: EpochRow) => {
-        try {
-          const payload = JSON.parse(entry.payload_json) as {
-            attemptIds?: unknown; attemptReceipts?: unknown; observationDigest?: unknown; observationInvocationRunId?: unknown;
-            safeEpoch?: { schemaVersion?: unknown; throughEventSeq?: unknown; attemptSetDigest?: unknown };
-            attestation?: { schemaVersion?: unknown; reviewedAttemptIds?: unknown; reviewedAttemptSetDigest?: unknown;
-              statement?: unknown; externalOutcomeProof?: unknown; verdict?: unknown };
-          };
-          if (!Array.isArray(payload.attemptIds) || !payload.attemptIds.length
-            || payload.attemptIds.some(id => typeof id !== "string" || !id)) return null;
-          const attemptIds = [...payload.attemptIds].sort() as string[];
-          const idSet = new Set(attemptIds);
-          if (idSet.size !== attemptIds.length || JSON.stringify(attemptIds) !== JSON.stringify(payload.attemptIds)
-            || !Array.isArray(payload.attemptReceipts) || payload.attemptReceipts.length !== attemptIds.length) return null;
-          const attestation = payload.attestation;
-          const userAttested = entry.kind === "run.user_control" && entry.actor_kind === "user"
-            && attestation?.schemaVersion === "agentlas.uncertain-attempt-user-attestation.v1"
-            && attestation.statement === "user_says_external_outcomes_reviewed_before_new_work"
-            && attestation.externalOutcomeProof === "not_observed_by_host";
-          const noEffect = attestation?.statement === EFFECT_RECEIPT_STATEMENT
-            && attestation.externalOutcomeProof === EFFECT_RECEIPT_PROOF && attestation.verdict === "not_done";
-          const observed = entry.kind === EFFECT_OBSERVATION_EVENT_KIND && entry.actor_kind === "host"
-            && typeof payload.observationDigest === "string" && Boolean(payload.observationDigest.trim())
-            && !payload.observationDigest.startsWith("agi-evidence:")
-            && typeof payload.observationInvocationRunId === "string" && Boolean(payload.observationInvocationRunId.trim())
-            && attestation?.schemaVersion === EFFECT_OBSERVATION_ATTESTATION_SCHEMA
-            && ((attestation.statement === "observed_external_outcome_done"
-              && attestation.externalOutcomeProof === "observed_read_only_by_model" && attestation.verdict === "done")
-              || (attestation.statement === "observed_external_outcome_not_done"
-                && attestation.externalOutcomeProof === "observed_read_only_by_model" && attestation.verdict === "not_done")
-              || (attestation.statement === EFFECT_OWNER_POLICY_STATEMENT
-                && attestation.externalOutcomeProof === EFFECT_OWNER_POLICY_PROOF && attestation.verdict === "unknown")
-              || noEffect);
-          if (!attestation || (!userAttested && !observed)
-            || !Array.isArray(attestation.reviewedAttemptIds) || !attestation.reviewedAttemptIds.length
-            || attestation.reviewedAttemptIds.length > MAX_GOAL_RESUME_REVIEW_ATTEMPTS
-            || attestation.reviewedAttemptIds.some(id => typeof id !== "string" || !idSet.has(id))
-            || new Set(attestation.reviewedAttemptIds).size !== attestation.reviewedAttemptIds.length
-            || typeof attestation.reviewedAttemptSetDigest !== "string"
-            || !/^sha256:[a-f0-9]{64}$/.test(attestation.reviewedAttemptSetDigest)) return null;
-          const receipts = payload.attemptReceipts as LongRunAcknowledgedAttemptReceipt[];
-          if (receipts.some(receipt => !receipt || typeof receipt !== "object"
-            || typeof receipt.attemptId !== "string" || !idSet.has(receipt.attemptId)
-            || !["completed", "failed", "interrupted", "cancelled", "uncertain"].includes(receipt.state)
-            || !["none", "committed", "uncertain"].includes(receipt.sideEffectState)
-            || typeof receipt.updatedAt !== "string" || !receipt.updatedAt
-            || (receipt.completedAt !== null && typeof receipt.completedAt !== "string")
-            || !Number.isSafeInteger(receipt.lastAttemptEventSeq) || receipt.lastAttemptEventSeq < 0)
-            || JSON.stringify(receipts.map(receipt => receipt.attemptId)) !== JSON.stringify(attemptIds)) return null;
-          const safeEpoch = payload.safeEpoch;
-          if (safeEpoch?.schemaVersion !== "agentlas.long-run-attempt-safe-epoch.v1"
-            || !Number.isSafeInteger(safeEpoch.throughEventSeq) || Number(safeEpoch.throughEventSeq) < 0
-            || safeEpoch.throughEventSeq !== entry.seq - 1
-            || safeEpoch.attemptSetDigest !== longRunAttemptSetDigest(runId, Number(safeEpoch.throughEventSeq), receipts)
-            || receipts.some(receipt => receipt.lastAttemptEventSeq > Number(safeEpoch.throughEventSeq))) return null;
-          return { attemptIds, receipts, reviewedIds: attestation.reviewedAttemptIds as string[], noEffect: observed && noEffect,
-            throughEventSeq: Number(safeEpoch.throughEventSeq), attemptSetDigest: String(safeEpoch.attemptSetDigest) };
-        } catch { return null; }
-      };
-      const latest = decodeEpoch(row);
-      if (!latest) return null;
-      const { attemptIds } = latest;
-      const bound = db.prepare(
-        `SELECT a.id, a.invocation_run_id, a.state, a.side_effect_state, a.updated_at, a.completed_at,
-           MIN(CASE WHEN e.kind = 'worker.attempt_started' THEN e.seq END) AS start_seq,
-           COALESCE(MAX(e.seq), 0) AS last_attempt_event_seq
-         FROM long_run_worker_attempts AS a
-         LEFT JOIN long_run_events AS e ON e.run_id = a.run_id
-           AND e.kind IN ('worker.attempt_started','worker.attempt_settled')
-           AND json_extract(e.payload_json, '$.attemptId') = a.id
-         WHERE a.run_id = ? AND a.id IN (SELECT value FROM json_each(?))
-         GROUP BY a.id`,
-      ).all(runId, JSON.stringify(attemptIds)) as Array<{ id: string; invocation_run_id: string | null; state: LongRunAttemptState;
-        side_effect_state: "none" | "committed" | "uncertain"; updated_at: string; completed_at: string | null;
-        start_seq: number | null; last_attempt_event_seq: number }>;
-      const receiptById = new Map(latest.receipts.map(receipt => [receipt.attemptId, receipt]));
-      if (bound.length !== attemptIds.length || bound.some(attempt => attempt.start_seq === null
-        || attempt.start_seq > latest.throughEventSeq || attempt.last_attempt_event_seq > latest.throughEventSeq
-        || attempt.state !== receiptById.get(attempt.id)?.state
-        || attempt.side_effect_state !== receiptById.get(attempt.id)?.sideEffectState
-        || attempt.updated_at !== receiptById.get(attempt.id)?.updatedAt
-        || attempt.completed_at !== receiptById.get(attempt.id)?.completedAt
-        || attempt.last_attempt_event_seq !== receiptById.get(attempt.id)?.lastAttemptEventSeq)) return null;
-      const receiptKey = (receipt: LongRunAcknowledgedAttemptReceipt): string => JSON.stringify([
-        receipt.attemptId, receipt.state, receipt.sideEffectState, receipt.updatedAt, receipt.completedAt, receipt.lastAttemptEventSeq,
-      ]);
-      const boundById = new Map(bound.map(attempt => [attempt.id, attempt]));
-      const pending = new Set(attemptIds);
-      const noEffectIds = new Set<string>();
-      const acceptDirectReviews = (epoch: NonNullable<ReturnType<typeof decodeEpoch>>): void => {
-        const reviewed = new Set(epoch.reviewedIds);
-        // A no-effect epoch must still prove all the IDs it directly inspected,
-        // not the older done/user-reviewed effects in its cumulative envelope.
-        const epochReceipts = new Map(epoch.receipts.map(receipt => [receipt.attemptId, receipt]));
-        if (epoch.noEffect && epoch.reviewedIds.some(id => {
-          const prior = epochReceipts.get(id), current = receiptById.get(id);
-          return !prior || !current || receiptKey(prior) !== receiptKey(current)
-            || (boundById.get(id)?.start_seq ?? Infinity) > epoch.throughEventSeq;
-        })) return;
-        for (const receipt of epoch.receipts) {
-          if (!reviewed.has(receipt.attemptId)) continue;
-          const current = receiptById.get(receipt.attemptId);
-          if (!current || receiptKey(current) !== receiptKey(receipt)
-            || (boundById.get(receipt.attemptId)?.start_seq ?? Infinity) > epoch.throughEventSeq) continue;
-          if (pending.delete(receipt.attemptId) && epoch.noEffect) {
-            for (const id of epoch.reviewedIds) noEffectIds.add(id);
-          }
-        }
-      };
-      acceptDirectReviews(latest);
-      // An attempt its own closed receipt answers needs no review in any epoch (unsettledLongRunAttempts drops it too).
-      for (const id of [...pending]) if (attemptReceiptProvesNoEffect(boundById.get(id)?.invocation_run_id ?? null)) pending.delete(id);
-      let beforeSeq = row.seq;
-      while (pending.size) {
-        // Batch by event cursor, not by lifetime: a long-running Goal can
-        // accumulate more than 500 valid observations. There is no recursive
-        // call or per-ID SQL query, and malformed pages cannot hide older proof.
-        const previous = db.prepare(`SELECT seq, kind, actor_kind, payload_json FROM long_run_events
-          WHERE run_id = ? AND seq < ? AND ${epochFilter}
-            AND EXISTS (SELECT 1 FROM json_each(long_run_events.payload_json, '$.attestation.reviewedAttemptIds')
-              WHERE value IN (SELECT value FROM json_each(?)))
-          ORDER BY seq DESC LIMIT ?`).all(runId, beforeSeq, JSON.stringify([...pending]), MAX_GOAL_RESUME_REVIEW_ATTEMPTS) as EpochRow[];
-        if (!previous.length) break;
-        for (const entry of previous) {
-          const epoch = decodeEpoch(entry);
-          if (epoch) acceptDirectReviews(epoch);
-          if (!pending.size) break;
-        }
-        beforeSeq = previous[previous.length - 1].seq;
-        if (previous.length < MAX_GOAL_RESUME_REVIEW_ATTEMPTS) break;
-      }
-      if (pending.size) return null;
-      if (noEffectIds.size && !receiptSettlesAttempts([...noEffectIds].map(id => ({
-        id, invocationRunId: boundById.get(id)!.invocation_run_id,
-      })))) return null;
-      return { schemaVersion: "agentlas.long-run-attempt-safe-epoch.v1", throughEventSeq: latest.throughEventSeq,
-        attemptSetDigest: latest.attemptSetDigest, eventSeq: row.seq, attemptIds };
-    } catch {
-      return null;
-    }
-  })();
-}
-
-/**
- * Attempts that still hold the Goal: only one that is running right now.
- *
- * Owner decision 2026-10-05 ("그냥 잠금 제거하고 … 미해결 대다수 오탐"): an attempt that ended without the app
- * knowing its outside outcome (interrupted, cancelled, failed, app closed) no longer holds anything. On the
- * owner's DB 73 such attempts produced 139 read-only looks (127 inconclusive), 19 manual acknowledgments and
- * a Goal that re-ran every minute, while only 3 had really posted. Its record stays in the ledger, and the
- * next turn reads it as short-term memory (memory/previous-turn.ts) and checks for itself.
- */
-export function unsettledLongRunAttempts(runId: string): UnsettledLongRunAttempt[] {
-  const rows = getDb().prepare(
-    `SELECT a.id, a.state, a.side_effect_state,
-       (SELECT MIN(e.seq) FROM long_run_events AS e
-        WHERE e.run_id = a.run_id AND e.kind = 'worker.attempt_started'
-          AND json_extract(e.payload_json, '$.attemptId') = a.id) AS start_event_seq
-     FROM long_run_worker_attempts AS a
-     WHERE a.run_id = ? AND a.state = 'running'
-     ORDER BY a.started_at, a.id`,
-  ).all(runId) as Array<{ id: string; state: LongRunAttemptState;
-    side_effect_state: "none" | "committed" | "uncertain"; start_event_seq: number | null }>;
-  return rows.map((row) => ({ id: row.id, state: row.state, sideEffectState: row.side_effect_state, startEventSeq: row.start_event_seq }));
-}
-
-export function getLongRunAttemptReview(runId: string): LongRunAttemptReview {
-  const run = getLongRun(runId);
-  if (!run) throw new Error(`long_run_not_found:${runId}`);
-  const unresolved = unsettledLongRunAttempts(runId);
-  const receipts = unresolved.map((attempt) => getDb().prepare(
-    `SELECT a.id, a.invocation_run_id, a.started_at, a.state, a.side_effect_state,
-            a.updated_at, a.completed_at, t.title AS task_title, t.objective AS task_objective
-     FROM long_run_worker_attempts AS a
-     LEFT JOIN long_run_workers AS w ON w.id = a.worker_id
-     LEFT JOIN long_run_tasks AS t ON t.run_id = a.run_id
-       AND t.id = COALESCE(a.task_id, w.task_id)
-     WHERE a.run_id = ? AND a.id = ?`,
-  ).get(runId, attempt.id) as { id: string; invocation_run_id: string | null; started_at: string;
-    state: LongRunAttemptState; side_effect_state: "none" | "committed" | "uncertain";
-    updated_at: string; completed_at: string | null;
-    task_title: string | null; task_objective: string | null } | undefined);
-  if (receipts.some((receipt) => !receipt)) throw new Error("goal_resume_uncertain_review_changed");
-  const attempts = receipts.map((receipt) => ({
-    id: receipt!.id, invocationRunId: receipt!.invocation_run_id, startedAt: receipt!.started_at,
-    state: receipt!.state, sideEffectState: receipt!.side_effect_state,
-    taskTitle: (receipt!.task_title || run.objective).slice(0, 240),
-    taskObjective: (receipt!.task_objective || run.objective).slice(0, 1_200),
-  }));
-  const attemptIds = attempts.map((attempt) => attempt.id);
-  const attemptSetDigest = `sha256:${createHash("sha256").update(JSON.stringify({
-    runId, version: run.version, lastEventSeq: run.lastEventSeq, attemptIds, receipts,
-  })).digest("hex")}`;
-  return { runId, version: run.version, attemptIds, attemptSetDigest, attempts };
-}
-
-/** Never infer a human review from a button press or message. An exact Main-owned
- * confirmation is required and checked again in the same transaction that
- * writes the attestation. The event records a user statement, not provider proof. */
-export function acknowledgeUncertainLongRunAttempts(
-  runId: string, confirmation?: LongRunAttemptReviewConfirmation,
-): LongRunAttemptAcknowledgment {
-  const db = getDb();
-  let result: LongRunAttemptAcknowledgment | null = null;
-  let changed = false;
-  db.transaction(() => {
-    const review = getLongRunAttemptReview(runId);
-    if (review.attempts.length > MAX_GOAL_RESUME_REVIEW_ATTEMPTS) throw new Error("goal_resume_uncertain_review_too_large");
-    if (review.attempts.some((attempt) => attempt.state === "running")) throw new Error("auto_goal_resume_attempt_unsettled");
-    if (review.attemptIds.length) {
-      if (!confirmation) throw new Error("goal_resume_uncertain_review_required");
-      if (confirmation.runId !== runId || confirmation.version !== review.version
-        || confirmation.attemptSetDigest !== review.attemptSetDigest
-        || JSON.stringify(confirmation.attemptIds) !== JSON.stringify(review.attemptIds)) {
-        throw new Error("goal_resume_uncertain_review_changed");
-      }
-    } else if (confirmation) {
-      throw new Error("goal_resume_uncertain_review_changed");
-    }
-    const receipts = db.prepare(
-      `SELECT a.id AS attempt_id, a.state, a.side_effect_state, a.updated_at, a.completed_at,
-         COALESCE(MAX(e.seq), 0) AS last_attempt_event_seq
-       FROM long_run_worker_attempts AS a
-       LEFT JOIN long_run_events AS e ON e.run_id = a.run_id
-         AND e.kind IN ('worker.attempt_started','worker.attempt_settled')
-         AND json_extract(e.payload_json, '$.attemptId') = a.id
-       WHERE a.run_id = ? AND a.state <> 'running'
-         AND (a.state = 'uncertain' OR a.side_effect_state = 'uncertain')
-       GROUP BY a.id ORDER BY a.id`,
-    ).all(runId) as Array<{ attempt_id: string; state: LongRunAttemptState;
-      side_effect_state: "none" | "committed" | "uncertain"; updated_at: string; completed_at: string | null;
-      last_attempt_event_seq: number }>;
-    const attemptReceipts: LongRunAcknowledgedAttemptReceipt[] = receipts.map((row) => ({
-      attemptId: row.attempt_id, state: row.state, sideEffectState: row.side_effect_state,
-      updatedAt: row.updated_at, completedAt: row.completed_at, lastAttemptEventSeq: row.last_attempt_event_seq,
-    }));
-    const attemptIds = attemptReceipts.map((receipt) => receipt.attemptId);
-    let safeEpoch: LongRunAttemptSafeEpoch | null = null;
-  /*
-   * 인지 이벤트는 원장 판번호를 올린다(appendLongRunEvent). 라운드 2 실측(2026-09-14): 호출부가 사람이 보낸
-   * 옛 판번호로 그다음 재개를 시도해 long_run_resume_version_conflict 로 두 번 다 거부됐다. 그래서 인지 뒤의
-   * 판번호를 함께 돌려주고, 호출부는 그 값으로 이어간다 — 사람이 확인한 판은 위에서 이미 대조했다.
-   */
-    if (review.attemptIds.length) {
-      const run = db.prepare("SELECT last_event_seq FROM long_runs WHERE id = ?").get(runId) as { last_event_seq: number } | undefined;
-      if (!run) throw new Error(`long_run_not_found:${runId}`);
-      safeEpoch = { schemaVersion: "agentlas.long-run-attempt-safe-epoch.v1", throughEventSeq: run.last_event_seq,
-        attemptSetDigest: longRunAttemptSetDigest(runId, run.last_event_seq, attemptReceipts) };
-      appendEventInDb({ runId, kind: "run.user_control", actorKind: "user",
-        payload: { action: "acknowledge_uncertain_attempts", attemptIds, attemptReceipts, safeEpoch,
-          attestation: { schemaVersion: "agentlas.uncertain-attempt-user-attestation.v1",
-            reviewedAttemptIds: review.attemptIds, reviewedAttemptSetDigest: review.attemptSetDigest,
-            statement: "user_says_external_outcomes_reviewed_before_new_work",
-            externalOutcomeProof: "not_observed_by_host" } }, at: new Date().toISOString() });
-      changed = true;
-    }
-    const version = (db.prepare("SELECT version FROM long_runs WHERE id = ?").get(runId) as { version: number } | undefined)?.version;
-    if (typeof version !== "number") throw new Error(`long_run_not_found:${runId}`);
-    result = { attemptIds: review.attemptIds, version, safeEpoch };
-  })();
-  if (changed) emitDesktopStoreChange({ entity: "long-run", id: runId });
-  return result!;
-}
-
-export const EFFECT_OBSERVATION_EVENT_KIND = "run.effect_observation";
-export const EFFECT_OBSERVATION_ATTESTATION_SCHEMA = "agentlas.uncertain-attempt-observation-attestation.v1";
-/** The host's own closed ledger proved every recorded call observation-only (attempt-effect-receipt.ts). */
-export const EFFECT_RECEIPT_STATEMENT = "receipt_no_outward_call";
-export const EFFECT_RECEIPT_PROOF = "host_receipt_closed_ledger";
-/**
- * Owner decision 2026-10-05: when the app can neither prove nor observe what an interrupted attempt did, the Goal
- * goes on and accepts the risk of repeating it, instead of staying blocked. Owner DB 2026-10-04: the looks were
- * exhausted, then capped, then too many to dispatch, and the unresolved set refused every wait (1-minute loop).
- * The record states that nothing was observed; the next turn is told the outcome is unknown and checks first.
- */
-export const EFFECT_OWNER_POLICY_STATEMENT = "unresolved_outcome_accepted_by_owner_policy";
-export const EFFECT_OWNER_POLICY_PROOF = "owner_policy_accepts_repeat_risk";
-
-// settleUncertainAttemptsByObservation (the effect-look settlement writer) was retired on 2026-10-05 with the
-// looks themselves (long-run/effect-observation.ts). The safe-epoch reader above still accepts its past ledger rows.
-
-/** Factual unresolved attempt count for observation; never a continuation gate. */
-export function unsettledLongRunAttemptCount(runId: string): number {
-  return unsettledLongRunAttempts(runId).length;
-}
-
-/** Live work only. Parallel verification and prior uncertainty do not own the controller. */
+/** Live work only. Parallel verification does not own the controller. */
 export function liveLongRunAttemptCount(runId: string): number {
   const row = getDb().prepare(`SELECT COUNT(*) AS n FROM long_run_worker_attempts a
     JOIN long_run_workers w ON w.id = a.worker_id WHERE a.run_id = ? AND a.state = 'running'
@@ -1256,32 +889,6 @@ export function blockHostPausedClaimedGoalWait(runId: string, expectedVersion: n
   return blocked;
 }
 
-/** Startup-only CAS queues independent continuation and preserves uncertainty.
- * An ordinary user pause is never converted by this recovery path. */
-export function blockHostPausedForEffectBoundaryUncertainty(runId: string, expectedVersion: number): LongRunRecord {
-  if (longRunOwnerHold(runId)) throw new Error(LONG_RUN_OWNER_HOLD_CODE);
-  const db = getDb();
-  db.transaction(() => {
-    const current = getLongRun(runId);
-    if (!current || current.surface === "science" || current.status !== "paused"
-      || !["app_closed", "crash_recovery"].includes(current.pauseReason ?? "")
-      || current.version !== expectedVersion) throw new Error("goal_resume_effect_boundary_uncertain_state_changed");
-    const now = new Date().toISOString();
-    const changed = db.prepare(`UPDATE long_runs SET status='queued', pause_reason=NULL, blocked_reason=NULL,
-      paused_at=NULL, updated_at=?, version=version+1 WHERE id=? AND status='paused' AND version=?
-      AND pause_reason IN ('app_closed','crash_recovery')`)
-      .run(now, runId, expectedVersion);
-    if (changed.changes !== 1) throw new Error("goal_resume_effect_boundary_uncertain_state_changed");
-    appendEventInDb({ runId, kind: "run.status_changed", actorKind: "host",
-      payload: { from: "paused", to: "queued", skippedStatus: "blocked", reason: GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN,
-        observationPending: true, continueIndependentWork: true, replayUncertainEffects: false, startupOnly: true }, at: now });
-  })();
-  emitDesktopStoreChange({ entity: "long-run", id: runId });
-  const blocked = getLongRun(runId);
-  if (!blocked) throw new Error("goal_resume_effect_boundary_uncertain_readback_failed");
-  return blocked;
-}
-
 /** Ledger kind of the host's "no Goal stays blocked" sweep (owner 2026-09-23). */
 export const BLOCKED_GOAL_SWEEP_EVENT_KIND = "run.blocked_sweep";
 export const BLOCKED_GOAL_SWEEP_SCHEMA = "agentlas.blocked-goal-sweep.v1";
@@ -1293,7 +900,6 @@ export interface BlockedGoalRetry {
   kind: "observe" | "resume";
   retryIndex: number;
   nextAt: string;
-  effectUncertain: boolean;
   /** model = the Goal's own turn asked for this time (shown to the owner as such); host = the host's policy. */
   requestedBy: "model" | "host";
 }
@@ -1352,7 +958,7 @@ export function pendingBlockedGoalRetry(runId: string): BlockedGoalRetry | null 
       || typeof payload.nextAt !== "string" || !Number.isSafeInteger(payload.retryIndex)) return null;
     return { seq: row.seq, fromReason: typeof payload.fromReason === "string" ? payload.fromReason : null,
       kind: payload.kind, retryIndex: Number(payload.retryIndex), nextAt: payload.nextAt,
-      effectUncertain: payload.effectUncertain === true, requestedBy: payload.requestedBy === "model" ? "model" : "host" };
+      requestedBy: payload.requestedBy === "model" ? "model" : "host" };
   } catch { return null; }
 }
 
@@ -1375,7 +981,6 @@ export function scheduleBlockedGoalRetry(input: {
   nextAt: string;
   detail: string;
   trigger: string;
-  effectUncertain: boolean;
   appInstanceId?: string | null;
   requestedBy?: "model" | "host";
 }): LongRunRecord {
@@ -1404,7 +1009,7 @@ export function scheduleBlockedGoalRetry(input: {
       payload: { schemaVersion: BLOCKED_GOAL_SWEEP_SCHEMA, action: "retry_scheduled", kind: input.kind,
         fromReason: input.fromReason, retryIndex: input.retryIndex, nextAt: input.nextAt,
         detail: input.detail.slice(0, 120), trigger: input.trigger.slice(0, 80),
-        effectUncertain: input.effectUncertain, appInstanceId: input.appInstanceId ?? null,
+        appInstanceId: input.appInstanceId ?? null,
         ...(input.requestedBy === "model" ? { requestedBy: "model" } : {}) }, at: now });
   })();
   emitDesktopStoreChange({ entity: "long-run", id: input.runId });
@@ -1436,49 +1041,6 @@ export function nextBlockedGoalRetrySlot(runId: string, now = Date.now(),
   const backoffMs = Math.min(6 * 60 * 60_000, 5 * 60_000 * 2 ** Math.min(retryIndex, 10));
   const delayMs = options.startup && retryIndex === 0 ? BLOCKED_GOAL_STARTUP_RETRY_MS : backoffMs;
   return { retryIndex, nextAt: new Date(now + delayMs).toISOString() };
-}
-
-/** Blocker put in place of an effect-uncertain retry that a later committed turn already answered. */
-export const EFFECT_BOUNDARY_SETTLED_BY_TURN = "effect_boundary_settled_by_turn";
-
-
-
-
-
-
-
-
-export function committedTurnSinceRetry(runId: string, retrySeq: number): string | null {
-  const row = getDb().prepare(`SELECT json_extract(payload_json, '$.attemptId') AS attemptId FROM long_run_events
-    WHERE run_id = ? AND seq > ? AND kind = 'worker.attempt_settled'
-      AND json_extract(payload_json, '$.state') = 'completed' AND json_extract(payload_json, '$.sideEffectState') = 'committed'
-    ORDER BY seq DESC LIMIT 1`).get(runId, retrySeq) as { attemptId: string | null } | undefined;
-  return row ? (row.attemptId ?? "attempt") : null;
-}
-
-/** The due effect-uncertain retry is closed by a committed turn: blocked on a settled (resumable) reason instead. */
-export function settleDueBoundaryRetryByTurn(runId: string, expectedVersion: number, attemptId: string): LongRunRecord {
-  if (longRunOwnerHold(runId)) throw new Error(LONG_RUN_OWNER_HOLD_CODE);
-  const db = getDb();
-  db.transaction(() => {
-    const current = getLongRun(runId);
-    const retry = current ? pendingBlockedGoalRetry(runId) : null;
-    if (!current || !retry || current.version !== expectedVersion) throw new Error("blocked_goal_retry_state_changed");
-    const now = new Date().toISOString();
-    const changed = db.prepare(`UPDATE long_runs SET status='queued', pause_reason=NULL, blocked_reason=NULL,
-      paused_at=NULL, updated_at=?, version=version+1 WHERE id=? AND status=? AND version=?`)
-      .run(now, runId, current.status, expectedVersion);
-    if (changed.changes !== 1) throw new Error("blocked_goal_retry_state_changed");
-    appendEventInDb({ runId, kind: BLOCKED_GOAL_SWEEP_EVENT_KIND, actorKind: "host",
-      payload: { schemaVersion: BLOCKED_GOAL_SWEEP_SCHEMA, action: "boundary_settled_by_turn", fromReason: retry.fromReason,
-        retryIndex: retry.retryIndex, attemptId }, at: now });
-    appendEventInDb({ runId, kind: "run.status_changed", actorKind: "host",
-      payload: { from: current.status, to: "queued", skippedStatus: "blocked", reason: EFFECT_BOUNDARY_SETTLED_BY_TURN, settledBy: attemptId }, at: now });
-  })();
-  emitDesktopStoreChange({ entity: "long-run", id: runId });
-  const next = getLongRun(runId);
-  if (!next) throw new Error("blocked_goal_retry_readback_failed");
-  return next;
 }
 
 /** The retry came due: put back the exact blocker it stood in for, so the same (observation/resume) decision runs again. */
@@ -1843,7 +1405,6 @@ export function settleLongRunWorkerAttempt(input: {
   state: Exclude<LongRunAttemptState, "running">;
   nativeCoordinate?: { kind: string; id: string } | null;
   continuityCapsule?: ContinuityCapsule | null;
-  sideEffectState?: "none" | "committed" | "uncertain";
   errorCode?: string | null;
   errorMessage?: string | null;
 }): boolean {
@@ -1865,7 +1426,7 @@ export function settleLongRunWorkerAttempt(input: {
       input.state,
       input.nativeCoordinate ? JSON.stringify(input.nativeCoordinate) : null,
       input.continuityCapsule ? JSON.stringify(input.continuityCapsule) : null,
-      input.sideEffectState ?? (input.state === "uncertain" ? "uncertain" : "none"),
+      "none", // legacy column; the host no longer classifies outside effects (owner 2026-10-12)
       input.errorCode?.slice(0, 120) ?? null,
       input.errorMessage?.slice(0, 1_000) ?? null,
       now,
@@ -1907,7 +1468,7 @@ export function settleLongRunWorkerAttempt(input: {
       kind: "worker.attempt_settled",
       actorKind: "runtime",
       actorId: row.worker_id,
-      payload: { attemptId: input.attemptId, state: input.state, sideEffectState: input.sideEffectState ?? null },
+      payload: { attemptId: input.attemptId, state: input.state },
       at: now,
     });
   }).immediate();
@@ -2790,7 +2351,6 @@ function pauseDesktopRuns(reason: "app-quit" | "startup-recovery", appInstanceId
       db.prepare(
         `UPDATE long_run_worker_attempts
          SET state = 'interrupted',
-             side_effect_state = CASE WHEN side_effect_state = 'none' THEN 'uncertain' ELSE side_effect_state END,
              error_code = ?, error_message = ?, updated_at = ?, completed_at = ?
          WHERE run_id = ? AND state = 'running'`,
       ).run(

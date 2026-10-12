@@ -84,7 +84,9 @@
   backdrop-filter: blur(8px);
 }
 
-.feature-update-close:hover,
+.feature-update-close:hover {
+  border-color: rgba(255, 255, 255, 0.48);
+}
 .feature-update-close:focus-visible {
   background: rgba(31, 34, 45, 0.94);
   border-color: rgba(255, 255, 255, 0.48);
@@ -431,7 +433,8 @@
   --popup-radius: 18px;
   --popup-backdrop: color-mix(in srgb, var(--ink) 24%, transparent);
   --popup-shadow: inset 0 1px 0 var(--white-soft), 0 4px 12px color-mix(in srgb, var(--ink) 7%, transparent), 0 24px 64px -16px color-mix(in srgb, var(--ink) 22%, transparent);
-  --popup-card-bg: linear-gradient(155deg, var(--paper), color-mix(in oklch, var(--green) 14%, var(--paper)));
+  /* Popups are plain white (owner 2026-10-12); the 10-09 redesign had tinted them with a green gradient. */
+  --popup-card-bg: var(--paper);
   --popup-control-bg: linear-gradient(155deg, color-mix(in oklch, var(--green) 18%, var(--paper)), color-mix(in oklch, var(--green) 42%, var(--paper)));
 }
 
@@ -818,7 +821,6 @@ html[data-one-output-resizing="true"] * {
 }
 
 .agentlas-tour-topline button:hover {
-  background: var(--fill-1);
   color: var(--ink);
 }
 
@@ -1173,7 +1175,6 @@ html[data-one-output-resizing="true"] * {
 
 .rd .hub-view-tab:hover {
   border-color: var(--rd-hair-2);
-  background: var(--rd-surface-2);
   color: var(--rd-ink);
 }
 
@@ -1377,8 +1378,8 @@ html[data-one-output-resizing="true"] * {
 }
 
 .rd .btn:hover {
-  background: var(--rd-surface-2);
   text-decoration: none;
+  color: var(--ink);
 }
 
 .rd .btn:active {
@@ -1683,10 +1684,6 @@ button[data-dashboard-import="true"]:disabled {
   text-align: left;
 }
 
-.dashboard-org-row:hover {
-  background: rgba(255, 255, 255, 0.08);
-}
-
 .dashboard-org-category {
   padding: 0 8px 0 2px;
   color: var(--white);
@@ -1781,7 +1778,6 @@ button[data-dashboard-import="true"]:disabled {
   opacity: 1;
 }
 .dashboard-org-remove:hover {
-  background: rgba(255, 122, 85, 0.18);
   color: var(--white);
 }
 .dashboard-org-remove-group {
@@ -2057,7 +2053,7 @@ button[data-dashboard-import="true"]:disabled {
 }
 .dashboard-local-model-card[data-active="true"] { border-color: color-mix(in oklch, var(--dash-teal-2) 30%, var(--dash-line)); }
 button.dashboard-local-model-card { cursor: pointer; }
-button.dashboard-local-model-card:hover { background: color-mix(in oklch, var(--dash-surface) 92%, var(--dash-teal-2)); }
+button.dashboard-local-model-card:hover { color: var(--ink); }
 .dashboard-local-model-main { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .dashboard-local-model-name { font-size: 13px; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dashboard-local-model-meta { font-size: 11px; color: var(--dash-muted, var(--muted-deep)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -2453,7 +2449,10 @@ button.dashboard-local-model-card:hover { background: color-mix(in oklch, var(--
   touch-action: none;
 }
 
-.dashboard-runtime-pool-order:hover:not(:disabled),
+.dashboard-runtime-pool-order:hover:not(:disabled) {
+  border-color: var(--dash-teal-2);
+  color: var(--ink);
+}
 .dashboard-runtime-pool-order:focus-visible {
   border-color: var(--dash-teal-2);
   background: color-mix(in oklch, var(--dash-teal-2) 13%, var(--paper));
@@ -2669,7 +2668,9 @@ button.dashboard-local-model-card:hover { background: color-mix(in oklch, var(--
   outline: none;
 }
 
-.dashboard-runtime-model-picker-option:hover,
+.dashboard-runtime-model-picker-option:hover {
+  color: var(--ink);
+}
 .dashboard-runtime-model-picker-option:focus-visible,
 .dashboard-runtime-model-picker-option[aria-selected="true"] {
   background: color-mix(in srgb, var(--dash-teal-2) 10%, var(--paper));
@@ -2838,7 +2839,6 @@ button.dashboard-local-model-card:hover { background: color-mix(in oklch, var(--
 .dashboard-runtime-pool-add:hover:not(:disabled) {
   border-color: var(--dash-teal-2);
   color: var(--dash-teal-2);
-  background: color-mix(in oklch, var(--dash-teal-2) 4%, var(--paper));
 }
 
 /* 좌우 패널을 접을 수 있게 된 뒤로 이 영역은 가로로 스크롤되지 않는다. 예전엔 캔버스에
@@ -2958,7 +2958,7 @@ button.dashboard-local-model-card:hover { background: color-mix(in oklch, var(--
   cursor: pointer;
 }
 
-.automation-architect-attach:hover { background: var(--paper-2); color: var(--ink); }
+.automation-architect-attach:hover { color: var(--ink); }
 .automation-architect-attach:disabled { opacity: .45; cursor: default; }
 
 .automation-architect-attachments {
@@ -3001,7 +3001,7 @@ button.dashboard-local-model-card:hover { background: color-mix(in oklch, var(--
   cursor: pointer;
 }
 
-.automation-architect-attachments button:hover { background: var(--paper-edge); color: var(--ink); }
+.automation-architect-attachments button:hover { color: var(--ink); }
 .automation-architect-attachment-error { color: var(--danger, var(--danger)); font-size: 11px; line-height: 1.45; }
 
 .automation-architect-loading {
@@ -3102,7 +3102,7 @@ button.dashboard-local-model-card:hover { background: color-mix(in oklch, var(--
   font-family: var(--font-mono);
 }
 
-.automation-issue-log-list li button:hover { background: var(--paper-2); }
+.automation-issue-log-list li button:hover { color: var(--ink); }
 .automation-issue-log-list li b { flex: none; font-size: 10px; width: 34px; }
 .automation-issue-log-list li[data-severity="error"] b { color: var(--danger, var(--danger)); }
 .automation-issue-log-list li[data-severity="warning"] b { color: var(--warn); }
@@ -3142,7 +3142,7 @@ button.dashboard-local-model-card:hover { background: color-mix(in oklch, var(--
 .automation-panel-tab { width: 30px; flex: 0 0 30px; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; gap: 10px; padding: 12px 0; border: 0; background: var(--rd-surface); color: var(--rd-ink-3); cursor: pointer; }
 .automation-panel-tab[data-side="left"] { border-right: 1px solid var(--rd-hair); }
 .automation-panel-tab[data-side="right"] { border-left: 1px solid var(--rd-hair); }
-.automation-panel-tab:hover { color: var(--rd-ink); background: var(--rd-surface-2); }
+.automation-panel-tab:hover { color: var(--rd-ink); }
 .automation-panel-tab span { font-size: 11px; line-height: 1; }
 .automation-panel-tab em { writing-mode: vertical-rl; font-style: normal; font-size: 10px; font-weight: 750; letter-spacing: .06em; }
 .automation-session-panel { width: 300px; flex: 0 1 300px; min-width: 210px; display: flex; flex-direction: column; border-right: 1px solid var(--rd-hair); background: var(--rd-surface); min-height: 0; }
@@ -3278,7 +3278,10 @@ button.dashboard-local-model-card:hover { background: color-mix(in oklch, var(--
   cursor: pointer;
 }
 
-.tool-approval-chip-action:hover,
+.tool-approval-chip-action:hover {
+  border-color: var(--paper-edge-strong);
+  color: var(--ink);
+}
 .tool-approval-chip-action:focus-visible {
   border-color: var(--paper-edge-strong);
   background: var(--paper-2);
@@ -3375,7 +3378,7 @@ button.dashboard-local-model-card:hover { background: color-mix(in oklch, var(--
   text-align: left;
   cursor: pointer;
 }
-.automation-activity-row > button:hover { background: var(--fill-1, rgba(0,0,0,0.04)); }
+.automation-activity-row > button:hover { color: var(--ink); }
 .automation-activity-row time {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
@@ -3714,7 +3717,6 @@ button[data-dashboard-chevron="open"] {
 }
 
 .dashboard-refresh-button:hover {
-  background: rgba(255, 255, 255, 0.12);
   opacity: 1;
 }
 
@@ -3913,7 +3915,7 @@ button[data-dashboard-chevron="open"] {
   cursor: pointer;
 }
 .dashboard-engine-usedefault:hover {
-  background: color-mix(in oklch, var(--dash-teal-2) 10%, var(--paper));
+  color: var(--ink);
 }
 .dashboard-engine-usedefault:disabled {
   opacity: 0.6;
@@ -4174,11 +4176,14 @@ button[data-toggle-state="on"] {
 .project-team-create-copy small { color: var(--rd-ink-3); font-size: 10px; }
 .project-team-create-actions { display: flex; align-items: center; gap: 2px; }
 .project-team-create-actions button { min-width: 26px; min-height: 26px; padding: 0 6px; border: 0; border-radius: 7px; background: transparent; color: var(--rd-ink-3); font-size: 10px; }
-.project-team-create-actions button:hover:not(:disabled), .project-team-create-actions button:focus-visible:not(:disabled) { background: var(--rd-surface-2); color: var(--rd-ink); }
+.project-team-create-actions button:hover:not(:disabled) { color: var(--rd-ink); }
+.project-team-create-actions button:focus-visible:not(:disabled) { background: var(--rd-surface-2); color: var(--rd-ink); }
 .project-team-create-actions button:disabled { opacity: .25; }
 .project-agent-library-tree-create { max-height: 560px; padding: 10px; }
 .project-roster-source-row-create { width: 100%; min-height: 36px; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 7px; padding: 6px 8px; border: 0; border-radius: 9px; background: transparent; color: var(--rd-ink); text-align: left; cursor: pointer; }
-.project-roster-source-row-create:hover, .project-roster-firm-row-create:hover, .project-roster-candidate-create:hover:not(:disabled) { background: var(--rd-surface-2); }
+.project-roster-source-row-create:hover,
+.project-roster-firm-row-create:hover,
+.project-roster-candidate-create:hover:not(:disabled) { color: var(--ink); }
 .project-roster-source-row-create > span:last-child, .project-roster-firm-row-create > span { color: var(--rd-ink-3); font: 650 10px/1 var(--font-mono); }
 .project-roster-firm-row-create { min-height: 36px; display: grid; grid-template-columns: 24px 18px minmax(0, 1fr) auto auto; align-items: center; gap: 6px; padding: 5px 7px 5px 16px; border-radius: 9px; }
 .project-roster-firm-row-create > button { min-height: 24px; padding: 0 7px; border: 1px solid var(--rd-hair); border-radius: 7px; background: var(--rd-surface); color: var(--rd-ink-3); font-size: 9.5px; cursor: pointer; }
@@ -4230,7 +4235,8 @@ button[data-toggle-state="on"] {
 .project-sidebar-project-row { display: flex; align-items: center; gap: 2px; }
 .project-sidebar-list .project-sidebar-project-link { min-width: 0; flex: 1; }
 .project-sidebar-list .project-sidebar-collapse { width: 30px; min-width: 30px; min-height: 30px; justify-content: center; padding: 0; color: var(--rd-ink-3); }
-.project-sidebar-list .project-sidebar-collapse:hover, .project-sidebar-list .project-sidebar-collapse:focus-visible { background: var(--rd-surface-2); color: var(--rd-ink); }
+.project-sidebar-list .project-sidebar-collapse:hover { color: var(--rd-ink); }
+.project-sidebar-list .project-sidebar-collapse:focus-visible { background: var(--rd-surface-2); color: var(--rd-ink); }
 .project-sidebar-list .project-sidebar-task { min-height: 30px; padding-left: 34px; color: var(--rd-ink-3); font-size: 11px; }
 .project-sidebar-list .project-sidebar-task::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--rd-hair-2); margin-left: -14px; }
 /* 화면 밖에서 오너를 기다리는 대화 — 행 끝의 파란 점(AttentionDot, lib/attention). */
@@ -4238,10 +4244,11 @@ button[data-toggle-state="on"] {
 .project-sidebar-list .project-sidebar-empty { min-height: 74px; justify-content: center; border: 1px dashed var(--rd-hair); color: var(--rd-ink-3); text-align: center; }
 .project-sidebar-foot { padding: 12px; display: grid; gap: 8px; border-top: 1px solid var(--rd-hair); }
 .project-detail-back { min-height: 36px; display: inline-flex; align-items: center; gap: 7px; padding: 0 10px; border: 1px solid var(--rd-hair); border-radius: 9px; background: var(--rd-surface); color: var(--rd-ink-2); font: inherit; font-size: 12px; font-weight: 750; cursor: pointer; }
-.project-detail-back:hover, .project-detail-back:focus-visible { border-color: var(--rd-hair-2); background: var(--rd-surface-2); color: var(--rd-ink); }
+.project-detail-back:hover { border-color: var(--rd-hair-2); color: var(--rd-ink); }
+.project-detail-back:focus-visible { border-color: var(--rd-hair-2); background: var(--rd-surface-2); color: var(--rd-ink); }
 .task-cockpit-header .project-detail-back { width: 30px; min-width: 30px; min-height: 30px; height: 30px; justify-content: center; padding: 0; border-color: transparent; background: transparent; }
 .task-cockpit-header .project-detail-back span { display: none; }
-.task-cockpit-header .project-detail-back:hover,
+.task-cockpit-header .project-detail-back:hover { border-color: transparent; color: var(--ink); }
 .task-cockpit-header .project-detail-back:focus-visible { border-color: transparent; background: var(--fill-1); }
 .task-cockpit-project-eyebrow { display: none; }
 .task-cockpit-title { display: flex; align-items: center; }
@@ -4492,7 +4499,7 @@ button[data-toggle-state="off"] {
   color: var(--muted-deep);
   cursor: pointer;
 }
-.automation-alert-close:hover,
+.automation-alert-close:hover { color: var(--ink-soft); }
 .automation-alert-close:focus-visible { background: var(--paper-3); color: var(--ink-soft); }
 .automation-alert-close:focus-visible { outline: 2px solid rgba(96, 122, 54, .3); outline-offset: 2px; }
 .automation-alert-close:disabled { opacity: .48; cursor: default; }
@@ -4730,7 +4737,7 @@ button[data-toggle-state="off"] {
 }
 
 .dashboard-activity-row:hover {
-  background: var(--paper-2);
+  color: var(--ink);
 }
 
 .dashboard-activity-row > span:nth-child(2) {
@@ -5113,10 +5120,6 @@ button[data-dashboard-import="true"] {
   background: var(--rd-surface-2);
   color: var(--rd-ink);
   border-bottom-color: var(--rd-hair);
-}
-
-.dashboard-refresh-button:hover {
-  background: color-mix(in oklch, var(--rd-ink) 5%, transparent);
 }
 
 .dashboard-engine-logo {
@@ -5764,7 +5767,7 @@ button[data-toggle-state="on"] {
 .build-mcp-interview-foot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .build-mcp-interview-hint { flex: 1; min-width: 0; font-size: 11.5px; color: var(--rd-ink-3); line-height: 1.4; }
 .build-mcp-interview-skip { padding: 6px 12px; border: 1px solid var(--rd-hair); border-radius: 8px; background: var(--rd-surface); color: var(--rd-ink-2); font-size: 12px; font-weight: 600; cursor: pointer; }
-.build-mcp-interview-skip:hover { background: var(--rd-surface-2); }
+.build-mcp-interview-skip:hover { color: var(--ink); }
 
 @media (max-width: 680px) {
   .rd .build-mcp-row { grid-template-columns: 24px minmax(0, 1fr); }
@@ -5838,7 +5841,6 @@ button[data-toggle-state="on"] {
 .rd .build-interview-back:hover {
   border-color: var(--rd-accent);
   color: var(--rd-ink);
-  background: color-mix(in oklch, var(--rd-accent) 7%, var(--rd-surface));
 }
 .build-interview-hint {
   margin: 0 0 12px;
@@ -5879,9 +5881,9 @@ button[data-toggle-state="on"] {
 }
 .rd .build-interview-opt:hover {
   border-color: color-mix(in oklch, var(--rd-accent) 55%, var(--rd-hair-2));
-  background: color-mix(in oklch, var(--rd-accent) 7%, var(--rd-surface));
   box-shadow: 0 8px 20px color-mix(in oklch, var(--rd-accent) 10%, transparent);
   transform: translateY(-1px);
+  color: var(--ink);
 }
 .rd .build-interview-opt[data-selected="true"] {
   border-color: color-mix(in oklch, var(--rd-accent) 72%, var(--rd-hair-2));
@@ -6049,7 +6051,7 @@ button[data-toggle-state="on"] {
   font-family: inherit;
 }
 .chat-qsheet-opt:hover {
-  background: var(--fill-2);
+  color: var(--ink);
 }
 .chat-qsheet-opt[data-selected="true"] {
   border-color: var(--accent);
@@ -6128,7 +6130,7 @@ button[data-toggle-state="on"] {
   cursor: pointer;
 }
 .chat-qsheet-skip:hover {
-  background: var(--fill-1);
+  color: var(--ink);
 }
 .chat-qsheet-next {
   padding: 6px 12px;
@@ -6141,7 +6143,7 @@ button[data-toggle-state="on"] {
   cursor: pointer;
 }
 .chat-qsheet-next:not(:disabled):hover {
-  background: var(--fill-2);
+  color: var(--ink);
 }
 .chat-qsheet-next:disabled {
   opacity: 0.45;
@@ -7377,7 +7379,9 @@ button[data-toggle-state="on"] {
   cursor: pointer;
 }
 
-.chat-composer-progress button:hover,
+.chat-composer-progress button:hover {
+  color: var(--ink);
+}
 .chat-composer-progress button:focus-visible {
   background: var(--fill-1);
   color: var(--ink);
@@ -7475,8 +7479,10 @@ button[data-toggle-state="on"] {
 }
 
 .chat-steering-draft-send:hover,
+.chat-steering-draft-discard:hover {
+  color: var(--ink);
+}
 .chat-steering-draft-send:focus-visible,
-.chat-steering-draft-discard:hover,
 .chat-steering-draft-discard:focus-visible {
   background: var(--fill-1);
   color: var(--ink);
@@ -7610,7 +7616,10 @@ button[data-toggle-state="on"] {
   cursor: pointer;
 }
 
-.task-cockpit-header-action:hover,
+.task-cockpit-header-action:hover {
+  border-color: var(--paper-edge);
+  color: var(--ink);
+}
 .task-cockpit-header-action[data-active="true"] {
   border-color: var(--paper-edge);
   background: var(--paper);
@@ -7638,7 +7647,6 @@ button[data-toggle-state="on"] {
 
 .task-cockpit-header-danger:hover {
   color: var(--red-deep);
-  background: color-mix(in srgb, var(--red-deep) 6%, var(--paper));
 }
 
 .chat-input-context-pill {
@@ -8960,7 +8968,6 @@ button[data-toggle-state="on"] {
 }
 
 .rd .cargo-pager-button:not(:disabled):hover {
-  background: var(--rd-surface-2);
   color: var(--rd-ink);
 }
 
@@ -9146,8 +9153,8 @@ button[data-toggle-state="on"] {
   transition: background 0.15s ease, border-color 0.15s ease;
 }
 .rd .hub-pager-btn:hover:not(:disabled) {
-  background: var(--rd-surface-2, var(--paper-3));
   border-color: var(--rd-ink-soft, var(--muted));
+  color: var(--ink);
 }
 .rd .hub-pager-btn:disabled {
   opacity: 0.4;
@@ -9286,7 +9293,7 @@ button[data-toggle-state="on"] {
 }
 .rd .hub-starter-tile-get:hover {
   border-color: var(--rd-accent);
-  background: color-mix(in oklch, var(--rd-accent) 10%, var(--rd-surface));
+  color: var(--ink);
 }
 
 @media (max-width: 520px) {
@@ -9621,7 +9628,7 @@ button[data-toggle-state="on"] {
   background: color-mix(in oklch, var(--rd-warn) 12%, transparent);
 }
 .fleet-stat-button:hover {
-  background: var(--rd-surface-2);
+  color: var(--ink);
 }
 .fleet-stat[data-tone="muted"] {
   color: var(--rd-ink-3);
@@ -9747,7 +9754,6 @@ button[data-toggle-state="on"] {
   cursor: pointer;
 }
 .sidenav-collapse:hover {
-  background: var(--fill-1);
   color: var(--ink);
 }
 /* 접힌 상태에서도 토글(펼치기) 버튼은 보여야 다시 펼 수 있다 — 로고 아래 가운데 배치. */
@@ -10095,7 +10101,12 @@ button[data-toggle-state="on"] {
   cursor: pointer;
   transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease, transform 150ms ease;
 }
-.sidenav-science-entry:hover,
+.sidenav-science-entry:hover {
+  border-color: rgba(195, 72, 61, 0.24);
+  box-shadow: 0 12px 34px rgba(61, 42, 39, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.96);
+  transform: translateY(-1px);
+  color: var(--ink);
+}
 .sidenav-science-entry:focus-visible {
   border-color: rgba(195, 72, 61, 0.24);
   background: rgba(255, 250, 248, 0.88);
@@ -10416,7 +10427,7 @@ button[data-toggle-state="on"] {
 }
 .sidenav-update-dismiss:hover,
 .sidenav-update-secondary:hover {
-  background: color-mix(in oklch, var(--ink) 5%, transparent);
+  color: var(--ink);
 }
 .sidenav-update-changelog {
   margin-top: 4px;
@@ -11574,7 +11585,6 @@ button[data-toggle-state="on"] {
 .agentlas-chat-copy-button:hover,
 .chat-input-stop-button:hover:not(:disabled) {
   border-color: var(--paper-edge);
-  background: var(--paper-2);
   color: var(--ink);
 }
 .chat-input-stop-button:disabled {
@@ -11603,7 +11613,7 @@ button[data-toggle-state="on"] {
   cursor: pointer;
 }
 .agentlas-chat-latest-button:hover {
-  background: var(--paper-2);
+  color: var(--ink);
 }
 .agentlas-chat-streaming-cursor {
   display: inline-block;

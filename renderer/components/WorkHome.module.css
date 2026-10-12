@@ -17,8 +17,8 @@
 .projectLink > svg { color:var(--muted-deep, #666c6b); }
 .folder { display:grid; place-items:center; width:38px; height:38px; border-radius:10px; background:var(--fill-1, #f1f1ee); color:var(--muted-deep, #666c6b); }
 .settings { width:36px; height:36px; display:grid; place-items:center; border-radius:8px; color:var(--muted-deep, #666c6b); }
-.row:hover { background:var(--fill-1, #f7f7f4); }
-.settings:hover { color:var(--ink); background:var(--fill-2, #eaeae6); }
+.row:hover { color: var(--ink); }
+.settings:hover { color:var(--ink); }
 .page button:focus-visible { outline:2px solid #777b5d; outline-offset:2px; }
 .empty { font-size:13px; color:var(--muted-deep, #666c6b); padding:22px 0; }
 .notice { display:flex; align-items:center; gap:15px; padding:14px; font-size:12px; background:var(--fill-1, #f1f1ee); margin-bottom:12px; }

@@ -92,11 +92,11 @@ export function prepareCheckpointContinuation(checkpoint: LongRunTaskCheckpoint,
     .get(run.id) as { runtime_selection_json: string } | undefined;
   if (!worker) throw new Error("checkpoint_runtime_binding_missing");
   const storedRuntimeSelection = JSON.parse(worker.runtime_selection_json) as LongRunRuntimeSelection;
-  const producer = getDb().prepare(`SELECT a.id, a.runtime_selection_json, a.state, a.side_effect_state, w.workspace_binding_json
+  const producer = getDb().prepare(`SELECT a.id, a.runtime_selection_json, a.state, w.workspace_binding_json
     FROM long_run_worker_attempts AS a JOIN long_run_workers AS w ON w.id = a.worker_id AND w.run_id = a.run_id
     WHERE a.invocation_run_id = ? AND a.run_id = ? AND w.role = 'controller' ORDER BY a.attempt DESC LIMIT 1`)
     .get(checkpoint.invocationRunId, run.id) as { id: string; runtime_selection_json: string; state: string;
-      side_effect_state: string; workspace_binding_json: string } | undefined;
+      workspace_binding_json: string } | undefined;
   let producerWorkspace: string | null | undefined;
   try {
     const value = producer ? JSON.parse(producer.workspace_binding_json)?.cwd : undefined;
@@ -105,7 +105,7 @@ export function prepareCheckpointContinuation(checkpoint: LongRunTaskCheckpoint,
   const handoff = goalRuntimeSelectionForCheckpoint(checkpoint, dispatchInvocationId);
   const producerSelection = producer ? JSON.parse(producer.runtime_selection_json) as LongRunRuntimeSelection : null;
   const targetSelection = handoff ? captureLongRunRuntimeSelection(handoff.selection, { requireExact: true }) : null;
-  if (!producer || producer.state !== "completed" || producer.side_effect_state !== "committed"
+  if (!producer || producer.state !== "completed"
     || producerWorkspace === undefined || producerWorkspace !== checkpoint.workspacePath
     || !producerSelection || (!same(storedRuntimeSelection, producerSelection)
       && !(dispatchInvocationId && targetSelection && same(storedRuntimeSelection, targetSelection))))

@@ -68,7 +68,7 @@
 }
 
 .liveToggle[aria-expanded="true"] { transform: rotate(180deg); }
-.liveToggle:hover { color: var(--work-ink); background: var(--paper-3); }
+.liveToggle:hover { color: var(--work-ink); }
 
 /* Left→right light sweep. The gradient is wider than the box so the bright
    band travels across the text and the base gray stays put around it. */
@@ -375,7 +375,7 @@
   font-weight: 620;
   cursor: pointer;
 }
-.retryButton:hover:not(:disabled) { background: var(--paper-2); }
+.retryButton:hover:not(:disabled) { color: var(--ink); }
 .retryButton:disabled { cursor: not-allowed; opacity: .55; }
 .retryButton:focus-visible { outline: 2px solid rgba(96, 122, 54, 0.35); outline-offset: 2px; }
 

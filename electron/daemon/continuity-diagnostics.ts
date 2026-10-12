@@ -13,7 +13,6 @@ const TERMINAL_KINDS = new Set([
   "invoke_completed", "invoke_failed", "invoke_threw", "invoke_cancelled", "invoke_interrupted",
 ]);
 const ATTEMPT_STATES = new Set(["running", "completed", "failed", "interrupted", "cancelled", "uncertain"]);
-const SIDE_EFFECT_STATES = new Set(["none", "committed", "uncertain"]);
 const MAX_EFFECT_EVENTS_TO_VERIFY = 4_096;
 const MAX_GOAL_EVENTS_TO_SCAN = 256;
 
@@ -36,7 +35,6 @@ interface AttemptRow {
   id: string;
   invocation_run_id: string;
   state: string;
-  side_effect_state: string;
   app_instance_id: string | null;
   started_at: string;
   completed_at: string | null;
@@ -88,7 +86,7 @@ export function goalContinuityDiagnostics(
   const runId = requiredId(run.id);
   const chatId = requiredId(run.rootChatId);
   const attempts = getDb().prepare(
-    `SELECT a.id, a.invocation_run_id, a.state, a.side_effect_state,
+    `SELECT a.id, a.invocation_run_id, a.state,
             a.app_instance_id, a.started_at, a.completed_at
        FROM long_run_worker_attempts AS a
        JOIN long_run_workers AS w ON w.id = a.worker_id AND w.run_id = a.run_id
@@ -156,7 +154,6 @@ export function goalContinuityDiagnostics(
       invocationRunId,
       appInstanceId: validAppInstanceId(attempt.app_instance_id) ? attempt.app_instance_id : null,
       attemptState: ATTEMPT_STATES.has(attempt.state) ? attempt.state : "unknown",
-      sideEffectState: SIDE_EFFECT_STATES.has(attempt.side_effect_state) ? attempt.side_effect_state : "unknown",
       startedAt: timestamp(attempt.started_at), completedAt: timestamp(attempt.completed_at),
       invocationStart: eventRef(started), terminal: eventRef(terminal),
       effectReceipt: {

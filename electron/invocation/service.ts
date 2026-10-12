@@ -27,7 +27,7 @@ import { runtimeFailureBlocksReplay } from "../runtime/selection";
 import { captureGoalEpisode, applyGoalEpisodeRest, drainGoalEpisodeNotices,
   captureGoalProducerAdmission, admitGoalProducer, assertGoalProducerDispatch, latestGoalEpisodeProducer, type GoalProducerAdmission } from "../long-run/episode-disposition";
 import { latestGoalWaitSubscription, registerGoalWaitSubscription, registerOngoingGoalCycle, restoreGoalWaitAfterUndispatchedStart, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
-import { finiteGoalTimerRefusalEndsTurn, finiteGoalTimerRefusalMessage, goalWaitRefusalAlreadyNotified, goalWaitRefusalMessage, goalWaitRefusalResolvesItself, GOAL_WAIT_FINITE_TIMER_NOTICE } from "../long-run/goal-wait-refusal";
+import { finiteGoalTimerRefusalEndsTurn, finiteGoalTimerRefusalMessage, goalWaitRefusalAlreadyNotified, goalWaitRefusalMessage, GOAL_WAIT_FINITE_TIMER_NOTICE } from "../long-run/goal-wait-refusal";
 import { ensureOngoingEpisodeTask } from "../long-run/ongoing-episode-task";
 import { settleNativeGoalEpisode } from "../long-run/native-goal-pass";
 import { GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN, goalResumeRecoveryBlockerCode } from "../../shared/long-run";
@@ -71,7 +71,7 @@ import {
   resumeLongRunByUser,
   settleLongRunWorkerAttempt,
   startLongRunWorkerAttempt,
-  transitionLongRun, liveLongRunAttemptCount, unsettledLongRunAttemptCount,
+  transitionLongRun, liveLongRunAttemptCount,
   longRunOwnerHold, scheduleBlockedGoalRetry, pendingBlockedGoalRetry, consecutiveGoalTurnFollowUps, goalTurnFollowUpPlan } from "../store/long-runs";
 import { armChatGoalContract, completeChatGoalContract, defineChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapshot, migrateLegacyGoalLifecycle } from "../store/chat-goals";
 import { automaticGoalReplayBlockerCode, prepareInvocationAutomaticGoal } from "./automatic-goal";
@@ -998,17 +998,6 @@ export function preDispatchRefusalReasonCode(error: unknown): string {
   if (identifier.test(message)) return message;
   const leading = /^([a-z][a-z0-9_]{2,79}):\s/.exec(message)?.[1];
   return leading ?? "main_start_pre_dispatch_refused";
-}
-
-/** The checkpoint's own controller attempt settled without any observed operation (sideEffectState none). */
-function checkpointProducerHadNoEffects(goalId: string, invocationRunId: string | null): { errorCode: string | null } | null {
-  const run = invocationRunId ? getLongRunByGoalId(goalId) : null;
-  if (!run || !invocationRunId || unsettledLongRunAttemptCount(run.id)) return null;
-  const row = getDb().prepare(`SELECT a.state, a.side_effect_state, a.error_code FROM long_run_worker_attempts AS a
-    JOIN long_run_workers AS w ON w.id = a.worker_id AND w.run_id = a.run_id
-    WHERE a.run_id = ? AND a.invocation_run_id = ? AND w.role = 'controller' ORDER BY a.rowid DESC LIMIT 1`)
-    .get(run.id, invocationRunId) as { state: string; side_effect_state: string; error_code: string | null } | undefined;
-  return row?.state === "interrupted" && row.side_effect_state === "none" ? { errorCode: row.error_code } : null;
 }
 
 interface NativeIngressPending {
@@ -3000,7 +2989,7 @@ export class InvocationService {
      * The orchestrator's runtime-selected event can arrive before the automatic Goal is admitted
      * (the admission judgment runs inside the pre-execution hook, ~9s in the 2026-09-24 isolated run).
      * Binding only on that event left every first-turn Goal without a controller attempt, so its
-     * checkpoint could never mint settled effects and blocked on checkpoint_side_effects_uncertain
+     * checkpoint could never mint settled effects and blocked
      * after turn one — even a read-only "2+2" One goal. Remember the selection and bind once the
      * Goal projection exists.
      */
@@ -3092,10 +3081,6 @@ export class InvocationService {
       settleLongRunWorkerAttempt({
         attemptId: goalControllerAttemptId,
         state: completed ? "completed" : "interrupted",
-        // A turn that failed before any tool operation (measured: work_project_residency_busy refused
-        // the CLI start) did nothing outside; "uncertain" sent every such retry to a ~150-230k-token
-        // effect observation, one per attempt, while the project stayed busy.
-        sideEffectState: completed ? "committed" : effectBoundary.observedNoOperations() ? "none" : "uncertain",
         ...(!completed
           ? { errorCode: terminalDisposition.errorCode ?? observedRuntimeErrorCode ?? "runtime_interrupted" }
           : {}),
@@ -4359,13 +4344,12 @@ export class InvocationService {
                 automaticResume, executionSource: executionContext?.source,
                 ...(durable.reason ? { resumeBlockedReason: durable.reason } : {}) } });
             // Waiting is a terminal inference receipt, not success. Measure effect custody only after it exists.
-            const boundaryReceipt = effectBoundary.persist();
+            effectBoundary.persist();
             if (goalControllerAttemptId && !goalControllerAttemptSettled) {
               goalControllerAttemptSettled = true;
               // Only measured runtime drainage can settle the interrupted attempt.
               if (handle.runtimeQuiesced) settleLongRunWorkerAttempt({ attemptId: goalControllerAttemptId, state: "interrupted",
-                sideEffectState: effectBoundary.observedNoOperations() ? "none"
-                  : boundaryReceipt?.effects === "settled" ? "committed" : "uncertain", errorCode: "authentication_required" });
+                errorCode: "authentication_required" });
             }
             try { effectsSettled = readInvocationEffectBoundary({ invocationRunId: runId, expectedChatId: chat.id }).effects === "settled"; } catch { /* preserve uncertainty */ }
             durable.effectsSettled = effectsSettled;
@@ -4487,11 +4471,7 @@ export class InvocationService {
               && !controller.signal.aborted && !record.hasTransientAttachments) {
               let fallbackRegistered = false;
               try {
-                const boundary = readInvocationEffectBoundary({ invocationRunId: runId, expectedChatId: chat.id });
-                if (boundary.effects !== "settled") {
-                appendLongRunEvent({ runId: current.id, kind: "run.effect_check_pending", actorKind: "host",
-                  payload: { invocationRunId: runId, reason: "goal_wait_effects_uncertain" } });
-              }
+                readInvocationEffectBoundary({ invocationRunId: runId, expectedChatId: chat.id });
                 const wait = getDb().transaction(() => {
                   recordLongRunCycle({ goalId: current.goalId, sourceInvocationId: runId,
                     progressState: "unknown", outcome: "ongoing-episode-unverified" });
@@ -4524,7 +4504,7 @@ export class InvocationService {
               const latest = current ? getLongRun(current.id) : null;
               const producer = latest ? latestGoalEpisodeProducer(latest.id) : undefined;
               if (latest?.status === "running" && !longRunOwnerHold(latest.id) && producer?.invocation_run_id === runId
-                && !controller.signal.aborted && unsettledLongRunAttemptCount(latest.id) === 0) transitionLongRun({ runId: latest.id, expectedVersion: latest.version,
+                && !controller.signal.aborted) transitionLongRun({ runId: latest.id, expectedVersion: latest.version,
                   to: "blocked", actorKind: "host", reason });
               tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_wait_refused", payload: {
                 goalId: current?.goalId ?? null, reasonCode: reason, disposition: episodeDecisionRecorded ? "decision_recorded" : "refused", scheduled: false } });
@@ -4542,8 +4522,7 @@ export class InvocationService {
               const message = pickLocale(runReq) === "ko"
                 ? "대기 조건을 확인하지 못했습니다. 확인은 백그라운드에서 처리하며 가능한 다음 작업을 계속합니다."
                 : "The wait condition is unconfirmed. Its check runs in the background while the next available work continues.";
-              // Only the uncertain-effect refusal resolves itself (the app re-checks read-only, then continues);
-              // every other refused wait asks the owner for a time or a Resume and stays prominent.
+              // A refused wait never blocks the Goal: its check runs in the background.
               const selfResolving = true;
               appendChatMessage(chat.id, "assistant", message, { hostNotice: { purpose: "host-status", runId,
                 status: selfResolving ? "wait-not-scheduled" : "needs-owner" } });
@@ -4617,12 +4596,7 @@ export class InvocationService {
             settleGoalResultMessages({ chatId: chat.id, goalId: completionClaim.goalId, runId, verified: false,
               verificationScope: "episode", verificationState: "not_requested" });
             try {
-              const boundary = readInvocationEffectBoundary({ invocationRunId: runId, expectedChatId: chat.id });
-              if (boundary.effects !== "settled") {
-                const current = getLongRunByGoalId(completionClaim.goalId!);
-                if (current) appendLongRunEvent({ runId: current.id, kind: "run.effect_check_pending", actorKind: "host",
-                  payload: { invocationRunId: runId, reason: "goal_wait_effects_uncertain" } });
-              }
+              readInvocationEffectBoundary({ invocationRunId: runId, expectedChatId: chat.id });
               getDb().transaction(() => {
                 recordLongRunCycle({ goalId: completionClaim.goalId!, sourceInvocationId: runId,
                   progressState: "unknown", outcome: "ongoing-episode-unverified" });
@@ -5133,7 +5107,7 @@ export class InvocationService {
       const readOnly = !parked.durable.effectsSettled;
       this.start({ ...request, runId: successorRunId, promptOrigin: "system", taskIntent: "task",
         ...(readOnly ? { permissions: "read", onePermissionMode: "read" } : {}),
-        userPrompt: `Continue the existing task after Main verified restoration of its exact login prerequisite. Source invocation: ${runId}. Inspect the existing results and current external state before carrying out only the remaining work.${readOnly ? " This observation is read-only because the prior effect boundary is uncertain; report what has already happened without repeating an action." : " Preserve completed work and do not replay the prior operation."}`,
+        userPrompt: `Continue the existing task after Main verified restoration of its exact login prerequisite. Source invocation: ${runId}. Inspect the existing results and current external state before carrying out only the remaining work.${readOnly ? " This turn is read-only; report what has already happened." : " Check what the prior operation already did and finish only what remains."}`,
       }, record.workspaceBinding, record.executionContext, undefined, "goal-continuation",
         successorAdmission);
       settleInvocationBrowserLoginWait(runId, "dispatched");
@@ -5204,7 +5178,7 @@ export class InvocationService {
       const plan = goalTurnFollowUpPlan({ repeats, requestedNotBefore: options.requestedNotBefore });
       scheduleBlockedGoalRetry({ runId: run.id, expectedVersion: run.version, kind: "resume",
         fromReason: followUpReason, retryIndex: repeats, nextAt: plan.nextAt, requestedBy: plan.requestedBy,
-        detail: followUpReason, trigger: "goal-turn-background", effectUncertain: unsettledLongRunAttemptCount(run.id) > 0,
+        detail: followUpReason, trigger: "goal-turn-background",
         appInstanceId: desktopAppInstanceId() });
       setTimeout(() => {
         try { runMainBackgroundTask(() => maybeDispatchEffectObservation(this, goalId, "goal-turn-background")); }

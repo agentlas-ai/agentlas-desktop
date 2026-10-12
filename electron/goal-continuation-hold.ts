@@ -120,8 +120,8 @@ function scheduleAdvisoryContinuation(a: {
     const basePrompt = current.promptTemplate.split(FRESH_CONTEXT_MARKER)[0]!;
     const prompt = basePrompt + FRESH_CONTEXT_MARKER +
       "Start a fresh episode from the current authorized Goal, owner instructions and exact durable receipts. " +
-      "Keep the current runtime and action permissions. Previous action effects or result checks may still be unknown. " +
-      "Do not replay a pending or uncertain action, invent an owner answer, or re-check the same unchanged observation with a model. " +
+      "Keep the current runtime and action permissions. Check the current state of earlier actions yourself and decide what still needs doing. " +
+      "Do not invent an owner answer. " +
       "Choose the next independent useful task; delegate observation and repair in the background. " +
       "If no independent step is due, record the limitation once and keep the bounded host retry. Honor explicit owner Stop.";
     const updated = getDb().prepare(`UPDATE automations SET schedule=?, next_run_at=?, prompt_template=?

@@ -96,7 +96,10 @@ export function mcpToolIsMutating(input: {
     && AGENTLAS_BROWSER_READ_TOOLS.has(input.toolName);
   const nativeRead = input.catalogId === "cua-driver"
     && AGENTLAS_COMPUTER_USE_READ_TOOLS.has(input.toolName);
-  return !(browserRead || nativeRead || oneGraphReadPermissionCall(input));
+  // agentlas-ui's only tool returns a constant schema text: no input, no effect.
+  // (Literal ids, as for the other reads here: gates lift this function out of the file.)
+  const uiSchemaRead = input.catalogId === "agentlas-ui" && input.toolName === "read_ui_schema";
+  return !(browserRead || nativeRead || uiSchemaRead || oneGraphReadPermissionCall(input));
 }
 
 /** Plan observation authority is minted from the actual host launcher, not a

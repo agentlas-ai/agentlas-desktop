@@ -408,7 +408,8 @@ const selectionMemo = new Map<string, SelectionMemoEntry>();
  * 상태(ready/missing-key)는 이번 턴 선택분이 우선하고, 이월분은 지난 상태를 유지한다.
  * TTL은 대화 호흡에 맞춰 1단계보다 길게 둔다. 자격 증명 변경 시 invalidate가 함께 비운다.
  */
-const STICKY_SELECTION_TTL_MS = 30 * 60_000;
+// 60분: 프롬프트 캐시 1시간 수명과 같다 — 그보다 먼저 도구셋이 줄면 살아 있는 캐시를 스스로 깨게 된다.
+const STICKY_SELECTION_TTL_MS = 60 * 60_000;
 const stickySelectionMemo = new Map<string, SelectionMemoEntry>();
 // Process-local selection hints, not grants or a durable checkpoint. A Goal retains
 // only exact IDs; current configuration, secrets and connection are checked each turn.

@@ -1941,7 +1941,7 @@ async function runOne(
         !parentMissing && !leaseOwnershipLost
       ) {
         try {
-          const repairReason = `${runError ?? "Result check is pending"}. Continue independent work. Inspect unresolved results in the background; preserve unknown outcomes and do not repeat the specific uncertain external actions.`;
+          const repairReason = `${runError ?? "Result check is pending"}. Check the current external state yourself and decide what still needs doing; redo only what has not happened.`;
           handleAutomationFailure(a, repairReason, currentRunId).catch((err) => {
             // Not awaited: the recovery run is background work and must not hold this run's settlement.
             console.error("[automation] handleAutomationFailure failed:", err);

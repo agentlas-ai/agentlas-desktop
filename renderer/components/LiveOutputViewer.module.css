@@ -23,7 +23,10 @@
 .documentIdentity span { flex: 0 0 auto; color: #7a818b; font-size: 9.5px; }
 .documentToolbarActions { flex: 0 0 auto; display: flex; align-items: center; gap: 5px; }
 .documentToolbar button, .documentInfo > summary { min-height: 28px; display: inline-flex; align-items: center; justify-content: center; padding: 0 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: #555d68; font: inherit; font-size: 10px; cursor: pointer; white-space: nowrap; }
-.documentToolbar button:hover, .documentToolbar button:focus-visible, .documentInfo > summary:hover, .documentInfo > summary:focus-visible { border-color: #cfd4dc; background: #f3f4f6; color: #242a32; outline: none; }
+.documentToolbar button:hover,
+.documentInfo > summary:hover { border-color: #cfd4dc; color: #242a32; }
+.documentToolbar button:focus-visible,
+.documentInfo > summary:focus-visible { border-color: #cfd4dc; background: #f3f4f6; color: #242a32; outline: none; }
 .documentToolbar button:disabled { cursor: wait; opacity: .55; }
 .documentZoom { height: 30px; display: inline-flex; align-items: center; border: 1px solid #dfe3e8; border-radius: 7px; background: #fafbfc; }
 .documentZoom button { min-width: 27px; height: 28px; min-height: 28px; padding: 0 5px; border: 0; border-radius: 0; font-size: 14px; }
@@ -43,7 +46,8 @@
 .documentError { position: absolute; inset: 0; z-index: 4; display: grid; place-items: center; align-content: center; gap: 7px; padding: 24px; background: rgba(250, 247, 247, .95); color: #724747; text-align: center; }
 .documentError strong { font-size: 13px; }
 .documentError button { min-height: 30px; padding: 0 10px; border: 1px solid currentColor; border-radius: 7px; background: transparent; color: inherit; font: inherit; font-size: 11px; cursor: pointer; }
-.documentError button:hover, .documentError button:focus-visible { background: color-mix(in srgb, currentColor 9%, transparent); outline: none; }
+.documentError button:hover { color: var(--ink); }
+.documentError button:focus-visible { background: color-mix(in srgb, currentColor 9%, transparent); outline: none; }
 .loading { min-height: 420px; display: grid; place-items: center; background: #f2f5f3; }
 .loading > span { border-color: #c8d3cc; border-top-color: #26724e; }
 @keyframes output-spin { to { transform: rotate(360deg); } }

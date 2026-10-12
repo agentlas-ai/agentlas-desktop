@@ -61,7 +61,7 @@
    세로 한 줄 목록 + 라디오. 추천(Agentlas)이 맨 위, 나머지는 "더 보기"로 접힌다. */
 .aiList{display:flex;flex-direction:column;width:min(560px,100%);margin:36px auto 0;padding:6px;border:1px solid var(--paper-edge);border-radius:16px;background:var(--paper);text-align:left}
 .aiRow{display:flex;align-items:center;gap:14px;width:100%;padding:12px 14px;border:0;border-radius:12px;background:transparent;color:var(--ink);cursor:pointer;text-align:left}
-.aiRow:hover{background:var(--paper-2)}
+.aiRow:hover { color: var(--ink); }
 .aiRow[data-selected=true]{background:var(--paper-3)}
 .aiRow:disabled{opacity:.6;cursor:default}
 .aiRow:focus-visible{outline:2px solid var(--black);outline-offset:1px}

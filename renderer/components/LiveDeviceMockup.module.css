@@ -68,7 +68,9 @@
   border-radius: 7px;
 }
 
-.windowButton:hover,
+.windowButton:hover {
+  color: var(--design-ink, var(--ink));
+}
 .windowButton:focus-visible {
   outline: none;
   background: var(--design-accent-soft, var(--paper-3));

@@ -1,10 +1,9 @@
 import { getDb } from "../store/db";
 import { getChatGoalRevision } from "../store/chat-goals";
-import { appendLongRunEvent, getLongRunByGoalId, getLongRunGoalRevisionBinding, longRunOwnerHold, recordLongRunCycle, nextBlockedGoalRetrySlot, pendingBlockedGoalRetry, scheduleBlockedGoalRetry, transitionLongRun } from "../store/long-runs";
+import { appendLongRunEvent, getLongRunByGoalId, getLongRunGoalRevisionBinding, longRunOwnerHold, recordLongRunCycle, transitionLongRun } from "../store/long-runs";
 import { ownsHostGoalLoop } from "./host-goal-surface";
 import { latestTaskCheckpoint } from "./checkpoint";
 import { observeOngoingOneGoalProgress } from "./goal-progress";
-import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import { latestGoalWaitSubscription, registerOngoingGoalCycle } from "./wait-subscriptions";
 
 /** Host-only custody, never a model completion/progress claim. A native pass
@@ -39,7 +38,7 @@ export function captureNativeGoalEpisode(goalId: string, chatId: string, invocat
  * The invocation is accounted once, including unavailable verification. */
 export function settleNativeGoalEpisode(binding: NativeGoalEpisodeBinding, input: {
   checkpointId?: string | null; hasTransientAttachments?: boolean; now?: number;
-} = {}): "waiting" | "stale" | "effects_uncertain" | "already_settled" | "authority_refused" {
+} = {}): "waiting" | "stale" | "already_settled" | "authority_refused" {
   return getDb().transaction(() => {
     const run = getLongRunByGoalId(binding.goalId), revision = getChatGoalRevision(binding.goalId);
     const wait = latestGoalWaitSubscription(binding.goalId);
@@ -56,22 +55,6 @@ export function settleNativeGoalEpisode(binding: NativeGoalEpisodeBinding, input
     const prior = getDb().prepare(`SELECT 1 FROM long_run_events WHERE run_id=? AND kind='run.native_episode_settled'
       AND json_extract(payload_json,'$.invocationRunId')=? LIMIT 1`).get(run.id, binding.invocationRunId);
     if (prior) return "already_settled";
-    let effectsSettled = false;
-    try { effectsSettled = readInvocationEffectBoundary({ invocationRunId: binding.invocationRunId,
-      expectedChatId: binding.chatId }).effects === "settled"; }
-    catch { /* Missing custody is uncertainty, never a no-effect assertion. */ }
-    if (!effectsSettled) {
-      // Reuse the existing durable, read-only effect-observation sweep. Its
-      // typed observe retry restores the uncertainty reason at the due time;
-      // it cannot turn this producer's prompt into an action replay.
-      if (!pendingBlockedGoalRetry(run.id)) {
-        const slot = nextBlockedGoalRetrySlot(run.id, input.now);
-        scheduleBlockedGoalRetry({ runId: run.id, expectedVersion: run.version, kind: "observe",
-          fromReason: "goal_wait_effects_uncertain", ...slot, detail: "native_episode_effect_receipt_unsettled",
-          trigger: "native-episode-settlement", effectUncertain: true, appInstanceId: run.appInstanceId });
-      }
-      return "effects_uncertain";
-    }
     const checkpoint = latestTaskCheckpoint(binding.goalId);
     const exactCheckpoint = input.checkpointId && checkpoint?.checkpointId === input.checkpointId
       && checkpoint.invocationRunId === binding.invocationRunId && checkpoint.goalRevision === binding.goalRevision

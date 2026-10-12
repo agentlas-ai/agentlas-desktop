@@ -40,7 +40,7 @@
 .rangeBounds { display: flex; justify-content: space-between; gap: var(--intellect-label-gap); color: var(--ink-soft); font-size: 12px; }
 .button, .legendButton, .sortButton { font: inherit; color: var(--ink); cursor: pointer; }
 .button { width: fit-content; max-width: 100%; min-height: 44px; padding: 12px var(--intellect-inset); border: 1px solid var(--paper-edge); background: var(--paper); border-radius: 8px; font-size: 13px; font-weight: 500; }
-.button:hover:not(:disabled) { border-color: var(--paper-edge-strong); background: var(--paper-2); }
+.button:hover:not(:disabled) { border-color: var(--paper-edge-strong); color: var(--ink); }
 .button:disabled { cursor: default; opacity: 0.5; }
 .button:focus-visible, .input:focus-visible, .range:focus-visible, .legendButton:focus-visible, .sortButton:focus-visible, .diagramNode:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .hint, .status { margin: var(--intellect-label-gap) 0 0; font-size: 12px; color: var(--ink-soft); line-height: 1.5; }

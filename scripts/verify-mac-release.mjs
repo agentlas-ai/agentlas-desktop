@@ -24,12 +24,25 @@ const tag = String(args.get("--tag") || process.env.AGENTLAS_DESKTOP_RELEASE_TAG
 const arches = ["arm64", "x64"];
 const signingPolicyPath = join(desktopRoot, "build-resources", "macos-release-signing-policy.json");
 
+// Apple's ticket lookup (CloudKit) drops connections ("Error 68", 10-12 releases 1.3.15-1.3.17): a stapler
+// validate that fails is retried a few times before it counts. Any other command runs once.
+const STAPLER_RETRY_DELAYS_MS = [20_000, 40_000, 60_000, 90_000, 120_000];
+function isStaplerValidate(command, args) {
+  return command === "xcrun" && args[0] === "stapler" && args[1] === "validate";
+}
+function sleepMs(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
+
 function run(command, commandArgs) {
-  const result = spawnSync(command, commandArgs, {
-    cwd: desktopRoot,
-    encoding: "utf8",
-    maxBuffer: 1024 * 1024 * 8,
-  });
+  let result;
+  for (let attempt = 0; ; attempt += 1) {
+    result = spawnSync(command, commandArgs, {
+      cwd: desktopRoot,
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024 * 8,
+    });
+    if (result.status === 0 || !isStaplerValidate(command, commandArgs) || attempt >= STAPLER_RETRY_DELAYS_MS.length) break;
+    sleepMs(STAPLER_RETRY_DELAYS_MS[attempt]);
+  }
   const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
   return {
     ok: result.status === 0,

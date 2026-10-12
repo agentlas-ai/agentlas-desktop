@@ -138,7 +138,7 @@
 }
 
 .small:hover:not(:disabled) {
-  background: var(--paper-edge);
+  color: var(--ink);
 }
 
 .small:disabled {

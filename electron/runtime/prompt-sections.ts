@@ -10,12 +10,15 @@
 // Surface protocol gate: the decision is monotone within a conversation, so the system bytes only
 // ever grow once and the prompt-cache prefix stays stable. Callers that pass no text (legacy
 // callers) get every section, as before.
+//
+// The Intellect UI schema is the exception: it is no longer gated by a keyword list over the user's
+// text at all. The model decides, and fetches the schema through the read-only `read_ui_schema` tool
+// (electron/ui-schema/mcp-server.ts); only the one-line rule below is always on.
 import {
   CONNECTION_INTRO_LINES,
   CONNECTION_PLAYBOOK_LINES,
   MEDIA_ROUTING_LINES,
 } from "./global-skill";
-import { intellectUiPrompt } from "../../shared/intellect-ui-prompt";
 
 /** Providers and verbs that mean the task is about reaching a third-party account or service. */
 const CONNECTION_INTENT =
@@ -25,29 +28,19 @@ const CONNECTION_INTENT =
 const MEDIA_INTENT =
   /\b(image|images|img|picture|photo|photograph|draw|drawing|illustrat\w*|logo|icon|thumbnail|poster|banner|mockup|wallpaper|video|clip|movie|animation|animate|audio|voice|speech|tts|narrat\w*|podcast|music|song|sound|dall-?e|midjourney|sora|veo|nanobanana|imagen|image_gen)\b|이미지|사진|그림|그려|영상|비디오|동영상|음성|음악|목소리|낭독|내레이션|로고|아이콘|일러스트|썸네일|포스터|배너|목업|애니메이션|효과음|노래/i;
 
-/** Charts, comparisons, diagrams, calculators and choice controls: where the agentlas-ui schema is needed. */
-const UI_INTENT =
-  /\b(chart|charts|graph|plot|diagram|flowchart|visuali[sz]\w*|compar\w*|versus|vs|table|calculator|calculate|calculation|simulat\w*|slider|dashboard|metric|trend|breakdown|agentlas-ui|options?|choose|choice|pros and cons|tradeoffs?)\b|차트|그래프|도표|다이어그램|시각화|비교|표로|표를|표 |계산|계산기|시뮬|슬라이더|지표|추이|추세|선택지|장단점|항목별/i;
-
-/** Marker an earlier assistant turn leaves when it already used the native UI blocks. */
-const UI_FENCE = "```agentlas-ui";
-
 export interface PromptSectionPlan {
   /** "full" = the whole playbook (and provider addresses); "core" = the compact rule only. */
   connection: "core" | "full";
   /** Generative image/video/audio routing rules. */
   media: boolean;
-  /** The agentlas-ui component schema. */
-  intellectUi: boolean;
 }
 
 export function planPromptSections(gateText: string | undefined): PromptSectionPlan {
   // Legacy callers (no text) keep every section.
-  if (gateText === undefined) return { connection: "full", media: true, intellectUi: true };
+  if (gateText === undefined) return { connection: "full", media: true };
   return {
     connection: CONNECTION_INTENT.test(gateText) ? "full" : "core",
     media: MEDIA_INTENT.test(gateText),
-    intellectUi: UI_INTENT.test(gateText) || gateText.includes(UI_FENCE),
   };
 }
 
@@ -61,10 +54,20 @@ export const CONNECTION_CORE_RULE = [
   "When a task needs a third-party service, never stop at \"there is no API/MCP/connector\": reuse an installed, permitted connector or authorized browser tool, prepare integration code locally when authorized, or name the exact missing secure boundary. Account creation, new grants or scopes, key generation/storage, security changes and provider charges need the user's dedicated native confirmation; before a payment, pause and state merchant, amount, currency and recurrence. The user alone enters a credential, in the provider's protected page or the native Vault input; never ask for, read, copy or store one through chat, tools, shell, files, environment variables or memory. Never bypass a CAPTCHA or 2FA: save progress, hand it to the user with the exact action, wait a bounded time. Speak plainly to non-technical users and avoid the words API, MCP, token and OAuth. The detailed account-connecting playbook is added automatically when a request is about connecting a service.",
 ].join("\n");
 
-/** Always-on UI line: the model may not emit agentlas-ui blocks unless the schema is present. */
+/**
+ * Always-on UI line. The component schema is NOT in any prompt: whether a turn needs it is the model's
+ * decision, not a keyword list over the user's text. The model calls the read-only `read_ui_schema`
+ * tool (agentlas-ui built-in MCP, attached to every ordinary turn) when it wants to draw a component.
+ */
 export const INTELLECT_UI_CORE_RULE = [
   "## Intellect UI",
-  "Chat can render native interactive components (charts, comparisons, diagrams, calculators, choices) from a fenced `agentlas-ui` block. The component schema is added automatically when the request calls for them; do not emit an `agentlas-ui` block unless that schema is present below.",
+  "Chat renders tables, comparisons, flows, metrics, charts and choices from `agentlas-ui`, ```chart or ```visual fences. When one beats prose, call `read_ui_schema` first and follow it; never emit one unread.",
+].join("\n");
+
+/** No tools exist in a restricted read boundary, so the schema cannot be read: prose only. */
+export const INTELLECT_UI_UNAVAILABLE_RULE = [
+  "## Intellect UI",
+  "UI blocks (agentlas-ui, chart, visual) are unavailable in this mode; answer in prose.",
 ].join("\n");
 
 export function connectionSectionText(plan: PromptSectionPlan): string {
@@ -78,20 +81,19 @@ export function connectionSectionText(plan: PromptSectionPlan): string {
   ].join("\n");
 }
 
-export function intellectUiSectionText(plan: PromptSectionPlan, locale?: string): string {
-  return plan.intellectUi ? intellectUiPrompt(locale) : INTELLECT_UI_CORE_RULE;
+export function intellectUiSectionText(options?: { toolless?: boolean }): string {
+  return options?.toolless ? INTELLECT_UI_UNAVAILABLE_RULE : INTELLECT_UI_CORE_RULE;
 }
 
 /**
  * Sections a stateless-prefix runtime carries in the current turn instead of the retained system
  * prefix (retainedResponsesPromptPacket): everything the plan loads beyond the always-on core.
  */
-export function onDemandSectionTurnBlocks(gateText: string | undefined, locale?: string): string[] {
+export function onDemandSectionTurnBlocks(gateText: string | undefined, _locale?: string): string[] {
   const plan = planPromptSections(gateText);
   const blocks: string[] = [];
   if (plan.connection === "full") blocks.push(connectionSectionText(plan));
   else if (plan.media) blocks.push(MEDIA_ROUTING_LINES.join("\n"));
-  if (plan.intellectUi) blocks.push(intellectUiPrompt(locale));
   return blocks;
 }
 

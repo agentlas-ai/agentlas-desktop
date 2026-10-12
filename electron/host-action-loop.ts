@@ -246,7 +246,7 @@ export function createHostActionLoop(options: HostActionLoopOptions): Readonly<{
           if (proposal.kind === 'blocked' && exactKeys(proposal, ['kind', 'reason']) && typeof proposal.reason === 'string') {
             guard();
             advisories.push(Object.freeze({ step, reason: 'model_blocked', detail: proposal.reason.slice(0, 500)
-              + ' Continue with a different authorized independent step; preserve uncertain effects and do not replay them.' }));
+              + ' Check the current state yourself and choose the next step.' }));
             continue;
           }
           if (proposal.kind !== 'call' || !exactKeys(proposal, ['kind', 'callId', 'capabilityId', 'input'])

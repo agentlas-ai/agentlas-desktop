@@ -1,7 +1,7 @@
 import { channelPublishReceiptsPromptBlockFor } from "../publish-receipts";
 import { resumeDesktopLongRunManually } from "../long-run/app-runtime-coordinator";
 import { getChatGoalRevision } from "../store/chat-goals";
-import { appendLongRunEvent, getLongRun, getLongRunByGoalId, latestLongRunAttemptSafeEpoch, acknowledgeUncertainLongRunAttempts, liveLongRunAttemptCount, type LongRunAttemptReviewConfirmation } from "../store/long-runs";
+import { appendLongRunEvent, getLongRun, getLongRunByGoalId, liveLongRunAttemptCount } from "../store/long-runs";
 import { getDb } from "../store/db";
 import { tryRecordRunEvent } from "../store/run-events";
 import { admitJudgedAutomaticGoal } from "../long-run/auto-goal-controller";
@@ -282,13 +282,10 @@ export function automaticGoalReplayBlockerCode(runId: string): string | null {
  * reclassifies the synthetic continuation as a new user request. */
 /**
  * 재개 요청을 만든다 — 상태를 바꾸지 않는다(재시작 체크포인트 경로가 그 전제로 판번호를 다시 대조한다).
- * actor "user": 사람이 누른 재개. 호출부가 acknowledgeUncertainLongRunAttempts 를 먼저 적고 그 뒤 판번호를 넘긴다.
- * actor "host": 자동 재개. 불확실한 부작용은 사람만 풀 수 있으므로 그것이 남아 있으면 거부한다.
+ * actor "user": 사람이 누른 재개. actor "host": 자동 재개.
+ * 이전 시도의 바깥 효과 여부는 호스트가 판단하지 않는다 — 다음 턴의 모델이 직전 턴 메모와 파일을 보고 스스로 확인한다(오너 2026-10-12).
  */
-export function automaticGoalResumeRequest(chatId: string, expectedVersion: number, actor: "user" | "host" = "host",
-  /** Main-only: a read-only observation already looked at the external outcome of the
-   * interrupted attempts and the ledger recorded its exact verdict in this transaction. */
-  observation?: { verdict: "done" | "not_done"; evidence: string; proof?: "receipt" }): import("../../shared/types").McpInvocationRequest | null {
+export function automaticGoalResumeRequest(chatId: string, expectedVersion: number, actor: "user" | "host" = "host"): import("../../shared/types").McpInvocationRequest | null {
   const chat = getDb().prepare("SELECT goal_id FROM chats WHERE id = ?").get(chatId) as { goal_id: string | null } | undefined;
   if (!chat?.goal_id) return null;
   const revision = getChatGoalRevision(chat.goal_id);
@@ -311,24 +308,11 @@ export function automaticGoalResumeRequest(chatId: string, expectedVersion: numb
     // One resolves permission from its explicit mode, not the generic field.
     // This is the stored user grant, not a new grant from a system prompt.
     ...(run.surface === "one" ? { oneMode: true, onePermissionMode: authority[2] as "read" | "write" | "full" } : {}),
-    userPrompt: `Resume the existing goal under its original permissions. Run effect/result checks in parallel with independent useful work. Failed or unavailable checks must never stop the whole goal. ${UNCERTAIN_EFFECT_POLICY} Preserve every original constraint and acceptance criterion. Verify the actual output before claiming completion, and compare it item by item against the user's original plan (including any spec document or project memory it points to): report what is missing first. For games, apps and UI, graphic quality is an acceptance criterion: placeholder shapes, default-colored rectangles, missing or misaligned assets and empty backgrounds are a failure, not a completion.${actor === "user" && latestLongRunAttemptSafeEpoch(run.id)
-      ? " The user acknowledged interrupted attempts, but the host did not prove their external outcomes. Inspect Activity and the external state yourself. ${UNCERTAIN_EFFECT_POLICY} Continue independent work."
-      : observation?.verdict === "done"
-        ? ` A read-only check just observed that the interrupted earlier action already took effect (evidence: ${observation.evidence}). Do not repeat it; continue with the next remaining step.`
-        : observation?.proof === "receipt"
-          // The host's own record: the interrupted turn only read. There is nothing to repeat.
-          ? ` The host's record shows the interrupted turn only searched, read or loaded pages (${observation.evidence}); nothing outside changed and there is nothing to repeat. Continue with the next remaining step.`
-          : observation?.verdict === "not_done"
-
-            // count, three minutes after the reply had been posted and verified). Never a licence to repeat blindly.
-            ? ` A read-only check reported that the interrupted earlier action did not take effect (evidence: ${observation.evidence}). Before doing it again, look at the exact page it targeted and at this conversation's later messages; if either shows it already happened (a posted reply, a permalink, a sent message), do not repeat it.`
-            : ""}${(() => { const receipts = channelPublishReceiptsPromptBlockFor(revision.objective); return receipts ? `\n\n${receipts}` : ""; })()}\n\n${revision.objective}` };
+    userPrompt: `Resume the existing goal under its original permissions. Run effect/result checks in parallel with independent useful work. Failed or unavailable checks must never stop the whole goal. ${UNCERTAIN_EFFECT_POLICY} Preserve every original constraint and acceptance criterion. Verify the actual output before claiming completion, and compare it item by item against the user's original plan (including any spec document or project memory it points to): report what is missing first. For games, apps and UI, graphic quality is an acceptance criterion: placeholder shapes, default-colored rectangles, missing or misaligned assets and empty backgrounds are a failure, not a completion.${(() => { const receipts = channelPublishReceiptsPromptBlockFor(revision.objective); return receipts ? `\n\n${receipts}` : ""; })()}\n\n${revision.objective}` };
 }
 
-/** 사람이 누른 재개 — 인지 이벤트와 재개가 한 트랜잭션이라, 요청을 못 만들면 인지도 남지 않는다. */
-export async function queueAutomaticGoalResume(
-  chatId: string, expectedVersion: number, confirmation?: LongRunAttemptReviewConfirmation,
-) {
+/** 사람이 누른 재개 — 요청을 만들고 재개하는 것이 한 트랜잭션이다. */
+export async function queueAutomaticGoalResume(chatId: string, expectedVersion: number) {
   const initialChat = getDb().prepare("SELECT goal_id FROM chats WHERE id = ?").get(chatId) as { goal_id: string | null } | undefined;
   const initialRun = initialChat?.goal_id ? getLongRunByGoalId(initialChat.goal_id) : null;
   if (!initialRun) throw new Error("long_run_resume_dispatch_unavailable");
@@ -343,8 +327,6 @@ export async function queueAutomaticGoalResume(
     const before = chat?.goal_id ? getLongRunByGoalId(chat.goal_id) : null;
     if (!before) throw new Error("long_run_resume_dispatch_unavailable");
     if (before.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
-    // Optional explicit review is recorded as an attestation, never fabricated by Resume.
-    if (confirmation) acknowledgeUncertainLongRunAttempts(before.id, confirmation);
     const version = getLongRun(before.id)?.version;
     if (!version) throw new Error("long_run_resume_dispatch_unavailable");
     const request = automaticGoalResumeRequest(chatId, version, "user");

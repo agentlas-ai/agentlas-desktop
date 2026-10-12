@@ -11,7 +11,7 @@
  * "직접 대조가 전체중단시키거나 하면안됨". What replaced it:
  *   - memory/previous-turn.ts gives every turn the previous turn of its conversation, with any outside call whose
  *     outcome is unknown and a judgement aid to look at the current state before repeating it;
- *   - store/long-runs.ts unsettledLongRunAttempts counts only a running attempt (bc6584e3);
+ *   - the host no longer classifies an attempt's outside effect at all (owner 2026-10-12): it records the attempt's state only;
  *   - workflow/run-graph.ts runs an automation step of unknown outcome with a note instead of holding it (1180fda2);
  *   - one/host-alerts.ts reports what the app cannot get past on its own to the owner through One (b77e3c0b).
  *
@@ -36,11 +36,8 @@ export const EFFECT_OBSERVATION_TIME_LIMIT_MS = 5 * 60_000;
 const RETIRED = "effect_observation_retired";
 
 /** Blockers that state an external effect is unknown. Older installs may have left a Goal blocked on one; the
- * blocked-goal sweep continues such a Goal itself. */
+ * blocked-goal sweep continues such a Goal itself. No code produces these any more. */
 const EFFECT_UNCERTAIN_BLOCK_REASONS = new Set<string>([
-  "checkpoint_side_effects_uncertain",
-  "goal_wait_effects_uncertain",
-  "auto_goal_resume_attempt_unsettled",
   GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN,
   "goal_wait_claimed_dispatch_uncertain",
   "goal_wait_claimed_binding_changed",

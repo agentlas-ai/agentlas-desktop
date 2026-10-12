@@ -19,8 +19,7 @@ export type GoalVerificationPrerequisiteCode =
   | "approval_required"
   | "entitlement_required"
   | "environment_unavailable"
-  | "user_stopped"
-  | "uncertain_side_effect";
+  | "user_stopped";
 export interface CheckpointCriterion {
   criterionIndex: number;
   verdict: "passed" | "failed" | "inconclusive";
@@ -33,22 +32,27 @@ export interface CheckpointCriterion {
   requiredActor?: "user" | "external" | null;
 }
 
+/** Owner 2026-10-12: no retry COUNT stops a Goal (a count cap on a failure the agent could never fix turned a Goal into a
+ * permanent dead end). Only idle spin does: this many consecutive retries whose turn executed zero tool calls and left
+ * the same failed-criteria set as before. The result is "blocked", which stays on the AGI repair path (blocked-goal
+ * sweep + AGI incident), not a terminal stop. */
+export const NO_PROGRESS_RETRY_LIMIT = 2;
+/** Blocked reason the verifier records for the idle-spin stop; distinguishable from a prerequisite or an unfixable failure. */
+export const VERIFICATION_NO_PROGRESS_REASON = "verification_no_progress";
+
 export function goalVerificationDisposition(input: {
   completed: boolean;
   verdicts: readonly CheckpointCriterion[];
-  retriesSoFar: number;
-  retryLimit: number;
-  recoveryStreak?: number;
+  /** Consecutive retries with zero tool calls and an unchanged failed-criteria set (host facts; 0 when unknown). */
+  noProgressRetries?: number;
 }): GoalVerificationDisposition {
   if (input.completed) return "completed";
   const failed = input.verdicts.filter((item) => item.verdict === "failed");
+  // Waiting on the user or an external actor (or a legacy/unknown recovery class) is a real wait, not a retry.
   if (failed.some((item) => item.recoveryClass !== "repairable")) return "blocked";
-  if (failed.length > 0) {
-    return (input.recoveryStreak ?? input.retriesSoFar) < input.retryLimit
-      ? "retry_required" : "blocked";
-  }
-  return input.verdicts.some((item) => item.verdict === "inconclusive")
-    && input.retriesSoFar < input.retryLimit ? "retry_required" : "blocked";
+  const retryable = failed.length > 0 || input.verdicts.some((item) => item.verdict === "inconclusive");
+  if (!retryable) return "blocked";
+  return (input.noProgressRetries ?? 0) >= NO_PROGRESS_RETRY_LIMIT ? "blocked" : "retry_required";
 }
 
 /** Host state, never a model-written conversation summary. Provider protocol
@@ -72,6 +76,8 @@ export interface LongRunTaskCheckpoint {
    * model wording and invocation ids. A changed failing set resets the streak. */
   recoveryFingerprint?: string | null;
   recoveryStreak?: number;
+  /** Consecutive retries with zero tool calls and an unchanged failed-criteria set, ending at this checkpoint. */
+  noProgressRetries?: number;
   /** This is not an exactly-once cursor: unknown native effects require inspection. */
   sideEffects: { state: "settled" | "uncertain"; attemptRefs: string[];
     /** Exact host effect receipt; absence is legacy evidence, not safe replay authority. */
@@ -161,12 +167,6 @@ export function compileLongRunCheckpoint(
   const plan = !ongoing || !fullPlan ? fullPlan : { ...fullPlan,
     steps: fullPlan.steps.filter(step => !closedStates.has(step.state) || recentClosed.has(step.taskId)) };
   const episodeRoute = hostEpisodeRoute(checkpoint);
-  const allReceipts = checkpoint.capsule.externalActionReceipts ?? [];
-  const closedAttemptStates = new Set([...closedStates, "interrupted"]);
-  const mustCarry = (receipt: typeof allReceipts[number]) => receipt.invocationRunId === checkpoint.invocationRunId
-    || !closedAttemptStates.has(receipt.state) || receipt.sideEffectState === "uncertain";
-  const recentReceipts = new Set(allReceipts.filter(receipt => !mustCarry(receipt)).slice(-8).map(receipt => receipt.attemptId));
-  const receipts = ongoing ? allReceipts.filter(receipt => mustCarry(receipt) || recentReceipts.has(receipt.attemptId)) : allReceipts;
   const packet = {
     schemaVersion: "agentlas.checkpoint-context.v1",
     executionClass,
@@ -195,12 +195,10 @@ export function compileLongRunCheckpoint(
     } : {}),
     historyRangeRef: checkpoint.capsule.historyRangeRef ?? null,
     instructionRevision: checkpoint.capsule.instructionSnapshot?.revision ?? null,
-    externalActionReceipts: checkpoint.capsule.externalActionReceipts ? receipts : null,
     ...(ongoing ? { lifecycle: "ongoing", historicalRecords: {
       checkpointRef: checkpoint.checkpointId,
       omittedClosedPlanSteps: (fullPlan?.steps.length ?? 0) - (plan?.steps.length ?? 0),
-      omittedSettledActionReceipts: allReceipts.length - receipts.length,
-      instruction: "The full immutable checkpoint and Goal ledger retain this history. Omitted completed work is NOT new work. Read the relevant historical receipts and current external state before taking any potentially repeated action. Unsettled receipts, open plan steps and all user constraints are retained here.",
+      instruction: "The full immutable checkpoint and Goal ledger retain this history. Omitted completed work is NOT new work. Read the relevant historical receipts and current external state before taking any potentially repeated action. Open plan steps and all user constraints are retained here.",
     } } : {}),
     workspacePath: checkpoint.workspacePath,
     eventCursor: checkpoint.capsule.lastCommittedEventSeq,

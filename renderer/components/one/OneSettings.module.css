@@ -1,7 +1,8 @@
 .railRoot { min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 .railHeader { min-height: 54px; display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: center; gap: 7px; padding: 2px 4px 10px; border-bottom: 1px solid var(--paper-3); }
 .railHeader > button { width: 32px; height: 32px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--muted-deep); cursor: pointer; }
-.railHeader > button:hover, .railHeader > button:focus-visible { background: var(--paper-3); outline: none; }
+.railHeader > button:hover { color: var(--ink); }
+.railHeader > button:focus-visible { background: var(--paper-3); outline: none; }
 .railHeader > div { min-width: 0; display: grid; gap: 3px; }
 .railHeader strong { color: var(--ink); font-size: 14px; font-weight: 720; letter-spacing: -.02em; }
 .railHeader small { overflow: hidden; color: var(--muted-deep); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }

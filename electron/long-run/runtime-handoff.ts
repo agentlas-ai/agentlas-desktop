@@ -188,10 +188,10 @@ export function getGoalRuntimeSelectionEvidence(chatId: string, goalId: string):
   let state: GoalRuntimeSelectionReceipt["state"] = event.state;
   let effective: RuntimeSelection | null = null;
   if (event.state === "claimed" && event.successorInvocationId) {
-    const attempt = getDb().prepare(`SELECT a.runtime_selection_json, a.state, a.side_effect_state FROM long_run_worker_attempts a
+    const attempt = getDb().prepare(`SELECT a.runtime_selection_json, a.state FROM long_run_worker_attempts a
       JOIN long_run_workers w ON w.id=a.worker_id AND w.run_id=a.run_id
       WHERE a.run_id=? AND a.invocation_run_id=? AND w.role='controller' ORDER BY a.rowid DESC LIMIT 1`)
-      .get(run.id, event.successorInvocationId) as { runtime_selection_json: string; state: string; side_effect_state: string } | undefined;
+      .get(run.id, event.successorInvocationId) as { runtime_selection_json: string; state: string } | undefined;
     // Binding an attempt occurs on the pre-run runtime-selected notice. That
     // alone is not evidence the provider executed. Do not call it applied until
     // the host has a successful terminal and settled effect receipt.
@@ -200,7 +200,7 @@ export function getGoalRuntimeSelectionEvidence(chatId: string, goalId: string):
     let effectsSettled = false;
     try { effectsSettled = readInvocationEffectBoundary({ invocationRunId: event.successorInvocationId,
       expectedChatId: chatId }).effects === "settled"; } catch { /* No receipt is not settled. */ }
-    if (attempt?.state === "completed" && attempt.side_effect_state === "committed" && terminal && effectsSettled) {
+    if (attempt?.state === "completed" && terminal && effectsSettled) {
       try {
         if (JSON.stringify(JSON.parse(attempt.runtime_selection_json))
           === JSON.stringify(captureLongRunRuntimeSelection(event.requested, { requireExact: true }))) {

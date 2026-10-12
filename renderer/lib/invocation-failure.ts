@@ -204,10 +204,6 @@ export function goalAdmissionControlFailureForCode(code: string | null | undefin
       message = ko ? "목표가 오너의 답이나 예약된 다음 차례를 기다리는 중이라 이 자동 요청은 시작하지 않았습니다. 목표는 그대로이며, 대화에 직접 보내면 바로 이어갑니다."
         : "The goal is waiting for your answer or its scheduled next turn, so this automatic request did not start. The goal is unchanged; send a message in the chat to continue it now.";
       break;
-    case "auto_goal_resume_attempt_unsettled":
-      message = ko ? "이전 실행의 외부 결과가 불확실해 새 요청을 시작하지 않았습니다. Activity와 실제 외부 결과를 확인한 뒤 목표의 재개 버튼에서 검토해 주세요. 목표와 입력은 보존되어 있습니다."
-        : "The previous action's external outcome is uncertain, so this request did not start. Check Activity and the external result, then review it from the goal's Resume button. Your goal and input are preserved.";
-      break;
     case "goal_verification_pending":
       message = ko ? "이전 실행의 결과가 아직 확인되지 않아 시작하지 않았습니다. 목표와 입력은 보존되어 있습니다."
         : "The previous attempt's outcome is still unresolved, so this request did not start. Your goal and input are preserved.";

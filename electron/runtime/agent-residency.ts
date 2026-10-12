@@ -62,7 +62,7 @@ export interface AgentResidencyEntry {
   source: AgentResidencySource;
   /** 마지막 활동(획득/반납/턴) 시각 — 12h 리퍼의 기준 시계. */
   lastActivityAt: number;
-  /** Explicit host exemption only; One identity alone never exempts idle resources. */
+  /** Exempt from the 12h idle reaper: the built-in One agent (Hope) or an explicit host exemption. */
   reaperExempt: boolean;
   /** 지금 턴이 쓰는 중인가. 사용 중인 것은 리퍼도 LRU 도 건드리지 않는다. */
   inUse: boolean;
@@ -375,9 +375,12 @@ export function resolveAgentResidencySource(agentId: string | null | undefined):
   return source;
 }
 
-/** Agent identity alone does not exempt an idle provider session from the 12h reaper. */
-export function isResidencyExemptAgent(_agentId: string | null | undefined): boolean {
-  return false;
+/**
+ * The personal agent (Hope, the built-in One agent) stays resident until the process itself ends: owner decision 2026-10-12,
+ * "무슨 일이 있어도 컴퓨터 전원이 나가지 않는 이상 켜놔야 한다". Every other agent still retires after 12h idle.
+ */
+export function isResidencyExemptAgent(agentId: string | null | undefined): boolean {
+  return agentId === BUILTIN_ONE_AGENT_ID;
 }
 
 /* ──────────────────────────── 등록/갱신 ──────────────────────────── */

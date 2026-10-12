@@ -52,7 +52,7 @@ export function localOneHarness(): OneHarnessService {
       try {
         const boundary = readInvocationEffectBoundary({ invocationRunId: input.runId, expectedChatId: task.originChatId });
         effect = { state: boundary.terminal ? boundary.effects : 'pending', receiptEventId: boundary.receiptEventId,
-          terminalEventId: boundary.terminalEventId, observedBy: boundary.settledByObservation ?? null,
+          terminalEventId: boundary.terminalEventId, observedBy: null,
           sourceRefs: boundary.sourceRefs, pendingEffectRefs: boundary.pendingEffectRefs };
       } catch { effect.pendingEffectRefs = ['one_effect_receipt_unavailable']; }
       const project = task.projectId ? getProject(task.projectId) : null;

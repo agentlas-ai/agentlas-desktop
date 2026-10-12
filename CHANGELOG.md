@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.3.18 — 2026-10-12
+
+- The app no longer decides for itself whether an outside action "may have happened". Agents used to be told not to redo voice, upload or render work that was marked uncertain, and a Goal could stop on that label. Now the agent checks the current state itself and redoes only what has not happened.
+- There is no retry count on Goal verification and no per-attempt action limit for AGI. A Goal stops retrying only when two retries in a row call no tool and leave the same criteria failing; AGI then takes it over instead of the Goal ending.
+- Native chat components (tables, comparisons, flows, metrics, charts, choices) are now used when the agent decides they help. It reads their format through a read-only tool instead of the app guessing from your words, and the always-on instructions are slightly shorter than before.
+- A video linked in chat under a descriptive name opens as a video in the side panel instead of "preview unsupported". The side panel's file tabs no longer show a scrollbar that pushed them up.
+- Popups are plain white again, and most small buttons, chips and tabs no longer flash a gray background on hover.
+- Includes everything in 1.3.17, which stayed a pre-release: Apple's notarization ticket lookup dropped the connection during its final verification three times. Release verification now retries that lookup for about five minutes.
+- Your personal agent (Hope) stays resident until the app quits. The personal One composer matches the reference shape. Local llama-server keeps its prompt cache across small edits, and the auto-selected tool set stays fixed for 60 minutes.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.17 — 2026-10-12
 
 - When a runtime session has to be rebuilt, the previous turns are resent as what was said and done. Each turn's host instructions and the full text of every tool result are no longer replayed. Each tool call is one short line: name, error, files made and a short argument summary. In the twelve largest conversations, the replayed text went from 22.9 million to 1.25 million characters.

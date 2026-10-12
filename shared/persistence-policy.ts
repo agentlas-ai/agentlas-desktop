@@ -53,7 +53,7 @@ export type FailureCause =
   | { kind: "self_hold" }
   /** 도구 없이 했다고 주장(호스트가 센 도구 호출 0). */
   | { kind: "claimed_without_tools" }
-  /** 바깥 효과가 반영됐는지 모름 — 다시 하지 말고 본다. */
+  /** 모델이 스스로 보고한 원인(전술 표식) — 호스트는 바깥 효과를 판정하지 않는다(오너 2026-10-12). 다시 하지 말고 본다. */
   | { kind: "effect_uncertain" }
   /** 판정기에 닿지 못함 — 실행이 아니라 판정만 다시. */
   | { kind: "judge_unavailable" }

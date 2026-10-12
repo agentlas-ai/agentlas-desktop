@@ -4,7 +4,7 @@
 .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-deep); }
 .criteria { color: var(--muted-deep); font-size: 10px; }
 .root button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; min-height: 28px; padding: 4px 7px; border-radius: 6px; font: inherit; color: var(--ink); }
-.root button:hover { background: var(--paper-edge); }
+.root button:hover { color: var(--ink); }
 .root button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 .root button:disabled { opacity: 0.5; cursor: default; }
 .error { margin: 0 0 5px; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }

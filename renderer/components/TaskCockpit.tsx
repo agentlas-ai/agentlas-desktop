@@ -630,7 +630,8 @@ function workspacePreviewFromLocalFile(path: string): WorkspaceFilePreview {
 function workspacePreviewFromLinkedFile(file: LinkedFileArtifact): WorkspaceFilePreview {
   const path = file.path || file.paths?.[0] || file.href;
   const isRemoteUrl = /^https?:\/\//i.test(path);
-  const viewerKind = isRemoteUrl ? "browser" : viewerKindFromName(file.name || path);
+  // Classify by the target, not the link label (a label like "24-second video" has no extension).
+  const viewerKind = isRemoteUrl ? "browser" : viewerKindFromName(path || file.name);
   return {
     path,
     name: file.name || basename(path),
@@ -6444,14 +6445,11 @@ function ChatPage() {
       });
   }, [chat]);
   /*
-   * ★2026-09-23 — Work 의 재개는 검토 없이 resumeGoal 만 불렀다. 멈춘 시도가 있으면 Main 이
-   *   goal_resume_uncertain_review_required 로 거절하고, Work 에는 그걸 풀 화면이 없었다(막다른 길).
-   *   One 과 같은 순서를 쓴다: 먼저 getGoalResumeReview — 효과 관찰이 도는 중이거나 멈춘 시도가
-   *   없으면 null 이라 곧바로 재개한다(자동 해소 우선). 사람이 볼 것이 남았을 때만 한 문장과
-   *   "이어가기" 하나를 보이고, 그 확인이 곧 정확한 시도 집합에 대한 confirmation 이다.
+   * 재개 전 검토는 자동화 연결(automationOwnership·automationSetup)에만 쓴다. 멈춘 시도의 바깥 효과는
+   * 호스트가 판단하지 않는다(오너 2026-10-12) — 검토할 것이 없으면 getGoalResumeReview 는 null 이라 곧바로 재개한다.
    */
   const [goalResumeReview, setGoalResumeReview] = useState<GoalResumeReview | null>(null);
-  // A review names one exact attempt set; a new Goal version or another chat invalidates it.
+  // A review names one exact Goal version; a new version or another chat invalidates it.
   useEffect(() => { setGoalResumeReview(null); }, [chat?.id, goalContext?.version]);
   const handleResumeGoal = useCallback((confirmation?: GoalResumeConfirmation) => {
     if (!chat || !goalContext?.version) return;
@@ -6487,20 +6485,6 @@ function ChatPage() {
           : /automation_goal_execution_review_(?:required|changed|unavailable)/.test(raw)
           ? (ko ? "자동화와 Goal의 연결을 다시 확인해야 합니다. 최신 목표를 확인한 뒤 이어가기를 눌러 주세요."
             : "The automation's connection to this Goal needs review. Refresh the Goal and select Continue again.")
-          : /auto_goal_resume_attempt_unsettled/.test(raw)
-          ? (ko ? "중단된 작업의 결과를 먼저 확인해야 합니다. 목표와 작업 기록은 보존되어 있습니다." : "The interrupted action's outcome needs confirmation first. Your goal and work history are preserved.")
-          : /goal_resume_uncertain_review_cancelled/.test(raw)
-            ? (ko ? "결과 확인을 취소했습니다. 목표는 중단 상태이며 기록은 보존됩니다." : "Outcome review was cancelled. The goal remains paused and its history is preserved.")
-          : /goal_resume_uncertain_review_changed/.test(raw)
-            ? (ko ? "확인 중 이전 실행 기록이 바뀌었습니다. 최신 Activity를 확인한 뒤 다시 시도해 주세요." : "The interrupted attempts changed during review. Inspect the latest Activity and try again.")
-          : /goal_resume_uncertain_review_required/.test(raw)
-            ? (ko ? "이전 실행의 외부 결과를 직접 확인해야 합니다. 목표는 중단 상태입니다." : "Review the interrupted attempts' external outcomes first. The goal remains paused.")
-          : /goal_resume_uncertain_review_unverifiable/.test(raw)
-            ? (ko ? "일부 시도의 Activity 호출 ID가 없어 결과 대조가 불가능할 수 있습니다. 목표와 기록은 보존되며 자동 재개하지 않습니다." : "Some attempts lack an Activity invocation ID, so their outcomes may be impossible to verify. The goal and history remain preserved without automatic resume.")
-          : /goal_resume_uncertain_review_too_large/.test(raw)
-            ? (ko ? "이 창에 개별 시도를 모두 표시할 수 없어 재개하지 않았습니다. Activity에서 확인해 주세요." : "Too many interrupted attempts to display reliably here. The goal remains paused; inspect Activity.")
-          : /goal_resume_uncertain_automation_reconciliation_required/.test(raw)
-            ? (ko ? "자동화의 외부 결과가 불확실해 재개하지 않았습니다. Activity와 실제 외부 결과를 대조해야 합니다." : "The automation was not resumed because prior external outcomes are unknown. Compare Activity with the actual external result.")
           : /goal_legacy_lifecycle_confirmation_unavailable/.test(raw)
             ? (ko
               ? "저장된 요청의 지속 목표 여부를 현재 모델로 확인하지 못해 재개하지 않았습니다. 모델 연결 상태를 확인한 뒤 다시 시도해 주세요."
@@ -7367,11 +7351,7 @@ function ChatPage() {
                 : (locale === "ko" ? "자동화가 실행할 Hub 버전과 설정을 저장한 뒤 다시 연결을 확인해 주세요." : "Save the automation's Hub version and settings, then return to review its connection.")
             : goalResumeReview.blocker
               ? (locale === "ko" ? "이 목표는 여기서 안전하게 이어갈 수 없어요. 목표는 멈춘 채로 둡니다." : "This goal cannot be continued safely here. The goal stays paused.")
-              : !goalResumeReview.attempts.length && goalResumeReview.automationOwnership
-                ? (locale === "ko" ? "이 Goal과 함께 재개하고 멈출 자동화를 확인해 주세요." : "Confirm the automation that will resume and stop with this Goal.")
-              : (locale === "ko"
-                ? `멈추기 전 작업 ${goalResumeReview.attempts.length}건은 이미 처리됐을 수 있어 다시 하지 않고, 다음 작업부터 이어갑니다.`
-                : `The ${goalResumeReview.attempts.length} interrupted task(s) may already have gone through, so they will not be redone — work continues from the next step.`)}</span>
+              : (locale === "ko" ? "이 Goal과 함께 재개하고 멈출 자동화를 확인해 주세요." : "Confirm the automation that will resume and stop with this Goal.")}</span>
           {goalResumeReview.automationOwnership && <div style={{ flexBasis: "100%", minWidth: 0, overflowWrap: "anywhere" }} data-goal-automation-owner-review={goalResumeReview.automationOwnership.automationId}>
             <p>{locale === "ko" ? `‘${goalResumeReview.automationOwnership.title}’ 자동화를 이 Goal에 연결합니다. Goal을 멈추면 이 자동화의 실행도 멈춥니다.`
               : `Connect “${goalResumeReview.automationOwnership.title}” to this Goal. Stopping the Goal will also stop this automation's execution.`}</p>

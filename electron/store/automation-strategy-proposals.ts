@@ -21,7 +21,7 @@ import {
   getChatGoalRevision,
   reviseStoredAutomaticGoal,
 } from "./chat-goals";
-import { bindCurrentGoalRevisionToLongRun, getLongRunByGoalId, unsettledLongRunAttemptCount } from "./long-runs";
+import { bindCurrentGoalRevisionToLongRun, getLongRunByGoalId } from "./long-runs";
 import {
   applyAutomationStrategyRevision,
   getAutomationStrategyRevisionByRequestId,
@@ -1621,9 +1621,6 @@ function applyProposalWithGoalAmendment(
   if (run.version !== amendment.expectedRunVersion) {
     throw new AutomationStrategyProposalError("proposal_goal_amendment_stale");
   }
-  if (unsettledLongRunAttemptCount(run.id) > 0) {
-    throw new AutomationStrategyProposalError("proposal_goal_amendment_attempt_unsettled");
-  }
 
   const db = getDb();
   const result = db.transaction(() => {
@@ -1638,7 +1635,7 @@ function applyProposalWithGoalAmendment(
     const liveGoal = getChatGoalRevision(current.goalId!);
     const liveRun = getLongRunByGoalId(current.goalId!);
     if (!liveGoal || !liveRun || liveGoal.revision !== amendment.expectedGoalRevision
-      || liveRun.version !== amendment.expectedRunVersion || unsettledLongRunAttemptCount(liveRun.id) > 0) {
+      || liveRun.version !== amendment.expectedRunVersion) {
       throw new AutomationStrategyProposalError("proposal_goal_amendment_stale");
     }
 

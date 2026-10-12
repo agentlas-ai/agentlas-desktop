@@ -25,13 +25,12 @@ import { importDedicatedBrowserCookies, syncConnectBrowserSession } from "./brow
 import { goalActiveChatIds } from "./store/goal-active-chats";
 import { registerAutomationChatActivityIpc } from "./automation-chat-activity-ipc";
 import { registerGoalPanelIpc } from "./goal-panel-ipc";
-import { acknowledgeUncertainLongRunAttempts, appendLongRunEvent, getLongRunByGoalId, getLongRunAttemptReview, bindCurrentGoalRevisionToLongRun, longRunBudgetExhaustion, longRunOwnerHold, LONG_RUN_BUDGET_EXHAUSTED_CODE, MAX_GOAL_RESUME_REVIEW_ATTEMPTS, type LongRunAttemptReviewConfirmation } from "./store/long-runs";
+import { appendLongRunEvent, getLongRunByGoalId, bindCurrentGoalRevisionToLongRun, longRunBudgetExhaustion, longRunOwnerHold, LONG_RUN_BUDGET_EXHAUSTED_CODE } from "./store/long-runs";
 import { getChatGoalRevision, reauthorizeStoredAutomaticGoal, reviseStoredAutomaticGoal } from "./store/chat-goals";
 import { adoptExplicitGoalGrant } from "./long-run/explicit-goal-authority";
 import { latestGoalWaitSubscription } from "./long-run/wait-subscriptions";
 import { ONE_DECISION_JUDGE_TIMEOUT_MS } from "../shared/one-decision";
 import { goalResumeRecoveryBlockerCode } from "../shared/long-run";
-import { matchesGoalResumeReview } from "../shared/goal-resume-review";
 import { acknowledgeAutomationGoalExecutionReview, getAutomationGoalExecutionReview } from "./automation-goal-owner-review";
 import { acknowledgeGoalExecutionResume, currentAutomationGoalExecutionOwnerMatches } from "./automation-execution-control";
 import { getGoalRuntimeSelection, requestGoalRuntimeSelection } from "./long-run/runtime-handoff";

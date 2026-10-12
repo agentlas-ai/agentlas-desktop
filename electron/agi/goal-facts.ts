@@ -17,7 +17,6 @@ import { getInvocationRunReceipt } from "../store/run-events";
 import { readGoalPlan } from "../store/goal-plans";
 import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
-import { isEffectUncertainBlockReason } from "../long-run/effect-observation";
 import { isGoalObserving } from "../long-run/effect-observation-tickets";
 import type { AgiBlockerFacts, AgiBlockerSignal, AgiTacticFact } from "./blocker";
 
@@ -25,7 +24,7 @@ import type { AgiBlockerFacts, AgiBlockerSignal, AgiTacticFact } from "./blocker
 export const AGI_MISSED_DUE_GRACE_MS = 5 * 60_000;
 
 /** goal_wait_* codes that mean "the host refused to register the wait" (not an effect/claim reconciliation). */
-const WAIT_REFUSAL = /^goal_wait_(?!effects_uncertain|claimed_|restored|registered|replan_started)[a-z_]+$/;
+const WAIT_REFUSAL = /^goal_wait_(?!claimed_|restored|registered|replan_started)[a-z_]+$/;
 const OWNER_QUESTION = new Set(["goal_owner_answer_required", "auto_goal_owner_review_required"]);
 
 export interface AgiGoalFactsDeps {
@@ -80,45 +79,6 @@ function ownerHold(db: Database.Database, runId: string): boolean {
         OR (kind = 'run.status_changed' AND actor_kind = 'user' AND json_extract(payload_json, '$.to') IN ('queued', 'running')))) AS released`)
     .get(runId, runId) as { paused: number | null; released: number | null } | undefined;
   return typeof row?.paused === "number" && (typeof row.released !== "number" || row.paused > row.released);
-}
-
-function uncertainAttemptIds(db: Database.Database, runId: string): string[] {
-  if (!tableExists(db, "long_run_worker_attempts")) return [];
-  const rows = db.prepare(`SELECT id FROM long_run_worker_attempts WHERE run_id = ? AND state <> 'running'
-    AND (state = 'uncertain' OR side_effect_state = 'uncertain') ORDER BY id`).all(runId) as Array<{ id: string }>;
-  // An attempt acknowledged or settled by a later ledger event (user review or observation/receipt) is no longer open.
-  const settled = new Set<string>();
-  for (const event of db.prepare(`SELECT payload_json FROM long_run_events WHERE run_id = ?
-      AND ((kind = 'run.user_control' AND json_extract(payload_json, '$.action') = 'acknowledge_uncertain_attempts')
-        OR (kind = 'run.effect_observation' AND json_extract(payload_json, '$.action') = 'settle_uncertain_attempts'))`)
-    .all(runId) as Array<{ payload_json: string }>) {
-    try { for (const id of (JSON.parse(event.payload_json).attemptIds ?? []) as string[]) settled.add(id); } catch { /* skip */ }
-  }
-  return rows.map((row) => row.id).filter((id) => !settled.has(id));
-}
-
-function exhaustedObservation(db: Database.Database, runId: string): { attemptIds: string[]; looksAfter: number; seq: number } | null {
-  const row = db.prepare(`SELECT seq, payload_json FROM long_run_events WHERE run_id = ? AND kind = 'run.effect_observation'
-    AND json_extract(payload_json, '$.action') = 'exhausted' ORDER BY seq DESC LIMIT 1`).get(runId) as { seq: number; payload_json: string } | undefined;
-  if (!row) return null;
-  let attemptIds: string[] = [];
-  try {
-    const payload = JSON.parse(row.payload_json) as { targetSet?: string };
-    attemptIds = JSON.parse(payload.targetSet ?? "[]") as string[];
-  } catch { attemptIds = []; }
-  const targetSet = JSON.stringify([...attemptIds].sort());
-  // Exhaustion belongs to one target set. An expanded or different set has
-  // its own observation budget and does not prove that this cap was bypassed.
-  const later = db.prepare(`SELECT payload_json FROM long_run_events WHERE run_id = ? AND kind = 'run.effect_observation'
-    AND json_extract(payload_json, '$.action') = 'dispatched' AND seq > ?`).all(runId, row.seq) as Array<{ payload_json: string }>;
-  const looksAfter = later.filter(({ payload_json }) => {
-    try {
-      const payload = JSON.parse(payload_json) as { observationTargetIds?: unknown; attemptIds?: unknown };
-      const targets = payload.observationTargetIds ?? payload.attemptIds;
-      return Array.isArray(targets) && JSON.stringify([...targets].sort()) === targetSet;
-    } catch { return false; }
-  }).length;
-  return { attemptIds, looksAfter, seq: row.seq };
 }
 
 function tactics(db: Database.Database, goalId: string, nowMs: number): { tactics: AgiTacticFact[]; blockedNodeId: string | null; readiness?: PlanReadiness } {
@@ -350,21 +310,6 @@ export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): Agi
       const unscheduled = currentUnscheduledRest(db, run);
       if (unscheduled) { signals.push({ kind: "blocked_status", reason: unscheduled.code }); refs.push(unscheduled.ref); }
       if (run.status === "waiting_user") signals.push({ kind: "needs_input", code: "waiting_user" });
-      // An outward effect whose result is unknown no longer holds a Goal (1.2.58, owner decision 2026-10-05): the next
-      // turn reads the previous one and checks for itself, and the looks that ended in "exhausted" are retired. Open
-      // uncertain attempts are the blocker only for a Goal an older install left blocked on one. Otherwise they hid the
-      // real failure: on 2026-10-05 AGI filed the rooms' runtime_turn_unsettled loop as cause effect_uncertain, cited a
-      // look exhausted the day before, and sent teammate work on that basis.
-      if (run.status === "blocked" && isEffectUncertainBlockReason(run.blockedReason)) {
-        const uncertain = uncertainAttemptIds(db, run.id);
-        const exhausted = exhaustedObservation(db, run.id);
-        if (exhausted && exhausted.attemptIds.some((id) => uncertain.includes(id))) {
-          signals.push({ kind: "effect_observation_exhausted", attemptIds: exhausted.attemptIds, looksAfterExhausted: exhausted.looksAfter });
-          refs.push(`long_run_event:${run.id}:${exhausted.seq}`);
-        } else if (uncertain.length) {
-          signals.push({ kind: "effect_uncertain", attemptIds: uncertain });
-        }
-      }
       if (run.stallStreak >= run.stallWindow && run.stallWindow > 0) signals.push({ kind: "stall_detected", streak: run.stallStreak });
       if (deps.continuationParkedForOwner?.(goalId)) signals.push({ kind: "needs_input", code: "continuation_needs_input" });
       if (run.rootChatId && deps.pendingApproval?.(run.rootChatId)) signals.push({ kind: "boundary", boundary: "security_consent", code: "tool_approval_pending" });
@@ -393,7 +338,7 @@ export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): Agi
     pauseReason: run.pauseReason, blockedReason: run.blockedReason,
     // Audit rows and evidence refs remain intact. Only baseline blockers already
     // superseded by this exact registered wait leave the current diagnosis.
-    signals: quiet ? signals.filter(signal => ["effect_uncertain", "effect_observation_exhausted"].includes(signal.kind)) : signals, tactics: plan.tactics, planReadiness: plan.readiness,
+    signals: quiet ? [] : signals, tactics: plan.tactics, planReadiness: plan.readiness,
     blockedNodeId: plan.blockedNodeId, evidenceRefs: refs };
 }
 

@@ -61,7 +61,7 @@
 }
 
 .close:hover:not(:disabled) {
-  background: rgba(120, 128, 134, 0.14);
+  color: var(--ink);
 }
 
 .scroll {

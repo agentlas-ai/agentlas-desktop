@@ -309,7 +309,7 @@ button.row:disabled .trailing { color: var(--muted-deep); }
   color: var(--ink-soft);
   cursor: pointer;
 }
-.back:hover,
+.back:hover { color: var(--ink); }
 .back:focus-visible { background: var(--paper-3); outline: none; }
 .options { display: grid; padding-top: 6px; min-width: 0; }
 
