@@ -187,7 +187,7 @@ export function startAliveOrganisms(): AliveOrganismHost {
       db: getDb(), nowMs: Date.now,
       latestReceipt: (chatId) => {
         const receipt = invocationService.latestReceipt(chatId);
-        return receipt ? { status: receipt.status, errorCode: receipt.errorCode ?? null, runId: receipt.runId ?? null } : null;
+        return receipt ? { status: receipt.status, errorCode: receipt.errorCode ?? null, runId: receipt.runId ?? null, errorMessage: receipt.errorMessage ?? null } : null;
       },
       chatBusy: (chatId) => invocationService.activeChatIds().includes(chatId),
       continuationParkedForOwner,

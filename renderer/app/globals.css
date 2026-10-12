@@ -10407,7 +10407,8 @@ button[data-toggle-state="on"] {
 .sidenav-update-secondary {
   flex: 1 1 0;
   min-width: 0;
-  padding: 0;
+  /* 눌림·hover 배경이 글자·아이콘·퍼센트에 붙지 않게 안쪽 여백을 둔다. */
+  padding: 0 12px;
   justify-content: flex-start;
   background: transparent;
   color: var(--ink);

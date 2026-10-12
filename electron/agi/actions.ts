@@ -129,7 +129,7 @@ export interface AgiExecutorDeps {
     apply(goalId: string, plan: AgiPlanView, ops: AgiPlanOp[]): void;
   };
   /** Record a persistence move (switch_runtime / switch_tool) for the goal's next turn. */
-  recordMove?(goalId: string, runId: string, move: "switch_runtime" | "switch_tool", detail: Record<string, unknown>): { ok: true } | { ok: false; code: string } | void;
+  recordMove?(goalId: string, runId: string, move: "switch_runtime" | "switch_tool" | "native_harness", detail: Record<string, unknown>): { ok: true } | { ok: false; code: string } | void;
   /** Installed alternatives for a capability path (retry_node_with guard). */
   installedPaths?(capability: string): string[];
   /** The login-recovery ladder seam (plugged by electron/browser/*; absent → unavailable). */
@@ -397,10 +397,14 @@ export class AgiActionExecutor {
       evidenceRefs: Array.isArray(settled.detail?.evidenceRefs) ? settled.detail!.evidenceRefs as string[] : [],
       // A failed effect is ruled out for this incident (R2); a refused precondition is not an attempt.
       ruledOut: !settled.ok && /\.failed$|-failed$|unavailable$/.test(settled.code) });
-    if (settled.ok && goal.chatId && this.deps.announce && request.action !== "file_defect") {
+    // The room is One's (owner 2026-10-12: "AGI · Motiondirector에게 t5 작업을 맡겼어요 같은 거 쓰지 마라"). AGI's own
+    // actions are host bookkeeping: they stay in the receipts and the Goal panel (goal-panel.ts) and never become room
+    // messages. Only an ask the owner must answer is posted.
+    const ownerAsk = request.action === "ask_owner_once" || request.action === "request_app_restart";
+    if (settled.ok && goal.chatId && this.deps.announce && ownerAsk) {
       const line = noticeLine(request.action, settled);
       if (line) {
-        try { this.deps.announce({ chatId: goal.chatId, actionId: request.actionId, kind: request.action === "ask_owner_once" || request.action === "request_app_restart" ? "ask" : "action", text: line }); }
+        try { this.deps.announce({ chatId: goal.chatId, actionId: request.actionId, kind: "ask", text: line }); }
         catch { /* a notice cannot undo the action */ }
       }
     }
@@ -418,10 +422,7 @@ export class AgiActionExecutor {
         .run(JSON.stringify(browser), request.actionId);
       if (login) this.deps.db.prepare("UPDATE agi_action_receipts SET result_json = json_set(result_json, '$.detail.login', json(?)) WHERE action_id = ?")
         .run(JSON.stringify(login), request.actionId);
-      if (!failed && goal.chatId && this.deps.announce && (code === "agi.login.recovered" || code === "agi.browser.restarted")) {
-        const line = noticeLine(request.action, { actionId: request.actionId, action: request.action, ok: true, code, detail: {} });
-        if (line) this.deps.announce({ chatId: goal.chatId, actionId: `${request.actionId}:done`, kind: "action", text: line });
-      }
+      // A recovered login or restarted browser is AGI bookkeeping too: no room message (see run() above).
     } catch { /* the store may be closing */ }
   }
 
@@ -500,6 +501,19 @@ export class AgiActionExecutor {
         const recorded = this.deps.recordMove(goal.goalId, goal.runId, "switch_tool", { incidentId, nodeId, capability, path });
         if (recorded && recorded.ok === false) return no(recorded.code);
         return ok("agi.retry.recorded", { nodeId, path });
+      }
+      case "use_native_harness": {
+        // An Agentlas capability keeps failing for this goal (our defect): until it recovers, every step that needs it is
+        // done with the runtime's own tools (shell, direct API calls with the saved keys, local programs, its built-in
+        // web access) and Agentlas only records the outputs. The failure is the goal's, not one tactic's: the browser
+        // ladder and run receipts are chat-level facts. Host facts only; no model judgment chooses it.
+        const capability = text(args.capability, 80);
+        const defect = text(args.defect, 120) || "our_defect";
+        if (capability !== "browser" && capability !== "tool") return no("agi.harness.capability-required");
+        if (!this.deps.recordMove) return no("agi.move.unavailable");
+        const recorded = this.deps.recordMove(goal.goalId, goal.runId, "native_harness", { incidentId, capability, defect });
+        if (recorded && recorded.ok === false) return no(recorded.code);
+        return ok("agi.harness.recorded", { capability, defect });
       }
       case "replan_tree": {
         if (!this.deps.plan) return no("agi.plan.unavailable");
@@ -621,11 +635,18 @@ export class AgiActionExecutor {
         return ok("agi.app-restart.asked", { reason: text(args.reason, 200) });
       }
       case "file_defect": {
-        const code = text(args.code, 160);
-        if (!code || !/^[a-z0-9_:.-]+$/i.test(code)) return no("agi.defect.code-required");
+        const named = text(args.code, 160);
+        if (!named || !/^[a-z0-9_:.-]+$/i.test(named)) return no("agi.defect.code-required");
         const evidenceRefs = Array.isArray(args.evidenceRefs) ? args.evidenceRefs.filter((ref): ref is string => typeof ref === "string").slice(0, 12) : [];
         if (!evidenceRefs.length) return no("agi.defect.evidence-required");
         const category = ["crash", "stall", "wrong-result", "ui", "login", "other"].includes(String(args.category)) ? String(args.category) : "other";
+        // A defect's identity is host-typed: one of the incident's own defect findings, or else the incident's reason code
+        // and category. A model names the same defect differently every time (production 2026-10-12: 65 reports with 65
+        // spellings from run_failed_unknown incidents, 44 from boundary_payment), so its name never matched
+        // UNIQUE(goal_id, code) and each attempt filed a new report. The incident and evidence refs carry the specifics.
+        const incident = this.incidents.get(incidentId);
+        const typed = incident?.diagnosis.defects?.some((finding) => finding.code === named) === true;
+        const code = typed || !incident ? named : `${incident.reasonCode}:${category}`;
         const id = `agi-defect:${request.actionId}`;
         const inserted = this.deps.db.prepare(`INSERT INTO agi_defect_reports(id,goal_id,chat_id,incident_id,code,category,evidence_json,workaround,created_at_ms)
           VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(goal_id, code) DO NOTHING`)

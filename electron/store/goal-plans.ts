@@ -84,7 +84,9 @@ export type GoalPlanDecisionKind =
   /** An edit the owner made in the goal panel (electron/long-run/goal-panel.ts). Receipt only; the node rows carry the state. */
   | "owner_edit" | "marker_apply" | "marker_context"
   /** Agent Strategy (electron/long-run/agent-strategy.ts): a KPI state transition receipt, and the outcome of a strategy shift. */
-  | "kpi_state" | "strategy_shift";
+  | "kpi_state" | "strategy_shift"
+  /** The AGI unblocker handed a repeatedly failing Agentlas capability to the runtime's own tools for a while (agi/actions.ts use_native_harness). */
+  | "native_harness";
 
 export interface GoalPlanDecisionRow {
   id: string;

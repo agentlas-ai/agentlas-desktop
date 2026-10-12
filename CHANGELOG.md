@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.3.16 — 2026-10-12
+
+- When an Agentlas browser or tool keeps failing for a Goal, the Goal no longer waits on it. After the same failure twice in a day, the Goal's turns do those steps with the runtime's own tools: shell commands, direct API calls with your saved keys, local programs and the runtime's own web access. Agentlas records the results. A step that truly needs you (a sign-in, a payment, a consent) is asked once. Before, AGI kept restarting the browser or starting another turn: one Goal hit the same browser failure 36 times in a week.
+- AGI no longer treats a Goal that is waiting for you as failing. While a Goal waits for your answer or a scheduled retry, the app refuses other system turns on purpose; AGI read those refusals as unknown failures (43 of 60 such incidents) and answered each with another turn that was refused the same way. AGI now also reads the real cause behind the app's generic start and runner failures.
+- AGI files the same app defect once. It used to file a new report each time it re-described the same problem (138 reports for a handful of defects).
+- AGI now knows which step of a Goal is blocked. The marker it read was never written, so its choices ignored which step had failed.
+- AGI no longer posts its actions in the room (for example, handing a step to a teammate). Only a question you must answer, or a request to restart the app, appears in the chat; the actions stay on the Goal panel.
+- When a step's outside effect is unknown (for example, an upload that returned no answer), the agent checks for itself and does the step again if it is missing, instead of waiting for a reviewer indefinitely.
+- A teammate shown as failed because of a run in another room shows the last failure reason in its 1:1 window too.
+- The update card's version button no longer crowds its hover background against the text.
+- Includes everything in 1.3.15, which was not published: Apple's notarization ticket service dropped the connection while stapling in all four of its signed builds. The Mac build now retries stapling.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.15 — 2026-10-12
 
 - A teammate's or One's runtime session (Codex, Claude Code, Grok, Cursor, Kimi) is no longer reopened when a turn routes other tools or needs other instruction sections. It continues the same session, and changed instructions are delivered to it once. Before, one teammate chat could open five new Codex sessions in a day, each re-sending its whole context uncached.

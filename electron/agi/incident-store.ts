@@ -128,6 +128,13 @@ export class AgiIncidentStore {
     return { incident: this.byDigest(diagnosis.goalId, diagnosis.stateDigest)!, created, reopened };
   }
 
+  /** How many incidents with this reason code the goal opened since `sinceMs` (a recurring cause, not one state). */
+  recurrences(goalId: string, reasonCode: string, sinceMs: number): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM agi_incidents WHERE goal_id = ? AND reason_code = ? AND opened_at_ms >= ?")
+      .get(goalId, reasonCode, sinceMs) as { n: number } | undefined;
+    return row?.n ?? 0;
+  }
+
   /** The goal has nothing typed holding it: every open incident is resolved. */
   resolveGoal(goalId: string, reason: string, nowMs: number): number {
     return this.db.prepare(`UPDATE agi_incidents SET status='resolved', closed_at_ms=?, close_reason=?, updated_at_ms=?

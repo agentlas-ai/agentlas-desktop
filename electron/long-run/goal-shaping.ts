@@ -64,6 +64,7 @@ import { getChatGoalRevision } from "../store/chat-goals";
 import { getLongRunByGoalId, longRunOwnerHold } from "../store/long-runs";
 import { ownsHostGoalLoop } from "./host-goal-surface";
 import { currentUiLocale } from "../ui-locale";
+import { UNCERTAIN_EFFECT_POLICY } from "../../shared/uncertain-effect-policy";
 
 export const GOAL_SHAPE_TIMEOUT_MS = 60_000;
 /** 폴백 뒤 재판단 상한 — 넘으면 6시간에 한 번만 다시 묻는다(매 턴 60초 지연 방지). */
@@ -319,7 +320,7 @@ function guidanceLine(tactic: LiveTactic): string | null {
   if (!g) return null;
   switch (g.move) {
     case "replan": return `This tactic was blocked (${g.cause}). Try a clearly different approach, or split it with a replace_tactic plan-op.`;
-    case "observe": return `This tactic was blocked (${g.cause}). First inspect the current state read-only; do not repeat an external action whose effect is unknown.`;
+    case "observe": return `This tactic was blocked (${g.cause}). First inspect the current state. ${UNCERTAIN_EFFECT_POLICY}`;
     case "retry_backoff": return `This tactic was blocked (${g.cause}); retry it${g.at ? ` after ${g.at}` : ""}. Work on another open tactic meanwhile if there is one.`;
     case "escalate_boundary": return `This tactic waits on the owner for a ${g.boundary ?? "boundary"} decision. Ask that one question once, then continue other tactics.`;
     case "switch_tool": return g.path
@@ -327,6 +328,35 @@ function guidanceLine(tactic: LiveTactic): string | null {
       : `This tactic was blocked (${g.cause}); use an alternative installed tool with the same capability.`;
     default: return `This tactic was blocked (${g.cause}); the host chose ${g.move}.`;
   }
+}
+
+/** The AGI unblocker's choice for a tactic reached later in the same turn (switch_tool). */
+function laterHint(tactic: LiveTactic): string {
+  const g = tactic.guidance;
+  return g?.move === "switch_tool" && g.path ? ` [host: use the installed alternative "${g.path}" for this tactic; the previous path failed]` : "";
+}
+
+/** How long a native-harness hand-off holds before the unblocker has to see the capability fail again. */
+export const NATIVE_HARNESS_HOLD_MS = 24 * 60 * 60_000;
+
+/** The capabilities the AGI unblocker handed to the runtime's own tools for this plan within the hold (newest per capability). */
+export function activeNativeHarness(goalId: string, revision: number, planSeq: number, nowMs: number): Array<{ capability: string; defect: string; since: string }> {
+  const out = new Map<string, { capability: string; defect: string; since: string }>();
+  for (const row of listGoalPlanDecisions(goalId, { revision, planSeq, kind: "native_harness", limit: 20 })) {
+    const capability = typeof row.payload?.capability === "string" ? row.payload.capability : null;
+    if (!capability || out.has(capability) || nowMs - Date.parse(row.createdAt) > NATIVE_HARNESS_HOLD_MS) continue;
+    out.set(capability, { capability, defect: typeof row.payload?.defect === "string" ? row.payload.defect : "our_defect", since: row.createdAt });
+  }
+  return [...out.values()];
+}
+
+/** The turn-context line for a capability handed to the runtime's own tools. */
+export function nativeHarnessLine(entry: { capability: string; defect: string }): string {
+  return `Host notice (AGI unblocker): the Agentlas ${entry.capability} path keeps failing in this goal (${entry.defect}; an app defect, already recorded). `
+    + `For every step that needs ${entry.capability === "browser" ? "a browser, the web or on-screen app control (the Agentlas browser ladder covers all three)" : "that tool"}, use your runtime's own tools instead: `
+    + "shell commands, direct API calls with the keys already in your environment, local programs, and your built-in web access. "
+    + "Write every result as a file in the task folder and name it in your answer; Agentlas only records the outputs. "
+    + "Do not retry the failing Agentlas tool. If a step truly needs the owner (a sign-in, a payment, a consent), ask once.";
 }
 
 /**
@@ -346,6 +376,7 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
   const lines: string[] = ["## Goal plan (host-owned shape decision · agentlas.goal-shape.v1)"];
   lines.push(`Current plan identity: goal ${plan.goalId} · revision ${plan.revision} · planSeq ${plan.planSeq}. This is the current projection for this Goal revision; earlier plan projections are historical.`);
   lines.push(`Shape: ${plan.shape} (problem: ${plan.problem_nature}${plan.fallback ? "; provisional — the planner was unavailable" : ""}). ${plan.rationale}`);
+  for (const entry of activeNativeHarness(plan.goalId, plan.revision, plan.planSeq, nowMs)) lines.push(nativeHarnessLine(entry));
   // Agent Strategy: 이 패스의 KPI 상태를 먼저 갱신한다(멱등). 읽기 전용 재렌더(record:false)는 쓰지 않는다.
   if (plan.shape === "mission_tree" && input.record !== false) {
     try { evaluateGoalKpis(plan, nowMs); } catch (error) { console.warn("[agent-strategy] evaluation failed:", error instanceof Error ? error.message : error); }
@@ -391,8 +422,7 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
       const later = [...plan.tactics].filter((t) => (t.status === "active" || t.status === "proposed") && !current.has(t.id)
         && readiness.branches.find(branch => branch.nodeId === t.id)?.workClasses.includes("external_effect")).sort((a, b) => a.ord - b.ord);
       // A tool path the AGI unblocker chose applies whenever the tactic is reached in this turn, not only when current.
-      if (later.length) lines.push(`Then, in order: ${later.map((t) => `${t.id}: ${t.description} (done when: ${t.done_when})${t.guidance?.move === "switch_tool" && t.guidance.path
-        ? ` [host: use the installed alternative "${t.guidance.path}" for this tactic; the previous path failed]` : ""}`).join(" | ")}`);
+      if (later.length) lines.push(`Then, in order: ${later.map((t) => `${t.id}: ${t.description} (done when: ${t.done_when})${laterHint(t)}`).join(" | ")}`);
     }
   } else if (ownerPausedOpen(plan).length) {
     // Only the owner's explicit branch pause holds these; they are open leaves, so the goal is not done.

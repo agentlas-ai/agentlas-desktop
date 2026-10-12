@@ -943,16 +943,9 @@ function toolEffectIdentity(payload: Record<string, unknown>): string {
 /** Host-owned blockers override a model's repair suggestion. Codes come from
  * durable typed fields only; error prose is deliberately not classified. */
 function hostRecoveryOverride(runId: string, invocationRunId?: string | null): RecoveryDecision | null {
-  const uncertain = getDb().prepare(
-    "SELECT 1 FROM long_run_worker_attempts WHERE run_id = ? AND side_effect_state = 'uncertain' LIMIT 1",
-  ).get(runId);
-  if (uncertain) {
-    return prerequisiteRecovery(
-      "uncertain_side_effect",
-      "user",
-      "Inspect and settle the uncertain side effect before another execution attempt.",
-    );
-  }
+  // An attempt of unknown outcome is not a prerequisite for the owner: no observation exists to settle it and the
+  // next turn checks for itself (owner decision 2026-10-05, effect-observation.ts). It used to send every such Goal
+  // to "user must settle", which nobody could do.
   if (!invocationRunId) return null;
   const latestToolOutcome = new Map<string, string | null>();
   for (const event of listRunEvents(invocationRunId, 500)) {

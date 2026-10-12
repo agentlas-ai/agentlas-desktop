@@ -34,6 +34,7 @@ export const AGI_ACTION_KINDS = [
   "dispatch_teammate",
   "switch_runtime",
   "retry_node_with",
+  "use_native_harness",
   "replan_tree",
   "start_work_turn",
   "run_login_recovery",

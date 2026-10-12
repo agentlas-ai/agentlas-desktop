@@ -7306,6 +7306,19 @@ function OneSessionsShell() {
           throw cause;
         }
         await paneCommit;
+        /*
+         * 좌석이 실패로 표시됐는데 그 실패는 다른 대화(예: 방)의 실행에서 났다면, 1:1 창은 비어 있어
+         * "실패"라는 말만 있고 이유가 없다(오너 2026-10-12, Motiondirector). 마지막 실패의 사유를 이
+         * 창에 카드로 보인다. chatId 를 떼서 다시 시도는 막고(다른 대화에서 몰래 돌지 않게), 'One에게
+         * 맡기기'는 지금 이 창에서 돌게 한다.
+         */
+        if (member.statusKind === "failed" && !options?.fresh) {
+          const failure = await api.runLedger.failures({ agentId: member.installedAgentId, limit: 1 }).then((items) => items[0] ?? null).catch(() => null);
+          if (failure && failure.chatId !== chat.id) {
+            const { chatId: _otherChatId, ...unbound } = failure;
+            setFailureFocus(unbound);
+          }
+        }
         // Entering the exact result conversation is the acknowledgement. The
         // blue dot is only cleared after that chat exists and navigation has
         // committed; a separate "View result" button is no longer required.

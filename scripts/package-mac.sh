@@ -269,8 +269,19 @@ notarize_dmg() {
     return 1
   fi
 
-  xcrun stapler staple "$dmg_path"
-  xcrun stapler validate "$dmg_path"
+  # Stapling fetches the accepted ticket from Apple's CloudKit service. Right after "Accepted" that lookup can drop the
+  # connection ("The network connection was lost", Error 68): 1.3.15 failed on it four runs in a row on 2026-10-12, once
+  # after the staple itself had succeeded. Retry with growing waits; a ticket that never arrives still fails the build.
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    if xcrun stapler staple "$dmg_path" && xcrun stapler validate "$dmg_path"; then
+      return 0
+    fi
+    echo "Stapling $dmg_path failed (attempt $attempt of 5); retrying in $((attempt * 30))s." >&2
+    sleep $((attempt * 30))
+  done
+  echo "Stapling $dmg_path failed after 5 attempts." >&2
+  return 1
 }
 
 seal_packaged_runtime_copy_for_execution() {

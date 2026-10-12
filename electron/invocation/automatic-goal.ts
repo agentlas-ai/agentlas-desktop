@@ -16,6 +16,7 @@ import type { LongRunRecord } from "../store/long-runs";
 import { buildAutomaticGoalCriteria } from "../../shared/automatic-goal-criteria";
 import { goalResumeRecoveryBlockerCode } from "../../shared/long-run";
 import { currentUiLocale } from "../ui-locale";
+import { UNCERTAIN_EFFECT_POLICY } from "../../shared/uncertain-effect-policy";
 import { runtimeFailureBlocksReplay } from "../runtime/selection";
 import { createHash } from "node:crypto";
 
@@ -310,8 +311,8 @@ export function automaticGoalResumeRequest(chatId: string, expectedVersion: numb
     // One resolves permission from its explicit mode, not the generic field.
     // This is the stored user grant, not a new grant from a system prompt.
     ...(run.surface === "one" ? { oneMode: true, onePermissionMode: authority[2] as "read" | "write" | "full" } : {}),
-    userPrompt: `Resume the existing goal under its original permissions. Run effect/result checks in parallel with independent useful work. Failed or unavailable checks must never stop the whole goal. Preserve uncertainty as unknown, do not repeat a specific uncertain external action, and choose other useful work while its outcome is unresolved. Preserve every original constraint and acceptance criterion. Verify the actual output before claiming completion, and compare it item by item against the user's original plan (including any spec document or project memory it points to): report what is missing first. For games, apps and UI, graphic quality is an acceptance criterion: placeholder shapes, default-colored rectangles, missing or misaligned assets and empty backgrounds are a failure, not a completion.${actor === "user" && latestLongRunAttemptSafeEpoch(run.id)
-      ? " The user acknowledged interrupted attempts, but the host did not prove their external outcomes. Inspect Activity and the external state read-only in parallel; do not repeat the specific uncertain actions. Continue independent work. If evidence is absent, report the prior outcomes as unknown."
+    userPrompt: `Resume the existing goal under its original permissions. Run effect/result checks in parallel with independent useful work. Failed or unavailable checks must never stop the whole goal. ${UNCERTAIN_EFFECT_POLICY} Preserve every original constraint and acceptance criterion. Verify the actual output before claiming completion, and compare it item by item against the user's original plan (including any spec document or project memory it points to): report what is missing first. For games, apps and UI, graphic quality is an acceptance criterion: placeholder shapes, default-colored rectangles, missing or misaligned assets and empty backgrounds are a failure, not a completion.${actor === "user" && latestLongRunAttemptSafeEpoch(run.id)
+      ? " The user acknowledged interrupted attempts, but the host did not prove their external outcomes. Inspect Activity and the external state yourself. ${UNCERTAIN_EFFECT_POLICY} Continue independent work."
       : observation?.verdict === "done"
         ? ` A read-only check just observed that the interrupted earlier action already took effect (evidence: ${observation.evidence}). Do not repeat it; continue with the next remaining step.`
         : observation?.proof === "receipt"

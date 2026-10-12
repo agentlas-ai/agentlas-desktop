@@ -34,7 +34,7 @@ export interface AgiGoalFactsDeps {
   episodeBaselineOnly?: boolean;
   nowMs(): number;
   /** Latest turn receipt of the goal chat (invocation service). */
-  latestReceipt?(chatId: string): { status: string; errorCode: string | null; runId?: string | null } | null;
+  latestReceipt?(chatId: string): { status: string; errorCode: string | null; runId?: string | null; errorMessage?: string | null } | null;
   /** The chat has a turn in flight right now: the goal owns its step. */
   chatBusy?(chatId: string): boolean;
   /** goal-continuation-hold parked the continuation row on needs_input. */
@@ -126,8 +126,12 @@ function tactics(db: Database.Database, goalId: string, nowMs: number): { tactic
   const plan = readGoalPlan(goalId, undefined, db);
   if (!plan) return { tactics: [], blockedNodeId: null };
   const readiness = projectGoalPlanReadiness(plan, { nowMs });
+  // A tactic the agent reported blocked carries the persistence policy's guidance until it is done (goal-shaping
+  // applyTacticMarker). Nothing ever wrote payload.blocked, so this fact was always null (production 2026-10-12:
+  // 0 of 138 tactics, while 31 open tactics carried guidance) and the unblocker never knew which tactic was stuck.
   const blocked = db.prepare(`SELECT node_id FROM goal_plan_nodes WHERE goal_id=? AND revision=? AND plan_seq=?
-    AND kind='tactic' AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json,'$.blocked') ELSE 0 END=1 ORDER BY ord LIMIT 1`).get(goalId, plan.revision, plan.planSeq) as { node_id: string } | undefined;
+    AND kind='tactic' AND status IN ('active','proposed')
+    AND CASE WHEN json_valid(payload_json) THEN json_type(payload_json,'$.guidance')='object' ELSE 0 END ORDER BY ord LIMIT 1`).get(goalId, plan.revision, plan.planSeq) as { node_id: string } | undefined;
   return { blockedNodeId: blocked?.node_id ?? null, readiness, tactics: plan.tactics.map(t => ({ nodeId: t.id,
     status: t.status, dependsOn: t.depends_on, readiness: readiness.branches.find(branch => branch.nodeId === t.id) })) };
 }
@@ -175,6 +179,30 @@ export function browserLadderSignal(db: Database.Database, chatId: string, nowMs
   if (row.final !== "stopped") return null;
   return { signal: { kind: "browser_unavailable", code: `browser_ladder:${row.code}` }, ref };
 }
+
+/**
+ * The start or the runner threw: the receipt's code is a generic wrapper and the typed cause is the message's leading
+ * code (production 2026-10-12: invoke-start-failed with "goal_waiting_system_start_refused" 49 times, runner-failed with
+ * "automation_goal_execution_owner_changed" or "goal_episode_admission_missing"). Without it every such run read as
+ * run_failed_unknown. A host timeout message is kept as a timeout family.
+ */
+const RECEIPT_WRAPPER_CODES = new Set(["invoke-start-failed", "runner-failed", "invoke-threw"]);
+function typedReceiptCode(receipt: { errorCode: string | null; errorMessage?: string | null }): string | null {
+  const code = receipt.errorCode;
+  if (!code || !RECEIPT_WRAPPER_CODES.has(code) || !receipt.errorMessage) return code;
+  const message = receipt.errorMessage.trim();
+  const token = /^([a-z][a-z0-9]*(?:_[a-z0-9]+)+)(?=$|[\s:])/.exec(message)?.[1];
+  if (token) return token;
+  return /\btime(?:d)? ?out\b/i.test(message) ? `${code}:timeout` : code;
+}
+
+/**
+ * Refusals that are the host keeping a waiting Goal waiting, not a failure of the Goal: a system turn arriving while the
+ * Goal waits for its owner or a scheduled retry is refused before any model call (relays are parked and carried by the
+ * next real turn). Read as a failure, each one opened a run_failed_unknown incident (43 of 60 in production) and the
+ * unblocker answered with another work turn that was refused the same way.
+ */
+const NOT_A_GOAL_FAILURE = new Set(["goal_waiting_system_start_refused"]);
 
 /** Map a turn receipt error code to the specific typed signal it names (code families only). */
 function receiptSignal(code: string, runId: string | null): AgiBlockerSignal {
@@ -341,8 +369,9 @@ export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): Agi
       if (deps.continuationParkedForOwner?.(goalId)) signals.push({ kind: "needs_input", code: "continuation_needs_input" });
       if (run.rootChatId && deps.pendingApproval?.(run.rootChatId)) signals.push({ kind: "boundary", boundary: "security_consent", code: "tool_approval_pending" });
       const receipt = run.rootChatId ? deps.latestReceipt?.(run.rootChatId) ?? null : null;
-      if (receipt && (receipt.status === "failed" || receipt.status === "refused") && receipt.errorCode) {
-        signals.push(receiptSignal(receipt.errorCode, receipt.runId ?? null));
+      const failedCode = receipt && (receipt.status === "failed" || receipt.status === "refused") ? typedReceiptCode(receipt) : null;
+      if (receipt && failedCode && !NOT_A_GOAL_FAILURE.has(failedCode)) {
+        signals.push(receiptSignal(failedCode, receipt.runId ?? null));
         if (receipt.runId) refs.push(`run:${receipt.runId}`);
       }
       const ladder = run.rootChatId ? browserLadderSignal(db, run.rootChatId, deps.nowMs()) : null;

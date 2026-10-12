@@ -26,6 +26,7 @@ import { AGI_ACTION_SCHEMA, AGI_MAX_ACTIONS_PER_ATTEMPT, type AgiActionExecutor,
 import { admitAgiTokens, chargeAgiTokens, readAgiTokenLimits } from "./budget";
 import { AGI_READ_TOOL_NAMES, type AgiReadResult } from "./read-tools";
 import type { AgiUnblockInput, AgiUnblockResult } from "./monitor";
+import { UNCERTAIN_EFFECT_POLICY } from "../../shared/uncertain-effect-policy";
 
 export const AGI_MODEL_ATTEMPT_SCHEMA = "agentlas.agi-unblock-decision.v1" as const;
 export const AGI_MAX_EXTRA_READS = 4;
@@ -86,10 +87,9 @@ Your job: clear the block or route around it so the goal keeps moving, choosing 
   failed), merge duplicates within a strategy, retire, or reorder. Never change intent.
 - If the plan needs a role nobody on the team has, create_teammate (then invite_teammate in group chats) and
   dispatch_teammate the concrete work bound to an active tactic id. Teammates may be created without asking.
-- Uncertain outward effects: never redo them. settle_uncertain_effect may reuse only an evidenceRef
-  "run:<observationRunId>" whose Main observation receipt already confirmed exactly those attemptIds.
-  A later successful tool, browser read or final message is not proof. Independent work can continue while the
-  read-only observation controller checks the original targets.
+- Uncertain outward effects: no observation controller exists any more and none will settle them. ${UNCERTAIN_EFFECT_POLICY}
+  Never park a goal on them: do not dispatch a wait for a reviewer, dispatch the work that checks and, where allowed, redoes it.
+  settle_uncertain_effect still requires an evidenceRef "run:<observationRunId>" from a Main observation receipt; do not use it otherwise.
 - A login wall: run_login_recovery(domain) first. A dead Agentlas Browser: restart_agentlas_browser. The app itself:
   request_app_restart (asks once; never restarts by itself).
 - A tool path that crashed: retry_node_with(nodeId, capability, path) naming one installed path from the evidence.

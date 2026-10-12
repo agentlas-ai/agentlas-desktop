@@ -22,6 +22,7 @@ import { emitDesktopStoreChange } from "../store/change-bus";
 import { getChatGoalRevision } from "../store/chat-goals";
 import { EFFECT_OBSERVATION_EVENT_KIND, getLongRunAttemptReview, getLongRunByGoalId, latestLongRunAttemptSafeEpoch } from "../store/long-runs";
 import { readGoalPlan, updateGoalPlanNode, insertGoalPlanNode, recordGoalPlanDecision } from "../store/goal-plans";
+import { activeNativeHarness } from "../long-run/goal-shaping";
 import { recordPersistenceDecisionEvent } from "../store/run-events";
 import { continueGoalForAlive } from "../long-run/blocked-goal-sweep";
 import { invocationService } from "../invocation/service";
@@ -244,9 +245,20 @@ export function agiInstalledPaths(): string[] {
  *  - switch_tool writes the chosen installed path into the tactic's guidance, which buildGoalPlanTurnContext puts in
  *    the next turn's plan context ("use <path> for this tactic now").
  */
-export function recordAgiMove(goalId: string, runId: string, move: "switch_runtime" | "switch_tool", detail: Record<string, unknown>):
+export function recordAgiMove(goalId: string, runId: string, move: "switch_runtime" | "switch_tool" | "native_harness", detail: Record<string, unknown>):
   { ok: true } | { ok: false; code: string } {
   const run = getLongRunByGoalId(goalId);
+  if (move === "native_harness") {
+    // The plan context of every turn carries a live harness notice (goal-shaping activeNativeHarness); without a plan
+    // there is no turn context to carry it.
+    const plan = planView(goalId);
+    if (!plan) return { ok: false, code: "agi.harness.plan-missing" };
+    const capability = String(detail.capability ?? "tool");
+    if (activeNativeHarness(goalId, plan.revision, plan.planSeq, Date.now()).some((entry) => entry.capability === capability)) return { ok: true };
+    recordGoalPlanDecision({ goalId, revision: plan.revision, planSeq: plan.planSeq, kind: "native_harness", createdAt: new Date().toISOString(),
+      payload: { capability, defect: String(detail.defect ?? "our_defect"), incidentId: detail.incidentId ?? null, actor: "agi-unblocker", runId } });
+    return { ok: true };
+  }
   if (move === "switch_tool") {
     const plan = planView(goalId);
     if (!plan || typeof detail.nodeId !== "string" || !plan.tactics.some((tactic) => tactic.id === detail.nodeId)) return { ok: false, code: "agi.retry.node-unknown" };

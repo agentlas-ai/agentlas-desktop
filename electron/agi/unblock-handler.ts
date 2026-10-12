@@ -41,6 +41,20 @@ function deterministicArgs(action: AgiActionKind, input: AgiUnblockInput, facts:
   }
 }
 
+/**
+ * The Agentlas capability a blocked diagnosis points at when the runtime's own tools can replace it (a label for the
+ * native-harness guidance, never a tool name to call). Null when they cannot: a runtime that fails by itself (quota,
+ * auth, an unknown crash) needs another runtime, a login wall needs the owner, and a refused start never reaches a turn.
+ */
+export function harnessCapability(d: Pick<AgiUnblockInput["diagnosis"], "primarySignal" | "causeKind">): "browser" | "tool" | null {
+  // The browser ladder also carries on-screen app control (production Yotube 2026-10-12: browser_cua_repl on the Agentlas
+  // app failed unified-cua-native-transport-unavailable in daemon-served turns, read as browser_unavailable 32 times a day).
+  if (d.primarySignal === "browser_unavailable") return "browser";
+  if (d.primarySignal === "tool_crash") return "tool";
+  if (d.primarySignal === "run_failed" && (d.causeKind === "tool_refused" || d.causeKind === "tool_missing")) return "tool";
+  return null;
+}
+
 export type AgiUnblockHandlerWithModel = AgiUnblockHandler & {
   /** Resolves when every model attempt this handler dispatched has settled (contracts, shutdown). */
   settled(): Promise<void>;
@@ -95,6 +109,15 @@ export function createAgiDeterministicHandler(executor: AgiActionExecutor, readF
       });
       return acted;
     };
+    // 1b. The same Agentlas capability failing again (this reason code opened twice for the goal in a day, or a second
+    // attempt on the same state) means the Agentlas path itself is broken, and another Agentlas path tends to hit the
+    // same defect (production 2026-10-12: one goal opened browser_unavailable 36 times in a week, each "resolved" by a
+    // browser restart or a new turn and back again). The capability is handed to the runtime's own tools for this goal;
+    // the work turn below then runs with that host notice in its plan context.
+    const capability = harnessCapability(d);
+    if (capability && (attempt >= 2 || executor.incidents.recurrences(input.goalId, d.reasonCode, Date.now() - 24 * 60 * 60_000) >= 2)) {
+      run("use_native_harness", { capability, defect: d.reasonCode }, 80);
+    }
     // Start independent work before advisory model checks; repair may time out
     // or ask for a missing credential without holding the original controller.
     const initialVersion = executor.currentVersion(input.goalId);
