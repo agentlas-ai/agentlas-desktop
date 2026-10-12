@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.12 — 2026-10-12
+
+- Paired Mobile can expand tool inputs, results, and observed sources in ordinary, Work, and group conversations. Long retained bodies are read in bounded pages; saved history previews remain identified as previews.
+- Tool activity pages are bound to the exact chat and run. Credential values and local paths are redacted, and personal One tool bodies stay on Desktop.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.11 — 2026-10-12
 
 - Claude Code, Grok, Kimi, Cursor, Antigravity and other agent CLIs that go completely silent are ended and retried, as Codex already was. A tool call that never finishes is ended after 90 minutes.

@@ -182,6 +182,8 @@ export const MOBILE_BRIDGE_METHODS = [
   "invoke.currentTurnSteerReceipt",
   "invoke.cancel",
   "invoke.attach",
+  "invoke.activity",
+  "invoke.toolPayload",
   "invoke.receipt",
   "invoke.activeChats",
   "confirm.listPending",
@@ -951,8 +953,7 @@ export type MobileBridgeToolPayloadShape =
 export type MobileBridgeToolPayloadSize = "empty" | "small" | "medium" | "large";
 
 /**
- * DESKTOP_MOBILE_BRIDGE: Tool bodies never cross the bridge. This describes
- * only non-sensitive structure so Mobile can render a useful collapsed row.
+ * Structural summary retained for older clients and collapsed tool rows.
  */
 export interface MobileBridgeToolPayloadSummaryDto {
   shape: MobileBridgeToolPayloadShape;
@@ -968,8 +969,8 @@ export interface MobileBridgeToolPayloadSummaryDto {
  * Derived on Desktop by the shared `normalizeToolCall` + `buildToolCallDisplay`
  * pair (shared/tool-call-detail.ts) so the phone never re-derives tool
  * semantics from a runner-specific name. Paths are already cwd-relative
- * (`stripCwdPrefix`) and every string passes the bridge sanitizer, so raw args
- * and results still stay on Desktop.
+ * (`stripCwdPrefix`) and every string passes the bridge sanitizer. Optional
+ * owner-only tool bodies are projected separately with explicit redaction.
  */
 export interface MobileBridgeToolCallDisplayDto {
   /** Runner-independent semantic kind: shell / read / edit / search / … */
@@ -1005,6 +1006,45 @@ export interface MobileBridgeInvocationToolDto {
   output: MobileBridgeToolPayloadSummaryDto | null;
   /** Optional so an older Desktop keeps working against a newer phone. */
   display?: MobileBridgeToolCallDisplayDto;
+  /** Owner-authenticated, sanitized tool arguments/results; never personal One. */
+  inputBody?: MobileBridgeToolBodyDto;
+  outputBody?: MobileBridgeToolBodyDto;
+  /** Observed public sources; never inferred from completion copy. */
+  sourceUrls?: string[];
+  sourceUrlsTruncated?: boolean;
+}
+
+export interface MobileBridgeToolBodyDto {
+  format: "json" | "text";
+  text: string;
+  /** Byte size of the available sanitized body, not the unsanitized original. */
+  originalBytes: number;
+  truncated: boolean;
+  /** Complete cached body access is bound to the exact chat, run and section. */
+  payloadRef?: string;
+  /** Legacy ledger previews cannot reconstruct the original tool body. */
+  source?: "retained" | "history-preview";
+}
+
+export interface MobileBridgeToolPayloadPageDto {
+  chatId: string;
+  runId: string;
+  payloadRef: string;
+  section: "input" | "output";
+  format: "json" | "text";
+  text: string;
+  originalBytes: number;
+  /** UTF-16 character offset for concatenation; never a UTF-8 byte offset. */
+  nextOffset: number | null;
+}
+
+export interface MobileBridgeInvocationActivityPageDto {
+  chatId: string;
+  runId: string;
+  source: "retained" | "history-preview" | "unavailable";
+  events: Array<{ id: string; sequence: number; occurredAt?: string; event: MobileBridgeInvocationEventDto }>;
+  nextCursor: string | null;
+  hasMore: boolean;
 }
 
 export interface MobileBridgeInvocationArtifactDto {
@@ -3833,6 +3873,16 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       return hasOnlyKeys(params, ["runId"]) ? requiredString(params, "runId", 160) : `${method} accepts only runId`;
     case "invoke.attach":
       return hasOnlyKeys(params, ["chatId"]) ? requiredString(params, "chatId") : "invoke.attach accepts only chatId";
+    case "invoke.activity":
+      return hasOnlyKeys(params, ["chatId", "runId", "cursor"])
+        ? firstError(requiredString(params, "chatId"), requiredString(params, "runId", 160), optionalString(params, "cursor", 1024))
+        : "invoke.activity accepts only chatId, runId and cursor";
+    case "invoke.toolPayload":
+      return hasOnlyKeys(params, ["chatId", "runId", "payloadRef", "section", "offset"])
+        ? firstError(requiredString(params, "chatId"), requiredString(params, "runId", 160), requiredString(params, "payloadRef", 160),
+            params.section === "input" || params.section === "output" ? null : "invoke.toolPayload requires input or output section",
+            params.offset === undefined || Number.isSafeInteger(params.offset) && Number(params.offset) >= 0 ? null : "invoke.toolPayload offset must be nonnegative")
+        : "invoke.toolPayload contains unsupported fields";
     case "one.decision.retryReview":
       return hasOnlyKeys(params, ["chatId", "taskId", "taskVersion", "decisionId"])
         ? firstError(

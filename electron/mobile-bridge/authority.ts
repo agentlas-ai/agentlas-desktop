@@ -67,6 +67,7 @@ import { performOneMobileSuggestionAction } from "../one/mobile-suggestions";
 import { invocationService } from "../invocation/service";
 import type { InvocationCurrentTurnPort } from "../runtime/invocation-owner-router";
 import { readMobileBridgeHistoryPage } from "./history-page";
+import { MobileToolPayloadStore, sanitizeMobileToolBody } from "./tool-payload";
 import {
   captureMobileOneInvocationBinding,
   captureInvocationWorkspaceBinding,
@@ -297,6 +298,9 @@ const EVENT_DELTA_MAX_BYTES = 64_000;
 const EVENT_ONE_ARTIFACT_LIMIT = 32;
 const RECENT_ONE_ARTIFACT_LIMIT = 10;
 const TOOL_COUNT_CAP = 1_000;
+const mobileToolPayloads = new MobileToolPayloadStore();
+const TOOL_ACTIVITY_PAGE_LIMIT = 100;
+const TOOL_ACTIVITY_BODY_BYTES = 8 * 1024;
 const BUILD_EVENT_TEXT_MAX_BYTES = 16_000;
 const BUILD_SUMMARY_MAX_BYTES = 2_000;
 const BUILD_RUN_HISTORY_LIMIT = 64;
@@ -1616,8 +1620,8 @@ function cleanToolDisplayValue(value: string | undefined, maxBytes: number): str
  * 버렸다).
  *
  * 이름과 사실(`exit 0`, `+23 −1`, `8 files · 31 matches`)은 집계값이라 늘 안전하다.
- * 식별값(summary)만 cleanToolDisplayValue 를 통과해야 하고, 원문 args·result 는
- * 예나 지금이나 브리지를 건너지 않는다.
+ * 식별값(summary)은 cleanToolDisplayValue 를 통과한다. args·result 본문은
+ * 별도 소유자 전용 본문 투영에서 자격 증명과 로컬 경로를 마스킹한다.
  */
 function projectToolCallDisplay(
   tool: NonNullable<McpInvocationEvent["tool"]>,
@@ -1824,9 +1828,35 @@ function summarizeToolPayload(value: string | undefined): MobileBridgeToolPayloa
   return { shape: "json-scalar", size };
 }
 
+function mobileToolSourceUrls(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const urls: string[] = [];
+  for (const candidate of value.slice(0, 500)) {
+    if (typeof candidate !== "string" || candidate.length > 2048 || /[\u0000-\u0020\u007f]/.test(candidate)) continue;
+    try {
+      const url = new URL(candidate);
+      const hostname = url.hostname.toLowerCase();
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password
+        || !hostname.includes('.') || /\.(?:local|localhost|internal)$/.test(hostname)
+        || hostname.startsWith('[') || hostname === 'localhost') continue;
+      const ip = hostname.split('.').map(Number);
+      if (ip.length === 4 && ip.every(Number.isInteger)
+        && (ip[0] === 0 || ip[0] === 10 || ip[0] === 127 || ip[0] >= 224
+          || ip[0] === 169 && ip[1] === 254 || ip[0] === 172 && ip[1] >= 16 && ip[1] <= 31
+          || ip[0] === 192 && ip[1] === 168 || ip[0] === 100 && ip[1] >= 64 && ip[1] <= 127)) continue;
+      if (sanitizeMobileToolBody(candidate).text !== candidate) continue;
+      if (!urls.includes(candidate)) urls.push(candidate);
+      if (urls.length >= 100) break;
+    } catch { /* Not an external source URL. */ }
+  }
+  return urls;
+}
+
 export function projectMobileBridgeInvocationEvent(
   event: McpInvocationEvent,
-  context?: { taskId?: string | null; chatId?: string | null; runId?: string | null; syncedAt?: string; cwd?: string | null },
+  context?: { taskId?: string | null; chatId?: string | null; runId?: string | null; syncedAt?: string; cwd?: string | null;
+    /** Opt-in only after Main establishes this is not a personal One chat. */
+    toolBodies?: boolean; toolBodyBytes?: number; historyPreview?: boolean },
 ): MobileBridgeInvocationEventDto {
   // "mcp-key-request" is a desktop-renderer-only elicitation signal — the
   // mobile client has no key sheet and its DTO union stays closed. Project it
@@ -1923,6 +1953,31 @@ export function projectMobileBridgeInvocationEvent(
       output: summarizeToolPayload(event.tool.result),
       display: projectToolCallDisplay(event.tool, context?.cwd ?? undefined),
     };
+    if (context?.toolBodies === true && context.chatId && context.runId) {
+      const sourceUrls = mobileToolSourceUrls(event.tool.sourceUrls);
+      let sourceBytes = 0;
+      const sourceBudget = context.toolBodyBytes === undefined ? 204_800 : 4096;
+      const boundedSources = sourceUrls.filter(url => {
+        sourceBytes += Buffer.byteLength(url) + 4;
+        return sourceBytes <= sourceBudget;
+      });
+      if (boundedSources.length) projected.tool.sourceUrls = boundedSources;
+      if (boundedSources.length < sourceUrls.length) projected.tool.sourceUrlsTruncated = true;
+      if (context.historyPreview) {
+        // The durable ledger stored previews, never full tool results. Preserve
+        // that distinction even when the stored preview is short or valid JSON.
+        const preview = (raw: string | undefined) => {
+          if (typeof raw !== "string") return undefined;
+          const body = sanitizeMobileToolBody(raw);
+          return { ...body, originalBytes: Buffer.byteLength(body.text), truncated: true, source: "history-preview" as const };
+        };
+        const inputBody = preview(event.tool.args);
+        const outputBody = preview(event.tool.result);
+        if (inputBody) projected.tool.inputBody = inputBody;
+        if (outputBody) projected.tool.outputBody = outputBody;
+      } else Object.assign(projected.tool, mobileToolPayloads.project({ chatId: context.chatId, runId: context.runId,
+        args: event.tool.args, result: event.tool.result, inlineBytes: context.toolBodyBytes }));
+    }
   }
   if (event.oneArtifacts?.length && context?.taskId && context.chatId) {
     const artifacts = projectMobileBridgeOneArtifacts(event.oneArtifacts, {
@@ -3575,13 +3630,106 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         if (!attached) return null;
         const taskId = findCanonicalTaskForChat(chatId)?.id ?? null;
         const cwd = resolveChatCwd(chatId);
+        const toolBodies = !isPersonalOneConversation(chatId);
+        // A run may contain thousands of tool events. Bound the aggregate
+        // payload below the relay budget; expanded complete bodies use chunks.
+        const toolBodyBytes = Math.min(512 * 1024, Math.floor(2 * 1024 * 1024 / Math.max(1, attached.events.length)));
         return asJsonValue(
           {
             runId: attached.runId,
-            events: attached.events.map((event) => projectMobileBridgeInvocationEvent(event, { taskId, chatId, runId: attached.runId, cwd })),
+            events: attached.events.map((event) => projectMobileBridgeInvocationEvent(event, { taskId, chatId, runId: attached.runId, cwd, toolBodies, toolBodyBytes })),
           },
           request.method,
         );
+      }
+      case "invoke.toolPayload": {
+        const params = guardedParams(request, ["chatId", "runId", "payloadRef", "section", "offset"]);
+        const chatId = requiredIdentifier(params, "chatId");
+        requireChat(chatId);
+        if (isPersonalOneConversation(chatId)) throw new Error("tool_payload_unavailable");
+        const runId = requiredIdentifier(params, "runId", RUN_ID_RE);
+        const payloadRef = requiredIdentifier(params, "payloadRef");
+        if (!/^[a-f0-9]{64}$/.test(payloadRef)) throw new TypeError("Invalid tool payload reference");
+        if (params.section !== "input" && params.section !== "output") throw new TypeError("Invalid tool payload section");
+        const offset = optionalInteger(params, "offset", 0, Number.MAX_SAFE_INTEGER) ?? 0;
+        return asJsonValue(mobileToolPayloads.read({ chatId, runId, payloadRef, section: params.section, offset }), request.method);
+      }
+      case "invoke.activity": {
+        const params = guardedParams(request, ["chatId", "runId", "cursor"]);
+        const chatId = requiredIdentifier(params, "chatId");
+        requireChat(chatId);
+        if (isPersonalOneConversation(chatId)) throw new Error("tool_activity_unavailable");
+        const runId = requiredIdentifier(params, "runId", RUN_ID_RE);
+        // Durable canonical run ownership is checked before any journal/ledger
+        // read. Knowing another run id does not grant access to its bodies.
+        const owner = getDb().prepare("SELECT 1 FROM run_events WHERE run_id=? AND chat_id=? AND kind='invoke_started' LIMIT 1").get(runId, chatId);
+        const attached = invocationService.attach(chatId);
+        if (!owner && attached?.runId !== runId) throw new Error("tool_activity_owner_mismatch");
+        const binding = createHash("sha256").update(`${chatId}\u0000${runId}`).digest("hex");
+        let after = 0;
+        let cursorSource: "retained" | "history-preview" | undefined;
+        if (params.cursor !== undefined && params.cursor !== null) {
+          const cursor = requiredBoundedString(params, "cursor", 1024);
+          try {
+            if (!/^[A-Za-z0-9_-]+$/.test(cursor)) throw new Error();
+            const decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+            if (!isRecord(decoded) || Object.keys(decoded).sort().join(",") !== "after,binding,source" || decoded.binding !== binding
+              || !Number.isSafeInteger(decoded.after) || Number(decoded.after) < 0
+              || decoded.source !== "retained" && decoded.source !== "history-preview") throw new Error();
+            after = Number(decoded.after); cursorSource = decoded.source;
+          } catch { throw new TypeError("Invalid tool activity cursor"); }
+        }
+        const replay = invocationService.replay({ chatId, runId, afterOrdinal: 0 });
+        const retained = attached?.runId === runId ? attached.events : replay.status === "complete" ? replay.events : null;
+        // A retained-source cursor must not silently switch indexes to durable
+        // sequences after eviction. The client can reload with no cursor.
+        if (cursorSource === "retained" && !retained) throw new Error("tool_activity_expired");
+        const source = cursorSource ?? (retained ? "retained" : "history-preview");
+        const cwd = resolveChatCwd(chatId);
+        const taskId = findCanonicalTaskForChat(chatId)?.id ?? null;
+        let events: Array<{ id: string; sequence: number; occurredAt?: string; event: MobileBridgeInvocationEventDto }>;
+        let hasMore = false;
+        let queriedRows = 0;
+        if (source === "retained" && retained) {
+          const relevant = retained.map((event, index) => ({ event, index: index + 1 }))
+            .filter(item => item.index > after && (item.event.tool || item.event.kind === "reasoning"));
+          hasMore = relevant.length > TOOL_ACTIVITY_PAGE_LIMIT;
+          events = relevant.slice(0, TOOL_ACTIVITY_PAGE_LIMIT).map(item => ({ id: `${runId}:${item.index}`, sequence: item.index,
+            ...(item.event.observedAt ? { occurredAt: item.event.observedAt } : {}),
+            event: projectMobileBridgeInvocationEvent(item.event, { taskId, chatId, runId, cwd, toolBodies: true, toolBodyBytes: TOOL_ACTIVITY_BODY_BYTES }) }));
+        } else {
+          const rows = getDb().prepare(`SELECT id,seq,ts,kind,payload_json FROM run_events WHERE run_id=? AND chat_id=? AND seq>?
+            AND kind IN ('mcp_tool-use','mcp_reasoning') ORDER BY seq ASC LIMIT ?`).all(runId, chatId, after, TOOL_ACTIVITY_PAGE_LIMIT + 1) as Array<{ id: string; seq: number; ts: string; kind: string; payload_json: string }>;
+          queriedRows = rows.length;
+          hasMore = rows.length > TOOL_ACTIVITY_PAGE_LIMIT;
+          events = rows.slice(0, TOOL_ACTIVITY_PAGE_LIMIT).flatMap(row => {
+            let data: Record<string, unknown>;
+            try { const parsed: unknown = JSON.parse(row.payload_json); if (!isRecord(parsed)) return []; data = parsed; } catch { return []; }
+            let event: McpInvocationEvent;
+            if (row.kind === "mcp_reasoning") {
+              if (data.reasoningPhase !== "start" && data.reasoningPhase !== "end") return [];
+              event = { kind: "reasoning", reasoning: { phase: data.reasoningPhase,
+                ...(typeof data.reasoningDurationMs === "number" && Number.isFinite(data.reasoningDurationMs) && data.reasoningDurationMs >= 0
+                  ? { durationMs: Math.floor(data.reasoningDurationMs) } : {}),
+                ...(data.reasoningPhase === "end" && typeof data.reasoningText === "string" ? { text: data.reasoningText } : {}) } };
+            } else {
+              if (typeof data.toolName !== "string" || !data.toolName.trim()) return [];
+              event = { kind: "tool-use", tool: { name: data.toolName,
+                ...(typeof data.toolId === "string" ? { id: data.toolId } : {}), isError: data.toolIsError === true,
+                ...(typeof data.toolArgs === "string" ? { args: data.toolArgs } : {}),
+                ...(typeof data.toolResultPreview === "string" ? { result: data.toolResultPreview } : {}),
+                sourceUrls: mobileToolSourceUrls(data.toolSourceUrls) } };
+            }
+            return [{ id: row.id, sequence: row.seq, occurredAt: row.ts,
+              event: projectMobileBridgeInvocationEvent(event, { taskId, chatId, runId, cwd, toolBodies: true, historyPreview: true }) }];
+          });
+          // Malformed/status-only rows still advance the cursor, otherwise an
+          // empty page would get stuck on the same diagnostic rows forever.
+          if (rows.length) after = rows[Math.min(rows.length, TOOL_ACTIVITY_PAGE_LIMIT) - 1].seq;
+        }
+        if (source === "retained" && events.length) after = events[events.length - 1].sequence;
+        const nextCursor = hasMore ? Buffer.from(JSON.stringify({ binding, source, after })).toString("base64url") : null;
+        return asJsonValue({ chatId, runId, source: source === "retained" || cursorSource || queriedRows > 0 ? source : "unavailable", events, hasMore, nextCursor }, request.method);
       }
       case "invoke.receipt": {
         const params = guardedParams(request, ["runId"]);
@@ -5253,7 +5401,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
             {
               runId,
               chatId,
-              event: projectMobileBridgeInvocationEvent(event, { taskId, chatId, runId, cwd }),
+              event: projectMobileBridgeInvocationEvent(event, { taskId, chatId, runId, cwd, toolBodies: !personalOne }),
               ...(personalOne ? { personalOne: true } : {}),
               ...(oneMessage ? { oneMessage } : {}),
             },
