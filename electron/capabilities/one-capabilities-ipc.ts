@@ -5,6 +5,9 @@
 //   oneCapabilities:detail        ({ id })                                    -> CapabilityDetail | null
 //   oneCapabilities:setEnabled    ({ id, enabled })                           -> CapabilityItem | null
 //   oneCapabilities:setSourceEnabled ({ source, enabled, kind? })             -> { source, changed }
+//
+// Agentlas built-ins are not listed and cannot be switched; neither can an item whose runtime loads it on its own.
+// Both setters throw `capability_not_switchable` for those instead of storing a state no run would honor.
 import type { IpcMain } from "electron";
 import { registerAppControlDomainIpc } from "../app-control/ipc-registry";
 import {

@@ -11,7 +11,7 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { ensureChildCloseAfterExit, startCliHeartbeat, RuntimeTurnUnsettledError } from "./runner";
+import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliToolSilenceWindowMs, RuntimeTurnUnsettledError } from "./runner";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { CLI_HISTORY_CONTEXT_TOKENS, composeResumeTurnPrompt, renderConversationContext } from "./continuity";
 import { tStatus } from "./status-i18n";
@@ -533,7 +533,14 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
     trackRunChild(child);
     // ★자식이 죽었는데 close 가 안 오면 이 실행은 영영 안 끝난다 — runner.ts 주석 참고.
     //   형제 러너(agy·claude·codex)에만 붙어 있던 계약을 여기에도 세운다.
-    const stopHeartbeat = startCliHeartbeat(child, events.onStatus, "grok");
+    const stopHeartbeatOnly = startCliHeartbeat(child, events.onStatus, "grok");
+    // ★호스트 소유 침묵 한도(runner.ts startCliSilenceGuard). 이 러너는 도구 시작/끝을 구분해 보고하지 않아, 긴 도구를
+    //   침묵으로 오인하지 않도록 한도를 도구 상한(90분)과 같게 둔다. 가드는 트리만 죽이고 close 가 유일한 정산이다.
+    const silenceLimitMs = cliToolSilenceWindowMs(req.env ?? process.env);
+    const silence = startCliSilenceGuard(child, {
+      label: "grok", onStatus: events.onStatus, windowMs: silenceLimitMs, toolWindowMs: silenceLimitMs, kill: () => killCliTree(child),
+    });
+    const stopHeartbeat = (): void => { stopHeartbeatOnly(); silence.stop(); };
     ensureChildCloseAfterExit(child, () => {
       events.onStatus("grok: process exited without closing its output — settling the run");
     });
@@ -669,6 +676,7 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
     };
 
     child.stdout?.on("data", (chunk: Buffer) => {
+      silence.touch();
       buffer += stdoutDecoder.write(chunk);
       let nl: number;
       while ((nl = buffer.indexOf("\n")) >= 0) {
@@ -685,6 +693,7 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
       }
     });
     child.stderr?.on("data", (chunk: Buffer) => {
+      silence.touch();
       stderr += stderrDecoder.write(chunk);
     });
     const flushOutputTail = () => {
@@ -737,6 +746,12 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
         return;
       }
       flushOutputTail();
+      // ★침묵 한도로 호스트가 끝낸 시도 — 이 close 가 유일한 정산이다(취소는 위에서 이미 처리했다).
+      if (silence.tripped) {
+        resolve({ text: text.trim(), tokens, sessionId, ownerControlTerminal: "uncertain",
+          failure: runtimeSilentTimeoutFailure("grok", silence.trippedWith?.limitMs ?? silenceLimitMs) });
+        return;
+      }
       // assistant text는 오류 증거가 아니다. streaming-json `type:error`와 실제 stderr만
       // handle()이 stderr에 모으므로, 답변이 같은 문구를 인용해도 상태를 오염시키지 않는다.
       if (code === 0) {

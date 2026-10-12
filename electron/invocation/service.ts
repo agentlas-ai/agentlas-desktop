@@ -166,6 +166,7 @@ import {
   holdQueuedSteerForRecovery,
   listRecoverableQueuedSteers,
   persistQueuedSteer,
+  retireHeldQueuedSteer,
   settleQueuedSteer,
   type DurableQueuedSteer,
   type DurableQueuedSteerRecoveryReason,
@@ -489,6 +490,7 @@ type InvocationSettledListener = (envelope: InvocationSettledEnvelope) => void |
 const MAX_BUFFERED_EVENTS = 4_000;
 const MAX_PARTIAL_CHARS = 2 * 1024 * 1024;
 const MAX_STEER_QUEUE_DEPTH = 8;
+const HELD_SYSTEM_STEER_RETIRE_MS = 60 * 60_000;
 const VERIFICATION_TRANSIENT_RETRY_DELAYS_MS = [5_000, 30_000, 120_000, 480_000] as const;
 const ONE_TASK_KIND_MEDIA_TYPE_RE = /^[a-z0-9][a-z0-9.+-]{0,63}\/[a-z0-9][a-z0-9.+-]{0,127}$/;
 const ONE_TASK_KIND_DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
@@ -1682,6 +1684,15 @@ export class InvocationService {
     let held = 0;
     for (const row of rows) {
       if (row.recoveryState === "held") {
+        // A held relay One wrote to a teammate has no owner to decide on it: measured 2026-10-12, two such rows sat
+        // for days after their run ended in a browser-login wait without a receipt. Once that run's lease is released
+        // and an hour has passed, close it; the Goal re-derives what still needs saying. Owner-written ones stay held.
+        const originalOwner = invocationRunOwners.getOwnerByRunId(row.originalRunId);
+        if (row.request.promptOrigin === "system" && originalOwner?.state === "released"
+          && Date.now() - Date.parse(row.queuedAt) > HELD_SYSTEM_STEER_RETIRE_MS && retireHeldQueuedSteer(row.id)) {
+          settled += 1;
+          continue;
+        }
         held += 1;
         continue;
       }

@@ -5,7 +5,7 @@ import { getDb } from "../store/db";
 import { appendChatMessage, autoTitleFromFirstMessage } from "../store/chats";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { getPendingInvocationAdmissionForChat } from "../store/invocation-admissions";
-import { invocationRunOwners } from "../store/invocation-run-owners";
+import { invocationRunOwners, invocationProcessOwner } from "../store/invocation-run-owners";
 import { withPreparedUserRow } from "../store/prepared-user-rows";
 import { pickLocale } from "../runtime/status-i18n";
 import { invocationService } from "./service";
@@ -39,6 +39,44 @@ function chatIsFree(chatId: string): boolean {
   return true;
 }
 
+/** How long a queued message may wait on a busy chat before we look into why, and how often we repeat the line. */
+const BUSY_DIAGNOSIS_AFTER_MS = 60_000;
+const BUSY_DIAGNOSIS_EVERY_MS = 5 * 60_000;
+const busyDiagnosisAt = new Map<string, number>();
+
+/**
+ * Why a queued message cannot start: the machine facts only (no prose, no prompt text). A lease owned by an earlier
+ * process of this same host kind is released here exactly as at startup: this process holds the single-instance lock,
+ * so the earlier one is gone and only its own death could have left the row active.
+ */
+export function diagnoseBusyChat(chatId: string, waitedMs: number, now: number = Date.now()): void {
+  if (waitedMs < BUSY_DIAGNOSIS_AFTER_MS) return;
+  const me = invocationProcessOwner();
+  let owner: ReturnType<typeof invocationRunOwners.getActiveOwner> = null;
+  try { owner = invocationRunOwners.getActiveOwner(chatId); } catch { /* unreadable is not proof */ }
+  if (owner && owner.ownerKind === me.ownerKind && owner.ownerId !== me.ownerId) {
+    try {
+      const released = invocationRunOwners.releaseAbandoned(me.ownerKind, me.ownerId);
+      console.warn("[send-queue] released leases of an earlier process", { chatId, released: released.length, ownerKind: me.ownerKind });
+    } catch (error) {
+      console.warn("[send-queue] could not release earlier-process leases", { chatId, code: String((error as { message?: string })?.message ?? error).slice(0, 80) });
+    }
+    return;
+  }
+  const last = busyDiagnosisAt.get(chatId) ?? 0;
+  if (now - last < BUSY_DIAGNOSIS_EVERY_MS) return;
+  busyDiagnosisAt.set(chatId, now);
+  let activeRun = false, admission = false;
+  try { activeRun = invocationService.activeChatIds().includes(chatId); } catch { /* diagnostic only */ }
+  try { admission = Boolean(getPendingInvocationAdmissionForChat(chatId)); } catch { /* diagnostic only */ }
+  console.warn("[send-queue] message still waiting for a busy chat", {
+    chatId, waitedSeconds: Math.round(waitedMs / 1000), activeRunInThisProcess: activeRun, pendingAdmission: admission,
+    lease: owner ? { state: owner.state, ownerKind: owner.ownerKind, ownedByThisProcess: owner.ownerId === me.ownerId, runId: owner.runId } : null,
+    // A lease this process owns while no run of this process is active is a leak (the run ended without releasing it).
+    suspectedLeak: Boolean(owner && owner.ownerId === me.ownerId && !activeRun && !admission),
+  });
+}
+
 /** The neutral line for a message that could not run and needs the owner (one line, no codes, no process names). */
 export function queuedSendEndedNotice(locale: "ko" | "en"): string {
   return locale === "ko"
@@ -62,6 +100,7 @@ export function createRendererSendQueue(startNow: RendererStartNow): {
     clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
     random: Math.random,
     isChatFree: chatIsFree,
+    onBusyWait: ({ chatId, waitedMs }) => diagnoseBusyChat(chatId, waitedMs),
     senderAlive: (event) => { try { return !event.sender.isDestroyed(); } catch { return false; } },
     saveUserRow: (request) => {
       if (request.promptOrigin === "system") return null;

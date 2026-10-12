@@ -8,7 +8,7 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import { createHash } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { ensureChildCloseAfterExit, startCliHeartbeat, RuntimeTurnUnsettledError } from "./runner";
+import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliToolSilenceWindowMs, RuntimeTurnUnsettledError } from "./runner";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import {
   CLI_HISTORY_CONTEXT_TOKENS,
@@ -239,6 +239,8 @@ interface KimiProcessResult {
   text: string;
   stderr: string;
   sessionId: string | null;
+  /** Set when the host ended the child for total silence (the limit it applied, in ms). */
+  silentLimitMs?: number;
 }
 
 function runKimiProcess(
@@ -263,7 +265,14 @@ function runKimiProcess(
     trackRunChild(child);
     // ★자식이 죽었는데 close 가 안 오면 이 실행은 영영 안 끝난다 — runner.ts 주석 참고.
     //   형제 러너(agy·claude·codex)에만 붙어 있던 계약을 여기에도 세운다.
-    const stopHeartbeat = startCliHeartbeat(child, events.onStatus, "kimi");
+    const stopHeartbeatOnly = startCliHeartbeat(child, events.onStatus, "kimi");
+    // ★호스트 소유 침묵 한도(runner.ts startCliSilenceGuard). 이 러너는 도구 시작/끝을 구분해 보고하지 않아, 긴 도구를
+    //   침묵으로 오인하지 않도록 한도를 도구 상한(90분)과 같게 둔다. 가드는 트리만 죽이고 close 가 유일한 정산이다.
+    const silenceLimitMs = cliToolSilenceWindowMs(req.env ?? process.env);
+    const silence = startCliSilenceGuard(child, {
+      label: "kimi", onStatus: events.onStatus, windowMs: silenceLimitMs, toolWindowMs: silenceLimitMs, kill: () => killCliTree(child),
+    });
+    const stopHeartbeat = (): void => { stopHeartbeatOnly(); silence.stop(); };
     ensureChildCloseAfterExit(child, () => {
       events.onStatus("kimi: process exited without closing its output — settling the run");
     });
@@ -319,6 +328,7 @@ function runKimiProcess(
 
     const bufferDecoder = new StringDecoder("utf8");
     child.stdout?.on("data", (chunk: Buffer) => {
+      silence.touch();
       buffer += bufferDecoder.write(chunk);
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
@@ -326,6 +336,7 @@ function runKimiProcess(
     });
     const kimiStderrDecoder = new StringDecoder("utf8");
     child.stderr?.on("data", (chunk: Buffer) => {
+      silence.touch();
       stderr = `${stderr}${kimiStderrDecoder.write(chunk)}`.slice(-4_000);
     });
     child.on("error", reject);
@@ -333,7 +344,8 @@ function runKimiProcess(
       stopHeartbeat();
       req.signal?.removeEventListener("abort", onAbort);
       if (buffer.trim()) consume(buffer);
-      resolve({ code, text: text.trim(), stderr: stderr.trim(), sessionId });
+      resolve({ code, text: text.trim(), stderr: stderr.trim(), sessionId,
+        ...(silence.tripped && !req.signal?.aborted ? { silentLimitMs: silence.trippedWith?.limitMs ?? silenceLimitMs } : {}) });
     });
   });
 }
@@ -426,6 +438,11 @@ export const runKimi: Runner = async (req, events): Promise<RunnerResult> => {
     : tStatus(runReq.locale, "callingBackend", { backend: runReq.backendLabel }));
   const result = await runKimiProcess(bin, args, runReq, events);
   if (runReq.signal?.aborted) throw new Error(tStatus(runReq.locale, "aborted"));
+  if (result.silentLimitMs !== undefined) {
+    // The host ended a child that stayed silent: a typed timeout, never an exit-code guess.
+    return { text: result.text, ownerControlTerminal: "uncertain", failure: runtimeSilentTimeoutFailure("kimi", result.silentLimitMs),
+      ...(result.sessionId ? { sessionId: result.sessionId } : {}) };
+  }
   if (result.code === 0) {
     const nextSessionId = result.sessionId ?? resumeSessionId ?? undefined;
     if (runReq.chatId && fingerprint && nextSessionId) {

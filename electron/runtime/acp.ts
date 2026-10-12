@@ -38,7 +38,7 @@ import {
   type AcpMcpTranslation,
 } from "./acp-protocol";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt, RuntimeTurnUnsettledError, runnerFailureFromError } from "./runner";
+import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliToolSilenceWindowMs, type CliSilenceGuard, wrapSystemPrompt, RuntimeTurnUnsettledError, runnerFailureFromError } from "./runner";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, spawnCli, trackRunChild, waitForCliTreeTermination } from "./exec";
 import { pickLocale, tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
@@ -1043,12 +1043,14 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       : null;
     const turnSink: AcpTurnSink = {
       onNotification: (method, params) => {
+        silence?.touch();
         if (method === "session/update") {
           // Setup can produce live activity too; retain it without admitting replayed history.
           client.onUpdate(params, ensureEffectRun);
         }
       },
       onRequest: async (method, params) => {
+        silence?.touch();
         agentRequestObserved = true;
         ensureEffectRun();
         if (method === "session/request_permission") {
@@ -1085,6 +1087,8 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
     let effectRun: ReturnType<typeof beginAdapterEffectRun> = null, effectTerminal: string | null = null;
     let promptCancellation: AbortController | null = null;
     let cancelFallback: ReturnType<typeof setTimeout> | undefined;
+    /** ★호스트 소유 침묵 한도: 에이전트가 낸 업데이트·요청만 센다(runner.ts startCliSilenceGuard). 프롬프트 전송 뒤에만 켠다. */
+    let silence: CliSilenceGuard | null = null;
     const ensureEffectRun = (): ReturnType<typeof beginAdapterEffectRun> => {
       return effectRun ??= beginAdapterEffectRun({ adapterKind: "acp", chatId: req.chatId, agentId: req.agentId });
     };
@@ -1351,6 +1355,16 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       const promptAcknowledgementId = `acp-prompt-completed:${randomUUID()}`;
       // Mark before calling transport: an exception cannot prove nothing was sent.
       promptDispatchAttempted = true;
+      {
+        // 이 러너는 도구 시작/끝을 구분해 보고하지 않아, 긴 도구를 침묵으로 오인하지 않도록 한도를 도구 상한(90분)과 같게 둔다.
+        const silenceLimitMs = cliToolSilenceWindowMs(req.env ?? process.env);
+        const guardedSession = session;
+        silence = startCliSilenceGuard(guardedSession.child, {
+          label: spec.id, onStatus: events.onStatus, windowMs: silenceLimitMs, toolWindowMs: silenceLimitMs,
+          // 트리를 죽이고 대기 중인 프롬프트 요청을 끊는다. 정산은 아래 catch 의 한 곳이다.
+          kill: () => { try { killCliTree(guardedSession.child); } catch { /* the request abort still settles */ } promptCancellation?.abort(new Error("runtime_silent_timeout")); },
+        });
+      }
       const result = await session.conn.request(
         "session/prompt",
         { sessionId, prompt: [{ type: "text", text: promptText }, ...imageBlocks] },
@@ -1401,6 +1415,11 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       // 원인 없는 실패를 겪는다. 다시 여는 비용이 그보다 싸다.
       broken = true;
       if (req.signal?.aborted) throw abortReasonError(req);
+      // ★침묵 한도로 호스트가 끝낸 시도 — 이 catch 가 유일한 정산이다(취소는 위에서 처리했다).
+      if (silence?.tripped && !effectTerminal) {
+        return { text: client.text.trim(), sessionId: session?.acpSessionId ?? undefined, ownerControlTerminal: "uncertain",
+          failure: runtimeSilentTimeoutFailure(spec.id, silence.trippedWith?.limitMs ?? cliToolSilenceWindowMs(req.env ?? process.env)) };
+      }
       // Preserve the effect ledger in finally; missing text is never no-effect proof.
       if (!effectTerminal && (promptDispatchAttempted || client.turnActivityObserved || agentRequestObserved)) {
         throw new RuntimeTurnUnsettledError(spec.id, locale);
@@ -1467,6 +1486,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         || (stableContextDelivery && !stableContextAcknowledged))) {
         invalidateStableTurnContext({ chatId: contextChatId, runtimeKind: sessionKind, sessionId: contextSessionId });
       }
+      silence?.stop();
       effectRun?.complete(client.effectReport(req.signal?.aborted ? "cancelled" : effectTerminal));
       req.signal?.removeEventListener("abort", onAbort);
       req.signal?.removeEventListener("abort", endApprovalTurn);

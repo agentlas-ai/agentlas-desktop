@@ -6,6 +6,11 @@
 //   - Only One (the top orchestrator) may use them, and only the items the person switched on. Every other
 //     agent (rooms, workers, borrowed agents, Science) never gets any of them.
 //   - Personal items (codex / claude / cursor) are OFF until switched on; Agentlas's own are ON.
+//   - Owner 2026-10-12: Agentlas's built-in capabilities are always on and never listed. Built-in is an explicit
+//     definition, not a name: a plugin package the app bundle ships (dist/plugins/<slug>/plugin.json) or a plugin
+//     of the Agentlas engine marketplaces. An Agentlas-named extension installed separately stays listed.
+//   - A switch a run cannot enforce is not offered: the item is listed with its limit, and a request to flip it
+//     (screen, IPC or One) is refused instead of being stored as if it worked.
 //
 // This module is the Main-side model: inventory (value-free list), detail (size-capped text, never a
 // credential), persisted on/off, and the selection a run assembles from (selectionFor). Products consume
@@ -34,9 +39,13 @@ export interface CapabilityItem {
   description: string;
   path: string;
   enabled: boolean;
-  /** Whether a product run can enforce this item's switch today (false: listed and stored, not yet enforceable). */
+  /** Whether a product run can enforce this item's switch (false: listed with `limit`, never switchable). */
   applies: boolean;
+  /** Why the switch is not offered: the runtime loads it on its own, or Agentlas connects it when a turn needs it. */
+  limit?: CapabilityLimit;
 }
+
+export type CapabilityLimit = "runtime_reads_itself" | "agentlas_managed";
 
 export interface CapabilityDetail {
   id: string;
@@ -62,6 +71,8 @@ export interface CapabilityRoots {
   /** GitHub Copilot CLI's folder (~/.copilot). */
   copilotDir: string;
   agentlasDir: string;
+  /** The plugin packages the app bundle ships (dist/plugins); their installed copies are built-ins. */
+  bundledPluginsDir?: string;
 }
 
 export const PERSONAL_SOURCES: readonly CapabilitySource[] = ["codex", "claude", "cursor", "grok", "gemini", "copilot"];
@@ -82,37 +93,56 @@ export function defaultCapabilityRoots(env: NodeJS.ProcessEnv = process.env): Ca
     geminiDir: path.join(home, ".gemini"),
     copilotDir: path.join(home, ".copilot"),
     agentlasDir: path.join(home, ".agentlas"),
+    bundledPluginsDir: BUNDLED_PLUGINS_DIR,
   };
+}
+
+/** dist/electron/capabilities -> dist/plugins, the same place plugins/builtin.ts loads the built-in manifests from. */
+const BUNDLED_PLUGINS_DIR = path.resolve(__dirname, "..", "..", "plugins");
+const CAPABILITY_SOURCES: readonly CapabilitySource[] = ["codex", "claude", "cursor", "grok", "gemini", "copilot", "agentlas"];
+
+/** Slugs of the plugin packages the app ships. Explicit: a package counts only if its own manifest names that slug. */
+export function bundledAgentlasPluginSlugs(dir: string = BUNDLED_PLUGINS_DIR): Set<string> {
+  const slugs = new Set<string>();
+  for (const name of safeReadDir(dir)) {
+    const manifest = readJson(path.join(dir, name, "plugin.json")) as Record<string, unknown> | null;
+    if (manifest && /^agentlas\.plugin\//.test(str(manifest.schema)) && str(manifest.slug) === name) slugs.add(name);
+  }
+  return slugs;
 }
 
 /* ------------------------------------------------------------------ persisted state */
 
 interface CapabilityState { items: Record<string, boolean>; sources: Partial<Record<CapabilitySource, boolean>> }
 const STATE_FILE = "one-capabilities.json";
-const RECHECK_MS = 2_000;
-let stateCache: { checkedAt: number; mtimeMs: number; value: CapabilityState } | null = null;
+let stateCache: { stamp: string; value: CapabilityState } | null = null;
 
 function emptyState(): CapabilityState { return { items: {}, sources: {} }; }
 
-/** A file in the user data folder, not process memory: Main and the background service both start runs. */
-export function readCapabilityState(): CapabilityState {
-  const now = Date.now();
-  if (stateCache && now - stateCache.checkedAt < RECHECK_MS) return stateCache.value;
+/**
+ * A file in the user data folder, not process memory: Main writes it and both Main and the background service start
+ * runs from it. Every read checks the file (a stat; it is re-parsed only when its inode, size or mtime changed), so a
+ * switch flipped in Main reaches the service's very next turn. A time-based cache used to hand a live service the
+ * old state for up to 2 s.
+ */
+export function readCapabilityState(options: { fresh?: boolean } = {}): CapabilityState {
   try {
     const file = userDataPath(STATE_FILE);
-    const mtimeMs = fs.statSync(file).mtimeMs;
-    if (!stateCache || stateCache.mtimeMs !== mtimeMs) {
+    const stat = fs.statSync(file);
+    const stamp = `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+    if (options.fresh || !stateCache || stateCache.stamp !== stamp) {
       const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<CapabilityState>;
       const state = emptyState();
       for (const [id, on] of Object.entries(raw.items ?? {})) if (typeof on === "boolean") state.items[id] = on;
-      for (const source of ["codex", "claude", "cursor", "agentlas"] as const) {
+      for (const source of CAPABILITY_SOURCES) {
         const on = raw.sources?.[source];
         if (typeof on === "boolean") state.sources[source] = on;
       }
-      stateCache = { checkedAt: now, mtimeMs, value: state };
-    } else stateCache.checkedAt = now;
+      stateCache = { stamp, value: state };
+    }
     return stateCache.value;
   } catch {
+    stateCache = null;
     return emptyState();
   }
 }
@@ -122,15 +152,22 @@ function writeCapabilityState(state: CapabilityState): void {
   const temp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(temp, JSON.stringify(state), { mode: 0o600 });
   fs.renameSync(temp, file);
-  stateCache = { checkedAt: Date.now(), mtimeMs: fs.statSync(file).mtimeMs, value: state };
+  const stat = fs.statSync(file);
+  stateCache = { stamp: `${stat.ino}:${stat.size}:${stat.mtimeMs}`, value: state };
 }
 
 export function isPersonalSource(source: CapabilitySource): boolean {
   return source !== "agentlas";
 }
 
-/** Personal items default OFF, Agentlas's own ON; a per-item choice beats a per-source choice. */
-export function capabilityEnabled(item: Pick<CapabilityItem, "id" | "source">, state: CapabilityState = readCapabilityState()): boolean {
+/**
+ * Personal items default OFF, Agentlas's own ON; a per-item choice beats a per-source choice. An item without an
+ * enforceable switch has a fixed answer, whatever an older build stored: an Agentlas extension stays available, and
+ * a personal one is never switched on by Agentlas anywhere (its own runtime may still load it; the screen says so).
+ * Grok's compatibility cells read these, so a stale ON must not turn them on.
+ */
+export function capabilityEnabled(item: Pick<CapabilityItem, "id" | "source" | "applies">, state: CapabilityState = readCapabilityState()): boolean {
+  if (!item.applies) return !isPersonalSource(item.source);
   return state.items[item.id] ?? state.sources[item.source] ?? !isPersonalSource(item.source);
 }
 
@@ -189,7 +226,7 @@ export function skillFilesUnder(root: string): string[] {
   return out;
 }
 
-type Draft = Omit<CapabilityItem, "id" | "enabled"> & { key: string; /** Identity within (source, kind); defaults to key. */ canon?: string };
+type Draft = Omit<CapabilityItem, "id" | "enabled"> & { key: string; /** Identity within (source, kind); defaults to key. */ canon?: string; /** Agentlas built-in: always on, never listed. */ builtin?: boolean };
 
 /** Scratch, build output, release-check trees and the OS temp dir are never capabilities. */
 const SCRATCH_SEGMENT = /(^|[\\/])(tmp|temp|dist|node_modules|\.next-build|release-check[^\\/]*|relcheck[^\\/]*|rel\d+|[^\\/]*-dist|[^\\/]*\.backup-[^\\/]*)([\\/]|$)/i;
@@ -215,14 +252,14 @@ function skillDraft(source: CapabilitySource, file: string, applies: boolean): D
   if (isScratchPath(file)) return null;
   const fm = frontMatter(readHead(file));
   if (!fm.name || !fm.description) return null;
-  return { key: file, canon: fm.name.toLowerCase(), kind: "skill", source, name: fm.name, description: oneLine(fm.description), path: file, applies };
+  return { key: file, canon: fm.name.toLowerCase(), kind: "skill", source, name: fm.name, description: oneLine(fm.description), path: file, applies, ...(applies ? {} : { limit: "runtime_reads_itself" as const }) };
 }
 function commandDraft(source: CapabilitySource, file: string, applies: boolean): Draft | null {
   if (isScratchPath(file)) return null;
   const fm = frontMatter(readHead(file));
   const slug = path.basename(file).replace(/\.md$/, "");
   if (!fm.description) return null;
-  return { key: file, canon: `/${slug}`, kind: "skill", source, name: `/${slug}`, description: oneLine(fm.description), path: file, applies };
+  return { key: file, canon: `/${slug}`, kind: "skill", source, name: `/${slug}`, description: oneLine(fm.description), path: file, applies, ...(applies ? {} : { limit: "runtime_reads_itself" as const }) };
 }
 
 function str(value: unknown): string { return typeof value === "string" ? value.trim() : ""; }
@@ -336,7 +373,7 @@ function codexItems(r: CapabilityRoots): Draft[] {
         key: `${plugin}@${market}`, canon: plugin.toLowerCase(), kind: "plugin", source: agentlas ? "agentlas" : "codex", name: `${plugin}@${market}`,
         title: manifest.title,
         description: manifest.description || (pluginFlags.get(`${plugin}@${market}`) === false ? "disabled in Codex" : ""),
-        path: at, applies: !agentlas,
+        path: at, applies: !agentlas, ...(agentlas ? { builtin: true } : {}),
       });
     }
   }
@@ -382,13 +419,13 @@ function claudeItems(r: CapabilityRoots): Draft[] {
     if (!manifest) continue;
     const agentlas = AGENTLAS_MARKETPLACES.has(market);
     out.push({ key: id, canon: slug.toLowerCase(), kind: "plugin", source: agentlas ? "agentlas" : "claude", name: id, title: manifest.title,
-      description: manifest.description, path: installPath, applies: !agentlas });
+      description: manifest.description, path: installPath, applies: !agentlas, ...(agentlas ? { builtin: true } : {}) });
   }
 
   const settingsFile = path.join(r.claudeDir, "settings.json");
   for (const h of hookEntries(readJson(settingsFile))) {
     out.push({ key: `${settingsFile}:${h.event}:${h.index}:${h.sub}`, kind: "hook", source: "claude", name: `${h.event} · ${hookScriptName(h.command)}`,
-      description: `Claude Code ${h.event} hook`, path: `${settingsFile}#hooks/${h.event}/${h.index}/${h.sub}`, applies: false });
+      description: `Claude Code ${h.event} hook`, path: `${settingsFile}#hooks/${h.event}/${h.index}/${h.sub}`, applies: false, limit: "runtime_reads_itself" });
   }
 
   const claudeMd = path.join(r.claudeDir, "CLAUDE.md");
@@ -424,12 +461,12 @@ function cursorItems(r: CapabilityRoots): Draft[] {
   const rules = path.join(r.cursorDir, "rules");
   const cursorRules = dirCount(rules, (name) => /\.(md|mdc)$/.test(name) && isFile(path.join(rules, name)));
   if (cursorRules > 0) {
-    out.push({ key: rules, kind: "memory", source: "cursor", name: "rules/", title: `Cursor 규칙 (${cursorRules}개 파일)`, description: "Cursor rules folder", path: rules, applies: false });
+    out.push({ key: rules, kind: "memory", source: "cursor", name: "rules/", title: `Cursor 규칙 (${cursorRules}개 파일)`, description: "Cursor rules folder", path: rules, applies: false, limit: "runtime_reads_itself" });
   }
   const mcp = readJson(path.join(r.cursorDir, "mcp.json")) as { mcpServers?: Record<string, unknown> } | null;
   for (const [name, def] of Object.entries(mcp?.mcpServers ?? {})) {
     const transport = def && typeof def === "object" && "url" in def ? "url" : "stdio";
-    out.push({ key: `cursor-mcp:${name}`, kind: "connector", source: "cursor", name, description: `MCP server (${transport})`, path: `${path.join(r.cursorDir, "mcp.json")}#mcpServers.${name}`, applies: false });
+    out.push({ key: `cursor-mcp:${name}`, kind: "connector", source: "cursor", name, description: `MCP server (${transport})`, path: `${path.join(r.cursorDir, "mcp.json")}#mcpServers.${name}`, applies: false, limit: "runtime_reads_itself" });
   }
   return out;
 }
@@ -504,13 +541,14 @@ function copilotItems(roots: CapabilityRoots): Draft[] {
   const mcp = readJson(file) as { mcpServers?: Record<string, unknown> } | null;
   for (const [name, def] of Object.entries(mcp?.mcpServers ?? {})) {
     const transport = def && typeof def === "object" && "url" in def ? "url" : "stdio";
-    out.push({ key: `copilot-mcp:${name}`, kind: "connector", source: "copilot", name, description: `MCP server (${transport})`, path: `${file}#mcpServers.${name}`, applies: false });
+    out.push({ key: `copilot-mcp:${name}`, kind: "connector", source: "copilot", name, description: `MCP server (${transport})`, path: `${file}#mcpServers.${name}`, applies: false, limit: "runtime_reads_itself" });
   }
   return out;
 }
 
 function agentlasItems(r: CapabilityRoots): Draft[] {
   const out: Draft[] = [];
+  const bundled = bundledAgentlasPluginSlugs(r.bundledPluginsDir ?? BUNDLED_PLUGINS_DIR);
   const plugins = path.join(r.agentlasDir, "plugins");
   for (const name of safeReadDir(plugins)) {
     if (name.startsWith(".")) continue; // `.slug.backup-<id>` are the installer's own backups
@@ -521,24 +559,25 @@ function agentlasItems(r: CapabilityRoots): Draft[] {
     const surface = (manifest.surface && typeof manifest.surface === "object" ? manifest.surface : {}) as Record<string, unknown>;
     const title = str(surface.displayName) || str(manifest.name) || name;
     out.push({ key: dir, canon: name.toLowerCase(), kind: "plugin", source: "agentlas", name: title, title,
-      description: oneLine(str(surface.description) || str(surface.tagline) || str(manifest.description)), path: dir, applies: false });
+      description: oneLine(str(surface.description) || str(surface.tagline) || str(manifest.description)), path: dir, applies: false,
+      ...(bundled.has(name) ? { builtin: true } : { limit: "agentlas_managed" as const }) });
   }
   return out;
 }
 
-let inventoryCache: { at: number; key: string; items: CapabilityItem[] } | null = null;
+type InventoryEntry = CapabilityItem & { builtin: boolean };
+let inventoryCache: { at: number; key: string; items: InventoryEntry[] } | null = null;
 const INVENTORY_MS = 5_000;
 
-/** The whole inventory with each item's on/off for One. Value-free: no file content. */
-export function listCapabilities(roots: CapabilityRoots = defaultCapabilityRoots(), options: { fresh?: boolean } = {}): CapabilityItem[] {
+/** Every item including the hidden built-ins, with the on/off a run gets. Built-ins are always on. */
+function inventory(roots: CapabilityRoots, fresh: boolean): InventoryEntry[] {
   const key = JSON.stringify(roots);
   const now = Date.now();
   const state = readCapabilityState();
-  if (!options.fresh && inventoryCache && inventoryCache.key === key && now - inventoryCache.at < INVENTORY_MS) {
-    return inventoryCache.items.map((item) => ({ ...item, enabled: capabilityEnabled(item, state) }));
-  }
+  const withState = (list: InventoryEntry[]) => list.map((item) => ({ ...item, enabled: item.builtin || capabilityEnabled(item, state) }));
+  if (!fresh && inventoryCache && inventoryCache.key === key && now - inventoryCache.at < INVENTORY_MS) return withState(inventoryCache.items);
   const seen = new Set<string>();
-  const items: CapabilityItem[] = [];
+  const items: InventoryEntry[] = [];
   scratchBases = [roots.home];
   try { scratchBases.push(fs.realpathSync(roots.home)); } catch { /* home may not exist */ }
   for (const draft of [...codexItems(roots), ...claudeItems(roots), ...cursorItems(roots), ...grokItems(roots), ...geminiItems(roots), ...copilotItems(roots), ...agentlasItems(roots)]) {
@@ -546,11 +585,30 @@ export function listCapabilities(roots: CapabilityRoots = defaultCapabilityRoots
     const identity = `${draft.source}|${draft.kind}|${draft.canon ?? draft.key}`;
     if (seen.has(identity)) continue;
     seen.add(identity);
-    const { key: _key, canon: _canon, ...rest } = draft;
-    items.push({ id, ...rest, enabled: false });
+    const { key: _key, canon: _canon, builtin, ...rest } = draft;
+    items.push({ id, ...rest, enabled: false, builtin: builtin === true });
   }
   inventoryCache = { at: now, key, items };
-  return items.map((item) => ({ ...item, enabled: capabilityEnabled(item, state) }));
+  return withState(items);
+}
+
+const publicItem = ({ builtin: _builtin, ...item }: InventoryEntry): CapabilityItem => item;
+
+/**
+ * The inventory the person sees and switches, with each item's on/off for One. Value-free: no file content.
+ * Agentlas built-ins are not part of it (always on, owner 2026-10-12), so lists, counts, search and detail never
+ * show them.
+ */
+export function listCapabilities(roots: CapabilityRoots = defaultCapabilityRoots(), options: { fresh?: boolean } = {}): CapabilityItem[] {
+  return inventory(roots, options.fresh === true).filter((item) => !item.builtin).map(publicItem);
+}
+
+/** Refusal for a switch no run can enforce: built-ins (always on, unlisted) and items whose runtime loads them itself. */
+export class CapabilityNotSwitchableError extends Error {
+  readonly code = "capability_not_switchable";
+  constructor(readonly id: string, readonly reason: "builtin" | CapabilityLimit) {
+    super(`capability_not_switchable: ${reason}`);
+  }
 }
 
 /* ------------------------------------------------------------------ detail */
@@ -697,20 +755,45 @@ export function capabilityDetail(id: string, roots: CapabilityRoots = defaultCap
 
 /* ------------------------------------------------------------------ switches */
 
-export function setCapabilityEnabled(id: string, enabled: boolean, roots: CapabilityRoots = defaultCapabilityRoots()): CapabilityItem | null {
-  const item = listCapabilities(roots, { fresh: true }).find((candidate) => candidate.id === id);
-  if (!item) return null;
-  const state = { items: { ...readCapabilityState().items }, sources: { ...readCapabilityState().sources } };
-  state.items[id] = enabled === true;
-  writeCapabilityState(state);
-  return { ...item, enabled: enabled === true };
+/** Stored choices only for switches a run enforces: an older build's OFF for a built-in or an unenforceable item is dropped. */
+function normalizedState(all: readonly InventoryEntry[], current: CapabilityState): CapabilityState {
+  const switchable = new Set(all.filter((item) => item.applies && !item.builtin).map((item) => item.id));
+  const items: Record<string, boolean> = {};
+  for (const [id, on] of Object.entries(current.items)) if (switchable.has(id)) items[id] = on;
+  const sources: CapabilityState["sources"] = {};
+  for (const source of CAPABILITY_SOURCES) {
+    if (current.sources[source] !== undefined && all.some((item) => item.source === source && item.applies && !item.builtin)) sources[source] = current.sources[source];
+  }
+  return { items, sources };
 }
 
-/** Bulk: every item of a source (optionally one kind) switched together; items inherit the source default afterwards. */
+/**
+ * Switch one item for One. Refused (CapabilityNotSwitchableError) for a built-in or an item no run can enforce, so a
+ * stored-but-ignored state is never returned as success. Unknown id: null.
+ */
+export function setCapabilityEnabled(id: string, enabled: boolean, roots: CapabilityRoots = defaultCapabilityRoots()): CapabilityItem | null {
+  const all = inventory(roots, true);
+  const item = all.find((candidate) => candidate.id === id);
+  if (!item) return null;
+  if (item.builtin) throw new CapabilityNotSwitchableError(id, "builtin");
+  if (!item.applies) throw new CapabilityNotSwitchableError(id, item.limit ?? "runtime_reads_itself");
+  // A write starts from the file, not this process's cache: the other process may have written in the last seconds.
+  const state = normalizedState(all, readCapabilityState({ fresh: true }));
+  state.items[id] = enabled === true;
+  writeCapabilityState(state);
+  return publicItem({ ...item, enabled: enabled === true });
+}
+
+/**
+ * Bulk: every enforceable item of a source (optionally one kind) switched together; afterwards they inherit the
+ * source default. Items without an enforceable switch are left as they are and not counted. A source with nothing
+ * enforceable is refused.
+ */
 export function setSourceEnabled(source: CapabilitySource, enabled: boolean, kind?: CapabilityKind, roots: CapabilityRoots = defaultCapabilityRoots()): { source: CapabilitySource; changed: number } {
-  const current = readCapabilityState();
-  const state = { items: { ...current.items }, sources: { ...current.sources } };
-  const targets = listCapabilities(roots, { fresh: true }).filter((item) => item.source === source && (!kind || item.kind === kind));
+  const all = inventory(roots, true);
+  const targets = all.filter((item) => item.source === source && item.applies && !item.builtin && (!kind || item.kind === kind));
+  if (targets.length === 0) throw new CapabilityNotSwitchableError(`source:${source}`, source === "agentlas" ? "agentlas_managed" : "runtime_reads_itself");
+  const state = normalizedState(all, readCapabilityState({ fresh: true }));
   if (!kind) { state.sources[source] = enabled === true; for (const item of targets) delete state.items[item.id]; }
   else for (const item of targets) state.items[item.id] = enabled === true;
   writeCapabilityState(state);
@@ -732,6 +815,6 @@ export interface CapabilitySelection {
  */
 export function selectionFor(agentId: string | undefined, roots: CapabilityRoots = defaultCapabilityRoots()): CapabilitySelection {
   const isOne = agentId === BUILTIN_ONE_AGENT_ID;
-  const items = listCapabilities(roots).map((item) => (isPersonalSource(item.source) && !isOne ? { ...item, enabled: false } : item));
+  const items = inventory(roots, false).map(publicItem).map((item) => (isPersonalSource(item.source) && !isOne ? { ...item, enabled: false } : item));
   return { isOne, items };
 }

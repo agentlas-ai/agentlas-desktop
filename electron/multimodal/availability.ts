@@ -13,7 +13,8 @@ import {
   type MultimodalProvider,
   type MultimodalSettings,
 } from "../../shared/multimodal";
-import { hasEnvVar } from "../secrets/vault";
+import { hasEnvVar, listEnvKeys } from "../secrets/vault";
+import { RUNTIME_AUTH_ENV_KEYS, isPlainMisnaming } from "../runtime/env-key-reach";
 import { multimodalImageSlot } from "./slot";
 
 /** cli-subscription provider id → 찾을 실행 파일 이름 + 흔한 설치 경로. */
@@ -131,6 +132,19 @@ export function grokOAuthReady(
 }
 
 /** 이 provider가 지금 바로 쓸 수 있나? (키리스=bin 존재 / 키필요=키 전부 존재) */
+/**
+ * A key saved under a plainly sloppy name (ELEVENLABS_1 for ELEVENLABS_API_KEY) counts as present: every run already
+ * receives it under the read name (runtime/env-resolver.ts). Without this the engine read "not ready" and the run's
+ * AGENTLAS_MULTIMODAL_* flags told agents the voice path was unavailable while the key sat in their environment
+ * (Yotube room, 2026-10-12). Runtime login keys never count, as they are never aliased.
+ */
+async function hasPlainAlias(key: string, names: () => Promise<string[]>): Promise<boolean> {
+  if (RUNTIME_AUTH_ENV_KEYS.has(key)) return false;
+  const stored = await names();
+  if (stored.includes(key)) return false;
+  return stored.filter((name) => isPlainMisnaming(name, key)).length === 1;
+}
+
 export async function isProviderReady(provider: MultimodalProvider): Promise<boolean> {
   const cli = CLI_BINS[provider.id];
   if (cli) {
@@ -145,7 +159,9 @@ export async function isProviderReady(provider: MultimodalProvider): Promise<boo
   // 나노바나나는 agy 키리스가 우선이지만 GEMINI_API_KEY 폴백도 허용(trex와 동일).
   if (provider.envKeys.length === 0) return true; // 키 불필요 엔진(이론상 CLI 미등록)
   try {
-    const checks = await Promise.all(provider.envKeys.map((key) => hasEnvVar(key)));
+    let stored: Promise<string[]> | null = null;
+    const names = () => (stored ??= listEnvKeys());
+    const checks = await Promise.all(provider.envKeys.map(async (key) => await hasEnvVar(key) || await hasPlainAlias(key, names)));
     return checks.every(Boolean);
   } catch {
     // Provider availability is optional execution context. Treat a locked or

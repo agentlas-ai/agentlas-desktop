@@ -33,7 +33,7 @@ import { randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult, RunnerFailure, RunnerFailureKind } from "./runner";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import { detectRuntimeRefusal } from "./runtime-refusal";
-import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt } from "./runner";
+import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliToolSilenceWindowMs, wrapSystemPrompt } from "./runner";
 import { announceToolDenied } from "./tool-approval";
 import {
   CLI_HISTORY_CONTEXT_TOKENS,
@@ -2406,7 +2406,14 @@ async function runPreparedAntigravity(
 
     const stdoutDecoder = new StringDecoder("utf8");
     const stderrDecoder = new StringDecoder("utf8");
-    const clearAgyHeartbeat = startCliHeartbeat(child, events.onStatus, "agy");
+    const clearAgyHeartbeatOnly = startCliHeartbeat(child, events.onStatus, "agy");
+    // ★호스트 소유 침묵 한도(runner.ts startCliSilenceGuard). 이 러너는 도구 시작/끝을 구분해 보고하지 않아 긴 도구를
+    //   침묵으로 오인하지 않도록 한도를 도구 상한(90분)과 같게 둔다. 가드는 트리만 죽이고 settle 이 유일한 정산이다.
+    const silenceLimitMs = cliToolSilenceWindowMs(req.env ?? process.env);
+    const silence = startCliSilenceGuard(child, {
+      label: "agy", onStatus: events.onStatus, windowMs: silenceLimitMs, toolWindowMs: silenceLimitMs, kill: () => killCliTree(child),
+    });
+    const clearAgyHeartbeat = (): void => { clearAgyHeartbeatOnly(); silence.stop(); };
     // ★죽은 자식이 close를 안 보내면 이 실행은 영영 안 끝난다 — runner.ts 주석 참고.
     if (!residentSession) {
       ensureChildCloseAfterExit(child, () => {
@@ -2538,8 +2545,9 @@ async function runPreparedAntigravity(
       }
     };
     if (!residentSession) {
-      child.stdout?.on("data", (chunk: Buffer) => consumeAgyText(stdoutDecoder.write(chunk)));
+      child.stdout?.on("data", (chunk: Buffer) => { silence.touch(); consumeAgyText(stdoutDecoder.write(chunk)); });
       child.stderr?.on("data", (chunk: Buffer) => {
+        silence.touch();
         stderr += stderrDecoder.write(chunk);
       });
     }
@@ -2586,6 +2594,12 @@ async function runPreparedAntigravity(
       }
       if (req.signal?.aborted) {
         reject(abortReasonError(req));
+        return;
+      }
+      // ★침묵 한도로 호스트가 끝낸 시도 — 이 settle 이 유일한 정산이다(취소는 위에서 처리했고, result 를 받은 턴은 해당 없다).
+      if (silence.tripped && !resultSeen) {
+        resolve({ text: "", ownerControlTerminal: "uncertain",
+          failure: runtimeSilentTimeoutFailure("antigravity", silence.trippedWith?.limitMs ?? silenceLimitMs) });
         return;
       }
       if (code === 0) {
@@ -2778,8 +2792,8 @@ async function runPreparedAntigravity(
       });
     } else {
       residentSession.active = {
-        onLine: consumeAgyLine,
-        onStderr: (chunk) => { stderr += chunk; },
+        onLine: (line) => { silence.touch(); consumeAgyLine(line); },
+        onStderr: (chunk) => { silence.touch(); stderr += chunk; },
         onDeath: (code) => settle(code),
       };
       if (!antigravityResidentSessionAlive(residentSession)

@@ -947,6 +947,18 @@ export function cliSilenceWindowMs(env: NodeJS.ProcessEnv = process.env): number
   return Number.isFinite(raw) && raw >= 50 ? Math.floor(raw) : CLI_SILENCE_WINDOW_MS;
 }
 
+/**
+ * A tool reported started suspends the 20-minute window (long renders and builds are silent), but not forever:
+ * a tool call that never returns and emits nothing for this long is hung, not working. A byte or event from the
+ * child resets it. `AGENTLAS_CLI_TOOL_SILENCE_WINDOW_MS` is a test hook only.
+ */
+export const CLI_TOOL_SILENCE_WINDOW_MS = 90 * 60_000;
+
+export function cliToolSilenceWindowMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.AGENTLAS_CLI_TOOL_SILENCE_WINDOW_MS);
+  return Number.isFinite(raw) && raw >= 50 ? Math.floor(raw) : CLI_TOOL_SILENCE_WINDOW_MS;
+}
+
 export interface CliSilenceGuard {
   /** Any byte/event from the child. */
   touch(): void;
@@ -955,6 +967,8 @@ export interface CliSilenceGuard {
   toolEnd(id?: string | null): void;
   /** True once the host decided to end the attempt for silence. */
   readonly tripped: boolean;
+  /** Which limit ended it: the plain window, or the longer ceiling that applies while a tool call is in flight. */
+  readonly trippedWith: { limitMs: number; toolInFlight: boolean } | null;
   stop(): void;
 }
 
@@ -968,21 +982,25 @@ export interface CliSilenceGuard {
  */
 export function startCliSilenceGuard(
   child: { killed: boolean; exitCode: number | null; signalCode: NodeJS.Signals | null },
-  opts: { label: string; onStatus: RunnerEvents["onStatus"]; kill: () => void; windowMs?: number },
+  opts: { label: string; onStatus: RunnerEvents["onStatus"]; kill: () => void; windowMs?: number; toolWindowMs?: number },
 ): CliSilenceGuard {
   const windowMs = opts.windowMs ?? cliSilenceWindowMs();
+  const toolWindowMs = opts.toolWindowMs ?? cliToolSilenceWindowMs();
   let last = Date.now();
   let tripped = false;
+  let trippedWith: { limitMs: number; toolInFlight: boolean } | null = null;
   const open = new Map<string, number>();
   const openCount = (): number => { let n = 0; for (const v of open.values()) n += v; return n; };
   let timer: ReturnType<typeof setInterval> | null = setInterval(() => {
     if (child.exitCode !== null || child.signalCode !== null) { stop(); return; }
-    if (tripped || openCount() > 0) return;
-    if (Date.now() - last < windowMs) return;
+    if (tripped) return;
+    const limitMs = openCount() > 0 ? Math.max(windowMs, toolWindowMs) : windowMs;
+    if (Date.now() - last < limitMs) return;
     tripped = true;
+    trippedWith = { limitMs, toolInFlight: openCount() > 0 };
     stop();
     opts.onStatus(
-      `${opts.label}: no output for ${Math.round(windowMs / 1000)}s — ending the stalled attempt (${RUNTIME_SILENT_TIMEOUT_CODE})`,
+      `${opts.label}: no output for ${Math.round(limitMs / 1000)}s${openCount() > 0 ? " with a tool call in flight" : ""} — ending the stalled attempt (${RUNTIME_SILENT_TIMEOUT_CODE})`,
     );
     try { opts.kill(); } catch { /* the close handler still settles */ }
   }, Math.max(20, Math.min(30_000, Math.floor(windowMs / 4))));
@@ -999,15 +1017,20 @@ export function startCliSilenceGuard(
       if (n > 0) open.set(k, n); else open.delete(k);
     },
     get tripped() { return tripped; },
+    get trippedWith() { return trippedWith; },
     stop,
   };
 }
 
 /** Typed failure for a host-ended silent attempt. */
-export function runtimeSilentTimeoutFailure(runtime: string, windowMs = cliSilenceWindowMs()): RunnerFailure {
+export function runtimeSilentTimeoutFailure(
+  runtime: string,
+  windowMs = cliSilenceWindowMs(),
+  detail: { toolInFlight?: boolean } = {},
+): RunnerFailure {
   return {
     kind: "timeout",
-    message: `${runtime} produced no output for ${Math.round(windowMs / 1000)}s; the host ended the attempt`.slice(0, 2_000),
+    message: `${runtime} produced no output for ${Math.round(windowMs / 1000)}s${detail.toolInFlight ? " while a tool call was in flight" : ""}; the host ended the attempt`.slice(0, 2_000),
     runtime,
     source: "marker",
     providerCode: RUNTIME_SILENT_TIMEOUT_CODE,

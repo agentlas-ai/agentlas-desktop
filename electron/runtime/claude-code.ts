@@ -22,6 +22,10 @@ import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import {
   ensureChildCloseAfterExit,
   startCliHeartbeat,
+  startCliSilenceGuard,
+  runtimeSilentTimeoutFailure,
+  cliSilenceWindowMs,
+  cliToolSilenceWindowMs,
   workforceObservedHostAuthorityEnforcement,
   workforceNativeToolEnforcement,
   workforceZeroToolsEnforcement,
@@ -1526,7 +1530,15 @@ const runClaudeTurn = async (
     // ★호스트 소유 생존 신호 — 러너 공통 규칙(runner.ts startCliHeartbeat 주석 참고).
     //   stream-json이라도 긴 생각/도구 구간은 수 분 침묵할 수 있고, 그 침묵은
     //   무활동 워치독에게 사망과 구별되지 않는다.
-    const stopHeartbeat = startCliHeartbeat(child, events.onStatus, "claude");
+    const stopHeartbeatOnly = startCliHeartbeat(child, events.onStatus, "claude");
+    // ★호스트 소유 침묵 한도(runner.ts startCliSilenceGuard): 자식이 낸 바이트·이벤트만 센다. 가드는 트리만 죽이고,
+    // 아래 settle 이 유일한 정산 경로로 timeout 실패를 만든다. 사용자 취소·result 를 받은 턴은 건드리지 않는다.
+    const silenceWindowMs = cliSilenceWindowMs(req.env ?? process.env);
+    const silence = startCliSilenceGuard(child, {
+      label: "claude", onStatus: events.onStatus, windowMs: silenceWindowMs,
+      toolWindowMs: cliToolSilenceWindowMs(req.env ?? process.env), kill: () => killCliTree(child),
+    });
+    const stopHeartbeat = (): void => { stopHeartbeatOnly(); silence.stop(); };
     // ★죽은 자식이 close를 안 보내면 이 실행은 영영 안 끝난다 — runner.ts 주석 참고.
     // 상주 세션은 열 때 한 번만 건다(턴마다 걸면 리스너가 쌓인다).
     if (!session) {
@@ -2147,6 +2159,7 @@ const runClaudeTurn = async (
             }
             // 도구 이벤트 전에 본문을 강제 플러시 — 렌더러 인터리브 앵커가 최신 좌표를 본다.
             emitPartial(true);
+            silence.toolStart(block.id);
             events.onTool?.(
               block.name,
               argStr.length > 2000 ? argStr.slice(0, 2000) + "…" : argStr,
@@ -2175,6 +2188,7 @@ const runClaudeTurn = async (
                   ...claudeArtifactPathsFromToolResult(toolName, block.content),
                 ]
               : [];
+            silence.toolEnd(toolId);
             events.onTool?.(toolName, undefined, result, toolId, block.is_error === true, artifactPaths);
             settleNativeFileProof(toolId, block.is_error === true);
             if (toolId) settledToolResultSignatures.set(toolId, resultSignature);
@@ -2198,6 +2212,7 @@ const runClaudeTurn = async (
                 ...claudeArtifactPathsFromToolResult(toolName, block.content),
               ]
             : [];
+          silence.toolEnd(toolId);
           events.onTool?.(toolName, undefined, result, toolId, block.is_error === true, artifactPaths);
           settleNativeFileProof(toolId, block.is_error === true);
           if (toolId) settledToolResultSignatures.set(toolId, resultSignature);
@@ -2315,9 +2330,11 @@ const runClaudeTurn = async (
       handleEvent(ev as unknown as Parameters<typeof handleEvent>[0]);
 
     if (!session) {
-      child.stdout?.on("data", createNdjsonLineReader(dispatchEvent));
+      const readNdjsonLines = createNdjsonLineReader(dispatchEvent);
+      child.stdout?.on("data", (chunk: Buffer) => { silence.touch(); readNdjsonLines(chunk); });
       const stderrDecoder = new StringDecoder("utf8");
       child.stderr?.on("data", (chunk: Buffer) => {
+        silence.touch();
         stderr += stderrDecoder.write(chunk);
       });
     }
@@ -2347,6 +2364,19 @@ const runClaudeTurn = async (
       }
       if (hostObservation?.error) {
         rejectRuntime(new Error(hostObservation.error));
+        return;
+      }
+      // ★침묵 한도로 호스트가 끝낸 시도 — 이 settle 이 유일한 정산이다. result 를 받은 턴·사용자 취소는 해당 없다.
+      if (silence.tripped && !sawResult) {
+        broken = true;
+        resolve({
+          text: (combined() || finalText).trim(),
+          ownerControlTerminal: "uncertain",
+          failure: runtimeSilentTimeoutFailure("claude", silence.trippedWith?.limitMs ?? silenceWindowMs, { toolInFlight: silence.trippedWith?.toolInFlight === true }),
+          sessionId,
+          tokens,
+          observedUsage,
+        });
         return;
       }
       // No result after a dispatched turn is uncertain, including tool-only
@@ -2537,6 +2567,7 @@ const runClaudeTurn = async (
      */
     const turnSink: ClaudeTurnSink = {
       onEvent: (ev) => {
+        silence.touch();
         dispatchEvent(ev);
         if (ev.type === "result") {
           sawResult = true;
@@ -2545,7 +2576,7 @@ const runClaudeTurn = async (
           queueMicrotask(() => settle(structuredRuntimeError ? 1 : 0));
         }
       },
-      onStderr: (chunk) => { stderr += chunk; },
+      onStderr: (chunk) => { silence.touch(); stderr += chunk; },
       onDeath: (code) => settle(code),
     };
 

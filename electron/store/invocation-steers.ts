@@ -243,6 +243,14 @@ export function holdQueuedSteerForRecovery(
   ).run(reason, new Date().toISOString(), id).changes === 1;
 }
 
+/** Close a held host-written direction that can no longer be delivered (its original run ended without a receipt). */
+export function retireHeldQueuedSteer(id: string): boolean {
+  return getDb().prepare(
+    `UPDATE invocation_steers SET status = 'cancelled', updated_at = ?
+      WHERE id = ? AND status IN ('queued','draining') AND recovery_state = 'held'`,
+  ).run(new Date().toISOString(), id).changes === 1;
+}
+
 /** Explicit recovery route hook; callers must make the replay decision first. */
 export function releaseQueuedSteerRecoveryHold(id: string): boolean {
   return getDb().prepare(

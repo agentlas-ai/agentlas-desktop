@@ -3,11 +3,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ipc } from "@/lib/ipc";
 import { Markdown } from "@/components/Markdown";
-import { IconArrowLeft, IconClose, IconSearch } from "@/components/Icon";
+import { IconArrowLeft, IconClose, IconLock, IconSearch } from "@/components/Icon";
 import type { OneCapabilitiesAPI, OneCapabilityDetail, OneCapabilityItem, OneCapabilityKind } from "../../../shared/one-capabilities";
 import {
-  CAPABILITY_KIND_ORDER, capabilityTitle, CAPABILITY_PAGE_SIZE, CAPABILITY_SOURCE_ORDER, DISABLED_SWITCH_TIP, detailIsMarkdown, filterCapabilities, itemEnabledTotals,
-  kindCounts, kindLabel, sourceBadge, sourceCounts, sourceLabel, toggleCapability,
+  CAPABILITY_KIND_ORDER, capabilityTitle, CAPABILITY_PAGE_SIZE, CAPABILITY_SOURCE_ORDER, detailIsMarkdown, filterCapabilities, itemEnabledTotals,
+  kindCounts, kindLabel, limitTip, sourceBadge, sourceCounts, sourceLabel, SWITCH_TIMING_TIP, toggleCapability,
   type CapabilityLocale, type CapabilitySourceFilter,
 } from "@/lib/one-capabilities-view";
 import styles from "./OneCapabilitiesModal.module.css";
@@ -23,7 +23,7 @@ export interface OneCapabilitiesInitial {
 
 export function CapabilitySwitch({ checked, disabled, label, tip, onChange }: { checked: boolean; disabled?: boolean; label: string; tip?: string; onChange(next: boolean): void }) {
   return (
-    <button type="button" role="switch" aria-checked={checked} aria-label={label} title={disabled ? tip : undefined} disabled={disabled}
+    <button type="button" role="switch" aria-checked={checked} aria-label={label} title={tip} disabled={disabled}
       className={styles.switch} data-on={checked ? "true" : "false"} data-capability-switch="true"
       onClick={(event) => { event.stopPropagation(); onChange(!checked); }}>
       <span aria-hidden="true" />
@@ -97,10 +97,15 @@ export function OneCapabilitiesModal({ open, locale, onClose, api: apiProp, init
 
   if (!open) return null;
   const closeDetail = () => { setDetailId(null); setDetail(null); setDetailState("idle"); };
-  const switchFor = (item: OneCapabilityItem) => (
-    <CapabilitySwitch checked={item.enabled} disabled={!item.applies} tip={DISABLED_SWITCH_TIP[locale]}
+  // No switch where no run can enforce one: a lock with the reason instead (owner 2026-10-12).
+  const switchFor = (item: OneCapabilityItem) => item.applies ? (
+    <CapabilitySwitch checked={item.enabled} tip={SWITCH_TIMING_TIP[locale]}
       label={`${capabilityTitle(item)} ${item.enabled ? copy("끄기", "Turn off") : copy("켜기", "Turn on")}`}
       onChange={(next) => void toggle(item.id, next)} />
+  ) : (
+    <span className={styles.locked} role="img" aria-label={limitTip(item, locale)} title={limitTip(item, locale)} data-capability-locked={item.limit ?? "runtime_reads_itself"}>
+      <IconLock size={13} />
+    </span>
   );
 
   const node = (

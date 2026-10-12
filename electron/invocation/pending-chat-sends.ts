@@ -65,6 +65,11 @@ export interface PendingChatSendsDeps<Sender> {
   /** The wait ended without a run: a permanent refusal, or the deadline. Never called for a transient refusal. */
   onEnded?(event: { chatId: string; request: McpInvocationRequest; reason: "permanent" | "deadline" | "closed"; code?: string }): void;
   onChange?(chatId: string): void;
+  /**
+   * Called on every look while the head message waits for a busy chat (cheap, no writes expected). Lets the wiring
+   * explain why it is still waiting and release a lease whose owner is provably gone. Never throws into the queue.
+   */
+  onBusyWait?(info: { chatId: string; waitedMs: number; attempts: number }): void;
   log?(message: string, detail: Record<string, unknown>): void;
 }
 
@@ -175,7 +180,11 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
           deps.onChange?.(chatId);
           continue;
         }
-        if (!deps.isChatFree(chatId)) { kick(chatId, BUSY_POLL_MS); return; }
+        if (!deps.isChatFree(chatId)) {
+          try { deps.onBusyWait?.({ chatId, waitedMs: deps.now() - row.created_at, attempts: row.attempts }); } catch { /* diagnosis never blocks the drain */ }
+          // The wiring may have just released the blocker: look again at once instead of after the poll gap.
+          if (!deps.isChatFree(chatId)) { kick(chatId, BUSY_POLL_MS); return; }
+        }
         const rec = record(row);
         try {
           // Every attempt is a new run: a refused start has already closed its own admission.

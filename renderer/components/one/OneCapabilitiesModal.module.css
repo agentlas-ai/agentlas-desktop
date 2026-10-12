@@ -37,6 +37,7 @@
 .switch[data-on=true]{background:var(--ink)}
 .switch[data-on=true] span{transform:translateX(12px)}
 .switch:disabled{opacity:.4;cursor:not-allowed}
+.locked{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:30px;height:18px;color:var(--ink-soft)}
 .note,.foot{margin:0;padding:12px 16px;font-size:12px;color:var(--muted-deep)}
 .foot{border-top:1px solid var(--paper-edge);flex:0 0 auto;padding:8px 16px}
 .rowError{margin:0 8px 6px;font-size:11px;color:var(--danger)}

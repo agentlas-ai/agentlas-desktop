@@ -19,7 +19,7 @@ import { RuntimeJudgmentRefusal } from "./judgment-refusal";
 import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { ensureChildCloseAfterExit, startCliHeartbeat } from "./runner";
+import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliToolSilenceWindowMs } from "./runner";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild } from "./exec";
 import { tStatus } from "./status-i18n";
@@ -238,7 +238,14 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
     trackRunChild(child);
     // ★자식이 죽었는데 close 가 안 오면 이 실행은 영영 안 끝난다 — runner.ts 주석 참고.
     //   형제 러너(agy·claude·codex)에만 붙어 있던 계약을 여기에도 세운다.
-    const stopHeartbeat = startCliHeartbeat(child, events.onStatus, "cursor");
+    const stopHeartbeatOnly = startCliHeartbeat(child, events.onStatus, "cursor");
+    // ★호스트 소유 침묵 한도(runner.ts startCliSilenceGuard). 이 러너는 도구 시작/끝을 구분해 보고하지 않아, 긴 도구를
+    //   침묵으로 오인하지 않도록 한도를 도구 상한(90분)과 같게 둔다. 가드는 트리만 죽이고 close 가 유일한 정산이다.
+    const silenceLimitMs = cliToolSilenceWindowMs(req.env ?? process.env);
+    const silence = startCliSilenceGuard(child, {
+      label: "cursor", onStatus: events.onStatus, windowMs: silenceLimitMs, toolWindowMs: silenceLimitMs, kill: () => killCliTree(child),
+    });
+    const stopHeartbeat = (): void => { stopHeartbeatOnly(); silence.stop(); };
     ensureChildCloseAfterExit(child, () => {
       events.onStatus("cursor: process exited without closing its output — settling the run");
     });
@@ -275,13 +282,14 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
     };
     const bufferDecoder = new StringDecoder("utf8");
     child.stdout?.on("data", (chunk: Buffer) => {
+      silence.touch();
       buffer += bufferDecoder.write(chunk);
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
       lines.forEach(consume);
     });
     const stderrDecoder = new StringDecoder("utf8");
-    child.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + stderrDecoder.write(chunk)).slice(-4_000); });
+    child.stderr?.on("data", (chunk: Buffer) => { silence.touch(); stderr = (stderr + stderrDecoder.write(chunk)).slice(-4_000); });
     child.on("error", (error) => finishReject(error));
     child.on("close", (code) => {
       stopHeartbeat();
@@ -290,6 +298,10 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
       req.signal?.removeEventListener("abort", onAbort);
       if (buffer.trim()) consume(buffer);
       if (req.signal?.aborted) return reject(abortReasonError(req));
+      if (silence.tripped) {
+        return resolve({ text: text.trim(), ownerControlTerminal: "uncertain",
+          failure: runtimeSilentTimeoutFailure("cursor", silence.trippedWith?.limitMs ?? silenceLimitMs) });
+      }
       if (code !== 0) return reject(new Error(`Cursor Agent CLI exit ${code}${stderr ? `\n${stderr}` : ""}`));
       resolve({ text: text.trim() || stderr.trim() || "(Cursor Agent returned no text)",
         ownerControlTerminal: terminalCompleted ? "completed" : "uncertain" });

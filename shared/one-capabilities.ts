@@ -13,8 +13,10 @@ export interface OneCapabilityItem {
   description: string;
   path: string;
   enabled: boolean;
-  /** False: listed and stored, but a product run cannot enforce the switch yet. */
+  /** False: no switch is offered; `limit` says why. Agentlas built-ins never reach the renderer at all. */
   applies: boolean;
+  /** runtime_reads_itself: the runtime loads it on its own. agentlas_managed: Agentlas connects it when a turn needs it. */
+  limit?: "runtime_reads_itself" | "agentlas_managed";
 }
 
 export interface OneCapabilityDetail {

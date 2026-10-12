@@ -30,7 +30,15 @@ const SOURCE_NAME: Record<OneCapabilitySource, string> = { agentlas: "Agentlas",
 
 export const kindLabel = (kind: OneCapabilityKind, locale: CapabilityLocale): string => KIND_LABEL[kind][locale];
 export const sourceLabel = (source: CapabilitySourceFilter, locale: CapabilityLocale): string => SOURCE_LABEL[source][locale];
-export const DISABLED_SWITCH_TIP = { ko: "이 런타임에서는 아직 켜고 끌 수 없어요", en: "This runtime cannot turn this on or off yet" } as const;
+/** A switch takes effect from One's next turn: every run re-reads it, and a resident session restarts with it. */
+export const SWITCH_TIMING_TIP = { ko: "One의 다음 턴부터 적용", en: "Applies from One's next turn" } as const;
+
+/** Why an item has no switch. Shown as the lock's tooltip, never as a switch that looks like it works. */
+export function limitTip(item: Pick<OneCapabilityItem, "source" | "limit">, locale: CapabilityLocale): string {
+  if (item.limit === "agentlas_managed") return locale === "ko" ? "Agentlas가 필요할 때 연결해요 · 여기서 끌 수 없어요" : "Agentlas connects it when a turn needs it · cannot be switched here";
+  const name = SOURCE_NAME[item.source];
+  return locale === "ko" ? `${name}가 스스로 불러오는 설정이에요 · 여기서 끌 수 없어요`.replace(/(Copilot|Grok)가 /, "$1이 ") : `${name} loads it on its own · cannot be switched here`;
+}
 
 /** Personal sources read "개인"; the built-ins read "Agentlas". The source name rides along for the personal ones. */
 export function sourceBadge(source: OneCapabilitySource, locale: CapabilityLocale): { label: string; personal: boolean } {
@@ -105,6 +113,8 @@ export async function toggleCapability(
 export const detailIsMarkdown = (detail: Pick<OneCapabilityDetail, "path" | "kind">): boolean =>
   /\.(md|markdown|mdc)$/i.test(detail.path) || (detail.kind === "memory" && !/\.(json|toml|ya?ml)$/i.test(detail.path));
 
+/** Footer count: only items with a switch are choices; locked ones are not counted as "on". */
 export function itemEnabledTotals(items: readonly OneCapabilityItem[]): { enabled: number; total: number } {
-  return { enabled: items.filter((item) => item.enabled).length, total: items.length };
+  const switchable = items.filter((item) => item.applies);
+  return { enabled: switchable.filter((item) => item.enabled).length, total: switchable.length };
 }

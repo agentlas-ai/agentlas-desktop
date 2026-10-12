@@ -1182,7 +1182,7 @@ function runCodexProcess(
        */
       // ★침묵 한도로 호스트가 끝낸 시도 — 이 close가 유일한 정산이다. 사용자 취소는 건드리지 않는다.
       if (silence.tripped && !req.signal?.aborted && !terminalObserved) {
-        runnerFailure = runtimeSilentTimeoutFailure("codex", silenceWindowMs);
+        runnerFailure = runtimeSilentTimeoutFailure("codex", silence.trippedWith?.limitMs ?? silenceWindowMs, { toolInFlight: silence.trippedWith?.toolInFlight === true });
       }
       if (code === 0 && !runnerFailure) {
         const refusal = detectRuntimeRefusal(text);
