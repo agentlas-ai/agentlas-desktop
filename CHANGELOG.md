@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.27 — 2026-10-13
+
+- A new tools page: plugins, connectors and skills in one place, with real brand logos, a detail view for each, and sign-in and skill viewers that open in place.
+- A teammate's 1:1 conversation also shows the work it did in group rooms, marked with the room.
+- The app now records each change to the Agentlas browser's Google sign-in (cookie names and causes only, never values) so the cause of repeated sign-outs can be found.
+- Typing Korean and pressing Enter sends with one press in every chat box (Japanese and Chinese conversion still confirms first).
+- Every button, tab, chip, menu item and list row that turns gray when you hover, press or select it now keeps room around its text.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.26 — 2026-10-13
 
 - Installed agents find their own guides and references again. A run now tells the agent where its own folder is, so the documents its instructions point to open instead of failing with "No such file".

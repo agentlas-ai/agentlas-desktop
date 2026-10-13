@@ -1,0 +1,23 @@
+/* Room work shown inside a teammate's 1:1 seat thread (owner 2026-10-13): a tinted bubble with "@room" on top. */
+.roomTag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 0 4px;
+  padding: 2px 8px;
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--accent, #4f6bed) 10%, transparent);
+  color: color-mix(in oklch, var(--accent, #4f6bed) 70%, var(--ink));
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 16px;
+  cursor: pointer;
+  border: 0;
+}
+.roomTag:hover { background: color-mix(in oklch, var(--accent, #4f6bed) 16%, transparent); }
+.roomBubble {
+  border-radius: 14px;
+  padding: 8px 12px;
+  background: color-mix(in oklch, var(--accent, #4f6bed) 6%, var(--paper));
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--accent, #4f6bed) 14%, transparent);
+}

@@ -22,7 +22,7 @@
 .documentIdentity strong { min-width: 0; overflow: hidden; font-size: 11.5px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .documentIdentity span { flex: 0 0 auto; color: #7a818b; font-size: 9.5px; }
 .documentToolbarActions { flex: 0 0 auto; display: flex; align-items: center; gap: 5px; }
-.documentToolbar button, .documentInfo > summary { min-height: 28px; display: inline-flex; align-items: center; justify-content: center; padding: 0 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: #555d68; font: inherit; font-size: 10px; cursor: pointer; white-space: nowrap; }
+.documentToolbar button, .documentInfo > summary { min-height: 28px; display: inline-flex; align-items: center; justify-content: center; padding: 0 10px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: #555d68; font: inherit; font-size: 10px; cursor: pointer; white-space: nowrap; }
 .documentToolbar button:hover,
 .documentInfo > summary:hover { border-color: #cfd4dc; color: #242a32; }
 .documentToolbar button:focus-visible,
@@ -167,7 +167,7 @@
   background: var(--popup-card-bg);
   box-shadow: var(--popup-shadow);
 }
-.imageContextMenu button { min-height: 32px; padding: 0 9px; border: 0; border-radius: 6px; background: transparent; color: var(--design-ink); font: inherit; font-size: 11px; text-align: left; cursor: pointer; }
+.imageContextMenu button { min-height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: var(--design-ink); font: inherit; font-size: 11px; text-align: left; cursor: pointer; }
 .imageContextMenu button:hover, .imageContextMenu button:focus-visible { background: var(--design-panel-muted); outline: none; }
 
 .documentToolbar { min-height:36px; padding:2px 6px; gap:4px; flex-wrap:nowrap; box-shadow:none; }

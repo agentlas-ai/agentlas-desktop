@@ -518,7 +518,7 @@ export function FirstRunOnboarding({
                     autoFocus
                     placeholder={copy.namePlaceholder}
                     onChange={(event) => setName(event.target.value)}
-                    onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing && name.trim()) void saveName(); }}
+                    onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing && event.keyCode !== 229 && name.trim()) void saveName(); }}
                   />
                 </div>
                 {/* The placeholder "루나" is an example, not a value: with no name typed the

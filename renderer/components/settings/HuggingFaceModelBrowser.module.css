@@ -63,7 +63,7 @@
 /* File decisions retain their size and fit on narrow screens. */
 @media(max-width:720px) {
   .detail .table thead { display:none; }
-  .detail .table tr { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; padding:14px 0; border-bottom:var(--hairline); }
+  .detail .table tr { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; padding:14px 10px; border-bottom:var(--hairline); }
   .detail .table td { display:block; min-width:0; padding:0; border:0; }
   .detail .table td:first-child,.detail .table td:last-child { grid-column:1/-1; }
   .detail .model strong { white-space:normal; overflow-wrap:anywhere; }

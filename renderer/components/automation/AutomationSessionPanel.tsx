@@ -6,13 +6,13 @@
 // 하는 것이 이 패널의 목적이다(RunHistoryPanel의 "대화에서 이어서 해결"이 여기로 들어온다).
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { KeyboardEvent } from "react";
 import { grantForDroppedFile, grantForPastedAttachment, grantForPastedImage, ipc, ipcEvents } from "@/lib/ipc";
 import { extractQuestions } from "@/lib/ask-question";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { IconArrowLeft, IconClose, IconRefresh } from "@/components/Icon";
 import { AutomationStrategyPanel } from "./AutomationStrategyPanel";
 import type { PreparedOneAttachments } from "@shared/one-attachments";
+import { useComposerEnter } from "@/lib/use-composer-enter";
 import type {
   AutomationExecutionPermission,
   AutomationHubMode,
@@ -116,9 +116,6 @@ function sendFailureMessage(error: unknown, ko: boolean): string {
   return ko ? "보내지 못했어요. 잠시 뒤 다시 시도해 주세요." : "It could not be sent. Try again shortly.";
 }
 
-function isImeSubmit(e: KeyboardEvent): boolean {
-  return e.nativeEvent.isComposing || e.keyCode === 229;
-}
 
 export function AutomationSessionPanel({
   automationId,
@@ -514,6 +511,7 @@ export function AutomationSessionPanel({
     window.addEventListener(AUTOMATION_SESSION_PROMPT_EVENT, onPrompt);
     return () => window.removeEventListener(AUTOMATION_SESSION_PROMPT_EVENT, onPrompt);
   }, [automationId, send]);
+  const composerEnter = useComposerEnter(() => { if (sendOutcomeUnknown) return; void send(draft); });
 
   // 임베드 모드 — 바깥의 공용 입력이 이 세션의 send를 그대로 쓴다(입력은 화면에 하나).
   useEffect(() => {
@@ -698,13 +696,9 @@ export function AutomationSessionPanel({
         <textarea
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key !== "Enter" || e.shiftKey) return;
-            if (isImeSubmit(e)) return;
-            e.preventDefault();
-            if (sendOutcomeUnknown) return;
-            void send(draft);
-          }}
+          onCompositionUpdate={composerEnter.onCompositionUpdate}
+          onCompositionEnd={composerEnter.onCompositionEnd}
+          onKeyDown={(e) => { composerEnter.handleEnter(e); }}
           rows={3}
           disabled={unavailable}
           placeholder={

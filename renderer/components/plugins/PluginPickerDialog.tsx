@@ -18,8 +18,9 @@
 //    (미입력 서버는 MCP 화면에 "키 필요"로 남아 스스로를 설명한다).
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { IconFilter, IconPuzzle } from "@/components/Icon";
-import { PluginLogo, usePluginBrandMap } from "@/components/PluginLogo";
+import { IconCheck, IconFilter, IconPlus } from "@/components/Icon";
+import { usePluginBrandMap } from "@/components/PluginLogo";
+import { ToolLogo } from "./ToolLogo";
 import type { MarketplaceListing, PluginKind } from "@/lib/types";
 import {
   countByKind,
@@ -230,7 +231,7 @@ export function PluginPickerDialog({
     <div className={styles.overlay} role="dialog" aria-modal="true" aria-labelledby="plugin-picker-title">
       <div className={styles.panel} ref={dialogRef}>
         <header className={styles.header}>
-          <h2 id="plugin-picker-title" className={styles.title}><span className={styles.titleIcon} aria-hidden="true"><IconPuzzle size={21}/></span>
+          <h2 id="plugin-picker-title" className={styles.title}>
             {variant === "onboarding"
               ? ko ? "어떤 도구를 자주 쓰세요?" : "What do you use every day?"
               : ko ? "도구 추가" : "Add tools"}
@@ -350,10 +351,10 @@ export function PluginPickerDialog({
                       aria-pressed={picked}
                       onClick={() => toggle(listing.slug)}
                     >
-                      <PluginLogo
+                      <ToolLogo
                         slug={listing.slug}
-                        name={listing.name}
-                        size={32}
+                        name={listing.nameEn || listing.name}
+                        frame="row"
                         brandColor={listing.brandColor}
                         brandMap={brandMap}
                       />
@@ -362,14 +363,12 @@ export function PluginPickerDialog({
                         <span className={styles.cardTagline}>{listing.tagline}</span>
                         <SetupHint listing={listing} ko={ko} hasLogin={hasBrowserLogin(listing)} />
                       </span>
-                      <span className={styles.cardAction}>
-                        {!installedKnown
-                          ? ko ? "상태 확인 필요" : "State unverified"
-                          : already
-                          ? ko ? "설치됨" : "Installed"
-                          : picked
-                            ? ko ? "선택됨" : "Selected"
-                            : ko ? "추가" : "Add"}
+                      <span
+                        className={styles.cardAction}
+                        data-on={already || picked || undefined}
+                        title={!installedKnown ? ko ? "상태 확인 필요" : "State unverified" : already ? ko ? "설치됨" : "Installed" : picked ? ko ? "선택됨" : "Selected" : ko ? "추가" : "Add"}
+                      >
+                        {already || picked ? <IconCheck size={15} /> : <IconPlus size={15} />}
                       </span>
                     </button>
                   );
@@ -393,7 +392,7 @@ export function PluginPickerDialog({
               ? ko ? `${progress} 설치 중…` : `Installing ${progress}…`
               : selected.size > 0
                 ? ko ? `${selected.size}개 선택됨` : `${selected.size} selected`
-                : ko ? "여러 개를 함께 고를 수 있어요" : "You can pick more than one"}
+                : ""}
           </span>
           <div className={styles.footerActions}>
             {guidedOnly && onCustomSetup && <button type="button" className={styles.primary} onClick={onCustomSetup}>{ko ? "MCP 연결 직접 추가" : "Add custom MCP connection"}</button>}

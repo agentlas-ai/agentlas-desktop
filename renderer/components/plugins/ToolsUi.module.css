@@ -1,0 +1,221 @@
+/* Tool library — plugin / connector / skill views.
+   Measured from the two reference recordings at 1:1 (2026-10-13):
+   ChatGPT "플러그인" (rows, detail column, prompt card, authorize + skill modals) and
+   Claude "사용자 지정" (hero, bordered cards, IDE-style skill viewer).
+   Palette comes from the page's --tl-* variables (tokens only). Every element with a
+   background, hover included, keeps inner padding. */
+
+/* ── logos ──────────────────────────────────────────────────────── */
+.logoTile { flex: none; display: inline-flex; align-items: center; justify-content: center; overflow: hidden; border-radius: 8px; background: var(--tl-tile, var(--paper)); box-shadow: 0 0 0 1px var(--tl-tile-line, var(--paper-edge)), 0 1px 2px color-mix(in srgb, var(--ink) 5%, transparent); color: var(--tl-sub, var(--muted-deep)); }
+.logoTile[data-frame="card"] { border-radius: 8px; }
+.logoTile[data-frame="hero"] { border-radius: 10px; box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 8%, transparent), 0 4px 12px color-mix(in srgb, var(--ink) 7%, transparent); }
+.logoTile[data-frame="detail"] { border-radius: 14px; box-shadow: 0 0 0 1px var(--tl-tile-line, var(--paper-edge)), 0 1px 3px color-mix(in srgb, var(--ink) 6%, transparent); }
+.logoBare { flex: none; display: inline-flex; align-items: center; justify-content: center; color: var(--tl-sub, var(--muted-deep)); }
+.logoMono { display: inline-flex; align-items: center; justify-content: center; border-radius: 22%; color: var(--white, var(--paper)); font-family: var(--font-head, inherit); font-weight: 700; letter-spacing: -.02em; }
+
+/* ── shared buttons (ChatGPT detail: 28px, radius 8, 13px) ───────── */
+.iconButton { width: 28px; height: 28px; flex: none; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--tl-sub, var(--muted-deep)); cursor: pointer; }
+.iconButton:hover { background: var(--tl-hover, var(--paper-3)); color: var(--ink); }
+.iconButton:disabled { opacity: .4; cursor: default; }
+.lightButton { height: 28px; display: inline-flex; align-items: center; gap: 5px; padding: 6px 10px; border: 0; border-radius: 8px; background: var(--tl-chip, var(--paper-3)); color: var(--ink); font-size: 13px; font-weight: 500; line-height: 16px; white-space: nowrap; cursor: pointer; text-decoration: none; }
+.lightButton:hover { background: var(--tl-active, var(--paper-edge)); }
+.darkButton { height: 28px; display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border: 0; border-radius: 8px; background: var(--ink); color: var(--paper); font-size: 13px; font-weight: 500; line-height: 16px; white-space: nowrap; cursor: pointer; }
+.darkButton:hover:not(:disabled) { background: color-mix(in srgb, var(--ink) 82%, var(--paper)); }
+.lightButton:disabled, .darkButton:disabled { opacity: .45; cursor: default; }
+
+.menuWrap { position: relative; display: inline-flex; }
+.menuDismiss { position: fixed; inset: 0; z-index: 29; border: 0; background: transparent; cursor: default; }
+.menu { position: absolute; right: 0; top: 32px; z-index: 30; min-width: 168px; padding: 6px; border: 1px solid var(--tl-line, var(--paper-edge)); border-radius: 14px; background: var(--paper); box-shadow: 0 8px 24px color-mix(in srgb, var(--ink) 10%, transparent), 0 1px 3px color-mix(in srgb, var(--ink) 6%, transparent); }
+.menu button { width: 100%; height: 32px; display: flex; align-items: center; gap: 8px; padding: 6px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--ink); font-size: 14px; text-align: left; cursor: pointer; }
+.menu button:hover { background: var(--tl-hover, var(--paper-3)); }
+.menu button[data-danger="true"] { color: var(--danger); }
+
+/* ── breadcrumb bar (ChatGPT: 13px, 44px bar) ───────────────────── */
+.crumbBar { position: sticky; top: 0; z-index: 6; height: 44px; display: flex; align-items: center; gap: 2px; padding: 0 14px; background: var(--tl-page, var(--paper)); font-size: 13px; color: var(--tl-sub, var(--muted-deep)); }
+.crumbLink { height: 28px; display: inline-flex; align-items: center; padding: 6px 8px; border: 0; border-radius: 8px; background: transparent; color: var(--tl-sub, var(--muted-deep)); font-size: 13px; cursor: pointer; }
+.crumbLink:hover { background: var(--tl-hover, var(--paper-3)); color: var(--ink); }
+.crumbSep { display: inline-flex; padding: 0 4px; color: var(--tl-sub, var(--muted-deep)); }
+.crumbCurrent { padding: 6px 4px; color: var(--ink); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ── detail column (ChatGPT: 720px, 60px tile, 20px name) ───────── */
+.detailColumn { width: 100%; max-width: 768px; margin: 0 auto; padding: 22px 24px 96px; }
+.detailIcon { margin: 0 0 16px; }
+.titleRow { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.detailName { margin: 0; min-width: 0; font-size: 20px; line-height: 28px; font-weight: 600; letter-spacing: -.2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.detailTagline { margin: 4px 0 0; font-size: 14px; line-height: 20px; color: var(--tl-sub, var(--muted-deep)); }
+.actions { display: flex; align-items: center; gap: 8px; flex: none; }
+
+/* prompt card — lavender gradient, chips centred, 16px radius */
+.promptCard {
+  --pc-a: oklch(0.80 0.075 278); /* colour-literal-allowed: reference prompt-card gradient */
+  --pc-b: oklch(0.87 0.055 300); /* colour-literal-allowed: reference prompt-card gradient */
+  margin: 24px 0 0; min-height: 210px; padding: 32px 28px; border-radius: 16px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  background:
+    radial-gradient(55% 75% at 30% 30%, color-mix(in srgb, var(--paper) 55%, transparent), transparent 70%),
+    radial-gradient(45% 60% at 85% 90%, color-mix(in srgb, var(--paper) 50%, transparent), transparent 70%),
+    linear-gradient(115deg, var(--pc-a) 0%, var(--pc-b) 100%);
+}
+.promptChip { max-width: 470px; display: flex; align-items: center; gap: 12px; padding: 10px 10px 10px 12px; border-radius: 12px; background: color-mix(in srgb, var(--paper) 72%, transparent); color: var(--ink); font-size: 14px; line-height: 21px; text-align: left; backdrop-filter: blur(8px); }
+.promptChip strong { font-weight: 400; margin-right: 5px; }
+.chipMark { display: inline-flex; vertical-align: -2px; margin-right: 5px; }
+.promptChipText { flex: 1; min-width: 0; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.promptArrow { width: 24px; height: 24px; flex: none; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 999px; background: color-mix(in srgb, var(--ink) 8%, transparent); color: var(--ink-soft); cursor: pointer; }
+.promptArrow:hover { background: color-mix(in srgb, var(--ink) 15%, transparent); color: var(--ink); }
+
+.description { margin: 24px 0 0; font-size: 14px; line-height: 22px; color: var(--ink); white-space: pre-line; }
+
+.section { margin: 32px 0 0; }
+.sectionTitle { display: flex; align-items: baseline; gap: 6px; margin: 0; padding: 0 0 12px; border-bottom: 1px solid var(--tl-line, var(--paper-edge)); font-size: 16px; line-height: 22px; font-weight: 600; color: var(--ink); }
+.sectionTitle span { font-weight: 400; color: var(--tl-sub, var(--muted-deep)); }
+.rows { display: flex; flex-direction: column; padding: 8px 0 0; margin: 0 -10px; }
+.row { width: 100%; min-height: 56px; display: flex; align-items: center; gap: 12px; padding: 8px 10px; border: 0; border-radius: 10px; background: transparent; color: var(--ink); text-align: left; font: inherit; }
+button.row { cursor: pointer; }
+button.row:hover, .row[data-highlight="true"] { background: var(--tl-hover, var(--paper-3)); }
+.rowIcon { width: 36px; height: 36px; flex: none; display: inline-flex; align-items: center; justify-content: center; border-radius: 8px; background: var(--tl-tile, var(--paper)); box-shadow: 0 0 0 1px var(--tl-tile-line, var(--paper-edge)); color: var(--ink-soft); }
+.rowText { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.rowName { font-size: 14px; line-height: 20px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rowSub { font-size: 13px; line-height: 18px; color: var(--tl-sub, var(--muted-deep)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rowMeta { flex: none; font-size: 12px; color: var(--tl-sub, var(--muted-deep)); }
+.moreRow { min-height: 44px; color: var(--tl-sub, var(--muted-deep)); font-size: 13px; }
+.moreRow:hover { color: var(--ink); }
+.stackIcons { width: 36px; display: inline-flex; justify-content: center; color: var(--tl-sub, var(--muted-deep)); }
+
+/* connection card (ChatGPT "연결된 계정": 1px line, radius 14, 56px rows, inset dividers) */
+.card { margin: 14px 0 0; border: 1px solid var(--tl-line, var(--paper-edge)); border-radius: 14px; background: var(--tl-page, var(--paper)); }
+.cardRow { min-height: 56px; display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 14px; }
+.cardRow + .cardRow { border-top: 1px solid var(--tl-line, var(--paper-edge)); margin: 0 14px; padding-left: 0; padding-right: 0; }
+.cardText { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.cardTitle { font-size: 14px; line-height: 20px; font-weight: 500; }
+.cardSub { font-size: 13px; line-height: 18px; color: var(--tl-sub, var(--muted-deep)); }
+.cardSub[data-tone="ready"] { color: var(--ok); }
+.cardSub[data-tone="warn"] { color: var(--danger); }
+.mono { display: block; max-width: 100%; font-family: var(--font-mono); font-size: 12px; line-height: 18px; color: var(--ink-soft); overflow-wrap: anywhere; }
+.addRow { width: 100%; min-height: 52px; display: flex; align-items: center; gap: 12px; padding: 8px 14px; border: 0; border-top: 1px solid var(--tl-line, var(--paper-edge)); border-radius: 0 0 13px 13px; background: transparent; color: var(--ink); font-size: 14px; text-align: left; cursor: pointer; }
+.addRow:hover { background: var(--tl-hover, var(--paper-3)); }
+.addCircle { width: 30px; height: 30px; flex: none; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; background: var(--tl-chip, var(--paper-3)); color: var(--ink-soft); }
+.smallButton { height: 28px; flex: none; display: inline-flex; align-items: center; gap: 5px; padding: 6px 10px; border: 0; border-radius: 8px; background: var(--tl-chip, var(--paper-3)); color: var(--ink); font-size: 13px; font-weight: 500; cursor: pointer; white-space: nowrap; text-decoration: none; }
+.smallButton:hover:not(:disabled) { background: var(--tl-active, var(--paper-edge)); }
+.smallButton:disabled { opacity: .45; cursor: default; }
+
+.info { display: grid; grid-template-columns: 96px minmax(0, 1fr); row-gap: 10px; padding: 14px 0 0; font-size: 13px; line-height: 20px; }
+.info dt { color: var(--tl-sub, var(--muted-deep)); }
+.info dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+.info a { color: var(--ink); }
+
+.notice { margin: 14px 0 0; padding: 10px 12px; border: 1px solid var(--tl-line, var(--paper-edge)); border-radius: 10px; background: var(--tl-page, var(--paper-2)); font-size: 13px; line-height: 1.55; color: var(--ink-soft); }
+
+/* ── discover: hero carousel (Claude: 280px, radius 12, sage fade) ── */
+.hero { position: relative; height: 280px; overflow: hidden; border: 1px solid var(--tl-hero-line, var(--paper-edge)); border-radius: 12px; background: linear-gradient(180deg, var(--tl-page, var(--paper)) 0%, var(--tl-page, var(--paper)) 30%, color-mix(in srgb, var(--blue) 50%, var(--tl-page, var(--paper))) 70%, var(--blue) 100%); text-align: center; }
+.heroEyebrow { margin: 26px 0 0; font-size: 12px; line-height: 16px; letter-spacing: .02em; text-transform: uppercase; color: var(--tl-sub, var(--muted-deep)); }
+.heroTitle { margin: 6px 0 0; font-size: 22px; line-height: 30px; font-weight: 500; color: var(--ink); }
+.heroSub { margin: 2px 0 0; font-size: 14px; line-height: 20px; color: var(--ink-soft); }
+.heroIcons { height: 84px; display: flex; align-items: center; justify-content: center; gap: 14px; margin: 18px 0 0; }
+.heroIcons > span:nth-child(2n) { transform: translateY(10px); }
+.heroIcons > span:nth-child(3n) { transform: translateY(-4px); }
+.heroCta { height: 40px; margin: 10px 0 0; padding: 10px 14px; border: 1px solid color-mix(in srgb, var(--ink) 9%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--paper) 45%, transparent); color: var(--ink); font-size: 14px; font-weight: 500; cursor: pointer; backdrop-filter: blur(6px); }
+.heroCta:hover { background: color-mix(in srgb, var(--paper) 75%, transparent); }
+.heroArrow { position: absolute; top: 50%; width: 40px; height: 40px; margin-top: -20px; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 50%; background: color-mix(in srgb, var(--paper) 70%, transparent); color: var(--ink-soft); cursor: pointer; }
+.heroArrow:hover { background: var(--paper); color: var(--ink); }
+.heroArrow[data-side="left"] { left: 12px; }
+.heroArrow[data-side="right"] { right: 12px; }
+.dots { display: flex; justify-content: center; gap: 6px; margin: 14px 0 0; }
+.dot { width: 6px; height: 6px; padding: 0; border: 0; border-radius: 999px; background: color-mix(in srgb, var(--ink) 18%, var(--tl-page, var(--paper))); cursor: pointer; }
+.dot[data-active="true"] { width: 24px; background: var(--ink); }
+
+/* section header (Claude: 15px/600 + count pill, "모두 보기 →" 14px) */
+.gridHead { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 36px 0 14px; }
+.gridTitle { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 15px; line-height: 22px; font-weight: 600; color: var(--ink); }
+.countPill { padding: 2px 7px; border-radius: 999px; background: var(--tl-chip, var(--paper-3)); font-size: 11px; line-height: 14px; font-weight: 500; color: var(--tl-sub, var(--muted-deep)); }
+.seeAll { height: 28px; display: inline-flex; align-items: center; gap: 6px; padding: 6px 8px; margin-right: -8px; border: 0; border-radius: 8px; background: transparent; color: var(--ink); font-size: 14px; cursor: pointer; }
+.seeAll:hover { background: var(--tl-hover, var(--paper-3)); }
+
+/* bordered cards (Claude: 1px line, radius 10, 14px padding, 48 tile, +/✓ 28px) */
+.cardGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.itemCard { position: relative; min-width: 0; min-height: 92px; display: flex; align-items: flex-start; gap: 12px; padding: 14px 54px 14px 14px; border: 1px solid var(--tl-card-line, var(--paper-edge)); border-radius: 10px; background: var(--tl-page, var(--paper)); box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 4%, transparent); color: var(--ink); text-align: left; cursor: pointer; font: inherit; }
+.itemCard:hover { border-color: color-mix(in srgb, var(--ink) 18%, var(--tl-card-line, var(--paper-edge))); box-shadow: 0 2px 6px color-mix(in srgb, var(--ink) 6%, transparent); }
+.itemText { min-width: 0; display: flex; flex-direction: column; gap: 2px; padding-top: 1px; }
+.itemName { font-size: 15px; line-height: 21px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.itemDesc { font-size: 14px; line-height: 20px; color: var(--ink-soft); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.itemMaker { font-size: 13px; line-height: 18px; color: var(--tl-sub, var(--muted-deep)); }
+.cardAction { position: absolute; top: 13px; right: 13px; width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 1px solid var(--tl-card-line, var(--paper-edge)); border-radius: 6px; background: var(--paper); color: var(--ink); cursor: pointer; box-shadow: 0 1px 1px color-mix(in srgb, var(--ink) 4%, transparent); }
+.cardAction:hover { background: var(--tl-hover, var(--paper-3)); }
+.cardAction[data-installed="true"] { border-color: transparent; box-shadow: none;
+  background: oklch(0.885 0.07 145); /* colour-literal-allowed: reference installed-check mint */
+  color: oklch(0.52 0.11 145); /* colour-literal-allowed: reference installed-check green */
+}
+
+/* two-column rows (ChatGPT: 68px pitch, 36 tile, 14/13px, 45px column gap) */
+.rowGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 26px; row-gap: 0; margin: 0 -10px; }
+.listRow { min-width: 0; min-height: 68px; display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: 12px; color: var(--ink); cursor: pointer; }
+.listRow:hover { background: var(--tl-hover, var(--paper-3)); }
+.listRowAction { width: 28px; height: 28px; flex: none; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--ink); cursor: pointer; }
+.listRowAction[data-installed="true"] { color: var(--tl-sub, var(--muted-deep)); }
+.listRowAction:hover { background: var(--tl-active, var(--paper-edge)); color: var(--ink); }
+
+.empty { margin: 24px 0; padding: 26px 16px; border: 1px dashed var(--tl-line, var(--paper-edge)); border-radius: 12px; color: var(--tl-sub, var(--muted-deep)); font-size: 13px; text-align: center; }
+
+/* ── skill viewer (Claude IDE: back link, 44 tile, underline tabs, tree 244) ── */
+.skillPage { width: 100%; max-width: 1008px; margin: 0 auto; padding: 24px 28px 64px; }
+.backLink { height: 30px; display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px 6px 6px; margin: 0 0 14px -6px; border: 0; border-radius: 8px; background: transparent; color: var(--ink); font-size: 14px; cursor: pointer; }
+.backLink:hover { background: var(--tl-hover, var(--paper-3)); }
+.skillHeader { display: flex; align-items: center; gap: 16px; }
+.skillTile { width: 44px; height: 44px; flex: none; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--tl-card-line, var(--paper-edge)); border-radius: 8px; background: var(--tl-chip, var(--paper-2)); color: var(--ink-soft); }
+.skillName { margin: 0; font-size: 16px; line-height: 22px; font-weight: 600; }
+.skillFrom { margin: 2px 0 0; font-size: 14px; line-height: 20px; color: var(--tl-sub, var(--muted-deep)); }
+.tabs { display: flex; gap: 2px; margin: 18px 0 0; border-bottom: 1px solid var(--tl-line, var(--paper-edge)); }
+.tab { position: relative; height: 34px; padding: 6px 12px; border: 0; border-radius: 8px 8px 0 0; background: transparent; color: var(--tl-sub, var(--muted-deep)); font-size: 14px; cursor: pointer; }
+.tab:hover { color: var(--ink); background: var(--tl-hover, var(--paper-3)); }
+.tab[data-active="true"] { color: var(--ink); font-weight: 500; }
+.tab[data-active="true"]::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--ink); }
+.viewer { display: grid; grid-template-columns: 244px minmax(0, 1fr); min-height: 460px; margin: 28px 0 0; overflow: hidden; border: 1px solid var(--tl-card-line, var(--paper-edge)); border-radius: 10px; }
+.tree { display: flex; flex-direction: column; gap: 0; padding: 8px; border-right: 1px solid var(--tl-card-line, var(--paper-edge)); }
+.treeItem { min-height: 32px; display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--ink); font-size: 15px; text-align: left; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.treeItem:hover { background: var(--tl-hover, var(--paper-3)); }
+.treeItem[data-active="true"] { background: var(--tl-active, var(--paper-edge)); font-weight: 600; }
+.treeItem[data-depth="1"] { padding-left: 28px; }
+.treeItem svg { flex: none; color: var(--ink-soft); }
+.viewerBody { min-width: 0; padding: 12px 20px 24px; overflow: auto; }
+.viewerTop { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 10px; }
+.viewerPath { margin: 0; font-family: var(--font-mono); font-size: 14px; color: var(--ink-soft); }
+.viewToggle { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--tl-card-line, var(--paper-edge)); border-radius: 8px; }
+.viewToggle button { width: 26px; height: 24px; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--tl-sub, var(--muted-deep)); cursor: pointer; }
+.viewToggle button[data-active="true"] { background: var(--tl-active, var(--paper-edge)); color: var(--ink); }
+.markdown { font-size: 15px; line-height: 26px; }
+.overview { padding: 20px 0 0; font-size: 15px; line-height: 1.65; color: var(--ink); }
+
+/* ── modals (ChatGPT) ───────────────────────────────────────────── */
+.scrim { position: fixed; inset: 0; z-index: 1200; display: flex; align-items: center; justify-content: center; padding: 24px; background: color-mix(in srgb, var(--ink) 22%, transparent); }
+.authPanel { position: relative; width: min(480px, 100%); padding: 32px 24px 22px; border-radius: 20px; background: var(--tl-page, var(--paper)); box-shadow: 0 16px 48px color-mix(in srgb, var(--ink) 16%, transparent), 0 2px 6px color-mix(in srgb, var(--ink) 6%, transparent); text-align: center; outline: none; }
+.modalClose { position: absolute; top: 16px; right: 16px; }
+.authLogos { display: flex; align-items: center; justify-content: center; gap: 12px; }
+.authApp { width: 56px; height: 56px; display: inline-flex; align-items: center; justify-content: center; overflow: hidden; border-radius: 12px; background: var(--tl-tile, var(--paper)); box-shadow: 0 0 0 1px var(--tl-tile-line, var(--paper-edge)), 0 1px 3px color-mix(in srgb, var(--ink) 6%, transparent); padding: 9px; }
+.authApp img { width: 100%; height: 100%; object-fit: contain; }
+.authDots { display: inline-flex; gap: 4px; }
+.authDots span { width: 6px; height: 6px; border-radius: 50%; background: color-mix(in srgb, var(--ink) 18%, var(--paper)); }
+.authTitle { margin: 18px 0 0; font-size: 20px; line-height: 28px; font-weight: 600; color: var(--ink); }
+.authSub { margin: 6px 0 0; font-size: 14px; line-height: 20px; color: var(--tl-sub, var(--muted-deep)); }
+.authSub[data-tone="error"] { color: var(--danger); }
+.authPrimary { width: 100%; height: 36px; margin: 22px 0 0; display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 8px 16px; border: 0; border-radius: 999px; background: var(--ink); color: var(--paper); font-size: 14px; font-weight: 500; cursor: pointer; }
+.authPrimary:hover:not(:disabled) { background: color-mix(in srgb, var(--ink) 82%, var(--paper)); }
+.authPrimary:disabled { opacity: .55; cursor: default; }
+.authLater { height: 32px; margin: 10px 0 0; padding: 6px 12px; border: 0; border-radius: 8px; background: transparent; color: var(--ink-soft); font-size: 14px; cursor: pointer; }
+.authLater:hover { background: var(--tl-hover, var(--paper-3)); color: var(--ink); }
+.authLink { display: inline-block; margin: 10px 0 0; font-size: 13px; color: var(--ink); }
+.spinner { width: 14px; height: 14px; border: 2px solid color-mix(in srgb, var(--paper) 40%, transparent); border-top-color: var(--paper); border-radius: 50%; animation: tlspin .8s linear infinite; }
+@keyframes tlspin { to { transform: rotate(360deg); } }
+
+.skillModal { position: relative; width: min(600px, 100%); max-height: calc(100vh - 128px); display: flex; flex-direction: column; border-radius: 20px; background: var(--tl-page, var(--paper)); box-shadow: 0 16px 48px color-mix(in srgb, var(--ink) 16%, transparent), 0 2px 6px color-mix(in srgb, var(--ink) 6%, transparent); outline: none; }
+.skillModalBody { flex: 1; min-height: 0; overflow: auto; padding: 20px 20px 8px; }
+.skillModalIcon { width: 40px; height: 40px; display: inline-flex; align-items: center; justify-content: center; border-radius: 10px; background: var(--tl-tile, var(--paper)); box-shadow: 0 0 0 1px var(--tl-tile-line, var(--paper-edge)); color: var(--ink-soft); }
+.skillModalName { margin: 14px 0 0; font-size: 20px; line-height: 28px; font-weight: 600; }
+.skillModalDesc { margin: 4px 0 0; font-size: 16px; line-height: 24px; color: var(--tl-sub, var(--muted-deep)); }
+.skillModalHeading { margin: 18px 0 12px; font-size: 16px; line-height: 22px; font-weight: 600; }
+.skillModalContent { padding: 16px; border: 1px solid var(--tl-line, var(--paper-edge)); border-radius: 14px; font-size: 14px; line-height: 22px; }
+.skillModalFoot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 12px 20px 16px; }
+
+@media (max-width: 900px) {
+  .cardGrid, .rowGrid { grid-template-columns: minmax(0, 1fr); }
+  .viewer { grid-template-columns: minmax(0, 1fr); }
+  .tree { border-right: 0; border-bottom: 1px solid var(--tl-card-line, var(--paper-edge)); }
+}

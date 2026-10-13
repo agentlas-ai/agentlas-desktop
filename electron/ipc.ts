@@ -498,7 +498,7 @@ import {
   getChatWorkingFolder,
   listArchivedChats,
   listChatMessages,
-  listChatMessagesPage,
+  listChatMessagesPage, listAgentRoomWorkMessages,
   repairRootChatSurfaceController,
   listChatsByFirm,
   listChatsByProject,
@@ -4527,6 +4527,11 @@ export function registerIpcHandlers(): void {
     // a thrown error (production 2026-10-12 20:55 KST: seven handler errors in nine seconds from one open chat).
     if (!getChat(input.chatId)) return { messages: [], hasOlder: false };
     return listChatMessagesPage(input.chatId, input.limit ?? 200, input.before);
+  });
+  ipcMain.handle("chats:agentRoomWork", (_event, input: { agentId: string; limit?: number }) => {
+    assertTrustedSitePublishIpcSender(_event);
+    if (!input || typeof input !== "object" || typeof input.agentId !== "string" || !input.agentId) throw new TypeError("Invalid room work request");
+    return listAgentRoomWorkMessages(input.agentId, input.limit ?? 200);
   });
   registerAppControlDomainIpc(ipcMain, "chats:listRecent", (limit?: number) => listRecentChats(limit));
   // One 화면 전용 — 전체 최근 목록을 잘라 쓰면 Work 대화가 One 대화를 밀어낸다.

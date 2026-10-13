@@ -23,7 +23,7 @@
 .sectionLabel { margin: 2px 4px -2px; color: var(--muted-deep); font-size: 9px; font-weight: 760; letter-spacing: .1em; text-transform: uppercase; }
 .rows { display: grid; gap: 6px; }
 .agentActions { display: flex; justify-content: center; margin: 2px 7px 5px; }
-.addRow, .createAgentButton { min-width: 0; min-height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 0 8px; border: 1px solid var(--paper-edge-strong); border-radius: 9px; background: var(--paper); color: var(--ink-soft); font: inherit; font-size: 9px; font-weight: 650; cursor: pointer; }
+.addRow, .createAgentButton { min-width: 0; min-height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 0 10px; border: 1px solid var(--paper-edge-strong); border-radius: 9px; background: var(--paper); color: var(--ink-soft); font: inherit; font-size: 9px; font-weight: 650; cursor: pointer; }
 .addRow:hover,
 .createAgentButton:hover { border-color: var(--muted); color: var(--ink); }
 .addRow:focus-visible,
@@ -66,7 +66,7 @@ button.failureDot:focus-visible { outline: 2px solid var(--danger); outline-offs
 .searchResults { display: grid; gap: 7px; max-height: 240px; overflow: auto; padding: 3px 0; }
 .searchSection { display: grid; gap: 3px; }
 .searchSection > strong { padding: 0 4px; color: var(--muted-deep); font-size: 8px; letter-spacing: .08em; text-transform: uppercase; }
-.searchSection > button { display: flex; min-width: 0; align-items: center; gap: 7px; padding: 5px 6px; border: 0; border-radius: 7px; background: transparent; text-align: left; cursor: pointer; }
+.searchSection > button { display: flex; min-width: 0; align-items: center; gap: 7px; padding: 6px 10px; border: 0; border-radius: 7px; background: transparent; text-align: left; cursor: pointer; }
 .searchSection > button:hover { color: var(--ink); }
 .searchSection > button:focus-visible { background: var(--paper-3); outline: 2px solid transparent; }
 .searchSection > button > span { display: grid; min-width: 0; gap: 2px; }
@@ -87,7 +87,7 @@ button.failureDot:focus-visible { outline: 2px solid var(--danger); outline-offs
 .dialogHeader button { border: 0; background: none; color: var(--muted-deep); font-size: 20px; cursor: pointer; }
 .slotNote { margin: -8px 0 0; color: var(--muted-deep); font-size: 10px; }
 .tabs { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 5px; padding: 3px; border-radius: 9px; background: var(--paper-3); }
-.tabs button { min-height: 28px; border: 0; border-radius: 7px; background: transparent; color: var(--muted-deep); font-size: 10px; cursor: pointer; }
+.tabs button { min-height: 28px; padding: 0 10px; border: 0; border-radius: 7px; background: transparent; color: var(--muted-deep); font-size: 10px; cursor: pointer; }
 .tabs button[data-active="true"] { background: var(--paper); color: var(--ok); box-shadow: 0 1px 4px rgba(20, 40, 30, .08); }
 .field { display: grid; gap: 5px; color: var(--muted-deep); font-size: 10px; }
 .field input, .field select { min-height: 34px; border: 1px solid var(--paper-edge); border-radius: 8px; padding: 0 9px; background: var(--paper); color: var(--ink); font-size: 11px; }
@@ -110,7 +110,7 @@ button.failureDot:focus-visible { outline: 2px solid var(--danger); outline-offs
 .autoSelectRow > div { display: grid; gap: 3px; }
 .autoSelectRow strong { color: var(--ink); font-size: 10px; }
 .autoSelectRow small { color: var(--muted-deep); font-size: 8px; }
-.toggle { min-width: 46px; min-height: 25px; padding: 0 7px; border: 1px solid var(--ok-soft); border-radius: 999px; background: var(--paper); color: var(--muted-deep); font-size: 8px; font-weight: 700; cursor: pointer; }
+.toggle { min-width: 46px; min-height: 28px; padding: 0 10px; border: 1px solid var(--ok-soft); border-radius: 999px; background: var(--paper); color: var(--muted-deep); font-size: 8px; font-weight: 700; cursor: pointer; }
 .toggle[data-on="true"] { border-color: var(--black); background: var(--black); color: var(--white); }
 .toolList { display: grid; gap: 5px; max-height: 240px; overflow: auto; }
 .toolRow { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto auto; align-items: center; gap: 7px; min-height: 38px; padding: 5px 7px; border: 1px solid var(--paper-3); border-radius: 9px; background: var(--paper); }
@@ -149,7 +149,7 @@ button.failureDot:focus-visible { outline: 2px solid var(--danger); outline-offs
   display: flex;
   justify-content: flex-start;
   gap: 7px;
-  padding: 0 9px;
+  padding: 0 10px;
   border-color: transparent;
   border-radius: 9px;
   background: var(--paper-3);
@@ -173,7 +173,7 @@ button.failureDot:focus-visible { outline: 2px solid var(--danger); outline-offs
   position: relative;
   min-height: 52px;
   gap: 9px;
-  padding: 6px 7px;
+  padding: 6px 10px;
   border: 0;
   border-radius: 10px;
   background: transparent;
@@ -289,7 +289,7 @@ button.failureDot:focus-visible { outline: 2px solid var(--danger); outline-offs
 
 .taskForceRow {
   min-height: 44px;
-  padding: 5px 7px;
+  padding: 6px 10px;
   border: 0;
   border-radius: 10px;
   background: transparent;
@@ -443,7 +443,7 @@ button.failureDot:focus-visible { outline: 2px solid var(--danger); outline-offs
 .addSheet .tabs,
 .toolTabs { min-height: 46px; gap: 5px; padding: 4px; border-radius: 11px; background: var(--one-sheet-card-muted); }
 .addSheet .tabs button,
-.toolTabs button { min-height: 38px; border: 0; border-radius: 8px; background: transparent; color: var(--one-sheet-muted); font: inherit; font-size: 12px; font-weight: 650; cursor: pointer; }
+.toolTabs button { min-height: 38px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: var(--one-sheet-muted); font: inherit; font-size: 12px; font-weight: 650; cursor: pointer; }
 .addSheet .tabs button[data-active="true"],
 .toolTabs button[data-active="true"] { background: var(--one-sheet-control-surface); color: var(--one-sheet-ink); box-shadow: 0 1px 5px rgba(30, 34, 31, .09); }
 .addSheet .tabs button:focus-visible,

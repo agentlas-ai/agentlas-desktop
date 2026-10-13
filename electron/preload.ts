@@ -869,6 +869,7 @@ const api: AgentlasIpc = {
   },
   chats: {
     messagesPage: (input) => ipcRenderer.invoke("chats:messagesPage", input),
+    agentRoomWork: (input) => ipcRenderer.invoke("chats:agentRoomWork", input),
     listRecent: (limit?: number) => ipcRenderer.invoke("chats:listRecent", limit),
     /** One 홈 전용 목록 — Work 대화가 One 대화를 밀어내지 않게 DB 에서 거른다. */
     listRecentOne: (limit?: number) => ipcRenderer.invoke("chats:listRecentOne", limit),

@@ -27,7 +27,7 @@
 .path { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); font: 600 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
 .language { flex: 0 0 auto; color: var(--ink-soft); font: 10px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; text-transform: uppercase; }
 .readonly { flex: 0 0 auto; color: var(--muted-deep); font-size: 10px; letter-spacing: .02em; }
-.copy { min-height: 28px; padding: 0 4px; border: 0; border-radius: 5px; background: transparent; color: var(--ink-soft); font: inherit; font-size: 11px; cursor: pointer; }
+.copy { min-height: 28px; padding: 0 10px; border: 0; border-radius: 5px; background: transparent; color: var(--ink-soft); font: inherit; font-size: 11px; cursor: pointer; }
 .copy:hover { color: var(--ink); }
 .copy:focus-visible { background: var(--paper-3); color: var(--ink); outline: none; }
 

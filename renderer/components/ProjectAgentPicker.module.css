@@ -183,7 +183,7 @@
 }
 
 .selectedRow > button {
-  padding: 0 8px;
+  padding: 0 10px;
 }
 
 .state > button:hover,
@@ -260,7 +260,7 @@
 .sourceToggle {
   width: 100%;
   min-height: 38px;
-  padding: 5px 7px;
+  padding: 6px 10px;
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr) auto;
   align-items: center;
@@ -369,7 +369,7 @@
 }
 
 .addTeam {
-  padding: 0 7px;
+  padding: 0 10px;
   white-space: nowrap;
 }
 
@@ -406,7 +406,7 @@
   width: 100%;
   min-width: 0;
   min-height: 43px;
-  padding: 5px 7px;
+  padding: 6px 10px;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;

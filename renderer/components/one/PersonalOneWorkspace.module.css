@@ -23,7 +23,7 @@
 .bubble :is(p,li):not(:where([data-intellect-ui] *)){line-height:1.65}.taskContents :is(h2,h3){line-height:1.4}
 
 /* Hand-off link (owner 2026-10-04: a 14px status dot squeezed into a blue bar, and filler text). */
-.root .delegation{display:flex;align-items:center;gap:10px;align-self:flex-start;width:min(100%,440px);max-width:100%;margin:2px 0 4px;padding:9px 10px 9px 9px;border:1px solid var(--paper-edge);border-radius:12px;background:var(--paper);color:var(--ink);text-align:left;cursor:pointer}
+.root .delegation{display:flex;align-items:center;gap:10px;align-self:flex-start;width:min(100%,440px);max-width:100%;margin:2px 0 4px;padding:9px 10px;border:1px solid var(--paper-edge);border-radius:12px;background:var(--paper);color:var(--ink);text-align:left;cursor:pointer}
 .root .delegation:hover { border-color:var(--paper-edge-strong); color: var(--ink); }
 .root .delegation:focus-visible {background:var(--paper-2);border-color:var(--paper-edge-strong)}
 .delegationIcon{display:grid;place-items:center;width:30px;height:30px;flex:0 0 30px;border-radius:8px;background:var(--paper-3);color:var(--ink-soft)}
@@ -36,7 +36,7 @@
 /* The + menu, in the composer menu's look (OneShell .composerPopover). */
 .plus{position:relative;display:flex;align-self:flex-end}
 .root .plusMenu{position:absolute;left:0;bottom:calc(100% + 10px);z-index:20;width:240px;padding:6px;border:1px solid var(--paper-edge);border-radius:12px;background:var(--paper);box-shadow:0 14px 38px rgba(20,25,20,.12);display:grid}
-.root .plusMenu button{width:100%;min-height:36px;display:flex;align-items:center;gap:9px;padding:6px 8px;border:0;border-radius:8px;background:transparent;color:var(--ink);font-size:12.5px;text-align:left;cursor:pointer}
+.root .plusMenu button{width:100%;min-height:36px;display:flex;align-items:center;gap:9px;padding:6px 10px;border:0;border-radius:8px;background:transparent;color:var(--ink);font-size:12.5px;text-align:left;cursor:pointer}
 .root .plusMenu button:hover,.root .plusMenu button:focus-visible{background:var(--paper-3);outline:none}
 .root .plusMenu button strong{font-weight:500}
 .plusIcon{display:grid;place-items:center;width:22px;color:var(--ink-soft)}

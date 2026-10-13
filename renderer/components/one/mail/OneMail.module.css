@@ -708,7 +708,7 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 0 8px;
+  padding: 0 10px;
   border: 0;
   border-radius: 8px;
   background: transparent;
@@ -953,7 +953,7 @@
 }
 
 .suggestion {
-  min-height: 26px;
+  min-height: 28px;
   padding: 0 10px;
   border: 1px solid var(--paper-edge);
   border-radius: 999px;

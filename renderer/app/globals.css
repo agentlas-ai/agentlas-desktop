@@ -1575,6 +1575,7 @@ html[data-one-output-resizing="true"] * {
 
 .dashboard-org-mode {
   height: 30px;
+  padding: 0 10px;
   border-radius: 6px;
   color: rgba(255, 255, 255, 0.66);
   font-size: 12px;
@@ -1678,19 +1679,19 @@ button[data-dashboard-import="true"]:disabled {
   display: flex;
   align-items: center;
   gap: 7px;
-  min-height: 28px;
+  min-height: 30px;
   border-radius: 7px;
   color: rgba(255, 255, 255, 0.82);
   text-align: left;
 }
 
 .dashboard-org-category {
-  padding: 0 8px 0 2px;
+  padding: 0 10px;
   color: var(--white);
 }
 
 .dashboard-org-firm {
-  padding: 0 8px 0 16px;
+  padding: 0 10px 0 24px;
 }
 
 .dashboard-org-firm svg {
@@ -1699,15 +1700,15 @@ button[data-dashboard-import="true"]:disabled {
 }
 
 .dashboard-org-agent {
-  padding: 0 8px 0 28px;
+  padding: 0 10px 0 36px;
 }
 
 .dashboard-org-agent-mid {
-  padding-left: 34px;
+  padding-left: 42px;
 }
 
 .dashboard-org-agent-deep {
-  padding-left: 48px;
+  padding-left: 56px;
 }
 
 .dashboard-org-agent-single .dashboard-org-dot,
@@ -2661,7 +2662,7 @@ button.dashboard-local-model-card:hover { color: var(--ink); }
   grid-template-columns: 22px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
-  padding: 7px;
+  padding: 7px 10px;
   border-radius: 7px;
   color: var(--dash-ink);
   cursor: pointer;
@@ -4640,7 +4641,7 @@ button[data-toggle-state="off"] {
 .automation-event-attention-actions button,
 .automation-reconcile-submit {
   min-height: 36px;
-  padding: 7px 9px;
+  padding: 7px 10px;
   border: 1px solid var(--paper-edge);
   border-radius: 9px;
   background: var(--paper-2);
@@ -7465,7 +7466,7 @@ button[data-toggle-state="on"] {
 }
 
 .chat-steering-draft-send {
-  padding: 0 8px;
+  padding: 0 10px;
   color: var(--ink-soft);
   font-size: 10px;
   font-weight: 700;
@@ -7545,7 +7546,7 @@ button[data-toggle-state="on"] {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 0 9px;
+  padding: 0 10px;
   border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
@@ -10638,7 +10639,7 @@ button[data-toggle-state="on"] {
 .library-roster-tab {
   flex: 1;
   min-width: 0;
-  padding: 6px 8px;
+  padding: 6px 10px;
   border: 1px solid var(--paper-edge, rgba(0, 0, 0, 0.08));
   border-radius: 8px;
   background: var(--paper, var(--paper));
@@ -11255,9 +11256,9 @@ button[data-toggle-state="on"] {
 /* 노드 좌상단 AI 주석 CTA(항목 5) — 작지만 항상 그 자리에. */
 .automation-flow-node-ai {
   position: absolute;
-  top: -10px;
+  top: -12px;
   left: 12px;
-  padding: 2px 7px;
+  padding: 4px 10px;
   border: 1px solid var(--paper-edge);
   border-radius: 999px;
   background: var(--paper);

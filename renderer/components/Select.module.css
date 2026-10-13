@@ -12,7 +12,7 @@
   background: var(--paper);
   border: 1px solid var(--paper-edge-strong);
   border-radius: 8px;
-  padding: 5px 8px 5px 10px;
+  padding: 5px 10px;
   cursor: pointer;
 }
 .trigger:hover:not(:disabled) { color: var(--ink); }

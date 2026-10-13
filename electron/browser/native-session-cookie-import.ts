@@ -17,6 +17,7 @@ import {
 } from "../mcp-tools/browser-cdp-launcher";
 import { NATIVE_BROWSER_PARTITION } from "../work-live-view";
 import { browserCredentialConsentRevision } from "./credential-sync";
+import { googleSessionTraceRecord, withAgentlasCookieWrite } from "./google-session-trace";
 import { decideNativeCookieWrite, planSessionGroupFeed } from "./cookie-merge";
 import { sessionCookieGroupOf, sessionCookieNamesFor } from "./login-wall";
 import { listBrowserSites } from "../store/browser-vault";
@@ -335,6 +336,35 @@ export function nativeCookieDetails(
   return { kind: "write", details };
 }
 
+/**
+ * After an import, compare what the source held with what the partition now stores for the Google sign-in cookies:
+ * missing, or a differing expiry / secure / httpOnly / sameSite. Names and attributes only, never values.
+ */
+async function logGoogleImportComparison(cookies: readonly CdpCookie[], destination: NativeCookieSession, nowSeconds: number): Promise<void> {
+  try {
+    const traced = cookies.filter((cookie) => typeof cookie.name === "string" && googleSessionTraceRecord({ domain: String(cookie.domain ?? ""), name: cookie.name }, "import", false));
+    if (!traced.length) return;
+    const stored = await destination.cookies.get({});
+    const differences: Array<Record<string, unknown>> = [];
+    for (const cookie of traced) {
+      const converted = nativeCookieDetails(cookie, nowSeconds);
+      if (converted.kind === "skip") { differences.push({ name: cookie.name, host: cookie.domain, skipped: converted.reason }); continue; }
+      const want = converted.details;
+      const host = String(cookie.domain ?? "").toLowerCase();
+      const got = stored.find((item) => item.name === want.name && String(item.domain ?? "").toLowerCase() === host && (item.path ?? "/") === want.path);
+      if (!got) { differences.push({ name: want.name, host, missing: true }); continue; }
+      const fields: string[] = [];
+      if ((want.expirationDate === undefined) !== (got.session === true || got.expirationDate === undefined)) fields.push("session");
+      else if (want.expirationDate !== undefined && Math.abs((got.expirationDate ?? 0) - want.expirationDate) > 2) fields.push("expires");
+      if (Boolean(got.secure) !== Boolean(want.secure)) fields.push("secure");
+      if (Boolean(got.httpOnly) !== Boolean(want.httpOnly)) fields.push("httpOnly");
+      if ((got.sameSite ?? "unspecified") !== (want.sameSite ?? "unspecified")) fields.push("sameSite");
+      if (fields.length) differences.push({ name: want.name, host, fields });
+    }
+    console.info(`[google-session-trace] ${JSON.stringify({ at: new Date().toISOString(), import: { traced: traced.length, differences } })}`);
+  } catch { /* diagnostics never block an import */ }
+}
+
 /** Writes only synthetic/private-test input or CDP-verified cookies; no values leave this function. */
 export async function writeNativeBrowserCookies(
   cookies: readonly CdpCookie[],
@@ -407,7 +437,7 @@ export async function writeNativeBrowserCookies(
         connect.beginMigration?.();
         begun = true;
       }
-      await destination.cookies.set(converted.details);
+      await withAgentlasCookieWrite(() => destination.cookies.set(converted.details));
       counts.imported += 1;
       if (replacing) counts.updated = (counts.updated ?? 0) + 1;
       else counts.added = (counts.added ?? 0) + 1;
@@ -420,6 +450,7 @@ export async function writeNativeBrowserCookies(
   if (counts.imported > 0) {
     try { await destination.flushStorageData(); }
     catch { counts.skipped.writeFailed += 1; }
+    await logGoogleImportComparison(cookies, destination, nowSeconds);
   }
   return counts;
 }

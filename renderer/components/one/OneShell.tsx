@@ -293,6 +293,7 @@ import {
   type OneActivityState,
 } from "@/lib/one-activity";
 import styles from "./OneShell.module.css";
+import roomWorkStyles from "./SeatRoomWork.module.css";
 import { PersonalOneWorkspace } from "./PersonalOneWorkspace";
 import panelMenu from "@/components/PanelPopover.module.css";
 
@@ -4444,6 +4445,36 @@ function OneSessionsShell() {
   // 좌석 에이전트가 패키지에 선언한 추천 작업(defaultPrompts). 어느 에이전트의 것인지와 함께 든다.
   const [seatSuggestionRead, setSeatSuggestionRead] = useState<{ agentId: string; items: OneSeatSuggestion[] } | null>(null);
   const activeSeatMemberAgentId = activeOneMember?.installedAgentId ?? null;
+  // Owner 2026-10-13: a teammate's 1:1 seat also shows what it did in group rooms, in time order, marked "@room".
+  // Room work runs in division sessions under each room, so it is read separately and never mixed into this chat's pages.
+  const seatRoomWorkAgentId = activeOneMember && activeThreadChatNow?.kind !== "division" && !activeTaskforce ? activeOneMember.installedAgentId : null;
+  const [seatRoomWork, setSeatRoomWork] = useState<{ agentId: string; rows: Array<UiMessage & { room: { chatId: string; title: string; sessionChatId: string } }> } | null>(null);
+  useEffect(() => {
+    const agentId = seatRoomWorkAgentId;
+    const api = ipc();
+    if (!agentId || typeof api?.chats.agentRoomWork !== "function") return;
+    let cancelled = false;
+    void api.chats.agentRoomWork({ agentId, limit: 200 }).then((rows) => {
+      if (cancelled) return;
+      setSeatRoomWork({ agentId, rows: rows.map((row) => ({ id: `room:${row.id}`, durableMessageId: row.durableMessageId, role: row.role,
+        text: row.text, createdAt: row.createdAt, speakerAgentId: row.speakerAgentId, hostNotice: row.hostNotice,
+        images: row.imageDataUrls, room: row.room })) });
+    }).catch(() => { /* the seat still shows its own conversation */ });
+    return () => { cancelled = true; };
+  }, [seatRoomWorkAgentId, messages.length]);
+  const seatThreadMessages = useMemo((): Array<UiMessage & { room?: { chatId: string; title: string; sessionChatId: string } }> => {
+    const rows = seatRoomWorkAgentId && seatRoomWork?.agentId === seatRoomWorkAgentId ? seatRoomWork.rows : [];
+    if (!rows.length) return visibleMessages;
+    const firstOwn = visibleMessages.find((message) => message.createdAt)?.createdAt;
+    // Older room work than the loaded window of this chat stays out until older pages are loaded.
+    const merged = [...visibleMessages, ...rows.filter((row) => !historyPageRef.current.hasOlder || !firstOwn || (row.createdAt ?? "") >= firstOwn)];
+    return merged.map((message, index) => ({ message, index })).sort((a, b) => {
+      const at = a.message.createdAt, bt = b.message.createdAt;
+      if (at && bt && at !== bt) return at < bt ? -1 : 1;
+      if (!at !== !bt) return at ? -1 : 1;
+      return a.index - b.index;
+    }).map(({ message }) => message);
+  }, [seatRoomWorkAgentId, seatRoomWork, visibleMessages]);
   useEffect(() => {
     const agentId = activeSeatMemberAgentId;
     const api = ipc();
@@ -9028,7 +9059,7 @@ function OneSessionsShell() {
                       {activeTaskforce && <OneTaskforceConversation historyIdentity={`${workerChatId}:${block.runId}`} state={block.state} org={oneOrgState} locale={appLocale} />}
                     </Fragment>
                   ))}
-                  {visibleMessages.map((message, messageIndex) => {
+                  {seatThreadMessages.map((message, messageIndex) => {
                     // Narrative output remains the primary final response.
                     // Only a genuinely visual/interactive surface replaces its
                     // duplicate Markdown payload.
@@ -9075,8 +9106,9 @@ function OneSessionsShell() {
                       ? { label: messageSpeakerMember.displayName, tone: messageSpeakerMember.icon, status: messageSpeakerMember.statusKind }
                       : assistantSpeaker;
                     const assistantGroupStart = message.role === "assistant"
-                      && (visibleMessages[messageIndex - 1]?.role !== "assistant"
-                        || visibleMessages[messageIndex - 1]?.speakerAgentId !== message.speakerAgentId);
+                      && (seatThreadMessages[messageIndex - 1]?.role !== "assistant"
+                        || seatThreadMessages[messageIndex - 1]?.speakerAgentId !== message.speakerAgentId
+                        || Boolean(seatThreadMessages[messageIndex - 1]?.room) !== Boolean(message.room));
                     return (
                       <Fragment key={message.intellectUiMessageId ?? message.id}>
                         {(departurePlan.beforeMessage.get(message.id) ?? []).map((notice) => (
@@ -9104,7 +9136,7 @@ function OneSessionsShell() {
                             <p className={styles.systemTurn} data-role="system" data-one-system-turn="true">{systemLabel}</p>
                           )
                           : (
-                          <MessageActions messageId={message.id} author={message.role === "user" ? (appLocale === "ko" ? "나" : "You") : messageSpeaker.label} text={displayedText} locale={appLocale} onReply={reply => { setMessageReply(reply); composerInputRef.current?.focus(); }}>
+                          <MessageActions messageId={message.id} author={message.role === "user" ? (message.room ? "One" : appLocale === "ko" ? "나" : "You") : messageSpeaker.label} text={displayedText} locale={appLocale} onReply={reply => { setMessageReply(reply); composerInputRef.current?.focus(); }}>
                           <article
                             className={styles.message}
                             data-one-message-id={message.id}
@@ -9113,6 +9145,7 @@ function OneSessionsShell() {
                             data-taskforce={activeTaskforce ? "true" : undefined}
                             data-one-message-speaker={message.role === "assistant" ? messageSpeaker.label : undefined}
                             data-one-avatar-group-start={assistantGroupStart ? "true" : undefined}
+                            data-one-room-work={message.room ? "true" : undefined}
                           >
                             {message.role === "assistant" && (
                               <span
@@ -9128,7 +9161,13 @@ function OneSessionsShell() {
                                 />}
                               </span>
                             )}
-                            <div className={styles.messageContent}>
+                            <div className={message.room ? `${styles.messageContent} ${roomWorkStyles.roomBubble}` : styles.messageContent}>
+                            {message.room && (
+                              <button type="button" className={roomWorkStyles.roomTag} onClick={() => openDispatchedSession(message.room!.sessionChatId)}
+                                title={appLocale === "ko" ? "이 방 작업 열기" : "Open this room work"}>
+                                @{message.room.title || (appLocale === "ko" ? "방" : "Room")}{message.role === "user" ? " · One" : ""}
+                              </button>
+                            )}
                             {activeTaskforce && message.role !== "system" && (
                               <div className={styles.taskforceMessageMeta}>
                                 <span>
@@ -9262,7 +9301,7 @@ function OneSessionsShell() {
                       workspacePath={workspacePath}
                     />
                   )}
-                  {messages.length === 0 && !busy && !teamPreflightBusy && !teamPreflight && !preflightPrompt && hydratedThreadChatId === activeThreadChatId && <div className={styles.emptyThread}>{selected ? tFor(appLocale, "one.shell.thread.empty_work") : tFor(appLocale, "one.shell.thread.empty_conversation")}</div>}
+                  {messages.length === 0 && !busy && !teamPreflightBusy && !teamPreflight && !preflightPrompt && hydratedThreadChatId === activeThreadChatId && seatThreadMessages.length === 0 && <div className={styles.emptyThread}>{selected ? tFor(appLocale, "one.shell.thread.empty_work") : tFor(appLocale, "one.shell.thread.empty_conversation")}</div>}
                   {workBusy && !preflightPrompt && !liveWorkAnchorMessageId && (
                     <>
                       {busy && activeRunPrompt && !livePromptMounted && (

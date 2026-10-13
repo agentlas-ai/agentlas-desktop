@@ -1,4 +1,4 @@
-.chip { flex: 0 0 auto; min-height: 22px; padding: 1px 9px; border: 1px solid var(--paper-edge); border-radius: 999px; background: var(--paper); color: var(--ink); font-size: 11px; line-height: 1.4; cursor: pointer; }
+.chip { flex: 0 0 auto; min-height: 28px; padding: 4px 10px; border: 1px solid var(--paper-edge); border-radius: 999px; background: var(--paper); color: var(--ink); font-size: 11px; line-height: 1.4; cursor: pointer; }
 .chip:hover { color: var(--ink); }
 .chip:focus-visible { background: var(--paper-2); }
 .backdrop { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(0, 0, 0, 0.32); }
@@ -6,7 +6,7 @@
 .head { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--paper-edge); }
 .head strong { flex: 0 0 auto; }
 .tabs { display: flex; gap: 4px; flex: 1 1 auto; }
-.tabs button { padding: 3px 9px; border: 1px solid transparent; border-radius: 999px; background: transparent; color: var(--muted-deep); font-size: 12px; cursor: pointer; }
+.tabs button { padding: 6px 12px; border: 1px solid transparent; border-radius: 999px; background: transparent; color: var(--muted-deep); font-size: 12px; cursor: pointer; }
 .tabs button[aria-selected="true"] { border-color: var(--paper-edge); background: var(--paper-2); color: var(--ink); }
 .close { border: none; background: transparent; color: var(--muted-deep); font-size: 18px; cursor: pointer; }
 .body { display: grid; gap: 10px; padding: 12px 14px 14px; overflow: auto; }

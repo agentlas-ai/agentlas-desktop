@@ -14,6 +14,7 @@ import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import type { OneActivityArtifact } from "@/lib/one-activity";
 import { TaskSidePanel } from "../workspace/TaskSidePanel";
 import styles from "./OneShell.module.css";
+import { useComposerEnter } from "@/lib/use-composer-enter";
 
 /**
  * 분할 보기의 "보고만 있는" 칸.
@@ -250,6 +251,7 @@ export function OneSplitPane({
       if (chatIdRef.current === chatId && chatEpochRef.current === chatEpoch) setSending(false);
     }
   }, [appLocale, chatId, draft, locale, permissionMode, runtimeSelection, sending]);
+  const enter = useComposerEnter(() => { void send(); });
 
   return (
     <section className={styles.splitPane} data-one-split-pane={chatId}>
@@ -346,12 +348,9 @@ export function OneSplitPane({
           rows={1}
           placeholder={locale === "ko" ? "이 세션에 말하기" : "Message this session"}
           onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-              event.preventDefault();
-              void send();
-            }
-          }}
+          onCompositionUpdate={enter.onCompositionUpdate}
+          onCompositionEnd={enter.onCompositionEnd}
+          onKeyDown={(event) => { enter.handleEnter(event); }}
         />
         <button type="submit" disabled={!draft.trim() || sending}>
           {sending ? (locale === "ko" ? "보내는 중" : "Sending") : (locale === "ko" ? "보내기" : "Send")}

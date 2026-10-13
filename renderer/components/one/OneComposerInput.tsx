@@ -2,7 +2,7 @@
 
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef } from "react";
 import type { Ref, TextareaHTMLAttributes } from "react";
-import { decideComposerEnter, decideComposerWrite } from "../../lib/one-composer-ime";
+import { decideComposerEnter, decideComposerWrite, isHangulComposition } from "../../lib/one-composer-ime";
 
 export type OneComposerValue = string | ((current: string) => string);
 
@@ -55,6 +55,10 @@ export const OneComposerInput = memo(forwardRef<OneComposerInputHandle, OneCompo
   // True from compositionstart to compositionend. Only the browser's own events change it.
   const composing = useRef(false);
   const lastCompositionEndAt = useRef<number | null>(null);
+  // Text of the composition in progress (or the one that just ended), to tell a Hangul commit from a conversion.
+  const compositionText = useRef("");
+  // An Enter pressed while a Hangul syllable was still composing: send as soon as the IME commits it.
+  const sendAfterCommit = useRef<HTMLTextAreaElement | null>(null);
 
   const getValue = useCallback(() => input.current?.value ?? value.current, []);
   const flushDraft = useCallback(() => {
@@ -174,10 +178,17 @@ export const OneComposerInput = memo(forwardRef<OneComposerInputHandle, OneCompo
       publish(event.currentTarget.value, false);
     }}
     onCompositionStart={() => { composing.current = true; }}
+    onCompositionUpdate={event => { compositionText.current = event.data ?? ""; }}
     onCompositionEnd={() => {
       // Chromium sends compositionend before the Enter keydown that committed it; the keydown handler reads this time.
       composing.current = false;
       lastCompositionEndAt.current = performance.now();
+      if (sendAfterCommit.current) {
+        const target = sendAfterCommit.current;
+        sendAfterCommit.current = null;
+        // The committed syllable reaches the textarea value after this event; send on the next task.
+        window.setTimeout(() => { flushDraft(); callbacks.current.onSubmit(target.value); }, 0);
+      }
     }}
     onBlur={event => { composing.current = false; flushDraft(); callbacks.current.onBlur?.(event); }}
     onKeyDown={event => {
@@ -189,7 +200,10 @@ export const OneComposerInput = memo(forwardRef<OneComposerInputHandle, OneCompo
         isComposing: event.nativeEvent.isComposing,
         keyCode: event.keyCode,
         msSinceCompositionEnd: lastCompositionEndAt.current === null ? null : performance.now() - lastCompositionEndAt.current,
+        committedHangul: isHangulComposition(compositionText.current),
       });
+      // The IME still holds this Enter: let it commit the syllable, then send from compositionend.
+      if (decision === "send-after-commit") { sendAfterCommit.current = event.currentTarget; return; }
       if (decision === "ignore") return;
       event.preventDefault();
       if (decision === "swallow") return;

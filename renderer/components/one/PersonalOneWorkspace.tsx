@@ -46,6 +46,7 @@ import { PersonalOneCheckins } from "./PersonalOneCheckins";
 import dynamic from "next/dynamic";
 import styles from "./PersonalOneWorkspace.module.css";
 import { Select } from "@/components/Select";
+import { useComposerEnter } from "@/lib/use-composer-enter";
 
 const PersonalOneTaskResult=dynamic(()=>import("./PersonalOneTaskResult").then(module=>module.PersonalOneTaskResult),{ssr:false});
 
@@ -312,6 +313,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     }const intent=outbox.current.prepare(method,input);setSavedRequests(outbox.current.list());
     const value=await outbox.current.deliver(ipc()!.oneSupervisor,intent);setSavedRequests(outbox.current.list());return value;
   };
+  const enter=useComposerEnter(()=>{void send();});
   const send=async(answer?:string)=>{
     // A question-card answer goes out alone: never with the composer's quotation, draft or attachments.
     const outgoing=answer===undefined?attachments:[];
@@ -498,7 +500,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
               <button type="button" role="menuitem" data-hover="own" onClick={()=>{setPlusOpen(false);void appearance();}}><span className={styles.plusIcon}><IconSettings size={15}/></span><strong>{copy("이름과 말풍선","Name and bubbles")}</strong></button>
             </div>}
           </div>
-          <textarea ref={composerInput} aria-label={ko?name+"에게 메시지":"Message "+name} value={text} onChange={event=>{if(draftIdentity.current===null)initialDraftEdit.current={edited:true,value:event.target.value};setText(event.target.value);event.currentTarget.style.height="auto";event.currentTarget.style.height=Math.min(140,event.currentTarget.scrollHeight)+"px";}} onKeyDown={event=>{if(event.key==="Enter"&&!event.shiftKey&&!event.nativeEvent.isComposing&&event.keyCode!==229){event.preventDefault();void send();}}} maxLength={8000} rows={1} placeholder={copy("메시지 보내기","Send a message")}/>
+          <textarea ref={composerInput} aria-label={ko?name+"에게 메시지":"Message "+name} value={text} onChange={event=>{if(draftIdentity.current===null)initialDraftEdit.current={edited:true,value:event.target.value};setText(event.target.value);event.currentTarget.style.height="auto";event.currentTarget.style.height=Math.min(140,event.currentTarget.scrollHeight)+"px";}} onCompositionUpdate={enter.onCompositionUpdate} onCompositionEnd={enter.onCompositionEnd} onKeyDown={event=>{enter.handleEnter(event);}} maxLength={8000} rows={1} placeholder={copy("메시지 보내기","Send a message")}/>
           <div className={styles.voice}><OneVoiceInputHelp locale={ko?"ko":"en"} composerRef={composerInput} /></div>
           <button className={styles.send} type="submit" aria-label={copy("보내기","Send")} disabled={!snapshot||savedRequestError||attachmentBusy||(!text.trim()&&!attachments.length)}><IconArrowUp size={16}/></button>
         </form>

@@ -523,10 +523,25 @@
 .explanation { margin:0 24px 12px; color:var(--ink-soft); font-size:11px; }
 .explanation summary { cursor:pointer; padding:6px 0; }
 .explanation .subtitle { margin:6px 0; padding:0; }
-.title { display:flex; align-items:center; gap:11px; }
-.titleIcon { display:grid; place-items:center; flex:none; width:42px; height:42px; border-radius:13px; background:var(--popup-sage,var(--paper-2)); color:var(--ink); box-shadow:inset 0 1px 0 #fff9,0 3px 10px #26312708; }
-.card { box-shadow:inset 0 1px 0 #fff9,0 3px 9px #26312708; }
-.card[data-selected] { background:var(--popup-sage,var(--paper-2)); }
+/* Claude "도구 추가" look (owner 2026-10-13): plain white bordered cards, + / ✓ square on the right. */
+.title { display:flex; align-items:center; gap:10px; font-size:18px; font-weight:600; }
+.card { position:relative; align-items:flex-start; min-height:76px; padding:12px 50px 12px 12px; background:var(--paper); box-shadow:none; }
+.card:hover { border-color:color-mix(in oklch, var(--ink) 18%, var(--paper-edge)); }
+.card[data-selected] { border-color:var(--ink-soft); background:var(--paper); }
+.cardName { font-size:14px; }
+.cardTagline { font-size:12.5px; white-space:normal; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+.cardAction { position:absolute; top:10px; right:10px; width:28px; height:28px; display:inline-flex; align-items:center; justify-content:center; border:1px solid var(--paper-edge); border-radius:7px; background:var(--paper); color:var(--ink); }
+.cardAction[data-on] { border-color:transparent; background:var(--ok-soft, var(--paper-3)); color:var(--ok); }
+.card[data-installed] .cardAction { color:var(--ok); }
+.search { border-radius:999px; }
+.filterButton { border-radius:8px; }
+.filterItem { min-height:30px; padding:6px 10px; }
+.filterItem:hover { background:var(--paper-3); }
+.close:hover { background:var(--paper-3); }
+.typeTabs { display:flex; gap:2px; margin:0 24px 8px; padding:0; background:transparent; }
+.typeTab { min-height:30px; padding:6px 12px; font-weight:500; font-size:13px; }
+.typeTab:hover { background:var(--paper-3); }
+.typeTab[data-active="true"] { background:var(--paper-edge); box-shadow:none; }
 
 /* A long catalog description must not enlarge a narrow choice column. */
 .card { min-width:0; }

@@ -3,7 +3,7 @@
 .tab { display:flex; align-items:center; min-width:0; max-width:200px; flex-shrink:0; border-radius:8px; }
 .tab[data-selected=true] { background:color-mix(in srgb,var(--ink,#202124) 6%,transparent); }
 .tab button { display:flex; gap:7px; align-items:center; border:0; background:transparent; color:inherit; height:29px; cursor:pointer; padding:0 7px; }
-.tab button[role=tab] { min-width:0; max-width:100%; flex:1 1 auto; font-size:11px; }
+.tab button[role=tab] { min-width:0; max-width:100%; flex:1 1 auto; font-size:11px; padding-left:10px; }
 .tab button span:last-child { min-width:0; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .dot { flex:0 0 auto; width:6px; height:6px; border-radius:50%; background:var(--muted,#aaa); }
 .dot[data-state=loading], .dot[data-state=opening] { background:var(--warn,#b48a35); }
@@ -26,7 +26,7 @@
 .tabs[data-inline=true] { min-width:0; max-width:100%; min-height:28px; padding:0; overflow-x:auto; }
 .browser { position:relative; }
 .menu { position:absolute; z-index:20; top:40px; right:8px; width:min(300px,calc(100% - 16px)); padding:5px; border:1px solid var(--line,#ddd); border-radius:10px; background:var(--paper,#fff); box-shadow:0 6px 20px #00000012; }
-.menu [role=menuitem] { display:block; width:100%; padding:9px; text-align:left; border:0; border-radius:6px; background:transparent; color:inherit; font:inherit; font-size:12px; cursor:pointer; }
+.menu [role=menuitem] { display:block; width:100%; padding:9px 10px; text-align:left; border:0; border-radius:6px; background:transparent; color:inherit; font:inherit; font-size:12px; cursor:pointer; }
 .menu a { text-decoration:none; box-sizing:border-box; }
 .menu a:hover { background:color-mix(in srgb,var(--ink,#202124) 7%,transparent); }
 .menu a:focus-visible { outline:2px solid var(--accent,#777); outline-offset:1px; }
@@ -36,7 +36,7 @@
 .controls { display:flex; align-items:center; position:relative; flex:none; }
 .controlPopover { position:absolute; z-index:30; right:0; top:calc(100% + 4px); }
 .menuTrigger svg { transform:rotate(90deg); }
-.browserMenu { --panel-menu-width:240px; --panel-menu-padding:6px; --panel-menu-radius:14px; --panel-menu-row-height:29px; --panel-menu-font-size:12px; --panel-menu-row-padding:6px 9px; }
+.browserMenu { --panel-menu-width:240px; --panel-menu-padding:6px; --panel-menu-radius:14px; --panel-menu-row-height:29px; --panel-menu-font-size:12px; --panel-menu-row-padding:6px 10px; }
 .browserMenu :global(hr) { margin:4px 6px; }
 .controlPopover button { display:inline-flex; align-items:center; justify-content:center; border:0; border-radius:6px; background:transparent; color:inherit; font:inherit; cursor:pointer; width:auto; height:auto; }
 .controlPopover button[role=menuitem] { display:flex; justify-content:space-between; width:100%; min-height:var(--panel-menu-row-height); padding:var(--panel-menu-row-padding); font-size:var(--panel-menu-font-size); font-weight:400; }

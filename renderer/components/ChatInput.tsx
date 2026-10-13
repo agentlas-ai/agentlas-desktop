@@ -39,6 +39,7 @@ import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import { ipc, grantForDroppedFile } from "@/lib/ipc";
 import { useChatAlwaysApproval, type ChatAlwaysApprovalControl } from "@/lib/use-chat-always-approval";
 import type { ChatFileDraft } from "@/lib/chat-files";
+import { useComposerEnter } from "@/lib/use-composer-enter";
 
 type ModelOption = { id: string; label: string; tag?: string };
 
@@ -807,6 +808,7 @@ function ChatInputComponent({
     return `${base}${base ? "\n\n" : ""}[${locale === "ko" ? "첨부" : "attachments"}]\n${parts.join("\n")}`;
   }
 
+  const composerEnter = useComposerEnter(() => submit());
   function submit() {
     if (submitDisabled) return;
     const text = withAttachmentContext(input.trim());
@@ -1607,10 +1609,16 @@ function ChatInputComponent({
           aria-label={locale === "ko" ? "채팅 입력" : "Chat message"}
           value={input}
           onChange={onInputChange}
+          onCompositionUpdate={composerEnter.onCompositionUpdate}
+          onCompositionEnd={composerEnter.onCompositionEnd}
           onKeyDown={(e) => {
             // 한글 등 IME 조합 중에는 어떤 단축키도 가로채지 않는다 — 조합 중 Enter는 글자 확정,
             // Esc는 조합 취소다. 가로채면 한글 입력 중 조기 전송 / 실행 정지가 오발동한다.
-            if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+            // 단, 한글 음절을 확정하는 Enter 는 확정 직후 전송한다(자동완성이 떠 있지 않을 때).
+            if (e.nativeEvent.isComposing || e.keyCode === 229) {
+              if (!(trigger && autocompleteOptions.length > 0)) composerEnter.handleEnter(e);
+              return;
+            }
             // 자동완성 popover가 떠 있을 때 ↑↓/Enter/Tab/Esc 가로챔
             if (trigger && autocompleteOptions.length > 0) {
               if (e.key === "ArrowDown") {
@@ -1661,10 +1669,7 @@ function ChatInputComponent({
               return;
             }
             // Enter = 즉시 전송, Shift+Enter = 줄바꿈. (자동완성 열림 시는 위에서 선택 처리)
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              submit();
-            }
+            composerEnter.handleEnter(e);
           }}
           onPaste={(e) => {
             const items = e.clipboardData?.items;

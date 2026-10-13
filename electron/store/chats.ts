@@ -1323,6 +1323,79 @@ export function listChatMessagesPage(
   };
 }
 
+/**
+ * One continuous read of a seat's direct (1:1) talk across every chat it was ever split into (owner 2026-10-13: the seat shows
+ * one conversation, the many chats stay as they are in storage). Newest-first paging with the same cursor shape as
+ * listChatMessagesPage, so older pages load only when asked. Group rooms are never read here: a room is its own visibility
+ * domain and its text must not appear in a seat's direct thread.
+ */
+export function listSeatMessagesPage(
+  seatId: string,
+  limit: number,
+  before?: { id: string; createdAt: string },
+): { messages: ChatHistoryEntry[]; hasOlder: boolean; chatIds: string[] } {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new TypeError("Invalid history page limit");
+  if (typeof seatId !== "string" || !seatId) throw new TypeError("Seat id is required");
+  const db = getDb();
+  const direct = `m.chat_id IN (SELECT id FROM chats WHERE seat_id = ? AND seat_kind = 'solo' AND archived_at IS NULL)`;
+  if (before && !db.prepare(
+    `SELECT 1 FROM chat_messages m WHERE ${direct} AND m.id = ? AND m.created_at = ?`,
+  ).get(seatId, before.id, before.createdAt)) {
+    throw new TypeError("History cursor no longer matches this seat; reload the newest page");
+  }
+  const rows = db.prepare(
+    `SELECT m.id, m.chat_id, m.role, m.text, m.created_at, m.host_notice_json, m.speaker_agent_id
+       FROM chat_messages m
+      WHERE ${direct} AND NOT (m.role = 'user' AND instr(m.text, ?) > 0)
+        ${before ? "AND (m.created_at < ? OR (m.created_at = ? AND m.id < ?))" : ""}
+      ORDER BY m.created_at DESC, m.id DESC LIMIT ?`,
+  ).all(seatId, LEGACY_FIRM_SYNTHESIS_MARKER,
+    ...(before ? [before.createdAt, before.createdAt, before.id] : []), limit + 1) as Array<MessageRow & { chat_id: string }>;
+  const page = rows.slice(0, limit).reverse();
+  const byChat = new Map<string, MessageRow[]>();
+  for (const row of page) byChat.set(row.chat_id, [...(byChat.get(row.chat_id) ?? []), row]);
+  const projected = new Map<string, ChatHistoryEntry>();
+  for (const [chatId, chatRows] of byChat) {
+    for (const entry of projectChatMessageRows(chatId, chatRows)) projected.set(entry.id, entry);
+  }
+  return {
+    messages: page.map((row) => projected.get(row.id)).filter((entry): entry is ChatHistoryEntry => Boolean(entry)),
+    hasOlder: rows.length > limit,
+    chatIds: [...byChat.keys()],
+  };
+}
+
+/**
+ * What a One teammate said and was asked inside group rooms, newest `limit` rows, for its 1:1 seat view (owner 2026-10-13:
+ * the seat shows the room work too, marked with the room). Work handed out in a room runs in a division session under that
+ * room, which inherits the room's seat, so the agent's solo seat alone never reaches it.
+ */
+export function listAgentRoomWorkMessages(agentId: string, limit: number): Array<ChatHistoryEntry & { room: { chatId: string; title: string; sessionChatId: string } }> {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 400) throw new TypeError("Invalid room work limit");
+  if (typeof agentId !== "string" || !agentId) throw new TypeError("Agent id is required");
+  const rows = getDb().prepare(
+    `SELECT m.id, m.chat_id, m.role, m.text, m.created_at, m.host_notice_json, m.speaker_agent_id,
+            p.id AS room_id, p.title AS room_title
+       FROM chat_messages m
+       JOIN chats c ON c.id = m.chat_id
+       JOIN chats p ON p.id = c.parent_chat_id
+      WHERE c.kind = 'division' AND c.origin_surface = 'one' AND c.agent_id = ? AND c.archived_at IS NULL
+        AND p.archived_at IS NULL AND m.role IN ('user', 'assistant')
+      ORDER BY m.created_at DESC, m.id DESC LIMIT ?`,
+  ).all(agentId, limit) as Array<MessageRow & { chat_id: string; room_id: string; room_title: string | null }>;
+  const page = rows.reverse();
+  const byChat = new Map<string, MessageRow[]>();
+  for (const row of page) byChat.set(row.chat_id, [...(byChat.get(row.chat_id) ?? []), row]);
+  const projected = new Map<string, ChatHistoryEntry>();
+  for (const [chatId, chatRows] of byChat) {
+    for (const entry of projectChatMessageRows(chatId, chatRows)) projected.set(entry.id, entry);
+  }
+  return page.flatMap((row) => {
+    const entry = projected.get(row.id);
+    return entry ? [{ ...entry, room: { chatId: row.room_id, title: row.room_title ?? "", sessionChatId: row.chat_id } }] : [];
+  });
+}
+
 function projectChatMessageRows(chatId: string, rows: MessageRow[]): ChatHistoryEntry[] {
   const imageUrls = listChatMessageImageUrls(rows.map((row) => row.id));
   const goalResults = storedGoalResults(chatId, rows.filter((row) => row.role === "assistant").map((row) => row.id));

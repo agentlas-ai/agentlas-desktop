@@ -1841,6 +1841,8 @@ function AutomationFlowPage() {
             placeholder={locale === "en" ? "Type the value this run starts from" : "이번 실행이 시작할 값을 입력하세요"}
             onChange={(e) => setInputPrompt({ ...inputPrompt, value: e.target.value })}
             onKeyDown={(e) => {
+              // A key the IME still holds commits the syllable; running then would start from a value missing it.
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
               if (e.key === "Enter" && inputPrompt.value.trim()) void runNow(false, inputPrompt.value.trim(), inputPrompt.fresh);
               if (e.key === "Escape") setInputPrompt(null);
             }}
@@ -2541,7 +2543,7 @@ return (
                         }
                       }}
                       onKeyDown={(e) => {
-                        if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                        if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
                           e.preventDefault();
                           // ★Enter = 세션 대화로 보낸다(묻기·지시). 그래프 수정 제안은
                           //   옆의 [고칠 내용 보기] 버튼이 담당한다 — 입력은 하나, 행동은 둘.

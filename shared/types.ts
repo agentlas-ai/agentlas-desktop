@@ -8050,6 +8050,8 @@ export interface AgentlasIpc {
   };
   chats: {
     messagesPage: (input: { chatId: string; limit?: number; before?: ChatMessagesCursor }) => Promise<ChatMessagesPage>;
+    /** A One teammate's messages from the rooms it worked in (newest first window, oldest first order). */
+    agentRoomWork?: (input: { agentId: string; limit?: number }) => Promise<Array<ChatHistoryEntry & { room: { chatId: string; title: string; sessionChatId: string } }>>;
     /** 최신순 활성 채팅 (보관된 것 제외). 사이드바 "최근 채팅" 섹션에서 사용 */
     listRecent: (limit?: number) => Promise<Chat[]>;
     /** One 홈 전용 — 전체 최근 목록을 잘라 쓰면 Work 대화가 One 대화를 밀어낸다. */

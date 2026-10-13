@@ -49,9 +49,11 @@ export function pluginSlugCandidates(input: {
 let brandMapPromise: Promise<Record<string, PluginBrandAsset>> | null = null;
 
 /** 브랜드 맵은 앱 전체에서 한 번만 받는다 — 카드 하나당 한 번씩 부르지 않는다. */
-export function usePluginBrandMap(): Record<string, PluginBrandAsset> {
+export function usePluginBrandMap(options?: { enabled?: boolean }): Record<string, PluginBrandAsset> {
+  const enabled = options?.enabled ?? true;
   const [map, setMap] = useState<Record<string, PluginBrandAsset>>({});
   useEffect(() => {
+    if (!enabled) return;
     let cancelled = false;
     const api = ipc();
     if (!api?.mcpTools?.brandMap) return;
@@ -60,7 +62,7 @@ export function usePluginBrandMap(): Record<string, PluginBrandAsset> {
       if (!cancelled) setMap(value ?? {});
     });
     return () => { cancelled = true; };
-  }, []);
+  }, [enabled]);
   return map;
 }
 
@@ -78,7 +80,7 @@ type Props = {
 };
 
 export function PluginLogo({ slug, catalogId, name, size = 28, brandColor, mark, brandMap }: Props) {
-  const ownMap = usePluginBrandMap();
+  const ownMap = usePluginBrandMap({ enabled: brandMap === undefined });
   const map = brandMap ?? ownMap;
   const [failed, setFailed] = useState(false);
 

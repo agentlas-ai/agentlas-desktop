@@ -68,6 +68,7 @@
 
 .tabs button {
   min-height: 38px;
+  padding: 0 10px;
   display: inline-flex;
   align-items: center;
   justify-content: center;

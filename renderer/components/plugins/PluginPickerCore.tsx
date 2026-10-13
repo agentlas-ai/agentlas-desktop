@@ -16,7 +16,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { BUNDLED_HUB_CATALOG_REVISION, listBundledHubPlugins } from "../../../shared/bundled-hub-catalog";
-import { PluginLogo, pluginSlugCandidates } from "@/components/PluginLogo";
+import { pluginSlugCandidates } from "@/components/PluginLogo";
+import { ToolLogo } from "./ToolLogo";
 import type {
   BrowserSite,
   InstalledMcpServer,
@@ -424,7 +425,7 @@ export function LoginStep({
   return (
     <StageShell chrome={chrome} labelledBy="plugin-login-title">
       <header className={styles.keyHeader}>
-        <PluginLogo slug={current.slug} name={current.name} size={36} brandMap={brandMap} />
+        <ToolLogo slug={current.slug} name={current.name} frame="row" brandMap={brandMap} />
         <div>
           <h2 id="plugin-login-title" className={styles.title}>
             {ko ? `${current.name}에 로그인` : `Sign in to ${current.name}`}
@@ -561,7 +562,7 @@ export function KeyStep({
   return (
     <StageShell chrome={chrome} labelledBy="plugin-key-title">
       <header className={styles.keyHeader}>
-        <PluginLogo slug={current.slug} name={current.name} size={36} brandMap={brandMap} />
+        <ToolLogo slug={current.slug} name={current.name} frame="row" brandMap={brandMap} />
         <div>
           <h2 id="plugin-key-title" className={styles.title}>
             {ko ? `${current.name} 연결` : `Connect ${current.name}`}
@@ -729,14 +730,19 @@ const CATEGORY_LABELS_KO: Record<string, string> = {
   crm: "CRM", finance: "금융", database: "데이터베이스", cloud: "클라우드",
   automation: "자동화", email: "메일·캘린더", marketing: "마케팅", search: "검색",
   ecommerce: "커머스", ai: "AI", media: "미디어", support: "고객지원", maps: "지도",
-  reference: "레퍼런스",
+  reference: "레퍼런스", dev: "개발", data: "데이터", web: "웹", custom: "직접 추가", other: "기타",
 };
+
+/** Display label for a Hub/catalog category id. */
+export function categoryLabel(category: string | undefined, ko: boolean): string {
+  const raw = (category ?? "").trim() || "other";
+  return ko ? CATEGORY_LABELS_KO[raw] ?? raw : raw.replace(/(^|\s)\w/g, (c) => c.toUpperCase());
+}
 
 export function groupByCategory(listings: MarketplaceListing[], ko: boolean): Array<[string, MarketplaceListing[]]> {
   const groups = new Map<string, MarketplaceListing[]>();
   for (const listing of listings) {
-    const raw = (listing.category ?? "").trim() || "other";
-    const label = ko ? CATEGORY_LABELS_KO[raw] ?? raw : raw.replace(/(^|\s)\w/g, (c) => c.toUpperCase());
+    const label = categoryLabel(listing.category, ko);
     const bucket = groups.get(label);
     if (bucket) bucket.push(listing);
     else groups.set(label, [listing]);

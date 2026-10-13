@@ -36,6 +36,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { installModelCatalogResolver, refreshRemoteCatalog } from "./runtime/model-catalog";
 import { scheduleLegacyProductSessionMove } from "./runtime/legacy-product-sessions-once";
+import { installGoogleSessionTrace } from "./browser/google-session-trace";
 import { registerOneCapabilitiesIpc } from "./capabilities/one-capabilities-ipc";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -2087,6 +2088,8 @@ app.whenReady().then(async () => {
   };
   // Product sessions older installs wrote into the person's Codex/Claude/Copilot homes move to the product stores, once.
   if (!developmentEffectsSuppressed()) scheduleLegacyProductSessionMove();
+  // Records every change to the Agentlas browser's Google sign-in cookies (names and causes only) — owner 2026-10-13.
+  installGoogleSessionTrace("persist:agentlas-browser-default");
   // 4-tier model catalog (PRD 2026-08-15 D-4): wire the context-window resolver
   // so BYOK compaction stops assuming 128k, and refresh models.dev in the
   // background (TTL 24h; failure keeps the stale copy, never blocks startup).
