@@ -2930,7 +2930,18 @@ function runNativeBrowserMcp() {
     // not just method names. A dependency change requires a fresh contract audit.
     const digest = createHash('sha256').update(fs.readFileSync(bundle)).digest('hex');
     if (digest === 'be2e09efef3017b4eaa76f0cb5289f66c4ea57833f94319b17c1c2f184987ad7') {
-      installed = installBrowserLeafHooks(bundledRequire('playwright-core/lib/coreBundle').tools);
+      const core = bundledRequire('playwright-core/lib/coreBundle');
+      installed = installBrowserLeafHooks(core.tools);
+      // The leased guest runs on this machine, but a CDP endpoint is treated as remote, so
+      // setInputFiles sent files as base64 and refused anything over 50 MB. A 104 MB YouTube
+      // long-form failed in browser_file_upload (production 2026-10-13 16:28 UTC). Marking only
+      // this lease local makes Playwright pass paths through DOM.setFileInputFiles instead.
+      const browserType = Object.getPrototypeOf(core.inprocess.playwright.chromium);
+      const connectOverCDP = browserType.connectOverCDP;
+      browserType.connectOverCDP = function (target, options) {
+        if (target !== endpoint) return connectOverCDP.call(this, target, options);
+        return connectOverCDP.call(this, target, { ...(options || {}), isLocal: true });
+      };
     }
   } catch { /* Retain tools, but emit no completion evidence on incompatibility. */ }
   if (!installed) log('browser-leaf-hooks-unavailable');

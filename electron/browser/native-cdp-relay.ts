@@ -124,9 +124,9 @@ async function waitForStableNativeBrowserViewport(
 }
 
 /*
- * Room for Playwright's own upload cap. Playwright MCP connects over CDP without isLocal, so setInputFiles sends
- * each file's bytes inline as base64 in one CDP message, up to Playwright's 50 MB total (fileUploadSizeLimit; 4/3
- * larger as base64). At 4 MiB a 3.4 MB YouTube banner (4.6 MB as base64) exceeded the frame limit, ws closed the
+ * Room for Playwright's own upload cap. A CDP client that is not marked local sends each file's bytes inline as
+ * base64 in one CDP message, up to Playwright's 50 MB total (fileUploadSizeLimit; 4/3 larger as base64). The
+ * leased Agentlas Browser MCP now connects with isLocal and passes paths instead (browser-cdp-launcher.ts). At 4 MiB a 3.4 MB YouTube banner (4.6 MB as base64) exceeded the frame limit, ws closed the
  * socket, and every later browser call in that turn failed with "socket hang up" (production 2026-10-06 00:03 UTC,
  * Youtube launch). Larger files are refused by Playwright itself before anything is sent.
  */

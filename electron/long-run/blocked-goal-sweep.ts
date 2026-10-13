@@ -140,6 +140,9 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
   let current = run;
   for (let pass = 0; pass < 2 && !prepared; pass += 1) {
     try {
+      // IMMEDIATE: this reads before it writes. Deferred, a commit by the daemon (it writes about every second) between
+      // the read and the write failed the upgrade at once with SQLITE_BUSY_SNAPSHOT ("database is locked"), which
+      // busy_timeout never waits on. After the 1.3.27 restart the Yotube room Goal failed every pass (2026-10-13 16:44Z).
       prepared = getDb().transaction(() => {
         const latest = getLongRun(current.id);
         if (!latest || latest.version !== current.version || !["blocked", "paused", "queued", "running", "waiting_tool"].includes(latest.status)) {
@@ -155,7 +158,7 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
           payload: { schemaVersion: BLOCKED_GOAL_SWEEP_SCHEMA, action: "resumed", fromReason: run.blockedReason,
             fromStatus: run.status, trigger: trigger.slice(0, 80), appInstanceId: desktopAppInstanceId() } });
         return { request: { ...request, runId: randomUUID() }, queuedId: queued.id };
-      })();
+      }).immediate();
     } catch (error) {
       const code = errorCode(error, "blocked_goal_resume_unavailable");
       // The owner's own turn (or another live holder) owns the run right now: losing to it is not a failure.
