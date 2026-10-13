@@ -1378,7 +1378,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       if (cancelFallback !== undefined) clearTimeout(cancelFallback);
       const stopReason = result?.stopReason;
       if (typeof stopReason !== "string" || !["end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"].includes(stopReason)) {
-        throw new RuntimeTurnUnsettledError(spec.id, locale);
+        throw new RuntimeTurnUnsettledError(spec.id, locale, sessionId);
       }
       effectTerminal = stopReason;
       client.finish();
@@ -1427,7 +1427,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       }
       // Preserve the effect ledger in finally; missing text is never no-effect proof.
       if (!effectTerminal && (promptDispatchAttempted || client.turnActivityObserved || agentRequestObserved)) {
-        throw new RuntimeTurnUnsettledError(spec.id, locale);
+        throw new RuntimeTurnUnsettledError(spec.id, locale, session?.acpSessionId);
       }
       if (allowStaleRetry && lease && !lease.fresh && session
         && !promptDispatchAttempted && !client.turnActivityObserved && !agentRequestObserved

@@ -56,6 +56,8 @@ import { isCallOnlyHubAgent } from "../../shared/call-only-agent";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { bindInvocationAgentContext } from "../runtime/agent-context-admission";
+import { invokeWithUnsettledContinuation, UNSETTLED_CONTINUATION_PROMPT } from "../runtime/unsettled-continuation";
+import { agentContextHostBinding, agentContextUnsettledTurn, markAgentContextContinuationHandle, type AgentContextCapability } from "../runtime/agent-context";
 import { createMainHostControlSink, createMainHostOperationBridge, withAdapterEffectChildDispatch } from "../invocation/adapter-effect-context";
 import { detectRuntimes } from "../runtime/detect";
 import { ONE_AGENT_ID } from "../runtime/agent-residency";
@@ -6195,9 +6197,13 @@ ${effectiveUserPrompt}`;
     let agentContextAttempt = 0;
     // Typed journal marker for host-written input (see markAgentContextHostAuthored); set per invocation, first call only.
     let hostAuthoredNext: string | undefined;
+    // Same-session continuation of an unsettled turn (invokeCurrentRuntime): the native handle for the next delivery only,
+    // and the turn id of the latest journal delivery, which is how the host finds what that turn left behind.
+    let continuationHandleNext: string | undefined;
+    let lastJournalTurnId: string | null = null;
     const persistentRunnerRequest = (request: RunnerRequest): RunnerRequest => {
       if (!persistentAgentContext || !req.runId || request.minimalObservation || request.judgmentOnly || request.untrustedNoTools) return request;
-      return bindInvocationAgentContext(request, { chatId: chat.id, agentId: agent.id, runId: req.runId,
+      const bound = bindInvocationAgentContext(request, { chatId: chat.id, agentId: agent.id, runId: req.runId,
         attempt: ++agentContextAttempt, aliveController: isAliveControllerRun, hostAuthored: hostAuthoredNext, assertCurrent() {
           assertMcpGoalSelectionCurrent();
           if (activeGoalId && activeGoalRevision !== null) {
@@ -6207,6 +6213,9 @@ ${effectiveUserPrompt}`;
             }
           }
         } });
+      lastJournalTurnId = agentContextHostBinding(bound.agentContext as AgentContextCapability).turnId;
+      markAgentContextContinuationHandle(lastJournalTurnId, continuationHandleNext);
+      return bound;
     };
     let goalWorkAdmissionNotified = false;
     if (workspacePins.size) runnerReq.sessionFingerprintSeed = JSON.stringify({ base: runnerReq.sessionFingerprintSeed ?? null,
@@ -7127,13 +7136,43 @@ ${effectiveUserPrompt}`;
       });
     }
     // Only the first call carries the host-authored purpose; an owner steer the pump delivers after it is the owner's words.
-    const invokeCurrentRuntime = (request: RunnerRequest, hostAuthored?: string): Promise<Awaited<ReturnType<Runner>>> => {
+    const runCurrentRuntimeOnce = (request: RunnerRequest, hostAuthored?: string, continuationHandle?: string): Promise<Awaited<ReturnType<Runner>>> => {
       const first: RunnerRequest = { ...request, ownerControlInbox };
-      const settled = runWithOwnerControl(first, (r) => { hostAuthoredNext = r === first ? hostAuthored : undefined; return invokeBrainRuntime(r); });
+      const settled = runWithOwnerControl(first, (r) => {
+        hostAuthoredNext = r === first ? hostAuthored : undefined;
+        continuationHandleNext = r === first ? continuationHandle : undefined;
+        return invokeBrainRuntime(r);
+      });
       // goal_wait / goal_complete calls of this pass re-enter as the exact text blocks the unchanged parsers read.
       return turnGoalToolsOffered && req.chatId && req.runId
         ? settled.then((res) => ({ ...res, text: applyGoalSignalsToText(res.text, takeGoalSignals(turnNotesKey(req.chatId!, req.runId!))) }))
         : settled;
+    };
+    /*
+     * A dispatched turn that ends without its terminal event is unknown, not failed (RuntimeTurnUnsettledError).
+     * The cause keeps changing (a background-wait tool, a login drop, a CLI update), so no cause is named here. The one
+     * contract every runtime keeps is that a session id resumes the same conversation; the model sees its own history, so
+     * completed effects are not repeated. This is the single point every runtime and every pass goes through (first call,
+     * Goal continuation passes, One recovery passes): ONE host-authored turn into the SAME session, never the original
+     * request again and never a stop for a human. If that turn is also unsettled, or the conversation cannot be resumed
+     * (no handle, resume refused), the binding gets a new generation (agent-context retire: decideGeneration symptom
+     * "resume_failed") and the failure surfaces exactly as before. The bound is structural: one continuation per call.
+     * Owner stop/abort, a closed HTTP refusal and a locally rejected dispatch never continue.
+     */
+    const invokeCurrentRuntime = (request: RunnerRequest, hostAuthored?: string): Promise<Awaited<ReturnType<Runner>>> => {
+      lastJournalTurnId = null;
+      return invokeWithUnsettledContinuation<RunnerRequest>({
+        dispatch(r, purpose, handle) { lastJournalTurnId = null; return runCurrentRuntimeOnce(r, purpose, handle); },
+        continuationRequest: (r, sessionId) => ({ ...r, userPrompt: UNSETTLED_CONTINUATION_PROMPT, images: undefined, runtimeSessionId: sessionId }),
+        eligible: !isAliveControllerRun && !scienceRecovery && !request.minimalObservation && !request.judgmentOnly && !request.untrustedNoTools,
+        aborted: () => signal?.aborted === true,
+        noModelWork: () => runtimeTerminalEvidence.closedHttpRefusal || runtimeTerminalEvidence.locallyRejected,
+        leftBehind: () => (lastJournalTurnId ? agentContextUnsettledTurn(lastJournalTurnId) : null),
+        record(phase) {
+          if (req.runId) tryRecordRunEvent({ runId: req.runId, chatId: chat.id, kind: "runtime_unsettled_continuation",
+            payload: { runtime: active.kind, phase } });
+        },
+      }, request, hostAuthored);
     };
     let activeRunnerReq = runnerRequestForRuntime(active, picked);
     if (hostGeneratedImageAttachment) {

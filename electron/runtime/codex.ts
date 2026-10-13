@@ -2269,7 +2269,7 @@ async function runCodexResidentTurn(input: {
       if (!req.signal?.aborted) acknowledgeStableTurnContext(stableContextDelivery,
         { sessionId: session.threadId, acknowledgementId: started.turn.id });
     } else {
-      throw new RuntimeTurnUnsettledError(KIND, req.locale);
+      throw new RuntimeTurnUnsettledError(KIND, req.locale, session.threadId);
     }
     const earlyCompletion = pendingTurnCompletions.get(acknowledgedTurnId);
     pendingTurnCompletions.clear();
@@ -2380,7 +2380,7 @@ async function runCodexResidentTurn(input: {
     broken = true;
     if (turnDispatchAttempted) persistTurnCounters();
     if (req.signal?.aborted) throw err;
-    if (turnDispatchAttempted && !terminalObserved) throw new RuntimeTurnUnsettledError(KIND, req.locale);
+    if (turnDispatchAttempted && !terminalObserved) throw new RuntimeTurnUnsettledError(KIND, req.locale, session.threadId);
     if (req.workforceRuntimeToolGrant) throw err;
     if (err instanceof CodexModelSelectionError) throw err;
     if (err instanceof CodexSessionContinuityError) throw err;
@@ -2944,7 +2944,7 @@ export const runCodex: Runner = async (
         return { text: r.text.trim(), ownerControlTerminal: "uncertain", failure: r.failure!,
           sessionId: r.threadId ?? resumeSessionId, tokens: r.tokens, appliedEffort };
       }
-      throw new RuntimeTurnUnsettledError(KIND, runReq.locale);
+      throw new RuntimeTurnUnsettledError(KIND, runReq.locale, r.threadId ?? resumeSessionId);
     }
     if (r.code === 0) {
       if (runReq.chatId && fingerprint && r.threadId && persistSession()) {
@@ -3025,7 +3025,7 @@ export const runCodex: Runner = async (
       return { text: created.text.trim(), ownerControlTerminal: "uncertain", failure: created.failure!,
         sessionId: created.threadId ?? undefined, tokens: created.tokens, appliedEffort };
     }
-    throw new RuntimeTurnUnsettledError(KIND, runReq.locale);
+    throw new RuntimeTurnUnsettledError(KIND, runReq.locale, created.threadId);
   }
   if (created.code === 0) {
     if (runReq.chatId && fingerprint && created.threadId && persistSession()) {

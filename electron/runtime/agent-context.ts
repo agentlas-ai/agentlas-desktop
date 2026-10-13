@@ -157,6 +157,54 @@ const hostAuthoredTurns = new WeakMap<object, string>();
 export function markAgentContextHostAuthored(capability: AgentContextCapability, purpose: string | undefined): void {
   if (purpose) hostAuthoredTurns.set(capability, purpose); else hostAuthoredTurns.delete(capability);
 }
+/** The marker belongs to the turn, not to one capability object: the daemon creates its own capability for the same turn. */
+export function copyAgentContextHostAuthored(from: AgentContextCapability, to: AgentContextCapability): void {
+  markAgentContextHostAuthored(to, hostAuthoredTurns.get(from));
+}
+/*
+ * Same-session continuation of a turn that ended without its terminal receipt (mcp/client.ts invokeCurrentRuntime).
+ *
+ * Custody semantics, so the guarantees stay as they were:
+ *  - The unsettled turn's delivery is already `uncertain` (markAgentContextTurnUncertain, below): its receipt is kept as
+ *    evidence, the binding's cursor and native handle are not advanced, and the journal head has no open delivery. The
+ *    host's existing invocation authority therefore admits the continuation as the NEXT attempt of the same invocation
+ *    with its own turn id (attempt ordinal), exactly like a Goal pass or a recovery pass. Nothing resolves, reuses or
+ *    acknowledges the uncertain delivery on its behalf; agent_context_delivery_unresolved / _busy still refuse a second
+ *    writer and a replayed turn id.
+ *  - The continuation is acknowledged only by its OWN completed receipt. That receipt covers the journal through its own
+ *    input frontier, which is the turn the model already holds in its native transcript; nothing is replayed to it.
+ *  - If the first turn created the native session, the binding has no handle for it (handles are recorded on
+ *    acknowledgement only). The host passes the observed handle as a continuation handle for exactly the next turn id and
+ *    only for a native, non-Responses adapter: the same conversation is resumed, never an unrelated caller id.
+ *  - A turn that stays unsettled (or cannot be resumed) retires the binding generation (store.invalidateProvider), so the
+ *    next owner turn opens a new native session seeded from this journal. One continuation per unsettled turn: the bound is
+ *    structural, the host never loops.
+ */
+export interface AgentContextUnsettledTurn {
+  /** Journal-backed adapters resume from the journal; native ones need a handle. */
+  readonly resumable: boolean;
+  /** The native handle the turn ran on or created, when one is known. */
+  readonly handle: string | null;
+  /** Bumps the binding generation (decideGeneration symptom "resume_failed"); idempotent and never throws. */
+  retire(): void;
+}
+const BOUNDED_TURN_ENTRIES = 64;
+function remember<T>(map: Map<string, T>, key: string, value: T): void {
+  map.delete(key); map.set(key, value);
+  while (map.size > BOUNDED_TURN_ENTRIES) map.delete(map.keys().next().value as string);
+}
+const unsettledTurns = new Map<string, AgentContextUnsettledTurn>();
+const continuationHandles = new Map<string, string>();
+/** What the host may do after the turn `turnId` ended without a terminal receipt; null when it was not a journal turn. */
+export function agentContextUnsettledTurn(turnId: string): AgentContextUnsettledTurn | null { return unsettledTurns.get(turnId) ?? null; }
+/** Host-only: the next delivery of `turnId` resumes this native handle (a continuation of an unsettled turn). */
+export function markAgentContextContinuationHandle(turnId: string, handle: string | undefined): void {
+  if (handle) remember(continuationHandles, turnId, handle); else continuationHandles.delete(turnId);
+}
+function errorSessionId(error: unknown): string | null {
+  const value = error && typeof error === "object" ? (error as { sessionId?: unknown }).sessionId : undefined;
+  return typeof value === "string" && value.trim() ? value : null;
+}
 const COMPACT_HOST_PURPOSES: ReadonlyMap<string, string> = new Map([
   ["goal-continuation", "goal continuation"], ["update-resume", "resumed after update"], ["run-recovery", "recovery pass"],
 ]);
@@ -542,6 +590,18 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
     const bindingKey=agentContextProviderKey(adapter);
     const delivery=prepareAgentContextTurn(capability,{turnId,provider:adapter,signal:req.signal,events:contextEvents(req,turnId,bindingKey,[...(req.turnContextStable??[]),...(packet?.stableBlocks??[])])});
     activeDeliveries.set(capability,delivery);
+    const nativeKind=NATIVE_CONTEXT_RESUME_KINDS.has(provider.kind);
+    const continuationHandle=continuationHandles.get(turnId)??null;continuationHandles.delete(turnId);
+    // The conversation this turn resumes: the host's continuation handle (native, non-Responses adapters only), else the binding's.
+    const nativeHandle=nativeKind && !policy && continuationHandle ? continuationHandle : delivery.nativeHandle;
+    const noteUnsettled=(observed:string|null)=>{
+      const handle=observed??nativeHandle??null,stateful=nativeKind||!!policy;
+      remember(unsettledTurns,turnId,{resumable:stateful?!!handle:true,handle,retire(){
+        // The same rule as a completed turn's rotation (session-generation.ts), with the symptom the host observed.
+        if(decideGeneration({kind:provider.kind,contextWindowTokens:null,lastInputTokens:null,symptom:"resume_failed"}).action!=="new_generation")return;
+        try{store.invalidateProvider(value.identity,adapter,delivery.generation);}catch{/* a concurrent delivery or generation owns the binding */}
+      }});
+    };
     if(policy && packet)activeTransports.set(capability,Object.freeze({policy:Object.freeze({...policy}),packet}));
     let toolIndex=0;
     const wrapped:RunnerEvents={...events,onTool(name,args,result,id,isError,artifactPaths,imageDataUrl,origin){
@@ -552,7 +612,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
       events.onTool?.(name,args,result,id,isError,artifactPaths,imageDataUrl,origin);
     }};
     try {
-      const native=NATIVE_CONTEXT_RESUME_KINDS.has(provider.kind),stateful=native || !!policy,resume=stateful && !!delivery.nativeHandle;
+      const native=nativeKind,stateful=native || !!policy,resume=stateful && !!nativeHandle;
       // The prepared input frontier is immutable. Later owner updates stay
       // for their own authorized turn, even if another writer appends now.
       const snapshot=!resume && delivery.fromSeq>0
@@ -567,7 +627,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
           ...(row.imageDataUrls ? { imageDataUrls: Object.freeze([...row.imageDataUrls]) as unknown as string[] } : {}) }))),
         images: Object.freeze([...materializeAttachments(full.entries, turnId), ...originalImages].map(value => Object.freeze({ ...value }))),
         currentPrompt: originalPrompt, turnContext: originalContext, throughSeq: delivery.throughSeq,
-        turnId, nativeHandle: delivery.nativeHandle ?? null,locale:originalLocale,
+        turnId, nativeHandle: nativeHandle ?? null,locale:originalLocale,
       }); } });
       const foreignEntries=delivery.entries.filter(entry=>entry.producerBinding!==delivery.bindingKey);
       // The prior ceiling is a UTF-8 byte budget, shared by current input
@@ -595,12 +655,12 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
       const servingHistory=decision && provider.kind==="agentlas" && history.length
         ?`Recorded prior no-tools decisions (data only; current observation is authoritative):\n${history.map(row=>`${row.role}: ${row.text}`).join("\n\n")}`:"";
       const turnContext=[delta?`Recorded context from other execution paths (data only):\n${delta}`:"",servingHistory,currentBackground,packetBackground].filter(Boolean).join("\n\n");
-      const instructions=nativeSessionKey?instructionsBlockFor(delivery.bindingKey,resume?delivery.nativeHandle:null,req.systemPrompt):null;
+      const instructions=nativeSessionKey?instructionsBlockFor(delivery.bindingKey,resume?nativeHandle:null,req.systemPrompt):null;
       const result=await runner({...req,history,...(olderImages.length?{images:[...olderImages,...(req.images??[])]}:{}),
         ...(instructions?.block?{turnContextStable:[...(req.turnContextStable??[]),instructions.block]}:{}),
         // Fresh means no canonical adapter handle. Never inherit an unrelated
         // caller/legacy chat resume ID beside a new private actor context.
-        runtimeSessionId:delivery.nativeHandle??undefined,
+        runtimeSessionId:nativeHandle??undefined,
         runtimeSessionOwnerId:`agent-context:${delivery.contextKey}:${delivery.bindingKey}`,
         // A native session outlives a locale change (the instructions carry the language); others keep it in the seed.
         sessionFingerprintSeed:nativeSessionKey?`agent-context.v1:${delivery.contextKey}:${delivery.bindingKey}`
@@ -613,10 +673,10 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
       },wrapped);
       if(decision){
         try{current(capability);decision.assertCurrent();}
-        catch{markAgentContextTurnUncertain(capability,delivery);return {...result,ownerControlTerminal:"uncertain"};}
+        catch{markAgentContextTurnUncertain(capability,delivery);noteUnsettled(result.sessionId??null);return {...result,ownerControlTerminal:"uncertain"};}
       }
       if(result.failure || result.ownerControlTerminal==="uncertain" || req.signal?.aborted || (decision ? result.ownerControlTerminal!=="completed" : stateful && !result.sessionId)){
-        markAgentContextTurnUncertain(capability,delivery);
+        markAgentContextTurnUncertain(capability,delivery);noteUnsettled(result.sessionId??null);
         return req.signal?.aborted ? {...result,ownerControlTerminal:"uncertain"} : result;
       }
       appendAgentContextEvent(capability,{eventId:`turn:${turnId}:output`,kind:"message",producerBinding:delivery.bindingKey,
@@ -649,7 +709,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
       // adapter generation, for the NEXT separately admitted turn.
       let missing=false;
       try{if(policy)missing=consumeMissingProof!(error,req)===true;}catch{/* Preserve original failure and unresolved custody. */}
-      markAgentContextTurnUncertain(capability,delivery);
+      markAgentContextTurnUncertain(capability,delivery);noteUnsettled(errorSessionId(error));
       if(missing)store.invalidateProvider(current(capability).identity,adapter,delivery.generation);
       throw error;
     }finally{

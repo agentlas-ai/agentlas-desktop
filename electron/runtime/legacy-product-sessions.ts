@@ -64,6 +64,35 @@ function moveTree(from: string, to: string): number {
   return moved;
 }
 
+
+/**
+ * Delete rows of `parent` with these ids, and first every row that references them — found from the database's own
+ * foreign-key metadata, never from a hard-coded table list (Copilot added `turns` and `forge_trajectory_events` after this
+ * code was written and the fixed list hit FOREIGN KEY constraint failed on the owner's store, 2026-10-13). Tables that
+ * point at the parent by naming convention without a declared key are listed by the caller in `alsoByColumn`.
+ */
+function deleteWithDependents(db: Database.Database, parent: string, ids: readonly string[], alsoByColumn: ReadonlyArray<readonly [string, string]> = []): number {
+  const dependents: Array<[string, string]> = [];
+  for (const { name } of db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>) {
+    for (const fk of db.prepare(`SELECT "table" AS t, "from" AS c FROM pragma_foreign_key_list(?)`).all(name) as Array<{ t: string; c: string }>) {
+      if (fk.t === parent) dependents.push([name, fk.c]);
+    }
+  }
+  const existing = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>).map((row) => row.name));
+  for (const [table, column] of alsoByColumn) {
+    if (existing.has(table) && !dependents.some(([t, c]) => t === table && c === column)) dependents.push([table, column]);
+  }
+  let removed = 0;
+  db.transaction(() => {
+    for (let i = 0; i < ids.length; i += 400) {
+      const chunk = ids.slice(i, i + 400), marks = chunk.map(() => "?").join(",");
+      for (const [table, column] of dependents) db.prepare(`DELETE FROM "${table}" WHERE "${column}" IN (${marks})`).run(...chunk);
+      removed += db.prepare(`DELETE FROM "${parent}" WHERE id IN (${marks})`).run(...chunk).changes;
+    }
+  }).immediate();
+  return removed;
+}
+
 function backupDb(file: string, backupDir: string, label: string): void {
   fs.mkdirSync(backupDir, { recursive: true, mode: 0o700 });
   const db = new Database(file, { readonly: true, fileMustExist: true });
@@ -93,15 +122,10 @@ export function moveLegacyCodexSessions(p: NonNullable<LegacyCleanupPaths["codex
     const db = new Database(file, { fileMustExist: true });
     try {
       db.pragma("busy_timeout = 5000");
-      const ids = [...moved];
-      db.transaction(() => {
-        for (let i = 0; i < ids.length; i += 500) {
-          const chunk = ids.slice(i, i + 500), marks = chunk.map(() => "?").join(",");
-          db.prepare(`DELETE FROM thread_spawn_edges WHERE parent_thread_id IN (${marks}) OR child_thread_id IN (${marks})`).run(...chunk, ...chunk);
-          for (const table of ["thread_attachments", "thread_dynamic_tools"]) db.prepare(`DELETE FROM ${table} WHERE thread_id IN (${marks})`).run(...chunk);
-          report.codexThreads += db.prepare(`DELETE FROM threads WHERE id IN (${marks})`).run(...chunk).changes;
-        }
-      }).immediate();
+      report.codexThreads += deleteWithDependents(db, "threads", [...moved], [
+        ["thread_spawn_edges", "parent_thread_id"], ["thread_spawn_edges", "child_thread_id"],
+        ["thread_attachments", "thread_id"], ["thread_dynamic_tools", "thread_id"],
+      ]);
     } finally { db.close(); }
     // Codex CLI's own index of the person's sessions.
     const index = path.join(p.realHome, "session_index.jsonl");
@@ -155,20 +179,18 @@ export function moveLegacyCopilotSessions(p: NonNullable<LegacyCleanupPaths["cop
   let ids: string[];
   try {
     ids = (probe.prepare("SELECT id, cwd FROM sessions").all() as Array<{ id: string; cwd: string | null }>)
-      .filter((row) => moved.has(row.id) || inside(userDataDir, row.cwd)).map((row) => row.id);
+      // Also rows whose folder an earlier run already moved into the product mirror (a run that hit a store error).
+      .filter((row) => moved.has(row.id) || inside(userDataDir, row.cwd) || fs.existsSync(path.join(p.mirrorHome, "session-state", row.id)))
+      .map((row) => row.id);
   } finally { probe.close(); }
   if (!ids.length) return;
   backupDb(store, backupDir, "copilot-session-store");
   const db = new Database(store, { fileMustExist: true });
   try {
     db.pragma("busy_timeout = 5000");
-    db.transaction(() => {
-      for (let i = 0; i < ids.length; i += 500) {
-        const chunk = ids.slice(i, i + 500), marks = chunk.map(() => "?").join(",");
-        for (const table of ["session_files", "session_refs", "checkpoints", "assistant_usage_events"]) db.prepare(`DELETE FROM ${table} WHERE session_id IN (${marks})`).run(...chunk);
-        report.copilotRows += db.prepare(`DELETE FROM sessions WHERE id IN (${marks})`).run(...chunk).changes;
-      }
-    }).immediate();
+    report.copilotRows += deleteWithDependents(db, "sessions", ids, [
+      ["session_files", "session_id"], ["session_refs", "session_id"], ["checkpoints", "session_id"], ["assistant_usage_events", "session_id"],
+    ]);
   } finally { db.close(); }
 }
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.23 — 2026-10-13
+
+- When an agent's turn ends without the runtime's completion signal, Agentlas continues once in the same conversation and asks the agent to finish what is left, instead of stopping and waiting for you. The original request is not sent again, so nothing already done is repeated. This works the same for every runtime and does not depend on any runtime's tool names.
+- The move of old agent conversations out of your Copilot app now also clears Copilot's own session list (in 1.3.22 the folders moved but the list kept them).
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.22 — 2026-10-13
 
 - Agent conversations that older versions left in your own Codex, Claude and Copilot apps are moved into Agentlas once, shortly after launch, so those apps list only your own sessions. Agentlas can still continue them. A backup of each app's session list is kept in Agentlas's data folder before anything is removed from it.

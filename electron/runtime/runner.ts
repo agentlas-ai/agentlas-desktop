@@ -793,11 +793,17 @@ export interface RunnerResult {
 export const RUNTIME_TURN_UNSETTLED_CODE = "runtime_turn_unsettled";
 export class RuntimeTurnUnsettledError extends Error {
   readonly code = RUNTIME_TURN_UNSETTLED_CODE;
-  constructor(readonly runtimeKind: string, locale?: string) {
+  /**
+   * The native session/thread id the runner knew when the turn ended without its terminal event, when it knew one.
+   * The host resumes this same conversation once (mcp/client.ts invokeCurrentRuntime); it is never read from prose.
+   */
+  readonly sessionId?: string;
+  constructor(readonly runtimeKind: string, locale?: string, sessionId?: string | null) {
     super(locale === "ko"
       ? `${runtimeKind} 요청을 보낸 뒤 완료 영수증을 받지 못했습니다. 실행 여부가 불확실해 자동 재전송을 멈췄습니다. 작업 기록을 확인한 뒤 이어가세요.`
       : `${runtimeKind} did not return a terminal receipt after dispatch. Automatic replay stopped because the request may have acted. Review the work history before continuing.`);
     this.name = "RuntimeTurnUnsettledError";
+    if (typeof sessionId === "string" && sessionId.trim() && sessionId.length <= 256) this.sessionId = sessionId;
   }
 }
 

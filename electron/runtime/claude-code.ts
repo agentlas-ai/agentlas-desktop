@@ -2364,7 +2364,7 @@ const runClaudeTurn = async (
       broken = true;
       detachTurn();
       rejectRuntime(turnDispatchAttempted && !sawResult && !req.signal?.aborted
-        ? new RuntimeTurnUnsettledError(KIND, req.locale) : err);
+        ? new RuntimeTurnUnsettledError(KIND, req.locale, sessionId) : err);
     };
     const settle = (code: number | null) => {
       if (settled) return;
@@ -2403,11 +2403,11 @@ const runClaudeTurn = async (
       // turns with no visible text. Only an unattempted resident write may fall
       // back to one-shot without risking another model or external action.
       if (turnDispatchAttempted && !sawResult) {
-        rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale));
+        rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale, sessionId));
         return;
       }
       if (aliveProfile && (!sawResult || !terminalSucceeded)) {
-        broken = true; rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale)); return;
+        broken = true; rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale, sessionId)); return;
       }
       if (session && !sawResult && !combined() && !finalText) {
         broken = true;
@@ -2576,7 +2576,7 @@ const runClaudeTurn = async (
           events.onStatus(`[runtime-session] resume_failed kind=${KIND} exit=${code}`);
           // A settled failure alone does not prove that earlier tool effects
           // were absent. The typed zero-turn result above is the safe exception.
-          rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale));
+          rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale, sessionId));
           return;
         }
         reject(new Error(`claude CLI exit ${code}${stderr ? `\n${stderr.slice(0, 500)}` : ""}`));

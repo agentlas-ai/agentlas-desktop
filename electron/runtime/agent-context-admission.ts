@@ -7,7 +7,7 @@ import { createDaemonAgentContextHost } from "../daemon/agent-context-host";
 import { getDb } from "../store/db";
 import { invocationProcessOwner, invocationRunOwners, assertInvocationRunOwner } from "../store/invocation-run-owners";
 import { getInvocationRunReceipt } from "../store/run-events";
-import { createAgentContextCapability, agentContextHostBinding, bootstrapAgentContextHistory, markAgentContextHostAuthored,
+import { createAgentContextCapability, agentContextHostBinding, bootstrapAgentContextHistory, markAgentContextHostAuthored, copyAgentContextHostAuthored,
   reconcileInterruptedAgentContext, type AgentContextCapability } from "./agent-context";
 import type { Runner, RunnerRequest } from "./runner";
 
@@ -123,6 +123,8 @@ export function withDaemonAgentContext(runner: Runner, provider: { kind: string;
     return daemon.host.runTurn(held.identity, { turnId: held.turnId, adapterKey, assertCurrent: held.assertCurrent, signal: request.signal },
       (capability, signal) => {
         reconcileInterruptedAgentContext(capability, assertPreviousTurnTerminal);
+        // The daemon admits the same turn under its own capability; the host-authored marker follows the turn.
+        copyAgentContextHostAuthored(request.agentContext as AgentContextCapability, capability);
         return runner({ ...request, agentContext: capability, signal }, events);
       });
   };
