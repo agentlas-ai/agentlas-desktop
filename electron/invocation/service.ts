@@ -5171,10 +5171,14 @@ export class InvocationService {
       const idleYield = !nothingStarted && Boolean(turnRunId && getDb().prepare(
         "SELECT 1 FROM run_events WHERE run_id = ? AND kind = 'goal_idle_pass_yield' LIMIT 1").get(turnRunId));
       const followUpReason = idleYield ? "goal_idle_pass_yield" : reason;
+      // A turn that ended on an owner question completed too, but until the owner answers nothing can move: count it
+      // across completed turns. Production 1.3.29, Yotube room 2026-10-13 21:09–21:53Z: every follow-up restarted at
+      // retryIndex 0, so the Goal woke about once a minute and asked the same phone-verification card 8 times.
+      const ownerQuestion = followUpReason === "goal_owner_answer_required";
       const ownerSince = (getDb().prepare("SELECT MAX(created_at) AS at FROM chat_messages WHERE chat_id = ? AND role = 'user'")
         .get(record.chatId) as { at: string | null } | undefined)?.at ?? null;
       const repeats = consecutiveGoalTurnFollowUps(run.id, followUpReason, ownerSince, Date.now(),
-        { sinceCompletedTurn: !nothingStarted && !idleYield });
+        { sinceCompletedTurn: !nothingStarted && !idleYield && !ownerQuestion });
       const plan = goalTurnFollowUpPlan({ repeats, requestedNotBefore: options.requestedNotBefore });
       scheduleBlockedGoalRetry({ runId: run.id, expectedVersion: run.version, kind: "resume",
         fromReason: followUpReason, retryIndex: repeats, nextAt: plan.nextAt, requestedBy: plan.requestedBy,

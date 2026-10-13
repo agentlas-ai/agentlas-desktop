@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.31 — 2026-10-14
+
+- While a Goal waits for your answer to its question, it checks back less and less often instead of asking the same question about once a minute; answering resumes it right away.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.30 — 2026-10-14
 
 - The Agentlas browser no longer stops working partway through a long Goal: each agent pass now hands its browser session back, so a run that passed more than eight times keeps its browser instead of reporting it as not connected until the app restarts.
