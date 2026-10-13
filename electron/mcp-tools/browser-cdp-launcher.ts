@@ -3288,19 +3288,29 @@ async function main() {
   let leaseFile = null;
   let closing = false;
   let browserReadyPromise = null;
+  // Resolves once the relay session DELETE is answered (bounded). Exiting before it is sent leaked one of the
+  // relay's 8 sessions per launcher; the 9th pass of a run then got 409 and the browser stayed unavailable until
+  // the run ended (Yotube room 2026-10-13 20:54Z: 8 wire_aborted, then upstream_transport_closed on every pass).
+  let nativeRelease = Promise.resolve();
   const releaseLeaseOnce = () => {
     closing = true;
     if (nativeLeaseEndpoint) {
       const endpoint = nativeLeaseEndpoint;
       nativeLeaseEndpoint = '';
-      void nativeRequest(endpoint, 'DELETE').catch(() => {});
+      nativeRelease = Promise.race([
+        nativeRequest(endpoint, 'DELETE').catch(() => {}),
+        new Promise((resolve) => setTimeout(resolve, 1500)),
+      ]);
     }
-    if (!leaseFile) return;
-    const currentLease = leaseFile;
-    leaseFile = null;
-    releaseLease(currentLease);
-    scheduleIdleReaper();
+    if (leaseFile) {
+      const currentLease = leaseFile;
+      leaseFile = null;
+      releaseLease(currentLease);
+      scheduleIdleReaper();
+    }
+    return nativeRelease;
   };
+  const exitAfterRelease = (code) => { void releaseLeaseOnce().then(() => process.exit(code)); };
   if (!fs.existsSync(PLAYWRIGHT_MCP_CLI)) throw new Error('Bundled Playwright MCP runtime is missing: ' + PLAYWRIGHT_MCP_CLI);
   // MCP hosts frequently start a server only to initialize/list tools. Starting
   // Chrome here created about:blank and a browser root every health-check cycle.
@@ -3347,14 +3357,10 @@ async function main() {
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', ...(nativeLeaseEndpoint ? { PLAYWRIGHT_MCP_CDP_HEADERS: 'Authorization: Bearer ' + NATIVE_TOKEN } : {}) },
   });
   child.on('error', (e) => {
-    releaseLeaseOnce();
     log('failed to start @playwright/mcp', String(e));
-    process.exit(1);
+    exitAfterRelease(1);
   });
-  child.on('exit', (code) => {
-    releaseLeaseOnce();
-    process.exit(code == null ? 0 : code);
-  });
+  child.on('exit', (code) => exitAfterRelease(code == null ? 0 : code));
 
   const isClosedPipeError = (error) => {
     const code = error && error.code;
@@ -3932,9 +3938,7 @@ async function main() {
     if (unifiedCuaEngine) { try { unifiedCuaEngine.dispose(); } catch {} unifiedCuaEngine = null; unifiedCuaApi = null; }
     safeEnd(child.stdin, 'playwright stdin');
     try { child.kill('SIGTERM'); } catch (e) {}
-    releaseLeaseOnce();
-    const timer = setTimeout(() => process.exit(exitCode), 100);
-    timer.unref();
+    exitAfterRelease(exitCode);
   };
   process.once('SIGINT', () => stopForSignal(130));
   process.once('SIGTERM', () => stopForSignal(143));
