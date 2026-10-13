@@ -18,6 +18,8 @@ import {
   unseenHistoryGap,
 } from "./continuity";
 import { tStatus } from "./status-i18n";
+import { withForeignCliContext } from "./foreign-cli-context";
+import { selectionFor } from "../capabilities/one-capabilities";
 import {
   agentRunCwd,
   detachedSpawnOpts,
@@ -255,7 +257,8 @@ function runKimiProcess(
       child = spawnCli(bin, args, {
         stdio: ["ignore", "pipe", "pipe"],
         cwd: req.cwd ?? agentRunCwd(),
-        env: req.env ?? process.env,
+        // Sessions go to the product mirror of the CLI's config folder, never the person's own (cli-product-homes.ts).
+        env: withForeignCliContext("kimi", req.env ?? process.env, selectionFor(req.agentId)),
         ...detachedSpawnOpts(),
       });
     } catch (error) {

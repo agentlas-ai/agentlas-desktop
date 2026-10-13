@@ -11,6 +11,7 @@ import { redactOperationalSecrets } from "../invocation/event-secret-redaction";
 import { redactSecrets } from "../../shared/secret-patterns";
 import { composeResumeTurnPrompt } from "./continuity";
 import { stripAllMemoryEventBlocks } from "../memory/events";
+import { decideGeneration, runtimeContextWindow } from "./session-generation";
 import { stripGoalWaitDisplayText } from "../long-run/wait-emitter";
 import { stripGoalCompleteMarker, stripStormbreakerContinueMarker } from "../hephaestus/loop-engineering";
 import { stripStaffGuidance } from "../one/owner-prompt";
@@ -632,6 +633,16 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
         {receiptId:`completed:${turnId}`,nativeHandle:result.sessionId,observedThroughSeq});
       if(instructions && result.sessionId)instructions.delivered(result.sessionId);
       if (decision && acknowledged === true) await publishAliveTerminalAck(capability,delivery,result,observedThroughSeq);
+      // A native session whose last request reached 80% of the model's own window gives way to a new generation for the
+      // NEXT turn, seeded from this journal (session-generation.ts, owner 2026-10-13). Background only: nothing on screen.
+      if (!decision && stateful && acknowledged === true) {
+        const generation = decideGeneration({ kind: provider.kind, contextWindowTokens: runtimeContextWindow(provider.kind, req.model),
+          lastInputTokens: result.contextInputTokens ?? null });
+        if (generation.action === "new_generation") {
+          try { store.invalidateProvider(current(capability).identity,adapter,delivery.generation); }
+          catch { /* a concurrent delivery owns the binding; the next completed turn decides again */ }
+        }
+      }
       return result;
     }catch(error){
       // A measured pre-effect missing retained response resets only this

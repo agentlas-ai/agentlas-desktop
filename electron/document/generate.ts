@@ -7,6 +7,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { detachedSpawnOpts, killCliTree, trackRunChild, writeStdin } from "../runtime/exec";
+import { withAgyProductHome } from "../runtime/antigravity-personal-context";
+import { withCodexProductHome } from "../runtime/codex-product-home";
 
 export type DocumentMode = "report" | "paper" | "brief";
 export type ReviseAction = "expand" | "rewrite" | "shorten" | "improve" | "formal" | "casual";
@@ -209,13 +211,14 @@ export async function reviseDocumentText(
 export async function runLlm(prompt: string): Promise<{ text?: string; engine?: "agy" | "codex"; reason?: string }> {
   const agy = resolveBin("agy", AGY_PATHS);
   if (agy) {
-    const env = { ...process.env, GEMINI_CLI_TRUST_WORKSPACE: "true" };
+    // Product sessions stay out of the person's own Antigravity history (HOME mirror, like every product run).
+    const env = withAgyProductHome({ ...process.env, GEMINI_CLI_TRUST_WORKSPACE: "true" }, undefined, undefined);
     const out = await runViaStdin(agy, ["--print", ""], prompt, env, 140_000);
     if (out && out.trim()) return { text: out, engine: "agy" };
   }
   const codex = resolveBin("codex", CODEX_PATHS);
   if (codex) {
-    const out = await runViaStdin(codex, ["exec", "-s", "read-only", "--skip-git-repo-check", "-"], prompt, process.env, 140_000);
+    const out = await runViaStdin(codex, ["exec", "-s", "read-only", "--skip-git-repo-check", "-"], prompt, withCodexProductHome(process.env), 140_000);
     if (out && out.trim()) return { text: out, engine: "codex" };
   }
   return { reason: "no-llm-runtime" };

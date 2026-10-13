@@ -56,9 +56,9 @@ import {
   saveRuntimeSession,
 } from "../store/runtime-sessions";
 import {
-  ROOM_AUTO_COMPACT_TOKEN_LIMIT, boundHandoffHistory, decideSessionRotation, readThreadHealth,
-  recordRotationReceipt, recordThreadTurn, renderRotationNotice,
+  boundHandoffHistory, readThreadHealth, recordRotationReceipt, recordThreadTurn,
 } from "./session-rotation";
+import { compactionTokenLimit, decideGeneration, runtimeContextWindow } from "./session-generation";
 import { AcpRpcError } from "./acp-protocol";
 import {
   CODEX_APP_SERVER_ARGS,
@@ -1499,7 +1499,9 @@ async function runCodexResidentTurn(input: {
    * 스폰 형상 — `-c` 는 app-server 하위 명령의 옵션이다(실측 `codex app-server --help`).
    * reasoning summary 를 켜는 것은 exec 경로와 같은 이유다(끄면 요약 아이템이 비어 온다).
    */
-  const args = [...CODEX_APP_SERVER_ARGS, "-c", "model_reasoning_summary=auto", "-c", `model_auto_compact_token_limit=${req.scienceController ? 150000 : ROOM_AUTO_COMPACT_TOKEN_LIMIT}`, ...surfaceArgs, ...mcpArgs];
+  // Native compaction at 80% of the model's own window (session-generation.ts); unknown window keeps Codex's default.
+  const compactLimit = req.scienceController ? 150000 : compactionTokenLimit(KIND, req.model);
+  const args = [...CODEX_APP_SERVER_ARGS, "-c", "model_reasoning_summary=auto", ...(compactLimit ? ["-c", `model_auto_compact_token_limit=${compactLimit}`] : []), ...surfaceArgs, ...mcpArgs];
   const pool = codexSessionPool();
   const poolKey = codexPoolKey({
     // A turn-scoped process is never checked out by another turn.
@@ -2369,6 +2371,7 @@ async function runCodexResidentTurn(input: {
         sessionId: session.threadId,
         tokens: usage.observed?.outputTokens ?? Math.ceil(estChars / 4),
         ...(usage.observed ? { observedUsage: usage.observed } : {}),
+        ...(health.lastInputTokens ? { contextInputTokens: health.lastInputTokens } : {}),
         ...(workforcePermissionEnforcement ? { workforcePermissionEnforcement } : {}),
         appliedEffort,
       },
@@ -2678,7 +2681,8 @@ export const runCodex: Runner = async (
   // reasoning summary 아이템을 켠다 — 실측(codex 0.147): 이 설정 없이는 `--json`에
   // reasoning 아이템이 0건이라 화면이 "생각 중" 외에 아무것도 말할 수 없었다. 켜면
   // 모델이 낸 헤드라인("**Preparing file count command execution**")이 아이템으로 온다.
-  modelArgs.push("-c", "model_reasoning_summary=auto", "-c", `model_auto_compact_token_limit=${runReq.scienceController ? 150000 : ROOM_AUTO_COMPACT_TOKEN_LIMIT}`);
+  const execCompactLimit = runReq.scienceController ? 150000 : compactionTokenLimit(KIND, runReq.model);
+  modelArgs.push("-c", "model_reasoning_summary=auto", ...(execCompactLimit ? ["-c", `model_auto_compact_token_limit=${execCompactLimit}`] : []));
   let appliedEffort: string | null = null;
   if (runReq.model) modelArgs.push("--model", runReq.model);
   // 모델 캐시의 exact profile을 실행 시점에도 다시 검증한다. 최신 Codex 모델은 max를
@@ -2709,25 +2713,21 @@ export const runCodex: Runner = async (
       ? existing.sessionId
       : null;
   /*
-   * Long-lived room threads rotate at a TURN BOUNDARY (here, before dispatch; a prior turn's recorded health
-   * decides, never the current turn). The next turn starts a fresh thread seeded with the goal contract
-   * (turnContext) plus a bounded text-only tail of the room, so the old thread's screenshots and tool dumps
-   * are not re-read on every call. Caller-managed sessions (Build etc.) are never rotated here.
+   * A chat-level thread (one the agent-context layer does not manage; that layer rotates its own through
+   * session-generation.ts) gives way to a new one at a TURN BOUNDARY when the prior turn's last request reached 80% of
+   * the model's own window (owner 2026-10-13: no fixed thresholds, nothing added to the prompt, nothing on screen).
+   * The next turn starts fresh with a bounded text-only tail of the conversation. Caller-managed sessions never rotate.
    */
   const rotation = matchedSessionId && existing && !runReq.runtimeSessionId && !runReq.singleUse
-    ? decideSessionRotation({ health: readThreadHealth(matchedSessionId),
-      reportedInputTokens: existing.reportedInputTokens })
+    ? decideGeneration({ kind: KIND, contextWindowTokens: runtimeContextWindow(KIND, runReq.model),
+      lastInputTokens: readThreadHealth(matchedSessionId)?.lastInputTokens ?? null })
     : null;
-  const storedSessionId = rotation?.rotate ? null : matchedSessionId;
-  if (rotation?.rotate && matchedSessionId && runReq.chatId) {
-    const rotatedAt = new Date().toISOString();
-    const receiptStored = recordRotationReceipt({ schemaVersion: "agentlas.runtime-thread-rotation.v1",
-      chatId: runReq.chatId, previousThreadId: matchedSessionId, reasons: rotation.reasons,
-      health: readThreadHealth(matchedSessionId), reportedInputTokens: existing?.reportedInputTokens ?? null, rotatedAt });
-    events.onStatus(`[runtime-session] rotated kind=${KIND} previous=${matchedSessionId} reasons=${rotation.reasons.join(",")} receipt=${receiptStored ? "stored" : "missing"}`);
-    runReq = { ...runReq, history: boundHandoffHistory(runReq.history),
-      turnContext: [renderRotationNotice({ previousThreadId: matchedSessionId, reasons: rotation.reasons, locale: runReq.locale }),
-        runReq.turnContext].filter(Boolean).join("\n\n") };
+  const storedSessionId = rotation?.action === "new_generation" ? null : matchedSessionId;
+  if (rotation?.action === "new_generation" && matchedSessionId && runReq.chatId) {
+    recordRotationReceipt({ schemaVersion: "agentlas.runtime-thread-rotation.v1",
+      chatId: runReq.chatId, previousThreadId: matchedSessionId, reasons: [rotation.reason],
+      health: readThreadHealth(matchedSessionId), reportedInputTokens: existing?.reportedInputTokens ?? null, rotatedAt: new Date().toISOString() });
+    runReq = { ...runReq, history: boundHandoffHistory(runReq.history) };
   }
   /*
    * Unattended parallel branches share one ledger chat and therefore one stored

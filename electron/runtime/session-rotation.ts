@@ -7,21 +7,11 @@
 // 이 모듈은 순수 결정/조립 함수 + 얇은 meta 영속화만 담는다. 스키마 변경 없음(meta 표 재사용).
 import type { ChatHistoryEntry } from "../../shared/types";
 
-/** 직전 턴의 마지막 모델 호출 입력 토큰이 이 값 이상이면 회전 — 자동 압축 한도(150K) 직전. */
-export const ROTATE_LAST_INPUT_TOKENS = 120_000;
-/** 한 스레드에서 네이티브 압축이 이만큼 일어났으면 회전 — 요약의 요약이 쌓이는 신호. */
-export const ROTATE_COMPACTIONS = 3;
-/** 건강 기록이 없는 구스레드의 폴백: 보고된 누적 입력 토큰(스레드 전체) 상한. */
-export const ROTATE_CUMULATIVE_INPUT_TOKENS = 40_000_000;
-/** 한 스레드가 겪은 턴 수 상한 — 작은 문맥이어도 무한 수명은 막는다. */
-export const ROTATE_TURNS = 60;
 /** 인수인계에 싣는 최근 대화 예산(토큰). 목표 계약/계획은 turnContext가 따로 싣는다. */
 export const HANDOFF_HISTORY_TOKENS = 6_000;
 /** 인수인계 메시지 한 건 글자 상한 — 도구 덤프/로그가 섞여 들어오는 것을 막는다. */
 export const HANDOFF_MESSAGE_CHARS = 1_200;
 export const HANDOFF_MAX_MESSAGES = 12;
-/** 일반 Codex 방 실행의 네이티브 자동 압축 한도. 회전(120K)이 먼저 걸리고 압축은 안전망. */
-export const ROOM_AUTO_COMPACT_TOKEN_LIMIT = 150_000;
 
 export interface ThreadHealth {
   threadId: string;
@@ -35,35 +25,10 @@ export interface ThreadHealth {
   observedAt: string;
 }
 
-export type RotationReason = "last_input_tokens" | "compactions" | "cumulative_input_tokens" | "turns";
-
-export interface RotationDecision {
-  rotate: boolean;
-  reasons: RotationReason[];
-}
+/** Why a thread gave way (session-generation.ts; owner 2026-10-13: 80% of the model window, no fixed thresholds). */
+export type RotationReason = "context_ratio" | "resume_failed" | "context_overflow";
 
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
-
-/**
- * 회전 여부. 호출자는 "턴이 끝난 뒤 다음 턴을 시작하기 직전"에만 부른다(턴 도중 호출 금지).
- * turnInFlight 가 참이면 무조건 회전하지 않는다 — 방어선이지 허가가 아니다.
- */
-export function decideSessionRotation(input: {
-  health: ThreadHealth | null;
-  reportedInputTokens: number | null;
-  turnInFlight?: boolean;
-}): RotationDecision {
-  if (input.turnInFlight) return { rotate: false, reasons: [] };
-  const reasons: RotationReason[] = [];
-  const h = input.health;
-  const last = num(h?.lastInputTokens);
-  if (last !== null && last >= ROTATE_LAST_INPUT_TOKENS) reasons.push("last_input_tokens");
-  if (h && h.compactions >= ROTATE_COMPACTIONS) reasons.push("compactions");
-  if (h && h.turns >= ROTATE_TURNS) reasons.push("turns");
-  const cumulative = num(input.reportedInputTokens);
-  if (cumulative !== null && cumulative >= ROTATE_CUMULATIVE_INPUT_TOKENS) reasons.push("cumulative_input_tokens");
-  return { rotate: reasons.length > 0, reasons };
-}
 
 /** 이미지/대용량 덩어리를 걷어낸 텍스트. 데이터 URI·base64 긴 줄·첨부 마커는 자리표시로 대체. */
 export function stripHeavyContent(text: string): string {
@@ -83,21 +48,6 @@ export function boundHandoffHistory(history: ChatHistoryEntry[]): ChatHistoryEnt
       ? `${clean.slice(0, HANDOFF_MESSAGE_CHARS)} …[truncated]` : clean;
     return { ...m, text };
   });
-}
-
-/** 새 스레드 첫 턴 맨 앞에 붙는 한 단락. 사실 그대로만 말한다. */
-export function renderRotationNotice(input: {
-  previousThreadId: string;
-  reasons: RotationReason[];
-  locale: "ko" | "en" | string;
-}): string {
-  const why = input.reasons.join(", ");
-  return input.locale === "ko"
-    ? `[런타임 스레드 회전] 이전 모델 스레드(${input.previousThreadId.slice(0, 8)})가 길어져(${why}) 새 스레드로 이어간다. `
-      + "목표 계약·계획·체크포인트는 아래 컨텍스트와 도구(원장)에 그대로 있다. 이전 스레드의 스크린샷·도구 출력은 가져오지 않았으니, 필요하면 도구로 다시 읽어라."
-    : `[Runtime thread rotation] The previous model thread (${input.previousThreadId.slice(0, 8)}) grew long (${why}); `
-      + "this conversation continues in a fresh thread. The goal contract, plan and checkpoint are in the context below and in the ledger tools. "
-      + "Screenshots and tool output from the old thread were not carried over; re-read through tools if needed.";
 }
 
 export interface RotationReceipt {

@@ -4,7 +4,8 @@ import { assertCurrentHistoryRunnerResult } from "./observed-runner";
 import { withCurrentHistoryTool, currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { boundedLocalOutputTokens, localContextFailure, localHttpFailureClass, measureLocalContext } from "./local-context";
-import { compactHistoryToBudget, estimateTransportTokens } from "./compact";
+import { compactHistoryToBudget, estimateTransportTokens, stableHistoryWindow } from "./compact";
+import { GENERATION_CONTEXT_RATIO } from "./session-generation";
 import { estimateRequestPromptTokens, ollamaNativeFetch, planOllamaContext, probeOllamaContextLimits } from "./ollama-native";
 import { browserDownloadAvailable, beginBrowserDownloadProof } from "../long-run/download-proof";
 import { beginBuiltinFileProof, beginNativeFileProof, mcpFileProofCandidate } from "../long-run/file-proof";
@@ -1235,6 +1236,16 @@ export async function runLocalOpenAiChat(
   opts: RunLocalOpenAiChatOptions,
   messages: ChatMessage[],
 ): Promise<RunnerResult> {
+  // The size of the turn's LAST model request is what the generation rule (session-generation.ts) reads.
+  const contextInput: { value?: number } = {};
+  const result = await runLocalOpenAiChatInner({ ...opts, contextInputSink: contextInput }, messages);
+  return contextInput.value && result.contextInputTokens === undefined ? { ...result, contextInputTokens: contextInput.value } : result;
+}
+
+async function runLocalOpenAiChatInner(
+  opts: RunLocalOpenAiChatOptions & { contextInputSink?: { value?: number } },
+  messages: ChatMessage[],
+): Promise<RunnerResult> {
   const { req, events, runtimeKind, host, model } = opts;
   const recovery = assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
   const chatEndpoint = opts.chatEndpoint ?? `${host}/v1/chat/completions`;
@@ -1251,18 +1262,12 @@ export async function runLocalOpenAiChat(
         .update(req.sessionFingerprintSeed ?? req.systemPrompt ?? "")
         .digest("hex")
     : null;
-  const previousSession = !recovery && req.chatId
-    ? getRuntimeSession(req.chatId, runtimeKind, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner })
-    : null;
   if (!recovery && req.chatId && sessionFingerprint) {
     // OpenAI-compatible local servers have no provider conversation ID. The
     // durable Agentlas chat history is the source of truth, while this
     // logical session record makes continuity visible and detects model/host
     // changes without pretending the server supports native resume.
     saveRuntimeSession(req.chatId, runtimeKind, req.chatId, sessionFingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner });
-    if (previousSession && previousSession.fingerprint === sessionFingerprint) {
-      events.onStatus(req.locale === "ko" ? "로컬 모델 대화 기록 이어가는 중..." : "Continuing local model conversation history...");
-    }
   }
   // `untrustedNoTools` is a Main-authored hard boundary. Do not even inspect
   // the image slot, parse MCP config, probe servers, or construct builtin
@@ -1326,20 +1331,8 @@ export async function runLocalOpenAiChat(
     transmittedHistoryCount = compacted.recent.length + 1;
     return compacted.droppedCount;
   };
-  const reportHistoryCompaction = (droppedCount: number): void => {
-    if (historyCompactionReported) return;
-    historyCompactionReported = true;
-    events.onNotice?.({ level: "info", code: "history-compacted", display: "divider",
-      message: req.locale === "ko"
-        ? `이 모델의 용량에 맞춰 이전 대화 ${droppedCount}개를 비신뢰 발췌로 보냈습니다. 현재 요청과 지시는 그대로입니다.`
-        : `Sent untrusted excerpts of ${droppedCount} earlier messages to fit this model's context. Current request and instructions are unchanged.` });
-  };
-  if (opts.capacitySource === "unknown") {
-    events.onNotice?.({ level: "warning", code: "model-context-capacity-estimated",
-      message: req.locale === "ko"
-        ? "이 모델의 실제 문맥 용량을 확인하지 못해 보수적 추정치를 적용합니다."
-        : "This model's actual context capacity is unknown; using a conservative estimate." });
-  }
+  // Host-side history trimming is background work: nothing about it is shown to the user (owner 2026-10-13).
+  const reportHistoryCompaction = (_droppedCount: number): void => { historyCompactionReported = true; };
   let finalText = "";
   let sawAnyToolCall = false;
   let summaryTurnRequested = false;
@@ -1457,6 +1450,28 @@ export async function runLocalOpenAiChat(
                 }
               : {}),
         };
+    // The conversation's "session" for a runtime with no provider session: start from a handoff that only changes when the
+    // history outgrows 80% of the model's own window (compact.ts stableHistoryWindow), so the prefix stays byte-stable and
+    // the provider cache / local KV cache keeps hitting. Silent: nothing is shown to the user.
+    if (turn === 0 && historicalEntries.length > 0 && canCompactInitialHistory && !opts.ollamaContext) {
+      const sessionWindow = opts.contextWindow ?? opts.estimatedContextWindow;
+      if (sessionWindow) {
+        const reserve = opts.estimatedOutputReserve ?? Math.min(8_192, Math.floor(sessionWindow / 4));
+        const outgoing = estimateTransportTokens(JSON.stringify(requestBody)) - historyBudgetTokens + reserve;
+        const ceiling = Math.floor(sessionWindow * GENERATION_CONTEXT_RATIO) - outgoing;
+        if (ceiling > 0 && historyBudgetTokens > ceiling) {
+          const stable = stableHistoryWindow(historicalEntries, {
+            ceilingTokens: ceiling, targetTokens: Math.min(ceiling, Math.floor(sessionWindow * (1 - GENERATION_CONTEXT_RATIO))), locale: req.locale });
+          if (stable?.digest) {
+            messages.splice(historyStartIndex, transmittedHistoryCount,
+              { role: "user", content: stable.digest },
+              ...stable.recent.map((entry) => ({ role: entry.role, content: entry.text } as ChatMessage)));
+            transmittedHistoryCount = stable.recent.length + 1;
+            historyBudgetTokens = stable.estimatedTokens;
+          }
+        }
+      }
+    }
     // Ollama: size the window to this request and ask for it on the native route; otherwise the
     // catalog estimate stands. The window is reported, never silently left at the server default.
     let turnFetch: typeof fetch = fetch;
@@ -1544,6 +1559,7 @@ export async function runLocalOpenAiChat(
           return assertCurrentHistoryRunnerResult({text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)});
         }
         requestBody.max_tokens = admittedOutputTokens;
+        if (opts.contextInputSink) opts.contextInputSink.value = measured.inputTokens;
       } catch {
         if (req.signal?.aborted) throw abortReasonError(req);
         return assertCurrentHistoryRunnerResult({text:"",failure:localContextFailure("local_context_measurement_unavailable",runtimeKind,req.locale)});
@@ -1642,7 +1658,7 @@ export async function runLocalOpenAiChat(
             throw new Error(`${providerLabel} API ${fallback.status}: ${fallbackErrText.slice(0, 300)}`);
           }
           const result = await streamChatTurn(fallback, events.onPartial, events.onThinking);
-          (usage.complete(usageAttempt, result.terminalUsage), currentHistoryRuntimeFence()?.assertCurrent());
+          (usage.complete(usageAttempt, result.terminalUsage), result.terminalUsage && opts.contextInputSink && (opts.contextInputSink.value = result.terminalUsage.inputTokens), currentHistoryRuntimeFence()?.assertCurrent());
           const failure = terminalFailure(result);
           if (failure) return failure;
           observeOwnerControlResponse(result);
@@ -1656,7 +1672,7 @@ export async function runLocalOpenAiChat(
     }
 
     const result = await streamChatTurn(resp, events.onPartial, events.onThinking);
-    (usage.complete(usageAttempt, result.terminalUsage), currentHistoryRuntimeFence()?.assertCurrent());
+    (usage.complete(usageAttempt, result.terminalUsage), result.terminalUsage && opts.contextInputSink && (opts.contextInputSink.value = result.terminalUsage.inputTokens), currentHistoryRuntimeFence()?.assertCurrent());
     // A reply cut at the output cap carries no usable tool call. A reasoning model (qwen3 spent all 2000
     // tokens thinking before its first call, measured 2026-10-11) used to surface here as "did not return
     // a terminal receipt ... the request may have acted", which is false: nothing was dispatched. Give the

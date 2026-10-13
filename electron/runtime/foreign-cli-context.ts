@@ -27,6 +27,7 @@ import os from "node:os";
 import path from "node:path";
 import { userDataPath } from "../runtime-paths";
 import { isMirrorLink, syncConfigHomeMirror } from "./config-home-mirror";
+import { withCliProductHome } from "./cli-product-homes";
 import type { CapabilityItem, CapabilityKind, CapabilitySelection } from "../capabilities/one-capabilities";
 
 const GROK_CELLS: ReadonlyArray<{ cell: string; kind: CapabilityKind }> = [
@@ -144,6 +145,11 @@ export function syncGrokProductHome(realHome: string, selection: CapabilitySelec
 
 /** The run environment for an ACP agent: foreign-tool context switched off unless One chose it. */
 export function withForeignCliContext(agentKind: string, env: NodeJS.ProcessEnv, selection: CapabilitySelection | undefined): NodeJS.ProcessEnv {
+  // Kimi, Cursor and Copilot: their config folder (sessions, instruction files, MCP lists) is a product mirror
+  // (cli-product-homes.ts). Never throws: a host without a writable app folder keeps the person's folder.
+  if (agentKind === "kimi" || agentKind === "cursor" || agentKind === "github-copilot-cli") {
+    try { return withCliProductHome(agentKind, env, selection); } catch { return env; }
+  }
   if (agentKind !== "grok") return env;
   const out: NodeJS.ProcessEnv = { ...env, ...grokCompatEnv(selection) };
   const real = realGrokHome(process.env);

@@ -29,7 +29,8 @@ import {
   type LocalChatContent,
 } from "./local-tool-loop";
 import { tStatus } from "./status-i18n";
-import { compactHistoryToBudget, estimateTransportTokens } from "./compact";
+import { compactHistoryToBudget, estimateTransportTokens, stableHistoryWindow } from "./compact";
+import { GENERATION_CONTEXT_RATIO } from "./session-generation";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import {
   ANTHROPIC_1M_BETA,
@@ -118,12 +119,8 @@ function prepareContext(
  */
 export function byokContextCapacity(backend: ByokBackend, model: string, req: RunnerRequest, events: RunnerEvents) {
   const resolved = resolveEffectiveContextWindow(backend, model, !!req.longContext);
-  if (resolved.source === "unknown") {
-    events.onNotice?.({ level: "warning", code: "model-context-capacity-estimated",
-      message: req.locale === "ko"
-        ? "이 모델의 실제 문맥 용량을 확인하지 못했습니다. 미리 거절하지 않고 보내며, 넘치면 제공자의 답을 그대로 알려 드립니다."
-        : "This model's actual context capacity is unknown. The request is sent without a pre-check; if it is too large, the provider's answer is shown." });
-  }
+  // An unknown window is background knowledge (the catalog default applies); nothing is shown to the user.
+  void events;
   return {
     window: resolved.contextWindow ?? UNKNOWN_CONTEXT_WINDOW,
     source: resolved.source,
@@ -154,12 +151,6 @@ export function byokHistoryAdmission(input: {
     if (!compacted.fits || !compacted.digest) break;
     input.replaceHistory(compacted.recent, compacted.digest);
     estimate = estimateTransportTokens(JSON.stringify(input.outgoingBody()));
-    if (estimate + input.outputReserve <= input.window) {
-      input.events.onNotice?.({ level: "info", code: "history-compacted", display: "divider",
-        message: input.req.locale === "ko"
-          ? `이 모델의 추정 용량에 맞춰 이전 대화 ${compacted.droppedCount}개를 비신뢰 발췌로 보냈습니다. 현재 요청과 지시는 그대로입니다.`
-          : `Sent untrusted excerpts of ${compacted.droppedCount} earlier messages to fit this model's estimated context. Current request and instructions are unchanged.` });
-    }
   }
   return estimate + input.outputReserve <= input.window || !input.capacityKnown;
 }
@@ -229,6 +220,20 @@ async function runAnthropicMessages(
   authHeaders: Record<string, string>,
   req: RunnerRequest,
   events: RunnerEvents,
+): Promise<RunnerResult> {
+  // The size of the turn's LAST model request feeds the generation rule (session-generation.ts).
+  const sink: { value?: number } = {};
+  const result = await runAnthropicMessagesInner(backend, baseUrl, authHeaders, req, events, sink);
+  return sink.value && result.contextInputTokens === undefined ? { ...result, contextInputTokens: sink.value } : result;
+}
+
+async function runAnthropicMessagesInner(
+  backend: ByokBackend,
+  baseUrl: string,
+  authHeaders: Record<string, string>,
+  req: RunnerRequest,
+  events: RunnerEvents,
+  sink: { value?: number },
 ): Promise<RunnerResult> {
   events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
 
@@ -334,6 +339,24 @@ async function runAnthropicMessages(
     const outgoingBody = () => ({ model, max_tokens: outputLimit, stream: true, system: systemField,
       messages: backend === "anthropic" ? withHistoryCacheBreakpoint(messages) : messages,
       ...(anthropicTools.length > 0 ? { tools: anthropicTools } : {}) });
+    // The conversation's "session": a handoff that only changes when history outgrows 80% of the model's own window
+    // (compact.ts stableHistoryWindow), so the cached prefix stays byte-identical. Silent; nothing is shown to the user.
+    if (turn === 0 && req.history.length > 0) {
+      const ceiling = Math.floor(capacity.window * GENERATION_CONTEXT_RATIO)
+        - (estimateTransportTokens(JSON.stringify(outgoingBody())) - historyBudgetState.value + outputLimit);
+      if (ceiling > 0 && historyBudgetState.value > ceiling) {
+        const stable = stableHistoryWindow(req.history.filter((row) => row.role === "user" || row.role === "assistant"), {
+          ceilingTokens: ceiling, targetTokens: Math.min(ceiling, Math.floor(capacity.window * (1 - GENERATION_CONTEXT_RATIO))), locale: req.locale });
+        if (stable?.digest) {
+          const next = stable.recent.map((row) => ({ role: row.role, content: row.text } as AnthropicMessage));
+          if (next[0]?.role === "user" && typeof next[0].content === "string") next[0] = { role: "user", content: `${stable.digest}\n\n${next[0].content}` };
+          else next.unshift({ role: "user", content: stable.digest });
+          messages.splice(0, transmittedHistoryCount, ...next);
+          transmittedHistoryCount = next.length;
+          historyBudgetState.value = stable.estimatedTokens;
+        }
+      }
+    }
     if (!byokHistoryAdmission({ req, events, window: capacity.window, capacityKnown: capacity.known, outputReserve: outputLimit,
       budgetState: historyBudgetState,
       outgoingBody,
@@ -445,6 +468,7 @@ async function runAnthropicMessages(
     }
     outputTokens += turnOutputTokens;
     const turnInput = inputTokens + cacheRead + cacheWrite - beforeInput;
+    if (turnInputObserved && turnInput > 0 && sink) sink.value = turnInput;
     // Anthropic bills raw input, cache reads and cache creation separately; the receipt carries only the total.
     if (turnInputObserved) events.onModelUsageDetail?.(usageAttempt, { cacheCreationInputTokens: cacheWrite - beforeCacheWrite, rawInputTokens: inputTokens - beforeRawInput });
     (measuredUsage.complete(usageAttempt, turnInputObserved && turnOutputObserved && messageStopped

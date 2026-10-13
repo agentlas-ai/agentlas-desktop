@@ -83,6 +83,46 @@ export function compactHistoryToBudget(
   return { recent: history, digest: null, droppedCount: 0, fits: false, estimatedTokens: fullCost };
 }
 
+export interface StableHistoryWindow {
+  recent: ChatHistoryEntry[];
+  digest: string | null;
+  /** How many times the handoff was rebuilt while walking the journal (0 = nothing was folded). */
+  generations: number;
+  estimatedTokens: number;
+}
+
+/**
+ * The history an API or local request starts from, with a handoff that only changes when the history outgrows the
+ * ceiling. A stateless runtime has no provider session, so Agentlas keeps the "session": walking the journal in order,
+ * the handoff (an excerpt digest plus a verbatim suffix, compactHistoryToBudget) is rebuilt only when handoff + tail
+ * passes `ceilingTokens`, and then it is rebuilt down to `targetTokens`. Between rebuilds the prefix is byte-identical
+ * (a pure function of the rows), so provider prompt caches and a local server's KV cache keep hitting. Both numbers
+ * come from the model's own window (session-generation.ts GENERATION_CONTEXT_RATIO); nothing here is a fixed constant.
+ * Returns null when a handoff cannot fit, and the caller falls back to per-request compaction.
+ */
+export function stableHistoryWindow(
+  history: ChatHistoryEntry[],
+  opts: { ceilingTokens: number; targetTokens: number; locale: RuntimeLocale },
+): StableHistoryWindow | null {
+  const ceiling = Math.floor(opts.ceilingTokens), target = Math.floor(opts.targetTokens);
+  if (!Number.isSafeInteger(ceiling) || !Number.isSafeInteger(target) || ceiling < 0 || target < 0 || target > ceiling) return null;
+  const rowCost = (message: ChatHistoryEntry): number => estimateTransportTokens(message.text) + 12;
+  const baseCost = (recent: ChatHistoryEntry[], digest: string | null): number =>
+    recent.reduce((sum, message) => sum + rowCost(message), 0) + (digest ? estimateTransportTokens(digest) + 12 : 0);
+  let base: { recent: ChatHistoryEntry[]; digest: string | null; cost: number } = { recent: [], digest: null, cost: 0 };
+  let baseEnd = 0, tailCost = 0, generations = 0;
+  for (let index = 0; index < history.length; index += 1) {
+    tailCost += rowCost(history[index]);
+    if (base.cost + tailCost <= ceiling) continue;
+    const compacted = compactHistoryToBudget(history.slice(0, index + 1), { historyBudgetTokens: target, locale: opts.locale });
+    if (!compacted.fits) return null;
+    base = { recent: compacted.recent, digest: compacted.digest, cost: baseCost(compacted.recent, compacted.digest) };
+    baseEnd = index + 1; tailCost = 0; generations += 1;
+  }
+  const recent = [...base.recent, ...history.slice(baseEnd)];
+  return { recent, digest: base.digest, generations, estimatedTokens: baseCost(recent, base.digest) };
+}
+
 export interface CompactOptions {
   /** 모델의 (유효) 컨텍스트 윈도우 토큰. 이 값 기반으로 히스토리 예산을 잡는다. */
   contextWindow: number;

@@ -41,6 +41,13 @@ function quietly(action: () => void): void {
   }
 }
 
+/** A symlink; on Windows a folder is linked as a junction (no privilege needed), a file as a symlink (may be refused). */
+function link(target: string, at: string): void {
+  let type: "junction" | undefined;
+  if (process.platform === "win32") { try { if (fs.statSync(target).isDirectory()) type = "junction"; } catch { /* dangling */ } }
+  fs.symlinkSync(target, at, type);
+}
+
 /** Brings the mirror in line with the real folder. Throws when links cannot be made. */
 export function syncConfigHomeMirror(input: ConfigHomeMirrorInput): void {
   const own = input.own ?? {};
@@ -64,7 +71,7 @@ export function syncConfigHomeMirror(input: ConfigHomeMirrorInput): void {
   for (const name of wanted) {
     const at = path.join(input.mirrorDir, name);
     if (lstat(at)) continue;
-    quietly(() => fs.symlinkSync(path.join(input.realDir, name), at));
+    quietly(() => link(path.join(input.realDir, name), at));
   }
   for (const [name, text] of Object.entries(own)) {
     const at = path.join(input.mirrorDir, name);

@@ -1,9 +1,9 @@
 // What a product Claude Code run inherits from the person's own ~/.claude (owner decision 2026-10-11, all users):
 // nothing, except for One, and for One only the items the person switched on (capabilities/one-capabilities.ts).
 //
-// Claude Code reads its config dir in place, and its sign-in lives in the OS keychain under a name derived from
-// the config dir, so a CLAUDE_CONFIG_DIR mirror (the Codex approach) would sign the person out. Everything here is
-// therefore a `--settings` overlay, which wins over the user settings file:
+// Product runs use a config-dir mirror for sessions (claude-product-home.ts: CLAUDE_CONFIG_DIR + an empty
+// CLAUDE_SECURESTORAGE_CONFIG_DIR keeps the person's keychain sign-in). The mirror links the person's configuration,
+// so which of it a run may use is still decided here, as a `--settings` overlay that wins over the user settings file:
 //   - `claudeMdExcludes`   personal CLAUDE.md and rules/*.md that are switched off (was: always, 2026-10-06)
 //   - `autoMemoryEnabled`  the project memory (projects/<cwd>/memory/MEMORY.md) only when that item is on
 //   - `skillOverrides`     {name: "off"} for each switched-off personal skill / command

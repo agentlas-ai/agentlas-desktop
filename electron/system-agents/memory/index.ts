@@ -8,38 +8,21 @@
 import type { SystemAgentSpec, OnDemandModule } from "../types";
 import { MEMORY_EMITTER_BLOCK } from "../../architecture/manifest";
 
-/** 항상-켜진 최소 코어 — 모든 완료 턴이 관찰 영수증을 남기고, 후보만 선택적으로 제안한다. */
-export const MEMORY_CORE = [
-  "## Memory",
-  "End EVERY completed normal reply with a hidden `## Memory Events` fenced JSON envelope: `{schema_version:\"agentlas.memory-ticket.v1\",turn_summary:\"safe English outcome\",candidates:[]}`. Always emit; use [] when nothing durable was learned.",
-  // Keep the bilingual and replacement contracts inside the existing core budget.
-  "Durable candidates: memory_kind, content (English), content_native (authoritative original), suggested_scope, confidence, sensitivity, evidence_refs. Scopes: user_identity, team_memory, agent_repo, agent_team, project, session, discard. Never emit secrets, credentials, logs, prompts, transcripts or absolute paths.",
-  "To replace recalled memory, add supersedes with its observed h:16hex; never invent a key.",
-].join("\n");
+/**
+ * The whole memory contract for runtimes that still write it as text (byok, Agentlas serving, local models). Owner
+ * 2026-10-13: agents output only the per-turn receipt; no candidates (they cost output tokens on every answer). Runtimes
+ * that list MCP tools directly get no memory text at all (the host builds the receipt).
+ */
+export const MEMORY_CORE = MEMORY_EMITTER_BLOCK;
 
 export const MEMORY_CORE_MAX_APPROX_TOKENS = 220;
 
-// "저장해·기록해·남겨" 는 평범한 파일 작업 요청("파일로 저장해줘")에도 걸려 2.7KB 전체 스키마를 매번 실었다(2026-09-14).
-// 기억을 뜻하는 낱말(기억·메모리·remember·memory)에만 건다.
-const MEMORY_DETAIL_RE = /\b(?:remember|memory|save this|record this|memory event)\b|기억|메모리/i;
-// A stated preference or identity fact is exactly what belongs in user_identity,
-// yet the always-on core prompt has no room to explain that scope. So when the
-// turn carries one of those signals, load the full schema block (which does
-// explain it) — otherwise the model emits the preference at medium confidence
-// and the curator throws it away. Kept deliberately narrow: imperative "call
-// me / from now on / always" phrasings and explicit self-description, not every
-// mention of a name.
-const PREFERENCE_SIGNAL_RE =
-  // "always·항상·나를·프로필" 은 일상 요청에 너무 흔해 뺐다 — 정체성·선호 신호는 남긴다("always use 존댓말" 은 존댓말로 걸린다).
-  /\b(?:call me|from now on|prefer|please use|i am|i'm|my name is|my role)\b|앞으로|불러|말투|반말|존댓말|내 이름|선호/i;
-
-/** Full schema is loaded when the task is about memory, or states a durable preference/identity. */
+/** One contract on every turn: the turn_summary receipt (owner 2026-10-13: output only, no candidates). */
 export function memoryEmitterPromptFor(request: string, _locale?: "ko" | "en"): string {
   // Display locale never changes the canonical English memory contract.
   // Non-English owner wording is preserved separately in content_native.
-  return MEMORY_DETAIL_RE.test(request) || PREFERENCE_SIGNAL_RE.test(request)
-    ? MEMORY_EMITTER_BLOCK
-    : MEMORY_CORE;
+  void request;
+  return MEMORY_CORE;
 }
 
 /** 온디맨드 — 전체 스키마(kinds/scopes enum, request_context 필드, JSON 포맷 예시). emit 시점에만 필요. */

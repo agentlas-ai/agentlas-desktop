@@ -125,73 +125,17 @@ export const CAREER_GRAPH_DB_FILE = "career-graph.sqlite";
 export const EXPERIENCE_RELATION_LEDGER_FILE = "experience-relations.jsonl";
 
 /**
- * Appended to EVERY agent's system prompt (the always-on curator path). Short on purpose.
- * English — models follow English operating instructions reliably, like the ASK protocol.
+ * The per-turn memory receipt for runtimes that write it as text. Owner 2026-10-13: turn_summary only — no candidates,
+ * no schema, no examples (they cost output tokens on every answer). The curator reads the receipt; the host keeps
+ * everything else.
  */
-export const MEMORY_EMITTER_BLOCK = `## Memory (Agentlas curated memory)
-
-At the end of EVERY completed normal reply, emit exactly one hidden Memory Events
-envelope. The runtime removes it before display. This envelope is the per-turn receipt:
-always include a compact safe turn_summary, and use an empty candidates array when
-nothing durable was learned. Do not skip the envelope.
-
-Rules:
-- Never include secrets, credentials, API keys, raw logs, or full transcripts.
-- Real credential values may live only in local project .env/.env.local,
-  ignored signing/ or credentials/ files, or a local keychain/vault. Memory
-  Events may mention env names and local relative paths only.
-- For deploy, release, store, billing, auth, API, or cloud work, first read the
-  project's ${PROJECT_MEMORY_DIR}/${LOCAL_CREDENTIALS_MAP_FILE} and the top
-  "Local Credential Index" section of ${PROJECT_MEMORY_DIR}/${PROJECT_SOUL_FILE}
-  before saying a credential is missing.
-- One candidate per durable item. Keep "content" to one or two sentences.
-- Write turn_summary and every candidate content in English, regardless of the
-  conversation or display language. Preserve non-English original wording in
-  content_native; it is the authoritative wording for owner decisions and quotes.
-- "memory_kind": fact | decision | preference | risk | procedure | hypothesis | evidence | deprecation | conflict
-- "suggested_scope": user_identity | team_memory | project (this folder) | agent_repo | session (temporary) | discard
-- Use user_identity for a stable operator preference or personal fact (their name, role, language, tone,
-  how they want you to behave) — these must outlive any one project. The curator only files user_identity
-  when you label it so with "confidence": "high"; it never promotes into that scope, so a preference emitted
-  at lower confidence is demoted to a throwaway session note.
-- "agent_team" is accepted only as a legacy alias for team_memory.
-- When replacing a recalled item, add "supersedes": "h:16hex" using its observed
-  block key. Never invent a key; replacement stays within the curator's owner.
-- Add "request_context" when it improves future recall: user_intent, trigger_terms,
-  cwd_at_request, target_project, target_path, cross_context, outcome.
-- Never put the raw user prompt or transcript in request_context.
-- Suggest a scope; the separate Memory Curator decides the final destination.
-- turn_summary is one value-free sentence about the completed outcome. It is not the
-  user prompt, a transcript, raw log, secret, or absolute local path.
-
-Format (always emit, including an empty candidates array):
-
+export const MEMORY_EMITTER_BLOCK = `## Memory
+End every completed normal reply with one hidden block (the runtime removes it before display):
 ${MEMORY_EVENTS_HEADING}
 \`\`\`json
-{
-  "schema_version": "agentlas.memory-ticket.v1",
-  "turn_summary": "Completed outcome in one safe sentence.",
-  "candidates": [
-    {
-      "memory_kind": "decision",
-      "content": "...",
-      "suggested_scope": "project",
-      "confidence": "high",
-      "sensitivity": "internal",
-      "evidence_refs": [],
-      "request_context": {
-        "user_intent": "...",
-        "trigger_terms": ["..."],
-        "cwd_at_request": null,
-        "target_project": null,
-        "target_path": null,
-        "cross_context": false,
-        "outcome": "..."
-      }
-    }
-  ]
-}
-\`\`\``;
+{"schema_version":"agentlas.memory-ticket.v1","turn_summary":"one safe English sentence about the outcome"}
+\`\`\`
+No secrets, paths, prompts or transcripts.`;
 
 // ── Built-in agents ──────────────────────────────────────────────────────────
 

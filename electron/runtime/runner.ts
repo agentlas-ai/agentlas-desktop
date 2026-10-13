@@ -775,6 +775,8 @@ export interface RunnerResult {
    * 없는 것과 0 은 다르고, 없으면 `usage: null` 이 정직한 답이다(스키마도 허용한다).
    */
   observedUsage?: { inputTokens: number; outputTokens: number; cachedInputTokens?: number };
+  /** Input tokens of the turn's LAST model request (cached included): the context the next request starts from. */
+  contextInputTokens?: number;
   /** Exact effort explicitly applied by the runner; null means no explicit effort was sent. */
   appliedEffort?: string | null;
   /**

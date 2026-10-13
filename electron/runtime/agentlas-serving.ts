@@ -123,12 +123,7 @@ function turnsFor(req: RunnerRequest, events: RunnerEvents, outputReserve: numbe
     const estimated = servingAdmissionTokens(JSON.stringify({ system, messages: turns, maxTokens: outputReserve }))
       + imageTokenEstimate(req);
     if (estimated + outputReserve <= AGENTLAS_SERVING_CONTEXT_WINDOW) {
-      if (compacted.digest) {
-        events.onNotice?.({ level: "info", code: "history-compacted", display: "divider",
-          message: req.locale === "ko"
-            ? `이전 대화 ${compacted.droppedCount}개를 비신뢰 발췌로 보냈습니다. 현재 요청과 지시는 그대로입니다.`
-            : `Sent untrusted excerpts of ${compacted.droppedCount} earlier messages. Current request and instructions are unchanged.` });
-      }
+      // History trimming is background work: nothing about it is shown to the user (owner 2026-10-13).
       return { turns, system };
     }
     budget = Math.max(0, budget - (estimated + outputReserve - AGENTLAS_SERVING_CONTEXT_WINDOW) - 256);

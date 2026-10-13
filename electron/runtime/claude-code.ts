@@ -81,6 +81,7 @@ import {
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import { isAuthenticSystemTimeMcpLaunch } from "../mcp-tools/system-time-server";
 import { createClaudeWorkforceObservation } from "./claude-workforce-observation";
+import { adoptClaudeSessionIntoProductHome, claudeProductHomeDir, withClaudeMirrorExcludes, withClaudeProductHome } from "./claude-product-home";
 import { bindNativeFileProofObserver, mcpFileProofCandidate } from "../long-run/file-proof";
 
 /** Claude exposes file mutations as a typed tool_use input followed by a
@@ -1134,7 +1135,11 @@ const runClaudeTurn = async (
   const personalSettings = withClaudePersonalContext(productSettings, selectionFor(runReq.agentId),
     path.resolve((runReq.env ?? process.env).CLAUDE_CONFIG_DIR || path.join((runReq.env ?? process.env).HOME || os.homedir(), ".claude")),
     req.cwd ?? agentRunCwd());
-  const toolBrokerArgs = personalSettings ? ["--settings", personalSettings] : [];
+  // The run's config dir is the product mirror (claude-product-home.ts): exclude the same files under its path too.
+  const mirroredSettings = personalSettings ? withClaudeMirrorExcludes(personalSettings,
+    path.resolve((runReq.env ?? process.env).CLAUDE_CONFIG_DIR || path.join((runReq.env ?? process.env).HOME || os.homedir(), ".claude")),
+    claudeProductHomeDir()) : personalSettings;
+  const toolBrokerArgs = mirroredSettings ? ["--settings", mirroredSettings] : [];
   const noToolsArgs = runReq.untrustedNoTools
     ? [
         // Claude's safe-mode disables even an explicit --mcp-config. Keep it
@@ -1295,8 +1300,14 @@ const runClaudeTurn = async (
    * 떨어지고, 사용자 화면에는 아무 차이도 남지 않는다.
    */
   const runCwd = req.cwd ?? agentRunCwd();
-  const runEnv = aliveProfile ? { ...process.env, CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(req.maxOutputTokens),
-    MAX_STRUCTURED_OUTPUT_RETRIES: "1", CLAUDE_CODE_MAX_TURNS: "1", CLAUDE_CODE_MAX_RETRIES: "0" } : req.env ?? process.env;
+  // Product sessions live in Agentlas's own Claude config dir, never in the person's ~/.claude (owner 2026-10-13); the
+  // person's keychain sign-in is reused unchanged (claude-product-home.ts). One keeps the user MCP servers it switched on.
+  const runEnv = withClaudeProductHome(aliveProfile ? { ...process.env, CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(req.maxOutputTokens),
+    MAX_STRUCTURED_OUTPUT_RETRIES: "1", CLAUDE_CODE_MAX_TURNS: "1", CLAUDE_CODE_MAX_RETRIES: "0" } : req.env ?? process.env, {
+    keepMcpServers: (selectionFor(runReq.agentId)?.items ?? []).filter((item) => item.source === "claude" && item.kind === "connector" && item.enabled).map((item) => item.name),
+  });
+  // A product session an older install wrote into ~/.claude/projects moves into the mirror before it is resumed.
+  if (resumeSessionId) { try { adoptClaudeSessionIntoProductHome(runEnv, resumeSessionId, runCwd); } catch { /* resume falls back below */ } }
   const residencyEligible =
     allowResidency &&
     executableState.residencySupported &&
@@ -1578,6 +1589,8 @@ const runClaudeTurn = async (
     let finalText = "";
     let tokens: number | undefined;
     let observedUsage: { inputTokens: number; outputTokens: number; cachedInputTokens?: number } | undefined;
+    /** Input of the turn's last root model request (fresh + cache read + cache write): what the next request starts from. */
+    let contextInputTokens: number | undefined;
     /** Root assistant messages only; result.modelUsage may include resumed turns. */
     const turnModel = new ClaudeTurnModelTracker();
     let stderr = "";
@@ -2128,6 +2141,12 @@ const runClaudeTurn = async (
       }
       if (ev.type === "assistant" && ev.message?.content) {
         turnModel.observe(ev);
+        if (!fromSubAgent) {
+          const u = (ev.message as { usage?: { input_tokens?: unknown; cache_read_input_tokens?: unknown; cache_creation_input_tokens?: unknown } }).usage;
+          const part = (v: unknown) => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : 0);
+          const total = u ? part(u.input_tokens) + part(u.cache_read_input_tokens) + part(u.cache_creation_input_tokens) : 0;
+          if (total > 0) contextInputTokens = total;
+        }
         for (const block of ev.message.content) {
           if (block.type === "text" && block.text) {
             if (fromSubAgent) continue;
@@ -2376,6 +2395,7 @@ const runClaudeTurn = async (
           sessionId,
           tokens,
           observedUsage,
+          ...(contextInputTokens ? { contextInputTokens } : {}),
         });
         return;
       }
@@ -2470,6 +2490,7 @@ const runClaudeTurn = async (
           sessionId,
           tokens,
           observedUsage,
+          ...(contextInputTokens ? { contextInputTokens } : {}),
           ...(observedModel ? { observedModel } : {}),
           workforcePermissionEnforcement: hostAuthorityWorkforce
             ? observedHostEnforcement
@@ -2498,6 +2519,7 @@ const runClaudeTurn = async (
             failure: runnerFailure,
             tokens,
             observedUsage,
+            ...(contextInputTokens ? { contextInputTokens } : {}),
             ...(observedModel ? { observedModel } : {}),
             workforcePermissionEnforcement: hostAuthorityWorkforce
             ? undefined

@@ -175,8 +175,12 @@ export function parseMemoryEvents(text: string): ParsedMemory {
     if (tailFence && tailFence.index != null) {
       try {
         const data = JSON.parse(tailFence[1].trim()) as Record<string, unknown>;
-        if (data?.schema_version === "agentlas.memory-ticket.v1" && Array.isArray(data.candidates)) {
-          const candidates = data.candidates;
+        // Owner 2026-10-13: the per-turn receipt is just turn_summary, so an envelope without a candidates field is an empty one.
+        const tailCandidates = Array.isArray(data?.candidates)
+          ? data.candidates
+          : data?.candidates === undefined && typeof data?.turn_summary === "string" ? [] : null;
+        if (data?.schema_version === "agentlas.memory-ticket.v1" && tailCandidates) {
+          const candidates = tailCandidates;
           const events = candidates.map(normalize).filter((event): event is RawMemoryEvent => event !== null);
           const turnSummary = coerceString(data.turn_summary, 360) ?? null;
           return {
@@ -209,7 +213,9 @@ export function parseMemoryEvents(text: string): ParsedMemory {
         emitterStatus = data.length === 0 ? "empty" : events.length > 0 ? "valid" : "malformed";
       } else if (data && typeof data === "object") {
         const envelope = data as Record<string, unknown>;
-        const candidates = Array.isArray(envelope.candidates) ? envelope.candidates : null;
+        const candidates = Array.isArray(envelope.candidates)
+          ? envelope.candidates
+          : envelope.candidates === undefined && typeof envelope.turn_summary === "string" ? [] : null;
         if (candidates) candidateCount = candidates.length;
         // Arrays and versionless envelopes are deliberate legacy contracts.
         // An explicitly versioned future contract must not become v1 memory.

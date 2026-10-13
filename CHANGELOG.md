@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.21 — 2026-10-13
+
+- Agent conversations stay out of your own apps. Claude Code, Copilot, Kimi and Cursor runs now keep their sessions in Agentlas's own folders (Codex and Antigravity already did), so they no longer appear in your Claude, Copilot or other CLI history, and you stay signed in. Claude runs also stop picking up your personal MCP servers and project history.
+- Long conversations no longer grow without end. When a conversation reaches 80% of the model's own context window, the next turn continues in a fresh session from Agentlas's record, for every runtime; API and local models keep a stable start of the conversation so their caches keep working. Codex compacts at the same 80%. None of this shows on screen.
+- Agents end each answer with a one-sentence summary only, instead of a larger hidden memory block.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.20 — 2026-10-13
 
 - Agents get far less fixed instruction text. A recreated session no longer re-sends hidden memory envelopes, the app's own continuation prompts, repeated staff guidance or hundreds of old tool lines (one busy room's replay went from 488K to 131K characters). Codex runs no longer list every plugin skill of the account in each request. The interactive surface spec and the chat UI schema are read through a tool only when the agent decides to use them, instead of riding the prompt on keywords. The account-connecting guide is one short paragraph for every tool that needs a saved key. Tool lists the agent already receives are not described again, and a Goal's objective is stated once.

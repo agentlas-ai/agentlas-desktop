@@ -1,5 +1,6 @@
 import { selectionFor } from "../capabilities/one-capabilities";
 import { withForeignCliContext } from "./foreign-cli-context";
+import { adoptCopilotSession } from "./cli-product-homes";
 import { registerNativeApprovalChildSignal } from "./native-approval-provenance";
 import { claimAttemptChild, releaseAttemptChild } from "./attempt-children";
 import { beginAdapterEffectRun, type AdapterEffectReport } from "../invocation/adapter-effect-context";
@@ -1190,6 +1191,8 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         resumed = true;
         events.onStatus(`[runtime-session] resumed kind=${sessionKind}`);
       }
+      // A Copilot session an older install wrote into the person's own folder is copied into the product mirror first.
+      if (!sessionId && resumeSessionId && spec.id === "github-copilot-cli") adoptCopilotSession(runEnv.COPILOT_HOME, resumeSessionId);
       if (!sessionId && resumeSessionId && canLoadSession) {
         client.beginReplay();
         try {

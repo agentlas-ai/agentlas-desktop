@@ -23,6 +23,8 @@ import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, run
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild } from "./exec";
 import { tStatus } from "./status-i18n";
+import { withForeignCliContext } from "./foreign-cli-context";
+import { selectionFor } from "../capabilities/one-capabilities";
 import { abortReasonError } from "./abort-reason";
 import { CURSOR_MODEL_RE, parseCursorModels, type DiscoveryOutcome } from "../../shared/model-discovery";
 import { settleDiscovery } from "./model-discovery-store";
@@ -228,7 +230,8 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
       child = spawnCli(bin, args, {
         stdio: ["ignore", "pipe", "pipe"],
         cwd,
-        env: req.env ?? process.env,
+        // Sessions go to the product mirror of the CLI's config folder, never the person's own (cli-product-homes.ts).
+        env: withForeignCliContext("cursor", req.env ?? process.env, selectionFor(req.agentId)),
         ...detachedSpawnOpts(),
       });
     } catch (error) {

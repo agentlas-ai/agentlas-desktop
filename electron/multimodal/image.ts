@@ -11,6 +11,7 @@ import { app } from "electron";
 import { userDataPath } from "../runtime-paths";
 import { detachedSpawnOpts, killCliTree, trackRunChild } from "../runtime/exec";
 import { withCodexProductHome } from "../runtime/codex-product-home";
+import { withAgyProductHome } from "../runtime/antigravity-personal-context";
 
 export type ImageModel = "codex" | "gemini" | "auto";
 export interface ImageResult {
@@ -168,7 +169,8 @@ async function runAgyNanoBanana(prompt: string, target: string): Promise<boolean
     `No text, no words, no letters, no numbers, no logo, no watermark. If you cannot generate images, reply exactly NO_IMAGE_GEN.`;
   const scratch = path.join(os.homedir(), ".gemini", "antigravity-cli", "scratch");
   const since = Date.now() - 3000;
-  const env = { ...process.env, GEMINI_CLI_TRUST_WORKSPACE: "true" };
+  // HOME mirror: the conversation stays in the product store; scratch/ is linked, so the image is still found there.
+  const env = withAgyProductHome({ ...process.env, GEMINI_CLI_TRUST_WORKSPACE: "true" }, undefined, undefined);
   await new Promise<void>((resolve) => {
     let done = false;
     const finish = () => {

@@ -5828,10 +5828,9 @@ ${effectiveUserPrompt}`;
   }
   // Compact core is always on; the full schema is loaded only for explicit
   // memory tasks. This keeps the recurring contract under ~150 tokens.
-  // When the agentlas-turn memory_note tool is attached on a runtime that lists every MCP tool to the model, the tool carries
-  // the format and rules and the host builds the per-turn receipt itself: no memory text at all.
-  if (!req.agentAppMode && !isAliveControllerRun && !restrictedReadBoundary && executionContext?.source !== "science"
-    && !turnToolReplacesText(active.kind, mcpIncludedServers)) {
+  // Every runtime writes the one-line turn_summary receipt itself (owner 2026-10-13: the host's 360-char cut of the answer is
+  // not a summary); the contract is the 285-byte block, the same on every path.
+  if (!req.agentAppMode && !isAliveControllerRun && !restrictedReadBoundary && executionContext?.source !== "science") {
     turnContextParts.push(memoryEmitterPromptFor(effectiveUserPrompt, pickLocale(req))); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
   }
   if (mcpAutoSelectionPrompt) turnContextParts.push(mcpAutoSelectionPrompt);
