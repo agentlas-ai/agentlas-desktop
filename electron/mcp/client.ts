@@ -6913,8 +6913,10 @@ ${effectiveUserPrompt}`;
           assertGraphWorkerAttempt(executionContext?.graphWorkerAttempt);
           noteGraphWorkerDispatch(executionContext?.graphWorkerAttempt, selectionForRuntime(selectedRuntime));
           currentHistoryRuntimeFence()?.assertRuntimeCoverage(selectedRuntime.kind);
+          // Binding the agent context is a host check: a refusal here is pre-dispatch, never an unsettled turn.
+          const boundRequest = persistentRunnerRequest(requestForRuntime);
           runnerInvoked = true;
-          result = await withCurrentHistoryProvider(async()=>{const returned=await selected.runner(persistentRunnerRequest(requestForRuntime), attemptEvents.events);historyReturnedUsage=returned.observedUsage;return assertCurrentHistoryRunnerResult(returned);});
+          result = await withCurrentHistoryProvider(async()=>{const returned=await selected.runner(boundRequest, attemptEvents.events);historyReturnedUsage=returned.observedUsage;return assertCurrentHistoryRunnerResult(returned);});
           runtimeTerminalEvidence.closedHttpRefusal = runtimeFailureIsClosedHttpRefusal(result.failure, {
             text: result.text, nativeActivity: attemptEvents.nativeActivity(), aborted: signal?.aborted === true,
             observedUsage: result.observedUsage,

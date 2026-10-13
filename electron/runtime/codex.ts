@@ -495,7 +495,10 @@ function stableContextFingerprint(req: RunnerRequest, fingerprint: string | null
   return crypto.createHash("sha256").update(JSON.stringify([fingerprint, req.runtimeSessionOwnerId ?? req.agentId ?? null,
     req.runtimeSessionOwnerId != null, req.systemPrompt, req.locale, req.permission, req.approvalsReviewer,
     req.model, req.effort, req.forceSurface, req.browserOnly, req.isolatedMcpConfig,
-    req.mcpAllowedTools, req.mcpConfigPath, req.toolBrokerSettingsPath, req.env?.CODEX_HOME, configuration])).digest("hex");
+    // Per-invocation materialized files (agentlas-mcp-invocation-<id>.json, broker settings) are left out: their
+    // names change every turn, which made every stable block look new and resent it on all 62 measured turns.
+    // The servers the thread actually runs are identified by the Codex MCP args inside `configuration`.
+    req.mcpAllowedTools, req.env?.CODEX_HOME, configuration])).digest("hex");
 }
 
 interface CodexRunResult {
@@ -2212,7 +2215,8 @@ async function runCodexResidentTurn(input: {
     const continuing = reusing || Boolean(resumeThreadId && session.threadId === resumeThreadId);
     // Prepare the exact dispatched seed too. Only the bound turn/start receipt
     // commits it; typed compaction/replacement and unsettled turns invalidate it.
-    if (!reusing) invalidateStableTurnContext({ chatId: contextChatId, runtimeKind: KIND, sessionId: session.threadId });
+    // A resumed thread keeps its whole history, so only a thread that is not being continued starts empty.
+    if (!continuing) invalidateStableTurnContext({ chatId: contextChatId, runtimeKind: KIND, sessionId: session.threadId });
     const resumeContext = dedupeStableTurnContext({ chatId: contextChatId, runtimeKind: KIND,
       sessionId: session.threadId, contextFingerprint: stableContextFingerprint(req, fingerprint, [bin, cwd, mcpArgs, surfaceArgs, appliedEffort]),
       turnContext: req.turnContext, stableBlocks: req.turnContextStable, retention: "native-compaction" });

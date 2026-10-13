@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.24 — 2026-10-13
+
+- Automatic recovery of a failed scheduled task works again. Since 2026-10-11 every recovery attempt was refused inside the app before the AI started and was shown as "did not return a terminal receipt"; recovery runs now hold the task's conversation properly, and a check the app itself refuses keeps its real reason instead of being reported as an unfinished turn.
+- Codex and Claude no longer resend the same stable context blocks on every turn of a long conversation.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.23 — 2026-10-13
 
 - When an agent's turn ends without the runtime's completion signal, Agentlas continues once in the same conversation and asks the agent to finish what is left, instead of stopping and waiting for you. The original request is not sent again, so nothing already done is repeated. This works the same for every runtime and does not depend on any runtime's tool names.

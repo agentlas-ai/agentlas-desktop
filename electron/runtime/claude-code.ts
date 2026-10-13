@@ -1482,8 +1482,8 @@ const runClaudeTurn = async (
     runtimeSessionOwnerId ?? null, isolateRuntimeSessionOwner, runReq.systemPrompt, runReq.locale,
     runReq.permission, runReq.approvalsReviewer, runReq.model, runReq.effort,
     runReq.forceSurface, runReq.browserOnly, runReq.minimalObservation, runReq.desktopControlGrant,
-    runReq.isolatedMcpConfig, runReq.mcpAllowedTools,
-    runReq.mcpConfigPath, runReq.toolBrokerSettingsPath, executableIdentity.fingerprint,
+    // The MCP config/broker file paths are per-invocation names; the allowed tool list identifies the servers.
+    runReq.isolatedMcpConfig, runReq.mcpAllowedTools, executableIdentity.fingerprint,
     runCwd, runEnv.CLAUDE_CONFIG_DIR])).digest("hex");
   let resumeContext = contextSessionId ? dedupeStableTurnContext({ chatId: contextChatId, runtimeKind: KIND,
     sessionId: contextSessionId, contextFingerprint, ...stableContextSnapshot,

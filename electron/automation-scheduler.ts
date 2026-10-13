@@ -244,6 +244,7 @@ import {
   type NoProgressDecision,
 } from "./automation-progress-guard";
 import { withRunPriority } from "./runtime/run-priority";
+import { claimInvocationRunOwner, invocationRunOwners } from "./store/invocation-run-owners";
 import { runMainBackgroundTask, captureMainRootContinuation, admitMainAutomation, withMainScheduledRoot, takeMainInvocationAdmission, MainInvocationLifetime, type MainInvocationAdmission } from "./runtime/scheduled-root-context";
 import { synthesizeLegacyGraph } from "./automation-emitter";
 import { recoverGraphScheduleCursors, recoveredGraphScheduleOccurrence, recoverReadOnlySuspendedGraphs, suspendAutomationForGraphReconciliation } from "./store/graph-reconciliation";
@@ -939,8 +940,10 @@ async function handleAutomationFailure(a: Automation, error: string, failedRunId
         throwIfAutomationAborted(optimizerController);
         return withAutomationRunAccounting({
         runId: failedRunId ?? "", automationId: a.id, chatId: chat.chat.id,
-      }, () => withRunPriority("background", () =>
-        runMcpInvocation(
+      }, () => withRunPriority("background", () => {
+        // The run's agent context is bound to its owner lease; without one the bind refused before any runtime started.
+        const ownerLease = claimInvocationRunOwner(chat.chat.id, runId);
+        return runMcpInvocation(
           req,
           (ev) => recordMcpInvocationEvent(runId, req, ev),
           optimizerController.signal,
@@ -950,8 +953,8 @@ async function handleAutomationFailure(a: Automation, error: string, failedRunId
             return current;
           })()).binding,
           { source: "automation" },
-        ),
-      ));
+        ).finally(() => { try { invocationRunOwners.release(ownerLease); } catch { /* the startup sweep frees a stranded lease */ } });
+      }));
       });
       void Promise.race([optimizerRun, abortGate])
         .then(async () => {
