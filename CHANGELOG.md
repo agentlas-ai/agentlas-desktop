@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.22 — 2026-10-13
+
+- Agent conversations that older versions left in your own Codex, Claude and Copilot apps are moved into Agentlas once, shortly after launch, so those apps list only your own sessions. Agentlas can still continue them. A backup of each app's session list is kept in Agentlas's data folder before anything is removed from it.
+- When an update could not install on quit, the log now says why.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.21 — 2026-10-13
 
 - Agent conversations stay out of your own apps. Claude Code, Copilot, Kimi and Cursor runs now keep their sessions in Agentlas's own folders (Codex and Antigravity already did), so they no longer appear in your Claude, Copilot or other CLI history, and you stay signed in. Claude runs also stop picking up your personal MCP servers and project history.
