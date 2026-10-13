@@ -841,6 +841,8 @@ export type TaskSidePanelProps = {
   onRequestReadableWidth?: (width: number) => void;
   /** Restore the person's saved width after a temporary file view is closed. */
   onRestorePreferredWidth?: () => void;
+  /** Reports an open panel that has nothing to show (no view, file or worker), so the page frees its column. */
+  onEmptyChange?: (empty: boolean) => void;
   minWidth?: number;
   maxWidth?: number;
   defaultWidth?: number;
@@ -893,6 +895,7 @@ function TaskSidePanelContent({
   onResize,
   onRequestReadableWidth,
   onRestorePreferredWidth,
+  onEmptyChange,
   minWidth = 200,
   maxWidth = 720,
   defaultWidth = 324,
@@ -1517,7 +1520,11 @@ function TaskSidePanelContent({
     });
   };
   const sectionExpanded = (section: OutputSectionKey) => !collapsedSections.has(section);
-  if (!visible) return null;
+  // Owner 2026-10-13 (Yotube vs Thread Marketing): an open panel with no view drew a blank 300px column beside the
+  // chat. With nothing to show it takes no space; it reappears as soon as a view, file or worker opens.
+  const empty = openTabs.length === 0 && chatFileTabs.length === 0 && !workerSelection && !result;
+  useEffect(() => { onEmptyChange?.(Boolean(visible) && empty); }, [visible, empty, onEmptyChange]);
+  if (!visible || empty) return null;
   return (
     <aside
       onKeyDownCapture={(event) => {

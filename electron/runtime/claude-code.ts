@@ -2364,7 +2364,7 @@ const runClaudeTurn = async (
       broken = true;
       detachTurn();
       rejectRuntime(turnDispatchAttempted && !sawResult && !req.signal?.aborted
-        ? new RuntimeTurnUnsettledError(KIND, req.locale, sessionId) : err);
+        ? new RuntimeTurnUnsettledError(KIND, req.locale, sessionId, runnerFailure?.message) : err);
     };
     const settle = (code: number | null) => {
       if (settled) return;
@@ -2403,11 +2403,11 @@ const runClaudeTurn = async (
       // turns with no visible text. Only an unattempted resident write may fall
       // back to one-shot without risking another model or external action.
       if (turnDispatchAttempted && !sawResult) {
-        rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale, sessionId));
+        rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale, sessionId, runnerFailure?.message));
         return;
       }
       if (aliveProfile && (!sawResult || !terminalSucceeded)) {
-        broken = true; rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale, sessionId)); return;
+        broken = true; rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale, sessionId, runnerFailure?.message)); return;
       }
       if (session && !sawResult && !combined() && !finalText) {
         broken = true;

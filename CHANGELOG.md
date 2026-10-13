@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.28 — 2026-10-13
+
+- When an agent's turn ends without its completion signal, the message now leads with the provider's own reason when it sent one (for example a model at capacity), for Codex, Claude Code and ACP agents.
+- A teammate's activity shows one line per command it ran instead of repeating the tool name.
+- The queued-direction strip no longer shows a hidden attachment marker after your words.
+- Dashboard model cards are cleaner: no status words, usage as a short figure, credits as a coin and a compact number, and Connect on the title row for cards that are not connected.
+- An open output panel with nothing to show no longer leaves an empty column.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.27 — 2026-10-13
 
 - A new tools page: plugins, connectors and skills in one place, with real brand logos, a detail view for each, and sign-in and skill viewers that open in place.

@@ -127,14 +127,25 @@ function projectDispatchNotice(parentChatId: string, notice: DispatchNotice, con
   const events = db.prepare(`SELECT id, kind, payload_json, ts FROM run_events
     WHERE run_id=? AND chat_id=? AND kind IN ('mcp_reasoning','mcp_tool-use','invoke_waiting')
     ORDER BY seq DESC LIMIT 24`).all(notice.runId, notice.chatId) as Array<{id:string;kind:string;payload_json:string;ts:string}>;
-  const activity = events.slice().reverse().flatMap(event => {
+  // One row per tool call (start and completion share a toolId), showing what ran — not just "bash" (owner 2026-10-13:
+  // a teammate's activity read "도구 · bash" eight times).
+  const seenTools = new Set<string>();
+  const activity = events.flatMap(event => {
     try {
       const p = JSON.parse(event.payload_json);
-      const text = event.kind === "mcp_reasoning" ? p.reasoningText : event.kind === "mcp_tool-use" ? p.toolName : null;
+      if (event.kind === "mcp_tool-use") {
+        if (typeof p.toolName !== "string" || !p.toolName.trim()) return [];
+        const key = typeof p.toolId === "string" && p.toolId ? p.toolId : event.id;
+        if (seenTools.has(key)) return [];
+        seenTools.add(key);
+        const text = toolActivityText(p.toolName, p.toolArgs);
+        return [{ id: event.id, kind: "tool", text: redactRunEventSensitiveText(text).slice(0,1200), createdAt:event.ts }];
+      }
+      const text = event.kind === "mcp_reasoning" ? p.reasoningText : null;
       return typeof text === "string" && text.trim() ? [{ id: event.id,
-        kind: event.kind === "mcp_reasoning" ? "reasoning" : "tool", text: redactRunEventSensitiveText(text).slice(0,1200), createdAt:event.ts }] : [];
+        kind: "reasoning", text: redactRunEventSensitiveText(text).slice(0,1200), createdAt:event.ts }] : [];
     } catch { return []; }
-  }).slice(-8);
+  }).reverse().slice(-8);
   const latestWait = events.find(e => e.kind === "invoke_waiting");
   const hasResultNotice = notice.purpose === "one-dispatch-link" && db.prepare(`SELECT 1 FROM chat_messages
     WHERE chat_id=? AND json_valid(host_notice_json) AND json_extract(host_notice_json,'$.purpose')='one-dispatch-result'
@@ -150,4 +161,20 @@ function projectDispatchNotice(parentChatId: string, notice: DispatchNotice, con
     ...(pendingQuestion ? { pendingQuestion } : {}),
     ...(notice.purpose === "one-dispatch-link" ? { activity } : {}) });
   return { ...base, ...(dispatch ? { dispatch } : {}) };
+}
+
+/** "bash" plus the command it ran, unwrapped from the shell launcher and cut to one line. */
+function toolActivityText(toolName: string, rawArgs: unknown): string {
+  let args: unknown = rawArgs;
+  if (typeof rawArgs === "string") { try { args = JSON.parse(rawArgs); } catch { args = rawArgs; } }
+  const record = args && typeof args === "object" ? args as Record<string, unknown> : null;
+  const command = record ? record.command ?? record.cmd : typeof args === "string" ? args : undefined;
+  let line = Array.isArray(command) ? command.join(" ") : typeof command === "string" ? command : "";
+  if (!line && record) {
+    const first = Object.values(record).find((value) => typeof value === "string" && value.trim());
+    line = typeof first === "string" ? first : "";
+  }
+  line = line.replace(/^\/bin\/(?:ba|z)?sh\s+-l?c\s+/, "").replace(/^["']|["']$/g, "").split(/\r?\n/, 1)[0]!.trim();
+  if (!line) return toolName;
+  return `${toolName} · ${line.length > 140 ? `${line.slice(0, 139)}…` : line}`;
 }

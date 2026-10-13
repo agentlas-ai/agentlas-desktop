@@ -16,7 +16,7 @@ import { navigate } from "@/lib/navigation";
 import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
 import { LocalModelMiniCards, useLocalModelSnapshot } from "@/components/dashboard/LocalModelMiniCards";
 import { RUNTIME_CHIPS, RuntimeConnectPopup, connectCopy, useRuntimeAuth, type RuntimeChipSpec } from "@/components/connect/RuntimeConnect";
-import { isPaidOverageUsageWindow, isSupportedProviderUsageWindow, providerHasUsableCredits, providerHasUsableExtraUsage } from "@shared/runtime-quota";
+import { isPaidOverageUsageWindow, isSupportedProviderUsageWindow, providerHasUsableCredits } from "@shared/runtime-quota";
 import type { ByokBackend } from "@shared/models";
 import type {
   CliRuntimeVersionStatus,
@@ -98,16 +98,14 @@ function windowLabel(w: UsageWindow, ko: boolean): string {
 function formatReset(resetAt: number | null | undefined, ko: boolean): string {
   if (!resetAt) return "";
   const diff = resetAt - Date.now();
-  const pre = ko ? "리셋 " : "resets in ";
-  if (diff <= 0) return ko ? "리셋 임박" : "resetting";
+  // Owner 2026-10-13: "2% · 3m", "2% · 7d" — the unit letter is enough, no "resets in" words.
+  void ko;
+  if (diff <= 0) return "0m";
   const mins = Math.round(diff / 60_000);
-  if (mins < 60) return `${pre}${mins}${ko ? "분" : "m"}`;
+  if (mins < 60) return `${mins}m`;
   const hrs = Math.floor(mins / 60);
-  if (hrs < 24) {
-    const m = mins % 60;
-    return `${pre}${hrs}${ko ? "시간" : "h"}${m ? ` ${m}${ko ? "분" : "m"}` : ""}`;
-  }
-  return `${pre}${Math.round(hrs / 24)}${ko ? "일" : "d"}`;
+  if (hrs < 24) return `${hrs}h`;
+  return `${Math.round(hrs / 24)}d`;
 }
 
 // "12.4 / 50" 대신 통화코드가 오면 실제 통화로 — 청구액은 단위 없이 쓰면 안 된다.
@@ -132,41 +130,37 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
-function providerCreditsLabel(usage: ProviderUsage, ko: boolean): string | null {
+/** 47244.8 → "47k", 3000 → "3k", 1500 → "1.5k", 200 → "200" (owner 2026-10-13). */
+function compactAmount(value: number): string {
+  const abs = Math.abs(value);
+  const trim = (n: number) => String(Math.round(n * 10) / 10).replace(/\.0$/, "");
+  if (abs >= 1e6) return `${trim(value / 1e6)}M`;
+  if (abs >= 1e4) return `${Math.round(value / 1e3)}k`;
+  if (abs >= 1e3) return `${trim(value / 1e3)}k`;
+  return String(Math.round(value));
+}
+
+/** Just the balance: the row and the card already say which provider and that it is credit. */
+function providerCreditsBalance(usage: ProviderUsage, ko: boolean): string | null {
   const credits = usage.credits;
   if (!credits) return null;
-  const balance = credits.unlimited
+  return credits.unlimited
     ? ko ? "무제한" : "unlimited"
     : typeof credits.balance === "number" && Number.isFinite(credits.balance)
       ? credits.unit === "USD cents"
-        ? new Intl.NumberFormat(ko ? "ko-KR" : "en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(credits.balance / 100)
-        : `${new Intl.NumberFormat(ko ? "ko-KR" : "en-US", { maximumFractionDigits: 2 }).format(credits.balance)}${credits.unit ? ` ${credits.unit}` : ""}`
+        ? `$${compactAmount(credits.balance / 100)}`
+        : compactAmount(credits.balance)
       : ko ? "잔액 확인 필요" : "balance unavailable";
+}
+
+function providerCreditsLabel(usage: ProviderUsage, ko: boolean): string | null {
+  const credits = usage.credits;
+  if (!credits) return null;
+  const balance = providerCreditsBalance(usage, ko);
   const continuation = usage.allowPaidUsage !== false && !usage.stale && providerHasUsableCredits(usage)
     ? ko ? " · 구독 한도 이후 사용" : " · usable after limit"
     : "";
   return `${usage.label} ${ko ? "크레딧" : "credits"} ${balance}${continuation}`;
-}
-
-function providerExtraUsageLabel(usage: ProviderUsage, ko: boolean): string | null {
-  const extra = usage.extraUsage;
-  if (!extra) return null;
-  const prefix = `${usage.label} ${ko ? "추가 사용" : "extra usage"}`;
-  if (!extra.enabled) return `${prefix} ${ko ? "꺼짐" : "off"}`;
-  if (usage.stale) return `${prefix} ${ko ? "켜짐 · 마지막 확인 기준" : "on · last observation"}`;
-  if (providerHasUsableExtraUsage(usage)) {
-    if (usage.allowPaidUsage === false) {
-      return `${prefix} ${ko ? "공급자 켜짐 · 앱 크레딧 사용 꺼짐" : "provider enabled · app credit use off"}`;
-    }
-    return `${prefix} ${ko ? "켜짐 · 구독 한도 이후 허용" : "on · allowed after subscription limit"}`;
-  }
-  const exhausted = usage.spendControlReached === true || extra.monthlyLimit === 0
-    || (typeof extra.utilization === "number" && extra.utilization >= 100)
-    || (typeof extra.monthlyLimit === "number" && typeof extra.usedCredits === "number"
-      && extra.usedCredits >= extra.monthlyLimit);
-  return `${prefix} ${exhausted
-    ? ko ? "켜짐 · 추가 사용 한도 소진" : "on · extra usage limit reached"
-    : ko ? "켜짐 · 추가 사용 한도 확인 필요" : "on · extra usage allowance unavailable"}`;
 }
 
 function UsageBar({ w, ko }: { w: UsageWindow; ko: boolean }) {
@@ -199,7 +193,7 @@ function UsageBar({ w, ko }: { w: UsageWindow; ko: boolean }) {
       <div role="progressbar" aria-label={`${windowLabel(w, ko)} ${ko ? "사용량" : "usage"}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
         <div style={{ width: `${pct}%`, background: fill }} />
       </div>
-      <span data-warn={warn ? "true" : "false"}>{ko ? `사용 ${pct}%` : `${pct}% used`}</span>
+      <span data-warn={warn ? "true" : "false"}>{`${pct}%`}</span>
       <span title={money ?? undefined}>{money ?? formatReset(w.resetAt, ko)}</span>
     </div>
   );
@@ -207,12 +201,17 @@ function UsageBar({ w, ko }: { w: UsageWindow; ko: boolean }) {
 
 /** A wallet has no known total: show its balance without inventing a percent. */
 function ProviderCreditBar({ usage, ko }: { usage: ProviderUsage; ko: boolean }) {
-  const label = providerCreditsLabel(usage, ko) ?? providerExtraUsageLabel(usage, ko);
-  if (!label) return null;
+  // Owner 2026-10-13: a coin icon and the short balance only; a provider without a credit balance (Claude Code's
+  // extra usage) shows no row at all. The full sentence stays in the tooltip.
+  const label = providerCreditsLabel(usage, ko);
+  const shown = providerCreditsBalance(usage, ko);
+  if (!label || !shown) return null;
   return <div className="dashboard-usage-bar" data-credit-balance="true" title={label}>
-    <span>{ko ? "크레딧" : "Credits"}</span>
+    <span aria-label={ko ? "크레딧" : "Credits"} style={{ display: "inline-flex", alignItems: "center" }}>
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><ellipse cx="8" cy="5" rx="5.5" ry="2.5" stroke="currentColor" strokeWidth="1.3" /><path d="M2.5 5v6c0 1.4 2.5 2.5 5.5 2.5s5.5-1.1 5.5-2.5V5" stroke="currentColor" strokeWidth="1.3" /><path d="M2.5 8c0 1.4 2.5 2.5 5.5 2.5s5.5-1.1 5.5-2.5" stroke="currentColor" strokeWidth="1.3" /></svg>
+    </span>
     <div aria-hidden="true" />
-    <span style={{ gridColumn: "3 / 5" }}>{label}</span>
+    <span style={{ gridColumn: "3 / 5", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{shown}</span>
   </div>;
 }
 
@@ -255,7 +254,7 @@ function ModelRoleUsage({ value, ko }: {
       <div className="dashboard-role-usage-legend">
         <span><i data-role="orchestrator" />Orch {formatTokens(value.orchestrator.observedTokens)} · {value.orchestrator.invocationCount}</span>
         <span><i data-role="worker" />Worker {formatTokens(value.worker.observedTokens)} · {value.worker.invocationCount}</span>
-        <small>{measurementLabel} · {ko ? "공급자 쿼터는 계정 단위" : "provider quota is account-level"}</small>
+        <small>{measurementLabel}</small>
       </div>
       {modelBuckets.length > 0 && (
         <div className="dashboard-role-usage-models" aria-label={ko ? "모델·작업량별 관측 사용량" : "Observed usage by model and effort"}>
@@ -568,22 +567,17 @@ export function EngineUsage() {
     const rt = runtimeFor(e);
     const runtimeVersionLabel = runtimeVersionText(runtimeVersionFor(e));
     const hasBars = connected && (visibleWindows.length > 0 || !!u?.credits || !!u?.extraUsage);
-    const creditsLabel = connected && u ? providerCreditsLabel(u, ko) : null;
-    const extraUsageLabel = connected && u ? providerExtraUsageLabel(u, ko) : null;
     const terminalError = connected && isTerminalProviderError(u);
     const retryableError = connected && u?.status === "error" && !isRateLimited(u);
-    const showConnectedChip = connected && !terminalError && !retryableError;
     // The default-engine status and the "use as default" action belong at the
     // top-right of the card (compact), not in the action foot.
     const activeRoles = connected
       ? rt?.activeRoles ?? (rt?.active ? ["orchestrator"] : [])
       : [];
-    const statusLine = (connected
-      ? statusText(e, u)
-      : e.auth === "cli" ? (ko ? "구독 · 미연결" : "subscription · not connected")
-      : e.auth === "apikey" ? (ko ? "API 키 · 미연결" : "API key · not connected")
-      : ko ? "미설치" : "not installed")
-      + (connected && runtimeVersionLabel ? ` · ${runtimeVersionLabel}` : "");
+    // Owner 2026-10-13: no "연결됨 · v… · 최신" or "구독 · 미연결" lines. A Connect button already says "not
+    // connected"; a working card needs no words. Only a problem the owner must act on keeps a line.
+    const statusProblem = connected && (terminalError || u?.status === "error" || u?.error === "keychain_blocked");
+    const statusLine = connected ? `${statusText(e, u)}${runtimeVersionLabel ? ` · ${runtimeVersionLabel}` : ""}` : "";
     const actions = terminalError ? (
       <button onClick={() => openProviderHelp(e)} className="titlebar-nodrag" title={e.id === "grok" ? (ko ? "Grok Settings에서 사용량 확인" : "Open Grok usage settings") : (ko ? "Antigravity 안내 열기" : "Open Antigravity")}>
         {e.id === "grok" ? (ko ? "Usage 열기" : "Open usage") : (ko ? "Antigravity" : "Antigravity")}
@@ -631,22 +625,20 @@ export function EngineUsage() {
                   </span>
                 ))}
               </>
-            ) : showConnectedChip ? (
-              // 오너 결정(2026-07-28): 연결 카드는 '연결' CTA만 남긴다. 역할 풀
-              // 편집(추가·순서·제거)은 역할 카드의 풀 편집기가 단일 창구다 —
-              // 전역 기본값·Use default 계열 버튼은 여기서 완전히 제거.
-              <span className="dashboard-engine-connected">{ko ? "연결됨" : "Connected"}</span>
+            ) : !connected && actions ? (
+              // Not connected: the Connect button sits on the title row so the card stays one row tall.
+              <span className="dashboard-engine-actions" style={{ padding: 0 }}>{actions}</span>
             ) : null}
           </span>
         </div>
-        <div
+        {statusProblem && <div
           className="dashboard-engine-card-status"
           data-terminal-state={terminalError ? "true" : undefined}
           style={connected && u?.status === "error" ? { color: "var(--dash-red)" } : undefined}
           title={`${statusLine}${u ? ` · ${ko ? "마지막 확인" : "Last checked"} ${new Date(u.fetchedAt).toLocaleString(ko ? "ko-KR" : "en-US")}` : ""}`}
         >
           {statusLine}
-        </div>
+        </div>}
         {hasBars && (
           <div className="dashboard-engine-card-body">
             {/* 알려진 창은 모두 그린다. 이전 캐시의 알 수 없는 Claude 창은 제외한다.
@@ -660,8 +652,7 @@ export function EngineUsage() {
             {subscriptionWindows.slice(2).map((w) => <UsageBar key={w.id} w={w} ko={ko} />)}
           </div>
         )}
-        {creditsLabel && extraUsageLabel && <div className="dashboard-engine-card-status" title={extraUsageLabel}>{extraUsageLabel}</div>}
-        {(actions || (keyFor === e.id && !connected)) && (
+        {connected && actions && (
           <div className="dashboard-engine-card-foot">
             {actions ? <div className="dashboard-engine-actions" style={{ padding: 0 }}>{actions}</div> : <span />}
           </div>

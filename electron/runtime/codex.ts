@@ -2384,7 +2384,7 @@ async function runCodexResidentTurn(input: {
     broken = true;
     if (turnDispatchAttempted) persistTurnCounters();
     if (req.signal?.aborted) throw err;
-    if (turnDispatchAttempted && !terminalObserved) throw new RuntimeTurnUnsettledError(KIND, req.locale, session.threadId);
+    if (turnDispatchAttempted && !terminalObserved) throw new RuntimeTurnUnsettledError(KIND, req.locale, session.threadId, failure?.message);
     if (req.workforceRuntimeToolGrant) throw err;
     if (err instanceof CodexModelSelectionError) throw err;
     if (err instanceof CodexSessionContinuityError) throw err;

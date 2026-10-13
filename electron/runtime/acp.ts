@@ -1427,7 +1427,8 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       }
       // Preserve the effect ledger in finally; missing text is never no-effect proof.
       if (!effectTerminal && (promptDispatchAttempted || client.turnActivityObserved || agentRequestObserved)) {
-        throw new RuntimeTurnUnsettledError(spec.id, locale, session?.acpSessionId);
+        // The agent's own final error (e.g. a JSON-RPC "model at capacity") leads the message; replay stays off.
+        throw new RuntimeTurnUnsettledError(spec.id, locale, session?.acpSessionId, err instanceof Error ? err.message : null);
       }
       if (allowStaleRetry && lease && !lease.fresh && session
         && !promptDispatchAttempted && !client.turnActivityObserved && !agentRequestObserved

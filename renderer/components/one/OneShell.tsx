@@ -4512,6 +4512,9 @@ function OneSessionsShell() {
       : null;
   const outputStateIsCurrent = Boolean(outputRailChatId && outputThreadChatId === outputRailChatId);
   const outputRailVisible = outputStateIsCurrent && contextRailOpen;
+  // The panel reports when it is open but has nothing to show; the layout then keeps the full chat width.
+  const [outputRailEmpty, setOutputRailEmpty] = useState(false);
+  const outputRailTakesSpace = outputRailVisible && !outputRailEmpty;
   // The open bit is persisted for convenience, but it is not conversation
   // state. Reset it at each thread boundary so an empty mobile conversation
   // cannot inherit an open, full-screen output rail from the previous thread.
@@ -8558,7 +8561,7 @@ function OneSessionsShell() {
         className={styles.body}
         data-rail-collapsed={railCollapsed ? "true" : "false"}
         data-rail-open={railOpen ? "true" : "false"}
-        data-context-rail={outputRailVisible ? "true" : "false"}
+        data-context-rail={outputRailTakesSpace ? "true" : "false"}
         data-context-rail-kind={oneOutputKind}
         data-task-active={selected || conversation ? "true" : "false"}
         data-home={!selected && !conversation ? "true" : "false"}
@@ -8782,7 +8785,7 @@ function OneSessionsShell() {
         <main
           className={styles.workspace}
           data-runtime-artifacts={runtimeArtifacts.length > 0 ? "true" : "false"}
-          data-context-rail={outputRailVisible ? "true" : "false"}
+          data-context-rail={outputRailTakesSpace ? "true" : "false"}
           data-context-rail-kind={oneOutputKind}
           data-split-active={splitPanes.length > 0 ? "true" : "false"}
           data-mail-view={railMode === "mail" ? "true" : undefined}
@@ -9925,7 +9928,8 @@ function OneSessionsShell() {
               // "steering cannot be cancelled" (2026-08-15 21:25, frames 46–72).
               <div key={queued.id} className={styles.steeringQueue} role="status" aria-live="polite" data-one-steering-queue="true">
                 <span>{appLocale === "ko" ? "다음 지시" : "Next instruction"}</span>
-                <strong>{queued.text}</strong>
+                {/* A direction queued with files carries the chat-file marker for Main; the strip shows the words only. */}
+                <strong>{parseChatFileMessage(queued.text).visibleText || (appLocale === "ko" ? "첨부 파일" : "Attachments")}</strong>
                 <small>{appLocale === "ko" ? "현재 실행을 유지하고 완료 후 새 지시를 이어서 실행합니다" : "Keeps the current execution running, then continues with the new instruction"}</small>
                 <button
                   type="button"
@@ -10364,6 +10368,7 @@ function OneSessionsShell() {
           activity={outputStateIsCurrent ? activity : undefined}
           locale={appLocale}
           visible={outputRailVisible}
+          onEmptyChange={setOutputRailEmpty}
           workerSelection={outputStateIsCurrent ? workerSelection : null}
           workerRun={outputStateIsCurrent ? workerRun : null}
           onCloseWorker={() => setWorkerSelection(null)}
