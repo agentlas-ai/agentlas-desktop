@@ -382,6 +382,20 @@ function ownerWait(dispatch: OneDispatchRow): { reason: string; notice_code?: st
   }
 }
 
+/** The chat's live run, if any, is stopped on the owner (receipt waiting_input) rather than working. */
+function parkedOnOwner(chatId: string): boolean {
+  try {
+    const { invocationService } = runtime();
+    const active = invocationService.attach(chatId, { includeEvents: false });
+    if (active) return invocationService.receipt(active.runId)?.status === "waiting_input";
+    const rows = getDb().prepare("SELECT child_run_id FROM one_team_dispatches WHERE child_chat_id = ? AND status = 'running'")
+      .all(chatId) as Array<{ child_run_id: string }>;
+    return rows.length > 0 && rows.every((r) => invocationService.receipt(r.child_run_id)?.status === "waiting_input");
+  } catch {
+    return false;
+  }
+}
+
 function view(dispatch: OneDispatchRow) {
   const running = dispatch.status === "running";
   const wait = ownerWait(dispatch);
@@ -693,15 +707,20 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
   const settling = reused && getDb().prepare(
     "SELECT 1 FROM one_team_dispatches WHERE child_chat_id = ? AND status = 'running' LIMIT 1",
   ).get(reused.id);
-  if (reused && (settling || invocationService.activeChatIds().includes(reused.id))) {
+  // A session parked on the owner (a sign-in, an answer) has no live turn: its run only resumes after the owner acts.
+  // New work for that teammate gets its own session and the parked run stays as it is, so the resume still works.
+  // Yotube room 2026-10-13: a caption fix was attached to a run waiting on a YouTube sign-in and never ran.
+  const parked = Boolean(reused && settling && parkedOnOwner(reused.id));
+  if (reused && !parked && (settling || invocationService.activeChatIds().includes(reused.id))) {
     throw new Error(`one-team-member-busy: ${ownerMessage(
       `팀원 ${member.displayName}의 그 세션은 지금 작업 중이라 시작하지 않았어요. one_team_steer 로 방향을 더하거나 새 세션으로 맡기세요.`,
       `Teammate ${member.displayName}'s session is working right now, so nothing was started. Use one_team_steer on it, or start a new session.`,
     )}`);
   }
-  const chat = reused ?? chats.createChat({ agentId: member.installedAgentId, title, originSurface: "one", taskMode: "conversation",
+  const continuing = parked ? null : reused;
+  const chat = continuing ?? chats.createChat({ agentId: member.installedAgentId, title, originSurface: "one", taskMode: "conversation",
     kind: "division", parentChatId });
-  const createdHere = !reused;
+  const createdHere = !continuing;
   installSettleListener();
   const id = `dispatch-${randomUUID()}`;
   const runId = randomUUID();
@@ -793,7 +812,10 @@ export function oneTeamSteer(caller: OneTeamCaller, input: { sessionId?: unknown
   ).run(result.runId ?? result.activeRunId ?? null, now, dispatch.id);
   const continued = row(dispatch.id)!;
   if (continued.child_run_id !== dispatch.child_run_id) appendParentNotice(continued, "link");
-  return { ...view(continued), queued: result.queued, note: result.queued ? "Queued after the teammate's current step." : "Sent; the teammate is working on it." };
+  const waiting = ownerWait(continued);
+  return { ...view(continued), queued: result.queued, note: waiting
+    ? "The session is waiting for the owner (see waiting_for_owner); this direction applies only after that. Work that does not need it can go to the same teammate with one_team_dispatch, which starts its own session."
+    : result.queued ? "Queued after the teammate's current step." : "Sent; the teammate is working on it." };
 }
 
 /** Reads of a still-running session allowed per capability (= one One run) before One must end its turn. */

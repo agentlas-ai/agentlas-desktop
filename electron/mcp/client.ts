@@ -5485,6 +5485,8 @@ ${effectiveUserPrompt}`;
     turnContextParts.push(locale === "ko"
       ? "[보고서 표식]\n이번 답이 읽을 문서(보고서·기획서·조사 결과·제안서처럼 목차가 있고 나중에 다시 꺼내 볼 글)라면, 답 맨 앞에 다음 세 줄을 그대로 두고 그 아래 마크다운 본문을 쓰세요.\n---\ndocument: <문서 제목>\n---\n그러면 대화가 아니라 문서로 그려지고, 사람이 마크다운이나 PDF로 받아 갈 수 있습니다. 짧은 답·잡담·한두 문단 설명에는 쓰지 마세요. 쓸지 말지는 당신이 판단합니다. 이 표식을 설명하거나 언급하지 마세요.\n[/보고서 표식]"
       : "[Document marker]\nIf this answer is a document to read (a report, plan, research write-up, or proposal — something with sections that will be opened again later), begin the answer with exactly these three lines and write the markdown body below them.\n---\ndocument: <document title>\n---\nIt is then rendered as a document rather than chat, and the person can take it away as Markdown or PDF. Do not use it for short answers, small talk, or a paragraph or two. Whether to use it is your judgment. Never explain or mention this marker.\n[/Document marker]");
+    // Same text every turn: a resumed native session already has it (runner dedupe, continuity.ts).
+    stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
   }
   /*
    * 차트·시각물·agentlas-ui 계약은 더 이상 턴 맥락에 넣지 않는다(오너 2026-10-12: 사용자 프롬프트
@@ -5504,7 +5506,8 @@ ${effectiveUserPrompt}`;
     && !req.agentAppMode
       ? mainOneProfileContext(req)
       : "";
-  if (approvedOneContext) turnContextParts.push(approvedOneContext);
+  // Persona and approved profile repeat verbatim; held reports change, and a changed block is always sent again.
+  if (approvedOneContext) { turnContextParts.push(approvedOneContext); stableTurnContextParts.push(approvedOneContext); }
   const approvedOneAttachmentContext = !workspaceBinding && !req.agentAppMode
     ? mainOneAttachmentContext(req)
     : "";
@@ -5573,6 +5576,7 @@ ${effectiveUserPrompt}`;
       `done signal, audience (the ask mechanism is below), then STOP. After the answers, restate the goal in one sentence and proceed; ` +
       `record what stays open as assumptions ('decide later' is a valid answer).`,
     );
+    stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
   }
   if (invocationProjectId) {
     const project = getProject(invocationProjectId);
@@ -6027,8 +6031,11 @@ ${effectiveUserPrompt}`;
             const reservedDecisionIds = new Set<string>();
             goalPlanContextSlot = { index: turnContextParts.length, goalId: activeGoalId,
               revision: activeGoalRevision ?? goalPlan.revision, reservedDecisionIds };
-            turnContextParts.push(buildGoalPlanTurnContext(goalPlan, { runId: req.runId ?? null, locale,
+            turnContextParts.push(buildGoalPlanTurnContext(goalPlan, { runId: req.runId ?? null, locale, typedTools: goalToolsReplaceText,
               onDecisionRecorded: (id) => { reservedDecisionIds.add(id); } }));
+            // Measured 1.3.24: the 6,190-char plan was byte-identical on consecutive turns and resent each time.
+            // A refreshed slot no longer matches this copy, so a changed plan is still delivered.
+            stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
           }
           // A finite Goal with a deadline may wait for its next cycle up to that deadline (goal-deadline.ts).
           if (!executionContext && getChatGoalRevision(activeGoalId)?.lifecycle === "finite") {
@@ -6310,7 +6317,7 @@ ${effectiveUserPrompt}`;
           throw Object.assign(new Error("goal_plan_dispatch_context_missing"), { code: "goal_plan_dispatch_context_missing" });
         }
         dispatchTurnContextParts[goalPlanContextSlot.index] = buildGoalPlanTurnContext(currentPlan,
-          { runId: req.runId ?? null, locale, record: false,
+          { runId: req.runId ?? null, locale, record: false, typedTools: goalTypedToolsReplaceText,
             reservedDecisionIds: goalPlanContextSlot.reservedDecisionIds ?? undefined });
         bindGoalPlanDispatch(currentPlan, req.runId ?? null);
       }
@@ -7450,7 +7457,7 @@ ${effectiveUserPrompt}`;
           })
         : buildStormbreakerContinuationPrompt(passCarriesContext ? null : result.text, pass);
       const continuationPrompt = [baseContinuationPrompt, passRecoveryNote].filter(Boolean).join("\n\n");
-      const planNote = !goalPlanContextSlot && activeGoalId ? goalPlanContinuationNote(activeGoalId) : null;
+      const planNote = !goalPlanContextSlot && activeGoalId ? goalPlanContinuationNote(activeGoalId, Date.now(), goalTypedToolsReplaceText) : null;
       activeRunnerReq = {
         ...nextRunnerReq,
         // Remote Hub instructions stay at user authority. Reattach the exact

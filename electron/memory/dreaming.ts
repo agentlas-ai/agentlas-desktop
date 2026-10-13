@@ -16,6 +16,7 @@ import { detectRuntimes } from "../runtime/detect";
 import { pickActive, pickRunner } from "../runtime/selection";
 import {
   dedupExactDuplicateMemories,
+  supersedeLegacyRequestEchoMemories,
   insertMemoryEntry,
   listAgentIdsWithLiveMemory,
   listGlobalMemoryForAgent,
@@ -96,6 +97,13 @@ export function getDreamingStatus(): DreamingStatus {
 
 export function startDreamingScheduler(): void {
   if (timer) return;
+  // Not gated on dreaming being on: these rows are wrong data, not a consolidation choice.
+  setTimeout(() => {
+    try {
+      const retired = supersedeLegacyRequestEchoMemories();
+      if (retired > 0) console.log(`[memory] superseded ${retired} legacy request-echo entries`);
+    } catch (err) { console.warn("[memory] legacy request-echo cleanup deferred:", err instanceof Error ? err.message : err); }
+  }, 60_000).unref?.();
   timer = setInterval(() => {
     void tick();
   }, TICK_MS);

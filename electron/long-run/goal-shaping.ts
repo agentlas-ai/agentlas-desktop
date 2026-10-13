@@ -367,6 +367,8 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
   /** Exact receipts already booked for the still-pending first pass, never a run-wide exclusion. */
   reservedDecisionIds?: ReadonlySet<string>;
   onDecisionRecorded?: (id: string) => void;
+  /** goal_tactic / goal_plan_op / goal_kpi are attached and the runtime calls MCP tools directly: no marker grammar. */
+  typedTools?: boolean;
 } = {}): string {
   const nowMs = input.nowMs ?? Date.now();
   const reservedDecisionIds = input.record === false ? input.reservedDecisionIds : undefined;
@@ -440,18 +442,23 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
   const review = reviewDue(plan, nowMs, reservedDecisionIds);
   const strategyLocale = input.locale ?? (currentUiLocale() === "ko" ? "ko" : "en");
   const kpiBlock = buildKpiShiftContext(plan, nowMs, strategyLocale);
-  lines.push(...kpiMeasurementLines(plan, nowMs));
+  lines.push(...kpiMeasurementLines(plan, nowMs, input.typedTools === true));
   if (kpiBlock) lines.push(kpiBlock);
   if (review && !kpiBlock) {
     lines.push("Strategy review due: compare each active strategy with the KR pace above; retire one whose timebox elapsed (cite evidence) or add one that cites a key result. Missing sensor data is not a reason to retire.");
   }
-  // Marker grammar = the minimum applyGoalPlanMarkers/applyTacticMarker accept (typed tool follow-up: agentlas-turn owner).
-  lines.push("Markers (one per line):");
-  lines.push('- done: <<agentlas-tactic>>{"id":"t1","status":"done","evidence":"what proves done_when"} — one for EVERY tactic you finish, including later ones finished this turn.');
-  lines.push('- blocked: <<agentlas-tactic>>{"id":"t1","status":"blocked","cause":"tool_missing|tool_refused|resource_busy|effect_uncertain|unknown|boundary","boundary":"payment|credential|security_consent|owner_stop|purpose_change","evidence":"..."} — the host picks the next move; never abandon the goal.');
-  lines.push('- plan: <<agentlas-plan-op>>{"op":"replace_tactic","id":"t1","with":[{"description":"...","done_when":"..."}]} · {"op":"add_tactic","strategy_id":"s1","description":"...","done_when":"..."}' +
-    (plan.shape === "mission_tree" ? ' · {"op":"retire_strategy","id":"s2","evidence":"..."} · {"op":"add_strategy","hypothesis":"...","serves_krs":["kr id"],"kpi":"...","timebox_hours":72,"tactics":[{"description":"...","done_when":"..."}]}' : ""));
-  lines.push('Tactic drafts also accept depends_on:["tactic id"] and prerequisites:[{"id":"...","state":"unmet|unknown|met","evidence_refs":["..."],"blocks":["prepare|local_write|external_effect"]}] (the host rejects dangling/cyclic ones).');
+  // The typed tools carry the shapes in their schemas; only what a schema cannot say stays.
+  if (input.typedTools) {
+    lines.push("Report every tactic finished or blocked this turn with goal_tactic, and plan changes with goal_plan_op.");
+  } else {
+    // Marker grammar = the minimum applyGoalPlanMarkers/applyTacticMarker accept (typed tool follow-up: agentlas-turn owner).
+    lines.push("Markers (one per line):");
+    lines.push('- done: <<agentlas-tactic>>{"id":"t1","status":"done","evidence":"what proves done_when"} — one for EVERY tactic you finish, including later ones finished this turn.');
+    lines.push('- blocked: <<agentlas-tactic>>{"id":"t1","status":"blocked","cause":"tool_missing|tool_refused|resource_busy|effect_uncertain|unknown|boundary","boundary":"payment|credential|security_consent|owner_stop|purpose_change","evidence":"..."} — the host picks the next move; never abandon the goal.');
+    lines.push('- plan: <<agentlas-plan-op>>{"op":"replace_tactic","id":"t1","with":[{"description":"...","done_when":"..."}]} · {"op":"add_tactic","strategy_id":"s1","description":"...","done_when":"..."}' +
+      (plan.shape === "mission_tree" ? ' · {"op":"retire_strategy","id":"s2","evidence":"..."} · {"op":"add_strategy","hypothesis":"...","serves_krs":["kr id"],"kpi":"...","timebox_hours":72,"tactics":[{"description":"...","done_when":"..."}]}' : ""));
+    lines.push('Tactic drafts also accept depends_on:["tactic id"] and prerequisites:[{"id":"...","state":"unmet|unknown|met","evidence_refs":["..."],"blocks":["prepare|local_write|external_effect"]}] (the host rejects dangling/cyclic ones).');
+  }
   lines.push(`No self-imposed caps; only the mission boundaries and the Goal's permissions limit you. Plan-op text is shown to the owner: write it in ${(input.locale ?? (currentUiLocale() === "ko" ? "ko" : "en")) === "ko" ? "Korean" : "English"}.`);
   if (input.record !== false) {
     if (tactics.length) {
@@ -474,7 +481,7 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
 }
 
 /** 같은 턴 안의 다음 패스에 붙일 짧은 안내(방금 완료된 전술 뒤의 다음 전술). */
-export function goalPlanContinuationNote(goalId: string, nowMs = Date.now()): string | null {
+export function goalPlanContinuationNote(goalId: string, nowMs = Date.now(), typedTools = false): string | null {
   const plan = readGoalPlan(goalId);
   if (!plan) return null;
   const next = selectActiveTactics(plan, { nowMs });
@@ -483,7 +490,7 @@ export function goalPlanContinuationNote(goalId: string, nowMs = Date.now()): st
     return "Goal plan: open tactics remain, but none is currently eligible under the plan's strategy state. Do not claim completion; inspect the current strategy state before continuing.";
   }
   if (!next.length) return "Goal plan: every planned tactic is done or retired — verify the acceptance criteria before claiming completion.";
-  return `Goal plan — next tactic: ${next.map((t) => `${t.id}: ${t.description} (done when: ${t.done_when})`).join(" | ")}. Emit the tactic marker when it is done.`;
+  return `Goal plan — next tactic: ${next.map((t) => `${t.id}: ${t.description} (done when: ${t.done_when})`).join(" | ")}. ${typedTools ? "Report it with goal_tactic" : "Emit the tactic marker"} when it is done.`;
 }
 
 // ── 표식 적용 ────────────────────────────────────────────────────────────────

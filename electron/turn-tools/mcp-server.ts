@@ -16,10 +16,14 @@ import { MEMORY_KINDS, MEMORY_SCOPES } from "../architecture/manifest";
  */
 export const AGENTLAS_TURN_CATALOG_ID = "agentlas-turn";
 export const AGENT_TURN_CONTROL_ENV = "AGENTLAS_TURN_CONTROL_FILE";
-export const AGENTLAS_TURN_TOOL_NAMES = ["memory_note", "goal_wait", "goal_complete"] as const;
-/** Offered on every turn this server is attached to. goal_wait / goal_complete are added on Goal turns only (capability `tools`). */
+export const AGENTLAS_TURN_TOOL_NAMES = ["memory_note", "goal_wait", "goal_complete", "goal_tactic", "goal_plan_op", "goal_kpi"] as const;
+/** Offered on every turn this server is attached to. The goal tools are added on Goal turns only (capability `tools`). */
 export const TURN_TOOLS_BASE = ["memory_note"] as const;
-export const TURN_TOOLS_GOAL = ["memory_note", "goal_wait", "goal_complete"] as const;
+export const TURN_TOOLS_GOAL = ["memory_note", "goal_wait", "goal_complete", "goal_tactic", "goal_plan_op", "goal_kpi"] as const;
+/** The plan tools replace the `<<agentlas-tactic>>` / `<<agentlas-plan-op>>` / `<<agentlas-kpi>>` marker lines. */
+export const GOAL_PLAN_TOOL_MARKERS = { goal_tactic: "<<agentlas-tactic>>", goal_plan_op: "<<agentlas-plan-op>>", goal_kpi: "<<agentlas-kpi>>" } as const;
+export const TACTIC_BLOCK_CAUSE_VALUES = ["tool_missing", "tool_refused", "resource_busy", "effect_uncertain", "unknown", "boundary"] as const;
+export const TACTIC_BOUNDARY_VALUES = ["payment", "credential", "security_consent", "owner_stop", "purpose_change"] as const;
 export const GOAL_WAIT_SUBJECT_KINDS = ["invocation", "artifact", "automation", "timer"] as const;
 export const GOAL_WAIT_CONDITIONS = ["terminal", "changed", "due"] as const;
 
@@ -82,6 +86,43 @@ export const AGENTLAS_TURN_TOOLS = [
       type: "object",
       properties: { evidence: { type: "string", maxLength: 240, description: "What was verified and where." }, summary: { type: "string", maxLength: 240 } },
       additionalProperties: false,
+    },
+  },
+{
+    name: "goal_tactic",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    description: "Report a Goal tactic as done (evidence proves its done_when) or blocked (the host picks the next move). Call once for every tactic finished this turn.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: idString,
+        status: { type: "string", enum: ["done", "blocked"] },
+        evidence: { type: "string", maxLength: 2000 },
+        cause: { type: "string", enum: [...TACTIC_BLOCK_CAUSE_VALUES] },
+        boundary: { type: "string", enum: [...TACTIC_BOUNDARY_VALUES] },
+      },
+      required: ["id", "status", "evidence"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "goal_plan_op",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    description: "Change the plan (shown to the owner): replace_tactic {id, with}, add_tactic {strategy_id, description, done_when}, retire_strategy {id, evidence}, add_strategy {hypothesis, serves_krs, kpi, tactics}.",
+    inputSchema: {
+      type: "object",
+      properties: { op: { type: "string", enum: ["replace_tactic", "add_tactic", "retire_strategy", "add_strategy"] } },
+      required: ["op"],
+    },
+  },
+  {
+    name: "goal_kpi",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    description: "Record a KPI value read from the real source now (observed_at ISO, evidence = what it showed); a metric without an owner number also takes name, unit, direction.",
+    inputSchema: {
+      type: "object",
+      properties: { kpi: idString, value: { type: "number" }, observed_at: { type: "string" }, source: { type: "string" }, evidence: { type: "string" } },
+      required: ["kpi", "value", "observed_at", "source", "evidence"],
     },
   },
 ] as const;

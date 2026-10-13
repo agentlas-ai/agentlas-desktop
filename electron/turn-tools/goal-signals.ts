@@ -10,7 +10,10 @@ import { GOAL_COMPLETE_MARKER } from "../hephaestus/loop-engineering";
 export interface GoalSignals {
   wait?: GoalWaitIntent;
   complete?: { evidence: string | null };
+  /** goal_tactic / goal_plan_op / goal_kpi calls, each as the exact marker line the plan parsers read. */
+  planLines?: string[];
 }
+export const GOAL_PLAN_LINE_LIMIT = 24;
 const TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_RUNS = 64;
 const pending = new Map<string, { at: number; signals: GoalSignals }>();
@@ -50,12 +53,21 @@ export function recordGoalCompleteSignal(key: string, evidence: string | null): 
   return "recorded";
 }
 
+/** Queues one validated plan marker line for this pass; false when the per-pass limit is reached. */
+export function recordGoalPlanLine(key: string, line: string): boolean {
+  const entry = entryFor(key);
+  const lines = entry.signals.planLines ?? (entry.signals.planLines = []);
+  if (lines.length >= GOAL_PLAN_LINE_LIMIT) return false;
+  lines.push(line);
+  return true;
+}
+
 /** Removes and returns the pass's signals (null when none). */
 export function takeGoalSignals(key: string | null | undefined): GoalSignals | null {
   if (!key) return null;
   const entry = pending.get(key);
   pending.delete(key);
-  return entry && (entry.signals.wait || entry.signals.complete) ? entry.signals : null;
+  return entry && (entry.signals.wait || entry.signals.complete || entry.signals.planLines?.length) ? entry.signals : null;
 }
 
 /** The marker the text protocol would carry for this evidence; the payload cannot contain `>` or a line break. */
@@ -75,6 +87,7 @@ export function goalWaitBlockText(intent: GoalWaitIntent): string {
 export function applyGoalSignalsToText(text: string, signals: GoalSignals | null): string {
   if (!signals) return text;
   let out = text;
+  if (signals.planLines?.length) out = `${out.trimEnd()}\n${signals.planLines.join("\n")}`;
   if (signals.wait && !out.includes("```agentlas-goal-wait")) out = `${out.trimEnd()}\n\n${goalWaitBlockText(signals.wait)}`;
   else if (signals.complete && !signals.wait) out = `${out.trimEnd()}\n${goalCompleteMarkerText(signals.complete.evidence)}`;
   return out;

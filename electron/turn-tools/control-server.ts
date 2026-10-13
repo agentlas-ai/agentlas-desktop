@@ -6,10 +6,12 @@ import { onHostShutdown } from "../host-lifecycle";
 import { userDataPath } from "../runtime-paths";
 import { memoryNoteToEvent } from "../memory/events";
 import { recordTurnMemoryNote, turnNotesKey, TURN_MEMORY_NOTE_LIMIT } from "./notes";
-import { recordGoalCompleteSignal, recordGoalWaitSignal, validateGoalWaitIntent } from "./goal-signals";
+import { GOAL_PLAN_LINE_LIMIT, recordGoalCompleteSignal, recordGoalPlanLine, recordGoalWaitSignal, validateGoalWaitIntent } from "./goal-signals";
+import { extractGoalPlanMarkers } from "../../shared/goal-shape";
+import { extractAgentStrategyMarkers } from "../../shared/agent-strategy";
 import { stripGoalCompleteMarker } from "../hephaestus/loop-engineering";
 import { goalCompleteMarkerText } from "./goal-signals";
-import { TURN_TOOLS_BASE } from "./mcp-server";
+import { GOAL_PLAN_TOOL_MARKERS, TURN_TOOLS_BASE } from "./mcp-server";
 
 // Main-side handler for the inline agentlas-turn MCP child. Loopback only, one random server token, one capability per
 // run config. The capability pins the chat and run; the child can name neither, so a note can only land in the turn
@@ -148,6 +150,26 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       const outcome = recordGoalCompleteSignal(turnNotesKey(binding.chatId, binding.runId), claim.evidence);
       if (outcome !== "recorded") throw new Error(`goal_complete_${outcome}: a turn either requests a wait or declares completion, once.`);
       return { declared: true, note: "The host closes the Goal only if its ledger also shows no open work." };
+    }
+    case "goal_tactic":
+    case "goal_plan_op":
+    case "goal_kpi": {
+      const operation = request.operation;
+      if (!binding.tools?.includes(operation)) throw new Error("turn-tools-operation-invalid");
+      const a = request.args && typeof request.args === "object" && !Array.isArray(request.args) ? request.args as Record<string, unknown> : null;
+      if (!a) throw new Error(`${operation}_invalid: arguments must be an object`);
+      // The line the text protocol would carry; the unchanged parser decides whether it is well formed.
+      const line = GOAL_PLAN_TOOL_MARKERS[operation] + JSON.stringify(a);
+      const parsed = operation === "goal_kpi" ? extractAgentStrategyMarkers(line).kpis.length : (() => {
+        const result = extractGoalPlanMarkers(line);
+        return operation === "goal_tactic" ? result.tactics.length : result.ops.length;
+      })();
+      if (parsed !== 1) throw new Error(`${operation}_invalid: the host could not read this ${operation === "goal_kpi" ? "KPI sample" : operation === "goal_tactic" ? "tactic report" : "plan change"}; check the required fields`);
+      if (binding.dryRun) return { recorded: false, reason: "dry_run" };
+      const goal = await goalResolver(binding.chatId, Date.now());
+      if (!goal) throw new Error(`${operation}_no_goal: No Goal is bound to this chat.`);
+      if (!recordGoalPlanLine(turnNotesKey(binding.chatId, binding.runId), line)) throw new Error(`${operation}_limit: at most ${GOAL_PLAN_LINE_LIMIT} plan reports per turn`);
+      return { recorded: "pending_host", note: "The host applies it when this turn ends and re-checks it against the plan." };
     }
     case "memory_note": {
       if (binding.tools && !binding.tools.includes("memory_note")) throw new Error("turn-tools-operation-invalid");

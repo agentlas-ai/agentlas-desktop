@@ -538,6 +538,20 @@ export function supersedeMemoryEntries(ids: string[]): void {
   tx(ids);
 }
 
+/** Exact prefix the pre-1.2.82 curator wrote for a turn without memory events (replaced in 1ef20f44). */
+export const LEGACY_REQUEST_ECHO_PREFIX = "이 에이전트는 다음과 같은 요청을 수행한다: ";
+
+/**
+ * Those rows only repeat the owner's request (some repeat host prompts) yet were stored as live procedures, so recall
+ * kept serving them. Supersede them (history stays, nothing is deleted). Idempotent; returns how many it retired.
+ */
+export function supersedeLegacyRequestEchoMemories(): number {
+  const now = new Date().toISOString();
+  return getDb().prepare(
+    "UPDATE memory_entries SET superseded_at = ? WHERE superseded_at IS NULL AND kind = 'procedure' AND substr(content, 1, ?) = ?",
+  ).run(now, LEGACY_REQUEST_ECHO_PREFIX.length, LEGACY_REQUEST_ECHO_PREFIX).changes;
+}
+
 /** 결정론 dedup — scope+kind+content(정규화)가 완전히 같은 live 엔트리 중 최신만 남기고 supersede.
  *  드리밍 1단계(무LLM). 반환: 정리된 개수. */
 export function dedupExactDuplicateMemories(): number {

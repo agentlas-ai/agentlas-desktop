@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.25 — 2026-10-13
+
+- When a teammate is waiting for you to sign in somewhere, new work for that teammate that does not need the sign-in now starts on its own instead of waiting behind it. The sign-in wait stays as it was.
+- Goal agents report finished or blocked steps, plan changes and measured numbers through checked actions instead of special text lines, so a malformed report is caught and explained right away instead of being silently ignored. Agents also get shorter instructions for it.
+- Long One conversations resend less of the same context on every turn, and Gemini API conversations keep a stable start so the provider's cache keeps working.
+- Old memory entries that only repeated your earlier requests are no longer offered to agents (they are kept in history, not deleted).
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.24 — 2026-10-13
 
 - Automatic recovery of a failed scheduled task works again. Since 2026-10-11 every recovery attempt was refused inside the app before the AI started and was shown as "did not return a terminal receipt"; recovery runs now hold the task's conversation properly, and a check the app itself refuses keeps its real reason instead of being reported as an unfinished turn.

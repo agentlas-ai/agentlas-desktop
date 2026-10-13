@@ -921,6 +921,24 @@ export const runGoogleByok: Runner = async (
       generationConfig: { maxOutputTokens: outputLimit },
       ...(includeTools ? { tools: [{ functionDeclarations }] } : {}),
     });
+    // Same session rule as the Anthropic/OpenAI paths: the history only changes when it outgrows 80% of the model's own
+    // window (compact.ts stableHistoryWindow), so Gemini's implicit prefix cache keeps hitting. Silent.
+    if (turn === 0 && req.history.length > 0) {
+      const ceiling = Math.floor(capacity.window * GENERATION_CONTEXT_RATIO)
+        - (estimateTransportTokens(JSON.stringify(outgoingBody())) - historyBudgetState.value + outputLimit);
+      if (ceiling > 0 && historyBudgetState.value > ceiling) {
+        const stable = stableHistoryWindow(req.history.filter((row) => row.role === "user" || row.role === "assistant"), {
+          ceilingTokens: ceiling, targetTokens: Math.min(ceiling, Math.floor(capacity.window * (1 - GENERATION_CONTEXT_RATIO))), locale: req.locale });
+        if (stable?.digest) {
+          const next = stable.recent.map((row) => ({ role: row.role === "user" ? "user" as const : "model" as const, parts: [{ text: row.text }] as GooglePart[] }));
+          if (next[0]?.role === "user") next[0].parts[0].text = `${stable.digest}\n\n${next[0].parts[0].text}`;
+          else next.unshift({ role: "user", parts: [{ text: stable.digest }] });
+          contents.splice(0, transmittedHistoryCount, ...next);
+          transmittedHistoryCount = next.length;
+          historyBudgetState.value = stable.estimatedTokens;
+        }
+      }
+    }
     if (!byokHistoryAdmission({ req, events, window: capacity.window, capacityKnown: capacity.known, outputReserve: outputLimit,
       budgetState: historyBudgetState,
       outgoingBody,

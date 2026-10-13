@@ -355,7 +355,7 @@ export function applyStrategyShift(plan: LiveGoalPlan, shift: StrategyShiftMarke
 const fmt = (value: number | null, digits = 2): string => value === null || !Number.isFinite(value) ? "n/a" : String(Math.round(value * 10 ** digits) / 10 ** digits);
 
 /** KR 마다 "먼저 현재 값을 재라" 지시와 표식 안내(트리일 때 항상, 한두 줄). 모드 on/shadow 에서만. */
-export function kpiMeasurementLines(plan: LiveGoalPlan, nowMs: number): string[] {
+export function kpiMeasurementLines(plan: LiveGoalPlan, nowMs: number, typedTools = false): string[] {
   if (agentStrategyMode() === "off" || plan.shape !== "mission_tree") return [];
   const lines: string[] = [];
   try {
@@ -368,9 +368,9 @@ export function kpiMeasurementLines(plan: LiveGoalPlan, nowMs: number): string[]
       if (!last) missing.push(kr.id);
       else if (nowMs - Date.parse(last.observedAt) > 2 * (kpi?.cadenceHours ?? 24) * HOUR_MS) stale.push(kr.id);
     }
-    if (missing.length) lines.push(`KPI measurement needed for ${missing.join(", ")}: read the current value from the real source now and report it with a kpi marker.`);
+    if (missing.length) lines.push(`KPI measurement needed for ${missing.join(", ")}: read the current value from the real source now and report it with ${typedTools ? "goal_kpi" : "a kpi marker"}.`);
     if (stale.length) lines.push(`KPI measurement is stale for ${stale.join(", ")}: measure again this pass if you can read the real value.`);
-    lines.push('KPI sample (one line, evidence required): <<agentlas-kpi>>{"kpi":"<kr id>","value":30,"observed_at":"<ISO>","source":"<where>","evidence":"what the screen/tool showed"}. A metric without an owner number: add "name","unit","direction":"up" and a new lowercase kpi id.');
+    if (!typedTools) lines.push('KPI sample (one line, evidence required): <<agentlas-kpi>>{"kpi":"<kr id>","value":30,"observed_at":"<ISO>","source":"<where>","evidence":"what the screen/tool showed"}. A metric without an owner number: add "name","unit","direction":"up" and a new lowercase kpi id.');
   } catch { /* 문맥 보조 줄은 실패해도 본 문맥을 막지 않는다 */ }
   return lines;
 }
