@@ -6116,13 +6116,16 @@ function OneSessionsShell() {
       return;
     }
     const currentSubmitChatId = selected?.chatId ?? conversation?.id;
-    const preserveFollowup = (chatId: string, binding: { submissionId?: string; waitingParentRunId?: string } = {}) => {
+    const preserveFollowup = (chatId: string, binding: { submissionId?: string; waitingParentRunId?: string } = {},
+      files?: { groupId: string; prompt: string }) => {
       if (binding.submissionId && promptBytes > 32_000) {
         setActionNotice(appLocale === "ko" ? "추가 지시는 최대 32KB까지 보낼 수 있습니다. 작성한 글은 그대로입니다." : "Follow-ups before the parent starts are limited to 32 KB. Your draft remains.");
         return;
       }
+      const followupPrompt = files?.prompt ?? explicitValue;
       const request: McpInvocationRequest = {
-        chatId, userPrompt: explicitValue, steeringMode: "queue",
+        chatId, userPrompt: followupPrompt, steeringMode: "queue",
+        ...(files ? { fileGroupId: files.groupId } : {}),
         taskIntent: selected ? "task" : "conversation", oneMode: true,
         locale: normalizedLocale, onePermissionMode: onePermission,
         permissions: onePermission === "auto" ? selected ? "write" : "read" : onePermission,
@@ -6134,10 +6137,10 @@ function OneSessionsShell() {
         sessionRouting: overrideSnapshot.sessionRouting === true,
       };
       const intent: OneFollowupIntent = {
-        intentId: uid(), chatId, userPrompt: explicitValue,
+        intentId: uid(), chatId, userPrompt: followupPrompt,
         createdAt: new Date().toISOString(), request, ...binding,
         agentIds: turnAgentIds.slice(),
-        ...(!binding.submissionId && !binding.waitingParentRunId && runIdRef.current && runChatIdRef.current === chatId
+        ...(!files && !binding.submissionId && !binding.waitingParentRunId && runIdRef.current && runChatIdRef.current === chatId
           && typeof ipc()?.invoke.steerCurrentTurn === "function" ? { currentTurnRunId: runIdRef.current } : {}),
         ...(turnAgentIds.length !== activeTaskforceAgentIds.length
           || turnAgentIds.some(agentId => !activeTaskforceAgentIds.includes(agentId)) ? { requiresReprepare: true } : {}),
@@ -6272,12 +6275,33 @@ function OneSessionsShell() {
     }
     if (busy || settlingChatId || (runIdRef.current && runChatIdRef.current === currentSubmitChatId)) {
       const chatId = busy || runIdRef.current ? runChatIdRef.current : settlingChatId;
-      if (!chatId || attachmentSnapshot.length > 0) {
+      if (!chatId) {
         setActionNotice(appLocale === "ko" ? "첨부 파일은 현재 실행이 끝난 뒤 보낼 수 있습니다. 작성창에 보관합니다." : "Attachments can be sent after the current run settles. They remain in the composer.");
         return;
       }
       if (!busy) runChatIdRef.current = chatId;
-      preserveFollowup(chatId);
+      if (attachmentSnapshot.length === 0) {
+        preserveFollowup(chatId);
+        return;
+      }
+      // Files ride as an immutable chat-file snapshot of this conversation. The queued direction starts as the next
+      // turn, where Main validates the group and gives the model the file paths and images (service.ts fileGroupId).
+      try {
+        const fileBridge = chatFilesBridge();
+        if (!fileBridge) throw new Error("chat file bridge unavailable");
+        const snapshot = await fileBridge.snapshot({
+          chatId,
+          files: attachmentSnapshot.map((item) => ({ grant: item.grant, name: item.name, mediaType: item.mediaType,
+            size: item.size, kind: item.kind === "image" ? "file" : item.kind })),
+        });
+        oneChatFileGroupsRef.current.set(snapshot.groupId, snapshot.files.map((file) => chatFileItem(file, "user-attachment")));
+        const withFiles = explicitValue || tFor(appLocale, "one.shell.composer.attachment_prompt",
+          { n: attachmentSnapshot.length, s: attachmentSnapshot.length === 1 ? "" : "s" });
+        preserveFollowup(chatId, {}, { groupId: snapshot.groupId, prompt: appendChatFileMarker(withFiles, snapshot.groupId) });
+        clearAttachmentDrafts({ preserveSubmittedPreviews: true });
+      } catch {
+        setAttachmentError(appLocale === "ko" ? "첨부를 저장하지 못했어요. 작성창에 그대로 있어요." : "The attachment could not be saved. It stays in the composer.");
+      }
       return;
     }
     const canContinueInPlace = Boolean(
@@ -8185,7 +8209,9 @@ function OneSessionsShell() {
     setAttachmentError(null);
   }, []);
   const addAttachmentFiles = useCallback(async (files: FileList | File[]) => {
-    if (busy || selectedReadOnly || teamDecisionPending || teamPreflightBusy) {
+    // A running Goal room is almost always busy: files picked now go with the next direction (fileGroupId), so only
+    // a read-only view or an unresolved team proposal still refuses them.
+    if (selectedReadOnly || teamDecisionPending || teamPreflightBusy) {
       setAttachmentError(tFor(appLocale, "one.shell.attach.busy_error"));
       return;
     }

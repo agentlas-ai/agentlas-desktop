@@ -645,6 +645,25 @@ export function buildEffectiveAgentSystemPrompt(agentId: string, fallback: strin
   return appendAgentSkillsToSystemPrompt(agentId, source?.content ?? fallback);
 }
 
+/**
+ * The folder an agent's live entry file (AGENTS.md) is read from, when there is one. That file points at its own docs by
+ * relative path ("read docs/route-selection.md") while the run's working directory is the owner's project, so the host
+ * names the folder in the turn context. Kept out of the effective prompt, whose exact bytes are pinned and hashed.
+ * Measured 2026-10-13 (Yotube Motiondirector, Codex rollout 01a1318b): five "No such file" reads of its own docs.
+ */
+export function agentPromptFolder(agentId: string): string | null {
+  const row = getRow(agentId);
+  if (!row) return null;
+  // System agents carry their own complete prompt; only installed packages read an entry file from a folder.
+  const builtin = getDb().prepare("SELECT builtin FROM installed_agents WHERE id = ?").get(agentId) as { builtin: number } | undefined;
+  if (builtin?.builtin) return null;
+  try {
+    return readAgentPromptSource(agentId) ? resolveDir(agentId, row.slug).dir : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Append-only, agent-owned audit ledger; caller-supplied project paths are never trusted. */
 export function appendAgentEvolutionLedger(agentId: string, record: Record<string, unknown>): void {
   const row = getRow(agentId);

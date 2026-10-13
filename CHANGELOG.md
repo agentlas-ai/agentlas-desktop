@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.26 — 2026-10-13
+
+- Installed agents find their own guides and references again. A run now tells the agent where its own folder is, so the documents its instructions point to open instead of failing with "No such file".
+- You can attach files in One while an agent is still working; they go along with your next direction.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.25 — 2026-10-13
 
 - When a teammate is waiting for you to sign in somewhere, new work for that teammate that does not need the sign-in now starts on its own instead of waiting behind it. The sign-in wait stays as it was.

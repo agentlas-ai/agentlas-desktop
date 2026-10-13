@@ -101,7 +101,7 @@ import { readGoalPlan } from "../store/goal-plans";
 import { goalPassStopCause } from "../long-run/goal-pass-stop";
 import { goalPassBudgetStep, GOAL_PASS_WALL_CLOCK_BUDGET_MS } from "../long-run/goal-pass-budget";
 import { captureNativeGoalEpisode, type NativeGoalEpisodeBinding } from "../long-run/native-goal-pass";
-import { buildEffectiveAgentSystemPrompt } from "../agents/files";
+import { agentPromptFolder, buildEffectiveAgentSystemPrompt } from "../agents/files";
 import { acquireAgentWorkspaceRunLease, releaseAgentWorkspaceRunLease, getAgentWorkspace, readAgentWorkspaceFile } from "../agents/workspace-service";
 import {
   autoRouteStatus,
@@ -5493,6 +5493,14 @@ ${effectiveUserPrompt}`;
    * 단어장이 아니라 모델이 도구로 판단). 시스템 프롬프트의 한 줄 규칙이 read_ui_schema 호출을 지시하고,
    * 그 도구(agentlas-ui 내장 MCP)가 스키마와 차트·시각물 안내를 돌려준다.
    */
+  // An installed agent's entry file names its own docs by relative path; the run works in the owner's project.
+  {
+    const agentFolder = agentPromptFolder(agent.id);
+    if (agentFolder) {
+      const block = `[Agent folder]\n${agentFolder}\nRelative paths in your instructions (docs/, contracts/, tools/, ...) are files in that folder; read them there. Work and deliver in the current working directory.\n[/Agent folder]`;
+      turnContextParts.push(block); stableTurnContextParts.push(block);
+    }
+  }
   // 표면 안내는 프롬프트가 아니라 이 턴의 맥락으로 들어간다.
   if (executionContext?.surfaceContext?.trim()) {
     turnContextParts.push(executionContext.surfaceContext.trim());
