@@ -1,7 +1,7 @@
 import type { Automation, RuntimeSelection } from "./types";
 import type { ToolchainInterface } from "./toolchain";
 
-export const TOOLCHAIN_GENERATION_TIMEOUT_MS = 120_000;
+export const TOOLCHAIN_GENERATION_TIMEOUT_MS = 300_000;
 
 /** A published capability has its own identity. Its source graph is provenance only. */
 export type ToolchainJsonSchema = Record<string, unknown>;

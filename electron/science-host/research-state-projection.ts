@@ -6,7 +6,7 @@ import { isRuntimeRole } from "../../shared/runtime-roles";
 
 const MAX_PROMPT_BYTES = 32 * 1024;
 const MAX_RESPONSE_BYTES = 24 * 1024;
-const MAX_TIMEOUT_MS = 15_000;
+const MAX_TIMEOUT_MS = 300_000;
 
 const SYSTEM_PROMPT = [
   "Extract only scientific content explicitly asserted in the supplied completed researcher-visible source.",

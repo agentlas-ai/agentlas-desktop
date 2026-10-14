@@ -16,7 +16,7 @@ import { createCodexNoToolsProviderSession, CodexNoToolsSessionError,
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const MAX_WIRE_BYTES = 4 * 1024 * 1024;
-const NO_TOOLS_TIMEOUT_MS = 180_000;
+const NO_TOOLS_TIMEOUT_MS = 300_000;
 const DISABLED_FEATURES = ["apps", "browser_use", "browser_use_external", "computer_use", "image_generation",
   "goals", "in_app_browser", "chronicle", "multi_agent", "multi_agent_v2", "memories", "plugins", "skill_search",
   "tool_suggest", "sleep_tool", "workspace_dependencies", "worktrees", "view_image", "realtime_conversation",

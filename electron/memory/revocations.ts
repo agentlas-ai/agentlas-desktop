@@ -7,8 +7,10 @@ import {
   activeBorrowedOwnerScopeKey,
   DEVICE_LOCAL_BORROWED_OWNER_SCOPE,
 } from "../agents/borrowed-owner-scope";
-import { getDb } from "../store/db";
+import { getMemoryDb as getDb, purgeLegacyMemoryCopies } from "./database";
 import { nativeTextsFor } from "./native-text";
+import { clearSelectedMemoryContextCache } from "./selected-context-cache";
+import { purgeGeneratedMemoryViews } from "./projections";
 
 /**
  * Cleanup-target source id for the original-wording twin of a translated
@@ -497,6 +499,23 @@ function tableExists(name: string): boolean {
   ).get(name));
 }
 
+/** A checkpoint can contain any recalled source and model receipts can still
+ * contain its wording. Purge the current physical owner partition atomically
+ * with the epoch; retain only content-free job tombstones for idempotency. */
+function purgePreForgetContinuation(epoch: number, now: string): void {
+  purgeGeneratedMemoryViews();
+  if (tableExists("memory_session_checkpoint_heads")) getDb().prepare("DELETE FROM memory_session_checkpoint_heads").run();
+  if (tableExists("memory_session_checkpoints")) getDb().prepare("DELETE FROM memory_session_checkpoints").run();
+  if (tableExists("memory_curation_jobs")) {
+    const columns = new Set((getDb().pragma("table_info(memory_curation_jobs)") as Array<{ name: string }>).map(row => row.name));
+    const leases = ["lease_token", "lease_expires_at"].filter(column => columns.has(column)).map(column => `${column}=NULL,`).join("");
+    getDb().prepare(`UPDATE memory_curation_jobs
+      SET payload_json='{}',result_json=NULL,runtime_digest='revoked',expected_revision=NULL,
+          state='revoked',next_attempt_at=NULL,${leases}updated_at=? WHERE intake_epoch<?`).run(now, epoch);
+  }
+  if (tableExists("memory_curation_batches")) getDb().prepare("DELETE FROM memory_curation_batches WHERE intake_epoch<?").run(epoch);
+}
+
 function legacyTicketMatchesOwner(row: LegacyDedupDecisionRow, memory: ForgettableMemoryRow): boolean {
   if (memory.scope === "project") {
     const projectPath = canonicalProjectPath(memory.project_path);
@@ -654,6 +673,7 @@ export function revokeOneMemoryEntry(memoryId: string, expectedAgentId: string):
     const epoch = Number((getDb().prepare(
       "SELECT epoch FROM memory_forget_clock WHERE id = 1",
     ).get() as { epoch: number }).epoch);
+    purgePreForgetContinuation(epoch, now);
     const revocationId = `mrv_${randomUUID()}`;
     getDb().prepare(
       `INSERT INTO memory_revocations (
@@ -707,6 +727,11 @@ export function revokeOneMemoryEntry(memoryId: string, expectedAgentId: string):
     for (const id of sourceMemoryIds) linkSource.run(id, canonicalRevocation.revocationId);
 
     const placeholders = sourceMemoryIds.map(() => "?").join(",");
+    const ticketIds = (getDb().prepare(`SELECT DISTINCT ticket_id FROM memory_decisions
+      WHERE target_memory_id IN (${placeholders}) UNION SELECT ticket_id FROM memory_episode_quarantines
+      WHERE revocation_id=?`).all(...sourceMemoryIds, canonicalRevocation.revocationId) as Array<{ ticket_id: string }>).map(row => row.ticket_id);
+    purgeLegacyMemoryCopies(sourceMemoryIds, ticketIds);
+    (require("./one-legacy") as typeof import("./one-legacy")).purgeLegacyOneArchivedBodies(sourceMemoryIds);
     getDb().prepare(
       `UPDATE memory_revocation_cleanup_targets
           SET revocation_id = ?, state = 'pending', next_attempt_at = ?,
@@ -842,5 +867,7 @@ export function revokeOneMemoryEntry(memoryId: string, expectedAgentId: string):
       revokedEpoch: epoch,
     };
   });
-  return revoke.immediate();
+  const result = revoke.immediate();
+  if (result) clearSelectedMemoryContextCache();
+  return result;
 }

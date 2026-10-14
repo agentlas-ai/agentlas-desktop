@@ -346,13 +346,18 @@ export interface RequiredJudgeSpec<V extends string> {
   requireNoTools?: true;
 }
 
-// Measured on this machine: a CLI runtime answers a judgment prompt in 12–18s
-// cold, so a 20s budget spent most of itself on process startup and timed out
-// on the third consecutive call. The judge never blocks a person — callers use
-// peekJudgment/prejudge for anything synchronous — so the budget is sized for a
-// cold CLI plus one skipped candidate rather than for a warm API round trip.
-const DEFAULT_TIMEOUT_MS = 45_000;
+// Owner policy: every connected semantic call gets the full five-minute
+// shared budget. Legacy 4s/6s/45s caller hints must not shorten cold CLI
+// startup. Cancellation still aborts immediately; tests can opt into their
+// explicit short budgets without changing production callers.
+const DEFAULT_TIMEOUT_MS = 300_000;
 const RUNNER_ABORT_GRACE_MS = 500;
+
+export function connectedModelTimeoutMs(requested?: number): number {
+  return process.env.AGENTLAS_TEST_JUDGMENT_TIMEOUTS === "1" && Number.isFinite(requested)
+    ? Math.max(1, Math.min(DEFAULT_TIMEOUT_MS, requested!))
+    : DEFAULT_TIMEOUT_MS;
+}
 const MAX_INPUT_CHARS = 8_000;
 const CACHE_MAX = 500;
 
@@ -873,7 +878,7 @@ async function callJudgmentModelDetailed(opts: {
     );
   }
 
-  const timeoutMs = Math.max(1, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const timeoutMs = connectedModelTimeoutMs(opts.timeoutMs);
   const deadlineAt = Date.now() + timeoutMs;
   const runBoundedAttempt = async <T>(attemptTimeoutMs: number, start: (signal: AbortSignal) => Promise<T>): Promise<{
     value?: T;

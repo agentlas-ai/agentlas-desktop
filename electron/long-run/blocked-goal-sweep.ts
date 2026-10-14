@@ -11,7 +11,7 @@ import { getChatGoalRevision } from "../store/chat-goals";
 import {
   appendLongRunEvent, bindCurrentGoalRevisionToLongRun, getLongRun, liveLongRunAttemptCount, nextBlockedGoalRetrySlot,
   pendingBlockedGoalRetry, reopenDueBlockedGoalRetry, scheduleBlockedGoalRetry, transitionLongRun,
-  BLOCKED_GOAL_SWEEP_EVENT_KIND, BLOCKED_GOAL_SWEEP_SCHEMA, type LongRunRecord,
+  BLOCKED_GOAL_SWEEP_EVENT_KIND, BLOCKED_GOAL_SWEEP_SCHEMA, type LongRunRecord, type BlockedGoalRetry,
   longRunOwnerHold, LONG_RUN_OWNER_HOLD_CODE,
 } from "../store/long-runs";
 import { automaticGoalResumeRequest } from "../invocation/automatic-goal";
@@ -206,6 +206,16 @@ function hostPauseRefusedThisInstance(run: LongRunRecord): boolean {
   return row?.status === "skipped" && row.reason !== "chat_busy";
 }
 
+/** Release only an obsolete host receipt hold, never a model-requested wait or
+ * an unavailable-runtime backoff. The exact immutable event owns the cause. */
+function receiptOnlyRetry(runId: string, retry: BlockedGoalRetry): boolean {
+  if (retry.requestedBy !== "host") return false;
+  const row = getDb().prepare(`SELECT json_extract(payload_json, '$.detail') AS detail
+    FROM long_run_events WHERE run_id = ? AND seq = ? AND kind = ?`)
+    .get(runId, retry.seq, BLOCKED_GOAL_SWEEP_EVENT_KIND) as { detail: string | null } | undefined;
+  return row?.detail === "runtime_turn_unsettled" || row?.detail === "serving_reconciliation_required";
+}
+
 /**
  * A Goal run whose chat the owner deleted. long_runs.root_chat_id is ON DELETE SET NULL, so the run outlives the
  * chat with nothing to resume into. The sweep used to read that as goal_chat_binding_missing and schedule a retry for
@@ -268,7 +278,7 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
       // A retry that a previous launch put in the future stood on that launch's failure (runtime, login, update).
       // The first sweep of a new launch owes one prompt look; a repeat failure then backs off from index 0.
       const restartedRetryDue = trigger === "startup" && run.status === "paused" && Date.parse(retry.nextAt) > Date.now();
-      if (Date.parse(retry.nextAt) > Date.now() && !restartedRetryDue) {
+      if (Date.parse(retry.nextAt) > Date.now() && !restartedRetryDue && !receiptOnlyRetry(run.id, retry)) {
         // The host pause at shutdown/startup does not cancel a scheduled retry: keep the app visibly waiting.
         if (run.status === "paused") {
           scheduleBlockedGoalRetry({ runId: run.id, expectedVersion: run.version, kind: retry.kind, fromReason: retry.fromReason,
@@ -344,8 +354,13 @@ export function continueGoalForAlive(runId: string, expectedVersion: number, dis
   if (run.status === "blocked") return sweepOne(run, dispatcher, "alive", budget) ?? deferred("alive_goal_not_continuable", run.blockedReason);
   // A host-scheduled retry owns the next step and its spacing. Isolated live run 2026-09-24: letting the
   // orchestrator bring a pending effect-observation retry forward turned the sweep's growing backoff into a
-  // ~30s loop (21 observation runs in 10 minutes, each inconclusive). Alive never overrides that schedule.
-  if (pendingBlockedGoalRetry(run.id)) return deferred("retry_owns_next_step", run.blockedReason);
+  // ~30s loop (21 observation runs in 10 minutes, each inconclusive). A historical
+  // receipt-only host hold is obsolete; actual retry spacing remains owned here.
+  const pendingRetry = pendingBlockedGoalRetry(run.id);
+  if (pendingRetry) {
+    if (!receiptOnlyRetry(run.id, pendingRetry)) return deferred("retry_owns_next_step", run.blockedReason);
+    return sweepOne(run, dispatcher, "alive", budget) ?? deferred("alive_goal_not_continuable", run.blockedReason);
+  }
   if (run.status !== "paused" || !ALIVE_CONTINUABLE_PAUSE_REASONS.has(run.pauseReason ?? "")) {
     return deferred("alive_goal_not_continuable", run.blockedReason);
   }

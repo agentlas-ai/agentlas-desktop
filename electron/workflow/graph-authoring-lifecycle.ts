@@ -18,7 +18,7 @@ const active = new Map<string, AbortController>();
 // A cancellation can arrive before an asynchronous handler reaches admission.
 // Remember it for the same maximum request lifetime; there is no independent timer loop.
 const closed = new Map<string, number>();
-const MAX_REQUEST_MS = 120_000;
+const MAX_REQUEST_MS = 300_000;
 
 function requestKey(senderId: number, requestId: unknown): string {
   if (typeof requestId !== "string" || !requestId.trim() || requestId.length > 128) {

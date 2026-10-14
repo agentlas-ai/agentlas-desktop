@@ -4,7 +4,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { getDb } from "../store/db";
+import { getMemoryDb as getDb } from "./database";
 import { looksSecret } from "../../shared/secret-patterns";
 import { memoryRunPredatesAnyForget } from "./revocations";
 import {

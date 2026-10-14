@@ -21,7 +21,7 @@ import {
   PROJECT_SITEMAP_MAX_ENTRIES,
   type ProjectSitemap,
 } from "./project-artifacts";
-import { getDb } from "../store/db";
+import { getMemoryDb as getDb } from "./database";
 import {
   activeHubMemoryNestPaths,
   ensureActiveHubMemoryNest,

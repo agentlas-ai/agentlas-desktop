@@ -291,7 +291,6 @@ export async function runSwarmInvocation(
     : pickRunner(workerDefault) ?? p.picked;
   const runtimeInventory = workloadRuntimeInventory(candidateRuntimes);
   const runId = p.req.runId ?? `swarm-${Date.now()}`;
-  let replayBlocked: ObservedRunnerFailureError | undefined;
   const recordUsage = (invocationId: string, runtime: typeof p.active, nodeId: string, modelRole: string,
     usage: RunnerResult["observedUsage"], status: string, value: unknown): void => {
     tryRecordRunEvent({ runId, chatId: p.chat.id, nodeId, agentId: nodeId,
@@ -529,7 +528,6 @@ export async function runSwarmInvocation(
       ontology.prompt,
     ].filter(Boolean).join("\n\n");
     const runWorkerOn = async (target: typeof p.active, targetRunner: typeof taskRunner) => {
-      if (replayBlocked) throw replayBlocked;
       const usageInvocationId = `swarm-model-call:${randomUUID()}`;
       try {
         const measuredResult = await runObservedRunner(targetRunner.runner,
@@ -611,9 +609,8 @@ export async function runSwarmInvocation(
     }
     if (result.failure) {
       if (runtimeFailureBlocksReplay(result.failure)) {
-        replayBlocked = new ObservedRunnerFailureError(result.failure);
         emit(task, { kind: "tool-use", done: true, status: p.locale === "ko" ? "실행 중단 — 작업 기록을 확인하세요." : "Execution stopped — review the work history." });
-        throw replayBlocked;
+        throw new ObservedRunnerFailureError(result.failure);
       }
       if (result.failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
         throw new ProjectResidencyBusyError(p.chat.projectId ?? "unknown");
@@ -660,7 +657,6 @@ export async function runSwarmInvocation(
   const synthEmit = (ev: McpInvocationEvent): void =>
     p.sink({ ...ev, agentId: "swarm-synthesizer", agentName: "Swarm Synthesizer", role: "synthesizer", phase: "synthesize" });
   const synthesize = async (board: SwarmBoard, signal?: AbortSignal): Promise<string> => {
-    if (replayBlocked) throw replayBlocked;
     const done = board.tasks.filter((t) => t.status === "done" && t.result);
     const controllerPriority = rolePriorityRuntimes(candidateRuntimes, "orchestrator");
     const controllerDefault = directUserRuntimePinHonored
@@ -721,7 +717,6 @@ export async function runSwarmInvocation(
       targetRuntime: typeof active,
       targetRunner: typeof synthesisRunner,
     ) => {
-      if (replayBlocked) throw replayBlocked;
       const usageInvocationId = `swarm-model-call:${randomUUID()}`;
       try {
         const measuredResult = await runObservedRunner(targetRunner.runner,
@@ -817,9 +812,8 @@ export async function runSwarmInvocation(
     }
     if (result.failure) {
       if (runtimeFailureBlocksReplay(result.failure)) {
-        replayBlocked = new ObservedRunnerFailureError(result.failure);
         synthEmit({ kind: "tool-use", done: true, status: p.locale === "ko" ? "실행 중단 — 작업 기록을 확인하세요." : "Execution stopped — review the work history." });
-        throw replayBlocked;
+        throw new ObservedRunnerFailureError(result.failure);
       }
       if (result.failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
         throw new ProjectResidencyBusyError(p.chat.projectId ?? "unknown");
@@ -884,7 +878,6 @@ export async function runSwarmInvocation(
     });
     throw error;
   }
-  if (replayBlocked) throw replayBlocked;
   const { board, final, aborted, doneCount, finalGate } = swarmResult;
 
   if (p.stormbreakerMode) {

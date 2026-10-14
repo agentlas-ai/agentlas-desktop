@@ -10,9 +10,10 @@
 // (dropped) before any write. DRY-RUN preview + APPLY, sharing one mapper so the
 // preview is exactly what apply writes.
 import fs from "node:fs";
+import { isGeneratedMemoryView } from "./projections";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { getDb } from "../store/db";
+import { getMemoryDb as getDb } from "./database";
 import { insertMemoryEntry } from "./store";
 import { autoIntakeCuratedMemory } from "../experience/store";
 import { getAgentById } from "../mcp/registry";
@@ -380,6 +381,7 @@ async function buildEntries(
     } catch {
       continue;
     }
+    if (isGeneratedMemoryView(md)) continue;
     const owner = await decideOwner(rel, md, target, opts);
     const sections = /decisions\.md$/i.test(rel) ? splitDatedBullets(md) : splitSections(md);
     for (const sec of sections) {

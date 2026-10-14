@@ -1,3 +1,4 @@
+import { withGraphOccurrenceCustody } from "../../shared/graph-occurrence-custody";
 import { randomUUID } from "node:crypto";
 import { sha256Value, graphExecutionDigest } from "../../shared/graph-execution-digest";
 import { requiredExecutionPermission } from "../../shared/graph-node-protocol";
@@ -101,12 +102,28 @@ async function invoke(input: ToolchainCallInput, options: ToolchainCallOptions, 
       options.signal?.throwIfAborted();
       const { runGraph } = await import("../workflow/run-graph");
       publication?.check();
-      const result = await runGraph(release.implementation.snapshot, release.implementation.snapshot.graph!, {
-        runId: receipt.runId, occurrenceId: `toolchain:${receipt.id}`, initialVars: input.args,
+      const occurrenceId = `toolchain:${receipt.id}`;
+      const graphDigest = graphExecutionDigest(release.implementation.snapshot, release.implementation.snapshot.graph!);
+      const assertOccurrenceCurrent = () => {
+        options.signal?.throwIfAborted();
+        publication?.check();
+        const row = getDb().prepare("SELECT value FROM meta WHERE key=?").get(key) as { value: string } | undefined;
+        const current = row && JSON.parse(row.value) as ToolchainCallReceipt | undefined;
+        const asset = getToolchainAsset(receipt.toolchainId);
+        const version = asset?.versions.find(item => item.version === receipt.version);
+        const carrier = getAutomation(release.implementation.automationId);
+        if (!current || current.id !== receipt.id || current.runId !== receipt.runId || current.inputHash !== inputHash
+          || current.status !== "running" || !version || version.contentHash !== receipt.contentHash
+          || (!validation && (asset?.status !== "callable" || version.validation.state !== "passed"))
+          || !carrier?.graph || graphExecutionDigest(carrier, carrier.graph) !== graphDigest) throw new Error("graph_occurrence_custody_changed");
+      };
+      const result = await withGraphOccurrenceCustody({ automationId: release.implementation.snapshot.id, occurrenceId, graphDigest },
+        assertOccurrenceCurrent, occurrenceCustody => runGraph(release.implementation.snapshot, release.implementation.snapshot.graph!, {
+        runId: receipt.runId, occurrenceId, occurrenceCustody, initialVars: input.args,
         signal: options.signal, sink: options.sink, depth: (options.depth ?? 0) + 1,
         callChain: [...(options.callChain ?? []), marker], dryRun: options.dryRun,
         permissionCeiling: options.permission, immutableImplementation: true, strategyCycle: "defer",
-      });
+      }));
       unconfirmedEffect = Object.values(result.nodeFailures ?? {}).some(failure => failure.code === "MUTATION_UNVERIFIED");
       publication?.check();
       if (!result.ok || result.needsInput || result.pendingNodeIds?.length) throw new Error(result.error ?? "toolchain_execution_unsettled");

@@ -26,7 +26,7 @@ import {
   type UpdateOneMemoryAssetInput,
   type UseOneMemoryCandidateOnceInput,
 } from "../../shared/one-memory";
-import { getDb } from "../store/db";
+import { readLegacyOneState, replaceLegacyOneState, isLegacyOneAssetActive } from "../memory/one-legacy";
 import { getChat } from "../store/chats";
 import { getInvocationRunReceipt } from "../store/run-events";
 import { findCanonicalTaskForChat, getCanonicalTask } from "../store/tasks";
@@ -496,19 +496,7 @@ function parseState(raw: string): OneMemoryState {
 }
 
 function readOrCreateState(): { raw: string; state: OneMemoryState } {
-  const db = getDb();
-  let row = db.prepare("SELECT value FROM meta WHERE key = ? LIMIT 1").get(ONE_MEMORY_META_KEY) as
-    | { value: string }
-    | undefined;
-  if (!row) {
-    const candidate = JSON.stringify(initialState());
-    db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)").run(ONE_MEMORY_META_KEY, candidate);
-    row = db.prepare("SELECT value FROM meta WHERE key = ? LIMIT 1").get(ONE_MEMORY_META_KEY) as
-      | { value: string }
-      | undefined;
-  }
-  if (!row) throw new Error("Could not initialize One Memory state");
-  return { raw: row.value, state: parseState(row.value) };
+  return readLegacyOneState(parseState, initialState);
 }
 
 function mutateState<T>(
@@ -523,10 +511,7 @@ function mutateState<T>(
   const outcome = update(current.state, nextTimestamp(current.state.version));
   if (!isOneMemoryState(outcome.state)) throw new Error("One Memory mutation violated the closed storage contract");
   if (outcome.state !== current.state) {
-    const result = getDb()
-      .prepare("UPDATE meta SET value = ? WHERE key = ? AND value = ?")
-      .run(JSON.stringify(outcome.state), ONE_MEMORY_META_KEY, current.raw);
-    if (result.changes !== 1) throw new Error("One Memory state changed concurrently; reload and try again");
+    replaceLegacyOneState(current.raw, current.state, outcome.state);
     for (const event of outcome.events ?? []) tryRecordOneDomainEvent(event);
   }
   return {
@@ -1238,7 +1223,7 @@ export function selectApprovedOneMemoryAssets(
   state: OneMemoryState = getOneMemoryState(),
 ): OneMemoryAsset[] {
   if (!isOneMemoryState(state)) throw new TypeError("Invalid One Memory state");
-  return state.memories.filter((memory) => memory.enabled).filter((memory) => {
+  return state.memories.filter((memory) => memory.enabled && isLegacyOneAssetActive(memory)).filter((memory) => {
     if (memory.scope === "personal") return true;
     if (memory.scope === "project") return Boolean(scope.projectId) && memory.scopeRef === scope.projectId;
     if (memory.scope === "agent") return Boolean(scope.agentId) && memory.scopeRef === scope.agentId;

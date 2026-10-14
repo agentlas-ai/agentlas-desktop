@@ -18,6 +18,7 @@ import { goalResumeRecoveryBlockerCode } from "../../shared/long-run";
 import { currentUiLocale } from "../ui-locale";
 import { UNCERTAIN_EFFECT_POLICY } from "../../shared/uncertain-effect-policy";
 import { runtimeFailureBlocksReplay } from "../runtime/selection";
+import { runtimeFailureBlocksNextAutomaticTurn } from "../../shared/runtime-turn-admission";
 import { createHash } from "node:crypto";
 import { stripStaffGuidance } from "../one/owner-prompt";
 import { isInterruptedPartial } from "../../shared/interrupted-partial";
@@ -261,10 +262,10 @@ function automaticGoalReplayBarrier(runId: string) {
 
 export function automaticGoalReplayBlockerCode(runId: string): string | null {
   const barrier = automaticGoalReplayBarrier(runId);
-  // Owner rule 2026-10-05 (restated 2026-10-11): an earlier turn whose outcome is unknown never holds the Goal. The
-  // previous-turn memory (memory/previous-turn.ts) tells the next turn to check first. run_c37044fd retried 10/20/40
-  // minutes forever on this. A no-progress loop and serving reconciliation still hold.
-  if (!barrier || barrier.code === "runtime_turn_unsettled") return null;
+  // A new controller episode uses the prior receipt as evidence; it does not
+  // replay that invocation. Missing terminal/steering ACKs and pending serving
+  // reconciliation cannot hold independent work. Keep the same-loop safeguard.
+  if (!barrier || !runtimeFailureBlocksNextAutomaticTurn({ providerCode: barrier.code })) return null;
   // Only the actual Main user-resume producer can capture this exact receipt
   // set. Wall clocks and generic user messages cannot acknowledge a later ACK.
   const resumed = getDb().prepare(`SELECT 1 FROM long_run_events WHERE run_id = ? AND seq > ?

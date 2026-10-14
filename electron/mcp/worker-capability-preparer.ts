@@ -24,7 +24,7 @@ export class WorkerCapabilityMaterializationError extends WorkerCapabilityError 
   }
 }
 // One bounded asynchronous pool attempt accommodates measured cold CLI judgments.
-export const WORKER_CAPABILITY_SELECTION_TIMEOUT_MS = 90_000;
+export const WORKER_CAPABILITY_SELECTION_TIMEOUT_MS = 300_000;
 const permissionRank = { read: 0, write: 1, full: 2 } as const;
 const scopeKey = (scope: ActiveGoalToolScope) => JSON.stringify([scope.goalId, scope.revision, scope.permission, scope.objective, scope.acceptanceCriteria]);
 

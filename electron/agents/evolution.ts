@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { getDb } from "../store/db";
+import { getMemoryDb as getDb } from "../memory/database";
 import { tryRecordFailureEvent } from "../store/run-events";
 import { readSkillCatalogAsset } from "../hephaestus/skill-catalog";
 import { assertMemoryWriteAllowed, MemoryRevokedError } from "../memory/revocations";

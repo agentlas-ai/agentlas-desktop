@@ -5694,7 +5694,7 @@ export function registerIpcHandlers(): void {
     const sentence=String(request ?? "").trim();
     if (!sentence) return {ok:false as const,code:"ARCHITECT_NO_REQUEST",reason:L("변경 요청이 비어 있습니다.","The change request is empty."),nextAction:""};
     const controller=new AbortController(), release=supervision.bindGraphProposalAbort(id,controller);
-    const deadline=Date.now()+120_000;
+    const deadline=Date.now()+300_000;
     const timer=setTimeout(()=>controller.abort(new Error("GRAPH_PROPOSAL_TIMEOUT")),Math.max(0,deadline-Date.now()));
     try {
       const base=supervision.captureGraphProposalBase(id);
@@ -6244,15 +6244,11 @@ export function registerIpcHandlers(): void {
     // 수동 실행은 실제 스케줄러의 접수·최종 상태를 돌려준다. 버튼 클릭 자체를 성공으로
     // 간주하면 리스 충돌이나 실행 실패가 "시작됨"으로 보이므로 fire-and-forget하지 않는다.
     const dryRun = opts?.dryRun === true;
-    // An uncertain live occurrence must block another live replay, but it must
-    // not block a side-effect-proof simulation used to diagnose the graph.
-    // runGraph also mode-matches durable checkpoints, so this simulation starts
-    // a fresh occurrence and can never inherit or consume the live coordinate.
-    if (!dryRun && opts?.fresh !== true && getAutomationGraphReconciliation(id)) {
-      throw new Error("automation_reconciliation_pending");
-    }
+    // This trusted button invocation is a new owner request. Historical effects
+    // stay on their original occurrence; they do not veto this new request.
+    // Explicit reconciliation uses its separate same-occurrence resume path.
     const { runAutomationNow } = await import("./automation-scheduler");
-    const result = await runAutomationNow(id, { ...(dryRun ? { dryRun: true } : {}), ...(opts?.fresh === true ? { fresh: true } : {}) }, admitMainAutomation(id));
+    const result = await runAutomationNow(id, { ...(dryRun ? { dryRun: true } : {}), fresh: true }, admitMainAutomation(id));
     if (!result.accepted) {
       const error = new Error("automation_run_not_accepted") as Error & { code?: string };
       error.code = "automation_run_not_accepted";
@@ -7735,7 +7731,7 @@ export function registerIpcHandlers(): void {
     // runtime — which then made the real build fail its own plan check.
     const resolvedRequest = resolveHephaestusBuildRequest(req);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 60_000);
+    const timer = setTimeout(() => controller.abort(), 300_000);
     try {
       return await previewBuildAllocation(
         resolvedRequest,

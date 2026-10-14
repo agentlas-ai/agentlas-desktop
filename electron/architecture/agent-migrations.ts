@@ -23,7 +23,7 @@
  *  4. **한 에이전트의 실패가 나머지를 막지 않는다.** 라이브러리 하나가 손상돼도 스윕은
  *     끝까지 간다.
  */
-import { getDb } from "../store/db";
+import { getMemoryDb as getDb } from "../memory/database";
 import { ARCHITECTURE_VERSION } from "./manifest";
 import {
   currentExperienceBaseHash,

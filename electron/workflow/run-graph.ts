@@ -1,3 +1,4 @@
+import { claimGraphOccurrenceCustody, assertGraphOccurrenceCustody, withChildGraphOccurrenceCustody, type GraphOccurrenceCustody, type GraphOccurrenceBinding } from "../../shared/graph-occurrence-custody";
 import { createGraphWorkerAttempt, readGraphWorkerFailure, readGraphWorkerPool, chooseGraphWorker, graphPinUnavailable, graphWorkerIdentity,
   type GraphWorkerAttempt, type GraphWorkerFailureReceipt, type GraphWorkerPool } from "./graph-worker-fallback";
 import { selectExactRuntime } from "../runtime/selection";
@@ -24,6 +25,7 @@ import type {
   WorkflowNodeRunState,
   RuntimeKind,
   RuntimeSelection,
+  AutomationGraphReconciliation,
 } from "../../shared/types";
 import { isRuntimeKind as isSharedRuntimeKind } from "../../shared/runtime-kinds";
 import { runtimeSelectionForGraphNode } from "../../shared/graph-runtime-selection";
@@ -116,6 +118,8 @@ export interface RunGraphOptions {
   runId?: string;
   /** Exact durable source occurrence. Retries only resume this same id. */
   occurrenceId?: string;
+  /** Native owning-ingress custody; never accepted from a serialized request. */
+  occurrenceCustody?: GraphOccurrenceCustody;
   /** Exact verified login sources; never a request to replay the entire graph. */
   resumeLoginWaitRunId?: string;
   loginResumeRunIds?: Record<string, string>;
@@ -1697,7 +1701,12 @@ export async function runGraph(
   opts: RunGraphOptions = {},
 ): Promise<RunGraphResult> {
   const finiteOwner = opts.dryRun ? undefined : captureFiniteAutomationGoalExecutionOwner(automation.id);
-  const assertFiniteCurrent = () => { if (finiteOwner) assertAutomationGoalExecutionOwner(finiteOwner); };
+  let occurrenceBinding: GraphOccurrenceBinding | undefined;
+  let custodyRunId: string | undefined;
+  const assertFiniteCurrent = () => {
+    if (finiteOwner) assertAutomationGoalExecutionOwner(finiteOwner);
+    if (opts.occurrenceCustody && occurrenceBinding && custodyRunId) assertGraphOccurrenceCustody(opts.occurrenceCustody, occurrenceBinding, custodyRunId);
+  };
   const withFiniteDispatch = async <T>(call: () => Promise<T>): Promise<T> => {
     assertFiniteCurrent();
     const result = await call();
@@ -1727,6 +1736,8 @@ export async function runGraph(
       : automation.executionPermission === "write" ? "write" : requiredExecutionPermission(graph);
   const initialVars = durableInitialVars(opts.initialVars);
   const admissionPending = new Map<string, GraphNodeFailure>();
+  const historicalMcpSources = new Map<string, AutomationGraphReconciliation[]>();
+  const deferredMcpHolds = new Map<string, GraphNodeFailure>();
   // 자율 전략 진화 — 이 자동화의 현재 실패 스트릭을 1회 수집해, 실패가 이어지는 동안
   // 모든 agent/action/output 노드 프롬프트에 "다른 방법 강제" 지시문을 주입한다.
   let strategyDirective = "";
@@ -1745,6 +1756,24 @@ export async function runGraph(
     });
   }
   const graphDigest = graphExecutionDigest(automation, graph);
+  if (opts.occurrenceCustody) {
+    if (!requestedOccurrenceId) throw new Error("graph_occurrence_custody_changed");
+    occurrenceBinding = { automationId: automation.id, occurrenceId: requestedOccurrenceId, graphDigest };
+    claimGraphOccurrenceCustody(opts.occurrenceCustody, occurrenceBinding, runId);
+    custodyRunId = runId;
+  }
+  const belongsToCurrentOccurrence = (source: { occurrenceId: string | null }): boolean =>
+    !opts.occurrenceCustody || source.occurrenceId === requestedOccurrenceId;
+  const historicalEffectNotes = new Map<string, GraphNodeFailure>();
+  const priorEvidenceReadContext = opts.occurrenceCustody && requestedOccurrenceId ? {
+    unrelatedToOccurrence: requestedOccurrenceId,
+    onUnreadablePriorEvidence: () => {
+      for (const node of graph.nodes.filter(nodeCouldHaveActedOutside)) historicalEffectNotes.set(node.id, {
+        code: "MUTATION_UNVERIFIED", reason: "An earlier request's effect for this leaf remains unconfirmed.",
+        nextAction: "Read the original effect outcome while independent branches continue.",
+      });
+    },
+  } : undefined;
   const definitionDigest = getAutomationDefinitionDigest(automation.id);
   const dryRun = opts.dryRun === true;
   // A workflow graph is browser-backed by default so its authenticated session
@@ -1763,18 +1792,27 @@ export async function runGraph(
       .filter((node) => nodeCouldHaveActedOutside(node))
       .map((node) => node.id),
   );
-  // A fresh command/Toolchain occurrence cannot hide a parked earlier request.
-  // Read every original coordinate, including after an independent run became
-  // the latest snapshot. Only those leaves (and their readers) remain pending.
-  if (!dryRun) for (const held of listAutomationGraphReconciliations(automation.id)) {
+  // Historical evidence stays visible in its original occurrence. Only a native
+  // owning ingress may identify a different authorized logical request.
+  if (!dryRun) for (const held of listAutomationGraphReconciliations(automation.id, priorEvidenceReadContext)) {
     if (held.simulation) continue;
-    for (const node of held.nodes) if (graphNodeIds.has(node.nodeId)) admissionPending.set(node.nodeId, {
-      code: "MUTATION_UNVERIFIED", reason: "An earlier request's effect for this leaf remains unconfirmed.",
-      nextAction: "Read the original effect outcome while independent branches continue.",
-    });
+    for (const node of held.nodes) if (graphNodeIds.has(node.nodeId)) {
+      if (!belongsToCurrentOccurrence(held)) {
+        historicalEffectNotes.set(node.nodeId, { code: "MUTATION_UNVERIFIED",
+          reason: "An earlier request's effect for this leaf remains unconfirmed.",
+          nextAction: "Read the original effect outcome while independent branches continue." });
+        continue;
+      }
+      historicalMcpSources.set(node.nodeId, [...historicalMcpSources.get(node.nodeId) ?? [], held]);
+      admissionPending.set(node.nodeId, {
+        code: "MUTATION_UNVERIFIED", reason: "An earlier request's effect for this leaf remains unconfirmed.",
+        nextAction: "Read the original effect outcome while independent branches continue.",
+      });
+    }
   }
   const loginSourceRunId = opts.resumeLoginWaitRunId ?? opts.loginResumeRunIds?.[automation.id];
-  const waitingSource = getGraphLoginWaitCheckpoint(automation.id);
+  const originalWaitingSource = getGraphLoginWaitCheckpoint(automation.id);
+  const waitingSource = originalWaitingSource && belongsToCurrentOccurrence(originalWaitingSource) ? originalWaitingSource : null;
   let loginAdmissionConflict = false;
   const quarantineLoginSource = (reason: string, unknownEffects = false): void => {
     loginAdmissionConflict = true;
@@ -1792,7 +1830,7 @@ export async function runGraph(
       nextAction: "Reconcile this login or effect receipt in the background; independent nodes continue.",
     });
   };
-  if (hasGraphLoginWait(automation.id) && !waitingSource) quarantineLoginSource("Login checkpoint is invalid.", true);
+  if (hasGraphLoginWait(automation.id) && !originalWaitingSource) quarantineLoginSource("Login checkpoint is invalid.", true);
   if (waitingSource && (!loginSourceRunId || waitingSource.runId !== loginSourceRunId
       || !graphLoginWaitReady((waitingSource.checkpoint as GraphCheckpoint).loginWaits))) {
     for (const nodeId of Object.keys((waitingSource.checkpoint as GraphCheckpoint).loginWaits)) admissionPending.set(nodeId, {
@@ -1811,7 +1849,7 @@ export async function runGraph(
   const previousLiveFailure = latestFailedCandidate && !latestFailedCandidate.simulation
     ? latestFailedCandidate
     : null;
-  if (opts.fresh === true && !dryRun && previousLiveFailure) {
+  if (opts.fresh === true && !dryRun && previousLiveFailure && belongsToCurrentOccurrence(previousLiveFailure)) {
     const rawCheckpoint = previousLiveFailure.checkpoint;
     const checkpointRow = rawCheckpoint && typeof rawCheckpoint === "object" && !Array.isArray(rawCheckpoint)
       ? rawCheckpoint as Record<string, unknown>
@@ -1984,10 +2022,18 @@ export async function runGraph(
   // Invocation-backed nodes can inspect the prior outcome with their existing
   // read tools. A direct transport cannot act on that instruction, so its hold
   // remains scoped to that node while independent branches continue.
-  const uncertainEffectNotes = new Map<string, GraphNodeFailure>();
+  const uncertainEffectNotes = new Map<string, GraphNodeFailure>(historicalEffectNotes);
   for (const [nodeId, failure] of [...admissionPending.entries()]) {
     if (!UNCERTAIN_EFFECT_NOTE_CODES.has(failure.code)) continue;
     const node = graph.nodes.find(candidate => candidate.id === nodeId);
+    // A direct call's payload may come from an upstream node. Compare its
+    // actual arguments at the runnable boundary, rather than holding a new
+    // request merely because it uses the same blueprint node ID.
+    if (node && Object.hasOwn(node.config, "mcpCall") && historicalMcpSources.has(nodeId)) {
+      admissionPending.delete(nodeId);
+      deferredMcpHolds.set(nodeId, failure);
+      continue;
+    }
     if (!node || !["agent", "action"].includes(node.type) || Object.hasOwn(node.config, "mcpCall")) continue;
     admissionPending.delete(nodeId);
     uncertainEffectNotes.set(nodeId, failure);
@@ -1998,10 +2044,11 @@ export async function runGraph(
     ...[...admissionPending].filter(([nodeId, failure]) => effectNodeIds.has(nodeId)
       && UNCERTAIN_EFFECT_NOTE_CODES.has(failure.code)).map(([nodeId]) => nodeId)])].sort();
   if (uncertainEffectNotes.size > 0) {
-    checkpoint.ambiguousNodeIds = checkpoint.ambiguousNodeIds.filter((nodeId) => !uncertainEffectNotes.has(nodeId));
+    checkpoint.ambiguousNodeIds = checkpoint.ambiguousNodeIds.filter((nodeId) => !uncertainEffectNotes.has(nodeId) || admissionPending.has(nodeId) || deferredMcpHolds.has(nodeId));
     tryRecordRunEvent({ runId, kind: "graph_uncertain_effect_noted", automationId: automation.id,
       payload: { nodeIds: [...uncertainEffectNotes.keys()].sort(), codes: [...new Set([...uncertainEffectNotes.values()].map((failure) => failure.code))].sort() } });
   }
+  checkpoint.ambiguousNodeIds = checkpoint.ambiguousNodeIds.filter(nodeId => !deferredMcpHolds.has(nodeId));
   const loginResumeRunIds = { ...opts.loginResumeRunIds };
   if (waitingSource) {
     for (const entry of Object.values(checkpoint.loginWaits)) for (const source of entry.prerequisites) {
@@ -3128,6 +3175,43 @@ export async function runGraph(
     } catch { /* Diagnostics cannot turn a completed judgment into a failed node or a new dispatch. */ }
   };
 
+  const historicalMcpInputDiffers = (node: WorkflowNode, source: AutomationGraphReconciliation): boolean => {
+    try {
+      if (source.graphDigest !== graphDigest || source.simulation
+        || source.occurrenceId === checkpoint!.occurrenceId) return false;
+      // A refused resume can carry the original hold forward without a new
+      // dispatch. Follow only its durable same-occurrence producer lineage.
+      const row = getDb().prepare(`WITH RECURSIVE lineage(id, parent, depth, seen) AS (
+        SELECT id, resume_of_run_id, 0, ',' || id || ',' FROM automation_runs
+          WHERE id = ? AND automation_id = ? AND occurrence_id = ? AND graph_digest = ?
+        UNION ALL SELECT r.id, r.resume_of_run_id, l.depth + 1, l.seen || r.id || ','
+          FROM automation_runs r JOIN lineage l ON r.id = l.parent
+          WHERE r.automation_id = ? AND r.occurrence_id = ? AND r.graph_digest = ?
+            AND l.depth < 256 AND instr(l.seen, ',' || r.id || ',') = 0
+        ) SELECT r.id, r.checkpoint_json FROM lineage l JOIN automation_runs r ON r.id = l.id
+          WHERE EXISTS (SELECT 1 FROM run_events e WHERE e.run_id = r.id
+            AND e.automation_id = ? AND e.node_id = ? AND e.kind = 'mcp_tool-use')
+          ORDER BY l.depth LIMIT 1`).get(source.runId, automation.id, source.occurrenceId, graphDigest,
+          automation.id, source.occurrenceId, graphDigest, automation.id, node.id) as
+          { id: string; checkpoint_json: string | null } | undefined;
+      if (!row?.checkpoint_json) return false;
+      const saved = parseGraphCheckpoint(JSON.parse(row.checkpoint_json), graphDigest, source.occurrenceId,
+        graphNodeIds, graphEdgeIds, effectNodeIds);
+      if (!saved) return false;
+      const call = node.config.mcpCall as { arguments?: unknown };
+      const priorArgs = projectGraphMcpArguments(call.arguments, saved.vars);
+      const priorDigest = sha256Value(priorArgs);
+      const observed = getDb().prepare(`SELECT payload_json FROM run_events WHERE run_id = ?
+        AND automation_id = ? AND node_id = ? AND kind = 'mcp_tool-use' ORDER BY seq`)
+        .all(row.id, automation.id, node.id) as Array<{ payload_json: string }>;
+      if (!observed.length || !observed.every(event => {
+        const payload = JSON.parse(event.payload_json) as { toolArgs?: unknown };
+        return typeof payload.toolArgs === "string" && sha256Value(JSON.parse(payload.toolArgs)) === priorDigest;
+      })) return false;
+      return sha256Value(projectGraphMcpArguments(call.arguments, vars)) !== priorDigest;
+    } catch { return false; }
+  };
+
   const runNode = async (node: (typeof ordered)[number], scopedSignal: AbortSignal): Promise<void> => {
     assertFiniteCurrent();
     const runSignal = scopedSignal;
@@ -3136,6 +3220,24 @@ export async function runGraph(
       failGraphNode(node, { code: "NODE_FAILED", reason: "Parent execution permission does not allow this mutation step.",
         nextAction: "Use a read-only capability or invoke it from an authorized write execution." });
       return;
+    }
+    const historicalHold = deferredMcpHolds.get(node.id);
+    if (historicalHold) {
+      // Starting this resume makes it the latest row of its occurrence. Keep
+      // the exact admitted sources as well: that running row cannot erase the
+      // predecessor's uncertainty before this payload has been checked.
+      const sources = [...new Map([
+        ...historicalMcpSources.get(node.id) ?? [],
+        ...listAutomationGraphReconciliations(automation.id, priorEvidenceReadContext)
+          .filter(source => !source.simulation && belongsToCurrentOccurrence(source) && source.nodes.some(held => held.nodeId === node.id)),
+      ].map(source => [source.runId, source] as const)).values()];
+      if (!sources.every(source => historicalMcpInputDiffers(node, source))) {
+        // Preserve a same-occurrence resume's original uncertainty. A distinct
+        // occurrence that made no call must not manufacture its own effect hold.
+        if (sources.some(source => source.occurrenceId === checkpoint!.occurrenceId)) failNode(node.id, true);
+        failGraphNode(node, historicalHold);
+        return;
+      }
     }
     switch (node.type) {
       case "trigger":
@@ -5203,14 +5305,16 @@ export async function runGraph(
         }
         journal("node_intent", node.id, { subgraph: ref, depth });
         assertFiniteCurrent();
-        const innerResult = await withFiniteDispatch(() => runGraph(inner, inner.graph!, {
+        const childOccurrenceId = `graph-child:${sha256Value({ automationId: automation.id,
+          occurrenceId: checkpoint!.occurrenceId, nodeId: node.id, loops: commonScope(node, rawInput ?? "").loops })}`;
+        const executeChild = (occurrenceCustody?: GraphOccurrenceCustody) => withFiniteDispatch(() => runGraph(inner, inner.graph!, {
           ...(opts.sink ? { sink: opts.sink } : {}),
           signal: runSignal,
           runId: `${runId}::sub:${node.id}`,
           // A parent resume changes its physical run id, never this child's logical method budget.
           // Distinct parent calls/loop iterations still receive independent child occurrences.
-          occurrenceId: `graph-child:${sha256Value({ automationId: automation.id,
-            occurrenceId: checkpoint!.occurrenceId, nodeId: node.id, loops: commonScope(node, rawInput ?? "").loops })}`,
+          occurrenceId: childOccurrenceId,
+          occurrenceCustody,
           ...(Object.keys(innerVars).length ? { initialVars: innerVars } : {}),
           ...(dryRun ? { dryRun: true } : {}),
           depth,
@@ -5220,6 +5324,14 @@ export async function runGraph(
           callChain: [...chain, ref],
           loginResumeRunIds,
         }));
+        const childBinding = { automationId: inner.id, occurrenceId: childOccurrenceId, graphDigest: graphExecutionDigest(inner, inner.graph!) };
+        const innerResult = opts.occurrenceCustody && occurrenceBinding
+          ? await withChildGraphOccurrenceCustody(opts.occurrenceCustody, occurrenceBinding, runId, childBinding, () => {
+            runSignal.throwIfAborted();
+            const current = loadAutomation(inner.id);
+            if (!current?.graph || graphExecutionDigest(current, current.graph) !== childBinding.graphDigest) throw new Error("graph_occurrence_custody_changed");
+          }, executeChild)
+          : await executeChild();
         // ★안쪽 사유를 그대로 들고 온다 — 바깥에서 "그냥 실패"로 뭉개면 어디서 왜 죽었는지
         //   사람이 알 수 없다. 안쪽 실행 기록으로 가는 길도 함께 준다.
         if (innerResult.needsInput && innerResult.loginWaitSource) {

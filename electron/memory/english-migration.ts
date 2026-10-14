@@ -15,7 +15,8 @@
 import { powerMonitor } from "electron";
 import { looksSecret } from "../../shared/secret-patterns";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
-import { getDb, openedStoreMigrationRole } from "../store/db";
+import { openedStoreMigrationRole } from "../store/db";
+import { getMemoryDb as getDb } from "./database";
 import { getMeta, setMeta } from "../store/meta";
 import { runSlotStats, runSlotsQuietForMs } from "../runtime/run-slots";
 import { dreamingIdleRequiredSec } from "./curator-rules";

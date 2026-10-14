@@ -25,6 +25,7 @@ import type { InvocationEffectBoundary } from "../invocation/effect-boundary-rea
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import {
   callConnectedModelDetailed,
+  connectedModelTimeoutMs,
   configuredOrchestratorJudgmentPolicy,
   type JudgmentRuntimeAttempt,
   type JudgmentRuntimeReceipt,
@@ -44,11 +45,9 @@ const MAX_ID_CHARS = 512;
 const MAX_FIXED_CONSTRAINTS = 64;
 const MAX_EVIDENCE_CHARS = 32_000;
 const MAX_DRAFT_CHARS = 12_000;
-// Local/API providers can spend several seconds starting a fresh CLI process
-// before returning a bounded JSON reflection. Keep this below the UI's
-// background-work budget, but above the observed cold-start latency so a
-// valid Goal cycle is not recorded as a false provider outage.
-const REFLECTION_TIMEOUT_MS = 45_000;
+// Background reflection shares the connected model's five-minute budget.
+// Owner cancellation remains immediate and never waits for this deadline.
+const REFLECTION_TIMEOUT_MS = 300_000;
 const reflectionControllers = new Set<AbortController>();
 
 export type GoalStrategyReflectionUnavailableReason =
@@ -953,28 +952,36 @@ export async function reflectGoalStrategyProposal(
   const interrupt = () => reflectionController.abort(input.signal?.reason ?? new Error("verification_cancelled"));
   input.signal?.addEventListener("abort", interrupt, { once: true });
   if (input.signal?.aborted) interrupt();
-  const timeout = setTimeout(() => reflectionController.abort(new Error("goal_strategy_timeout")), REFLECTION_TIMEOUT_MS);
+  const timeoutMs = connectedModelTimeoutMs(REFLECTION_TIMEOUT_MS);
+  const timeout = setTimeout(() => reflectionController.abort(new Error("goal_strategy_timeout")), timeoutMs);
   timeout.unref?.();
   let detailed: Awaited<ReturnType<DetailedCall>>;
+  let onStopped: (() => void) | undefined;
   try {
-    detailed = await callModel({
+    if (reflectionController.signal.aborted) return { status: "unavailable", reason: "goal_strategy_runtime_unavailable" };
+    const stopped = new Promise<never>((_resolve, reject) => {
+      onStopped = () => reject(reflectionController.signal.reason ?? new Error("goal_strategy_cancelled"));
+      reflectionController.signal.addEventListener("abort", onStopped, { once: true });
+    });
+    const call = callModel({
       systemPrompt: systemPrompt(),
       input: serialized,
-      // This is a background advisory path. Keep the bounded model call short
-      // so a slow provider cannot occupy the Goal's next episode indefinitely.
-      timeoutMs: REFLECTION_TIMEOUT_MS,
+      timeoutMs,
       signal: reflectionController.signal,
       selectionPolicy: policy,
       requireNoTools: true,
     });
+    void call.catch(() => {});
+    detailed = await Promise.race([call, stopped]);
   } catch {
     return { status: "unavailable", reason: "goal_strategy_runtime_unavailable" };
   } finally {
     clearTimeout(timeout);
     input.signal?.removeEventListener("abort", interrupt);
     reflectionControllers.delete(reflectionController);
+    if (onStopped) reflectionController.signal.removeEventListener("abort", onStopped);
   }
-  if (!detailed.text) return { status: "unavailable", reason: "goal_strategy_runtime_unavailable" };
+  if (reflectionController.signal.aborted || !detailed.text) return { status: "unavailable", reason: "goal_strategy_runtime_unavailable" };
   const draft = parseGoalStrategyProposalDraft(detailed.text);
   if (!draft) return { status: "unavailable", reason: "goal_strategy_invalid_output" };
   const now = dependencies?.now?.() ?? new Date().toISOString();

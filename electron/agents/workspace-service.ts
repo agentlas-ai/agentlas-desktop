@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { getDb } from "../store/db";
+import { getMemoryDb as getDb } from "../memory/database";
 import { getRoute } from "./routes";
 import { materializeAgentFiles, resolveAgentPackageDir } from "./files";
 import { readCanonicalPromptFromDirectory } from "./prompt-authority";

@@ -18,7 +18,7 @@ import type {
   LocalTasteDraftRecord,
 } from "../../shared/types";
 import { getAgentById } from "../mcp/registry";
-import { getDb } from "../store/db";
+import { getMemoryDb as getDb } from "../memory/database";
 import { hasDurableRunStartReceipt } from "../store/run-events";
 import { assertMemoryWriteAllowed, revokedMemorySourceIds } from "../memory/revocations";
 import { nativeTextsFor } from "../memory/native-text";

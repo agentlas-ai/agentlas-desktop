@@ -20,7 +20,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { getDb } from "../store/db";
+import { getMemoryDb as getDb, getMemoryStoreInfo } from "./database";
 import { applyTranslation } from "./english-migration";
 import { isNonEnglishText, translationSourceHash } from "./native-text";
 import { insertMemoryEntry, listMemoryEvidenceTokensForAgent } from "./store";
@@ -246,6 +246,9 @@ interface PreparedImport {
 
 function prepareImport(root: string, text: string | null): PreparedImport | OneImportResult {
   const result: OneImportResult = { scanned: 0, imported: 0, skipped: 0, failed: 0 };
+  // An unbound legacy machine drawer cannot be attributed to a freshly signed
+  // in account. It remains available only in its explicit device-local store.
+  if (!getMemoryStoreInfo().ownerNamespace.startsWith("device-local:")) return { ...result, reason: "legacy_owner_unbound" };
   if (text === null) return { ...result, reason: "soul_missing" };
   const blocks = parseOneDurableBlocks(text);
   result.scanned = blocks.length;

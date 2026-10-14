@@ -1,9 +1,9 @@
 // Local projection of durable memory relationships. Edges never create or move
 // content; they only connect memories already admitted under one owner boundary.
 import { createHash, randomUUID } from "node:crypto";
-import { getDb } from "../store/db";
+import { getMemoryDb as getDb } from "./database";
 import { rankHybridLocal } from "./local-embedding";
-import { listMemoryRelationCandidates, type MemoryEntry } from "./store";
+import { listMemoryRelationCandidates, memoryAudienceKey, type MemoryEntry } from "./store";
 import { nativeTextsFor } from "./native-text";
 import { assertMemoryWriteAllowed, MemoryRevokedError, memoryOwnerKey } from "./revocations";
 
@@ -106,6 +106,8 @@ export function supersedeExplicitMemory(entry: Pick<MemoryEntry, "id">, blockKey
       throw error;
     }
     const authority = ownerKey(successor);
+    const audience = memoryAudienceKey(entry.id);
+    if (!audience) return null;
     const rows = getDb().prepare(`SELECT id, scope, kind, content, project_id, project_path, agent_id, chat_id, evidence_json
       FROM memory_entries WHERE superseded_at IS NULL AND id <> ?
         AND (scope = ? OR (? IN ('team_memory','agent_team') AND scope IN ('team_memory','agent_team')))
@@ -115,7 +117,7 @@ export function supersedeExplicitMemory(entry: Pick<MemoryEntry, "id">, blockKey
         project_id: string | null; project_path: string | null; agent_id: string | null; chat_id: string | null;
         evidence_json: string;
       }>;
-    const owned = rows.filter((row) => ownerKey({
+    const owned = rows.filter((row) => memoryAudienceKey(row.id) === audience && ownerKey({
       scope: row.scope, projectId: row.project_id, projectPath: row.project_path,
       agentId: row.agent_id, chatId: row.chat_id,
     }) === authority);

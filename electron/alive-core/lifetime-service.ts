@@ -15,8 +15,7 @@ import type { AliveActionPacket, AliveAgent, AliveAttachment, AlivePlaygroundObs
   AliveRuntimeStart, AliveUnblockAttempt, AliveUnblockOutcome, AliveUnblockResult } from "./contracts";
 import { aliveActionKindsForDomain, aliveActionRegistration } from "./action-registry";
 import { AliveLifetimeStore } from "./lifetime-store";
-import { runtimeFailureBlocksReplay } from "../runtime/selection";
-import { aliveResumeAuthorized } from "./owner-resume";
+import { aliveResumeAuthorized, aliveWakeRequiresOwnerResume } from "./owner-resume";
 
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 export interface AliveLifetimeBeat { agentId: string; outcome: "wait" | "dispatched" | "failed"; reasonCode: string }
@@ -255,12 +254,9 @@ export class AliveLifetimeService {
         WHERE w.agent_id=? ORDER BY e.sequence DESC LIMIT 1`).get(agent.agentId) as {wake_id:string;receipt_json:string|null}|undefined;
       if (lastWake) {
         let receipt: {runId?:unknown;errorCode?:unknown}|null = null;
-        try { receipt = lastWake.receipt_json ? JSON.parse(lastWake.receipt_json) : null; } catch { /* retain the failed boundary */ }
-        if (!receipt || receipt.runId !== lastWake.wake_id) {
-          beats.push(this.wait(agent, "runtime_turn_unsettled", nowMs)); continue;
-        }
-        if (typeof receipt.errorCode === "string" && (receipt.errorCode === "alive-host-lost"
-          || runtimeFailureBlocksReplay({providerCode:receipt.errorCode}))) {
+        try { receipt = lastWake.receipt_json ? JSON.parse(lastWake.receipt_json) : null; } catch { /* unavailable prior context never fences a fresh wake */ }
+        if (receipt?.runId === lastWake.wake_id && typeof receipt.errorCode === "string"
+          && aliveWakeRequiresOwnerResume(receipt.errorCode)) {
           const barrier = this.store.resumeBarrier(agent.agentId);
           ownerResumeDue = Boolean(barrier && aliveResumeAuthorized(this.store.db,agent,barrier));
           if (!ownerResumeDue) { beats.push(this.wait(agent, receipt.errorCode, nowMs)); continue; }

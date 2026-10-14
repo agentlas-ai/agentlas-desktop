@@ -16,6 +16,7 @@ import {
   setCanonicalTaskStatus,
 } from "../store/tasks";
 import { hasInvocationRunReceipt } from "../store/run-events";
+import { getInvocationAdmission } from "../store/invocation-admissions";
 import { tryRecordOneDomainEvent } from "./domain-events";
 import { ensureOneGroupLocalStaff, oneOrgExecutionGuidance } from "./org";
 import { ensureOneTaskforceForPreflight, notifyOneTaskforceFromPreflight, listOneTaskforces } from "./taskforces";
@@ -125,6 +126,7 @@ export interface OneTeamPreflightDependencies {
   getGoalStatus?: (goalId: string) => string | null | undefined;
   setTaskStatus?: typeof setCanonicalTaskStatus;
   hasRunReceipt?: typeof hasInvocationRunReceipt;
+  getAdmission?: typeof getInvocationAdmission;
   /** Test-only crash seam after the durable reservation CAS. */
   afterReservation?: (proposal: OneTeamPreflightProposal) => void;
   /** Injectable resident judge for "does this genuinely need a team?" (tests). */
@@ -956,7 +958,15 @@ function recoverReservations(deps: OneTeamPreflightDependencies): void {
         && record.reservation.ownerInstanceId !== PROCESS_INSTANCE_ID
         && !processAlive(record.reservation.ownerPid),
       );
-      if (!promptUnavailable && !abandonedReservation) return record;
+      const admission = record.reservation
+        ? (deps.getAdmission ?? getInvocationAdmission)(record.reservation.runId) : null;
+      // A live process can retain a reservation after a definite pre-start
+      // rejection. That original identity cannot start again; observing it is
+      // enough to release this reservation, without retrying the instruction.
+      const rejectedReservation = Boolean(record.reservation && admission?.status === "rejected"
+        && admission.runId === record.reservation.runId
+        && admission.chatId === record.proposal.binding.chatId);
+      if (!promptUnavailable && !abandonedReservation && !rejectedReservation) return record;
       changed = true;
       // PRD §4.30 — 여기서 지속 원장을 확인해 놓고 **결과를 버리고 있었다.** 그래서 실제로
       // 시작해 이미 비용을 쓴 실행까지 "복구 필요"로 표시됐고, 사용자가 복구를 누르면 같은

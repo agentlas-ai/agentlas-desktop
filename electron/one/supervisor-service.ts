@@ -13,7 +13,7 @@ import {
 import { OneSupervisorStore, supervisorHash, type SupervisorRequestRow } from "./supervisor-store";
 import { ONE_BUBBLE_COLORS, type OneBubbleColor } from '../../shared/one-profile';
 import type { OneSupervisorWorkQueue } from "./supervisor-work-queue";
-import { runtimeFailureBlocksReplay } from "../runtime/selection";
+import { runtimeFailureBlocksNextAutomaticTurn } from "../../shared/runtime-turn-admission";
 import type { OneSupervisorOwner } from "./supervisor-owner";
 import type { SupervisorJournalInput, SupervisorJournalPage, SupervisorStopInput } from "../../shared/one-supervisor-runtime";
 import {OneBudgetAdmissionDenied,type OneBudgetStore} from "./budget-store";
@@ -305,14 +305,13 @@ export class OneSupervisorService {
     }
     return count;
   }
-  private runReplayBlocked(runId: string, chatId: string, requireReceipt = false, observed?: InvocationRunReceipt): boolean {
+  private runBlocksNextAutomaticTurn(runId: string, chatId: string, observed?: InvocationRunReceipt): boolean {
     const receipt = observed ?? this.deps.runtime.receipt(runId);
-    if (!receipt) return requireReceipt;
-    if (receipt.runId !== runId || receipt.chatId !== chatId) return true;
-    if (runtimeFailureBlocksReplay({ providerCode: receipt.errorCode ?? undefined })) return true;
-    return Boolean(this.deps.store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='invocation_current_turn_steers'").get()
-      && this.deps.store.db.prepare(`SELECT 1 FROM invocation_current_turn_steers
-        WHERE run_id=? AND chat_id=? AND status IN ('dispatching','uncertain') LIMIT 1`).get(runId,chatId));
+    // Unknown historical results and steering ACKs stay in the ledger and
+    // recap. They cannot deny a distinct next review/follow-up command.
+    if (!receipt || receipt.runId !== runId || receipt.chatId !== chatId) return false;
+    return receipt.status === "running" || receipt.status === "cancelling"
+      || runtimeFailureBlocksNextAutomaticTurn({ providerCode: receipt.errorCode ?? undefined });
   }
   private reviewNeedsReportOnly(reviewRunId: string): boolean {
     const notices = this.deps.store.db.prepare(`SELECT task_id,run_id,state FROM one_supervisor_notices
@@ -324,7 +323,7 @@ export class OneSupervisorService {
         WHERE task_id=? AND run_id=? AND kind IN ('work','follow-up') ORDER BY rowid DESC LIMIT 1`)
         .get(notice.task_id,notice.run_id) as {payload_json:string}|undefined;
       const chatId = task?.chatId ?? (request ? JSON.parse(request.payload_json).workerChatId : null);
-      return !chatId || this.runReplayBlocked(notice.run_id,chatId,true);
+      return Boolean(chatId && this.runBlocksNextAutomaticTurn(notice.run_id,chatId));
     });
   }
   /** Main's review row and claimed source receipts own this ceiling. A model
@@ -355,7 +354,7 @@ export class OneSupervisorService {
       if (row.kind === "work" || row.kind === "follow-up") this.deps.store.notice(row, receipt.status);
       if (isReview(row)) {
         // Only this run (the claim's generation) closes its results; an owner stop is not retried.
-        if (this.runReplayBlocked(receipt.runId,receipt.chatId,false,receipt)) this.deps.store.closeReview(row.run_id!, "review_outcome_unknown");
+        if (this.runBlocksNextAutomaticTurn(receipt.runId,receipt.chatId,receipt)) this.deps.store.closeReview(row.run_id!, "review_outcome_unknown");
         else if (receipt.status === "completed") this.deps.store.closeReview(row.run_id!, this.deps.quietRun?.(row.run_id!) ? "quiet" : null);
         else if (receipt.status === "cancelled") this.deps.store.closeReview(row.run_id!, "review_stopped_by_owner");
         else this.deps.store.retryReview(row.run_id!, `review_${receipt.status}`);
@@ -640,7 +639,7 @@ export class OneSupervisorService {
       ORDER BY rowid DESC LIMIT 1`)
       .get(oneId,input.taskId) as SupervisorRequestRow|undefined;
     const automaticUnknown = Boolean(automatic && delegated?.workerChatId
-      && (!latest?.run_id || this.runReplayBlocked(latest.run_id,delegated.workerChatId,true)));
+      && latest?.run_id && this.runBlocksNextAutomaticTurn(latest.run_id,delegated.workerChatId));
     const rejected=!work || !delegated?.workerChatId ? "supervisor_follow_up_not_delegated"
       : automaticUnknown ? "supervisor_follow_up_outcome_unknown"
       : work.state === "cancelled" ? "supervisor_task_cancelled"

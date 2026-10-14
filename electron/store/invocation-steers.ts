@@ -252,11 +252,12 @@ export function retireHeldQueuedSteer(id: string): boolean {
 }
 
 /** Explicit recovery route hook; callers must make the replay decision first. */
-export function releaseQueuedSteerRecoveryHold(id: string): boolean {
+export function releaseQueuedSteerRecoveryHold(id: string, expectedReason?: DurableQueuedSteerRecoveryReason): boolean {
   return getDb().prepare(
     `UPDATE invocation_steers
         SET recovery_state = 'ready', recovery_reason = NULL, status = 'queued',
             drained_run_id = NULL, updated_at = ?
-      WHERE id = ? AND status IN ('queued','draining') AND recovery_state = 'held'`,
-  ).run(new Date().toISOString(), id).changes === 1;
+      WHERE id = ? AND status IN ('queued','draining') AND recovery_state = 'held'
+        AND (? IS NULL OR (status = 'queued' AND drained_run_id IS NULL AND recovery_reason = ?))`,
+  ).run(new Date().toISOString(), id, expectedReason ?? null, expectedReason ?? null).changes === 1;
 }

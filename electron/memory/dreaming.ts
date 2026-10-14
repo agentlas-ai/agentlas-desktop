@@ -37,7 +37,7 @@ const IDLE_REQUIRED_SEC = dreamingIdleRequiredSec();
 const COOLDOWN_MS = dreamingCooldownMs();
 const TICK_MS = 5 * 60 * 1000; // 5분마다 조건 확인(조건 체크 자체는 ~0 비용)
 const MAX_AGENTS_PER_PASS = 2; // 한 번의 드리밍에서 LLM 통합할 에이전트 수 상한
-const LLM_TIMEOUT_MS = 180_000;
+const LLM_TIMEOUT_MS = 300_000;
 
 export function getDreamingEnabled(): boolean {
   const stored = getMeta(ENABLED_KEY);

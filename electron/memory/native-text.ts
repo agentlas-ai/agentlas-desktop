@@ -8,7 +8,7 @@
 // This module is deliberately light (SQL only) so the store, the recall
 // ranking and the UI projections can import it without a module cycle.
 import { createHash } from "node:crypto";
-import { getDb } from "../store/db";
+import { getMemoryDb as getDb } from "./database";
 import { autoLocalEmbedding, parseLocalEmbedding, type LocalMemoryEmbedding } from "./local-embedding";
 
 type Db = ReturnType<typeof getDb>;

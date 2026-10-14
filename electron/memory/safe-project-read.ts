@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
 import { verifyActivatedFolderIdentity } from "../architecture/activation";
+import { observeProjectMemoryFile, readOriginalMemorySource, type MemorySourceRef } from "./source-catalogue";
+import { createHash } from "node:crypto";
 
 export const PROJECT_MEMORY_TEXT_MAX_BYTES = 2 * 1024 * 1024;
 export const PROJECT_CODE_MAP_MAX_BYTES = 16 * 1024 * 1024;
@@ -130,7 +132,9 @@ export function readActivatedProjectMemoryText(
     if (!validateParentChain(inspected.memoryRoot, inspected.absolutePath)) return null;
     if (!verifyActivatedFolderIdentity(projectPath)) return null;
 
-    return new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+    observeProjectMemoryFile(projectPath, relativePath, text);
+    return text;
   } catch {
     return null;
   } finally {
@@ -142,6 +146,22 @@ export function readActivatedProjectMemoryText(
       }
     }
   }
+}
+
+/** Catalogue references use the existing activated-folder reader, never a
+ * stored path as authority. Byte slices must end on valid UTF-8 boundaries. */
+export function readActivatedProjectMemorySource(projectPath: string, relativePath: string, ref: MemorySourceRef,
+  start: number, end: number, assertCurrent: () => void): Buffer {
+  return readOriginalMemorySource(ref, { actorId: null, visibilityDomain: "activated-project",
+    readerContract: "desktop.activated-project-file.v1" }, { start, end }, (source, from, through) => {
+    const address = JSON.parse(source.address_json) as { path?: string; ref?: string };
+    if (address.path !== projectPath || address.ref !== relativePath) throw new Error("memory_source_changed");
+    const text = readActivatedProjectMemoryText(projectPath, relativePath);
+    if (text === null) throw new Error("memory_source_reader_unavailable");
+    const bytes = Buffer.from(text, "utf8");
+    if (createHash("sha256").update(bytes).digest("hex") !== source.content_digest) throw new Error("memory_source_changed");
+    return bytes.subarray(from, through);
+  }, () => { assertCurrent(); if (!verifyActivatedFolderIdentity(projectPath)) throw new Error("memory_source_reader_unavailable"); });
 }
 
 export function readActivatedProjectMemoryJson<T>(

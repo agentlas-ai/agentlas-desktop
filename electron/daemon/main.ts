@@ -689,9 +689,29 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
     const automation = stored ?? fallbackRow;
     if (!automation) throw new Error("graph.run requires automationId or an automation row");
     const { runGraph } = await import("../workflow/run-graph");
+    const { graphExecutionDigest } = await import("../../shared/graph-execution-digest");
+    const { withGraphOccurrenceCustody } = await import("../../shared/graph-occurrence-custody");
     const controller = new AbortController();
     const ownerId = typeof (automation as { id?: unknown }).id === "string" ? (automation as { id: string }).id : "";
     const lifetime = new MainInvocationLifetime(admitMainAutomation(ownerId), ownerId, ownerId, "automation");
+    const admittedAutomation = { ...(automation as object), graph } as Parameters<typeof runGraph>[0];
+    const admittedGraph = graph as Parameters<typeof runGraph>[1];
+    const graphDigest = graphExecutionDigest(admittedAutomation, admittedGraph);
+    // graph.run is the local owner's explicit native command ingress. A new
+    // command has its own occurrence; no serialized field may mint custody.
+    const occurrenceId = `owner-request:${randomUUID()}`;
+    const assertOccurrenceCurrent = () => {
+      assertServiceOwner();
+      if (closing || controller.signal.aborted || !lifetime.ownsActiveRoot()) {
+        throw new Error("graph_occurrence_custody_changed");
+      }
+      if (stored) {
+        const current = getAutomation(stored.id);
+        if (!current?.graph || graphExecutionDigest(current, current.graph) !== graphDigest) {
+          throw new Error("graph_occurrence_custody_changed");
+        }
+      }
+    };
     let afterSettled: ReturnType<typeof captureMainRootContinuation>;
     graphRunsInFlight += 1;
     // 데몬으로 들어온 그래프 실행은 정의상 무인 작업이다 — 실행 슬롯 2단 큐와 자식 nice
@@ -699,13 +719,13 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
     try {
       const result = await lifetime.run(() => {
         afterSettled = captureMainRootContinuation();
-        return withRunPriority("background", () =>
-        runGraph(
-          { ...(automation as object), graph } as never,
-          graph as never,
-          { signal: controller.signal, ...(initialVars ? { initialVars } : {}) } as never,
-        ),
-        );
+        return withGraphOccurrenceCustody({ automationId: ownerId, occurrenceId, graphDigest },
+          assertOccurrenceCurrent, occurrenceCustody => withRunPriority("background", () =>
+            runGraph(admittedAutomation, admittedGraph, {
+              signal: controller.signal, occurrenceId, occurrenceCustody,
+              ...(initialVars ? { initialVars } : {}),
+            }),
+          ));
       });
       if (result.needsInput && result.loginWaitSource && result.loginWaits?.length) {
         if (stored) {

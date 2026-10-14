@@ -9,7 +9,7 @@ import type {
   ExperienceOntologyGraphSnapshot,
 } from "../../shared/types";
 import { EXPERIENCE_RELATION_LEDGER_FILE } from "../architecture/manifest";
-import { getDb } from "../store/db";
+import { getMemoryDb as getDb } from "../memory/database";
 import { isCanonicalTaskId } from "./taxonomy";
 import {
   autoLocalEmbedding,

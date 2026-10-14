@@ -1,6 +1,6 @@
 // Durable memory store (memory_entries table). The Memory Curator owns writes here.
-import { randomUUID } from "node:crypto";
-import { getDb } from "../store/db";
+import { createHash, randomUUID } from "node:crypto";
+import { getMemoryDb as getDb, getMemoryStoreInfo } from "./database";
 import type { MemoryKind, MemoryScope } from "../architecture/manifest";
 import {
   autoLocalEmbedding,
@@ -62,6 +62,10 @@ interface Row {
 }
 
 const MEMORY_CREATED_AT_CLOCK_KEY = "memory-created-at-clock-v1";
+const ordinaryRecall = (alias: "memory_entries" | "m" | "n") => `NOT EXISTS(
+  SELECT 1 FROM memory_identity_bindings visibility WHERE visibility.memory_id=${alias}.id
+    AND (json_extract(visibility.applicability_json,'$.recallChannel')='legacy_one_overlay'
+      OR json_extract(visibility.applicability_json,'$.enabled')=0))`;
 
 function nextMemoryCreatedAt(db: ReturnType<typeof getDb>): string {
   const clock = db.prepare("SELECT value FROM meta WHERE key = ?").get(MEMORY_CREATED_AT_CLOCK_KEY) as {
@@ -203,6 +207,14 @@ export interface NewMemoryEntry {
   intakeEpoch?: number | null;
   /** Original-language wording when `content` is the English rendering. */
   contentNative?: string;
+  /** Trusted local origin binding, separate from model-proposed evidence. */
+  originRefs?: Array<{ kind: "ticket" | "run" | "source" | "project"; id: string; revision?: string }>;
+  curationActor?: "model_curated" | "host_admitted" | "legacy";
+  policyVersion?: string;
+  /** A compatibility channel preserves an existing One-only audience. */
+  recallChannel?: "default" | "legacy_one_overlay";
+  compatibilityScope?: { scope: "personal" | "project" | "agent" | "team"; scopeRef: string | null };
+  enabled?: boolean;
 }
 
 export function insertMemoryEntry(e: NewMemoryEntry): MemoryEntry {
@@ -261,6 +273,7 @@ export function insertMemoryEntry(e: NewMemoryEntry): MemoryEntry {
       JSON.stringify(embedding.vector),
       now,
     );
+    bindMemoryIdentity(id, e, now);
     if (native && native !== e.content.trim()) {
       ensureMemoryNativeTable();
       getDb().prepare(
@@ -305,6 +318,76 @@ export function insertMemoryEntry(e: NewMemoryEntry): MemoryEntry {
   return entry;
 }
 
+/** The scope remains the reader's authority; graph origin never widens it. */
+function bindMemoryIdentity(id: string, entry: NewMemoryEntry, now: string): void {
+  const db = getDb();
+  const store = getMemoryStoreInfo();
+  const refs = (entry.originRefs ?? []).filter(ref => ref.id.trim() && ref.id.length <= 512).slice(0, 32);
+  const applicability = { scope: entry.scope, projectIds: entry.projectId ? [entry.projectId] : [],
+    projectPathHash: entry.projectPath ? createHash("sha256").update(entry.projectPath).digest("hex") : null,
+    actorId: entry.agentId ?? null, chatId: entry.chatId ?? null,
+    recallChannel: entry.recallChannel ?? "default", enabled: entry.enabled !== false,
+    ...(entry.compatibilityScope ? { compatibilityScope: entry.compatibilityScope } : {}) };
+  db.prepare(`INSERT INTO memory_identity_bindings(memory_id,owner_namespace,actor_id,origin_refs_json,applicability_json,curation_actor,policy_version)
+    VALUES(?,?,?,?,?,?,?)`).run(id, store.ownerNamespace, entry.agentId ?? null, JSON.stringify(refs), JSON.stringify(applicability),
+      entry.curationActor ?? "host_admitted", entry.policyVersion ?? "agentlas.memory-admission.v1");
+  for (const ref of refs) db.prepare(`INSERT OR IGNORE INTO memory_origin_links(memory_id,source_kind,source_id,source_revision,relation)
+    VALUES(?,?,?,?,'origin')`).run(id, ref.kind, ref.id, ref.revision ?? "");
+  if (entry.projectId) {
+    const origin = refs.find(ref => ref.kind === "ticket")?.id ?? refs[0]?.id ?? "";
+    db.prepare("INSERT OR IGNORE INTO memory_project_links(memory_id,project_id,relation,source_ref) VALUES(?,?,'origin',?)").run(id, entry.projectId, origin);
+    if (entry.scope === "project" || (entry.scope === "agent_repo" && entry.projectPath)) {
+      db.prepare("INSERT OR IGNORE INTO memory_project_links(memory_id,project_id,relation,source_ref) VALUES(?,?,'applies_to','')").run(id, entry.projectId);
+    }
+  }
+  db.prepare(`INSERT OR IGNORE INTO memory_projection_outbox(outbox_id,memory_id,authority_revision,state,payload_json,created_at,updated_at)
+    VALUES(?,?,?,'queued','{}',?,?)`).run(`memory:${id}:${store.revision}`, id, store.revision, now, now);
+}
+
+/** Append trusted source provenance to an exact governed duplicate without
+ * widening its applicability or changing the original memory actor. */
+export function appendMemoryOrigins(id: string, origins: NonNullable<NewMemoryEntry["originRefs"]>, projectId?: string | null): void {
+  const db = getDb();
+  db.transaction(() => {
+    const store = getMemoryStoreInfo();
+    const current = db.prepare(`SELECT b.origin_refs_json,b.owner_namespace,m.agent_id,m.scope,m.kind,m.content,m.project_id,m.project_path,m.chat_id FROM memory_entries m
+      LEFT JOIN memory_identity_bindings b ON b.memory_id=m.id WHERE m.id=? AND m.superseded_at IS NULL
+      AND m.content<>'' AND COALESCE(json_extract(b.applicability_json,'$.enabled'),1)<>0`).get(id) as (Pick<Row, "agent_id" | "scope" | "kind" | "content" | "project_id" | "project_path" | "chat_id"> & { origin_refs_json: string | null; owner_namespace: string | null }) | undefined;
+    if (!current || (current.owner_namespace && current.owner_namespace !== store.ownerNamespace)) throw new Error("memory_origin_target_unavailable");
+    let previous: NonNullable<NewMemoryEntry["originRefs"]> = [];
+    try { previous = JSON.parse(current.origin_refs_json ?? "[]") as typeof previous; } catch { /* Existing source links stay available separately. */ }
+    if (!Array.isArray(previous)) previous = [];
+    const refs = origins.filter(ref => ["ticket", "run", "source", "project"].includes(ref.kind)
+      && typeof ref.id === "string" && ref.id.trim() && ref.id.length <= 512).slice(0, 32);
+    const insert = db.prepare("INSERT OR IGNORE INTO memory_origin_links(memory_id,source_kind,source_id,source_revision,relation) VALUES(?,?,?,?,'origin')");
+    let changed = false;
+    for (const ref of refs) changed = insert.run(id, ref.kind, ref.id, ref.revision ?? "").changes > 0 || changed;
+    if (projectId) changed = db.prepare("INSERT OR IGNORE INTO memory_project_links(memory_id,project_id,relation,source_ref) VALUES(?,?,'origin',?)")
+      .run(id, projectId, refs.find(ref => ref.kind === "ticket")?.id ?? refs[0]?.id ?? "").changes > 0 || changed;
+    if (!changed) return;
+    const keyed = new Map([...previous, ...refs].filter(ref => ref && typeof ref.id === "string"
+      && ["ticket", "run", "source", "project"].includes(ref.kind)).map(ref => [JSON.stringify([ref.kind, ref.id, ref.revision ?? ""]), ref]));
+    if (current.owner_namespace === null) bindMemoryIdentity(id, { scope: current.scope as MemoryScope, kind: current.kind as MemoryKind,
+      content: current.content, agentId: current.agent_id, projectId: current.project_id, projectPath: current.project_path,
+      chatId: current.chat_id, curationActor: "legacy" }, new Date().toISOString());
+    db.prepare(`UPDATE memory_identity_bindings SET origin_refs_json=?,revision=revision+1 WHERE memory_id=?`)
+      .run(JSON.stringify([...keyed.values()].slice(-64)), id);
+    db.prepare("UPDATE memory_store_meta SET value=CAST(value AS INTEGER)+1 WHERE key='revision'").run();
+    const revision = getMemoryStoreInfo().revision, now = new Date().toISOString();
+    db.prepare("INSERT OR IGNORE INTO memory_projection_outbox VALUES(?,?,?,'queued','{}',?,?)")
+      .run(`memory-origin:${id}:${revision}`, id, revision, now, now);
+  }).immediate();
+}
+
+/** Internal projection repair, not a user-facing unscoped recall capability. */
+export function readMemoryEntryForProjection(id: string): MemoryEntry | null {
+  const row = getDb().prepare(`SELECT m.* FROM memory_entries m LEFT JOIN memory_identity_bindings b ON b.memory_id=m.id
+    WHERE m.id=? AND m.superseded_at IS NULL AND m.content<>''
+    AND (b.owner_namespace IS NULL OR b.owner_namespace=?)
+    AND COALESCE(json_extract(b.applicability_json,'$.enabled'),1)<>0`).get(id, getMemoryStoreInfo().ownerNamespace) as Row | undefined;
+  return row ? toEntry(row) : null;
+}
+
 /** Live (non-superseded) memory for a project folder, newest first. */
 export function listMemoryForContext(
   scope: { projectId?: string | null; projectPath?: string | null; agentId?: string | null; chatId?: string | null },
@@ -313,7 +396,10 @@ export function listMemoryForContext(
   // Project ids may identify a Science study without a Desktop folder. A null
   // path is not global authority. Agent-specific portable learning remains
   // portable, but only for its own actor; unknown actors receive shared memory.
-  const rows = getDb().prepare(`SELECT * FROM memory_entries WHERE superseded_at IS NULL AND (
+  const rows = getDb().prepare(`SELECT * FROM memory_entries WHERE superseded_at IS NULL
+    AND NOT EXISTS(SELECT 1 FROM memory_identity_bindings b WHERE b.memory_id=memory_entries.id
+      AND (json_extract(b.applicability_json,'$.recallChannel')='legacy_one_overlay'
+        OR json_extract(b.applicability_json,'$.enabled')=0)) AND (
     (scope IN ('user_identity','team_memory','agent_team') AND project_path IS NULL)
     OR (scope='agent_repo' AND agent_id=? AND (project_path IS NULL OR project_path=?))
     OR (scope='project'
@@ -331,7 +417,7 @@ export function listMemoryByPath(projectPath: string, limit = 40): MemoryEntry[]
   const rows = getDb()
     .prepare(
       `SELECT * FROM memory_entries
-       WHERE superseded_at IS NULL
+       WHERE superseded_at IS NULL AND ${ordinaryRecall("memory_entries")}
          AND (
            project_path = ?
            OR (project_path IS NULL AND scope IN ('user_identity', 'team_memory', 'agent_team'))
@@ -347,7 +433,7 @@ export function listGlobalMemory(limit = 30): MemoryEntry[] {
   const rows = getDb()
     .prepare(
       `SELECT * FROM memory_entries
-       WHERE project_path IS NULL AND scope != 'session' AND superseded_at IS NULL
+       WHERE project_path IS NULL AND scope != 'session' AND superseded_at IS NULL AND ${ordinaryRecall("memory_entries")}
        ORDER BY created_at DESC LIMIT ?`,
     )
     .all(limit) as Row[];
@@ -364,7 +450,7 @@ export function listMemoryByPathForAgent(
   const rows = getDb()
     .prepare(
       `SELECT * FROM memory_entries
-       WHERE superseded_at IS NULL
+       WHERE superseded_at IS NULL AND ${ordinaryRecall("memory_entries")}
          AND (
            project_path = ?
            OR (project_path IS NULL AND scope IN ('user_identity', 'team_memory', 'agent_team'))
@@ -382,7 +468,7 @@ export function listGlobalMemoryForAgent(agentId: string | null, limit = 30): Me
   const rows = getDb()
     .prepare(
       `SELECT * FROM memory_entries
-       WHERE project_path IS NULL AND scope != 'session' AND superseded_at IS NULL
+       WHERE project_path IS NULL AND scope != 'session' AND superseded_at IS NULL AND ${ordinaryRecall("memory_entries")}
          AND (scope != 'agent_repo' OR agent_id IS ?)
        ORDER BY created_at DESC LIMIT ?`,
     )
@@ -419,6 +505,18 @@ export function listMemoryEvidenceTokensForAgent(agentId: string, prefix: string
   return tokens;
 }
 
+/** Channel/applicability equality supplements the legacy scope/actor boundary. */
+export function memoryAudienceKey(id: string): string | null {
+  const row = getDb().prepare("SELECT applicability_json FROM memory_identity_bindings WHERE memory_id=?").get(id) as { applicability_json: string } | undefined;
+  if (!row) return JSON.stringify(["default", null, null]);
+  try {
+    const value = JSON.parse(row.applicability_json) as { enabled?: boolean; recallChannel?: string;
+      compatibilityScope?: { scope?: string; scopeRef?: string | null } };
+    if (value.enabled === false) return null;
+    return JSON.stringify([value.recallChannel ?? "default", value.compatibilityScope?.scope ?? null, value.compatibilityScope?.scopeRef ?? null]);
+  } catch { return null; }
+}
+
 /** Candidates that share the same governed owner boundary as one new memory. */
 export function listMemoryRelationCandidates(entry: MemoryEntry, limit = 160): MemoryEntry[] {
   const capped = Math.max(1, Math.min(500, Math.floor(limit)));
@@ -449,7 +547,8 @@ export function listMemoryRelationCandidates(entry: MemoryEntry, limit = 160): M
        ORDER BY created_at DESC LIMIT ?`,
     ).all(entry.id, entry.projectId, entry.projectPath, capped) as Row[];
   }
-  return rows.map(toEntry);
+  const audience = memoryAudienceKey(entry.id);
+  return audience ? rows.filter(row => memoryAudienceKey(row.id) === audience).map(toEntry) : [];
 }
 
 /** Dedup check: same scope+kind+content already live for this path (or globally). */
@@ -459,6 +558,8 @@ export function findEquivalentMemoryId(
   content: string,
   projectPath: string | null,
   agentId: string | null,
+  boundary: { projectId?: string | null; chatId?: string | null; recallChannel?: "default" | "legacy_one_overlay";
+    compatibilityScope?: { scope: string; scopeRef: string | null } } = {},
 ): string | null {
   const norm = content.trim().toLowerCase();
   const row = getDb()
@@ -468,9 +569,16 @@ export function findEquivalentMemoryId(
          AND superseded_at IS NULL
          AND (project_path IS ? OR project_path = ?)
          AND (scope != 'agent_repo' OR agent_id IS ?)
+         AND (scope != 'session' OR chat_id IS ?)
+         AND (scope != 'project' OR project_id IS ? OR (project_id IS NULL AND project_path IS NOT NULL))
+         AND COALESCE((SELECT json_extract(applicability_json,'$.recallChannel') FROM memory_identity_bindings WHERE memory_id=memory_entries.id),'default')=?
+         AND COALESCE((SELECT json_extract(applicability_json,'$.compatibilityScope.scope') FROM memory_identity_bindings WHERE memory_id=memory_entries.id),'')=?
+         AND COALESCE((SELECT json_extract(applicability_json,'$.compatibilityScope.scopeRef') FROM memory_identity_bindings WHERE memory_id=memory_entries.id),'')=?
+         AND COALESCE((SELECT json_extract(applicability_json,'$.enabled') FROM memory_identity_bindings WHERE memory_id=memory_entries.id),1)<>0
        LIMIT 1`,
     )
-    .get(scope, kind, norm, projectPath, projectPath, agentId) as { id: string } | undefined;
+    .get(scope, kind, norm, projectPath, projectPath, agentId, boundary.chatId ?? null, boundary.projectId ?? null,
+      boundary.recallChannel ?? "default", boundary.compatibilityScope?.scope ?? "", boundary.compatibilityScope?.scopeRef ?? "") as { id: string } | undefined;
   if (row?.id) return row.id;
   // A memory translated to English keeps its original wording in the side
   // table; the same original arriving again (an older engine, an import) is
@@ -484,9 +592,16 @@ export function findEquivalentMemoryId(
            AND m.superseded_at IS NULL
            AND (m.project_path IS ? OR m.project_path = ?)
            AND (m.scope != 'agent_repo' OR m.agent_id IS ?)
+           AND (m.scope != 'session' OR m.chat_id IS ?)
+           AND (m.scope != 'project' OR m.project_id IS ? OR (m.project_id IS NULL AND m.project_path IS NOT NULL))
+           AND COALESCE((SELECT json_extract(applicability_json,'$.recallChannel') FROM memory_identity_bindings WHERE memory_id=m.id),'default')=?
+           AND COALESCE((SELECT json_extract(applicability_json,'$.compatibilityScope.scope') FROM memory_identity_bindings WHERE memory_id=m.id),'')=?
+           AND COALESCE((SELECT json_extract(applicability_json,'$.compatibilityScope.scopeRef') FROM memory_identity_bindings WHERE memory_id=m.id),'')=?
+           AND COALESCE((SELECT json_extract(applicability_json,'$.enabled') FROM memory_identity_bindings WHERE memory_id=m.id),1)<>0
          LIMIT 1`,
       )
-      .get(scope, kind, norm, projectPath, projectPath, agentId) as { id: string } | undefined;
+      .get(scope, kind, norm, projectPath, projectPath, agentId, boundary.chatId ?? null, boundary.projectId ?? null,
+        boundary.recallChannel ?? "default", boundary.compatibilityScope?.scope ?? "", boundary.compatibilityScope?.scopeRef ?? "") as { id: string } | undefined;
     return nativeRow?.id ?? null;
   } catch {
     return null; // side table absent: nothing was translated on this store
@@ -558,14 +673,16 @@ export function dedupExactDuplicateMemories(): number {
   const rows = getDb()
     .prepare(
       `SELECT id FROM memory_entries m
-       WHERE superseded_at IS NULL
+       WHERE superseded_at IS NULL AND ${ordinaryRecall("m")}
          AND EXISTS (
            SELECT 1 FROM memory_entries n
-           WHERE n.superseded_at IS NULL
+           WHERE n.superseded_at IS NULL AND ${ordinaryRecall("n")}
              AND n.scope = m.scope AND n.kind = m.kind
              AND lower(trim(n.content)) = lower(trim(m.content))
              AND (n.project_path IS m.project_path)
              AND (n.agent_id IS m.agent_id)
+             AND (m.scope != 'project' OR n.project_id IS m.project_id)
+             AND (m.scope != 'session' OR n.chat_id IS m.chat_id)
              AND (n.created_at > m.created_at OR (n.created_at = m.created_at AND n.id > m.id))
          )`,
     )

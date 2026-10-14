@@ -239,7 +239,7 @@ async function runModelReview(
   // A slow or stuck model must never block publishing forever — bound the
   // review and fall back to the deterministic backstop if it runs long.
   const timeout = new AbortController();
-  const timer = setTimeout(() => timeout.abort(), 90_000);
+  const timer = setTimeout(() => timeout.abort(), 300_000);
   if (signal) {
     if (signal.aborted) timeout.abort();
     else signal.addEventListener("abort", () => timeout.abort(), { once: true });
@@ -525,7 +525,7 @@ async function llmFixFile(
   ].join("\n");
   const user = JSON.stringify({ file: rel, blockers: messages.slice(0, 8), content: content.slice(0, 24000) });
   const timeout = new AbortController();
-  const timer = setTimeout(() => timeout.abort(), 90_000);
+  const timer = setTimeout(() => timeout.abort(), 300_000);
   if (signal) {
     if (signal.aborted) timeout.abort();
     else signal.addEventListener("abort", () => timeout.abort(), { once: true });

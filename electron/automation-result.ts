@@ -56,7 +56,7 @@ export const AUTOMATION_JUDGE_PIN_FALLBACK = "pool_then_pin" as const;
  * the same morning timed out both attempts at ~22,500ms, leaving the run
  * "unjudged". Nobody waits on this background call, so both attempts get room.
  */
-export const AUTOMATION_OUTCOME_JUDGE_TIMEOUT_MS = 120_000;
+export const AUTOMATION_OUTCOME_JUDGE_TIMEOUT_MS = 300_000;
 
 function judgeReceiptOf(verdict: Pick<RequiredVerdict<string>, "verdict" | "runtimeReceipt" | "attempts">): AutomationJudgeReceipt | undefined {
   const attempts = (verdict.attempts ?? []).map((attempt) => ({

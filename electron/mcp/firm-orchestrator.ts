@@ -663,6 +663,7 @@ async function runNodeTurnSafe(
   synthesisAllocation: WorkloadAllocation | null;
   evidence: FirmExecutionEvidence;
   ok: boolean;
+  runtimeFailure?: Readonly<RunnerFailure>;
 }> {
   const link = linkAbort(p.signal);
   let timedOut = false;
@@ -725,7 +726,8 @@ async function runNodeTurnSafe(
       console.error("[memory] firm terminal turn receipt failed:", ticketError);
     }
     if (p.signal?.aborted) throw err;
-    const replayBlocked = err instanceof ObservedRunnerFailureError && runtimeFailureBlocksReplay(err.failure);
+    const failure = err instanceof ObservedRunnerFailureError ? err.failure : runnerFailureFromError(err, p.active.kind);
+    const runtimeFailure = runtimeFailureBlocksReplay(failure) ? failure : undefined;
     // 실패/타임아웃 노드도 per-node 완료 신호 → UI에서 ▶ 가 멈추고 정리된다(스턱 방지).
     p.sink({
       kind: "tool-use",
@@ -736,8 +738,8 @@ async function runNodeTurnSafe(
       role: turn.node.role,
       tier: turn.tier,
     });
-    // Always close the visible node before preserving its typed terminal boundary.
-    if (replayBlocked) throw err;
+    // A failed packet closes this node while independent siblings continue.
+    // Preserve typed uncertainty so this same packet cannot be retried.
     if (p.req.agentAppMode) {
       return {
         text: UNTRUSTED_RUNTIME_FAILURE_MESSAGE,
@@ -745,6 +747,7 @@ async function runNodeTurnSafe(
         synthesisAllocation: null,
         evidence,
         ok: false,
+        ...(runtimeFailure ? { runtimeFailure } : {}),
       };
     }
     if (timedOut) {
@@ -760,6 +763,7 @@ async function runNodeTurnSafe(
         synthesisAllocation: null,
         evidence,
         ok: false,
+        ...(runtimeFailure ? { runtimeFailure } : {}),
       };
     }
     const msg = err instanceof Error ? err.message : String(err);
@@ -773,6 +777,7 @@ async function runNodeTurnSafe(
       synthesisAllocation: null,
       evidence,
       ok: false,
+      ...(runtimeFailure ? { runtimeFailure } : {}),
     };
   } finally {
     inactivityGuard.current?.dispose();
@@ -1849,7 +1854,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
       toMainBubble: true,
       allocation,
     });
-    if (!turn.ok && !p.signal?.aborted) {
+    if (!turn.ok && !p.signal?.aborted && !runtimeFailureBlocksReplay(turn.runtimeFailure)) {
       mainStatus(
         ko
           ? "완료된 팀 결과를 보존한 채 종합 단계만 다시 진행하는 중…"

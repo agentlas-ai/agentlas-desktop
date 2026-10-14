@@ -24,6 +24,7 @@ import { parseRunEventReplayInput, type RunEventReplay } from "../../shared/run-
 import { withInvocationAccounting } from "../long-run/accounting-context";
 import { longRunMonetaryRefusal } from "../long-run/budget";
 import { runtimeFailureBlocksReplay } from "../runtime/selection";
+import { runtimeFailureBlocksNextAutomaticTurn } from "../../shared/runtime-turn-admission";
 import { captureGoalEpisode, applyGoalEpisodeRest, drainGoalEpisodeNotices,
   captureGoalProducerAdmission, admitGoalProducer, assertGoalProducerDispatch, latestGoalEpisodeProducer, type GoalProducerAdmission } from "../long-run/episode-disposition";
 import { latestGoalWaitSubscription, registerGoalWaitSubscription, registerOngoingGoalCycle, restoreGoalWaitAfterUndispatchedStart, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
@@ -164,6 +165,7 @@ import {
   cancelQueuedSteersForChat,
   getDurableQueuedSteer,
   holdQueuedSteerForRecovery,
+  releaseQueuedSteerRecoveryHold,
   listRecoverableQueuedSteers,
   persistQueuedSteer,
   retireHeldQueuedSteer,
@@ -1698,12 +1700,24 @@ export class InvocationService {
     let resumed = 0;
     let settled = 0;
     let held = 0;
-    for (const row of rows) {
+    for (let row of rows) {
+      // A distinct queued direction may proceed after exact execution custody closes.
+      // Unknown historical outcomes remain evidence, never permission to replay them.
+      const originalOwner = invocationRunOwners.getOwnerByRunId(row.originalRunId);
+      const previousExecutionClosed = originalOwner?.runId === row.originalRunId
+        && originalOwner.chatId === row.chatId && originalOwner.state === "released"
+        && !this.activeRuns.has(row.originalRunId) && !this.settlingRuns.has(row.originalRunId)
+        && !this.nativeIngress.has(row.originalRunId) && !this.nativePreparing.has(row.originalRunId);
+      if (previousExecutionClosed && row.status === "queued" && !row.drainedRunId
+        && row.recoveryState === "held"
+        && (row.recoveryReason === "original-run-start-uncertain"
+          || row.recoveryReason === "original-run-effect-boundary-unconfirmed")) {
+        if (releaseQueuedSteerRecoveryHold(row.id, row.recoveryReason)) row = getDurableQueuedSteer(row.id)!;
+      }
       if (row.recoveryState === "held") {
         // A held relay One wrote to a teammate has no owner to decide on it: measured 2026-10-12, two such rows sat
         // for days after their run ended in a browser-login wait without a receipt. Once that run's lease is released
         // and an hour has passed, close it; the Goal re-derives what still needs saying. Owner-written ones stay held.
-        const originalOwner = invocationRunOwners.getOwnerByRunId(row.originalRunId);
         if (row.request.promptOrigin === "system" && originalOwner?.state === "released"
           && Date.now() - Date.parse(row.queuedAt) > HELD_SYSTEM_STEER_RETIRE_MS && retireHeldQueuedSteer(row.id)) {
           settled += 1;
@@ -1734,17 +1748,15 @@ export class InvocationService {
         continue;
       }
       const originalReceipt = getInvocationRunReceipt(row.originalRunId);
-      if (!steerReceiptIsTerminal(originalReceipt)) {
+      if (!steerReceiptIsTerminal(originalReceipt) && !previousExecutionClosed) {
         holdQueuedSteerForRecovery(row.id, "original-run-start-uncertain");
         held += 1;
         continue;
       }
-      // A terminal invocation receipt only closes the model/runtime lifecycle;
-      // it does not prove that provider or adapter effects have quiesced. The
-      // exact Main-owned boundary is the only safe proof that a queued follow-
-      // up may be dispatched after a restart.
+      // While execution custody is still live, use its exact boundary. Once
+      // released, historical effect uncertainty is the next model's context.
       let originalBoundary: ReturnType<typeof readInvocationEffectBoundary>;
-      try {
+      if (!previousExecutionClosed) try {
         originalBoundary = readInvocationEffectBoundary({
           invocationRunId: row.originalRunId,
           expectedChatId: row.chatId,
@@ -1755,7 +1767,7 @@ export class InvocationService {
         continue;
       }
       // The owner's own message is never held on an unknown outside outcome, only on a run that has not finished.
-      if (!originalBoundary.terminal) {
+      if (!previousExecutionClosed && !originalBoundary!.terminal) {
         holdQueuedSteerForRecovery(row.id, "original-run-effect-boundary-unconfirmed");
         held += 1;
         continue;
@@ -2238,14 +2250,40 @@ export class InvocationService {
         teamId: chat.firmId,
       };
       const appliedPrinciples = selectApprovedOneOperatingPrinciples(profile, invocationScope);
-      const memoryState = getOneMemoryState();
-      const appliedMemories = selectApprovedOneMemoryAssets(invocationScope, memoryState);
+      let approvedMemoryContext: string | undefined;
+      // Approved memory is an optional overlay. A legacy reader or unavailable
+      // store must not refuse a fresh owner turn or alter the stored authority.
+      try {
+        const memoryState = getOneMemoryState();
+        const appliedMemories = selectApprovedOneMemoryAssets(invocationScope, memoryState);
+        const memoryContext = buildApprovedOneMemoryContext(invocationScope, memoryState);
+        const memoryReceipt = {
+          storeVersion: memoryState.version,
+          memoryIds: appliedMemories.map((item) => item.id),
+          scopeKinds: [...new Set(appliedMemories.map((item) => item.scope))].sort(),
+          assets: appliedMemories.map((item) => ({
+            assetId: item.id,
+            assetVersion: item.version,
+            provenanceStatus: item.provenanceStatus,
+            sourceTaskId: item.sourceTaskId,
+            sourceTaskVersion: item.sourceTaskVersion,
+            sourceRunId: item.sourceRunId,
+            sourceValueClosureId: item.sourceValueClosureId,
+            sourceValueClosureVersion: item.sourceValueClosureVersion,
+            scope: item.scope,
+          })),
+        };
+        oneMemoryReceipt = memoryReceipt;
+        approvedMemoryContext = memoryContext;
+      } catch {
+        console.warn("[invocation] optional One memory overlay skipped", { code: "one_memory_overlay_unavailable" });
+      }
       // One 페르소나 오버레이 — Main만 붙인다. 실행 경계(solo_locked·preflight)는
       // 위에서 이미 고정됐고, 이 블록은 정체성/능력 서술만 더한다.
       oneProfileContext = [
         ONE_PERSONA_DIRECTIVE,
         buildApprovedOneProfileContext(profile, invocationScope),
-        buildApprovedOneMemoryContext(invocationScope, memoryState),
+        approvedMemoryContext,
         ...(preparedOneMemoryUseOnce ? [preparedOneMemoryUseOnce.context] : []),
         ...(preparedOneBriefingAction ? [preparedOneBriefingAction.context] : []),
       ].filter(Boolean).join("\n\n");
@@ -2254,22 +2292,6 @@ export class InvocationService {
         profileVersion: profile.version,
         principleIds: appliedPrinciples.map((item) => item.id),
         scopeKinds: [...new Set(appliedPrinciples.map((item) => item.scope))].sort(),
-      };
-      oneMemoryReceipt = {
-        storeVersion: memoryState.version,
-        memoryIds: appliedMemories.map((item) => item.id),
-        scopeKinds: [...new Set(appliedMemories.map((item) => item.scope))].sort(),
-        assets: appliedMemories.map((item) => ({
-          assetId: item.id,
-          assetVersion: item.version,
-          provenanceStatus: item.provenanceStatus,
-          sourceTaskId: item.sourceTaskId,
-          sourceTaskVersion: item.sourceTaskVersion,
-          sourceRunId: item.sourceRunId,
-          sourceValueClosureId: item.sourceValueClosureId,
-          sourceValueClosureVersion: item.sourceValueClosureVersion,
-          scope: item.scope,
-        })),
       };
     } else if (
       chat.originSurface === "work"
@@ -5192,7 +5214,7 @@ export class InvocationService {
     const ownerStop = record.controller.signal.aborted && stop instanceof Error
       && (stop.message === STOPPED_BY_USER || isOwnerGoalStopCause(stop.message) || Boolean(invocationHostStopCause(stop.message)));
     if (!goalId || record.background || ownerStop || record.steeringInterruptRequested
-      || runtimeFailureBlocksReplay({ providerCode: reason })) return;
+      || runtimeFailureBlocksNextAutomaticTurn({ providerCode: reason })) return;
     try {
       const run = getLongRunByGoalId(goalId);
       if (!run || run.surface === "science" || LONG_RUN_TERMINAL_STATUSES.has(run.status)

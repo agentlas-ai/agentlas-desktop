@@ -616,6 +616,11 @@ type ArmedOneMemoryUseOnce = {
 /** Main codes that mean the proposal's exact binding no longer exists; the same proposal can never be confirmed. */
 const ONE_TEAM_PREFLIGHT_BINDING_GONE_CODES = new Set(["stale_binding", "candidate_changed", "expired", "recovery_required", "already_resolved", "invalid_request"]);
 
+type OneRunStartOutcome = {
+  status: "started" | "queued" | "reconciled" | "rejected" | "uncertain" | "no-dispatch";
+  runId?: string;
+};
+
 type PendingTeamPrompt = {
   proposalId: string;
   preflightSubmissionId?: string;
@@ -2492,6 +2497,8 @@ function OneSessionsShell() {
   const autoResolvingProposalRef = useRef<string | null>(null);
   // A refused automatic start re-publishes the proposal, which re-runs the start effect. Bound the attempts per proposal.
   const autoResolveFailuresRef = useRef(new Map<string, number>());
+  const attemptedTeamRunIdsRef = useRef(new Set<string>());
+  const settledRejectedTeamRunIdsRef = useRef(new Set<string>());
   const automationRunPendingRef = useRef(new Set<string>());
   const pluginMutationPendingRef = useRef(new Set<string>());
   const runIdRef = useRef<string | null>(null);
@@ -4315,7 +4322,6 @@ function OneSessionsShell() {
         member.installedAgentId === agentId && (member.unreadCount > 0 || Boolean(member.archivedAt)))));
     });
   }, [activeThreadChatId, confirmations, oneOrgState, selectedTaskId, sessionGroups.rows, taskforces]);
-  const activeThreadPromptFallback = selected?.display.title ?? conversation?.title ?? "";
   const activeTaskforce = useMemo(
     () => taskforces.find((taskforce) => taskforce.chatId === activeThreadChatId) ?? null,
     [activeThreadChatId, taskforces],
@@ -5070,14 +5076,24 @@ function OneSessionsShell() {
           ? await api.oneAttachments.forTeam(proposal.proposalId).catch(() => null)
           : null;
         if (cancelled) return;
+        const history = proposal ? await readOneShellHistory(api, activeThreadChatId).catch(() => null) : null;
+        let originalPrompt: string | null = null;
+        if (proposal && history) for (const entry of [...history].reverse()) {
+          if (entry.role === "user" && entry.text.trim()
+            && `sha256:${await onePreflightTextDigest(entry.text)}` === proposal.binding.promptDigest) {
+            originalPrompt = entry.text;
+            break;
+          }
+        }
+        if (cancelled || activeThreadChatIdRef.current !== activeThreadChatId) return;
         setTeamPreflight(proposal);
         setPendingTeamPrompt((current) => (
           proposal && current?.proposalId === proposal.proposalId
             ? current
-            : proposal
+            : proposal && originalPrompt
               ? {
                   proposalId: proposal.proposalId,
-                  text: activeThreadPromptFallback || proposal.goalSummary,
+                  text: originalPrompt,
                   attachments: teamAttachments,
                   recurrence: null,
                   overrides: {},
@@ -5085,11 +5101,10 @@ function OneSessionsShell() {
                 }
               : null
         ));
-        if (proposal && isOneTeamPreflightPendingStatus(proposal.status)) {
-          const visiblePrompt = activeThreadPromptFallback || proposal.goalSummary;
-          setMessages((current) => current.length > 0
-            ? current
-            : [{ id: `team-request:${proposal.proposalId}`, role: "user", text: visiblePrompt }]);
+        if (originalPrompt && history) {
+          const durable = toUiMessages(history);
+          setMessages(current => activeThreadChatIdRef.current === activeThreadChatId
+            ? mergeOneShellHistory(current, durable) : current);
         }
       })
       .catch((cause) => {
@@ -5101,7 +5116,7 @@ function OneSessionsShell() {
         }
       });
     return () => { cancelled = true; };
-  }, [activeThreadChatId, activeThreadPromptFallback]);
+  }, [activeThreadChatId, hydratedThreadChatId]);
 
   const oneMemoryUseOnceTarget = useMemo<OneMemoryUseOnceTarget | null>(() => {
     if (selected?.chatId) {
@@ -5372,7 +5387,7 @@ function OneSessionsShell() {
       /** Main-owned queued directions belong to this immutable submit. */
       preflightSubmissionId?: string;
     },
-  ) => {
+  ): Promise<OneRunStartOutcome> => {
     const api = ipc();
     const events = ipcEvents();
     const runLocale = normalizedLocale;
@@ -5382,24 +5397,38 @@ function OneSessionsShell() {
         setActionNotice(runLocale === "ko"
           ? "연결이 돌아오면 이어서 보낼게요."
           : "This follows when the connection returns.");
-        return;
+        return { status: "uncertain" };
       }
       throw new Error(tFor(runLocale, "one.shell.run.desktop_unavailable"));
     }
     let observedAdmissionStatus: "absent" | "pending" | "admitted" | "rejected" | null = null;
     let optimisticUserMessageId: string | null = null;
-    const reconcileAcceptedAdmission = async (candidateRunId: string, rejectionCause?: unknown): Promise<boolean> => {
+    const settleRejectedTeamStart = async (candidateRunId: string) => {
+      const ref = options?.teamRef;
+      if (!ref || ref.reservedRunId !== candidateRunId) return;
+      // Revoke only this sealed pending UI, even if its owner navigated away.
+      setPendingTeamPrompt(current => current?.proposalId === ref.proposalId ? null : current);
+      if (settledRejectedTeamRunIdsRef.current.has(candidateRunId)) return;
+      settledRejectedTeamRunIdsRef.current.add(candidateRunId);
+      const failed = await api.oneTeamPreflight.failStart(ref).catch(() => null);
+      if (failed && activeThreadChatIdRef.current === chatId) setTeamPreflight(current =>
+        !current || current.proposalId === ref.proposalId ? failed : current);
+    };
+    const reconcileAcceptedAdmission = async (candidateRunId: string, rejectionCause?: unknown): Promise<OneRunStartOutcome | null> => {
       let admission = await api.invoke.admission(candidateRunId);
+      const observed = await api.invoke.receipt(candidateRunId);
+      const exactReceipt = observed?.runId === candidateRunId && observed.chatId === chatId ? observed : null;
       const record = readOneUncertainAdmission(chatId);
       if (absentAdmissionProvesNoStart(admission, record?.runId === candidateRunId ? record : { chatId, runId: candidateRunId })
-        && !(await api.invoke.receipt(candidateRunId))) {
+        && !exactReceipt) {
         // A proven no-start without an admission row takes the same path as a recorded rejection.
         admission = { runId: candidateRunId, chatId, status: "rejected", pendingAt: "", updatedAt: "", rejectionReasonCode: null };
       }
       observedAdmissionStatus = admission.status;
-      if (admission.status !== "absent" && admission.chatId !== chatId) return false;
-      if (admission.status === "pending") return false;
-      if (admission.status === "rejected") {
+      if (admission.status !== "absent" && admission.chatId !== chatId) return null;
+      if (admission.status === "pending" && !exactReceipt) return null;
+      if (admission.status === "rejected" && !exactReceipt) {
+        await settleRejectedTeamStart(candidateRunId);
         uncertainAdmissionRef.current.delete(chatId);
         clearOneUncertainAdmission(chatId, candidateRunId);
         if (runIdRef.current === candidateRunId) {
@@ -5439,7 +5468,7 @@ function OneSessionsShell() {
             }
           } catch { /* Keep the draft and report the missing read below. */ }
         }
-        if (activeThreadChatIdRef.current !== chatId) return true;
+        if (activeThreadChatIdRef.current !== chatId) return { status: "rejected", runId: candidateRunId };
         /*
          * ★2026-09-23 — 이 갈래는 goalAdmissionControlFailure 보다 먼저 돈다. 예전엔 Main 이 모든
          *   사전 거절을 고정 사유(main_start_pre_dispatch_refused)로 적었고 여기서는 일반 문구만
@@ -5459,7 +5488,7 @@ function OneSessionsShell() {
         if (specific) {
           admissionRecoveryFenceRef.current.set(chatId, { runId: candidateRunId, accepted: false, notice: specific.message, rejectedAt: Date.now() });
           setActionNotice(specific.message);
-          return true;
+          return { status: "rejected", runId: candidateRunId };
         }
         const codeSuffix = "";
         setActionNotice((runLocale === "ko"
@@ -5473,13 +5502,20 @@ function OneSessionsShell() {
               ? "Your direction is in the conversation, but did not run. Review the Goal, then choose whether to revise or resume it. Nothing was resent automatically."
               : "Your direction was saved, but its conversation row could not be checked yet. Do not resend the draft; review the Goal and history first."
             : "This message could not run. Check the model connection and usage limits, then send it again.") + codeSuffix);
-        return true;
+        return { status: "rejected", runId: candidateRunId };
       }
-      const observed = await api.invoke.receipt(candidateRunId);
-      if (!observed || observed.runId !== candidateRunId || observed.chatId !== chatId) return false;
+      if (!exactReceipt) {
+        if (admission.status !== "admitted") return null;
+        if (options?.teamRef?.reservedRunId === candidateRunId) setPendingTeamPrompt(current =>
+          current?.proposalId === options.teamRef!.proposalId ? null : current);
+        return { status: "reconciled", runId: candidateRunId };
+      }
+      if (options?.teamRef?.reservedRunId === candidateRunId) setPendingTeamPrompt(current =>
+        current?.proposalId === options.teamRef!.proposalId ? null : current);
       uncertainAdmissionRef.current.delete(chatId);
       clearOneUncertainAdmission(chatId, candidateRunId);
-      if (observed.status === "running" || observed.status === "cancelling") {
+      if (activeThreadChatIdRef.current !== chatId) return { status: "reconciled", runId: candidateRunId };
+      if (exactReceipt.status === "running" || exactReceipt.status === "cancelling") {
         runIdRef.current = candidateRunId;
         runChatIdRef.current = chatId;
         activityRunIdRef.current = candidateRunId;
@@ -5501,11 +5537,11 @@ function OneSessionsShell() {
       setActionNotice(runLocale === "ko"
         ? "이 요청 ID의 실행 기록을 확인했습니다. 지시를 재전송하지 않고 기록을 복원합니다."
         : "A run with this request ID was found. Its record is being restored without resending the instruction.");
-      return true;
+      return { status: "reconciled", runId: candidateRunId };
     };
     const unresolvedRunId = uncertainAdmissionRef.current.get(chatId) ?? readOneUncertainAdmission(chatId)?.runId;
     if (unresolvedRunId) {
-      try { if (await reconcileAcceptedAdmission(unresolvedRunId)) return; }
+      try { const outcome = await reconcileAcceptedAdmission(unresolvedRunId); if (outcome) return outcome; }
       catch { /* Unavailable receipt is not permission for a new run ID. */ }
       setActionNotice(runLocale === "ko"
         ? observedAdmissionStatus === "pending"
@@ -5514,13 +5550,26 @@ function OneSessionsShell() {
         : observedAdmissionStatus === "pending"
           ? "The previous message is still being handled. This one follows right after."
           : "Checking on the previous message. This one follows when the connection returns.");
-      return;
+      return { status: "uncertain", runId: unresolvedRunId };
     }
-    if (options?.automaticRecovery && admissionRecoveryFenceRef.current.has(chatId)) return;
+    if (options?.automaticRecovery && admissionRecoveryFenceRef.current.has(chatId)) return { status: "no-dispatch" };
     if (runIdRef.current && runChatIdRef.current === chatId) {
       if (!options?.promptOrigin) setComposer((current) => current.trim() ? current : text);
       setActionNotice(runLocale === "ko" ? "이 대화는 실행 중입니다. 현재 작업에 지시를 보내거나 중지할 수 있습니다." : "This conversation is running. You can steer or stop the current run.");
-      return;
+      return { status: "no-dispatch" };
+    }
+    if (options?.teamRef) {
+      const sealedRunId = options.teamRef.reservedRunId;
+      if (options.runId !== sealedRunId) return { status: "rejected", runId: sealedRunId };
+      try {
+        const outcome = await reconcileAcceptedAdmission(sealedRunId);
+        if (outcome) return outcome;
+        if (observedAdmissionStatus !== "absent") return { status: "uncertain", runId: sealedRunId };
+      } catch { return { status: "uncertain", runId: sealedRunId }; }
+      if (attemptedTeamRunIdsRef.current.has(sealedRunId)) return { status: "no-dispatch", runId: sealedRunId };
+      // Burn synchronously before the first await/optimistic paint. A rejection
+      // or lost response is observation work, never a second native dispatch.
+      attemptedTeamRunIdsRef.current.add(sealedRunId);
     }
     // A Taskforce is the conversation's durable roster, not a one-turn
     // composer decoration. Decision answers, clarification turns, and recovery
@@ -5650,7 +5699,7 @@ function OneSessionsShell() {
       setActionNotice(runLocale === "ko"
         ? "요청 ID를 재시작 후에도 보존할 수 없어 실행을 보내지 않았습니다. 저장 공간을 확인해 주세요."
         : "The request ID could not be preserved across a restart, so the run was not sent. Check Desktop storage.");
-      return;
+      return { status: "no-dispatch", runId };
     }
     // Main may spend seconds admitting (preflight judges, runtime checks) before it
     // lists this chat as active. Until invoke.run answers, "not active" means "not
@@ -5685,6 +5734,7 @@ function OneSessionsShell() {
         ...(options?.overrides?.sessionRouting ? { sessionRouting: true } : { sessionRouting: false }),
         ...(options?.overrides?.fastMode ? { fastMode: true } : {}),
       });
+      if (!startAnswer || startAnswer.runId !== runId) throw new Error("invoke_start_ack_identity_mismatch");
       admittingRunIdsRef.current.delete(runId);
       clearOneUncertainAdmission(chatId, runId);
       if (startAnswer?.queued) {
@@ -5708,7 +5758,8 @@ function OneSessionsShell() {
             && message.text === text && message.durableMessageId)
             ? current.filter((message) => message.id !== placed) : current);
         } catch { /* the saved message appears at the next refresh */ }
-        return;
+        if (options?.teamRef) setPendingTeamPrompt(current => current?.proposalId === options.teamRef!.proposalId ? null : current);
+        return { status: "queued", runId };
       }
       if (options?.preflightSubmissionId && activeThreadChatIdRef.current === chatId) {
         setPreflightSteerReceipts(await api.invoke.preflightSteers(chatId).catch(() => []));
@@ -5721,8 +5772,10 @@ function OneSessionsShell() {
         }
       }
       if (options?.teamRef) {
-        setTeamPreflight(await api.oneTeamPreflight.getForChat(chatId).catch(() => null));
-        setPendingTeamPrompt(null);
+        setPendingTeamPrompt(current => current?.proposalId === options.teamRef!.proposalId ? null : current);
+        const currentProposal = await api.oneTeamPreflight.getForChat(chatId).catch(() => null);
+        if (activeThreadChatIdRef.current === chatId) setTeamPreflight(current =>
+          !current || current.proposalId === options.teamRef!.proposalId ? currentProposal : current);
       }
       // Instructions typed during preparation become steers of this run now.
       const pendingSteers = pendingSteersRef.current;
@@ -5754,9 +5807,10 @@ function OneSessionsShell() {
           ? "작업을 시작했어요. 화면 갱신이 늦어도 다시 보낼 필요는 없어요."
           : "The run started. The view may refresh late; there is no need to send it again.");
       }
+      return { status: "started", runId };
     } catch (cause) {
       admittingRunIdsRef.current.delete(runId);
-      try { if (await reconcileAcceptedAdmission(runId, cause)) return; }
+      try { const outcome = await reconcileAcceptedAdmission(runId, cause); if (outcome) return outcome; }
       catch { /* An unavailable receipt remains ambiguous, never rejected. */ }
       const controlFailure = goalAdmissionControlFailure(cause, runLocale === "ko");
       const chatBusyFailure = isChatBusyFailure(cause);
@@ -5775,7 +5829,7 @@ function OneSessionsShell() {
         setActionNotice(runLocale === "ko"
           ? "메시지를 보냈어요. 연결이 불안정해 진행 상황은 잠시 뒤 이 대화에서 확인할 수 있어요."
           : "Your message was sent. The connection is unsteady; progress will show in this conversation shortly.");
-        return;
+        return { status: "uncertain", runId };
       }
       clearOneUncertainAdmission(chatId, runId);
       if (controlFailure) {
@@ -5783,7 +5837,7 @@ function OneSessionsShell() {
       }
       if (activeThreadChatIdRef.current && activeThreadChatIdRef.current !== chatId) {
         if (!controlFailure && !isChatBusyFailure(cause)) requestOneOperationalRecovery("one-run-start", cause, { chatId });
-        return;
+        return { status: "no-dispatch", runId };
       }
       if (isChatBusyFailure(cause)) {
         const attachment = await api.invoke.attach(chatId).catch(() => null);
@@ -5833,13 +5887,10 @@ function OneSessionsShell() {
               ? "진행 중인 실행에 다시 연결했고, 새 지시를 저장했습니다. 현재 실행이 정리되면 이어서 반영합니다."
               : "Reconnected to the run in progress and saved the new instruction. It continues as soon as the current execution settles.")
             : (runLocale === "ko" ? "이미 실행 중인 작업에 다시 연결했습니다." : "Reconnected to the run already in progress."));
-          return;
+          return { status: steered ? "queued" : "no-dispatch", runId };
         }
       }
-      if (options?.teamRef) {
-        const failed = await api.oneTeamPreflight.failStart(options.teamRef).catch(() => null);
-        if (failed) setTeamPreflight(failed);
-      }
+      await settleRejectedTeamStart(runId);
       unsubscribeRunRef.current?.();
       unsubscribeRunRef.current = null;
       if (cancelNoticeRunIdRef.current === runId) {
@@ -5895,6 +5946,7 @@ function OneSessionsShell() {
         : "This message could not run. Check the model connection and usage limits, then send it again."));
       await refreshAll();
       if (!controlFailure && !isChatBusyFailure(cause)) requestOneOperationalRecovery("one-run-start", cause, { chatId });
+      return { status: "rejected", runId };
     } finally {
       if (attachedOneMemoryUseOnce) {
         // One Main consumes on accepted start. A rejected start is also a
@@ -5940,7 +5992,7 @@ function OneSessionsShell() {
       if (window.location.pathname.startsWith("/one")) {
         router.replace(`/one?task=${encodeURIComponent(proposal.binding.taskId)}`);
       }
-      await startRun(
+      const outcome = await startRun(
         proposal.binding.chatId,
         proposal.binding.taskId,
         proposal.binding.taskVersion,
@@ -5959,7 +6011,14 @@ function OneSessionsShell() {
           displayUserMessage: userAlreadyShown,
         },
       );
-      setTeamPreflight(await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => result.proposal));
+      if (!["started", "queued", "reconciled"].includes(outcome.status)) {
+        setPendingTeamPrompt(current => current?.proposalId === proposal.proposalId ? null : current);
+        if (outcome.status === "rejected") throw new Error("[agentlas:code=recovery_required] Reserved run was rejected before start");
+        return;
+      }
+      const currentProposal = await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => result.proposal);
+      if (activeThreadChatIdRef.current === proposal.binding.chatId) setTeamPreflight(current =>
+        !current || current.proposalId === proposal.proposalId ? currentProposal : current);
     } catch (cause) {
       const failures = (autoResolveFailuresRef.current.get(proposal.proposalId) ?? 0) + 1;
       autoResolveFailuresRef.current.set(proposal.proposalId, failures);
@@ -6056,7 +6115,7 @@ function OneSessionsShell() {
       if (window.location.pathname.startsWith("/one")) {
         router.replace(`/one?task=${encodeURIComponent(proposal.binding.taskId)}`);
       }
-      await startRun(
+      const outcome = await startRun(
         proposal.binding.chatId,
         proposal.binding.taskId,
         proposal.binding.taskVersion,
@@ -6075,7 +6134,14 @@ function OneSessionsShell() {
           displayUserMessage: true,
         },
       );
-      setTeamPreflight(await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => result.proposal));
+      if (!["started", "queued", "reconciled"].includes(outcome.status)) {
+        setPendingTeamPrompt(current => current?.proposalId === proposal.proposalId ? null : current);
+        if (outcome.status === "rejected") throw new Error("[agentlas:code=recovery_required] Reserved run was rejected before start");
+        return;
+      }
+      const currentProposal = await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => result.proposal);
+      if (activeThreadChatIdRef.current === proposal.binding.chatId) setTeamPreflight(current =>
+        !current || current.proposalId === proposal.proposalId ? currentProposal : current);
     } catch (cause) {
       const current = await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => null);
       if (current) setTeamPreflight(current);

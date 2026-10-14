@@ -16,7 +16,7 @@ import type {
 } from "../../shared/experience";
 import { getAuthenticatedActorIds, getSessionCookieHeader } from "../auth";
 import { pathFromGrant } from "../fs/access";
-import { getDb } from "../store/db";
+import { getMemoryDb as getDb } from "../memory/database";
 import { copiesPrivateSource } from "./source-copy-guard";
 import { publicExperienceSafetyIssues, tasteDraftSourceMemoryHash } from "./store";
 

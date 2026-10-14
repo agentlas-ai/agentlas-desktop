@@ -1,3 +1,4 @@
+import { withGraphOccurrenceCustody, type GraphOccurrenceCustody } from "../shared/graph-occurrence-custody";
 import { withRunnerSettlementObserver } from "./runtime/observed-runner";
 import { withAutomationRunAccounting } from "./long-run/accounting-context";
 import { stopAutomationRun as stopExecutionAutomationRun, assertAutomationGoalExecutionOwner, automationGoalExecutionHeld, bindAutomationRunStop, captureAutomationGoalExecutionOwner, isFiniteGoalDispatchRefusal, releaseAutomationRunStop } from "./automation-execution-control";
@@ -1041,6 +1042,7 @@ async function runOne(
     /** Exact scheduled occurrence. Calendar slots must not implicitly resume
      * another slot merely because it is the latest failed graph. */
     occurrenceId?: string;
+    assertOwnerOccurrenceCurrent?: () => void;
     /** The scheduled fire time. Recording the run and advancing the schedule
      *  must use the same clock, or a run fired for a past-due slot stamps
      *  last_run_at with wall-clock now while next_run_at advances from the slot,
@@ -1057,7 +1059,6 @@ async function runOne(
   const afterSettled = captureMainRootContinuation();
   if (dispatchPaused()) return { accepted: false };
   if (running.has(a.id)) return { accepted: false };
-  if (!a.graph && hasGraphLoginWait(a.id) && !opts?.resumeLoginWaitRunId) return { accepted: false }; // 직전 실행이 아직 진행 중이면 건너뜀
   // due[] may have waited behind another run. The controller must belong to
   // the same stored definition that this invocation will actually execute.
   const definitionSnapshot = (value: Automation) => JSON.stringify({
@@ -1495,13 +1496,35 @@ async function runOne(
         const graphRun = Promise.resolve().then(() => {
           throwIfAutomationAborted(controller);
           assertGoalCurrent();
-          return withRunPriority("background", () =>
+          const occurrenceId = opts?.triggerDelivery?.occurrenceId ?? opts?.occurrenceId;
+          const graphDigest = graphExecutionDigest(a, a.graph!);
+          const triggerId = opts?.triggerDelivery?.occurrenceId?.startsWith("trigger-event:")
+            ? opts.triggerDelivery.occurrenceId.slice("trigger-event:".length) : null;
+          type TriggerClaim = { automation_id: string; status: string; claim_owner: string | null; claimed_until: string | null; run_id: string | null };
+          const readTriggerClaim = () => triggerId ? getDb().prepare("SELECT automation_id,status,claim_owner,claimed_until,run_id FROM automation_trigger_events WHERE id=?").get(triggerId) as TriggerClaim | undefined : undefined;
+          const claimedTrigger = readTriggerClaim();
+          const ownsScheduledOccurrence = Boolean(scheduledAttemptRecorded && scheduledOccurrenceId && occurrenceId === scheduledOccurrenceId);
+          const assertOccurrenceCurrent = () => {
+            graphSignal.throwIfAborted();
+            assertGoalCurrent();
+            const lease = getDb().prepare("SELECT lease_owner,claimed_at FROM automations WHERE id=?").get(a.id) as { lease_owner: string | null; claimed_at: string | null } | undefined;
+            if (!opts?.claim || leaseOwnershipLost || lease?.lease_owner !== LEASE_OWNER || !lease.claimed_at) throw new Error("graph_occurrence_custody_changed");
+            if (opts?.assertOwnerOccurrenceCurrent) { opts.assertOwnerOccurrenceCurrent(); }
+            else if (triggerId) {
+              const current = readTriggerClaim();
+              if (!claimedTrigger?.claim_owner || current?.claim_owner !== claimedTrigger.claim_owner
+                || current.automation_id !== a.id || current.status !== "claimed" || current.run_id !== runId
+                || !current.claimed_until || Date.parse(current.claimed_until) <= Date.now()) throw new Error("graph_occurrence_custody_changed");
+            } else if (!ownsScheduledOccurrence) throw new Error("graph_occurrence_custody_changed");
+          };
+          const executeGraph = (occurrenceCustody?: GraphOccurrenceCustody) => withRunPriority("background", () =>
           runGraph(a, a.graph!, {
             signal: graphSignal,
             ...(opts?.dryRun ? { dryRun: true } : {}),
             ...(opts?.fresh ? { fresh: true } : {}),
           runId,
-          occurrenceId: opts?.triggerDelivery?.occurrenceId ?? opts?.occurrenceId,
+          occurrenceId,
+          occurrenceCustody,
           resumeLoginWaitRunId: opts?.resumeLoginWaitRunId,
           initialVars: graphInitialVars,
           ownerContinuationContext,
@@ -1550,6 +1573,9 @@ async function runOne(
             },
           }),
         );
+          return occurrenceId && (ownsScheduledOccurrence || triggerId || opts?.assertOwnerOccurrenceCurrent)
+            ? withGraphOccurrenceCustody({ automationId: a.id, occurrenceId, graphDigest }, assertOccurrenceCurrent, executeGraph)
+            : executeGraph();
         });
         result = await awaitAutomationRunnerWithAbortGrace(graphRun, graphSignal);
       } catch (err) {
@@ -2102,7 +2128,9 @@ async function runOne(
             allowDisabledLease: opts?.allowDisabledLease,
             triggerContext: opts?.triggerContext,
             zeroToolRetried: true,
-            fresh: opts?.fresh,
+            // Physical retries remain the original logical request.
+            occurrenceId: opts?.triggerDelivery?.occurrenceId ?? opts?.occurrenceId,
+            fresh: false,
           },
         ); } finally { legacyRuntimeRetries.delete(retryAutomation); }
         // ★사전 확인의 관측 기반 완결 — 재시도가 도구로 실제 완주했다면 그 사실을
@@ -2265,11 +2293,14 @@ export async function runAutomationNow(id: string, opts?: { dryRun?: boolean; fr
     : undefined;
   const lifetime = new MainInvocationLifetime(mainAdmission, id, freshRunId ?? id, "automation");
   return lifetime.run(() => runOne(a, {
-    claim: true,
-    advanceSchedule: false,
-    allowDisabledLease: true,
+    claim: true, advanceSchedule: false, allowDisabledLease: true,
     ...(opts?.dryRun ? { dryRun: true } : {}),
-    ...(opts?.fresh ? { fresh: true, runId: freshRunId } : {}),
+    ...(opts?.fresh ? { fresh: true, runId: freshRunId,
+      occurrenceId: `owner-request:${randomUUID()}`,
+      assertOwnerOccurrenceCurrent: () => {
+        if (!lifetime.ownsActiveRoot() || dispatchPaused()) throw new Error("graph_occurrence_custody_changed");
+      },
+    } : {}),
   }));
 }
 
@@ -2308,11 +2339,11 @@ export function enqueueAutomationRunNow(id: string, mainAdmission?: MainInvocati
   }
   const lifetime = new MainInvocationLifetime(mainAdmission, id, runId, "automation");
   void lifetime.run(() => runOne(automation, {
-    claim: true,
-    preclaimed: true,
-    runId,
-    advanceSchedule: false,
-    allowDisabledLease: true,
+    claim: true, preclaimed: true, runId, advanceSchedule: false, allowDisabledLease: true,
+    fresh: true, occurrenceId: `owner-request:${randomUUID()}`,
+    assertOwnerOccurrenceCurrent: () => {
+      if (!lifetime.ownsActiveRoot() || dispatchPaused()) throw new Error("graph_occurrence_custody_changed");
+    },
   })).catch((error) => console.error(`[automation] queued run failed (${id})`, error));
   return { accepted: true, automationId: id, runId, status: "queued" };
 }

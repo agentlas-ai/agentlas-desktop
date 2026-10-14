@@ -49,6 +49,7 @@ export interface LightWakeDeps {
   pickRunner(status: RuntimeStatus): { runner: Runner; label: string } | null;
   noteFailure(status: RuntimeStatus, failure: RunnerFailure): void;
   now(): number;
+  /** Explicit short budgets are enabled only by the judgment test hook. */
   timeoutMs?: number;
   /** Authenticated daemon decision lane. Absence preserves the legacy
    * stateless path; an uncertain dispatch never falls back to that path. */
@@ -129,7 +130,9 @@ export class LightWakeRunner {
       VALUES (?,?,'running',1,?,?)`).run(input.wakeId, input.agentId, this.deps.processStartedAtMs, this.deps.now());
     const controller = new AbortController();
     this.active.set(input.wakeId, controller);
-    const timer = setTimeout(() => controller.abort(new Error("alive-wake-timeout")), this.deps.timeoutMs ?? 180_000);
+    const timeoutMs = process.env.AGENTLAS_TEST_JUDGMENT_TIMEOUTS === "1" && Number.isFinite(this.deps.timeoutMs)
+      ? Math.max(1, Math.min(300_000, this.deps.timeoutMs!)) : 300_000;
+    const timer = setTimeout(() => controller.abort(new Error("alive-wake-timeout")), timeoutMs);
     timer.unref?.();
     const toolIds = new Map<string, string>();
     const usage = createRuntimeUsageCollector();
