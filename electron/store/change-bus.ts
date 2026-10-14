@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type Database from "better-sqlite3";
 /**
  * Process-local invalidation bus for projections that mirror Desktop stores.
@@ -63,9 +64,17 @@ export function desktopStoreTransaction<T>(db: Database.Database, body: () => T)
 
 const listeners = new Set<DesktopStoreChangeListener>();
 
+/**
+ * A listener runs in the async context it subscribed from, not the writer's. Listeners fire synchronously inside the
+ * write, so they used to inherit whatever run the writer was in: a Goal verifier recording its inference start woke
+ * the AGI monitor, whose own Codex decision then opened its effect scope inside the verifier's sealed stage and was
+ * judged an untracked dispatch, aborting the real verification (Yotube room 2026-10-14 00:29Z and 00:48Z).
+ */
 export function onDesktopStoreChange(listener: DesktopStoreChangeListener): () => void {
-  listeners.add(listener);
-  return () => listeners.delete(listener);
+  const inSubscriberContext = AsyncLocalStorage.snapshot();
+  const bound: DesktopStoreChangeListener = (change) => inSubscriberContext(() => listener(change));
+  listeners.add(bound);
+  return () => listeners.delete(bound);
 }
 
 export function emitDesktopStoreChange(change: DesktopStoreChange): void {

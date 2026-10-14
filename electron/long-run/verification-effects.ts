@@ -238,8 +238,12 @@ class EffectSession implements VerificationSession {
   }
 
   private emptyReport(kind: string, report: AdapterEffectReport | null): boolean {
+    // Codex reports its exec child or resident turn closing; quiesced is the confirmed terminal. Without this arm no
+    // Codex verifier could ever pass (production 2026-10-14: 2 of 2 failed native_not_empty_complete on a clean report).
     const successfulTerminal = kind === "antigravity" ? report?.terminal === "SUCCESS"
-      : kind === "acp" ? report?.terminal === "end_turn" : false;
+      : kind === "acp" ? report?.terminal === "end_turn"
+      : kind === "codex" ? (report?.terminal === "process_closed" || report?.terminal === "resident_turn_closed") && report.quiesced === true
+      : false;
     return report?.complete === true && successfulTerminal && report.operationIds.length === 0
       && (report.settledFailureIds?.length ?? 0) === 0 && report.reasons.length === 0;
   }
