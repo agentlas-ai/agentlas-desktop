@@ -545,7 +545,7 @@ async function prejudgeRosterAutoRoute(
     if (eligible.length === 0) return;
     await selectAutoRoutedAgentJudged(prompt, eligible, preferredLocaleFromText(prompt), {
       allowFallback: false,
-      timeoutMs: 8_000,
+      timeoutMs: 300_000,
       runtimeSelection,
     });
   } catch {

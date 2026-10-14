@@ -57,7 +57,7 @@ export async function resolveOneMarkdownSurfaceIntent(
       input: taskPrompt.slice(0, 4_000),
       guidance: "Judge the request's meaning in any language; mentioning a trip in passing is not a travel plan.",
       signal: opts.signal,
-      timeoutMs: opts.timeoutMs ?? 6_000,
+      timeoutMs: opts.timeoutMs ?? 300_000,
     });
     return verdict.verdict === null
       ? { intent: "generic", source: "unavailable" }

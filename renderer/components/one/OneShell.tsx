@@ -1501,6 +1501,8 @@ function OneSessionsShell() {
   // These refs make that first paint belong to the new run, rather than briefly
   // borrowing the prior answer's Activity and elapsed clock.
   const dispatchRunPromptRef = useRef<{ runId: string; text: string } | null>(null);
+  /** Recovery run ids already started once; a recovery id is never started twice (see the auto-recovery effect). */
+  const attemptedRecoveryRunIdsRef = useRef(new Set<string>());
   const activeRunStartedAtRef = useRef<number | null>(null);
   const activityChatIdRef = useRef<string | null>(null);
   // Durable receipts may arrive after a newer turn has already begun. Keep the
@@ -6990,6 +6992,10 @@ function OneSessionsShell() {
         state.attemptsSpent = verification.attempt ?? state.attemptsSpent + 1;
         const nextRecoveryRunId = verification.nextRecoveryRunId;
         if (!nextRecoveryRunId) { setAutoRecovery({ phase: "stopped", reason: "undecided", diagnosis: safeDiagnosis }); return; }
+        // One start per recovery id: a refused start (native_gui_original_start_replayed) asked again for the same id
+        // and restarted it about five times a second, flashing the room between busy and idle (Yotube, 2026-10-14).
+        if (attemptedRecoveryRunIdsRef.current.has(nextRecoveryRunId)) { setAutoRecovery({ phase: "stopped", reason: "undecided", diagnosis: safeDiagnosis }); return; }
+        attemptedRecoveryRunIdsRef.current.add(nextRecoveryRunId);
         state.originalRunId = verification.originalRunId;
         state.recoveryRunId = nextRecoveryRunId;
         setAutoRecovery({ phase: "recovering", attempt: state.attemptsSpent, diagnosis: safeDiagnosis });
@@ -7061,6 +7067,8 @@ function OneSessionsShell() {
         state.attemptsSpent = judgement.attempt ?? state.attemptsSpent + 1;
         const recoveryRunId = judgement.nextRecoveryRunId;
         if (!recoveryRunId || !judgement.originalRunId) { setAutoRecovery({ phase: "stopped", reason: "undecided", diagnosis: safeDiagnosis }); return; }
+        if (attemptedRecoveryRunIdsRef.current.has(recoveryRunId)) { setAutoRecovery({ phase: "stopped", reason: "undecided", diagnosis: safeDiagnosis }); return; }
+        attemptedRecoveryRunIdsRef.current.add(recoveryRunId);
         state.originalRunId = judgement.originalRunId;
         state.recoveryRunId = recoveryRunId;
         setAutoRecovery({ phase: "recovering", attempt: state.attemptsSpent, diagnosis: safeDiagnosis });

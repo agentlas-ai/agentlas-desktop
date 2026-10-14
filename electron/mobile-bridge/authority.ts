@@ -3118,7 +3118,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         // Async pre-pass: warm the completion-claim judgments the synchronous
         // Value Closure trust validator peeks. A miss remains unverified and
         // cannot be promoted by a regex or static verdict.
-        await prejudgeCompletionClaims(ACCEPTED_RESULT_CLOSURE_FACT_STATEMENTS, { timeoutMs: 6_000 }).catch(() => undefined);
+        await prejudgeCompletionClaims(ACCEPTED_RESULT_CLOSURE_FACT_STATEMENTS, { timeoutMs: 300_000 }).catch(() => undefined);
         const closure = ensureAcceptedResultValueClosure({
           priorTaskVersion: expectedVersion,
           acceptedTask: accepted,
@@ -3531,8 +3531,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         // The host keeps this identity through preflight and actual admission.
         invocation.runId ??= randomUUID();
         await withInvocationPreflightAccounting({ runId: invocation.runId, chatId: invocation.chatId }, () => Promise.all([
-          prejudgeOneRequestIntent(invocation, { timeoutMs: 4_000 }),
-          prejudgeOneMemoryIntent(invocation, { timeoutMs: 4_000 }),
+          prejudgeOneRequestIntent(invocation, { timeoutMs: 300_000 }),
+          prejudgeOneMemoryIntent(invocation, { timeoutMs: 300_000 }),
         ])).catch(() => undefined);
         const mobileOneTurn = isMobileBridgeOneChat(requireChat(invocation.chatId));
         const effectiveInvocation = mobileOneTurn

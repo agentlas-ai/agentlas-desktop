@@ -2290,8 +2290,8 @@ async function runOneBindingInvocation(
   };
   // 동기 start 경로가 들여다보는 판정을 미리 데운다(모바일/렌더러 진입점과 동일).
   await withInvocationPreflightAccounting({ runId: request.runId, chatId: request.chatId }, () => Promise.all([
-    prejudgeOneRequestIntent(request, { timeoutMs: 4_000 }),
-    prejudgeOneMemoryIntent(request, { timeoutMs: 4_000 }),
+    prejudgeOneRequestIntent(request, { timeoutMs: 300_000 }),
+    prejudgeOneMemoryIntent(request, { timeoutMs: 300_000 }),
   ])).catch(() => undefined);
 
   return new Promise<string>((resolve, reject) => {
