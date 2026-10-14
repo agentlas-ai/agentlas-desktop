@@ -5,6 +5,7 @@ import { createNativeInvocationPublicReceiver, nativePublicAckOperation, nativeP
 import { configuredNativeGuiOwner } from "./native-gui-startup";
 import { dispatchOnePreflightSteers } from "./preflight-steer-admission";
 import { notifyDaemonRunSettled } from "./daemon-run-alerts";
+import { publishNativeGuiActiveChats, publishNativeGuiInvocationEvent } from "./native-gui-events";
 
 type Channel = object & { dispatch(method: string, params: unknown): Promise<unknown>; onClose(listener: () => void): () => void };
 let legacyChatIds: string[] = [], nativeChatIds: string[] = [], recoveredChatIds: string[] = [];
@@ -43,8 +44,13 @@ export function createNativeGuiPublicBridge(policy: Readonly<{ maxRetainedBytes:
       maxRetainedBytes: policy.maxRetainedBytes,
       read: input => actualChannel.dispatch("native.attach", nativePublicReadOperation(input)),
       ack: input => actualChannel.dispatch("native.attach", nativePublicAckOperation(input)),
-      onEvent: ({ runId, event }) => { if (live()) broadcast(`invoke:event:${runId}`, event); },
-      onActiveChats(chatIds) { if (!live()) return; staleChatIds = new Set(); nativeChatIds = [...chatIds]; recoveredChatIds = []; publishActiveChats(); },
+      onEvent: ({ runId, chatId, event }) => {
+        if (!live()) return;
+        broadcast(`invoke:event:${runId}`, event);
+        // The phone bridge, too: it listens to Main's own service, which never sees daemon-hosted runs.
+        publishNativeGuiInvocationEvent({ runId, chatId, event });
+      },
+      onActiveChats(chatIds) { if (!live()) return; staleChatIds = new Set(); nativeChatIds = [...chatIds]; recoveredChatIds = []; publishActiveChats(); publishNativeGuiActiveChats(nativeChatIds); },
       onSettled(settlement) {
         const { runId, chatId } = settlement;
         if (!live()) return;

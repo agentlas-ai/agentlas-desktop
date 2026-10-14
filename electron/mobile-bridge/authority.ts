@@ -65,6 +65,7 @@ import { MobileChatAttachmentUploads } from "./chat-attachment-upload";
 import { chatFilePrompt, chatFileImages, validateChatAttachmentSelection, readBoundChatMessageAttachment } from "../store/chat-message-attachments";
 import { performOneMobileSuggestionAction } from "../one/mobile-suggestions";
 import { invocationService } from "../invocation/service";
+import { nativeGuiActiveChatIds, onNativeGuiActiveChats, onNativeGuiInvocationEvent } from "../invocation/native-gui-events";
 import type { InvocationCurrentTurnPort } from "../runtime/invocation-owner-router";
 import { readMobileBridgeHistoryPage } from "./history-page";
 import { MobileToolPayloadStore, sanitizeMobileToolBody } from "./tool-payload";
@@ -1761,7 +1762,8 @@ export function durableMobileApprovalPending(id: string, chatId: string): boolea
 }
 
 export function observeMobilePushNotices(hostId: string, listener: (notice: MobilePushNotice, stillCurrent?: () => boolean) => void): () => void {
-  const stopMessages = invocationService.onEvent(({ runId, chatId, event }) => {
+  // Personal One turns run in the background service since 2026-10-12; its finals arrive through native-gui-events.
+  const onMessage = ({ runId, chatId, event }: { runId: string; chatId: string; event: McpInvocationEvent }) => {
     if (event.agentId || event.kind !== "final") return;
     const message = projectOneMessageForPhone(event);
     if (!message) return; // quiet/check-in/worker answers have no saved root message
@@ -1775,7 +1777,10 @@ export function observeMobilePushNotices(hostId: string, listener: (notice: Mobi
     listener({ category: "resultReady", destination: "thread", hostId,
       entityId: chatId, dedupeKey: `run-result:${hostId}:${runId}`,
       subject: "Agentlas", occurredAt: new Date().toISOString() });
-  });
+  };
+  const stopMainMessages = invocationService.onEvent(onMessage);
+  const stopNativeMessages = onNativeGuiInvocationEvent(onMessage);
+  const stopMessages = () => { stopMainMessages(); stopNativeMessages(); };
   // A raw error can precede a successful provider fallback. Only the durable
   // terminal receipt can establish failure; input/approval/cancel waits cannot.
   const stopFailures = invocationService.onSettled(({ runId, chatId, agentId, receipt, pendingQuestion, browserLoginWaiting, userDecisionRequest }) => {
@@ -5386,41 +5391,48 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
 
   private attachDesktopSubscriptions(): void {
     if (this.upstreamUnsubscribers.length > 0) return;
+    // One handler for Main-hosted and daemon-hosted runs (personal One runs in the daemon since 2026-10-12).
+    const forwardInvocationEvent = ({ runId, chatId, event }: { runId: string; chatId: string; event: McpInvocationEvent }) => {
+      // Live events arrive per token; the folder and Task lookups are per
+      // RUN, not per event. The cache is dropped when the run terminates.
+      const { cwd, taskId, personalOne } = cachedRunContext(runId, chatId);
+      const oneMessage = personalOne ? projectOneMessageForPhone(event) : null;
+      this.emit({
+        event: "invoke.event",
+        payload: asJsonValue(
+          {
+            runId,
+            chatId,
+            event: projectMobileBridgeInvocationEvent(event, { taskId, chatId, runId, cwd, toolBodies: !personalOne }),
+            ...(personalOne ? { personalOne: true } : {}),
+            ...(oneMessage ? { oneMessage } : {}),
+          },
+          "invoke.event envelope",
+        ),
+      });
+      if (event.kind === "final" || event.kind === "error") {
+        forgetRunContext(runId);
+        this.scheduleSnapshotUpdated();
+      } else if ((event.kind === "tool-use" || (event.kind === "reasoning" && event.reasoning?.phase === "end"))
+        && oneDispatchParentForRun(chatId, runId)) {
+        // The original child event stays child-bound. Refresh the room's read-only projection.
+        this.scheduleSnapshotUpdated();
+      }
+    };
+    // The phone sees every running chat: Main-hosted ones and the daemon's (union, so neither source flaps the list).
+    const emitActiveChats = (): void => {
+      const chatIds = [...new Set([...invocationService.activeChatIds(), ...nativeGuiActiveChatIds()])];
+      this.emit({ event: "invoke.activeChats", payload: asJsonValue(chatIds, "invoke.activeChats") });
+      this.scheduleSnapshotUpdated();
+    };
     this.upstreamUnsubscribers = [
       onGoalControlChange((change) => {
         if (this.goalControl) this.emit({ event: "goalControl.updated", payload: asJsonValue({ schemaVersion: 1, hostId: this.options.hostIdentity.hostId, ...change }, "goal control change") });
       }),
-      invocationService.onEvent(({ runId, chatId, event }) => {
-        // Live events arrive per token; the folder and Task lookups are per
-        // RUN, not per event. The cache is dropped when the run terminates.
-        const { cwd, taskId, personalOne } = cachedRunContext(runId, chatId);
-        const oneMessage = personalOne ? projectOneMessageForPhone(event) : null;
-        this.emit({
-          event: "invoke.event",
-          payload: asJsonValue(
-            {
-              runId,
-              chatId,
-              event: projectMobileBridgeInvocationEvent(event, { taskId, chatId, runId, cwd, toolBodies: !personalOne }),
-              ...(personalOne ? { personalOne: true } : {}),
-              ...(oneMessage ? { oneMessage } : {}),
-            },
-            "invoke.event envelope",
-          ),
-        });
-        if (event.kind === "final" || event.kind === "error") {
-          forgetRunContext(runId);
-          this.scheduleSnapshotUpdated();
-        } else if ((event.kind === "tool-use" || (event.kind === "reasoning" && event.reasoning?.phase === "end"))
-          && oneDispatchParentForRun(chatId, runId)) {
-          // The original child event stays child-bound. Refresh the room's read-only projection.
-          this.scheduleSnapshotUpdated();
-        }
-      }),
-      invocationService.onActiveChats((chatIds) => {
-        this.emit({ event: "invoke.activeChats", payload: asJsonValue(chatIds, "invoke.activeChats") });
-        this.scheduleSnapshotUpdated();
-      }),
+      invocationService.onEvent(forwardInvocationEvent),
+      onNativeGuiInvocationEvent(forwardInvocationEvent),
+      invocationService.onActiveChats(() => emitActiveChats()),
+      onNativeGuiActiveChats(() => emitActiveChats()),
       onBrowserApprovalLifecycle((event) => this.forwardBrowserApproval(event)),
       onToolApprovalRequested(() => this.scheduleSnapshotUpdated()),
       onToolApprovalResolved(() => this.scheduleSnapshotUpdated()),

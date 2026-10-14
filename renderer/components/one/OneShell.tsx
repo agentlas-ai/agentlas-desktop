@@ -859,6 +859,12 @@ function toUiMessages(history: ChatHistoryEntry[]): UiMessage[] {
       suppressRecoveryReply = false;
       continue;
     }
+    // An answer the owner's own new message cut off is superseded by the reply to that message: the host interrupts
+    // the turn and saves the streamed fragment right after the owner's row. Drawing it ("중단됨 · …") only reads as a
+    // fault (owner 2026-10-14, X Marketing 10:40:27Z: message at .072, fragment at .152). The record keeps it.
+    const previous = visible.at(-1);
+    if (entry.role === "assistant" && isInterruptedPartial(entry.text) && previous?.role === "user"
+      && Math.abs(Date.parse(entry.createdAt) - Date.parse(previous.createdAt ?? "")) <= 5_000) continue;
     if (entry.role === "user") {
       suppressRecoveryReply = false;
       userTurnAwaitingAnswer = true;

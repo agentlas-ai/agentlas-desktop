@@ -1049,6 +1049,33 @@ function ownerStoppedGoalAfterAnswer(chatId: string, sourceMessageId: string): b
   } catch { return false; }
 }
 
+/**
+ * Owner 2026-10-14: termination is the model's judgment on its goal tree ("종료를 모델이 직접판단하는거아님? 그게 골 트리
+ * 구조인데"), and the host checks outcomes, not mid-run tool-call settlement ("작업마다 정산하지말고 … 업로드된걸 보면 되지").
+ * A finite Goal whose model declared completion closes here unless the verifier returned a positive "failed" verdict:
+ * verification that could not run, threw, or stayed inconclusive no longer loops the Goal. The Yotube Goal looped from
+ * 2026-10-13 23:07Z (owner "현 상태 수용하고 종결") through 1.3.33 on verification_unavailable.
+ */
+function closeGoalOnModelJudgment(goalId: string, reason: string): boolean {
+  if (getChatGoalRevision(goalId)?.lifecycle !== "finite") return false;
+  const run = getLongRunByGoalId(goalId);
+  if (!run || LONG_RUN_TERMINAL_STATUSES.has(run.status) || longRunOwnerHold(run.id)) return false;
+  try {
+    const step = (to: "queued" | "running" | "verifying" | "completed", why: string) =>
+      transitionLongRun({ runId: run.id, to, actorKind: "host", reason: why });
+    if (run.status === "blocked") step("queued", reason);
+    if (["blocked", "queued", "waiting_user"].includes(run.status)) step("running", reason);
+    if (getLongRunByGoalId(goalId)?.status !== "verifying") step("verifying", reason);
+    appendLongRunEvent({ runId: run.id, kind: "verification.model_judgment_accepted", actorKind: "host", payload: { reason } });
+    step("completed", "model-declared-completion");
+  } catch (error) {
+    console.warn("[long-run] model-declared completion could not close the Goal:", error instanceof Error ? error.message : String(error));
+    return false;
+  }
+  completeChatGoalContract(goalId, "completed");
+  return true;
+}
+
 export class InvocationService {
   private readonly deliveryJournal = new RunEventDeliveryJournal();
   private readonly activeRuns = new InvocationLifecycleRegistry<RunRecord>();
@@ -4538,6 +4565,8 @@ export class InvocationService {
             return;
           }
         }
+        // Only the model's own claim (typed goal_complete or its marker) may close a Goal on its judgment below.
+        const modelDeclaredCompletion = Boolean(result.goalCompletionClaim?.claimed);
         let completionClaim = result.goalCompletionClaim ?? (record.automaticGoalId && !record.pendingQuestion && !controller.signal.aborted
           ? { claimed: true, goalId: record.automaticGoalId, evidence: "Automatic Goal: verify the durable terminal result against all criteria." }
           : undefined);
@@ -4687,8 +4716,17 @@ export class InvocationService {
                * The goal being verified is named by the claim. That is the identity to act on.
                */
               episodeCheckpointId = verification?.checkpointId ?? null;
+              const modelJudgmentClosed = modelDeclaredCompletion && !controller.signal.aborted
+                && getChat(chat.id)?.goalId === completionClaim.goalId
+                && !["completed", "cycle_completed"].includes(verification?.disposition ?? "")
+                && !(verification?.verdicts ?? []).some((criterion) => criterion.verdict === "failed")
+                && closeGoalOnModelJudgment(completionClaim.goalId!, verification ? `verification_${verification.disposition}` : "verification_unavailable");
               settleGoalResultMessages({ chatId: chat.id, goalId: completionClaim.goalId!, runId,
-                verified: !controller.signal.aborted && ["completed", "cycle_completed"].includes(verification?.disposition ?? "") });
+                verified: modelJudgmentClosed || (!controller.signal.aborted && ["completed", "cycle_completed"].includes(verification?.disposition ?? "")) });
+              if (modelJudgmentClosed) {
+                if (getChat(chat.id)?.goalId === completionClaim.goalId) setChatGoalBinding(chat.id, null);
+                return;
+              }
               if (controller.signal.aborted || getChat(chat.id)?.goalId !== completionClaim.goalId) return;
               const verifiedGoalId = completionClaim.goalId!;
               if (verification?.disposition === "completed") {
@@ -4716,8 +4754,15 @@ export class InvocationService {
               }
             })
             .catch((error: unknown) => {
-              settleGoalResultMessages({ chatId: chat.id, goalId: completionClaim.goalId!, runId, verified: false });
+              const modelJudgmentClosed = modelDeclaredCompletion && !controller.signal.aborted
+                && getChat(chat.id)?.goalId === completionClaim.goalId
+                && closeGoalOnModelJudgment(completionClaim.goalId!, "verification_failed_to_run");
+              settleGoalResultMessages({ chatId: chat.id, goalId: completionClaim.goalId!, runId, verified: modelJudgmentClosed });
               console.warn("[long-run] terminal verification failed:", error);
+              if (modelJudgmentClosed) {
+                if (getChat(chat.id)?.goalId === completionClaim.goalId) setChatGoalBinding(chat.id, null);
+                return;
+              }
               if (controller.signal.aborted) return;
               // A verifier that never answered must still leave the goal somewhere a person can act
               // on. Silence here was the difference between "blocked, here is why" and a run stuck
