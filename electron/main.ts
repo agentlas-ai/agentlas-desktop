@@ -75,8 +75,10 @@ import { buildAppMenu } from "./menu";
 import { closeStore, getDb, initStore, openedStorePath, resolveStorePath, runPostContinuityStoreRepairs, STORE_SCHEMA_VERSION } from "./store/db";
 import { getDaemonAutostartEnabled, markDaemonAutostartStoreReady, readDaemonAutostartStoreReady, resolveDaemonAutostartPolicy } from "./store/daemon-autostart";
 import { storeIdentityDigest } from "./daemon/diagnostic-log";
+import { mainWindowDevToolsAllowed } from "./devtools-policy";
 import { startMemoryRevocationCleanup, stopMemoryRevocationCleanup } from "./memory/revocation-cleanup";
 import { emitDesktopStoreChange, onDesktopStoreChange } from "./store/change-bus";
+import { watchExternalChatChanges } from "./store/external-chat-changes";
 import { clearDetectCache } from "./runtime/detect";
 import { getChat, repairPlaceholderTaskTitles } from "./store/chats";
 import { expireOrphanedSurfaceJobs } from "./store/agent-surface-jobs";
@@ -1277,6 +1279,9 @@ async function createWindow(options: { startupPlaceholder?: boolean; initialRout
       sandbox: true,
       // Renderer가 외부 https만 띄울 수 있게
       webSecurity: true,
+      // The renderer console holds the owner's whole window.agentlas bridge. Product agents opened it through
+      // System Events and typed calls into it, landing keystrokes in the owner's composer (2026-10-14).
+      devTools: mainWindowDevToolsAllowed({ packaged: app.isPackaged }),
     },
   });
 
@@ -4365,6 +4370,8 @@ app.whenReady().then(async () => {
       window.webContents.send("store:changed", change);
     }
   });
+  // Chat rows the background service commits (daemon-hosted One, room and Goal turns) reach the same broadcast.
+  try { watchExternalChatChanges(getDb); } catch (error) { console.warn("[store] external chat watch unavailable", error); }
   setCurrentUiLocale(resolveMenuLocale());
   applyAppMenu(resolveMenuLocale());
   ipcMain.handle("menu:setLocale", (_e, locale: unknown) => {

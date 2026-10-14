@@ -92,6 +92,7 @@ import {
 } from "@/components/Icon";
 import { confirmPopup, alertPopup } from "@/lib/popup";
 import { grantForDroppedFile, grantForPastedAttachment, grantForPastedImage, ipc, ipcEvents } from "@/lib/ipc";
+import { fitImageUnder } from "@/lib/attachment-image-fit";
 import { tFor, useT } from "@/lib/i18n";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
@@ -557,6 +558,12 @@ const DECISION_REJECT_FALLBACK = {
  * 자동 승인이 보낼 답. 시트가 보여 주던 첫 승인 선택지를 그대로 쓴다 —
  * 사람이 눌렀을 때와 같은 문자열이어야 기록이 갈라지지 않는다.
  */
+/** A yes/no permission to proceed: no choice between options, not multi-select. */
+function isPermissionOnlyConfirmation(confirmation: PendingConfirmation): boolean {
+  if (confirmation.multiSelect) return false;
+  return (confirmation.options ?? []).filter((item) => Boolean(item?.label)).length <= 1;
+}
+
 function firstApprovalLabel(confirmation: PendingConfirmation): string | null {
   const option = confirmation.options?.find((item) => Boolean(item?.label));
   return option?.label ?? null;
@@ -859,12 +866,10 @@ function toUiMessages(history: ChatHistoryEntry[]): UiMessage[] {
       suppressRecoveryReply = false;
       continue;
     }
-    // An answer the owner's own new message cut off is superseded by the reply to that message: the host interrupts
-    // the turn and saves the streamed fragment right after the owner's row. Drawing it ("중단됨 · …") only reads as a
-    // fault (owner 2026-10-14, X Marketing 10:40:27Z: message at .072, fragment at .152). The record keeps it.
-    const previous = visible.at(-1);
-    if (entry.role === "assistant" && isInterruptedPartial(entry.text) && previous?.role === "user"
-      && Math.abs(Date.parse(entry.createdAt) - Date.parse(previous.createdAt ?? "")) <= 5_000) continue;
+    // An interrupted answer (owner's new message, host stop, update, restart) is an internal state, not a reply: the
+    // turn that follows answers instead. Drawing it ("중단됨 · …") only read as a fault (owner 2026-10-14: "이거 다 UI에
+    // 안보이게 해"). The record keeps it with its banner, so history never mistakes it for a finished answer.
+    if (entry.role === "assistant" && isInterruptedPartial(entry.text)) continue;
     if (entry.role === "user") {
       suppressRecoveryReply = false;
       userTurnAwaitingAnswer = true;
@@ -7102,11 +7107,21 @@ function OneSessionsShell() {
     const projectedTask = projections.find((item) => item.chatId === confirmation.chatId);
     const isActiveOneConversation = conversation?.id === confirmation.chatId
       && conversation.originSurface === "one";
-    // 실행 중이라 못 보내면 말해야 한다 — 조용히 돌아가면 "골랐는데 전송이 안 된다"로 보인다(오너 지적 2026-09-14).
+    // While a run is going the answer goes to that run, like a typed message (steer or queue). A continuous Goal room is
+    // always running, so "press again when it finishes" left its cards greyed out forever (owner 2026-10-14, X Marketing).
     if (api && busy) {
-      setError(appLocale === "ko"
-        ? "실행이 아직 도는 중이라 답을 보내지 못했습니다. 실행이 끝나면 같은 선택을 다시 눌러 주세요."
-        : "The run is still going, so the answer was not sent. Press the same choice again once it finishes.");
+      if (!projectedTask && !isActiveOneConversation) return;
+      setConfirmations((items) => items.filter((item) => item.sourceMessageId !== confirmation.sourceMessageId));
+      try {
+        await api.confirm.commitAnswer({ chatId: confirmation.chatId, sourceMessageId: confirmation.sourceMessageId, reply: label });
+      } catch {
+        // Replaced or already answered: show Main's current questions instead of sending a stale answer.
+        const pending = await api.confirm.listPending().catch(() => null);
+        if (pending) setConfirmations(pending);
+        return;
+      }
+      void api.confirm.committedAnswers(confirmation.chatId).then(setCommittedAnswers, () => undefined);
+      void submit(label);
       return;
     }
     if (
@@ -7181,7 +7196,7 @@ function OneSessionsShell() {
       requestOneOperationalRecovery("one-decision-answer", cause);
       setError(null);
     }
-  }, [busy, conversation?.id, conversation?.originSurface, projections, startRun]);
+  }, [busy, conversation?.id, conversation?.originSurface, projections, startRun, submit]);
 
   /*
    * "항상 승인"은 그 대화 안에서만 산다.
@@ -7225,6 +7240,10 @@ function OneSessionsShell() {
         // Main's commitAnswer still validates the exact pending source ID.
         if (cancelled) return;
         if (!approved || manualAlwaysApprovalRef.current.has(auto.sourceMessageId)) continue;
+        // "Always approve" is a permission grant ("may I do this?"), like a CLI's bypass mode. A question with a real
+        // choice is never answered for the owner: the first option was posted as the owner's own message and acted on
+        // (X Marketing 2026-10-14 21:21 KST, "조회 자동화 생성" created and enabled an automation).
+        if (!isPermissionOnlyConfirmation(auto)) continue;
         const reply = firstApprovalLabel(auto) ?? "Approve. Proceed with the proposed action.";
         await answerConfirmation(auto, reply);
         return;
@@ -8210,9 +8229,10 @@ function OneSessionsShell() {
   // decision; settled read-only history locks both surfaces.
   const composerSettingsBlocked = !busy && !teamPreflightBusy && (selectedReadOnly || activeDirectSessionUnavailable);
   const composerInteractionBlocked = composerSettingsBlocked || teamDecisionPending || activeDirectSessionUnavailable;
-  // Attachments cannot be steered into an existing or still-preparing run in
-  // v1. Keep that single boundary explicit instead of dimming every control.
-  const composerAttachmentBlocked = busy || teamPreflightBusy || selectedReadOnly || teamDecisionPending || activeDirectSessionUnavailable;
+  // A running room is almost always busy: files picked while it runs go with the next direction (fileGroupId, queued),
+  // the same path addAttachmentFiles already accepts. Disabling the + button while busy left supervisor and Goal rooms
+  // with no way to attach at all (owner 2026-10-14).
+  const composerAttachmentBlocked = teamPreflightBusy || selectedReadOnly || teamDecisionPending || activeDirectSessionUnavailable;
   const oneDisplayName = oneProfile?.displayName.trim() || "One";
   /*
    * One 의 얼굴. 프로필에서 고른 캐릭터가 있으면 그것이고, 없으면 지금까지의 기본이다.
@@ -8278,7 +8298,9 @@ function OneSessionsShell() {
     const next: OneAttachmentDraft[] = [];
     let totalBytes = current.reduce((sum, item) => sum + item.size, 0);
     const errors: string[] = [];
-    for (const file of incoming) {
+    for (const original of incoming) {
+      // A large photo or screenshot is shrunk to fit the image limit instead of refused (owner 2026-10-14).
+      const file = await fitImageUnder(original, ONE_ATTACHMENT_LIMITS.maxImageBytes);
       let kind: OneAttachmentDraft["kind"] = attachmentKind(file);
       const perFileLimit = kind === "image" ? ONE_ATTACHMENT_LIMITS.maxImageBytes : ONE_ATTACHMENT_LIMITS.maxFileBytes;
       if (file.size > perFileLimit) {
@@ -9629,7 +9651,7 @@ function OneSessionsShell() {
                 confirmation={visibleSelectedConfirmation}
                 taskId={selected?.taskId ?? null}
                 locale={appLocale}
-                disabled={busy || selectedReadOnly}
+                disabled={selectedReadOnly}
                 block={visibleConfirmationBlock}
                 onAnswer={answerConfirmation}
                 onResend={(confirmation, text) => {
@@ -9677,22 +9699,6 @@ function OneSessionsShell() {
                   onClick={() => setArmedOneMemoryUseOnce(null)}
                   aria-label={tFor(appLocale, "one.shell.composer.memory_exclude_aria")}
                 ><IconClose size={12} /></button>
-              </div>
-            )}
-            {attachmentDrafts.length > 0 && (
-              <div className={styles.attachmentTray} aria-label={tFor(appLocale, "one.shell.composer.selected_attachments_aria")}>
-                {attachmentDrafts.map((item) => (
-                  <div key={item.id} className={styles.attachmentChip} data-kind={item.kind}>
-                    {item.previewUrl
-                      ? <img src={item.previewUrl} alt="" aria-hidden="true" />
-                      : <span className={styles.attachmentFileIcon} aria-hidden="true">{item.kind === "directory" ? <IconFolder size={15} /> : <IconFileUp size={15} />}</span>}
-                    <span className={styles.attachmentCopy}>
-                      <strong>{item.name}</strong>
-                      <small>{attachmentTypeLabel(item.mediaType, item.name)} · {attachmentSize(item.size)}</small>
-                    </span>
-                    <button type="button" onClick={() => removeAttachmentDraft(item.id)} aria-label={tFor(appLocale, "one.shell.composer.remove_attachment", { name: item.name })}><IconClose size={11} /></button>
-                  </div>
-                ))}
               </div>
             )}
             {attachmentError && <p className={styles.attachmentError} role="alert">{attachmentError}</p>}
@@ -9993,7 +9999,7 @@ function OneSessionsShell() {
               <OneFirstRequestCards locale={appLocale} entry={firstRequestEntry} cards={firstRequestCards} onInsert={insertFirstRequestPrompt} hasDraft={composerHasText} />
             )}
             <MessageReplyPreview reply={messageReply} locale={appLocale} onDismiss={() => setMessageReply(null)} />
-            <form className={styles.composer} data-one-composer="true" data-unavailable={activeDirectSessionUnavailable ? "true" : undefined} style={activeSeatDissolved ? { display: "none" } : undefined} onSubmit={(event) => {
+            <form className={styles.composer} data-one-composer="true" data-has-files={attachmentDrafts.length > 0 ? "true" : undefined} data-unavailable={activeDirectSessionUnavailable ? "true" : undefined} style={activeSeatDissolved ? { display: "none" } : undefined} onSubmit={(event) => {
               event.preventDefault();
               if (activeSeatDissolved || activeDirectSessionUnavailable) return;
               const submittedValue = composerInputRef.current?.value ?? composer;
@@ -10010,6 +10016,23 @@ function OneSessionsShell() {
                 aria-hidden="true"
                 onChange={(event) => { if (event.target.files?.length) void addAttachmentFiles(event.target.files); }}
               />
+              {attachmentDrafts.length > 0 && (
+                <div className={styles.attachmentTray} aria-label={tFor(appLocale, "one.shell.composer.selected_attachments_aria")}>
+                  {/* Square tiles inside the composer, above the text (owner 2026-10-14, the Codex composer). */}
+                  {attachmentDrafts.map((item) => (
+                    <div key={item.id} className={styles.attachmentChip} data-kind={item.kind} title={item.name}>
+                      {item.previewUrl
+                        ? <img src={item.previewUrl} alt="" aria-hidden="true" />
+                        : <span className={styles.attachmentCopy}>
+                            <span className={styles.attachmentFileIcon} aria-hidden="true">{item.kind === "directory" ? <IconFolder size={18} /> : <IconFileUp size={18} />}</span>
+                            <strong>{item.name}</strong>
+                            <small>{attachmentTypeLabel(item.mediaType, item.name)} · {attachmentSize(item.size)}</small>
+                          </span>}
+                      <button type="button" onClick={() => removeAttachmentDraft(item.id)} aria-label={tFor(appLocale, "one.shell.composer.remove_attachment", { name: item.name })}><IconClose size={11} /></button>
+                    </div>
+                  ))}
+                </div>
+              )}
               <OneComposerInput
                 ref={composerHandleRef}
                 inputRef={composerInputRef}
@@ -10020,8 +10043,10 @@ function OneSessionsShell() {
                 onValueChange={onComposerValueChange}
                 onSubmit={(submittedValue) => {
                   if (activeSeatDissolved || activeDirectSessionUnavailable) return;
-                  if (busy && !submittedValue.trim()) stopRun();
-                  else void submit(submittedValue);
+                  // Enter never stops a run: an empty Enter (a second keydown after an IME commit, a cleared composer)
+                  // paused the owner's Goal right after sending (2026-10-14). Stop is the button only.
+                  if (busy && !submittedValue.trim()) return;
+                  void submit(submittedValue);
                 }}
                 data-focus-ring="wrapper"
                 rows={1}

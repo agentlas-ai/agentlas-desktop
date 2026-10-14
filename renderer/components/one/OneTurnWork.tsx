@@ -746,19 +746,9 @@ export function OneTurnWork({
           <span>{loginWaiting ? (ko ? "로그인 대기" : "Waiting for sign-in") : workedFor}</span>
           {/* 표시=실행 (C-D-1): 이 턴이 실제로 돈 모델을 실행 기록 표면에 남긴다. */}
           {presentation.model && <span className={styles.muted} data-run-model="true">· {presentation.model}</span>}
-          {steeringInterrupted && (
-            <span className={styles.muted}>· {ko ? "방향 수정됨" : "direction updated"}</span>
-          )}
-          {hostStop && <span className={styles.muted} data-host-stop={hostStopCause}>· {hostStop.short}</span>}
-          {failed && (
-            <span className={terminal === "cancelled" ? styles.muted : styles.headerTerminal}>
-              · {terminal === "cancelled" ? (ko ? "중단됨" : "stopped") : (ko ? "실패" : "failed")}
-            </span>
-          )}
-          {!failed && interrupted && (
-            <span className={styles.headerTerminal}>
-              · {ko ? "답을 받지 못함" : "no answer"}
-            </span>
+          {/* Host stops, owner stops, steering and unanswered turns are internal states: not drawn (owner 2026-10-14). */}
+          {failed && terminal === "failed" && (
+            <span className={styles.headerTerminal}>· {ko ? "실패" : "failed"}</span>
           )}
           <span className={styles.headerChevron} aria-hidden="true"><IconChevronDown size={12} /></span>
         </button>
@@ -796,65 +786,6 @@ export function OneTurnWork({
               <div>{presentation.terminalMessage}</div>
             </div>
           </details>
-        </div>
-      )}
-      {/* ★ 답이 사라진 자리에는 사라졌다고 적는다 (UX-D-1).
-          앱이 실행 도중 멈추면 종료 줄을 쓸 주체가 없어 답도, 실패 표시도 남지 않았다.
-          사용자에게는 자기 질문만 나란히 남아 "왜 답이 없는지" 알 길이 자체가 없었다.
-          접힘과 무관하게 보이고, 다시 물을 수 있는 길을 같은 자리에 둔다. */}
-      {interrupted && (
-        <div className={styles.rows} data-one-turn-interrupted="true">
-          <div className={styles.row} data-kind="notice" data-status="failed">
-            <span className={styles.rowHead}>
-              <span className={styles.rowMark} data-status="failed" aria-hidden="true" />
-              <span className={styles.rowText}>
-                <span className={styles.notice} data-level="error">
-                  {ko
-                    ? "이 질문은 답을 받지 못했습니다 — 실행 도중 앱이 멈춰 답이 저장되지 않았습니다."
-                    : "This question never received an answer — the app stopped mid-run, so nothing was saved."}
-                </span>
-              </span>
-            </span>
-          </div>
-          {onRetry && (
-            <div className={styles.retryRow}>
-              <button
-                type="button"
-                className={styles.retryButton}
-                onClick={onRetry}
-                disabled={retryDisabled}
-                data-one-turn-retry="true"
-              >
-                {ko ? "다시 시도" : "Retry"}
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-      {hostStop && (
-        <div className={styles.rows} data-one-turn-host-stop={hostStopCause}>
-          <div className={styles.row} data-kind="notice" data-status="completed">
-            <span className={styles.rowHead}>
-              <span className={styles.rowMark} data-status="completed" aria-hidden="true" />
-              <span className={styles.rowText}><span className={styles.notice}>{hostStop.detail}</span></span>
-            </span>
-          </div>
-        </div>
-      )}
-      {steeringInterrupted && (
-        <div className={styles.rows} data-one-turn-steered="true">
-          <div className={styles.row} data-kind="notice" data-status="completed">
-            <span className={styles.rowHead}>
-              <span className={styles.rowMark} data-status="completed" aria-hidden="true"><IconRefresh size={13} /></span>
-              <span className={styles.rowText}>
-                <span className={styles.notice}>
-                  {ko
-                    ? "새 지시를 반영하기 위해 이 실행을 중단했습니다."
-                    : "This run was interrupted to apply your new direction."}
-                </span>
-              </span>
-            </span>
-          </div>
         </div>
       )}
     </section>

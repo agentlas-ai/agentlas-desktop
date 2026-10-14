@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.3.38 — 2026-10-14
+
+- Agents use only Agentlas's own skills, plugins and connectors. Skills, plugins, hooks, memory and connectors you set up in Codex, Claude Code, Cursor and other tools are no longer listed, counted or used by Agentlas runs.
+- In the One chat, one Enter sends once: a Korean input Enter no longer sends twice, and an empty Enter no longer stops a running answer or pauses a Goal. Answers the background service writes appear in the open chat right away.
+- The released app no longer opens developer tools in its main window, so an agent cannot use them to type into your message box.
+- Automations with an agent step run again: each agent step now holds its conversation before it starts, instead of every one being refused since 2026-10-12 and its retries stopping on an unconfirmed worker.
+- One's approve, always and reject cards can be answered while a run is going, instead of staying greyed out in a room whose Goal runs continuously.
+- When a Goal resumes, it now picks up the message you sent while it was working, instead of continuing with only its old plan.
+- You can paste files, images and video from the clipboard into the supervisor One and attach them while a run is going; attachments show as tiles inside the message box, and large photos are shrunk to fit instead of refused.
+- Internal stop and continuation notes (interrupted answers, host stops, automatic resume prompts) are no longer shown in One, split panes or Work; real failures and sign-in waits still are.
+- "Always approve" now answers only permission prompts; One no longer picks the first option of a real choice on your behalf.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.37 — 2026-10-14
 
 - A Goal with an end closes when its agent declares it complete, unless the completion check finds something actually failed; a check that could not run or stayed unsure no longer keeps it open.

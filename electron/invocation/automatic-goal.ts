@@ -20,6 +20,7 @@ import { UNCERTAIN_EFFECT_POLICY } from "../../shared/uncertain-effect-policy";
 import { runtimeFailureBlocksReplay } from "../runtime/selection";
 import { createHash } from "node:crypto";
 import { stripStaffGuidance } from "../one/owner-prompt";
+import { isInterruptedPartial } from "../../shared/interrupted-partial";
 
 /** Bounded default, not a promise to finish inside it. Unfinished goals retain their criteria and
  * pause with their remaining budget intact. Money metering is unavailable here: null explicitly
@@ -279,6 +280,23 @@ export function automaticGoalReplayBlockerCode(runId: string): string | null {
   return resumed ? null : barrier.code;
 }
 
+/**
+ * The owner's newest message that no finished answer followed, if any. A message the owner sent mid-turn interrupts
+ * that turn; the resume then carried only the plan, so the owner's request sat in history below a "preserve every
+ * original constraint" instruction and the run went on with the old plan (Thread Marketing, 2026-10-14 12:08Z: "쓰레드
+ * 전략을 찾아보고 바꾸던지"). Interrupted fragments and host/system rows do not count as an answer.
+ */
+export function unansweredOwnerMessage(chatId: string): string | null {
+  const rows = getDb().prepare("SELECT role, text FROM chat_messages WHERE chat_id = ? ORDER BY created_at DESC LIMIT 40")
+    .all(chatId) as Array<{ role: string; text: string | null }>;
+  for (const row of rows) {
+    const text = (row.text ?? "").trim();
+    if (row.role === "assistant" && text && !isInterruptedPartial(text)) return null;
+    if (row.role === "user" && text) return text.slice(0, 4_000);
+  }
+  return null;
+}
+
 /** Explicit UI resume reuses the same campaign and remaining budget. It never
  * reclassifies the synthetic continuation as a new user request. */
 /**
@@ -309,7 +327,7 @@ export function automaticGoalResumeRequest(chatId: string, expectedVersion: numb
     // One resolves permission from its explicit mode, not the generic field.
     // This is the stored user grant, not a new grant from a system prompt.
     ...(run.surface === "one" ? { oneMode: true, onePermissionMode: authority[2] as "read" | "write" | "full" } : {}),
-    userPrompt: `Resume the existing goal under its original permissions. Run effect/result checks in parallel with independent useful work. Failed or unavailable checks must never stop the whole goal. ${UNCERTAIN_EFFECT_POLICY} Preserve every original constraint and acceptance criterion. Verify the actual output before claiming completion, and compare it item by item against the user's original plan (including any spec document or project memory it points to): report what is missing first. For games, apps and UI, graphic quality is an acceptance criterion: placeholder shapes, default-colored rectangles, missing or misaligned assets and empty backgrounds are a failure, not a completion.${(() => { const receipts = channelPublishReceiptsPromptBlockFor(revision.objective); return receipts ? `\n\n${receipts}` : ""; })()}\n\n${stripStaffGuidance(revision.objective)}` };
+    userPrompt: `Resume the existing goal under its original permissions. Run effect/result checks in parallel with independent useful work. Failed or unavailable checks must never stop the whole goal. ${UNCERTAIN_EFFECT_POLICY} Preserve every original constraint and acceptance criterion. Verify the actual output before claiming completion, and compare it item by item against the user's original plan (including any spec document or project memory it points to): report what is missing first. For games, apps and UI, graphic quality is an acceptance criterion: placeholder shapes, default-colored rectangles, missing or misaligned assets and empty backgrounds are a failure, not a completion.${(() => { const receipts = channelPublishReceiptsPromptBlockFor(revision.objective); return receipts ? `\n\n${receipts}` : ""; })()}\n\n${stripStaffGuidance(revision.objective)}${(() => { const owner = unansweredOwnerMessage(chatId); return owner ? `\n\nOwner's latest message, not answered yet. It comes first: answer or act on it before continuing the plan, and change the plan if it asks:\n${owner}` : ""; })()}` };
 }
 
 /** 사람이 누른 재개 — 요청을 만들고 재개하는 것이 한 트랜잭션이다. */

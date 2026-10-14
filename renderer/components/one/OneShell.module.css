@@ -2098,57 +2098,60 @@
 }
 
 .attachmentTray {
+  grid-area: files;
   display: flex;
-  gap: 7px;
+  gap: 8px;
   overflow-x: auto;
-  padding: 1px 1px 3px;
+  padding: 0 0 2px;
   scrollbar-width: thin;
 }
 
+/* A square tile per attachment inside the composer (owner 2026-10-14, the Codex composer). */
+.composer[data-has-files="true"] {
+  grid-template-rows: auto minmax(30px, auto) 32px;
+  grid-template-areas:
+    "files files"
+    "input input"
+    "tools actions";
+}
+
 .attachmentChip {
-  min-width: 190px;
-  max-width: 280px;
-  min-height: 52px;
-  display: grid;
-  grid-template-columns: 40px minmax(0, 1fr) 32px;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 5px 5px 6px;
+  position: relative;
+  flex: 0 0 auto;
+  width: 112px;
+  height: 112px;
+  overflow: hidden;
   border: 1px solid var(--paper-edge);
   border-radius: 12px;
-  background: var(--paper);
+  background: var(--paper-3);
   color: var(--ink);
-  box-shadow: 0 5px 18px rgba(25, 31, 36, .05);
 }
 
-.attachmentChip img,
-.attachmentFileIcon {
-  width: 40px;
-  height: 40px;
-  border-radius: 8px;
-}
-
-.attachmentChip img { display: block; object-fit: cover; background: var(--paper-3); }
-.attachmentFileIcon { display: grid; place-items: center; background: var(--paper-3); color: var(--accent); font-size: 17px; }
-.attachmentCopy { min-width: 0; display: grid; gap: 3px; }
-.attachmentCopy strong { overflow: hidden; font-size: 10px; font-weight: 690; text-overflow: ellipsis; white-space: nowrap; }
-.attachmentCopy small { overflow: hidden; color: var(--muted-deep); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.attachmentChip img { position: absolute; inset: 0; width: 100%; height: 100%; display: block; object-fit: cover; }
+.attachmentCopy { position: absolute; inset: 0; display: grid; align-content: end; gap: 3px; padding: 10px; min-width: 0; }
+.attachmentFileIcon { display: block; margin-bottom: auto; color: var(--muted-deep); }
+.attachmentCopy strong { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 11px; font-weight: 650; line-height: 1.3; word-break: break-all; }
+.attachmentCopy small { overflow: hidden; color: var(--muted-deep); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .attachmentChip > button {
-  width: 32px;
-  min-height: 44px;
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  min-height: 22px;
   display: grid;
   place-items: center;
   padding: 0;
   border: 0;
-  border-radius: 9px;
-  background: transparent;
-  color: var(--muted-deep);
-  font: inherit;
-  font-size: 17px;
+  border-radius: 50%;
+  background: rgba(20, 22, 26, .62);
+  color: var(--white);
   cursor: pointer;
+  opacity: 0;
+  transition: opacity .12s ease;
 }
-.attachmentChip > button:hover { color: var(--ink); }
-.attachmentChip > button:focus-visible { background: var(--paper-3); outline: 2px solid var(--muted); }
+.attachmentChip:hover > button, .attachmentChip:focus-within > button { opacity: 1; }
+.attachmentChip > button:focus-visible { outline: 2px solid var(--muted); }
 
 .attachmentError {
   padding: 7px 10px;
@@ -2965,7 +2968,6 @@
   .composerPopoverScroll { max-height: min(52vh, 380px); }
   .composerChip span { max-width: 108px; }
   .attachmentDropOverlay { bottom: 10px; width: calc(100% - 20px); }
-  .attachmentChip { min-width: 176px; max-width: 230px; }
   .messageBody { max-width: 94%; }
   .teamRoleList { grid-template-columns: 1fr; }
   .teamFacts > div { grid-template-columns: 1fr; gap: 2px; }

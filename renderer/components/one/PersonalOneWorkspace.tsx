@@ -3,12 +3,13 @@ import { MessageActions, MessageReplyPreview } from "../MessageActions";
 import { composeMessageReply, displayMessageReply, type MessageReply } from "@/lib/message-reply";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ipc, ipcEvents, grantForDroppedFile } from "@/lib/ipc";
+import { ipc, ipcEvents, grantForDroppedFile, grantForPastedAttachment, grantForPastedImage } from "@/lib/ipc";
+import { fitImageUnder } from "@/lib/attachment-image-fit";
 import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
 import { useT } from "@/lib/i18n";
 import { Markdown, StreamingMarkdown, type LinkedFileArtifact } from "@/components/Markdown";
 import { mapIntellectUiProse } from "@shared/intellect-ui";
-import { IconArrowUp, IconBrain, IconCheck, IconChevronRight, IconClose, IconMoreHorizontal, IconExpand, IconLayers, IconPanelRight, IconPlus, IconPuzzle, IconSidebar, IconRefresh, IconSettings, IconSparkles } from "@/components/Icon";
+import { IconArrowUp, IconBrain, IconCheck, IconChevronRight, IconClose, IconMoreHorizontal, IconExpand, IconFileUp, IconLayers, IconPanelRight, IconPlus, IconPuzzle, IconSidebar, IconRefresh, IconSettings, IconSparkles } from "@/components/Icon";
 import type { OneSupervisorSnapshot, SupervisorCommandReceipt, SupervisorTask, SupervisorDelegation } from "../../../shared/one-supervisor";
 import { ONE_BUBBLE_COLORS, type OneBubbleColor, type OneProfile } from "../../../shared/one-profile";
 import { readAppUiPreference } from "@/lib/app-ui-preferences";
@@ -109,8 +110,13 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   useEffect(()=>()=>{for(const item of attachmentsRef.current)if(item.preview)URL.revokeObjectURL(item.preview);},[]);
   const pickAttachments=async(files:File[])=>{
     if(attachmentBusy)return;const next=[...attachments];
-    try{for(const item of files){
-      const grant=await grantForDroppedFile(item);if(!grant)throw new Error(copy("이 파일을 읽을 수 없습니다.","This file is unavailable."));
+    try{for(const original of files){
+      // A large photo or screenshot is shrunk to fit the image limit instead of refused (owner 2026-10-14).
+      const item=await fitImageUnder(original,ONE_ATTACHMENT_LIMITS.maxImageBytes);
+      // A Finder file carries its path; a pasted screenshot, clip or generated file has none, so Main pins its bytes to
+      // a private file and issues the same exact-file grant (the One composer's path).
+      const grant=await grantForDroppedFile(item)??await grantForPastedAttachment(item)??(item.type.startsWith("image/")?await grantForPastedImage(item):null);
+      if(!grant)throw new Error(copy("이 파일을 읽을 수 없습니다.","This file is unavailable."));
       if(next.length>=ONE_ATTACHMENT_LIMITS.maxCount || item.size>(item.type.startsWith("image/")?ONE_ATTACHMENT_LIMITS.maxImageBytes:ONE_ATTACHMENT_LIMITS.maxFileBytes) || next.reduce((sum,file)=>sum+file.draft.size,0)+item.size>ONE_ATTACHMENT_LIMITS.maxTotalBytes)throw new Error(copy("첨부는 최대 8개, 이미지 5 MB, 파일 64 MB, 전체 96 MB까지 가능합니다.","Attachments allow 8 items, 5 MB images, 64 MB files and 96 MB total."));
       next.push({draft:{grant,name:item.name,mediaType:item.type||"application/octet-stream",size:item.size,kind:"file"},...(item.type.startsWith("image/")?{preview:URL.createObjectURL(item)}:{})});
     }setAttachmentError(null);}catch(cause){setAttachmentError(cause instanceof Error?cause.message:String(cause));}
@@ -475,14 +481,13 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
           steps:["Submit a Supervisor request",`Request kind: ${receipt.kind}`],
         }} />}
         <input ref={attachmentPicker} type="file" multiple hidden onChange={event=>{if(event.target.files)void pickAttachments(Array.from(event.target.files));event.target.value="";}}/>
-        {attachments.length>0&&<div className={styles.attachmentDrafts} aria-label={copy("선택한 첨부","Selected attachments")}>{attachments.map((item,index)=><div className={styles.attachmentDraft} key={index}>
-          {item.preview&&<img src={item.preview} alt={item.draft.name}/>}
-          <span>{item.draft.name}<small>{formatChatFileSize(item.draft.size)}</small></span>
-          <button type="button" aria-label={copy("첨부 삭제: ","Remove attachment: ")+item.draft.name} onClick={()=>{if(item.preview)URL.revokeObjectURL(item.preview);setAttachments(prior=>prior.filter((_,position)=>position!==index));}}><IconClose size={14}/></button>
-        </div>)}</div>}
         {attachmentError&&<p role="alert" className={styles.feedback}>{attachmentError}</p>}
         <MessageReplyPreview reply={messageReply} locale={locale} onDismiss={()=>setMessageReply(null)}/>
-        <form className={styles.composer} data-expanded={composerExpanded} onSubmit={event=>{event.preventDefault();void send();}}>
+        <form className={styles.composer} data-expanded={composerExpanded} data-has-files={attachments.length>0} onSubmit={event=>{event.preventDefault();void send();}}>
+          {attachments.length>0&&<div className={styles.attachmentDrafts} aria-label={copy("선택한 첨부","Selected attachments")}>{attachments.map((item,index)=><div className={styles.attachmentDraft} data-kind={item.preview?"image":"file"} key={index} title={item.draft.name}>
+            {item.preview?<img src={item.preview} alt={item.draft.name}/>:<span className={styles.attachmentFile}><IconFileUp size={18}/><strong>{item.draft.name}</strong><small>{formatChatFileSize(item.draft.size)}</small></span>}
+            <button type="button" aria-label={copy("첨부 삭제: ","Remove attachment: ")+item.draft.name} onClick={()=>{if(item.preview)URL.revokeObjectURL(item.preview);setAttachments(prior=>prior.filter((_,position)=>position!==index));}}><IconClose size={12}/></button>
+          </div>)}</div>}
           <div ref={plusMenu} className={styles.plus}>
             <button type="button" className={styles.iconButton} aria-label={copy("추가","Add")} aria-haspopup="menu" aria-expanded={plusOpen} data-hover="own" onClick={()=>setPlusOpen(value=>!value)}><IconPlus size={20}/></button>
             {plusOpen&&<div className={styles.plusMenu} role="menu" aria-label={copy("추가","Add")}>
@@ -500,7 +505,14 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
               <button type="button" role="menuitem" data-hover="own" onClick={()=>{setPlusOpen(false);void appearance();}}><span className={styles.plusIcon}><IconSettings size={15}/></span><strong>{copy("이름과 말풍선","Name and bubbles")}</strong></button>
             </div>}
           </div>
-          <textarea ref={composerInput} aria-label={ko?name+"에게 메시지":"Message "+name} value={text} onChange={event=>{if(draftIdentity.current===null)initialDraftEdit.current={edited:true,value:event.target.value};setText(event.target.value);event.currentTarget.style.height="auto";event.currentTarget.style.height=Math.min(140,event.currentTarget.scrollHeight)+"px";}} onCompositionUpdate={enter.onCompositionUpdate} onCompositionEnd={enter.onCompositionEnd} onKeyDown={event=>{enter.handleEnter(event);}} maxLength={8000} rows={1} placeholder={copy("메시지 보내기","Send a message")}/>
+          <textarea ref={composerInput} aria-label={ko?name+"에게 메시지":"Message "+name} value={text} onChange={event=>{if(draftIdentity.current===null)initialDraftEdit.current={edited:true,value:event.target.value};setText(event.target.value);event.currentTarget.style.height="auto";event.currentTarget.style.height=Math.min(140,event.currentTarget.scrollHeight)+"px";}} onCompositionUpdate={enter.onCompositionUpdate} onCompositionEnd={enter.onCompositionEnd} onKeyDown={event=>{enter.handleEnter(event);}} onPaste={event=>{
+            // Clipboard files (screenshots, Finder copies, audio, video, documents) become attachments; plain text pastes as text.
+            const clipboard=event.clipboardData;if(!clipboard)return;const files:File[]=[];const seen=new Set<string>();
+            const add=(file:File|null)=>{if(!file)return;const id=`${file.name}|${file.size}|${file.type}`;if(seen.has(id))return;seen.add(id);files.push(file);};
+            for(const file of Array.from(clipboard.files))add(file);
+            if(!files.length)for(const item of Array.from(clipboard.items))if(item.kind==="file")add(item.getAsFile());
+            if(!files.length)return;event.preventDefault();void pickAttachments(files);
+          }} maxLength={8000} rows={1} placeholder={copy("메시지 보내기","Send a message")}/>
           <div className={styles.voice}><OneVoiceInputHelp locale={ko?"ko":"en"} composerRef={composerInput} /></div>
           <button className={styles.send} type="submit" aria-label={copy("보내기","Send")} disabled={!snapshot||savedRequestError||attachmentBusy||(!text.trim()&&!attachments.length)}><IconArrowUp size={16}/></button>
         </form>

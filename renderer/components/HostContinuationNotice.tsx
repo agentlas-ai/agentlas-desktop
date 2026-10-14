@@ -35,16 +35,9 @@ export function HostContinuationNotice({ text, locale, notice }: { text: string;
       style={{ alignSelf: "stretch", maxWidth: 760, margin: "6px 0", color: "var(--muted-deep)", fontSize: 12, lineHeight: 1.5 }}
     >{label}</p>;
   }
-  if (notice?.purpose === "update-resume") {
-    // The app continued a turn the update restart interrupted. The ledger keeps the internal
-    // continuation instructions; the person sees one line.
-    return <p
-      data-host-notice="update-resume"
-      data-run-id={notice.runId}
-      role="status"
-      style={{ alignSelf: "stretch", maxWidth: 760, margin: "4px 0", color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.5 }}
-    >{locale === "ko" ? "업데이트 후 이어서 진행합니다" : "Continuing after the update"}</p>;
-  }
+  // Internal harness work is not shown (docs/2026-10-13-native-harness 04 §2; owner 2026-10-04): the app continuing a
+  // turn after an update restart, and the host's own continuation request below, stay in the ledger only.
+  if (notice?.purpose === "update-resume") return null;
   if (notice?.purpose === "one-delegation-review") {
     // One woke because work it handed off finished. The ledger keeps the host's review request; the person sees one line.
     return <p
@@ -93,9 +86,6 @@ export function HostContinuationNotice({ text, locale, notice }: { text: string;
     >{display.code}</code>}
   </article>;
   }
-  return <p
-    data-host-notice="goal-continuation"
-    role="status"
-    style={{ alignSelf: "stretch", maxWidth: 760, margin: "4px 0", color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.5 }}
-  >{locale === "ko" ? "자동 이어가기 요청" : "Automatic continuation requested"}</p>;
+  // goal-continuation and any other host-written continuation request: internal, not rendered.
+  return null;
 }

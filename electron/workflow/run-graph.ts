@@ -40,6 +40,7 @@ import {
   type ToolBrokerLevel,
 } from "../../shared/graph-tool-broker";
 import { runMcpInvocation } from "../mcp/client";
+import { claimInvocationRunOwner, invocationRunOwners } from "../store/invocation-run-owners";
 import { sameMethodAttemptLimit, MAX_SAME_METHOD_STARTS, type WorkUnit } from "../../shared/work-recovery";
 import { GraphWorkRecovery, type GraphWorkRecoveryScope } from "./work-recovery";
 import { listAutomationGraphReconciliations } from "../store/graph-reconciliation";
@@ -4408,6 +4409,12 @@ export async function runGraph(
             : runMcpInvocation;
           const invokeNode: typeof runMcpInvocation = async (...args) => {
             assertFiniteCurrent();
+            // An agent node's context is bound to its run owner lease. Without one every agent node refused before its
+            // runtime started (agent_context_original_invocation_owner_required; production 2026-10-12..14, earlier
+            // masked as "no completion receipt"), and each resume then stopped on worker_liveness_unknown. Claimed before
+            // the work unit begins, so a busy chat is a clean refusal, not an unconfirmed mutation.
+            const ownerLease = nativeMcpCall ? null : claimInvocationRunOwner(nodeChat.id, runId);
+            try {
             if (!dryRun) {
               const scope = commonScope(node, prompt);
               commonScopes.set(node.id, scope);
@@ -4423,6 +4430,9 @@ export async function runGraph(
             const result = await invokeNodeRaw(...args);
             assertFiniteCurrent();
             return result;
+            } finally {
+              if (ownerLease) { try { invocationRunOwners.release(ownerLease); } catch { /* the startup sweep frees a stranded lease */ } }
+            }
           };
           const result = await withFiniteDispatch(() => withAutomationNodeAccounting({
             runId, automationId: automation.id, nodeId: node.id, chatId: nodeChat.id,

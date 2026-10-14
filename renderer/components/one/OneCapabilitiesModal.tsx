@@ -90,6 +90,10 @@ export function OneCapabilitiesModal({ open, locale, onClose, api: apiProp, init
 
   const visible = useMemo(() => filterCapabilities(items, { kind, source, query }), [items, kind, source, query]);
   const navCounts = useMemo(() => kindCounts(items, source), [items, source]);
+  // Only Agentlas's own items are listed (owner 2026-10-14): a kind with nothing in it is not shown, and the screen
+  // opens on the first kind that has items instead of an empty list.
+  const navKinds = useMemo(() => CAPABILITY_KIND_ORDER.filter((entry) => navCounts[entry] > 0), [navCounts]);
+  useEffect(() => { if (navKinds.length && !navKinds.includes(kind)) setKind(navKinds[0]); }, [navKinds, kind]);
   const chipCounts = useMemo(() => sourceCounts(items, kind), [items, kind]);
   const totals = useMemo(() => itemEnabledTotals(items.filter((item) => item.kind === kind)), [items, kind]);
   const openItem = detailId ? items.find((item) => item.id === detailId) ?? null : null;
@@ -113,7 +117,7 @@ export function OneCapabilitiesModal({ open, locale, onClose, api: apiProp, init
       <div ref={dialogRef} className={styles.dialog} role="dialog" aria-modal="true" aria-label={title} tabIndex={-1} data-one-capabilities="true">
         <nav className={styles.nav} aria-label={title}>
           <h2>{title}</h2>
-          {CAPABILITY_KIND_ORDER.map((entry) => (
+          {navKinds.map((entry) => (
             <button key={entry} type="button" data-kind={entry} aria-current={entry === kind ? "page" : undefined}
               onClick={() => { setKind(entry); closeDetail(); }}>
               <span>{kindLabel(entry, locale)}</span><small>{navCounts[entry]}</small>
@@ -157,13 +161,14 @@ export function OneCapabilitiesModal({ open, locale, onClose, api: apiProp, init
           ) : (
             <>
               <div className={styles.filters}>
-                <div className={styles.chips} role="group" aria-label={copy("출처", "Source")}>
-                  {CAPABILITY_SOURCE_ORDER.map((entry) => (
+                {/* Only Agentlas's own items are listed (owner 2026-10-14), so a source filter shows only when there is a choice. */}
+                {CAPABILITY_SOURCE_ORDER.filter((entry) => entry !== "all" && chipCounts[entry] > 0).length > 1 && <div className={styles.chips} role="group" aria-label={copy("출처", "Source")}>
+                  {CAPABILITY_SOURCE_ORDER.filter((entry) => entry === "all" || chipCounts[entry] > 0).map((entry) => (
                     <button key={entry} type="button" data-source={entry} aria-pressed={source === entry} onClick={() => setSource(entry)}>
                       {sourceLabel(entry, locale)}<small>{chipCounts[entry]}</small>
                     </button>
                   ))}
-                </div>
+                </div>}
                 <label className={styles.search}>
                   <IconSearch size={13} />
                   <input type="search" value={query} placeholder={copy("검색", "Search")} aria-label={copy("검색", "Search")} onChange={(event) => setQuery(event.target.value)} />

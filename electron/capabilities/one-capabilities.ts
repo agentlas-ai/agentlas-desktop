@@ -45,7 +45,7 @@ export interface CapabilityItem {
   limit?: CapabilityLimit;
 }
 
-export type CapabilityLimit = "runtime_reads_itself" | "agentlas_managed";
+export type CapabilityLimit = "runtime_reads_itself" | "agentlas_managed" | "personal_runtime";
 
 export interface CapabilityDetail {
   id: string;
@@ -167,8 +167,12 @@ export function isPersonalSource(source: CapabilitySource): boolean {
  * Grok's compatibility cells read these, so a stale ON must not turn them on.
  */
 export function capabilityEnabled(item: Pick<CapabilityItem, "id" | "source" | "applies">, state: CapabilityState = readCapabilityState()): boolean {
-  if (!item.applies) return !isPersonalSource(item.source);
-  return state.items[item.id] ?? state.sources[item.source] ?? !isPersonalSource(item.source);
+  // Owner 2026-10-14: product runs use only Agentlas's own skills, plugins and connectors. The Agentlas harness drives
+  // each runtime (app-server, claude -p, ACP), so a runtime's personal skills, plugins, hooks, memory and connectors
+  // are never switched on, whatever an older build stored ("agentlas 전용 스킬 플러그인 커넥터만 쓸 수있게").
+  if (isPersonalSource(item.source)) return false;
+  if (!item.applies) return true;
+  return state.items[item.id] ?? state.sources[item.source] ?? true;
 }
 
 /* ------------------------------------------------------------------ scanning helpers */
@@ -600,7 +604,9 @@ const publicItem = ({ builtin: _builtin, ...item }: InventoryEntry): CapabilityI
  * show them.
  */
 export function listCapabilities(roots: CapabilityRoots = defaultCapabilityRoots(), options: { fresh?: boolean } = {}): CapabilityItem[] {
-  return inventory(roots, options.fresh === true).filter((item) => !item.builtin).map(publicItem);
+  // Personal runtime items are never used by a product run (capabilityEnabled), so they are not listed or counted
+  // either: the screen showed 187 Codex/Claude/Cursor skills, all off, including Agentlas's own CLI copies (owner 2026-10-14).
+  return inventory(roots, options.fresh === true).filter((item) => !item.builtin && !isPersonalSource(item.source)).map(publicItem);
 }
 
 /** Refusal for a switch no run can enforce: built-ins (always on, unlisted) and items whose runtime loads them itself. */
@@ -776,6 +782,7 @@ export function setCapabilityEnabled(id: string, enabled: boolean, roots: Capabi
   const item = all.find((candidate) => candidate.id === id);
   if (!item) return null;
   if (item.builtin) throw new CapabilityNotSwitchableError(id, "builtin");
+  if (isPersonalSource(item.source)) throw new CapabilityNotSwitchableError(id, "personal_runtime");
   if (!item.applies) throw new CapabilityNotSwitchableError(id, item.limit ?? "runtime_reads_itself");
   // A write starts from the file, not this process's cache: the other process may have written in the last seconds.
   const state = normalizedState(all, readCapabilityState({ fresh: true }));
@@ -791,8 +798,8 @@ export function setCapabilityEnabled(id: string, enabled: boolean, roots: Capabi
  */
 export function setSourceEnabled(source: CapabilitySource, enabled: boolean, kind?: CapabilityKind, roots: CapabilityRoots = defaultCapabilityRoots()): { source: CapabilitySource; changed: number } {
   const all = inventory(roots, true);
-  const targets = all.filter((item) => item.source === source && item.applies && !item.builtin && (!kind || item.kind === kind));
-  if (targets.length === 0) throw new CapabilityNotSwitchableError(`source:${source}`, source === "agentlas" ? "agentlas_managed" : "runtime_reads_itself");
+  const targets = all.filter((item) => item.source === source && item.applies && !item.builtin && !isPersonalSource(item.source) && (!kind || item.kind === kind));
+  if (targets.length === 0) throw new CapabilityNotSwitchableError(`source:${source}`, source === "agentlas" ? "agentlas_managed" : "personal_runtime");
   const state = normalizedState(all, readCapabilityState({ fresh: true }));
   if (!kind) { state.sources[source] = enabled === true; for (const item of targets) delete state.items[item.id]; }
   else for (const item of targets) state.items[item.id] = enabled === true;

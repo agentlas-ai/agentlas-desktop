@@ -329,13 +329,12 @@ function receiptRecoveryMessage(
   }
   // Main 이 직접 끊은 실행(앱 종료·Goal 일시정지/삭제)은 실행 오류가 아니다 — 붉은 실패 줄 대신 이유를 적는다.
   const hostStop = receipt.hostStopCause ? invocationHostStopCopy(receipt.hostStopCause, locale) : null;
-  const isFailure = !hostStop && (receipt.status === "failed" || receipt.status === "interrupted");
+  // Host stops (update, app quit, Goal pause), cancellations and interruptions without an error are internal states:
+  // nothing to draw (owner 2026-10-14). Real failures and sign-in waits stay, they need the owner.
+  if (hostStop || receipt.status === "cancelled" || (receipt.status === "interrupted" && !receipt.errorMessage?.trim() && !receipt.errorCode?.trim())) return null;
+  const isFailure = receipt.status === "failed" || receipt.status === "interrupted";
   const baseText = receipt.status === "waiting_input"
     ? (locale === "ko" ? "로그인이 필요해 작업을 기다리고 있습니다. 로그인 후 계속할 수 있습니다." : "This task is waiting for sign-in. It can continue after login.")
-    : hostStop ? hostStop.detail : receipt.status === "cancelled"
-    ? (locale === "ko"
-      ? "작업이 취소되었습니다."
-      : "The task was cancelled.")
     : (locale === "ko"
       ? "작업이 중단되었습니다."
       : "The task stopped.");
@@ -1429,6 +1428,15 @@ function advancePipeline(stages: PipelineStage[] | undefined, ev: McpInvocationE
 function completePipeline(stages: PipelineStage[] | undefined): PipelineStage[] | undefined {
   if (!stages || !stages.length) return stages;
   return stages.map((s) => ({ ...s, status: "done" as const }));
+}
+
+/**
+ * Interrupted answers (owner stop, host stop, update, restart) are internal states, not replies: the turn that follows
+ * answers instead. Work, the supervisor and graph chats hide them like One does (owner 2026-10-14: "이거 다 UI에
+ * 안보이게 해"). The stored row keeps its banner.
+ */
+function withoutInterruptedAnswers<T extends { role: string; text: string }>(history: T[]): T[] {
+  return history.filter((entry) => !(entry.role === "assistant" && isInterruptedPartial(entry.text)));
 }
 
 function historyEntryToStreamMessage(entry: {
@@ -3878,7 +3886,7 @@ function ChatPage() {
           if (!owns() || !checkpoint.isCurrent()) return false;
           const state = { ...projectOneActivityFromLedger(ledger, snapshot.receipt), lastSequence: checkpoint.throughOrdinal };
           if (terminal && history) {
-            const next = attachMcpStepsToLatestAgent(history.map(historyEntryToStreamMessage), mcpStepsFromLedger(ledger));
+            const next = attachMcpStepsToLatestAgent(withoutInterruptedAnswers(history).map(historyEntryToStreamMessage), mcpStepsFromLedger(ledger));
             lastFinalRunIdRef.current = runId;
             setMessages(current => isCurrentChat() && (!runIdRef.current || runIdRef.current === runId) && lastFinalRunIdRef.current === runId ? reconcileTranscriptSnapshot(current.map(message =>
               message.id === placeholderId && message.runId === runId ? { ...message, busy: false, streaming: false, activityState: state } : message), next, null,
@@ -4199,7 +4207,7 @@ function ChatPage() {
             );
           }
           const historyMessages: StreamMessage[] = restoreAnsweredQuestions(
-            history.map(historyEntryToStreamMessage),
+            withoutInterruptedAnswers(history).map(historyEntryToStreamMessage),
             committedReplies,
           );
           // The ledger is the canonical Work projection too: preserve each run's
@@ -4555,7 +4563,7 @@ function ChatPage() {
           ? await api.runLedger.events(receipt.runId, 500).catch(() => [])
           : [];
         if (!isCurrentChat() || (runIdRef.current && runIdRef.current !== endedRunId)) return;
-        const historyMessages = restoreAnsweredQuestions(h.map(historyEntryToStreamMessage), committedReplies);
+        const historyMessages = restoreAnsweredQuestions(withoutInterruptedAnswers(h).map(historyEntryToStreamMessage), committedReplies);
         const hydrated = attachHydratedWorkActivities(historyMessages, h, chatTimeline);
         const next = hasHydratedWorkActivities(hydrated)
           ? hydrated
@@ -4616,7 +4624,7 @@ function ChatPage() {
           ? await api.runLedger.events(receipt.runId, 500).catch(() => [])
           : [];
         if (!stopped && isCurrentChat() && (!runIdRef.current || runIdRef.current === endedRunId)) {
-          const historyMessages = restoreAnsweredQuestions(h.map(historyEntryToStreamMessage), committedReplies);
+          const historyMessages = restoreAnsweredQuestions(withoutInterruptedAnswers(h).map(historyEntryToStreamMessage), committedReplies);
           const hydrated = attachHydratedWorkActivities(historyMessages, h, chatTimeline);
           const next = hasHydratedWorkActivities(hydrated)
             ? hydrated

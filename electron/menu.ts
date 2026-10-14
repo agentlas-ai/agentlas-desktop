@@ -6,6 +6,7 @@ import { app, BrowserWindow, dialog, Menu, shell } from "electron";
 import { checkSafely as updaterCheck, getUpdaterState } from "./updater";
 import { credentialRecoveryMenuItems } from "./secrets/recovery-menu";
 import { noteQuitIntent } from "./quit-reason";
+import { mainWindowDevToolsAllowed } from "./devtools-policy";
 
 const WEB_BASE = "https://agentlas.cloud";
 
@@ -307,7 +308,7 @@ export function buildAppMenu(
         { type: "separator" },
         { role: "reload" },
         { role: "forceReload" },
-        { role: "toggleDevTools" },
+        ...(mainWindowDevToolsAllowed({ packaged: app.isPackaged }) ? [{ role: "toggleDevTools" as const }] : []),
         { type: "separator" },
         {
           label: L.actualSize,

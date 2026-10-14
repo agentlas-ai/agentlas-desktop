@@ -7,6 +7,7 @@ import { normalizeChatHostNotice } from "@shared/chat-host-notice";
 import type { ChatHostNotice, ChatMessagesCursor } from "@shared/types";
 import { ipc } from "@/lib/ipc";
 import { readOneChatHistoryPage, mergeOneChatHistory, oneChatHistoryCursor } from "@/lib/one-chat-history";
+import { isInterruptedPartial } from "@shared/interrupted-partial";
 import { oneHistoryWindowStart, revealOneHistoryPage } from "@/lib/one-history-window";
 import { parseChatFileMessage } from "@/lib/chat-files";
 import { projectOneActivityFromLedger } from "@/lib/one-activity";
@@ -307,11 +308,11 @@ export function OneSplitPane({
           if (!text && images.length === 0) return null;
           if (message.role === "system") {
             const notice = normalizeChatHostNotice(message.role, message.hostNotice);
-            if (notice) return <HostContinuationNotice key={message.id} text={text} locale={locale === "ko" ? "ko" : "en"} notice={notice} />;
-            return (
-              <p key={message.id} data-split-message-id={message.id} className={styles.systemTurn} data-role="system">{text}</p>
-            );
+            // A system row without a typed notice is a host-written harness request (Goal resume, continuation): it is
+            // not drawn, like in the full One view. Interrupted answers below are internal states too (owner 2026-10-14).
+            return notice ? <HostContinuationNotice key={message.id} text={text} locale={locale === "ko" ? "ko" : "en"} notice={notice} /> : null;
           }
+          if (message.role === "assistant" && isInterruptedPartial(message.text ?? "")) return null;
           return (
             <article key={message.id} data-split-message-id={message.id} className={styles.message} data-role={message.role}>
               <div className={styles.messageBody}>
