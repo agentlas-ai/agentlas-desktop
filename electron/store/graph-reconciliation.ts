@@ -584,6 +584,28 @@ export function suspendAutomationForGraphReconciliation(automationId: string): b
   return result.changes > 0;
 }
 
+/**
+ * A held view, or nothing when the old run cannot be reconciled against the graph that runs now.
+ *
+ * Owner 2026-10-14: the host judges by outcomes, not by settling every earlier tool call ("작업마다 정산하지말고 …
+ * 중간에 툴콜 미정산 이런걸 왜보냐"; "새로운 주제 할때마다 터지냐"). An error run whose graph has since changed, with
+ * no revised-graph path, used to throw graph_drift out of this listing, so EVERY later run of that automation failed
+ * before it started. Measured 2026-10-14 08:06–08:55Z: "X 매일 원글 초안 제안" and four Yotube check automations all
+ * failed with automation_graph_reconciliation_graph_drift. The old run stays in the record; the next run starts fresh
+ * on the current graph. The owner's explicit reconcile (reconcileAutomationGraph) still reports the drift.
+ */
+function loadHeldReconciliation(
+  automationId: string,
+  exact?: { runId: string; occurrenceId: string },
+): LoadedReconciliation | null {
+  try {
+    return loadReconciliation(automationId, exact);
+  } catch (error) {
+    if (error instanceof Error && error.message === "automation_graph_reconciliation_graph_drift") return null;
+    throw error;
+  }
+}
+
 export function listAutomationGraphReconciliations(
   automationId: string,
 ): AutomationGraphReconciliation[] {
@@ -614,7 +636,7 @@ export function listAutomationGraphReconciliations(
     seenOccurrences.add(row.occurrence_id);
     if (row.status !== "error") continue;
     inspectedRunIds.add(row.id);
-    const loaded = loadReconciliation(automationId, { runId: row.id, occurrenceId: row.occurrence_id });
+    const loaded = loadHeldReconciliation(automationId, { runId: row.id, occurrenceId: row.occurrence_id });
     if (loaded) views.push(loaded.view);
   }
   // Manual and scheduled runs also own durable occurrences. A later run of
@@ -639,10 +661,10 @@ export function listAutomationGraphReconciliations(
     seenOccurrences.add(occurrenceId);
     if (row.status !== "error") continue;
     inspectedRunIds.add(row.id);
-    const loaded = loadReconciliation(automationId, { runId: row.id, occurrenceId });
+    const loaded = loadHeldReconciliation(automationId, { runId: row.id, occurrenceId });
     if (loaded) views.push(loaded.view);
   }
-  const latest = loadReconciliation(automationId);
+  const latest = loadHeldReconciliation(automationId);
   if (latest && !inspectedRunIds.has(latest.run.id)) views.push(latest.view);
   return views;
 }
@@ -663,7 +685,7 @@ export function getAutomationEffectHold(automationId: string): AutomationGraphRe
   const automation = getAutomation(automationId);
   if (!automation) throw new Error("automation_graph_reconciliation_automation_missing");
   if (automation.graph && automation.graph.nodes.length > 0) return getAutomationGraphReconciliation(automationId);
-  const latest = loadReconciliation(automationId);
+  const latest = loadHeldReconciliation(automationId);
   return latest?.view ?? null;
 }
 
@@ -1134,7 +1156,7 @@ function scheduleCheckpoint(automation: Automation, allowRevisedHold = false): {
   const digest = graphExecutionDigest(automation, graph);
   if (run.graph_digest !== digest) {
     // Historical authority can expose its old hold, never execute a new graph.
-    const revised = allowRevisedHold ? loadReconciliation(automation.id) : null;
+    const revised = allowRevisedHold ? loadHeldReconciliation(automation.id) : null;
     return revised?.revisedGraph && !Object.keys(revised.checkpoint.loginWaits).length ? revised : null;
   }
   let raw: unknown;

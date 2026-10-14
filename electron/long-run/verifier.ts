@@ -789,8 +789,8 @@ export function collectDurableGoalVerificationEvidence(
   const settledBoundary = (id: string): boolean => {
     try {
       const read = receipt.chatId ? readInvocationEffectBoundary({invocationRunId: id, expectedChatId: receipt.chatId}) : null;
-      // Quiesced (only typed failed-but-resolved calls open) is enough to judge the current state.
-      return !!read && (read.effects === "settled" || read.quiesced === true)
+      // A finished turn bound to this Goal revision is evidence; tool-call settlement is not a precondition (owner 2026-10-14).
+      return !!read && read.terminal === true
         && (!goalBinding || invocationMatchesGoalRevision(id, goalBinding.goalId, goalBinding.revision));
     } catch { return false; }
   };

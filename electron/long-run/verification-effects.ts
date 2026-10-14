@@ -77,6 +77,11 @@ export function runVerificationEffectDispatch(
   return scope ? scope.session.dispatch(scope.stage, kind, signal, start) : start(signal, () => {});
 }
 
+/** Failures that belong to one stage's own work, never to an outside effect. */
+const STAGE_LOCAL_FAILURES: ReadonlySet<string> = new Set([
+  "verification_effects_stage_failed", "verification_effects_runner_failed", "verification_effects_dispatch_missing",
+]);
+
 class EffectSession implements VerificationSession {
   readonly executionId: string;
   readonly anchorId: string;
@@ -135,6 +140,7 @@ class EffectSession implements VerificationSession {
     const stage: Stage = { name, open: true };
     this.stage = stage;
     const startCount = this.dispatches.length;
+    const failuresBefore = new Set(this.failures);
     // Even an accidentally unwrapped nested adapter must never inherit the
     // task's sealed ledger. It is an uncovered verifier dispatch, not success.
     const untracked = () => this.fail("verification_effects_untracked_dispatch");
@@ -150,11 +156,29 @@ class EffectSession implements VerificationSession {
       return result;
     } catch (error) {
       this.fail("verification_effects_stage_failed");
+      this.releaseStageLocalFailures(startCount, failuresBefore);
       throw error;
     } finally {
       stage.open = false;
       this.stage = null;
     }
+  }
+
+  /**
+   * A stage whose own work failed (its judgment threw, the model answered with an error, it made no dispatch) is that
+   * stage's failure, not an effect. Latching it poisoned every later stage: at 06:26Z (production 1.3.33) the
+   * criterion-proof stage threw with no dispatch, and the judgment stage then refused to start, so the whole Goal
+   * verification failed and looped (owner 2026-10-14: closure must not hang on settlement bookkeeping). The caller
+   * still sees the throw. Effect-safety failures (tool observed, untracked or late dispatch, non-empty native
+   * report, invalid scope, ledger) stay latched, and so does anything while one of this stage's dispatches is open.
+   */
+  private releaseStageLocalFailures(startCount: number, failuresBefore: ReadonlySet<string>): void {
+    const added = [...this.failures].filter(reason => !failuresBefore.has(reason));
+    const stageDispatches = this.dispatches.slice(startCount);
+    if (!added.length || !added.every(reason => STAGE_LOCAL_FAILURES.has(reason))) return;
+    if (stageDispatches.some(dispatch => !dispatch.settled || dispatch.scopes.size && [...dispatch.scopes.values()].some(scope => !this.emptyReport(dispatch.kind, scope.report)))) return;
+    for (const reason of added) this.failures.delete(reason);
+    this.record("verifier_effect_stage_released", { reasonCodes: added });
   }
 
   dispatch(stage: Stage, kind: string, signal: AbortSignal,
