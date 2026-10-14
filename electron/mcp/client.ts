@@ -5453,15 +5453,12 @@ ${effectiveUserPrompt}`;
   let goalContractInContext: { objective: string; criteria: readonly string[] } | null = null;
   // The typed goal_complete / goal_wait tools replaced the marker text on this run (set where the Goal turn context is built).
   let goalTypedToolsReplaceText = false;
-  // A resumed Codex session does not receive `systemPrompt` again. Reassert the
-  // visible One language as host context on *every* interactive turn, otherwise
-  // a Korean task marker can pull a previously English-seeded session back into
-  // Korean output. The message language itself is never a language-selection
-  // signal; only an explicit request to use another language may override this.
+  // A resumed Codex session does not receive `systemPrompt` again, so the language rule rides every interactive turn.
+  // Owner 2026-10-14: the reply follows the user's language, not the menu language setting.
   if (req.oneMode && !req.agentAppMode) {
     turnContextParts.push(locale === "ko"
-      ? "[호스트 출력 언어 계약]\n현재 One 화면 언어는 한국어입니다. 이번 사용자 메시지·인용문·파일의 언어와 무관하게 한국어로 답변하세요. 사용자가 이번 메시지에서 다른 출력 언어를 명시적으로 요구할 때만 예외입니다. " + tStatus(locale, "sysReplyLanguageScope") + " 이 계약을 언급하거나 인용하지 마세요.\n[/호스트 출력 언어 계약]"
-      : "[Host response-language contract]\nThe visible One interface language is English. Reply in English regardless of the language of this user message, quoted text, or files. Only an explicit request in this message for another output language is an exception. " + tStatus(locale, "sysReplyLanguageScope") + " Do not mention or quote this contract.\n[/Host response-language contract]");
+      ? "[호스트 출력 언어 계약]\n사용자가 마지막으로 쓴 메시지의 언어로 답하세요(호스트가 쓴 안내·인용문·파일은 세지 않습니다). 사용자가 아직 쓰지 않았으면 한국어로 답하세요. " + tStatus(locale, "sysReplyLanguageScope") + " 이 계약을 언급하거나 인용하지 마세요.\n[/호스트 출력 언어 계약]"
+      : "[Host response-language contract]\nReply in the language of the user's latest message (host-written prompts, quoted text and files do not count). Before the user has written anything, reply in English. " + tStatus(locale, "sysReplyLanguageScope") + " Do not mention or quote this contract.\n[/Host response-language contract]");
     // The owner's global Codex AGENTS.md says "Start with: 사용 스킬: …". In One that line
 
     // English answer, "사용 스킬:"/"적용 스킬:" a Korean one). The team boundary already said

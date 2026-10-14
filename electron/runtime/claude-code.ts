@@ -403,7 +403,7 @@ async function claudeExecutionSettings(req: RunnerRequest): Promise<string | nul
 }
 
 /**
- * 답변 언어는 앱의 화면 언어가 정한다(runner.ts responseLanguageGuide 의 제품 규칙). 그런데 Claude Code 사용자 설정
+ * 답변 언어는 사용자가 쓴 언어를 따른다(오너 2026-10-14, runner.ts responseLanguageGuide). 그런데 Claude Code 사용자 설정
  * `"language": "korean"` 은 CLI 가 시스템 수준에 넣어서, 우리 시스템 프롬프트의 "Always reply in English" 를 맨 앞에
  * 두든 맨 끝에 두든 이겼다(실측 2026-09-14, claude 2.1.270: 두 배치 모두 한국어, `--settings '{"language":"english"}'`
  * 는 영어). 영어 화면·영어 프로젝트에서 연구 디렉터가 한국어로 답하던 원인 — 그 설정을 해 둔 사용자 누구에게나 난다.
@@ -428,8 +428,10 @@ export function withoutPersonalClaudeInstructions(settings: string, env: NodeJS.
   return JSON.stringify({ ...base, claudeMdExcludes: [...new Set([...existing, ...personalClaudeInstructionFiles(env)])] });
 }
 
-export async function withProductReplyLanguage(settings: string | null, locale: RunnerRequest["locale"]): Promise<string> {
-  const language = locale === "ko" ? "korean" : "english";
+export async function withProductReplyLanguage(settings: string | null, _locale: RunnerRequest["locale"]): Promise<string> {
+  // Owner 2026-10-14: the reply follows the user's language. "" clears a personal "language" setting without forcing
+  // one (measured claude 2.1.296 with a personal "korean": unset answered English in Korean; "" answered each in kind).
+  const language = "";
   let base: Record<string, unknown> = {};
   if (settings) {
     const trimmed = settings.trim();

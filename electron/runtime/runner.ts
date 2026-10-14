@@ -1265,16 +1265,13 @@ export const SURFACE_INTENT_MARKER = "<<surface-intent>>";
 
 function responseLanguageGuide(locale: RuntimeLocale, _userPrompt?: string): string {
   const exactReplyGuide = "If the current message asks you to reply, return, or output an exact literal string, obey it exactly and output nothing else. Do not explain, clarify, add an identity badge, or append a control block.";
-  // One's language switch is an explicit product setting. Deriving the reply
-  // language from the latest prompt made an English One screen answer in
-  // Korean whenever a Korean task marker was submitted, leaving the product
-  // visibly bilingual in a single turn. The chosen UI locale wins unless the
-  // person explicitly asks for a different language in the message itself.
+  // Owner 2026-10-14: the reply follows the language the user writes in; the app's language setting is for menus and
+  // screens only ("입력언어무관 한국어답이 아니고 입력언어에따라 출력 … 세팅 영어 한국어는 메뉴나 그런거임"). The setting is
+  // only the fallback before the user has written anything (sysGuide).
   return [
     tStatus(locale, "sysGuide"),
     tStatus(locale, "sysReplyLanguageScope"),
     tStatus(locale, "sysInterimLanguage"),
-    "Do not infer a different reply language from the language of the current message, quoted text, file contents, or prior conversation.",
     "Do not expose hidden chain-of-thought. If you need to narrate progress, summarize only observable actions and results.",
     exactReplyGuide,
   ].join(" ");
