@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.3.34 — 2026-10-14
+## 1.3.35 — 2026-10-14
 
 - Agents reply in the language you write in. The app's language setting now only sets menus and screens, and is used for replies only before you have written anything.
 - This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
