@@ -1,12 +1,8 @@
 # Changelog
 
-## 1.3.39 — 2026-10-14
+## 1.3.40 — 2026-10-15
 
 - Your message always starts: a slow pre-check no longer refuses it, and a refused automatic retry is no longer resent several times a second, which made a room flicker between working and idle.
-- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
-
-## 1.3.38 — 2026-10-14
-
 - Agents use only Agentlas's own skills, plugins and connectors. Skills, plugins, hooks, memory and connectors you set up in Codex, Claude Code, Cursor and other tools are no longer listed, counted or used by Agentlas runs.
 - In the One chat, one Enter sends once: a Korean input Enter no longer sends twice, and an empty Enter no longer stops a running answer or pauses a Goal. Answers the background service writes appear in the open chat right away.
 - The released app no longer opens developer tools in its main window, so an agent cannot use them to type into your message box.

@@ -283,7 +283,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '23dea02fd5195e439874b79bbdd01ba4c40d5b6f172e3f53bca7f43abed1ec04') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '2f47fce4687cf41e23004ef250b8221e63facafdce3ffa414dd8449d38a20105') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -315,7 +315,7 @@ jobs:
             "scripts/test-first-run-roles-from-onboarding.cjs": "a482380530cca91ff82807844cf04878e9d08c847ef9a4106c12abab0b696317",
             "scripts/test-hub-bookmark-ux.cjs": "782386b1d2687fdd5e90f64bf239009410f55d0f419bac7d0d5482274bf22121",
             "scripts/test-mobile-ontology-bridge.cjs": "5257bdc12ab680997da410f7c2e03293224b00d139a817c6bd42109c9a54bf37",
-            "scripts/test-one-activity-contract.cjs": "5db013479e70a055a3b592377a838ce50592526a842ec9643b4ff5e62afd3ce8",
+            "scripts/test-one-activity-contract.cjs": "4694b99b6ebe434d076fec38da3fed8bf6e191ac35d16f3fa06ca046539b6756",
             "scripts/test-one-sidebar-contract.cjs": "04d662278f524d51789f9ea733745e7e0a592f734e0587696011e6b1763db75d",
             "scripts/test-project-first-v84.cjs": "c718ca8f12109518d372af3a781dd9bdff95aeee7e7669f88578d52069c79eb5",
             "scripts/test-room-isolation-and-owner-turn.cjs": "8d35fdd605c9c5d5441d33abe9ba1c277f2d770da3515839d909c9acf90aff29",
@@ -329,7 +329,7 @@ jobs:
             "scripts/verify-builtin-plugins-degrade.mjs": "47801c16ef3dd39c0da35d56103f8ba3eca3d179f4ce5ca8b73a8f556324eaaf",
             "scripts/verify-one-composer-surface.mjs": "4dc0eec040819d5db15d1e0e48ee866a139e33d8f3ff525cb25b3c75e5445f08",
             "scripts/verify-one-team-permission-boundary.mjs": "f2373e909cd59c6957d6014fe6ab6f3e0a924b13b335f1d06ff8beaef353a126",
-            "scripts/verify-one-team-surface.mjs": "63364b48934ddef65855ae2c5428580b0fe3ab6fbf6c6165f3b99a5efd2556e2",
+            "scripts/verify-one-team-surface.mjs": "0d442b81e168411ea279b16d23eb709c6c48a097d7d6df2de75a8f636a75b85e",
             "scripts/current-sidebar-route-contract.cjs": "46d8f58f57e0a7a93cbde54582387d4f937e9f2bf07cd50956eb6520eb004f37"
           }));
           if (manifest.files?.length !== 45 || approvedPins.size !== 45) throw new Error('All 44 original private Mac entries plus the exact sealed R7 sidebar helper are required');
@@ -731,7 +731,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '23dea02fd5195e439874b79bbdd01ba4c40d5b6f172e3f53bca7f43abed1ec04') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '2f47fce4687cf41e23004ef250b8221e63facafdce3ffa414dd8449d38a20105') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -763,7 +763,7 @@ jobs:
             "scripts/test-first-run-roles-from-onboarding.cjs": "a482380530cca91ff82807844cf04878e9d08c847ef9a4106c12abab0b696317",
             "scripts/test-hub-bookmark-ux.cjs": "782386b1d2687fdd5e90f64bf239009410f55d0f419bac7d0d5482274bf22121",
             "scripts/test-mobile-ontology-bridge.cjs": "5257bdc12ab680997da410f7c2e03293224b00d139a817c6bd42109c9a54bf37",
-            "scripts/test-one-activity-contract.cjs": "5db013479e70a055a3b592377a838ce50592526a842ec9643b4ff5e62afd3ce8",
+            "scripts/test-one-activity-contract.cjs": "4694b99b6ebe434d076fec38da3fed8bf6e191ac35d16f3fa06ca046539b6756",
             "scripts/test-one-sidebar-contract.cjs": "04d662278f524d51789f9ea733745e7e0a592f734e0587696011e6b1763db75d",
             "scripts/test-project-first-v84.cjs": "c718ca8f12109518d372af3a781dd9bdff95aeee7e7669f88578d52069c79eb5",
             "scripts/test-room-isolation-and-owner-turn.cjs": "8d35fdd605c9c5d5441d33abe9ba1c277f2d770da3515839d909c9acf90aff29",
@@ -777,7 +777,7 @@ jobs:
             "scripts/verify-builtin-plugins-degrade.mjs": "47801c16ef3dd39c0da35d56103f8ba3eca3d179f4ce5ca8b73a8f556324eaaf",
             "scripts/verify-one-composer-surface.mjs": "4dc0eec040819d5db15d1e0e48ee866a139e33d8f3ff525cb25b3c75e5445f08",
             "scripts/verify-one-team-permission-boundary.mjs": "f2373e909cd59c6957d6014fe6ab6f3e0a924b13b335f1d06ff8beaef353a126",
-            "scripts/verify-one-team-surface.mjs": "63364b48934ddef65855ae2c5428580b0fe3ab6fbf6c6165f3b99a5efd2556e2",
+            "scripts/verify-one-team-surface.mjs": "0d442b81e168411ea279b16d23eb709c6c48a097d7d6df2de75a8f636a75b85e",
             "scripts/current-sidebar-route-contract.cjs": "46d8f58f57e0a7a93cbde54582387d4f937e9f2bf07cd50956eb6520eb004f37"
           }));
           if (manifest.files?.length !== 45 || approvedPins.size !== 45) throw new Error('All 44 original private Mac entries plus the exact sealed R7 sidebar helper are required');
@@ -1107,7 +1107,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '23dea02fd5195e439874b79bbdd01ba4c40d5b6f172e3f53bca7f43abed1ec04') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '2f47fce4687cf41e23004ef250b8221e63facafdce3ffa414dd8449d38a20105') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -1139,7 +1139,7 @@ jobs:
             "scripts/test-first-run-roles-from-onboarding.cjs": "a482380530cca91ff82807844cf04878e9d08c847ef9a4106c12abab0b696317",
             "scripts/test-hub-bookmark-ux.cjs": "782386b1d2687fdd5e90f64bf239009410f55d0f419bac7d0d5482274bf22121",
             "scripts/test-mobile-ontology-bridge.cjs": "5257bdc12ab680997da410f7c2e03293224b00d139a817c6bd42109c9a54bf37",
-            "scripts/test-one-activity-contract.cjs": "5db013479e70a055a3b592377a838ce50592526a842ec9643b4ff5e62afd3ce8",
+            "scripts/test-one-activity-contract.cjs": "4694b99b6ebe434d076fec38da3fed8bf6e191ac35d16f3fa06ca046539b6756",
             "scripts/test-one-sidebar-contract.cjs": "04d662278f524d51789f9ea733745e7e0a592f734e0587696011e6b1763db75d",
             "scripts/test-project-first-v84.cjs": "c718ca8f12109518d372af3a781dd9bdff95aeee7e7669f88578d52069c79eb5",
             "scripts/test-room-isolation-and-owner-turn.cjs": "8d35fdd605c9c5d5441d33abe9ba1c277f2d770da3515839d909c9acf90aff29",
@@ -1153,7 +1153,7 @@ jobs:
             "scripts/verify-builtin-plugins-degrade.mjs": "47801c16ef3dd39c0da35d56103f8ba3eca3d179f4ce5ca8b73a8f556324eaaf",
             "scripts/verify-one-composer-surface.mjs": "4dc0eec040819d5db15d1e0e48ee866a139e33d8f3ff525cb25b3c75e5445f08",
             "scripts/verify-one-team-permission-boundary.mjs": "f2373e909cd59c6957d6014fe6ab6f3e0a924b13b335f1d06ff8beaef353a126",
-            "scripts/verify-one-team-surface.mjs": "63364b48934ddef65855ae2c5428580b0fe3ab6fbf6c6165f3b99a5efd2556e2",
+            "scripts/verify-one-team-surface.mjs": "0d442b81e168411ea279b16d23eb709c6c48a097d7d6df2de75a8f636a75b85e",
             "scripts/current-sidebar-route-contract.cjs": "46d8f58f57e0a7a93cbde54582387d4f937e9f2bf07cd50956eb6520eb004f37"
           }));
           if (manifest.files?.length !== 45 || approvedPins.size !== 45) throw new Error('All 44 original private Mac entries plus the exact sealed R7 sidebar helper are required');
