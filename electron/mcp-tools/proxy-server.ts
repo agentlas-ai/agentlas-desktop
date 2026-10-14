@@ -76,6 +76,8 @@ const AGENTLAS_BROWSER_READ_TOOLS = new Set([
   "browser_take_screenshot",
   "browser_wait_for",
   "browser_skill_list",
+  // Posts one owner card in this chat; the owner's own press presents the page.
+  "browser_show_owner",
 ]);
 
 // Native observation calls cannot change host state. Keep this list exact;

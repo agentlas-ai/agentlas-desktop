@@ -636,11 +636,11 @@ function closeActive(active: ActiveWorkView, notify = true): void {
 }
 
 /** Presentation does not mutate guest ownership, input, or background visibility. */
-export function presentNativeBrowserGuest(ownerId: number, taskScopeId: string, runId: string, viewId: string): void {
+export function presentNativeBrowserGuest(ownerId: number, taskScopeId: string, runId: string, viewId: string, by?: "owner"): void {
   const active = registeredGuest(ownerId, viewId, taskScopeId);
   if (!active || active.mode !== "browser" || !runId) return;
   emit(active, { state: active.state, url: active.view.webContents.getURL() || "about:blank",
-    presentation: { id: randomUUID(), runId } });
+    presentation: { id: randomUUID(), runId, ...(by ? { by } : {}) } });
 }
 
 export function closeWorkLiveView(ownerId: number, viewId: string, taskScopeId?: string): { ok: boolean } {

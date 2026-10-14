@@ -18,6 +18,7 @@ import { randomUUID } from "node:crypto";
 import type { McpInvocationEvent } from "../../shared/types";
 import { registrableDomain } from "../../shared/registrable-domain";
 import {
+  BROWSER_HUMAN_CHECK_NOTICE,
   BROWSER_LADDER_EVENT_KIND,
   BROWSER_LADDER_SCHEMA,
   HUMAN_CHECK_POLL_MS,
@@ -513,6 +514,20 @@ export function observeBrowserToolForHumanCheck(input: { toolName: string; chatI
   })().catch(() => undefined);
 }
 
+/**
+ * The agent called browser_show_owner: the owner has to do a step in the open browser (a phone code, a consent
+ * screen). One card with Open browser; pressing it presents the page the agent acted on last and opens a closed
+ * panel. Before this an agent had no way to show the in-app browser and fell back to macOS window scripting
+ * (Yotube room 2026-10-13 22:50Z, YouTube phone verification: the owner asked where the screen was).
+ */
+export function ownerBrowserStepNotice(input: { locale: "ko" | "en"; nativeGrant?: NativeBrowserRelayGrant | null }): Notice {
+  const message = { ko: "브라우저에서 직접 하실 단계가 있어요", en: "There is a step for you in the browser" };
+  const grant = input.nativeGrant ?? null;
+  return { level: "warning", code: BROWSER_HUMAN_CHECK_NOTICE, message: input.locale === "ko" ? message.ko : message.en,
+    i18n: message, details: JSON.stringify({ schema: BROWSER_LADDER_SCHEMA, reasonCode: "owner_browser_step", action: "open-browser",
+      site: null, browserSurface: grant ? "native" : "dedicated", ...(grant?.ownerScopeId ? { ownerScopeId: grant.ownerScopeId } : {}) }) };
+}
+
 const droppedWires = new Map<string, { at: number; ladderId: string; chatId: string | null }>();
 /**
  * Bridge wire cut under in-flight browser calls (production 2026-09-26..29: 11 calls "agentlas proxy
@@ -568,10 +583,13 @@ export async function browserLadderOwnerAction(input: {
       if (input.action === "open-browser") {
         const site = input.site && /^[a-z0-9.-]{1,253}$/i.test(input.site) ? input.site : null;
         const pages = grant.pages();
-        const matches = site ? pages.filter((page) => {
+        const siteMatches = site ? pages.filter((page) => {
           const wall = detectLoginWall({ url: page.url });
           return wall.kind === "login-wall" ? wall.site === site : siteOf(page.url) === site;
         }) : pages;
+        // Several tabs: the one the agent acted on last is the page it asked the owner to look at.
+        const lastActed = siteMatches.filter((page) => page.lastActed);
+        const matches = siteMatches.length > 1 && lastActed.length === 1 ? lastActed : siteMatches;
         if (matches.length !== 1 || !matches[0].present) {
           return { ok: false, code: matches.length > 1 ? "native-browser-owner-page-ambiguous" : "native-browser-owner-page-unavailable" };
         }

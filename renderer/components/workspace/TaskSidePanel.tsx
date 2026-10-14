@@ -1010,6 +1010,8 @@ function TaskSidePanelContent({
     selectRailView(view);
     onRequestOpen?.();
   }, [reopenRailTab, selectRailView, onRequestOpen]);
+  const requestOpenRef = useRef(onRequestOpen);
+  requestOpenRef.current = onRequestOpen;
   const nativeBrowserObservedRef = useRef(onBrowserObserved);
   nativeBrowserObservedRef.current = onBrowserObserved;
   const [presentedBrowser, setPresentedBrowser] = useState<{ viewId: string; id: string }>();
@@ -1034,10 +1036,15 @@ function TaskSidePanelContent({
         setBrowserUrlsByScope((current) => current[scope] === status.url ? current : { ...current, [scope]: status.url! });
         observeRailTab("browser");
         nativeBrowserObservedRef.current?.(status.url);
+        // The owner pressed a card's Open browser: that press is the explicit reveal, so a closed panel opens on it.
+        if (presentation.by === "owner") {
+          selectRailView("browser");
+          requestOpenRef.current?.();
+        }
       }).catch(() => undefined);
     });
     return () => { disposed = true; off?.(); };
-  }, [screenChatId, browserScopeKey, observeRailTab]);
+  }, [screenChatId, browserScopeKey, observeRailTab, selectRailView]);
   // 이 대화(Work 는 프로젝트까지)에 걸린 자동화 — 있을 때만 "자동화" 탭이 선다(오너 2026-09-28).
   const automationSnapshot = useAutomationChatActivity({ chatId: screenChatId ?? null });
   const hasAutomations = (automationSnapshot?.automations.length ?? 0) > 0;

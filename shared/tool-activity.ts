@@ -24,9 +24,13 @@ const HOST_PREFLIGHT_PREFIX = "Agentlas Plugins";
  * a read-only One answer included — ended with effects "uncertain" and blocked.
  */
 export const HOST_SUPERVISOR_NOTICE_PREFIX = "Stormbreaker Loop ·";
+// Goal continuations use the same host-only tool-use channel as supervisor notices.
+// Keep the old prefix export for callers; both labels have no provider dispatch.
+const HOST_GOAL_NOTICE_PREFIX = "Goal Loop ·";
 
 export function isHostSupervisorNotice(toolName: string | null | undefined): boolean {
-  return String(toolName ?? "").trim().startsWith(HOST_SUPERVISOR_NOTICE_PREFIX);
+  const name = String(toolName ?? "").trim();
+  return name.startsWith(HOST_SUPERVISOR_NOTICE_PREFIX) || name.startsWith(HOST_GOAL_NOTICE_PREFIX);
 }
 
 /** 편성 감사용 읽기 전용 호출 — 바깥을 바꾸지 않는다. */

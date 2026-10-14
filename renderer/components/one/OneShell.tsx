@@ -157,7 +157,7 @@ import type {
 } from "@shared/one-surface";
 import { toCustomerSafeText } from "@shared/one-customer-safe";
 import { stripAgentControlBlocks, stripAgentIdentityBadges, stripAgentRoutingBanners } from "@shared/agent-control-blocks";
-import { isLivePartialCommitBoundary } from "@shared/interrupted-partial";
+import { isInterruptedPartial, isLivePartialCommitBoundary } from "@shared/interrupted-partial";
 import { classifyOneRequestIntent } from "@shared/one-request-intent";
 import { runtimeSelectionReceiptMatches } from "@shared/runtime-selection-receipt";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
@@ -935,6 +935,19 @@ function stripGenericResultReadyCopy(value: string): string {
  */
 const ONE_SYSTEM_PROMPTS = ["retry_unfinished", "runtime_recovered", "auto_recover"] as const;
 
+/**
+ * An answer cut off before it finished is kept with its "interrupted" banner (shared/interrupted-partial.ts), but on
+ * screen it reads like a step of the work, not an error: one quiet line with its first sentence (owner 2026-10-14:
+ * "중단된 답변입니다 이런거 너무 많아서 오류같음 … 추론과정처럼 한줄로").
+ */
+function interruptedPartialLine(text: string, locale: string): string {
+  const body = text.split("\n").filter((line) => !line.startsWith(">")).map((line) => line.trim()).find(Boolean) ?? "";
+  const first = body.replace(/\s+/g, " ");
+  const clipped = first.length > 140 ? `${first.slice(0, 139)}…` : first;
+  const label = locale === "ko" ? "중단됨" : "Interrupted";
+  return clipped ? `${label} · ${clipped}` : label;
+}
+
 function oneSystemPromptLabel(message: UiMessage): string | null {
   if (message.role !== "system") return null;
   const text = message.text.trim();
@@ -1035,8 +1048,9 @@ function projectVisibleOneMessageText(message: UiMessage): string {
   if (message.role === "assistant" && /^(?:Your result and files are ready\. You can review them below\.|요청한 결과와 파일을 준비했어요\. 아래에서 바로 확인할 수 있어요\.)$/.test(message.text.trim())) {
     return "";
   }
-  const systemPromptLabel = oneSystemPromptLabel(message);
-  if (systemPromptLabel) return systemPromptLabel;
+  // "One continued the remaining steps" and its siblings are the host continuing on its own: not conversation
+  // (owner 2026-10-14, "자동이어가기도 굳이 챗창에는 안나와도"). They stay in the record, not on screen.
+  if (oneSystemPromptLabel(message)) return "";
   // 좌석 사건 줄(자리 담당이 바뀌었다·누가 맡았다)은 내부 프롬프트가 아니라 **대화에
   // 남는 사실**이다. 표식이 붙은 줄만 열어 준다 — 표식 없는 system 줄은 아래에서 그대로
   // 비공개다(좌석 기획 §4-5; 표식 계약은 shared/one-seat-events.ts).
@@ -9089,7 +9103,9 @@ function OneSessionsShell() {
                     const hasAttachments = (message.images?.length ?? 0) > 0 || (message.files?.length ?? 0) > 0;
                     if ((foldedIntoWork || (!displayedText && !hasAttachments)) && !liveBefore && blocksAfter.length === 0) return null;
                     const systemLabel = message.role === "system"
-                      ? oneSystemPromptLabel(message)
+                      ? null
+                      : message.role === "assistant" && !message.streaming && isInterruptedPartial(message.text)
+                        ? interruptedPartialLine(message.text, appLocale)
                       // A phone decision-card Reject is an action, not English the owner typed.
                       : message.role === "user" && isOneDecisionProductSafeRejectReply(message.text)
                         ? tFor(appLocale, "one.shell.decision.reject_receipt")

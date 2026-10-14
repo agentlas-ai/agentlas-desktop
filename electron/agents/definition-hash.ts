@@ -68,6 +68,38 @@ function shouldEnterDirectory(relative: string): boolean {
 }
 
 /**
+ * Newest modification time among the files the definition fingerprint covers, by stat alone (no reads). A run calls
+ * this to notice that a local agent changed after it was imported (an owner edit or the agent's own evolution);
+ * hashing the whole definition on every run is what the startup migration below already found too slow.
+ * Returns 0 when the folder cannot be read.
+ */
+export function newestLocalAgentDefinitionMtimeMs(rootPath: string): number {
+  let newest = 0;
+  let seen = 0;
+  const walk = (directory: string, root: string): void => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      if (seen >= MAX_FILES || entry.isSymbolicLink()) continue;
+      const absolute = path.join(directory, entry.name);
+      const relative = normalizedRelative(root, absolute);
+      if (entry.isDirectory()) {
+        if (shouldEnterDirectory(relative)) walk(absolute, root);
+        continue;
+      }
+      if (!entry.isFile() || !isDefinitionPath(relative)) continue;
+      seen += 1;
+      newest = Math.max(newest, fs.statSync(absolute).mtimeMs);
+    }
+  };
+  try {
+    const root = fs.realpathSync.native(path.resolve(rootPath));
+    walk(root, root);
+  } catch {
+    return 0;
+  }
+  return newest;
+}
+
+/**
  * Content-derived fingerprint for a local AgentDefinition.
  *
  * Memory, receipts, generated output, local paths and credentials are excluded.

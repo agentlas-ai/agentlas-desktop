@@ -143,6 +143,8 @@ export interface NativeBrowserRelayPage {
   /** Stable native view identity; optional for older observers/mocks. */
   id?: string;
   url: string;
+  /** The page the agent acted on last in this grant. */
+  lastActed?: boolean;
   /** Reload and resolve with the URL the page settled on (null if it went away). */
   reload: () => Promise<string | null>;
   /** Open a URL in the same guest (owner sign-in card). */
@@ -282,6 +284,8 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
   // run hit the tab limit.
   let lastActivity = Date.now();
   const touch = () => { lastActivity = Date.now(); };
+  // The page the agent acted on last: an owner card with several tabs open shows this one.
+  let lastActedViewId: string | null = null;
   // Fallback-ladder state. `issued` remembers every session id this grant handed out: a session that was
   // dropped while the grant is still current is brought back under the same id instead of answering 410 for
   // the rest of the run (production 2026-09-27..28: 45 calls in 17 runs failed on one dead session URL,
@@ -563,6 +567,7 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
     else await createGuest(lease);
   };
   const presentAction = (guest: Pick<Guest, "wc" | "viewId" | "lastPresentationAt">) => {
+    lastActedViewId = guest.viewId;
     if (!current() || input.presentation === "background") return;
     const now = Date.now(), previous = guest.lastPresentationAt;
     guest.lastPresentationAt = now;
@@ -1018,6 +1023,7 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
         out.push({
           id: guest.viewId,
           url: wc.getURL(),
+          lastActed: guest.viewId === lastActedViewId,
           retainLoginVerification: (signal) => {
             if (!current() || signal.aborted || wc.isDestroyed()) throw new Error("native-browser-grant-revoked");
             const lease = acquireNativeBrowserTask({ taskScopeId: input.chatId, runId: input.runId, permission: "read", signal });
@@ -1068,8 +1074,8 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
           },
           present: () => {
             if (wc.isDestroyed() || !current() || !focusNativeBrowserTask(input.chatId)) return false;
-            // The owner asked to be shown this page: present even a background run's guest.
-            presentNativeBrowserGuest(owner.ownerId, input.chatId, input.runId, guest.viewId);
+            // The owner asked to be shown this page: present even a background run's guest, and open a closed panel.
+            presentNativeBrowserGuest(owner.ownerId, input.chatId, input.runId, guest.viewId, "owner");
             return current() && !wc.isDestroyed();
           },
         });

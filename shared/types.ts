@@ -4080,8 +4080,9 @@ export interface WorkLiveBrowserTab extends WorkLiveViewStatus {
 }
 
 export interface WorkLiveViewStatus {
-  /** Main-issued foreground AI action; navigation status alone is not presentation authority. */
-  presentation?: { id: string; runId: string };
+  /** Main-issued foreground AI action; navigation status alone is not presentation authority.
+   * by "owner": the owner pressed a card's Open browser, so a closed panel opens on this page. */
+  presentation?: { id: string; runId: string; by?: "owner" };
   /** Cookie transfer receipt for this URL only; unrelated sites remain in Main. */
   nativeSession?: NativeBrowserCookieImportResult;
   viewId: string;

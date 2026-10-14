@@ -3272,6 +3272,14 @@ const UNIFIED_CUA_TOOL = {
   description: 'Run JavaScript in a persistent run-scoped isolate. The code is the body of an async function: "return" the value you want back (e.g. "return await cua.getState()"); without "return" the result is null. Global cua API: await cua.getState(); cua.getTab(id).snapshot/focus/close/navigate(url)/back/click({element,ref})/typeText({element,ref},text)/pressKey(key); await cua.createBrowserTab("iab",url); cua.getApp(name).observe/snapshot/screenshot/focus/click({x,y,sourceId})/drag/scroll/typeText/pressKey/setValue, plus clickElement({observationId,elementIndex}), setElementValue, performElementAction, selectElementText. Native element observations are single-mutation and must be refreshed. globalThis values persist between calls. Native methods exist only when cua-driver was selected for this same run.',
   inputSchema: { type: 'object', properties: { code: { type: 'string', minLength: 1, maxLength: 65536 }, timeout_ms: { type: 'integer', minimum: 250, maximum: 120000 } }, required: ['code'], additionalProperties: false },
 };
+// Ask the owner to do a step in the open browser (a phone code, a consent screen). Main answers with one card whose
+// Open browser shows the page this run acted on last; the agent never scripts the app window for that.
+const OWNER_STEP_TOOL = {
+  name: 'browser_show_owner',
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  description: 'Show the owner the browser page you are on when only they can do the next step there (enter a phone or SMS code, pass a check, approve a screen). The app posts one card with an Open browser button; then tell the owner in chat what to do. Do not type their codes and do not script the app window.',
+  inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+};
 function skillPath(name) { return path.join(SKILLS_DIR, String(name).replace(/[^a-zA-Z0-9._-]/g, '_') + '.json'); }
 function listSkills() { try { return fs.readdirSync(SKILLS_DIR).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5)); } catch (e) { return []; } }
 function saveSkill(name, steps, description) {
@@ -3813,6 +3821,7 @@ async function main() {
         ? line
         : JSON.stringify({ ...msg, params: { ...msg.params, arguments: args } });
       // 스킬 툴은 로컬 처리(child 로 안 보냄).
+      if (name === 'browser_show_owner') { writeClient({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'The owner now has a card with an Open browser button for the page you acted on last. Tell them in chat what to do there, then wait for their reply.' }] } }); return; }
       if (name === 'browser_skill_list') { writeClient({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: JSON.stringify(listSkills()) }] } }); return; }
       if (name === 'browser_skill_save') {
         try { const doc = saveSkill(args.name, recording.slice(), args.description); writeClient({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'Saved skill "' + doc.name + '" with ' + doc.steps.length + ' steps → ' + skillPath(doc.name) }] } }); }
@@ -3907,7 +3916,7 @@ async function main() {
     if (msg && msg.result && Array.isArray(msg.result.tools)) {
       patchBrowserToolDescriptions(msg.result.tools);
       const have = new Set(msg.result.tools.map((t) => t.name));
-      for (const st of [...SKILL_TOOLS, UNIFIED_CUA_TOOL]) if (!have.has(st.name)) msg.result.tools.push(st);
+      for (const st of [...SKILL_TOOLS, UNIFIED_CUA_TOOL, OWNER_STEP_TOOL]) if (!have.has(st.name)) msg.result.tools.push(st);
       writeClient(msg); return;
     }
     writeOutput(line);

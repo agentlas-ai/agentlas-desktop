@@ -2249,9 +2249,13 @@ async function runMcpInvocationInContext(
           notify: (card) => notify(ownerLoginCardNotice(card, pickLocale(req))),
         })).catch(() => undefined);
     }
-    void import("../browser/fallback-ladder-runtime").then(({ observeBrowserToolForHumanCheck }) =>
-      observeBrowserToolForHumanCheck({ toolName: browserTool, ...(req.chatId ? { chatId: req.chatId } : {}), nativeGrant: nativeBrowserGrant ?? null }))
-      .catch(() => undefined);
+    void import("../browser/fallback-ladder-runtime").then(({ observeBrowserToolForHumanCheck, ownerBrowserStepNotice }) => {
+      if (leaf === "browser_show_owner") {
+        notify(ownerBrowserStepNotice({ locale: pickLocale(req), nativeGrant: nativeBrowserGrant ?? null }));
+        return;
+      }
+      observeBrowserToolForHumanCheck({ toolName: browserTool, ...(req.chatId ? { chatId: req.chatId } : {}), nativeGrant: nativeBrowserGrant ?? null });
+    }).catch(() => undefined);
   };
   sink = (rawEvent: McpInvocationEvent) => {
     let ev = redactOneAttachmentEvent(req, rawEvent);
@@ -2549,6 +2553,17 @@ async function runMcpInvocationInContext(
   const invocationProjectId = suppressProjectBinding || suppressMutableProjectContext
     ? null
     : chat.projectId;
+  // A local agent changes while it works (owner edits, its own evolution): run the folder's current definition.
+  // Stat-only check; a re-import happens only when a definition file is newer than the last import.
+  try {
+    const { refreshLocalAgentIfChanged } = await import("../agents/local-freshness");
+    await refreshLocalAgentIfChanged(chat.agentId);
+    for (const target of req.taskForceTargets ?? []) {
+      if (target.source === "local" && target.entityKind === "agent") await refreshLocalAgentIfChanged(target.agentId);
+    }
+  } catch (error) {
+    console.warn("[local-agent] freshness check unavailable:", error instanceof Error ? error.message : String(error));
+  }
   let agent = getAgentById(chat.agentId);
   if (!agent) {
     sink({ kind: "error", error: { code: "no-agent", message: tStatus(locale, "errAgentNotFound") } });
