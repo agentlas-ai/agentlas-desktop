@@ -579,6 +579,10 @@ function decisionRejectCopy(locale: "ko" | "en"): string {
 }
 
 type UiMessage = {
+  /** Room that owns a locally created (optimistic/live) row. Durable rows are
+   * owned by the screen's thread ref; a local row tagged for another room is
+   * never shown, whatever async step appended it. */
+  chatId?: string;
   goalResult?: GoalResultPresentation;
   hostNotice?: ChatHostNotice;
   id: string;
@@ -1113,6 +1117,12 @@ function projectVisibleOneMessageText(message: UiMessage): string {
   // "safe One Surface", a CLI/session token) must never reach the reader even
   // when it arrives through a model or legacy synthesis path.
   return toCustomerSafeText(customerAnswer, detectOneTextLocale(customerAnswer) === "ko" ? "ko" : "en");
+}
+
+/** Drops local rows that belong to a different room than the one on screen. */
+function dropForeignChatMessages(messages: UiMessage[], chatId: string | null): UiMessage[] {
+  if (!chatId || !messages.some((message) => message.chatId && message.chatId !== chatId)) return messages;
+  return messages.filter((message) => !message.chatId || message.chatId === chatId);
 }
 
 function upsertLiveMessage(messages: UiMessage[], text: string, streaming: boolean, runId?: string): UiMessage[] {
@@ -1989,6 +1999,8 @@ function OneSessionsShell() {
   const goalControlEpochRef = useRef(0);
   const [oneRuntime, setOneRuntime] = useState<RuntimeStatus | null>(null);
   const [oneRuntimePinned, setOneRuntimePinned] = useState(false);
+  // Room whose pin the chip currently shows (null = no room open yet).
+  const oneRuntimeOwnerChatIdRef = useRef<string | null>(null);
   const [oneModelOptions, setOneModelOptions] = useState<OneComposerModelOption[]>([]);
   const [oneRuntimeInventory, setOneRuntimeInventory] = useState<RuntimeStatus[]>([]);
   const [oneRuntimePreferenceRevision, setOneRuntimePreferenceRevision] = useState(0);
@@ -3929,8 +3941,8 @@ function OneSessionsShell() {
           );
           // 같은 대화인데 서버 스냅샷이 아직 비었다면(첫 실행이 방금 시작됐다면)
           // 사람이 막 친 말과 라이브 응답을 빈 스냅샷으로 지우지 않는다.
-          if (hydratedNext.length === 0 && current.length > 0) return current;
-          return mergeOneShellHistory(current, hydratedNext);
+          if (hydratedNext.length === 0 && current.length > 0) return dropForeignChatMessages(current, chatId);
+          return mergeOneShellHistory(dropForeignChatMessages(current, chatId), hydratedNext);
         });
       }
       // 이 대화의 기록이 화면에 도착했다 — 그 전에는 "대화를 시작해 보세요"·추천을 띄우지 않는다.
@@ -4130,6 +4142,11 @@ function OneSessionsShell() {
     </article>;
   };
   useEffect(() => setMessageReply(null), [activeThreadChatId]);
+  // Belt and braces: whichever async step appended it, a local row owned by
+  // another room never survives a paint in this one.
+  useLayoutEffect(() => {
+    setMessages((current) => dropForeignChatMessages(current, activeThreadChatId));
+  }, [activeThreadChatId, messages]);
   const composerAlwaysApproval = useChatAlwaysApproval(activeThreadChatId);
   const onePermissionLabel = `${onePermission === "auto" ? (appLocale === "ko" ? "자동 모드" : "Auto mode") : onePermission === "read" ? (appLocale === "ko" ? "읽기 전용" : "Read only") : onePermission === "write" ? (appLocale === "ko" ? "파일 편집" : "Accept file edits") : (appLocale === "ko" ? "전체 액세스" : "Full access")}${composerAlwaysApproval.enabled ? (appLocale === "ko" ? " · 항상 승인" : " · Always approve") : ""}`;
   /*
@@ -4760,6 +4777,13 @@ function OneSessionsShell() {
     const api = ipc();
     if (!api) { setActiveThreadChat(conversation); return; }
     let cancelled = false;
+    // The chip belongs to the open room. Opening another room must not keep
+    // showing the previous room's model while this room's pin is being read.
+    if (oneRuntimeOwnerChatIdRef.current !== activeThreadChatId) {
+      oneRuntimeOwnerChatIdRef.current = activeThreadChatId;
+      setOneRuntime(null);
+      setOneRuntimePinned(false);
+    }
     // 대화 조회는 런타임 탐지(느릴 수 있다)를 기다리지 않는다 — 머리말·담당 판정이 이 값을 쓴다.
     const chatRead = activeThreadChatId ? api.chats.get(activeThreadChatId).catch(() => null) : Promise.resolve(null);
     void chatRead.then((chat) => { if (!cancelled) setActiveThreadChat(chat); });
@@ -4768,10 +4792,10 @@ function OneSessionsShell() {
       chatRead,
     ]).then(([runtimes, chat]) => {
       if (cancelled) return;
-      // A model chosen in One is a product preference, not disposable state on
-      // the current route. Prefer a chat's durable override, then the last
-      // explicit One choice, then the globally active runtime.
-      const selection = chat?.runtimeSelection ?? readStoredOneRuntimeSelection();
+      // An open room shows its own durable pin; an unpinned room shows the
+      // default orchestrator runtime, never another room's last choice. The
+      // stored last choice only seeds a room that does not exist yet.
+      const selection = chat?.runtimeSelection ?? (activeThreadChatId ? null : readStoredOneRuntimeSelection());
       const matched = selection
         ? runtimes.find((runtime) => runtimeMatchesSelection(runtime, selection))
         : runtimes.find((runtime) => runtime.active);
@@ -5323,10 +5347,13 @@ function OneSessionsShell() {
         return;
       }
     }
-    setOneRuntime(acknowledgedRuntime);
-    setOneRuntimePinned(true);
     writeStoredOneRuntimeSelection(acknowledgedSelection);
     setComposerMenu(null);
+    // The pin call above awaited Main; the person may have opened another room
+    // meanwhile. That room's chip is not this room's choice.
+    if (activeThreadChatIdRef.current !== activeThreadChatId) return;
+    setOneRuntime(acknowledgedRuntime);
+    setOneRuntimePinned(true);
   }, [activeThreadChatId, appLocale, busy, oneRuntime, oneRuntimeInventory, oneRuntimeSelection]);
 
   const restoreUnsentFollowup = useCallback(async (intent: OneFollowupIntent) => {
@@ -5717,6 +5744,10 @@ function OneSessionsShell() {
       setActivity(freshActivity);
       setError(null);
       setMessages((current) => {
+        // Preparation awaited Main; the person may be in another room now. This
+        // run's rows belong to `chatId` and must not be painted into that room.
+        const screenChatId = activeThreadChatIdRef.current;
+        if (screenChatId != null && screenChatId !== chatId) return current;
         const withoutLive = current.filter((item) => item.id !== "one-live-response");
         const userAlreadyVisible = options?.userAlreadyShown
           && isPromptOnScreen(withoutLive, text);
@@ -5726,11 +5757,12 @@ function OneSessionsShell() {
             ? []
             : [{
               id: optimisticUserMessageId!,
+              chatId,
               role: "user" as const,
               ...promptBubbleContent(text),
               createdAt: new Date().toISOString(),
             }]),
-          { id: "one-live-response", role: "assistant" as const, text: "", streaming: true },
+          { id: "one-live-response", chatId, role: "assistant" as const, text: "", streaming: true },
         ];
       });
     });
@@ -6772,6 +6804,7 @@ function OneSessionsShell() {
           id: preflightId,
           role: "user",
           text: value,
+          ...(sentChatId ? { chatId: sentChatId } : {}),
           // Optimistic rows carry the local send time so the run that follows
           // can be anchored after them before the durable row ever loads.
           createdAt: new Date().toISOString(),
@@ -6879,6 +6912,7 @@ function OneSessionsShell() {
             receipt.effort ?? (receipt.model ? undefined : receiptRuntime.effort),
           ));
           setOneRuntimePinned(true);
+          oneRuntimeOwnerChatIdRef.current = chat.id;
           writeStoredOneRuntimeSelection(receipt);
         } catch {
           // The empty chat already exists and is now the visible recovery
