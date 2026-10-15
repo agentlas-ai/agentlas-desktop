@@ -5,6 +5,7 @@
 //   - 팀(firm/org)이 없는 단일 에이전트 채팅에서는 병렬 표기를 쓰지 않고 단독 작업 뷰로 표시(정직성).
 //   - 타임라인: 노드들의 상태/도구/위임(handoff)을 위→아래 피드로.
 "use client";
+import { inferOwnerLocale, ownerActivityText, agentKey } from "@shared/owner-visible-activity-text";
 import { useMemo, useState, type CSSProperties } from "react";
 import type { InstalledAgent, InstalledFirm, ResolvedOrg } from "@/lib/types";
 import { pickLocalized, useT } from "@/lib/i18n";
@@ -81,8 +82,9 @@ function timelineHasFailureSignal(timeline: NetTimelineItem[]): boolean {
   );
 }
 
-function cleanAgentStatus(text: string | undefined): string {
-  const value = text?.replace(/\s+/g, " ").trim() ?? "";
+function cleanAgentStatus(text: string | undefined, locale: "ko" | "en", names?: ReadonlyMap<string, string>): string {
+  // Shared owner-visible text layer first (plumbing dropped, slugs → display names), then the legacy scrub.
+  const value = ownerActivityText(text, { locale: inferOwnerLocale(text, locale), ...(names ? { names } : {}) }) ?? "";
   if (!value) return "";
   if (/(?:^|\s)codex:\s|\[runtime-session\]|sessionend hook|skill descriptions were shortened|agentlas plugins|\/Users\/[^\s]+\/(?:\.codex|\.claude|Library\/Application Support)|(?:^|\s)(?:mcp__|automation_graph_|hep-network|stormbreaker[_-])|\b(?:bash|collab_tool_call|mcp_tool_call|write|read|edit|glob|grep|websearch|webfetch)\b|\b(?:codex|claude code|antigravity|kimi|grok)\s+cli\b/i.test(value)) {
     return "";
@@ -124,6 +126,15 @@ export function AgentNetworkPanel({
 }: Props) {
   const { t, locale } = useT();
   const [briefOpen, setBriefOpen] = useState(false);
+  const rosterNames = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const candidate of agents) {
+      const name = pickLocalized(candidate, locale).name;
+      for (const id of [candidate.id, candidate.slug]) if (id) names.set(agentKey(id), name);
+      if (candidate.slug) names.set(agentKey(`installed:${candidate.slug}`), name);
+    }
+    return names;
+  }, [agents, locale]);
   const visibleLiveAgents = useMemo<Record<string, LiveAgent>>(() => Object.fromEntries(
     Object.entries(liveAgents).flatMap(([key, item]) => {
       const installed = agents.find((candidate) =>
@@ -145,7 +156,7 @@ export function AgentNetworkPanel({
       const unresolvedMachineLabel = !resolved
         && item.name === key
         && (/[-_:/.]/u.test(item.name) || /^[0-9a-f]{16,}$/i.test(item.name));
-      const status = cleanAgentStatus(item.status);
+      const status = cleanAgentStatus(item.status, locale, rosterNames);
       return [[key, resolved
         ? { ...item, name: pickLocalized(resolved, locale).name, status }
         : unresolvedMachineLabel
@@ -160,9 +171,9 @@ export function AgentNetworkPanel({
     // words such as "read" and "write" from internal CLI chatter.
     const text = item.kind === "message"
       ? item.text.replace(/\s+/g, " ").trim()
-      : cleanAgentStatus(item.text);
+      : cleanAgentStatus(item.text, locale, rosterNames);
     return text ? [{ ...item, text }] : [];
-  }), [timeline]);
+  }), [timeline, locale, rosterNames]);
 
   const roster = useMemo<Roster | null>(() => {
     // ResolvedOrg가 있으면 그걸로 명단 (노드 id = 이벤트 agentId와 정확히 일치)
@@ -645,7 +656,7 @@ function latestSoloTimelineText(timeline: NetTimelineItem[], locale: "ko" | "en"
 }
 
 function cleanSoloStatus(value: string, locale: "ko" | "en", busy: boolean): string {
-  const text = value.replace(/\s+/g, " ").trim();
+  const text = ownerActivityText(value, { locale: inferOwnerLocale(value, locale) }) ?? "";
   if (!text) return "";
   if (/stormbreaker|scope-lock|verifier-first|agentlas\s*오케스트레이터|orchestrator|루프\s*stormbreaker|loop\s*[·:]|armed|route\b/i.test(text)) {
     return busy ? (locale === "ko" ? "처리 중" : "Working") : "";

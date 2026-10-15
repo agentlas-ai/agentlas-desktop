@@ -7,6 +7,13 @@ import type { ToolInvocationOrigin } from "@shared/tool-invocation-origin";
 import { BUILTIN_ONE_AGENT_ID } from "@shared/builtin-agent-ids";
 import type { InvocationPlanEntry } from "@shared/invocation-plan";
 import { toolObservationAction } from "./tool-observation";
+import {
+  ownerActivityText,
+  ownerAgentLabel,
+  ownerAgentLabelOrNull,
+  agentKey,
+  type OwnerActivityContext,
+} from "@shared/owner-visible-activity-text";
 
 /**
  * One turn's work, in the shape Codex draws it.
@@ -445,6 +452,21 @@ function pushEdit(cells: OneWorkCell[], item: OneActivityItem, file: OneWorkEdit
   });
 }
 
+/** Display names the events themselves carried, keyed by agent id/slug (owner text never shows a slug). */
+function ownerNamesFromState(state: OneActivityState): Map<string, string> {
+  const names = new Map<string, string>();
+  const put = (id: string | undefined, name: string | undefined) => {
+    const label = name?.trim();
+    if (id && label && !names.has(agentKey(id))) names.set(agentKey(id), label);
+  };
+  for (const item of state.items) put(item.agentId, item.agentName);
+  for (const handoff of state.handoffs) {
+    put(handoff.fromAgentId, handoff.fromAgentName);
+    put(handoff.toAgentId, handoff.toAgentName);
+  }
+  return names;
+}
+
 export function buildOneWorkPresentation(
   state: OneActivityState,
   locale: "ko" | "en",
@@ -453,6 +475,8 @@ export function buildOneWorkPresentation(
   const cells: OneWorkCell[] = [];
   const dividers: OneWorkDivider[] = [];
   const cwd = workspacePath ?? state.cwd ?? null;
+  const ownerNames = ownerNamesFromState(state);
+  const ownerCtx = (agentName?: string): OwnerActivityContext => ({ locale, names: ownerNames, ...(agentName ? { agentName } : {}) });
   let answerRow: OneActivityItem | undefined;
   let durationMs: number | undefined;
   let terminal: OneWorkPresentation["terminal"];
@@ -504,15 +528,19 @@ export function buildOneWorkPresentation(
           status: itemStatus(item),
           startedAt: item.observedAt,
           ...cellAttribution(item),
-          name: [item.agentName?.trim() || (locale === "ko" ? "에이전트" : "Agent"), item.model].filter(Boolean).join(" · "),
-          ...(item.role?.trim() && item.role.trim() !== item.agentName?.trim() ? { role: item.role.trim() } : {}),
+          name: [ownerAgentLabel(item.agentName ?? item.agentId, ownerCtx()), item.model].filter(Boolean).join(" · "),
+          ...(ownerAgentLabelOrNull(item.role, ownerCtx()) && item.role?.trim() !== item.agentName?.trim()
+            ? { role: ownerAgentLabelOrNull(item.role, ownerCtx())! } : {}),
           ...(item.phase ? { phase: item.phase } : {}),
           terminalObserved: item.agentTerminalObserved === true,
         });
         break;
       }
       case "notice": {
-        const message = (item.noticeI18n?.[locale] ?? item.message ?? "").trim();
+        // Owner text layer: plumbing notices (runtime selection, transport, diagnostics) are not rows; team-step
+        // jargon is rewritten. The ledger keeps the original rows (this is display only).
+        const rawMessage = (item.noticeI18n?.[locale] ?? item.message ?? "").trim();
+        const message = rawMessage ? (ownerActivityText(rawMessage, ownerCtx(item.agentName)) ?? "") : "";
         if (!message && !item.activityCode) break;
         const level = item.noticeLevel ?? "info";
         // A `divider` notice (context compaction) is a boundary of the
@@ -621,6 +649,13 @@ export function buildOneWorkPresentation(
       startedAt: answerRow.observedAt,
       ...(answerRow.answerChars != null ? { chars: answerRow.answerChars } : {}),
     });
+  }
+  // A worker named by its machine id (uuid / installed:slug) reads as the roster name the events carried, else stays unnamed.
+  for (const cell of cells) {
+    if (!cell.agent) continue;
+    const label = ownerAgentLabelOrNull(cell.agent, ownerCtx());
+    if (label) cell.agent = label;
+    else delete cell.agent;
   }
   // 연속된 헤드라인 없는 생각은 한 칸으로 합쳐 시간을 누적한다(공용 규칙 shared/turn-activity-rows.ts —
   // Science 작업 블록과 같은 함수). Codex 처럼 헤드라인이 있는 생각은 각자 남는다.

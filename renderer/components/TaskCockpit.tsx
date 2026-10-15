@@ -246,6 +246,7 @@ import {
   reduceOneActivity,
   type OneActivityState,
 } from "@/lib/one-activity";
+import { inferOwnerLocale, ownerActivityText, ownerAgentLabel, ownerAgentLabelOrNull } from "@shared/owner-visible-activity-text";
 import { CodeIdeViewer, isCodeArtifactName } from "@/components/CodeIdeViewer";
 import { LiveOutputViewer, type LiveOutputKind } from "@/components/LiveOutputViewer";
 import { agentScreenModeForTool } from "@/lib/agent-screen-mode";
@@ -1225,19 +1226,38 @@ function appendTimeline(
 const DURABLE_WORKFLOW_EVENT_RE =
   /^(?:task_force_model_call_(?:started|completed|failed)|workload_allocation|workforce_planner_(?:schema_attempt|blocked)|workflow_node_state|invoke_(?:result|completed|failed|cancelled|interrupted))$/;
 
+/** Owner-visible status text (shared One/Work layer): "" when the line is plumbing, so callers skip it. */
+function ownerStatus(raw: string | undefined, locale: "ko" | "en", agentName?: string): string {
+  return ownerActivityText(raw, { locale: inferOwnerLocale(raw, locale), ...(agentName ? { agentName } : {}) }) ?? "";
+}
+
+/** The event as the owner may read it: plumbing status removed, machine agent names/roles replaced. */
+function ownerVisibleEvent(ev: McpInvocationEvent, locale: "ko" | "en"): McpInvocationEvent {
+  if (ev.status === undefined && !ev.agentName && !ev.role) return ev;
+  const out: McpInvocationEvent = { ...ev };
+  if (typeof ev.status === "string") {
+    const plain = ownerStatus(ev.status, locale, ev.agentName);
+    if (plain) out.status = plain;
+    else delete out.status;
+  }
+  if (ev.agentName) out.agentName = ownerAgentLabel(ev.agentName, { locale });
+  if (ev.role) {
+    const role = ownerAgentLabelOrNull(ev.role, { locale });
+    if (role) out.role = role;
+    else delete out.role;
+  }
+  return out;
+}
+
 function durableWorkflowLabel(event: RunEventUi, locale: "ko" | "en"): string {
   const ko = locale === "ko";
-  const processState = typeof event.payload.agentProcessState === "string"
-    ? event.payload.agentProcessState
-    : "";
-  if (processState === "closed") return ko ? "CLI 프로세스 닫힘" : "CLI process closed";
-  if (processState === "failed") return ko ? "CLI 프로세스 실패" : "CLI process failed";
-  if (processState === "idle") return ko ? "CLI 프로세스 대기 중" : "CLI process idle";
-  if (processState === "running") return ko ? "CLI 프로세스 실행 중" : "CLI process running";
+  const agentName = typeof event.payload.agentName === "string" ? event.payload.agentName : undefined;
+  // CLI process state is plumbing, never a line the owner reads (run_events keeps it).
+  if (typeof event.payload.agentProcessState === "string" && !event.payload.status) return "";
   const status = typeof event.payload.status === "string" ? event.payload.status.trim() : "";
   const state = typeof event.payload.state === "string" ? event.payload.state.trim() : "";
-  if (status) return status;
-  if (state) return state;
+  if (status) return ownerStatus(status, locale, agentName);
+  if (state) return ownerStatus(state, locale, agentName);
   const labels: Record<string, [string, string]> = {
     task_force_model_call_started: ["모델 호출 시작", "Model call started"],
     task_force_model_call_completed: ["모델 호출 완료", "Model call completed"],
@@ -1275,7 +1295,7 @@ function workflowSnapshotFromLedger(
     if (!DURABLE_WORKFLOW_EVENT_RE.test(event.kind) && !isDurableMcpAgentEvent) continue;
     const agentId = event.nodeId || event.agentId || (typeof event.payload.agentMessageFrom === "string" ? event.payload.agentMessageFrom : "");
     if (!agentId) continue;
-    const role =
+    const rawRole =
       typeof event.payload.role === "string"
         ? event.payload.role
         : typeof event.payload.phase === "string"
@@ -1283,6 +1303,7 @@ function workflowSnapshotFromLedger(
         : typeof event.payload.modelRole === "string"
           ? event.payload.modelRole
           : "";
+    const role = ownerAgentLabelOrNull(rawRole, { locale }) ?? "";
     const model = typeof event.payload.model === "string" ? event.payload.model : undefined;
     const tokensValue = Number(event.payload.tokens);
     const tokens = Number.isFinite(tokensValue) && tokensValue > 0 ? tokensValue : undefined;
@@ -1290,9 +1311,15 @@ function workflowSnapshotFromLedger(
       ? event.payload.agentMessageDirection as AgentMessageDirection
       : undefined;
     const text = messageText || durableWorkflowLabel(event, locale);
+    // Plumbing (CLI process state, transport, diagnostics) is not a row; the ledger keeps it.
+    if (!text) continue;
+    const displayName = ownerAgentLabel(
+      typeof event.payload.agentName === "string" ? event.payload.agentName : event.agentId || event.nodeId || agentId,
+      { locale },
+    );
     liveAgents[agentId] = {
       ...(liveAgents[agentId] ?? {}),
-      name: typeof event.payload.agentName === "string" ? event.payload.agentName : event.agentId || event.nodeId || agentId,
+      name: displayName,
       role,
       active: processState === "running",
       status: text,
@@ -1303,7 +1330,7 @@ function workflowSnapshotFromLedger(
     timeline.push({
       key: `ledger:${event.id}`,
       agentId,
-      name: typeof event.payload.agentName === "string" ? event.payload.agentName : event.agentId || event.nodeId || agentId,
+      name: displayName,
       role,
       kind: messageText
         ? "message"
@@ -3083,11 +3110,13 @@ function ChatPage() {
   // send()의 인라인 핸들러를 추출해 재접속 경로와 공유 — lastStatusRef는 중복 status 억제용(공유).
   const consumeEvent = useCallback(
     (
-      ev: McpInvocationEvent,
+      rawEv: McpInvocationEvent,
       placeholderId: string,
       lastStatusRef: { text: string },
       sourceRunId?: string,
     ) => {
+      // The typed One projection below reads the raw event; every owner-visible line reads this cleaned view.
+      const ev = ownerVisibleEvent(rawEv, locale);
       if (!isCurrentChat()) return;
       // A subscription can outlive a steering/reconnect transition by one
       // queued event. Main's run id is the authority; a stale event must not
@@ -3110,7 +3139,7 @@ function ChatPage() {
         if (message.id !== placeholderId) return message;
         if (sourceRunId && message.runId && message.runId !== sourceRunId) return message;
         const previous = message.activityState ?? initialOneActivityState();
-        const next = reduceOneActivity(previous, ev);
+        const next = reduceOneActivity(previous, rawEv);
         if (next === previous && (!sourceRunId || message.runId === sourceRunId)) return message;
         return {
           ...message,
@@ -3196,16 +3225,9 @@ function ChatPage() {
           });
         }
         if (ev.agentLifecycle) {
-          const lifecycleText = ev.status?.trim() || (
-            ev.agentLifecycle.state === "closed"
-              ? locale === "ko" ? "CLI 프로세스 닫힘" : "CLI process closed"
-              : ev.agentLifecycle.state === "idle"
-                ? locale === "ko" ? "CLI 프로세스 대기 중" : "CLI process idle"
-                : ev.agentLifecycle.state === "failed"
-                  ? locale === "ko" ? "CLI 프로세스 실패" : "CLI process failed"
-                  : locale === "ko" ? "CLI 프로세스 실행 중" : "CLI process running"
-          );
-          appendTimeline(setNetTimeline, {
+          // CLI process state is plumbing: only a status the owner layer kept is a row.
+          const lifecycleText = ev.status?.trim() ?? "";
+          if (lifecycleText) appendTimeline(setNetTimeline, {
             key: uid(),
             agentId: aid,
             name: ev.agentName ?? aid,
@@ -3230,7 +3252,8 @@ function ChatPage() {
                 }
               : prev,
           );
-          appendTimeline(setNetTimeline, {
+          const doneText = ev.status?.trim() || (rawEv.status ? "" : locale === "ko" ? "완료" : "completed");
+          if (doneText) appendTimeline(setNetTimeline, {
             key: uid(),
             agentId: aid,
             name: ev.agentName ?? aid,
@@ -3238,7 +3261,7 @@ function ChatPage() {
             tier: ev.tier,
             kind: "status",
             // 실패 경로 done은 status("… 실패/failed")를 동봉 → 완료로 위장하지 않고 실패를 표시.
-            text: ev.status?.trim() || (locale === "ko" ? "완료" : "completed"),
+            text: doneText,
             tokens: ev.tokens,
           });
           return;
@@ -3460,13 +3483,15 @@ function ChatPage() {
         );
       } else if (ev.kind === "notice" && ev.notice) {
         // ★호스트 고지는 답변 본문에 섞지 않는다. 자기 행으로 붙는다.
-        const notice = ev.notice;
+        // Owner text layer: plumbing notices (runtime selection, diagnostics) are not rows.
+        const notice = { ...ev.notice, message: ownerStatus(ev.notice.message, locale, ev.agentName) };
         if (notice.code === "runtime-fallback" && ev.runtimeSelection) {
           // A fallback is scoped to the running invocation. Work may attach to
           // or replay a One-origin run, but that event must not replace the
           // room's saved selection or the next send/steer will feed the
           // temporary fallback back into execution as a new user choice.
         }
+        if (notice.message) {
         transcriptRevisionRef.current += 1;
         setMessages((prev) => {
           const lastAgent = [...prev].reverse().find((m) => m.role === "agent");
@@ -3482,6 +3507,7 @@ function ChatPage() {
               : m,
           );
         });
+        }
       } else if (ev.kind === "surface" && ev.surface) {
         pushWorkflow("tool", `Surface ready · ${ev.surface.title}`);
         const surfaceId = ev.surfaceId ?? uid();

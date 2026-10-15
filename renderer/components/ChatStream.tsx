@@ -43,6 +43,7 @@ import { OneTurnWork } from "./one/OneTurnWork";
 import type { OneWorkerWorkGroup } from "@/lib/one-turn-work";
 import type { OneActivityItem, OneActivityState } from "@/lib/one-activity";
 import { ChatContinuationProjector } from "@/lib/chat-continuations";
+import { inferOwnerLocale, ownerActivityText } from "@shared/owner-visible-activity-text";
 
 /**
  * Work keeps its transport projection in StreamMessage for compatibility with
@@ -74,7 +75,14 @@ export function workActivityStateFromMessage(message: StreamMessage): OneActivit
     ...(message.finishedAt != null ? { durationMs: Math.max(0, message.finishedAt - startedAt) } : {}),
   }];
 
-  for (const step of message.steps ?? []) {
+  for (const rawStep of message.steps ?? []) {
+    let step = rawStep;
+    // A status step (no tool, not a reasoning summary) is host chatter: plumbing is dropped, team jargon rewritten.
+    if (step.kind === "thinking" && !step.tool && !step.reasoning) {
+      const plain = ownerActivityText(step.text, { locale: inferOwnerLocale(step.text), ...(step.agentName ? { agentName: step.agentName } : {}) });
+      if (!plain) continue;
+      step = { ...rawStep, text: plain };
+    }
     const observedAt = new Date(step.createdAt ?? startedAt).toISOString();
     const status: OneActivityItem["status"] = step.resultIsError
       ? "failed"
@@ -2301,7 +2309,7 @@ function projectAssistantProse(text: string, streaming: boolean): string {
 }
 
 function userFacingRunStatus(text: string | undefined, locale: "ko" | "en"): string {
-  const value = text?.replace(/\s+/g, " ").trim() ?? "";
+  const value = ownerActivityText(text, { locale: inferOwnerLocale(text, locale) }) ?? "";
   if (!value || isInternalRuntimeStatus(value)) {
     return locale === "ko" ? "작업을 진행하고 있습니다." : "Work is in progress.";
   }
@@ -2310,7 +2318,7 @@ function userFacingRunStatus(text: string | undefined, locale: "ko" | "en"): str
 
 function isUserFacingStreamStep(step: StreamStep): boolean {
   if (step.tool) return true;
-  return Boolean(step.text.trim()) && !isInternalRuntimeStatus(step.text);
+  return Boolean(step.text.trim()) && !isInternalRuntimeStatus(step.text) && ownerActivityText(step.text, { locale: inferOwnerLocale(step.text) }) !== null;
 }
 
 function isParallelWorkMessage(message: StreamMessage): boolean {

@@ -281,6 +281,7 @@ import {
   stripMobileBridgeControlFences,
 } from "./sanitize";
 import { MobileScienceChat } from "./science-chat";
+import { inferOwnerLocale, isMachineAgentLabel, ownerActivityText, ownerAgentLabelOrNull } from "../../shared/owner-visible-activity-text";
 import type {
   MobileBridgeAuthority,
   MobileBridgeAuthorityEvent,
@@ -1891,7 +1892,9 @@ export function projectMobileBridgeInvocationEvent(
     // 고지는 폰에도 간다. 다만 기계 원문(details)은 보내지 않는다 — 화면에 쓸 값만.
     // 심각도와 표시 형태는 같이 보낸다. 그게 없으면 폰은 "컨텍스트를 압축했습니다"와
     // "결과를 정리하지 못했습니다"를 같은 회색 줄로 그리게 된다.
-    projected.status = boundedRedactedText(event.notice.message, 1_000);
+    // Owner-visible text layer (shared with One/Work): plumbing notices carry no status, jargon is rewritten.
+    const ownerNotice = ownerActivityText(event.notice.message, { locale: inferOwnerLocale(event.notice.message), ...(event.agentName ? { agentName: event.agentName } : {}) });
+    if (ownerNotice) projected.status = boundedRedactedText(ownerNotice, 1_000);
     projected.noticeLevel = event.notice.level;
     if (event.notice.code === "runtime-selected") {
       projected.noticeCode = "runtime-selected";
@@ -1902,13 +1905,15 @@ export function projectMobileBridgeInvocationEvent(
     // 이 문장은 **실행의 로케일**로 이미 렌더돼 있다. 폰이 다른 언어로 설정돼 있으면
     // 남의 언어가 그대로 뜬다(데스크탑이 시작한 실행에 폰이 붙어 볼 때). 만드는
     // 자리에서 두 벌을 내면 폰이 자기 것을 고를 수 있다.
-    if (event.notice.i18n) {
-      projected.noticeTextKo = boundedRedactedText(event.notice.i18n.ko, 1_000);
-      projected.noticeTextEn = boundedRedactedText(event.notice.i18n.en, 1_000);
+    if (event.notice.i18n && ownerNotice) {
+      projected.noticeTextKo = boundedRedactedText(ownerActivityText(event.notice.i18n.ko, { locale: "ko" }) ?? ownerNotice, 1_000);
+      projected.noticeTextEn = boundedRedactedText(ownerActivityText(event.notice.i18n.en, { locale: "en" }) ?? ownerNotice, 1_000);
     }
   }
   if (typeof event.status === "string") {
-    projected.status = boundedRedactedText(event.status, 1_000);
+    // Same layer as the desktop: CLI process state, transport lines and diagnostics never reach the phone.
+    const ownerStatus = ownerActivityText(event.status, { locale: inferOwnerLocale(event.status), ...(event.agentName ? { agentName: event.agentName } : {}) });
+    if (ownerStatus) projected.status = boundedRedactedText(ownerStatus, 1_000);
   }
   if (typeof event.text === "string") {
     const text = boundedRedactedText(
@@ -1936,10 +1941,11 @@ export function projectMobileBridgeInvocationEvent(
     projected.agentId = boundedRedactedText(event.agentId, 256);
   }
   if (typeof event.agentName === "string") {
-    projected.agentName = boundedRedactedText(event.agentName, 300);
+    projected.agentName = boundedRedactedText(isMachineAgentLabel(event.agentName) ? "" : event.agentName, 300);
   }
   if (typeof event.role === "string") {
-    projected.role = boundedRedactedText(event.role, 300);
+    const ownerRole = ownerAgentLabelOrNull(event.role, { locale: "en" });
+    if (ownerRole) projected.role = boundedRedactedText(ownerRole, 300);
   }
   if (event.phase === "plan" || event.phase === "delegate" || event.phase === "synthesize") {
     projected.phase = event.phase;

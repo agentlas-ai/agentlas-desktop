@@ -1,0 +1,193 @@
+/**
+ * 오너에게 보이는 활동 문구의 단일 층 — One 과 Work 가 같은 함수를 쓴다.
+ *
+ * 실측 2026-10-16(그룹 방 fc53939f·a1ab9a72): 실행 원장(run_events)에는 진단용 문구가 그대로 남고,
+ * 화면에는 그중 일부가 새어 나왔다 — "Codex CLI 호출 중...", "CLI 프로세스 대기 중", "codex: Reconnecting... 2/5",
+ * "[cache] read=…", "Agentlas One → installed:no-ai-slop-copywriter 메시지 전송", "TF 미완료 — …".
+ * 개발자 용어라 오너가 읽을 수 없다.
+ *
+ * 규칙:
+ *   1. 배관(CLI 프로세스 상태·전송/재연결·CLI stderr·대괄호 진단·출력 형식 안내·모델 확인 잡담)은 null — 화면에서 뺀다.
+ *      원장과 로그에는 그대로 남는다(이 함수는 표시만 바꾼다).
+ *   2. 내부 에이전트 id(installed:·firm:·borrow:·team-mem…)는 이벤트가 준 표시 이름(또는 명단)으로 바꾼다.
+ *      못 풀면 슬러그를 보이지 않는다.
+ *   3. 팀 단계 문구는 짧은 평문으로 바꾼다.
+ * 이 파일은 의존성이 없다 — renderer·electron(모바일 투영)이 모두 가져다 쓴다.
+ */
+
+export type OwnerActivityLocale = "ko" | "en";
+
+export interface OwnerActivityContext {
+  locale: OwnerActivityLocale;
+  /** 이 이벤트가 주장하는 에이전트의 표시 이름(typed agentName). */
+  agentName?: string;
+  /** 에이전트 id·슬러그 → 표시 이름. 키는 `agentKey()` 로 정규화해 비교한다. */
+  names?: ReadonlyMap<string, string> | Readonly<Record<string, string>>;
+  /** 마지막 실패의 실제 이유. 있으면 "다시 시도 중" 대신 이것을 쓴다. */
+  finalReason?: string;
+  /** TF 미완료일 때 남은 일의 이름들. */
+  remaining?: readonly string[];
+}
+
+/** Emitters write the run's own locale; surfaces without a locale (stored steps, phone) read it off the text. */
+export function inferOwnerLocale(text: string | null | undefined, fallback: OwnerActivityLocale = "en"): OwnerActivityLocale {
+  return /[가-힣]/.test(String(text ?? "")) ? "ko" : fallback;
+}
+
+const MACHINE_PREFIX = /^(?:(?:borrow|installed|firm|cloud|hub|local|builtin|team-mem[\w-]*|team)\s*:)/i;
+const MACHINE_TOKEN = /(?:borrow:)?(?:installed|firm|cloud|hub|local|team-mem[\w-]*)(?::[\w.\-]+)+/gi;
+const UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+
+/** 슬러그·uuid·긴 hex 처럼 사람이 쓴 이름이 아닌 값. */
+export function isMachineAgentLabel(value: string | null | undefined): boolean {
+  const text = String(value ?? "").trim();
+  if (!text) return false;
+  if (MACHINE_PREFIX.test(text)) return true;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(text) || /^[0-9a-f]{16,}$/i.test(text)) return true;
+  return !/\s/.test(text) && /^[a-z0-9]+(?:[-_.:][a-z0-9]+)+$/.test(text);
+}
+
+/** `borrow:installed:x` · `borrow:firm:y:team:uuid` · `installed:x` → 같은 키. */
+export function agentKey(id: string): string {
+  return id.trim().toLowerCase().replace(/^borrow:/, "").replace(/:team(?::[\w-]+)?$/, "");
+}
+
+function lookup(names: OwnerActivityContext["names"], id: string): string | undefined {
+  if (!names || !id) return undefined;
+  const key = agentKey(id);
+  const read = (k: string): string | undefined => {
+    const value = names instanceof Map ? names.get(k) : (names as Record<string, string>)[k];
+    return typeof value === "string" && value.trim() && !isMachineAgentLabel(value) ? value.trim() : undefined;
+  };
+  return read(key) ?? read(id) ?? read(key.split(":").slice(1).join(":"));
+}
+
+function generic(locale: OwnerActivityLocale): string {
+  return locale === "ko" ? "에이전트" : "agent";
+}
+
+/** 표시용 에이전트 이름. 사람이 쓴 이름이면 그대로, 기계 값이면 명단에서, 못 풀면 일반어. */
+export function ownerAgentLabel(raw: string | null | undefined, ctx: OwnerActivityContext): string {
+  const text = String(raw ?? "").replace(/\s+/g, " ").trim();
+  if (!text) return generic(ctx.locale);
+  if (!isMachineAgentLabel(text)) return text;
+  return lookup(ctx.names, text) ?? (ctx.agentName && !isMachineAgentLabel(ctx.agentName) ? ctx.agentName : generic(ctx.locale));
+}
+
+/** 기계 값이면 null(숨김), 사람이 쓴 이름이면 그대로 — 역할 줄처럼 "없어도 되는" 자리용. */
+export function ownerAgentLabelOrNull(raw: string | null | undefined, ctx: OwnerActivityContext): string | null {
+  const text = String(raw ?? "").replace(/\s+/g, " ").trim();
+  if (!text) return null;
+  if (!isMachineAgentLabel(text)) return text;
+  return lookup(ctx.names, text) ?? null;
+}
+
+/** 문장 속 내부 id 를 표시 이름으로 바꾼다. 못 푼 것은 지운다. */
+function cleanSlugs(text: string, ctx: OwnerActivityContext): string {
+  const replaced = text
+    .replace(MACHINE_TOKEN, (token) => lookup(ctx.names, token) ?? "")
+    .replace(UUID, "")
+    .replace(/\(\s*\)|\[\s*\]/g, "");
+  return replaced.replace(/\s+/g, " ").replace(/\s+([,.;:])/g, "$1").replace(/(?:,\s*)+$/g, "").trim();
+}
+
+function uniqueNames(values: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    const key = value.toLowerCase();
+    if (!value || seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
+}
+
+const NAME = "([^→]+?)";
+
+// 배관 — 화면에서 뺀다.
+const DROP_PATTERNS: readonly RegExp[] = [
+  /^\[[A-Za-z][\w.-]*\]/, // [codex-personal] · [cache] · [runtime-session] · [runtime-protocol] · [codex-surface]
+  /^(?:codex|claude(?: code)?|gemini|grok|kimi|agy|antigravity|cursor|copilot|ollama|lmstudio|mlx)\s*:\s/i, // CLI stderr
+  /^(?:reconnecting|falling back from websockets)\b/i,
+  /\bunexpected status \d{3}\b|\bwss?:\/\/\S+|\bcf-ray:/i,
+  /^CLI\s*(?:프로세스|process)/i,
+  /^session (?:alive|resumed|started)\b/i,
+  /^.{1,40}\s호출 중\.{0,3}$/, // "{backend} 호출 중..."
+  /^calling\s.{1,40}?\.{0,3}$/i,
+  /^(?:AI 연결을 다시 확인하는 중|Checking the AI connection)/i,
+  /^(?:전송 중|sending)\.{0,3}$/i,
+  /출력 형식(?:은|을).{0,40}(?:지시문|강제)|output (?:format|schema)\b.{0,60}\b(?:instruction|prompt|enforce)/i,
+  /이번 실행에 고른 AI|^This run uses .{1,80}; checking that the call goes through/i,
+  /^(?:연결된 도구로 작업을 계속합니다|Continuing with the configured tools)/i,
+];
+
+/**
+ * 오너에게 보일 한 줄. null 이면 줄이 아니다(배관).
+ * 모르는 문구는 슬러그만 정리해 그대로 둔다 — 못 알아본다고 지우지 않는다.
+ */
+export function ownerActivityText(raw: string | null | undefined, ctx: OwnerActivityContext): string | null {
+  const ko = ctx.locale === "ko";
+  const text = String(raw ?? "").replace(/\s+/g, " ").trim();
+  if (!text) return null;
+  if (DROP_PATTERNS.some((pattern) => pattern.test(text))) return null;
+  const label = (value: string) => ownerAgentLabel(value.trim(), ctx);
+  let match: RegExpMatchArray | null;
+
+  // 팀 단계
+  if ((match = text.match(new RegExp(`^${NAME} → ${NAME} (?:메시지 전송|message sent)$`, "i")))) {
+    return ko ? `${label(match[2])}에게 맡김` : `Handed to ${label(match[2])}`;
+  }
+  if ((match = text.match(new RegExp(`^${NAME} → ${NAME} (?:답장|replied)$`, "i")))) {
+    return ko ? `${label(match[2])}에게 답함` : `Replied to ${label(match[2])}`;
+  }
+  if ((match = text.match(new RegExp(`^${NAME} → ${NAME} (?:결과 전달|result sent)$`, "i")))) {
+    return ko ? `${label(match[1])} 결과 받음` : `Got result from ${label(match[1])}`;
+  }
+  if ((match = text.match(/^(.+?) (?:단계 보류 — 선행 단계 미완료|step withheld — dependency incomplete)$/i))) {
+    return ko ? `${label(match[1])}: 앞 단계 기다리는 중` : `${label(match[1])}: waiting for an earlier step`;
+  }
+  if ((match = text.match(/^(.+?) (?:팀 )?(?:일부 )?실패$/) ?? text.match(/^(.+?) (?:team )?failed$/i)
+    ?? text.match(/^(.+?) team completed with worker failures$/i))) {
+    const who = label(match[1]);
+    const reason = ctx.finalReason?.replace(/\s+/g, " ").trim();
+    return reason ? `${who}: ${reason}` : ko ? `${who}: 다시 시도 중` : `${who}: retrying`;
+  }
+  if ((match = text.match(/^(?:한 단계가 막혀 다시 진행하는 중…?|Retrying a blocked step…?)(?:\s*\((.*)\))?$/i))) {
+    const who = match[1] ? lookup(ctx.names, match[1]) ?? (isMachineAgentLabel(match[1]) ? "" : match[1]) : "";
+    return who ? (ko ? `${who}: 다시 시도 중` : `${who}: retrying`) : (ko ? "한 단계 다시 시도 중" : "Retrying a step");
+  }
+  if ((match = text.match(/^(?:Hub TF 에이전트 준비 중|Preparing Hub task-force agents)\s*:\s*(.*)$/i))) {
+    const names = uniqueNames(match[1].split(",").map((part) => part.trim()).filter(Boolean)
+      .map((part) => lookup(ctx.names, part) ?? (isMachineAgentLabel(part) ? "" : part)));
+    return names.length ? (ko ? `에이전트 준비 중: ${names.join(", ")}` : `Preparing agents: ${names.join(", ")}`)
+      : (ko ? "에이전트 준비 중" : "Preparing agents");
+  }
+  if (/^(?:TF 미완료|Task force incomplete)/i.test(text)) {
+    const left = uniqueNames((ctx.remaining ?? []).map((name) => ownerAgentLabel(name, ctx)));
+    return left.length ? (ko ? `남은 작업: ${left.join(", ")}` : `Left to do: ${left.join(", ")}`)
+      : (ko ? "남은 작업 있음" : "Work remains");
+  }
+  if (/^(?:계획 검증 실패|Plan validation failed)/i.test(text)) return ko ? "계획 다듬는 중" : "Refining the plan";
+  if (/^(?:CEO가 작업을 분배하는 중|CEO is planning the work)/i.test(text)) return ko ? "작업 나누는 중" : "Splitting the work";
+  if (/^(?:TF 오케스트레이터가 에이전트별 입력 패킷을 설계 중|Task-force orchestrator is designing)/i.test(text)) {
+    return ko ? "작업 나누는 중" : "Splitting the work";
+  }
+  if (/^(?:TF 결과를 종합하는 중|Synthesizing task-force results)/i.test(text)) return ko ? "결과 정리하는 중" : "Pulling results together";
+  if ((match = text.match(/^(.+?) · (?:입력 패킷 실행 중|running input packet)$/i))) {
+    return ko ? `${label(match[1])} 작업 중` : `${label(match[1])} working`;
+  }
+  if ((match = text.match(/^(.+?) · (?:위임 계획 중|planning)$/i))) {
+    return ko ? `${label(match[1])} 계획 중` : `${label(match[1])} planning`;
+  }
+
+  const cleaned = cleanSlugs(text, ctx);
+  return cleaned || null;
+}
+
+/** 같은 줄이 이어서 반복되면 하나로 합친다(앞뒤 비교). */
+export function collapseOwnerActivityLines(lines: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const line of lines) if (out.at(-1) !== line) out.push(line);
+  return out;
+}
