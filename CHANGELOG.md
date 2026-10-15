@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.45 — 2026-10-16
+
+- One and Work fold each turn to one line that says what is happening now and how long it has taken. When the runtime keeps a checklist (Codex, ACP or Claude task tools), it shows as steps that tick off, and the checklist is still there when you reopen the chat. Failures and approvals waiting for you stay visible while folded.
+- A stopped or unanswered run no longer shows a check mark.
+- This release binds Agentlas OS v1.2.63 at 70b53f0714865617ca5a4947fbd8c113078d572f; public runtime asset `hephaestus-runtime-v1.2.63.tar.gz` is pinned at SHA-256 `16589f4d43e98c5bdd15e8c6f01acd62174f55cad6a3507fe21464bc4b58187e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.44 — 2026-10-15
 
 - Sending to a chat that is still busy tells you it is busy again, instead of asking you to check the model connection or usage.
