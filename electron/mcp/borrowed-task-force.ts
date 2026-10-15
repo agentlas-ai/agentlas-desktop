@@ -3008,16 +3008,25 @@ export const TASK_FORCE_WORKER_HANDOFF_SCHEMA: Record<string, unknown> = {
   },
 };
 
+// Owner rule (2026-10-13, "하네스 간섭을 없앨 것"): a format check never throws away a worker's work. A handoff that
+// names the typed schema but does not validate is kept, with its full text, as a PARTIAL packet: dependent steps still
+// run, the work still reaches the room, and only a valid handoff can report COMPLETED.
+function salvagedTaskForceHandoff(text: string): string {
+  const outcome = { packetStatus: "partial", reviewComplete: false, blockingRemaining: ["handoff_format_invalid"] };
+  return [`<<agentlas-packet-outcome>>${JSON.stringify(outcome)}<</agentlas-packet-outcome>>`, text.trim(),
+    "STATUS: PARTIAL", "blocking_remaining: handoff_format_invalid"].join("\n");
+}
+
 export function taskForceWorkerHandoffText(text: string): string {
   const source = text.trim().replace(/^```(?:json)?\s*([\s\S]*?)```$/i, "$1");
   let parsed: Record<string, unknown>;
   // Narration before the final handoff object is not a malformed handoff (shared/typed-json-tail.ts).
   try { parsed = parseWholeOrTrailingTypedJson(source, "agentlas.packet-handoff.v1") as Record<string, unknown>; } catch {
-    if (source.includes("agentlas.packet-handoff.v1")) throw new Error("task_force_worker_handoff_invalid");
+    if (source.includes("agentlas.packet-handoff.v1")) return salvagedTaskForceHandoff(text);
     return text;
   }
   if (!parsed || parsed.schemaVersion !== "agentlas.packet-handoff.v1") {
-    if (parsed && (String(parsed.schemaVersion ?? "").startsWith("agentlas.packet-handoff") || "packetStatus" in Object(parsed) && "handoff" in Object(parsed))) throw new Error("task_force_worker_handoff_invalid");
+    if (parsed && (String(parsed.schemaVersion ?? "").startsWith("agentlas.packet-handoff") || "packetStatus" in Object(parsed) && "handoff" in Object(parsed))) return salvagedTaskForceHandoff(text);
     return text;
   }
   const keys = ["schemaVersion", "handoff", "limitations", "packetStatus", "reviewComplete", "blockingRemaining", "handoffFacts"];
@@ -3029,7 +3038,7 @@ export function taskForceWorkerHandoffText(text: string): string {
     || !Array.isArray(parsed.blockingRemaining) || parsed.blockingRemaining.length > 16
     || !Array.isArray(parsed.handoffFacts) || parsed.handoffFacts.length > 8
     || [...parsed.blockingRemaining, ...parsed.handoffFacts].some(item => typeof item !== "string" || !item.trim())) {
-    throw new Error("task_force_worker_handoff_invalid");
+    return salvagedTaskForceHandoff(text);
   }
   const outcome = { packetStatus: parsed.packetStatus, reviewComplete: parsed.reviewComplete, blockingRemaining: parsed.blockingRemaining };
   // Canonical typed state precedes unrestricted human text. Escape delimiters in
