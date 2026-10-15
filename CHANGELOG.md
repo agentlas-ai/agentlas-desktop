@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.44 — 2026-10-15
+
+- Sending to a chat that is still busy tells you it is busy again, instead of asking you to check the model connection or usage.
+- Run now on a graph automation from your paired phone starts the run again, instead of being refused before its first step.
+- A chat whose background service stopped in the middle of an answer takes your next message, instead of staying stuck as pending.
+- Unattended runs no longer ask an owner who is not there; they report what they need instead.
+- API and local-model runtimes receive the same turn context as the subscription runtimes, and reuse of what One learned works again for newly learned memory.
+- The graph interview offers only services Agentlas can connect, and Build answers from older mobile apps keep all of their questions.
+- This release binds Agentlas OS v1.2.63 at 70b53f0714865617ca5a4947fbd8c113078d572f; public runtime asset `hephaestus-runtime-v1.2.63.tar.gz` is pinned at SHA-256 `16589f4d43e98c5bdd15e8c6f01acd62174f55cad6a3507fe21464bc4b58187e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.43 — 2026-10-15
 
 - The Agentlas harness now drives every runtime the same way: compact prompt modules with typed tools instead of long instructions, sessions that carry over for API, local models, Antigravity and Terminal runs, and one schema for every app operation.
