@@ -39,6 +39,7 @@ import {
   type OneWorkCell,
   type OneWorkPresentation,
 } from "@/lib/one-turn-work";
+import type { InvocationPlanEntry } from "@shared/invocation-plan";
 import styles from "./OneTurnWork.module.css";
 import { BoundImageArtifacts } from "../workspace/BoundImageArtifacts";
 import { toolFailureCopy } from "@shared/tool-failure";
@@ -47,16 +48,18 @@ import { shellExecutionOutcome } from "@/lib/shell-execution-outcome";
 import { toolInvocationOriginLabel, type ToolInvocationOrigin } from "@shared/tool-invocation-origin";
 
 /**
- * One assistant turn's process, drawn the way Codex draws it:
+ * One assistant turn's process, folded to one line by default (Claude Code / Codex):
  *
- *   running →  ✦ <the model's latest thought headline, shimmering>
- *              탐색함  README.md, package.json
- *              실행함  npm test
- *   settled →  27s 동안 작업 ›            (collapsed; click to open the rows)
+ *   running →  ✓ 파일 구조 확인                 (only when the runtime keeps its own plan)
+ *              ◌ 테스트 실행
+ *              ○ 결과 정리
+ *              • <what it is doing now, one line, shimmering>   1분 52초  ›
+ *                  탐색함  README.md            (open: the rows nest under that line)
+ *   settled →  ✓ 명령 2개 실행함   27초  ›      (collapsed; click to open plan + rows)
  *
  * Every row is what the runtime actually did (typed protocol → ledger), never
- * a hard-coded status sentence. The headline is the model's own reasoning
- * summary; only when a runtime gives none does the row verb stand in.
+ * a hard-coded status sentence. The line says the active plan step, else what
+ * is running, else the latest step; failures and owner waits stay outside the fold.
  */
 
 function useElapsed(startedAt: number | null, active: boolean): number {
@@ -268,7 +271,7 @@ function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
       // Codex draws the model's own summary headline as the row ("Planning
       // applypatch creation"); the span length is secondary. Only a thought
       // with no text falls back to "Thought for Ns".
-      const seconds = cell.durationMs != null && cell.durationMs >= 1_000 ? formatWorkElapsed(cell.durationMs) : null;
+      const seconds = cell.durationMs != null && cell.durationMs >= 1_000 ? formatWorkElapsed(cell.durationMs, locale) : null;
       const label = cell.headline
         ?? (cell.status === "running"
           ? verb
@@ -326,7 +329,7 @@ function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
           head={(
             <>
               <strong>{verb}</strong>
-              <span className={styles.object}>{compactShellLabel(locale)}</span>
+              <span className={styles.object}>{cell.summary ?? compactShellLabel(locale)}</span>
               {cellOriginBadge(cell, locale)}
               {statusSuffix(cell, locale)}
               {cell.exitCode != null && cell.exitCode !== 0 && <span className={styles.muted}>exit {cell.exitCode}</span>}
@@ -565,6 +568,42 @@ export function OneWorkerWorkDetails({ group, locale }: { group: OneWorkerWorkGr
   </div>;
 }
 
+/**
+ * The runtime's own checklist: one row per step, ○ pending, a spinner on the step in progress, ✓ done.
+ * Drawn only from a typed plan event; a settled run keeps the last state without animating.
+ */
+function PlanChecklist({ entries, active, locale }: {
+  entries: readonly InvocationPlanEntry[];
+  active: boolean;
+  locale: "ko" | "en";
+}) {
+  const ko = locale === "ko";
+  const done = entries.filter((entry) => entry.status === "completed").length;
+  const statusWord = (status: InvocationPlanEntry["status"]) => status === "completed"
+    ? (ko ? "완료" : "done") : status === "in_progress" ? (ko ? "진행 중" : "in progress") : (ko ? "대기" : "pending");
+  return (
+    <ol className={styles.plan} data-one-plan="true" data-done={done} data-total={entries.length}
+      aria-label={ko ? `작업 단계 ${done}/${entries.length}` : `Steps ${done} of ${entries.length}`}>
+      {entries.map((entry, index) => (
+        <li key={`${entry.id ?? index}:${entry.text}`} className={styles.planStep} data-status={entry.status}
+          aria-label={`${entry.text} · ${statusWord(entry.status)}`} title={entry.text}>
+          <span className={styles.planMark} data-status={entry.status}
+            data-live={active && entry.status === "in_progress" ? "true" : undefined} aria-hidden="true">
+            {entry.status === "completed" && <IconCheck size={12} strokeWidth={2.2} />}
+          </span>
+          <span className={styles.planText}>{entry.text}</span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+/** A failure or an owner wait the folded line must not hide (typed level / failure code only). */
+function needsOwnerEye(cell: OneWorkCell): boolean {
+  if (cell.kind === "notice") return cell.level === "error";
+  return cell.kind === "call" && (cell.failureCode === "approval_required" || cell.failureCode === "approval_expired");
+}
+
 export function OneTurnWorkDividers({ presentation }: { presentation: OneWorkPresentation }) {
   if (presentation.dividers.length === 0) return null;
   return (
@@ -690,8 +729,16 @@ export function OneTurnWork({
   // failures and live retry/queue states keep their own rows.
   const quietNotes = useMemo(() => inlineCells.filter(isQuietHostNote), [inlineCells]);
   const firstQuietNote = quietNotes[0]?.id;
+  // The runtime's own checklist, when it keeps one (typed plan event only).
+  const planEntries = state.plan?.entries ?? [];
+  const hasPlan = planEntries.length > 0;
+  // Failures and owner waits are never folded away; everything else opens from the one line.
+  const ownerEyeCells = useMemo(() => inlineCells.filter(needsOwnerEye), [inlineCells]);
+  // Failed steps not already drawn as their own row stay countable on the folded line.
+  const failedStepCount = visibleCells.filter((cell) => cell.kind !== "notice" && !needsOwnerEye(cell)
+    && (cell.status === "failed" || (cell.kind === "run" && cell.exitCode != null && cell.exitCode !== 0))).length;
 
-  if (!active && !loginWaiting && !hasRows && !presentation.terminalMessage && !interrupted && !steeringInterrupted && !state.artifacts.length) {
+  if (!active && !loginWaiting && !hasRows && !hasPlan && !presentation.terminalMessage && !interrupted && !steeringInterrupted && !state.artifacts.length) {
     // Nothing happened beyond the answer itself (no thought, no tool). Codex
     // shows no work line for such a turn.
     return null;
@@ -703,55 +750,71 @@ export function OneTurnWork({
   // Claude 처럼 접힌 줄이 "무엇을" 했는지 먼저 말한다(레퍼런스 "명령 2개 실행함 ›") — 명령이 있던 턴은
   // 명령 개수 + 걸린 시간, 없으면 지금처럼 걸린 시간만. 개수는 실제로 돈 명령 행(run 칸)만 센다.
   const commandCount = visibleCells.filter((cell) => cell.kind === "run").length;
-  const elapsedLabel = settledMs != null ? formatWorkElapsed(settledMs) : null;
-  const workedFor = commandCount > 0
-    ? (ko ? `명령 ${commandCount}개 실행함${elapsedLabel ? ` · ${elapsedLabel}` : ""}` : `Ran ${commandCount} command${commandCount === 1 ? "" : "s"}${elapsedLabel ? ` · ${elapsedLabel}` : ""}`)
-    : settledMs != null
-      ? (ko ? `${formatWorkElapsed(settledMs)} 동안 작업` : `Worked for ${formatWorkElapsed(settledMs)}`)
-      : (ko ? "작업" : "Work");
+  const elapsedLabel = settledMs != null ? formatWorkElapsed(settledMs, locale) : null;
+  const planDone = planEntries.filter((entry) => entry.status === "completed").length;
+  const workedFor = hasPlan
+    ? (ko ? `${planDone}/${planEntries.length}단계 완료` : `${planDone}/${planEntries.length} steps done`)
+    : commandCount > 0
+      ? (ko ? `명령 ${commandCount}개 실행함` : `Ran ${commandCount} command${commandCount === 1 ? "" : "s"}`)
+      : settledMs != null
+        ? (ko ? `${formatWorkElapsed(settledMs, locale)} 동안 작업` : `Worked for ${formatWorkElapsed(settledMs, locale)}`)
+        : (ko ? "작업" : "Work");
+  // "N초 동안 작업" already says how long; every other line carries the time beside it.
+  const summaryElapsed = active ? formatWorkElapsed(liveElapsedMs, locale)
+    : loginWaiting || (!hasPlan && commandCount === 0) ? null : elapsedLabel;
+  const expandable = hasRows || (hasPlan && !active);
+  const terminalState = loginWaiting ? "waiting_input" : steeringInterrupted ? "steered" : terminal ?? "completed";
+  const summaryContent = (
+    <>
+      <span className={styles.summaryMark} data-state={active ? "running" : terminalState} aria-hidden="true">
+        {active || loginWaiting ? <span className={styles.pulse} data-live={active ? "true" : undefined} />
+          : failed && terminal === "failed" ? <IconAlertTriangle size={13} strokeWidth={1.7} />
+            : <IconCheck size={13} strokeWidth={1.7} />}
+      </span>
+      <span className={active ? `${styles.liveText} ${styles.shimmer}` : styles.summaryText}
+        {...(active ? { role: "status", "aria-live": "polite" as const } : {})}>
+        {active ? headline : loginWaiting ? (ko ? "로그인 대기" : "Waiting for sign-in") : workedFor}
+      </span>
+      {/* 표시=실행 (C-D-1): 이 턴이 실제로 돈 모델을 실행 기록 표면에 남긴다. */}
+      {!active && presentation.model && <span className={styles.summaryModel} data-run-model="true">{presentation.model}</span>}
+      {failedStepCount > 0 && (
+        <span className={styles.summaryAlert} data-failed-steps={failedStepCount}
+          title={ko ? `실패한 단계 ${failedStepCount}개` : `${failedStepCount} failed ${failedStepCount === 1 ? "step" : "steps"}`}>
+          <IconAlertTriangle size={11} strokeWidth={1.8} />{failedStepCount}
+        </span>
+      )}
+      {/* Host stops, owner stops, steering and unanswered turns are internal states: not drawn (owner 2026-10-14). */}
+      {failed && terminal === "failed" && (
+        <span className={styles.headerTerminal}>{ko ? "실패" : "failed"}</span>
+      )}
+      {summaryElapsed && <span className={styles.summaryElapsed} data-elapsed="true">{summaryElapsed}</span>}
+      {expandable && <span className={styles.summaryChevron} aria-hidden="true"><IconChevronDown size={12} /></span>}
+    </>
+  );
   return (
     <>
     <section
       className={styles.work}
       data-one-turn-work="true"
       data-state={preparing ? "preparing" : active ? "running" : loginWaiting ? "waiting_input" : "settled"}
+      data-has-plan={hasPlan ? "true" : undefined}
       aria-busy={active}
     >
-      {active ? (
-        <div className={styles.liveBlock}>
-          <div className={styles.live} role="status" aria-live="polite">
-            <span className={styles.liveMark} aria-hidden="true"><IconSparkles size={13} /></span>
-            <span className={`${styles.liveText} ${styles.shimmer}`}>{headline}</span>
-            {hasRows && (
-              <button
-                type="button"
-                className={styles.liveToggle}
-                onClick={() => setExpanded((current) => !current)}
-                aria-expanded={expanded}
-                aria-label={ko ? "과정 접기/펼치기" : "Toggle steps"}
-              >
-                <IconChevronDown size={12} />
-              </button>
-            )}
-          </div>
-        </div>
-      ) : (
+      {/* While it runs, the runtime's own checklist stays in view above its one-line "doing now" (Claude Code). */}
+      {active && hasPlan && <PlanChecklist entries={planEntries} active locale={locale} />}
+      {expandable ? (
         <button
           type="button"
-          className={styles.header}
+          className={styles.summary}
           onClick={() => setExpanded((current) => !current)}
           aria-expanded={expanded}
-          data-terminal={loginWaiting ? "waiting_input" : steeringInterrupted ? "steered" : terminal ?? "completed"}
+          aria-label={active ? undefined : (ko ? "과정 접기/펼치기" : "Toggle steps")}
+          data-terminal={active ? undefined : terminalState}
         >
-          <span>{loginWaiting ? (ko ? "로그인 대기" : "Waiting for sign-in") : workedFor}</span>
-          {/* 표시=실행 (C-D-1): 이 턴이 실제로 돈 모델을 실행 기록 표면에 남긴다. */}
-          {presentation.model && <span className={styles.muted} data-run-model="true">· {presentation.model}</span>}
-          {/* Host stops, owner stops, steering and unanswered turns are internal states: not drawn (owner 2026-10-14). */}
-          {failed && terminal === "failed" && (
-            <span className={styles.headerTerminal}>· {ko ? "실패" : "failed"}</span>
-          )}
-          <span className={styles.headerChevron} aria-hidden="true"><IconChevronDown size={12} /></span>
+          {summaryContent}
         </button>
+      ) : (
+        <div className={styles.summary} data-static="true" data-terminal={active ? undefined : terminalState}>{summaryContent}</div>
       )}
       {/* Outside the fold: where the answer came from stays visible after the block collapses. */}
       {toolchainSources.length > 0 && (
@@ -759,17 +822,24 @@ export function OneTurnWork({
           {toolchainSources.map((source) => <ToolchainSourceChip key={`${source.kind}:${source.automationId}`} source={source} locale={locale} />)}
         </div>
       )}
+      {!active && expanded && hasPlan && <PlanChecklist entries={planEntries} active={false} locale={locale} />}
       {(active || expanded) && workerGroups.length > 0 && (
         <div className={styles.workerList} aria-label={ko ? "작업자별 활동" : "Activity by worker"}>
           {workerGroups.map((group) => <WorkerWorkCard key={group.agentId} group={group} active={active} locale={locale} onInspectWorker={onInspectWorker} />)}
         </div>
       )}
       {expanded && (inlineCells.length > 0 || (hostNotes?.length ?? 0) > 0) && (
-        <div className={styles.rows}>
+        <div className={styles.rows} data-nested="true">
           {inlineCells.map((cell) => (isQuietHostNote(cell)
             ? cell.id === firstQuietNote ? <HostNotesRow key="host-notes" cells={quietNotes} notes={hostNotes} locale={locale} /> : null
             : <WorkRow key={cell.id} cell={cell} locale={locale} />))}
           {!firstQuietNote && (hostNotes?.length ?? 0) > 0 && <HostNotesRow key="host-notes" cells={[]} notes={hostNotes} locale={locale} />}
+        </div>
+      )}
+      {/* Folded, a failure or a pending approval still shows as its own row. */}
+      {!expanded && ownerEyeCells.length > 0 && (
+        <div className={styles.rows} data-nested="true" data-owner-eye="true">
+          {ownerEyeCells.map((cell) => <WorkRow key={cell.id} cell={cell} locale={locale} />)}
         </div>
       )}
       {/* Keep an actionable summary visible while diagnostic payloads stay in a disclosure. */}

@@ -11,6 +11,7 @@ import { createHash } from "node:crypto";
 import { featureIsNative } from "../harness/feature-registry";
 import type { ChatHistoryEntry, ImageAttachment, McpInvocationEvent } from "../../shared/types";
 import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
+import type { InvocationPlan } from "../../shared/invocation-plan";
 import { tStatus, type RuntimeLocale } from "./status-i18n";
 import { composePrompt, ASK_LINE, type PluginCatalog } from "./prompt-modules";
 import { installedPluginCatalog, explicitPluginRouterPrompt } from "../plugins/router-prompt";
@@ -715,6 +716,11 @@ export interface RunnerEvents {
    * 누적해 end에 전문을 붙인다. 선택.
    */
   onThinking?: (phase: "start" | "delta" | "end", durationMs?: number, text?: string) => void;
+  /**
+   * The runtime's own task checklist, from its structured protocol only (runtime-plan.ts). Each call is the complete
+   * list and replaces the previous one. Runtimes without a native plan never call it. 선택.
+   */
+  onPlan?: (plan: InvocationPlan) => void;
   /**
    * ★호스트가 사용자에게 하는 말. 상태줄(onStatus)과 다르다 — 상태줄은 **지나가는** 값이고
    * 이건 대화에 **남아야 하는 사실**이다.

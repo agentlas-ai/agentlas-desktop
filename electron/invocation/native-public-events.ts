@@ -7,10 +7,10 @@ export const NATIVE_PUBLIC_EVENT_READ = "invocation.public.read";
 export const NATIVE_PUBLIC_EVENT_ACK = "invocation.public.ack";
 export const NATIVE_PUBLIC_EVENT_CHUNK_BYTES = 98304;
 const VERSION = "agentlas.native-public-event.v1";
-const EVENT_KEYS = ["delivery", "kind", "sequence", "observedAt", "durableMessageId", "goalResult", "lifecycle", "status", "activity", "text", "userDecisionRequest", "imageDataUrls", "delta", "textLen", "error", "notice", "surfaceId", "surface", "oneSurface", "oneArtifacts", "oneFriendlyFollowups", "tool", "keyRequest", "tokens", "observedUsage", "reasoning", "agentId", "runtimeAgentId", "agentName", "role", "modelRole", "tier", "phase", "delegateTo", "done", "model", "observedModel", "runtimeSelection", "agentMessage", "agentLifecycle", "nodeId", "nodeState"] as const satisfies readonly (keyof McpInvocationEvent)[];
+const EVENT_KEYS = ["delivery", "kind", "sequence", "observedAt", "durableMessageId", "goalResult", "lifecycle", "status", "activity", "text", "userDecisionRequest", "imageDataUrls", "delta", "textLen", "error", "notice", "surfaceId", "surface", "oneSurface", "oneArtifacts", "oneFriendlyFollowups", "tool", "keyRequest", "tokens", "observedUsage", "reasoning", "plan", "agentId", "runtimeAgentId", "agentName", "role", "modelRole", "tier", "phase", "delegateTo", "done", "model", "observedModel", "runtimeSelection", "agentMessage", "agentLifecycle", "nodeId", "nodeState"] as const satisfies readonly (keyof McpInvocationEvent)[];
 const RECEIPT_KEYS = ["runId", "chatId", "status", "startedAt", "updatedAt", "finishedAt", "eventCount", "resultFolder", "hasImages", "borrowAgents", "taskForceTargets", "model", "errorCode", "errorMessage", "runtimeFailure", "executionPermission", "steeringRecovery", "interruptionCause", "hostStopCause"] as const satisfies readonly (keyof InvocationRunReceipt)[];
 const SETTLED_KEYS = ["runId", "chatId", "agentId", "receipt", "oneMode", "pendingQuestion", "browserLoginWaiting", "userDecisionRequest"] as const;
-const KINDS = new Set(["lifecycle", "thinking", "tool-use", "partial", "final", "error", "surface", "usage", "reasoning", "mcp-key-request", "notice"]);
+const KINDS = new Set(["lifecycle", "thinking", "tool-use", "partial", "final", "error", "surface", "usage", "reasoning", "mcp-key-request", "notice", "plan"]);
 export type NativePublicSettlement = Omit<InvocationSettledEnvelope, "goal" | "workspaceBinding">;
 type PublicValue = {
     version: typeof VERSION;

@@ -47,6 +47,8 @@ import { cliHistoryContextTokens, composeResumeTurnPrompt, renderConversationCon
   renderGapContext, unseenHistoryGap, dedupeStableTurnContext, acknowledgeStableTurnContext,
   invalidateStableTurnContext, type StableTurnContextDelivery } from "./continuity";
 import { stageCliImageAttachments } from "./image-attachments";
+import { createRuntimePlanEmitter, planFromAcpPlanUpdate } from "./runtime-plan";
+import type { InvocationPlan } from "../../shared/invocation-plan";
 import { agentContextColdBootstrapForRequest, agentContextDeliveryForRequest, agentContextSessionKey } from "./agent-context";
 import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
 import {
@@ -197,6 +199,11 @@ export class AcpSessionClient {
    * 도구 호출이 다시 보고된다 — 재생 구간은 통째로 무시하고 세션 상태만 얻는다.
    */
   private replaying = false;
+  /** Per-turn plan emitter: forwards the agent's checklist only when it changes. */
+  private planEmitter: ((plan: InvocationPlan | null) => void) | null = null;
+  private emitPlan(plan: InvocationPlan | null): void {
+    (this.planEmitter ??= createRuntimePlanEmitter(this.events.onPlan))(plan);
+  }
 
   constructor(
     private readonly events: RunnerEvents,
@@ -244,8 +251,8 @@ export class AcpSessionClient {
         break;
       }
       case "plan": {
-        const entries = Array.isArray(update.entries) ? update.entries : [];
-        if (entries.length) this.events.onStatus(this.locale === "ko" ? `계획 ${entries.length}단계` : `Plan · ${entries.length} steps`);
+        // The agent's own checklist, typed (runtime-plan.ts) — not a status sentence. Each update is the full list.
+        this.emitPlan(planFromAcpPlanUpdate(update));
         break;
       }
       case "tool_call":

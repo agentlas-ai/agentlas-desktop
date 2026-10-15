@@ -2,6 +2,7 @@ import type { AgentMessageDirection, InvocationRunReceipt, McpInvocationEvent, R
 import type { OneArtifactBindingRequestV1 } from "@shared/one-artifacts";
 import { classifyToolFailure, isToolFailureCode, type ToolFailureCode } from "@shared/tool-failure";
 import { decodeToolInvocationOrigin, type ToolInvocationOrigin } from "@shared/tool-invocation-origin";
+import type { InvocationPlanEntry } from "@shared/invocation-plan";
 
 export type OneActivityStatus = "running" | "cancelling" | "waiting_input" | "completed" | "failed" | "cancelled" | "info";
 export type OneActivityKind = "run" | "reasoning" | "tool" | "agent" | "notice" | "result" | "terminal";
@@ -116,6 +117,38 @@ export interface OneActivitySource {
   status: OneActivityStatus;
 }
 
+export interface OneActivityPlan {
+  entries: InvocationPlanEntry[];
+  observedAt: string;
+}
+
+const PLAN_MAX_ENTRIES = 50;
+const PLAN_TEXT_MAX = 300;
+
+function planText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.replace(/\s+/g, " ").trim();
+  if (!text) return undefined;
+  return text.length > PLAN_TEXT_MAX ? `${text.slice(0, PLAN_TEXT_MAX - 1).trimEnd()}…` : text;
+}
+
+/** Same closed shape Main bounds (shared/invocation-plan.ts); the renderer re-checks what IPC or the ledger hands it. */
+export function oneActivityPlanEntries(value: unknown): InvocationPlanEntry[] | null {
+  if (!Array.isArray(value)) return null;
+  const entries: InvocationPlanEntry[] = [];
+  for (const raw of value.slice(0, PLAN_MAX_ENTRIES)) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const record = raw as Record<string, unknown>;
+    const text = planText(record.text);
+    const status = record.status;
+    if (!text || (status !== "pending" && status !== "in_progress" && status !== "completed")) continue;
+    const id = typeof record.id === "string" && record.id.trim() ? record.id.trim().slice(0, 128) : undefined;
+    const activeText = planText(record.activeText);
+    entries.push({ ...(id ? { id } : {}), text, ...(activeText && activeText !== text ? { activeText } : {}), status });
+  }
+  return entries;
+}
+
 export interface OneActivityState {
   items: OneActivityItem[];
   artifacts: OneActivityArtifact[];
@@ -129,6 +162,11 @@ export interface OneActivityState {
   terminalStatus?: "completed" | "failed" | "cancelled";
   /** The run's working folder from the lifecycle start fact — tool paths are shown relative to it. */
   cwd?: string;
+  /**
+   * The runtime's own checklist (Codex update_plan, ACP plan, Claude todo tools), latest snapshot.
+   * Absent when the runtime has no native plan; never derived from prose.
+   */
+  plan?: OneActivityPlan;
   /**
    * Model/runtime label the orchestrator run actually executed with, from the
    * runtime's own `final` event (ledger: mcp_final payload.observedModel). Display =
@@ -628,6 +666,7 @@ function reduceOneActivityInternal(
   let selectedPermissionMode = state.selectedPermissionMode;
   let cwd = state.cwd;
   let model = state.model;
+  let plan = state.plan;
   let handoffs = state.handoffs;
   let terminalStatus: OneActivityState["terminalStatus"] = undefined;
 
@@ -685,6 +724,10 @@ function reduceOneActivityInternal(
     if (typeof event.tokens === "number" && Number.isFinite(event.tokens)) {
       tokens = Math.max(tokens ?? 0, event.tokens);
     }
+  } else if (event.kind === "plan") {
+    // Only the run's own runtime checklist. An explicit orchestration node (a worker) keeps its plan to itself.
+    const entries = event.agentId ? null : oneActivityPlanEntries(event.plan?.entries);
+    if (entries) plan = entries.length > 0 ? { entries, observedAt } : undefined;
   } else if (event.kind === "reasoning" && event.reasoning?.phase === "start") {
     const id = `reasoning:${sequence}`;
     items = upsertItem(items, {
@@ -1014,6 +1057,7 @@ function reduceOneActivityInternal(
     ...(selectedPermissionMode ? { selectedPermissionMode } : {}),
     ...(cwd ? { cwd } : {}),
     ...(model ? { model } : {}),
+    ...(plan ? { plan } : {}),
     ...(terminalStatus ? { terminalStatus } : {}),
   };
 }
@@ -1331,6 +1375,12 @@ export function projectOneActivityFromLedger(events: RunEventUi[], receipt?: Inv
           },
         }, row.ts);
       }
+      continue;
+    }
+    if (row.kind === "mcp_plan") {
+      // Every row is a full snapshot; replaying them in order leaves the latest one. A worker node's row stays its own.
+      const entries = oneActivityPlanEntries(payload.planEntries);
+      if (entries && !ledgerString(payload, "agentNodeId")) apply({ kind: "plan", plan: { entries } }, row.ts);
       continue;
     }
     if (row.kind === "mcp_thinking") {

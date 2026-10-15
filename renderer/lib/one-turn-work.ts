@@ -5,6 +5,8 @@ import { parseShellCommand, stripShellWrapper } from "@shared/exploratory-shell"
 import { toolFailureCopy, type ToolFailureCode } from "@shared/tool-failure";
 import type { ToolInvocationOrigin } from "@shared/tool-invocation-origin";
 import { BUILTIN_ONE_AGENT_ID } from "@shared/builtin-agent-ids";
+import type { InvocationPlanEntry } from "@shared/invocation-plan";
+import { toolObservationAction } from "./tool-observation";
 
 /**
  * One turn's work, in the shape Codex draws it.
@@ -63,7 +65,7 @@ interface CellBase {
 export type OneWorkCell =
   | (CellBase & { kind: "thought"; headline?: string; body?: string; durationMs?: number })
   | (CellBase & { kind: "explore"; entries: OneWorkExploreEntry[] })
-  | (CellBase & { kind: "run"; command: string; output?: string; exitCode?: number | null })
+  | (CellBase & { kind: "run"; command: string; output?: string; exitCode?: number | null; summary?: string })
   | (CellBase & { kind: "edit"; files: OneWorkEditFile[]; diff?: string })
   | (CellBase & { kind: "web_search"; query: string })
   | (CellBase & { kind: "fetch"; url: string; statusCode?: number })
@@ -84,7 +86,10 @@ export interface OneWorkPresentation {
   /** Conversation-boundary notices (context compaction) — drawn outside the collapsible block. */
   dividers: OneWorkDivider[];
   running: boolean;
-  /** Live one-line status: the model's latest thought headline, else the running cell's verb. */
+  /**
+   * Live one-line status: the runtime's active plan step, else what is running now (tool label or the model's thought
+   * headline), else the latest step, else a short verb. Structured data only.
+   */
   headline: string;
   /** Immutable run duration once the lifecycle row settled. */
   durationMs?: number;
@@ -109,13 +114,19 @@ export function terminalFailureCopy(code: string | undefined, locale: "ko" | "en
   return locale === "ko" ? "작업을 마치지 못했습니다. 상세 내용을 확인하세요." : "The task could not finish. Open the details.";
 }
 
-export function formatWorkElapsed(ms: number): string {
+export function formatWorkElapsed(ms: number, locale?: "ko" | "en"): string {
   const seconds = Math.max(0, Math.floor(ms / 1_000));
-  if (seconds < 60) return `${seconds}s`;
+  const ko = locale === "ko";
+  if (seconds < 60) return ko ? `${seconds}초` : `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  if (minutes < 60) return ko ? `${minutes}분 ${seconds % 60}초` : `${minutes}m ${seconds % 60}s`;
   const hours = Math.floor(minutes / 60);
-  return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
+  return ko ? `${hours}시간 ${minutes % 60}분 ${seconds % 60}초` : `${hours}h ${minutes % 60}m ${seconds % 60}s`;
+}
+
+/** The step the runtime marked in progress, or undefined. */
+export function activePlanStep(entries: readonly InvocationPlanEntry[] | undefined): InvocationPlanEntry | undefined {
+  return entries?.find((entry) => entry.status === "in_progress");
 }
 
 const MARKDOWN_EMPHASIS_RE = /(\*\*|__|\*|_|`)/g;
@@ -154,7 +165,7 @@ function basename(path: string): string {
 
 type Classified =
   | { cell: "explore"; entries: OneWorkExploreEntry[] }
-  | { cell: "run"; command: string; output?: string; exitCode?: number | null }
+  | { cell: "run"; command: string; output?: string; exitCode?: number | null; summary?: string }
   | { cell: "edit"; file: OneWorkEditFile; diff?: string }
   | { cell: "web_search"; query: string }
   | { cell: "fetch"; url: string; statusCode?: number }
@@ -237,11 +248,14 @@ function classifyTool(item: OneActivityItem, workspacePath: string | null): Clas
       const command = stripShellWrapper(detail.command);
       const entries = command ? exploreEntriesFromShell(command, workspacePath) : null;
       if (entries && entries.length > 0) return { cell: "explore", entries };
+      // The runtime's own one-line description of the command (Claude Code Bash `description`), an exact input field.
+      const summary = pickText(parseJsonRecord(tool.args), ["description"]);
       return {
         cell: "run",
         command,
         ...(detail.output ? { output: detail.output } : {}),
         ...(detail.exitCode !== undefined ? { exitCode: detail.exitCode } : {}),
+        ...(summary ? { summary: summary.replace(/\s+/g, " ").slice(0, 240) } : {}),
       };
     }
     case "edit":
@@ -546,6 +560,7 @@ export function buildOneWorkPresentation(
               command: classified.command,
               ...(classified.output ? { output: classified.output } : {}),
               ...(classified.exitCode !== undefined ? { exitCode: classified.exitCode } : {}),
+              ...(classified.summary ? { summary: classified.summary } : {}),
               ...(agent ? { agent } : {}),
             });
             break;
@@ -689,8 +704,10 @@ export function cellObject(cell: OneWorkCell): string {
   switch (cell.kind) {
     case "explore":
       return cell.entries.at(-1)?.label ?? "";
-    case "run":
-      return cell.command.length > 60 ? `${cell.command.slice(0, 59)}…` : cell.command;
+    case "run": {
+      const firstLine = cell.command.split(/\r?\n/).find((line) => line.trim())?.trim() ?? "";
+      return firstLine.length > 60 ? `${firstLine.slice(0, 59)}…` : firstLine;
+    }
     case "edit":
       return cell.files.map((file) => basename(file.path)).join(", ");
     case "web_search":
@@ -706,23 +723,35 @@ export function cellObject(cell: OneWorkCell): string {
   }
 }
 
+/**
+ * One readable line for a work cell, the same words its row uses: the runtime's own description of a command, the
+ * typed tool action and target, or the verb and object.
+ */
+export function cellHeadline(cell: OneWorkCell, locale: "ko" | "en"): string {
+  if (cell.kind === "thought") return cell.headline ?? cellVerb(cell, locale);
+  if (cell.kind === "notice") return cell.message;
+  if (cell.kind === "run" && cell.summary) return cell.summary;
+  if (cell.kind === "call") {
+    const fallbackLabel = cell.label === CONNECTED_TOOL_LABEL ? (locale === "ko" ? "연결된 도구 사용" : "Use connected tool") : cell.label;
+    const action = toolObservationAction(cell.toolName ?? cell.label, fallbackLabel, cell.args, locale);
+    return action.target ? `${action.label} · ${action.target}` : action.label;
+  }
+  const object = cellObject(cell);
+  const verb = cellVerb(cell, locale);
+  return object ? `${verb} · ${object}` : verb;
+}
+
 function liveHeadline(cells: OneWorkCell[], state: OneActivityState, locale: "ko" | "en"): string {
   const ko = locale === "ko";
+  // 1. The runtime said which step of its own plan it is on.
+  const step = state.terminalStatus ? undefined : activePlanStep(state.plan?.entries);
+  if (step) return step.activeText ?? step.text;
+  // 2. What is running now.
   for (let index = cells.length - 1; index >= 0; index -= 1) {
     const cell = cells[index];
-    if (cell.status !== "running") continue;
+    if (cell.status !== "running" || cell.kind === "notice") continue;
     if (cell.kind === "thought") return cell.headline ?? (ko ? "생각하는 중" : "Thinking");
-    if (cell.kind === "notice") continue;
-    const object = cellObject(cell);
-    const verb = cellVerb(cell, locale);
-    return object ? `${verb} · ${object}` : verb;
-  }
-  // Nothing specific is running (answer streaming, or the runtime is between
-  // steps). Reuse the last thought headline rather than a generic word — the
-  // model told us what it was doing last.
-  for (let index = cells.length - 1; index >= 0; index -= 1) {
-    const cell = cells[index];
-    if (cell.kind === "thought" && cell.headline) return cell.headline;
+    return cellHeadline(cell, locale);
   }
   if (state.items.some((item) => item.id === "answer:stream" && item.status === "running")) {
     return ko ? "답변 작성 중" : "Writing";
@@ -731,6 +760,12 @@ function liveHeadline(cells: OneWorkCell[], state: OneActivityState, locale: "ko
   // "작업 중"은 이 경우 사실이 아니고, 사실이 아닌 진행 표시가 재전송을 부른다.
   if (state.items.some((item) => item.kind === "run" && item.status === "running" && item.activityCode === "queue_wait")) {
     return ko ? "차례를 기다리는 중" : "Waiting in queue";
+  }
+  // 3. Between steps: the most recent tool step or model-written thought headline, whichever came last.
+  for (let index = cells.length - 1; index >= 0; index -= 1) {
+    const cell = cells[index];
+    if (cell.kind === "notice" || cell.kind === "answer" || (cell.kind === "thought" && !cell.headline)) continue;
+    return cellHeadline(cell, locale);
   }
   return ko ? "작업 중" : "Working";
 }

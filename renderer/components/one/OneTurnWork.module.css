@@ -1,10 +1,11 @@
 /*
- * One turn's work block — Codex desktop look.
+ * One turn's work block — folded to one line (Claude Code / Codex desktop look).
  *
- *  running   ✦ 파일 구조를 살펴보는 중            (shimmer, model headline)
- *              탐색함  README.md, package.json
- *              실행함  npm test
- *  settled   27s 동안 작업 ›                        (13px gray, collapsed)
+ *  running   ✓ 파일 구조 확인                       (only with the runtime's own plan)
+ *            ◌ 테스트 실행
+ *            • 테스트 실행 중   1분 52초  ›          (shimmer, one line)
+ *                탐색함  README.md                   (open: rows nest under the line)
+ *  settled   ✓ 명령 2개 실행함   27초  ›             (13px gray, collapsed)
  *
  * Exact worker identities form compact disclosures; individual tool details
  * remain inside their worker. Owner-only activity keeps the quiet text column.
@@ -27,17 +28,31 @@
 /* A run that left no answer text ends the turn here; the 12px kept for the answer only widened the gap to the next turn. */
 .work:last-child { margin-bottom: 0; }
 
-/* ── live header (running) ────────────────────────────────────────────── */
-.liveBlock { display: grid; gap: 1px; }
-.live {
-  min-height: 28px;
+/* ── the one line (running and settled) ───────────────────────────────── */
+.summary {
+  width: calc(100% + 16px);
+  min-height: 30px;
+  margin-inline: -8px;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 2px 0;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--work-muted);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  min-width: 0;
 }
+button.summary { cursor: pointer; }
+button.summary:hover { background: var(--paper-2); }
+button.summary:hover .summaryText { color: var(--work-ink); }
+.summary:focus-visible { outline: 2px solid rgba(96, 122, 54, 0.35); outline-offset: 1px; }
 
-.liveMark {
+.summaryMark {
   width: 18px;
   height: 18px;
   flex: 0 0 auto;
@@ -45,30 +60,113 @@
   place-items: center;
   color: var(--work-faint);
 }
+.summaryMark[data-state="failed"] { color: var(--work-fail); }
 
-.liveText {
+/* The small animated dot of a run that is working (static when settled or reduced motion). */
+.pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted-deep);
+}
+.pulse[data-live="true"] { animation: oneWorkPulse 1.4s ease-in-out infinite; }
+@keyframes oneWorkPulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+.liveText,
+.summaryText {
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13.5px;
-  font-weight: 500;
 }
+.liveText { font-size: 13.5px; font-weight: 500; }
 
-.liveToggle {
-  display: grid;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
+.summaryModel {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 34%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--work-faint);
-  cursor: pointer;
+  font-size: 12px;
 }
 
-.liveToggle[aria-expanded="true"] { transform: rotate(180deg); }
-.liveToggle:hover { color: var(--work-ink); }
+.summaryAlert {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--work-fail);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.summaryElapsed {
+  flex: 0 0 auto;
+  color: var(--work-faint);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.summaryChevron {
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  color: var(--work-faint);
+  transform: rotate(-90deg);
+  transition: transform 140ms ease;
+}
+.summary[aria-expanded="true"] .summaryChevron { transform: rotate(0deg); }
+
+/* ── the runtime's own checklist ──────────────────────────────────────── */
+.plan {
+  display: grid;
+  gap: 2px;
+  margin: 2px 0 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 10px;
+  list-style: none;
+  min-width: 0;
+}
+.planStep {
+  min-width: 0;
+  min-height: 24px;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  color: var(--work-muted);
+  font-size: 13px;
+}
+.planStep[data-status="in_progress"] { color: var(--work-ink); font-weight: 550; }
+.planText { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.planMark {
+  width: 13px;
+  height: 13px;
+  justify-self: center;
+  box-sizing: border-box;
+  display: inline-grid;
+  place-items: center;
+  border: 1.5px solid var(--paper-edge-strong);
+  border-radius: 50%;
+  color: var(--work-muted);
+}
+.planMark[data-status="completed"] { border-color: transparent; }
+.planMark[data-status="in_progress"] { border-color: var(--work-ink); border-right-color: transparent; }
+.planMark[data-live="true"] { animation: oneWorkSpin 0.9s linear infinite; }
+@keyframes oneWorkSpin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse[data-live="true"],
+  .planMark[data-live="true"] { animation: none; }
+}
 
 /* Left→right light sweep. The gradient is wider than the box so the bright
    band travels across the text and the base gray stays put around it. */
@@ -82,41 +180,18 @@
   animation: oneWorkShimmer 1.9s linear infinite;
 }
 
+/* Positions stay within 0–100% so the 220% image always covers the box: past that range the left of the
+   text (color: transparent) had no background under it and vanished mid-sweep. */
 @keyframes oneWorkShimmer {
   from { background-position: 100% 0; }
-  to { background-position: -20% 0; }
+  to { background-position: 0% 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .shimmer { animation: none; color: var(--work-muted); background: none; }
 }
 
-/* ── settled header ───────────────────────────────────────────────────── */
-.header {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  min-height: 24px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--work-muted);
-  font: inherit;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.header:hover { color: var(--work-ink); }
-.header:focus-visible { outline: 2px solid rgba(96, 122, 54, 0.35); outline-offset: 3px; border-radius: 4px; }
-.headerTerminal { color: var(--work-fail); }
-.headerChevron {
-  display: inline-grid;
-  place-items: center;
-  color: var(--work-faint);
-  transform: rotate(-90deg);
-  transition: transform 140ms ease;
-}
-.header[aria-expanded="true"] .headerChevron { transform: rotate(0deg); }
+.headerTerminal { color: var(--work-fail); font-size: 12px; }
 
 /* ── rows ─────────────────────────────────────────────────────────────── */
 .rows {
@@ -124,6 +199,8 @@
   gap: 2px;
   padding: 6px 0 7px 2px;
 }
+/* Opened rows sit under the one line they belong to (Claude Code nesting). */
+.rows[data-nested="true"] { padding-left: 14px; }
 
 .work[data-state="settled"] .rows {
   max-height: min(56vh, 620px);

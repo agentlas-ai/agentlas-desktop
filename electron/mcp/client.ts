@@ -6500,6 +6500,8 @@ async function runMcpInvocationInContext(
           reasoning: { phase, ...(durationMs !== undefined ? { durationMs } : {}), ...(fullText.trim() ? { text: fullText } : {}) },
         });
       },
+      // The runtime's own checklist (runtime-plan.ts normalized it from its structured protocol).
+      onPlan: (plan: NonNullable<McpInvocationEvent["plan"]>) => sink({ kind: "plan", plan }),
       // 러너가 사용자에게 남겨야 하는 사실(첫 소비자: 컨텍스트 압축).
       // 상태줄과 달리 대화에 남는다.
       onNotice: (notice: NonNullable<McpInvocationEvent["notice"]>) => {
@@ -6612,6 +6614,10 @@ async function runMcpInvocationInContext(
             runnerEvents.onThinking(...args);
           }),
           onNotice: forward(runnerEvents.onNotice),
+          onPlan: forward((...args: Parameters<NonNullable<RunnerEvents["onPlan"]>>) => {
+            nativeActivity = true;
+            runnerEvents.onPlan(...args);
+          }),
         },
         settle: () => {
           if (!settled && generation === runnerEventGeneration) onNativeTurnController?.(null);

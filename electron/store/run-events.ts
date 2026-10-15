@@ -32,6 +32,7 @@ import {
   type PersistenceDecisionPayload,
 } from "../../shared/persistence-policy";
 import { classifyToolFailure } from "../../shared/tool-failure";
+import { boundInvocationPlan } from "../../shared/invocation-plan";
 import type { ObservedToolActivity } from "../automation-result";
 import { decodeToolInvocationOrigin } from "../../shared/tool-invocation-origin";
 import { emitDesktopStoreChange } from "./change-bus";
@@ -723,6 +724,18 @@ function safePayload(
     // 비밀 마스킹(SECRET_RE)은 truncate 안에서 동일하게 적용된다.
     if (key === "reasoningText" && typeof value === "string") {
       out[key] = truncate(value, 4_000);
+      continue;
+    }
+    // A plan is a closed list of {id?, text, activeText?, status}; re-bound it here and mask each string like any
+    // other diagnostic text. The generic array branch would keep raw objects unbounded.
+    if (key === "planEntries") {
+      const plan = boundInvocationPlan({ entries: value });
+      if (plan) out[key] = plan.entries.map((entry) => ({
+        ...(entry.id ? { id: truncate(entry.id, 128) } : {}),
+        text: truncate(entry.text, 300),
+        ...(entry.activeText ? { activeText: truncate(entry.activeText, 300) } : {}),
+        status: entry.status,
+      }));
       continue;
     }
     if (key === "toolArgs" && typeof value === "string") {
@@ -1731,6 +1744,8 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     reasoningDurationMs: ev.reasoning?.durationMs,
     // end에만 전문이 온다(delta는 live 전용 — 아래에서 원장에 안 남긴다).
     reasoningText: ev.reasoning?.phase === "end" ? ev.reasoning?.text : undefined,
+    // The runtime's checklist snapshot (kind:"plan"); reopening a chat replays the latest one.
+    planEntries: ev.kind === "plan" ? ev.plan?.entries : undefined,
     // Main's exact committed assistant row identity. The renderer may bind a
     // run to history only through this opaque ID; worker message IDs and
     // timestamp/text guesses are intentionally not persisted as substitutes.

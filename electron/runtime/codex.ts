@@ -8,6 +8,7 @@ import { registerNativeApprovalChildSignal } from "./native-approval-provenance"
 import { prepareRotationHandoff } from "./handoff-facts";
 import { reportModelPayload, ledgerFromCliSent } from "./model-call-ledger";
 import { recordNativeCompaction } from "./native-compaction-event";
+import { createRuntimePlanEmitter, planFromCodexTodoList, planFromCodexTurnPlan } from "./runtime-plan";
 import path from "node:path";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { RuntimeJudgmentRefusal } from "./judgment-refusal";
@@ -956,6 +957,7 @@ function runCodexProcess(
       }
       return null;
     };
+    const emitExecPlan = createRuntimePlanEmitter(events.onPlan);
     const handle = (ev: {
       type?: string;
       thread_id?: string;
@@ -1074,6 +1076,10 @@ function runCodexProcess(
         terminalObserved = true;
         // ★핸들러가 아예 없던 이벤트 — 프로토콜이 턴 실패를 선언하는 자리다.
         terminalFailure = codexFailureFromEvent(ev as { type?: string; error?: { message?: unknown } }) ?? terminalFailure;
+      } else if ((ev.type === "item.started" || ev.type === "item.updated" || ev.type === "item.completed")
+        && ev.item?.type === "todo_list") {
+        // The model's own checklist (exec serializes update_plan as a todo_list item); structured fields only.
+        emitExecPlan(planFromCodexTodoList(ev.item));
       } else if (ev.type === "item.started" && ev.item?.type === "reasoning") {
         // reasoning 구간 신호 — 상태줄 "생각 중…" 회전의 근거 (Claude 경로와 동일 계약).
         openThinking();
@@ -1853,6 +1859,8 @@ async function runCodexResidentTurn(input: {
     emitted = true;
     events.onPartial(bodyText());
   };
+  // The model's own checklist (update_plan → turn/plan/updated), forwarded only when it changes.
+  const emitPlan = createRuntimePlanEmitter(events.onPlan);
 
   const rejectModelReroute = (fromModel: unknown, toModel: unknown): void => {
     withdrawNativeTurnController();
@@ -1940,6 +1948,12 @@ async function runCodexResidentTurn(input: {
         }
         break;
       }
+      case "turn/plan/updated":
+        // A sub-agent's thread or another turn has its own plan; only this turn's checklist is drawn.
+        if (params?.threadId === session.threadId && confirmedTurnId && params?.turnId === confirmedTurnId) {
+          emitPlan(planFromCodexTurnPlan(params));
+        }
+        break;
       case "thread/started":
         // The thread/start and resume responses own session.threadId. A sub-agent's
         // thread also announces itself here and must not take over this session.

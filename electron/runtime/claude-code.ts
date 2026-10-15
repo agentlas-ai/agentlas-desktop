@@ -1,6 +1,7 @@
 import { selectionFor } from "../capabilities/one-capabilities";
 import { reportModelPayload, ledgerFromCliSent } from "./model-call-ledger";
 import { recordNativeCompaction } from "./native-compaction-event";
+import { ClaudeTaskPlanTracker, createRuntimePlanEmitter } from "./runtime-plan";
 import { claudeMcpIsolation, withClaudePersonalContext, withDisallowedTools } from "./claude-personal-context";
 import { recordClaudeCapabilityRequest, recordClaudeCapabilityInit } from "./capability-receipt";
 import { claudeBrowserSurfaceArgs, claudeEngineBrowserEnabled } from "./claude-browser-surface";
@@ -1706,6 +1707,9 @@ const runClaudeTurn = async (
 
     const toolNameById = new Map<string, string>();
     const toolRequestReplay = new ToolRequestReplayGuard();
+    // Claude's own checklist (TodoWrite / TaskCreate·TaskUpdate), from tool input + structured tool_use_result only.
+    const planTracker = new ClaudeTaskPlanTracker();
+    const emitPlan = createRuntimePlanEmitter(events.onPlan);
 
     /**
 
@@ -2230,6 +2234,8 @@ const runClaudeTurn = async (
               toolInputById.set(block.id, block.input);
               toolCallById.set(block.id, { name: block.name, detail: detailOfToolInput(block.input) });
             }
+            // A sub-agent's todo list is its own; only the root turn's checklist is this run's plan.
+            if (!fromSubAgent) planTracker.toolUse(block.id, block.name, block.input);
             // 도구 이벤트 전에 본문을 강제 플러시 — 렌더러 인터리브 앵커가 최신 좌표를 본다.
             emitPartial(true);
             silence.toolStart(block.id);
@@ -2263,12 +2269,16 @@ const runClaudeTurn = async (
               : [];
             silence.toolEnd(toolId);
             events.onTool?.(toolName, undefined, result, toolId, block.is_error === true, artifactPaths);
+            if (!fromSubAgent) emitPlan(planTracker.toolResult(toolId, block.is_error === true, undefined));
             settleNativeFileProof(toolId, block.is_error === true);
             if (toolId) settledToolResultSignatures.set(toolId, resultSignature);
             if (toolId) toolInputById.delete(toolId);
           }
         }
       } else if (ev.type === "user" && ev.message?.content) {
+        // stream-json puts the tool's structured result beside the message; it is unambiguous only for a lone tool_result.
+        const structuredToolResult = ev.message.content.filter((candidate) => candidate.type === "tool_result").length === 1
+          ? (ev as { tool_use_result?: unknown }).tool_use_result : undefined;
         for (const block of ev.message.content) {
           if (block.type !== "tool_result") continue;
           const toolId = block.tool_use_id;
@@ -2287,6 +2297,7 @@ const runClaudeTurn = async (
             : [];
           silence.toolEnd(toolId);
           events.onTool?.(toolName, undefined, result, toolId, block.is_error === true, artifactPaths);
+          if (!fromSubAgent) emitPlan(planTracker.toolResult(toolId, block.is_error === true, structuredToolResult));
           settleNativeFileProof(toolId, block.is_error === true);
           if (toolId) settledToolResultSignatures.set(toolId, resultSignature);
           if (toolId) toolInputById.delete(toolId);

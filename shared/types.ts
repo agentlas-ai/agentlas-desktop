@@ -4956,6 +4956,8 @@ export interface McpInvocationEvent {
     | "usage"
     | "reasoning"
     | "mcp-key-request"
+    /** The runtime's own task checklist (full snapshot, shared/invocation-plan.ts). Desktop-only; old readers ignore it. */
+    | "plan"
     /**
      * ★호스트가 하는 말. 모델의 답과 **같은 칸을 쓰지 않는다**.
      *
@@ -5099,6 +5101,8 @@ export interface McpInvocationEvent {
    *  Codex는 reasoning summary 헤드라인, Claude는 thinking 블록, ACP는 thought chunk,
    *  ollama는 thinking 필드가 온다. 없는 런타임(agy)은 start/end만 온다. */
   reasoning?: { phase: "start" | "delta" | "end"; durationMs?: number; text?: string };
+  /** kind:"plan" only — the runtime's native checklist, normalized and bounded. Never derived from prose. */
+  plan?: import("./invocation-plan").InvocationPlan;
   // ── 멀티 에이전트 속성 (firm 오케스트레이션) — 없으면 단일 CEO/에이전트 ──
   /** 이 이벤트를 낸 노드의 안정 id (ResolvedNode.id) — 네트워크 패널 per-agent 버킷 키 */
   agentId?: string;
