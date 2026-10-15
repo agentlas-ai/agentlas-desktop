@@ -24,7 +24,7 @@ import { answerChatHandoverRequest, CHAT_HANDOVER_VERSION, registerChatHandoverP
 import { createDaemonNativeInvocationHost } from "./native-invocation-host";
 import { nativeStartDescriptor, type NativeStartDescriptor } from "./native-start-protocol";
 import type { NativeAuthenticatedIdentity } from "./native-session-auth";
-import { createNativeInvocationPublicPublisher, nativePublicAttachmentOperation } from "../invocation/native-public-events";
+import { createNativeInvocationPublicPublisher, nativePublicAttachmentOperation, nativePublicKindsRequest, NATIVE_PUBLIC_KINDS_VERSION } from "../invocation/native-public-events";
 import { createNativeInvocationApprovalChannel } from "./native-invocation-approvals";
 import { getInvocationAdmission } from "../store/invocation-admissions";
 import { getCurrentTurnSteer } from "../store/current-turn-steers";
@@ -91,6 +91,8 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
     approvals: ReturnType<typeof createNativeInvocationApprovalChannel>;
     recovery: ReturnType<typeof createNativeJsonTransfers>;
     recoveryRecords: Map<string, { descriptor: NativeJsonTransferDescriptor; complete: boolean }>;
+    /** Optional public kinds this exact peer opted into (NATIVE_PUBLIC_KINDS_VERSION); empty for a 1.3.44 Main. */
+    publicKinds: Set<string>;
     createSubscriptions(notify: (method: string, params: unknown, sourceMode?: "live" | "post-denial") => boolean): {publisher: ReturnType<typeof createNativeInvocationPublicPublisher>; approvals: ReturnType<typeof createNativeInvocationApprovalChannel>};
     activateObservation?: () => Array<{method: string; params: unknown; mode?: "live" | "post-denial"}> } ;
   const attached = new Map<ControlSocketPeer, Attached>();
@@ -157,6 +159,13 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
         if (!exact(params, ["version", "stream"]) || params.stream !== record.publisher.stream || !record.activateObservation) fail("native_observation_stream_changed");
         const notifications = record.activateObservation(); record.activateObservation = undefined;
         return {version: "agentlas.native-observation-activate.v1", stream: record.publisher.stream, notifications, status: status(record)};
+      }
+      // A newer Main says which optional live kinds (the plan checklist) its receiver accepts. Kept per peer, so an
+      // observation reset's new publisher inherits it. A 1.3.44 Main never sends this and never receives those kinds.
+      if (params && typeof params === "object" && (params as {version?:unknown}).version === NATIVE_PUBLIC_KINDS_VERSION) {
+        const record = current(peer);
+        for (const kind of nativePublicKindsRequest(params)) record.publicKinds.add(kind);
+        return { version: NATIVE_PUBLIC_KINDS_VERSION, kinds: [...record.publicKinds] };
       }
       if(params && typeof params==="object" && (params as {version?:unknown}).version===ALIVE_DECISION_PROTOCOL){
         const attachment=current(peer),identity=attachment.identity;
@@ -227,7 +236,10 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
         }
         let observed: unknown;
         if (wire.version === "agentlas.native-owner-text-attach.v1" && exact(wire,["version","chatId","runId","inputDigest","includeEvents"]) && typeof wire.includeEvents === "boolean") {
-          observed = options.service.nativeOwnerTextAttach(value,wire.includeEvents);
+          const attachedEvents = options.service.nativeOwnerTextAttach(value,wire.includeEvents);
+          // Same rule as the live stream: an optional kind reaches only a Main that opted into it.
+          observed = !attachedEvents || attachment.publicKinds.has("plan") ? attachedEvents
+            : {...attachedEvents, events: attachedEvents.events.filter(event => event.kind !== "plan")};
         } else if (wire.version === "agentlas.native-owner-text-recovery.v1" && exact(wire,["version","chatId","runId","inputDigest"])) {
           observed = options.service.nativeOwnerTextRecovery(value);
         } else fail("native_owner_text_invalid");
@@ -278,6 +290,7 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
       if (server.authenticatedPeerIdentity(peer) !== identity) fail("native_invocation_channel_changed");
       if (!attached.has(peer)) {
         const getIdentity = () => server.authenticatedPeerIdentity(peer) ?? null;
+        const publicKinds = new Set<string>();
         const acceptsRun = (runId: string, chatId: string) => known.get(runId)?.start.binding.chatId === chatId || !!supervisor.runBinding(chatId,runId);
         // Progress stream only (events, active chats). Approvals keep the strict acceptsRun above.
         const observesRun = (runId: string, chatId: string) => acceptsRun(runId, chatId) || !!daemonOwnedObservation(chatId, runId);
@@ -290,6 +303,7 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
         const publisher = createNativeInvocationPublicPublisher({ service: options.service, identity, getIdentity,
           notify, acceptsRun: observesRun,
           acceptsChat: observesChat,
+          acceptsKind: kind => publicKinds.has(kind),
           ...NATIVE_PUBLIC_EVENT_POLICY,
           onFault: error => console.warn("[native-invocation] public stream unavailable", error.code) });
         const approvals = createNativeInvocationApprovalChannel({ identity, getIdentity,
@@ -310,7 +324,7 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
         const recoveryRecords = new Map<string, { descriptor: NativeJsonTransferDescriptor; complete: boolean }>();
         const recovery = createNativeJsonTransfers({ maxPending: NATIVE_PUBLIC_EVENT_POLICY.maxItems, maxRetainedBytes: NATIVE_PUBLIC_EVENT_POLICY.maxRetainedBytes,
           isCurrent: owner => server.authenticatedPeerIdentity(peer) === identity && [...recoveryRecords.values()].some(value => value === owner) });
-        attached.set(peer, { identity, publisher, approvals, recovery, recoveryRecords, createSubscriptions }); peer.onClose(() => disposeAttachment(peer));
+        attached.set(peer, { identity, publisher, approvals, recovery, recoveryRecords, publicKinds, createSubscriptions }); peer.onClose(() => disposeAttachment(peer));
         daemonDeviceBridge().attach(peer, { request: frame => server.request(peer, "native.checkpoint", frame) });
       }
       return status(current(peer));

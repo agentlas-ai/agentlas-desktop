@@ -11,6 +11,22 @@ const EVENT_KEYS = ["delivery", "kind", "sequence", "observedAt", "durableMessag
 const RECEIPT_KEYS = ["runId", "chatId", "status", "startedAt", "updatedAt", "finishedAt", "eventCount", "resultFolder", "hasImages", "borrowAgents", "taskForceTargets", "model", "errorCode", "errorMessage", "runtimeFailure", "executionPermission", "steeringRecovery", "interruptionCause", "hostStopCause"] as const satisfies readonly (keyof InvocationRunReceipt)[];
 const SETTLED_KEYS = ["runId", "chatId", "agentId", "receipt", "oneMode", "pendingQuestion", "browserLoginWaiting", "userDecisionRequest"] as const;
 const KINDS = new Set(["lifecycle", "thinking", "tool-use", "partial", "final", "error", "surface", "usage", "reasoning", "mcp-key-request", "notice", "plan"]);
+/**
+ * Kinds newer than the 1.3.44 wire. A shipped receiver faults (and closes the whole live projection) on a kind or key
+ * it does not know, so the publisher sends these only to a peer that opted in with NATIVE_PUBLIC_KINDS_VERSION. An
+ * older daemon refuses that op (native_invocation_attach_invalid) and never produces these kinds anyway.
+ */
+export const NATIVE_PUBLIC_OPTIONAL_KINDS = ["plan"] as const;
+const OPTIONAL_KINDS = new Set<string>(NATIVE_PUBLIC_OPTIONAL_KINDS);
+const LEGACY_EVENT_KEYS = EVENT_KEYS.filter(key => key !== "plan");
+export const NATIVE_PUBLIC_KINDS_VERSION = "agentlas.native-public-kinds.v1";
+export function nativePublicKindsOperation(kinds: readonly string[]): { version: typeof NATIVE_PUBLIC_KINDS_VERSION; kinds: string[] } { return { version: NATIVE_PUBLIC_KINDS_VERSION, kinds: [...kinds] }; }
+/** Daemon side: the optional kinds this peer asked for (unknown names ignored), or a typed refusal. */
+export function nativePublicKindsRequest(value: unknown): string[] {
+    if (!exact(value, ["version", "kinds"]) || value.version !== NATIVE_PUBLIC_KINDS_VERSION || !Array.isArray(value.kinds) || value.kinds.length > 16 || !value.kinds.every(kind => typeof kind === "string" && kind.length <= 64))
+        fail("native_public_kinds_invalid");
+    return [...new Set((value.kinds as string[]).filter(kind => OPTIONAL_KINDS.has(kind)))];
+}
 export type NativePublicSettlement = Omit<InvocationSettledEnvelope, "goal" | "workspaceBinding">;
 type PublicValue = {
     version: typeof VERSION;
@@ -102,6 +118,8 @@ export function createNativeInvocationPublicPublisher(options: {
     maxRetainedBytes: number;
     maxItems: number;
     onFault(error: NativePublicEventError): void;
+    /** True only for an optional kind this peer opted into (NATIVE_PUBLIC_KINDS_VERSION). Absent = 1.3.44 wire. */
+    acceptsKind?(kind: string): boolean;
 }) {
     const capacity = bounded(options.maxRetainedBytes, "native_public_capacity_invalid"), maxItems = bounded(options.maxItems, "native_public_capacity_invalid"), stream = randomBytes(32).toString("hex");
     type Item = {
@@ -142,6 +160,8 @@ export function createNativeInvocationPublicPublisher(options: {
     // precedes publishSettled; retain only a source-observed pair until settled ACK.
     const event = (e: InvocationEventEnvelope) => {
         if (!available) return;
+        // Withheld, not faulted: a peer that has not opted in still gets every 1.3.44 kind; the ledger keeps the rest.
+        if (OPTIONAL_KINDS.has(String(e.event?.kind)) && options.acceptsKind?.(String(e.event.kind)) !== true) return;
         try {
             const prior = observedRuns.get(e.runId);
             if (prior !== undefined && prior !== e.chatId) fail("native_public_run_binding_changed");
@@ -152,7 +172,7 @@ export function createNativeInvocationPublicPublisher(options: {
                 observedRuns.set(e.runId, e.chatId);
                 observationBytes += bindingBytes;
             }
-            publish({ version: VERSION, kind: "event", value: { runId: e.runId, chatId: e.chatId, event: pick(e.event, EVENT_KEYS) } });
+            publish({ version: VERSION, kind: "event", value: { runId: e.runId, chatId: e.chatId, event: pick(e.event, options.acceptsKind?.("plan") === true ? EVENT_KEYS : LEGACY_EVENT_KEYS) } });
         } catch (e) { close(e instanceof NativePublicEventError ? e : new NativePublicEventError("native_public_projection_invalid")); }
     };
     const active = (chatIds: string[]) => publish({ version: VERSION, kind: "activeChats", value: chatIds.filter(options.acceptsChat) });

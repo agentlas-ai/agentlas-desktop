@@ -7,6 +7,7 @@ import { CHAT_HANDOVER_VERSION, chatReleaseReplyFromWire, registerChatHandoverPe
 import { assertNativeGuiOwnerBootstrap, type createNativeGuiOwnerClient } from "./native-gui-owner";
 import { invocationAdmissionEpochsReservedHere, rejectPendingAdmissionsOfTerminatedEpochs } from "../store/invocation-admissions";
 import type { createNativeMainAuthCallbackAdapter } from "./native-main-auth-callback";
+import { NATIVE_PUBLIC_OPTIONAL_KINDS, nativePublicKindsOperation } from "./native-public-events";
 
 declare const enrolledGui: unique symbol;
 export interface NativeGuiEnrollment { readonly [enrolledGui]: true }
@@ -195,6 +196,11 @@ export function attachNativeGuiDaemon(enrollment: NativeGuiEnrollment, discovere
       const capabilities = Object.freeze({ ...reply.capabilities }) as NativeGuiCapabilities;
       value.capabilities = capabilities; value.ready = reply.ready;
       settleReservationsOfEndedOwners(identity.bootId);
+      // This receiver accepts the newer live kinds (the plan checklist); say so before any observation starts. An older
+      // daemon refuses the unknown op (native_invocation_attach_invalid) and never emits them; the attach stays healthy.
+      try { await channel.dispatch("native.attach", nativePublicKindsOperation(NATIVE_PUBLIC_OPTIONAL_KINDS)); }
+      catch (error) { if ((error as {code?:unknown}).code !== "native_invocation_attach_invalid") console.warn("[native-invocation] optional live kinds not enabled", (error as {code?:unknown}).code ?? "unknown"); }
+      current();
       // Device bridge: revoke daemon-run screen scopes if this channel closes, forward lock/sleep, push the current state.
       void import("./device-bridge-main").then(async m => (await m.deviceBridgeMain()).attached(channel as never)).catch(() => undefined);
       // Chat host handover (1.3.0 A2): this process can ask the attached service to release its idle resident sessions of a
