@@ -232,6 +232,30 @@ export function goalAdmissionControlFailureForCode(code: string | null | undefin
   return { code, message };
 }
 
+/**
+ * Fixed ledger codes the native start path writes for a refusal before start. They prove no start but do not name the
+ * cause: the Main issuer writes native_ingress_rejected_before_start; since 6143d04a the daemon's closed-before-prepared
+ * frontier writes native_ingress_closed_before_prepared and a prepared entry closed before start writes
+ * native_prepared_entry_closed or native_prepared_closed_before_start. The thrown error still carries the real reason.
+ */
+const NATIVE_INGRESS_FIXED_LEDGER_CODES: ReadonlySet<string> = new Set([
+  "native_ingress_rejected_before_start",
+  "native_ingress_closed_before_prepared",
+  "native_prepared_entry_closed",
+  "native_prepared_closed_before_start",
+]);
+
+/**
+ * The code whose wording a proven no-start shows: the thrown cause when the ledger row only holds a fixed native
+ * ingress code and the cause has its own wording (e.g. invocation_chat_busy), else the recorded ledger code, else
+ * the cause. main_start_pre_dispatch_refused is the legacy fixed Main code and never wins over the cause.
+ */
+export function admissionRefusalDisplayCode(ledgerCode: string | null | undefined, causeCode: string | null | undefined, ko: boolean): string | null {
+  if (causeCode && ledgerCode && NATIVE_INGRESS_FIXED_LEDGER_CODES.has(ledgerCode) && goalAdmissionControlFailureForCode(causeCode, ko)) return causeCode;
+  if (ledgerCode && ledgerCode !== "main_start_pre_dispatch_refused") return ledgerCode;
+  return causeCode ?? null;
+}
+
 /** Shared customer wording; a new user turn may resume a paused goal in Main.
  * Do not require a separate Resume button or turn a refusal into a retry. */
 export function knownStartFailureHuman(error: unknown, ko: boolean): string | null {

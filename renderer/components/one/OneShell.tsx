@@ -30,7 +30,7 @@ import { AutomationLiveRows, AutomationReportSummary } from "../automation/Autom
 import { OneGoalControls } from "./OneGoalControls";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { failureCode, failureMessage, goalAdmissionControlFailure, goalAdmissionControlFailureForCode, ipcErrorCode, isChatBusyFailure } from "@/lib/invocation-failure";
+import { admissionRefusalDisplayCode, failureCode, failureMessage, goalAdmissionControlFailure, goalAdmissionControlFailureForCode, ipcErrorCode, isChatBusyFailure } from "@/lib/invocation-failure";
 import {
   type CSSProperties,
   Fragment,
@@ -5539,15 +5539,12 @@ function OneSessionsShell() {
          *   냈다 — 구체 문구(예산 소진·정리 중·앱 종료 중…)가 원리적으로 닿지 않았다. 이제 원장에
          *   실제 코드가 남으니, 그 코드(없으면 방금 받은 오류의 코드)로 구체 문구를 먼저 고른다.
          */
-        // The native ingress ledger row carries only a fixed code (native_ingress_rejected_before_start); the thrown
-        // error still names the real reason (e.g. invocation_chat_busy). Prefer it when it has specific copy.
+        // A native start ledger row carries only a fixed no-start code (native_ingress_rejected_before_start from the
+        // Main issuer, native_ingress_closed_before_prepared from the daemon's closed frontier, native_prepared_* from a
+        // closed prepared entry); the thrown error still names the real reason (e.g. invocation_chat_busy). Prefer it
+        // when it has specific copy.
         const causeCode = rejectionCause !== undefined ? failureCode(rejectionCause) ?? null : null;
-        const recordedCode = causeCode && admission.rejectionReasonCode === "native_ingress_rejected_before_start"
-          && goalAdmissionControlFailureForCode(causeCode, runLocale === "ko")
-          ? causeCode
-          : admission.rejectionReasonCode && admission.rejectionReasonCode !== "main_start_pre_dispatch_refused"
-          ? admission.rejectionReasonCode
-          : causeCode;
+        const recordedCode = admissionRefusalDisplayCode(admission.rejectionReasonCode, causeCode, runLocale === "ko");
         const specific = goalAdmissionControlFailureForCode(recordedCode, runLocale === "ko");
         if (specific) {
           admissionRecoveryFenceRef.current.set(chatId, { runId: candidateRunId, accepted: false, notice: specific.message, rejectedAt: Date.now() });
