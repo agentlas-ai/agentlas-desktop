@@ -41,6 +41,7 @@ import { stripReplyMemoryEventsReadOnly } from "../memory/curator";
 import { buildProjectContextSlice } from "../memory/context-map";
 import { STORMBREAKER_LOOP_PROTOCOL } from "../hephaestus/loop-engineering";
 import type { CoreStormbreakerHarness } from "../hephaestus/commands";
+import { parseWholeOrTrailingTypedJson } from "../../shared/typed-json-tail";
 
 // 총 작업 수/라운드 안전 상한 — 무한 스폰·무한루프로부터 컴/지갑을 지키는 최후 방어선(엔진이 강제).
 // 각 작업 = 실 LLM 호출이라 비용이 나가므로 보수적으로. (동시 실행 수는 별개로 슬라이더가 제어)
@@ -181,7 +182,8 @@ export function parseSwarmOutput(text: string, typedContract = false, inventory?
 } {
   const source = text.trim().replace(/^```(?:json)?\s*([\s\S]*?)```$/i, "$1");
   try {
-    const typed = JSON.parse(source) as Record<string, unknown>;
+    // Narration before the final typed object is not a malformed result (shared/typed-json-tail.ts).
+    const typed = parseWholeOrTrailingTypedJson(source, "agentlas.swarm-worker-result.v1") as Record<string, unknown>;
     if (typedContract && typed?.schemaVersion !== "agentlas.swarm-worker-result.v1" && typed && typeof typed === "object") throw new Error("swarm_worker_result_invalid");
     if (typed?.schemaVersion === "agentlas.swarm-worker-result.v1") {
       if (Object.keys(typed).some(key => !["schemaVersion", "result", "tasks", "synthesis"].includes(key))

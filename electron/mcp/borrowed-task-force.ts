@@ -133,6 +133,7 @@ import {
   buildBorrowedAgentMemoryContext,
   recordBorrowedAgentCareer,
 } from "../agents/borrowed-profiles";
+import { parseWholeOrTrailingTypedJson } from "../../shared/typed-json-tail";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
@@ -3010,7 +3011,8 @@ export const TASK_FORCE_WORKER_HANDOFF_SCHEMA: Record<string, unknown> = {
 export function taskForceWorkerHandoffText(text: string): string {
   const source = text.trim().replace(/^```(?:json)?\s*([\s\S]*?)```$/i, "$1");
   let parsed: Record<string, unknown>;
-  try { parsed = JSON.parse(source); } catch {
+  // Narration before the final handoff object is not a malformed handoff (shared/typed-json-tail.ts).
+  try { parsed = parseWholeOrTrailingTypedJson(source, "agentlas.packet-handoff.v1") as Record<string, unknown>; } catch {
     if (source.includes("agentlas.packet-handoff.v1")) throw new Error("task_force_worker_handoff_invalid");
     return text;
   }
