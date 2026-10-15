@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.46 — 2026-10-16
+
+- Includes everything planned for 1.3.45, which was not published.
+- Team rooms finish their work again: a teammate that said a sentence before its result no longer has the whole result thrown away, and a result in an unexpected shape is kept as partial work instead of stopping the steps after it.
+- The model shown in a room's message box is that room's own model, and opening an empty room no longer shows another room's message.
+- This release binds Agentlas OS v1.2.63 at 70b53f0714865617ca5a4947fbd8c113078d572f; public runtime asset `hephaestus-runtime-v1.2.63.tar.gz` is pinned at SHA-256 `16589f4d43e98c5bdd15e8c6f01acd62174f55cad6a3507fe21464bc4b58187e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.45 — 2026-10-16
 
 - One and Work fold each turn to one line that says what is happening now and how long it has taken. When the runtime keeps a checklist (Codex, ACP or Claude task tools), it shows as steps that tick off, and the checklist is still there when you reopen the chat. Failures and approvals waiting for you stay visible while folded.
