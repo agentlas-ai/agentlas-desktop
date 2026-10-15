@@ -22,6 +22,8 @@ export interface OneOsLeasePorts {
   validateObservation?(binding: Readonly<OneOsExecutionBinding>, input: { appTarget?: string; sourceId?: string }): Promise<void>;
   now?(): number;
   changed?(): void;
+  /** A scoped execution was disposed (run finished, cancelled or revoked). Cosmetic listeners only; must not throw into the broker. */
+  executionEnded?(binding: Readonly<OneOsExecutionBinding>): void;
   resourceLockPath?: string;
 }
 export class OneOsLeaseError extends Error { constructor(readonly code: string) { super(code); this.name = "OneOsLeaseError"; } }
@@ -72,6 +74,7 @@ export class OneOsResourceLeaseBroker {
       record.revoked = true; signal?.removeEventListener("abort", dispose);
       if (this.holder?.executionId === executionId) { this.holder.reason = "one-os-execution-revoked"; this.holder.controller.abort(); }
       this.executions.delete(executionId); this.ports.changed?.();
+      try { this.ports.executionEnded?.(record.binding); } catch { /* a listener never blocks revocation */ }
     };
     this.executions.set(executionId, { binding: Object.freeze({ ...binding }), token, assertCurrent: assertExecutionCurrent, signal, dispose, revoked: false });
     signal?.addEventListener("abort", dispose, { once: true });
@@ -87,6 +90,8 @@ export class OneOsResourceLeaseBroker {
     return { id: cap.executionId!, record };
   }
   assertExecutionCurrent(capability:unknown):void {this.execution(capability);if(this.ports.readiness().session!=="awake")fail("one-os-session-unavailable");}
+  /** The authorized binding of a live capability (throws like every other capability check). */
+  executionBinding(capability:unknown):Readonly<OneOsExecutionBinding> {return this.execution(capability).record.binding;}
   hasContextGrant(capability:unknown):boolean {return Boolean(this.execution(capability).record.binding.contextGrantId);}
   snapshot(): OneContextLeaseState {
     const holder = this.holder;

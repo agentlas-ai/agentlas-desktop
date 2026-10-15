@@ -21,6 +21,7 @@ import {
 } from "./native-driver";
 import { currentUiLocale } from "../ui-locale";
 import { checkComputerUseWindowScope } from "./window-scope";
+import { supervisorDock } from "./supervisor-dock";
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_AUDIT_ROWS = 200;
@@ -172,6 +173,16 @@ function recordAudit(action: string, result: NativeInputResult, textLength?: num
   }
 }
 
+/**
+ * Supervisor right-dock (electron/computer-use/supervisor-dock.ts): only a supervisor-run execution carries a scoped
+ * capability, so a bearer-authorized tool call from any other agent never docks anything. Cosmetic and best effort:
+ * an unreadable capability simply means no dock; it never changes the outcome of the action.
+ */
+function dockRunOf(capability: unknown): { runId: string; hasContextGrant: boolean } | null {
+  if (capability === undefined || !supervisorDock()) return null;
+  try { const binding = oneOsLeaseBroker().executionBinding(capability); return { runId: binding.runId, hasContextGrant: Boolean(binding.contextGrantId) }; }
+  catch { return null; }
+}
 function osFailure(error: unknown): NativeInputResult { return {ok:false,error:error && typeof error === "object" && "code" in error ? String(error.code) : "one-os-authority-unavailable"}; }
 async function observationAuthority(body:Record<string,unknown>):Promise<{assertCurrent():void;binding?:import("../one/context-lease").OneOsExecutionBinding}> {
   if(body.oneOsExecution!==undefined)return oneOsLeaseBroker().authorizeObservation(body.oneOsExecution,{appTarget:typeof body.app==="string"?body.app:undefined,sourceId:typeof body.sourceId==="string"?body.sourceId:undefined});
@@ -206,6 +217,8 @@ async function observeApp(body: Record<string, unknown>): Promise<Record<string,
   const denied = await checkComputerUseWindowScope({ route: "observe", app });
   if (denied) { recordAudit("observeApp", denied as NativeInputResult); return denied; }
   let authority;try {authority=await observationAuthority(body);authority.assertCurrent();}catch(error){return osFailure(error) as unknown as Record<string,unknown>;}
+  const dockRun = dockRunOf(body.oneOsExecution);
+  if (dockRun) { const docked = await supervisorDock()?.begin({ ...dockRun, app }); if (docked?.layoutChanged) sourceGeometries.clear(); }
   const result = await invokeNativeInputDriver({ action: "observeApp", app, maxDepth, maxNodes });
   try {authority.assertCurrent();}catch(error){return osFailure(error) as unknown as Record<string,unknown>;}
   recordAudit("observeApp", result);
@@ -285,6 +298,9 @@ async function runAction(body: Record<string, unknown>): Promise<NativeInputResu
     observedElement = { observationId, ref };
   }
   let targetPid: number | undefined;
+  const dockRun = dockRunOf(body.oneOsExecution);
+  const dockElementFrame = dockRun && action === "elementAction" && observedElement
+    ? observations.get(observedElement.observationId)?.frames[Number(body.element_index)] : undefined;
 
   let request: NativeInputAction | null = null;
   switch (action) {
@@ -430,11 +446,33 @@ async function runAction(body: Record<string, unknown>): Promise<NativeInputResu
         if(request.action==="typeText"||request.action==="selectText")request={...request,...(targetPid?{targetPid}:{})};
         if(action!=="elementAction")await new Promise(resolve=>setTimeout(resolve,280));
       }
+      if(dockRun && appName && action!=="focusApp") {
+        // Right-dock layout before the first effect on this app. Screen points were mapped from a capture taken before
+        // the windows moved, so a point action stops here and asks for a fresh capture instead of pressing a stale spot.
+        const docked=await supervisorDock()?.begin({...dockRun,app:targetPid?`pid:${targetPid}`:actionTarget?.resolvedPid?`pid:${actionTarget.resolvedPid}`:appName});
+        if(docked?.layoutChanged){
+          sourceGeometries.clear();
+          if(request.action==="move"||request.action==="click"||request.action==="drag")return {ok:false,error:"screen-layout-changed",message:"The windows were just arranged beside the assistant panel. Capture the screen again, then repeat this action."};
+        }
+      }
     } else if(body.oneOsExecution!==undefined) { const authority=await observationAuthority(body);authority.assertCurrent(); }
     await lease?.checkpoint();
     if(action!=="status"&&action!=="listApps"&&action!=="move")observations.clear();
     if(request.action==="focusApp" && actionTarget)request={...request,app:`pid:${actionTarget.resolvedPid}`,windowId:actionTarget.resolvedWindowId,processStartMs:actionTarget.resolvedProcessStartMs};
+    if(dockRun){
+      const dock=supervisorDock();
+      if(request.action==="move"||request.action==="click")dock?.pointer({x:request.x,y:request.y});
+      else if(request.action==="drag")dock?.pointer({x:request.toX,y:request.toY});
+      else if(dockElementFrame)dock?.pointer({x:dockElementFrame.x+dockElementFrame.width/2,y:dockElementFrame.y+dockElementFrame.height/2});
+    }
     const result=await invokeNativeInputDriver(request,undefined,lease?.signal);
+    if(dockRun){
+      const dock=supervisorDock();
+      if(action==="focusApp"&&result.ok&&typeof result.pid==="number"){
+        const docked=await dock?.begin({...dockRun,app:`pid:${result.pid}`});
+        if(docked?.layoutChanged)sourceGeometries.clear();
+      } else dock?.step();
+    }
     if(actionTarget?.allowFocus){actionTarget.allowFocus=false;await lease?.checkpoint();}
     // Revocation cannot persist audit/history after native work returns.
     if(body.oneOsExecution!==undefined)oneOsLeaseBroker().assertExecutionCurrent(body.oneOsExecution);

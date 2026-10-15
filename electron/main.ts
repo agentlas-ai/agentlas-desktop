@@ -58,6 +58,7 @@ import { registerOllamaMigrationIpc } from "./local-model-hub/migration-ipc";
 import { registerLocalModelHubIpc } from "./local-model-hub-ipc";
 import { isAppControlEvent, recordAppControlRendererEvent } from "./app-control/ipc-registry";
 import { configureAppControlHost } from "./app-control/service";
+import { installSupervisorDock } from "./computer-use/supervisor-dock-main";
 import { assertOneWindowChannel, configureOneWindowHost, getOneWindow, oneOnlyLaunch, oneWindowShellActive, openOneWindow, registerOneWindowIpc } from "./one-window-manager";
 import { registerOneVaultMainIpc, closeOneVaultMain, invalidateOneVaultMainAuthority, oneVaultMainMobileSources } from './secrets/one-vault-main';
 import {createOnePersonalNativeMainEntry} from './secrets/one-personal-native-main-owner';
@@ -762,6 +763,8 @@ configureOneWindowHost({ mainWindow: () => mainWindow, locale: () => currentUiLo
   },
   quit: () => { quitFullConfirmed = true; noteQuitIntent("menu-quit", { from: "one-tray" }); commitQuit({ kind: "quit", daemon: "stop" }); },
 });
+// Hope operating another app docks the One panel to the right edge and shows a working badge (supervisor-dock.ts).
+installSupervisorDock();
 let lastStartupNavigationFailure: {
   kind: ReturnType<typeof classifyStartupNavigationFailure>;
   target: string;

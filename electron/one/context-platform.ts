@@ -9,6 +9,7 @@ import path from "node:path";
 import type { OneContextReadiness, OneContextScope } from "../../shared/one-context";
 import { invokeNativeInputDriver, nativeInputDriverAvailable } from "../computer-use/native-driver";
 import { OneContextError, OneContextService, configureOneContextService, type ContextTarget } from "./context-service";
+import { isSupervisorDockOverlayWindow, supervisorDock } from "../computer-use/supervisor-dock";
 import { OneOsResourceLeaseBroker, configureOneOsLeaseBroker, type OneOsActionTarget, type OneOsExecutionBinding } from "./context-lease";
 
 type WindowMetadata = { appName: string; windowId: number; pid: number; processStartMs: number; name: string; bundleIdentifier: string; active: boolean; bounds: { x: number; y: number; width: number; height: number } };
@@ -47,7 +48,7 @@ async function nativeWindows(): Promise<WindowMetadata[]> {
 }
 function fingerprint(value: unknown): string { return JSON.stringify(value); }
 function ownedWindows(): ContextTarget[] {
-  return BrowserWindow.getAllWindows().filter(window => !window.isDestroyed() && !window.webContents.isDestroyed() && window.isVisible()).map(window => ({
+  return BrowserWindow.getAllWindows().filter(window => !window.isDestroyed() && !window.webContents.isDestroyed() && window.isVisible() && !isSupervisorDockOverlayWindow(window.id)).map(window => ({
     kind: "window", sourceId: `electron:${window.id}:${window.webContents.id}`, label: window.getTitle() || "Agentlas", owned: true,
     fingerprint: fingerprint([window.id,window.webContents.id,window.webContents.getURL()]), pid: process.pid, bounds: window.getBounds(),
     captureAvailable: true, interactionAvailable: false,
@@ -130,7 +131,7 @@ export function initializeOneContext(input:{activeOneId():string;assertTask(scop
     if(action.resolvedWindowId!==undefined && action.resolvedWindowId!==target.windowId)throw new OneContextError("one-os-window-changed");
     action.resolvedWindowId=target.windowId;
   };
-  const broker=new OneOsResourceLeaseBroker({resourceLockPath:path.join(os.tmpdir(),`agentlas-os-input-${process.getuid?.()??"owner"}`,"resource.lock"),readiness:oneContextReadiness,validateTarget:validate,validateObservation:async(binding,observation)=>{
+  const broker=new OneOsResourceLeaseBroker({executionEnded:binding=>supervisorDock()?.executionEnded(binding.runId),resourceLockPath:path.join(os.tmpdir(),`agentlas-os-input-${process.getuid?.()??"owner"}`,"resource.lock"),readiness:oneContextReadiness,validateTarget:validate,validateObservation:async(binding,observation)=>{
     if(binding.oneId!==input.activeOneId())throw new OneContextError("one-context-identity-changed");input.assertTask(binding);
     if(binding.contextGrantId){const authority=service.authorize({...binding,grantId:binding.contextGrantId});authority.assertCurrent();
       if(!await oneContextTargetCurrent(authority.target))throw new OneContextError("one-context-target-stale");

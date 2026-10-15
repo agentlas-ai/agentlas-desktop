@@ -308,6 +308,22 @@ func raiseApplicationWindow(pid: pid_t) {
     _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
 }
 
+func targetWindow(_ pid: pid_t) -> AXUIElement? {
+    let application = AXUIElementCreateApplication(pid)
+    for attribute in [kAXFocusedWindowAttribute, kAXMainWindowAttribute] {
+        var raw: CFTypeRef?
+        if AXUIElementCopyAttributeValue(application, attribute as CFString, &raw) == .success, let raw { return (raw as! AXUIElement) }
+    }
+    var rawWindows: CFTypeRef?
+    if AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &rawWindows) == .success,
+       let windows = rawWindows as? [AXUIElement] { return windows.first }
+    return nil
+}
+
+func rectDictionary(_ rect: CGRect) -> [String: Any] {
+    ["x": rect.origin.x, "y": rect.origin.y, "width": rect.width, "height": rect.height]
+}
+
 func runningApplication(_ target: String) -> NSRunningApplication? {
     let needle = target.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
     let requestedPid: pid_t? = {
@@ -551,6 +567,38 @@ case "focusApp":
         } else { raiseApplicationWindow(pid: match.processIdentifier) }
     }
     respond(["ok": activated, "app": match.localizedName ?? target, "pid": Int(match.processIdentifier)])
+
+case "windowFrame", "setWindowFrame":
+    // Supervisor right-dock: read, or move and resize, the target app's front window through Accessibility. The
+    // Electron side decides the rectangle; this only applies it and reports what the app actually accepted.
+    ensureAccessibility()
+    guard let target = request["app"] as? String, !target.isEmpty, target.count <= 160 else {
+        failure("invalid-app", message: "app must be a non-empty string under 160 characters.", exitCode: 64)
+    }
+    guard let match = runningApplication(target) else { failure("app-not-found", message: "No running application matched the requested app name, bundle identifier, or pid.", exitCode: 69) }
+    guard let window = targetWindow(match.processIdentifier), var frame = frameOf(window) else { failure("window-unavailable", message: "The app has no window that Accessibility can read.") }
+    let fullScreen = boolAttribute(window, "AXFullScreen") ?? false
+    let minimized = boolAttribute(window, kAXMinimizedAttribute as String) ?? false
+    var applied = false
+    if action == "setWindowFrame" {
+        guard !fullScreen, !minimized else { failure("window-not-adjustable", message: "A full-screen or minimized window is left where it is.") }
+        guard let x = number(request, "x"), let y = number(request, "y"), let width = number(request, "width"), let height = number(request, "height"),
+              width >= 200, height >= 120, pointIsOnActiveDisplay(CGPoint(x: x, y: y)) else {
+            failure("invalid-frame", message: "x, y, width and height must describe a window on an active display.", exitCode: 64)
+        }
+        var size = CGSize(width: width, height: height)
+        var origin = CGPoint(x: x, y: y)
+        // Size, position, size again: an app that clamps to its minimum size can otherwise end up off the target edge.
+        if let sizeValue = AXValueCreate(.cgSize, &size), let originValue = AXValueCreate(.cgPoint, &origin) {
+            let first = AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
+            let moved = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, originValue)
+            let second = AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
+            applied = moved == .success && (first == .success || second == .success)
+        }
+        frame = frameOf(window) ?? frame
+    }
+    respond(["ok": true, "pid": Int(match.processIdentifier), "app": match.localizedName ?? target, "frame": rectDictionary(frame),
+             "fullScreen": fullScreen, "minimized": minimized, "applied": applied])
 
 case "observeApp":
     ensureAccessibility()

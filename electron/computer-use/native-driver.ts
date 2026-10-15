@@ -9,6 +9,8 @@ export type NativeInputAction =
   | { action: "listApps" }
   | { action: "listCaptureTargets" }
   | { action: "focusApp"; app: string; windowId?:number; processStartMs?:number }
+  | { action: "windowFrame"; app: string }
+  | { action: "setWindowFrame"; app: string; x: number; y: number; width: number; height: number }
   | { action: "move"; x: number; y: number }
   | { action: "click"; x: number; y: number; button?: "left" | "right" | "middle"; clickCount?: 1 | 2 }
   | {
