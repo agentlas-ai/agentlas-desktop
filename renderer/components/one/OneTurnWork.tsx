@@ -767,9 +767,10 @@ export function OneTurnWork({
   const summaryContent = (
     <>
       <span className={styles.summaryMark} data-state={active ? "running" : terminalState} aria-hidden="true">
-        {active || loginWaiting ? <span className={styles.pulse} data-live={active ? "true" : undefined} />
-          : failed && terminal === "failed" ? <IconAlertTriangle size={13} strokeWidth={1.7} />
-            : <IconCheck size={13} strokeWidth={1.7} />}
+        {/* A check only for a run that typed its own completion; stopped or unanswered runs keep a quiet dot. */}
+        {failed && terminal === "failed" ? <IconAlertTriangle size={13} strokeWidth={1.7} />
+          : !active && !loginWaiting && terminal === "completed" && !steeringInterrupted && !interrupted ? <IconCheck size={13} strokeWidth={1.7} />
+            : <span className={styles.pulse} data-live={active ? "true" : undefined} />}
       </span>
       <span className={active ? `${styles.liveText} ${styles.shimmer}` : styles.summaryText}
         {...(active ? { role: "status", "aria-live": "polite" as const } : {})}>
