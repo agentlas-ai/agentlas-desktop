@@ -4063,7 +4063,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const id = requiredIdentifier(params, "id");
         if (!getAutomation(id)) throw new Error(`Automation not found: ${id}`);
         const { enqueueAutomationRunNow } = await import("../automation-scheduler");
-        const result = enqueueAutomationRunNow(id);
+        const { admitMainAutomation } = await import("../runtime/scheduled-root-context");
+        // A paired phone is an authenticated owner ingress, like the Desktop button: admit its fresh owner occurrence.
+        const result = enqueueAutomationRunNow(id, admitMainAutomation(id));
         this.scheduleSnapshotUpdated(id);
         return asJsonValue(result, request.method);
       }
