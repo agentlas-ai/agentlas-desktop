@@ -23,6 +23,10 @@ import {
 import { FsAccessDeniedError } from "../fs/access";
 import { userDataPath } from "../runtime-paths";
 import { assertAgentWorkspaceActivationReady } from "./workspace-guard";
+import { isWorkspaceAsset } from "./workspace-snapshot";
+import { capturePackageSourceOwner, assertOriginalPackageDeclaration, observeAdmittedPackageSources,
+  isGeneratedMemoryDeclaration, type AdmittedPackageAsset } from "../memory/package-sources";
+import type { MemorySourceRef } from "../memory/source-catalogue";
 
 interface AgentRow {
   id: string;
@@ -254,6 +258,7 @@ function atomicWriteTextFile(filePath: string, content: string): void {
 }
 
 export interface AgentFileTextSnapshot {
+  sourceRef?: MemorySourceRef;
   path: string;
   relativePath: string;
   exists: boolean;
@@ -261,6 +266,13 @@ export interface AgentFileTextSnapshot {
   hash: string;
 }
 
+const declarationIdentities = new WeakMap<object, { path: string; stat: fs.Stats }>();
+function unchangedDeclarationFile(file: string, expected: fs.Stats): void {
+  const live = fs.lstatSync(file);
+  if (live.isSymbolicLink() || !live.isFile() || live.dev !== expected.dev || live.ino !== expected.ino
+    || live.size !== expected.size || live.mtimeMs !== expected.mtimeMs || live.ctimeMs !== expected.ctimeMs
+    || live.mode !== expected.mode || live.nlink !== expected.nlink) throw new Error("agent_package_source_changed");
+}
 /** Authoritative optional snapshot used by create/delete asset evolution. */
 export function inspectAgentFileText(agentId: string, requested: string): AgentFileTextSnapshot {
   const { dir, safe } = resolveAgentFileTarget(agentId, requested);
@@ -303,13 +315,16 @@ export function inspectAgentFileText(agentId: string, requested: string): AgentF
     }
     const content = bytes.toString("utf8");
     if (!Buffer.from(content, "utf8").equals(bytes)) throw new Error("Agent asset is not valid UTF-8");
-    return {
+    unchangedDeclarationFile(safe, after);
+    const snapshot = {
       path: safe,
       relativePath: path.relative(dir, safe).split(path.sep).join("/"),
       exists: true,
       content,
       hash: createHash("sha256").update(bytes).digest("hex"),
     };
+    declarationIdentities.set(snapshot, { path: safe, stat: after });
+    return snapshot;
   } finally {
     fs.closeSync(fd);
   }
@@ -328,8 +343,25 @@ export function readAgentPromptSource(agentId: string): AgentFileTextSnapshot | 
   if (!row) return null;
   const { dir, isLocal } = resolveDir(agentId, row.slug);
   if (!isLocal) materializeAgentFiles(agentId);
+  assertAgentWorkspaceActivationReady(agentId);
+  const observation = capturePackageSourceOwner();
+  const route = JSON.stringify(getRoute(agentId) ?? null);
   const prompt = readCanonicalPromptFromDirectory(dir);
-  return prompt ? inspectAgentFileText(agentId, prompt.relativePath) : null;
+  if (!prompt) return null;
+  if (!isWorkspaceAsset(prompt.relativePath)) throw new Error("private_file_not_package_declaration");
+  const result = inspectAgentFileText(agentId, prompt.relativePath);
+  assertOriginalPackageDeclaration(dir, result.content);
+  const refs = observeAdmittedPackageSources(observation, { agentId, root: dir,
+    assets: [{ path: result.relativePath, role: "instruction", digest: result.hash, byteLength: Buffer.byteLength(result.content) }],
+    assertCurrent: () => {
+      assertAgentWorkspaceActivationReady(agentId);
+      const latest = getRow(agentId);
+      if (!latest || resolveDir(agentId, latest.slug).dir !== dir || JSON.stringify(getRoute(agentId) ?? null) !== route) throw new Error("agent_package_source_changed");
+      const identity = declarationIdentities.get(result);
+      if (!identity) throw new Error("agent_package_source_changed");
+      unchangedDeclarationFile(identity.path, identity.stat);
+    } });
+  return { ...result, ...(refs.get(result.relativePath) ? { sourceRef: refs.get(result.relativePath) } : {}) };
 }
 
 /** Safe removal used only by receipted rollback of an asset that was originally absent. */
@@ -566,12 +598,27 @@ export function buildAgentSkillsRuntimeContext(agentId: string): string {
   if (!row) return "";
   const { dir, isLocal } = resolveDir(agentId, row.slug);
   if (!isLocal) materializeAgentFiles(agentId);
+  const observation = capturePackageSourceOwner(), route = JSON.stringify(getRoute(agentId) ?? null);
+  const assets: AdmittedPackageAsset[] = [], identities: Array<{ path: string; stat: fs.Stats }> = [];
+  const result = agentSkillCatalogLine(dir, assets, identities);
+  observeAdmittedPackageSources(observation, { agentId, root: dir, assets,
+    assertCurrent: () => { assertAgentWorkspaceActivationReady(agentId); const latest = getRow(agentId);
+      if (!latest || resolveDir(agentId, latest.slug).dir !== dir || JSON.stringify(getRoute(agentId) ?? null) !== route) throw new Error("agent_package_source_changed");
+      for (const identity of identities) unchangedDeclarationFile(identity.path, identity.stat);
+    } });
+  return result;
+}
 
+/**
+ * The `skills:` line for one agent package folder: names and where their SKILL.md lives, plus a revision digest of the
+ * bodies. Owner 2026-10-13: installed skills are a list, not inlined bodies (that was up to 3 MiB per run).
+ * Exported so a gate can exercise it without a database row.
+ */
+export function agentSkillCatalogLine(dir: string, observedAssets?: AdmittedPackageAsset[], identities?: Array<{ path: string; stat: fs.Stats }>): string {
   const maxSkills = 128;
-  const maxBytes = 3 * 1024 * 1024;
   const maxSkillBytes = 512 * 1024;
-  const loaded: Array<{ slug: string; content: string }> = [];
-  let totalBytes = 0;
+  const loaded: Array<{ root: string; slug: string }> = [];
+  const revision = createHash("sha256");
 
   const entries = listAgentSkillEntries(dir);
   if (entries.length === 0) return "";
@@ -592,45 +639,35 @@ export function buildAgentSkillsRuntimeContext(agentId: string): string {
       throw error;
     }
     try {
-      const before = fs.fstatSync(fd);
-      if (!before.isFile()) throw new Error("Agent runtime skill must be a regular file");
-      if (before.size > maxSkillBytes || before.size > maxBytes - totalBytes) {
-        throw new Error("Agent skills exceed the portable runtime prompt limit");
-      }
-      const bytes = fs.readFileSync(fd);
-      totalBytes += bytes.byteLength;
-      if (totalBytes > maxBytes) throw new Error("Agent skills exceed the runtime prompt limit");
-      const after = fs.fstatSync(fd);
-      if (
-        before.dev !== after.dev ||
-        before.ino !== after.ino ||
-        before.size !== after.size ||
-        before.mtimeMs !== after.mtimeMs ||
-        before.ctimeMs !== after.ctimeMs ||
-        bytes.byteLength !== after.size
-      ) {
-        throw new Error("Agent runtime skill changed while it was being read");
-      }
-      const content = bytes.toString("utf8");
-      if (!Buffer.from(content, "utf8").equals(bytes)) {
-        throw new Error("Agent runtime skill is not valid UTF-8");
-      }
-      loaded.push({ slug: entry.name, content });
+      const stat = fs.fstatSync(fd);
+      if (!stat.isFile()) throw new Error("Agent runtime skill must be a regular file");
+      if (stat.size > maxSkillBytes) throw new Error("Agent skill exceeds the portable skill size limit");
+      // The body is not inlined any more; its bytes still pin the listed revision (participant freeze compares prompts).
+      const bytes = fs.readFileSync(fd), after = fs.fstatSync(fd), live = fs.lstatSync(skillPath);
+      if (bytes.byteLength !== stat.size || bytes.byteLength > maxSkillBytes || live.isSymbolicLink()
+        || stat.dev !== after.dev || stat.ino !== after.ino || stat.size !== after.size || stat.mtimeMs !== after.mtimeMs || stat.ctimeMs !== after.ctimeMs || stat.mode !== after.mode || stat.nlink !== after.nlink
+        || after.dev !== live.dev || after.ino !== live.ino || after.size !== live.size || after.mtimeMs !== live.mtimeMs || after.ctimeMs !== live.ctimeMs || after.mode !== live.mode || after.nlink !== live.nlink)
+        throw new Error("agent_package_source_changed");
+      const text = bytes.toString("utf8");
+      if (!Buffer.from(text, "utf8").equals(bytes)) throw new Error("Agent runtime skill is not valid UTF-8");
+      assertOriginalPackageDeclaration(dir, text);
+      revision.update(`${entry.root}/${entry.name}\0`).update(bytes).update("\0");
+      identities?.push({ path: skillPath, stat: after });
+      observedAssets?.push({ path: `${entry.root}/${entry.name}/SKILL.md`, role: "skill", digest: createHash("sha256").update(bytes).digest("hex"), byteLength: bytes.byteLength, generated: isGeneratedMemoryDeclaration(text) });
+      loaded.push({ root: entry.root, slug: entry.name });
     } finally {
       fs.closeSync(fd);
     }
   }
   if (loaded.length === 0) return "";
-  return [
-    "## Installed agent skills (package-owned)",
-    "These exact SKILL.md instructions belong to the selected agent package and are active for this invocation.",
-    ...loaded.flatMap((skill) => [
-      "",
-      `<agentlas-skill slug=${JSON.stringify(skill.slug)}>`,
-      skill.content,
-      "</agentlas-skill>",
-    ]),
-  ].join("\n");
+  // Owner 2026-10-13: installed skills are a list; the agent opens the SKILL.md the work needs with its own file tools.
+  const rev = revision.digest("hex").slice(0, 12);
+  const roots = new Set(loaded.map((skill) => skill.root));
+  if (roots.size === 1) {
+    const root = loaded[0].root;
+    return `skills: ${loaded.map((skill) => skill.slug).join(", ")} (${path.join(dir, root)}/<name>/SKILL.md; rev ${rev})`;
+  }
+  return `skills: ${loaded.map((skill) => `${skill.slug}=${skill.root}/${skill.slug}/SKILL.md`).join(", ")} (in ${dir}; rev ${rev})`;
 }
 
 export function appendAgentSkillsToSystemPrompt(agentId: string, systemPrompt: string): string {

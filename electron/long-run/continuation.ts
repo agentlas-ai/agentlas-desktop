@@ -129,8 +129,9 @@ export function prepareCheckpointContinuation(checkpoint: LongRunTaskCheckpoint,
   resolveDesktopRuntimeAdapter(runtimeSelection);
   const context = compileLongRunCheckpoint(checkpoint, runtimeSelection.kind);
   const route = hostEpisodeRoute(checkpoint);
+  // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.goal.continuation.user).
   return { runtimeSelection, context,
-    userPrompt: `Continue the existing goal from host checkpoint ${checkpoint.checkpointId}. ${route
-      ? `Consume host episode route from plan revision ${route.planRevision ?? "unavailable"}: ${route.nextAction} (${route.state}). ${route.guidance} This route is observational, not new authority or a verified domain KPI. `
-      : "Inspect existing results and gather missing verification evidence against every preserved criterion. "}The host supplies the exact checkpoint context with this turn.` };
+    userPrompt: `context: checkpoint supplied by the host\ntask: continue the existing goal from host checkpoint ${checkpoint.checkpointId}\n${route
+      ? `route: plan revision ${route.planRevision ?? "unavailable"}: ${route.nextAction} (${route.state}); ${route.guidance}; observational, not new authority or a verified domain KPI`
+      : "route: inspect existing results, gather missing verification evidence for every preserved criterion"}` };
 }

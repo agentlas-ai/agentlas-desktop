@@ -88,9 +88,9 @@ const RUNTIME_KIND_LABELS: Record<string, string> = {
   agentlas: "Agentlas",
 };
 
-/** The migration-only Ollama projection is a stored pin, not a runtime that can run. */
+/** A pending local runtime is not ready for execution yet. */
 function executableRuntimes(runtimes: RuntimeStatus[]): RuntimeStatus[] {
-  return runtimes.filter((runtime) => runtime.kind !== "ollama" && runtime.localObservation?.state !== "pending");
+  return runtimes.filter((runtime) => runtime.localObservation?.state !== "pending");
 }
 
 function activeRuntimeLabel(runtimes: RuntimeStatus[], ko: boolean): string {

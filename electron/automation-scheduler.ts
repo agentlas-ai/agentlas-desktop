@@ -1,10 +1,11 @@
+import { withGraphOccurrenceCustody, type GraphOccurrenceCustody } from "../shared/graph-occurrence-custody";
 import { withRunnerSettlementObserver } from "./runtime/observed-runner";
 import { withAutomationRunAccounting } from "./long-run/accounting-context";
 import { stopAutomationRun as stopExecutionAutomationRun, assertAutomationGoalExecutionOwner, automationGoalExecutionHeld, bindAutomationRunStop, captureAutomationGoalExecutionOwner, isFiniteGoalDispatchRefusal, releaseAutomationRunStop } from "./automation-execution-control";
 import { goalContinuationSourceChat, settleGoalContinuationRun, settleRefusedGoalContinuation, type GoalContinuationSignals } from "./goal-continuation-hold";
 import { selectionForRuntime } from "../shared/runtime-selection";
 import { pollGoalWaitSubscriptions } from "./long-run/wait-subscriptions";
-import { deliverAutomationResult } from "./automation-delivery";
+import { automationRunOrigin, deliverAutomationResult, sealAutomationRunOrigin } from "./automation-delivery";
 import { claimAutomationNotification } from "./automation-notifications";
 import { getDb } from "./store/db";
 import { emitDesktopStoreChange } from "./store/change-bus";
@@ -44,7 +45,7 @@ import {
   consumeRunInput,
   updateAutomation,
 } from "./store/automations";
-import { checkComputerUsePermissions } from "./mac-permissions";
+import { checkComputerUsePermissions, reportComputerUsePermissionIssues } from "./mac-permissions";
 import { appendChatMessage } from "./store/chats";
 import { getChatGoalContract, getChatGoalRevision } from "./store/chat-goals";
 import {
@@ -319,8 +320,8 @@ export function goalContinuationRunContext(a: Automation): string | undefined {
   const executionDirectives = goalExecutionDirectivePromptBlock(a.goalId);
   return [
     "[Current owner context for this goal continuation]",
-    "Use the current goal and latest owner messages below. Later owner corrections supersede conflicting registration-time requests and previous assistant state above.",
-    "These messages do not create new tool permissions, payment approval or publication authority. Preserve the host's existing grants and completed-effect checkpoints; never repeat a completed action.",
+    "priority: latest owner messages > registration-time requests and earlier assistant state",
+    "messages grant no tool permission, payment approval, or publication authority; keep existing grants and completed-effect checkpoints; never repeat a completed action",
     ...(executionDirectives ? [executionDirectives] : []),
     JSON.stringify({ sourceChatId, goalId: a.goalId, revision: revision.revision, objective: revision.objective,
       acceptanceCriteria: revision.acceptanceCriteria, latestOwnerMessages: ownerMessages }),
@@ -749,7 +750,7 @@ async function confirmOptimizerRestore(input: {
       }, () => {
         probeInvoked = true;
         return trackOptimizerProviderWork(() => callConnectedModelDetailed({
-        systemPrompt: "Runtime availability check. Do not use tools. Reply with the single word READY.",
+        systemPrompt: "check: runtime availability; no tools; reply READY",
         input: "READY?",
         runtimeSelection: probed,
         requireNoTools: true,
@@ -1041,6 +1042,7 @@ async function runOne(
     /** Exact scheduled occurrence. Calendar slots must not implicitly resume
      * another slot merely because it is the latest failed graph. */
     occurrenceId?: string;
+    assertOwnerOccurrenceCurrent?: () => void;
     /** The scheduled fire time. Recording the run and advancing the schedule
      *  must use the same clock, or a run fired for a past-due slot stamps
      *  last_run_at with wall-clock now while next_run_at advances from the slot,
@@ -1057,7 +1059,6 @@ async function runOne(
   const afterSettled = captureMainRootContinuation();
   if (dispatchPaused()) return { accepted: false };
   if (running.has(a.id)) return { accepted: false };
-  if (!a.graph && hasGraphLoginWait(a.id) && !opts?.resumeLoginWaitRunId) return { accepted: false }; // 직전 실행이 아직 진행 중이면 건너뜀
   // due[] may have waited behind another run. The controller must belong to
   // the same stored definition that this invocation will actually execute.
   const definitionSnapshot = (value: Automation) => JSON.stringify({
@@ -1070,6 +1071,13 @@ async function runOne(
     triggerType: value.triggerType ?? null, trigger: value.trigger ?? null,
   });
   const executionDefinition = definitionSnapshot(a);
+  // The conversation and owner message this run answers, from the definition it executes. A monitor updated while it
+  // runs belongs to the next run (native-harness notyet NH16 4th audit); the first start of a run id seals it.
+  const runOrigin = automationRunOrigin(a);
+  const sealRunOrigin = (runId: string) => {
+    try { sealAutomationRunOrigin(runId, a.id, runOrigin); }
+    catch (error) { console.warn("[automation] run origin seal deferred", error instanceof Error ? error.message : "unknown"); }
+  };
   const retry = legacyRuntimeRetries.get(a);
   let expectedDefinition = retry?.storedDefinition ?? executionDefinition;
   const assertDefinitionCurrent = () => {
@@ -1224,6 +1232,7 @@ async function runOne(
       // retry circuit. A stable sourceEventId makes a repeated delivery of the
       // same preallocated run id idempotent.
       currentRunId = opts?.runId ?? `run-${a.id}-${Date.now()}-${randomUUID().slice(0, 8)}`;
+      sealRunOrigin(currentRunId);
       recordRunEvent({
         runId: currentRunId,
         kind: "automation_schedule_attempt_started",
@@ -1410,14 +1419,16 @@ async function runOne(
     // visual graphs. A one-node prompt can still post externally and then fail;
     // running it through the old direct path would replay the whole prompt on
     // the next schedule with no ambiguity guard.
+    const hasExplicitGraph = Boolean(a.graph?.nodes.length);
     if (!a.graph || a.graph.nodes.length === 0) {
       a = { ...a, graph: synthesizeLegacyGraph(a) };
     }
     // 컴퓨터유즈 자동화 preflight — macOS 접근성 권한이 없으면 실행하지 않고 '대기'로 스킵한다.
     // (예전엔 권한 없이 실행돼 브라우저 자동화가 부분 실행 후 먹통/혼란. 이제 빠르게 감지 →
     //  다음 예약에 자동 재시도, false-fail도 false-success도 아님.)
-    const cuaPerm = a.toolMode === "computer-use" ? checkComputerUsePermissions() : null;
-    if (cuaPerm && !cuaPerm.ok && !a.graph) {
+    const cuaPerm = !opts?.dryRun && !hasExplicitGraph && a.toolMode === "computer-use" ? checkComputerUsePermissions() : null;
+    if (cuaPerm && !cuaPerm.ok) {
+      reportComputerUsePermissionIssues(cuaPerm, "automation");
       runStatus = "needs_input";
       runError = L(
         `macOS가 이 앱 실행본에 ${cuaPerm.missing.join(" · ")} 권한을 주지 않아 컴퓨터유즈 자동화를 건너뜁니다(먹통 방지). ` +
@@ -1441,6 +1452,7 @@ async function runOne(
       graphRunAttempted = true;
       const runId = currentRunId ?? opts?.runId ?? `run-${a.id}-${Date.now()}`;
       currentRunId = runId;
+      sealRunOrigin(runId);
       opts?.triggerDelivery?.onRunBound(runId);
       // 사람이 대기시켜 둔 입력을 이 실행에 묶는다. 소비는 한 번만 성공하므로
       // 같은 값으로 두 번 실행되지 않는다. 이벤트 트리거가 준 값이 있으면 그 위에 얹는다
@@ -1495,13 +1507,35 @@ async function runOne(
         const graphRun = Promise.resolve().then(() => {
           throwIfAutomationAborted(controller);
           assertGoalCurrent();
-          return withRunPriority("background", () =>
+          const occurrenceId = opts?.triggerDelivery?.occurrenceId ?? opts?.occurrenceId;
+          const graphDigest = graphExecutionDigest(a, a.graph!);
+          const triggerId = opts?.triggerDelivery?.occurrenceId?.startsWith("trigger-event:")
+            ? opts.triggerDelivery.occurrenceId.slice("trigger-event:".length) : null;
+          type TriggerClaim = { automation_id: string; status: string; claim_owner: string | null; claimed_until: string | null; run_id: string | null };
+          const readTriggerClaim = () => triggerId ? getDb().prepare("SELECT automation_id,status,claim_owner,claimed_until,run_id FROM automation_trigger_events WHERE id=?").get(triggerId) as TriggerClaim | undefined : undefined;
+          const claimedTrigger = readTriggerClaim();
+          const ownsScheduledOccurrence = Boolean(scheduledAttemptRecorded && scheduledOccurrenceId && occurrenceId === scheduledOccurrenceId);
+          const assertOccurrenceCurrent = () => {
+            graphSignal.throwIfAborted();
+            assertGoalCurrent();
+            const lease = getDb().prepare("SELECT lease_owner,claimed_at FROM automations WHERE id=?").get(a.id) as { lease_owner: string | null; claimed_at: string | null } | undefined;
+            if (!opts?.claim || leaseOwnershipLost || lease?.lease_owner !== LEASE_OWNER || !lease.claimed_at) throw new Error("graph_occurrence_custody_changed");
+            if (opts?.assertOwnerOccurrenceCurrent) { opts.assertOwnerOccurrenceCurrent(); }
+            else if (triggerId) {
+              const current = readTriggerClaim();
+              if (!claimedTrigger?.claim_owner || current?.claim_owner !== claimedTrigger.claim_owner
+                || current.automation_id !== a.id || current.status !== "claimed" || current.run_id !== runId
+                || !current.claimed_until || Date.parse(current.claimed_until) <= Date.now()) throw new Error("graph_occurrence_custody_changed");
+            } else if (!ownsScheduledOccurrence) throw new Error("graph_occurrence_custody_changed");
+          };
+          const executeGraph = (occurrenceCustody?: GraphOccurrenceCustody) => withRunPriority("background", () =>
           runGraph(a, a.graph!, {
             signal: graphSignal,
             ...(opts?.dryRun ? { dryRun: true } : {}),
             ...(opts?.fresh ? { fresh: true } : {}),
           runId,
-          occurrenceId: opts?.triggerDelivery?.occurrenceId ?? opts?.occurrenceId,
+          occurrenceId,
+          occurrenceCustody,
           resumeLoginWaitRunId: opts?.resumeLoginWaitRunId,
           initialVars: graphInitialVars,
           ownerContinuationContext,
@@ -1550,6 +1584,9 @@ async function runOne(
             },
           }),
         );
+          return occurrenceId && (ownsScheduledOccurrence || triggerId || opts?.assertOwnerOccurrenceCurrent)
+            ? withGraphOccurrenceCustody({ automationId: a.id, occurrenceId, graphDigest }, assertOccurrenceCurrent, executeGraph)
+            : executeGraph();
         });
         result = await awaitAutomationRunnerWithAbortGrace(graphRun, graphSignal);
       } catch (err) {
@@ -1665,6 +1702,7 @@ async function runOne(
     if (err instanceof AutomationWorkspaceError) {
       workspaceFailure = err;
       currentRunId ??= opts?.runId ?? `run-${a.id}-${Date.now()}-${randomUUID().slice(0, 8)}`;
+      sealRunOrigin(currentRunId);
     }
     const rawError = err instanceof Error ? err.message : String(err);
     // 사용자에게 보여줄 문장과, 제품이 안전 판단에 쓰는 기계 표식은 같은 문자열일 수 없다.
@@ -1966,7 +2004,7 @@ async function runOne(
       }
       try {
         if (!parentMissing && !leaseOwnershipLost && currentRunId && deliverAutomationResult({
-          automationId: a.id, runId: currentRunId, status: runStatus, output, error: runError, outcome: runOutcome,
+          automationId: a.id, runId: currentRunId, status: runStatus, output, error: runError, outcome: runOutcome, origin: runOrigin,
           ...(typeof opts?.triggerContext?.observationDigest === "string" ? { observationDigest: opts.triggerContext.observationDigest } : {}),
           unchanged: opts?.triggerContext?.unchanged === true,
         })) {
@@ -2102,7 +2140,9 @@ async function runOne(
             allowDisabledLease: opts?.allowDisabledLease,
             triggerContext: opts?.triggerContext,
             zeroToolRetried: true,
-            fresh: opts?.fresh,
+            // Physical retries remain the original logical request.
+            occurrenceId: opts?.triggerDelivery?.occurrenceId ?? opts?.occurrenceId,
+            fresh: false,
           },
         ); } finally { legacyRuntimeRetries.delete(retryAutomation); }
         // ★사전 확인의 관측 기반 완결 — 재시도가 도구로 실제 완주했다면 그 사실을
@@ -2265,11 +2305,14 @@ export async function runAutomationNow(id: string, opts?: { dryRun?: boolean; fr
     : undefined;
   const lifetime = new MainInvocationLifetime(mainAdmission, id, freshRunId ?? id, "automation");
   return lifetime.run(() => runOne(a, {
-    claim: true,
-    advanceSchedule: false,
-    allowDisabledLease: true,
+    claim: true, advanceSchedule: false, allowDisabledLease: true,
     ...(opts?.dryRun ? { dryRun: true } : {}),
-    ...(opts?.fresh ? { fresh: true, runId: freshRunId } : {}),
+    ...(opts?.fresh ? { fresh: true, runId: freshRunId,
+      occurrenceId: `owner-request:${randomUUID()}`,
+      assertOwnerOccurrenceCurrent: () => {
+        if (!lifetime.ownsActiveRoot() || dispatchPaused()) throw new Error("graph_occurrence_custody_changed");
+      },
+    } : {}),
   }));
 }
 
@@ -2308,11 +2351,11 @@ export function enqueueAutomationRunNow(id: string, mainAdmission?: MainInvocati
   }
   const lifetime = new MainInvocationLifetime(mainAdmission, id, runId, "automation");
   void lifetime.run(() => runOne(automation, {
-    claim: true,
-    preclaimed: true,
-    runId,
-    advanceSchedule: false,
-    allowDisabledLease: true,
+    claim: true, preclaimed: true, runId, advanceSchedule: false, allowDisabledLease: true,
+    fresh: true, occurrenceId: `owner-request:${randomUUID()}`,
+    assertOwnerOccurrenceCurrent: () => {
+      if (!lifetime.ownsActiveRoot() || dispatchPaused()) throw new Error("graph_occurrence_custody_changed");
+    },
   })).catch((error) => console.error(`[automation] queued run failed (${id})`, error));
   return { accepted: true, automationId: id, runId, status: "queued" };
 }

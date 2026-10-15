@@ -41,7 +41,7 @@
 .controlPopover button { display:inline-flex; align-items:center; justify-content:center; border:0; border-radius:6px; background:transparent; color:inherit; font:inherit; cursor:pointer; width:auto; height:auto; }
 .controlPopover button[role=menuitem] { display:flex; justify-content:space-between; width:100%; min-height:var(--panel-menu-row-height); padding:var(--panel-menu-row-padding); font-size:var(--panel-menu-font-size); font-weight:400; }
 .zoomControls { display:flex; align-items:center; gap:0; font-size:11px; }
-.zoomControls button { min-width:23px; min-height:23px; padding:2px; border:1px solid var(--paper-edge,#e6e6e8); border-radius:0; }
+.zoomControls button { min-width:24px; min-height:24px; padding:2px; border:1px solid var(--paper-edge,#e6e6e8); border-radius:0; }
 .zoomControls button:first-child { border-radius:8px 0 0 8px; }
 .zoomControls button:last-child { margin-left:5px; border-color:transparent; border-radius:7px; }
 .zoomControls span { display:grid; place-items:center; min-width:42px; min-height:23px; border-top:1px solid var(--paper-edge,#e6e6e8); border-bottom:1px solid var(--paper-edge,#e6e6e8); text-align:center; }

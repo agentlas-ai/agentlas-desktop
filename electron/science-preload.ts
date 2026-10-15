@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { UpdateScienceProjectDeliverableInput, UpdateScienceProjectDeliverableResult } from "agentlas-science";
+import type { ScienceCapabilityCatalogInput, ScienceCapabilityManagerInput } from "../shared/science-capability-catalog";
 
 const extensionId = process.argv
   .find((argument) => argument.startsWith("--agentlas-extension-id="))
@@ -10,6 +11,7 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
   bootstrap: () => ipcRenderer.invoke("science:bootstrap", { extensionId }),
   shell: Object.freeze({
     backToWork: () => ipcRenderer.invoke("science:shell:backToWork", { extensionId }),
+    openCapabilityManager: (input: ScienceCapabilityManagerInput) => ipcRenderer.invoke("science:shell:openCapabilityManager", { extensionId, input }),
   }),
   math: Object.freeze({
     command: (input: unknown) => ipcRenderer.invoke("science:math:command", { extensionId, input }),
@@ -136,6 +138,25 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
     inspect: (input: unknown) => ipcRenderer.invoke("science:runtime:inspect", { extensionId, input }),
     select: (input: unknown) => ipcRenderer.invoke("science:runtime:select", { extensionId, input }),
   }),
+  researchCompute: Object.freeze({
+    beginSession: (input: unknown) => ipcRenderer.invoke("science:researchCompute:beginSession", { extensionId, input }),
+    runSession: (input: unknown) => ipcRenderer.invoke("science:researchCompute:runSession", { extensionId, input }),
+    readSession: (input: unknown) => ipcRenderer.invoke("science:researchCompute:readSession", { extensionId, input }),
+    readSessionRequest: (input: unknown) => ipcRenderer.invoke("science:researchCompute:readSessionRequest", { extensionId, input }),
+    stopSession: (input: unknown) => ipcRenderer.invoke("science:researchCompute:stopSession", { extensionId, input }),
+
+    runConsole: (input: unknown) => ipcRenderer.invoke("science:researchCompute:runConsole", { extensionId, input }),
+    readConsoleRequest: (input: unknown) => ipcRenderer.invoke("science:researchCompute:readConsoleRequest", { extensionId, input }),
+    interrupt: (input: unknown) => ipcRenderer.invoke("science:researchCompute:interrupt", { extensionId, input }),
+    clearGeneration: (input: unknown) => ipcRenderer.invoke("science:researchCompute:clearGeneration", { extensionId, input }),
+    readHumanControl: (input: unknown) => ipcRenderer.invoke("science:researchCompute:readHumanControl", { extensionId, input }),
+    list: (input: unknown) => ipcRenderer.invoke("science:researchCompute:list", { extensionId, input }),
+    read: (input: unknown) => ipcRenderer.invoke("science:researchCompute:read", { extensionId, input }),
+  }),
+  researchCapabilities: Object.freeze({
+    inspect: (input: unknown) => ipcRenderer.invoke("science:researchCapabilities:inspect", { extensionId, input }),
+    catalog: (input: ScienceCapabilityCatalogInput) => ipcRenderer.invoke("science:researchCapabilities:catalog", { extensionId, input }),
+  }),
   composer: Object.freeze({
     reconcileSteering: (input: unknown) => ipcRenderer.invoke("science:composer:reconcileSteering", { extensionId, input }),
     steer: (input: unknown) => ipcRenderer.invoke("science:composer:steer", { extensionId, input }),
@@ -184,10 +205,10 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
     getVersion: (projectId: string, sourceVersionId: string) => ipcRenderer.invoke("science:sources:get", { extensionId, projectId, sourceVersionId }),
     // 목록의 행들을 한 번에 확인해 받는다. 한 건씩 부르면 왕복 수가 곧 대기 시간이 된다.
     getMany: (projectId: string, sourceIds: string[]) => ipcRenderer.invoke("science:sources:getMany", { extensionId, projectId, sourceIds }),
-    reader: (projectId: string, sourceId: string) => ipcRenderer.invoke("science:sources:reader", { extensionId, projectId, sourceId }),
-    openOriginal: (projectId: string, sourceId: string) => {
+    reader: (projectId: string, sourceId: string, sourceVersionId?: string) => ipcRenderer.invoke("science:sources:reader", { extensionId, projectId, sourceId, sourceVersionId }),
+    openOriginal: (projectId: string, sourceId: string, sourceVersionId?: string) => {
       if (!navigator.userActivation?.isActive && process.env.AGENTLAS_E2E !== "1") return Promise.reject(new Error("science-source-original-user-gesture-required"));
-      return ipcRenderer.invoke("science:sources:openOriginal", { extensionId, projectId, sourceId });
+      return ipcRenderer.invoke("science:sources:openOriginal", { extensionId, projectId, sourceId, sourceVersionId });
     },
   }),
   datasets: Object.freeze({

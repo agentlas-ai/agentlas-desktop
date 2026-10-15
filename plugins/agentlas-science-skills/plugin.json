@@ -33,7 +33,7 @@
     "tools": [
       {
         "id": "agentlas-science-skills",
-        "capability": "knowledge",
+        "capability": "data",
         "kind": "stdio",
         "command": "${node}",
         "args": [

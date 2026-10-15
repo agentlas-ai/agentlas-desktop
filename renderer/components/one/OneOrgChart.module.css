@@ -57,12 +57,10 @@ button.failureDot:focus-visible { outline: 2px solid var(--danger); outline-offs
 .handover { display: inline-flex; align-items: center; gap: 3px; color: var(--muted-deep); font-size: 8px; white-space: nowrap; }
 .inlineForm input { width: 100px; min-height: 22px; border: 1px solid var(--ok-soft); border-radius: 5px; padding: 0 5px; font-size: 10px; }
 .footer { display: flex; justify-content: space-between; padding: 3px 6px 0; color: var(--muted-deep); font-size: 9px; }
-.slotBudget { display: inline-flex; align-items: center; gap: 5px; }
-.slotBudget button { border: 0; padding: 0; background: none; color: var(--ok); font-size: 8px; text-decoration: underline; cursor: pointer; }
 .searchBox { display: grid; gap: 7px; }
 .searchInputWrap { display: flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 8px; border: 1px solid var(--ok-soft); border-radius: 8px; background: var(--ok-soft); color: var(--muted-deep); }
 .searchInputWrap input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: var(--ink); font-size: 10px; }
-.searchInputWrap button { display: grid; place-items: center; width: 20px; height: 20px; border: 0; background: none; color: var(--muted-deep); cursor: pointer; }
+.searchInputWrap button { display: grid; place-items: center; width: 24px; height: 24px; border: 0; background: none; color: var(--muted-deep); cursor: pointer; }
 .searchResults { display: grid; gap: 7px; max-height: 240px; overflow: auto; padding: 3px 0; }
 .searchSection { display: grid; gap: 3px; }
 .searchSection > strong { padding: 0 4px; color: var(--muted-deep); font-size: 8px; letter-spacing: .08em; text-transform: uppercase; }
@@ -322,7 +320,7 @@ button.failureDot:focus-visible { outline: 2px solid var(--danger); outline-offs
 
 .rowActions button,
 .rowActions select {
-  min-height: 20px;
+  min-height: 24px;
   background: transparent;
   color: var(--muted-deep);
 }
@@ -357,7 +355,6 @@ button.failureDot:focus-visible { outline: 2px solid var(--danger); outline-offs
   font-size: 10px;
 }
 
-.slotBudget button { color: var(--muted-deep); font-size: 9px; }
 
 @media (max-width: 760px) {
   .rowActions { opacity: 0; }

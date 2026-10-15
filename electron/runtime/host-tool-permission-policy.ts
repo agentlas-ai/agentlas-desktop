@@ -38,16 +38,7 @@ export interface HostToolPermissionPolicyPorts extends HostToolPermissionIdentit
   now?: () => number;
 }
 
-/** The same policy is installed as the base arbiter; private relays retain dispatch ownership. */
-export function createHostToolPermissionPolicy(ports: HostToolPermissionPolicyPorts) {
-  const { getAuthenticatedActorIds, configuredIdentity, getCapabilityDecision,
-    recordCapabilityGrant, requestToolApproval, announceToolDenied } = ports;
-  const now = ports.now ?? Date.now;
-  const recentUserDenials = new Map<string, number>();
-  const USER_DENIAL_TTL_MS = 5 * 60_000;
-  const denialKey = (ask: { sessionKey: string; tool: string; detail?: string }) => `${ask.sessionKey}\u0000${ask.tool}\u0000${mainToolConsentResource(ask) ?? ask.detail ?? ""}`;
-
-  const opaqueConsentIdentity = (label: string, value: string): string => {
+const opaqueConsentIdentity = (label: string, value: string): string => {
     // Account ids, workspace paths, and agent names are native host-only material.
     // Approval events may cross into a renderer, so keep the binding exact but
     // value-free at that boundary and in the capability ledger.
@@ -58,6 +49,43 @@ export function createHostToolPermissionPolicy(ports: HostToolPermissionPolicyPo
       .update(`agentlas-tool-consent-${label}-v1\u0000${value}`, "utf8")
       .digest("hex")}`;
   };
+
+/** Exact existing actor/workspace consent calculation; no resource grant or effect. */
+export function toolApprovalConsentActorBinding(
+  request: { cwd?: string; chatId?: string },
+  actor: { workspaceId: string; userId: string } | null,
+  install = configuredIdentity(),
+): Pick<ToolApprovalConsentBinding, "userIdentity" | "workspaceIdentity"> {
+    // Keep the supplied path bytes intact before canonicalizing `.`/`..`.
+    // Unix permits leading/trailing spaces in a directory name; trimming here
+    // would let two distinct workspaces inherit the same durable consent.
+    const rawWorkspace = request.cwd && request.cwd.length > 0
+      ? path.resolve(request.cwd)
+      : request.chatId
+        ? `chat:${request.chatId}`
+        : `desktop:${install?.userDataNamespace ?? "Agentlas"}`;
+    const rawUser = actor
+      ? `account:${actor.userId}`
+      : `install:${install?.channel ?? "official"}:${install?.userDataNamespace ?? "Agentlas"}`;
+    const rawWorkspaceIdentity = actor
+      ? `account-workspace:${actor.workspaceId}|${rawWorkspace}`
+      : rawWorkspace;
+    return {
+      userIdentity: opaqueConsentIdentity("user", rawUser),
+      workspaceIdentity: opaqueConsentIdentity("workspace", rawWorkspaceIdentity),
+    };
+}
+
+/** The same policy is installed as the base arbiter; private relays retain dispatch ownership. */
+export function createHostToolPermissionPolicy(ports: HostToolPermissionPolicyPorts) {
+  const { getAuthenticatedActorIds, configuredIdentity, getCapabilityDecision,
+    recordCapabilityGrant, requestToolApproval, announceToolDenied } = ports;
+  const now = ports.now ?? Date.now;
+  const recentUserDenials = new Map<string, number>();
+  const USER_DENIAL_TTL_MS = 5 * 60_000;
+  const denialKey = (ask: { sessionKey: string; tool: string; detail?: string }) => `${ask.sessionKey}\u0000${ask.tool}\u0000${mainToolConsentResource(ask) ?? ask.detail ?? ""}`;
+
+
 
   /**
    * The native host is the only authority that can mint a durable consent identity. The
@@ -70,6 +98,7 @@ export function createHostToolPermissionPolicy(ports: HostToolPermissionPolicyPo
     runtime: string;
     tool: string;
     detail?: string;
+    arguments?: unknown;
     cwd?: string;
     chatId?: string;
     agentId?: string;
@@ -77,27 +106,12 @@ export function createHostToolPermissionPolicy(ports: HostToolPermissionPolicyPo
   }): ToolApprovalConsentBinding => {
     const scopedActor = nativeApprovalActorSnapshot();
     const actor = scopedActor ? scopedActor.actor : getAuthenticatedActorIds();
-    const install = configuredIdentity();
-    // Keep the supplied path bytes intact before canonicalizing `.`/`..`.
-    // Unix permits leading/trailing spaces in a directory name; trimming here
-    // would let two distinct workspaces inherit the same durable consent.
-    const rawWorkspace = ask.cwd && ask.cwd.length > 0
-      ? path.resolve(ask.cwd)
-      : ask.chatId
-        ? `chat:${ask.chatId}`
-        : `desktop:${install?.userDataNamespace ?? "Agentlas"}`;
-    const rawUser = actor
-      ? `account:${actor.userId}`
-      : `install:${install?.channel ?? "official"}:${install?.userDataNamespace ?? "Agentlas"}`;
-    const rawWorkspaceIdentity = actor
-      ? `account-workspace:${actor.workspaceId}|${rawWorkspace}`
-      : rawWorkspace;
+    const actorBinding = toolApprovalConsentActorBinding(ask, actor, configuredIdentity());
     const rawRequester = `runtime:${ask.runtime}|agent:${ask.agentId?.trim() || "default"}`;
     return {
-      userIdentity: opaqueConsentIdentity("user", rawUser),
-      workspaceIdentity: opaqueConsentIdentity("workspace", rawWorkspaceIdentity),
+      ...actorBinding,
       requesterIdentity: opaqueConsentIdentity("requester", rawRequester),
-      credentialResourceIdentity: mainToolConsentResource(ask) ?? capabilityResourceIdentity(ask.tool, ask.detail),
+      credentialResourceIdentity: mainToolConsentResource(ask) ?? capabilityResourceIdentity(ask.tool, ask.detail, ask.arguments),
       permissionScope: ask.permission ?? "read",
     };
   };
@@ -206,6 +220,16 @@ export function createHostToolPermissionPolicy(ports: HostToolPermissionPolicyPo
     if (outcome.decision === "deny") recentUserDenials.set(denialKey(ask), now());
     // Durable consent is checked again for each call, including its first approval.
     // A native session permit would outlive revocation of the saved rule.
+    if (outcome.decision === "allow_always" || outcome.decision === "allow_session") {
+      // Revocation/deny written while this call was waiting on its card must win
+      // at the last decision point before execution (G04). Fail closed on error.
+      try {
+        const latest = getCapabilityDecision({
+          capability, tool: ask.tool, detail: ask.detail, agentId: ask.agentId, chatId: ask.chatId, consentBinding,
+        });
+        if (latest === "deny") return "deny";
+      } catch { return "deny"; }
+    }
     return outcome.decision === "allow_always" ? "allow_once" : outcome.decision;
   };
   return { consentBindingForAsk, persistGrant, arbiter };

@@ -74,9 +74,9 @@ export class OneSupervisorWorkExecutor {
       this.deps.assertOwner();
       this.deps.queue.recoverUnstarted();
       for (const job of this.deps.queue.active()) this.reconcile(job);
-      // claim() enforces the global limit under an immediate SQLite write lock,
-      // including another process's unresolved starting/running ownership.
-      for (let count = 0; count < 2; count += 1) {
+      // One decides which work to delegate. Claim every queued delegation once;
+      // native runtime admission owns resource scheduling, not a fixed Work cap.
+      for (;;) {
         this.deps.assertOwner();
         const claimed = this.deps.queue.claim({ownerEpoch: this.deps.ownerEpoch, ownerKind: this.deps.ownerKind, leaseMs: this.deps.leaseMs});
         if (!claimed) break;

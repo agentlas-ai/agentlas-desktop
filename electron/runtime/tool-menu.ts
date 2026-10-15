@@ -36,15 +36,15 @@ function definition(name: string, description: string, properties: Record<string
   return { type: "function", function: { name, description, parameters: { type: "object", properties, required, additionalProperties: false } } };
 }
 const MENU_TOOLS = [
-  definition(LIST, "Browse the available MCP tool metadata. Page through names/descriptions; optionally filter by exact server key. Prepare an exact name before calling it.",
+  definition(LIST, "List MCP tools (page; server filter). Prepare a name before calling.",
     { server: { type: "string" }, cursor: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 50 } }),
-  definition(PREPARE, "Retrieve the complete input schema for one exact tool name from agentlas_tools_list. Large alternative-based schemas return their first variants page and explicit selection controls. A prepared token is required for agentlas_tools_call. The server validates the original contract.",
+  definition(PREPARE, "Full input schema + token for one exact tool name (required for agentlas_tools_call). Large schemas: first variants page.",
     { name: { type: "string" } }, ["name"]),
-  definition(VARIANTS, "Page through the complete alternative metadata of a large tool schema by exact name. Use an exact returned index with agentlas_tools_prepare_variant.",
+  definition(VARIANTS, "Page variants of a large tool schema; pick an index for agentlas_tools_prepare_variant.",
     { name: { type: "string" }, cursor: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 50 } }, ["name"]),
-  definition(PREPARE_VARIANT, "Retrieve one complete alternative of a large tool schema using its exact name and a variant index returned by agentlas_tools_variants or agentlas_tools_prepare.",
+  definition(PREPARE_VARIANT, "One variant schema + token (name, variant index).",
     { name: { type: "string" }, variant: { type: "integer", minimum: 0 } }, ["name", "variant"]),
-  definition(CALL, "Execute one prepared MCP tool with its opaque token and an arguments object matching its exact prepared input schema. Normal user permissions and approval still apply.",
+  definition(CALL, "Call a prepared tool: token + arguments per its schema. Approval applies.",
     { token: { type: "string" }, arguments: { type: "object", additionalProperties: true } }, ["token", "arguments"]),
 ];
 

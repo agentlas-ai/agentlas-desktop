@@ -99,7 +99,7 @@ function attachmentGuideLocale(prompt: string, fallback: RuntimeLocale): Runtime
   return fallback;
 }
 
-function appendAttachmentGuide(prompt: string, images: StagedCliImage[], locale: RuntimeLocale): string {
+function appendAttachmentGuide(prompt: string, images: StagedCliImage[], _locale: RuntimeLocale): string {
   if (images.length === 0) return prompt;
   const list = images
     .map((image, index) => {
@@ -107,20 +107,7 @@ function appendAttachmentGuide(prompt: string, images: StagedCliImage[], locale:
       return `${index + 1}. ${image.path} (${image.mediaType}${original})`;
     })
     .join("\n");
-  const guide =
-    locale === "ko"
-      ? [
-          "[첨부 이미지]",
-          `사용자가 이번 메시지에 이미지 ${images.length}개를 첨부했습니다. Agentlas가 CLI에서 읽을 수 있도록 아래 경로에 파일로 저장했습니다.`,
-          list,
-          "먼저 위 경로의 파일을 읽거나 열어서 확인하세요. 다운로드 폴더나 최근 파일을 추측해서 찾지 마세요.",
-        ].join("\n")
-      : [
-          "[Attached images]",
-          `The user attached ${images.length} image${images.length === 1 ? "" : "s"} to this message. Agentlas saved them as files the CLI can read:`,
-          list,
-          "Open or read these exact paths first. Do not guess by searching Downloads or recent files.",
-        ].join("\n");
+  const guide = ["[Attached images] saved as files; read these paths first, do not search Downloads:", list].join("\n");
   return prompt.trim() ? `${prompt}\n\n${guide}` : guide;
 }
 

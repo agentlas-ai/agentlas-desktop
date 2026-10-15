@@ -61,15 +61,15 @@ export function parseGoalWaitIntent(text: string): { text: string; request: Pars
 
 
 export function goalWaitProtocol(lifecycle?: "finite" | "ongoing" | null): string {
-  return `When this Goal must wait for an already observed Desktop invocation or an existing artifact input to change, request a durable wait and end this turn. Do not repeatedly call a model to poll unchanged state. Waits are checked only while the app is running. Do not promise a wait was accepted; the host returns a durable registration receipt. Do not declare the Goal complete in the same response. Only use actual IDs already observed; never invent a subject. CI, arbitrary URLs and other external jobs currently need their own supported monitor and cannot be represented as an invocation ID.
-This is a response block consumed by Desktop Main, not an MCP tool to search for or call.
-Emit at most one block:
+  return `Goal wait (host block, not a tool): waiting on an observed invocation, saved artifact, graph output or timer; end the turn after it. Never wait to poll a model; never invent IDs; never claim accepted (the host returns a receipt) or complete in the same reply.
+One block max:
 \`\`\`agentlas-goal-wait
-{"schemaVersion":"agentlas.goal-wait-intent.v1","subject":{"kind":"invocation","invocationRunId":"observed ID","chatId":"observed chat ID"},"condition":"terminal","nextAction":"What to inspect after it settles","deadline":null}
+{"schemaVersion":"agentlas.goal-wait-intent.v1","subject":{"kind":"invocation","invocationRunId":"observed ID","chatId":"observed chat ID"},"condition":"terminal","nextAction":"what to inspect after","deadline":null}
 \`\`\`
-For a saved artifact input, use subject {"kind":"artifact","artifactId":"observed artifact ID"} and condition "changed". To watch a value that changes later (followers, views, replies, prices), do not wake a model to re-measure it: save a graph in this conversation (or reuse a callable Toolchain) whose steps read the value without an agent step and that runs on its own schedule, then use subject {"kind":"automation","automationId":"that graph's ID"} and condition "changed". The host compares the graph's latest completed output and wakes this Goal only when it changes, with that output attached. This works for one-time and ongoing Goals. ${lifecycle !== "finite"
-    ? `For an explicitly ongoing Goal, use subject {"kind":"timer","notBefore":"future ISO timestamp"} and condition "due" to wait until the next useful work cycle. Respect the user's cadence, and inspect current external state before acting; never repeat an already completed post or purchase. Timer waits cannot be earlier than one minute from now.`
-    : `This Goal is a one-time (finite) Goal: a timer subject is refused unless a goal deadline is stated below. Without one, when the remaining outcome can only be measured later (followers, views, replies next week), do not request a wait: finish this turn normally, and state in your reply what should be re-measured and when, so the owner can ask for continued tracking.`} A requested deadline must be an ISO timestamp; null preserves no user-imposed deadline. New user directions, Stop and changed Goal authority always override this request.`;
+subjects: {"kind":"artifact","artifactId":"ID"} + "changed" | {"kind":"automation","automationId":"saved graph ID"} + "changed" (graph reads a value on its own schedule with no agent step; host wakes this Goal when its output changes) | ${lifecycle !== "finite"
+    ? `{"kind":"timer","notBefore":"future ISO"} + "due" (at least 1 min ahead; check external state first, never repeat a done post or purchase)`
+    : `timer: refused without a goal deadline; value measurable only later: finish now and state what to re-measure and when`}
+deadline: ISO or null. User direction, Stop, authority changes override.`;
 }
 
 /**
@@ -77,5 +77,5 @@ For a saved artifact input, use subject {"kind":"artifact","artifactId":"observe
  * wait for its next work cycle up to the deadline; the host moves a later request to the deadline itself.
  */
 export function goalDeadlineWaitClause(deadlineAt: string): string {
-  return `This Goal has a deadline: ${deadlineAt}. Until then, keep working toward its target in bounded work cycles. When the next useful step is later (results need time to show), request the timer subject {"kind":"timer","notBefore":"future ISO timestamp"} with condition "due"; notBefore may not be later than the deadline (a later request is moved to the deadline). Inspect current external state before acting and never repeat a completed post or purchase. At the deadline, measure the target and finish the turn without a wait so it is verified.`;
+  return `deadline: ${deadlineAt}; work in bounded cycles; later step: {"kind":"timer","notBefore":"future ISO"} + "due", notBefore <= deadline (later is moved); check state first, never repeat a done post or purchase; at deadline measure and finish without a wait`;
 }

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import type { IpcMain, IpcMainInvokeEvent, WebContents } from "electron";
 import type { ProductExtensionPermission } from "../../shared/product-extension";
 import type { DaemonScienceCommand, DaemonScienceEvent } from "../daemon/science-service";
@@ -12,6 +13,7 @@ type Row = Record<string, unknown>;
 type Scope = { projectId: string; conversationId: string };
 type Cursor = { sequence: number; target: number };
 interface Viewer {
+  humanViewInstanceId: string;
   sender: WebContents;
   scope: Scope | null;
   lifecycleProjectId: string | null;
@@ -41,6 +43,11 @@ export interface ScienceDaemonExecutionIpc {
 
 const CORE_CHANNELS = [
   "science:runtime:inspect", "science:runtime:select",
+  "science:researchCompute:list", "science:researchCompute:read",
+  "science:researchCompute:interrupt", "science:researchCompute:clearGeneration", "science:researchCompute:readHumanControl",
+  "science:researchCompute:runConsole", "science:researchCompute:readConsoleRequest",
+  "science:researchCompute:beginSession", "science:researchCompute:runSession", "science:researchCompute:readSession", "science:researchCompute:readSessionRequest", "science:researchCompute:stopSession",
+  "science:researchCapabilities:inspect",
   "science:researchLoops:inspect", "science:researchLoops:start", "science:researchLoops:transition",
   "science:composer:start", "science:composer:steer", "science:composer:reconcileSteering",
   "science:composer:steering", "science:composer:cancel", "science:composer:attach", "science:composer:receipt",
@@ -91,6 +98,8 @@ export function registerScienceDaemonExecutionIpc(options: {
   assertScienceSender(event: IpcMainInvokeEvent, envelope: unknown, permission?: ProductExtensionPermission): unknown;
   /** Revalidates the active signed release at every event delivery. */
   assertScienceViewPermission(senderId: number, permission: ProductExtensionPermission): unknown;
+  /** Explicit actual signed view only; must deny app-control even when it holds a recorded view event. */
+  assertHumanComputeSender?(event: IpcMainInvokeEvent, envelope: unknown): { releaseId: string };
   client: ScienceDaemonClient;
   onConnectionState?(state: ScienceDaemonObservation): void;
 }): ScienceDaemonExecutionIpc {
@@ -141,7 +150,7 @@ export function registerScienceDaemonExecutionIpc(options: {
     if (existing) remove(existing);
     const destroyed = () => remove(viewer);
     const navigated = (_event: unknown, _url: string, _inPlace: boolean, mainFrame: boolean) => { if (mainFrame) remove(viewer); };
-    const viewer: Viewer = { sender: event.sender, scope: null, lifecycleProjectId: null, approvals: null,
+    const viewer: Viewer = { humanViewInstanceId: randomUUID(), sender: event.sender, scope: null, lifecycleProjectId: null, approvals: null,
       questions: null, asks: false, approvalIds: new Set(), askRequests: new Map(), cursors: new Map(), draining: null,
       dispose() { viewer.sender.removeListener("destroyed", destroyed); viewer.sender.removeListener("did-start-navigation", navigated); } };
     viewers.set(event.sender.id, viewer);
@@ -387,6 +396,162 @@ export function registerScienceDaemonExecutionIpc(options: {
   for (const action of ["inspect", "select"] as const) register(`science:runtime:${action}`, (event, envelope) => {
     const payload = input(envelope); scope(payload);
     return dispatch(`runtime.${action}`, payload);
+  });
+  for (const action of ["list", "read"] as const) register(`science:researchCompute:${action}`, async (event, envelope) => {
+    const payload = input(envelope); scope(payload);
+    // A deadline makes this an observation: commandObserved must not heal/start
+    // the daemon when the native compute monitor is opened.
+    const result = await client.commandObserved({ op: `compute.${action}`, input: payload } as DaemonScienceCommand,
+      { observationDeadlineMs: performance.now() + 5_000, timeoutMs: 5_000 });
+    admit(event, envelope);
+    return result;
+  });
+  for (const action of ["interrupt", "clearGeneration", "readHumanControl"] as const) ipcMain.handle(`science:researchCompute:${action}`, async (event, envelope) => {
+    let attempted = false;
+    let payload: Row | null = null;
+    const publicAction = action === "clearGeneration" ? "clear-generation" : action === "readHumanControl" ? "read-control" : action;
+    try {
+      admit(event, envelope);
+      if (!options.assertHumanComputeSender || !client.commandHuman) throw Error("science-human-compute-unavailable");
+      const release = options.assertHumanComputeSender(event, envelope);
+      if (typeof release.releaseId !== "string" || release.releaseId.length < 1 || release.releaseId.length > 200 || /[\u0000-\u001f]/u.test(release.releaseId)) throw Error("science-human-compute-release-invalid");
+      const raw = input(envelope);
+      const keys = action === "readHumanControl" ? ["projectId", "conversationId", "requestId"] :
+        ["projectId", "conversationId", "requestId", "executionId", "kernelId", "kernelGeneration", "codeSha256", "environmentSha256", "turnId", "invocationRunId", "originMessageId"];
+      if (Object.keys(raw).length !== keys.length || Object.keys(raw).some(key => !keys.includes(key))) throw Error("science-human-compute-input-invalid");
+      const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      for (const key of keys.filter(key => !["kernelGeneration", "codeSha256", "environmentSha256","turnId","invocationRunId"].includes(key))) {
+        if (typeof raw[key] !== "string" || !UUID.test(raw[key] as string)) throw Error("science-human-compute-input-invalid");
+      }
+      if (action !== "readHumanControl" && (!(raw.turnId===null&&raw.invocationRunId===null||[raw.turnId,raw.invocationRunId].every(v=>typeof v==="string"&&UUID.test(v)))||!Number.isSafeInteger(raw.kernelGeneration) || Number(raw.kernelGeneration) < 1
+        || !/^[a-f0-9]{64}$/.test(String(raw.codeSha256)) || !/^[a-f0-9]{64}$/.test(String(raw.environmentSha256)))) throw Error("science-human-compute-target-invalid");
+      payload = Object.freeze({ ...raw });
+      const viewer = viewerFor(event);
+      const frame = event.senderFrame;
+      const assertBeforeDispatch = () => {
+        admit(event, envelope);
+        const current = options.assertHumanComputeSender!(event, envelope);
+        if (!live(viewer) || event.senderFrame !== frame || current.releaseId !== release.releaseId) throw Error("science-human-compute-admission-changed");
+      };
+      const result = await client.commandHuman({ assertBeforeDispatch, build(owner) {
+        assertBeforeDispatch();
+        attempted = true;
+        return { op: `compute.${action}`, input: payload!, requester: { kind: "signed-science-main-frame", viewInstanceId: viewer.humanViewInstanceId,
+          releaseId: release.releaseId, ...owner } } as DaemonScienceCommand;
+      } }, { observationDeadlineMs: performance.now() + 5_000, timeoutMs: 5_000 });
+      assertBeforeDispatch();
+      return result;
+    } catch (error) {
+      // Do not rely on Electron's stringified exceptions for effect certainty.
+      // A late admission failure or a remote rejection may follow a real effect.
+      const transport = error instanceof ScienceDaemonClientError ? error.failure : null;
+      const outcome = transport?.outcome === "not-dispatched" || !attempted && !transport ? "not-dispatched" : "unknown";
+      const code = transport?.code ?? (error instanceof Error && /^[a-zA-Z0-9_-]{1,128}$/.test(error.message) ? error.message : "science-human-compute-unconfirmed");
+      return { schema: "agentlas.science-human-compute-transport.v1", outcome, code, action: publicAction,
+        ...(payload ? { projectId: payload.projectId, conversationId: payload.conversationId, requestId: payload.requestId,
+          ...(action === "readHumanControl" ? {} : { target: Object.fromEntries(Object.entries(payload).filter(([key]) => key !== "requestId")) }) } : {}) };
+    }
+  });
+  for (const action of ["runConsole", "readConsoleRequest"] as const) ipcMain.handle(`science:researchCompute:${action}`, async (event, envelope) => {
+    let attempted = false;
+    let payload: Row | null = null;
+    const publicAction = action === "runConsole" ? "run-console" : "read-console";
+    try {
+      admit(event, envelope);
+      if (!options.assertHumanComputeSender || !client.commandHuman) throw Error("science-human-compute-console-unavailable");
+      const release = options.assertHumanComputeSender(event, envelope);
+      if (typeof release.releaseId !== "string" || release.releaseId.length < 1 || release.releaseId.length > 200 || /[\u0000-\u001f]/u.test(release.releaseId)) throw Error("science-human-compute-release-invalid");
+      const raw = input(envelope), target = row(raw.target);
+      const allowed = action === "runConsole" ? ["requestId", "target", "code", "inputs", "outputs", "timeoutMs"] : ["requestId", "target"];
+      const targetKeys = ["projectId", "conversationId", "executionId", "kernelId", "kernelGeneration", "codeSha256", "environmentSha256", "turnId", "invocationRunId", "originMessageId"];
+      const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      const HASH = /^[a-f0-9]{64}$/;
+      if (Object.keys(raw).some(key => !allowed.includes(key)) || typeof raw.requestId !== "string" || !UUID.test(raw.requestId)
+        || !target || Object.keys(target).length !== targetKeys.length || Object.keys(target).some(key => !targetKeys.includes(key))
+        || targetKeys.filter(key => !["kernelGeneration", "codeSha256", "environmentSha256"].includes(key)).some(key => typeof target[key] !== "string" || !UUID.test(target[key] as string))
+        || !Number.isSafeInteger(target.kernelGeneration) || Number(target.kernelGeneration) < 1
+        || typeof target.codeSha256 !== "string" || !HASH.test(target.codeSha256) || typeof target.environmentSha256 !== "string" || !HASH.test(target.environmentSha256)) throw Error("science-human-compute-console-input-invalid");
+      const relative = (p: unknown): p is string => typeof p === "string" && p.length > 0 && p.length <= 2000 && !/[\\\u0000-\u001f]/u.test(p)
+        && !p.startsWith("/") && !p.split("/").some(part => !part || part === "." || part === "..");
+      if (action === "runConsole" && (typeof raw.code !== "string" || !raw.code.trim() || Buffer.byteLength(raw.code, "utf8") > 65536
+        || raw.timeoutMs !== undefined && (!Number.isSafeInteger(raw.timeoutMs) || Number(raw.timeoutMs) < 1000 || Number(raw.timeoutMs) > 86400000)
+        || raw.inputs !== undefined && (!Array.isArray(raw.inputs) || raw.inputs.length > 40 || raw.inputs.some(pin => !row(pin) || Object.keys(pin).sort().join(",") !== "path,sha256" || !relative(pin.path) || typeof pin.sha256 !== "string" || !HASH.test(pin.sha256)) || new Set(raw.inputs.map(pin => pin.path)).size !== raw.inputs.length)
+        || raw.outputs !== undefined && (!Array.isArray(raw.outputs) || raw.outputs.length > 40 || raw.outputs.some(p => !relative(p)) || new Set(raw.outputs).size !== raw.outputs.length))) throw Error("science-human-compute-console-input-invalid");
+      // Own immutable request bytes across the asynchronous no-heal preflight.
+      payload = Object.freeze({ requestId: raw.requestId, target: Object.freeze({ ...target }),
+        ...(action === "runConsole" ? { code: raw.code,
+          ...(raw.inputs === undefined ? {} : { inputs: Object.freeze((raw.inputs as Row[]).map(pin => Object.freeze({ ...pin }))) }),
+          ...(raw.outputs === undefined ? {} : { outputs: Object.freeze([...(raw.outputs as string[])]) }),
+          ...(raw.timeoutMs === undefined ? {} : { timeoutMs: raw.timeoutMs }) } : {}) });
+      const viewer = viewerFor(event), frame = event.senderFrame;
+      const assertBeforeDispatch = () => {
+        admit(event, envelope);
+        const current = options.assertHumanComputeSender!(event, envelope);
+        if (!live(viewer) || event.senderFrame !== frame || current.releaseId !== release.releaseId) throw Error("science-human-compute-admission-changed");
+      };
+      const result = await client.commandHuman({ assertBeforeDispatch, build(owner) {
+        assertBeforeDispatch(); attempted = true;
+        return { op: `compute.${action}`, input: payload!, requester: { kind: "signed-science-main-frame", viewInstanceId: viewer.humanViewInstanceId,
+          releaseId: release.releaseId, ...owner } } as DaemonScienceCommand;
+      } }, { observationDeadlineMs: performance.now() + 5_000, timeoutMs: 5_000 });
+      assertBeforeDispatch();
+      return result;
+    } catch (error) {
+      const transport = error instanceof ScienceDaemonClientError ? error.failure : null;
+      const outcome = transport?.outcome === "not-dispatched" || !attempted && !transport ? "not-dispatched" : "unknown";
+      const code = transport?.code ?? (error instanceof Error && /^[a-zA-Z0-9_-]{1,128}$/.test(error.message) ? error.message : "science-human-compute-console-unconfirmed");
+      return { schema: "agentlas.science-human-compute-console-transport.v1", outcome, code, action: publicAction,
+        ...(payload ? { requestId: payload.requestId, target: payload.target } : {}) };
+    }
+  });
+
+  for(const action of ["beginSession","runSession","readSession","readSessionRequest","stopSession"] as const) ipcMain.handle(`science:researchCompute:${action}`,async(event,envelope)=>{
+    let attempted=false,payload:Row|null=null;
+    const publicAction={beginSession:"begin-session",runSession:"run-session",readSession:"read-session",readSessionRequest:"read-session-request",stopSession:"stop-session"}[action];
+    try {
+      admit(event,envelope);
+      if(!options.assertHumanComputeSender||!client.commandHuman)throw Error("science-human-compute-session-unavailable");
+      const release=options.assertHumanComputeSender(event,envelope);
+      if(typeof release.releaseId!=="string"||release.releaseId.length<1||release.releaseId.length>200||/[\u0000-\u001f]/u.test(release.releaseId))throw Error("science-human-compute-release-invalid");
+      const raw=input(envelope),UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,HASH=/^[a-f0-9]{64}$/;
+      const keys=action==="beginSession"?(raw.mode==="bootstrap-python"?["requestId","projectId","conversationId","mode","originMessageId","language","environment","limits"]:["requestId","projectId","conversationId","anchorTarget","mode","limits"]):action==="runSession"?["requestId","projectId","conversationId","sessionId","sessionEpoch","code","inputs","outputs","timeoutMs"]:action==="readSession"?["projectId","conversationId","sessionId","requestId"]:action==="stopSession"?["projectId","conversationId","sessionId","requestId","sessionEpoch"]:["projectId","conversationId","sessionId","requestId"];
+      if(Object.keys(raw).some(k=>!keys.includes(k))||![raw.projectId,raw.conversationId].every(v=>typeof v==="string"&&UUID.test(v)))throw Error("science-human-compute-session-input-invalid");
+      if(action==="readSession") {
+        if((raw.sessionId===undefined)===(raw.requestId===undefined)||typeof(raw.sessionId??raw.requestId)!=="string"||!UUID.test(String(raw.sessionId??raw.requestId)))throw Error("science-human-compute-session-input-invalid");
+      }else if(typeof raw.requestId!=="string"||!UUID.test(raw.requestId)||action!=="beginSession"&&(typeof raw.sessionId!=="string"||!UUID.test(raw.sessionId))||["runSession","stopSession"].includes(action)&&(!Number.isSafeInteger(raw.sessionEpoch)||Number(raw.sessionEpoch)<1))throw Error("science-human-compute-session-input-invalid");
+      if(action==="beginSession") {
+        if(raw.mode==="bootstrap-python") {const environment=row(raw.environment);if(typeof raw.originMessageId!=="string"||!UUID.test(raw.originMessageId)||raw.language!=="python"||!environment||Object.keys(environment).length!==1||environment.kind!=="system")throw Error("science-human-compute-session-input-invalid");}
+        else {const target=row(raw.anchorTarget),targetKeys=["projectId","conversationId","executionId","kernelId","kernelGeneration","codeSha256","environmentSha256","turnId","invocationRunId","originMessageId"];
+        if(!target||Object.keys(target).length!==targetKeys.length||Object.keys(target).some(k=>!targetKeys.includes(k))||target.projectId!==raw.projectId||target.conversationId!==raw.conversationId||targetKeys.filter(k=>!["kernelGeneration","codeSha256","environmentSha256"].includes(k)).some(k=>typeof target[k]!=="string"||!UUID.test(target[k] as string))||!Number.isSafeInteger(target.kernelGeneration)||Number(target.kernelGeneration)<1||typeof target.codeSha256!=="string"||!HASH.test(target.codeSha256)||typeof target.environmentSha256!=="string"||!HASH.test(target.environmentSha256)||!["reuse-live","fresh-generation"].includes(String(raw.mode)))throw Error("science-human-compute-session-input-invalid");}
+        const ceilings:Row={wallTimeMs:28800000,maxCells:1000,maxActiveRuntimeMs:14400000,maxCellTimeMs:600000},limits=raw.limits===undefined?null:row(raw.limits);
+        if(raw.limits!==undefined&&(!limits||Object.keys(limits).some(k=>!Object.hasOwn(ceilings,k))||Object.entries(limits).some(([k,v])=>!Number.isSafeInteger(v)||Number(v)<(k==="maxCells"?1:1000)||Number(v)>Number(ceilings[k]))))throw Error("science-human-compute-session-input-invalid");
+      }
+      if(action==="runSession") {
+        const relative=(p:unknown)=>typeof p==="string"&&p.length>0&&p.length<=2000&&!/[\\\u0000-\u001f]/u.test(p)&&!p.startsWith("/")&&!p.split("/").some(x=>!x||x==="."||x==="..");
+        if(typeof raw.code!=="string"||!raw.code.trim()||Buffer.byteLength(raw.code,"utf8")>65536||raw.timeoutMs!==undefined&&(!Number.isSafeInteger(raw.timeoutMs)||Number(raw.timeoutMs)<1000||Number(raw.timeoutMs)>600000)||raw.inputs!==undefined&&(!Array.isArray(raw.inputs)||raw.inputs.length>40||raw.inputs.some(p=>!row(p)||Object.keys(p).sort().join(",")!=="path,sha256"||!relative(p.path)||typeof p.sha256!=="string"||!HASH.test(p.sha256))||new Set(raw.inputs.map(p=>p.path)).size!==raw.inputs.length)||raw.outputs!==undefined&&(!Array.isArray(raw.outputs)||raw.outputs.length>40||raw.outputs.some(p=>!relative(p))||new Set(raw.outputs).size!==raw.outputs.length))throw Error("science-human-compute-session-input-invalid");
+      }
+      const owned=JSON.parse(JSON.stringify(raw)) as Row; // no renderer-owned mutable nested values survive preflight
+      if(row(owned.anchorTarget))Object.freeze(owned.anchorTarget);
+      if(row(owned.environment))Object.freeze(owned.environment);
+      if(row(owned.limits))Object.freeze(owned.limits);
+      if(Array.isArray(owned.inputs)){owned.inputs.forEach(Object.freeze);Object.freeze(owned.inputs);}
+      if(Array.isArray(owned.outputs))Object.freeze(owned.outputs);
+      payload=Object.freeze(owned);
+      const viewer=viewerFor(event),frame=event.senderFrame;
+      const assertBeforeDispatch=()=>{admit(event,envelope);const current=options.assertHumanComputeSender!(event,envelope);if(!live(viewer)||event.senderFrame!==frame||current.releaseId!==release.releaseId)throw Error("science-human-compute-admission-changed");};
+      const result=await client.commandHuman({assertBeforeDispatch,build(owner){assertBeforeDispatch();attempted=true;return {op:`compute.${action}`,input:payload!,requester:{kind:"signed-science-main-frame",viewInstanceId:viewer.humanViewInstanceId,releaseId:release.releaseId,...owner}} as DaemonScienceCommand;}},{observationDeadlineMs:performance.now()+5000,timeoutMs:5000});
+      assertBeforeDispatch();return result;
+    }catch(error){const transport=error instanceof ScienceDaemonClientError?error.failure:null,outcome=transport?.outcome==="not-dispatched"||!attempted&&!transport?"not-dispatched":"unknown",code=transport?.code??(error instanceof Error&&/^[a-zA-Z0-9_-]{1,128}$/.test(error.message)?error.message:"science-human-compute-session-unconfirmed");
+      return {schema:"agentlas.science-human-compute-session-transport.v1",outcome,code,action:publicAction,...(payload?{input:payload}:{})};}
+  });
+  register("science:researchCapabilities:inspect", async (event, envelope) => {
+    const payload = input(envelope); scope(payload);
+    const result = await client.commandObserved({ op: "capability.inspect", input: payload } as DaemonScienceCommand,
+      { observationDeadlineMs: performance.now() + 5_000, timeoutMs: 5_000 });
+    // A navigation/release change during the read cannot receive an old scope's
+    // reply. This query never prepares a connector or starts/heals the daemon.
+    admit(event, envelope);
+    return result;
   });
   for (const action of ["inspect", "snapshot", "link"] as const) register(`science:projectSpace:${action}`, (_event, envelope) => {
     const payload = input(envelope);

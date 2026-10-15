@@ -32,12 +32,13 @@ export function isGlobalOrchestrator(agent: InstalledAgent | null | undefined): 
 }
 
 export function autoRouteJudgmentInput(userPrompt: string, pool: readonly InstalledAgent[]): string {
+  // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.agents.auto-router.judge-input, desktop.judgment.kind.installed-agent-route.user).
   return [
-    `REQUEST:\n${userPrompt.slice(0, 3_000)}`,
     "AVAILABLE PROJECT/TURN AGENTS:",
     ...pool.map((agent) =>
       `- ${agent.slug}: ${agent.nameEn || agent.name} — ${(agent.taglineEn || agent.tagline || "").slice(0, 240)}`,
     ),
+    `REQUEST:\n${userPrompt.slice(0, 3_000)}`,
   ].join("\n");
 }
 
@@ -130,9 +131,10 @@ export function autoRouteSystemPreamble(
   mode: "default" | "apps-generate" | "app-edit" = "default",
 ): string {
   const bounded = mode === "app-edit"
-    ? "Edit only the existing Agentlas App supplied by the host. Preserve user state and verify the change."
+    ? "scope: edit only the host-supplied Agentlas App; keep user state; verify"
     : mode === "apps-generate" && choice.agent.slug === APP_BUILDER_SLUG
-      ? "The user explicitly enabled Apps Generate for this turn. Build and verify the requested App."
-      : "Act only as a task-scoped sub-agent. Return the result to the current controller; never claim session ownership.";
-  return ["## Task-scoped agent call", "", autoRouteStatus(choice, locale), bounded].join("\n");
+      ? "scope: Apps Generate enabled; build and verify the requested App"
+      : "scope: task-scoped sub-agent; return to the controller, never claim the session";
+  // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.main.system.auto-route-preamble, desktop.agents.auto-router.preamble).
+  return ["## Task-scoped agent call", bounded, `agent: ${choice.agent.nameEn || choice.agent.name}; reason: ${choice.reason}`].join("\n");
 }

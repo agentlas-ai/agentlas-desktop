@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { McpInvocationRequest } from "../../shared/types";
 import { getDb } from "./db";
+import { readClosedNativeIngressFrontier, consumeClosedNativeIngressFrontier } from "../runtime/native-ingress-closure";
 
 /** Main-normalized immutable request snapshot; admitted still requires service validation. */
 export const INVOCATION_ADMISSION_DIGEST_VERSION = "main-canonical-json-v1" as const;
@@ -304,7 +305,7 @@ export function createInvocationAdmission(
     const pending = getPendingInvocationAdmissionForChat(input.chatId);
     if (pending) return { kind: "conflict", reason: "pending-chat", admission: pending };
     throw new Error("invocation_admission_insert_not_applied");
-  })();
+  }).immediate();
 }
 
 /**
@@ -395,5 +396,32 @@ export function decideInvocationAdmission(input: InvocationAdmissionIdentity & {
       SET status = 'rejected', rejected_at = ?, rejection_reason_code = ?, updated_at = ?
       WHERE run_id = ? AND status = 'pending'`).run(timestamp, input.reasonCode, timestamp, input.runId);
     return { kind: "rejected", admission: decode(rowForRun(input.runId)!) };
-  })();
+  }).immediate();
+}
+
+/** Actual Root source closed before prepared entry; canonical request transfer may have failed.
+ * No JSON substitute, missing ACK, PID or caller-authored status is a no-start proof. */
+export function rejectClosedNativeIngressAdmission(proof: object, now: Date = new Date()): InvocationAdmissionWriteResult {
+  const result = getDb().transaction((): InvocationAdmissionWriteResult => {
+    const binding = readClosedNativeIngressFrontier(proof);
+    const row = rowForRun(binding.runId);
+    if (!row) return { kind: "conflict", reason: "not-found" };
+    if (row.chat_id !== binding.chatId || row.input_digest !== binding.inputDigest
+      || row.digest_version !== INVOCATION_ADMISSION_DIGEST_VERSION) return { kind: "conflict", reason: "run-identity", admission: decode(row) };
+    if (row.owner_process_epoch !== binding.ownerProcessEpoch) return { kind: "conflict", reason: "owner-epoch", admission: decode(row) };
+    if (anyStartReceipt(binding.runId)) return { kind: "conflict", reason: "start-already-exists", admission: decode(row) };
+    if (row.status === "rejected") return { kind: "rejected", admission: decode(row) };
+    if (row.status !== "pending") return { kind: "conflict", reason: "already-decided", admission: decode(row) };
+    const timestamp = now.toISOString();
+    const changed = getDb().prepare(`UPDATE invocation_admissions SET status='rejected', rejected_at=?,
+      rejection_reason_code='native_ingress_closed_before_prepared', updated_at=?
+      WHERE run_id=? AND chat_id=? AND input_digest=? AND owner_process_epoch=? AND status='pending'`)
+      .run(timestamp, timestamp, binding.runId, binding.chatId, binding.inputDigest, binding.ownerProcessEpoch);
+    if (changed.changes !== 1) throw new Error("invocation_admission_closed_frontier_cas_failed");
+    return { kind: "rejected", admission: decode(rowForRun(binding.runId)!) };
+   }).immediate();
+  // A rollback or unknown COMMIT failure leaves this closed observation usable.
+  // It cannot grant execution; an exact terminal row is observed idempotently.
+  consumeClosedNativeIngressFrontier(proof);
+  return result;
 }

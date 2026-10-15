@@ -9,7 +9,7 @@ import type {
   ExperienceOntologyGraphSnapshot,
 } from "../../shared/types";
 import { EXPERIENCE_RELATION_LEDGER_FILE } from "../architecture/manifest";
-import { getDb } from "../store/db";
+import { getMemoryDb as getDb } from "../memory/database";
 import { isCanonicalTaskId } from "./taxonomy";
 import {
   autoLocalEmbedding,
@@ -1169,6 +1169,18 @@ function relationGraphNode(row: RelationGraphNodeRow): ExperienceOntologyGraphNo
  * but secret-looking values are still dropped as defense in depth, and the
  * label is flattened to one short line.
  */
+/**
+ * The agent-facing copy of an experience map (app.call): the owner-local titles (localLabel) are removed, safeLabel stays.
+ * The map is drawn for the owner; a local title (pack name, memory candidate text) never reaches an agent or a model.
+ */
+export function withoutOwnerLocalLabels<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((item) => withoutOwnerLocalLabels(item)) as T;
+  if (!value || typeof value !== "object") return value;
+  const copy: Record<string, unknown> = {};
+  for (const [key, field] of Object.entries(value as Record<string, unknown>)) if (key !== "localLabel") copy[key] = withoutOwnerLocalLabels(field);
+  return copy as T;
+}
+
 function localGraphLabel(value: string | null | undefined): string | undefined {
   const flat = String(value ?? "")
     .normalize("NFC")

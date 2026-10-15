@@ -2127,19 +2127,6 @@ const dict = {
     "one.shell.workspace.open_sidebar_aria": "사이드바 열기",
     "one.shell.firstrun.title": "일하는 당신을 만드세요, 그리고 당신은 쉬세요",
     "one.shell.firstrun.body": "생각나는 대로 말하세요. One이 필요한 기준을 정리하고, 일이 커지면 맞는 팀을 알아서 준비합니다.",
-    "one.chips.aria": "바로 시작할 수 있는 일",
-    "one.chips.recommended": "권장",
-    "one.chips.build": "에이전트 만들기 — 반복 업무를 맡길 전담 일손을 세워요",
-    "one.chips.library": "내 에이전트 찾기·정리 — 라이브러리를 한눈에 봐요",
-    "one.chips.automation": "자동화 만들기 — 정한 시간에 알아서 실행돼요",
-    "one.chips.experience": "에이전트 경험 리뷰 — 쌓인 경험을 확인하고 승인해요",
-    "one.chips.resume_build": "만들던 에이전트 이어하기 — 멈춘 곳부터 계속해요",
-    "one.chips.fix_automation": "실패한 자동화 고치기 — {name}",
-    "one.chips.approve_graph": "승인 기다리는 중 — {name}",
-    "one.chips.try_automation": "자동화 써보기 — 최근 7일간 안 쓴 기능이에요",
-    "one.chips.try_experience": "경험 리뷰 써보기 — 최근 7일간 안 쓴 기능이에요",
-    "one.chips.try_build": "에이전트 만들어보기 — 최근 7일간 안 쓴 기능이에요",
-    "one.chips.try_library": "라이브러리 둘러보기 — 최근 7일간 안 쓴 기능이에요",
     "one.growth.title": "에이전트가 배운 걸 반영할까요?",
     "one.growth.apply": "반영하기",
     "one.growth.later": "나중에",
@@ -4489,19 +4476,6 @@ const dict = {
     "one.shell.workspace.open_sidebar_aria": "Open sidebar",
     "one.shell.firstrun.title": "Build a version of you that works. Then you rest.",
     "one.shell.firstrun.body": "Say it however it comes to mind. One organizes the criteria and prepares the right team when the work grows.",
-    "one.chips.aria": "Things you can start right away",
-    "one.chips.recommended": "Recommended",
-    "one.chips.build": "Create an agent — set up dedicated help for repeat work",
-    "one.chips.library": "Find and organize my agents — see the whole library",
-    "one.chips.automation": "Create an automation — runs on the schedule you set",
-    "one.chips.experience": "Review agent experience — check and approve what was learned",
-    "one.chips.resume_build": "Continue the agent you were building — pick up where it stopped",
-    "one.chips.fix_automation": "Fix a failed automation — {name}",
-    "one.chips.approve_graph": "Waiting for your approval — {name}",
-    "one.chips.try_automation": "Try automations — unused in the last 7 days",
-    "one.chips.try_experience": "Try experience review — unused in the last 7 days",
-    "one.chips.try_build": "Try building an agent — unused in the last 7 days",
-    "one.chips.try_library": "Explore your library — unused in the last 7 days",
     "one.growth.title": "Apply what your agent learned?",
     "one.growth.apply": "Apply",
     "one.growth.later": "Later",
@@ -4822,6 +4796,15 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       } catch {
         // Storage is optional; the system preference remains available.
       }
+      // A language saved through the core setting while this window was closed (revision > 0) wins over the old local copy.
+      try {
+        const core = await ipc()?.sdk?.settings?.getLanguage?.();
+        const data = core?.status === "ok" ? core.data as { source?: string; revision?: number; pref?: string } | undefined : undefined;
+        if (data?.source === "core-setting" && (data.revision ?? 0) > 0 && (data.pref === "ko" || data.pref === "en" || data.pref === "system")) {
+          stored = data.pref;
+          try { if (stored === "system") window.localStorage.removeItem(STORAGE_KEY); else window.localStorage.setItem(STORAGE_KEY, stored); } catch { /* optional */ }
+        }
+      } catch { /* the local copy still applies */ }
       const resolved = stored === "system" ? await readSystemLocale() : stored;
       if (generation !== localeRequestGeneration.current) return;
       setPrefState(stored);
@@ -4835,8 +4818,8 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     if (!_ready) return;
     _localeSnapshot = locale;
     const api = ipc();
-    void api?.menu?.setLocale?.(locale);
-  }, [locale, _ready]);
+    void api?.menu?.setLocale?.(locale, pref);
+  }, [locale, pref, _ready]);
 
   const setPref = useCallback(async (p: LocalePref): Promise<Locale> => {
     // An older system-locale reply must not overwrite a newer user choice.
@@ -4857,6 +4840,16 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       return next;
     }
   }, []);
+
+  // Language set through the harness port (SDK / model / app control / daemon): follow the core setting. Applying goes
+  // through the same setPref path; the echo to menu:setLocale changes nothing, so there is no loop.
+  useEffect(() => {
+    const api = ipc();
+    const off = api?.sdk?.settings?.onLanguageChanged?.((event) => {
+      void setPref(event.pref).then(() => api?.sdk?.settings?.ackLanguageApplied?.(event.revision));
+    });
+    return () => { off?.(); };
+  }, [setPref]);
 
   // One 의 사람에게 보이는 호칭 — 첫 설정 02 단계/프로필에서 정한 이름. 바뀌면 t 가 새로 만들어져
   // 소비자가 다시 그린다. 제품 이름 "One" 은 ONE_PERSONA_KEYS 밖의 문장에 그대로 남는다.

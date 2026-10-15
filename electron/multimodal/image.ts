@@ -12,29 +12,24 @@ import { userDataPath } from "../runtime-paths";
 import { detachedSpawnOpts, killCliTree, trackRunChild } from "../runtime/exec";
 import { withCodexProductHome } from "../runtime/codex-product-home";
 import { withAgyProductHome } from "../runtime/antigravity-personal-context";
+import { findExecutableSync } from "../runtime/path-lookup";
 
-export type ImageModel = "codex" | "gemini" | "auto";
+export type ImageModel = "codex" | "gemini" | "grok" | "auto";
 export interface ImageResult {
   ok: boolean;
   src?: string;
   reason?: string;
   /** 실제 생성에 성공한 엔진(auto 페일오버 추적용). */
-  engine?: "codex" | "gemini";
+  engine?: "codex" | "gemini" | "grok";
   /** Main-only source path; never put this path in model/user text. */
   artifactPath?: string;
+  /** Edit lineage (NH34): the input's and the output's content digests. */
+  lineage?: { sourceSha256: string; outputSha256: string };
 }
 
 function resolveBin(name: string, extra: string[]): string | null {
-  const fromPath = (process.env.PATH || "").split(":").filter(Boolean).map((d) => path.join(d, name));
-  for (const c of [...extra, ...fromPath]) {
-    try {
-      fs.accessSync(c, fs.constants.X_OK);
-      return c;
-    } catch {
-      /* keep looking */
-    }
-  }
-  return null;
+  // Platform PATH delimiter and Windows PATHEXT (NH31): a POSIX ":" split read every Windows CLI as absent.
+  return findExecutableSync(name, extra);
 }
 
 function newestPngSince(dir: string, since: number): string | null {
@@ -64,18 +59,21 @@ function newestPngSince(dir: string, since: number): string | null {
   return out[0]?.p ?? null;
 }
 
-async function runCodexImage(prompt: string, target: string, cwd: string): Promise<boolean> {
+async function runCodexImage(prompt: string, target: string, cwd: string, inputImage?: string): Promise<boolean> {
   const bin = resolveBin("codex", [
     path.join(os.homedir(), ".local/bin/codex"),
     "/opt/homebrew/bin/codex",
     "/usr/local/bin/codex",
   ]);
   if (!bin) return false;
-  const instruction =
-    `Use your built-in image_gen tool to generate exactly ONE image and save the PNG to ${target} ` +
-    `(largest landscape size, e.g. 1536x1024). IMAGE PROMPT: ${prompt}. ` +
-    `Absolutely no text, no words, no letters, no numbers, no logo, no watermark. ` +
-    `If you cannot generate images print exactly NO_IMAGE_GEN.`;
+  const instruction = inputImage
+    // Edit: the attached image is the source; the instruction says what changes (NH34).
+    ? `Use your built-in image_gen tool to edit the attached image and save exactly ONE resulting PNG to ${target}. ` +
+      `EDIT: ${prompt}. Keep everything the edit does not mention. If you cannot edit images print exactly NO_IMAGE_GEN.`
+    : `Use your built-in image_gen tool to generate exactly ONE image and save the PNG to ${target} ` +
+      `(largest landscape size, e.g. 1536x1024). IMAGE PROMPT: ${prompt}. ` +
+      `Absolutely no text, no words, no letters, no numbers, no logo, no watermark. ` +
+      `If you cannot generate images print exactly NO_IMAGE_GEN.`;
   const since = Date.now() - 3000;
   await new Promise<void>((resolve) => {
     let done = false;
@@ -88,7 +86,7 @@ async function runCodexImage(prompt: string, target: string, cwd: string): Promi
     try {
       // stdin은 반드시 닫는다(ignore) — 파이프로 열려 있으면 codex가
       // "Reading additional input from stdin..."으로 EOF를 기다리며 영원히 블록된다.
-      child = spawn(bin, ["exec", "-s", "workspace-write", "--skip-git-repo-check", instruction], {
+      child = spawn(bin, ["exec", "-s", "workspace-write", "--skip-git-repo-check", ...(inputImage ? ["-i", inputImage] : []), instruction], {
         cwd,
         // The user's Codex home without their personal AGENTS.md, like every product run.
         env: withCodexProductHome(process.env),
@@ -155,7 +153,7 @@ async function runGeminiImage(prompt: string, target: string, apiKey: string): P
  * ~/.gemini/antigravity-cli/scratch 에 저장하므로, --add-dir로 출력폴더 권한을 주고, 실패 시 scratch의
  * 최신 PNG를 target으로 복사한다.
  */
-async function runAgyNanoBanana(prompt: string, target: string): Promise<boolean> {
+async function runAgyNanoBanana(prompt: string, target: string, inputImage?: string): Promise<boolean> {
   const bin = resolveBin("agy", [
     path.join(os.homedir(), ".local/bin/agy"),
     "/opt/homebrew/bin/agy",
@@ -163,14 +161,18 @@ async function runAgyNanoBanana(prompt: string, target: string): Promise<boolean
   ]);
   if (!bin) return false;
   const outDir = path.dirname(target);
-  const instruction =
-    `Use your image generation capability (Nano Banana / Gemini image) to generate exactly ONE image: ${prompt}. ` +
-    `Save the resulting PNG file to the absolute path ${target}. ` +
-    `No text, no words, no letters, no numbers, no logo, no watermark. If you cannot generate images, reply exactly NO_IMAGE_GEN.`;
+  const instruction = inputImage
+    ? `Use your image generation capability (Nano Banana / Gemini image) to edit the image at the absolute path ${inputImage}: ${prompt}. ` +
+      `Keep everything the edit does not mention. Save exactly ONE resulting PNG to the absolute path ${target}. If you cannot edit images, reply exactly NO_IMAGE_GEN.`
+    : `Use your image generation capability (Nano Banana / Gemini image) to generate exactly ONE image: ${prompt}. ` +
+      `Save the resulting PNG file to the absolute path ${target}. ` +
+      `No text, no words, no letters, no numbers, no logo, no watermark. If you cannot generate images, reply exactly NO_IMAGE_GEN.`;
   const scratch = path.join(os.homedir(), ".gemini", "antigravity-cli", "scratch");
   const since = Date.now() - 3000;
   // HOME mirror: the conversation stays in the product store; scratch/ is linked, so the image is still found there.
   const env = withAgyProductHome({ ...process.env, GEMINI_CLI_TRUST_WORKSPACE: "true" }, undefined, undefined);
+  // The selected route uses subscription OAuth, regardless of ambient API keys.
+  for (const key of ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_APPLICATION_CREDENTIALS"]) delete env[key];
   await new Promise<void>((resolve) => {
     let done = false;
     const finish = () => {
@@ -181,7 +183,7 @@ async function runAgyNanoBanana(prompt: string, target: string): Promise<boolean
     let child;
     try {
       // stdin ignore — codex와 동일한 stdin-EOF 대기 블록 방지.
-      child = spawn(bin, ["--dangerously-skip-permissions", "--add-dir", outDir, "--print", instruction], {
+      child = spawn(bin, ["--dangerously-skip-permissions", "--add-dir", outDir, ...(inputImage ? ["--add-dir", path.dirname(inputImage)] : []), "--print", instruction], {
         cwd: outDir,
         env,
         stdio: ["ignore", "ignore", "ignore"],
@@ -221,18 +223,14 @@ async function runAgyNanoBanana(prompt: string, target: string): Promise<boolean
   return fs.existsSync(target);
 }
 
-/** gemini 경로 1회 시도 — agy 나노바나나(키리스) → GEMINI_API_KEY Imagen 폴백. */
+/** The subscription route never falls through to a paid API transport. */
 async function tryGemini(clean: string, target: string): Promise<boolean> {
-  const agyOk = await runAgyNanoBanana(clean, target);
-  if (agyOk) return true;
-  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
-  if (!apiKey) return false;
-  return runGeminiImage(clean, target, apiKey);
+  return runAgyNanoBanana(clean, target);
 }
 
 // auto 페일오버 상태 — 한 엔진이 실패(쿼터 소진/미설치)하면 세션 내 잠시 뒤로 미룬다(15분).
 // 매 이미지마다 죽은 엔진에 150초 타임아웃을 다시 태우는 낭비를 막는 소프트 쿨다운.
-const engineCooldown: Record<"codex" | "gemini", number> = { codex: 0, gemini: 0 };
+const engineCooldown: Record<"codex" | "gemini" | "grok", number> = { codex: 0, gemini: 0, grok: 0 };
 const COOLDOWN_MS = 15 * 60 * 1000;
 
 /**
@@ -240,6 +238,13 @@ const COOLDOWN_MS = 15 * 60 * 1000;
  * 남은 사용량이 있는 쪽을 자동으로 쓴다. 명시 모델은 그 엔진만 쓴다. Dashboard 역할
  * 슬롯에서 온 선택을 몰래 다른 공급자로 바꾸면 저장된 선택과 실제 영수증이 달라진다.
  */
+/** Grok Imagine (official CLI, OAuth subscription only — runGrokImagine refuses an API key) into the exact target. */
+async function tryGrok(prompt: string, target: string, dir: string): Promise<boolean> {
+  const { runGrokImagine } = await import("./grok-imagine");
+  const produced = await runGrokImagine({ prompt, cwd: dir, kind: "image", targetPath: target });
+  return Boolean(produced) && fs.existsSync(target);
+}
+
 export async function generateImage(model: ImageModel, prompt: string): Promise<ImageResult> {
   let target: string | undefined;
   try {
@@ -250,24 +255,29 @@ export async function generateImage(model: ImageModel, prompt: string): Promise<
     target = path.join(dir, `trex_${Date.now()}_${Math.floor(Math.random() * 1e6)}.png`);
 
     const now = Date.now();
-    const preferred: Array<"codex" | "gemini"> =
+    // Grok (Imagine through the official CLI, subscription OAuth only) is used only when chosen: auto keeps codex → gemini.
+    const preferred: Array<"codex" | "gemini" | "grok"> =
       model === "gemini"
         ? ["gemini"]
         : model === "codex"
           ? ["codex"]
-          : ["codex", "gemini"];
+          : model === "grok"
+            ? ["grok"]
+            : ["codex", "gemini"];
     // auto일 때만 쿨다운으로 순서 재배열(명시 모델은 사용자의 의도를 우선 존중).
     const order =
       model === "auto"
         ? [...preferred].sort((a, b) => (engineCooldown[a] > now ? 1 : 0) - (engineCooldown[b] > now ? 1 : 0))
         : preferred;
 
-    let engine: "codex" | "gemini" | null = null;
+    let engine: "codex" | "gemini" | "grok" | null = null;
     for (const e of order) {
       const ok =
         e === "codex"
           ? await runCodexImage(clean, target, dir)
-          : await tryGemini(clean, target);
+          : e === "grok"
+            ? await tryGrok(clean, target, dir)
+            : await tryGemini(clean, target);
       if (ok) {
         engine = e;
         engineCooldown[e] = 0;
@@ -276,7 +286,7 @@ export async function generateImage(model: ImageModel, prompt: string): Promise<
       engineCooldown[e] = now + COOLDOWN_MS;
     }
     if (!engine) {
-      try { fs.unlinkSync(target); } catch { /* partial engine output is disposable */ }
+      // Retain partial media at its durable target for inspection and recovery.
       return { ok: false, reason: "all-engines-unavailable" };
     }
 
@@ -289,10 +299,48 @@ export async function generateImage(model: ImageModel, prompt: string): Promise<
       artifactPath: target,
     };
   } catch (e) {
-    if (target) {
-      try { fs.unlinkSync(target); } catch { /* cleanup is best-effort after a failed run */ }
-    }
+    // Keep the original target, including partial media, for recovery.
     return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+const EDIT_INPUT_MAX_BYTES = 20 * 1024 * 1024;
+
+/**
+ * Edit one image through a subscription route (NH34): Codex image_gen with the image attached (`codex exec -i`) or
+ * Antigravity Nano Banana reading it from its directory. Grok Imagine and the paid Gemini API are not edit routes here;
+ * an explicit route never falls through to another. The input is read, never changed; the output is a new file with
+ * the input and output digests as lineage.
+ */
+export async function editImage(model: Exclude<ImageModel, "grok">, imagePath: string, instruction: string): Promise<ImageResult> {
+  try {
+    const clean = (instruction || "").trim().slice(0, 1200);
+    if (!clean) return { ok: false, reason: "empty-instruction" };
+    const stat = fs.statSync(imagePath);
+    if (!stat.isFile() || stat.size === 0 || stat.size > EDIT_INPUT_MAX_BYTES) return { ok: false, reason: "edit-input-invalid" };
+    const source = fs.readFileSync(imagePath);
+    const png = source.length > 8 && source.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    const jpeg = source.length > 3 && source[0] === 0xff && source[1] === 0xd8 && source[2] === 0xff;
+    const webp = source.length > 12 && source.toString("latin1", 0, 4) === "RIFF" && source.toString("latin1", 8, 12) === "WEBP";
+    if (!png && !jpeg && !webp) return { ok: false, reason: "edit-input-not-image" };
+    const { createHash } = await import("node:crypto");
+    const sourceSha256 = createHash("sha256").update(source).digest("hex");
+    const dir = userDataPath("multimodal-images");
+    fs.mkdirSync(dir, { recursive: true });
+    const target = path.join(dir, `edit_${Date.now()}_${Math.floor(Math.random() * 1e6)}.png`);
+    const order: Array<"codex" | "gemini"> = model === "codex" ? ["codex"] : model === "gemini" ? ["gemini"] : ["codex", "gemini"];
+    for (const engine of order) {
+      const ok = engine === "codex" ? await runCodexImage(clean, target, dir, imagePath) : await runAgyNanoBanana(clean, target, imagePath);
+      if (!ok || !fs.existsSync(target)) continue;
+      const output = fs.readFileSync(target);
+      const outputSha256 = createHash("sha256").update(output).digest("hex");
+      // A route that copied the input back unchanged did not edit anything.
+      if (outputSha256 === sourceSha256) { fs.rmSync(target, { force: true }); continue; }
+      return { ok: true, engine, artifactPath: target, src: `data:${sniffImageMime(output)};base64,${output.toString("base64")}`, lineage: { sourceSha256, outputSha256 } };
+    }
+    return { ok: false, reason: "all-engines-unavailable" };
+  } catch (e) {
+    return { ok: false, reason: e instanceof Error ? e.message.slice(0, 200) : String(e) };
   }
 }
 
@@ -323,19 +371,19 @@ function sniffImageMime(buf: Buffer): string {
   return "image/png";
 }
 
-/** 드롭다운 가용성 — codex bin 존재 / gemini 키 존재 여부를 렌더러에 알려준다. */
+/** CLI presence is availability metadata, not a provider execution receipt. */
 export async function imageProviders(): Promise<{ codex: boolean; gemini: boolean }> {
   const codex = !!resolveBin("codex", [
     path.join(os.homedir(), ".local/bin/codex"),
     "/opt/homebrew/bin/codex",
     "/usr/local/bin/codex",
   ]);
-  // 나노바나나 = Antigravity CLI(agy) 키리스, 또는 GEMINI_API_KEY 폴백.
+  // Nano Banana is the Antigravity subscription route; API keys are not its availability.
   const agy = !!resolveBin("agy", [
     path.join(os.homedir(), ".local/bin/agy"),
     "/opt/homebrew/bin/agy",
     "/usr/local/bin/agy",
   ]);
-  const gemini = agy || !!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
+  const gemini = agy;
   return { codex, gemini };
 }

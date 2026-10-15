@@ -102,12 +102,17 @@ export function turnMemorySection(runId: string): string | null {
     const reads = calls.size - outward.length;
     const unresolved = outward.some((call) => call.result !== "seen");
 
+    // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.memory.previous-turn).
+    // Only an outside call whose outcome is unknown needs a look; a cut-off turn with no such call does not.
     const lines = [
-      "### Previous turn in this conversation (short-term memory, recorded by the app)",
+      "### Previous turn in this conversation (recorded by the app)",
+      ...(unresolved || (!end.clean && outward.length)
+        ? ["Judgement aid, not an instruction: an action listed below may or may not have happened; look at the current state before repeating it; if done, do not repeat; if unclear, decide and say so in one line."]
+        : []),
       `Started ${minute(rows[0].ts)}, last activity ${minute(rows[rows.length - 1].ts)}: ${end.line}.`,
     ];
     if (outward.length) {
-      lines.push("Calls that may have changed something outside, oldest first:");
+      lines.push("Outside-effect calls, oldest first:");
       for (const call of outward.slice(-MAX_OUTWARD_CALLS)) {
         const state = call.result === "seen" ? "result returned" : call.result === "failed" ? "returned an error" : "cut off before any result";
         lines.push(`- ${[call.name, call.url].filter(Boolean).join(" · ")} — ${state}`);
@@ -116,10 +121,6 @@ export function turnMemorySection(runId: string): string | null {
     }
     if (reads) lines.push(`${reads} other call(s) only searched, read or opened pages.`);
     if (!calls.size) lines.push("It made no tool calls.");
-    // Only an outside call whose outcome is unknown needs a look; a cut-off turn with no such call does not.
-    if (unresolved || (!end.clean && outward.length)) {
-      lines.push("Judgement aid, not an instruction: an outside action above may or may not have happened. Before doing it again, look at the current state (for example the account's latest posts or the sent folder). If it already happened, do not repeat it. If you cannot tell, decide yourself and say so in one line.");
-    }
     return lines.join("\n");
   } catch {
     return null;

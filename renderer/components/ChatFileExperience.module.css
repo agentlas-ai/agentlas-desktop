@@ -101,7 +101,7 @@
 }
 
 .inline .tabSelect { flex: 1 1 auto; max-width: 100%; padding: 0 4px 0 10px; }
-.inline .tabClose { width: 20px; min-height: 20px; opacity: 0; }
+.inline .tabClose { width: 24px; min-height: 24px; opacity: 0; }
 .inline .tab:hover .tabClose,
 .inline .tab[data-active="true"] .tabClose { opacity: .62; }
 

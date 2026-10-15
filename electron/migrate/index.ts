@@ -248,8 +248,7 @@ export async function runMigration(opts: MigrationOptions): Promise<MigrationRes
     if (!agent.skipped) {
       const memoryNote =
         src.memoryFiles.length > 0
-          ? `\n\n${src.label} 메모리 ${src.memoryFiles.length}개를 ${src.rootPath} 에서 발견. ` +
-            `워킹 폴더로 연결하면 에이전트가 참조할 수 있습니다.`
+          ? `\nmemory: ${src.memoryFiles.length} files at ${src.rootPath}; link as working folder to reference`
           : "";
       const project = createProject({
         name: uiText(`${src.label} 마이그레이션`, `${src.label} migration`),
@@ -265,7 +264,7 @@ export async function runMigration(opts: MigrationOptions): Promise<MigrationRes
           nameSnapshot: src.label,
         }],
         systemPrompt:
-          `${src.label}에서 가져온 어시스턴트입니다. 원본 설정: ${src.rootPath}` + memoryNote,
+          `imported assistant from ${src.label}; source config: ${src.rootPath}` + memoryNote,
       }, { projectAgentGrant });
       projectId = project.id;
     }

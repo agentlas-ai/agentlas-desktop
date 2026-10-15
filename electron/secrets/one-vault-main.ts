@@ -103,6 +103,21 @@ function owned(event:IpcMainInvokeEvent):BrowserWindow {
   if(window.isDestroyed()||!window.isFocused()||!host.isOwnerWindow(window))throw new OneVaultError('authority_denied');
   return window;
 }
+/** Original focused Main owner plus actual Vault drain. This only prepares a
+ * report generation; it never resumes credential access or approves a source. */
+export async function prepareOneVaultMainReportGeneration(event:IpcMainInvokeEvent){
+ const originalHost=host,window=owned(event),frame=event.senderFrame,url=frame?.url;
+ if(event.senderFrame!==event.sender.mainFrame||policy||consumerReady||pendingConsent||providerDomain||providerPlayer)throw new OneVaultError('authority_unavailable');
+ const r=runtime(),session=getAuthenticatedSessionBinding(),owner=r.currentNativeOwner(),trust=r.trust.currentHostMetadata();
+ if(!session||session.expiresAt!==null&&session.expiresAt<=Date.now()||!owner||!trust||trust.hostId!==owner.hostId||owner.principalId!==session.userId||owner.sessionId!==session.sessionId||owner.workspaceId!==session.workspaceId)throw new OneVaultError('authority_unavailable');
+ const identity=oneVaultDigest([session,owner,trust]);
+ const current=()=>{
+  if(host!==originalHost||owned(event)!==window||event.senderFrame!==frame||event.senderFrame!==event.sender.mainFrame||frame?.url!==url||policy||consumerReady||pendingConsent||providerDomain||providerPlayer||currentOneVaultRuntime()!==r||oneVaultDigest([getAuthenticatedSessionBinding(),r.currentNativeOwner(),r.trust.currentHostMetadata()])!==identity)throw new OneVaultError('authority_unavailable');
+ };
+ current();await r.service.beginAuthorityDrain();current();const drain=r.service.authorityDrainState();
+ if(!drain.confirmed)throw new OneVaultError('authority_unavailable');
+ return Object.freeze({window,runtime:r,drainEpoch:drain.epoch,assertCurrent(){current();const latest=r.service.authorityDrainState();if(!latest.confirmed||latest.epoch!==drain.epoch)throw new OneVaultError('authority_unavailable')}});
+}
 const authorityRebinds=new WeakMap<object,{window:BrowserWindow;runtime:ReturnType<typeof runtime>;ticket:object;policy:OneVaultRuntimePolicy;consumer:((commandId:string,toolId:string,keyName:string)=>boolean)|null;consent:OneVaultMainPendingConsent|null;cleared:boolean}>();
  /** Main top-frame/native owner action only. Existing provider domains require their own drain owner. */
  export async function prepareOneVaultMainReauthorization(event:IpcMainInvokeEvent):Promise<{ticket:object;window:BrowserWindow}>{

@@ -9,8 +9,6 @@
 import { useEffect, useState } from "react";
 import {
   ONE_DECISION_JUDGE_TIMEOUT_MS,
-  lexicalOneDecisionDisposition,
-  lexicalOneDecisionRiskLevel,
   oneDecisionJudgmentTexts,
   type OneDecisionAuthorityReadiness,
   type OneDecisionJudgedReaders,
@@ -45,13 +43,13 @@ export function useJudgedOneDecision(
     let cancelled = false;
     void (async () => {
       try {
-        const lexicalDispositions = texts.options.map(lexicalOneDecisionDisposition);
         const [riskVerdict, readinessVerdict, dispositionVerdicts] = await Promise.all([
           judgeLabelViaBridge<OneDecisionRiskLevel>({
             kind: "one-decision-risk",
             labels: RISK_LABELS,
             input: texts.combined,
-            fallback: lexicalOneDecisionRiskLevel(texts.combined, lexicalDispositions),
+            // No verdict → the most careful level (never a word guess).
+            fallback: "R4",
             timeoutMs: ONE_DECISION_JUDGE_TIMEOUT_MS,
           }),
           judgeLabelViaBridge<OneDecisionAuthorityReadiness>({
@@ -66,7 +64,7 @@ export function useJudgedOneDecision(
               kind: "one-decision-disposition",
               labels: DISPOSITION_LABELS,
               input: optionText,
-              fallback: lexicalOneDecisionDisposition(optionText),
+              fallback: "choice",
               timeoutMs: ONE_DECISION_JUDGE_TIMEOUT_MS,
             }).then((verdict) => ({ optionText, verdict })),
           )),

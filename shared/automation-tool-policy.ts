@@ -10,21 +10,9 @@ import type { AutomationToolMode } from "./types";
 // here anymore: the resident judge rules by meaning, and an unjudged run keeps the neutral
 // "auto" mode instead of guessing from words.
 //
-// What survives is FORMAT detection, not meaning: a literal product name, the CDP port, the
-// remote-debugging flag. Those are identifiers — finite, language-independent, and correct
-// to match exactly.
-const EXACT_AGENTLAS_BROWSER_PATTERNS = [
-  /\bAgentlas\s+Browser\b/i,
-  /\b(?:built[- ]in|in[- ]app|Taskforce)\s+Browser\b/i,
-  /\b(?:CDP|remote[- ]debugging)\b/i,
-  /(?:127\.0\.0\.1|localhost):9222/i,
-  /로그인된\s*(?:에이전틀라스\s*)?브라우저/i,
-  /(?:내장|인앱|태스크포스)\s*브라우저/i,
-];
-
-function hasAny(text: string, patterns: RegExp[]): boolean {
-  return patterns.some((pattern) => pattern.test(text));
-}
+// Product names, the CDP port and "built-in browser" phrases are no longer matched either
+// (owner rule 2026-10-13): the host binding comes from an explicit enum (toolMode, graph tool
+// node `toolMode`/`catalog`) or from the model's verdict; free text never selects a host.
 
 export const COMPUTER_USE_JUDGMENT_KIND = "automation-needs-human-web";
 
@@ -52,7 +40,7 @@ function graphNodesOf(graph: unknown): Array<{ type?: unknown; config?: Record<s
  * browser and CUA declarations exist, keep the authenticated browser binding
  * because it is the only host that can carry the imported session.
  */
-export function graphDeclaredToolMode(graph: unknown): AutomationToolMode | null {
+export function graphDeclaredToolModes(graph: unknown): Set<AutomationToolMode> {
   const nodes = graphNodesOf(graph);
   const declaredModes = new Set<AutomationToolMode>();
   for (const node of nodes) {
@@ -64,6 +52,11 @@ export function graphDeclaredToolMode(graph: unknown): AutomationToolMode | null
     if (GRAPH_BROWSER_TOOL_IDS.has(catalog)) declaredModes.add("browser");
     if (GRAPH_COMPUTER_USE_TOOL_IDS.has(catalog)) declaredModes.add("computer-use");
   }
+  return declaredModes;
+}
+
+export function graphDeclaredToolMode(graph: unknown): AutomationToolMode | null {
+  const declaredModes = graphDeclaredToolModes(graph);
   if (declaredModes.has("browser")) return "browser";
   if (declaredModes.has("computer-use")) return "computer-use";
   return null;
@@ -156,10 +149,6 @@ export function resolveAutomationToolMode(input: {
    */
   if (isWorkflowGraphValue(input.graph)) return graphDeclaredToolMode(input.graph) ?? "browser";
   const text = [input.name ?? "", input.promptTemplate ?? "", input.targetLabel ?? ""].join("\n");
-  // Exact real-login browser intent outranks the generic social-site heuristic.
-  // Otherwise a Reddit job that explicitly says "Agentlas Browser / 9222" is silently
-  // diverted into Computer Use and loses the authenticated CDP session.
-  if (hasAny(text, EXACT_AGENTLAS_BROWSER_PATTERNS)) return "browser";
   return shouldPreferComputerUseForAutomation(text, input.judged) ? "computer-use" : "auto";
 }
 

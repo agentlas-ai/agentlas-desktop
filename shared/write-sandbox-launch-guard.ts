@@ -24,7 +24,9 @@ export interface LaunchEscape {
 const LAUNCHERS = new Set([
   "open", "osascript", "launchctl", "automator",
   "xdg-open", "gnome-open", "kde-open", "exo-open", "systemd-run",
-  "start", "explorer", "explorer.exe", "rundll32", "rundll32.exe", "start-process",
+  "start", "explorer", "explorer.exe", "rundll32", "rundll32.exe", "start-process", "saps",
+  // PowerShell 의 기본 앱으로 열기(`ii` 는 invoke-item 별칭) — Start-Process 와 같은 탈출 경로.
+  "invoke-item", "ii",
   "crontab", "at", "tmux", "screen",
 ]);
 const WRAPPERS = new Set(["sudo", "nohup", "exec", "command", "env", "time", "caffeinate", "setsid", "nice", "ionice", "builtin", "xargs"]);

@@ -27,6 +27,8 @@ export interface DaemonResidencyInput {
   invocationRuns?: number;
   /** Authenticated durable One domain custody includes future check-ins. */
   supervisorDomain?: boolean;
+  /** NH21: this service holds the One/Work Alive domain and at least one life is on (its clock lives here). */
+  aliveDomain?: boolean;
 }
 
 /** Work that would be cut if the service stopped now. Attachment/continuity are not work. */
@@ -52,6 +54,7 @@ export function daemonResidencyReasons(input: DaemonResidencyInput): string[] {
   if (input.desktopAttached) reasons.push("desktop-attached");
   if (input.loginContinuity) reasons.push("login-continuity");
   if (input.supervisorDomain) reasons.push("one-supervisor");
+  if (input.aliveDomain) reasons.push("alive-organisms");
   return [...reasons, ...daemonActiveWorkReasons(input)];
 }
 

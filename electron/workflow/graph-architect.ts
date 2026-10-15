@@ -1,3 +1,4 @@
+import { fixedPurposePrompt, purposePrompt } from "../runtime/purpose-prompts";
 // Graph Architect — 사용자의 한 문장을 그래프 변경 **제안**으로 바꾼다.
 //
 // 이 모듈은 모델을 부르지 않는다. 프롬프트를 만들고, 모델이 돌려준 텍스트를 엄격하게
@@ -27,6 +28,8 @@ export type GraphPatchProposalParse =
  *   갈림길의 조건값도 못 본다. "이게 무슨 그래프인지" 알 단서가 라벨뿐이었다.
  *   사람이 노드에 달아 둔 주석(config.note)도 여기 실려 모델의 지시가 된다.
  */
+export { GRAPH_PATCH_OUTPUT_SCHEMA } from "../../shared/graph-authoring";
+
 export function buildGraphArchitectPrompt(graph: WorkflowGraph, goal?: string | null): string {
   const shape = {
     nodes: graph.nodes.map((node) => ({
@@ -43,38 +46,23 @@ export function buildGraphArchitectPrompt(graph: WorkflowGraph, goal?: string | 
       ...(typeof edge.maxIterations === "number" ? { maxIterations: edge.maxIterations } : {}),
     })),
   };
-  return [
-    "You edit an automation graph by PROPOSING a change. You never apply anything.",
-    "Return ONLY compact JSON: {\"ops\":[...],\"rationale\":\"<one short sentence>\"}.",
-    "Allowed op values: addNode, editNode, removeNode, addEdge, removeEdge, setPolicy, setTrigger.",
-    "addNode needs `node` ({id,type,label,config}); editNode/setPolicy need `nodeId` and `config`;",
-    "removeNode needs `nodeId`; addEdge needs `edge` ({id,source,target[,sourceHandle][,maxIterations]});",
-    "removeEdge needs `edgeId`; setTrigger needs `config`.",
-    "Node types: trigger, agent, tool, action, condition, transform, output, eval, subgraph, code.",
-    "  · eval judges an upstream value: config {subject:\"<var name>\", produces:\"<one word>\",",
-    "    items:[{text:\"<atomic, checkable>\", kind:\"must\"|\"mustNot\"}]} — it writes",
-    "    \"pass\"/\"fail\" and <produces>_reason. Propose 2-5 must items (what must exist)",
-    "    plus 1-3 mustNot items (common failure modes: invented numbers, placeholder text).",
-    "    Items must be atomic — 'The CSV has a numeric price column', not 'The data looks good'.",
-    "    To add verification to a graph: eval after the step, then a condition on its verdict,",
-    "    with a bounded edge back to the step (maxIterations) and a forward edge onward.",
-    "  · code runs a script YOU write for EXACT computation or data-shaping a chat model would get",
-    "    quietly wrong (number math, parsing, spreadsheets): config {code:\"<script>\",",
-    "    codeLang:\"python\"|\"js\", note:\"<what it does>\"}. Upstream values arrive as `vars`;",
-    "    set `result` to what the next step reads. Never propose a code node with empty code.",
-    "  · subgraph calls another automation: config {graphRef:\"<automation id>\", input:\"...\"}.",
-    "A step that changes something outside must declare config.effect = \"mutation\".",
-    "Every edge leaving a condition node must set sourceHandle to \"true\" or \"false\".",
-    "An edge that loops back to an earlier step must set maxIterations (a number >= 1) —",
-    "  unbounded repetition is rejected at run time, so a loop without it is a broken proposal.",
-    "Nodes may carry config.note — a comment the person wrote on that node. Treat it as their",
-    "  instruction for that step; when they ask for changes, notes tell you what they meant.",
-    "Do not invent ids that are not in the graph below, and do not reuse an existing id for a new node.",
-    "If the request cannot be expressed as these ops, return {\"ops\":[]} — do not approximate.",
-    "",
-    ...(goal?.trim() ? [`This automation exists to: ${goal.trim()}`] : []),
-    `Current graph: ${JSON.stringify(shape)}`,
-  ].join("\n");
+  const policy = fixedPurposePrompt("purpose.graph.architect.policy", [
+    "task: propose an automation graph change; never apply anything",
+    "output: supplied patch schema; unexpressible request => empty ops",
+    "eval: config {subject:\"<var name>\", produces:\"<one word>\", items:[{text:\"<atomic, checkable>\", kind:\"must\"|\"mustNot\"}]}; writes \"pass\"/\"fail\" and <produces>_reason; 2-5 must + 1-3 mustNot (invented numbers, placeholder text); verification = eval, then condition on verdict, bounded edge back (maxIterations), forward edge onward",
+    "code: config {code:\"<script>\", codeLang:\"python\"|\"js\", note:\"<what it does>\"}; for exact computation/parsing; upstream values in `vars`, result in `result`; never empty code",
+    "subgraph: config {graphRef:\"<automation id>\", input:\"...\"}",
+    "external change: config.effect = \"mutation\"",
+    "condition edges: sourceHandle \"true\" or \"false\"",
+    "loop-back edge: maxIterations number >= 1 (else rejected at run time)",
+    "config.note = the person's instruction for that step",
+    "ids: only those in the graph below; new nodes get new ids",
+  ]);
+  return purposePrompt([
+    { id: "purpose.graph.architect.policy", revision: 2, stability: "fixed-policy", changeTriggers: ["release"], text: policy },
+    { id: "purpose.graph.architect.goal", revision: 1, stability: "task-context", changeTriggers: ["goal-revision"], text: goal?.trim() ? `This automation exists to: ${goal.trim()}` : "" },
+    { id: "purpose.graph.architect.snapshot", revision: 1, stability: "turn-context", changeTriggers: ["plan-revision", "checkpoint"], text: `Current graph: ${JSON.stringify(shape)}` },
+  ]);
 }
 
 function firstJsonObject(text: string): string | null {

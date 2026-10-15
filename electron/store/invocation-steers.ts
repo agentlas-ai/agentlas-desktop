@@ -4,7 +4,29 @@ import type { InvocationExecutionContext } from "../mcp/client";
 import type { InvocationWorkspaceBinding } from "../invocation/workspace-binding";
 import { getDb } from "./db";
 
+/** Private queue metadata, never a public invocation/renderer authority DTO. */
+export interface QueuedTeamReportCustody {
+  schemaVersion: "agentlas.queued-team-report-custody.v1";
+  ownerScope: string; serviceIdentity: string; chatId: string;
+  dispatchId: string | null; childRunId: string | null; parentRunId: string | null;
+  requestDigest: string;
+}
+export function queuedTeamReportDigest(request: McpInvocationRequest): string {
+  return createHash("sha256").update(canonicalQueuedSteerRequest(request)).digest("hex");
+}
+function reportCustodyJson(value: QueuedTeamReportCustody): string {
+  const keys=["schemaVersion","ownerScope","serviceIdentity","chatId","dispatchId","childRunId","parentRunId","requestDigest"];
+  if (!value || Object.keys(value).length!==keys.length || Object.keys(value).some(key=>!keys.includes(key))
+    || value.schemaVersion!=="agentlas.queued-team-report-custody.v1"
+    || ![value.ownerScope,value.serviceIdentity,value.requestDigest].every(v=>typeof v==="string"&&/^[a-f0-9]{64}$/.test(v))
+    || ![value.chatId,value.dispatchId,value.childRunId,value.parentRunId].every(v=>v===null || typeof v==="string"&&!!v&&Buffer.byteLength(v)<=512&&!/[\u0000-\u001f]/.test(v))
+    || !value.chatId || Boolean(value.dispatchId)!==Boolean(value.childRunId)) throw new Error("invocation_report_custody_invalid");
+  return JSON.stringify(Object.fromEntries(keys.map(key=>[key,value[key as keyof QueuedTeamReportCustody]])));
+}
 export interface DurableQueuedSteer {
+  /** Raw presence distinguishes unknown legacy from corrupt/conflicting custody. */
+  oneTeamReportCustodyJson?: string;
+  oneTeamReportCustody?: QueuedTeamReportCustody;
   id: string;
   chatId: string;
   originalRunId: string;
@@ -29,7 +51,8 @@ export type DurableQueuedSteerRecoveryReason =
   | "original-run-effect-boundary-unconfirmed"
   | "drained-run-start-uncertain"
   | "drained-run-receipt-missing"
-  | "draining-run-id-missing";
+  | "draining-run-id-missing"
+  | "one-team-report-owner-unbound";
 
 type Row = {
   id: string;
@@ -43,6 +66,7 @@ type Row = {
   queued_at: string;
   drained_run_id: string | null;
   status: DurableQueuedSteer["status"];
+  one_team_report_custody_json?: string | null;
   recovery_state?: DurableQueuedSteerRecoveryState;
   recovery_reason?: DurableQueuedSteerRecoveryReason | null;
 };
@@ -59,6 +83,7 @@ function decode(row: Row): DurableQueuedSteer {
     "drained-run-start-uncertain",
     "drained-run-receipt-missing",
     "draining-run-id-missing",
+    "one-team-report-owner-unbound",
   ].includes(recoveryReason)) {
     throw new Error("invocation_steer_invalid_recovery_reason");
   }
@@ -69,7 +94,11 @@ function decode(row: Row): DurableQueuedSteer {
   const executionContext = row.execution_context_json
     ? JSON.parse(row.execution_context_json) as InvocationExecutionContext
     : undefined;
+  let reportCustody: QueuedTeamReportCustody | undefined;
+  if (row.one_team_report_custody_json!==null && row.one_team_report_custody_json!==undefined) {try {const raw=JSON.parse(row.one_team_report_custody_json);reportCustodyJson(raw);reportCustody=raw;} catch { /* Invalid presence is held by the original host; never fallback to legacy. */ }}
   return {
+    ...(row.one_team_report_custody_json!==null && row.one_team_report_custody_json!==undefined ? {oneTeamReportCustodyJson:row.one_team_report_custody_json} : {}),
+    ...(reportCustody ? {oneTeamReportCustody:reportCustody} : {}),
     id: row.id,
     chatId: row.chat_id,
     originalRunId: row.original_run_id,
@@ -110,6 +139,7 @@ export function persistQueuedSteer(input: {
   chatId: string;
   originalRunId: string;
   request: McpInvocationRequest;
+  oneTeamReportCustody?: QueuedTeamReportCustody;
   workspaceBinding?: InvocationWorkspaceBinding;
   executionContext?: InvocationExecutionContext;
 }): DurableQueuedSteer {
@@ -121,6 +151,9 @@ export function persistQueuedSteer(input: {
   const promptText = input.request.userPrompt;
   const promptHash = createHash("sha256").update(promptText, "utf8").digest("hex");
   const requestJson = JSON.stringify(input.request);
+  const custodyJson=input.oneTeamReportCustody ? reportCustodyJson(input.oneTeamReportCustody) : null;
+  if (custodyJson && (input.request.oneTeamReportTurn!==true || input.oneTeamReportCustody!.chatId!==input.chatId
+    || input.oneTeamReportCustody!.requestDigest!==queuedTeamReportDigest(input.request))) throw new Error("invocation_report_custody_invalid");
   const workspaceJson = input.workspaceBinding ? JSON.stringify(input.workspaceBinding) : null;
   const executionJson = input.executionContext ? JSON.stringify(input.executionContext) : null;
   const old = getDb().prepare("SELECT * FROM invocation_steers WHERE id = ?").get(id) as Row | undefined;
@@ -128,7 +161,7 @@ export function persistQueuedSteer(input: {
     if (old.chat_id !== input.chatId || old.original_run_id !== input.originalRunId
       || old.prompt_text !== promptText || old.prompt_hash !== promptHash
       || old.request_json !== requestJson || old.workspace_binding_json !== workspaceJson
-      || old.execution_context_json !== executionJson) throw new Error("invocation_steer_identity_conflict");
+      || old.execution_context_json !== executionJson || (old.one_team_report_custody_json ?? null)!==custodyJson) throw new Error("invocation_steer_identity_conflict");
     if (old.status !== "queued" && old.status !== "draining") throw new Error("invocation_steer_already_consumed");
     return decode(old);
   }
@@ -136,8 +169,8 @@ export function persistQueuedSteer(input: {
     `INSERT INTO invocation_steers
        (id, chat_id, original_run_id, prompt_text, prompt_hash, request_json,
         workspace_binding_json, execution_context_json, status, recovery_state,
-        queued_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'ready', ?, ?)`,
+        queued_at, updated_at, one_team_report_custody_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'ready', ?, ?, ?)`,
   ).run(
     id,
     input.chatId,
@@ -149,11 +182,12 @@ export function persistQueuedSteer(input: {
     executionJson,
     queuedAt,
     queuedAt,
+    custodyJson,
   );
   return { id, chatId: input.chatId, originalRunId: input.originalRunId, promptText, promptHash,
     request: input.request, ...(input.workspaceBinding ? { workspaceBinding: input.workspaceBinding } : {}),
     ...(input.executionContext ? { executionContext: input.executionContext } : {}), queuedAt,
-    recoveryState: "ready", status: "queued" };
+    recoveryState: "ready", status: "queued", ...(custodyJson ? {oneTeamReportCustodyJson:custodyJson,oneTeamReportCustody:input.oneTeamReportCustody} : {}) };
 }
 
 /** Exact receipt check for a claimed preflight handoff after IPC loss. */
@@ -201,11 +235,25 @@ export function hasQueuedOwnerSteer(chatId: string): boolean {
   });
 }
 
-export function beginQueuedSteerDrain(id: string, drainedRunId: string): boolean {
-  return getDb().prepare(
-    `UPDATE invocation_steers SET status = 'draining', drained_run_id = ?, updated_at = ?
-     WHERE id = ? AND status IN ('queued','draining') AND recovery_state = 'ready'`,
-  ).run(drainedRunId, new Date().toISOString(), id).changes === 1;
+/** The current original host guard runs inside the same canonical queue CAS. */
+export function beginQueuedSteerDrain(id: string, drainedRunId: string, reportGuard?: (row: DurableQueuedSteer) => boolean): boolean {
+  const db=getDb();return db.transaction(()=>{
+    const raw=db.prepare("SELECT * FROM invocation_steers WHERE id=? AND status IN ('queued','draining') AND recovery_state='ready'").get(id) as Row|undefined;
+    if(!raw)return false;const row=decode(raw);
+    if(row.drainedRunId && row.drainedRunId!==drainedRunId)return false;
+    if(row.request.oneTeamReportTurn===true && (!reportGuard || !reportGuard(row))){holdQueuedSteerForRecovery(id,"one-team-report-owner-unbound");return false;}
+    return db.prepare(`UPDATE invocation_steers SET status='draining',drained_run_id=?,updated_at=?
+      WHERE id=? AND status IN ('queued','draining') AND recovery_state='ready'`).run(drainedRunId,new Date().toISOString(),id).changes===1;
+  })();
+}
+/** Seal unknown legacy only after actual host proof; known custody never changes. */
+export function bindQueuedTeamReportCustody(id:string,custody:QueuedTeamReportCustody):boolean {
+  const db=getDb();return db.transaction(()=>{
+    const row=getDurableQueuedSteer(id);if(!row || row.request.oneTeamReportTurn!==true || row.oneTeamReportCustodyJson!==undefined
+      || row.chatId!==custody.chatId || queuedTeamReportDigest(row.request)!==custody.requestDigest)return false;
+    return db.prepare("UPDATE invocation_steers SET one_team_report_custody_json=?,updated_at=? WHERE id=? AND one_team_report_custody_json IS NULL AND status IN ('queued','draining')")
+      .run(reportCustodyJson(custody),new Date().toISOString(),id).changes===1;
+  })();
 }
 
 /** Where a queued direction stands: still waiting, delivered into a run ("started"), withdrawn or failed. */
@@ -217,13 +265,17 @@ export function queuedSteerState(id: string): { status: DurableQueuedSteer["stat
 
 export function settleQueuedSteer(id: string, status: "started" | "cancelled" | "failed"): boolean {
   return getDb().prepare(
-    "UPDATE invocation_steers SET status = ?, updated_at = ? WHERE id = ? AND status IN ('queued','draining') AND recovery_state = 'ready'",
+    // A trusted terminal withdrawal must win even when recovery is held.
+    // Delivery/failure still requires the existing ready-state decision.
+    "UPDATE invocation_steers SET status = ?, updated_at = ? WHERE id = ? AND status IN ('queued','draining')"
+      + (status === "cancelled" ? "" : " AND recovery_state = 'ready'"),
   ).run(status, new Date().toISOString(), id).changes === 1;
 }
 
-export function cancelQueuedSteersForChat(chatId: string): void {
+export function cancelQueuedSteersForChat(chatId: string, preserveTeamReports = false): void {
   getDb().prepare(
-    "UPDATE invocation_steers SET status = 'cancelled', updated_at = ? WHERE chat_id = ? AND status = 'queued'",
+    "UPDATE invocation_steers SET status = 'cancelled', updated_at = ? WHERE chat_id = ? AND status = 'queued'"
+      + (preserveTeamReports ? " AND CASE WHEN json_valid(request_json) THEN COALESCE(json_type(request_json,'$.oneTeamReportTurn'),'')<>'true' ELSE 1 END" : ""),
   ).run(new Date().toISOString(), chatId);
 }
 
@@ -252,11 +304,12 @@ export function retireHeldQueuedSteer(id: string): boolean {
 }
 
 /** Explicit recovery route hook; callers must make the replay decision first. */
-export function releaseQueuedSteerRecoveryHold(id: string): boolean {
+export function releaseQueuedSteerRecoveryHold(id: string, expectedReason?: DurableQueuedSteerRecoveryReason): boolean {
   return getDb().prepare(
     `UPDATE invocation_steers
         SET recovery_state = 'ready', recovery_reason = NULL, status = 'queued',
             drained_run_id = NULL, updated_at = ?
-      WHERE id = ? AND status IN ('queued','draining') AND recovery_state = 'held'`,
-  ).run(new Date().toISOString(), id).changes === 1;
+      WHERE id = ? AND status IN ('queued','draining') AND recovery_state = 'held'
+        ${expectedReason ? "AND recovery_reason = ? AND status = 'queued' AND drained_run_id IS NULL" : ""}`,
+  ).run(new Date().toISOString(), id, ...(expectedReason ? [expectedReason] : [])).changes === 1;
 }

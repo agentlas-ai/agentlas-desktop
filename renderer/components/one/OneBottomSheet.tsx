@@ -36,7 +36,7 @@ type OneBottomSheetProps = {
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-function isTopmostModal(dialog: HTMLElement): boolean {
+export function isTopmostModal(dialog: HTMLElement): boolean {
   const layer = dialog.closest<HTMLElement>('[data-one-modal-layer="true"]');
   if (!layer) return true;
   const layers = Array.from(document.querySelectorAll<HTMLElement>('[data-one-modal-layer="true"]'));

@@ -5,6 +5,7 @@ import type { RunnerEvents } from "../runtime/runner";
 import { captureScienceToolCorrelation, type ScienceToolCorrelation } from "./science-failure-settlement";
 import { captureScienceNativeFailureObservation, type ScienceNativeFailureObservation } from "./science-native-failure";
 import { MAIN_TOOL_PREDISPATCH_PROTOCOL, bindMainHostControlEvent, mainHostControlForEvent, type MainHostControlObservation } from "./effect-metadata";
+import { validatedHostNativeRuntimeDiagnostic, type NativeRuntimeDiagnostic } from "../runtime/native-runtime-diagnostics";
 
 export interface AdapterEffectReport {
   schemaVersion: "agentlas.adapter-effect-coverage.v1";
@@ -36,6 +37,7 @@ interface Scope {
   source?: string;
   nativeScienceTool?: (binding: ScienceToolCorrelation) => void;
   nativeScienceFailure?: (observation: ScienceNativeFailureObservation) => void;
+  nativeRuntimeDiagnostic?: (diagnostic: NativeRuntimeDiagnostic) => void;
   purpose?: "preparation";
   begin: (admission: AdapterEffectAdmission) => void;
   finish: (scopeId: string, report: AdapterEffectReport) => void;
@@ -84,6 +86,18 @@ export function bindScienceNativeFailureObserver(input: { chatId?: string; agent
   return (item, completionKind) => {
     const observation = captureScienceNativeFailureObservation(scope.runId, scope.chatId, item, completionKind);
     if (observation) scope.nativeScienceFailure?.({ ...observation, binding: { ...observation.binding, providerToolId: qualify(observation.binding.providerToolId) } });
+  };
+}
+
+/** Capture the host run before initialization/spawn. Resident and late close
+ * callbacks retain this owner; optional diagnostics cannot settle effects. */
+export function bindNativeRuntimeDiagnosticObserver(input: { chatId?: string; agentId?: string }): (item: unknown) => void {
+  const scope = context.getStore();
+  if (!scope || scope.purpose === "preparation" || scope.childDispatchId !== undefined
+    || input.chatId !== scope.chatId || (input.agentId ?? null) !== scope.rootAgentId) return () => {};
+  return item => {
+    if (!validatedHostNativeRuntimeDiagnostic(item)) return;
+    try { scope.nativeRuntimeDiagnostic?.(item); } catch { /* Optional observation must not change a run or Stop. */ }
   };
 }
 

@@ -81,7 +81,7 @@ export function admitJudgedAutomaticGoal(input: {
     // A replay must never re-arm a cancelled/completed campaign.
     if (LONG_RUN_TERMINAL_STATUSES.has(run.status)) return run;
     const bound = bindCurrentGoalRevisionToLongRun(run.id, run.version);
-    getDb().prepare("UPDATE chats SET goal_id = ? WHERE id = ?").run(input.goalId, input.chatId);
+    setChatGoalBinding(input.chatId, input.goalId);
     return bound;
   }).immediate();
 }

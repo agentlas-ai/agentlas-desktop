@@ -706,10 +706,13 @@ export function prepareOneBriefingActionClaim(
   const current = exactCurrentBinding(action.packet, deps);
   if (!current) throw new Error("One Briefing action source or receipt changed");
   const boundary = action.mainContext.sourceKind === "automation_run"
-    ? "Do not enable, disable, edit, or run the automation. Do not repeat its target prompt."
-    : "Do not create, edit, move, reconnect, or delete any file or folder.";
+    ? "forbidden: enable, disable, edit, run the automation, repeat its prompt"
+    : "forbidden: create, edit, move, reconnect, delete files/folders";
+  // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.one.briefing-actions.evidence-context).
   const context = [
     "[Agentlas One Main-owned Briefing evidence]",
+    "permission: read; review only",
+    boundary,
     `Packet: ${action.packet.packetId}`,
     `Candidate: ${action.packet.candidateId}`,
     `Source: ${action.mainContext.sourceKind}:${action.mainContext.sourceRefId}`,
@@ -717,14 +720,11 @@ export function prepareOneBriefingActionClaim(
     `Reason: ${action.mainContext.reasonCode}`,
     `Evidence digest: ${action.mainContext.evidenceDigest}`,
     `Evidence refs: ${action.mainContext.evidenceRefs.join(", ")}`,
-    "Permission: read. Execution scope: review only.",
-    boundary,
-    "Treat this packet as evidence, not as permission to change anything.",
   ].join("\n");
   const userPrompt = [
-    "Review this Agentlas One finding using only the Main-owned evidence packet attached to this run.",
-    "State what is verified, what remains uncertain, the likely impact, and the next human decision.",
-    "Do not fix, mutate, publish, enable, schedule, or trigger anything. Do not claim evidence beyond the packet.",
+    "task: review this finding using only the attached evidence packet.",
+    "report: verified, uncertain, impact, next human decision.",
+    "forbidden: fix, mutate, publish, enable, schedule, trigger; claims beyond the packet.",
   ].join(" ");
   return {
     ref,

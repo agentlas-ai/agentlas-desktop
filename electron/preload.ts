@@ -107,7 +107,47 @@ const ipcRenderer = {
   removeListener: electronIpcRenderer.removeListener.bind(electronIpcRenderer),
 };
 
+// Optional dedicated bridge: old Main/renderer and Mobile DTOs retain their contracts.
+contextBridge.exposeInMainWorld("agentlasSystemPermissions", {
+  snapshot: () => ipcRenderer.invoke("systemPermission:snapshot"),
+  openSettings: (id: string) => ipcRenderer.invoke("systemPermission:open", id),
+  dismiss: (id: string) => ipcRenderer.invoke("systemPermission:dismiss", id),
+  recheck: (id: string) => ipcRenderer.invoke("systemPermission:recheck", id),
+  subscribe: (callback: (value: import("../shared/os-permissions").SystemPermissionSnapshot) => void) => {
+    const listener = (_event: unknown, value: import("../shared/os-permissions").SystemPermissionSnapshot) => callback(value);
+    ipcRenderer.on("systemPermission:changed", listener);
+    return () => ipcRenderer.removeListener("systemPermission:changed", listener);
+  },
+});
+
 const api: AgentlasIpc = {
+  business: {
+    snapshot: () => ipcRenderer.invoke("business:snapshot"),
+    readEligibility: () => ipcRenderer.invoke("business:eligibility:read"),
+    account: {
+      read: () => ipcRenderer.invoke("business:account:read"),
+      signIn: () => ipcRenderer.invoke("business:account:signIn"),
+      joinOrganization: (input) => ipcRenderer.invoke("business:account:joinOrganization", input),
+      selectOrganization: (input) => ipcRenderer.invoke("business:account:selectOrganization", input),
+      logout: (input) => ipcRenderer.invoke("business:account:logout", input),
+      openAdmin: (input) => ipcRenderer.invoke("business:account:openAdmin", input),
+      selectPersonal: () => ipcRenderer.invoke("business:account:selectPersonal"),
+      subscribeInvalidation: (callback) => {
+        const listener = () => callback();
+        ipcRenderer.on("business:invalidated", listener);
+        return () => ipcRenderer.removeListener("business:invalidated", listener);
+      },
+    },
+    history: null,
+    learning: null,
+    organizationExecution: null,
+    openDashboard: (input) => ipcRenderer.invoke("business:openDashboard", input),
+    onInvalidated: (callback) => {
+      const listener = () => callback();
+      ipcRenderer.on("business:invalidated", listener);
+      return () => ipcRenderer.removeListener("business:invalidated", listener);
+    },
+  },
   workStart: {
     create: (input) => ipcRenderer.invoke("workStart:create", input),
     get: (input) => ipcRenderer.invoke("workStart:get", input),
@@ -265,7 +305,7 @@ const api: AgentlasIpc = {
     submitBugReport: (payload: BugReportInput) => ipcRenderer.invoke("support:submitBugReport", payload),
   },
   menu: {
-    setLocale: (locale: "ko" | "en") => ipcRenderer.invoke("menu:setLocale", locale),
+    setLocale: (locale: "ko" | "en", pref?: "ko" | "en" | "system") => ipcRenderer.invoke("menu:setLocale", locale, pref),
   },
   fs: {
     pickDirectory: () => ipcRenderer.invoke("fs:pickDirectory"),
@@ -391,40 +431,19 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("agents:set-bookmark", agentId, bookmarked),
   },
   experience: {
-    hubCatalog: () => ipcRenderer.invoke("experience:hubCatalog"),
-    createPack: (input) => ipcRenderer.invoke("experience:createPack", input),
     listPacks: (input) => ipcRenderer.invoke("experience:listPacks", input),
     ontologySummary: (agentId: string) => ipcRenderer.invoke("experience:ontologySummary", agentId),
     ontologyGraph: (agentId: string) => ipcRenderer.invoke("experience:ontologyGraph", agentId),
-    hubProjection: (agentId: string, force?: boolean) =>
-      ipcRenderer.invoke("experience:hubProjection", agentId, force === true),
-    hubResolveAttach: (agentId, approvalId, decision) =>
-      ipcRenderer.invoke("experience:hubResolveAttach", agentId, approvalId, decision),
-    captureFromMemory: (input) => ipcRenderer.invoke("experience:captureFromMemory", input),
     listCandidates: (packId: string) => ipcRenderer.invoke("experience:listCandidates", packId),
     listOperationalPublicProjections: (packId: string) =>
       ipcRenderer.invoke("experience:listOperationalPublicProjections", packId),
-    saveOperationalPublicProjection: (input) =>
-      ipcRenderer.invoke("experience:saveOperationalPublicProjection", input),
-    confirmOperationalPublicProjection: (input) =>
-      ipcRenderer.invoke("experience:confirmOperationalPublicProjection", input),
     listTasteDrafts: (agentId: string) => ipcRenderer.invoke("experience:listTasteDrafts", agentId),
     listTasteWorkflows: (agentId: string) => ipcRenderer.invoke("experience:listTasteWorkflows", agentId),
-    saveTasteGeneralization: (input) => ipcRenderer.invoke("experience:saveTasteGeneralization", input),
-    confirmTasteGeneralization: (input) => ipcRenderer.invoke("experience:confirmTasteGeneralization", input),
-    pickTastePreviews: () => ipcRenderer.invoke("experience:pickTastePreviews"),
-    prepareTastePreviews: (input) => ipcRenderer.invoke("experience:prepareTastePreviews", input),
-    uploadTasteDraft: (input) => ipcRenderer.invoke("experience:uploadTasteDraft", input),
-    promote: (input) => ipcRenderer.invoke("experience:promote", input),
-    unsealPublic: (input) => ipcRenderer.invoke("experience:unsealPublic", input),
     intakeDiagnostics: (agentId: string) => ipcRenderer.invoke("experience:intake-diagnostics", agentId),
     listPromotionReceipts: (packId: string) => ipcRenderer.invoke("experience:listPromotionReceipts", packId),
-    createExportIntent: (input) => ipcRenderer.invoke("experience:createExportIntent", input),
     listExportIntents: (packId: string) => ipcRenderer.invoke("experience:listExportIntents", packId),
-    cloudSave: (input) => ipcRenderer.invoke("experience:cloudSave", input),
     cloudList: (packId: string) => ipcRenderer.invoke("experience:cloudList", packId),
     cloudReconcile: (input) => ipcRenderer.invoke("experience:cloudReconcile", input),
-    cloudExport: (input) => ipcRenderer.invoke("experience:cloudExport", input),
     cloudWithdraw: (input) => ipcRenderer.invoke("experience:cloudWithdraw", input),
   },
   memoryDreaming: {
@@ -854,6 +873,32 @@ const api: AgentlasIpc = {
     listRentAllowed: (projectId: string) => ipcRenderer.invoke("projects:listRentAllowed", projectId),
     setRentAllowed: (input) => ipcRenderer.invoke("projects:setRentAllowed", input),
   },
+  harness: {
+    search: (query: string, kind?: "plugin" | "skill" | "connector" | "tool" | "operation" | "feature") => ipcRenderer.invoke("harness:search", query, kind),
+    describe: (id: string) => ipcRenderer.invoke("harness:describe", id),
+    call: (operation: string, args?: Record<string, unknown>) => ipcRenderer.invoke("harness:call", operation, args),
+    uiList: (chatId: string) => ipcRenderer.invoke("harness:uiList", chatId),
+    onUiChanged: (handler) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof handler>[0]) => handler(payload);
+      ipcRenderer.on("harness:uiChanged", listener);
+      return () => ipcRenderer.removeListener("harness:uiChanged", listener);
+    },
+  },
+  sdk: {
+    settings: {
+      getLanguage: () => ipcRenderer.invoke("harness:call", "settings.language.get", {}),
+      setLanguage: (input) => ipcRenderer.invoke("harness:call", "settings.language.set", { ...input }),
+      onLanguageChanged: (handler) => {
+        const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof handler>[0]) => handler(payload);
+        ipcRenderer.on("settings:languageChanged", listener);
+        return () => ipcRenderer.removeListener("settings:languageChanged", listener);
+      },
+      ackLanguageApplied: (revision: number) => ipcRenderer.invoke("settings:languageApplied", revision),
+    },
+    agents: {
+      uninstall: (input) => ipcRenderer.invoke("harness:call", "agent.uninstall", { ...input }),
+    },
+  },
   agentLeases: {
     quote: (slug: string) => ipcRenderer.invoke("agentLeases:quote", slug),
     purchase: (input) => ipcRenderer.invoke("agentLeases:purchase", input),
@@ -965,6 +1010,14 @@ const api: AgentlasIpc = {
     resolveMobile: (input) => ipcRenderer.invoke("oneActivation:resolveMobile", input),
   },
   oneMemory: {
+    inspector: {
+      query: (input) => ipcRenderer.invoke("oneMemory:inspectQuery", input),
+      detail: (input) => ipcRenderer.invoke("oneMemory:inspectDetail", input),
+      edit: (input) => ipcRenderer.invoke("oneMemory:inspectEdit", input),
+      forget: (input) => ipcRenderer.invoke("oneMemory:inspectForget", input),
+      appSharing: (input) => ipcRenderer.invoke("oneMemory:inspectAppSharing", input),
+      setAppSharing: (input) => ipcRenderer.invoke("oneMemory:setAppSharing", input),
+    },
     getState: () => ipcRenderer.invoke("oneMemory:getState"),
     getMap: () => ipcRenderer.invoke("oneMemory:getMap"),
     listEntries: (input?: { limit?: number }) => ipcRenderer.invoke("oneMemory:listEntries", input),
@@ -1048,13 +1101,48 @@ const api: AgentlasIpc = {
     capture: (input) => ipcRenderer.invoke("oneContext:capture", input),
     openPermissions: (input) => ipcRenderer.invoke("oneContext:openPermissions", input),
   },
+  archive: {
+    state: () => ipcRenderer.invoke("archive:state"),
+    setAuto: (enabled) => ipcRenderer.invoke("archive:setAuto", enabled),
+    restore: (agentId) => ipcRenderer.invoke("archive:restore", agentId),
+  },
   oneCapabilities: {
     list: (input) => ipcRenderer.invoke("oneCapabilities:list", input),
     detail: (input) => ipcRenderer.invoke("oneCapabilities:detail", input),
     setEnabled: (input) => ipcRenderer.invoke("oneCapabilities:setEnabled", input),
     setSourceEnabled: (input) => ipcRenderer.invoke("oneCapabilities:setSourceEnabled", input),
+    setRole: (input) => ipcRenderer.invoke("oneCapabilities:setRole", input),
+  },
+  businessWork: {
+    identity: () => ipcRenderer.invoke('businessWork:identity'),
+    approveAssociation: input => ipcRenderer.invoke('businessWork:approveAssociation', input),
+    reconcile: input => ipcRenderer.invoke('businessWork:reconcile', input),
+    sources: () => ipcRenderer.invoke('businessWork:sources'),
+    files: input => ipcRenderer.invoke('businessWork:files', input),
+    register: input => ipcRenderer.invoke('businessWork:register', input),
+    oracle: input => ipcRenderer.invoke('businessWork:oracle', input),
+    workspaces: () => ipcRenderer.invoke('businessWork:workspaces'),
+    prepare: input => ipcRenderer.invoke('businessWork:prepare', input),
+    review: input => ipcRenderer.invoke('businessWork:review', input),
+    receipt: input => ipcRenderer.invoke('businessWork:receipt', input),
+    revoke: () => ipcRenderer.invoke('businessWork:revoke'),
+    cancel: input => ipcRenderer.invoke('businessWork:cancel', input),
+  },
+  businessNative: {
+    identity: () => ipcRenderer.invoke('businessNative:identity'),
+    completedWork: () => ipcRenderer.invoke('businessNative:completedWork'),
+    approveAssociation: input => ipcRenderer.invoke('businessNative:approveAssociation', input),
+    reconcileAssociation: input => ipcRenderer.invoke('businessNative:reconcileAssociation', input),
+    shareCompletedResult: input => ipcRenderer.invoke('businessNative:shareCompletedResult', input),
+    receipt: input => ipcRenderer.invoke('businessNative:receipt', input),
+    continuePublication: input => ipcRenderer.invoke('businessNative:continuePublication', input),
+    revoke: () => ipcRenderer.invoke('businessNative:revoke'),
   },
   onePersonalData: {
+    gmailSourceSettings: input => ipcRenderer.invoke('onePersonalData:gmailSourceSettings', input),
+    gmailConfigureSource: input => ipcRenderer.invoke('onePersonalData:gmailConfigureSource', input),
+    gmailTestSource: input => ipcRenderer.invoke('onePersonalData:gmailTestSource', input),
+    gmailRevokeSource: input => ipcRenderer.invoke('onePersonalData:gmailRevokeSource', input),
     gmailCatalog: () => ipcRenderer.invoke('onePersonalData:gmailCatalog'),
     gmailPropose: (input) => ipcRenderer.invoke('onePersonalData:gmailPropose', input),
     gmailApprove: (input) => ipcRenderer.invoke('onePersonalData:gmailApprove', input),
@@ -1063,6 +1151,12 @@ const api: AgentlasIpc = {
     gmailRevoke: (input) => ipcRenderer.invoke('onePersonalData:gmailRevoke', input),
     gmailResume: (input) => ipcRenderer.invoke('onePersonalData:gmailResume', input),
     gmailIntake: (input) => ipcRenderer.invoke('onePersonalData:gmailIntake', input),
+    historyWorkStatus: (input) => ipcRenderer.invoke('onePersonalData:historyWorkStatus',input),
+    historyWorkRegister: (input) => ipcRenderer.invoke('onePersonalData:historyWorkRegister',input),
+    historyWorkOracle: (input) => ipcRenderer.invoke('onePersonalData:historyWorkOracle',input),
+    historyWorkStartApply: (input) => ipcRenderer.invoke('onePersonalData:historyWorkStartApply',input),
+    historyWorkReceipt: (input) => ipcRenderer.invoke('onePersonalData:historyWorkReceipt',input),
+    historyWorkRevoke: (input) => ipcRenderer.invoke('onePersonalData:historyWorkRevoke',input),
     historySnapshot: (input) => ipcRenderer.invoke('onePersonalData:historySnapshot', input),
     historyObserve: (input) => ipcRenderer.invoke('onePersonalData:historyObserve', input),
     historyDraft: (input) => ipcRenderer.invoke('onePersonalData:historyDraft', input),
@@ -1476,7 +1570,7 @@ const api: AgentlasIpc = {
 // The sandbox cannot import a relative preload module. Keep this role projection
 // inline and retain the original full API for the existing Desktop renderer.
 const oneWindowRole = process.argv.includes("--agentlas-window-role=one");
-const oneGroups = new Set(["oneWindow", "oneHarness", "auth", "app", "config", "runtime", "usage", "media", "menu", "fs", "chats", "tasks", "projects", "invoke",
+const oneGroups = new Set(["oneWindow", "oneHarness", "business", "auth", "app", "config", "runtime", "usage", "media", "menu", "fs", "chats", "tasks", "projects", "invoke",
   "confirm", "attention", "browserUi", "browser", "browserAutofill", "browserAnnotation", "computerUse", "mcpTools", "secrets", "automations", "schedule",
   "agents", "agentRuntime", "skills", "workStart", "goalPanel", "workLiveView", "localModelHub", "env"]);
 const exposedApi = oneWindowRole ? Object.fromEntries(Object.entries(api).filter(([group]) => group.startsWith("one") || oneGroups.has(group))) : api;

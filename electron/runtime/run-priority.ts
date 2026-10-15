@@ -14,7 +14,15 @@
 // 이 모듈은 의도적으로 의존성이 0이다(exec ↔ run-slots ↔ store 순환을 만들지 않기 위해).
 import { AsyncLocalStorage } from "node:async_hooks";
 
-export type RunPriority = "interactive" | "background";
+/**
+ * owner — the owner's own message (One/Work chat, mobile, Telegram) and the model calls of that turn itself (its main call,
+ * a root firm's controller, judgment/router/repair steps). Delegated work the turn starts — a firm/swarm/task-force worker,
+ * planner or synthesis, the memory curator, a build — is not the owner's message: it runs interactive. It is admitted ahead
+ * of everything and may take one reserved slot above the limit while other work holds the slots, so a message never waits
+ * behind automation or teammates (native-harness notyet NH20). interactive — anything else a person may be watching (the
+ * default). background — unattended entry points that wrap themselves (automation scheduler, daemon graph.run).
+ */
+export type RunPriority = "owner" | "interactive" | "background";
 
 const priorityContext = new AsyncLocalStorage<RunPriority>();
 
@@ -32,6 +40,34 @@ export function withRunPriority<T>(priority: RunPriority, fn: () => T): T {
  */
 export function currentRunPriority(): RunPriority {
   return priorityContext.getStore() ?? "interactive";
+}
+
+/**
+ * The slot priority of one invocation: the owner's own words (not a product-sent continuation, not a teammate report, no
+ * unattended execution source except the owner's mobile/Telegram channels) are "owner". Any other invocation started inside
+ * an owner turn (a teammate dispatch, a room wake) does not inherit the owner lane: it falls back to interactive; background
+ * stays background.
+ */
+export function invocationRunPriority(input: {
+  promptOrigin?: "user" | "system";
+  oneTeamReportTurn?: boolean;
+  source?: string;
+}, inherited: RunPriority = currentRunPriority()): RunPriority {
+  const ownerChannel = input.source === undefined || input.source === "mobile" || input.source === "telegram";
+  if (input.promptOrigin !== "system" && !input.oneTeamReportTurn && ownerChannel) return "owner";
+  return inherited === "owner" ? "interactive" : inherited;
+}
+
+/** Model-call roles (model-call-ledger ModelCallRole) that are delegated work, never the owner's own turn. */
+const DELEGATED_ROLES: ReadonlySet<string> = new Set(["worker", "planner", "synthesis", "curator", "build"]);
+
+/**
+ * The slot lane of one model call: the owner lane stays with the owner's own turn; a delegated call made inside it (its
+ * model-call scope names a worker/planner/synthesis/curator/build role) falls back to interactive, so a firm or swarm the
+ * owner's message started cannot fill the owner lane ahead of the owner's next message (native-harness notyet NH20).
+ */
+export function slotPriorityForCall(priority: RunPriority, role: string | undefined): RunPriority {
+  return priority === "owner" && role !== undefined && DELEGATED_ROLES.has(role) ? "interactive" : priority;
 }
 
 /**

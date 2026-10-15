@@ -17,7 +17,11 @@ export interface OneCapabilityItem {
   applies: boolean;
   /** runtime_reads_itself: the runtime loads it on its own. agentlas_managed: Agentlas connects it when a turn needs it. */
   limit?: "runtime_reads_itself" | "agentlas_managed";
+  /** Which One may use a switchable item: both, the personal conversation, or One as CEO (rooms, organization). */
+  role?: OneCapabilityRole;
 }
+
+export type OneCapabilityRole = "both" | "personal" | "ceo";
 
 export interface OneCapabilityDetail {
   id: string;
@@ -36,4 +40,5 @@ export interface OneCapabilitiesAPI {
   detail(input: { id: string }): Promise<OneCapabilityDetail | null>;
   setEnabled(input: { id: string; enabled: boolean }): Promise<OneCapabilityItem | null>;
   setSourceEnabled(input: { source: OneCapabilitySource; enabled: boolean; kind?: OneCapabilityKind }): Promise<{ source: OneCapabilitySource; changed: number }>;
+  setRole(input: { id: string; role: OneCapabilityRole }): Promise<OneCapabilityItem | null>;
 }

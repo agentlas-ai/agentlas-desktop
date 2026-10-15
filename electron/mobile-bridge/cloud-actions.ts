@@ -1,3 +1,4 @@
+import { transferMobileBuildInterviewWitness } from "../hephaestus/mobile-interview-witness";
 // DESKTOP_MOBILE_BRIDGE: Cloud-action and build adapters for the Mobile Bridge
 // authority.
 //
@@ -254,22 +255,18 @@ export function createDesktopMobileBridgeBuildActions(): MobileBridgeBuildAction
             });
           })();
       const { runHephaestusBuild } = await import("../hephaestus/builder");
-      await runHephaestusBuild(
-        input.runId,
-        {
-          request: input.goal,
-          workspace,
-          runtimePinned: false,
-          ...(applied?.runtime ? { runtime: applied.runtime } : {}),
-          mcpAttachment: applied?.attachment,
-          ...(input.runtimeSessionId ? { runtimeSessionId: input.runtimeSessionId } : {}),
-          ...(input.history?.length ? { history: input.history } : {}),
-          locale: input.locale,
-        },
-        input.sink,
-        input.signal,
-        input.locale,
-      );
+      const request = {
+        request: input.goal,
+        workspace,
+        runtimePinned: false,
+        ...(applied?.runtime ? { runtime: applied.runtime } : {}),
+        mcpAttachment: applied?.attachment,
+        ...(input.runtimeSessionId ? { runtimeSessionId: input.runtimeSessionId } : {}),
+        ...(input.history?.length ? { history: input.history } : {}),
+        locale: input.locale,
+      };
+      transferMobileBuildInterviewWitness(input, request);
+      await runHephaestusBuild(input.runId, request, input.sink, input.signal, input.locale);
     },
   };
 }

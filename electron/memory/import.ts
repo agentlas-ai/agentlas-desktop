@@ -10,9 +10,10 @@
 // (dropped) before any write. DRY-RUN preview + APPLY, sharing one mapper so the
 // preview is exactly what apply writes.
 import fs from "node:fs";
+import { isGeneratedMemoryView } from "./projections";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { getDb } from "../store/db";
+import { getMemoryDb as getDb, getMemoryStoreInfo } from "./database";
 import { insertMemoryEntry } from "./store";
 import { autoIntakeCuratedMemory } from "../experience/store";
 import { getAgentById } from "../mcp/registry";
@@ -195,6 +196,30 @@ export type MemoryImportOwnerJudge = (spec: {
   timeoutMs?: number;
 }) => Promise<{ verdict: string; source: "llm" | "fallback"; confidence: number; reason: string }>;
 
+interface MemoryImportOptions {
+  judgeFn?: MemoryImportOwnerJudge;
+  /** Native caller custody captured before a folder dialog, never a wire field. */
+  assertCurrent?: () => void;
+}
+
+export function captureMemoryImportOwner(): () => void {
+  const original = getMemoryStoreInfo();
+  return () => {
+    const current = getMemoryStoreInfo();
+    if (current.ownerNamespace !== original.ownerNamespace || current.path !== original.path)
+      throw new Error("memory_import_owner_changed");
+    if (current.revocationEpoch !== original.revocationEpoch)
+      throw new Error("memory_import_epoch_changed");
+  };
+}
+
+function guardedOptions(opts: MemoryImportOptions): MemoryImportOptions {
+  const original = captureMemoryImportOwner();
+  const assertCurrent = () => { opts.assertCurrent?.(); original(); };
+  assertCurrent();
+  return { ...opts, assertCurrent };
+}
+
 const MAX_MEMBER_LABELS = 40;
 
 /**
@@ -209,8 +234,9 @@ export async function resolveMemoryImportOwner(
   relFile: string,
   content: string,
   target: MemoryImportMemberTarget,
-  opts: { judgeFn?: MemoryImportOwnerJudge; timeoutMs?: number } = {},
+  opts: MemoryImportOptions & { timeoutMs?: number } = {},
 ): Promise<{ owner: { agentId: string; role: string } | null; source: "llm" | "fallback" }> {
+  opts.assertCurrent?.();
   const lexical = matchMember(normalizeToken(relFile), target);
   if (target.members.length === 0) return { owner: null, source: "fallback" };
   const members = target.members.slice(0, MAX_MEMBER_LABELS);
@@ -226,19 +252,21 @@ export async function resolveMemoryImportOwner(
   }
   let verdict: Awaited<ReturnType<MemoryImportOwnerJudge>>;
   try {
+    opts.assertCurrent?.();
     verdict = await judgeFn({
       kind: "memory-import-member-owner",
       question:
         "Which team member should own the knowledge in this imported memory file? Answer 'orchestrator' when it is team-wide coordination knowledge or no listed member clearly owns it.",
       labels,
+      // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.judgment.kind.memory-import-member-owner.user).
       input: [
+        "TEAM MEMBERS:",
+        ...members.map((member) => `- ${member.slug}: ${member.role}`),
+        "",
         `FILE: ${relFile}`,
         "",
         "CONTENT:",
         content.slice(0, 2_000),
-        "",
-        "TEAM MEMBERS:",
-        ...members.map((member) => `- ${member.slug}: ${member.role}`),
       ].join("\n"),
       hints: members.map((member) => ({
         label: member.slug,
@@ -247,16 +275,19 @@ export async function resolveMemoryImportOwner(
           ...normalizeToken(member.slug).split(" ").filter((t) => t.length >= 3),
         ])],
       })),
+      // Composition order: fixed → variable (ledger desktop.judgment.kind.memory-import-member-owner.system).
       guidance:
-        `A deterministic token-overlap pre-pass suggested "${lexicalLabel}". Treat that as a prior, not a fact. ` +
-        "Judge who the knowledge is FOR by meaning, in any language — a filename token overlap is not ownership.",
+        "Judge who the knowledge is FOR by meaning, in any language — a filename token overlap is not ownership. " +
+        `A deterministic token-overlap pre-pass suggested "${lexicalLabel}". Treat that as a prior, not a fact.`,
       fallback: lexicalLabel,
       timeoutMs: opts.timeoutMs,
     });
   } catch {
+    opts.assertCurrent?.();
     // No connected model → orchestrator (owner null), never a token-overlap pick.
     return { owner: null, source: "fallback" };
   }
+  opts.assertCurrent?.();
   if (verdict.source !== "llm") return { owner: null, source: "fallback" };
   if (verdict.verdict === "orchestrator") return { owner: null, source: "llm" };
   const member = bySlug.get(verdict.verdict);
@@ -278,8 +309,9 @@ async function decideOwner(
   relFile: string,
   content: string,
   target: TargetShape,
-  opts: { judgeFn?: MemoryImportOwnerJudge } = {},
+  opts: MemoryImportOptions = {},
 ): Promise<OwnerDecision> {
+  opts.assertCurrent?.();
   const lower = relFile.toLowerCase();
   const alwaysKeep = ALWAYS_KEEP_HINT.test(lower);
   if (SHARED_HINT.test(lower)) {
@@ -293,6 +325,7 @@ async function decideOwner(
   }
   if (target.kind === "team") {
     const routed = await resolveMemoryImportOwner(relFile, content, target, opts);
+    opts.assertCurrent?.();
     if (routed.owner) {
       return {
         scope: "agent_repo",
@@ -369,18 +402,21 @@ interface BuiltEntry {
 async function buildEntries(
   req: MemoryImportRequest,
   target: TargetShape,
-  opts: { judgeFn?: MemoryImportOwnerJudge } = {},
+  opts: MemoryImportOptions = {},
 ): Promise<BuiltEntry[]> {
   const files = collectMarkdown(req.sourcePath);
   const built: BuiltEntry[] = [];
   for (const { abs, rel } of files) {
+    opts.assertCurrent?.();
     let md: string;
     try {
       md = fs.readFileSync(abs, "utf8");
     } catch {
       continue;
     }
+    if (isGeneratedMemoryView(md)) continue;
     const owner = await decideOwner(rel, md, target, opts);
+    opts.assertCurrent?.();
     const sections = /decisions\.md$/i.test(rel) ? splitDatedBullets(md) : splitSections(md);
     for (const sec of sections) {
       if (!keepSection(sec.heading, sec.body, owner.alwaysKeep)) continue;
@@ -422,10 +458,12 @@ function existsByToken(token: string): boolean {
 
 export async function importMemoryPreview(
   req: MemoryImportRequest,
-  opts: { judgeFn?: MemoryImportOwnerJudge } = {},
+  opts: MemoryImportOptions = {},
 ): Promise<MemoryImportPreview> {
+  opts = guardedOptions(opts);
   const target = validateRequest(req);
   const entries = await buildEntries(req, target, opts);
+  opts.assertCurrent?.();
   const rows: MemoryImportRow[] = [];
   const byOwner: Record<string, number> = {};
   const byKind: Record<string, number> = {};
@@ -465,10 +503,12 @@ export async function importMemoryPreview(
 
 export async function importMemoryApply(
   req: MemoryImportRequest,
-  opts: { judgeFn?: MemoryImportOwnerJudge } = {},
+  opts: MemoryImportOptions = {},
 ): Promise<MemoryImportResult> {
+  opts = guardedOptions(opts);
   const target = validateRequest(req);
   const entries = await buildEntries(req, target, opts);
+  opts.assertCurrent?.();
   const result: MemoryImportResult = {
     sourcePath: req.sourcePath,
     targetAgentId: target.agentId,
@@ -480,6 +520,7 @@ export async function importMemoryApply(
     byOwner: {},
   };
   for (const e of entries) {
+    opts.assertCurrent?.();
     if (e.redacted) {
       result.redacted += 1;
       continue;

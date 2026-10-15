@@ -111,9 +111,7 @@ export function writeEvolutionProposalsForProject(projectDir: string | null | un
 }
 
 /** 세션 시작 컨텍스트 한 줄 — 대기 중 고위험 제안이 있을 때만. content-free. */
-export function evolutionSessionContextLine(pendingCount: number, locale: "ko" | "en"): string | null {
+export function evolutionSessionContextLine(pendingCount: number, _locale?: "ko" | "en"): string | null {
   if (pendingCount <= 0) return null;
-  return locale === "ko"
-    ? `[Agentlas] 검토 대기 중인 에이전트 성장 제안 ${pendingCount}건 — \`agentlas evolve\`로 확인하세요.`
-    : `[Agentlas] ${pendingCount} agent growth proposal(s) pending — review with \`agentlas evolve\`.`;
+  return `[Agentlas] ${pendingCount} growth proposal(s) pending: \`agentlas evolve\``;
 }

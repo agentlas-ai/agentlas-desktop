@@ -95,17 +95,10 @@ export interface OneOrgMember {
 }
 
 export interface OneOrgSlots {
+  /** Registered identities, not concurrent runs or resident CLI processes. */
   used: number;
-  capacity: number;
-  available: number;
-  /** One's own orchestrator slot is included in used. */
+  /** One's own identity is included in used. Roster membership has no hardware cap. */
   includesOne: true;
-  /** Machine-backed swarm budget shown beside the organisation footer. */
-  recommended: number;
-  hardMax: number;
-  cores: number;
-  totalMemGB: number;
-  userSet: boolean;
 }
 
 export interface OneOrgState {

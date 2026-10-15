@@ -1,4 +1,3 @@
-import { experienceChipsRetired } from "./retired";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import type {
@@ -386,13 +385,6 @@ export class ExperienceCloudHttpClient {
     return validateExperienceBaseResolution(await readResponseJson(response), input);
   }
 
-  async upload(
-    bundle: PortableExperienceBundle,
-    idempotencyKey: string,
-  ): Promise<ExperienceCloudUploadReceipt> {
-    return experienceChipsRetired();
-  }
-
   async findUpload(bundle: PortableExperienceBundle, idempotencyKey: string): Promise<ExperienceCloudUploadReceipt | null> {
     const response = await this.request(`/api/experience/v1/uploads?bundleId=${encodeURIComponent(bundle.bundleId)}`, {
       method: "GET",
@@ -487,56 +479,6 @@ function getPack(packId: string): CloudPackRow {
   return row;
 }
 
-function packageIdentity(pack: CloudPackRow): {
-  slug: string;
-  cloudId?: string;
-  packageHash: string;
-  packageHashVersion: string;
-} {
-  const agent = getAgentById(pack.agent_id);
-  if (!agent) throw new Error("Experience Pack has no installed agent.");
-  // 팩 자신이 기준을 안 갖고 있는 것은 데이터 결손이라 여전히 막는다 (판 불일치와는 다르다).
-  if (!pack.base_package_hash) throw new Error("Experience Pack has no recorded base package.");
-  // 위 내보내기와 같은 이유로 막지 않는다. 서버가 판을 확정해 되쓰는 경로이므로
-  // 지금 설치본과 팩의 기준이 달라도 해석 자체는 성립한다.
-  if (agent.packageHash !== pack.base_package_hash) {
-    console.log(`[experience] resolving cloud base for pack ${pack.id} measured on an older build`);
-  }
-  const marker = agent.localPath ? readCloudAgentRestoreMarker(agent.localPath) : null;
-  const registration = marker?.registrations?.["owner-private"] ?? marker?.registrations?.["hub-public"];
-  // A legacy local import can keep an install-only slug (for example a
-  // collision suffix) after the exact package is registered in Agent Cloud.
-  // Once a signed Cloud registration exists, its slug and cloudId are the
-  // authoritative pair. Mixing the old local slug with the new cloudId makes
-  // the server correctly reject Experience binding as a reference mismatch.
-  const registeredSlug = registration?.slug?.trim();
-  return {
-    slug: registeredSlug || agent.slug,
-    ...(registration?.cloudId ? { cloudId: registration.cloudId } : {}),
-    packageHash: pack.base_package_hash,
-    packageHashVersion: pack.base_package_hash_version ?? marker?.packageHashVersion ?? "path-sha256-executable-v2",
-  };
-}
-
-function storeBaseResolution(packId: string, resolved: ExperienceBaseReleaseResolution): void {
-  getDb().prepare(
-    `UPDATE experience_packs
-        SET base_agent_definition_id = ?, base_agent_release_id = ?,
-            base_package_hash_version = ?, updated_at = updated_at
-      WHERE id = ?`,
-  ).run(resolved.agentDefinitionId, resolved.agentReleaseId, resolved.packageHashVersion, packId);
-}
-
-function idempotencyKey(bundle: PortableExperienceBundle): string {
-  const digest = createHash("sha256")
-    .update("agentlas-experience-upload-idempotency-v1\0")
-    .update(bundle.bundleHash)
-    .update("\0")
-    .update(bundle.requestedVisibility)
-    .digest("hex");
-  return `exu:${bundle.requestedVisibility}:${digest}`;
-}
-
 function uploadFromRow(row: CloudUploadRow): ExperienceCloudUploadRecord {
   const bundle = validatePortableExperienceBundle(JSON.parse(row.canonical_bundle_json) as PortableExperienceBundle);
   if (portableExperienceCanonicalJson(bundle) !== row.canonical_bundle_json) {
@@ -578,56 +520,6 @@ function getUploadRow(localId: string): CloudUploadRow {
   const row = getDb().prepare("SELECT * FROM experience_cloud_uploads WHERE id = ?").get(localId) as CloudUploadRow | undefined;
   if (!row) throw new Error("Local Experience Cloud upload was not found.");
   return row;
-}
-
-function ensureUploadRecord(packId: string, bundle: PortableExperienceBundle, now: string): CloudUploadRow {
-  const key = idempotencyKey(bundle);
-  const existing = getDb().prepare(
-    `SELECT * FROM experience_cloud_uploads
-      WHERE pack_id = ? AND bundle_hash = ? AND requested_visibility = ?`,
-  ).get(packId, bundle.bundleHash, bundle.requestedVisibility) as CloudUploadRow | undefined;
-  const canonical = portableExperienceCanonicalJson(bundle);
-  if (existing) {
-    if (existing.bundle_id !== bundle.bundleId || existing.idempotency_key !== key || existing.canonical_bundle_json !== canonical) {
-      throw new Error("Existing Experience upload identity conflicts with the canonical bundle.");
-    }
-    return existing;
-  }
-  if (bundle.requestedVisibility === "public") {
-    const privateDraft = getDb().prepare(
-      `SELECT * FROM experience_cloud_uploads
-        WHERE pack_id = ? AND bundle_hash = ? AND requested_visibility = 'private'
-        ORDER BY rowid DESC LIMIT 1`,
-    ).get(packId, bundle.bundleHash) as CloudUploadRow | undefined;
-    if (privateDraft) {
-      getDb().prepare(
-        `UPDATE experience_cloud_uploads
-            SET requested_visibility = 'public', canonical_bundle_json = ?,
-                idempotency_key = ?, remote_status = 'local-ready',
-                remote_error_code = NULL, remote_error_message = NULL,
-                remote_receipt_json = NULL,
-                updated_at = ?
-          WHERE id = ?`,
-      ).run(canonical, key, now, privateDraft.id);
-      return getUploadRow(privateDraft.id);
-    }
-  } else {
-    const publicRequest = getDb().prepare(
-      `SELECT 1 FROM experience_cloud_uploads
-        WHERE pack_id = ? AND bundle_hash = ? AND requested_visibility = 'public'
-        LIMIT 1`,
-    ).get(packId, bundle.bundleHash);
-    if (publicRequest) throw new Error("A public verification request cannot be downgraded to a new private upload.");
-  }
-  const id = randomUUID();
-  getDb().prepare(
-    `INSERT INTO experience_cloud_uploads (
-       id, pack_id, requested_visibility, bundle_id, bundle_hash,
-       canonical_bundle_json, idempotency_key, remote_status,
-       attempt_count, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, 'local-ready', 0, ?, ?)`,
-  ).run(id, packId, bundle.requestedVisibility, bundle.bundleId, bundle.bundleHash, canonical, key, now, now);
-  return getUploadRow(id);
 }
 
 function localStateForServer(receipt: ExperienceCloudUploadReceipt): ExperienceCloudLocalState {
@@ -689,30 +581,11 @@ function failureCode(error: unknown): string {
   return "invalid_server_response";
 }
 
-async function tryLostResponseRecovery(
-  client: ExperienceCloudHttpClient,
-  row: CloudUploadRow,
-  bundle: PortableExperienceBundle,
-): Promise<ExperienceCloudUploadReceipt | null> {
-  try {
-    return await client.findUpload(bundle, row.idempotency_key);
-  } catch {
-    return null;
-  }
-}
-
 export function listExperienceCloudUploads(packId: string): ExperienceCloudUploadRecord[] {
   getPack(packId);
   return (getDb().prepare(
     "SELECT * FROM experience_cloud_uploads WHERE pack_id = ? ORDER BY updated_at DESC, rowid DESC",
   ).all(packId) as CloudUploadRow[]).map(uploadFromRow);
-}
-
-export async function saveExperienceToCloud(
-  input: ExperienceCloudSaveInput,
-  deps: ExperienceCloudDependencies = {},
-): Promise<ExperienceCloudUploadRecord> {
-  return experienceChipsRetired();
 }
 
 export async function reconcileExperienceCloudUpload(
@@ -738,13 +611,6 @@ export async function reconcileExperienceCloudUpload(
       now,
     );
   }
-}
-
-export async function exportExperienceFromCloud(
-  localUploadId: string,
-  deps: ExperienceCloudDependencies = {},
-): Promise<ExperienceCloudExportResult> {
-  return experienceChipsRetired();
 }
 
 export async function withdrawExperienceFromCloud(

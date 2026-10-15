@@ -16,8 +16,12 @@ export function localContextFailure(code: LocalContextCode, runtime: string, loc
       : locale === "ko" ? "현재 모델의 대화 용량을 확인하지 못했습니다. 모델 상태를 확인해 주세요." : "The model context could not be verified. Check the model status." };
 }
 
-/** Structured provider markers only. HTTP 400 alone never means tools are unsupported. */
-export function localHttpFailureClass(text: string): "context" | "tools" | "other" {
+/**
+ * Structured provider markers only. HTTP 400 alone never means tools are unsupported. HTTP 413 (Payload Too Large) is a
+ * machine status, not prose: the request itself is over the endpoint's size limit, which is a capacity refusal.
+ */
+export function localHttpFailureClass(text: string, status?: number): "context" | "tools" | "other" {
+  if (status === 413) return "context";
   let error: Record<string, unknown>;
   try { const value = JSON.parse(text); error = value?.error; if (!error || typeof error !== "object" || Array.isArray(error)) return "other"; } catch { return "other"; }
   if (["exceed_context_size_error", "context_length_exceeded"].includes(String(error.type))

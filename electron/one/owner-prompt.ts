@@ -30,7 +30,10 @@ export function splitOneExecutionPrompt(req: OwnerPromptRequest): { request: str
   if (closeAt < 0) return { request: text, background: "" };
   const end = closeAt + ONE_STAFF_GUIDANCE_CLOSE.length;
   const background = text.slice(open, end);
-  const request = (text.slice(0, open).replace(/\s+$/, "") + text.slice(end)).replace(/\s+$/, "");
+  // The block may lead the prompt (standing-staff first, owner words last): drop the separator it leaves behind.
+  const before = text.slice(0, open).replace(/\s+$/, "");
+  const after = text.slice(end);
+  const request = (before ? before + after : after.replace(/^\s+/, "")).replace(/\s+$/, "");
   return { request, background };
 }
 

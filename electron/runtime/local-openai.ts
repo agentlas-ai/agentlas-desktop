@@ -1,3 +1,4 @@
+import { schemaFallbackPromptPart, observationSystemWithSchema } from "../../shared/runtime-capabilities";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 // OpenAI 호환 로컬 서버(LM Studio / MLX 등) 공용 감지 + 실호출.
 // Ollama(runtime/ollama.ts)와 달리 이들은 "표준 OpenAI" 엔드포인트를 쓴다:
@@ -8,6 +9,7 @@ import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { resolveEffectiveContextWindow } from "../../shared/models";
+import { reportModelEndpoint } from "./model-call-ledger";
 import { runLocalOpenAiChat, type ChatMessage, type LocalChatContent } from "./local-tool-loop";
 import { ownerControlHistoryImages } from "./owner-control-pump";
 import { agentContextHostBinding } from "./agent-context";
@@ -121,7 +123,7 @@ export function makeLocalOpenAiRunner(
     const systemText = req.systemPrompt;
 
     const surfaceGateText = cumulativeSurfaceGateText(recent, req.surfaceUserPrompt ?? req.userPrompt);
-    const wrapped = (surfaceGate?: "exclude") => wrapSystemPrompt(
+    const wrapped = (surfaceGate?: "exclude", withSchema = false) => wrapSystemPrompt(
       systemText,
       req.locale,
       req.permission,
@@ -136,6 +138,8 @@ export function makeLocalOpenAiRunner(
       undefined,
       req.sciencePromptProfile,
       req.judgmentOnly === true ? "host-judgment" : undefined,
+      withSchema && req.outputSchema ? [schemaFallbackPromptPart(req.outputSchema.schema)] : undefined,
+      req.systemPromptComposition,
     );
     const systemContent = req.minimalObservation ? req.systemPrompt : wrapped();
     // Managed local only: when the keyword-gated Surface protocol is what pushes the
@@ -171,6 +175,7 @@ export function makeLocalOpenAiRunner(
       messages.push({ role: "user", content: req.userPrompt });
     }
 
+    reportModelEndpoint({ url: host });
     return runLocalOpenAiChat(
       {
         req,
@@ -189,11 +194,30 @@ export function makeLocalOpenAiRunner(
         ...(estimatedWindow !== undefined ? {
           estimatedContextWindow: estimatedWindow,
           estimatedOutputReserve: req.maxOutputTokens ?? Math.min(8_192, Math.floor(estimatedWindow / 4)),
+          ...(options.loadedInstanceContextLengthFn && contextWindow === undefined ? { remeasureContextWindow: async () => {
+            // Same binding checks as the first read; a changed request/authority throws rather than measuring someone else's model.
+            const original = loadedBinding;
+            const assertCurrent = () => {
+              if (req.model !== original.model || req.signal !== original.signal || req.agentContext !== original.capability
+                || req.scienceRecoveryCapability !== original.science || req.chatId !== original.chatId
+                || req.agentId !== original.agentId || req.approvalChatId !== original.approvalChatId || req.permission !== original.permission)
+                loadedCapacityFailure("local_loaded_capacity_request_binding_changed");
+              original.signal?.throwIfAborted();
+              if (original.capability) agentContextHostBinding(original.capability).assertCurrent();
+              assertScienceRecoveryRequest(req, runtimeKind);
+            };
+            const value = await options.loadedInstanceContextLengthFn!(Object.freeze({ host, model, signal: original.signal, assertCurrent }));
+            return value !== undefined && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+          } } : {}),
           ...(capacity ? { capacitySource: capacity.source } : {}),
         } : {}),
         ...(options.acceptsImageResults === false ? { acceptsImageResults: false } : {}),
         ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
         ...(systemPromptFallback ? { systemPromptFallback } : {}),
+        renderOutputSchemaSystem: () => ({
+          system: req.minimalObservation ? observationSystemWithSchema(req.systemPrompt, req.outputSchema?.schema) : wrapped(undefined, true),
+          ...(systemPromptFallback ? { fallback: wrapped("exclude", true) } : {}),
+        }),
       },
       messages,
     );

@@ -20,7 +20,8 @@ export function oneDispatchPendingQuestion(childChatId: string, childRunId: stri
     : undefined;
   // A committed answer whose continuation was rejected is still actionable. The existing authority
   // accepts only the same source/reply on retry; removing its question here would strand the child.
-  return questions.length ? { sourceMessageId:message.id, questions,
+  return questions.length ? { sourceMessageId:message.id, questions:questions.slice(0,8),
+    ...(questions.length > 8 ? {questionBank:{schemaVersion:1 as const,sourceMessageId:message.id,questions}} : {}),
     ...(committed?.continuationRunId ? {committedReply:committed.reply,continuationRunId:committed.continuationRunId} : {}) } : undefined;
 }
 

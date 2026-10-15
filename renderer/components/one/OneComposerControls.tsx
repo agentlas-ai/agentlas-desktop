@@ -20,11 +20,12 @@ import {
 import { PluginLogo, usePluginBrandMap } from "@/components/PluginLogo";
 import { runtimeModelFallbackLabel } from "@/components/dashboard/RuntimeModelPicker";
 import { runtimeUsesEngineModelSetting } from "@shared/models";
+import { ContextBreakdown } from "@/components/ContextBreakdown";
 import type { ChatAlwaysApprovalControl } from "@/lib/use-chat-always-approval";
 import type { RuntimeStatus } from "@shared/types";
 import styles from "./OneShell.module.css";
 
-export type OneComposerMenuKey = "plus" | "agents" | "model" | "effort" | "permission";
+export type OneComposerMenuKey = "plus" | "agents" | "model" | "effort" | "permission" | "context";
 export type OnePermissionMode = "auto" | "read" | "write" | "full";
 
 export type OneComposerModelOption = {
@@ -72,6 +73,8 @@ type Props = {
   alwaysApproval: ChatAlwaysApprovalControl;
   turnOptions: Partial<Record<OneTurnOptionKey, true>>;
   localFilesConnected: boolean;
+  /** Chat whose context window the "context" menu shows (harness context.inspect). */
+  contextChatId?: string | null;
   onMenuChange: (menu: OneComposerMenuKey | null) => void;
   onAttach: () => void;
   onAddFolder: () => void;
@@ -104,6 +107,7 @@ export function OneComposerControls({
   alwaysApproval,
   turnOptions,
   localFilesConnected,
+  contextChatId,
   onMenuChange,
   onAttach,
   onAddFolder,
@@ -208,7 +212,11 @@ export function OneComposerControls({
       } as CSSProperties}
       aria-label={locale === "ko" ? "One 입력 설정" : "One composer settings"}
     >
-      {activeMenu === "plus" ? (
+      {activeMenu === "context" ? (
+        <div data-one-context-breakdown="true" style={{ padding: "14px 16px", minWidth: 240 }}>
+          <ContextBreakdown chatId={contextChatId ?? null} locale={locale} fallbackLabel="—" fallbackNote="" />
+        </div>
+      ) : activeMenu === "plus" ? (
         <div className={styles.composerPopoverList}>
           <div className={styles.composerPopoverSectionLabel}>{locale === "ko" ? "추가" : "Add"}</div>
           <ComposerRow

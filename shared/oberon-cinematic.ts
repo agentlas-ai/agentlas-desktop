@@ -254,52 +254,40 @@ export const COLOR_TONE_BORROW_PROMPT = "첫 번째 이미지의 모든 요소�
 export const COLOR_PALETTE_BORROW_PROMPT = "첫 번째 이미지를 유지하고 색상 톤만 두 번째 이미지의 팔레트를 참조해 변경한다.";
 export const REFERENCE_ATTACH_ORDER_RULE = "변경할 이미지를 첫 번째로, 참조할 이미지를 두 번째로 첨부한다. 순서가 바뀌면 프롬프트도 그에 맞춰 조정한다.";
 
-// ── 프롬프트 린트 — 흔한 실수 감지(차단 아닌 경고) ──────────────────────────
+// ── 프롬프트 진단 — 구조 오류만 호스트, 창작 조언은 모델 검토 ──────────────────
 //
-// 판정 위임 대상이 아니다: 이 린트는 아무것도 막지 않고 "이렇게 쓰면 더 좋다"는 조언만
-// 붙인다. 결정 권한이 없으므로 오탐의 비용이 조언 한 줄이고, 사용자의 프롬프트는 그대로
-// 실행된다. 판정을 LLM에 넘겨야 하는 곳은 "사용자의 결과를 바꾸거나 막는" 지점뿐이다.
-// (실제로 막는 지점들은 electron/system-agents/judgment.ts 를 통해 모델이 판정한다.)
+// 호스트는 프롬프트의 단어(시각 어휘·품질 키워드·행동 연결 어구)로 창작 품질을 판정하지
+// 않는다. 호스트 진단은 구조 오류(빈 프롬프트·비문자열·길이 초과) 한 종류("schema")뿐이다.
+// 창작 조언은 CINEMATIC_CREATIVE_REVIEW_GUIDE 를 모델 검토(creative review)에 넘겨
+// 모델이 판단한다 — 호스트 diagnostics 로는 절대 반환하지 않는다.
 
-export const QUALITY_KEYWORD_BLACKLIST = [
-  "8K",
-  "ultra HD",
-  "masterpiece",
-  "best quality",
-  "extremely detailed",
-  "professional photography",
-  "award winning",
-] as const;
+export const CINEMATIC_PROMPT_MAX_CHARS = 8_000;
+
+export const CINEMATIC_CREATIVE_REVIEW_GUIDE = [
+  "Review this image prompt as a creative director; the host does not judge wording.",
+  "Prefer concrete visual information (shot size, light direction, lens feel, palette, framing) over abstract quality words.",
+  "Translate emotion into lighting, colour and framing rather than naming the emotion.",
+  "One image holds one moment; split multi-moment actions into separate shots.",
+].join("\n");
 
 export interface CinematicPromptFinding {
-  rule: "quality_keyword_spam" | "emotion_without_visuals" | "multiple_moments";
+  /** Host diagnostics are structural only. Creative advice is model-review only. */
+  kind: "schema";
+  rule: "prompt_not_string" | "prompt_empty" | "prompt_too_long";
   message: string;
 }
 
-export function lintCinematicPrompt(prompt: string): CinematicPromptFinding[] {
-  const findings: CinematicPromptFinding[] = [];
-  const hits = QUALITY_KEYWORD_BLACKLIST.filter((kw) => prompt.toLowerCase().includes(kw.toLowerCase()));
-  if (hits.length >= 2) {
-    findings.push({
-      rule: "quality_keyword_spam",
-      message: `추상적 품질 키워드 나열(${hits.join(", ")})은 효과가 약하다. 구체적 시각 정보(샷 사이즈, 조명 방향, 렌즈 느낌)가 훨씬 낫다.`,
-    });
+export function lintCinematicPrompt(prompt: unknown): CinematicPromptFinding[] {
+  if (typeof prompt !== "string") {
+    return [{ kind: "schema", rule: "prompt_not_string", message: "prompt must be a string" }];
   }
-  const visualVocab =
-    /(light|lighting|조명|shot|샷|close-up|클로즈업|와이드|wide|angle|앵글|lens|렌즈|depth of field|심도|grain|그레인|palette|색감|톤|tone|framing|프레이밍|백라이트|역광)/i;
-  if (prompt.trim().length > 0 && prompt.trim().length < 80 && !visualVocab.test(prompt)) {
-    findings.push({
-      rule: "emotion_without_visuals",
-      message: "감정은 조명·색감·프레이밍으로 번역해야 한다. 예: '슬픔' → low-key lighting, desaturated cool tones, subject small in frame, wide shot.",
-    });
+  if (prompt.trim().length === 0) {
+    return [{ kind: "schema", rule: "prompt_empty", message: "prompt must not be empty" }];
   }
-  if (/(하다가|한 뒤에?|그리고 나서|다음에|이후에)\s/.test(prompt) && /(나가|일어나|떠나|돌아)/.test(prompt)) {
-    findings.push({
-      rule: "multiple_moments",
-      message: "여러 순간이 한 프롬프트에 섞여 있다. 하나의 이미지에는 하나의 순간만 담는다 — 나머지는 별도 샷으로 나눈다.",
-    });
+  if (prompt.length > CINEMATIC_PROMPT_MAX_CHARS) {
+    return [{ kind: "schema", rule: "prompt_too_long", message: `prompt exceeds ${CINEMATIC_PROMPT_MAX_CHARS} characters` }];
   }
-  return findings;
+  return [];
 }
 
 // ── 파이프라인 메타 ──────────────────────────────────────────────────────────

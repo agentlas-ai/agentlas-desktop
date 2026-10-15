@@ -11,8 +11,9 @@ export const PERSONAL_INTEGRATION_METHODS=['gmailCatalog','gmailPropose','gmailA
 export type PersonalIntegrationMethod=typeof PERSONAL_INTEGRATION_METHODS[number];
 export interface NativePersonalReviewContext {window:BrowserWindow;actor:GmailRegistrationActor;assertCurrent():void}
 const nativeReviews=new AsyncLocalStorage<NativePersonalReviewContext>();
+export function currentNativePersonalReviewContext():NativePersonalReviewContext{const context=nativeReviews.getStore();if(!context)throw personalDataError('personal_integration_native_review_required');context.assertCurrent();return context;}
 function fail(code:string):never{throw personalDataError(code);}
-const approvalMethods=new Set<PersonalIntegrationMethod>(['gmailApprove','historyAccept','historyAcceptFeedback']);
+const approvalMethods=new Set<PersonalIntegrationMethod>(['gmailApprove','historyObserve','historyAccept','historyAcceptFeedback']);
 /** Main-owned explicit native approver; never accepts an approval object from the renderer. */
 export function createGmailNativeDialogReview(input:{actor():GmailRegistrationActor;showMessageBox(window:BrowserWindow,options:MessageBoxOptions):Promise<MessageBoxReturnValue>}):(request:Readonly<GmailNativeApprovalRequest>)=>Promise<GmailNativeApprovalReceipt|null>{return async request=>{
   const context=nativeReviews.getStore();if(!context)fail('personal_integration_native_review_required');context.assertCurrent();
@@ -71,7 +72,7 @@ export function registerOnePersonalIntegrationIpc(input:{ipc:Pick<IpcMain,'handl
   input.assertTrustedSender(event);if(input.isAppControlEvent(event)||extras.length)fail('personal_integration_dedicated_port_required');validate(method,value);
   const mode=input.mode();if(mode==='handoff')fail('personal_integration_owner_handoff_pending');
   try {if(mode==='daemon'){if(approvalMethods.has(method)){if(!input.invokeOwnerReview)fail('personal_integration_native_review_bridge_required');const context=input.reviewContext(event);context.assertCurrent();const result=await input.invokeOwnerReview(method,value,context);context.assertCurrent();return result;}return await input.invokeOwner(method,value);}
-    if(approvalMethods.has(method)){const context=input.reviewContext(event);context.assertCurrent();return await nativeReviews.run(context,()=>input.local.dispatch(method,value));}return await input.local.dispatch(method,value);
+    if(approvalMethods.has(method)){const original=input.reviewContext(event),context={...original,assertCurrent(){original.assertCurrent();if(input.mode()!=='local')fail('personal_integration_owner_handoff_pending')}};context.assertCurrent();const result=await nativeReviews.run(context,()=>input.local.dispatch(method,value));context.assertCurrent();return result;}return await input.local.dispatch(method,value);
   }catch(error){const code=(error as {code?:unknown})?.code;throw personalDataError(typeof code==='string'&&/^(?:personal_integration|gmail_personal|history_native|history_evolution)_[a-z_]{1,80}$/.test(code)?code:'personal_integration_unavailable');}});}
 
 /** Intake wake fanout only. Parent calls wakeFromExistingCheckin inside its ALREADY existing owner timer. */

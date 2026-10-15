@@ -140,16 +140,12 @@ function readPromptFile(root: string, ref: unknown): string | undefined {
   }
 }
 
-const RESOLVER_SYSTEM = `You are Agentlas's team-structure resolver. You are given a map (file list + excerpts) of an arbitrary AI-agent-team folder. Infer the org as exactly 3 tiers: a single CEO, its divisions (department heads), and each division's specialists.
-
-Rules:
-- Output ONLY one JSON object, no prose, no markdown fence.
-- Shape: {"divisions":[{"role":"...","name":"...","promptFileRef":"relative/path or null","specialists":[{"role":"...","name":"...","promptFileRef":"relative/path or null"}]}]}
-- The CEO is already known — do NOT include it; only resolve divisions + specialists beneath it.
-- role = the function (e.g. "Marketing Division", "Designer"); name = a display name (may equal role).
-- promptFileRef = the relative file path (from the listed FILES) whose content defines that agent's behavior, or null.
-- If the team is flat (no clear sub-structure), return the leaf roles as divisions with empty specialists.
-- Be faithful to the folder; do not invent agents that aren't represented.`;
+const RESOLVER_SYSTEM = `task: infer the org of an AI-agent-team folder (file list + excerpts) as 3 tiers: CEO (already known, do NOT include), divisions, each division's specialists
+output: ONE JSON object only, no prose, no fence: {"divisions":[{"role":"...","name":"...","promptFileRef":"relative/path or null","specialists":[{"role":"...","name":"...","promptFileRef":"relative/path or null"}]}]}
+role: the function (e.g. "Marketing Division"); name: display name (may equal role)
+promptFileRef: relative path from the listed FILES whose content defines the agent, or null
+flat team: leaf roles as divisions, empty specialists
+faithful to the folder; no invented agents`;
 
 /** firm의 팀 폴더를 LLM으로 분석해 3-tier ResolvedOrg를 만들어 저장한다. */
 export async function resolveTeamOrg(
@@ -254,16 +250,12 @@ function writeSidecar(root: string, org: ResolvedOrg): void {
   }
 }
 
-const ANALYZE_SYSTEM = `You are Agentlas's folder analyzer. Given a map (file list + excerpts) of a folder the user just imported, decide whether it is a SINGLE agent or a MULTI-AGENT TEAM, and if a team, infer its structure. Folder layouts vary wildly across frameworks — judge by meaning, not by fixed folder names.
-
-Rules:
-- Output ONLY one JSON object, no prose, no markdown fence.
-- Shape: {"kind":"agent"|"team","divisions":[{"role":"...","name":"...","promptFileRef":"relative/path or null","specialists":[{"role":"...","name":"...","promptFileRef":"relative/path or null"}]}]}
-- "team" when multiple distinct agents/roles are defined (subfolders each with an agent/persona/prompt file, a roster/orgspec/manifest listing members, several personas). "agent" when it is a single assistant.
-- The CEO/orchestrator is implicit — do NOT include it; list its direct reports as "divisions" and their reports as "specialists".
-- promptFileRef = the relative file path whose content defines that agent, or null.
-- If kind is "agent", divisions = [].
-- Be faithful to the folder; do not invent agents that aren't represented.`;
+const ANALYZE_SYSTEM = `task: decide whether an imported folder (file list + excerpts) is a SINGLE agent or a MULTI-AGENT TEAM; if a team, infer its structure; judge by meaning, not folder names
+output: ONE JSON object only, no prose, no fence: {"kind":"agent"|"team","divisions":[{"role":"...","name":"...","promptFileRef":"relative/path or null","specialists":[{"role":"...","name":"...","promptFileRef":"relative/path or null"}]}]}
+team: multiple distinct agents/roles (subfolders with agent/persona/prompt files, roster/orgspec/manifest, several personas); agent: single assistant, divisions = []
+CEO/orchestrator implicit, not listed: its direct reports are divisions, their reports specialists
+promptFileRef: relative path whose content defines the agent, or null
+faithful to the folder; no invented agents`;
 
 /** 임포트된 폴더를 활성 LLM(CLI/BYOK)으로 분석 — 단일 에이전트인지 팀인지 + (팀이면) 3-tier 구조.
  *  하드코딩 폴더명 매칭이 아니라 LLM이 임의 구조를 의미로 판단한다.

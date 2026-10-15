@@ -17,6 +17,8 @@ const PROMPT_ROW_WINDOW_MS = 120_000;
 
 export interface OneThreadRunBlock {
   runId: string;
+  /** Main-persisted assistant row identity, never a timestamp/text guess. */
+  answerMessageIds?: string[];
   startedAt: string;
   finishedAt?: string;
   status: InvocationRunReceipt["status"];
@@ -48,6 +50,8 @@ export function projectThreadRuns(
       const interruptionCause = oneRunInterruptionCause(entry.receipt, entry.events);
       return {
         runId: entry.receipt.runId,
+        answerMessageIds: [...new Set(entry.events.filter(event => event.runId === entry.receipt.runId && (!event.chatId || event.chatId === entry.receipt.chatId) && !event.agentId && event.kind === "mcp_final")
+          .map(event => event.payload.durableMessageId).filter((id): id is string => typeof id === "string" && Boolean(id.trim())))],
         startedAt: entry.receipt.startedAt,
         ...(entry.receipt.finishedAt ? { finishedAt: entry.receipt.finishedAt } : {}),
         status: entry.receipt.status,

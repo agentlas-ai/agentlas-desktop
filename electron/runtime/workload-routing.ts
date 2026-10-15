@@ -1,3 +1,4 @@
+import type { DeclaredPromptPart } from "./prompt-order";
 import type { AgentRuntimeOverride, RuntimeStatus } from "../../shared/types";
 import { createHash } from "node:crypto";
 import { buildShadowRoutingEvaluation } from "./routing-evaluation";
@@ -875,12 +876,22 @@ export function workloadAllocationPromptExample(phase: WorkloadPhase): string {
   });
 }
 
+/** Typed fields let full-channel callers place stable inventory rules above changing inventory data. */
+export function workloadAllocationInventoryPromptParts(
+  runtimes: RuntimeStatus | RuntimeStatus[],
+): DeclaredPromptPart[] {
+  const list = Array.isArray(runtimes) ? runtimes : [runtimes];
+  return [
+    { id: "workload.runtime-inventory.policy", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 0,
+      text: "LIVE_RUNTIME_INVENTORY is authoritative. Copy runtimeId and modelId exactly from the same entry; never infer or invent a provider model ID from tier or modelClass." },
+    { id: "workload.runtime-inventory.data", revision: 1, stability: "configuration", changeTriggers: ["runtime", "capability-inventory"], order: 0,
+      text: `LIVE_RUNTIME_INVENTORY=${JSON.stringify(workloadRuntimeInventory(list))}` },
+  ];
+}
+
+/** Preserve the existing string API's two lines and separator for every current caller. */
 export function workloadAllocationInventoryPrompt(
   runtimes: RuntimeStatus | RuntimeStatus[],
 ): string {
-  const list = Array.isArray(runtimes) ? runtimes : [runtimes];
-  return [
-    "LIVE_RUNTIME_INVENTORY is authoritative. Copy runtimeId and modelId exactly from the same entry; never infer or invent a provider model ID from tier or modelClass.",
-    `LIVE_RUNTIME_INVENTORY=${JSON.stringify(workloadRuntimeInventory(list))}`,
-  ].join("\n");
+  return workloadAllocationInventoryPromptParts(runtimes).map(part => part.text).join("\n");
 }

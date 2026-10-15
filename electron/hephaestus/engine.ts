@@ -21,6 +21,7 @@ import { currentUiLocale } from "../ui-locale";
 import { hephaestusRoot, hephaestusRootDetail, readHephaestusVersion, resetHephaestusRootCache } from "./root";
 import type { HephaestusStatus, HephaestusUpdateJournal } from "../../shared/types";
 import { classifyHephaestusUpdateJournal, parseHephaestusUpdateJournal } from "../../shared/hephaestus-update-contract";
+import { trustedMemoryOwnerEnvironment } from "../memory/trusted-owner-binding";
 
 export { hephaestusRoot, hephaestusRootDetail, readHephaestusVersion } from "./root";
 
@@ -345,6 +346,8 @@ export async function resolveHephaestusStdioLaunch(
       PYTHONUTF8: "1",
       PYTHONIOENCODING: "utf-8",
       ...(judgeRuntime ? { AGENTLAS_JUDGE_RUNTIME: judgeRuntime } : {}),
+      ...(module === "agentlas_cloud" && args[0] === "mcp" && args[1] === "serve"
+        ? trustedMemoryOwnerEnvironment() : {}),
     }),
   };
 }

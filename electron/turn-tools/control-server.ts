@@ -5,7 +5,8 @@ import { randomUUID } from "node:crypto";
 import { onHostShutdown } from "../host-lifecycle";
 import { userDataPath } from "../runtime-paths";
 import { memoryNoteToEvent } from "../memory/events";
-import { recordTurnMemoryNote, turnNotesKey, TURN_MEMORY_NOTE_LIMIT } from "./notes";
+import { recordTurnAsk, recordTurnMemoryNote, turnNotesKey, TURN_ASK_LIMIT, TURN_MEMORY_NOTE_LIMIT } from "./notes";
+import { parseAskFenceBody, type AgentlasAskQuestion } from "../../shared/ask-fence-flatten";
 import { GOAL_PLAN_LINE_LIMIT, recordGoalCompleteSignal, recordGoalPlanLine, recordGoalWaitSignal, validateGoalWaitIntent } from "./goal-signals";
 import { extractGoalPlanMarkers } from "../../shared/goal-shape";
 import { extractAgentStrategyMarkers } from "../../shared/agent-strategy";
@@ -17,7 +18,7 @@ import { GOAL_PLAN_TOOL_MARKERS, TURN_TOOLS_BASE } from "./mcp-server";
 // run config. The capability pins the chat and run; the child can name neither, so a note can only land in the turn
 // that holds the capability.
 
-const MAX_REQUEST_BYTES = 128 * 1024;
+const MAX_REQUEST_BYTES = 768 * 1024;
 
 export interface TurnToolsCapabilityBinding {
   capabilityId: string;
@@ -27,6 +28,10 @@ export interface TurnToolsCapabilityBinding {
   dryRun?: boolean;
   /** Tools this run may call (the child lists only these; the host re-checks). Default: memory_note. */
   tools?: readonly string[];
+  /** The run's tool permission, handed to harness ports that save (graph.draft.commit). */
+  permission?: "read" | "write" | "full";
+  /** One Team is attached and the run is neither a Toolchain consumer nor a room member (one_graph_* scope). */
+  graphAuthoring?: boolean;
 }
 
 export type TurnGoalTimerAuthority =
@@ -171,6 +176,24 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       if (!recordGoalPlanLine(turnNotesKey(binding.chatId, binding.runId), line)) throw new Error(`${operation}_limit: at most ${GOAL_PLAN_LINE_LIMIT} plan reports per turn`);
       return { recorded: "pending_host", note: "The host applies it when this turn ends and re-checks it against the plan." };
     }
+    case "ask_form": {
+      if (!binding.tools?.includes("ask_form")) throw new Error("turn-tools-operation-invalid");
+      const a = request.args && typeof request.args === "object" && !Array.isArray(request.args) ? request.args as Record<string, unknown> : null;
+      if (!a) throw new Error("ask_form_invalid: arguments must be an object");
+      const unknownField = Object.keys(a).find((key) => key !== "questions");
+      if (unknownField) throw new Error(`ask_form_unknown_field: ${unknownField}`);
+      if (!Array.isArray(a.questions) || a.questions.length < 1 || a.questions.length > TURN_ASK_LIMIT) throw new Error(`ask_form_invalid: questions must hold 1-${TURN_ASK_LIMIT} items`);
+      // Same parser the text block goes through (limits, template rejection); one bad question refuses the whole call.
+      const asks: AgentlasAskQuestion[] = [];
+      for (let i = 0; i < a.questions.length; i += 1) {
+        const parsed = parseAskFenceBody(JSON.stringify(a.questions[i]));
+        if (!parsed) throw new Error(`ask_form_invalid: question ${i + 1} needs a filled question text and 2-8 options with labels`);
+        asks.push(parsed);
+      }
+      if (binding.dryRun) return { recorded: false, reason: "dry_run" };
+      if (!recordTurnAsk(turnNotesKey(binding.chatId, binding.runId), asks)) throw new Error(`ask_form_limit: at most ${TURN_ASK_LIMIT} questions per turn; ask the rest after the answer`);
+      return { shown: "pending_host", note: "End your turn now; the person's answer arrives as the next message." };
+    }
     case "memory_note": {
       if (binding.tools && !binding.tools.includes("memory_note")) throw new Error("turn-tools-operation-invalid");
       const parsed = memoryNoteToEvent(request.args);
@@ -179,6 +202,23 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       const slot = recordTurnMemoryNote(turnNotesKey(binding.chatId, binding.runId), parsed.event);
       if (slot === null) throw new Error(`memory_note_limit: at most ${TURN_MEMORY_NOTE_LIMIT} notes per turn; merge the rest into one note`);
       return { recorded: true, note: slot, status: "queued_for_curator" };
+    }
+    case "harness_search":
+    case "harness_describe":
+    case "harness_call": {
+      const operation = request.operation;
+      if (!binding.tools?.includes(operation)) throw new Error("turn-tools-operation-invalid");
+      const a = request.args && typeof request.args === "object" && !Array.isArray(request.args) ? request.args as Record<string, unknown> : {};
+      const harness = await import("../harness/capability-ports");
+      const ctx = { chatId: binding.chatId, runId: binding.runId, dryRun: binding.dryRun === true,
+        ...(binding.permission ? { permission: binding.permission } : {}), ...(binding.graphAuthoring === true ? { graphAuthoring: true } : {}) };
+      if (operation === "harness_search") {
+        const kind = typeof a.kind === "string" ? a.kind as Parameters<typeof harness.searchHarness>[1] : undefined;
+        return { items: await harness.searchHarness(typeof a.query === "string" ? a.query.slice(0, 500) : "", kind) };
+      }
+      if (operation === "harness_describe") return harness.describeHarness(typeof a.id === "string" ? a.id : "", ctx);
+      const args = a.args && typeof a.args === "object" && !Array.isArray(a.args) ? a.args as Record<string, unknown> : {};
+      return harness.callHarnessPort(typeof a.operation === "string" ? a.operation : "", args, ctx);
     }
     default:
       throw new Error("turn-tools-operation-invalid");

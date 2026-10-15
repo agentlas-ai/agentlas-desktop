@@ -6,7 +6,7 @@ import type { NativeHistoryActor, NativeHistoryEvolutionService } from './histor
 import { personalDataHash, personalDataId, personalDataTarget, personalDataError } from './personal-data-store';
 
 export interface HistoryNativeCommandBinding {
-  commandId:string;candidateId:string;target:PersonalDataTarget;revision:number;envelopeDigest:string;purpose:'draft'|'run';
+  commandId:string;candidateId:string;target:PersonalDataTarget;revision:number;envelopeDigest:string;purpose:'draft'|'run'|'apply';
   taskId:string;runId:string;chatId:string;envelope:EvolutionEnvelope;
 }
 /** Opaque process-local custody. A JSON copy never becomes an execution capability. */
@@ -40,15 +40,15 @@ export function createHistoryNativeExecution(ports:HistoryNativeExecutionPorts){
     ports.assertOwner();if(ports.db.inTransaction)fail('history_native_uncommitted_request');
     let b:PersistedBinding;try{b=JSON.parse(rows[0].value_json);personalDataTarget(b.target);personalDataId(b.candidateId);}catch{fail('history_native_binding_invalid');}
     const a=ports.actor();if(b.commandId!==rows[0].command_id||b.target.oneId!==a.oneId||b.target.deploymentId!==a.hostId||personalDataHash(b.actor)!==personalDataHash(a))fail('history_native_session_changed');
-    configured().assertCommand(b.commandId);
+    configured().assertCommand(b.commandId,stage);
     const request=ports.db.prepare('SELECT * FROM one_supervisor_requests WHERE command_id=?').get(b.commandId) as {one_id:string;kind:string;state:string;task_id:string|null;run_id:string|null;payload_json:string;payload_hash:string}|undefined;
     if(!request||request.kind!=='work'||request.one_id!==a.oneId||!(stage==='claim'?['stored']:['dispatching','accepted']).includes(request.state)||!request.task_id||!request.run_id)fail('history_native_original_command_required');
     let chatId:string;try{chatId=JSON.parse(request.payload_json).workerChatId;personalDataId(chatId);}catch{fail('history_native_original_command_required');}
     if(selector.runId&&request.run_id!==selector.runId)fail('history_native_original_command_required');
     const task=ports.canonicalTask(request.task_id);if(task?.id!==request.task_id||task.originChatId!==chatId)fail('history_native_original_command_required');
     const row=ports.db.prepare('SELECT value_json FROM one_history_evolution_candidates WHERE candidate_id=?').get(b.candidateId) as {value_json:string}|undefined;
-    if(!row)fail('history_native_candidate_missing');const candidate=JSON.parse(row.value_json) as HistoryEvolutionCandidate;
-    if(candidate.revision!==b.revision||personalDataHash(candidate.target)!==personalDataHash(b.target)||personalDataHash(candidate.envelope)!==b.envelopeDigest||(b.purpose==='draft'?candidate.generationCommandId:candidate.runCommandId)!==b.commandId||!['draft','run'].includes(b.purpose))fail('history_native_execution_binding_changed');
+    if(!row)fail('history_native_candidate_missing');const candidate=b.purpose==='apply'?configured().applicationCandidate(b.commandId):JSON.parse(row.value_json) as HistoryEvolutionCandidate;
+    if(candidate.revision!==b.revision||personalDataHash(candidate.target)!==personalDataHash(b.target)||personalDataHash(candidate.envelope)!==b.envelopeDigest||(b.purpose!=='apply'&&(b.purpose==='draft'?candidate.generationCommandId:candidate.runCommandId)!==b.commandId)||!['draft','run','apply'].includes(b.purpose))fail('history_native_execution_binding_changed');
     return {binding:{commandId:b.commandId,candidateId:b.candidateId,target:structuredClone(b.target),revision:b.revision,envelopeDigest:b.envelopeDigest,purpose:b.purpose,taskId:request.task_id,runId:request.run_id,chatId,envelope:structuredClone(candidate.envelope)},bindingDigest:personalDataHash(b),requestDigest:personalDataHash([request.payload_json,request.payload_hash,request.task_id,request.run_id])};
   };
   const assertCommand=(commandId:string,stage:'claim'|'dispatch'='dispatch'):HistoryNativeCommandBinding|null=>{const current=lookup({commandId},stage);if(!current)return null;ports.assertCurrentBudget(current.binding,stage);return current.binding;};
@@ -86,7 +86,8 @@ export function createHistoryNativeExecution(ports:HistoryNativeExecutionPorts){
     const digest=personalDataHash(input),b=assertTool(token,input);if(b.purpose!=='draft'||!b.envelope.allowedKinds.includes(input.kind))fail('history_native_asset_outside_envelope');
     const result=await configured().withBoundBuilders(b,async producers=>{assertTool(token,input);const value=await execute(producers);assertTool(token,input);return value;});assertTool(token,input);if(personalDataHash(input)!==digest)fail('history_native_tool_request_changed');return result as T;
   };
-  return {assertCommand,bindRun,assertRun,assertToken,assertTool,readBoundSource,withProvider,withTool,withProducer,
+  const withApplication=async(token:HistoryNativeRunToken,input:{toolRef:string;request:unknown})=>{const b=assertTool(token,input);if(b.purpose!=='apply')fail('history_work_apply_binding_required');const result=await configured().withBoundApplication(b);assertTool(token,input);return result};
+  return {withApplication,assertCommand,bindRun,assertRun,assertToken,assertTool,readBoundSource,withProvider,withTool,withProducer,
     forgetRun(runId:string){const token=runs.get(runId);if(token)witnesses.delete(token);runs.delete(runId);},close(){for(const token of runs.values())witnesses.delete(token);runs.clear();}};
 }
 

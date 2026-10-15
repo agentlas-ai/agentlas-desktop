@@ -2368,14 +2368,11 @@ async function runSubmitterRuntimeReview(
   }
 
   const systemPrompt = [
-    "You are the Agentlas Cloud package security reviewer.",
-    "This review runs locally on the submitter machine using the submitter's own runtime or BYOK key.",
-    "Do not assume Agentlas Cloud or the platform owner will pay for model calls.",
-    "Return strict JSON only: {\"verdict\":\"pass|fail|needs-review\",\"summary\":\"...\",\"findings\":[{\"severity\":\"blocker|high|medium|low|info\",\"category\":\"secret|policy|size|structure|runtime|network|review\",\"message\":\"...\",\"file\":\"optional\",\"remediation\":\"optional\"}]}",
+    "role: Agentlas Cloud package security reviewer (local, submitter's own runtime or BYOK key)",
+    "output: strict JSON only: {\"verdict\":\"pass|fail|needs-review\",\"summary\":\"...\",\"findings\":[{\"severity\":\"blocker|high|medium|low|info\",\"category\":\"secret|policy|size|structure|runtime|network|review\",\"message\":\"...\",\"file\":\"optional\",\"remediation\":\"optional\"}]}",
   ].join("\n");
   const prompt = [
-    "Review this Agentlas cloud package manifest and static scan.",
-    "",
+    "review: manifest + static scan",
     JSON.stringify({ manifest, staticFindings }, null, 2),
   ].join("\n");
 
@@ -3040,10 +3037,9 @@ async function generateLocalizedListingWithRunner(
     const result = await runObservedRunner(picked.runner,
       {
         systemPrompt: [
-          "Translate public Agentlas Hub listing metadata.",
-          "Return one strict JSON object with exactly titleEn, titleKo, descriptionEn, descriptionKo.",
-          "Translate only the supplied name and description. Do not invent features, claims, prices, or setup details.",
-          "English fields must contain natural English and no Hangul. Korean fields must be natural Korean.",
+          "task: translate public Hub listing metadata; only the supplied name and description; invent no features, claims, prices, setup",
+          "output: one strict JSON object, exactly titleEn, titleKo, descriptionEn, descriptionKo",
+          "en fields: natural English, no Hangul; ko fields: natural Korean",
         ].join("\n"),
         history: [],
         userPrompt: JSON.stringify({ sourceTitle: name, sourceDescription: tagline }),
@@ -3090,10 +3086,9 @@ async function normalizePurposeAnswerWithSubmitterRuntime(
     const result = await runObservedRunner(picked.runner,
       {
         systemPrompt: [
-          "Convert one ordinary-language answer into internal Agentlas routing metadata.",
-          "Return strict JSON only: {\"summary\":\"one factual English sentence\",\"capabilities\":[\"english_verb_object\"]}.",
-          "Use 2-8 concrete English verb_object capabilities in snake_case, each with at least two words.",
-          "Preserve the user's meaning. Do not invent tools, permissions, runtimes, languages, modalities, or claims.",
+          "task: convert one answer into routing metadata; keep its meaning; invent no tools, permissions, runtimes, languages, modalities, claims",
+          "output: strict JSON only: {\"summary\":\"one factual English sentence\",\"capabilities\":[\"english_verb_object\"]}",
+          "capabilities: 2-8 concrete snake_case verb_object, at least two words each",
         ].join("\n"),
         history: [],
         userPrompt: source,

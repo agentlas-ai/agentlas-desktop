@@ -57,6 +57,7 @@ import {
 import { setOnePersonaName } from "@/lib/one-persona-name";
 import { AgentMailOfferCard } from "@/components/one/mail/AgentMailOfferCard";
 import styles from "./FirstRun.module.css";
+import { Select } from "@/components/Select";
 
 const LEGACY_WORK_TOUR_KEY = "agentlas.work.firstRunOnboarding.v3";
 /** Same bounds as shared/one-profile.ts validation (profileContext ≤4000, principle ≤500, ≤128 principles). */

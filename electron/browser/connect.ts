@@ -6,6 +6,7 @@
 // 보안: 사이트 비밀번호를 받거나 자동 입력하지 않는다. 로그인은 제공자 페이지에서 사용자가 직접 한다.
 // 승인 게이트: 결제(payment)는 매번 확인. 그 외는 "한 번만 / 항상 승인 / 거부", always만 기억.
 import { spawn } from "node:child_process";
+import { createOwnedChildDrain } from "../runtime/owned-child-drain";
 import { randomUUID } from "node:crypto";
 import { probeBrowserSession } from "./session-probe";
 import {
@@ -181,12 +182,9 @@ function ownershipReasonCode(reason: string): string {
   return "inspection-error";
 }
 
-function stopUnverifiedLoginChild(child: ReturnType<typeof spawn>): void {
-  try {
-    if (child.pid && !child.killed) child.kill("SIGTERM");
-  } catch {
-    // The transient Chrome process may already have handed off and exited.
-  }
+async function stopUnverifiedLoginChild(drain: ReturnType<typeof createOwnedChildDrain>): Promise<void> {
+  // Only the original spawn handle; never a listener-selected or foreign PID.
+  await drain.stop({ forceAfterMs: 2_000 });
 }
 
 export function browserLoginArgs(profile: string, url: string): string[] {
@@ -267,6 +265,7 @@ async function browserOpenLoginOnce(site: string): Promise<BrowserOpenLoginResul
       browserLoginArgs(profile, url),
       { detached: true, stdio: "ignore" },
     );
+    const childDrain = createOwnedChildDrain(child);
     let spawnError: Error | null = null;
     openLoginChildren.set(norm, child);
     setBrowserSession(norm, "none");
@@ -301,15 +300,15 @@ async function browserOpenLoginOnce(site: string): Promise<BrowserOpenLoginResul
             break;
           }
           if (ownership.state === "foreign") {
-            stopUnverifiedLoginChild(child);
+            await stopUnverifiedLoginChild(childDrain);
             throw new Error(`Chrome CDP listener ownership could not be verified (${ownership.reason}).`);
           }
         }
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
-      if (spawnError) throw spawnError;
+      if (spawnError) { await stopUnverifiedLoginChild(childDrain); throw spawnError; }
       if (!ready) {
-        stopUnverifiedLoginChild(child);
+        await stopUnverifiedLoginChild(childDrain);
         throw new Error(`Chrome CDP listener ownership could not be verified (${lastOwnershipReason}).`);
       }
     }

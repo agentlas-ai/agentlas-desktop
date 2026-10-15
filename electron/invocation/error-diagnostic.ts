@@ -75,3 +75,35 @@ export function invocationErrorDiagnostic(error: unknown, options: {
   }
   return diagnostic;
 }
+
+export type NativePreparationDiagnosticPhase = "native-ingress" | "native-ingress-authorize" | "native-ingress-read" | "native-ingress-validation" | "native-ingress-cleanup" | "native-prepared-start" | "native-prepared-quiescence" | "native-prepared-cleanup";
+const MACHINE_CAUSE_LIMIT = 6;
+const CHECKPOINT_DIAGNOSTIC_KINDS = new Set(["preparation.handoff", "judge", "team.prepare", "team.attachments-required", "briefing.prepare", "memory.prepare", "attachments.claim", "team.claim", "briefing.claim", "memory.claim", "images.transfer", "team.fail-start", "attachments.release"]);
+/** Lookup must be the process-private driver observation, never a wire field or error property. */
+export function nativeMachineCauseDiagnostic(error: unknown, checkpointKindForError?: (error: unknown) => unknown): Record<string, unknown> {
+  const chain: Array<Record<string, unknown>> = [], seen = new Set<object>();
+  let current: unknown = error, depth = 0, truncated = false, cyclic = false;
+  while (current && (typeof current === "object" || typeof current === "function")) {
+    if (seen.has(current)) { cyclic = true; break; }
+    if (depth >= MACHINE_CAUSE_LIMIT) { truncated = true; break; }
+    seen.add(current);
+    const observation: Record<string, unknown> = { depth };
+    const code = dataProperty(current, "code");
+    if (typeof code === "string" && /^[a-z][a-z0-9_]{1,99}$/.test(code)) {
+      try { if (redactOperationalSecrets(code) === code) observation.code = code; } catch { /* no trustworthy code */ }
+    }
+    let kind: unknown; try { kind = checkpointKindForError?.(current); } catch { /* diagnostic lookup is not execution */ }
+    if (typeof kind === "string" && CHECKPOINT_DIAGNOSTIC_KINDS.has(kind)) observation.checkpointKind = kind;
+    if (Object.keys(observation).length > 1) chain.push(observation);
+    current = dataProperty(current, "cause"); depth += 1;
+  }
+  return { machineCauseChain: chain, machineCauseTruncated: truncated, machineCauseCycle: cyclic };
+}
+/** Pre-boundary diagnostic is intentionally content-free: no request, prose, stack, SQL or path. */
+export function nativePreparationErrorDiagnostic(error: unknown, context: {
+  phase: NativePreparationDiagnosticPhase; startBoundaryCrossed?: boolean;
+}, checkpointKindForError?: (error: unknown) => unknown): Record<string, unknown> {
+  return { schemaVersion: "agentlas.native-preparation-error-diagnostic.v1", diagnosticPhase: context.phase,
+    ...(typeof context.startBoundaryCrossed === "boolean" ? { startBoundaryCrossed: context.startBoundaryCrossed } : {}),
+    ...nativeMachineCauseDiagnostic(error, checkpointKindForError) };
+}

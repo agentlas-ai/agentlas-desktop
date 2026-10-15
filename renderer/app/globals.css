@@ -2992,8 +2992,8 @@ button.dashboard-local-model-card:hover { color: var(--ink); }
 .automation-architect-attachments button {
   display: grid;
   place-items: center;
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: 0;
   border-radius: 50%;
@@ -3697,8 +3697,8 @@ button.dashboard-local-model-card:hover { color: var(--ink); }
 }
 
 button[data-dashboard-chevron] {
-  width: 17px;
-  height: 17px;
+  width: 24px;
+  height: 24px;
   color: currentColor;
   opacity: 0.72;
   font-size: 10px;
@@ -7367,8 +7367,8 @@ button[data-toggle-state="on"] {
 }
 
 .chat-composer-progress button {
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
@@ -11768,7 +11768,7 @@ button[data-toggle-state="on"] {
 }
 .agentlas-chat-outline-tick {
   height: 2px;
-  padding: 0;
+  padding: 0; /* a11y-empty-bar: contentless tick, nothing to inset */
   border: none;
   border-radius: 2px;
   background: var(--muted-deep);

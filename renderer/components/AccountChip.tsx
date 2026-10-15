@@ -12,9 +12,10 @@ import { useT } from "@/lib/i18n";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
 import { IconChevronDown, IconArrowLeft } from "./Icon";
+import { BusinessEntryButton } from "../business/BusinessEntryButton";
 
 export function AccountChip() {
-  const { t } = useT();
+  const { t, locale } = useT();
   const [session, setSession] = useState<AuthSession>(() => (
     readViewData<AuthSession>("shell.auth-session")?.value ?? { signedIn: false }
   ));
@@ -228,7 +229,7 @@ export function AccountChip() {
 
       {popoverOpen && session.signedIn && (
         <div
-          role="menu" aria-label={t("account.sign_out")} className={`glass-lift ${popupMenu.panelPopover}`}
+          role="menu" aria-label={locale === "ko" ? "계정 메뉴" : "Account menu"} className={`glass-lift ${popupMenu.panelPopover}`}
           style={{
             position: "absolute",
             bottom: "calc(100% + 6px)",
@@ -253,6 +254,7 @@ export function AccountChip() {
               {session.email}
             </div>
           )}
+          <BusinessEntryButton menu locale={locale} onOpen={() => setPopoverOpen(false)} />
           <button
             role="menuitem" onClick={() => void signOut()}
             style={{

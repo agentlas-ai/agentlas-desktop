@@ -10,7 +10,8 @@ export interface MobileGoalControlServices {
   chatSurface(chatId: string): "one" | "work" | null;
   readAliveState(input: unknown): Promise<AliveState>;
   setAliveEnabled(input: unknown): Promise<AliveState>;
-  setAliveTokenLimit(input: unknown): AliveState;
+  /** A Promise when the background service owns the Alive domain and the edit is forwarded there (NH21). */
+  setAliveTokenLimit(input: unknown): AliveState | Promise<AliveState>;
   getAgiTokenLimits(): AgiTokenLimitsView;
   setAgiTokenLimits(input: unknown): AgiTokenLimitsView;
   readGoalPanel(chatId: string): GoalPanelView | null;
@@ -139,7 +140,7 @@ export class MobileGoalControl {
       switch (method) {
         case "alive.getState": return reply({ ok: true, state: await this.services.readAliveState(input) });
         case "alive.setEnabled": return reply({ ok: true, state: await this.services.setAliveEnabled(input) });
-        case "alive.setTokenLimit": return reply({ ok: true, state: this.services.setAliveTokenLimit(input) });
+        case "alive.setTokenLimit": return reply({ ok: true, state: await this.services.setAliveTokenLimit(input) });
         case "agi.getTokenLimits": return reply({ ok: true, limits: this.services.getAgiTokenLimits() });
         case "agi.setTokenLimits": return reply({ ok: true, limits: this.services.setAgiTokenLimits(input) });
         case "chats.pauseGoal":

@@ -572,7 +572,7 @@ export async function provePluginBuilder(input: { sessionId: string }): Promise<
   const workflows = Array.isArray(manifest.provides?.skills?.workflows) ? manifest.provides.skills.workflows.map(String) : [];
   const workflow = workflows[0] ?? null;
   const router = pluginRouterPrompt(`@${slug} proof`);
-  const routerInjected = router.includes(`@${slug}`) && router.includes("Router:") && router.includes("router (invoked in this turn)");
+  const routerInjected = router.includes(`@${slug}`) && router.includes(`invoked: @${slug} → read`);
   let workflowRun: PluginProofReceipt["workflowRun"] = null;
   if (workflow) {
     emit(session.id, "prove", `Invoking @${slug} ${workflow} once for execution proof.`);

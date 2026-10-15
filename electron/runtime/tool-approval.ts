@@ -65,6 +65,8 @@ export interface RuntimeToolPermissionAsk {
   /** ACP 도구 종류(read/edit/execute/…). 알 수 없으면 "other". */
   kind: string;
   detail?: string;
+  /** Main-only parsed call arguments. Only their recipient/amount facts enter the consent identity; never serialized. */
+  arguments?: unknown;
   cwd?: string;
   /** 이번 실행의 권한(러너 계약과 같은 값). undefined 는 read 와 같게 취급한다. */
   permission: "read" | "write" | "full" | undefined;

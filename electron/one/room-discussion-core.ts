@@ -393,10 +393,9 @@ export interface SpeakerPromptInput {
 }
 
 export function buildSpeakerPrompt(input: SpeakerPromptInput): string {
-  const ko = input.locale === "ko";
-  const owner = input.ownerLabel ?? (ko ? "오너" : "Owner");
-  const label = (post: RoomPost) => post.author === "owner" ? owner : (post.speakerName || (ko ? "팀원" : "Member"));
-  let lines = input.newPosts.map((post) => `#${post.seq} [${label(post)}${post.kind === "comment" ? (ko ? ", 댓글" : ", comment") : ""}] ${clipPost(post.text)}`);
+  const owner = input.ownerLabel ?? "Owner";
+  const label = (post: RoomPost) => post.author === "owner" ? owner : (post.speakerName || "Member");
+  let lines = input.newPosts.map((post) => `#${post.seq} [${label(post)}${post.kind === "comment" ? ", comment" : ""}] ${clipPost(post.text)}`);
   let total = 0;
   const kept: string[] = [];
   for (let index = lines.length - 1; index >= 0; index -= 1) {
@@ -409,47 +408,21 @@ export function buildSpeakerPrompt(input: SpeakerPromptInput): string {
   const omitted = input.omitted + dropped;
   const others = input.members.filter((member) => member.agentId !== input.member.agentId).map((member) => member.name);
   const together = input.coSpeakers.filter((name) => name !== input.member.name);
-  const head = ko
-    ? [
-      `[단체방 토론] 방 "${input.roomTitle}"에서 ${owner}와 팀원들이 이야기하고 있습니다. 당신은 ${input.member.name}입니다.`,
-      input.roomDescription ? `방 설명: ${input.roomDescription.slice(0, 300)}` : "",
-      `이 방의 다른 팀원: ${others.join(", ") || "(없음)"}`,
-      `이 방은 순서나 차례가 없는 자유로운 대화입니다.${together.length ? ` ${together.join(", ")}도 같은 글을 보고 지금 답하는 중이라 서로의 새 발언은 아직 볼 수 없습니다.` : ""}`,
-    ]
-    : [
-      `[Group room discussion] In the room "${input.roomTitle}" the ${owner.toLowerCase()} and teammates are talking. You are ${input.member.name}.`,
-      input.roomDescription ? `Room description: ${input.roomDescription.slice(0, 300)}` : "",
-      `Other teammates in this room: ${others.join(", ") || "(none)"}`,
-      `This room is a free conversation with no turns or order.${together.length ? ` ${together.join(", ")} are reading the same post and answering right now, so you cannot see each other's new words yet.` : ""}`,
-    ];
-  const section = ko
-    ? [`마지막으로 본 이후 새 글${omitted > 0 ? ` (더 앞선 ${omitted}개는 생략)` : ""}:`, ...(lines.length ? lines : ["(새 글 없음)"])]
-    : [`New posts since you last looked${omitted > 0 ? ` (${omitted} earlier omitted)` : ""}:`, ...(lines.length ? lines : ["(no new posts)"])];
+  const head = [
+    `[Group room discussion] room: "${input.roomTitle}"; you: ${input.member.name}; with: ${owner}`,
+    input.roomDescription ? `description: ${input.roomDescription.slice(0, 300)}` : "",
+    `teammates: ${others.join(", ") || "(none)"}`,
+    `free conversation with no turns or order${together.length ? `; ${together.join(", ")} answer the same post now, their new words are not visible yet` : ""}`,
+  ];
+  const section = [`new posts${omitted > 0 ? ` (${omitted} earlier omitted)` : ""}:`, ...(lines.length ? lines : ["(none)"])];
   const task = input.mode === "comment" && input.replyTarget
-    ? (ko
-      ? [`할 일: #${input.replyTarget.seq} 글에 짧은 댓글을 남기세요. 한두 문장, 길어도 두 문장을 넘기지 마세요. 새 주제를 열지 마세요.`]
-      : [`Task: leave a short comment on post #${input.replyTarget.seq}. One or two sentences, never more than two. Do not open a new topic.`])
-    : (ko
-      ? [`할 일: 위 글을 읽고 ${input.member.name}으로서 이 주제와 직접 관련 있고 보탤 말이 있을 때만 의견을 말하세요. 핵심 위주로 간결하게.${input.replyTarget ? ` 특히 #${input.replyTarget.seq} 글에 답하세요.` : ""}`]
-      : [`Task: read the posts above and, as ${input.member.name}, speak only if this is relevant to you and you have something to add. Concise and to the point.${input.replyTarget ? ` Answer post #${input.replyTarget.seq} in particular.` : ""}`]);
-  const rules = ko
-    ? [
-      "규칙:",
-      "- 오너가 쓴 언어로 답하세요. 도구나 파일 작업 없이 말로만 답합니다.",
-      "- 다른 팀원에게 묻거나 반박하려면 @이름 으로 부르세요. 상대가 이어서 답합니다.",
-      "- 특정 글에 답하면 답의 첫 줄에 [[reply:#번호]] 를 쓰세요.",
-      "- 더할 말이 없거나 내 분야가 아니면 [[pass]] 한 단어만 쓰세요. 모두가 말할 필요는 없습니다.",
-      "- 앞 발언을 되풀이하지 마세요.",
-    ]
-    : [
-      "Rules:",
-      "- Answer in the language the owner used. Speak only; no tools or file work.",
-      "- To ask or challenge a teammate, call them with @name. They answer next.",
-      "- When answering a specific post, start your answer with [[reply:#number]].",
-      "- If you have nothing to add or it is not your area, write only [[pass]]. Not everyone needs to speak.",
-      "- Do not repeat what was already said.",
-    ];
-  return [...head.filter(Boolean), "", ...section, "", ...task, "", ...rules].join("\n");
+    ? [`task: short comment on post #${input.replyTarget.seq}; one or two sentences, never more than two; no new topic`]
+    : [`task: speak as ${input.member.name} only if relevant and you add something; concise${input.replyTarget ? `; answer post #${input.replyTarget.seq}` : ""}`];
+  const rules = [
+    "rules: owner's language; speech only, no tools or files; @name asks a teammate (they answer next); answering a post starts with [[reply:#number]]; nothing to add or not your area = only [[pass]]; no repeats",
+  ];
+  // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.one.room-discussion.speaker-prompt).
+  return [...head.filter(Boolean), "", ...task, "", ...section, "", ...rules].join("\n");
 }
 
 // ── Caps ────────────────────────────────────────────────────────────────────

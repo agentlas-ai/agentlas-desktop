@@ -1019,10 +1019,12 @@ function routePageHtml(
   const app = manifest.app;
   const op = normalizeOperationsForHtml(operations);
   const collections = collectionsForHtml(operations);
-  const routeKey = `${route.path} ${route.label} ${route.purpose ?? ""}`.toLowerCase();
+  // The page template comes from the route's declared section (typed), never from words in its path, label or purpose
+  // (native-harness notyet NH25). A route without a section gets the general overview.
+  const section = routeSection(route);
   const pageTitle = route.label || ctx.appName;
-  const content = routeContentHtml(manifest, routeKey, operations);
-  const primaryCount = routeKey.includes("catalog") || routeKey.includes("store") ? collections.products.length : Math.max(collections.metrics.length, collections.products.length, collections.assets.length);
+  const content = routeContentHtml(manifest, section, operations);
+  const primaryCount = section === "catalog" || section === "storefront" ? collections.products.length : Math.max(collections.metrics.length, collections.products.length, collections.assets.length);
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -1212,7 +1214,14 @@ function operatorStatusRows(op: ReturnType<typeof normalizeOperationsForHtml>): 
   ];
 }
 
-function routeContentHtml(manifest: AgentlasSurfaceManifest, routeKey: string, operations: JsonObject): string {
+/** Page templates a route may declare (`section`); "overview" and anything undeclared get the general overview. */
+export const APP_ROUTE_SECTIONS = ["overview", "storefront", "catalog", "orders", "finance"] as const;
+export type AppRouteSection = (typeof APP_ROUTE_SECTIONS)[number];
+function routeSection(route: AgentlasSurfaceAppRoute): AppRouteSection | null {
+  return (APP_ROUTE_SECTIONS as readonly unknown[]).includes(route.section) ? route.section as AppRouteSection : null;
+}
+
+function routeContentHtml(manifest: AgentlasSurfaceManifest, section: AppRouteSection | null, operations: JsonObject): string {
   const app = manifest.app;
   const collections = collectionsForHtml(operations);
   const trust = isObject(operations.trust) ? operations.trust : {};
@@ -1221,7 +1230,7 @@ function routeContentHtml(manifest: AgentlasSurfaceManifest, routeKey: string, o
   const claims: JsonObject[] = Array.isArray(trust.claims)
     ? trust.claims.filter(isObject)
     : (manifest.claims ?? []).map((claim) => jsonValue(claim));
-  if (routeKey.includes("store") || routeKey.includes("front")) {
+  if (section === "storefront") {
     return `<section class="hero">
         <div class="hero-copy">
           <span class="pill estimated">launch preview - source gated</span>
@@ -1242,7 +1251,7 @@ function routeContentHtml(manifest: AgentlasSurfaceManifest, routeKey: string, o
         </div>
       </section>`;
   }
-  if (routeKey.includes("catalog") || routeKey.includes("product")) {
+  if (section === "catalog") {
     return `<section class="section">
         <h2>Catalog Workbench</h2>
         <div class="table">
@@ -1256,7 +1265,7 @@ function routeContentHtml(manifest: AgentlasSurfaceManifest, routeKey: string, o
         </div>
       </section>`;
   }
-  if (routeKey.includes("order") || routeKey.includes("fulfillment")) {
+  if (section === "orders") {
     return `<section class="section">
         <h2>Order Operations</h2>
         <div class="grid">
@@ -1270,7 +1279,7 @@ function routeContentHtml(manifest: AgentlasSurfaceManifest, routeKey: string, o
         </div>
       </section>`;
   }
-  if (routeKey.includes("finance") || routeKey.includes("payment") || routeKey.includes("payout")) {
+  if (section === "finance") {
     return `<section class="section">
         <h2>Finance And Approval Gates</h2>
         <div class="grid">
@@ -1986,6 +1995,7 @@ function normalizeRoute(raw: unknown): AgentlasSurfaceAppRoute {
     label: stringValue(row.label) || stringValue(row.name) || "App",
     purpose: stringValue(row.purpose) || stringValue(row.description),
     status: stringValue(row.status) || "planned",
+    ...((APP_ROUTE_SECTIONS as readonly unknown[]).includes(row.section) ? { section: row.section } : {}),
   };
 }
 

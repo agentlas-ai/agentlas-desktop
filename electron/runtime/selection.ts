@@ -30,6 +30,7 @@ import { runGrok } from "./grok";
 import { runCursor } from "./cursor";
 import { runLMStudio, lmStudioHost } from "./lmstudio";
 import { runMLX } from "./mlx";
+import { ollamaHost, runOllama } from "./ollama";
 import { runManagedLocalModel } from "../local-model-hub/runtime-adapter";
 import { acquireRunSlot } from "./run-slots";
 import { agentActivityKey, registerAgentResidency, touchAgentResidency } from "./agent-residency";
@@ -46,7 +47,10 @@ import { abortReasonError } from "./abort-reason";
 import { withAgentContext } from "./agent-context";
 import { responsesContextPolicy } from "./responses-context-policy";
 import { withDaemonAgentContext } from "./agent-context-admission";
-import { withModelCallLedger } from "./model-call-ledger";
+import { currentModelCallScope, withModelCallLedger } from "./model-call-ledger";
+import { currentRunPriority, slotPriorityForCall } from "./run-priority";
+import { withRemoteCurationRuntime } from "./remote-curation-binding";
+import { withMemorySourceRunner } from "../memory/source-custody";
 
 /** Per-turn, before the provider or its reusable session is used. Unknown probes are not authentication. */
 function withRuntimeAuthProbe(runner: Runner, runtimeKind: string): Runner {
@@ -95,13 +99,14 @@ function withRunSlot(runner: Runner, runtimeKind: string): Runner {
   return async (req, events) => {
     // 우선순위: 요청 명시값 → 호출 문맥(withRunPriority) → interactive.
     // 자동화 스케줄러·데몬 graph.run 이 background 문맥을 깔고, 채팅 턴은 기본값이다.
+    // 오너 턴 안에서 맡긴 일(firm/swarm/task-force 워커·플래너·종합, 큐레이터)은 오너 레인을 쓰지 않는다(NH20).
     const release = await acquireRunSlot(req.signal, () => {
       events.onStatus(
         req.locale === "ko"
           ? "다른 에이전트 실행이 끝나기를 기다리는 중... (동시 실행 한도)"
           : "Waiting for a free run slot... (concurrency limit)",
       );
-    }, req.runPriority);
+    }, req.runPriority ?? slotPriorityForCall(currentRunPriority(), currentModelCallScope()?.role));
     /*
      * ★상주 등록 — 여기가 **공용 실행 경로**다.
      *
@@ -155,7 +160,7 @@ function withLocalInferenceSlot(runner: Runner): Runner {
           ? "다른 로컬 추론이 끝나기를 기다리는 중... (동시 실행 한도)"
           : "Waiting for a free local inference slot... (concurrency limit)",
       );
-    });
+    }, req.runPriority ?? slotPriorityForCall(currentRunPriority(), currentModelCallScope()?.role));
     try {
       return await runner(req, events);
     } finally {
@@ -174,6 +179,9 @@ const runAntigravitySlotted = withRunSlot(runAntigravity, "antigravity");
 const runKimiSlotted = withRunSlot(acpOrLegacyRunner("kimi", runKimi), "kimi");
 const runGrokSlotted = withRunSlot(acpOrLegacyRunner("grok", runGrok), "grok");
 const runCursorSlotted = withRunSlot(acpOrLegacyRunner("cursor", runCursor), "cursor");
+// The local loop imports the common selector through MCP; resolve the
+// exported const only at dispatch, after that module cycle has initialized.
+const runOllamaSlotted = withLocalInferenceSlot((req, events) => runOllama(req, events));
 const runLMStudioSlotted = withLocalInferenceSlot(runLMStudio);
 const runMLXSlotted = withLocalInferenceSlot(runMLX);
 const runManagedLocalModelSlotted = withLocalInferenceSlot(runManagedLocalModel);
@@ -266,13 +274,22 @@ export function pickRunner(active: RuntimeStatus): { runner: Runner; label: stri
   // One immutable selected spec supplies both the spawned runner and its
   // portable/native binding; a shared executable must not merge ACP profiles.
   const spec = resolvedSpec ? { ...resolvedSpec, args: [...resolvedSpec.args] } : null;
-  const configurationIdentity = spec ? JSON.stringify([spec.id,spec.command,spec.args,spec.registryId??null]) : undefined;
+  const localIdentity = active.kind === "ollama" ? ollamaHost() : undefined;
+  const configurationIdentity = localIdentity ?? (spec ? JSON.stringify([spec.id,spec.command,spec.args,spec.registryId??null]) : undefined);
+  const selectedIdentity = JSON.stringify([active.kind, active.backend, active.source, active.acpAgentId ?? null]);
+  const configurationCurrent = () => {
+    if (selectedIdentity !== JSON.stringify([active.kind, active.backend, active.source, active.acpAgentId ?? null])) return false;
+    if (active.kind === "ollama") return ollamaHost() === localIdentity;
+    if (active.kind !== "acp") return true;
+    const current = resolveAcpAgentSpec(active.acpAgentId);
+    return configurationIdentity === JSON.stringify(current ? [current.id,current.command,current.args,current.registryId??null] : null);
+  };
   const selected = pickRunnerWithoutHostGuidance(active, spec);
   // 모든 제품 경로가 여기를 지난다 — 어느 루프에 버그가 있어도 실패하는 런타임을 분당 수만 번 띄우지 못한다(invocation-breaker).
   return selected
     ? { ...selected, runner: invocationBreaker.wrap(withNativeBrowserGuidance(withDaemonAgentContext(withAgentContext(
       // Innermost: the ledger sees the request after every host wrapper, exactly as the adapter does (context-reduction C01).
-      withModelCallLedger(selected.runner, { kind: active.kind, backend: active.backend ?? null, model: active.model ?? null, effort: null }),
+      withMemorySourceRunner(withRemoteCurationRuntime(withModelCallLedger(async(req,events)=>{if(!configurationCurrent())throw new Error("runtime_selected_configuration_changed");return selected.runner(req,events);}, { kind: active.kind, backend: active.backend ?? null, model: active.model ?? null, effort: null }), active, configurationCurrent)),
       { kind: active.kind, ...(active.backend ? { backend: active.backend } : {}) },
       { configurationSource:active.source,configurationIdentity }),
       { kind: active.kind,configurationIdentity,...(active.backend ? { backend: active.backend } : {}) })), invocationBreakerKey(active), selected.label) }
@@ -338,10 +355,9 @@ function pickRunnerWithoutHostGuidance(active: RuntimeStatus, acpSpec: AcpAgentS
       label: `${active.label ?? spec.label}${active.model ? ` · ${active.model}` : ""}`,
     };
   }
-  // Ollama is a migration-only stored kind. It remains decodable so existing
-  // pins can be shown and migrated, but it is never an executable product
-  // runtime after the Agentlas Local cutover.
-  if (active.kind === "ollama") return null;
+  // The explicit external server/model remains a distinct local runtime; a
+  // managed-model migration cannot silently substitute its selected identity.
+  if (active.kind === "ollama") return { runner: runOllamaSlotted, label: `Ollama${active.model ? ` · ${active.model}` : ""}` };
   if (active.kind === "lmstudio")
     return { runner: runLMStudioSlotted, label: `LM Studio${active.model ? ` · ${active.model}` : ""}` };
   if (active.kind === "mlx")
@@ -407,7 +423,7 @@ export function pickRecoveryRunner(selection: Pick<RuntimeStatus, "kind"> & { so
     return { runner: bindRuntimeSource(createAcpRunner(spec), selection.source), label: spec.label };
   }
   if (selection.kind === "agentlas") return { runner: runAgentlasServing, label: "Agentlas" };
-  if (selection.kind === "ollama") return null;
+  if (selection.kind === "ollama") return { runner: runOllamaSlotted, label: "Ollama" };
   if (selection.kind === "agentlas-local") return { runner: runManagedLocalModelSlotted, label: "Agentlas Local" };
   if (selection.kind === "lmstudio") return { runner: runLMStudioSlotted, label: "LM Studio" };
   if (selection.kind === "mlx") return { runner: runMLXSlotted, label: "MLX" };

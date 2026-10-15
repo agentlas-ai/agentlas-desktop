@@ -6,12 +6,11 @@
 //
 // Now both pack intents are one judgeSubset call per One request (the subset
 // cache keys on kind+labels+input, so the creative and ecommerce seeds share a
-// single model verdict for the same prompt). The prefilters are demoted to
-// hints ONLY (they ride along in the judge guidance). Contract unified
+// single model verdict for the same prompt). There are no lexical
+// prefilters or priors any more. Contract unified
 // 2026-08-20: with NO connected model the resolution is NEUTRAL — an empty
-// selection with source:"fallback". The lexical prefilter never appears as a
-// selection, so no future consumer can seed a pack surface from a keyword
-// guess by forgetting to branch on `source`.
+// selection with source:"fallback". No consumer can seed a pack
+// surface from a keyword guess, because none exists.
 
 import type { ImageAttachment } from "../shared/types";
 import { judgeSubset, type SubsetSpec, type SubsetVerdict } from "./system-agents/judgment";
@@ -24,7 +23,7 @@ export const ONE_PACK_INTENT_JUDGMENT_KIND = "one-pack-intent";
 
 export interface OnePackIntentResolution {
   selected: OnePackIntent[];
-  /** "llm" = the model decided; "fallback" = today's prefilter verdicts, labeled. */
+  /** "llm" = the model decided; "fallback" = neutral (empty selection). */
   source: "llm" | "fallback";
   reason: string;
 }
@@ -35,7 +34,7 @@ export type OnePackIntentJudge = (
 
 /**
  * Resolve which deep-vertical pack surfaces (zero or more) this One request
- * genuinely calls for. The lexical prefilters are hints, never a gate.
+ * genuinely calls for. There is no lexical prior; the model verdict is the only seed.
  */
 export async function resolveOnePackIntents(input: {
   prompt: string;
@@ -44,13 +43,6 @@ export async function resolveOnePackIntents(input: {
   timeoutMs?: number;
   judgeSubsetFn?: OnePackIntentJudge;
 }): Promise<OnePackIntentResolution> {
-  // Lazy imports keep the surface modules ↔ intent module dependency acyclic.
-  const { shouldSeedCreativeAdPack } = await import("./creative-pack/surface");
-  const { shouldSeedEcommerceOps } = await import("./ecommerce-pack/surface");
-  const lexical: OnePackIntent[] = [
-    ...(shouldSeedCreativeAdPack(input.prompt, input.images) ? ["creative-ad-pack" as const] : []),
-    ...(shouldSeedEcommerceOps(input.prompt) ? ["ecommerce-ops" as const] : []),
-  ];
   if (!input.prompt.trim()) return { selected: [], source: "fallback", reason: "empty prompt" };
   let verdict: SubsetVerdict<OnePackIntent>;
   try {
@@ -65,21 +57,8 @@ export async function resolveOnePackIntents(input: {
       // one cached verdict per One request; attachment context rides in guidance.
       input: input.prompt.slice(0, 2_000),
       guidance:
-        `A deterministic prefilter suggested [${lexical.join(", ") || "none"}]. Treat that as a hint, not a gate. ` +
         (input.images?.length ? `The request includes ${input.images.length} image attachment(s). ` : "") +
-        "A coincidental substring ('small', 'restore', 'add a task') is NOT intent, and a genuine creative or " +
-        "commerce request in any language qualifies even when no reference word appears. An empty selection is " +
-        "the correct answer for ordinary requests.",
-      hints: [
-        {
-          label: "creative-ad-pack",
-          words: ["ad", "advertisement", "banner", "poster", "campaign", "creative", "reels", "tiktok", "광고", "배너", "포스터", "릴스", "영상", "상세페이지"],
-        },
-        {
-          label: "ecommerce-ops",
-          words: ["shop", "store", "mall", "checkout", "orders", "inventory", "product listing", "쇼핑몰", "커머스", "주문", "재고", "상품 등록"],
-        },
-      ],
+        "Judge the user's intent in any language. An empty selection is the correct answer for ordinary requests.",
       signal: input.signal,
       timeoutMs: input.timeoutMs ?? 8_000,
     });

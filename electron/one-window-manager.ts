@@ -108,7 +108,7 @@ export function assertOneWindowSender(event: IpcMainInvokeEvent): BrowserWindow 
 }
 // The companion can reach only its controllers. Each controller still validates
 // its own arguments, grants, task ownership and user interaction requirements.
-const ONE_CHANNEL_PREFIXES = ["oneWindow:", "oneContext:", "oneHarness:", "oneSupervisor:", "onePersonalData:", "oneVault:", "oneProvider:", "oneOrg:", "oneTaskforces:", "oneSearch:", "oneAttachments:", "oneArtifacts:",
+const ONE_CHANNEL_PREFIXES = ["oneWindow:", "oneContext:", "oneHarness:", "oneSupervisor:", "onePersonalData:", "business:", "oneVault:", "oneProvider:", "oneOrg:", "oneTaskforces:", "oneSearch:", "oneAttachments:", "oneArtifacts:",
   "oneProfile:", "oneFeatureIntro:", "oneActivation:", "oneMemory:", "oneSuggestions:", "oneHubDerivative:", "oneAutoRecovery:", "oneValueClosure:",
   "oneWeeklyReflection:", "oneExperienceReuse:", "oneImprovementProof:", "oneBriefing:", "oneRequestIntent:", "oneTeamPreflight:", "auth:", "config:", "runtime:", "usage:",
   "fs:", "chatFiles:", "chats:", "tasks:", "projects:", "invoke:", "confirm:", "attention:", "menu:", "media:",

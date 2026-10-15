@@ -1,3 +1,4 @@
+import { reportSystemPermissionIssue } from "../os-permission-guidance";
 import fs from "node:fs";
 import path from "node:path";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -107,7 +108,10 @@ export class OneOsResourceLeaseBroker {
     if (this.holder) fail("one-os-resource-busy");
     const ready = this.ports.readiness();
     if (ready.session !== "awake") fail("one-os-session-unavailable");
-    if (!ready.driverAvailable || ready.accessibility !== "granted") fail("one-os-input-unavailable");
+    if (!ready.driverAvailable || ready.accessibility !== "granted") {
+      if (ready.platform === "darwin" && ready.accessibility !== "granted") reportSystemPermissionIssue("accessibility", "one-context");
+      fail("one-os-input-unavailable");
+    }
     if (ready.humanBusy) {
       this.lastWaiting = { state: "waiting", oneId: binding.oneId, taskId: binding.taskId, runId: binding.runId, target: target.appTarget, reasonCode: "one-os-human-active" };
       this.ports.changed?.(); fail("one-os-human-active");

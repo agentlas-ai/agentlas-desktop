@@ -15,8 +15,7 @@ import type { AliveActionPacket, AliveAgent, AliveAttachment, AlivePlaygroundObs
   AliveRuntimeStart, AliveUnblockAttempt, AliveUnblockOutcome, AliveUnblockResult } from "./contracts";
 import { aliveActionKindsForDomain, aliveActionRegistration } from "./action-registry";
 import { AliveLifetimeStore } from "./lifetime-store";
-import { runtimeFailureBlocksReplay } from "../runtime/selection";
-import { aliveResumeAuthorized } from "./owner-resume";
+import { aliveResumeAuthorized, aliveWakeRequiresOwnerResume } from "./owner-resume";
 
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 export interface AliveLifetimeBeat { agentId: string; outcome: "wait" | "dispatched" | "failed"; reasonCode: string }
@@ -162,9 +161,20 @@ export class AliveLifetimeService {
             if (receipt && receipt.actionId === reserved.actionId) settled = this.store.finishAction(receipt, nowMs);
           } catch { /* Unknown domain acceptance keeps the exact reservation. */ }
         }
-        if (settled || !this.accepting || !reserved.packet || !attachment || !port?.execute || !port.actionReceipt) continue;
         // Receipt recovery is read-only even after access is lost. Replaying
         // an effect is a new dispatch and needs current access.
+        const custody = reserved.packet ? this.playgrounds.get(reserved.packet.domain) : undefined;
+        if (!settled && this.accepting && reserved.packet && custody?.remoteCustody && custody.execute && !this.options.actionAdmission?.()) {
+          // The custodian re-reads the reservation and settles a receipt for every outcome; an epoch that moved or an
+          // attachment that left is its refusal to record, not a reason to stop asking (the life would stay held).
+          const packet = reserved.packet;
+          try {
+            custody.execute(attachment ?? { attachmentId: packet.attachmentId, agentId: reserved.agentId, domain: packet.domain,
+              status: "detached", scope: packet.scope }, packet, nowMs);
+          } catch { /* The custodian is unreachable; the next beat asks again. */ }
+          continue;
+        }
+        if (settled || !this.accepting || !reserved.packet || !attachment || !port?.execute || !port.actionReceipt) continue;
         if (this.options.actionAdmission?.()) continue;
         const packet = reserved.packet;
         const current = this.store.get(reserved.agentId);
@@ -174,7 +184,8 @@ export class AliveLifetimeService {
         // Only the port's actionId-deduplicated route may replay after a crash between its effect and receipt.
         try {
           const result = port.execute(attachment, packet, nowMs);
-          if (result.actionId === reserved.actionId) this.store.finishAction(result, nowMs);
+          // Handed to the custodian again (it deduplicates by actionId): the durable receipt settles it later.
+          if (result.actionId === reserved.actionId && result.pending !== true) this.store.finishAction(result, nowMs);
         } catch { /* Keep the exact executing reservation for the next read-through. */ }
         continue;
       }
@@ -208,7 +219,10 @@ export class AliveLifetimeService {
       }
       try {
         const result = port.execute(currentAttachment, action, nowMs);
-        if (result.actionId === reserved.actionId) this.store.finishAction(result, nowMs);
+        if (result.actionId === reserved.actionId && result.pending === true) {
+          // The custodian in another process owns the effect; its durable receipt settles this reservation.
+          this.store.event(reserved.agentId, "action.forwarded", { actionId: reserved.actionId }, nowMs);
+        } else if (result.actionId === reserved.actionId) this.store.finishAction(result, nowMs);
         // A mismatched or thrown reply may have crossed the action boundary; retain the reservation.
       } catch { this.store.event(reserved.agentId, "action.acceptance-uncertain", { actionId: reserved.actionId }, nowMs); }
     }
@@ -245,9 +259,9 @@ export class AliveLifetimeService {
       if (agent.budget.deadlineMs !== null && nowMs >= agent.budget.deadlineMs) { beats.push(this.wait(agent, "grant.deadline-spent", nowMs)); continue; }
       if (agent.budget.tokenLimit !== null && agent.budget.tokensUsed >= agent.budget.tokenLimit) { beats.push(this.wait(agent, "grant.tokens-spent", nowMs)); continue; }
       if (agent.budget.tokenLimit !== null && agent.state.usageUnknown === true) { beats.push(this.wait(agent, "grant.usage-unavailable", nowMs)); continue; }
-      // The ledger sequence owns the last attempt, including equal/backward
-      // clocks. Settings, a new model, and changed observations cannot release
-      // an uncertain wake. Only exact, unconsumed native owner consent can do so.
+      // A settled wake's missing result/ACK is context for the next wake.
+      // Live reservations above still serialize actual work. Only a repeated
+      // no-progress loop needs a new owner decision before automatic work.
       let ownerResumeDue = false;
       const lastWake = this.store.db.prepare(`SELECT w.wake_id,w.receipt_json FROM alive_wakes w
         JOIN alive_events e ON e.agent_id=w.agent_id AND e.kind='wake.settled'
@@ -255,12 +269,9 @@ export class AliveLifetimeService {
         WHERE w.agent_id=? ORDER BY e.sequence DESC LIMIT 1`).get(agent.agentId) as {wake_id:string;receipt_json:string|null}|undefined;
       if (lastWake) {
         let receipt: {runId?:unknown;errorCode?:unknown}|null = null;
-        try { receipt = lastWake.receipt_json ? JSON.parse(lastWake.receipt_json) : null; } catch { /* retain the failed boundary */ }
-        if (!receipt || receipt.runId !== lastWake.wake_id) {
-          beats.push(this.wait(agent, "runtime_turn_unsettled", nowMs)); continue;
-        }
-        if (typeof receipt.errorCode === "string" && (receipt.errorCode === "alive-host-lost"
-          || runtimeFailureBlocksReplay({providerCode:receipt.errorCode}))) {
+        try { receipt = lastWake.receipt_json ? JSON.parse(lastWake.receipt_json) : null; } catch { /* unavailable prior context never fences a fresh wake */ }
+        if (receipt?.runId === lastWake.wake_id && typeof receipt.errorCode === "string"
+          && aliveWakeRequiresOwnerResume(receipt.errorCode)) {
           const barrier = this.store.resumeBarrier(agent.agentId);
           ownerResumeDue = Boolean(barrier && aliveResumeAuthorized(this.store.db,agent,barrier));
           if (!ownerResumeDue) { beats.push(this.wait(agent, receipt.errorCode, nowMs)); continue; }

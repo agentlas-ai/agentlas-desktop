@@ -11,7 +11,7 @@ import {
   type OneMemoryMapScope,
   type OneMemoryMapSnapshot,
 } from "../../shared/one-memory-map";
-import { getDb } from "../store/db";
+import { getMemoryDb as getDb, getMemoryStoreInfo } from "../memory/database";
 import type { OneDurableMemoryEntryUi } from "../../shared/types";
 import { revokeOneMemoryEntry } from "../memory/revocations";
 import {
@@ -51,6 +51,10 @@ interface CachedMap {
 
 let cachedMap: CachedMap | null = null;
 
+const visibleMemory = (alias: "memory_entries" | "source" | "target") =>
+  `NOT EXISTS(SELECT 1 FROM memory_identity_bindings visibility WHERE visibility.memory_id=${alias}.id
+    AND json_extract(visibility.applicability_json,'$.enabled')=0)`;
+
 function oneRoot(): string {
   return process.env.AGENTLAS_ONE_DIR || path.join(os.homedir(), ".agentlas", "one");
 }
@@ -88,6 +92,7 @@ function normalizedContent(value: unknown): string | null {
  */
 function readTicketSlugIndex(root: string): Map<string, string> {
   const result = new Map<string, string>();
+  if (!getMemoryStoreInfo().ownerNamespace.startsWith("device-local:")) return result;
   const metadataRoot = path.join(root, ".agentlas");
   const slugPath = path.join(metadataRoot, "ticket-slugs.json");
   const ticketPath = path.join(metadataRoot, "memory-tickets.jsonl");
@@ -256,7 +261,9 @@ function readRelations(): RelationRow[] {
        JOIN memory_entries source ON source.id = relation.from_memory_id
        JOIN memory_entries target ON target.id = relation.to_memory_id
        WHERE source.agent_id = ? AND target.agent_id = ?
-         AND source.superseded_at IS NULL AND target.superseded_at IS NULL`,
+         AND source.superseded_at IS NULL AND target.superseded_at IS NULL
+         AND ${visibleMemory("source")} AND ${visibleMemory("target")}`,
+    // Reversible compatibility disable is independent of supersession/forget.
     ).all(ONE_AGENT_ID, ONE_AGENT_ID) as RelationRow[];
   } catch {
     return [];
@@ -264,10 +271,11 @@ function readRelations(): RelationRow[] {
 }
 
 function mapSignature(root: string): string {
+  const custody = getMemoryStoreInfo();
   const summary = getDb().prepare(
     `SELECT COUNT(*) AS count, MAX(created_at) AS newest,
             COALESCE(SUM(LENGTH(COALESCE(embedding_json, ''))), 0) AS embedding_bytes
-     FROM memory_entries WHERE agent_id = ? AND superseded_at IS NULL`,
+     FROM memory_entries WHERE agent_id = ? AND superseded_at IS NULL AND ${visibleMemory("memory_entries")}`,
   ).get(ONE_AGENT_ID) as { count: number; newest: string | null; embedding_bytes: number };
   let relationSummary = "none";
   try {
@@ -277,7 +285,8 @@ function mapSignature(root: string): string {
        JOIN memory_entries source ON source.id = relation.from_memory_id
        JOIN memory_entries target ON target.id = relation.to_memory_id
        WHERE source.agent_id = ? AND target.agent_id = ?
-         AND source.superseded_at IS NULL AND target.superseded_at IS NULL`,
+         AND source.superseded_at IS NULL AND target.superseded_at IS NULL
+         AND ${visibleMemory("source")} AND ${visibleMemory("target")}`,
     ).get(ONE_AGENT_ID, ONE_AGENT_ID) as { count: number; newest: string | null };
     relationSummary = `${value.count}:${value.newest ?? "none"}`;
   } catch {
@@ -285,12 +294,15 @@ function mapSignature(root: string): string {
   }
   const metadataRoot = path.join(root, ".agentlas");
   const raw = [
+    custody.ownerNamespace,
+    custody.revocationEpoch,
+    custody.revision,
     summary.count,
     summary.newest ?? "none",
     summary.embedding_bytes,
     relationSummary,
-    safeFileSignature(path.join(metadataRoot, "ticket-slugs.json")),
-    safeFileSignature(path.join(metadataRoot, "memory-tickets.jsonl")),
+    custody.ownerNamespace.startsWith("device-local:") ? safeFileSignature(path.join(metadataRoot, "ticket-slugs.json")) : "unbound",
+    custody.ownerNamespace.startsWith("device-local:") ? safeFileSignature(path.join(metadataRoot, "memory-tickets.jsonl")) : "unbound",
   ].join("|");
   return crypto.createHash("sha256").update(raw).digest("hex").slice(0, 24);
 }
@@ -325,7 +337,7 @@ export function getOneMemoryMap(): OneMemoryMapSnapshot {
     `SELECT id, scope, kind, content, project_id, project_path, evidence_json,
             embedding_json, created_at
      FROM memory_entries
-     WHERE agent_id = ? AND superseded_at IS NULL
+     WHERE agent_id = ? AND superseded_at IS NULL AND ${visibleMemory("memory_entries")}
      ORDER BY created_at ASC, id ASC`,
   ).all(ONE_AGENT_ID) as MemoryMapRow[];
   const ticketSlugs = readTicketSlugIndex(root);
@@ -443,7 +455,7 @@ export function listOneDurableMemoryEntries(limit = 300): OneDurableMemoryEntryU
   const rows = getDb().prepare(
     `SELECT id, scope, kind, content, project_path, evidence_json, created_at
      FROM memory_entries
-     WHERE agent_id = ? AND superseded_at IS NULL
+     WHERE agent_id = ? AND superseded_at IS NULL AND ${visibleMemory("memory_entries")}
      ORDER BY created_at DESC, id DESC
      LIMIT ?`,
   ).all(ONE_AGENT_ID, capped) as Array<{

@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { app } from "electron";
+import { reportSystemPermissionIssue } from "../os-permission-guidance";
 
 export type NativeInputAction =
   | { action: "status" }
@@ -101,13 +102,17 @@ export function nativeInputDriverAvailable(): boolean {
 export function invokeNativeInputDriver(
   request: NativeInputAction,
   timeoutMs = request.action === "drag" ? 8_000 : 4_000,
+  signal?: AbortSignal,
 ): Promise<NativeInputResult> {
-  return withOneSensitiveOperation(() => invokeNativeInputDriverUnlocked(request, timeoutMs));
+  return withOneSensitiveOperation(() => invokeNativeInputDriverUnlocked(request, timeoutMs, signal));
 }
 function invokeNativeInputDriverUnlocked(
   request: NativeInputAction,
   timeoutMs = request.action === "drag" ? 8_000 : 4_000,
+  signal?: AbortSignal,
 ): Promise<NativeInputResult> {
+  const aborted: NativeInputResult = { ok: false, error: "driver-aborted", message: "Native input driver was cancelled." };
+  if (signal?.aborted) return Promise.resolve(aborted);
   const driver = nativeInputDriverPath();
   if (!driver) {
     return Promise.resolve({
@@ -117,53 +122,82 @@ function invokeNativeInputDriverUnlocked(
     });
   }
   return new Promise((resolve) => {
-    const child = spawn(driver, [], {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: {},
-      windowsHide: true,
-      shell: false,
-    });
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(driver, [], { stdio: ["pipe", "pipe", "pipe"], env: {}, windowsHide: true, shell: false });
+    } catch {
+      // A synchronous spawn failure created no child to drain.
+      resolve({ ok: false, error: "driver-launch-failed", message: "Native input driver could not start." });
+      return;
+    }
     const stdout: Buffer[] = [];
     let stdoutBytes = 0;
-    let settled = false;
+    let settled = false, killRequested = false;
+    let stopped: NativeInputResult | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const clearTimer = () => { if (timer !== undefined) { clearTimeout(timer); timer = undefined; } };
     const finish = (result: NativeInputResult) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      clearTimer();
+      signal?.removeEventListener("abort", onAbort);
       resolve(result);
     };
-    const timer = setTimeout(() => {
-      try { child.kill("SIGKILL"); } catch { /* ignore */ }
-      finish({ ok: false, error: "driver-timeout", message: "Native input driver timed out." });
-    }, Math.max(250, Math.min(timeoutMs, 10_000)));
-
-    child.stdout.on("data", (chunk: Buffer) => {
+    const stop = (result: NativeInputResult) => {
+      if (settled) return;
+      stopped ??= result;
+      clearTimer();
+      // A kill request (including false/throw) is not a physical exit proof.
+      // Keep the caller's resource lease and sensitive-operation barrier until close.
+      if (!killRequested) {
+        killRequested = true;
+        try { child.kill("SIGKILL"); } catch { /* close remains the drain barrier */ }
+      }
+    };
+    const onAbort = () => stop(aborted);
+    child.stdout!.on("data", (chunk: Buffer) => {
+      if (stopped || settled) return;
       stdoutBytes += chunk.length;
       if (stdoutBytes <= 256 * 1024) stdout.push(chunk);
       else {
-        try { child.kill("SIGKILL"); } catch { /* ignore */ }
-        finish({ ok: false, error: "driver-response-too-large", message: "Native input driver response was rejected." });
+        stdout.length = 0;
+        stop({ ok: false, error: "driver-response-too-large", message: "Native input driver response was rejected." });
       }
     });
-    child.once("error", () => {
-      finish({ ok: false, error: "driver-launch-failed", message: "Native input driver could not start." });
-    });
+    // Node emits close after a failed spawn's error too. An error with no PID
+    // never manufactures a successful drain; observe it and await that close.
+    child.on("error", () => stop({ ok: false, error: "driver-launch-failed", message: "Native input driver could not start." }));
     child.once("close", (code) => {
-      if (settled) return;
+      if (stopped) { finish(stopped); return; }
       try {
         const parsed = JSON.parse(Buffer.concat(stdout).toString("utf8")) as NativeInputResult;
         if (!parsed || typeof parsed !== "object" || typeof parsed.ok !== "boolean") throw new Error("invalid");
+        if (parsed.error === "accessibility-permission-required") reportSystemPermissionIssue("accessibility", "computer-use");
         finish(parsed);
       } catch {
-        finish({
-          ok: false,
-          error: code === 77 ? "accessibility-permission-required" : "driver-invalid-response",
-          message: "Native input driver returned an invalid response.",
-        });
+        if (code === 77) reportSystemPermissionIssue("accessibility", "computer-use");
+        finish({ ok: false, error: code === 77 ? "accessibility-permission-required" : "driver-invalid-response", message: "Native input driver returned an invalid response." });
       }
     });
-    child.stdin.on("error", () => {});
-    child.stdin.end(JSON.stringify(request));
+    child.stdout!.on("error", () => stop({ ok: false, error: "driver-response-failed", message: "Native input driver output failed." }));
+    // Drain stderr without retaining/logging raw output. A bounded diagnostic
+    // stream cannot backpressure the child forever or bypass its drain barrier.
+    let stderrBytes = 0;
+    child.stderr!.on("data", (chunk: Buffer) => {
+      if (stopped || settled) return;
+      stderrBytes += chunk.length;
+      if (stderrBytes > 256 * 1024) stop({ ok: false, error: "driver-response-too-large", message: "Native input driver response was rejected." });
+    });
+    child.stderr!.on("error", () => stop({ ok: false, error: "driver-response-failed", message: "Native input driver output failed." }));
+    child.stdin!.on("error", () => {});
+    timer = setTimeout(() => stop({ ok: false, error: "driver-timeout", message: "Native input driver timed out." }), Math.max(250, Math.min(timeoutMs, 10_000)));
+    signal?.addEventListener("abort", onAbort, { once: true });
+    // Abort may have happened during spawn, before the listener was installed.
+    if (signal?.aborted) onAbort();
+    if (!stopped) {
+      try { child.stdin!.end(JSON.stringify(request)); }
+      catch { stop({ ok: false, error: "driver-launch-failed", message: "Native input driver could not start." }); }
+    }
   });
 }
 import { withOneSensitiveOperation } from '../secrets/sensitive-surface';

@@ -18,6 +18,7 @@ import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
+import { createOwnedChildDrain, OWNED_CHILD_DRAIN_SOURCE } from "../runtime/owned-child-drain";
 import { BROWSER_APPROVAL_FILE_ENV } from "../browser/approval-channel";
 import { assertDedicatedBrowserProfilePath } from "../browser/profile-path-boundary";
 import { assertInstallBrowserPath, assertInstallBrowserTarget, installBrowserBoundary } from "../browser/install-browser-boundary";
@@ -724,8 +725,13 @@ async function inspectLinuxCdpProcesses(port: number): Promise<BrowserCdpProcess
   return snapshots;
 }
 
+/** PowerShell 은 stdout 을 파이프로 돌리면 콘솔 OEM 코드페이지(한국어 Windows = CP949)로 쓴다. Node 는 UTF-8 로
+ * 읽으므로 한국어 사용자 이름이 든 실행 경로·명령줄이 깨져 전용 프로필 소유 판정이 어긋났다. */
+const POWERSHELL_UTF8_OUTPUT = "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)";
+
 async function inspectWindowsCdpProcesses(port: number): Promise<BrowserCdpProcessSnapshot[]> {
   const script = [
+    POWERSHELL_UTF8_OUTPUT,
     `$connections = @(Get-NetTCPConnection -State Listen -LocalPort ${port} -ErrorAction Stop)`,
     "$rows = @($connections | Group-Object OwningProcess | ForEach-Object { $pidValue = [int]$_.Name; $p = Get-CimInstance Win32_Process -Filter \"ProcessId = $pidValue\"; $addresses = @($_.Group | Select-Object -ExpandProperty LocalAddress -Unique); $nonLoopback = @($addresses | Where-Object { $_ -ne '127.0.0.1' -and $_ -ne '::1' }); if ($p) { [pscustomobject]@{ pid = [int]$p.ProcessId; executable = [string]$p.ExecutablePath; commandLine = [string]$p.CommandLine; loopbackOnly = [bool]($addresses.Count -gt 0 -and $nonLoopback.Count -eq 0) } } })",
     "$rows | ConvertTo-Json -Compress",
@@ -781,6 +787,7 @@ export async function inspectBrowserCdpProfileRoots(): Promise<BrowserCdpProcess
       .map((candidate) => `'${candidate.replace(/'/gu, "''")}'`)
       .join(",");
     const script = [
+      POWERSHELL_UTF8_OUTPUT,
       `$allowed = @(${allowed})`,
       "$rows = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $allowed -contains ([string]$_.ExecutablePath).ToLowerInvariant() } | ForEach-Object { [pscustomobject]@{ pid = [int]$_.ProcessId; executable = [string]$_.ExecutablePath; commandLine = [string]$_.CommandLine; loopbackOnly = $true } })",
       "$rows | ConvertTo-Json -Compress",
@@ -1498,6 +1505,7 @@ async function invokeBrowserTabsListThroughLauncher(launcher: string, options: {
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
+  const childDrain = createOwnedChildDrain(child);
   let settled = false;
   let outputBuffer = "";
   const pending = new Map<number, { resolve: (message: BrowserCdpLauncherMessage) => void; reject: (error: Error) => void }>();
@@ -1523,6 +1531,13 @@ async function invokeBrowserTabsListThroughLauncher(launcher: string, options: {
       waiter.resolve(message);
     }
   };
+  const onReadFailure = () => {
+    rejectPending(failure("launcher", "unknown"));
+    void childDrain.stop();
+  };
+  child.stdout?.on("error", onReadFailure);
+  child.stderr?.on("error", onReadFailure);
+  child.stdin?.on("error", onReadFailure);
   child.stdout?.on("data", onOutput);
   child.stderr?.on("data", (chunk: Buffer | string) => {
     const bytes = Buffer.byteLength(chunk);
@@ -1556,14 +1571,9 @@ async function invokeBrowserTabsListThroughLauncher(launcher: string, options: {
     settled = true;
     rejectPending(new Error("browser-bootstrap-closed"));
     try { child.stdin?.end(); } catch { /* already closed */ }
-    await new Promise<void>((resolve) => {
-      if (child.exitCode !== null || child.signalCode !== null) return resolve();
-      const timer = setTimeout(() => {
-        try { child.kill("SIGTERM"); } catch { /* already exited */ }
-        resolve();
-      }, 2_000);
-      child.once("exit", () => { clearTimeout(timer); resolve(); });
-    });
+    // TERM asks the launcher to close its own writer child. Forcing the parent
+    // dead could orphan that child, so retain this flight until actual close.
+    await childDrain.stop({ graceMs: 2_000 });
   };
 
   try {
@@ -1692,92 +1702,117 @@ export async function ensureBrowserCdpHostHeaded(input: {
  * approval behavior cannot drift between the shipped script and its tests.
  */
 export const BROWSER_APPROVAL_CLASSIFIER_SOURCE = String.raw`
-// "subscrib" alone and a bare "order" are not money: production 2026-10-04 (Youtube launch room, Full access +
-// Always allow) asked for payment approval on YouTube Studio's "Subscribers gained 추가" metric checkbox five times,
-// and "Sort order" reads the same. A free channel Subscribe is a social engagement (BROWSER_SOCIAL_ENGAGE_SOURCE).
-// A paid flow still names pay/purchase/buy/billing/card/checkout/결제, or the order or subscription itself.
-const PAY_RE = /(checkout|\bpay(ment)?\b|purchase|\bbuy\b|\b(?:place|complete|confirm|submit)\s+(?:your\s+|the\s+)?order\b|\border\s+(?:now|summary)\b|donate|\bpaid\s+subscription|\bsubscription\s+(?:plan|fee|payment|billing)|\bstart\s+(?:a\s+|your\s+)?(?:paid\s+)?subscription|\bsubscribe\s+(?:to\s+)?(?:premium|plus|pro)\b|billing|credit\s*card|debit\s*card|card\s*number|cvv|cvc|결제|구매|주문하기|주문\s*확인|결재|유료\s*구독|정기\s*결제|카드\s*번호|카드\s*정보|카드\s*등록)/i;
-const SEND_RE = /(publish|\bpost\b|\bsend\b|submit|tweet|retweet|\bshare\b|reply|\bcomment\b|confirm|전송|게시|제출|답글|댓글|공유|보내|확인)/i;
-const PUBLISH_RE = /(publish|\bpost\b|tweet|retweet|게시|공개)/i;
-const DELETE_RE = /(delete|remove|destroy|unsubscribe|삭제|제거|탈퇴)/i;
+// Typed effect contract (owner rule 2026-10-13: the host does not decide meaning from words; native-harness notyet NH25).
+// An approval class comes only from
+//   1. the effect the model declares for a browser_click (its semantic judgment of what the click does),
+//   2. the tool's own semantics (a submit key, type with submit, accepting a dialog, running page code), and
+//   3. page STRUCTURE read from the target element just before the action: the HTML form method and the W3C autofill
+//      tokens (cc-*) of the field or of the form a submit control belongs to.
+// Never from a label, an element description, a URL or any page words: a "Pay now" label neither raises nor lowers.
+// Declared effects:
+//   none     - UI only (tab, filter, menu, expand, open a composer, choose a file); nothing leaves the page's draft state
+//   like / follow / repost - reversible social engagement; receipted by the post-click state check, not gated
+//   reply / message (class send), post (class publish), send / publish / delete / payment - the click finalizes that effect
+// The same tokens feed shared/automation-activity.ts, so the approval class and the run digest agree.
+// A click with no valid effect is never trusted as harmless: approvalFor() requires approval for it. Structure can only
+// RAISE a declared class (a submit control of a POST form is at least send; of a form with card fields, payment); an
+// unreadable structure is neutral.
 const SUBMIT_KEY_RE = /(?:^|[+\s])(enter|return|numpadenter)(?:$|[+\s])/i;
-// Opening a composer or selecting draft media is reversible. Treating labels
-// such as "New post" as the final publish action stalls the file chooser behind
-// an approval sheet before the user can even prepare the draft.
-const DRAFT_STAGE_RE = /(?:\b(?:new|create|compose|start)\s+(?:a\s+)?(?:new\s+)?(?:post|reel|story)\b|\b(?:add|choose|select|upload)\s+(?:media|photo|video|file|from\s+computer)\b|(?:새로운?|새)\s*(?:게시물|릴스|스토리)|(?:게시물|릴스|스토리)\s*(?:만들기|작성|추가)|컴퓨터에서\s*선택|파일\s*(?:선택|첨부))/i;
-const EXPLICIT_FINALIZE_RE = /(?:\bpublish\b|\bshare\b|\bpost\s+now\b|\bsend\b|\bsubmit\b|게시하기|공유하기|전송하기|제출하기)/i;
-
-function actionFromIntent(text, fallback = null) {
-  if (PAY_RE.test(text)) return 'payment';
-  if (DELETE_RE.test(text)) return 'delete';
-  if (PUBLISH_RE.test(text)) return 'publish';
-  if (SEND_RE.test(text)) return 'send';
-  return fallback;
+const CLICK_EFFECT_CLASS = { none: null, like: null, follow: null, repost: null, reply: 'send', message: 'send', post: 'publish', send: 'send', publish: 'publish', delete: 'delete', payment: 'payment' };
+const CLICK_ENGAGE_EFFECTS = { like: true, follow: true, repost: true };
+const CLASS_RANK = { send: 1, publish: 2, delete: 3, payment: 4 };
+function declaredClickEffect(args) {
+  const raw = args && typeof args === 'object' && typeof args.effect === 'string' ? args.effect.trim().toLowerCase() : '';
+  return Object.prototype.hasOwnProperty.call(CLICK_EFFECT_CLASS, raw) ? raw : null;
+}
+function higherApprovalClass(a, b) {
+  if (!a) return b || null;
+  if (!b) return a;
+  return (CLASS_RANK[b] || 0) > (CLASS_RANK[a] || 0) ? b : a;
 }
 
-function intentText(name, args, currentUrl = '') {
+// Page-side probe (run through browser_evaluate on the action's target, or on the focused element for a key press).
+// Returns typed DOM facts only; the classifier never sees the element's text.
+const ACTION_STRUCTURE_PROBE = "(el) => { el = el || document.activeElement; if (!el || !el.getAttribute) return { found: false };"
+  + " const card = (n) => !!(n && n.getAttribute && String(n.getAttribute('autocomplete') || '').toLowerCase().split(' ').some((t) => t.indexOf('cc-') === 0));"
+  + " const form = el.form || (el.closest ? el.closest('form') : null); const tag = String(el.tagName || '').toLowerCase(); const type = String(el.getAttribute('type') || '').toLowerCase();"
+  + " const submitControl = (tag === 'button' && !!form && (type === '' || type === 'submit')) || (tag === 'input' && (type === 'submit' || type === 'image'));"
+  + " return { found: true, submitControl, formMethod: form ? String(form.getAttribute('method') || 'get').toLowerCase() : null,"
+  + " paymentField: card(el), paymentForm: !!form && Array.prototype.some.call(form.elements || [], card) }; }";
+
+function actionStructureTargets(name, args) {
   const input = args && typeof args === 'object' ? args : {};
-  const parts = [currentUrl, input.element, input.target, input.name, input.label, input.url];
+  if (name === 'browser_click') return CLICK_EFFECT_CLASS[declaredClickEffect(input)] === 'payment' ? [] : [typeof input.target === 'string' ? input.target : null];
+  if (name === 'browser_type' || name === 'browser_fill') return [typeof input.target === 'string' ? input.target : null];
+  if (name === 'browser_press_key') return SUBMIT_KEY_RE.test(String(input.key || '')) ? [''] : [];
   if (name === 'browser_fill_form' && Array.isArray(input.fields)) {
-    for (const field of input.fields) parts.push(field && field.name, field && field.type);
+    return input.fields.slice(0, 12).map((field) => field && typeof (field.target || field.ref) === 'string' ? (field.target || field.ref) : null);
   }
-  return parts.filter((value) => typeof value === 'string').join(' ').toLowerCase();
+  return [];
 }
 
-function classifyAction(name, args, currentUrl = '') {
-  const input = args && typeof args === 'object' ? args : {};
-  const intent = intentText(name, input, currentUrl);
-  const controlIntent = intentText(name, input, '');
-  let allText = '';
-  try { allText = JSON.stringify(input).toLowerCase(); } catch (e) { allText = ''; }
+// Merge per-target probe results (fill_form probes each field).
+function mergeActionStructure(results) {
+  const found = (results || []).filter((row) => row && row.found === true);
+  if (!found.length) return null;
+  return {
+    found: true,
+    submitControl: found.some((row) => row.submitControl === true),
+    formMethod: found.map((row) => row.formMethod).find((method) => typeof method === 'string') || null,
+    paymentField: found.some((row) => row.paymentField === true),
+    paymentForm: found.some((row) => row.paymentForm === true),
+  };
+}
 
+function structuralClass(name, structure, submitting) {
+  if (!structure || structure.found !== true) return null;
+  if (name === 'browser_type' || name === 'browser_fill' || name === 'browser_fill_form') {
+    if (structure.paymentField) return 'payment';
+    if (!submitting) return null;
+  }
+  if (structure.submitControl || submitting) {
+    if (structure.paymentForm || structure.paymentField) return 'payment';
+    if (structure.formMethod === 'post') return 'send';
+  }
+  return null;
+}
+
+function classifyAction(name, args, currentUrl = '', structure = null) {
+  const input = args && typeof args === 'object' ? args : {};
   // Playwright MCP exposes page-scoped JavaScript as browser_evaluate and
   // process-scoped JavaScript as browser_run_code_unsafe. Both execute
   // caller-supplied code and both must cross the same explicit checkpoint.
-  // Keeping only the old browser_run_code alias here made the visible
-  // approval sheet decorative for the current browser_evaluate tool.
   if (name === 'browser_evaluate' || name === 'browser_run_code' || name === 'browser_run_code_unsafe') return 'unsafe-code';
 
   const submitByType = name === 'browser_type' && input.submit === true;
   const submitByKey = name === 'browser_press_key' && SUBMIT_KEY_RE.test(String(input.key || ''));
-  if (submitByType || submitByKey) return actionFromIntent(intent, 'send');
-
-  if (name === 'browser_handle_dialog' && input.accept === true) {
-    return actionFromIntent(intent, 'send');
-  }
-
-  // Filling payment credentials is gated before secrets are exposed to the page.
-  // Ordinary text/form filling remains approval-free until an actual submit action.
-  if (name === 'browser_type' || name === 'browser_fill' || name === 'browser_fill_form') {
-    return PAY_RE.test(intent) ? 'payment' : null;
-  }
-
-  if (name === 'browser_navigate' || name === 'browser_navigate_back') {
-    return PAY_RE.test(allText) ? 'payment' : null;
-  }
-  if (name === 'browser_file_upload') {
-    // Playwright only stages the selected file in the page's draft flow. The
-    // irreversible Share/Publish click remains independently approval-gated.
-    // File names and parent directories may legitimately contain "post".
-    return null;
-  }
+  if (submitByType || submitByKey) return higherApprovalClass('send', structuralClass(name, structure, true));
+  if (name === 'browser_handle_dialog' && input.accept === true) return 'send';
+  // Filling a card field is gated before the secret reaches the page; other filling stays approval-free until a submit.
+  if (name === 'browser_type' || name === 'browser_fill' || name === 'browser_fill_form') return structuralClass(name, structure, false);
+  // Navigation and staging a file are not effects; the finalizing click or submit is gated on its own.
+  if (name === 'browser_navigate' || name === 'browser_navigate_back' || name === 'browser_file_upload') return null;
   if (name === 'browser_click') {
-    // The page URL is trusted only for payment context. A Threads/Instagram URL
-    // containing /post/ must not turn every harmless click into a publish.
-    if (PAY_RE.test(intent)) return 'payment';
-    if (DELETE_RE.test(controlIntent)) return 'delete';
-    if (DRAFT_STAGE_RE.test(controlIntent) && !EXPLICIT_FINALIZE_RE.test(controlIntent)) return null;
-    return actionFromIntent(controlIntent + ' ' + allText);
+    return higherApprovalClass(CLICK_EFFECT_CLASS[declaredClickEffect(input)] || null, structuralClass(name, structure, false));
   }
+  return null;
+}
+
+// The gate's question. classifyAction() is the class the call is KNOWN to have (typed effect raised by structure);
+// a click that declared no valid effect is not known to be harmless, so it needs approval too.
+function approvalFor(name, args, currentUrl = '', structure = null) {
+  const classified = classifyAction(name, args, currentUrl, structure);
+  if (classified) return classified;
+  if (name === 'browser_click' && !declaredClickEffect(args)) return 'send';
   return null;
 }
 `;
 
 /**
- * Companion to the approval classifier: one-click social engagement (follow, like, repost,
- * subscribe) — an outward effect for growth goals that the approval gate deliberately does not
- * gate (a like must not open an approval sheet). It reuses the classifier's own intentText and
- * PAY/DELETE patterns, and never changes classifyAction's answer.
+ * Companion to the approval classifier: one-click social engagement (follow, like, repost) — an
+ * outward effect for growth goals that the approval gate deliberately does not gate (a like must
+ * not open an approval sheet). It reads the click's declared effect (the classifier's typed
+ * contract) and never changes classifyAction's answer.
  *
  * Intent alone is not an effect: the launcher stamps the clicked element, reads its
  * accessibility state (aria-pressed/checked, aria-label, descendant labels, visible text) before
@@ -1787,18 +1822,12 @@ function classifyAction(name, args, currentUrl = '') {
  * that can see the post-click state.
  */
 export const BROWSER_SOCIAL_ENGAGE_SOURCE = String.raw`
-const SOCIAL_ENGAGE_RE = /(\bfollow\b(?![\s-]?up)|\blike\b|\brepost\b|\bretweet\b|\bsubscribe\b|\bupvote\b|팔로우|좋아요|리포스트|재게시|구독|フォロー|いいね|リポスト|チャンネル登録|关注|点赞|转发|订阅|\bseguir\b|me gusta|suscrib|\bs'abonner\b|j'aime|abonnieren|gefällt mir)/i;
-const SOCIAL_UNDO_RE = /(unfollow|unlike|undo|\bfollowing\b|\bsubscribed\b|\bliked\b|언팔|팔로잉|취소|解除|取消|フォロー中|dejar de|ne plus)/i;
-
 function socialEngageIntent(name, args) {
   if (name !== 'browser_click') return null;
-  const control = intentText(name, args && typeof args === 'object' ? args : {}, '');
-  if (!control || SOCIAL_UNDO_RE.test(control)) return null;
-  // Payment/delete keep their own class. send/publish words are not excluded: element descriptions are
-  // prose ("Like button on the post"), and the post-click state check is what decides the effect.
-  if (PAY_RE.test(control) || DELETE_RE.test(control)) return null;
-  const match = control.match(SOCIAL_ENGAGE_RE);
-  return match ? match[1].toLowerCase() : null;
+  // The declared effect is the model's judgment (like / follow / repost); the post-click state check decides whether it
+  // happened. No label words: they neither start nor stop a receipt (native-harness notyet NH25).
+  const declared = declaredClickEffect(args);
+  return declared && Object.prototype.hasOwnProperty.call(CLICK_ENGAGE_EFFECTS, declared) ? declared : null;
 }
 
 const ENGAGE_STATE_BODY = "const labels = Array.from(el.querySelectorAll('[aria-label]')).slice(0, 4).map((n) => n.getAttribute('aria-label')).join('|');"
@@ -1966,9 +1995,23 @@ function browserFindArgumentFailure(name, args) {
 }
 const BROWSER_FIND_REF_GUIDANCE = ' Search only for words visible on the page. Snapshot refs such as e123 are not page text: pass a ref directly as "target" to browser_click / browser_hover / browser_type instead of searching for it.';
 const BROWSER_SNAPSHOT_START_GUIDANCE = ' The dedicated Agentlas browser starts with no site open: if the page is about:blank, open the site your task names with browser_navigate first.';
+const BROWSER_CLICK_EFFECT_DESCRIPTION = 'What this click does, declared by you: none (tab, filter, menu, expand, open a composer, pick a file; nothing is sent), like, follow, repost, or the effect this click finalizes: reply, message, post, send, publish, delete, payment. A click without a valid effect always asks the owner for approval.';
+function withClickEffectSchema(tool) {
+  const schema = tool && tool.inputSchema && typeof tool.inputSchema === 'object' ? tool.inputSchema : null;
+  if (!schema) return;
+  schema.properties = { ...(schema.properties || {}), effect: { type: 'string', enum: ['none', 'like', 'follow', 'repost', 'reply', 'post', 'message', 'send', 'publish', 'delete', 'payment'], description: BROWSER_CLICK_EFFECT_DESCRIPTION } };
+  const required = Array.isArray(schema.required) ? schema.required : [];
+  if (!required.includes('effect')) schema.required = [...required, 'effect'];
+}
+function stripClickEffect(name, args) {
+  if (name !== 'browser_click' || !args || typeof args !== 'object' || !Object.prototype.hasOwnProperty.call(args, 'effect')) return args;
+  const { effect: _declared, ...rest } = args;
+  return rest;
+}
 function patchBrowserToolDescriptions(tools) {
   if (!Array.isArray(tools)) return tools;
   for (const tool of tools) {
+    if (tool && tool.name === 'browser_click') withClickEffectSchema(tool);
     if (!tool || typeof tool.description !== 'string') continue;
     if (tool.name === 'browser_find' && !tool.description.includes('Snapshot refs such as e123')) tool.description += BROWSER_FIND_REF_GUIDANCE;
     if (tool.name === 'browser_snapshot' && !tool.description.includes('starts with no site open')) tool.description += BROWSER_SNAPSHOT_START_GUIDANCE;
@@ -2039,6 +2082,7 @@ function cancelledRequestId(message) {
  * dedicated-profile listener may be adopted, while unknown listeners fail closed.
  */
 export const BROWSER_CDP_OWNERSHIP_RUNTIME_SOURCE = String.raw`
+const POWERSHELL_UTF8_OUTPUT = '[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)';
 function canonicalProfile(value) {
   if (process.platform === 'win32') return path.win32.resolve(value).replace(/[\\/]+$/, '').toLowerCase();
   return path.resolve(value).replace(/\/+$/, '');
@@ -2192,6 +2236,7 @@ async function inspectLinuxProcesses() {
 }
 async function inspectWindowsProcesses() {
   const script = [
+    POWERSHELL_UTF8_OUTPUT,
     '$connections = @(Get-NetTCPConnection -State Listen -LocalPort ' + PORT + ' -ErrorAction Stop)',
     '$rows = @($connections | Group-Object OwningProcess | ForEach-Object { $pidValue = [int]$_.Name; $p = Get-CimInstance Win32_Process -Filter "ProcessId = $pidValue"; $addresses = @($_.Group | Select-Object -ExpandProperty LocalAddress -Unique); $nonLoopback = @($addresses | Where-Object { $_ -ne "127.0.0.1" -and $_ -ne "::1" }); if ($p) { [pscustomobject]@{ pid = [int]$p.ProcessId; executable = [string]$p.ExecutablePath; commandLine = [string]$p.CommandLine; loopbackOnly = [bool]($addresses.Count -gt 0 -and $nonLoopback.Count -eq 0) } } })',
     '$rows | ConvertTo-Json -Compress',
@@ -2541,7 +2586,7 @@ async function inspectProfileRootPid(pid) {
       return { pid, executable: executableLine ? executableLine.slice(1) : '', commandLine: commandLine.trim(), loopbackOnly: true };
     }
     if (process.platform === 'win32') {
-      const script = '$p = Get-CimInstance Win32_Process -Filter "ProcessId = ' + pid + '"; if ($p) { [pscustomobject]@{ pid = [int]$p.ProcessId; executable = [string]$p.ExecutablePath; commandLine = [string]$p.CommandLine; loopbackOnly = $true } | ConvertTo-Json -Compress }';
+      const script = POWERSHELL_UTF8_OUTPUT + '; $p = Get-CimInstance Win32_Process -Filter "ProcessId = ' + pid + '"; if ($p) { [pscustomobject]@{ pid = [int]$p.ProcessId; executable = [string]$p.ExecutablePath; commandLine = [string]$p.CommandLine; loopbackOnly = $true } | ConvertTo-Json -Compress }';
       const output = await execFileText('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script]);
       return output.trim() ? JSON.parse(output) : null;
     }
@@ -2648,6 +2693,7 @@ async function browserProcessResources(rootPid) {
   }
   if (process.platform === 'win32') {
     const script = [
+      POWERSHELL_UTF8_OUTPUT,
       '$rows = @(Get-CimInstance Win32_Process | ForEach-Object { $p = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue; [pscustomobject]@{ pid = [int]$_.ProcessId; ppid = [int]$_.ParentProcessId; rssBytes = if ($p) { [double]$p.WorkingSet64 } else { 0 } } })',
       '$rows | ConvertTo-Json -Compress',
     ].join('; ');
@@ -2659,6 +2705,7 @@ async function browserProcessResources(rootPid) {
     if (wanted.size > 0) {
       const wantedLiteral = [...wanted].filter((pid) => Number.isInteger(pid) && pid > 0).join(',');
       const commandScript = [
+        POWERSHELL_UTF8_OUTPUT,
         '$wanted = @(' + wantedLiteral + ')',
         '$rows = @(Get-CimInstance Win32_Process | Where-Object { $wanted -contains [int]$_.ProcessId } | ForEach-Object { [pscustomobject]@{ pid = [int]$_.ProcessId; commandLine = [string]$_.CommandLine } })',
         '$rows | ConvertTo-Json -Compress',
@@ -2785,7 +2832,7 @@ async function guardOwnedBrowser(browserPid, ownerPid) {
  * 그래서 파일이 자기 계약 번호와 writer를 들고 다닌다. 더 높은 계약과 같은 계약의 다른
  * writer는 보존한다. 같은 Desktop 계약은 현재 설치 앱의 런타임 경로로 다시 결합한다.
  */
-export const BROWSER_CDP_LAUNCHER_CONTRACT = 22;
+export const BROWSER_CDP_LAUNCHER_CONTRACT = 24;
 export const BROWSER_CDP_LAUNCHER_WRITER = "agentlas-desktop";
 
 const UNIFIED_CUA_BOOTSTRAP_SOURCE = String.raw`
@@ -3149,6 +3196,7 @@ async function ensureChromeUnlocked() {
   args.push('--no-startup-window');
   log('launching bundled Chrome for Testing on port', PORT, HEADLESS ? '(headless)' : '');
   const child = spawn(exe, args, { detached: true, stdio: 'ignore' });
+  const launchedChildDrain = createOwnedChildDrain(child);
   let launchError = null;
   child.once('error', (error) => { launchError = error; });
   child.unref();
@@ -3161,15 +3209,17 @@ async function ensureChromeUnlocked() {
         log('CDP ready', ownership.pid);
         return;
       }
-      try {
-        if (process.platform === 'win32' && child.pid) {
-          await new Promise((resolve) => execFile('taskkill.exe', ['/PID', String(child.pid), '/T'], { windowsHide: true, timeout: 3000 }, () => resolve()));
-        } else if (child.pid) process.kill(child.pid, 'SIGTERM');
-      } catch (e) {}
+      if (process.platform === 'win32' && child.pid) {
+        // Preserve the original owned-child tree termination on Windows.
+        await new Promise((resolve) => execFile('taskkill.exe', ['/PID', String(child.pid), '/T'], { windowsHide: true, timeout: 3000 }, () => resolve()));
+      }
+      await launchedChildDrain.stop({ forceAfterMs: 2_000 });
       throw new Error('Agentlas browser started but ownership verification failed (' + ownership.state + ':' + ownership.reason + ').');
     }
     await new Promise((r) => setTimeout(r, 500));
   }
+  // Do not release the launch lock while this unverified child can still write.
+  await launchedChildDrain.stop({ forceAfterMs: 2_000 });
   // Only a genuinely never-ready port reaches here — Chrome did not come up.
   writeBackoff('launch-failed');
   throw new Error('Agentlas Chrome for Testing failed to start' + (launchError ? ': ' + launchError.message : ' on CDP port ' + PORT + '.') + ' Automatic relaunch is paused.');
@@ -3269,7 +3319,7 @@ const SKILL_TOOLS = [
 ];
 const UNIFIED_CUA_TOOL = {
   name: 'browser_cua_repl',
-  description: 'Run JavaScript in a persistent run-scoped isolate. The code is the body of an async function: "return" the value you want back (e.g. "return await cua.getState()"); without "return" the result is null. Global cua API: await cua.getState(); cua.getTab(id).snapshot/focus/close/navigate(url)/back/click({element,ref})/typeText({element,ref},text)/pressKey(key); await cua.createBrowserTab("iab",url); cua.getApp(name).observe/snapshot/screenshot/focus/click({x,y,sourceId})/drag/scroll/typeText/pressKey/setValue, plus clickElement({observationId,elementIndex}), setElementValue, performElementAction, selectElementText. Native element observations are single-mutation and must be refreshed. globalThis values persist between calls. Native methods exist only when cua-driver was selected for this same run.',
+  description: 'Run JavaScript in a persistent run-scoped isolate. The code is the body of an async function: "return" the value you want back (e.g. "return await cua.getState()"); without "return" the result is null. Global cua API: await cua.getState(); cua.getTab(id).snapshot/focus/close/navigate(url)/back/click({element,ref,effect})/typeText({element,ref},text)/pressKey(key) (click effect as in browser_click; none for plain navigation clicks); await cua.createBrowserTab("iab",url); cua.getApp(name).observe/snapshot/screenshot/focus/click({x,y,sourceId})/drag/scroll/typeText/pressKey/setValue, plus clickElement({observationId,elementIndex}), setElementValue, performElementAction, selectElementText. Native element observations are single-mutation and must be refreshed. globalThis values persist between calls. Native methods exist only when cua-driver was selected for this same run.',
   inputSchema: { type: 'object', properties: { code: { type: 'string', minLength: 1, maxLength: 65536 }, timeout_ms: { type: 'integer', minimum: 250, maximum: 120000 } }, required: ['code'], additionalProperties: false },
 };
 // Ask the owner to do a step in the open browser (a phone code, a consent screen). Main answers with one card whose
@@ -3291,6 +3341,8 @@ function saveSkill(name, steps, description) {
 function loadSkill(name) { const p = skillPath(name); if (!fs.existsSync(p)) return null; return JSON.parse(fs.readFileSync(p, 'utf8')); }
 
 ${BROWSER_LEAF_RECEIPT_SOURCE}
+
+${OWNED_CHILD_DRAIN_SOURCE}
 
 async function main() {
   let leaseFile = null;
@@ -3318,7 +3370,18 @@ async function main() {
     }
     return nativeRelease;
   };
-  const exitAfterRelease = (code) => { void releaseLeaseOnce().then(() => process.exit(code)); };
+  let exitFlight = null;
+  const exitAfterRelease = (code) => {
+    closing = true;
+    if (!exitFlight) exitFlight = (async () => {
+      // A pending ensure can still spawn/attest the dedicated browser. Close
+      // dispatch first, then await that owned operation and the actual MCP child.
+      if (browserReadyPromise) await browserReadyPromise.catch(() => {});
+      await childDrain.closed;
+      await releaseLeaseOnce();
+      process.exit(code);
+    })();
+  };
   if (!fs.existsSync(PLAYWRIGHT_MCP_CLI)) throw new Error('Bundled Playwright MCP runtime is missing: ' + PLAYWRIGHT_MCP_CLI);
   // MCP hosts frequently start a server only to initialize/list tools. Starting
   // Chrome here created about:blank and a browser root every health-check cycle.
@@ -3340,7 +3403,10 @@ async function main() {
         log('resource snapshot', usage.pages + ' pages', usage.renderers + ' renderers', Math.ceil(usage.rssBytes / 1024 / 1024) + 'MB RSS');
         if (closing) throw new Error('Agentlas browser client closed during launch.');
       } catch (error) {
-        releaseLeaseOnce();
+        closing = true;
+        safeEnd(child.stdin, 'playwright stdin');
+        await childDrain.stop({ forceAfterMs: 2_000 });
+        await releaseLeaseOnce();
         throw error;
       }
     })();
@@ -3364,11 +3430,13 @@ async function main() {
     stdio: ['pipe', 'pipe', 'inherit'],
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', ...(nativeLeaseEndpoint ? { PLAYWRIGHT_MCP_CDP_HEADERS: 'Authorization: Bearer ' + NATIVE_TOKEN } : {}) },
   });
+  const childDrain = createOwnedChildDrain(child);
   child.on('error', (e) => {
     log('failed to start @playwright/mcp', String(e));
+    void childDrain.stop({ forceAfterMs: 2_000 });
     exitAfterRelease(1);
   });
-  child.on('exit', (code) => exitAfterRelease(code == null ? 0 : code));
+  child.on('close', (code) => exitAfterRelease(code == null ? 0 : code));
 
   const isClosedPipeError = (error) => {
     const code = error && error.code;
@@ -3522,10 +3590,27 @@ async function main() {
   };
 
   // 승인 게이트 통과 여부 판정(공유). 통과=null, 거부=사유문자열.
+  // Typed DOM facts of the action's target (form method, card autofill tokens) for the classifier; never its text.
+  // An unreadable target is neutral: the declared effect alone decides.
+  const readActionStructure = async (name, args) => {
+    const targets = actionStructureTargets(name, args);
+    if (!targets.length) return null;
+    const results = [];
+    for (const target of targets) {
+      if (target === null) continue;
+      try {
+        results.push(engageStateFromResult(await callChildWithin('browser_evaluate', target
+          ? { element: String((args && args.element) || 'action target'), target, function: ACTION_STRUCTURE_PROBE }
+          : { function: ACTION_STRUCTURE_PROBE }, 2000)));
+      } catch (e) { /* neutral */ }
+    }
+    return mergeActionStructure(results);
+  };
+
   const gate = async (name, args, signal) => {
     const observedUrl = await readCdpPageUrl();
     const contextUrl = approvalContextUrl(name, args, observedUrl);
-    const actionType = classifyAction(name, args, contextUrl);
+    const actionType = approvalFor(name, args, contextUrl, await readActionStructure(name, args));
     if (!actionType) return null;
     // Full access is run-scoped Main authority, not a site permission. A fresh
     // browser legitimately starts at about:blank, so verify that authority with
@@ -3548,7 +3633,7 @@ async function main() {
     }
     const detail = actionType === 'unsafe-code'
       ? String(args.function || args.expression || args.code || args.filename || name)
-      : (args.element || args.url || args.key || name);
+      : (args.element || args.url || args.key || name) + (name === 'browser_click' && !declaredClickEffect(args) ? ' (no effect declared)' : '');
     const decision = await requestApproval(site, actionType, actionType + ': ' + detail, signal);
     return decision === 'approved' ? null : (decision === 'denied' ? actionType : 'approval-' + decision);
   };
@@ -3566,7 +3651,7 @@ async function main() {
     if (signal?.aborted) { resolve({ error: { message: 'unified-cua-cancelled' } }); return; }
     signal?.addEventListener('abort', cancel, { once: true });
     waiters.set(id, (value) => { signal?.removeEventListener('abort', cancel); resolve(value); });
-    forwardRaw(JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: normalizeToolArguments(name, args) } }));
+    forwardRaw(JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: stripClickEffect(name, normalizeToolArguments(name, args)) } }));
   });
 
   const callChildWithin = (name, args, ms) => {
@@ -3817,9 +3902,10 @@ async function main() {
       catch (e) { upload = { error: { content: [{ type: 'text', text: 'File upload staging failed: ' + String(e && e.message || e).slice(0, 300) }], isError: true } }; }
       if (upload.error) { writeClient({ jsonrpc: '2.0', id: msg.id, result: upload.error }); return; }
       args = upload.args;
-      const forwardedLine = args === originalArgs
+      const forwardArgs = stripClickEffect(name, args);
+      const forwardedLine = forwardArgs === originalArgs
         ? line
-        : JSON.stringify({ ...msg, params: { ...msg.params, arguments: args } });
+        : JSON.stringify({ ...msg, params: { ...msg.params, arguments: forwardArgs } });
       // 스킬 툴은 로컬 처리(child 로 안 보냄).
       if (name === 'browser_show_owner') { writeClient({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'The owner now has a card with an Open browser button for the page you acted on last. Tell them in chat what to do there, then wait for their reply.' }] } }); return; }
       if (name === 'browser_skill_list') { writeClient({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: JSON.stringify(listSkills()) }] } }); return; }
@@ -3923,6 +4009,7 @@ async function main() {
   };
 
   let cbuf = '';
+  child.stdout.on('error', () => stopForSignal(1));
   child.stdout.on('data', (chunk) => {
     cbuf += chunk.toString('utf8'); let i;
     while ((i = cbuf.indexOf('\n')) >= 0) { const line = cbuf.slice(0, i); cbuf = cbuf.slice(i + 1); handleChildLine(line); }
@@ -3938,15 +4025,14 @@ async function main() {
     closing = true;
     if (unifiedCuaEngine) { try { unifiedCuaEngine.dispose(); } catch {} unifiedCuaEngine = null; unifiedCuaApi = null; }
     safeEnd(child.stdin, 'playwright stdin');
-    const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch (e) {} }, 1500);
-    timer.unref();
+    void childDrain.stop({ graceMs: 1500, forceAfterMs: 2_000 });
   });
   const stopForSignal = (exitCode) => {
     gateLifecycle.cancelAll();
     for (const controller of unifiedEvaluations.values()) controller.abort(); unifiedEvaluations.clear();
     if (unifiedCuaEngine) { try { unifiedCuaEngine.dispose(); } catch {} unifiedCuaEngine = null; unifiedCuaApi = null; }
     safeEnd(child.stdin, 'playwright stdin');
-    try { child.kill('SIGTERM'); } catch (e) {}
+    void childDrain.stop({ forceAfterMs: 2_000 });
     exitAfterRelease(exitCode);
   };
   process.once('SIGINT', () => stopForSignal(130));

@@ -1,0 +1,75 @@
+import {AsyncLocalStorage} from 'node:async_hooks';
+import {randomUUID} from 'node:crypto';
+import type Database from 'better-sqlite3';
+import type {MessageBoxOptions,MessageBoxReturnValue} from 'electron';
+import type {PersonalDataTarget} from '../../shared/one-personal-data';
+import type {HistoryEvolutionObservation,EvolutionEnvelope} from '../../shared/one-history-evolution';
+import {HISTORY_METADATA_POLICY,type HistorySourceFence,type HistorySourceScope,type HistoryMetadataSnapshot} from '../../shared/one-history-source';
+import type {NativeHistoryActor,NativeHistoryEvolutionOptions} from './history-evolution-native';
+import type {NativePersonalReviewContext} from './personal-integrations-glue';
+import {personalDataHash,personalDataTarget,personalDataError} from './personal-data-store';
+interface Review {id:string;actor:NativeHistoryActor;target:PersonalDataTarget;fence:HistorySourceFence;scope:HistorySourceScope;budgetId:string;budgetRevision:number;policyRevision:string;snapshot:HistoryMetadataSnapshot|null}
+export interface HistorySourceOwnerPorts {
+ db():Database.Database;actor():NativeHistoryActor;assertOwner():void;
+ assertTarget(target:PersonalDataTarget,actor:NativeHistoryActor):void;
+ budget(target:PersonalDataTarget):{budgetId:string;revision:number}|null;
+ fence():HistorySourceFence;read(scope:HistorySourceScope,fence:HistorySourceFence,check:()=>void):HistoryMetadataSnapshot;
+ assertSnapshot(snapshot:HistoryMetadataSnapshot,check:()=>void):void;
+ context():NativePersonalReviewContext;show(window:NativePersonalReviewContext['window'],options:MessageBoxOptions):Promise<MessageBoxReturnValue>;
+ locale():string;
+}
+function fail(code:string):never{throw personalDataError(code)}
+/** Original explicit local scope acceptance and immutable source custody. Constructor performs no reads or writes. */
+export class HistorySourceOwner {
+ private readonly workScopes=new WeakMap<object,Review>();
+ private closed=false;private epoch=0;private readonly accepted=new Set<string>();private readonly active=new AsyncLocalStorage<{id:string;read:boolean;check():void}>();
+ private readonly originals:Readonly<HistorySourceOwnerPorts>;
+ constructor(private readonly p:HistorySourceOwnerPorts){this.originals={...p}}
+ private actor(){if(this.closed||Object.keys(this.originals).some(k=>this.p[k as keyof HistorySourceOwnerPorts]!==this.originals[k as keyof HistorySourceOwnerPorts]))fail('history_native_source_owner_changed');this.p.assertOwner();return this.p.actor()}
+ private target(target:PersonalDataTarget){const a=this.actor();personalDataTarget(target);if(target.scope!=='personal'||target.audience!=='owner'||target.organizationId!==null||target.projectId!==null||target.oneId!==a.oneId||target.deploymentId!==a.hostId)fail('history_native_source_scope_unavailable');this.p.assertTarget(target,a);return a}
+ private schema(){this.p.db().exec('CREATE TABLE IF NOT EXISTS one_history_source_reviews(id TEXT PRIMARY KEY,target_key TEXT NOT NULL,value_json TEXT NOT NULL,record_digest TEXT NOT NULL)')}
+ private row(id:string,historical=false):Review {if(!historical&&!this.accepted.has(id))fail('history_native_source_review_required');const row=this.p.db().prepare('SELECT value_json,record_digest FROM one_history_source_reviews WHERE id=?').get(id) as {value_json:string;record_digest:string}|undefined;if(!row)fail('history_native_source_review_required');const r=JSON.parse(row.value_json) as Review;if(personalDataHash(r)!==row.record_digest||r.id!==id)fail('history_native_source_proof_invalid');return r}
+ private current(r:Review){this.active.getStore()?.check();const a=this.target(r.target),b=this.p.budget(r.target);if(personalDataHash(a)!==personalDataHash(r.actor)||personalDataHash(this.p.fence())!==personalDataHash(r.fence)||r.fence.consent!=='on'||!b||b.budgetId!==r.budgetId||b.revision!==r.budgetRevision||Date.now()>Date.parse(r.scope.to)+r.scope.retentionMs)fail('history_native_source_changed');return a}
+ private latest(target:PersonalDataTarget):Review {this.target(target);const held=this.active.getStore();if(held){const r=this.row(held.id);if(personalDataHash(r.target)!==personalDataHash(target))fail('history_native_source_target_changed');this.current(r);return r}for(const id of [...this.accepted].reverse()){const r=this.row(id);if(personalDataHash(r.target)===personalDataHash(target)){this.current(r);return r}}fail('history_native_source_review_required')}
+ private observations(r:Review):HistoryEvolutionObservation[]{if(!r.snapshot)fail('history_native_source_snapshot_required');return r.snapshot.entries.map(e=>({id:personalDataHash([r.id,e.sourceRef,e.revision]),revision:e.revision,sourceId:'native-history-metadata',sourceRef:e.sourceRef,observedAt:e.occurredAt,permissionRevision:r.policyRevision,consentRevision:r.id,environmentRevision:personalDataHash([r.actor.hostId,r.actor.workspaceId,HISTORY_METADATA_POLICY]),interface:'application',summary:JSON.stringify({policy:HISTORY_METADATA_POLICY,bucket:e.source,occurredAt:e.occurredAt,applicationCategories:e.categories}),sensitiveFieldsRemoved:true}))}
+ private assertObservation(target:PersonalDataTarget,o:HistoryEvolutionObservation){const r=this.row(o.consentRevision);if(personalDataHash(r.target)!==personalDataHash(target))fail('history_native_source_target_changed');this.current(r);if(!r.snapshot||!this.observations(r).some(v=>personalDataHash(v)===personalDataHash(o)))fail('history_native_source_snapshot_changed');this.p.assertSnapshot(r.snapshot,()=>this.current(r));}
+ private revokedObservationScope(target:PersonalDataTarget,o:HistoryEvolutionObservation):boolean {
+  // A fresh current local review is mandatory before consulting any retired receipt. No malformed or unavailable proof is omitted.
+  const live=this.latest(target),r=this.row(o.consentRevision,true);
+  if(personalDataHash(r.target)!==personalDataHash(target)||!r.snapshot||!this.observations(r).some(v=>personalDataHash(v)===personalDataHash(o)))fail('history_native_source_proof_invalid');
+  if(!this.accepted.has(r.id)||personalDataHash(r.actor)!==personalDataHash(live.actor)||personalDataHash(r.fence)!==personalDataHash(live.fence)||r.budgetId!==live.budgetId||r.budgetRevision!==live.budgetRevision||Date.now()>Date.parse(r.scope.to)+r.scope.retentionMs)return true;
+  try{this.p.assertSnapshot(r.snapshot,()=>this.current(live));return false}catch(error){
+   // Only the original source's precise replacement marker can retire a still-live observation.
+   this.current(live);if((error as {code?:unknown})?.code==='history_native_source_changed'||(error as {code?:unknown})?.code==='ENOENT')return true;throw error;
+  }
+ }
+ /** The focused employee action retains its private scope until the original observe/store/readback finishes. */
+ private async withReview<T>(target:PersonalDataTarget,action:()=>Promise<T>):Promise<T>{
+  target=personalDataTarget(structuredClone(target));const a=structuredClone(this.target(target)),fence=structuredClone(this.p.fence());if(fence.consent!=='on')fail('history_native_source_consent_required');const context=this.p.context(),epoch=this.epoch,budget=structuredClone(this.p.budget(target));if(!budget)fail('history_native_source_budget_required');
+  const now=Date.now(),scope:HistorySourceScope={from:new Date(now-86400000).toISOString(),to:new Date(now).toISOString(),buckets:['6h','10min'],maxEntries:20,retentionMs:86400000};
+  const check=()=>{context.assertCurrent();if(epoch!==this.epoch||personalDataHash(this.target(target))!==personalDataHash(a)||personalDataHash(context.actor)!==personalDataHash(a)||personalDataHash(this.p.fence())!==personalDataHash(fence)||personalDataHash(this.p.budget(target))!==personalDataHash(budget))fail('history_native_source_review_changed')};check();const ko=this.p.locale()==='ko';
+  const answer=await this.p.show(context.window,{type:'question',title:ko?'기록 메타데이터 관찰 범위':'Review history metadata scope',message:ko?'현재 개인 Page에서 이 범위만 관찰할까요?':'Observe only this scope in the current personal Page?',detail:[ko?'최근 24시간의 6시간·10분 요약, 최대 20개.':'Six-hour and ten-minute summaries from the last 24 hours; at most 20.',ko?'다시 읽기 허용: 24시간. 공유 대상: 나.':'Readback permission: 24 hours. Audience: owner.',ko?'시각·요약 구간·허용 목록의 앱 분류만 사용합니다.':'Only timestamps, summary buckets and allowlisted application categories are used.',ko?'제목·본문·화면·원시 이벤트·자유 텍스트·개인 경로는 읽기 결과에서 제외합니다. 요약 본문은 읽지 않습니다.':'Titles, body, screenshots, raw events, free text and private paths are excluded from the result. Summary bodies are not read.',ko?'모델 실행·초안 생성·평가·파일 변경·자동 관찰은 승인하지 않습니다.':'This does not approve model execution, drafting, evaluation, file changes or automatic observation.',`Page: ${target.spaceId}/${target.pageId}`,`${ko?'기간':'Range'}: ${scope.from} – ${scope.to}`].join('\n'),buttons:ko?['취소','이 범위 한 번 관찰']:['Cancel','Observe this scope once'],defaultId:0,cancelId:0,noLink:true});check();if(answer.response!==1)fail('history_native_source_review_declined');
+  const id='history-review:'+randomUUID(),r:Review={id,actor:a,target:structuredClone(target),fence,scope,budgetId:budget.budgetId,budgetRevision:budget.revision,policyRevision:personalDataHash([a,target,fence,budget,HISTORY_METADATA_POLICY]),snapshot:null};
+  this.schema();this.p.db().transaction(()=>{check();this.p.db().prepare('INSERT INTO one_history_source_reviews VALUES(?,?,?,?)').run(id,personalDataHash(target),JSON.stringify(r),personalDataHash(r))})();this.accepted.add(id);
+  try{return await this.active.run({id,read:false,check},async()=>{check();const result=await action();check();this.current(this.row(id));return result})}catch(error){this.accepted.delete(id);throw error}
+ }
+ /** Metadata custody only: the receiving owner must issue separate execution consent. */
+ captureWorkScope(target:PersonalDataTarget):object{const r=this.latest(target);if(!r.snapshot)fail('history_native_source_snapshot_required');this.p.assertSnapshot(r.snapshot,()=>this.current(r));const cap=Object.freeze({});this.workScopes.set(cap,r);return cap}
+ readWorkScope(cap:object){const r=this.workScopes.get(cap);if(!r||!this.accepted.has(r.id))fail('history_native_source_review_required');this.current(r);if(!r.snapshot)fail('history_native_source_snapshot_required');this.p.assertSnapshot(r.snapshot,()=>this.current(r));return structuredClone({actor:r.actor,target:r.target,scope:r.scope,policyRevision:r.policyRevision,budgetId:r.budgetId,budgetRevision:r.budgetRevision,observations:this.observations(r)})}
+ policy():Omit<NativeHistoryEvolutionOptions,'materialize'>{return{
+  sourceId:'native-history-metadata',observeWithReview:(target,action)=>this.withReview(target,action),
+  envelope:target=>{const r=this.latest(target);return{policyRevision:r.policyRevision,sourceIds:['native-history-metadata'],toolRefs:[],resourceRefs:[],budgetId:r.budgetId,maxObservations:r.scope.maxEntries,retentionMs:r.scope.retentionMs,allowedKinds:['agent'],automaticPromotion:false} satisfies EvolutionEnvelope},
+  scopedHistory:{isRevokedObservationScope:(target,o)=>this.revokedObservationScope(target,o),observe:async(target,max)=>{const held=this.active.getStore(),r=this.latest(target);if(!held||held.id!==r.id||held.read||max!==r.scope.maxEntries)fail('history_native_source_review_required');held.read=true;const snapshot=this.p.read(r.scope,r.fence,()=>this.current(r));this.current(r);if(!snapshot.entries.length)fail('history_native_source_no_metadata');const next={...r,snapshot};this.p.db().transaction(()=>{this.current(r);const original=this.row(r.id);if(original.snapshot)fail('history_native_source_snapshot_changed');this.p.db().prepare('UPDATE one_history_source_reviews SET value_json=?,record_digest=? WHERE id=?').run(JSON.stringify(next),personalDataHash(next),r.id)})();return this.observations(next)},assertCurrent:(target,o)=>this.assertObservation(target,o)},
+  personalAuthority:{current:request=>{try{const target=this.latestTarget(request.resourceId),r=this.latest(target),a=this.current(r);if(!['history-observe','history-read'].includes(request.action)||request.purpose!=='permitted-history-evolution'||request.permissionRevision!==r.policyRevision||request.scope!=='personal'||request.audience!=='owner'||request.organizationId!==null||request.projectId!==null||request.principalId!==a.principalId||request.payerId!==a.principalId||request.sessionId!==a.sessionId||request.workspaceId!==a.workspaceId||request.oneId!==a.oneId||request.hostId!==a.hostId||request.taskId!==null||request.runId!==null||request.controlVersion!==null||request.credentialGeneration!==null)fail('history_native_source_scope_unavailable');
+   for(const ref of request.sourceRefs){let found=false;for(const id of [...this.accepted].reverse()){const held=this.row(id);if(personalDataHash(held.target)!==personalDataHash(target)||!held.snapshot)continue;const observation=this.observations(held).find(v=>v.sourceRef===ref);if(observation){this.assertObservation(target,observation);found=true;break}}if(!found)fail('history_native_source_snapshot_required')}
+   return{decision:'allow',revision:r.policyRevision,reason:'current_original_native_metadata_review'};
+  }catch{return{decision:'deny',revision:'',reason:'history_native_source_review_required'}}}},
+ }}
+ private latestTarget(resource:string){for(const id of [...this.accepted].reverse()){const r=this.row(id);if(`${r.target.spaceId}:${r.target.pageId}`===resource)return r.target}fail('history_native_source_review_required')}
+ invalidate(){this.epoch++;this.accepted.clear()}
+ close(){this.closed=true;this.invalidate()}
+}
+/** Original factories are bound without reading History, creating a table or registering a wake. */
+export async function createNativeHistorySourceOwner(options:{locale():string}):Promise<HistorySourceOwner>{const [db,runtime,supervisor,history,glue]=await Promise.all([import('../store/db'),import('./personal-integrations-runtime'),import('./supervisor'),import('./computer-history'),import('./personal-integrations-glue')]);return new HistorySourceOwner({db:db.getDb,actor:runtime.currentOnePersonalIntegrationActor,assertOwner:runtime.assertOnePersonalIntegrationCurrentOwner,
+ assertTarget:(target,a)=>{const d=db.getDb();if(!d.prepare("SELECT 1 FROM sqlite_master WHERE name='one_personal_data_acl'").get())fail('history_native_source_target_changed');const acl=d.prepare('SELECT principal_id FROM one_personal_data_acl WHERE target_key=?').get(personalDataHash(target)) as {principal_id:string}|undefined;const page=d.prepare('SELECT 1 FROM one_personal_data_pages WHERE target_key=?').get(personalDataHash(target));if(acl?.principal_id!==a.principalId||!page)fail('history_native_source_target_changed')},
+ budget:target=>{const b=supervisor.oneSupervisor().budgets({oneId:target.oneId})[0];return b?{budgetId:b.budgetId,revision:b.revision}:null},fence:history.getComputerHistorySourceFence,read:history.readComputerHistoryMetadata,assertSnapshot:history.assertComputerHistoryMetadataCurrent,context:glue.currentNativePersonalReviewContext,show:async(w,o)=>(await import('electron')).dialog.showMessageBox(w,o),locale:options.locale})}

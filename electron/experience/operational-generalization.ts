@@ -1,4 +1,3 @@
-import { experienceChipsRetired } from "./retired";
 import { createHash } from "node:crypto";
 import type {
   OperationalPublicProjectionConfirmInput,
@@ -80,45 +79,10 @@ type ProjectionRow = {
   updated_at: string;
 };
 
-function digest(...parts: string[]): string {
-  const value = createHash("sha256");
-  for (const part of parts) value.update(part.normalize("NFC")).update("\0");
-  return value.digest("hex");
-}
-
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, child]) => `${JSON.stringify(key.normalize("NFC"))}:${canonical(child)}`)
-      .join(",")}}`;
-  }
-  if (typeof value === "string") return JSON.stringify(value.normalize("NFC"));
-  return JSON.stringify(value);
-}
-
-function exactKeys(value: unknown, allowed: readonly string[], label: string): asserts value is Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object.`);
-  if (Object.keys(value as Record<string, unknown>).some((key) => !allowed.includes(key))) {
-    throw new Error(`${label} contains unsupported fields.`);
-  }
-}
-
 function cleanId(value: unknown, label: string): string {
   const clean = typeof value === "string" ? value.trim() : "";
   if (!LOCAL_ID_RE.test(clean)) throw new Error(`${label} is invalid.`);
   return clean;
-}
-
-function cleanText(value: unknown, label: string, max: number): string {
-  const clean = typeof value === "string" ? value.trim().normalize("NFC") : "";
-  if (!clean || Array.from(clean).length > max) throw new Error(`${label} is required and must be at most ${max} characters.`);
-  return clean;
-}
-
-function uniqueSorted(values: readonly string[]): string[] {
-  return [...new Set(values)].sort((left, right) => left.localeCompare(right));
 }
 
 function parseStringArray(raw: string): string[] {
@@ -128,123 +92,6 @@ function parseStringArray(raw: string): string[] {
   } catch {
     return [];
   }
-}
-
-function getPack(packId: string): PackRow {
-  const row = getDb().prepare("SELECT * FROM experience_packs WHERE id = ?").get(packId) as PackRow | undefined;
-  if (!row) throw new Error("Experience Pack not found.");
-  if (row.status !== "active") throw new Error("Archived Experience Packs cannot create a public projection.");
-  const currentPackageHash = getAgentById(row.agent_id)?.packageHash ?? null;
-  if (!row.base_package_hash || !HASH_RE.test(row.base_package_hash) || currentPackageHash !== row.base_package_hash) {
-    throw new Error("Experience Pack base package is missing or stale.");
-  }
-  if (!row.base_agent_definition_id || !row.base_agent_release_id || !row.base_package_hash_version) {
-    throw new Error("Save the Experience privately first so Agent Cloud can resolve the exact base release.");
-  }
-  return row;
-}
-
-function environmentConstraints(pack: PackRow): string[] {
-  let profile: ReturnType<typeof parseCanonicalEnvironmentProfile> = null;
-  try {
-    profile = parseCanonicalEnvironmentProfile(JSON.parse(pack.environment_profile_json || "null"));
-  } catch {
-    profile = null;
-  }
-  if (!profile) throw new Error("A canonical exact environment is required for public projection.");
-  return profile.constraints;
-}
-
-function sourceRows(pack: PackRow, candidateIds: readonly string[]): SourceRow[] {
-  const ids = uniqueSorted(candidateIds.map((value) => cleanId(value, "sourceCandidateId")));
-  if (ids.length < 1 || ids.length > 32) throw new Error("Select 1-32 private promoted Operational items.");
-  const placeholders = ids.map(() => "?").join(",");
-  const rows = getDb().prepare(
-    `SELECT c.id, c.pack_id, c.agent_id, c.environment_key, c.summary,
-            c.task_terms_json, c.confidence, c.status, c.outcome_status,
-            c.public_safe, c.created_at, c.updated_at,
-            r.id AS receipt_id, r.evidence_hash, r.verification_status,
-            r.verification_method
-       FROM experience_candidates c
-       JOIN experience_promotion_receipts r
-         ON r.candidate_id = c.id AND r.action = 'promote'
-      WHERE c.id IN (${placeholders})
-      ORDER BY c.id ASC`,
-  ).all(...ids) as SourceRow[];
-  if (rows.length !== ids.length || rows.some((row) =>
-    row.pack_id !== pack.id || row.agent_id !== pack.agent_id || row.environment_key !== pack.environment_key ||
-    row.status !== "promoted" || !["attested", "verified"].includes(row.outcome_status) || row.public_safe !== 0)) {
-    throw new Error("Public projection sources must be private promoted items from this exact Pack and environment.");
-  }
-  return rows;
-}
-
-function sourceBinding(row: SourceRow): OperationalPublicProjectionSourceBinding {
-  const sourceItemHash = digest("operational-private-source-v1", canonical({
-    candidateId: row.id,
-    packId: row.pack_id,
-    agentId: row.agent_id,
-    environmentKey: row.environment_key,
-    summaryHash: digest("private-summary-v1", row.summary),
-    taskSignatures: uniqueSorted(parseStringArray(row.task_terms_json).filter(isCanonicalTaskId)),
-    confidence: row.confidence,
-    status: row.status,
-    outcomeStatus: row.outcome_status,
-    publicSafe: false,
-    receiptId: row.receipt_id,
-    evidenceHash: row.evidence_hash,
-    verificationStatus: row.verification_status,
-    verificationMethod: row.verification_method,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  }));
-  return { candidateId: row.id, sourceItemHash: `sha256:${sourceItemHash}` };
-}
-
-function sourceSnapshotHash(pack: PackRow, bindings: readonly OperationalPublicProjectionSourceBinding[]): string {
-  return digest("operational-public-source-snapshot-v1", canonical({
-    packId: pack.id,
-    agentId: pack.agent_id,
-    basePackageHash: pack.base_package_hash,
-    baseAgentDefinitionId: pack.base_agent_definition_id,
-    baseAgentReleaseId: pack.base_agent_release_id,
-    environmentKey: pack.environment_key,
-    bindings,
-  }));
-}
-
-function proposalHash(input: {
-  pack: PackRow;
-  sourceSnapshotHash: string;
-  title: string;
-  instructions: string[];
-  taskSignatures: string[];
-  environmentConstraints: string[];
-}): string {
-  return digest("operational-public-projection-v1", canonical({
-    packId: input.pack.id,
-    agentId: input.pack.agent_id,
-    basePackageHash: input.pack.base_package_hash,
-    baseAgentDefinitionId: input.pack.base_agent_definition_id,
-    baseAgentReleaseId: input.pack.base_agent_release_id,
-    environmentKey: input.pack.environment_key,
-    sourceSnapshotHash: input.sourceSnapshotHash,
-    title: input.title,
-    instructions: input.instructions,
-    taskSignatures: input.taskSignatures,
-    environmentConstraints: input.environmentConstraints,
-  }));
-}
-
-function privacyIssues(title: string, instructions: readonly string[], sources: readonly SourceRow[]): string[] {
-  const texts = [title, ...instructions];
-  const issues = texts.flatMap(publicExperienceSafetyIssues);
-  for (const text of texts) {
-    for (const rule of PRIVATE_CONTEXT_PATTERNS) if (rule.pattern.test(text)) issues.push(rule.code);
-  }
-  const combined = texts.join("\n");
-  if (sources.some((source) => copiesPrivateSource(combined, source.summary))) issues.push("source-copy-overlap");
-  return uniqueSorted(issues);
 }
 
 function rowRecord(row: ProjectionRow): OperationalPublicProjectionRecord {
@@ -284,33 +131,6 @@ function rowRecord(row: ProjectionRow): OperationalPublicProjectionRecord {
   };
 }
 
-function invalidateChangedSource(row: ProjectionRow): ProjectionRow {
-  if (row.status !== "confirmed") return row;
-  try {
-    const pack = getPack(row.pack_id);
-    const bindings = rowRecord(row).sourceBindings;
-    const sources = sourceRows(pack, bindings.map((binding) => binding.candidateId));
-    const liveBindings = sources.map(sourceBinding);
-    const liveSnapshot = sourceSnapshotHash(pack, liveBindings);
-    const exact = row.agent_id === pack.agent_id && row.base_package_hash === pack.base_package_hash &&
-      row.base_agent_definition_id === pack.base_agent_definition_id &&
-      row.base_agent_release_id === pack.base_agent_release_id && row.environment_key === pack.environment_key;
-    if (exact && canonical(bindings) === canonical(liveBindings) && liveSnapshot === row.source_snapshot_hash) return row;
-  } catch {
-    // Any missing/rejected/rebound source invalidates confirmation fail-closed.
-  }
-  const issues = uniqueSorted([...parseStringArray(row.privacy_issue_codes_json), "source-material-changed"]);
-  const now = new Date().toISOString();
-  getDb().prepare(
-    `UPDATE experience_public_projections
-        SET status = 'proposal', confirmation_hash = NULL, confirmed_at = NULL,
-            privacy_issue_codes_json = ?, updated_at = ?
-      WHERE projection_id = ? AND status = 'confirmed'`,
-  ).run(JSON.stringify(issues), now, row.projection_id);
-  return getDb().prepare("SELECT * FROM experience_public_projections WHERE projection_id = ?")
-    .get(row.projection_id) as ProjectionRow;
-}
-
 /** Reading retired projections preserves their original confirmation evidence. */
 export function listOperationalPublicProjections(packIdValue: string): OperationalPublicProjectionRecord[] {
   const packId = cleanId(packIdValue, "packId");
@@ -318,18 +138,6 @@ export function listOperationalPublicProjections(packIdValue: string): Operation
     "SELECT * FROM experience_public_projections WHERE pack_id = ? ORDER BY updated_at DESC",
   ).all(packId) as ProjectionRow[];
   return rows.map(rowRecord);
-}
-
-export function saveOperationalPublicProjection(
-  input: OperationalPublicProjectionSaveInput,
-): OperationalPublicProjectionRecord {
-  return experienceChipsRetired();
-}
-
-export function confirmOperationalPublicProjection(
-  input: OperationalPublicProjectionConfirmInput,
-): OperationalPublicProjectionRecord {
-  return experienceChipsRetired();
 }
 
 /** Fail-closed read used only by public/unlisted portable materialization. */

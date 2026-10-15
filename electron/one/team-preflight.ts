@@ -5,8 +5,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { detectRuntimes } from "../runtime/detect";
 import { pickActive, selectExactRuntime } from "../runtime/selection";
 import { selectAutoRoutedAgent, selectAutoRoutedAgentJudged } from "../agents/auto-router";
+import { restoreAgentForUse } from "../archive/auto-archive";
 import { getAgentById, listInstalledAgents } from "../mcp/registry";
 import { getDb } from "../store/db";
+import { restoredTeamSourceDigest } from "../cloud-agents/team-firm";
 import { listFirms } from "../store/firms";
 import { getChat, retitleAutoTitledChatForTask } from "../store/chats";
 import {
@@ -16,6 +18,7 @@ import {
   setCanonicalTaskStatus,
 } from "../store/tasks";
 import { hasInvocationRunReceipt } from "../store/run-events";
+import { getInvocationAdmission } from "../store/invocation-admissions";
 import { tryRecordOneDomainEvent } from "./domain-events";
 import { ensureOneGroupLocalStaff, oneOrgExecutionGuidance } from "./org";
 import { ensureOneTaskforceForPreflight, notifyOneTaskforceFromPreflight, listOneTaskforces } from "./taskforces";
@@ -125,6 +128,7 @@ export interface OneTeamPreflightDependencies {
   getGoalStatus?: (goalId: string) => string | null | undefined;
   setTaskStatus?: typeof setCanonicalTaskStatus;
   hasRunReceipt?: typeof hasInvocationRunReceipt;
+  getAdmission?: typeof getInvocationAdmission;
   /** Test-only crash seam after the durable reservation CAS. */
   afterReservation?: (proposal: OneTeamPreflightProposal) => void;
   /** Injectable resident judge for "does this genuinely need a team?" (tests). */
@@ -433,7 +437,8 @@ function candidateSnapshot(
     installedAgentId: agent.id,
     slug: agent.slug,
     installedAt: agent.installedAt,
-    packageHash: normalizePackageHash(agent.packageHash),
+    packageHash: normalizePackageHash(agent.kind === "team" && agent.assetSource === "agent-cloud"
+      ? restoredTeamSourceDigest(agent.id) ?? undefined : agent.packageHash),
     source,
   };
 }
@@ -507,10 +512,13 @@ function eligibleExplicitMember(installed: InstalledAgent, coordinatorId: string
   return installed.id !== coordinatorId
     && !installed.sourceMissingSince
     && installed.visibility !== "background"
-    && installed.visibility !== "private";
+    && installed.visibility !== "private"
+    && (installed.kind !== "team" || installed.assetSource !== "agent-cloud"
+      || restoredTeamSourceDigest(installed.id) !== null);
 }
 
 function eligibleRosterSpecialists(all: InstalledAgent[], coordinatorId: string): InstalledAgent[] {
+  // Archived (30 days unused) agents stay candidates: owner 2026-10-13 "routing use auto-restores" — the pick restores them.
   return all.filter((installed) =>
     installed.id !== coordinatorId
     && installed.kind !== "team"
@@ -581,6 +589,7 @@ function exactInstalledRoster(
   const unresolved: Array<{ agentId: string; displayName: string; reason: string }> = [];
   const seen = new Set([coordinator.id]);
   for (const agentId of requestedAgentIds) {
+    restoreAgentForUse(agentId);
     const matches = all().filter((agent) => agent.id === agentId);
     const installed = matches.length === 1 ? matches[0] : null;
     if (!installed || seen.has(installed.id) || !eligibleExplicitMember(installed, coordinator.id)) {
@@ -650,6 +659,7 @@ function exactInstalledRoster(
     // A cache miss cannot become a wordlist or embedding decision.
     const selected = selectAutoRoutedAgent(prompt, eligible, locale, { allowFallback: false, judgedOnly: true, runtimeSelection });
     if (selected) {
+      restoreAgentForUse(selected.agent.id);
       const snapshot = candidateSnapshot(selected.agent, "installed");
       candidates.push(snapshot);
       roles.push(roleFromCandidate(
@@ -956,7 +966,15 @@ function recoverReservations(deps: OneTeamPreflightDependencies): void {
         && record.reservation.ownerInstanceId !== PROCESS_INSTANCE_ID
         && !processAlive(record.reservation.ownerPid),
       );
-      if (!promptUnavailable && !abandonedReservation) return record;
+      const admission = record.reservation
+        ? (deps.getAdmission ?? getInvocationAdmission)(record.reservation.runId) : null;
+      // A live process can retain a reservation after a definite pre-start
+      // rejection. That original identity cannot start again; observing it is
+      // enough to release this reservation, without retrying the instruction.
+      const rejectedReservation = Boolean(record.reservation && admission?.status === "rejected"
+        && admission.runId === record.reservation.runId
+        && admission.chatId === record.proposal.binding.chatId);
+      if (!promptUnavailable && !abandonedReservation && !rejectedReservation) return record;
       changed = true;
       // PRD §4.30 — 여기서 지속 원장을 확인해 놓고 **결과를 버리고 있었다.** 그래서 실제로
       // 시작해 이미 비용을 쓴 실행까지 "복구 필요"로 표시됐고, 사용자가 복구를 누르면 같은
@@ -1412,7 +1430,8 @@ export async function prepareOneTeamPreflight(
   const standingStaffGuidance = oneOrgExecutionGuidance(requestedAgentIds);
   PROCESS_PROMPTS.set(proposal.proposalId, {
     original: input.userPrompt,
-    execution: standingStaffGuidance ? `${input.userPrompt}\n\n${standingStaffGuidance}` : input.userPrompt,
+    // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.one.team-preflight.execution-prompt).
+    execution: standingStaffGuidance ? `${standingStaffGuidance}\n\n${input.userPrompt}` : input.userPrompt,
     requestedAgentIds,
     requestRosterDigest,
     allowAutomaticRosterSelection,

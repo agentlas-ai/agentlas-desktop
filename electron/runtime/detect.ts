@@ -18,6 +18,7 @@ import { invalidateAntigravityModelDiscovery, probeAntigravity } from "./antigra
 import { probeKimi } from "./kimi";
 import { invalidateGrokModelDiscovery, probeGrok } from "./grok";
 import { probeCursor } from "./cursor";
+import { probeOllama } from "./ollama";
 import { probeLMStudio } from "./lmstudio";
 import { probeMLX } from "./mlx";
 import { observeManagedLocalRuntime, probeManagedLocalRuntime } from "../local-model-hub/runtime-adapter";
@@ -505,6 +506,7 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
   const kimiDisabled = runtimeProbeDisabled("kimi");
   const grokDisabled = runtimeProbeDisabled("grok");
   const cursorDisabled = runtimeProbeDisabled("cursor");
+  const ollamaDisabled = runtimeProbeDisabled("ollama");
   const lmstudioDisabled = runtimeProbeDisabled("lmstudio");
   const mlxDisabled = runtimeProbeDisabled("mlx");
   const agentlasLocalDisabled = runtimeProbeDisabled("agentlas-local");
@@ -517,6 +519,7 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
     kimiCli,
     gr,
     cursor,
+    ollama,
     lmstudio,
     mlx,
     managedLocal,
@@ -542,6 +545,7 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
     kimiDisabled ? Promise.resolve(null) : probeKimi(),
     grokDisabled ? Promise.resolve(null) : probeGrok(),
     cursorDisabled ? Promise.resolve(null) : probeCursor(),
+    ollamaDisabled ? Promise.resolve(null) : probeOllama(),
     lmstudioDisabled ? Promise.resolve(null) : probeLMStudio(),
     mlxDisabled ? Promise.resolve(null) : probeMLX(),
     agentlasLocalDisabled || observationOnly ? Promise.resolve(null) : probeManagedLocalRuntime(),
@@ -754,22 +758,12 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
       }),
     });
   }
-  const rememberedOllama = active?.kind === "ollama"
-    ? active.model
-    : recallRuntimeSelection("ollama", "ollama")?.model;
-  if (active?.kind === "ollama" || rememberedOllama) {
-    // Migration-only projection: preserve the requested identity for status/UI
-    // readback without probing or executing the user's external Ollama server.
-    list.push({
-      kind: "ollama",
-      backend: "ollama",
-      source: active?.kind === "ollama" ? active.source ?? "ollama" : "ollama",
-      version: null,
-      active: false,
-      model: rememberedOllama,
-      availableModels: rememberedOllama ? [rememberedOllama] : [],
-      ...conservativeLocalRuntimeAllocation(rememberedOllama ? [rememberedOllama] : []),
-    });
+  if (ollama && ollama.models.length > 0) {
+    const remembered = active?.kind === "ollama" ? active.model : recallRuntimeSelection("ollama", "ollama")?.model;
+    const preferred = remembered && ollama.models.includes(remembered) ? remembered : ollama.models[0] ?? null;
+    list.push({ kind: "ollama", backend: "ollama", source: "ollama", version: ollama.version,
+      active: active?.kind === "ollama", model: preferred, availableModels: ollama.models,
+      ...conservativeLocalRuntimeAllocation(ollama.models) });
   }
   // LM Studio / MLX — OpenAI 호환 로컬 서버. Ollama와 동일한 "단일 런타임 + 동적 모델 목록" 모양.
   if (lmstudio && lmstudio.models.length > 0) {
@@ -989,7 +983,6 @@ function rolePoolGates(list: RuntimeStatus[]): {
     list.find((runtime) => runtimeMatchesSelection(runtime, selection));
   return {
     isRuntimeAvailable: (selection) => {
-      if (selection.kind === "ollama") return false;
       const runtime = runtimeFor(selection);
       return Boolean(runtime) && runtime?.localObservation?.state !== "pending" && !isRuntimeCredentialUnavailable(runtime);
     },

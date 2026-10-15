@@ -1,7 +1,10 @@
+import {createNativeHistoryWorkOwner,type HistoryWorkOwner} from './one/history-work-owner';
 import { initializeOneContext } from "./one/context-platform";
 import { getOneProfile } from "./store/one-profile";
 import { configureOneSupervisorScience } from "./one/supervisor";
 import { configureMobileScienceChatClient } from "./mobile-bridge/science-chat";
+import { createScienceCapabilityCatalog, readScientificSkillCatalogMetadata, registerScienceCapabilityCatalogIpc } from "./science-host/capability-catalog";
+import { listRoutes as listScienceCapabilityAgentRoutes } from "./agents/routes";
 import { reviewScienceAnalysisPlanWithFreshness } from "agentlas-science";
 // Electron 진입점.
 // dev:  ELECTRON_START_URL = http://localhost:3100 (Next.js dev server)
@@ -38,6 +41,7 @@ import { installModelCatalogResolver, refreshRemoteCatalog } from "./runtime/mod
 import { scheduleLegacyProductSessionMove } from "./runtime/legacy-product-sessions-once";
 import { installGoogleSessionTrace } from "./browser/google-session-trace";
 import { registerOneCapabilitiesIpc } from "./capabilities/one-capabilities-ipc";
+import { registerArchiveIpc } from "./archive/archive-ipc";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -59,10 +63,15 @@ import { registerOneVaultMainIpc, closeOneVaultMain, invalidateOneVaultMainAutho
 import {createOnePersonalNativeMainEntry} from './secrets/one-personal-native-main-owner';
 import {getServer as getInstalledMcpServer} from './mcp-tools/registry';
 import {mcpServerConfigurationDigest} from './mcp-tools/prepared-transport';
-import { registerOneNativeMainComposition, currentOneNativeMainComposition } from './one/native-main-composition';
+import { registerOneNativeMainComposition, currentOneNativeMainComposition, configureOneNativeMainOwnerFactory } from './one/native-main-composition';
+import { createOneNativeMainFamilyRouter } from './one/native-family-router';
+import { registerNativeEmployeeMain } from './business/native-employee-main';
+import { registerEmployeeAgentWorkMain } from './business/employee-agent-work-main';
+import {createNativeHistorySourceOwner,type HistorySourceOwner} from './one/history-source-owner';
 import { registerOnePersonalIntegrationMainIpc } from './one/personal-integrations-main';
+import { createNativeGmailPersonalSourceOwner, type GmailPersonalSourceOwner } from './one/gmail-personal-source-owner';
 import { registerRoomDiscussionIpc } from './one/room-discussion-ipc';
-import { closeOnePersonalIntegrations, invalidateOnePersonalIntegrations } from './one/personal-integrations-runtime';
+import { closeOnePersonalIntegrations, invalidateOnePersonalIntegrations, configureOnePersonalIntegrationPolicy } from './one/personal-integrations-runtime';
 import { configureDevelopmentEffectPolicy, developmentEffectPolicyRequested, developmentEffectsSuppressed, developmentIpcBoundary, developmentRendererRequestAllowed } from "./development-effect-policy";
 import { ScienceProjectFolderSelections, validateScienceProjectFolderPath } from "agentlas-science";
 import { installDesktopScienceHost } from "./science-host";
@@ -169,7 +178,7 @@ import { planAfterQuitPrompt, planGuiQuit, QUIT_PROMPT_CHOICES, quitPromptText, 
 import { backgroundHoldActive, enterBackgroundHold, leaveBackgroundHold } from "./background-tray";
 import { decideRunAlert, fireRunAlert, getRunAlerts } from "./run-alerts";
 import { supervisorQuietRun } from "./one/supervisor-presentation";
-import { currentUiLocale, setCurrentUiLocale } from "./ui-locale";
+import { currentUiLocale, readUiLocaleCore, setCurrentUiLocale } from "./ui-locale";
 import { prepareMacRuntimeResourcesForExecution } from "./runtime/mac-resource-seal";
 import {
   issueMobileBridgePairing,
@@ -311,6 +320,7 @@ import type {
   ScienceDecisionRequest,
 } from "agentlas-science/dist/contracts/science-contract";
 import type { ProductExtensionPermission } from "../shared/product-extension";
+import { productExtensionSignedPayload } from "../shared/product-extension";
 import { toolApprovalActionId } from "../shared/tool-approval-action";
 import type { ToolApprovalDecision } from "../shared/types";
 import type { ScienceComposerStartInput, ScienceSteerInput } from "agentlas-science";
@@ -727,6 +737,12 @@ const STARTUP_PLACEHOLDER_URL = `data:text/html;charset=utf-8,${encodeURICompone
 
 let mainWindow: BrowserWindow | null = null;
 let nativePersonalEntry:ReturnType<typeof createOnePersonalNativeMainEntry>|null=null;
+let nativeBusinessEntry:ReturnType<typeof registerNativeEmployeeMain>|null=null;
+let nativeWorkEntry:ReturnType<typeof registerEmployeeAgentWorkMain>|null=null;
+let nativeMainFamilyRouter:ReturnType<typeof createOneNativeMainFamilyRouter>|null=null;
+let nativeGmailSourceOwner:GmailPersonalSourceOwner|null=null;
+let nativeHistorySourceOwner:HistorySourceOwner|null=null;
+let nativeHistoryWorkOwner:HistoryWorkOwner|null=null;
 let nativePersonalEpoch=0,nativePersonalCleanupUnknown=false;const nativePersonalShutdown=new AbortController();
 let pendingOneNotification: { taskId?: string; chatId?: string } | null = null;
 // One operates the app through the same handlers the window calls (electron/app-control).
@@ -1523,7 +1539,8 @@ function stopQuitServices(): Promise<void> {
   try { disposeAuthSessionRestoration?.(); } catch {}
   disposeAuthSessionRestoration = null;
   try { currentOneNativeMainComposition()?.invalidate('shutdown'); } catch {}
-  nativePersonalShutdown.abort();try{nativePersonalEntry?.close()}catch{nativePersonalCleanupUnknown=true}
+  nativePersonalShutdown.abort();
+  for(const cleanup of [()=>nativePersonalEntry?.close(),()=>nativeBusinessEntry?.close(),()=>nativeWorkEntry?.close(),()=>nativeMainFamilyRouter?.close(),()=>nativeGmailSourceOwner?.close(),()=>nativeHistorySourceOwner?.close(),()=>nativeHistoryWorkOwner?.close()])try{cleanup()}catch{nativePersonalCleanupUnknown=true}
   try { closeOneVaultMain(); } catch {}
   try { closeOnePersonalIntegrations(); } catch {}
   try { disposeMobileBridgeStateChange?.(); } catch {}
@@ -1720,10 +1737,12 @@ function finishQuitCleanup(options: { preserveUpdater?: boolean } = {}): Promise
     // This admitted process starts no workers or host-global maintenance.
     // Close only its local stores; ordinary cancellation remains available via IPC.
     shellReadyForWindows = false;
-    try { closeScienceStore(); } catch (error) { console.error("[science-store] close failed", error); }
-    try { closeStore(); } catch (error) { console.error("[store] close failed", error); }
-    quitCleanupDone = true;
-    quitCleanupPromise = localModelHubControl?.shutdown() ?? Promise.resolve();
+    quitCleanupPromise = (async () => {
+      try { await closeScienceStore(); } catch (error) { console.error("[science-store] close failed", error); }
+      try { closeStore(); } catch (error) { console.error("[store] close failed", error); }
+      await localModelHubControl?.shutdown();
+      quitCleanupDone = true;
+    })();
     return quitCleanupPromise;
   }
   quitCleanupPromise = (async () => {
@@ -1787,7 +1806,7 @@ function finishQuitCleanup(options: { preserveUpdater?: boolean } = {}): Promise
         chats: invocationService.activeChatIds().length, automations: automationWorkInFlight(),
       });
     }
-    try { closeScienceStore(); } catch (error) { console.error("[science-store] close failed", error); }
+    try { await closeScienceStore(); } catch (error) { console.error("[science-store] close failed", error); }
     try { closeStore(); } catch (error) { console.error("[store] close failed", error); }
     if (!options.preserveUpdater) {
       try { disposeAutoUpdater(); } catch {}
@@ -1844,7 +1863,7 @@ function forceQuitAfterContinuity(reason: string): void {
   try { closeLongRunVerifierAdmission(); } catch {}
   try { interruptLongRunVerifiers(); } catch {}
   try { runHostShutdownHooks(); } catch {}
-  try { closeScienceStore(); } catch {}
+  try { void Promise.resolve(closeScienceStore()).catch(() => {}); } catch {}
   try { closeStore(); } catch {}
   quitCleanupDone = true;
   app.exit(0);
@@ -2490,8 +2509,16 @@ app.whenReady().then(async () => {
     const requested=db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_requests'").get() && db.prepare(`SELECT 1 FROM one_supervisor_requests r JOIN one_supervisor_conversations c ON c.one_id=r.one_id AND c.chat_id=r.origin_chat_id WHERE r.one_id=? AND r.task_id=? AND json_extract(r.payload_json,'$.workerChatId')=?`).get(scope.oneId,task.id,chat.id);
     if(!personal&&!requested)throw new Error("one-context-task-source-unavailable");
   }});
+  nativeGmailSourceOwner=await createNativeGmailPersonalSourceOwner({locale:()=>currentUiLocale()==='ko'?'ko':'en'});
+  if(nativePersonalShutdown.signal.aborted||nativePersonalCleanupUnknown){nativeGmailSourceOwner.close();throw Error('gmail_personal_source_owner_unavailable')}
+  const nativeGmailPolicy=nativeGmailSourceOwner.policy();
+  nativeHistorySourceOwner=await createNativeHistorySourceOwner({locale:()=>currentUiLocale()==='ko'?'ko':'en'});
+  if(nativePersonalShutdown.signal.aborted||nativePersonalCleanupUnknown){nativeHistorySourceOwner.close();throw Error('history_native_source_owner_changed')}
+  nativeHistoryWorkOwner=await createNativeHistoryWorkOwner({source:nativeHistorySourceOwner,locale:()=>currentUiLocale()==='ko'?'ko':'en'});
+  if(nativePersonalShutdown.signal.aborted||nativePersonalCleanupUnknown){nativeHistoryWorkOwner.close();throw Error('history_work_owner_changed')}
+  configureOnePersonalIntegrationPolicy({gmail:nativeGmailPolicy,history:nativeHistoryWorkOwner.history,historyToolReference:nativeHistoryWorkOwner.toolReference,historyToolResources:nativeHistoryWorkOwner.toolResources,historyWorkTools:nativeHistoryWorkOwner.tools});
   registerIpcHandlers();
-  registerOnePersonalIntegrationMainIpc({ipc:ipcMain,assertTrustedSender:assertTrustedSitePublishIpcSender,isOwnerWindow:window=>window===mainWindow||window===getOneWindow()});
+  registerOnePersonalIntegrationMainIpc({ipc:ipcMain,assertTrustedSender:assertTrustedSitePublishIpcSender,isOwnerWindow:window=>window===mainWindow||window===getOneWindow(),gmailSourceOwner:nativeGmailSourceOwner,historyWorkOwner:nativeHistoryWorkOwner,lifetime:{ready:()=>!nativePersonalCleanupUnknown&&!nativePersonalShutdown.signal.aborted,currentEpoch:()=>nativePersonalEpoch}});
   registerRoomDiscussionIpc({ipc:ipcMain,assertTrustedSender:assertTrustedSitePublishIpcSender,isOwnerWindow:window=>window===mainWindow||window===getOneWindow()});
   registerOneVaultMainIpc({ipc:ipcMain,host:{preloadPath:path.join(__dirname,'preload.js'),
     preparePersonalPending:(window,runId)=>{if(!nativePersonalEntry||nativePersonalCleanupUnknown)throw Error('one_personal_native_entry_unavailable');return nativePersonalEntry.preparePending(window,runId)},
@@ -2506,22 +2533,39 @@ app.whenReady().then(async () => {
     });},
   }});
   // Metadata-only prior account candidates; construction/host initialization grants zero.
+  const nativeComposition=registerOneNativeMainComposition();
   const nativeSources=oneVaultMainMobileSources();if(nativeSources){
+    nativeMainFamilyRouter=createOneNativeMainFamilyRouter({runtime:()=>nativeSources.runtime()});
+    configureOneNativeMainOwnerFactory(nativeMainFamilyRouter.factory);
     nativePersonalEntry=createOnePersonalNativeMainEntry({sources:nativeSources,
       lifetime:{signal:nativePersonalShutdown.signal,ready:()=>!nativePersonalCleanupUnknown&&!nativePersonalShutdown.signal.aborted&&!!nativeSources.runtime()?.currentNativeOwner(),currentEpoch:()=>nativePersonalEpoch},
       focusedWindow:()=>getOneWindow()?.isFocused()?getOneWindow():mainWindow?.isFocused()?mainWindow:null,
       currentServer:getInstalledMcpServer,configurationDigest:mcpServerConfigurationDigest,
       // No existing signed storage record proves the installed MCP domain mapping.
       mappingOwner:null,
+      installFactory:factory=>{if(!nativeMainFamilyRouter||nativePersonalCleanupUnknown)throw Error('one_native_main_family_router_unavailable');nativeMainFamilyRouter.installPersonal(factory)},
+    });
+    nativeWorkEntry=registerEmployeeAgentWorkMain({ipc:ipcMain,sources:nativeSources,
+      assertTrustedSender:assertTrustedSitePublishIpcSender,isOwnerWindow:window=>window===mainWindow||window===getOneWindow(),
+      locale:()=>currentUiLocale()==='ko'?'ko':'en',signal:nativePersonalShutdown.signal,
+      installationGeneration:nativeComposition.installationGeneration,
+      prepareGeneration:event=>{if(nativePersonalCleanupUnknown)throw Error('one_native_main_cleanup_unknown');return nativeComposition.prepareEmployeeSharingGeneration(event)},
+    });
+    nativeBusinessEntry=registerNativeEmployeeMain({ipc:ipcMain,assertTrustedSender:assertTrustedSitePublishIpcSender,
+      isOwnerWindow:window=>window===mainWindow||window===getOneWindow(),sources:nativeSources,
+      locale:()=>currentUiLocale()==='ko'?'ko':'en',
+      signal:nativePersonalShutdown.signal,installationGeneration:nativeComposition.installationGeneration,
+      prepareGeneration:event=>{if(nativePersonalCleanupUnknown)throw Error('one_native_main_cleanup_unknown');return nativeComposition.prepareEmployeeSharingGeneration(event)},
+      installStartup:startup=>{if(!nativeMainFamilyRouter||nativePersonalCleanupUnknown)throw Error('one_native_main_family_router_unavailable');nativeMainFamilyRouter.installReport(startup);if(nativeComposition.start().state!=='ready')throw Error('one_native_business_installation_unavailable')},
     });
   }
   // Construction is inert; absent independently installed native owners remains unavailable.
-  registerOneNativeMainComposition();
-  currentOneNativeMainComposition()?.start();
+  nativeComposition.start();
   // DESKTOP_MOBILE_BRIDGE: Desktop main is the sole authority. Renderer IPC
   // can issue/revoke pairing, but never receives a persisted bearer token.
   // One's capability inventory (skills, plugins, hooks, memories, connectors) with per-item switches.
   registerOneCapabilitiesIpc(ipcMain);
+  registerArchiveIpc(ipcMain);
   ipcMain.handle("mobileBridge:status", () => mobileBridgeRuntimeStatus());
   ipcMain.handle("mobileBridge:issuePairing", () => issueMobileBridgePairing());
   ipcMain.handle("mobileBridge:listDevices", () => listMobileBridgeDevices());
@@ -2669,11 +2713,40 @@ app.whenReady().then(async () => {
       },
       assertScienceSender, client: scienceDaemonClient,
       assertScienceViewPermission: assertScienceExtensionViewPermission,
+      assertHumanComputeSender: (event, envelope) => {
+        if (isAppControlEvent(event) || !isScienceExtensionViewSender(event.sender.id) || event.sender.isDestroyed()) throw Error("science-human-compute-view-required");
+        assertScienceSender(event, envelope, "science:agent-runtime");
+        assertScienceExtensionViewPermission(event.sender.id, "science:agent-runtime");
+        const release = activeScienceExtension();
+        if (!release) throw Error("science-extension-not-active");
+        return { releaseId: createHash("sha256").update(productExtensionSignedPayload(release.manifest), "utf8").digest("hex") };
+      },
       onConnectionState: state => {
         if (state.errorCode) console.warn("[science-runtime] observation disconnected", state);
       },
     });
   }
+  registerScienceCapabilityCatalogIpc({
+    handle: (channel, listener) => ipcMain.handle(channel, listener),
+    authorize: (event, input) => {
+      if (isAppControlEvent(event) || !isScienceExtensionViewSender(event.sender.id)) throw new Error("science-capability-view-required");
+      assertScienceSender(event, input, "science:agent-runtime");
+    },
+    catalog: createScienceCapabilityCatalog({
+      skills: () => readScientificSkillCatalogMetadata(path.join(__dirname, "../plugins/agentlas-science-skills")),
+      connectors: () => getDb().prepare("SELECT id,name,name_en,catalog_id,transport,enabled FROM mcp_servers ORDER BY id").all().map((raw) => {
+        const row = raw as { id: string; name: string; name_en?: string; catalog_id?: string | null; transport: string; enabled: number };
+        return { id: row.id, name: row.name, nameEn: row.name_en, catalogId: row.catalog_id, transport: row.transport, enabled: row.enabled === 1 };
+      }),
+      agents: () => getDb().prepare("SELECT id,slug,name,builtin FROM installed_agents ORDER BY id").all() as Array<{ id: string; slug: string; name: string; builtin: number }>,
+      routes: () => listScienceCapabilityAgentRoutes().map(({ agentId, kind, source, missingSince }) => ({ agentId, kind, source, missingSince })),
+    }),
+    navigate: (route) => {
+      if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) throw new Error("science-owner-window-missing");
+      mainWindow.webContents.send("menu:navigate", route);
+      mainWindow.show(); mainWindow.focus();
+    },
+  });
   ipcMain.handle("science:shell:backToWork", (event, input: unknown) => {
     assertScienceSender(event, input);
     if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) throw new Error("science-owner-window-missing");
@@ -3097,36 +3170,67 @@ app.whenReady().then(async () => {
     const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
     return scienceStore().listSources(projectId);
   });
-  // The paper as saved, for the researcher's reader (Science sourceReaderView), and the downloaded original opened in
-  // its system viewer. Only a file under the project's papers/ folder is ever opened.
+  // Exact SourceVersion transport; older Stores must never substitute today's
+  // current version for a requested historical version.
+  function scienceSourceReaderForIpc(input: unknown) {
+    const value = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const projectId = typeof value.projectId === "string" ? value.projectId : "";
+    const sourceId = typeof value.sourceId === "string" ? value.sourceId : "";
+    if (!projectId || !sourceId) throw new Error("science-source-reader-scope-invalid");
+    const sourceVersionId = value.sourceVersionId === undefined ? undefined : value.sourceVersionId;
+    if (sourceVersionId !== undefined && (typeof sourceVersionId !== "string" || !sourceVersionId.trim())) throw new Error("science-source-version-invalid");
+    const store = scienceStore() as ReturnType<typeof scienceStore> & {
+      sourceReaderView?: (projectId: string, sourceId: string, sourceVersionId?: string) => unknown;
+    };
+    const result = typeof store.sourceReaderView === "function" ? store.sourceReaderView(projectId, sourceId, sourceVersionId as string | undefined) : null;
+    if (result === null) return { projectId, sourceId, store, view: null };
+    if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("science-source-reader-version-mismatch");
+    const view = result as unknown as Record<string, unknown>;
+    if (view.schema !== "agentlas.science.source-reader/v1" || view.sourceId !== sourceId
+      || typeof view.sourceVersionId !== "string" || !view.sourceVersionId
+      || (sourceVersionId !== undefined && view.sourceVersionId !== sourceVersionId)) throw new Error("science-source-reader-version-mismatch");
+    return { projectId, sourceId, store, view };
+  }
   ipcMain.handle("science:sources:reader", (event, input: unknown) => {
     assertScienceSender(event, input);
-    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
-    const sourceId = input && typeof input === "object" && "sourceId" in input ? String((input as { sourceId?: unknown }).sourceId ?? "") : "";
-    const store = scienceStore() as ReturnType<typeof scienceStore> & { sourceReaderView?: (projectId: string, sourceId: string) => unknown };
-    return typeof store.sourceReaderView === "function" ? store.sourceReaderView(projectId, sourceId) : null;
+    return scienceSourceReaderForIpc(input).view;
   });
   ipcMain.handle("science:sources:openOriginal", async (event, input: unknown) => {
     assertScienceSender(event, input);
-    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
-    const sourceId = input && typeof input === "object" && "sourceId" in input ? String((input as { sourceId?: unknown }).sourceId ?? "") : "";
-    const store = scienceStore() as ReturnType<typeof scienceStore> & { sourceReaderView?: (projectId: string, sourceId: string) => { original?: { path?: string } | null } | null };
-    const file = typeof store.sourceReaderView === "function" ? store.sourceReaderView(projectId, sourceId)?.original?.path : undefined;
+    const { projectId, sourceId, store, view } = scienceSourceReaderForIpc(input);
+    const original = view?.original;
+    if (!view || view.bodyState !== "hash-verified" || !original || typeof original !== "object" || Array.isArray(original)) return { ok: false };
+    const proof = original as Record<string, unknown>, hash = /^[a-f0-9]{64}$/u;
+    if (proof.sourceId !== sourceId || proof.sourceVersionId !== view.sourceVersionId
+      || typeof view.sourceContentSha256 !== "string" || !hash.test(view.sourceContentSha256)
+      || proof.sourceContentSha256 !== view.sourceContentSha256 || typeof proof.rawSha256 !== "string" || !hash.test(proof.rawSha256)
+      || typeof proof.mirrorSha256 !== "string" || !hash.test(proof.mirrorSha256) || typeof proof.path !== "string"
+      || (proof.kind !== "pdf" && proof.kind !== "html")
+      || (proof.kind === "pdf" ? proof.transformation !== "identity" || proof.rawSha256 !== proof.mirrorSha256 : proof.transformation !== "inert-html/v1")) return { ok: false };
     const folder = store.getProject(projectId)?.folderPath;
-    if (!file || !folder) return { ok: false };
-    // openPath launches whatever the file is, so a downloaded name like x.command or x.app would run. Only a regular
-    // document file whose real path (symlinks resolved) is inside the project's papers/ folder is opened: Science
-    // mirrors originals there as .pdf, .html (open-web pages; 17 of 28 in the 2026-10-05 live study) or .txt.
-    let real: string;
+    if (!folder) return { ok: false };
+    let fd: number | undefined, real: string;
     try {
-      real = fs.realpathSync(file);
-      if (!fs.statSync(real).isFile()) return { ok: false };
-      if (!real.startsWith(fs.realpathSync(path.join(folder, "papers")) + path.sep)) return { ok: false };
-    } catch {
-      return { ok: false };
-    }
-    if (![".pdf", ".html", ".txt"].includes(path.extname(real).toLowerCase())) return { ok: false };
-    const error = await shell.openPath(real);
+      const papers = path.join(folder, "papers"), papersStat = fs.lstatSync(papers);
+      if (!papersStat.isDirectory() || papersStat.isSymbolicLink()) return { ok: false };
+      real = fs.realpathSync(proof.path);
+      if (real !== path.resolve(proof.path) || !real.startsWith(fs.realpathSync(papers) + path.sep)
+        || path.extname(real).toLowerCase() !== `.${proof.kind}` || !fs.lstatSync(real).isFile()) return { ok: false };
+      fd = fs.openSync(real, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+      const before = fs.fstatSync(fd);
+      if (!before.isFile() || before.size > 64 * 1024 * 1024) return { ok: false };
+      const bytes = fs.readFileSync(fd), after = fs.fstatSync(fd), named = fs.lstatSync(real);
+      if (bytes.length !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs
+        || after.ino !== before.ino || after.dev !== before.dev || named.isSymbolicLink()
+        || named.ino !== after.ino || named.dev !== after.dev || named.size !== after.size || named.mtimeMs !== after.mtimeMs
+        || fs.realpathSync(proof.path) !== real || createHash("sha256").update(bytes).digest("hex") !== proof.mirrorSha256
+        || (proof.kind === "pdf" && !bytes.subarray(0, 5).equals(Buffer.from("%PDF-")))) return { ok: false };
+    } catch { return { ok: false }; }
+    finally { if (fd !== undefined) fs.closeSync(fd); }
+    // Re-admit after the exact file read; shell still owns the final pathname
+    // open, so this check is not an atomic OS-viewer/file-descriptor handoff.
+    assertScienceSender(event, input);
+    const error = await shell.openPath(real!);
     return { ok: !error };
   });
   ipcMain.handle("science:sources:get", (event, input: unknown) => {
@@ -4372,12 +4476,31 @@ app.whenReady().then(async () => {
   });
   // Chat rows the background service commits (daemon-hosted One, room and Goal turns) reach the same broadcast.
   try { watchExternalChatChanges(getDb); } catch (error) { console.warn("[store] external chat watch unavailable", error); }
-  setCurrentUiLocale(resolveMenuLocale());
-  applyAppMenu(resolveMenuLocale());
-  ipcMain.handle("menu:setLocale", (_e, locale: unknown) => {
+  // The saved core setting wins over the OS locale; the OS locale only seeds a first run.
+  const savedUiLocale = readUiLocaleCore();
+  if (!savedUiLocale) setCurrentUiLocale(resolveMenuLocale(), "system");
+  applyAppMenu(savedUiLocale?.locale ?? resolveMenuLocale());
+  // Registry readiness (local state only, no network); unknown is reported available.
+  void import("./harness/canonical-readiness").then((m) => m.installCanonicalReadinessProbe()).catch(() => undefined);
+  void import("./harness/settings-agent-ops").then((ops) => {
+    ops.attachLanguageProjectors(() => BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed()).map((w) => `window:${w.webContents.id}`));
+    // Port (SDK / model / app control / daemon) changes reach every window and the native menu, even with no window open.
+    ops.onLanguageChanged((event) => {
+      applyAppMenu(event.locale);
+      for (const window of BrowserWindow.getAllWindows()) {
+        if (!window.isDestroyed() && !window.webContents.isDestroyed()) window.webContents.send("settings:languageChanged", event);
+      }
+    });
+    ops.watchLanguageSetting();
+  }).catch(() => undefined);
+  ipcMain.handle("menu:setLocale", async (_e, locale: unknown, pref: unknown) => {
     const nextLocale = resolveMenuLocale(typeof locale === "string" ? locale : undefined);
-    setCurrentUiLocale(nextLocale);
-    applyAppMenu(nextLocale);
+    const before = readUiLocaleCore();
+    setCurrentUiLocale(nextLocale, pref === "ko" || pref === "en" || pref === "system" ? pref : undefined);
+    const after = readUiLocaleCore();
+    if (!before || (after && after.revision !== before.revision)) {
+      if (after) (await import("./harness/settings-agent-ops")).emitLanguageChanged(after, "renderer");
+    } else applyAppMenu(nextLocale);
   });
   shellReadyForWindows = true;
   registerOneWindowIpc();
@@ -4409,15 +4532,13 @@ app.whenReady().then(async () => {
   // A session can expire by TTL or be rejected by the server while every
   // renderer remains mounted. Switch the bookmark authority boundary and
   // account UI immediately instead of waiting for a future focus event.
+  // Losing a session is not evidence the account changed. Reconciling here
+  // revokes nothing while signed out; the bridge simply stops serving until
+  // the user signs back in. Wiping on plain TTL expiry is what left this
+  // machine with 39 of 39 paired devices revoked and zero usable.
   disposeAuthSessionInvalidation = onAuthSessionInvalidated(() => {
     nativePersonalEpoch++;
-    currentOneNativeMainComposition()?.invalidate('session');
-    invalidateOneVaultMainAuthority();
-    invalidateOnePersonalIntegrations();
-    // Losing a session is not evidence the account changed. Reconciling here
-    // revokes nothing while signed out; the bridge simply stops serving until
-    // the user signs back in. Wiping on plain TTL expiry is what left this
-    // machine with 39 of 39 paired devices revoked and zero usable.
+    for(const cleanup of [()=>currentOneNativeMainComposition()?.invalidate('session'),()=>nativeBusinessEntry?.invalidate(),()=>nativeWorkEntry?.invalidate(),()=>nativeGmailSourceOwner?.invalidate(),()=>nativeHistorySourceOwner?.invalidate(),()=>nativeHistoryWorkOwner?.invalidate(),()=>invalidateOneVaultMainAuthority(),()=>invalidateOnePersonalIntegrations()])try{cleanup()}catch{nativePersonalCleanupUnknown=true}
     reconcileMobileBridgeDevicesForAccount(userDataDir());
     failCloseActiveHubBookmarks();
     broadcastHubBookmarkSnapshot();
@@ -4619,11 +4740,11 @@ app.whenReady().then(async () => {
       if (enrollment && outcome.status !== "failed" && outcome.status !== "disabled") {
         try {
           const publicModule = await import("./invocation/native-gui-public");
-          nativePublicBridge ??= publicModule.createNativeGuiPublicBridge(policy.NATIVE_PUBLIC_EVENT_POLICY, (channel, identity) => native.revokeNativeGuiStartAvailability(originalEnrollment, channel, identity));
+          nativePublicBridge ??= publicModule.createNativeGuiPublicBridge(policy.NATIVE_PUBLIC_EVENT_POLICY, (channel, identity) => { if (native.revokeNativeGuiStartAvailability(originalEnrollment, channel, identity)) nativeChannelReattacher?.trigger("observation unavailable"); });
           const bridge = nativePublicBridge;
           nativeGuiControls ??= (await import("./invocation/native-gui-controls")).createNativeGuiControls({ authorizeRenderer: authorizeNativeGuiRenderer,
             onRecoveryChatIds: chatIds => { nativePublicBridge?.reconcileStale(chatIds); publicModule.publishNativeRecoveryActiveChats(chatIds); },
-            onUnavailable: (channel, identity) => native.revokeNativeGuiStartAvailability(originalEnrollment, channel, identity) });
+            onUnavailable: (channel, identity) => { if (native.revokeNativeGuiStartAvailability(originalEnrollment, channel, identity)) nativeChannelReattacher?.trigger("observation unavailable"); } });
           const controls = nativeGuiControls;
           const originalEnrollment = enrollment;
           // Re-attach after a close while the app runs: one attach at a time, 1 s..30 s backoff, stops when quitting.
@@ -4632,7 +4753,7 @@ app.whenReady().then(async () => {
             attach: async (nextBootId) => {
               const next = await native.attachNativeGuiDaemon(originalEnrollment, nextBootId, nativeEventSink, nativeAttachHooks);
               await controls.refresh();
-              if (!next.ready) throw new Error("native_gui_attach_not_ready");
+              if (!next.ready || !bridge.available || !controls.available) throw new Error("native_gui_attach_not_ready");
               if (bridge.available && controls.available && !native.configuredNativeGuiOwner()) initializeNativeGuiInvocationOwner(originalEnrollment, policy.NATIVE_MAIN_PREPARATION_POLICY);
             },
             currentChannel: () => native.nativeGuiEnrollmentChannel(originalEnrollment),
@@ -4640,12 +4761,18 @@ app.whenReady().then(async () => {
             log: line => console.info(line),
           });
           const reattacher = nativeChannelReattacher;
-          const nativeEventSink = (method: string, params: unknown, identity?: import("./daemon/native-session-auth").NativeAuthenticatedIdentity) => { bridge.accept(method, params, identity); controls.accept(method, params, identity); };
+          const nativeEventSink = (method: string, params: unknown, identity?: import("./daemon/native-session-auth").NativeAuthenticatedIdentity, sourceMode?: "live" | "post-denial") => { bridge.accept(method, params, identity); controls.accept(method, params, identity, sourceMode); };
           const nativeAttachHooks = {
+            onObservationReset(channel: Parameters<typeof bridge.bind>[0], identity: Parameters<typeof bridge.bind>[1], stream: string) {
+              bridge.resetObservation(channel, identity, stream); controls.resetObservation(channel, identity);
+            },
+            async onObservationReady() { await bridge.quiesce(); await controls.refresh(); return bridge.available && controls.available; },
             onAuthenticated(channel: Parameters<typeof bridge.bind>[0], identity: Parameters<typeof bridge.bind>[1]) {
               bridge.bind(channel, identity); controls.bind(channel, identity);
-              invocationService.setForeignNativeStartFence(chatId => !!native.configuredNativeGuiOwner()?.retainedChatIds().includes(chatId)
-                || controls.retainedChatIds().includes(chatId) || bridge.activeChatIds().includes(chatId));
+              invocationService.setForeignNativeStartFence(chatId => !!native.configuredNativeGuiOwner()?.activeAuthorityChatIds().includes(chatId)
+                || controls.activeAuthorityChatIds().includes(chatId) || (bridge.activeChatIds().includes(chatId)
+                  && (controls.hasOpenStoredAuthority(chatId) || !(native.configuredNativeGuiOwner()?.closedAuthorityChatIds().includes(chatId)
+                    || controls.closedAuthorityChatIds().includes(chatId)))));
               reattacher.watch(channel);
             },
           };
@@ -4657,6 +4784,7 @@ app.whenReady().then(async () => {
           if (attachment.ready && bridge.available && controls.available && !native.configuredNativeGuiOwner()) {
             initializeNativeGuiInvocationOwner(enrollment, policy.NATIVE_MAIN_PREPARATION_POLICY);
           }
+          if (!attachment.ready) reattacher.trigger("observation not ready");
           nativeAttachment = attachment;
           // General starts remain blocked until actual event/replay, approval,
           // recovery and original service cwd/noBrain observers are integrated.
@@ -4777,6 +4905,7 @@ app.whenReady().then(async () => {
         userDataPath: userDataDir(),
         appVersion: app.getVersion(),
         visualSessionControl: createAgentlasWindowVisualSessionControl(() => mainWindow),
+        nativeToolApprovals: authorize => nativeGuiControls?.mobileApprovalPort(authorize) ?? null,
       });
     } catch (err) {
       lastBridgeStartupError = err;

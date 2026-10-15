@@ -173,6 +173,11 @@ export const MOBILE_BRIDGE_METHODS = [
   "plugins.list",
   "invoke.history",
   "invoke.historyPage",
+  // Read-only context snapshot (docs/2026-10-13-native-harness/20). Appended: older apps never call it.
+  "context.inspect",
+  // Harness thread/turn projection (docs/2026-10-13-native-harness/12 F3/F5). Appended: older apps never call them.
+  "harness.read",
+  "harness.command",
   "request.status",
   "one.invoke.start",
   "invoke.start",
@@ -387,6 +392,7 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   ...MOBILE_GOAL_CONTROL_WRITE_METHODS,
   "device.revokeSelf",
   "hub.invoke",
+  "harness.command",
   "hub.install",
   "chats.rename",
   "chats.archive",
@@ -448,7 +454,6 @@ export const MOBILE_BRIDGE_EVENT_NAMES = [
   "confirm.updated",
   "browser.approval",
   "automation.updated",
-  "ontology.updated",
   "build.event",
   // 내용 없이 "무엇이 바뀌었나"만 싣는다(changeSeq·대화 id·안읽음 수). 폰은 내용을 다시 묻는다.
   "mail.updated",
@@ -1190,202 +1195,6 @@ export interface MobileBridgeAgentDto {
   };
 }
 
-export type MobileBridgeOntologyChipKind = "operational" | "taste";
-export type MobileBridgeOntologyProjectionState =
-  | "live"
-  | "offline"
-  | "stale"
-  | "conflict"
-  | "revoked";
-export type MobileBridgeOntologyVerification =
-  | "verified"
-  | "requested"
-  | "unverified"
-  | "rejected";
-export type MobileBridgeOntologyLoadoutState =
-  | "empty"
-  | "ready"
-  | "pending-approval"
-  | "applying"
-  | "offline"
-  | "stale"
-  | "conflict"
-  | "revoked";
-export type MobileBridgeOntologyAttachmentState =
-  | "attached"
-  | "update-available"
-  | "pending-approval"
-  | "scheduled-next-session"
-  | "applying"
-  | "conflict"
-  | "revoked";
-
-export type MobileBridgeTasteAxis =
-  | "composition"
-  | "color"
-  | "typography"
-  | "motion"
-  | "pacing"
-  | "density"
-  | "imagery"
-  | "editing"
-  | "spatial-rhythm";
-
-/** Server-compiled, prompt-injection-scanned Taste material for one exact base. */
-export interface MobileBridgeTasteRuntimeOverlayDto {
-  schemaVersion: 2;
-  chipId: string;
-  releaseId: string;
-  sourceContentHash: string;
-  baseAgentDefinitionId: string;
-  baseAgentReleaseId: string;
-  taskSignatures: Array<
-    | "agentlas.task.v1/design"
-    | "agentlas.task.v1/image-generation"
-    | "agentlas.task.v1/video-production"
-    | "agentlas.task.v1/presentation"
-  >;
-  rules: Array<{
-    ruleId: string;
-    axis: MobileBridgeTasteAxis;
-    polarity: "prefer" | "avoid";
-    attribute: "structure" | "saturation" | "hierarchy" | "intensity" | "tempo" | "information" | "treatment" | "rhythm" | "spacing";
-    value: string;
-    strength: 1 | 2 | 3;
-  }>;
-  estimatedTokens: number;
-  budgetTokens: 240;
-}
-
-/** Entitlement-checked, public-safe Operational material for one Desktop session. */
-export interface DesktopOperationalRuntimeOverlayDto {
-  schemaVersion: 1;
-  chipId: string;
-  releaseId: string;
-  sourceContentHash: string;
-  baseAgentDefinitionId: string;
-  baseAgentReleaseId: string;
-  taskSignatures: string[];
-  instructions: string[];
-  estimatedTokens: number;
-  budgetTokens: 560;
-}
-
-/**
- * Hub-authoritative runtime snapshot. A new Desktop chat may activate an
- * already-approved next-session loadout; no prompt, chat id, or credential is
- * sent to Hub.
- */
-export interface DesktopOntologyRuntimeSessionDto {
-  schemaVersion: 1;
-  agentDefinitionId: string;
-  agentReleaseId: string;
-  state: "ready" | "empty" | "revoked";
-  projectionRevision: string;
-  loadoutRevision: string;
-  operational: DesktopOperationalRuntimeOverlayDto | null;
-  taste: MobileBridgeTasteRuntimeOverlayDto | null;
-  generatedAt: string;
-}
-
-export interface MobileBridgeOntologyChipDto {
-  chipId: string;
-  releaseId: string;
-  kind: MobileBridgeOntologyChipKind;
-  displayName: string;
-  summary: string;
-  version: string;
-  verification: MobileBridgeOntologyVerification;
-  labels: string[];
-  /** Reproduced outcome or human pairwise-preference evidence; never a universal score. */
-  evidenceLabel: string;
-  evidenceCount: number;
-  /** Present only for verified Taste chips; never derived from display summary text. */
-  runtimeOverlay?: MobileBridgeTasteRuntimeOverlayDto;
-}
-
-export interface MobileBridgeOntologyLoadoutEntryDto {
-  chipId: string;
-  releaseId: string;
-  kind: MobileBridgeOntologyChipKind;
-  state: MobileBridgeOntologyAttachmentState;
-  availableReleaseId?: string;
-}
-
-export interface MobileBridgeOntologyLoadoutDto {
-  revision: string;
-  state: MobileBridgeOntologyLoadoutState;
-  entries: MobileBridgeOntologyLoadoutEntryDto[];
-  changedAt?: string;
-}
-
-/**
- * A Hub-authoritative loadout that has already been approved but will only
- * become active when the agent starts its next session. It is deliberately
- * separate from the current loadout and from pre-decision approvals.
- */
-export interface MobileBridgeOntologyScheduledLoadoutDto {
-  revision: string;
-  state: "pending-next-session";
-  entries: MobileBridgeOntologyLoadoutEntryDto[];
-  changedAt?: string;
-}
-
-export interface MobileBridgeOntologyRecommendationDto {
-  recommendationId: string;
-  source: string;
-  summary: string;
-  reasons: string[];
-  tradeoffs: string[];
-  proposedChips: MobileBridgeOntologyLoadoutEntryDto[];
-  requiresApproval: true;
-  createdAt: string;
-  expiresAt: string;
-}
-
-export interface MobileBridgeOntologyPendingAttachDto {
-  approvalId: string;
-  recommendationId: string;
-  expectedLoadoutRevision: string;
-  selectedChips: MobileBridgeOntologyLoadoutEntryDto[];
-  createdAt: string;
-  expiresAt: string;
-}
-
-/** Secret-free Hub projection bound to one exact immutable agent release. */
-export interface MobileBridgeOntologyProjectionDto {
-  schemaVersion: 1;
-  agentDefinitionId: string;
-  agentReleaseId: string;
-  state: MobileBridgeOntologyProjectionState;
-  generatedAt: string;
-  revision: string;
-  operationalChips: MobileBridgeOntologyChipDto[];
-  tasteChips: MobileBridgeOntologyChipDto[];
-  loadout: MobileBridgeOntologyLoadoutDto;
-  scheduledNextSession?: MobileBridgeOntologyScheduledLoadoutDto;
-  recommendations: MobileBridgeOntologyRecommendationDto[];
-  pendingAttachApprovals: MobileBridgeOntologyPendingAttachDto[];
-}
-
-export interface MobileBridgeOntologyAttachReceiptDto {
-  schemaVersion: 1;
-  approvalId: string;
-  outcome:
-    | "accepted"
-    | "denied"
-    | "already-resolved"
-    | "offline"
-    | "stale"
-    | "conflict"
-    | "revoked"
-    | "outcome-unknown";
-  loadoutState: MobileBridgeOntologyLoadoutState;
-  loadoutRevision?: string;
-  acknowledgedAt: string;
-  message: string;
-}
-
 export interface MobileBridgeFirmNodeDto {
   agentId: string;
   agentSlug: string;
@@ -1644,6 +1453,51 @@ export interface MobileBridgeChatHistoryPageDto {
   hasOlder: boolean;
   /** Pass unchanged as cursor; null when no older page exists. */
   nextCursor: string | null;
+}
+
+/**
+ * harness.read / harness.command: the paired owner's phone calls the same harness dispatcher the Desktop UI uses, for an
+ * explicit set of operations. Reads are plain requests; commands (Stop, start of a Work turn) are write methods with
+ * replay protection. Advertised by bridge.ready capability `harnessThreadV1` = { read, command }; older Desktops refuse
+ * the methods, older apps never call them.
+ */
+export const MOBILE_HARNESS_READ_OPERATIONS = ["thread.list", "thread.read", "turn.status", "effects.uncertain", "media.routes"] as const;
+export const MOBILE_HARNESS_COMMAND_OPERATIONS = ["turn.interrupt", "turn.start"] as const;
+
+/**
+ * context.inspect: the last model request of one chat, item by item. Typed projection of
+ * agentlas.context-snapshot.v1 — no run/call ids, paths or module text. `null` tokens mean
+ * "unavailable" (never 0). Advertised by bridge.ready capability `contextInspectV1`.
+ */
+export type MobileBridgeContextCategory =
+  | "system_prompt" | "tools" | "messages" | "agentlas_instructions"
+  | "attachments" | "current_input" | "tool_exchanges" | "framing";
+export type MobileBridgeContextMeasurement = "provider_reported" | "host_estimated" | "unavailable";
+export interface MobileBridgeContextSnapshotDto {
+  schemaVersion: 1;
+  status: "observed" | "no_request";
+  observedAt?: string;
+  runtimeKind?: string;
+  model?: string | null;
+  capacityTokens: number | null;
+  inputTokens: number | null;
+  inputMeasurement: MobileBridgeContextMeasurement;
+  cachedTokens?: number;
+  outputTokens?: number;
+  /** The session rolls to a new generation at this input size (80% of the window). */
+  rotationAtTokens: number | null;
+  usedRatio: number | null;
+  items: Array<{ category: MobileBridgeContextCategory; tokens: number | null; measurement: MobileBridgeContextMeasurement }>;
+  /** Provider total minus the attributed items; the native-side remainder. */
+  unattributedTokens: number | null;
+  toolsCount?: number;
+  /** Newer Desktops (notyet NH18), all optional so older apps keep reading the fields above. */
+  /** Where the window came from: the runtime's own report for that session, or the model catalog. */
+  capacitySource?: "runtime-reported" | "model-catalog";
+  /** Attributed items minus the provider total, when the host estimate is the larger one. */
+  overAttributedTokens?: number;
+  /** The whole chat so far, never mixed into the window above. */
+  sessionCumulative?: { requests: number; inputTokens: number; outputTokens: number; unmeasuredRequests: number };
 }
 
 /**
@@ -2834,8 +2688,6 @@ export interface MobileBridgeSnapshot {
   oneEcosystemSuggestions?: OneMobileEcosystemSuggestionV1[];
   /** System-only Task receipt for exact post-exchange pairing verification. */
   pairingVerificationTasks?: MobileBridgePairingTaskDto[];
-  /** Absent when the authenticated Web producer is not shipped or not proven available. */
-  ontologyChipProjections?: MobileBridgeOntologyProjectionDto[];
   /** Absent on older Desktop builds. Main remains the only profile authority. */
   oneProfile?: MobileBridgeOneProfileDto;
   /** Absent on older Desktop builds. Candidate selection is already complete in Main. */
@@ -3794,6 +3646,19 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
         ? firstError(requiredString(params, "chatId"), optionalInteger(params, "limit", 1, 200),
             params.cursor === undefined || params.cursor === null ? null : requiredString(params, "cursor", 1024))
         : "invoke.historyPage accepts only chatId, limit and cursor";
+    case "context.inspect":
+      return hasOnlyKeys(params, ["chatId"])
+        ? requiredString(params, "chatId")
+        : "context.inspect accepts only chatId";
+    case "harness.read":
+    case "harness.command": {
+      const allowed: readonly string[] = method === "harness.read" ? MOBILE_HARNESS_READ_OPERATIONS : MOBILE_HARNESS_COMMAND_OPERATIONS;
+      if (!hasOnlyKeys(params, ["operation", "args"])) return `${method} accepts only operation and args`;
+      if (typeof params.operation !== "string" || !allowed.includes(params.operation)) return `${method} operation must be one of ${allowed.join(", ")}`;
+      if (params.args !== undefined && (!params.args || typeof params.args !== "object" || Array.isArray(params.args))) return `${method} args must be an object`;
+      if (params.args !== undefined && JSON.stringify(params.args).length > 210_000) return `${method} args are too large`;
+      return null;
+    }
     case "composer.context":
       return hasOnlyKeys(params, ["chatId"])
         ? requiredString(params, "chatId")
@@ -4106,12 +3971,14 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
         )
         : "build.start accepts only goal and idempotencyKey";
     case "build.answer": {
-      if (!hasOnlyKeys(params, ["runId", "questionSetId", "answers", "idempotencyKey"])) {
+      if (!hasOnlyKeys(params, ["runId", "questionSetId", "answers", "idempotencyKey", "questionSetRevision"])) {
         return "build.answer contains unsupported fields";
       }
+      if (params.questionSetRevision !== undefined && params.questionSetRevision !== 2) return "Unsupported questionSetRevision";
       const answers = params.answers;
-      if (!Array.isArray(answers) || answers.length < 1 || answers.length > 7) {
-        return "answers must contain between 1 and 7 entries";
+      const revision2 = params.questionSetRevision === 2;
+      if (!Array.isArray(answers) || answers.length < (revision2 ? 0 : 1) || answers.length > (revision2 ? 64 : 7)) {
+        return revision2 ? "answers must contain between 0 and 64 entries" : "answers must contain between 1 and 7 entries";
       }
       const seenQuestionIds = new Set<string>();
       for (const answer of answers) {
@@ -4147,9 +4014,9 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       );
     }
     case "build.status":
-      return hasOnlyKeys(params, ["runId"])
-        ? requiredString(params, "runId", 160)
-        : "build.status accepts only runId";
+      return hasOnlyKeys(params, ["runId", "questionSetRevision"])
+        ? firstError(requiredString(params, "runId", 160), params.questionSetRevision === undefined || params.questionSetRevision === 2 ? null : "Unsupported questionSetRevision")
+        : "build.status accepts only runId and questionSetRevision";
     case "mail.threads":
       return hasOnlyKeys(params, ["view", "q", "cursor", "limit"])
         ? firstError(
@@ -4290,13 +4157,15 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
           )
         : "mail.directory.search accepts only q and skill";
     case "mail.delegate":
-      return hasOnlyKeys(params, ["threadId", "instruction", "locale"])
+      return hasOnlyKeys(params, ["threadId", "instruction", "locale", "sendMode"])
         ? firstError(
             requiredString(params, "threadId", MOBILE_BRIDGE_MAIL_LIMITS.id),
             optionalText(params, "instruction", MOBILE_BRIDGE_MAIL_LIMITS.instruction),
             validateEnum(params, "locale", ["ko", "en"]),
+            // Additive: absent (older apps) = draft only.
+            validateEnum(params, "sendMode", ["draft", "send"]),
           )
-        : "mail.delegate accepts only threadId, instruction and locale";
+        : "mail.delegate accepts only threadId, instruction, locale and sendMode";
     case "one.profile.update": {
       if (!hasOnlyKeys(params, [
         "expectedVersion",

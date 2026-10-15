@@ -15,6 +15,7 @@
  */
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
 
 const SCHEMA = "agentlas.plugin/v2";
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
@@ -39,7 +40,7 @@ const UPSTREAM_ON_MISSING = "fail-loud";
 
 /** A skill claiming outputs must say what verifies the claim (G7). */
 const OUTPUT_CLAIM_RE = /^#{1,3}\s*Outputs\b/im;
-const VERIFICATION_RE = /^#{1,3}\s*Verification\b/im;
+const VERIFICATION_RE = /^#{1,3}\s*(?:Verification|Scientific acceptance gate)\b/im;
 
 const SECRET_FILE_RE = /(^|\/)(\.env(\..*)?|.*\.pem|.*\.p12|.*credentials.*|.*secret.*)$/i;
 
@@ -61,6 +62,27 @@ function frontmatter(text) {
     if (kv) out[kv[1]] = kv[2].trim().replace(/^["']|["']$/g, "");
   }
   return out;
+}
+
+// G3 retains references in prose and code. Exempt only actual local variables
+// declared inside the same supported Bash/Nextflow fenced example.
+function skillReferenceText(text) {
+  return text.replace(/^ {0,3}(`{3,}|~{3,})(bash|sh|shell|nextflow)[^\n]*\n([\s\S]*?)^ {0,3}(?:`{3,}|~{3,})\s*$/gm, (block, fence, language, body) => {
+    const bindings = new Set();
+    const declaration = language === "nextflow" ? /^\s*val\s+([a-z][a-z0-9_]*)\b/gm : /^\s*for\s+([a-z][a-z0-9_]*)\s+in\b/gm;
+    for (const match of body.matchAll(declaration)) bindings.add(match[1]);
+    return block.replace(/\$([a-z][a-z0-9-]*)/g, (match, name) => bindings.has(name) ? "" : match);
+  });
+}
+
+// One reviewed public manual, exact immutable content only. A changed file,
+// other plugin, other path or raw key/container is still rejected by G5.
+const PUBLIC_DOCUMENTATION_HASHES = new Map([
+  ["agentlas-science-skills:skills/modal/references/secrets.md", "fa0718268752bf6d7ed2008b90b8a3adb9b6d52aeedcce1e4afd75663151b113"],
+]);
+function reviewedPublicDocumentation(slug, relative, absolute) {
+  const pin = PUBLIC_DOCUMENTATION_HASHES.get(`${slug}:${relative}`);
+  return typeof pin === "string" && crypto.createHash("sha256").update(fs.readFileSync(absolute)).digest("hex") === pin;
 }
 
 function checkPackage(dir) {
@@ -126,7 +148,7 @@ function checkPackage(dir) {
   );
   for (const rel of skillFiles) {
     const text = fs.readFileSync(path.join(dir, rel), "utf8");
-    for (const ref of text.matchAll(/\$([a-z][a-z0-9-]*)/g)) {
+    for (const ref of skillReferenceText(text).matchAll(/\$([a-z][a-z0-9-]*)/g)) {
       if (!skillNames.has(ref[1]) && !refNames.has(ref[1])) {
         fail("G3", `${rel}: $${ref[1]} does not resolve to a real skill or reference`);
       }
@@ -153,7 +175,7 @@ function checkPackage(dir) {
       else if (/[=:]/.test(k)) fail("G5", `${t.id}: envKeys carries a value (${k})`);
     }
   }
-  for (const f of files) if (SECRET_FILE_RE.test(f)) fail("G5", `credential-looking file in package: ${f}`);
+  for (const f of files) if (SECRET_FILE_RE.test(f) && !reviewedPublicDocumentation(m.slug, f, path.join(dir, f))) fail("G5", `credential-looking file in package: ${f}`);
 
   // ── G6: requires.tools capabilities exist ──────────────────
   for (const cap of m.requires?.tools || []) {

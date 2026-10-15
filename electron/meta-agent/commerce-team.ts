@@ -1,3 +1,4 @@
+import { composeDeclaredPrompt } from "../runtime/prompt-order";
 // Local meta-agent factory for Agentlas OS.
 // It materializes a domain team as a durable local Agentlas firm without using
 // a hosted web API. The generated team is plain markdown/config plus registry
@@ -148,6 +149,7 @@ function writeTeamFiles(
     files.push({ path: relative, kind, bytes: Buffer.byteLength(body, "utf8") });
   };
 
+  write("agentlas.json", "config", JSON.stringify({ schemaVersion: "1.0", entry: "agents/ceo/AGENT.md" }, null, 2));
   write("TEAM.md", "doc", teamOverview(profile, input, createdAt));
   write("README.md", "doc", teamOverview(profile, input, createdAt));
 
@@ -160,16 +162,22 @@ function writeTeamFiles(
   write(path.join(".claude", "CLAUDE.md"), "config", runtimeGuide(profile, rootPath, input, "Claude Code", createdAt));
   write("GEMINI.md", "config", runtimeGuide(profile, rootPath, input, "Gemini", createdAt));
 
+  write("agents/ceo/agentlas.json", "config", JSON.stringify({ schemaVersion: "1.0", entry: "AGENT.md" }, null, 2));
   write("agents/ceo/AGENT.md", "prompt", ceoPrompt(profile, rootPath));
   write("agents/ceo/AGENTS.md", "config", ceoRuntimeGuide(profile, rootPath, "Codex"));
   write("agents/ceo/CLAUDE.md", "config", ceoRuntimeGuide(profile, rootPath, "Claude Code"));
   write("agents/ceo/GEMINI.md", "config", ceoRuntimeGuide(profile, rootPath, "Gemini"));
   for (const role of TEAM_ROLES) {
+    write(`agents/${role.id}/agentlas.json`, "config", JSON.stringify({ schemaVersion: "1.0", entry: "AGENT.md" }, null, 2));
     write(`agents/${role.id}/AGENT.md`, "prompt", divisionPrompt(profile, role.role, role.name));
     write(`agents/${role.id}/AGENTS.md`, "config", divisionRuntimeGuide(profile, role.role, role.name, "Codex"));
     write(`agents/${role.id}/CLAUDE.md`, "config", divisionRuntimeGuide(profile, role.role, role.name, "Claude Code"));
     write(`agents/${role.id}/GEMINI.md`, "config", divisionRuntimeGuide(profile, role.role, role.name, "Gemini"));
     for (const specialist of role.specialists) {
+      const relative = `agents/${role.id}/specialists/${specialist.id}`;
+      write(`${relative}/agentlas.json`, "config", JSON.stringify({ schemaVersion: "1.0", entry: "AGENT.md" }, null, 2));
+      write(`${relative}/AGENT.md`, "prompt", specialistPrompt(profile, role.role, specialist.role, specialist.name));
+      for (const adapter of ["AGENTS.md", "CLAUDE.md", "GEMINI.md"]) write(`${relative}/${adapter}`, "config", composeDeclaredPrompt([{ id: "commerce.specialist.adapter-policy", stability: "fixed-policy", changeTriggers: ["release"], text: "Read AGENT.md in this folder with the runtime file reader before work; it is the canonical role contract." }, { id: "commerce.specialist.adapter-profile", stability: "configuration", changeTriggers: ["owner-profile"], text: `# ${specialist.name}` }]) + "\n");
       write(
         `agents/${role.id}/${specialist.id}.md`,
         "prompt",
@@ -269,7 +277,7 @@ function upsertTeamMemberAgents(rootPath: string, profile: TeamProfile, createdA
     members.set(divisionSlug, { slug: divisionSlug, localPath: divisionPath, agent: divisionAgent });
     for (const specialist of role.specialists) {
       const specialistSlug = `${divisionSlug}-${specialist.id}`;
-      const specialistPath = path.join(rootPath, "agents", role.id);
+      const specialistPath = path.join(rootPath, "agents", role.id, "specialists", specialist.id);
       const specialistAgent = upsertGeneratedAgent({
         slug: specialistSlug,
         name: specialist.name,
@@ -431,7 +439,7 @@ function teamOverview(profile: TeamProfile, input: MetaAgentTeamFactoryRequest, 
     "",
     "## What This Package Is",
     "",
-    "A portable Agentlas OS team package. Agentlas can install it as a generated firm, while Codex, Claude Code, Gemini, and other local LLM apps can read the same folder without needing the Agentlas renderer.",
+    "portable Agentlas OS team package; installs as a generated firm; Codex, Claude Code, Gemini, other local LLM apps read the same folder",
     "",
     "## Runtime Entrypoints",
     "",
@@ -443,7 +451,7 @@ function teamOverview(profile: TeamProfile, input: MetaAgentTeamFactoryRequest, 
     "",
     "## Operating Rule",
     "",
-    "This team is optimized for Agentlas OS. It may create surfaces, apps, tools, MCP plans, browser delegation steps, vault requests, and payment approvals. It must never store passwords, tokens, cookies, card numbers, CVV/CVC, or OTP values in prompts, manifests, files, logs, or approval metadata.",
+    "may create: surfaces, apps, tools, MCP plans, browser delegation steps, vault requests, payment approvals; never store passwords, tokens, cookies, card numbers, CVV/CVC, OTP in prompts, manifests, files, logs, approval metadata",
     "",
     "## Divisions",
     "",
@@ -451,102 +459,49 @@ function teamOverview(profile: TeamProfile, input: MetaAgentTeamFactoryRequest, 
   ].join("\n");
 }
 
-function runtimeGuide(
-  profile: TeamProfile,
-  rootPath: string,
-  input: MetaAgentTeamFactoryRequest,
-  runtimeName: string,
-  createdAt: string,
-): string {
-  return [
-    `# ${profile.name} - ${runtimeName} Runtime Guide`,
-    "",
-    `TEAM ROOT: ${rootPath}`,
-    `CREATED: ${createdAt}`,
-    `SOURCE SURFACE: ${input.surfaceId ?? "not linked"}`,
-    "",
-    `Use this file when ${runtimeName} opens the generated team outside Agentlas Desktop.`,
-    "",
-    "## Mission",
-    "",
-    ceoPrompt(profile, rootPath),
-    "",
-    "## Agentlas OS Compatibility Contract",
-    "",
-    "- Prefer declarative Surface Manifests, `agentlas.team.json`, and generated app/tool ledgers over freeform prose.",
-    "- If you create or update files, MCPs, provider state, or deployment artifacts, write a reversible lifecycle note and leave evidence.",
-    "- If a provider API/MCP is absent, continue through browser delegation, an alternate provider, a generated local helper, or a local fallback.",
-    "- Ask for login, signup, OTP, legal identity, CAPTCHA, and card entry only in provider pages or secure Agentlas UI.",
-    "- Store API keys and OAuth outputs through Agentlas vault or the host runtime's secret store; generated files may contain only presence/fingerprint/status.",
-    "- Mark factual and numeric claims as verified, claimed, estimated, or unverified.",
-    "",
-    "## Portable Layout",
-    "",
-    "- `agents/ceo/AGENT.md`: CEO brain.",
-    "- `agents/storefront/AGENT.md`: storefront division.",
-    "- `agents/catalog/AGENT.md`: catalog and image division.",
-    "- `agents/payments-data/AGENT.md`: payment, database, credential, and provider setup division.",
-    "- `agents/operations/AGENT.md`: order, fulfillment, support, and dashboard division.",
-    "- `agentlas.team.json`: machine-readable team manifest.",
-  ].join("\n");
-}
+/** One shared semantic core in each canonical role prompt, not repeated in adapters. */
+const COMMERCE_ROLE_CORE = `Owner/runtime authorization governs payments and all actions; no added cap/wait. Use OS manifests. Connector recovery: only for requested operations that need a missing connector; reuse existing authorized authentication first, then authorized browser/console/local/alternate paths. Supplied-receipt reports need no service setup or operational declarations. Secrets only secure UI/Vault. Label verified/claimed/estimated/unverified; prove effects. Retain files/screenshots, rollback/launch checks permanently. Return upward; Curator owns durable writes.`;
 
-function ceoRuntimeGuide(profile: TeamProfile, rootPath: string, runtimeName: string): string {
-  return [
-    `# ${profile.name} CEO - ${runtimeName}`,
-    "",
-    ceoPrompt(profile, rootPath),
-    "",
-    "Route work to the right division, keep the generated app durable, and return structured OS actions or manifest deltas whenever possible.",
-  ].join("\n");
+function runtimeGuide(profile: TeamProfile, rootPath: string, input: MetaAgentTeamFactoryRequest, runtimeName: string, createdAt: string): string {
+  return composeDeclaredPrompt([
+    { id: "commerce.adapter.reader-policy", stability: "fixed-policy", changeTriggers: ["release"], text: "Read agents/ceo/AGENT.md with the runtime file reader before work. agentlas.json declares this same canonical entry for Agentlas hosts; no second policy copy lives here.\n\nRead agentlas.team.json for roster/layout; division entries live at agents/<division>/AGENT.md and specialist entries at agents/<division>/specialists/<id>/AGENT.md. Return manifests, files, evidence and blockers to the CEO." },
+    { id: "commerce.adapter.profile", stability: "configuration", changeTriggers: ["owner-profile", "runtime"], text: `# ${profile.name} - ${runtimeName}` },
+    { id: "commerce.adapter.source", stability: "task-context", changeTriggers: ["task"], text: `team root: ${rootPath}; created: ${createdAt}; source: ${input.surfaceId ?? "not linked"}` },
+  ]);
 }
-
+function ceoRuntimeGuide(profile: TeamProfile, _rootPath: string, runtimeName: string): string {
+  return composeDeclaredPrompt([
+    { id: "commerce.ceo.adapter.reader-policy", stability: "fixed-policy", changeTriggers: ["release"], text: "Read AGENT.md in this folder with the runtime file reader before work; agentlas.json declares that canonical entry. Route typed briefs to divisions and verify their returned results." },
+    { id: "commerce.ceo.adapter.profile", stability: "configuration", changeTriggers: ["owner-profile", "runtime"], text: `# ${profile.name} CEO - ${runtimeName}` },
+  ]);
+}
 function divisionRuntimeGuide(profile: TeamProfile, role: string, name: string, runtimeName: string): string {
-  return [
-    `# ${name} - ${runtimeName}`,
-    "",
-    divisionPrompt(profile, role, name),
-    "",
-    "This wrapper exists so Codex, Claude Code, Gemini, and Agentlas importers all detect the division folder as a usable agent. Keep outputs small, typed, evidence-labeled, and safe to merge into the Agentlas OS ledger.",
-  ].join("\n");
+  return composeDeclaredPrompt([
+    { id: "commerce.division.adapter.reader-policy", stability: "fixed-policy", changeTriggers: ["release"], text: "Read AGENT.md in this folder with the runtime file reader before work; agentlas.json declares that canonical entry. Return small typed evidence/results to the CEO." },
+    { id: "commerce.division.adapter.profile", stability: "configuration", changeTriggers: ["owner-profile", "runtime"], text: `# ${name} - ${runtimeName}\n\n${role} of ${profile.name}.` },
+  ]);
 }
-
 function ceoPrompt(profile: TeamProfile, rootPath: string): string {
-  return [
-    `You are the CEO of ${profile.name}.`,
-    "",
-    `TEAM ROOT: ${rootPath}`,
-    `DOMAIN: ${profile.category}`,
-    `AUDIENCE: ${profile.audience}`,
-    "",
-    "Mission: turn a user's ecommerce intent into a running Agentlas OS operation: storefront, catalog, payment setup, database setup, Codex/image generation, order desk, and operator dashboard.",
-    "",
-    "Operating rules:",
-    "- Prefer Agentlas Surface manifests and OS actions over plain text.",
-    "- Never answer 'API/MCP is unavailable' as a dead end. Use browser delegation, provider console setup, generated local helpers, alternate providers, or a clear secure handoff.",
-    "- Ask for passwords, OTPs, legal identity confirmation, and card details only through provider or Agentlas secure UI.",
-    "- Before paid checkout, show merchant, amount/currency, recurrence, and purpose, then require explicit approval.",
-    "- Mark facts and numbers as verified, claimed, estimated, or unverified. Do not present unsourced revenue, margin, tax, or legal claims as KPI truth.",
-    "- Every file/tool/MCP/deploy mutation must be reversible and leave launch proof.",
-    "- Capture useful progress screenshots under the system temp directory when running visual tests.",
-  ].join("\n");
+  return composeDeclaredPrompt([
+    { id: "commerce.ceo.mission", stability: "fixed-policy", changeTriggers: ["release"], order: 0, text: "Deliver a running commerce operation: storefront/catalog, verified image capability, payments/database, order desk and dashboard. Assign divisions and merge checkable Surface/OS deltas." },
+    { id: "commerce.role.core", revision: 2, stability: "fixed-policy", changeTriggers: ["release"], order: 10, text: COMMERCE_ROLE_CORE },
+    { id: "commerce.ceo.receipt", stability: "fixed-policy", changeTriggers: ["release"], order: 20, text: "Payment receipts: merchant, amount/currency, recurrence and purpose." },
+    { id: "commerce.ceo.profile-root", stability: "task-context", changeTriggers: ["owner-profile", "task"], text: `CEO of ${profile.name}; root: ${rootPath}; ${profile.category}; audience: ${profile.audience}` },
+  ], "\n");
 }
-
 function divisionPrompt(profile: TeamProfile, role: string, name: string): string {
-  return [
-    `You are ${name}, the ${role} for ${profile.name}.`,
-    `Domain: ${profile.category}. Audience: ${profile.audience}.`,
-    "Return structured plans, surface deltas, files, or tool specs that the CEO can verify and operate inside Agentlas OS.",
-    "Use evidence labels and capability declarations for external calls, PII, payments, credentials, and model generation.",
-  ].join("\n");
+  return composeDeclaredPrompt([
+    { id: "commerce.division.mission", stability: "fixed-policy", changeTriggers: ["release"], order: 0, text: "Return structured plans, surface deltas, files or tool specs the CEO can verify and operate." },
+    { id: "commerce.role.core", revision: 2, stability: "fixed-policy", changeTriggers: ["release"], order: 10, text: COMMERCE_ROLE_CORE },
+    { id: "commerce.division.profile", stability: "configuration", changeTriggers: ["owner-profile"], text: `${name}: ${role} of ${profile.name}; ${profile.category}; audience: ${profile.audience}` },
+  ], "\n");
 }
-
 function specialistPrompt(profile: TeamProfile, divisionRole: string, role: string, name: string): string {
-  return [
-    `You are ${name}, ${role}, reporting to ${divisionRole} in ${profile.name}.`,
-    `Focus on ${profile.category} ecommerce execution.`,
-    "Produce small, checkable outputs. Do not invent provider state, credentials, prices, or operational facts.",
-  ].join("\n");
+  return composeDeclaredPrompt([
+    { id: "commerce.specialist.mission", stability: "fixed-policy", changeTriggers: ["release"], order: 0, text: "Return a small checkable result within your specialist scope; never invent provider state, prices or operational facts." },
+    { id: "commerce.role.core", revision: 2, stability: "fixed-policy", changeTriggers: ["release"], order: 10, text: COMMERCE_ROLE_CORE },
+    { id: "commerce.specialist.profile", stability: "configuration", changeTriggers: ["owner-profile"], text: `${name}: ${role}, reports to ${divisionRole} in ${profile.name}; ${profile.category} commerce.` },
+  ], "\n");
 }
 
 function slugify(value: string): string {

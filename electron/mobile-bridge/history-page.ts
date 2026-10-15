@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import type { MobileBridgeChatHistoryPageDto } from "../../shared/mobile-bridge";
-import { listChatMessagesPage } from "../store/chats";
-import { projectMobileBridgeHistory } from "./projector";
+import { listChatMessagesPage, listChatMessagesBeforeUiAnchor } from "../store/chats";
+import { listUiInstances } from "../harness/ui-instances";
+import { mergeInlineUiTranscript } from "../../shared/inline-ui-transcript";
+import { projectMobileBridgeHistory, type MobileBridgeHistoryConsumption } from "./projector";
 import { mobileBridgeJsonBytes, MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES } from "./sanitize";
 
 // Leave space inside the normal transport budget for cursor metadata and envelope.
@@ -34,22 +36,44 @@ function decodeCursor(chatId: string, cursor: string): HistoryCursor {
   }
 }
 
-export function readMobileBridgeHistoryPage(
+export async function readMobileBridgeHistoryPage(
   chatId: string,
   limit = 200,
   cursor?: string,
-): MobileBridgeChatHistoryPageDto {
+): Promise<MobileBridgeChatHistoryPageDto> {
   const before = cursor === undefined ? undefined : decodeCursor(chatId, cursor);
-  const page = listChatMessagesPage(chatId, limit, before);
+  const instances = await listUiInstances(chatId);
+  const virtualAnchor = before?.id.startsWith("ui-instance:");
+  if (virtualAnchor && !instances.some(instance => instance.chatId === chatId
+    && `ui-instance:${instance.instanceId}` === before!.id && instance.createdAt === before!.createdAt)) {
+    throw new TypeError("History UI cursor no longer matches this chat; reload the newest page");
+  }
+  // Closed instances retain their source metadata and can still anchor an old cursor.
+  const page = virtualAnchor
+    ? listChatMessagesBeforeUiAnchor(chatId, limit, before!)
+    : listChatMessagesPage(chatId, limit, before);
+  const isBefore = (row: { id: string; createdAt: string }) => !before
+    || row.createdAt < before.createdAt || (row.createdAt === before.createdAt && row.id < before.id);
+  const lower = page.hasOlder ? page.messages[0] : undefined;
+  const inline = mergeInlineUiTranscript(chatId, page.messages, instances.filter(instance => {
+    const row = { id: `ui-instance:${instance.instanceId}`, createdAt: instance.createdAt };
+    return isBefore(row) && (!lower || row.createdAt > lower.createdAt
+      || (row.createdAt === lower.createdAt && row.id >= lower.id));
+  }));
+  // Match SQLite's textual (timestamp,id) order, including equal-time DB/UI rows.
+  inline.history.sort((left, right) => left.createdAt < right.createdAt ? -1 : left.createdAt > right.createdAt ? 1
+    : left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+  // Housekeeping rows are walked past without being sent (NH26): paging counts and anchors on what the page consumed.
+  const consumption: MobileBridgeHistoryConsumption = { consumed: 0 };
   const messages = projectMobileBridgeHistory(
-    page.messages, limit, MOBILE_BRIDGE_HISTORY_PAGE_BYTES - CURSOR_RESERVE_BYTES, chatId,
+    inline.history, limit, MOBILE_BRIDGE_HISTORY_PAGE_BYTES - CURSOR_RESERVE_BYTES, chatId,
+    inline.fallbackByMessageId, consumption,
   );
-  if (page.messages.length && !messages.length) {
-    // Never return an empty continuation that would silently skip the oversized row.
+  if (inline.history.length && !consumption.consumed) {
     throw new RangeError("History message exceeds the mobile page budget");
   }
-  const hasOlder = page.hasOlder || messages.length < page.messages.length;
-  const oldest = messages[0];
+  const hasOlder = page.hasOlder || consumption.consumed < inline.history.length;
+  const oldest = consumption.oldest;
   const nextCursor = hasOlder && oldest
     ? Buffer.from(JSON.stringify({
         version: 1, chat: chatBinding(chatId), id: oldest.id, createdAt: oldest.createdAt,

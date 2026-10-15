@@ -27,7 +27,7 @@ let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 let _openedStoreMigrationRole: StoreMigrationRole | null = null;
 
-const SCHEMA_VERSION = 132;
+const SCHEMA_VERSION = 134;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -5078,6 +5078,10 @@ export function initStore(options: StoreInitOptions = {}): void {
       ["resource_identity", "resource_identity TEXT"],
       ["permission_scope", "permission_scope TEXT"],
       ["tool_identity", "tool_identity TEXT"],
+      // G04: optional expiry (ISO, NULL = never) and the consent revision the
+      // grant was given under. Additive; old rows read as revision 0, no expiry.
+      ["expires_at", "expires_at TEXT"],
+      ["consent_revision", "consent_revision INTEGER NOT NULL DEFAULT 0"],
     ],
   };
   /*
@@ -5297,6 +5301,10 @@ export function initStore(options: StoreInitOptions = {}): void {
       resource_identity TEXT,
       permission_scope TEXT CHECK(permission_scope IS NULL OR permission_scope IN ('read','write','full')),
       tool_identity TEXT,
+      -- G04: optional expiry (ISO, NULL = never) and the consent revision the grant was given under.
+      -- Also declared in REQUIRED_COLUMNS for installs that already have the table.
+      expires_at TEXT,
+      consent_revision INTEGER NOT NULL DEFAULT 0,
       UNIQUE(capability, pattern, scope)
     );
     CREATE INDEX IF NOT EXISTS idx_capability_grants_scope ON capability_grants(scope);
@@ -5382,6 +5390,10 @@ export function initStore(options: StoreInitOptions = {}): void {
     "UPDATE one_org_members SET unread_generation = 1 WHERE unread_count > 0 AND unread_generation = 0",
   ).run();
   addColumnIfMissing(_db, "one_taskforces", "description", "description TEXT NOT NULL DEFAULT ''");
+  // Per-connection credential references (native-harness notyet NH29): two accounts of one MCP endpoint are two rows,
+  // each naming the Vault key that holds its own value. Additive and idempotent; an empty object keeps the global key.
+  addColumnIfMissing(_db, "mcp_servers", "credential_refs_json", "credential_refs_json TEXT NOT NULL DEFAULT '{}'");
+
 
   // v105 — exact queued steering survives renderer/app restarts. The request
   // stays in the private local store; hashes and run bindings are queryable
@@ -6984,6 +6996,18 @@ export function initStore(options: StoreInitOptions = {}): void {
   // EXISTS keeps the step idempotent.
   if (userVersion < 132) {
     _db.transaction(() => { createRoomDiscussionSchema(_db!); })();
+  }
+
+  // v133: private queued Group report custody follows the original native
+  // account/store. Only the canonical owner migration runs this additive DDL.
+  if (userVersion < 133) {
+    _db.transaction(() => { addColumnIfMissing(_db!, "invocation_steers", "one_team_report_custody_json", "one_team_report_custody_json TEXT"); })();
+  }
+
+  // v134: exact-connection logout survives enablement toggles and host restarts.
+  // Followers refuse older schema; only the existing migration owner performs DDL.
+  if (userVersion < 134) {
+    _db.transaction(() => { addColumnIfMissing(_db!, "mcp_servers", "connection_epoch", "connection_epoch INTEGER NOT NULL DEFAULT 0 CHECK(connection_epoch >= 0)"); })();
   }
 
   } catch (error) {

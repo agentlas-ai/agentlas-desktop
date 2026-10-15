@@ -1,10 +1,12 @@
 import { desktopCapturer, screen, systemPreferences } from "electron";
 import { withOneSensitiveOperation } from '../secrets/sensitive-surface';
 import { checkComputerUsePermissions } from "../mac-permissions";
+import { reportSystemPermissionIssue } from "../os-permission-guidance";
 import type { ComputerUseCaptureOptions, ComputerUsePreview } from "../../shared/types";
 import { nativeInputDriverAvailable } from "./native-driver";
 
 function screenPermission(): ComputerUsePreview["screenPermission"] {
+  if (process.platform === "win32") return "unknown";
   if (process.platform !== "darwin") return "granted";
   try {
     return systemPreferences.getMediaAccessStatus("screen");
@@ -25,11 +27,13 @@ async function captureComputerUsePreviewUnlocked(
 ): Promise<ComputerUsePreview> {
   const captureMode: ComputerUsePreview["captureMode"] = options?.mode === "window" ? "window" : "screen";
   const permissions = checkComputerUsePermissions();
+  const screenStatus = screenPermission();
+  if (screenStatus === "denied" || screenStatus === "restricted") reportSystemPermissionIssue("screen", "computer-use");
   const driverAvailable = nativeInputDriverAvailable();
   const base: Omit<ComputerUsePreview, "sources" | "selectedSourceId" | "dataUrl" | "capturedAt" | "error"> = {
     platform: process.platform,
     captureMode,
-    screenPermission: screenPermission(),
+    screenPermission: screenStatus,
     accessibility: permissions.accessibility,
     observationAvailable: false,
     interactionAvailable: driverAvailable && permissions.accessibility,
@@ -38,18 +42,27 @@ async function captureComputerUsePreviewUnlocked(
   };
   try {
     const sources = await new Promise<Awaited<ReturnType<typeof desktopCapturer.getSources>>>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("desktop-capture-timeout")), 4_000);
+      let settled = false;
+      const timeout = setTimeout(() => {
+        settled = true;
+        reject(new Error("desktop-capture-timeout"));
+      }, 4_000);
       void desktopCapturer.getSources({
         types: [captureMode],
         thumbnailSize: { width: 1120, height: 700 },
         fetchWindowIcons: false,
       }).then(
         (value) => {
+          if (settled) return;
+          settled = true;
           clearTimeout(timeout);
           resolve(value);
         },
         (error) => {
+          if (settled) return;
+          settled = true;
           clearTimeout(timeout);
+          if (process.platform === "win32") reportSystemPermissionIssue("screen", "computer-use");
           reject(error);
         },
       );
@@ -104,8 +117,11 @@ async function captureComputerUsePreviewUnlocked(
     }
     const dataUrl = selected && !selected.thumbnail.isEmpty() ? selected.thumbnail.toDataURL() : null;
     if (selected && !dataUrl) error = "screen-unavailable";
+    if (selected && !dataUrl && process.platform === "win32") reportSystemPermissionIssue("screen", "computer-use");
+    if (!dataUrl && !selectionRequired && process.platform === "darwin" && screenPermission() !== "granted") reportSystemPermissionIssue("screen", "computer-use");
     return {
       ...base,
+      screenPermission: screenPermission(),
       observationAvailable: Boolean(dataUrl),
       sources: summaries,
       selectedSourceId: selected?.id ?? null,
@@ -115,6 +131,7 @@ async function captureComputerUsePreviewUnlocked(
       error: dataUrl ? null : error ?? "screen-unavailable",
     };
   } catch {
+    if (process.platform === "darwin" && ["denied", "restricted", "not-determined"].includes(screenPermission())) reportSystemPermissionIssue("screen", "computer-use");
     return {
       ...base,
       sources: [],

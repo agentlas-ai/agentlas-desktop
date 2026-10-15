@@ -1,0 +1,9 @@
+/* Geometry, scrim, modal focus and common buttons come from the existing sheet/rd contract. */
+.body { display: grid; gap: 12px; color: var(--ink); overflow-wrap: anywhere; }
+.body p { margin: 0; font-size: 13px; line-height: 1.65; }
+.hint { color: var(--muted-deep); }
+.feedback { padding: 10px 12px; border: 1px solid var(--paper-edge); border-radius: 10px; background: var(--rd-surface); }
+.actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.actions button { min-height: 44px; white-space: normal; }
+.actions button:focus-visible { outline: 2px solid var(--rd-accent-text); outline-offset: 3px; }
+@media (max-width: 440px) { .actions button { flex: 1 1 100%; } }

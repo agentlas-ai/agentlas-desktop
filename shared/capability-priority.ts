@@ -126,37 +126,26 @@ export interface AgentlasCapabilityProvider {
 
 const MAX_GUIDANCE_PROVIDERS = 16;
 
-/**
- * One system-prompt paragraph that tells the model the order. Empty when no
- * Agentlas provider is installed. Names only providers installed on this
- * machine; whether one is attached to this run is the tool list's job.
- */
-export function capabilityPriorityGuidance(providers: readonly AgentlasCapabilityProvider[]): string {
+
+/** `capability=tool` pairs for the one-line `prefer` prompt module (same selection as the guidance above). */
+export function preferredProviderPairs(providers: readonly AgentlasCapabilityProvider[]): string[] {
   const byCapability = new Map<string, string[]>();
   let count = 0;
   for (const provider of providers) {
     const capability = provider.capability.trim();
     const toolId = provider.toolId.trim();
     if (!capability || !toolId || count >= MAX_GUIDANCE_PROVIDERS) continue;
-    // An Agentlas tool that shares an outside equivalent's name (the built-in
-    // `playwright` twin of the Agentlas browser) would read as the outside one.
-    if (capabilityEquivalents(capability)?.codexServerNames.includes(toolId)) continue;
+    // Priority only matters where an outside equivalent exists (browser, computer use, …); a capability with no
+    // known competitor needs no ordering line.
+    const equivalents = capabilityEquivalents(capability);
+    if (!equivalents || equivalents.codexServerNames.includes(toolId)) continue;
     const tools = byCapability.get(capability) ?? [];
     if (tools.includes(toolId)) continue;
     tools.push(toolId);
     byCapability.set(capability, tools);
     count += 1;
   }
-  const rows = [...byCapability].map(([capability, tools]) => {
-    const outside = capabilityEquivalents(capability)?.outsideLabel;
-    return `${capability} → ${tools.join(", ")}${outside ? ` (before ${outside})` : ""}`;
-  });
-  if (rows.length === 0) return "";
-  return [
-    "Capability priority (Agentlas first): when an Agentlas tool covers a capability, use it before any equivalent from another source (this runtime's own plugins or the owner's other MCP servers).",
-    "Use the other tool only when the Agentlas one is not in your tool list for this run or fails, and then say which one you used and why.",
-    `Agentlas providers on this machine: ${rows.join("; ")}.`,
-  ].join(" ");
+  return [...byCapability].map(([capability, tools]) => `${capability}=${tools.join("|")}`);
 }
 
 /** Sort comparator: Agentlas-published first, original order otherwise (stable sort). */

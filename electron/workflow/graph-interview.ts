@@ -1,3 +1,4 @@
+import { fixedPurposePrompt, purposePrompt } from "../runtime/purpose-prompts";
 // 그래프 인터뷰 — 사람의 한 문장에서 시작해, 만들 수 있을 만큼 알아낼 때까지 **되묻는다**.
 //
 // 이 모듈은 모델을 부르지 않는다. 프롬프트를 만들고, 돌아온 텍스트를 엄격하게 읽는 두 가지만 한다.
@@ -74,139 +75,12 @@ export function startInterview(request: string): InterviewState {
 }
 
 const RULES = [
-  "You are building an automation for someone who is not a developer. You will be asked to either",
-  "ASK questions or produce a BLUEPRINT. Never produce raw graph JSON, node ids, or edges.",
-  "",
-  "Ask rather than assume. These must come from the person, never from you:",
-  "  · when it runs (a time, or 'whenever I give it a value') — never invent a time;",
-  "  · whether a step goes OUTSIDE (posting, emailing, saving a file, paying) — never downgrade to read;",
-  "  · what exactly each step should do, in enough detail that an agent can act without asking back;",
-  "  · how many times a repeat may run.",
-  "Ask about what you genuinely cannot decide. Do not ask about things you can name yourself",
-  "(a sensible automation name, a variable name, the order of obvious steps).",
-  "",
-  "If the person says they do not know, or asks you to decide (\"you pick\", \"알아서 해줘\",",
-  "\"상관없어\", \"아무거나\"), DECIDE IT YOURSELF and move on. Never ask the same thing a third time.",
-  "Deferring to you is not permission — it means take the most conservative option:",
-  "  · goes outside? → read. Nothing leaves the machine unless they said yes in their own words.",
-  "  · repeat limit? → 2, the smallest useful bound.",
-  "  · run time? → there is no safe time to pick, so offer to make it input-triggered instead",
-  "    (it then runs only when they start it) and build that if they still do not choose.",
-  "Say what you decided for them in the goal sentence, so they can see it and change it.",
-  "",
-  "If an answer does not actually answer your question, do not repeat the question as-is —",
-  "offer concrete choices instead. Never ask more than you need: prefer building with a sensible",
-  "default over a fourth round of questions about the same thing.",
-  "",
-  "Write questions the way a helpful shop assistant would: short, concrete, one thing at a time,",
-  "with examples when a choice is not obvious. Write every question, choice, name, goal, label,",
-  "and note in the PRODUCT LANGUAGE stated at the end of this prompt — even when the person",
-  "writes in another language. The person chose the product language in settings; drifting to",
-  "the input language makes the product look broken. (Their own words quoted back are fine.)",
-  "",
-  "Return ONLY compact JSON, one of these two shapes:",
-  '  {"ask":[{"id":"<stable-id>","question":"...","why":"...","choices":["...","..."]}]}',
-  `  {"blueprint":{"schema":"${BLUEPRINT_SCHEMA}","name":"...","goal":"...","trigger":{...},"steps":[...],"branches":[...],"checks":[...]}}`,
-  "",
-  "trigger is either {\"kind\":\"cron\",\"schedule\":\"daily-08:00\"} (24h, or a 5-field cron string)",
-  "or {\"kind\":\"input\",\"label\":\"<what to ask the person>\",\"varName\":\"<one word, a-z>\"}.",
-  "",
-  "steps[] entries: {\"title\":\"...\",\"instruction\":\"...\",\"effect\":\"read\"|\"mutation\",",
-  "  \"produces\":\"<one word>\",\"consumes\":[\"<one word>\"],\"role\":\"<kind of worker>\"}.",
-  "  · instruction is what the agent is told. Write it so it can act with no further questions.",
-  "  · role: what KIND of worker this step needs, in the person's language",
-  "    (\"한국어 마케팅 글쓰기\", \"web game coding\", \"data analysis\"). Add it to every",
-  "    agent/action step. Write the role, NEVER an agent name or id — the product searches",
-  "    the real catalog and fills the slot itself. A name you invent does not exist and the",
-  "    graph dies at run time. Steps that need the same kind of worker get the same role text.",
-  "    Alongside role, add roleEn: the same role faithfully translated to English. The catalog",
-  "    is English — searching with a non-English role buries the right worker (measured: the",
-  "    same query ranked its target 1st in English and 144th in Korean).",
-  "  · kind:\"code\" when the step is an EXACT computation or data-shaping that a chat model would",
-  "    get quietly wrong: number math, currency/percent, parsing HTML/CSV/JSON, spreadsheet cells,",
-  "    date arithmetic, calling a data library (e.g. yfinance). For those, add kind:\"code\", a short",
-  "    codeLang (\"python\" default, or \"js\"), and code:\"<the script>\". The script gets the upstream",
-  "    values as `vars` (a dict/object) and must set `result` to what the next step reads.",
-  "    Read consumes[] the same way. YOU write the code — the person only describes what they want.",
-  "    If the script imports anything outside the Python standard library, declare the pip names in",
-  "    packages:[\"yfinance\"] on that step — the product installs them before the run. Prefer the",
-  "    standard library when it can do the job; an undeclared import dies on the user's machine.",
-  "  · kind:\"runGraph\" when the person wants an automation they ALREADY have to run as one",
-  "    step of this one (\"then run my weekly report\"). Add graphRef:\"<id>\" chosen from the",
-  "    list of saved automations at the end of this prompt — never invent an id, and never use",
-  "    the name (names change, ids do not). If nothing in that list matches, do not guess:",
-  "    write the work as ordinary steps instead.",
-  "  · kind:\"agent\" (the default, omit it) for judgement, writing, summarizing, deciding — anything",
-  "    where being approximately right is fine. Split a step: fetch+compute in a code step, then",
-  "    judge/write in an agent step. Do not put exact math inside an agent instruction.",
-  "  · a step that reads {{x}} must list x in consumes, and some earlier step (or the input trigger)",
-  "    must declare produces:\"x\".",
-  "  · effect:\"mutation\" for anything that leaves the machine or changes a file.",
-  "  · uses: [{\"capability\":\"<from the list below>\",\"provider\":\"<id>\"|null}] — the outside",
-  "    services this step needs. Pick the capability from the closed list; if the person named a",
-  "    service, put its id in provider, otherwise leave provider null and it will be asked later.",
-  "    A step that only writes text needs no `uses` at all.",
-  "  · Never invent a capability or provider id. If what they want is not in the list, say so",
-  "    in the step instruction and leave `uses` out rather than inventing one.",
-  "  · Do NOT ask whether an account is already connected, and do not mention API keys, tokens,",
-  "    logins, or authentication. The product checks connections itself and asks separately.",
-  "    Ask only WHICH service, and only when it genuinely changes what gets built.",
-  "",
-  "branches[] entries (optional): {\"afterStep\":<0-based>,\"var\":\"<one word>\",",
-  "  \"op\":\"contains|truthy|falsy|eq|ne|gt|lt\",\"value\":\"...\",",
-  "  \"yesStep\":<index>,\"noStep\":<index>,",
-  "  \"repeatStep\":<index>,\"repeatOn\":\"yes\"|\"no\",\"maxRepeats\":<1-20>}.",
-  "  · repeatStep goes BACK to an earlier step. It REQUIRES repeatOn and maxRepeats.",
-  "",
-  "checks[] (REQUIRED whenever a branch repeats, and whenever a step that changes things",
-  "  outside sends out a value an earlier step computed — an unattended run must not ship",
-  "  an empty or invented result):",
-  "  {\"afterStep\":<0-based>,\"subject\":\"<a value some step produces>\",",
-  "   \"criteria\":\"<one-line summary of what passing means>\",\"produces\":\"<one word>\",",
-  "   \"items\":[{\"text\":\"<atomic, checkable>\",\"kind\":\"must\"|\"mustNot\"}]}",
-  "  · A check is a SEPARATE step that judges the result against the criteria and produces",
-  "    \"pass\" or \"fail\". A repeat must branch on that verdict — never on words inside the",
-  "    result itself. A step that grades its own output is not a check.",
-  "  · So: to repeat until good enough, add a check after the step, then branch on",
-  "    {\"var\":\"<the check's produces>\",\"op\":\"eq\",\"value\":\"fail\",\"repeatOn\":\"yes\",...}.",
-  "  · YOU propose the checklist (items): 2-5 \"must\" items (what must exist in the result)",
-  "    plus 1-3 \"mustNot\" items (common failure modes for THIS task: invented numbers,",
-  "    placeholder text, copying the input verbatim, missing the asked comparison...).",
-  "    Write items that are atomic and checkable — 'The CSV has a numeric price column',",
-  "    not 'The data looks good'. Vague items produce noisy judging.",
-  "    The person will see and can edit every item before saving — propose, don't ask.",
-  "  · A factual item (\"the price matches the real value\") cannot be judged from the result",
-  "    alone — the judge would guess. Split it: add a read step BEFORE the check that re-fetches",
-  "    the fact (kind:\"code\" or a read step with uses) into its own produces, then set the",
-  "    check's evidence:\"<that name>\". The check then compares result against evidence.",
-  "    Only ask when the goal itself is too vague to know what the result even is.",
-  "  · MUTATION RESULT — verify it landed, not that the model said so (REQUIRED for every",
-  "    effect:\"mutation\" step that acts on the outside world — posting, sending, saving,",
-  "    updating). A run that writes \"posted 3 replies\" has not posted anything; only an",
-  "    INDEPENDENT observation of the outside world proves it. So the mutation step must",
-  "    produce the identifiers needed to observe its result (the posted URLs/ids, the file",
-  "    path, the updated row id) — put that in its produces. Then add, AFTER it, a read step",
-  "    (effect:\"read\") that RE-OBSERVES the result from the outside — a fresh look, not the",
-  "    mutation's own report: open each returned URL, re-read the saved file, re-fetch the",
-  "    updated row — into its own produces. Then add a check whose subject is the mutation's",
-  "    result and whose evidence is that observation, with must-items like 'each posted item",
-  "    exists at its URL with the expected author and text' / 'the file exists and contains",
-  "    the expected fields' / 'the row was appended with the submitted values'. If the outside",
-  "    result genuinely cannot be re-observed, say so in the step instruction rather than",
-  "    skipping the check.",
-  "  · A value a branch tests for emptiness (op truthy/falsy) MUST NOT also carry a check",
-  "    that demands it be non-empty. Threshold watchers are the common case: on a day the",
-  "    threshold is not crossed the value is correctly empty, and a check demanding content",
-  "    fails the run on exactly the days nothing was supposed to happen. Put that check",
-  "    INSIDE the branch that has the value, or check the comparison step's own report",
-  "    (both rates read, threshold applied) instead of the alert text.",
-  "  · repeatOn says which side loops. Write the condition the way the person said it and",
-  "    put the loop on the side they meant — do not flip either one to make it fit.",
-  "",
-  "Ask at most 3 questions per turn. Never repeat a question id you already asked.",
-  "",
-  `capability must be one of: ${CAPABILITIES.join(", ")}`,
-  `provider must be one of: ${PROVIDER_CATALOG.map((p) => p.id).join(", ")}`,
+  "interview: non-developer; ask missing run time, external effect, actionable detail or repeat intent only; never expose graph ids/edges or ask keys/login/name/obvious order" ,
+  "delegation: owner defers => decide and explain in goal; retain authorized outside effects and repeat/time intent; never impose read-only or new limits; unspecified time may use input trigger" ,
+  "questions: concise choices, at most 3; no repeated ids; after 3 unanswered rounds choose a disclosed default within owner authority" ,
+  "steps: actionable; roles describe worker kind in product language, roleEn English; exact math/parsing/dates use code (vars -> result), not agent arithmetic; actual saved graph/provider ids only" ,
+  "proof: repeated/computed outside effects need atomic checks; mutation produces ids, later independent read reobserves into evidence; not observable => disclose; branch on check pass/fail, normal empty branches need no nonempty test" ,
+  "output: supplied ASK|BLUEPRINT schema; product language for all visible text" ,
 ].join("\n");
 
 /** 이번 턴에 모델에게 보낼 지시. 지금까지 알아낸 것을 전부 함께 준다. */
@@ -214,13 +88,7 @@ export function buildInterviewPrompt(state: InterviewState, locale: "ko" | "en" 
   const known = state.answers.length
     ? state.answers.map((a) => `Q(${a.questionId}): ${a.question}\nA: ${a.answer}`).join("\n\n")
     : "(nothing yet)";
-  const lines = [
-    RULES,
-    "",
-    `What the person asked for:\n${state.request}`,
-    "",
-    `What they have already told you:\n${known}`,
-  ];
+  const lines: string[] = [`What they have already told you:\n${known}`];
   if (state.asked.length) {
     lines.push("", `Question ids already asked (do not repeat): ${state.asked.join(", ")}`);
   }
@@ -228,36 +96,21 @@ export function buildInterviewPrompt(state: InterviewState, locale: "ko" | "en" 
   //   한국어 질문이 나와 화면 절반이 뒤섞였다).
   // ★부를 수 있는 자동화 목록을 **그 순간 실물로** 싣는다. 이것이 없으면 모델은
   //   id를 지어내고, 그 그래프는 실행 때 죽는다(에이전트 슬롯과 같은 규율).
-  if (state.knownGraphs?.length) {
-    lines.push(
-      "",
-      "Saved automations you may call with kind:\"runGraph\" (use the id exactly):",
-      ...state.knownGraphs.slice(0, 40).map((g) => `  ${g.id} — ${g.name}`),
-    );
-  }
-  lines.push("", `PRODUCT LANGUAGE: ${locale === "ko" ? "Korean" : "English"}. Every user-facing string you emit is in this language.`);
+  const graphCatalog = state.knownGraphs?.length
+    ? ["Saved automations (kind:\"runGraph\", exact id):", ...state.knownGraphs.slice(0, 40).map(g => `  ${g.id} — ${g.name}`)].join("\n") : "";
   // ★지난 시도가 왜 지어지지 못했는지를 **모델 앞에 놓는다**. 커널이 지난 실패를 다음
   //   실행 지시에 붙이는 것과 같은 규율이다 — 없으면 같은 실수를 그대로 반복한다.
   const attempts = state.attempts ?? [];
   if (attempts.length) {
     lines.push(
       "",
-      "Your previous blueprint could NOT be built. Fix exactly these problems and return a",
-      "corrected blueprint. EVERY fix below is ADDITIVE: add the missing top-level checks[] entry",
-      "(each problem message gives you the exact entry to add). Keep EVERY step, the trigger, and",
-      "every produces/consumes exactly as they are — never delete, merge, or shrink a step to make",
-      "a problem disappear: that removes what the person asked for and just triggers a different",
-      "error. More steps and more checks is the right direction, never fewer. Do not repeat the",
-      "same mistake, and do not ask the person — these are format problems on your side,",
-      "not missing information:",
+      "Your previous blueprint could NOT be built; return a corrected blueprint fixing exactly these (format problems on your side, not missing information; do not ask the person):",
+      "fixes are ADDITIVE: add the missing top-level checks[] entry each problem names; keep EVERY step, the trigger, every produces/consumes; more steps and checks, never fewer",
       ...attempts.flatMap((a) => a.problems.map((problem) => `  · ${problem}`)),
       "",
       // ★가장 위험한 '고치는 방법'을 미리 막는다. 검증 오류는 그 단계를 지우면 사라지지만,
       //   그러면 사람이 부탁한 일이 조용히 없어진 채로 검증을 통과한다.
-      "DO NOT fix a problem by deleting the step it complains about, by dropping the outside",
-      "action the person asked for, or by changing when the automation starts. Keep everything",
-      "the person asked for and fix only the format. If a problem seems unfixable, keep the",
-      "step and return ask[] instead.",
+      "DO NOT fix a problem by deleting the step it complains about, dropping the outside action the person asked for, or changing when it starts; unfixable => keep the step and return ask[]",
     );
     const last = attempts[attempts.length - 1];
     if (typeof last.stepCount === "number") {
@@ -271,11 +124,16 @@ export function buildInterviewPrompt(state: InterviewState, locale: "ko" | "en" 
   if (state.round >= MAX_INTERVIEW_ROUNDS - 1) {
     lines.push(
       "",
-      "This is the last round. Ask only what makes the automation impossible to build without it;",
-      "otherwise return the blueprint.",
+      "last round: ask only what makes it impossible to build; otherwise return the blueprint",
     );
   }
-  return lines.join("\n");
+  return purposePrompt([
+    { id: "purpose.graph.interview.policy", revision: 2, stability: "fixed-policy", changeTriggers: ["release"], text: RULES },
+    { id: "purpose.graph.interview.locale", revision: 1, stability: "configuration", changeTriggers: ["locale"], text: `PRODUCT LANGUAGE: ${locale === "ko" ? "Korean" : "English"}` },
+    { id: "purpose.graph.interview.request", revision: 1, stability: "task-context", changeTriggers: ["owner-input", "task"], text: `What the person asked for:\n${state.request}` },
+    { id: "purpose.graph.interview.catalog", revision: 1, stability: "task-context", changeTriggers: ["capability-inventory"], text: graphCatalog },
+    { id: "purpose.graph.interview.answers-repair", revision: 1, stability: "turn-context", changeTriggers: ["owner-input", "checkpoint"], text: lines.join("\n") },
+  ]);
 }
 
 export type InterviewParse =

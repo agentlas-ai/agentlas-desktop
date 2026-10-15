@@ -6,7 +6,7 @@
 // 질문받은 사실조차 모른 채 대화가 멎는다(모바일에서 실제로 그랬다: sanitize 가
 // stripAgentControlBlocks 로 펜스를 통째 제거했고, 텔레그램만 자기 평문화기를 갖고
 // 있었다). 표면마다 손으로 다시 짜면 한 표면씩 빠진다 — 그래서 한 벌이 소유한다.
-import { AGENT_ASK_OPEN, AGENT_ASK_CLOSE } from "./agent-control-blocks";
+import { AGENT_ASK_OPEN, AGENT_ASK_CLOSE, repairAskOpenMarkers } from "./agent-control-blocks";
 import { renderPlainAskBody } from "./ask-plaintext";
 import { isUnfilledQuestionTemplate } from "./types";
 import { mapIntellectUiProse } from "./intellect-ui";
@@ -25,7 +25,7 @@ export interface ExtractedAskFences {
   questions: AgentlasAskQuestion[];
 }
 
-const MAX_QUESTIONS = 8;
+const MAX_QUESTIONS = 64;
 const MAX_OPTIONS = 8;
 
 /** Parse one fence body without granting it approval or execution authority. */
@@ -79,7 +79,8 @@ export function extractAskFences(text: unknown): ExtractedAskFences {
   return { text: visible, questions };
 }
 
-function extractProseAskFences(text: string): ExtractedAskFences {
+function extractProseAskFences(input: string): ExtractedAskFences {
+  const text = typeof input === "string" ? repairAskOpenMarkers(input) : input;
   if (typeof text !== "string" || !text.includes(AGENT_ASK_OPEN)) {
     return { text: typeof text === "string" ? text : "", questions: [] };
   }
@@ -131,7 +132,8 @@ export function flattenAskFences(text: string, replyLocale: "ko" | "en"): string
   return mapIntellectUiProse(text, prose => flattenProseAskFences(prose, replyLocale));
 }
 
-function flattenProseAskFences(text: string, replyLocale: "ko" | "en"): string {
+function flattenProseAskFences(input: string, replyLocale: "ko" | "en"): string {
+  const text = repairAskOpenMarkers(input);
   if (!text.includes(AGENT_ASK_OPEN)) return text;
   let result = "";
   let rest = text;

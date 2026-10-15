@@ -27,7 +27,7 @@ import {
   declaredDesktopControlServers,
 } from "./codex-desktop-surface";
 import { realCodexHome, type CodexProductHomeOptions } from "./codex-product-home";
-import type { CapabilityItem, CapabilitySelection } from "../capabilities/one-capabilities";
+import { skillFilesUnder, type CapabilityItem, type CapabilitySelection } from "../capabilities/one-capabilities";
 
 export interface CodexPersonalContextInput {
   /** What this run may use (selectionFor(agentId)); absent means nothing personal. */
@@ -99,10 +99,19 @@ export function codexPersonalContextArgs(input: CodexPersonalContextInput = {}):
   // Skills: every Codex skill that is switched off, in each root this run's Codex will actually scan.
   const scanned = [path.join(home, ".agents", "skills") + path.sep];
   if (codexHome === realCodexHome(env) || personal?.skills) scanned.push(path.join(realCodexHome(env), "skills") + path.sep);
-  const disabledSkills = codexItems(selection, "skill").filter((item) => !item.enabled && scanned.some((root) => item.path.startsWith(root)));
-  // With no selection at all (a caller outside the capability model) fall back to disabling everything found.
+  // Every SKILL.md actually present in those roots is off unless the selection switched that exact file on. The
+  // capability inventory alone left gaps (scratch-named or deep folders, same-named skills in two roots stored
+  // once, no selection at all), and each gap put the person's skills into product runs' <skills_instructions>.
+  // Compare by real path: the run's home mirror links the person's skills folder, so Codex sees the mirror path
+  // while the switch was recorded on the real one. The emitted path is the one Codex itself discovers.
+  const real = (file: string): string => { try { return fs.realpathSync(file); } catch { return file; } };
+  const enabledSkillPaths = new Set(codexItems(selection, "skill").filter((item) => item.enabled).map((item) => real(item.path)));
+  const present = new Set<string>();
+  for (const root of scanned) for (const file of skillFilesUnder(root.slice(0, -path.sep.length))) present.add(file);
+  for (const item of codexItems(selection, "skill")) if (!item.enabled && scanned.some((root) => item.path.startsWith(root))) present.add(item.path);
+  const disabledSkills = [...present].filter((file) => !enabledSkillPaths.has(real(file))).sort();
   if (disabledSkills.length > 0) {
-    args.push("-c", `skills.config=[${disabledSkills.map((item) => `{path=${JSON.stringify(item.path)},enabled=false}`).join(",")}]`);
+    args.push("-c", `skills.config=[${disabledSkills.map((file) => `{path=${JSON.stringify(file)},enabled=false}`).join(",")}]`);
   }
 
   // Plugins: with none switched on (every non-One run, and One before the person picks any), the whole plugin

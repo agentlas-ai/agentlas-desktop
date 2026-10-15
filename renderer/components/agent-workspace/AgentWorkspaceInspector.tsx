@@ -15,7 +15,7 @@ import styles from "./AgentWorkspace.module.css";
 import { Select } from "@/components/Select";
 
 function canAssignRuntime(runtime: RuntimeStatus): boolean {
-  return runtime.kind !== "ollama" && runtimeSupportsAgentOverride(runtime);
+  return runtimeSupportsAgentOverride(runtime);
 }
 
 export function AgentWorkspaceInspector({ agent, name, locale, snapshot, firm, org, binding, runtimes, overrides, onClose, onRename, onRemove, onOverridesChange, onNotice }: {

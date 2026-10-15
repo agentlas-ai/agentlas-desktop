@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
+import { runtimeFailureBlocksNextAutomaticTurn } from '../shared/runtime-turn-admission';
 
 export type HostJson = null | boolean | number | string | readonly HostJson[] | { readonly [key: string]: HostJson };
 
@@ -196,6 +197,7 @@ export function createHostActionLoop(options: HostActionLoopOptions): Readonly<{
     const advisories: { step: number; reason: HostLoopReason | 'model_blocked'; detail?: string }[] = [];
     const seenIds = new Set<string>();
     const seenInputs = new Set<string>();
+    const uncertainInputs = new Set<string>();
     const controller = new AbortController();
     const deadline = performance.now() + maxDurationMs;
     let deadlineExpired = false;
@@ -257,7 +259,8 @@ export function createHostActionLoop(options: HostActionLoopOptions): Readonly<{
           const callInput = proposal.input as HostJson;
           if (!matches(capability.inputSchema, callInput)) throw new LoopFailure('invalid_input');
           const fingerprint = createHash('sha256').update(canonical([capability.id, callInput])).digest('hex');
-          if (seenIds.has(proposal.callId) || (capability.replayPolicy === 'call-id-and-input' && seenInputs.has(fingerprint))) throw new LoopFailure('replay');
+          if (seenIds.has(proposal.callId) || uncertainInputs.has(fingerprint)
+            || (capability.replayPolicy === 'call-id-and-input' && seenInputs.has(fingerprint))) throw new LoopFailure('replay');
           seenIds.add(proposal.callId);
           seenInputs.add(fingerprint);
           const base = { step, callId: proposal.callId, capabilityId: capability.id, input: callInput };
@@ -278,12 +281,18 @@ export function createHostActionLoop(options: HostActionLoopOptions): Readonly<{
           } catch (error) {
             const reason = error instanceof LoopFailure ? error.reason : 'provider_failed';
             const invalidated = ['scope_changed', 'aborted', 'deadline'].includes(reason);
-            if (dispatched) receipts.push(Object.freeze({ ...base, status: invalidated ? 'invalidated' : 'error', reason }));
+            if (dispatched) {
+              // Even a new call ID cannot blindly repeat an action whose
+              // acknowledgement was lost. Other authorized actions can proceed.
+              uncertainInputs.add(fingerprint);
+              receipts.push(Object.freeze({ ...base, status: invalidated ? 'invalidated' : 'error', reason }));
+            }
             throw error;
           }
         } catch (error) {
           const reason = error instanceof LoopFailure ? error.reason : 'invalid_proposal';
-          if (['aborted', 'scope_changed', 'deadline'].includes(reason) || noReplayReason(reason)) throw error;
+          if (['aborted', 'scope_changed', 'deadline'].includes(reason)
+            || runtimeFailureBlocksNextAutomaticTurn({ providerCode: reason })) throw error;
           advisories.push(Object.freeze({ step, reason, detail: 'Choose another authorized independent action. An error receipt does not authorize replay of that action.' }));
         }
       }

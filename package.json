@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "1.3.40",
+  "version": "1.3.43",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Antigravity 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -15,17 +15,19 @@
     "minimumSourceAppVersion": "0.7.0",
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
-    "targetSchemaVersion": 132,
-    "bundledRuntimeVersion": "1.2.61"
+    "targetSchemaVersion": 134,
+    "bundledRuntimeVersion": "1.2.63"
   },
   "agentlasBundledRuntimeSource": {
     "repository": "https://github.com/agentlas-ai/Agentlas-OS.git",
-    "ref": "v1.2.61",
-    "commit": "dd3cd3ad12a821fe2afe1ba888078459f26fb82e",
-    "assetName": "hephaestus-runtime-v1.2.61.tar.gz",
-    "assetSha256": "3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e"
+    "ref": "v1.2.63",
+    "commit": "70b53f0714865617ca5a4947fbd8c113078d572f",
+    "assetName": "hephaestus-runtime-v1.2.63.tar.gz",
+    "assetSha256": "16589f4d43e98c5bdd15e8c6f01acd62174f55cad6a3507fe21464bc4b58187e"
   },
   "scripts": {
+    "test:science-capability-catalog": "cross-env ELECTRON_RUN_AS_NODE=1 electron scripts/science-capability-catalog-contract.cjs",
+    "test:science-specialist-memory-boundary": "electron scripts/science-specialist-memory-boundary-contract.cjs",
     "test:work-20-step-journey": "node scripts/qa-work-20-step-journey.cjs",
     "test:work-agent-screen-rail": "node scripts/qa-work-agent-screen-rail.cjs",
     "test:work-capture-evidence": "node scripts/qa-work-capture-evidence.cjs",
@@ -73,7 +75,7 @@
     "e2e:smoke": "node scripts/e2e-smoke.mjs",
     "package:mac": "npm run ensure:engine && bash scripts/package-mac.sh",
     "install:mac:stable": "bash scripts/install-stable-mac.sh",
-    "dist:mac:unsigned": "bash scripts/package-mac.sh --clean-local-output && npm run ensure:engine && npm run build && npm run fetch:python && npm run fetch:node && npm run fetch:browser && AGENTLAS_LOCAL_CANDIDATE=1 electron-builder --mac --dir --publish never --config electron-builder.mac-local.yml && node scripts/verify-local-mac-candidate.mjs",
+    "dist:mac:unsigned": "bash scripts/clean-local-mac-output.sh && npm run ensure:engine && npm run build && npm run fetch:python && npm run fetch:node && npm run fetch:browser && AGENTLAS_LOCAL_CANDIDATE=1 electron-builder --mac --dir --publish never --config electron-builder.mac-local.yml && node scripts/verify-local-mac-candidate.mjs",
     "dist:win": "npm run ensure:engine && npm run build && npm run fetch:python && npm run fetch:node && npm run fetch:browser && electron-builder --win",
     "dist:linux": "npm run ensure:engine && npm run build && npm run fetch:python && npm run fetch:browser && electron-builder --linux",
     "release:mac:verify": "node scripts/verify-mac-release.mjs --write-env",
@@ -263,6 +265,7 @@
     "test:one-bubble-width": "node scripts/local/one-bubble-fits-its-text-contract.cjs",
     "test:ask-card-label-truth": "node scripts/local/ask-card-label-tells-the-truth-contract.cjs",
     "test:one-question-action-bar": "node scripts/test-one-question-action-bar.cjs",
+    "test:one-committed-answer-resumes-on-open": "node scripts/test-one-committed-answer-resumes-on-open.cjs",
     "qa:one-question-action-bar": "node scripts/qa-run.cjs -- scripts/qa-one-question-action-bar-electron.cjs",
     "test:question-pending-past-host-bubble": "electron scripts/test-question-pending-past-host-bubble.cjs",
     "test:gates-report-failure": "node scripts/local/electron-gates-report-failure-contract.cjs",
@@ -274,6 +277,8 @@
     "test:composer-event-sync": "node scripts/composer-event-sync-contract.mjs",
     "test:daemon-app-scope": "node scripts/daemon-app-scope-contract.cjs",
     "test:daemon-science-headless": "tsc -p electron/tsconfig.json && node scripts/test-daemon-science-headless.cjs",
+    "test:science-compute-observation-scope": "node scripts/science-compute-observation-scope-contract.cjs",
+    "test:science-human-compute-transport": "node scripts/science-human-compute-transport-contract.cjs",
     "test:experience-promotion": "node scripts/experience-promotion-contract.cjs",
     "test:loadout-editor": "node scripts/loadout-editor-contract.cjs",
     "test:mac-cookie-reencryption": "node scripts/mac-cookie-reencryption-contract.cjs",

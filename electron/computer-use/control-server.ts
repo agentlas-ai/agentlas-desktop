@@ -407,7 +407,7 @@ async function runAction(body: Record<string, unknown>): Promise<NativeInputResu
     }
     return { ok: false, error: "invalid-arguments", message: "Computer Use action arguments were rejected." };
   }
-  let lease: {checkpoint():Promise<void>;release():void}|undefined;
+  let lease: {signal?:AbortSignal;checkpoint():Promise<void>;release():void}|undefined;
   let actionTarget:import("../one/context-lease").OneOsActionTarget|undefined;
   try {
     if(action!=="status" && action!=="listApps") {
@@ -423,7 +423,7 @@ async function runAction(body: Record<string, unknown>): Promise<NativeInputResu
       } else if(broker)lease=broker.acquireLegacyAction();
       await lease?.checkpoint();
       if(appName && action!=="focusApp" && (body.oneOsExecution===undefined || actionTarget?.allowFocus)) {
-        const focused=await invokeNativeInputDriver({action:"focusApp",app:actionTarget?.resolvedPid?`pid:${actionTarget.resolvedPid}`:appName,...(actionTarget?{windowId:actionTarget.resolvedWindowId,processStartMs:actionTarget.resolvedProcessStartMs}:{})});
+        const focused=await invokeNativeInputDriver({action:"focusApp",app:actionTarget?.resolvedPid?`pid:${actionTarget.resolvedPid}`:appName,...(actionTarget?{windowId:actionTarget.resolvedWindowId,processStartMs:actionTarget.resolvedProcessStartMs}:{})},undefined,lease?.signal);
         if(actionTarget)actionTarget.allowFocus=false;
         await lease?.checkpoint();recordAudit("focusApp",focused);if(!focused.ok)return focused;
         if(typeof focused.pid==="number"&&Number.isInteger(focused.pid)&&focused.pid>0)targetPid=focused.pid;
@@ -434,7 +434,7 @@ async function runAction(body: Record<string, unknown>): Promise<NativeInputResu
     await lease?.checkpoint();
     if(action!=="status"&&action!=="listApps"&&action!=="move")observations.clear();
     if(request.action==="focusApp" && actionTarget)request={...request,app:`pid:${actionTarget.resolvedPid}`,windowId:actionTarget.resolvedWindowId,processStartMs:actionTarget.resolvedProcessStartMs};
-    const result=await invokeNativeInputDriver(request);
+    const result=await invokeNativeInputDriver(request,undefined,lease?.signal);
     if(actionTarget?.allowFocus){actionTarget.allowFocus=false;await lease?.checkpoint();}
     // Revocation cannot persist audit/history after native work returns.
     if(body.oneOsExecution!==undefined)oneOsLeaseBroker().assertExecutionCurrent(body.oneOsExecution);

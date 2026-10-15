@@ -6,8 +6,8 @@
 //   <userData>/site-projects/<projectId>/screens/<screenId>.html
 // project.json is the source of truth for screen metadata; screen HTML lives
 // as plain files so users can inspect/export them directly.
-import { app } from "electron";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import type {
@@ -38,7 +38,9 @@ function projectsRoot(): string {
 }
 
 export function siteAgentAppsRoot(): string {
-  return path.join(app.getPath("home"), ".agentlas", "site", "agentapp");
+  // os.homedir() is what Electron's app.getPath("home") returns; importing electron here made the store unloadable
+  // in the background service (daemon-loads-without-electron: site/store.js).
+  return path.join(os.homedir(), ".agentlas", "site", "agentapp");
 }
 
 function projectDir(projectId: string): string {

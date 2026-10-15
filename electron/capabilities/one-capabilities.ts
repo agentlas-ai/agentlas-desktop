@@ -43,9 +43,14 @@ export interface CapabilityItem {
   applies: boolean;
   /** Why the switch is not offered: the runtime loads it on its own, or Agentlas connects it when a turn needs it. */
   limit?: CapabilityLimit;
+  /** Personal / CEO scope for a switchable item; absent = both (items stored before scopes existed). */
+  role?: CapabilityRole;
 }
 
 export type CapabilityLimit = "runtime_reads_itself" | "agentlas_managed" | "personal_runtime";
+/** Which One may use an item: the personal conversation, One as CEO (rooms, organization), or both (21 G3). */
+export type CapabilityRole = "both" | "personal" | "ceo";
+const CAPABILITY_ROLES: readonly CapabilityRole[] = ["both", "personal", "ceo"];
 
 export interface CapabilityDetail {
   id: string;
@@ -113,11 +118,11 @@ export function bundledAgentlasPluginSlugs(dir: string = BUNDLED_PLUGINS_DIR): S
 
 /* ------------------------------------------------------------------ persisted state */
 
-interface CapabilityState { items: Record<string, boolean>; sources: Partial<Record<CapabilitySource, boolean>> }
+interface CapabilityState { items: Record<string, boolean>; sources: Partial<Record<CapabilitySource, boolean>>; roles: Record<string, CapabilityRole> }
 const STATE_FILE = "one-capabilities.json";
 let stateCache: { stamp: string; value: CapabilityState } | null = null;
 
-function emptyState(): CapabilityState { return { items: {}, sources: {} }; }
+function emptyState(): CapabilityState { return { items: {}, sources: {}, roles: {} }; }
 
 /**
  * A file in the user data folder, not process memory: Main writes it and both Main and the background service start
@@ -134,6 +139,7 @@ export function readCapabilityState(options: { fresh?: boolean } = {}): Capabili
       const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<CapabilityState>;
       const state = emptyState();
       for (const [id, on] of Object.entries(raw.items ?? {})) if (typeof on === "boolean") state.items[id] = on;
+      for (const [id, role] of Object.entries(raw.roles ?? {})) if (CAPABILITY_ROLES.includes(role as CapabilityRole) && role !== "both") state.roles[id] = role as CapabilityRole;
       for (const source of CAPABILITY_SOURCES) {
         const on = raw.sources?.[source];
         if (typeof on === "boolean") state.sources[source] = on;
@@ -172,7 +178,7 @@ export function capabilityEnabled(item: Pick<CapabilityItem, "id" | "source" | "
   // are never switched on, whatever an older build stored ("agentlas 전용 스킬 플러그인 커넥터만 쓸 수있게").
   if (isPersonalSource(item.source)) return false;
   if (!item.applies) return true;
-  return state.items[item.id] ?? state.sources[item.source] ?? true;
+  return state.items[item.id] ?? state.sources[item.source] ?? !isPersonalSource(item.source);
 }
 
 /* ------------------------------------------------------------------ scanning helpers */
@@ -578,7 +584,8 @@ function inventory(roots: CapabilityRoots, fresh: boolean): InventoryEntry[] {
   const key = JSON.stringify(roots);
   const now = Date.now();
   const state = readCapabilityState();
-  const withState = (list: InventoryEntry[]) => list.map((item) => ({ ...item, enabled: item.builtin || capabilityEnabled(item, state) }));
+  const withState = (list: InventoryEntry[]) => list.map((item) => ({ ...item, enabled: item.builtin || capabilityEnabled(item, state),
+    ...(item.applies && !item.builtin ? { role: state.roles[item.id] ?? "both" } : {}) }));
   if (!fresh && inventoryCache && inventoryCache.key === key && now - inventoryCache.at < INVENTORY_MS) return withState(inventoryCache.items);
   const seen = new Set<string>();
   const items: InventoryEntry[] = [];
@@ -770,7 +777,9 @@ function normalizedState(all: readonly InventoryEntry[], current: CapabilityStat
   for (const source of CAPABILITY_SOURCES) {
     if (current.sources[source] !== undefined && all.some((item) => item.source === source && item.applies && !item.builtin)) sources[source] = current.sources[source];
   }
-  return { items, sources };
+  const roles: Record<string, CapabilityRole> = {};
+  for (const [id, role] of Object.entries(current.roles)) if (switchable.has(id) && role !== "both") roles[id] = role;
+  return { items, sources, roles };
 }
 
 /**
@@ -807,11 +816,28 @@ export function setSourceEnabled(source: CapabilitySource, enabled: boolean, kin
   return { source, changed: targets.length };
 }
 
+/** Scope one switchable item to the personal One, One as CEO, or both (21 G3). Same refusals as setCapabilityEnabled. */
+export function setCapabilityRole(id: string, role: CapabilityRole, roots: CapabilityRoots = defaultCapabilityRoots()): CapabilityItem | null {
+  if (!CAPABILITY_ROLES.includes(role)) throw new Error("capability_role_invalid");
+  const all = inventory(roots, true);
+  const item = all.find((candidate) => candidate.id === id);
+  if (!item) return null;
+  if (item.builtin) throw new CapabilityNotSwitchableError(id, "builtin");
+  if (isPersonalSource(item.source)) throw new CapabilityNotSwitchableError(id, "personal_runtime");
+  if (!item.applies) throw new CapabilityNotSwitchableError(id, item.limit ?? "runtime_reads_itself");
+  const state = normalizedState(all, readCapabilityState({ fresh: true }));
+  if (role === "both") delete state.roles[id]; else state.roles[id] = role;
+  writeCapabilityState(state);
+  return publicItem({ ...item, role });
+}
+
 /* ------------------------------------------------------------------ run assembly */
 
 export interface CapabilitySelection {
   /** True only for One. */
   isOne: boolean;
+  /** One's role in this run: its personal conversation, or CEO everywhere else. Null for every other agent. */
+  role: Exclude<CapabilityRole, "both"> | null;
   /** Every inventory item with the on/off this run gets: workers have every personal item off. */
   items: CapabilityItem[];
 }
@@ -820,8 +846,22 @@ export interface CapabilitySelection {
  * The selection a product run assembles from. Only One may have personal items on, and only the ones the
  * person switched on; every other agent (rooms, workers, borrowed agents, Science) gets none of them.
  */
-export function selectionFor(agentId: string | undefined, roots: CapabilityRoots = defaultCapabilityRoots()): CapabilitySelection {
+export function selectionFor(agentId: string | undefined, roots: CapabilityRoots = defaultCapabilityRoots(), chatId?: string): CapabilitySelection {
   const isOne = agentId === BUILTIN_ONE_AGENT_ID;
-  const items = inventory(roots, false).map(publicItem).map((item) => (isPersonalSource(item.source) && !isOne ? { ...item, enabled: false } : item));
-  return { isOne, items };
+  const role = isOne ? (chatId && personalConversation(chatId) ? "personal" : "ceo") : null;
+  const items = inventory(roots, false).map(publicItem).map((item) => (isPersonalSource(item.source) && !isOne)
+    || (role && item.role && item.role !== "both" && item.role !== role) ? { ...item, enabled: false } : item);
+  return { isOne, role, items };
+}
+
+/** The personal One's own conversation (the supervisor binding); a lookup failure counts as CEO. */
+function personalConversation(chatId: string): boolean {
+  try {
+    const { getDb } = require("../store/db") as typeof import("../store/db");
+    const { getOneProfile } = require("../store/one-profile") as typeof import("../store/one-profile");
+    const { personalSupervisorConversationInDb } = require("../one/supervisor-store") as typeof import("../one/supervisor-store");
+    return personalSupervisorConversationInDb(getDb(), getOneProfile().oneId, chatId);
+  } catch {
+    return false;
+  }
 }

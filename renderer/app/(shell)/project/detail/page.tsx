@@ -2276,7 +2276,7 @@ function ProjectAgentRosterLibrary({
                         {firm.selfReferential ? (
                           <span className="project-team-chevron" aria-hidden="true" />
                         ) : (
-                          <button type="button" className="project-team-chevron" onClick={() => onToggleFirm(firm.id)} aria-expanded={firmOpen}>
+                          <button type="button" className="project-team-chevron" onClick={() => onToggleFirm(firm.id)} aria-expanded={firmOpen} aria-label={locale === "ko" ? (firmOpen ? "접기" : "펼치기") : (firmOpen ? "Collapse" : "Expand")}>
                             {firmOpen ? <IconChevronDown size={11} /> : <IconChevronRight size={11} />}
                           </button>
                         )}

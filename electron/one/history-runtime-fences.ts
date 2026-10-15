@@ -10,12 +10,14 @@ export interface HistoryRuntimeToolInput {
 type HistoryProducerPorts=Parameters<Parameters<Execution['withProducer']>[2]>[0];
 export interface HistoryRuntimeFence {
   readonly schema:'agentlas.history-runtime-fence.v1';
+  binding():Readonly<import("./history-native-execution-glue").HistoryNativeCommandBinding>;
   assertCurrent():void;
   assertRuntimeCoverage(runtimeKind:string):void;
   assertMcpMethod(method:string):void;
   assertTool(input:HistoryRuntimeToolInput):void;
   withMcpToolCall<T>(input:HistoryRuntimeToolInput,execute:()=>Promise<T>):Promise<T>;
   withProducerCall<T>(kind:'skill'|'toolchain'|'agent',execute:(ports:HistoryProducerPorts)=>Promise<T>):Promise<T>;
+  applyCurrentTool():Promise<unknown>;
   withProviderCall<T>(execute:()=>Promise<T>):Promise<T>;
 }
 type Execution=ReturnType<typeof createHistoryNativeExecution>;
@@ -49,6 +51,7 @@ export function createHistoryRuntimeFences(ports:HistoryRuntimeFencePorts){
     const execution=ports.execution();if(!execution)fail('history_native_execution_adapter_required');execution.assertToken(token);
     if(current){assertScope(current);if(current.token!==token||current.execution!==execution)fail('history_native_runtime_scope_changed');return current.fence;}
     let scope:Scope;const fence:HistoryRuntimeFence=Object.freeze({schema:'agentlas.history-runtime-fence.v1' as const,
+      binding:()=>{assertScope(scope);return Object.freeze(structuredClone(execution.assertToken(token)));},
       assertCurrent:()=>assertScope(scope),assertRuntimeCoverage(runtimeKind:string){assertScope(scope);if(!['byok','ollama','lmstudio','mlx','agentlas'].includes(runtimeKind))fail('history_native_runtime_per_call_fence_unavailable');},assertMcpMethod(method:string){assertScope(scope);if(method!=='tools/call'&&!metadataMethods.has(method))fail('history_native_mcp_method_outside_envelope');},
       assertTool:(input:HistoryRuntimeToolInput)=>{tool(scope,input);},
       withMcpToolCall:async<T>(input:HistoryRuntimeToolInput,execute:()=>Promise<T>):Promise<T>=>{
@@ -56,6 +59,7 @@ export function createHistoryRuntimeFences(ports:HistoryRuntimeFencePorts){
         return scopes.run(scope,()=>toolScopes.run({scope,input},async()=>{let failure:unknown;try{return await execution.withTool(token,bound,execute);}catch(error){failure=error;throw error;}finally{preserveEvidence(failure,()=>{if(personalDataHash(input)!==digest)fail('history_native_tool_request_changed');tool(scope,input);});}}));
       },
       withProducerCall:async<T>(kind:'skill'|'toolchain'|'agent',execute:(ports:HistoryProducerPorts)=>Promise<T>):Promise<T>=>{assertScope(scope);const call=toolScopes.getStore();if(!call||call.scope!==scope)fail('history_native_original_tool_scope_required');const digest=personalDataHash(call.input),bound=tool(scope,call.input);let failure:unknown;try{return await execution.withProducer<T>(token,{...bound,kind},execute);}catch(error){failure=error;throw error;}finally{preserveEvidence(failure,()=>{if(personalDataHash(call.input)!==digest)fail('history_native_tool_request_changed');tool(scope,call.input);});}},
+      applyCurrentTool:async()=>{assertScope(scope);const call=toolScopes.getStore();if(!call||call.scope!==scope)fail('history_native_original_tool_scope_required');const bound=tool(scope,call.input);return execution.withApplication(token,bound);},
       withProviderCall:async<T>(execute:()=>Promise<T>):Promise<T>=>{
         assertScope(scope);return scopes.run(scope,async()=>{let failure:unknown;try{return await execution.withProvider(token,execute);}catch(error){failure=error;throw error;}finally{preserveEvidence(failure,()=>assertScope(scope));}});
       },
@@ -88,3 +92,5 @@ export function serializableHistoryGate<T extends {historyRuntimeFence?:HistoryR
 
 /** Actual native builder callbacks retain the original opaque tool scope. Ordinary callers use their existing producer; unknown/JSON child scopes cannot enter. */
 export async function withCurrentHistoryProducer<T>(kind:'skill'|'toolchain'|'agent',execute:(ports:HistoryProducerPorts)=>Promise<T>,ordinary:()=>Promise<T>):Promise<T>{const fence=currentHistoryRuntimeFence();return fence?fence.withProducerCall(kind,execute):ordinary();}
+
+export async function withCurrentHistoryApplication():Promise<unknown>{const fence=currentHistoryRuntimeFence();if(!fence)fail('history_native_original_tool_scope_required');return fence.applyCurrentTool();}

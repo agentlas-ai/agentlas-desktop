@@ -29,24 +29,60 @@ interface CreativeSeedInput {
   prompt: string;
   images?: ImageAttachment[];
   metadata?: ProductMetadata;
+  /** Model-supplied channel enum; validated here, never read from prompt words. */
+  channel?: CreativeChannel | null;
   now?: string;
 }
 
-const CREATIVE_TERMS =
-  /(ad|ads|advert|creative|campaign|social|reels|tiktok|instagram|youtube|shorts|video|image|asset|product|shop|store|marketing|광고|소셜|릴스|틱톡|인스타|영상|이미지|에셋|제품|상품|쇼핑몰|상세페이지|마케팅)/i;
+// The channel is a model-supplied enum. The host only validates membership; it never
+// reads phrases such as "tiktok" or "feed" from the prompt. Unknown/unavailable
+// resolves to the neutral default, never to a lexical guess.
+export const CREATIVE_CHANNELS = ["Instagram Reels", "Instagram Feed", "TikTok", "YouTube Shorts"] as const;
+export type CreativeChannel = (typeof CREATIVE_CHANNELS)[number];
+export const DEFAULT_CREATIVE_CHANNEL: CreativeChannel = "Instagram Reels";
+export const CREATIVE_CHANNEL_JUDGMENT_KIND = "creative-ad-channel";
 
-export function shouldSeedCreativeAdPack(prompt: string, images?: ImageAttachment[]): boolean {
-  const urls = extractUrls(prompt);
-  if (images?.length && CREATIVE_TERMS.test(prompt)) return true;
-  if (urls.length === 0) return false;
-  const trimmed = prompt.trim();
-  const urlOnly = urls.length === 1 && trimmed === urls[0];
-  return (
-    urlOnly ||
-    CREATIVE_TERMS.test(prompt) ||
-    /제품|상품|url/i.test(prompt) ||
-    urls.some((url) => /product|products|item|shop|store|goods|commerce|\/p\/|\/dp\//i.test(url))
-  );
+export function normalizeCreativeChannel(value: unknown): CreativeChannel {
+  return typeof value === "string" && (CREATIVE_CHANNELS as readonly string[]).includes(value)
+    ? (value as CreativeChannel)
+    : DEFAULT_CREATIVE_CHANNEL;
+}
+
+export type CreativeChannelJudge = (spec: {
+  kind: string;
+  question: string;
+  labels: readonly CreativeChannel[];
+  input: string;
+  guidance?: string;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}) => Promise<{ verdict: CreativeChannel | null; source: "llm" | "unavailable"; confidence: number; reason: string }>;
+
+export async function resolveCreativeChannel(
+  prompt: string,
+  judgeFn?: CreativeChannelJudge,
+  opts: { signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<CreativeChannel> {
+  if (!prompt.trim()) return DEFAULT_CREATIVE_CHANNEL;
+  try {
+    let judge = judgeFn;
+    if (!judge) {
+      const { judgeRequired } = await import("../system-agents/judgment");
+      judge = judgeRequired as unknown as CreativeChannelJudge;
+    }
+    const verdict = await judge({
+      kind: CREATIVE_CHANNEL_JUDGMENT_KIND,
+      question: "Which channel is this advertising request primarily for?",
+      labels: CREATIVE_CHANNELS,
+      input: prompt.slice(0, 2_000),
+      guidance: "Judge in any language. When the channel is unstated or unclear, choose Instagram Reels.",
+      timeoutMs: opts.timeoutMs ?? 8_000,
+      signal: opts.signal,
+    });
+    return verdict.source === "llm" ? normalizeCreativeChannel(verdict.verdict) : DEFAULT_CREATIVE_CHANNEL;
+  } catch {
+    return DEFAULT_CREATIVE_CHANNEL;
+  }
 }
 
 export async function prepareCreativeAdPackManifest(input: {
@@ -54,13 +90,11 @@ export async function prepareCreativeAdPackManifest(input: {
   images?: ImageAttachment[];
   now?: string;
   judgeSubsetFn?: OnePackIntentJudge;
+  judgeChannelFn?: CreativeChannelJudge;
 }): Promise<AgentlasSurfaceManifest | null> {
   // ONE judged pack-intent decision (shared with the ecommerce seed via the
-  // subset cache). The keyword prefilter is a hint, never a gate: a lexical
-  // MISS can still seed when the model recognizes creative intent, and a
-  // coincidental substring ("add a task", an uploaded bug-repro screenshot)
-  // can't force the Creative Ad surface. With NO connected model we do NOT seed
-  // from the keyword prefilter — the pack simply does not appear (undecided).
+  // subset cache). The model-selected subset is the only seed: there is no
+  // keyword prior. With NO connected model the pack simply does not appear.
   const intents = await resolveOnePackIntents({
     prompt: input.prompt,
     images: input.images,
@@ -73,6 +107,7 @@ export async function prepareCreativeAdPackManifest(input: {
     prompt: input.prompt,
     images: input.images,
     metadata,
+    channel: await resolveCreativeChannel(input.prompt, input.judgeChannelFn),
     now: input.now,
   });
 }
@@ -84,7 +119,7 @@ export function buildCreativeAdPackManifest(input: CreativeSeedInput): AgentlasS
   const imageOrigin = input.metadata?.imageUrl ? safeOrigin(input.metadata.imageUrl) : null;
   const productName = cleanTitle(input.metadata?.title) || productFromUrl(productUrl) || "Product";
   const description = input.metadata?.description || "No product description extracted yet.";
-  const channel = inferChannel(input.prompt);
+  const channel = normalizeCreativeChannel(input.channel);
   const evidence = [
     ...(productUrl
       ? [
@@ -572,11 +607,4 @@ function productFromUrl(url?: string): string | undefined {
 function cleanTitle(value?: string): string | undefined {
   const cleaned = value?.replace(/\s+/g, " ").replace(/\s*[|–—-]\s*[^|–—-]{2,}$/u, "").trim();
   return cleaned || undefined;
-}
-
-function inferChannel(prompt: string): string {
-  if (/tiktok|틱톡/i.test(prompt)) return "TikTok";
-  if (/feed|피드/i.test(prompt)) return "Instagram Feed";
-  if (/youtube|shorts|쇼츠/i.test(prompt)) return "YouTube Shorts";
-  return "Instagram Reels";
 }

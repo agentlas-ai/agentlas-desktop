@@ -507,7 +507,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
   setMaxListeners(0, lifetime.signal); // A lifetime can own any number of concurrent RPC waiters.
   const hostPrefix = `host:${randomUUID()}:`; let hostSequence = 0;
   const native = new Map<string, { id: string | number; method: string; controller?: AbortController; detach?: () => void; sent: boolean; effect?: ReturnType<typeof beginMainMcpEffect>; initParamsKey?: string | null;
-    toolName?: string; resultFinishing?: boolean;
+    toolName?: string; resultFinishing?: boolean; onDelivered?: () => void;
     historyUpstream?: {resolve(frame:Frame):void;reject(error:unknown):void};
     /** agentlas-browser tools/call only: the call as sent, for one bounded ladder replay. */
     browserCall?: { frame: Frame; mutating: boolean; laddered: boolean } }>();
@@ -646,6 +646,8 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       if (!clientCancelled) pending.controller?.signal.throwIfAborted();
       pending.detach?.(); native.delete(wireId); external.delete(idKey(pending.id));
       down({ ...outgoing, id: pending.id });
+      // The result is on the wire to the CLI: the stored copy kept for crash replay is acknowledged (effect ledger G12).
+      try { pending.onDelivered?.(); } catch { /* never fails the delivery */ }
     };
     /*
      * The result-boundary hook refused to release this call's result (a login wall the owner must clear, a run being
@@ -741,6 +743,46 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       if (await schema(tool, signal) !== digest) { deny(wireId, "schema_changed"); return; }
       signal.throwIfAborted(); validate();
       const pending = native.get(wireId); if (!pending) return;
+      // Pre-effect checkpoint (harness/effect-ledger.ts) for mutating calls: begun before the frame goes upstream,
+      // settled from the same terminal hook the effect receipt uses (a cut wire after send is uncertain).
+      if (mutating) {
+        const ledger = await import("../harness/effect-ledger");
+        const begun = await ledger.beginEffect({ surface: "mcp-proxy", chatId: gate.chatId ?? null, run: ledger.effectRunId(gate),
+          tool: `mcp:${gate.catalogId ?? gate.serverKey}:${tool}`, args });
+        signal.throwIfAborted(); validate();
+        if (begun.status === "uncertain_prior") {
+          finish(wireId, { jsonrpc: "2.0", result: { isError: true, _meta: { agentlasProxyFailure: "effect_uncertain" },
+            content: [{ type: "text", text: begun.content }] } });
+          return;
+        }
+        if (begun.status === "replayed") {
+          // Settled before a crash, never delivered: answer with the stored (redacted) result instead of executing again.
+          let stored: Record<string, any>;
+          try { const parsed = JSON.parse(begun.content); stored = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : { content: [{ type: "text", text: begun.content }] }; }
+          catch { stored = { content: [{ type: "text", text: begun.content }] }; }
+          const priorRef = begun.priorRef;
+          pending.onDelivered = () => { void ledger.acknowledgeEffect(priorRef).catch(() => undefined); };
+          finish(wireId, { jsonrpc: "2.0", result: { ...stored, _meta: { ...(stored._meta ?? {}), agentlasReplayed: true, replayed: true } } });
+          return;
+        }
+        const inner = pending.effect;
+        let wentUpstream = false;
+        pending.effect = {
+          dispatched: () => { wentUpstream = true; inner?.dispatched(); },
+          finish: (terminal?: Record<string, any>) => {
+            inner?.finish(terminal);
+            const result = terminal?.result;
+            const state = !wentUpstream ? "failed" : !terminal ? "uncertain"
+              : terminal.error != null || result?.isError === true ? "failed" : "settled";
+            let stored: string | undefined;
+            if (state === "settled" && result && typeof result === "object") { try { stored = JSON.stringify(result); } catch { stored = undefined; } }
+            const ref = begun.ref;
+            const written = ledger.settleEffect(ref, state, stored !== undefined ? { result: stored } : undefined).catch(() => false);
+            // Delivery (down) follows this hook synchronously; the ack waits for the settle row so it never races it.
+            if (stored !== undefined) pending.onDelivered = () => { void written.then((ok) => ok ? ledger.acknowledgeEffect(ref) : false).catch(() => undefined); };
+          },
+        };
+      }
       const send=async()=>{pending.sent=true;pending.effect?.dispatched();if(gate.catalogId==="agentlas-browser")pending.browserCall={frame,mutating,laddered:false};await up({...frame,id:wireId});};
       if(gate.historyRuntimeFence){
         const response=await gate.historyRuntimeFence.withMcpToolCall(historyToolInput(frame,digest),async()=>{

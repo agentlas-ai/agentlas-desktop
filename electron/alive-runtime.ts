@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { ALIVE_CONTROLLER_SLUG, builtinAgentId } from "./architecture/manifest";
+import { registerScienceAliveMemoryRun } from "./memory/science-alive-memory";
 import { invocationService } from "./invocation/service";
 import { captureLongRunRuntimeSelection } from "./long-run/exact-runtime-binding";
 import { createChat, getChat, normalizeChatRuntimeSelection } from "./store/chats";
@@ -208,19 +209,33 @@ export const desktopAliveRuntime = {
     const scienceAttachments = input.context.attachments.filter((attachment) => attachment.domain === "science");
     if (scienceAttachments.length > 1) return { accepted: false, reasonCode: "alive-science-attachment-ambiguous" };
     const scienceAttachment = scienceAttachments[0];
+    let closeMemory: (()=>void) | undefined;
     try {
+      if(scienceAttachment) closeMemory=registerScienceAliveMemoryRun({chatId,agentId:input.agentId,wakeId:input.wakeId,controlEpoch:input.controlEpoch,
+        attachmentId:scienceAttachment.attachmentId,selection});
       const started = invocationService.start({ runId: input.wakeId, chatId,
-        userPrompt: `You are the independent Alive controller. Review this host-observed state, use any separately granted tools that advance your purpose, and return one bare JSON decision. For rest or reflection, use {"schema":"agentlas.alive-decision.v2","kind":"wait","reason":"brief reason","nextWakeAtMs":null,"action":null}; "review" is also valid, and nextWakeAtMs may be a nonnegative integer. Only if capabilities includes science.continue_research AND an attached Science observation shows a paused loop, you may instead propose {"schema":"agentlas.alive-decision.v2","kind":"act","reason":"brief reason","nextWakeAtMs":null,"action":{"kind":"science.continue_research","attachmentId":"observed attachment ID"}}. The host binds the loop version and hashes from this wake itself; do not copy them. When a paused Science observation lists submission.agentOwnedFailingGates, those gates are the study's own unfinished work: a researcher-owned item (author details, attestation) waiting in parallel does not cover them, so propose the continuation rather than waiting. Copy the attachment ID exactly; do not invent it. The host independently checks current stop, grant, budget, binding, and revision before any action. You may revise your plan; do not claim an action, study, manuscript, or external effect happened until its separate host result exists.\n${context}`,
+        userPrompt: `role: independent alive controller
+output: agentlas.alive-decision.v2 per response schema; wait|review: action null; reason brief
+act: only if capabilities has science.continue_research and an attached Science observation shows a paused loop; action.attachmentId = the observed attachment id, exact
+host binds loop version and hashes; do not copy them
+paused loop with submission.agentOwnedFailingGates: own unfinished work, propose continuation, do not wait
+tools: use granted ones
+no completion claims without a host result
+context:
+${context}`,
         promptOrigin: "system", taskIntent: "conversation", permissions: "full", sessionRouting: false,
         runtimeSelection: selection, locale: currentUiLocale() }, undefined, { source: "alive",
         ...(scienceAttachment ? { aliveScience: { agentId: input.agentId, wakeId: input.wakeId,
           controlEpoch: input.controlEpoch, attachmentId: scienceAttachment.attachmentId } } : {}) });
       if (started.runId !== input.wakeId) {
+        closeMemory?.();
         invocationService.cancel(started.runId);
         return { accepted: false, reasonCode: "alive-runtime-run-id-mismatch" };
       }
+      if(closeMemory){const close=closeMemory;const detach=invocationService.onSettled((event)=>{if(event.receipt.runId===input.wakeId){detach();close();}});
+        const receipt=invocationService.receipt(started.runId);if(receipt&&!["running","queued"].includes(receipt.status)){detach();close();}}
       return { accepted: true, runId: started.runId };
-    } catch { return { accepted: false, reasonCode: "alive-runtime-start-failed" }; }
+    } catch { closeMemory?.();return { accepted: false, reasonCode: "alive-runtime-start-failed" }; }
   },
   cancel(runId: string): void {
     if (!UUID.test(runId)) return;

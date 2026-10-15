@@ -9,6 +9,9 @@ import { automationOutwardSummary, type AutomationRunDigest } from "../shared/au
 import { currentUiLocale } from "./ui-locale";
 import { redactOperationalSecrets } from "./invocation/event-secret-redaction";
 import { formatRuntimeQuotaReset, quotaRetryAfterAt } from "../shared/runtime-quota";
+import { queueGraphResultForOne } from "./one/graph-review";
+import { AUTOMATION_RUN_ORIGIN_KIND, AUTOMATION_RUN_ORIGIN_SCHEMA, automationRunOrigin, readSealedAutomationRunOrigin, type AutomationRunOrigin } from "./automation-run-origin";
+import { wakeOneForGraphResult } from "./one/host-alerts";
 
 /** Exact current-run host receipts only. Historical prose is not a reset clock. */
 function automationQuotaResetTimes(runId: string, automationId: string): string[] {
@@ -86,11 +89,22 @@ export function quietAutomationRun(input: Pick<AutomationNotificationInput, "run
   return digest !== null && digest.outwardActivityCoverage === "complete" && digest.outwardTotal === 0;
 }
 
+export { automationRunOrigin, type AutomationRunOrigin } from "./automation-run-origin";
+
+/** First start wins: a redelivered occurrence with the same run id keeps the origin its first attempt sealed. */
+export function sealAutomationRunOrigin(runId: string, automationId: string, origin: AutomationRunOrigin | null): void {
+  recordRunEvent({ runId, automationId, kind: AUTOMATION_RUN_ORIGIN_KIND, sourceEventId: AUTOMATION_RUN_ORIGIN_KIND, evidencePhase: "observed",
+    payload: { schemaVersion: AUTOMATION_RUN_ORIGIN_SCHEMA, originChatId: origin?.originChatId ?? null, originMessageId: origin?.originMessageId ?? null } });
+}
+
 /** The scheduler owns the result. Atomically publish it to the registration's
  * original conversation and claim its notification; replay cannot duplicate the
- * durable message. An OS notification remains only an attempted delivery. */
-export function deliverAutomationResult(input: AutomationNotificationInput): boolean {
-  return getDb().transaction(() => {
+ * durable message. An OS notification remains only an attempted delivery. A graph
+ * that answers One's personal conversation (or a Work session One delegated) is
+ * queued for One's review in the same transaction (native-harness notyet NH16). */
+export function deliverAutomationResult(input: AutomationNotificationInput & { origin?: AutomationRunOrigin | null }): boolean {
+  let queuedForOne = false;
+  const delivered = getDb().transaction(() => {
     const db = getDb();
     const run = db.prepare("SELECT status FROM automation_runs WHERE id = ? AND automation_id = ?")
       .get(input.runId, input.automationId) as { status: string } | undefined;
@@ -109,12 +123,18 @@ export function deliverAutomationResult(input: AutomationNotificationInput): boo
       })).digest("hex") } : input;
     if (!claimAutomationNotification(notificationInput)) return false;
     const automation = getAutomation(input.automationId);
-    const chatId = automation?.monitor?.originChatId;
-    const sourceMessageId = automation?.monitor?.originMessageId;
-    if (!automation || !chatId || !sourceMessageId || !getChat(chatId)) return true;
-    const source = db.prepare("SELECT 1 FROM chat_messages WHERE id = ? AND chat_id = ? AND role = 'user'")
-      .get(sourceMessageId, chatId);
-    if (!source) return true;
+    if (!automation) return true;
+    // The run's own sealed origin, never a monitor that changed while it ran (native-harness notyet NH16 4th audit).
+    // A run without a seal uses the origin its caller captured at start; a run started before seals existed, the
+    // automation's current monitor.
+    const sealed = readSealedAutomationRunOrigin(db, input.runId);
+    const origin = sealed !== undefined ? sealed : input.origin !== undefined ? input.origin : automationRunOrigin(automation);
+    const chatId = origin?.originChatId;
+    if (!chatId || !getChat(chatId)) return true;
+    // The owner conversation is still known when the original command is not. Report there without guessing a turn.
+    const requestedSourceMessageId = origin?.originMessageId;
+    const sourceMessageId = requestedSourceMessageId && db.prepare("SELECT 1 FROM chat_messages WHERE id = ? AND chat_id = ? AND role = 'user'")
+      .get(requestedSourceMessageId, chatId) ? requestedSourceMessageId : null;
     if (quietAutomationRun(input)) {
       // Nothing outward happened, nothing failed and nobody is asked: the run stays in the
       // conversation's 자동화 tab timeline ("변화 없음"), not as a chat row.
@@ -139,6 +159,11 @@ export function deliverAutomationResult(input: AutomationNotificationInput): boo
       evidencePhase: "executed", payload: { schemaVersion: "agentlas.automation-origin-report.v1",
         sourceMessageId, messageId: message.id, status: input.status,
         outputDigest: createHash("sha256").update(body).digest("hex"), deliveryState: "persisted" } });
+    queuedForOne = queueGraphResultForOne(db, { automation: { id: automation.id, name: automation.name, monitor: { originChatId: chatId, originMessageId: sourceMessageId } }, runId: input.runId, status: input.status, outcome: input.outcome ?? null,
+      error: input.error ?? null, report: body, reportMessageId: message.id });
     return true;
   }).immediate();
+  // After commit: the review reads the committed notice. Another process hosting One picks it up on its tick.
+  if (queuedForOne) queueMicrotask(wakeOneForGraphResult);
+  return delivered;
 }

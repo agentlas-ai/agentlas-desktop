@@ -230,7 +230,7 @@ export class AliveLifetimeStore {
     }).immediate();
   }
   finishAction(result: AliveActionResult, nowMs: number): boolean {
-    if (typeof result.actionId !== "string" || typeof result.ok !== "boolean"
+    if (result.pending === true || typeof result.actionId !== "string" || typeof result.ok !== "boolean"
       || typeof result.code !== "string" || !/^[a-z][a-z0-9._-]{2,119}$/.test(result.code)
       || (result.ok && (!result.invocationRunId || !UUID.test(result.invocationRunId)))
       || (result.invocationRunId !== undefined && !UUID.test(result.invocationRunId))) return false;

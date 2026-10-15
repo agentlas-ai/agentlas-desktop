@@ -16,6 +16,7 @@
 import { createHash } from "node:crypto";
 import { getDb } from "./db";
 import { emitDesktopStoreChange } from "./change-bus";
+import { consentTransactionFacts } from "../runtime/tool-consent";
 import type {
   ToolApprovalConsentBinding,
 } from "../../shared/types";
@@ -76,7 +77,20 @@ function normalizedBinding(binding: ToolApprovalConsentBinding): ToolApprovalCon
     requesterIdentity: boundedIdentity(binding.requesterIdentity, "requester identity"),
     credentialResourceIdentity: boundedIdentity(binding.credentialResourceIdentity, "resource identity"),
     permissionScope: binding.permissionScope,
+    ...(binding.expiresAt !== undefined ? { expiresAt: normalizedExpiry(binding.expiresAt) } : {}),
+    ...(binding.revision !== undefined ? { revision: normalizedRevision(binding.revision) } : {}),
   };
+}
+
+function normalizedExpiry(value: string): string {
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) throw new Error("invalid capability consent expiry");
+  return new Date(time).toISOString();
+}
+
+function normalizedRevision(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error("invalid capability consent revision");
+  return value;
 }
 
 function bindingCanonicalText(binding: ToolApprovalConsentBinding): string {
@@ -101,7 +115,7 @@ export function capabilityConsentScope(binding: ToolApprovalConsentBinding): str
  * caller supplies the exact tool/detail material in Main; only the digest is
  * persisted so commands or credential names cannot leak through the ledger.
  */
-export function capabilityResourceIdentity(tool: string, detail?: string): string {
+export function capabilityResourceIdentity(tool: string, detail?: string, callArguments?: unknown): string {
   const normalizedTool = boundedIdentity(tool, "tool");
   // Preserve the exact detail bytes. Collapsing whitespace would make two
   // different paths/quoted arguments share a grant and therefore broaden the
@@ -110,12 +124,37 @@ export function capabilityResourceIdentity(tool: string, detail?: string): strin
   if (exactDetail.length > CONSENT_DETAIL_MAX) {
     throw new Error("invalid capability consent resource");
   }
-  return createHash("sha256")
+  // G04: a send/pay-class call's recipient and amount are part of what the owner
+  // approved. They are appended only when present, so a call without them keeps
+  // the digest it always had and existing grants stay valid.
+  const facts = consentTransactionFacts(callArguments);
+  const hash = createHash("sha256")
     .update("agentlas-tool-resource-v1\u0000", "utf8")
     .update(normalizedTool, "utf8")
     .update("\u0000", "utf8")
-    .update(exactDetail, "utf8")
-    .digest("hex");
+    .update(exactDetail, "utf8");
+  if (facts) hash.update("\u0000txn\u0000", "utf8").update(JSON.stringify(facts), "utf8");
+  return hash.digest("hex");
+}
+
+const CONSENT_FLOOR_PREFIX = "capability-consent-revision:";
+
+/** Current consent revision of one resource (0 until it is first raised). */
+export function getCapabilityConsentRevision(resourceIdentity: string): number {
+  const row = getDb().prepare("SELECT value FROM meta WHERE key = ?")
+    .get(`${CONSENT_FLOOR_PREFIX}${resourceIdentity}`) as { value?: string } | undefined;
+  const n = Number(row?.value ?? 0);
+  return Number.isSafeInteger(n) && n > 0 ? n : 0;
+}
+
+/** Raise the resource's consent revision: every earlier allow grant for it stops
+ * being reused and the owner is asked again. Returns the new revision. */
+export function bumpCapabilityConsentRevision(resourceIdentity: string): number {
+  const next = getCapabilityConsentRevision(resourceIdentity) + 1;
+  getDb().prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+    .run(`${CONSENT_FLOOR_PREFIX}${resourceIdentity}`, String(next));
+  emitDesktopStoreChange({ entity: "capability-grant" });
+  return next;
 }
 
 function isExactConsentScope(scope: string): boolean {
@@ -167,7 +206,8 @@ export function getCapabilityDecision(q: CapabilityQuery): CapabilityDecision | 
   const rows = getDb()
     .prepare(
       `SELECT capability, pattern, decision, scope, binding_version, user_identity,
-              workspace_identity, requester_identity, resource_identity, permission_scope
+              workspace_identity, requester_identity, resource_identity, permission_scope,
+              expires_at, consent_revision
          FROM capability_grants
        WHERE capability IN (${keys.map(() => "?").join(",")})`,
     )
@@ -182,6 +222,8 @@ export function getCapabilityDecision(q: CapabilityQuery): CapabilityDecision | 
       requester_identity?: string | null;
       resource_identity?: string | null;
       permission_scope?: ToolApprovalConsentBinding["permissionScope"] | null;
+      expires_at?: string | null;
+      consent_revision?: number | null;
     }>;
   if (rows.length === 0) return null;
 
@@ -196,8 +238,20 @@ export function getCapabilityDecision(q: CapabilityQuery): CapabilityDecision | 
     } catch {
       return null;
     }
+    const nowMs = Date.now();
+    const requiredRevision = Math.max(
+      binding.revision ?? 0,
+      getCapabilityConsentRevision(binding.credentialResourceIdentity),
+    );
     const exact = rows.filter((row) => {
       if (Number(row.binding_version ?? 0) !== 1) return false;
+      // Expired rows are never reused (a lapsed deny too: ask again). Unparseable expiry fails closed.
+      if (row.expires_at) {
+        const expiry = Date.parse(row.expires_at);
+        if (!Number.isFinite(expiry) || expiry <= nowMs) return false;
+      }
+      // A stale allow is not reused; a deny stays binding (it can only refuse).
+      if (row.decision === "allow" && Number(row.consent_revision ?? 0) < requiredRevision) return false;
       const rowBinding =
         row.user_identity && row.workspace_identity && row.requester_identity
           && row.resource_identity && row.permission_scope
@@ -265,13 +319,16 @@ export function recordCapabilityGrant(input: CapabilityGrantInput): CapabilityGr
       const binding = normalizedBinding(input.consentBinding);
       const scope = capabilityConsentScope(binding);
       const pattern = binding.credentialResourceIdentity;
+      const expiresAt = binding.expiresAt ?? null;
+      const revision = Math.max(binding.revision ?? 0, getCapabilityConsentRevision(binding.credentialResourceIdentity));
       const result = db
         .prepare(
           `INSERT INTO capability_grants (
              capability, pattern, decision, scope, source, created_at,
              binding_version, user_identity, workspace_identity,
-             requester_identity, resource_identity, permission_scope, tool_identity
-           ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+             requester_identity, resource_identity, permission_scope, tool_identity,
+             expires_at, consent_revision
+           ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(capability, pattern, scope)
            DO UPDATE SET
              decision = excluded.decision,
@@ -283,7 +340,9 @@ export function recordCapabilityGrant(input: CapabilityGrantInput): CapabilityGr
              requester_identity = excluded.requester_identity,
              resource_identity = excluded.resource_identity,
              permission_scope = excluded.permission_scope,
-             tool_identity = excluded.tool_identity`,
+             tool_identity = excluded.tool_identity,
+             expires_at = excluded.expires_at,
+             consent_revision = excluded.consent_revision`,
         )
         .run(
           input.capability,
@@ -298,6 +357,8 @@ export function recordCapabilityGrant(input: CapabilityGrantInput): CapabilityGr
           binding.credentialResourceIdentity,
           binding.permissionScope,
           input.tool ?? null,
+          expiresAt,
+          revision,
         );
       const row = db
         .prepare(
@@ -394,6 +455,8 @@ export function listCapabilityGrants(scope?: string): CapabilityGrantRow[] {
               requesterIdentity: row.requester_identity,
               credentialResourceIdentity: row.resource_identity,
               permissionScope: row.permission_scope,
+              ...(typeof row.expires_at === "string" && row.expires_at ? { expiresAt: row.expires_at } : {}),
+              revision: Number(row.consent_revision ?? 0),
             },
           }
         : {}

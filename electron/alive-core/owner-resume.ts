@@ -2,10 +2,13 @@ import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { AliveAgent } from "./contracts";
 import type { AliveResumeBarrier } from "../../shared/alive";
+import { runtimeFailureBlocksNextAutomaticTurn } from "../../shared/runtime-turn-admission";
 
 export function aliveWakeRequiresOwnerResume(code: unknown): code is string {
-  return code === "alive-host-lost" || code === "runtime_turn_unsettled"
-    || code === "serving_reconciliation_required" || code === "automation_no_progress_loop";
+  // A settled wake's missing acknowledgement is evidence for the next wake,
+  // never permission to replay its actions and never a hold on independent work.
+  // A detected no-progress loop still needs a new owner direction.
+  return typeof code === "string" && runtimeFailureBlocksNextAutomaticTurn({ providerCode: code });
 }
 
 /** Causal order belongs to the immutable ledger, never receipt timestamps. */

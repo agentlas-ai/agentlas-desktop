@@ -11,6 +11,7 @@ import {
   isOpenCrabCredentialUrl,
 } from "../opencrab/constants";
 import type { InstalledMcpServer, McpTransport } from "../../shared/types";
+import { parseCredentialRefs } from "./credential-refs";
 
 interface ServerRow {
   id: string;
@@ -22,6 +23,9 @@ interface ServerRow {
   args_json: string;
   url: string | null;
   env_keys_json: string;
+  /** Absent on a store the owner has not migrated yet; reads as "no references". */
+  credential_refs_json?: string | null;
+  connection_epoch?: number;
   enabled: number;
   installed_at: string;
 }
@@ -29,6 +33,7 @@ interface ServerRow {
 function toServer(row: ServerRow): InstalledMcpServer {
   const args = safeJsonArray(row.args_json);
   const envKeys = safeJsonArray(row.env_keys_json);
+  const credentialRefs = parseCredentialRefs(row.credential_refs_json);
   return {
     id: row.id,
     catalogId: row.catalog_id,
@@ -39,7 +44,10 @@ function toServer(row: ServerRow): InstalledMcpServer {
     args: args.values,
     url: row.url,
     envKeys: envKeys.values,
-    configurationValid: args.valid && envKeys.valid,
+    ...(Object.keys(credentialRefs.refs).length ? { credentialRefs: credentialRefs.refs } : {}),
+    ...(row.connection_epoch !== undefined ? { connectionEpoch: row.connection_epoch } : {}),
+    configurationValid: args.valid && envKeys.valid && credentialRefs.valid
+      && (row.connection_epoch === undefined || (Number.isSafeInteger(row.connection_epoch) && row.connection_epoch >= 0)),
     enabled: row.enabled === 1,
     installedAt: row.installed_at,
   };
@@ -154,6 +162,8 @@ export function installCustomServer(def: {
   args?: string[];
   url?: string;
   envKeys?: string[];
+  /** Connection-owned Vault keys (credential-refs.ts); only for keys this connection alone holds. */
+  credentialRefs?: Record<string, string>;
 }): InstalledMcpServer {
   const name = def.name.trim();
   if (!name) throw new Error("MCP server name required");
@@ -170,15 +180,20 @@ export function installCustomServer(def: {
     throw new Error(`Use the ${OPENCRAB_CATALOG_ID} catalog connection for private OpenCrab MCP URLs.`);
   }
 
+  const refs = def.credentialRefs ?? {};
+  const parsedRefs = parseCredentialRefs(JSON.stringify(refs));
+  if (!parsedRefs.valid || Object.keys(refs).some((key) => !(def.envKeys ?? []).includes(key))) throw new Error("credential_refs_invalid");
+
   const id = randomUUID();
   const now = new Date().toISOString();
-  getDb()
-    .prepare(
+  const db = getDb();
+  // One transaction: a row that exists without its references would read another account's global key.
+  db.transaction(() => {
+    db.prepare(
       `INSERT INTO mcp_servers
          (id, catalog_id, name, name_en, transport, command, args_json, url, env_keys_json, enabled, installed_at)
        VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
-    )
-    .run(
+    ).run(
       id,
       name,
       name,
@@ -189,6 +204,10 @@ export function installCustomServer(def: {
       JSON.stringify(def.envKeys ?? []),
       now,
     );
+    if (Object.keys(parsedRefs.refs).length) {
+      db.prepare("UPDATE mcp_servers SET credential_refs_json = ? WHERE id = ?").run(JSON.stringify(parsedRefs.refs), id);
+    }
+  })();
   return getServer(id)!;
 }
 
@@ -281,4 +300,22 @@ export function setServerEnabled(id: string, enabled: boolean): InstalledMcpServ
   const server = getServer(id);
   if (!server) throw new Error(`MCP server not found: ${id}`);
   return server;
+}
+
+/** Revoke only this connection. The registry transaction is the durable authority; enablement may later be restored
+ * by connector.connect, but no old preparation can regain its previous epoch. No shared credential is changed here. */
+export function revokeServerConnectionSession(id: string): InstalledMcpServer {
+  const db = getDb();
+  return db.transaction(() => {
+    const row = db.prepare("SELECT * FROM mcp_servers WHERE id = ?").get(id) as ServerRow | undefined;
+    if (!row) throw Object.assign(new Error("connector_not_installed"), { code: "connector_not_installed" });
+    if (row.connection_epoch === undefined) throw Object.assign(new Error("connection_epoch_unsupported"), { code: "connection_epoch_unsupported" });
+    if (!Number.isSafeInteger(row.connection_epoch) || row.connection_epoch < 0 || row.connection_epoch >= Number.MAX_SAFE_INTEGER) {
+      throw Object.assign(new Error("connection_epoch_invalid"), { code: "connection_epoch_invalid" });
+    }
+    const changed = db.prepare("UPDATE mcp_servers SET enabled = 0, connection_epoch = connection_epoch + 1 WHERE id = ? AND connection_epoch = ?")
+      .run(id, row.connection_epoch);
+    if (changed.changes !== 1) throw Object.assign(new Error("connection_epoch_conflict"), { code: "connection_epoch_conflict" });
+    return getServer(id)!;
+  })();
 }

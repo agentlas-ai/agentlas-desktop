@@ -3035,8 +3035,8 @@
   grid-template-columns: auto minmax(0, 1fr) auto auto;
 }
 .steeringQueueRemove {
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   display: inline-flex;
   align-items: center;
   justify-content: center;

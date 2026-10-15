@@ -19,6 +19,11 @@ export interface NativeOneStartPort {
   /** Cleanup only after preparation quiescence and released custody for non-handoff. */
   finish(binding: NativeOneStartBinding, status: "handed-off" | "rejected" | "cancelled" | "uncertain" | "settled"): Promise<void>;
 }
+const checkpointFailures = new WeakMap<object, NativeOneStartCheckpointKind>();
+/** Private observation of an error created here; copied fields and wire values carry no phase authority. */
+export function nativeOneStartCheckpointFailureKind(error: unknown): NativeOneStartCheckpointKind | undefined {
+  return error && (typeof error === "object" || typeof error === "function") ? checkpointFailures.get(error) : undefined;
+}
 const ports = new WeakSet<object>();
 const localPorts = new WeakSet<object>();
 export interface LocalInvocationPreparationPorts extends Omit<NativeOneStartPort, "execute"> {
@@ -83,7 +88,10 @@ export async function driveNativeOneStart<T>(steps: Generator<NativeOneStartChec
     } catch (cause) {
       await lifetime.awaitRetained();
       const error = signal.aborted && !terminalCleanup ? signal.reason : localPorts.has(port) ? cause : new RuntimeTurnUnsettledError("native-one-claim");
-      if (error instanceof Error && error !== cause) Object.defineProperty(error, "cause", { value: cause });
+      if (error instanceof Error && error !== cause) {
+        Object.defineProperty(error, "cause", { value: cause });
+        checkpointFailures.set(error, step.value.kind);
+      }
       step = steps.throw(error);
       continue;
     }

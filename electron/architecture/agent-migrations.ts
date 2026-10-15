@@ -23,15 +23,13 @@
  *  4. **한 에이전트의 실패가 나머지를 막지 않는다.** 라이브러리 하나가 손상돼도 스윕은
  *     끝까지 간다.
  */
-import { getDb } from "../store/db";
+import { getMemoryDb as getDb } from "../memory/database";
 import { ARCHITECTURE_VERSION } from "./manifest";
 import {
   currentExperienceBaseHash,
-  promoteWaitingExperienceCandidates,
   reconcileExistingCuratedMemoryCandidates,
 } from "../experience/store";
 import { backfillExperienceFromRunHistory } from "../experience/backfill";
-import { hasDurableRunStartReceipt } from "../store/run-events";
 import { bindAgentIdentity } from "../agents/identity";
 
 export interface AgentMigrationOutcome {
@@ -46,30 +44,6 @@ export interface AgentMigrationStep {
   /** 사람이 읽는 설명 — 원장 화면과 로그에 그대로 나간다. */
   description: string;
   run(agentId: string): AgentMigrationOutcome;
-}
-
-/**
- * 이 에이전트가 실제로 돈 실행 중 시작 영수증이 있는 것 하나. 없으면 승급 근거가 없다.
- *
- * ★시작 영수증 행은 **이 에이전트 이름으로 남지 않는다.** 실행이 시작되는 시점에는 아직 누가
- * 맡을지 정해지지 않아 `agent_id` 가 NULL 이고(스웜·편성 실행), 에이전트 이름은 그 뒤의
- * 도구·완료 이벤트부터 붙는다. 그래서 "이 에이전트의 시작 이벤트"를 찾으면 항상 0건이다 —
- * 실측: 913개 이벤트를 남긴 에이전트의 실행 6건이 전부 영수증을 갖고 있는데도 0으로 보였다.
- * 실행 id 는 이 에이전트의 이벤트에서 얻고, 영수증 판정은 그 실행 전체에 묻는다.
- */
-function durableRunIdFor(agentId: string): string | null {
-  const rows = getDb().prepare(
-    `SELECT run_id AS runId, MAX(ts) AS at
-       FROM run_events
-      WHERE agent_id = ? AND run_id IS NOT NULL
-      GROUP BY run_id
-      ORDER BY at DESC
-      LIMIT 24`,
-  ).all(agentId) as Array<{ runId: string }>;
-  for (const row of rows) {
-    if (row.runId && hasDurableRunStartReceipt(row.runId)) return row.runId;
-  }
-  return null;
 }
 
 /**
@@ -121,20 +95,6 @@ export const AGENT_MIGRATION_STEPS: AgentMigrationStep[] = [
         outcome: result.memoriesCreated > 0 ? "applied" : "noop",
         changed: result.memoriesCreated,
         detail: `intake=${result.intakeAttempted} existing=${result.skippedExisting}`,
-      };
-    },
-  },
-  {
-    id: "experience-auto-promote-2026-08",
-    description: "실행 영수증이 있는 후보를 칩으로 승급한다(사용자가 승급 방법을 몰라도 쌓이게)",
-    run(agentId) {
-      const runId = durableRunIdFor(agentId);
-      if (!runId) return { outcome: "noop", changed: 0, detail: "no-durable-run-receipt" };
-      const result = promoteWaitingExperienceCandidates({ agentId, runId, limit: 200 });
-      return {
-        outcome: result.promoted > 0 ? "applied" : "noop",
-        changed: result.promoted,
-        detail: `eligible=${result.eligible}`,
       };
     },
   },

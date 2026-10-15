@@ -123,7 +123,7 @@ export interface MobileBridgeAgentMailService {
   removeContact(contactId: string): Promise<Loose>;
   directorySearch(input: { q: string; skill?: string }): Promise<MobileBridgeMailDirectorySearchDto | MobileBridgeMailRefusalDto>;
   identity(): Promise<MobileBridgeMailIdentityDto | MobileBridgeMailRefusalDto>;
-  delegate(input: { threadId: string; instruction?: string; locale?: "ko" | "en" }): Promise<MobileBridgeMailDelegateDto | MobileBridgeMailRefusalDto>;
+  delegate(input: { threadId: string; instruction?: string; locale?: "ko" | "en"; sendMode?: MobileDelegateSendMode }): Promise<MobileBridgeMailDelegateDto | MobileBridgeMailRefusalDto>;
   /** Live change notices, content-free. Returns an unsubscribe. */
   subscribe(listener: (event: MobileBridgeMailUpdatedEventDto) => void): () => void;
 }
@@ -434,9 +434,11 @@ function mailboxFingerprint(mailbox: unknown): string {
 const MOBILE_OWNER_ACTOR = "owner";
 const MOBILE_OWNER_AUTHORITY = { origin: "owner" } as const;
 
-// Owner's words that mean "actually send it" (ko/en). Anything else from the
-// phone makes One stop at a draft (EDGE-CASES M2).
-const SEND_INTENT_RE = /(보내|발송|전송|\bsend\b)/i;
+// Send vs. draft is a typed field from the phone (`sendMode`), never a reading
+// of the owner's words: "보내", "보내지 마", "don't send", a quoted "send" all
+// mean nothing to the host. Anything but the exact value "send" (missing field
+// from an older app, unknown value) stays a draft (EDGE-CASES M2).
+export type MobileDelegateSendMode = "draft" | "send";
 
 /**
  * The phone's instruction is the owner's own text (trusted), but it still
@@ -444,9 +446,13 @@ const SEND_INTENT_RE = /(보내|발송|전송|\bsend\b)/i;
  * mail's subject and sender are NOT added here — Main's agentMailDelegate reads
  * them from the server and must fence them as untrusted data (sync.ts, H9).
  */
-export function mobileDelegateInstruction(instruction: string | undefined, locale: "ko" | "en"): string {
+export function mobileDelegateInstruction(
+  instruction: string | undefined,
+  locale: "ko" | "en",
+  sendMode?: MobileDelegateSendMode | string,
+): string {
   const own = typeof instruction === "string" ? sanitizeMailText(instruction, MOBILE_BRIDGE_MAIL_LIMITS.instruction * 4).trim() : "";
-  const draftOnly = !SEND_INTENT_RE.test(own);
+  const draftOnly = sendMode !== "send";
   const base = own || (locale === "ko" ? "이 메일을 읽고 답장을 준비해 줘." : "Read this mail and prepare a reply.");
   if (!draftOnly) return base.slice(0, MOBILE_BRIDGE_MAIL_LIMITS.instruction);
   const rule = locale === "ko"
@@ -831,7 +837,7 @@ export function createMobileBridgeAgentMailService(
       if (!call) return unavailable("hand mail to One");
       const result = await call({
         threadId: input.threadId,
-        instruction: mobileDelegateInstruction(input.instruction, input.locale ?? "ko"),
+        instruction: mobileDelegateInstruction(input.instruction, input.locale ?? "ko", input.sendMode),
         ...(input.locale ? { locale: input.locale } : {}),
         // Read-only run: One can read the thread and save a draft, never act
         // outside mail on the strength of a phone tap.

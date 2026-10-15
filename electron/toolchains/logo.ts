@@ -83,12 +83,13 @@ export function iconContentSquare(bitmap: Uint8Array, width: number, height: num
 
 function prompt(name: string, description: string): string {
   const purpose = description.replace(/\s+/g, " ").trim().split(/(?<=[.!?。])\s/)[0].slice(0, 220);
+  // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.toolchain.logo.image-prompt).
   return [
-    `An app icon for a small tool called "${name}".`,
-    purpose ? `What it does: ${purpose}` : "",
-    "A single bold, simple white symbol for that purpose, centered on a smooth colored gradient, macOS app icon style.",
+    "A single bold, simple white symbol for the tool's purpose, centered on a smooth colored gradient, macOS app icon style.",
     "Square 1:1 image. The gradient fills the whole canvas edge to edge: no white margin, no rounded corners, no frame (the app rounds the corners itself).",
     "Flat and clean, no text, no letters, no words, no border, no shadow.",
+    `An app icon for a small tool called "${name}".`,
+    purpose ? `What it does: ${purpose}` : "",
   ].filter(Boolean).join(" ");
 }
 

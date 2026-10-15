@@ -1,29 +1,19 @@
-// 런타임 시스템 프롬프트 동적 조립 — 코어 + 요청에 맞는 온디맨드 모듈만.
-// 이게 ITR의 "매 스텝 최소 시스템 프롬프트 조립" 부분. 코어만 1~2KB, 모듈은 필요할 때만.
+// 시스템 에이전트 프롬프트 조립 — 코어 + 모든 모듈. 오너 2026-10-13: 단어장(BM25 키워드)으로 모듈을 고르지 않는다.
 import type { SystemAgentSpec } from "./types";
-import { selectModules, type SelectOptions } from "./discovery";
 
 export interface AssembleResult {
   systemPrompt: string;
-  /** 이번 턴에 실제 로드된 모듈 id(텔레메트리/디버깅·miss-rate 측정용) */
+  /** Exact source pieces, loaded once; consumers declare the source's own lifetime. */
+  parts: readonly { id: string; text: string }[];
+  /** 실린 모듈 id(텔레메트리) */
   loadedModuleIds: string[];
-  scores: Array<{ id: string; score: number }>;
-  /** 코어 + 모듈 합산 대략 문자 수(토큰 절감 측정용) */
+  /** 코어 + 모듈 합산 문자 수 */
   chars: number;
 }
 
-export function assembleSystemPrompt(
-  agent: SystemAgentSpec,
-  query: string,
-  opts?: SelectOptions,
-): AssembleResult {
-  const { selected, scores } = selectModules(query, agent.modules, opts);
-  const parts = [agent.core, ...selected.map((m) => m.load())];
-  const systemPrompt = parts.join("\n\n");
-  return {
-    systemPrompt,
-    loadedModuleIds: selected.map((m) => m.id),
-    scores,
-    chars: systemPrompt.length,
-  };
+export function assembleSystemPrompt(agent: SystemAgentSpec, _query?: string, _opts?: unknown): AssembleResult {
+  void _query; void _opts;
+  const parts = [{ id: "core", text: agent.core }, ...agent.modules.map((m) => ({ id: m.id, text: m.load() }))];
+  const systemPrompt = parts.map(part => part.text).join("\n\n");
+  return { systemPrompt, parts, loadedModuleIds: agent.modules.map((m) => m.id), chars: systemPrompt.length };
 }

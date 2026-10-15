@@ -80,7 +80,7 @@ export const CONTINUOUS_MODE_MAX_PASSES = 20_000;
 
 // Only what stripStormbreakerContinueMarker needs: when the marker is sent and who removes it. The Core harness is
 // loaded beside it; cadence/evidence advice for automations lives in the automation prompt builders.
-export const STORMBREAKER_LOOP_PROTOCOL = `If safe work remains and nothing blocks you (auth, payment, policy, secrets, approval), end with ${STORMBREAKER_CONTINUE_MARKER} on its own line; the host strips it and runs the next pass.`;
+export const STORMBREAKER_LOOP_PROTOCOL = `safe work remains, no blocker: last line ${STORMBREAKER_CONTINUE_MARKER}`;
 
 export function stripStormbreakerContinueMarker(text: string): { text: string; shouldContinue: boolean } {
   const escaped = STORMBREAKER_CONTINUE_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -109,27 +109,23 @@ export function stripStormbreakerContinueMarker(text: string): { text: string; s
  */
 export function goalCompletionProtocol(locale: "ko" | "en", lifecycle: "finite" | "ongoing" = "finite"): string {
   if (lifecycle === "ongoing") return [
-    "## Ongoing Goal (host-owned)",
-    "This is a continuing responsibility explicitly requested by the user, not a task with a final completion. Keep it open until the user stops it.",
-    "Work in bounded episodes. Inspect current state and durable receipts before acting, respect the user's cadence, and never repeat an already completed or uncertain external effect.",
-    `When the current episode satisfies its criteria with evidence, emit ${GOAL_COMPLETE_MARKER}. For this ongoing Goal the host verifies only the episode, then persists a quiet 30-minute observation wait; it does not complete the mandate.`,
-    "If work is not due yet, request a typed timer wait for the next useful time. Do not spin on unchanged state or claim that local work runs while the app or computer is off.",
-    "Auth, approval, uncertain side effects and explicit Stop still take precedence. Preserve the exact conversation, runtime/model and permission binding.",
+    "## Ongoing Goal",
+    "mandate: continuing, open until the user stops it; work in bounded episodes",
+    "each episode: read state + receipts first; never repeat a done or uncertain external effect",
+    `episode met with evidence: ${GOAL_COMPLETE_MARKER} (host verifies the episode only, then waits 30 min quietly)`,
+    "nothing due: timer wait; unchanged state: stop",
+    "precedence: auth, approval, uncertain effects, Stop",
   ].join("\n");
   return locale === "ko"
     ? [
-        "## Goal 종료 규약 (호스트 소유)",
-        `모든 성공 기준을 증거로 확인했으면 마지막 줄에 ${GOAL_COMPLETE_MARKER} 를 적어라.`,
-        `근거를 같이 남기려면 ${GOAL_COMPLETE_MARKER.replace(">>", ": 무엇을 어디서 확인했는지>>")} 형태로 적는다.`,
-        "이 마커가 없으면 호스트는 목표를 끝내지 않는다. 지속 판단은 네 산문이 아니라 원장이 내리기 때문이다.",
-        "아직 남은 일이 있으면 절대 적지 마라 — 이 마커는 원장의 미완 항목을 닫는다.",
+        "## Goal 종료",
+        `모든 기준을 증거로 확인: 마지막 줄 ${GOAL_COMPLETE_MARKER} (근거: ${GOAL_COMPLETE_MARKER.replace(">>", ": 확인한 것>>")})`,
+        "마커 없으면 목표는 열린 채. 남은 일이 있으면 금지.",
       ].join("\n")
     : [
-        "## Goal termination protocol (host-owned)",
-        `When every acceptance criterion is verified with evidence, end your output with ${GOAL_COMPLETE_MARKER} on its own line.`,
-        `To attach the evidence inline, write ${GOAL_COMPLETE_MARKER.replace(">>", ": what you verified and where>>")}.`,
-        "Without that marker the host never ends the goal, because continuation is decided by the ledger rather than by your prose.",
-        "Never emit it while work remains — it closes the open ledger tasks.",
+        "## Goal end",
+        `all criteria verified with evidence: last line ${GOAL_COMPLETE_MARKER} (evidence: ${GOAL_COMPLETE_MARKER.replace(">>", ": what you verified>>")})`,
+        "no marker: goal stays open. Work remaining: never emit.",
       ].join("\n");
 }
 
@@ -204,8 +200,7 @@ export function goalCompletionVerdict(input: {
 export function buildStormbreakerContinuationPrompt(previousOutput: string | null, pass: number): string {
   return [
     `Continue Stormbreaker execution pass ${pass}.`,
-    "Do not restart: take the next unfinished work packet, act on it, verify it, update the goal ledger.",
-    `If all requested work is verified, omit the continuation marker; if more safe work remains, end with ${STORMBREAKER_CONTINUE_MARKER} on its own line.`,
+    `next: unfinished packet, act, verify, update ledger; more safe work: last line ${STORMBREAKER_CONTINUE_MARKER}; all verified: no marker`,
     ...(previousOutput === null ? [] : ["", "Previous assistant output:", previousOutput]),
   ].join("\n");
 }
@@ -241,14 +236,12 @@ export function buildGoalDrivenContinuationPrompt(input: {
 }): string {
   const lines = [
     `Continue persistent-goal execution pass ${input.pass}.`,
-    `The goal ledger reports this goal is NOT yet achieved (open ledger tasks: ${input.openTaskCount}), so execution continues even though the previous pass did not request continuation.`,
+    `ledger: not achieved, open tasks ${input.openTaskCount}`,
     ...(input.objective ? [`Goal objective: ${input.objective}`] : []),
-    "Do not restart: take the next unfinished work packet, act, verify, update the goal ledger.",
-    ...(input.typedGoalTools ? [] : [
-      `Only when the whole goal is verified, end with ${GOAL_COMPLETE_MARKER} on its own line (optionally ${GOAL_COMPLETE_MARKER.replace(">>", ": what you verified and where>>")}); without it the host keeps the goal open, and the marker closes the remaining ledger tasks.`,
-    ]),
-    `If more safe work remains after this pass, end with ${STORMBREAKER_CONTINUE_MARKER} on its own line.`,
-    "If nothing can progress now (waiting on the user, an approval, an external fix), do not report 'no change' again: ask with the question card, or name the exact blocker once and end without the continuation marker. A result matching the previous pass counts as no progress and the host stops cycling after three.",
+    "next: unfinished packet, act, verify, update ledger",
+    ...(input.typedGoalTools ? [] : [`whole goal verified: last line ${GOAL_COMPLETE_MARKER} (evidence: ${GOAL_COMPLETE_MARKER.replace(">>", ": what you verified>>")})`]),
+    `more safe work: last line ${STORMBREAKER_CONTINUE_MARKER}`,
+    "blocked: question card or name the blocker once, no marker; repeat of last result = no progress (host stops after 3)",
   ];
   if (input.previousOutput !== null) lines.push("", "Previous assistant output:", input.previousOutput);
   return lines.join("\n");
@@ -260,17 +253,17 @@ export function buildStormbreakerLongRunPrompt(input: {
   userPrompt: string;
   workingFolder?: string | null;
 }): string {
+  // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.hephaestus.stormbreaker.long-run).
   return [
     STORMBREAKER_LONG_RUN_MARKER,
+    "Continue the unfinished Stormbreaker Loop goal from the source chat.",
+    "next: unfinished safe packet, act, verify, record; history + workspace evidence, no restart",
+    `fully verified: no continue marker, last line ${GOAL_COMPLETE_MARKER}`,
+    "blocked (auth, payment, policy, secrets, tools, approval): report it, no marker",
+    `more safe work: last line ${STORMBREAKER_CONTINUE_MARKER}`,
+    "",
     `Source chat: ${input.sourceChatId}`,
     input.workingFolder ? `Workspace: ${input.workingFolder}` : "",
-    "",
-    "Continue the unfinished Stormbreaker Loop goal from the source chat.",
-    "Use this hidden automation session history plus durable workspace evidence. Do not restart from scratch.",
-    "Maintain a visible goal ledger, pick the next unfinished safe work packet, act with available tools, verify the result, and record what changed.",
-    `If the work is fully verified, do not include the continuation marker, and end with ${GOAL_COMPLETE_MARKER} on its own line so the host can close the goal. Omitting it leaves the goal running on a schedule with nothing left to do.`,
-    "If blocked by auth, payment, provider policy, missing secrets, unavailable tools, or user approval, report the blocker and do not include the continuation marker.",
-    `If more safe work remains after this run, end with ${STORMBREAKER_CONTINUE_MARKER} on its own line.`,
     "",
     "Original user request:",
     input.userPrompt,

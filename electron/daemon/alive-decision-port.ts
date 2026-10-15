@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { CONTROLLER_MEMORY_HEADERS, renderControllerSurfaceMemory, bindSurfaceMemoryRequest, captureSurfaceMemoryCustody, readSurfaceMemory } from "../memory/surface-recall";
 import { createRuntimeUsageCollector } from "../../shared/observed-usage";
 import type Database from "better-sqlite3";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
@@ -9,7 +10,8 @@ import { ALIVE_GOAL_CONTROLLER_PROMPT } from "../alive-organisms/controller-prom
 import { ALIVE_GOAL_DECISION_OUTPUT_SCHEMA } from "../alive-organisms/goal-decision";
 import { createDaemonAgentContextHost } from "./agent-context-host";
 import type { NativeAuthenticatedIdentity } from "./native-session-auth";
-import { agentContextSessionKey, agentContextHostBinding, reconcileInterruptedAgentContext } from "../runtime/agent-context";
+import { createAgentContextCapability, agentContextSessionKey, agentContextHostBinding, reconcileInterruptedAgentContext } from "../runtime/agent-context";
+import { admitAwakeAgentResidency, withAwakeAgentResidency, releaseAwakeAgentResidency, type AwakeAgentResidencyAdmission } from "../runtime/agent-residency";
 import { registerAliveDecisionProfile } from "../runtime/alive-decision-context";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "../runtime/runner";
 
@@ -27,6 +29,7 @@ export interface AliveDecisionChoice {
   source: string | null;
   backend: RuntimeSelection["backend"] | null;
   model: string | null;
+  acpAgentId?: string | null;
 }
 declare const bindingBrand: unique symbol;
 export interface AliveDecisionBinding { readonly [bindingBrand]: true }
@@ -124,7 +127,7 @@ export function createAliveDecisionTransport(options: {
       request.signal?.addEventListener("abort", cancel, { once: true });
       try {
         const result = await options.dispatch({ version: ALIVE_DECISION_PROTOCOL, operation: "run", wake: held.wake,
-          choice: { kind: status.kind, source: status.source ?? null, backend: selection.backend ?? null, model: selection.model ?? null },
+          choice: { kind: status.kind, source: status.source ?? null, backend: selection.backend ?? null, model: selection.model ?? null, ...(status.kind === "acp" ? { acpAgentId: selection.acpAgentId } : {}) },
           userPrompt: request.userPrompt });
         if (!exact(result, ["version", "wakeId", "result", "nativeActivity", "toolNames"]) || result.version !== ALIVE_DECISION_PROTOCOL
           || result.wakeId !== held.wake.wakeId || typeof result.nativeActivity !== "boolean" || !Array.isArray(result.toolNames)
@@ -142,6 +145,73 @@ export function createAliveDecisionTransport(options: {
     close() { if (closed) return; closed = true; for (const wake of captured.values()) control(wake, "release"); captured.clear(); },
   };
 }
+/** Main fallback uses the same opaque life binding, journal and no-tools
+ * profile. It never converts an uncertain daemon dispatch into another call. */
+export function createLocalAliveDecisionTransport(options: {
+  db: Database.Database; ownerBinding(): AliveDecisionOwner; now(): number;
+  pickRunner(status: RuntimeStatus): { runner: Runner; label: string } | null;
+}): AliveDecisionTransport {
+  const active = new Map<string, AbortController>();
+  let closed = false, generation = 0;
+  return { ownerBinding: options.ownerBinding,
+    async run(binding, status, selection, original, events) {
+      const held = bindings.get(binding), custody = captureSurfaceMemoryCustody();
+      if (!held || closed || active.has(held.wake.lifeAgentId)) fail("alive_decision_binding_required");
+      const wake = held.wake, controller = new AbortController(), resources = new Map<string,()=>void|Promise<void>>();
+      let admission:AwakeAgentResidencyAdmission|undefined;
+      const abort = () => controller.abort(original.signal?.reason);
+      original.signal?.addEventListener("abort", abort, { once: true });
+      active.set(wake.lifeAgentId, controller);
+      const assert = () => {
+        controller.signal.throwIfAborted(); if (closed || active.get(wake.lifeAgentId) !== controller) fail("alive_decision_port_closed");
+        if (digest(options.ownerBinding()) !== digest({ ownerScope: wake.ownerScope, serviceIdentity: wake.serviceIdentity })) fail("alive_decision_owner_changed");
+        held.assertCurrent(); custody?.assertCurrent();
+        const event = options.db.prepare("SELECT payload_json FROM alive_events WHERE agent_id=? AND kind='wake.runtime-selected' AND json_extract(payload_json,'$.wakeId')=? ORDER BY sequence DESC LIMIT 1").get(wake.lifeAgentId,wake.wakeId) as {payload_json:string}|undefined;
+        const pin = event ? JSON.parse(event.payload_json) : null;
+        if(!pin||pin.kind!==status.kind||(pin.model??null)!==(selection.model??null)||(pin.backend??null)!==(selection.backend??null)
+          ||(pin.source!==undefined&&pin.source!==(status.source??null))||(status.kind==="acp"&&pin.acpAgentId!==status.acpAgentId))fail("alive_decision_runtime_changed");
+        const attempt = options.db.prepare("SELECT agent_id,status FROM alive_light_wakes WHERE wake_id=? AND attempt_started=1").get(wake.wakeId) as {agent_id:string;status:string}|undefined;
+        if (!attempt || attempt.agent_id !== wake.lifeAgentId || attempt.status !== "running") fail("alive_decision_attempt_changed");
+      };
+      try {
+        original.signal?.throwIfAborted(); assert();
+        const picked = options.pickRunner(status); if (!picked) fail("alive_decision_runtime_unavailable");
+        const identity = { ownerScope: wake.ownerScope, serviceIdentity: wake.serviceIdentity,
+          agentId: builtinAgentId(ALIVE_CONTROLLER_SLUG), visibilityDomain: `alive-decision:${wake.organism}:${wake.lifeAgentId}` };
+        const capability = createAgentContextCapability(identity, { turnId: `alive-decision:${wake.wakeId}`, assertCurrent: assert });
+        reconcileInterruptedAgentContext(capability, previous => {
+          if (!previous.startsWith("alive-decision:")) fail("alive_decision_previous_turn_unknown");
+          const row = options.db.prepare("SELECT agent_id,status FROM alive_light_wakes WHERE wake_id=?").get(previous.slice(15)) as {agent_id:string;status:string}|undefined;
+          if (!row || row.agent_id !== wake.lifeAgentId || !["completed","failed","cancelled","interrupted"].includes(row.status)) fail("alive_decision_previous_turn_unsettled");
+        });
+        const budget = JSON.parse((options.db.prepare("SELECT budget_json FROM alive_agents WHERE agent_id=?").get(wake.lifeAgentId) as {budget_json:string}).budget_json) as {tokenLimit:number|null;tokensUsed:number};
+        const header = CONTROLLER_MEMORY_HEADERS.main;
+        const base = Buffer.byteLength(original.userPrompt + header, "utf8");
+        const remaining = budget.tokenLimit === null ? 96 : Math.max(0,budget.tokenLimit-budget.tokensUsed-Math.ceil(base/3));
+        const memory = custody ? readSurfaceMemory({ receiver: {kind:"alive-controller",actorId:identity.agentId,lifeId:wake.lifeAgentId,organism:wake.organism},
+          visibilityDomain:identity.visibilityDomain,query:original.userPrompt,maxApproxTokens:Math.max(0,Math.min(96,remaining,Math.floor((16384-base)/3))),custody,assertHost:assert }) : null;
+        const request: RunnerRequest = {...original,agentId:identity.agentId,agentContext:capability,signal:controller.signal,
+          userPrompt:original.userPrompt, ...(memory?.text ? {turnContext:original.turnContext ? original.turnContext+renderControllerSurfaceMemory(memory,"main") : renderControllerSurfaceMemory(memory,"main")} : {})};
+        bindSurfaceMemoryRequest(request,memory);
+        const remove = registerAliveDecisionProfile(capability, request, {kind:"alive-no-tools",lifeAgentId:wake.lifeAgentId,wakeId:wake.wakeId,
+          resourceOwnerKey:agentContextSessionKey(capability),bindingKey:digest([selection,status.source,"alive-no-tools.v1",memory?.sourceKey??null]),maxHistoryChars:8192,
+          signal:controller.signal,assertCurrent(){assert();memory?.assertCurrent();},retainResource(){try{assert();memory?.assertCurrent();return true;}catch{return false;}},
+          registerResource(key,close){assert();if(!key||resources.size>=1)fail("alive_decision_resource_owned");resources.set(key,close);return()=>{if(resources.get(key)===close)resources.delete(key);};}});
+        try {
+          assert(); memory?.assertCurrent();
+          admission=admitAwakeAgentResidency({contextKey:agentContextSessionKey(capability),agentId:identity.agentId,
+            ownerEpoch:digest(options.ownerBinding()),generation:++generation,assertCurrent(){assert();memory?.assertCurrent();}});
+          const result = await withAwakeAgentResidency(admission,()=>picked.runner(request, events),assert);
+          try {assert();memory?.assertCurrent();} catch {return {...result,text:"",failure:{kind:"unavailable",runtime:status.kind,source:"marker",providerCode:"surface_memory_source_changed",message:"The original controller memory source changed."}};}
+          return result;
+        } finally {remove();}
+      } finally {original.signal?.removeEventListener("abort",abort);active.delete(wake.lifeAgentId);for(const close of resources.values()){try{await close();}catch{}}resources.clear();if(admission)releaseAwakeAgentResidency(admission);}
+    },
+    release(lifeId) {active.get(lifeId)?.abort(new Error("alive-wake-cancelled"));},
+    close() {closed=true;for(const controller of active.values())controller.abort(new Error("alive-wake-shutdown"));}
+  };
+}
+
 export interface AliveDecisionPeer {
   identity: NativeAuthenticatedIdentity;
   assertCurrent(): void;
@@ -197,8 +267,10 @@ export function createDaemonAliveDecisionPort(options: {
       }
       if (!exact(wire, ["version", "operation", "wake", "choice", "userPrompt"]) || wire.operation !== "run"
         || typeof wire.userPrompt !== "string" || Buffer.byteLength(wire.userPrompt) > 16 * 1024
-        || !exact(wire.choice, ["kind", "source", "backend", "model"]) || typeof wire.choice.kind !== "string"
+        || !(exact(wire.choice, ["kind", "source", "backend", "model"]) || exact(wire.choice, ["kind", "source", "backend", "model", "acpAgentId"])) || typeof wire.choice.kind !== "string"
         || [wire.choice.source, wire.choice.backend, wire.choice.model].some(item => item !== null && (typeof item !== "string" || item.length > 2048))) fail("alive_decision_request_invalid");
+      if (wire.choice.kind === "acp" ? typeof wire.choice.acpAgentId !== "string" || !wire.choice.acpAgentId || wire.choice.acpAgentId.length > 512
+        : wire.choice.acpAgentId !== undefined && wire.choice.acpAgentId !== null) fail("alive_decision_runtime_changed");
       assertOwner(); peer.assertCurrent();
       if (peer.identity.bootId !== options.bootId || peer.identity.serviceIdentity !== owner.serviceIdentity) fail("alive_decision_peer_changed");
       validateLife(options.db, wake, options.now(), true);
@@ -211,9 +283,11 @@ export function createDaemonAliveDecisionPort(options: {
         AND json_extract(payload_json,'$.wakeId')=? ORDER BY sequence DESC LIMIT 1`).get(wake.lifeAgentId, wake.wakeId) as { payload_json: string } | undefined;
       const selection = selected ? JSON.parse(selected.payload_json) : null;
       if (!selection || selection.kind !== choice.kind || (selection.model || null) !== choice.model
-        || (selection.backend ?? null) !== choice.backend) fail("alive_decision_runtime_changed");
+        || (selection.backend ?? null) !== choice.backend || (selection.source !== undefined && selection.source !== choice.source)
+        || (choice.kind === "acp" && selection.acpAgentId !== choice.acpAgentId)) fail("alive_decision_runtime_changed");
       active.add(wake.lifeAgentId);
       const controller = new AbortController();
+      const memoryCustody=captureSurfaceMemoryCustody();
       const usage = createRuntimeUsageCollector();
       let nativeActivity = false;
       let providerResult: RunnerResult | undefined;
@@ -228,7 +302,8 @@ export function createDaemonAliveDecisionPort(options: {
         const heldLife = life;
         life.detach ??= peer.onClose(() => release(heldLife));
         const picked = await options.resolveRuntime(choice);
-        if (!picked || picked.status.kind !== choice.kind || (picked.status.source ?? null) !== choice.source) fail("alive_decision_runtime_unavailable");
+        if (!picked || picked.status.kind !== choice.kind || (picked.status.source ?? null) !== choice.source
+          || (picked.status.backend ?? null) !== choice.backend || (choice.kind === "acp" && picked.status.acpAgentId !== choice.acpAgentId)) fail("alive_decision_runtime_unavailable");
         const assertTurn = () => {
           controller.signal.throwIfAborted(); assertOwner(); peer.assertCurrent(); validateLife(options.db, wake, options.now(), true);
           const row = options.db.prepare("SELECT status FROM alive_light_wakes WHERE wake_id=?").get(wake.wakeId) as { status: string } | undefined;
@@ -249,20 +324,31 @@ export function createDaemonAliveDecisionPort(options: {
             const row = options.db.prepare("SELECT agent_id,status FROM alive_light_wakes WHERE wake_id=?").get(previous.slice(15)) as { agent_id: string; status: string } | undefined;
             if (!row || row.agent_id !== wake.lifeAgentId || !["completed", "failed", "cancelled", "interrupted"].includes(row.status)) fail("alive_decision_previous_turn_unsettled");
           });
+          const budget=JSON.parse((options.db.prepare("SELECT budget_json FROM alive_agents WHERE agent_id=?").get(wake.lifeAgentId) as {budget_json:string}).budget_json) as {tokenLimit:number|null;tokensUsed:number};
+          const memoryHeader=CONTROLLER_MEMORY_HEADERS.daemon;
+          const baseBytes=Buffer.byteLength(wire.userPrompt as string,"utf8"),headerBytes=Buffer.byteLength(memoryHeader,"utf8");
+          const remaining=budget.tokenLimit===null?96:Math.max(0,budget.tokenLimit-budget.tokensUsed-Math.ceil((baseBytes+headerBytes)/3));
+          const recallBudget=Math.max(0,Math.min(96,remaining,Math.floor((16*1024-baseBytes-headerBytes)/3)));
+          const memory=memoryCustody?readSurfaceMemory({receiver:{kind:"alive-controller",actorId:life!.identity.agentId,lifeId:wake.lifeAgentId,organism:wake.organism},
+            visibilityDomain:life!.identity.visibilityDomain,query:wire.userPrompt as string,maxApproxTokens:recallBudget,custody:memoryCustody,
+            assertHost(){const binding=agentContextHostBinding(capability);binding.assertCurrent();assertTurn();if(binding.identity.agentId!==builtinAgentId(ALIVE_CONTROLLER_SLUG)||binding.identity.visibilityDomain!==life!.identity.visibilityDomain)fail("alive_decision_recall_actor_changed");}}):null;
+          const userPrompt=wire.userPrompt as string;
           const request: RunnerRequest = { agentId: life!.identity.agentId, agentContext: capability, systemPrompt: ALIVE_GOAL_CONTROLLER_PROMPT,
-            history: [], userPrompt: wire.userPrompt as string, backendLabel: picked.label, runtimeSource: picked.status.source,
+            history: [], userPrompt, ...(memory?.text ? {turnContext:renderControllerSurfaceMemory(memory,"daemon")} : {}), backendLabel: picked.label, runtimeSource: picked.status.source,
             model: choice.model ?? undefined, effort: "low", longContext: false, permission: "read", untrustedNoTools: true,
             judgmentOnly: true, surfaceGate: "exclude", maxOutputTokens: 600,
             outputSchema: { name: "agentlas_alive_goal_decision_v2", schema: ALIVE_GOAL_DECISION_OUTPUT_SCHEMA }, signal, locale: "en",
             ...(choice.kind === "codex" ? { isolatedMcpConfig: true } : {}) };
+          bindSurfaceMemoryRequest(request,memory);
           const remove = registerAliveDecisionProfile(capability, request, { kind: "alive-no-tools", lifeAgentId: wake.lifeAgentId,
-            wakeId: wake.wakeId, resourceOwnerKey: agentContextSessionKey(capability), bindingKey, maxHistoryChars: 8192, signal,
-            assertCurrent() { agentContextHostBinding(capability).assertCurrent(); assertTurn(); },
-            retainResource() { try { assertOwner(); validateLife(options.db, heldLife.wake, options.now(), false); return lives.get(wake.lifeAgentId) === heldLife; } catch { return false; } },
+            wakeId: wake.wakeId, resourceOwnerKey: agentContextSessionKey(capability), bindingKey:digest([bindingKey,memory?.sourceKey??null]), maxHistoryChars: 8192, signal,
+            assertCurrent() { agentContextHostBinding(capability).assertCurrent(); assertTurn(); memory?.assertCurrent(); },
+            retainResource() { try { assertOwner(); validateLife(options.db, heldLife.wake, options.now(), false); memory?.assertCurrent(); return lives.get(wake.lifeAgentId) === heldLife; } catch { return false; } },
             registerResource(key, close) { assertTurn(); if (!key || heldLife.resources.size >= 1) fail("alive_decision_resource_owned");
               heldLife.resources.set(key, close); return () => { if (heldLife.resources.get(key) === close) heldLife.resources.delete(key); }; },
           });
           try {
+            memory?.assertCurrent();
             providerResult = await picked.runner(request, { onPartial: () => { nativeActivity = true; }, onStatus: () => {},
               onThinking: () => { nativeActivity = true; }, onUsage: () => { nativeActivity = true; },
               onNativeTurnController: value => { if (value) nativeActivity = true; },
@@ -272,6 +358,7 @@ export function createDaemonAliveDecisionPort(options: {
               if (toolNames.length < 16) toolNames.push(String(name).slice(0, 80));
               if (name !== "StructuredOutput") { controller.abort(new Error("alive-decision-tool-denied")); fail("alive_decision_tool_denied"); }
             } });
+            try {memory?.assertCurrent();}catch(error){providerResult={...providerResult,text:""};throw error;}
             if (providerResult.text || providerResult.observedUsage || providerResult.ownerControlTerminal === "completed") nativeActivity = true;
             return providerResult;
           } finally { remove(); }

@@ -7,7 +7,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { pluginTreeSignature } from "./tree-signature";
-import Database from "better-sqlite3";
+import type Database from "better-sqlite3";
 import { isPackagedRuntime, optionalElectronAppPath, userDataPath } from "../runtime-paths";
 import { configuredIdentity } from "../install-identity";
 
@@ -240,6 +240,8 @@ function acquireMaterializeLock(parent: string, slug: string): MaterializeLock {
     throw new Error("plugin materialize lock database must be a real file");
   }
   const token = randomUUID();
+  // Verification-only child processes do not open this writer lock or load a native SQLite binding.
+  const Database = require("better-sqlite3") as typeof import("better-sqlite3");
   const database = new Database(lockPath, { timeout: MATERIALIZE_LOCK_WAIT_MS });
   try {
     const opened = lstatIfPresent(lockPath);

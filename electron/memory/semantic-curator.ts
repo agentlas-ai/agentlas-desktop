@@ -10,6 +10,8 @@ import type { RawMemoryEvent } from "./events";
 import { parseMemoryEvents } from "./events";
 import { callConnectedModel } from "../system-agents/judgment";
 import { isJudgmentRefusal } from "../runtime/judgment-refusal";
+import { registerAutomaticMemoryRuntime } from "./automatic-curator";
+import { currentMemorySourceCustody, memorySourceSnapshot, assertMemorySourceCustody } from "./source-custody";
 
 export type SemanticDisposition = "accept" | "session" | "discard" | "defer";
 
@@ -32,27 +34,20 @@ export interface SemanticCurationOptions {
   semanticDecisions?: SemanticMemoryDecision[];
   semanticAttempted?: boolean;
   semanticFailed?: boolean;
+  automaticRuntimeKey?: string;
+  automaticOwnerNamespace?: string;
 }
 
-export const SEMANTIC_MEMORY_CURATOR_PROMPT = `# Agentlas Semantic Memory Curator
-
-You review proposed memory candidates after a completed model turn. You do not solve
-the original task and you never write storage. Judge meaning and future usefulness;
-the host applies deterministic privacy, ownership, deduplication, and write gates.
-When content_native is present, it is the authoritative original wording. Review
-both texts; defer contradictory English/original meanings instead of choosing one.
-
-Return JSON only: {"schema_version":"agentlas.semantic-curation.v1","decisions":[...]}
-Each decision must contain candidate_index, disposition (accept|session|discard|defer),
-resolved_scope (user_identity|team_memory|project|agent_repo|session|discard), and a
-short stable reason_code. Use user_identity only for a high-confidence stable operator
-fact/preference/decision/procedure. Use project for project-specific state. Use
-agent_repo only for portable agent-specific learning. A candidate that records a
-run's own tactical choice - holding or pausing work, a quota or limit the agent set for
-itself, a waiting window, keeping a gate closed - is session (reason_code
-own-tactical-choice), never a portable procedure: the next run must decide again from
-the owner's goal. Do not invent candidates, quote
-transcripts, or include paths, credentials, IDs, or explanations outside JSON.`;
+export const SEMANTIC_MEMORY_CURATOR_PROMPT = `judgment: semantic memory curation of proposed candidates after a completed turn; do not solve the task, never write storage
+focus: meaning and future usefulness; host applies privacy, ownership, dedup, write gates
+content_native: authoritative original wording; review both texts, defer on contradictory meaning
+output: JSON only {"schema_version":"agentlas.semantic-curation.v1","decisions":[...]}
+decision: candidate_index, disposition (accept|session|discard|defer), resolved_scope (user_identity|team_memory|project|agent_repo|session|discard), short stable reason_code
+user_identity: only high-confidence stable operator fact/preference/decision/procedure
+project: project-specific state
+agent_repo: only portable agent-specific learning
+own tactical choice (holding or pausing work, self-set quota or limit, waiting window, gate kept closed): session, reason_code own-tactical-choice; never a portable procedure
+no invented candidates, transcript quotes, paths, credentials, IDs, or text outside JSON`;
 
 function safeReason(value: unknown): string {
   const reason = typeof value === "string" ? value.trim().toLowerCase() : "";
@@ -171,6 +166,11 @@ export async function runSemanticMemoryReview(input: {
   sourceProvenance?: "task-force-synthesis";
   sourceSurface?: "automation-run";
 }): Promise<SemanticCurationOptions> {
+  const sourceCustody = currentMemorySourceCustody();
+  const automaticRuntimeKey = registerAutomaticMemoryRuntime(input.replyText, {
+    runner: input.runner, backendLabel: input.backendLabel, model: input.model,
+    effort: input.effort, env: input.env, locale: input.locale,
+  }, sourceCustody);
   const parsed = parseMemoryEvents(input.replyText);
   const request = buildSemanticCurationRequest(input.extraEvents?.length ? [...parsed.events, ...input.extraEvents] : parsed.events, {
     hasProject: input.hasProject,
@@ -178,7 +178,13 @@ export async function runSemanticMemoryReview(input: {
     sourceProvenance: input.sourceProvenance,
     ...(input.sourceSurface ? { sourceSurface: input.sourceSurface } : {}),
   });
-  if (request.reviewableIndices.length === 0) return {};
+  const automaticOwnerNamespace = memorySourceSnapshot(sourceCustody)?.ownerNamespace ?? "memory-source-unavailable";
+  const binding = { automaticRuntimeKey, automaticOwnerNamespace };
+  // Return the ORIGINAL binding even when stale. Throwing here would let
+  // callers' semantic-failure catch erase it and enter an unfenced policy lane.
+  try { assertMemorySourceCustody(sourceCustody); }
+  catch { return { ...binding, semanticAttempted: true, semanticFailed: true }; }
+  if (request.reviewableIndices.length === 0) return binding;
   try {
     const result = await runObservedRunnerAs("curator", "semantic-curator", input.runner, {
       systemPrompt: SEMANTIC_MEMORY_CURATOR_PROMPT,
@@ -190,11 +196,9 @@ export async function runSemanticMemoryReview(input: {
       signal: input.signal,
       permission: "read",
       env: withoutMcpTransportEnv(input.env),
-      // This is a host-owned post-turn review, not untrusted webpage input.
-      // Some exact runtimes (including Antigravity) cannot prove a zero-tool
-      // sandbox even after MCP transport is removed. Keep the review read-only
-      // and MCP-less without rejecting the selected runtime before it starts.
-      untrustedNoTools: false,
+      // Candidate text is untrusted source material. Runtimes that cannot
+      // provide a no-tools invocation defer to the configured judgment pool.
+      untrustedNoTools: true,
       chatId: `memory-curator:${randomUUID()}`,
       // The chat id above is never seen again, so a pooled process could never be reused.
       singleUse: true,
@@ -204,13 +208,13 @@ export async function runSemanticMemoryReview(input: {
       onPartial: () => undefined,
       onTool: () => undefined,
     });
-    if (input.signal?.aborted) return { semanticAttempted: true, semanticFailed: true };
+    if (input.signal?.aborted) return { ...binding, semanticAttempted: true, semanticFailed: true };
     if (result.failure) throw new ObservedRunnerFailureError(result.failure);
     const decisions = parseSemanticCurationResponse(result.text, request.reviewableIndices);
     if (decisions.length !== request.reviewableIndices.length) {
-      return { semanticAttempted: true, semanticFailed: true };
+      return { ...binding, semanticAttempted: true, semanticFailed: true };
     }
-    return { semanticDecisions: decisions, semanticAttempted: true, semanticFailed: false };
+    return { ...binding, semanticDecisions: decisions, semanticAttempted: true, semanticFailed: false };
   } catch (error) {
     /*
      * ★이 실행의 런타임이 격리를 못 한다고 해서 판정 자체가 죽어서는 안 된다.
@@ -232,14 +236,15 @@ export async function runSemanticMemoryReview(input: {
           input: request.prompt,
           locale: input.locale,
           signal: input.signal,
+          requireNoTools: true,
         });
         const decisions = text ? parseSemanticCurationResponse(text, request.reviewableIndices) : [];
         if (decisions.length === request.reviewableIndices.length) {
-          return { semanticDecisions: decisions, semanticAttempted: true, semanticFailed: false };
+          return { ...binding, semanticDecisions: decisions, semanticAttempted: true, semanticFailed: false };
         }
       } catch { /* 폴백의 폴백은 없다 — 아래 정책 경로가 받는다. */ }
     }
     console.warn(`[memory] semantic curator fell back to policy: ${error instanceof Error ? error.message : "unknown"}`);
-    return { semanticAttempted: true, semanticFailed: true };
+    return { ...binding, semanticAttempted: true, semanticFailed: true };
   }
 }

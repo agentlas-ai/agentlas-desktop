@@ -5,18 +5,25 @@ import net from "node:net";
 import type { Duplex } from "node:stream";
 import os from "node:os";
 import path from "node:path";
-import { openAiStrictSchemaOrNull, codexSystemPromptWithSchemaFallback } from "./strict-output-schema";
+import { openAiStrictSchemaOrNull } from "./strict-output-schema";
+import { observationSystemWithSchema } from "../../shared/runtime-capabilities";
 import type { RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
 import { aliveDecisionProfileForRequest, type AliveDecisionProfile } from "./alive-decision-context";
 import { agentContextNoToolsPacketForRequest, agentContextSessionKey } from "./agent-context";
 import { createCodexNoToolsProviderSession, CodexNoToolsSessionError,
   type CodexNoToolsProviderSession, type CodexNoToolsProviderSessionOptions } from "./codex-no-tools-session";
 
+/** Opaque complete host payload only; no inner producer lifetime or permission is inferred here. */
+export function composeCodexHostInstructions(req: Pick<RunnerRequest, "systemPrompt" | "outputSchema">): string {
+  return req.outputSchema && !openAiStrictSchemaOrNull(req.outputSchema.schema)
+    ? observationSystemWithSchema(req.systemPrompt, req.outputSchema.schema) : req.systemPrompt;
+}
+
 /** The subscription endpoint already used by Codex; never a caller-selected provider. */
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const MAX_WIRE_BYTES = 4 * 1024 * 1024;
-const NO_TOOLS_TIMEOUT_MS = 180_000;
+const NO_TOOLS_TIMEOUT_MS = 300_000;
 const DISABLED_FEATURES = ["apps", "browser_use", "browser_use_external", "computer_use", "image_generation",
   "goals", "in_app_browser", "chronicle", "multi_agent", "multi_agent_v2", "memories", "plugins", "skill_search",
   "tool_suggest", "sleep_tool", "workspace_dependencies", "worktrees", "view_image", "realtime_conversation",
@@ -186,7 +193,7 @@ export async function runCodexNoTools(
       // every native/global-rules/memory/tool-inventory input item; only Main's
       // exact instructions and evidence reach the model. ResponsesLite embeds
       // its native menu in additional_tools input frames as well as tools.
-      payload.instructions = codexSystemPromptWithSchemaFallback(req);
+      payload.instructions = composeCodexHostInstructions(req);
       payload.input = [{ type: "message", role: "user", content: [{ type: "input_text", text: req.userPrompt }] }];
       delete payload.previous_response_id;
       delete payload.access_programs;
@@ -308,7 +315,7 @@ export async function runCodexNoTools(
       return { text: "", failure: failure("codex_no_tools_custom_provider_unavailable", "unavailable") };
     }
     const instructions = path.join(home, "instructions.md");
-    await fs.writeFile(instructions, codexSystemPromptWithSchemaFallback(req), { mode: 0o600 });
+    await fs.writeFile(instructions, composeCodexHostInstructions(req), { mode: 0o600 });
     const schema = req.outputSchema ? openAiStrictSchemaOrNull(req.outputSchema.schema) : null;
     const schemaFile = schema ? path.join(home, "output-schema.json") : undefined;
     if (schemaFile) await fs.writeFile(schemaFile, JSON.stringify(schema), { mode: 0o600 });
@@ -462,7 +469,7 @@ function createAliveGateway(profile: Readonly<AliveDecisionProfile>, bindingKey:
       }
       let response: Awaited<ReturnType<CodexNoToolsProviderSession["exchange"]>>;
       try { response = await provider.exchange({ request: turn.req, packet: turn.packet, headers,
-        hostInstructions: codexSystemPromptWithSchemaFallback(turn.req), signal: turn.controller.signal,
+        hostInstructions: composeCodexHostInstructions(turn.req), signal: turn.controller.signal,
         assertCurrent() { if (currentAliveTurn(resource, profile) !== turn) throw new Error("codex_no_tools_cancelled"); } }); }
       catch (error) {
       if (error instanceof CodexNoToolsSessionError && error.preDispatch && error.httpStatus === 401 && turn.authRejectCount < 2) {
@@ -578,7 +585,7 @@ export async function runCodexAliveNoTools(
     return { text: "", failure: failure("codex_no_tools_custom_provider_unavailable", "unavailable") };
   }
   const bindingKey = crypto.createHash("sha256").update(JSON.stringify([profile.bindingKey, accountHome, authStorage,
-    req.model, req.effort, codexSystemPromptWithSchemaFallback(req), req.outputSchema,
+    req.model, req.effort, composeCodexHostInstructions(req), req.outputSchema,
     dependencies.residentFingerprint ?? (dependencies.resident ? "resident" : "exec")])).digest("hex");
   let resource = aliveGateways.get(profile.resourceOwnerKey);
   if (resource?.active) return { text: "", failure: failure("codex_no_tools_alive_busy", "unavailable"), ownerControlTerminal: "uncertain" };
@@ -601,7 +608,7 @@ export async function runCodexAliveNoTools(
     profile.assertCurrent(); if (req.signal?.aborted || gateway.closed) abort();
     if (controller.signal.aborted) return { text: "", failure: turn.failure, ownerControlTerminal: "uncertain" };
     const instructions = path.join(gateway.home, "instructions.md");
-    await fs.writeFile(instructions, codexSystemPromptWithSchemaFallback(req), { mode: 0o600 });
+    await fs.writeFile(instructions, composeCodexHostInstructions(req), { mode: 0o600 });
     const schema = req.outputSchema ? openAiStrictSchemaOrNull(req.outputSchema.schema) : null;
     const schemaFile = schema ? path.join(gateway.home, "output-schema.json") : undefined;
     if (schemaFile) await fs.writeFile(schemaFile, JSON.stringify(schema), { mode: 0o600 });
@@ -636,7 +643,7 @@ export async function runCodexAliveNoTools(
         }
         turn.nativeIds = Object.freeze({ threadId, turnId }); turn.resolveNativeStarted();
       }, baseUrl: gateway.baseUrl, home: gateway.home, accountHome, authStorage,
-      contextWindowTokens: window, systemPrompt: codexSystemPromptWithSchemaFallback(req), packet }) : await execute(args, request); }
+      contextWindowTokens: window, systemPrompt: composeCodexHostInstructions(req), packet }) : await execute(args, request); }
     catch (error) { if (!turn.failure) throw error; return { text: "", failure: turn.failure, ownerControlTerminal: "uncertain" }; }
     // Only the production callback's measured thread.started plus completed
     // native terminal can persist a handle; input IDs never fabricate a receipt.

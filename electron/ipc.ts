@@ -1,3 +1,4 @@
+import { withoutArchivedAgents } from "./archive/auto-archive";
 import { configuredNativeGuiControls } from "./invocation/native-gui-controls";
 import { ownerTurnStartsOnDesktop } from "./invocation/goal-owner-route";
 import { publishLegacyInvocationActiveChats, combinedInvocationActiveChatIds } from "./invocation/native-gui-public";
@@ -19,6 +20,7 @@ import { authorizeSupervisorNativeOrigin, supervisorNativeNoticePurpose, dispatc
   configureOneSupervisorNativeRuntime, callOneSupervisorRuntime, supervisorRuntimeMode } from "./one/supervisor-native-runtime";
 import { assertOneWindowChannel } from "./one-window-manager";
 import { registerOnePersonalDataIpc } from './one/personal-data-ipc';
+import { registerBusinessShippingIpc } from './business/shipping-console-ipc';
 import { recordAppControlRendererEvent, registerAppControlDomainIpc } from "./app-control/ipc-registry";
 import { registerAgentWorkspaceIpc } from "./agents/workspace-ipc";
 import { importDedicatedBrowserCookies, syncConnectBrowserSession } from "./browser/native-session-cookie-import";
@@ -43,6 +45,7 @@ import { developmentEffectsSuppressed, developmentIpcBoundary } from "./developm
 import { copyImageSource, saveImageSource } from "./media/image-actions";
 import { authorizeSourceSharingInCleanCopy } from "./hephaestus/source-consent";
 import { checkComputerUsePermissions } from "./mac-permissions";
+import { openSystemPermissionSettings, registerSystemPermissionIpc } from "./os-permission-settings";
 import type { IpcMainInvokeEvent } from "electron";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -169,6 +172,7 @@ import {
   removeServer,
   setServerEnabled,
 } from "./mcp-tools/registry";
+import { credentialVaultKey } from "./mcp-tools/credential-refs";
 import {
   installHubPlugin,
   listPendingHubPluginApprovals,
@@ -224,6 +228,7 @@ import {
 import { getRoute } from "./agents/routes";
 import { importLocalFolder } from "./agents/import-local";
 import { getDb } from "./store/db";
+import { createFreshReservationFrontier } from "./runtime/fresh-reservation-frontier";
 import { AutomationWorkspaceError, automationWorkspaceView, withOwnerAutomationWorkspaceIntent } from "./automation-workspace";
 import {
   canonicalInvocationRequestJson,
@@ -354,7 +359,6 @@ import type {
   OneArtifactPreviewRevokeV1,
 } from "../shared/types";
 import { resolveExperiencePackCreateIpcInput } from "./experience/access";
-import { getExperienceHubCatalog } from "./experience/hub-catalog";
 import {
   checkSafely as updaterCheck,
   getUpdaterState,
@@ -408,11 +412,8 @@ import {
 } from "./hub-bookmark-sync";
 import { claimQuest, getQuestClaimStatus, listQuests } from "./quests";
 import { listMemoryEntriesForAgentUi } from "./memory/store";
-import { importMemoryPreview, importMemoryApply } from "./memory/import";
+import { importMemoryPreview, importMemoryApply, captureMemoryImportOwner } from "./memory/import";
 import {
-  captureExperienceCandidate,
-  createExperienceExportIntent,
-  createExperiencePack,
   getExperienceIntakeDiagnostics,
   getExperienceOntologySummary,
   listExperienceCandidates,
@@ -420,8 +421,6 @@ import {
   listExperiencePacks,
   listExperiencePromotionReceipts,
   listLocalTasteDrafts,
-  promoteExperienceCandidate,
-  unsealExperienceCandidatePublic,
 } from "./experience/store";
 import { listAgentUsageSummary, setAgentBookmark } from "./agents/usage";
 import {
@@ -430,23 +429,15 @@ import {
 } from "./agents/borrowed-profiles";
 import { getExperienceOntologyGraphSnapshot } from "./experience/relation-index";
 import {
-  confirmTasteGeneralization,
   listTasteChipWorkflows,
-  prepareTastePreviews,
-  saveTasteGeneralization,
-  uploadTasteDraft,
 } from "./experience/taste-workflow";
 import {
-  confirmOperationalPublicProjection,
   listOperationalPublicProjections,
-  saveOperationalPublicProjection,
 } from "./experience/operational-generalization";
 import { getAgentLearningSummary } from "./agents/learning-summary";
 import {
-  exportExperienceFromCloud,
   listExperienceCloudUploads,
   reconcileExperienceCloudUpload,
-  saveExperienceToCloud,
   withdrawExperienceFromCloud,
 } from "./experience/cloud";
 import { getDreamingStatus, setDreamingEnabled } from "./memory/dreaming";
@@ -477,7 +468,6 @@ import {
   provisionProjectOntology,
   syncProjectOntology,
 } from "./ontology/project-runtime";
-import { experienceChipsRetired } from "./experience/retired";
 import { getProjectTimelineSnapshot } from "./memory/project-timeline";
 import {
   createProject,
@@ -629,6 +619,8 @@ import {
   useOneMemoryCandidateOnce,
 } from "./one/memory-candidates";
 import { forgetOneDurableMemoryEntry, getOneMemoryMap, listOneDurableMemoryEntries } from "./one/memory-map";
+import { registerDesktopMemoryInspectorIpc } from "./one/memory-inspector";
+import { onAuthSessionOwnershipChanged } from "./auth";
 import {
   acceptOneSuggestionForReviewFromUser,
   dismissOneSuggestion,
@@ -1780,8 +1772,10 @@ export function registerIpcHandlers(): void {
   registerAgentWorkspaceIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerOneSupervisorIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerOnePersonalDataIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
+  registerBusinessShippingIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerOneHarnessIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerOneContextIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender, openPermissions: openOneContextPermissions });
+  registerSystemPermissionIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerBrowserUiIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerBrowserAutofillIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerBrowserProfileImportIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
@@ -3060,6 +3054,7 @@ export function registerIpcHandlers(): void {
   //   dry-run 미리보기(어느 멤버·kind로 들어갈지) + 적용. 미리보기는 경로 미지정 시
   //   폴더 선택 대화상자를 연다. 원본 경로/자격증명은 렌더러로 반환하지 않는다.
   ipcMain.handle("memory:import-preview", async (event, agentId: string, sourcePath?: string) => {
+    const assertCurrent = captureMemoryImportOwner();
     let resolvedPath = typeof sourcePath === "string" ? sourcePath.trim() : "";
     if (!resolvedPath) {
       const win = BrowserWindow.fromWebContents(event.sender);
@@ -3071,14 +3066,13 @@ export function registerIpcHandlers(): void {
       if (picked.canceled || picked.filePaths.length !== 1) return null;
       resolvedPath = picked.filePaths[0];
     }
-    return importMemoryPreview({ agentId, sourcePath: resolvedPath });
+    assertCurrent();
+    return importMemoryPreview({ agentId, sourcePath: resolvedPath }, { assertCurrent });
   });
   registerAppControlDomainIpc(ipcMain, "memory:import-apply", (agentId: string, sourcePath: string) =>
     importMemoryApply({ agentId, sourcePath: String(sourcePath ?? "").trim() }));
 
   // Legacy history remains readable. Retired writes stop before probes or Hub calls.
-  registerAppControlDomainIpc(ipcMain, "experience:hubCatalog", () => getExperienceHubCatalog());
-  registerAppControlDomainIpc(ipcMain, "experience:createPack", () => experienceChipsRetired());
   registerAppControlDomainIpc(ipcMain, "experience:listPacks", (input) => listExperiencePacks(input));
   registerAppControlDomainIpc(ipcMain, "experience:ontologySummary", (agentId: string) => getExperienceOntologySummary(agentId));
   registerAppControlDomainIpc(ipcMain, "experience:ontologyGraph", (agentId: string) =>
@@ -3087,25 +3081,11 @@ export function registerIpcHandlers(): void {
   registerAppControlDomainIpc(ipcMain, "agents:exact-bindings", () => listInstalledAgentHubBindings());
   registerAppControlDomainIpc(ipcMain, "agents:borrowed-ontology-graph", (profileId: string) =>
     getBorrowedAgentOntologyGraph(profileId));
-  registerAppControlDomainIpc(ipcMain, "experience:hubProjection", () => experienceChipsRetired());
-  registerAppControlDomainIpc(ipcMain, "experience:hubResolveAttach", () => experienceChipsRetired());
-  ipcMain.handle("experience:captureFromMemory", (_e, input) => captureExperienceCandidate(input));
   registerAppControlDomainIpc(ipcMain, "experience:listCandidates", (packId: string) => listExperienceCandidates(packId));
   registerAppControlDomainIpc(ipcMain, "experience:listOperationalPublicProjections", (packId: string) =>
     listOperationalPublicProjections(packId));
-  registerAppControlDomainIpc(ipcMain, "experience:saveOperationalPublicProjection", (input) =>
-    saveOperationalPublicProjection(input));
-  registerAppControlDomainIpc(ipcMain, "experience:confirmOperationalPublicProjection", (input) =>
-    confirmOperationalPublicProjection(input));
   registerAppControlDomainIpc(ipcMain, "experience:listTasteDrafts", (agentId: string) => listLocalTasteDrafts(agentId));
   registerAppControlDomainIpc(ipcMain, "experience:listTasteWorkflows", (agentId: string) => listTasteChipWorkflows(agentId));
-  registerAppControlDomainIpc(ipcMain, "experience:saveTasteGeneralization", (input) => saveTasteGeneralization(input));
-  registerAppControlDomainIpc(ipcMain, "experience:confirmTasteGeneralization", (input) => confirmTasteGeneralization(input));
-  ipcMain.handle("experience:pickTastePreviews", () => experienceChipsRetired());
-  ipcMain.handle("experience:prepareTastePreviews", (_e, input) => prepareTastePreviews(input));
-  registerAppControlDomainIpc(ipcMain, "experience:uploadTasteDraft", (input) => uploadTasteDraft(input));
-  registerAppControlDomainIpc(ipcMain, "experience:promote", (input) => promoteExperienceCandidate(input));
-  registerAppControlDomainIpc(ipcMain, "experience:unsealPublic", (input) => unsealExperienceCandidatePublic(input));
   registerAppControlDomainIpc(ipcMain, "experience:intake-diagnostics", (agentId: string) =>
     getExperienceIntakeDiagnostics(agentId));
   registerAppControlDomainIpc(ipcMain, "experience:listPromotionReceipts", (packId: string) =>
@@ -3116,14 +3096,10 @@ export function registerIpcHandlers(): void {
   registerAppControlDomainIpc(ipcMain, "agents:usage-summary", () => listAgentUsageSummary());
   registerAppControlDomainIpc(ipcMain, "agents:set-bookmark", (agentId: string, bookmarked: boolean) =>
     setAgentBookmark(agentId, bookmarked === true));
-  registerAppControlDomainIpc(ipcMain, "experience:createExportIntent", (input) => createExperienceExportIntent(input));
   registerAppControlDomainIpc(ipcMain, "experience:listExportIntents", (packId: string) => listExperienceExportIntents(packId));
-  registerAppControlDomainIpc(ipcMain, "experience:cloudSave", (input: ExperienceCloudSaveInput) => saveExperienceToCloud(input));
   registerAppControlDomainIpc(ipcMain, "experience:cloudList", (packId: string) => listExperienceCloudUploads(packId));
   registerAppControlDomainIpc(ipcMain, "experience:cloudReconcile", (input: ExperienceCloudReconcileInput) =>
     reconcileExperienceCloudUpload(input.localUploadId));
-  registerAppControlDomainIpc(ipcMain, "experience:cloudExport", (input: ExperienceCloudReconcileInput) =>
-    exportExperienceFromCloud(input.localUploadId));
   registerAppControlDomainIpc(ipcMain, "experience:cloudWithdraw", (input: ExperienceCloudWithdrawInput) =>
     withdrawExperienceFromCloud(input));
 
@@ -3401,8 +3377,11 @@ export function registerIpcHandlers(): void {
    * 개발 실행은 macOS가 서로 다른 앱으로 취급한다(오너가 "이미 켰는데?"라고 한 실측 혼선의 뿌리).
    */
   registerAppControlDomainIpc(ipcMain, "system:computerUsePermissions", () => checkComputerUsePermissions());
-  ipcMain.handle("system:openAccessibilitySettings", async () => {
-    await shell.openExternal("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility");
+  ipcMain.handle("system:openAccessibilitySettings", async event => {
+    assertTrustedSitePublishIpcSender(event);
+    const state = checkComputerUsePermissions();
+    const result = await openSystemPermissionSettings(state.accessibility && !state.screenRecording ? "screen" : "accessibility");
+    if (!result.ok) throw new Error(result.error);
   });
   registerAppControlDomainIpc(ipcMain, "system:concurrencyInfo", () => getAgentConcurrencyInfo());
   // 브리핑 인터뷰 모드 (smart / build-only / off)
@@ -3461,7 +3440,9 @@ export function registerIpcHandlers(): void {
       const catalog = server.catalogId ? getCatalogEntry(server.catalogId) : null;
       for (const key of server.envKeys) {
         const req = catalog?.envRequirements.find((r) => r.key === key);
-        const entry = map.get(key) ?? { hasValue: false, requiredBy: [] };
+        // A connection that holds its own account key is listed under that Vault key, not the global name (NH29).
+        const vaultKey = credentialVaultKey(server, key);
+        const entry = map.get(vaultKey) ?? { hasValue: false, requiredBy: [] };
         entry.requiredBy.push({
           agentId: `mcp:${server.id}`,
           agentName: `${server.name} (MCP)`,
@@ -3471,7 +3452,7 @@ export function registerIpcHandlers(): void {
           hint: req?.hint,
           hintEn: req?.hintEn,
         });
-        map.set(key, entry);
+        map.set(vaultKey, entry);
       }
     }
     // 멀티모달 전역 fallback provider가 요구하는 키도 환경변수 화면에 노출.
@@ -3503,6 +3484,30 @@ export function registerIpcHandlers(): void {
     { listKeys: listEnvKeys, hasValue: hasEnvVar, preview: async () => null },
   )).map(({ key, requiredBy, hasValue }) => ({ key, requiredBy, hasValue })));
 
+  // ── harness capability ports: UI / SDK / One app control use the same dispatcher as the model's harness_call ──
+  const harnessUiContext = { chatId: "ui", runId: "ui" };
+  registerAppControlDomainIpc(ipcMain, "harness:search", async (query: unknown, kind?: unknown) =>
+    (await import("./harness/capability-ports")).searchHarness(typeof query === "string" ? query.slice(0, 500) : "", typeof kind === "string" ? kind as never : undefined));
+  registerAppControlDomainIpc(ipcMain, "harness:describe", async (id: unknown) =>
+    (await import("./harness/capability-ports")).describeHarness(typeof id === "string" ? id : "", harnessUiContext));
+  registerAppControlDomainIpc(ipcMain, "harness:call", async (operation: unknown, args?: unknown) =>
+    (await import("./harness/capability-ports")).callHarnessPort(typeof operation === "string" ? operation : "",
+      args && typeof args === "object" && !Array.isArray(args) ? args as Record<string, unknown> : {}, harnessUiContext));
+
+  // UI instances (inline result views): the renderer lists a chat's instances and hears every change; actions go
+  // through harness:call "ui.action" (chat "ui" + args.chatId), i.e. the same dispatcher as everything else.
+  registerAppControlDomainIpc(ipcMain, "harness:uiList", async (chatId: unknown) =>
+    (await import("./harness/ui-instances")).listUiInstances(typeof chatId === "string" ? chatId : ""));
+  void import("./harness/ui-instances").then(({ onUiInstanceEvent, watchUiInstanceStore }) => {
+    onUiInstanceEvent((event) => {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) { try { win.webContents.send("harness:uiChanged", event); } catch { /* renderer may be closing */ } }
+      }
+    });
+    // Instances the daemon writes reach the renderer too.
+    return watchUiInstanceStore();
+  }).catch(() => undefined);
+
   // ── multimodal global fallback ─────────────────────────
   registerAppControlDomainIpc(ipcMain, "multimodal:listProviders", () => listMultimodalProviders());
   registerAppControlDomainIpc(ipcMain, "multimodal:getSettings", () => getMultimodalSettings());
@@ -3519,28 +3524,17 @@ export function registerIpcHandlers(): void {
   registerAppControlDomainIpc(ipcMain, "multimodal:videoKeyStatus", () => videoKeyStatus());
 
   // ── team (설치된 에이전트) ─────────────────────────────
-  registerAppControlDomainIpc(ipcMain, "team:list", () => listInstalledAgents());
+  // Archived agents (30 days unused) stay out of the default list; lookups by id and routing still reach them.
+  registerAppControlDomainIpc(ipcMain, "team:list", () => withoutArchivedAgents(listInstalledAgents()));
   registerAppControlDomainIpc(ipcMain, "team:install", (slug: string) => installAgent(slug));
   registerAppControlDomainIpc(ipcMain, "team:installMine", (id: string) => installMyAgent(id));
   // 봇 삭제 확인 문구용 정확한 수 — "좌석 N곳이 빈 자리가 됩니다. 대화 M개는 그대로 남습니다".
   ipcMain.handle("team:uninstallPreview", (_e, id: string) => agentRemovalPreview(id));
-  ipcMain.handle("team:uninstall", async (_e, id: string, options?: { removeSource?: boolean }) => {
-    const existing = getAgentById(id);
-    if (!existing) return { removed: false, sourceMovedToTrash: false };
-    const route = getRoute(id);
-    uninstallAgent(id);
-    let sourceMovedToTrash = false;
-    if (options?.removeSource && route?.source === "local-import" && fs.existsSync(route.path)) {
-      try {
-        await shell.trashItem(route.path);
-        sourceMovedToTrash = true;
-      } catch {
-        // Registry removal remains complete; the result tells the renderer that
-        // the original folder still needs attention.
-      }
-    }
-    return { removed: true, sourceMovedToTrash };
-  });
+  // One implementation shared with the harness port agent.uninstall (harness/settings-agent-ops.ts).
+  ipcMain.handle("team:uninstall", async (_e, id: string, options?: { removeSource?: boolean }) =>
+    (await import("./harness/settings-agent-ops")).performAgentUninstall(id, options));
+  ipcMain.handle("settings:languageApplied", async (e, revision: unknown) =>
+    (await import("./harness/settings-agent-ops")).acknowledgeLanguageApplied(typeof revision === "number" ? revision : -1, `window:${e.sender.id}`));
   registerAppControlDomainIpc(ipcMain, "team:setLocalDisplayName", (id: string, value: string) =>
     setAgentLocalDisplayName(id, value),
   );
@@ -4297,7 +4291,7 @@ export function registerIpcHandlers(): void {
     if (typeof chatId === "string" && chatId) revokeChatAlwaysApproval(chatId.slice(0, 128));
     return listAlwaysApprovedChatIds();
   });
-  registerAppControlDomainIpc(ipcMain, "runtime:listToolApprovals", () => [...new Map([...listPendingToolApprovals(), ...(configuredNativeGuiControls()?.listApprovals() ?? [])].map(request => [request.id, request])).values()]);
+  registerAppControlDomainIpc(ipcMain, "runtime:listToolApprovals", async () => [...new Map([...listPendingToolApprovals(), ...(configuredNativeGuiControls()?.listAvailableApprovals() ?? [])].map(request => [request.id, request])).values()]);
   ipcMain.handle("runtime:getToolApprovalResolution", (_e, id: string) => {
     const native = configuredNativeGuiControls();
     if (native?.hasApproval(id)) return native.approvalReceipt(_e, id);
@@ -5090,6 +5084,7 @@ export function registerIpcHandlers(): void {
   registerAppControlDomainIpc(ipcMain, "oneActivation:resolveWork", (input) => resolveOneActivationWork(input));
   registerAppControlDomainIpc(ipcMain, "oneActivation:skip", (input) => skipOneActivation(input));
   registerAppControlDomainIpc(ipcMain, "oneActivation:resolveMobile", (input) => resolveOneActivationMobile(input));
+  registerDesktopMemoryInspectorIpc({ipc:ipcMain,assertTrustedSender:assertTrustedSitePublishIpcSender,onOwnerChanged:onAuthSessionOwnershipChanged});
   registerAppControlDomainIpc(ipcMain, "oneMemory:getState", () => getOneMemoryState());
   registerAppControlDomainIpc(ipcMain, "oneMemory:getMap", () => getOneMemoryMap());
   registerAppControlDomainIpc(ipcMain, "oneMemory:listEntries", (input?: { limit?: number }) => listOneDurableMemoryEntries(input?.limit));
@@ -5694,7 +5689,7 @@ export function registerIpcHandlers(): void {
     const sentence=String(request ?? "").trim();
     if (!sentence) return {ok:false as const,code:"ARCHITECT_NO_REQUEST",reason:L("변경 요청이 비어 있습니다.","The change request is empty."),nextAction:""};
     const controller=new AbortController(), release=supervision.bindGraphProposalAbort(id,controller);
-    const deadline=Date.now()+120_000;
+    const deadline=Date.now()+300_000;
     const timer=setTimeout(()=>controller.abort(new Error("GRAPH_PROPOSAL_TIMEOUT")),Math.max(0,deadline-Date.now()));
     try {
       const base=supervision.captureGraphProposalBase(id);
@@ -5705,6 +5700,7 @@ export function registerIpcHandlers(): void {
         if (controller.signal.aborted || Date.now()>=deadline) throw new supervision.GraphSupervisionError("GRAPH_PROPOSAL_TIMEOUT");
         const detailed=await awaitConnectedModelRunnerWithAbortGrace(callConnectedModelDetailed({
           systemPrompt:architect.buildGraphArchitectPrompt(base.graph,base.goal), input:sentence.slice(0,4000)+feedback,
+          outputSchema: { name: "agentlas_graph_patch_proposal_v1", schema: architect.GRAPH_PATCH_OUTPUT_SCHEMA },
           runtimeSelection: base.runtimeSelection,
           pinFallback: "pin_then_worker_pool",
           authoring: true, signal:controller.signal,timeoutMs:Math.max(1,deadline-Date.now()),
@@ -5760,8 +5756,8 @@ export function registerIpcHandlers(): void {
       awaitConnectedModelRunnerWithAbortGrace,
     } = require("./system-agents/judgment") as typeof import("./system-agents/judgment");
     const { MAX_SELF_CORRECTIONS } = require("./workflow/graph-interview") as typeof import("./workflow/graph-interview");
-    // 한 번의 사람 답변은 스스로 고치는 재시도까지 모두 합쳐 2분 안에 끝난다.
-    // 각 재시도마다 2분을 새로 주면 화면의 남은 시간과 실제 대기가 서로 다른 약속이 된다.
+    // One owner answer shares a five-minute deadline across repair attempts;
+    // retries never renew the request's cancellation and lifetime boundary.
     const interviewDeadline = requestOwner.deadline;
 
     /**
@@ -5796,8 +5792,9 @@ export function registerIpcHandlers(): void {
         const seenTitles: string[] = [];
         let partialBuf = "";
         const detailedTurn = await awaitConnectedModelRunnerWithAbortGrace(callConnectedModelDetailed({
-          systemPrompt: "You return only compact JSON. No prose.",
+          systemPrompt: "output: compact JSON only",
           input: buildInterviewPrompt(attempt, currentUiLocale()),
+          outputSchema: { name: "agentlas_graph_interview_v1", schema: (await import("../shared/graph-authoring")).GRAPH_INTERVIEW_OUTPUT_SCHEMA },
           timeoutMs: Math.max(1, interviewDeadline - Date.now()),
           signal: requestOwner.signal,
           // 그래프를 **짓는** 호출이다 — 조회 도구와 이미 동의된 MCP 가 함께 간다.
@@ -6244,15 +6241,11 @@ export function registerIpcHandlers(): void {
     // 수동 실행은 실제 스케줄러의 접수·최종 상태를 돌려준다. 버튼 클릭 자체를 성공으로
     // 간주하면 리스 충돌이나 실행 실패가 "시작됨"으로 보이므로 fire-and-forget하지 않는다.
     const dryRun = opts?.dryRun === true;
-    // An uncertain live occurrence must block another live replay, but it must
-    // not block a side-effect-proof simulation used to diagnose the graph.
-    // runGraph also mode-matches durable checkpoints, so this simulation starts
-    // a fresh occurrence and can never inherit or consume the live coordinate.
-    if (!dryRun && opts?.fresh !== true && getAutomationGraphReconciliation(id)) {
-      throw new Error("automation_reconciliation_pending");
-    }
+    // This trusted button invocation is a new owner request. Historical effects
+    // stay on their original occurrence; they do not veto this new request.
+    // Explicit reconciliation uses its separate same-occurrence resume path.
     const { runAutomationNow } = await import("./automation-scheduler");
-    const result = await runAutomationNow(id, { ...(dryRun ? { dryRun: true } : {}), ...(opts?.fresh === true ? { fresh: true } : {}) }, admitMainAutomation(id));
+    const result = await runAutomationNow(id, { ...(dryRun ? { dryRun: true } : {}), fresh: true }, admitMainAutomation(id));
     if (!result.accepted) {
       const error = new Error("automation_run_not_accepted") as Error & { code?: string };
       error.code = "automation_run_not_accepted";
@@ -7083,6 +7076,8 @@ export function registerIpcHandlers(): void {
       throw new Error("invocation_admission_chat_pending");
     }
     let durableAdmission: InvocationAdmissionIdentity | null = null;
+    let reservationFrontier: ReturnType<typeof createFreshReservationFrontier> | null = null;
+    let localReservationRefusalReason = "renderer_local_setup_refused";
     const reserveAdmission = (): InvocationAdmissionIdentity => {
       if (durableAdmission) return durableAdmission;
       const candidate = {
@@ -7096,6 +7091,17 @@ export function registerIpcHandlers(): void {
         throw new Error(`invocation_admission_${reserved.kind === "conflict" ? reserved.reason : reserved.admission.status}`);
       }
       durableAdmission = candidate;
+      reservationFrontier = createFreshReservationFrontier({
+        tryReject: () => getDb().transaction(() => {
+          // Local setup has not claimed a writer. Any exact run owner is not
+          // this fresh reservation's authority, including legacy/foreign rows.
+          if (createInvocationRunOwnerStore({ getDb }).getOwnerByRunId(candidate.runId)) return false;
+          return decideInvocationAdmission({ ...candidate, decision: "rejected", reasonCode: localReservationRefusalReason,
+            noStartProof: { kind: "owner-start-boundary-not-crossed", verifiedOwnerProcessEpoch: candidate.ownerProcessEpoch } }).kind === "rejected";
+        }).immediate(),
+        schedule: (retry, delayMs) => { setTimeout(retry, delayMs).unref(); },
+        onFailure: () => console.warn("[invocation] exact unstarted renderer reservation cleanup pending", { runId: candidate.runId }),
+      });
       return candidate;
     };
     // One's intent and personal-memory judges belong to the One surface only.
@@ -7181,22 +7187,17 @@ export function registerIpcHandlers(): void {
       } catch (cause) {
         // No call to start() has happened. Close only this proven pre-start
         // admission; a failed reservation must not strand the chat pending.
-        const rejected = decideInvocationAdmission({
-          ...acceptedAdmission, decision: "rejected", reasonCode: "one_preflight_parent_reservation_refused",
-          noStartProof: { kind: "owner-start-boundary-not-crossed",
-            verifiedOwnerProcessEpoch: invocationOwnerEpoch },
-        });
-        if (rejected.kind !== "rejected") {
-          throw new Error("one_preflight_parent_reservation_rejection_failed", { cause });
-        }
+        localReservationRefusalReason = "one_preflight_parent_reservation_refused";
+        reservationFrontier!.closeBeforeSource();
         holdOnePreflightSubmission(preflightSubmissionId);
         throw cause;
       }
     }
     try {
-      const startResult = nativeOwner
+      const localPreparation = nativeOwner ? undefined : createRendererInvocationPreparation(acceptedAdmission);
+      const startResult = reservationFrontier!.enterSource(() => nativeOwner
         ? nativeOwner.startReserved(_event, request, mainAdmission, acceptedAdmission)
-        : invocationService.startNativePrepared(request, createRendererInvocationPreparation(acceptedAdmission), mainAdmission, acceptedAdmission);
+        : invocationService.startNativePrepared(request, localPreparation!, mainAdmission, acceptedAdmission));
       // Parent capture and ordered signed start packet precede this wakeup.
       // Intake is independent of the preparation/start result ACK.
       if (nativeOwner && preflightSubmissionId) dispatchOnePreflightSteers(preflightSubmissionId);
@@ -7214,6 +7215,9 @@ export function registerIpcHandlers(): void {
       }
       return started;
     } catch (cause) {
+      // Only local setup before source entry is ours to reject. An invoked
+      // source owns its actual no-start proof, including synchronous throws.
+      reservationFrontier!.closeBeforeSource();
       // A refusal that only means "not ready yet" is retried by the send queue, which saves the message once itself.
       if (isTransientSendRefusal(cause) && canQueuePendingSend(request)) throw cause;
       // The renderer has already accepted and displayed this turn. Several
@@ -7272,15 +7276,15 @@ export function registerIpcHandlers(): void {
     const durable = await durableOwnerTextRoutes().currentTurn(_event, chatId);
     if (durable !== NOT_DAEMON_OWNED) return durable;
     const native = configuredNativeGuiControls();
-    if (native && (native.hasChat(chatId) || configuredNativeGuiOwner()?.retainedChatIds().includes(chatId))) return native.currentTurn(_event, chatId);
+    if (native && (native.hasChat(chatId) || configuredNativeGuiOwner()?.activeAuthorityChatIds().includes(chatId))) return native.currentTurn(_event, chatId);
     return invocationCurrentTurnControl.currentTurn(chatId);
   });
   const steerCurrentTurnFromRenderer = async (_event: IpcMainInvokeEvent, input: import("../shared/types").InvocationCurrentTurnSteerRequest) => {
     const durable = await durableOwnerTextRoutes().steerCurrentTurn(_event, input);
     if (durable !== NOT_DAEMON_OWNED) return durable;
     const owner = configuredNativeGuiOwner(), controls = configuredNativeGuiControls();
-    if (controls && (controls.hasChat(input.chatId) || owner?.retainedChatIds().includes(input.chatId))) {
-      const binding = owner?.retainedChatIds().includes(input.chatId) ? owner.capturedTextBinding(input.chatId, input.expectedRunId) : controls.observedTextBinding(_event,input.chatId);
+    if (controls && (controls.hasChat(input.chatId) || owner?.activeAuthorityChatIds().includes(input.chatId))) {
+      const binding = owner?.activeAuthorityChatIds().includes(input.chatId) ? owner.capturedTextBinding(input.chatId, input.expectedRunId) : controls.observedTextBinding(_event,input.chatId);
       if(binding.runId!==input.expectedRunId)throw new Error("invocation_steer_stale_run");
       return controls.ownerText(_event,binding,input.intentId,input.text,"current").then(r=>({chatId:r.chatId,intentId:r.intentId,runId:r.runId,promptHash:r.promptHash,messageId:r.messageId,status:r.sourceStatus,...(r.code?{code:r.code}:{})}));
     }
@@ -7317,7 +7321,7 @@ export function registerIpcHandlers(): void {
     const durable = await durableOwnerTextRoutes().currentTurnSteerReceipt(_event, input);
     if (durable !== NOT_DAEMON_OWNED) return durable;
     const owner=configuredNativeGuiOwner(),controls=configuredNativeGuiControls();
-    if(controls&&(controls.hasChat(input.chatId)||owner?.retainedChatIds().includes(input.chatId))){const binding=owner?.retainedChatIds().includes(input.chatId)?owner.capturedTextBinding(input.chatId):controls.observedTextBinding(_event,input.chatId);return await controls.ownerTextReceipt(_event,binding,input.intentId).then(r=>r?{chatId:r.chatId,intentId:r.intentId,runId:r.runId,promptHash:r.promptHash,messageId:r.messageId,status:r.sourceStatus,...(r.code?{code:r.code}:{})}:null);}
+    if(controls&&(controls.hasChat(input.chatId)||owner?.activeAuthorityChatIds().includes(input.chatId))){const binding=owner?.activeAuthorityChatIds().includes(input.chatId)?owner.capturedTextBinding(input.chatId):controls.observedTextBinding(_event,input.chatId);return await controls.ownerTextReceipt(_event,binding,input.intentId).then(r=>r?{chatId:r.chatId,intentId:r.intentId,runId:r.runId,promptHash:r.promptHash,messageId:r.messageId,status:r.sourceStatus,...(r.code?{code:r.code}:{})}:null);}
     return invocationCurrentTurnControl.currentTurnSteerReceipt(input.chatId, input.intentId);
     } catch (cause) {
       if (isTransientSendRefusal(cause)) return null;
@@ -7329,9 +7333,9 @@ export function registerIpcHandlers(): void {
     const durable = await durableOwnerTextRoutes().steer(_event, request, intentId);
     if (durable !== NOT_DAEMON_OWNED) return durable;
     const owner=configuredNativeGuiOwner(),controls=configuredNativeGuiControls();
-    if(controls&&(controls.hasChat(request.chatId)||owner?.retainedChatIds().includes(request.chatId))){
+    if(controls&&(controls.hasChat(request.chatId)||owner?.activeAuthorityChatIds().includes(request.chatId))){
       const intent=intentId??randomUUID(), kind=request.steeringMode==="interrupt"?"interrupt":"queue";
-      if(owner?.retainedChatIds().includes(request.chatId)){const binding=owner.textInputBinding(_event,request);return controls.ownerText(_event,binding,intent,request.userPrompt,kind).then(r=>r.result);}
+      if(owner?.activeAuthorityChatIds().includes(request.chatId)){const binding=owner.textInputBinding(_event,request);return controls.ownerText(_event,binding,intent,request.userPrompt,kind).then(r=>r.result);}
       return controls.recoveredTextBinding(_event,request).then(binding=>controls.ownerText(_event,binding,intent,request.userPrompt,kind)).then(r=>r.result);
     }
     // A direction for an idle chat whose turns start in the daemon would start a turn here, and this process's
@@ -7366,7 +7370,7 @@ export function registerIpcHandlers(): void {
     const durable = await durableOwnerTextRoutes().steerReceipt(_event, input);
     if (durable !== NOT_DAEMON_OWNED) return durable;
     const owner=configuredNativeGuiOwner(),controls=configuredNativeGuiControls();
-    if(controls&&(controls.hasChat(input.chatId)||owner?.retainedChatIds().includes(input.chatId))){const binding=owner?.retainedChatIds().includes(input.chatId)?owner.capturedTextBinding(input.chatId):controls.observedTextBinding(_event,input.chatId);return await controls.ownerTextReceipt(_event,binding,input.intentId).then(r=>r?.result??null);}
+    if(controls&&(controls.hasChat(input.chatId)||owner?.activeAuthorityChatIds().includes(input.chatId))){const binding=owner?.activeAuthorityChatIds().includes(input.chatId)?owner.capturedTextBinding(input.chatId):controls.observedTextBinding(_event,input.chatId);return await controls.ownerTextReceipt(_event,binding,input.intentId).then(r=>r?.result??null);}
     return invocationService.ownerSteerReceipt(input.chatId, input.intentId);
     } catch (cause) {
       // A receipt lookup that cannot be answered right now is "no receipt yet", not a failure to report.
@@ -7394,7 +7398,7 @@ export function registerIpcHandlers(): void {
       const durable = await durableOwnerTextRoutes().unsteer(_event, req);
       if (durable !== NOT_DAEMON_OWNED) return durable;
       const owner=configuredNativeGuiOwner(),controls=configuredNativeGuiControls();
-      if(controls&&(controls.hasChat(req.chatId)||owner?.retainedChatIds().includes(req.chatId))){const binding=owner?.retainedChatIds().includes(req.chatId)?owner.capturedTextBinding(req.chatId):controls.observedTextBinding(_event,req.chatId);return controls.ownerTextUnsteer(_event,binding,req.position,req.text);}
+      if(controls&&(controls.hasChat(req.chatId)||owner?.activeAuthorityChatIds().includes(req.chatId))){const binding=owner?.activeAuthorityChatIds().includes(req.chatId)?owner.capturedTextBinding(req.chatId):controls.observedTextBinding(_event,req.chatId);return controls.ownerTextUnsteer(_event,binding,req.position,req.text);}
       return invocationService.unsteer(req.chatId,req.position,req.text);
     },
   );
@@ -7405,7 +7409,7 @@ export function registerIpcHandlers(): void {
     const durable = await durableOwnerTextRoutes().attach(_event, chatId, options?.includeEvents !== false);
     if (durable !== NOT_DAEMON_OWNED) return durable;
     const owner=configuredNativeGuiOwner(),controls=configuredNativeGuiControls();
-    if(controls&&(controls.hasChat(chatId)||owner?.retainedChatIds().includes(chatId))){const binding=owner?.retainedChatIds().includes(chatId)?owner.capturedTextBinding(chatId):controls.observedTextBinding(_event,chatId);return controls.ownerTextAttach(_event,binding,options?.includeEvents!==false);}
+    if(controls&&(controls.hasChat(chatId)||owner?.activeAuthorityChatIds().includes(chatId))){const binding=owner?.activeAuthorityChatIds().includes(chatId)?owner.capturedTextBinding(chatId):controls.observedTextBinding(_event,chatId);return controls.ownerTextAttach(_event,binding,options?.includeEvents!==false);}
     return invocationService.attach(chatId, {includeEvents:options?.includeEvents!==false});
   };
   // "Not attachable right now" (the run just ended, the channel is reattaching) is the same answer as "no run": nothing to show.
@@ -7474,7 +7478,7 @@ export function registerIpcHandlers(): void {
     const durable = await durableOwnerTextRoutes().steeringRecovery(_event, chatId);
     if (durable !== NOT_DAEMON_OWNED) return durable;
     const owner=configuredNativeGuiOwner(),controls=configuredNativeGuiControls();
-    if(controls&&(controls.hasChat(chatId)||owner?.retainedChatIds().includes(chatId))){const binding=owner?.retainedChatIds().includes(chatId)?owner.capturedTextBinding(chatId):controls.observedTextBinding(_event,chatId);return controls.ownerTextRecovery(_event,binding);}return invocationService.steeringRecovery(chatId);};
+    if(controls&&(controls.hasChat(chatId)||owner?.activeAuthorityChatIds().includes(chatId))){const binding=owner?.activeAuthorityChatIds().includes(chatId)?owner.capturedTextBinding(chatId):controls.observedTextBinding(_event,chatId);return controls.ownerTextRecovery(_event,binding);}return invocationService.steeringRecovery(chatId);};
   ipcMain.handle("invoke:steeringRecovery", async (_event, chatId: string) => {
     try { return await steeringRecoveryFromRenderer(_event, chatId); }
     catch (cause) { if (isTransientSendRefusal(cause)) return []; throw cause; }
@@ -7735,7 +7739,7 @@ export function registerIpcHandlers(): void {
     // runtime — which then made the real build fail its own plan check.
     const resolvedRequest = resolveHephaestusBuildRequest(req);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 60_000);
+    const timer = setTimeout(() => controller.abort(), 300_000);
     try {
       return await previewBuildAllocation(
         resolvedRequest,

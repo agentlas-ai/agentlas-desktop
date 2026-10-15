@@ -1,3 +1,4 @@
+import type {HistoryWorkStatus,HistoryWorkSelection,HistoryWorkCandidateSelection} from './one-history-work';
 import type {PersonalDataTarget,PersonalDataProposal} from './one-personal-data';
 import type {HistoryEvolutionCandidate,HistoryEvolutionSnapshot} from './one-history-evolution';
 export interface GmailNativeSelection {serverId:string;expectedAccountRef:string;target:PersonalDataTarget;budgetId:string;query:string;labelIds:string[];allowMessageBody:boolean;allowHistory:boolean;purpose:string}
@@ -7,6 +8,16 @@ export interface GmailNativeReceipt {consentId:string;revision:number;status:Gma
 type ConsentInput={consentId:string;expectedRevision:number};
 type CandidateInput={target:PersonalDataTarget;candidateId:string;expectedRevision:number};
 export interface OnePersonalIntegrationsNativeAPI {
+ historyWorkStatus(input:HistoryWorkSelection):Promise<HistoryWorkStatus>;
+ historyWorkRegister(input:HistoryWorkSelection&{sourceAgentId:string}):Promise<HistoryWorkStatus>;
+ historyWorkOracle(input:HistoryWorkSelection&{registrationId:string}):Promise<HistoryWorkStatus>;
+ historyWorkStartApply(input:HistoryWorkCandidateSelection):Promise<HistoryWorkStatus>;
+ historyWorkReceipt(input:HistoryWorkSelection):Promise<HistoryWorkStatus>;
+ historyWorkRevoke(input:HistoryWorkSelection):Promise<HistoryWorkStatus>;
+ gmailSourceSettings(input:{target:PersonalDataTarget;budgetId:string}):Promise<GmailSourceSettingsSnapshot>;
+ gmailConfigureSource(input:GmailSourceConfigurationInput):Promise<GmailSourceSettingReceipt>;
+ gmailTestSource(input:GmailSourceSettingSelector):Promise<GmailSourceSettingReceipt>;
+ gmailRevokeSource(input:GmailSourceSettingSelector):Promise<GmailSourceSettingReceipt>;
  gmailCatalog():Promise<GmailNativeCatalogEntry[]>;
  gmailPropose(input:GmailNativeSelection&{commandId?:string}):Promise<GmailNativeReceipt>;
  gmailApprove(input:ConsentInput):Promise<GmailNativeReceipt>;
@@ -28,3 +39,20 @@ export interface OnePersonalIntegrationsNativeAPI {
  historyControl(input:CandidateInput&{action:'pause'|'resume'|'revoke'|'delete';commandId?:string;expectedControlVersion?:string}):Promise<HistoryEvolutionCandidate>;
  historyRestore(input:CandidateInput&{versionId:string}):Promise<HistoryEvolutionCandidate>;
 }
+
+/** Explicit user intent only. Main resolves actor, ACL, credential custody and approval. */
+export interface GmailSourceConfigurationInput {
+ commandId:string;settingId:string|null;expectedRevision:number;serverId:string;mailbox:string;
+ target:PersonalDataTarget;budgetId:string;query:string;labelIds:string[];allowMessageBody:boolean;allowHistory:false;purpose:string;
+}
+export interface GmailSourceSettingSelector {commandId:string;settingId:string;expectedRevision:number}
+export interface GmailSourceSettingState {
+ settingId:string;revision:number;state:'configured'|'tested'|'revoked';serverId:string;target:PersonalDataTarget;budgetId:string;
+ mailbox:string;query:string;labelIds:string[];allowMessageBody:boolean;purpose:string;lastCommandId:string;
+ coverage:'bounded-search-incomplete';current:boolean;
+}
+export interface GmailSourceSettingsSnapshot {
+ target:PersonalDataTarget;budgetId:string;servers:readonly {serverId:string;label:string}[];settings:readonly GmailSourceSettingState[];
+ history:{available:false;reason:'gmail_personal_history_semantic_supplier_required'};
+}
+export interface GmailSourceSettingReceipt {commandId:string;settingId:string;revision:number;state:GmailSourceSettingState['state'];readBackVerified:true}

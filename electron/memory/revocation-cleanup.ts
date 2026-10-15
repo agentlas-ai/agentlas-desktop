@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
-import { getDb, openedStoreMigrationRole } from "../store/db";
+import { openedStoreMigrationRole } from "../store/db";
+import { getMemoryDb as getDb } from "./database";
 import {
   forgetAgentNestExperienceMemoryForOwnerScope,
   reconcileProjectMemoryProjectionCleanup,

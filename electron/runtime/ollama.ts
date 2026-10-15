@@ -1,3 +1,4 @@
+import { schemaFallbackPromptPart, observationSystemWithSchema } from "../../shared/runtime-capabilities";
 // Ollama 로컬 LLM — 감지 + 실호출.
 // 사용자 머신에서 도는 오픈 모델(gemma / deepseek / llama 등)을 호출한다.
 // API 키 불필요, 클라우드 미경유 — 완전 로컬. (PRD §3.1 BYOC의 로컬 변형)
@@ -74,24 +75,18 @@ export const runOllama: Runner = async (
   const recent = req.history;
   const systemText = req.systemPrompt;
 
+  const renderSystem = (withSchema = false) => req.minimalObservation
+    ? observationSystemWithSchema(systemText, withSchema ? req.outputSchema?.schema : undefined)
+    : wrapSystemPrompt(
+      systemText, req.locale, req.permission, cumulativeSurfaceGateText(recent, req.surfaceUserPrompt ?? req.userPrompt),
+      req.forceSurface, req.restrictedReadBoundary, req.untrustedNoTools, undefined, undefined, undefined,
+      req.surfaceGate, undefined, req.sciencePromptProfile, req.judgmentOnly === true ? "host-judgment" : undefined,
+      withSchema && req.outputSchema ? [schemaFallbackPromptPart(req.outputSchema.schema)] : undefined,
+      req.systemPromptComposition,
+    );
   const messages: ChatMessage[] = [{
     role: "system",
-    content: wrapSystemPrompt(
-      systemText,
-      req.locale,
-      req.permission,
-      cumulativeSurfaceGateText(recent, req.surfaceUserPrompt ?? req.userPrompt),
-      req.forceSurface,
-      req.restrictedReadBoundary,
-      req.untrustedNoTools,
-      undefined,
-      undefined,
-      undefined,
-      req.surfaceGate,
-      undefined,
-      undefined,
-      req.judgmentOnly === true ? "host-judgment" : undefined,
-    ),
+    content: renderSystem(),
   }];
   for (const m of recent) {
     if (m.role === "user") {
@@ -122,6 +117,7 @@ export const runOllama: Runner = async (
       req,
       events,
       runtimeKind: "ollama",
+      renderOutputSchemaSystem: () => ({ system: renderSystem(true) }),
       host,
       model,
       estimatedContextWindow: capacity.contextWindow ?? 16_000,

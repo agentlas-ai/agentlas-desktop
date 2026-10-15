@@ -1,3 +1,4 @@
+import { fixedPurposePrompt, purposePrompt } from "../runtime/purpose-prompts";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
@@ -9,17 +10,26 @@ import { MEMORY_KINDS, MEMORY_SCOPES } from "../architecture/manifest";
  * forwarded to Main's loopback control server (control-server.ts), which re-checks the run capability and feeds the
  * SAME pipeline the parsed block fed. The text parsers stay as the fallback for runtimes without this tool.
  *
- * Tools now: memory_note (replaces the `## Memory Events` envelope; the per-turn receipt/turn_summary is host-built).
+ * Tools now: memory_note (replaces the `## Memory Events` envelope; the per-turn receipt/turn_summary is host-built),
+ * ask_form (replaces the `<<agentlas-ask>>` block; attended runs only).
  *
  * Must not import electron (the daemon loads it). The source rides in argv as an audited, hash-checked inline launch
  * (same contract as agent-mail / workspace-preview): no disk path exists to swap.
  */
 export const AGENTLAS_TURN_CATALOG_ID = "agentlas-turn";
 export const AGENT_TURN_CONTROL_ENV = "AGENTLAS_TURN_CONTROL_FILE";
-export const AGENTLAS_TURN_TOOL_NAMES = ["memory_note", "goal_wait", "goal_complete", "goal_tactic", "goal_plan_op", "goal_kpi"] as const;
+export const AGENTLAS_TURN_TOOL_NAMES = ["memory_note", "goal_wait", "goal_complete", "goal_tactic", "goal_plan_op", "goal_kpi", "ask_form", "harness_search", "harness_describe", "harness_call"] as const;
+/** The harness gateway (electron/harness/capability-ports.ts): inert discovery plus one dispatcher, on every run with this server. */
+export const TURN_TOOLS_HARNESS = ["harness_search", "harness_describe", "harness_call"] as const;
 /** Offered on every turn this server is attached to. The goal tools are added on Goal turns only (capability `tools`). */
 export const TURN_TOOLS_BASE = ["memory_note"] as const;
 export const TURN_TOOLS_GOAL = ["memory_note", "goal_wait", "goal_complete", "goal_tactic", "goal_plan_op", "goal_kpi"] as const;
+/** Attended runs (a person can answer) also get ask_form; unattended and mobile-durable runs never list it. */
+export const TURN_TOOLS_ASK = ["memory_note", "ask_form"] as const;
+export const TURN_TOOLS_GOAL_ASK = ["memory_note", "goal_wait", "goal_complete", "goal_tactic", "goal_plan_op", "goal_kpi", "ask_form"] as const;
+export function turnToolsFor(goal: boolean, ask: boolean): readonly string[] {
+  return [...(goal ? (ask ? TURN_TOOLS_GOAL_ASK : TURN_TOOLS_GOAL) : (ask ? TURN_TOOLS_ASK : TURN_TOOLS_BASE)), ...TURN_TOOLS_HARNESS];
+}
 /** The plan tools replace the `<<agentlas-tactic>>` / `<<agentlas-plan-op>>` / `<<agentlas-kpi>>` marker lines. */
 export const GOAL_PLAN_TOOL_MARKERS = { goal_tactic: "<<agentlas-tactic>>", goal_plan_op: "<<agentlas-plan-op>>", goal_kpi: "<<agentlas-kpi>>" } as const;
 export const TACTIC_BLOCK_CAUSE_VALUES = ["tool_missing", "tool_refused", "resource_busy", "effect_uncertain", "unknown", "boundary"] as const;
@@ -34,9 +44,9 @@ const idString = { type: "string", maxLength: 500 };
 // Tool definitions are prompt tokens too (owner 2026-10-13): the schema carries the enums, the host validates and
 // screens; the description says only what the schema cannot.
 export const MEMORY_NOTE_DESCRIPTION =
-  "Save one durable learning (owner preference, decision, risk, procedure) to curated memory. English content; the owner's own wording in content_native. Never secrets.";
+  "Save one durable learning to curated memory. content in English; owner wording in content_native; no secrets.";
 
-export const AGENTLAS_TURN_TOOLS = [
+export const AGENTLAS_TURN_TOOLS = ([
   {
     name: "memory_note",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
@@ -60,7 +70,7 @@ export const AGENTLAS_TURN_TOOLS = [
   {
     name: "goal_wait",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-    description: "Pause this Goal until an observed invocation ends, an artifact or saved automation output changes, or a time arrives, then end the turn; only real observed IDs.",
+    description: "Pause the Goal until an invocation ends, an artifact/automation output changes, or a time arrives; then end the turn. Observed IDs only.",
     inputSchema: {
       type: "object",
       properties: {
@@ -81,7 +91,7 @@ export const AGENTLAS_TURN_TOOLS = [
   {
     name: "goal_complete",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-    description: "Declare that every acceptance criterion of this Goal is verified; never while work remains.",
+    description: "Declare every acceptance criterion verified; not while work remains.",
     inputSchema: {
       type: "object",
       properties: { evidence: { type: "string", maxLength: 240, description: "What was verified and where." }, summary: { type: "string", maxLength: 240 } },
@@ -91,7 +101,7 @@ export const AGENTLAS_TURN_TOOLS = [
 {
     name: "goal_tactic",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-    description: "Report a Goal tactic as done (evidence proves its done_when) or blocked (the host picks the next move). Call once for every tactic finished this turn.",
+    description: "Report done_when proven by evidence, or a blocker. pending_host is queued; turn-end Main revalidates the current plan before applying.",
     inputSchema: {
       type: "object",
       properties: {
@@ -108,30 +118,469 @@ export const AGENTLAS_TURN_TOOLS = [
   {
     name: "goal_plan_op",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-    description: "Change the plan (shown to the owner): replace_tactic {id, with}, add_tactic {strategy_id, description, done_when}, retire_strategy {id, evidence}, add_strategy {hypothesis, serves_krs, kpi, tactics}.",
+    description: "Propose a plan change within owner intent. done_when needs observable proof; prerequisites met needs verified evidence. pending_host is queued, not applied.",
     inputSchema: {
-      type: "object",
-      properties: { op: { type: "string", enum: ["replace_tactic", "add_tactic", "retire_strategy", "add_strategy"] } },
-      required: ["op"],
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "replace_tactic"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Exact current observed plan ID; host parser/current plan remain authoritative."
+            },
+            "with": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "description": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "done_when": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "one_off",
+                      "recurring"
+                    ],
+                    "description": "Absent defaults to one_off in existing parser."
+                  },
+                  "depends_on": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Exact current observed plan ID; host parser/current plan remain authoritative."
+                    }
+                  },
+                  "prerequisites": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "Stable identifier of this prerequisite."
+                        },
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "met",
+                            "unmet",
+                            "unknown"
+                          ]
+                        },
+                        "evidence_refs": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "blocks": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "prepare",
+                              "local_write",
+                              "external_effect"
+                            ]
+                          }
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "state",
+                        "evidence_refs",
+                        "blocks"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "description",
+                  "done_when"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "op",
+            "id",
+            "with"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "add_tactic"
+            },
+            "strategy_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "description": {
+              "type": "string",
+              "minLength": 1
+            },
+            "done_when": {
+              "type": "string",
+              "minLength": 1
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "one_off",
+                "recurring"
+              ],
+              "description": "Absent defaults to one_off in existing parser."
+            },
+            "depends_on": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Exact current observed plan ID; host parser/current plan remain authoritative."
+              }
+            },
+            "prerequisites": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Stable identifier of this prerequisite."
+                  },
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "met",
+                      "unmet",
+                      "unknown"
+                    ]
+                  },
+                  "evidence_refs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "blocks": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "prepare",
+                        "local_write",
+                        "external_effect"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "state",
+                  "evidence_refs",
+                  "blocks"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "op",
+            "description",
+            "done_when"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "retire_strategy"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Exact current observed plan ID; host parser/current plan remain authoritative."
+            },
+            "evidence": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "add_strategy"
+            },
+            "hypothesis": {
+              "type": "string",
+              "minLength": 1
+            },
+            "serves_krs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kpi": {
+              "type": "string"
+            },
+            "timebox_hours": {
+              "type": "number"
+            },
+            "observation_window_hours": {
+              "type": "number"
+            },
+            "actions_per_day": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "description": "Planner cadence target, not authority or tool/turn admission cap; only real owner boundaries constrain effects."
+            },
+            "tactics": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "description": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "done_when": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "one_off",
+                      "recurring"
+                    ],
+                    "description": "Absent defaults to one_off in existing parser."
+                  },
+                  "depends_on": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Exact current observed plan ID; host parser/current plan remain authoritative."
+                    }
+                  },
+                  "prerequisites": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "Stable identifier of this prerequisite."
+                        },
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "met",
+                            "unmet",
+                            "unknown"
+                          ]
+                        },
+                        "evidence_refs": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "blocks": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "prepare",
+                              "local_write",
+                              "external_effect"
+                            ]
+                          }
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "state",
+                        "evidence_refs",
+                        "blocks"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "description",
+                  "done_when"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "op",
+            "hypothesis",
+            "tactics"
+          ],
+          "additionalProperties": false
+        }
+      ],
+      "description": "Full payload variants from existing shared plan parser; omitted optional values keep existing parser defaults. Existing draft truncation/text/ID/DAG rules remain host checks, not newly invented task quotas.",
+      "type": "object"
     },
   },
   {
     name: "goal_kpi",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-    description: "Record a KPI value read from the real source now (observed_at ISO, evidence = what it showed); a metric without an owner number also takes name, unit, direction.",
+    description: "Record an actual source observation now; evidence must identify what was observed. Pending host application is not a saved KPI.",
     inputSchema: {
-      type: "object",
-      properties: { kpi: idString, value: { type: "number" }, observed_at: { type: "string" }, source: { type: "string" }, evidence: { type: "string" } },
-      required: ["kpi", "value", "observed_at", "source", "evidence"],
+      "type": "object",
+      "properties": {
+        "kpi": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable KPI identifier: existing, or new with name, unit and direction."
+        },
+        "value": {
+          "type": "number"
+        },
+        "observed_at": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "direction": {
+          "type": "string",
+          "enum": [
+            "up",
+            "down"
+          ]
+        }
+      },
+      "required": [
+        "kpi",
+        "value",
+        "observed_at",
+        "source",
+        "evidence"
+      ],
+      "additionalProperties": false
     },
   },
-] as const;
+  {
+    name: "ask_form",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    description: "Show a choice card for a real fork with no safe default, then end the turn; the pick arrives as the next message.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        questions: {
+          type: "array",
+          minItems: 1,
+          maxItems: 8,
+          items: {
+            type: "object",
+            properties: {
+              question: { type: "string", minLength: 1, maxLength: 4000 },
+              header: { type: "string", maxLength: 200 },
+              multiSelect: { type: "boolean" },
+              options: {
+                type: "array",
+                minItems: 2,
+                maxItems: 8,
+                items: {
+                  type: "object",
+                  properties: { label: { type: "string", minLength: 1, maxLength: 200 }, description: { type: "string", maxLength: 1000 } },
+                  required: ["label"],
+                  additionalProperties: false,
+                },
+              },
+            },
+            required: ["question", "options"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["questions"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "harness_search",
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    description: "Find plugins, skills, connectors, catalog tools, operations, features by words; returns ids. Inert.",
+    inputSchema: {
+      type: "object",
+      properties: { query: { type: "string", maxLength: 500 }, kind: { type: "string", enum: ["plugin", "skill", "connector", "tool", "operation", "feature"] } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "harness_describe",
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    description: "Detail for one harness_search id: skill text+revision, plugin skills+router, connector auth state, operation fields.",
+    inputSchema: { type: "object", properties: { id: { type: "string", minLength: 1, maxLength: 500 } }, required: ["id"], additionalProperties: false },
+  },
+  {
+    name: "harness_call",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    description: "Run one harness operation (skill.activate, connector.connect, auth.ensure, auth.login, plugin.enable, ...); returns ok | refused | unavailable + reason.",
+    inputSchema: { type: "object", properties: { operation: { type: "string", minLength: 1, maxLength: 100 }, args: { type: "object" } }, required: ["operation"], additionalProperties: false },
+  },
+] as const).map(tool => {
+  purposePrompt([{ id: `tool.agentlas-turn.${tool.name}.schema`, revision: 1, stability: "fixed-policy", changeTriggers: ["release"], text: JSON.stringify(tool.inputSchema) }]);
+  return { ...tool, description: purposePrompt([
+  { id: `tool.agentlas-turn.${tool.name}.description`, revision: 2, stability: "fixed-policy", changeTriggers: ["release"], text: tool.description },
+]) };
+});
 
 const SOURCE_HEAD = String.raw`"use strict";
 const fs = require("node:fs");
 const http = require("node:http");
 const CONTROL_ENV = "AGENTLAS_TURN_CONTROL_FILE";
-const MAX_REQUEST_BYTES = 128 * 1024;
+const MAX_REQUEST_BYTES = 768 * 1024;
 `;
 const SOURCE_TAIL = String.raw`function control() {
   const file = process.env[CONTROL_ENV];

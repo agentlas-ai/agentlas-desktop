@@ -28,12 +28,14 @@ const DICT = {
     thinking: "{agent}가 생각 중...",
     sending: "전송 중...",
     callingBackend: "{backend} 호출 중...",
+    schemaInPromptOnly: "이 실행 경로는 출력 형식을 강제할 수 없어 지시문으로만 요청합니다.",
     cliImageReady: "첨부 이미지 {count}개를 파일로 준비했습니다 — {backend}가 해당 경로를 읽습니다",
     cliNoImage: "{backend}은 이미지 첨부 미지원 — 텍스트만 전송됩니다",
     cliNoImageClaude:
       "{backend}은 이미지 첨부 미지원 — 텍스트만 전송됩니다 (BYOK API로 전환하면 멀티모달 가능)",
     errChatNotFound: "채팅을 찾지 못했습니다.",
     errAgentNotFound: "에이전트가 삭제되었거나 찾을 수 없습니다.",
+    errAgentArchived: "보관된 에이전트입니다. 설정 › 저장공간에서 복구하세요.",
     errNoRuntime:
       "연결된 LLM 백엔드가 없습니다. 설정에서 Claude Code/Codex/Antigravity 또는 API 키를 연결해 주세요.",
     errNoRunner: "지원하지 않는 런타임 조합: {kind}/{backend}",
@@ -58,18 +60,9 @@ const DICT = {
     // ★2026-09-23 실측: 오너가 "영어로만 쓰고 영어계정만 인터랙티브 하셈"(Threads 게시 규칙)이라고 쓰자
     //   모델이 그걸 "이번 메시지의 다른 출력 언어 요청"으로 읽고 오너에게도 영어로 답·보고했다.
     //   결과물 언어 규칙은 결과물에만 걸린다 — 답변 언어는 화면 언어 그대로.
-    sysReplyLanguageScope:
-      "\"게시물은 영어로만\"처럼 다른 사람에게 내보낼 결과물의 언어 규칙은 그 결과물에만 적용됩니다. 사용자에게 하는 답변·보고·요약의 언어를 바꾸라는 요청이 아니므로, 사용자에게는 계속 사용자가 쓴 언어로 답하세요.",
     // ★2026-09-26 실측(QA 대화 4687a520): 메일 발송 도구 사이에 모델이 쓴 영어 중간 메모
     //   "Unsent state confirmed. Sending now." 가 한국어 답변 한가운데 그대로 저장·표시됐다.
     //   도구 호출 사이의 글도 최종 답변에 이어 붙어 사용자에게 보인다.
-    sysInterimLanguage:
-      "도구를 부르기 전후에 쓰는 짧은 진행 메모도 사용자 화면에 그대로 보입니다. 그런 메모도 답변과 같은 언어로 쓰거나, 필요 없으면 아예 쓰지 마세요. 영어 내부 확인 문장(예: \"Sending now.\")을 남기지 마세요.",
-    sysGuide:
-      "사용자가 마지막으로 쓴 메시지의 언어로 답하세요(호스트가 쓴 안내는 사용자의 언어가 아닙니다). 사용자가 아직 아무것도 쓰지 않았으면 한국어로 답하세요. 앱의 언어 설정은 메뉴·화면용입니다.",
-    sysHeader: "당신은 Agentlas Desktop에서 사용자가 설치한 전문 어시스턴트입니다.",
-    sysToolsOff:
-      "읽기 전용 권한입니다. 현재 작업 폴더의 파일은 읽고 검색하고 분석할 수 있지만 파일이나 외부 상태를 바꾸면 안 됩니다. 읽기 전용 샌드박스 안에서 필요한 조회 도구를 사용하세요. 작업에 쓰기·실행이 정말 필요하면 무엇이 왜 필요한지 한 문장으로 말한 뒤, 답의 마지막 줄에 정확히 [[NEEDS-FULL-ACCESS]] 를 한 줄로 남기세요 — 앱이 사용자에게 전체 액세스 승격을 묻고, 승인되면 이어서 실행됩니다. 예외: 에이전트 메일 도구(agent_mail_*)가 있으면 사용자가 요청한 메일 보내기·답장·초안 저장은 이 모드에서도 그 도구로 바로 하세요 — 전체 액세스가 필요 없습니다.",
     sysAgentDef: "── 에이전트 정의 ──",
     histPrev: "── 이전 대화 ──",
     histThis: "── 이번 요청 ──",
@@ -79,14 +72,12 @@ const DICT = {
     speakerAssistant: "어시스턴트",
     projectContext: "[프로젝트 컨텍스트 — {name}]",
     firmContext: "[회사 컨텍스트 — {name}]",
-    firmCeoGuide:
-      "당신은 이 회사의 CEO이며, 사용자가 이 채팅에서 명령을 내릴 때는 회사 전체에 대한 지시로 해석하세요.",
+    firmCeoGuide: "역할: 이 회사 CEO. 이 채팅의 지시 = 회사 전체 지시.",
     firmOrgChart: "현재 조직도:",
     firmReportSuffix: "(보고: {to})",
-    firmDelegateNote:
-      "(CEO로서 어느 본부에 무엇을 맡길지 위임 계획을 정리해 응답하세요.)",
+    firmDelegateNote: "(CEO: 어느 본부에 무엇을 맡길지 답에 정리.)",
     compacted: "컨텍스트 압축 — 이전 대화 {n}개 메시지를 요약으로 접었습니다",
-    compactedDigestHeader: "[압축된 이전 대화 요약 — 오래된 맥락을 간추렸습니다]",
+    compactedDigestHeader: "[압축된 이전 대화 요약]",
     // 중지 원인은 여러 가지다(사람이 누름·무활동 워치독·단계 시간 초과·예산 소진).
     // 예전엔 전부 "사용자가 정지 버튼으로"라고 단정해, 누른 적 없는 사람이 거짓 사유를 받았다.
     aborted: "실행이 중지되었습니다.",
@@ -98,12 +89,14 @@ const DICT = {
     thinking: "{agent} is thinking...",
     sending: "Sending...",
     callingBackend: "Calling {backend}...",
+    schemaInPromptOnly: "This runtime path cannot enforce the output schema — asking for it in the prompt instead.",
     cliImageReady: "Prepared {count} attached image file(s) — {backend} will read those paths",
     cliNoImage: "{backend} does not support image attachments — sending text only",
     cliNoImageClaude:
       "{backend} does not support image attachments — sending text only (switch to BYOK API for multimodal)",
     errChatNotFound: "Chat not found.",
     errAgentNotFound: "Agent was removed or could not be found.",
+    errAgentArchived: "This agent is archived. Restore it in Settings › Storage.",
     errNoRuntime:
       "No LLM backend connected. Connect Claude Code, Codex, Antigravity, or an API key in Settings.",
     errNoRunner: "Unsupported runtime combination: {kind}/{backend}",
@@ -124,15 +117,6 @@ const DICT = {
       "The local model ({model}) finished without producing a single character. Try another model or a shorter request.",
     errLocalToolLoopStuck:
       "The local model ({model}) kept calling tools for {turns} turns without reaching an answer. This run is not accepted as a result.",
-    sysReplyLanguageScope:
-      "A language rule for content you produce for others (for example \"post only in English\" or \"write the email in Japanese\") governs that content only. It is not a request to change the language you use with the user: keep replies, reports and summaries to the user in the user's language.",
-    sysInterimLanguage:
-      "Short progress notes you write before or between tool calls are shown to the user as part of your answer. Write them in the same language as your reply, or leave them out.",
-    sysGuide:
-      "Reply in the language of the user's latest message (host-written prompts are not the user's language). Before the user has written anything, reply in English. The app's language setting is for menus and screens only.",
-    sysHeader: "You are a specialist assistant installed by the user in Agentlas Desktop.",
-    sysToolsOff:
-      "Read-only permission is selected. You may read, search, and analyze files in the current working folder, but must not change files or external state. Use the available inspection tools inside the read-only sandbox. If the task genuinely needs writing or execution, say in one sentence what is needed and why, then put exactly [[NEEDS-FULL-ACCESS]] on its own final line — the app will ask the user to escalate to full access and resume once approved. Exception: if agent mail tools (agent_mail_*) are available, sending, replying to or drafting mail the user asked for works in this mode through those tools — do not ask for full access for it.",
     sysAgentDef: "── Agent definition ──",
     histPrev: "── Previous turns ──",
     histThis: "── Current request ──",
@@ -142,14 +126,12 @@ const DICT = {
     speakerAssistant: "Assistant",
     projectContext: "[Project context — {name}]",
     firmContext: "[Firm context — {name}]",
-    firmCeoGuide:
-      "You are the CEO of this firm. Interpret the user's instructions in this chat as orders to the entire firm.",
+    firmCeoGuide: "role: CEO of this firm; instructions in this chat = orders to the whole firm",
     firmOrgChart: "Current org chart:",
     firmReportSuffix: "(reports to: {to})",
-    firmDelegateNote:
-      "(As CEO, lay out which head you'd task with what in your reply.)",
+    firmDelegateNote: "(CEO: state which head gets what.)",
     compacted: "Context compacted — folded {n} earlier messages into a summary",
-    compactedDigestHeader: "[Summary of compacted earlier conversation — older context condensed]",
+    compactedDigestHeader: "[Summary of compacted earlier conversation]",
     aborted: "The run was stopped.",
     abortedByUser: "Run stopped from the stop button.",
     mcpToolsAttached: "{count} tool(s) attached",

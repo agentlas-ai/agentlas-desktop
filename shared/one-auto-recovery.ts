@@ -1,5 +1,6 @@
 import type { InvocationRunReceipt, RunEventUi } from "./types";
 import { MAX_SAME_METHOD_STARTS } from "./work-recovery";
+import { runtimeFailureBlocksNextAutomaticTurn } from "./runtime-turn-admission";
 
 /**
  * Exact durable evidence that an interrupted run was replaced by a person's
@@ -139,8 +140,8 @@ export type OneRecoveryOutcomeDecision =
   | { verified: false; retry: true; attempt: number }
   | { verified: false; retry: false; reason: OneAutoRecoveryStop };
 
-/** Main-recorded terminal boundaries apply before any automatic judgment or
- * read-only observation turn. Read authority cannot settle an uncertain turn. */
+/** Main-recorded terminal boundaries apply before automatic judgment. Historical
+ * uncertainty is evidence for a fresh read-only episode, not a terminal hold. */
 export function oneAutoRecoveryTerminalStop(
   receipt: Pick<InvocationRunReceipt, "status" | "errorCode" | "interruptionCause" | "hostStopCause">,
 ): Extract<OneAutoRecoveryDecision, { retry: false }> | null {
@@ -150,10 +151,7 @@ export function oneAutoRecoveryTerminalStop(
   if (receipt.status === "cancelled") return { retry: false, reason: "stopped-by-user" };
   if (receipt.hostStopCause) return { retry: false, reason: "settled" };
   if (receipt.status !== "failed" && receipt.status !== "interrupted") return null;
-  if (receipt.errorCode === "automation_no_progress_loop") return { retry: false, reason: "no-progress" };
-  if (receipt.errorCode === "runtime_turn_unsettled" || receipt.errorCode === "serving_reconciliation_required") {
-    return { retry: false, reason: "unsafe-to-repeat" };
-  }
+  if (runtimeFailureBlocksNextAutomaticTurn({ providerCode: receipt.errorCode })) return { retry: false, reason: "no-progress" };
   return null;
 }
 

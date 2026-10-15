@@ -20,11 +20,11 @@ export const RUNTIME_NATIVE_CAPABILITIES: Record<string, string[]> = {
 };
 
 const ABILITY_WORDS: Record<string, string> = {
-  "web.search": "built-in web search",
-  "web.fetch": "built-in web page fetch",
-  "image.generate": "built-in image generation (save the image into the working folder's assets/ and cite that path)",
-  shell: "shell commands (within the granted permission)",
-  "file.edit": "file reading and editing (within the granted permission)",
+  "web.search": "web search",
+  "web.fetch": "web fetch",
+  "image.generate": "image generation (save to assets/, cite the path)",
+  shell: "shell",
+  "file.edit": "file edit",
 };
 
 /**
@@ -36,6 +36,5 @@ const ABILITY_WORDS: Record<string, string> = {
 export function runtimeNativeAbilitiesLine(runtimeKind: string | null | undefined, extra: readonly string[] = []): string {
   const abilities = [...(runtimeKind ? RUNTIME_NATIVE_CAPABILITIES[runtimeKind] ?? [] : []), ...extra];
   const words = [...new Set(abilities)].map((ability) => ABILITY_WORDS[ability]).filter(Boolean);
-  if (!words.length) return "";
-  return `Native abilities of this runtime (use them directly and combine them with plugins and MCP tools): ${words.join("; ")}.`;
+  return words.join(", ");
 }

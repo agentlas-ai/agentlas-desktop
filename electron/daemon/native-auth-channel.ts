@@ -1,3 +1,4 @@
+import { redactOperationalSecrets } from "../invocation/event-secret-redaction";
 import { nativeStartDescriptor, makeNativePreparationWireRequest, type NativeStartDescriptor, type NativePreparationWireRequest } from "./native-start-protocol";
 import fs from "node:fs";
 import path from "node:path";
@@ -38,11 +39,27 @@ const MAX_BYTES = 1048576;
  * The daemon's checkpoint calls back into Main (judge, team/memory/briefing prepare) run model calls inside that start
  * (a One judge took 24 s on 1.2.89), so they get the same bound instead of 10 s.
  */
-const NATIVE_START_REPLY_TIMEOUT_MS = 180000;
+const NATIVE_SEMANTIC_PREPARATION_BUDGET_MS = 300000;
+// Transport delivery is separate from the model budget and fixed when the request starts.
+const NATIVE_REPLY_DELIVERY_GRACE_MS = 10000;
+const NATIVE_START_REPLY_TIMEOUT_MS = NATIVE_SEMANTIC_PREPARATION_BUDGET_MS + NATIVE_REPLY_DELIVERY_GRACE_MS;
 /** Only invoke.nativeStart (whole start) and native.attach (adoptSession + supervisor.recover) wait long; every other request keeps 10 s. */
 export function nativeGuiReplyTimeoutMs(method: string): number { return method === "invoke.nativeStart" || method === "native.attach" ? NATIVE_START_REPLY_TIMEOUT_MS : 10000; }
 const methods = new Set(["invoke.nativeStart", "invoke.admission", "invoke.receipt", "invoke.currentTurn", "invoke.steerCurrentTurn", "invoke.currentTurnSteerReceipt", "invoke.cancel", "native.approvalReply", "native.attach", "native.detach"]);
-const errorCode = (e: unknown) => { const c = (e as { code?: unknown })?.code; return typeof c === "string" && /^[a-z][a-z0-9_]{1,99}$/.test(c) ? c : "native_operation_failed"; };
+const errorCode = (e: unknown): string => {
+  if (e && (typeof e === "object" || typeof e === "function")) {
+    try {
+      let owner: object | null = e;
+      for (let depth = 0; owner && depth < 3; depth += 1, owner = Object.getPrototypeOf(owner)) {
+        const property = Object.getOwnPropertyDescriptor(owner, "code");
+        if (!property) continue;
+        const code = Object.hasOwn(property, "value") ? property.value : undefined;
+        return typeof code === "string" && /^[a-z][a-z0-9_]{1,99}$/.test(code) && redactOperationalSecrets(code) === code ? code : "native_operation_failed";
+      }
+    } catch { /* A hostile or revoked proxy supplies no trustworthy code. */ }
+  }
+  return "native_operation_failed";
+};
 export function nativeAuthSocketPath(userData: string): string {
   const ordinary = defaultControlSocketPath(userData);
   if (process.platform === "win32") return ordinary + "-native";
@@ -109,7 +126,7 @@ export async function startNativeAuthChannel(options: { address: string; binding
           const waiting = typeof requestId === "string" ? reverse.pending.get(requestId) : undefined;
           if (!waiting || auth.authenticatedPeerIdentity(peer) !== waiting.identity) { socket.destroy(); return; }
           try { if ((message.completion as { body?: { domain?: unknown } })?.body?.domain !== waiting.replyDomain) throw nativeAuthError("native_auth_checkpoint_reply_invalid"); const result = waiting.serviceObservation ? auth.serviceObservationReply(peer, waiting.capability!, message.completion, requestId as string, waiting.sequence, waiting.request!) : waiting.ingressNoStart ? auth.ingressNoStartReply(peer, waiting.capability!, message.completion, requestId as string, waiting.sequence, waiting.request!) : waiting.lane === "terminal" ? auth.terminalCheckpointReply(peer, waiting.capability!, message.completion, requestId as string, waiting.sequence, waiting.request!) : auth.checkpointReply(peer, message.completion, requestId as string, waiting.sequence); reverse.pending.delete(requestId as string); clearTimeout(waiting.timer); waiting.resolve(result); }
-          catch (error) { reverse.pending.delete(requestId as string); clearTimeout(waiting.timer); waiting.reject(error); if (!["native_checkpoint_failed", "native_checkpoint_unavailable"].includes(errorCode(error))) { socket.destroy(); return; } }
+          catch (error) { reverse.pending.delete(requestId as string); clearTimeout(waiting.timer); waiting.reject(error); if (!auth.consumeCheckpointOperationError(error, peer, requestId as string, waiting.sequence)) { socket.destroy(); return; } }
           continue;
         }
         if (!exactKeys(message, ["id", "method", "params"]) || !Number.isSafeInteger(message.id) || Number(message.id) < 1) { socket.destroy(); return; }
@@ -204,7 +221,7 @@ export async function connectNativeGuiChannel(options: { address: string; bindin
           Promise.resolve().then(() => { if (done || auth.authenticatedIdentity() !== captured) throw nativeAuthError("native_auth_channel_lost"); if (!options.onRequest) throw nativeAuthError("native_checkpoint_unavailable"); return options.onRequest(incoming.method, incoming.params, captured); }).then(result => {
             if (done || auth.authenticatedIdentity() !== captured) return;
             completions.push({ prepare: () => incoming.complete(result ?? null), terminal }); flushCompletions();
-          }, () => { if (done || auth.authenticatedIdentity() !== captured) return; completions.push({ prepare: () => incoming.complete(null, "native_checkpoint_failed"), terminal }); flushCompletions(); }).finally(() => { if (incoming.params && typeof incoming.params === "object") guiIngressObservations.delete(incoming.params); if (incoming.params && typeof incoming.params === "object") guiServiceObservations.delete(incoming.params); terminal ? terminalCallbackCount-- : callbackCount--; });
+          }, (reason) => { if (done || auth.authenticatedIdentity() !== captured) return; completions.push({ prepare: () => incoming.complete(null, errorCode(reason)), terminal }); flushCompletions(); }).finally(() => { if (incoming.params && typeof incoming.params === "object") guiIngressObservations.delete(incoming.params); if (incoming.params && typeof incoming.params === "object") guiServiceObservations.delete(incoming.params); terminal ? terminalCallbackCount-- : callbackCount--; });
         } catch { close(); return; } continue;
       }
       if (!Number.isSafeInteger(message.id) || Number(message.id) < 1) { close(); return; }
@@ -232,7 +249,7 @@ export async function connectNativeGuiChannel(options: { address: string; bindin
       if (!methods.has(method)) throw nativeAuthError("native_auth_method_denied"); let sequence = 0;
       const result = await call("native.auth.request", () => { const frame = auth.request(method, params); sequence = frame.sequence; return frame.envelope; }, method === "invoke.cancel" ? "cancel" : "ordinary",
         nativeGuiReplyTimeoutMs(method));
-      try { return auth.reply(result, sequence); } catch (error) { if (["native_auth_reply_invalid", "native_auth_signature_invalid"].includes(errorCode(error))) close(); throw error; }
+      try { return auth.reply(result, sequence); } catch (error) { if (!auth.consumeReplyOperationError(error, sequence)) close(); throw error; }
     },
     onClose(listener: () => void): () => void { if (done) { listener(); return () => {}; } closeListeners.add(listener); return () => { closeListeners.delete(listener); }; }, close,
   };

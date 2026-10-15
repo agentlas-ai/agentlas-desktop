@@ -16,6 +16,7 @@ import { ComposerDecisionSlot } from "./ComposerDecisionPortal";
 import { PopupSteps } from "./Popup";
 import { OneVoiceInputHelp } from "./one/OneVoiceInputHelp";
 import { AliveComposerButton } from "./alive/AliveComposerButton";
+import { ContextBreakdown } from "./ContextBreakdown";
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   ImageAttachment,
@@ -1505,8 +1506,8 @@ function ChatInputComponent({
               title={t("common.close")}
               style={{
                 flexShrink: 0,
-                width: 20,
-                height: 20,
+                width: 24,
+                height: 24,
                 display: "inline-flex",
                 alignItems: "center",
                 justifyContent: "center",
@@ -1549,12 +1550,13 @@ function ChatInputComponent({
                   aria-label={t("chatinput.remove_image")}
                   style={{
                     position: "absolute",
-                    top: 2,
-                    right: 2,
-                    width: 18,
-                    height: 18,
-                    borderRadius: "50%",
-                    background: "rgba(0,0,0,0.7)",
+                    top: -1,
+                    right: -1,
+                    // 24px 단추 안에 18px 원을 그대로 그린다.
+                    width: 24,
+                    height: 24,
+                    padding: 0,
+                    background: "radial-gradient(circle closest-side, rgba(0,0,0,0.7) 0 9px, transparent 9.5px)",
                     color: "white",
                     border: "none",
                     fontSize: 10,
@@ -1914,14 +1916,12 @@ function ChatInputComponent({
                       maxHeight: "min(400px, 65dvh)", overflowY: "auto",
                     }}
                   >
-                    <div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 10, color: "var(--ink)", fontSize: 12, fontWeight: 700 }}>
-                        <span aria-hidden style={{display: "grid", placeItems: "center", width: 40, height: 40, borderRadius: 12, background: "var(--popup-control-bg)"}}><IconLayers size={20} /></span>
-                        <span>{t("chatinput.context.menu_title")}<strong style={{display: "block", fontSize: 24, lineHeight: 1.25}}>{contextTokenLabel}</strong></span>
+                    <div style={{ display: "grid", gap: 6 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--ink)", fontSize: 12, fontWeight: 700 }}>
+                        <IconLayers size={16} aria-hidden />
+                        <span>{t("chatinput.context.menu_title")}</span>
                       </div>
-                      <p style={{ margin: "4px 0 0", color: "var(--muted-deep)", fontSize: 10.5, lineHeight: 1.45 }}>
-                        {locale === "ko" ? "기록의 추정 토큰 · 모델 사용률 아님" : "Estimated history tokens · not model usage"}
-                      </p>
+                      <ContextBreakdown chatId={activeChatId} locale={locale} fallbackLabel={contextTokenLabel} />
                     </div>
                     <button
                       type="button"

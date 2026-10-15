@@ -5,6 +5,9 @@ import type { SupervisorControlProgress, SupervisorJournalInput, SupervisorJourn
 /** Personal identity is One's durable oneId; none of these IDs is a provider session. */
 export const ONE_SUPERVISOR_SCHEMA = "agentlas.one-supervisor.v1" as const;
 export type SupervisorSurface = "one" | "work" | "science";
+/** Automatic follow-ups One may send to one delegated task since the owner's latest direction (owner-asked ones are not
+ * counted). The host enforces it; the overlay and the tool description render this same number (22 O9). */
+export const ONE_SUPERVISOR_FOLLOW_UP_LIMIT = 2;
 export type SupervisorRequestState = "stored" | "dispatching" | "accepted" | "completed" | "cancelled" | "failed" | "held";
 export interface SupervisorCommandReceipt {
   commandId: string;

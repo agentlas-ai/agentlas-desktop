@@ -1,4 +1,4 @@
-import { runObservedRunner, runObservedRunnerAs, ObservedRunnerFailureError } from "../runtime/observed-runner";
+import { runObservedRunnerAs, ObservedRunnerFailureError } from "../runtime/observed-runner";
 // 유휴 드리밍 큐레이션 — Claude Code/Codex의 "드리밍"처럼, 사용자가 자리를 비운 유휴 시간에
 // 큐레이터가 쌓아둔 durable 메모리를 정리한다. 1단계는 결정론 dedup(무LLM), 2단계는 메모리가
 // 많이 쌓인 에이전트에 한해 LLM 1회 호출로 규칙 통합.
@@ -23,12 +23,49 @@ import {
   supersedeMemoryEntries,
   type MemoryEntry,
 } from "./store";
-import { currentMemoryForgetEpoch, MemoryRevokedError } from "./revocations";
+import { MemoryRevokedError } from "./revocations";
 import {
   agentNestExperienceOwnership,
   reconcileAgentNestExperienceConsolidation,
 } from "./project-files";
 import { getAgentById } from "../mcp/registry";
+import { createHash, randomUUID } from "node:crypto";
+import { getMemoryDb, getMemoryStoreInfo } from "./database";
+import { assertMemorySourceCustody, currentMemorySourceCustody, withIndependentMemoryWorker } from "./source-custody";
+import { connectedModelTimeoutMs } from "../system-agents/judgment";
+
+const DREAM_POLICY = "agentlas.dreaming-source.v1";
+const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+function dreamingDb(): ReturnType<typeof getMemoryDb> {
+  const db = getMemoryDb();
+  db.exec(`CREATE TABLE IF NOT EXISTS memory_dreaming_sources (
+    scope_key TEXT NOT NULL,input_digest TEXT NOT NULL,intake_epoch INTEGER NOT NULL,
+    state TEXT NOT NULL,lease_token TEXT,lease_expires_at TEXT,result_json TEXT,
+    completed_at TEXT,PRIMARY KEY(scope_key,input_digest,intake_epoch));
+    CREATE TABLE IF NOT EXISTS memory_dreaming_clock (
+      id INTEGER PRIMARY KEY CHECK(id=1),intake_epoch INTEGER NOT NULL,
+      authority_revision INTEGER NOT NULL,completed_at TEXT NOT NULL);`);
+  return db;
+}
+function sourceDigest(entries: MemoryEntry[], ownership: Record<string, string[]>): string {
+  const db = getMemoryDb();
+  const sources = entries.map(entry => ({ entry, projectionOwners: ownership[entry.id] ?? [],
+    binding: db.prepare("SELECT * FROM memory_identity_bindings WHERE memory_id=?").get(entry.id) ?? null,
+    projects: db.prepare("SELECT project_id,relation,source_ref FROM memory_project_links WHERE memory_id=? ORDER BY project_id,relation,source_ref").all(entry.id),
+    native: db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_entry_native'").get()
+      ? db.prepare("SELECT content_native FROM memory_entry_native WHERE entry_id=?").get(entry.id) ?? null : null,
+  })).sort((a,b) => a.entry.id.localeCompare(b.entry.id));
+  return digest([DREAM_POLICY, sources]);
+}
+function selectedDreamingSources(agentId: string): { entries: MemoryEntry[]; ownership: Record<string, string[]>; group: string } | null {
+  const all = listGlobalMemoryForAgent(agentId, 60).filter(entry => entry.scope === "agent_repo" && entry.agentId === agentId);
+  const ownership = agentNestExperienceOwnership(all.map(entry => entry.id));
+  const groups = new Map<string, MemoryEntry[]>();
+  for (const entry of all) { const key = JSON.stringify([...(ownership[entry.id] ?? [])].sort());
+    const group = groups.get(key) ?? []; group.push(entry); groups.set(key, group); }
+  const selected = [...groups].sort((a,b) => b[1].length-a[1].length || a[0].localeCompare(b[0])).find(([,rows])=>rows.length>=8);
+  return selected ? { entries: selected[1], ownership, group: selected[0] } : null;
+}
 
 const ENABLED_KEY = "memory_dreaming_enabled";
 const LAST_AT_KEY = "memory_dreaming_last_at";
@@ -37,7 +74,7 @@ const IDLE_REQUIRED_SEC = dreamingIdleRequiredSec();
 const COOLDOWN_MS = dreamingCooldownMs();
 const TICK_MS = 5 * 60 * 1000; // 5분마다 조건 확인(조건 체크 자체는 ~0 비용)
 const MAX_AGENTS_PER_PASS = 2; // 한 번의 드리밍에서 LLM 통합할 에이전트 수 상한
-const LLM_TIMEOUT_MS = 180_000;
+const LLM_TIMEOUT_MS = 300_000;
 
 export function getDreamingEnabled(): boolean {
   const stored = getMeta(ENABLED_KEY);
@@ -125,17 +162,39 @@ function idleSeconds(): number {
 
 async function tick(): Promise<void> {
   if (running) return;
-  if (!getDreamingEnabled()) return;
-  const lastAt = getMeta(LAST_AT_KEY);
-  if (lastAt && Date.now() - Date.parse(lastAt) < COOLDOWN_MS) return;
-  if (idleSeconds() < IDLE_REQUIRED_SEC) return;
-  const slots = runSlotStats();
-  if (slots.inUse > 0 || slots.queued > 0) return;
-
   running = true;
   try {
-    await dreamOnce();
-    setMeta(LAST_AT_KEY, new Date().toISOString());
+    await withIndependentMemoryWorker(async () => {
+      if (!getDreamingEnabled() || idleSeconds() < IDLE_REQUIRED_SEC) return;
+      const slots = runSlotStats();
+      if (slots.inUse > 0 || slots.queued > 0) return;
+      const custody = currentMemorySourceCustody();
+      assertMemorySourceCustody(custody);
+      const db = dreamingDb(), source = getMemoryStoreInfo();
+      const clock = db.prepare("SELECT * FROM memory_dreaming_clock WHERE id=1").get() as {
+        intake_epoch: number; authority_revision: number; completed_at: string } | undefined;
+      // A source mutation, correction, forget or owner switch opens the pass;
+      // unchanged per-scope digests still suppress model work independently.
+      if (clock && clock.intake_epoch === source.revocationEpoch && clock.authority_revision === source.revision
+        && Date.now() - Date.parse(clock.completed_at) < COOLDOWN_MS) {
+        // Native wording/projection-owner metadata can change without the main
+        // entry revision. A cooldown cannot hide a changed exact source set.
+        const pending = listAgentIdsWithLiveMemory(8).some(target => {
+          const selected = selectedDreamingSources(target.agentId);
+          if (!selected) return false;
+          const row = db.prepare("SELECT state,lease_expires_at FROM memory_dreaming_sources WHERE scope_key=? AND input_digest=? AND intake_epoch=?")
+            .get(digest([source.ownerNamespace,target.agentId,"agent_repo",selected.group]), sourceDigest(selected.entries,selected.ownership), source.revocationEpoch) as { state: string; lease_expires_at: string | null } | undefined;
+          return row?.state !== "completed" && (!row?.lease_expires_at || row.lease_expires_at <= new Date().toISOString());
+        });
+        if (!pending) return;
+      }
+      if (await dreamOnce()) {
+        assertMemorySourceCustody(custody);
+        const current = getMemoryStoreInfo(), completedAt = new Date().toISOString();
+        db.prepare("INSERT OR REPLACE INTO memory_dreaming_clock VALUES(1,?,?,?)").run(current.revocationEpoch, current.revision, completedAt);
+        setMeta(LAST_AT_KEY, completedAt);
+      }
+    });
   } catch (err) {
     console.error("[dreaming] pass failed:", err);
   } finally {
@@ -143,48 +202,67 @@ async function tick(): Promise<void> {
   }
 }
 
-async function dreamOnce(): Promise<void> {
+async function dreamOnce(): Promise<boolean> {
+  const custody = currentMemorySourceCustody();
+  assertMemorySourceCustody(custody);
+  const origin = getMemoryStoreInfo();
+  let completed = false, dispatched = 0;
   // 1단계 — 결정론 dedup(무LLM, 수 ms).
   const deduped = dedupExactDuplicateMemories();
   if (deduped > 0) console.log(`[dreaming] dedup: superseded ${deduped} duplicate entries`);
 
   // 2단계 — 메모리가 많이 쌓인 에이전트만 LLM 통합(패스당 상한).
-  const targets = listAgentIdsWithLiveMemory(8).slice(0, MAX_AGENTS_PER_PASS);
-  if (targets.length === 0) return;
+  const targets = listAgentIdsWithLiveMemory(8);
+  if (targets.length === 0) return false;
 
   const runtimes = await detectRuntimes();
   const active = pickActive(runtimes);
   const picked = active ? pickRunner(active) : null;
-  if (!picked) return; // 사용 가능한 런타임 없음 — 다음 기회에
+  if (!picked) return false; // 사용 가능한 런타임 없음 — 다음 기회에
 
   for (const target of targets) {
     // 사용자가 돌아왔으면 즉시 중단 — 드리밍은 항상 양보한다.
-    if (idleSeconds() < 30) return;
+    if (idleSeconds() < 30) return completed;
     const agent = getAgentById(target.agentId);
     if (!agent) continue;
-    const allEntries = listGlobalMemoryForAgent(target.agentId, 60).filter(
-      (e) => e.scope === "agent_repo" && e.agentId === target.agentId,
-    );
-    if (allEntries.length < 8) continue;
-    // A primary installed agent may have invoked several borrowed Hub agents.
-    // Consolidate only one group whose rows have the identical projection-owner
-    // set; otherwise a rule derived from agent B could leak into agent A's nest.
-    const ownership = agentNestExperienceOwnership(allEntries.map((entry) => entry.id));
-    const ownerGroups = new Map<string, MemoryEntry[]>();
-    for (const entry of allEntries) {
-      const key = JSON.stringify(ownership[entry.id] ?? []);
-      const group = ownerGroups.get(key) ?? [];
-      group.push(entry);
-      ownerGroups.set(key, group);
-    }
-    const entries = [...ownerGroups.entries()]
-      .sort((left, right) => right[1].length - left[1].length || left[0].localeCompare(right[0]))
-      .map(([, group]) => group)
-      .find((group) => group.length >= 8);
-    if (!entries) continue;
+    if (dispatched >= MAX_AGENTS_PER_PASS) return completed;
+    assertMemorySourceCustody(custody);
+    const selected = selectedDreamingSources(target.agentId);
+    if (!selected) continue;
+    const { entries } = selected;
+    const db = dreamingDb(), inputDigest = sourceDigest(entries, selected.ownership);
+    const scope = digest([origin.ownerNamespace, target.agentId, "agent_repo", selected.group]);
+    const timeoutMs = connectedModelTimeoutMs(LLM_TIMEOUT_MS);
+    const lease = randomUUID(), leaseExpires = new Date(Date.now() + timeoutMs + 30_000).toISOString();
+    const assertSource = () => {
+      assertMemorySourceCustody(custody);
+      const now = getMemoryStoreInfo();
+      if (now.ownerNamespace !== origin.ownerNamespace || now.revocationEpoch !== origin.revocationEpoch) throw new Error("memory_source_custody_changed");
+      const fresh = selectedDreamingSources(target.agentId);
+      if (!fresh || fresh.group !== selected.group || sourceDigest(fresh.entries, fresh.ownership) !== inputDigest) throw new Error("dreaming_source_changed");
+    };
+    const claimed = db.transaction(() => {
+      assertSource();
+      const previous = db.prepare("SELECT state,lease_expires_at FROM memory_dreaming_sources WHERE scope_key=? AND input_digest=? AND intake_epoch=?")
+        .get(scope, inputDigest, origin.revocationEpoch) as { state: string; lease_expires_at: string | null } | undefined;
+      if (previous?.state === "completed" || (previous?.lease_expires_at && previous.lease_expires_at > new Date().toISOString())) return false;
+      db.prepare(`INSERT INTO memory_dreaming_sources VALUES(?,?,?,'processing',?,?,NULL,NULL)
+        ON CONFLICT(scope_key,input_digest,intake_epoch) DO UPDATE SET state='processing',lease_token=excluded.lease_token,
+        lease_expires_at=excluded.lease_expires_at`).run(scope, inputDigest, origin.revocationEpoch, lease, leaseExpires);
+      return true;
+    }).immediate();
+    if (!claimed) continue;
+    dispatched++;
+    const assertLease = () => {
+      assertSource();
+      const row = db.prepare("SELECT state,lease_token,lease_expires_at FROM memory_dreaming_sources WHERE scope_key=? AND input_digest=? AND intake_epoch=?")
+        .get(scope, inputDigest, origin.revocationEpoch) as { state: string; lease_token: string; lease_expires_at: string } | undefined;
+      if (!row || row.state !== "processing" || row.lease_token !== lease || row.lease_expires_at <= new Date().toISOString()) throw new Error("dreaming_lease_changed");
+    };
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let onStopped: (() => void) | undefined;
     // 유휴 이탈 감시 — 30초마다 확인, 사용자가 활동하면 즉시 abort.
     const watchdog = setInterval(() => {
       if (idleSeconds() < 30) controller.abort();
@@ -195,38 +273,55 @@ async function dreamOnce(): Promise<void> {
       const numbered = entries
         .map((e, i) => `${i + 1}. [${e.kind}/${e.confidence}] ${e.content.replace(/\s+/g, " ").slice(0, 400)}`)
         .join("\n");
-      const intakeEpoch = currentMemoryForgetEpoch();
-      const result = await runObservedRunnerAs("curator", "dreaming", picked.runner,
+      const intakeEpoch = origin.revocationEpoch;
+      assertLease();
+      if (controller.signal.aborted) return completed;
+      const stopped = new Promise<never>((_resolve, reject) => {
+        onStopped = () => reject(controller.signal.reason ?? new Error("memory_dreaming_cancelled"));
+        controller.signal.addEventListener("abort", onStopped, { once: true });
+      });
+      const call = runObservedRunnerAs("curator", "dreaming", picked.runner,
         {
           systemPrompt: [
-            "You are a memory consolidation pass for an AI agent. Merge redundant or fragmentary memory entries into a few durable rules.",
-            'Return ONLY valid JSON: {"rules": ["..."], "absorbed": [1,2,...]} — no markdown fences, no prose.',
-            "rules: max 5 distilled, actionable rules in the same language as the entries. Each must preserve concrete specifics (paths, flags, names).",
+            "judgment: merge redundant or fragmentary memory entries into a few durable rules",
+            'output: ONLY valid JSON {"rules": ["..."], "absorbed": [1,2,...]}, no fences, no prose',
+            "rules: max 5 actionable, entries' language, keep concrete specifics (paths, flags, names)",
             // The owner reads these rules in the agent's Learned panel. Internal run identifiers mean nothing to them.
-            "Write every rule as plain sentences an owner can read: say what the agent does and what it should do next time. Never copy internal identifiers (attempt/run/task ids, UUIDs, hashes, step tags such as t4); refer to them as \"an earlier attempt\" or \"an earlier task\" instead. Keep the names, paths and flags a person would recognise.",
-            "absorbed: the entry numbers fully covered by your rules. NEVER absorb an entry whose specifics are not preserved in a rule.",
-            "If the entries are already clean and distinct, return {\"rules\": [], \"absorbed\": []}.",
+            "rule text: owner-readable plain sentences (what the agent does, what to do next time); no internal ids (attempt/run/task ids, UUIDs, hashes, step tags such as t4); say \"an earlier attempt\" instead",
+            "absorbed: entry numbers fully covered by the rules; never absorb an entry whose specifics are not preserved",
+            "already clean and distinct: {\"rules\": [], \"absorbed\": []}",
           ].join("\n"),
           history: [],
           userPrompt: `Agent: ${agent.name}\nMemory entries:\n${numbered}`,
           backendLabel: picked.label,
           permission: "read",
+          judgmentOnly: true, untrustedNoTools: true,
           signal: controller.signal,
           locale: "en",
         },
         { onPartial: () => {}, onStatus: () => {} },
       );
-      if (controller.signal.aborted) return;
+      void call.catch(() => {});
+      const result = await Promise.race([call, stopped]);
+      if (controller.signal.aborted) return completed;
+      assertLease();
       if (result.failure) throw new ObservedRunnerFailureError(result.failure);
       const parsed = extractJson(result.text);
-      if (!parsed) continue;
+      if (!parsed || !Array.isArray(parsed.rules) || !Array.isArray(parsed.absorbed)
+        || parsed.rules.length > 5 || !parsed.rules.every(rule => typeof rule === "string" && rule.trim() && rule.length <= 4_000)
+        || !parsed.absorbed.every(n => Number.isInteger(n) && Number(n) >= 1 && Number(n) <= entries.length)) throw new Error("dreaming_result_invalid");
       const rules = (Array.isArray(parsed.rules) ? parsed.rules : []).filter(
         (r): r is string => typeof r === "string" && r.trim().length > 0,
       );
       const absorbed = (Array.isArray(parsed.absorbed) ? parsed.absorbed : [])
         .map((n) => Number(n))
         .filter((n) => Number.isInteger(n) && n >= 1 && n <= entries.length);
-      if (rules.length === 0 || absorbed.length === 0) continue;
+      if ((rules.length === 0) !== (absorbed.length === 0)) throw new Error("dreaming_result_invalid");
+      if (rules.length === 0) {
+        db.transaction(() => { assertLease(); db.prepare("UPDATE memory_dreaming_sources SET state='completed',result_json=?,completed_at=?,lease_token=NULL,lease_expires_at=NULL WHERE scope_key=? AND input_digest=? AND intake_epoch=? AND lease_token=?")
+          .run(JSON.stringify({ rules: [], absorbed: [] }), new Date().toISOString(), scope, inputDigest, origin.revocationEpoch, lease); }).immediate();
+        completed = true; continue;
+      }
       const absorbedEntries = absorbed.map((n) => entries[n - 1]);
       const strictestSensitivity = strictestMemorySensitivity(absorbedEntries);
       // Supersede keeps the pointer, not just the count. The AMGB governed
@@ -235,7 +330,9 @@ async function dreamOnce(): Promise<void> {
       // sentence loses exactly that: nothing could ever answer which entries
       // this rule replaced. The ids are the provenance edge.
       const supersedePointers = absorbedEntries.map((entry) => `supersedes:${entry.id}`);
-      const consolidated = rules.slice(0, 5).map((rule) =>
+      const consolidated = db.transaction(() => {
+        assertLease();
+        const consolidated = rules.slice(0, 5).map((rule) =>
         insertMemoryEntry({
           scope: "agent_repo",
           kind: "procedure",
@@ -244,13 +341,20 @@ async function dreamOnce(): Promise<void> {
           confidence: "medium",
           sensitivity: strictestSensitivity,
           intakeEpoch,
+          curationActor: "model_curated", policyVersion: DREAM_POLICY,
+          originRefs: absorbedEntries.map(entry => ({ kind: "source" as const, id: entry.id, revision: digest(entry) })),
           evidence: [
             `dreaming: consolidated ${absorbed.length}/${entries.length} entries`,
             ...supersedePointers,
           ],
         }));
-      const absorbedIds = absorbedEntries.map((entry) => entry.id);
-      supersedeMemoryEntries(absorbedIds);
+        supersedeMemoryEntries(absorbedEntries.map(entry => entry.id));
+        db.prepare("UPDATE memory_dreaming_sources SET state='completed',result_json=?,completed_at=?,lease_token=NULL,lease_expires_at=NULL WHERE scope_key=? AND input_digest=? AND intake_epoch=? AND lease_token=?")
+          .run(JSON.stringify({ memoryIds: consolidated.map(entry => entry.id), absorbedIds: absorbedEntries.map(entry => entry.id) }), new Date().toISOString(), scope, inputDigest, origin.revocationEpoch, lease);
+        return consolidated;
+      }).immediate();
+      completed = true;
+      const absorbedIds = absorbedEntries.map(entry => entry.id);
       // Keep the cross-project projection aligned with Desktop ownership. The
       // single-rule case has an unambiguous structural successor; multi-rule
       // consolidation retires stale sources without manufacturing pairwise
@@ -272,12 +376,17 @@ async function dreamOnce(): Promise<void> {
       }
       // abort(사용자 복귀/타임아웃) 포함 — 조용히 다음 기회로.
       if (!controller.signal.aborted) console.error("[dreaming] consolidation failed:", err);
-      return;
+      return completed;
     } finally {
+      // A failed/unavailable model or changed source is retryable, never a
+      // successful processed digest. A peer reclaimed lease is untouched.
+      try { db.prepare("UPDATE memory_dreaming_sources SET state='retry',lease_token=NULL,lease_expires_at=NULL WHERE scope_key=? AND input_digest=? AND intake_epoch=? AND state='processing' AND lease_token=?").run(scope, inputDigest, origin.revocationEpoch, lease); } catch { /* Old owner facade is fenced. */ }
       clearTimeout(timeout);
       clearInterval(watchdog);
+      if (onStopped) controller.signal.removeEventListener("abort", onStopped);
     }
   }
+  return completed;
 }
 
 function extractJson(text: string): { rules?: unknown; absorbed?: unknown } | null {

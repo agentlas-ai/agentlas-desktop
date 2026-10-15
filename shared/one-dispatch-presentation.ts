@@ -1,5 +1,10 @@
 import { parseAskFenceBody, type AgentlasAskQuestion } from "./ask-fence-flatten";
 
+export const ONE_DISPATCH_QUESTION_BANK_MAX_QUESTIONS = 64;
+export interface OneDispatchQuestionBank {
+  schemaVersion: 1; sourceMessageId: string; questions: AgentlasAskQuestion[];
+}
+
 export interface OneDispatchQuestionAnswer {
   parentChatId: string; dispatchId: string; chatId: string; runId: string; sourceMessageId: string;
   reply?: string; locale?: "ko" | "en"; retryCommitted?: boolean;
@@ -15,7 +20,7 @@ export interface OneDispatchPresentation {
   startedAt: string;
   updatedAt: string;
   resultText?: string;
-  pendingQuestion?: { sourceMessageId: string; questions: AgentlasAskQuestion[]; committedReply?: string; continuationRunId?: string };
+  pendingQuestion?: { sourceMessageId: string; questions: AgentlasAskQuestion[]; questionBank?: OneDispatchQuestionBank; committedReply?: string; continuationRunId?: string };
   activity?: Array<{ id: string; kind: "reasoning" | "tool" | "status"; text: string; createdAt: string }>;
 }
 
@@ -34,16 +39,30 @@ export function normalizeOneDispatchPresentation(value: unknown): OneDispatchPre
       || !["reasoning", "tool", "status"].includes(item.kind) || typeof item.text !== "string") continue;
     activity.push({ id: item.id, kind: item.kind, text: item.text.slice(0, 1200), createdAt: item.createdAt });
   }
-  const pending = v.pendingQuestion as {sourceMessageId?:unknown;questions?:unknown;committedReply?:unknown;continuationRunId?:unknown} | undefined;
+  const pending = v.pendingQuestion as {sourceMessageId?:unknown;questions?:unknown;questionBank?:unknown;committedReply?:unknown;continuationRunId?:unknown} | undefined;
   const questions = Array.isArray(pending?.questions)
     ? pending.questions.slice(0,8).flatMap(q => {
       try { const json = JSON.stringify(q); const parsed = typeof json === "string" ? parseAskFenceBody(json) : null; return parsed ? [parsed] : []; }
       catch { return []; }
     }) : [];
+  const rawBank = pending?.questionBank as Partial<OneDispatchQuestionBank> | undefined;
+  let questionBank: OneDispatchQuestionBank | undefined;
+  if (rawBank?.schemaVersion === 1 && rawBank.sourceMessageId === pending?.sourceMessageId
+    && id(rawBank.sourceMessageId) && Array.isArray(rawBank.questions) && rawBank.questions.length > 0
+    && rawBank.questions.length <= ONE_DISPATCH_QUESTION_BANK_MAX_QUESTIONS) {
+    const bankQuestions = rawBank.questions.map(q => {
+      try { return parseAskFenceBody(JSON.stringify(q)); } catch { return null; }
+    });
+    if (bankQuestions.every((q): q is AgentlasAskQuestion => q !== null)
+      && JSON.stringify(bankQuestions.slice(0,8)) === JSON.stringify(questions)) {
+      questionBank = { schemaVersion: 1, sourceMessageId: rawBank.sourceMessageId, questions: bankQuestions };
+    }
+  }
   return { dispatchId: v.dispatchId, parentChatId: v.parentChatId, memberAgentId: v.memberAgentId,
     memberIcon: v.memberIcon, status: v.status as OneDispatchPresentation["status"], startedAt: v.startedAt, updatedAt: v.updatedAt,
     ...(typeof v.resultText === "string" && v.resultText.trim() ? { resultText: v.resultText.slice(0, 12000) } : {}),
     ...(pending && id(pending.sourceMessageId) && questions.length ? { pendingQuestion: { sourceMessageId:pending.sourceMessageId, questions,
+      ...(questionBank ? { questionBank } : {}),
       ...(id(pending.continuationRunId) && typeof pending.committedReply === "string" && pending.committedReply.length <= 12000
         ? {continuationRunId:pending.continuationRunId,committedReply:pending.committedReply} : {}),
     } } : {}),

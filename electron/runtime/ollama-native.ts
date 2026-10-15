@@ -39,7 +39,19 @@ export interface OllamaContextPlan {
 /** Sticky per host+model: shrinking would make the next request reload the model for nothing. */
 const chosenWindow = new Map<string, number>();
 
-export function resetOllamaContextChoices(): void { chosenWindow.clear(); }
+/** The model maximum the sticky choice was made against: a different maximum means a different model behind the tag. */
+const chosenBasis = new Map<string, { modelMax?: number }>();
+
+export function resetOllamaContextChoices(): void { chosenWindow.clear(); chosenBasis.clear(); limitsCache.clear(); }
+
+/**
+ * G32: forget everything measured for host+model (probed limits and the sticky window). Called when a context failure
+ * says the measured window was wrong, so the next plan re-measures instead of reusing a bigger remembered window.
+ */
+export function invalidateOllamaContext(host: string, model: string): void {
+  const key = `${host}\0${model}`;
+  chosenWindow.delete(key); chosenBasis.delete(key); limitsCache.delete(key);
+}
 
 export function planOllamaContext(input: {
   host: string;
@@ -58,10 +70,16 @@ export function planOllamaContext(input: {
   // 1.25x headroom: every tool step appends its call and result to the same window.
   const wanted = Math.ceil(need * 1.25);
   const key = `${input.host}\0${input.model}`;
-  const previous = chosenWindow.get(key) ?? 0;
+  let previous = chosenWindow.get(key) ?? 0;
+  // A smaller trained maximum than the remembered window, or a maximum that differs from the one the choice was made
+  // against, is a different (smaller) model behind the same tag: the remembered bigger window is stale, not a floor.
+  const basis = chosenBasis.get(key);
+  if (previous > 0 && input.limits.modelMax !== undefined
+    && (input.limits.modelMax < previous || (basis?.modelMax !== undefined && basis.modelMax !== input.limits.modelMax))) previous = 0;
   const tier = OLLAMA_CONTEXT_TIERS.find((candidate) => candidate >= wanted) ?? OLLAMA_CONTEXT_TIERS[OLLAMA_CONTEXT_TIERS.length - 1];
   const numCtx = Math.min(ceiling, Math.max(tier, previous));
   chosenWindow.set(key, numCtx);
+  chosenBasis.set(key, modelMax ? { modelMax } : {});
   return {
     numCtx, ...(modelMax ? { modelMax } : {}), ...(input.limits.loaded ? { loaded: input.limits.loaded } : {}),
     ceiling, insufficient: need > numCtx, needTokens: need,
@@ -77,10 +95,11 @@ export async function probeOllamaContextLimits(
   model: string,
   signal?: AbortSignal,
   fetchImpl: typeof fetch = fetch,
+  options: { fresh?: boolean } = {},
 ): Promise<OllamaContextLimits> {
   const key = `${host}\0${model}`;
   const cached = limitsCache.get(key);
-  if (cached && Date.now() - cached.at < LIMITS_TTL_MS) return cached.value;
+  if (!options.fresh && cached && Date.now() - cached.at < LIMITS_TTL_MS) return cached.value;
   const value: OllamaContextLimits = {};
   const timeout = (ms: number) => AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(ms)]);
   try {
@@ -101,8 +120,29 @@ export async function probeOllamaContextLimits(
       if (row && Number.isSafeInteger(row.context_length) && Number(row.context_length) > 0) value.loaded = Number(row.context_length);
     }
   } catch { /* not loaded or unreachable */ }
+  // A fresh reading of the real loaded window below the remembered choice means the model was reloaded smaller.
+  const remembered = chosenWindow.get(key);
+  if (options.fresh && value.loaded !== undefined && remembered !== undefined && value.loaded < remembered) {
+    chosenWindow.delete(key); chosenBasis.delete(key);
+  }
   limitsCache.set(key, { at: Date.now(), value });
   return value;
+}
+
+/**
+ * G32: after a context failure, drop what was cached and measure again. Returns the smallest window the server now
+ * reports for the model (loaded or trained maximum), or undefined when it reports neither (unknown, never 0).
+ */
+export async function remeasureOllamaWindow(
+  host: string,
+  model: string,
+  signal?: AbortSignal,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ limits: OllamaContextLimits; window: number | undefined }> {
+  invalidateOllamaContext(host, model);
+  const limits = await probeOllamaContextLimits(host, model, signal, fetchImpl, { fresh: true });
+  const known = [limits.loaded, limits.modelMax].filter((value): value is number => typeof value === "number" && value > 0);
+  return { limits, window: known.length ? Math.min(...known) : undefined };
 }
 
 // ── OpenAI chat request -> native /api/chat ─────────────────────────────

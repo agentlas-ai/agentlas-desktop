@@ -1,5 +1,7 @@
 import { BrowserWindow, desktopCapturer, nativeImage, powerMonitor, screen, shell, systemPreferences } from "electron";
 import { withOneSensitiveOperation } from '../secrets/sensitive-surface';
+import { openSystemPermissionSettings } from "../os-permission-settings";
+import { reportSystemPermissionIssue } from "../os-permission-guidance";
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -33,9 +35,8 @@ export async function openOneContextPermissions(value: unknown): Promise<void> {
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length !== 1 || !Object.hasOwn(value, "kind")) throw new OneContextError("one-context-invalid-input");
   const kind = (value as {kind: unknown}).kind;
   if (kind !== "screen" && kind !== "accessibility") throw new OneContextError("one-context-invalid-permission");
-  if (process.platform === "darwin") await shell.openExternal(`x-apple.systempreferences:com.apple.preference.security?Privacy_${kind === "screen" ? "ScreenCapture" : "Accessibility"}`);
-  else if (process.platform === "win32" && kind === "screen") await shell.openExternal("ms-settings:privacy-graphicscaptureprogrammatic");
-  else throw new OneContextError("one-context-settings-unavailable");
+  const result = await openSystemPermissionSettings(kind);
+  if (!result.ok) throw new OneContextError(result.error ?? "one-context-settings-unavailable");
 }
 async function nativeWindows(): Promise<WindowMetadata[]> {
   if (!nativeInputDriverAvailable()) return [];
@@ -82,6 +83,10 @@ async function captureExactUnlocked(target: ContextTarget, signal: AbortSignal):
     return {dataUrl:pixels.toDataURL(),capturedAt:new Date().toISOString()};
   }
   if (process.platform !== "darwin") throw new OneContextError("one-context-platform-unavailable");
+  if (oneContextReadiness().screenPermission !== "granted") {
+    reportSystemPermissionIssue("screen", "one-context");
+    throw new OneContextError("one-context-screen-permission-unavailable");
+  }
   const args = ["-x","-t","png"];
   if (target.kind === "window") { const match = /^window:(\d+):0$/.exec(target.sourceId); if (!match) throw new OneContextError("one-context-target-invalid"); args.push(`-l${match[1]}`); }
   else { const all = await oneContextTargets("display"), index = all.findIndex(row => row.sourceId === target.sourceId && row.fingerprint === target.fingerprint); if(index<0)throw new OneContextError("one-context-target-stale"); args.push(`-D${index+1}`); }

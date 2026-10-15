@@ -7,7 +7,9 @@ import { getProject } from '../store/projects';
 import { readInvocationEffectBoundary } from '../invocation/effect-boundary-reader';
 import { oneSupervisor } from './supervisor';
 import { supervisorExactResult } from './supervisor-presentation';
-import { OneHarnessService, type HarnessArtifactBinding, type HarnessActionRecord } from './harness-service';
+import { OneHarnessService, type HarnessArtifactBinding, type HarnessActionRecord, type HarnessResultSource } from './harness-service';
+import type { CanonicalTask } from '../../shared/types';
+import type { SupervisorTask } from '../../shared/one-supervisor';
 import type { OneEffectReceipt, OneHarnessAPI } from '../../shared/one-harness';
 import type { SupervisorCommandReceipt } from '../../shared/one-supervisor';
 
@@ -26,6 +28,22 @@ function actionStore() {
   return db;
 }
 
+const PROJECTED_STATUS: Record<string, CanonicalTask["status"]> = { completed: "completed", failed: "failed", cancelled: "cancelled", interrupted: "failed", running: "running" };
+
+/** A read-only result source for a supervisor-projected task: the exact text the projection holds, no artifacts. */
+export function projectedResultSource(oneId: string, current: SupervisorTask, runId: string): HarnessResultSource {
+  if (current.runId !== runId) throw new Error('one_harness_run_mismatch');
+  const receipt = current.chatId ? getInvocationRunReceipt(runId) : null;
+  const sameChat = receipt && receipt.chatId === current.chatId ? receipt : null;
+  const task: CanonicalTask = { id: current.taskId, version: 1, title: current.title, projectId: current.projectId, firmId: null,
+    status: PROJECTED_STATUS[current.state] ?? "running", originChatId: current.chatId, createdAt: current.observedAt, updatedAt: current.observedAt,
+    archivedAt: null, participants: [] };
+  return { oneId, current, task, receipt: sameChat, surface: null, text: current.result, bindings: [],
+    effect: { state: current.state === 'running' ? 'pending' : 'uncertain', receiptEventId: null, terminalEventId: null, observedBy: null, sourceRefs: [], pendingEffectRefs: [] },
+    scope: { oneIdentityRef: oneId, taskId: current.taskId, runId, surface: current.surface, kind: 'personal', projectId: current.projectId,
+      organizationId: null, legacyFirmId: null, label: 'Personal', authorityRef: 'desktop-local', authorization: 'local-owner', dataClass: 'personal', payer: 'personal' } };
+}
+
 /** Adapts authoritative existing stores; there is no second task/artifact store. */
 export function localOneHarness(): OneHarnessService {
   if (instance) return instance;
@@ -35,6 +53,9 @@ export function localOneHarness(): OneHarnessService {
       const snapshot = await oneSupervisor().snapshot();
       if (snapshot.oneId !== input.oneId || getOneProfile().oneId !== input.oneId) throw new Error('one_harness_identity_changed');
       const current = snapshot.tasks.find(task => task.taskId === input.taskId);
+      // A Science turn, a conversation One messaged or a teammate it reached has no canonical Work task; its exact
+      // result comes from the supervisor projection (docs native-harness 22 O5), read-only.
+      if (current && !getCanonicalTask(input.taskId)) return projectedResultSource(snapshot.oneId, current, input.runId);
       const task = getCanonicalTask(input.taskId);
       if (!current || !task?.originChatId || current.chatId !== task.originChatId) throw new Error('one_harness_task_not_visible');
       const receipt = getInvocationRunReceipt(input.runId);

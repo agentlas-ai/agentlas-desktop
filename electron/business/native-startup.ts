@@ -17,6 +17,10 @@ export interface BusinessNativeStartupInput {
   readonly toolchains?: Readonly<BusinessNativeStartupToolchainPorts> | null;
 }
 
+// Issuance provenance only. It cannot grant an action or extend an admission.
+// A DTO, marker, cloned handle or a different shared port object is never issued.
+const originalStartupDomains = new WeakMap<object, Readonly<BusinessNativeStartupSharedPorts>>();
+
 /** Pure owner hookup factory. Import/construction does not register One authority,
  * activate an account/tenant/collector, open a DB, request a grant or dispatch effects.
  * One's sole routing owner consumes these exports and performs its once-only binding.
@@ -47,7 +51,7 @@ export function createBusinessNativeStartupBindings(input: BusinessNativeStartup
     effects: input.toolchains?.effects ?? null,
   }, now);
   let cleanupUnknown = false;
-  return Object.freeze({
+  const bindings = Object.freeze({
     vault,
     data,
     toolchains,
@@ -60,5 +64,17 @@ export function createBusinessNativeStartupBindings(input: BusinessNativeStartup
       if (cleanupUnknown) throw new Error('business_native_cleanup_unconfirmed');
     },
   });
+  originalStartupDomains.set(bindings, shared);
+  return bindings;
 }
 export type BusinessNativeStartupBindings = ReturnType<typeof createBusinessNativeStartupBindings>;
+
+/** Main-owned console consumers reuse the already-issued original startup.
+ * Object identity and all four original references must match; this check is
+ * provenance, never current identity, role, resource or serialized permission. */
+export function businessNativeStartupMatchesShared(bindings: BusinessNativeStartupBindings,
+  shared: Readonly<BusinessNativeStartupSharedPorts>): boolean {
+  const original = originalStartupDomains.get(bindings);
+  return !!original && original.sessions === shared.sessions && original.identity === shared.identity
+    && original.authority === shared.authority && original.registry === shared.registry;
+}

@@ -30,6 +30,9 @@ import { OneExperienceReuseCard } from "./OneExperienceReuseCard";
 import { OneImprovementProofCard } from "./OneImprovementProofCard";
 import { OneBottomSheet } from "./OneBottomSheet";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
+import { BUILTIN_ONE_AGENT_ID } from "@shared/builtin-agent-ids";
+import type { AgentAppMemorySharing } from "@shared/agent-app-memory";
+import type { DesktopMemoryQueryResult, DesktopMemoryDetail, DesktopMemoryStatus } from "@shared/desktop-memory-inspector";
 import type { OneDurableMemoryEntryUi } from "@shared/types";
 import type { OneMemoryMapSnapshot } from "@shared/one-memory-map";
 import { OneMemoryMap, ONE_MEMORY_KIND_COLORS } from "./OneMemoryMap";
@@ -113,27 +116,10 @@ function KindIcon({ kind, size = 14 }: { kind: string; size?: number }) {
   return <span className={styles.kindIcon} style={{ color: ONE_MEMORY_KIND_COLORS[kind] ?? "#8a8d92" }} aria-hidden="true"><Icon size={size} /></span>;
 }
 
-export function OneMemorySheet({
-  open,
-  state,
-  locale,
-  useOnceTarget,
-  onClose,
-  onStateChange,
-  onUseOnceReady,
-  valueClosure = null,
-  experienceReuse = null,
-  improvementProof = null,
-  valueClosureState = null,
-  onValueClosureStateChange,
-  onManageImprovementAsset,
-}: OneMemorySheetProps) {
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [useOnceReceipt, setUseOnceReceipt] = useState<OneMemoryUseOnceReceipt | null>(null);
-  // What One actually remembers (the rows the memory map is drawn from). Loaded
-  // when the sheet opens; the sheet and the map must agree on the count.
+/** Older preload compatibility: exactly one historical One reader is mounted
+ * only when the optional Desktop Inspector is absent. No new intake or approval. */
+function LegacyOneMemoryView({open,locale}:{open:boolean;locale:"ko"|"en"}) {
+  const [busyId,setBusyId]=useState<string|null>(null),[message,setMessage]=useState<string|null>(null),[error,setError]=useState<string|null>(null);
   const [durable, setDurable] = useState<OneDurableMemoryEntryUi[] | null>(null);
   const [durableError, setDurableError] = useState(false);
   const [durableRetry, setDurableRetry] = useState(0);
@@ -214,281 +200,11 @@ export function OneMemorySheet({
     const row = durable?.find((entry) => entry.id === id);
     return row ? { label: kindLabel(row.kind, locale), text: row.content } : null;
   }, [durable, locale]);
-  const [editingCandidateId, setEditingCandidateId] = useState<string | null>(null);
-  const [candidateContent, setCandidateContent] = useState("");
-  const [editingMemoryId, setEditingMemoryId] = useState<string | null>(null);
-  const [memoryContent, setMemoryContent] = useState("");
-
-  const pending = useMemo(
-    () => state?.candidates.filter((candidate) => candidate.status === "pending") ?? [],
-    [state],
-  );
-  const resolved = useMemo(
-    () => (state?.candidates.filter((candidate) => candidate.status !== "pending") ?? [])
-      .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
-      .slice(0, 12),
-    [state],
-  );
-
-  useEffect(() => {
-    if (!open) return;
-    setMessage(null);
-    setError(null);
-    setUseOnceReceipt(null);
-  }, [onClose, open]);
-
-  useEffect(() => {
-    if (editingCandidateId && !pending.some((candidate) => candidate.id === editingCandidateId)) {
-      setEditingCandidateId(null);
-    }
-    if (editingMemoryId && !state?.memories.some((memory) => memory.id === editingMemoryId)) {
-      setEditingMemoryId(null);
-    }
-  }, [editingCandidateId, editingMemoryId, pending, state]);
-
-  if (!open) return null;
-
-  const refresh = async () => {
-    const api = ipc();
-    if (!api) throw new Error(tFor(locale, "one.mem.err.unavailable"));
-    const latest = await api.oneMemory.getState();
-    onStateChange(latest);
-    return latest;
-  };
-
-  const mutate = async (id: string, operation: () => Promise<unknown>, success: string) => {
-    setBusyId(id);
-    setMessage(null);
-    setError(null);
-    try {
-      const value = await operation();
-      await refresh();
-      setMessage(success);
-      return value;
-    } catch (cause) {
-      await refresh().catch(() => undefined);
-      requestOneOperationalRecovery("one-memory", cause);
-      setError(null);
-      return null;
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  const beginCandidateEdit = (candidate: OneMemoryCandidate) => {
-    setEditingCandidateId(candidate.id);
-    setCandidateContent(candidate.normalizedPreview);
-    setMessage(null);
-    setError(null);
-  };
-
-  const saveCandidate = async (candidate: OneMemoryCandidate) => {
-    const api = ipc();
-    if (!state) return;
-    if (!api) {
-      requestOneOperationalRecovery("one-memory", new Error("Desktop bridge unavailable"));
-      return;
-    }
-    const result = await mutate(candidate.id, () => api.oneMemory.save({
-      expectedStoreVersion: state.version,
-      candidateId: candidate.id,
-      expectedCandidateVersion: candidate.version,
-      approvedByUser: true,
-    }), tFor(locale, "one.mem.msg.saved_approved"));
-    if (result) setEditingCandidateId(null);
-  };
-
-  const editAndSaveCandidate = async (event: FormEvent, candidate: OneMemoryCandidate) => {
-    event.preventDefault();
-    const api = ipc();
-    if (!state) return;
-    if (!api) {
-      requestOneOperationalRecovery("one-memory", new Error("Desktop bridge unavailable"));
-      return;
-    }
-    const result = await mutate(candidate.id, () => api.oneMemory.editAndSave({
-      expectedStoreVersion: state.version,
-      candidateId: candidate.id,
-      expectedCandidateVersion: candidate.version,
-      approvedByUser: true,
-      content: candidateContent,
-      scope: candidate.scope,
-      scopeRef: candidate.scopeRef,
-    }), tFor(locale, "one.mem.msg.saved_edited"));
-    if (result) setEditingCandidateId(null);
-  };
-
-  const useCandidateOnce = async (candidate: OneMemoryCandidate) => {
-    const api = ipc();
-    if (!state || !useOnceTarget) return;
-    if (!api) {
-      requestOneOperationalRecovery("one-memory", new Error("Desktop bridge unavailable"));
-      return;
-    }
-    const result = await mutate(candidate.id, () => api.oneMemory.useOnce({
-      expectedStoreVersion: state.version,
-      candidateId: candidate.id,
-      expectedCandidateVersion: candidate.version,
-      target: useOnceTarget,
-      confirmedByUser: true,
-    }), tFor(locale, "one.mem.msg.use_once_ready"));
-    const receipt = result && typeof result === "object" && "value" in result
-      ? (result as { value: OneMemoryUseOnceReceipt }).value
-      : null;
-    setUseOnceReceipt(receipt);
-    if (receipt) onUseOnceReady(receipt, useOnceTarget);
-  };
-
-  const rejectCandidate = async (candidate: OneMemoryCandidate) => {
-    const api = ipc();
-    if (!state) return;
-    if (!api) {
-      requestOneOperationalRecovery("one-memory", new Error("Desktop bridge unavailable"));
-      return;
-    }
-    await mutate(candidate.id, () => api.oneMemory.reject({
-      expectedStoreVersion: state.version,
-      candidateId: candidate.id,
-      expectedCandidateVersion: candidate.version,
-      rejectedByUser: true,
-    }), tFor(locale, "one.mem.msg.rejected"));
-  };
-
-  const beginMemoryEdit = (memory: OneMemoryAsset) => {
-    setEditingMemoryId(memory.id);
-    setMemoryContent(memory.content);
-    setMessage(null);
-    setError(null);
-  };
-
-  const saveMemory = async (event: FormEvent, memory: OneMemoryAsset) => {
-    event.preventDefault();
-    const api = ipc();
-    if (!state) return;
-    if (!api) {
-      requestOneOperationalRecovery("one-memory", new Error("Desktop bridge unavailable"));
-      return;
-    }
-    const result = await mutate(memory.id, () => api.oneMemory.updateAsset({
-      expectedStoreVersion: state.version,
-      memoryId: memory.id,
-      expectedMemoryVersion: memory.version,
-      content: memoryContent,
-      scope: memory.scope,
-      scopeRef: memory.scopeRef,
-      approvedByUser: true,
-    }), tFor(locale, "one.mem.msg.reapproved"));
-    if (result) setEditingMemoryId(null);
-  };
-
-  const toggleMemory = async (memory: OneMemoryAsset) => {
-    const api = ipc();
-    if (!state) return;
-    if (!api) {
-      requestOneOperationalRecovery("one-memory", new Error("Desktop bridge unavailable"));
-      return;
-    }
-    await mutate(memory.id, () => api.oneMemory.setAssetEnabled({
-      expectedStoreVersion: state.version,
-      memoryId: memory.id,
-      expectedMemoryVersion: memory.version,
-      enabled: !memory.enabled,
-      confirmedByUser: true,
-    }), memory.enabled
-      ? tFor(locale, "one.mem.msg.disabled")
-      : tFor(locale, "one.mem.msg.enabled"));
-  };
-
-  const deleteMemory = async (memory: OneMemoryAsset) => {
-    const api = ipc();
-    if (!state) return;
-    if (!api) {
-      requestOneOperationalRecovery("one-memory", new Error("Desktop bridge unavailable"));
-      return;
-    }
-    if (!await confirmPopup(tFor(locale, "one.mem.confirm.delete_memory"), { locale, title: locale === "ko" ? "기억 삭제" : "Delete memory", confirmLabel: locale === "ko" ? "삭제" : "Delete", tone: "danger" })) return;
-    await mutate(memory.id, () => api.oneMemory.deleteAsset({
-      expectedStoreVersion: state.version,
-      memoryId: memory.id,
-      expectedMemoryVersion: memory.version,
-      confirmedByUser: true,
-    }), tFor(locale, "one.mem.msg.memory_deleted"));
-  };
-
-  const deleteResolvedCandidate = async (candidate: OneMemoryCandidate) => {
-    const api = ipc();
-    if (!state) return;
-    if (!api) {
-      requestOneOperationalRecovery("one-memory", new Error("Desktop bridge unavailable"));
-      return;
-    }
-    if (!await confirmPopup(tFor(locale, "one.mem.confirm.delete_record"), { locale, title: locale === "ko" ? "기록 삭제" : "Delete record", confirmLabel: locale === "ko" ? "삭제" : "Delete", tone: "danger" })) return;
-    await mutate(candidate.id, () => api.oneMemory.deleteCandidate({
-      expectedStoreVersion: state.version,
-      candidateId: candidate.id,
-      expectedCandidateVersion: candidate.version,
-      confirmedByUser: true,
-    }), tFor(locale, "one.mem.msg.record_deleted"));
-  };
-
-  return (
-    <OneBottomSheet
-      open={open}
-      onClose={onClose}
-      closeLabel={tFor(locale, "one.mem.aria.close_memory")}
-      ariaLabelledBy="one-memory-title"
-      size="wide"
-      closeOnBackdrop={!busyId}
-      closeOnEscape={!busyId}
-      closeDisabled={Boolean(busyId)}
-      title={tFor(locale, "one.mem.header.title")}
-      icon={<IconBrain size={20} />}
-      titleId="one-memory-title"
-    >
-        {!state ? (
-          <div className={styles.loading} role="status"><span>{tFor(locale, "one.mem.loading")}</span><LoadingEstimate locale={locale} operationKey="one-memory-load" expectedSeconds={[1, 15]} /></div>
-        ) : (
-          <div className={styles.content}>
-            {(message || error) && <p className={error ? styles.error : styles.message} role={error ? "alert" : "status"}>{error ?? message}</p>}
-            {useOnceReceipt && (
-              <section className={styles.onceReceipt} aria-label={tFor(locale, "one.mem.once.aria")}>
-                <strong>{tFor(locale, "one.mem.once.title")}</strong>
-                <p>{tFor(locale, "one.mem.once.expires", { date: formatDate(useOnceReceipt.expiresAt, locale) })}</p>
-                <small>{tFor(locale, "one.mem.once.note")}</small>
-              </section>
-            )}
-
-            {valueClosure && (
-              <section className={styles.section} aria-labelledby="memory-compounding-title">
-                <div className={styles.sectionHeading}>
-                  <div>
-                    <h3 id="memory-compounding-title">{tFor(locale, "one.mem.compounding.title")}</h3>
-                  </div>
-                </div>
-                <div className={styles.cardList}>
-                  {valueClosureState && onValueClosureStateChange && (
-                    <OneValueClosureCard
-                      record={valueClosure}
-                      state={valueClosureState}
-                      locale={locale}
-                      onStateChange={onValueClosureStateChange}
-                    />
-                  )}
-                  {experienceReuse && (
-                    <OneExperienceReuseCard record={experienceReuse} locale={locale} onManage={onClose} />
-                  )}
-                  {improvementProof && onManageImprovementAsset && (
-                    <OneImprovementProofCard
-                      record={improvementProof}
-                      locale={locale}
-                      onManageAsset={onManageImprovementAsset}
-                    />
-                  )}
-                </div>
-              </section>
-            )}
-
-            <section className={styles.section} aria-labelledby="durable-memory-title" data-one-durable-memory="true">
+  useEffect(()=>{if(!open)return;return window.agentlasEvents?.onStoreChanged?.(change=>{
+    if(!["agent","project","one-profile","runtime"].includes(change.entity))return;
+    ++durableRequest.current;setDurable(null);setMemoryMap(null);setSelectedMemory(null);setDurableRetry(value=>value+1);
+  });},[open]);
+  return <><section className={styles.section} aria-labelledby="durable-memory-title" data-one-durable-memory="true">
               <h3 id="durable-memory-title" className={styles.memoryCount}>
                 {locale === "ko" ? "기억" : "Memories"} <span>{durable ? durable.length : durableError ? "!" : "…"}</span>
               </h3>
@@ -556,135 +272,125 @@ export function OneMemorySheet({
                   </button>
                 )}
               </div>
-            </section>
+            </section>{message&&<p className={styles.message} role="status">{message}</p>}{error&&<p className={styles.error} role="alert">{error}</p>}</>;
+}
 
-            {/* Empty review/saved lists carry no information — hide them (owner 2026-08-16). */}
-            {pending.length > 0 && (
-              <section className={styles.section} aria-labelledby="memory-candidates-title">
-                <div className={styles.sectionHeading}>
-                  <div>
-                    <h3 id="memory-candidates-title">{tFor(locale, "one.mem.candidates.title", { n: pending.length })}</h3>
-                  </div>
-                </div>
-                <div className={styles.cardList}>
-                  {pending.length === 0 && <p className={styles.empty}>{tFor(locale, "one.mem.candidates.empty")}</p>}
-                  {pending.map((candidate) => (
-                    <article key={candidate.id} className={styles.card}>
-                      {editingCandidateId === candidate.id ? (
-                        <form className={styles.editForm} onSubmit={(event) => void editAndSaveCandidate(event, candidate)}>
-                          <label className={styles.wideField}>
-                            <span>{tFor(locale, "one.mem.field.content_to_save")}</span>
-                            <textarea value={candidateContent} onChange={(event) => setCandidateContent(event.target.value)} maxLength={500} rows={4} required disabled={Boolean(busyId)} />
-                          </label>
-                          <div className={styles.cardActions}>
-                            <button type="submit" className={styles.primaryButton} disabled={Boolean(busyId) || !candidateContent.trim()}>{tFor(locale, "one.mem.action.approve_edits_save")}</button>
-                            <button type="button" className={styles.secondaryButton} onClick={() => setEditingCandidateId(null)} disabled={Boolean(busyId)}>{tFor(locale, "one.mem.action.cancel")}</button>
-                          </div>
-                        </form>
-                      ) : (
-                        <>
-                          <div className={styles.cardTop}>
-                            <span className={styles.scopeBadge}>{tFor(locale, "one.mem.scope.for_use", { scope: locale === "ko" ? scopeLabel(candidate.scope, locale) : scopeLabel(candidate.scope, locale).toLowerCase() })}</span>
-                            <span className={styles.pendingBadge}>{basisLabel(candidate, locale)}</span>
-                          </div>
-                          <p className={styles.cardContent}>{candidate.normalizedPreview}</p>
-                          <details className={styles.sourceBox}>
-                            <summary>{tFor(locale, "one.mem.candidate.why_summary")}</summary>
-                            <span>{tFor(locale, "one.mem.label.original_work")} · {shortRef(candidate.source.sourceTaskId)}</span>
-                            <span>{tFor(locale, "one.mem.label.source")} · {shortRef(candidate.source.sourceRef)}</span>
-                            <span>{tFor(locale, "one.mem.label.check_records")} · {candidate.source.evidenceRefs.length}</span>
-                            <span>{candidate.source.provenanceStatus === "verified"
-                              ? tFor(locale, "one.mem.provenance.verified")
-                              : tFor(locale, "one.mem.provenance.unverified")}</span>
-                            <span>{tFor(locale, "one.mem.label.review_again")} · {formatDate(candidate.reviewAfter, locale)}</span>
-                          </details>
-                          <div className={styles.cardActions}>
-                            <button type="button" className={styles.primaryButton} onClick={() => void saveCandidate(candidate)} disabled={Boolean(busyId) || candidate.source.provenanceStatus !== "verified"}>{tFor(locale, "one.mem.action.save_to_memory")}</button>
-                            <button type="button" className={styles.secondaryButton} onClick={() => beginCandidateEdit(candidate)} disabled={Boolean(busyId) || candidate.source.provenanceStatus !== "verified"}>{tFor(locale, "one.mem.action.edit_and_save")}</button>
-                            <button
-                              type="button"
-                              className={styles.secondaryButton}
-                              onClick={() => void useCandidateOnce(candidate)}
-                              disabled={Boolean(busyId) || !useOnceTarget}
-                              title={!useOnceTarget ? tFor(locale, "one.mem.use_once_title") : undefined}
-                            >{tFor(locale, "one.mem.action.use_once")}</button>
-                            <button type="button" className={styles.dangerButton} onClick={() => void rejectCandidate(candidate)} disabled={Boolean(busyId)}>{tFor(locale, "one.mem.action.reject")}</button>
-                          </div>
-                        </>
-                      )}
-                    </article>
-                  ))}
-                </div>
-              </section>
-            )}
+function DesktopMemoryInspector({open,locale,revisionHint}:{open:boolean;locale:"ko"|"en";revisionHint:OneMemoryState|null}) {
+  const [result,setResult]=useState<DesktopMemoryQueryResult|null>(null),[detail,setDetail]=useState<DesktopMemoryDetail|null>(null);
+  const [actor,setActor]=useState(BUILTIN_ONE_AGENT_ID),[project,setProject]=useState(""),[scope,setScope]=useState("");
+  const [status,setStatus]=useState<DesktopMemoryStatus|"all">("active"),[selected,setSelected]=useState<string|null>(null);
+  const [text,setText]=useState(""),[editing,setEditing]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState<string|null>(null),[notice,setNotice]=useState<string|null>(null),[retry,setRetry]=useState(0);
+  const [appSharing,setAppSharing]=useState<AgentAppMemorySharing|null>(null),[appChoice,setAppChoice]=useState("");
+  const generation=useRef(0),detailGeneration=useRef(0);
+  const errorText=(cause:unknown)=>{
+    const message=cause instanceof Error?cause.message:String(cause);
+    return message.includes("memory_owner_")?(locale==="ko"?"기억 상태가 바뀌었거나 사용할 수 없습니다. 다시 불러와 주세요.":"The memory changed or is unavailable. Reload it before continuing."):message;
+  };
+  useEffect(()=>{
+    const current=++generation.current;++detailGeneration.current;setResult(null);setDetail(null);setSelected(null);setEditing(false);setError(null);
+    if(!open)return;
+    const api=ipc()?.oneMemory.inspector;
+    if(!api){setError(locale==="ko"?"기억 정보를 불러올 수 없습니다.":"Memory information is unavailable.");return;}
+    void api.query({actorId:actor==="*"?null:actor,projectId:project||null,scope:(scope||null) as OneMemoryMapSnapshot["nodes"][number]["scope"]|null,status})
+      .then(value=>{if(current===generation.current){if(value.schemaVersion!=="agentlas.desktop-memory-inspector.v1")throw Error("Memory information is unavailable");setResult(value);}})
+      .catch(cause=>{if(current===generation.current)setError(errorText(cause));});
+    return ()=>{++generation.current;++detailGeneration.current;};
+  },[open,actor,project,scope,status,retry,locale,revisionHint]);
+  useEffect(()=>{if(!open)return;const events=window.agentlasEvents;
+    return events?.onStoreChanged?.((change)=>{if(!["agent","project","one-profile","runtime"].includes(change.entity))return;++generation.current;++detailGeneration.current;setResult(null);setDetail(null);setSelected(null);setEditing(false);setRetry(value=>value+1);});
+  },[open]);
+  useEffect(()=>{
+    const current=++detailGeneration.current;setDetail(null);setEditing(false);
+    if(!open||!selected||!result)return;
+    const api=ipc()?.oneMemory.inspector;if(!api)return;
+    void api.detail({memoryId:selected,ownerRef:result.ownerRef}).then(value=>{if(current===detailGeneration.current)setDetail(value);})
+      .catch(cause=>{if(current===detailGeneration.current)setError(errorText(cause));});
+    return ()=>{++detailGeneration.current;};
+  },[open,selected,result]);
+  useEffect(()=>{
+    const current=detailGeneration.current;setAppSharing(null);setAppChoice("");
+    const api=ipc()?.oneMemory.inspector;
+    if(!detail||!api?.appSharing||!api.setAppSharing||detail.status!=="active"||!detail.actorId||!["agent_repo","project"].includes(detail.scope))return;
+    void api.appSharing({memoryId:detail.memoryId,ownerRef:detail.ownerRef,actorId:detail.actorId,expectedRevision:detail.expectedRevision,expectedEpoch:detail.expectedEpoch})
+      .then(value=>{if(current===detailGeneration.current)setAppSharing(value);}).catch(()=>{if(current===detailGeneration.current)setAppSharing(null);});
+  },[detail]);
+  const shareWithApp=async(revoke=false)=>{
+    if(!detail||!appSharing||(!revoke&&appChoice===""))return;const api=ipc()?.oneMemory.inspector;if(!api?.setAppSharing)return;
+    const receiver=revoke?null:appSharing.choices[Number(appChoice)];if(!revoke&&!receiver)return;
+    const current=generation.current;setBusy(true);setError(null);setNotice(null);
+    try{await api.setAppSharing({memoryId:detail.memoryId,ownerRef:detail.ownerRef,actorId:detail.actorId,expectedRevision:detail.expectedRevision,expectedEpoch:detail.expectedEpoch,receiver});
+      if(current===generation.current){setNotice(revoke?(locale==="ko"?"이 기억의 App 공유를 회수했어요.":"Removed App sharing for this memory."):(locale==="ko"?"선택한 App 멤버에게 이 기억만 공유했어요.":"Shared this memory with the selected App member."));setRetry(value=>value+1);}
+    }catch(cause){if(current===generation.current)setError(errorText(cause));}finally{setBusy(false);}
+  };
+  const describe=useCallback((id:string)=>{const row=result?.entries.find(value=>value.memoryId===id);return row?{label:`${row.actorName} · ${kindLabel(row.kind,locale)}`,text:row.content}:null;},[result,locale]);
+  const mutate=async(action:"edit"|"forget")=>{
+    if(!detail)return;const api=ipc()?.oneMemory.inspector;if(!api)return;
+    const current=generation.current;setBusy(true);setError(null);setNotice(null);
+    try {
+      const target={memoryId:detail.memoryId,ownerRef:detail.ownerRef,actorId:detail.actorId,expectedRevision:detail.expectedRevision,expectedEpoch:detail.expectedEpoch};
+      const receipt=action==="edit"?await api.edit({...target,content:text}):await api.forget(target);
+      if(current!==generation.current)return;
+      setNotice(action==="edit"?(locale==="ko"?"수정했어요. 이전 내용은 이력으로 남습니다.":"Updated. The previous content remains in history.")
+        :(locale==="ko"?`${receipt.affectedMemoryIds.length}개 기억을 잊었어요.`:`Forgot ${receipt.affectedMemoryIds.length} memories.`));
+      setRetry(value=>value+1);
+    }catch(cause){if(current===generation.current)setError(errorText(cause));}
+    finally{setBusy(false);}
+  };
+  const recallLabel=(value:string)=>({user_identity:locale==="ko"?"개인 공통":"Personal",team_memory:locale==="ko"?"팀":"Team",agent_repo:locale==="ko"?"이 Agent":"This agent",agent_team:locale==="ko"?"Agent 팀":"Agent team",project:locale==="ko"?"프로젝트":"Project",session:locale==="ko"?"이 대화":"This conversation"}[value]??value);
+  const statusLabel=(value:string)=>({active:locale==="ko"?"유효":"Active",disabled:locale==="ko"?"사용 안 함":"Disabled",superseded:locale==="ko"?"이전 내용":"Superseded",forgotten:locale==="ko"?"잊은 기록":"Forgotten",all:locale==="ko"?"모든 상태":"All statuses"}[value]??value);
+  return <section className={styles.section} aria-labelledby="durable-memory-title" data-one-durable-memory="true">
+    <h3 id="durable-memory-title" className={styles.memoryCount}>{locale==="ko"?"기억":"Memories"} <span>{result?.total??"…"}</span></h3>
+    <div className={`${styles.editForm} ${styles.memoryFilters}`}>
+      <label><span>{locale==="ko"?"One / Agent":"One / Agent"}</span><select aria-label="Memory actor" value={actor} disabled={busy} onChange={event=>setActor(event.target.value)}>
+        <option value={BUILTIN_ONE_AGENT_ID}>One</option><option value="*">{locale==="ko"?"모든 Agent":"All agents"}</option>
+        {result?.actors.filter(value=>value.id&&value.id!==BUILTIN_ONE_AGENT_ID).map(value=><option key={value.id} value={value.id!}>{value.name}</option>)}</select></label>
+      <label><span>{locale==="ko"?"프로젝트":"Project"}</span><select aria-label="Memory project" value={project} disabled={busy} onChange={event=>setProject(event.target.value)}><option value="">{locale==="ko"?"모든 프로젝트":"All projects"}</option>{result?.projects.map(value=><option key={value.id} value={value.id}>{value.name}</option>)}</select></label>
+      <label><span>{locale==="ko"?"적용 범위":"Scope"}</span><select aria-label="Memory scope" value={scope} disabled={busy} onChange={event=>setScope(event.target.value)}><option value="">{locale==="ko"?"모든 범위":"All scopes"}</option>{["user_identity","team_memory","agent_repo","agent_team","project","session"].map(value=><option key={value} value={value}>{recallLabel(value)}</option>)}</select></label>
+      <label><span>{locale==="ko"?"상태":"Status"}</span><select aria-label="Memory status" value={status} disabled={busy} onChange={event=>setStatus(event.target.value as DesktopMemoryStatus|"all")}>{["active","disabled","superseded","forgotten","all"].map(value=><option key={value} value={value}>{statusLabel(value)}</option>)}</select></label>
+    </div>
+    <p className={styles.memoryHint}>{locale==="ko"?"Agent별 회상 범위를 유지하며 소유자가 기억을 관리할 수 있습니다.":"Manage your memories while preserving each agent's recall scope."}</p>
+    {error&&<p className={styles.error} role="alert">{error} <button type="button" className={styles.secondaryButton} disabled={busy} onClick={()=>setRetry(value=>value+1)}>{locale==="ko"?"다시 불러오기":"Reload"}</button></p>}
+    {notice&&<p className={styles.message} role="status">{notice}</p>}
+    {!result&&!error&&<p className={styles.empty} role="status">{locale==="ko"?"기억을 불러오는 중입니다.":"Loading memories."}</p>}
+    {result?.truncated&&<p className={styles.memoryHint}>{locale==="ko"?`최근 ${result.entries.length}개를 표시합니다. 필터로 범위를 좁혀 주세요.`:`Showing the latest ${result.entries.length}. Narrow the filters to see a smaller range.`}</p>}
+    {result&&result.map.nodes.length>0&&<div className={styles.memoryMap}><OneMemoryMap snapshot={result.map} locale={locale} height={232} colorByKind selectedId={selected} onSelect={setSelected} describe={describe} unassignedProjectLabel={locale==="ko"?"프로젝트 없음":"No project"}/></div>}
+    <div className={styles.memoryList}>{result?.entries.map(row=><button key={row.memoryId} type="button" className={styles.memoryEntryButton} data-selected={selected===row.memoryId?"true":undefined} onClick={()=>setSelected(value=>value===row.memoryId?null:row.memoryId)}>
+      <KindIcon kind={row.kind}/><span>{row.title||statusLabel(row.status)}</span><small>{row.actorName} · {statusLabel(row.status)}</small></button>)}</div>
+    {result&&result.entries.length===0&&<p className={styles.empty}>{locale==="ko"?"선택한 범위에 기억이 없습니다.":"No memories in this selection."}</p>}
+    {detail&&<section className={styles.memoryInspectorDetail} aria-label={locale==="ko"?"기억 상세":"Memory details"}>
+      <h4>{detail.actorName} · {kindLabel(detail.kind,locale)}</h4><p className={styles.memoryBody}>{detail.content}</p>
+      <dl><dt>{locale==="ko"?"학습 Agent":"Source actor"}</dt><dd>{detail.actorName} · {detail.actorId??(locale==="ko"?"미확인":"Unknown")}</dd><dt>{locale==="ko"?"출처":"Origins"}</dt><dd>{detail.originRefs.length?detail.originRefs.map(ref=><span key={`${ref.kind}:${ref.id}:${ref.revision}`}>{ref.kind} · {ref.id}{ref.revision?` (${shortRef(ref.revision)})`:""}</span>):locale==="ko"?"출처 기록 없음":"No recorded origin"}</dd>
+        <dt>{locale==="ko"?"프로젝트 관계":"Project relations"}</dt><dd>{detail.projects.length?detail.projects.map(ref=><span key={`${ref.id}:${ref.relation}`}>{ref.relation==="origin"?(locale==="ko"?"출처":"Origin"):(locale==="ko"?"적용":"Applies to")} · {result?.projects.find(value=>value.id===ref.id)?.name??ref.id}</span>):"—"}</dd>
+        <dt>{locale==="ko"?"회상 범위":"Recall scope"}</dt><dd>{recallLabel(detail.applicability.scope)}{detail.applicability.compatibilityScope?` · ${detail.applicability.compatibilityScope.scope}`:""}{detail.applicability.actorId?` · ${detail.applicability.actorId}`:""}</dd>
+        <dt>{locale==="ko"?"열람 범위":"Audience"}</dt><dd>{detail.audience.declaration==="unknown"?(locale==="ko"?"미확인 / 이전 형식":"Unknown / legacy"):`${recallLabel(detail.audience.scope)} · ${detail.audience.sensitivity}`}</dd>
+        <dt>{locale==="ko"?"현재 유효성":"Validity"}</dt><dd>{statusLabel(detail.status)} · {formatDate(detail.createdAt,locale)}{detail.supersededAt?` → ${formatDate(detail.supersededAt,locale)}`:""}</dd>
+        <dt>{locale==="ko"?"개정":"Revision"}</dt><dd>{detail.bindingRevision??"—"} · {shortRef(detail.expectedRevision)} · {detail.curationActor}</dd></dl>
+      {appSharing&&<div className={styles.editForm} aria-label={locale==="ko"?"이 기억의 App 공유":"App sharing for this memory"}>
+        {appSharing.current&&<p className={styles.memoryHint}>{locale==="ko"?"현재 공유 대상: ":"Currently shared with: "}{appSharing.choices.find(value=>value.appId===appSharing.current?.appId&&value.actorId===appSharing.current.actorId)?.label??`${appSharing.current.appId} · ${appSharing.current.actorId}`}</p>}
+        {appSharing.choices.length>0&&<><label className={styles.wideField}><span>{locale==="ko"?"이 기억을 공유할 App · 멤버":"App · member for this memory"}</span><select aria-label="Memory App receiver" value={appChoice} disabled={busy} onChange={event=>setAppChoice(event.target.value)}><option value="">{locale==="ko"?"공유 대상 선택":"Choose receiver"}</option>{appSharing.choices.map((value,index)=><option key={`${value.appId}:${value.actorId}`} value={index}>{value.label}</option>)}</select></label>
+          <button type="button" className={styles.secondaryButton} disabled={busy||appChoice===""} onClick={()=>void shareWithApp()}>{locale==="ko"?"이 App에 공유":"Share with this App"}</button></>}
+        {appSharing.canRevoke&&<button type="button" className={styles.secondaryButton} disabled={busy} onClick={()=>void shareWithApp(true)}>{locale==="ko"?"App 공유 회수":"Remove App sharing"}</button>}
+        {(appSharing.choices.length>0||appSharing.current)&&<p className={styles.memoryHint}>{locale==="ko"?"선택한 App 멤버에게 이 기억만 적용됩니다. 프로젝트 출처와 기존 Agent 회상 범위는 유지됩니다.":"Only this memory is shared with the selected App member. Its project origins and existing agent scope stay unchanged."}</p>}
+      </div>}
+      {editing?<form className={styles.editForm} onSubmit={event=>{event.preventDefault();void mutate("edit");}}><label className={styles.wideField}><span>{locale==="ko"?"기억 수정":"Edit memory"}</span><textarea value={text} rows={4} maxLength={4000} required disabled={busy} onChange={event=>setText(event.target.value)}/></label><div className={styles.cardActions}><button type="submit" className={styles.primaryButton} disabled={busy||!text.trim()}>{locale==="ko"?"수정 적용":"Apply correction"}</button><button type="button" className={styles.secondaryButton} disabled={busy} onClick={()=>setEditing(false)}>{locale==="ko"?"취소":"Cancel"}</button></div></form>
+        :<div className={styles.cardActions}>{detail.editable&&<button type="button" className={styles.secondaryButton} disabled={busy} onClick={()=>{setText(detail.content);setEditing(true);}}>{locale==="ko"?"수정":"Edit"}</button>}{detail.status==="active"&&detail.actorId&&<button type="button" className={styles.dangerButton} disabled={busy} onClick={()=>void mutate("forget")}>{locale==="ko"?"잊기":"Forget"}</button>}</div>}
+      <p className={styles.memoryHint}>{locale==="ko"?"잊기는 같은 저장 범위의 동일한 기억과 그 보기를 함께 처리합니다.":"Forgetting also removes identical memories in the same storage scope and their views."}</p>
+    </section>}
+  </section>;
+}
 
-            {state.memories.length > 0 && (
-              <section className={styles.section} aria-labelledby="saved-memory-title">
-                <div className={styles.sectionHeading}>
-                  <div>
-                    <h3 id="saved-memory-title">{tFor(locale, "one.mem.saved.title", { n: state.memories.length })}</h3>
-                  </div>
-                </div>
-                <div className={styles.cardList}>
-                  {state.memories.length === 0 && <p className={styles.empty}>{tFor(locale, "one.mem.saved.empty")}</p>}
-                  {state.memories.map((memory) => (
-                    <article key={memory.id} className={styles.card} data-enabled={memory.enabled ? "true" : "false"}>
-                      {editingMemoryId === memory.id ? (
-                        <form className={styles.editForm} onSubmit={(event) => void saveMemory(event, memory)}>
-                          <label className={styles.wideField}>
-                            <span>{tFor(locale, "one.mem.field.what_to_remember")}</span>
-                            <textarea value={memoryContent} onChange={(event) => setMemoryContent(event.target.value)} maxLength={500} rows={4} required disabled={Boolean(busyId)} />
-                          </label>
-                          <div className={styles.cardActions}>
-                            <button type="submit" className={styles.primaryButton} disabled={Boolean(busyId) || !memoryContent.trim()}>{tFor(locale, "one.mem.action.reapprove_save")}</button>
-                            <button type="button" className={styles.secondaryButton} onClick={() => setEditingMemoryId(null)} disabled={Boolean(busyId)}>{tFor(locale, "one.mem.action.cancel")}</button>
-                          </div>
-                        </form>
-                      ) : (
-                        <>
-                          <div className={styles.cardTop}>
-                            <span className={styles.scopeBadge}>{tFor(locale, "one.mem.scope.for_use", { scope: locale === "ko" ? scopeLabel(memory.scope, locale) : scopeLabel(memory.scope, locale).toLowerCase() })}</span>
-                            <span className={memory.enabled ? styles.enabledBadge : styles.disabledBadge}>{memory.enabled ? tFor(locale, "one.mem.status.available") : tFor(locale, "one.mem.status.not_in_use")}</span>
-                          </div>
-                          <p className={styles.cardContent}>{memory.content}</p>
-                          <details className={styles.sourceBox}>
-                            <summary>{tFor(locale, "one.mem.memory.source_summary")}</summary>
-                            <span>{tFor(locale, "one.mem.label.approved_by_me")} · {formatDate(memory.approvedAt, locale)}</span>
-                            <span>{tFor(locale, "one.mem.label.original_work")} · {shortRef(memory.sourceTaskId)}</span>
-                            <span>{tFor(locale, "one.mem.label.check_records")} · {memory.evidenceRefs.length}</span>
-                          </details>
-                          <div className={styles.cardActions}>
-                            <button type="button" className={styles.secondaryButton} onClick={() => beginMemoryEdit(memory)} disabled={Boolean(busyId)}>{tFor(locale, "one.mem.action.edit")}</button>
-                            <button type="button" className={styles.secondaryButton} onClick={() => void toggleMemory(memory)} disabled={Boolean(busyId)}>{memory.enabled ? tFor(locale, "one.mem.action.disable") : tFor(locale, "one.mem.action.enable")}</button>
-                            <button type="button" className={styles.dangerButton} onClick={() => void deleteMemory(memory)} disabled={Boolean(busyId)}>{tFor(locale, "one.mem.action.delete")}</button>
-                          </div>
-                        </>
-                      )}
-                    </article>
-                  ))}
-                </div>
-              </section>
-            )}
-
-            {resolved.length > 0 && <section className={styles.section} aria-labelledby="memory-history-title">
-              <div className={styles.sectionHeading}>
-                <div>
-                  <h3 id="memory-history-title">{tFor(locale, "one.mem.history.title")}</h3>
-                </div>
-              </div>
-              <div className={styles.historyList}>
-                {resolved.map((candidate) => <article key={candidate.id} className={styles.historyRow}>
-                  <div>
-                    <strong>{resolutionLabel(candidate, locale)}</strong>
-                    <span>{candidate.normalizedPreview}</span>
-                    <small>{formatDate(candidate.updatedAt, locale)} · {scopeLabel(candidate.scope, locale)}</small>
-                  </div>
-                  <button type="button" className={styles.textDangerButton} onClick={() => void deleteResolvedCandidate(candidate)} disabled={Boolean(busyId)}>{tFor(locale, "one.mem.action.delete_record")}</button>
-                </article>)}
-              </div>
-            </section>}
-          </div>
-        )}
-    </OneBottomSheet>
-  );
+export function OneMemorySheet({ open, state, locale, onClose, valueClosure, experienceReuse,
+  improvementProof, valueClosureState, onValueClosureStateChange, onManageImprovementAsset }: OneMemorySheetProps) {
+  return <OneBottomSheet open={open} onClose={onClose} closeLabel={tFor(locale, "one.mem.aria.close_memory")} ariaLabelledBy="one-memory-title" size="wide" title={tFor(locale, "one.mem.header.title")}
+    icon={<IconBrain size={20} />} titleId="one-memory-title">
+    {ipc()?.oneMemory.inspector ? <DesktopMemoryInspector open={open} locale={locale} revisionHint={state} />
+      : <LegacyOneMemoryView open={open} locale={locale} />}
+    {valueClosure && <section className={styles.section}>
+      {valueClosureState && onValueClosureStateChange && <OneValueClosureCard record={valueClosure} state={valueClosureState}
+        locale={locale} onStateChange={onValueClosureStateChange} />}
+      {experienceReuse && <OneExperienceReuseCard record={experienceReuse} locale={locale} onManage={onClose} />}
+      {improvementProof && onManageImprovementAsset && <OneImprovementProofCard record={improvementProof} locale={locale}
+        onManageAsset={onManageImprovementAsset} />}
+    </section>}
+  </OneBottomSheet>;
 }

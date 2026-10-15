@@ -216,7 +216,8 @@ export function createUnifiedComputerUse(options: UnifiedComputerUseOptions): Un
       back: () => run(async () => { await scopedCall(options.browser, "browser_tabs", selected()); const result = await scopedCall(options.browser, "browser_navigate_back", {}); await updateIdentity(); return result; }),
       click: (target: BrowserElementTarget) => run(async () => {
         await scopedCall(options.browser, "browser_tabs", selected());
-        const result = await scopedCall(options.browser, "browser_click", browserElementArgs(target));
+        const effect = typeof target.effect === "string" && target.effect.trim() ? { effect: target.effect.trim() } : {};
+        const result = await scopedCall(options.browser, "browser_click", { ...browserElementArgs(target), ...effect });
         await updateIdentity();
         return result;
       }),

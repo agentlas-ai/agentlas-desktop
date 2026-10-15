@@ -6,6 +6,7 @@ import { detailForUser, failureCode, failureMessage } from "./invocation-failure
  */
 const KO: Record<string, string> = {
   agent_missing: "이 에이전트는 더 이상 설치되어 있지 않습니다.",
+  applied_readback_unconfirmed: "적용한 변경을 다시 읽어 확인하지 못했습니다. 새로고침해서 확인해 주세요.",
   approval_invalid: "승인이 만료되었거나 다른 변경에 대한 것입니다. 다시 검토해 주세요.",
   approval_stale: "지금 변경 내용을 먼저 검토해 주세요.",
   base_changed: "그 사이 파일이 바뀌었습니다. 새로고침한 뒤 다시 검토해 주세요.",
@@ -33,6 +34,11 @@ const KO: Record<string, string> = {
   memory_ineligible: "이 기억은 적용 범위나 근거를 더 확인해야 에이전트에 반영할 수 있습니다.",
   memory_private: "이 기억은 에이전트 파일에 넣을 수 없습니다.",
   memory_required: "기억을 하나 이상 골라 주세요.",
+  mutation_lease_changed: "변경 잠금이 그 사이 풀렸습니다. 다시 시도해 주세요.",
+  mutation_lease_expired: "이 변경 잠금이 끝났습니다. 다시 시도해 주세요.",
+  mutation_lease_invalid: "변경에 필요한 원래 정보가 빠졌습니다. 다시 검토해 주세요.",
+  mutation_lease_reentrant: "이 에이전트의 다른 변경이 진행 중입니다. 끝난 뒤 다시 시도해 주세요.",
+  mutation_lease_scope: "이 변경 잠금은 다른 에이전트의 것입니다.",
   no_change: "이미 같은 내용입니다. 바꿀 것이 없습니다.",
   owner_approval_required: "에이전트 관리에서 이 변경을 먼저 승인해 주세요.",
   path_collision: "같은 이름의 파일이 있습니다. 다른 이름을 써 주세요.",
@@ -85,6 +91,7 @@ const KO: Record<string, string> = {
   unsafe_root: "안전하게 편집할 수 있는 실제 에이전트 폴더가 필요합니다.",
   unsafe_run_state: "비공개 실행 폴더를 다시 연결해 주세요.",
   update_busy: "다른 작업이 이 에이전트를 바꾸는 중입니다. 끝난 뒤 새로고침해 주세요.",
+  work_registration_changed: "WORK·개인 파일 등록이 그 사이 바뀌었습니다. 다시 검토해 주세요.",
   write_race: "적용하는 동안 파일이 바뀌어 그대로 보존했습니다. 검토해 주세요.",
 };
 const GENERIC_KO = "이 작업을 끝내지 못했습니다. 새로고침한 뒤 다시 시도해 주세요.";

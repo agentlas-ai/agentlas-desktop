@@ -35,9 +35,9 @@ function privateObservation(input: {
   doctor: HephaestusCommandResult | null;
   attempt: number;
 }): string {
+  // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.one.recovery-action-judge.hephaestus-observation).
   return secretValueFloor(JSON.stringify({
     surface: "agentlas-os-readiness",
-    attempt: input.attempt,
     status: {
       available: input.status.available,
       source: input.status.source,
@@ -45,6 +45,7 @@ function privateObservation(input: {
       pythonVersion: input.status.pythonVersion,
       observedFailure: input.status.reason ?? null,
     },
+    attempt: input.attempt,
     update: input.update && {
       ok: input.update.ok,
       outcome: input.update.outcome,

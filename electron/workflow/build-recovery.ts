@@ -44,6 +44,7 @@ import { checkComputerUsePermissions } from "../mac-permissions";
 import { currentUiLocale } from "../ui-locale";
 import { codeReferencedVars } from "../../shared/graph-code-vars";
 import { runtimeSelectionForGraphNode } from "../../shared/graph-runtime-selection";
+import { graphDeclaredToolModes } from "../../shared/automation-tool-policy";
 import { nodeDeclaresOutwardEffect } from "../../shared/graph-node-protocol";
 
 /**
@@ -95,12 +96,14 @@ function str(config: Record<string, unknown> | undefined, key: string): string {
 }
 
 /** 이 그래프가 **선언한** 것으로만 판단한다. 선언 없는 것을 필요하다고 하면 틀린 전제다. */
-function declaredUse(graph: WorkflowGraph | null | undefined): { browser: boolean; screen: boolean; outward: boolean } {
+export function declaredUse(graph: WorkflowGraph | null | undefined): { browser: boolean; screen: boolean; outward: boolean } {
   const nodes = graph?.nodes ?? [];
-  const text = JSON.stringify(nodes).toLowerCase();
+  // Structure only: tool nodes' declared `toolMode` / `catalog` (shared policy walk). URLs,
+  // "screenshot" and other words inside prompts, code or labels declare nothing.
+  const modes = graphDeclaredToolModes(graph);
   return {
-    browser: /"catalog":"[^"]*browser|https?:\/\//.test(text),
-    screen: /computer-use|computeruse|screenshot/.test(text),
+    browser: modes.has("browser"),
+    screen: modes.has("computer-use"),
     outward: nodes.some((n) => nodeDeclaresOutwardEffect(n as { type?: string; config?: Record<string, unknown> })),
   };
 }
@@ -458,15 +461,16 @@ export async function applyGraphBuildRecovery(input: {
   }
 
   if (cap.kind === "open_mac_permissions") {
-    const { shell } = await import("electron");
+    const { openSystemPermissionSettings } = await import("../os-permission-settings");
     throwIfBuildRecoveryAborted(input.signal);
-    await shell.openExternal(
-      "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
-    ).catch(() => undefined);
+    const state = checkComputerUsePermissions();
+    const opened = await openSystemPermissionSettings(state.accessibility && !state.screenRecording ? "screen" : "accessibility");
     throwIfBuildRecoveryAborted(input.signal, true);
     return {
-      ok: true,
-      message: ko ? "권한 화면을 열었습니다. 허용한 뒤 다시 저장해 주세요." : "Opened the permission screen. Allow it, then save again.",
+      ok: opened.ok,
+      message: opened.ok
+        ? (ko ? "권한 화면을 열었습니다. 허용한 뒤 다시 저장해 주세요." : "Opened the permission screen. Allow it, then save again.")
+        : (ko ? "권한 설정을 열지 못했습니다. 시스템 설정에서 확인해 주세요." : "Could not open permission settings. Review access in system settings."),
     };
   }
 

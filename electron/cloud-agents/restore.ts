@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { gunzipSync } from "node:zlib";
+import { snapshotAgentWorkspace } from "../agents/workspace-snapshot";
 import {
   PACKAGE_MAX_TOTAL_BYTES,
   PACKAGE_MAX_FILE_BYTES,
@@ -251,6 +252,19 @@ export function restoreCloudAgentPackage(input: {
           ? "repaired"
           : "updated",
   };
+}
+
+/** Use the same executable-source identity as workspace leases; restore receipts establish origin only. */
+export function readRestoredCloudAgentPackageSnapshot(destinationDir: string, packageHash: string): string | null {
+  try {
+    const marker = readCloudAgentRestoreMarker(destinationDir);
+    if (!marker || marker.packageHash !== packageHash) return null;
+    const snapshot = snapshotAgentWorkspace(destinationDir);
+    if (!snapshot.files.length
+      || JSON.stringify(readCloudAgentRestoreMarker(destinationDir)) !== JSON.stringify(marker)
+      || snapshotAgentWorkspace(destinationDir).treeDigest !== snapshot.treeDigest) return null;
+    return snapshot.treeDigest;
+  } catch { return null; }
 }
 
 export function readCloudAgentRestoreMarker(destinationDir: string): CloudAgentRestoreMarker | null {

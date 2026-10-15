@@ -12,9 +12,10 @@ import {
   appendLongRunEvent, bindCurrentGoalRevisionToLongRun, getLongRun, liveLongRunAttemptCount, nextBlockedGoalRetrySlot,
   pendingBlockedGoalRetry, reopenDueBlockedGoalRetry, scheduleBlockedGoalRetry, transitionLongRun,
   BLOCKED_GOAL_SWEEP_EVENT_KIND, BLOCKED_GOAL_SWEEP_SCHEMA, type LongRunRecord,
+  type BlockedGoalRetry,
   longRunOwnerHold, LONG_RUN_OWNER_HOLD_CODE,
 } from "../store/long-runs";
-import { automaticGoalResumeRequest } from "../invocation/automatic-goal";
+import { automaticGoalReplayBlockerCode, automaticGoalResumeRequest } from "../invocation/automatic-goal";
 import {
   assertDesktopLongRunAdmissionOpen, confirmDesktopLongRunResumeDispatched, desktopAppInstanceId,
   failDesktopLongRunResumeDispatch,
@@ -118,6 +119,45 @@ export function projectHeldByAnotherTurn(run: LongRunRecord, dispatcher: EffectO
   return dispatcher.activeChatIds().some((chatId) => chatId !== run.rootChatId && getChat(chatId)?.projectId === projectId);
 }
 
+/**
+ * 같은 자동 루프가 진전 없이 반복되어 막힌 목표. 새 오너 입력만 이 장벽을 풀 수 있으므로,
+ * 자동 재시도를 예약해 같은 루프를 늘리지 않는다. 이전 턴의 불확실한 영수증은 이 경로로 오지 않는다.
+ * 재시도를 예약하지 않고 대기 상태로 돌려 놓아(sweepOne 은 대기 중이고 예약이 없는 목표를 고르지 않는다) 기계 표식 하나만 남기고,
+ * 안내는 같은 장벽에 대해 한 번만 낸다.
+ */
+export const REPLAY_BARRIER_OWNER_NEEDED_ACTION = "owner_needed";
+function replayBarrierToldFor(runId: string, code: string): boolean {
+  const row = getDb().prepare(`SELECT json_extract(payload_json, '$.action') AS action, json_extract(payload_json, '$.detail') AS detail
+    FROM long_run_events WHERE run_id = ? AND kind = ? ORDER BY seq DESC LIMIT 1`)
+    .get(runId, BLOCKED_GOAL_SWEEP_EVENT_KIND) as { action: string | null; detail: string | null } | undefined;
+  return row?.action === REPLAY_BARRIER_OWNER_NEEDED_ACTION && row.detail === code;
+}
+function parkForReplayBarrier(run: LongRunRecord, code: string, trigger: string): BlockedGoalSweepResult {
+  const told = replayBarrierToldFor(run.id, code);
+  const parked = getDb().transaction(() => {
+    const current = getLongRun(run.id);
+    if (!current || current.version !== run.version) throw new Error("blocked_goal_sweep_state_changed");
+    if (current.status !== "waiting_tool") {
+      // The same resting state scheduleBlockedGoalRetry uses (queued -> waiting_tool is not a transitionLongRun edge).
+      const changed = getDb().prepare(`UPDATE long_runs SET status='waiting_tool', pause_reason=NULL, blocked_reason=NULL,
+        app_instance_id=COALESCE(?, app_instance_id), paused_at=NULL, updated_at=?, version=version+1
+        WHERE id=? AND status=? AND version=?`)
+        .run(desktopAppInstanceId(), new Date().toISOString(), current.id, current.status, current.version);
+      if (changed.changes !== 1) throw new Error("blocked_goal_sweep_state_changed");
+      appendLongRunEvent({ runId: current.id, kind: "run.status_changed", actorKind: "host",
+        payload: { from: current.status, to: "waiting_tool", reason: "replay-barrier-owner-needed" } });
+    }
+    appendLongRunEvent({ runId: current.id, kind: BLOCKED_GOAL_SWEEP_EVENT_KIND, actorKind: "host",
+      payload: { schemaVersion: BLOCKED_GOAL_SWEEP_SCHEMA, action: REPLAY_BARRIER_OWNER_NEEDED_ACTION, detail: code,
+        trigger: trigger.slice(0, 80), appInstanceId: desktopAppInstanceId() } });
+    return getLongRun(current.id) ?? current;
+  }).immediate();
+  const latest = parked;
+  if (!told) notify(latest, "effect-retrying", "앞 작업 결과를 확인하지 못해 자동으로 이어가지 않았어요. 이어가기를 누르면 계속합니다.",
+    "I could not confirm the result of the earlier step, so I did not continue on my own. Press Resume to continue.");
+  return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: code };
+}
+
 function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, trigger: string): BlockedGoalSweepResult {
   const chatId = run.rootChatId!;
   // Every resume path (sweep, Alive's continue, a released project) asks the one wake policy: the owner first,
@@ -170,6 +210,11 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
       if (!latest || code === "blocked_goal_sweep_state_changed" || !["blocked", "paused", "queued", "running", "waiting_tool"].includes(latest.status)) {
         return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: code };
       }
+      // A replay barrier needs the owner's own Resume to release it: park instead of scheduling retries that cannot succeed.
+      if (automaticGoalReplayBlockerCode(latest.id) === code) {
+        try { return parkForReplayBarrier(latest, code, trigger); }
+        catch (parkError) { logSweepFailureCause("replay-barrier-park", run.id, code, parkError); }
+      }
       // An edited Goal whose new revision was never bound: bind it (the same binder the chip uses), then retry once.
       if (code === "auto_goal_resume_revision_pending" && pass === 0) {
         try { current = bindCurrentGoalRevisionToLongRun(latest.id, latest.version); continue; }
@@ -204,6 +249,16 @@ function hostPauseRefusedThisInstance(run: LongRunRecord): boolean {
     AND json_extract(payload_json, '$.appInstanceId') = ? ORDER BY seq DESC LIMIT 1`)
     .get(run.id, desktopAppInstanceId()) as { status: string | null; reason: string | null } | undefined;
   return row?.status === "skipped" && row.reason !== "chat_busy";
+}
+
+/** Release only an obsolete host receipt hold, never a model-requested wait or
+ * an unavailable-runtime backoff. The exact immutable event owns the cause. */
+function receiptOnlyRetry(runId: string, retry: BlockedGoalRetry): boolean {
+  if (retry.requestedBy !== "host") return false;
+  const row = getDb().prepare(`SELECT json_extract(payload_json, '$.detail') AS detail
+    FROM long_run_events WHERE run_id = ? AND seq = ? AND kind = ?`)
+    .get(runId, retry.seq, BLOCKED_GOAL_SWEEP_EVENT_KIND) as { detail: string | null } | undefined;
+  return row?.detail === "runtime_turn_unsettled" || row?.detail === "serving_reconciliation_required";
 }
 
 /**
@@ -268,7 +323,7 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
       // A retry that a previous launch put in the future stood on that launch's failure (runtime, login, update).
       // The first sweep of a new launch owes one prompt look; a repeat failure then backs off from index 0.
       const restartedRetryDue = trigger === "startup" && run.status === "paused" && Date.parse(retry.nextAt) > Date.now();
-      if (Date.parse(retry.nextAt) > Date.now() && !restartedRetryDue) {
+      if (Date.parse(retry.nextAt) > Date.now() && !restartedRetryDue && !receiptOnlyRetry(run.id, retry)) {
         // The host pause at shutdown/startup does not cancel a scheduled retry: keep the app visibly waiting.
         if (run.status === "paused") {
           scheduleBlockedGoalRetry({ runId: run.id, expectedVersion: run.version, kind: retry.kind, fromReason: retry.fromReason,
@@ -344,8 +399,13 @@ export function continueGoalForAlive(runId: string, expectedVersion: number, dis
   if (run.status === "blocked") return sweepOne(run, dispatcher, "alive", budget) ?? deferred("alive_goal_not_continuable", run.blockedReason);
   // A host-scheduled retry owns the next step and its spacing. Isolated live run 2026-09-24: letting the
   // orchestrator bring a pending effect-observation retry forward turned the sweep's growing backoff into a
-  // ~30s loop (21 observation runs in 10 minutes, each inconclusive). Alive never overrides that schedule.
-  if (pendingBlockedGoalRetry(run.id)) return deferred("retry_owns_next_step", run.blockedReason);
+  // ~30s loop (21 observation runs in 10 minutes, each inconclusive). A historical
+  // receipt-only host hold is obsolete; actual retry spacing remains owned here.
+  const pendingRetry = pendingBlockedGoalRetry(run.id);
+  if (pendingRetry) {
+    if (!receiptOnlyRetry(run.id, pendingRetry)) return deferred("retry_owns_next_step", run.blockedReason);
+    return sweepOne(run, dispatcher, "alive", budget) ?? deferred("alive_goal_not_continuable", run.blockedReason);
+  }
   if (run.status !== "paused" || !ALIVE_CONTINUABLE_PAUSE_REASONS.has(run.pauseReason ?? "")) {
     return deferred("alive_goal_not_continuable", run.blockedReason);
   }

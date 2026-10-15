@@ -6,20 +6,22 @@ import { OnePersonalDataStore, personalDataError, personalDataHash, personalData
 
 export interface HistoryEvolutionPorts {
   store:OnePersonalDataStore; deploymentId:string; oneId():string; organizationAuthorityConnected?:boolean;
-  policy:{current(target:PersonalDataTarget):EvolutionEnvelope;check(input:{target:PersonalDataTarget;action:"observe"|"draft"|"evaluate"|"accept"|"run"|"read"|"restore";candidateId?:string;sourceRefs:string[];envelopeDigest:string}):{decision:"allow"|"deny"|"unknown";revision:string}};
-  history:{observe(target:PersonalDataTarget,max:number):Promise<HistoryEvolutionObservation[]>;assertCurrent(target:PersonalDataTarget,observation:HistoryEvolutionObservation):void};
+  policy:{current(target:PersonalDataTarget):EvolutionEnvelope;readCandidate?(target:PersonalDataTarget,candidateId:string):EvolutionEnvelope;check(input:{target:PersonalDataTarget;action:"observe"|"draft"|"evaluate"|"accept"|"run"|"read"|"restore";candidateId?:string;sourceRefs:string[];envelopeDigest:string}):{decision:"allow"|"deny"|"unknown";revision:string}};
+  history:{observe(target:PersonalDataTarget,max:number):Promise<HistoryEvolutionObservation[]>;assertCurrent(target:PersonalDataTarget,observation:HistoryEvolutionObservation):void;isRevokedObservationScope?(target:PersonalDataTarget,observation:HistoryEvolutionObservation):boolean};
   /** Existing native Supervisor/queue and OneBudgetRuntime, with current execution fence at claim/dispatch. */
   supervisor:{startWork(input:SupervisorWorkInput):SupervisorCommandReceipt;control(input:SupervisorControlInput):SupervisorCommandReceipt|Promise<SupervisorCommandReceipt>;
     receipt(input:{oneId:string;commandId:string}):SupervisorCommandReceipt|null;
     bindExecution(input:{commandId:string;candidateId:string;target:PersonalDataTarget;revision:number;envelopeDigest:string;purpose:"draft"|"run"}):void};
   /** Existing plugin Builder, agent workspace and learner produce exact private drafts; never invent versions. */
-  assets:{collectExactDraft(input:{target:PersonalDataTarget;commandId:string;candidateId:string}):Promise<HistoryEvolutionDraft|null>;
+  assets:{withApplyExclusion?<T>(input:{candidateId:string},action:()=>Promise<T>):Promise<T>;
+    collectExactDraft(input:{target:PersonalDataTarget;commandId:string;candidateId:string}):Promise<HistoryEvolutionDraft|null>;
     assertCurrentDraft(input:{target:PersonalDataTarget;draft:HistoryEvolutionDraft}):void;
     consumeApproval(input:{candidateId:string;reviewedHash:string;approvalId:string;revision:number}):void;
     applyReviewed(input:{target:PersonalDataTarget;candidateId:string;draft:HistoryEvolutionDraft;reviewedHash:string;approvalId:string}):Promise<{state:"applied"|"unknown";versionId:string;digest:string}>;
-    restoreAsNewDraft(input:{target:PersonalDataTarget;candidateId:string;versionId:string;envelope:EvolutionEnvelope}):Promise<HistoryEvolutionDraft>};
-  evaluator:{oracle():{id:string;revision:string;fixtureDigest:string};evaluate(input:{candidateId:string;draft:HistoryEvolutionDraft;envelopeDigest:string;oracle:{id:string;revision:string;fixtureDigest:string};signal:AbortSignal}):Promise<HistoryEvolutionEvaluation>};
+    restoreAsNewDraft(input:{target:PersonalDataTarget;candidateId:string;versionId:string;envelope:EvolutionEnvelope}):Promise<HistoryEvolutionDraft>}|null;
+  evaluator:{oracle(input?:{candidateId:string;draft:HistoryEvolutionDraft|null}):{id:string;revision:string;fixtureDigest:string};evaluate(input:{candidateId:string;draft:HistoryEvolutionDraft;envelopeDigest:string;oracle:{id:string;revision:string;fixtureDigest:string};signal:AbortSignal}):Promise<HistoryEvolutionEvaluation>}|null;
   pages:{writeExactFeedback(input:{target:PersonalDataTarget;candidateId:string;commandId:string;draft:HistoryEvolutionDraft}):Promise<{anchor:PersonalDataTaskAnchor;receipt:PersonalDataWriteReceipt}>};
+  draftAdmission?(candidate:HistoryEvolutionCandidate):{permissions:"read"|"write";text:string};
   now?:()=>string;
 }
 export function historyEvolutionReviewHash(c:HistoryEvolutionCandidate):string{return personalDataHash([c.target,c.candidateId,c.revision,c.observations,c.envelope,c.draft,c.evaluation]);}
@@ -38,6 +40,9 @@ export class OneHistoryEvolutionService {
   constructor(private readonly ports:HistoryEvolutionPorts){ports.store.db.exec(`CREATE TABLE IF NOT EXISTS one_history_evolution_candidates(candidate_id TEXT PRIMARY KEY,target_key TEXT NOT NULL,revision INTEGER NOT NULL,value_json TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS one_history_evolution_tombstones(target_key TEXT NOT NULL,source_ref TEXT NOT NULL,PRIMARY KEY(target_key,source_ref));
     CREATE TABLE IF NOT EXISTS one_history_evolution_operations(operation_id TEXT PRIMARY KEY,candidate_id TEXT NOT NULL,kind TEXT NOT NULL,intent_hash TEXT NOT NULL,phase TEXT NOT NULL);`);}
+  private assets(){if(!this.ports.assets)throw personalDataError("history_evolution_asset_supplier_unavailable");return this.ports.assets;}
+  private evaluator(){if(!this.ports.evaluator)throw personalDataError("history_evolution_evaluator_unavailable");return this.ports.evaluator;}
+  private requireEvolutionFamily(){if(!this.ports.assets||!this.ports.evaluator)throw personalDataError("history_evolution_family_unavailable_before_dispatch");}
   private now():string{return this.ports.now?.()??new Date().toISOString();}
   private privacyKey(t:PersonalDataTarget):string{return personalDataHash([t.deploymentId,t.oneId,t.scope,t.organizationId,t.projectId,t.audience]);}
   private target(raw:PersonalDataTarget):PersonalDataTarget {const t=personalDataTarget(raw);if(t.deploymentId!==this.ports.deploymentId||t.oneId!==this.ports.oneId())throw personalDataError("history_evolution_identity_changed");return t;}
@@ -58,7 +63,7 @@ export class OneHistoryEvolutionService {
     this.target(c.target);
     if(c.target.organizationId!==null&&!this.ports.organizationAuthorityConnected)throw personalDataError("history_evolution_organization_policy_required");
     if(["paused","revoked","deleted","unknown"].includes(c.status)&&action!=="read")throw personalDataError("history_evolution_not_active");
-    const e=envelope(this.ports.policy.current(c.target)),digest=personalDataHash(e);
+    const e=envelope(action==='read'&&this.ports.policy.readCandidate?this.ports.policy.readCandidate(c.target,c.candidateId):this.ports.policy.current(c.target)),digest=personalDataHash(e);
     if(digest!==personalDataHash(c.envelope))throw personalDataError("history_evolution_policy_changed");
     for(const o of c.observations){
       if(this.ports.store.db.prepare("SELECT 1 FROM one_history_evolution_tombstones WHERE target_key=? AND source_ref=?").get(this.privacyKey(c.target),o.sourceRef))throw personalDataError("history_evolution_source_deleted");
@@ -66,7 +71,7 @@ export class OneHistoryEvolutionService {
       this.ports.history.assertCurrent(c.target,o);
     }
     const decision=this.ports.policy.check({target:c.target,action,candidateId:c.candidateId,sourceRefs:c.observations.map(o=>o.sourceRef),envelopeDigest:digest});
-    if(c.draft&&(action==="accept"||action==="run"))this.ports.assets.assertCurrentDraft({target:c.target,draft:c.draft});
+    if(c.draft&&(action==="accept"||action==="run"))this.assets().assertCurrentDraft({target:c.target,draft:c.draft});
     if(decision.decision!=="allow"||!decision.revision)throw personalDataError(decision.decision==="unknown"?"history_evolution_authority_unknown":"history_evolution_authority_denied");return decision.revision;
   }
   snapshot(input:{target:PersonalDataTarget}):HistoryEvolutionSnapshot {
@@ -75,7 +80,12 @@ export class OneHistoryEvolutionService {
     const e=envelope(this.ports.policy.current(target)),decision=this.ports.policy.check({target,action:"read",sourceRefs:[],envelopeDigest:personalDataHash(e)});
     if(decision.decision!=="allow"||!decision.revision)throw personalDataError("history_evolution_authority_denied");
     const candidates=(this.ports.store.db.prepare("SELECT value_json FROM one_history_evolution_candidates WHERE target_key=? ORDER BY rowid DESC LIMIT 100").all(this.ports.store.key(target)) as Array<{value_json:string}>).map(r=>JSON.parse(r.value_json) as HistoryEvolutionCandidate);
-    for(const c of candidates)this.current(c,"read");return {schema:ONE_HISTORY_EVOLUTION_SCHEMA,target,candidates};
+    const visible=candidates.filter(c=>{
+      // Only the original metadata supplier may exclude an immutable, never-executed observation whose scope retired.
+      const observationOnly=c.status==='observed'&&c.draft===null&&c.evaluation===null&&c.generationCommandId===null&&c.runCommandId===null&&c.observations.length>0&&c.observations.every(o=>o.sourceId==='native-history-metadata');
+      if(observationOnly&&this.ports.history.isRevokedObservationScope){const revoked=c.observations.map(o=>this.ports.history.isRevokedObservationScope!(target,o));if(revoked.some(Boolean))return false;}
+      this.current(c,"read");return true;
+    });return {schema:ONE_HISTORY_EVOLUTION_SCHEMA,target,candidates:visible};
   }
   /** Host-triggered permitted observation. No model or renderer may author observation/permission receipts. */
   async observe(input:{target:PersonalDataTarget;predecessorId?:string}):Promise<HistoryEvolutionCandidate> {
@@ -95,13 +105,15 @@ export class OneHistoryEvolutionService {
     const c={...seed,candidateId,observations};this.current(c,"observe");return this.save(c,0);
   }
   draft(input:{target:PersonalDataTarget;candidateId:string;expectedRevision:number;commandId:string}):HistoryEvolutionCandidate {
+    this.requireEvolutionFamily();
     const target=this.target(input.target),c=this.get(target,input.candidateId);
     return this.ports.store.atomic(()=>{
       this.current(c,"draft");if(c.revision!==input.expectedRevision||c.status!=="observed")throw personalDataError("history_evolution_revision_conflict");
       const commandId=personalDataId(input.commandId);
       this.ports.supervisor.bindExecution({commandId,candidateId:c.candidateId,target,revision:c.revision+1,envelopeDigest:personalDataHash(c.envelope),purpose:"draft"});
-      const receipt=this.ports.supervisor.startWork({commandId,oneId:target.oneId,permissions:"read",budgetId:c.envelope.budgetId,...(target.projectId?{projectId:target.projectId}:{}),
-        text:`Prepare a private Skill/Toolchain/Agent draft for history candidate ${c.candidateId}. Read only its bound redacted observations. Record ProcessBinding preconditions, input/output, manual judgments, result checks and exact environment/source revisions. Reuse existing assets before generating; use the existing plugin Builder, agent workspace diff or Toolchain learner. No install, approval, policy change or promotion.`});
+      const scoped=this.ports.draftAdmission?.(frozen(c));
+      const receipt=this.ports.supervisor.startWork({commandId,oneId:target.oneId,permissions:scoped?.permissions??"read",budgetId:c.envelope.budgetId,...(target.projectId?{projectId:target.projectId}:{}),
+        text:scoped?.text??`Prepare a private Skill/Toolchain/Agent draft for history candidate ${c.candidateId}. Read only its bound redacted observations. Record ProcessBinding preconditions, input/output, manual judgments, result checks and exact environment/source revisions. Reuse existing assets before generating; use the existing plugin Builder, agent workspace diff or Toolchain learner. No install, approval, policy change or promotion.`});
       if(!receipt.taskId||!receipt.runId||["failed","cancelled"].includes(receipt.state))throw personalDataError("history_evolution_supervisor_not_admitted");
       return this.save({...c,status:"drafting",generationCommandId:commandId},c.revision);
     });
@@ -117,41 +129,48 @@ export class OneHistoryEvolutionService {
     if(!d.process.sourceRevisions.length)throw personalDataError("history_evolution_source_revision_changed");
   }
   async collectDraft(input:{target:PersonalDataTarget;candidateId:string;expectedRevision:number}):Promise<HistoryEvolutionCandidate> {
+    this.requireEvolutionFamily();
     const target=this.target(input.target),c=this.get(target,input.candidateId);
     if(c.revision!==input.expectedRevision||c.status!=="drafting"||!c.generationCommandId)throw personalDataError("history_evolution_revision_conflict");
-    const auth=this.current(c,"draft"),draft=await this.ports.assets.collectExactDraft({target,candidateId:c.candidateId,commandId:c.generationCommandId});
+    const auth=this.current(c,"draft"),draft=await this.assets().collectExactDraft({target,candidateId:c.candidateId,commandId:c.generationCommandId});
     if(!draft)throw personalDataError("history_evolution_exact_draft_missing");
     if(this.current(c,"draft")!==auth)throw personalDataError("history_evolution_authority_changed");this.validateDraft(c,draft);
     return this.save({...c,status:"draft",draft},c.revision);
   }
   async evaluate(input:{target:PersonalDataTarget;candidateId:string;expectedRevision:number}):Promise<HistoryEvolutionCandidate> {
+    this.requireEvolutionFamily();
     const target=this.target(input.target),c=this.get(target,input.candidateId);
     if(c.revision!==input.expectedRevision||c.status!=="draft"||!c.draft)throw personalDataError("history_evolution_revision_conflict");
-    const auth=this.current(c,"evaluate"),oracle=this.ports.evaluator.oracle(),controller=new AbortController();
+    const auth=this.current(c,"evaluate"),oracle=this.evaluator().oracle({candidateId:c.candidateId,draft:c.draft}),controller=new AbortController();
     if(this.controllers.has(c.candidateId))throw personalDataError("history_evolution_evaluation_in_progress");this.controllers.set(c.candidateId,controller);
-    try{const evaluation=await this.ports.evaluator.evaluate({candidateId:c.candidateId,draft:frozen(c.draft),envelopeDigest:personalDataHash(c.envelope),oracle:frozen(oracle),signal:controller.signal});
+    try{const evaluation=await this.evaluator().evaluate({candidateId:c.candidateId,draft:frozen(c.draft),envelopeDigest:personalDataHash(c.envelope),oracle:frozen(oracle),signal:controller.signal});
       if(controller.signal.aborted)throw personalDataError("history_evolution_cancelled");
-      if(this.current(c,"evaluate")!==auth||personalDataHash(this.ports.evaluator.oracle())!==personalDataHash(oracle))throw personalDataError("history_evolution_frozen_oracle_changed");
+      if(this.current(c,"evaluate")!==auth||personalDataHash(this.evaluator().oracle({candidateId:c.candidateId,draft:c.draft}))!==personalDataHash(oracle))throw personalDataError("history_evolution_frozen_oracle_changed");
       if(evaluation.draftDigest!==c.draft.digest||evaluation.envelopeDigest!==personalDataHash(c.envelope)||evaluation.oracleId!==oracle.id||evaluation.oracleRevision!==oracle.revision||evaluation.fixtureDigest!==oracle.fixtureDigest
         ||evaluation.isolated!==true||evaluation.networkAccess!==false||evaluation.providerCalls!==0||!/^[a-f0-9]{64}$/.test(evaluation.resultDigest))throw personalDataError("history_evolution_evaluation_invalid");
       return this.save({...c,status:"evaluated",evaluation},c.revision);
     }finally{if(this.controllers.get(c.candidateId)===controller)this.controllers.delete(c.candidateId);}
   }
   async accept(input:{target:PersonalDataTarget;candidateId:string;expectedRevision:number;reviewedHash:string;approvalId:string}):Promise<HistoryEvolutionCandidate> {
+    if(this.ports.assets?.withApplyExclusion)return this.ports.assets.withApplyExclusion(input,()=>this.acceptHeld(input));
+    return this.acceptHeld(input);
+  }
+  private async acceptHeld(input:{target:PersonalDataTarget;candidateId:string;expectedRevision:number;reviewedHash:string;approvalId:string}):Promise<HistoryEvolutionCandidate> {
+    this.requireEvolutionFamily();
     const target=this.target(input.target),c=this.get(target,input.candidateId);
     if(c.revision!==input.expectedRevision||c.status!=="evaluated"||!c.draft||!c.evaluation?.passed||historyEvolutionReviewHash(c)!==input.reviewedHash)throw personalDataError("history_evolution_review_mismatch");
     const auth=this.current(c,"accept");
-    const oracle=this.ports.evaluator.oracle();if(oracle.id!==c.evaluation.oracleId||oracle.revision!==c.evaluation.oracleRevision||oracle.fixtureDigest!==c.evaluation.fixtureDigest)throw personalDataError("history_evolution_frozen_oracle_changed");
+    const oracle=this.evaluator().oracle({candidateId:c.candidateId,draft:c.draft});if(oracle.id!==c.evaluation.oracleId||oracle.revision!==c.evaluation.oracleRevision||oracle.fixtureDigest!==c.evaluation.fixtureDigest)throw personalDataError("history_evolution_frozen_oracle_changed");
     const operationId=`he-accept:${personalDataHash([c.candidateId,input.reviewedHash,input.approvalId])}`;
     const pending=this.ports.store.atomic(()=>{
       if(this.get(target,c.candidateId).revision!==c.revision)throw personalDataError("history_evolution_revision_conflict");
       const prior=this.ports.store.db.prepare("SELECT phase FROM one_history_evolution_operations WHERE operation_id=?").get(operationId);
       if(prior)throw personalDataError("history_evolution_apply_outcome_unknown");
-      this.current(c,"accept");this.ports.assets.consumeApproval({candidateId:c.candidateId,reviewedHash:input.reviewedHash,approvalId:input.approvalId,revision:c.revision});
+      this.current(c,"accept");this.assets().consumeApproval({candidateId:c.candidateId,reviewedHash:input.reviewedHash,approvalId:input.approvalId,revision:c.revision});
       this.ports.store.db.prepare("INSERT INTO one_history_evolution_operations VALUES(?,?,?,?,?)").run(operationId,c.candidateId,"accept",input.reviewedHash,"attempted");
       return this.save({...c,status:"unknown",reason:"apply_pending"},c.revision);
     });
-    try{const receipt=await this.ports.assets.applyReviewed({target,candidateId:c.candidateId,draft:frozen(c.draft),reviewedHash:input.reviewedHash,approvalId:input.approvalId});
+    try{const receipt=await this.assets().applyReviewed({target,candidateId:c.candidateId,draft:frozen(c.draft),reviewedHash:input.reviewedHash,approvalId:input.approvalId});
       if(this.current(c,"accept")!==auth||receipt.state!=="applied"||receipt.digest!==c.draft.digest)throw personalDataError("history_evolution_apply_outcome_unknown");
       // Existing workspace apply issues a NEW actual revision ID after exact digest read-back.
       const appliedDraft={...c.draft,versionId:personalDataId(receipt.versionId)};
@@ -159,6 +178,7 @@ export class OneHistoryEvolutionService {
     }catch(error){const latest=this.get(target,c.candidateId);if(latest.revision===pending.revision)this.save({...latest,status:"unknown",reason:"apply_outcome_unknown"},latest.revision);throw error;}
   }
   run(input:{target:PersonalDataTarget;candidateId:string;expectedRevision:number;commandId:string}):HistoryEvolutionCandidate {
+    this.requireEvolutionFamily();
     const target=this.target(input.target),c=this.get(target,input.candidateId);
     return this.ports.store.atomic(()=>{
       this.current(c,"run");if(c.revision!==input.expectedRevision||c.status!=="accepted"||!c.draft||!c.evaluation?.passed)throw personalDataError("history_evolution_revision_conflict");
@@ -213,9 +233,10 @@ export class OneHistoryEvolutionService {
     return fenced;
   }
   async restore(input:{target:PersonalDataTarget;candidateId:string;expectedRevision:number;versionId:string}):Promise<HistoryEvolutionCandidate> {
+    this.requireEvolutionFamily();
     const target=this.target(input.target),c=this.get(target,input.candidateId);
     if(c.revision!==input.expectedRevision||["deleted","revoked","unknown"].includes(c.status))throw personalDataError("history_evolution_not_active");
-    const auth=this.current(c,"restore"),draft=await this.ports.assets.restoreAsNewDraft({target,candidateId:c.candidateId,versionId:personalDataId(input.versionId),envelope:c.envelope});
+    const auth=this.current(c,"restore"),draft=await this.assets().restoreAsNewDraft({target,candidateId:c.candidateId,versionId:personalDataId(input.versionId),envelope:c.envelope});
     if(this.current(c,"restore")!==auth||draft.versionId===input.versionId)throw personalDataError("history_evolution_restore_must_be_new_revision");this.validateDraft(c,draft);
     return this.save({...c,candidateId:`he-restore:${personalDataHash([c.candidateId,input.versionId,draft.versionId])}`,revision:0,status:"draft",draft,evaluation:null,generationCommandId:null,runCommandId:null,anchor:null,feedback:null,predecessorId:c.candidateId,createdAt:this.now()},0);
   }
@@ -240,7 +261,7 @@ export function createAgentWorkspaceHistoryEvolutionAssets(options:{
   workspaceApprovalId(input:{target:PersonalDataTarget;candidateId:string;approvalId:string;proposalId:string;proposalDigest:string}):string;
   assertCurrent(target:PersonalDataTarget,assetId:string):void;
   resolveVersion(input:{target:PersonalDataTarget;candidateId:string;versionId:string}):Pick<HistoryEvolutionDraft,"assetId"|"kind"|"process"|"toolRefs"|"resourceRefs">;
-}):HistoryEvolutionPorts["assets"] {
+}):NonNullable<HistoryEvolutionPorts["assets"]> {
   const draft=(p:import("../../shared/agent-workspace").AgentWorkspaceProposal,meta:Pick<HistoryEvolutionDraft,"kind"|"process"|"toolRefs"|"resourceRefs">):HistoryEvolutionDraft=>({kind:meta.kind,process:meta.process,toolRefs:meta.toolRefs,resourceRefs:meta.resourceRefs,assetId:p.agentId,versionId:p.id,proposalRef:p.id,digest:p.proposedTreeDigest,producer:"agent-workspace",changeRefs:p.changes.map(c=>`change:${personalDataHash([c.path,c.beforeHash,c.afterHash])}`)});
   return {
     async collectExactDraft(input){

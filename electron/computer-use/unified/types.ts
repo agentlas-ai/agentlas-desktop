@@ -107,6 +107,9 @@ export interface BrowserElementTarget {
   /** Exact snapshot reference; `ref` is accepted as the concise CUA spelling. */
   ref?: string;
   target?: string;
+  /** Declared effect of a click (browser_click `effect`: none, like, follow, repost, reply, message, post, send,
+   * publish, delete, payment); without it a gated run asks for approval. */
+  effect?: string;
 }
 
 export interface BrowserTabTarget {

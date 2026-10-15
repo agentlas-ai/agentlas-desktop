@@ -2,7 +2,7 @@ import {getAuthenticatedSessionBinding} from '../auth';
 import type {BrowserWindow,IpcMainInvokeEvent} from 'electron';
 import type {MobileBridgeConnectionContext} from '../mobile-bridge/server';
 import {oneVaultDigest} from '../secrets/one-vault-crypto';
-import {oneVaultMainMobileSources,prepareOneVaultMainReauthorization,clearOneVaultMainForReauthorization,finishOneVaultMainReauthorization,configureOneVaultMainPolicy,configureOneVaultMainPendingConsent,configureOneProviderMainDomain,invalidateOneVaultMainAuthority,type OneVaultMainPendingConsent} from '../secrets/one-vault-main';
+import {oneVaultMainMobileSources,prepareOneVaultMainReportGeneration,prepareOneVaultMainReauthorization,clearOneVaultMainForReauthorization,finishOneVaultMainReauthorization,configureOneVaultMainPolicy,configureOneVaultMainPendingConsent,configureOneProviderMainDomain,invalidateOneVaultMainAuthority,type OneVaultMainPendingConsent} from '../secrets/one-vault-main';
 import type {OneVaultRuntime,OneVaultRuntimePolicy} from '../secrets/one-vault-runtime';
 import type {OneProviderDomainPorts} from '../secrets/one-provider-main';
 import {createOneMobileMainProducer,type OneMobileMainLifetime,type OneMobileMainProducerPorts} from '../secrets/one-mobile-main-producer';
@@ -15,16 +15,33 @@ export interface OneNativePersonalOwners {
  readonly credentialConsumer:(commandId:string,toolId:string,keyName:string)=>boolean;
  readonly provider?:OneProviderDomainPorts|null;
 }
-export type OneNativeMainOwners=({readonly scope:'personal';readonly personal:OneNativePersonalOwners}
- |{readonly scope:'organization';readonly startup:Omit<OneNativeStartupOwners,'signal'|'assertMainOwner'>})&{
+type OneNativeMainFamilyBase={
  /** Independent original source/grant + native approved signer. Absence disables Mobile only. */
  readonly mobile:Pick<OneMobileSocketPorts,'source'|'sign'>|null;
  readonly providerReader:OneMobileMainProducerPorts['providerReader'];
  /** Owner-issued live revision/ACL/installation fence, never inferred from object presence. */
  stillCurrent():boolean;
 };
+export type OneNativeMainPersonalFamily={readonly scope:'personal';readonly personal:OneNativePersonalOwners}&OneNativeMainFamilyBase;
+export type OneNativeMainOrganizationFamily={readonly scope:'organization';readonly startup:Omit<OneNativeStartupOwners,'signal'|'assertMainOwner'|'currentNativeInstallation'>}&OneNativeMainFamilyBase;
+export interface OneNativeMainFamilySelection {
+ readonly personal:OneNativeMainPersonalFamily|null;
+ readonly organization:OneNativeMainOrganizationFamily|null;
+}
+export type OneNativeMainOwners=OneNativeMainPersonalFamily|OneNativeMainOrganizationFamily|({
+ readonly scope:'combined';
+ /** Stable Main-owned selection. Only previously absent, explicitly approved
+  * families can be added; an installed family can never be replaced. */
+ families():Readonly<OneNativeMainFamilySelection>;
+ readonly mobile:null;readonly providerReader:null;
+}&OneNativeMainFamilyBase);
 export interface OneNativeReauthorizationScope {readonly installationEpoch:number;readonly sessionDigest:string;readonly nativeOwnerDigest:string}
+export interface OneNativeReportGenerationScope extends OneNativeReauthorizationScope {readonly hostTrustDigest:string;readonly drainEpoch:number}
  export interface OneNativeMainOwnerFactory {
+ /** Retires the original report family after a completed native drain. These
+  * Main-only capabilities never approve a new organization or personal scope. */
+ prepareReportGeneration?(runtime:OneVaultRuntime,scope:Readonly<OneNativeReportGenerationScope>):object;
+ consumeReportGeneration?(ticket:object,scope:Readonly<OneNativeReportGenerationScope>):void;
  /** Genuine focused native review plus authenticated durable receipt/capability registry.
   * consume rejects unsigned, copied, replayed or stale receipts. No renderer boolean. */
  reviewReauthorization?(window:BrowserWindow,runtime:OneVaultRuntime,scope:Readonly<OneNativeReauthorizationScope>):Promise<object|null>;
@@ -42,9 +59,12 @@ function denied(reason:string):never{throw Error(reason)}
  * consent, credentials, request engine or provider is created by this composition. */
 export function createOneNativeMainComposition(){
  let shutdown=new AbortController();const listeners=new Set<(r:'session'|'shutdown')=>void>();
- let reauthorizing=false,reauthorizationAllowed=false;let epoch=0,closed=false,cleanupUnknown=false,started=false,reason:string|null='one_native_main_owner_unbound';
+ let reauthorizing=false,reauthorizationAllowed=false,terminated=false;let epoch=0,closed=false,cleanupUnknown=false,started=false,reason:string|null='one_native_main_owner_unbound';
  let originalReferences:unknown[]=[];
- const references=()=>owners?[owners.stillCurrent,owners.mobile,owners.mobile?.source,owners.mobile?.sign,owners.providerReader,...(owners.scope==='personal'?[owners.personal,owners.personal.policy,owners.personal.pendingConsent,owners.personal.credentialConsumer,owners.personal.provider]:[owners.startup])]:[];
+ const familyReferences=(o:OneNativeMainPersonalFamily|OneNativeMainOrganizationFamily)=>[o.stillCurrent,o.mobile,o.mobile?.source,o.mobile?.sign,o.providerReader,...(o.scope==='personal'?[o.personal,o.personal.policy,o.personal.policy.personal,o.personal.policy.personal?.current,o.personal.pendingConsent,o.personal.credentialConsumer,o.personal.provider]:[o.startup])];
+ const references=()=>owners?owners.scope==='combined'?[owners.stillCurrent,owners.families,owners.mobile,owners.providerReader]:familyReferences(owners):[];
+ let personalFamily:OneNativeMainPersonalFamily|null=null,organizationFamily:OneNativeMainOrganizationFamily|null=null;
+ let personalReferences:unknown[]=[],organizationReferences:unknown[]=[];
  let runtime:OneVaultRuntime|null=null,owners:OneNativeMainOwners|null=null,originalFactory:OneNativeMainOwnerFactory|null=null,identity='';
  let startup:ReturnType<typeof installOneNativeStartup>|null=null;
  let mobile:ReturnType<typeof createOneMobileMainProducer>|null=null,socket:ReturnType<typeof createOneMobileSocketOwner>|null=null;
@@ -60,9 +80,12 @@ export function createOneNativeMainComposition(){
  let lifetime=makeLifetime();
  function fence<T extends object>(value:T):T{
   const pinned=epoch,methods=new Map<PropertyKey,{original:Function;wrapped:Function}>();
-  const bound=()=>{if(pinned!==epoch)denied('one_native_main_old_epoch');check()};
+  const originalKeys=new Set<PropertyKey>(Reflect.ownKeys(value)),originalMethods=new Map<PropertyKey,Function>();
+  for(const key of originalKeys){const d=Reflect.getOwnPropertyDescriptor(value,key);if(d&&'value' in d&&typeof d.value==='function')originalMethods.set(key,d.value)}
+  const bound=()=>{if(pinned!==epoch)denied('one_native_main_old_epoch');check();if(owners?.scope==='combined')assertFamily('personal')};
   function read(key:PropertyKey){
    bound();let result;try{result=Reflect.get(value,key,value)}catch(error){bound();throw error}bound();if(typeof result!=='function')return result;
+   if(!originalKeys.has(key)||originalMethods.has(key)&&originalMethods.get(key)!==result)denied('one_native_main_current_owner_changed');
    const prior=methods.get(key);if(prior){if(prior.original!==result)denied('one_native_main_current_owner_changed');return prior.wrapped;}
    const wrapped=(...args:unknown[])=>{bound();if(Reflect.get(value,key,value)!==result)denied('one_native_main_current_owner_changed');const at=epoch;
     const finish=(v:unknown)=>{bound();if(at!==epoch||Reflect.get(value,key,value)!==result)denied('one_native_main_current_owner_changed');return v};let resultValue;try{resultValue=Reflect.apply(result,value,args)}catch(error){finish(undefined);throw error}return resultValue&&typeof resultValue.then==='function'?resultValue.then(finish,(error:unknown)=>{finish(undefined);throw error}):finish(resultValue)};
@@ -74,8 +97,8 @@ export function createOneNativeMainComposition(){
   return new Proxy(facade,{get(_target,key){return read(key)}}) as T;
  }
 
- function personal(input:OneNativePersonalOwners){
-  const installedEpoch=epoch;const installedCurrent=()=>epoch===installedEpoch&&current();const installedCheck=()=>{if(!installedCurrent())denied('one_native_main_old_epoch')};
+ function personal(input:OneNativePersonalOwners,assertFamily:()=>void=()=>{}){
+  const installedEpoch=epoch;const installedCurrent=()=>{try{if(epoch!==installedEpoch)return false;check();assertFamily();return true}catch{return false}};const installedCheck=()=>{if(!installedCurrent())denied('one_native_main_old_epoch')};
   if(!input?.policy||typeof input.policy.currentIntent!=='function'||typeof input.policy.personal?.current!=='function'||typeof input.policy.currentGrant!=='function'||typeof input.pendingConsent?.approveOriginalPending!=='function'||typeof input.credentialConsumer!=='function')denied('one_native_personal_owners_unbound');
   const original=fence(input.policy),isPersonal=(b:{scope:string;organizationId:string|null})=>b.scope==='personal'&&b.organizationId===null;
   const retained=(e:Parameters<NonNullable<OneVaultRuntimePolicy['currentRecovery']>>[0])=>{if(!isPersonal(e.request.binding))return null;const at=epoch,result=original.currentRecovery?.(e);return result?{...result,stillCurrent:()=>installedCurrent()&&at===epoch&&result.stillCurrent()===true}:null};
@@ -95,27 +118,68 @@ export function createOneNativeMainComposition(){
   configureOneVaultMainPendingConsent(fence(input.pendingConsent));
   if(input.provider)configureOneProviderMainDomain(fence(input.provider));
  }
+ function selection():Readonly<OneNativeMainFamilySelection>{
+  check();if(owners?.scope!=='combined')denied('one_native_main_family_owner_required');
+  const f=owners.families();check();
+  if(!f||Reflect.ownKeys(f).length!==2||!Object.hasOwn(f,'personal')||!Object.hasOwn(f,'organization')
+   ||!f.personal&&!f.organization||f.personal!==null&&f.personal?.scope!=='personal'||f.organization!==null&&f.organization?.scope!=='organization')denied('one_native_main_family_owner_required');
+  return f;
+ }
+ function assertFamily(kind:'personal'|'organization'){
+  const selected=selection(),o=kind==='personal'?personalFamily:organizationFamily,refs=kind==='personal'?personalReferences:organizationReferences;
+  if(!o||selected[kind]!==o||o.stillCurrent()!==true||familyReferences(o).some((v,i)=>v!==refs[i]))denied('one_native_main_family_owner_changed');
+  check();
+ }
+ function installStartup(input:OneNativeMainOrganizationFamily['startup'],assertFamily:()=>void){
+  const r=check();assertFamily();
+  startup=installOneNativeStartup({...input,signal:shutdown.signal,assertMainOwner:()=>{check();assertFamily()},currentNativeInstallation:()=>{
+   check();assertFamily();const owner=r.currentNativeOwner();if(!owner)return null;
+   return {nativeActor:{principalId:owner.principalId,sessionId:owner.sessionId,workspaceId:owner.workspaceId,hostId:owner.hostId,oneId:r.sources.oneId()},custodyGeneration:owner.custodyGeneration,installationGeneration:epoch};
+  }});
+ }
+ function reconcileFamilies(){
+  const f=selection();
+  if(personalFamily&&f.personal!==personalFamily||organizationFamily&&f.organization!==organizationFamily)denied('one_native_main_family_replacement_denied');
+  if(f.organization&&!organizationFamily){
+   const s=f.organization.startup;
+   // Combined installation is an independent report family. It cannot replace
+   // the original personal Vault, credential, provider or Toolchain policy.
+   if(!s?.nativeCustodyReports||s.business||s.employeeReports||s.personalVault||s.pendingConsent||s.credentialConsumer||s.provider||s.toolchains
+    ||f.organization.mobile||f.organization.providerReader)denied('one_native_main_report_family_required');
+   organizationFamily=f.organization;organizationReferences=familyReferences(f.organization);assertFamily('organization');
+   installStartup(s,()=>assertFamily('organization'));
+  }
+  if(f.personal&&!personalFamily){
+   if(f.personal.mobile||f.personal.providerReader)denied('one_native_main_family_mobile_owner_required');
+   personalFamily=f.personal;personalReferences=familyReferences(f.personal);assertFamily('personal');
+   personal(f.personal.personal,()=>assertFamily('personal'));
+  }
+  check();
+ }
  function status():OneNativeMainStatus {return{state:current()?'ready':'unavailable',reason:current()?null:reason??'one_native_main_current_owner_changed',mobile:current()&&!!mobile&&!!socket,mobileBlocker:current()&&mobile&&socket?null:'one_native_mobile_source_signer_unbound'}}
  function start():OneNativeMainStatus {
-  if(started||closed||cleanupUnknown)return status();
+  if(closed||cleanupUnknown)return status();
+  if(started){if(owners?.scope==='combined')try{reconcileFamilies()}catch(error){const failure=error instanceof Error?error.message:'one_native_main_family_install_unknown';invalidate('shutdown');if(!cleanupUnknown)reason=failure;return status()}return status()}
   const factory=ownerFactory;if(!factory)return{state:'unavailable',reason:'one_native_main_owner_unbound',mobile:false};
   const sources=oneVaultMainMobileSources(),session=getAuthenticatedSessionBinding();
   if(!session||session.expiresAt!==null&&session.expiresAt<=Date.now())return{state:'unavailable',reason:'one_native_main_session_unavailable',mobile:false};
   let r:OneVaultRuntime|null;try{r=sources?.runtime()??sources?.prepareRuntime()??null}catch{return{state:'unavailable',reason:'one_native_main_runtime_owner_unavailable',mobile:false}}if(!r?.currentNativeOwner())return{state:'unavailable',reason:'one_native_main_runtime_owner_unavailable',mobile:false};
   const before=oneVaultDigest([session,r.currentNativeOwner()]);let issued:OneNativeMainOwners|null;
-  try{issued=factory.current(r);if(!issued||!['personal','organization'].includes(issued.scope)||issued.stillCurrent()!==true)return{state:'unavailable',reason:'one_native_main_source_owners_unbound',mobile:false}}catch{return{state:'unavailable',reason:'one_native_main_source_owners_unbound',mobile:false}};
+  try{issued=factory.current(r);if(!issued||!['personal','organization','combined'].includes(issued.scope)||issued.stillCurrent()!==true)return{state:'unavailable',reason:'one_native_main_source_owners_unbound',mobile:false}}catch{return{state:'unavailable',reason:'one_native_main_source_owners_unbound',mobile:false}};
   if(ownerFactory!==factory||sources?.runtime()!==r||oneVaultDigest([getAuthenticatedSessionBinding(),r.currentNativeOwner()])!==before)return{state:'unavailable',reason:'one_native_main_current_owner_changed',mobile:false};
   runtime=r;owners=issued;originalFactory=factory;identity=before;originalReferences=references();started=true;
   try{
    check();
    if(issued.scope==='personal')personal(issued.personal);
-   else startup=installOneNativeStartup({...issued.startup,signal:shutdown.signal,assertMainOwner:()=>{check();}});
+   else if(issued.scope==='organization')installStartup(issued.startup,()=>{});
+   else reconcileFamilies();
    check();
    if(issued.mobile){
     if(!issued.mobile.source||!issued.mobile.sign)denied('one_native_mobile_source_signer_unbound');
     let composition:ReturnType<ReturnType<typeof createOneMobileMainProducer>['activate']>|null=null;
     socket=createOneMobileSocketOwner({trust:r.trust,source:(c,q)=>{check();const result=issued.mobile!.source!(c,q);check();return result},sign:async(d,b)=>{check();const result=await issued.mobile!.sign!(d,b);check();return result},channelEpoch:c=>composition?.adapter.nativeChannelEpoch(c)??null,now:()=>r.sources.now?.()??Date.now()});
-    const sameSocket=socket,pendingConsent=issued.scope==='personal'?issued.personal.pendingConsent:issued.startup.pendingConsent;
+    const sameSocket=socket,pendingConsent=issued.scope==='personal'?issued.personal.pendingConsent:issued.scope==='organization'?issued.startup.pendingConsent:null;
+    if(!pendingConsent)denied('one_native_mobile_pending_consent_unbound');
     mobile=createOneMobileMainProducer({runtime:()=>current()?r:null,lifetime,isNativeOwnerWindow:w=>!!oneVaultMainMobileSources()?.isNativeOwnerWindow(w),sender:{current:(c,e)=>sameSocket.current(c,e),requestAuthenticated:(c,d)=>sameSocket.requestAuthenticated(c,d)},pendingConsent,delivery:sameSocket,providerReader:issued.providerReader});
     composition=mobile.activate();configureOneMobileSocketOwner(sameSocket);
    }
@@ -123,13 +187,40 @@ export function createOneNativeMainComposition(){
   }catch(error){const failure=error instanceof Error?error.message:'one_native_main_install_unknown';invalidate('shutdown');if(!cleanupUnknown)reason=failure;return status();}
  }
  function invalidate(cause:'session'|'shutdown'){
-  reauthorizationAllowed=cause==='session';epoch++;closed=true;reason=cause==='session'?'one_native_main_session_invalidated':'one_native_main_shutdown';
+  terminated=terminated||cause==='shutdown';reauthorizationAllowed=cause==='session'&&!terminated;epoch++;closed=true;reason=cause==='session'?'one_native_main_session_invalidated':'one_native_main_shutdown';
   for(const cleanup of [()=>shutdown.abort(),...Array.from(listeners,l=>()=>l(cause)),()=>mobile?.dispose(),()=>socket?.dispose(),()=>{if(socket&&currentOneMobileSocketOwner()===socket)configureOneMobileSocketOwner(null)},()=>startup?.invalidate(cause),()=>invalidateOneVaultMainAuthority()])try{cleanup()}catch{cleanupUnknown=true}
   listeners.clear();if(cleanupUnknown)reason='one_native_main_cleanup_unknown';
  }
+ function resetGeneration(){
+  epoch++;closed=false;started=false;reason=null;reauthorizationAllowed=false;shutdown=new AbortController();lifetime=makeLifetime();
+  runtime=null;owners=null;identity='';originalReferences=[];mobile=null;socket=null;startup=null;personalFamily=null;organizationFamily=null;personalReferences=[];organizationReferences=[];
+ }
+ /** Only the focused identity action can prepare an empty new report generation.
+  * Prior approvals, unknown attempts, Vault policy and provider authority stay
+  * terminal. A subsequent original native organization review remains required. */
+ async function prepareEmployeeSharingGeneration(event:IpcMainInvokeEvent):Promise<void>{
+  if(cleanupUnknown||terminated)denied('one_native_main_cleanup_unknown');
+  if(!closed)return;
+  if(reauthorizing||!reauthorizationAllowed||mobile||socket||personalFamily||owners?.scope==='personal'||owners?.scope==='organization')denied('one_native_main_report_generation_unavailable');
+  const factory=ownerFactory,at=epoch;
+  if(!factory||originalFactory&&factory!==originalFactory||!factory.prepareReportGeneration||!factory.consumeReportGeneration)denied('one_native_main_report_generation_owner_unbound');
+  const prepare=factory.prepareReportGeneration,consume=factory.consumeReportGeneration;
+  reauthorizing=true;
+  try{
+   const prepared=await prepareOneVaultMainReportGeneration(event),r=prepared.runtime,session=getAuthenticatedSessionBinding(),owner=r.currentNativeOwner();
+   if(!session||!owner||runtime&&r!==runtime||epoch!==at||cleanupUnknown||terminated||ownerFactory!==factory)denied('one_native_main_current_owner_changed');
+   const scope=Object.freeze({installationEpoch:at,sessionDigest:oneVaultDigest(session),nativeOwnerDigest:oneVaultDigest(owner),hostTrustDigest:oneVaultDigest(r.trust.currentHostMetadata()),drainEpoch:prepared.drainEpoch});
+   const current=()=>{prepared.assertCurrent();if(epoch!==at||cleanupUnknown||terminated||ownerFactory!==factory||factory.prepareReportGeneration!==prepare||factory.consumeReportGeneration!==consume||oneVaultMainMobileSources()?.runtime()!==r||oneVaultDigest(getAuthenticatedSessionBinding())!==scope.sessionDigest||oneVaultDigest(r.currentNativeOwner())!==scope.nativeOwnerDigest||oneVaultDigest(r.trust.currentHostMetadata())!==scope.hostTrustDigest)denied('one_native_main_current_owner_changed')};
+   current();const ticket=prepare.call(factory,r,scope);current();consume.call(factory,ticket,scope);current();
+   originalFactory=factory;resetGeneration();
+  }finally{reauthorizing=false}
+ }
  /** Explicit native top-frame action. No timer/session-restored handler calls this. */
  async function reauthorize(event:IpcMainInvokeEvent):Promise<OneNativeMainStatus>{
-  if(reauthorizing||!closed||!reauthorizationAllowed||cleanupUnknown||!runtime||!owners||owners.scope!=='personal'||owners.personal.provider)denied('one_native_main_reauthorization_unavailable');
+  if(owners?.scope==='personal'&&owners.personal.provider)denied('one_native_main_reauthorization_unavailable');
+  if(reauthorizing||!closed||!reauthorizationAllowed||cleanupUnknown||!runtime||!owners
+   ||owners.scope==='organization'||owners.scope==='personal'&&owners.personal.provider
+   ||owners.scope==='combined'&&(!personalFamily||personalFamily.personal.provider))denied('one_native_main_reauthorization_unavailable');
   const factory=ownerFactory,r=runtime,at=epoch;
   if(!factory||factory!==originalFactory||!factory.reviewReauthorization||!factory.consumeReauthorization)denied('one_native_main_reauthorization_owner_unbound');
   reauthorizing=true;let cleared=false;
@@ -141,9 +232,11 @@ export function createOneNativeMainComposition(){
    const receipt=await factory.reviewReauthorization(prepared.window,r,scope);
    if(!receipt||!stillCurrent())denied('one_native_main_reauthorization_denied');
    const fresh=factory.consumeReauthorization(receipt,scope);
-   if(!fresh||fresh.scope!=='personal'||fresh.personal.provider||fresh.stillCurrent()!==true||factory.current(r)!==fresh||!stillCurrent())denied('one_native_main_reauthorization_denied');
+   if(!fresh||fresh.scope==='organization'||fresh.scope==='personal'&&fresh.personal.provider
+    ||fresh.scope==='combined'&&(!fresh.families().personal||fresh.families().personal!.personal.provider||fresh.families().organization)
+    ||fresh.stillCurrent()!==true||factory.current(r)!==fresh||!stillCurrent())denied('one_native_main_reauthorization_denied');
    clearOneVaultMainForReauthorization(event,prepared.ticket);cleared=true;
-   epoch++;closed=false;started=false;reason=null;reauthorizationAllowed=false;shutdown=new AbortController();lifetime=makeLifetime();mobile=null;socket=null;startup=null;
+   resetGeneration();
    const result=start();if(result.state!=='ready'||owners!==fresh)denied('one_native_main_reauthorization_denied');
    finishOneVaultMainReauthorization(event,prepared.ticket);return status();
   }catch(error){if(cleared)invalidate('session');throw error}finally{reauthorizing=false}
@@ -158,7 +251,7 @@ export function createOneNativeMainComposition(){
   const retained=rows.length===1?r.retainedOperation(rows[0].command_id):null;if(!retained||retained.evidence.operationId!==operationId)denied('one_native_mobile_retained_source_unavailable');
   const at=epoch;await socket.authenticateRecovery(context,retained.evidence.request);check();if(at!==epoch)denied('one_native_main_current_owner_changed');return mobile.openRecovery(window,context,operationId);
  }
- return Object.freeze({start,status,invalidate,reauthorizationRequired:()=>closed&&reauthorizationAllowed,reauthorize,openPending,openRecovery});
+ return Object.freeze({start,status,invalidate,installationGeneration:()=>epoch,reauthorizationRequired:()=>closed&&reauthorizationAllowed&&(owners?.scope==='personal'||owners?.scope==='combined'&&!!personalFamily),prepareEmployeeSharingGeneration,reauthorize,openPending,openRecovery});
 }
 let main:ReturnType<typeof createOneNativeMainComposition>|null=null;
 /** Actual Main registers once after the existing Vault host, never through IPC. */

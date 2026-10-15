@@ -56,8 +56,11 @@ function fileDigest(path: string): string {
   } finally { fs.closeSync(fd); }
 }
 export function mcpServerConfigurationDigest(server: InstalledMcpServer): string {
+  // Credential references join the digest only when present, so every existing consent keeps its digest (NH29).
   return createHash("sha256").update(JSON.stringify([server.id, server.catalogId, server.transport,
-    server.command, server.args, server.url, server.envKeys, server.enabled, server.configurationValid])).digest("hex");
+    server.command, server.args, server.url, server.envKeys, server.enabled, server.configurationValid,
+    ...(server.credentialRefs && Object.keys(server.credentialRefs).length ? [server.credentialRefs] : []),
+    ...(server.connectionEpoch ? [{ connectionEpoch: server.connectionEpoch }] : [])])).digest("hex");
 }
 function stringRecord(value: unknown): Record<string, string> {
   if (!value || typeof value !== "object" || Array.isArray(value)
@@ -138,6 +141,38 @@ export function registerPreparedMcpConfig(input: {
     try { return fileDigest(input.path) === seal.digest; } catch { return false; }
   };
 }
+/** Main-only extension of an existing opaque admission. Serialized JSON never mints inherited grants.
+ * Source custody/target/proxy/credential pins remain live for the entire child view. */
+export function extendPreparedMcpConfig(input: {
+  path: string; sourcePath?: string;
+  servers: Parameters<typeof registerPreparedMcpConfig>[0]["servers"];
+  runtimeEnv: Record<string, string>; isCurrent: () => boolean;
+}): () => boolean {
+  const source = input.sourcePath ? preparedMcpBindings(input.sourcePath) : [];
+  const sourceKeys = new Set(source.map(binding => binding.configKey));
+  if (input.servers.some(row => sourceKeys.has(row.configKey))) throw new Error("mcp_prepared_extension_key_collision");
+  const serializedTransport = (transport: PreparedMcpTransport) => transport.kind === "stdio"
+    ? { command: transport.command, args: [...transport.args], env: { ...transport.env } }
+    : { type: transport.kind, url: transport.url, headers: { ...transport.headers } };
+  const inherited = source.map(binding => {
+    const row = bindings.get(binding)!;
+    return { configKey: binding.configKey, server: binding.server,
+      transport: serializedTransport(row.transport), runtimeRoot: row.transport.runtimeRoot,
+      consentTransport: serializedTransport(row.targetTransport), proxyScope: row.proxyScope,
+      ...(row.scopedCredential ? { scopedCredential: row.scopedCredential } : {}),
+    };
+  });
+  return registerPreparedMcpConfig({ path: input.path, servers: [...inherited, ...input.servers],
+    runtimeEnv: input.runtimeEnv, isCurrent: () => {
+      if (!input.isCurrent()) return false;
+      try {
+        if (!input.sourcePath) return true;
+        const current = preparedMcpBindings(input.sourcePath);
+        return current.length === source.length && source.every(binding => current.includes(binding));
+      } catch { return false; }
+    } });
+}
+
 function validate(seal: Seal): void {
   try {
     if (seal.invalid || seals.get(seal.path) !== seal || !seal.current()

@@ -3,13 +3,15 @@ import type { ChatHostNotice } from "../../shared/types";
 import { Markdown } from "./Markdown";
 import { OneDispatchNotice } from "./one/OneDispatchNotice";
 import { automationReportDisplay } from "../lib/automation-report-display";
-import { agiActionNoticeLine, hostStatusLabel } from "../../shared/chat-host-notice";
+import { agiActionNoticeLine, hostStatusLabel, isHousekeepingHostNotice } from "../../shared/chat-host-notice";
 
 /** Historical host request, not a projection of the invocation's current state.
  * Keep the original text in the message ledger; internal resume instructions
  * and verifier payloads are not user-facing task instructions.
  */
 export function HostContinuationNotice({ text, locale, notice }: { text: string; locale: "ko" | "en"; notice?: ChatHostNotice; onOpenChat?: (chatId: string) => void }) {
+  // Housekeeping (the host checking, continuing, waiting, resuming; One waking to review handed-off work) is not drawn.
+  if (isHousekeepingHostNotice(notice)) return null;
   if (notice?.purpose === "one-dispatch-brief") {
     // 팀원 세션 첫머리: One 이 맡긴 일. 사람(오너)이 쓴 말처럼 보이면 안 된다.
     return <article
@@ -35,21 +37,9 @@ export function HostContinuationNotice({ text, locale, notice }: { text: string;
       style={{ alignSelf: "stretch", maxWidth: 760, margin: "6px 0", color: "var(--muted-deep)", fontSize: 12, lineHeight: 1.5 }}
     >{label}</p>;
   }
-  // Internal harness work is not shown (docs/2026-10-13-native-harness 04 §2; owner 2026-10-04): the app continuing a
-  // turn after an update restart, and the host's own continuation request below, stay in the ledger only.
-  if (notice?.purpose === "update-resume") return null;
-  if (notice?.purpose === "one-delegation-review") {
-    // One woke because work it handed off finished. The ledger keeps the host's review request; the person sees one line.
-    return <p
-      data-host-notice="one-delegation-review"
-      data-run-id={notice.runId}
-      role="status"
-      style={{ alignSelf: "stretch", maxWidth: 760, margin: "4px 0", color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.5 }}
-    >{locale === "ko" ? "맡긴 일이 끝나 결과를 확인합니다" : "Checking the work that finished"}</p>;
-  }
   if (notice?.purpose === "host-status") {
-    // The host's own status line (effect check, wait, cycle). Where One cannot fold it into its turn's
-    // work block it is still one quiet line: the short status, then the sentence as written.
+    // A host status that is not housekeeping (needs-owner, goal-closed, runtime-kept): the short status, then the
+    // sentence as written.
     return <p
       data-host-notice="host-status"
       data-host-status={notice.status}

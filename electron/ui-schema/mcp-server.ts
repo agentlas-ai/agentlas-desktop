@@ -3,10 +3,11 @@ import path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { intellectUiToolText } from "../../shared/intellect-ui-prompt";
 import { SURFACE_PROTOCOL } from "../surface-emitter";
+import { AUTOMATION_PROTOCOL } from "../automation-emitter";
 
 /*
- * agentlas-ui: a keyless, read-only built-in MCP server with two tools, `read_ui_schema` and
- * `read_surface_protocol` (the interactive surface spec, ~19K chars, which used to be inlined into the
+ * agentlas-ui: a keyless, read-only built-in MCP server with three tools, `read_ui_schema`,
+ * `read_automation_protocol` (the recurring-run registration spec) and `read_surface_protocol` (the interactive surface spec, ~19K chars, which used to be inlined into the
  * system prompt by a keyword gate and on every One-team turn).
  *
  * Why a tool and not a prompt section: whether a turn needs the Intellect UI component schema
@@ -20,7 +21,7 @@ import { SURFACE_PROTOCOL } from "../surface-emitter";
  * (same launch contract as system-time / workspace-preview): there is no disk path to swap.
  */
 export const AGENTLAS_UI_CATALOG_ID = "agentlas-ui";
-export const AGENTLAS_UI_TOOL_NAMES = ["read_ui_schema", "read_surface_protocol"] as const;
+export const AGENTLAS_UI_TOOL_NAMES = ["read_ui_schema", "read_surface_protocol", "read_automation_protocol"] as const;
 
 const SOURCE_HEAD = String.raw`"use strict";
 const MAX_REQUEST_BYTES = 64 * 1024;
@@ -28,6 +29,7 @@ const MAX_REQUEST_BYTES = 64 * 1024;
 const SOURCE_TAIL = String.raw`const tools = [
   { name: "read_ui_schema", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }, description: "Return the chat's native UI component schema (agentlas-ui blocks) and the chart/visual block guidance. Read-only; call it before emitting any agentlas-ui, chart or visual block.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
   { name: "read_surface_protocol", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }, description: "Return the spec for an interactive surface (tracker, dashboard, operating console or board the user returns to and acts on): the hidden manifest block, widgets, data, jobs and trust rules. Read it before emitting a surface; never emit one unread.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
+  { name: "read_automation_protocol", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }, description: "Return the spec for scheduling, monitoring or changing a recurring run: the ## Automation registration block, schedules, monitor sources, steps and rules. Read it before emitting an automation block; never emit one unread.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
 ];
 function handle(requestValue) {
   if (requestValue.method === "initialize") return { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "agentlas-ui", version: "1.0.0" } };
@@ -38,6 +40,7 @@ function handle(requestValue) {
   const name = requestValue.params && requestValue.params.name;
   if (name === "read_ui_schema") return { content: [{ type: "text", text: SCHEMA_TEXT }] };
   if (name === "read_surface_protocol") return { content: [{ type: "text", text: SURFACE_TEXT }] };
+  if (name === "read_automation_protocol") return { content: [{ type: "text", text: AUTOMATION_TEXT }] };
   return { content: [{ type: "text", text: "Unknown agentlas-ui tool." }], isError: true };
 }
 function line(value) {
@@ -53,7 +56,7 @@ process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => { input += chunk; if (Buffer.byteLength(input, "utf8") > MAX_REQUEST_BYTES) process.exit(78); let end; while ((end = input.indexOf("\n")) >= 0) { line(input.slice(0, end).replace(/\r$/, "")); input = input.slice(end + 1); } });
 `;
 
-const SOURCE = `${SOURCE_HEAD}const SCHEMA_TEXT = ${JSON.stringify(intellectUiToolText())};\nconst SURFACE_TEXT = ${JSON.stringify(SURFACE_PROTOCOL)};\n${SOURCE_TAIL}`;
+const SOURCE = `${SOURCE_HEAD}const SCHEMA_TEXT = ${JSON.stringify(intellectUiToolText())};\nconst SURFACE_TEXT = ${JSON.stringify(SURFACE_PROTOCOL)};\nconst AUTOMATION_TEXT = ${JSON.stringify(AUTOMATION_PROTOCOL)};\n${SOURCE_TAIL}`;
 const SOURCE_SHA256 = createHash("sha256").update(SOURCE).digest("hex");
 const BOOTSTRAP =
   `const z=require("node:zlib"),c=require("node:crypto"),v=require("node:vm"),b=z.gunzipSync(Buffer.from(process.argv[1],"base64"),{maxOutputLength:131072});` +

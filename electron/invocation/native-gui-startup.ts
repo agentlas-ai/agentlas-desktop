@@ -15,11 +15,14 @@ type Adapter = ReturnType<typeof createNativeMainAuthCallbackAdapter>;
 export type NativeGuiCapabilities = Readonly<{ start: boolean; stop: boolean; events: boolean; approvals: boolean; recovery: boolean }>;
 type Attachment = Readonly<{ ready: boolean; capabilities: NativeGuiCapabilities; identity: NativeAuthenticatedIdentity }>;
 /** Events carry the identity of the generation that produced them (undefined only before authentication completes). */
-export type NativeGuiEventSink = (method: string, params: unknown, identity?: NativeAuthenticatedIdentity) => void;
+export type NativeGuiEventSink = (method: string, params: unknown, identity?: NativeAuthenticatedIdentity, sourceMode?: "live" | "post-denial") => void;
 export interface NativeGuiAttachHooks {
   onAuthenticated?(channel: Channel, identity: NativeAuthenticatedIdentity): void;
+  onObservationReset?(channel: Channel, identity: NativeAuthenticatedIdentity, stream: string): void;
+  /** Fresh endpoint/snapshot only. Historical approval cards never join this barrier. */
+  onObservationReady?(channel: Channel, identity: NativeAuthenticatedIdentity): Promise<boolean>;
 }
-interface State { binding: NativeAuthBinding; credential: NativeCredential; wire: string; written: boolean; channel?: Channel; identity?: NativeAuthenticatedIdentity; capabilities?: NativeGuiCapabilities; ready?: boolean; adapter?: Adapter; owner?: Owner; attachBoot?: string; attachment?: Promise<Attachment>; attachPending?: boolean; generation: number }
+interface State { binding: NativeAuthBinding; credential: NativeCredential; wire: string; written: boolean; channel?: Channel; identity?: NativeAuthenticatedIdentity; capabilities?: NativeGuiCapabilities; ready?: boolean; adapter?: Adapter; owner?: Owner; attachBoot?: string; attachment?: Promise<Attachment>; attachPending?: boolean; generation: number; observationStream?: string; observationRevision?: number; observationRecovery?: Promise<Attachment> }
 const enrollments = new WeakMap<object, State>();
 let installed: State | undefined;
 function fail(code: string): never { throw new Error(code); }
@@ -50,6 +53,51 @@ export function writePreparedNativeEnrollment(pipe: Writable, enrollment: Native
     try { pipe.end(value.wire); } catch (error) { cleanup(); reject(error); }
   });
 }
+/** Rotate only disposable observation subscriptions on the original authenticated
+ * control channel. Never reissue starts, renew run authority, or close writers. */
+export function recoverNativeGuiObservation(enrollment: NativeGuiEnrollment, onEvent: NativeGuiEventSink | undefined, hooks: NativeGuiAttachHooks): Promise<Attachment> {
+  const value = state(enrollment);
+  if (value.observationRecovery) return value.observationRecovery;
+  const channel = value.channel, identity = value.identity;
+  if (!channel || !identity || nativeGuiChannelIdentity(channel) !== identity || !hooks.onObservationReset || !hooks.onObservationReady) fail("native_gui_observation_recovery_unavailable");
+  const originalGeneration = value.generation;
+  const current = () => { if (value.channel !== channel || value.identity !== identity || value.generation !== originalGeneration || nativeGuiChannelIdentity(channel) !== identity) fail("native_gui_original_channel_unavailable"); };
+  const operation = (async () => {
+    current();
+    let reset: unknown;
+    try { reset = await channel.dispatch("native.attach", {version: "agentlas.native-observation-reset.v1"}); }
+    catch (error) {
+      // A genuinely older daemon does not implement this optional operation.
+      // Preserve its healthy legacy attach; never pretend recovery succeeded.
+      if ((error as {code?:unknown}).code === "native_invocation_attach_invalid" && value.ready === true && value.capabilities) return Object.freeze({ready: true, capabilities: value.capabilities, identity});
+      throw error;
+    }
+    current(); value.ready = false;
+    if (!exact(reset, ["version", "stream"]) || reset.version !== "agentlas.native-observation-reset.v1" || typeof reset.stream !== "string" || !/^[a-f0-9]{64}$/.test(reset.stream)) fail("native_gui_observation_reset_invalid");
+    hooks.onObservationReset!(channel, identity, reset.stream); value.observationStream = reset.stream;
+    const originalRevision = value.observationRevision ?? 0;
+    const activated = await channel.dispatch("native.attach", {version: "agentlas.native-observation-activate.v1", stream: reset.stream});
+    current();
+    if (!exact(activated, ["version", "stream", "notifications", "status"]) || activated.version !== "agentlas.native-observation-activate.v1" || activated.stream !== reset.stream || !Array.isArray(activated.notifications)) fail("native_gui_observation_activation_invalid");
+    for (const event of activated.notifications) {
+      if ((!exact(event, ["method", "params"]) && !exact(event, ["method", "params", "mode"])) || !["invocation.public.ready", "invocation.approval.ready", "invocation.approval.resolved", "invocation.approval.unavailable"].includes(String(event.method))) fail("native_gui_observation_activation_invalid");
+      if ((event.mode !== undefined && event.mode !== "live" && event.mode !== "post-denial") || (event.method === "invocation.approval.ready" && event.mode === undefined)) fail("native_gui_observation_mode_invalid");
+      onEvent?.(String(event.method), event.params, identity, event.mode as "live" | "post-denial" | undefined);
+    }
+    const reply = activated.status;
+    if (!exact(reply, ["version", "bootId", "serviceIdentity", "ready", "capabilities"]) || reply.version !== "agentlas.native-attach.v1" || reply.bootId !== identity.bootId || reply.serviceIdentity !== identity.serviceIdentity || typeof reply.ready !== "boolean"
+      || !exact(reply.capabilities, ["start", "stop", "events", "approvals", "recovery"]) || Object.values(reply.capabilities).some(flag => typeof flag !== "boolean")) fail("native_gui_attach_reply_invalid");
+    const endpointReady = await hooks.onObservationReady!(channel, identity);
+    current();
+    if ((value.observationRevision ?? 0) !== originalRevision) fail("native_gui_observation_recovery_faulted");
+    value.capabilities = Object.freeze({...reply.capabilities}) as NativeGuiCapabilities;
+    value.ready = reply.ready && endpointReady && Object.values(value.capabilities).every(Boolean);
+    return Object.freeze({ready: value.ready, capabilities: value.capabilities, identity});
+  })();
+  value.observationRecovery = operation;
+  const settled = () => { if (value.observationRecovery === operation) value.observationRecovery = undefined; };
+  operation.then(settled, settled); void operation.catch(() => {}); return operation;
+}
 /** Public ping supplies discovery only. The boot becomes trusted solely after
  * the actual enrolled signature and strict native.attach transcript agree. */
 export function attachNativeGuiDaemon(enrollment: NativeGuiEnrollment, discoveredBootId: string,
@@ -67,7 +115,10 @@ export function attachNativeGuiDaemon(enrollment: NativeGuiEnrollment, discovere
       if (!value.channel || nativeGuiChannelIdentity(value.channel) !== result.identity) fail("native_gui_original_channel_unavailable");
       return result;
     });
-    // A closed channel, a new daemon boot or an unready attach starts a NEW generation.
+    if (value.channel && value.identity && nativeGuiChannelIdentity(value.channel) === value.identity && value.attachBoot === discoveredBootId && hooks?.onObservationReset) {
+      return recoverNativeGuiObservation(enrollment, onEvent, hooks);
+    }
+    // A closed channel or a new daemon boot starts a new physical generation.
     // Never two live channels: the superseded one is closed before the next connect.
     value.ready = false; value.capabilities = undefined;
     const old = value.channel; if (old) { try { old.close(); } catch { /* already closed */ } }
@@ -79,7 +130,17 @@ export function attachNativeGuiDaemon(enrollment: NativeGuiEnrollment, discovere
   const attachment = (async () => {
     const channel = await connectNativeGuiChannel({ address: nativeAuthSocketPath(userDataDir()), binding: value.binding,
       credential: value.credential, bootId: discoveredBootId,
-      onEvent: onEvent && ((method, params) => { if (value.generation === gen) onEvent(method, params, genIdentity); }),
+      onEvent: onEvent && ((method, params) => {
+        if (value.generation !== gen) return;
+        if (method === "invocation.approval.observation") {
+          if ((!exact(params, ["version", "stream", "method", "params"]) && !exact(params, ["version", "stream", "method", "params", "mode"])) || params.version !== "agentlas.native-approval-observation.v1"
+            || !["invocation.approval.ready", "invocation.approval.resolved", "invocation.approval.unavailable"].includes(String(params.method)) || (params.mode !== undefined && params.mode !== "live" && params.mode !== "post-denial")) return;
+          if (params.stream !== value.observationStream) return;
+          onEvent(String(params.method), params.params, genIdentity, params.mode as "live" | "post-denial" | undefined); return;
+        }
+        if (value.observationStream && method.startsWith("invocation.approval.")) return;
+        onEvent(method, params, genIdentity);
+      }),
       onRequest(method, raw, identity) {
         current();
         // Device bridge (1.3.0 A3): the service's device requests (scoped screen control, idle snapshot) arrive on the same
@@ -91,7 +152,7 @@ export function attachNativeGuiDaemon(enrollment: NativeGuiEnrollment, discovere
         if (!value.adapter) fail("native_gui_callback_not_initialized"); return value.adapter.onRequest(method, raw, identity);
       } });
     try { current(); } catch (error) { channel.close(); throw error; }
-    value.channel = channel; value.identity = undefined; value.capabilities = undefined; value.ready = false;
+    value.channel = channel; value.observationStream = undefined; value.identity = undefined; value.capabilities = undefined; value.ready = false;
     try {
       const identity = nativeGuiChannelIdentity(channel); if (!identity) fail("native_gui_enrolled_channel_required");
       value.identity = identity; genIdentity = identity;
@@ -116,6 +177,10 @@ export function attachNativeGuiDaemon(enrollment: NativeGuiEnrollment, discovere
         return chatReleaseReplyFromWire(await channel.dispatch("native.attach", { version: CHAT_HANDOVER_VERSION, op: "release", chatId, deadlineMs }));
       });
       channel.onClose(unregisterHandover);
+      if (hooks?.onObservationReset) {
+        try { return await recoverNativeGuiObservation(enrollment, onEvent, hooks); }
+        catch (error) { console.warn("[native-invocation] observation recovery unavailable", (error as {code?:unknown}).code ?? "native_gui_observation_recovery_unavailable"); value.ready = false; return Object.freeze({ready: false, capabilities, identity}); }
+      }
       return Object.freeze({ ready: reply.ready && Object.values(capabilities).every(flag => flag === true), capabilities, identity });
     } catch (error) { channel.close(); throw error; }
   })();
@@ -145,7 +210,7 @@ export function assertNativeGuiStartAvailable(enrollment: NativeGuiEnrollment): 
 export function revokeNativeGuiStartAvailability(enrollment: NativeGuiEnrollment, channel: object, identity: NativeAuthenticatedIdentity): boolean {
   const value = state(enrollment);
   if (value.channel !== channel || value.identity !== identity) return false;
-  value.ready = false; return true;
+  value.ready = false; value.observationRevision = (value.observationRevision ?? 0) + 1; return true;
 }
 export function nativeGuiAttachGeneration(enrollment: NativeGuiEnrollment): number { return state(enrollment).generation; }
 export function nativeGuiEnrollmentChannel(enrollment: NativeGuiEnrollment): Channel | undefined { return state(enrollment).channel; }

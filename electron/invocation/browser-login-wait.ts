@@ -1,6 +1,9 @@
 import type { LoginPrerequisiteRef } from "../browser/login-recovery";
 import { getDb } from "../store/db";
 import { recordRunEvent } from "../store/run-events";
+import { INVOCATION_BROWSER_LOGIN_WAIT_EVENT as EVENT, parseInvocationBrowserLoginWait,
+  type InvocationBrowserLoginWait } from "../../shared/invocation-browser-login-wait";
+export type { InvocationBrowserLoginWait } from "../../shared/invocation-browser-login-wait";
 
 import type { BrowserLoginWait } from "../browser/login-prerequisite";
 import type { InvocationExecutionContext } from "../mcp/client";
@@ -12,35 +15,21 @@ export function canResumeInvocationBrowserLoginWait(context?: InvocationExecutio
     && !context.scienceRecovery && !context.scienceReview && !context.science && !context.aliveScience
     && !context.nodeId && !context.occurrenceId && !context.onWorkforcePrepareReceipt);
 }
-export interface InvocationBrowserLoginWait {
-  prerequisite: LoginPrerequisiteRef;
-  sourceInvocationId: string;
-  chatId: string;
-  goalId: string | null;
-  goalRevision: number | null;
-  ownerEpoch: string;
-  runtimeQuiesced: boolean;
-  effectsSettled: boolean;
-  state: "waiting" | "claimed" | "dispatched" | "cancelled" | "blocked";
-  successorInvocationId: string | null;
-  reason: string | null;
-}
-const EVENT = "invocation_browser_login_wait";
 export function sameLoginPrerequisite(a: LoginPrerequisiteRef, b: LoginPrerequisiteRef): boolean {
   return a.prerequisiteId === b.prerequisiteId && a.runId === b.runId && a.chatId === b.chatId
     && a.nodeId === b.nodeId && a.sessionId === b.sessionId && a.generation === b.generation;
 }
 export function latestInvocationBrowserLoginWait(runId: string): InvocationBrowserLoginWait | null {
-  const row = getDb().prepare("SELECT payload_json FROM run_events WHERE run_id = ? AND kind = ? ORDER BY seq DESC LIMIT 1")
-    .get(runId, EVENT) as { payload_json: string } | undefined;
+  const row = getDb().prepare("SELECT payload_json, chat_id FROM run_events WHERE run_id = ? AND kind = ? ORDER BY seq DESC LIMIT 1")
+    .get(runId, EVENT) as { payload_json: string; chat_id: string | null } | undefined;
   if (!row) return null;
   try {
-    const value = JSON.parse(row.payload_json).wait as InvocationBrowserLoginWait;
-    return value && value.sourceInvocationId === runId && value.prerequisite?.runId === runId
-      && value.prerequisite.chatId === value.chatId ? value : null;
+    return parseInvocationBrowserLoginWait(JSON.parse(row.payload_json).wait, runId, row.chat_id);
   } catch { return null; }
 }
 function persist(wait: InvocationBrowserLoginWait): void {
+  if (!parseInvocationBrowserLoginWait(wait, wait.sourceInvocationId, wait.chatId))
+    throw new Error("browser_login_wait_checkpoint_invalid");
   recordRunEvent({ runId: wait.sourceInvocationId, chatId: wait.chatId, kind: EVENT,
     sourceEventId: `browser-login-wait:${wait.prerequisite.prerequisiteId}:${wait.prerequisite.generation}:${wait.state}`,
     payload: { wait } });

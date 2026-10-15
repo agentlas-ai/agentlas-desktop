@@ -2,6 +2,7 @@
 
 import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Markdown } from "@/components/Markdown";
+import { inlineVisualRanges, mapInlineVisualProse } from "@shared/inline-visual";
 import { isDocumentLikeText } from "@/lib/one-doc-like";
 import { oneHistoryWindowStart, revealOneHistoryPage } from "@/lib/one-history-window";
 import type { OneOrgMember, OneOrgState, OneOrgStatusKind } from "@shared/one-org";
@@ -237,9 +238,11 @@ const MessageText = memo(function MessageText({
   speakerName?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const normalized = coordinationOnly
-    ? visibleCoordinatorText(text, locale, speakerName)
-    : visibleAgentText(text, locale, speakerName);
+  const normalized = mapInlineVisualProse(text, prose => coordinationOnly
+    ? visibleCoordinatorText(prose, locale, speakerName)
+    : visibleAgentText(prose, locale, speakerName));
+  // Keep complete widget source and identity; expansion never remounts controls.
+  const hasVisual = inlineVisualRanges(normalized).length > 0;
   const finding = (() => {
     // Korean workers translate the report labels ("발견/결과:", "근거:",
     // "가정:", "리스크:") — the collapse must recognise both languages or the
@@ -252,10 +255,10 @@ const MessageText = memo(function MessageText({
     return summary || null;
   })();
   const long = normalized.length > 1_200;
-  const collapsible = Boolean(finding) || long;
-  const visible = !expanded && finding
+  const collapsible = !hasVisual && (Boolean(finding) || long);
+  const visible = !collapsible || expanded ? normalized : finding
     ? finding
-    : long && !expanded
+    : long
       ? `${normalized.slice(0, 1_080).trimEnd()}…`
       : normalized;
   return <>

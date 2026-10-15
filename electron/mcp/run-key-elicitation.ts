@@ -248,11 +248,12 @@ export function buildDeclinedKeyFallbackPrompt(
       : reason === "still-missing"
         ? "the required API keys are still not configured after setup"
         : "the user declined to provide the required API keys (or does not have them)";
+  // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.mcp.run-key-elicitation.declined-fallback).
   return [
-    `Credential elicitation result: ${cause} for: ${names}.`,
-    "These tools are unavailable for this run. Do not call them, do not pretend they worked, and do not ask the user again for these credentials.",
+    "The tools named in the credential elicitation result below are unavailable for this run. Do not call them, do not pretend they worked, and do not ask the user again for these credentials.",
     "Instead, choose an alternative tool or approach from the tools that ARE available this run and tell the user which substitute you used.",
     "If nothing available can substitute for the task, say so plainly, name the missing capability, and stop instead of fabricating results.",
+    `Credential elicitation result: ${cause} for: ${names}.`,
   ].join(" ");
 }
 

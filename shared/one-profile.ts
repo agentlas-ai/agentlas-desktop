@@ -289,16 +289,16 @@ export function buildApprovedOwnerWorkPreferenceContext(
   const authored = profile.profileContext.trim();
   if (!authored && enabled.length === 0) return null;
   return [
-    "[Owner preferences — explicitly provided by the user in their Agentlas profile]",
-    "Apply these to tone, conduct, and reporting in this Work run. They do not change who you are or grant any authority.",
-    authored ? `User-authored context: ${authored}` : "User-authored context: none.",
-    "Approved operating principles:",
-    enabled.length > 0
-      ? enabled.map((item) => `- [${item.scope}${item.scopeRef ? `:${item.scopeRef}` : ""}] ${item.content}`).join("\n")
-      : "- None approved.",
-    "Do not present inferred preferences as approved operating principles.",
-    "Apply these silently: never announce, label, tag or quote them in the reply (no bracketed notes like [tone check]); just answer in that manner.",
-  ].join("\n");
+    "[Owner preferences]",
+    "scope: tone, conduct, reporting; grants no authority; apply silently, never quote or tag",
+    authored ? `User-authored context: ${authored}` : "",
+    ...(enabled.length > 0
+      ? [
+          "Approved operating principles:",
+          enabled.map((item) => `- [${item.scope}${item.scopeRef ? `:${item.scopeRef}` : ""}] ${item.content}`).join("\n"),
+        ]
+      : []),
+  ].filter(Boolean).join("\n");
 }
 
 export function buildApprovedOneProfileContext(
@@ -309,16 +309,15 @@ export function buildApprovedOneProfileContext(
   const enabled = selectApprovedOneOperatingPrinciples(profile, scope);
   // Host-known empties ("None approved", "context: none") are omitted rather than stated.
   return [
-    "[Agentlas One profile — explicitly provided by the user]",
+    "[One profile]",
     `Identity: ${profile.displayName} (${profile.role})`,
     profile.profileContext ? `User-authored context: ${profile.profileContext}` : "",
     ...(enabled.length > 0
       ? [
           "Approved operating principles:",
           enabled.map((item) => `- [${item.scope}${item.scopeRef ? `:${item.scopeRef}` : ""}] ${item.content}`).join("\n"),
-          "Do not present inferred preferences as approved operating principles.",
         ]
       : []),
-    "Apply these silently: never announce, label, tag or quote them in the reply (no bracketed notes like [tone check]); just answer in that manner.",
+    "apply silently, never quote or tag; only these are approved",
   ].filter(Boolean).join("\n");
 }

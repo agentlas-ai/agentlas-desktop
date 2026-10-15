@@ -143,7 +143,12 @@ export const scienceCriterionReviewHost:ScienceCriterionReviewHost={
     });
     dispatchEntered=true;
     try { invocationService.start({runId:review.invocationRunId,chatId:review.runtimeChatId,permissions:"read",planMode:true,runtimeSelection:selection,promptOrigin:"system",taskIntent:"conversation",
-      userPrompt:`Independently review only the exact scientific criterion and immutable evidence reserved by Main. Call read_criterion_review_input once to receive that snapshot; do not read it from files or other tools. Do not produce or modify research data, install tools, delegate, or perform external writes. Distinguish method adequacy from the scientific outcome; a negative scientific finding is not automatically a failed method. Return exactly one JSON object, without Markdown, using schema agentlas.science-criterion-review-findings.v1, reviewRequestId ${review.id}, inputSha256 ${review.inputSha256}, and finding {criterionIndex:${review.basis.criterionIndex},verdict:passed|failed|inconclusive,scientificOutcome:supported|contradicted|inconclusive|not-assessed,summary:string,limitations:string[]}. Do not claim verification of information absent from the snapshot.`},binding,{source:"science",scienceReview:authority}); } catch(error) { unsubscribe(); throw error; }
+      userPrompt:`judgment: independent review of the exact scientific criterion and immutable evidence reserved by Main
+input: call read_criterion_review_input once (not files or other tools)
+no research data changes, installs, delegation, external writes
+method adequacy != scientific outcome; a negative finding is not a failed method
+nothing absent from the snapshot is verified
+output: one JSON object, no Markdown, schema agentlas.science-criterion-review-findings.v1, reviewRequestId ${review.id}, inputSha256 ${review.inputSha256}, finding {criterionIndex:${review.basis.criterionIndex},verdict:passed|failed|inconclusive,scientificOutcome:supported|contradicted|inconclusive|not-assessed,summary:string,limitations:string[]}`},binding,{source:"science",scienceReview:authority}); } catch(error) { unsubscribe(); throw error; }
     return {status:"running"};
     } catch(error) {
       if(dispatchEntered)throw error;

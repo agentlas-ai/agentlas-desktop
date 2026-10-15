@@ -36,8 +36,18 @@ import { readToolchainState } from "../toolchains/store";
 import { recordToolchainAssetDiscovery, toolchainAssetUsage } from "../toolchains/usage";
 import { currentOneToolchainNativeInvocation } from "./toolchain-native-runtime";
 import { resolveNativeAssetPublicationAuthority } from "../toolchains/asset-cold-start";
+import { resolveGraphOriginMessage, type GraphOriginBinding } from "./graph-origin";
 
 /** A Work task's capability (team-control-server scope "toolchain-consumer"). */
+/**
+ * The owner message a graph's reports answer (22 O3). Run delivery only reports into the origin conversation against a
+ * user message there when proven (automation-delivery.ts); an unknown command remains null in a standalone report. The anchor is the message the
+ * calling run received (graph-origin.ts), not the conversation's latest message (native-harness notyet NH15).
+ */
+function ownerOriginMessage(chatId: string, caller: OneTeamCaller): string | null {
+  return resolveGraphOriginMessage(getDb(), chatId, caller as OneTeamCaller & GraphOriginBinding);
+}
+
 function isToolchainConsumer(caller: OneTeamCaller): boolean {
   return (caller as { scope?: unknown }).scope === "toolchain-consumer";
 }
@@ -369,6 +379,31 @@ async function dispatchToolchain(caller: OneTeamCaller, name: string, input: Rec
   throw new Error("toolchain_unknown_operation");
 }
 
+/** The conversation that owns graphs for this caller — the same rule every one_graph_* tool applies (graph drafts). */
+export function oneGraphOwnerChatId(caller: OneTeamCaller): string {
+  if (isToolchainConsumer(caller)) throw new Error("one_graph_consumer_scope");
+  return owner(caller).id;
+}
+
+/** one_graph_save's checks — shape, compiler, MCP effect, references, schedule — without saving (graph drafts). */
+export async function validateOneGraphBlueprint(caller: OneTeamCaller, bp: GraphBlueprint, graphId: string | null):
+  Promise<{ ok: true } | { ok: false; code: string; problems: unknown }> {
+  const shape = graphAuthoringShapeProblems(bp, GRAPH_BLUEPRINT_INPUT_SCHEMA, "blueprint");
+  if (shape.length) return { ok: false, code: "one_graph_input_invalid", problems: shape };
+  const existing = graphId ? exact(caller, graphId) : null;
+  const built = buildGraphFromBlueprint(bp, currentUiLocale(), { knownGraphs: scoped(caller).map(a => ({ id: a.id, name: a.name })), ...(existing ? { selfId: existing.id } : {}) });
+  if (!built.ok) return { ok: false, code: "one_graph_blueprint_invalid", problems: built.problems };
+  const effectProblems = graphMcpEffectProblems(built.graph, currentUiLocale());
+  if (effectProblems.length) return { ok: false, code: "one_graph_blueprint_invalid", problems: effectProblems.map(p => ({ reason: p.reason, ask: null })) };
+  try { checkReferences(caller, built.graph, existing?.id, requiredExecutionPermission(built.graph), existing?.hubMode ?? "local-only"); }
+  catch (error) { return { ok: false, code: "one_graph_reference_invalid", problems: [{ reason: error instanceof Error ? error.message : String(error), ask: null }] }; }
+  if (bp.trigger.kind === "cron") {
+    const spec = specFromStored(bp.trigger.schedule, existing?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone);
+    if (!spec || !nextRun(spec)) return { ok: false, code: "one_graph_schedule_invalid", problems: [{ reason: "schedule has no next run", ask: null }] };
+  }
+  return { ok: true };
+}
+
 export async function oneGraphDispatch(caller: OneTeamCaller, name: string, input: Record<string, unknown>): Promise<unknown> {
   if (isToolchainConsumer(caller) && !TOOLCHAIN_CONSUMER_TOOLS.includes(name)) throw new Error("one_graph_consumer_scope");
   const tool = ONE_GRAPH_TOOLS.find(t => t.name === name);
@@ -479,7 +514,9 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
         // The monitor lives inside the trigger document: replacing the trigger without it dropped the origin binding,
         // so every revision of a saved graph failed its own scope check (measured 2026-10-04, QA app, real model).
         saved = updateAutomation(current.id, { name: bp.name, goal: bp.goal, promptTemplate: bp.goal,
-          scheduleHuman: schedule, scheduleJson: null, triggerType, trigger: { kind: triggerType }, monitor: current.monitor,
+          scheduleHuman: schedule, scheduleJson: null, triggerType, trigger: { kind: triggerType },
+          // A later editor cannot establish the original command of an unbound graph.
+          monitor: current.monitor,
           executionPermission: permission });
         saved = applyAutomationLifecycle({ parsed: { action: enable ? "resume" : "pause", automationId: saved.id, expectedDefinitionDigest: automationDefinitionDigest(saved), name: saved.name, prompt: "", schedule: "", scheduleEmitted: false }, chatId: chat.id, canWrite: true }).automation;
       } else saved = createAutomation({ name: bp.name, goal: bp.goal, promptTemplate: bp.goal,
@@ -487,7 +524,7 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
         runtimeSelection: chat.runtimeSelection ?? undefined, hubMode: "local-only", executionPermission: permission,
         graphJson: graph, enabled: enable, createdBy: "agent", scheduleHuman: schedule, scheduleJson: null,
         triggerType, monitor: { schemaVersion: "agentlas.automation-monitor.v1", originChatId: chat.id,
-          originMessageId: null, notificationPolicy: "meaningful_changes", deadline: null } });
+          originMessageId: ownerOriginMessage(chat.id, caller), notificationPolicy: "meaningful_changes", deadline: null } });
       recordOneGraphAuthority(saved, chat.id);
       return receipt(saved, { ok: true, action: existing ? "updated" : "created", ...(connections && !enable ? { activation: connections.activation } : {}) });
     }).immediate();

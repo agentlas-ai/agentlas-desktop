@@ -1,4 +1,4 @@
-import { createHistoryRuntimeFences, type HistoryRuntimeFencePorts, type HistoryRuntimeFence } from './history-runtime-fences';
+import { currentHistoryRuntimeFence, createHistoryRuntimeFences, type HistoryRuntimeFencePorts, type HistoryRuntimeFence } from './history-runtime-fences';
 import { getDb } from '../store/db';
 import { getAuthenticatedSessionBinding } from '../auth';
 import { getOneProfile } from '../store/one-profile';
@@ -15,6 +15,7 @@ import type { PersonalDataTarget } from '../../shared/one-personal-data';
 export interface OnePersonalIntegrationNativePolicy {
   gmail?: Omit<NativeGmailRegistrationOptions, 'reviewNative' | 'subscribeOwnerWake'>;
   history?: Omit<NativeHistoryEvolutionOptions, 'materialize'>;
+  historyWorkTools?(binding:Readonly<import("./history-native-execution-glue").HistoryNativeCommandBinding>):readonly string[];
   historyToolResources?: HistoryNativeExecutionPorts['resolveToolResources'];
   historyToolReference?:HistoryRuntimeFencePorts['canonicalToolReference'];
 }
@@ -78,7 +79,8 @@ async function initialize(): Promise<void> {
       if (policy?.history) {
         const runtime = await import('./personal-data-runtime');
         const historyPolicy = policy.history;
-        nextHistory = await createNativeHistoryEvolution({ ...historyPolicy, personalAuthority: { current: request => { assertOwner(); return epoch === originalEpoch ? historyPolicy.personalAuthority.current(request) : { decision: 'deny', revision: '', reason: 'personal_integration_authority_changed' }; } }, materialize: runtime.materializeOneHistoryExactResult });
+        const review=historyPolicy.observeWithReview;
+        nextHistory = await createNativeHistoryEvolution({ ...historyPolicy, observeWithReview:review?async(target,action)=>{assertOwner();if(policy?.history!==historyPolicy||historyPolicy.observeWithReview!==review||epoch!==originalEpoch)throw personalDataError('personal_integration_authority_changed');const result=await review(target,action);assertOwner();if(policy?.history!==historyPolicy||historyPolicy.observeWithReview!==review||epoch!==originalEpoch)throw personalDataError('personal_integration_authority_changed');return result}:undefined, personalAuthority: { current: request => { assertOwner(); return epoch === originalEpoch ? historyPolicy.personalAuthority.current(request) : { decision: 'deny', revision: '', reason: 'personal_integration_authority_changed' }; } }, materialize: runtime.materializeOneHistoryExactResult });
         nextOwner.configureNativeHistory(nextHistory);
       }
       const nextExecution = await createDefaultHistoryNativeExecution({ service: () => history, assertCurrentBudget: assertBudget, resolveToolResources: input => policy?.historyToolResources?.(input) ?? null });
@@ -128,3 +130,6 @@ export function closeOnePersonalIntegrations(): void { epoch++; owner?.close(); 
 
 /** Existing native invocation lease is already claimed by InvocationService. No renderer scope. */
 export async function withOneHistoryNativeInvocation<T>(input:{runId:string;chatId:string},execute:()=>Promise<T>):Promise<T>{const token=await bindOneHistoryNativeRun(input);if(!token)return execute();runtimeFences??=createHistoryRuntimeFences({bindRun:bindOneHistoryNativeRun,execution:currentOneHistoryExecution,canonicalToolReference:i=>policy?.historyToolReference?.(i)??null});return runtimeFences.withInvocation(input,()=>execute());}
+
+export function currentOneHistoryService(){return history;}
+export function currentOneHistoryWorkTools():readonly string[]{const fence=currentHistoryRuntimeFence();return fence?policy?.historyWorkTools?.(fence.binding())??[]:[];}

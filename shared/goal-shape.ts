@@ -43,6 +43,38 @@ export const GOAL_SHAPE_LIMITS = {
   defaultTimeboxHours: 72,
 } as const;
 
+/** Model draft wire contract. Host validation still binds owner numbers, quotes and the dependency DAG. */
+export const GOAL_SHAPE_OUTPUT_SCHEMA: Record<string, unknown> = (() => {
+  const text = { type: "string", minLength: 1, maxLength: GOAL_SHAPE_LIMITS.text };
+  const id = { type: "string", pattern: "^[A-Za-z][A-Za-z0-9_.-]{0,39}$" };
+  const nullable = (schema: Record<string, unknown>) => ({ anyOf: [schema, { type: "null" }] });
+  const object = (properties: Record<string, unknown>, required = Object.keys(properties)) =>
+    ({ type: "object", properties, required, additionalProperties: false });
+  const array = (items: Record<string, unknown>, maxItems?: number, minItems?: number) =>
+    ({ type: "array", items, ...(maxItems === undefined ? {} : { maxItems }), ...(minItems === undefined ? {} : { minItems }) });
+  const hours = { type: "number", minimum: GOAL_SHAPE_LIMITS.minReviewHours, maximum: GOAL_SHAPE_LIMITS.maxReviewHours * 4 };
+  const prerequisite = object({ id, state: { enum: ["met", "unmet", "unknown"] }, evidence_refs: array(text),
+    blocks: array({ enum: ["prepare", "local_write", "external_effect"] }) });
+  const tactic = object({ id, strategy_id: nullable(id), description: text, done_when: text,
+    kind: { enum: ["one_off", "recurring"] }, depends_on: array(id), prerequisites: array(prerequisite) },
+    ["id", "strategy_id", "description", "done_when", "kind"]);
+  const deadline = { ...text, description: "Owner-stated deadline only; ISO 8601 date/timestamp or duration (e.g. P30D for within 30 days); null when none." };
+  const kr = object({ metric: text, target: { type: "number" }, unit: text,
+    deadline: nullable(deadline), baseline: nullable({ type: "number" }) });
+  const boundary = { anyOf: [object({ text, source: { const: "owner" }, quote: text }),
+    object({ text, source: { const: "platform_rule" }, rule_ref: text })] };
+  const mission = object({ objective: text, diagnosis: text, key_results: array(kr, GOAL_SHAPE_LIMITS.keyResults),
+    boundaries: array(boundary, GOAL_SHAPE_LIMITS.boundaries) });
+  const strategy = object({ id, hypothesis: text, serves_krs: array(text), kpi: text,
+    budget: object({ actions_per_day: nullable({ type: "number", minimum: 0 }) }),
+    timebox_hours: hours, observation_window_hours: hours });
+  return object({ shape: { enum: GOAL_SHAPE_KINDS }, problem_nature: { enum: PROBLEM_NATURES }, rationale: text,
+    mission: nullable(mission), strategies: array(strategy, GOAL_SHAPE_LIMITS.strategies),
+    tactics: array(tactic, GOAL_SHAPE_LIMITS.tactics, 1),
+    review_every_hours: nullable({ type: "number", minimum: GOAL_SHAPE_LIMITS.minReviewHours, maximum: GOAL_SHAPE_LIMITS.maxReviewHours }),
+    deadline: nullable(deadline) });
+})();
+
 export interface GoalKeyResult {
   id: string;
   metric: string;
@@ -325,6 +357,7 @@ export function validateGoalShape(raw: unknown, ownerText: string, createdAtIso:
         while (krIds.has(id)) id = `${id}_2`;
         krIds.add(id);
         const deadline = str(item.deadline, 40) || null;
+        if (deadline && !resolveGoalDeadline(deadline, createdAtIso)) return { ok: false, reason: "kr_deadline_unreadable" };
         const baseline = finiteOrNull(item.baseline);
         krs.push({ id, metric, target, unit: str(item.unit, 40), target_text: matched.text, deadline,
           deadline_at: resolveGoalDeadline(deadline, createdAtIso), baseline });
@@ -413,7 +446,7 @@ export function validateGoalShape(raw: unknown, ownerText: string, createdAtIso:
   // The owner's deadline is kept however far away it is (owner 2026-10-12: no arbitrary caps on user intent; a
   // deadline over 400 days used to be dropped as goal_deadline_out_of_range).
   const goalDeadlineAt = resolveGoalDeadline(goalDeadline, createdAtIso);
-  if (goalDeadline && !goalDeadlineAt) notes.push("goal_deadline_unreadable");
+  if (goalDeadline && !goalDeadlineAt) return { ok: false, reason: "goal_deadline_unreadable" };
   return { ok: true, notes, plan: {
     schemaVersion: GOAL_SHAPE_SCHEMA, shape, problem_nature: nature, rationale,
     mission, strategies, tactics, review_every_hours: shape === "mission_tree" ? reviewEveryHours : null,

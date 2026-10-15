@@ -23,6 +23,27 @@ function withMarkerOnLastBlock<M extends CacheableMessage>(message: M): M {
 }
 
 /**
+ * Apply a cache plan's message-level breakpoints: mark the last content block of each message the plan anchored.
+ * Placement is decided by cache-planner.ts (planCache); this only writes the markers. Input is not mutated.
+ */
+export function applyPlannedMessageBreakpoints<M extends CacheableMessage>(
+  messages: M[],
+  plan: { anthropicBreakpoints: ReadonlyArray<{ segmentId: string }> },
+  messageIndexBySegment: Readonly<Record<string, number>>,
+): M[] {
+  let next: M[] | null = null;
+  for (const point of plan.anthropicBreakpoints) {
+    const index = messageIndexBySegment[point.segmentId];
+    if (index === undefined || index < 0 || index >= messages.length) continue;
+    next ??= messages.slice();
+    next[index] = withMarkerOnLastBlock(next[index]);
+  }
+  return next ?? messages;
+}
+
+/**
+ * LEGACY reference placement (pre-planner). Production placement is cache-planner.ts + applyPlannedMessageBreakpoints;
+ * this stays only as the byte-parity oracle for scripts/test-cache-planner.cjs.
  * Rolling breakpoints for an Anthropic request body's messages (system keeps its own marker):
  *  - the last block of the final message when it carries tool_results — the newest tool_result, so each step
  *    reads the whole previous transcript at 0.1x and writes only the new tail;

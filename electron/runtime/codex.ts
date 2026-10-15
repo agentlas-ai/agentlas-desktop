@@ -1,14 +1,17 @@
+import type { DeclaredPromptPart } from "./prompt-order";
 import { registerNativeApprovalChildSignal } from "./native-approval-provenance";
 // Codex CLI — 감지 + 실호출.
 // 사용자의 ChatGPT Plus/Pro 구독으로 돌아간다 (PRD §3.1 6-A).
 //
 // 호출 형식: codex exec "<prompt>"  (—— Codex CLI의 exec 모드)
 // V0는 single-turn; 이전 대화를 user 입력에 inline.
+import { prepareRotationHandoff } from "./handoff-facts";
 import { reportModelPayload, ledgerFromCliSent } from "./model-call-ledger";
+import { recordNativeCompaction } from "./native-compaction-event";
 import path from "node:path";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { RuntimeJudgmentRefusal } from "./judgment-refusal";
-import { runCodexNoTools, runCodexAliveNoTools } from "./codex-no-tools";
+import { runCodexNoTools, runCodexAliveNoTools, composeCodexHostInstructions } from "./codex-no-tools";
 import { runCodexAliveResidentTurn, closeCodexAliveResidentOwner,
   codexAliveResidentGeneration, consumeCodexAliveResidentResult } from "./codex-alive-session";
 import { aliveDecisionProfileForRequest } from "./alive-decision-context";
@@ -21,17 +24,17 @@ import { ToolRequestReplayGuard } from "../../shared/tool-request-replay";
 import { createCodexNativeTurnController, probeCodexNativeSteering } from "./codex-native-steering";
 import type { ObservedTokenUsage } from "../../shared/observed-usage";
 import { StringDecoder } from "node:string_decoder";
-import { codexSystemPromptWithSchemaFallback, openAiStrictSchemaOrNull } from "./strict-output-schema";
+import { codexOutputSchemaFallbackBlock, openAiStrictSchemaOrNull } from "./strict-output-schema";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult , RunnerFailure } from "./runner";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import { codexShellEnvironmentArgs } from "./env-key-reach";
-import { imageOutputContract, planPromptSections } from "./prompt-sections";
-import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliSilenceWindowMs, RUNTIME_SILENT_TIMEOUT_CODE, wrapSystemPrompt, workforceObservedHostAuthorityEnforcement, RuntimeTurnUnsettledError } from "./runner";
+import { imageOutputContract } from "./prompt-sections";
+import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliSilenceWindowMs, cliToolSilenceWindowMs, type CliSilenceGuard, childExitReason, RUNTIME_SILENT_TIMEOUT_CODE, runtimeProtocolUnrecognizedFailure, wrapSystemPrompt, workforceObservedHostAuthorityEnforcement, RuntimeTurnUnsettledError } from "./runner";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { abortReasonError } from "./abort-reason";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import {
-  CLI_HISTORY_CONTEXT_TOKENS,
+  cliHistoryContextTokens,
   composeResumeTurnPrompt,
   renderConversationContext,
   renderGapContext,
@@ -56,10 +59,11 @@ import {
   saveRuntimeSession,
 } from "../store/runtime-sessions";
 import {
-  boundHandoffHistory, readThreadHealth, recordRotationReceipt, recordThreadTurn,
+  readThreadHealth, recordThreadTurn,
 } from "./session-rotation";
-import { compactionTokenLimit, decideGeneration, runtimeContextWindow } from "./session-generation";
-import { AcpRpcError } from "./acp-protocol";
+import { decideGeneration, nativeCompactionLimit, recordObservedContextWindow, runtimeContextWindow } from "./session-generation";
+import { AcpRpcError, classifyAcpFailure, createNativeRuntimeDiagnostic, NativeProtocolDiagnostics, NativeTransportDiagnostics, nativeProcessErrorCode } from "./acp-protocol";
+import type { NativeFailureEvidence, NativeProtocolCounters, NativeRuntimeDiagnostic } from "./native-runtime-diagnostics";
 import {
   CODEX_APP_SERVER_ARGS,
   CodexModelSelectionError,
@@ -77,6 +81,7 @@ import {
   looksLikeMissingAppServer,
   markCodexAppServerUnsupported,
   openCodexResidentSession,
+  codexInitializationFailure,
   prepareCodexThreadResume,
   prepareCodexExecThreadResume,
   type CodexResidentSession,
@@ -101,7 +106,7 @@ import { generateImage } from "../multimodal/image";
 import { multimodalImageSlot, multimodalImageSlotDiagnosis } from "../multimodal/slot";
 import { copyGeneratedImageIntoWorkspace } from "../multimodal/workspace-image-copy";
 import { bindNativeFileProofObserver, mcpFileProofCandidate } from "../long-run/file-proof";
-import { bindScienceNativeToolObserver, bindScienceNativeFailureObserver, createAdapterEffectLedger } from "../invocation/adapter-effect-context";
+import { bindScienceNativeToolObserver, bindScienceNativeFailureObserver, bindNativeRuntimeDiagnosticObserver, createAdapterEffectLedger } from "../invocation/adapter-effect-context";
 import {
   defaultRuntimeToolPermission,
   getRuntimeToolPermissionArbiter,
@@ -115,6 +120,37 @@ const CODEX_IMAGE_TOOL_VERSION = "agentlas.generate-image.v1";
 type NativeFileProofObserver = ReturnType<typeof bindNativeFileProofObserver>;
 type NativeFileProofInput = Parameters<NativeFileProofObserver>[0];
 type NativeFileProofTicket = Exclude<ReturnType<NativeFileProofObserver>, null>;
+
+type CodexDiagnosticInput = Omit<NativeRuntimeDiagnostic, "schemaVersion" | "runtime" | "driver" | "observedAt" | "diagnosticAttemptId" | "sequence">;
+/** Observations capture the Main run before initialization, independently of
+ * model attempt admission. No payload or optional journal error controls flow. */
+function bindCodexRuntimeDiagnostics(req: RunnerRequest, driver: NativeRuntimeDiagnostic["driver"]): (input: CodexDiagnosticInput) => void {
+  let observe: (item: unknown) => void = () => {};
+  try { observe = bindNativeRuntimeDiagnosticObserver(req); } catch { /* Optional host observer. */ }
+  const diagnosticAttemptId = crypto.randomUUID();
+  let sequence = 0;
+  return input => {
+    try {
+      if (sequence >= 32) return;
+      const diagnostic = createNativeRuntimeDiagnostic({ ...input, driver, diagnosticAttemptId, sequence: ++sequence });
+      if (diagnostic) observe(diagnostic);
+    } catch { /* Diagnostics are optional and cannot authorize retry or completion. */ }
+  };
+}
+function codexProtocolDelta(current: NativeProtocolCounters, baseline: NativeProtocolCounters): NativeProtocolCounters {
+  return Object.freeze(Object.fromEntries(Object.entries(current).map(([key, value]) =>
+    [key, Math.max(0, value - baseline[key as keyof NativeProtocolCounters])])) as unknown as NativeProtocolCounters);
+}
+function codexProcessErrorCode(error: unknown): string | null {
+  try { return nativeProcessErrorCode(error); } catch { return null; }
+}
+function codexDiagnosticFailure(error: unknown): NativeFailureEvidence {
+  try {
+    const failure = classifyAcpFailure(error);
+    if (failure) return failure;
+  } catch { /* Optional host evidence; retain the primary runtime failure. */ }
+  return Object.freeze({ category: "unknown", rpcCode: null, timeoutMs: null, requestMethod: null });
+}
 
 /** Admit only paths that Codex included in a structured FileChange start. */
 export function codexNativeFileProofCandidates(
@@ -158,7 +194,7 @@ export function codexNativeFileProofCandidates(
 const CODEX_IMAGE_DYNAMIC_TOOL = {
   type: "function",
   name: CODEX_IMAGE_TOOL_NAME,
-  description: "Generate the image the user asked for with Agentlas's configured multimodal slot. You MUST call this tool for image-generation requests. Never claim that an image was generated or displayed unless this tool returns success=true and an inputImage result.",
+  description: "Generate the requested image. Required for image requests; claim an image only after success=true with inputImage.",
   inputSchema: {
     type: "object",
     properties: {
@@ -237,9 +273,16 @@ async function getBin(source?: string, cwd = agentRunCwd(), env = process.env): 
   return cachedBin;
 }
 
+/** The `[OUTPUT CONTRACT]` fallback block (empty when the schema rides a strict native channel). It is request-scoped,
+ * so it follows the wrapped system sections instead of sitting inside the agent-definition slot. */
+function codexSchemaFallbackBlock(req: RunnerRequest): string {
+  return codexOutputSchemaFallbackBlock(req);
+}
+
 function buildPrompt(req: RunnerRequest): string {
+  // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.main.codex.exec-create.seed).
   const sys = wrapSystemPrompt(
-    codexSystemPromptWithSchemaFallback(req),
+    req.systemPrompt,
     req.locale,
     req.permission,
     cumulativeSurfaceGateText(req.history, req.userPrompt),
@@ -253,12 +296,14 @@ function buildPrompt(req: RunnerRequest): string {
     KIND,
     req.sciencePromptProfile,
     req.judgmentOnly === true ? "host-judgment" : undefined,
+    codexSchemaFallbackBlock(req) ? [{ id: "transport.codex.output-schema", revision: 1, stability: "task-context", changeTriggers: ["release", "task", "plan-revision"], order: 90, text: codexSchemaFallbackBlock(req) }] : undefined,
+      req.systemPromptComposition,
   );
   // 새 세션 시드: 턴 컨텍스트는 시스템 섹션 뒤에, 히스토리는 연속성 프레이밍+압축과 함께.
   const turnContext = req.turnContext?.trim();
   const parts: string[] = [`[SYSTEM]\n${sys}${turnContext ? `\n\n${turnContext}` : ""}`, ""];
   if (req.history.length > 0) {
-    const { block } = renderConversationContext(req.history, req.locale, CLI_HISTORY_CONTEXT_TOKENS);
+    const { block } = renderConversationContext(req.history, req.locale, cliHistoryContextTokens(KIND, req.model));
     parts.push(block, "");
   }
   parts.push(tStatus(req.locale, "histThisSection"), req.userPrompt);
@@ -272,9 +317,10 @@ function buildPrompt(req: RunnerRequest): string {
  * reopened. Keep the exec fallback above unchanged, but never seed a resident
  * app-server thread with a fake user message.
  */
-function buildDeveloperInstructions(req: RunnerRequest): string {
+function buildDeveloperInstructions(req: RunnerRequest, imageContractLine?: string): string {
+  // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.main.codex.app-server.developer-instructions).
   return wrapSystemPrompt(
-    codexSystemPromptWithSchemaFallback(req),
+    req.systemPrompt,
     req.locale,
     req.permission,
     cumulativeSurfaceGateText(req.history, req.userPrompt),
@@ -288,13 +334,18 @@ function buildDeveloperInstructions(req: RunnerRequest): string {
     KIND,
     req.sciencePromptProfile,
     req.judgmentOnly === true ? "host-judgment" : undefined,
+    [
+      ...(imageContractLine ? [{ id: "transport.codex.image-contract", revision: 1, stability: "configuration", changeTriggers: ["runtime", "attachments"], text: imageContractLine } as DeclaredPromptPart] : []),
+      ...(codexSchemaFallbackBlock(req) ? [{ id: "transport.codex.output-schema", revision: 1, stability: "task-context", changeTriggers: ["release", "task", "plan-revision"], order: 90, text: codexSchemaFallbackBlock(req) } as DeclaredPromptPart] : []),
+    ],
+      req.systemPromptComposition,
   );
 }
 
 function buildResidentInitialTurnPrompt(req: RunnerRequest): string {
   const parts: string[] = [];
   if (req.history.length > 0) {
-    const { block } = renderConversationContext(req.history, req.locale, CLI_HISTORY_CONTEXT_TOKENS);
+    const { block } = renderConversationContext(req.history, req.locale, cliHistoryContextTokens(KIND, req.model));
     parts.push(block, "");
   }
   const turnContext = req.turnContext?.trim();
@@ -600,6 +651,28 @@ export function codexFailureFromEvent(
 }
 
 /**
+ * True when a `codex exec --json` line has a protocol shape this adapter understands: thread.started with a string id,
+ * turn.started/failed, turn.completed with absent-or-object usage, item.started/completed with a typed item object,
+ * or a rollout-style event_msg/response_item carrying a typed payload. Wrong-shape JSON is not an event.
+ */
+export function codexExecEventRecognized(ev: unknown): boolean {
+  if (!ev || typeof ev !== "object" || Array.isArray(ev)) return false;
+  const e = ev as { type?: unknown; thread_id?: unknown; usage?: unknown; item?: unknown; payload?: unknown };
+  const typed = (v: unknown): boolean => Boolean(v) && typeof v === "object" && !Array.isArray(v) && typeof (v as { type?: unknown }).type === "string";
+  switch (e.type) {
+    case "thread.started": return typeof e.thread_id === "string";
+    case "turn.started":
+    case "turn.failed": return true;
+    case "turn.completed": return e.usage === undefined || (Boolean(e.usage) && typeof e.usage === "object");
+    case "item.started":
+    case "item.completed": return typed(e.item);
+    case "event_msg":
+    case "response_item": return typed(e.payload);
+    default: return false;
+  }
+}
+
+/**
  * `item.completed/error` is not a turn terminal. Codex also uses that item for
  * recoverable diagnostics (for example, clamping a plugin hook timeout) and
  * may subsequently emit a normal agent message followed by `turn.completed`.
@@ -684,6 +757,7 @@ function runCodexProcess(
   observeNativeFile: NativeFileProofObserver,
   stableContextDelivery?: StableTurnContextDelivery,
 ): Promise<CodexRunResult> {
+  const diagnose = bindCodexRuntimeDiagnostics(req, "exec");
   const effects = createAdapterEffectLedger({ adapterKind: KIND, chatId: req.chatId, agentId: req.agentId }, events);
   events = effects.events;
   const observeScienceTool = bindScienceNativeToolObserver(req, effects.qualify);
@@ -698,13 +772,30 @@ function runCodexProcess(
       reject(abortReasonError(req));
       return;
     }
-    const child = spawnCli(bin, args, {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: req.env ?? process.env,
-      // 사용자가 지정한 프로젝트 폴더에서 실행 — 미지정이면 전용 폴더.
-      cwd: req.cwd ?? agentRunCwd(),
-      ...detachedSpawnOpts(),
-    });
+    let child: ReturnType<typeof spawnCli>;
+    try {
+      child = spawnCli(bin, args, {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: req.env ?? process.env,
+        // 사용자가 지정한 프로젝트 폴더에서 실행 — 미지정이면 전용 폴더.
+        cwd: req.cwd ?? agentRunCwd(),
+        ...detachedSpawnOpts(),
+      });
+    } catch (error) {
+      diagnose({ phase: "process-error", runtimeAttemptId: null, transport: null, protocol: null, protocolScope: null,
+        terminal: { accepted: false, threadMismatch: 0, turnMismatch: 0, earlyOverflow: 0 },
+        failure: { category: "child-process-error", rpcCode: null, timeoutMs: null, requestMethod: null } });
+      throw error;
+    }
+    let transportDiagnostics: NativeTransportDiagnostics | null = null;
+    let protocolDiagnostics: NativeProtocolDiagnostics | null = null;
+    try {
+      transportDiagnostics = new NativeTransportDiagnostics();
+      protocolDiagnostics = new NativeProtocolDiagnostics();
+    } catch { /* Optional collectors cannot prevent admitted child control. */ }
+    const incrementDiagnosticCounter = (key: keyof NativeProtocolCounters): void => {
+      try { protocolDiagnostics?.increment(key); } catch { /* Optional observation. */ }
+    };
     trackRunChild(child);
     // ★호스트 소유 생존 신호 — 러너 공통 규칙(runner.ts startCliHeartbeat 주석 참고).
     const stopHeartbeatOnly = startCliHeartbeat(child, events.onStatus, "codex");
@@ -746,6 +837,26 @@ function runCodexProcess(
     let lastEmit = 0;
     let turnCompleted = false;
     let terminalObserved = false;
+    /** `codex exec --json` lines of a shape this adapter understands; zero + exit 0 = runtime_protocol_unrecognized. */
+    let recognizedExecEvents = 0;
+    let terminalObservationFailed = false;
+    let terminalObservationError: unknown;
+    const observeTerminalCallback = (observe: () => void): void => {
+      try { observe(); }
+      catch (error) {
+        if (!terminalObservationFailed) terminalObservationError = error;
+        terminalObservationFailed = true;
+        incrementDiagnosticCounter("handlerErrors");
+        effects.uncertain("native-terminal-observation-failed");
+      }
+    };
+    const emitProcessDiagnostic = (phase: NativeRuntimeDiagnostic["phase"], failure: NativeFailureEvidence | null = null): void => {
+      try {
+        const protocol = protocolDiagnostics?.snapshot() ?? null;
+        diagnose({ phase, runtimeAttemptId, transport: transportDiagnostics?.snapshot() ?? null, protocol, protocolScope: protocol ? "attempt" : null,
+          terminal: { accepted: terminalObserved, threadMismatch: 0, turnMismatch: 0, earlyOverflow: 0 }, failure });
+      } catch { /* Optional content-free observation. */ }
+    };
     let turnStarted = false;
     // Newer Codex runtimes send native tool calls as response items instead of
     // the older `item.started` / `item.completed` command events. Dropping that
@@ -869,13 +980,20 @@ function runCodexProcess(
       };
       usage?: { output_tokens?: number; input_tokens?: number; cached_input_tokens?: number };
     }): void => {
+      if (codexExecEventRecognized(ev)) recognizedExecEvents += 1;
       if (typeof ev.type === "string" && ev.type !== "thread.started") turnStarted = true;
       const payload = record(ev.payload);
-      if (stableContextDelivery && (ev.type === "compacted" || ev.type === "thread.compacted"
-      || payload?.type === "context_compaction" || payload?.type === "context_compacted" || payload?.type === "compacted"
-        || ["contextCompaction", "context_compaction", "compaction"].includes(String(ev.item?.type ?? "")))) {
+      const execCompactionSeen = ev.type === "compacted" || ev.type === "thread.compacted"
+        || payload?.type === "context_compaction" || payload?.type === "context_compacted" || payload?.type === "compacted"
+        || ["contextCompaction", "context_compaction", "compaction"].includes(String(ev.item?.type ?? ""));
+      if (stableContextDelivery && execCompactionSeen) {
         invalidateStableTurnContext(stableContextDelivery.identity);
       }
+      // G17: exec path records the occurrence too (item completion or the bare notice; item.started is not one).
+      if (execCompactionSeen && ev.type !== "item.started") recordNativeCompaction({
+        runtime: "codex", chatId: req.chatId, model: req.model, signal: String(payload?.type ?? ev.type ?? "unknown"),
+        nativeRef: ev.item?.id != null ? String(ev.item.id) : null,
+        configuredWindowLimit: nativeCompactionLimit(KIND, req.model) ?? null });
       if ((ev.type === "item.started" || ev.type === "item.completed") && ev.item) {
         effects.frame(String(ev.item.type ?? "unknown"), codexNativeItemEffectCoverage(ev.item), codexNativeOperationalItemId(ev.item));
         if (ev.type === "item.completed" && codexNativeItemMayOutliveTurn(ev.item)) effects.uncertain("native-background-operation");
@@ -1089,7 +1207,8 @@ function runCodexProcess(
           settleNativeFileProof(item.id, isError);
         }
       } else if (ev.type === "turn.completed") {
-        closeThinking();
+        // Native facts and measured counters survive a host callback failure.
+        // Those callbacks may enforce authority/accounting; reject after cleanup.
         turnCompleted = true;
         terminalObserved = true;
         if (ev.usage?.input_tokens != null) reportedInputTokens = ev.usage.input_tokens;
@@ -1103,7 +1222,6 @@ function runCodexProcess(
           tokens = reportedOutputTokenBaseline != null && reportedOutputTokens >= reportedOutputTokenBaseline
             ? reportedOutputTokens - reportedOutputTokenBaseline
             : Math.ceil(estChars / 4);
-          events.onUsage?.(tokens);
         }
         /*
          * ★영수증의 usage — 예전에는 output_tokens 하나만 읽고 input/cached 를 버려서
@@ -1118,60 +1236,100 @@ function runCodexProcess(
         const turnInput = deltaFromBaseline(reportedInputTokens, usageBaseline.input);
         observedUsage = codexObservedTurnUsage({ inputTokens: reportedInputTokens,
           outputTokens: reportedOutputTokens, cachedInputTokens: reportedCachedInputTokens }, usageBaseline);
-        if (observedUsage) events.onTerminalObservedUsage?.(observedUsage, runtimeAttemptId);
         const turnCached = deltaFromBaseline(reportedCachedInputTokens, usageBaseline.cachedInput);
+        observeTerminalCallback(closeThinking);
+        if (tokens != null) observeTerminalCallback(() => events.onUsage?.(tokens!));
+        if (observedUsage) observeTerminalCallback(() => events.onTerminalObservedUsage?.(observedUsage!, runtimeAttemptId));
         if (turnInput != null && turnInput > 0 && turnCached != null) {
           // Cached input is a measured subset of input and is retained in the receipt.
-          events.onStatus(`[cache] read=${turnCached} fresh=${turnInput - turnCached} hit=${Math.round((turnCached / turnInput) * 100)}%`);
+          observeTerminalCallback(() => events.onStatus(`[cache] read=${turnCached} fresh=${turnInput - turnCached} hit=${Math.round((turnCached / turnInput) * 100)}%`));
         }
       }
     };
 
     const stdoutDecoder = new StringDecoder("utf8");
     const stderrDecoder = new StringDecoder("utf8");
-    const consumeStdout = (textChunk: string) => {
+    const consumeStdout = (textChunk: string, flushFinalFrame = false) => {
       buffer += textChunk;
       let nl: number;
-      while ((nl = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, nl).trim();
-        buffer = buffer.slice(nl + 1);
+      // A physical close ends the final JSONL record even when the CLI omitted
+      // its last LF. Feed that existing record through the same parser and
+      // terminal guards; ordinary data chunks must still wait for a delimiter.
+      while ((nl = buffer.indexOf("\n")) >= 0 || (flushFinalFrame && buffer.trim().length > 0)) {
+        incrementDiagnosticCounter("lines");
+        const end = nl >= 0 ? nl : buffer.length;
+        const line = buffer.slice(0, end).trim();
+        buffer = buffer.slice(end + (nl >= 0 ? 1 : 0));
         if (!line) continue;
+        let frame: unknown;
+        try { frame = JSON.parse(line); }
+        catch {
+          incrementDiagnosticCounter("invalidJson");
+          effects.uncertain("native-json-frame-invalid");
+          continue;
+        }
+        incrementDiagnosticCounter("parsed");
+        if (!frame || typeof frame !== "object" || Array.isArray(frame)) incrementDiagnosticCounter("invalidShape");
+        else if (typeof (frame as { type?: unknown }).type === "string") incrementDiagnosticCounter("notifications");
         try {
-          handle(JSON.parse(line));
+          handle(frame as Parameters<typeof handle>[0]);
         } catch {
+          incrementDiagnosticCounter("handlerErrors");
           // 비-JSON 라인(헤더 등) 무시
           effects.uncertain("native-json-frame-invalid");
         }
       }
     };
     child.stdout?.on("data", (chunk: Buffer) => { silence.touch(); consumeStdout(stdoutDecoder.write(chunk)); });
+    child.stdout?.on("end", () => {
+      try { transportDiagnostics?.transportEnded("stdout-end"); } catch { /* Optional observation. */ }
+    });
     child.stderr?.on("data", (chunk: Buffer) => {
       silence.touch();
+      try { transportDiagnostics?.addStderr(chunk); } catch { /* Preserve the existing decoder. */ }
       stderr += stderrDecoder.write(chunk);
     });
 
     child.on("error", (err) => {
+      try { transportDiagnostics?.childError(codexProcessErrorCode(err)); } catch { /* Mandatory rejection follows. */ }
+      emitProcessDiagnostic("process-error", { category: "child-process-error", rpcCode: null, timeoutMs: null, requestMethod: null });
       // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지.
       stopHeartbeat();
       child.stdout?.removeAllListeners("data");
       child.stderr?.removeAllListeners("data");
       req.signal?.removeEventListener("abort", onAbort);
       if (stableContextDelivery) invalidateStableTurnContext(stableContextDelivery.identity);
-      effects.complete("process_error", false);
-      reject(req.signal?.aborted ? abortReasonError(req) : new RuntimeTurnUnsettledError(KIND, req.locale));
+      try { effects.complete("process_error", false); }
+      catch (error) {
+        reject(req.signal?.aborted ? abortReasonError(req) : terminalObservationFailed ? terminalObservationError : error);
+        return;
+      }
+      reject(req.signal?.aborted ? abortReasonError(req) : terminalObservationFailed ? terminalObservationError : new RuntimeTurnUnsettledError(KIND, req.locale));
     });
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       // Pipe chunks can split a Korean UTF-8 code point. Decoding them
       // independently turns the split bytes into permanent U+FFFD in One.
-      consumeStdout(stdoutDecoder.end());
+      consumeStdout(stdoutDecoder.end(), true);
       stderr += stderrDecoder.end();
+      try { transportDiagnostics?.childClosed(code, signal); } catch { /* Mandatory cleanup follows. */ }
+      emitProcessDiagnostic("process-closed", terminalObservationFailed ? codexDiagnosticFailure(terminalObservationError) : null);
       // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지.
       stopHeartbeat();
       child.stdout?.removeAllListeners("data");
       child.stderr?.removeAllListeners("data");
       req.signal?.removeEventListener("abort", onAbort);
       if (buffer.trim()) effects.uncertain("native-trailing-frame-unparsed");
-      effects.complete("process_closed", terminalObserved && code !== null && !req.signal?.aborted);
+      try { effects.complete("process_closed", terminalObserved && code !== null && !req.signal?.aborted); }
+      catch (error) {
+        if (stableContextDelivery) invalidateStableTurnContext(stableContextDelivery.identity);
+        reject(req.signal?.aborted ? abortReasonError(req) : terminalObservationFailed ? terminalObservationError : error);
+        return;
+      }
+      if (terminalObservationFailed) {
+        if (stableContextDelivery) invalidateStableTurnContext(stableContextDelivery.identity);
+        reject(req.signal?.aborted ? abortReasonError(req) : terminalObservationError);
+        return;
+      }
       let runnerFailure = resolveCodexRunFailure({
         code,
         text,
@@ -1187,6 +1345,9 @@ function runCodexProcess(
       // ★침묵 한도로 호스트가 끝낸 시도 — 이 close가 유일한 정산이다. 사용자 취소는 건드리지 않는다.
       if (silence.tripped && !req.signal?.aborted && !terminalObserved) {
         runnerFailure = runtimeSilentTimeoutFailure("codex", silence.trippedWith?.limitMs ?? silenceWindowMs, { toolInFlight: silence.trippedWith?.toolInFlight === true });
+      }
+      if (code === 0 && !runnerFailure && recognizedExecEvents === 0 && !text.trim()) {
+        runnerFailure = runtimeProtocolUnrecognizedFailure("codex", stderr);
       }
       if (code === 0 && !runnerFailure) {
         const refusal = detectRuntimeRefusal(text);
@@ -1478,6 +1639,7 @@ async function runCodexResidentTurn(input: {
 }): Promise<ResidentTurnOutcome> {
   const { bin, req, chatId, fingerprint, resumeThreadId, gapContext, mcpArgs, appliedEffort, observeNativeFile } = input;
   const turnScoped = input.turnScopedProcess === true;
+  const diagnose = bindCodexRuntimeDiagnostics(req, "app-server");
   publishCodexNativeControlState(input.events, "app-server", "pending", "native_control_pending");
   // Host capability is internal continuity identity, never effect/approval chat authority.
   const canonicalContextKey = req.agentContext && !req.minimalObservation && !req.untrustedNoTools
@@ -1502,8 +1664,8 @@ async function runCodexResidentTurn(input: {
    * 스폰 형상 — `-c` 는 app-server 하위 명령의 옵션이다(실측 `codex app-server --help`).
    * reasoning summary 를 켜는 것은 exec 경로와 같은 이유다(끄면 요약 아이템이 비어 온다).
    */
-  // Native compaction at 80% of the model's own window (session-generation.ts); unknown window keeps Codex's default.
-  const compactLimit = req.scienceController ? 150000 : compactionTokenLimit(KIND, req.model);
+  // Native compaction at 80% of the model's own window (session-generation.ts), Science included; unknown window keeps Codex's default.
+  const compactLimit = nativeCompactionLimit(KIND, req.model);
   const args = [...CODEX_APP_SERVER_ARGS, "-c", "model_reasoning_summary=auto", ...(compactLimit ? ["-c", `model_auto_compact_token_limit=${compactLimit}`] : []), ...surfaceArgs, ...mcpArgs];
   const pool = codexSessionPool();
   const poolKey = codexPoolKey({
@@ -1539,6 +1701,10 @@ async function runCodexResidentTurn(input: {
     if (err && typeof err === "object" && "code" in err && err.code === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
       throw err;
     }
+    const initialization = codexInitializationFailure(err);
+    if (initialization) diagnose({ phase: "initialize-failed", runtimeAttemptId: null,
+      transport: initialization.transport, protocol: initialization.protocol, protocolScope: initialization.protocol ? "attempt" : null,
+      terminal: { accepted: false, threadMismatch: 0, turnMismatch: 0, earlyOverflow: 0 }, failure: initialization.failure });
     // 구형 CLI 는 `app-server` 하위 명령 자체가 없다 — 프로세스 수명 동안 1회 학습해 영구 강등.
     if (looksLikeMissingAppServer("", err)) {
       markCodexAppServerUnsupported(err instanceof Error ? err.message : String(err));
@@ -1549,6 +1715,10 @@ async function runCodexResidentTurn(input: {
   }
 
   const session = lease.session;
+  // Parsing counters belong to the pooled connection. Subtract this checkout's
+  // baseline; stderr/child-close facts retain explicit connection lifetime.
+  let protocolBaseline: NativeProtocolCounters | null = null;
+  try { protocolBaseline = session.conn.diagnosticSnapshot().protocol; } catch { /* Optional observation. */ }
   const effects = createAdapterEffectLedger({ adapterKind: KIND, chatId: req.chatId, agentId: req.agentId }, events);
   events = effects.events;
   const observeScienceTool = bindScienceNativeToolObserver(req, effects.qualify);
@@ -1589,7 +1759,32 @@ async function runCodexResidentTurn(input: {
   let turnDispatchAttempted = false;
   let terminalObserved = false;
   let terminalSucceeded = false;
+  let terminalObservationFailed = false;
+  let terminalObservationError: unknown;
+  let primaryError: { error: unknown } | null = null;
+  const observeTerminalCallback = (observe: () => void): void => {
+    try { observe(); }
+    catch (error) {
+      if (!terminalObservationFailed) terminalObservationError = error;
+      terminalObservationFailed = true;
+      broken = true;
+      effects.uncertain("native-terminal-observation-failed");
+    }
+  };
   const runtimeAttemptId = crypto.randomUUID();
+  let diagnosticRuntimeAttemptId: string | null = null;
+  let diagnosticFailure: NativeFailureEvidence | null = null;
+  const terminalDiagnostics = { threadMismatch: 0, turnMismatch: 0, earlyOverflow: 0 };
+  const emitResidentDiagnostic = (phase: NativeRuntimeDiagnostic["phase"], failure: NativeFailureEvidence | null = diagnosticFailure): void => {
+    try {
+      const snapshot = session.conn.diagnosticSnapshot();
+      diagnose({ phase, runtimeAttemptId: diagnosticRuntimeAttemptId, transport: snapshot.transport,
+        protocol: protocolBaseline ? codexProtocolDelta(snapshot.protocol, protocolBaseline) : null,
+        protocolScope: protocolBaseline ? "connection-delta" : null,
+        terminal: { accepted: terminalObserved, ...terminalDiagnostics }, failure });
+    } catch { /* Optional content-free observation. */ }
+  };
+  let transportDiagnosticObserved = false;
   let nativeThreadCreated = false;
   let turnUsageBaseline: CodexUsageBaseline = { input: null, output: null, cachedInput: null };
   const pendingModelReroutes = new Map<string, { fromModel: string; toModel: string }>();
@@ -1603,8 +1798,8 @@ async function runCodexResidentTurn(input: {
   } = { observed: undefined, total: null };
   // Thread-health observations for rotation (session-rotation.ts): last model-call input of this turn and
   // native compactions seen. Recorded only for a turn that reached a terminal; a failed turn adds nothing.
-  const health: { lastInputTokens: number | null; compactionItems: Set<string>; compactedNotices: number } =
-    { lastInputTokens: null, compactionItems: new Set(), compactedNotices: 0 };
+  const health: { lastInputTokens: number | null; contextWindowTokens: number | null; compactionItems: Set<string>; compactedNotices: number } =
+    { lastInputTokens: null, contextWindowTokens: null, compactionItems: new Set(), compactedNotices: 0 };
   const persistTurnCounters = (): void => {
     if (!session.threadId) return;
     if (terminalObserved) {
@@ -1680,14 +1875,39 @@ async function runCodexResidentTurn(input: {
     typeof params?.threadId === "string" && typeof session.threadId === "string" && session.threadId !== ""
     && params.threadId !== session.threadId;
 
+  /**
+   * ★호스트 소유 침묵 한도(resident app-server). exec 경로(runCodexProcess)에만 있던 가드를 상주 턴에도 세운다: 살아 있지만
+   * 완전히 조용한 app-server 는 `turn/completed` 를 영영 보내지 않아 이 턴(`await settled`)을 무기한 붙든다. 자식이 낸
+   * 알림·서버 요청만 센다(하트비트 아님). 도구 아이템이 열려 있거나 승인/입력 요청에 답을 기다리는 동안은 도구 한도.
+   */
+  let silence: CliSilenceGuard | null = null;
+  const silenceWindowMs = cliSilenceWindowMs(env);
+  const NON_TOOL_ITEM_TYPES = new Set(["agentMessage", "reasoning", "userMessage", "plan", "hookPrompt", "contextCompaction", "context_compaction", "compaction"]);
+  let serverRequestSeq = 0;
+
   const onNotification = (method: string, params: any): void => {
+    silence?.touch();
+    if ((method === "item/started" || method === "item/completed") && typeof params?.item?.id === "string"
+      && !NON_TOOL_ITEM_TYPES.has(String(params?.item?.type ?? ""))) {
+      // A started tool suspends the plain window until it completes (long builds/renders are silent).
+      if (method === "item/started") silence?.toolStart(params.item.id); else silence?.toolEnd(params.item.id);
+    }
     if (params?.threadId === session.threadId && (method === "thread/compacted"
       || ["thread/closed", "thread/deleted", "thread/archived"].includes(method)
       || ((method === "item/started" || method === "item/completed")
         && ["contextCompaction", "context_compaction", "compaction"].includes(String(params?.item?.type ?? ""))))) {
       invalidateStableTurnContext({ chatId: contextChatId, runtimeKind: KIND, sessionId: session.threadId ?? "" });
-      if (method === "thread/compacted") health.compactedNotices += 1;
-      else if (method === "item/completed") health.compactionItems.add(String(params?.item?.id ?? health.compactionItems.size));
+      let observedCompaction = false;
+      if (method === "thread/compacted") { health.compactedNotices += 1; observedCompaction = true; }
+      else if (method === "item/completed") { health.compactionItems.add(String(params?.item?.id ?? health.compactionItems.size)); observedCompaction = true; }
+      // G17: per-occurrence record next to the aggregate above (the aggregate still feeds rotation, unchanged).
+      if (observedCompaction) recordNativeCompaction({
+        runtime: "codex", chatId: req.chatId, model: req.model, signal: method,
+        nativeRef: method === "item/completed" && params?.item?.id != null ? String(params.item.id) : null,
+        sessionRef: session.threadId, turnRef: typeof params?.turnId === "string" ? params.turnId : null,
+        tokensBefore: health.lastInputTokens, tokensBeforeSource: "last_observed_input",
+        configuredWindowLimit: compactLimit,
+        compactionsThisTurn: Math.max(health.compactionItems.size, health.compactedNotices) });
     }
     if (method === "item/started" || method === "item/completed") {
       if (fromOtherThread(params) || (confirmedTurnId && params?.turnId && params.turnId !== confirmedTurnId)) {
@@ -1837,6 +2057,11 @@ async function runCodexResidentTurn(input: {
         if (confirmedTurnId && typeof params?.turnId === "string" && params.turnId !== confirmedTurnId) break;
         const last = params?.tokenUsage?.last;
         const total = params?.tokenUsage?.total;
+        // The window Codex itself reports for this model: the next spawn derives its compaction limit from it when the
+        // product's table does not know the model (session-generation.ts, native-harness NH14).
+        recordObservedContextWindow(KIND, req.model, params?.tokenUsage?.modelContextWindow);
+        const reportedWindow = params?.tokenUsage?.modelContextWindow;
+        if (typeof reportedWindow === "number" && Number.isSafeInteger(reportedWindow) && reportedWindow > 0) health.contextWindowTokens = reportedWindow;
         if (total && Number.isSafeInteger(total.outputTokens) && total.outputTokens >= 0) {
           usage.total = {
             outputTokens: total.outputTokens,
@@ -1878,22 +2103,31 @@ async function runCodexResidentTurn(input: {
       }
       case "turn/completed": {
         const turn = params?.turn;
+        if (typeof params?.threadId === "string" && typeof session.threadId === "string" && session.threadId
+          && params.threadId !== session.threadId) terminalDiagnostics.threadMismatch = Math.min(Number.MAX_SAFE_INTEGER, terminalDiagnostics.threadMismatch + 1);
         if (!turn || params?.threadId !== session.threadId || typeof turn.id !== "string" || !turn.id) break;
         // Notifications may precede the turn/start response. Only its exact
         // acknowledged ID can bind a terminal result to this submitted prompt.
         if (!acknowledgedTurnId) {
           if (turnRequestInFlight && pendingTurnCompletions.size < 64) pendingTurnCompletions.set(turn.id, params);
+          else if (turnRequestInFlight) terminalDiagnostics.earlyOverflow = Math.min(Number.MAX_SAFE_INTEGER, terminalDiagnostics.earlyOverflow + 1);
           break;
         }
-        if (turn.id !== acknowledgedTurnId) break;
-        withdrawNativeTurnController();
+        if (turn.id !== acknowledgedTurnId) {
+          terminalDiagnostics.turnMismatch = Math.min(Number.MAX_SAFE_INTEGER, terminalDiagnostics.turnMismatch + 1);
+          break;
+        }
         terminalObserved = true;
         terminalSucceeded = turn.status === "completed";
-        if (usage.observed) events.onTerminalObservedUsage?.(usage.observed, runtimeAttemptId);
-        workforceObservation?.completeTurn(params);
         if (turn.status === "interrupted") interrupted = true;
         failure = codexFailureFromTurn(turn) ?? failure;
-        settleTurn?.("completed");
+        // CodexSession catches sink exceptions. Always settle this exact native
+        // terminal, then propagate authority/accounting errors in the caller.
+        try {
+          observeTerminalCallback(withdrawNativeTurnController);
+          if (usage.observed) observeTerminalCallback(() => events.onTerminalObservedUsage?.(usage.observed!, runtimeAttemptId));
+          observeTerminalCallback(() => workforceObservation?.completeTurn(params));
+        } finally { settleTurn?.("completed"); }
         break;
       }
       default:
@@ -1918,6 +2152,10 @@ async function runCodexResidentTurn(input: {
   const sink: CodexTurnSink = {
     onNotification,
     onServerRequest: async (method, params) => {
+      // The child asked and now waits for an answer (approval, input, tool): its silence is not a stall.
+      const silenceRequestKey = `server-request:${++serverRequestSeq}`;
+      silence?.toolStart(silenceRequestKey);
+      try {
       if (method === "item/tool/call" || isCodexApprovalRequest(method)) {
         workforceObservation?.assertRequestContext(params, turnId);
       }
@@ -1932,7 +2170,7 @@ async function runCodexResidentTurn(input: {
         if (!imageToolSlot || tool !== CODEX_IMAGE_TOOL_NAME || namespace !== null || !callId || !prompt) {
           return {
             success: false,
-            contentItems: [{ type: "inputText", text: "Image generation failed: the host image tool is unavailable or the prompt is invalid. Do not claim an image was generated or displayed." }],
+            contentItems: [{ type: "inputText", text: "image: failed (tool unavailable or prompt invalid); no image exists." }],
           };
         }
         const ask: RuntimeToolPermissionAsk = {
@@ -1959,7 +2197,7 @@ async function runCodexResidentTurn(input: {
           events.onStatus(`[tool-approval] runtime=${KIND} capability=other tool=${CODEX_IMAGE_TOOL_NAME} decision=deny`);
           return {
             success: false,
-            contentItems: [{ type: "inputText", text: "Image generation was not approved. Do not claim an image was generated or displayed." }],
+            contentItems: [{ type: "inputText", text: "image: not approved; no image exists." }],
           };
         }
         events.onStatus(`[tool-approval] runtime=${KIND} capability=other tool=${CODEX_IMAGE_TOOL_NAME} decision=${decision}`);
@@ -1967,7 +2205,7 @@ async function runCodexResidentTurn(input: {
         if (!generated.ok || !generated.src || !generated.artifactPath) {
           return {
             success: false,
-            contentItems: [{ type: "inputText", text: `Image generation failed: ${generated.reason ?? "no image was produced"}. Do not claim an image was generated or displayed.` }],
+            contentItems: [{ type: "inputText", text: `image: failed (${generated.reason ?? "none produced"}); no image exists.` }],
           };
         }
         dynamicToolArtifactPaths.set(callId, [generated.artifactPath]);
@@ -1976,7 +2214,7 @@ async function runCodexResidentTurn(input: {
         return {
           success: true,
           contentItems: [
-            { type: "inputText", text: `Image generation succeeded with ${generated.engine ?? imageToolSlot.runtimeKind}. The image is attached to this tool result.${workspaceCopy ? ` A copy is saved in the working folder at ${workspaceCopy} — use this path for uploads and later steps.` : ""}` },
+            { type: "inputText", text: `image: ok (${generated.engine ?? imageToolSlot.runtimeKind}), attached${workspaceCopy ? `; copy: ${workspaceCopy} (use for uploads)` : ""}` },
             { type: "inputImage", imageUrl: generated.src },
           ],
         };
@@ -2053,9 +2291,22 @@ async function runCodexResidentTurn(input: {
         `[tool-approval] runtime=${KIND} capability=${codexApprovalCapability(ask)} tool=${ask.tool} decision=${decision}`,
       );
       return reply;
+      } finally { silence?.toolEnd(silenceRequestKey); }
     },
     onStatus: (status) => events.onStatus(status),
     onTransportClosed: (reason) => {
+      if (!transportDiagnosticObserved) {
+        transportDiagnosticObserved = true;
+        try {
+          emitResidentDiagnostic("transport-ended", { category: "transport-ended", rpcCode: null, timeoutMs: null, requestMethod: null });
+          if (session.conn.diagnosticSnapshot().transport.childCloseObserved) emitResidentDiagnostic("child-closed", null);
+          else {
+            // stdout end can precede the real OS close. This one captured owner
+            // survives checkout release; it never reads session.active or ALS.
+            session.child.once("close", () => emitResidentDiagnostic("child-closed", null));
+          }
+        } catch { /* Stop and terminal withdrawal remain unconditional. */ }
+      }
       withdrawNativeTurnController();
       closedReason = reason;
       elicitationAbort.abort(new Error(reason));
@@ -2117,11 +2368,9 @@ async function runCodexResidentTurn(input: {
           "sandbox_workspace_write.exclude_tmpdir_env_var": true,
           "sandbox_workspace_write.exclude_slash_tmp": true,
         } } : {}),
-        // The image contract rides only a turn that can produce an image: a host image tool is attached, or the
-        // cumulative request is about images/video/audio (prompt-sections.ts). Resident threads receive it later
-        // through the stable turn context ("On-demand instructions"), where the media routing rules also travel.
-        developerInstructions: imageToolSlot || planPromptSections(cumulativeSurfaceGateText(req.history, req.userPrompt)).media
-          ? `${buildDeveloperInstructions(req)}\n\n${codexImageToolInstructions(Boolean(imageToolSlot))}`
+        // The one-line image contract rides every ordinary thread (no media-intent word list, owner 2026-10-13).
+        developerInstructions: codexImageToolCapability(req) !== "disabled" && req.sciencePromptProfile !== true
+          ? buildDeveloperInstructions(req, codexImageToolInstructions(Boolean(imageToolSlot)))
           : buildDeveloperInstructions(req),
         ...(imageToolSlot ? { dynamicTools: [CODEX_IMAGE_DYNAMIC_TOOL] } : {}),
       };
@@ -2248,6 +2497,7 @@ async function runCodexResidentTurn(input: {
     });
     let started: any;
     turnDispatchAttempted = true;
+    diagnosticRuntimeAttemptId = runtimeAttemptId;
     reportModelPayload(() => ledgerFromCliSent({
       // nativeThreadCreated = new thread (full seed); a thread/resume or fork on a cold process = reopen; a live resident thread = resume.
       mode: nativeThreadCreated ? "fresh" : developerInstructionsSent !== null ? "reopen" : "resume",
@@ -2258,6 +2508,8 @@ async function runCodexResidentTurn(input: {
     try {
       started = await session.conn.request("turn/start", turnParams, { timeoutMs: 120_000, signal: req.signal });
     } catch (error) {
+      diagnosticFailure = codexDiagnosticFailure(error);
+      emitResidentDiagnostic("turn-start-failed");
       // A JSON-RPC error response is the server refusing the request: no turn began, so nothing may
       // have acted. Only a closed transport or a timeout leaves the dispatch genuinely uncertain.
       if (error instanceof AcpRpcError) turnDispatchAttempted = false;
@@ -2275,7 +2527,17 @@ async function runCodexResidentTurn(input: {
     } else {
       throw new RuntimeTurnUnsettledError(KIND, req.locale, session.threadId);
     }
+    // Dispatch is acknowledged: from here a child that stops emitting is the host's to end (single settlement below).
+    {
+      const guardedChild = session.child;
+      silence = startCliSilenceGuard(guardedChild, {
+        label: "codex", onStatus: events.onStatus, windowMs: silenceWindowMs, toolWindowMs: cliToolSilenceWindowMs(env),
+        kill: () => { try { killCliTree(guardedChild); } catch { /* the transport-closed settlement still runs */ } settleTurn?.("closed"); },
+      });
+    }
     const earlyCompletion = pendingTurnCompletions.get(acknowledgedTurnId);
+    for (const bufferedTurnId of pendingTurnCompletions.keys()) if (bufferedTurnId !== acknowledgedTurnId)
+      terminalDiagnostics.turnMismatch = Math.min(Number.MAX_SAFE_INTEGER, terminalDiagnostics.turnMismatch + 1);
     pendingTurnCompletions.clear();
     if (earlyCompletion) onNotification("turn/completed", earlyCompletion);
     const bufferedReroute = confirmedTurnId ? pendingModelReroutes.get(confirmedTurnId) : undefined;
@@ -2307,16 +2569,28 @@ async function runCodexResidentTurn(input: {
     events.onStatus(`[runtime-session] ${continuing ? "resumed" : "created"} kind=${KIND}`);
     if (modelSelectionError) throw modelSelectionError;
     const reason = await settled;
-    closeThinking();
-
-    if (modelSelectionError) throw modelSelectionError;
-
-    if (req.signal?.aborted) {
-      // 취소여도 스레드가 생겼으면 저장 → 이어지는 steering 메시지가 문맥을 유지한다.
-      persistTurnCounters();
+    if (req.signal?.aborted || interrupted) {
+      // Keep Stop's authority ahead of callback failures, while retaining the
+      // native terminal and measured counters for failure accounting.
+      if (req.signal?.aborted) persistTurnCounters();
       broken = true;
       throw abortReasonError(req);
     }
+    if (silence?.tripped && !terminalObserved) {
+      // The host ended a silent app-server: a typed timeout (single settlement), never a guessed exit.
+      broken = true;
+      persistTurnCounters();
+      closeThinking();
+      return { result: { text: bodyText().trim(), ownerControlTerminal: "uncertain",
+        failure: runtimeSilentTimeoutFailure(KIND, silence.trippedWith?.limitMs ?? silenceWindowMs, { toolInFlight: silence.trippedWith?.toolInFlight === true }),
+        sessionId: session.threadId, appliedEffort } };
+    }
+    if (terminalObservationFailed) throw terminalObservationError;
+    closeThinking();
+    if (req.signal?.aborted) throw abortReasonError(req);
+
+    if (modelSelectionError) throw modelSelectionError;
+
     if (reason === "closed") {
       // A closed transport cannot prove that a dispatched tool-only turn did nothing.
       broken = true;
@@ -2326,11 +2600,6 @@ async function runCodexResidentTurn(input: {
       }
       throw new RuntimeTurnUnsettledError(KIND, req.locale);
     }
-    if (interrupted) {
-      broken = true;
-      throw abortReasonError(req);
-    }
-
     // Record both native inventories. Selected capability changes invalidate
     // the invocation; unrelated host changes are evidence, never a replay.
     if (workforceObservation) {
@@ -2376,31 +2645,44 @@ async function runCodexResidentTurn(input: {
         tokens: usage.observed?.outputTokens ?? Math.ceil(estChars / 4),
         ...(usage.observed ? { observedUsage: usage.observed } : {}),
         ...(health.lastInputTokens ? { contextInputTokens: health.lastInputTokens } : {}),
+        // The window Codex reported for this session: the 80% rule reads it before any catalog number (NH14).
+        ...(health.contextWindowTokens ? { contextWindowTokens: health.contextWindowTokens } : {}),
         ...(workforcePermissionEnforcement ? { workforcePermissionEnforcement } : {}),
         appliedEffort,
       },
     };
   } catch (err) {
+    diagnosticFailure = codexDiagnosticFailure(err);
     broken = true;
-    if (turnDispatchAttempted) persistTurnCounters();
-    if (req.signal?.aborted) throw err;
-    if (turnDispatchAttempted && !terminalObserved) throw new RuntimeTurnUnsettledError(KIND, req.locale, session.threadId, failure?.message);
-    if (req.workforceRuntimeToolGrant) throw err;
-    if (err instanceof CodexModelSelectionError) throw err;
-    if (err instanceof CodexSessionContinuityError) throw err;
-    if (looksLikeMissingAppServer(session.conn?.lastStderr ?? "", err)) {
-      markCodexAppServerUnsupported(err instanceof Error ? err.message : String(err));
-      events.onStatus(`[residency] disabled kind=${KIND} reason=app-server-unsupported`);
+    try {
+      if (turnDispatchAttempted) persistTurnCounters();
+      if (req.signal?.aborted) throw abortReasonError(req);
+      if (turnDispatchAttempted && !terminalObserved) throw new RuntimeTurnUnsettledError(KIND, req.locale, session.threadId, failure?.message ?? childExitReason(session.child?.exitCode, session.conn?.lastStderr));
+      if (req.workforceRuntimeToolGrant) throw err;
+      if (err instanceof CodexModelSelectionError) throw err;
+      if (err instanceof CodexSessionContinuityError) throw err;
+      if (looksLikeMissingAppServer(session.conn?.lastStderr ?? "", err)) {
+        markCodexAppServerUnsupported(err instanceof Error ? err.message : String(err));
+        events.onStatus(`[residency] disabled kind=${KIND} reason=app-server-unsupported`);
+      }
+      // Empty visible text is not evidence of no dispatch or no external action.
+      if (turnDispatchAttempted) throw err;
+      if (!emitted && !bodyText()) return { retryOneShot: true };
+      throw err;
+    } catch (error) {
+      // Preserve the chosen outgoing failure, including uncertainty/Stop
+      // transformations, if a later cleanup callback or ledger also fails.
+      primaryError = { error };
+      throw error;
     }
-    // Empty visible text is not evidence of no dispatch or no external action.
-    if (turnDispatchAttempted) throw err;
-    if (!emitted && !bodyText()) return { retryOneShot: true };
-    throw err;
   } finally {
+    silence?.stop();
     withdrawNativeTurnController();
     req.signal?.removeEventListener("abort", onAbort);
     elicitationAbort.abort(new Error("Codex turn settled"));
-    closeThinking();
+    // A final thinking callback can contain a host fence. Retain its error,
+    // but do not let it skip interrupt drain, sink removal or pool disposal.
+    observeTerminalCallback(closeThinking);
     // 취소가 프로토콜에 도달한 뒤에 죽인다(상한 2초 — 응답이 없어도 폐기는 반드시 일어난다).
     if (interruptAck) {
       await Promise.race([
@@ -2410,12 +2692,23 @@ async function runCodexResidentTurn(input: {
     }
     // 수신자를 먼저 뗀다 — 유휴 세션이 지난 턴의 events 로 상태를 흘리면 안 된다.
     session.active = null;
+    if (terminalObservationFailed && !diagnosticFailure) diagnosticFailure = codexDiagnosticFailure(terminalObservationError);
+    emitResidentDiagnostic("turn-terminal");
     if (broken || req.signal?.aborted || failure || interrupted || (turnDispatchAttempted && !terminalObserved)) {
       invalidateStableTurnContext({ chatId: contextChatId, runtimeKind: KIND, sessionId: session.threadId ?? "" });
     }
-    effects.complete(turnDispatchAttempted ? "resident_turn_closed" : "not_dispatched", (!turnDispatchAttempted || terminalObserved) && !req.signal?.aborted && (!turnDispatchAttempted || !broken));
-    if (broken || req.signal?.aborted || turnScoped) pool.discard(lease);
-    else pool.release(lease);
+    try {
+      effects.complete(turnDispatchAttempted ? "resident_turn_closed" : "not_dispatched", (!turnDispatchAttempted || terminalObserved) && !req.signal?.aborted && (!turnDispatchAttempted || !broken));
+    } finally {
+      try {
+        if (broken || req.signal?.aborted || turnScoped) pool.discard(lease);
+        else pool.release(lease);
+      } finally {
+        if (req.signal?.aborted) throw abortReasonError(req);
+        if (primaryError) throw primaryError.error;
+        if (terminalObservationFailed) throw terminalObservationError;
+      }
+    }
   }
   });
 }
@@ -2444,7 +2737,7 @@ async function runCodexMinimalObservation(bin: string, req: RunnerRequest, event
   try {
     await fs.symlink(path.join(realHome, "auth.json"), path.join(home, "auth.json")).catch(() => {});
     const instructions = path.join(home, "observation-instructions.md");
-    await fs.writeFile(instructions, codexSystemPromptWithSchemaFallback(req), { encoding: "utf8", mode: 0o600 });
+    await fs.writeFile(instructions, composeCodexHostInstructions(req), { encoding: "utf8", mode: 0o600 });
     const schema = req.outputSchema ? openAiStrictSchemaOrNull(req.outputSchema.schema) : null;
     const schemaFile = path.join(home, "observation-output-schema.json");
     if (schema) await fs.writeFile(schemaFile, JSON.stringify(schema), { encoding: "utf8", mode: 0o600 });
@@ -2473,7 +2766,7 @@ async function runCodexMinimalObservation(bin: string, req: RunnerRequest, event
     if (!run.terminalObserved && isSilentTimeoutRun(run)) {
       return { text: run.text.trim(), ownerControlTerminal: "uncertain", failure: run.failure! };
     }
-    if (!run.terminalObserved) throw new RuntimeTurnUnsettledError(KIND, req.locale);
+    if (!run.terminalObserved) throw new RuntimeTurnUnsettledError(KIND, req.locale, undefined, childExitReason(run.code, run.stderr));
     if (run.code !== 0 && !run.text.trim()) throw new Error(`codex CLI exit ${run.code}${run.stderr ? `\n${run.stderr.slice(0, 500)}` : ""}`);
     return { text: run.text.trim(), ...(run.failure ? { failure: run.failure } : {}), tokens: run.tokens,
       ownerControlTerminal: run.code === 0 && run.turnCompleted && !run.failure && run.text.trim()
@@ -2509,7 +2802,7 @@ export const runCodex: Runner = async (
     ? withCodexProductHome({ ...requestEnv, CODEX_HOME: accountCodexHome(requestEnv.CODEX_HOME) }, { isolated: true })
     : req.isolatedMcpConfig
       ? withCodexProductHome(requestEnv, { isolated: true })
-      : withCodexProductHome(requestEnv, { personal: codexPersonalHomeOptions(selectionFor(req.agentId)) }) };
+      : withCodexProductHome(requestEnv, { personal: codexPersonalHomeOptions(selectionFor(req.agentId, undefined, req.chatId)) }) };
   const observeNativeFile = bindNativeFileProofObserver();
   if (
     req.untrustedNoTools &&
@@ -2663,7 +2956,7 @@ export const runCodex: Runner = async (
   // Personal Codex memories, skills, plugins, hooks and MCP servers stay out of every product run; One alone gets
   // the items the person switched on (capabilities/one-capabilities.ts).
   const personalContext = codexPersonalContextArgs({
-    selection: selectionFor(runReq.agentId),
+    selection: selectionFor(runReq.agentId, undefined, runReq.chatId),
     desktopControlGrant: runReq.desktopControlGrant === true,
     userConfigIgnored: runReq.isolatedMcpConfig === true,
     hostServerNames,
@@ -2685,7 +2978,7 @@ export const runCodex: Runner = async (
   // reasoning summary 아이템을 켠다 — 실측(codex 0.147): 이 설정 없이는 `--json`에
   // reasoning 아이템이 0건이라 화면이 "생각 중" 외에 아무것도 말할 수 없었다. 켜면
   // 모델이 낸 헤드라인("**Preparing file count command execution**")이 아이템으로 온다.
-  const execCompactLimit = runReq.scienceController ? 150000 : compactionTokenLimit(KIND, runReq.model);
+  const execCompactLimit = nativeCompactionLimit(KIND, runReq.model);
   modelArgs.push("-c", "model_reasoning_summary=auto", ...(execCompactLimit ? ["-c", `model_auto_compact_token_limit=${execCompactLimit}`] : []));
   let appliedEffort: string | null = null;
   if (runReq.model) modelArgs.push("--model", runReq.model);
@@ -2728,10 +3021,12 @@ export const runCodex: Runner = async (
     : null;
   const storedSessionId = rotation?.action === "new_generation" ? null : matchedSessionId;
   if (rotation?.action === "new_generation" && matchedSessionId && runReq.chatId) {
-    recordRotationReceipt({ schemaVersion: "agentlas.runtime-thread-rotation.v1",
-      chatId: runReq.chatId, previousThreadId: matchedSessionId, reasons: [rotation.reason],
-      health: readThreadHealth(matchedSessionId), reportedInputTokens: existing?.reportedInputTokens ?? null, rotatedAt: new Date().toISOString() });
-    runReq = { ...runReq, history: boundHandoffHistory(runReq.history) };
+    // The new thread gets the bounded tail with host-built facts ahead of it, and the same rotation receipt as before
+    // (docs native-harness 07 G07, G11: uncertain effects stay uncertain, grants as ids, goal refs, host-replay label).
+    const handoff = await prepareRotationHandoff({ chatId: runReq.chatId, runtime: KIND, previousThreadId: matchedSessionId,
+      reason: rotation.reason, history: runReq.history, health: readThreadHealth(matchedSessionId),
+      reportedInputTokens: existing?.reportedInputTokens ?? null, agentId: runReq.agentId ?? null });
+    runReq = { ...runReq, history: handoff.history };
   }
   /*
    * Unattended parallel branches share one ledger chat and therefore one stored
@@ -2948,7 +3243,7 @@ export const runCodex: Runner = async (
         return { text: r.text.trim(), ownerControlTerminal: "uncertain", failure: r.failure!,
           sessionId: r.threadId ?? resumeSessionId, tokens: r.tokens, appliedEffort };
       }
-      throw new RuntimeTurnUnsettledError(KIND, runReq.locale, r.threadId ?? resumeSessionId);
+      throw new RuntimeTurnUnsettledError(KIND, runReq.locale, r.threadId ?? resumeSessionId, childExitReason(r.code, r.stderr));
     }
     if (r.code === 0) {
       if (runReq.chatId && fingerprint && r.threadId && persistSession()) {
@@ -3029,7 +3324,7 @@ export const runCodex: Runner = async (
       return { text: created.text.trim(), ownerControlTerminal: "uncertain", failure: created.failure!,
         sessionId: created.threadId ?? undefined, tokens: created.tokens, appliedEffort };
     }
-    throw new RuntimeTurnUnsettledError(KIND, runReq.locale, created.threadId);
+    throw new RuntimeTurnUnsettledError(KIND, runReq.locale, created.threadId, childExitReason(created.code, created.stderr));
   }
   if (created.code === 0) {
     if (runReq.chatId && fingerprint && created.threadId && persistSession()) {

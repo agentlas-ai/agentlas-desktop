@@ -12,10 +12,12 @@
  *    강조 하나)을 먼저 깐다. 레퍼런스 차트의 **디자인 언어**를 따르되 그 코드를 복사하지 않는다.
  */
 import type { VisualThemeTokens } from "./chart-spec";
-import { CHART_FENCE_LANGUAGES, visualPalette } from "./chart-spec";
+import { visualPalette } from "./chart-spec";
 
-export const VISUAL_FENCE_LANGUAGES = ["visual", "html-visual", "artifact-html"] as const;
-export const VISUAL_HTML_MAX_BYTES = 512 * 1024;
+import { HTML_VISUAL_FENCE_LANGUAGES, inlineVisualRanges } from "@shared/inline-visual";
+import { INLINE_VISUAL_HTML_MAX_BYTES, screenInlineVisualHtml } from "@shared/inline-ui-presentation";
+export const VISUAL_FENCE_LANGUAGES = HTML_VISUAL_FENCE_LANGUAGES;
+export const VISUAL_HTML_MAX_BYTES = INLINE_VISUAL_HTML_MAX_BYTES;
 export const VISUAL_MAX_HEIGHT = 1_600;
 export const VISUAL_SIZE_MESSAGE = "agentlas-visual:size";
 export const VISUAL_PROMPT_MESSAGE = "agentlas-visual:prompt";
@@ -41,17 +43,12 @@ export const VISUAL_SANDBOX = "allow-scripts";
 
 export type VisualHtmlRejectCode = "empty" | "too-large" | "meta-refresh" | "base-tag";
 
-const VISUAL_FENCE_LINE_RE = new RegExp(
-  `^\`\`\`(?:${[...CHART_FENCE_LANGUAGES, ...VISUAL_FENCE_LANGUAGES].map((lang) => lang.replace(/[+.]/g, "\\$&")).join("|")})(?:[ \t][^\n]*)?$`,
-  "im",
-);
-
 /**
  * 답에 차트·시각물 펜스가 있는가 — 있으면 One 은 그 답의 말풍선 바탕·테두리를 걷는다(오너 2026-09-29
  * "챗창에 경계선 없게", Claude 처럼 차트가 대화 바탕 위에 바로). 없는 답은 지금 말풍선 그대로.
  */
 export function hasInlineVisualBlock(text: string | undefined | null): boolean {
-  return typeof text === "string" && text.includes("```") && VISUAL_FENCE_LINE_RE.test(text);
+  return typeof text === "string" && inlineVisualRanges(text).length > 0;
 }
 
 export function isVisualFenceLanguage(lang: string): boolean {
@@ -59,13 +56,7 @@ export function isVisualFenceLanguage(lang: string): boolean {
 }
 
 export function screenVisualHtml(html: string): { ok: true } | { ok: false; code: VisualHtmlRejectCode } {
-  if (!html.trim()) return { ok: false, code: "empty" };
-  if (new TextEncoder().encode(html).byteLength > VISUAL_HTML_MAX_BYTES) return { ok: false, code: "too-large" };
-  // CSP 는 탐색(navigation)을 막지 못한다. 문서가 스스로 다른 주소로 넘어가는 자리는 먼저 거절하고,
-  // 스크립트로 넘어가는 경우는 부모가 두 번째 load 를 보고 막는다.
-  if (/<meta[^>]+http-equiv\s*=\s*["']?\s*refresh/i.test(html)) return { ok: false, code: "meta-refresh" };
-  if (/<base[\s>]/i.test(html)) return { ok: false, code: "base-tag" };
-  return { ok: true };
+  return screenInlineVisualHtml(html);
 }
 
 export function visualRejectMessage(code: VisualHtmlRejectCode, ko: boolean): string {

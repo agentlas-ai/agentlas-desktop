@@ -96,7 +96,7 @@ export function createInvocationRunOwnerStore(ports: InvocationRunOwnerStorePort
         VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`)
         .run(input.chatId, input.runId, input.ownerId, input.ownerKind, leaseId, timestamp, timestamp);
       return { kind: "claimed" as const, owner: getRunOwner(input.chatId, input.runId)! };
-    })();
+    }).immediate();
   }
 
   function transition(expected: InvocationRunOwner, state: "settling" | "released"): boolean {
@@ -125,7 +125,7 @@ export function createInvocationRunOwnerStore(ports: InvocationRunOwnerStorePort
         WHERE run_id = ? AND lease_id = ? AND state IN ('active','settling')`);
       for (const row of rows) release.run(now(), row.runId, row.leaseId);
       return rows;
-    })();
+    }).immediate();
   }
 
   return { claim, getActiveOwner, getRunOwner, getOwnerByRunId, getPreviousOwner, listActiveOwners, releaseAbandoned,

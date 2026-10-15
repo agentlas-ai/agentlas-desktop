@@ -90,10 +90,9 @@ export function listChannelPublishReceipts(limit = 20): ChannelPublishReceipt[] 
 export function channelPublishReceiptsPromptBlock(receipts: ChannelPublishReceipt[] = listChannelPublishReceipts()): string {
   if (!receipts.length) return "";
   return [
-    "[Host-recorded channel receipts — facts from the app's own ledger, not from any agent's notes]",
-    "The app saw these videos exist on the owner's YouTube channel in YouTube Studio (they were uploaded; check Studio for their visibility):",
+    "[Host-recorded channel receipts]",
+    "uploaded (seen in YouTube Studio; visibility: check Studio); never upload the same file again; a local \"not posted\" note is older:",
     ...receipts.map((receipt) => `- ${receipt.url} (first seen ${receipt.firstSeenAt}, ${receipt.evidence})`),
-    "A video listed here was uploaded: never upload the same file again. A local note that says \"not posted\" is older than this receipt.",
     "[/Host-recorded channel receipts]",
   ].join("\n");
 }

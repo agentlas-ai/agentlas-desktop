@@ -6,11 +6,14 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { ipc, ipcEvents, grantForDroppedFile, grantForPastedAttachment, grantForPastedImage } from "@/lib/ipc";
 import { fitImageUnder } from "@/lib/attachment-image-fit";
 import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
+import { ChatContinuationProjector } from "@/lib/chat-continuations";
 import { useT } from "@/lib/i18n";
 import { Markdown, StreamingMarkdown, type LinkedFileArtifact } from "@/components/Markdown";
-import { mapIntellectUiProse } from "@shared/intellect-ui";
+import { mapInlineVisualProse } from "@shared/inline-visual";
+import { InlineUiInstances, useInlineUiInstances, inlineUiForReply } from "@/components/UiInstances";
+import { IntellectUiActions } from "@/lib/intellect-ui-actions";
 import { IconArrowUp, IconBrain, IconCheck, IconChevronRight, IconClose, IconMoreHorizontal, IconExpand, IconFileUp, IconLayers, IconPanelRight, IconPlus, IconPuzzle, IconSidebar, IconRefresh, IconSettings, IconSparkles } from "@/components/Icon";
-import type { OneSupervisorSnapshot, SupervisorCommandReceipt, SupervisorTask, SupervisorDelegation } from "../../../shared/one-supervisor";
+import type { OneSupervisorSnapshot, SupervisorCommandReceipt, SupervisorTask, SupervisorDelegation, SupervisorReplyTurn } from "../../../shared/one-supervisor";
 import { ONE_BUBBLE_COLORS, type OneBubbleColor, type OneProfile } from "../../../shared/one-profile";
 import { readAppUiPreference } from "@/lib/app-ui-preferences";
 import { stripAgentControlBlocks, stripAgentIdentityBadges, stripAgentRoutingBanners } from "../../../shared/agent-control-blocks";
@@ -21,7 +24,7 @@ import { PopupDetails } from "@/components/Popup";
 import { OneMemorySheet } from "./OneMemorySheet";
 import { OneCapabilitiesModal } from "./OneCapabilitiesModal";
 import { OneAgentPortrait } from "./OneAgentPortrait";
-import type { OneMemoryState } from "@/lib/types";
+import type { ChatHistoryEntry, OneMemoryState } from "@/lib/types";
 import { SupervisorOutbox, type PendingSupervisorWrite, type SupervisorWrite } from "@/lib/one-supervisor-outbox";
 import { personalOnePendingAsk, personalOneReplyPresentation, personalOneTranscript } from "@/lib/personal-one-transcript";
 import { PersonalOneAskCard } from "./PersonalOneAsk";
@@ -48,11 +51,19 @@ import dynamic from "next/dynamic";
 import styles from "./PersonalOneWorkspace.module.css";
 import { Select } from "@/components/Select";
 import { useComposerEnter } from "@/lib/use-composer-enter";
+import { useBusinessEligibility } from '@/business/use-business-eligibility';
 
 const PersonalOneTaskResult=dynamic(()=>import("./PersonalOneTaskResult").then(module=>module.PersonalOneTaskResult),{ssr:false});
 
-const visibleAnswer=(text:string)=>mapIntellectUiProse(text,prose=>stripAgentRoutingBanners(stripAgentIdentityBadges(stripAgentControlBlocks(prose,{streaming:true}))).trim());
+const visibleAnswer=(text:string)=>mapInlineVisualProse(text,prose=>stripAgentRoutingBanners(stripAgentIdentityBadges(stripAgentControlBlocks(prose,{streaming:true}))).trim());
 const terminal=(state:string)=>["completed","cancelled","failed","interrupted"].includes(state);
+type PersonalOneConversationMessage = ChatHistoryEntry & {
+  displayKey: string;
+  historyGroupId?: string;
+  replyTurn?: SupervisorReplyTurn;
+  hasDurableAnswer?: boolean;
+  pendingCommandId?: string;
+};
 // Personal One runs every turn with full access and Computer Use; Main decides that (owner 2026-10-05).
 function storedOneRuntime() {
   return readAppUiPreference("oneRuntimeSelection");
@@ -66,6 +77,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const [capabilitiesModal,setCapabilitiesModal]=useState(false);
   const [capabilities,setCapabilities]=useState<PersonalOneCapabilityTab|null>(null);
   const [menuOpen,setMenuOpen]=useState(false);
+  const businessAccess = useBusinessEligibility({ enabled: menuOpen });
   const [securityOpen,setSecurityOpen]=useState(false);
   // Sidebar: owner choice persists; below 860px it is collapsed unless the owner opens it for this session.
   const [navPref,setNavPref]=useState<"open"|"closed"|null>(()=>{try{const v=window.localStorage.getItem("agentlas.one.personal.nav");return v==="open"||v==="closed"?v:null;}catch{return null;}});
@@ -82,6 +94,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const [composerExpanded,setComposerExpanded]=useState(false);
   const [snapshot,setSnapshot]=useState<OneSupervisorSnapshot|null>(null);
   const historyScope=snapshot?.conversationChatId ?? null;
+  const inlineUi=useInlineUiInstances(snapshot?.conversationChatId);
   const historyScopeRef=useRef(historyScope);historyScopeRef.current=historyScope;
   const groups=useMemo(()=>personalOneTranscript((snapshot?.messages ?? []).filter(message=>message.role!=="system"),snapshot?.turns ?? []),[snapshot?.messages,snapshot?.turns]);
   const groupIndexes=useMemo(()=>new Map(groups.map((group,index)=>[group.message.id,index])),[groups]);
@@ -252,6 +265,40 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     for(const group of groups)if(group===active||group.turn&&ownIds.has(group.turn.commandId))included.add(group.message.id);
     return groups.filter(group=>included.has(group.message.id));
   },[groups,historyGroups,activeReply?.runId,historyScope,ownVisibleCommands]);
+  const continuationProjector=useRef(new ChatContinuationProjector());
+  const observedReplyTexts=useRef(new Map<string,string>());
+  const conversationMessages=useMemo(()=>{
+    if(live?.text){
+      const key=`${historyScope}:${live.runId}`;
+      observedReplyTexts.current.set(key,live.text);
+      while(observedReplyTexts.current.size>200)observedReplyTexts.current.delete(observedReplyTexts.current.keys().next().value!);
+    }
+    const messages:PersonalOneConversationMessage[]=groups.flatMap(({message,turn,answer})=>{
+      const rows:PersonalOneConversationMessage[]=[{...message,historyGroupId:message.id,
+        displayKey:turn?`supervisor-command:${turn.commandId}`:message.id}];
+      if(turn)rows.push({...answer,id:answer?.id ?? `supervisor-reply:${turn.runId}`,role:"assistant",
+        // The live hook clears its buffer before the terminal snapshot arrives.
+        // Keep the observed reply through that gap under the same exact owner.
+        text:answer?.text ?? (activeReply?.runId===turn.runId
+          ?(live?.runId===turn.runId&&live.text?live.text:observedReplyTexts.current.get(`${historyScope}:${turn.runId}`) ?? ""):""),
+        createdAt:answer?.createdAt ?? turn.createdAt,
+        displayKey:`supervisor-reply:${turn.runId}`,historyGroupId:message.id,replyTurn:turn,hasDurableAnswer:Boolean(answer)});
+      return rows;
+    });
+    return [...messages,...pendingMessages.map((message):PersonalOneConversationMessage=>({
+      id:message.commandId,role:"user",text:message.text,createdAt:"",displayKey:`supervisor-command:${message.commandId}`,
+      pendingCommandId:message.commandId,
+    }))];
+  },[activeReply?.runId,groups,historyScope,live?.runId,live?.text,pendingMessages]);
+  const conversationRows=useMemo(()=>{
+    const visible=new Set(visibleGroups.map(group=>group.message.id));
+    return continuationProjector.current.project(historyScope ?? "personal-one-pending",conversationMessages,{
+      key:message=>message.displayKey,role:message=>message.role,
+      text:message=>message.role==="assistant"?visibleAnswer(message.text):message.text,
+      active:message=>Boolean(message.replyTurn&&!message.hasDurableAnswer&&message.replyTurn.runId===activeReply?.runId),
+      createdAt:message=>message.createdAt || undefined,run:message=>message.replyTurn?.runId,
+    }).filter(row=>Boolean(row.message.pendingCommandId)||visible.has(row.message.historyGroupId!));
+  },[activeReply?.runId,conversationMessages,historyScope,visibleGroups]);
   const captureHistoryAnchor=()=>{
     const element=transcript.current;if(!element)return;
     const top=element.getBoundingClientRect().top;
@@ -297,7 +344,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     if(nearBottom.current)element.scrollTop=element.scrollHeight;
     else if(historyAnchor.current){const anchor=historyAnchor.current;const row=Array.from(element.querySelectorAll<HTMLElement>("[data-personal-one-message-id]")).find(item=>item.dataset.personalOneMessageId===anchor.id);if(row)element.scrollTop+=row.getBoundingClientRect().top-anchor.top;}
     captureHistoryAnchor();
-  },[historyScope,visibleGroups,pendingMessages,live?.text,scopedWindow,messageFiles,viewportWidth,shownPanelWidth,tasksOpen,artifactOpen,file]);
+  },[historyScope,conversationRows,scopedWindow,messageFiles,viewportWidth,shownPanelWidth,tasksOpen,artifactOpen,file]);
   useEffect(()=>{loadedGroups.current.clear();setMessageFiles({});},[snapshot?.conversationChatId]);
   useEffect(()=>{
     const bridge=chatFilesBridge();if(!snapshot||!bridge)return;
@@ -363,6 +410,9 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   };
   const openMemory=async()=>{setMemoryOpen(true);try{setMemory(await ipc()!.oneMemory.getState());}catch{setError(true);}};
   const openFile=useCallback((reference:LinkedFileArtifact,chatId:string)=>{try{setFile(personalOneFile(reference,chatId));setTasksOpen(false);}catch{setError(true);}},[]);
+  const openConversationFile=useCallback((reference:LinkedFileArtifact)=>{
+    if(snapshot?.conversationChatId)openFile(reference,snapshot.conversationChatId);
+  },[openFile,snapshot?.conversationChatId]);
   const task=snapshot?.tasks.find(item=>item.taskId===selected);const name=snapshot?.displayName||"One";
   const panelChatId=file?.chatId ?? task?.chatId ?? snapshot?.conversationChatId ?? null;
   useEffect(()=>{
@@ -424,6 +474,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       {menuOpen&&<nav ref={headerMenuRef} id="personal-one-menu" className={styles.headerMenu} aria-label={copy("One 메뉴","One menu")} onKeyDown={event=>{if(event.key==="Escape"){event.stopPropagation();setMenuOpen(false);headerMenuTrigger.current?.focus();}}}>
         <button type="button" onClick={()=>{setMenuOpen(false);setCapabilities("connections");}}>{copy("연결 도구","Connected tools")}</button>
         <button type="button" data-personal-one-security-entry="true" onClick={()=>{setMenuOpen(false);setSecurityOpen(true);}}>{copy("보안과 연결 관리","Security and connections")}</button>
+        {businessAccess.eligible&&<button type="button" data-business-entry="true" onClick={()=>{setMenuOpen(false);void openMain('/business');}}><IconSettings size={16}/>{copy("조직 설정","Organization settings")}</button>}
         <button type="button" onClick={()=>{setMenuOpen(false);setCapabilities("repeat");}}>{copy("반복 업무","Recurring work")}</button>
         <button type="button" onClick={()=>{setMenuOpen(false);setBudgetsOpen(true);}}>{copy("실행 예산","Execution budgets")}</button>
         <button type="button" onClick={()=>{setMenuOpen(false);setCheckinsOpen(true);}}>{copy("감시 조건","Monitoring")}</button>
@@ -438,34 +489,50 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       {requestedTaskUnavailable&&<p role="status" className={styles.feedback}>{copy("알림이 가리킨 작업을 현재 관측에서 찾지 못했습니다. 같은 작업의 관측을 기다리고 있습니다.","The task referenced by the notification is absent from the current observation. Waiting for that exact task.")}</p>}
       {windowError&&<p role="status" className={styles.feedback}>{copy("창 동작을 확인하지 못했습니다. 창 크기는 가장자리를 끌어 조절할 수 있습니다.","The window action was not confirmed. Drag the window edge to resize it.")}</p>}
 
+      <IntellectUiActions.Provider value={{prepareFollowup:prepareUiFollowup,disabled:Boolean(activeReply||attachmentBusy)}}>
       <div ref={transcript} className={styles.transcript} data-personal-one-transcript="true" style={{overflowAnchor:"none"}} onWheel={handleHistoryWheel} onTouchStart={event=>{if(!(event.target as Element).closest("button"))freezeHistory();}} onPointerDown={event=>{if(event.target===event.currentTarget)freezeHistory();}} onScroll={event=>handleHistoryScroll(event.currentTarget)} aria-live="polite">
         <div className={styles.thread}>
           {!snapshot?.messages.length&&!pendingMessages.length&&<div className={styles.empty}><h2>{copy("무엇을 함께 할까요?","What shall we work on?")}</h2></div>}
           {historyStart>0&&<button type="button" style={historyButtonStyle} data-personal-one-history="earlier" onClick={()=>revealHistory("earlier")}>{copy("이전 대화 24개 보기","Show 24 earlier turns")}</button>}
           {groups.length>24&&<button type="button" style={historyButtonStyle} data-personal-one-history="collapse" onClick={latestHistory}>{copy("최근 대화로 접기","Fold to recent turns")}</button>}
-          {visibleGroups.map(({message,turn,answer})=>{
-            const replyPresentation=turn?personalOneReplyPresentation(turn,Boolean(answer),activeReply?.runId):null;
-            const replyText=answer?visibleAnswer(answer.text):live&&turn&&live.runId===turn.runId?visibleAnswer(live.text):"";
-            const replyUiId=turn?`supervisor-reply:${turn.runId}`:answer?.id ?? message.id;
-            return <div className={styles.turn} key={message.id} data-personal-one-message-id={message.id} data-command-id={turn?.commandId}>
-            <MessageActions messageId={message.id} author={message.role==="user"?copy("나","You"):name} text={message.role==="assistant"?visibleAnswer(message.text):displayMessageReply(parseChatFileMessage(message.text).visibleText,locale)} locale={locale} onReply={reply=>{setMessageReply(reply);composerDock.current?.querySelector("textarea")?.focus();}}><article className={styles.bubble} data-role={message.role}><Markdown text={message.role==="assistant"?visibleAnswer(message.text):displayMessageReply(parseChatFileMessage(message.text).visibleText,locale)} messageId={message.id} chatId={snapshot?.conversationChatId} onOpenLinkedFile={reference=>openFile(reference,snapshot!.conversationChatId)} onUiFollowup={message.role==="assistant"?prepareUiFollowup:undefined} uiActionsDisabled={Boolean(activeReply||attachmentBusy)}/></article></MessageActions>
-            {message.role==="user"&&message.imageDataUrls?.map((src,index)=><img key={src} src={src} alt={copy("첨부 이미지 ","Attached image ")+(index+1)} style={{maxWidth:240,maxHeight:180,borderRadius:10}}/>)}
-            {parseChatFileMessage(message.text).groupIds.map(group=><ChatFileCards key={group} files={messageFiles[group] ?? []} locale={ko?"ko":"en"} onOpen={requestChatFileOpen}/>)}
-            {replyText&&<MessageActions messageId={answer?.id ?? replyUiId} author={name} text={replyText} locale={locale} onReply={reply=>{setMessageReply(reply);composerDock.current?.querySelector("textarea")?.focus();}}><article className={styles.bubble} data-role="assistant" data-run-id={turn?.runId}><StreamingMarkdown text={replyText} messageId={replyUiId} chatId={snapshot?.conversationChatId} onOpenLinkedFile={reference=>openFile(reference,snapshot!.conversationChatId)} onUiFollowup={prepareUiFollowup} uiActionsDisabled={Boolean(activeReply||attachmentBusy)}/></article></MessageActions>}
-            {turn&&snapshot?.delegations?.filter(item=>item.originReplyRunId===turn.runId).map(delegation)}
-            {/* Owner 2026-10-04: no activity log under a reply ("이런건 없어도 되는"). While One answers, three dots. */}
-            {replyPresentation==="answering"&&!(live&&live.runId===turn?.runId&&live.text)&&<div className={styles.typing} role="status" aria-label={copy("답하는 중","Answering")}><span/><span/><span/></div>}
-            {turn?.state==="failed"&&<AgiIncidentReportButton key={turn.runId} locale={ko?"ko":"en"} draft={{
+          {conversationRows.map(row=>{
+            const message=row.message,turn=message.replyTurn;
+            const sourceMessageId=row.sourceId;
+            const displayId=row.continuation?row.id:message.displayKey;
+            const contentId=row.continuation?displayId:message.displayKey;
+            const displayedText=message.role==="assistant"?row.text:displayMessageReply(parseChatFileMessage(row.text).visibleText,locale);
+            const markdownText=message.role==="assistant"?row.markdownText ?? displayedText:displayedText;
+            const replyPresentation=turn?personalOneReplyPresentation(turn,Boolean(message.hasDurableAnswer),activeReply?.runId):null;
+            const typing=row.tail&&replyPresentation==="answering"&&!displayedText;
+            const delegated=row.tail&&turn?snapshot?.delegations?.filter(item=>item.originReplyRunId===turn.runId) ?? []:[];
+            const imageUrls=row.tail?message.imageDataUrls ?? []:[];
+            const fileGroups=row.tail?parseChatFileMessage(message.text).groupIds:[];
+            const failed=row.tail&&turn?.state==="failed";
+            const ownedUi=message.role==="assistant"&&turn&&!row.continuation ? inlineUiForReply(inlineUi,turn.runId,message.text) : [];
+            if(!ownedUi.length&&!markdownText&&!typing&&!failed&&!delegated.length&&!imageUrls.length&&!fileGroups.length)return null;
+            return <div className={styles.turn} key={displayId} data-personal-one-message-id={displayId} data-personal-one-source-id={sourceMessageId} data-personal-one-history-id={message.historyGroupId} data-command-id={turn?.commandId} data-optimistic-message={message.pendingCommandId}>
+            {(markdownText||ownedUi.length>0)&&<MessageActions messageId={sourceMessageId} author={message.role==="user"?copy("나","You"):name} text={displayedText} locale={locale} onReply={reply=>{setMessageReply(reply);composerDock.current?.querySelector("textarea")?.focus();}}><article className={styles.bubble} data-role={message.role} data-run-id={turn?.runId}>
+              {message.role==="assistant"&&turn
+                ?<StreamingMarkdown text={markdownText} messageId={contentId} chatId={snapshot?.conversationChatId} onOpenLinkedFile={openConversationFile} onUiFollowup={prepareUiFollowup} uiActionsDisabled={Boolean(activeReply||attachmentBusy)}/>
+                :<Markdown text={markdownText} messageId={contentId} chatId={snapshot?.conversationChatId} onOpenLinkedFile={openConversationFile} onUiFollowup={message.role==="assistant"?prepareUiFollowup:undefined} uiActionsDisabled={Boolean(activeReply||attachmentBusy)}/>}
+              <InlineUiInstances chatId={snapshot?.conversationChatId} instances={ownedUi} turnIds={turn?[turn.runId]:[]} locale={ko?"ko":"en"}/>
+            </article></MessageActions>}
+            {imageUrls.map((src,index)=><img key={src} src={src} alt={copy("첨부 이미지 ","Attached image ")+(index+1)} style={{maxWidth:240,maxHeight:180,borderRadius:10}}/>)}
+            {fileGroups.map(group=><ChatFileCards key={group} files={messageFiles[group] ?? []} locale={ko?"ko":"en"} onOpen={requestChatFileOpen}/>)}
+            {delegated.map(delegation)}
+            {/* Owner 2026-10-04: while One answers, three dots without an activity log. */}
+            {typing&&<div className={styles.typing} role="status" aria-label={copy("답하는 중","Answering")}><span/><span/><span/></div>}
+            {failed&&turn&&<AgiIncidentReportButton key={turn.runId} locale={ko?"ko":"en"} draft={{
               chatId:snapshot?.conversationChatId,runId:turn.runId,failureCode:"one_supervisor_reply_failed",category:"other",
               title:"[Supervisor] Reply failed",summary:"The Supervisor reply failed before normal completion.",
               steps:["Send a message to Supervisor","The reply state became failed"],
             }} />}
           </div>})}
           {historyEnd<groups.length&&<button type="button" style={historyButtonStyle} data-personal-one-history="later" onClick={()=>revealHistory("later")}>{copy("다음 대화 24개 보기","Show 24 later turns")}</button>}
-          {pendingMessages.map(message=><div className={styles.turn} key={message.commandId} data-optimistic-message={message.commandId}><MessageActions messageId={message.commandId} author={copy("나","You")} text={displayMessageReply(message.text,locale)} locale={locale} onReply={reply=>{setMessageReply(reply);composerDock.current?.querySelector("textarea")?.focus();}}><article className={styles.bubble} data-role="user"><Markdown text={displayMessageReply(message.text,locale)} messageId={message.commandId}/></article></MessageActions></div>)}
           {snapshot?.delegations?.filter(item=>!item.originReplyRunId || !snapshot.turns?.some(turn=>turn.runId===item.originReplyRunId)).map(delegation)}
         </div>
       </div>
+      </IntellectUiActions.Provider>
       <div ref={composerDock} className={styles.composerDock}>
         <div className={styles.decisionStack}>
           {pendingAsk&&pendingAsk.sourceMessageId!==dismissedAskId&&<PersonalOneAskCard key={pendingAsk.sourceMessageId} ask={pendingAsk} locale={ko?"ko":"en"} disabled={Boolean(activeReply)||attachmentBusy} onAnswer={answer=>void send(answer)} onDismiss={()=>setDismissedAskId(pendingAsk.sourceMessageId)} />}

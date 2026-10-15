@@ -4,7 +4,6 @@
 //            | seedance(ByteDance, fal.ai 경유) | kling(Kuaishou, PiAPI 경유).
 //   provider는 UI에서 "연결/키 있는 멀티모달"로 확정해 넘어온다(무조건 Veo 아님).
 //   ⚠️ no-fallback: 키 미설정/입력 부적합이면 조용히 떨어지지 않고 명시적으로 실패 보고한다.
-import { app, shell } from "electron";
 import { randomUUID } from "crypto";
 import { promises as fs } from "fs";
 import path from "path";
@@ -67,6 +66,35 @@ const DEFAULT_MODELS: Record<MultimodalVideoProvider, string> = {
   grok: "runtime-default",
 };
 
+// Text-to-video models (official API docs, checked 2026-10-14). Image-to-video keeps DEFAULT_MODELS.
+//   runway  : POST /v1/text_to_video, gen4.5 (ratio 1280:720|720:1280, duration 2-10)  https://docs.dev.runwayml.com/api/
+//   luma    : POST /dream-machine/v1/generations with prompt only                      https://docs.lumalabs.ai/docs/video-generation
+//   veo     : generateVideos({prompt}) without image                                   https://ai.google.dev/gemini-api/docs/veo
+//   seedance: fal-ai/bytedance/seedance/v1/pro/text-to-video                           https://fal.ai/models/fal-ai/bytedance/seedance/v1/pro/text-to-video/api
+//   kling   : PiAPI task with input.image_url left empty                               https://piapi.ai/docs/kling-api/create-task
+//   grok    : POST https://api.x.ai/v1/videos/generations {model, prompt, duration 1-15, aspect_ratio, resolution},
+//             poll GET /v1/videos/{request_id} (pending|done|failed|expired)  https://docs.x.ai/developers/model-capabilities/video/generation
+//             An API-key route (XAI_API_KEY, metered): image-to-video keeps the subscription CLI.
+const TEXT_MODELS: Partial<Record<MultimodalVideoProvider, string>> = {
+  runway: "gen4.5",
+  luma: "ray-2",
+  veo: "veo-3.1-lite-generate-001",
+  seedance: "fal-ai/bytedance/seedance/v1/pro/text-to-video",
+  kling: "kling",
+  grok: "grok-imagine-video-1.5",
+};
+const XAI_BASE = "https://api.x.ai/v1";
+/** Grok text-to-video is the xAI API (metered), never the subscription CLI. */
+const XAI_KEYS = ["XAI_API_KEY", "GROK_API_KEY"];
+/** Providers with a documented public text-only video API. */
+export const TEXT_TO_VIDEO_PROVIDERS = Object.keys(TEXT_MODELS) as MultimodalVideoProvider[];
+
+/** A request with no input image. Carried inside the durable intent so restart recovery keeps the mode. */
+export type MultimodalTextVideoRequest = MultimodalVideoRequest & { textOnly?: true };
+function isTextOnly(request: MultimodalVideoRequest): boolean {
+  return (request as MultimodalTextVideoRequest).textOnly === true;
+}
+
 const RUNWAY_BASE = "https://api.dev.runwayml.com";
 const RUNWAY_VERSION = "2024-11-06";
 const LUMA_BASE = "https://api.lumalabs.ai";
@@ -77,8 +105,16 @@ const MAX_POLLS = 120; // ~10분
 
 const jobs = new Map<string, MultimodalVideoJob>();
 const cancelledJobs = new Set<string>();
+/**
+ * Jobs whose provider finished after the owner stopped local waiting: the stop is honoured (no new submit, nothing more
+ * started) but the finished output is kept permanently — the owner's originals are never discarded (notyet NH33).
+ */
+const retainAfterLocalStop = new Set<string>();
 const verificationControllers = new Map<string, AbortController>();
 let hydrationStarted = false;
+const recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const recoveryRuns = new Map<string, Promise<void>>();
+const videoIngestRuns = new Map<string, Promise<MultimodalVideoFile>>();
 
 interface DurableVideoIntent {
   kind: "video";
@@ -109,15 +145,16 @@ async function hasAnyEnvVar(keys: string[]): Promise<boolean> {
 }
 
 export async function videoKeyStatus(): Promise<MultimodalVideoKeyStatus> {
-  const [runway, luma, veo, seedance, kling, grokAuth] = await Promise.all([
+  const [runway, luma, veo, seedance, kling, grokAuth, grokApi] = await Promise.all([
     hasAnyEnvVar(PROVIDER_KEYS.runway),
     hasAnyEnvVar(PROVIDER_KEYS.luma),
     hasAnyEnvVar(PROVIDER_KEYS.veo),
     hasAnyEnvVar(PROVIDER_KEYS.seedance),
     hasAnyEnvVar(PROVIDER_KEYS.kling),
     grokAuthSource(),
+    hasAnyEnvVar(XAI_KEYS),
   ]);
-  return { runway, luma, veo, seedance, kling, grok: Boolean(resolveGrokBin()) && grokAuth === "oauth" };
+  return { runway, luma, veo, seedance, kling, grok: Boolean(resolveGrokBin()) && grokAuth === "oauth", grokApi };
 }
 
 function validateVideoRequest(request: MultimodalVideoRequest, provider: MultimodalVideoProvider, model: string): void {
@@ -140,11 +177,33 @@ function validateVideoRequest(request: MultimodalVideoRequest, provider: Multimo
   if (requirements?.requireAudio !== undefined && typeof requirements.requireAudio !== "boolean") {
     throw new Error("media_video_output_requirements_invalid");
   }
+  if (request.extendFromJobId !== undefined) {
+    // Extension continues a generation the provider still holds: Luma keyframes frame0 = {type: "generation", id} (NH34).
+    if (provider !== "luma") throw new Error("media_video_extend_unsupported_provider");
+    if (request.imagePath || request.imageUrl || isTextOnly(request)) throw new Error("media_video_extend_input_conflict");
+    extendSourceGenerationId(request.extendFromJobId, provider);
+    return;
+  }
+  if (isTextOnly(request)) {
+    if (!TEXT_MODELS[provider]) throw new Error("media_video_text_unsupported_provider");
+    if (request.imagePath || request.imageUrl) throw new Error("media_video_text_image_not_allowed");
+    // Runway gen4.5 and Veo text-to-video accept only landscape/portrait.
+    if ((provider === "runway" || provider === "veo") && request.aspectRatio === "1:1") throw new Error("media_video_aspect_ratio_unsupported");
+    return;
+  }
   if (provider === "luma" && (!request.imageUrl || !/^https:\/\//iu.test(request.imageUrl))) {
     throw new Error("media_video_luma_https_image_required");
   }
   if (provider !== "luma" && !request.imagePath && !request.imageUrl) throw new Error("media_video_input_image_required");
   if (request.imageUrl && !/^https:\/\//iu.test(request.imageUrl)) throw new Error("media_video_image_url_invalid");
+}
+
+/** The provider generation id of a finished job of the same provider (the extension source), or a typed refusal. */
+function extendSourceGenerationId(jobId: string, provider: MultimodalVideoProvider): string {
+  const source = typeof jobId === "string" && jobId ? getMediaOperation(jobId) : null;
+  if (!source || source.modality !== "video" || source.providerId !== provider) throw new Error("media_video_extend_source_unknown");
+  if (source.lifecycle !== "succeeded" || !source.providerOperationId) throw new Error("media_video_extend_source_not_finished");
+  return source.providerOperationId;
 }
 
 function durableVideoIntent(value: unknown): DurableVideoIntent | null {
@@ -191,7 +250,9 @@ function jobFromOperation(operation: MediaOperationRecord): MultimodalVideoJob {
   if (operation.lifecycle === "succeeded") {
     job.status = "succeeded";
     job.progress = { phase: "complete", percent: 100 };
-    job.message = currentUiLocale() === "ko" ? "애니메이션 완료" : "Animation complete";
+    const kept = operation.cancellation === "unconfirmed";
+    job.message = kept ? keptMessage() : (currentUiLocale() === "ko" ? "애니메이션 완료" : "Animation complete");
+    if (kept && !job.warnings.includes("kept_after_local_stop")) job.warnings.push("kept_after_local_stop");
   } else if (operation.cancellation === "requested" || operation.cancellation === "unconfirmed" || operation.cancellation === "confirmed") {
     job.status = "cancelled";
     job.progress = { phase: "cancelled", percent: job.progress.percent };
@@ -229,13 +290,13 @@ export function initializeVideoJobs(): void {
   ensureVideoJobsHydrated();
 }
 
-export function startVideoJob(request: MultimodalVideoRequest): MultimodalVideoJob {
+export function startVideoJob(request: MultimodalTextVideoRequest): MultimodalVideoJob {
   ensureVideoJobsHydrated();
   const ko = currentUiLocale() === "ko";
   const id = randomUUID();
   const provider: MultimodalVideoProvider = request.provider ?? "runway";
   if (!Object.hasOwn(PROVIDER_KEYS, provider)) throw new Error("media_video_provider_invalid");
-  const model = request.model || DEFAULT_MODELS[provider];
+  const model = request.model || (isTextOnly(request) ? TEXT_MODELS[provider] : undefined) || DEFAULT_MODELS[provider];
   validateVideoRequest(request, provider, model);
   const title = request.title || "Video";
   const outputDir = userDataPath("multimodal-video", `${safeSlug(title)}-${id.slice(0, 8)}`);
@@ -264,7 +325,7 @@ export function startVideoJob(request: MultimodalVideoRequest): MultimodalVideoJ
     inputDigest: mediaInputDigest({ provider, model, request }),
     intent: { kind: "video", job, request } satisfies DurableVideoIntent,
     spendLimitUsd: null,
-    capabilities: currentVideoAdapterCapabilities(provider),
+    capabilities: currentVideoAdapterCapabilities(provider === "grok" && isTextOnly(request) ? "grok-api" : provider),
   });
   attachOperation(job, operation);
   jobs.set(id, job);
@@ -284,7 +345,12 @@ export function getVideoJob(id: string): MultimodalVideoJob | null {
   }
   if (job) {
     const operation = getMediaOperation(id);
-    if (operation) attachOperation(job, operation);
+    if (operation) {
+      if (operation.lifecycle === "succeeded" || operation.lifecycle === "failed" || operation.cancellation !== "none") {
+        job = jobFromOperation(operation);
+        jobs.set(id, job);
+      } else attachOperation(job, operation);
+    }
   }
   return job ? snapshot(job) : null;
 }
@@ -302,7 +368,14 @@ export function cancelVideoJob(id: string): MultimodalVideoJob | null {
   const operation = requestMediaCancellation(id);
   const ko = currentUiLocale() === "ko";
   if (operation.lifecycle === "succeeded" || operation.lifecycle === "failed") {
-    return snapshot(jobFromOperation(operation));
+    const settledJob = jobFromOperation(operation);
+    // Cancelled before anything was submitted: the registry closes it at once. The still-running starter must stop
+    // at its next checkpoint and must not rewrite the job as failed (markMediaSubmitting would throw on a closed row).
+    if (operation.lifecycle === "failed" && operation.cancellation !== "none") {
+      cancelledJobs.add(id);
+      jobs.set(id, settledJob);
+    }
+    return snapshot(settledJob);
   }
   cancelledJobs.add(id);
   verificationControllers.get(id)?.abort();
@@ -322,6 +395,8 @@ export async function openVideoOutput(id: string): Promise<{ ok: boolean; messag
   const job = getVideoJob(id);
   if (!job) return { ok: false, message: "Animate job not found." };
   await fs.mkdir(job.outputDir, { recursive: true });
+  // Require on use: the daemon (and the harness media ports there) loads this module without electron.
+  const { shell } = require("electron") as typeof import("electron");
   const result = await shell.openPath(job.outputDir);
   return result ? { ok: false, message: result } : { ok: true, message: job.outputDir };
 }
@@ -338,13 +413,13 @@ async function runAnimateJob(id: string, request: MultimodalVideoRequest): Promi
     );
   }
 
-  if (job.provider === "grok") {
+  if (job.provider === "grok" && !isTextOnly(request)) {
     await runGrokAnimate(id, job, request, prompt);
     return;
   }
 
   // provider별 허용 키 목록에서 실제 존재하는 첫 키를 쓴다(멀티모달 연결 키 인식).
-  const keyList = PROVIDER_KEYS[job.provider];
+  const keyList = job.provider === "grok" ? XAI_KEYS : PROVIDER_KEYS[job.provider];
   const key = await readFirstSecret(keyList);
   if (!key) {
     // no-fallback: 키 없으면 명시적으로 막는다(다른 provider로 몰래 떨어지지 않음).
@@ -377,7 +452,9 @@ async function runAnimateJob(id: string, request: MultimodalVideoRequest): Promi
         ? await runLuma(job, request, key, prompt)
         : job.provider === "seedance"
           ? await runSeedance(job, request, key, prompt)
-          : await runKling(job, request, key, prompt);
+          : job.provider === "grok"
+            ? await runGrokTextVideo(job, request, key, prompt)
+            : await runKling(job, request, key, prompt);
 
   assertNotCancelled(id);
   updateJob(job, { phase: "downloading", message: ko ? "결과 영상 다운로드 중" : "Downloading the result video", percent: 92 });
@@ -457,7 +534,8 @@ async function runVeo(
   apiKey: string,
 ): Promise<void> {
   const ko = currentUiLocale() === "ko";
-  const image = await resolveVeoImage(request);
+  const textOnly = isTextOnly(request);
+  const image = textOnly ? undefined : await resolveVeoImage(request);
   assertNotCancelled(id);
 
   const ai = new GoogleGenAI({ apiKey });
@@ -467,14 +545,15 @@ async function runVeo(
     operation = await ai.models.generateVideos({
       model: job.model,
       prompt,
-      image,
+      ...(image ? { image } : {}),
       config: {
         numberOfVideos: 1,
-        durationSeconds: (request.durationSec ?? 5) >= 8 ? 8 : 6,
+        durationSeconds: textOnly ? veoTextDuration(request.durationSec) : (request.durationSec ?? 5) >= 8 ? 8 : 6,
         aspectRatio: request.aspectRatio === "9:16" ? "9:16" : "16:9",
         resolution: "720p",
         enhancePrompt: true,
-        personGeneration: "allow_adult",
+        // image-to-video requires allow_adult; the text-only default is left to the API.
+        ...(textOnly ? {} : { personGeneration: "allow_adult" }),
       },
     });
   } catch (error) {
@@ -507,19 +586,7 @@ async function runVeo(
 
   assertNotCancelled(id);
   updateJob(job, { phase: "downloading", message: ko ? "결과 영상 저장 중" : "Saving the result video", percent: 92 });
-  const name = `${safeSlug(job.title)}-${job.id.slice(0, 8)}.mp4`;
-  const absPath = path.join(job.outputDir, name);
-  if (video.videoBytes) {
-    await fs.writeFile(absPath, Buffer.from(video.videoBytes, "base64"));
-  } else if (video.uri) {
-    await ai.files.download({ file: video.uri, downloadPath: absPath });
-  } else {
-    throw new Error(ko ? "Veo가 uri/바이트 없는 영상을 반환했습니다." : "Veo returned a video without uri or videoBytes.");
-  }
-  const file = await verifiedVideoFile(job, absPath, request);
-  assertNotCancelled(id);
-  job.files.push(file);
-  updateJob(job, { status: "succeeded", phase: "complete", message: ko ? "애니메이션 완료" : "Animation complete", percent: 100 });
+  await finishRecoveredVeo(job, request, ai, operation);
 }
 
 // Veo i2v 입력 이미지 → {imageBytes(base64), mimeType}. 로컬 경로 우선, 공개 URL 폴백.
@@ -552,7 +619,8 @@ async function readFirstSecret(keys: string[]): Promise<string | null> {
 // ── Runway (gen4_turbo, image_to_video) ──────────────────────
 async function runRunway(job: MultimodalVideoJob, request: MultimodalVideoRequest, key: string, prompt: string): Promise<string> {
   const ko = currentUiLocale() === "ko";
-  const promptImage = await resolveRunwayImage(request);
+  const textOnly = isTextOnly(request);
+  const promptImage = textOnly ? undefined : await resolveRunwayImage(request);
   const headers = {
     Authorization: `Bearer ${key}`,
     "X-Runway-Version": RUNWAY_VERSION,
@@ -560,14 +628,14 @@ async function runRunway(job: MultimodalVideoJob, request: MultimodalVideoReques
   };
   const body = {
     model: job.model,
-    promptImage,
+    ...(promptImage ? { promptImage } : {}),
     promptText: prompt,
     ratio: runwayRatio(request.aspectRatio),
-    duration: clampDuration(request.durationSec),
+    duration: textOnly ? Math.min(10, Math.max(2, Math.round(request.durationSec ?? 5))) : clampDuration(request.durationSec),
   };
   markMediaSubmitting(job.id);
   let res: Response;
-  try { res = await fetch(`${RUNWAY_BASE}/v1/image_to_video`, { method: "POST", headers, body: JSON.stringify(body) }); }
+  try { res = await fetch(`${RUNWAY_BASE}/v1/${textOnly ? "text_to_video" : "image_to_video"}`, { method: "POST", headers, body: JSON.stringify(body) }); }
   catch (error) { throw submitOutcomeUnknown(job.provider, error); }
   if (!res.ok) {
     throw new Error(
@@ -629,7 +697,9 @@ function runwayRatio(aspect: MultimodalVideoRequest["aspectRatio"]): string {
 // ── Luma (ray-2, image-to-video; 공개 URL만) ─────────────────
 async function runLuma(job: MultimodalVideoJob, request: MultimodalVideoRequest, key: string, prompt: string): Promise<string> {
   const ko = currentUiLocale() === "ko";
-  if (!request.imageUrl || !/^https:\/\//i.test(request.imageUrl)) {
+  const textOnly = isTextOnly(request);
+  const extendFrom = request.extendFromJobId ? extendSourceGenerationId(request.extendFromJobId, "luma") : null;
+  if (!extendFrom && !textOnly && (!request.imageUrl || !/^https:\/\//i.test(request.imageUrl))) {
     throw new Error(
       ko
         ? "Luma는 공개 HTTPS 이미지 URL만 지원합니다. 로컬 이미지를 쓰려면 provider를 runway로 선택하세요."
@@ -640,7 +710,8 @@ async function runLuma(job: MultimodalVideoJob, request: MultimodalVideoRequest,
   const body = {
     prompt,
     model: job.model,
-    keyframes: { frame0: { type: "image", url: request.imageUrl } },
+    ...(extendFrom ? { keyframes: { frame0: { type: "generation", id: extendFrom } } }
+      : textOnly ? {} : { keyframes: { frame0: { type: "image", url: request.imageUrl } } }),
     resolution: "720p",
     duration: clampDuration(request.durationSec) >= 9 ? "9s" : "5s",
     aspect_ratio: request.aspectRatio ?? "16:9",
@@ -686,15 +757,66 @@ async function runLuma(job: MultimodalVideoJob, request: MultimodalVideoRequest,
   throw new ProviderStatusUnknown(ko ? "Luma 상태 확인 시간이 끝났습니다. 다시 제출하지 않았습니다." : "Luma status polling timed out; the job was not resubmitted.");
 }
 
+// ── Grok Imagine text-to-video (xAI API) ──
+async function runGrokTextVideo(job: MultimodalVideoJob, request: MultimodalVideoRequest, key: string, prompt: string): Promise<string> {
+  const ko = currentUiLocale() === "ko";
+  const headers = { Authorization: `Bearer ${key}`, "Content-Type": "application/json" };
+  const body = {
+    model: job.model,
+    prompt,
+    duration: Math.min(15, Math.max(1, Math.round(request.durationSec ?? 8))),
+    aspect_ratio: request.aspectRatio ?? "16:9",
+    resolution: "720p",
+  };
+  markMediaSubmitting(job.id);
+  let res: Response;
+  try { res = await fetch(`${XAI_BASE}/videos/generations`, { method: "POST", headers, body: JSON.stringify(body) }); }
+  catch (error) { throw submitOutcomeUnknown(job.provider, error); }
+  if (!res.ok) {
+    throw new Error(ko ? `Grok 영상 제출 실패 (HTTP ${res.status}): ${truncate(await res.text())}` : `Grok video submission failed (HTTP ${res.status}): ${truncate(await res.text())}`);
+  }
+  const requestId = (await readAcceptedJson<{ request_id?: string }>(job.provider, res)).request_id;
+  if (!requestId) throw new SubmitOutcomeUnknown(ko ? "Grok 접수 응답에 복구할 request_id가 없습니다." : "Grok accepted the request without a recoverable request_id.");
+  persistProviderAccepted(job.id, requestId);
+  updateJob(job, { phase: "generating", message: ko ? "Grok 생성 중" : "Grok generating", percent: 25 });
+  for (let i = 0; i < MAX_POLLS; i++) {
+    assertNotCancelled(job.id);
+    await sleep(POLL_MS);
+    const poll = await fetchProviderStatus(`${XAI_BASE}/videos/${encodeURIComponent(requestId)}`, { headers });
+    if (!poll.ok) {
+      if (poll.status === 429) { recordProviderPoll(job, "HTTP_429", i); continue; }
+      throw new Error(ko ? `Grok 폴링 실패 (HTTP ${poll.status})` : `Grok polling failed (HTTP ${poll.status})`);
+    }
+    const outcome = grokVideoOutcome(await poll.json());
+    recordProviderPoll(job, outcome.status || "unknown", i);
+    if (outcome.url) return outcome.url;
+    if (outcome.failure) throw new Error(ko ? `Grok 생성 실패: ${outcome.failure}` : `Grok generation failed: ${outcome.failure}`);
+    updateJob(job, { percent: Math.min(90, 25 + Math.round((i / MAX_POLLS) * 65)) });
+  }
+  throw new ProviderStatusUnknown(ko ? "Grok 상태 확인 시간이 끝났습니다. 다시 제출하지 않았습니다." : "Grok status polling timed out; the job was not resubmitted.");
+}
+
+/** One reading of GET /v1/videos/{id}: done with a URL, a terminal failure, or still pending. */
+export function grokVideoOutcome(data: unknown): { status: string; url?: string; failure?: string } {
+  const rec = (data && typeof data === "object" ? data : {}) as { status?: unknown; video?: { url?: unknown }; error?: { code?: unknown; message?: unknown } };
+  const status = String(rec.status ?? "").toLowerCase();
+  const url = typeof rec.video?.url === "string" ? rec.video.url : undefined;
+  if (status === "done") return url ? { status, url } : { status, failure: "done without a video URL" };
+  if (status === "failed" || status === "expired") {
+    return { status, failure: String(rec.error?.message ?? rec.error?.code ?? status).slice(0, 300) };
+  }
+  return { status };
+}
+
 // ── Seedance 2.0 (ByteDance, fal.ai queue 경유; image-to-video) ──
 //   fal 큐 API: 제출→status_url/response_url→폴링→결과 video.url. 이미지는 data-uri 인라인.
 async function runSeedance(job: MultimodalVideoJob, request: MultimodalVideoRequest, key: string, prompt: string): Promise<string> {
   const ko = currentUiLocale() === "ko";
-  const imageUrl = await resolveRunwayImage(request); // https URL 또는 로컬 data-uri.
+  const imageUrl = isTextOnly(request) ? undefined : await resolveRunwayImage(request); // https URL 또는 로컬 data-uri.
   const headers = { Authorization: `Key ${key}`, "Content-Type": "application/json" };
   const body = {
     prompt,
-    image_url: imageUrl,
+    ...(imageUrl ? { image_url: imageUrl } : {}),
     aspect_ratio: request.aspectRatio ?? "16:9",
     resolution: "720p",
     duration: clampDuration(request.durationSec) >= 10 ? "10" : "5",
@@ -751,14 +873,14 @@ async function runSeedance(job: MultimodalVideoJob, request: MultimodalVideoRequ
 //   PiAPI 통합 태스크: POST /api/v1/task → GET /api/v1/task/{id} 폴링 → output 영상 URL.
 async function runKling(job: MultimodalVideoJob, request: MultimodalVideoRequest, key: string, prompt: string): Promise<string> {
   const ko = currentUiLocale() === "ko";
-  const imageUrl = await resolveRunwayImage(request); // https URL 또는 로컬 data-uri.
+  const imageUrl = isTextOnly(request) ? undefined : await resolveRunwayImage(request); // https URL 또는 로컬 data-uri.
   const headers = { "x-api-key": key, "Content-Type": "application/json" };
   const body = {
     model: "kling",
     task_type: "video_generation",
     input: {
       prompt,
-      image_url: imageUrl,
+      ...(imageUrl ? { image_url: imageUrl } : {}),
       duration: clampDuration(request.durationSec) >= 10 ? 10 : 5,
       aspect_ratio: request.aspectRatio ?? "16:9",
       mode: "std",
@@ -822,22 +944,40 @@ async function runKling(job: MultimodalVideoJob, request: MultimodalVideoRequest
 }
 
 // ── 공통 ─────────────────────────────────────────────────────
-async function downloadVideo(job: MultimodalVideoJob, url: string, request: MultimodalVideoRequest): Promise<MultimodalVideoFile> {
+function runVideoIngest(id: string, action: () => Promise<MultimodalVideoFile>): Promise<MultimodalVideoFile> {
+  const pending = videoIngestRuns.get(id);
+  if (pending) return pending;
+  const run = Promise.resolve().then(action);
+  videoIngestRuns.set(id, run);
+  void run.finally(() => { if (videoIngestRuns.get(id) === run) videoIngestRuns.delete(id); }).catch(() => undefined);
+  return run;
+}
+
+function downloadVideo(job: MultimodalVideoJob, url: string, request: MultimodalVideoRequest): Promise<MultimodalVideoFile> {
+  return runVideoIngest(job.id, () => downloadVideoOnce(job, url, request));
+}
+
+async function downloadVideoOnce(job: MultimodalVideoJob, url: string, request: MultimodalVideoRequest): Promise<MultimodalVideoFile> {
   const ko = currentUiLocale() === "ko";
-  recordMediaVerifying(job.id, { resultUrl: url });
+  // A crashed writer must not leave a deterministic final filename that blocks retry with EEXIST.
+  // Only this attempt's incomplete staging file is disposable; verified digest-named originals are never overwritten.
+  const absPath = path.join(job.outputDir, `.video-ingest-${randomUUID()}.part`);
+  const previous = getMediaOperation(job.id)?.providerCheckpoint as { originalResultUrl?: unknown; resultUrl?: unknown } | null;
+  const originalResultUrl = typeof previous?.originalResultUrl === "string" ? previous.originalResultUrl
+    : typeof previous?.resultUrl === "string" ? previous.resultUrl : url;
+  checkpointVideoIngest(job.id, { originalResultUrl, resultUrl: url, stagingPath: absPath, ingestState: "downloading", localPath: null });
   const res = await fetch(url);
-  if (!res.ok) throw new Error(ko ? `결과 영상 다운로드 실패 (HTTP ${res.status})` : `Failed to download the result video (HTTP ${res.status})`);
+  if (!res.ok) throw new VideoResultFetchError(res.status, ko ? `결과 영상 다운로드 실패 (HTTP ${res.status})` : `Failed to download the result video (HTTP ${res.status})`);
   const limit = 1024 * 1024 * 1024;
   if (Number(res.headers.get("content-length")) > limit) {
     await res.body?.cancel();
     throw new Error(ko ? "영상 파일이 허용된 크기를 초과했습니다." : "The video exceeds the file size limit.");
   }
-  const name = `${safeSlug(job.title)}-${job.id.slice(0, 8)}.mp4`;
-  const absPath = path.join(job.outputDir, name);
   if (!res.body) throw new Error(ko ? "영상 응답이 비어 있습니다." : "The video response has no body.");
   const reader = res.body.getReader();
   const output = await fs.open(absPath, "wx", 0o600);
   let size = 0;
+  let complete = false;
   try {
     for (;;) {
       assertNotCancelled(job.id);
@@ -849,17 +989,31 @@ async function downloadVideo(job: MultimodalVideoJob, url: string, request: Mult
       while (written < next.value.byteLength) written += (await output.write(next.value, written, next.value.byteLength - written)).bytesWritten;
     }
     await output.sync();
+    complete = true;
   } finally {
     await reader.cancel().catch(() => undefined);
     await output.close();
+    // A partial download (disk full, cancel, network) is removed so the next recovery can write the file again ("wx").
+    if (!complete) await fs.unlink(absPath).catch(() => undefined);
   }
-  return verifiedVideoFile(job, absPath, request);
+  checkpointVideoIngest(job.id, { localPath: absPath, ingestState: "downloaded" });
+  return verifiedVideoFileOnce(job, absPath, request);
 }
 
-async function verifiedVideoFile(job: MultimodalVideoJob, absPath: string, request: MultimodalVideoRequest): Promise<MultimodalVideoFile> {
+function checkpointVideoIngest(id: string, patch: Record<string, unknown>): void {
+  const current = getMediaOperation(id);
+  const previous = current?.providerCheckpoint;
+  recordMediaVerifying(id, { ...(previous && typeof previous === "object" && !Array.isArray(previous) ? previous : {}), ...patch });
+}
+
+function verifiedVideoFile(job: MultimodalVideoJob, absPath: string, request: MultimodalVideoRequest): Promise<MultimodalVideoFile> {
+  return runVideoIngest(job.id, () => verifiedVideoFileOnce(job, absPath, request));
+}
+
+async function verifiedVideoFileOnce(job: MultimodalVideoJob, absPath: string, request: MultimodalVideoRequest): Promise<MultimodalVideoFile> {
   assertNotCancelled(job.id);
   const ko = currentUiLocale() === "ko";
-  recordMediaVerifying(job.id, { localPath: absPath });
+  checkpointVideoIngest(job.id, { localPath: absPath, ingestState: "downloaded" });
   updateJob(job, { phase: "verifying", percent: 96, message: ko ? "영상 재생·길이·크기 확인 중" : "Checking video playback, duration and dimensions" });
   const controller = new AbortController();
   verificationControllers.set(job.id, controller);
@@ -870,7 +1024,7 @@ async function verifiedVideoFile(job: MultimodalVideoJob, absPath: string, reque
   } catch (error) {
     if (error instanceof MediaVerificationError) {
       job.warnings.push(error.reasonCode);
-      throw new Error(ko ? `영상 결과를 확인하지 못했습니다. ${error.reasonCode === "media_verifier_unavailable" ? "FFmpeg와 ffprobe 설치가 필요합니다." : error.reasonCode === "media_output_criteria_mismatch" ? "요청한 길이·크기·오디오 조건과 다릅니다." : "파일이 완전한 영상인지 확인해 주세요."}` : error.message);
+      throw new MediaVerificationError(error.reasonCode, ko ? `영상 결과를 확인하지 못했습니다. ${error.reasonCode === "media_verifier_unavailable" ? "FFmpeg와 ffprobe 설치가 필요합니다." : error.reasonCode === "media_output_criteria_mismatch" ? "요청한 길이·크기·오디오 조건과 다릅니다." : "파일이 완전한 영상인지 확인해 주세요."}` : error.message);
     }
     throw error;
   } finally { if (verificationControllers.get(job.id) === controller) verificationControllers.delete(job.id); }
@@ -905,7 +1059,11 @@ function recordProviderPoll(job: MultimodalVideoJob, providerStatus: string, att
   const current = getMediaOperation(job.id);
   if (!current) throw new Error("media_operation_not_found");
   if (current.pollAttempts >= MAX_POLLS) throw new ProviderStatusUnknown("Provider polling reached its durable attempt limit; the job was not resubmitted.");
-  recordMediaProviderProgress({ id: job.id, providerStatus, providerCheckpoint });
+  const previous = current.providerCheckpoint;
+  const checkpoint = providerCheckpoint && typeof providerCheckpoint === "object" && !Array.isArray(providerCheckpoint)
+    ? { ...(previous && typeof previous === "object" && !Array.isArray(previous) ? previous : {}), ...providerCheckpoint }
+    : providerCheckpoint;
+  recordMediaProviderProgress({ id: job.id, providerStatus, providerCheckpoint: checkpoint });
   updateJob(job, { percent: Math.min(90, 25 + Math.round((attempt / MAX_POLLS) * 65)) });
 }
 
@@ -933,20 +1091,38 @@ function syncJobFromOperation(operation: MediaOperationRecord): void {
 }
 
 function scheduleVideoRecovery(id: string): void {
+  if (recoveryTimers.has(id)) return;
   const timer = setTimeout(() => {
+    recoveryTimers.delete(id);
     const current = getMediaOperation(id);
     if (current) void recoverVideoOperation(current).catch((error: unknown) => failJob(id, error));
   }, POLL_MS);
+  recoveryTimers.set(id, timer);
   timer.unref?.();
 }
 
-async function recoverVideoOperation(operation: MediaOperationRecord): Promise<void> {
+function recoverVideoOperation(operation: MediaOperationRecord): Promise<void> {
+  const pending = recoveryRuns.get(operation.id);
+  if (pending) return pending;
+  const run = Promise.resolve().then(() => {
+    const current = getMediaOperation(operation.id);
+    if (current) return recoverVideoOperationOnce(current);
+  });
+  recoveryRuns.set(operation.id, run);
+  void run.finally(() => { if (recoveryRuns.get(operation.id) === run) recoveryRuns.delete(operation.id); }).catch(() => undefined);
+  return run;
+}
+
+async function recoverVideoOperationOnce(operation: MediaOperationRecord): Promise<void> {
   if (operation.cancellation === "requested") {
     const receipt = await reconcileMediaOperation(operation.id);
-    syncJobFromOperation(receipt.operation);
-    return;
+    operation = receipt.operation;
+    syncJobFromOperation(operation);
+    // Settling a local stop does not finish recovery of the already-submitted provider operation.
   }
+  if (operation.cancellation === "confirmed" || operation.lifecycle === "succeeded" || operation.lifecycle === "failed") return;
   if (operation.lifecycle === "submit_intent") {
+    if (operation.cancellation !== "none") return;
     const intent = durableVideoIntent(operation.intent);
     if (!intent) throw new Error("media_video_operation_corrupt");
     await runAnimateJob(operation.id, intent.request);
@@ -959,17 +1135,42 @@ async function recoverVideoOperation(operation: MediaOperationRecord): Promise<v
   }
   if (operation.lifecycle === "verifying") {
     const intent = durableVideoIntent(operation.intent);
-    const checkpoint = operation.providerCheckpoint as { localPath?: unknown; resultUrl?: unknown } | null;
+    const checkpoint = operation.providerCheckpoint as { localPath?: unknown; resultUrl?: unknown; ingestState?: unknown } | null;
     const job = jobs.get(operation.id);
     if (!intent || !job) throw new Error("media_video_operation_corrupt");
-    const file = typeof checkpoint?.localPath === "string"
-      ? await verifiedVideoFile(job, checkpoint.localPath, intent.request)
-      : typeof checkpoint?.resultUrl === "string"
-        ? await downloadVideo(job, checkpoint.resultUrl, intent.request)
-        : null;
-    if (!file) throw new Error("media_video_verification_checkpoint_missing");
-    job.files = [file];
-    updateJob(job, { status: "succeeded", phase: "complete", message: currentUiLocale() === "ko" ? "애니메이션 완료" : "Animation complete", percent: 100 });
+    const kept = beginRetainAfterLocalStop(job);
+    try {
+      let file: MultimodalVideoFile | null = null;
+      const pending = videoIngestRuns.get(job.id);
+      if (pending) file = await pending;
+      else if (typeof checkpoint?.localPath === "string" && checkpoint.ingestState !== "downloading") {
+        try { file = await verifiedVideoFile(job, checkpoint.localPath, intent.request); }
+        catch (error) {
+          const incomplete = (error as NodeJS.ErrnoException).code === "ENOENT"
+            || (error instanceof MediaVerificationError && ["media_decode_failed", "media_video_stream_invalid", "media_output_size_invalid"].includes(error.reasonCode));
+          if (!incomplete || (typeof checkpoint.resultUrl !== "string" && !operation.providerOperationId)) throw error;
+          // A legacy localPath can name a crash partial. Preserve it and recover the same output, never a new generation.
+        }
+      }
+      if (!file && typeof checkpoint?.resultUrl === "string") {
+        try { file = await downloadVideo(job, checkpoint.resultUrl, intent.request); }
+        catch (error) {
+          if (!(error instanceof VideoResultFetchError) || ![403, 410].includes(error.status)
+            || !operation.providerOperationId || operation.capabilities.statusLookup !== "provider_operation_id") throw error;
+          // Refresh an expired storage URL by looking up the same accepted provider operation; never submit again.
+          const current = getMediaOperation(operation.id);
+          if (current) await pollRecoveredVideoOperation(current);
+          return;
+        }
+      }
+      if (!file) {
+        // A crashed Veo SDK download may have only a provider identity, never a complete local file.
+        if (operation.providerOperationId) { await pollRecoveredVideoOperation(operation); return; }
+        throw new Error("media_video_verification_checkpoint_missing");
+      }
+      job.files = [file];
+      updateJob(job, { status: "succeeded", phase: "complete", message: kept ? keptMessage() : (currentUiLocale() === "ko" ? "애니메이션 완료" : "Animation complete"), percent: 100 });
+    } finally { retainAfterLocalStop.delete(job.id); }
     return;
   }
   if (["provider_accepted", "running"].includes(operation.lifecycle) && operation.providerOperationId) {
@@ -982,9 +1183,23 @@ async function pollRecoveredVideoOperation(operation: MediaOperationRecord): Pro
   const job = jobs.get(operation.id);
   if (!intent || !job || !operation.providerOperationId) throw new Error("media_video_operation_corrupt");
   if (operation.pollAttempts >= MAX_POLLS) throw new ProviderStatusUnknown("Provider polling reached its durable attempt limit; the job was not resubmitted.");
-  const key = operation.providerId === "grok" ? null : await readFirstSecret(PROVIDER_KEYS[job.provider]);
-  if (job.provider !== "grok" && !key) throw new ProviderStatusUnknown("The provider credential is unavailable for restart reconciliation.");
+  const grokApi = job.provider === "grok" && isTextOnly(intent.request);
+  const key = operation.providerId === "grok" && !grokApi ? null : await readFirstSecret(grokApi ? XAI_KEYS : PROVIDER_KEYS[job.provider]);
+  if ((job.provider !== "grok" || grokApi) && !key) throw new ProviderStatusUnknown("The provider credential is unavailable for restart reconciliation.");
   try {
+    if (grokApi) {
+      const response = await fetch(`${XAI_BASE}/videos/${encodeURIComponent(operation.providerOperationId)}`, {
+        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      });
+      if (response.status === 429) { recordProviderPoll(job, "HTTP_429", operation.pollAttempts); scheduleVideoRecovery(job.id); return; }
+      if (!response.ok) throw new Error(`xAI video status HTTP ${response.status}`);
+      const outcome = grokVideoOutcome(await response.json());
+      recordProviderPoll(job, outcome.status || "unknown", operation.pollAttempts);
+      if (outcome.url) return completeRecoveredRemote(job, intent.request, outcome.url);
+      if (outcome.failure) throw new ProviderTerminalFailure(outcome.failure);
+      scheduleVideoRecovery(job.id);
+      return;
+    }
     if (job.provider === "runway") {
       const response = await fetch(`${RUNWAY_BASE}/v1/tasks/${operation.providerOperationId}`, {
         headers: { Authorization: `Bearer ${key}`, "X-Runway-Version": RUNWAY_VERSION, "Content-Type": "application/json" },
@@ -1059,41 +1274,65 @@ async function pollRecoveredVideoOperation(operation: MediaOperationRecord): Pro
     }
     throw new ProviderStatusUnknown("This local video adapter has no provider operation lookup.");
   } catch (error) {
-    if (error instanceof ProviderStatusUnknown || error instanceof ProviderTerminalFailure) throw error;
+    if (error instanceof ProviderStatusUnknown || error instanceof ProviderTerminalFailure || error instanceof MediaVerificationError) throw error;
     throw new ProviderStatusUnknown(`Provider status reconciliation was interrupted; no new submit was sent. ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
+/** Provider finished after a local stop: keep its output under the stop (cancellation state stays as it is). */
+function beginRetainAfterLocalStop(job: MultimodalVideoJob): boolean {
+  if (getMediaOperation(job.id)?.cancellation !== "unconfirmed") return false;
+  retainAfterLocalStop.add(job.id);
+  if (!job.warnings.includes("kept_after_local_stop")) job.warnings.push("kept_after_local_stop");
+  return true;
+}
+const keptMessage = () => currentUiLocale() === "ko" ? "기다림을 멈춘 뒤 완성되어 결과를 보관했습니다" : "Finished after you stopped waiting; the result was kept";
+
 async function completeRecoveredRemote(job: MultimodalVideoJob, request: MultimodalVideoRequest, url: string): Promise<void> {
-  const operation = getMediaOperation(job.id);
-  if (operation?.cancellation === "unconfirmed") {
-    const failed = recordMediaFailed(job.id, "provider_completed_after_local_cancel", "The provider completed after local waiting was cancelled; no output was downloaded.");
-    syncJobFromOperation(failed);
-    return;
-  }
-  updateJob(job, { phase: "downloading", message: currentUiLocale() === "ko" ? "결과 영상 다운로드 중" : "Downloading the result video", percent: 92 });
-  const file = await downloadVideo(job, url, request);
-  job.files = [file];
-  updateJob(job, { status: "succeeded", phase: "complete", message: currentUiLocale() === "ko" ? "애니메이션 완료" : "Animation complete", percent: 100 });
+  const kept = beginRetainAfterLocalStop(job);
+  try {
+    updateJob(job, { phase: "downloading", message: currentUiLocale() === "ko" ? "결과 영상 다운로드 중" : "Downloading the result video", percent: 92 });
+    const file = await downloadVideo(job, url, request);
+    job.files = [file];
+    updateJob(job, { status: "succeeded", phase: "complete", message: kept ? keptMessage() : (currentUiLocale() === "ko" ? "애니메이션 완료" : "Animation complete"), percent: 100 });
+  } finally { retainAfterLocalStop.delete(job.id); }
 }
 
 async function finishRecoveredVeo(job: MultimodalVideoJob, request: MultimodalVideoRequest, ai: GoogleGenAI, operation: GenerateVideosOperation): Promise<void> {
-  const durable = getMediaOperation(job.id);
-  if (durable?.cancellation === "unconfirmed") {
-    const failed = recordMediaFailed(job.id, "provider_completed_after_local_cancel", "Veo completed after local waiting was cancelled; no output was downloaded.");
-    syncJobFromOperation(failed);
-    return;
-  }
+  const kept = beginRetainAfterLocalStop(job);
+  try { await ingestRecoveredVeo(job, request, ai, operation, kept); }
+  finally { retainAfterLocalStop.delete(job.id); }
+}
+
+async function ingestRecoveredVeo(job: MultimodalVideoJob, request: MultimodalVideoRequest, ai: GoogleGenAI, operation: GenerateVideosOperation, kept: boolean): Promise<void> {
+  const file = await runVideoIngest(job.id, () => ingestRecoveredVeoOnce(job, request, ai, operation));
+  job.files = [file];
+  updateJob(job, { status: "succeeded", phase: "complete", message: kept ? keptMessage() : (currentUiLocale() === "ko" ? "애니메이션 완료" : "Animation complete"), percent: 100 });
+}
+
+async function ingestRecoveredVeoOnce(job: MultimodalVideoJob, request: MultimodalVideoRequest, ai: GoogleGenAI, operation: GenerateVideosOperation): Promise<MultimodalVideoFile> {
   const video = operation.response?.generatedVideos?.[0]?.video;
   if (!video) throw new Error("Veo completed without a video.");
-  const absPath = path.join(job.outputDir, `${safeSlug(job.title)}-${job.id.slice(0, 8)}.mp4`);
+  const absPath = path.join(job.outputDir, `.video-ingest-${randomUUID()}.part`);
   await fs.mkdir(job.outputDir, { recursive: true });
-  if (video.videoBytes) await fs.writeFile(absPath, Buffer.from(video.videoBytes, "base64"));
-  else if (video.uri) await ai.files.download({ file: video.uri, downloadPath: absPath });
-  else throw new Error("Veo completed without downloadable bytes.");
-  const file = await verifiedVideoFile(job, absPath, request);
-  job.files = [file];
-  updateJob(job, { status: "succeeded", phase: "complete", message: currentUiLocale() === "ko" ? "애니메이션 완료" : "Animation complete", percent: 100 });
+  checkpointVideoIngest(job.id, { stagingPath: absPath, localPath: null, ingestState: "downloading",
+    ...(video.uri ? { veoResultUri: video.uri } : {}) });
+  try {
+    if (video.videoBytes) await fs.writeFile(absPath, Buffer.from(video.videoBytes, "base64"));
+    else if (video.uri) await ai.files.download({ file: video.uri, downloadPath: absPath });
+    else throw new Error("Veo completed without downloadable bytes.");
+  } catch (error) {
+    // A partial file (disk full, interrupted download) must not block the next recovery attempt.
+    await fs.unlink(absPath).catch(() => undefined);
+    throw error;
+  }
+  return verifiedVideoFileOnce(job, absPath, request);
+}
+
+// Veo accepts 4, 6 or 8 seconds.
+function veoTextDuration(sec: number | undefined): number {
+  const wanted = sec ?? 6;
+  return wanted <= 5 ? 4 : wanted <= 7 ? 6 : 8;
 }
 
 function clampDuration(sec: number | undefined): number {
@@ -1143,7 +1382,24 @@ function updateJob(
 function failJob(id: string, error: unknown): void {
   const job = jobs.get(id);
   if (!job) return;
-  if (job.status === "cancelled") return;
+  const current = getMediaOperation(id);
+  // Retrying ingest or looking up an accepted operation cannot create another chargeable generation.
+  // Keep the durable checkpoint after transient I/O/verification interruption, even while the local job is stopped.
+  const retryIngest = current?.lifecycle === "verifying" && !(error instanceof ProviderTerminalFailure)
+    && !(error instanceof MediaVerificationError && !["media_verification_cancelled", "media_verifier_unavailable", "media_verification_timeout"].includes(error.reasonCode));
+  const retryLookup = current?.providerOperationId
+    && (error instanceof ProviderStatusUnknown || (error instanceof AnimateCancelled && current.cancellation === "unconfirmed"))
+    && ["provider_accepted", "running"].includes(current.lifecycle);
+  if (current && current.cancellation !== "confirmed" && (retryIngest || retryLookup)) {
+    if (current.pollAttempts < MAX_POLLS) {
+      const deferred = recordMediaProviderProgress({ id, providerStatus: retryIngest ? "INGEST_INTERRUPTED" : "LOOKUP_INTERRUPTED",
+        providerCheckpoint: current.providerCheckpoint ?? undefined });
+      syncJobFromOperation(deferred);
+      scheduleVideoRecovery(id);
+    }
+    return;
+  }
+  if (job.status === "cancelled" && !(error instanceof ProviderTerminalFailure) && !(error instanceof MediaVerificationError)) return;
   try {
     if (error instanceof ProviderStatusUnknown) {
       const current = getMediaOperation(id);
@@ -1185,7 +1441,11 @@ function failJob(id: string, error: unknown): void {
 }
 
 function assertNotCancelled(id: string): void {
-  if (cancelledJobs.has(id)) throw new AnimateCancelled();
+  if (cancelledJobs.has(id) && !retainAfterLocalStop.has(id)) throw new AnimateCancelled();
+}
+
+class VideoResultFetchError extends Error {
+  constructor(readonly status: number, message: string) { super(message); }
 }
 
 class AnimateCancelled extends Error {

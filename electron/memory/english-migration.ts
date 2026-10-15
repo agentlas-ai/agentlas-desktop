@@ -15,7 +15,8 @@
 import { powerMonitor } from "electron";
 import { looksSecret } from "../../shared/secret-patterns";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
-import { getDb, openedStoreMigrationRole } from "../store/db";
+import { openedStoreMigrationRole } from "../store/db";
+import { getMemoryDb as getDb } from "./database";
 import { getMeta, setMeta } from "../store/meta";
 import { runSlotStats, runSlotsQuietForMs } from "../runtime/run-slots";
 import { dreamingIdleRequiredSec } from "./curator-rules";
@@ -143,14 +144,9 @@ export function judgeTranslation(
 }
 
 export const TRANSLATOR_SYSTEM_PROMPT = [
-  "You translate short memory notes into English for a search index.",
-  "Translate the meaning faithfully and concisely. Do not add, drop or explain facts.",
-  "Copy every ASCII token exactly as written: identifiers, file names and paths, URLs, commands, flags,",
-  "numbers, versions, product and model names, and anything inside backticks — same spelling and case.",
-  "Write numbers as digits, as in the source. Never expand an acronym or rename an identifier.",
-  "Output English only.",
-  'Return ONLY JSON: {"items":[{"id":"<id>","en":"<english>"}]} with exactly one item per input id.',
-  "No markdown fences, no commentary.",
+  "task: translate short memory notes into English for a search index; faithful, concise, no added or dropped facts; English only",
+  "copy exactly: identifiers, file names, paths, URLs, commands, flags, numbers (digits), versions, product/model names, anything in backticks; never expand acronyms or rename",
+  'output: ONLY JSON {"items":[{"id":"<id>","en":"<english>"}]}, one item per input id, no fences, no commentary',
 ].join("\n");
 
 /** Strict parse: one object, `items` array, ids from the batch only. */

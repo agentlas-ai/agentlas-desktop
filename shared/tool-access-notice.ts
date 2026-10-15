@@ -46,59 +46,29 @@ export function buildToolAccessNotice(input: ToolAccessNoticeInput): string {
   const available = input.availableTools.filter((name) => name.trim().length > 0);
   const blocked = (input.blockedTools ?? []).filter((name) => name.trim().length > 0);
   const pending = (input.pendingApprovalTools ?? []).filter((name) => name.trim().length > 0);
+  // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger terminal.access-notice.tools.system).
   const lines: string[] = [];
 
-  // ① 지금 무엇이 붙어 있는가 — 0개일 때도 반드시 말한다.
-  lines.push(
-    available.length > 0
-      ? `Tools available in this run: ${available.join(", ")}.`
-      : "No tools are connected in this run.",
-  );
+  lines.push("install/enable: user decides → show slug, permissions, credentials needed; never on your own");
+  lines.push("nothing covers the need: say so; never describe a tool call you did not make");
 
-  // ② 이미 이 기계에 있고 켜기만 하면 되는 것 — 새로 설치하라고 말하기 전에 알려야 한다.
+  lines.push(available.length > 0 ? `tools: ${available.join(", ")}` : "tools: none");
+
   if (pending.length > 0) {
-    lines.push(
-      `Already attached but switched off, waiting for the user to approve local execution: ${pending.join(", ")}. ` +
-      "Ask the user to approve it instead of installing anything new.",
-    );
+    lines.push(`attached but off, awaiting user approval: ${pending.join(", ")} → ask to approve; no new install`);
   }
 
-  // ③ 없다고 단정하기 전에 어디를 보는지 — 방법을 이름으로 준다.
   if (input.hubCatalogAvailable) {
-    lines.push(
-      `Before telling the user a capability is unavailable, call ${resolveTool} with the capability you need. ` +
-      "The Agentlas Hub catalog covers integrations that are not installed here yet.",
-    );
+    lines.push(`before saying a capability is unavailable: call ${resolveTool}(capability) → Hub catalog lists uninstalled integrations`);
   } else if (input.hubCatalogError) {
-    lines.push(
-      `The Agentlas Hub catalog could not be reached this run (${input.hubCatalogError}). ` +
-      "Say that the catalog is unreachable rather than that no such tool exists.",
-    );
+    lines.push(`Hub catalog unreachable (${input.hubCatalogError}) → say unreachable, not "no such tool"`);
   } else {
-    lines.push(
-      "The Agentlas Hub catalog is not reachable from this surface. " +
-      "Say what you cannot do and why; do not claim a capability that is not connected.",
-    );
+    lines.push("Hub catalog not reachable here → state limits; no claims of unconnected capabilities");
   }
 
-  // ④ 설치는 사람이 한다 — 경계를 매번 다시 말한다.
-  lines.push(
-    "Never install or enable a tool on your own. Show the slug, what it will be allowed to do, " +
-    "and whether it needs credentials, then let the user decide.",
-  );
-
-  // ⑤ 자격증명이 막고 있는 것은 사람에게 물어야 풀린다.
   if (blocked.length > 0) {
-    lines.push(
-      `Matched but unusable until credentials are set: ${blocked.join(", ")}. ` +
-      "Ask for those only if this task actually needs them.",
-    );
+    lines.push(`blocked until credentials set: ${blocked.join(", ")} → ask only if the task needs them`);
   }
-
-  // ⑥ 지어내기 금지 — 없으면 없다고 한다.
-  lines.push(
-    "If nothing covers the need, say so plainly. Do not describe a tool call you did not make.",
-  );
 
   return lines.join("\n");
 }

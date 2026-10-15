@@ -217,18 +217,17 @@ async function runModelReview(
       defExcerpt = "";
     }
   }
+  // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.hephaestus.publish.review.system).
   const system = [
-    "You review an Agentlas agent package before it is published to the PUBLIC Agentlas Hub.",
-    "Decide, generically, what must be removed and fix bilingual metadata. Return JSON only, no prose.",
-    "EXCLUDE from the published package (add relative paths to `exclude`): local build artifacts and",
-    "developer junk (virtualenvs, caches, lockfile-only tooling dirs, editor config, OS cruft), symlinks,",
-    "and any secret-bearing file (real .env with values, private keys, credentials). Keep instructional",
-    "files and env KEY-NAME templates like .env.example. Never exclude the agent definition, README, or skills.",
+    "judgment: pre-publish review of an Agentlas agent package for the PUBLIC Hub",
+    "exclude: relative paths of build artifacts, developer junk (venvs, caches, lockfile-only dirs, editor config, OS cruft), symlinks, secret-bearing files (real .env values, private keys, credentials); keep instructional files and .env.example key-name templates; never the agent definition, README, skills",
+    "acknowledgeWarns: {path,type,reason} for benign prompt-injection/destructive-command WARNs (docs, examples, own instructions); never real secrets or exfiltration",
     needLocalized
-      ? "The package is missing verified bilingual metadata. Produce `localized` with titleEn, titleKo, descriptionEn, descriptionKo. Base it STRICTLY on the provided `agent` object (its real name, tagline, and definitionExcerpt) — translate THIS specific agent faithfully into natural English and Korean. Do NOT invent a generic name or capabilities the agent does not have."
-      : "Bilingual metadata is present; set `localized` to null.",
-    "For prompt-injection / destructive-command WARN findings that are actually benign (documentation, examples, the agent's own legitimate instructions), list them in `acknowledgeWarns` with {path,type,reason}. Do NOT acknowledge anything that is a real secret or a real exfiltration.",
-    'Return exactly: {"exclude":[],"localized":null,"acknowledgeWarns":[]}',
+      ? "localized: required (bilingual metadata missing): titleEn, titleKo, descriptionEn, descriptionKo; translate THIS agent faithfully from the provided `agent` object only; invent no name or capability"
+      : "localized: null (bilingual metadata present)",
+    // The output contract closes the prompt (final-boundary).
+    "output: JSON only",
+    'schema: {"exclude":[],"localized":null,"acknowledgeWarns":[]}',
   ].join("\n");
   const user = JSON.stringify({
     agent: { name: cardName, tagline: cardTagline, definitionExcerpt: defExcerpt },
@@ -239,7 +238,7 @@ async function runModelReview(
   // A slow or stuck model must never block publishing forever — bound the
   // review and fall back to the deterministic backstop if it runs long.
   const timeout = new AbortController();
-  const timer = setTimeout(() => timeout.abort(), 90_000);
+  const timer = setTimeout(() => timeout.abort(), 300_000);
   if (signal) {
     if (signal.aborted) timeout.abort();
     else signal.addEventListener("abort", () => timeout.abort(), { once: true });
@@ -513,19 +512,16 @@ async function llmFixFile(
   locale: "ko" | "en",
 ): Promise<FileFix> {
   const system = [
-    "You remediate ONE file in an Agentlas agent package so it passes a public-Hub security scan and can be uploaded.",
-    "The goal is ALWAYS a successful upload — fix the file, do not give up.",
-    "Return JSON only: {\"action\":\"rewrite\"|\"exclude\",\"content\":\"<full fixed file when rewriting>\",\"reason\":\"...\"}.",
-    "Rules:",
-    "- Real secret VALUES (API keys, tokens, passwords, private keys): replace ONLY the value with a clear placeholder like <YOUR_API_KEY> or ${API_KEY}. Keep the surrounding docs/code intact.",
-    "- Documentation examples / format specs / field names that merely LOOK like keys (e.g. `sk-ant-...`, `x-api-key` header names): make them unambiguous placeholders (e.g. `sk-ant-<YOUR_KEY>`) so the scanner is satisfied, preserving the explanation.",
-    "- Remote-shell-install patterns (curl … | sh): rewrite into explicit, reviewable steps (download, verify, run) or an inert fenced example.",
-    "- If and only if the file is pure local junk / a real credential file with nothing reusable, return action \"exclude\".",
-    "- Prefer rewrite over exclude. When rewriting, return the COMPLETE file content, changed minimally.",
+    "judgment: remediate ONE file so it passes the public-Hub security scan; goal is always a successful upload",
+    "secret VALUES: replace only the value with a placeholder like <YOUR_API_KEY> or ${API_KEY}; keep the rest",
+    "key-like examples / format specs / field names (`sk-ant-...`, `x-api-key`): unambiguous placeholders (`sk-ant-<YOUR_KEY>`); keep the explanation",
+    "curl … | sh: explicit reviewable steps (download, verify, run) or an inert fenced example",
+    "exclude: only pure local junk or a real credential file with nothing reusable; otherwise rewrite with the COMPLETE file, minimal change",
+    "output: JSON only {\"action\":\"rewrite\"|\"exclude\",\"content\":\"<full fixed file when rewriting>\",\"reason\":\"...\"}",
   ].join("\n");
   const user = JSON.stringify({ file: rel, blockers: messages.slice(0, 8), content: content.slice(0, 24000) });
   const timeout = new AbortController();
-  const timer = setTimeout(() => timeout.abort(), 90_000);
+  const timer = setTimeout(() => timeout.abort(), 300_000);
   if (signal) {
     if (signal.aborted) timeout.abort();
     else signal.addEventListener("abort", () => timeout.abort(), { once: true });

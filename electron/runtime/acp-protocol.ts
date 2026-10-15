@@ -12,6 +12,18 @@
 // as requests with an id and must be answered.
 import type { ChildProcess } from "node:child_process";
 import { onJsonLines } from "./json-lines";
+import { NativeTransportDiagnostics, NativeProtocolDiagnostics, nativeRequestMethod, nativeSpawnErrorCode, type NativeTransportSnapshot, type NativeProtocolCounters, type NativeFailureEvidence } from "./native-runtime-diagnostics";
+import { types } from "node:util";
+export { createNativeRuntimeDiagnostic, NativeProtocolDiagnostics, NativeTransportDiagnostics, nativeProcessErrorCode } from "./native-runtime-diagnostics";
+
+const acpFailures=new WeakMap<object,NativeFailureEvidence>();
+const safeFailure=(category:NativeFailureEvidence["category"],method:unknown=null,rpcCode:unknown=null,timeoutMs:unknown=null):NativeFailureEvidence=>Object.freeze({category,requestMethod:nativeRequestMethod(method),rpcCode:typeof rpcCode==="number"&&Number.isInteger(rpcCode)&&rpcCode>=-2147483648&&rpcCode<=2147483647?rpcCode:null,timeoutMs:typeof timeoutMs==="number"&&Number.isSafeInteger(timeoutMs)&&timeoutMs>0&&timeoutMs<=86400000?timeoutMs:null});
+export function classifyAcpFailure(error:unknown):NativeFailureEvidence { return error&&typeof error==="object"?acpFailures.get(error)??safeFailure("unknown"):safeFailure("unknown"); }
+export class AcpTransportClosedError extends Error {
+  readonly transport:NativeTransportSnapshot|null;
+  constructor(message:string,transport:NativeTransportSnapshot|null){super(message);this.name="AcpTransportClosedError";this.transport=transport;acpFailures.set(this,safeFailure("transport-ended"));}
+}
+
 
 export const ACP_PROTOCOL_VERSION = 1;
 
@@ -24,18 +36,23 @@ export interface JsonRpcError {
 export class AcpRpcError extends Error {
   readonly code: number;
   readonly data: unknown;
-  constructor(err: JsonRpcError) {
+  constructor(err: JsonRpcError, method?:string) {
     super(err.message || `ACP error ${err.code}`);
     this.name = "AcpRpcError";
     this.code = err.code;
     this.data = err.data;
+    acpFailures.set(this,safeFailure("rpc-error",method,err.code));
   }
 }
 
 export class AcpTimeoutError extends Error {
+  readonly method:string;
+  readonly timeoutMs:number;
   constructor(method: string, ms: number) {
     super(`ACP ${method} timed out after ${ms}ms`);
     this.name = "AcpTimeoutError";
+    this.method=method;this.timeoutMs=ms;
+    acpFailures.set(this,safeFailure("rpc-timeout",method,null,ms));
   }
 }
 
@@ -62,18 +79,23 @@ export class AcpConnection {
   private readonly pending = new Map<number, Pending>();
   private closed = false;
   private stderrTail = "";
+  private readonly transportDiagnostics=new NativeTransportDiagnostics();
+  private readonly protocolDiagnostics=new NativeProtocolDiagnostics();
 
   constructor(private readonly child: ChildProcess, private readonly handlers: AcpConnectionHandlers = {}) {
     if (!child.stdout || !child.stdin) throw new Error("ACP agent must be spawned with piped stdio");
     // Split on "\n" only: readline also breaks at U+2028/U+2029, which JSON carries inside strings (./json-lines).
     onJsonLines(child.stdout, (line) => this.onLine(line));
     child.stderr?.on("data", (buf: Buffer) => {
+      try{this.transportDiagnostics.addStderr(buf);}catch{/* Preserve legacy stderr handling if observation fails. */}
       this.stderrTail = (this.stderrTail + buf.toString("utf8")).slice(-4000);
     });
     const finish = (code: number | null) => {
       if (this.closed) return;
       this.closed = true;
-      const err = new Error(`ACP agent closed (exit ${code ?? "?"})${this.stderrTail ? `: ${this.stderrTail.trim().slice(-300)}` : ""}`);
+      let transport:NativeTransportSnapshot|null=null;
+      try{transport=this.transportDiagnostics.snapshot();}catch{/* Optional diagnostics cannot gate pending rejection or close notification. */}
+      const err = new AcpTransportClosedError(`ACP agent closed (exit ${code ?? "?"})${this.stderrTail ? `: ${this.stderrTail.trim().slice(-300)}` : ""}`,transport);
       for (const p of this.pending.values()) {
         p.cleanup?.();
         p.reject(err);
@@ -81,10 +103,14 @@ export class AcpConnection {
       this.pending.clear();
       this.handlers.onClose?.(code);
     };
-    child.on("close", finish);
-    child.on("error", () => finish(null));
-    child.stdout.on("end", () => finish(child.exitCode));
+    child.on("close", (code,signal) => {try{this.transportDiagnostics.childClosed(code,signal);}catch{/* Observation must not block closure. */}finish(code);});
+    child.on("error", (error) => {try{const code=error&&typeof error==="object"&&!types.isProxy(error)?Object.getOwnPropertyDescriptor(error,"code")?.value:undefined;this.transportDiagnostics.childError(nativeSpawnErrorCode(code));}catch{/* Observation must not block closure. */}finish(null);});
+    child.stdout.on("end", () => {try{this.transportDiagnostics.transportEnded("stdout-end");}catch{/* Observation must not block closure. */}finish(child.exitCode);});
   }
+
+  diagnosticSnapshot():{transport:NativeTransportSnapshot;protocol:NativeProtocolCounters} {return Object.freeze({transport:this.transportDiagnostics.snapshot(),protocol:this.protocolDiagnostics.snapshot()});}
+
+  private noteProtocol(key:keyof NativeProtocolCounters):void {try{this.protocolDiagnostics.increment(key);}catch{/* Optional counters cannot alter parser or handler semantics. */}}
 
   get lastStderr(): string {
     return this.stderrTail;
@@ -96,29 +122,33 @@ export class AcpConnection {
   }
 
   private onLine(line: string): void {
+    this.noteProtocol("lines");
     const trimmed = line.trim();
     if (!trimmed) return;
     let msg: any;
     try {
       msg = JSON.parse(trimmed);
+      this.noteProtocol("parsed");
     } catch {
+      this.noteProtocol("invalidJson");
       return; // agents sometimes log to stdout; ignore non-JSON lines
     }
-    if (!msg || typeof msg !== "object") return;
+    if (!msg || typeof msg !== "object") {this.noteProtocol("invalidShape");return;}
     if (msg.id !== undefined && msg.method) {
+      this.noteProtocol("requests");
       void this.answer(msg);
       return;
     }
     if (msg.id !== undefined) {
       const p = this.pending.get(Number(msg.id));
-      if (!p) return;
+      if (!p) {this.noteProtocol("unmatchedResponses");return;}
       this.pending.delete(Number(msg.id));
       p.cleanup?.();
-      if (msg.error) p.reject(new AcpRpcError(msg.error));
+      if (msg.error) p.reject(new AcpRpcError(msg.error,p.method));
       else p.resolve(msg.result ?? {});
       return;
     }
-    if (msg.method) this.handlers.onNotification?.(String(msg.method), msg.params ?? {});
+    if (msg.method) {this.noteProtocol("notifications");try{this.handlers.onNotification?.(String(msg.method), msg.params ?? {});}catch(error){this.noteProtocol("handlerErrors");throw error;}}else this.noteProtocol("invalidShape");
   }
 
   private async answer(req: any): Promise<void> {
@@ -129,6 +159,7 @@ export class AcpConnection {
       const result = await this.handlers.onRequest(method, req.params ?? {});
       reply.result = result ?? {};
     } catch (err) {
+      this.noteProtocol("handlerErrors");
       reply.error = err instanceof AcpRpcError
         ? { code: err.code, message: err.message, ...(err.data !== undefined ? { data: err.data } : {}) }
         : { code: -32603, message: err instanceof Error ? err.message : String(err) };

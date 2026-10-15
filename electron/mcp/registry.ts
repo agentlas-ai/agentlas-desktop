@@ -10,6 +10,7 @@ import { agentFolderPath, materializeAgentFiles } from "../agents/files";
 import { getRoute, removeRoute, setRoute, type AgentRoute, type RuntimeLabel } from "../agents/routes";
 import { isPrivateWebOnlyAgent, publicAgentVisibility } from "../agents/policy";
 import { isScratchImportPath } from "./scratch-import";
+import { recoverRestoredTeamFirms } from "../cloud-agents/team-firm";
 import { deriveListingEntityKind, entityKindAfterRefresh } from "../agents/entity-kind";
 import { readCloudAgentRestoreMarker } from "../cloud-agents/restore";
 import {
@@ -154,6 +155,7 @@ export function backfillEntityKinds(): void {
 
 export function listInstalledAgents(): InstalledAgent[] {
   recoverCloudRegistryTransactions();
+  recoverRestoredTeamFirms();
   try {
     // The dedupe module owns its route-generation cache. Calling it on every
     // projection is cheap when unchanged, and lets a deferred definition-hash
@@ -179,6 +181,7 @@ export function listInstalledAgentsReadOnly(): InstalledAgent[] {
 
 export function getAgentById(id: string): InstalledAgent | null {
   recoverCloudRegistryTransactions();
+  recoverRestoredTeamFirms(id);
   const row = getDb()
     .prepare("SELECT * FROM installed_agents WHERE id = ?")
     .get(id) as AgentRow | undefined;
@@ -486,6 +489,7 @@ function persistListing(
 
   // External-tool discovery is intentionally post-commit and best-effort. A
   // catalog registration can neither split nor veto the package transaction.
+  recoverRestoredTeamFirms(id);
   autoRegisterAgentTools(listing);
   replaceInstalledAgentHubBinding({
     installedAgentId: id,

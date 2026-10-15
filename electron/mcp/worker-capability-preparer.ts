@@ -24,7 +24,7 @@ export class WorkerCapabilityMaterializationError extends WorkerCapabilityError 
   }
 }
 // One bounded asynchronous pool attempt accommodates measured cold CLI judgments.
-export const WORKER_CAPABILITY_SELECTION_TIMEOUT_MS = 90_000;
+export const WORKER_CAPABILITY_SELECTION_TIMEOUT_MS = 300_000;
 const permissionRank = { read: 0, write: 1, full: 2 } as const;
 const scopeKey = (scope: ActiveGoalToolScope) => JSON.stringify([scope.goalId, scope.revision, scope.permission, scope.objective, scope.acceptanceCriteria]);
 
@@ -61,10 +61,12 @@ export function createWorkerCapabilityPreparer(deps: PreparationDependencies): P
     if (deps.baselineIds.some((id) => !available.has(id))) {
       throw new WorkerCapabilityError("worker-capability-inventory-changed");
     }
-    const task = JSON.stringify({ brief: input.task.brief, doneWhen: input.task.doneWhen,
-      expectedOutput: input.task.expectedOutput, constraints: input.task.constraints,
+    // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.mcp.worker-capability.selection-task).
+    const task = JSON.stringify({
+      instruction: "Select only capabilities genuinely required for this worker packet and its completion evidence. Existing tools remain available; do not pad the selection.",
       alreadyAvailableToolIds: deps.baselineIds,
-      instruction: "Select only capabilities genuinely required for this worker packet and its completion evidence. Existing tools remain available; do not pad the selection." });
+      brief: input.task.brief, doneWhen: input.task.doneWhen,
+      expectedOutput: input.task.expectedOutput, constraints: input.task.constraints });
     const memoKey = createHash("sha256").update(JSON.stringify([expectedScope, inventory.fingerprint,
       input.permission, input.cwd, task])).digest("hex");
     const cachedIds = reselection ? undefined : selectionMemo.get(memoKey);

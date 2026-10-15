@@ -171,11 +171,12 @@ export function createNativeInvocationPublicPublisher(options: {
         ack(identity: NativeAuthenticatedIdentity, input: unknown): void { current(); if (identity !== options.identity)
             fail("native_public_identity_changed"); const item = queue[0]; if (!exact(input, ["version", "stream", "sequence", "sha256"]) || input.version !== VERSION || input.stream !== stream || !item || input.sequence !== item.descriptor.sequence || input.sha256 !== item.descriptor.sha256)
             fail("native_public_ack_invalid"); queue.shift(); if (item.releaseObservation) { const chatId = observedRuns.get(item.releaseObservation); if (chatId !== undefined) observationBytes -= Buffer.byteLength(item.releaseObservation) + Buffer.byteLength(chatId); observedRuns.delete(item.releaseObservation); } retainedBytes -= item.bytes.length; announced = false; announce(); },
-        dispose: () => close(), get available() { return available && options.getIdentity() === options.identity; }, get retainedBytes() { return retainedBytes; }, get pendingItems() { return queue.length; }, get observationBytes() { return observationBytes; },
+        get stream() { return stream; }, dispose: () => close(), get available() { return available && options.getIdentity() === options.identity; }, get retainedBytes() { return retainedBytes; }, get pendingItems() { return queue.length; }, get observationBytes() { return observationBytes; },
     };
 }
 /** Feed only authenticated native channel notifications. Identity is the actual captured local object. */
 export function createNativeInvocationPublicReceiver(options: {
+    expectedStream?: string;
     identity: NativeAuthenticatedIdentity;
     getIdentity(): NativeAuthenticatedIdentity | null;
     maxRetainedBytes: number;
@@ -223,6 +224,9 @@ export function createNativeInvocationPublicReceiver(options: {
             return; try {
             current();
             const d = descriptor(input);
+            // A reset pins the signed source stream. Late original stream notifications
+            // are obsolete observations, never a fault of the new receiver.
+            if (options.expectedStream !== undefined && d.stream !== options.expectedStream) return;
             if (d.sequence !== sequence + 1 || (stream !== undefined && stream !== d.stream) || d.bytes > capacity || next)
                 fail("native_public_sequence_or_capacity");
             stream = d.stream;

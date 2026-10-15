@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.43 — 2026-10-15
+
+- The Agentlas harness now drives every runtime the same way: compact prompt modules with typed tools instead of long instructions, sessions that carry over for API, local models, Antigravity and Terminal runs, and one schema for every app operation.
+- When a browser or computer action is blocked by a macOS, Windows or Linux permission, the app shows which permission is missing and opens the right settings page; it never turns a permission on by itself.
+- Messages start after the shared memory-store upgrade, and switching back to a room no longer restarts an already rejected team reservation or flashes a temporary Stop button.
+- The next direction and later Goal, team and Graph work no longer wait for an older completion or effect receipt; semantic checks have a five-minute budget.
+- Automation results can go to your personal review, the background service keeps the Alive clock, connectors keep a stable identity across runs, and video jobs resume without resubmitting.
+- Many smaller fixes across One, Work, rooms, Graphs and Goals.
+- This release binds Agentlas OS v1.2.63 at 70b53f0714865617ca5a4947fbd8c113078d572f; public runtime asset `hephaestus-runtime-v1.2.63.tar.gz` is pinned at SHA-256 `16589f4d43e98c5bdd15e8c6f01acd62174f55cad6a3507fe21464bc4b58187e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.40 — 2026-10-15
 
 - Your message always starts: a slow pre-check no longer refuses it, and a refused automatic retry is no longer resent several times a second, which made a room flicker between working and idle.

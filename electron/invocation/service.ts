@@ -1,12 +1,16 @@
+import { createClosedFactRetry } from "../runtime/fresh-reservation-frontier";
 import { withoutOnePersonalNativeOriginal } from "../secrets/one-personal-native-entry";
 import { captureOrdinaryOneTurn, type OrdinaryOneTurnSource, type OrdinaryOneTurnMode, type OrdinaryOneTurnState } from "./ordinary-one-turn";
 import { nativeOwnerTextChoices, NATIVE_OWNER_TEXT_CONTEXT_OMITTED } from "./native-owner-text";
 import type { NativeOwnerTextBinding, NativeOwnerTextInput, NativeOwnerTextReceipt } from "./native-owner-text";
 import { withNativeApprovalExecution } from "../runtime/native-approval-provenance";
-import { getAuthenticatedActorIds } from "../auth";
-import { takeNativeInvocationIngressSource, validateNativeIngressRequest, type NativeInvocationIngressSource, type NativeIngressBinding } from "./native-ingress-source";
+import { invocationRunPriority, withRunPriority } from "../runtime/run-priority";
+import { getAuthenticatedActorIds, onAuthSessionOwnershipChanged, onAuthSessionRestored } from "../auth";
+import { agentContextOwnerBinding } from "../runtime/agent-context-admission";
+import { buildTeamSessionHandoff, teamDispatchReceiverCurrent } from "../one/session-handoff";
+import { takeNativeInvocationIngressSource, validateNativeIngressRequest, type NativeInvocationIngressSource, type NativeIngressBinding, type NativeIngressPrepared } from "./native-ingress-source";
 import { createNativePreparationLifetime, withNativePreparationLifetime, runNativePreparation, type NativePreparationLifetime } from "../runtime/native-preparation-lifetime";
-import { assertNativeOneStartPort, isLocalInvocationPreparationPort, driveLocalOneStart, driveNativeOneStart, oneStartCheckpoint, type NativeOneStartCheckpoint, type NativeOneStartPort, type NativeOneStartBinding } from "./native-start-checkpoints";
+import { assertNativeOneStartPort, isLocalInvocationPreparationPort, driveLocalOneStart, driveNativeOneStart, oneStartCheckpoint, nativeOneStartCheckpointFailureKind, type NativeOneStartCheckpoint, type NativeOneStartPort, type NativeOneStartBinding } from "./native-start-checkpoints";
 import { canResumeInvocationBrowserLoginWait, claimInvocationBrowserLoginWait, registerInvocationBrowserLoginWait, settleInvocationBrowserLoginWait,
   type BrowserLoginWaitHandle, type InvocationBrowserLoginWait } from "./browser-login-wait";
 import { isOneQuietReply } from "../../shared/one-supervisor";
@@ -24,6 +28,7 @@ import { parseRunEventReplayInput, type RunEventReplay } from "../../shared/run-
 import { withInvocationAccounting } from "../long-run/accounting-context";
 import { longRunMonetaryRefusal } from "../long-run/budget";
 import { runtimeFailureBlocksReplay } from "../runtime/selection";
+import { runtimeFailureBlocksNextAutomaticTurn } from "../../shared/runtime-turn-admission";
 import { captureGoalEpisode, applyGoalEpisodeRest, drainGoalEpisodeNotices,
   captureGoalProducerAdmission, admitGoalProducer, assertGoalProducerDispatch, latestGoalEpisodeProducer, type GoalProducerAdmission } from "../long-run/episode-disposition";
 import { latestGoalWaitSubscription, registerGoalWaitSubscription, registerOngoingGoalCycle, restoreGoalWaitAfterUndispatchedStart, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
@@ -148,6 +153,7 @@ import {
   INVOCATION_ADMISSION_DIGEST_VERSION,
   getInvocationAdmission,
   decideInvocationAdmission,
+  rejectClosedNativeIngressAdmission,
   getPendingInvocationAdmissionForChat,
   type InvocationAdmissionIdentity,
 } from "../store/invocation-admissions";
@@ -160,6 +166,10 @@ import { acknowledgeGoalExecutionResume, captureNativeGoalStopOwner, currentAuto
 import { stopWorkspacePreviewsForTaskScope } from "../workspace-preview/control-server";
 import {
   beginQueuedSteerDrain,
+  bindQueuedTeamReportCustody,
+  queuedTeamReportDigest,
+  releaseQueuedSteerRecoveryHold,
+  type QueuedTeamReportCustody,
   canonicalQueuedSteerRequest,
   cancelQueuedSteersForChat,
   getDurableQueuedSteer,
@@ -242,7 +252,7 @@ import {
 } from "../one/attachments";
 import { redactMcpInvocationEventSecrets } from "./event-secret-redaction";
 import { redactSecrets } from "../../shared/secret-patterns";
-import { invocationErrorDiagnostic } from "./error-diagnostic";
+import { invocationErrorDiagnostic, nativePreparationErrorDiagnostic, type NativePreparationDiagnosticPhase } from "./error-diagnostic";
 import { normalizeOneRecurrenceSelectionV1 } from "../../shared/one-recurrence";
 import { classifyOneRequestIntent } from "../../shared/one-request-intent";
 import { oneVersionPinRosterIds } from "../../shared/one-team-preflight";
@@ -358,6 +368,7 @@ interface OrdinaryOneTurnLifetime {
   executionClosed: boolean;
 }
 interface NativePreparingPending {
+  startBoundary: StartBoundary;
   request: Readonly<McpInvocationRequest>;
   actorSnapshot: Readonly<{ userId: string; workspaceId: string }> | null;
   binding: NativeOneStartBinding;
@@ -366,6 +377,8 @@ interface NativePreparingPending {
   retained: Set<Promise<unknown>>;
   preparationLifetime: NativePreparationLifetime;
   ordinaryTurn?: OrdinaryOneTurnLifetime;
+  /** Private monotonic dispatch frontier; never a wire or cleanup ACK. */
+  dispatchClosed?: boolean;
 }
 
 interface RunRecord {
@@ -417,6 +430,8 @@ interface RunRecord {
   executionSource?: InvocationExecutionContext["source"];
   /** Main-only provenance retained while waiting; never reconstructed from a receipt. */
   executionContext?: InvocationExecutionContext;
+  oneTeamReportCustody?: QueuedTeamReportCustody;
+  oneTeamReportOriginalRequest?: Readonly<McpInvocationRequest>;
 }
 
 function nextObservableSequence(record: RunRecord): number {
@@ -425,6 +440,8 @@ function nextObservableSequence(record: RunRecord): number {
 }
 
 interface QueuedSteer {
+  oneTeamReportCustodyJson?: string;
+  oneTeamReportCustody?: QueuedTeamReportCustody;
   mainAdmission?: MainInvocationAdmission;
   id: string;
   originalRunId: string;
@@ -502,6 +519,8 @@ function steerReceiptIsTerminal(receipt: InvocationRunReceipt | null): boolean {
 
 function queuedSteerFromDurable(row: DurableQueuedSteer): QueuedSteer {
   return {
+    ...(row.oneTeamReportCustodyJson!==undefined ? {oneTeamReportCustodyJson:row.oneTeamReportCustodyJson} : {}),
+    ...(row.oneTeamReportCustody ? {oneTeamReportCustody:row.oneTeamReportCustody} : {}),
     id: row.id,
     originalRunId: row.originalRunId,
     promptHash: row.promptHash,
@@ -520,15 +539,71 @@ function ownerWrittenSteers(queue: QueuedSteer[]): QueuedSteer[] {
   return queue.filter((queued) => queued.request.promptOrigin !== "system");
 }
 
+function publicSteerRecoveryReason(reason:DurableQueuedSteerRecoveryReason|undefined):InvocationSteerRecovery["reason"] {
+  return !reason || reason==="one-team-report-owner-unbound" ? "original-run-start-uncertain" : reason;
+}
+/** Canonical source reference, Main-only positional argument; not an authority DTO. */
+export interface QueuedTeamReportSourceRef { dispatchId:string;childRunId:string;roomChatId:string }
+function readQueuedTeamReportSource(ref:QueuedTeamReportSourceRef) {
+  if(Object.keys(ref).sort().join(",")!=="childRunId,dispatchId,roomChatId" || ![ref.dispatchId,ref.childRunId,ref.roomChatId].every(v=>typeof v==="string"&&!!v&&Buffer.byteLength(v)<=512&&!/[\u0000-\u001f]/.test(v)))throw new Error("one_team_report_owner_unbound");
+  const db=getDb();
+  type Source={parent_chat_id:string;parent_run_id:string|null;child_run_id:string;owner_scope:string|null;child_chat_id:string;member_agent_id:string;brief:string;status:string;result_text:string|null};
+  const lookup=(table:string):Source|undefined=>{
+    const columns=new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{name:string}>).map(column=>column.name));
+    if(!columns.size)return undefined;
+    // Group tables predate private custody and still migrate lazily. Startup
+    // recovery reads unknown metadata without taking over that migration.
+    const optional=(name:string,fallback:string)=>columns.has(name)?name:`${fallback} AS ${name}`;
+    const projection=["parent_chat_id",optional("parent_run_id","NULL"),"child_run_id",optional("owner_scope","NULL"),
+      "child_chat_id","member_agent_id",optional("brief","''"),"status","result_text"].join(",");
+    return db.prepare(`SELECT ${projection} FROM ${table} WHERE id=? AND child_run_id=? AND parent_chat_id=?`)
+      .get(ref.dispatchId,ref.childRunId,ref.roomChatId) as Source|undefined;
+  };
+  const source=lookup("one_team_dispatches")??lookup("one_team_dispatch_results");
+  if(!source || !buildTeamSessionHandoff({dispatchId:ref.dispatchId,roomChatId:source.parent_chat_id,parentRunId:source.parent_run_id,
+    childRunId:source.child_run_id,childChatId:source.child_chat_id,memberAgentId:source.member_agent_id,memberName:"member",
+    brief:source.brief,status:source.status,result:source.result_text}).relayAllowed)throw new Error("one_team_report_owner_unbound");return source;
+}
+function captureQueuedTeamReportCustody(request:McpInvocationRequest,ref?:QueuedTeamReportSourceRef,legacyParentRunId?:string):QueuedTeamReportCustody {
+  if(request.oneTeamReportTurn!==true || !request.oneMode || request.promptOrigin!=="system")throw new Error("one_team_report_owner_unbound");
+  // Fresh reports need the actual Group producer's canonical source. Only an
+  // existing durable row may use the older native receiver proof on recovery.
+  if(!ref && !legacyParentRunId)throw new Error("one_team_report_owner_unbound");
+  const owner=agentContextOwnerBinding(),source=ref?readQueuedTeamReportSource(ref):null;
+  if(ref && ref.roomChatId!==request.chatId || !teamDispatchReceiverCurrent({roomChatId:request.chatId,
+    parentRunId:source?.parent_run_id ?? legacyParentRunId,ownerScope:source?.owner_scope ?? null}))throw new Error("one_team_report_owner_unbound");
+  if(!ref){const db=getDb();for(const table of ["one_team_dispatches","one_team_dispatch_results"]){
+    if(!db.prepare("SELECT 1 FROM sqlite_master WHERE name=?").get(table))continue;
+    const columns=new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{name:string}>).map(column=>column.name));
+    if(!columns.has("owner_scope"))continue;
+    const parentBound=Boolean(legacyParentRunId&&columns.has("parent_run_id"));
+    const foreign=db.prepare(`SELECT 1 FROM ${table} WHERE parent_chat_id=? AND owner_scope IS NOT NULL AND owner_scope<>? ${parentBound?"AND parent_run_id=?":""} LIMIT 1`)
+      .get(request.chatId,owner.ownerScope,...(parentBound?[legacyParentRunId]:[]));
+    if(foreign)throw new Error("one_team_report_owner_unbound");
+  }}
+  const latest=agentContextOwnerBinding();if(latest.ownerScope!==owner.ownerScope||latest.serviceIdentity!==owner.serviceIdentity)throw new Error("one_team_report_owner_unbound");
+  return Object.freeze({schemaVersion:"agentlas.queued-team-report-custody.v1",...owner,chatId:request.chatId,
+    dispatchId:ref?.dispatchId??null,childRunId:ref?.childRunId??null,parentRunId:source?.parent_run_id??legacyParentRunId??null,
+    requestDigest:queuedTeamReportDigest(request)});
+}
+function queuedTeamReportCurrent(custody:QueuedTeamReportCustody|undefined,request:McpInvocationRequest):boolean {
+  try {if(!custody || custody.chatId!==request.chatId || custody.requestDigest!==queuedTeamReportDigest(request))return false;
+    const now=agentContextOwnerBinding();if(now.ownerScope!==custody.ownerScope||now.serviceIdentity!==custody.serviceIdentity)return false;
+    if(custody.dispatchId){const source=readQueuedTeamReportSource({dispatchId:custody.dispatchId,childRunId:custody.childRunId!,roomChatId:custody.chatId});
+      if(source.parent_run_id!==custody.parentRunId || !teamDispatchReceiverCurrent({roomChatId:custody.chatId,parentRunId:source.parent_run_id,ownerScope:source.owner_scope}))return false;
+    }else {const legacy=captureQueuedTeamReportCustody(request,undefined,custody.parentRunId??undefined);if(legacy.ownerScope!==custody.ownerScope||legacy.serviceIdentity!==custody.serviceIdentity)return false;}
+    const latest=agentContextOwnerBinding();return latest.ownerScope===custody.ownerScope&&latest.serviceIdentity===custody.serviceIdentity;
+  }catch{return false;}
+}
 function steeringRecoveryFromDurable(row: DurableQueuedSteer): InvocationSteerRecovery {
   return {
     id: row.id,
     chatId: row.chatId,
-    originalRunId: row.originalRunId,
-    promptText: row.promptText,
-    promptHash: row.promptHash,
+    originalRunId: row.request.oneTeamReportTurn ? "" : row.originalRunId,
+    promptText: row.request.oneTeamReportTurn ? "" : row.promptText,
+    promptHash: row.request.oneTeamReportTurn ? "" : row.promptHash,
     queuedAt: row.queuedAt,
-    reason: row.recoveryReason ?? "original-run-start-uncertain",
+    reason: publicSteerRecoveryReason(row.recoveryReason),
   };
 }
 
@@ -1006,15 +1081,17 @@ interface NativeIngressPending {
   actorSnapshot: Readonly<{ userId: string; workspaceId: string }> | null;
   selectedCwd?: string;
   undispatchedLease?: InvocationRunOwner;
+  closedExecutionLease?: InvocationRunOwner;
   observedKinds: Set<string>;
   controller: AbortController;
   lifetime: NativePreparationLifetime;
   retained: Set<Promise<unknown>>;
   handedOff: boolean;
+  returnedPrepared?: NativeIngressPrepared;
   port?: NativeOneStartPort;
   cancelPromise?: Promise<void>;
   cancelSettled: boolean;
-  frontier: "open" | "closed-no-start";
+  frontier: "open" | "closed-no-start" | "closed-prepared";
   proofMinted: boolean;
 }
 
@@ -1088,12 +1165,28 @@ export class InvocationService {
   private readonly steerQueueCapacityListeners = new Set<(chatId: string) => void>();
   private readonly pendingGoalVerifications = new Map<string, RunRecord>();
   private readonly settlingRuns = new Map<string, RunRecord>();
+  /** Original cleanup observations have no executable authority or chat-admission slot. */
+  private readonly nativeCleanupQuarantine = new Map<string, { completion: WeakRef<Promise<void>>; outcome: "pending" | "failed" }>();
   private readonly browserLoginWaitingRuns = new Map<string, RunRecord>();
   private readonly steerQueues = new Map<string, QueuedSteer[]>();
   private readonly nativePreparing = new Map<string, NativePreparingPending>();
   private ordinaryOneTurnObserver?: (source: OrdinaryOneTurnSource) => OrdinaryOneTurnObservation | undefined;
   private readonly nativeIngress = new Map<string, NativeIngressPending>();
-  private readonly nativeIngressOriginals = new WeakMap<NativeInvocationIngressSource, { pending: NativeIngressPending; controller: AbortController; lifetime: NativePreparationLifetime }>();
+  private readonly nativeClosedAdmissionRetries = new Map<string, ReturnType<typeof createClosedFactRetry>>();
+  private readonly nativeIngressOriginals = new WeakMap<NativeInvocationIngressSource, { pending: NativeIngressPending; controller: AbortController; lifetime: NativePreparationLifetime; closedEntry?: { token: object; port: NativeOneStartPort } }>();
+  private readonly nativeClosedPreparing = new WeakMap<NativeInvocationIngressSource, { ingress: NativeIngressPending; prepared: NativePreparingPending }>();
+  private readonly nativePreparedDriversClosed = new WeakSet<NativePreparingPending>();
+  /** Transport Stop observations, never physical checkpoint/child completion. */
+  private readonly nativeCancellationObservations = new WeakSet<Promise<unknown>>();
+  private readonly nativeClosedPreparedRetries = new Map<string, ReturnType<typeof createClosedFactRetry>>();
+  /** Local resources are invoked once; only their exact owner-release storage
+   * observation can be retried after the original driver really drains. */
+  private readonly nativeLocalPreparedClosures = new WeakMap<NativePreparingPending, {
+    record: RunRecord; expected: InvocationRunOwner;
+    status: "rejected" | "cancelled" | "uncertain"; finishStarted: boolean;
+    retry?: ReturnType<typeof createClosedFactRetry>;
+  }>();
+  private readonly nativePreparedEntries = new WeakMap<object, { expected: { chatId: string; runId: string | undefined }; admission: InvocationAdmissionIdentity; port: NativeOneStartPort; ingress?: NativeIngressPending; entered: boolean; closed: boolean; originalFailure?: unknown; localDispatchClosed?: boolean; retry?: ReturnType<typeof createClosedFactRetry> }>();
   private readonly nativeServiceObservationProofs = new WeakMap<object, { original: NativeInvocationIngressSource; pending: NativeIngressPending; kind: "native-execution-cwd-selected-v1" | "native-undispatched-start-v1" }>();
   private readonly nativeIngressNoStartProofs = new WeakMap<object, { original: NativeInvocationIngressSource; pending: NativeIngressPending; controller: AbortController; lifetime: NativePreparationLifetime }>();
   private readonly nativePreparationListeners = new Set<(event: { runId: string; chatId: string; status: "handed-off" | "rejected" | "cancelled" | "uncertain" }) => void>();
@@ -1186,6 +1279,406 @@ export class InvocationService {
     } catch (error) { console.warn("[invocation] ordinary One observation remains unconfirmed:", error); }
   }
 
+  private nativeCleanupObservers(runId: string, observation: { completion: WeakRef<Promise<void>>; outcome: "pending" | "failed" }): [() => void, () => void] {
+    // This callback scope contains only the service and thin diagnostic record.
+    // It never receives the original request, pending source, or cleanup promise.
+    return [() => {
+      if (this.nativeCleanupQuarantine.get(runId) === observation) this.nativeCleanupQuarantine.delete(runId);
+    }, () => {
+      if (this.nativeCleanupQuarantine.get(runId) === observation) observation.outcome = "failed";
+      console.warn("[invocation] native cleanup remains unconfirmed", { runId });
+    }];
+  }
+
+  private quarantineNativeCleanup(runId: string, held: { preparation?: NativePreparingPending; ingress?: NativeIngressPending; completion: Promise<void> }): void {
+    const observation = { completion: new WeakRef(held.completion), outcome: "pending" as "pending" | "failed" };
+    this.nativeCleanupQuarantine.set(runId, observation);
+    while (this.nativeCleanupQuarantine.size > 128) this.nativeCleanupQuarantine.delete(this.nativeCleanupQuarantine.keys().next().value!);
+    // The resource owner retains real work. Diagnostic observers are created
+    // in a separate scope so an unsettled join cannot retain this source graph.
+    void held.completion.then(...this.nativeCleanupObservers(runId, observation));
+  }
+
+  /** Called only after the original execution lifetime and its attached children settle.
+   * Exact released ownership closes execution authority; cleanup success is separate. */
+  private retireDrainedNativeExecution(runId: string, record: RunRecord, pending: NativePreparingPending): boolean {
+    const expected = record.ownerLease;
+    if (!expected || expected.runId !== runId || expected.chatId !== record.chatId
+      || pending.binding.runId !== runId || pending.binding.chatId !== record.chatId
+      || pending.controller !== record.controller || pending.startBoundary.ownerLease !== expected || !pending.startBoundary.handedOff
+      || !pending.preparationLifetime.admissionClosed || pending.preparationLifetime.pendingCount !== 0
+      || this.settlingRuns.get(runId) !== record || this.activeRuns.has(runId)) return false;
+    const custody = invocationRunOwners.getRunOwner(record.chatId, runId);
+    if (!custody || custody.state !== "released" || custody.chatId !== expected.chatId || custody.runId !== expected.runId
+      || custody.ownerId !== expected.ownerId || custody.ownerKind !== expected.ownerKind || custody.leaseId !== expected.leaseId) return false;
+    const preparing = this.nativePreparing.get(runId), ingress = this.nativeIngress.get(runId);
+    if (preparing && preparing !== pending) return false;
+    if (ingress && (ingress.port !== pending.port || ingress.controller !== pending.controller
+      || ingress.lifetime !== pending.preparationLifetime || !ingress.handedOff)) return false;
+    // Old source proofs still reference their originals, but their live-map guards now fail.
+    if (preparing) this.nativePreparing.delete(runId);
+    if (ingress) { ingress.closedExecutionLease = Object.freeze({ ...expected }); this.nativeIngress.delete(runId); }
+    this.settlingRuns.delete(runId);
+    this.finishOrdinaryOneTurn(pending, "preparation");
+    if (!this.nativeCleanupQuarantine.has(runId)) {
+      const completion = Promise.resolve().then(() => pending.port.finish(pending.binding, "settled"));
+      const held = { preparation: pending, completion };
+      this.quarantineNativeCleanup(runId, held);
+    }
+    return true;
+  }
+
+  /** Actual local driver closure only. Durable admission/lease authority is
+   * checked separately by the unchanged retirement CAS. This admits no turn. */
+  private nativePreparedDispatchLocallyClosed(pending: NativePreparingPending): boolean {
+    // Genuine same-process ports still own their resource-quiesce/release path;
+    // their admission epoch is intentionally distinct from process owner ID.
+    if (isLocalInvocationPreparationPort(pending.port)) return false;
+    const { binding, controller, preparationLifetime: lifetime, startBoundary: boundary } = pending;
+    const runId = binding.runId, ingress = this.nativeIngress.get(runId);
+    if (!this.nativePreparedDriversClosed.has(pending) || this.nativePreparing.get(runId) !== pending || boundary.handedOff
+      || !lifetime.admissionClosed || lifetime.pendingCount !== 0
+      || (ingress && (ingress.port !== pending.port || ingress.controller !== controller || ingress.lifetime !== lifetime || !ingress.handedOff))) return false;
+    const record = this.activeRuns.get(runId) ?? this.settlingRuns.get(runId);
+    if (record && (record.chatId !== binding.chatId || record.controller !== controller || record.completion || record.mainLifetime)) return false;
+    if (boundary.crossed && (!record || !boundary.ownerLease || record.ownerLease !== boundary.ownerLease || boundary.runId !== runId
+      || boundary.ownerLease.chatId !== binding.chatId || boundary.ownerLease.runId !== runId
+      || boundary.ownerLease.ownerId !== binding.admission.ownerProcessEpoch)) return false;
+    return boundary.crossed || (!record && !boundary.ownerLease);
+  }
+
+  /** Only the original semantic ACK join is skipped. This physical fact never
+   * replaces the durable row/lease CAS or its fresh-admission/writer fences. */
+  private nativeSourceDispatchLocallyClosed(original: NativeInvocationIngressSource): boolean {
+    const held = this.nativeIngressOriginals.get(original), pending = held?.pending;
+    if (!pending || pending.original !== original || held!.controller !== pending.controller || held!.lifetime !== pending.lifetime
+      || !pending.handedOff || !pending.port || !pending.controller.signal.aborted
+      || !pending.lifetime.admissionClosed || pending.lifetime.pendingCount !== 0) return false;
+    const runId = pending.source.binding.runId, current = this.nativeIngress.get(runId), prepared = this.nativePreparing.get(runId);
+    if (current && current !== pending) return false;
+    if (prepared) return current === pending && prepared.controller === pending.controller && prepared.port === pending.port
+      && prepared.preparationLifetime === pending.lifetime && this.nativePreparedDispatchLocallyClosed(prepared);
+    if (this.activeRuns.has(runId) || this.settlingRuns.has(runId)) return false;
+    const closed = this.nativeClosedPreparing.get(original);
+    if (current === undefined && closed?.ingress === pending && pending.frontier === "closed-prepared") {
+      const driver = closed.prepared;
+      return driver.controller === pending.controller && driver.port === pending.port && driver.preparationLifetime === pending.lifetime
+        && driver.dispatchClosed === true && !driver.startBoundary.handedOff && this.nativePreparedDriversClosed.has(driver);
+    }
+    const fact = held!.closedEntry;
+    if (!fact || fact.port !== pending.port) return false;
+    const entry = this.nativePreparedEntries.get(fact.token);
+    if (!entry) return current === undefined && pending.frontier === "closed-prepared";
+    return current === pending && !entry.entered && entry.closed && entry.localDispatchClosed === true
+      && entry.ingress === pending && entry.port === pending.port
+      && entry.expected.chatId === pending.source.binding.chatId && entry.expected.runId === runId
+      && entry.admission.chatId === pending.source.binding.chatId && entry.admission.runId === runId
+      && entry.admission.ownerProcessEpoch === pending.source.binding.ownerProcessEpoch
+      && createHash("sha256").update(INVOCATION_ADMISSION_DIGEST_VERSION + "\0").update(entry.admission.canonicalRequestJson).digest("hex") === pending.source.binding.inputDigest;
+  }
+
+  /** Only startNativePrepared creates this original entry after consuming its
+   * genuine Main admission. Its monotonic marker precedes prepared registration. */
+  private async retireClosedPreparedEntry(token: object): Promise<boolean> {
+    const entry = this.nativePreparedEntries.get(token);
+    if (!entry || entry.entered || !entry.closed) return false;
+    const a = entry.admission, ingress = entry.ingress, runId = a.runId;
+    if (a.chatId !== entry.expected.chatId || runId !== entry.expected.runId) return false;
+    if (this.nativePreparing.has(runId) || this.activeRuns.has(runId) || this.settlingRuns.has(runId)) return false;
+    const current = this.nativeIngress.get(runId);
+    if (current !== ingress || (ingress && (ingress.port !== entry.port || !ingress.handedOff || this.nativeIngressOriginals.get(ingress.original)?.pending !== ingress))) return false;
+    if (ingress) {
+      ingress.lifetime.closeAdmission();
+      if (!ingress.controller.signal.aborted) ingress.controller.abort(entry.originalFailure);
+      await ingress.lifetime.quiescent(); await this.drainNativeIngressRetained(ingress);
+      if (this.nativeIngress.get(runId) !== ingress || this.nativePreparing.has(runId) || this.activeRuns.has(runId) || this.settlingRuns.has(runId)) return false;
+    }
+    if (this.nativePreparedEntries.get(token) !== entry || entry.entered || !entry.closed) return false;
+    // This original never-entered driver's lifetime and unknown retained work
+    // have drained. Keep only a thin token/port fact, not its request/admission.
+    entry.localDispatchClosed = true;
+    if (ingress) {
+      const held = this.nativeIngressOriginals.get(ingress.original);
+      if (held?.pending !== ingress || held.controller !== ingress.controller || held.lifetime !== ingress.lifetime) return false;
+      held.closedEntry = { token, port: entry.port };
+    }
+    const verifyClosed = (allowWrite: boolean): boolean => {
+      if (entry.entered || !entry.closed || invocationRunOwners.getRunOwner(a.chatId, runId)
+        || getDb().prepare("SELECT 1 FROM run_events WHERE run_id=? AND kind='invoke_started' LIMIT 1").get(runId)) return false;
+      const row = getInvocationAdmission(runId);
+      if (!row || row.chatId !== a.chatId || row.ownerProcessEpoch !== a.ownerProcessEpoch
+        || row.inputDigest !== createHash("sha256").update(INVOCATION_ADMISSION_DIGEST_VERSION + "\0").update(a.canonicalRequestJson).digest("hex")) return false;
+      if (row.status === "rejected") return true;
+      if (row.status !== "pending" || !allowWrite) return false;
+      return decideInvocationAdmission({ ...a, decision: "rejected", reasonCode: "native_prepared_entry_closed",
+        noStartProof: { kind: "owner-start-boundary-not-crossed", verifiedOwnerProcessEpoch: a.ownerProcessEpoch } }).kind === "rejected";
+    };
+    let closed: boolean;
+    try { closed = getDb().transaction(() => verifyClosed(true)).immediate(); }
+    catch (cause) { if (verifyClosed(false)) closed = true; else throw cause; }
+    if (!closed) return false;
+    entry.retry?.stop();
+    this.nativePreparedEntries.delete(token);
+    if (ingress) { ingress.frontier = "closed-prepared"; this.nativeIngress.delete(runId); }
+    this.quarantineNativeCleanup(runId, { completion: this.observeClosedPreparedCleanup(entry.port, { chatId: a.chatId, runId, admission: a }, "uncertain") });
+    this.publishActiveChats(); this.drainSteerQueue(a.chatId);
+    return true;
+  }
+
+  private async reconcileClosedPreparedEntry(token: object): Promise<void> {
+    const entry = this.nativePreparedEntries.get(token);
+    if (!entry || entry.entered || !entry.closed) return;
+    try {
+      if (!await this.retireClosedPreparedEntry(token)) { entry.retry?.stop(); entry.retry = undefined; }
+    } catch {
+      if (!entry.retry) entry.retry = createClosedFactRetry({
+        observe: () => this.reconcileClosedPreparedEntry(token),
+        schedule: (retry, delay) => { const timer = setTimeout(retry, delay); timer.unref?.(); return () => clearTimeout(timer); },
+      });
+      entry.retry.request();
+    }
+  }
+
+  /** Same-process resource cleanup already ran once. This observes only the
+   * original locally-owned lease; no producer, port or cleanup is replayed. */
+  private async reconcileClosedLocalPrepared(pending: NativePreparingPending): Promise<void> {
+    const held = this.nativeLocalPreparedClosures.get(pending);
+    if (!held || held.finishStarted) return;
+    const { binding, controller, preparationLifetime: lifetime, startBoundary: boundary } = pending;
+    const runId = binding.runId, expected = held.expected, record = held.record;
+    const deny = (): void => { held.retry?.stop(); held.retry = undefined; };
+    if (!isLocalInvocationPreparationPort(pending.port) || this.nativePreparing.get(runId) !== pending
+      || !this.nativePreparedDriversClosed.has(pending) || !lifetime.admissionClosed || lifetime.pendingCount !== 0
+      || !boundary.crossed || boundary.handedOff || boundary.runId !== runId || boundary.ownerLease !== expected
+      || record.ownerLease !== expected || record.chatId !== binding.chatId || record.controller !== controller
+      || record.completion || record.mainLifetime || this.nativeIngress.has(runId)
+      || (this.activeRuns.has(runId) && this.activeRuns.get(runId) !== record)
+      || (this.settlingRuns.has(runId) && this.settlingRuns.get(runId) !== record)) { deny(); return; }
+    const verifyReleased = (allowWrite: boolean): boolean => {
+      const admission = getInvocationAdmission(runId), process = invocationProcessOwner();
+      if (!admission || admission.status !== "admitted" || admission.chatId !== binding.chatId
+        || admission.ownerProcessEpoch !== binding.admission.ownerProcessEpoch
+        || admission.inputDigest !== createHash("sha256").update(INVOCATION_ADMISSION_DIGEST_VERSION + "\0").update(binding.admission.canonicalRequestJson).digest("hex")
+        || expected.chatId !== binding.chatId || expected.runId !== runId
+        || expected.ownerId !== process.ownerId || expected.ownerKind !== process.ownerKind) return false;
+      const owner = invocationRunOwners.getRunOwner(binding.chatId, runId);
+      const same = (value: InvocationRunOwner | null): boolean => !!value && value.chatId === expected.chatId && value.runId === expected.runId
+        && value.ownerId === expected.ownerId && value.ownerKind === expected.ownerKind && value.leaseId === expected.leaseId;
+      if (!same(owner)) return false;
+      if (owner!.state !== "released") {
+        if (!allowWrite) return false;
+        invocationRunOwners.release(expected);
+      }
+      const released = invocationRunOwners.getRunOwner(binding.chatId, runId);
+      return same(released) && released!.state === "released";
+    };
+    let released: boolean;
+    try {
+      try { released = getDb().transaction(() => verifyReleased(true)).immediate(); }
+      catch (cause) { if (verifyReleased(false)) released = true; else throw cause; }
+    } catch {
+      if (!held.retry) held.retry = createClosedFactRetry({
+        observe: () => this.reconcileClosedLocalPrepared(pending),
+        schedule: (observe, delay) => { const timer = setTimeout(observe, delay); timer.unref?.(); return () => clearTimeout(timer); },
+      });
+      held.retry.request();
+      return;
+    }
+    if (!released) { deny(); return; }
+    deny(); held.finishStarted = true;
+    if (this.nativePreparing.get(runId) !== pending || boundary.handedOff || record.completion || record.mainLifetime) return;
+    pending.dispatchClosed = true;
+    if (this.activeRuns.get(runId) === record) this.activeRuns.settle(runId);
+    if (this.settlingRuns.get(runId) === record) this.settlingRuns.delete(runId);
+    // The only registered local finish implementations delegate to the renderer
+    // no-op. Observe it once without turning its response into executable custody.
+    let completion: Promise<void>;
+    try { completion = Promise.resolve(pending.port.finish(binding, held.status)); }
+    catch (cause) { completion = Promise.reject(cause); }
+    this.quarantineNativeCleanup(runId, { completion });
+    this.nativeLocalPreparedClosures.delete(pending);
+    this.nativePreparing.delete(runId);
+    this.publishActiveChats(); this.finishOrdinaryOneTurn(pending,"closed"); this.drainSteerQueue(binding.chatId);
+  }
+
+  /** The original driver has returned after closing its generator and draining
+   * the real preparation lifetime. This retires executable custody, never claims. */
+  private retireClosedPreparedNoBrain(pending: NativePreparingPending, error: unknown): boolean {
+    const { binding, controller, preparationLifetime: lifetime, startBoundary: boundary } = pending;
+    const runId = binding.runId, ingress = this.nativeIngress.get(runId);
+    if (!this.nativePreparedDriversClosed.has(pending) || this.nativePreparing.get(runId) !== pending || boundary.handedOff || pending.dispatchClosed
+      || !lifetime.admissionClosed || lifetime.pendingCount !== 0
+      || (ingress && (ingress.port !== pending.port || ingress.controller !== controller || ingress.lifetime !== lifetime || !ingress.handedOff))) return false;
+    const record = this.activeRuns.get(runId) ?? this.settlingRuns.get(runId);
+    if (record && (record.chatId !== binding.chatId || record.controller !== controller || record.completion || record.mainLifetime)) return false;
+    if (boundary.crossed && (!record || !boundary.ownerLease || record.ownerLease !== boundary.ownerLease || boundary.runId !== runId)) return false;
+    if (!boundary.crossed && (record || boundary.ownerLease)) return false;
+    // No asynchronous driver work survives this call site. Closing its original
+    // controller cannot cancel a handed-off provider (explicitly denied above).
+    if (!controller.signal.aborted) controller.abort(error);
+    const verifyClosed = (allowWrite: boolean): boolean => {
+      const admission = getInvocationAdmission(runId), expected = boundary.ownerLease;
+      if (!admission || admission.chatId !== binding.chatId || admission.ownerProcessEpoch !== binding.admission.ownerProcessEpoch
+        || admission.inputDigest !== createHash("sha256").update(INVOCATION_ADMISSION_DIGEST_VERSION + "\0").update(binding.admission.canonicalRequestJson).digest("hex")) return false;
+      const owner = invocationRunOwners.getRunOwner(binding.chatId, runId), active = invocationRunOwners.getActiveOwner(binding.chatId);
+      if (active && (!expected || active.runId !== runId || active.leaseId !== expected.leaseId || active.ownerId !== expected.ownerId || active.ownerKind !== expected.ownerKind)) return false;
+      if (!boundary.crossed) {
+        if (owner || getDb().prepare("SELECT 1 FROM run_events WHERE run_id=? AND kind='invoke_started' LIMIT 1").get(runId)) return false;
+        if (admission.status === "pending") {
+          if (!allowWrite) return false;
+          const decision = decideInvocationAdmission({ ...binding.admission, decision: "rejected", reasonCode: "native_prepared_closed_before_start",
+            noStartProof: { kind: "owner-start-boundary-not-crossed", verifiedOwnerProcessEpoch: binding.admission.ownerProcessEpoch } });
+          if (decision.kind !== "rejected") return false;
+        } else if (admission.status !== "rejected") return false;
+        return true;
+      }
+      if (!expected || admission.status !== "admitted" || !owner || owner.chatId !== expected.chatId || owner.runId !== expected.runId
+        || owner.ownerId !== expected.ownerId || owner.ownerKind !== expected.ownerKind || owner.leaseId !== expected.leaseId
+        || expected.ownerId !== binding.admission.ownerProcessEpoch) return false;
+      if (owner.state !== "released") { if (!allowWrite) return false; invocationRunOwners.release(expected); }
+      const released = invocationRunOwners.getRunOwner(binding.chatId, runId);
+      return !!released && released.state === "released" && released.chatId === expected.chatId && released.runId === expected.runId
+        && released.ownerId === expected.ownerId && released.ownerKind === expected.ownerKind && released.leaseId === expected.leaseId;
+    };
+    let closed: boolean;
+    try { closed = getDb().transaction(() => verifyClosed(true)).immediate(); }
+    catch (cause) { if (verifyClosed(false)) closed = true; else throw cause; }
+    if (!closed) return false;
+    pending.dispatchClosed = true;
+    const retry = this.nativeClosedPreparedRetries.get(runId);
+    if (retry) { retry.stop(); this.nativeClosedPreparedRetries.delete(runId); }
+    if (boundary.crossed && boundary.runId) {
+      // Receipt observation failure cannot undo the actual local closed frontier.
+      try { this.releaseUndispatchedStart(boundary.runId, binding.chatId, error, isLocalInvocationPreparationPort(pending.port) ? boundary.cleanups ?? [] : []); }
+      catch { console.warn("[invocation] closed native receipt cleanup remains unconfirmed", { runId }); }
+      if (this.activeRuns.get(runId) === record) this.activeRuns.settle(runId);
+      if (this.settlingRuns.get(runId) === record) this.settlingRuns.delete(runId);
+    }
+    if (ingress) {
+      ingress.frontier = "closed-prepared";
+      if (boundary.ownerLease) { ingress.undispatchedLease = Object.freeze({ ...boundary.ownerLease }); ingress.closedExecutionLease = ingress.undispatchedLease; }
+      // The opaque original remains the weak key for its terminal observation.
+      // Neither active selection nor executable capacity retains this graph.
+      this.nativeClosedPreparing.set(ingress.original, { ingress, prepared: pending });
+      this.nativeIngress.delete(runId);
+    }
+    this.nativePreparing.delete(runId);
+    this.finishOrdinaryOneTurn(pending, "closed");
+    this.publishActiveChats();
+    return true;
+  }
+
+  private scheduleClosedPreparedReconciliation(pending: NativePreparingPending, error: unknown, status: "rejected" | "cancelled" | "uncertain"): void {
+    const runId = pending.binding.runId;
+    let retry = this.nativeClosedPreparedRetries.get(runId);
+    if (!retry) {
+      retry = createClosedFactRetry({
+        observe: () => {
+          if (this.nativePreparing.get(runId) !== pending || !this.nativePreparedDriversClosed.has(pending)) {
+            retry!.stop(); this.nativeClosedPreparedRetries.delete(runId); return;
+          }
+          try {
+            if (this.retireClosedPreparedNoBrain(pending, error)) {
+              this.quarantineNativeCleanup(runId, { completion: this.observeClosedPreparedCleanup(pending.port, pending.binding, status) });
+              this.drainSteerQueue(pending.binding.chatId);
+            } else { retry!.stop(); this.nativeClosedPreparedRetries.delete(runId); }
+          } catch { retry!.request(); } // Reobserve only this original physically closed CAS.
+        },
+        schedule: (observe, delay) => { const timer = setTimeout(observe, delay); timer.unref?.(); return () => clearTimeout(timer); },
+      });
+      this.nativeClosedPreparedRetries.set(runId, retry);
+    }
+    retry.request();
+  }
+
+  private observeClosedPreparedCleanup(port: NativeOneStartPort, binding: NativeOneStartBinding, status: "rejected" | "cancelled" | "uncertain"): Promise<void> {
+    // Only the actual port/resource owner enters this async scope. It never
+    // captures the service pending/request/controller graph for diagnostics.
+    return Promise.resolve().then(async () => { await port.quiesce(binding, status); await port.finish(binding, status); });
+  }
+
+  private scheduleClosedNativeIngressReconciliation(pending: NativeIngressPending, status: "cancelled" | "uncertain"): void {
+    const runId = pending.source.binding.runId;
+    let retry = this.nativeClosedAdmissionRetries.get(runId);
+    if (!retry) {
+      retry = createClosedFactRetry({
+        observe: () => {
+          if (this.nativeIngress.get(runId) !== pending) { retry!.stop(); this.nativeClosedAdmissionRetries.delete(runId); return; }
+          try { if (this.retireClosedNativeIngress(pending, status)) this.drainSteerQueue(pending.source.binding.chatId); }
+          catch { /* A changed/unknown source is not a new no-start proof. */ }
+          // A storage exception in retire requested another observation. A false
+          // source/tuple/owner/receipt guard terminates this original observer.
+          if (!retry!.pending) { retry!.stop(); this.nativeClosedAdmissionRetries.delete(runId); }
+        },
+        schedule: (observe, delay) => { const timer = setTimeout(observe, delay); timer.unref?.(); return () => clearTimeout(timer); },
+      });
+      this.nativeClosedAdmissionRetries.set(runId, retry);
+    }
+    retry.request();
+  }
+
+  /** Actual original authorize/read returned or threw, and prepared entry never occurred. */
+  private retireClosedNativeIngress(pending: NativeIngressPending, status: "cancelled" | "uncertain"): boolean {
+    const original = this.nativeIngressOriginals.get(pending.original), runId = pending.source.binding.runId;
+    let ownerObservationFailed = false;
+    const assertClosed = () => {
+      if (original?.pending !== pending || original.controller !== pending.controller || original.lifetime !== pending.lifetime
+        || this.nativeIngress.get(runId) !== pending || pending.handedOff || pending.port !== undefined
+        || !pending.controller.signal.aborted || !pending.lifetime.admissionClosed || pending.lifetime.pendingCount !== 0
+        || this.nativePreparing.has(runId) || this.activeRuns.has(runId) || this.settlingRuns.has(runId)) throw new Error("native_ingress_dispatch_not_closed");
+      let owner: InvocationRunOwner | null;
+      try { owner = invocationRunOwners.getRunOwner(pending.source.binding.chatId, runId); }
+      catch (error) { ownerObservationFailed = true; throw error; }
+      if (owner) throw new Error("native_ingress_dispatch_not_closed");
+    };
+    let proof: object;
+    try {
+      assertClosed();
+      pending.source.closeUnused(pending.controller.signal);
+      proof = pending.returnedPrepared
+        ? pending.source.captureClosedReturnedBeforeTransfer(pending.returnedPrepared, pending.lifetime, assertClosed)
+        : pending.source.captureClosedBeforePrepared(assertClosed);
+    } catch (error) {
+      if (!ownerObservationFailed) throw error;
+      this.scheduleClosedNativeIngressReconciliation(pending, status);
+      return false;
+    }
+    let decision: ReturnType<typeof rejectClosedNativeIngressAdmission>;
+    try { decision = rejectClosedNativeIngressAdmission(proof); }
+    catch (error) {
+      // COMMIT can succeed while its observer throws. A truthful exact terminal
+      // row plus the same closed original fact needs no fabricated cleanup ACK.
+      let committed: ReturnType<typeof getInvocationAdmission> = null;
+      try {
+        assertClosed();
+        const row = getInvocationAdmission(runId), b = pending.source.binding;
+        if (row?.status === "rejected" && row.chatId === b.chatId && row.inputDigest === b.inputDigest && row.ownerProcessEpoch === b.ownerProcessEpoch
+          && !getDb().prepare("SELECT 1 FROM run_events WHERE run_id=? AND kind='invoke_started' LIMIT 1").get(runId)) committed = row;
+      } catch {}
+      if (committed) decision = { kind: "rejected", admission: committed };
+      else {
+        this.scheduleClosedNativeIngressReconciliation(pending, status);
+        return false;
+      }
+    }
+    if (decision.kind !== "rejected") return false;
+    const retry = this.nativeClosedAdmissionRetries.get(runId);
+    if (retry) { retry.stop(); this.nativeClosedAdmissionRetries.delete(runId); }
+    pending.frontier = "closed-no-start";
+    pending.returnedPrepared = undefined;
+    // The original cancel/quiesce/finish promises stay observed; neither is replayed or treated as an ACK.
+    const completion = Promise.resolve().then(async () => {
+      await pending.source.quiesce();
+      await this.drainNativeIngressRetained(pending);
+      await pending.source.finish(status);
+    });
+    const held = { ingress: pending, completion };
+    this.quarantineNativeCleanup(runId, held);
+    this.nativeIngress.delete(runId);
+    this.publishActiveChats();
+    return true;
+  }
+
   /** Additive quiescence fact; never a fabricated invocation terminal receipt. */
   onNativePreparationQuiesced(listener: (event: { runId: string; chatId: string; status: "handed-off" | "rejected" | "cancelled" | "uncertain" }) => void): () => void {
     this.nativePreparationListeners.add(listener);
@@ -1198,25 +1691,27 @@ export class InvocationService {
       const cancel = Promise.resolve().then(() => pending.source.cancel());
       pending.cancelPromise = cancel;
       pending.retained.add(cancel);
-      const settled = () => { pending.cancelSettled = true; };
-      void cancel.then(settled, settled);
+      this.nativeCancellationObservations.add(cancel);
+      // Actual cancellation is requested once; an ACK remains only an observed
+      // result. The original source/controller/lifetime owns dispatch closure.
+      void cancel.catch(() => {});
     }
     return pending.cancelPromise;
   }
 
   private async drainNativeIngressRetained(pending: NativeIngressPending): Promise<void> {
     let size: number;
-    do { size = pending.retained.size; await Promise.allSettled([...pending.retained]); }
+    do { size = pending.retained.size; await Promise.allSettled([...pending.retained].filter(p => !this.nativeCancellationObservations.has(p))); }
     while (pending.retained.size !== size);
   }
 
   private assertNativeIngressNoStart(original: NativeInvocationIngressSource, pending: NativeIngressPending): void {
     const originalRecord = this.nativeIngressOriginals.get(original);
     if (originalRecord?.pending !== pending || originalRecord.controller !== pending.controller || originalRecord.lifetime !== pending.lifetime
-      || this.nativeIngress.get(pending.source.binding.runId) !== pending
+      || (this.nativeIngress.get(pending.source.binding.runId) !== pending && !(pending.frontier === "closed-no-start" && this.nativeIngress.get(pending.source.binding.runId) === undefined))
       || pending.frontier !== "closed-no-start" || pending.handedOff || pending.port !== undefined
       || !pending.lifetime.admissionClosed || pending.lifetime.pendingCount !== 0
-      || !pending.cancelPromise || !pending.cancelSettled) {
+      || !pending.cancelPromise) {
       throw Object.assign(new Error("native_ingress_no_start_not_closed"), { code: "native_ingress_no_start_not_closed" });
     }
     pending.source.assertCurrent();
@@ -1255,10 +1750,12 @@ export class InvocationService {
 
   private assertNativeServiceObservation(original: NativeInvocationIngressSource, pending: NativeIngressPending, kind: "native-execution-cwd-selected-v1" | "native-undispatched-start-v1"): void {
     const held = this.nativeIngressOriginals.get(original), prepared = this.nativePreparing.get(pending.source.binding.runId);
+    const closed = kind === "native-undispatched-start-v1" ? this.nativeClosedPreparing.get(original) : undefined;
+    const selected = prepared ?? closed?.prepared;
     if (held?.pending !== pending || held.controller !== pending.controller || held.lifetime !== pending.lifetime
-      || this.nativeIngress.get(pending.source.binding.runId) !== pending || !pending.handedOff || !pending.port
-      || !prepared || prepared.controller !== pending.controller || prepared.port !== pending.port
-      || prepared.preparationLifetime !== pending.lifetime) throw new Error("native_service_observation_source_required");
+      || (this.nativeIngress.get(pending.source.binding.runId) !== pending && closed?.ingress !== pending) || !pending.handedOff || !pending.port
+      || !selected || selected.controller !== pending.controller || selected.port !== pending.port
+      || selected.preparationLifetime !== pending.lifetime || (closed && !selected.dispatchClosed)) throw new Error("native_service_observation_source_required");
     pending.source.assertCurrent();
     if (kind === "native-execution-cwd-selected-v1") {
       if (!pending.selectedCwd || pending.controller.signal.aborted || pending.lifetime.admissionClosed) throw new Error("native_service_cwd_not_selected");
@@ -1295,6 +1792,51 @@ export class InvocationService {
       : Object.freeze({ kind: held.kind, binding, leaseId: held.pending.undispatchedLease!.leaseId });
   }
 
+  /** Private original-source close observation; no wire/PID/row grants cancellation. */
+  cancelNativePreparationForSource(original: NativeInvocationIngressSource): "requested" | "already-requested" | "handed-off" | "not-found" {
+    const observed = this.nativeIngressOriginals.get(original);
+    if (!observed) return "not-found";
+    const ingress = observed.pending, runId = ingress.source.binding.runId;
+    if (this.nativeIngress.get(runId) !== ingress || ingress.original !== original
+      || ingress.controller !== observed.controller || ingress.lifetime !== observed.lifetime) return "not-found";
+    const preparing = this.nativePreparing.get(runId);
+    if (preparing && (preparing.controller !== observed.controller || preparing.preparationLifetime !== observed.lifetime)) return "not-found";
+    // The actual start boundary, not the still-pending transport reply, transfers execution custody.
+    if (preparing?.startBoundary.handedOff || (!preparing && ingress.handedOff)) return "handed-off";
+    ingress.lifetime.closeAdmission();
+    const already = ingress.controller.signal.aborted;
+    if (!already) ingress.controller.abort(Object.assign(new Error("native_preparation_channel_lost"), { code: "native_preparation_channel_lost" }));
+    this.cancelNativeIngress(ingress);
+    return already ? "already-requested" : "requested";
+  }
+
+  /** Original host source only: execution/dispatch authority, not remote cleanup success. */
+  nativeExecutableAuthorityClosedForSource(original: NativeInvocationIngressSource): boolean {
+    const held = this.nativeIngressOriginals.get(original), pending = held?.pending;
+    if (!pending || held!.controller !== pending.controller || held!.lifetime !== pending.lifetime
+      || !pending.lifetime.admissionClosed || pending.lifetime.pendingCount !== 0) return false;
+    const b = pending.source.binding, runId = b.runId;
+    if (this.nativeIngress.has(runId) || this.nativePreparing.has(runId) || this.activeRuns.has(runId) || this.settlingRuns.has(runId)) return false;
+    const a = getInvocationAdmission(runId), owner = invocationRunOwners.getRunOwner(b.chatId, runId);
+    if (!a || a.chatId !== b.chatId || a.inputDigest !== b.inputDigest || a.ownerProcessEpoch !== b.ownerProcessEpoch) return false;
+    if (!pending.handedOff || pending.frontier === "closed-prepared" && a.status === "rejected") return (pending.frontier === "closed-no-start" || pending.frontier === "closed-prepared") && pending.controller.signal.aborted && a.status === "rejected" && !owner;
+    const expected = pending.closedExecutionLease;
+    return !!expected && a.status === "admitted" && !!owner && owner.state === "released"
+      && owner.chatId === expected.chatId && owner.runId === expected.runId && owner.ownerId === expected.ownerId
+      && owner.ownerKind === expected.ownerKind && owner.leaseId === expected.leaseId;
+  }
+
+  /** Local machine observations only; never a receipt, authorization or recovery decision. */
+  private logNativePreparationFailure(runId: string, chatId: string, error: unknown, context: {
+    phase: NativePreparationDiagnosticPhase; startBoundaryCrossed?: boolean; agentAppMode?: boolean;
+  }): void {
+    if (context.agentAppMode !== false) return;
+    try {
+      console.warn("[invocation] native preparation diagnostic", { runId, chatId,
+        ...nativePreparationErrorDiagnostic(error, context, nativeOneStartCheckpointFailureKind) });
+    } catch { /* Diagnostics cannot replace the original error or prevent cleanup. */ }
+  }
+
   /** Source capability, not a request/JSON switch. Registration precedes every chunk await. */
   async startNativeIngress(source: NativeInvocationIngressSource): Promise<InvocationStartResult> {
     const owned = takeNativeInvocationIngressSource(source), binding = owned.binding;
@@ -1315,6 +1857,8 @@ export class InvocationService {
     this.nativeIngress.set(binding.runId,pending);this.publishActiveChats();
     let status:"handed-off"|"cancelled"|"uncertain"="uncertain";
     let refusedBeforeStart=false;
+    let diagnosticPhase: NativePreparationDiagnosticPhase = "native-ingress";
+    let diagnosticAgentAppMode: boolean | undefined;
     try {
       // A distinct busy-chat capsule still owns genuine cancellation/quiescence
       // and a closed-before-prepared proof; it never leaks an unregistered source.
@@ -1324,30 +1868,54 @@ export class InvocationService {
       // The other process (Desktop <-> background service) is running a turn of this chat: one host per chat at a time.
       if (otherHostBusy) { refusedBeforeStart=true; throw Object.assign(new Error(CHAT_BUSY_OTHER_HOST_CODE),{code:CHAT_BUSY_OTHER_HOST_CODE}); }
       if (!this.acceptingStarts) throw new Error("desktop_execution_admission_closed");
+      diagnosticPhase="native-ingress-authorize";
       const admission=await withNativePreparationLifetime(lifetime,()=>runNativePreparation(()=>owned.authorize(controller.signal)));
       await lifetime.awaitRetained();owned.assertCurrent();controller.signal.throwIfAborted();
+      diagnosticPhase="native-ingress-read";
       const prepared=await withNativePreparationLifetime(lifetime,()=>runNativePreparation(()=>owned.read(controller.signal)));
+      pending.returnedPrepared=prepared;
       await lifetime.awaitRetained();
       owned.assertCurrent();controller.signal.throwIfAborted();
+      diagnosticAgentAppMode=prepared.request.agentAppMode === true;
+      diagnosticPhase="native-ingress-validation";
       const durable=validateNativeIngressRequest(binding,prepared.request);
-      pending.handedOff=true;pending.port=prepared.port;
+      diagnosticPhase="native-prepared-start";
       const result=await this.startNativePrepared(prepared.request,prepared.port,admission,durable,undefined,undefined,prepared.hostNoticePurpose);
       status="handed-off";return result;
     } catch(cause) {
       status=controller.signal.aborted?"cancelled":"uncertain";
       if(controller.signal.aborted) throw controller.signal.reason;
       if(refusedBeforeStart){ status="cancelled"; throw cause; }
-      const error=new RuntimeTurnUnsettledError("native-ingress");Object.defineProperty(error,"cause",{value:cause});throw error;
+      const error=new RuntimeTurnUnsettledError("native-ingress");Object.defineProperty(error,"cause",{value:cause});
+      this.logNativePreparationFailure(binding.runId,binding.chatId,error,{phase:diagnosticPhase,agentAppMode:diagnosticAgentAppMode});
+      throw error;
     } finally {
       if (!pending.handedOff) this.cancelNativeIngress(pending);
-      lifetime.closeAdmission();await lifetime.quiescent();await this.drainNativeIngressRetained(pending);
+      lifetime.closeAdmission();await lifetime.quiescent();
+      if (!pending.handedOff) {
+        if (!controller.signal.aborted) controller.abort(new Error("native_ingress_dispatch_closed"));
+        try {
+          this.retireClosedNativeIngress(pending, controller.signal.aborted ? "cancelled" : "uncertain");
+        } catch (cause) {
+          // A missing/changed closed fact stays fenced; cleanup cannot replace
+          // the original Stop, channel or request-validation failure.
+          this.logNativePreparationFailure(binding.runId,binding.chatId,cause,{phase:"native-ingress-cleanup",agentAppMode:diagnosticAgentAppMode});
+        }
+      } else if (this.nativeSourceDispatchLocallyClosed(source)
+        || (pending.frontier === "closed-prepared" && this.nativeExecutableAuthorityClosedForSource(source))) {
+        // The exact closed prepared port already owns one cleanup observation.
+        // Rejoining its cached semantic ACK here cannot hold nativeStart open.
+      } else {
+      await this.drainNativeIngressRetained(pending);
       try {
         await owned.quiesce();
         await this.drainNativeIngressRetained(pending);
         if (!pending.handedOff) pending.frontier="closed-no-start";
         await owned.finish(status);
-      } catch(cause) { const error=new RuntimeTurnUnsettledError("native-ingress-cleanup");Object.defineProperty(error,"cause",{value:cause});throw error; }
+      } catch(cause) { const error=new RuntimeTurnUnsettledError("native-ingress-cleanup");Object.defineProperty(error,"cause",{value:cause});
+        this.logNativePreparationFailure(binding.runId,binding.chatId,error,{phase:"native-ingress-cleanup",agentAppMode:diagnosticAgentAppMode});throw error; }
       this.nativeIngress.delete(binding.runId);this.publishActiveChats();
+      }
       for(const listener of this.nativePreparationListeners){try{listener({runId:binding.runId,chatId:binding.chatId,status});}catch{}}
     }
   }
@@ -1355,9 +1923,31 @@ export class InvocationService {
   /** Private native bootstrap gate. The daemon host reserves exact input before this call, without await. */
   async startNativePrepared(req: McpInvocationRequest, port: NativeOneStartPort, mainAdmission: MainInvocationAdmission, durableAdmission: InvocationAdmissionIdentity,
     workspaceBinding?: InvocationWorkspaceBinding, executionContext?: InvocationExecutionContext, hostNoticePurpose?: ChatHostNotice["purpose"]): Promise<InvocationStartResult> {
-    assertNativeOneStartPort(port);
     const admission = takeMainInvocationAdmission(mainAdmission, { chatId: req.chatId, runId: req.runId });
     if (!admission) throw new Error("native_one_main_admission_required");
+    const token = Object.freeze({}), entry = { expected: { chatId: req.chatId, runId: req.runId }, admission: Object.freeze({ ...durableAdmission }), port, ingress: this.nativeIngress.get(req.runId ?? ""), entered: false, closed: false, originalFailure: undefined as unknown };
+    this.nativePreparedEntries.set(token, entry);
+    try {
+      if (entry.ingress) {
+        const prepared = entry.ingress.returnedPrepared;
+        if (entry.ingress.handedOff || entry.ingress.port !== undefined || !prepared || prepared.request !== req || prepared.port !== port) throw new Error("native_ingress_original_prepared_required");
+        entry.ingress.source.transferPreparedForEntry(prepared);
+        entry.ingress.handedOff = true; entry.ingress.port = port; entry.ingress.returnedPrepared = undefined;
+      }
+      return await this.startNativePreparedOwned(req, port, admission, durableAdmission, () => { entry.entered = true; }, workspaceBinding, executionContext, hostNoticePurpose);
+    } catch (error) {
+      if (!entry.entered) {
+        entry.closed = true; entry.originalFailure = error;
+        if (entry.ingress && !entry.ingress.handedOff) this.nativePreparedEntries.delete(token);
+        else await this.reconcileClosedPreparedEntry(token);
+      }
+      throw error;
+    } finally { if (entry.entered) this.nativePreparedEntries.delete(token); }
+  }
+
+  private async startNativePreparedOwned(req: McpInvocationRequest, port: NativeOneStartPort, admission: MainInvocationAdmission, durableAdmission: InvocationAdmissionIdentity, enterPrepared: () => void,
+    workspaceBinding?: InvocationWorkspaceBinding, executionContext?: InvocationExecutionContext, hostNoticePurpose?: ChatHostNotice["purpose"]): Promise<InvocationStartResult> {
+    assertNativeOneStartPort(port);
     if (!req.runId || durableAdmission.runId !== req.runId || durableAdmission.chatId !== req.chatId) throw new Error("invocation_admission_request_identity_mismatch");
     const nativeRunId = req.runId;
     req = structuredClone(req);
@@ -1375,13 +1965,14 @@ export class InvocationService {
     const controller = ingress?.controller ?? new AbortController(), retained = ingress?.retained ?? new Set<Promise<unknown>>();
     const preparationLifetime = ingress?.lifetime ?? createNativePreparationLifetime(binding);
     const nativeActor = ingress ? ingress.actorSnapshot : !isLocalInvocationPreparationPort(port) ? getAuthenticatedActorIds() : null;
-    const pending: NativePreparingPending = { request:req, actorSnapshot: nativeActor ? Object.freeze({ ...nativeActor }) : null, binding, controller, port, retained, preparationLifetime };
-    this.nativePreparing.set(nativeRunId, pending);
-    this.publishActiveChats();
     const boundary: StartBoundary = { crossed: false };
+    const pending: NativePreparingPending = { startBoundary:boundary, request:req, actorSnapshot: nativeActor ? Object.freeze({ ...nativeActor }) : null, binding, controller, port, retained, preparationLifetime };
+    enterPrepared();
+    this.nativePreparing.set(nativeRunId, pending);
     let status: "handed-off" | "rejected" | "cancelled" | "uncertain" = "rejected";
     let nativeFailure: unknown;
     try {
+      this.publishActiveChats();
       if (req.oneMode && !effectObservationTicket(nativeRunId) && this.ordinaryOneTurnObserver) {
         const turn: OrdinaryOneTurnLifetime = { phase: "preparing", actor: JSON.stringify(ingress || !isLocalInvocationPreparationPort(port) ? pending.actorSnapshot : getAuthenticatedActorIds()),
           inputDigest: reservation.inputDigest, preparationClosed: false, executionClosed: false };
@@ -1404,9 +1995,13 @@ export class InvocationService {
       return started;
     } catch (error) {
       nativeFailure = error;
+      this.logNativePreparationFailure(nativeRunId,req.chatId,error,{phase:"native-prepared-start",startBoundaryCrossed:boundary.crossed,agentAppMode:req.agentAppMode === true});
       status = controller.signal.aborted ? "cancelled" : "uncertain";
-      if (durableAdmission && !boundary.crossed) decideInvocationAdmission({ ...durableAdmission, decision: "rejected", reasonCode: preDispatchRefusalReasonCode(error),
-        noStartProof: { kind: "owner-start-boundary-not-crossed", verifiedOwnerProcessEpoch: durableAdmission.ownerProcessEpoch } });
+      if (durableAdmission && !boundary.crossed) {
+        try { decideInvocationAdmission({ ...durableAdmission, decision: "rejected", reasonCode: preDispatchRefusalReasonCode(error),
+          noStartProof: { kind: "owner-start-boundary-not-crossed", verifiedOwnerProcessEpoch: durableAdmission.ownerProcessEpoch } }); }
+        catch { /* Original source failure remains primary; the exact closed frontier reconciles below. */ }
+      }
       if (boundary.crossed && !boundary.handedOff && boundary.runId) {
         tryRecordRunEvent({ runId: boundary.runId, chatId: req.chatId, kind: "invoke_threw", payload: { errorCode: controller.signal.aborted ? "native_preparation_cancelled" : RUNTIME_TURN_UNSETTLED_CODE, providerDispatched: false } });
         // Keep the slot and custody until exact Main preparation/claim quiescence.
@@ -1416,21 +2011,59 @@ export class InvocationService {
     } finally {
       preparationLifetime.closeAdmission();
       await preparationLifetime.quiescent();
-      await Promise.allSettled([...retained]);
-      // A failed finish retains the pending barrier/custody for explicit reconciliation.
-      // Root transport must supply actual Main quiescence; missing ACK is not success.
+      let retainedSize: number;
+      do { retainedSize = retained.size; await Promise.allSettled([...retained].filter(p => !this.nativeCancellationObservations.has(p))); }
+      while (retained.size !== retainedSize);
+      // The original driver/generator and all attached local work have really
+      // drained here. Remote semantic cleanup is not executable chat custody.
+      this.nativePreparedDriversClosed.add(pending);
+      let retired = false;
+      if (!boundary.handedOff) {
+        try { retired = this.retireClosedPreparedNoBrain(pending, nativeFailure); }
+        catch {
+          this.scheduleClosedPreparedReconciliation(pending, nativeFailure, status as "rejected" | "cancelled" | "uncertain");
+        }
+      }
+      if (retired) {
+        this.quarantineNativeCleanup(nativeRunId, { completion: this.observeClosedPreparedCleanup(port, binding, status as "rejected" | "cancelled" | "uncertain") });
+      } else if (!boundary.handedOff && controller.signal.aborted && this.nativePreparedDispatchLocallyClosed(pending)) {
+        // The exact durable retirement observer owns cleanup after its CAS.
+        // Joining semantic RPCs here would veto the already closed original.
+      } else {
       try { await port.quiesce(binding, status); }
-      catch (cause) { const error = new RuntimeTurnUnsettledError("native-one-quiescence"); Object.defineProperty(error, "cause", { value: cause }); throw error; }
-      if (boundary.crossed && !boundary.handedOff && boundary.runId) this.releaseUndispatchedStart(boundary.runId, req.chatId, nativeFailure, isLocalInvocationPreparationPort(port) ? boundary.cleanups ?? [] : []);
+      catch (cause) { const error = new RuntimeTurnUnsettledError("native-one-quiescence"); Object.defineProperty(error, "cause", { value: cause });
+        this.logNativePreparationFailure(nativeRunId,req.chatId,error,{phase:"native-prepared-quiescence",startBoundaryCrossed:boundary.crossed,agentAppMode:req.agentAppMode === true});throw nativeFailure ?? error; }
+      const localClosedRecord = isLocalInvocationPreparationPort(port) && boundary.crossed && !boundary.handedOff && boundary.runId === nativeRunId
+        ? this.activeRuns.get(nativeRunId) ?? this.settlingRuns.get(nativeRunId) : undefined;
+      const localClosedEligible = !!localClosedRecord && !!boundary.ownerLease && localClosedRecord.ownerLease === boundary.ownerLease
+        && localClosedRecord.controller === controller && !localClosedRecord.completion && !localClosedRecord.mainLifetime;
+      let localClosed = false;
+      const observeLocalCleanupLoop = localClosedEligible ? () => {
+        // This original-source fact is minted only after every synchronous
+        // cleanup callback was attempted, never before a diagnostic/log leaf.
+        this.nativeLocalPreparedClosures.set(pending, { record: localClosedRecord!, expected: boundary.ownerLease!,
+          status: status as "rejected" | "cancelled" | "uncertain", finishStarted: false });
+        localClosed = true;
+      } : undefined;
+      if (boundary.crossed && !boundary.handedOff && boundary.runId) {
+        try { this.releaseUndispatchedStart(boundary.runId, req.chatId, nativeFailure, isLocalInvocationPreparationPort(port) ? boundary.cleanups ?? [] : [], undefined, observeLocalCleanupLoop); }
+        catch (cause) { if (!localClosed) throw cause; this.logNativePreparationFailure(nativeRunId,req.chatId,cause,{phase:"native-prepared-cleanup",startBoundaryCrossed:true,agentAppMode:req.agentAppMode === true}); }
+      }
+      if (localClosed) {
+        await this.reconcileClosedLocalPrepared(pending);
+      } else {
       if (!boundary.handedOff && boundary.ownerLease) invocationRunOwners.release(boundary.ownerLease);
       if (ingress && boundary.crossed && !boundary.handedOff && boundary.ownerLease && boundary.runId === nativeRunId) {
         ingress.undispatchedLease = Object.freeze({ ...boundary.ownerLease });
       }
       try { await port.finish(binding, status); }
-      catch (cause) { const error = new RuntimeTurnUnsettledError("native-one-cleanup"); Object.defineProperty(error, "cause", { value: cause }); throw error; }
+      catch (cause) { const error = new RuntimeTurnUnsettledError("native-one-cleanup"); Object.defineProperty(error, "cause", { value: cause });
+        this.logNativePreparationFailure(nativeRunId,req.chatId,error,{phase:"native-prepared-cleanup",startBoundaryCrossed:boundary.crossed,agentAppMode:req.agentAppMode === true});throw nativeFailure ?? error; }
       this.nativePreparing.delete(nativeRunId);
       this.publishActiveChats();
       this.finishOrdinaryOneTurn(pending, boundary.handedOff ? "preparation" : "closed");
+      }
+      }
       for (const listener of this.nativePreparationListeners) {
         try { listener({ runId: nativeRunId, chatId: req.chatId, status }); } catch { /* machine fact remains owned */ }
       }
@@ -1444,6 +2077,15 @@ export class InvocationService {
     // the renderer then sees a real `closed` state instead of guessing from a
     // missing answer.
     onAgentResidencyChange((change) => this.publishAgentResidencyChange(change));
+    onAuthSessionOwnershipChanged(()=>{
+      for(const [runId,record] of new Map([...this.activeRuns.entries(),...this.settlingRuns,
+        ...this.pendingGoalVerifications,...this.browserLoginWaitingRuns])) {
+        if(record.oneTeamReportCustody && !queuedTeamReportCurrent(record.oneTeamReportCustody,record.oneTeamReportOriginalRequest!)) {
+          try {this.cancelWithReason(runId,new Error("one_team_report_owner_changed"));}catch{record.controller.abort(new Error("one_team_report_owner_changed"));}
+        }
+      }
+    });
+    onAuthSessionRestored(()=>queueMicrotask(()=>{try{this.recoverQueuedSteers(undefined,true);}catch{ /* Owner recovery is retried by the existing startup/host path. */ }}));
   }
 
   onEvent(listener: InvocationEventListener): () => void {
@@ -1693,18 +2335,53 @@ export class InvocationService {
   }
 
   /** Rehydrate exact accepted directions after SQLite is initialized on boot. */
-  recoverQueuedSteers(chatId?: string): InvocationSteerRecoveryReport {
-    const rows = listRecoverableQueuedSteers(chatId);
+  recoverQueuedSteers(chatId?: string, ownerReportHoldsOnly = false): InvocationSteerRecoveryReport {
+    const rows = listRecoverableQueuedSteers(chatId).filter(row=>!ownerReportHoldsOnly
+      || row.request.oneTeamReportTurn===true && row.recoveryState==="held" && row.recoveryReason==="one-team-report-owner-unbound");
     let resumed = 0;
     let settled = 0;
     let held = 0;
-    for (const row of rows) {
+    for (let row of rows) {
+      // A malformed/uncertain drain claim outranks owner recovery. An account
+      // returning cannot turn evidence of a prior dispatch into a fresh queue.
+      if (row.request.oneTeamReportTurn === true && row.status === "draining" && !row.drainedRunId) {
+        holdQueuedSteerForRecovery(row.id, "draining-run-id-missing");
+        held += 1;
+        continue;
+      }
+      if(row.request.oneTeamReportTurn===true && !row.drainedRunId){
+        if(row.oneTeamReportCustodyJson===undefined){
+          try {const custody=captureQueuedTeamReportCustody(row.request,undefined,row.originalRunId);
+            if(bindQueuedTeamReportCustody(row.id,custody))row=getDurableQueuedSteer(row.id)!;
+          }catch{ /* Unknown legacy stays unknown, never rebound to a different source owner. */ }
+        }
+        if(!queuedTeamReportCurrent(row.oneTeamReportCustody,row.request)){
+          holdQueuedSteerForRecovery(row.id,"one-team-report-owner-unbound");held++;continue;
+        }
+        if(row.recoveryState==="held" && row.recoveryReason==="one-team-report-owner-unbound"){
+          if(!releaseQueuedSteerRecoveryHold(row.id,"one-team-report-owner-unbound")){held++;continue;}row=getDurableQueuedSteer(row.id)!;
+        }
+      }
+      // This direction is a distinct next turn. An exact released execution
+      // owner proves the previous writer is gone even when its result/ACK was
+      // lost. Keep that history for recap, without holding undispatched input.
+      const originalOwner = invocationRunOwners.getOwnerByRunId(row.originalRunId);
+      const previousExecutionClosed = originalOwner?.runId === row.originalRunId
+        && originalOwner.chatId === row.chatId && originalOwner.state === "released"
+        && !this.activeRuns.has(row.originalRunId) && !this.settlingRuns.has(row.originalRunId)
+        && !this.nativeIngress.has(row.originalRunId) && !this.nativePreparing.has(row.originalRunId);
+      if (previousExecutionClosed && row.status === "queued" && !row.drainedRunId
+        && row.recoveryState === "held"
+        && (row.recoveryReason === "original-run-start-uncertain"
+          || row.recoveryReason === "original-run-effect-boundary-unconfirmed")) {
+        if (releaseQueuedSteerRecoveryHold(row.id, row.recoveryReason)) row = getDurableQueuedSteer(row.id)!;
+      }
       if (row.recoveryState === "held") {
         // A held relay One wrote to a teammate has no owner to decide on it: measured 2026-10-12, two such rows sat
         // for days after their run ended in a browser-login wait without a receipt. Once that run's lease is released
         // and an hour has passed, close it; the Goal re-derives what still needs saying. Owner-written ones stay held.
-        const originalOwner = invocationRunOwners.getOwnerByRunId(row.originalRunId);
         if (row.request.promptOrigin === "system" && originalOwner?.state === "released"
+          && row.recoveryReason !== "one-team-report-owner-unbound"
           && Date.now() - Date.parse(row.queuedAt) > HELD_SYSTEM_STEER_RETIRE_MS && retireHeldQueuedSteer(row.id)) {
           settled += 1;
           continue;
@@ -1734,17 +2411,15 @@ export class InvocationService {
         continue;
       }
       const originalReceipt = getInvocationRunReceipt(row.originalRunId);
-      if (!steerReceiptIsTerminal(originalReceipt)) {
+      if (!steerReceiptIsTerminal(originalReceipt) && !previousExecutionClosed) {
         holdQueuedSteerForRecovery(row.id, "original-run-start-uncertain");
         held += 1;
         continue;
       }
-      // A terminal invocation receipt only closes the model/runtime lifecycle;
-      // it does not prove that provider or adapter effects have quiesced. The
-      // exact Main-owned boundary is the only safe proof that a queued follow-
-      // up may be dispatched after a restart.
+      // While execution custody is still live, use its exact boundary. Once
+      // released, historical effect uncertainty is the next model's context.
       let originalBoundary: ReturnType<typeof readInvocationEffectBoundary>;
-      try {
+      if (!previousExecutionClosed) try {
         originalBoundary = readInvocationEffectBoundary({
           invocationRunId: row.originalRunId,
           expectedChatId: row.chatId,
@@ -1755,7 +2430,7 @@ export class InvocationService {
         continue;
       }
       // The owner's own message is never held on an unknown outside outcome, only on a run that has not finished.
-      if (!originalBoundary.terminal) {
+      if (!previousExecutionClosed && !originalBoundary!.terminal) {
         holdQueuedSteerForRecovery(row.id, "original-run-effect-boundary-unconfirmed");
         held += 1;
         continue;
@@ -1789,11 +2464,16 @@ export class InvocationService {
     /** Main-only renderer admission identity; never accepted from an IPC request. */
     durableAdmission?: InvocationAdmissionIdentity,
     queuedRoomInheritance?: typeof QUEUED_ONE_ROOM_INHERITANCE,
+    oneTeamReportCustody?: QueuedTeamReportCustody,
   ): InvocationStartResult {
+    if(req.oneTeamReportTurn===true){
+      oneTeamReportCustody ??= captureQueuedTeamReportCustody(req);
+      if(!queuedTeamReportCurrent(oneTeamReportCustody,req))throw new Error("one_team_report_owner_unbound");
+    }
     const startBoundary: StartBoundary = { crossed: false };
     try {
       const started = this.startPrepared(req, workspaceBinding, executionContext, questionContinuation,
-        hostNoticePurpose, mainAdmission, durableAdmission, startBoundary, queuedRoomInheritance);
+        hostNoticePurpose, mainAdmission, durableAdmission, startBoundary, queuedRoomInheritance, oneTeamReportCustody);
       // The run is dispatched from here: a failed cleanup of an older parked wait must not report it as not started.
       try {
         for (const [waitingRunId, waiting] of this.browserLoginWaitingRuns) {
@@ -1859,8 +2539,9 @@ export class InvocationService {
     durableAdmission: InvocationAdmissionIdentity | undefined,
     startBoundary: StartBoundary,
     queuedRoomInheritance?: typeof QUEUED_ONE_ROOM_INHERITANCE,
+    oneTeamReportCustody?: QueuedTeamReportCustody,
   ): InvocationStartResult {
-    return driveLocalOneStart(this.startPreparedSteps(req, workspaceBinding, executionContext, questionContinuation, hostNoticePurpose, mainAdmission, durableAdmission, startBoundary, queuedRoomInheritance));
+    return driveLocalOneStart(this.startPreparedSteps(req, workspaceBinding, executionContext, questionContinuation, hostNoticePurpose, mainAdmission, durableAdmission, startBoundary, queuedRoomInheritance, undefined, oneTeamReportCustody));
   }
 
   private *startPreparedSteps(
@@ -1874,10 +2555,12 @@ export class InvocationService {
     startBoundary: StartBoundary,
     queuedRoomInheritance?: typeof QUEUED_ONE_ROOM_INHERITANCE,
     nativeController?: AbortController,
+    oneTeamReportCustody?: QueuedTeamReportCustody,
   ): Generator<NativeOneStartCheckpoint, InvocationStartResult, unknown> {
     const nativePreparation = nativeController ? this.nativePreparing.get(req.runId!) : undefined;
     mainAdmission = takeMainInvocationAdmission(mainAdmission);
     assertDesktopOneRecoveryStart(req);
+    if(req.oneTeamReportTurn===true && !queuedTeamReportCurrent(oneTeamReportCustody,req))throw new Error("one_team_report_owner_unbound");
     if (durableAdmission && (durableAdmission.runId !== req.runId || durableAdmission.chatId !== req.chatId)) {
       throw new Error("invocation_admission_request_identity_mismatch");
     }
@@ -2238,14 +2921,40 @@ export class InvocationService {
         teamId: chat.firmId,
       };
       const appliedPrinciples = selectApprovedOneOperatingPrinciples(profile, invocationScope);
-      const memoryState = getOneMemoryState();
-      const appliedMemories = selectApprovedOneMemoryAssets(invocationScope, memoryState);
+      let approvedMemoryContext: string | undefined;
+      // Approved memory is an optional overlay. A legacy reader or unavailable
+      // store must not refuse a fresh owner turn or alter the stored authority.
+      try {
+        const memoryState = getOneMemoryState();
+        const appliedMemories = selectApprovedOneMemoryAssets(invocationScope, memoryState);
+        const memoryContext = buildApprovedOneMemoryContext(invocationScope, memoryState);
+        const memoryReceipt = {
+          storeVersion: memoryState.version,
+          memoryIds: appliedMemories.map((item) => item.id),
+          scopeKinds: [...new Set(appliedMemories.map((item) => item.scope))].sort(),
+          assets: appliedMemories.map((item) => ({
+            assetId: item.id,
+            assetVersion: item.version,
+            provenanceStatus: item.provenanceStatus,
+            sourceTaskId: item.sourceTaskId,
+            sourceTaskVersion: item.sourceTaskVersion,
+            sourceRunId: item.sourceRunId,
+            sourceValueClosureId: item.sourceValueClosureId,
+            sourceValueClosureVersion: item.sourceValueClosureVersion,
+            scope: item.scope,
+          })),
+        };
+        oneMemoryReceipt = memoryReceipt;
+        approvedMemoryContext = memoryContext;
+      } catch {
+        console.warn("[invocation] optional One memory overlay skipped", { code: "one_memory_overlay_unavailable" });
+      }
       // One 페르소나 오버레이 — Main만 붙인다. 실행 경계(solo_locked·preflight)는
       // 위에서 이미 고정됐고, 이 블록은 정체성/능력 서술만 더한다.
       oneProfileContext = [
         ONE_PERSONA_DIRECTIVE,
         buildApprovedOneProfileContext(profile, invocationScope),
-        buildApprovedOneMemoryContext(invocationScope, memoryState),
+        approvedMemoryContext,
         ...(preparedOneMemoryUseOnce ? [preparedOneMemoryUseOnce.context] : []),
         ...(preparedOneBriefingAction ? [preparedOneBriefingAction.context] : []),
       ].filter(Boolean).join("\n\n");
@@ -2254,22 +2963,6 @@ export class InvocationService {
         profileVersion: profile.version,
         principleIds: appliedPrinciples.map((item) => item.id),
         scopeKinds: [...new Set(appliedPrinciples.map((item) => item.scope))].sort(),
-      };
-      oneMemoryReceipt = {
-        storeVersion: memoryState.version,
-        memoryIds: appliedMemories.map((item) => item.id),
-        scopeKinds: [...new Set(appliedMemories.map((item) => item.scope))].sort(),
-        assets: appliedMemories.map((item) => ({
-          assetId: item.id,
-          assetVersion: item.version,
-          provenanceStatus: item.provenanceStatus,
-          sourceTaskId: item.sourceTaskId,
-          sourceTaskVersion: item.sourceTaskVersion,
-          sourceRunId: item.sourceRunId,
-          sourceValueClosureId: item.sourceValueClosureId,
-          sourceValueClosureVersion: item.sourceValueClosureVersion,
-          scope: item.scope,
-        })),
       };
     } else if (
       chat.originSurface === "work"
@@ -2431,6 +3124,7 @@ export class InvocationService {
         ...(ownerAnswersGoalQuestion ? { ownerAnswer: true } : {}) };
     }
     const record: RunRecord = {
+      ...(oneTeamReportCustody ? {oneTeamReportCustody,oneTeamReportOriginalRequest:Object.freeze(structuredClone(req))} : {}),
       ...(nativePreparation ? {nativeOwnerTextChoices:canonicalInvocationRequestJson(nativeOwnerTextChoices(nativePreparation.request) as unknown as McpInvocationRequest)} : {}),
       controller,
       background: backgroundObservation,
@@ -2571,6 +3265,7 @@ export class InvocationService {
         publishActiveState: () => this.publishActiveChats(),
         persistStart: () => {
           assertDesktopOneRecoveryStart(runReq);
+          if(record.oneTeamReportCustody && !queuedTeamReportCurrent(record.oneTeamReportCustody,record.oneTeamReportOriginalRequest!))throw new Error("one_team_report_owner_unbound");
           const persistReceipt = () => recordRunEvent({
           runId,
           kind: "invoke_started",
@@ -3172,6 +3867,9 @@ export class InvocationService {
         ? { goalId: goalLongRun.goalId, attemptId: goalControllerAttemptId } : null }, () => withAdapterEffectContext({ runId, chatId: chat.id, rootAgentId: chat.agentId ?? null,
         source: executionContext?.source, nativeScienceTool: binding => effectBoundary.nativeScienceTool(binding),
         nativeScienceFailure: observation => effectBoundary.nativeScienceFailure(observation),
+        nativeRuntimeDiagnostic: diagnostic => tryRecordRunEvent({ runId, chatId: chat.id, agentId: chat.agentId ?? null,
+          kind: "runtime_native_diagnostic", sourceEventId: `native-runtime-diagnostic:${diagnostic.diagnosticAttemptId}:${diagnostic.phase}:${diagnostic.sequence}`,
+          evidencePhase: "observed", payload: { ...diagnostic } }),
         begin: admission => { effectBoundary.adapterStarted(admission); record.semanticSteps.admitAdapter(admission); }, finish: (scopeId, report) => effectBoundary.adapterFinished(scopeId, report),
         hostControl: observation => effectBoundary.hostControl(observation), recordingFailed: () => effectBoundary.recordingFailed() }, () => Promise.resolve().then(() => {
         if (record.ownerLease) assertInvocationRunOwner(record.ownerLease);
@@ -3187,9 +3885,20 @@ export class InvocationService {
         // Chat host handover (1.3.0 A2): the chat's previous turn ran in the other process, so that process lets go of its
         // idle resident runtime sessions before this one dispatches, and the same provider thread resumes here.
         const handedOver = handoverLease ? this.handOverChatHost(handoverLease, runReq.chatId, runId) : undefined;
-        const dispatch = () => withNativeApprovalExecution(nativeApprovalOwner, () => runMcpInvocation(
+        const dispatch = () => {
+          controller.signal.throwIfAborted();
+          if(record.oneTeamReportCustody && !queuedTeamReportCurrent(record.oneTeamReportCustody,record.oneTeamReportOriginalRequest!))throw new Error("one_team_report_owner_changed");
+          return withNativeApprovalExecution(nativeApprovalOwner, () => runMcpInvocation(
       runReq,
       (rawEvent) => {
+        if(record.oneTeamReportCustody && !queuedTeamReportCurrent(record.oneTeamReportCustody,record.oneTeamReportOriginalRequest!)) {
+          controller.abort(new Error("one_team_report_owner_changed"));
+          if(rawEvent.kind!=="usage")return;
+          // Keep numeric usage, never a stale report's text/tool/notice payload.
+          rawEvent={kind:"usage",tokens:rawEvent.tokens,observedUsage:rawEvent.observedUsage ? {
+            inputTokens:rawEvent.observedUsage.inputTokens,outputTokens:rawEvent.observedUsage.outputTokens,
+            ...(rawEvent.observedUsage.cachedInputTokens!==undefined?{cachedInputTokens:rawEvent.observedUsage.cachedInputTokens}:{})} : undefined};
+        }
         const hostControl = mainHostControlForEvent(rawEvent);
         effectBoundary.observe(rawEvent);
         rawEvent = redactMcpInvocationEventSecrets(redactOneAttachmentEvent(runReq, rawEvent));
@@ -4143,7 +4852,6 @@ export class InvocationService {
               projectionGoalId = prepared.run.goalId;
               record.automaticGoalId = prepared.run.goalId;
               try {
-                setChatGoalBinding(chat.id, prepared.run.goalId);
                 const stopReason = controller.signal.reason instanceof Error ? controller.signal.reason.message : "internal_abort";
                 let goal = getLongRunByGoalId(prepared.run.goalId);
                 if (goal && !LONG_RUN_TERMINAL_STATUSES.has(goal.status)) {
@@ -4192,7 +4900,6 @@ export class InvocationService {
           transitionLongRun({ runId: admitted.id, to: "running", actorKind: "host", reason: "automatic-goal-user-dispatch" });
           refreshGoalProjection();
           if (lastControllerSelection) bindGoalControllerAttempt(lastControllerSelection);
-          setChatGoalBinding(chat.id, admitted.goalId);
           const goalEvent: McpInvocationEvent = { kind: "tool-use", tool: { name: "Goal", result:
             `${admitted.objective}\n\n${admitted.acceptanceCriteria.map((criterion) => `• ${criterion}`).join("\n")}\n\n` +
             (pickLocale(runReq) === "ko"
@@ -4298,12 +5005,19 @@ export class InvocationService {
       },
       this.ownerControlInbox(runId, record),
     ));
-        return handedOver ? handedOver.then(dispatch) : dispatch(); })
+        };
+        // The owner's own message takes the owner slot lane (NH20); anything this turn starts for others does not inherit it.
+        const runPriority = invocationRunPriority({ promptOrigin: runReq.promptOrigin, oneTeamReportTurn: runReq.oneTeamReportTurn, source: executionContext?.source });
+        const prioritizedDispatch = () => withRunPriority(runPriority, dispatch);
+        return handedOver ? handedOver.then(prioritizedDispatch) : prioritizedDispatch(); })
       .then((result) => {
         // The runner promise has settled. Persist host effect completeness
         // before a fast verifier can produce or claim a retry checkpoint.
         try { effectBoundary.persist(); }
         catch (error) { console.warn("[invocation] effect boundary receipt failed:", error); }
+        if(record.oneTeamReportCustody && !queuedTeamReportCurrent(record.oneTeamReportCustody,record.oneTeamReportOriginalRequest!)) {
+          controller.abort(new Error("one_team_report_owner_changed"));throw new Error("one_team_report_owner_changed");
+        }
         // A compromised runtime must not turn the private attachment staging
         // directory into a durable result-folder receipt.
         const returnedResultFolder = result.resultFolder;
@@ -4978,20 +5692,13 @@ export class InvocationService {
           catch (error) { console.warn("[invocation] drained owner release remains unconfirmed:", error); }
         }
         if (nativePreparation) {
-          try { await nativePreparation.port.finish(nativePreparation.binding, "settled"); }
-          catch (cause) {
-            // The owned brain has drained, but Main custody is still unknown.
-            // Keep this settling slot and prevent successor/queued dispatch.
-            // Observe the rejection here so GUI loss cannot crash the daemon.
-            console.warn("[invocation] native preparation cleanup remains unconfirmed:", cause);
-            return;
-          }
-        }
-        this.settlingRuns.delete(runId);
+          // A missing cleanup ACK cannot retain an already drained execution slot.
+          // Failed owner/CAS or actual preparation drain proof keeps the live fence.
+          if (!this.retireDrainedNativeExecution(runId, record, nativePreparation)) return;
+        } else this.settlingRuns.delete(runId);
         this.publishActiveChats();
         if (nativePreparation) this.finishOrdinaryOneTurn(nativePreparation, "execution");
-        // Recovery listeners can start the next read-only turn only after the
-        // predecessor's full cleanup/lifetime barrier released its chat slot.
+        // Actual execution authority is closed; original resource cleanup remains separate.
         this.publishSettled(runId, record);
         const hasQueuedSteer = Boolean(this.steerQueues.get(record.chatId)?.length);
         this.drainSteerQueue(runReq.chatId);
@@ -5033,8 +5740,9 @@ export class InvocationService {
    * and release the slot.
    */
   private releaseUndispatchedStart(runId: string, chatId: string, error: unknown, cleanups: Array<() => void>,
-    settledRecord?: RunRecord): void {
+    settledRecord?: RunRecord, onCleanupLoopCompleted?: () => void): void {
     const diagnosticRecord = settledRecord ?? this.activeRuns.get(runId);
+    try {
     // Inspect only a known Main request, before cleanup removes attachment aliases.
     if (diagnosticRecord) {
       const diagnosticRequest = diagnosticRecord.request;
@@ -5050,9 +5758,15 @@ export class InvocationService {
         kind: "invoke_error_diagnostic", payload: diagnostic });
     }
     console.warn("[invocation] start failed after its durable receipt and before dispatch; releasing the chat", error);
+    } catch { /* Diagnostic collection/formatting cannot skip terminal cleanup. */ }
     for (const cleanup of cleanups) {
-      try { cleanup(); } catch (cleanupError) { console.warn("[invocation] undispatched start cleanup failed:", cleanupError); }
+      try { cleanup(); }
+      catch (cleanupError) {
+        try { console.warn("[invocation] undispatched start cleanup failed:", cleanupError); }
+        catch { /* A diagnostic formatter cannot prevent the next cleanup. */ }
+      }
     }
+    onCleanupLoopCompleted?.();
     // The ledger projects a start without a terminal row as "interrupted", so ask for the row itself: a runner that
     // already wrote its terminal fact before failing keeps it, and only a missing one is recorded here.
     const terminalRecorded = getDb().prepare(`SELECT 1 FROM run_events WHERE run_id = ? AND kind IN
@@ -5152,7 +5866,7 @@ export class InvocationService {
       const readOnly = !parked.durable.effectsSettled;
       this.start({ ...request, runId: successorRunId, promptOrigin: "system", taskIntent: "task",
         ...(readOnly ? { permissions: "read", onePermissionMode: "read" } : {}),
-        userPrompt: `Continue the existing task after Main verified restoration of its exact login prerequisite. Source invocation: ${runId}. Inspect the existing results and current external state before carrying out only the remaining work.${readOnly ? " This turn is read-only; report what has already happened." : " Check what the prior operation already did and finish only what remains."}`,
+        userPrompt: `login restored (source run ${runId}). Inspect results and external state, then do only what remains.${readOnly ? " read-only: report what happened." : ""}`,
       }, record.workspaceBinding, record.executionContext, undefined, "goal-continuation",
         successorAdmission);
       settleInvocationBrowserLoginWait(runId, "dispatched");
@@ -5192,7 +5906,7 @@ export class InvocationService {
     const ownerStop = record.controller.signal.aborted && stop instanceof Error
       && (stop.message === STOPPED_BY_USER || isOwnerGoalStopCause(stop.message) || Boolean(invocationHostStopCause(stop.message)));
     if (!goalId || record.background || ownerStop || record.steeringInterruptRequested
-      || runtimeFailureBlocksReplay({ providerCode: reason })) return;
+      || runtimeFailureBlocksNextAutomaticTurn({ providerCode: reason })) return;
     try {
       const run = getLongRunByGoalId(goalId);
       if (!run || run.surface === "science" || LONG_RUN_TERMINAL_STATUSES.has(run.status)
@@ -5458,7 +6172,7 @@ export class InvocationService {
       const already = preparing.controller.signal.aborted;
       if (!already) {
         preparing.controller.abort(reason);
-        try { const pending = Promise.resolve(preparing.port.cancel(preparing.binding)); pending.catch(() => {}); preparing.retained.add(pending); } catch { /* actual awaited claim still owns the barrier */ }
+        try { const pending = Promise.resolve(preparing.port.cancel(preparing.binding)); pending.catch(() => {}); this.nativeCancellationObservations.add(pending); preparing.retained.add(pending); } catch { /* actual awaited claim still owns the barrier */ }
       }
       if (!this.activeRuns.get(runId)) return already ? "already-requested" : "requested";
     }
@@ -5499,11 +6213,7 @@ export class InvocationService {
     if (this.browserLoginWaitingRuns.has(runId)) {
       const preserveWaiting = reason.message === "app_closed" || reason.message === "app_shutdown" || reason.message === "update_restart";
       if (!preserveWaiting && record?.chatId) {
-        this.steerQueues.delete(record.chatId);
-        try {
-          cancelQueuedSteersForChat(record.chatId);
-          cancelQueuedOnePreflightSteersForChat(record.chatId);
-        } catch { /* The explicit stop must still reach the parked owner. */ }
+        this.clearQueuedDirectionsForStop(record,reason);
       }
       this.cancelParkedBrowserLoginWait(runId, preserveWaiting ? "host_restart" : reason.message, !preserveWaiting);
       if (record?.automaticGoalId) this.settleAutomaticGoalInterruption(record);
@@ -5512,13 +6222,7 @@ export class InvocationService {
     // Stop is terminal for the visible work item: it also clears directions
     // queued behind the active turn. Steering itself never calls cancel.
     if (record?.chatId) {
-      this.steerQueues.delete(record.chatId);
-      try {
-        cancelQueuedSteersForChat(record.chatId);
-        cancelQueuedOnePreflightSteersForChat(record.chatId);
-      } catch {
-        // Persistence failure must never prevent the actual stop signal.
-      }
+      this.clearQueuedDirectionsForStop(record,reason);
     }
     let result = this.activeRuns.requestCancelWithReason(runId, reason);
     if (result === "not-found" && record && (this.pendingGoalVerifications.has(runId) || this.settlingRuns.has(runId))) {
@@ -5546,6 +6250,22 @@ export class InvocationService {
       });
     }
     return result;
+  }
+
+  private clearQueuedDirectionsForStop(record:RunRecord,reason:Error):void {
+    this.steerQueues.delete(record.chatId);
+    const preserveReports=reason.message==="one_team_report_owner_changed" && Boolean(record.oneTeamReportCustody);
+    try {getDb().transaction(()=>{
+      if(preserveReports)for(const row of listRecoverableQueuedSteers(record.chatId)){
+        if(row.request.oneTeamReportTurn===true && row.status==="queued" && !row.drainedRunId){
+          // This is a hold, never a new admission. Auth restoration rechecks
+          // the exact original custody; stronger uncertainty holds stay held.
+          holdQueuedSteerForRecovery(row.id,"one-team-report-owner-unbound");
+        }
+      }
+      cancelQueuedSteersForChat(record.chatId,preserveReports);
+      cancelQueuedOnePreflightSteersForChat(record.chatId);
+    })();}catch{ /* Store refusal must never keep the original run alive. */ }
   }
 
   /** Interrupt an interactive turn only after its replacement direction is durable. */
@@ -5984,6 +6704,7 @@ export class InvocationService {
     mainAdmission?: MainInvocationAdmission,
     /** Main-owned idempotency key for a preflight direction. */
     preflightSteerId?: string,
+    oneTeamReportSource?: QueuedTeamReportSourceRef,
   ): InvocationSteerResult {
     mainAdmission = takeMainInvocationAdmission(mainAdmission);
     if (req.oneAttachmentRef) {
@@ -5993,6 +6714,8 @@ export class InvocationService {
       ...req,
       permissions: effectiveInvocationPermission(req.permissions, req.planMode),
     };
+    const reportCustody=steerRequest.oneTeamReportTurn===true?captureQueuedTeamReportCustody(steerRequest,oneTeamReportSource):undefined;
+    if (oneTeamReportSource && !reportCustody)throw new Error("one_team_report_owner_unbound");
     if (preflightSteerId) {
       const existing = getDurableQueuedSteer(preflightSteerId);
       if (existing) {
@@ -6018,7 +6741,7 @@ export class InvocationService {
         chatId: req.chatId,
         queued: false,
         interruptsCurrent: false,
-        runId: this.start({ ...steerRequest, runId: undefined }, workspaceBinding, executionContext, undefined, undefined, mainAdmission).runId,
+        runId: this.start({ ...steerRequest, runId: undefined }, workspaceBinding, executionContext, undefined, undefined, mainAdmission,undefined,undefined,reportCustody).runId,
       };
     }
     if (!invocationWorkspaceBindingsEqual(active[1].workspaceBinding, workspaceBinding)) {
@@ -6034,6 +6757,7 @@ export class InvocationService {
       ...(preflightSteerId ? { id: preflightSteerId } : {}),
       chatId: req.chatId,
       originalRunId: active[0],
+      ...(reportCustody ? {oneTeamReportCustody:reportCustody} : {}),
       request: { ...steerRequest, runId: undefined },
       ...(workspaceBinding ? { workspaceBinding: immutableWorkspaceBinding(workspaceBinding) } : {}),
       ...(executionContext ? { executionContext } : {}),
@@ -6048,6 +6772,8 @@ export class InvocationService {
     }
     queue.push({
       mainAdmission,
+      ...(durable.oneTeamReportCustodyJson!==undefined ? {oneTeamReportCustodyJson:durable.oneTeamReportCustodyJson} : {}),
+      ...(durable.oneTeamReportCustody ? {oneTeamReportCustody:durable.oneTeamReportCustody} : {}),
       id: durable.id,
       originalRunId: durable.originalRunId,
       promptHash: durable.promptHash,
@@ -6144,7 +6870,7 @@ export class InvocationService {
             queuedAt: queued.queuedAt,
             position: index + 1,
             ...(queued.recoveryState ? { recoveryState: queued.recoveryState } : {}),
-            ...(queued.recoveryReason ? { recoveryReason: queued.recoveryReason } : {}),
+            ...(queued.recoveryReason ? { recoveryReason: publicSteerRecoveryReason(queued.recoveryReason) } : {}),
           })),
         };
       }
@@ -6422,7 +7148,9 @@ export class InvocationService {
       if (!queue.length) this.steerQueues.delete(chatId);
       const drainedRunId = next.drainedRunId ?? randomUUID();
       try {
-        if (!beginQueuedSteerDrain(next.id, drainedRunId)) return;
+        if (!beginQueuedSteerDrain(next.id, drainedRunId, row=>queuedTeamReportCurrent(row.oneTeamReportCustody,row.request)
+          && canonicalQueuedSteerRequest(row.request)===canonicalQueuedSteerRequest(next.request)
+          && row.oneTeamReportCustodyJson===next.oneTeamReportCustodyJson)) return;
         if (!hasInvocationRunReceipt(drainedRunId)) {
           // Started from the settling run's own stack: it must not inherit that run's personal-native original.
           withoutOnePersonalNativeOriginal(() => this.start(
@@ -6431,6 +7159,7 @@ export class InvocationService {
             next.executionContext,
             undefined, undefined, next.mainAdmission, undefined,
             next.request.oneMode && next.request.promptOrigin !== "system" ? QUEUED_ONE_ROOM_INHERITANCE : undefined,
+            next.oneTeamReportCustody,
           ));
         }
         settleQueuedSteer(next.id, "started");

@@ -22,6 +22,8 @@ export interface OnePersonalNativeMainOwnerPorts {
  ownerPorts:OnePersonalNativeOwnerPorts;
  /** Independently current native installed provider/account catalog. No caller strings/global env. */
  accounts: {current(original:Readonly<OnePersonalNativeOriginal>):readonly OnePersonalNativeAccountChoice[]}|null;
+ /** Actual Main may retain this original family in its sole additive factory. */
+ installFactory?:(factory:OneNativeMainOwnerFactory)=>void;
 }
 /** One local native caller/controller, using the existing ALS and the ONE factory registry.
  * Capture holds the actual origin reference only; it neither mints an origin nor grants permission. */
@@ -29,8 +31,8 @@ export function createOnePersonalNativeMainOwner(p:OnePersonalNativeMainOwnerPor
  const originals=new Map<string,{original:Readonly<OnePersonalNativeOriginal>;selectedAccount:object|null}>();let closed=false,bundleOwnerDigest:string|null=null;
  let bundle:ReturnType<typeof createOnePersonalNativeOwners>|null=null,factory:ReturnType<typeof createOnePersonalNativeOwnerFactory>|null=null;
  let reference:ReturnType<typeof composeOneVaultStoredReferenceOwner>|null=null;
- const refs=[p.runtime,p.isNativeOwnerWindow,p.ownerPorts,p.accounts];
- const current=()=>{if(closed||[p.runtime,p.isNativeOwnerWindow,p.ownerPorts,p.accounts].some((v,i)=>v!==refs[i]))throw Error('one_personal_native_main_owner_changed');const r=p.runtime();if(!r?.currentNativeOwner())throw Error('one_personal_native_runtime_unavailable');return r;};
+ const refs=[p.runtime,p.isNativeOwnerWindow,p.ownerPorts,p.accounts,p.installFactory];
+ const current=()=>{if(closed||[p.runtime,p.isNativeOwnerWindow,p.ownerPorts,p.accounts,p.installFactory].some((v,i)=>v!==refs[i]))throw Error('one_personal_native_main_owner_changed');const r=p.runtime();if(!r?.currentNativeOwner())throw Error('one_personal_native_runtime_unavailable');return r;};
  function captureOriginal(){if(closed)throw Error('one_personal_native_main_owner_changed');const original=currentOnePersonalNativeOriginal();if(!original?.request.runId)return;
   // Opaque origin validates the existing sole Supervisor/canonical invocation.
   // Value-free retention grants nothing; legacy use needs no Vault owner.
@@ -57,7 +59,7 @@ export function createOnePersonalNativeMainOwner(p:OnePersonalNativeMainOwnerPor
   const found=created.lookupStoredReference(command);
   if(found){reference=composeOneVaultStoredReferenceOwner(r,{...created,readAuthority:p.ownerPorts.consumer!});if(!reference)throw Error('one_personal_native_scoped_consumer_unbound');await reference.approveOriginalReference(window,runId);check();created.policy.currentStoredReference=reference.policy.currentStoredReference;}
   else{await created.approveOriginalPending(window,runId);check();}
-  bundle=created;bundleOwnerDigest=oneVaultDigest(r.currentNativeOwner());if(!factory){factory=createOnePersonalNativeOwnerFactory(r,created);configureOneNativeMainOwnerFactory(factory as OneNativeMainOwnerFactory);}
+  bundle=created;bundleOwnerDigest=oneVaultDigest(r.currentNativeOwner());if(!factory){factory=createOnePersonalNativeOwnerFactory(r,created);if(p.installFactory)p.installFactory(factory as OneNativeMainOwnerFactory);else configureOneNativeMainOwnerFactory(factory as OneNativeMainOwnerFactory);}
   const installed=currentOneNativeMainComposition()?.start();check();if(installed?.state!=='ready')throw Error('one_personal_native_main_install_unavailable');return{commandId:command,reference:!!found};
  }
  async function finishSaved(runId:string){const original=originals.get(runId)?.original;if(!bundle||!original)return;const r=current();authorizeSupervisorNativeOrigin(original.origin,original.request);const rows=r.sources.db.prepare("SELECT command_id FROM one_supervisor_requests WHERE one_id=? AND run_id=?").all(r.sources.oneId(),runId) as Array<{command_id:string}>;if(rows.length!==1)return;const metadata=r.metadata.read(rows[0].command_id),op=metadata?.operationId&&r.journal.get(metadata.operationId);if(op&&op.state==='saved')await bundle.installScopedConsumer(rows[0].command_id);}
@@ -89,6 +91,7 @@ export function createOnePersonalNativeMainEntry(input:{
  mappingOwner:{current(binding:Readonly<import('./one-vault-personal-adapter').OneVaultScopedConsumerReceipt>):import('./one-personal-native-scoped-consumer').OnePersonalNativeMcpMapping|null}|null;
  /** Required only when an actual separate provider domain is composed by its owner. */
  invalidateProviderReadiness?:OnePersonalNativeOwnerPorts['invalidateProviderReadiness'];
+ installFactory?:OnePersonalNativeMainOwnerPorts['installFactory'];
 }){
  let runtime:OneVaultRuntime|null=null,catalog:ReturnType<typeof createOnePersonalNativeSavedAccountCatalog>|null=null,scoped:ReturnType<typeof createOnePersonalScopedConsumerOwner>|null=null,closed=false;
  function currentRuntime(){if(closed)throw Error('one_personal_native_entry_closed');const current=input.sources.runtime()??input.sources.prepareRuntime();if(!current||runtime&&runtime!==current)throw Error('one_personal_native_existing_runtime_unavailable');runtime=current;return current;}
@@ -97,7 +100,7 @@ export function createOnePersonalNativeMainEntry(input:{
  const ports:OnePersonalNativeOwnerPorts={lifetime:input.lifetime,isNativeOwnerWindow:input.sources.isNativeOwnerWindow,
   get providerSelections(){return nativeOwners().catalog.providerSelections},get consumer(){return nativeOwners().scoped.consumer},
   invalidateProviderReadiness:(slot,generation)=>{scoped?.invalidateSlot(slot,generation);input.invalidateProviderReadiness?.(slot,generation)}};
- const controller=createOnePersonalNativeMainOwner({runtime:currentRuntime,isNativeOwnerWindow:input.sources.isNativeOwnerWindow,accounts:{current:original=>nativeOwners().catalog.accounts.current(original)},ownerPorts:ports});
+ const controller=createOnePersonalNativeMainOwner({runtime:currentRuntime,isNativeOwnerWindow:input.sources.isNativeOwnerWindow,accounts:{current:original=>nativeOwners().catalog.accounts.current(original)},ownerPorts:ports,installFactory:input.installFactory});
  configureOnePersonalNativePendingEntry(controller);
  return Object.freeze({...controller,close(){closed=true;let unknown=false;try{controller.close()}catch{unknown=true}try{scoped?.close()}catch{unknown=true}if(unknown)throw Error('one_personal_native_main_cleanup_unknown')}});
 }

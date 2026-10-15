@@ -164,6 +164,19 @@ export function createNativeOneCapabilityBroker(ports: NativeOneCapabilityBroker
       || (owner && (owner.state !== "released" || owner.ownerKind !== "daemon" || owner.ownerId !== r.identity.ownerId))) return fail("one_native_verified_rejection_required");
     if (r.attachments) releasePreparedOneAttachments(r.attachments); r.state = "released"; handles.delete(r.handle);
   }
+  /** Close executable claims after exact durable no-start/settlement, without asserting resource cleanup. */
+  function sealAuthority(value: NativeOneCapabilityCapsule): void {
+    const r = capsules.get(value); if (!r) return fail("one_native_capability_unavailable");
+    const a = getInvocationAdmission(r.binding.runId), owner = ports.getRunOwner(r.binding.chatId, r.binding.runId);
+    if (!a || a.chatId !== r.binding.chatId || a.inputDigest !== r.binding.inputDigest || a.ownerProcessEpoch !== r.identity.bootId) return fail("one_native_settlement_required");
+    if (a.status === "rejected") {
+      if (!a.rejectionReasonCode || getDb().prepare("SELECT 1 FROM run_events WHERE run_id=? AND kind='invoke_started' LIMIT 1").get(r.binding.runId)
+        || (owner && (owner.state !== "released" || owner.ownerKind !== "daemon" || owner.ownerId !== r.identity.bootId))) return fail("one_native_verified_rejection_required");
+    } else if (a.status !== "admitted" || !owner || owner.state !== "released" || owner.ownerKind !== "daemon" || owner.ownerId !== r.identity.bootId
+      || (r.leaseId !== undefined && owner.leaseId !== r.leaseId)) return fail("one_native_settlement_required");
+    r.cancelled = true; // Never restore claims, use-once grants, or a terminal receipt.
+    handles.delete(r.handle); // Capacity counts executable authority, not failed staging cleanup.
+  }
   function disconnect(proof: NativeOneProducer) { const p = producers.get(proof); if (p) p.connected = false; /* Custody and claimed staging remain unchanged; never replay. */ }
-  return { enroll, prepare, resolve, projection, claimAttachments, readImageChunk, claimAfterDurableStart, observe, cancel, releaseAfterSettlement, releaseRejectedBeforeStart, disconnect };
+  return { enroll, prepare, resolve, projection, claimAttachments, readImageChunk, claimAfterDurableStart, observe, cancel, releaseAfterSettlement, releaseRejectedBeforeStart, sealAuthority, disconnect };
 }

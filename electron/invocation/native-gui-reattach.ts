@@ -20,7 +20,7 @@ export interface NativeChannelReattachPorts {
 export function createNativeChannelReattacher(ports: NativeChannelReattachPorts) {
   const setTimer = ports.setTimer ?? ((fn, ms) => { const t = setTimeout(fn, ms); (t as { unref?: () => void }).unref?.(); return t; });
   const clearTimer = ports.clearTimer ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>));
-  let timer: unknown, running = false, stopped = false, failures = 0, attempts = 0, closedWhileRunning = false;
+  let timer: unknown, running = false, stopped = false, failures = 0, attempts = 0, closedWhileRunning = false, requestedWhileRunning = false;
   const watched = new WeakSet<object>();
   const unwatch = new Set<() => void>();
   const delay = () => Math.min(NATIVE_REATTACH_MAX_MS, NATIVE_REATTACH_BASE_MS * 2 ** Math.min(failures, 16));
@@ -47,8 +47,9 @@ export function createNativeChannelReattacher(ports: NativeChannelReattachPorts)
       ports.log(`[native-invocation] re-attach attempt ${attempt} failed: ${error instanceof Error ? error.message : "unknown_error"}`);
     } finally { running = false; }
     if (stopped) return;
+    const requested = requestedWhileRunning; requestedWhileRunning = false;
     const channel = ports.currentChannel();
-    if (channel && failures === 0) { watch(channel); if (closedWhileRunning) { closedWhileRunning = false; schedule("channel closed during attach"); } }
+    if (channel && failures === 0) { watch(channel); if (closedWhileRunning || requested) { closedWhileRunning = false; schedule(requested ? "requested during attach" : "channel closed during attach"); } }
     else { closedWhileRunning = false; schedule("retry"); }
   }
   /** Watch a channel; its close (while it is still the current one) starts the loop. */
@@ -64,10 +65,18 @@ export function createNativeChannelReattacher(ports: NativeChannelReattachPorts)
     });
     if (off && !stopped) unwatch.add(off);
   }
+  function trigger(reason = "requested"): void {
+    if (stopped) return;
+    if (ports.isQuitting()) { stop(); return; }
+    // Availability can change after attach's final snapshot but before it
+    // resolves. Preserve that source request; never overlap two attaches.
+    if (running) { requestedWhileRunning = true; return; }
+    schedule(reason);
+  }
   function stop(): void {
-    stopped = true; if (timer !== undefined) { clearTimer(timer); timer = undefined; }
+    stopped = true; requestedWhileRunning = false; closedWhileRunning = false; if (timer !== undefined) { clearTimer(timer); timer = undefined; }
     for (const off of unwatch) off(); unwatch.clear();
   }
-  return Object.freeze({ watch, stop, trigger: (reason = "requested") => schedule(reason),
+  return Object.freeze({ watch, stop, trigger,
     get state() { return Object.freeze({ running, stopped, failures, attempts, scheduled: timer !== undefined }); } });
 }

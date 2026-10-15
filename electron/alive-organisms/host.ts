@@ -58,6 +58,11 @@ export interface AliveHostDeps {
   unblockAttempt?: AliveLifetimeServiceOptions["unblockAttempt"];
   /** Goal/chat store changes (goal deleted, ended, cancelled, rebound). Returns an unsubscribe. */
   onGoalStoreChanged?(listener: () => void): () => void;
+  /**
+   * This process still holds the Alive domain (domain-owner.ts, NH21). Checked before every beat and owner edit, so a
+   * host that lost the lease never reserves another wake or action. Absent: the host is the only one (contracts).
+   */
+  fence?(): boolean;
 }
 
 /** No wake for this long after an action the goal accepted. */
@@ -195,6 +200,17 @@ export class AliveOrganismHost {
 
   isRunning(): boolean { return this.running; }
 
+  /** No beat running and no wake in flight in any organism: a handoff now cannot leave a settlement behind. */
+  quiescent(): boolean {
+    return Object.values(this.organisms).every((organism) => !organism.beating && organism.store.activeWakes().length === 0);
+  }
+
+  /** Owner edits go to the domain owner only (NH21). */
+  assertOwner(): void {
+    if (!this.running) throw new AliveHostError("alive-host-not-running");
+    if (this.deps.fence && !this.deps.fence()) throw new AliveHostError("alive-host-not-owner");
+  }
+
   /** Share overlapping reads, then fetch again for each later enable or beat. */
   refreshPlanAccess(): Promise<AliveAgentAccess> {
     if (this.accessRefresh) return this.accessRefresh;
@@ -213,6 +229,7 @@ export class AliveOrganismHost {
   async beat(kind: AliveOrganism): Promise<void> {
     const organism = this.organisms[kind];
     if (!this.running || organism.beating) return;
+    if (this.deps.fence && !this.deps.fence()) return;
     organism.beating = true;
     try {
       try { await this.deps.refreshModelOrder((status) => this.light.facts(status)); } catch { /* the last cached order stays authoritative */ }

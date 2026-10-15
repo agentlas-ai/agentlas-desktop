@@ -17,102 +17,10 @@ function scopeLabel(candidate: OneMemoryCandidate, locale: Locale): string {
   return tFor(locale, "one.memc.scope.personal");
 }
 
-export function OneMemoryCandidateCard({
-  candidate,
-  state,
-  locale,
-  onStateChange,
-  onReview,
-}: {
-  candidate: OneMemoryCandidate;
-  state: OneMemoryState;
-  locale: "ko" | "en";
-  onStateChange: (state: OneMemoryState) => void;
-  onReview: () => void;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const refresh = async () => {
-    const api = ipc();
-    if (!api) throw new Error(tFor(locale, "one.memc.err.store"));
-    const latest = await api.oneMemory.getState();
-    onStateChange(latest);
-    return latest;
-  };
-
-  const save = async () => {
-    const api = ipc();
-    if (busy) return;
-    if (!api) {
-      requestOneOperationalRecovery("one-memory-candidate", new Error("Desktop bridge unavailable"));
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      await api.oneMemory.save({
-        expectedStoreVersion: state.version,
-        candidateId: candidate.id,
-        expectedCandidateVersion: candidate.version,
-        approvedByUser: true,
-      });
-      await refresh();
-    } catch (cause) {
-      await refresh().catch(() => undefined);
-      requestOneOperationalRecovery("one-memory-candidate", cause);
-      setError(null);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const reject = async () => {
-    const api = ipc();
-    if (busy) return;
-    if (!api) {
-      requestOneOperationalRecovery("one-memory-candidate", new Error("Desktop bridge unavailable"));
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      await api.oneMemory.reject({
-        expectedStoreVersion: state.version,
-        candidateId: candidate.id,
-        expectedCandidateVersion: candidate.version,
-        rejectedByUser: true,
-      });
-      await refresh();
-    } catch (cause) {
-      await refresh().catch(() => undefined);
-      requestOneOperationalRecovery("one-memory-candidate", cause);
-      setError(null);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <article className={styles.card} aria-labelledby={`${candidate.id}-title`}>
-      <div className={styles.copy}>
-        <p className={styles.eyebrow}>{tFor(locale, "one.memc.eyebrow")}</p>
-        <h3 id={`${candidate.id}-title`}>{tFor(locale, "one.memc.title")}</h3>
-        <blockquote>{candidate.normalizedPreview}</blockquote>
-        <small>{scopeLabel(candidate, locale)} · {tFor(locale, "one.memc.not_reused")}</small>
-      </div>
-      {error && <p className={styles.error} role="alert">{error}</p>}
-      <div className={styles.actions}>
-        <button type="button" className={styles.primary} disabled={busy} onClick={() => void save()}>
-          {busy ? tFor(locale, "one.memc.saving") : tFor(locale, "one.memc.remember")}
-        </button>
-        <button type="button" className={styles.secondary} disabled={busy} onClick={onReview}>
-          {tFor(locale, "one.memc.edit")}
-        </button>
-        <button type="button" className={styles.textButton} disabled={busy} onClick={() => void reject()}>
-          {tFor(locale, "one.memc.no")}
-        </button>
-      </div>
-    </article>
-  );
+/** Compatibility display for an older renderer; no per-memory approval action. */
+export function OneMemoryCandidateCard({locale,onReview}: {candidate:OneMemoryCandidate;state:OneMemoryState;
+  locale:"ko"|"en";onStateChange:(state:OneMemoryState)=>void;onReview:()=>void}) {
+  return <article className={styles.card}><p>{locale==="ko"?"기억은 자동으로 정리됩니다.":"Memory is curated automatically."}</p>
+    <button type="button" className={styles.secondary} onClick={onReview}>
+      {locale==="ko"?"기억 관리":"Manage memory"}</button></article>;
 }

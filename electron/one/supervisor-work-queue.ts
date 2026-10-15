@@ -17,7 +17,6 @@ export interface SupervisorWorkLease {
   reason: string | null;
   updated_at: number;
 }
-const LIVE = "'claimed','starting','running','held'";
 const TERMINAL = new Set<WorkPhase>(["completed", "failed", "cancelled"]);
 
 /** Native dispatch ownership, separate from the ingress ACK and provider session.
@@ -73,7 +72,7 @@ export class OneSupervisorWorkQueue {
       .all(...(oneId ? [oneId] : [])) as SupervisorWorkLease[];
   }
   active(): SupervisorWorkLease[] {
-    return this.db.prepare("SELECT * FROM one_supervisor_work_jobs WHERE phase IN ('starting','running','held') LIMIT 100").all() as SupervisorWorkLease[];
+    return this.db.prepare("SELECT * FROM one_supervisor_work_jobs WHERE phase IN ('starting','running','held')").all() as SupervisorWorkLease[];
   }
   enqueue(row: SupervisorRequestRow, chatId: string): SupervisorWorkLease {
     if (row.kind !== "work" || row.state !== "stored" || !row.task_id || !row.run_id) throw supervisorError('supervisor_work_ingress_invalid');
@@ -85,21 +84,16 @@ export class OneSupervisorWorkQueue {
         }
         return prior;
       }
-      if ((this.db.prepare(`SELECT count(*) AS n FROM one_supervisor_work_jobs WHERE one_id=? AND phase NOT IN ('completed','failed','cancelled')`)
-        .get(row.one_id) as {n: number}).n >= 20) throw supervisorError('supervisor_work_queue_full');
       this.db.prepare(`INSERT INTO one_supervisor_work_jobs(command_id,one_id,task_id,chat_id,run_id,phase,updated_at)
         VALUES(?,?,?,?,?,'queued',?)`).run(row.command_id, row.one_id, row.task_id, chatId, row.run_id, this.now());
       return this.get(row.command_id)!;
     });
   }
-  claim(input: {ownerEpoch: string; ownerKind: NonNullable<SupervisorWorkLease["owner_kind"]>; leaseMs?: number; capacity?: number}): SupervisorWorkLease | null {
+  claim(input: {ownerEpoch: string; ownerKind: NonNullable<SupervisorWorkLease["owner_kind"]>; leaseMs?: number}): SupervisorWorkLease | null {
     const leaseMs = input.leaseMs ?? 30_000;
-    const capacity = input.capacity ?? 2;
     if (!input.ownerEpoch || input.ownerEpoch.length > 200 || !["desktop-main", "work-daemon"].includes(input.ownerKind)
-      || !Number.isSafeInteger(leaseMs) || leaseMs < 100 || leaseMs > 120_000
-      || !Number.isInteger(capacity) || capacity < 1 || capacity > 2) throw supervisorError('supervisor_work_claim_invalid');
+      || !Number.isSafeInteger(leaseMs) || leaseMs < 100 || leaseMs > 120_000) throw supervisorError('supervisor_work_claim_invalid');
     return this.write(() => {
-      if ((this.db.prepare(`SELECT count(*) AS n FROM one_supervisor_work_jobs WHERE phase IN (${LIVE})`).get() as {n: number}).n >= capacity) return null;
       const candidate = this.db.prepare(`SELECT * FROM one_supervisor_work_jobs WHERE phase='queued'
         AND one_id=(SELECT one_id FROM one_supervisor_host_identity WHERE slot='active') ORDER BY rowid LIMIT 1`).get() as SupervisorWorkLease | undefined;
       if (!candidate) return null;

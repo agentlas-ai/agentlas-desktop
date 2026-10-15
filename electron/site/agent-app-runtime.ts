@@ -1,4 +1,7 @@
 import { shell } from "electron";
+import { onAuthSessionOwnershipChanged } from "../auth";
+import { captureSurfaceMemoryCustody } from "../memory/surface-recall";
+import { registerAppMemoryRun } from "../memory/agent-app-memory";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -286,9 +289,15 @@ async function handleRun(request: IncomingMessage, response: ServerResponse, run
   // being read and invoke the same Desktop target concurrently.
   const runId = `site-app-${randomUUID()}`;
   runtime.activeRunId = runId;
+  const memoryCustody=captureSurfaceMemoryCustody();
+  let appMemoryRun: ReturnType<typeof registerAppMemoryRun> | null = null;
+  let ownerChanged=false;
+  const detachOwner=onAuthSessionOwnershipChanged(()=>{ownerChanged=true;invocationService.cancel(runId);});
+  const assertRequestOwner=()=>{if(ownerChanged)throw new AgentAppInvocationFailure();try{memoryCustody?.assertCurrent();}catch{throw new AgentAppInvocationFailure();}};
   try {
     const project = getSiteProject(runtime.projectId);
     const inputs = validateInputs(project, await readJsonBody(request));
+    assertRequestOwner();
     const { chatId } = assertTargetBinding(project);
     try {
       const declaredCapabilityIds = project.agentAppContract?.capabilities.readonlyMcpCatalogIds ?? [];
@@ -310,7 +319,14 @@ async function handleRun(request: IncomingMessage, response: ServerResponse, run
         },
       );
       try {
-        const prompt = buildPrompt(project, inputs, prepared.disclosure);
+        assertRequestOwner();
+        const basePrompt=buildPrompt(project, inputs, prepared.disclosure);
+        const contractDigest=createHash("sha256").update(JSON.stringify(project.agentAppContract)).digest("hex");
+        const assertApp=()=>{assertRequestOwner();
+          const current=getSiteProject(project.id),actual=assertTargetBinding(current);
+          if(actual.chatId!==chatId || createHash("sha256").update(JSON.stringify(current.agentAppContract)).digest("hex")!==contractDigest)throw new AgentAppInvocationFailure();};
+        appMemoryRun=registerAppMemoryRun({runId,projectId:project.id,chatId,custody:memoryCustody,assertHost:assertApp,onInvalidated:()=>invocationService.cancel(runId)});
+        const prompt=basePrompt;
         const result = await new Promise<{ runId: string; text: string }>((resolve, reject) => {
           let settled = false;
           const timeoutMs = project.agentAppTarget?.kind === "firm" ? 300_000 : 120_000;
@@ -328,7 +344,10 @@ async function handleRun(request: IncomingMessage, response: ServerResponse, run
           };
           const unsubscribe = invocationService.onEvent((envelope) => {
             if (envelope.runId !== runId) return;
-            if (envelope.event.kind === "final") finish(() => resolve({ runId, text: envelope.event.text ?? "" }));
+            if (envelope.event.kind === "final") {
+              try {assertApp();appMemoryRun?.assertCurrent();finish(() => resolve({ runId, text: envelope.event.text ?? "" }));}
+              catch {cancel();}
+            }
             if (envelope.event.kind === "error") finish(() => reject(new AgentAppInvocationFailure()));
           });
           const timer = setTimeout(() => {
@@ -338,6 +357,7 @@ async function handleRun(request: IncomingMessage, response: ServerResponse, run
           timer.unref?.();
           request.once("aborted", cancel);
           try {
+            assertApp();appMemoryRun?.assertCurrent();
             invocationService.start({
               runId,
               chatId,
@@ -380,6 +400,8 @@ async function handleRun(request: IncomingMessage, response: ServerResponse, run
     const status = Number((error as { status?: unknown })?.status);
     fail(response, Number.isInteger(status) ? status : 400, "runtime-failed", error instanceof Error ? error.message : "Agent runtime failed.");
   } finally {
+    appMemoryRun?.close();
+    detachOwner();
     if (runtime.activeRunId === runId) runtime.activeRunId = null;
   }
 }

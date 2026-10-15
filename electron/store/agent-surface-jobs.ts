@@ -227,7 +227,7 @@ export function expireOrphanedSurfaceJobs(now = new Date()): string[] {
       closed.push(row.id);
     }
   });
-  tx();
+  tx.immediate();
   return closed;
 }
 

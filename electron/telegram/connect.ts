@@ -1734,14 +1734,16 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
     : await resolveTelegramAutomationReportIntent(clean).catch(
       () => ({ intent: "none" as const, source: "fallback" as const }),
     );
-  if (reportIntent.source === "llm" && reportIntent.intent === "status") {
+  // A model verdict or an exact /reports command decides; a fallback (no model) never acts.
+  const decided = reportIntent.source === "llm" || reportIntent.source === "command";
+  if (decided && reportIntent.intent === "status") {
     await telegramApi(poller.token, "sendMessage", {
       chat_id: chatId,
       text: automationReportStatusText(binding),
     }).catch(() => undefined);
     return;
   }
-  if (reportIntent.source === "llm" && reportIntent.intent === "disable") {
+  if (decided && reportIntent.intent === "disable") {
     setAutomationReportEnabled(binding.id, false);
     await telegramApi(poller.token, "sendMessage", {
       chat_id: chatId,
@@ -1749,7 +1751,7 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
     }).catch(() => undefined);
     return;
   }
-  if (reportIntent.source === "llm" && reportIntent.intent === "enable") {
+  if (decided && reportIntent.intent === "enable") {
     setAutomationReportEnabled(binding.id, true);
     await telegramApi(poller.token, "sendMessage", {
       chat_id: chatId,
@@ -1799,10 +1801,12 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
   try {
     const finalText = await runBindingInvocation(binding, message, cleanWithAttachments, mode, attachments, replyLocale);
     await sendLongMessage(poller.token, chatId, finalText);
-    const nextStatus: TelegramConnectStatus = /테스트|test/i.test(clean) ? "test_passed" : "chat_paired";
+    // A full inbound → reply round trip just succeeded: that is the verified connection, whatever the message said
+    // (native-harness notyet NH25: the message's words never pick the status).
+    const nextStatus: TelegramConnectStatus = "test_passed";
     getDb()
-      .prepare("UPDATE telegram_bindings SET status = ?, last_error = NULL, last_test_at = COALESCE(last_test_at, ?), updated_at = ? WHERE id = ?")
-      .run(nextStatus, nextStatus === "test_passed" ? nowIso() : null, nowIso(), binding.id);
+      .prepare("UPDATE telegram_bindings SET status = ?, last_error = NULL, last_test_at = ?, updated_at = ? WHERE id = ?")
+      .run(nextStatus, nowIso(), nowIso(), binding.id);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     markBindingFailed(binding.id, msg);

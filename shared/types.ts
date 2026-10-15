@@ -6,7 +6,11 @@ import type { OneWindowAPI } from "./one-window";
 import type { OneHarnessAPI } from "./one-harness";
 import type { OneContextAPI } from "./one-context";
 import type { OneCapabilitiesAPI } from "./one-capabilities";
+import type { ArchiveAPI } from "./archive";
 import type { OnePersonalDataNativeAPI } from './one-personal-native';
+import type { EmployeeAgentWorkAPI } from './business/employee-agent-work-api';
+import type { BusinessNativeSharingAPI } from './business/native-sharing-api';
+import type { BusinessRendererBridge } from './business/console-contracts';
 import type { OneVaultNativeAPI } from './one-vault';
 import type { OneProviderNativeAPI } from './one-provider-native';
 import type { AgentWorkspaceIpc } from "./agent-workspace";
@@ -114,6 +118,7 @@ import type {
   UseOneMemoryCandidateOnceInput,
 } from "./one-memory";
 import type { OneMemoryMapSnapshot } from "./one-memory-map";
+import type { DesktopMemoryInspectorAPI } from "./desktop-memory-inspector";
 import type {
   AddOneOrgMemberInput,
   ArchiveOneOrgMemberInput,
@@ -562,8 +567,6 @@ import type {
   SiteWorkspaceHandoff,
 } from "./site-studio";
 import type {
-  MobileBridgeOntologyAttachReceiptDto,
-  MobileBridgeOntologyProjectionDto,
   MobileBridgePairingPayload,
 } from "./mobile-bridge";
 import type {
@@ -1398,6 +1401,17 @@ export interface McpToolCatalogEntry {
 }
 
 /** 사용자가 설치/구성한 MCP 서버 (SQLite에 영구화). */
+/** One harness operation answer (agentlas.harness-result.v1). */
+export interface HarnessPortResultView {
+  schemaVersion: "agentlas.harness-result.v1";
+  operationId: string;
+  status: "ok" | "refused" | "unavailable";
+  data?: unknown;
+  reason?: string;
+  next?: string;
+  receiptId: string;
+}
+
 export interface InstalledMcpServer {
   id: string;
   /** 카탈로그 출신이면 카탈로그 id, 커스텀이면 null */
@@ -1410,6 +1424,14 @@ export interface InstalledMcpServer {
   url: string | null;
   /** 이 서버가 쓰는 글로벌 env 키 목록 (값은 keychain) */
   envKeys: string[];
+  /**
+   * Per-connection credential references: env key name the server sees → Vault key that holds this connection's value.
+   * A key absent here reads the global Vault key of the same name. Two accounts of one service at the same endpoint
+   * are two connections with different references, never one row sharing a global key (native-harness notyet NH29).
+   */
+  credentialRefs?: Record<string, string>;
+  /** Durable exact-connection logout generation; absent only on an unmigrated store. */
+  connectionEpoch?: number;
   /** False when legacy/corrupt JSON arrays contained non-string members. */
   configurationValid?: boolean;
   enabled: boolean;
@@ -1427,6 +1449,8 @@ export interface McpServerStatus {
   checkedAt: string;
   /** Typed transport observation; callers must never classify prose errors. */
   failureCode?: 'authentication_required' | 'configuration_missing' | 'connection_unavailable' | 'connection_cancelled';
+  /** HTTP status the transport carried on failure (401/402/403/429 separate login, entitlement and quota; NH31). */
+  httpStatus?: number;
   /**
    * A configured server whose health check would visibly launch a user-facing
    * application is intentionally not spawned by passive status surfaces.
@@ -5841,6 +5865,8 @@ export interface MultimodalVideoRequest {
   durationSec?: number;
   model?: string;
   outputRequirements?: { minWidth?: number; minHeight?: number; requireAudio?: boolean };
+  /** Extend a finished video of the same provider: the earlier job's id (NH34). Luma only; others refuse. */
+  extendFromJobId?: string;
 }
 
 export interface MultimodalVideoFile {
@@ -5899,6 +5925,8 @@ export interface MultimodalVideoKeyStatus {
   kling: boolean;
   /** Grok CLI(Imagine) — API 키가 아니라 구독 로그인된 grok 바이너리 존재 여부. */
   grok: boolean;
+  /** Grok Imagine text-to-video through the xAI API key (metered; never the subscription CLI). */
+  grokApi?: boolean;
 }
 
 // ── Oberon text planning jobs ──────────────────────────────────
@@ -6618,47 +6646,6 @@ export interface AgentLearningSummary {
   localReceiptCount: number;
 }
 
-export type AgentOntologyHubProjectionStatus =
-  | "unbound"
-  | "live"
-  | "offline"
-  | "stale"
-  | "auth-unavailable"
-  | "endpoint-absent"
-  | "projection-missing"
-  | "binding-changed";
-
-/**
- * Renderer-safe, read-only Hub projection for one installed agent. Main owns
- * authentication and exact-binding resolution; no local path, prompt, user,
- * workspace, credential, or MCP process configuration crosses IPC.
- */
-export interface AgentOntologyHubProjection {
-  schemaVersion: 1;
-  status: AgentOntologyHubProjectionStatus;
-  supported: boolean;
-  binding: {
-    agentDefinitionId: string;
-    agentReleaseId: string;
-  } | null;
-  projection: MobileBridgeOntologyProjectionDto | null;
-}
-
-export type AgentOntologyAttachDecision = "approve" | "deny";
-
-/**
- * Main-verified result of one explicit Desktop attachment decision. The
- * renderer receives the outcome and refreshed public projection, never a
- * session cookie, idempotency key, or caller-supplied release identity.
- */
-export interface AgentOntologyAttachDecisionResult {
-  schemaVersion: 1;
-  outcome: MobileBridgeOntologyAttachReceiptDto["outcome"];
-  loadoutState: MobileBridgeOntologyAttachReceiptDto["loadoutState"];
-  acknowledgedAt: string;
-  projection: AgentOntologyHubProjection;
-}
-
 export interface RunEventUi {
   id: string;
   runId: string;
@@ -7316,7 +7303,7 @@ export interface AgentlasIpc {
   /** 네이티브 macOS 메뉴바 제어 — 인앱 언어 설정을 메인 프로세스로 전달해 메뉴를 다시 그린다. */
   menu: {
     /** 현재 표시 언어를 메인에 알려 네이티브 메뉴 라벨을 ko/en으로 갱신. */
-    setLocale: (locale: "ko" | "en") => Promise<void>;
+    setLocale: (locale: "ko" | "en", pref?: "ko" | "en" | "system") => Promise<void>;
   };
   /** 워킹 폴더 — 채팅 우측의 폴더 트리 패널이 사용. read-only. */
   fs: {
@@ -7418,48 +7405,22 @@ export interface AgentlasIpc {
   };
   /** Local Experience ownership and explicit owner-authorized Cloud exchange. */
   experience: {
-    /** Public, buyer-safe Hub catalog. Internal chip/release IDs never cross IPC. */
-    hubCatalog: () => Promise<ExperienceHubCatalogResult>;
-    createPack: (input: ExperiencePackCreateIpcInput) => Promise<ExperiencePackRecord>;
     listPacks: (input: ExperiencePackListInput) => Promise<ExperiencePackRecord[]>;
-    captureFromMemory: (input: ExperienceCandidateCaptureInput) => Promise<ExperienceCandidateRecord>;
     listCandidates: (packId: string) => Promise<ExperienceCandidateRecord[]>;
     listOperationalPublicProjections: (packId: string) => Promise<OperationalPublicProjectionRecord[]>;
-    saveOperationalPublicProjection: (input: OperationalPublicProjectionSaveInput) => Promise<OperationalPublicProjectionRecord>;
-    confirmOperationalPublicProjection: (input: OperationalPublicProjectionConfirmInput) => Promise<OperationalPublicProjectionRecord>;
     /** Private preference observations only. They are not Hub Taste releases. */
     listTasteDrafts: (agentId: string) => Promise<LocalTasteDraftRecord[]>;
     listTasteWorkflows: (agentId: string) => Promise<TasteChipWorkflowRecord[]>;
-    saveTasteGeneralization: (input: TasteGeneralizationInput) => Promise<TasteChipWorkflowRecord>;
-    confirmTasteGeneralization: (input: TasteGeneralizationConfirmInput) => Promise<TasteChipWorkflowRecord>;
-    pickTastePreviews: () => Promise<[TastePreviewGrant, TastePreviewGrant] | null>;
-    prepareTastePreviews: (input: TastePreviewPrepareInput) => Promise<TasteChipWorkflowRecord>;
-    uploadTasteDraft: (input: TasteHubUploadInput) => Promise<TasteChipWorkflowRecord>;
-    promote: (input: ExperiencePromotionInput) => Promise<ExperiencePromotionReceipt>;
-    /** Explicit owner-consented public unseal of one promoted candidate (post-redaction clean + existing receipt required). */
-    unsealPublic: (input: ExperiencePublicUnsealInput) => Promise<ExperiencePromotionReceipt>;
     /** Value-free intake funnel counts (blocked/skipped reason codes, redacted admits). */
     intakeDiagnostics: (agentId: string) => Promise<ExperienceIntakeDiagnostics>;
     listPromotionReceipts: (packId: string) => Promise<ExperiencePromotionReceipt[]>;
-    createExportIntent: (input: ExperienceExportIntentInput) => Promise<ExperienceExportIntentRecord>;
     listExportIntents: (packId: string) => Promise<ExperienceExportIntentRecord[]>;
-    /** Private save and public verification request are separate explicit actions. */
-    cloudSave: (input: ExperienceCloudSaveInput) => Promise<ExperienceCloudUploadRecord>;
     cloudList: (packId: string) => Promise<ExperienceCloudUploadRecord[]>;
     cloudReconcile: (input: ExperienceCloudReconcileInput) => Promise<ExperienceCloudUploadRecord>;
-    cloudExport: (input: ExperienceCloudReconcileInput) => Promise<ExperienceCloudExportResult>;
     cloudWithdraw: (input: ExperienceCloudWithdrawInput) => Promise<ExperienceCloudUploadRecord>;
     ontologySummary: (agentId: string) => Promise<ExperienceOntologySummary>;
     /** Value-free, bounded relation graph; never includes source summaries, paths, prompts, or secrets. */
     ontologyGraph: (agentId: string) => Promise<ExperienceOntologyGraphSnapshot>;
-    /** Exact v59 binding only. Reads Hub state; any attachment decision uses hubResolveAttach. */
-    hubProjection: (agentId: string, force?: boolean) => Promise<AgentOntologyHubProjection>;
-    /** Resolve only a Hub-issued pending approval for this exact installed agent. Never purchases a chip. */
-    hubResolveAttach: (
-      agentId: string,
-      approvalId: string,
-      decision: AgentOntologyAttachDecision,
-    ) => Promise<AgentOntologyAttachDecisionResult>;
   };
   /** 실행/실패 원장 — 긴 원문 없이 runId, 노드, 도구, 오류 메타데이터만 조회한다. */
   runLedger: {
@@ -8031,6 +7992,31 @@ export interface AgentlasIpc {
     /** Returns the updated allowed-slug list for the project. */
     setRentAllowed: (input: { projectId: string; slug: string; allowed: boolean }) => Promise<string[]>;
   };
+  /** Harness capability ports (electron/harness/capability-ports.ts): the same dispatcher models use through harness_call. */
+  harness: {
+    /** Inert discovery across plugins, skills, connectors, catalog tools, operations and features. */
+    search: (query: string, kind?: "plugin" | "skill" | "connector" | "tool" | "operation" | "feature") => Promise<Array<{ id: string; kind: string; name: string; description: string }>>;
+    describe: (id: string) => Promise<HarnessPortResultView>;
+    /** Run one operation (e.g. connector.import, connector.connect, auth.ensure, skill.read). */
+    call: (operation: string, args?: Record<string, unknown>) => Promise<HarnessPortResultView>;
+    /** Latest revision of every UI instance (inline result view) in a chat. */
+    uiList: (chatId: string) => Promise<import("./ui-instances").UiInstanceView[]>;
+    /** Fires when any UI instance is presented, updated, closed or acted on. Returns the unsubscribe. */
+    onUiChanged: (handler: (event: import("./ui-instances").UiInstanceEvent) => void) => () => void;
+  };
+  /** Typed SDK-style calls over harness:call; the same operations the model, app control and the daemon use. */
+  sdk: {
+    settings: {
+      getLanguage: () => Promise<HarnessPortResultView>;
+      /** Result separates the saved receipt (data.saved) from UI ACKs (data.ui.applied / pending). */
+      setLanguage: (input: { locale: "ko" | "en" | "system"; expectedRevision?: number }) => Promise<HarnessPortResultView>;
+      onLanguageChanged: (handler: (event: { type: "settings.language.changed"; revision: number; locale: "ko" | "en"; pref: "ko" | "en" | "system"; origin: string }) => void) => () => void;
+      ackLanguageApplied: (revision: number) => Promise<void>;
+    };
+    agents: {
+      uninstall: (input: { agentId: string; sourcePolicy?: "retain" | "trash"; expectedRevision?: string }) => Promise<HarnessPortResultView>;
+    };
+  };
   agentLeases: {
     quote: (slug: string) => Promise<AgentLeaseQuote>;
     purchase: (input: AgentLeasePurchaseInput) => Promise<AgentLeasePurchaseResult>;
@@ -8197,7 +8183,13 @@ export interface AgentlasIpc {
   oneContext: OneContextAPI;
   /** One's capability inventory: skills, plugins, hooks, memory and connectors, each with an on/off switch. */
   oneCapabilities: OneCapabilitiesAPI;
+  archive: ArchiveAPI;
   onePersonalData: OnePersonalDataNativeAPI;
+  /** Company account metadata and management use the existing authenticated browser.
+   * Native execution still requires its original registered authority. */
+  business: BusinessRendererBridge;
+  businessWork: EmployeeAgentWorkAPI;
+  businessNative: BusinessNativeSharingAPI;
   oneVault: OneVaultNativeAPI;
   oneProvider: OneProviderNativeAPI;
   oneProfile: {
@@ -8228,6 +8220,8 @@ export interface AgentlasIpc {
   };
   /** Editable Memory candidates and explicitly approved reusable Memory assets. */
   oneMemory: {
+    /** Owner renderer-only capability; absent in older preloads and Mobile1.0.0. */
+    inspector?: DesktopMemoryInspectorAPI;
     getState: () => Promise<OneMemoryState>;
     getMap: () => Promise<OneMemoryMapSnapshot>;
     /**
@@ -9004,7 +8998,17 @@ export interface ToolApprovalConsentBinding {
   requesterIdentity: string;
   credentialResourceIdentity: string;
   permissionScope: "read" | "write" | "full";
+  /** ISO time after which a stored grant is never reused (ask again). Not part
+   * of the row's identity digest, so re-granting replaces the same row. */
+  expiresAt?: string;
+  /** On a stored grant: the consent revision it was given under. On a lookup:
+   * the minimum revision the caller requires; an older grant is not reused. */
+  revision?: number;
 }
+
+/** Provenance of text that reaches the model. Only "owner" (typed owner path) and "host" (Main-authored) may drive
+ * grants, goals or consent; "tool-result" (page/DOM/file/handoff/MCP output) is data and never does. */
+export type ToolResultTrust = "tool-result" | "owner" | "host";
 
 export type ToolApprovalDurableConsentStatus = "persisted" | "failed" | "unavailable";
 
@@ -9118,9 +9122,13 @@ export function isUnfilledQuestionTemplate(input: {
   // 서식의 질문 자리를 그대로 낸 경우. 이 문장 자체가 "여기에 질문을 써라"는 안내문이라
   // 사용자에게는 뜻이 없다.
   if (question === "question text ending with ?") return true;
+  // The compact ask line (prompt-modules core ask, 2026-10-14) shows the shape with ellipses: {"question":"…?",
+  // "options":[{"label":"…"}]}. A question that is only that placeholder is just as unanswerable.
+  const ellipsisOnly = (value: string) => /^(?:…|\.{3})\??$/.test(value);
+  if (ellipsisOnly(question)) return true;
 
   // 질문은 채웠는데 선택지를 안 채운 경우 — 고를 수 없으니 역시 답할 수 없다.
-  const placeholderLabels = labels.filter((label) => /^option [a-d]$/.test(label));
+  const placeholderLabels = labels.filter((label) => /^option [a-d]$/.test(label) || ellipsisOnly(label));
   if (labels.length > 0 && placeholderLabels.length === labels.length) return true;
 
   // 짧은 이름만 안 채운 것은 막지 않는다 — 질문과 선택지가 진짜면 답할 수 있다.

@@ -31,6 +31,7 @@ import {
   sweepIdleAgentResidency,
 } from "../runtime/agent-residency";
 import { sweepOrphanedRunChildren } from "../runtime/spawn-registry";
+import { sweepUnusedAgents } from "../archive/auto-archive";
 import { drainRunChildrenForHostShutdown, liveRunChildCount } from "../runtime/exec";
 import { drainInvocationService } from "../runtime/invocation-lifecycle";
 import { MainInvocationLifetime, admitMainAutomation, captureMainRootContinuation } from "../runtime/scheduled-root-context";
@@ -122,6 +123,8 @@ let invocationOwners: typeof import("../store/invocation-run-owners")["invocatio
 let invocationBroker: ReturnType<typeof createInvocationOwnerBroker> | null = null;
 let daemonInvocationService: typeof import("../invocation/service")["invocationService"] | null = null;
 let daemonNativeInvocation: Awaited<ReturnType<typeof import("./native-invocation-runtime")["createNativeInvocationRuntime"]>> | null = null;
+/** NH21: the One/Work Alive domain (loaded once the enrolled native service is up). */
+let aliveOrganisms: typeof import("../alive-organisms") | null = null;
 let nativeInvocationUnavailableCode: string | null = "native_invocation_not_configured";
 let daemonInvocationControl: typeof import("../runtime/invocation-owner-control") | null = null;
 
@@ -156,6 +159,7 @@ function residencyInput(): DaemonResidencyInput {
   return {
     desktopAttached: desktopParentPid !== null,
     supervisorDomain: daemonNativeInvocation?.supervisorActive ?? false,
+    aliveDomain: aliveOrganisms?.daemonAliveResident() ?? false,
     loginContinuity: loginContinuityEnabled(),
     graphRuns: graphRunsInFlight + graphLoginWaits.size,
     runChildren: liveRunChildCount(),
@@ -239,7 +243,7 @@ async function getScienceService() {
     const { createDaemonScienceService } = await import("./science-service");
     if (closing) throw new Error("daemon_shutting_down");
     assertServiceOwner();
-    scienceService ??= createDaemonScienceService({ ownerEpoch: bootId, assertOwner: assertServiceOwner, shutdownTimeoutMs: 8_000,
+    scienceService ??= createDaemonScienceService({ ownerEpoch: bootId, ownerServiceIdentity: serviceIdentity!, assertOwner: assertServiceOwner, shutdownTimeoutMs: 8_000,
       onEvent: event => {
         assertServiceOwner();
         let delivered = false;
@@ -689,9 +693,29 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
     const automation = stored ?? fallbackRow;
     if (!automation) throw new Error("graph.run requires automationId or an automation row");
     const { runGraph } = await import("../workflow/run-graph");
+    const { graphExecutionDigest } = await import("../../shared/graph-execution-digest");
+    const { withGraphOccurrenceCustody } = await import("../../shared/graph-occurrence-custody");
     const controller = new AbortController();
     const ownerId = typeof (automation as { id?: unknown }).id === "string" ? (automation as { id: string }).id : "";
     const lifetime = new MainInvocationLifetime(admitMainAutomation(ownerId), ownerId, ownerId, "automation");
+    const admittedAutomation = { ...(automation as object), graph } as Parameters<typeof runGraph>[0];
+    const admittedGraph = graph as Parameters<typeof runGraph>[1];
+    const graphDigest = graphExecutionDigest(admittedAutomation, admittedGraph);
+    // graph.run is the local owner's explicit native command ingress. A new
+    // command has its own occurrence; no serialized field may mint custody.
+    const occurrenceId = `owner-request:${randomUUID()}`;
+    const assertOccurrenceCurrent = () => {
+      assertServiceOwner();
+      if (closing || controller.signal.aborted || !lifetime.ownsActiveRoot()) {
+        throw new Error("graph_occurrence_custody_changed");
+      }
+      if (stored) {
+        const current = getAutomation(stored.id);
+        if (!current?.graph || graphExecutionDigest(current, current.graph) !== graphDigest) {
+          throw new Error("graph_occurrence_custody_changed");
+        }
+      }
+    };
     let afterSettled: ReturnType<typeof captureMainRootContinuation>;
     graphRunsInFlight += 1;
     // 데몬으로 들어온 그래프 실행은 정의상 무인 작업이다 — 실행 슬롯 2단 큐와 자식 nice
@@ -699,13 +723,13 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
     try {
       const result = await lifetime.run(() => {
         afterSettled = captureMainRootContinuation();
-        return withRunPriority("background", () =>
-        runGraph(
-          { ...(automation as object), graph } as never,
-          graph as never,
-          { signal: controller.signal, ...(initialVars ? { initialVars } : {}) } as never,
-        ),
-        );
+        return withGraphOccurrenceCustody({ automationId: ownerId, occurrenceId, graphDigest },
+          assertOccurrenceCurrent, occurrenceCustody => withRunPriority("background", () =>
+            runGraph(admittedAutomation, admittedGraph, {
+              signal: controller.signal, occurrenceId, occurrenceCustody,
+              ...(initialVars ? { initialVars } : {}),
+            }),
+          ));
       });
       if (result.needsInput && result.loginWaitSource && result.loginWaits?.length) {
         if (stored) {
@@ -795,13 +819,14 @@ function performShutdown(reason: string): Promise<void> {
     if (scienceService) {
       let serviceTimeout: NodeJS.Timeout | null = null;
       try {
-        await Promise.race([scienceService.close(), new Promise<void>((resolve) => {
-          serviceTimeout = setTimeout(resolve, 10_000);
+        await Promise.race([scienceService.close(), new Promise<never>((_resolve, reject) => {
+          serviceTimeout = setTimeout(() => reject(new Error("science_shutdown_unsettled")), 10_000);
         })]);
       } catch (error) { console.error("[agentlasd] science shutdown failed:", error); }
       finally { if (serviceTimeout) clearTimeout(serviceTimeout); }
     }
-    // Science has persisted its receipts before the shared local engine stops.
+    // Science is given the deadline above to persist receipts before the shared
+    // local engine stops. An unsettled deadline is reported, never a drain proof.
     // Only explicit service shutdown reaches this path; GUI detach never does.
     await localModelServicePromise?.catch(() => {});
     if (localModelService || localModelRpc) {
@@ -1033,6 +1058,13 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
         : await credentials.loadNativeDaemonCredential(binding);
       assertServiceOwner();
       await getDaemonInvocationControl();
+      // Native turns own MCP tool dispatch even when no local-model service was opened.
+      // Publish readiness only after this process's permission proxy is listening.
+      if (await startMcpProxyApprovalServer() <= 0) {
+        throw Object.assign(new Error("native_invocation_mcp_proxy_unavailable"),
+          { code: "native_invocation_mcp_proxy_unavailable" });
+      }
+      assertServiceOwner();
       if (closing) throw new Error("daemon_shutting_down");
       daemonNativeInvocation = await runtime.createNativeInvocationRuntime({ address: channel.nativeAuthSocketPath(dir),
         binding, credential, bootId, service: daemonInvocationService!, assertOwner: assertServiceOwner,
@@ -1053,6 +1085,22 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
       // Preserve existing Science/control service behavior while exposing exact
       // native readiness failure. No native request has been issued/replayed.
       console.warn("[agentlasd] native invocation unavailable:", nativeInvocationUnavailableCode);
+    }
+  }
+
+  // NH21: the enrolled service is the preferred owner of the One/Work Alive domain. It takes the lease when free (or
+  // when the window hands it over at a quiescent point) and keeps the lives beating after the window closes; Goal
+  // actions go back to the window, which owns Goal custody. AGENTLAS_ALIVE_ORGANISMS=off is the same kill switch as Main's.
+  if (daemonNativeInvocation && process.env.AGENTLAS_ALIVE_ORGANISMS !== "off") {
+    try {
+      const [alive, { daemonDeviceBridge }] = await Promise.all([import("../alive-organisms"), import("./device-bridge")]);
+      aliveOrganisms = alive;
+      alive.startDaemonAliveOrganisms({
+        action: (input) => daemonDeviceBridge().aliveAction(input),
+        changed: (event) => daemonDeviceBridge().aliveChanged(event),
+      });
+    } catch (error) {
+      console.error("[agentlasd] alive organisms failed to start:", error);
     }
   }
 
@@ -1083,6 +1131,7 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
    *      항목을 확인 사살한다(정체 확인 후 SIGTERM → 다음 패스 SIGKILL).
    */
   const SWEEP_INTERVAL_MS = 10 * 60_000;
+  let lastArchiveSweepAt = 0;
   const RESIDENT_IDLE_REAP_MS = 12 * 60 * 60_000;
   keepAlive = setInterval(() => {
     try {
@@ -1098,6 +1147,18 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
       if (closed > 0) console.log(`[agentlasd] residency reaper: closed ${closed} agent session(s) idle >12h`);
     } catch (error) {
       console.error("[agentlasd] residency reaper failed:", error);
+    }
+    try {
+      // Locally stored agents unused for 30 days move to the Archive (owner 2026-10-13); cheap and idempotent, so at most
+      // once per 6 hours is plenty. Silent: nothing is shown to the user.
+      const now = Date.now();
+      if (now - lastArchiveSweepAt >= 6 * 60 * 60_000) {
+        lastArchiveSweepAt = now;
+        const archived = sweepUnusedAgents(now);
+        if (archived.length > 0) console.log(`[agentlasd] auto-archive: moved ${archived.length} unused agent(s) to the Archive`);
+      }
+    } catch (error) {
+      console.error("[agentlasd] auto-archive failed:", error);
     }
     void sweepOrphanedRunChildren()
       .then((sweep) => {

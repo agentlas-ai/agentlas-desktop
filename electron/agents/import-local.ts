@@ -14,6 +14,7 @@ import { removeRoute, replaceRoute, listRoutes, type RuntimeLabel } from "./rout
 import { findAdoptableOrphanAgentId } from "../store/agent-dedupe";
 import { getFirmBySlug, upsertLocalTeamFirm } from "../store/firms";
 import { scanAgentFolder, type FolderScan, type ScanMember } from "./folder-scan";
+import { buildLocalTeamOrgChart } from "./team-org-chart";
 import { bindResolvedOrgAgentIds, clearResolvedOrg, saveResolvedOrg } from "../store/org-spec";
 import { detectEnvRequirementsFromFolder } from "./env-detect";
 import type {
@@ -433,14 +434,17 @@ function buildTeamSystemPrompt(dir: string, name: string): string {
     ) ||
     `Act as the orchestrating CEO of ${name}.`;
   const claudeRoot = path.join(dir, ".claude");
+  // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.agents.import-local.team-system-prompt).
   const header =
-    `You are the CEO / orchestrator of the "${name}" agent team, now launched through Agentlas.\n\n` +
-    `TEAM ROOT: ${dir}\n` +
-    `Team definition (org spec, playbooks, department & role agents) lives under: ${claudeRoot}\n` +
-    `When the instructions below reference team files with relative paths (e.g. ./playbook.md, ../orgspec.yaml, .claude/...), resolve them as ABSOLUTE paths under that team root and read them as needed.\n\n` +
-    `TARGET PROJECT: your current working directory is the user's target project. Do ALL building, file creation, and delivery in the current working directory — never inside the team root. Route work to the right department/specialist, sequence multi-step work, keep a brief CEO-style status in Korean, and apply read-only-first safety gates for high-risk actions (billing/auth/security/deploy).\n\n` +
+    `role: CEO / orchestrator of agent team "${name}" (launched through Agentlas)\n` +
+    `relative paths below (./playbook.md, ../orgspec.yaml, .claude/...): resolve as absolute under the "team root:" path given after the team brain\n` +
+    `cwd: the user's target project; build and deliver there, never in the team root\n` +
+    `style: route to the right department/specialist, sequence multi-step work, brief CEO status in Korean, read-only-first for billing/auth/security/deploy\n` +
     `--- TEAM BRAIN ---\n`;
-  return (header + brain).slice(0, 16000);
+  const location =
+    `\nteam root: ${dir}\n` +
+    `team definition: ${claudeRoot}`;
+  return (header + brain).slice(0, 16000) + location;
 }
 
 function readFirst(dir: string, candidates: string[], maxChars = 8000): string {
@@ -606,29 +610,7 @@ function registerTeamAsFirm(
   if (JUNK_DIRS.test(path.basename(dir).toLowerCase()) && !hasTeamMarkers(dir)) {
     return null;
   }
-  let orgChart: Array<FirmOrgNode & { agentId: string }>;
-  if (divisions && divisions.length > 0) {
-    orgChart = [{ agentSlug: slug, agentId, role: "CEO", reportsTo: null }];
-    for (const d of divisions) {
-      const dSlug = `${slug}-${d.id}`;
-      orgChart.push({ agentSlug: dSlug, agentId: "", role: d.role || d.name, reportsTo: slug });
-      for (const s of d.specialists ?? []) {
-        orgChart.push({ agentSlug: `${dSlug}-${s.id}`, agentId: "", role: s.role || s.name, reportsTo: dSlug });
-      }
-    }
-  } else if (scanMembers && scanMembers.length > 0) {
-    // 결정적 스캐너가 찾은 구성원 — LLM 없이도 조직도에 구성원이 반드시 들어간다.
-    orgChart = [
-      { agentSlug: slug, agentId, role: "CEO", reportsTo: null },
-      ...scanMembers.map((m) => ({ agentSlug: `${slug}-${m.id}`, agentId: "", role: m.role || m.name, reportsTo: slug })),
-    ];
-  } else {
-    const depts = readTeamDepartments(dir);
-    orgChart = [
-      { agentSlug: slug, agentId, role: "CEO", reportsTo: null },
-      ...depts.map((d) => ({ agentSlug: `${slug}-${d}`, agentId: "", role: deptLabel(d), reportsTo: slug })),
-    ];
-  }
+  const orgChart = buildLocalTeamOrgChart(agentId, slug, divisions, scanMembers, divisions?.length || scanMembers?.length ? [] : readTeamDepartments(dir));
   return upsertLocalTeamFirm({ slug: `firm-${slug}`, name, tagline, ceoAgentId: agentId, orgChart });
 }
 

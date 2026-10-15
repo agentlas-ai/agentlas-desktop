@@ -14,6 +14,7 @@ import { readOneChatHistory, readOneChatHistoryPage, mergeOneChatHistory, oneCha
 import { OneComposerInput, type OneComposerInputHandle } from "./OneComposerInput";
 import { oneHistoryWindowStart, revealOneHistoryPage } from "@/lib/one-history-window";
 import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
+import { ChatContinuationProjector } from "@/lib/chat-continuations";
 import { readOneFollowupOutbox, saveOneFollowupIntent, removeOneFollowupIntent, pauseOneFollowupOutbox, pauseOneFollowupIntent, resumeOneFollowupIntent, waitForOneFollowupDelivery, type OneFollowupIntent } from "@/lib/one-followup-outbox";
 import { ONE_PREFLIGHT_STEER_REQUEST_KEYS, normalizeOnePreflightSteerRequest } from "@shared/one-preflight-steers";
 
@@ -23,7 +24,7 @@ import { ComposerDecisionSlot } from "../ComposerDecisionPortal";
 import { mergeGoalResults, type GoalResultPresentation } from "../../../shared/goal-result";
 import { GoalResultReport } from "../GoalResultReport";
 import type { ChatHostNotice, InvocationAdmissionReceipt, InvocationSteerRecovery, McpInvocationRequest } from "../../../shared/types";
-import { agiActionNoticeLine, hostStatusLabel, isQuietHostStatus, normalizeChatHostNotice } from "../../../shared/chat-host-notice";
+import { agiActionNoticeLine, isHousekeepingHostNotice, normalizeChatHostNotice } from "../../../shared/chat-host-notice";
 import { HostContinuationNotice } from "../HostContinuationNotice";
 import { AutomationLiveRows, AutomationReportSummary } from "../automation/AutomationChatActivity";
 import { OneGoalControls } from "./OneGoalControls";
@@ -45,8 +46,9 @@ import {
 import { flushSync } from "react-dom";
 import { bindAgentScreenScope } from "@/lib/agent-screen-scope";
 import { Markdown, StreamingMarkdown, type LinkedFileArtifact } from "@/components/Markdown";
-import { hasIntellectUiFence } from "@/lib/intellect-ui-actions";
-import { mapIntellectUiProse } from "@shared/intellect-ui";
+import { hasIntellectUiFence, IntellectUiActions } from "@/lib/intellect-ui-actions";
+import { InlineUiInstances, useInlineUiInstances, inlineUiForReply } from "@/components/UiInstances";
+import { mapInlineVisualProse } from "@shared/inline-visual";
 import { AskCard, type AskCardOption } from "@/components/AskCard";
 import {
   ASK_ACTION_COPY,
@@ -70,6 +72,7 @@ import {
   IconArrowUp,
   IconAlertTriangle,
   IconBolt,
+  IconLayers,
   IconChevronDown,
   IconCheck,
   IconClose,
@@ -233,7 +236,7 @@ import { OneToolchains, toolchainStackClassName } from "./OneToolchains";
 import { OneSettingsRail, OneSettingsSheet, type OneSettingsKey } from "./OneSettings";
 import type { OneWorkerWorkGroup } from "@/lib/one-turn-work";
 import type { OneWorkerPanelSelection, OneWorkerPanelRun } from "@/lib/one-worker-panel";
-import { OneTurnWork, OneTurnWorkDividers, type OneTurnHostNote } from "./OneTurnWork";
+import { OneTurnWork, OneTurnWorkDividers } from "./OneTurnWork";
 import { OneTaskforceConversation } from "./OneTaskforceConversation";
 import {
   memberForAgent, OneDiscussionReplyContext, OneDiscussionThread, useOneDiscussion,
@@ -443,7 +446,7 @@ function oneOrgBrowserPreviewState(): OneOrgState {
       runtimeSelection: null,
       revision: 1,
     }],
-    slots: { used: 2, capacity: 4, available: 2, includesOne: true, recommended: 4, hardMax: 8, cores: 10, totalMemGB: 32, userSet: false },
+    slots: { used: 2, includesOne: true },
   };
 }
 
@@ -588,6 +591,14 @@ type UiMessage = {
   role: "user" | "assistant" | "system";
   text: string;
   streaming?: boolean;
+  /** Display segments never replace the canonical text used by decisions and artifacts. */
+  continuationText?: string;
+  continuationMarkdownText?: string;
+  continuationFirst?: boolean;
+  continuationSourceId?: string;
+  continuationUiMessageId?: string;
+  continuationRunId?: string;
+  continuationTail?: boolean;
   /*
    * ★첨부는 대화의 일부다 — 보내고 나면 사라지던 것을 남긴다.
    *
@@ -615,6 +626,11 @@ type ArmedOneMemoryUseOnce = {
 
 /** Main codes that mean the proposal's exact binding no longer exists; the same proposal can never be confirmed. */
 const ONE_TEAM_PREFLIGHT_BINDING_GONE_CODES = new Set(["stale_binding", "candidate_changed", "expired", "recovery_required", "already_resolved", "invalid_request"]);
+
+type OneRunStartOutcome = {
+  status: "started" | "queued" | "reconciled" | "rejected" | "uncertain" | "no-dispatch";
+  runId?: string;
+};
 
 type PendingTeamPrompt = {
   proposalId: string;
@@ -1047,7 +1063,7 @@ function visibleOneMessageText(message: UiMessage): string {
 }
 function computeVisibleOneMessageText(message: UiMessage): string {
   return message.role === "assistant"
-    ? mapIntellectUiProse(message.text, text => projectVisibleOneMessageText({ ...message, text }))
+    ? mapInlineVisualProse(message.text, text => projectVisibleOneMessageText({ ...message, text }))
     : projectVisibleOneMessageText(message);
 }
 
@@ -1099,10 +1115,11 @@ function projectVisibleOneMessageText(message: UiMessage): string {
   return toCustomerSafeText(customerAnswer, detectOneTextLocale(customerAnswer) === "ko" ? "ko" : "en");
 }
 
-function upsertLiveMessage(messages: UiMessage[], text: string, streaming: boolean): UiMessage[] {
+function upsertLiveMessage(messages: UiMessage[], text: string, streaming: boolean, runId?: string): UiMessage[] {
   const index = messages.findIndex((item) => item.id === "one-live-response");
   const message: UiMessage = { id: "one-live-response", role: "assistant", text, streaming,
-    intellectUiMessageId: messages[index]?.intellectUiMessageId ?? `one-ui:${uid()}` };
+    intellectUiMessageId: messages[index]?.intellectUiMessageId ?? `one-ui:${uid()}`,
+    continuationRunId: runId ?? messages[index]?.continuationRunId };
   if (index < 0) return [...messages, message];
   return messages.map((item, itemIndex) => itemIndex === index ? message : item);
 }
@@ -2309,11 +2326,39 @@ function OneSessionsShell() {
     return exact ? { chatId: workerChatId, runId: exact.runId, state: exact.state } : null;
   }, [activity, activityStateRunId, contextRailOpen, threadRuns, workerChatId, workerSelection]);
   useEffect(() => { setWorkerSelection(null); }, [workerChatId]);
-  const transcriptIds = useMemo(() => messages.map(message => message.id), [messages]);
+  const continuationProjectorRef = useRef(new ChatContinuationProjector());
+  const displayMessages = useMemo(() => continuationProjectorRef.current.project(workerChatId ?? "one-home", messages, {
+    key: (message) => message.intellectUiMessageId ?? (message.id === "one-live-response"
+      ? `one-live:${activeActivityRunId ?? "pending"}` : message.durableMessageId ?? message.id),
+    role: (message) => message.role,
+    text: visibleOneMessageText,
+    active: (message) => message.id === "one-live-response" && Boolean(message.streaming),
+    run: (message) => message.continuationRunId,
+    createdAt: (message) => message.createdAt ?? (message.id === "one-live-response" && renderedActivityStartedAt != null
+      ? new Date(renderedActivityStartedAt).toISOString() : undefined),
+  }).map((row): UiMessage => {
+    const message = row.message;
+    if (!row.continuation && !row.frozen) return message;
+    return {
+      ...message,
+      id: row.id,
+      intellectUiMessageId: row.continuation ? row.id : message.intellectUiMessageId ?? row.id,
+      continuationSourceId: row.sourceId,
+      continuationUiMessageId: message.intellectUiMessageId ?? message.id,
+      continuationText: row.text,
+      continuationMarkdownText: row.markdownText,
+      continuationFirst: !row.continuation,
+      continuationTail: row.tail,
+      createdAt: row.createdAt,
+      streaming: !row.frozen && row.tail && message.streaming,
+      ...(!row.tail ? { goalResult: undefined, images: undefined, files: undefined, chatFiles: undefined, chatFileGroupIds: undefined } : {}),
+    };
+  }), [activeActivityRunId, messages, renderedActivityStartedAt, workerChatId]);
+  const transcriptIds = useMemo(() => displayMessages.map(message => message.id), [displayMessages]);
   const [historyWindow, setHistoryWindow] = useState<{ chatId: string | null; oldestId: string | null } | null>(null);
   const historyAnchor = historyWindow?.chatId === workerChatId ? historyWindow.oldestId : null;
   const historyStart = oneHistoryWindowStart(transcriptIds, historyAnchor, 24);
-  const visibleMessages = useMemo(() => historyStart ? messages.slice(historyStart) : messages, [messages, historyStart]);
+  const visibleMessages = useMemo(() => historyStart ? displayMessages.slice(historyStart) : displayMessages, [displayMessages, historyStart]);
   const historyWindowRef = useRef({ chatId: workerChatId, ids: transcriptIds, start: historyStart });
   historyWindowRef.current = { chatId: workerChatId, ids: transcriptIds, start: historyStart };
   const olderHistoryAvailable = historyPageRef.current.chatId === workerChatId && historyPageRef.current.hasOlder;
@@ -2371,11 +2416,13 @@ function OneSessionsShell() {
     const date = new Date(message.createdAt ?? "");
     return [message.id, Number.isFinite(date.getTime()) ? messageTimeFormatter.format(date) : ""] as const;
   })), [visibleMessages, messageTimeFormatter]);
-  const liveResponseMounted = visibleMessages.some((message) => message.id === "one-live-response");
+  const liveResponseMessage = visibleMessages.find((message) => (message.continuationSourceId ?? message.id) === "one-live-response"
+    && message.continuationTail !== false);
+  const liveResponseMounted = Boolean(liveResponseMessage);
   const livePromptMounted = Boolean(activeRunPrompt && isPromptOnScreen(visibleMessages, activeRunPrompt.text));
-  // The live run's work block: before the streaming reply once text arrives,
-  // otherwise at the tail of the thread (after the prompt that started it).
-  const liveWorkAnchorMessageId = workBusy && liveResponseMounted ? "one-live-response" : null;
+  // Ongoing work belongs to the current reply below the latest follow-up,
+  // including the textless working row before its first new words arrive.
+  const liveWorkAnchorMessageId = workBusy && liveResponseMounted ? liveResponseMessage!.id : null;
   const liveWorkBlock = workBusy
     ? (
       <OneTurnWork
@@ -2430,23 +2477,11 @@ function OneSessionsShell() {
       ? previous.anchor.getBoundingClientRect().top - previous.top
       : scroller.scrollHeight - previous.scrollHeight;
   }, [workerChatId, historyStart, leadingHistoryStart]);
-  // The host's quiet status lines (effect check, wait, cycle) fold into the work block of the run they
-  // describe — matched by the durable marker's runId, never by wording. A line whose run is not drawn
-  // here (live run, or older than the loaded window) stays one quiet line in place.
-  const foldedHostNotes = useMemo(() => {
-    const drawn = new Set<string>([...threadWorkPlan.leading, ...[...threadWorkPlan.afterMessage.values()].flat()].map((block) => block.runId));
-    const byRun = new Map<string, OneTurnHostNote[]>();
-    const messageIds = new Set<string>();
-    for (const message of visibleMessages) {
-      const notice = normalizeChatHostNotice(message.role, message.hostNotice);
-      if (!isQuietHostStatus(notice) || !drawn.has(notice.runId)) continue;
-      const list = byRun.get(notice.runId) ?? [];
-      list.push({ id: message.id, label: hostStatusLabel(notice, appLocale), text: message.text });
-      byRun.set(notice.runId, list);
-      messageIds.add(message.id);
-    }
-    return { byRun, messageIds };
-  }, [appLocale, threadWorkPlan, visibleMessages]);
+  // Housekeeping host rows (effect check, wait, cycle, resume, One reviewing handed-off work; native-harness notyet NH26)
+  // are drawn nowhere: not folded into a work block, not a quiet line. Matched by the durable typed marker, never by wording.
+  const housekeepingMessageIds = useMemo(() => new Set(visibleMessages
+    .filter((message) => isHousekeepingHostNotice(normalizeChatHostNotice(message.role, message.hostNotice)))
+    .map((message) => message.id)), [visibleMessages]);
   const durableThreadBrowserUrl = useMemo(() => {
     for (let index = threadRuns.length - 1; index >= 0; index -= 1) {
       const url = taskBrowserUrl(threadRuns[index].state.items);
@@ -2492,6 +2527,8 @@ function OneSessionsShell() {
   const autoResolvingProposalRef = useRef<string | null>(null);
   // A refused automatic start re-publishes the proposal, which re-runs the start effect. Bound the attempts per proposal.
   const autoResolveFailuresRef = useRef(new Map<string, number>());
+  const attemptedTeamRunIdsRef = useRef(new Set<string>());
+  const settledRejectedTeamRunIdsRef = useRef(new Set<string>());
   const automationRunPendingRef = useRef(new Set<string>());
   const pluginMutationPendingRef = useRef(new Set<string>());
   const runIdRef = useRef<string | null>(null);
@@ -3552,7 +3589,7 @@ function OneSessionsShell() {
       oneTranscriptRevisionRef.current += 1;
       const partialText = streamTextRef.current;
       setMessages((current) => ownsQueuedUpdate()
-        ? upsertLiveMessage(current, partialText, true).map((message) => message.id === "one-live-response" && event.goalResult ? { ...message, goalResult: event.goalResult } : message)
+        ? upsertLiveMessage(current, partialText, true, eventRunId).map((message) => message.id === "one-live-response" && event.goalResult ? { ...message, goalResult: event.goalResult } : message)
         : current);
       /*
        * ★ 답이 흘러나오는 동안에도 화면이 따라 내려간다 (오너 지적 2026-08-24).
@@ -3590,7 +3627,7 @@ function OneSessionsShell() {
       // (measured 2026-08-15: the previous answer vanished while a queued
       // instruction ran, until the history reload brought it back).
       oneTranscriptRevisionRef.current += 1;
-      setMessages((current) => ownsQueuedUpdate() ? upsertLiveMessage(current, text, false).map((message) => (
+      setMessages((current) => ownsQueuedUpdate() ? upsertLiveMessage(current, text, false, eventRunId).map((message) => (
         message.id === "one-live-response"
           ? { ...message, ...(event.goalResult ? { goalResult: event.goalResult } : {}), id: `one-answer:${settledRunId ?? uid()}`, createdAt: message.createdAt ?? new Date().toISOString(), ...(event.durableMessageId ? { durableMessageId: event.durableMessageId } : {}) }
           : message
@@ -3693,7 +3730,7 @@ function OneSessionsShell() {
         setActivityStateRunId(current => owns() ? runId : current); setActivity(current => owns() ? state : current); cacheOneActivity(chatId, state);
         if (snapshot.partialText !== undefined) {
           streamTextRef.current = snapshot.partialText;
-          setMessages(current => owns() ? upsertLiveMessage(current, snapshot.partialText!, true) : current);
+          setMessages(current => owns() ? upsertLiveMessage(current, snapshot.partialText!, true, runId) : current);
         }
         return true;
       },
@@ -4073,6 +4110,25 @@ function OneSessionsShell() {
   }, [projections, selectedTaskId]);
 
   const activeThreadChatId = selected?.chatId ?? conversation?.id ?? null;
+  const inlineUi = useInlineUiInstances(activeThreadChatId ?? undefined);
+  const uiRunForMessage = (message: UiMessage): string | undefined => {
+    if (message.continuationRunId) return message.continuationRunId;
+    const sourceId = message.continuationSourceId ?? message.durableMessageId ?? message.id;
+    const matches = threadRuns.filter(run => run.answerMessageIds?.includes(sourceId));
+    return matches.length === 1 ? matches[0].runId : undefined;
+  };
+  const renderUiOnlyBubble = (runId: string | null | undefined) => {
+    if (!runId || messages.some(message => message.role === "assistant" && uiRunForMessage(message) === runId)) return null;
+    const owned = inlineUiForReply(inlineUi, runId);
+    if (!owned.length) return null;
+    return <article key={`ui-reply:${runId}`} className={styles.message} data-role="assistant" data-ui-reply-run={runId}>
+      <div className={styles.messageContent}><div className={styles.messageBody}>
+        <IntellectUiActions.Provider value={{ prepareFollowup: prepareUiFollowup, disabled: busy || activeSeatDissolved || activeDirectSessionUnavailable }}>
+          <InlineUiInstances chatId={activeThreadChatId ?? undefined} turnIds={[runId]} instances={owned} locale={appLocale === "ko" ? "ko" : "en"}/>
+        </IntellectUiActions.Provider>
+      </div></div>
+    </article>;
+  };
   useEffect(() => setMessageReply(null), [activeThreadChatId]);
   const composerAlwaysApproval = useChatAlwaysApproval(activeThreadChatId);
   const onePermissionLabel = `${onePermission === "auto" ? (appLocale === "ko" ? "자동 모드" : "Auto mode") : onePermission === "read" ? (appLocale === "ko" ? "읽기 전용" : "Read only") : onePermission === "write" ? (appLocale === "ko" ? "파일 편집" : "Accept file edits") : (appLocale === "ko" ? "전체 액세스" : "Full access")}${composerAlwaysApproval.enabled ? (appLocale === "ko" ? " · 항상 승인" : " · Always approve") : ""}`;
@@ -4315,7 +4371,6 @@ function OneSessionsShell() {
         member.installedAgentId === agentId && (member.unreadCount > 0 || Boolean(member.archivedAt)))));
     });
   }, [activeThreadChatId, confirmations, oneOrgState, selectedTaskId, sessionGroups.rows, taskforces]);
-  const activeThreadPromptFallback = selected?.display.title ?? conversation?.title ?? "";
   const activeTaskforce = useMemo(
     () => taskforces.find((taskforce) => taskforce.chatId === activeThreadChatId) ?? null,
     [activeThreadChatId, taskforces],
@@ -4367,8 +4422,11 @@ function OneSessionsShell() {
   const roomMentionNames = useMemo(() => activeTaskforce
     ? ["One", ...(oneOrgState?.members ?? []).flatMap((member) => [member.displayName, member.nameEn].filter((name): name is string => Boolean(name)))]
     : undefined, [activeTaskforce, oneOrgState?.members]);
-  const visibleMessageIds = useMemo(() => new Set(visibleMessages.map((message) => message.id)), [visibleMessages]);
-  const visibleMessagesById = useMemo(() => new Map(visibleMessages.map((message) => [message.id, message])), [visibleMessages]);
+  const visibleMessageIds = useMemo(() => new Set(visibleMessages.flatMap((message) => [message.id, message.continuationSourceId ?? message.id])), [visibleMessages]);
+  const visibleMessagesById = useMemo(() => new Map(visibleMessages.flatMap((message) => [
+    [message.id, message] as const,
+    [message.continuationSourceId ?? message.id, message] as const,
+  ])), [visibleMessages]);
   // 활성 세션의 좌석 1급 조회(SEAT-SESSION-PLAN-v2) — 해체(T7) 여부가 읽기 전용
   // 아카이브 배너·전송 대체 CTA 를 결정한다. 좌석이 없거나 조회가 실패하면 평소대로.
   /*
@@ -4494,13 +4552,25 @@ function OneSessionsShell() {
     if (!rows.length) return visibleMessages;
     const firstOwn = visibleMessages.find((message) => message.createdAt)?.createdAt;
     // Older room work than the loaded window of this chat stays out until older pages are loaded.
-    const merged = [...visibleMessages, ...rows.filter((row) => !historyPageRef.current.hasOlder || !firstOwn || (row.createdAt ?? "") >= firstOwn)];
-    return merged.map((message, index) => ({ message, index })).sort((a, b) => {
-      const at = a.message.createdAt, bt = b.message.createdAt;
-      if (at && bt && at !== bt) return at < bt ? -1 : 1;
-      if (!at !== !bt) return at ? -1 : 1;
-      return a.index - b.index;
-    }).map(({ message }) => message);
+    const roomRows = rows.filter((row) => !historyPageRef.current.hasOlder || !firstOwn || (row.createdAt ?? "") >= firstOwn)
+      .map((message, index) => ({ message, index })).sort((a, b) => {
+        const at = a.message.createdAt, bt = b.message.createdAt;
+        if (at && bt && at !== bt) return at < bt ? -1 : 1;
+        if (!at !== !bt) return at ? -1 : 1;
+        return a.index - b.index;
+      }).map(({ message }) => message);
+    // Continuations already have an observed conversation order. Insert room
+    // work by time without sorting a frozen answer past the user's follow-up.
+    const merged: Array<UiMessage & { room?: { chatId: string; title: string; sessionChatId: string } }> = [];
+    let roomIndex = 0;
+    for (const message of visibleMessages) {
+      while (roomIndex < roomRows.length && (!message.createdAt
+        || (roomRows[roomIndex].createdAt && roomRows[roomIndex].createdAt! < message.createdAt))) {
+        merged.push(roomRows[roomIndex++]);
+      }
+      merged.push(message);
+    }
+    return [...merged, ...roomRows.slice(roomIndex)];
   }, [seatRoomWorkAgentId, seatRoomWork, visibleMessages]);
   useEffect(() => {
     const agentId = activeSeatMemberAgentId;
@@ -5070,14 +5140,24 @@ function OneSessionsShell() {
           ? await api.oneAttachments.forTeam(proposal.proposalId).catch(() => null)
           : null;
         if (cancelled) return;
+        const history = proposal ? await readOneShellHistory(api, activeThreadChatId).catch(() => null) : null;
+        let originalPrompt: string | null = null;
+        if (proposal && history) for (const entry of [...history].reverse()) {
+          if (entry.role === "user" && entry.text.trim()
+            && `sha256:${await onePreflightTextDigest(entry.text)}` === proposal.binding.promptDigest) {
+            originalPrompt = entry.text;
+            break;
+          }
+        }
+        if (cancelled || activeThreadChatIdRef.current !== activeThreadChatId) return;
         setTeamPreflight(proposal);
         setPendingTeamPrompt((current) => (
           proposal && current?.proposalId === proposal.proposalId
             ? current
-            : proposal
+            : proposal && originalPrompt
               ? {
                   proposalId: proposal.proposalId,
-                  text: activeThreadPromptFallback || proposal.goalSummary,
+                  text: originalPrompt,
                   attachments: teamAttachments,
                   recurrence: null,
                   overrides: {},
@@ -5085,11 +5165,10 @@ function OneSessionsShell() {
                 }
               : null
         ));
-        if (proposal && isOneTeamPreflightPendingStatus(proposal.status)) {
-          const visiblePrompt = activeThreadPromptFallback || proposal.goalSummary;
-          setMessages((current) => current.length > 0
-            ? current
-            : [{ id: `team-request:${proposal.proposalId}`, role: "user", text: visiblePrompt }]);
+        if (originalPrompt && history) {
+          const durable = toUiMessages(history);
+          setMessages(current => activeThreadChatIdRef.current === activeThreadChatId
+            ? mergeOneShellHistory(current, durable) : current);
         }
       })
       .catch((cause) => {
@@ -5101,7 +5180,7 @@ function OneSessionsShell() {
         }
       });
     return () => { cancelled = true; };
-  }, [activeThreadChatId, activeThreadPromptFallback]);
+  }, [activeThreadChatId, hydratedThreadChatId]);
 
   const oneMemoryUseOnceTarget = useMemo<OneMemoryUseOnceTarget | null>(() => {
     if (selected?.chatId) {
@@ -5372,7 +5451,7 @@ function OneSessionsShell() {
       /** Main-owned queued directions belong to this immutable submit. */
       preflightSubmissionId?: string;
     },
-  ) => {
+  ): Promise<OneRunStartOutcome> => {
     const api = ipc();
     const events = ipcEvents();
     const runLocale = normalizedLocale;
@@ -5382,24 +5461,38 @@ function OneSessionsShell() {
         setActionNotice(runLocale === "ko"
           ? "연결이 돌아오면 이어서 보낼게요."
           : "This follows when the connection returns.");
-        return;
+        return { status: "uncertain" };
       }
       throw new Error(tFor(runLocale, "one.shell.run.desktop_unavailable"));
     }
     let observedAdmissionStatus: "absent" | "pending" | "admitted" | "rejected" | null = null;
     let optimisticUserMessageId: string | null = null;
-    const reconcileAcceptedAdmission = async (candidateRunId: string, rejectionCause?: unknown): Promise<boolean> => {
+    const settleRejectedTeamStart = async (candidateRunId: string) => {
+      const ref = options?.teamRef;
+      if (!ref || ref.reservedRunId !== candidateRunId) return;
+      // Revoke only this sealed pending UI, even if its owner navigated away.
+      setPendingTeamPrompt(current => current?.proposalId === ref.proposalId ? null : current);
+      if (settledRejectedTeamRunIdsRef.current.has(candidateRunId)) return;
+      settledRejectedTeamRunIdsRef.current.add(candidateRunId);
+      const failed = await api.oneTeamPreflight.failStart(ref).catch(() => null);
+      if (failed && activeThreadChatIdRef.current === chatId) setTeamPreflight(current =>
+        !current || current.proposalId === ref.proposalId ? failed : current);
+    };
+    const reconcileAcceptedAdmission = async (candidateRunId: string, rejectionCause?: unknown): Promise<OneRunStartOutcome | null> => {
       let admission = await api.invoke.admission(candidateRunId);
+      const observed = await api.invoke.receipt(candidateRunId);
+      const exactReceipt = observed?.runId === candidateRunId && observed.chatId === chatId ? observed : null;
       const record = readOneUncertainAdmission(chatId);
       if (absentAdmissionProvesNoStart(admission, record?.runId === candidateRunId ? record : { chatId, runId: candidateRunId })
-        && !(await api.invoke.receipt(candidateRunId))) {
+        && !exactReceipt) {
         // A proven no-start without an admission row takes the same path as a recorded rejection.
         admission = { runId: candidateRunId, chatId, status: "rejected", pendingAt: "", updatedAt: "", rejectionReasonCode: null };
       }
       observedAdmissionStatus = admission.status;
-      if (admission.status !== "absent" && admission.chatId !== chatId) return false;
-      if (admission.status === "pending") return false;
-      if (admission.status === "rejected") {
+      if (admission.status !== "absent" && admission.chatId !== chatId) return null;
+      if (admission.status === "pending" && !exactReceipt) return null;
+      if (admission.status === "rejected" && !exactReceipt) {
+        await settleRejectedTeamStart(candidateRunId);
         uncertainAdmissionRef.current.delete(chatId);
         clearOneUncertainAdmission(chatId, candidateRunId);
         if (runIdRef.current === candidateRunId) {
@@ -5439,7 +5532,7 @@ function OneSessionsShell() {
             }
           } catch { /* Keep the draft and report the missing read below. */ }
         }
-        if (activeThreadChatIdRef.current !== chatId) return true;
+        if (activeThreadChatIdRef.current !== chatId) return { status: "rejected", runId: candidateRunId };
         /*
          * ★2026-09-23 — 이 갈래는 goalAdmissionControlFailure 보다 먼저 돈다. 예전엔 Main 이 모든
          *   사전 거절을 고정 사유(main_start_pre_dispatch_refused)로 적었고 여기서는 일반 문구만
@@ -5459,7 +5552,7 @@ function OneSessionsShell() {
         if (specific) {
           admissionRecoveryFenceRef.current.set(chatId, { runId: candidateRunId, accepted: false, notice: specific.message, rejectedAt: Date.now() });
           setActionNotice(specific.message);
-          return true;
+          return { status: "rejected", runId: candidateRunId };
         }
         const codeSuffix = "";
         setActionNotice((runLocale === "ko"
@@ -5473,13 +5566,20 @@ function OneSessionsShell() {
               ? "Your direction is in the conversation, but did not run. Review the Goal, then choose whether to revise or resume it. Nothing was resent automatically."
               : "Your direction was saved, but its conversation row could not be checked yet. Do not resend the draft; review the Goal and history first."
             : "This message could not run. Check the model connection and usage limits, then send it again.") + codeSuffix);
-        return true;
+        return { status: "rejected", runId: candidateRunId };
       }
-      const observed = await api.invoke.receipt(candidateRunId);
-      if (!observed || observed.runId !== candidateRunId || observed.chatId !== chatId) return false;
+      if (!exactReceipt) {
+        if (admission.status !== "admitted") return null;
+        if (options?.teamRef?.reservedRunId === candidateRunId) setPendingTeamPrompt(current =>
+          current?.proposalId === options.teamRef!.proposalId ? null : current);
+        return { status: "reconciled", runId: candidateRunId };
+      }
+      if (options?.teamRef?.reservedRunId === candidateRunId) setPendingTeamPrompt(current =>
+        current?.proposalId === options.teamRef!.proposalId ? null : current);
       uncertainAdmissionRef.current.delete(chatId);
       clearOneUncertainAdmission(chatId, candidateRunId);
-      if (observed.status === "running" || observed.status === "cancelling") {
+      if (activeThreadChatIdRef.current !== chatId) return { status: "reconciled", runId: candidateRunId };
+      if (exactReceipt.status === "running" || exactReceipt.status === "cancelling") {
         runIdRef.current = candidateRunId;
         runChatIdRef.current = chatId;
         activityRunIdRef.current = candidateRunId;
@@ -5501,11 +5601,11 @@ function OneSessionsShell() {
       setActionNotice(runLocale === "ko"
         ? "이 요청 ID의 실행 기록을 확인했습니다. 지시를 재전송하지 않고 기록을 복원합니다."
         : "A run with this request ID was found. Its record is being restored without resending the instruction.");
-      return true;
+      return { status: "reconciled", runId: candidateRunId };
     };
     const unresolvedRunId = uncertainAdmissionRef.current.get(chatId) ?? readOneUncertainAdmission(chatId)?.runId;
     if (unresolvedRunId) {
-      try { if (await reconcileAcceptedAdmission(unresolvedRunId)) return; }
+      try { const outcome = await reconcileAcceptedAdmission(unresolvedRunId); if (outcome) return outcome; }
       catch { /* Unavailable receipt is not permission for a new run ID. */ }
       setActionNotice(runLocale === "ko"
         ? observedAdmissionStatus === "pending"
@@ -5514,13 +5614,26 @@ function OneSessionsShell() {
         : observedAdmissionStatus === "pending"
           ? "The previous message is still being handled. This one follows right after."
           : "Checking on the previous message. This one follows when the connection returns.");
-      return;
+      return { status: "uncertain", runId: unresolvedRunId };
     }
-    if (options?.automaticRecovery && admissionRecoveryFenceRef.current.has(chatId)) return;
+    if (options?.automaticRecovery && admissionRecoveryFenceRef.current.has(chatId)) return { status: "no-dispatch" };
     if (runIdRef.current && runChatIdRef.current === chatId) {
       if (!options?.promptOrigin) setComposer((current) => current.trim() ? current : text);
       setActionNotice(runLocale === "ko" ? "이 대화는 실행 중입니다. 현재 작업에 지시를 보내거나 중지할 수 있습니다." : "This conversation is running. You can steer or stop the current run.");
-      return;
+      return { status: "no-dispatch" };
+    }
+    if (options?.teamRef) {
+      const sealedRunId = options.teamRef.reservedRunId;
+      if (options.runId !== sealedRunId) return { status: "rejected", runId: sealedRunId };
+      try {
+        const outcome = await reconcileAcceptedAdmission(sealedRunId);
+        if (outcome) return outcome;
+        if (observedAdmissionStatus !== "absent") return { status: "uncertain", runId: sealedRunId };
+      } catch { return { status: "uncertain", runId: sealedRunId }; }
+      if (attemptedTeamRunIdsRef.current.has(sealedRunId)) return { status: "no-dispatch", runId: sealedRunId };
+      // Burn synchronously before the first await/optimistic paint. A rejection
+      // or lost response is observation work, never a second native dispatch.
+      attemptedTeamRunIdsRef.current.add(sealedRunId);
     }
     // A Taskforce is the conversation's durable roster, not a one-turn
     // composer decoration. Decision answers, clarification turns, and recovery
@@ -5650,7 +5763,7 @@ function OneSessionsShell() {
       setActionNotice(runLocale === "ko"
         ? "요청 ID를 재시작 후에도 보존할 수 없어 실행을 보내지 않았습니다. 저장 공간을 확인해 주세요."
         : "The request ID could not be preserved across a restart, so the run was not sent. Check Desktop storage.");
-      return;
+      return { status: "no-dispatch", runId };
     }
     // Main may spend seconds admitting (preflight judges, runtime checks) before it
     // lists this chat as active. Until invoke.run answers, "not active" means "not
@@ -5685,6 +5798,7 @@ function OneSessionsShell() {
         ...(options?.overrides?.sessionRouting ? { sessionRouting: true } : { sessionRouting: false }),
         ...(options?.overrides?.fastMode ? { fastMode: true } : {}),
       });
+      if (!startAnswer || startAnswer.runId !== runId) throw new Error("invoke_start_ack_identity_mismatch");
       admittingRunIdsRef.current.delete(runId);
       clearOneUncertainAdmission(chatId, runId);
       if (startAnswer?.queued) {
@@ -5708,7 +5822,8 @@ function OneSessionsShell() {
             && message.text === text && message.durableMessageId)
             ? current.filter((message) => message.id !== placed) : current);
         } catch { /* the saved message appears at the next refresh */ }
-        return;
+        if (options?.teamRef) setPendingTeamPrompt(current => current?.proposalId === options.teamRef!.proposalId ? null : current);
+        return { status: "queued", runId };
       }
       if (options?.preflightSubmissionId && activeThreadChatIdRef.current === chatId) {
         setPreflightSteerReceipts(await api.invoke.preflightSteers(chatId).catch(() => []));
@@ -5721,8 +5836,10 @@ function OneSessionsShell() {
         }
       }
       if (options?.teamRef) {
-        setTeamPreflight(await api.oneTeamPreflight.getForChat(chatId).catch(() => null));
-        setPendingTeamPrompt(null);
+        setPendingTeamPrompt(current => current?.proposalId === options.teamRef!.proposalId ? null : current);
+        const currentProposal = await api.oneTeamPreflight.getForChat(chatId).catch(() => null);
+        if (activeThreadChatIdRef.current === chatId) setTeamPreflight(current =>
+          !current || current.proposalId === options.teamRef!.proposalId ? currentProposal : current);
       }
       // Instructions typed during preparation become steers of this run now.
       const pendingSteers = pendingSteersRef.current;
@@ -5754,9 +5871,10 @@ function OneSessionsShell() {
           ? "작업을 시작했어요. 화면 갱신이 늦어도 다시 보낼 필요는 없어요."
           : "The run started. The view may refresh late; there is no need to send it again.");
       }
+      return { status: "started", runId };
     } catch (cause) {
       admittingRunIdsRef.current.delete(runId);
-      try { if (await reconcileAcceptedAdmission(runId, cause)) return; }
+      try { const outcome = await reconcileAcceptedAdmission(runId, cause); if (outcome) return outcome; }
       catch { /* An unavailable receipt remains ambiguous, never rejected. */ }
       const controlFailure = goalAdmissionControlFailure(cause, runLocale === "ko");
       const chatBusyFailure = isChatBusyFailure(cause);
@@ -5775,7 +5893,7 @@ function OneSessionsShell() {
         setActionNotice(runLocale === "ko"
           ? "메시지를 보냈어요. 연결이 불안정해 진행 상황은 잠시 뒤 이 대화에서 확인할 수 있어요."
           : "Your message was sent. The connection is unsteady; progress will show in this conversation shortly.");
-        return;
+        return { status: "uncertain", runId };
       }
       clearOneUncertainAdmission(chatId, runId);
       if (controlFailure) {
@@ -5783,7 +5901,7 @@ function OneSessionsShell() {
       }
       if (activeThreadChatIdRef.current && activeThreadChatIdRef.current !== chatId) {
         if (!controlFailure && !isChatBusyFailure(cause)) requestOneOperationalRecovery("one-run-start", cause, { chatId });
-        return;
+        return { status: "no-dispatch", runId };
       }
       if (isChatBusyFailure(cause)) {
         const attachment = await api.invoke.attach(chatId).catch(() => null);
@@ -5833,13 +5951,10 @@ function OneSessionsShell() {
               ? "진행 중인 실행에 다시 연결했고, 새 지시를 저장했습니다. 현재 실행이 정리되면 이어서 반영합니다."
               : "Reconnected to the run in progress and saved the new instruction. It continues as soon as the current execution settles.")
             : (runLocale === "ko" ? "이미 실행 중인 작업에 다시 연결했습니다." : "Reconnected to the run already in progress."));
-          return;
+          return { status: steered ? "queued" : "no-dispatch", runId };
         }
       }
-      if (options?.teamRef) {
-        const failed = await api.oneTeamPreflight.failStart(options.teamRef).catch(() => null);
-        if (failed) setTeamPreflight(failed);
-      }
+      await settleRejectedTeamStart(runId);
       unsubscribeRunRef.current?.();
       unsubscribeRunRef.current = null;
       if (cancelNoticeRunIdRef.current === runId) {
@@ -5895,6 +6010,7 @@ function OneSessionsShell() {
         : "This message could not run. Check the model connection and usage limits, then send it again."));
       await refreshAll();
       if (!controlFailure && !isChatBusyFailure(cause)) requestOneOperationalRecovery("one-run-start", cause, { chatId });
+      return { status: "rejected", runId };
     } finally {
       if (attachedOneMemoryUseOnce) {
         // One Main consumes on accepted start. A rejected start is also a
@@ -5940,7 +6056,7 @@ function OneSessionsShell() {
       if (window.location.pathname.startsWith("/one")) {
         router.replace(`/one?task=${encodeURIComponent(proposal.binding.taskId)}`);
       }
-      await startRun(
+      const outcome = await startRun(
         proposal.binding.chatId,
         proposal.binding.taskId,
         proposal.binding.taskVersion,
@@ -5959,7 +6075,14 @@ function OneSessionsShell() {
           displayUserMessage: userAlreadyShown,
         },
       );
-      setTeamPreflight(await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => result.proposal));
+      if (!["started", "queued", "reconciled"].includes(outcome.status)) {
+        setPendingTeamPrompt(current => current?.proposalId === proposal.proposalId ? null : current);
+        if (outcome.status === "rejected") throw new Error("[agentlas:code=recovery_required] Reserved run was rejected before start");
+        return;
+      }
+      const currentProposal = await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => result.proposal);
+      if (activeThreadChatIdRef.current === proposal.binding.chatId) setTeamPreflight(current =>
+        !current || current.proposalId === proposal.proposalId ? currentProposal : current);
     } catch (cause) {
       const failures = (autoResolveFailuresRef.current.get(proposal.proposalId) ?? 0) + 1;
       autoResolveFailuresRef.current.set(proposal.proposalId, failures);
@@ -6056,7 +6179,7 @@ function OneSessionsShell() {
       if (window.location.pathname.startsWith("/one")) {
         router.replace(`/one?task=${encodeURIComponent(proposal.binding.taskId)}`);
       }
-      await startRun(
+      const outcome = await startRun(
         proposal.binding.chatId,
         proposal.binding.taskId,
         proposal.binding.taskVersion,
@@ -6075,7 +6198,14 @@ function OneSessionsShell() {
           displayUserMessage: true,
         },
       );
-      setTeamPreflight(await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => result.proposal));
+      if (!["started", "queued", "reconciled"].includes(outcome.status)) {
+        setPendingTeamPrompt(current => current?.proposalId === proposal.proposalId ? null : current);
+        if (outcome.status === "rejected") throw new Error("[agentlas:code=recovery_required] Reserved run was rejected before start");
+        return;
+      }
+      const currentProposal = await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => result.proposal);
+      if (activeThreadChatIdRef.current === proposal.binding.chatId) setTeamPreflight(current =>
+        !current || current.proposalId === proposal.proposalId ? currentProposal : current);
     } catch (cause) {
       const current = await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => null);
       if (current) setTeamPreflight(current);
@@ -6213,7 +6343,7 @@ function OneSessionsShell() {
           setComposer(current => current === text || current === rawReply ? "" : current);
           setMessageReply(current => current === submittedReply ? null : current);
           setMessages(current => current.some(message => message.id === `followup:${intent.intentId}`) ? current
-            : [...current, { id: `followup:${intent.intentId}`, role: "user", text: intent.userPrompt, createdAt: intent.createdAt }]);
+            : [...current, { id: `followup:${intent.intentId}`, intellectUiMessageId: `followup:${intent.intentId}`, role: "user", text: intent.userPrompt, createdAt: intent.createdAt }]);
           followupDeliveryNoticeRef.current = null;
           setActionNotice(null);
         }
@@ -7927,14 +8057,7 @@ function OneSessionsShell() {
         (suggestion.status === "open" && actionableConfirmations.length === 0 && !briefingSnapshot?.candidate)
       )) ?? null;
   }, [actionableConfirmations.length, briefingSnapshot?.candidate, oneSuggestions, selected]);
-  const selectedMemoryCandidate = useMemo(() => {
-    if (!selected || !oneMemory || selected.canonicalStatus !== "completed") return null;
-    return oneMemory.candidates.find((candidate) =>
-      candidate.status === "pending"
-      && candidate.source.provenanceStatus === "verified"
-      && candidate.source.sourceTaskId === selected.taskId
-    ) ?? null;
-  }, [oneMemory, selected]);
+  const selectedMemoryCandidate = null as import("@/lib/types").OneMemoryCandidate | null; // Historical candidates are audit, never approval prompts.
   const selectedValueClosure = useMemo(() => {
     if (!selected || !oneValueClosures) return null;
     const declaredRef = surface?.taskId === selected.taskId
@@ -8751,7 +8874,6 @@ function OneSessionsShell() {
               onConnectTool={() => { setSettingsSheet("mcp"); }}
               onBrowseTools={() => { setSettingsSheet("plugins"); }}
               onBrowseSource={(source) => router.push(source === "cloud" ? "/library/agents?tab=cloud" : "/marketplace")}
-              onOpenConcurrency={() => setSettingsSheet("concurrency")}
               conversationResults={oneOrgConversationResults}
               historyResults={oneOrgHistoryResults}
               onOpenConversation={openConversation}
@@ -8814,7 +8936,7 @@ function OneSessionsShell() {
           </> : <OneSettingsRail
             locale={appLocale}
             profileName={oneDisplayName}
-            pendingMemoryCount={oneMemory?.candidates.filter((candidate) => candidate.status === "pending").length ?? 0}
+            pendingMemoryCount={0}
             onBack={() => setRailMode("organisation")}
             onOpen={(setting) => {
               // Permission is a composer decision. Keep it anchored to the
@@ -9104,15 +9226,20 @@ function OneSessionsShell() {
                         runStatus={block.status}
                         interruptionCause={block.interruptionCause}
                         hostStopCause={block.hostStopCause}
-                        hostNotes={foldedHostNotes.byRun.get(block.runId)}
                         startedAt={Date.parse(block.startedAt)}
                         locale={appLocale}
                         workspacePath={workspacePath}
                       />
                       {activeTaskforce && <OneTaskforceConversation historyIdentity={`${workerChatId}:${block.runId}`} state={block.state} org={oneOrgState} locale={appLocale} />}
+                      {renderUiOnlyBubble(block.runId)}
                     </Fragment>
                   ))}
                   {seatThreadMessages.map((message, messageIndex) => {
+                    const sourceMessageId = message.continuationSourceId ?? message.id;
+                    const firstSourceSegment = !message.continuationSourceId
+                      || seatThreadMessages.find(item => (item.continuationSourceId ?? item.id) === sourceMessageId)?.id === message.id;
+                    const contentMessageId = message.continuationFirst && message.continuationUiMessageId
+                      ? message.continuationUiMessageId : message.intellectUiMessageId ?? message.id;
                     // Narrative output remains the primary final response.
                     // Only a genuinely visual/interactive surface replaces its
                     // duplicate Markdown payload.
@@ -9122,22 +9249,26 @@ function OneSessionsShell() {
                     // Surface's flattened narrative never stands in for it
                     // (measured: it dropped links/fences and rendered raw
                     // "[hello.txt]([local path]" and a stray ``` ).
-                    const visibleText = visibleOneMessageText(message);
+                    const visibleText = message.continuationText ?? visibleOneMessageText(message);
                     const displayedText = message.role === "user" ? displayMessageReply(visibleText, appLocale) : visibleText;
-                    // A quiet host status line folded into its run's work block draws nothing here.
-                    const foldedIntoWork = foldedHostNotes.messageIds.has(message.id);
+                    const markdownText = message.continuationMarkdownText ?? displayedText;
+                    const uiTurnId = message.role === "assistant" ? uiRunForMessage(message) : undefined;
+                    const ownedUi = firstSourceSegment ? inlineUiForReply(inlineUi, uiTurnId, message.text) : [];
+                    const hasVisibleContent = Boolean(markdownText) || ownedUi.length > 0;
+                    // A housekeeping host row draws nothing here.
+                    const foldedIntoWork = housekeepingMessageIds.has(sourceMessageId);
                     const messageHostNotice = normalizeChatHostNotice(message.role, message.hostNotice);
                     // Host status lines that report a failure or need the owner stay ordinary bubbles.
                     const drawsAsHostNotice = Boolean(messageHostNotice)
-                      && (messageHostNotice?.purpose !== "host-status" || isQuietHostStatus(messageHostNotice));
+                      && (messageHostNotice?.purpose !== "host-status" || isHousekeepingHostNotice(messageHostNotice));
                     // Codex draws the turn's work above the answer it produced:
                     // the live block sits right before the streaming reply,
                     // settled blocks right after the prompt that started them.
                     const liveBefore = liveWorkAnchorMessageId === message.id;
-                    const blocksAfter = threadWorkPlan.afterMessage.get(message.id) ?? [];
+                    const blocksAfter = message.continuationTail === false ? [] : threadWorkPlan.afterMessage.get(sourceMessageId) ?? [];
                     // 첨부만 있는 턴도 대화다 — 텍스트가 없다고 버리면 사진을 보낸 사실 자체가 사라진다.
                     const hasAttachments = (message.images?.length ?? 0) > 0 || (message.files?.length ?? 0) > 0;
-                    if ((foldedIntoWork || (!displayedText && !hasAttachments)) && !liveBefore && blocksAfter.length === 0) return null;
+                    if ((foldedIntoWork || (!hasVisibleContent && !hasAttachments)) && !liveBefore && blocksAfter.length === 0) return null;
                     const systemLabel = message.role === "system"
                       ? null
                       : message.role === "assistant" && !message.streaming && isInterruptedPartial(message.text)
@@ -9148,9 +9279,9 @@ function OneSessionsShell() {
                         : null;
                     const graphRequest = message.role === "user" ? oneGraphRequest(message.text) : null;
                     // 토론 방: 댓글은 달린 글 아래 스레드로 그린다(달린 글이 화면에 있을 때만).
-                    const discussionMeta = discussion.index.byId.get(message.id);
+                    const discussionMeta = discussion.index.byId.get(sourceMessageId);
                     if (isNestedComment(discussionMeta, visibleMessageIds)) return null;
-                    const discussionComments: ThreadComment[] = (discussion.index.comments.get(message.id) ?? []).flatMap((comment) => {
+                    const discussionComments: ThreadComment[] = (message.continuationTail === false ? [] : discussion.index.comments.get(sourceMessageId) ?? []).flatMap((comment) => {
                       const found = visibleMessagesById.get(comment.messageId);
                       return found ? [{ messageId: comment.messageId, text: found.text, createdAt: found.createdAt, timeLabel: messageTimeLabels.get(found.id), speakerAgentId: comment.speakerAgentId }] : [];
                     });
@@ -9166,7 +9297,7 @@ function OneSessionsShell() {
                         || Boolean(seatThreadMessages[messageIndex - 1]?.room) !== Boolean(message.room));
                     return (
                       <Fragment key={message.intellectUiMessageId ?? message.id}>
-                        {(departurePlan.beforeMessage.get(message.id) ?? []).map((notice) => (
+                        {(firstSourceSegment ? departurePlan.beforeMessage.get(sourceMessageId) ?? [] : []).map((notice) => (
                           <p key={notice.id} className={styles.departureNotice} data-one-departure="true">
                             <span aria-hidden="true">---------</span>
                             <span>{notice.label}</span>
@@ -9176,8 +9307,9 @@ function OneSessionsShell() {
                         {liveBefore && !preflightPrompt && <>
                           {activeTaskforce && <OneTaskforceConversation historyIdentity={`${workerChatId}:${activeActivityRunId ?? "pending"}`} state={renderedActivity} org={oneOrgState} locale={appLocale} />}
                           {liveWorkBlock}
+                          {renderUiOnlyBubble(activeActivityRunId)}
                         </>}
-                        {(displayedText || hasAttachments) && !foldedIntoWork && (drawsAsHostNotice
+                        {(hasVisibleContent || hasAttachments) && !foldedIntoWork && (drawsAsHostNotice
                           ? (message.hostNotice?.purpose === "automation-report" && !agiActionNoticeLine(message.hostNotice, message.text)
                             // 자동화 보고 = 원장이 센 행동 요약 + 로고, 원문은 펼침 안에(오너 2026-09-28).
                             ? <AutomationReportSummary runId={message.hostNotice.runId} text={message.text} locale={appLocale === "ko" ? "ko" : "en"}
@@ -9191,10 +9323,11 @@ function OneSessionsShell() {
                             <p className={styles.systemTurn} data-role="system" data-one-system-turn="true">{systemLabel}</p>
                           )
                           : (
-                          <MessageActions messageId={message.id} author={message.role === "user" ? (message.room ? "One" : appLocale === "ko" ? "나" : "You") : messageSpeaker.label} text={displayedText} locale={appLocale} onReply={reply => { setMessageReply(reply); composerInputRef.current?.focus(); }}>
+                          <MessageActions messageId={sourceMessageId} author={message.role === "user" ? (message.room ? "One" : appLocale === "ko" ? "나" : "You") : messageSpeaker.label} text={displayedText} locale={appLocale} onReply={reply => { setMessageReply(reply); composerInputRef.current?.focus(); }}>
                           <article
                             className={styles.message}
                             data-one-message-id={message.id}
+                            data-one-message-source-id={sourceMessageId}
                             data-role={message.role}
                             data-kind={isResultContinuationMessage(message) ? "continuity" : undefined}
                             data-taskforce={activeTaskforce ? "true" : undefined}
@@ -9238,7 +9371,9 @@ function OneSessionsShell() {
                                   ? (appLocale === "ko" ? "나" : "You")
                                   : (memberForAgent(oneOrgState?.members, replyParentMeta.speakerAgentId)?.displayName ?? assistantSpeaker.label)}
                                 snippet={replyParentMeta.text}
-                                onJump={() => document.querySelector(`[data-one-message-id="${replyParentMeta.id}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" })}
+                                onJump={() => [...document.querySelectorAll<HTMLElement>("[data-one-message-id]")]
+                                  .find(element => element.dataset.oneMessageSourceId === (replyParentMeta.continuationSourceId ?? replyParentMeta.id)
+                                    || element.dataset.oneMessageId === replyParentMeta.id)?.scrollIntoView({ block: "center", behavior: "smooth" })}
                               />
                             )}
                             {message.images && message.images.length > 0 && (
@@ -9252,9 +9387,9 @@ function OneSessionsShell() {
                             {message.chatFiles && message.chatFiles.length > 0 && (
                               <ChatFileCards files={message.chatFiles} locale={appLocale} onOpen={openOneChatFile} />
                             )}
-                            {(displayedText || (message.files?.some((file) => file.kind !== "image") ?? false)) && (
-                            <div className={styles.messageBody} data-doc={message.role === "assistant" && !message.streaming && !hasIntellectUiFence(displayedText) && isDocumentLikeText(message.text) ? "true" : undefined}
-                              data-one-visual-answer={message.role === "assistant" && (hasInlineVisualBlock(message.text) || hasIntellectUiFence(displayedText)) ? "true" : undefined}>
+                            {(hasVisibleContent || (message.files?.some((file) => file.kind !== "image") ?? false)) && (
+                            <div className={styles.messageBody} data-doc={message.role === "assistant" && !message.streaming && !hasIntellectUiFence(markdownText) && isDocumentLikeText(markdownText) ? "true" : undefined}
+                              data-one-visual-answer={message.role === "assistant" && (hasInlineVisualBlock(markdownText) || hasIntellectUiFence(markdownText)) ? "true" : undefined}>
                               {message.files && message.files.filter((f) => f.kind !== "image").length > 0 && (
                                 <div className={styles.messageFiles}>
                                   {message.files.filter((f) => f.kind !== "image").map((f, i) => (
@@ -9270,16 +9405,19 @@ function OneSessionsShell() {
                                 * 아직 한 줄인 글을 문서 카드로 세우면 빈 액자가 된다.
                                 */}
                               <GoalResultReport result={message.goalResult} locale={appLocale}>
-                              {displayedText && ((message.streaming || hasIntellectUiFence(displayedText))
-                                ? <StreamingMarkdown text={displayedText} messageId={message.intellectUiMessageId ?? message.id} onOpenLinkedFile={openOneLinkedFile} chatId={activeThreadChatId} onUiFollowup={prepareUiFollowup} uiActionsDisabled={busy || activeSeatDissolved || activeDirectSessionUnavailable} />
+                              {markdownText && ((message.streaming || hasIntellectUiFence(markdownText) || hasInlineVisualBlock(markdownText))
+                                ? <StreamingMarkdown text={markdownText} messageId={contentMessageId} onOpenLinkedFile={openOneLinkedFile} chatId={activeThreadChatId} onUiFollowup={prepareUiFollowup} uiActionsDisabled={busy || activeSeatDissolved || activeDirectSessionUnavailable} />
                                 : (() => {
-                                  const documentMark = readOneDocumentMark(displayedText);
+                                  const documentMark = message.continuationTail === false ? null : readOneDocumentMark(markdownText);
                                   return documentMark
-                                    ? <OneDocumentCard doc={documentMark} locale={appLocale} messageId={message.id} />
-                                    : <Markdown text={displayedText} messageId={message.intellectUiMessageId ?? message.id} onOpenLinkedFile={openOneLinkedFile} chatId={activeThreadChatId} onUiFollowup={prepareUiFollowup} uiActionsDisabled={busy || activeSeatDissolved || activeDirectSessionUnavailable} mentionNames={message.role === "assistant" ? roomMentionNames : undefined} />;
+                                    ? <OneDocumentCard doc={documentMark} locale={appLocale} messageId={sourceMessageId} />
+                                    : <Markdown text={markdownText} messageId={contentMessageId} onOpenLinkedFile={openOneLinkedFile} chatId={activeThreadChatId} onUiFollowup={prepareUiFollowup} uiActionsDisabled={busy || activeSeatDissolved || activeDirectSessionUnavailable} mentionNames={message.role === "assistant" ? roomMentionNames : undefined} />;
                                 })())}
-                              {message.role === "assistant" && !message.streaming && <LinkedLocalFiles text={message.text} chatId={activeThreadChatId} locale={appLocale} />}
+                              {message.role === "assistant" && !message.streaming && message.continuationTail !== false && <LinkedLocalFiles text={message.text} chatId={activeThreadChatId} locale={appLocale} />}
                               </GoalResultReport>
+                              <IntellectUiActions.Provider value={{ prepareFollowup: prepareUiFollowup, disabled: busy || activeSeatDissolved || activeDirectSessionUnavailable }}>
+                                <InlineUiInstances chatId={activeThreadChatId ?? undefined} instances={ownedUi} turnIds={uiTurnId ? [uiTurnId] : []} locale={appLocale === "ko" ? "ko" : "en"}/>
+                              </IntellectUiActions.Provider>
                             </div>
                             )}
                             {message.role === "user" && rejectedGoalDirection?.chatId === activeThreadChatId
@@ -9328,12 +9466,12 @@ function OneSessionsShell() {
                               runStatus={block.status}
                               interruptionCause={block.interruptionCause}
                               hostStopCause={block.hostStopCause}
-                              hostNotes={foldedHostNotes.byRun.get(block.runId)}
                               {...(message.role === "user" && message.text.trim()
                                 ? { onRetry: () => retryUnansweredTurn(message.text, block.state.model), retryDisabled: busy }
                                 : {})}
                             />
                             {activeTaskforce && <OneTaskforceConversation historyIdentity={`${workerChatId}:${block.runId}`} state={block.state} org={oneOrgState} locale={appLocale} />}
+                      {renderUiOnlyBubble(block.runId)}
                           </Fragment>
                         ))}
                       </Fragment>
@@ -9368,6 +9506,7 @@ function OneSessionsShell() {
                       )}
                       {activeTaskforce && <OneTaskforceConversation historyIdentity={`${workerChatId}:${activeActivityRunId ?? "pending"}`} state={renderedActivity} org={oneOrgState} locale={appLocale} />}
                       {liveWorkBlock}
+                          {renderUiOnlyBubble(activeActivityRunId)}
                     </>
                   )}
                   {/* 이 대화의 자동화가 숨은 세션에서 도는 동안의 실시간 줄 — 끝나면 보고 요약으로 바뀐다. */}
@@ -9758,6 +9897,7 @@ function OneSessionsShell() {
               <OneComposerControls
                 activeMenu={composerMenu}
                 locale={appLocale}
+                contextChatId={activeThreadChatId}
                 runtime={oneRuntime}
                 models={oneModelOptions}
                 agents={availableAgents.map((candidate) => {
@@ -10213,6 +10353,18 @@ function OneSessionsShell() {
                     title={appLocale === "ko" ? "Fast: 단일 패스와 최소 추론으로 빠르게 실행" : "Fast: run one direct pass with the lowest verified reasoning effort"}
                     aria-pressed={Boolean(turnOverrides.fastMode)}
                   ><IconBolt size={16} /></button>
+                  <button
+                    type="button"
+                    className={styles.composerQuickMode}
+                    data-one-composer-trigger="context"
+                    data-active={composerMenu === "context" ? "true" : "false"}
+                    aria-expanded={composerMenu === "context"}
+                    aria-haspopup="dialog"
+                    aria-controls={composerMenu === "context" ? "one-composer-popover" : undefined}
+                    aria-label={appLocale === "ko" ? "컨텍스트" : "Context"}
+                    title={appLocale === "ko" ? "컨텍스트" : "Context"}
+                    onClick={() => setComposerMenu((current) => current === "context" ? null : "context")}
+                  ><IconLayers size={16} /></button>
                 </div>
                 <div className={styles.composerActions}>
                   <OneVoiceInputHelp

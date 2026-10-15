@@ -23,6 +23,10 @@ import {
 let server: http.Server | null = null;
 let boundPort = 0;
 let token = "";
+let starting: Promise<number> | null = null;
+let pendingServer: http.Server | null = null;
+let pendingResolve: ((port: number) => void) | null = null;
+let generation = 0;
 
 function readBody(req: http.IncomingMessage, maxBytes = 256 * 1024): Promise<string> {
   return new Promise((resolve) => {
@@ -98,13 +102,15 @@ export function mcpToolIsMutating(input: {
     && AGENTLAS_BROWSER_READ_TOOLS.has(input.toolName);
   const nativeRead = input.catalogId === "cua-driver"
     && AGENTLAS_COMPUTER_USE_READ_TOOLS.has(input.toolName);
-  // agentlas-ui's only tool returns a constant schema text: no input, no effect.
+  // agentlas-ui's tools return constant reference text: no input, no effect.
   // (Literal ids, as for the other reads here: gates lift this function out of the file.)
-  const uiSchemaRead = input.catalogId === "agentlas-ui" && (input.toolName === "read_ui_schema" || input.toolName === "read_surface_protocol");
-  // agentlas-turn memory_note only queues a note for the Memory Curator in this run (Main re-checks the run capability and
+  const uiSchemaRead = input.catalogId === "agentlas-ui" && (input.toolName === "read_ui_schema" || input.toolName === "read_surface_protocol" || input.toolName === "read_automation_protocol");
+  // agentlas-turn memory_note only queues a note for the Memory Curator (ask_form a choice card for the person) in this run (Main re-checks the run capability and
   // a read-permission turn discards it): no outward effect, so it needs no write approval.
-  const turnNoteRead = input.catalogId === "agentlas-turn" && input.toolName === "memory_note";
-  return !(browserRead || nativeRead || uiSchemaRead || turnNoteRead || oneGraphReadPermissionCall(input));
+  const turnNoteRead = input.catalogId === "agentlas-turn" && (input.toolName === "memory_note" || input.toolName === "ask_form");
+  // harness_search / harness_describe are inert discovery (no install, login or run); harness_call stays gated.
+  const harnessRead = input.catalogId === "agentlas-turn" && (input.toolName === "harness_search" || input.toolName === "harness_describe");
+  return !(browserRead || nativeRead || uiSchemaRead || turnNoteRead || harnessRead || oneGraphReadPermissionCall(input));
 }
 
 /** Plan observation authority is minted from the actual host launcher, not a
@@ -214,14 +220,18 @@ export function allowLongLivedBridgeWires(srv: http.Server): http.Server {
 
 export function startMcpProxyApprovalServer(): Promise<number> {
   if (server && boundPort) return Promise.resolve(boundPort);
+  if (starting) return starting;
+  const startingGeneration = ++generation;
   token = randomUUID();
-  return new Promise((resolve) => {
+  const capabilityToken = token;
+  const pending = new Promise<number>((resolve) => {
+    pendingResolve = resolve;
     const srv = http.createServer((req, res) => {
       if (req.method !== "POST" || (!(req.url ?? "").startsWith("/approve") && !(req.url ?? "").startsWith("/bridge/"))) {
         res.writeHead(404).end("not found");
         return;
       }
-      if ((req.headers["authorization"] ?? "") !== `Bearer ${token}`) {
+      if ((req.headers["authorization"] ?? "") !== `Bearer ${capabilityToken}`) {
         res.writeHead(401).end("unauthorized");
         return;
       }
@@ -249,18 +259,30 @@ export function startMcpProxyApprovalServer(): Promise<number> {
         res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ decision, ...(decision === "deny" ? { reason: "policy-denied" } : {}) }));
       });
     });
+    pendingServer = srv;
 
     allowLongLivedBridgeWires(srv);
     srv.on("error", () => {
-      server = null;
-      boundPort = 0;
+      if (startingGeneration === generation) {
+        server = null;
+        boundPort = 0;
+        pendingServer = null;
+        pendingResolve = null;
+      }
       resolve(0);
     });
 
     srv.listen(0, "127.0.0.1", () => {
+      if (startingGeneration !== generation) {
+        try { srv.close(); } catch { /* stopped while binding */ }
+        resolve(0);
+        return;
+      }
       const addr = srv.address();
       boundPort = typeof addr === "object" && addr ? addr.port : 0;
       server = srv;
+      pendingServer = null;
+      pendingResolve = null;
       try {
         const infoPath = mcpProxyControlInfoPath();
         const infoDir = path.dirname(infoPath);
@@ -276,9 +298,20 @@ export function startMcpProxyApprovalServer(): Promise<number> {
       resolve(boundPort);
     });
   });
+  starting = pending;
+  void pending.finally(() => { if (starting === pending) starting = null; });
+  return pending;
 }
 
 export function stopMcpProxyApprovalServer(): void {
+  generation += 1;
+  pendingResolve?.(0);
+  pendingResolve = null;
+  if (pendingServer) {
+    try { pendingServer.close(); } catch { /* bind callback retires it */ }
+  }
+  pendingServer = null;
+  starting = null;
   stopMcpProxySessions();
   if (server) {
     try { server.close(); } catch { /* ignore */ }

@@ -1,3 +1,4 @@
+import { composeDeclaredPrompt, registerDeclaredPromptModule, type DeclaredPromptPart } from "../runtime/prompt-order";
 import { randomUUID } from "node:crypto";
 import Ajv from "ajv";
 import { sha256Value } from "../../shared/graph-execution-digest";
@@ -14,7 +15,7 @@ import { listInstalledServers } from "../mcp-tools/registry";
 import { GLOBAL_ORCHESTRATOR_SLUG } from "../architecture/manifest";
 import { callToolchainPreparation, type ToolchainPreparationProducer } from "./preparation";
 import { TOOLCHAIN_GENERALIZER_AGENT, TOOLCHAIN_GENERALIZATION_OUTPUT_SCHEMA, type ToolchainGeneralizationDecision } from "../system-agents/toolchain-generalizer";
-import { graphMcpEffectProblems } from "../workflow/mcp-call";
+import { graphMcpEffectProblems, graphMcpToolNeverReadOnly, inspectGraphMcpTools } from "../workflow/mcp-call";
 import { currentUiLocale } from "../ui-locale";
 import { addToolchainVersion, createToolchainAsset, getToolchainAsset, listToolchainAssets, matchingToolchainVersion, toolchainSchemaProblems } from "./assets";
 
@@ -136,6 +137,19 @@ function compileDecision(decision: Exclude<ToolchainGeneralizationDecision, { de
   return built.graph;
 }
 
+function generalizerContext(input: ToolchainGenerationInput, requested: ToolchainAsset | null, assets: ToolchainAsset[], installedProviders: unknown[], feedback: string): string {
+  // JSON members come from explicit producer fields; the canonical composer orders their declared lifetimes.
+  return "{" + composeDeclaredPrompt([
+        { id: "toolchains.generalizer.user.catalog", revision: 1, stability: "versioned-content", changeTriggers: ["skill-package", "plan-revision"], order: 0, text: '"catalog":' + JSON.stringify(catalogContext(assets)) },
+        { id: "toolchains.generalizer.user.implementation", revision: 1, stability: "versioned-content", changeTriggers: ["skill-package", "plan-revision", "task"], order: 10, text: '"requestedImplementation":' + JSON.stringify(requested?.versions.at(-1)?.implementation.snapshot.graph ?? null) },
+        { id: "toolchains.generalizer.user.locale", revision: 1, stability: "configuration", changeTriggers: ["locale"], order: 0, text: '"productLanguage":' + JSON.stringify(currentUiLocale()) },
+        { id: "toolchains.generalizer.user.tool-inventory", revision: 1, stability: "configuration", changeTriggers: ["plugin-inventory", "connector-inventory", "tool-grant"], order: 10, text: '"installedProviders":' + JSON.stringify(installedProviders) },
+        { id: "toolchains.generalizer.user.target", revision: 1, stability: "task-context", changeTriggers: ["task"], order: 0, text: '"requestedAssetId":' + JSON.stringify(input.toolchainId ?? null) },
+        { id: "toolchains.generalizer.user.request", revision: 1, stability: "turn-context", changeTriggers: ["owner-input"], order: 0, text: '"request":' + JSON.stringify(input.request) },
+        { id: "toolchains.generalizer.user.feedback", revision: 1, stability: "turn-context", changeTriggers: ["retrieval"], order: 10, text: '"feedback":' + JSON.stringify(feedback) },
+      ], ",") + "}";
+}
+
 /** Future authoring only: no task graph scan, no migration and no example effects. */
 export function generateToolchain(input: ToolchainGenerationInput, actor: GenerationActor = {}): Promise<ToolchainGenerationResult> {
   if (!input || typeof input.request !== "string" || !input.request.trim() || input.request.length > 8000
@@ -170,23 +184,37 @@ async function prepare(input: ToolchainGenerationInput, actor: GenerationActor, 
       if (input.toolchainId && !requested) throw new Error("toolchain_not_found");
       if (requested?.status === "withdrawn") throw new Error("toolchain_capability_withdrawn");
       const revision = catalogRevision(assets);
-      const context = JSON.stringify({ request: input.request, requestedAssetId: input.toolchainId ?? null,
-        productLanguage: currentUiLocale(), catalog: catalogContext(assets),
-        requestedImplementation: requested?.versions.at(-1)?.implementation.snapshot.graph ?? null,
-        installedProviders: listInstalledServers().filter(server => server.enabled).map(server => ({ catalogId: server.catalogId, name: server.name })),
-        feedback, outputSchema: TOOLCHAIN_GENERALIZATION_OUTPUT_SCHEMA });
+      // Native registry observation only: no tool call or authority is granted by this inventory.
+      const installedProviders = await Promise.all(listInstalledServers().filter(server => server.enabled).map(async server => {
+        const identity = { catalogId: server.catalogId, name: server.name };
+        const catalogId = server.catalogId;
+        if (!actor.callerChatId || !catalogId) return { ...identity, bindingStatus: "unavailable", reason: !catalogId ? "catalog_id_required" : "caller_chat_required", tools: [] };
+        try {
+          signal.throwIfAborted(); actor.assertCurrent?.();
+          const observed = await inspectGraphMcpTools({ chat: { id: actor.callerChatId }, catalogId, permission: "read", signal });
+          signal.throwIfAborted(); actor.assertCurrent?.();
+          return { ...identity, bindingStatus: "inspected", ...observed,
+            tools: observed.tools.map(tool => ({ ...tool,
+              effect: graphMcpToolNeverReadOnly(catalogId, tool.toolName) ? "mutation" : "read-or-argument-dependent" })) };
+        } catch {
+          signal.throwIfAborted(); actor.assertCurrent?.();
+          return { ...identity, bindingStatus: "unavailable", reason: "inventory_unavailable", tools: [] };
+        }
+      }));
+      const context = generalizerContext(input, requested ?? null, assets, installedProviders, feedback);
       if (Buffer.byteLength(context) > 1024 * 1024) throw new Error("toolchain_catalog_context_too_large");
       const detailed = await callToolchainPreparation({ purpose: "generalization",
         systemPrompt: TOOLCHAIN_GENERALIZER_AGENT.core, input: context,
+        outputSchema: { name: "agentlas_toolchain_generalization", schema: TOOLCHAIN_GENERALIZATION_OUTPUT_SCHEMA },
         producer: actor.preparationProducer, signal, deadlineAt: deadline });
       signal.throwIfAborted(); actor.assertCurrent?.();
       if (!detailed.text && detailed.failure?.kind === "refused" && detailed.failure.source === "marker"
         && detailed.failure.message === "judgment_orchestrator_pool_changed") {
-        feedback = "The configured orchestrator pool refreshed during runtime discovery. Re-read its current policy and the current catalog.";
+        feedback = "retry: orchestrator pool refreshed; re-read catalog";
         continue;
       }
       if (!detailed.text) throw new Error("toolchain_generalization_unavailable");
-      if (catalogRevision() !== revision) { feedback = "Catalog changed while you reviewed it. Compare the fresh complete catalog again before choosing an identity."; continue; }
+      if (catalogRevision() !== revision) { feedback = "retry: catalog changed; compare the fresh complete catalog"; continue; }
       let nativeCommitAttempted = false;
       try {
         const decision = parseDecision(detailed.text);

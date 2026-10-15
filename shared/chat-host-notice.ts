@@ -5,7 +5,7 @@ const HOST_STATUS_KINDS: readonly HostStatusKind[] = [
   "effect-checking", "effect-continuing", "wait-registered", "wait-not-scheduled", "cycle-verified", "goal-resuming",
   "effect-retrying", "goal-paused", "goal-closed", "runtime-kept", "needs-owner",
 ];
-/** Host status lines that need nothing from the owner — the screen folds them into the turn's quiet line. */
+/** Host status lines that need nothing from the owner: housekeeping, drawn on no surface (isHousekeepingHostNotice). */
 const QUIET_HOST_STATUSES: ReadonlySet<HostStatusKind> = new Set([
   "effect-checking", "effect-continuing", "wait-registered", "wait-not-scheduled", "cycle-verified", "goal-resuming",
   // Retry/pause lines the app resolves on its own: nothing for the owner to do, so never an ordinary chat bubble.
@@ -14,6 +14,21 @@ const QUIET_HOST_STATUSES: ReadonlySet<HostStatusKind> = new Set([
 
 export function isQuietHostStatus(notice: ChatHostNotice | undefined): notice is Extract<ChatHostNotice, { purpose: "host-status" }> {
   return notice?.purpose === "host-status" && QUIET_HOST_STATUSES.has(notice.status);
+}
+
+/**
+ * Housekeeping (native-harness 04 §2, notyet NH26): the host's own check / continue / wait / cycle / resume / retry /
+ * pause lines, its continuation requests, and One waking to review handed-off work. Decided by the typed notice the
+ * host wrote, never by wording. No surface draws these rows — Work, One, the split pane and the phone — not as a bubble,
+ * not as a quiet line, not folded into a work block. They stay in the ledger. Results, questions, consent and
+ * milestones stay visible: needs-owner, goal-closed, runtime-kept, teammate dispatch links/results, teammate joined,
+ * the brief handed to a teammate, automation and AGI reports.
+ */
+export function isHousekeepingHostNotice(notice: ChatHostNotice | undefined): boolean {
+  if (!notice) return false;
+  if (notice.purpose === "host-status") return QUIET_HOST_STATUSES.has(notice.status);
+  return notice.purpose === "goal-continuation" || notice.purpose === "update-resume"
+    || notice.purpose === "one-delegation-review" || notice.purpose === "one-checkin";
 }
 
 /** Short label for a host status line ("확인 중", "반영 안 됨 → 이어감", "예약 안 함"). */
@@ -40,8 +55,8 @@ export function hostStatusLabel(notice: Extract<ChatHostNotice, { purpose: "host
 
 /**
  * Host status lines are the one purpose kept on **assistant** rows: the host writes them as the
- * conversation's voice (so every surface still shows the sentence), and the marker lets One fold
- * the quiet ones. Every other purpose stays system-only.
+ * conversation's voice (the model reads them in later turns), and the marker lets every surface drop
+ * the housekeeping ones (isHousekeepingHostNotice). Every other purpose stays system-only.
  */
 export function normalizeChatHostNotice(role: string, value: unknown): ChatHostNotice | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;

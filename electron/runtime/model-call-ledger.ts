@@ -10,7 +10,9 @@
  * same request through and observes events; every failure to record is swallowed.
  *
  * Rules the stored payload obeys:
- *  - sizes, ids, enums and digests only. Prompt text is estimated locally and dropped, never stored.
+ *  - sizes, ids, enums and digests only. Prompt text is estimated locally and dropped from the payload; the
+ *    host-authored blocks' originals go to the content-addressed retention store keyed by the same digest
+ *    (context-originals.ts) so a past request can be read back exactly (notyet NH18).
  *  - unknown stays unknown. A block the adapter cannot see (a resumed CLI thread keeps its system prompt, tools and
  *    history inside the provider session) is listed in `unknownBlocks` and its key is absent; usage the provider did
  *    not report is absent with `usageStatus: "unknown"`. Neither is ever written as 0.
@@ -18,11 +20,15 @@
  *    Anthropic the adapters already add raw input + cache read + cache creation. `observedCachedInput` is the
  *    subset served from cache; it is never added to input again.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { estimateTextTokens } from "./token-estimate";
+import { estimateTextTokens, TOKEN_ESTIMATE_REVISION } from "./token-estimate";
+import { normalizeProviderUsage, type UsageDialect } from "../../shared/observed-usage";
+import { cacheLedgerFields, type CachePlan } from "./cache-planner";
 import { tryRecordRunEvent } from "../store/run-events";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
+import { withMemorySourceScope } from "../memory/source-custody";
+import { RETAINED_CONTEXT_BLOCKS, retainContextOriginal } from "./context-originals";
 
 export const MODEL_CALL_LEDGER_SCHEMA = "agentlas.model-call-ledger.v1";
 export const MODEL_CALL_LEDGER_EVENT_KIND = "model_call_ledger";
@@ -49,6 +55,25 @@ export interface PayloadLedger {
   attachmentsCount: number | null;
   /** Independent estimate of the whole serialized request, for a block-sum sanity check. */
   wholeEstimate: number | null;
+  /** G15: per-block content digest + UTF-8 bytes of what was transmitted. Digest and size only, never text.
+   * ownerText has no digest (short, guessable); an unseen block is simply absent. */
+  blockDigests?: Partial<Record<BlockName, { digest?: string; bytes: number }>>;
+}
+
+/** Truncated sha256 of a block's text plus its UTF-8 size. The text itself is dropped by the caller. */
+export function digestBlock(text: string | null | undefined, withDigest = true): { digest?: string; bytes: number } | undefined {
+  if (text == null) return undefined;
+  return { ...(withDigest && text ? { digest: createHash("sha256").update(text).digest("hex").slice(0, 16) } : {}),
+    bytes: Buffer.byteLength(text, "utf8") };
+}
+function digestsOf(entries: Partial<Record<BlockName, string | null | undefined>>): PayloadLedger["blockDigests"] {
+  const out: NonNullable<PayloadLedger["blockDigests"]> = {};
+  for (const [name, text] of Object.entries(entries) as Array<[BlockName, string | null | undefined]>) {
+    const value = digestBlock(text, name !== "ownerText");
+    if (value) out[name] = value;
+    if (value?.digest && RETAINED_CONTEXT_BLOCKS.includes(name)) retainContextOriginal(value.digest, text);
+  }
+  return out;
 }
 
 export interface ModelCallScope {
@@ -70,7 +95,7 @@ export function withModelCallScope<T>(scope: ModelCallScope, fn: () => T): T {
   const parent = scopes.getStore();
   const merged: ModelCallScope = { ...parent };
   for (const [key, value] of Object.entries(scope)) if (value !== undefined) (merged as Record<string, unknown>)[key] = value;
-  return scopes.run(merged, fn);
+  return withMemorySourceScope(scope, () => scopes.run(merged, fn));
 }
 export function currentModelCallScope(): ModelCallScope | undefined { return scopes.getStore(); }
 
@@ -146,6 +171,8 @@ export function ledgerFromReport(report: ReportedPayload): PayloadLedger {
     blocks, toolsCount: report.tools ? report.tools.count : null,
     attachmentsCount: report.attachments ? report.attachments.count : null,
     wholeEstimate: whole === null ? null : whole + (blocks.attachments ?? 0),
+    blockDigests: digestsOf({ instructions: report.instructions, tools: report.tools?.text, history: report.history,
+      hostContext: report.hostContext, ownerText: report.ownerText, toolExchanges: report.toolExchanges }),
   };
 }
 
@@ -202,6 +229,8 @@ export function ledgerFromApiBody(body: unknown, hints: {
   blocks.toolExchanges = tokens(toolExchangeText);
   blocks.attachments = imageCount * LEDGER_IMAGE_TOKEN_ESTIMATE;
   const given = hints.ledgerHints;
+  let instructionOriginal: string | null = systemParts.join("");
+  let hostOriginal: string | undefined;
   let placement: string | undefined;
   if (given) {
     placement = given.hostContextPlacement;
@@ -215,6 +244,24 @@ export function ledgerFromApiBody(body: unknown, hints: {
     blocks.instructions = Math.max(0, instructionTokens - hostInSystem);
     blocks.ownerText = Math.min(given.ownerTextTokens, Math.max(0, currentTokens - hostInUser));
     blocks.framing = Math.max(0, currentTokens - hostInUser - blocks.ownerText);
+    // Token counts alone cannot identify a source span. Accept custody only when the exact transient host text
+    // occurs once in its final JSON string content. Never retain a larger system block under a smaller item count.
+    if (!inUser && hostInSystem > 0) instructionOriginal = null;
+    const text = given.hostContextText;
+    if (typeof text === "string" && text.length > 0) {
+      const encoded = JSON.stringify(text).slice(1, -1);
+      const parent = inUser ? (current ? mediaFreeJson(current) : "") : systemParts.join("");
+      const at = parent.indexOf(encoded);
+      if (at >= 0 && parent.indexOf(encoded, at + encoded.length) < 0) {
+        hostOriginal = text;
+        blocks.hostContext = tokens(text);
+        if (!inUser) {
+          instructionOriginal = parent.slice(0, at) + parent.slice(at + encoded.length);
+          blocks.instructions = tokens(instructionOriginal);
+        }
+        blocks.framing = Math.max(0, currentTokens - (inUser ? blocks.hostContext : 0) - blocks.ownerText);
+      }
+    }
   } else {
     // No host split available (non-main calls): the whole current message is the owner-side text.
     blocks.instructions = instructionTokens;
@@ -226,6 +273,9 @@ export function ledgerFromApiBody(body: unknown, hints: {
     mode: hints.mode ?? "stateless", source: "adapter-final", ...(placement ? { placement } : {}),
     blocks, toolsCount: toolCount, attachmentsCount: imageCount,
     wholeEstimate: tokens(mediaFreeJson(body)) + blocks.attachments,
+    blockDigests: digestsOf({ instructions: instructionOriginal, hostContext: hostOriginal, tools: tools ? mediaFreeJson(tools) : "",
+      history: history.map(mediaFreeJson).join(""), toolExchanges: toolExchangeText,
+      ownerText: current ? mediaFreeJson(current) : "" }),
   };
 }
 
@@ -270,7 +320,10 @@ export function ledgerFromCliSent(input: {
   }
   return { mode: input.mode, source: "adapter-final", ...(input.placement ? { placement: input.placement } : {}),
     blocks, toolsCount: null, attachmentsCount: req.images?.length ?? 0,
-    wholeEstimate: sent + tokens(input.systemText) + (blocks.attachments ?? 0) };
+    wholeEstimate: sent + tokens(input.systemText) + (blocks.attachments ?? 0),
+    blockDigests: digestsOf({ instructions: input.systemText, ownerText: req.userPrompt,
+      ...(input.historyInSentText ? { history: req.history.map((row) => row.text).join("\n"),
+        hostContext: input.hostContextText ?? req.turnContext } : {}) }) };
 }
 
 /** Pre-adapter view of a request. A fallback only: wrappers added by the adapter are not in it. */
@@ -292,10 +345,16 @@ interface AttemptRecord {
   payload: PayloadLedger | null;
   usage: { inputTokens: number; outputTokens: number; cachedInputTokens?: number } | null;
   detail: { cacheCreationInputTokens?: number; rawInputTokens?: number } | null;
+  /** The cache plan the adapter applied to this attempt (cache-planner.ts); absent = the adapter reported none. */
+  cachePlan?: CachePlan | null;
 }
+/** G15: where the call went and what the provider says it ran. Host only; never a path, query or key. */
+export interface CallMeta { endpointHost?: string; reportedModel?: string }
 interface Collector {
+  meta?: CallMeta;
   attempts: AttemptRecord[];
   pending: PayloadLedger | null;
+  pendingCachePlan?: CachePlan | null;
 }
 const collectors = new AsyncLocalStorage<Collector>();
 
@@ -313,6 +372,41 @@ export function reportModelPayload(build: () => PayloadLedger): void {
     const last = collector.attempts.at(-1);
     if (last && last.payload === null && last.usage === null) last.payload = ledger;
     else collector.pending = ledger;
+  } catch { /* observability must not break a run */ }
+}
+
+/**
+ * Adapter hook: report the provider cache plan applied to the request about to be sent (same binding rules as
+ * reportModelPayload; no-op outside a wrapped runner; failures swallowed).
+ */
+export function reportCachePlan(plan: CachePlan | (() => CachePlan)): void {
+  try {
+    const collector = collectors.getStore();
+    if (!collector) return;
+    const value = typeof plan === "function" ? plan() : plan;
+    const last = collector.attempts.at(-1);
+    if (last && !last.cachePlan && last.usage === null) last.cachePlan = value;
+    else collector.pendingCachePlan = value;
+  } catch { /* observability must not break a run */ }
+}
+
+/** Host (and port) of a URL, nothing else: no scheme, userinfo, path, query or fragment. */
+export function endpointHostOf(url: string | null | undefined): string | undefined {
+  if (!url) return undefined;
+  try { const host = new URL(url).host; return host || undefined; } catch { return undefined; }
+}
+
+/**
+ * Adapter hook: report the endpoint the request goes to and/or the model the provider says it ran. Applies to every
+ * attempt of the wrapped call. No-op outside a wrapped runner; failures swallowed.
+ */
+export function reportModelEndpoint(meta: { url?: string | null; reportedModel?: string | null }): void {
+  try {
+    const collector = collectors.getStore();
+    if (!collector) return;
+    const host = endpointHostOf(meta.url);
+    const model = typeof meta.reportedModel === "string" && meta.reportedModel.trim() ? meta.reportedModel.trim().slice(0, 120) : undefined;
+    collector.meta = { ...collector.meta, ...(host ? { endpointHost: host } : {}), ...(model ? { reportedModel: model } : {}) };
   } catch { /* observability must not break a run */ }
 }
 
@@ -334,13 +428,50 @@ function inferRole(req: RunnerRequest, scoped: ModelCallRole | undefined): { rol
 const sanitizeCount = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 
+/** Provider wire dialect of a runtime identity (label only; the ledger stores already-logical counts). */
+export function usageDialectOf(identity: ModelCallIdentity): UsageDialect {
+  const kind = identity.kind; const backend = String(identity.backend ?? "").toLowerCase();
+  if (kind === "claude-code" || backend === "anthropic") return "anthropic";
+  if (backend === "google" || backend === "gemini" || kind === "antigravity") return "gemini";
+  if (kind === "ollama") return "ollama";
+  if (kind === "codex") return "openai-responses";
+  if (kind === "byok" || kind === "lmstudio" || kind === "mlx" || kind === "agentlas-local" || kind === "agentlas") return "openai-chat";
+  return "unknown";
+}
+
+/** G16: run the one normalizer over the attempt's usage. Anthropic parts (raw input + read + creation) are re-summed
+ * and cross-checked against the logical total the adapter reported; other shapes are validated as logical counts. */
+export function usageNormalizationFields(identity: ModelCallIdentity, usage: AttemptRecord["usage"], detail: AttemptRecord["detail"]): Record<string, unknown> {
+  if (!usage) return {};
+  const dialect = usageDialectOf(identity);
+  const rawParts = detail && sanitizeCount(detail.rawInputTokens) !== undefined && sanitizeCount(detail.cacheCreationInputTokens) !== undefined
+    && sanitizeCount(usage.cachedInputTokens) !== undefined;
+  const normalized = rawParts
+    ? normalizeProviderUsage("anthropic", { input_tokens: detail!.rawInputTokens, cache_read_input_tokens: usage.cachedInputTokens,
+      cache_creation_input_tokens: detail!.cacheCreationInputTokens, output_tokens: usage.outputTokens })
+    : normalizeProviderUsage("unknown", { inputTokens: usage.inputTokens, cachedInputTokens: usage.cachedInputTokens,
+      cacheCreationInputTokens: detail?.cacheCreationInputTokens, outputTokens: usage.outputTokens });
+  const out: Record<string, unknown> = { usageDialect: dialect };
+  if (normalized.rejected) { out.usageRejected = normalized.rejected; return out; }
+  if (normalized.totalInput !== undefined) out.usageTotalInput = normalized.totalInput;
+  if (normalized.cachedRead !== undefined) out.usageCachedRead = normalized.cachedRead;
+  if (normalized.cacheWrite !== undefined) out.usageCacheWrite = normalized.cacheWrite;
+  if (normalized.uncached !== undefined) out.usageUncached = normalized.uncached;
+  if (normalized.output !== undefined) out.usageOutput = normalized.output;
+  if (rawParts && normalized.totalInput !== usage.inputTokens) out.usageRejected = "total_mismatch";
+  return out;
+}
+
 /** Flatten one attempt into run-event payload fields (flat numbers/strings only; absent key = unknown). */
 export function ledgerEventPayload(input: {
   callRef: string; scopeCallRef?: string; attemptIndex: number; attemptCount: number; attemptId: string | null;
   role: ModelCallRole; roleSource: "scope" | "inferred"; phase?: string; userTurnId: string; scoped: boolean;
   identity: ModelCallIdentity; requestModel?: string | null; effort?: string | null;
   payload: PayloadLedger | null; usage: AttemptRecord["usage"]; detail: AttemptRecord["detail"];
+  cachePlan?: CachePlan | null; meta?: CallMeta;
   status: string; failureKind?: string; durationMs: number;
+  /** The context window the runtime itself reported for this session (RunnerResult.contextWindowTokens). */
+  contextWindowObserved?: number;
 }): Record<string, unknown> {
   const { payload } = input;
   const out: Record<string, unknown> = {
@@ -353,6 +484,10 @@ export function ledgerEventPayload(input: {
     ...(input.requestModel ? { model: input.requestModel } : {}), ...(input.effort ? { effort: input.effort } : {}),
     status: input.status, ...(input.failureKind ? { failureKind: input.failureKind } : {}), durationMs: input.durationMs,
     payloadSource: payload?.source ?? "unknown", mode: payload?.mode ?? "unknown",
+    tokenizerRevision: TOKEN_ESTIMATE_REVISION,
+    ...(input.meta?.endpointHost ? { endpointHost: input.meta.endpointHost } : {}),
+    ...(input.meta?.reportedModel ? { reportedModel: input.meta.reportedModel } : {}),
+    ...(input.contextWindowObserved ? { contextWindowObserved: input.contextWindowObserved } : {}),
   };
   if (payload) {
     if (payload.placement) out.placement = payload.placement;
@@ -370,6 +505,10 @@ export function ledgerEventPayload(input: {
     if (payload.toolsCount !== null) out.toolsCount = payload.toolsCount;
     if (payload.attachmentsCount !== null) out.attachmentsCount = payload.attachmentsCount;
     if (payload.wholeEstimate !== null) out.wholeRequestEstimate = payload.wholeEstimate;
+    for (const [name, value] of Object.entries(payload.blockDigests ?? {}) as Array<[BlockName, { digest?: string; bytes: number }]>) {
+      out[`${names[name].replace(/Tokens$/, "")}Bytes`] = value.bytes;
+      if (value.digest) out[`${names[name].replace(/Tokens$/, "")}Digest`] = value.digest;
+    }
   } else {
     out.unknownBlocks = BLOCK_NAMES.join(",");
   }
@@ -380,6 +519,9 @@ export function ledgerEventPayload(input: {
     out.observedOutput = usage.outputTokens;
     if (sanitizeCount(usage.cachedInputTokens) !== undefined) out.observedCachedInput = usage.cachedInputTokens;
   } else out.usageStatus = "unknown";
+  Object.assign(out, usageNormalizationFields(input.identity, input.usage, input.detail));
+  // Cache planner fields are flat and additive; observedCachedInput above is untouched (context-inspect reads it).
+  Object.assign(out, cacheLedgerFields(input.cachePlan, out.observedCachedInput));
   if (input.detail) {
     const write = sanitizeCount(input.detail.cacheCreationInputTokens);
     const raw = sanitizeCount(input.detail.rawInputTokens);
@@ -409,8 +551,10 @@ export function withModelCallLedger(runner: Runner, identity: ModelCallIdentity)
         ...events,
         onRuntimeAttemptStarted: (id) => {
           try {
-            collector.attempts.push({ id, startedAt: Date.now(), payload: collector.pending, usage: null, detail: null });
+            collector.attempts.push({ id, startedAt: Date.now(), payload: collector.pending, usage: null, detail: null,
+              cachePlan: collector.pendingCachePlan ?? null });
             collector.pending = null;
+            collector.pendingCachePlan = null;
           } catch { /* observability only */ }
           events.onRuntimeAttemptStarted?.(id);
         },
@@ -466,10 +610,13 @@ function emit(collector: Collector, input: {
   // Attempts the adapter announced; a runner that announced none still made (at most) one call we must account for.
   const attempts: AttemptRecord[] = collector.attempts.length
     ? collector.attempts
-    : [{ id: null, startedAt: input.startedAt, payload: collector.pending, usage: null, detail: null }];
+    : [{ id: null, startedAt: input.startedAt, payload: collector.pending, usage: null, detail: null, cachePlan: collector.pendingCachePlan ?? null }];
   // One announced attempt and a returned total: the returned total is that attempt's receipt.
   if (attempts.length === 1 && attempts[0].usage === null && result?.observedUsage) attempts[0].usage = { ...result.observedUsage };
   const fallbackPayload = ledgerFromRequest(req);
+  // The window the runtime reported (ACP usage_update size, a local server's loaded n_ctx when the adapter reports it).
+  const window = (result as { contextWindowTokens?: unknown } | undefined)?.contextWindowTokens;
+  const reportedWindow = typeof window === "number" && Number.isSafeInteger(window) && window > 0 ? window : undefined;
   attempts.forEach((attempt, index) => {
     // Only the first attempt may fall back to the pre-adapter request view; later rounds (tool loops, retries)
     // carry state the request does not show, so an unreported payload stays unknown instead of being guessed.
@@ -483,7 +630,9 @@ function emit(collector: Collector, input: {
         callRef, ...(scope?.callRef ? { scopeCallRef: scope.callRef } : {}), attemptIndex: index + 1, attemptCount: attempts.length,
         attemptId: attempt.id, role, roleSource: source, ...(scope?.phase ? { phase: scope.phase } : {}),
         userTurnId, scoped: Boolean(scope?.runId), identity, requestModel: req.model ?? identity.model ?? null, effort,
-        payload, usage: attempt.usage, detail: attempt.detail, status, ...(failureKind ? { failureKind } : {}),
+        payload, usage: attempt.usage, detail: attempt.detail, cachePlan: attempt.cachePlan ?? null, status, ...(failureKind ? { failureKind } : {}),
+        ...(collector.meta ? { meta: collector.meta } : {}),
+        ...(reportedWindow && index === attempts.length - 1 ? { contextWindowObserved: reportedWindow } : {}),
         durationMs: Math.max(0, Date.now() - attempt.startedAt),
       }),
     });

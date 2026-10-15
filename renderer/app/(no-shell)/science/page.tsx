@@ -1,15 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ProductExtensionStatus, ProductExtensionViewBounds, ProductExtensionViewStatus } from "@shared/product-extension";
-import { ProductModeMenu } from "@/components/one/ProductModeMenu";
 import { BrowserActionApprovalSheet } from "@/components/BrowserActionApprovalSheet";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
 import styles from "./ScienceHost.module.css";
-
-const HEADER_HEIGHT = 56;
 
 function elementBounds(element: HTMLElement): ProductExtensionViewBounds {
   const rect = element.getBoundingClientRect();
@@ -31,10 +28,6 @@ export default function ScienceHostPage() {
   const [extension, setExtension] = useState<ProductExtensionStatus | null>(null);
   const [view, setView] = useState<ProductExtensionViewStatus | null>(null);
   const [approvalHeight, setApprovalHeight] = useState(0);
-  // Native views paint above renderer overlays, so while the product menu is open the native Science view is moved
-  // below the list instead of the list being hidden under it. The surface shrinks, which the observer below turns into new native bounds.
-  const [menuInset, setMenuInset] = useState(0);
-  const handleMenuExtent = useCallback((bottom: number) => setMenuInset(bottom > 0 ? Math.max(0, bottom + 8 - HEADER_HEIGHT) : 0), []);
 
   useEffect(() => {
     const surface = surfaceRef.current;
@@ -129,15 +122,9 @@ export default function ScienceHostPage() {
       <div className={styles.page} style={approvalHeight > 0 ? {
         // Native WebContentsViews paint above renderer overlays. Reserve an
         // actual host-owned area; the surface observer updates native bounds.
-        gridTemplateRows: `56px minmax(0, 1fr) ${approvalHeight}px`,
+        gridTemplateRows: `minmax(0, 1fr) ${approvalHeight}px`,
       } : undefined}>
-        <header className={`${styles.header} titlebar-drag`}>
-          <div className="titlebar-nodrag"><ProductModeMenu current="science" darkText locale={ko ? "ko" : "en"} onMenuExtentChange={handleMenuExtent} closeOnWindowBlur /></div>
-          {/* No tagline and no status words: the header carries the mode menu only (owner 2026-10-05: cut the meaningless text). */}
-          <div className={styles.title} aria-hidden="true" />
-          <div className={styles.status} aria-hidden="true" />
-        </header>
-        <div ref={surfaceRef} className={styles.surface} style={menuInset > 0 ? { marginTop: menuInset } : undefined} data-menu-open={menuInset > 0 ? "true" : undefined}>
+        <div ref={surfaceRef} className={styles.surface}>
           {(unavailable || failed) && (
             <div className={styles.fallback}>
               <div className={styles.fallbackCard}>

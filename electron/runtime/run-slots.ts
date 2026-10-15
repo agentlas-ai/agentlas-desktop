@@ -10,7 +10,14 @@ import { getAgentConcurrency } from "../store/concurrency";
 import { currentRunPriority, type RunPriority } from "./run-priority";
 
 let inUse = 0;
+/** Slots held by owner runs (part of inUse). */
+let ownerInUse = 0;
 let maintenance = false;
+/**
+ * Slots an owner run may take above the limit while other work holds slots (native-harness notyet NH20): the owner's message
+ * starts now instead of waiting for automation, a Goal pass or a teammate to finish. Bounded: at most one extra child.
+ */
+export const OWNER_RESERVED_SLOTS = 1;
 /** Last moment a run held or released a slot (process start counts as activity). */
 let lastSlotActivityAt = Date.now();
 
@@ -29,16 +36,29 @@ interface Waiter {
  * 때만 승계한다. 각 대기열 안에서는 기존 FIFO 그대로다(기아 방지: background 도
  * interactive 가 없으면 즉시 승계하므로 무기한 배제는 없다 — 사람이 계속 누르는 동안
  * 밀리는 것이 정확히 의도다).
+ *
+ * 그 위에 owner 단(NH20): 오너가 보낸 메시지의 실행은 맨 앞에 서고, 다른 작업이 슬롯을 다 쥐고 있으면
+ * 예약 슬롯 하나(OWNER_RESERVED_SLOTS)로 바로 시작한다 — 순서만 앞서고 슬롯이 빌 때까지 기다리던 것이
+ * "재개를 눌러야 돈다"로 보였다.
  */
+const ownerQueue: Waiter[] = [];
 const interactiveQueue: Waiter[] = [];
 const backgroundQueue: Waiter[] = [];
 
 function queueFor(priority: RunPriority): Waiter[] {
-  return priority === "background" ? backgroundQueue : interactiveQueue;
+  return priority === "owner" ? ownerQueue : priority === "background" ? backgroundQueue : interactiveQueue;
 }
 
 function queuedCount(): number {
-  return interactiveQueue.length + backgroundQueue.length;
+  return ownerQueue.length + interactiveQueue.length + backgroundQueue.length;
+}
+
+/** Owner: any free slot, or the reserved one while other work holds slots. Others: a free slot only. */
+function canAdmit(priority: RunPriority): boolean {
+  if (maintenance) return false;
+  const limit = getAgentConcurrency();
+  if (inUse < limit) return true;
+  return priority === "owner" && inUse - ownerInUse > 0 && inUse < limit + OWNER_RESERVED_SLOTS;
 }
 
 function abortError(): Error {
@@ -47,12 +67,20 @@ function abortError(): Error {
   return e;
 }
 
-function makeRelease(): () => void {
+function admit(priority: RunPriority): () => void {
+  inUse += 1;
+  if (priority === "owner") ownerInUse += 1;
+  lastSlotActivityAt = Date.now();
+  return makeRelease(priority);
+}
+
+function makeRelease(priority: RunPriority): () => void {
   let released = false;
   return () => {
     if (released) return;
     released = true;
     inUse -= 1;
+    if (priority === "owner") ownerInUse -= 1;
     lastSlotActivityAt = Date.now();
     pump();
   };
@@ -62,17 +90,19 @@ function pump(): void {
   // CLI 파일을 교체하는 동안에는 새 자식 프로세스를 절대 스폰하지 않는다. 업데이트가
   // 끝나면 release가 pump를 다시 호출해 기존 FIFO 순서 그대로 이어간다.
   if (maintenance) return;
-  while (inUse < getAgentConcurrency() && queuedCount() > 0) {
-    // interactive 대기열을 먼저 비운다 — 사람이 기다리는 턴이 자동화보다 앞선다.
-    const w = interactiveQueue.length > 0 ? interactiveQueue.shift()! : backgroundQueue.shift()!;
+  for (;;) {
+    // owner first, then interactive (a person waiting) ahead of automation.
+    const priority: RunPriority | null = ownerQueue.length > 0 && canAdmit("owner") ? "owner"
+      : interactiveQueue.length > 0 && canAdmit("interactive") ? "interactive"
+        : backgroundQueue.length > 0 && interactiveQueue.length === 0 && canAdmit("background") ? "background" : null;
+    if (!priority) return;
+    const w = queueFor(priority).shift()!;
     if (w.signal && w.onAbort) w.signal.removeEventListener("abort", w.onAbort);
     if (w.signal?.aborted) {
       w.reject(abortError());
       continue;
     }
-    inUse += 1;
-    lastSlotActivityAt = Date.now();
-    w.resolve(makeRelease());
+    w.resolve(admit(priority));
   }
 }
 
@@ -88,12 +118,11 @@ export function acquireRunSlot(
   priority?: RunPriority,
 ): Promise<() => void> {
   if (signal?.aborted) return Promise.reject(abortError());
-  if (!maintenance && inUse < getAgentConcurrency()) {
-    inUse += 1;
-    lastSlotActivityAt = Date.now();
-    return Promise.resolve(makeRelease());
-  }
   const effectivePriority = priority ?? currentRunPriority();
+  // A free slot is taken at once unless someone ahead in priority is already waiting for it.
+  const ahead = effectivePriority === "owner" ? ownerQueue.length
+    : effectivePriority === "interactive" ? ownerQueue.length + interactiveQueue.length : queuedCount();
+  if (ahead === 0 && canAdmit(effectivePriority)) return Promise.resolve(admit(effectivePriority));
   const queue = queueFor(effectivePriority);
   return new Promise<() => void>((resolve, reject) => {
     const w: Waiter = { resolve, reject, signal };
@@ -151,4 +180,9 @@ export function runSlotStats(): { inUse: number; queued: number; limit: number; 
 /** 우선순위별 대기 인원 — 새 진단 표면(기존 runSlotStats 모양은 건드리지 않는다). */
 export function runSlotQueueBreakdown(): { interactive: number; background: number } {
   return { interactive: interactiveQueue.length, background: backgroundQueue.length };
+}
+
+/** The owner lane (NH20): owner messages waiting and owner runs holding a slot (the latter may exceed the limit by one). */
+export function runSlotOwnerLane(): { queued: number; inUse: number } {
+  return { queued: ownerQueue.length, inUse: ownerInUse };
 }

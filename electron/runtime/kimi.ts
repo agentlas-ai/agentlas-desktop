@@ -8,10 +8,12 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import { createHash } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliToolSilenceWindowMs, RuntimeTurnUnsettledError } from "./runner";
+import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, runtimeProtocolUnrecognizedFailure, cliToolSilenceWindowMs, RuntimeTurnUnsettledError } from "./runner";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
+import { schemaFallbackPromptPart } from "../../shared/runtime-capabilities";
+import { composeDeclaredPrompt } from "./prompt-order";
 import {
-  CLI_HISTORY_CONTEXT_TOKENS,
+  cliHistoryContextTokens,
   composeResumeTurnPrompt,
   renderConversationContext,
   renderGapContext,
@@ -199,6 +201,8 @@ function systemFingerprint(req: RunnerRequest): string {
 }
 
 function buildPrompt(req: RunnerRequest): string {
+  // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.main.kimi.prompt).
+  // The request-scoped contract is a wrapper supplement, outside the agent slot and before final authority.
   const system = wrapSystemPrompt(
     req.systemPrompt,
     req.locale,
@@ -214,11 +218,13 @@ function buildPrompt(req: RunnerRequest): string {
       undefined,
     req.sciencePromptProfile,
     req.judgmentOnly === true ? "host-judgment" : undefined,
+    req.outputSchema ? [schemaFallbackPromptPart(req.outputSchema.schema)] : undefined,
+      req.systemPromptComposition,
   );
   const turnContext = req.turnContext?.trim();
   const parts = [`[SYSTEM]\n${system}${turnContext ? `\n\n${turnContext}` : ""}`, ""];
   if (req.history.length > 0) {
-    const { block } = renderConversationContext(req.history, req.locale, CLI_HISTORY_CONTEXT_TOKENS);
+    const { block } = renderConversationContext(req.history, req.locale, cliHistoryContextTokens(KIND, req.model));
     parts.push(block, "");
   }
   parts.push(tStatus(req.locale, "histThisSection"), req.userPrompt);
@@ -243,6 +249,21 @@ interface KimiProcessResult {
   sessionId: string | null;
   /** Set when the host ended the child for total silence (the limit it applied, in ms). */
   silentLimitMs?: number;
+  /** Stream-json lines of a shape this adapter understands (assistant text/tool_calls, tool result, resume hint). */
+  recognizedEvents: number;
+}
+
+/**
+ * True when a Kimi print stream-json line is a protocol event this adapter understands: the session resume hint, an
+ * assistant message with string/array content or a tool_calls array, or a tool result message. Wrong-shape JSON is not.
+ */
+export function kimiEventRecognized(event: unknown): boolean {
+  if (!event || typeof event !== "object" || Array.isArray(event)) return false;
+  const e = event as Record<string, unknown>;
+  if (e.role === "meta") return e.type === "session.resume_hint" && typeof e.session_id === "string";
+  if (e.role === "assistant") return typeof e.content === "string" || Array.isArray(e.content) || Array.isArray(e.tool_calls);
+  if (e.role === "tool") return typeof e.content === "string" || Array.isArray(e.content) || typeof e.tool_call_id === "string";
+  return false;
 }
 
 function runKimiProcess(
@@ -258,7 +279,7 @@ function runKimiProcess(
         stdio: ["ignore", "pipe", "pipe"],
         cwd: req.cwd ?? agentRunCwd(),
         // Sessions go to the product mirror of the CLI's config folder, never the person's own (cli-product-homes.ts).
-        env: withForeignCliContext("kimi", req.env ?? process.env, selectionFor(req.agentId)),
+        env: withForeignCliContext("kimi", req.env ?? process.env, selectionFor(req.agentId, undefined, req.chatId)),
         ...detachedSpawnOpts(),
       });
     } catch (error) {
@@ -287,12 +308,14 @@ function runKimiProcess(
     let text = "";
     let stderr = "";
     let sessionId: string | null = null;
+    let recognizedEvents = 0;
     const toolCalls = new Map<string, { name: string; args: string }>();
 
     const consume = (line: string) => {
       if (!line.trim()) return;
       try {
         const event = JSON.parse(line) as Record<string, unknown>;
+        if (kimiEventRecognized(event)) recognizedEvents += 1;
         if (event.role === "meta" && event.type === "session.resume_hint" && typeof event.session_id === "string") {
           sessionId = event.session_id;
           return;
@@ -347,7 +370,7 @@ function runKimiProcess(
       stopHeartbeat();
       req.signal?.removeEventListener("abort", onAbort);
       if (buffer.trim()) consume(buffer);
-      resolve({ code, text: text.trim(), stderr: stderr.trim(), sessionId,
+      resolve({ code, text: text.trim(), stderr: stderr.trim(), sessionId, recognizedEvents,
         ...(silence.tripped && !req.signal?.aborted ? { silentLimitMs: silence.trippedWith?.limitMs ?? silenceLimitMs } : {}) });
     });
   });
@@ -404,7 +427,11 @@ export const runKimi: Runner = async (req, events): Promise<RunnerResult> => {
   const prompt = resumeSessionId
     ? composeResumeTurnPrompt(
         runReq.userPrompt,
-        [gapContext, runReq.turnContext ?? ""].filter(Boolean).join("\n\n"),
+        composeDeclaredPrompt([
+          ...(runReq.outputSchema ? [{ ...schemaFallbackPromptPart(runReq.outputSchema.schema), text: schemaFallbackPromptPart(runReq.outputSchema.schema).text?.trim() ?? "" }] : []),
+          { id: "transport.kimi.resume.gap", revision: 1, stability: "turn-context", changeTriggers: ["owner-input", "checkpoint", "task"], order: 10, text: gapContext },
+          { id: "transport.kimi.resume.host-turn", revision: 1, stability: "turn-context", changeTriggers: ["owner-input", "checkpoint", "task"], order: 20, text: runReq.turnContext ?? "" },
+        ], "\n\n"),
         runReq.locale,
       )
     : buildPrompt(runReq);
@@ -439,11 +466,18 @@ export const runKimi: Runner = async (req, events): Promise<RunnerResult> => {
   events.onStatus(resumeSessionId
     ? (runReq.locale === "ko" ? "Kimi Code 대화를 이어가는 중..." : "Resuming the Kimi Code conversation...")
     : tStatus(runReq.locale, "callingBackend", { backend: runReq.backendLabel }));
+  if (runReq.outputSchema) events.onStatus(tStatus(runReq.locale, "schemaInPromptOnly"));
   const result = await runKimiProcess(bin, args, runReq, events);
   if (runReq.signal?.aborted) throw new Error(tStatus(runReq.locale, "aborted"));
   if (result.silentLimitMs !== undefined) {
     // The host ended a child that stayed silent: a typed timeout, never an exit-code guess.
     return { text: result.text, ownerControlTerminal: "uncertain", failure: runtimeSilentTimeoutFailure("kimi", result.silentLimitMs),
+      ...(result.sessionId ? { sessionId: result.sessionId } : {}) };
+  }
+  if (result.code === 0 && result.recognizedEvents === 0 && !result.text) {
+    // Exit 0 with not one recognized stream-json event: a typed failure, never the "empty response" placeholder.
+    const failure = runtimeProtocolUnrecognizedFailure(KIND, result.stderr);
+    return { text: failure.message, ownerControlTerminal: "uncertain", failure,
       ...(result.sessionId ? { sessionId: result.sessionId } : {}) };
   }
   if (result.code === 0) {

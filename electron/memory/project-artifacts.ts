@@ -12,6 +12,9 @@ import {
   type MemoryScope,
 } from "../architecture/manifest";
 import { looksSecret } from "../../shared/secret-patterns";
+import { observeProductSource, type MemorySourceRef } from "./source-catalogue";
+import { getDb as getProductDb } from "../store/db";
+import { getMemoryStoreInfo, type MemoryStoreInfo } from "./database";
 
 /** Project-manager handoff notes live below the private project memory root. */
 export const PROJECT_PM_DIR = "pm";
@@ -879,6 +882,7 @@ export interface ProjectPmReadLimits {
 }
 
 export interface ProjectPmTextFile {
+  sourceRef?: MemorySourceRef;
   relativePath: string;
   bytes: number;
   sha256: string;
@@ -1072,6 +1076,8 @@ export function readProjectPmTextFiles(
   const pmRoot = path.join(memoryRoot, PROJECT_PM_DIR);
   const pmStat = assertRealDirectory(identity, pmRoot, { label: "The PM memory root" });
 
+  let sourceOwner: MemoryStoreInfo | null = null;
+  try { sourceOwner = getMemoryStoreInfo(); } catch { /* Preserve admitted manual reads. */ }
   const files: ProjectPmTextFile[] = [];
   let totalBytes = 0;
   for (const requested of normalized) {
@@ -1098,6 +1104,31 @@ export function readProjectPmTextFiles(
     fail("race-detected", "The PM memory roots changed during the read.");
   }
   assertProjectRootIdentity(identity);
+  // This successful reader is the PM caller used by buildMemoryContext and
+  // ontology. Its original root/bounds stay authoritative; metadata never
+  // turns a directory, path or UUID into an activated-folder capability.
+  if (sourceOwner) try {
+    const current = getMemoryStoreInfo();
+    const { verifyActivatedFolderIdentity } = require("../architecture/activation") as typeof import("../architecture/activation");
+    if (current.ownerNamespace === sourceOwner.ownerNamespace && current.path === sourceOwner.path
+      && current.revocationEpoch === sourceOwner.revocationEpoch && verifyActivatedFolderIdentity(identity.root)) {
+      for (const file of files) {
+        const lane = getMemoryStoreInfo();
+        if (lane.ownerNamespace !== sourceOwner.ownerNamespace || lane.path !== sourceOwner.path
+          || lane.revocationEpoch !== sourceOwner.revocationEpoch || !verifyActivatedFolderIdentity(identity.root)) break;
+        // Reuse the exact digest/UTF-8 byte count already produced by this
+        // stable original reader; no second body hash or content copy.
+        const relativePath = `pm/${file.relativePath}`;
+        const sourceRef = observeProductSource(getProductDb(), { actorId: null, visibilityDomain: "activated-project",
+          logicalKey: JSON.stringify([identity.root, relativePath]), sourceKind: "manual-file",
+          readerContract: "desktop.activated-project-file.v1", writerContract: "manual-original",
+          schemaVersion: "agentlas.project-memory-text.v1", sourceRevision: file.sha256,
+          address: { path: identity.root, ref: relativePath }, rangeUnit: "utf8", rangeEnd: file.bytes,
+          contentDigest: file.sha256 });
+        if (sourceRef) file.sourceRef = sourceRef;
+      }
+    }
+  } catch { /* Optional source catalogue failure cannot replace manual content. */ }
   return files;
 }
 

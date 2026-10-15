@@ -23,6 +23,9 @@
 //   OS  other non-ASCII symbols (dashes, arrows, box drawing)     0.55 each
 //   E   astral code points (emoji)                                2.5  each
 
+/** Bump whenever the coefficients below change; recorded in every model-call ledger event (G15). */
+export const TOKEN_ESTIMATE_REVISION = "o200k-linear-2026-10-11";
+
 const W = 1.0, LX = 0.19, D = 0.45, P = 0.46, N = 2.0, H = 0.87, C = 0.75, K = 0.8, OL = 0.3, OS = 0.55, E = 2.5;
 
 /** Best estimate of o200k_base tokens (unbiased; see the calibration record). */

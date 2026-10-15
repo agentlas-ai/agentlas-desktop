@@ -102,6 +102,8 @@ async function defaultNative():Promise<GmailPersonalNativePorts> {
 /** Calls only after explicit current native consent. No OAuth creation, API grant, connector install or ready status is inferred. */
 export async function createInstalledGmailPersonalSource(options:GmailPersonalSourceOptions):Promise<{port:PersonalDataSourcePort;assertConsent(target:PersonalDataTarget):string;native:GmailPersonalNativePorts}> {
   const target=personalDataTarget(options.target),connectorId=options.connectorId??"gmail",before=JSON.parse(JSON.stringify(consent(options,target))) as GmailCurrentReadConsent;
+  // A History descriptor/decoder cannot supply the missing native query-scoped semantic authority.
+  if(before.allowHistory)throw personalDataError("personal_data_gmail_history_semantic_supplier_required");
   options.consent.assertRead({target,serverId:options.serverId,toolName:"inventory"});
   const native=options.native??await defaultNative(),server=native.getServer(options.serverId);
   if(!server?.enabled||server.configurationValid===false)throw new PersonalDataConnectorError("disconnected");

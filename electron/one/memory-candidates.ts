@@ -26,7 +26,7 @@ import {
   type UpdateOneMemoryAssetInput,
   type UseOneMemoryCandidateOnceInput,
 } from "../../shared/one-memory";
-import { getDb } from "../store/db";
+import { readLegacyOneState, replaceLegacyOneState, isLegacyOneAssetActive, buildLegacyOneAutomaticContext, legacyOneMemoryText } from "../memory/one-legacy";
 import { getChat } from "../store/chats";
 import { getInvocationRunReceipt } from "../store/run-events";
 import { findCanonicalTaskForChat, getCanonicalTask } from "../store/tasks";
@@ -35,8 +35,13 @@ import {
   type RecordOneDomainEventInput,
 } from "./domain-events";
 import { getOneValueClosureState } from "./value-closure";
+import { recordAutomaticMemoryTurn } from "../memory/automatic-curator";
+import { assertMemoryTicketSource } from "../memory/source-custody";
+import { getMemoryDb } from "../memory/database";
 
 export const ONE_MEMORY_META_KEY = "agentlas.one.memory.v1";
+
+function retiredApproval(): never { throw Object.assign(new Error("one_memory_approval_retired"), { code: "one_memory_approval_retired" }); }
 
 const SCOPES = new Set<OneMemoryScope>(["personal", "project", "agent", "team"]);
 const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/;
@@ -410,9 +415,8 @@ function exactUseOnceGrant(
 
 function oneMemoryUseOnceContext(grant: EphemeralOneMemoryUseOnceGrant): string {
   return [
-    "[One-time Memory — explicitly confirmed for this invocation only]",
+    "[One-time Memory — confirmed, this invocation only; not durable]",
     `- [${grant.scope}${grant.scopeRef ? `:${grant.scopeRef}` : ""}] ${grant.content}`,
-    "This instruction expires after this accepted invocation start, is not durable Memory, and is not evidence of improvement.",
   ].join("\n");
 }
 
@@ -496,19 +500,7 @@ function parseState(raw: string): OneMemoryState {
 }
 
 function readOrCreateState(): { raw: string; state: OneMemoryState } {
-  const db = getDb();
-  let row = db.prepare("SELECT value FROM meta WHERE key = ? LIMIT 1").get(ONE_MEMORY_META_KEY) as
-    | { value: string }
-    | undefined;
-  if (!row) {
-    const candidate = JSON.stringify(initialState());
-    db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)").run(ONE_MEMORY_META_KEY, candidate);
-    row = db.prepare("SELECT value FROM meta WHERE key = ? LIMIT 1").get(ONE_MEMORY_META_KEY) as
-      | { value: string }
-      | undefined;
-  }
-  if (!row) throw new Error("Could not initialize One Memory state");
-  return { raw: row.value, state: parseState(row.value) };
+  return readLegacyOneState(parseState, initialState);
 }
 
 function mutateState<T>(
@@ -523,10 +515,7 @@ function mutateState<T>(
   const outcome = update(current.state, nextTimestamp(current.state.version));
   if (!isOneMemoryState(outcome.state)) throw new Error("One Memory mutation violated the closed storage contract");
   if (outcome.state !== current.state) {
-    const result = getDb()
-      .prepare("UPDATE meta SET value = ? WHERE key = ? AND value = ?")
-      .run(JSON.stringify(outcome.state), ONE_MEMORY_META_KEY, current.raw);
-    if (result.changes !== 1) throw new Error("One Memory state changed concurrently; reload and try again");
+    replaceLegacyOneState(current.raw, current.state, outcome.state);
     for (const event of outcome.events ?? []) tryRecordOneDomainEvent(event);
   }
   return {
@@ -627,77 +616,7 @@ function proposeOneMemoryCandidateInternal(
   input: ProposeOneMemoryCandidateInput,
   allowLegacy: boolean,
 ): OneMemoryMutationResult<OneMemoryCandidate> {
-  if (!isRecord(input)) throw new TypeError("Invalid Memory candidate proposal");
-  assertOnlyKeys(input, [
-    "expectedStoreVersion", "normalizedPreview", "scope", "scopeRef", "source", "suppressionKey", "reviewAfter",
-  ], "Memory candidate proposal");
-  assertVersion(input.expectedStoreVersion, "expectedStoreVersion");
-  const normalizedPreview = cleanMemoryText(input.normalizedPreview, "normalizedPreview");
-  const scope = normalizeScope(input.scope, input.scopeRef);
-  const source = normalizeSource(input.source, allowLegacy);
-  assertSafeId(input.suppressionKey, "suppressionKey");
-
-  return mutateState(input.expectedStoreVersion, (current, timestamp) => {
-    const nowMs = Date.parse(timestamp.iso);
-    const activeSuppressions = current.suppressions.filter((item) => Date.parse(item.until) > nowMs);
-    const suppressed = activeSuppressions.find((item) =>
-      item.suppressionKey === input.suppressionKey && item.scope === scope.scope && item.scopeRef === scope.scopeRef);
-    if (suppressed) throw new Error(`Memory candidate suppressed until ${suppressed.until}`);
-    if (current.candidates.some((item) =>
-      item.status === "pending" && item.suppressionKey === input.suppressionKey &&
-      item.scope === scope.scope && item.scopeRef === scope.scopeRef)) {
-      throw new Error("An equivalent Memory candidate is already pending");
-    }
-    if (current.candidates.length >= 512) throw new Error("One Memory candidate limit reached");
-
-    const reviewAfterMs = input.reviewAfter ? Date.parse(input.reviewAfter) : nowMs + DEFAULT_REVIEW_MS;
-    if (!Number.isFinite(reviewAfterMs) || reviewAfterMs < nowMs + MIN_REVIEW_MS || reviewAfterMs > nowMs + MAX_REVIEW_MS) {
-      throw new TypeError("reviewAfter must be 1-730 days in the future");
-    }
-    const candidate: OneMemoryCandidate = {
-      id: opaqueId("memory_candidate"),
-      version: timestamp.version,
-      normalizedPreview,
-      scope: scope.scope,
-      scopeRef: scope.scopeRef,
-      source,
-      suppressionKey: input.suppressionKey,
-      status: "pending",
-      resolution: null,
-      memoryId: null,
-      reviewAfter: new Date(reviewAfterMs).toISOString(),
-      cooldownUntil: null,
-      createdAt: timestamp.iso,
-      updatedAt: timestamp.iso,
-      resolvedAt: null,
-    };
-    const state = stateWithTimestamp(current, timestamp, {
-      candidates: [...current.candidates, candidate],
-      suppressions: activeSuppressions,
-    });
-    return {
-      state,
-      value: candidate,
-      events: [{
-        eventType: "memory.candidate_created",
-        occurredAt: candidate.createdAt,
-        actor: source.basis === "inferred" ? "one" : "user",
-        entityId: candidate.id,
-        taskId: source.sourceTaskId,
-        version: candidate.version,
-        visibility: domainVisibility(candidate.scope),
-        entries: [
-          { name: "candidateId", value: candidate.id },
-          // The review store owns candidate text until resolution. The append-
-          // only domain ledger keeps only a content-free lifecycle statement so
-          // a later Use once tombstone can truthfully remove the original.
-          { name: "normalizedPreview", value: "Candidate content awaiting explicit review" },
-          { name: "scope", value: candidate.scope },
-          { name: "sourceRef", value: source.sourceRef },
-        ],
-      }],
-    };
-  });
+  return retiredApproval();
 }
 
 export function proposeOneMemoryCandidate(
@@ -718,43 +637,32 @@ export interface ProposeUnverifiedOneMemoryCandidateFromRunInput {
 }
 
 /**
- * Main-only bridge between a completed run and explicit result acceptance.
- * The review candidate is durable, but its source is deliberately ineligible
- * for save/reuse/proof until acceptance seals the exact Task/run/Closure tuple.
+ * Main-only completed-source bridge to automatic curation. The original host
+ * source capability is required; no approval candidate or legacy asset is created.
  */
 export function proposeUnverifiedOneMemoryCandidateFromRun(
   input: ProposeUnverifiedOneMemoryCandidateFromRunInput,
-): OneMemoryMutationResult<OneMemoryCandidate> {
-  if (!isRecord(input)) throw new TypeError("Invalid unverified Memory candidate proposal");
-  assertOnlyKeys(input, [
-    "expectedStoreVersion", "normalizedPreview", "scope", "scopeRef", "sourceTaskId",
-    "sourceRunId", "basis", "suppressionKey",
-  ], "Unverified Memory candidate proposal");
-  assertSafeId(input.sourceTaskId, "sourceTaskId");
-  assertSafeId(input.sourceRunId, "sourceRunId");
-  const task = getCanonicalTask(input.sourceTaskId);
-  const run = getInvocationRunReceipt(input.sourceRunId);
-  if (!task || !task.originChatId || !run || run.status !== "completed" || run.chatId !== task.originChatId) {
-    throw new Error("Unverified Memory candidate is not bound to the exact completed run");
-  }
-  return proposeOneMemoryCandidateInternal({
-    expectedStoreVersion: input.expectedStoreVersion,
-    normalizedPreview: input.normalizedPreview,
-    scope: input.scope,
-    ...(input.scopeRef === undefined ? {} : { scopeRef: input.scopeRef }),
-    source: {
-      provenanceStatus: "legacy_unversioned",
-      sourceTaskId: task.id,
-      sourceTaskVersion: null,
-      sourceRunId: null,
-      sourceValueClosureId: null,
-      sourceValueClosureVersion: null,
-      sourceRef: `user_instruction:${run.runId}`,
-      evidenceRefs: [`run:${run.runId}`],
-      basis: input.basis,
-    },
-    suppressionKey: input.suppressionKey,
-  }, true);
+): null {
+  const task = getCanonicalTask(input.sourceTaskId), run = getInvocationRunReceipt(input.sourceRunId);
+  if (!task?.originChatId || !run || run.runId !== input.sourceRunId || run.status !== "completed" || run.chatId !== task.originChatId)
+    throw new Error("one_memory_source_unavailable");
+  const chat = getChat(task.originChatId);
+  if (!chat?.agentId) throw new Error("one_memory_source_unavailable");
+  const context = { runId: run.runId, chatId: task.originChatId, agentId: chat.agentId,
+    projectId: task.projectId ?? null, projectPath: null, hostOutcome: "unknown" as const };
+  // Guard the original foreground source before looking up or creating a Ticket.
+  // A completed run-id or renderer payload is not a source capability.
+  assertMemoryTicketSource(context);
+  const db = getMemoryDb();
+  // Any original Ticket owns its processing policy, including read-only,
+  // failed, or pending/retry work. The old producer must never reopen it.
+  const existing = db.prepare(`SELECT 1 FROM memory_tickets
+    WHERE run_id=? AND chat_id=? AND agent_id=? LIMIT 1`)
+    .get(context.runId, context.chatId, context.agentId);
+  if (existing) return null;
+  const observation = cleanMemoryText(input.normalizedPreview, "Memory observation");
+  recordAutomaticMemoryTurn({ context, turnSummary: observation, replyText: observation });
+  return null;
 }
 
 export interface SealOneMemoryCandidateProvenanceInput {
@@ -769,209 +677,33 @@ export interface SealOneMemoryCandidateProvenanceInput {
 export function sealOneMemoryCandidateProvenance(
   input: SealOneMemoryCandidateProvenanceInput,
 ): OneMemoryMutationResult<OneMemoryCandidate[]> | null {
-  if (!isRecord(input)) throw new TypeError("Invalid Memory provenance seal");
-  assertOnlyKeys(input, [
-    "sourceTaskId", "sourceTaskVersion", "sourceRunId", "sourceValueClosureId", "sourceValueClosureVersion",
-  ], "Memory provenance seal");
-  const verified = normalizeSource({
-    provenanceStatus: "verified",
-    sourceTaskId: input.sourceTaskId,
-    sourceTaskVersion: input.sourceTaskVersion,
-    sourceRunId: input.sourceRunId,
-    sourceValueClosureId: input.sourceValueClosureId,
-    sourceValueClosureVersion: input.sourceValueClosureVersion,
-    sourceRef: `user_instruction:${input.sourceRunId}`,
-    evidenceRefs: [`run:${input.sourceRunId}`],
-    basis: "explicit_user_statement",
-  });
-  const state = getOneMemoryState();
-  const matches = state.candidates.filter((candidate) =>
-    candidate.status === "pending"
-    && candidate.source.provenanceStatus === "legacy_unversioned"
-    && candidate.source.sourceTaskId === verified.sourceTaskId
-    && candidate.source.sourceRef === verified.sourceRef
-    && candidate.source.evidenceRefs.includes(`run:${input.sourceRunId}`),
-  );
-  if (matches.length === 0) return null;
-  return mutateState(state.version, (current, timestamp) => {
-    const matchIds = new Set(matches.map((item) => item.id));
-    const sealed: OneMemoryCandidate[] = [];
-    const candidates = current.candidates.map((candidate) => {
-      if (
-        !matchIds.has(candidate.id)
-        || candidate.status !== "pending"
-        || candidate.source.provenanceStatus !== "legacy_unversioned"
-        || candidate.source.sourceTaskId !== verified.sourceTaskId
-        || candidate.source.sourceRef !== verified.sourceRef
-      ) return candidate;
-      const updated: OneMemoryCandidate = {
-        ...candidate,
-        version: timestamp.version,
-        source: {
-          ...verified,
-          basis: candidate.source.basis,
-          sourceRef: candidate.source.sourceRef,
-          evidenceRefs: [...candidate.source.evidenceRefs],
-        },
-        updatedAt: timestamp.iso,
-      };
-      sealed.push(updated);
-      return updated;
-    });
-    if (sealed.length !== matches.length) {
-      throw new Error("Memory candidate changed before provenance could be sealed");
-    }
-    return {
-      state: stateWithTimestamp(current, timestamp, { candidates }),
-      value: sealed,
-    };
-  });
+  // Historical approval provenance stays as recorded; acceptance no longer opens a writer.
+  return null;
 }
 
 function saveCandidate(
   input: SaveOneMemoryCandidateInput | EditAndSaveOneMemoryCandidateInput,
   edited: boolean,
 ): OneMemoryMutationResult<OneMemorySavedResult> {
-  return mutateState(input.expectedStoreVersion, (current, timestamp) => {
-    const candidate = pendingCandidate(current, input.candidateId, input.expectedCandidateVersion);
-    if (candidate.source.provenanceStatus !== "verified") {
-      throw new Error("Accept this Task result before saving its Memory candidate");
-    }
-    assertVerifiedSourceProvenance(candidate.source);
-    if (current.memories.length >= 512) throw new Error("One Memory asset limit reached");
-    const editedInput = edited ? input as EditAndSaveOneMemoryCandidateInput : null;
-    const content = editedInput ? cleanMemoryText(editedInput.content, "Memory content") : candidate.normalizedPreview;
-    const scope = editedInput
-      ? normalizeScope(editedInput.scope ?? candidate.scope, "scopeRef" in editedInput ? editedInput.scopeRef : candidate.scopeRef)
-      : { scope: candidate.scope, scopeRef: candidate.scopeRef };
-    const memory: OneMemoryAsset = {
-      id: opaqueId("memory"),
-      version: timestamp.version,
-      content,
-      scope: scope.scope,
-      scopeRef: scope.scopeRef,
-      sourceCandidateId: candidate.id,
-      provenanceStatus: candidate.source.provenanceStatus,
-      sourceTaskId: candidate.source.sourceTaskId,
-      sourceTaskVersion: candidate.source.sourceTaskVersion,
-      sourceRunId: candidate.source.sourceRunId,
-      sourceValueClosureId: candidate.source.sourceValueClosureId,
-      sourceValueClosureVersion: candidate.source.sourceValueClosureVersion,
-      sourceRef: candidate.source.sourceRef,
-      evidenceRefs: [...candidate.source.evidenceRefs],
-      approvalSource: "explicit_user",
-      approvedAt: timestamp.iso,
-      enabled: true,
-      createdAt: timestamp.iso,
-      updatedAt: timestamp.iso,
-      disabledAt: null,
-    };
-    const resolved: OneMemoryCandidate = {
-      ...candidate,
-      version: timestamp.version,
-      normalizedPreview: content,
-      scope: scope.scope,
-      scopeRef: scope.scopeRef,
-      status: "saved",
-      resolution: "saved",
-      memoryId: memory.id,
-      updatedAt: timestamp.iso,
-      resolvedAt: timestamp.iso,
-    };
-    return {
-      state: stateWithTimestamp(current, timestamp, {
-        candidates: current.candidates.map((item) => item.id === candidate.id ? resolved : item),
-        memories: [...current.memories, memory],
-      }),
-      value: { candidate: resolved, memory },
-      events: [resolvedEvent(resolved, edited ? "edited_and_saved" : "saved", memory.id)],
-    };
-  });
+  return retiredApproval();
 }
 
 export function saveOneMemoryCandidate(
   input: SaveOneMemoryCandidateInput,
 ): OneMemoryMutationResult<OneMemorySavedResult> {
-  if (!isRecord(input)) throw new TypeError("Invalid Memory candidate save request");
-  assertOnlyKeys(input, ["expectedStoreVersion", "candidateId", "expectedCandidateVersion", "approvedByUser"], "Memory candidate save request");
-  assertVersion(input.expectedStoreVersion, "expectedStoreVersion");
-  if (input.approvedByUser !== true) throw new Error("Saving Memory requires explicit user approval");
-  return saveCandidate(input, false);
+  return retiredApproval();
 }
 
 export function editAndSaveOneMemoryCandidate(
   input: EditAndSaveOneMemoryCandidateInput,
 ): OneMemoryMutationResult<OneMemorySavedResult> {
-  if (!isRecord(input)) throw new TypeError("Invalid Memory candidate edit-and-save request");
-  assertOnlyKeys(input, [
-    "expectedStoreVersion", "candidateId", "expectedCandidateVersion", "approvedByUser", "content", "scope", "scopeRef",
-  ], "Memory candidate edit-and-save request");
-  assertVersion(input.expectedStoreVersion, "expectedStoreVersion");
-  if (input.approvedByUser !== true) throw new Error("Editing and saving Memory requires explicit user approval");
-  cleanMemoryText(input.content, "Memory content");
-  return saveCandidate(input, true);
+  return retiredApproval();
 }
 
 export function useOneMemoryCandidateOnce(
   input: UseOneMemoryCandidateOnceInput,
 ): OneMemoryMutationResult<OneMemoryUseOnceReceipt> {
-  if (!isRecord(input)) throw new TypeError("Invalid Memory use-once request");
-  assertOnlyKeys(input, [
-    "expectedStoreVersion", "candidateId", "expectedCandidateVersion", "target", "confirmedByUser",
-  ], "Memory use-once request");
-  assertVersion(input.expectedStoreVersion, "expectedStoreVersion");
-  if (input.confirmedByUser !== true) throw new Error("Use once requires explicit user confirmation");
-  const binding = normalizeUseOnceTarget(input.target);
-  let grant: EphemeralOneMemoryUseOnceGrant | null = null;
-  const result = mutateState(input.expectedStoreVersion, (current, timestamp) => {
-    const candidate = pendingCandidate(current, input.candidateId, input.expectedCandidateVersion);
-    assertMemoryScopeMatchesBinding(candidate.scope, candidate.scopeRef, binding);
-    const resolved: OneMemoryCandidate = {
-      ...candidate,
-      version: timestamp.version,
-      // The original is held only by Main's process-local grant below. The
-      // renderer receipt and durable candidate both remain content-free.
-      normalizedPreview: "Used once; not saved as long-term Memory.",
-      status: "used_once",
-      resolution: "used_once",
-      updatedAt: timestamp.iso,
-      resolvedAt: timestamp.iso,
-    };
-    const receipt: OneMemoryUseOnceReceipt = {
-      contractVersion: ONE_MEMORY_CONTRACT_VERSION,
-      receiptId: opaqueId("memory_once_receipt"),
-      issuedAt: timestamp.iso,
-      expiresAt: new Date(timestamp.version + USE_ONCE_RECEIPT_MS).toISOString(),
-      persisted: false,
-    };
-    grant = {
-      receiptId: receipt.receiptId,
-      claimToken: randomUUID(),
-      candidateId: candidate.id,
-      candidateVersion: resolved.version,
-      sourceTaskId: candidate.source.sourceTaskId,
-      content: candidate.normalizedPreview,
-      scope: candidate.scope,
-      scopeRef: candidate.scopeRef,
-      binding,
-      issuedAt: receipt.issuedAt,
-      expiresAt: receipt.expiresAt,
-      evictionTimer: null,
-    };
-    return {
-      state: stateWithTimestamp(current, timestamp, {
-        candidates: current.candidates.map((item) => item.id === candidate.id ? resolved : item),
-      }),
-      value: receipt,
-      events: [resolvedEvent(resolved, "used_once")],
-    };
-  });
-  const issuedGrant = grant as EphemeralOneMemoryUseOnceGrant | null;
-  if (!issuedGrant) throw new Error("Memory use-once grant was not created");
-  cleanupExpiredUseOnceGrants();
-  oneMemoryUseOnceGrants.set(issuedGrant.receiptId, issuedGrant);
-  scheduleUseOnceGrantEviction(issuedGrant);
-  return result;
+  return retiredApproval();
 }
 
 /**
@@ -1109,52 +841,7 @@ export function deleteOneMemoryCandidate(
 export function updateOneMemoryAsset(
   input: UpdateOneMemoryAssetInput,
 ): OneMemoryMutationResult<OneMemoryAsset> {
-  if (!isRecord(input)) throw new TypeError("Invalid Memory update request");
-  assertOnlyKeys(input, [
-    "expectedStoreVersion", "memoryId", "expectedMemoryVersion", "content", "scope", "scopeRef", "approvedByUser",
-  ], "Memory update request");
-  assertVersion(input.expectedStoreVersion, "expectedStoreVersion");
-  if (input.approvedByUser !== true) throw new Error("Editing Memory requires explicit user approval");
-  if (!("content" in input) && !("scope" in input) && !("scopeRef" in input)) throw new TypeError("Memory update is empty");
-  return mutateState(input.expectedStoreVersion, (current, timestamp) => {
-    const memory = exactMemory(current, input.memoryId, input.expectedMemoryVersion);
-    const content = "content" in input ? cleanMemoryText(input.content, "Memory content") : memory.content;
-    const scope = normalizeScope(input.scope ?? memory.scope, "scopeRef" in input ? input.scopeRef : memory.scopeRef);
-    const changedFields = [
-      ...(content !== memory.content ? ["content"] : []),
-      ...(scope.scope !== memory.scope ? ["scope"] : []),
-      ...(scope.scopeRef !== memory.scopeRef ? ["scopeRef"] : []),
-    ];
-    if (changedFields.length === 0) return { state: current, value: memory };
-    const updated: OneMemoryAsset = {
-      ...memory,
-      version: timestamp.version,
-      content,
-      scope: scope.scope,
-      scopeRef: scope.scopeRef,
-      approvalSource: "explicit_user",
-      approvedAt: timestamp.iso,
-      updatedAt: timestamp.iso,
-    };
-    return {
-      state: stateWithTimestamp(current, timestamp, {
-        memories: current.memories.map((item) => item.id === memory.id ? updated : item),
-      }),
-      value: updated,
-      events: [{
-        eventType: "memory.updated",
-        occurredAt: updated.updatedAt,
-        actor: "user",
-        entityId: updated.id,
-        version: updated.version,
-        visibility: domainVisibility(updated.scope),
-        entries: [
-          { name: "memoryId", value: updated.id },
-          { name: "changedFields", value: changedFields },
-        ],
-      }],
-    };
-  });
+  return retiredApproval();
 }
 
 export function setOneMemoryAssetEnabled(
@@ -1238,7 +925,7 @@ export function selectApprovedOneMemoryAssets(
   state: OneMemoryState = getOneMemoryState(),
 ): OneMemoryAsset[] {
   if (!isOneMemoryState(state)) throw new TypeError("Invalid One Memory state");
-  return state.memories.filter((memory) => memory.enabled).filter((memory) => {
+  return state.memories.filter((memory) => memory.enabled && isLegacyOneAssetActive(memory)).filter((memory) => {
     if (memory.scope === "personal") return true;
     if (memory.scope === "project") return Boolean(scope.projectId) && memory.scopeRef === scope.projectId;
     if (memory.scope === "agent") return Boolean(scope.agentId) && memory.scopeRef === scope.agentId;
@@ -1251,11 +938,11 @@ export function buildApprovedOneMemoryContext(
   state: OneMemoryState = getOneMemoryState(),
 ): string {
   const memories = selectApprovedOneMemoryAssets(scope, state);
-  if (memories.length === 0) return ""; // a host-known empty is not stated
+  const automatic = buildLegacyOneAutomaticContext(scope);
+  if (memories.length === 0) return automatic;
   return [
-    "[Approved One Memory — explicit user approvals only]",
+    "[Approved One Memory]",
     ...memories.map((memory) =>
-      `- [${memory.scope}${memory.scopeRef ? `:${memory.scopeRef}` : ""}] ${memory.content} (source ${memory.sourceRef})`),
-    "These entries are context, not evidence that a later result improved.",
-  ].join("\n");
+      `- [${memory.scope}${memory.scopeRef ? `:${memory.scopeRef}` : ""}] ${legacyOneMemoryText(memory)} (source ${memory.sourceRef})`),
+  ].concat(automatic ? [automatic] : []).join("\n");
 }

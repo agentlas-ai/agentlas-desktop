@@ -607,7 +607,7 @@ export function applyLiveHubBookmarkValidation(
       });
     }
   });
-  tx();
+  tx.immediate();
 }
 
 export function listingForHubBookmarkMutation(row: HubBookmarkStoreRow): MarketplaceListing {

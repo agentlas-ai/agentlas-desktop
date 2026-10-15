@@ -26,6 +26,8 @@ interface Props {
   onSelect?: (id: string | null) => void;
   /** What a memory says, for the hover card. The map snapshot itself never carries content. */
   describe?: (id: string) => { label: string; text: string } | null;
+  /** Desktop actor views must not label private unprojected memory as One shared. */
+  unassignedProjectLabel?: string;
 }
 
 /** Kind colours, muted so a crowded map stays calm. */
@@ -109,7 +111,7 @@ function clusterCenters(nodes: OneMemoryMapPlacedNode[]): Map<string, { x: numbe
   }]));
 }
 
-function OneMemoryMapComponent({ snapshot, locale, height, colorByKind = false, selectedId, onSelect, describe }: Props) {
+function OneMemoryMapComponent({ snapshot, locale, height, colorByKind = false, selectedId, onSelect, describe, unassignedProjectLabel }: Props) {
   const copy = COPY[locale];
   const rootRef = useRef<HTMLElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -301,7 +303,7 @@ function OneMemoryMapComponent({ snapshot, locale, height, colorByKind = false, 
         <div id="one-memory-map-tooltip" className={styles.tooltip} style={tooltipStyle} role="status" aria-live="polite">
           {described ? <div className={styles.described}><strong>{described.label}</strong><p>{described.text}</p></div> : <dl>
             <div><dt>{copy.kind}</dt><dd>{activeNode.kind}</dd></div>
-            <div><dt>{copy.project}</dt><dd>{activeNode.projectSlug ?? copy.shared}</dd></div>
+            <div><dt>{copy.project}</dt><dd>{activeNode.projectSlug ?? unassignedProjectLabel ?? copy.shared}</dd></div>
             <div><dt>{copy.scope}</dt><dd>One / {activeNode.scope}</dd></div>
             <div><dt>{copy.relations}</dt><dd>{activeNode.relationCount}</dd></div>
             <div><dt>{copy.evidence}</dt><dd>{activeNode.evidenceCount}</dd></div>

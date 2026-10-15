@@ -254,6 +254,10 @@ export function windowsProcessIdentityMatches(
 // 128 maximum-width decimal PIDs produce a script under 4 KiB.
 export const WINDOWS_CIM_PID_CHUNK_SIZE = 128;
 
+/** PowerShell 은 stdout 을 파이프로 돌리면 콘솔 OEM 코드페이지(한국어 Windows = CP949)로 쓴다. Node 는
+ * UTF-8 로 읽으므로 한국어 사용자 이름이 든 실행 경로·명령줄이 깨져 프로세스 신원 판정이 어긋났다. */
+const WINDOWS_POWERSHELL_UTF8_OUTPUT = "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)";
+
 function normalizedWindowsProcessIds(pids: readonly number[]): number[] {
   return [...new Set(pids.filter((pid) => Number.isInteger(pid) && pid > 0))];
 }
@@ -261,6 +265,7 @@ function normalizedWindowsProcessIds(pids: readonly number[]): number[] {
 function buildWindowsProcessIdentityScriptForChunk(pids: readonly number[]): string {
   const filter = pids.map((pid) => `ProcessId = ${pid}`).join(" OR ");
   return [
+    WINDOWS_POWERSHELL_UTF8_OUTPUT,
     `$items = @(Get-CimInstance Win32_Process -Filter \"${filter}\" | ForEach-Object {`,
     "  $created = $_.CreationDate.ToUniversalTime().ToString('o')",
     "  [pscustomobject]@{ processId = [int]$_.ProcessId; executablePath = [string]$_.ExecutablePath; commandLine = [string]$_.CommandLine; creationTime = $created }",

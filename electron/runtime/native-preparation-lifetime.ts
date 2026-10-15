@@ -68,6 +68,13 @@ export function createNativePreparationLifetime(owner: object): NativePreparatio
   states.set(lifetime, state); ownerScopes.set(owner, lifetime);
   return Object.freeze(lifetime);
 }
+/** Pure observation of the genuine lifetime's original source owner and drain. */
+export function assertClosedNativePreparationLifetime(lifetime: NativePreparationLifetime, owner: object): void {
+  const state = stateFor(lifetime);
+  if (state.owner !== owner) denied("native_preparation_owner_mismatch");
+  if (!state.closed) denied("native_preparation_admission_open");
+  if (state.pending.size !== 0) denied("native_preparation_not_quiescent");
+}
 export function withNativePreparationLifetime<T>(lifetime: NativePreparationLifetime, action: () => T): T {
   const state = stateFor(lifetime), inherited = current();
   if (state.closed) denied("native_preparation_admission_closed");

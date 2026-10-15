@@ -31,15 +31,16 @@ export function createNativeGuiPublicBridge(policy: Readonly<{ maxRetainedBytes:
   // authoritative snapshot arrives or the chat settles.
   let staleChatIds = new Set<string>(), generation = 0;
   /** Rebindable: a new generation replaces a CLOSED one; a live channel is never replaced. */
-  function bind(actualChannel: Channel, actualIdentity: NativeAuthenticatedIdentity): void {
+  function bind(actualChannel: Channel, actualIdentity: NativeAuthenticatedIdentity, expectedStream?: string): void {
     if (nativeGuiChannelIdentity(actualChannel) !== actualIdentity) throw new Error("native_gui_public_original_channel_required");
     if (channel && channel !== actualChannel && nativeGuiChannelIdentity(channel) !== undefined) throw new Error("native_gui_public_original_channel_required");
-    if (channel === actualChannel) throw new Error("native_gui_public_original_channel_required");
+    if (channel === actualChannel && expectedStream === undefined) throw new Error("native_gui_public_original_channel_required");
+    if (expectedStream !== undefined && !/^[a-f0-9]{64}$/.test(expectedStream)) throw new Error("native_gui_public_stream_required");
     if (receiver) { for (const chatId of receiver.activeChatIds()) staleChatIds.add(chatId); receiver.dispose(); }
     const mine = ++generation;
     const live = () => mine === generation;
     channel = actualChannel; identity = actualIdentity;
-    receiver = createNativeInvocationPublicReceiver({ identity: actualIdentity,
+    receiver = createNativeInvocationPublicReceiver({ expectedStream, identity: actualIdentity,
       getIdentity: () => channel === actualChannel ? nativeGuiChannelIdentity(actualChannel) ?? null : null,
       maxRetainedBytes: policy.maxRetainedBytes,
       read: input => actualChannel.dispatch("native.attach", nativePublicReadOperation(input)),
@@ -75,7 +76,7 @@ export function createNativeGuiPublicBridge(policy: Readonly<{ maxRetainedBytes:
   }
   /** The new generation's authoritative active-chat snapshot (recovery refresh) resolves stale chats it no longer lists. */
   function reconcileStale(activeChatIds: readonly string[]): void { for (const chatId of [...staleChatIds]) if (!activeChatIds.includes(chatId)) staleChatIds.delete(chatId); }
-  return Object.freeze({ bind, reconcileStale, accept(method: string, params: unknown, fromIdentity?: NativeAuthenticatedIdentity) {
+  return Object.freeze({ bind, resetObservation: (actualChannel: Channel, actualIdentity: NativeAuthenticatedIdentity, stream: string) => bind(actualChannel, actualIdentity, stream), reconcileStale, accept(method: string, params: unknown, fromIdentity?: NativeAuthenticatedIdentity) {
       if (fromIdentity !== undefined && fromIdentity !== identity) return; // event from a previous generation
       receiver?.accept(method, params); },
     async quiesce() { await receiver?.quiesce(); },

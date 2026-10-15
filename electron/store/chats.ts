@@ -10,6 +10,7 @@ import { takePreparedUserRow } from "./prepared-user-rows";
 import { oneDispatchSidebarPredicate, createOneDispatchNoticeProjector } from "../one/dispatch-presentation";
 import { getChatGoalRevision } from "./chat-goals";
 import { parseGoalResult, type GoalResultPresentation } from "../../shared/goal-result";
+import { repairAskOpenMarkers } from "../../shared/agent-control-blocks";
 import { emitDesktopStoreChange } from "./change-bus";
 import { getFirm } from "./firms";
 import { evictRuntimeSessionsForChat } from "./runtime-sessions";
@@ -984,9 +985,11 @@ export function emitHostNoticeCommitted(chatId: string): void {
 export function appendChatMessage(
   chatId: string,
   role: "user" | "assistant" | "system",
-  text: string,
+  rawText: string,
   options?: ChatMessageAppendOptions,
 ): ChatHistoryEntry {
+  // A mistyped ask open marker is repaired once, here, so the inbox query, mobile and every surface read one shape.
+  const text = role === "assistant" ? repairAskOpenMarkers(rawText) : rawText;
   // The send queue saved this message when it was accepted; the run that finally starts it must not add a second bubble.
   if (role === "user") {
     const prepared = takePreparedUserRow<ChatHistoryEntry>(chatId, text);
@@ -1309,10 +1312,52 @@ export function listChatMessagesPage(
   ).get(chatId, before.id, before.createdAt, LEGACY_FIRM_SYNTHESIS_MARKER)) {
     throw new TypeError("History cursor no longer matches this chat; reload the newest page");
   }
-  const rows = db.prepare(
+  return readChatMessageKeyset(chatId, limit, before);
+}
+
+/**
+ * Transcript paging for harness thread.read (Terminal thread read reads the same rows the same way): the keyset of
+ * listChatMessagesPage over the rows a transcript shows. System rows are left out before the limit, so a page holds up to
+ * `limit` shown messages and its cursor is always a shown row — the same pages and cursors on every surface.
+ */
+export function listChatTranscriptPage(
+  chatId: string,
+  limit: number,
+  before?: { id: string; createdAt: string },
+): { messages: ChatHistoryEntry[]; hasOlder: boolean } {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new TypeError("Invalid history page limit");
+  if (before && !getDb().prepare(
+    `SELECT 1 FROM chat_messages WHERE chat_id = ? AND id = ? AND created_at = ?
+      AND NOT (role = 'user' AND instr(text, ?) > 0)`,
+  ).get(chatId, before.id, before.createdAt, LEGACY_FIRM_SYNTHESIS_MARKER)) {
+    throw new TypeError("History cursor no longer matches this chat; reload the newest page");
+  }
+  return readChatMessageKeyset(chatId, limit, before, { excludeSystem: true });
+}
+
+/** Internal read bound, used only after Mobile verifies the UiInstance cursor in its source store. */
+export function listChatMessagesBeforeUiAnchor(
+  chatId: string,
+  limit: number,
+  before: { id: string; createdAt: string },
+): { messages: ChatHistoryEntry[]; hasOlder: boolean } {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 200
+    || !/^ui-instance:[A-Za-z0-9_.:-]+$/.test(before.id)
+    || !Number.isFinite(Date.parse(before.createdAt))) throw new TypeError("Invalid verified UI history bound");
+  return readChatMessageKeyset(chatId, limit, before);
+}
+
+function readChatMessageKeyset(
+  chatId: string,
+  limit: number,
+  before?: { id: string; createdAt: string },
+  options: { excludeSystem?: boolean } = {},
+): { messages: ChatHistoryEntry[]; hasOlder: boolean } {
+  const rows = getDb().prepare(
     `SELECT id, role, text, created_at, host_notice_json, speaker_agent_id
        FROM chat_messages
       WHERE chat_id = ? AND NOT (role = 'user' AND instr(text, ?) > 0)
+        ${options.excludeSystem ? "AND role != 'system'" : ""}
         ${before ? "AND (created_at < ? OR (created_at = ? AND id < ?))" : ""}
       ORDER BY created_at DESC, id DESC LIMIT ?`,
   ).all(chatId, LEGACY_FIRM_SYNTHESIS_MARKER,

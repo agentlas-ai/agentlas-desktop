@@ -6,6 +6,7 @@
 //
 // 이 모듈은 순수 결정/조립 함수 + 얇은 meta 영속화만 담는다. 스키마 변경 없음(meta 표 재사용).
 import type { ChatHistoryEntry } from "../../shared/types";
+import type { HostFacts } from "./handoff-facts";
 
 /** 인수인계에 싣는 최근 대화 예산(토큰). 목표 계약/계획은 turnContext가 따로 싣는다. */
 export const HANDOFF_HISTORY_TOKENS = 6_000;
@@ -58,6 +59,10 @@ export interface RotationReceipt {
   health: ThreadHealth | null;
   reportedInputTokens: number | null;
   rotatedAt: string;
+  /** G07: which runtime switched (absent on pre-overlay receipts). Same record for CLI threads and stateless API/local runtimes. */
+  runtime?: string;
+  /** G11: host-recorded facts the next generation sees ahead of any summary (handoff-facts.ts). */
+  facts?: HostFacts;
 }
 
 const healthKey = (threadId: string): string => `runtime-thread-health:${threadId}`;

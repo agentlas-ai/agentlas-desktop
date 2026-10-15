@@ -7159,8 +7159,8 @@ function ChatPage() {
             style={{
               marginLeft: "auto",
               flexShrink: 0,
-              width: 20,
-              height: 20,
+              width: 24,
+              height: 24,
               display: "inline-flex",
               alignItems: "center",
               justifyContent: "center",

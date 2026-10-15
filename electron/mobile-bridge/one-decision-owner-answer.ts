@@ -9,12 +9,6 @@ import type {
 } from "../../shared/mobile-bridge";
 import type { PendingConfirmation } from "../../shared/types";
 
-// Exclusion only: these explicit control labels never create execution authority.
-// Keep action labels such as "Cancel subscription" and "Change permissions"
-// distinct from a standalone Cancel/Modify control when the judge is unavailable.
-const OWNER_CONTROL_LABEL = /^(?:reject|deny|decline|cancel|stop|skip|not now|modify|edit|adjust|review scope|거절|거부|취소|중단|건너뛰기?|나중에|수정|변경|범위 검토)[.!。]?$/iu;
-const OWNER_REFUSAL_LABEL = /^(?:do not\b|don't\b)|(?:하지\s*않(?:음|기)?|안\s*함|허용\s*안\s*함)[.!。]?$/iu;
-
 // Match V1's whitespace display cleanup without redacting or truncating source
 // text. A label changed by either of those operations must still be refused.
 function ownerSourceLabel(value: string): string {
@@ -36,10 +30,12 @@ export function projectOneDecisionOwnerAnswerV4(
     // A redacted/truncated option is not the original answer the owner selected.
     || view.options.some((option, index) => option.index !== index
       || !option.label || option.label !== ownerSourceLabel(pending.options[index].label))) return null;
+  // Typed only (native-harness notyet NH25): the judged disposition keeps reject/modify controls out of the quick
+  // answers, plus the product's own exact reject reply. Without a verdict an option is a plain "choice": choosing it
+  // sends its exact label as the owner's confirmed answer and grants nothing (grantsAuthority stays with "approve").
   const selectableIndexes = view.options.filter((option) =>
     option.disposition !== "reject" && option.disposition !== "modify"
-    && option.label !== ONE_DECISION_PRODUCT_SAFE_REJECT_REPLY
-    && !OWNER_CONTROL_LABEL.test(option.label) && !OWNER_REFUSAL_LABEL.test(option.label),
+    && option.label !== ONE_DECISION_PRODUCT_SAFE_REJECT_REPLY,
   ).map((option) => option.index);
   if (!selectableIndexes.length) return null;
   const bindingDigest = createHash("sha256").update(JSON.stringify([

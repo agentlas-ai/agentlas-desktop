@@ -33,12 +33,16 @@ import { randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult, RunnerFailure, RunnerFailureKind } from "./runner";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import { detectRuntimeRefusal } from "./runtime-refusal";
-import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliToolSilenceWindowMs, wrapSystemPrompt } from "./runner";
+import { cumulativeSurfaceGateText, childExitReason, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliToolSilenceWindowMs, wrapSystemPrompt } from "./runner";
 import { announceToolDenied } from "./tool-approval";
 import {
-  CLI_HISTORY_CONTEXT_TOKENS,
+  acknowledgeStableTurnContext,
+  cliHistoryContextTokens,
+  dedupeStableTurnContext,
   renderConversationContext,
 } from "./continuity";
+import { agentContextColdBootstrapForRequest, agentContextDeliveryForRequest } from "./agent-context";
+import { waitForRetiredCliExit } from "./retired-cli-exit";
 import { tStatus } from "./status-i18n";
 import { selectionFor } from "../capabilities/one-capabilities";
 import { withAgyProductHome } from "./antigravity-personal-context";
@@ -274,7 +278,9 @@ async function getBin(opts?: { source?: string }): Promise<string | null> {
  * discovered capacity. */
 export const AGY_ARGV_PROMPT_LIMIT = 100_000;
 
-export function buildAntigravityPrompt(req: RunnerRequest, maxPromptBytes = AGY_ARGV_PROMPT_LIMIT): string {
+export function buildAntigravityPrompt(req: RunnerRequest, maxPromptBytes = AGY_ARGV_PROMPT_LIMIT, sessionRules = ""): string {
+  // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.main.antigravity.prompt).
+  // `sessionRules` (permission-dependent) follows the wrapped system sections instead of leading the whole prompt.
   const sys = wrapSystemPrompt(
     req.systemPrompt,
     req.locale,
@@ -290,17 +296,19 @@ export function buildAntigravityPrompt(req: RunnerRequest, maxPromptBytes = AGY_
     "antigravity",
     req.sciencePromptProfile,
     req.judgmentOnly === true ? "host-judgment" : undefined,
+      undefined,
+      req.systemPromptComposition,
   );
   // 새 세션 시드: 턴 컨텍스트는 시스템 섹션 뒤에, 히스토리는 연속성 프레이밍+압축과 함께.
   const turnContext = req.turnContext?.trim();
-  const systemSection = `[SYSTEM]\n${sys}${turnContext ? `\n\n${turnContext}` : ""}`;
+  const systemSection = `[SYSTEM]\n${sys}${sessionRules.trim() ? `\n\n${sessionRules.trimEnd()}` : ""}${turnContext ? `\n\n${turnContext}` : ""}`;
   const currentSection = `${tStatus(req.locale, "histThisSection")}\n${req.userPrompt}`;
   const compose = (historyBlock?: string): string =>
     [systemSection, "", ...(historyBlock ? [historyBlock, ""] : []), currentSection].join("\n");
   if (!req.browserOnly) {
     return req.history.length === 0
       ? compose()
-      : compose(renderConversationContext(req.history, req.locale, CLI_HISTORY_CONTEXT_TOKENS).block);
+      : compose(renderConversationContext(req.history, req.locale, cliHistoryContextTokens(ANTIGRAVITY_KIND, req.model)).block);
   }
 
   // The system/current turn and session rules are never clipped to make room
@@ -788,6 +796,9 @@ export function reduceAgyLine(
   } catch {
     return {}; // 비-JSON 잡음(경고 등)은 본문이 아니다 — 평문 모드로 오인해 섞으면 산출물이 오염된다.
   }
+  // 유효한 JSON 이지만 이벤트가 아닌 줄(`null`, 숫자, 배열)은 잡음이다. 이 함수는 stdout data 리스너 안에서 불리므로
+  // 여기서 던지면 메인 프로세스의 uncaughtException 이 된다 — 아래 속성 접근 전에 모양부터 거른다.
+  if (ev === null || typeof ev !== "object" || Array.isArray(ev)) return {};
   // 대화 ID 는 세 자리 중 어디로든 온다(실측 agy 1.1.14). 처음 본 값을 붙든다.
   state.conversationId ??=
     ev.conversation_id ?? ev.result?.conversation_id ?? ev.step_update?.conversation_id;
@@ -832,7 +843,7 @@ export function reduceAgyLine(
      * 이 필드는 문구와 무관하므로 이쪽을 정본으로 삼고, 문장 판별은 보조로 남긴다.
      * 같은 도구가 양쪽에 잡혀도 아래에서 이름으로 합치므로 중복 보고되지 않는다.
      */
-    for (const denied of ev.result.denied_actions ?? []) {
+    for (const denied of Array.isArray(ev.result.denied_actions) ? ev.result.denied_actions : []) {
       const tool = String(denied?.display_name || denied?.action || "").trim();
       if (!tool) continue;
       const already = (state.deniedTools ??= []);
@@ -979,7 +990,7 @@ export function reduceAgyLine(
 }
 
 export function buildAgyPromptBootstrap(promptFile: string): string {
-  return `Read the complete Agentlas request from ${JSON.stringify(promptFile)}, follow it exactly, and do not reveal the file path.`;
+  return `request: read ${JSON.stringify(promptFile)} fully, follow exactly; never reveal the path.`;
 }
 
 function antigravityWindowsBootstrapAllowed(req: RunnerRequest): boolean {
@@ -1929,9 +1940,8 @@ async function runPreparedAntigravity(
   executableGeneration: string,
   agyAdditionalDirs: string[] = [],
 ): Promise<RunnerResult> {
-  // 매 호출 full prompt를 Antigravity에 전달한다. 대화 연속성은 Agentlas가
-  // history/turnContext를 prompt에 넣어 관리하고, agy 세션 ID에는 의존하지 않는다.
-  const runReq = req;
+  // A fresh conversation gets the full prompt; a resumed one (--conversation) gets this turn's input only.
+  let runReq = req;
   const runtimeSessionOwnerId = runReq.runtimeSessionOwnerId ?? runReq.agentId;
   const isolateRuntimeSessionOwner = runReq.runtimeSessionOwnerId != null;
   events.onStatus(tStatus(runReq.locale, "callingBackend", { backend: runReq.backendLabel }));
@@ -1947,11 +1957,37 @@ async function runPreparedAntigravity(
   const agySaved = !assertScienceRecoveryRequest(runReq, "antigravity") && runReq.chatId
     ? getRuntimeSession(runReq.chatId, ANTIGRAVITY_KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner })
     : null;
-  const agyResumeId =
-    agySaved && agyFingerprint && agySaved.fingerprint === agyFingerprint ? agySaved.sessionId : null;
-  let prompt = agyResumeId
-    ? [runReq.turnContext?.trim(), runReq.userPrompt].filter(Boolean).join("\n\n")
-    : buildPrompt(runReq);
+  /*
+   * Under the common agent-context journal (native-harness NH11) the conversation is the binding's acknowledged native
+   * handle, never this runner's own per-chat record: a generation rotated at 80% must not resume the conversation it left.
+   * The record still proves the handle was produced by this executable and model (antigravitySessionFingerprint); without
+   * that proof the session is cold and is seeded from the journal, the host facts ahead of any summary (NH13).
+   */
+  const commonContext = agentContextDeliveryForRequest(runReq) !== null;
+  const commonHandle = commonContext ? runReq.runtimeSessionId?.trim() || null : null;
+  const agyResumeId = commonContext
+    ? (commonHandle && agySaved && agyFingerprint && agySaved.fingerprint === agyFingerprint && agySaved.sessionId === commonHandle ? commonHandle : null)
+    : agySaved && agyFingerprint && agySaved.fingerprint === agyFingerprint ? agySaved.sessionId : null;
+  if (commonContext && commonHandle && !agyResumeId) {
+    const bootstrap = await agentContextColdBootstrapForRequest(runReq);
+    if (!bootstrap) {
+      return { text: "", ownerControlTerminal: "uncertain", failure: { kind: "unavailable", runtime: "antigravity", source: "marker",
+        providerCode: "agy_native_handle_unverified",
+        message: runReq.locale === "ko" ? "Antigravity 대화를 이 실행 파일·모델로 이어갈 수 없고, 기록에서 새 대화를 시작할 자료도 없습니다."
+          : "The Antigravity conversation cannot continue on this executable and model, and no journal seed is available for a new one." } };
+    }
+    // The current input is the one this runner already staged; only the earlier conversation comes from the journal.
+    runReq = { ...runReq, history: [...bootstrap.history], turnContext: bootstrap.turnContext };
+    events.onStatus("[runtime-session] cold kind=antigravity reason=handle_unverified");
+  }
+  // Blocks the resumed conversation already holds are sent once per conversation (the common stable-block contract).
+  const stableContext = agyResumeId ? dedupeStableTurnContext({ chatId: runReq.chatId, runtimeKind: ANTIGRAVITY_KIND, sessionId: agyResumeId,
+    contextFingerprint: createHash("sha256").update(JSON.stringify([agyFingerprint, runtimeSessionOwnerId ?? null, runReq.systemPrompt,
+      runReq.locale, runReq.permission, runReq.model ?? null])).digest("hex"),
+    turnContext: runReq.turnContext, stableBlocks: runReq.turnContextStable }) : null;
+  const resumeTurnInput = [(stableContext?.text ?? runReq.turnContext)?.trim(), runReq.userPrompt].filter(Boolean).join("\n\n");
+  // A fresh prompt is built below, once the session rules it embeds are known.
+  let prompt = agyResumeId ? resumeTurnInput : "";
 
   /*
    * ★이 실행이 실제로 도구를 쓸 수 있는가 — 권한 플래그와 세션 규칙이 같은 답을 써야 한다.
@@ -2023,29 +2059,20 @@ async function runPreparedAntigravity(
     "Non-interactive session rules:",
     ...(runReq.browserOnly
       ? [
-          "- Only the Agentlas Browser MCP is available and pre-approved. Use it directly.",
-          "- Never use run_command, file tools, provider-native browser tools, or another Playwright runtime.",
-          "- Never print, serialize, or pass cookies, auth headers, or session tokens in arguments or output.",
-          "- Complete browser work through the declared Agentlas Browser tools and report only observed results.",
+          "- tools: only the Agentlas Browser MCP, pre-approved; use it directly",
+          "- never: run_command, file tools, provider-native browser tools, another Playwright runtime",
+          "- never print or pass cookies, auth headers, session tokens",
+          "- report only observed results",
         ]
       : agyToolsAllowed
       ? [
-          "- Tools ARE available and pre-approved. Use them to do the work for real.",
-          "- NEVER run a long-lived process in the foreground (dev servers, watchers, `npm run dev`,",
-          "  `vite`, `next dev`, `tail -f`, anything that does not exit on its own). This session waits",
-          "  for the command to finish, so a foreground dev server hangs the whole run until timeout.",
-          "  Start it detached instead (for example `npm run dev >/tmp/dev.log 2>&1 &`), then poll the",
-          "  URL until it answers, and report that URL. If a task only needs the site reachable, a",
-          "  server that is already listening is done — do not restart it in the foreground.",
-          "- Apply changes to the actual files in the workspace: create, edit, and run what the",
-          "  request needs. Printing code in your reply is NOT doing the work.",
-          "- Your final text is a report of what you actually changed, not a substitute for it.",
+          "- tools: available, pre-approved; do the work for real in workspace files (printed code is not work)",
+          "- never run a long-lived process in the foreground (dev server, watcher, `npm run dev`, `vite`, `next dev`, `tail -f`): the session waits for exit and hangs until timeout; start detached (`npm run dev >/tmp/dev.log 2>&1 &`), poll the URL, report it; an already listening server is done",
+          "- final text: report of what you changed",
         ]
       : [
-        "- Tool calls cannot be approved here — do not attempt them.",
-        "- Do NOT save your work to a file. Your final text response IS the deliverable;",
-        "  the next automation step reads only that text. If the request asks for a file's",
-        "  contents (HTML, code, a document), put the COMPLETE contents in your response.",
+        "- tools: cannot be approved here; do not attempt",
+        "- no files: your final text IS the deliverable (the next step reads only it); put the COMPLETE contents in it",
       ]),
     "",
   ].join("\n");
@@ -2055,10 +2082,11 @@ async function runPreparedAntigravity(
         Math.floor((resolveEffectiveContextWindow("antigravity", runReq.model, false).contextWindow ?? UNKNOWN_CONTEXT_WINDOW) * 0.8),
       )
     : AGY_ARGV_PROMPT_LIMIT;
-  if (runReq.browserOnly && !agyResumeId) {
-    prompt = buildPrompt(runReq, browserPromptBudget - Buffer.byteLength(sessionRules, "utf8") - 1);
+  if (!agyResumeId) {
+    prompt = runReq.browserOnly ? buildPrompt(runReq, browserPromptBudget, sessionRules) : buildPrompt(runReq, AGY_ARGV_PROMPT_LIMIT, sessionRules);
   }
-  spawnPrompt = `${sessionRules}\n${prompt}`;
+  // Resume turns carry no system section, so the rules still lead them; a fresh prompt already embeds them.
+  spawnPrompt = agyResumeId ? `${sessionRules}\n${prompt}` : prompt;
   const protectedSpawnPrompt = spawnPrompt;
   const spawnPromptBytes = Buffer.byteLength(spawnPrompt, "utf8");
   if (runReq.browserOnly && spawnPromptBytes > browserPromptBudget) {
@@ -2073,7 +2101,7 @@ async function runPreparedAntigravity(
   // agy reads the person's GEMINI.md, skills, plugins, hooks and MCP servers from HOME; a product run gets a mirrored HOME
   // without them (only One gets back what the person switched on). Must run after the run's MCP servers were reconciled.
   const agyProductEnv = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
-    try { return withAgyProductHome(env, selectionFor(runReq.agentId), agyToolsAllowed ? runReq.mcpConfigPath : undefined); }
+    try { return withAgyProductHome(env, selectionFor(runReq.agentId, undefined, runReq.chatId), agyToolsAllowed ? runReq.mcpConfigPath : undefined); }
     catch { return env; }
   };
   const oneShotSpawnEnv = (): NodeJS.ProcessEnv => {
@@ -2222,6 +2250,12 @@ async function runPreparedAntigravity(
       // eligible for this turn again.
       const residentOwner: AntigravityResidentOwner = { ...residentBaseOwner, scopeKey: key };
       await retireSupersededAntigravitySessions(pool, residentOwner);
+      if (commonContext && !agyResumeId) {
+        // A cold common-context turn starts a new conversation; an idle process of this key holds an earlier one in memory.
+        const stale = pool.retireIdleMatching((session) => session.executableOwner.scopeKey === key);
+        if (stale.busy) throw new Error("runtime_session_owner_busy");
+        await Promise.all(stale.retired.map((session) => waitForRetiredCliExit(session.child)));
+      }
       try {
         residentLease = await pool.acquire(
           key,
@@ -2429,7 +2463,11 @@ async function runPreparedAntigravity(
       if (!trimmedLine) return;
       const normalizedLine = effectCoverage.normalizeLine(trimmedLine);
       effectCoverage.observe(normalizedLine);
-      const step = reduceAgyLine(normalizedLine, agyState);
+      // A well-formed JSON line of the wrong shape (e.g. a non-string tool_name) must not throw out of the stdout
+      // data listener: that is an uncaughtException in Main. Treat it as noise; the terminal result still decides.
+      let step: ReturnType<typeof reduceAgyLine>;
+      try { step = reduceAgyLine(normalizedLine, agyState); }
+      catch { events.onStatus("agy: ignored an event line with an unexpected shape"); step = {}; }
       // 도구 호출을 화면으로 올린다 — 같은 도구가 진행(ACTIVE)/완료(DONE)로 두 번 오면 같은
       // id 로 갱신된다(ACTIVE 1회 + DONE 1회만 올린다; 반복 ACTIVE는 무시).
       if (step.tool) {
@@ -2476,10 +2514,15 @@ async function runPreparedAntigravity(
        * ★막힌 도구는 **즉시** 말한다. 이 실행은 뒤에서 SUCCESS + 빈 응답으로 끝나기 때문에,
        * 여기서 알리지 않으면 사용자는 아무 일도 일어나지 않은 화면만 보게 된다.
        */
-      if (step.approvalDenied && !announcedDenials.has(step.approvalDenied.tool)) {
-        announcedDenials.add(step.approvalDenied.tool);
-        const tool = step.approvalDenied.tool;
-        if (step.approvalDenied.reason === "boundary") {
+      // The structured `result.denied_actions` field is the source of truth (reduceAgyLine); when the vendor's step-level
+      // error wording drifts and no step announced anything, announce from that field instead of staying silent.
+      const denial = step.approvalDenied
+        ?? (step.activity === "result" && announcedDenials.size === 0
+          ? (agyState.deniedTools ?? []).find((d) => d.reason === "approval") : undefined);
+      if (denial && !announcedDenials.has(denial.tool)) {
+        announcedDenials.add(denial.tool);
+        const tool = denial.tool;
+        if (denial.reason === "boundary") {
           /*
            * ★승인 시트를 **열지 않는다**. 아무리 승인해도 열리지 않는 경계이기 때문이다.
            * 여기에 시트를 띄우면 사용자는 자기가 풀 수 있는 문제로 오해하고 누른다 —
@@ -2500,7 +2543,7 @@ async function runPreparedAntigravity(
             runtime: "antigravity",
             sessionKey: `antigravity:${runReq.chatId ?? runReq.cwd ?? "default"}`,
             tool,
-            detail: step.approvalDenied.detail,
+            detail: denial.detail,
             cwd: runReq.cwd,
             deniedBy: "runtime-headless",
           });
@@ -2721,18 +2764,25 @@ async function runPreparedAntigravity(
         if (runReq.chatId && agyFingerprint && agyState.conversationId && !failure) {
           saveRuntimeSession(runReq.chatId, ANTIGRAVITY_KIND, agyState.conversationId, agyFingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner });
         }
+        const completed = Boolean(resultSeen && agyState.resultStatus === "SUCCESS" && !failure && trimmed
+          && Boolean(agyState.conversationId?.trim())
+          && (!agyResumeId || agyState.conversationId === agyResumeId)
+          && (!agyState.resultConversationId || agyState.resultConversationId === agyState.conversationId));
+        if (completed && stableContext?.delivery && agyState.conversationId) {
+          acknowledgeStableTurnContext(stableContext.delivery, { sessionId: agyState.conversationId, acknowledgementId: randomUUID() });
+        }
         resolve({
           text: trimmed,
-          ownerControlTerminal: resultSeen && agyState.resultStatus === "SUCCESS" && !failure && trimmed
-            && Boolean(agyState.conversationId?.trim())
-            && (!agyResumeId || agyState.conversationId === agyResumeId)
-            && (!agyState.resultConversationId || agyState.resultConversationId === agyState.conversationId)
-            ? "completed" : "uncertain",
+          ownerControlTerminal: completed ? "completed" : "uncertain",
           ...(failure ? { failure } : {}),
+          // The conversation this turn ran on: the common journal acknowledges it as the binding's native handle (NH11).
+          ...(!failure && agyState.conversationId?.trim() ? { sessionId: agyState.conversationId } : {}),
           ...(resultSeen && agyState.usagePairObserved
             ? {
               tokens: agyState.outputTokens,
               observedUsage: { inputTokens: agyState.inputTokens, outputTokens: agyState.outputTokens },
+              // The last agent_response step's input: the context the next request starts from (the common 80% rule).
+              ...(agyState.inputTokens > 0 ? { contextInputTokens: agyState.inputTokens } : {}),
             }
             : {}),
         });
@@ -2767,7 +2817,7 @@ async function runPreparedAntigravity(
           ownerControlTerminal: "uncertain",
           failure: {
             kind: "exit",
-            message: "Antigravity exited without a structured provider failure.",
+            message: `Antigravity exited without a structured provider failure.${childExitReason(code, stderr) ? ` ${childExitReason(code, stderr)}` : ""}`,
             runtime: "antigravity",
             source: "exit",
             ...(typeof code === "number" ? { exitCode: code } : {}),
@@ -2801,7 +2851,7 @@ async function runPreparedAntigravity(
           residentSession,
           residentLease?.fresh && !agyResumeId
             ? spawnPrompt
-            : [runReq.turnContext?.trim(), runReq.userPrompt].filter(Boolean).join("\n\n"),
+            : resumeTurnInput,
         )) {
         residentSession.active = null;
         settle(null);

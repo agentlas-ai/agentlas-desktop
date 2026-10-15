@@ -26,7 +26,7 @@
  * 빠진다 — telegram/connect.ts에 같은 사고가 이미 기록돼 있다.
  */
 
-import { mapIntellectUiProse } from "./intellect-ui";
+import { mapInlineVisualProse } from "./inline-visual";
 
 export const AGENT_CONTROL_HEADINGS = [
   "## Memory Events",
@@ -36,6 +36,45 @@ export const AGENT_CONTROL_HEADINGS = [
 
 export const AGENT_ASK_OPEN = "<<agentlas-ask>>";
 export const AGENT_ASK_CLOSE = "<</agentlas-ask>>";
+
+/** Close-marker misspellings seen from small models (`</<agentlas-ask>>`, `</agentlas-ask>>`, `<</agentlas-ask>`). */
+const ASK_CLOSE_VARIANTS = /<\/<agentlas-ask>>|(?<!<)<\/agentlas-ask>>|<<\/agentlas-ask>(?!>)/g;
+
+/**
+ * Structural repair, not a word rule: a close marker met outside any open fence and followed by a JSON object is a
+ * mistyped open marker (measured 2026-10-14: gpt-oss:20b wrote `<</agentlas-ask>>{…}<</agentlas-ask>>` in 2 of 6 runs),
+ * and a misspelled close marker is the close marker (`</<agentlas-ask>>`, same model, same day).
+ * Every ask consumer (extract, flatten, display strip) reads the repaired text, so no surface shows the raw JSON.
+ */
+export function repairAskOpenMarkers(input: string): string {
+  const text = input.includes("agentlas-ask>") ? input.replace(ASK_CLOSE_VARIANTS, AGENT_ASK_CLOSE) : input;
+  if (!text.includes(AGENT_ASK_CLOSE)) return text;
+  let out = "";
+  let rest = text;
+  let inFence = false;
+  for (let guard = 0; guard < 128; guard += 1) {
+    const open = inFence ? -1 : rest.indexOf(AGENT_ASK_OPEN);
+    const close = rest.indexOf(AGENT_ASK_CLOSE);
+    if (close < 0 && open < 0) break;
+    if (!inFence && open >= 0 && (close < 0 || open < close)) {
+      out += rest.slice(0, open + AGENT_ASK_OPEN.length);
+      rest = rest.slice(open + AGENT_ASK_OPEN.length);
+      inFence = true;
+      continue;
+    }
+    if (close < 0) break;
+    const after = rest.slice(close + AGENT_ASK_CLOSE.length);
+    if (!inFence && /^\s*\{/.test(after)) {
+      out += rest.slice(0, close) + AGENT_ASK_OPEN;
+      inFence = true;
+    } else {
+      out += rest.slice(0, close + AGENT_ASK_CLOSE.length);
+      inFence = false;
+    }
+    rest = after;
+  }
+  return out + rest;
+}
 export const AGENT_FOLLOWUPS_OPEN = "<<agentlas-one-followups>>";
 export const AGENT_FOLLOWUPS_CLOSE = "<</agentlas-one-followups>>";
 /** surface 울타리의 **정본 상수**. electron/surface-emitter.ts가 이걸 재수출한다. */
@@ -72,7 +111,7 @@ export const AGENT_LINE_MARKERS = [
 const IDENTITY_BADGE = /(^|\s)(?:\*\*)?\[\s*(?:[A-Z][A-Za-z .'-]{0,31}|[\u3131-\u318e\uac00-\ud7a3]{1,16})\s*\](?:\*\*)?(?=\s|$)/gu;
 
 export function stripAgentIdentityBadges(value: string): string {
-  return mapIntellectUiProse(value, stripProseIdentityBadges);
+  return mapInlineVisualProse(value, stripProseIdentityBadges);
 }
 
 function stripProseIdentityBadges(value: string): string {
@@ -191,11 +230,11 @@ function pairedHit(
  * 그 조각까지 감춘다. 완성된 응답에는 적용하지 않는다 — 정상 본문을 자르면 안 된다.
  */
 export function stripAgentControlBlocks(value: string, options?: { streaming?: boolean }): string {
-  return mapIntellectUiProse(value, prose => stripProseControlBlocks(prose, options));
+  return mapInlineVisualProse(value, prose => stripProseControlBlocks(prose, options));
 }
 
 function stripProseControlBlocks(value: string, options?: { streaming?: boolean }): string {
-  let visible = stripLineMarkers(value).replace(GOAL_COMPLETE_RE, "");
+  let visible = stripLineMarkers(repairAskOpenMarkers(value)).replace(GOAL_COMPLETE_RE, "");
   for (const marker of BARE_MARKERS) visible = visible.split(marker).join("");
 
   // 모델은 제어 블록을 여러 개 낼 수 있다. 적대적 스팸에도 멈추도록 상한을 둔다.
@@ -389,5 +428,5 @@ const ROUTING_BANNER_LINE = /^[ \t]*(?:\*\*)?(?:(?:사용|적용)\s*(?:에이전
 const ROUTING_BANNER_WITH_REASON = /^[ \t]*(?:\*\*)?(?:Skills|Agents)(?:\*\*)?[ \t]*:[^\n]*\b(?:Reason|이유)[ \t]*:[^\n]*(?:\n[ \t]*)*/gim;
 
 export function stripAgentRoutingBanners(value: string): string {
-  return mapIntellectUiProse(value, prose => prose.replace(ROUTING_BANNER_LINE, "").replace(ROUTING_BANNER_WITH_REASON, ""));
+  return mapInlineVisualProse(value, prose => prose.replace(ROUTING_BANNER_LINE, "").replace(ROUTING_BANNER_WITH_REASON, ""));
 }

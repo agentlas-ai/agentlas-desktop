@@ -211,6 +211,13 @@ export function listRecoverableMediaOperations(modality?: MediaOperationRecord["
   });
 }
 
+/** The newest finished operation of a provider (succeeded or failed): what a media route has actually produced (NH31). */
+export function latestFinishedMediaOperation(providerId: string): MediaOperationRecord | null {
+  const row = getDb().prepare(`SELECT * FROM media_operations
+    WHERE provider_id = ? AND lifecycle IN ('succeeded','failed') ORDER BY updated_at DESC LIMIT 1`).get(providerId) as MediaOperationRow | undefined;
+  return rowToRecord(row);
+}
+
 export function listMediaOperationEvents(operationId: string): MediaOperationEvent[] {
   const rows = getDb().prepare("SELECT * FROM media_operation_events WHERE operation_id = ? ORDER BY sequence")
     .all(operationId) as MediaOperationEventRow[];

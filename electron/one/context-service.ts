@@ -1,3 +1,4 @@
+import { reportSystemPermissionIssue } from "../os-permission-guidance";
 import { randomUUID } from "node:crypto";
 import type { OneContextCapture, OneContextGrant, OneContextGrantInput, OneContextLeaseState, OneContextReadiness, OneContextScope, OneContextSnapshot, OneContextTarget, OneContextTargetSelection } from "../../shared/one-context";
 
@@ -111,6 +112,10 @@ export class OneContextService {
     if (!target || !await this.ports.current(target)) throw new OneContextError("one-context-target-stale");
     if(this.selections.get(String(input.selectionId))!==selection || selection.expiresAt<=this.now())throw new OneContextError("one-context-selection-stale");
     this.scope(input); const ready = this.readiness();
+    if (ready.session === "awake" && ready.platform === "darwin") {
+      if (!target.owned && ready.screenPermission !== "granted") reportSystemPermissionIssue("screen", "one-context");
+      if (input.mode === "interact" && ready.accessibility !== "granted") reportSystemPermissionIssue("accessibility", "one-context");
+    }
     if (ready.session !== "awake" || !target.captureAvailable || (!target.owned && ready.screenPermission !== "granted")) throw new OneContextError("one-context-capture-unavailable");
     if (input.mode === "interact" && (!target.interactionAvailable || !ready.driverAvailable || ready.accessibility !== "granted")) throw new OneContextError("one-context-input-unavailable");
     for (const held of this.grants.values()) if (held.grant.oneId === scope.oneId && held.grant.taskId === scope.taskId) this.stop(held, "one-context-replaced");
@@ -138,6 +143,10 @@ export class OneContextService {
       if (!held || held.grant.oneId !== scope.oneId || held.grant.taskId !== scope.taskId || held.grant.state !== "active" || held.controller.signal.aborted
         || mode === "interact" && held.grant.mode !== "interact") throw new OneContextError("one-context-grant-unavailable");
       const ready = this.readiness();
+      if (ready.session === "awake" && ready.platform === "darwin") {
+        if (!held.target.owned && ready.screenPermission !== "granted") reportSystemPermissionIssue("screen", "one-context");
+        if (mode === "interact" && ready.accessibility !== "granted") reportSystemPermissionIssue("accessibility", "one-context");
+      }
       if (ready.session !== "awake" || !held.target.owned && ready.screenPermission !== "granted") { this.stop(held, "one-context-session-unavailable"); throw new OneContextError("one-context-session-unavailable"); }
       if (mode === "interact" && (!ready.driverAvailable || ready.accessibility !== "granted")) throw new OneContextError("one-context-input-unavailable");
     };

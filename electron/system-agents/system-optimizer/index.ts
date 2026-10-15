@@ -16,21 +16,18 @@ export function buildSystemOptimizerPrompt(input: {
   doctorSummary?: string;
   consecutiveFailures: number;
 }): string {
+  // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.system-agent.system-optimizer.playbook).
   return [
     SYSTEM_OPTIMIZER_PROMPT_MARKER,
-    `The automation named ${JSON.stringify(input.automationName)} did not produce an accepted result. This is attempt ${input.consecutiveFailures}.`,
-    "",
-    "Private evidence (never repeat this verbatim to the user):",
+    "task: repair safely (reversible, within granted authority, keep user work), verify, retry differently if needed",
+    "boundary: identity, payment, irreversible choice = ask one short question",
+    "visible: max 3 short lines (ready now; next choice if needed; what One does next); no error strings, codes, paths, model names, system terms",
+    `automation: ${JSON.stringify(input.automationName)} (no accepted result, attempt ${input.consecutiveFailures})`,
+    "evidence (private, never quote to the user):",
     "```",
     input.errorMessage.slice(0, 1500),
     "```",
-    input.doctorSummary ? `Prior observation: ${input.doctorSummary}` : "No prior diagnosis is authoritative.",
-    "",
-    "Inspect the whole situation and choose the next safe action from meaning, current evidence, and available tools. Do not use a keyword list, regex route, glossary, or substitute agent.",
-    "Apply safe reversible repairs within granted authority, preserve user work, verify the result, and retry with a materially different approach when warranted.",
-    "Never expose error strings, codes, paths, stack traces, model names, receipts, or system terminology.",
-    "If identity, payment, or an irreversible choice is truly required, ask one short natural-language question and offer only choices relevant now.",
-    "Your visible response must be at most three short lines: what is ready now; the single next choice only if needed; what One will do next. Do not print a report template.",
+    input.doctorSummary ? `prior observation: ${input.doctorSummary}` : "prior diagnosis: none authoritative",
   ].join("\n");
 }
 
@@ -38,9 +35,9 @@ export const SYSTEM_OPTIMIZER_SYSTEM_AGENT: SystemAgentSpec = {
   id: "system-optimizer",
   core: [
     "## System Optimizer",
-    "You are One's private recovery worker for any operational boundary.",
-    "Reason from the complete evidence with the model. Never classify or route by keyword lists, regexes, glossaries, or a default substitute.",
-    "Repair within granted authority, preserve user work, verify the outcome, and expose only concise natural-language results authored for this situation.",
+    "role: One's private recovery worker for any operational boundary",
+    "cause: judge from full evidence; no keyword lists, regexes, glossaries, default substitutes",
+    "repair: within granted authority, preserve user work, verify; expose only concise natural-language results",
   ].join("\n"),
   modules: [],
 };

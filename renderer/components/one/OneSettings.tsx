@@ -47,8 +47,10 @@ import { runtimeUsesEngineModelSetting } from "@shared/models";
 import { OneBottomSheet, type OneBottomSheetSize } from "./OneBottomSheet";
 import { MediaDisplaySettings } from "../MediaDisplaySettings";
 import styles from "./OneSettings.module.css";
+import { OneBusinessWork } from "./OneBusinessWork";
+import { OneBusinessSharing } from "./OneBusinessSharing";
 
-export type OneSettingsKey = "mcp" | "plugins" | "permission" | "models" | "multimodal" | "media" | "concurrency" | "history" | "briefing";
+export type OneSettingsKey = "work" | "business" | "mcp" | "plugins" | "permission" | "models" | "multimodal" | "media" | "concurrency" | "history" | "briefing";
 
 /**
  * 시트 폭은 내용이 정한다.
@@ -58,6 +60,8 @@ export type OneSettingsKey = "mcp" | "plugins" | "permission" | "models" | "mult
  * 여러 열로 늘어놓을 것이 있는 화면만 넓게 연다.
  */
 const SHEET_WIDTH: Record<OneSettingsKey, OneBottomSheetSize> = {
+  work: "compact",
+  business: "compact",
   mcp: "compact",
   plugins: "compact",
   models: "wide",
@@ -100,6 +104,8 @@ type SheetProps = {
 };
 
 const SETTINGS_META: Record<OneSettingsKey, { titleKo: string; titleEn: string; descriptionKo: string; descriptionEn: string }> = {
+  work: {titleKo:"조직 업무 변경",titleEn:"Organization WORK changes",descriptionKo:"선택한 업무 파일과 평가 기준을 검토합니다.",descriptionEn:"Review selected WORK files and evaluation criteria."},
+  business: { titleKo: "조직 공유", titleEn: "Organization sharing", descriptionKo: "조직 연결과 검토한 작업 요약의 공유를 관리합니다.", descriptionEn: "Manage your organization connection and reviewed work summaries." },
   mcp: { titleKo: "MCP 서버", titleEn: "MCP servers", descriptionKo: "직접 등록한 MCP 서버의 연결과 실행 상태를 관리합니다.", descriptionEn: "Manage connections and runtime state for custom MCP servers." },
   briefing: { titleKo: "브리핑 알림", titleEn: "Briefing notifications", descriptionKo: "One이 먼저 알려 주는 빈도와 방식, 방해 금지 시간을 정합니다.", descriptionEn: "Choose how often One reaches out, where it shows up, and when to stay quiet." },
   plugins: { titleKo: "플러그인", titleEn: "Plugins", descriptionKo: "카탈로그에서 설치한 도구를 켜거나 끕니다.", descriptionEn: "Enable or disable tools installed from the catalog." },
@@ -107,7 +113,7 @@ const SETTINGS_META: Record<OneSettingsKey, { titleKo: string; titleEn: string; 
   models: { titleKo: "모델", titleEn: "Models", descriptionKo: "CEO 오케스트레이터인 One의 기본 모델을 정합니다.", descriptionEn: "Choose the default model for One, the CEO orchestrator." },
   multimodal: { titleKo: "멀티모달", titleEn: "Multimodal", descriptionKo: "이미지·영상 작업에 사용할 엔진과 키를 연결합니다.", descriptionEn: "Connect engines and keys for image and video work." },
   media: { titleKo: "결과 미디어", titleEn: "Result media", descriptionKo: "사이드바 결과에서 사진·영상·음성을 표시할지 정합니다.", descriptionEn: "Choose which photos, videos, and audio appear in result sidebars." },
-  concurrency: { titleKo: "동시 실행", titleEn: "Concurrency", descriptionKo: "One과 터미널 에이전트가 동시에 실행할 수 있는 수입니다.", descriptionEn: "Set how many runs One and terminal agents may do at once." },
+  concurrency: { titleKo: "동시 실행", titleEn: "Concurrency", descriptionKo: "터미널을 쓰는 작업의 동시 실행 수입니다. 등록할 팀원 수와는 별개입니다.", descriptionEn: "Set concurrent terminal runs independently of the number of registered teammates." },
   /* ko 라벨은 웹 "컴퓨터 사용 기록" 과 통일(A3) — 채널마다 같은 설정이 다른
      이름으로 불리면 안 된다. */
   history: { titleKo: "컴퓨터 사용 기록", titleEn: "Computer History", descriptionKo: "로컬 작업 요약과 에이전트 빌드 추천의 기록 범위를 관리합니다.", descriptionEn: "Manage local work summaries and agent-build recommendations." },
@@ -156,6 +162,8 @@ export function OneSettingsRail({ locale, profileName, pendingMemoryCount, onBac
         <RailRow icon={<IconSparkles size={15} />} title={ko ? "브리핑" : "Briefing"} detail={ko ? "주기·데스크탑 알림·방해 금지" : "Cadence, desktop alerts, quiet hours"} onClick={() => onOpen("briefing")} />
       </div>
       <div className={styles.railGroup}><span>{ko ? "개인정보" : "Privacy"}</span>
+        <RailRow icon={<IconShield size={15} />} title={ko ? "조직 업무 변경" : "Organization WORK changes"} onClick={() => onOpen("work")} />
+        <RailRow icon={<IconUsers size={15} />} title={ko ? "조직 공유" : "Organization sharing"} onClick={() => onOpen("business")} />
         <RailRow icon={<IconLock size={15} />} title={ko ? "컴퓨터 사용 기록" : "Computer History"} onClick={() => onOpen("history")} />
       </div>
       <div className={styles.railGroup}><span>{ko ? "앱" : "App"}</span>
@@ -392,7 +400,7 @@ function ConcurrencySettings({ locale, active }: { locale: string; active: boole
     <input type="range" min={1} max={info.hardMax} value={draft} onChange={(event) => setDraft(Number(event.target.value))} aria-label={locale === "ko" ? "동시 실행 수" : "Concurrent runs"} />
     <div className={styles.slotScale}><span>1</span><span>{locale === "ko" ? `권장 ${info.recommended}` : `Recommended ${info.recommended}`}</span><span>{info.hardMax}</span></div>
     <div className={styles.slotVisual} aria-hidden="true">{Array.from({ length: info.hardMax }, (_, index) => <span key={index} data-active={index < draft ? "true" : "false"}><IconUsers size={16} /></span>)}</div>
-    <p>{locale === "ko" ? `${info.cores}코어 · ${info.totalMemGB}GB RAM · One 포함` : `${info.cores} cores · ${info.totalMemGB}GB RAM · Includes One`}</p>
+    <p>{locale === "ko" ? `${info.cores}코어 · ${info.totalMemGB}GB RAM` : `${info.cores} cores · ${info.totalMemGB}GB RAM`}</p>
     {notice && <p className={styles.notice} role="status">{notice}</p>}
     <div className={styles.actionRow}><button type="button" disabled={busy} onClick={() => setDraft(info.recommended)}>{locale === "ko" ? "권장값" : "Recommended"}</button><button type="button" className={styles.primary} disabled={busy || draft === info.current} onClick={() => void save()}>{locale === "ko" ? "적용" : "Apply"}</button></div>
   </div>;
@@ -530,6 +538,8 @@ export function OneSettingsSheet({ open, locale, installedPlugins, pluginCatalog
       {open === "media" && <MediaDisplaySettings locale={locale} compact />}
       {open === "concurrency" && <ConcurrencySettings locale={locale} active={open === "concurrency"} />}
       {open === "history" && <HistorySettings locale={locale} state={history} onConsent={onHistoryConsent} />}
+      {open === "work" && <OneBusinessWork locale={locale} />}
+      {open === "business" && <OneBusinessSharing locale={locale} />}
       {open === "briefing" && <BriefingSettings locale={locale} />}
     </div>
   </OneBottomSheet>;

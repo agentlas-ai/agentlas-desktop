@@ -11,7 +11,7 @@ export function installMainCodeMode(tools: OpenAiToolDef[], byName: Map<string, 
   if (!enabled || byName.size === 0 || tools.some(tool => tool.function.name === CODE_MODE_TOOL)) return tools;
   states.set(byName, {calls: 0});
   return [...tools, {type: "function", function: {name: CODE_MODE_TOOL,
-    description: "Run bounded JavaScript to compose independent approved tools in one request. Use await tools.call(name, arguments), tools.list(options), tools.prepare(exactName), tools.callPrepared(token, arguments). Promise.all is supported. Return a compact JSON value. Every nested call keeps normal approval. No Node, imports or direct network. store(key,value)/load(key) last only inside this evaluation; no state survives another call or restart.",
+    description: "JS: await tools.call(name,args) | tools.list(o) | tools.prepare(name) | tools.callPrepared(token,args); Promise.all ok; store/load(key) this run only; no Node/imports/network; nested calls keep approval; return compact JSON.",
     parameters: {type: "object", properties: {code: {type: "string"}, timeoutMs: {type: "integer", minimum: 10, maximum: 30000}}, required: ["code"], additionalProperties: false}}}];
 }
 type Dispatch = (byName: Map<string, ResolvedTool>, call: MainToolDispatchCall, events: RunnerEvents, approval: LocalToolApprovalContext) => Promise<MainToolDispatchResult>;

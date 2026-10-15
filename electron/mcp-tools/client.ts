@@ -1,5 +1,6 @@
 import { withCurrentHistoryTool } from "../one/history-runtime-fences";
-import { preparedMcpTransport, preparedMcpTargetTransport, type PreparedMcpBinding } from "./prepared-transport";
+import { captureRemoteCurationConsumer } from "../memory/remote-curation";
+import { mcpServerConfigurationDigest, preparedMcpTransport, preparedMcpTargetTransport, type PreparedMcpBinding } from "./prepared-transport";
 import { mcpToolSchemaDigest } from "./tool-schema";
 // 실제 MCP 클라이언트 — v2 SDK로 2026/2025 원격 서버에 붙어 tools/list.
 // 트랜스포트 3종: stdio(npx) / SSE(레거시 원격) / Streamable HTTP(현대 원격 표준).
@@ -18,6 +19,7 @@ import { SSEClientTransport as LegacySSEClientTransport } from "@modelcontextpro
 import { StreamableHTTPClientTransport as LegacyHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { OwnedStdioClientTransport, ownedStdioEnvironment } from "./owned-stdio-transport";
 import { readEnvVarAliased as readEnvVar } from "../secrets/env-alias";
+import { credentialVaultKey } from "./credential-refs";
 import { resolveMcpOAuthAccessToken } from "./oauth";
 import { listInstalledServers, getServer } from "./registry";
 import { isCurrentElectronExecutable } from "../runtime/exec";
@@ -285,12 +287,17 @@ export function workforceMcpContractIssues(tools: WorkforceMcpInventoryTool[]): 
   return { blocking: [...new Set(blocking)], warnings: [...new Set(issues)] };
 }
 
+class McpConnectionSessionChangedError extends Error {
+  readonly code = "mcp_connection_session_changed";
+  constructor() { super("mcp_connection_session_changed"); }
+}
+
 export class McpToolCallError extends Error {
   constructor(
     readonly boundary: "pre-request-error" | "ambiguous-transport" | "received-protocol-error",
     readonly mcpCode: number | null,
     message: string,
-    readonly reason: "response-too-large" | null = null,
+    readonly reason: "response-too-large" | "connection-session-changed" | null = null,
   ) {
     super(message);
     this.name = "McpToolCallError";
@@ -387,12 +394,12 @@ function expandHome(arg: string): string {
   return arg;
 }
 
-/** 서버가 요구하는 env 키를 vault에서 채워 { resolved, missing } 반환. */
-async function resolveEnv(envKeys: string[]): Promise<{ resolved: Record<string, string>; missing: string[] }> {
+/** 서버가 요구하는 env 키를 vault에서 채워 { resolved, missing } 반환. A connection-owned key reads its own Vault key (NH29). */
+async function resolveEnv(envKeys: string[], server?: Pick<InstalledMcpServer, "credentialRefs">): Promise<{ resolved: Record<string, string>; missing: string[] }> {
   const resolved: Record<string, string> = {};
   const missing: string[] = [];
   for (const k of envKeys) {
-    const v = await readEnvVar(k);
+    const v = await readEnvVar(server ? credentialVaultKey(server, k) : k);
     if (v) resolved[k] = v;
     else missing.push(k);
   }
@@ -407,11 +414,11 @@ export function requiredMcpManualEnvKeys(server: InstalledMcpServer, hasOAuth: b
 }
 
 async function resolveServerEnvironment(server: InstalledMcpServer): Promise<{ resolved: Record<string, string>; missing: string[] }> {
-  if (server.transport === "stdio") return resolveEnv(server.envKeys);
-  const endpoint = await resolveEnv(requiredMcpManualEnvKeys(server, true));
+  if (server.transport === "stdio") return resolveEnv(server.envKeys, server);
+  const endpoint = await resolveEnv(requiredMcpManualEnvKeys(server, true), server);
   if (endpoint.missing.length) return endpoint;
   const token = await resolveMcpOAuthAccessToken(server.id, parseRemoteUrl(server, endpoint.resolved).url.toString());
-  const environment = token ? endpoint : await resolveEnv(server.envKeys);
+  const environment = token ? endpoint : await resolveEnv(server.envKeys, server);
   // Keep the token only in the local connection material so error redaction also covers it.
   if (token) environment.resolved.__mcpOAuthAccessToken = token;
   return environment;
@@ -534,6 +541,36 @@ export interface McpRuntimePin {
 
 export function createMcpRuntimePin(): McpRuntimePin {
   return { runtimeRoot: null, runtimeVersion: null, protocolDigest: null };
+}
+
+/**
+ * resources/read of one resource (MCP Apps `ui://` views) over the same transport and credential resolution as a tool
+ * call. Read-only; the caller decides which URIs are admissible.
+ */
+export async function readServerResource(
+  server: InstalledMcpServer,
+  uri: string,
+  options?: { timeoutMs?: number; signal?: AbortSignal },
+): Promise<{ contents: Array<{ uri: string; mimeType?: string; text?: string; blob?: string; _meta?: Record<string, unknown> }>; _meta?: Record<string, unknown> }> {
+  const timeoutMs = Math.max(250, Math.min(options?.timeoutMs ?? CONNECT_TIMEOUT_MS, CONNECT_TIMEOUT_MS));
+  const controller = new AbortController();
+  const client = new Client({ name: "agentlas-desktop", version: electronAppVersion() }, { capabilities: {} });
+  let transport: Transport | null = null;
+  const stop = () => { controller.abort(); void transport?.close().catch(() => {}); };
+  try {
+    return await withAbortSignal(withTimeout((async () => {
+      const environment = await resolveServerEnvironment(server);
+      if (environment.missing.length > 0) throw new Error(`configuration_missing: ${environment.missing.join(", ")}`);
+      controller.signal.throwIfAborted();
+      transport = (await createTransport(server, environment.resolved, undefined, controller.signal)).transport;
+      configureProtocolNegotiation(client, transport);
+      await client.connect(transport);
+      controller.signal.throwIfAborted();
+      return await client.readResource({ uri }) as Awaited<ReturnType<typeof readServerResource>>;
+    })(), timeoutMs, stop, controller.signal), options?.signal, stop);
+  } finally {
+    await closeMcpProbeBounded(client, transport);
+  }
 }
 
 async function createTransport(
@@ -800,7 +837,8 @@ export async function testServerConnection(
       : observation?.status ?? observation?.statusCode;
     const failureCode = err instanceof UnauthorizedError || httpStatus === 401 ? 'authentication_required' as const
       : options?.signal?.aborted ? 'connection_cancelled' as const : 'connection_unavailable' as const;
-    return { id: server.id, connected: false, tools: [], error: message.slice(0, 300), missingEnv: missing, checkedAt, failureCode };
+    return { id: server.id, connected: false, tools: [], error: message.slice(0, 300), missingEnv: missing, checkedAt, failureCode,
+      ...(typeof httpStatus === "number" && Number.isInteger(httpStatus) ? { httpStatus } : {}) };
   }
 }
 
@@ -992,7 +1030,18 @@ async function callServerToolContentInternal(
   const sessionKey = server.id;
   let releaseSession: (() => void) | null = null;
   let sessionEntry: McpSessionEntry | null = null;
+  let registryBound = server.connectionEpoch !== undefined;
+  const expectedConfiguration = mcpServerConfigurationDigest(server);
+  const assertCurrentConnection = () => {
+    if (!registryBound) return; // Canonical ephemeral native tools have no registry connection session.
+    const current = getServer(server.id);
+    if (!current || !current.enabled || current.configurationValid === false || mcpServerConfigurationDigest(current) !== expectedConfiguration) {
+      // Refuse this new dispatch without aborting a different call already sent on the run session.
+      throw new McpConnectionSessionChangedError();
+    }
+  };
   try {
+    registryBound ||= getServer(server.id) !== null;
     const workforceCall = server.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID &&
       toolName.startsWith("workforce.");
     const timeoutCeiling = workforceCall ? WORKFORCE_TOOL_TIMEOUT_MAX_MS : CONNECT_TIMEOUT_MS;
@@ -1002,6 +1051,7 @@ async function callServerToolContentInternal(
       (async () => {
         if (options?.signal?.aborted) stop();
         preparation.signal.throwIfAborted();
+        assertCurrentConnection();
         const environment = options?.prepared ? { resolved: {}, missing: [] } : await resolveServerEnvironment(server);
         resolved = environment.resolved;
         preparation.signal.throwIfAborted();
@@ -1028,6 +1078,7 @@ async function callServerToolContentInternal(
           if (session) {
             releaseSession ??= await session.acquire(sessionKey);
             preparation.signal.throwIfAborted();
+            assertCurrentConnection();
             sessionEntry = session.take(sessionKey, server, options?.prepared, credentialDigest);
           }
           let activeClient: Client;
@@ -1164,9 +1215,14 @@ async function callServerToolContentInternal(
           if (modernInventory && !modernDefinition) throw new Error("mcp_tool_not_in_current_inventory");
           preparation.signal.throwIfAborted();
           if (options?.prepared) preparedMcpTransport(options.prepared, server);
-          const res = await withCurrentHistoryTool({kind:"mcp",serverId:server.id,catalogId:server.catalogId??null,toolName,args,schemaDigest:options?.expectedToolSchemaDigest??(modernDefinition?mcpToolSchemaDigest(modernDefinition):null)},()=>activeClient.callTool({ name: toolName, arguments: args },
-            modernDefinition ? { toolDefinition: modernDefinition } : undefined));
-          const normalized = normalizeMcpToolContentResult(res, maxTextChars, options?.retainFullResult === true);
+          const remoteCuration = captureRemoteCurationConsumer(options?.prepared, completeRemoteMemoryCuration);
+          const res = await withCurrentHistoryTool({kind:"mcp",serverId:server.id,catalogId:server.catalogId??null,toolName,args,schemaDigest:options?.expectedToolSchemaDigest??(modernDefinition?mcpToolSchemaDigest(modernDefinition):null)},()=>{
+            assertCurrentConnection();
+            return activeClient.callTool({ name: toolName, arguments: args },
+              modernDefinition ? { toolDefinition: modernDefinition } : undefined);
+          });
+          const projected = remoteCuration ? remoteCuration(res) : res;
+          const normalized = normalizeMcpToolContentResult(projected, maxTextChars, options?.retainFullResult === true);
           if (session && sessionEntry) session.touch();
           else await closeMcpClientAndTransport(activeClient, transport);
           client = null;
@@ -1190,7 +1246,8 @@ async function callServerToolContentInternal(
     const rawMessage = err instanceof Error ? err.message : String(err);
     const mcpCode = err instanceof McpError || ProtocolError.isInstance(err) ? err.code : null;
     const boundary = classifyMcpToolCallBoundary(err, boundaryState.phase);
-    const reason = err instanceof McpToolResponseTooLargeError ? "response-too-large" : null;
+    const reason = err instanceof McpToolResponseTooLargeError ? "response-too-large"
+      : err instanceof McpConnectionSessionChangedError ? "connection-session-changed" : null;
     throw new McpToolCallError(
       boundary,
       mcpCode,
@@ -1304,9 +1361,61 @@ export async function createPreparedMcpTargetTransport(binding: PreparedMcpBindi
     preparedMcpTransport(binding, binding.server);
     const init = { requestInit: { headers: target.headers },
       ...(binding.server.catalogId === OPENCRAB_CATALOG_ID ? { fetch: openCrabNoRedirectFetch } : {}) };
-    return target.kind === "sse" ? new LegacySSEClientTransport(new URL(target.url), init)
+    const transport = target.kind === "sse" ? new LegacySSEClientTransport(new URL(target.url), init)
       : new LegacyHTTPClientTransport(new URL(target.url), init);
+    const consume = captureRemoteCurationConsumer(binding, completeRemoteMemoryCuration);
+    if (consume) instrumentRemoteMemoryResponses(transport, consume);
+    return transport;
   }
   // Internal native proxies stay on the legacy SDK's byte-compatible stdio boundary.
   return (await createTransport(binding.server, {}, undefined, signal, binding, true, cwd)).transport as unknown as LegacyTransport;
+}
+
+/** Proxy CLI replies do not pass the host-loop callTool normalizer. Consume
+ * only a matching tools/call response and project its auxiliary memory packet. */
+function instrumentRemoteMemoryResponses(transport: LegacyTransport, consume: (result: unknown) => unknown): void {
+  const pending = new Set<string | number>();
+  const send = transport.send.bind(transport);
+  transport.send = async (message, options) => {
+    if ("method" in message && message.method === "tools/call" && "id" in message && pending.size < 128) pending.add(message.id);
+    try { await send(message, options); }
+    catch (error) { if ("id" in message && message.id !== undefined) pending.delete(message.id); throw error; }
+  };
+  let receiver: LegacyTransport["onmessage"] = transport.onmessage;
+  Object.defineProperty(transport, "onmessage", { configurable: true,
+    get: () => (message: Parameters<NonNullable<LegacyTransport["onmessage"]>>[0], extra: Parameters<NonNullable<LegacyTransport["onmessage"]>>[1]) => {
+      if (!("method" in message) && "id" in message && message.id !== null && message.id !== undefined && pending.delete(message.id) && "result" in message) message = { ...message, result: consume(message.result) } as typeof message;
+      receiver?.(message, extra);
+    },
+    set: (value: LegacyTransport["onmessage"]) => { receiver = value; },
+  });
+}
+
+/** A separate remote connection, not the foreground approval proxy or its
+ * execution/history grant. The native consumer already bound account+target;
+ * its independent abort/fingerprint fence remains live throughout this call. */
+async function completeRemoteMemoryCuration(
+  target: Exclude<ReturnType<typeof preparedMcpTargetTransport>, { kind: "stdio" }>,
+  args: { jobId: string; leaseToken: string; inputDigest: string; model: string; output: string },
+  signal: AbortSignal,
+): Promise<unknown> {
+  signal.throwIfAborted();
+  const client = new Client({ name: "agentlas-desktop-memory", version: electronAppVersion() }, { capabilities: {} });
+  const init = { requestInit: { headers: target.headers }, fetch: openCrabNoRedirectFetch };
+  const transport = (target.kind === "sse" ? new SSEClientTransport(new URL(target.url), init)
+    : new StreamableHTTPClientTransport(new URL(target.url), init)) as unknown as Transport;
+  const stop = () => { void client.close().catch(() => {}); void transport.close().catch(() => {}); };
+  try {
+    return await withAbortSignal(withTimeout((async () => {
+      configureProtocolNegotiation(client, transport);
+      await client.connect(transport);
+      signal.throwIfAborted();
+      const inventory = await listCompleteToolInventory(client, signal);
+      const definition = inventory.tools.find(tool => tool.name === "agentlas.complete_memory_curation");
+      if (!definition) throw new Error("remote_memory_completion_tool_unavailable");
+      signal.throwIfAborted();
+      // Exact toolDefinition disables the modern SDK's header-mismatch replay.
+      return client.callTool({ name: "agentlas.complete_memory_curation", arguments: args }, { toolDefinition: definition });
+    })(), 30_000, stop, signal), signal, stop);
+  } finally { await closeMcpProbeBounded(client, transport); }
 }

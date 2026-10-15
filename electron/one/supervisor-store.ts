@@ -44,6 +44,30 @@ export function supervisorStoppedGoalForTask(db:Database.Database,taskId:string,
   return typeof row?.goalId === "string" ? row.goalId : null;
 }
 
+/** The Work hand-off that owns a worker conversation, found by its exact workerChatId however old it is. A bounded
+ * "latest N rows" scan lost the owner once N newer hand-offs existed (native-harness notyet NH16 4th audit: row 401). */
+export function supervisorWorkForWorkerChat(db: Database.Database, workerChatId: string, oneId?: string): {one_id: string; command_id: string; task_id: string} | undefined {
+  if (!workerChatId || !db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_requests'").get()) return undefined;
+  return db.prepare(`SELECT one_id,command_id,task_id FROM one_supervisor_requests
+    WHERE kind='work' AND task_id IS NOT NULL ${oneId ? "AND one_id=?" : ""} AND json_valid(payload_json)
+      AND json_extract(payload_json,'$.workerChatId')=? ORDER BY rowid DESC LIMIT 1`)
+    .get(...(oneId ? [oneId, workerChatId] : [workerChatId])) as {one_id: string; command_id: string; task_id: string} | undefined;
+}
+
+/** A graph/automation result answering One's conversation or a Work session it delegated (native-harness notyet NH16,
+ * one/graph-review.ts). Written inside the scheduler's delivery transaction, so a crash cannot lose it and a replayed
+ * delivery cannot queue it twice; the owner's own stop is kept as skipped. Same notice id rule as notice(). A store that
+ * the supervisor has not upgraded yet (no review columns) queues nothing; the origin report itself is already saved. */
+export function insertGraphResultNotice(db: Database.Database, input: {oneId: string; automationId: string; runId: string; personalChatId: string; state: string; ownerStopped: boolean; detail: string}): boolean {
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_notices'").get()) return false;
+  const columns = new Set((db.prepare("PRAGMA table_info(one_supervisor_notices)").all() as Array<{name:string}>).map(column => column.name));
+  if (!columns.has("review_state") || !columns.has("detail")) return false;
+  const taskId = `graph:${input.automationId}`;
+  return db.prepare(`INSERT OR IGNORE INTO one_supervisor_notices(id,one_id,task_id,origin_chat_id,run_id,state,created_at,review_state,review_reason,detail)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).run(supervisorHash([input.oneId,taskId,input.runId]),input.oneId,taskId,input.personalChatId,input.runId,input.state,
+    new Date().toISOString(),input.ownerStopped ? "skipped" : "pending",input.ownerStopped ? "owner_cancelled" : null,input.detail).changes === 1;
+}
+
 /** Additive ingress/attribution journal. Tasks, attempts, effects and approvals stay in their existing ledgers. */
 export class OneSupervisorStore {
   constructor(readonly db: Database.Database) {
@@ -187,11 +211,18 @@ export class OneSupervisorStore {
   }
   /** Written in the same transaction as the settlement, so a crash cannot lose a finished delegation's report (D06).
    * The owner's own cancellation needs no report back. */
-  notice(row: SupervisorRequestRow, state: string): void {
-    if (!row.task_id || !row.run_id) return;
-    this.db.prepare(`INSERT OR IGNORE INTO one_supervisor_notices(id,one_id,task_id,origin_chat_id,run_id,state,created_at,review_state,review_reason)
+  notice(row: SupervisorRequestRow, state: string): boolean {
+    if (!row.task_id || !row.run_id) return false;
+    return this.db.prepare(`INSERT OR IGNORE INTO one_supervisor_notices(id,one_id,task_id,origin_chat_id,run_id,state,created_at,review_state,review_reason)
       VALUES(?,?,?,?,?,?,?,?,?)`).run(supervisorHash([row.one_id,row.task_id,row.run_id]),row.one_id,row.task_id,row.origin_chat_id,row.run_id,state,new Date().toISOString(),
-      state === "cancelled" ? "skipped" : "pending", state === "cancelled" ? "owner_cancelled" : null);
+      state === "cancelled" ? "skipped" : "pending", state === "cancelled" ? "owner_cancelled" : null).changes === 1;
+  }
+  /** A teammate result linked to the exact one_chat_send run that started it (22 O1). Once per teammate run. */
+  noticeTeamResult(oneId: string, input: {dispatchId: string; childRunId: string; chatId: string; state: string; detail: string}): boolean {
+    const taskId = `team:${input.dispatchId}`;
+    return this.db.prepare(`INSERT OR IGNORE INTO one_supervisor_notices(id,one_id,task_id,origin_chat_id,run_id,state,created_at,review_state,review_reason,detail)
+      VALUES(?,?,?,?,?,?,?,?,?,?)`).run(supervisorHash([oneId,taskId,input.childRunId]),oneId,taskId,input.chatId,input.childRunId,input.state,new Date().toISOString(),
+      input.state === "cancelled" ? "skipped" : "pending", input.state === "cancelled" ? "owner_cancelled" : null, input.detail.slice(0, 6000)).changes === 1;
   }
   private checkinRow(row: {id:string;instruction:string;cadence_json:string;notify:"important"|"always";next_at:number;last_fired_at:number|null;fires:number}): OneCheckin {
     return {id:row.id,instruction:row.instruction,cadence:JSON.parse(row.cadence_json) as OneCheckinCadence,notify:row.notify,
@@ -243,6 +274,10 @@ export class OneSupervisorStore {
   noticeNeedsOwner(oneId: string, taskId: string, chatId: string, waitId: string, detail: string): boolean {
     return this.db.prepare(`INSERT OR IGNORE INTO one_supervisor_notices(id,one_id,task_id,origin_chat_id,run_id,state,created_at,review_state,detail)
       VALUES(?,?,?,?,?,'needs-owner',?,'pending',?)`).run(supervisorHash([oneId,taskId,`wait:${waitId}`]),oneId,taskId,chatId,`wait:${waitId}`,new Date().toISOString(),detail.slice(0,2000)).changes === 1;
+  }
+  /** Results waiting for a review turn, including ones another process queued (a graph delivered by the scheduler). */
+  hasPendingReview(oneId: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM one_supervisor_notices WHERE one_id=? AND review_state='pending' LIMIT 1").get(oneId);
   }
   noticeDetail(id: string): string | null {
     return (this.db.prepare("SELECT detail FROM one_supervisor_notices WHERE id=?").get(id) as {detail:string|null}|undefined)?.detail ?? null;

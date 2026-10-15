@@ -50,3 +50,14 @@
 .fileBody pre{margin:0;font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
 @media(max-width:640px){.dialog{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}.nav{flex-direction:row;overflow:auto;border-right:0;border-bottom:1px solid var(--paper-edge)}.nav h2{display:none}.search{width:120px}}
 .more{align-self:center;margin:4px 0 10px;height:28px;padding:0 12px;border:1px solid var(--paper-edge-strong);border-radius:8px;background:var(--white);color:var(--ink);font:inherit;font-size:12px;cursor:pointer}.more:hover { color: var(--ink); }
+
+.role {
+  flex: none;
+  padding: 3px 8px;
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.3));
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+}

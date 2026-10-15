@@ -27,6 +27,10 @@ export interface DeviceBridgeMainPorts {
   appControl?(input: { kind: "operations" | "call"; ownerTurn: boolean; input: Record<string, unknown> }): Promise<{ outcome: "value"; value: unknown } | { outcome: "error"; code: string; message: string }>;
   /** Run every intake the service could not hand over while this process was away. Called on each successful attach. */
   drainGoalIntake?(): void;
+  /** NH21: execute a Goal action the service's Alive host reserved (Main owns Goal custody). Answers a value, never throws. */
+  aliveAction?(input: { domain: "work" | "one"; actionId: string }): { ok: true; result: unknown } | { ok: false; error: string };
+  /** NH21: a life changed in the service; refresh this process's screens. */
+  aliveChanged?(event: Record<string, unknown>): boolean;
   session(): DeviceSession;
   idleSeconds(): number | null;
   subscribePower(handler: (event: "lock-screen" | "unlock-screen" | "suspend" | "resume") => void): () => void;
@@ -102,6 +106,15 @@ export function createDeviceBridgeMain(ports: DeviceBridgeMainPorts) {
         if (answer.outcome === "value" && JSON.stringify(answer.value ?? null).length > 600_000) return { ok: true, outcome: "error", code: "result-too-large", message: "The result is too large; narrow the query." };
         return { ok: true, ...answer };
       }
+      if (op === "aliveAction") {
+        if (!exactKeys(payload, ["domain", "actionId"]) || (payload.domain !== "work" && payload.domain !== "one") || !id(payload.actionId) || !ports.aliveAction) return { ok: false, error: "device_bridge_refused" };
+        const answer = ports.aliveAction({ domain: payload.domain, actionId: payload.actionId });
+        return answer.ok ? { ok: true, result: answer.result } : { ok: false, error: /^[a-z][a-z0-9_]{1,99}$/.test(answer.error) ? answer.error : "device_bridge_refused" };
+      }
+      if (op === "aliveChanged") {
+        if (!ports.aliveChanged || !ports.aliveChanged(payload)) return { ok: false, error: "device_bridge_refused" };
+        return { ok: true };
+      }
       if (op === "disposeOsExecution") {
         if (!exactKeys(payload, ["executionId"]) || !id(payload.executionId)) return { ok: false, error: "device_bridge_refused" };
         const entry = executions.get(payload.executionId);
@@ -146,6 +159,11 @@ export async function deviceBridgeMain(): Promise<ReturnType<typeof createDevice
     releaseChat: (chatId, deadlineMs) => releaseLocalChatSessions(chatId, deadlineMs),
     forwardGoalIntake: input => goalIntake.acceptForwardedGoalIntake(input),
     drainGoalIntake: () => goalIntake.drainPendingGoalIntakes(),
+    aliveAction: input => {
+      try { return require("../alive-organisms").executeForwardedAliveAction(input); }
+      catch (error) { return { ok: false, error: codeOf(error) === "device_bridge_refused" ? "alive_action_failed" : codeOf(error) }; }
+    },
+    aliveChanged: event => { try { return require("../alive-organisms").aliveChangedFromService(event) as boolean; } catch { return false; } },
     appControl: async input => {
       const service = await import("../app-control/service");
       try {

@@ -19,13 +19,13 @@ export function readOneRuntimeSelection(): RuntimeSelection | null {
   } catch { return null; }
 }
 
-export async function reconcileOneOllamaSelection(): Promise<OllamaMigrationEntry | null> {
+export async function reconcileOneOllamaSelection(options: { apply?: boolean } = {}): Promise<OllamaMigrationEntry | null> {
   const api = localModelMigrationApi();
   const before = window.localStorage.getItem(ONE_RUNTIME_STORAGE_KEY);
   const current = readOneRuntimeSelection();
   if (!api || current?.kind !== "ollama") return null;
   const entry = await api.inspectOneSelection({ selection: current });
-  if (entry?.state === "mapped") {
+  if (entry?.state === "mapped" && options.apply === true) {
     if (window.localStorage.getItem(ONE_RUNTIME_STORAGE_KEY) !== before) return null;
     const actual: RuntimeSelection = {
       ...current,

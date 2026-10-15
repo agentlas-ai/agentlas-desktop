@@ -14,6 +14,60 @@ type Conversations = ReturnType<Science["scienceConversationService"]>;
 type Questions = ReturnType<Store["researcherQuestions"]>;
 type Scope = { projectId: string; conversationId: string };
 type TurnScope = Scope & { turnId: string };
+type ComputeReadInput = Scope & { executionId: string; afterCursor?: number; maxEvents?: number; waitMs?: number };
+type ComputeListInput = Scope & { limit?: number };
+export type NativeHumanComputeRequester = { kind: "signed-science-main-frame"; viewInstanceId: string; releaseId: string; ownerServiceIdentity: string; ownerBootId: string };
+type HumanComputeInput = Scope & { turnId:string|null; originMessageId: string; invocationRunId: string|null; executionId: string; kernelId: string;
+  kernelGeneration: number; codeSha256: string; environmentSha256: string; requestId: string };
+type HumanComputeReadInput = Scope & { requestId: string };
+type HumanComputeTarget = Omit<HumanComputeInput, "requestId">;
+type HumanComputeConsoleInput = { requestId: string; target: HumanComputeTarget; code: string;
+  inputs?: { path: string; sha256: string }[]; outputs?: string[]; timeoutMs?: number };
+type HumanComputeConsoleReadInput = { requestId: string; target: HumanComputeTarget };
+type HumanSessionBeginInput = Scope & ({requestId:string;mode:"bootstrap-python";originMessageId:string;language:"python";environment:{kind:"system"};limits?:Partial<{wallTimeMs:number;maxCells:number;maxActiveRuntimeMs:number;maxCellTimeMs:number}>}|{requestId:string;anchorTarget:HumanComputeTarget;mode:"reuse-live"|"fresh-generation";limits?:Partial<{wallTimeMs:number;maxCells:number;maxActiveRuntimeMs:number;maxCellTimeMs:number}>});
+type HumanSessionRunInput = Scope & {requestId:string;sessionId:string;sessionEpoch:number;code:string;inputs?:{path:string;sha256:string}[];outputs?:string[];timeoutMs?:number};
+type HumanSessionReadInput = Scope & {sessionId?:string;requestId?:string};
+type HumanSessionRequestReadInput = Scope & {sessionId:string;requestId:string};
+type HumanSessionStopInput = HumanSessionRequestReadInput & {sessionEpoch:number};
+type HumanSessionInput = HumanSessionBeginInput | HumanSessionRunInput | HumanSessionReadInput | HumanSessionRequestReadInput | HumanSessionStopInput;
+type HumanComputeGuard = (requester: NativeHumanComputeRequester) => void;
+type HumanComputeService = {
+  interruptHuman(requester: NativeHumanComputeRequester, input: HumanComputeInput, guard: HumanComputeGuard): unknown;
+  clearGenerationHuman(requester: NativeHumanComputeRequester, input: HumanComputeInput, guard: HumanComputeGuard): unknown;
+  readHumanControl(requester: NativeHumanComputeRequester, input: HumanComputeReadInput, guard: HumanComputeGuard): unknown;
+  runHuman?(requester: NativeHumanComputeRequester, input: HumanComputeConsoleInput, guard: HumanComputeGuard): unknown;
+  readHumanConsole?(requester: NativeHumanComputeRequester, input: HumanComputeConsoleReadInput, guard: HumanComputeGuard): unknown;
+  beginHumanSession?(requester: NativeHumanComputeRequester,input: HumanSessionBeginInput,guard:HumanComputeGuard):unknown;
+  runHumanSession?(requester: NativeHumanComputeRequester,input: HumanSessionRunInput,guard:HumanComputeGuard):unknown;
+  readHumanSession?(requester: NativeHumanComputeRequester,input: HumanSessionReadInput,guard:HumanComputeGuard):unknown;
+  readHumanSessionRequest?(requester: NativeHumanComputeRequester,input: HumanSessionRequestReadInput,guard:HumanComputeGuard):unknown;
+  stopHumanSession?(requester: NativeHumanComputeRequester,input: HumanSessionStopInput,guard:HumanComputeGuard):unknown;
+};
+// Signed older Science packages may lack native compute. Keep that case an
+// explicit unavailable response rather than constructing a GUI execution owner.
+type ComputeUiApi = {
+  createScientificComputeUiControls?: (ports: { authorize(scope: Scope, action: "interrupt" | "clear-generation" | "read-control" | "run-console" | "read-console" | "begin-session" | "run-session" | "read-session" | "read-session-request" | "stop-session"): NativeHumanComputeRequester;
+    store: Store; service: HumanComputeService }) => { interrupt(input: HumanComputeInput): Promise<unknown>;
+      clearGeneration(input: HumanComputeInput): Promise<unknown>; readHumanControl(input: HumanComputeReadInput): Promise<unknown>;
+      runConsole?(input: HumanComputeConsoleInput): Promise<unknown>; readConsoleRequest?(input: HumanComputeConsoleReadInput): Promise<unknown>;
+      beginSession?(input: HumanSessionBeginInput): Promise<unknown>;
+      runSession?(input: HumanSessionRunInput): Promise<unknown>;
+      readSession?(input: HumanSessionReadInput): Promise<unknown>;
+      readSessionRequest?(input: HumanSessionRequestReadInput): Promise<unknown>;
+      stopSession?(input: HumanSessionStopInput): Promise<unknown>;
+    };
+  createScientificComputeUiReader?: (ports: { authorize(): void; store: Store; service: {
+    list(input: ComputeListInput): unknown; read(input: Required<ComputeReadInput>): Promise<unknown>;
+  } }) => { list(input: ComputeListInput): Promise<unknown>; read(input: ComputeReadInput): Promise<unknown> };
+  scienceScientificExecutionService?: () => {
+    list(projectId: string, conversationId: string, limit?: number): unknown;
+    wait(projectId: string, conversationId: string, executionId: string, afterCursor?: number, maxEvents?: number, waitMs?: number): Promise<unknown>;
+  } & Partial<HumanComputeService>;
+};
+type CapabilityUiApi = {
+  createScientificCapabilityUiReader?: (ports: { authorize(scope: Scope): void; inspect(scope: Scope): unknown }) => { inspect(scope: Scope): Promise<unknown> };
+  inspectScientificCapabilityContext?: (store: Store, scope: Scope) => unknown;
+};
 
 /** Native, authenticated control operations, NOT an agent-callable tool surface. */
 export type DaemonScienceCommand =
@@ -27,6 +81,18 @@ export type DaemonScienceCommand =
   | { op: "projects.updateDeliverable"; input: Parameters<Store["updateProjectDeliverable"]>[0] }
   | { op: "runtime.inspect"; input: Parameters<Science["inspectScienceRuntime"]>[1] }
   | { op: "runtime.select"; input: Parameters<Science["selectScienceRuntime"]>[1] }
+  | { op: "compute.list"; input: ComputeListInput }
+  | { op: "compute.read"; input: ComputeReadInput }
+  | { op: "compute.interrupt" | "compute.clearGeneration"; input: HumanComputeInput; requester: NativeHumanComputeRequester }
+  | { op: "compute.readHumanControl"; input: HumanComputeReadInput; requester: NativeHumanComputeRequester }
+  | { op: "compute.runConsole"; input: HumanComputeConsoleInput; requester: NativeHumanComputeRequester }
+  | { op: "compute.readConsoleRequest"; input: HumanComputeConsoleReadInput; requester: NativeHumanComputeRequester }
+  | { op: "compute.beginSession"; input: HumanSessionBeginInput; requester: NativeHumanComputeRequester }
+  | { op: "compute.runSession"; input: HumanSessionRunInput; requester: NativeHumanComputeRequester }
+  | { op: "compute.readSession"; input: HumanSessionReadInput; requester: NativeHumanComputeRequester }
+  | { op: "compute.readSessionRequest"; input: HumanSessionRequestReadInput; requester: NativeHumanComputeRequester }
+  | { op: "compute.stopSession"; input: HumanSessionStopInput; requester: NativeHumanComputeRequester }
+  | { op: "capability.inspect"; input: Scope }
   | { op: "loops.inspect"; input: { projectId: string } }
   | { op: "loops.start"; input: Parameters<Store["startLoopSession"]>[0] }
   | { op: "loops.transition"; input: Parameters<Store["transitionLoopSession"]>[0] }
@@ -98,6 +164,8 @@ const errorCode = (error: unknown) => (error instanceof Error ? error.message : 
 
 export function createDaemonScienceService(options: {
   ownerEpoch: string;
+  /** Native daemon constructor identity; absent older hosts cannot admit human controls. */
+  ownerServiceIdentity?: string;
   assertOwner(): void;
   onEvent?(event: DaemonScienceEvent): boolean | void;
   shutdownTimeoutMs?: number;
@@ -330,6 +398,83 @@ export function createDaemonScienceService(options: {
     }
     const { api, store, conversations, host: activeHost } = ready();
     switch (command.op) {
+      case "compute.beginSession":
+      case "compute.runSession":
+      case "compute.readSession":
+      case "compute.readSessionRequest":
+      case "compute.stopSession":
+      case "compute.interrupt":
+      case "compute.clearGeneration":
+      case "compute.runConsole":
+      case "compute.readConsoleRequest":
+      case "compute.readHumanControl": {
+        const compute = api as unknown as ComputeUiApi;
+        if (!options.ownerServiceIdentity || typeof compute.createScientificComputeUiControls !== "function" || typeof compute.scienceScientificExecutionService !== "function") throw Error("science_native_compute_human_unavailable");
+        const requester = command.requester;
+        const assertRequester = () => {
+          assertExecution(); // Includes the current exclusive native owner lease.
+          const keys = ["kind", "viewInstanceId", "releaseId", "ownerServiceIdentity", "ownerBootId"];
+          if (!requester || Object.keys(requester).length !== keys.length || Object.keys(requester).some(key => !keys.includes(key))
+            || requester.kind !== "signed-science-main-frame" || keys.some(key => typeof requester[key as keyof NativeHumanComputeRequester] !== "string"
+              || requester[key as keyof NativeHumanComputeRequester].length < 1 || requester[key as keyof NativeHumanComputeRequester].length > 200
+              || /[\u0000-\u001f]/u.test(requester[key as keyof NativeHumanComputeRequester]))
+            || requester.ownerBootId !== options.ownerEpoch || requester.ownerServiceIdentity !== options.ownerServiceIdentity) throw Error("science_native_compute_human_owner_invalid");
+        };
+        assertRequester();
+        const execution = () => { assertRequester(); return compute.scienceScientificExecutionService!(); };
+        const call = (method: keyof HumanComputeService, supplied: NativeHumanComputeRequester, input: HumanComputeInput | HumanComputeReadInput | HumanComputeConsoleInput | HumanComputeConsoleReadInput | HumanSessionInput, guard: HumanComputeGuard) => {
+          assertRequester();
+          const service = execution();
+          if (typeof service[method] !== "function") throw Error("science_native_compute_human_unavailable");
+          return (service[method] as (r: NativeHumanComputeRequester, i: HumanComputeInput | HumanComputeReadInput | HumanComputeConsoleInput | HumanComputeConsoleReadInput | HumanSessionInput, g: HumanComputeGuard) => unknown).call(service, supplied, input, guard);
+        };
+        const controls = compute.createScientificComputeUiControls({ authorize: () => { assertRequester(); return { ...requester }; }, store,
+          service: { interruptHuman: (r, i, g) => call("interruptHuman", r, i, g), clearGenerationHuman: (r, i, g) => call("clearGenerationHuman", r, i, g),
+            readHumanControl: (r, i, g) => call("readHumanControl", r, i, g),
+            runHuman: (r, i, g) => call("runHuman", r, i, g), readHumanConsole: (r, i, g) => call("readHumanConsole", r, i, g),
+            beginHumanSession: (r,i,g)=>call("beginHumanSession",r,i,g),
+            runHumanSession: (r,i,g)=>call("runHumanSession",r,i,g),
+            readHumanSession: (r,i,g)=>call("readHumanSession",r,i,g),
+            readHumanSessionRequest: (r,i,g)=>call("readHumanSessionRequest",r,i,g),
+            stopHumanSession: (r,i,g)=>call("stopHumanSession",r,i,g) } });
+        if (command.op === "compute.runConsole" && typeof controls.runConsole !== "function"
+          || command.op === "compute.readConsoleRequest" && typeof controls.readConsoleRequest !== "function") throw Error("science_native_compute_human_console_unavailable");
+        const sessionPort = {"compute.beginSession":"beginSession","compute.runSession":"runSession","compute.readSession":"readSession","compute.readSessionRequest":"readSessionRequest","compute.stopSession":"stopSession"} as const;
+        if(command.op in sessionPort) {
+          const method=sessionPort[command.op as keyof typeof sessionPort],fn=controls[method];
+          if(typeof fn!=="function")throw Error("science_native_compute_human_session_unavailable");
+          const result=await (fn as (input:HumanSessionInput)=>Promise<unknown>).call(controls,command.input as HumanSessionInput);assertRequester();return result;
+        }
+        const result = await (command.op === "compute.runConsole" ? controls.runConsole!(command.input)
+          : command.op === "compute.readConsoleRequest" ? controls.readConsoleRequest!(command.input)
+          : command.op === "compute.interrupt" ? controls.interrupt(command.input) : command.op === "compute.clearGeneration" ? controls.clearGeneration(command.input) : command.op === "compute.readHumanControl" ? controls.readHumanControl(command.input) : Promise.reject(Error("science_native_compute_human_command_invalid")));
+        assertRequester();
+        return result;
+      }
+      case "capability.inspect": {
+        const capability = api as unknown as CapabilityUiApi;
+        if (typeof capability.createScientificCapabilityUiReader !== "function" || typeof capability.inspectScientificCapabilityContext !== "function") {
+          throw new Error("science_capability_context_ui_unavailable");
+        }
+        const reader = capability.createScientificCapabilityUiReader({ authorize: assertExecution,
+          inspect: s => { assertExecution(); return capability.inspectScientificCapabilityContext!(store, s); } });
+        return reader.inspect(command.input);
+      }
+      case "compute.list":
+      case "compute.read": {
+        const compute = api as unknown as ComputeUiApi;
+        if (typeof compute.createScientificComputeUiReader !== "function" || typeof compute.scienceScientificExecutionService !== "function") {
+          throw new Error("science_native_compute_ui_unavailable");
+        }
+        // The exclusive daemon lease is rechecked at authorization and each
+        // service access. The execution service stays lazy in the owning daemon.
+        const execution = () => { assertExecution(); return compute.scienceScientificExecutionService!(); };
+        const reader = compute.createScientificComputeUiReader({ authorize: assertExecution, store, service: {
+          list: i => execution().list(i.projectId, i.conversationId, i.limit),
+          read: i => execution().wait(i.projectId, i.conversationId, i.executionId, i.afterCursor, i.maxEvents, i.waitMs),
+        } });
+        return command.op === "compute.list" ? reader.list(command.input) : reader.read(command.input);
+      }
       case "space.inspect": return api.scienceProjectSpaceService().inspect(command.input.projectId, command.input.options);
       case "space.snapshot": return api.scienceProjectSpaceService().snapshot(command.input.projectId);
       case "space.link": return api.scienceProjectSpaceService().link(command.input.projectId, command.input.link);
@@ -579,7 +724,7 @@ export function createDaemonScienceService(options: {
       // Do not close SQLite underneath an in-flight model discovery/Math call.
       await withinDeadline(Promise.allSettled([...commands]));
       for (const release of unsubscribe.splice(0)) release();
-      if (runtimeOpened && science) science.closeScienceStore();
+      if (runtimeOpened && science) await science.closeScienceStore();
       runtimeOpened = false;
       adapter = null;
       state = "closed";

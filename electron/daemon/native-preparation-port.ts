@@ -17,6 +17,8 @@ export function createDaemonNativePreparationPort(options: {
   /** Receiver's shared transfer resource admission, not a producer schema cap. */
   importCheckpointValue(value: unknown, signal: AbortSignal): Promise<unknown>;
   assertCurrent(): void;
+  /** Same captured channel/binding for old terminal cleanup; never new claims. */
+  assertTerminalCurrent(): void;
   control: NativePreparationControl;
   claimAttachments(payload: Readonly<Record<string, unknown>>): Promise<unknown>;
 }): NativeOneStartPort {
@@ -31,16 +33,19 @@ export function createDaemonNativePreparationPort(options: {
   const localJudge = createRendererInvocationPreparation(admission);
   if (options.control.start.handle !== start.handle || options.control.start.binding.chatId !== start.binding.chatId
     || options.control.start.binding.runId !== start.binding.runId || options.control.start.binding.inputDigest !== start.binding.inputDigest) throw new Error("native_preparation_input_mismatch");
-  function assertCurrent(binding: NativeOneStartBinding): void {
-    options.assertCurrent();
+  function assertBinding(binding: NativeOneStartBinding): void {
     if (binding.chatId !== admission.chatId || binding.runId !== admission.runId || binding.admission.chatId !== admission.chatId
       || binding.admission.runId !== admission.runId || binding.admission.ownerProcessEpoch !== admission.ownerProcessEpoch
       || binding.admission.canonicalRequestJson !== admission.canonicalRequestJson) throw new Error("native_preparation_input_mismatch");
   }
+  function assertCurrent(binding: NativeOneStartBinding): void { options.assertCurrent(); assertBinding(binding); }
+  function assertTerminalCurrent(binding: NativeOneStartBinding): void { options.assertTerminalCurrent(); assertBinding(binding); }
   async function call(action: NativePreparationWireAction, payload: Record<string, unknown>): Promise<unknown> {
-    options.assertCurrent();
+    const terminal = action === "checkpoint" && (payload.kind === "team.fail-start" || payload.kind === "attachments.release");
+    const check = terminal ? options.assertTerminalCurrent : options.assertCurrent;
+    check();
     const value = await options.control.request(action, payload);
-    options.assertCurrent();
+    check();
     return value;
   }
   async function checkpointValue(kind: string, payload: Readonly<Record<string, unknown>>, signal: AbortSignal): Promise<unknown> {
@@ -51,7 +56,7 @@ export function createDaemonNativePreparationPort(options: {
     assertCurrent,
     async execute(binding, checkpoint, signal) {
       const terminalCleanup = checkpoint.kind === "team.fail-start" || checkpoint.kind === "attachments.release";
-      assertCurrent(binding); if (!terminalCleanup) signal.throwIfAborted();
+      if (terminalCleanup) assertTerminalCurrent(binding); else { assertCurrent(binding); signal.throwIfAborted(); }
       if (checkpoint.kind === "judge") {
         // The original judges warm process-local caches. Execute them in this
         // daemon's real preparation ALS, accounting and actual AbortController.
@@ -73,9 +78,9 @@ export function createDaemonNativePreparationPort(options: {
     },
     cancel(binding) {
       // The source and prepared driver share one exact actual Stop promise.
-      assertCurrent(binding); return options.control.cancel();
+      assertTerminalCurrent(binding); return options.control.cancel();
     },
-    quiesce(binding, status) { assertCurrent(binding); return options.control.quiesce(status); },
-    finish(binding, status) { assertCurrent(binding); return options.control.finish(status); },
+    quiesce(binding, status) { assertTerminalCurrent(binding); return options.control.quiesce(status); },
+    finish(binding, status) { assertTerminalCurrent(binding); return options.control.finish(status); },
   });
 }

@@ -19,8 +19,9 @@ import { RuntimeJudgmentRefusal } from "./judgment-refusal";
 import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliToolSilenceWindowMs } from "./runner";
+import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, runtimeProtocolUnrecognizedFailure, cliToolSilenceWindowMs } from "./runner";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
+import { schemaFallbackPromptPart } from "../../shared/runtime-capabilities";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild } from "./exec";
 import { tStatus } from "./status-i18n";
 import { withForeignCliContext } from "./foreign-cli-context";
@@ -138,6 +139,10 @@ export async function probeCursor(): Promise<CursorProbe | null> {
 }
 
 function promptFor(req: RunnerRequest): string {
+  // Composition order (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.main.cursor.prompt), same as the Kimi print path:
+  // the request-scoped output contract is a wrapper supplement (out of the agent slot, before final authority), then host turn context —
+  // this stateless legacy path ignored req.turnContext, so a run whose context rides separately lost it — then history.
+  const turnContext = req.turnContext?.trim();
   const parts = [
     `[SYSTEM]\n${wrapSystemPrompt(
       req.systemPrompt,
@@ -151,10 +156,12 @@ function promptFor(req: RunnerRequest): string {
       undefined,
       undefined,
       req.surfaceGate,
-      undefined,
-      undefined,
+      "cursor",
+      req.sciencePromptProfile,
       req.judgmentOnly === true ? "host-judgment" : undefined,
-    )}`,
+      req.outputSchema ? [schemaFallbackPromptPart(req.outputSchema.schema)] : undefined,
+      req.systemPromptComposition,
+    )}${turnContext ? `\n\n${turnContext}` : ""}`,
     "",
   ];
   for (const entry of req.history) parts.push(`${entry.role === "user" ? "[USER]" : "[ASSISTANT]"}\n${entry.text}`, "");
@@ -189,6 +196,30 @@ function eventText(value: unknown): string {
   return "";
 }
 
+/**
+ * True when a Cursor print stream-json line is a protocol event this adapter understands: system/tool_call/error lines
+ * with their documented discriminators, assistant/user messages with content, or a result whose subtype/is_error are
+ * typed. Any line that yields assistant text also counts. Wrong-shape JSON is not an event.
+ */
+export function cursorEventRecognized(event: unknown): boolean {
+  if (!event || typeof event !== "object" || Array.isArray(event)) return false;
+  const e = event as Record<string, unknown>;
+  if (eventText(e)) return true;
+  switch (e.type) {
+    case "system": return typeof e.subtype === "string";
+    case "tool_call": return true;
+    case "thinking": return true;
+    case "error": return true;
+    case "assistant":
+    case "user": {
+      const content = e.message && typeof e.message === "object" ? (e.message as Record<string, unknown>).content : undefined;
+      return Array.isArray(content) || typeof content === "string";
+    }
+    case "result": return typeof e.subtype === "string" || typeof e.is_error === "boolean";
+    default: return false;
+  }
+}
+
 export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> => {
   if (assertScienceRecoveryRequest(req, "cursor"))
     throw new Error("science_recovery_acp_transport_required");
@@ -215,6 +246,7 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
   const bin = await resolveCursorBinary();
   if (!bin) throw new Error(req.locale === "ko" ? "Cursor Agent CLI를 찾지 못했습니다." : "Cursor Agent CLI is not installed.");
   events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
+  if (req.outputSchema) events.onStatus(tStatus(req.locale, "schemaInPromptOnly"));
   const args = ["--print", "--output-format", "stream-json"];
   // Cursor requires --force to apply writes in headless mode. Never add it for
   // read-only invocations; normal Agentlas write/full tasks remain automated.
@@ -231,7 +263,7 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
         stdio: ["ignore", "pipe", "pipe"],
         cwd,
         // Sessions go to the product mirror of the CLI's config folder, never the person's own (cli-product-homes.ts).
-        env: withForeignCliContext("cursor", req.env ?? process.env, selectionFor(req.agentId)),
+        env: withForeignCliContext("cursor", req.env ?? process.env, selectionFor(req.agentId, undefined, req.chatId)),
         ...detachedSpawnOpts(),
       });
     } catch (error) {
@@ -259,6 +291,7 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
     let stderr = "";
     let terminalCompleted = false;
     let terminalError = false;
+    let recognizedEvents = 0;
     let settled = false;
     const finishReject = (error: Error) => {
       if (settled) return;
@@ -269,6 +302,7 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
     const consume = (line: string) => {
       try {
         const event = JSON.parse(line);
+        if (cursorEventRecognized(event)) recognizedEvents += 1;
         if (event?.type === "result") {
           terminalCompleted = !terminalError && event.subtype === "success" && event.is_error === false
             && typeof event.result === "string" && Boolean(event.result.trim());
@@ -306,6 +340,11 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
           failure: runtimeSilentTimeoutFailure("cursor", silence.trippedWith?.limitMs ?? silenceLimitMs) });
       }
       if (code !== 0) return reject(new Error(`Cursor Agent CLI exit ${code}${stderr ? `\n${stderr}` : ""}`));
+      if (recognizedEvents === 0 && !text.trim()) {
+        // Exit 0 with not one recognized stream-json event: a typed failure, never the "returned no text" placeholder.
+        const failure = runtimeProtocolUnrecognizedFailure("cursor", stderr);
+        return resolve({ text: failure.message, ownerControlTerminal: "uncertain", failure });
+      }
       resolve({ text: text.trim() || stderr.trim() || "(Cursor Agent returned no text)",
         ownerControlTerminal: terminalCompleted ? "completed" : "uncertain" });
     });

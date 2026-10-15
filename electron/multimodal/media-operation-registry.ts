@@ -45,6 +45,8 @@ const CURRENT_VIDEO_ADAPTER_CAPABILITIES: Record<string, MediaProviderCapabiliti
   seedance: { submitRecovery: "none", statusLookup: "provider_operation_id", cancellation: "local_only" },
   kling: { submitRecovery: "none", statusLookup: "provider_operation_id", cancellation: "local_only" },
   grok: { submitRecovery: "none", statusLookup: "none", cancellation: "local_only" },
+  // Grok text-to-video is the xAI API: its request_id is a provider operation the restart path can look up.
+  "grok-api": { submitRecovery: "none", statusLookup: "provider_operation_id", cancellation: "local_only" },
 };
 
 export function currentVideoAdapterCapabilities(providerId: string): MediaProviderCapabilities {
@@ -105,8 +107,10 @@ export function recordMediaProviderProgress(input: {
   providerStatus: string;
   providerCheckpoint?: unknown;
 }): MediaOperationRecord {
+  const current = getMediaOperation(input.id);
   return update(input.id, {
-    lifecycle: "running",
+    // Provider lookup can be retried while ingest is incomplete; never regress verifying back to running.
+    lifecycle: current?.lifecycle === "verifying" ? "verifying" : "running",
     providerStatus: input.providerStatus,
     ...(input.providerCheckpoint === undefined ? {} : { providerCheckpoint: input.providerCheckpoint }),
     incrementPollAttempts: true,

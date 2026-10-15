@@ -1,5 +1,6 @@
 import { createDaemonOneSupervisorHost } from "./one-supervisor-host";
 import { ALIVE_DECISION_PROTOCOL, createDaemonAliveDecisionPort } from "./alive-decision-port";
+import { ALIVE_RUNTIME_PROTOCOL } from "../alive-organisms/runtime-protocol";
 import { getDb } from "../store/db";
 import { agentContextOwnerBinding } from "../runtime/agent-context-admission";
 import { withAgentContext } from "../runtime/agent-context";
@@ -75,7 +76,8 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
     assertOwner:options.assertOwner,ownerBinding:agentContextOwnerBinding,now:Date.now,
     async resolveRuntime(choice){
       const status=(await detectRuntimes()).find(value=>value.kind===choice.kind
-        && (value.backend??null)===choice.backend && (value.source??null)===choice.source);
+        && (value.backend??null)===choice.backend && (value.source??null)===choice.source
+        && (choice.kind!=="acp" || value.acpAgentId===choice.acpAgentId));
       if(!status)return null;
       const selected={...status,model:choice.model};
       const picked=selected.kind==="agentlas"?{runner:withAgentContext(runAliveServingDecision,{kind:"agentlas"}),label:"Agentlas"}:pickRunner(selected);
@@ -88,7 +90,9 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
   type Attached = { identity: NativeAuthenticatedIdentity; publisher: ReturnType<typeof createNativeInvocationPublicPublisher>;
     approvals: ReturnType<typeof createNativeInvocationApprovalChannel>;
     recovery: ReturnType<typeof createNativeJsonTransfers>;
-    recoveryRecords: Map<string, { descriptor: NativeJsonTransferDescriptor; complete: boolean }> };
+    recoveryRecords: Map<string, { descriptor: NativeJsonTransferDescriptor; complete: boolean }>;
+    createSubscriptions(notify: (method: string, params: unknown, sourceMode?: "live" | "post-denial") => boolean): {publisher: ReturnType<typeof createNativeInvocationPublicPublisher>; approvals: ReturnType<typeof createNativeInvocationApprovalChannel>};
+    activateObservation?: () => Array<{method: string; params: unknown; mode?: "live" | "post-denial"}> } ;
   const attached = new Map<ControlSocketPeer, Attached>();
   const owned = new Map<string, Captured>(), known = new Map<string, Captured>();
   let server!: Awaited<ReturnType<typeof startNativeAuthChannel>>;
@@ -110,12 +114,12 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
     try { return capture(chatId, runId); }
     catch (error) { const observed = daemonOwnedObservation(chatId, runId); if (observed) return observed; throw error; }
   };
-  const observationAvailable = () => [...attached.values()].every(r => r.publisher.available && r.approvals.available);
-  const capabilities = (): NativeInvocationCapabilities => ({ start: !!host && accepting && observationAvailable(), stop: !!host,
-    events: !!host && [...attached.values()].every(r => r.publisher.available),
-    approvals: !!host && [...attached.values()].every(r => r.approvals.available), recovery: !!host });
-  const status = (): NativeInvocationAttachReply => {
-    const value = capabilities(); return { version: "agentlas.native-attach.v1", bootId: options.bootId,
+  const observationAvailable = (record: Attached) => record.publisher.available && record.approvals.available;
+  const capabilities = (record?: Attached): NativeInvocationCapabilities => ({ start: !!host && accepting && (!record || observationAvailable(record)), stop: !!host,
+    events: !!host && (!record || record.publisher.available),
+    approvals: !!host && (!record || record.approvals.available), recovery: !!host });
+  const status = (record?: Attached): NativeInvocationAttachReply => {
+    const value = capabilities(record); return { version: "agentlas.native-attach.v1", bootId: options.bootId,
       serviceIdentity: options.binding.serviceIdentity, ready: Object.values(value).every(Boolean), capabilities: value };
   };
   function disposeAttachment(peer: ControlSocketPeer) { const record = attached.get(peer); if (!record) return;
@@ -125,11 +129,45 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
   async function dispatch(method: string, params: unknown, peer: ControlSocketPeer): Promise<unknown> {
     options.assertOwner();
     if (method === "native.attach") {
+      if (params && typeof params === "object" && (params as {version?:unknown}).version === "agentlas.native-observation-reset.v1") {
+        const record = current(peer);
+        if (!exact(params, ["version"])) fail("native_observation_reset_invalid");
+        // Only disposable observation buffers rotate. Original source/ledger,
+        // recovery records, physical channel, callbacks and writers are untouched.
+        record.publisher.dispose(); record.approvals.dispose();
+        let paused = true;
+        const notifications: Array<{method: string; params: unknown; mode?: "live" | "post-denial"}> = [];
+        let liveNotifications = 0;
+        const next = record.createSubscriptions((method, value, mode) => {
+          if (!paused) {
+            if (method.startsWith("invocation.approval.")) return peer.notify("invocation.approval.observation", {version: "agentlas.native-approval-observation.v1", stream: record.publisher.stream, method, params: value, ...(mode ? {mode} : {})});
+            return peer.notify(method, value);
+          }
+          // Historical descriptor/receipt metadata never consumes live delivery
+          // capacity. Its original registry and exact lazy transfers own history.
+          if (mode !== "post-denial" && liveNotifications++ >= NATIVE_PUBLIC_EVENT_POLICY.maxItems + 2 * NATIVE_APPROVAL_OBSERVATION_POLICY.maxRecords) return false;
+          notifications.push({method, params: value, ...(mode ? {mode} : {})}); return true;
+        });
+        record.publisher = next.publisher; record.approvals = next.approvals;
+        record.activateObservation = () => { paused = false; return notifications.splice(0); };
+        return {version: "agentlas.native-observation-reset.v1", stream: next.publisher.stream};
+      }
+      if (params && typeof params === "object" && (params as {version?:unknown}).version === "agentlas.native-observation-activate.v1") {
+        const record = current(peer);
+        if (!exact(params, ["version", "stream"]) || params.stream !== record.publisher.stream || !record.activateObservation) fail("native_observation_stream_changed");
+        const notifications = record.activateObservation(); record.activateObservation = undefined;
+        return {version: "agentlas.native-observation-activate.v1", stream: record.publisher.stream, notifications, status: status(record)};
+      }
       if(params && typeof params==="object" && (params as {version?:unknown}).version===ALIVE_DECISION_PROTOCOL){
         const attachment=current(peer),identity=attachment.identity;
         return alivePort().dispatch(params,{identity,
           assertCurrent(){if(current(peer).identity!==identity)fail("alive_decision_native_peer_changed");},
           onClose:listener=>peer.onClose(listener)});
+      }
+      // NH21: the service holds the Alive domain; the window forwards the owner's AGI edits here.
+      if(params && typeof params==="object" && (params as {version?:unknown}).version===ALIVE_RUNTIME_PROTOCOL){
+        current(peer);
+        return (await import("../alive-organisms")).answerAliveRuntimeRequest(params,options.bootId);
       }
       // Chat host handover (1.3.0 A2): Desktop is about to run this chat's next turn and asks the service to release.
       if(params && typeof params==="object" && (params as {version?:unknown}).version===CHAT_HANDOVER_VERSION){
@@ -225,7 +263,7 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
         const record = current(peer); return record.approvals.receipt(record.identity, params.requestId); }
       if (exact(params, ["version"]) && params.version === "agentlas.native-recovery.v1") {
         current(peer);
-        const captures=[...known.values()].map(r=>({chatId:r.start.binding.chatId,runId:r.start.binding.runId,nativeCustody:r.released?'released':'retained'}));
+        const captures=[...known.values()].filter(r=>!host?.executableAuthorityClosed(r.start)).map(r=>({chatId:r.start.binding.chatId,runId:r.start.binding.runId,nativeCustody:r.released?'released':'retained'}));
         for(const value of supervisor.captures())if(!captures.some(row=>row.runId===value.runId))captures.push(value);
         const activeRunIds=options.service.activeRunIds().filter(runId=>captures.some(row=>row.runId===runId));
         return { version: "agentlas.native-recovery.v1", bootId: options.bootId,
@@ -248,8 +286,9 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
           const active = invocationRunOwners.getActiveOwner(chatId);
           return !!active && !!daemonOwnedObservation(chatId, active.runId);
         };
+        const createSubscriptions = (notify: (method: string, params: unknown, sourceMode?: "live" | "post-denial") => boolean) => {
         const publisher = createNativeInvocationPublicPublisher({ service: options.service, identity, getIdentity,
-          notify: (method, value) => peer.notify(method, value), acceptsRun: observesRun,
+          notify, acceptsRun: observesRun,
           acceptsChat: observesChat,
           ...NATIVE_PUBLIC_EVENT_POLICY,
           onFault: error => console.warn("[native-invocation] public stream unavailable", error.code) });
@@ -264,15 +303,17 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
             const original = invocationRunOwners.getRunOwner(owner.chatId, owner.runId);
             return original?.ownerId === options.bootId && original.ownerKind === "daemon" && original.leaseId === owner.leaseId;
           },
-          notify: (method, value) => peer.notify(method, value), maxRetainedBytes: NATIVE_PUBLIC_EVENT_POLICY.maxRetainedBytes,
+          notify, maxRetainedBytes: NATIVE_PUBLIC_EVENT_POLICY.maxRetainedBytes,
           maxItems: NATIVE_APPROVAL_OBSERVATION_POLICY.maxRecords, onFault: error => console.warn("[native-invocation] approval delivery unavailable", (error as {code?:unknown})?.code) });
+        return {publisher, approvals}; };
+        const {publisher, approvals} = createSubscriptions((method, value) => peer.notify(method, value));
         const recoveryRecords = new Map<string, { descriptor: NativeJsonTransferDescriptor; complete: boolean }>();
         const recovery = createNativeJsonTransfers({ maxPending: NATIVE_PUBLIC_EVENT_POLICY.maxItems, maxRetainedBytes: NATIVE_PUBLIC_EVENT_POLICY.maxRetainedBytes,
           isCurrent: owner => server.authenticatedPeerIdentity(peer) === identity && [...recoveryRecords.values()].some(value => value === owner) });
-        attached.set(peer, { identity, publisher, approvals, recovery, recoveryRecords }); peer.onClose(() => disposeAttachment(peer));
+        attached.set(peer, { identity, publisher, approvals, recovery, recoveryRecords, createSubscriptions }); peer.onClose(() => disposeAttachment(peer));
         daemonDeviceBridge().attach(peer, { request: frame => server.request(peer, "native.checkpoint", frame) });
       }
-      return status();
+      return status(current(peer));
     }
     if (method === "native.detach") {
       current(peer); if (!exact(params, ["version"]) || params.version !== "agentlas.native-detach.v1") fail("native_invocation_detach_invalid");
@@ -283,12 +324,16 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
     if (method === "native.approvalReply") return attachment.approvals.reply(attachment.identity, params);
     if (method === "invoke.nativeStart") {
       if (!accepting) fail("daemon_shutting_down");
-      if (!observationAvailable()) fail("native_invocation_observation_unavailable");
+      if (!observationAvailable(attachment)) fail("native_invocation_observation_unavailable");
       const start = nativeStartDescriptor(params);
       if (owned.has(start.handle) || known.has(start.binding.runId)) fail("native_invocation_descriptor_replayed");
+      const reservation = getInvocationAdmission(start.binding.runId);
+      if (!reservation || reservation.status !== "pending" || reservation.chatId !== start.binding.chatId
+        || reservation.inputDigest !== start.binding.inputDigest || reservation.ownerProcessEpoch !== options.bootId) fail("native_invocation_descriptor_replayed");
+      for (const [handle, value] of owned) if (host.executableAuthorityClosed(value.start)) owned.delete(handle);
       if (owned.size >= options.resources.maxRecords) fail("native_invocation_runtime_busy");
       while (known.size >= options.resources.maxRecords) {
-        const old = [...known.entries()].find(([, value]) => value.released);
+        const old = [...known.entries()].find(([, value]) => value.released || host!.executableAuthorityClosed(value.start));
         if (!old) fail("native_invocation_runtime_busy"); known.delete(old![0]);
       }
       const record = { peer, identity: attachment.identity, start, released: false };
@@ -350,8 +395,9 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
       if (!host) return fail("native_invocation_host_not_ready"); return host.consumeServiceObservationProof(peer, start, wire, proof); }, handle: dispatch });
   try { options.assertOwner(); host = createDaemonNativeInvocationHost({ binding: options.binding, bootId: options.bootId,
     service: options.service, transport: server, assertSocketFence: options.assertOwner, ...options.resources,
-    onCustodyReleased: start => { const record = owned.get(start.handle);
-      if (!record || record.start.binding.runId !== start.binding.runId || record.start.binding.chatId !== start.binding.chatId
+    onCustodyReleased: start => { const record = owned.get(start.handle) ?? known.get(start.binding.runId);
+      if (!record) return; // Original physical cleanup may finish after its sealed metadata was compacted.
+      if (record.start.handle !== start.handle || record.start.binding.runId !== start.binding.runId || record.start.binding.chatId !== start.binding.chatId
         || record.start.binding.inputDigest !== start.binding.inputDigest) throw new Error("native_invocation_release_binding_changed");
       record.released = true; owned.delete(start.handle); } }); }
   catch (error) { unregisterHandoverPeer(); await server.close(); throw error; }

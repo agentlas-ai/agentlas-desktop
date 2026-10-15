@@ -1,108 +1,14 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { IconRefresh } from '../../components/Icon';
 import { businessOnlyKeys, isBusinessId, isBusinessRevision, isBusinessScope, isBusinessSession, type BusinessExactStop } from '../../../shared/business/context';
 import { sameBusinessHistoryViewContext, type BusinessHistoryViewContext } from '../../../shared/business/history-view';
 import { isBusinessNativeArray } from '../../../shared/business/native-registry';
-import { looksSecret } from '../../../shared/secret-patterns';
+import { businessReviewMatches, businessReviewReady, isBusinessLearningSnapshot, type BusinessLearningCandidateAction as CandidateAction, type BusinessLearningCandidateView, type BusinessLearningReviewView, type BusinessLearningSnapshot, type BusinessLearningPanelPort } from '../../../shared/business/console-contracts';
+export { businessReviewMatches, businessReviewReady, isBusinessLearningSnapshot, type BusinessLearningBaseRevision, type BusinessLearningCandidateView, type BusinessLearningReviewView, type BusinessLearningSnapshot, type BusinessLearningPanelPort } from '../../../shared/business/console-contracts';
 
-/** Canonical numeric revisions and opaque owner revisions are distinct exact values. */
-export type BusinessLearningBaseRevision = number | string;
-function isLearningBaseRevision(value: unknown): value is BusinessLearningBaseRevision {
-  return isBusinessRevision(value) || isBusinessId(value);
-}
-export interface BusinessLearningCandidateView {
-  id: string;
-  revision: number;
-  controlRevision: number;
-  label: string;
-  currentVersion: string | null;
-  baseRevision: BusinessLearningBaseRevision;
-  proposalDigest: string | null;
-  state: 'candidate' | 'draft' | 'review-ready' | 'active' | 'paused' | 'revoked' | 'unknown';
-  validation: 'passed' | 'failed' | 'unknown';
-  sourceStatus: 'allowed' | 'paused' | 'revoked' | 'unknown';
-  stopTarget: Pick<BusinessExactStop, 'hostId' | 'taskId' | 'runId' | 'controlVersion'> | null;
-  restoreVersion: string | null;
-}
-export interface BusinessLearningReviewView {
-  candidateId: string;
-  candidateRevision: number;
-  baseRevision: BusinessLearningBaseRevision;
-  proposalDigest: string;
-  reviewReceiptId: string;
-  reviewedHash: string;
-  expiresAt: number;
-  /** Native trusted reviewer supplies current content authorization after loading the exact diff. */
-  trustedOwner: boolean;
-  contentAuthorized: boolean;
-  actualDiffLoaded: boolean;
-  changes: Array<{ path: string; before: string; after: string }>;
-}
-export interface BusinessLearningSnapshot {
-  context?: BusinessHistoryViewContext | null;
-  scopeLabel: string;
-  status: 'current' | 'unknown';
-  sources: Array<{ id: string; label: string; policyRevision: number; collection: 'on' | 'paused' | 'off'; analysis: 'on' | 'paused' | 'off' }>;
-  candidates: BusinessLearningCandidateView[];
-}
-interface CandidateAction { candidateId: string; expectedRevision: number; expectedControlRevision: number }
-export interface BusinessLearningPanelPort {
-  read(): Promise<BusinessLearningSnapshot>;
-  subscribeInvalidation?(listener: () => void): () => void;
-  compare(input: CandidateAction): Promise<BusinessLearningReviewView | null>;
-  approve(input: CandidateAction & { baseRevision: BusinessLearningBaseRevision; proposalDigest: string; reviewReceiptId: string; reviewedHash: string }): Promise<BusinessLearningSnapshot>;
-  pause(input: CandidateAction): Promise<BusinessLearningSnapshot>;
-  revoke(input: CandidateAction): Promise<BusinessLearningSnapshot>;
-  restoreProposal(input: CandidateAction & { version: string; expectedBaseRevision: BusinessLearningBaseRevision }): Promise<BusinessLearningSnapshot>;
-  pauseCollection(input: { sourceId: string; expectedPolicyRevision: number }): Promise<BusinessLearningSnapshot>;
-  /** Exact safe stop is independent of content, authority-service readiness and other pending mutations. */
-  stop(input: CandidateAction & { target: NonNullable<BusinessLearningCandidateView['stopTarget']> }): Promise<{ state: 'accepted' | 'settled' | 'unknown' | 'failed' }>;
-  openAudit(input: { candidateId: string }): Promise<void>;
-}
-export function businessReviewMatches(candidate: BusinessLearningCandidateView, review: BusinessLearningReviewView | null, now = Date.now()): boolean {
-  let characters = 0;
-  const content = (text: unknown): text is string => typeof text === 'string' && text.length <= 100000 && !looksSecret(text)
-    && (characters += text.length) <= 1000000;
-  return candidate.sourceStatus === 'allowed' && !!review
-    && businessOnlyKeys(review, ['candidateId', 'candidateRevision', 'baseRevision', 'proposalDigest', 'reviewReceiptId', 'reviewedHash', 'expiresAt', 'trustedOwner', 'contentAuthorized', 'actualDiffLoaded', 'changes'])
-    && review.trustedOwner === true && review.contentAuthorized === true && review.actualDiffLoaded === true
-    && isLearningBaseRevision(candidate.baseRevision) && isLearningBaseRevision(review.baseRevision)
-    && review.candidateId === candidate.id && review.candidateRevision === candidate.revision && review.baseRevision === candidate.baseRevision
-    && candidate.proposalDigest !== null && review.proposalDigest === candidate.proposalDigest && review.reviewedHash === review.proposalDigest
-    && /^[a-f0-9]{64}$/.test(review.proposalDigest) && isBusinessId(review.reviewReceiptId) && isBusinessRevision(review.expiresAt)
-    && review.expiresAt > now && isBusinessNativeArray(review.changes, 128) && review.changes.length > 0
-    && review.changes.every(change => businessOnlyKeys(change, ['path', 'before', 'after']) && typeof change.path === 'string'
-      && change.path.length <= 240 && !change.path.startsWith('/') && !change.path.includes('\\') && !/[\u0000-\u001f\u007f]/.test(change.path)
-      && change.path.split('/').every(part => !!part && part !== '.' && part !== '..') && content(change.before) && content(change.after))
-    && new Set(review.changes.map(change => change.path)).size === review.changes.length;
-}
-export function businessReviewReady(candidate: BusinessLearningCandidateView, review: BusinessLearningReviewView | null, now = Date.now()): boolean {
-  return candidate.state === 'review-ready' && candidate.validation === 'passed' && businessReviewMatches(candidate, review, now);
-}
 const stateLabels = { candidate: '후보', draft: '초안', 'review-ready': '검토 필요', active: '사용 중', paused: '일시 중지', revoked: '회수됨', unknown: '확인 필요' } as const;
-export function isBusinessLearningSnapshot(value: unknown): value is BusinessLearningSnapshot {
-  const label = (text: unknown): text is string => typeof text === 'string' && text.length <= 200 && !looksSecret(text) && !/[\u0000-\u001f\u007f]/.test(text);
-  try {
-    return businessOnlyKeys(value, ['context', 'scopeLabel', 'status', 'sources', 'candidates']) && label(value.scopeLabel)
-      && ['current', 'unknown'].includes(value.status as string) && isBusinessNativeArray(value.sources, 160)
-      && value.sources.every(source => businessOnlyKeys(source, ['id', 'label', 'policyRevision', 'collection', 'analysis'])
-        && isBusinessId(source.id) && label(source.label) && isBusinessRevision(source.policyRevision)
-        && ['on', 'paused', 'off'].includes(source.collection as string) && ['on', 'paused', 'off'].includes(source.analysis as string))
-      && new Set(value.sources.map(source => (source as { id: string }).id)).size === value.sources.length
-      && isBusinessNativeArray(value.candidates, 160) && value.candidates.every(candidate =>
-        businessOnlyKeys(candidate, ['id', 'revision', 'controlRevision', 'label', 'currentVersion', 'baseRevision', 'proposalDigest', 'state', 'validation', 'sourceStatus', 'stopTarget', 'restoreVersion'])
-        && isBusinessId(candidate.id) && label(candidate.label) && (candidate.currentVersion === null || isBusinessId(candidate.currentVersion))
-        && [candidate.revision, candidate.controlRevision].every(isBusinessRevision) && isLearningBaseRevision(candidate.baseRevision)
-        && (candidate.proposalDigest === null || typeof candidate.proposalDigest === 'string' && /^[a-f0-9]{64}$/.test(candidate.proposalDigest))
-        && Object.hasOwn(stateLabels, candidate.state as string) && ['passed', 'failed', 'unknown'].includes(candidate.validation as string)
-        && ['allowed', 'paused', 'revoked', 'unknown'].includes(candidate.sourceStatus as string)
-        && (candidate.restoreVersion === null || isBusinessId(candidate.restoreVersion))
-        && (candidate.stopTarget === null || businessOnlyKeys(candidate.stopTarget, ['hostId', 'taskId', 'runId', 'controlVersion'])
-          && [candidate.stopTarget.hostId, candidate.stopTarget.taskId, candidate.stopTarget.runId].every(isBusinessId) && isBusinessRevision(candidate.stopTarget.controlVersion)))
-      && new Set(value.candidates.map(v => (v as { id: string }).id)).size === value.candidates.length;
-  } catch { return false; }
-}
 function learningCurrent(snapshot: BusinessLearningSnapshot | null, expected: BusinessHistoryViewContext | null | undefined, now: number): boolean {
   if (!isBusinessLearningSnapshot(snapshot)) return false;
   const context = snapshot?.context;
@@ -133,7 +39,7 @@ function terminalStop(candidate: BusinessLearningCandidateView, context: Busines
 }
 
 /** Metadata first; private diff content is requested separately and requires current owner/content review. */
-export function BusinessLearningPanel({ port, expectedContext, initialSnapshot = null }: { port: BusinessLearningPanelPort | null; expectedContext?: BusinessHistoryViewContext | null; initialSnapshot?: BusinessLearningSnapshot | null }) {
+export function BusinessLearningPanel({ port, expectedContext, initialSnapshot = null, displayClosed = false }: { port: BusinessLearningPanelPort | null; expectedContext?: BusinessHistoryViewContext | null; initialSnapshot?: BusinessLearningSnapshot | null; displayClosed?: boolean }) {
   const [snapshot, setSnapshot] = useState<BusinessLearningSnapshot | null>(port ? initialSnapshot : null);
   const [confirmed, setConfirmed] = useState(false);
   const [review, setReview] = useState<BusinessLearningReviewView | null>(null);
@@ -160,13 +66,17 @@ export function BusinessLearningPanel({ port, expectedContext, initialSnapshot =
     const off = port.subscribeInvalidation?.(() => {
       generation.current++; setSnapshot(null); setReview(null); setConfirmed(false); setBusy(false); setNotice('현재 권한이 바뀌어 변경안 표시를 닫았습니다.');
     });
-    void port.read().then(value => { if (generation.current === expected) {
+    if (!displayClosed) void port.read().then(value => { if (generation.current === expected) {
       try { accept(value); } catch { setSnapshot(null); setConfirmed(false); setNotice('현재 업무 범위와 학습 상태를 확인해야 합니다.'); }
     } }, () => {
       if (generation.current === expected) { setSnapshot(null); setNotice('현재 학습 상태를 확인할 수 없습니다.'); }
     });
     return () => { generation.current++; ownerGeneration.current++; off?.(); };
   }, [port, expectedKey]);
+  useEffect(() => {
+    if (displayClosed) { generation.current++; setSnapshot(null); setReview(null); setConfirmed(false); setBusy(false); }
+    // Preserve the exact original terminal targets and their owner generation.
+  }, [displayClosed]);
   useEffect(() => {
     if (!snapshot?.context) return;
     const expiresAt = Math.min(snapshot.context.expiresAt, Date.parse(snapshot.context.session.expiresAt)); let timer: ReturnType<typeof setTimeout>;
@@ -220,23 +130,22 @@ export function BusinessLearningPanel({ port, expectedContext, initialSnapshot =
       if (owner === ownerGeneration.current) setNotice(result.state === 'settled' ? '해당 실행이 중지됐습니다.' : result.state === 'accepted' ? '중지를 전달했습니다. 결과를 확인 중입니다.' : '중지 결과를 확인해야 합니다.');
     } catch { if (owner === ownerGeneration.current) setNotice('중지 결과가 확인되지 않았습니다. 실행 상태를 다시 확인해 주세요.'); }
   }
-  const visible = learningCurrent(snapshot, expectedContext, Date.now()) ? snapshot : null;
+  const visible = !displayClosed && learningCurrent(snapshot, expectedContext, Date.now()) ? snapshot : null;
   const current = port !== null && confirmed && visible !== null;
   return (
     <section aria-labelledby="business-learning-heading" className="business-learning-panel">
-      <h2 id="business-learning-heading">학습과 개선</h2>
-      <p>{visible?.scopeLabel ?? '업무 범위를 확인하세요.'}</p>
-      <p>허용한 업무에서 개선안을 만듭니다. 적용 전 변경안과 검증 결과를 확인하세요.</p>
-      {!port && <p role="status">관리 연결 필요 · 실제 변경안과 현재 권한을 확인한 후 검토할 수 있습니다.</p>}
-      <button type="button" disabled={busy || !port} onClick={() => void update(() => port!.read())}>현재 상태 확인</button>
-      {visible?.sources.map(source => <div key={source.id}>
-        <span>{source.label} · 수집 {source.collection === 'on' ? '허용' : source.collection === 'paused' ? '중지' : '꺼짐'} · 분석 {source.analysis === 'on' ? '허용' : source.analysis === 'paused' ? '중지' : '꺼짐'}</span>
+      <header className="business-section-header"><h2 id="business-learning-heading">학습과 개선</h2>
+        <button type="button" className="business-icon-button" title="현재 상태 확인" aria-label="현재 상태 확인" disabled={displayClosed || busy || !port} onClick={() => void update(() => port!.read())}><IconRefresh size={16} /></button></header>
+      {visible && <span className="business-status">{visible.scopeLabel}</span>}
+      {!port && <span role="status" className="business-status">개선 연결 필요</span>}
+      {visible?.sources.map(source => <div key={source.id} className="business-setting-row">
+        <span>{source.label}</span><span className="business-status">수집 {source.collection === 'on' ? '허용' : source.collection === 'paused' ? '중지' : '꺼짐'}</span><span className="business-status">분석 {source.analysis === 'on' ? '허용' : source.analysis === 'paused' ? '중지' : '꺼짐'}</span>
         <button type="button" disabled={busy || !current || source.collection !== 'on'} onClick={() => void update(() => port!.pauseCollection({ sourceId: source.id, expectedPolicyRevision: source.policyRevision }))}>수집 중지</button>
       </div>)}
       {visible?.candidates.map(candidate => <article key={candidate.id} aria-label={candidate.label}>
         <h3>{candidate.label}</h3>
-        <p>현재 버전 {candidate.currentVersion ?? '적용 전'} · {stateLabels[candidate.state]} · 검증 {candidate.validation === 'passed' ? '통과' : candidate.validation === 'failed' ? '실패' : '확인 필요'}</p>
-        <div>
+        <div className="business-context-line"><span>현재 버전 {candidate.currentVersion ?? '적용 전'}</span><span className="business-status" data-state={candidate.state}>{stateLabels[candidate.state]}</span><span className="business-status" data-state={candidate.validation}>검증 {candidate.validation === 'passed' ? '통과' : candidate.validation === 'failed' ? '실패' : '확인 필요'}</span></div>
+        <div className="business-actions">
           <button type="button" disabled={busy || !current} onClick={() => void compare(candidate)}>변경안 비교</button>
           <button type="button" disabled={busy || !current || !businessReviewReady(candidate, review)} onClick={() => {
             if (!review || !businessReviewReady(candidate, review)) return;
@@ -257,7 +166,6 @@ export function BusinessLearningPanel({ port, expectedContext, initialSnapshot =
         </div>}
       </article>)}
       {!visible && terminalTargets.length > 0 && <section aria-label="원래 실행의 중지">
-        <p>앞서 확인한 실행을 중지할 수 있습니다.</p>
         {terminalTargets.map((target, index) => <button key={JSON.stringify(target)} type="button" disabled={!port}
           aria-label={`원래 실행 중지 ${index + 1}`} onClick={() => void stop(target)}>원래 실행 중지</button>)}
       </section>}

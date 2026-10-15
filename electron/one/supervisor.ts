@@ -6,7 +6,8 @@ import { createHash } from 'node:crypto';
 import { chatFilePrompt, chatFileImages, validateChatAttachmentSelection } from "../store/chat-message-attachments";
 import { getDb, openedStoreMigrationRole } from "../store/db";
 import { getOneProfile, getOneProfileOrigin, updateOneProfile } from "../store/one-profile";
-import { createChat, getChat, appendChatMessage, listChatMessages, normalizeChatRuntimeSelection } from "../store/chats";
+import { createChat, getChat, appendChatMessage, listChatMessages, normalizeChatRuntimeSelection, getChatWorkingFolder, setChatWorkingFolder } from "../store/chats";
+import { ensurePersonalOneWorkspace, exportPersonalSession } from "./personal-workspace";
 import { ensureCanonicalTaskForChat, listCanonicalTasks, getCanonicalTaskForChat, hasPassedTaskForceExecutionVerification } from "../store/tasks";
 import { getProject } from "../store/projects";
 import { grantChatAlwaysApproval } from "../store/capability-grants";
@@ -21,7 +22,9 @@ import { OneSupervisorService, type SupervisorRuntime } from "./supervisor-servi
 import { SupervisorScienceAdapter } from "./supervisor-science";
 import { supervisorExactResult, supervisorQuietRun, supervisorReplyTurns } from "./supervisor-presentation";
 import { onAskUserLifecycle } from "../confirm/ask-user";
-import { registerOneHostAlertSink } from "./host-alerts";
+import { registerOneGraphResultWake, registerOneHostAlertSink, registerOneTeamResultSink } from "./host-alerts";
+import { personalGraphTasks } from "./graph-review";
+import { getAutomationLiveRunId, getAutomationLiveRunState, listAutomations } from "../store/automations";
 import { OneSupervisorLegacyMigration } from './supervisor-migration';
 import type { ScienceDaemonClient } from "../science-host/daemon-client";
 import type { SupervisorTask, SupervisorHostNoticePurpose } from "../../shared/one-supervisor";
@@ -87,6 +90,12 @@ const nativeBudgetAdmissions = new Map<string,string>();
 let nativeRuntime: ReturnType<typeof createSupervisorNativeRuntime> | null = null;
 export function configureOneSupervisorScience(client:Pick<ScienceDaemonClient,"commandObserved">):void {
   science=new SupervisorScienceAdapter(client);
+}
+/** An unset working folder becomes the personal output folder; a folder the owner chose stays (21 G2). */
+function bindPersonalFolder(chatId:string):void {
+  try {
+    if(!getChatWorkingFolder(chatId))setChatWorkingFolder(chatId,ensurePersonalOneWorkspace(getOneProfile().oneId,chatId).output);
+  } catch(error){console.warn("[one-supervisor] personal folder deferred",error instanceof Error?error.message:"unknown");}
 }
 export function isPersonalSupervisorConversation(chatId:string):boolean {
   return personalSupervisorConversationInDb(getDb(),getOneProfile().oneId,chatId);
@@ -218,7 +227,7 @@ export function oneSupervisor():OneSupervisorService {
   };
   supervisor=new OneSupervisorService({
     store,owner,budget,identity:getOneProfile,assertAuthority:()=>hostOptions?.assertAuthority(),workQueue,workIdentityMutable:hostsWork,wakeWorkQueue:()=>queueMicrotask(()=>workExecutor?.kick()),
-    createConversation:()=>createChat({originSurface:"one",taskMode:"conversation",title:getOneProfile().displayName}).id,
+    createConversation:()=>{const id=createChat({originSurface:"one",taskMode:"conversation",title:getOneProfile().displayName}).id;bindPersonalFolder(id);return id;},
     history:chatId=>listChatMessages(chatId,100),appendUser:(chatId,text,images)=>{
       const groupId=/<!-- agentlas-chat-files:v1:([0-9a-f-]{36}) -->/i.exec(text)?.[1];
       validateChatAttachmentSelection(chatId,groupId,images);
@@ -233,7 +242,9 @@ export function oneSupervisor():OneSupervisorService {
       // The native Work invocation persists its own human input once. The
       // atomic supervisor request already durably owns this brief before dispatch.
       return {chatId:chat.id,taskId:task.id};
-    },alwaysApprove:chatId=>grantChatAlwaysApproval(chatId,"one-delegation"),quietRun:runId=>supervisorQuietRun(getDb(),runId),tasks:desktopTasks,locale:currentUiLocale,normalizeRuntimeSelection:normalizeChatRuntimeSelection,
+    },graphTasks:oneId=>personalGraphTasks(getDb(),oneId,{automations:listAutomations,
+      liveRunId:id=>getAutomationLiveRunState(id)==="running" ? getAutomationLiveRunId(id) : null}),
+    alwaysApprove:chatId=>grantChatAlwaysApproval(chatId,"one-delegation"),quietRun:runId=>supervisorQuietRun(getDb(),runId),tasks:desktopTasks,locale:currentUiLocale,normalizeRuntimeSelection:normalizeChatRuntimeSelection,
     turns:(chatId,requests)=>supervisorReplyTurns(getDb(),chatId,requests,invocationService.attach(chatId)),
     appearance:input=>{updateOneProfile({expectedVersion:input.expectedVersion,patch:{displayName:input.displayName,bubbleColor:input.bubbleColor}});},
     legacyHistory:(oneId,chatId)=>legacy.inventory(oneId,chatId,new Set(invocationService.activeChatIds()),['inherited','machine'].includes(getOneProfileOrigin())),
@@ -255,7 +266,11 @@ export function oneSupervisor():OneSupervisorService {
     try{if(runId)budgetRuntime.reconcileRun(runId,nativeReceipt);else budgetRuntime.reconcile();}
     catch(error){console.warn("[one-supervisor] usage reconciliation pending",error instanceof Error?error.message:"unknown");}
   };
-  const stopBudgetEvents=onSettled(event=>{observeBudget(event.runId,event.receipt);if(event.receipt.status==='completed')queueMicrotask(()=>{try{collectOnePersonalDataResult(event.runId);}catch{/* A denied/stale result stays a proposal blocker; never retries inference. */}});});
+  // The personal conversation works in its own folder and keeps a revisioned raw export (docs native-harness 21 G2).
+  const personalChat=store.conversation(getOneProfile().oneId);
+  if(personalChat)bindPersonalFolder(personalChat);
+  const stopBudgetEvents=onSettled(event=>{observeBudget(event.runId,event.receipt);
+    if(event.chatId===store.conversation(getOneProfile().oneId))queueMicrotask(()=>{try{exportPersonalSession(getOneProfile().oneId,event.chatId);}catch(error){console.warn("[one-supervisor] personal session export deferred",error instanceof Error?error.message:"unknown");}});if(event.receipt.status==='completed')queueMicrotask(()=>{try{collectOnePersonalDataResult(event.runId);}catch{/* A denied/stale result stays a proposal blocker; never retries inference. */}});});
   const budgetTimer=setInterval(()=>observeBudget(),30_000);budgetTimer.unref?.();
   stopBudgetHost=()=>{clearInterval(budgetTimer);stopBudgetEvents();};
   observeBudget();
@@ -287,7 +302,12 @@ export function oneSupervisor():OneSupervisorService {
   });
   // Host problems from other rooms reach the owner through One, not only as cards there (owner 2026-10-05).
   const stopHostAlerts=registerOneHostAlertSink(alert=>supervisor?.hostNeedsOwner(alert) ?? false);
-  const stopProactive=()=>{clearInterval(checkinTimer);stopQuestions();stopHostAlerts();};stopProactiveHost=stopProactive;
+  // A teammate started by One's own message to a room reports back to One for review (docs native-harness 22 O1).
+  const stopTeamResults=registerOneTeamResultSink(result=>{try{return supervisor?.teamResult(result) ?? false;}catch(error){console.warn("[one-supervisor] team result deferred",error instanceof Error ? error.message : "unknown");return false;}});
+  // A graph that answers this conversation (or a Work session One delegated) is queued for review by the scheduler's
+  // delivery; in this process the review starts now (native-harness notyet NH16). Elsewhere the tick above picks it up.
+  const stopGraphResults=registerOneGraphResultWake(()=>{try{supervisor?.reviewQueuedResults();}catch(error){console.warn("[one-supervisor] graph result review deferred",error instanceof Error ? error.message : "unknown");}});
+  const stopProactive=()=>{clearInterval(checkinTimer);stopQuestions();stopHostAlerts();stopTeamResults();stopGraphResults();};stopProactiveHost=stopProactive;
   registerAppRuntimeParticipant("one-supervisor-work-queue", {
     closeAdmission:()=>{owner.closeAdmission();workExecutor?.close();stopProactive();},
     interrupt:()=>{owner.closeAdmission();workExecutor?.close();stopProactive();},

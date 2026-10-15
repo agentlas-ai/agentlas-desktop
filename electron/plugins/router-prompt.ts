@@ -1,3 +1,4 @@
+import { composeDeclaredPrompt } from "../runtime/prompt-order";
 // 설치된 플러그인의 라우터를 실행의 시스템 프롬프트에 잇는다.
 //
 // ★이 파일이 마지막 칸이다. 규격(docs/PLUGIN-SPEC.md §4.1)이 지적한 구멍이 정확히
@@ -16,6 +17,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { renderPluginCatalog, type PluginCatalog } from "../runtime/prompt-modules";
 
 interface InstalledPlugin {
   slug: string;
@@ -114,47 +116,73 @@ export function resetPluginRouterCache(): void {
   cache = null;
 }
 
+/**
+ * Explicit mention token: `@slug` as a WHOLE token typed by the owner (the UI inserts it
+ * as `@slug`). Structure only, no meaning: the token must start the text or follow
+ * whitespace, must not continue into more identifier characters (`@slugger`, `@slug/x`,
+ * `@slug@y`), and must sit outside backtick code spans, fenced code and `>` quote lines.
+ * `"@slug"`, `(@slug)`, `foo@slug` are therefore NOT mentions. Match is case-insensitive
+ * because plugin slugs are lowercase identifiers. A mention only exposes/points at the
+ * plugin router; it never grants approval or runs anything.
+ */
+export function hasExplicitMention(userPrompt: string, mention: string): boolean {
+  const token = String(mention ?? "").trim().toLowerCase();
+  if (!token || !userPrompt) return false;
+  const stripped = String(userPrompt)
+    .replace(/```[\s\S]*?(?:```|$)/g, " ")
+    .replace(/`[^`\n]*`/g, " ")
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*>/.test(line))
+    .join("\n")
+    .toLowerCase();
+  let from = 0;
+  for (;;) {
+    const at = stripped.indexOf(token, from);
+    if (at < 0) return false;
+    const before = at === 0 ? "" : stripped[at - 1];
+    const after = stripped[at + token.length] ?? "";
+    // Trailing sentence punctuation (",", ".", "!", "?", ":", ";", ")") ends the token; identifier continuations do not.
+    const afterOk = after === "" || !/[a-z0-9_@\-\/\\]/.test(after) && !(after === "." && /[a-z0-9_-]/.test(stripped[at + token.length + 1] ?? ""));
+    if ((before === "" || /\s/.test(before)) && afterOk) return true;
+    from = at + 1;
+  }
+}
+
 function mentioned(userPrompt: string, plugin: InstalledPlugin): boolean {
-  const needle = plugin.mention.toLowerCase();
-  return userPrompt.toLowerCase().includes(needle);
+  return hasExplicitMention(userPrompt, plugin.mention);
+}
+
+/** Versioned installed inventory. Explicit-only plugins never enter the standing system catalog. */
+export function installedPluginCatalog(_userPrompt?: string): PluginCatalog | null {
+  const plugins = listInstalledPlugins();
+  const listed = plugins.filter((p) => p.implicit !== "never");
+  if (!listed.length) return null;
+  return {
+    mentions: listed.map((p) => p.mention),
+    routerPattern: standardRouterPath("<slug>"),
+    // Only a non-standard router path is spelled out; the conventional one is the pattern above.
+    extraRouters: listed.filter((p) => p.routerPath !== standardRouterPath(p.slug)).map((p) => `${p.mention} ${p.routerPath}`),
+    invoked: [],
+  };
+}
+
+/** This-turn pointers, including explicit-only plugins; mentions expose routers, never grant authority. */
+export function explicitPluginRouterPrompt(userPrompt = ""): string {
+  const invoked = listInstalledPlugins().filter((plugin) => mentioned(userPrompt, plugin));
+  return composeDeclaredPrompt([{ id: "catalog.invoked", revision: 1,
+    stability: "turn-context", changeTriggers: ["release", "profile", "plugin-inventory", "owner-input"], order: 0,
+    text: invoked.map((plugin) => `invoked: ${plugin.mention} → read ${plugin.routerPath} first`).join("\n"),
+  }], "\n");
 }
 
 /**
- * 이번 실행의 플러그인 안내. 설치된 것이 없으면 `""` — 없는 것을 있다고 말하지 않는다.
+ * 이번 실행의 플러그인 목록. 설치된 것이 없으면 `""` — 없는 것을 있다고 말하지 않는다.
  *
  * @param userPrompt 이번 턴의 사용자 입력. 미제공이면 멘션 판정을 할 수 없으므로 목록만 낸다.
  */
 export function pluginRouterPrompt(userPrompt?: string): string {
-  const plugins = listInstalledPlugins();
-  const prompt = userPrompt ?? "";
-  const listed = plugins.filter((p) => p.implicit !== "never" || mentioned(prompt, p));
-  if (!listed.length) return "";
-
-  const lines: string[] = [
-    "## Plugins",
-    `Capability packages, not agents. Open a plugin's router file (\`${standardRouterPath("<slug>")}\` unless listed) and follow it. In a skill, \`$name\` is another skill or reference of that plugin; \`@name\` is a host tool.`,
-    "Missing tool: use this runtime's own abilities first, then agentlas_resolve_plugins. A named installed plugin attaches next turn; an uninstalled Hub plugin needs owner approval.",
-  ];
-
-  if (listed.some((plugin) => plugin.slug === "plugin-make")) {
-    lines.push("Repeatable procedure no plugin covers: offer @plugin-make once; do not start it.");
-  }
-
-  // One entry per plugin (progressive disclosure): the model opens the router file for routing
-  // detail and the workflow list, so the always-on text carries only what picks the plugin.
-  for (const p of listed) {
-    const summary = shortPluginSummary(p.routerDescription, 90);
-    // The conventional router path is stated once in the header; only a non-standard path is spelled out.
-    const standard = p.routerPath === standardRouterPath(p.slug);
-    lines.push(`- ${p.mention}: ${summary || p.name}${standard ? "" : ` Router: ${p.routerPath}`}`);
-  }
-
-  // 라우터 전문은 싣지 않는다(예산 규칙: 프롬프트에 스킬 본문을 인라인하지 않는다). 명시 호출된
-  // 플러그인은 먼저 열어야 할 한 줄 포인터만 받는다.
-  const invoked = listed.filter((p) => mentioned(prompt, p));
-  for (const p of invoked) lines.push(`Invoked this turn: ${p.mention} — read ${p.routerPath} first.`);
-
-  return lines.join("\n");
+  const catalog = installedPluginCatalog();
+  return [catalog ? renderPluginCatalog(catalog) : "", explicitPluginRouterPrompt(userPrompt)].filter(Boolean).join("\n");
 }
 
 function routedPointer(p: InstalledPlugin, reason?: string): string {
@@ -165,7 +193,7 @@ function routedPointer(p: InstalledPlugin, reason?: string): string {
  * 이번 턴의 라우팅 판정(auto-select)이 고른 스킬 플러그인의 라우터 포인터(본문은 싣지 않는다).
  *
  * 턴 컨텍스트(턴 단위)에 실리므로 다른 대화·다음 턴으로 새지 않는다. 이미 멘션된 플러그인은
- * 시스템 프롬프트의 "Invoked this turn" 줄이 있으므로 뺀다.
+ * 현재 턴의 명시 멘션 포인터가 있으므로 뺀다.
  */
 export function selectedPluginRouterPrompt(selected: ReadonlyArray<{ slug: string; reason?: string }>, userPrompt = ""): string {
   if (!selected.length) return "";

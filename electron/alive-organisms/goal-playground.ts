@@ -80,6 +80,12 @@ export interface GoalPlaygroundDeps {
    * blockedBy goal.agi-monitor-owns and never wakes the controller model.
    */
   agiMonitorOwnsBlocked?(): boolean;
+  /**
+   * Goal custody is in another process (the Desktop window process owns Goal continuation while the background service
+   * owns the Alive clock, NH21). The custodian re-reads this exact `executing` reservation from the shared store and
+   * runs the same execute() with its own deps; its durable receipt settles the reservation on a later beat.
+   */
+  forwardAction?(input: { domain: "work" | "one"; actionId: string }): void;
 }
 export interface GoalActionNotice {
   chatId: string; goalId: string; actionId: string; code: "goal.continue-resumed" | "goal.continue-observing";
@@ -203,6 +209,28 @@ export class GoalAlivePlayground implements AlivePlaygroundPort {
     };
   }
 
+  /** The Alive host hands this port's effects to the Goal custodian in another process (forwardAction). */
+  get remoteCustody(): boolean { return Boolean(this.deps.forwardAction); }
+
+  /** Whether a dispatch of this action id ever started here (a claimed or settled receipt exists). */
+  actionStarted(actionId: string): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM alive_goal_action_receipts WHERE action_id=? AND domain=?").get(actionId, this.domain));
+  }
+
+  /**
+   * The custodian refuses a forwarded action that never started (the life's epoch moved, its attachment left): a
+   * settled failure receipt the owner's service reads back. A started dispatch is never overwritten here.
+   */
+  refuse(packet: AliveActionPacket, code: string, nowMs: number): AliveActionResult {
+    const goalId = typeof packet.expected?.goalId === "string" ? packet.expected.goalId : "";
+    const runId = typeof packet.expected?.runId === "string" ? packet.expected.runId : "";
+    const result: AliveActionResult = { ok: false, actionId: packet.actionId, code };
+    this.db.prepare(`INSERT INTO alive_goal_action_receipts(action_id,domain,goal_id,run_id,status,result_json,created_at_ms,settled_at_ms)
+      VALUES (?,?,?,?,'settled',?,?,?) ON CONFLICT(action_id) DO NOTHING`)
+      .run(packet.actionId, this.domain, goalId, runId, JSON.stringify(result), nowMs, nowMs);
+    return this.actionReceipt(packet.actionId) ?? result;
+  }
+
   actionReceipt(actionId: string): AliveActionResult | null {
     const row = this.db.prepare("SELECT status,result_json FROM alive_goal_action_receipts WHERE action_id=? AND domain=?")
       .get(actionId, this.domain) as { status: string; result_json: string | null } | undefined;
@@ -213,6 +241,10 @@ export class GoalAlivePlayground implements AlivePlaygroundPort {
   execute(attachment: AliveAttachment, packet: AliveActionPacket, nowMs: number): AliveActionResult {
     const replay = this.actionReceipt(packet.actionId);
     if (replay) return { ...replay, replayed: true };
+    if (this.deps.forwardAction) {
+      this.deps.forwardAction({ domain: this.domain, actionId: packet.actionId });
+      return { ok: false, actionId: packet.actionId, code: "goal.continue-forwarded", pending: true };
+    }
     const fail = (code: string): AliveActionResult => this.settle(packet, { ok: false, actionId: packet.actionId, code }, nowMs);
     const expected = packet.expected;
     if (packet.schema !== "agentlas.alive-action.v1" || packet.action !== GOAL_CONTINUE_ACTION || packet.domain !== this.domain

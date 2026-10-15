@@ -106,10 +106,10 @@ export function validateGoalWaitIntent(intent: unknown): { ok: true; intent: Goa
  */
 export function typedGoalLifecycleProtocol(lifecycle: "finite" | "ongoing" | null | undefined): string | null {
   if (lifecycle !== "ongoing") return null;
-  return "## Ongoing Goal (host-owned)\nA continuing responsibility the user asked for: it stays open until the user stops it. Work in bounded episodes: inspect current state and durable receipts first, respect the user's cadence, never repeat a completed or uncertain external effect, and use goal_complete only to close the current episode and goal_wait (timer) when nothing is due yet.";
+  return "## Ongoing Goal\nmandate: continuing, open until the user stops it; bounded episodes; read state + receipts first; never repeat a done or uncertain effect; goal_complete closes the episode; nothing due: goal_wait (timer)";
 }
 
 /** Deadline clause for a Goal whose timer waits go through the goal_wait tool (no JSON grammar). */
 export function typedGoalDeadlineClause(deadlineAt: string): string {
-  return `This Goal has a deadline: ${deadlineAt}. Until then keep working in bounded cycles; a timer goal_wait may not be later than it (a later one is moved to it). Inspect current external state before acting and never repeat a completed post or purchase. At the deadline, measure the target and finish without a wait so it is verified.`;
+  return `deadline: ${deadlineAt}; bounded cycles; timer goal_wait <= deadline (later is moved); check state first, never repeat a done post or purchase; at deadline measure and finish without a wait`;
 }

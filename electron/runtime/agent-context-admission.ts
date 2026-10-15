@@ -1,3 +1,5 @@
+import { carryRunnerTurnContext } from "./runner-turn-context-binding";
+import { carrySurfaceMemoryRequest } from "../memory/surface-recall";
 import { createHash } from "node:crypto";
 import { getAuthenticatedActorIds, onAuthSessionInvalidated, onAuthSessionRestored } from "../auth";
 import { onDesktopStoreChange } from "../store/change-bus";
@@ -6,7 +8,6 @@ import { captureNativeAuthBinding } from "../daemon/native-auth-credentials";
 import { createDaemonAgentContextHost } from "../daemon/agent-context-host";
 import { getDb } from "../store/db";
 import { invocationProcessOwner, invocationRunOwners, assertInvocationRunOwner } from "../store/invocation-run-owners";
-import { getInvocationRunReceipt } from "../store/run-events";
 import { createAgentContextCapability, agentContextHostBinding, bootstrapAgentContextHistory, markAgentContextHostAuthored, copyAgentContextHostAuthored,
   reconcileInterruptedAgentContext, type AgentContextCapability } from "./agent-context";
 import type { Runner, RunnerRequest } from "./runner";
@@ -50,18 +51,18 @@ export function bindInvocationAgentContext(request: RunnerRequest, input: {
   // becomes authoritative afterwards; chat projections are not imported again.
   bootstrapAgentContextHistory(capability, request.history);
   markAgentContextHostAuthored(capability, input.hostAuthored);
-  return { ...request, agentContext: capability };
+  return carryRunnerTurnContext(request, { ...request, agentContext: capability });
 }
 function assertPreviousTurnTerminal(turnId: string): void {
   if (!turnId.startsWith("agent-context-turn:")) fail("agent_context_prior_turn_unsettled");
   let source: unknown;
   try { source = JSON.parse(turnId.slice("agent-context-turn:".length)); } catch { fail("agent_context_prior_turn_unsettled"); }
   if (!Array.isArray(source) || source.length !== 3 || typeof source[0] !== "string" || typeof source[1] !== "string") fail("agent_context_prior_turn_unsettled");
-  const [chatId, runId] = source, owner = invocationRunOwners.getRunOwner(chatId, runId), receipt = getInvocationRunReceipt(runId);
-  if (!owner || owner.state !== "released" || !receipt || receipt.chatId !== chatId
-    || !["completed", "cancelled", "failed", "interrupted"].includes(receipt.status)) fail("agent_context_prior_turn_unsettled");
-  // A terminal invocation proves the old dispatch cannot still run. Its
-  // external effects may remain uncertain in MainWorkRecovery; do not clear them.
+  const [chatId, runId] = source, owner = invocationRunOwners.getRunOwner(chatId, runId);
+  if (!owner || owner.state !== "released") fail("agent_context_prior_turn_unsettled");
+  // Exact owner release follows execution drainage or the existing dead-host
+  // fence. A missing historical receipt cannot hold a distinct new turn;
+  // preserve the old delivery and external effects as uncertain, without replay.
 }
 let daemon: { key: string; host: ReturnType<typeof createDaemonAgentContextHost> } | null = null;
 const awakeIdentities=new Map<string,ReturnType<typeof agentContextHostBinding>["identity"]>();
@@ -125,7 +126,7 @@ export function withDaemonAgentContext(runner: Runner, provider: { kind: string;
         reconcileInterruptedAgentContext(capability, assertPreviousTurnTerminal);
         // The daemon admits the same turn under its own capability; the host-authored marker follows the turn.
         copyAgentContextHostAuthored(request.agentContext as AgentContextCapability, capability);
-        return runner({ ...request, agentContext: capability, signal }, events);
+        return runner(carrySurfaceMemoryRequest(request, carryRunnerTurnContext(request, { ...request, agentContext: capability, signal })), events);
       });
   };
 }

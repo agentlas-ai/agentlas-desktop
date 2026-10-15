@@ -120,6 +120,9 @@ export interface MobileBridgeConnectionContext {
   devBootstrap: boolean;
 }
 
+/** Genuine accepted socket lifetime. Host-only; never parsed from an RPC. */
+export interface MobileBridgeConnectionLease { current(): boolean }
+
 export interface MobileBridgeAuthorityEvent {
   event: MobileBridgeEventName;
   payload: MobileBridgeJsonValue;
@@ -133,7 +136,7 @@ export interface MobileBridgeAuthorityEvent {
  */
 export interface MobileBridgeAuthority {
   /** Only server.accept mints this lifecycle event; never RPC-selectable. */
-  connectionOpened?(context: MobileBridgeConnectionContext): void;
+  connectionOpened?(context: MobileBridgeConnectionContext, lease?: MobileBridgeConnectionLease): void;
   snapshot(context: MobileBridgeConnectionContext): Promise<MobileBridgeSnapshot>;
   pairingVerification?(context: MobileBridgeConnectionContext): Promise<{
     hostId: string;
@@ -599,7 +602,8 @@ export class AgentlasMobileBridgeServer {
       transportFailed: false,
     };
     this.clients.add(state);
-    try { this.authority.connectionOpened?.(state.context); }
+    const connectionLease = Object.freeze({ current: () => this.clients.has(state) && !state.revoked && !state.revocationPending && !state.transportFailed && state.socket.readyState === WS_OPEN });
+    try { this.authority.connectionOpened?.(state.context, connectionLease); }
     catch { this.clients.delete(state); socket.close(1008, "secure channel unavailable"); return; }
     const phoneOwner = currentOneMobileSocketOwner();
     if (phoneOwner) {

@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 import { ipc } from "@/lib/ipc";
 import { Markdown } from "@/components/Markdown";
 import { IconArrowLeft, IconClose, IconLock, IconSearch } from "@/components/Icon";
-import type { OneCapabilitiesAPI, OneCapabilityDetail, OneCapabilityItem, OneCapabilityKind } from "../../../shared/one-capabilities";
+import type { OneCapabilitiesAPI, OneCapabilityDetail, OneCapabilityItem, OneCapabilityKind, OneCapabilityRole } from "../../../shared/one-capabilities";
 import {
   CAPABILITY_KIND_ORDER, capabilityTitle, CAPABILITY_PAGE_SIZE, CAPABILITY_SOURCE_ORDER, detailIsMarkdown, filterCapabilities, itemEnabledTotals,
   kindCounts, kindLabel, limitTip, sourceBadge, sourceCounts, sourceLabel, SWITCH_TIMING_TIP, toggleCapability,
@@ -101,6 +101,26 @@ export function OneCapabilitiesModal({ open, locale, onClose, api: apiProp, init
 
   if (!open) return null;
   const closeDetail = () => { setDetailId(null); setDetail(null); setDetailState("idle"); };
+  // Personal Hope and CEO Hope share one inventory; an item can be kept to one of them (docs native-harness 21 G3).
+  const setRole = async (id: string, role: OneCapabilityRole) => {
+    const bridge = api();
+    if (!bridge?.setRole) return;
+    try {
+      const next = await bridge.setRole({ id, role });
+      if (next) setItems((current) => current.map((item) => (item.id === id ? { ...item, role: next.role ?? role } : item)));
+      setRowError(null);
+    } catch { setRowError(id); }
+  };
+  const roleFor = (item: OneCapabilityItem) => item.applies && item.enabled ? (
+    <select className={styles.role} value={item.role ?? "both"} aria-label={copy("쓰는 곳", "Used by")}
+      title={copy("개인 대화 / CEO(방·조직) / 둘 다", "Personal chat / CEO (rooms, organization) / both")}
+      onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}
+      onChange={(event) => void setRole(item.id, event.target.value as OneCapabilityRole)}>
+      <option value="both">{copy("둘 다", "Both")}</option>
+      <option value="personal">{copy("개인", "Personal")}</option>
+      <option value="ceo">CEO</option>
+    </select>
+  ) : null;
   // No switch where no run can enforce one: a lock with the reason instead (owner 2026-10-12).
   const switchFor = (item: OneCapabilityItem) => item.applies ? (
     <CapabilitySwitch checked={item.enabled} tip={SWITCH_TIMING_TIP[locale]}
@@ -186,6 +206,7 @@ export function OneCapabilitiesModal({ open, locale, onClose, api: apiProp, init
                           {item.description && <span>{item.description}</span>}
                         </div>
                         <span className={styles.badge} data-personal={badge.personal ? "true" : "false"}>{badge.label}</span>
+                        {roleFor(item)}
                         {switchFor(item)}
                       </div>
                       {rowError === item.id && <p className={styles.rowError} role="status">{copy("바꾸지 못했어요. 다시 눌러 주세요.", "Could not change this. Try again.")}</p>}

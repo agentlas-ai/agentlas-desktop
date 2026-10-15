@@ -63,6 +63,11 @@ export interface ScienceDaemonClient {
   command(command: DaemonScienceCommand, options?: ScienceDaemonRequestOptions): Promise<unknown>;
   /** Current daemon only: no spawn, Science start, or automatic retry. */
   commandObserved(command: DaemonScienceCommand, options?: ScienceDaemonRequestOptions): Promise<unknown>;
+  /** Native human controls only. No owner healing/retry; build after verified preflight. */
+  commandHuman?(admission: {
+    build(owner: { ownerServiceIdentity: string; ownerBootId: string }): DaemonScienceCommand;
+    assertBeforeDispatch(): void;
+  }, options?: ScienceDaemonRequestOptions): Promise<unknown>;
   cancelMath(input: { projectId: string; requestId: string }): Promise<{ requested: boolean }>;
   /** One socket, no automatic reconnect. Reattach/replay explicitly after disconnect. */
   subscribe(onEvent: (event: DaemonScienceEvent) => void, onDisconnect?: (error: ScienceDaemonClientError) => void,
@@ -139,7 +144,7 @@ export function createScienceDaemonClient(options: ScienceDaemonClientOptions): 
   // admission from arbitrarily long scientific computation and handle EOF.
   function rpc(method: "daemon.ping" | "science.start" | "science.status" | "science.command" | "science.subscribe", params: unknown,
     request: ScienceDaemonRequestOptions = {}, stream?: { ownerEpoch: string;
-      onEvent(event: DaemonScienceEvent): void; onDisconnect?(error: ScienceDaemonClientError): void }): Promise<unknown> {
+      onEvent(event: DaemonScienceEvent): void; onDisconnect?(error: ScienceDaemonClientError): void }, beforeDispatch?: () => void): Promise<unknown> {
     assertIdentity();
     try { assertObservationBudget(request); } catch (error) { return Promise.reject(error); }
     const timeoutMs = request.timeoutMs ?? 0;
@@ -202,6 +207,8 @@ export function createScienceDaemonClient(options: ScienceDaemonClientOptions): 
         catch (error) { done(error as ScienceDaemonClientError); return; }
         if (request.signal?.aborted) { abort(); return; }
         if (expireObservation()) return;
+        try { beforeDispatch?.(); }
+        catch { done(failure("science_human_compute_admission_changed", "request", "not-dispatched")); return; }
         sent = true; // A disconnect from this point cannot prove non-execution.
         if (timeoutMs) responseTimer = setTimeout(() => {
           if (finished || expireObservation()) return;
@@ -402,6 +409,25 @@ export function createScienceDaemonClient(options: ScienceDaemonClientOptions): 
     return rpc("science.command", { serviceIdentity: daemon.serviceIdentity, bootId: daemon.bootId, command }, request);
   }
 
+  async function commandHuman(admission: { build(owner: { ownerServiceIdentity: string; ownerBootId: string }): DaemonScienceCommand;
+    assertBeforeDispatch(): void }, options: ScienceDaemonRequestOptions = {}): Promise<unknown> {
+    // A finite observation deadline selects the existing no-heal preflight.
+    const request = { ...options, observationDeadlineMs: options.observationDeadlineMs ?? performance.now() + 5_000 };
+    assertObservationBudget(request);
+    const daemon = await readyDaemonForCommand(request);
+    assertObservationBudget(request);
+    let command: DaemonScienceCommand;
+    try {
+      admission.assertBeforeDispatch();
+      command = admission.build({ ownerServiceIdentity: daemon.serviceIdentity, ownerBootId: daemon.bootId });
+      if (!["compute.interrupt", "compute.clearGeneration", "compute.readHumanControl", "compute.runConsole", "compute.readConsoleRequest", "compute.beginSession", "compute.runSession", "compute.readSession", "compute.readSessionRequest", "compute.stopSession"].includes(command.op)
+        || !("requester" in command) || command.requester.ownerServiceIdentity !== daemon.serviceIdentity
+        || command.requester.ownerBootId !== daemon.bootId) throw Error("science_human_compute_command_invalid");
+    } catch { throw failure("science_human_compute_admission_changed", "request", "not-dispatched"); }
+    return rpc("science.command", { serviceIdentity: daemon.serviceIdentity, bootId: daemon.bootId, command }, request, undefined,
+      admission.assertBeforeDispatch);
+  }
+
   async function cancelMath(input: { projectId: string; requestId: string }): Promise<{ requested: boolean }> {
     // Independent connection: Stop never queues behind the long computation.
     // It targets the currently verified daemon without starting/recovering work.
@@ -427,7 +453,7 @@ export function createScienceDaemonClient(options: ScienceDaemonClientOptions): 
       { timeoutMs: 5_000 }, { ownerEpoch: daemon.bootId, onEvent, onDisconnect }) as () => void;
   }
 
-  return { ensureStarted, status, command, commandObserved, cancelMath, subscribe, eventTransport: "push-and-replay",
+  return { ensureStarted, status, command, commandObserved, commandHuman, cancelMath, subscribe, eventTransport: "push-and-replay",
     close() {
       if (closed) return;
       closed = true;

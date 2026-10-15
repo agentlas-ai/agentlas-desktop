@@ -36,6 +36,12 @@ export function createNativeDaemonAuthenticator(binding: NativeAuthBinding, key:
   const peers = new WeakMap<ControlSocketPeer, PeerState>(), held = new Set<ControlSocketPeer>();
   const ingressSigner = createNativeIngressNoStartSigner(key), serviceSigner = createNativeServiceObservationSigner(key);
   const terminalSigner = createNativeTerminalAuthSigner(key), terminalCapabilities = new WeakMap<NativeTerminalCheckpointCapability, { peer: ControlSocketPeer; identity: NativeAuthenticatedIdentity; start: NativeStartDescriptor }>();
+  const operationErrors = new WeakMap<object, { peer: ControlSocketPeer; identity: NativeAuthenticatedIdentity; requestId: string; sequence: number }>();
+  function checkpointOperationError(code: string, peer: ControlSocketPeer, requestId: string, sequence: number): Error & { code: string } {
+    const error = nativeAuthError(code), identity = peers.get(peer)?.identity;
+    if (identity) operationErrors.set(error, { peer, identity, requestId, sequence });
+    return error;
+  }
   const close = (peer: ControlSocketPeer) => { const p = peers.get(peer); if (p) { peers.delete(peer); held.delete(peer); clearTimeout(p.timer); p.release(); } };
   return {
     challenge(peer: ControlSocketPeer, hello: unknown): unknown {
@@ -110,7 +116,7 @@ export function createNativeDaemonAuthenticator(binding: NativeAuthBinding, key:
       if (!held || held.peer !== peer || !p?.active || p.identity !== held.identity || !exact(envelope, ["body", "signature"]) || !exact(envelope.body, ["scope", "generation", "serviceIdentity", "bootId", "connection", "sequence", "requestId", "direction", "domain", "result", "error", "start", "nonce"])) denied("native_auth_terminal_reply_invalid");
       const b = envelope.body, start = nativeStartDescriptor(b.start);
       if (b.scope !== binding.scope || b.generation !== key.generation || b.serviceIdentity !== binding.serviceIdentity || b.bootId !== bootId || b.connection !== p.transcript.connection || b.requestId !== requestId || b.sequence !== sequence || b.direction !== "gui-to-daemon" || b.domain !== "agentlas.native.ingressNoStartReply.v1" || b.nonce !== request.requestId || start.handle !== held.start.handle || !sameNativeStartBinding(start.binding, held.start.binding) || !(b.error === null || typeof b.error === "string" && /^[a-z][a-z0-9_]{1,99}$/.test(b.error))) denied("native_auth_terminal_reply_invalid");
-      if (!verifyNativeAuthFrame(key, b, envelope.signature)) denied("native_auth_signature_invalid"); if (b.error) throw nativeAuthError(b.error); return b.result;
+      if (!verifyNativeAuthFrame(key, b, envelope.signature)) denied("native_auth_signature_invalid"); if (b.error) throw checkpointOperationError(b.error, peer, requestId, sequence); return b.result;
     },
     serviceObservationCheckpoint(peer: ControlSocketPeer, capability: NativeTerminalCheckpointCapability, requestId: string, value: unknown, opaqueProof: unknown): { envelope: unknown; sequence: number; request: NativePreparationWireRequest } {
       const held = terminalCapabilities.get(capability), p = peers.get(peer);
@@ -128,20 +134,28 @@ export function createNativeDaemonAuthenticator(binding: NativeAuthBinding, key:
       if (!held || held.peer !== peer || !p?.active || p.identity !== held.identity || !exact(envelope, ["body", "signature"]) || !exact(envelope.body, ["scope", "generation", "serviceIdentity", "bootId", "connection", "sequence", "requestId", "direction", "domain", "result", "error", "start", "nonce"])) denied("native_auth_terminal_reply_invalid");
       const b = envelope.body, start = nativeStartDescriptor(b.start);
       if (b.scope !== binding.scope || b.generation !== key.generation || b.serviceIdentity !== binding.serviceIdentity || b.bootId !== bootId || b.connection !== p.transcript.connection || b.requestId !== requestId || b.sequence !== sequence || b.direction !== "gui-to-daemon" || b.domain !== "agentlas.native.serviceObservationReply.v1" || b.nonce !== request.requestId || start.handle !== held.start.handle || !sameNativeStartBinding(start.binding, held.start.binding) || !(b.error === null || typeof b.error === "string" && /^[a-z][a-z0-9_]{1,99}$/.test(b.error))) denied("native_auth_terminal_reply_invalid");
-      if (!verifyNativeAuthFrame(key, b, envelope.signature)) denied("native_auth_signature_invalid"); if (b.error) throw nativeAuthError(b.error); return b.result;
+      if (!verifyNativeAuthFrame(key, b, envelope.signature)) denied("native_auth_signature_invalid"); if (b.error) throw checkpointOperationError(b.error, peer, requestId, sequence); return b.result;
     },
     terminalCheckpointReply(peer: ControlSocketPeer, capability: NativeTerminalCheckpointCapability, envelope: unknown, requestId: string, sequence: number, request: NativePreparationWireRequest): unknown {
       const held = terminalCapabilities.get(capability), p = peers.get(peer);
       if (!held || held.peer !== peer || !p?.active || p.identity !== held.identity || !exact(envelope, ["body", "signature"]) || !exact(envelope.body, ["scope", "generation", "serviceIdentity", "bootId", "connection", "sequence", "requestId", "direction", "domain", "result", "error", "start", "nonce"])) denied("native_auth_terminal_reply_invalid");
       const b = envelope.body, start = nativeStartDescriptor(b.start);
       if (b.scope !== binding.scope || b.generation !== key.generation || b.serviceIdentity !== binding.serviceIdentity || b.bootId !== bootId || b.connection !== p.transcript.connection || b.requestId !== requestId || b.sequence !== sequence || b.direction !== "gui-to-daemon" || b.domain !== "agentlas.native.terminalCheckpointReply.v1" || b.nonce !== request.requestId || start.handle !== held.start.handle || !sameNativeStartBinding(start.binding, held.start.binding) || !(b.error === null || typeof b.error === "string" && /^[a-z][a-z0-9_]{1,99}$/.test(b.error))) denied("native_auth_terminal_reply_invalid");
-      if (!verifyNativeAuthFrame(key, b, envelope.signature)) denied("native_auth_signature_invalid"); if (b.error) throw nativeAuthError(b.error); return b.result;
+      if (!verifyNativeAuthFrame(key, b, envelope.signature)) denied("native_auth_signature_invalid"); if (b.error) throw checkpointOperationError(b.error, peer, requestId, sequence); return b.result;
     },
     checkpointReply(peer: ControlSocketPeer, envelope: unknown, requestId: string, sequence: number): unknown {
       const p = peers.get(peer); if (!p?.active || !exact(envelope, ["body", "signature"]) || !exact(envelope.body, ["scope", "generation", "serviceIdentity", "bootId", "connection", "sequence", "requestId", "direction", "domain", "result", "error"])) denied("native_auth_checkpoint_reply_invalid");
       const b = envelope.body;
       if (b.scope !== binding.scope || b.generation !== key.generation || b.serviceIdentity !== binding.serviceIdentity || b.bootId !== bootId || b.connection !== p.transcript.connection || b.requestId !== requestId || b.sequence !== sequence || b.direction !== "gui-to-daemon" || b.domain !== "agentlas.native.checkpointReply.v1" || !(b.error === null || typeof b.error === "string" && /^[a-z][a-z0-9_]{1,99}$/.test(b.error))) denied("native_auth_checkpoint_reply_invalid");
-      if (!verifyNativeAuthFrame(key, b, envelope.signature)) denied("native_auth_signature_invalid"); if (b.error) throw nativeAuthError(b.error); return b.result;
+      if (!verifyNativeAuthFrame(key, b, envelope.signature)) denied("native_auth_signature_invalid"); if (b.error) throw checkpointOperationError(b.error, peer, requestId, sequence); return b.result;
+    },
+    /** Single-use process-private observation bound to the exact verified reply and current peer. */
+    consumeCheckpointOperationError(error: unknown, peer: ControlSocketPeer, requestId: string, sequence: number): boolean {
+      if (!error || (typeof error !== "object" && typeof error !== "function")) return false;
+      const observation = operationErrors.get(error);
+      if (!observation || observation.peer !== peer || observation.requestId !== requestId || observation.sequence !== sequence
+        || peers.get(peer)?.identity !== observation.identity) return false;
+      operationErrors.delete(error); return true;
     },
     authenticatedPeerIdentity(peer: ControlSocketPeer): NativeAuthenticatedIdentity | undefined { const p = peers.get(peer); return p?.active ? p.identity : undefined; },
     close,
@@ -154,6 +168,7 @@ export function createNativeDaemonAuthenticator(binding: NativeAuthBinding, key:
 export function createNativeGuiAuthenticator(binding: NativeAuthBinding, key: NativeCredential, expectedBootId: string) {
   credentialMatches(binding, key, "gui"); if (!bootValid(expectedBootId)) denied("native_auth_boot_invalid");
   const clientNonce = nonce(); let transcript: Transcript | null = null, active = false, sequence = 0, eventSequence = 0, callbackSequence = 0; let identity: NativeAuthenticatedIdentity | undefined;
+  const replyOperationErrors = new WeakMap<object, { identity: NativeAuthenticatedIdentity; sequence: number }>();
   const terminalSigner = createNativeTerminalAuthSigner(key), ingressSigner = createNativeIngressNoStartSigner(key), serviceSigner = createNativeServiceObservationSigner(key);
   return {
     hello: { scope: binding.scope, generation: key.generation, serviceIdentity: binding.serviceIdentity, clientNonce },
@@ -174,7 +189,14 @@ export function createNativeGuiAuthenticator(binding: NativeAuthBinding, key: Na
     reply(envelope: unknown, expectedSequence: number): unknown {
       if (!active || !transcript || !exact(envelope, ["body", "signature"]) || !exact(envelope.body, ["scope", "generation", "serviceIdentity", "bootId", "connection", "sequence", "domain", "result", "error"])) denied("native_auth_reply_invalid");
       const b = envelope.body; if (b.scope !== binding.scope || b.generation !== key.generation || b.serviceIdentity !== binding.serviceIdentity || b.bootId !== expectedBootId || b.connection !== transcript.connection || b.sequence !== expectedSequence || b.domain !== "agentlas.native.reply.v1" || !(b.error === null || typeof b.error === "string" && /^[a-z][a-z0-9_]{1,99}$/.test(b.error))) denied("native_auth_reply_invalid");
-      if (!verifyNativeAuthFrame(key, b, envelope.signature)) denied("native_auth_signature_invalid"); if (b.error) throw nativeAuthError(b.error); return b.result;
+      if (!verifyNativeAuthFrame(key, b, envelope.signature)) denied("native_auth_signature_invalid"); if (b.error) { const error = nativeAuthError(b.error); if (identity) replyOperationErrors.set(error, { identity, sequence: expectedSequence }); throw error; } return b.result;
+    },
+    /** One exact fully-verified operation result, not an error code classification. */
+    consumeReplyOperationError(error: unknown, expectedSequence: number): boolean {
+      if (!error || (typeof error !== "object" && typeof error !== "function")) return false;
+      const observation = replyOperationErrors.get(error);
+      if (!observation || !active || observation.identity !== identity || observation.sequence !== expectedSequence) return false;
+      replyOperationErrors.delete(error); return true;
     },
     event(envelope: unknown): { method: string; params: unknown } {
       if (!active || !transcript || !exact(envelope, ["body", "signature"]) || !exact(envelope.body, ["scope", "generation", "serviceIdentity", "bootId", "connection", "sequence", "domain", "method", "params"])) denied("native_auth_event_invalid");

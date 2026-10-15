@@ -1,3 +1,4 @@
+import { composeDeclaredPrompt, registerDeclaredPromptModule, type DeclaredPromptPart } from "../runtime/prompt-order";
 import { toolObservationDigest } from "../automation-progress-guard";
 import { randomUUID } from "node:crypto";
 import type { RunnerResult } from "../runtime/runner";
@@ -15,7 +16,7 @@ import {
 } from "../runtime/continuity";
 import { getAgentConcurrency } from "../store/concurrency";
 import { tryRecordFailureEvent, tryRecordRunEvent } from "../store/run-events";
-import type { BorrowedTaskForceParams } from "./borrowed-task-force";
+import { taskForceAllocationOutputSchema, type BorrowedTaskForceParams } from "./borrowed-task-force";
 import { runSwarm, type SwarmBoard, type SwarmEvent, type SwarmTask } from "./swarm-engine";
 import { buildEffectiveAgentSystemPrompt } from "../agents/files";
 import {
@@ -31,7 +32,6 @@ import {
 import { runtimeFailureBlocksReplay, pickActive, pickRunner, rolePriorityRuntimes } from "../runtime/selection";
 import { runnerFailureFromError, withoutMcpTransportEnv } from "../runtime/runner";
 import { ProjectResidencyBusyError, WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
-import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
 import {
   isMobileReadRuntimeAllowed,
   MobileReadRuntimeBoundaryError,
@@ -70,13 +70,13 @@ function restrictedSwarmText(
 }
 
 /** 스웜 워커에게 주는 규약 — 자기 작업을 하고, 새 하위작업/핸드오프가 필요하면 `## Spawn`으로. */
-function swarmProtocol(
+function swarmProtocolParts(
   goal: string,
   board: SwarmBoard,
   task: SwarmTask,
   runtimeInventory: ReturnType<typeof workloadRuntimeInventory>,
   conversationContext = "",
-): string {
+): DeclaredPromptPart[] {
   const doneList = board.tasks
     .filter((t) => t.status === "done")
     .slice(-8)
@@ -88,53 +88,136 @@ function swarmProtocol(
     .map((t) => `- [${t.status}] ${t.title}${t.brief ? ` — ${t.brief}` : ""}`)
     .join("\n");
   return [
-    "You are one worker in an EMERGENT AGENT SWARM collaborating on a shared goal.",
-    `SHARED GOAL: ${goal}`,
-    conversationContext
-      ? `\nONGOING CONVERSATION (this swarm continues the user's chat — interpret the goal in this context, and never call it a previous session):\n${conversationContext}`
-      : "",
-    "",
-    "YOUR TASK RIGHT NOW:",
-    `- ${task.title}${task.role ? ` (role: ${task.role})` : ""}`,
-    task.brief ? `- Details: ${task.brief}` : "",
-    "",
-    doneList ? `Already completed by peers (recent):\n${doneList}` : "No peer results yet — you may be first.",
-    assignedList ? `WORK ALREADY ASSIGNED TO PEERS (never duplicate these packets):\n${assignedList}` : "",
-    "",
-    "LIVE_RUNTIME_INVENTORY (the only allowed worker targets; copy runtimeId/modelId exactly):",
-    JSON.stringify(runtimeInventory),
-    "",
-    "RULES:",
-    "1. Do your task concretely with available tools/files in the current working folder.",
-    "2. If the goal needs MORE work beyond your task, split it into concrete next steps.",
-    "   Judge each child's complexity, risk, context size, and precision needs yourself.",
-    "   As the parent model, choose runtimeId, modelId, and effort from LIVE_RUNTIME_INVENTORY for each child.",
-    "   Do not infer IDs from model names and do not put every worker on frontier. Use the smallest sufficient live model.",
-    "   End with a `## Spawn` JSON block when spawning:",
-    "   ## Spawn",
-    "   ```json",
-    `   {"tasks":[{"role":"optional","brief":"concrete child task","files":["relative/path/it/writes.ts"],"allocation":${workloadAllocationPromptExample("delegate")}}]${!task.spawnedBy ? `,"synthesis":${workloadAllocationPromptExample("synthesize")}` : ""}}`,
-    "   ```",
-    !task.spawnedBy
-      ? "   You are the initial seed: always include the synthesis allocation; use tasks:[] if no child is needed."
-      : "   Omit the block if no child is needed. Role is optional.",
-    "   Never spawn work that another pending, running, or completed peer packet already owns.",
-    // 워커들은 하나의 작업 폴더를 공유한다. 선언이 있어야 호스트가 겹치는 작업을 직렬화해
-    // 서로의 편집(또는 사용자 변경)을 덮어쓰는 것을 막을 수 있다.
-    "   `files`: list every project file the child will CREATE or MODIFY (relative paths). Peers share one working folder, so the host serializes tasks that declare the same file. Omit it only for read-only or research work — an omitted list means the host cannot protect that file from a concurrent writer.",
-    "3. Do NOT restate the whole goal. Do NOT invent work that isn't needed — over-spawning wastes the user's money.",
-    "4. Everything above the `## Spawn` block is your result and is shared with peers on the blackboard.",
-  ]
-    .filter(Boolean)
-    .join("\n");
+    { id: "swarm.worker.user.scope", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 0, text: "Work your assigned task using granted tools; ongoing conversation is current context. Do not repeat the goal or peer-owned work. Spawn only necessary missing work on proportional live runtime/model/effort pairs; inventory is evidence, not authority." },
+    { id: "swarm.worker.user.transport", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 10, text: "Return supplied JSON: result is the human handoff/blackboard. Every child declares all files it writes (same-file tasks serialize); [] only for read-only work. Seed always supplies synthesis, even with tasks []; descendants with no child use tasks [] and synthesis null." },
+    { id: "swarm.worker.user.runtime-inventory", revision: 1, stability: "configuration", changeTriggers: ["runtime", "capability-inventory"], order: 0, text: JSON.stringify({ liveRuntimeInventory: runtimeInventory }) },
+    { id: "swarm.worker.user.task", revision: 1, stability: "task-context", changeTriggers: ["task", "goal-revision"], order: 0, text: JSON.stringify({ goal, task: { title: task.title, role: task.role, brief: task.brief } }) },
+    { id: "swarm.worker.user.peers", revision: 2, stability: "turn-context", changeTriggers: ["plan-revision", "child-result", "goal-runtime"], order: 30, text: JSON.stringify({ peersDone: doneList, peersAssigned: assignedList }) },
+    { id: "swarm.worker.user.conversation", revision: 2, stability: "turn-context", changeTriggers: ["owner-input", "model-output"], order: 10, text: JSON.stringify({ conversationContext }) },
+  ];
+}
+
+/** Shared host inputs are typed before the worker/synthesis channel is serialized. */
+function swarmSystemContextParts(
+  p: BorrowedTaskForceParams & { stormbreakerMode?: boolean },
+  coreHarnessPrompt: string | undefined,
+  projectContextSlice: string | null | undefined,
+): DeclaredPromptPart[] {
+  return [
+    { id: "swarm.shared.system.agent-definition", revision: 1, stability: "versioned-content", changeTriggers: ["agent-instructions", "skill-package"], order: 0,
+      text: buildEffectiveAgentSystemPrompt(p.orchestratorAgent.id, p.orchestratorAgent.systemPrompt) },
+    { id: "swarm.shared.system.profile", revision: 1, stability: "turn-context", changeTriggers: ["owner-profile", "owner-input", "permission"], order: 0,
+      text: !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "" },
+    { id: "swarm.shared.system.core-harness", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 20, text: coreHarnessPrompt },
+    { id: "swarm.shared.system.loop-protocol", revision: 1, stability: "fixed-policy", changeTriggers: ["release", "profile"], order: 30,
+      text: p.stormbreakerMode ? STORMBREAKER_LOOP_PROTOCOL : "" },
+    { id: "swarm.shared.system.project-context", revision: 1, stability: "turn-context", changeTriggers: ["retrieval", "task", "goal-revision"], order: 20,
+      text: projectContextSlice ?? "" },
+  ];
+}
+
+const SWARM_ALLOCATION_MODEL_CLASSES = ["auto", "haiku", "luna", "flash", "mini", "sonnet", "terra", "tera", "composer", "opus", "sol", "grok"] as const;
+
+function swarmAllocationInInventory(value: Record<string, unknown>, inventory: ReturnType<typeof workloadRuntimeInventory>): boolean {
+  const runtime = inventory.find(row => row.runtimeId === value.runtimeId);
+  if (!runtime || typeof value.modelId !== "string" || !runtime.models.includes(value.modelId)) return false;
+  const profile = runtime.modelProfiles[value.modelId];
+  const efforts = profile?.efforts ?? runtime.efforts;
+  if (!efforts.includes(String(value.effort)) || profile?.costTier && profile.costTier !== value.tier) return false;
+  const requirements = value.requirements as WorkloadAllocation["requirements"];
+  const totalTokens = requirements.inputTokens + requirements.expectedOutputTokens;
+  return !(totalTokens > 0 && (!profile?.contextWindow || profile.contextWindow < totalTokens)
+    || requirements.toolRequired && profile?.supportsTools !== true && !profile?.capabilities.includes("tools")
+    || requirements.multimodalRequired && profile?.supportsMultimodal !== true && !profile?.capabilities.includes("multimodal"));
+}
+
+export function swarmWorkerOutputSchema(seed: boolean, inventory: ReturnType<typeof workloadRuntimeInventory> = []): Record<string, unknown> {
+  registerDeclaredPromptModule({ id: "swarm.worker.response-schema", revision: 3, stability: "task-context", changeTriggers: ["release", "runtime", "capability-inventory", "profile", "task", "plan-revision"], order: 0 });
+  const allocation = (phase: "delegate" | "synthesize") => {
+    const base = taskForceAllocationOutputSchema(phase) as { required: string[]; properties: Record<string, unknown>; [key: string]: unknown };
+    return { ...base, required: ["schema", ...base.required], properties: {
+      ...base.properties, schema: { type: "string", enum: ["agentlas.workload-allocation.v1"] },
+      modelClass: { type: "string", enum: [...SWARM_ALLOCATION_MODEL_CLASSES] },
+      ...(inventory.length ? { runtimeId: { type: "string", enum: inventory.map(row => row.runtimeId) },
+        modelId: { type: "string", enum: [...new Set(inventory.flatMap(row => row.models))] },
+        effort: { type: "string", enum: [...new Set(inventory.flatMap(row => Object.values(row.modelProfiles).flatMap(profile => profile.efforts ?? row.efforts)))] } } : {}),
+      requirements: { type: "object", additionalProperties: false, required: ["inputTokens", "expectedOutputTokens", "toolRequired", "multimodalRequired"], properties: {
+        inputTokens: { type: "integer", minimum: 0, maximum: 10_000_000 }, expectedOutputTokens: { type: "integer", minimum: 0, maximum: 10_000_000 }, toolRequired: { type: "boolean" }, multimodalRequired: { type: "boolean" } } },
+      reasonCodes: { type: "array", minItems: 1, maxItems: 8, items: { type: "string", minLength: 1 } },
+    } };
+  };
+  return { type: "object", additionalProperties: false, required: ["schemaVersion", "result", "tasks", "synthesis"], properties: {
+    schemaVersion: { type: "string", enum: ["agentlas.swarm-worker-result.v1"] }, result: { type: "string" },
+    tasks: { type: "array", maxItems: 12, items: { type: "object", additionalProperties: false, required: ["role", "brief", "files", "allocation"], properties: {
+      role: { type: "string" }, brief: { type: "string", minLength: 1 }, files: { type: "array", maxItems: 24, uniqueItems: true, items: { type: "string", minLength: 1 } }, allocation: allocation("delegate") } } },
+    synthesis: seed ? allocation("synthesize") : { anyOf: [allocation("synthesize"), { type: "null" }] },
+  } };
+}
+
+function swarmTypedAllocationValid(value: unknown, phase: "delegate" | "synthesize"): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const a = value as Record<string, unknown>;
+  const keys = ["schema", "runtimeId", "modelId", "tier", "modelClass", "effort", "phase", "requirements", "reasonCodes", "rationale"];
+  if (Object.keys(a).some(key => !keys.includes(key)) || keys.some(key => !(key in a))
+    || a.schema !== "agentlas.workload-allocation.v1" || a.phase !== phase
+    || !["economy", "balanced", "frontier"].includes(String(a.tier))
+    || !(SWARM_ALLOCATION_MODEL_CLASSES as readonly string[]).includes(String(a.modelClass))
+    || [a.runtimeId, a.modelId, a.modelClass, a.effort, a.rationale].some(value => typeof value !== "string")
+    || typeof a.runtimeId !== "string" || !a.runtimeId.trim() || typeof a.modelId !== "string" || !a.modelId.trim()
+    || !Array.isArray(a.reasonCodes) || !a.reasonCodes.length || a.reasonCodes.length > 8
+    || a.reasonCodes.some(code => typeof code !== "string" || !code.trim())) return false;
+  if (normalizeWorkloadAllocation(a, phase).modelClass !== a.modelClass) return false;
+  const r = a.requirements as Record<string, unknown>;
+  return Boolean(r && typeof r === "object" && !Array.isArray(r)
+    && Object.keys(r).length === 4 && ["inputTokens", "expectedOutputTokens"].every(key => typeof r[key] === "number" && Number.isInteger(r[key]) && (r[key] as number) >= 0 && (r[key] as number) <= 10_000_000)
+    && typeof r.toolRequired === "boolean" && typeof r.multimodalRequired === "boolean");
 }
 
 /** 에이전트 출력에서 `## Spawn` 블록을 분리 → { result(본문), spawn[] }. */
-export function parseSwarmOutput(text: string): {
+export function parseSwarmOutput(text: string, typedContract = false, inventory?: ReturnType<typeof workloadRuntimeInventory>): {
   result: string;
   spawn: Array<{ title: string; brief: string; role?: string; files?: string[]; allocation: WorkloadAllocation }>;
   synthesisAllocation: WorkloadAllocation | null;
 } {
+  const source = text.trim().replace(/^```(?:json)?\s*([\s\S]*?)```$/i, "$1");
+  try {
+    const typed = JSON.parse(source) as Record<string, unknown>;
+    if (typedContract && typed?.schemaVersion !== "agentlas.swarm-worker-result.v1" && typed && typeof typed === "object") throw new Error("swarm_worker_result_invalid");
+    if (typed?.schemaVersion === "agentlas.swarm-worker-result.v1") {
+      if (Object.keys(typed).some(key => !["schemaVersion", "result", "tasks", "synthesis"].includes(key))
+        || typeof typed.result !== "string" || !Array.isArray(typed.tasks) || typed.tasks.length > 12
+        || !Object.hasOwn(typed, "synthesis") || typed.synthesis !== null && !swarmTypedAllocationValid(typed.synthesis, "synthesize")) throw new Error("swarm_worker_result_invalid");
+      for (const raw of typed.tasks) {
+        const child = raw as Record<string, unknown>;
+        if (!child || typeof child !== "object" || Array.isArray(child)
+          || Object.keys(child).some(key => !["role", "brief", "files", "allocation"].includes(key))
+          || typeof child.role !== "string" || typeof child.brief !== "string" || !child.brief.trim()
+          || !Array.isArray(child.files) || child.files.length > 24
+          || child.files.some(file => typeof file !== "string" || !file.trim()) || !swarmTypedAllocationValid(child.allocation, "delegate")) throw new Error("swarm_worker_result_invalid");
+      }
+      if (inventory && (typed.tasks.some(raw => !swarmAllocationInInventory((raw as Record<string, unknown>).allocation as Record<string, unknown>, inventory))
+        || typed.synthesis !== null && !swarmAllocationInInventory(typed.synthesis as Record<string, unknown>, inventory))) {
+        throw new Error("swarm_worker_allocation_inventory_invalid");
+      }
+      // Keep human result text as data; quoted legacy headings cannot select children.
+      return {
+        result: typed.result.trim(),
+        spawn: typed.tasks.map(raw => {
+          const child = raw as Record<string, unknown>;
+          const brief = (child.brief as string).trim();
+          const role = (child.role as string).trim() || undefined;
+          const files = [...new Set((child.files as string[]).map(file => file.trim()))];
+          return { title: brief.slice(0, 80), brief, role,
+            ...(files.length ? { files } : {}),
+            allocation: normalizeWorkloadAllocation(child.allocation, "delegate") };
+        }),
+        synthesisAllocation: typed.synthesis ? normalizeWorkloadAllocation(typed.synthesis, "synthesize") : null,
+      };
+    }
+  } catch (error) {
+    if (error instanceof Error && (error.message === "swarm_worker_result_invalid" || error.message === "swarm_worker_allocation_inventory_invalid")) throw error;
+    if (typedContract && source.includes("agentlas.swarm-worker-result.v1")) throw new Error("swarm_worker_result_invalid");
+  }
   // 앞 개행을 먹지 않도록 수평 공백만([ \t]) 허용 — `\s`는 개행 포함이라 슬라이스가 어긋난다.
   const m = text.match(/^[ \t]*##[ \t]*Spawn[ \t]*$/im);
   if (!m || m.index === undefined) return { result: text.trim(), spawn: [], synthesisAllocation: null };
@@ -291,7 +374,6 @@ export async function runSwarmInvocation(
     : pickRunner(workerDefault) ?? p.picked;
   const runtimeInventory = workloadRuntimeInventory(candidateRuntimes);
   const runId = p.req.runId ?? `swarm-${Date.now()}`;
-  let replayBlocked: ObservedRunnerFailureError | undefined;
   const recordUsage = (invocationId: string, runtime: typeof p.active, nodeId: string, modelRole: string,
     usage: RunnerResult["observedUsage"], status: string, value: unknown): void => {
     tryRecordRunEvent({ runId, chatId: p.chat.id, nodeId, agentId: nodeId,
@@ -492,15 +574,6 @@ export async function runSwarmInvocation(
       status: p.locale === "ko" ? `${task.title}` : task.title,
       model: active.model ?? active.kind,
     });
-    const ontology = await buildAgentRuntimeOntologyContext({
-      runSessionId: runId,
-      installedAgent: p.orchestratorAgent,
-      projectId: p.chat.projectId,
-      projectPath: p.workingFolder,
-      runtimeKind: active.kind,
-      task: task.brief || task.title,
-      includeOperational: false,
-    });
     const projectContextSlice = await buildProjectContextSlice(
       p.workingFolder ?? null,
       task.brief || task.title,
@@ -516,27 +589,19 @@ export async function runSwarmInvocation(
     // The canonical package prompt is authoritative, but the per-task
     // swarm protocol is invocation context. Passing both as the fallback
     // silently drops the protocol whenever a canonical prompt file exists.
-    const workerSystemPrompt = [
-      buildEffectiveAgentSystemPrompt(
-        p.orchestratorAgent.id,
-        p.orchestratorAgent.systemPrompt,
-      ),
-      !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "",
-      coreHarnessPrompt,
-      swarmProtocol(goal, board, task, runtimeInventory, conversationContext),
-      p.stormbreakerMode ? STORMBREAKER_LOOP_PROTOCOL : "",
-      projectContextSlice ?? "",
-      ontology.prompt,
-    ].filter(Boolean).join("\n\n");
+    const workerSystemPrompt = composeDeclaredPrompt([
+      ...swarmSystemContextParts(p, coreHarnessPrompt, projectContextSlice),
+      ...swarmProtocolParts(goal, board, task, runtimeInventory, conversationContext),
+    ], "\n\n");
     const runWorkerOn = async (target: typeof p.active, targetRunner: typeof taskRunner) => {
-      if (replayBlocked) throw replayBlocked;
       const usageInvocationId = `swarm-model-call:${randomUUID()}`;
       try {
         const measuredResult = await runObservedRunner(targetRunner.runner,
           {
             systemPrompt: workerSystemPrompt,
             history: [],
-            userPrompt: task.brief || task.title,
+            outputSchema: { name: "agentlas_swarm_worker_result", schema: swarmWorkerOutputSchema(!task.spawnedBy, runtimeInventory) },
+            userPrompt: composeDeclaredPrompt([{ id: "swarm.worker.user.current-task", revision: 1, stability: "task-context", changeTriggers: ["task", "plan-revision", "goal-revision"], order: 0, text: task.brief || task.title }], "\n"),
             backendLabel: targetRunner.label,
             workProjectId: p.chat.originSurface === "work" && p.chat.projectId ? p.chat.projectId : null,
             model: target.model ?? undefined,
@@ -555,7 +620,8 @@ export async function runSwarmInvocation(
           {
             onStatus: (status) => emit(task, { kind: "tool-use", status }),
             onPartial: (text) => {
-              if (!p.restrictedReadBoundary) emit(task, { kind: "partial", text });
+              // Typed result is published after parsing; keep raw JSON off all desktop/mobile streams.
+              void text;
             },
             onTool: (name, args, r, id, isError, artifactPaths, imageDataUrl) => emit(task, { kind: "tool-use", tool: { name, args, result: r, id, isError, observationDigest: toolObservationDigest(artifactPaths, imageDataUrl) } }),
           },
@@ -611,9 +677,8 @@ export async function runSwarmInvocation(
     }
     if (result.failure) {
       if (runtimeFailureBlocksReplay(result.failure)) {
-        replayBlocked = new ObservedRunnerFailureError(result.failure);
         emit(task, { kind: "tool-use", done: true, status: p.locale === "ko" ? "실행 중단 — 작업 기록을 확인하세요." : "Execution stopped — review the work history." });
-        throw replayBlocked;
+        throw new ObservedRunnerFailureError(result.failure);
       }
       if (result.failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
         throw new ProjectResidencyBusyError(p.chat.projectId ?? "unknown");
@@ -647,8 +712,9 @@ export async function runSwarmInvocation(
         payload: workloadAllocationReceipt(executedResolution, result.observedUsage),
       });
     }
+    const parsed = parseSwarmOutput(restrictedSwarmText(p, result.text, task.id), true, runtimeInventory);
+    if (!task.spawnedBy && result.text.includes("agentlas.swarm-worker-result.v1") && !parsed.synthesisAllocation) throw new Error("swarm_seed_synthesis_required");
     emit(task, { kind: "tool-use", done: true, status: p.locale === "ko" ? `${task.title} 완료` : `${task.title} done` });
-    const parsed = parseSwarmOutput(restrictedSwarmText(p, result.text, task.id));
     return {
       result: parsed.result,
       spawn: parsed.spawn,
@@ -660,7 +726,6 @@ export async function runSwarmInvocation(
   const synthEmit = (ev: McpInvocationEvent): void =>
     p.sink({ ...ev, agentId: "swarm-synthesizer", agentName: "Swarm Synthesizer", role: "synthesizer", phase: "synthesize" });
   const synthesize = async (board: SwarmBoard, signal?: AbortSignal): Promise<string> => {
-    if (replayBlocked) throw replayBlocked;
     const done = board.tasks.filter((t) => t.status === "done" && t.result);
     const controllerPriority = rolePriorityRuntimes(candidateRuntimes, "orchestrator");
     const controllerDefault = directUserRuntimePinHonored
@@ -696,15 +761,6 @@ export async function runSwarmInvocation(
       `HOST-VERIFIED ALLOCATION: ${JSON.stringify(t.resolvedAllocation ?? null)}`,
       t.result,
     ].join("\n")).join("\n\n");
-    const ontology = await buildAgentRuntimeOntologyContext({
-      runSessionId: runId,
-      installedAgent: p.orchestratorAgent,
-      projectId: p.chat.projectId,
-      projectPath: p.workingFolder,
-      runtimeKind: active.kind,
-      task: goal,
-      includeOperational: false,
-    });
     const projectContextSlice = await buildProjectContextSlice(
       p.workingFolder ?? null,
       goal,
@@ -721,31 +777,19 @@ export async function runSwarmInvocation(
       targetRuntime: typeof active,
       targetRunner: typeof synthesisRunner,
     ) => {
-      if (replayBlocked) throw replayBlocked;
       const usageInvocationId = `swarm-model-call:${randomUUID()}`;
       try {
         const measuredResult = await runObservedRunner(targetRunner.runner,
           {
-            systemPrompt: [
-              buildEffectiveAgentSystemPrompt(
-                p.orchestratorAgent.id,
-                p.orchestratorAgent.systemPrompt,
-              ),
-              !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "",
-              coreHarnessPrompt,
-              p.stormbreakerMode ? STORMBREAKER_LOOP_PROTOCOL : "",
-              "You are the synthesizer of an agent swarm. Below are the results your peers produced for the shared goal.",
-              "Integrate them into ONE coherent final answer for the user. Reconcile overlaps, note anything incomplete.",
-              "Do not just concatenate. Do not include a `## Spawn` block.",
-              `SHARED GOAL: ${goal}`,
-              conversationContext
-                ? `ONGOING CONVERSATION (this swarm continues the user's chat — answer as its natural next reply, and never call it a previous session):\n${conversationContext}`
-                : "",
-              projectContextSlice ?? "",
-              ontology.prompt,
-            ].join("\n"),
+            systemPrompt: composeDeclaredPrompt([
+              ...swarmSystemContextParts(p, coreHarnessPrompt, projectContextSlice),
+              { id: "swarm.synthesis.system.role", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 0, text: "You are the synthesizer of an agent swarm." },
+              { id: "swarm.synthesis.system.scope", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 10, text: "task: peer results -> ONE final answer; reconcile overlaps, flag incomplete; no concatenation; no `## Spawn`" },
+              { id: "swarm.synthesis.system.goal", revision: 1, stability: "task-context", changeTriggers: ["goal-revision", "task"], order: 0, text: `goal: ${goal}` },
+              { id: "swarm.synthesis.system.conversation", revision: 1, stability: "turn-context", changeTriggers: ["owner-input", "model-output"], order: 10, text: conversationContext ? `conversation (continuation; not a previous session):\n${conversationContext}` : "" },
+            ], "\n"),
             history: [],
-            userPrompt: pieces || "(no completed results)",
+            userPrompt: composeDeclaredPrompt([{ id: "swarm.synthesis.user.results", revision: 1, stability: "turn-context", changeTriggers: ["child-result", "goal-runtime", "plan-revision"], order: 0, text: pieces || "(no completed results)" }], "\n"),
             backendLabel: targetRunner.label,
             workProjectId: p.chat.originSurface === "work" && p.chat.projectId ? p.chat.projectId : null,
             model: targetRuntime.model ?? undefined,
@@ -817,9 +861,8 @@ export async function runSwarmInvocation(
     }
     if (result.failure) {
       if (runtimeFailureBlocksReplay(result.failure)) {
-        replayBlocked = new ObservedRunnerFailureError(result.failure);
         synthEmit({ kind: "tool-use", done: true, status: p.locale === "ko" ? "실행 중단 — 작업 기록을 확인하세요." : "Execution stopped — review the work history." });
-        throw replayBlocked;
+        throw new ObservedRunnerFailureError(result.failure);
       }
       if (result.failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
         throw new ProjectResidencyBusyError(p.chat.projectId ?? "unknown");
@@ -884,7 +927,6 @@ export async function runSwarmInvocation(
     });
     throw error;
   }
-  if (replayBlocked) throw replayBlocked;
   const { board, final, aborted, doneCount, finalGate } = swarmResult;
 
   if (p.stormbreakerMode) {

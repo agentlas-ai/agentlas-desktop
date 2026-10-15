@@ -1,3 +1,5 @@
+import { portableServingStrictSchemaOrNull } from "./serving-output-schema";
+import { registerDeclaredPromptModule } from "./prompt-order";
 /*
  * Agentlas 서빙 러너 — CLI 도 API 키도 없는 사람이 답을 받는 길.
  *
@@ -14,7 +16,8 @@
  * 실행 1회가 크레딧을 쓴다. 잔액 판정·예약·정산은 전부 서버가 한다. 여기서 값을 지어내
  * 미리 보여 주지 않는다 — 앱이 계산한 값과 실제 청구가 어긋나면 그것이 곧 거짓말이 된다.
  */
-import { reportModelPayload, ledgerFromApiBody } from "./model-call-ledger";
+import { reportModelPayload, reportCachePlan, reportModelEndpoint, ledgerFromApiBody } from "./model-call-ledger";
+import { cacheCapabilityFor, planCache, segmentOf, type CachePlan, type CacheSegment } from "./cache-planner";
 import { assertCurrentHistoryRunnerResult } from "./observed-runner";
 import { currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { getSessionCookieHeader, webBaseUrl } from "../auth";
@@ -26,6 +29,7 @@ import {
   isAgentlasServingModel,
 } from "../../shared/agentlas-serving";
 import { compactHistoryToBudget } from "./compact";
+import { openStatelessGeneration, type StatelessGenerationSession, type StatelessWindow } from "./stateless-generation";
 import { estimateAdmissionTokens } from "./token-estimate";
 
 /**
@@ -37,7 +41,7 @@ function servingAdmissionTokens(text: string): number {
   return estimateAdmissionTokens(text);
 }
 import type { Runner, RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
-import { schemaFallbackInstruction } from "../../shared/runtime-capabilities";
+import { schemaFallbackPromptPart, observationSystemWithSchema } from "../../shared/runtime-capabilities";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { createToolLoopProgress, createToolLoopUsage, prepareMainToolLoop, runMainToolDispatch } from "./local-tool-loop";
@@ -79,9 +83,14 @@ function imageTokenEstimate(req: RunnerRequest, toolImageCount = 0): number {
   return ((req.images?.length ?? 0) + toolImageCount) * IMAGE_TOKEN_ESTIMATE;
 }
 
-function turnsFor(req: RunnerRequest, events: RunnerEvents, outputReserve: number): { turns: ServingTurn[]; system: string } | null {
+/** The serving tier's transport ceiling is the window this endpoint admits; 80% of it is the rotation point. */
+const SERVING_GENERATION_WINDOW: StatelessWindow = { tokens: AGENTLAS_SERVING_CONTEXT_WINDOW, source: "host-ceiling", known: true };
+
+/** `base`: the conversation's generation (handoff + rows after its frontier) in place of req.history. */
+function turnsFor(req: RunnerRequest, events: RunnerEvents, outputReserve: number,
+  base?: { digest: string; rows: RunnerRequest["history"] } | null): { turns: ServingTurn[]; system: string } | null {
   // A Main-issued effect observation carries its own complete prompt (no Agentlas header/skills).
-  const wrapped = req.minimalObservation ? req.systemPrompt : wrapSystemPrompt(
+  const system = req.minimalObservation ? observationSystemWithSchema(req.systemPrompt, req.outputSchema?.schema) : wrapSystemPrompt(
       req.systemPrompt,
       req.locale,
       req.permission,
@@ -98,10 +107,11 @@ function turnsFor(req: RunnerRequest, events: RunnerEvents, outputReserve: numbe
       undefined,
       req.sciencePromptProfile,
       req.judgmentOnly === true ? "host-judgment" : undefined,
+      req.outputSchema ? [schemaFallbackPromptPart(req.outputSchema.schema)] : undefined,
+      req.systemPromptComposition,
     );
   // The server enforces req.outputSchema by constrained decoding when it can; the
   // instruction is the honest floor for a server that cannot (status line says which).
-  const system = req.outputSchema ? `${wrapped}\n${schemaFallbackInstruction(req.outputSchema.schema)}` : wrapped;
   // Images are counted as a bounded per-image estimate, not as their base64 length:
   // one ordinary screenshot's base64 alone is larger than the whole 128k window,
   // so counting it as text refused every image turn before it was sent.
@@ -110,7 +120,9 @@ function turnsFor(req: RunnerRequest, events: RunnerEvents, outputReserve: numbe
     - imageTokenEstimate(req)
     - outputReserve - 256;
   for (let attempt = 0; attempt < 8; attempt += 1) {
-    const compacted = compactHistoryToBudget(req.history, { historyBudgetTokens: budget, locale: req.locale });
+    const history = base ? [{ id: "agentlas:stateless-handoff", role: "user" as const, text: base.digest, createdAt: new Date(0).toISOString() },
+      ...base.rows] : req.history;
+    const compacted = compactHistoryToBudget(history, { historyBudgetTokens: budget, locale: req.locale });
     if (!compacted.fits) return null;
     const turns: ServingTurn[] = compacted.recent
       .filter((entry) => entry.role === "user" || entry.role === "assistant")
@@ -218,6 +230,7 @@ async function servingHttpFailure(response: Response, locale: RunnerRequest["loc
   try { code = String(((await response.json()) as { code?: unknown }).code ?? ""); } catch { /* empty body */ }
   const providerCode = /^[a-z0-9_]{1,64}$/.test(code) ? code : `http_${response.status}`;
   if (providerCode === "serving_reconciliation_required") return servingReconciliationFailure(locale);
+  if (providerCode === "serving_input_too_large" || response.status === 413) return servingInputTooLargeFailure(locale);
   if (response.status === 401) {
     return { kind: "auth", runtime: "agentlas", source: "marker", providerCode: "sign_in_required",
       message: signInRequired(locale).message };
@@ -243,10 +256,19 @@ function streamFailure(data: unknown, locale: RunnerRequest["locale"]): RunnerFa
   const record = data && typeof data === "object" ? data as { code?: unknown; message?: unknown } : {};
   const code = typeof record.code === "string" && /^[a-z0-9_]{1,64}$/.test(record.code) ? record.code : "serving_failed";
   if (code === "serving_reconciliation_required") return servingReconciliationFailure(locale);
+  if (code === "serving_input_too_large") return servingInputTooLargeFailure(locale);
   const message = typeof record.message === "string" && record.message ? record.message
     : locale === "ko" ? "답을 만들지 못했습니다. 잠시 뒤 다시 시도해 주세요." : "The Agentlas model could not answer. Try again shortly.";
   return { kind: code === "insufficient_credits" ? "quota" : "exit", runtime: "agentlas", source: "marker",
     providerCode: code, message: message.slice(0, 400) };
+}
+
+/** The server's own typed 413 (nothing dispatched to a provider): the same capacity refusal as the local pre-send check. */
+function servingInputTooLargeFailure(locale: RunnerRequest["locale"]): RunnerFailure {
+  return { kind: "refused", runtime: "agentlas", source: "marker", providerCode: "model_context_capacity_exceeded",
+    message: locale === "ko"
+      ? "Agentlas 모델의 입력 한도를 넘었습니다. 현재 요청과 지시는 잘라내지 않았습니다."
+      : "The request exceeds the Agentlas serving input limit. Current request and instructions were not clipped." };
 }
 
 function servingReconciliationFailure(locale: RunnerRequest["locale"]): RunnerFailure {
@@ -259,13 +281,30 @@ function servingReconciliationFailure(locale: RunnerRequest["locale"]): RunnerFa
 
 /** 요청 본문의 공통 칸. 사진·출력 계약은 매 왕복 같이 간다(서버는 상태를 들지 않는다). */
 function servingRequestFields(req: RunnerRequest): Record<string, unknown> {
+  const nativeSchema = req.outputSchema ? portableServingStrictSchemaOrNull(req.outputSchema.schema) : null;
+  if (nativeSchema) registerDeclaredPromptModule({ id: "transport.output-schema.native", revision: 1, stability: "task-context", changeTriggers: ["release", "task", "plan-revision"] });
   return {
     ...(req.images?.length ? { images: req.images.map((image) => ({ mediaType: image.mediaType, data: image.data })) } : {}),
-    ...(req.outputSchema ? { outputSchema: { name: req.outputSchema.name, schema: req.outputSchema.schema } } : {}),
+    ...(req.outputSchema && nativeSchema ? { outputSchema: { name: req.outputSchema.name, schema: nativeSchema } } : {}),
   };
 }
 
 /** Missing or invalid dispatch receipts never become measured zero. */
+/**
+ * The serving server (/api/one/serving/chat) places the Anthropic markers itself; the desktop sends none. The plan
+ * therefore carries no breakpoints, only the stable-prefix digest (tools + system) and the expected-prefix size that
+ * the ledger compares with the cacheReadInputTokens the server reports back.
+ */
+function servingCachePlan(input: { system: string; tools: unknown[]; turns: unknown[] }): CachePlan {
+  const segments: CacheSegment[] = [];
+  if (input.tools.length > 0) segments.push(segmentOf("tools", "S0", "stable-prefix", JSON.stringify(input.tools)));
+  segments.push(segmentOf("system", "S1", "stable-prefix", input.system));
+  const last = input.turns.length - 1;
+  if (last >= 1) segments.push({ id: "history", layer: "S4", cacheClass: "provider-owned", bytes: JSON.stringify(input.turns.slice(0, last)).length });
+  if (last >= 0) segments.push({ id: "owner-input", layer: "S5", cacheClass: "volatile-tail", bytes: JSON.stringify(input.turns[last]).length });
+  return planCache({ capability: cacheCapabilityFor({ family: "agentlas-serving" }), segments });
+}
+
 class ServingUsage {
   private readonly usage;
   constructor(events: RunnerEvents) { this.usage = createToolLoopUsage(events); }
@@ -325,6 +364,7 @@ async function runAgentlasServingWithTools(
   context: { turns: ServingTurn[]; system: string },
   outputReserve: number,
   cookie: string,
+  generations?: StatelessGenerationSession,
 ): Promise<RunnerResult | null> {
   const { tools, byName, broker, approval } = await prepareMainToolLoop(req, "agentlas");
   if (tools.length < 1) {
@@ -350,8 +390,21 @@ async function runAgentlasServingWithTools(
   const progress = createToolLoopProgress("agentlas", req, events);
   let accumulatedText = "";
   let firstRound = true;
-  for (;;) {
+  let round = 0, lastRequestTokens: number | null = null, lastObservedInput: number | null = null;
+  for (;; round += 1) {
     req.signal?.throwIfAborted();
+    if (generations && round > 0) {
+      // After a tool round whose results are all in: the next request's input against 80% of the serving window.
+      const pending = { model, system: context.system, messages: context.turns, maxTokens: outputReserve,
+        toolProtocol: TOOL_PROTOCOL, tools: definitions, toolExchanges: toolExchanges.map(({ images: _images, ...exchange }) => exchange) };
+      const rotation = await generations.boundary({ boundary: "tool-step", step: round, window: SERVING_GENERATION_WINDOW,
+        requestTokens: servingAdmissionTokens(JSON.stringify(pending)), historyTokens: servingAdmissionTokens(JSON.stringify(context.turns.slice(0, -1))),
+        observedLastInput: lastObservedInput, lastRequestTokens });
+      if (rotation.action === "rotated") {
+        const rebuilt = turnsFor(req, events, outputReserve, rotation);
+        if (rebuilt) context = { turns: rebuilt.turns, system: context.system };
+      }
+    }
     const textPayload = { model, system: context.system, messages: context.turns, maxTokens: outputReserve,
       toolProtocol: TOOL_PROTOCOL, tools: definitions, toolExchanges };
     const toolImageCount = toolExchanges.reduce((count, exchange) => count + (exchange.images?.length ?? 0), 0);
@@ -360,6 +413,7 @@ async function runAgentlasServingWithTools(
     const requestBody = JSON.stringify({ ...textPayload, ...servingRequestFields(req) });
     // Image bytes have a visual admission estimate, not a text-token estimate.
     const admissionPayload = { ...textPayload, toolExchanges: toolExchanges.map(({ images: _images, ...exchange }) => exchange) };
+    lastRequestTokens = servingAdmissionTokens(JSON.stringify(admissionPayload));
     // The serving tier exposes a conservative 128k window. Count the full
     // growing tool transcript and schemas before another charged model call.
     if (servingAdmissionTokens(JSON.stringify(admissionPayload)) + imageTokenEstimate(req, toolImageCount) + outputReserve + 256
@@ -370,6 +424,8 @@ async function runAgentlasServingWithTools(
     }
     // Context-reduction C01: the exact round about to be sent (system, tools, history, tool exchanges), sizes only.
     reportModelPayload(() => ledgerFromApiBody(textPayload, { ledgerHints: req.ledgerHints, imageCount: sentImageCount }));
+    reportCachePlan(() => servingCachePlan({ system: context.system, tools: definitions, turns: context.turns }));
+    reportModelEndpoint({ url: webBaseUrl() });
     const usageAttempt = usage.start();
     const response = await postServing(requestBody, cookie, req);
     if (!response.ok) return assertCurrentHistoryRunnerResult({ text: accumulatedText, ownerControlTerminal: "uncertain", failure: await servingHttpFailure(response, req.locale), ...usage.settle() });
@@ -394,6 +450,8 @@ async function runAgentlasServingWithTools(
     }
     if (!done) return assertCurrentHistoryRunnerResult({ text: accumulatedText, ownerControlTerminal: "uncertain", failure: servingReconciliationFailure(req.locale), ...usage.settle() });
     (usage.add(usageAttempt, done), currentHistoryRuntimeFence()?.assertCurrent());
+    // The server's inputTokens include cache reads and writes: the whole input of this request.
+    const observedInput = Number.isSafeInteger(done.usage?.inputTokens) && Number(done.usage?.inputTokens) > 0 ? Number(done.usage?.inputTokens) : null;
     // A stateless round gets new tool images once. Preserve the textual exchanges,
     // but do not carry base64 screenshots through every later charged call.
     for (const exchange of toolExchanges) delete exchange.images;
@@ -411,6 +469,8 @@ async function runAgentlasServingWithTools(
       if (Array.isArray(done.toolUses) && done.toolUses.length > 0) throw new Error("invalid_serving_tool_frame");
       accumulatedText += text;
       if (!accumulatedText.trim()) throw new Error("agentlas_serving_empty_answer");
+      // Only a complete, valid final response acknowledges the generation it used (never max_tokens or a broken frame).
+      if (!req.signal?.aborted) generations?.completed(round, observedInput);
       (currentHistoryRuntimeFence()?.assertCurrent(), events.onPartial(accumulatedText));
       return assertCurrentHistoryRunnerResult({ text: accumulatedText, ...usage.settle(),
         ownerControlTerminal: !req.signal?.aborted && (done.toolUses === undefined || (Array.isArray(done.toolUses) && done.toolUses.length === 0))
@@ -421,6 +481,9 @@ async function runAgentlasServingWithTools(
       if (seenCallIds.has(call.id)) throw new Error("invalid_serving_tool_frame");
       seenCallIds.add(call.id);
     }
+    // A complete tool_use frame whose calls all validated: the request used the generation; its input is the next measure.
+    generations?.completed(round, observedInput);
+    lastObservedInput = observedInput;
     const results: ServingToolExchange["results"] = [];
     const images: ServingImage[] = [];
     for (const call of calls) {
@@ -453,7 +516,17 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
       : "The server's exact model capacity is undisclosed; using a conservative transport budget." });
 
   const outputReserve = Math.min(MAX_TOKENS[model] ?? 2_600, req.maxOutputTokens ?? Number.POSITIVE_INFINITY);
-  const context = turnsFor(req, events, outputReserve);
+  // The conversation's "session" (stateless-generation.ts, native-harness NH10): the handoff it installed, a new one when a
+  // request's input reaches 80% of the serving window, acknowledged by the next complete response. Silent.
+  const generations = openStatelessGeneration({ runtime: "agentlas", chatId: req.chatId, ownerId: req.runtimeSessionOwnerId ?? req.agentId ?? null,
+    model, history: req.history, locale: req.locale, agentId: req.agentId ?? null });
+  let context = turnsFor(req, events, outputReserve, generations.seed);
+  if (context) {
+    const rotation = await generations.boundary({ boundary: "turn-start", step: 0, window: SERVING_GENERATION_WINDOW,
+      requestTokens: servingAdmissionTokens(JSON.stringify({ system: context.system, messages: context.turns })) + imageTokenEstimate(req),
+      historyTokens: servingAdmissionTokens(JSON.stringify(context.turns.slice(0, -1))) });
+    if (rotation.action === "rotated") context = turnsFor(req, events, outputReserve, rotation) ?? context;
+  }
   if (!context) return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain", failure: { kind: "refused", runtime: "agentlas", source: "marker",
     providerCode: "model_context_capacity_exceeded",
     message: req.locale === "ko"
@@ -463,11 +536,13 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
   // Same admission as every host-loop runtime: tools whenever the run is not a
   // Main-authored no-tools boundary and has either an MCP config or a workspace.
   if (!req.untrustedNoTools && (req.mcpConfigPath || req.cwd)) {
-    const withTools = await runAgentlasServingWithTools(req, events, model, { turns, system }, outputReserve, cookie);
+    const withTools = await runAgentlasServingWithTools(req, events, model, { turns, system }, outputReserve, cookie, generations);
     if (withTools) return withTools;
   }
   reportModelPayload(() => ledgerFromApiBody({ model, system, messages: turns, maxTokens: outputReserve },
     { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
+  reportCachePlan(() => servingCachePlan({ system, tools: [], turns }));
+  reportModelEndpoint({ url: webBaseUrl() });
   const usage = new ServingUsage(events);
   const usageAttempt = usage.start();
   const response = await postServing(JSON.stringify({
@@ -511,10 +586,12 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
         ? "Agentlas 모델이 빈 답을 돌려주었습니다. 다시 시도해 주세요."
         : "The Agentlas model returned an empty answer. Try again." } });
   }
+  const completedTerminal = !req.signal?.aborted && (done.stopReason === "end_turn" || done.stopReason === "stop_sequence")
+    && (done.toolUses === undefined || Array.isArray(done.toolUses) && done.toolUses.length === 0);
+  // Only the complete final response acknowledges the generation it used; a partial (max_tokens) or invalid one does not.
+  if (completedTerminal) generations.completed(0, Number.isSafeInteger(done.usage?.inputTokens) && Number(done.usage?.inputTokens) > 0 ? Number(done.usage?.inputTokens) : null);
   return assertCurrentHistoryRunnerResult({ text, ...usage.settle(),
-    ownerControlTerminal: !req.signal?.aborted && (done.stopReason === "end_turn" || done.stopReason === "stop_sequence")
-      && (done.toolUses === undefined || Array.isArray(done.toolUses) && done.toolUses.length === 0)
-      ? "completed" : "uncertain" });
+    ownerControlTerminal: completedTerminal ? "completed" : "uncertain" });
 };
 
 /** 화면에 그릴 러너 이름. 세기까지 붙여 무엇으로 돌았는지 알 수 있게 한다. */

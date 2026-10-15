@@ -121,7 +121,6 @@ export function OneOrgChart({
   onSetAutoSelect,
   onConnectTool,
   onBrowseSource,
-  onOpenConcurrency,
   conversationResults = [],
   historyResults = [],
   onOpenConversation,
@@ -178,7 +177,6 @@ export function OneOrgChart({
   onSetAutoSelect?: (member: OneOrgMember, enabled: boolean) => Promise<void>;
   onConnectTool?: (member: OneOrgMember, serverId?: string) => void;
   onBrowseSource?: (source: "cloud" | "hub") => void;
-  onOpenConcurrency?: () => void;
   conversationResults?: OneOrgSearchItem[];
   historyResults?: OneOrgSearchItem[];
   onOpenConversation?: (id: string) => void;
@@ -330,7 +328,7 @@ export function OneOrgChart({
     noPeople: "No staff members match.", noConversations: "No conversations match.", noHistory: "No history matches.",
   };
   const addCopy = ko ? {
-    slots: "팀원", used: "명", remaining: "명 더 추가 가능", sourceAria: "에이전트 출처",
+    sourceAria: "에이전트 출처",
     myAgents: "내 에이전트", installed: "로컬 에이전트", choose: "에이전트를 선택하세요", search: "에이전트 검색",
     matchingRole: (role: string) => `${role} 역할에 맞는 에이전트`, noMatch: "설치된 에이전트 중 일치하는 역할이 없습니다.", showAll: "전체 목록 보기",
     permanent: "상주 · 만료 없음",
@@ -345,7 +343,7 @@ export function OneOrgChart({
     cloudSignedOut: "Agentlas 로그인이 필요합니다. 로그인하면 Agent Cloud에 저장한 에이전트가 여기 표시됩니다.",
     hubSignedOut: "Agentlas 로그인이 필요합니다. 로그인하면 Hub에서 북마크한 에이전트가 여기 표시됩니다.",
   } : {
-    slots: "Teammates", used: "", remaining: " more available", sourceAria: "Agent source",
+    sourceAria: "Agent source",
     myAgents: "My agents", installed: "Local agent", choose: "Choose an agent", search: "Search agents",
     matchingRole: (role: string) => `Agents matching ${role}`, noMatch: "No installed agent matches this role.", showAll: "View all agents",
     permanent: "Standing · No expiry",
@@ -425,8 +423,8 @@ export function OneOrgChart({
     const requestAuthEpoch = authEpochRef.current;
     const isCurrentRequest = () => authEpochRef.current === requestAuthEpoch;
     if (!isCurrentRequest()) return;
-    if (!state || state.slots.available <= 0) {
-      setAddError(ko ? "팀원을 더 추가할 수 없습니다 — 최대 인원입니다." : "You have reached the teammate limit.");
+    if (!state) {
+      setAddError(ko ? "팀원 정보를 아직 불러오지 못했습니다." : "The teammate roster has not loaded yet.");
       setPendingHubAdd(request);
       return;
     }
@@ -466,7 +464,7 @@ export function OneOrgChart({
   };
 
   const submitAdd = async () => {
-    if (!selectedAgent || busy || !state || state.slots.available <= 0) return;
+    if (!selectedAgent || busy || !state) return;
     if (addTab !== "my" && !selectedListing) return;
     const requestAuthEpoch = authEpochRef.current;
     const isCurrentRequest = () => authEpochRef.current === requestAuthEpoch;
@@ -593,7 +591,7 @@ export function OneOrgChart({
         {active.length === 0 && <>
           <div className={styles.empty}>{locale === "ko" ? "아직 상주 스태프가 없습니다. 아래 역할을 골라 시작하세요." : "No standing staff yet. Pick a role to get started."}</div>
           <div className={styles.ghosts} aria-label={locale === "ko" ? "추천 역할" : "Suggested roles"}>
-          {ghostRoles.map((role) => <button key={role.id} type="button" className={styles.ghost} onClick={() => { setRoleFilter(role.id); setAddTab("my"); setAddOpen(true); }} disabled={!state || state.slots.available <= 0}><span><IconPlus size={14} /></span><strong>{role.label}</strong><small>{locale === "ko" ? "아직 없음" : "Not assigned"}</small></button>)}
+          {ghostRoles.map((role) => <button key={role.id} type="button" className={styles.ghost} onClick={() => { setRoleFilter(role.id); setAddTab("my"); setAddOpen(true); }} disabled={!state}><span><IconPlus size={14} /></span><strong>{role.label}</strong><small>{locale === "ko" ? "아직 없음" : "Not assigned"}</small></button>)}
           </div>
         </>}
         {active.map((member) => (
@@ -676,35 +674,22 @@ export function OneOrgChart({
         ))}
       </div>
       <div className={styles.agentActions}>
-        {/*
-          * ★회색일 때 사유가 마우스에는 안 보였고(aria-label 뿐), 아직 못 읽은 상태까지
-          *   "가득 참" 이라고 말하고 있었다 — 사실이 아니다(실측 2026-09-08).
-          *   사유를 갈라 말하고, 가득 찬 경우엔 **푸는 길**까지 적는다.
-          */}
-        {onCreateAgent && <button type="button" className={styles.createAgentButton} onClick={onCreateAgent} disabled={!state || state.slots.available <= 0}
+        {onCreateAgent && <button type="button" className={styles.createAgentButton} onClick={onCreateAgent} disabled={!state}
           aria-label={!state
             ? (locale === "ko" ? "팀원 수를 읽는 중" : "Reading teammate count")
-            : state.slots.available
-              ? (locale === "ko" ? "새 에이전트 만들기 또는 기존 에이전트 추가" : "Create or add an agent")
-              : (locale === "ko" ? "팀원이 가득 참" : "Teammate limit reached")}
+            : (locale === "ko" ? "새 에이전트 만들기 또는 기존 에이전트 추가" : "Create or add an agent")}
           title={!state
             ? (locale === "ko" ? "팀원 수를 아직 읽지 못했습니다." : "The teammate count has not been read yet.")
-            : state.slots.available
-              ? undefined
-              : (locale === "ko"
-                ? `팀원이 ${state.slots.used}/${state.slots.capacity}명으로 가득 찼습니다. 아래 '설정'에서 동시 실행 수를 늘리거나 쓰지 않는 팀원을 내보내세요.`
-                : `Teammates are full (${state.slots.used}/${state.slots.capacity}). Raise concurrent runs under Settings below, or remove a teammate you are not using.`)}>
+            : undefined}>
           <IconPlus size={15} />
         </button>}
       </div>
       <div className={styles.sectionLabel}>{locale === "ko" ? "현재 태스크포스" : "Active Task Force"}</div>
       {taskForce.length > 0 ? <div className={styles.taskForceRows}>{taskForce.map((agent) => <div className={styles.taskForceRow} key={agent!.id}><OneAgentPortrait status="working" label={agent!.name} tone={agent!.tone} size="small" /><span>{agent!.localDisplayName || agent!.name}</span><small>{locale === "ko" ? "이번 작업" : "This task"}</small></div>)}</div> : <div className={styles.taskForceHint}>{locale === "ko" ? "대화에서 소환한 일회성 에이전트는 팀원 수에 들어가지 않고 현재 Work에만 연결됩니다." : "Temporary agents summoned in chat do not count as teammates and stay attached only to the current Work task."}</div>}
       <footer className={styles.footer}>
-        <span>{locale === "ko" ? "팀원" : "Teammates"} {state?.slots.used ?? 1}/{state?.slots.capacity ?? 1}</span>
-        <span className={styles.slotBudget} title={state ? (locale === "ko" ? `${state.slots.cores}코어 · ${state.slots.totalMemGB}GB RAM · 권장 ${state.slots.recommended} · 최대 ${state.slots.hardMax}` : `${state.slots.cores} cores · ${state.slots.totalMemGB}GB RAM · Recommended ${state.slots.recommended} · Maximum ${state.slots.hardMax}`) : undefined}>
-          {state?.slots.available ? (locale === "ko" ? "추가 가능" : "Available") : (locale === "ko" ? "가득 참" : "Full")}
-          {onOpenConcurrency && <button type="button" onClick={onOpenConcurrency} aria-label={locale === "ko" ? "동시 실행 수 설정" : "Configure concurrent runs"}>{locale === "ko" ? "설정" : "Settings"}</button>}
-        </span>
+        <span>{state
+          ? (locale === "ko" ? `One 포함 ${state.slots.used}명` : `${state.slots.used} members incl. One`)
+          : (locale === "ko" ? "팀원 불러오는 중" : "Loading teammates")}</span>
       </footer>
       {archived.length > 0 && <details className={styles.archived}><summary>{locale === "ko" ? "보관됨" : "Archived"} · {archived.length}</summary>{archived.map((member) => <div className={styles.archivedRow} key={member.id}><span>{member.displayName}</span><button type="button" onClick={() => void onRestore(member)}>{locale === "ko" ? "복원" : "Restore"}</button></div>)}</details>}
 
@@ -790,7 +775,7 @@ export function OneOrgChart({
         size="wide"
         panelClassName={styles.addDialog}
         bodyClassName={styles.addDialogBody}
-        eyebrow={`${addCopy.slots} ${state?.slots.used ?? 1}/${state?.slots.capacity ?? 1}${addCopy.used} · ${state?.slots.available ?? 0}${addCopy.remaining}`}
+        eyebrow={state ? (locale === "ko" ? `One 포함 ${state.slots.used}명` : `${state.slots.used} members incl. One`) : undefined}
         title={locale === "ko" ? "에이전트 추가" : "Add agent"}
         titleId="one-org-add-title"
         ariaLabelledBy="one-org-add-title"

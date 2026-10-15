@@ -10,9 +10,13 @@
  *  - The runtime reports one call twice (requested, then completed). Rows with the same node, tool call id
  *    and arguments are one call; the last row's error flag wins.
  *  - Host preflight lookups and supervisor notices (shared/tool-activity.ts) are not work and are dropped.
- *  - An outward action is a successful call whose ledger shape says it changed the outside world: a browser
- *    click whose element label is a submit/like/repost/follow control, an upload, a mail send, or an MCP
- *    tool whose name is a create/post/send verb. Typed text is a draft, not an effect; only its length is kept.
+ *  - An outward action COUNTS only from a typed effect: the `effect` argument the model declared on a browser
+ *    click (reply/post/repost/like/follow/message, or send/publish/delete/payment) on a successful completed
+ *    call, or the exact operation `browser_file_upload`. Typed text is a draft, not an effect; only its length
+ *    is kept. (Owner rule 2026-10-13: the host never decides meaning from the words of a label or tool name.)
+ *  - A label/tool-name guess (an unlabeled click on a "답글 게시" control, a `send_email` tool) is never a count.
+ *    It is kept apart as `outwardEstimate` (an observation estimate) and makes the coverage "unknown", so a
+ *    quiet-run decision can never rest on it.
  *  - Unknown shapes are never promoted to outward counts. They stay visible as plain action rows.
  *
  * Pure: Main (IPC digest), the renderer and the phone bridge can all call it.
@@ -24,6 +28,10 @@ export const AUTOMATION_RUN_DIGEST_SCHEMA = "agentlas.automation-run-digest.v1" 
 
 export type AutomationToolFamily = "browser" | "computer" | "shell" | "mail" | "image" | "web" | "time" | "file" | "agent" | "other";
 export type AutomationOutwardKind = "reply" | "post" | "repost" | "like" | "follow" | "message" | "upload" | "mail";
+/** Typed click effects that finalize something but carry no finer outward kind. */
+export type AutomationOtherEffect = "send" | "publish" | "delete" | "payment";
+const OUTWARD_KIND_VALUES: ReadonlySet<string> = new Set(["reply", "post", "repost", "like", "follow", "message"]);
+const OTHER_EFFECT_VALUES: ReadonlySet<string> = new Set(["send", "publish", "delete", "payment"]);
 export type AutomationActionKind = AutomationOutwardKind | "navigate" | "read" | "search" | "click" | "type" | "command" | "time" | "image" | "file" | "call";
 
 /** One `mcp_tool-use` ledger row, reduced to the fields the digest reads. */
@@ -59,6 +67,10 @@ export interface AutomationActionRow {
   nodeId: string | null;
   /** Characters typed (the text itself is not carried). */
   typedChars?: number;
+  /** The typed effect the model declared on this click, when it was valid. */
+  effect?: string;
+  /** A label/tool-name guess, not a count. Present only when no typed effect existed. */
+  estimatedOutward?: AutomationOutwardKind;
 }
 
 export interface AutomationRunDigest {
@@ -68,8 +80,14 @@ export interface AutomationRunDigest {
   status: string;
   startedAt: string | null;
   endedAt: string | null;
+  /** Counted from typed effect receipts / exact operation identity only. */
   outward: Partial<Record<AutomationOutwardKind, number>>;
+  /** Typed effects with no finer kind (send/publish/delete/payment). Included in outwardTotal. */
+  outwardOther?: Partial<Record<AutomationOtherEffect, number>>;
   outwardTotal: number;
+  /** Label/tool-name guesses for calls with no typed effect. Estimate only, never added to outward counts. */
+  outwardEstimate?: Partial<Record<AutomationOutwardKind, number>>;
+  outwardEstimateTotal?: number;
   failures: number;
   toolCalls: number;
   /** Missing legacy/request-only receipts cannot establish that nothing happened. */
@@ -139,6 +157,7 @@ export function automationToolFamily(toolName: string): AutomationToolFamily {
   return "other";
 }
 
+// ESTIMATE ONLY (owner rule 2026-10-13): a click label guess is never an outward count; it feeds `outwardEstimate`.
 // Browser click labels. A reply/post needs a submit verb so "답글 필터" (a filter tab) is not a reply.
 const NOT_OUTWARD_LABEL = /필터|filter|탭\b|\btab\b|메뉴|menu|더\s*보기|see more|more options|닫기|close|검색|search|알림|notification|정렬|sort/i;
 const SUBMIT_VERB = /게시|올리기|보내기|전송|등록|\bpost\b|\bsend\b|\bsubmit\b|\bpublish\b/i;
@@ -196,6 +215,12 @@ function actionKindFor(toolName: string, family: AutomationToolFamily): Automati
   if (action === "search") return "search";
   if (action === "read" || action === "fetch") return "read";
   return "call";
+}
+
+/** The model-declared `effect` of a browser click: a lowercase token from the typed contract, else null. */
+function typedClickEffect(args: Record<string, unknown>): string | null {
+  const raw = typeof args.effect === "string" ? args.effect.trim().toLowerCase() : "";
+  return raw === "none" || OUTWARD_KIND_VALUES.has(raw) || OTHER_EFFECT_VALUES.has(raw) ? raw : null;
 }
 
 function argString(args: Record<string, unknown>, ...keys: string[]): string | null {
@@ -259,6 +284,9 @@ export function digestAutomationRun(input: DigestAutomationRunInput): Automation
   let lastUrl: string | null = null;
   const rows: AutomationActionRow[] = [];
   const outward: Partial<Record<AutomationOutwardKind, number>> = {};
+  const outwardOther: Partial<Record<AutomationOtherEffect, number>> = {};
+  const outwardEstimate: Partial<Record<AutomationOutwardKind, number>> = {};
+  const inertSeqs = new Set<number>();
   const siteCounts = new Map<string, number>();
   const familyCounts = new Map<AutomationToolFamily, number>();
   let failures = 0;
@@ -281,25 +309,40 @@ export function digestAutomationRun(input: DigestAutomationRunInput): Automation
     const typed = kind === "type" ? argString(args, "text", "value") : null;
     if (!call.isError && event.completed === true && typed && family === "browser") pendingDraftByNode.add(nodeKey);
     let outwardKind: AutomationOutwardKind | null = null;
+    let otherEffect: AutomationOtherEffect | null = null;
+    let estimatedKind: AutomationOutwardKind | null = null;
+    let inert = false;
+    const typedEffect = kind === "click" && (family === "browser" || family === "computer") ? typedClickEffect(args) : null;
     if (!call.isError && event.completed === true) {
-      if (kind === "click") {
-        outwardKind = outwardKindForClickLabel(elementLabel);
+      if (typedEffect) {
+        if (OUTWARD_KIND_VALUES.has(typedEffect)) outwardKind = typedEffect as AutomationOutwardKind;
+        else if (OTHER_EFFECT_VALUES.has(typedEffect)) otherEffect = typedEffect as AutomationOtherEffect;
+        else if (typedEffect === "none") inert = true;
+        if (outwardKind === "post" || outwardKind === "reply" || outwardKind === "message" || otherEffect === "send" || otherEffect === "publish") pendingDraftByNode.delete(nodeKey);
+      } else if (kind === "upload" && leafOf(event.toolName) === "browser_file_upload") {
+        outwardKind = "upload";
+      } else if (kind === "click") {
+        // No typed effect: a label guess is an observation estimate, never a count.
+        estimatedKind = outwardKindForClickLabel(elementLabel);
         // Bare English labels are also nouns/navigation. A preceding draft in
         // this same node supplies the missing submit context; a link does not.
-        if (!outwardKind && pendingDraftByNode.has(nodeKey)) {
-          if (/^(?:post|publish)$/i.test(elementLabel ?? "")) outwardKind = "post";
-          else if (/^(?:reply|comment)$/i.test(elementLabel ?? "")) outwardKind = "reply";
+        if (!estimatedKind && pendingDraftByNode.has(nodeKey)) {
+          if (/^(?:post|publish)$/i.test(elementLabel ?? "")) estimatedKind = "post";
+          else if (/^(?:reply|comment)$/i.test(elementLabel ?? "")) estimatedKind = "reply";
         }
-        if (outwardKind === "post" || outwardKind === "reply" || outwardKind === "message") pendingDraftByNode.delete(nodeKey);
+        if (estimatedKind === "post" || estimatedKind === "reply" || estimatedKind === "message") pendingDraftByNode.delete(nodeKey);
+      } else {
+        estimatedKind = kind === "upload" ? "upload" : outwardKindForToolName(event.toolName, family);
       }
-      else if (kind === "upload") outwardKind = "upload";
-      else outwardKind = outwardKindForToolName(event.toolName, family);
     } else if (kind === "upload") {
       kind = "click";
     }
     if (outwardKind) kind = outwardKind;
     if (call.isError) failures += 1;
     if (outwardKind) outward[outwardKind] = (outward[outwardKind] ?? 0) + 1;
+    if (otherEffect) outwardOther[otherEffect] = (outwardOther[otherEffect] ?? 0) + 1;
+    if (estimatedKind) outwardEstimate[estimatedKind] = (outwardEstimate[estimatedKind] ?? 0) + 1;
+    if (inert) inertSeqs.add(event.seq);
     if (domain) siteCounts.set(domain, (siteCounts.get(domain) ?? 0) + 1);
     familyCounts.set(family, (familyCounts.get(family) ?? 0) + 1);
     const row: AutomationActionRow = {
@@ -307,17 +350,19 @@ export function digestAutomationRun(input: DigestAutomationRunInput): Automation
       firstAt: call.firstAt,
       lastAt: call.lastAt,
       kind,
-      outward: outwardKind !== null,
+      outward: outwardKind !== null || otherEffect !== null,
       family,
       domain,
-      url: kind === "navigate" || outwardKind ? url : null,
-      label: kind === "click" || outwardKind || kind === "type" ? (elementLabel?.slice(0, 80) ?? null) : null,
+      url: kind === "navigate" || outwardKind || otherEffect ? url : null,
+      label: kind === "click" || outwardKind || otherEffect || kind === "type" ? (elementLabel?.slice(0, 80) ?? null) : null,
       toolLeaf: leafOf(event.toolName),
       count: 1,
       failed: call.isError ? 1 : 0,
       failureCode: call.failureCode,
       nodeId: event.nodeId ?? null,
       ...(typed ? { typedChars: [...typed].length } : {}),
+      ...(typedEffect ? { effect: typedEffect } : {}),
+      ...(estimatedKind ? { estimatedOutward: estimatedKind } : {}),
     };
     // Repeated plain reads/clicks on the same site in the same step collapse into one row.
     const previous = rows.at(-1);
@@ -330,7 +375,9 @@ export function digestAutomationRun(input: DigestAutomationRunInput): Automation
     }
     rows.push(row);
   }
-  const outwardTotal = Object.values(outward).reduce((sum, value) => sum + (value ?? 0), 0);
+  const sumOf = (record: object): number => (Object.values(record) as Array<number | undefined>).reduce<number>((sum, value) => sum + (value ?? 0), 0);
+  const outwardTotal = sumOf(outward) + sumOf(outwardOther);
+  const outwardEstimateTotal = sumOf(outwardEstimate);
   return {
     schemaVersion: AUTOMATION_RUN_DIGEST_SCHEMA,
     runId: input.runId,
@@ -339,14 +386,16 @@ export function digestAutomationRun(input: DigestAutomationRunInput): Automation
     startedAt: input.startedAt,
     endedAt: input.endedAt ?? null,
     outward,
+    ...(outwardTotal - sumOf(outward) > 0 ? { outwardOther } : {}),
     outwardTotal,
+    ...(outwardEstimateTotal > 0 ? { outwardEstimate, outwardEstimateTotal } : {}),
     failures,
     toolCalls: calls.length,
     outwardActivityCoverage: calls.length === 0 ? "unknown"
       : !calls.every((call) => call.event.completed === true) ? "incomplete"
         // Display grouping defaults unknown browser tools to "read". That
         // label cannot prove an evaluator/script/tab mutation was read-only.
-        : calls.every((call) => rows.some((row) => row.outward && row.id === `${input.runId}:${call.event.seq}`)
+        : calls.every((call) => inertSeqs.has(call.event.seq) || rows.some((row) => row.outward && row.id === `${input.runId}:${call.event.seq}`)
           || /^(?:browser_)?(?:navigate|snapshot|screenshot|read_file|read|search|web_search|web_fetch|get_current_time|current_time|get_url)$/.test(leafOf(call.event.toolName))) ? "complete" : "unknown",
     sites: [...siteCounts].map(([domain, count]) => ({ domain, count })).sort((a, b) => b.count - a.count),
     families: [...familyCounts].map(([family, count]) => ({ family, count })).sort((a, b) => b.count - a.count),
@@ -419,7 +468,8 @@ export function automationActionLine(row: AutomationActionRow, locale: "ko" | "e
   const times = row.count > 1 ? (ko ? ` ${row.count}회` : ` ×${row.count}`) : "";
   const site = row.domain ? `${row.domain} · ` : "";
   const label = row.label ? ` “${row.label}”` : "";
-  if (row.outward) return `${site}${OUTWARD_VERBS[row.kind as AutomationOutwardKind][locale]}`;
+  if (row.outward && row.kind in OUTWARD_VERBS) return `${site}${OUTWARD_VERBS[row.kind as AutomationOutwardKind][locale]}`;
+  if (row.outward) return `${site}${ko ? "누름" : "Clicked"} · ${row.effect ?? ""}${label}`;
   switch (row.kind) {
     case "navigate": return `${site}${ko ? "페이지 열어봄" : "Opened page"}${times}`;
     case "read": return row.family === "browser" || row.family === "computer"
@@ -437,9 +487,13 @@ export function automationActionLine(row: AutomationActionRow, locale: "ko" | "e
 }
 
 /** Headline for a finished run: "Threads 답글 3회, 리포스트 2회" or "Threads 확인만 함". */
-export function automationRunHeadline(digest: Pick<AutomationRunDigest, "outward" | "outwardTotal" | "sites" | "toolCalls" | "outwardActivityCoverage"> & { status?: string }, locale: "ko" | "en"): string {
+export function automationRunHeadline(digest: Pick<AutomationRunDigest, "outward" | "outwardTotal" | "sites" | "toolCalls" | "outwardActivityCoverage"> & { status?: string; outwardEstimate?: AutomationRunDigest["outwardEstimate"]; outwardEstimateTotal?: number }, locale: "ko" | "en"): string {
   const site = digest.sites[0] ? siteDisplayName(digest.sites[0].domain) : "";
   if (digest.outwardTotal > 0) return `${site ? `${site} ` : ""}${automationOutwardSummary(digest.outward, locale)}`;
+  if ((digest.outwardEstimateTotal ?? 0) > 0 && digest.status !== "running") {
+    const guess = automationOutwardSummary(digest.outwardEstimate ?? {}, locale);
+    return `${site ? `${site} ` : ""}${locale === "ko" ? "추정" : "estimated"} ${guess}`;
+  }
   if (digest.status === "running") return locale === "ko" ? `${site ? `${site} ` : ""}진행 중 · 도구 ${digest.toolCalls}회` : `${site ? `${site} ` : ""}in progress · ${digest.toolCalls} tool calls`;
   if (digest.status === "ok") {
     if (digest.outwardActivityCoverage !== "complete") return locale === "ko" ? "외부 동작 측정 불가" : "Outward activity unknown";

@@ -1,0 +1,87 @@
+.card {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 10px;
+  color: var(--ink);
+}
+
+.head {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.button:hover:not(:disabled) {
+  background: var(--paper-edge);
+}
+
+.button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.icon {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-deep);
+  cursor: pointer;
+}
+
+.icon:hover {
+  background: var(--paper-edge);
+}
+
+.frame {
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color-scheme: normal;
+}

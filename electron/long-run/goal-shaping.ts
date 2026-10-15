@@ -1,3 +1,4 @@
+import { fixedPurposePrompt, purposePrompt } from "../runtime/purpose-prompts";
 /**
  * 골 구조 판단 → 계획 → 실행 연결(One·Work 공통, ownsHostGoalLoop).
  * docs/2026-09-24-PLAN-persistent-autonomy-foundation.md "골 구조 판단" S-4.
@@ -18,6 +19,7 @@ import {
 } from "../system-agents/judgment";
 import {
   GOAL_SHAPE_LIMITS,
+  GOAL_SHAPE_OUTPUT_SCHEMA,
   NATURE_SHAPE,
   checkPlanOp,
   extractGoalPlanMarkers,
@@ -64,6 +66,7 @@ import { getChatGoalRevision } from "../store/chat-goals";
 import { getLongRunByGoalId, longRunOwnerHold } from "../store/long-runs";
 import { ownsHostGoalLoop } from "./host-goal-surface";
 import { currentUiLocale } from "../ui-locale";
+import { AGENTLAS_TURN_TOOLS } from "../turn-tools/mcp-server";
 import { UNCERTAIN_EFFECT_POLICY } from "../../shared/uncertain-effect-policy";
 
 export const GOAL_SHAPE_TIMEOUT_MS = 60_000;
@@ -82,49 +85,24 @@ export type GoalShapeModelCall = (opts: Parameters<typeof callConnectedModelDeta
  * English. Ids, enum values and JSON keys stay English (machine), owner quotes stay verbatim.
  */
 export function goalPlanTextLanguageRule(locale: "ko" | "en"): string {
+  const fields = "rationale, mission.objective, mission.diagnosis, key_results metric/unit, strategies hypothesis/kpi, tactics description/done_when, boundaries text";
   return locale === "ko"
-    ? "Language: write every human-readable text field — rationale, mission.objective, mission.diagnosis, key_results metric and unit, strategies hypothesis and kpi, tactics description and done_when, boundaries text — in Korean (한국어), whatever language the goal or the evidence is in. Keep ids (t1, s1), enum values (shape, problem_nature, kind, source), JSON keys and ISO durations in English; a boundary quote stays an exact substring of the owner's text."
-    : "Language: write every human-readable text field — rationale, mission.objective, mission.diagnosis, key_results metric and unit, strategies hypothesis and kpi, tactics description and done_when, boundaries text — in English. Keep ids, enum values and JSON keys as specified; a boundary quote stays an exact substring of the owner's text.";
+    ? `locale: text fields in Korean (한국어), whatever language the goal or evidence is in: ${fields}\nKeep ids (t1, s1), enum values (shape, problem_nature, kind, source), JSON keys, ISO durations in English; boundary quote = exact substring of owner text`
+    : `locale: text fields in English: ${fields}\nKeep ids, enum values, JSON keys as specified; boundary quote = exact substring of owner text`;
 }
 
 export function goalShapeSystemPrompt(locale: "ko" | "en" = "en"): string {
-  return [
-    goalPlanTextLanguageRule(locale),
-    "",
-    "You are the planning lead for an autonomous agent. BEFORE any work starts, decide the SHAPE of the plan for the owner's goal.",
-    "The domain can be anything: software, money, marketing, a game, a reminder, research. Never assume a domain.",
-    "",
-    "Step 1 — classify the problem (Cynefin):",
-    "- clear: what to do is obvious; one run of work finishes it and completion is directly checkable.",
-    "- complicated: the steps can be worked out in advance by analysis, but it takes several ordered steps or runs.",
-    "- complex: the outcome (a number or state, often with a deadline) is fixed, but which approach works can only be learned by trying; several approaches should be run as experiments and kept or dropped by results.",
-    "- chaotic: something is broken or urgent right now; act first to stabilise.",
-    "Step 2 — choose the SIMPLEST shape that can work (decompose only as needed; when in doubt pick the simpler shape):",
-    "- single_tactic for clear and chaotic problems: exactly one tactic.",
-    "- tactic_list for complicated problems: as many ordered tactics as the work needs.",
-    "- mission_tree for complex problems: mission -> strategies (as many parallel hypotheses as are worth running now) -> tactics.",
-    "- The tactics' done_when conditions ARE the goal's completion checklist: the goal is achieved exactly when every tactic's done_when (and every key result) is met — nothing more, nothing missing (WBS 100% rule). Write each done_when as something a checker can observe (a file, a page, a command result, a number); a claim that cannot be observed must be restated as something observable.",
-    "",
-    "Rules:",
-    "- Every tactic has an id (t1, t2, ...), a concrete description, and done_when: an observable post-condition that proves it is finished. kind is one_off, or recurring for a repeated action (e.g. a daily post).",
-    '- Optional tactic fields: depends_on:["existing tactic id"] (acyclic; [] declares independence), prerequisites:[{"id":"predicate_id","state":"unmet|unknown|met","evidence_refs":["source reference"],"blocks":["prepare|local_write|external_effect"]}]. Missing fields mean unknown historical prerequisite information. References are assertions until the host verifies them; met requires a reference and is not effect/completion proof.',
-    "- A tactic must change something. 'Look into it' alone is not a tactic.",
-    "- mission_tree needs mission.objective (the owner's intent and end state), mission.diagnosis (one sentence naming the biggest obstacle — the crux), strategies, and tactics where EVERY tactic has strategy_id of an existing strategy — including measurement or tracking tactics (attach them to the strategy they inform). A tactic without a strategy is dropped.",
-    "- Strategy: id (s1, s2, ...), hypothesis (the guiding policy: why this approach should move the key results), serves_krs (metric names of the key results it serves), kpi (a leading indicator), budget {actions_per_day} is an advisory activity cadence, only if a sensible daily volume follows from the required pace; it is never a cap on preparation, observation, tool calls or work turns, timebox_hours (minimum observation before judging it), observation_window_hours.",
-    "- key_results: ONLY numeric targets the owner actually wrote (target must equal a number in the owner's text, e.g. '1만' = 10000, '백만' = 1000000, '$10k' = 10000). Never invent targets. If the owner wrote no numeric target, key_results is []. A yes/no end state (e.g. 'capture the capital') belongs in mission.objective, not in key_results. deadline as an ISO 8601 calendar duration from now (e.g. P30D for '1달'/'one month') or null; a limit in non-calendar units (game turns, rounds, levels) stays in mission.objective. baseline only if the owner stated it.",
-    "- boundaries: ONLY (a) owner rules, source 'owner' with quote = an exact substring of the owner's text, or (b) explicit platform/legal rules, source 'platform_rule' with rule_ref naming the rule, no numbers. Do NOT invent caps, quotas or safety limits — self-made limits are not boundaries.",
-    "- review_every_hours (mission_tree only): how often to review strategies against the key-result pace (1-168; 24 is typical).",
-    "- deadline (any shape): the owner's explicit time limit for the WHOLE goal, as an ISO 8601 duration from now (e.g. P30D for '1달 안에'/'within a month') or an ISO date for a named day ('by Friday' = that date). null when the owner gave no time limit. Never invent or infer one from the domain.",
-    "- At most 6 strategies and 12 tactics. Tactics should each fit in one work session.",
-    "- rationale: one or two sentences explaining the classification and shape.",
-    "",
-    "Answer with ONE JSON object and nothing else:",
-    '{"shape":"single_tactic|tactic_list|mission_tree","problem_nature":"clear|complicated|complex|chaotic","rationale":"...",',
-    '"mission":{"objective":"...","diagnosis":"...","key_results":[{"metric":"...","target":0,"unit":"...","deadline":"P30D","baseline":null}],"boundaries":[{"text":"...","source":"owner","quote":"..."}]},',
-    '"strategies":[{"id":"s1","hypothesis":"...","serves_krs":["..."],"kpi":"...","budget":{"actions_per_day":null},"timebox_hours":72,"observation_window_hours":72}],',
-    '"tactics":[{"id":"t1","strategy_id":"s1","description":"...","done_when":"...","kind":"one_off"}],"review_every_hours":24,"deadline":null}',
-    "Omit mission and strategies (or use null/[]) unless the shape is mission_tree; tactics then have strategy_id null.",
-  ].join("\n");
+  const policy = fixedPurposePrompt("purpose.goal.shape.policy", [
+    "plan: simplest Cynefin shape; clear/chaotic=single tactic (stabilize chaos), complicated=ordered tactics, complex=mission strategies as experiments",
+    "tactics: change state within one session; observable done_when; every tree tactic serves a strategy; all strategies serve owner intent",
+    "targets/baseline/deadline: owner-stated only; deadlines use ISO dates/durations (P30D); no numeric KR => []; yes/no end state stays objective; cadence advisory, never a cap",
+    "boundaries: exact owner quote or explicit platform/legal rule_ref; invent no limits; prerequisites met refs are assertions until host verifies, never completion proof",
+    "output: supplied draft schema only; mission=null/strategies=[] outside mission_tree",
+  ]);
+  return purposePrompt([
+    { id: "purpose.goal.shape.policy", revision: 2, stability: "fixed-policy", changeTriggers: ["release"], text: policy },
+    { id: "purpose.goal.shape.locale", revision: 1, stability: "configuration", changeTriggers: ["locale"], text: goalPlanTextLanguageRule(locale) },
+  ]);
 }
 
 export interface GoalShapeJudgment {
@@ -166,14 +144,28 @@ export async function judgeGoalShape(input: {
   });
   const policy = input.selectionPolicy === undefined ? configuredOrchestratorJudgmentPolicy() : input.selectionPolicy;
   if (!policy && !input.callModel && !input.runtimeSelection) return fail("goal_shape_judgment_pool_unconfigured");
-  const payload = JSON.stringify({
-    now: input.createdAt,
-    goal_objective: input.objective,
-    owner_text: input.ownerText,
-    ...(input.priorFacts ? { previous_attempt: input.priorFacts,
-      instruction: "The previous plan shape failed in practice. Decompose further only where it failed; a larger shape is allowed." } : {}),
-    ...(input.ownerRequest ? { owner_request: "The owner asked to break this goal into a structured plan: sub-goals, and strategic goals if the problem is complex. Keep the owner's intent exactly; choose the shape by the rules above." } : {}),
-  });
+  const payload = purposePrompt([
+    ...(input.priorFacts ? [{
+      id: "purpose.goal.shape.retry-guide", revision: 1, stability: "fixed-policy" as const,
+      changeTriggers: ["release", "checkpoint"] as const,
+      text: "previous shape failed; decompose further only where it failed; larger shape allowed",
+    }] : []),
+    ...(input.ownerRequest ? [{
+      id: "purpose.goal.shape.owner-plan-guide", revision: 1, stability: "fixed-policy" as const,
+      changeTriggers: ["release", "owner-input"] as const,
+      text: "owner asked for a structured plan (sub-goals; strategic goals if complex); keep owner intent exactly",
+    }] : []),
+    {
+      id: "purpose.goal.shape.input", revision: 2, stability: "turn-context",
+      changeTriggers: ["task", "owner-input", "goal-revision", "checkpoint"],
+      text: JSON.stringify({
+        now: input.createdAt,
+        goal_objective: input.objective,
+        owner_text: input.ownerText,
+        ...(input.priorFacts ? { previous_attempt: input.priorFacts } : {}),
+      }),
+    },
+  ]);
   let detailed: Awaited<ReturnType<GoalShapeModelCall>>;
   try {
     detailed = await (input.callModel ?? callConnectedModelDetailed)({
@@ -183,6 +175,7 @@ export async function judgeGoalShape(input: {
       signal: input.signal,
       ...(policy ? { selectionPolicy: policy } : input.runtimeSelection ? { runtimeSelection: input.runtimeSelection } : {}),
       requireNoTools: true,
+      outputSchema: { name: "agentlas_goal_shape_draft_v1", schema: GOAL_SHAPE_OUTPUT_SCHEMA },
       accept: (text: string) => validateGoalShape(parseGoalShapeDraft(text), input.ownerText, input.createdAt).ok,
     });
   } catch {
@@ -321,10 +314,10 @@ function guidanceLine(tactic: LiveTactic): string | null {
   switch (g.move) {
     case "replan": return `This tactic was blocked (${g.cause}). Try a clearly different approach, or split it with a replace_tactic plan-op.`;
     case "observe": return `This tactic was blocked (${g.cause}). First inspect the current state. ${UNCERTAIN_EFFECT_POLICY}`;
-    case "retry_backoff": return `This tactic was blocked (${g.cause}); retry it${g.at ? ` after ${g.at}` : ""}. Work on another open tactic meanwhile if there is one.`;
-    case "escalate_boundary": return `This tactic waits on the owner for a ${g.boundary ?? "boundary"} decision. Ask that one question once, then continue other tactics.`;
+    case "retry_backoff": return `This tactic was blocked (${g.cause}); retry${g.at ? ` after ${g.at}` : ""}; meanwhile work another open tactic.`;
+    case "escalate_boundary": return `This tactic waits on the owner for a ${g.boundary ?? "boundary"} decision. Ask once; continue other tactics.`;
     case "switch_tool": return g.path
-      ? `This tactic was blocked (${g.cause}); the AGI unblocker chose the installed alternative "${g.path}". Use "${g.path}" for this tactic now, not the path that failed.`
+      ? `This tactic was blocked (${g.cause}); the AGI unblocker chose the installed alternative "${g.path}". Use "${g.path}" now, not the failed path.`
       : `This tactic was blocked (${g.cause}); use an alternative installed tool with the same capability.`;
     default: return `This tactic was blocked (${g.cause}); the host chose ${g.move}.`;
   }
@@ -352,11 +345,9 @@ export function activeNativeHarness(goalId: string, revision: number, planSeq: n
 
 /** The turn-context line for a capability handed to the runtime's own tools. */
 export function nativeHarnessLine(entry: { capability: string; defect: string }): string {
-  return `Host notice (AGI unblocker): the Agentlas ${entry.capability} path keeps failing in this goal (${entry.defect}; an app defect, already recorded). `
-    + `For every step that needs ${entry.capability === "browser" ? "a browser, the web or on-screen app control (the Agentlas browser ladder covers all three)" : "that tool"}, use your runtime's own tools instead: `
-    + "shell commands, direct API calls with the keys already in your environment, local programs, and your built-in web access. "
-    + "Write every result as a file in the task folder and name it in your answer; Agentlas only records the outputs. "
-    + "Do not retry the failing Agentlas tool. If a step truly needs the owner (a sign-in, a payment, a consent), ask once.";
+  return `AGI unblocker: Agentlas ${entry.capability} path keeps failing here (${entry.defect}; app defect, recorded). `
+    + `For steps needing ${entry.capability === "browser" ? "browser, web or app control" : "that tool"}: use runtime-own tools (shell, direct APIs with env keys, local programs, built-in web). `
+    + "Write each result as a file in the task folder and name it in the answer. Do not retry the failing Agentlas tool. Owner needed (sign-in, payment, consent): ask once.";
 }
 
 /**
@@ -375,9 +366,9 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
   const tactics = selectActiveTactics(plan, { nowMs });
   const readiness = projectGoalPlanReadiness(plan, { nowMs });
   const strategyOf = (id: string | null) => plan.strategies.find((s) => s.id === id) ?? null;
-  const lines: string[] = ["## Goal plan (host-owned shape decision · agentlas.goal-shape.v1)"];
+  const lines: string[] = ["## Goal plan (agentlas.goal-shape.v1)"];
   // Goal id / revision / planSeq / problem_nature are host state the model never has to echo (markers carry only tactic ids).
-  lines.push(`Plan ${plan.shape}${plan.fallback ? " (provisional — the planner was unavailable)" : ""}: ${plan.rationale}`);
+  lines.push(`Plan ${plan.shape}${plan.fallback ? " (provisional)" : ""}: ${plan.rationale}`);
   for (const entry of activeNativeHarness(plan.goalId, plan.revision, plan.planSeq, nowMs)) lines.push(nativeHarnessLine(entry));
   // Agent Strategy: 이 패스의 KPI 상태를 먼저 갱신한다(멱등). 읽기 전용 재렌더(record:false)는 쓰지 않는다.
   if (plan.shape === "mission_tree" && input.record !== false) {
@@ -400,13 +391,13 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
         + ` · sensor: ${pace.status === "no_sensor" ? (view?.current != null ? "one sample so far" : "none yet") : pace.status}`
         + (view?.state && view.state !== "no_data" ? ` · KPI state: ${view.state}` : ""));
     }
-    if (plan.mission.boundaries.length) lines.push(`Boundaries (the only limits): ${plan.mission.boundaries.map((b) => b.text).join("; ")}`);
+    if (plan.mission.boundaries.length) lines.push(`Boundaries: ${plan.mission.boundaries.map((b) => b.text).join("; ")}`);
     const active = plan.strategies.filter((s) => s.status === "active").map((s) => `${s.id}: ${s.hypothesis}`);
     if (active.length) lines.push(`Active strategies: ${active.join(" | ")}`);
     activeStrategyIds = new Set(plan.strategies.filter((s) => s.status === "active").map((s) => s.id));
     const cadence = plan.strategies.filter((s) => s.status === "active" && s.actions_per_day !== null)
       .map((s) => `${s.id}: ${s.actions_per_day}/day`);
-    if (cadence.length) lines.push(`Planned activity cadence (advisory): ${cadence.join(" | ")} (advisory; assignments are not completed activities — check real results before repeating an external action).`);
+    if (cadence.length) lines.push(`Cadence (advisory; assignments are not done work, check results before repeating an external action): ${cadence.join(" | ")}`);
   }
   if (tactics.length) {
     lines.push("Current tactics:");
@@ -417,9 +408,9 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
       const branch = readiness.branches.find(branch => branch.nodeId === tactic.id)!;
       // Only a narrowing carries information: an unrestricted branch (incl. "legacy_unknown" prerequisites) is the default.
       const held = (["observe", "prepare", "local_write", "external_effect"] as const).filter((kind) => !branch.workClasses.includes(kind));
-      if (held.length) lines.push(`  Held by host (not available now): ${held.join(", ")} — ${branch.reasonCodes.filter((code) => code !== "prerequisites_legacy_unknown").join(", ") || branch.prerequisiteState}.`);
+      if (held.length) lines.push(`  Held: ${held.join(", ")} — ${branch.reasonCodes.filter((code) => code !== "prerequisites_legacy_unknown").join(", ") || branch.prerequisiteState}.`);
       const guidance = guidanceLine(tactic);
-      if (guidance) lines.push(`  Host guidance (persistence policy): ${guidance}`);
+      if (guidance) lines.push(`  Guidance: ${guidance}`);
     }
     // 목록은 순서가 이미 정해진 계획이다 — 남은 전술의 id 를 보여 줘야 같은 턴에 이어서 끝낸 전술도 표식할 수 있다.
     // (실측 2026-09-24 E2E: 한 패스에 t1~t3 을 다 했는데 t1 만 알아서 t1 만 표식했다.) 트리는 활성 전술만(R9).
@@ -433,11 +424,11 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
     }
   } else if (ownerPausedOpen(plan).length) {
     // Only the owner's explicit branch pause holds these; they are open leaves, so the goal is not done.
-    lines.push(`The remaining sub-goals (${ownerPausedOpen(plan).map((t) => t.id).join(", ")}) are paused by the owner. Do not work on them and do not claim the goal is complete; report briefly and end this turn.`);
+    lines.push(`The remaining sub-goals (${ownerPausedOpen(plan).map((t) => t.id).join(", ")}) owner-paused: skip them, goal not complete; report briefly, end turn.`);
   } else if (plan.tactics.some((tactic) => tactic.status === "active" || tactic.status === "proposed")) {
-    lines.push("Open tactics remain, but none is currently eligible under the plan's strategy state. Do not claim completion; inspect the current strategy state before continuing.");
+    lines.push("Open tactics remain, none eligible now: not complete; inspect strategy state first.");
   } else {
-    lines.push("Every planned tactic is done or retired. Verify the goal's acceptance criteria; if work remains, add a tactic with an add_tactic plan-op.");
+    lines.push("All tactics done or retired: verify acceptance criteria; work remains: add_tactic plan-op.");
   }
   const review = reviewDue(plan, nowMs, reservedDecisionIds);
   const strategyLocale = input.locale ?? (currentUiLocale() === "ko" ? "ko" : "en");
@@ -445,21 +436,20 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
   lines.push(...kpiMeasurementLines(plan, nowMs, input.typedTools === true));
   if (kpiBlock) lines.push(kpiBlock);
   if (review && !kpiBlock) {
-    lines.push("Strategy review due: compare each active strategy with the KR pace above; retire one whose timebox elapsed (cite evidence) or add one that cites a key result. Missing sensor data is not a reason to retire.");
+    lines.push("Strategy review due: compare each active strategy with KR pace; retire if timebox elapsed (evidence) or add one citing a KR; no sensor data is not a reason to retire.");
   }
+  const reportInstructions: string[] = [];
   // The typed tools carry the shapes in their schemas; only what a schema cannot say stays.
   if (input.typedTools) {
-    lines.push("Report every tactic finished or blocked this turn with goal_tactic, and plan changes with goal_plan_op.");
+    reportInstructions.push("tactic done/blocked: goal_tactic (evidence proves done_when); plan change: goal_plan_op; pending_host is queued, verify turn-end application");
   } else {
-    // Marker grammar = the minimum applyGoalPlanMarkers/applyTacticMarker accept (typed tool follow-up: agentlas-turn owner).
-    lines.push("Markers (one per line):");
-    lines.push('- done: <<agentlas-tactic>>{"id":"t1","status":"done","evidence":"what proves done_when"} — one for EVERY tactic you finish, including later ones finished this turn.');
-    lines.push('- blocked: <<agentlas-tactic>>{"id":"t1","status":"blocked","cause":"tool_missing|tool_refused|resource_busy|effect_uncertain|unknown|boundary","boundary":"payment|credential|security_consent|owner_stop|purpose_change","evidence":"..."} — the host picks the next move; never abandon the goal.');
-    lines.push('- plan: <<agentlas-plan-op>>{"op":"replace_tactic","id":"t1","with":[{"description":"...","done_when":"..."}]} · {"op":"add_tactic","strategy_id":"s1","description":"...","done_when":"..."}' +
-      (plan.shape === "mission_tree" ? ' · {"op":"retire_strategy","id":"s2","evidence":"..."} · {"op":"add_strategy","hypothesis":"...","serves_krs":["kr id"],"kpi":"...","timebox_hours":72,"tactics":[{"description":"...","done_when":"..."}]}' : ""));
-    lines.push('Tactic drafts also accept depends_on:["tactic id"] and prerequisites:[{"id":"...","state":"unmet|unknown|met","evidence_refs":["..."],"blocks":["prepare|local_write|external_effect"]}] (the host rejects dangling/cyclic ones).');
+    // Exact tool schemas also teach the fallback markers when direct typed delivery is unavailable.
+    reportInstructions.push("text fallback: each report line starts with its marker, then JSON (never bare JSON): <<agentlas-tactic>> {\"id\":\"<exact observed tactic id>\",\"status\":\"done\",\"evidence\":\"<proof of done_when>\"}; plan change: <<agentlas-plan-op>> <JSON op>; delivered goal_tactic/goal_plan_op schemas govern; host revalidates before apply");
+    reportInstructions.push("Goal marker schemas (data): " + JSON.stringify(AGENTLAS_TURN_TOOLS
+      .filter(tool => tool.name === "goal_tactic" || tool.name === "goal_plan_op")
+      .map(tool => ({ name: tool.name, inputSchema: tool.inputSchema }))));
   }
-  lines.push(`No self-imposed caps; only the mission boundaries and the Goal's permissions limit you. Plan-op text is shown to the owner: write it in ${(input.locale ?? (currentUiLocale() === "ko" ? "ko" : "en")) === "ko" ? "Korean" : "English"}.`);
+  reportInstructions.push("limits: mission boundaries + Goal permissions only");
   if (input.record !== false) {
     if (tactics.length) {
       const receipt = recordGoalPlanDecision({ goalId: plan.goalId, revision: plan.revision, planSeq: plan.planSeq, kind: "tactic_dispatch", createdAt: new Date(nowMs).toISOString(),
@@ -477,7 +467,11 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
       input.onDecisionRecorded?.(receipt.id);
     }
   }
-  return lines.join("\n");
+  return purposePrompt([
+    { id: "purpose.goal.plan.report-contract", revision: 3, stability: "configuration", changeTriggers: ["release", "tool-grant", "runtime"], text: reportInstructions.join("\n") },
+    { id: "purpose.goal.plan.locale", revision: 1, stability: "configuration", changeTriggers: ["locale"], text: `locale: plan-op text = ${strategyLocale === "ko" ? "Korean" : "English"}` },
+    { id: "purpose.goal.plan.snapshot", revision: 1, stability: "turn-context", changeTriggers: ["plan-revision", "checkpoint", "retrieval"], text: lines.join("\n") },
+  ]);
 }
 
 /** 같은 턴 안의 다음 패스에 붙일 짧은 안내(방금 완료된 전술 뒤의 다음 전술). */
@@ -485,11 +479,11 @@ export function goalPlanContinuationNote(goalId: string, nowMs = Date.now(), typ
   const plan = readGoalPlan(goalId);
   if (!plan) return null;
   const next = selectActiveTactics(plan, { nowMs });
-  if (!next.length && ownerPausedOpen(plan).length) return "Goal plan: the remaining sub-goals are paused by the owner — do not work on them and do not claim completion.";
+  if (!next.length && ownerPausedOpen(plan).length) return "Goal plan: remaining sub-goals paused by the owner; do not work them or claim completion.";
   if (!next.length && plan.tactics.some((tactic) => tactic.status === "active" || tactic.status === "proposed")) {
-    return "Goal plan: open tactics remain, but none is currently eligible under the plan's strategy state. Do not claim completion; inspect the current strategy state before continuing.";
+    return "Goal plan: open tactics remain, none eligible under the strategy state; no completion claim; inspect the strategy state first.";
   }
-  if (!next.length) return "Goal plan: every planned tactic is done or retired — verify the acceptance criteria before claiming completion.";
+  if (!next.length) return "Goal plan: every tactic done or retired; verify the acceptance criteria before claiming completion.";
   return `Goal plan — next tactic: ${next.map((t) => `${t.id}: ${t.description} (done when: ${t.done_when})`).join(" | ")}. ${typedTools ? "Report it with goal_tactic" : "Emit the tactic marker"} when it is done.`;
 }
 

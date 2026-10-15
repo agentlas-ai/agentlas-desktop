@@ -895,7 +895,7 @@ export async function hasUsableMcpOAuthCredential(serverId: string, serverUrl: s
  * 401로 죽고 사용자는 "왜 갑자기 안 되지"를 겪는다. null이면 화면이 "다시 연결"을
  * 말할 수 있다.
  */
-export async function resolveMcpOAuthAccessToken(serverId: string, serverUrl?: string): Promise<string | null> {
+export async function resolveMcpOAuthAccessToken(serverId: string, serverUrl?: string, options?: { passiveOnly?: true }): Promise<string | null> {
   const session = await readMcpOAuthSession(serverId);
   if (!session) return null;
   if (serverUrl !== undefined) {
@@ -911,9 +911,17 @@ export async function resolveMcpOAuthAccessToken(serverId: string, serverUrl?: s
   } catch {
     return null;
   }
+  if (options?.passiveOnly) {
+    if (session.expiresAt !== undefined && (typeof session.expiresAt !== "number" || !Number.isFinite(session.expiresAt) || session.expiresAt - REFRESH_SKEW_MS <= Date.now())) return null;
+    // Re-read the original metadata after the token read; changed custody or
+    // expiry cannot race a passive preparation into refresh or stale admission.
+    const current = await readMcpOAuthSession(serverId);
+    if (JSON.stringify(current) !== JSON.stringify(session) || !tokens || Array.isArray(tokens) || typeof tokens.accessToken !== "string" || !tokens.accessToken.trim()) return null;
+  }
   const fresh = !session.expiresAt || session.expiresAt - REFRESH_SKEW_MS > Date.now();
   if (fresh) return tokens.accessToken;
-  if (!tokens.refreshToken) return null;
+  // Explicit source preparation observes only original credentials; it never refreshes.
+  if (options?.passiveOnly || !tokens.refreshToken) return null;
 
   try {
     const body = new URLSearchParams({

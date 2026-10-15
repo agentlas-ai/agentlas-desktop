@@ -19,6 +19,7 @@ import { installHubPlugin } from "./hub-plugin-bridge";
 import { installedServerMatchesPluginSlug } from "../../shared/plugin-slug";
 import { runtimeKindSupportsMcpTransport } from "../../shared/runtime-mcp";
 import { userDataPath } from "../runtime-paths";
+import { credentialVaultKey } from "./credential-refs";
 
 export interface InternalMcpBuildCandidate {
   public: McpBuildCandidate;
@@ -130,8 +131,10 @@ function receiptItem(
 async function allKeysPresent(
   keys: string[],
   deps: McpAttachmentResolverDependencies,
+  server?: Pick<InstalledMcpServer, "credentialRefs">,
 ): Promise<boolean> {
-  const checks = await Promise.all(keys.map((key) => deps.hasEnv(key).catch(() => false)));
+  // An installed connection's own credential lives under its reference, not the global name (NH29).
+  const checks = await Promise.all(keys.map((key) => deps.hasEnv(server ? credentialVaultKey(server, key) : key).catch(() => false)));
   return checks.every(Boolean);
 }
 
@@ -244,7 +247,7 @@ async function advanceFallbackGroup(input: {
       input.state.unavailable.push(candidate.public.id);
       continue;
     }
-    if (!(await allKeysPresent(server.envKeys, input.deps))) {
+    if (!(await allKeysPresent(server.envKeys, input.deps, server))) {
       input.state.missingKey.push(receiptItem(candidate, "missing_key", "missing_key"));
       input.state.unavailable.push(candidate.public.id);
       continue;

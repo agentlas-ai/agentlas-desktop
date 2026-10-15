@@ -4,9 +4,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { getDb } from "../store/db";
+import { getMemoryDb as getDb } from "./database";
 import { looksSecret } from "../../shared/secret-patterns";
 import { memoryRunPredatesAnyForget } from "./revocations";
+import { assertMemoryTicketSource } from "./source-custody";
 import {
   autoLocalEmbedding,
   parseLocalEmbedding,
@@ -192,6 +193,7 @@ export function beginMemoryTicket(input: {
   candidateCount: number;
   turnSummary?: string | null;
 }): MemoryTicket {
+  assertMemoryTicketSource(input.context);
   const key = turnKey(input.context);
   const existing = getDb().prepare(
     `SELECT ticket_id AS ticketId, emitter_status AS emitterStatus,

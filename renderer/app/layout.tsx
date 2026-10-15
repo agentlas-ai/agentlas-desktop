@@ -12,6 +12,7 @@ import { AuthGate } from "@/components/AuthGate";
 import { OneRecoveryPlane } from "@/components/OneRecoveryPlane";
 import { PlanPickerHost } from "@/components/billing/PlanPickerModal";
 import { AttentionHost } from "@/components/AttentionHost";
+import { OsPermissionHost } from "@/components/OsPermissionHost";
 import { TooltipHost } from "@/components/TooltipHost";
 
 export const metadata: Metadata = {
@@ -47,6 +48,7 @@ export default function RootLayout({
           <I18nProvider>
             <OneRecoveryPlane />
             <AttentionHost />
+            <OsPermissionHost />
             <TooltipHost />
             <AuthGate>{children}</AuthGate>
             {/* The one paywall ("플랜 선택"): every "see plans" entry point opens this. */}

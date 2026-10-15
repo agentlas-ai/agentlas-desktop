@@ -24,6 +24,7 @@ import {
 import { parseDurableOneSurfaceJson } from "../../shared/one-surface-durable";
 import { parseOneDomainEventJson } from "../../shared/one-domain-events";
 import { isOneRecurrenceSelectionV1 } from "../../shared/one-recurrence";
+import { INVOCATION_BROWSER_LOGIN_WAIT_EVENT, parseInvocationBrowserLoginWait } from "../../shared/invocation-browser-login-wait";
 import { isOneSteeringInterruption } from "../../shared/one-auto-recovery";
 import {
   PERSISTENCE_DECISION_EVENT_KIND,
@@ -646,6 +647,14 @@ function safePayload(
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(input ?? {})) {
     if (value == null) continue;
+    if (key === "wait") {
+      // Exact host-owned browser identity is a checkpoint, not tool log prose.
+      // Keep only the closed run/chat contract; UI/mobile never receive it.
+      const wait = context?.kind === INVOCATION_BROWSER_LOGIN_WAIT_EVENT
+        ? parseInvocationBrowserLoginWait(value, context.runId, context.chatId ?? null) : null;
+      if (wait) out.wait = { ...wait, reason: wait.reason === null ? null : redactRunEventSensitiveText(wait.reason) };
+      continue;
+    }
     if (key === "toolId" && canonicalToolId !== undefined) {
       out[key] = canonicalToolId;
       continue;
@@ -800,6 +809,8 @@ export function scrubLegacyRunEventSecrets(): number {
         const context = { runId: row.run_id, chatId: row.chat_id, kind: row.kind, seq: row.seq ?? undefined };
         const exactEffectMetadata = canonicalEffectMetadataForScrub(parsed, context);
         const canonicalToolId = canonicalAdapterToolId(parsed, context);
+        const canonicalWait = row.kind === INVOCATION_BROWSER_LOGIN_WAIT_EVENT
+          ? parseInvocationBrowserLoginWait(parsed.wait, row.run_id, row.chat_id) : null;
         if (typeof parsed.toolArgs === "string") parsed.toolArgs = sanitizeRunEventToolArgs(parsed.toolArgs);
         if (typeof parsed.toolResultPreview === "string") {
           parsed.toolResultPreview = redactRunEventSensitiveText(parsed.toolResultPreview);
@@ -814,6 +825,11 @@ export function scrubLegacyRunEventSecrets(): number {
           return value;
         };
         next = JSON.stringify(scrubValue(parsed));
+        if (canonicalWait) {
+          const scrubbed = JSON.parse(next) as Record<string, unknown>;
+          scrubbed.wait = { ...canonicalWait, reason: canonicalWait.reason === null ? null : redactRunEventSensitiveText(canonicalWait.reason) };
+          next = JSON.stringify(scrubbed);
+        }
         if (canonicalToolId !== undefined) {
           const scrubbed = JSON.parse(next) as Record<string, unknown>;
           scrubbed.toolId = canonicalToolId;
@@ -1263,6 +1279,7 @@ function runRowToUi(row: RunEventRow): RunEventUi {
   delete payload.workerReportJson;
   delete payload[QUESTION_CONTINUATION_REPLY_FIELD];
   delete payload.instructionSnapshot;
+  delete payload.wait;
   payload.runtimeEvidence = runtimeEvidenceForRow({ id: row.id, kind: row.kind, payload });
   enrichOneArtifactContentIdentity(payload);
   return {

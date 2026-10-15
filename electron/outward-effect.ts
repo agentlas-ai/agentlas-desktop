@@ -13,11 +13,9 @@
  * state, not the trajectory). Local ledger edits, shell, navigation and filter clicks are activity.
  *
  * The rules reuse existing classifiers instead of new name lists:
- *  - browser: the shipped browser approval classifier (BROWSER_APPROVAL_CLASSIFIER_SOURCE). Its
- *    send/publish class is deliberately over-inclusive for safety (a "답글 필터" tab click reads as
- *    "send"), so for progress a send/publish only counts as a commit when it completes something
- *    the run composed (typed/filled/uploaded) or when the control is an explicit finalize
- *    (the same classifier's EXPLICIT_FINALIZE_RE). delete/payment count as they are.
+ *  - browser: the shipped browser approval classifier (BROWSER_APPROVAL_CLASSIFIER_SOURCE), typed: a click's declared
+ *    effect (send/publish/delete/payment, i.e. the model said the click finalizes it), a submit key or type+submit. An
+ *    undeclared click is not proof of an outcome and stays activity. No label words (native-harness notyet NH25).
  *  - files: shared/tool-taxonomy "file" actions. A write inside the host's own scratch cwd
  *    (userData/agent-cwd — where the agent works when the owner declared no folder) is the agent's
  *    notebook; a write anywhere else (project folder, chat working folder, any declared path) is a
@@ -66,17 +64,16 @@ export interface OutwardEffectSummary {
 }
 
 type BrowserClass = "payment" | "delete" | "publish" | "send" | "unsafe-code" | null;
-let browserClassifier: { classify: (name: string, args: unknown) => BrowserClass; finalize: RegExp } | null = null;
+let browserClassifier: { classify: (name: string, args: unknown) => BrowserClass } | null = null;
 
-function browserApproval(): { classify: (name: string, args: unknown) => BrowserClass; finalize: RegExp } {
+function browserApproval(): { classify: (name: string, args: unknown) => BrowserClass } {
   if (browserClassifier) return browserClassifier;
   // The exact source the materialized launcher runs — no drift between the gate and this signal.
   // eslint-disable-next-line @typescript-eslint/no-implied-eval
-  const built = new Function(`${BROWSER_APPROVAL_CLASSIFIER_SOURCE}\nreturn { classifyAction, EXPLICIT_FINALIZE_RE };`)() as {
+  const built = new Function(`${BROWSER_APPROVAL_CLASSIFIER_SOURCE}\nreturn { classifyAction };`)() as {
     classifyAction: (name: string, args: unknown, currentUrl?: string) => BrowserClass;
-    EXPLICIT_FINALIZE_RE: RegExp;
   };
-  browserClassifier = { classify: (name, args) => built.classifyAction(name, args, ""), finalize: built.EXPLICIT_FINALIZE_RE };
+  browserClassifier = { classify: (name, args) => built.classifyAction(name, args, "") };
   return browserClassifier;
 }
 
@@ -100,12 +97,6 @@ const COMPOSE_LEAVES = new Set(["browser_type", "browser_fill", "browser_fill_fo
 
 function isBrowserTool(name: string, leaf: string): boolean {
   return leaf.startsWith("browser_") || classifyTool(leaf || name) === "browser";
-}
-
-function controlText(args: unknown): string {
-  const input = args && typeof args === "object" ? args as Record<string, unknown> : {};
-  return [input.element, input.target, input.name, input.label]
-    .filter((value): value is string => typeof value === "string").join(" ");
 }
 
 /** Paths a file tool touched (codex apply_patch lists, claude/grok/filesystem path arguments). */
@@ -173,9 +164,11 @@ export function summarizeOutwardEffects(calls: OutwardToolCall[], ctx: OutwardEf
       try { klass = approval.classify(leaf, args); } catch { klass = null; }
       if (klass === "payment" || klass === "delete") { count("browser_commit"); composed = false; continue; }
       if (klass === "publish" || klass === "send") {
+        // Typed: a declared send/publish click or a submit. Accepting a dialog or a submit key only completes something
+        // when the run composed it first.
         const input = args && typeof args === "object" ? args as Record<string, unknown> : {};
-        const typedAndSubmitted = leaf === "browser_type" && input.submit === true;
-        if (composed || typedAndSubmitted || approval.finalize.test(controlText(args))) {
+        const declared = leaf === "browser_click" || (leaf === "browser_type" && input.submit === true);
+        if (composed || declared) {
           count("browser_commit");
           composed = false;
           continue;

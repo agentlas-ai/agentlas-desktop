@@ -7,8 +7,10 @@ import {
   appendMemoryLog,
   appendSoulMemory,
 } from "./project-files";
-import { findEquivalentMemoryId, insertMemoryEntry, type RequestContext } from "./store";
+import { appendMemoryOrigins, findEquivalentMemoryId, insertMemoryEntry, type RequestContext } from "./store";
 import { supersedeExplicitMemory, supersedeRestatedMemories } from "./graph";
+import { enqueueAutomaticMemoryCuration } from "./automatic-curator";
+import { getMemoryStoreInfo } from "./database";
 import { isAutomationLedgerChat } from "./automation-surface";
 import {
   beginMemoryProjectionWrite,
@@ -72,6 +74,11 @@ export interface CurationContext {
    * ledger chat), never from the memory text.
    */
   sourceSurface?: "automation-run";
+  /** Host-observed lifecycle only; model prose cannot grant an effect receipt. */
+  hostOutcome?: "completed" | "failed" | "cancelled" | "partial" | "unknown";
+  /** Trusted compatibility boundary; parsed/model JSON never sets these. */
+  memoryChannel?: "default" | "legacy_one_overlay";
+  memoryCompatibilityScope?: { scope: "personal" | "project" | "agent" | "team"; scopeRef: string | null };
   /** Exact runtime/base context supplied only by real installed-agent runs. */
   experienceIntake?: {
     platform: string;
@@ -152,6 +159,10 @@ export interface CurateReplyOptions {
   semanticDecisions?: SemanticMemoryDecision[];
   semanticAttempted?: boolean;
   semanticFailed?: boolean;
+  automaticRuntimeKey?: string;
+  automaticOwnerNamespace?: string;
+  /** Explicit compatibility export, never a second automatic memory authority. */
+  writeProjections?: boolean;
   /**
    * Memory events taken out of this turn's earlier continuous passes, each committed as its own message before the
    * final answer. Appended after the final answer's events, so semantic decisions keep their candidate indexes.
@@ -374,6 +385,10 @@ interface EventCurationOptions {
   curatorMode?: MemoryCuratorMode;
   semanticDecisions?: SemanticMemoryDecision[];
   projectPath?: string | null;
+  decisionIndexOffset?: number;
+  writeProjections?: boolean;
+  originTicketIds?: string[];
+  policyVersion?: string;
 }
 
 function safeDecisionReasonCode(value: string): string {
@@ -393,7 +408,7 @@ function recordCandidateDecision(input: {
   if (!input.options.ticketId) return;
   recordMemoryDecision({
     ticketId: input.options.ticketId,
-    candidateIndex: input.index,
+    candidateIndex: input.index + (input.options.decisionIndexOffset ?? 0),
     content: input.event.content,
     memoryKind: input.event.memory_kind,
     proposedScope: input.event.suggested_scope,
@@ -405,7 +420,7 @@ function recordCandidateDecision(input: {
     sensitivity: input.event.sensitivity,
     curatorMode: input.options.curatorMode ?? "policy",
   });
-  if (input.options.projectPath) {
+  if (input.options.writeProjections === true && input.options.projectPath) {
     try {
       appendCuratorDecision(input.options.projectPath, {
         content: input.event.content,
@@ -497,6 +512,7 @@ export function curateEvents(
   options: EventCurationOptions = {},
 ): CurationReport {
   const report = emptyReport();
+  const writeProjections = options.writeProjections === true;
   const projectProjections: Array<{
     lease: MemoryProjectionWriterLease;
     logRecord: Record<string, unknown>;
@@ -517,7 +533,7 @@ export function curateEvents(
         action: "redacted",
         reason: "policy-secret",
       });
-      if (ctx.projectPath) {
+      if (writeProjections && ctx.projectPath) {
         appendMemoryLog(ctx.projectPath, {
           action: "redacted",
           reason: "secret",
@@ -548,7 +564,7 @@ export function curateEvents(
         action: "session",
         reason: "policy-low-trust-quarantine",
       });
-      if (ctx.projectPath) {
+      if (writeProjections && ctx.projectPath) {
         appendMemoryLog(ctx.projectPath, {
           action: "session",
           reason: "low-trust-quarantine",
@@ -585,7 +601,7 @@ export function curateEvents(
         action: "deferred",
         reason: "evidence-shape-insufficient",
       });
-      if (ctx.projectPath) {
+      if (writeProjections && ctx.projectPath) {
         appendMemoryLog(ctx.projectPath, {
           action: "session",
           reason: "evidence-shape-insufficient",
@@ -616,7 +632,7 @@ export function curateEvents(
         ? "policy-automation-run-own-choice"
         : "policy-automation-run-unevidenced";
       recordCandidateDecision({ options, index, event: ev, scope: "session", action: "session", reason });
-      if (ctx.projectPath) {
+      if (writeProjections && ctx.projectPath) {
         appendMemoryLog(ctx.projectPath, {
           action: "session",
           reason,
@@ -659,7 +675,7 @@ export function curateEvents(
         action: resolved.deferred ? "deferred" : "session",
         reason: resolved.reason,
       });
-      if (ctx.projectPath) {
+      if (writeProjections && ctx.projectPath) {
         appendMemoryLog(ctx.projectPath, {
           action: "session",
           kind: ev.memory_kind,
@@ -700,8 +716,15 @@ export function curateEvents(
       ev.content,
       projectPath,
       effectiveAgentId,
+      { projectId: ctx.projectId, chatId: ctx.chatId, recallChannel: ctx.memoryChannel,
+        compatibilityScope: ctx.memoryCompatibilityScope },
     );
     if (equivalentMemoryId) {
+      appendMemoryOrigins(equivalentMemoryId, [
+        ...(options.originTicketIds ?? (options.ticketId ? [options.ticketId] : [])).map(id => ({ kind: "ticket" as const, id })),
+        ...(ctx.runId ? [{ kind: "run" as const, id: ctx.runId }] : []),
+        ...(ctx.projectId ? [{ kind: "project" as const, id: ctx.projectId }] : []),
+      ], ctx.projectId);
       report.deduped += 1;
       recordCandidateDecision({
         options,
@@ -737,6 +760,15 @@ export function curateEvents(
         evidence: evidenceWithSourceProvenance(ev, ctx),
         requestContext,
         intakeRunId: ctx.runId,
+        curationActor: options.curatorMode === "semantic" ? "model_curated" : "host_admitted",
+        policyVersion: options.policyVersion ?? "agentlas.memory-admission.v1",
+        recallChannel: ctx.memoryChannel,
+        compatibilityScope: ctx.memoryCompatibilityScope,
+        originRefs: [
+          ...(options.originTicketIds ?? (options.ticketId ? [options.ticketId] : [])).map(id => ({ kind: "ticket" as const, id })),
+          ...(ctx.runId ? [{ kind: "run" as const, id: ctx.runId }] : []),
+          ...(ctx.projectId ? [{ kind: "project" as const, id: ctx.projectId }] : []),
+        ],
       });
     } catch (error) {
       if (!(error instanceof MemoryRevokedError)) throw error;
@@ -752,7 +784,7 @@ export function curateEvents(
           ? "policy-forgotten-stale-intake"
           : "policy-forgotten-content",
       });
-      if (ctx.projectPath) {
+      if (writeProjections && ctx.projectPath) {
         appendMemoryLog(ctx.projectPath, {
           action: "discarded",
           reason: "owner-forgotten",
@@ -783,7 +815,7 @@ export function curateEvents(
     // similar_to graph edges are now projected inside insertMemoryEntry on every
     // insert path (curated turns, imports, terminal, mobile), so the curator no
     // longer links a second time — the projection is idempotent regardless.
-    if (ctx.projectPath) {
+    if (writeProjections && ctx.projectPath) {
       const projectionLease = beginMemoryProjectionWrite({
         sourceMemoryId: entry.id,
         targetKind: "project-files",
@@ -823,7 +855,7 @@ export function curateEvents(
     }
   }
 
-  if (ctx.projectPath && projectProjections.length > 0) {
+  if (writeProjections && ctx.projectPath && projectProjections.length > 0) {
     commitMemoryProjectionWrites(
       projectProjections.map((projection) => ({
         lease: projection.lease,
@@ -844,7 +876,7 @@ export function curateEvents(
   // agent_repo 배움을 이 실행에 관여한 빌린 에이전트들의 private ontology cache에 미러링.
   // 데스크탑 DB(agentId 기반 agent_repo)와 Hephaestus vector query(slug 기반)를 잇는다.
   const nestSlugs = [...new Set((ctx.borrowedAgentSlugs ?? []).map((s) => s.trim()).filter(Boolean))];
-  if (nestExperienceItems.length > 0 && nestSlugs.length > 0) {
+  if (writeProjections && nestExperienceItems.length > 0 && nestSlugs.length > 0) {
     for (const slug of nestSlugs) {
       appendAgentNestExperienceMemory(slug, nestExperienceItems);
     }
@@ -899,6 +931,9 @@ export function curateReply(
   options: CurateReplyOptions = {},
 ): CuratedReply {
   const parsed = parseMemoryEvents(replyText);
+  if (options.automaticOwnerNamespace && options.automaticOwnerNamespace !== getMemoryStoreInfo().ownerNamespace) {
+    throw new Error("memory_owner_changed");
+  }
   const carried = options.carriedEvents ?? [];
   const modelEvents = carried.length ? [...parsed.events, ...carried] : parsed.events;
   const emitterStatus = parsed.events.length === 0 && carried.length > 0 ? "valid" : parsed.emitterStatus;
@@ -944,6 +979,7 @@ export function curateReply(
         curatorMode,
         semanticDecisions: options.semanticDecisions,
         projectPath: ctx.projectPath,
+        writeProjections: options.writeProjections,
       })
     : emptyReport();
   const report = memoryDecisionReport(ticket.ticketId, attemptedReport);
@@ -955,7 +991,7 @@ export function curateReply(
         ? "no_candidates"
         : "decided";
   appendTurnOutcomeDecision({
-    projectPath: ctx.projectPath,
+    projectPath: options.writeProjections === true ? ctx.projectPath : null,
     ticketId: ticket.ticketId,
     outcome,
     report,
@@ -963,6 +999,10 @@ export function curateReply(
   });
   completeMemoryTicket(ticket.ticketId, report, curatorMode, { outcome });
   recordCurationReceipt(ctx, report);
+  if (modelEvents.length === 0) {
+    try { enqueueAutomaticMemoryCuration(ticket.ticketId, ctx, parsed.turnSummary ?? fallbackTurnObservation(parsed.cleanedText), replyText, options.automaticRuntimeKey); }
+    catch { /* Intake cannot block or repeat a completed foreground effect. */ }
+  }
   return {
     cleanedText: parsed.cleanedText,
     report,

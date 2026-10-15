@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
   ComputerHistoryEntry,
   ComputerHistoryDraftPrompt,
@@ -12,11 +12,13 @@ import type {
 } from "../../shared/computer-history";
 import { redactSecrets } from "../../shared/secret-patterns";
 import { getMeta, setMeta } from "../store/meta";
+import { HISTORY_METADATA_POLICY, type HistorySourceFence, type HistorySourceScope, type HistoryMetadataSnapshot } from "../../shared/one-history-source";
 import { currentUiLocale } from "../ui-locale";
 
 const ROOT = process.env.AGENTLAS_COMPUTER_HISTORY_ROOT?.trim()
   || path.join(os.homedir(), ".agentlas", "history");
 const CONSENT_KEY = "one_computer_history_consent_v1";
+const CONSENT_REVISION_KEY = "one_computer_history_consent_revision_v1";
 const CLEARED_BEFORE_KEY = "one_computer_history_cleared_before_v1";
 const MAX_FILES_PER_BUCKET = 80;
 const MAX_BODY_CHARS = 360;
@@ -302,11 +304,11 @@ function buildRecommendation(entries: ComputerHistoryEntry[]): ComputerHistoryRe
 
 export function getComputerHistoryState(): ComputerHistoryState {
   const currentConsent = consent();
-  pruneCaptureFiles();
-  evidenceRefs.clear();
   if (currentConsent === "off") {
     return { schemaVersion: 1, consent: "off", entries: [], generatedAt: new Date().toISOString() };
   }
+  pruneCaptureFiles();
+  evidenceRefs.clear();
   const clearedBefore = Date.parse(getMeta(CLEARED_BEFORE_KEY) || "");
   const entries = (["6h", "10min"] as ComputerHistorySource[])
     .flatMap((source) => filesFor(source).map((file) => parseEntry(file, source)).filter(Boolean) as ComputerHistoryEntry[])
@@ -389,10 +391,11 @@ export function getComputerHistoryConsent(): "off" | "on" { return consent(); }
 
 export function setComputerHistoryConsent(enabled: boolean): ComputerHistoryState {
   setMeta(CONSENT_KEY, enabled ? "on" : "off");
+  setMeta(CONSENT_REVISION_KEY, randomUUID());
   // Revocation stops new captures immediately. Existing local pixels remain
   // until their seven-day expiry or the explicit clear action, so the user can
   // still inspect the already-consented record before deleting it.
-  pruneCaptureFiles();
+  // The consent-off read must not prune captures or refresh recommendation evidence.
   return getComputerHistoryState();
 }
 
@@ -409,6 +412,7 @@ export function clearComputerHistory(): ComputerHistoryState {
   // records from One without deleting another product's data; newer summaries
   // can appear normally after this point.
   setMeta(CLEARED_BEFORE_KEY, new Date().toISOString());
+  setMeta(CONSENT_REVISION_KEY, randomUUID());
   return getComputerHistoryState();
 }
 
@@ -446,4 +450,57 @@ export function recordComputerHistorySummary(input: {
   ].join("\n");
   fs.writeFileSync(file, content, { mode: 0o600 });
   return true;
+}
+
+
+/** Observation-only source read: no captures, events, recommendation, pruning or body reads. */
+export function getComputerHistorySourceFence():HistorySourceFence{return{consent:consent(),revision:getMeta(CONSENT_REVISION_KEY)||'legacy',clearedBefore:getMeta(CLEARED_BEFORE_KEY)||null}}
+const metadataCategories:Record<string,HistoryMetadataSnapshot['entries'][number]['categories'][number]>={
+ 'Safari':'browser','Google Chrome':'browser','Microsoft Edge':'browser','Firefox':'browser',
+ 'Visual Studio Code':'editor','Cursor':'editor','Xcode':'editor','Terminal':'terminal','iTerm2':'terminal',
+ 'Microsoft Excel':'spreadsheet','Numbers':'spreadsheet','Microsoft PowerPoint':'presentation','Keynote':'presentation',
+ 'Slack':'communication','Microsoft Teams':'communication'};
+function metadataFail():never{throw Object.assign(new Error('history_native_source_changed'),{code:'history_native_source_changed'})}
+function sourceFence(expected:HistorySourceFence,check:()=>void){check();if(expected.consent!=='on'||JSON.stringify(getComputerHistorySourceFence())!==JSON.stringify(expected))metadataFail()}
+function sourceDirectory(root:string,directory:string){const rootStat=fs.lstatSync(root),dirStat=fs.lstatSync(directory);if(!rootStat.isDirectory()||rootStat.isSymbolicLink()||!dirStat.isDirectory()||dirStat.isSymbolicLink())metadataFail();const realRoot=fs.realpathSync(root),realDir=fs.realpathSync(directory);if(!isInside(realRoot,realDir))metadataFail();return[realRoot,realDir,rootStat.dev,rootStat.ino,dirStat.dev,dirStat.ino].join(':')}
+function metadataHeader(root:string,file:string,check:()=>void){
+ check();const directory=path.dirname(file),parent=sourceDirectory(root,directory),before=fs.lstatSync(file);
+ if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1||before.size>512000||!isInside(fs.realpathSync(root),fs.realpathSync(file)))metadataFail();
+ const fd=fs.openSync(file,fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW??0));try{
+  const opened=fs.fstatSync(fd);if(opened.ino!==before.ino||opened.dev!==before.dev||opened.nlink!==1)metadataFail();
+  // Read exactly through the closing frontmatter delimiter. A bulk read could include private body bytes.
+  const bytes:number[]=[],one=Buffer.alloc(1);let line='',closed=false,lines=0;
+  for(let offset=0;offset<8192;offset++){if(fs.readSync(fd,one,0,1,offset)!==1)break;bytes.push(one[0]);if(one[0]===10){lines++;if(line.replace(/\r$/,'')==='---'){if(lines===1){}else{closed=true;break}}else if(lines===1)metadataFail();line=''}else line+=String.fromCharCode(one[0]);}
+  if(!closed)metadataFail();const buffer=Buffer.from(bytes),raw=buffer.toString('utf8');if(!Buffer.from(raw,'utf8').equals(buffer))metadataFail();
+  const after=fs.fstatSync(fd),last=fs.lstatSync(file);check();
+  if(sourceDirectory(root,directory)!==parent||after.dev!==opened.dev||after.ino!==opened.ino||after.size!==opened.size||after.mtimeMs!==opened.mtimeMs||after.ctimeMs!==opened.ctimeMs||after.nlink!==1||last.isSymbolicLink()||last.dev!==opened.dev||last.ino!==opened.ino||last.size!==after.size||last.mtimeMs!==after.mtimeMs)metadataFail();
+  const values=frontmatter(raw).values,fingerprint=createHash('sha256').update(JSON.stringify([parent,after.dev,after.ino,after.size,after.mtimeMs,after.ctimeMs,raw])).digest('hex');
+  return{values,fingerprint};
+ }finally{fs.closeSync(fd)}
+}
+export function readComputerHistoryMetadata(scope:HistorySourceScope,fence:HistorySourceFence,assertCurrent:()=>void):HistoryMetadataSnapshot{
+ const check=()=>sourceFence(fence,assertCurrent);check();const from=Date.parse(scope.from),to=Date.parse(scope.to);
+ if(!Number.isFinite(from)||!Number.isFinite(to)||from>=to||to>Date.now()+30000||to-from>86400000||scope.maxEntries<1||scope.maxEntries>20||!Number.isSafeInteger(scope.maxEntries)||scope.retentionMs!==86400000||!scope.buckets.length||scope.buckets.some(b=>b!=='10min'&&b!=='6h'))metadataFail();
+ const entries:HistoryMetadataSnapshot['entries']=[],files:HistoryMetadataSnapshot['files']=[];
+ for(const root of [...new Set([ROOT,...COMPATIBLE_READ_ROOTS])]){
+  check();if(!fs.existsSync(root))continue;sourceDirectory(root,root);
+  for(const source of scope.buckets){let candidates:string[]=[];
+   for(const directory of [path.join(root,source),root]){
+    check();if(!fs.existsSync(directory))continue;sourceDirectory(root,directory);const iterator=fs.opendirSync(directory);let scanned=0;
+    try{for(let entry=iterator.readSync();entry&&scanned++<1000;entry=iterator.readSync())if(entry.isFile()&&entry.name.endsWith('.md')&&entry.name!=='instructions.md'&&(directory!==root||new RegExp('-'+source+'-(?:memory-summary|[^/]+)\\.md$').test(entry.name)))candidates.push(path.join(directory,entry.name));}finally{iterator.closeSync()}
+   }
+   candidates=[...new Set(candidates)].slice(0,80);
+   for(const file of candidates){check();if(entries.length>=scope.maxEntries)break;const {values,fingerprint}=metadataHeader(root,file,check),time=Date.parse(values.occurredAt??values.timestamp??'');
+    if(!Number.isFinite(time)||time<from||time>to||fence.clearedBefore!==null&&time<=Date.parse(fence.clearedBefore))continue;
+    const categories=[...new Set((values.apps??'').split(',').map(v=>Object.hasOwn(metadataCategories,v.trim())?metadataCategories[v.trim()]:undefined).filter((v):v is NonNullable<typeof v>=>!!v))].sort();
+    const sourceRef='history-summary:'+createHash('sha256').update(JSON.stringify([root,file,source])).digest('hex');
+    entries.push({source,occurredAt:new Date(time).toISOString(),categories,sourceRef,revision:fingerprint});files.push({root,file,source,fingerprint});
+   }
+  }
+ }
+ check();return JSON.parse(JSON.stringify({policy:HISTORY_METADATA_POLICY,fence,scope,entries,files}));
+}
+export function assertComputerHistoryMetadataCurrent(snapshot:HistoryMetadataSnapshot,assertCurrent:()=>void):void{
+ const check=()=>sourceFence(snapshot.fence,assertCurrent);check();if(snapshot.policy!==HISTORY_METADATA_POLICY||snapshot.entries.length!==snapshot.files.length)metadataFail();
+ for(const pin of snapshot.files){if(metadataHeader(pin.root,pin.file,check).fingerprint!==pin.fingerprint)metadataFail()}check();
 }

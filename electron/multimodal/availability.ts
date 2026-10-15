@@ -16,6 +16,7 @@ import {
 import { hasEnvVar, listEnvKeys } from "../secrets/vault";
 import { RUNTIME_AUTH_ENV_KEYS, isPlainMisnaming } from "../runtime/env-key-reach";
 import { multimodalImageSlot } from "./slot";
+import { findExecutableSync } from "../runtime/path-lookup";
 
 /** cli-subscription provider id → 찾을 실행 파일 이름 + 흔한 설치 경로. */
 const CLI_BINS: Record<string, { name: string; extra: string[] }> = {
@@ -60,16 +61,8 @@ const CLI_BINS: Record<string, { name: string; extra: string[] }> = {
 };
 
 function resolveBin(name: string, extra: string[]): string | null {
-  const fromPath = (process.env.PATH || "").split(":").filter(Boolean).map((d) => path.join(d, name));
-  for (const c of [...extra, ...fromPath]) {
-    try {
-      fs.accessSync(c, fs.constants.X_OK);
-      return c;
-    } catch {
-      /* keep looking */
-    }
-  }
-  return null;
+  // Platform PATH delimiter and Windows PATHEXT (NH31): a POSIX ":" split read every Windows CLI as absent.
+  return findExecutableSync(name, extra);
 }
 
 /**

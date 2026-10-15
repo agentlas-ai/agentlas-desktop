@@ -26,7 +26,7 @@ export class DeviceBridgeError extends Error {
 }
 export type DeviceSession = "awake" | "locked" | "sleeping" | "unknown";
 export interface DeviceStateSnapshot { session: DeviceSession; idleSeconds: number | null; observedAt: string }
-export type DeviceOp = "prepareOsExecution" | "disposeOsExecution" | "idle" | "releaseChatSessions" | "forwardGoalIntake" | "appControl";
+export type DeviceOp = "prepareOsExecution" | "disposeOsExecution" | "idle" | "releaseChatSessions" | "forwardGoalIntake" | "appControl" | "aliveAction" | "aliveChanged";
 export interface DeviceFrame { version: typeof DEVICE_BRIDGE_VERSION; requestId: string; op: DeviceOp; deadlineMs: number; payload: Record<string, unknown> }
 export interface PreparedOsExecutionWire { capability: { version: "agentlas.one-os-execution.v1"; executionId: string; token: string } }
 
@@ -142,6 +142,17 @@ export function createDaemonDeviceBridge(options: { now?: () => number; newReque
       if (reply.outcome === "value") return { outcome: "value", value: reply.value };
       if (reply.outcome === "error" && typeof reply.code === "string" && typeof reply.message === "string") return { outcome: "error", code: reply.code, message: reply.message };
       throw new DeviceBridgeError("device_bridge_refused", "app_control_reply_invalid");
+    },
+    /** NH21: the service owns the Alive clock, Main owns Goal custody. Main re-reads this executing reservation from the
+     * shared store, runs the Goal action once (durable action-id claim) and answers with the settled result. */
+    async aliveAction(input: { domain: "work" | "one"; actionId: string }): Promise<{ result: unknown }> {
+      const reply = await ask("aliveAction", { domain: input.domain, actionId: input.actionId }, 8000);
+      return { result: reply.result };
+    },
+    /** A life changed: Main's screens and its phone projection refresh (no content, the same invalidation as Main's own). */
+    async aliveChanged(event: { surface: "one" | "work"; chatId?: string; scopeId: string }): Promise<void> {
+      if (!transport) return;
+      await ask("aliveChanged", { surface: event.surface, scopeId: event.scopeId, ...(event.chatId !== undefined ? { chatId: event.chatId } : {}) }, 5000);
     },
     failPending: failAll,
   };

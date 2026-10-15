@@ -628,9 +628,8 @@ export function claimOneAttachments(input: {
       images,
       runtimeContext: [
         "[Agentlas One attachments - Main verified]",
-        `The user attached ${record.items.length} file or folder item(s). Read only the exact staged copies below.`,
+        `attached: ${record.items.length}; read only these staged copies, no searching elsewhere; name files by original name, never staging paths`,
         ...lines,
-        "Do not search Downloads or recent files. Do not repeat internal staging paths in the answer; refer to each file by its original name.",
         "[/Agentlas One attachments]",
       ].join("\n"),
       redactions,

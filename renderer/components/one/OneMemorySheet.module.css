@@ -368,3 +368,19 @@
 .memoryCount > span { min-width: 24px; padding: 3px 7px; border-radius: 7px; background: var(--paper-3); font-size: 11px; }
 .kindChips button { min-height: 36px; }
 .memoryMap { overflow: hidden; border: 1px solid var(--paper-edge); border-radius: 12px; }
+
+.memoryFilters { margin-top: 12px; }
+.memoryHint { color: var(--muted-deep); font-size: 12px; line-height: 1.45; }
+.memoryEntryButton { display:grid; grid-template-columns:20px minmax(0,1fr) auto; gap:10px; align-items:center; width:100%; padding:10px; border:0; border-radius:10px; background:transparent; color:var(--ink); font:inherit; text-align:left; cursor:pointer; }
+.memoryEntryButton > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
+.memoryEntryButton small { color:var(--muted-deep); font-size:11px; }
+.memoryEntryButton:hover,.memoryEntryButton[data-selected="true"] { background:var(--paper-3); }
+.memoryEntryButton:focus-visible { outline:2px solid var(--one-sheet-accent); outline-offset:2px; }
+.memoryInspectorDetail { margin-top:14px; padding:14px; border:1px solid var(--paper-edge); border-radius:12px; }
+.memoryInspectorDetail h4 { margin:0 0 8px; }
+.memoryBody { white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.5; }
+.memoryInspectorDetail dl { display:grid; grid-template-columns:max-content minmax(0,1fr); gap:8px 12px; font-size:12px; }
+.memoryInspectorDetail dt { color:var(--muted-deep); }
+.memoryInspectorDetail dd { margin:0; overflow-wrap:anywhere; }
+.memoryInspectorDetail dd > span { display:block; }
+@media (max-width:680px) { .memoryEntryButton { grid-template-columns:20px minmax(0,1fr); } .memoryEntryButton small { grid-column:2; } .memoryInspectorDetail dl { grid-template-columns:1fr; gap:4px; } .memoryInspectorDetail dd { margin-bottom:8px; } }

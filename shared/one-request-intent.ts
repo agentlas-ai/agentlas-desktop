@@ -12,12 +12,10 @@ export type OneRequestIntentDecision = OneRequestIntent | "undecided";
 export const ONE_REQUEST_INTENT_JUDGMENT_KIND = "one-request-intent";
 
 export const ONE_REQUEST_INTENT_JUDGMENT_QUESTION =
-  "Is the user asking One to DO durable work (produce, plan, research, transform, or organize something), or is this an ordinary conversational message (greeting, small talk, a quick factual or product question)?";
+  "asks One to DO durable work (produce, plan, research, transform, organize), or ordinary conversation (greeting, small talk, quick factual/product question)?";
 
 export const ONE_REQUEST_INTENT_JUDGMENT_GUIDANCE =
-  "\"task\" means the turn should be preserved as durable work with a deliverable. " +
-  "A short factual question, a greeting, or chit-chat is \"conversation\" even when it names a work-like noun. " +
-  "A genuine work request is \"task\" in ANY language or phrasing, even when none of the reference words appear.";
+  "task: durable work with a deliverable, any language or phrasing; conversation: short factual question, greeting, chit-chat even with a work-like noun";
 
 /** The exact input string the resolver judges and synchronous sites peek. */
 export function oneRequestIntentJudgmentInput(prompt: string): string {

@@ -1,0 +1,54 @@
+"use client";
+import {useEffect,useRef,useState} from 'react';
+import {ipc} from '@/lib/ipc';
+import type {WorkChoice,WorkUiStatus} from '@shared/business/employee-agent-work-api';
+import styles from './OneSettings.module.css';
+/** Opening this sheet performs no read, connection or work. Every operation is
+ * an explicit employee action; native review supplies the approval authority. */
+export function OneBusinessWork({locale}:{locale:string}){
+ const ko=locale==='ko',[code,setCode]=useState(''),[sources,setSources]=useState<WorkChoice[]>([]),[source,setSource]=useState(''),[files,setFiles]=useState<string[]>([]),[paths,setPaths]=useState<string[]>([]),[works,setWorks]=useState<WorkChoice[]>([]),[work,setWork]=useState(''),[path,setPath]=useState(''),[pendingConnection,setPendingConnection]=useState(''),[status,setStatus]=useState<WorkUiStatus>({state:'disconnected'}),[busy,setBusy]=useState(false),[error,setError]=useState(false),[copied,setCopied]=useState(false);
+ const generation=useRef(0),pending=useRef(0);useEffect(()=>()=>{generation.current++},[]);
+ const api=()=>{const value=ipc()?.businessWork;if(!value)throw Error('unavailable');return value};
+ const clearSelector=()=>{setCopied(false);setStatus(previous=>{const{registrationId,...rest}=previous;return rest})};
+ const edit=()=>{generation.current++;setError(false);clearSelector()};
+ async function run(action:()=>Promise<void>){const g=++generation.current,id=++pending.current;setBusy(true);setError(false);clearSelector();try{await action()}catch{if(generation.current===g){clearSelector();setError(true)}}finally{if(pending.current===id)setBusy(false)}}
+ async function result(action:()=>Promise<WorkUiStatus>){const g=generation.current,r=await action();if(g===generation.current)setStatus(r)}
+ const control={minHeight:44,width:'100%',minWidth:0,whiteSpace:'normal' as const,overflowWrap:'anywhere' as const};
+ const button=(text:string,call:()=>Promise<void>,disabled=false)=><div className={styles.actionRow} style={{gridTemplateColumns:'minmax(0,1fr)'}}><button type="button" className={styles.primary} style={control} disabled={disabled} onClick={()=>void run(call)}>{text}</button></div>;
+ const notices:Record<WorkUiStatus['state'],[string,string]>={
+ disconnected:['조직의 업무 변경 연결을 준비하세요.','Prepare a WORK change connection with your organization.'],associated:['연결을 확인했습니다. 등록할 업무 파일을 선택하세요.','Connection confirmed. Select WORK files to register.'],
+ 'approval-required':['조직 관리자의 업무 범위 승인이 필요합니다. 기존 등록 영수증만 조회하세요.','Organization approval of this WORK scope is required. Look up the original registration receipt only.'],
+    'native-registered':['선택한 파일을 별도 업무 공간에 기록했습니다. 평가 기준은 별도로 검토해야 합니다.','Selected files are recorded in a separate workspace. Review evaluation criteria separately.'],registered:['조직 등록을 확인했습니다. 변경할 파일을 선택하세요.','Organization registration confirmed. Select a file to change.'],
+ preparing:['원래 작업 실행을 요청했습니다. 실행 중에 변경과 평가 결과를 검토하세요. 작업이 먼저 끝나면 새 승인은 불가능합니다.','Original work was requested. Review the change and evaluation while it is running. Approval is unavailable once the run ends.'],
+ 'review-required':['변경 내용과 평가 결과를 네이티브 승인 창에서 검토하세요.','Review the change and evaluation in the native approval dialog.'],
+ 'native-applied':['기기의 파일은 변경되었습니다. 조직의 최종 기록은 확인하지 못했습니다. 영수증만 조회하며 다시 적용하지 않습니다.','Files on this device changed. Organization finalization is unconfirmed. Look up the receipt; the change will not be applied again.'],
+ finalized:['기기 변경과 조직의 최종 기록을 확인했습니다.','The device change and organization finalization are confirmed.'],rejected:['기기의 변경은 유지되지만 조직이 최종 기록을 거절했습니다. 자동 복원하지 않습니다.','The device change remains, but the organization rejected finalization. It will not be restored automatically.'],
+ unknown:['결과를 확인하지 못했습니다. 기존 영수증만 조회하세요.','The outcome is unknown. Look up the original receipt only.'],expired:['연결 또는 요청이 만료되었습니다. 새 승인이 필요합니다.','The connection or request expired. New approval is required.'],revoked:['이 기기의 업무 변경 연결이 중지되었습니다.','WORK changes from this device have stopped.'],
+ 'original-execution-unavailable':['원래 실행을 확인하지 못해 변경할 수 없습니다.','The original execution is unavailable; the change cannot proceed.']};
+ return <div className={styles.settingList} style={{minWidth:0}}>
+  <p className={styles.notice}>{ko?'선택한 업무 파일만 별도로 등록합니다. 평가 기준과 각 변경은 직접 검토합니다. 개인 메모리와 보고 공유는 포함하지 않습니다.':'Register only selected WORK files. Review evaluation criteria and each change yourself. Personal memory and report sharing are excluded.'}</p>
+  {button(ko?'연결 정보 복사':'Copy connection details',async()=>{const g=generation.current,n=await api().identity();if(g===generation.current)await navigator.clipboard.writeText(JSON.stringify(n))},busy)}
+  <label className={styles.secretRow} style={{gridTemplateColumns:'minmax(0,1fr)',display:'grid',gap:6}}>{ko?'조직 연결 코드':'Organization connection code'}<input style={control} value={code} maxLength={256} autoComplete="off" onChange={e=>{edit();setCode(e.target.value)}}/></label>
+  {button(ko?'연결 검토':'Review connection',async()=>{const g=generation.current,r=await api().approveAssociation({challengeId:code.trim()});if(g===generation.current){setStatus(r);setPendingConnection(r.state==='unknown'?r.selection??'':'')}},busy||!code.trim())}
+  {pendingConnection&&button(ko?'원래 연결 승인 확인':'Check original connection approval',async()=>{const g=generation.current,r=await api().reconcile({selection:pendingConnection});if(g===generation.current){setStatus(r);setPendingConnection('')}},busy)}
+  {button(ko?'등록할 업무 찾기':'Find WORK to register',async()=>{const g=generation.current,v=await api().sources();if(g===generation.current){setSources(v);setSource('');setFiles([]);setPaths([])}},busy)}
+  {sources.length>0&&<label className={styles.secretRow} style={{gridTemplateColumns:'minmax(0,1fr)',display:'grid',gap:6}}>{ko?'원본 업무':'Original WORK'}<select style={{...control,borderRadius:'var(--one-sheet-control-radius)',border:'1px solid var(--one-sheet-control-border)',background:'var(--one-sheet-control-surface)',color:'var(--one-sheet-ink)'}} value={source} disabled={busy} onChange={e=>{edit();setSource(e.target.value);setFiles([]);setPaths([])}}><option value="">{ko?'업무 선택':'Choose WORK'}</option>{sources.map(v=><option key={v.id} value={v.id}>{v.label}</option>)}</select></label>}
+  {source&&button(ko?'선택 가능한 파일 확인':'Find selectable files',async()=>{const g=generation.current,v=await api().files({sourceId:source});if(g===generation.current)setFiles(v)},busy)}
+  {files.map(file=><label key={file} style={{minHeight:44,display:'flex',alignItems:'center',gap:8,overflowWrap:'anywhere'}}><input type="checkbox" checked={paths.includes(file)} disabled={busy} onChange={e=>{edit();setPaths(e.target.checked?[...paths,file]:paths.filter(p=>p!==file))}}/>{file}</label>)}
+  {paths.length>0&&status.state!=='approval-required'&&button(ko?'선택 파일 검토 후 등록':'Review and register selected files',()=>result(()=>api().register({sourceId:source,paths})),busy)}
+  {status.state==='native-registered'&&status.selection&&button(ko?'평가 기준 파일 선택 및 검토':'Choose and review evaluation criteria',()=>result(()=>api().oracle({selection:status.selection!})),busy)}
+  {button(ko?'등록한 업무 확인':'Find registered WORK',async()=>{const g=generation.current,v=await api().workspaces();if(g===generation.current){setWorks(v);setWork('');setPath('')}},busy)}
+  {works.length>0&&<label className={styles.secretRow} style={{gridTemplateColumns:'minmax(0,1fr)',display:'grid',gap:6}}>{ko?'변경할 업무':'WORK to change'}<select style={{...control,borderRadius:'var(--one-sheet-control-radius)',border:'1px solid var(--one-sheet-control-border)',background:'var(--one-sheet-control-surface)',color:'var(--one-sheet-ink)'}} value={work} disabled={busy} onChange={e=>{edit();setWork(e.target.value);setPath('')}}><option value="">{ko?'업무 선택':'Choose WORK'}</option>{works.map(v=><option key={v.id} value={v.id}>{v.label}</option>)}</select></label>}
+  {work&&status.state!=='approval-required'&&button(ko?'평가 기준 파일 선택 및 새 검토':'Choose evaluation criteria for a new review',()=>result(()=>api().oracle({selection:work})),busy)}
+  {work&&<label className={styles.secretRow} style={{gridTemplateColumns:'minmax(0,1fr)',display:'grid',gap:6}}>{ko?'업무 파일':'WORK file'}<select style={{...control,borderRadius:'var(--one-sheet-control-radius)',border:'1px solid var(--one-sheet-control-border)',background:'var(--one-sheet-control-surface)',color:'var(--one-sheet-ink)'}} value={path} disabled={busy} onChange={e=>{edit();setPath(e.target.value)}}><option value="">{ko?'파일 선택':'Choose a file'}</option>{works.find(v=>v.id===work)?.paths?.map(p=><option key={p} value={p}>{p}</option>)}</select></label>}
+  {path&&status.state!=='approval-required'&&<>{button(ko?'변경 파일 선택 후 검토 준비':'Choose revised file and prepare review',()=>result(()=>api().prepare({selection:work,path,action:'edit'})),busy)}{button(ko?'처음 승인한 버전으로 복원 검토':'Review restoration to the first approved version',()=>result(()=>api().prepare({selection:work,path,action:'restore'})),busy)}</>}
+  {status.state==='preparing'&&status.selection&&button(ko?'변경과 평가 결과 검토':'Review change and evaluation',()=>result(()=>api().review({selection:status.selection!})),busy)}
+  {status.selection&&button(ko?'기존 영수증 조회':'Look up original receipt',()=>result(()=>api().receipt({selection:status.selection!})),busy)}
+  {status.selection&&['approval-required','registered','finalized'].includes(status.state)&&button(ko?'조직 등록 코드 복사':'Copy organization registration code',async()=>{const g=generation.current,selection=status.selection!,r=await api().receipt({selection});if(g!==generation.current)return;if(r.selection!==selection||!['approval-required','registered','finalized'].includes(r.state)||typeof r.registrationId!=='string'||!/^([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i.test(r.registrationId)){setStatus({...r,selection,registrationId:undefined});throw Error('registration_selector_unavailable')}setStatus(r);await navigator.clipboard.writeText(r.registrationId);if(g===generation.current)setCopied(true)},busy)}
+  {copied&&<p role="status" className={styles.notice}>{ko?'조직 등록 코드를 복사했습니다. 조직의 승인 화면에 전달하세요. 이 코드는 승인이 아닙니다.':'Registration code copied. Use it in your organization’s approval screen. The code is not an approval.'}</p>}
+  {status.selection&&button(ko?'변경 요청 취소':'Cancel change request',()=>result(()=>api().cancel({selection:status.selection!}))) }
+  {button(ko?'업무 변경 연결 중지':'Stop WORK change connection',()=>result(()=>api().revoke()))}
+  <p role="status" className={styles.notice}>{notices[status.state]?.[ko?0:1]}</p>
+  {error&&<p role="alert" className={styles.notice}>{ko?'현재 연결 또는 원본을 확인하지 못했습니다. 적용 여부가 불명확하면 영수증만 조회하세요.':'The current connection or original source could not be verified. If the outcome is uncertain, look up the receipt only.'}</p>}
+ </div>;
+}

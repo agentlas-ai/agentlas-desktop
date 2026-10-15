@@ -633,7 +633,14 @@
   gap: 6px;
 }
 
+.chipRemove::before {
+  content: "";
+  position: absolute;
+  inset: -3px; /* a11y-hit-area: 24px */
+}
+
 .chipRemove {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;

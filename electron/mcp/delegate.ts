@@ -12,6 +12,10 @@ import type { RuntimeStatus } from "../../shared/types";
 
 export const DELEGATE_HEADING = "## Delegate";
 
+/** Which stage a delegated slot runs in; the parent model declares it (no host word matching). */
+export type DelegationStage = "production" | "integration" | "verification";
+const DELEGATION_STAGES: readonly DelegationStage[] = ["production", "integration", "verification"];
+
 export interface Delegation {
   /** 하위 노드의 role 또는 name (오케스트레이터가 ResolvedOrg 자식과 매칭) */
   target: string;
@@ -19,6 +23,8 @@ export interface Delegation {
   brief: string;
   /** Parent-AI-authored capacity assignment; host code only validates/translates it. */
   allocation: WorkloadAllocation;
+  /** production (default) · integration (combines finished results) · verification (checks them, runs last). */
+  stage: DelegationStage;
 }
 
 export interface ParsedDelegation {
@@ -38,38 +44,32 @@ export function buildDelegateProtocol(
   const list = reports
     .map((r) => `  - ${r.role}${r.name && r.name !== r.role ? ` (${r.name})` : ""}`)
     .join("\n");
+  // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.mcp.firm.delegate-protocol).
   return [
     "## Delegation (you orchestrate a team)",
     "",
-    "You lead a team. For THIS task, engage ONLY the direct reports actually needed —",
-    "never all of them. Give each a focused brief (goal + specifics). If none are needed,",
-    "do the work yourself and emit no Delegate block.",
     options.allowFollowup
-      ? "This is a bounded follow-up decision after team results. If a failed check or missing result requires repair, delegate only the smallest required revision/re-verification step; otherwise emit no Delegate block and return the final answer."
-      : "This is the only initial delegation planning round. Include every role required to finish the request now,",
-    options.allowFollowup
-      ? "Never use a runtime's built-in sub-agent, Agent, Task, SendMessage, or collaboration tool. The host executes only the typed Delegate block below, so an invisible runtime child can never bypass the room ledger or leave stale failure state behind."
-      : "including downstream independent QA or verification roles. State dependencies in their briefs;",
-    options.allowFollowup
-      ? "When revising, name the exact failed acceptance item and pass the latest relevant evidence in the brief."
-      : "the host will delay verification until production results exist. Never defer a needed role to synthesis.",
+      ? "follow-up: after team results; delegate only the smallest repair / re-verification a failed check needs (name the failed acceptance item, pass the latest evidence); else no Delegate block, final answer"
+      : "delegate: only the direct reports this task needs (never all), each a focused brief; none needed → do it yourself, no Delegate block; this is the only initial round: include every needed role now, including independent QA/verification",
+    "stage per delegation: production (default) · integration (combines other slots' finished results) · verification (checks them; the host runs it after production/integration)",
+    "never a runtime's own sub-agent / Agent / Task / SendMessage tool: the host runs only the Delegate block",
     "",
-    "Your direct reports:",
-    list,
-    "",
-    "Judge each child task's complexity, risk, context size, and synthesis burden yourself.",
-    "Assign provider-neutral capacity plus one exact live runtime/model pair; never copy one flagship model to every child.",
-    workloadAllocationInventoryPrompt(runtimes),
+    "allocation: judge each slot's complexity, risk, context and synthesis burden; provider-neutral capacity + one exact live runtime/model pair; never one flagship for every slot",
     "To delegate, end your reply with exactly this block (omit entirely if delegating to none):",
     "",
     DELEGATE_HEADING,
     "```json",
-    `{ "delegations": [ { "target": "<report role or name above>", "brief": "<what they should do>", "allocation": ${workloadAllocationPromptExample("delegate")} } ], "synthesis": ${workloadAllocationPromptExample("synthesize")} }`,
+    `{ "delegations": [ { "target": "<report role or name from 'Your direct reports:'>", "brief": "<what they should do>", "stage": "production", "allocation": ${workloadAllocationPromptExample("delegate")} } ], "synthesis": ${workloadAllocationPromptExample("synthesize")} }`,
     "```",
     "",
     options.allowFollowup
       ? "After emitting a follow-up Delegate block, STOP. The host runs that one bounded follow-up and returns the updated result for synthesis."
       : "After delegating, STOP — their results come back to you to synthesize.",
+    "",
+    workloadAllocationInventoryPrompt(runtimes),
+    "",
+    "Your direct reports:",
+    list,
   ].join("\n");
 }
 
@@ -101,8 +101,9 @@ export function parseDelegations(text: string): ParsedDelegation {
             const o = d as Record<string, unknown>;
             const target = typeof o.target === "string" ? o.target.trim() : "";
             const brief = typeof o.brief === "string" ? o.brief.trim() : "";
+            const stage = DELEGATION_STAGES.includes(o.stage as DelegationStage) ? o.stage as DelegationStage : "production";
             return target
-              ? { target, brief, allocation: normalizeWorkloadAllocation(o.allocation, "delegate") }
+              ? { target, brief, allocation: normalizeWorkloadAllocation(o.allocation, "delegate"), stage }
               : null;
           })
           .filter((d): d is Delegation => d !== null);

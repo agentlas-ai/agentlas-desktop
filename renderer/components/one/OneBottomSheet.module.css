@@ -4,17 +4,17 @@
      popovers, settings): white paper, hairline var(--paper-3), quiet gray labels.
      Owner decision 2026-08-16 — the warm-paper/oversized-title look was
      the odd one out. */
-  --one-sheet-surface: var(--white);
+  --one-sheet-surface: var(--rd-surface);
   --one-sheet-ink: var(--ink);
   --one-sheet-muted: var(--muted-deep);
   --one-sheet-accent: var(--rd-accent-text);
   --one-sheet-line: var(--paper-edge);
   --one-sheet-scrim: var(--popup-backdrop);
-  --one-sheet-control-surface: var(--white);
+  --one-sheet-control-surface: var(--rd-surface);
   --one-sheet-control-border: var(--paper-edge);
   --one-sheet-control-radius: 10px;
   --one-sheet-control-height: 44px;
-  --one-sheet-card-surface: var(--white);
+  --one-sheet-card-surface: var(--rd-surface);
   --one-sheet-card-muted: color-mix(in oklch, var(--green) 12%, var(--paper));
   --one-sheet-card-radius: 12px;
   --one-sheet-label-ink: var(--ink);

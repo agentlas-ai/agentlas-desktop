@@ -43,11 +43,11 @@ import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, run
 import { agentRunCwd, detachedSpawnOpts, killCliTree, spawnCli, trackRunChild, waitForCliTreeTermination } from "./exec";
 import { pickLocale, tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
-import { CLI_HISTORY_CONTEXT_TOKENS, composeResumeTurnPrompt, renderConversationContext,
+import { cliHistoryContextTokens, composeResumeTurnPrompt, renderConversationContext,
   renderGapContext, unseenHistoryGap, dedupeStableTurnContext, acknowledgeStableTurnContext,
   invalidateStableTurnContext, type StableTurnContextDelivery } from "./continuity";
 import { stageCliImageAttachments } from "./image-attachments";
-import { agentContextBootstrapForRequest, agentContextDeliveryForRequest, agentContextSessionKey } from "./agent-context";
+import { agentContextColdBootstrapForRequest, agentContextDeliveryForRequest, agentContextSessionKey } from "./agent-context";
 import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
 import {
   getRuntimeToolPermissionArbiter,
@@ -59,7 +59,8 @@ import {
 import { AcpSessionPool, type AcpSessionLease } from "./acp-session-pool";
 import { resolveAgentResidencySource, isResidencyExemptAgent } from "./agent-residency";
 import { classifyDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
-import { schemaFallbackInstruction } from "../../shared/runtime-capabilities";
+import { schemaFallbackInstruction, schemaFallbackPromptPart } from "../../shared/runtime-capabilities";
+import { composeDeclaredPrompt } from "./prompt-order";
 import { observeCliExecutableIdentity } from "./cli-executable-identity";
 import { waitForRetiredCliExit } from "./retired-cli-exit";
 
@@ -339,6 +340,8 @@ export class AcpSessionClient {
           tool: String(params?.toolCall?.title ?? kind),
           kind,
           detail: typeof params?.toolCall?.rawInput === "string" ? params.toolCall.rawInput : undefined,
+          // Structured input binds recipient/amount into the consent identity (docs native-harness 07 G04).
+          ...(params?.toolCall?.rawInput && typeof params.toolCall.rawInput === "object" ? { arguments: params.toolCall.rawInput } : {}),
           cwd: this.approval.cwd,
           permission: this.permission,
           ...(this.approval.planMode ? { planMode: true as const } : {}),
@@ -953,7 +956,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
     events.onStatus(tStatus(locale, "callingBackend", { backend: req.backendLabel || spec.label }));
     const cwd = req.cwd ?? agentRunCwd();
     // Other tools' personal context (Claude/Cursor folders) stays out unless One chose it (foreign-cli-context.ts).
-    const runEnv = withForeignCliContext(spec.id, req.env ?? process.env, selectionFor(req.agentId));
+    const runEnv = withForeignCliContext(spec.id, req.env ?? process.env, selectionFor(req.agentId, undefined, req.chatId));
     const configuredCommand = req.runtimeSource ?? spec.command;
     const executableIdentity = observeCliExecutableIdentity({ bin: configuredCommand, cwd, env: runEnv });
     if (!executableIdentity) throw new Error(`ACP executable unavailable: ${configuredCommand}`);
@@ -1274,7 +1277,8 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       // session/new is measured before resolving this immutable host packet.
       // A cold no-load carrier needs its own prior turns as well as foreign
       // deltas; the wrapper's retained-turn req.history is intentionally empty.
-      const bootstrap = !resumed ? agentContextBootstrapForRequest(req) : null;
+      // A session that did not load is seeded from the journal, with the host facts ahead of any summary (NH13).
+      const bootstrap = !resumed ? await agentContextColdBootstrapForRequest(req) : null;
       const images = bootstrap?.images ?? req.images ?? [];
       const imageBlocks: Array<Record<string, unknown>> = [];
       let userPrompt = bootstrap?.currentPrompt ?? req.userPrompt;
@@ -1333,21 +1337,26 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         sessionId, contextFingerprint, turnContext: bootstrap?.turnContext ?? req.turnContext, stableBlocks: req.turnContextStable });
       stableContextDelivery = context.delivery;
       const promptText = resumed
-        ? `${composeResumeTurnPrompt(userPrompt, [gapContext, context.text].filter(Boolean).join("\n\n"), locale)}${schemaFallback}`
+        ? composeResumeTurnPrompt(userPrompt, composeDeclaredPrompt([
+            ...(req.outputSchema ? [schemaFallbackPromptPart(req.outputSchema.schema)] : []),
+            { id: "transport.acp.resume.gap", revision: 1, stability: "turn-context", changeTriggers: ["owner-input", "checkpoint", "task"], order: 10, text: gapContext },
+            { id: "transport.acp.resume.host-turn", revision: 1, stability: "turn-context", changeTriggers: ["owner-input", "checkpoint", "task"], order: 20, text: context.text },
+          ], "\n\n"), locale)
         : [
           wrapSystemPrompt(
             req.systemPrompt, locale, req.permission, userPrompt,
             req.forceSurface, req.restrictedReadBoundary, req.untrustedNoTools,
             req.untrustedAllowedMcpTools, req.workforceRuntimeToolGrant,
             undefined, req.surfaceGate,
-            undefined,
-            undefined,
+            spec.id,
+            req.sciencePromptProfile,
             req.judgmentOnly === true ? "host-judgment" : undefined,
+            req.outputSchema ? [schemaFallbackPromptPart(req.outputSchema.schema)] : undefined,
+      req.systemPromptComposition,
           ),
-          (bootstrap?.history ?? req.history).length > 0 ? renderConversationContext([...(bootstrap?.history ?? req.history)], locale, CLI_HISTORY_CONTEXT_TOKENS).block : "",
+          (bootstrap?.history ?? req.history).length > 0 ? renderConversationContext([...(bootstrap?.history ?? req.history)], locale, cliHistoryContextTokens(spec.id, req.model)).block : "",
           context.text,
           userPrompt,
-          schemaFallback,
         ].filter(Boolean).join("\n\n");
       nativeMcp?.assertCurrent();
       assertScienceRecoveryAcpRequest(req, spec.id);
@@ -1413,8 +1422,11 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         const pct = Math.round((client.contextUsed / client.contextSize) * 100);
         events.onStatus(locale === "ko" ? `컨텍스트 ${pct}% 사용` : `Context ${pct}% used`);
       }
-      // observedUsage intentionally absent: ACP v1 gives context occupancy, not tokens.
-      return { text, sessionId, ownerControlTerminal: stopReason === "end_turn" ? "completed" : "uncertain" };
+      // observedUsage intentionally absent: ACP v1 gives context occupancy, not tokens. The occupancy IS the size of the
+      // context the next request starts from, so it feeds the common 80% generation rule with the agent's own window.
+      return { text, sessionId, ownerControlTerminal: stopReason === "end_turn" ? "completed" : "uncertain",
+        ...(client.contextUsed !== undefined && client.contextUsed > 0 ? { contextInputTokens: client.contextUsed } : {}),
+        ...(client.contextSize ? { contextWindowTokens: client.contextSize } : {}) };
     } catch (err) {
       // 실패한 세션은 풀에 되돌리지 않는다 — 상태를 모르는 세션을 물려주면 다음 턴이
       // 원인 없는 실패를 겪는다. 다시 여는 비용이 그보다 싸다.
@@ -1529,10 +1541,13 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
  * disabled by env. The decision is per call so a setting change needs no restart.
  */
 export function acpOrLegacyRunner(kind: string, legacy: Runner): Runner {
-  const spec = ACP_AGENTS[kind];
-  if (!spec) return legacy;
-  const acp = createAcpRunner(spec);
   return (req, events) => {
+    // Selection creates these adapters while cold ACP imports are still
+    // initializing. Resolve the declared inventory at dispatch, not in that
+    // module cycle; the same per-call transport/recovery gates still apply.
+    const spec = ACP_AGENTS[kind];
+    if (!spec) return legacy(req, events);
+    const acp = createAcpRunner(spec);
     const recovery = assertScienceRecoveryAcpRequest(req, spec.id);
     if (acpDisabledFor(kind)) {
       // Respect the host transport setting; never downgrade a fresh recovery

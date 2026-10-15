@@ -58,6 +58,7 @@ export function inspectJudgmentCapability(
   }
 
   if (selection.kind === "byok"
+    || selection.kind === "ollama"
     || selection.kind === "lmstudio"
     || selection.kind === "mlx"
     || selection.kind === "agentlas-local"
@@ -74,7 +75,7 @@ export function inspectJudgmentCapability(
     };
   }
 
-  if (["antigravity", "acp", "kimi", "grok", "cursor", "ollama"].includes(selection.kind)) {
+  if (["antigravity", "acp", "kimi", "grok", "cursor"].includes(selection.kind)) {
     return {
       schemaVersion: "agentlas.judgment-capability.v1",
       requirement: "no_tools",

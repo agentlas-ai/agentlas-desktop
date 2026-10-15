@@ -39,6 +39,8 @@ import { classifyHephaestusUpdateJournal, hephaestusPendingHostLabels } from "@s
 import { ScienceExtensionPanel } from "@/components/settings/ScienceExtensionPanel";
 import { OllamaMigrationPanel } from "@/components/settings/OllamaMigrationPanel";
 import { AgentMailPanel } from "@/components/settings/AgentMailPanel";
+import { ArchivePanel } from "@/components/settings/ArchivePanel";
+import { PricingPanel } from "@/components/settings/PricingPanel";
 import { ServiceConnectionsButton } from "@/components/connect/ServiceConnectionsButton";
 import { ChipGrid, ConnectChip, RUNTIME_CHIPS, RuntimeChip, RuntimeConnectPopup, connectCopy, useRuntimeAuth, type RuntimeChipSpec } from "@/components/connect/RuntimeConnect";
 
@@ -475,6 +477,7 @@ export default function SettingsPage() {
         <ScienceExtensionPanel />
         <MobileBridgePanel />
         <AgentMailPanel locale={locale} />
+        <ArchivePanel locale={locale} />
 
         {/* 언어 선택 */}
         <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "24px 0 12px" }}>
@@ -1051,9 +1054,13 @@ export default function SettingsPage() {
                 onActivate={activateByok}
               />
             )}
+            {hasKey[b] && b === "google" && <GeminiExplicitCacheControl />}
+            {hasKey[b] && b === "deepseek" && <ByokWireControl backend="deepseek" />}
           </div>
         ))}
         </ConnectSection>
+
+        <PricingPanel locale={locale} />
 
         <MemoryDiagnosticsPanel />
 
@@ -2584,6 +2591,90 @@ function UpdatePanel() {
 
 // ── BYOK live model catalog + manual ID escape hatch ─────
 // Model generations are provider-owned. Never pin versioned IDs in the UI.
+/**
+ * Gemini explicit cachedContents (docs/2026-10-13-native-harness/13 §7): off by default; the owner's switch and TTL.
+ * Google bills cached tokens per hour of storage, so the switch says so in its tooltip; harness cache.settings.* is the
+ * one path (receipted), the same one the SDK and app control use.
+ */
+function GeminiExplicitCacheControl() {
+  const { locale } = useT();
+  const ko = locale === "ko";
+  const [setting, setSetting] = useState<{ enabled: boolean; ttlSeconds: number } | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void ipc()?.harness?.call("cache.settings.get", {}).then((result) => {
+      const gemini = (result?.data as { gemini?: { enabled: boolean; ttlSeconds: number } } | undefined)?.gemini;
+      if (live && gemini) setSetting(gemini);
+    }).catch(() => undefined);
+    return () => { live = false; };
+  }, []);
+  const save = async (next: { enabled?: boolean; ttlSeconds?: number }) => {
+    setBusy(true);
+    try {
+      const result = await ipc()?.harness?.call("cache.settings.set", { provider: "gemini", ...next });
+      const gemini = (result?.data as { gemini?: { enabled: boolean; ttlSeconds: number } } | undefined)?.gemini;
+      if (gemini) setSetting(gemini);
+    } finally { setBusy(false); }
+  };
+  if (!setting) return null;
+  const hint = ko
+    ? "고정 지시·도구를 Google에 캐시로 저장해 반복 입력 비용을 줄입니다. 저장 시간만큼 Google이 시간당 요금을 받습니다."
+    : "Stores the fixed instructions and tools as a Google cache to cut repeated input cost. Google bills storage per hour.";
+  return (
+    <div data-gemini-explicit-cache="true" title={hint}
+      style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10, padding: "8px 10px", borderRadius: "var(--radius-md)", border: "1px solid var(--paper-edge)" }}>
+      <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, fontWeight: 650, color: "var(--ink)", cursor: busy ? "default" : "pointer" }}>
+        <input type="checkbox" checked={setting.enabled} disabled={busy} onChange={(event) => void save({ enabled: event.target.checked })} />
+        {ko ? "명시 캐시" : "Explicit cache"}
+      </label>
+      <select value={setting.ttlSeconds} disabled={busy || !setting.enabled} aria-label="TTL"
+        onChange={(event) => void save({ ttlSeconds: Number(event.target.value) })}
+        style={{ fontSize: 12, padding: "4px 6px", borderRadius: "var(--radius-sm)", border: "1px solid var(--paper-edge)", background: "var(--paper)" }}>
+        {[300, 600, 1800, 3600].map((sec) => <option key={sec} value={sec}>{sec < 3600 ? `${sec / 60}m` : "1h"}</option>)}
+      </select>
+    </div>
+  );
+}
+
+/** The wire a BYOK backend speaks (harness byok.wire.*): Chat Completions by default, DeepSeek's stateless Responses on request. */
+function ByokWireControl({ backend }: { backend: "deepseek" }) {
+  const { locale } = useT();
+  const [wire, setWire] = useState<"chat" | "responses" | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void ipc()?.harness?.call("byok.wire.get", {}).then((result) => {
+      const value = (result?.data as { wires?: Record<string, "chat" | "responses"> } | undefined)?.wires?.[backend];
+      if (live && value) setWire(value);
+    }).catch(() => undefined);
+    return () => { live = false; };
+  }, [backend]);
+  if (!wire) return null;
+  const hint = locale === "ko"
+    ? "Responses는 상태를 저장하지 않는 호환 API입니다. 대화·도구 기록은 계속 Agentlas가 관리합니다."
+    : "Responses is a stateless compatibility API; Agentlas still keeps the conversation and tool history.";
+  return (
+    <div data-byok-wire={backend} title={hint}
+      style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, padding: "8px 10px", borderRadius: "var(--radius-md)", border: "1px solid var(--paper-edge)" }}>
+      <span style={{ fontSize: 12, fontWeight: 650, color: "var(--ink)" }}>API</span>
+      <select value={wire} disabled={busy} aria-label="API"
+        onChange={(event) => {
+          const next = event.target.value === "responses" ? "responses" : "chat";
+          setBusy(true);
+          void ipc()?.harness?.call("byok.wire.set", { backend, wire: next }).then((result) => {
+            const value = (result?.data as { wires?: Record<string, "chat" | "responses"> } | undefined)?.wires?.[backend];
+            if (value) setWire(value);
+          }).finally(() => setBusy(false));
+        }}
+        style={{ fontSize: 12, padding: "4px 6px", borderRadius: "var(--radius-sm)", border: "1px solid var(--paper-edge)", background: "var(--paper)" }}>
+        <option value="chat">Chat Completions</option>
+        <option value="responses">Responses</option>
+      </select>
+    </div>
+  );
+}
+
 function ByokModelControls({
   backend,
   status,

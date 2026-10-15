@@ -10,6 +10,7 @@ import { getAgentSurface } from "../store/agent-surfaces";
 import { getChatGoalRevision } from "../store/chat-goals";
 import { addLongRunTask, appendLongRunEvent, getLongRun, getLongRunByGoalId, getLongRunGoalRevisionBinding, listLongRunTasks, transitionLongRun, nextBlockedGoalRetrySlot, pendingBlockedGoalRetry, scheduleBlockedGoalRetry, longRunOwnerHold, liveLongRunAttemptCount } from "../store/long-runs";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
+import { invocationRunOwners } from "../store/invocation-run-owners";
 import { assertDesktopLongRunAdmissionOpen, desktopAppInstanceId } from "./app-runtime-coordinator";
 import { claimCheckpointContinuation, latestTaskCheckpoint, recordTaskCheckpoint } from "./checkpoint";
 import { prepareCheckpointContinuation } from "./continuation";
@@ -21,6 +22,7 @@ import { runtimeCooldownForSelection } from "../runtime/runtime-cooldown";
 import { autoHandoffGoalRuntimeAtWait, goalAutoRuntimeRestoreDue } from "./runtime-handoff";
 import { withGoalWaitAccounting } from "./accounting-context";
 import { reflectOngoingStall, replanModelFingerprint, type StallReplanResult } from "./stall-replan";
+import { connectedModelTimeoutMs } from "../system-agents/judgment";
 import type { OngoingStallReplan } from "../../shared/runtime-plan";
 import { parseGoalWaitIntent, type GoalWaitIntent } from "./wait-emitter";
 import { timerWaitAuthority } from "./goal-deadline";
@@ -470,13 +472,21 @@ export function reconcileClaimedGoalWaitsAtStartup(target: GoalWaitHost | null =
             effectBoundaryReceiptId: settledRetryReceiptId, outcome: "verified_retry_checkpoint_no_replay" } });
         return;
       }
-      if (wait.episodeRequestId) {
+      const successorOwner = wait.successorInvocationId
+        ? invocationRunOwners.getRunOwner(wait.chatId, wait.successorInvocationId) : null;
+      const successorExecutionClosed = bindingExact && successorOwner?.state === "released"
+        && liveLongRunAttemptCount(current.id) === 0 && !invocationRunOwners.getActiveOwner(wait.chatId)
+        && target?.isChatBusy(wait.chatId) !== true;
+      if (wait.episodeRequestId && !successorExecutionClosed) {
         // No receipt of a successor is not proof of non-dispatch. Preserve the
         // exact claim across restart; reconciliation never creates a replacement.
         if (wait.wakeReason !== "goal_episode_dispatch_unknown") persist({ ...wait, revision: wait.revision + 1,
           wakeReason: "goal_episode_dispatch_unknown", nextCheckAt: null });
         return;
       }
+      // An exact released successor can leave its result unknown, but cannot
+      // own the Goal's next step forever. Retire this claim without changing
+      // its successor id and schedule a distinct turn with current context.
       const reason = bindingExact ? "goal_wait_claimed_dispatch_uncertain" : "goal_wait_claimed_binding_changed";
       const next: GoalWaitSubscription = { ...wait, revision: wait.revision + 1, state: "cancelled", nextCheckAt: null, wakeReason: reason };
       persist(next);
@@ -643,7 +653,7 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
               previousAction: checkpoint.capsule.plan?.stallReplan?.action
                 ?? checkpoint.capsule.plan?.episodeStrategy?.nextAction ?? null,
               previousAlternative: checkpoint.capsule.plan?.stallReplan?.alternative ?? null,
-              signal: controller.signal })), 5_000)
+              signal: controller.signal })), connectedModelTimeoutMs())
           : { status: "unavailable", reason: "stall_replan_checkpoint_changed" };
       } catch { controller.abort(); replan = { status: "unavailable", reason: "stall_replan_runtime_failed" }; }
       finally { replanInFlight.delete(wait.waitId); }

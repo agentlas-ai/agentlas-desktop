@@ -103,29 +103,6 @@ const RISK_REASONS = new Set<OneDecisionViewV1["risk"]["reasons"][number]>([
 const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const COST_RE = /(?:[$₩€£]\s*\d[\d,.]*|\d[\d,.]*\s*(?:원|krw|usd|eur|gbp|credits?))/i;
 const DEADLINE_RE = /(?:\b\d{4}-\d{1,2}-\d{1,2}(?:[t\s]\d{1,2}(?::\d{2})?)?\b|\b(?:by|before|until)\s+[^,.!?\n]{2,48}|\d{1,2}\s*월\s*\d{1,2}\s*일(?:\s*(?:오전|오후)?\s*\d{1,2}(?::\d{2})?)?\s*(?:까지|이전)?)/i;
-const IRREVERSIBLE_RE = /(?:irreversible|permanent(?:ly)?|cannot\s+(?:be\s+)?undo|can't\s+(?:be\s+)?undo|되돌릴\s*수\s*없|영구적)/i;
-const REVERSIBLE_RE = /(?:reversible|can\s+(?:be\s+)?undo|rollback|recoverable|되돌릴\s*수\s*있|롤백|복구\s*가능|취소\s*가능)/i;
-const COST_RELEVANT_RE = /(?:payment|checkout|purchase|buy|paid|billing|subscription|credit|결제|구매|구독|비용|크레딧)/i;
-
-const RISK_PATTERNS: Array<{ level: OneDecisionRiskLevel; reason: OneDecisionViewV1["risk"]["reasons"][number]; re: RegExp }> = [
-  // Under-warning is the dangerous direction here, so the money/destruction verbs stay
-  // broad: "wire the money", "wipe all records", "drop the database" used to fall through
-  // to a lower level than the equivalent "transfer funds" / "mass delete".
-  { level: "R4", reason: "critical_effect", re: /(?:legal\s+(?:filing|submission)|file\s+(?:a\s+)?lawsuit|(?:transfer|wire|remit|withdraw)\s+(?:the\s+)?(?:funds?|money|balance|payment)|security\s+(?:setting|permission)|change\s+(?:owner|admin)|(?:mass\s+delet|wipe|erase|purge|drop)\s*(?:all|the|every)?\s*(?:record|data|database|table|account|user)?|법적\s*제출|소송\s*제출|자금\s*(?:이체|송금)|송금|권한\s*변경|보안\s*설정|(?:대규모|전체|모든)\s*(?:삭제|초기화))/i },
-  { level: "R3", reason: "external_effect", re: /(?:send\s+(?:an?\s+)?(?:email|message)|publish|post\s+(?:it|this|public)|book(?:ing)?|reserve|pay(?:ment)?|checkout|purchase|delete|invite\s+(?:a\s+)?user|메일\s*발송|메시지\s*전송|공개\s*게시|게시|예약|결제|구매|삭제|사용자\s*초대)/i },
-  { level: "R2", reason: "limited_change", re: /(?:save|write|update|edit\s+(?:the\s+)?file|share\s+(?:with|to)|upload|install|connect\s+(?:the|to)|enable|rename|move\s+(?:the\s+)?file|저장|파일\s*쓰기|업데이트|팀원.*공유|업로드|설치|연결|활성화|이름\s*변경|파일\s*이동)/i },
-  { level: "R1", reason: "preparation_only", re: /(?:draft|prepare|preview|compare|temporary|proposal|research|초안|준비|미리보기|비교|임시|제안|조사)/i },
-  { level: "R0", reason: "read_only", re: /(?:read|view|inspect|search|review|summari[sz]e|읽|조회|검색|검토|요약)/i },
-];
-
-// "without" / "…없이 계속" / "…하지 않" are usually QUALIFIERS on an action option
-// ("Send without CC", "확인 없이 계속", "위험을 초래하지 않고 진행"), not a refusal. They used
-// to classify an approve option as a rejection, which then under-rated the decision's risk —
-// the dangerous direction for a send/pay/publish card. Only treat them as a refusal when
-// they negate the action itself (do not send / 발송하지 않).
-const REJECT_RE = /(?:\breject\b|\bdeny\b|\bdecline\b|\bdo\s+not\b|\bdon't\b|\bcancel\b|\bstop\b|\bskip\b|\bnot\s+now\b|거절|거부|허용\s*안|취소|중단|건너뛰|저장\s*안|발송\s*안|게시\s*안|(?:보내|발송|게시|저장|결제|구매|삭제|공유|업로드|설치|연결|진행|실행)\s*하지\s*않)/i;
-const MODIFY_RE = /(?:\bmodify\b|\bedit\b|\bchange\b|\badjust\b|review\s+scope|수정|변경|범위\s*검토)/i;
-const APPROVE_RE = /(?:\bapprove\b|\ballow\b|\bconfirm\b|\bproceed\b|\bcontinue\b|\bsend\b|\bpublish\b|\bpay\b|\bpurchase\b|\bbook\b|\bdelete\b|\bsave\b|\bshare\b|\bupload\b|\bconnect\b|\benable\b|\binstall\b|이\s*범위|허용|승인|확정|진행|계속|보내|발송|게시|결제|구매|예약|삭제|저장|공유|업로드|연결|활성|설치)/i;
 
 function safeText(value: string, maxLength: number): string {
   return redactSecrets(value)
@@ -145,14 +122,6 @@ export function oneDecisionOptionJudgmentInput(label: string, description: strin
   return `${label} ${description}`;
 }
 
-/** Legacy prior retained only for compatibility tests; never execution authority. */
-export function lexicalOneDecisionDisposition(text: string): OneDecisionOptionDisposition {
-  if (REJECT_RE.test(text)) return "reject";
-  if (MODIFY_RE.test(text)) return "modify";
-  if (APPROVE_RE.test(text)) return "approve";
-  return "choice";
-}
-
 function classifyOption(
   label: string,
   description: string,
@@ -161,24 +130,9 @@ function classifyOption(
   const text = oneDecisionOptionJudgmentInput(label, description);
   // The connected-model verdict decides. With NO verdict we FAIL CLOSED to a
   // neutral "choice" (which, under the fail-closed R4 level below, cannot grant
-  // authority without explicit approval) — never a keyword disposition. The
-  // reject/modify CONTROLS still work, so the user can always decline. The
-  // disposition wordlists survive only as the judge's prior.
+  // authority without explicit approval). The reject/modify CONTROLS still work,
+  // so the user can always decline. The host holds no disposition wordlist.
   return (judged?.(text) ?? null) ?? "choice";
-}
-
-/** Legacy prior retained only for compatibility tests; never execution authority. */
-export function lexicalOneDecisionRiskLevel(
-  text: string,
-  optionDispositions: readonly OneDecisionOptionDisposition[],
-): OneDecisionRiskLevel {
-  const matches = RISK_PATTERNS.filter((pattern) => pattern.re.test(text));
-  let level: OneDecisionRiskLevel = "R0";
-  for (const match of matches) {
-    if (RISK_ORDER[match.level] > RISK_ORDER[level]) level = match.level;
-  }
-  if (optionDispositions.includes("approve") && matches.length === 0) level = "R2";
-  return level;
 }
 
 const CANONICAL_LEVEL_REASON: Record<OneDecisionRiskLevel, OneDecisionViewV1["risk"]["reasons"][number]> = {
@@ -198,32 +152,22 @@ function inferRisk(
   // language the wordlists never covered still reaches R3/R4). With NO verdict —
   // no reader (renderer render pass) or a reader that returns null (no model /
   // not warmed) — we FAIL CLOSED to the highest risk and require explicit
-  // approval. This is a safe stop, not a keyword decision; the RISK_PATTERNS
-  // wordlists survive only as the judge's prior.
+  // approval. This is a safe stop, not a keyword decision; the host holds no
+  // risk wordlist.
   const judgedLevel = judged?.(text) ?? null;
   if (judgedLevel === null) {
     return { level: "R4", certainty: "ambiguous", reasons: ["critical_effect", "unstructured_authority_request"] };
   }
   const level = judgedLevel;
-  // RISK_PATTERNS matches are used ONLY to attribute descriptive reasons to the
-  // model-decided level, never to decide it.
-  const matches = RISK_PATTERNS.filter((pattern) => pattern.re.test(text));
+  // Reasons are structural: the canonical reason for the model-decided level, plus
+  // the typed approval-disposition flag. No wording is read here.
   const hasUnstructuredAuthority = optionDispositions.includes("approve");
-  const reasons = [...new Set(matches
-    .filter((match) => match.level === level)
-    .map((match) => match.reason))];
-  if (reasons.length === 0) reasons.push(CANONICAL_LEVEL_REASON[level]);
+  const reasons: OneDecisionViewV1["risk"]["reasons"][number][] = [CANONICAL_LEVEL_REASON[level]];
   if (hasUnstructuredAuthority && RISK_ORDER[level] >= RISK_ORDER.R2) reasons.push("unstructured_authority_request");
-  if (matches.some((match) => RISK_ORDER[match.level] <= 1) && matches.some((match) => RISK_ORDER[match.level] >= 2)) {
-    reasons.push("conflicting_signals");
-  }
-  if (reasons.length === 0) reasons.push(level === "R0" ? "read_only" : "unstructured_authority_request");
   return {
     level,
-    // Mixed lexical signals are useful context for the card, but they do not
-    // invalidate a complete resident-model risk verdict. Authority readiness
-    // remains a separate gate below; a missing verdict still returns R4 with
-    // ambiguous certainty above.
+    // Authority readiness remains a separate gate below; a missing verdict still
+    // returns R4 with ambiguous certainty above.
     certainty: "inferred",
     reasons: [...new Set(reasons)],
   };
@@ -274,16 +218,16 @@ export function normalizeOneDecision(
     && (risk.certainty === "ambiguous" || authorityReadiness !== "ready");
   const impactText = rawOptions.map((option) => option.description).filter(Boolean).join(" · ");
   const explicitRejectIndex = dispositions.findIndex((item) => item === "reject");
-  const cost: OneDecisionField = matchedField(combined, COST_RE, "question") ?? (COST_RELEVANT_RE.test(combined)
+  // Hints come from an amount the question states (number + currency grammar) or from the model-judged risk level, never
+  // from words such as "payment" or "irreversible" (native-harness notyet NH25): an effect the model rated R3/R4 may
+  // carry a cost or be hard to undo, so it says "not stated" instead of guessing; the owner reads the question itself.
+  const effectful = RISK_ORDER[risk.level] >= RISK_ORDER.R3;
+  const cost: OneDecisionField = matchedField(combined, COST_RE, "question") ?? (effectful
     ? { status: "not_stated", value: null, source: "policy" as const }
     : { status: "not_applicable", value: null, source: "policy" as const });
-  const reversibility: OneDecisionField = IRREVERSIBLE_RE.test(combined)
-    ? { status: "stated", value: "irreversible", source: "question" as const }
-    : REVERSIBLE_RE.test(combined)
-      ? { status: "stated", value: "reversible", source: "question" as const }
-      : risk.level === "R0"
-        ? { status: "not_applicable", value: null, source: "policy" as const }
-        : { status: "not_stated", value: null, source: "policy" as const };
+  const reversibility: OneDecisionField = risk.level === "R0"
+    ? { status: "not_applicable", value: null, source: "policy" as const }
+    : { status: "not_stated", value: null, source: "policy" as const };
   const deadline: OneDecisionField = matchedField(combined, DEADLINE_RE, "question")
     ?? { status: "not_stated", value: null, source: "policy" as const };
 

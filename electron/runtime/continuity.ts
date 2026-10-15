@@ -9,21 +9,56 @@ import type { ChatHistoryEntry } from "../../shared/types";
 import { tStatus, type RuntimeLocale } from "./status-i18n";
 import { compactHistory } from "./compact";
 import { createHash } from "node:crypto";
+import { GENERATION_CONTEXT_RATIO, runtimeContextWindow } from "./session-generation";
 
-/** CLI 러너가 새 세션을 시드할 때 재주입 히스토리에 허용하는 유효 컨텍스트(토큰). */
-export const CLI_HISTORY_CONTEXT_TOKENS = 120_000;
+/**
+ * DEGRADED VALUE — used ONLY when the selected model's verified window W is unknown. It is the former fixed constant,
+ * kept as the declared "unknown window" capability exception; a known W never reaches it (cliHistoryContextTokens).
+ */
+export const CLI_HISTORY_CONTEXT_TOKENS_UNKNOWN_WINDOW = 120_000;
+
+/** Output + provider/tool framing reserve for the seed turn: a fraction of W, bounded so a 1M window does not reserve 100k. */
+export const CLI_HISTORY_OUTPUT_RESERVE_RATIO = 0.1;
+export const CLI_HISTORY_OUTPUT_RESERVE_MAX_TOKENS = 32_768;
+export const CLI_HISTORY_OUTPUT_RESERVE_MIN_TOKENS = 1_024;
+
+export interface CliHistoryBudget {
+  /** Window the budget derives from; null = unknown (degraded value used). */
+  windowTokens: number | null;
+  /** Tokens set aside for the model's answer and framing — NOT available to replayed history. */
+  outputReserveTokens: number;
+  /** Admission budget for the replayed-history seed (input side only): below the 80% rotation point, minus the reserve. */
+  admissionTokens: number;
+  source: "verified-window" | "unknown-window-degraded";
+}
+
+/** Pure: admission budget and output reserve for a window W (null/invalid = unknown). */
+export function cliHistoryBudgetForWindow(windowTokens: number | null | undefined): CliHistoryBudget {
+  if (typeof windowTokens !== "number" || !Number.isFinite(windowTokens) || windowTokens <= 0) {
+    return { windowTokens: null, outputReserveTokens: 0, admissionTokens: CLI_HISTORY_CONTEXT_TOKENS_UNKNOWN_WINDOW, source: "unknown-window-degraded" };
+  }
+  const w = Math.floor(windowTokens);
+  const outputReserveTokens = Math.min(w, Math.min(CLI_HISTORY_OUTPUT_RESERVE_MAX_TOKENS,
+    Math.max(CLI_HISTORY_OUTPUT_RESERVE_MIN_TOKENS, Math.floor(w * CLI_HISTORY_OUTPUT_RESERVE_RATIO))));
+  // A fresh seed must start below the rotation point (GENERATION_CONTEXT_RATIO of W), or the next turn rotates again.
+  const admissionTokens = Math.max(0, Math.floor(w * GENERATION_CONTEXT_RATIO) - outputReserveTokens);
+  return { windowTokens: w, outputReserveTokens, admissionTokens, source: "verified-window" };
+}
+
+/** Replayed-history budget for the selected runtime/model: derives from its verified window; unknown W → degraded value. */
+export function cliHistoryContextTokens(kind: string, model: string | null | undefined): number {
+  return cliHistoryBudgetForWindow(runtimeContextWindow(kind, model)).admissionTokens;
+}
 
 /** 스웜 워커/신시사이저에 주입하는 대화 컨텍스트 예산 — 워커 수만큼 곱해지므로 보수적으로. */
 export const SWARM_HISTORY_CONTEXT_TOKENS = 8_000;
 
-function continuityNote(locale: RuntimeLocale): string {
-  return locale === "ko"
-    ? "위 기록은 지금 이어지고 있는 바로 이 대화다. 너는 처음부터 이 대화를 함께한 어시스턴트로서 자연스럽게 이어서 답한다. '이전 세션', '이전 대화 기록을 보면' 같은 표현으로 별개의 대화처럼 언급하지 마라."
-    : "The transcript above is THIS very conversation, still in progress. Continue it naturally as the assistant who has been present from the start. Never refer to it as a 'previous session' or a separate conversation.";
+function continuityNote(_locale?: RuntimeLocale): string {
+  return "transcript below = this live conversation; continue as the assistant from its start; never call it a previous session";
 }
 
 export interface ConversationContextResult {
-  /** 완성된 히스토리 블록(헤더 + 필요 시 다이제스트 + 최근 원문 + 연속성 노트). 히스토리가 없으면 "". */
+  /** 완성된 히스토리 블록(헤더 + 연속성 노트 + 필요 시 다이제스트 + 최근 원문). 히스토리가 없으면 "". */
   block: string;
   /** 다이제스트로 접힌 과거 메시지 수 — 0이면 전부 원문 유지. */
   droppedCount: number;
@@ -46,9 +81,10 @@ export function renderConversationContext(
   const user = tStatus(locale, "speakerUser");
   const assistant = tStatus(locale, "speakerAssistant");
   const lines = recent.map((m) => `${m.role === "user" ? user : assistant}: ${m.text}`);
-  const parts: string[] = [tStatus(locale, "histPrev")];
+  // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.main.continuity.render-conversation-context).
+  const parts: string[] = [tStatus(locale, "histPrev"), continuityNote(locale), ""];
   if (digest) parts.push(digest, "");
-  parts.push(lines.join("\n\n"), "", continuityNote(locale));
+  parts.push(lines.join("\n\n"));
   return { block: parts.join("\n"), droppedCount };
 }
 
@@ -76,9 +112,7 @@ export function renderGapContext(
   locale: RuntimeLocale,
 ): string {
   if (gap.length === 0) return "";
-  const intro = locale === "ko"
-    ? "네가 이 대화에서 마지막으로 응답한 이후, 아래 턴들이 다른 실행 경로(스웜/다른 러너)로 진행됐다. 모두 같은 대화의 일부다."
-    : "Since your last reply in this conversation, the turns below happened via another execution path (swarm/another runner). They are all part of this same conversation.";
+  const intro = "since your last reply, turns below ran via another path (swarm/another runner); same conversation:";
   const { block } = renderConversationContext(gap, locale, GAP_HISTORY_CONTEXT_TOKENS);
   return `${intro}\n${block}`;
 }
@@ -95,9 +129,7 @@ export function composeResumeTurnPrompt(
 ): string {
   const ctx = turnContext?.trim();
   if (!ctx) return userPrompt;
-  const header = locale === "ko"
-    ? "── 턴 컨텍스트(호스트 주입 배경 정보 — 사용자 메시지 아님, 언급·인용하지 말 것) ──"
-    : "── Turn context (host-injected background — not part of the user's message; do not mention or quote it) ──";
+  const header = "── Turn context (host background; not the user's message; never quote) ──";
   return [header, ctx, "", tStatus(locale, "histThis"), userPrompt].join("\n");
 }
 

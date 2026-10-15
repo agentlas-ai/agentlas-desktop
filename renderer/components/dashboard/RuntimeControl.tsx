@@ -139,7 +139,7 @@ function modelDiscoveryNotes(runtimes: RuntimeStatus[], ko: boolean): Array<{ ke
   const notes: Array<{ key: string; text: string }> = [];
   const seen = new Set<string>();
   for (const runtime of runtimes) {
-    if (runtime.kind === "ollama" || runtime.credentialAccess?.status === "unavailable") continue;
+    if (runtime.credentialAccess?.status === "unavailable") continue;
     if (runtime.modelDiscovery?.status !== "failed") continue;
     const key = runtimeKey(runtime);
     if (seen.has(key)) continue;
@@ -457,7 +457,7 @@ export function RuntimeControl() {
   }
 
   function runtimeOptionsForRole(role: RuntimeRole) {
-    return runtimesForRole(role).filter((runtime) => runtime.kind !== "ollama" && runtime.credentialAccess?.status !== "unavailable").map((runtime, index) => ({
+    return runtimesForRole(role).filter((runtime) => runtime.credentialAccess?.status !== "unavailable").map((runtime, index) => ({
       runtime,
       index,
       label: runtimeLabel(runtime),
@@ -470,7 +470,6 @@ export function RuntimeControl() {
   ): RuntimeModelPickerOption[] {
     const options: RuntimeModelPickerOption[] = [];
     for (const runtime of runtimesForRole(role)) {
-      if (runtime.kind === "ollama") continue;
       const models = modelsByRuntime[runtimeKey(runtime)] ?? (runtime.availableModels ?? []).map((id) => ({ id, label: id }));
       if (runtimeUsesEngineModelSetting(runtime.kind)) {
         options.push({
@@ -570,8 +569,8 @@ export function RuntimeControl() {
   }
 
   function runtimeForSelection(selection: RuntimeSelection): RuntimeStatus | null {
-    // The migration-only Ollama projection is not an executable runtime (same filter as the option lists).
-    const roleRuntimes = runtimesForRole(selection.role ?? "orchestrator").filter((runtime) => runtime.kind !== "ollama");
+    // Resolve the selected executable identity from this role's available runtimes.
+    const roleRuntimes = runtimesForRole(selection.role ?? "orchestrator");
     return roleRuntimes.find((runtime) => runtimeMatchesSelection(runtime, selection)) ?? null;
   }
 
@@ -1183,7 +1182,7 @@ export function RuntimeControl() {
     );
   }
 
-  const anyActive = runtimes.some((runtime) => runtime.kind !== "ollama" && runtime.localObservation?.state !== "pending");
+  const anyActive = runtimes.some((runtime) => runtime.localObservation?.state !== "pending");
   const localPending = runtimes.some((runtime) => runtime.localObservation?.state === "pending");
   const localInstalled = (localModelSnapshot?.modelInstallations.length ?? 0) > 0;
   return (

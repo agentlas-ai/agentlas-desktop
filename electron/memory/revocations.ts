@@ -7,8 +7,11 @@ import {
   activeBorrowedOwnerScopeKey,
   DEVICE_LOCAL_BORROWED_OWNER_SCOPE,
 } from "../agents/borrowed-owner-scope";
-import { getDb } from "../store/db";
+import { getMemoryDb as getDb, getMemoryStoreInfo, purgeLegacyMemoryCopies } from "./database";
 import { nativeTextsFor } from "./native-text";
+import { clearSelectedMemoryContextCache } from "./selected-context-cache";
+import { purgeGeneratedMemoryViews } from "./projections";
+import { memoryActorIds, sameMemoryActor } from "../../shared/memory-actor-family";
 
 /**
  * Cleanup-target source id for the original-wording twin of a translated
@@ -51,6 +54,8 @@ interface ForgettableMemoryRow {
   agent_id: string | null;
   chat_id: string | null;
   superseded_at: string | null;
+  actor_id?: string | null;
+  owner_namespace?: string | null;
 }
 
 interface LegacyDedupDecisionRow {
@@ -421,27 +426,34 @@ export function memoryOwnerKey(input: Pick<MemoryAuthorityInput,
   return stableHash(`agentlas-memory-owner-v1\0${input.scope}\0${authority}`);
 }
 
-function latestOwnerRevocation(ownerKey: string): { epoch: number; revokedAt: string } | null {
+/** Preserve raw v1 authority keys while recognizing only the two declared One actors. */
+export function memoryAuthorityOwnerKeys(input: Pick<MemoryAuthorityInput,
+  "scope" | "projectId" | "projectPath" | "agentId" | "chatId"
+>): string[] {
+  return [...new Set((input.scope === "agent_repo" ? memoryActorIds(input.agentId ?? null) : [input.agentId ?? null])
+    .map(agentId => memoryOwnerKey({...input,agentId})))];
+}
+function latestOwnerRevocation(ownerKeys: string[]): { epoch: number; revokedAt: string } | null {
   return getDb().prepare(
     `SELECT revoked_epoch AS epoch, revoked_at AS revokedAt
        FROM memory_revocations
-      WHERE owner_key = ?
+      WHERE owner_key IN (${ownerKeys.map(()=>"?").join(",")})
       ORDER BY revoked_epoch DESC LIMIT 1`,
-  ).get(ownerKey) as { epoch: number; revokedAt: string } | undefined ?? null;
+  ).get(...ownerKeys) as { epoch: number; revokedAt: string } | undefined ?? null;
 }
 
 /** Must run inside the caller's IMMEDIATE insert transaction. */
 export function assertMemoryWriteAllowed(input: MemoryAuthorityInput): void {
-  const ownerKey = memoryOwnerKey(input);
+  const ownerKeys = memoryAuthorityOwnerKeys(input);
   const contentHash = memoryContentHash(input.content);
   const exact = getDb().prepare(
     `SELECT 1 FROM memory_revocations
-      WHERE owner_key = ? AND memory_kind = ? AND content_hash = ?
+      WHERE owner_key IN (${ownerKeys.map(()=>"?").join(",")}) AND memory_kind = ? AND content_hash = ?
       LIMIT 1`,
-  ).get(ownerKey, input.kind, contentHash);
+  ).get(...ownerKeys, input.kind, contentHash);
   if (exact) throw new MemoryRevokedError("exact-content-revoked");
 
-  const latest = latestOwnerRevocation(ownerKey);
+  const latest = latestOwnerRevocation(ownerKeys);
   if (!latest) return;
   if (Number.isInteger(input.intakeEpoch) && Number(input.intakeEpoch) < latest.epoch) {
     throw new MemoryRevokedError("stale-intake-epoch");
@@ -497,6 +509,40 @@ function tableExists(name: string): boolean {
   ).get(name));
 }
 
+/** A checkpoint can contain any recalled source and model receipts can still
+ * contain its wording. Purge the current physical owner partition atomically
+ * with the epoch; retain only content-free job tombstones for idempotency. */
+function purgePreForgetContinuation(epoch: number, now: string): void {
+  purgeGeneratedMemoryViews();
+  if (tableExists("memory_session_checkpoint_heads")) getDb().prepare("DELETE FROM memory_session_checkpoint_heads").run();
+  if (tableExists("memory_session_checkpoints")) getDb().prepare("DELETE FROM memory_session_checkpoints").run();
+  if (tableExists("memory_curation_jobs")) {
+    const columns = new Set((getDb().pragma("table_info(memory_curation_jobs)") as Array<{ name: string }>).map(row => row.name));
+    const leases = ["lease_token", "lease_expires_at"].filter(column => columns.has(column)).map(column => `${column}=NULL,`).join("");
+    getDb().prepare(`UPDATE memory_curation_jobs
+      SET payload_json='{}',result_json=NULL,runtime_digest='revoked',expected_revision=NULL,
+          state='revoked',next_attempt_at=NULL,${leases}updated_at=? WHERE intake_epoch<?`).run(now, epoch);
+  }
+  if (tableExists("memory_curation_batches")) getDb().prepare("DELETE FROM memory_curation_batches WHERE intake_epoch<?").run(epoch);
+  if (tableExists("memory_operations")) {
+    // Core's detached worker shares this physical owner partition. Its
+    // processing receipt is also its lease, so replace it with a tombstone.
+    const owner = getMemoryStoreInfo().ownerNamespace;
+    const pending = `SELECT operation_id FROM memory_operations WHERE owner_namespace=?
+      AND revocation_epoch<? AND state IN ('queued','deferred','processing')`;
+    getDb().prepare(`UPDATE memory_episodes SET summary=NULL,summary_hash=NULL
+      WHERE ticket_id IN (${pending})`).run(owner, epoch);
+    getDb().prepare(`UPDATE memory_tickets SET state='failed',failure_code='source_revoked',
+      curation_outcome='curator_failed',updated_at=? WHERE ticket_id IN (${pending})`).run(now, owner, epoch);
+    getDb().prepare(`UPDATE memory_operations SET payload_json='{}',
+      receipt_json=CASE WHEN state IN ('queued','deferred','processing') THEN
+        json_object('schema_version','agentlas.core-memory-runtime.v1','operation_id',operation_id,
+          'action','defer','reason','source_revoked','written',0) ELSE receipt_json END,
+      state=CASE WHEN state IN ('queued','deferred','processing') THEN 'revoked' ELSE state END,
+      updated_at=? WHERE owner_namespace=? AND revocation_epoch<?`).run(now, owner, epoch);
+  }
+}
+
 function legacyTicketMatchesOwner(row: LegacyDedupDecisionRow, memory: ForgettableMemoryRow): boolean {
   if (memory.scope === "project") {
     const projectPath = canonicalProjectPath(memory.project_path);
@@ -504,7 +550,7 @@ function legacyTicketMatchesOwner(row: LegacyDedupDecisionRow, memory: Forgettab
       ? row.projectPathHash === stableHash(projectPath)
       : Boolean(memory.project_id) && row.projectId === memory.project_id;
   }
-  if (memory.scope === "agent_repo") return row.agentId === memory.agent_id;
+  if (memory.scope === "agent_repo") return sameMemoryActor(row.agentId,memory.agent_id ?? memory.actor_id);
   if (memory.scope === "session") return row.chatId === memory.chat_id;
   return true;
 }
@@ -523,26 +569,26 @@ function reconcileLegacyDedupEpisodes(
 ): void {
   const targetByRawHash = new Map(matched.map((row) => [stableHash(row.content), row.id]));
   if (targetByRawHash.size === 0) return;
-  const ownerKey = memoryOwnerKey({
+  const ownerKeys = memoryAuthorityOwnerKeys({
     scope: selected.scope,
     projectId: selected.project_id,
     projectPath: selected.project_path,
-    agentId: selected.agent_id,
+    agentId: selected.agent_id ?? selected.actor_id,
     chatId: selected.chat_id,
   });
   const liveTargetByRawHash = new Map(
     (getDb().prepare(
-      `SELECT id, scope, kind, content, project_id, project_path, agent_id, chat_id, superseded_at
-         FROM memory_entries
-        WHERE scope = ? AND kind = ? AND superseded_at IS NULL`,
+      `SELECT m.id,m.scope,m.kind,m.content,m.project_id,m.project_path,m.agent_id,m.chat_id,m.superseded_at,b.actor_id
+         FROM memory_entries m LEFT JOIN memory_identity_bindings b ON b.memory_id=m.id
+        WHERE m.scope = ? AND m.kind = ? AND m.superseded_at IS NULL`,
     ).all(selected.scope, selected.kind) as ForgettableMemoryRow[])
-      .filter((row) => memoryOwnerKey({
+      .filter((row) => ownerKeys.includes(memoryOwnerKey({
         scope: row.scope,
         projectId: row.project_id,
         projectPath: row.project_path,
-        agentId: row.agent_id,
+        agentId: row.agent_id ?? row.actor_id,
         chatId: row.chat_id,
-      }) === ownerKey && !targetByRawHash.has(stableHash(row.content)))
+      })) && !targetByRawHash.has(stableHash(row.content)))
       .map((row) => [stableHash(row.content), row.id]),
   );
   const redactEpisode = getDb().prepare(
@@ -625,37 +671,50 @@ function enqueueRevocationCleanupTarget(input: {
   );
 }
 
+function explicitAudienceKey(memoryId: string): string {
+  const row=getDb().prepare("SELECT applicability_json FROM memory_identity_bindings WHERE memory_id=?").get(memoryId) as {applicability_json:string}|undefined;
+  const stable=(value: unknown): unknown => Array.isArray(value)?value.map(stable):value && typeof value==="object"?Object.fromEntries(Object.entries(value).sort(([a],[b])=>a.localeCompare(b)).map(([key,item])=>[key,stable(item)])):value;
+  try {return JSON.stringify(stable(JSON.parse(row?.applicability_json ?? "{}").audience ?? null));} catch {return `invalid:${memoryId}`;}
+}
+
 /**
  * Commit the durable tombstone and remove every directly retrievable raw DB
  * projection in one IMMEDIATE transaction. Filesystem/nest projections are
  * reconciled by the caller from the bounded return value.
  */
-export function revokeOneMemoryEntry(memoryId: string, expectedAgentId: string): ForgottenMemoryProjection | null {
+export function revokeOneMemoryEntry(memoryId: string, expectedAgentId: string, options?: {
+  /** Owner inspector validates owner/actor/revision/epoch in its enclosing transaction. */
+  bindingActor?: boolean;
+}): ForgottenMemoryProjection | null {
   const activeNestOwnerScopeKey = activeBorrowedOwnerScopeKey();
   const revoke = getDb().transaction((): ForgottenMemoryProjection | null => {
-    const selected = getDb().prepare(
-      `SELECT id, scope, kind, content, project_id, project_path, agent_id, chat_id, superseded_at
-         FROM memory_entries
-        WHERE id = ? AND agent_id = ? AND superseded_at IS NULL
-        LIMIT 1`,
-    ).get(memoryId, expectedAgentId) as ForgettableMemoryRow | undefined;
+    const actorIds = memoryActorIds(expectedAgentId);
+    const selected = getDb().prepare(options?.bindingActor
+      ? `SELECT m.id,m.scope,m.kind,m.content,m.project_id,m.project_path,m.agent_id,m.chat_id,m.superseded_at,b.actor_id,b.owner_namespace
+         FROM memory_entries m LEFT JOIN memory_identity_bindings b ON b.memory_id=m.id
+         WHERE m.id=? AND COALESCE(NULLIF(b.actor_id,''),m.agent_id) IN (${actorIds.map(()=>"?").join(",")}) AND m.superseded_at IS NULL LIMIT 1`
+      : `SELECT id, scope, kind, content, project_id, project_path, agent_id, chat_id, superseded_at
+         FROM memory_entries WHERE id = ? AND agent_id IN (${actorIds.map(()=>"?").join(",")}) AND superseded_at IS NULL LIMIT 1`
+    ).get(memoryId, ...actorIds) as ForgettableMemoryRow | undefined;
     if (!selected) return null;
 
-    const ownerKey = memoryOwnerKey({
+    const ownerKeys = memoryAuthorityOwnerKeys({
       scope: selected.scope,
       projectId: selected.project_id,
       projectPath: selected.project_path,
-      agentId: selected.agent_id,
+      agentId: selected.agent_id ?? selected.actor_id,
       chatId: selected.chat_id,
     });
+    const ownerKey = memoryOwnerKey({scope:selected.scope,projectId:selected.project_id,projectPath:selected.project_path,agentId:selected.agent_id ?? selected.actor_id,chatId:selected.chat_id});
     const contentHash = memoryContentHash(selected.content);
     const now = new Date().toISOString();
     getDb().prepare("UPDATE memory_forget_clock SET epoch = epoch + 1 WHERE id = 1").run();
     const epoch = Number((getDb().prepare(
       "SELECT epoch FROM memory_forget_clock WHERE id = 1",
     ).get() as { epoch: number }).epoch);
+    purgePreForgetContinuation(epoch, now);
     const revocationId = `mrv_${randomUUID()}`;
-    getDb().prepare(
+    for (const authorityKey of ownerKeys) getDb().prepare(
       `INSERT INTO memory_revocations (
          revocation_id, owner_key, memory_kind, content_hash, source_memory_id,
          revoked_epoch, revoked_at
@@ -664,16 +723,16 @@ export function revokeOneMemoryEntry(memoryId: string, expectedAgentId: string):
          source_memory_id = excluded.source_memory_id,
          revoked_epoch = excluded.revoked_epoch,
          revoked_at = excluded.revoked_at`,
-    ).run(revocationId, ownerKey, selected.kind, contentHash, selected.id, epoch, now);
+    ).run(authorityKey===ownerKey?revocationId:`mrv_${randomUUID()}`, authorityKey, selected.kind, contentHash, selected.id, epoch, now);
     const canonicalRevocation = getDb().prepare(
       `SELECT revocation_id AS revocationId FROM memory_revocations
         WHERE owner_key = ? AND memory_kind = ? AND content_hash = ?`,
     ).get(ownerKey, selected.kind, contentHash) as { revocationId: string };
 
     const candidates = getDb().prepare(
-      `SELECT id, scope, kind, content, project_id, project_path, agent_id, chat_id, superseded_at
-         FROM memory_entries
-        WHERE scope = ? AND kind = ?`,
+      `SELECT m.id,m.scope,m.kind,m.content,m.project_id,m.project_path,m.agent_id,m.chat_id,m.superseded_at,b.actor_id,b.owner_namespace
+         FROM memory_entries m LEFT JOIN memory_identity_bindings b ON b.memory_id=m.id
+        WHERE m.scope = ? AND m.kind = ?`,
     ).all(selected.scope, selected.kind) as ForgettableMemoryRow[];
     // English migration: a translated row's original wording lives in the side
     // table. The same original under the same owner is the same memory, and it
@@ -681,14 +740,20 @@ export function revokeOneMemoryEntry(memoryId: string, expectedAgentId: string):
     const candidateNatives = nativeTextsFor("memory_entry", candidates.map((row) => row.id));
     const selectedNative = candidateNatives.get(selected.id);
     const selectedNativeHash = selectedNative ? memoryContentHash(selectedNative) : null;
+    const audienceKey = options?.bindingActor
+      ? (require("./store") as typeof import("./store")).memoryAudienceKey : null;
+    const selectedAudience = audienceKey?.(selected.id);
+    const declaredAudience=explicitAudienceKey(selected.id);
     const matched = candidates.filter((row) => {
-      if (memoryOwnerKey({
+      if (options?.bindingActor && (row.owner_namespace ? row.owner_namespace !== getMemoryStoreInfo().ownerNamespace : !getMemoryStoreInfo().ownerNamespace.startsWith("device-local:"))) return false;
+      if (audienceKey && (audienceKey(row.id) !== selectedAudience || explicitAudienceKey(row.id)!==declaredAudience)) return false;
+      if (!ownerKeys.includes(memoryOwnerKey({
         scope: row.scope,
         projectId: row.project_id,
         projectPath: row.project_path,
-        agentId: row.agent_id,
+        agentId: row.agent_id ?? row.actor_id,
         chatId: row.chat_id,
-      }) !== ownerKey) return false;
+      }))) return false;
       if (memoryContentHash(row.content) === contentHash) return true;
       const native = candidateNatives.get(row.id);
       return Boolean(selectedNativeHash && native && memoryContentHash(native) === selectedNativeHash);
@@ -707,6 +772,11 @@ export function revokeOneMemoryEntry(memoryId: string, expectedAgentId: string):
     for (const id of sourceMemoryIds) linkSource.run(id, canonicalRevocation.revocationId);
 
     const placeholders = sourceMemoryIds.map(() => "?").join(",");
+    const ticketIds = (getDb().prepare(`SELECT DISTINCT ticket_id FROM memory_decisions
+      WHERE target_memory_id IN (${placeholders}) UNION SELECT ticket_id FROM memory_episode_quarantines
+      WHERE revocation_id=?`).all(...sourceMemoryIds, canonicalRevocation.revocationId) as Array<{ ticket_id: string }>).map(row => row.ticket_id);
+    purgeLegacyMemoryCopies(sourceMemoryIds, ticketIds);
+    (require("./one-legacy") as typeof import("./one-legacy")).purgeLegacyOneArchivedBodies(sourceMemoryIds);
     getDb().prepare(
       `UPDATE memory_revocation_cleanup_targets
           SET revocation_id = ?, state = 'pending', next_attempt_at = ?,
@@ -749,7 +819,7 @@ export function revokeOneMemoryEntry(memoryId: string, expectedAgentId: string):
       nativeHashes.set(hash, rows);
     }
     for (const [nativeHash, rowIds] of nativeHashes) {
-      getDb().prepare(
+      for (const authorityKey of ownerKeys) getDb().prepare(
         `INSERT INTO memory_revocations (
            revocation_id, owner_key, memory_kind, content_hash, source_memory_id,
            revoked_epoch, revoked_at
@@ -758,7 +828,7 @@ export function revokeOneMemoryEntry(memoryId: string, expectedAgentId: string):
            source_memory_id = excluded.source_memory_id,
            revoked_epoch = excluded.revoked_epoch,
            revoked_at = excluded.revoked_at`,
-      ).run(`mrv_${randomUUID()}`, ownerKey, selected.kind, nativeHash, selected.id, epoch, now);
+      ).run(`mrv_${randomUUID()}`, authorityKey, selected.kind, nativeHash, selected.id, epoch, now);
       const nativeRevocation = getDb().prepare(
         `SELECT revocation_id AS revocationId FROM memory_revocations
           WHERE owner_key = ? AND memory_kind = ? AND content_hash = ?`,
@@ -842,5 +912,19 @@ export function revokeOneMemoryEntry(memoryId: string, expectedAgentId: string):
       revokedEpoch: epoch,
     };
   });
-  return revoke.immediate();
+  const result = revoke.immediate();
+  if (result) clearSelectedMemoryContextCache();
+  return result;
+}
+
+/** Owner corrections invalidate derived continuation/queued old-source results,
+ * without erasing the superseded original audit row or minting a new authority. */
+export function invalidateMemoryContinuationAfterOwnerEdit(): number {
+  return getDb().transaction(() => {
+    getDb().prepare("UPDATE memory_forget_clock SET epoch=epoch+1 WHERE id=1").run();
+    const epoch = currentMemoryForgetEpoch();
+    purgePreForgetContinuation(epoch,new Date().toISOString());
+    clearSelectedMemoryContextCache();
+    return epoch;
+  }).immediate();
 }

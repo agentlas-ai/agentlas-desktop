@@ -14,7 +14,7 @@
 .logoMono { display: inline-flex; align-items: center; justify-content: center; border-radius: 22%; color: var(--white, var(--paper)); font-family: var(--font-head, inherit); font-weight: 700; letter-spacing: -.02em; }
 
 /* ── shared buttons (ChatGPT detail: 28px, radius 8, 13px) ───────── */
-.iconButton { width: 28px; height: 28px; flex: none; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--tl-sub, var(--muted-deep)); cursor: pointer; }
+.iconButton { width: 28px; height: 28px; flex: none; display: inline-flex; align-items: center; justify-content: center; padding: 4px; border: 0; border-radius: 8px; background: transparent; color: var(--tl-sub, var(--muted-deep)); cursor: pointer; }
 .iconButton:hover { background: var(--tl-hover, var(--paper-3)); color: var(--ink); }
 .iconButton:disabled { opacity: .4; cursor: default; }
 .lightButton { height: 28px; display: inline-flex; align-items: center; gap: 5px; padding: 6px 10px; border: 0; border-radius: 8px; background: var(--tl-chip, var(--paper-3)); color: var(--ink); font-size: 13px; font-weight: 500; line-height: 16px; white-space: nowrap; cursor: pointer; text-decoration: none; }
@@ -60,7 +60,7 @@
 .promptChip strong { font-weight: 400; margin-right: 5px; }
 .chipMark { display: inline-flex; vertical-align: -2px; margin-right: 5px; }
 .promptChipText { flex: 1; min-width: 0; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-.promptArrow { width: 24px; height: 24px; flex: none; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 999px; background: color-mix(in srgb, var(--ink) 8%, transparent); color: var(--ink-soft); cursor: pointer; }
+.promptArrow { width: 24px; height: 24px; flex: none; display: inline-flex; align-items: center; justify-content: center; padding: 3px; border: 0; border-radius: 999px; background: color-mix(in srgb, var(--ink) 8%, transparent); color: var(--ink-soft); cursor: pointer; }
 .promptArrow:hover { background: color-mix(in srgb, var(--ink) 15%, transparent); color: var(--ink); }
 
 .description { margin: 24px 0 0; font-size: 14px; line-height: 22px; color: var(--ink); white-space: pre-line; }
@@ -115,7 +115,7 @@ button.row:hover, .row[data-highlight="true"] { background: var(--tl-hover, var(
 .heroIcons > span:nth-child(3n) { transform: translateY(-4px); }
 .heroCta { height: 40px; margin: 10px 0 0; padding: 10px 14px; border: 1px solid color-mix(in srgb, var(--ink) 9%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--paper) 45%, transparent); color: var(--ink); font-size: 14px; font-weight: 500; cursor: pointer; backdrop-filter: blur(6px); }
 .heroCta:hover { background: color-mix(in srgb, var(--paper) 75%, transparent); }
-.heroArrow { position: absolute; top: 50%; width: 40px; height: 40px; margin-top: -20px; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 50%; background: color-mix(in srgb, var(--paper) 70%, transparent); color: var(--ink-soft); cursor: pointer; }
+.heroArrow { position: absolute; top: 50%; width: 40px; height: 40px; margin-top: -20px; display: inline-flex; align-items: center; justify-content: center; padding: 8px; border: 0; border-radius: 50%; background: color-mix(in srgb, var(--paper) 70%, transparent); color: var(--ink-soft); cursor: pointer; }
 .heroArrow:hover { background: var(--paper); color: var(--ink); }
 .heroArrow[data-side="left"] { left: 12px; }
 .heroArrow[data-side="right"] { right: 12px; }
@@ -138,7 +138,7 @@ button.row:hover, .row[data-highlight="true"] { background: var(--tl-hover, var(
 .itemName { font-size: 15px; line-height: 21px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .itemDesc { font-size: 14px; line-height: 20px; color: var(--ink-soft); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .itemMaker { font-size: 13px; line-height: 18px; color: var(--tl-sub, var(--muted-deep)); }
-.cardAction { position: absolute; top: 13px; right: 13px; width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 1px solid var(--tl-card-line, var(--paper-edge)); border-radius: 6px; background: var(--paper); color: var(--ink); cursor: pointer; box-shadow: 0 1px 1px color-mix(in srgb, var(--ink) 4%, transparent); }
+.cardAction { position: absolute; top: 13px; right: 13px; width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; padding: 4px; border: 1px solid var(--tl-card-line, var(--paper-edge)); border-radius: 6px; background: var(--paper); color: var(--ink); cursor: pointer; box-shadow: 0 1px 1px color-mix(in srgb, var(--ink) 4%, transparent); }
 .cardAction:hover { background: var(--tl-hover, var(--paper-3)); }
 .cardAction[data-installed="true"] { border-color: transparent; box-shadow: none;
   background: oklch(0.885 0.07 145); /* colour-literal-allowed: reference installed-check mint */
@@ -149,7 +149,7 @@ button.row:hover, .row[data-highlight="true"] { background: var(--tl-hover, var(
 .rowGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 26px; row-gap: 0; margin: 0 -10px; }
 .listRow { min-width: 0; min-height: 68px; display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: 12px; color: var(--ink); cursor: pointer; }
 .listRow:hover { background: var(--tl-hover, var(--paper-3)); }
-.listRowAction { width: 28px; height: 28px; flex: none; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--ink); cursor: pointer; }
+.listRowAction { width: 28px; height: 28px; flex: none; display: inline-flex; align-items: center; justify-content: center; padding: 4px; border: 0; border-radius: 8px; background: transparent; color: var(--ink); cursor: pointer; }
 .listRowAction[data-installed="true"] { color: var(--tl-sub, var(--muted-deep)); }
 .listRowAction:hover { background: var(--tl-active, var(--paper-edge)); color: var(--ink); }
 

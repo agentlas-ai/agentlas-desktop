@@ -5,7 +5,7 @@ import { RuntimeTurnUnsettledError, RUNTIME_TURN_UNSETTLED_CODE, type RunnerResu
 import type { AgentContextUnsettledTurn } from "./agent-context";
 
 /** Host-authored (purpose "run-recovery", compacted on replay); names no tool, runtime or cause. */
-export const UNSETTLED_CONTINUATION_PROMPT = "Your previous turn ended without a completion signal. Check your own history for what is already done, then finish the remaining work; do not repeat completed actions.";
+export const UNSETTLED_CONTINUATION_PROMPT = "previous turn: no completion signal. Check history, finish what remains, repeat nothing done.";
 
 export type UnsettledOutcome = { ok: true; result: RunnerResult } | { ok: false; error: unknown };
 

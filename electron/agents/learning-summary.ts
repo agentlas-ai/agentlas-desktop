@@ -1,7 +1,7 @@
 import { inspectAgentFileText, listAgentFiles } from "./files";
 import { getExperienceOntologySummary } from "../experience/store";
 import { getAgentById } from "../mcp/registry";
-import { getDb } from "../store/db";
+import { getMemoryDb as getDb } from "../memory/database";
 import type { AgentLearningSummary } from "../../shared/types";
 
 const TERMINAL_KINDS = [

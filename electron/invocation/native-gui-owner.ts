@@ -1,9 +1,11 @@
+import { getDb } from "../store/db";
+import { invocationRunOwners } from "../store/invocation-run-owners";
 import { createHash } from "node:crypto";
 import { effectiveInvocationPermission } from "../../shared/invocation-permission";
 import { ONE_PREFLIGHT_STEER_REQUEST_KEYS } from "../../shared/one-preflight-steers";
 import { onePreflightSteerTemplate } from "../store/one-preflight-steers";
 import type { McpInvocationRequest } from "../../shared/types";
-import { canonicalInvocationRequestJson, createInvocationAdmission, getInvocationAdmission, INVOCATION_ADMISSION_DIGEST_VERSION, type InvocationAdmissionIdentity } from "../store/invocation-admissions";
+import { canonicalInvocationRequestJson, createInvocationAdmission, decideInvocationAdmission, getInvocationAdmission, INVOCATION_ADMISSION_DIGEST_VERSION, type InvocationAdmissionIdentity } from "../store/invocation-admissions";
 import { admitMainInvocation, type MainInvocationAdmission } from "../runtime/scheduled-root-context";
 import { nativeGuiChannelIdentity } from "../daemon/native-auth-channel";
 import type { NativeAuthenticatedIdentity } from "../daemon/native-session-auth";
@@ -24,8 +26,8 @@ export function assertNativeGuiOwnerBootstrap(owner: object, callbacks: Callback
 }
 interface Capture {
   readonly channel: Channel; readonly identity: NativeAuthenticatedIdentity;
-  readonly originalRequest: McpInvocationRequest; readonly start: NativeStartDescriptor; readonly privateHandle: NativeMainPreparationRouterHandle;
-  transportStart?: Promise<unknown>; actualStart: Promise<InvocationStartResult>; cancellation?: Promise<StopResult>; unavailable: boolean;
+  originalRequest: McpInvocationRequest; readonly start: NativeStartDescriptor; readonly privateHandle: NativeMainPreparationRouterHandle;
+  transportStart?: Promise<unknown>; actualStart: Promise<InvocationStartResult>; cancellation?: Promise<StopResult>; unavailable: boolean; cleanupObservation?: Promise<unknown>;
 }
 /** `detail` is machine-readable and content-free (top-level key NAMES only); it goes to logs, never to the screen. */
 export class NativeGuiOwnerError extends Error { constructor(readonly code: string, readonly detail?: string) { super(code); } }
@@ -50,8 +52,60 @@ export function createNativeGuiOwnerClient(ports: {
   // A failed synchronous issuer can have reserved an admission, but cannot mint
   // source-owned noStart proof. Keep the original failure; caller reconciliation
   // owns rejection. Never turn this record into a replay/start or Stop authority.
-  const issueFailures = new Map<string, { admission: InvocationAdmissionIdentity; error: unknown }>();
+  type IssueFailure = { admission: InvocationAdmissionIdentity; error: unknown; timer?: ReturnType<typeof setTimeout>; reconcile?: () => void; needsReconciliation: boolean };
+  const issueFailures = new Map<string, IssueFailure>();
+  function reconcileIssueFailuresBeforeDistinctStart(): void {
+    // These closures own original synchronous pre-dispatch failures only. A new
+    // authorized start may reobserve their closed fact, never invoke the producer/RPC again.
+    for (const failure of [...issueFailures.values()]) if (failure.needsReconciliation) failure.reconcile?.();
+  }
+  function issueFailedBeforeDispatch(admission: InvocationAdmissionIdentity, error: unknown): void {
+    const failure: IssueFailure = { admission, error, needsReconciliation: false };
+    issueFailures.set(admission.runId, failure);
+    const reconcile = () => {
+      if (failure.timer) clearTimeout(failure.timer);
+      failure.timer = undefined; failure.needsReconciliation = false;
+      if (issueFailures.get(admission.runId) !== failure) return;
+      try {
+        // Only these synchronous catches precede channel.dispatch. A foreign owner is never our no-start fact.
+        getDb().transaction(() => {
+          if (invocationRunOwners.getRunOwner(admission.chatId, admission.runId)) return;
+          const a = getInvocationAdmission(admission.runId);
+          if (!a || a.chatId !== admission.chatId || a.inputDigest !== rowDigest(admission) || a.ownerProcessEpoch !== admission.ownerProcessEpoch) return;
+          if (a.status === "pending") decideInvocationAdmission({ ...admission, decision: "rejected", reasonCode: "native_gui_before_dispatch_failed",
+            noStartProof: { kind: "owner-start-boundary-not-crossed", verifiedOwnerProcessEpoch: admission.ownerProcessEpoch } });
+        }).immediate();
+        const closed = [...issueFailures].filter(([, f]) => { const row = getInvocationAdmission(f.admission.runId); return row?.status === "rejected" && row.chatId === f.admission.chatId && row.ownerProcessEpoch === f.admission.ownerProcessEpoch && row.inputDigest === rowDigest(f.admission); });
+        for (const [runId] of closed.slice(0, Math.max(0, closed.length - 128))) issueFailures.delete(runId);
+      } catch (cause) {
+        failure.needsReconciliation = true;
+        let code: unknown; try { if (cause && typeof cause === "object") code = Object.getOwnPropertyDescriptor(cause, "code")?.value; } catch {}
+        if (typeof code === "string" && /^SQLITE_(?:BUSY|LOCKED)(?:_[A-Z_]+)?$/.test(code) && !failure.timer) { failure.timer = setTimeout(reconcile, 1_000); failure.timer.unref?.(); }
+      }
+    };
+    failure.reconcile = reconcile;
+    reconcile();
+  }
   const watched = new WeakSet<Channel>();
+  function activeAuthority(r: Capture): boolean {
+    if (!ports.router.closeAuthorityIfSettled(r.privateHandle)) return true;
+    // Closed text selectors cannot use the original request again. Preserve
+    // digest/run identity and the private cleanup handle, without retaining prompt text.
+    r.originalRequest = { chatId: r.start.binding.chatId, runId: r.start.binding.runId, userPrompt: "" };
+    if (!r.cleanupObservation) {
+      // Local original-handle cleanup only; no nativeStart, checkpoint claim, or ACK replay.
+      r.cleanupObservation = Promise.resolve().then(() => ports.router.finishForSettlement(r.privateHandle, "settled"));
+      void r.cleanupObservation.then(() => { try { retire(r.start.binding.runId); } catch {} }, () => {});
+    }
+    return false;
+  }
+  function liveCapacity(): number {
+    const failures = [...issueFailures.values()].filter(f => {
+      const a = getInvocationAdmission(f.admission.runId);
+      return !a || a.chatId !== f.admission.chatId || a.ownerProcessEpoch !== f.admission.ownerProcessEpoch || a.inputDigest !== rowDigest(f.admission) || a.status !== "rejected";
+    }).length;
+    return [...captures.values()].filter(activeAuthority).length + failures;
+  }
   function requireCurrent(r: Capture): void {
     if (r.unavailable || ports.getChannel() !== r.channel || nativeGuiChannelIdentity(r.channel) !== r.identity) fail("native_gui_original_channel_unavailable");
   }
@@ -72,7 +126,8 @@ export function createNativeGuiOwnerClient(ports: {
     if (!sender || thenable(sender)) fail("native_gui_original_renderer_required");
     const request = ports.sanitizeRendererRequest(raw);
     if (!request.runId || captures.has(request.runId) || issueFailures.has(request.runId)) fail("native_gui_original_start_replayed");
-    if (captures.size + issueFailures.size >= ports.maxRetainedStarts) fail("native_gui_capacity_reached");
+    reconcileIssueFailuresBeforeDistinctStart();
+    if (liveCapacity() >= ports.maxRetainedStarts) fail("native_gui_capacity_reached");
     const channel = ports.getChannel(), identity = channel && nativeGuiChannelIdentity(channel);
     if (!channel || !identity) fail("native_gui_enrolled_channel_required");
     const validation: unknown = ports.validateBeforeReserve(originalEvent, request, identity);
@@ -87,7 +142,7 @@ export function createNativeGuiOwnerClient(ports: {
     try {
       const parent: unknown = ports.reservePreflightParent?.(originalEvent, request, admission);
       if (thenable(parent)) fail("native_gui_synchronous_parent_required");
-    } catch (error) { issueFailures.set(request.runId, { admission, error }); throw error; }
+    } catch (error) { issueFailedBeforeDispatch(admission, error); throw error; }
     return captureStart(originalEvent, request, mainAdmission, admission, channel, identity);
   }
   /** Same issuer, reservation and authenticated start RPC; source is a private
@@ -125,7 +180,8 @@ export function createNativeGuiOwnerClient(ports: {
     const available: unknown = ports.assertStartAvailable?.();
     if (thenable(available)) fail("native_gui_synchronous_validation_required");
     if (!runId || captures.has(runId) || issueFailures.has(runId)) fail("native_gui_original_start_replayed");
-    if (captures.size + issueFailures.size >= ports.maxRetainedStarts) fail("native_gui_capacity_reached");
+    reconcileIssueFailuresBeforeDistinctStart();
+    if (liveCapacity() >= ports.maxRetainedStarts) fail("native_gui_capacity_reached");
     const channel = ports.getChannel(), identity = channel && nativeGuiChannelIdentity(channel);
     if (!identity) fail("native_gui_enrolled_channel_required");
     return identity;
@@ -138,13 +194,15 @@ export function createNativeGuiOwnerClient(ports: {
     try {
       issued = ports.router.issue({ event: originalEvent, ...(hostOrigin?{hostOrigin}:{}), actualChannel: channel, request, mainAdmission, admission });
       ports.callbackAdapter.registerIssued(issued.start, issued.privateHandle);
-    } catch (error) { issueFailures.set(runId, { admission, error }); throw error; }
+    } catch (error) { issueFailedBeforeDispatch(admission, error); throw error; }
     const r: Capture = { channel, identity, originalRequest: JSON.parse(canonicalInvocationRequestJson(request)) as McpInvocationRequest, start: issued.start, privateHandle: issued.privateHandle,
       actualStart: undefined as unknown as Promise<InvocationStartResult>, unavailable: false };
     captures.set(runId, r); // BEFORE watching or dispatching; close can be synchronous.
+    let dispatchEntered = false;
     try {
       watch(channel);
       requireCurrent(r);
+      dispatchEntered = true; // A synchronous throw after this point can still have dispatched.
       r.transportStart = channel.dispatch("invoke.nativeStart", r.start);
       r.actualStart = r.transportStart.then(value => {
         requireCurrent(r);
@@ -152,7 +210,10 @@ export function createNativeGuiOwnerClient(ports: {
         if (!value || typeof value !== "object" || (value as { runId?: unknown }).runId !== r.start.binding.runId) fail("native_gui_start_ack_invalid");
         return value as InvocationStartResult;
       });
-    } catch (error) { r.actualStart = Promise.reject(error); }
+    } catch (error) {
+      if (!dispatchEntered) issueFailedBeforeDispatch(admission, error);
+      r.actualStart = Promise.reject(error);
+    }
     // Caller owns the error presentation; attaching a observer prevents a lost
     // IPC listener from creating unhandled rejection, without swallowing it.
     void r.actualStart.catch(() => {});
@@ -186,7 +247,7 @@ export function createNativeGuiOwnerClient(ports: {
   function textInputBinding(originalEvent: object, request: McpInvocationRequest, expectedRunId?: string) {
     const sender = ports.authorizeRenderer(originalEvent);
     if (!sender || thenable(sender)) fail("native_gui_original_renderer_required");
-    const matches = [...captures.values()].filter(r => r.start.binding.chatId === request.chatId && (!expectedRunId || r.start.binding.runId === expectedRunId));
+    const matches = [...captures.values()].filter(r => activeAuthority(r) && r.start.binding.chatId === request.chatId && (!expectedRunId || r.start.binding.runId === expectedRunId));
     if (matches.length !== 1) fail("native_gui_original_text_parent_required");
     const r = matches[0]; requireCurrent(r);
     // Text inherits only this already-issued invocation. A new reference or
@@ -212,7 +273,7 @@ export function createNativeGuiOwnerClient(ports: {
     const sender = ports.authorizeRenderer(originalEvent);
     if (!sender || thenable(sender)) fail("native_gui_original_renderer_required");
     const r = captures.get(runId);
-    if (!r || r.start.binding.chatId !== request.chatId || !r.originalRequest.oneMode) fail("native_gui_original_text_parent_required");
+    if (!r || !activeAuthority(r) || r.start.binding.chatId !== request.chatId || !r.originalRequest.oneMode) fail("native_gui_original_text_parent_required");
     requireCurrent(r);
     const expected = onePreflightSteerTemplate(r.originalRequest);
     expected.userPrompt = request.userPrompt; expected.runId = undefined;
@@ -229,10 +290,10 @@ export function createNativeGuiOwnerClient(ports: {
     return Object.freeze({ chatId: r.start.binding.chatId, runId, inputDigest: r.start.binding.inputDigest });
   }
   function capturedTextBinding(chatId: string, runId?: string) {
-    const records=[...captures.values()].filter(r=>r.start.binding.chatId===chatId&&(!runId||r.start.binding.runId===runId));
+    const records=[...captures.values()].filter(r=>activeAuthority(r)&&r.start.binding.chatId===chatId&&(!runId||r.start.binding.runId===runId));
     if(records.length!==1)fail("native_gui_original_text_parent_required");requireCurrent(records[0]);return Object.freeze({...records[0].start.binding});
   }
-  function capturedParent(chatId: string, runId: string): boolean { const r = captures.get(runId); return !!r && r.start.binding.chatId === chatId; }
+  function capturedParent(chatId: string, runId: string): boolean { const r = captures.get(runId); return !!r && activeAuthority(r) && r.start.binding.chatId === chatId; }
   function retire(runId: string): boolean {
     const r = captures.get(runId); if (!r) return false;
     const state = ports.router.inspect(r.privateHandle);
@@ -247,7 +308,9 @@ export function createNativeGuiOwnerClient(ports: {
       issuanceFailed: issueFailures.has(runId), unavailable: r ? r.unavailable || ports.getChannel() !== r.channel || nativeGuiChannelIdentity(r.channel) !== r.identity : false,
       cancellationRequested: !!r?.cancellation, preparation: r ? ports.router.inspect(r.privateHandle) : undefined }); },
     retainedChatIds(): string[] { return [...new Set([...captures.values()].map(r => r.start.binding.chatId))]; },
-    get retainedCount() { return captures.size + issueFailures.size; } });
+    closedAuthorityChatIds(): string[] { return [...new Set([...captures.values()].filter(r => !activeAuthority(r)).map(r => r.start.binding.chatId))]; },
+    activeAuthorityChatIds(): string[] { return [...new Set([...captures.values()].filter(activeAuthority).map(r => r.start.binding.chatId))]; },
+    get retainedCount() { return captures.size + issueFailures.size; }, get activeAuthorityCount() { return liveCapacity(); } });
   const channel = ports.getChannel(), identity = channel && nativeGuiChannelIdentity(channel);
   if (channel && identity) ownerBootstraps.set(owner, { channel, identity, callbacks: ports.callbackAdapter });
   return owner;

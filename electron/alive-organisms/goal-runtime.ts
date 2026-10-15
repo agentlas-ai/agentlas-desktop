@@ -52,7 +52,8 @@ export class GoalAliveRuntime implements AliveRuntimePort {
     let decisionBinding: AliveDecisionBinding | undefined;
     try { decisionBinding = this.deps.bindDecision?.(input); }
     catch { return { accepted: false, reasonCode: "alive-decision-binding-unavailable" }; }
-    this.store.event(input.agentId, ALIVE_WAKE_RUNTIME_EVENT, { wakeId: input.wakeId, ...resolved.record,
+    this.store.event(input.agentId, ALIVE_WAKE_RUNTIME_EVENT, { wakeId: input.wakeId, ...resolved.record, source: resolved.selection.source ?? null,
+      ...(resolved.selection.kind === "acp" ? { acpAgentId: resolved.selection.acpAgentId } : {}),
       processStartedAtMs: this.deps.processStartedAtMs }, this.deps.now());
     const started = this.deps.light.start({ wakeId: input.wakeId, agentId: input.agentId, status: resolved.status,
       selection: resolved.selection, systemPrompt: ALIVE_GOAL_CONTROLLER_PROMPT, userPrompt, schema: ALIVE_GOAL_DECISION_OUTPUT_SCHEMA,

@@ -17,9 +17,7 @@ export function permissionEscalationContinuationRequest(input: {
   oneMode: boolean;
   locale: "ko" | "en";
 }): McpInvocationRequest {
-  const userPrompt = input.locale === "ko"
-    ? "전체 액세스가 승인되었다. 방금 권한이 없어 멈춘 작업을 이어서 완료하라."
-    : "Full access has been approved. Continue and finish the work that was blocked by the read-only permission.";
+  const userPrompt = "full access: approved. Finish the work the read-only permission blocked.";
   return {
     runId: input.runId,
     chatId: input.chatId,

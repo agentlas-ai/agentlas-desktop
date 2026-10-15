@@ -136,8 +136,13 @@ export const TOOLCHAIN_CONSUMER_PROTOCOL =
  */
 export function automationProtocolFor(oneTeamAttached: boolean, toolchainConsumer: boolean): string {
   if (oneTeamAttached && !toolchainConsumer) return ONE_GRAPH_PROTOCOL;
-  return oneTeamAttached ? `${TOOLCHAIN_CONSUMER_PROTOCOL}\n\n${AUTOMATION_PROTOCOL}` : AUTOMATION_PROTOCOL;
+  return oneTeamAttached ? `${TOOLCHAIN_CONSUMER_PROTOCOL}\n${AUTOMATION_PROTOCOL_POINTER}` : AUTOMATION_PROTOCOL_POINTER;
 }
+
+/** The only automation text a turn carries without One's graph tools: the full AUTOMATION_PROTOCOL is read on demand
+ * through the agentlas-ui `read_automation_protocol` tool (ui-schema/mcp-server.ts). */
+export const AUTOMATION_PROTOCOL_POINTER =
+  "automation: call read_automation_protocol, then emit its ## Automation block";
 
 // Fallback for runtimes without the native host authoring tool.
 export const AUTOMATION_PROTOCOL = [

@@ -10,11 +10,7 @@ import {
   tryRecordRunEvent,
 } from "./store/run-events";
 import { insertMemoryEntry } from "./memory/store";
-import {
-  autoIntakeCuratedMemory,
-  findExperienceCandidateBySourceMemory,
-  promoteExperienceCandidateFromRunReceipt,
-} from "./experience/store";
+import { autoIntakeCuratedMemory } from "./experience/store";
 import { getAgentById } from "./mcp/registry";
 import { appendChatMessage } from "./store/chats";
 import { getOrCreateAutomationSession } from "./store/automation-sessions";
@@ -40,7 +36,6 @@ export interface AutomationRecoveryReceipt {
   signature: string;
   recoveryCount: number;
   memoryId: string | null;
-  experiencePromoted: boolean;
   evolutionApplied: boolean;
   evolutionProposalId: string | null;
 }
@@ -108,7 +103,6 @@ export function recordAutomationRecovery(input: AutomationRecoveryInput): Automa
   }
 
   let memoryId: string | null = null;
-  let experiencePromoted = false;
   if (input.automation.targetType === "agent") {
     const agentId = input.automation.targetId;
     try {
@@ -151,11 +145,6 @@ export function recordAutomationRecovery(input: AutomationRecoveryInput): Automa
           taskHint: input.automation.promptTemplate?.slice(0, 400) ?? input.automation.name,
           runId: input.runId,
         });
-        const candidate = findExperienceCandidateBySourceMemory(agentId, memoryId);
-        if (candidate && candidate.status === "candidate") {
-          promoteExperienceCandidateFromRunReceipt({ candidateId: candidate.id, runId: input.runId });
-          experiencePromoted = true;
-        }
       } catch (error) {
         console.warn("[automation-recovery] experience outcome promotion deferred:", error);
       }
@@ -173,17 +162,12 @@ export function recordAutomationRecovery(input: AutomationRecoveryInput): Automa
           "🔀 전환된 전략이 선언되지 않아 이번 런 기록을 근거로 남깁니다.",
           "🔀 No switched strategy was declared, so this is recorded based on this run's record.",
         ),
-    experiencePromoted
-      ? L(
-          "🧠 이 경험을 자동으로 기억했습니다(성공 영수증 기반 자동 승격).",
-          "🧠 This experience was remembered automatically (auto-promoted from the success receipt).",
-        )
-      : memoryId
-        ? L("🧠 이 경험을 에이전트 메모리에 기록했습니다.", "🧠 This experience was recorded in agent memory.")
-        : L(
-            "🧠 대상이 단일 에이전트가 아니어서 실행 기록으로만 남깁니다.",
-            "🧠 The target is not a single agent, so this is kept only as a run record.",
-          ),
+    memoryId
+      ? L("🧠 이 경험을 에이전트 메모리에 기록했습니다.", "🧠 This experience was recorded in agent memory.")
+      : L(
+          "🧠 대상이 단일 에이전트가 아니어서 실행 기록으로만 남깁니다.",
+          "🧠 The target is not a single agent, so this is kept only as a run record.",
+        ),
   ];
   appendAutomationChatMessage(input.automation, lines.join("\n"));
 
@@ -191,7 +175,6 @@ export function recordAutomationRecovery(input: AutomationRecoveryInput): Automa
     signature,
     recoveryCount,
     memoryId,
-    experiencePromoted,
     // Only One may author a semantic prompt change. This recorder preserves
     // evidence and memory; it never fabricates an evolution proposal.
     evolutionApplied: false,

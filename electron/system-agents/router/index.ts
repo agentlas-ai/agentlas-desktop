@@ -14,31 +14,26 @@ export const ROUTER_AGENT_ID = "agentlas-router-agent";
  *  escalation directive is present. */
 export const ROUTER_CORE = [
   "## Router Agent",
-  "You resolve a routing request the deterministic router could not confidently route. Using the user's request plus the supplied candidates/hub_candidates, do EXACTLY ONE of: route to the best-fit agent, ask ONE sharp clarification, or propose building a new agent via hep-build.",
-  "First infer the user's real intent and rewrite a vague request into a routable form. Rank by intent fit, not keyword overlap — a clearly-matching specialist beats a generalist. Prefer a confident route when one candidate fits; clarify only when two or more candidates plausibly fit and the choice changes the outcome.",
-  "Run the chosen agent attached to the current project. Never improvise the task yourself, never call cloud agents context-less, and never invent agent ids/slugs outside the candidate list. Output the decision with a one-line rationale.",
-  "Safety: do not route a request that violates policy — surface the refusal reason instead.",
+  "role: resolve a routing request the deterministic router could not route",
+  "decide: exactly one of route to best-fit agent | ask ONE clarification | propose new agent via hep-build",
+  "rank: inferred intent fit, not keyword overlap; specialist > generalist; clarify only when 2+ candidates fit and the choice changes the outcome",
+  "run: chosen agent attached to the current project; ids/slugs only from the candidate list; never do the task yourself",
+  "output: decision + one-line rationale; policy violation → refusal reason",
 ].join("\n");
 
 /** On-demand: how to re-rank candidates by intent fit. Loaded on escalation turns. */
 export const ROUTER_RERANK_MODULE: OnDemandModule = {
   id: "router-rerank",
   title: "Candidate rerank heuristics",
-  keywords: [
-    "rerank", "candidate", "route", "routing", "ambiguous", "fit", "select", "choose",
-    "후보", "재정렬", "라우팅", "모호", "선택", "에이전트 선택", "적합",
-  ],
-  description:
-    "Re-rank routing candidates by inferred intent fit: weigh capability/trigger coverage over name overlap, demote off-domain and over-broad agents, honor anti-triggers, and break near-ties toward the more specific agent.",
+  description: "Re-rank routing candidates by inferred intent fit.",
   load: () =>
     [
-      "### Rerank heuristics",
-      "- Score each candidate on how well its capabilities/triggers cover the *inferred* intent, not the literal query words.",
-      "- A specialist whose scope matches wins over a broad generalist, even at a lower raw score.",
-      "- Demote candidates from a different domain than the request, and agents with very broad capability lists (likely catch-alls).",
-      "- Honor anti-triggers: if the request matches a candidate's anti-trigger, drop it.",
-      "- Near-tie (top two within ~15%): pick the more specific agent; if still tied, ask one clarification naming the two.",
-      "- Hub candidates are borrowable: prefer a comparable local installed match; otherwise borrow the best-fit hub agent and run it grounded in the project.",
+      "### Rerank",
+      "score: capability/trigger coverage of inferred intent, not query words",
+      "demote: other domain, catch-all capability lists",
+      "anti-trigger match → drop",
+      "near-tie (top two within ~15%): more specific agent; still tied → ask one clarification naming both",
+      "hub candidates: prefer comparable local match, else borrow best-fit hub agent grounded in the project",
     ].join("\n"),
 };
 
@@ -46,16 +41,13 @@ export const ROUTER_RERANK_MODULE: OnDemandModule = {
 export const ROUTER_CLARIFY_MODULE: OnDemandModule = {
   id: "router-clarify",
   title: "Clarification authoring",
-  keywords: ["clarify", "question", "ambiguous", "ask", "intent", "되물음", "질문", "모호", "의도"],
-  description:
-    "Write the single clarification question for genuinely ambiguous routing: name the concrete fork that decides the route and offer the strongest candidates.",
+  description: "Write the single clarification question for ambiguous routing.",
   load: () =>
     [
-      "### Clarification authoring",
-      "- Ask EXACTLY ONE question, naming the concrete fork that decides the route (outcome, domain, or run-existing vs build-new).",
-      "- Offer the 2–3 strongest candidates by name so the user can pick directly.",
-      "- Never ask a generic 'what do you want?' — anchor on what the candidates actually differ on.",
-      "- Match the user's language (ko/en).",
+      "### Clarify",
+      "ask: exactly one question naming the fork (outcome | domain | run-existing vs build-new)",
+      "options: 2-3 strongest candidates by name",
+      "language: user's",
     ].join("\n"),
 };
 

@@ -15,6 +15,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { detachedSpawnOpts, killCliTree, trackRunChild } from "../runtime/exec";
+import { findExecutableSync } from "../runtime/path-lookup";
 
 export type DocumentPdfEngine = "tectonic" | "chromium";
 
@@ -48,16 +49,8 @@ export interface DocumentPdfInput {
 const TOOL_DIRS = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", path.join(os.homedir(), ".local/bin")];
 
 function resolveTool(name: string): string | null {
-  const fromPath = (process.env.PATH || "").split(":").filter(Boolean).map((dir) => path.join(dir, name));
-  for (const candidate of [...TOOL_DIRS.map((dir) => path.join(dir, name)), ...fromPath]) {
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK);
-      return candidate;
-    } catch {
-      /* keep looking */
-    }
-  }
-  return null;
+  // Platform PATH delimiter and Windows PATHEXT (NH31): a POSIX ":" split read every Windows CLI as absent.
+  return findExecutableSync(name, TOOL_DIRS.map((dir) => path.join(dir, name)));
 }
 
 function run(bin: string, args: string[], cwd: string, timeoutMs: number): Promise<{ code: number; stderr: string }> {

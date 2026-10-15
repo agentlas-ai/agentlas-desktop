@@ -56,7 +56,8 @@ export function looksSecret(content: string): boolean {
 /** Replace credential-shaped substrings with a marker, preserving the surrounding text.
  *  Use where dropping the whole payload would lose more than it protects. */
 export function redactSecrets(content: string, marker = "[redacted-secret]"): string {
-  let out = content;
+  // Redacting only the header leaves the multiline key material visible.
+  let out = content.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/gi, marker);
   for (const re of SECRET_PATTERNS) {
     out = out.replace(new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`), marker);
   }

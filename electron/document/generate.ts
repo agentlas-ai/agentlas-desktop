@@ -9,6 +9,7 @@ import path from "node:path";
 import { detachedSpawnOpts, killCliTree, trackRunChild, writeStdin } from "../runtime/exec";
 import { withAgyProductHome } from "../runtime/antigravity-personal-context";
 import { withCodexProductHome } from "../runtime/codex-product-home";
+import { findExecutableSync } from "../runtime/path-lookup";
 
 export type DocumentMode = "report" | "paper" | "brief";
 export type ReviseAction = "expand" | "rewrite" | "shorten" | "improve" | "formal" | "casual";
@@ -36,16 +37,8 @@ export interface DocumentContentResult {
 }
 
 function resolveBin(name: string, extra: string[]): string | null {
-  const fromPath = (process.env.PATH || "").split(":").filter(Boolean).map((d) => path.join(d, name));
-  for (const c of [...extra, ...fromPath]) {
-    try {
-      fs.accessSync(c, fs.constants.X_OK);
-      return c;
-    } catch {
-      /* keep looking */
-    }
-  }
-  return null;
+  // Platform PATH delimiter and Windows PATHEXT (NH31): a POSIX ":" split read every Windows CLI as absent.
+  return findExecutableSync(name, extra);
 }
 
 const AGY_PATHS = [path.join(os.homedir(), ".local/bin/agy"), "/opt/homebrew/bin/agy", "/usr/local/bin/agy"];

@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import { createHash, randomUUID } from "node:crypto";
+import { observeProductSource, readOriginalMemorySource, type MemorySourceRef } from "../memory/source-catalogue";
 
 /** Host-authored actor identity. Invocation, workspace and effect authority are
  * deliberately absent: a context journal never authorizes a tool operation. */
@@ -24,7 +25,7 @@ export interface AgentContextEvent {
   producerBinding?: string;
 }
 export interface AgentContextEntry extends AgentContextEvent { seq: number; digest: string }
-export interface AgentContextSnapshot { contextKey: string; revision: number; throughSeq: number; entries: AgentContextEntry[] }
+export interface AgentContextSnapshot { contextKey: string; revision: number; throughSeq: number; entries: AgentContextEntry[]; sourceRef?: MemorySourceRef }
 export interface AgentContextDelivery {
   contextKey: string;
   deliveryId: string;
@@ -114,6 +115,14 @@ export function createAgentContextStore(getDb: () => Database.Database) {
     if (row && agentContextKey(JSON.parse(row.identity_json) as AgentContextIdentity) !== key) fail("agent_context_identity_collision");
     return row;
   }
+  function observe(identity: AgentContextIdentity, row: Head | undefined, adoptAddress = false): MemorySourceRef | null {
+    if (!row) return null;
+    return observeProductSource(getDb(), { actorId: identity.agentId, visibilityDomain: identity.visibilityDomain,
+      logicalKey: JSON.stringify([identity.ownerScope, identity.agentId, identity.visibilityDomain]), sourceKind: "agent-journal",
+      readerContract: "desktop.agent-context.v1", writerContract: "desktop.agent-context-store",
+      schemaVersion: "agentlas.agent-context.v1", sourceRevision: String(row.revision),
+      address: { path: getDb().name, contextKey: row.context_key }, rangeUnit: "seq", rangeEnd: row.through_seq, adoptAddress });
+  }
   function entries(key: string, after = 0, through = Number.MAX_SAFE_INTEGER): AgentContextEntry[] {
     return (getDb().prepare("SELECT * FROM agent_context_entries WHERE context_key=? AND seq>? AND seq<=? ORDER BY seq")
       .all(key, after, through) as Array<{ seq: number; event_id: string; kind: AgentContextEventKind; payload_json: string; digest: string; producer_binding: string | null }>).map(row => ({
@@ -130,7 +139,7 @@ export function createAgentContextStore(getDb: () => Database.Database) {
    */
   function adoptPriorHead(identity: AgentContextIdentity): boolean {
     const key = agentContextKey(identity), db = getDb();
-    return db.transaction(() => {
+    const adopted = db.transaction(() => {
       if (db.prepare("SELECT 1 FROM agent_context_heads WHERE context_key=?").get(key)) return false;
       const prior = db.prepare(`SELECT * FROM agent_context_heads
         WHERE json_extract(identity_json,'$.ownerScope')=? AND json_extract(identity_json,'$.agentId')=?
@@ -145,15 +154,30 @@ export function createAgentContextStore(getDb: () => Database.Database) {
       db.prepare("DELETE FROM agent_context_heads WHERE context_key=?").run(prior.context_key);
       return true;
     }).immediate();
+    if (adopted) observe(identity, head(identity, false), true);
+    return adopted;
   }
   function readRange(identity: AgentContextIdentity, range: {after?:number;through?:number} = {}): AgentContextSnapshot {
     const after=range.after??0,through=range.through??Number.MAX_SAFE_INTEGER;
     if(!Number.isSafeInteger(after)||after<0||!Number.isSafeInteger(through)||through<after)fail("agent_context_read_range_invalid");
-    return getDb().transaction(()=>{
+    const result = getDb().transaction(()=>{
       const row = head(identity, false), contextKey = agentContextKey(identity);
       return { contextKey, revision: row?.revision ?? 0, throughSeq: row?.through_seq ?? 0,
         entries: row ? entries(contextKey,after,Math.min(through,row.through_seq)) : [] };
     }).deferred();
+    const sourceRef = observe(identity, head(identity, false));
+    return { ...result, ...(sourceRef ? { sourceRef } : {}) };
+  }
+  function readSource(identity: AgentContextIdentity, ref: MemorySourceRef, after: number, through: number, assertCurrent: () => void): AgentContextEntry[] {
+    const bytes = readOriginalMemorySource(ref, { actorId: identity.agentId, visibilityDomain: identity.visibilityDomain,
+      readerContract: "desktop.agent-context.v1" }, { start: after, end: through }, (source, from, to) => {
+      const address = JSON.parse(source.address_json) as { path?: string; contextKey?: string };
+      if (address.path !== getDb().name || address.contextKey !== agentContextKey(identity)) fail("memory_source_changed");
+      const snapshot = readRange(identity, { after: from, through: to });
+      if (String(snapshot.revision) !== source.source_revision) fail("memory_source_changed");
+      return Buffer.from(JSON.stringify(snapshot.entries), "utf8");
+    }, assertCurrent);
+    return JSON.parse(bytes.toString("utf8")) as AgentContextEntry[];
   }
   function read(identity: AgentContextIdentity): AgentContextSnapshot { return readRange(identity); }
   function readHead(identity: AgentContextIdentity): Omit<AgentContextSnapshot,"entries"> {
@@ -168,7 +192,7 @@ export function createAgentContextStore(getDb: () => Database.Database) {
   function append(identity: AgentContextIdentity, event: AgentContextEvent, expectedRevision?: number): AgentContextEntry {
     nonempty(event.eventId); if (!kinds.has(event.kind)) fail("agent_context_event_invalid");
     const payload = encodePayload(event.payload), digest = hash([event.kind, payload, event.producerBinding ?? ""]), db = getDb();
-    return db.transaction(() => {
+    const result = db.transaction(() => {
       const row = head(identity, true)!;
       const previous = db.prepare("SELECT seq,digest FROM agent_context_entries WHERE context_key=? AND event_id=?").get(row.context_key, event.eventId) as { seq: number; digest: string } | undefined;
       if (previous) {
@@ -183,6 +207,8 @@ export function createAgentContextStore(getDb: () => Database.Database) {
         .run(seq, new Date().toISOString(), row.context_key, row.revision);
       return { ...event, payload: JSON.parse(payload) as Record<string, unknown>, seq, digest };
     }).immediate();
+    observe(identity, head(identity, false));
+    return result;
   }
   function beginDelivery(identity: AgentContextIdentity, provider: AgentContextProvider, options: { turnId: string; expectedRevision?: number }): AgentContextDelivery {
     nonempty(options.turnId); const bindingKey = agentContextProviderKey(provider), db = getDb();
@@ -289,5 +315,5 @@ export function createAgentContextStore(getDb: () => Database.Database) {
         .run(key,binding,expectedGeneration).changes!==1)fail("agent_context_generation_changed");
     }).immediate();
   }
-  return {adoptPriorHead,read,readRange,readHead,acknowledgedStableBlockHashes,append,beginDelivery,readPendingDelivery,readOpenPendingDelivery,acknowledgeDelivery,markDeliveryUncertain,invalidateProvider};
+  return {adoptPriorHead,read,readRange,readSource,readHead,acknowledgedStableBlockHashes,append,beginDelivery,readPendingDelivery,readOpenPendingDelivery,acknowledgeDelivery,markDeliveryUncertain,invalidateProvider};
 }

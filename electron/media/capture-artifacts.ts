@@ -10,6 +10,8 @@
 // 이 모듈이 그 정본의 단일 홈이다: ~/.agentlas/captures/{screen,browser}.
 // agentlas://localfile 의 허용 루트(fs/access.ts)에 이 루트가 포함되어
 // One·Work 두 채팅 표면 모두 같은 절대경로로 렌더할 수 있다.
+// 정본은 자동으로 지우지 않는다(오너 D13 영구 보관, docs native-harness 21 G6): 예전의 300개 상한 삭제는
+// 대화에 붙은 옛 캡처를 빈 상자로 만들었다.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -30,10 +32,6 @@ export function browserCaptureDir(): string {
   return path.join(captureArtifactsRoot(), "browser");
 }
 
-/** 브라우저 MCP --output-max-size 값(바이트) — playwright 가 스스로 오래된 파일을 비운다. */
-export const BROWSER_CAPTURE_MAX_BYTES = 256 * 1024 * 1024;
-
-const MAX_CAPTURE_FILES = 300;
 const DATA_URL_RE = /^data:image\/(png|jpeg);base64,([A-Za-z0-9+/=]+)$/;
 
 /**
@@ -51,7 +49,6 @@ export function saveScreenCaptureArtifact(dataUrl: string | null | undefined): s
     const ext = match[1] === "png" ? ".png" : ".jpg";
     const filePath = path.join(dir, `screen-${stamp}-${randomUUID().slice(0, 8)}${ext}`);
     fs.writeFileSync(filePath, Buffer.from(match[2], "base64"), { mode: 0o600 });
-    pruneCaptureDir(dir);
     return filePath;
   } catch {
     return null;
@@ -80,37 +77,8 @@ export function saveBrowserCaptureArtifact(
     const ext = mediaType === "image/png" ? ".png" : ".jpg";
     const filePath = path.join(dir, `browser-${stamp}-${randomUUID().slice(0, 8)}${ext}`);
     fs.writeFileSync(filePath, Buffer.from(base64Data, "base64"), { mode: 0o600 });
-    pruneCaptureDir(dir);
     return filePath;
   } catch {
     return null;
-  }
-}
-
-/** 파일 수 상한으로 무한 성장 방지 — 가장 오래된 것부터 지운다(정리 실패는 무해). */
-function pruneCaptureDir(dir: string): void {
-  try {
-    const entries = fs
-      .readdirSync(dir)
-      .filter((name) => /\.(png|jpg)$/.test(name))
-      .map((name) => {
-        const full = path.join(dir, name);
-        try {
-          return { full, mtimeMs: fs.statSync(full).mtimeMs };
-        } catch {
-          return null;
-        }
-      })
-      .filter((entry): entry is { full: string; mtimeMs: number } => entry !== null)
-      .sort((a, b) => b.mtimeMs - a.mtimeMs);
-    for (const entry of entries.slice(MAX_CAPTURE_FILES)) {
-      try {
-        fs.rmSync(entry.full, { force: true });
-      } catch {
-        // 남은 파일은 다음 저장 때 다시 시도된다.
-      }
-    }
-  } catch {
-    // 폴더가 없거나 읽기 실패 — 저장 경로가 이미 성공했으므로 무시.
   }
 }

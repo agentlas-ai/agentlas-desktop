@@ -569,7 +569,9 @@ if (!run(process.execPath, [withdrawnGate], { cwd: root })) {
 }
 
 // 오너 규칙: 답할 수 없는 것은 보여주지 않는다.
-const unanswerableGate = releaseVerificationFile("verify-unanswerable-questions-hidden.mjs");
+// The ask contract moved into one prompt-modules line (2026-10-14), so this gate is the hash-bound private copy that the
+// release workflow installs from the pinned private verification manifest (scripts/), not the immutable predecessor.
+const unanswerableGate = join(root, "scripts", "verify-unanswerable-questions-hidden.mjs");
 if (!existsSync(unanswerableGate)) {
   fail("unanswerable-questions gate is missing — a release must not proceed without it");
 }

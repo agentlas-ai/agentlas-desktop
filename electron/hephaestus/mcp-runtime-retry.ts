@@ -5,6 +5,8 @@ import {
   type RunnerRequest,
   type RunnerResult,
 } from "../runtime/runner";
+import type { DeclaredPromptPart } from "../runtime/prompt-order";
+import { composeTracedPrompt, restoreTracedPrompt } from "../runtime/prompt-composition-trace";
 import type { ResolvedMcpBuildAttachment } from "../mcp-tools/attachment-resolver";
 import { containsMcpStartupTransportFatal } from "../runtime/mcp-startup-fatal";
 
@@ -20,6 +22,7 @@ export interface BuildRunnerWithMcpRecoveryResult {
   result: RunnerResult;
   attachment: ResolvedMcpBuildAttachment | undefined;
   retryReceipt: BuildMcpRuntimeRetryReceipt | null;
+  prompt: Pick<RunnerRequest, "systemPrompt" | "systemPromptComposition">;
 }
 
 function fatalMcpSegments(message: string): string[] {
@@ -98,8 +101,9 @@ export async function runBuildRunnerWithMcpRecovery(input: {
   };
 
   try {
-    const result = await input.runner(input.makeRequest(input.attachment), trackedEvents);
-    return { result, attachment: input.attachment, retryReceipt: null };
+    const initialRequest = input.makeRequest(input.attachment);
+    const result = await input.runner(initialRequest, trackedEvents);
+    return { result, attachment: input.attachment, retryReceipt: null, prompt: { systemPrompt: initialRequest.systemPrompt, systemPromptComposition: initialRequest.systemPromptComposition } };
   } catch (error) {
     if (input.signal.aborted || executionObserved) throw error;
     const failedCandidateId = classifySingleMcpRuntimeFatal(error, input.attachment);
@@ -129,26 +133,37 @@ export async function runBuildRunnerWithMcpRecovery(input: {
     input.onRetry?.(retryReceipt);
     const retryRequest = input.makeRequest(recovered);
     const capability = failed.capability.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 80) || "unknown";
-    const degradedGuard = replacement
-      ? [
-          "",
-          "## Main-authoritative MCP degraded server guard",
-          "One failed MCP server was removed. Use only the attached approved same-capability fallback and other attached MCPs.",
-          "Do not claim that the removed server itself completed any action.",
-        ].join("\n")
-      : [
-          "",
-          "## Main-authoritative MCP degraded capability guard",
-          `Unavailable capability: ${capability}.`,
-          "The failed MCP was removed before this retry. Do not call it, simulate its external side effect, or claim that side effect completed.",
-          "Continue only unaffected work. Mark any output that depends on this capability as unavailable.",
-          recovered.receipt.emptyMode
-            ? "No MCP is attached in this retry; all MCP-dependent side effects are unavailable."
-            : "Other attached MCP capabilities remain available.",
-        ].join("\n");
-    if (retryRequest.systemPrompt.length + degradedGuard.length > MAX_BUILD_SYSTEM_PROMPT_CHARS) throw error;
-    retryRequest.systemPrompt += degradedGuard;
+    // The original provider has not started work. Only the verified host parts
+    // are recomposed; no permission, attachment or retry eligibility is minted here.
+    if (!retryRequest.systemPromptComposition) throw error;
+    let sourceParts: readonly DeclaredPromptPart[];
+    try { sourceParts = restoreTracedPrompt(retryRequest.systemPrompt, retryRequest.systemPromptComposition); }
+    catch { throw error; }
+    const degradedParts: DeclaredPromptPart[] = replacement ? [{
+      id: "build.mcp-degraded.replacement-policy", revision: 1, stability: "fixed-policy",
+      changeTriggers: ["release", "tool-grant", "validation-result"],
+      text: "## Main-authoritative MCP degraded server guard\nremoved: one failed MCP server; use only the attached same-capability fallback and other attached MCPs; never claim the removed server completed an action",
+    }] : [{
+      id: "build.mcp-degraded.unavailable-policy", revision: 1, stability: "fixed-policy",
+      changeTriggers: ["release", "tool-grant", "validation-result"],
+      text: "## Main-authoritative MCP degraded capability guard\ncontinue: unaffected work only; mark dependent output unavailable",
+    }, {
+      id: "build.mcp-degraded.inventory", revision: 1, stability: "configuration",
+      changeTriggers: ["connector-inventory", "tool-grant", "validation-result"],
+      text: recovered.receipt.emptyMode
+        ? "mcp: none attached; all MCP-dependent side effects unavailable"
+        : "mcp: other attached capabilities remain available",
+    }, {
+      id: "build.mcp-degraded.capability", revision: 1, stability: "turn-context",
+      changeTriggers: ["tool-grant", "validation-result"],
+      text: `unavailable capability: ${capability} (removed before retry; do not call it, simulate its side effect, or claim it completed)`,
+    }];
+    const retryComposition = composeTracedPrompt([...sourceParts, ...degradedParts]);
+    const retryPrompt = retryComposition.text;
+    if (retryPrompt.length > MAX_BUILD_SYSTEM_PROMPT_CHARS) throw error;
+    retryRequest.systemPromptComposition = retryComposition.composition;
+    retryRequest.systemPrompt = retryPrompt;
     const result = await input.runner(retryRequest, input.events);
-    return { result, attachment: recovered, retryReceipt };
+    return { result, attachment: recovered, retryReceipt, prompt: { systemPrompt: retryRequest.systemPrompt, systemPromptComposition: retryRequest.systemPromptComposition } };
   }
 }

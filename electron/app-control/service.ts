@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import type { BrowserWindow } from "electron";
 import { APP_CONTROL_CATALOG, type AppControlCatalogEntry, type AppControlInvokeArg } from "./catalog.generated";
 import { AppControlError, appControlDomainHandlerRegistered, appControlHandlerRegistered, appControlInteractionWindowAvailable, invokeAppControlIpc } from "./ipc-registry";
 import { appControlEffectNeedsOwnerTurn, appControlPolicy, type AppControlEffect } from "./policy";
 import { APP_CONTROL_ARGUMENT_SCHEMAS, APP_UI_PREFERENCE_VALUE_SCHEMAS } from "./argument-schemas.generated";
+import { describeCatalogOperation, describeHostOperation, type OperationDescriptor } from "./operation-descriptors";
 import type { AppControlRendererOperation, AppControlRendererReply } from "../../shared/app-control";
 import { appUiPreferenceDefinitions, isAppUiPreferenceName, normalizeAppUiPreference } from "../../shared/app-ui-preferences";
 import { decodeAppControlArguments } from "./argument-codec";
@@ -91,6 +93,52 @@ const HOST_ARGUMENT_SCHEMAS: Record<string, Record<string, unknown>> = {
   "app.setMediaDisplay": objectSchema({ kind: { type: "string", enum: ["image", "video", "audio"] }, visible: { type: "boolean" } }, ["kind", "visible"]),
 };
 
+// Read-only descriptor facts (native-harness S1, notyet NH19). Added beside the existing fields; nothing here is consulted
+// when a call is authorized. The output schema rides only on an exact lookup, like input_schema: a search result list
+// stays small for the model.
+// The canonical output schema describes handler data. app.call preserves that data only when JSON fits;
+// its existing fulfilled reply may instead contain a clipped preview or the legacy serialization fallback.
+// Keep the wire unchanged and describe it separately. Window operations already return their flat ACK.
+function appCallReplySchema(operation: Operation, descriptor: OperationDescriptor): Record<string, unknown> {
+  if (!operation.entry) return descriptor.outputSchema;
+  const { $defs, ...handlerOutput } = descriptor.outputSchema;
+  const properties = {
+    ok: { type: "boolean" }, operation: { const: operation.path }, effect: { const: operation.effect },
+    code: { type: "string" }, receipt_id: { type: "string" }, receipt_recorded: { type: "boolean" },
+  };
+  const reply = (result: Record<string, unknown>, truncated: boolean) => ({
+    type: "object", properties: { ...properties, result, ...(truncated ? { truncated: { const: true } } : {}) },
+    required: ["ok", "operation", "effect", "result", ...(truncated ? ["truncated"] : [])], additionalProperties: false,
+  });
+  return {
+    ...($defs ? { $defs } : {}),
+    anyOf: [
+      reply({ anyOf: [handlerOutput, { type: "null" }] }, false),
+      reply({ type: "string", maxLength: RESULT_LIMIT + 1 }, true),
+      // clipResult's JSON serialization failure has always returned a string without a truncated flag.
+      reply({ type: "string", maxLength: RESULT_LIMIT }, false),
+    ],
+  };
+}
+
+function operationDescriptorView(operation: Operation, detailed: boolean): Record<string, unknown> {
+  const descriptor: OperationDescriptor = operation.entry ? describeCatalogOperation(operation.entry)
+    : describeHostOperation({ path: operation.path, effect: operation.effect, inputSchema: HOST_ARGUMENT_SCHEMAS[operation.path] });
+  return { semantics_version: descriptor.semanticsVersion, kind: descriptor.kind, kind_basis: descriptor.kindBasis,
+    ...(descriptor.kindReason ? { kind_reason: descriptor.kindReason } : {}), policy_ref: descriptor.policyRef,
+    idempotency: descriptor.idempotency, ...(descriptor.idempotencyField ? { idempotency_field: descriptor.idempotencyField } : {}),
+    cancellation: descriptor.cancellation, ...(descriptor.job ? { job: descriptor.job } : {}), ...(descriptor.events.length ? { events: descriptor.events } : {}),
+    required_host_ports: descriptor.requiredHostPorts, headless: descriptor.execution.headless, receipt: descriptor.receipt.kind,
+    output_basis: descriptor.outputBasis, ...(descriptor.untypedReason ? { untyped_reason: descriptor.untypedReason } : {}),
+    ...(descriptor.bridgeAgreement === "mismatch" ? { bridge_agreement: "mismatch" } : {}),
+    ...(detailed ? { output_schema: descriptor.outputSchema,
+      output_schema_scope: operation.entry ? "handler-result" : "call-reply",
+      call_reply_scope: "app-control-service-fulfilled-reply",
+      call_reply_schema: appCallReplySchema(operation, descriptor),
+    } : {}),
+    ...(descriptor.aliases.length ? { aliases: descriptor.aliases } : {}), ui_only: descriptor.flags.uiOnly };
+}
+
 function scienceInstalled(): boolean {
   try { return host?.scienceInstalled() ?? false; } catch { return false; }
 }
@@ -111,33 +159,18 @@ function operations(): Operation[] {
 const words = (value: string) => value
   .replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9가-힣]+/).filter(Boolean);
 
-// The owner asks in Korean; operation names and most docs are English. Common product words map across.
-const KOREAN_TERMS: Array<[RegExp, string[]]> = [
-  [/알림|알람/, ["alert", "notification"]], [/소리|사운드/, ["sound"]], [/설정|환경/, ["settings", "config", "set"]],
-  [/자동화|워크플로/, ["automation", "automations"]], [/프로젝트/, ["project", "projects"]], [/언어|한국어|영어/, ["language", "locale"]],
-  [/기억|메모리/, ["memory"]], [/모델/, ["model", "models"]], [/에이전트|직원|팀원/, ["agent", "agents"]], [/팀/, ["team"]],
-  [/메일|이메일/, ["mail"]], [/업데이트/, ["updater", "update"]], [/사이언스|연구/, ["science", "research"]], [/대화|채팅/, ["chat", "chats"]],
-  [/목표|골/, ["goal"]], [/동시|병렬/, ["concurrency"]], [/텔레그램/, ["telegram"]], [/모바일|폰|휴대폰/, ["mobile"]],
-  [/브라우저/, ["browser"]], [/일정|스케줄|예약/, ["schedule"]], [/토큰|한도/, ["token", "limit"]], [/사용량|요금|비용/, ["usage"]],
-  [/인터뷰|질문/, ["interview"]], [/드리밍|꿈/, ["dreaming"]], [/도구|툴/, ["tool", "tools", "mcp"]], [/플러그인/, ["plugin"]],
-  [/사이트|웹사이트/, ["site"]], [/문서|pdf/i, ["document"]], [/이미지|그림/, ["image"]], [/동영상|비디오|영상/, ["video"]],
-  [/로컬/, ["local"]], [/화면|이동|열어/, ["navigate"]], [/켜|끄|꺼|활성|비활성/, ["enabled", "toggle", "set"]],
-  [/패널|사이드바|폭|너비|접기|펼치|표시/, ["sidebar", "layout", "preference", "display", "width"]],
-  [/원고|논문/, ["manuscript"]], [/데이터/, ["data", "datasets"]], [/런타임|엔진/, ["runtime"]], [/키체인|백그라운드|데몬/, ["daemon"]],
-  // Verbs.
-  [/삭제|지워|지우|제거/, ["remove", "delete"]], [/만들|생성|추가/, ["create", "add"]], [/목록|개수|몇/, ["list"]],
-  [/바꿔|바꾸|변경|수정/, ["set", "update"]], [/실행|돌려/, ["run"]], [/멈춰|중지|정지/, ["stop", "pause"]], [/확인|조회|상태/, ["get", "status"]],
-];
+// Search is deterministic over the operation's own words (path, doc, signature, keywords). No translation table:
+// the model writes the query in English (owner rule 2026-10-13: the host does not judge meaning by word lists).
 function queryTerms(query: string): string[] {
-  const terms = new Set(words(query));
-  for (const [pattern, english] of KOREAN_TERMS) if (pattern.test(query)) for (const term of english) terms.add(term);
-  return [...terms];
+  return [...new Set(words(query))];
 }
 
 type OperationsInput = { query?: unknown; area?: unknown; operation?: unknown; limit?: unknown; offset?: unknown; include_restricted?: unknown };
 export type AppControlOperationsResult = {
   science_installed: boolean; areas?: Array<{ area: string; operations: number; available: number }>; operations?: Array<Record<string, unknown>>;
   total: number; offset?: number; next_offset?: number | null; restricted?: Array<Record<string, unknown>>;
+  /** A query that matched nothing and was not English. */
+  hint?: string;
   /** Present only when this process has no window and the window process could not be reached. */
   app_window?: { available: false; code: string; message: string };
 };
@@ -199,8 +232,9 @@ export function appControlOperationsLocal(input: OperationsInput): AppControlOpe
       return { operation, score };
     }).filter((item) => item.score > 0).sort((a, b) => b.score - a.score || a.operation.path.localeCompare(b.operation.path));
     matched = scored.map((item) => item.operation);
-    // Nothing matched: hand back the map rather than an empty answer.
-    if (!matched.length) return { science_installed: science, total: 0, areas: areaList() };
+    // Nothing matched: hand back the map rather than an empty answer (and say the catalog is English).
+    if (!matched.length) return { science_installed: science, total: 0, areas: areaList(),
+      ...(/[^\x00-\x7f]/.test(query) ? { hint: "operation names and docs are English: search with English words" } : {}) };
   }
   const offset = typeof input.offset === "number" && Number.isInteger(input.offset) ? Math.min(Math.max(input.offset, 0), 10_000) : 0;
   return { science_installed: science, total: matched.length, offset, next_offset: offset + limit < matched.length ? offset + limit : null,
@@ -212,6 +246,7 @@ export function appControlOperationsLocal(input: OperationsInput): AppControlOpe
         : operation.entry && appControlDomainHandlerRegistered(operation.entry.channel) ? "domain-service" : "owner-interaction",
       ...(exact || query === operation.path ? { input_schema: operation.inputSchema ?? HOST_ARGUMENT_SCHEMAS[operation.path] ?? APP_CONTROL_ARGUMENT_SCHEMAS[operation.path] }
         : { argument_schema_available: !!(operation.inputSchema ?? HOST_ARGUMENT_SCHEMAS[operation.path] ?? APP_CONTROL_ARGUMENT_SCHEMAS[operation.path]) }),
+      descriptor: operationDescriptorView(operation, !!(exact || query === operation.path)),
       ...(appControlEffectNeedsOwnerTurn(operation.effect) ? { owner_turn_only: true } : {}),
       ...(operation.keywords?.length ? { fields: operation.keywords } : {}),
       ...(operation.doc ? { doc: operation.doc } : {}),
@@ -267,12 +302,40 @@ function build(arg: AppControlInvokeArg, named: Record<string, unknown>): unknow
   return object;
 }
 
+const OWNER_LOCAL_MAP_OPERATIONS: ReadonlySet<string> = new Set(["experience.ontologyGraph", "agents.borrowedOntologyGraph"]);
+
 function clipResult(value: unknown): { result: unknown; truncated?: true } {
   if (value === undefined) return { result: null };
   let text: string;
   try { text = JSON.stringify(value) ?? "null"; } catch { return { result: String(value).slice(0, RESULT_LIMIT) }; }
   if (text.length <= RESULT_LIMIT) return { result: JSON.parse(text) };
   return { result: `${text.slice(0, RESULT_LIMIT)}…`, truncated: true };
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`).join(",")}}`;
+  return JSON.stringify(value) ?? "null";
+}
+
+// One receipt per dispatched non-read call, whichever caller reached it (One's tools, the harness app.call port, the
+// background service through the device bridge): the operation itself, not just "app.call" (descriptor receipt
+// contract, NH19). The ledger is evidence, not a gate: when it cannot be written the call result says so.
+async function recordAppCallReceipt(entry: { operation: string; effect: AppControlEffect; named: Record<string, unknown>; status: "ok" | "refused" | "failed"; code?: string; ownerTurn: boolean }): Promise<Record<string, unknown>> {
+  if (entry.effect === "read") return {};
+  try {
+    const { appendReceiptOutcome } = require("../harness/capability-ports") as typeof import("../harness/capability-ports");
+    const outcome = await appendReceiptOutcome({ operationId: entry.operation, via: "app.call", effect: entry.effect,
+      inputDigest: createHash("sha256").update(canonicalJson(entry.named)).digest("hex"), status: entry.status,
+      ...(entry.code ? { code: entry.code } : {}), ownerTurn: entry.ownerTurn });
+    return { receipt_id: outcome.receiptId, receipt_recorded: outcome.recorded };
+  } catch {
+    return { receipt_recorded: false };
+  }
+}
+
+function errorCode(error: unknown): string {
+  return error instanceof AppControlError ? error.code : error && typeof error === "object" && "code" in error && typeof (error as { code: unknown }).code === "string" ? (error as { code: string }).code : "operation-failed";
 }
 
 export async function appControlCallLocal(caller: AppControlCaller, input: { operation?: unknown; args?: unknown }): Promise<Record<string, unknown>> {
@@ -305,8 +368,11 @@ export async function appControlCallLocal(caller: AppControlCaller, input: { ope
       if (!presentation || presentation.isDestroyed()) throw new AppControlError("app-window-closed", "The Agentlas presentation window is closed.");
       if (presentation.isMinimized()) presentation.restore();
       presentation.show();
-      const result = await rendererCall(presentation, "app.navigate", { route });
-      return { ...result, effect: operation.effect };
+      let result: AppControlRendererReply;
+      try { result = await rendererCall(presentation, "app.navigate", { route }); }
+      catch (error) { await recordAppCallReceipt({ operation: path, effect: operation.effect, named: { route }, status: "failed", code: errorCode(error), ownerTurn: caller.ownerTurn }); throw error; }
+      return { ...result, effect: operation.effect, ...await recordAppCallReceipt({ operation: path, effect: operation.effect, named: { route },
+        status: result.ok ? "ok" : "refused", ...(result.ok ? {} : { code: result.code }), ownerTurn: caller.ownerTurn }) };
     }
     if (!window || window.isDestroyed()) throw new AppControlError("app-window-closed", "The Agentlas interaction window is closed.");
     if (path === "app.setLanguage" && (typeof named.locale !== "string" || !["ko", "en", "system"].includes(named.locale))) throw new AppControlError("invalid-arguments", "locale must be ko, en or system.");
@@ -320,8 +386,12 @@ export async function appControlCallLocal(caller: AppControlCaller, input: { ope
       try { named.value = normalizeAppUiPreference(named.name, named.value); }
       catch (error) { throw new AppControlError("invalid-arguments", error instanceof Error ? error.message : "Invalid UI preference."); }
     }
-    const result = await rendererCall(window, path as AppControlRendererOperation, named);
-    return { ...result, effect: operation.effect, ...(path === "app.getUiPreferences" && result.ok ? {
+    let result: AppControlRendererReply;
+    try { result = await rendererCall(window, path as AppControlRendererOperation, named); }
+    catch (error) { await recordAppCallReceipt({ operation: path, effect: operation.effect, named, status: "failed", code: errorCode(error), ownerTurn: caller.ownerTurn }); throw error; }
+    const receipt = await recordAppCallReceipt({ operation: path, effect: operation.effect, named, status: result.ok ? "ok" : "refused",
+      ...(result.ok ? {} : { code: result.code }), ownerTurn: caller.ownerTurn });
+    return { ...result, effect: operation.effect, ...receipt, ...(path === "app.getUiPreferences" && result.ok ? {
       preferences: result.state!.uiPreferences,
       definitions: Object.fromEntries(Object.entries(appUiPreferenceDefinitions).map(([name, definition]) => [name, {
         description: definition.description, value_schema: uiPreferenceValueSchema(name),
@@ -333,10 +403,15 @@ export async function appControlCallLocal(caller: AppControlCaller, input: { ope
   if (!appControlHandlerRegistered(entry.channel)) throw new AppControlError("operation-unavailable", `${path} is not available in this app session.`);
   const decoded = decodeAppControlArguments(named, APP_CONTROL_ARGUMENT_SCHEMAS[path]) as Record<string, unknown>;
   const args = entry.invokeArgs.map((arg) => build(arg, decoded));
-  const value = await invokeAppControlIpc({ window, channel: entry.channel, args, operation: path, ownerInteraction: caller.ownerTurn });
+  let value: unknown;
+  try { value = await invokeAppControlIpc({ window, channel: entry.channel, args, operation: path, ownerInteraction: caller.ownerTurn }); }
+  catch (error) { await recordAppCallReceipt({ operation: path, effect: operation.effect, named: decoded, status: "failed", code: errorCode(error), ownerTurn: caller.ownerTurn }); throw error; }
+  // The experience maps carry owner-local titles for the owner's renderer; an agent's copy drops them (safeLabel stays).
+  if (OWNER_LOCAL_MAP_OPERATIONS.has(path)) value = (await import("../experience/relation-index")).withoutOwnerLocalLabels(value);
   const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
   const refused = record?.ok === false || record?.success === false || record?.accepted === false
     || operation.effect !== "read" && (record?.state === "failed" || record?.status === "rejected");
-  return { ok: !refused, operation: path, effect: operation.effect, ...clipResult(value),
-    ...(refused ? { code: typeof record?.code === "string" ? record.code : typeof record?.reasonCode === "string" ? record.reasonCode : "operation-refused" } : {}) };
+  const code = refused ? typeof record?.code === "string" ? record.code : typeof record?.reasonCode === "string" ? record.reasonCode : "operation-refused" : undefined;
+  return { ok: !refused, operation: path, effect: operation.effect, ...clipResult(value), ...(code ? { code } : {}),
+    ...await recordAppCallReceipt({ operation: path, effect: operation.effect, named: decoded, status: refused ? "refused" : "ok", ...(code ? { code } : {}), ownerTurn: caller.ownerTurn }) };
 }

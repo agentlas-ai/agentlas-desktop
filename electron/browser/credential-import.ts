@@ -59,6 +59,7 @@ import {
 } from "./cookie-merge";
 import { sessionCookieGroupOf, sessionCookieNamesFor } from "./login-wall";
 import { currentUiLocale } from "../ui-locale";
+import { reportSystemPermissionIssue } from "../os-permission-guidance";
 
 /** 가져오기 거절·오류 문구는 화면 언어로 — 영어 화면에 한국어가 새지 않게(오너 2026-09-14). */
 function importCopy(ko: string, en: string): string {
@@ -111,12 +112,32 @@ function browserFamilyRoots(): BrowserFamilyRoot[] {
   return browserFamilyRootsForPlatform(process.platform, os.homedir(), process.env);
 }
 
+/** Guidance is observational: a missing listener must never change import behavior. */
+function reportImportPrerequisite(permission: "browser-files" | "keychain"): void {
+  try { reportSystemPermissionIssue(permission, "browser-import"); }
+  catch { /* guidance is best-effort; never alter a cookie write or legacy result */ }
+}
+
+function reportBrowserFileAccessFailure(error: unknown): void {
+  const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+  if (code === "EACCES" || code === "EPERM") reportImportPrerequisite("browser-files");
+}
+
+/** Unlike existsSync, retain exact access-denial evidence before preserving absent-path behavior. */
+function importSourceStat(file: string): fs.Stats | undefined {
+  try { return fs.statSync(file, { throwIfNoEntry: false }); }
+  catch (error) {
+    reportBrowserFileAccessFailure(error);
+    return undefined;
+  }
+}
+
 /** 프로필 디렉터리 안에서 쿠키 저장소의 실경로. 신형 Chrome 은 Network/ 밑으로 옮겼다. */
 function cookieStorePath(profileDir: string): string | null {
   const modern = path.join(profileDir, "Network", "Cookies");
-  if (fs.existsSync(modern)) return modern;
+  if (importSourceStat(modern)) return modern;
   const legacy = path.join(profileDir, "Cookies");
-  if (fs.existsSync(legacy)) return legacy;
+  if (importSourceStat(legacy)) return legacy;
   return null;
 }
 
@@ -127,7 +148,8 @@ function readLocalStateNames(userDataDir: string): Record<string, { name?: strin
       profile?: { info_cache?: Record<string, { name?: string; user_name?: string }> };
     };
     return parsed.profile?.info_cache ?? {};
-  } catch {
+  } catch (error) {
+    reportBrowserFileAccessFailure(error);
     return {};
   }
 }
@@ -141,18 +163,19 @@ export function listDiscoverableProfiles(): DiscoveredBrowserProfile[] {
   assertDevelopmentEffectAllowed("browser.credentials-profile-discovery");
   const out: DiscoveredBrowserProfile[] = [];
   for (const root of browserFamilyRoots()) {
-    if (!fs.existsSync(root.userDataDir)) continue;
+    if (!importSourceStat(root.userDataDir)) continue;
     const names = readLocalStateNames(root.userDataDir);
     let entries: string[];
     try {
       entries = fs.readdirSync(root.userDataDir);
-    } catch {
+    } catch (error) {
+      reportBrowserFileAccessFailure(error);
       continue;
     }
     for (const entry of entries) {
       if (entry !== "Default" && !/^Profile \d+$/.test(entry)) continue;
       const profileDir = path.join(root.userDataDir, entry);
-      if (!fs.statSync(profileDir, { throwIfNoEntry: false })?.isDirectory()) continue;
+      if (!importSourceStat(profileDir)?.isDirectory()) continue;
       const info = names[entry] ?? {};
       const store = cookieStorePath(profileDir);
       out.push({
@@ -187,9 +210,10 @@ export function snapshotBrowserSqlite(src: string, workDir: string, basename: st
     fs.copyFileSync(src, dst);
     for (const suffix of ["-wal", "-shm"]) {
       const sidecar = `${src}${suffix}`;
-      if (fs.existsSync(sidecar)) fs.copyFileSync(sidecar, `${dst}${suffix}`);
+      if (fs.statSync(sidecar, { throwIfNoEntry: false })) fs.copyFileSync(sidecar, `${dst}${suffix}`);
     }
-  } catch {
+  } catch (error) {
+    reportBrowserFileAccessFailure(error);
     return null;
   }
   try {
@@ -567,9 +591,17 @@ function readMacSafeStorageKey(service: string): Buffer | null {
     );
     let length = password.length;
     while (length > 0 && (password[length - 1] === 0x0a || password[length - 1] === 0x0d)) length -= 1;
-    if (length === 0) return null;
+    if (length === 0) {
+      reportImportPrerequisite("keychain");
+      return null;
+    }
     return pbkdf2Sync(password.subarray(0, length), "saltysalt", 1_003, 16, "sha1");
-  } catch {
+  } catch (error) {
+    // execFileSync can throw before assigning password while retaining partial output.
+    const partial = error && typeof error === "object" && "stdout" in error ? error.stdout : null;
+    if (Buffer.isBuffer(partial)) partial.fill(0);
+    // Unavailable only: process exit bytes cannot identify a precise Keychain OSStatus.
+    reportImportPrerequisite("keychain");
     return null;
   } finally {
     password?.fill(0);

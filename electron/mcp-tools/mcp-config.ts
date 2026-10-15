@@ -29,6 +29,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { ensureDefaultMcpPluginsInstalled } from "./defaults";
 import { listInstalledServers } from "./registry";
 import { readEnvVarAliased as readEnvVar } from "../secrets/env-alias";
+import { credentialVaultKey } from "./credential-refs";
 import { KeychainUnavailableError } from "../secrets/keychain-host";
 import { resolveMcpOAuthAccessToken } from "./oauth";
 import {
@@ -49,7 +50,7 @@ import { isAuthenticWorkspacePreviewMcpLaunch } from "../workspace-preview/mcp-s
 import { AGENT_MAIL_CONTROL_ENV, isAuthenticAgentMailMcpLaunch } from "../agent-mail/mcp-server";
 import { AGENT_MAIL_AUTO_RUN_MCP, createAgentMailCapability, isAgentMailAutoRunChat, removeAgentMailCapability } from "../agent-mail/control-server";
 import { agentMailToolsOfferedForRun } from "../agent-mail/client";
-import { AGENT_TURN_CONTROL_ENV, TURN_TOOLS_BASE, TURN_TOOLS_GOAL, isAuthenticTurnToolsMcpLaunch } from "../turn-tools/mcp-server";
+import { AGENT_TURN_CONTROL_ENV, turnToolsFor, isAuthenticTurnToolsMcpLaunch } from "../turn-tools/mcp-server";
 import { createTurnToolsCapability, removeTurnToolsCapability } from "../turn-tools/control-server";
 import { ONE_TEAM_CONTROL_ENV, ROOM_MEMBER_TOOL_NAMES, isAuthenticOneTeamMcpLaunch } from "../one/team-mcp-server";
 import { createOneTeamCapability, removeOneTeamCapability } from "../one/team-control-server";
@@ -180,6 +181,10 @@ export interface McpConfigResult {
 }
 
 export interface McpConfigBuildOptions {
+  /** Native exact-run object; stripped from delegated reconstruction intent. */
+  osMemoryCuratorRun?: import("../runtime/os-memory-curator-binding").NativeOsCuratorRun;
+  /** Main-only explicit personal source preparation: no seed, login, refresh or browser credential sync. */
+  sourceOnlyPassiveCredentials?: true;
   /** Exact Main original/source/installed receiver, never a serialized caller option. */
   nativeScopedSelection?: OneOriginalMcpSelection;
   /** Resolve the same Main claim for every final installed row, including fixed
@@ -214,6 +219,8 @@ export interface McpConfigBuildOptions {
   turnRunId?: string;
   /** Goal turns: also offer goal_wait / goal_complete from agentlas-turn. */
   turnGoalTools?: true;
+  /** Attended runs (a person can answer): also offer ask_form. Never set for unattended or mobile-durable runs. */
+  turnAskTool?: true;
   /** Main-minted owner-full evidence for a worker's bounded preview tool. */
   workspacePreviewOwnerGrant?: WorkspacePreviewOwnerGrant;
   /**
@@ -411,7 +418,8 @@ const PROXY_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
 // (isolated live run 2026-09-25: every hephaestus-network bridge "upstream_transport_closed",
 // so host-loop runtimes never had Workforce tools). Forwarded only for that launch.
 const HEPHAESTUS_LAUNCH_KEYS = ["HEPHAESTUS_RUNTIME_ROOT", "PYTHONPATH", "PYTHONUTF8", "PYTHONIOENCODING",
-  "PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX", "AGENTLAS_JUDGE_RUNTIME"];
+  "PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX", "AGENTLAS_JUDGE_RUNTIME",
+  "AGENTLAS_MEMORY_ROOT", "AGENTLAS_MEMORY_OWNER_NAMESPACE", "AGENTLAS_MEMORY_BINDING_FILE", "AGENTLAS_MEMORY_BINDING_REVISION"];
 let mapping;
 try {
   mapping = JSON.parse(process.argv[3] || "{}");
@@ -679,13 +687,14 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   // generic Playwright process attached directly to 9222 has no lease,
   // guardian, page cap or idle cleanup and can therefore orphan the browser.
   const automationBrowserRun = Boolean(opts?.browserProfileKey?.startsWith("automation-"));
+  if (opts?.sourceOnlyPassiveCredentials && (!opts.skipDefaultSeed || opts.serverIds?.length !== 1 || !opts.configKey || opts.nativeBrowser || opts.catalogIds || opts.requiredToolCatalogIds)) throw new Error("gmail_personal_source_preparation_scope_invalid");
   if (!opts?.skipDefaultSeed) ensureDefaultMcpPluginsInstalled();
   // ★승인된 자격증명은 실행 직전에 스스로 최신이 된다. 이 함수는 모든 런타임 실행이 지나는
   //   길목이라(모든 채널·그래프 노드 포함), 여기 한 번 걸면 어디서 브라우저를 쓰든 로그인이 있다.
   //   승인이 없으면 즉시 반환하고 아무것도 복사하지 않는다. 실패해도 실행을 막지 않는다.
   try {
     const { refreshBrowserCredentialsIfDue } = await import("../browser/credential-sync");
-    await refreshBrowserCredentialsIfDue();
+    if (!opts?.sourceOnlyPassiveCredentials) await refreshBrowserCredentialsIfDue();
   } catch {
     /* 자격증명 갱신 실패가 도구 설정 작성을 막아서는 안 된다 */
   }
@@ -778,6 +787,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   const residentProxyHandles: string[] = [];
   const activatedResidentProxyHandles = new Set<string>();
   const browserAuthorityCleanup: Array<() => void> = [];
+  const osCuratorCleanup: Array<() => void> = [];
   let osExecution:SupervisorOsExecutionOutcome|null|undefined;
   let releasePrepared: (() => boolean) | undefined;
   let released = false;
@@ -794,6 +804,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       else cancelMcpProxyLaunchPreparation(handle);
     }
     for (const revoke of browserAuthorityCleanup) revoke();
+    for (const revoke of osCuratorCleanup) revoke();
     if(osExecution?.kind==="scoped")osExecution.dispose();
     for (const revoke of agentMailCapabilityCleanup) revoke();
     for (const revoke of turnToolsCapabilityCleanup) revoke();
@@ -942,7 +953,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     try {
       for (const rawKey of s.envKeys) {
         const envKey = validateEnvKey(rawKey);
-        const value = await readEnvVar(envKey);
+        // A connection-owned credential reads its own Vault key; the server still receives it as `envKey` (NH29).
+        const value = await readEnvVar(credentialVaultKey(s, envKey));
         if (!value) {
           missingRequiredValue = true;
           continue;
@@ -957,7 +969,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         // Endpoint credentials remain mandatory even when OAuth replaces
         // manual authentication headers. Bind the token to the resolved URL.
         if (!resolvedRemoteUrl) continue;
-        oauthAccessToken = await resolveMcpOAuthAccessToken(s.id, resolvedRemoteUrl);
+        oauthAccessToken = await resolveMcpOAuthAccessToken(s.id, resolvedRemoteUrl, opts?.sourceOnlyPassiveCredentials ? { passiveOnly: true } : undefined);
       }
     } catch (error) {
       if (!(error instanceof KeychainUnavailableError)
@@ -1082,7 +1094,9 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         try {
           const capabilityConfigKey = opts?.configKey ?? key;
           const capability = await createTurnToolsCapability(
-            { chatId: callerChatId, runId: opts.turnRunId, tools: opts.turnGoalTools ? TURN_TOOLS_GOAL : TURN_TOOLS_BASE, dryRun: opts?.toolGate?.simulation === true || opts?.toolGate?.planMode === true },
+            { chatId: callerChatId, runId: opts.turnRunId, tools: turnToolsFor(opts.turnGoalTools === true, opts.turnAskTool === true), dryRun: opts?.toolGate?.simulation === true || opts?.toolGate?.planMode === true,
+              permission: opts?.toolGate?.permission ?? "read",
+              graphAuthoring: serializedServers.some((server) => server.catalogId === "one-team") && !toolchainConsumer && !roomMember },
             capabilityConfigKey,
           );
           turnToolsCapabilityCleanup.push(() => removeTurnToolsCapability(capabilityConfigKey, capability.binding.capabilityId));
@@ -1126,6 +1140,15 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         builtInEnv.PATH = preparedEnv.PATH ?? "";
       }
       const secretAliases: Record<string, string> = {};
+      if (s.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID) {
+        const bridge = await (await import("../runtime/os-memory-curator-binding")).prepareOsMemoryCuratorBridge(
+          opts?.osMemoryCuratorRun, { configPath, configKey: key, serverId: s.id });
+        const alias = mcpRuntimeSecretAlias(key, "AGENTLAS_MEMORY_CURATOR_RUNTIME");
+        // Explicit unavailable overrides the unrelated legacy judge hint; it never guesses a model.
+        secretAliases.AGENTLAS_MEMORY_CURATOR_RUNTIME = alias;
+        runtimeEnv[alias] = JSON.stringify(bridge?.config ?? { kind: "unavailable", reason: "os_curator_native_binding_unavailable" });
+        if (bridge) osCuratorCleanup.push(() => bridge.close());
+      }
       if(!opts?.nativeBrowser && canonicalComputerUseSelected && ["cua-driver","agentlas-browser"].includes(s.catalogId??"")) {
         osExecution??=await prepareSupervisorOsExecutionAsync({runId:opts?.supervisorReplyRunId,chatId:opts?.toolGate?.chatId,
           permission:opts?.toolGate?.permission,admissionCurrent:opts?.admissionCurrent});
@@ -1424,7 +1447,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
 
   writePrivateFile(configPath, JSON.stringify({ mcpServers }, null, 2));
   const configurations = preparedRows.map(({ server }) => [server.id, mcpServerConfigurationDigest(server)] as const);
-  const { admissionCurrent: _admissionCurrent, nativeScopedSelection: _nativeScopedSelection,
+  const { osMemoryCuratorRun: _osMemoryCuratorRun, admissionCurrent: _admissionCurrent, nativeScopedSelection: _nativeScopedSelection,
     nativeScopedSelectionForServer: _nativeScopedSelectionForServer, ...delegationBuildOptions } = opts ?? {};
   for (const row of preparedRows) {
     const entry = mcpServers[row.configKey] as { env?: Record<string, string> };

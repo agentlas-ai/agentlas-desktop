@@ -23,7 +23,7 @@
 import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
 import { DeviceBridgeError, daemonDeviceBridge } from "../daemon/device-bridge";
 import { getDb } from "../store/db";
-import { getChat, setChatGoalBinding } from "../store/chats";
+import { getChat } from "../store/chats";
 import { getLongRunByGoalId } from "../store/long-runs";
 import { tryRecordRunEvent } from "../store/run-events";
 import { isGoalAdmittingDecision, prepareInvocationAutomaticGoal } from "./automatic-goal";
@@ -110,7 +110,6 @@ async function performIntake(input: GoalIntakeForward, text: string): Promise<vo
     const prepared = await prepareInvocationAutomaticGoal({ runId: input.runId, chatId: input.chatId, sourceMessageId: input.sourceMessageId,
       userPrompt: text, permission: input.permission, signal: new AbortController().signal });
     if (prepared.kind === "admitted") {
-      setChatGoalBinding(input.chatId, prepared.run.goalId);
       return done("admitted", "classified_goal", { goalId: prepared.run.goalId });
     }
     if (prepared.kind === "bypass") return done("bypass", "classified_not_goal");

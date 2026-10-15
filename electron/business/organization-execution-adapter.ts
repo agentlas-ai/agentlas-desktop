@@ -59,13 +59,22 @@ export function createBusinessOrganizationExecutionAdapter(owners: BusinessOrgan
   const listeners = new Set<() => void>();
   // Original selector metadata only. No permission, payload, result or executable
   // command is cached; the server's durable original claim owns restart deduplication.
-  const attempted = new Map<string, { namespace: string; lookup: BusinessOrganizationExecutionLookup; pending: boolean }>();
-  const knownOwners = new Map<string, string>();
+  const attempted = new Map<string, {
+    readonly original: Readonly<{ namespace: string; lookup: BusinessOrganizationExecutionLookup; ownerPrincipalId: string }>;
+    pending: boolean;
+  }>();
+  // Explicit remote original-owner metadata only. A current candidate owner cannot
+  // identify a historical claim; contradictory pins remain ambiguous and closed.
+  const knownOriginalOwners = new Map<string, Readonly<{ ownerPrincipalId: string | null; available: boolean; ambiguous: boolean; closed: boolean }>>();
   const blocker = () => !identity || !ingress || !readOwner || !controlOwner || !receiptOwner || !metadataCurrent || !targetCurrent || !resultCurrent
     ? 'organization_execution_owner_unbound' : null;
   const namespace = (session: BusinessSession) => JSON.stringify([session.deploymentId, session.identityAuthorityId, session.organizationId, session.principalId, session.hostId]);
-  const candidateKey = (session: BusinessSession, candidateId: string) => JSON.stringify([namespace(session), candidateId]);
   const originalKey = (session: BusinessSession, lookup: BusinessOrganizationExecutionLookup) => JSON.stringify([namespace(session), lookup.candidateId, lookup.action, lookup.expectedRevision]);
+  const receiptDisplayOwner = (key: string): string | undefined => {
+    const known = knownOriginalOwners.get(key);
+    if (known?.ambiguous || known?.closed) return undefined;
+    return attempted.get(key)?.original.ownerPrincipalId ?? (known?.available ? known.ownerPrincipalId ?? undefined : undefined);
+  };
   function current(session: BusinessSession, stamp: number): boolean {
     try {
       if (blocker() || generation !== stamp || !isBusinessSession(session) || Date.parse(session.expiresAt) <= now()) return false;
@@ -93,9 +102,19 @@ export function createBusinessOrganizationExecutionAdapter(owners: BusinessOrgan
       const snapshot = freezeBusinessOrganizationExecutionMetadata(raw);
       if (!businessOrganizationExecutionContextMatches(snapshot.context, session, now()) || !liveMetadata(session, snapshot) || !current(session, stamp))
         throw new BusinessOrganizationExecutionError('organization_execution_context_changed');
-      for (const row of snapshot.rows) {
-        if (knownOwners.size >= 4096 && !knownOwners.has(candidateKey(session, row.candidateId))) throw new BusinessOrganizationExecutionError('organization_execution_unavailable');
-        knownOwners.set(candidateKey(session, row.candidateId), row.ownerPrincipalId);
+      for (const row of snapshot.rows) for (const pending of row.pendingControls) {
+        const key = originalKey(session, { candidateId: row.candidateId, action: pending.action, expectedRevision: pending.expectedRevision });
+        if (knownOriginalOwners.size >= 4096 && !knownOriginalOwners.has(key)) throw new BusinessOrganizationExecutionError('organization_execution_unavailable');
+        const known = knownOriginalOwners.get(key), local = attempted.get(key)?.original.ownerPrincipalId;
+        const incoming = pending.originalOwnerPrincipalId;
+        const ambiguous = known?.ambiguous === true || incoming != null && (local !== undefined && incoming !== local
+          || known?.ownerPrincipalId != null && incoming !== known.ownerPrincipalId);
+        knownOriginalOwners.set(key, Object.freeze({ ownerPrincipalId: known?.ownerPrincipalId ?? incoming ?? null,
+          available: incoming != null && !ambiguous, ambiguous,
+          // A missing legacy field is not fresh evidence that a closed original
+          // identity reopened. Explicit matching identity can clear null closure;
+          // contradictory original identities remain ambiguous independently.
+          closed: incoming === null || incoming === undefined && known?.closed === true }));
       }
       return snapshot;
     } catch { throw new BusinessOrganizationExecutionError('organization_execution_unavailable'); }
@@ -106,9 +125,20 @@ export function createBusinessOrganizationExecutionAdapter(owners: BusinessOrgan
     const snapshot = await readExact(session, stamp);
     const scope = namespace(session);
     const rows = snapshot.rows.map(row => {
-      const controls = new Map(row.pendingControls.map(item => [businessOrganizationExecutionPendingKey(item), item]));
-      for (const record of attempted.values()) if (record.pending && record.namespace === scope && record.lookup.candidateId === row.candidateId)
-        controls.set(businessOrganizationExecutionPendingKey(record.lookup), { action: record.lookup.action, expectedRevision: record.lookup.expectedRevision });
+      const controls = new Map(row.pendingControls.map(item => {
+        const selector = { candidateId: row.candidateId, action: item.action, expectedRevision: item.expectedRevision };
+        const known = knownOriginalOwners.get(originalKey(session, selector));
+        return [businessOrganizationExecutionPendingKey(item), { action: item.action, expectedRevision: item.expectedRevision,
+          ...(known?.ambiguous || known?.closed ? { originalOwnerPrincipalId: null }
+            : known?.available && known.ownerPrincipalId !== null ? { originalOwnerPrincipalId: known.ownerPrincipalId } : {}) }] as const;
+      }));
+      for (const record of attempted.values()) if (record.pending && record.original.namespace === scope && record.original.lookup.candidateId === row.candidateId) {
+        const known = knownOriginalOwners.get(originalKey(session, record.original.lookup));
+        const closed = known?.ambiguous === true || known?.closed === true;
+        controls.set(businessOrganizationExecutionPendingKey(record.original.lookup), {
+          action: record.original.lookup.action, expectedRevision: record.original.lookup.expectedRevision,
+          originalOwnerPrincipalId: closed ? null : record.original.ownerPrincipalId });
+      }
       if (controls.size > 64) throw new BusinessOrganizationExecutionError('organization_execution_unavailable');
       return { ...row, pendingControls: [...controls.values()] };
     });
@@ -123,7 +153,10 @@ export function createBusinessOrganizationExecutionAdapter(owners: BusinessOrgan
     const key = originalKey(session, lookup); let started = false;
     if (!receiptOnly && attempted.has(key)) throw new BusinessOrganizationExecutionError('organization_execution_original_receipt_required');
     try {
-      let ownerPrincipalId = knownOwners.get(candidateKey(session, lookup.candidateId));
+      // Current discovery may have a different owner after the original attempt.
+      // Receipt lookup retains that exact original owner; fresh receipt authority
+      // below is still required and does not grant another dispatch.
+      let ownerPrincipalId = receiptOnly ? receiptDisplayOwner(key) : undefined;
       if (!receiptOnly) {
         const snapshot = await readExact(session, stamp);
         const row = snapshot.rows.find(value => value.candidateId === lookup.candidateId);
@@ -138,14 +171,14 @@ export function createBusinessOrganizationExecutionAdapter(owners: BusinessOrgan
         // synchronous send boundary and check again, never queue another original.
         if (attempted.has(key)) throw new BusinessOrganizationExecutionError('organization_execution_original_receipt_required');
         if (attempted.size >= 256) throw new BusinessOrganizationExecutionError('organization_execution_unavailable');
-        attempted.set(key, { namespace: namespace(session), lookup, pending: true });
+        attempted.set(key, { original: Object.freeze({ namespace: namespace(session), lookup, ownerPrincipalId }), pending: true });
       }
       started = true;
       const rawResult = await (receiptOnly ? receiptOwner!(lookup, session) : controlOwner!(lookup, session));
       if (!current(session, stamp) || !isBusinessOrganizationExecutionResult(rawResult)) throw new BusinessOrganizationExecutionError('organization_execution_unknown', !receiptOnly);
       const result = freezeBusinessOrganizationExecutionMetadata(rawResult);
       if (!businessOrganizationExecutionResultMatches(result, lookup, ownerPrincipalId)
-        || receiptOnly && !liveTarget(session, lookup, 'receipt')
+        || receiptOnly && (receiptDisplayOwner(key) !== ownerPrincipalId || !liveTarget(session, lookup, 'receipt'))
         || resultCurrent!(session, lookup, result) !== true || !current(session, stamp)) throw new BusinessOrganizationExecutionError('organization_execution_unknown', !receiptOnly);
       const record = attempted.get(key);
       if (record) record.pending = result.stateWrite === 'unknown' || result.effectState === 'unreconciled';

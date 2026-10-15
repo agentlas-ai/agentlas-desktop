@@ -8,6 +8,7 @@ export const BUSINESS_ACTIONS = [
   'audit.read', 'overview.read', 'resource.read', 'page.write', 'space.write',
   'credential.store', 'credential.verify', 'credential.replace', 'credential.revoke',
   'audio.generate', 'work.execute', 'work.stop', 'history.observe', 'history.read',
+  'agent.read', 'agent.report', 'agent.manage', 'agent.share',
   'history.manage', 'history.pause', 'history.delete', 'evolution.read', 'evolution.generate',
   'evolution.build', 'evolution.evaluate', 'evolution.review', 'evolution.promote',
   'evolution.execute', 'evolution.feedback', 'evolution.pause', 'evolution.stop',

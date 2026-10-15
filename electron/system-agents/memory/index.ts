@@ -29,10 +29,6 @@ export function memoryEmitterPromptFor(request: string, _locale?: "ko" | "en"): 
 export const MEMORY_SCHEMA_MODULE: OnDemandModule = {
   id: "memory-schema",
   title: "Memory Events full schema",
-  keywords: [
-    "remember", "memory", "save", "note", "decision", "preference", "fact", "risk",
-    "procedure", "record", "기억", "저장", "메모리", "결정", "선호", "기록", "남겨",
-  ],
   description:
     "Full schema for emitting a Memory Events block: memory_kind/suggested_scope enums, request_context fields (user_intent, trigger_terms, target_project, outcome…), and the exact JSON format.",
   // 정본 블록을 그대로 로드(중복/이탈 방지). 코어는 위 요약본만 항상 깔린다.

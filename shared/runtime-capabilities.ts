@@ -1,3 +1,4 @@
+import { composeDeclaredPrompt, type DeclaredPromptPart } from "../electron/runtime/prompt-order";
 // 런타임 능력 서술자 — "이 CLI가 무엇을 할 수 있고, 우리는 어떤 통로로 쓰는가"의 정본.
 // runtime-mcp.ts 와 같은 규율: Record<RuntimeKind, …> 라서 새 런타임은 모든 칸에
 // 답하지 않으면 컴파일이 실패한다. 근거 없는 행은 여기 있을 자격이 없다.
@@ -287,6 +288,7 @@ export const RUNTIME_SCHEMA_OUTPUT: Record<RuntimeKind, SchemaOutputDelivery | n
   kimi: null,
   acp: null,
   // OpenAI 호환 본문을 우리가 직접 만든다 — 여기가 제약 디코딩이 가장 확실한 곳이다.
+  // BYOK Anthropic Messages·Gemini 경로는 스키마를 지시문으로 넣고 상태줄에 남긴다(runtime/byok.ts prepareContext).
   byok: { via: "response-format" },
   ollama: { via: "response-format" },
   lmstudio: { via: "response-format" },
@@ -302,12 +304,22 @@ export const RUNTIME_SCHEMA_OUTPUT: Record<RuntimeKind, SchemaOutputDelivery | n
  * 말로 전할 뿐이라 깨질 수 있고, 그래서 러너는 이걸 쓸 때 상태줄에 남긴다.
  */
 export function schemaFallbackInstruction(schema: Record<string, unknown>): string {
-  return [
-    "",
-    "[OUTPUT CONTRACT]",
-    "Your final message must be exactly one JSON document matching this schema,",
-    "with no prose, no explanation, and no code fence around it:",
-    JSON.stringify(schema),
-    "[/OUTPUT CONTRACT]",
-  ].join("\n");
+  return composeDeclaredPrompt([schemaFallbackPromptPart(schema)], "\n");
+}
+
+/** The exact schema can contain task-bound IDs; never classify it as immutable prose. */
+export function schemaFallbackPromptPart(schema: Record<string, unknown>): DeclaredPromptPart {
+  return { id: "transport.output-schema.fallback", revision: 1, stability: "task-context",
+    changeTriggers: ["release", "task", "plan-revision"], order: 90,
+    text: "\n[OUTPUT CONTRACT]\nfinal message: exactly one JSON document matching this schema; no prose, no fence:\n"
+      + JSON.stringify(schema) + "\n[/OUTPUT CONTRACT]" };
+}
+
+/** Complete observation prompts are one host-owned turn payload; their chronology is untouched. */
+export function observationSystemWithSchema(system: string, schema?: Record<string, unknown>): string {
+  return composeDeclaredPrompt([
+    ...(schema ? [schemaFallbackPromptPart(schema)] : []),
+    { id: "transport.observation.system", revision: 1, stability: "turn-context",
+      changeTriggers: ["owner-input", "checkpoint", "task"], text: system },
+  ], "\n");
 }

@@ -225,15 +225,22 @@ function synthesizeLegacyCheckpoint(
 function boundEventForOccurrence(
   automationId: string,
   occurrenceId: string,
+  evidenceOnly = false,
 ): BoundEventRow | null {
   if (!occurrenceId.startsWith(EVENT_OCCURRENCE_PREFIX)) return null;
   const eventId = occurrenceId.slice(EVENT_OCCURRENCE_PREFIX.length);
-  if (!validId(eventId)) throw new Error("automation_graph_reconciliation_bound_event_malformed");
+  if (!validId(eventId)) {
+    if (evidenceOnly) return null;
+    throw new Error("automation_graph_reconciliation_bound_event_malformed");
+  }
   const row = getDb().prepare(
     `SELECT id, trigger_kind, status, updated_at
      FROM automation_trigger_events
      WHERE id = ? AND automation_id = ?`,
   ).get(eventId, automationId) as BoundEventRow | undefined;
+  // A read-only view is not authority to change or retry its event. Keep the
+  // original run evidence visible without projecting a new event status schema.
+  if (evidenceOnly && (!row || !["pending", "parked"].includes(row.status))) return null;
   if (!row) throw new Error("automation_graph_reconciliation_bound_event_missing");
   if (row.status === "claimed") throw new Error("automation_graph_reconciliation_bound_event_active");
   if (row.status !== "pending" && row.status !== "parked") {
@@ -393,6 +400,7 @@ function loadRevisedGraphReconciliation(
 function loadReconciliation(
   automationId: string,
   exact?: { runId: string; occurrenceId: string },
+  evidenceOnly = false,
 ): LoadedReconciliation | null {
   if (!validId(automationId)) throw new Error("automation_graph_reconciliation_input_invalid");
   const automation = getAutomation(automationId);
@@ -462,7 +470,7 @@ function loadReconciliation(
   const inFlight = new Set(checkpoint.inFlightNodeIds);
   const unresolvedNodes = graph.nodes.filter((node) => ambiguous.has(node.id) || inFlight.has(node.id));
   if (unresolvedNodes.length === 0) return null;
-  const boundEvent = boundEventForOccurrence(automationId, checkpoint.occurrenceId);
+  const boundEvent = boundEventForOccurrence(automationId, checkpoint.occurrenceId, evidenceOnly);
   if (run.dry_run === 1 && boundEvent) {
     throw new Error("automation_graph_reconciliation_simulation_event_invalid");
   }
@@ -594,20 +602,50 @@ export function suspendAutomationForGraphReconciliation(automationId: string): b
  * failed with automation_graph_reconciliation_graph_drift. The old run stays in the record; the next run starts fresh
  * on the current graph. The owner's explicit reconcile (reconcileAutomationGraph) still reports the drift.
  */
+export interface GraphReconciliationReadContext {
+  /** Observation only. The owning kernel supplies this after native custody claim. */
+  unrelatedToOccurrence: string;
+  onUnreadablePriorEvidence?: (source: { runId: string; occurrenceId: string; code: string }) => void;
+}
+const UNREADABLE_PRIOR_EVIDENCE = new Set([
+  "automation_graph_reconciliation_checkpoint_malformed", "automation_graph_reconciliation_node_states_malformed",
+  "automation_graph_reconciliation_time_invalid",
+  "automation_graph_reconciliation_bound_event_missing", "automation_graph_reconciliation_bound_event_malformed",
+  "automation_graph_reconciliation_conflict",
+]);
 function loadHeldReconciliation(
   automationId: string,
   exact?: { runId: string; occurrenceId: string },
+  readContext?: GraphReconciliationReadContext,
 ): LoadedReconciliation | null {
   try {
-    return loadReconciliation(automationId, exact);
+    return loadReconciliation(automationId, exact, true);
   } catch (error) {
     if (error instanceof Error && error.message === "automation_graph_reconciliation_graph_drift") return null;
+    if (readContext && error instanceof Error && UNREADABLE_PRIOR_EVIDENCE.has(error.message)) {
+      // Prove the original source identity from storage, never the failed caller's
+      // requested coordinate. Same-source recovery and explicit reducers stay strict.
+      const row = exact
+        ? getDb().prepare("SELECT id,automation_id,occurrence_id,checkpoint_json FROM automation_runs WHERE automation_id=? AND id=?").get(automationId, exact.runId)
+        : getDb().prepare("SELECT id,automation_id,occurrence_id,checkpoint_json FROM automation_runs WHERE automation_id=? ORDER BY started_at DESC,rowid DESC LIMIT 1").get(automationId);
+      const source = row as Pick<LatestRunRow, "id" | "automation_id" | "occurrence_id" | "checkpoint_json"> | undefined;
+      if (source) {
+        let savedOccurrence: unknown;
+        try { savedOccurrence = source.checkpoint_json && JSON.parse(source.checkpoint_json)?.occurrenceId; } catch { /* original row remains untouched */ }
+        const occurrenceId = source.occurrence_id ?? (typeof savedOccurrence === "string" ? savedOccurrence : legacyOccurrenceId(source));
+        if (occurrenceId !== readContext.unrelatedToOccurrence) {
+          readContext.onUnreadablePriorEvidence?.({ runId: source.id, occurrenceId, code: error.message });
+          return null;
+        }
+      }
+    }
     throw error;
   }
 }
 
 export function listAutomationGraphReconciliations(
   automationId: string,
+  readContext?: GraphReconciliationReadContext,
 ): AutomationGraphReconciliation[] {
   if (!validId(automationId)) throw new Error("automation_graph_reconciliation_input_invalid");
   // Form-created automations intentionally begin with a renderer-synthesized graph.
@@ -621,11 +659,9 @@ export function listAutomationGraphReconciliations(
   // successful resume supersedes older failed snapshots for that occurrence.
   const boundRows = getDb().prepare(
     `SELECT r.id, r.occurrence_id, r.status
-     FROM automation_trigger_events e
-     JOIN automation_runs r
-       ON r.automation_id = e.automation_id
-      AND r.occurrence_id = ('trigger-event:' || e.id)
-     WHERE e.automation_id = ? AND e.status IN ('pending', 'parked')
+     FROM automation_runs r
+     WHERE r.automation_id = ? AND r.occurrence_id LIKE 'trigger-event:%'
+       AND r.dry_run = 0
      ORDER BY r.started_at DESC, r.rowid DESC`,
   ).all(automationId) as Array<{ id: string; occurrence_id: string | null; status: string | null }>;
   const seenOccurrences = new Set<string>();
@@ -636,7 +672,7 @@ export function listAutomationGraphReconciliations(
     seenOccurrences.add(row.occurrence_id);
     if (row.status !== "error") continue;
     inspectedRunIds.add(row.id);
-    const loaded = loadHeldReconciliation(automationId, { runId: row.id, occurrenceId: row.occurrence_id });
+    const loaded = loadHeldReconciliation(automationId, { runId: row.id, occurrenceId: row.occurrence_id }, readContext);
     if (loaded) views.push(loaded.view);
   }
   // Manual and scheduled runs also own durable occurrences. A later run of
@@ -661,10 +697,10 @@ export function listAutomationGraphReconciliations(
     seenOccurrences.add(occurrenceId);
     if (row.status !== "error") continue;
     inspectedRunIds.add(row.id);
-    const loaded = loadHeldReconciliation(automationId, { runId: row.id, occurrenceId });
+    const loaded = loadHeldReconciliation(automationId, { runId: row.id, occurrenceId }, readContext);
     if (loaded) views.push(loaded.view);
   }
-  const latest = loadHeldReconciliation(automationId);
+  const latest = loadHeldReconciliation(automationId, undefined, readContext);
   if (latest && !inspectedRunIds.has(latest.run.id)) views.push(latest.view);
   return views;
 }

@@ -11,9 +11,9 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliToolSilenceWindowMs, RuntimeTurnUnsettledError } from "./runner";
+import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, runtimeProtocolUnrecognizedFailure, cliToolSilenceWindowMs, RuntimeTurnUnsettledError } from "./runner";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
-import { CLI_HISTORY_CONTEXT_TOKENS, composeResumeTurnPrompt, renderConversationContext } from "./continuity";
+import { cliHistoryContextTokens, composeResumeTurnPrompt, renderConversationContext } from "./continuity";
 import { tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
 import { agentRunCwd, detachedSpawnOpts, firstExistingCli, killCliTree, probeCliVersion, spawnCli, trackRunChild } from "./exec";
@@ -389,9 +389,11 @@ function buildSystemText(req: RunnerRequest): string {
     undefined,
     undefined,
     req.surfaceGate,
-    undefined,
-    undefined,
+    KIND,
+    req.sciencePromptProfile,
     req.judgmentOnly === true ? "host-judgment" : undefined,
+      undefined,
+      req.systemPromptComposition,
   );
   const turnContext = req.turnContext?.trim();
   return `${sys}${turnContext ? `\n\n${turnContext}` : ""}`;
@@ -401,7 +403,7 @@ function buildPrompt(req: RunnerRequest, systemViaFlag: boolean): string {
   // 세션 미지원 러너 — 매 턴 히스토리를 연속성 프레이밍+압축과 함께 재주입한다.
   const parts: string[] = systemViaFlag ? [] : [`[SYSTEM]\n${buildSystemText(req)}`, ""];
   if (req.history.length > 0) {
-    const { block } = renderConversationContext(req.history, req.locale, CLI_HISTORY_CONTEXT_TOKENS);
+    const { block } = renderConversationContext(req.history, req.locale, cliHistoryContextTokens(KIND, req.model));
     parts.push(block, "");
   }
   parts.push(tStatus(req.locale, "histThisSection"), req.userPrompt);
@@ -437,6 +439,27 @@ type GrokEvent = {
   usage?: { output_tokens?: number; completion_tokens?: number };
   tokens?: number;
 };
+
+/**
+ * True when a streaming-json line is a protocol event this adapter understands: a known `type`/`event` whose payload has
+ * the documented type (text-bearing events carry a string, `end` carries a string stopReason). Wrong-shape JSON is not one.
+ */
+export function grokEventRecognized(ev: unknown): boolean {
+  if (!ev || typeof ev !== "object" || Array.isArray(ev)) return false;
+  const e = ev as GrokEvent;
+  const type = e.type ?? e.event;
+  switch (type) {
+    case "text": case "assistant": case "message":
+      return [e.text, e.content, e.delta, e.data].some((v) => typeof v === "string");
+    case "end":
+      return e.stopReason === undefined || typeof e.stopReason === "string";
+    case "thought": case "step_start": case "step_finish": case "done": case "final": case "error":
+    case "tool_use": case "tool": case "tool_call": case "tool_start": case "tool_end":
+      return true;
+    default:
+      return false;
+  }
+}
 
 export function isGrokQuotaExhausted(value: string): boolean {
   const text = String(value ?? "");
@@ -516,7 +539,7 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
     : tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
 
   const cwd = req.cwd ?? agentRunCwd();
-  const env = grokEnv(withForeignCliContext("grok", req.env ?? process.env, selectionFor(req.agentId)));
+  const env = grokEnv(withForeignCliContext("grok", req.env ?? process.env, selectionFor(req.agentId, undefined, req.chatId)));
   if (!env.GROK_API_KEY && !env.XAI_API_KEY) {
     const key = (await readEnvVar("GROK_API_KEY")) || (await readEnvVar("XAI_API_KEY"));
     if (key) {
@@ -602,6 +625,8 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
     let stderr = "";
     let terminalCompleted = false;
     let terminalError = false;
+    /** streaming-json lines of a shape this adapter understands; zero + empty text + exit 0 = runtime_protocol_unrecognized. */
+    let recognizedEvents = 0;
     let terminalStopReason: string | undefined;
     let tokens: number | undefined;
     let lastEmit = 0;
@@ -632,6 +657,7 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
     });
 
     const handle = (ev: GrokEvent): void => {
+      if (grokEventRecognized(ev)) recognizedEvents += 1;
       const nested = ev.data && typeof ev.data === "object" ? ev.data as Record<string, unknown> : null;
       const eventSessionId = ev.sessionId ?? ev.session_id
         ?? (typeof nested?.sessionId === "string" ? nested.sessionId : undefined)
@@ -730,7 +756,10 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
         buffer = buffer.slice(nl + 1);
         if (!line) continue;
         try {
-          handle(JSON.parse(line) as GrokEvent);
+          const parsed: unknown = JSON.parse(line);
+          // Valid JSON that is not an object (`null`, a number) is neither an event nor assistant text.
+          if (parsed === null || typeof parsed !== "object") continue;
+          handle(parsed as GrokEvent);
         } catch {
           // JSON이 아니면(--format json 미지원/plain 모드) 텍스트로 누적.
           text += (text ? "\n" : "") + line;
@@ -747,7 +776,10 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
       stderr += stderrDecoder.end();
       if (buffer.trim()) {
         const line = buffer.trim();
-        try { handle(JSON.parse(line) as GrokEvent); }
+        try {
+          const parsed: unknown = JSON.parse(line);
+          if (parsed !== null && typeof parsed === "object") handle(parsed as GrokEvent);
+        }
         catch { text += (text ? "\n" : "") + line; }
       }
       buffer = "";
@@ -800,6 +832,12 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
       }
       // assistant text는 오류 증거가 아니다. streaming-json `type:error`와 실제 stderr만
       // handle()이 stderr에 모으므로, 답변이 같은 문구를 인용해도 상태를 오염시키지 않는다.
+      if (code === 0 && recognizedEvents === 0 && !text.trim() && !terminalError) {
+        // Exit 0, no recognized streaming-json event and no text: typed failure, not an empty "success".
+        const protocolFailure = runtimeProtocolUnrecognizedFailure(KIND, stderr);
+        resolve({ text: protocolFailure.message, tokens, sessionId, ownerControlTerminal: "uncertain", failure: protocolFailure });
+        return;
+      }
       if (code === 0) {
         clearProviderHealth("grok");
         invalidateUsage("grok");

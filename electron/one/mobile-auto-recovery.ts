@@ -100,11 +100,11 @@ function recoveryPrompt(input: {
   diagnosis: string;
 }): string {
   return [
-    "Continue the person's unfinished request as Agentlas One.",
-    "Inspect current state using read-only authority first. Never repeat an outward action merely because its acknowledgement is missing.",
-    "Find a different safe route, verify the original requested outcome, and return only the concise useful result.",
-    "If new authority, identity, or an irreversible choice is truly required, ask one short contextual question through One's normal decision flow.",
-    "Do not expose error codes, stack traces, paths, receipts, attempts, runtime names, databases, or internal component names.",
+    "task: continue the person's unfinished request as One",
+    "first: read-only inspection of current state; never repeat an outward action just because its acknowledgement is missing",
+    "then: a different safe route, verify the original outcome, return only the concise useful result",
+    "new authority, identity, or irreversible choice needed: one short contextual question via One's normal decision flow",
+    "never expose error codes, stack traces, paths, receipts, attempts, runtime names, databases, internal components",
     `Original request: ${input.goal}`,
     ...(input.diagnosis.trim() ? [`One's private diagnosis: ${input.diagnosis.trim()}`] : []),
   ].join("\n");

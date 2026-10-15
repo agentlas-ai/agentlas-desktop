@@ -59,15 +59,15 @@ function manifest(id: string, release: ToolchainAssetVersion) {
     input_schema: release.contract.inputSchema, input_examples: release.contract.examples.map(e => e.input) };
 }
 const GENERATOR_PROMPT = [
-  "Write routing test requests for this tool contract and the other currently permitted tools.",
-  'Return ONLY JSON: {"positives":[5 strings],"negatives":[5 strings]}. Exactly five of each.',
-  "Positives are different full-sentence realistic owner requests this tool handles, paraphrasing its purpose with concrete input values.",
-  "Negatives are near-miss requests with a different outcome, opposite effect or another tool's job. Use the contract language. Do not execute anything.",
+  "task: routing test requests for this tool contract vs the other permitted tools; execute nothing",
+  'output: {"positives":[5 strings],"negatives":[5 strings]}',
+  "positives: distinct full-sentence owner requests this tool handles, paraphrased, concrete input values",
+  "negatives: near-miss requests (different outcome, opposite effect, another tool's job), contract language",
 ].join("\n");
 const SELECTOR_PROMPT = [
-  "You are a fresh assistant with no conversation history. Each task has only the contracts returned by actual search, possibly none.",
-  "Choose a returned tool only when it clearly fits, otherwise null. Bind input exactly per its input_schema. Do not execute anything.",
-  'Return ONLY JSON: {"answers":[{"task":index,"toolchain_id":string|null,"version":number|null,"content_hash":string|null,"input":object}]}. One answer for each of ten tasks; echo exact candidate identity/version/hash. For null use null version/hash and empty input.',
+  "task: per task pick a returned tool only if it clearly fits, else null; input per input_schema; execute nothing",
+  'output: {"answers":[{"task":index,"toolchain_id":string|null,"version":number|null,"content_hash":string|null,"input":object}]}',
+  "one answer per task (ten); echo exact identity/version/hash; null = null version/hash, empty input",
 ].join("\n");
 function parse(text: string | null): Record<string, unknown> {
   try { const value = JSON.parse(text ?? ""); if (value && typeof value === "object" && !Array.isArray(value)) return value; } catch { /* fail closed */ }
@@ -191,8 +191,9 @@ export async function prepareAssetFreshSession(before: ToolchainAsset, release: 
           && (old.nativeIntentId === lease.intentId || lease.retest === "reuse" && (old.passed || Date.now() - Date.parse(old.at) < ASSET_FRESH_RETEST_DELAY_MS))) return copy(old);
         const pool = candidates();
         const generated = await callToolchainPreparation({ purpose: "fresh-session-evaluation", producer: lease.runtime,
-          systemPrompt: GENERATOR_PROMPT, input: JSON.stringify({ contract: manifest(binding.id, release),
-            other_tools: pool.filter(c => c.id !== binding.id).map(c => manifest(c.id, c.release)) }), deadlineAt: lease.deadlineAt, signal });
+          systemPrompt: GENERATOR_PROMPT, input: JSON.stringify({ // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.toolchain.asset-cold-start.generator.user).
+            other_tools: pool.filter(c => c.id !== binding.id).map(c => manifest(c.id, c.release)),
+            contract: manifest(binding.id, release) }), deadlineAt: lease.deadlineAt, signal });
         check(); if (!generated.text || !generated.runtimeReceipt) throw Error("toolchain_cold_start_generation_unavailable");
         const data = parse(generated.text), positives = probes(data.positives), negatives = probes(data.negatives), tasks = [...positives, ...negatives];
         if (new Set(tasks).size !== 10) throw Error("toolchain_cold_start_distinct_requests_required");

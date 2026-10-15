@@ -1,5 +1,6 @@
 import { assertCurrentHistoryRunnerResult } from "./observed-runner";
-import { reportModelPayload, ledgerFromApiBody } from "./model-call-ledger";
+import { openStatelessGeneration, statelessHistoryTokens, type StatelessWindowSource } from "./stateless-generation";
+import { reportModelPayload, reportCachePlan, reportModelEndpoint, ledgerFromApiBody } from "./model-call-ledger";
 import { currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 // BYOK 직접 API 러너 — Anthropic Messages / OpenAI Chat Completions / Google Generative API.
@@ -15,7 +16,13 @@ import { assertScienceRecoveryRequest } from "../science-host/recovery-authority
 import { readApiKey } from "../secrets/vault";
 import type { Runner, RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
 import { cumulativeSurfaceGateText, RuntimeTurnUnsettledError, runtimeHttpFailure, workforceZeroToolsEnforcement, wrapSystemPrompt } from "./runner";
-import { withRollingCacheBreakpoints, cachedTokensFromGeminiUsage } from "./prompt-cache";
+import { applyPlannedMessageBreakpoints, cachedTokensFromGeminiUsage } from "./prompt-cache";
+import { cacheCapabilityFor, planCache, segmentOf, type CachePlan, type CacheSegment } from "./cache-planner";
+import { readByokWire } from "./byok-wire";
+import {
+  ensureGeminiCachedContent, forgetGeminiCachedContent, geminiBodyWithCache, isGeminiCacheMissing, readGeminiCacheSetting,
+  GEMINI_CACHE_DEFAULT, type EnsureOutcome,
+} from "./gemini-explicit-cache";
 import { createOwnerControlBoundary, ownerControlHistoryImages } from "./owner-control-pump";
 import { abortReasonError } from "./abort-reason";
 import {
@@ -29,8 +36,8 @@ import {
   type LocalChatContent,
 } from "./local-tool-loop";
 import { tStatus } from "./status-i18n";
-import { compactHistoryToBudget, estimateTransportTokens, stableHistoryWindow } from "./compact";
-import { GENERATION_CONTEXT_RATIO } from "./session-generation";
+import { schemaFallbackInstruction, schemaFallbackPromptPart, observationSystemWithSchema } from "../../shared/runtime-capabilities";
+import { compactHistoryToBudget, estimateTransportTokens } from "./compact";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import {
   ANTHROPIC_1M_BETA,
@@ -74,7 +81,8 @@ function resolveModel(backend: ByokBackend, req: RunnerRequest): string {
 function prepareContext(
   backend: ByokBackend,
   req: RunnerRequest,
-  _events: RunnerEvents,
+  events: RunnerEvents,
+  schemaInPrompt = false,
 ): { model: string; recent: RunnerRequest["history"]; system: string } {
   assertScienceRecoveryRequest(req, "byok", backend);
   const model = resolveModel(backend, req);
@@ -88,10 +96,14 @@ function prepareContext(
   const recent = req.history;
   // 서피스 게이트는 러너 공통 규칙(runner.ts cumulativeSurfaceGateText)을 따른다.
   const surfaceGateText = cumulativeSurfaceGateText(recent, req.surfaceUserPrompt ?? req.userPrompt);
+  // The Anthropic Messages and Gemini paths build no response schema; the shape goes in the prompt and the status says so
+  // (RunnerRequest.outputSchema contract). The OpenAI-compatible path enforces it with response_format instead.
+  const schemaFallback = schemaInPrompt && req.outputSchema ? schemaFallbackInstruction(req.outputSchema.schema) : "";
+  if (schemaFallback) events.onStatus(tStatus(req.locale, "schemaInPromptOnly"));
   return {
     model,
     recent,
-    system: req.minimalObservation ? req.systemPrompt : wrapSystemPrompt(
+    system: req.minimalObservation ? observationSystemWithSchema(req.systemPrompt, schemaInPrompt ? req.outputSchema?.schema : undefined) : wrapSystemPrompt(
       req.systemPrompt,
       req.locale,
       req.permission,
@@ -106,6 +118,8 @@ function prepareContext(
       undefined,
       req.sciencePromptProfile,
       req.judgmentOnly === true ? "host-judgment" : undefined,
+      schemaInPrompt && req.outputSchema ? [schemaFallbackPromptPart(req.outputSchema.schema)] : undefined,
+      req.systemPromptComposition,
     ),
   };
 }
@@ -187,27 +201,77 @@ type AnthropicContent =
     } & CacheControl)
   // 도구 왕복 — 어시스턴트가 tool_use 를 내면 우리가 실행하고 tool_result 로 답한다.
   | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
-  | { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean };
+  | { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean }
+  // Opaque continuation blocks: the provider requires them back unchanged (signature included) before the tool_use they precede.
+  | { type: "thinking"; thinking: string; signature: string }
+  | { type: "redacted_thinking"; data: string };
 
 type AnthropicMessage = { role: "user" | "assistant"; content: string | AnthropicContent[] };
 
 /**
- * 대화 히스토리 캐시 브레이크포인트 (2026-08-18).
- *
- * system 블록에만 breakpoint를 두면 캐시되는 건 프리픽스뿐이고, 턴이 쌓일수록 커지는
- * **대화 본문은 매 호출 전액 정가**로 재처리됐다. Anthropic은 breakpoint를 4개까지
- * 허용하므로, 이번 턴 입력 **직전**(= 다음 턴에도 바이트가 그대로 남는 마지막 지점)에
- * 하나를 더 둔다. 다음 턴은 그 지점까지를 0.1배로 읽는다.
- *
- * 호환 엔드포인트(GLM/Kimi/DeepSeek 등)에는 붙이지 않는다 — 서버측 자동 캐싱을 쓰고
- * 이 필드를 거부할 수 있다(위 systemField와 같은 이유).
+ * Gemini generateContent caches implicitly (2.5+). Explicit cachedContents is the owner's opt-in (gemini-explicit-cache.ts);
+ * the plan records the stable-prefix digest (systemInstruction + tools) and, when used, whether the cache was created or
+ * reused — otherwise why not.
  */
-function withHistoryCacheBreakpoint(messages: AnthropicMessage[]): AnthropicMessage[] {
-  // tool_use / tool_result blocks accept cache_control too (Anthropic docs, prompt caching). The old
-  // text/image-only rule left every tool-loop step without a history breakpoint, so a 5+ step turn
-  // re-billed the whole growing transcript at full price each step. Mark the final block (newest
-  // tool_result) and the turn boundary before it; see prompt-cache.ts.
-  return withRollingCacheBreakpoints(messages as never) as AnthropicMessage[];
+function geminiCachePlan(body: { systemInstruction?: unknown; tools?: unknown; contents: unknown[] }, explicit?: EnsureOutcome): CachePlan {
+  const segments: CacheSegment[] = [];
+  if (body.tools) segments.push(segmentOf("tools", "S0", "stable-prefix", JSON.stringify(body.tools)));
+  segments.push(segmentOf("system", "S1", "stable-prefix", JSON.stringify(body.systemInstruction ?? "")));
+  const last = body.contents.length - 1;
+  if (last >= 1) segments.push({ id: "history", layer: "S4", cacheClass: "append-only", bytes: JSON.stringify(body.contents.slice(0, last)).length });
+  if (last >= 0) segments.push({ id: "owner-input", layer: "S5", cacheClass: "volatile-tail", bytes: JSON.stringify(body.contents[last]).length });
+  const plan = planCache({ capability: cacheCapabilityFor({ family: "gemini" }), segments });
+  if (!explicit) return plan;
+  if (explicit.status === "skipped") return explicit.reason === "gemini_explicit_off" ? plan : { ...plan, lossReasons: [...plan.lossReasons, explicit.reason] };
+  return { ...plan, lossReasons: plan.lossReasons.filter((reason) => reason !== "gemini_implicit_only"), geminiExplicit: explicit.status };
+}
+
+/**
+ * Anthropic wire body parts with the cache plan applied (cache-planner.ts is the only place that decides placement).
+ *
+ * Segments in render order (tools -> system -> messages):
+ *   tools (S0) + system (S1)  stable-prefix  -> one breakpoint at the end of the run (the system block)
+ *   history (S4)              append-only    -> the turn boundary: messages[0..n-2], marker on message n-2's last block
+ *   tool-result (S4)          append-only    -> mid tool loop the newest tool_result (next step reads it from cache)
+ *   owner-input (S5)          volatile-tail  -> the final message when it is this turn's user input: never cached
+ * Compatible third-party endpoints get no markers (they cache server-side and may reject the field).
+ */
+function anthropicCachePlan(input: { native: boolean; model: string; system: string; tools: unknown[]; messages: AnthropicMessage[] }): {
+  plan: CachePlan; messageIndexBySegment: Record<string, number>;
+} {
+  const { messages } = input;
+  const segments: CacheSegment[] = [];
+  const messageIndexBySegment: Record<string, number> = {};
+  if (input.tools.length > 0) segments.push(segmentOf("tools", "S0", "stable-prefix", JSON.stringify(input.tools)));
+  segments.push(segmentOf("system", "S1", "stable-prefix", input.system));
+  const lastIndex = messages.length - 1;
+  if (lastIndex >= 1) {
+    messageIndexBySegment.history = lastIndex - 1;
+    segments.push({ id: "history", layer: "S4", cacheClass: "append-only", bytes: JSON.stringify(messages.slice(0, lastIndex)).length });
+  }
+  if (lastIndex >= 0) {
+    const last = messages[lastIndex];
+    const carriesToolResult = Array.isArray(last.content) && last.content.some((block) => block.type === "tool_result");
+    messageIndexBySegment[carriesToolResult ? "tool-result" : "owner-input"] = lastIndex;
+    segments.push({ id: carriesToolResult ? "tool-result" : "owner-input", layer: carriesToolResult ? "S4" : "S5",
+      cacheClass: carriesToolResult ? "append-only" : "volatile-tail", bytes: JSON.stringify(last).length });
+  }
+  const plan = planCache({ capability: cacheCapabilityFor({ family: "anthropic", model: input.model, native: input.native }), segments, model: input.model });
+  return { plan, messageIndexBySegment };
+}
+
+function anthropicWire(input: { native: boolean; model: string; system: string; tools: unknown[]; messages: AnthropicMessage[] }): {
+  system: string | Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }>; messages: AnthropicMessage[]; plan: CachePlan;
+} {
+  const { plan, messageIndexBySegment } = anthropicCachePlan(input);
+  if (!input.native) return { system: input.system, messages: input.messages, plan };
+  // Prompt caching: only real Anthropic honors `cache_control`; below the per-model minimum Anthropic silently skips it.
+  const marked = plan.anthropicBreakpoints.some((point) => point.segmentId === "system");
+  return {
+    system: [{ type: "text", text: input.system, ...(marked ? { cache_control: { type: "ephemeral" as const } } : {}) }],
+    messages: applyPlannedMessageBreakpoints(input.messages as never, plan, messageIndexBySegment) as AnthropicMessage[],
+    plan,
+  };
 }
 
 /**
@@ -227,6 +291,28 @@ async function runAnthropicMessages(
   return sink.value && result.contextInputTokens === undefined ? { ...result, contextInputTokens: sink.value } : result;
 }
 
+/** Gemini BadRequest: true only when a structured field violation points at the tools / function declarations. */
+export function geminiToolDeclarationRejected(body: string): boolean {
+  try {
+    const details = (JSON.parse(body) as { error?: { details?: Array<{ fieldViolations?: Array<{ field?: unknown }> }> } })?.error?.details;
+    return Array.isArray(details) && details.some((detail) => Array.isArray(detail?.fieldViolations)
+      && detail.fieldViolations.some((violation) => typeof violation?.field === "string" && /^tools(\[|\.|$)/.test(violation.field)));
+  } catch {
+    return false;
+  }
+}
+
+/** The conversation's generation for a BYOK loop (stateless-generation.ts, native-harness notyet NH10). */
+function byokGenerations(req: RunnerRequest, model: string) {
+  return openStatelessGeneration({ runtime: "byok", chatId: req.chatId, ownerId: req.runtimeSessionOwnerId ?? req.agentId ?? null,
+    model, history: req.history, locale: req.locale, agentId: req.agentId ?? null });
+}
+
+/** The window the rotation rule may read: a catalog/built-in number is evidence, the unknown default is not. */
+function byokGenerationWindow(capacity: { window: number; source: "built-in" | "catalog" | "unknown"; known: boolean }) {
+  return { tokens: capacity.window, source: capacity.source as StatelessWindowSource, known: capacity.known };
+}
+
 async function runAnthropicMessagesInner(
   backend: ByokBackend,
   baseUrl: string,
@@ -237,18 +323,19 @@ async function runAnthropicMessagesInner(
 ): Promise<RunnerResult> {
   events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
 
-  const { model, recent, system } = prepareContext(backend, req, events);
+  const { model, recent, system } = prepareContext(backend, req, events, true);
 
   const messages: AnthropicMessage[] = [];
+  const historyMessage = (m: RunnerRequest["history"][number]): AnthropicMessage => {
+    const images = ownerControlHistoryImages(m);
+    return { role: m.role as "user" | "assistant", content: images.length ? [
+      ...images.map((image): AnthropicContent => ({ type: "image",
+        source: { type: "base64", media_type: image.mediaType, data: image.data } })),
+      { type: "text", text: m.text },
+    ] : m.text };
+  };
   for (const m of recent) {
-    if (m.role === "user" || m.role === "assistant") {
-      const images = ownerControlHistoryImages(m);
-      messages.push({ role: m.role, content: images.length ? [
-        ...images.map((image): AnthropicContent => ({ type: "image",
-          source: { type: "base64", media_type: image.mediaType, data: image.data } })),
-        { type: "text", text: m.text },
-      ] : m.text });
-    }
+    if (m.role === "user" || m.role === "assistant") messages.push(historyMessage(m));
   }
 
   // 마지막 user 메시지는 image가 있으면 content array
@@ -273,21 +360,6 @@ async function runAnthropicMessagesInner(
     headers["anthropic-beta"] = ANTHROPIC_1M_BETA;
   }
 
-  // Prompt caching: only real Anthropic honors `cache_control`. Marking the
-  // (large, stable) system prompt as a cache breakpoint bills cached input
-  // ~90% cheaper on hits and consumes far less of a subscription's usage
-  // limit; below the per-model minimum (~1024 tokens) Anthropic silently skips
-  // it, so it is a harmless no-op for short prompts. Third-party
-  // Anthropic-compatible endpoints (GLM/Kimi/DeepSeek) keep the plain string
-  // form — they cache automatically server-side and may reject the extra field.
-  const systemField =
-    backend === "anthropic"
-      ? [{ type: "text" as const, text: system, cache_control: { type: "ephemeral" as const } }]
-      : system;
-
-  // 히스토리 breakpoint도 진짜 Anthropic에서만(호환 엔드포인트는 이 필드를 거부할 수 있다).
-  const wireMessages = backend === "anthropic" ? withHistoryCacheBreakpoint(messages) : messages;
-
   /*
    * ★도구 — 이 러너에는 도구 루프가 아예 없었다(파일 전체에 "tool" 문자열 0회).
    *
@@ -310,6 +382,19 @@ async function runAnthropicMessagesInner(
   const outputLimit = req.maxOutputTokens ?? Math.min(8_192, Math.floor(capacity.window / 4));
   let transmittedHistoryCount = req.history.filter((row) => row.role === "user" || row.role === "assistant").length;
   const historyBudgetState = { value: req.history.reduce((sum, row) => sum + estimateTransportTokens(row.text) + 12, 0) };
+  // The conversation's "session" (stateless-generation.ts): the handoff it installed, a new one at a settled boundary when
+  // a request's input reaches 80% of the window, acknowledged by the next complete response. Silent.
+  const generations = byokGenerations(req, model);
+  const installGeneration = (digest: string, rows: RunnerRequest["history"]): void => {
+    const next = rows.filter((row) => row.role === "user" || row.role === "assistant").map(historyMessage);
+    if (next[0]?.role === "user" && typeof next[0].content === "string") next[0] = { role: "user", content: `${digest}\n\n${next[0].content}` };
+    else next.unshift({ role: "user", content: digest });
+    messages.splice(0, transmittedHistoryCount, ...next);
+    transmittedHistoryCount = next.length;
+    historyBudgetState.value = statelessHistoryTokens(digest, rows);
+  };
+  if (generations.seed) installGeneration(generations.seed.digest, generations.seed.rows);
+  let lastRequestTokens: number | null = null, lastObservedInput: number | null = null;
 
   let acc = "";
   let lastEmit = 0;
@@ -336,27 +421,15 @@ async function runAnthropicMessagesInner(
       // Keep tool_result blocks together before appending ordinary user text.
       for (const entry of batch) messages.push({ role: "user", content: entry.text });
     }
-    const outgoingBody = () => ({ model, max_tokens: outputLimit, stream: true, system: systemField,
-      messages: backend === "anthropic" ? withHistoryCacheBreakpoint(messages) : messages,
-      ...(anthropicTools.length > 0 ? { tools: anthropicTools } : {}) });
-    // The conversation's "session": a handoff that only changes when history outgrows 80% of the model's own window
-    // (compact.ts stableHistoryWindow), so the cached prefix stays byte-identical. Silent; nothing is shown to the user.
-    if (turn === 0 && req.history.length > 0) {
-      const ceiling = Math.floor(capacity.window * GENERATION_CONTEXT_RATIO)
-        - (estimateTransportTokens(JSON.stringify(outgoingBody())) - historyBudgetState.value + outputLimit);
-      if (ceiling > 0 && historyBudgetState.value > ceiling) {
-        const stable = stableHistoryWindow(req.history.filter((row) => row.role === "user" || row.role === "assistant"), {
-          ceilingTokens: ceiling, targetTokens: Math.min(ceiling, Math.floor(capacity.window * (1 - GENERATION_CONTEXT_RATIO))), locale: req.locale });
-        if (stable?.digest) {
-          const next = stable.recent.map((row) => ({ role: row.role, content: row.text } as AnthropicMessage));
-          if (next[0]?.role === "user" && typeof next[0].content === "string") next[0] = { role: "user", content: `${stable.digest}\n\n${next[0].content}` };
-          else next.unshift({ role: "user", content: stable.digest });
-          messages.splice(0, transmittedHistoryCount, ...next);
-          transmittedHistoryCount = next.length;
-          historyBudgetState.value = stable.estimatedTokens;
-        }
-      }
-    }
+    const outgoingWire = () => anthropicWire({ native: backend === "anthropic", model, system, tools: anthropicTools, messages });
+    const outgoingBody = () => { const wire = outgoingWire(); return { model, max_tokens: outputLimit, stream: true, system: wire.system,
+      messages: wire.messages, ...(anthropicTools.length > 0 ? { tools: anthropicTools } : {}) }; };
+    // Rotation at this settled boundary (turn start, or after a tool step whose results are all in): the request's INPUT
+    // against 80% of the window. Input + output reserve is admission, checked next, and never records a generation.
+    const rotation = await generations.boundary({ boundary: turn === 0 ? "turn-start" : "tool-step", step: turn,
+      window: byokGenerationWindow(capacity), requestTokens: estimateTransportTokens(JSON.stringify(outgoingBody())),
+      historyTokens: historyBudgetState.value, observedLastInput: lastObservedInput, lastRequestTokens });
+    if (rotation.action === "rotated") installGeneration(rotation.digest, rotation.rows);
     if (!byokHistoryAdmission({ req, events, window: capacity.window, capacityKnown: capacity.known, outputReserve: outputLimit,
       budgetState: historyBudgetState,
       outgoingBody,
@@ -374,6 +447,9 @@ async function runAnthropicMessagesInner(
     })) return assertCurrentHistoryRunnerResult({ text: "", failure: byokContextFailure(req) });
     assertScienceRecoveryRequest(req, "byok", backend);
     reportModelPayload(() => ledgerFromApiBody(outgoingBody(), { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
+    const sentRequestTokens = estimateTransportTokens(JSON.stringify(outgoingBody()));
+    reportCachePlan(() => outgoingWire().plan);
+    reportModelEndpoint({ url: baseUrl });
     const usageAttempt = measuredUsage.start();
     const beforeInput = inputTokens + cacheRead + cacheWrite;
     const beforeCacheRead = cacheRead;
@@ -389,6 +465,12 @@ async function runAnthropicMessagesInner(
     }));
 
     if (!resp.ok) {
+      // HTTP 413 is a machine status: the request is over the endpoint's size limit. Typed capacity refusal, never replayed.
+      if (resp.status === 413) {
+        const observedUsage = measuredUsage.total();
+        return assertCurrentHistoryRunnerResult({ text: acc.trim(), failure: byokContextFailure(req), ...(observedUsage ? { observedUsage } : {}),
+          workforcePermissionEnforcement: broker?.finish(false) });
+      }
       const failure = runtimeHttpFailure(resp.status, "byok", "Anthropic");
       if (failure) {
         const observedUsage = measuredUsage.total();
@@ -401,6 +483,8 @@ async function runAnthropicMessagesInner(
 
     // 이번 턴에 모인 tool_use 블록. index 로 들어와 조각조각 쌓인다.
     const pendingToolUse = new Map<number, { id: string; name: string; json: string }>();
+    /** Thinking blocks of this response, verbatim (text + signature, or the redacted payload), by content index. */
+    const opaqueThinking = new Map<number, { type: "thinking"; thinking: string; signature: string } | { type: "redacted_thinking"; data: string }>();
     let stopReason: string | null = null;
     let conflictingStopReason = false;
     let turnInputObserved = false;
@@ -417,12 +501,22 @@ async function runAnthropicMessagesInner(
         const event = JSON.parse(payload) as {
           type: string;
           index?: number;
-          content_block?: { type?: string; id?: string; name?: string };
-          delta?: { type?: string; text?: string; partial_json?: string; stop_reason?: string };
+          content_block?: { type?: string; id?: string; name?: string; thinking?: string; signature?: string; data?: string };
+          delta?: { type?: string; text?: string; partial_json?: string; stop_reason?: string; thinking?: string; signature?: string };
           message?: { usage?: Record<string, number | null | undefined> };
           usage?: Record<string, number | null | undefined>;
         };
-        if (event.type === "content_block_start" && event.content_block?.type === "tool_use") {
+        if (event.type === "content_block_start" && event.content_block?.type === "thinking") {
+          opaqueThinking.set(event.index ?? 0, { type: "thinking", thinking: event.content_block.thinking ?? "", signature: event.content_block.signature ?? "" });
+        } else if (event.type === "content_block_start" && event.content_block?.type === "redacted_thinking") {
+          opaqueThinking.set(event.index ?? 0, { type: "redacted_thinking", data: event.content_block.data ?? "" });
+        } else if (event.type === "content_block_delta" && event.delta?.type === "thinking_delta") {
+          const block = opaqueThinking.get(event.index ?? 0);
+          if (block?.type === "thinking") block.thinking += event.delta.thinking ?? "";
+        } else if (event.type === "content_block_delta" && event.delta?.type === "signature_delta") {
+          const block = opaqueThinking.get(event.index ?? 0);
+          if (block?.type === "thinking") block.signature += event.delta.signature ?? "";
+        } else if (event.type === "content_block_start" && event.content_block?.type === "tool_use") {
           pendingToolUse.set(event.index ?? 0, {
             id: event.content_block.id ?? "",
             name: event.content_block.name ?? "",
@@ -440,6 +534,7 @@ async function runAnthropicMessagesInner(
           }
         } else if (event.type === "message_start" && event.message?.usage) {
           const usage = event.message.usage;
+          reportModelEndpoint({ reportedModel: (event.message as { model?: string }).model });
           turnInputObserved = Number.isSafeInteger(usage.input_tokens) && Number(usage.input_tokens) >= 0
             && [usage.input_tokens, usage.cache_read_input_tokens, usage.cache_creation_input_tokens]
               .every((value) => value == null || (Number.isSafeInteger(value) && value >= 0));
@@ -492,6 +587,11 @@ async function runAnthropicMessagesInner(
         || (stopReason === "tool_use" && pendingToolUse.size > 0));
     if (!completeBoundary) {
       const error = new RuntimeTurnUnsettledError("byok", req.locale);
+      // The provider's own structured stop reason: the context window ran out. Same typed refusal as a pre-send overflow.
+      if (stopReason === "model_context_window_exceeded" && messageStopped) {
+        return assertCurrentHistoryRunnerResult({ text: acc.trim(), ownerControlTerminal: "uncertain", failure: byokContextFailure(req),
+          workforcePermissionEnforcement: broker?.finish(false) });
+      }
       return assertCurrentHistoryRunnerResult({ text: acc.trim() || error.message, ownerControlTerminal: "uncertain",
         failure: stopReason === "refusal"
           ? { ...byokFailure("refused", acc.trim() || "Anthropic refused the request."), providerCode: "refusal" }
@@ -500,6 +600,9 @@ async function runAnthropicMessagesInner(
     }
     if (req.signal?.aborted) throw abortReasonError(req);
     ownerControl.applied();
+    generations.completed(turn, turnInputObserved && turnInput > 0 ? turnInput : null);
+    lastObservedInput = turnInputObserved && turnInput > 0 ? turnInput : null;
+    lastRequestTokens = sentRequestTokens;
 
     if (req.scienceCollectionCapability && stopReason === "tool_use" && pendingToolUse.size === 0) {
       throw new Error("science_collection_tool_frame_invalid");
@@ -532,6 +635,8 @@ async function runAnthropicMessagesInner(
     // 어시스턴트 턴을 그대로 되돌려 넣는다(텍스트 + tool_use). 그래야 다음 호출에서
     // tool_result 가 짝을 찾는다.
     const assistantContent: AnthropicContent[] = [];
+    // Thinking blocks first, byte-for-byte as received: a tool_use turn is rejected when its thinking/signature is altered or dropped.
+    for (const [, block] of [...opaqueThinking.entries()].sort((a, b) => a[0] - b[0])) assistantContent.push({ ...block });
     if (acc.trim()) assistantContent.push({ type: "text", text: acc });
     const resultContent: AnthropicContent[] = [];
     for (const [, entry] of orderedToolUse) {
@@ -711,18 +816,24 @@ async function runOpenAiCompletionWithMainToolLoop(
   const { model, recent, system } = prepareContext(backend, req, events);
   const capacity = byokContextCapacity(backend, model, req, events);
   const endpoint = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
+  reportModelEndpoint({ url: endpoint });
+  // DeepSeek may speak its stateless Responses wire when the owner chose it (byok-wire.ts); Chat Completions otherwise.
+  const wire = backend === "deepseek" ? await readByokWire("deepseek").catch(() => "chat" as const) : "chat";
   return runLocalOpenAiChat(
     {
       req,
       events,
       runtimeKind: "byok",
+      renderOutputSchemaSystem: () => ({ system: prepareContext(backend, req, events, true).system }),
       recoveryBackend: backend,
+      ...(wire === "responses" ? { responsesWire: "deepseek" as const } : {}),
       host: baseUrl.replace(/\/$/, ""),
       chatEndpoint: endpoint,
       headers: { authorization: `Bearer ${key}` },
       providerLabel,
       model,
       estimatedContextWindow: capacity.window,
+      capacitySource: capacity.source,
       estimatedOutputReserve: req.maxOutputTokens ?? Math.min(8_192, Math.floor(capacity.window / 4)),
       // A cloud provider refuses an oversized request explicitly; an unknown window is not a reason to refuse first.
       ...(capacity.known ? {} : { unknownCapacityProviderEnforced: true as const }),
@@ -844,7 +955,7 @@ export const runGoogleByok: Runner = async (
 
   events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
 
-  const { model, recent, system } = prepareContext("google", req, events);
+  const { model, recent, system } = prepareContext("google", req, events, true);
 
   type GoogleFunctionCall = { id?: unknown; name?: unknown; args?: unknown };
   /** Keep provider Parts verbatim in model history. Gemini thought signatures
@@ -892,6 +1003,24 @@ export const runGoogleByok: Runner = async (
   const outputLimit = req.maxOutputTokens ?? Math.min(8_192, Math.floor(capacity.window / 4));
   let transmittedHistoryCount = req.history.filter((row) => row.role === "user" || row.role === "assistant").length;
   const historyBudgetState = { value: req.history.reduce((sum, row) => sum + estimateTransportTokens(row.text) + 12, 0) };
+  // Same generation rule as the Anthropic/OpenAI paths (stateless-generation.ts); Google message/tool-result shapes kept.
+  const generations = byokGenerations(req, model);
+  const installGeneration = (digest: string, rows: RunnerRequest["history"]): void => {
+    const next = rows.filter((row) => row.role === "user" || row.role === "assistant").map((row) => ({
+      role: row.role === "user" ? "user" as const : "model" as const,
+      parts: [
+        ...(row.role === "user" ? ownerControlHistoryImages(row).map((image) => ({ inlineData: { mimeType: image.mediaType, data: image.data } })) : []),
+        { text: row.text },
+      ] as GooglePart[] }));
+    const firstText = next[0]?.role === "user" ? next[0].parts.find((part) => typeof part.text === "string") : undefined;
+    if (firstText) firstText.text = `${digest}\n\n${firstText.text}`;
+    else next.unshift({ role: "user", parts: [{ text: digest }] });
+    contents.splice(0, transmittedHistoryCount, ...next);
+    transmittedHistoryCount = next.length;
+    historyBudgetState.value = statelessHistoryTokens(digest, rows);
+  };
+  if (generations.seed) installGeneration(generations.seed.digest, generations.seed.rows);
+  let lastRequestTokens: number | null = null, lastObservedInput: number | null = null;
   let acc = "";
   let lastEmit = 0;
   let reachedAnswer = false;
@@ -909,6 +1038,8 @@ export const runGoogleByok: Runner = async (
   };
 
   const ownerControl = createOwnerControlBoundary(req);
+  // Explicit cachedContents only when the owner turned it on (doc 13 §7); off, nothing below changes the request.
+  const geminiCacheSetting = await readGeminiCacheSetting().catch(() => ({ ...GEMINI_CACHE_DEFAULT }));
   try {
   for (let turn = 0; turn < MAX_BYOK_TOOL_TURNS; turn += 1) {
     if (req.signal?.aborted) throw abortReasonError(req);
@@ -921,24 +1052,11 @@ export const runGoogleByok: Runner = async (
       generationConfig: { maxOutputTokens: outputLimit },
       ...(includeTools ? { tools: [{ functionDeclarations }] } : {}),
     });
-    // Same session rule as the Anthropic/OpenAI paths: the history only changes when it outgrows 80% of the model's own
-    // window (compact.ts stableHistoryWindow), so Gemini's implicit prefix cache keeps hitting. Silent.
-    if (turn === 0 && req.history.length > 0) {
-      const ceiling = Math.floor(capacity.window * GENERATION_CONTEXT_RATIO)
-        - (estimateTransportTokens(JSON.stringify(outgoingBody())) - historyBudgetState.value + outputLimit);
-      if (ceiling > 0 && historyBudgetState.value > ceiling) {
-        const stable = stableHistoryWindow(req.history.filter((row) => row.role === "user" || row.role === "assistant"), {
-          ceilingTokens: ceiling, targetTokens: Math.min(ceiling, Math.floor(capacity.window * (1 - GENERATION_CONTEXT_RATIO))), locale: req.locale });
-        if (stable?.digest) {
-          const next = stable.recent.map((row) => ({ role: row.role === "user" ? "user" as const : "model" as const, parts: [{ text: row.text }] as GooglePart[] }));
-          if (next[0]?.role === "user") next[0].parts[0].text = `${stable.digest}\n\n${next[0].parts[0].text}`;
-          else next.unshift({ role: "user", parts: [{ text: stable.digest }] });
-          contents.splice(0, transmittedHistoryCount, ...next);
-          transmittedHistoryCount = next.length;
-          historyBudgetState.value = stable.estimatedTokens;
-        }
-      }
-    }
+    // Rotation at this settled boundary: input against 80% of the window (admission, next, is a separate check).
+    const rotation = await generations.boundary({ boundary: turn === 0 ? "turn-start" : "tool-step", step: turn,
+      window: byokGenerationWindow(capacity), requestTokens: estimateTransportTokens(JSON.stringify(outgoingBody())),
+      historyTokens: historyBudgetState.value, observedLastInput: lastObservedInput, lastRequestTokens });
+    if (rotation.action === "rotated") installGeneration(rotation.digest, rotation.rows);
     if (!byokHistoryAdmission({ req, events, window: capacity.window, capacityKnown: capacity.known, outputReserve: outputLimit,
       budgetState: historyBudgetState,
       outgoingBody,
@@ -953,8 +1071,20 @@ export const runGoogleByok: Runner = async (
       },
     })) return assertCurrentHistoryRunnerResult({ text: "", failure: byokContextFailure(req) });
     const requestBody = outgoingBody();
+    const sentRequestTokens = estimateTransportTokens(JSON.stringify(requestBody));
+    reportModelEndpoint({ url });
     assertScienceRecoveryRequest(req, "byok", "google");
     reportModelPayload(() => ledgerFromApiBody(requestBody, { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
+    const explicitCache = geminiCacheSetting.enabled
+      ? await ensureGeminiCachedContent({
+        apiKey: key, model, systemInstruction: requestBody.systemInstruction, tools: requestBody.tools,
+        prefixTokensEst: estimateTransportTokens(JSON.stringify(requestBody.systemInstruction))
+          + (requestBody.tools ? estimateTransportTokens(JSON.stringify(requestBody.tools)) : 0),
+        setting: geminiCacheSetting, signal: req.signal,
+      })
+      : undefined;
+    const cachedContentName = explicitCache && explicitCache.status !== "skipped" ? explicitCache.name : null;
+    reportCachePlan(() => geminiCachePlan(requestBody, explicitCache));
     let usageAttempt = measuredUsage.start();
     if (req.signal?.aborted) throw abortReasonError(req);
     ownerControl.dispatched();
@@ -962,13 +1092,35 @@ export const runGoogleByok: Runner = async (
       method: "POST",
       headers: { "content-type": "application/json" },
       signal: req.signal,
-      body: JSON.stringify(requestBody),
+      body: JSON.stringify(cachedContentName ? geminiBodyWithCache(requestBody, cachedContentName) : requestBody),
     }));
+    if (!resp.ok && cachedContentName && isGeminiCacheMissing(resp.status, await resp.clone().text().catch(() => ""))) {
+      // The cache expired or vanished between creation and use: drop it and send this request once without it.
+      forgetGeminiCachedContent(cachedContentName);
+      reportCachePlan(() => geminiCachePlan(requestBody, { status: "skipped", reason: "gemini_cache_missing_resent_plain" }));
+      usageAttempt = measuredUsage.start();
+      resp = await withCurrentHistoryProvider(()=>fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        signal: req.signal,
+        body: JSON.stringify(requestBody),
+      }));
+    }
     if (!resp.ok) {
       const terminal = httpFailureResult(resp.status);
       if (terminal) return terminal;
+      // HTTP 413: the request is over the endpoint's size limit. A typed capacity refusal, not a tools problem to retry around.
+      if (resp.status === 413) {
+        const observedUsage = measuredUsage.total();
+        return assertCurrentHistoryRunnerResult({ text: acc.trim(), failure: byokContextFailure(req), ...(observedUsage ? { observedUsage } : {}),
+          workforcePermissionEnforcement: broker?.finish(false) });
+      }
     }
-    if (!ownerControl.hasPending() && !resp.ok && includeTools && resp.status >= 400 && resp.status < 500) {
+    // Retry without tools only when Gemini says, in its structured BadRequest field paths, that a tool declaration is
+    // what it rejected (docs native-harness 07 G23). Any other 4xx (prose-only, quota, bad image) stays a loud failure:
+    // a blind tools-free retry dropped capability and announced "tools unsupported" for unrelated errors.
+    if (!ownerControl.hasPending() && !resp.ok && includeTools && resp.status >= 400 && resp.status < 500
+      && geminiToolDeclarationRejected(await resp.clone().text().catch(() => ""))) {
       // A Workforce grant is for this advertised inventory. A tools-free retry
       // would make any later success evidence describe a different invocation.
       if (req.scienceCollectionCapability) throw new Error("science_collection_tool_protocol_unsupported");
@@ -977,6 +1129,7 @@ export const runGoogleByok: Runner = async (
       events.onStatus(tStatus(req.locale, "mcpToolCallUnsupported"));
       assertScienceRecoveryRequest(req, "byok", "google");
       reportModelPayload(() => ledgerFromApiBody(outgoingBody(), { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
+      reportCachePlan(() => geminiCachePlan(outgoingBody()));
       usageAttempt = measuredUsage.start();
       resp = await withCurrentHistoryProvider(()=>fetch(url, {
         method: "POST",
@@ -1085,6 +1238,10 @@ export const runGoogleByok: Runner = async (
     }
     if (req.signal?.aborted) throw abortReasonError(req);
     ownerControl.applied();
+    const observedInput = terminalUsage && terminalUsage.inputTokens > 0 ? terminalUsage.inputTokens : null;
+    generations.completed(turn, observedInput);
+    lastObservedInput = observedInput;
+    lastRequestTokens = sentRequestTokens;
     if (functionCalls.length === 0 || req.untrustedNoTools) {
       reachedAnswer = true;
       break;

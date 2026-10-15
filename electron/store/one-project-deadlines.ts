@@ -39,7 +39,9 @@ function exactKeys(value: object, keys: readonly string[]): boolean {
   return actual.length === allowed.size && actual.every((key) => allowed.has(key));
 }
 
-function normalizeRelativeDeliverablePath(value: unknown): string {
+/** Exported for the cross-OS path table test. `:` is refused in every segment: on Windows it is a drive
+ * (`C:x` is drive-relative and slips past `isAbsolute`) or an NTFS alternate data stream (`a.txt:evil`). */
+export function normalizeRelativeDeliverablePath(value: unknown): string {
   if (typeof value !== "string") throw new TypeError("Expected deliverable path must be a relative file path");
   const raw = value.trim().replace(/\\/g, "/");
   if (
@@ -50,7 +52,7 @@ function normalizeRelativeDeliverablePath(value: unknown): string {
     throw new TypeError("Expected deliverable path must stay inside the connected project folder");
   }
   const segments = raw.split("/");
-  if (segments.some((segment) => segment.length < 1 || segment === "." || segment === "..")) {
+  if (segments.some((segment) => segment.length < 1 || segment === "." || segment === ".." || segment.includes(":"))) {
     throw new TypeError("Expected deliverable path must stay inside the connected project folder");
   }
   const normalized = path.posix.normalize(raw);

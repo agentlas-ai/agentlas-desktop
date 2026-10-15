@@ -184,17 +184,16 @@ export function contractManifest(contract: ToolchainInterface, automation: Autom
 // ── Cold-start test ──────────────────────────────────────────────────────────
 
 const GENERATOR_PROMPT = [
-  "You write test requests for a tool-routing evaluation. You receive one tool contract and a list of other automations.",
-  "Return ONLY JSON: {\"positives\":[5 strings],\"negatives\":[5 strings]}.",
-  "positives: realistic owner requests this tool should handle, phrased differently from its name and purpose (paraphrase, do not copy wording). Each is a full sentence a person would type, never just an input value. If the tool takes an input, each positive must still make a concrete value for it obvious. Use the language the tool's purpose is written in.",
-  "negatives: near-miss requests it must NOT handle — same topic but a different outcome, or the opposite effect (e.g. reading vs posting), or another automation's job.",
+  "task: tool-routing test requests for one tool contract vs other automations",
+  "output: {\"positives\":[5 strings],\"negatives\":[5 strings]}",
+  "positives: full-sentence owner requests this tool handles, paraphrased (not its wording), concrete input value implied, in the purpose's language",
+  "negatives: near-miss requests it must NOT handle (same topic different outcome, opposite effect, another automation's job)",
 ].join("\n");
 
 const SELECTOR_PROMPT = [
-  "You are a fresh assistant with no prior conversation. For each task you get the candidate tools a search returned (possibly none).",
-  "Pick the one tool that clearly does the task, or null when none fits. Use only each candidate's contract (purpose, when_to_use, when_not_to_use, input_schema).",
-  "If you pick one, fill its input exactly per input_schema (string values, only listed fields).",
-  "Return ONLY JSON: {\"answers\":[{\"task\":<index>,\"graph_id\":string|null,\"input\":object}]} with one answer per task.",
+  "task: per task pick the one candidate tool that clearly does it, else null; judge by contract only",
+  "input: per input_schema (string values, listed fields only)",
+  "output: {\"answers\":[{\"task\":<index>,\"graph_id\":string|null,\"input\":object}]}, one per task",
 ].join("\n");
 
 /**

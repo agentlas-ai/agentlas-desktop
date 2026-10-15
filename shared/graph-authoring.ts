@@ -39,7 +39,7 @@ export const GRAPH_BLUEPRINT_INPUT_SCHEMA = object({
     code: { ...string(24000), description: "Code step body. Earlier values arrive in `vars` (python dict: vars.get('text'); js object: vars.text) — list the names in consumes. Assign the output to `result`; it becomes this step's produces value. print/console output is a log only." },
     codeLang: { enum: ["python", "js"] }, packages: array(string(120)),
     role: string(200), roleEn: string(200),
-  }, ["title", "instruction", "effect"]), 32, 1),
+  }, ["title", "instruction", "effect"]), 20, 1),
   branches: array(object({
     afterStep: index, var: string(80), op: { enum: CONDITION_OPS },
     value: { anyOf: [{ type: "string", maxLength: 8000 }, { type: "number" }] }, yesStep: index, noStep: index,
@@ -50,6 +50,27 @@ export const GRAPH_BLUEPRINT_INPUT_SCHEMA = object({
     produces: string(80), evidence: string(80),
   }, ["afterStep", "subject", "criteria"])),
 }, ["schema", "name", "goal", "trigger", "steps"]);
+
+/** UI interview output: both alternatives travel to the actual model call. */
+export const GRAPH_INTERVIEW_OUTPUT_SCHEMA = {
+  anyOf: [
+    object({ ask: array(object({ id: string(128), question: string(2000), why: string(2000),
+      choices: array(string(1000), 20) }, ["id", "question"]), 3, 1) }, ["ask"]),
+    object({ blueprint: GRAPH_BLUEPRINT_INPUT_SCHEMA }, ["blueprint"]),
+  ],
+};
+
+/** Patch wire shape; topology/effect/compiler checks remain authoritative after generation. */
+export const GRAPH_PATCH_OUTPUT_SCHEMA = object({
+  ops: array({ anyOf: [
+    object({ op: { const: "addNode" }, node: object({ id, type: { enum: ["trigger", "agent", "tool", "action", "condition", "transform", "output", "eval", "subgraph", "code", "toolchain_call"] }, label: string(200), config: { type: "object", additionalProperties: true } }, ["id", "type", "config"]) }, ["op", "node"]),
+    ...["editNode", "setPolicy"].map(op => object({ op: { const: op }, nodeId: id, config: { type: "object", additionalProperties: true } }, ["op", "nodeId", "config"])),
+    object({ op: { const: "removeNode" }, nodeId: id }, ["op", "nodeId"]),
+    object({ op: { const: "addEdge" }, edge: object({ id, source: id, target: id, sourceHandle: { enum: ["true", "false"] }, maxIterations: { type: "integer", minimum: 1 } }, ["id", "source", "target"]) }, ["op", "edge"]),
+    object({ op: { const: "removeEdge" }, edgeId: id }, ["op", "edgeId"]),
+    object({ op: { const: "setTrigger" }, config: { type: "object", additionalProperties: true } }, ["op", "config"]),
+  ] }, 24), rationale: string(2000),
+}, ["ops", "rationale"]);
 
 const ro = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
 const act = { readOnlyHint: false, destructiveHint: false, openWorldHint: false };

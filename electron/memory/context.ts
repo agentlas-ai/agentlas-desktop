@@ -3,6 +3,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { getMemoryStoreInfo } from "./database";
+import { selectedMemoryContextCache } from "./selected-context-cache";
+import { captureMemoryContextGeneration } from "./context-generation";
+import { readGenerationMemoryPack, recordMemoryGenerationFallback } from "./generation-pack";
 import {
   listMemoryForContext,
   type MemoryEntry,
@@ -480,7 +485,8 @@ function confidencePrior(confidence: MemoryEntry["confidence"]): number {
 }
 
 /** Scope/agent filtering happens in SQL before this ranking function. */
-function selectMemoryEntries(entries: MemoryEntry[], taskPrompt?: string, frame?: RecallFrame): MemoryEntry[] {
+function selectMemoryEntries(entries: MemoryEntry[], taskPrompt?: string, frame?: RecallFrame,
+  nativeSource?: ReturnType<typeof nativeRecallFor>, tokenBudget = MEMORY_SELECTED_MAX_APPROX_TOKENS): MemoryEntry[] {
   const query = String(taskPrompt ?? "").trim();
   if (!query || localEmbeddingTokens(query).length === 0) return entries.slice(0, MAX_ENTRIES);
   // English is the search/capsule surface; the original wording is a second
@@ -490,7 +496,7 @@ function selectMemoryEntries(entries: MemoryEntry[], taskPrompt?: string, frame?
   // owner's store copy: concatenating both into one text diluted the original's
   // lexical match (Korean top-1 17→13 of 20); max-of-two keeps it. The capsule
   // stays English.
-  const natives = nativeRecallFor("memory_entry", entries.map((entry) => entry.id));
+  const natives = nativeSource ?? nativeRecallFor("memory_entry", entries.map((entry) => entry.id));
   const ranked = rankHybridLocal(query, entries.map((entry) => ({
     id: entry.id,
     ...(natives.has(entry.id)
@@ -515,15 +521,35 @@ function selectMemoryEntries(entries: MemoryEntry[], taskPrompt?: string, frame?
   if (ranked.length === 0) return [];
   const all = ranked.map((result) => result.item.entry);
   const allText = entryLines(all, frame);
-  if (approximateMemoryTokens(allText) <= MEMORY_SELECTED_MAX_APPROX_TOKENS) return all;
+  if (approximateMemoryTokens(allText) <= tokenBudget) return all;
   const selected: MemoryEntry[] = [];
   for (const result of ranked) {
     if (selected.length >= MAX_ENTRIES) break;
     const proposed = entryLines([...selected, result.item.entry], frame);
-    if (approximateMemoryTokens(proposed) > MEMORY_SELECTED_MAX_APPROX_TOKENS) continue;
+    if (approximateMemoryTokens(proposed) > tokenBudget) continue;
     selected.push(result.item.entry);
   }
   return selected;
+}
+
+/** Selection/rendering only. The authenticated surface caller supplies original
+ * rows already filtered by its actor/project/domain policy; this function does
+ * not mint authority, load ambient sources or share unrestricted pack caches. */
+export function selectCanonicalMemoryForSurface(entries: readonly MemoryEntry[], input: {
+  query?: string; chatId?: string | null; maxApproxTokens: number;
+}): { text: string; sourceIds: string[] } {
+  const budget = Number.isFinite(input.maxApproxTokens)
+    ? Math.max(0, Math.min(MEMORY_SELECTED_MAX_APPROX_TOKENS, Math.floor(input.maxApproxTokens))) : 0;
+  if (!budget || !entries.length) return { text: "", sourceIds: [] };
+  const originals = [...entries], frame = recallFrameFor(originals, input.chatId);
+  const candidates = selectMemoryEntries(originals, input.query, frame, undefined, budget);
+  const selected: MemoryEntry[] = [];
+  // The legacy empty-query selector returns a bounded count; the restricted
+  // surface also enforces its exact requested text budget on that path.
+  for (const entry of candidates) {
+    if (approximateMemoryTokens(entryLines([...selected, entry], frame)) <= budget) selected.push(entry);
+  }
+  return { text: entryLines(selected, frame), sourceIds: selected.map(entry => entry.id) };
 }
 
 function timelineSection(
@@ -554,7 +580,7 @@ function timelineSection(
     : episodes.slice(0, 6);
   if (picked.length === 0) return null;
   return [
-    "### Recent work timeline (turn observations, not durable semantic memory)",
+    "### Recent work (observations)",
     ...picked.map((episode) => `- ${episode.createdAt.slice(0, 10)} · ${episode.summary}`),
   ].join("\n");
 }
@@ -690,22 +716,73 @@ function selectSoulText(soul: string, taskPrompt: string | undefined, projectPat
 }
 
 
-function globalMemorySections(agentId: string | null | undefined, taskPrompt: string | undefined,
-  options: { projectId?: string | null; chatId?: string | null }): string[] {
-  const entries = listMemoryForContext({ ...options, agentId }, MEMORY_CANDIDATE_LIMIT);
+function selectedMemorySection(projectPath: string | null, agentId: string | null | undefined, taskPrompt: string | undefined,
+  options: { projectId?: string | null; chatId?: string | null; runId?: string | null; visibilityDomain?: string },
+  selection?: { eligibleIds: Set<string>; selectedIds: Set<string> }): string {
+  const binding = captureMemoryContextGeneration({ ...options, projectPath, agentId });
+  if (binding.generation) {
+    const pack = readGenerationMemoryPack(binding.generation, {
+      query: taskPrompt?.trim() ?? "", maxApproxTokens: MEMORY_SELECTED_MAX_APPROX_TOKENS,
+      select: (entries, query, budget) => selectMemoryEntries(entries, query, recallFrameFor(entries, options.chatId), undefined, budget),
+      render: entries => entries.length ? `${projectPath ? "### Relevant curated memory" : "### Curated memory (global)"}\n${entryLines(entries, recallFrameFor(entries, options.chatId))}` : "",
+    });
+    if (pack) {
+      if (selection) { for (const id of pack.eligibleIds) selection.eligibleIds.add(id); for (const id of pack.selectedIds) selection.selectedIds.add(id); }
+      return pack.text;
+    }
+    recordMemoryGenerationFallback("generation-pack-safe-fallback");
+  } else recordMemoryGenerationFallback(binding.reason);
+  // Re-run the actual SQL scope filter before every cache hit. Source text,
+  // native vectors and automation provenance may change without an entry's
+  // main revision, so their fingerprint supplements the canonical revision.
+  const custody = getMemoryStoreInfo();
+  const entries = listMemoryForContext({ ...options, projectPath, agentId }, MEMORY_CANDIDATE_LIMIT);
   const frame = recallFrameFor(entries, options.chatId);
-  const selected = selectMemoryEntries(entries, taskPrompt, frame);
-  return selected.length > 0
-    ? [`### Curated memory (global)\n${entryLines(selected, frame)}`]
-    : [];
+  const natives = taskPrompt?.trim() ? nativeRecallFor("memory_entry", entries.map(entry => entry.id)) : new Map();
+  const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  let identity: Parameters<typeof selectedMemoryContextCache.get>[0] | null = null;
+  try {
+    const source = getMemoryStoreInfo();
+    if (!sameMemoryCustody(custody, source)) return "";
+    identity = { ownerNamespace: source.ownerNamespace, revision: source.revision, revocationEpoch: source.revocationEpoch,
+      actorId: agentId ?? null, visibilityDomain: JSON.stringify([options.visibilityDomain ?? null, options.chatId ?? null]),
+      projectId: options.projectId ?? null, projectPath, queryDigest: sha(taskPrompt?.trim() ?? ""),
+      sourceDigest: sha([entries, [...natives], frame.automationRecall, [...frame.ledgerChatIds].sort()]) };
+    if (selection) for (const entry of entries) selection.eligibleIds.add(entry.id);
+    const cached = selectedMemoryContextCache.getSelection(identity);
+    if (cached !== null) {
+      if (selection) for (const id of cached.sourceIds) selection.selectedIds.add(id);
+      return cached.text;
+    }
+  } catch { /* Cache availability never prevents the original scoped recall. */ }
+  const selected = selectMemoryEntries(entries, taskPrompt, frame, natives);
+  if (!sameMemoryCustody(custody, getMemoryStoreInfo())) return "";
+  if (selection) {
+    for (const entry of entries) selection.eligibleIds.add(entry.id);
+    for (const entry of selected) selection.selectedIds.add(entry.id);
+  }
+  const section = selected.length ? `${projectPath ? "### Relevant curated memory" : "### Curated memory (global)"}\n${entryLines(selected, frame)}` : "";
+  if (identity) selectedMemoryContextCache.set(identity, section, selected.map(entry => entry.id));
+  return section;
+}
+
+function globalMemorySections(agentId: string | null | undefined, taskPrompt: string | undefined,
+  options: { projectId?: string | null; chatId?: string | null; visibilityDomain?: string }): string[] {
+  const section = selectedMemorySection(null, agentId, taskPrompt, options);
+  return section ? [section] : [];
 }
 
 function formatMemorySections(sections: string[]): string {
   if (sections.length === 0) return "";
   return [
-    "## Agentlas memory (read before answering; five-scope + request_context recall)",
+    "## Agentlas memory",
     ...sections,
   ].join("\n\n");
+}
+
+function sameMemoryCustody(left: ReturnType<typeof getMemoryStoreInfo>, right: ReturnType<typeof getMemoryStoreInfo>): boolean {
+  return left.ownerNamespace === right.ownerNamespace && left.path === right.path
+    && left.revocationEpoch === right.revocationEpoch && left.revision === right.revision;
 }
 
 function projectPmSection(projectPath: string, taskPrompt?: string): string | null {
@@ -765,15 +842,21 @@ export async function buildMemoryContext(
     /** When set, records content-free `context_source` markers for each source that entered the prompt. */
     runId?: string | null;
     chatId?: string | null;
+    /** Exact host domain when available; chat-id segregation always remains. */
+    visibilityDomain?: string;
     signal?: AbortSignal;
   } = {},
 ): Promise<string> {
   if (options.signal?.aborted) return "";
+  const custody = getMemoryStoreInfo();
+  const stillCurrent = (): boolean => !options.signal?.aborted && sameMemoryCustody(custody, getMemoryStoreInfo());
   const sections: string[] = [];
   // Short-term memory (owner 2026-10-05): the previous turn of this conversation, so the model itself checks
   // an interrupted outside action before repeating it instead of the host locking the Goal.
   const previousTurn = previousTurnMemorySection(options.chatId, options.runId);
-  const withPreviousTurn = (list: string[]): string[] => previousTurn ? [previousTurn, ...list] : list;
+  // Stable governed sources come first; the fresh observation delta stays at
+  // the tail so it cannot invalidate the reusable selected-memory prefix.
+  const withPreviousTurn = (list: string[]): string[] => previousTurn ? [...list, previousTurn] : list;
 
   // Content-free observability: track which recall sources actually entered this
   // turn's prompt and their approximate injected token size. Emitted only when a
@@ -799,11 +882,14 @@ export async function buildMemoryContext(
     // the stored folder identity again immediately before touching any project
     // memory, and once more before returning the assembled prompt.
     if (!verifyActivatedFolderIdentity(projectPath)) {
-      return formatMemorySections(withPreviousTurn(globalMemorySections(agentId, options.taskPrompt, options)));
+      const fallback = formatMemorySections(withPreviousTurn(globalMemorySections(agentId, options.taskPrompt, options)));
+      return stillCurrent() ? fallback : "";
     }
+    const selection = { eligibleIds: new Set<string>(), selectedIds: new Set<string>() };
+    const memorySection = selectedMemorySection(projectPath, agentId, options.taskPrompt, options, selection);
     const rawSoul = readActivatedProjectMemoryText(projectPath, PROJECT_SOUL_FILE);
     const soul = rawSoul ? filterRevokedProjectSoul(
-      filterSupersededProjectSoul(rawSoul, options.projectId, projectPath), options.projectId, projectPath,
+      filterSupersededProjectSoul(rawSoul, options.projectId, projectPath, selection), options.projectId, projectPath,
     ) : null;
     if (soul && soul.trim()) {
       const soulSection = `### Project memory (${projectPath})\n${selectSoulText(soul, options.taskPrompt, projectPath)}`;
@@ -818,11 +904,11 @@ export async function buildMemoryContext(
     let sourceSignature: string | undefined;
     if (options.materializeCodeMap !== false) {
       sourceSignature = await projectSourceSignature(projectPath, options.signal);
-      if (options.signal?.aborted || !verifyActivatedFolderIdentity(projectPath)) return "";
+      if (!stillCurrent() || !verifyActivatedFolderIdentity(projectPath)) return "";
       await ensureCodeMap(projectPath, sourceSignature, options.signal);
-      if (options.signal?.aborted || !verifyActivatedFolderIdentity(projectPath)) return "";
+      if (!stillCurrent() || !verifyActivatedFolderIdentity(projectPath)) return "";
       await ensureSitemap(projectPath, sourceSignature, options.signal);
-      if (options.signal?.aborted || !verifyActivatedFolderIdentity(projectPath)) return "";
+      if (!stillCurrent() || !verifyActivatedFolderIdentity(projectPath)) return "";
     }
     const sitemap = summarizeSitemap(projectPath);
     if (sitemap) {
@@ -847,23 +933,20 @@ export async function buildMemoryContext(
       signal: options.signal,
       sourceSignature,
     });
-    if (options.signal?.aborted || !verifyActivatedFolderIdentity(projectPath)) return "";
+    if (!stillCurrent() || !verifyActivatedFolderIdentity(projectPath)) return "";
     if (contextSlice) {
       sections.push(contextSlice);
       injected.push({ source: "code_map", text: contextSlice });
     }
-    const entries = listMemoryForContext({ projectPath, projectId: options.projectId, agentId, chatId: options.chatId }, MEMORY_CANDIDATE_LIMIT);
-    const frame = recallFrameFor(entries, options.chatId);
-    const selectedEntries = selectMemoryEntries(entries, options.taskPrompt, frame);
-    if (selectedEntries.length > 0) {
-      const memorySection = `### Relevant curated memory\n${entryLines(selectedEntries, frame)}`;
+    if (memorySection) {
       sections.push(memorySection);
       injected.push({ source: "memory", text: memorySection });
     }
     const timeline = timelineSection(options.projectId, projectPath, options.taskPrompt, { agentId, chatId: options.chatId });
     if (timeline) sections.push(timeline);
     if (!verifyActivatedFolderIdentity(projectPath)) {
-      return formatMemorySections(withPreviousTurn(globalMemorySections(agentId, options.taskPrompt, options)));
+      const fallback = formatMemorySections(withPreviousTurn(globalMemorySections(agentId, options.taskPrompt, options)));
+      return stillCurrent() ? fallback : "";
     }
   } else {
     const globalSections = globalMemorySections(agentId, options.taskPrompt, options);
@@ -874,6 +957,7 @@ export async function buildMemoryContext(
   }
 
   if (previousTurn) injected.push({ source: "memory", text: previousTurn });
+  if (!stillCurrent()) return "";
   flushMarkers();
   return formatMemorySections(withPreviousTurn(sections));
 }

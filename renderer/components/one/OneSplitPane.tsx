@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Markdown } from "@/components/Markdown";
 import { HostContinuationNotice } from "@/components/HostContinuationNotice";
-import { normalizeChatHostNotice } from "@shared/chat-host-notice";
+import { isHousekeepingHostNotice, normalizeChatHostNotice } from "@shared/chat-host-notice";
 import type { ChatHostNotice, ChatMessagesCursor } from "@shared/types";
 import { ipc } from "@/lib/ipc";
 import { readOneChatHistoryPage, mergeOneChatHistory, oneChatHistoryCursor } from "@/lib/one-chat-history";
@@ -306,6 +306,8 @@ export function OneSplitPane({
           const text = typeof message.text === "string" ? parseChatFileMessage(message.text).visibleText.trim() : "";
           const images = Array.isArray(message.imageDataUrls) ? message.imageDataUrls.filter(Boolean) : [];
           if (!text && images.length === 0) return null;
+          // Housekeeping host rows (check, continue, wait, resume; NH26) are drawn on no surface.
+          if (isHousekeepingHostNotice(normalizeChatHostNotice(message.role, message.hostNotice))) return null;
           if (message.role === "system") {
             const notice = normalizeChatHostNotice(message.role, message.hostNotice);
             // A system row without a typed notice is a host-written harness request (Goal resume, continuation): it is

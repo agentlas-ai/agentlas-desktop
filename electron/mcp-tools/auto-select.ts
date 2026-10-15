@@ -1,3 +1,4 @@
+import { fixedPurposePrompt, purposePrompt } from "../runtime/purpose-prompts";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
 import {
@@ -30,7 +31,7 @@ import {
   pluginSlugFromCandidateId,
   type InstalledPluginCandidate,
 } from "../plugins/plugin-candidates";
-import { selectedPluginRouterPrompt } from "../plugins/router-prompt";
+import { hasExplicitMention, selectedPluginRouterPrompt } from "../plugins/router-prompt";
 import type {
   AutomationHubMode,
   AutomationToolMode,
@@ -125,8 +126,10 @@ export interface AutoSelectedMcpContext {
   routedPlugins?: RoutedPluginSelection[];
   /** Who chose the optional set: the judge, the deterministic fallback, or nobody. */
   selectionSource?: "judge" | "local-relevance" | "none";
-  /** Value-free note: nothing was decided, or the candidate inventory was capped. */
+  /** Value-free note: nothing was decided, or the candidate inventory was capped (receipt; not prompt text). */
   needsNote?: string;
+  /** Hub plugins left off this run's shelf; the prompt names only this count (harness_search finds them). */
+  hubNotOffered?: number;
   /**
    * Why nothing was decided, and whether that cost anything.
    *
@@ -655,22 +658,13 @@ export async function autoSelectMcpTools(input: {
   // remain strict and never receive this browser fallback.
   const automaticHostDecision = input.toolMode == null || input.toolMode === "auto";
   /*
-   * ★ 요청이 URL 이나 "브라우저로/에서" 를 직접 말하면 호스트 결정(브라우저 vs 컴퓨터 유즈)을 판정기에 맡기지
-   *   않는다 — 명시 증거는 사용자가 브라우저 모드를 고른 것과 같다. 판정기가 작은 로컬 모델일 때 실측
-   *   (2026-09-13, Qwen3-4B): "Agentlas 브라우저로 https://example.com 을 열고 …" 에 agentlas-time 을 골라
-   *   도구 호출만 4번 반복하고 실패했다. 선택 대상은 설치·활성·설정 유효한 정본 브라우저(agentlas-browser)뿐이고,
-   *   없으면 아무것도 바꾸지 않는다(막다른 길 금지). 키워드 점수화가 아니라 호스트 바인딩의 명시 증거 하나다.
+   * Owner rule 2026-10-13: the host never decides the browser/computer-use surface from words
+   * in the request or the Goal objective. A URL, domain or "in the browser" phrase is only a
+   * typed target the model reads; the surface comes from (1) the owner's explicit binding
+   * (input.toolMode / automation toolMode / graph tool node) or (2) the model's structured
+   * selection below (resolveNeeds -> agentlas-browser / cua-driver in neededIds). When neither
+   * speaks, the mode stays neutral "auto" — there is no lexical fallback.
    */
-  // A later "continue" turn must retain the browser named by the active Goal's
-  // original objective. Looking only at the latest short follow-up made a
-  // durable web campaign silently lose its authenticated browser.
-  const browserBindingText = [input.userPrompt, activeGoalScope?.objective ?? ""].filter(Boolean).join("\n");
-  const explicitBrowserEvidence = automaticHostDecision && effectiveToolMode === "auto"
-    && (/https?:\/\/[^\s)]+/i.test(browserBindingText)
-      // 스킴 없는 도메인("example.com 화면 찍어줘")도 웹 대상의 명시 증거다 — 판정기 없이도 브라우저.
-      || /(^|[\s"'(])[a-z0-9-]+(\.[a-z0-9-]+)*\.(com|net|org|io|ai|dev|app|co|kr|jp|edu|gov)(\/[^\s)]*)?(?=$|[\s)"',.!?])/i.test(browserBindingText)
-      || /(브라우저(로|에서|를 열)|in the browser|with the browser|open (the )?browser)/i.test(browserBindingText));
-  if (explicitBrowserEvidence) effectiveToolMode = "browser";
 
   // ── ① 프로젝트 우선 (project-first narrowing) ────────────────────────────
   // 프로젝트를 여는 이유는 그 안에 이미 갖춰 둔 것을 먼저 쓰라는 뜻이다. 그런데 이 선택기는
@@ -719,9 +713,7 @@ export async function autoSelectMcpTools(input: {
     pinnedReasons.set("hephaestus-network", "always available routing/plugin resolver");
   }
   if (effectiveToolMode === "browser") {
-    pinnedReasons.set("agentlas-browser", explicitBrowserEvidence
-      ? "Browser plugin (real-login CDP): the request names a URL or the browser explicitly"
-      : "Browser plugin (real-login CDP) for this automation");
+    pinnedReasons.set("agentlas-browser", "Browser plugin (real-login CDP) for this automation");
   }
   if (effectiveToolMode === "computer-use") {
     pinnedReasons.set(
@@ -806,8 +798,9 @@ export async function autoSelectMcpTools(input: {
   // Installed plugins that ship skills are first-class candidates next to MCP tools.
   // Built from each manifest — no per-plugin table. implicit:"never" plugins stay
   // unmentioned unless the user names them.
-  const promptLower = input.userPrompt.toLowerCase();
-  const mentionedPlugin = (plugin: InstalledPluginCandidate): boolean => promptLower.includes(plugin.mention.toLowerCase());
+  // Only an explicit whole-token `@mention` selects (router-prompt.hasExplicitMention);
+  // a substring of another word, quoted text or code never does.
+  const mentionedPlugin = (plugin: InstalledPluginCandidate): boolean => hasExplicitMention(input.userPrompt, plugin.mention);
   const skillCandidates: McpNeedCandidate[] = pluginCandidates
     .filter((plugin) => plugin.hasSkills && (plugin.implicit !== "never" || mentionedPlugin(plugin)))
     .map((plugin) => ({
@@ -933,17 +926,17 @@ export async function autoSelectMcpTools(input: {
     needs.decided
       ? ""
       : selectionSource === "local-relevance"
-        ? `The optional-tool judgment did not return a selection; a deterministic local relevance ranking attached: ${fallbackIds.join(", ")}.`
-        : "The optional-tool judgment did not return a selection. Only configured tools and revalidated selections from this active Goal are available.",
-    cappedHub > 0 ? `${cappedHub} further Hub plugins were not offered to the selector this run.` : "",
+        ? `no optional-tool judgment this run, local relevance attached ${fallbackIds.join(", ")}`
+        : "no optional-tool judgment this run, configured tools only",
+    cappedHub > 0 ? `${cappedHub} more Hub plugins not offered (harness_search finds them)` : "",
     // 조용히 줄이지 않는다 — 왜 Hub 후보가 없는지 영수증에 남긴다.
     projectScoped && hubAllowed && cappedHub > 0
-      ? "Project-first: only a short Hub shelf was offered to the selector for this project folder. The full Hub stays reachable at runtime through hephaestus-network."
+      ? "project-first: short Hub shelf for this folder; full Hub via hephaestus-network"
       : "",
     needs.omitted.length > 0 ? `${needs.omitted.length} candidates exceeded the selector inventory cap.` : "",
   ]
     .filter(Boolean)
-    .join(" ");
+    .join("; ");
 
   // Baseline capability (owner 2026-09-29 "agentlas browser면 다 되야 하는거 아니냐"): the
   // Agentlas browser is core, not an optional pick. A run under a writable active Goal or a
@@ -1273,6 +1266,7 @@ export async function autoSelectMcpTools(input: {
     selectionSource,
     needsOutcome: { decided: needs.decided, candidateCount: needsCandidateCount, reason: needs.reason },
     ...(needsNote ? { needsNote } : {}),
+    ...(cappedHub > 0 ? { hubNotOffered: cappedHub } : {}),
     ...(hubInventory.hubPluginError ? { hubPluginError: hubInventory.hubPluginError } : {}),
   };
   // ── sticky 합집합 병합 — 같은 대화의 도구셋은 넓어지기만 한다(캐시 보존) ──
@@ -1321,56 +1315,51 @@ export function buildMcpAutoSelectionPrompt(
   const computerUseReady = installed.some((tool) => tool.id === "cua-driver");
   const modeLine =
     opts?.toolMode === "browser"
-      ? "This automation is bound to Agentlas Browser (real-login CDP). Use only that browser host for web work; never create a fresh Playwright profile."
+      ? "mode: Agentlas Browser (real-login CDP) only for web work; no fresh Playwright profile"
       : opts?.toolMode === "computer-use"
-        ? "This automation explicitly selected Computer Use mode; use desktop/screen tools for UI work."
+        ? "mode: Computer Use; desktop/screen tools for UI work"
         : "";
   const hubLine =
     opts?.hubMode === "hub-first"
-      ? "This automation is Hub-first: prefer Agentlas Hub specialists/plugins through hephaestus-network before local fallbacks."
+      ? "hub: first; prefer Hub specialists/plugins via hephaestus-network before local fallbacks"
       : opts?.hubMode === "hub-allowed"
-        ? "This automation may use Agentlas Hub specialists/plugins through hephaestus-network when local tools are insufficient."
+        ? "hub: allowed via hephaestus-network when local tools are insufficient"
         : opts?.hubMode === "local-only"
-          ? "This automation is local-only: do not use Agentlas Hub routing or borrowed Hub agents."
+          ? "hub: local-only; no Hub routing or borrowed Hub agents"
           : "";
   // 붙은 도구의 이름·설명·입력 스키마는 MCP 도구 스키마로 이미 전달된다(2026-10-13: 이름 나열, "도구를 쓰라",
   // 플러그인 우주 개수, 로컬 인벤토리, Hub 조회 안내는 프롬프트에서 뺐다). 스키마로 알 수 없는 것만 남긴다:
   // 후보 플러그인, 꺼진 것(승인 대기)·자격증명 대기·불능 상태, 도구가 0개라는 사실.
   const hubCandidates =
     selected.hubPlugins.length > 0
-      ? `Hub plugin candidates: ${selected.hubPlugins
-          .map((plugin) =>
-            `${plugin.slug} (${plugin.name}; ${plugin.reason}${plugin.installCli ? `; install: ${plugin.installCli}` : ""})`,
-          )
-          .join("; ")}.`
+      ? `hub candidates: ${JSON.stringify(selected.hubPlugins.map(plugin => ({ slug: plugin.slug, name: plugin.name, reason: plugin.reason, ...(plugin.installCli ? { installCli: plugin.installCli } : {}) })))}`
       : selected.hubPluginError
-        ? `Hub plugin catalog unreachable this run: ${selected.hubPluginError}. Say so rather than claiming no such tool exists.`
+        ? `hub catalog unreachable (${selected.hubPluginError}) → say so; never "no such tool"`
         : "";
   const pendingApproval = (selected.pendingApprovalTools ?? []).filter((name) => name.trim().length > 0);
-  return [
-    installed.length === 0 && pendingApproval.length === 0 && blocked.length === 0 ? "No tools are connected in this run." : "",
-    modeLine,
-    hubLine,
+  const inventoryLines = [
+    installed.length === 0 && pendingApproval.length === 0 && blocked.length === 0 ? "tools: none" : "",
     computerUseSelected && !computerUseReady
       ? browserReady
-        ? "Native Computer Use is unavailable in this run: claim no OS-level control; Agentlas Browser covers only the authenticated browser."
-        : "Native Computer Use is unavailable in this run: claim no screen interaction or OS-level control."
+        ? "computer use: unavailable → no OS-level control; browser covers only the signed-in browser"
+        : "computer use: unavailable → no screen or OS-level control"
       : "",
-    selected.needsNote ? `Tool selection note: ${selected.needsNote}` : "",
+    // The selection receipt (needsNote) stays in the ledger; the model only needs what it can act on.
+    selected.hubNotOffered ? `hub: ${selected.hubNotOffered} more plugins (harness_search)` : "",
     hubCandidates,
     pendingApproval.length > 0
-      ? `Switched off until the user approves local execution (ask; do not install anything new): ${pendingApproval.join(", ")}.`
+      ? `approval pending: ${JSON.stringify(pendingApproval)}; current grant first; ask only missing authorization`
       : "",
     blocked.length > 0
-      ? `Unusable until credentials are set (ask only if the task needs them): ${blocked.map((tool) => `${tool.id} missing ${tool.missingEnv.join(", ")}`).join("; ")}.`
+      ? `credentials missing: ${JSON.stringify(blocked.map(tool => ({ id: tool.id, missingEnv: tool.missingEnv })))}; Vault/key/browser reuse first; hide values; ask only affected task`
       : "",
     unavailable.length > 0
-      ? `Unavailable MCP state (value-free): ${unavailable
-          .map((tool) => `${tool.id}=${tool.state}${tool.required ? "(required)" : ""}${tool.connectionOutcome ? `: ${describeScopedMcpOutcome(tool.connectionOutcome, "en")}` : ""}`)
-          .join("; ")}. Degrade only what depends on them.`
+      ? `MCP unavailable: ${JSON.stringify(unavailable.map(tool => ({ id: tool.id, state: tool.state, required: Boolean(tool.required), ...(tool.connectionOutcome ? { reason: describeScopedMcpOutcome(tool.connectionOutcome, "en") } : {}) })))}; degrade dependent work only`
       : "",
     selectedPluginRouterPrompt(selected.routedPlugins ?? [], opts?.userPrompt ?? ""),
-  ]
-    .filter(Boolean)
-    .join("\n");
+  ].filter(Boolean).join("\n");
+  return purposePrompt([
+    { id: "purpose.mcp.selection.mode", revision: 2, stability: "configuration", changeTriggers: ["runtime", "permission"], text: [modeLine, hubLine].filter(Boolean).join("\n") },
+    { id: "purpose.mcp.selection.inventory", revision: 2, stability: "turn-context", changeTriggers: ["capability-inventory", "connector-inventory", "plugin-inventory", "tool-grant", "owner-input"], text: inventoryLines },
+  ]);
 }

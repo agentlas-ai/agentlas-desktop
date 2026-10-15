@@ -30,6 +30,20 @@ function generateAppControlSchemas({ root, operations, check, outputDirectory = 
   findScience(science);
   const flags = ts.TypeFlags;
   const describe = type => checker.typeToString(type).replace(/import\("[^\"]*"\)\./g, "").slice(0, 160);
+  // Owner-local labels (the experience map's local titles) never reach an agent-facing schema; see relation-index.ts.
+  const OWNER_LOCAL_FIELDS = new Set(["localLabel"]);
+  function withoutOwnerLocalFields(node) {
+    if (Array.isArray(node)) return node.map(withoutOwnerLocalFields);
+    if (!node || typeof node !== "object") return node;
+    const copy = {};
+    for (const [key, value] of Object.entries(node)) {
+      if (key === "properties" && value && typeof value === "object" && !Array.isArray(value)) {
+        copy[key] = Object.fromEntries(Object.entries(value).filter(([name]) => !OWNER_LOCAL_FIELDS.has(name)).map(([name, field]) => [name, withoutOwnerLocalFields(field)]));
+      } else if (key === "required" && Array.isArray(value)) copy[key] = value.filter((name) => !OWNER_LOCAL_FIELDS.has(name));
+      else copy[key] = withoutOwnerLocalFields(value);
+    }
+    return copy;
+  }
   function schema(type, depth = 0, seen = new Set()) {
     if (!type) return {};
     if (type.flags & (flags.Any | flags.Unknown)) return { description: "Host validates this JSON value." };
@@ -507,6 +521,293 @@ function generateAppControlSchemas({ root, operations, check, outputDirectory = 
     const declaration = field.valueDeclaration ?? field.declarations?.[0] ?? preferenceInterface;
     preferenceSchemas[field.name] = schema(checker.getTypeOfSymbolAtLocation(field, declaration));
   }
+  // ── operation contracts (native-harness NH19, doc 14 §6) ────────────────────────────────────────────────────────
+  // What each operation returns, which Main entry runs it, and the push channels the bridges subscribe to, all read
+  // from the TypeScript the app runs: the bridge's declared return type; for the Science bridge (which answers `any`)
+  // the registered Main handler's return type, then the daemon command's own return statements; and the registration
+  // call itself. Nothing is inferred from words in a name; a result no source types stays "untyped" with the reason.
+  const untypedType = type => !type || !!(type.flags & (flags.Any | flags.Unknown));
+  const awaitedOf = type => type ? checker.getAwaitedType(type) ?? type : type;
+  const resultSchema = type => {
+    const value = awaitedOf(type);
+    if (value.flags & (flags.Void | flags.Undefined)) return { type: "null", description: "Returns nothing (JSON null)." };
+    return schema(value, 1);
+  };
+  const registrations = new Map(), prefixRegistrations = new Map();
+  const electronDirectory = path.join(root, "electron") + path.sep;
+  function scanRegistrations(source) {
+    if (!/registerAppControlDomainIpc\(|\.handle\(|\bhandle\(|\bregister\(/.test(source.text)) return;
+    const visit = (node, bindings) => {
+      if (ts.isVariableDeclaration(node) && node.initializer) bind(node.name, constant(node.initializer, bindings), bindings);
+      if (ts.isForOfStatement(node)) {
+        const values = constant(node.expression, bindings);
+        const declaration = ts.isVariableDeclarationList(node.initializer) && node.initializer.declarations[0];
+        if (Array.isArray(values) && declaration) {
+          for (const value of values) { const iteration = new Map(bindings); bind(declaration.name, value, iteration); visit(node.statement, iteration); }
+          return;
+        }
+      }
+      if (ts.isCallExpression(node)) {
+        const callee = node.expression.getText(source);
+        const domain = callee === "registerAppControlDomainIpc";
+        if (domain || callee === "register" || callee === "handle" || /\.handle$/.test(callee)) {
+          const offset = domain ? 1 : 0;
+          const argument = unwrap(node.arguments[offset]);
+          // A literal, a folded loop constant, or a const-asserted table member (CH.status) the checker types exactly.
+          let channel = constant(argument, bindings);
+          if (typeof channel !== "string" && argument) { const literal = checker.getTypeAtLocation(argument); if (literal.isStringLiteral()) channel = literal.value; }
+          const entry = { file: path.relative(root, source.fileName), domain, handler: node.arguments[offset + 1], shared: false };
+          if (typeof channel === "string" && channel.includes(":")) {
+            const prior = registrations.get(channel);
+            if (!prior || domain && !prior.domain) registrations.set(channel, entry);
+          } else if (argument && ts.isTemplateExpression(argument) && argument.head.text.endsWith(":")) {
+            // `prefix:${method}` over a runtime table: every channel under that prefix is registered by this call.
+            const prior = prefixRegistrations.get(argument.head.text);
+            if (!prior || domain && !prior.domain) prefixRegistrations.set(argument.head.text, { ...entry, shared: true });
+          }
+        }
+      }
+      ts.forEachChild(node, child => visit(child, bindings));
+    };
+    visit(source, new Map());
+  }
+  for (const source of [...program.getSourceFiles()].sort((a, b) => a.fileName.localeCompare(b.fileName))) {
+    if (source.fileName.startsWith(electronDirectory) && !source.isDeclarationFile) scanRegistrations(source);
+  }
+  function handlerReturn(registration) {
+    const handler = registration && unwrap(registration.handler);
+    if (!handler) return null;
+    if (ts.isArrowFunction(handler) || ts.isFunctionExpression(handler)) {
+      const signature = checker.getSignatureFromDeclaration(handler);
+      return signature ? checker.getReturnTypeOfSignature(signature) : null;
+    }
+    if (ts.isIdentifier(handler) || ts.isPropertyAccessExpression(handler)) {
+      const signature = checker.getSignaturesOfType(checker.getTypeAtLocation(handler), ts.SignatureKind.Call)[0];
+      return signature ? checker.getReturnTypeOfSignature(signature) : null;
+    }
+    return null;
+  }
+  // The daemon runs Science commands in runCommand: each `case "op":` group (and an `if (command.op === "op")` block)
+  // returns the command's result. Their return expressions are the typed output; nested callbacks are not. A group that
+  // only hands the command to another dispatcher (dispatchSciencePublicationCommand) is read through that dispatcher.
+  const commandOutputCache = new Map();
+  function commandOutputs(fn) {
+    if (commandOutputCache.has(fn)) return commandOutputCache.get(fn);
+    const outputs = new Map();
+    commandOutputCache.set(fn, outputs);
+    const file = fn.getSourceFile();
+    const returnsOf = statements => {
+      const found = [];
+      const visit = node => { if (ts.isFunctionLike(node)) return; if (ts.isReturnStatement(node) && node.expression) found.push(node.expression); ts.forEachChild(node, visit); };
+      statements.forEach(visit);
+      return found;
+    };
+    const delegateOf = expression => {
+      let call = unwrap(expression);
+      if (call && ts.isAwaitExpression(call)) call = unwrap(call.expression);
+      if (!call || !ts.isCallExpression(call) || !call.arguments.some(argument => argument.getText(file) === "command")) return null;
+      const declaration = checker.getResolvedSignature(call)?.declaration;
+      return declaration && ts.isFunctionDeclaration(declaration) && declaration.body && declaration !== fn
+        && declaration.getSourceFile().fileName.startsWith(electronDirectory) ? declaration : null;
+    };
+    const record = (ops, statements) => {
+      const expressions = returnsOf(statements);
+      const delegate = expressions.length === 1 ? delegateOf(expressions[0]) : null;
+      const delegated = delegate ? commandOutputs(delegate) : null;
+      for (const op of ops) {
+        if (outputs.has(op)) continue;
+        outputs.set(op, delegated?.get(op) ?? expressions.map(expression => checker.getTypeAtLocation(expression)));
+      }
+    };
+    const visit = node => {
+      if (ts.isFunctionLike(node)) return;
+      if (ts.isIfStatement(node) && ts.isBinaryExpression(node.expression) && node.expression.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken
+        && node.expression.left.getText(file) === "command.op" && ts.isStringLiteralLike(node.expression.right)) {
+        record([node.expression.right.text], [node.thenStatement]);
+      }
+      if (ts.isSwitchStatement(node) && node.expression.getText(file) === "command.op") {
+        let pending = [];
+        for (const clause of node.caseBlock.clauses) {
+          if (ts.isCaseClause(clause) && ts.isStringLiteralLike(clause.expression)) pending.push(clause.expression.text);
+          if (clause.statements.length) { if (pending.length) record(pending, clause.statements); pending = []; }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    fn.body.statements.forEach(visit);
+    return outputs;
+  }
+  let runCommand = null;
+  const findRun = node => { if (!runCommand && ts.isFunctionDeclaration(node) && node.name?.text === "runCommand") runCommand = node; else ts.forEachChild(node, findRun); };
+  findRun(commandSource);
+  const daemonOutputs = runCommand?.body ? commandOutputs(runCommand) : new Map();
+  const contracts = {};
+  for (const operation of operations) {
+    const registration = registrations.get(operation.channel)
+      ?? [...prefixRegistrations].find(([prefix]) => operation.channel.startsWith(prefix) && !operation.channel.slice(prefix.length).includes(":"))?.[1];
+    const daemonCommand = operation.surface === "science" ? nativeChannels.get(operation.channel) : undefined;
+    const type = operationType(operation);
+    const signature = type && checker.getSignaturesOfType(type, ts.SignatureKind.Call)[0];
+    const bridge = signature ? checker.getReturnTypeOfSignature(signature) : null;
+    let output, basis, untypedReason, handlerAgreement;
+    const daemonTypes = daemonCommand ? daemonOutputs.get(daemonCommand) ?? [] : [];
+    // The registered Main handler's return type is what the call actually sends back, so it leads. A `prefix:${method}`
+    // table registration shares one handler across methods, so its type says nothing about one operation.
+    const handled = registration && !registration.shared ? handlerReturn(registration) : null;
+    const isVoid = value => !!(awaitedOf(value).flags & (flags.Void | flags.Undefined));
+    if (!untypedType(awaitedOf(handled))) {
+      output = resultSchema(handled); basis = isVoid(handled) ? "void" : "main-handler-type";
+      // Where the renderer's bridge also declares a type, record whether the handler's result is assignable to it.
+      handlerAgreement = untypedType(awaitedOf(bridge)) ? "bridge-untyped" : checker.isTypeAssignableTo(awaitedOf(handled), awaitedOf(bridge)) ? "assignable" : "mismatch";
+    } else if (!untypedType(awaitedOf(bridge))) {
+      output = resultSchema(bridge); basis = isVoid(bridge) ? "void" : "bridge-type";
+      handlerAgreement = registration?.shared ? "shared-table-handler" : "handler-untyped";
+    } else if (daemonTypes.length && daemonTypes.every(item => !untypedType(awaitedOf(item)))) {
+      const variants = [...new Map(daemonTypes.map(item => { const value = resultSchema(item); return [JSON.stringify(value), value]; })).values()];
+      output = variants.length === 1 ? variants[0] : { anyOf: variants }; basis = "daemon-command-type";
+    } else {
+      untypedReason = !registration ? "handler-not-found-statically" : daemonCommand ? (daemonTypes.length ? "daemon-command-returns-untyped" : "daemon-command-has-no-return") : "handler-returns-untyped";
+      output = { description: "The handler returns an untyped JSON value; read it as data." }; basis = "untyped";
+    }
+    // app.call strips owner-local map titles before an agent sees the result (relation-index.ts withoutOwnerLocalLabels),
+    // so the agent-facing contract does not list them either.
+    output = withoutOwnerLocalFields(output);
+    contracts[operation.path] = { output, outputBasis: basis, ...(untypedReason ? { untypedReason } : {}), ...(handlerAgreement ? { handlerAgreement } : {}),
+      execution: registration?.domain ? "domain-service" : "owner-interaction",
+      registration: registration ? registration.file : "not-found-statically", ...(daemonCommand ? { daemonCommand } : {}) };
+  }
+  // Push channels: a member of an exposed bridge whose body subscribes with ipcRenderer.on("<channel>"), or a generic
+  // `on(channel, handler)` member that admits channels by prefix (channel.startsWith("invoke:event:")) — each prefix is a
+  // per-id stream. The payload is the first parameter of the callback the member takes, typed by the preload itself.
+  // app.call is request/response, so no push channel is callable through it.
+  const events = [];
+  const bridgeObjects = [];
+  for (const [file, surface] of [["electron/preload.ts", "desktop"], ["electron/science-preload.ts", "science"]]) {
+    const source = program.getSourceFile(path.join(root, file));
+    const objectOf = node => {
+      node = unwrap(node);
+      if (node && ts.isCallExpression(node) && node.expression.getText(source) === "Object.freeze") node = unwrap(node.arguments[0]);
+      if (node && ts.isIdentifier(node)) {
+        const declaration = checker.getSymbolAtLocation(node)?.valueDeclaration;
+        if (declaration && ts.isVariableDeclaration(declaration) && declaration.initializer) return objectOf(declaration.initializer);
+      }
+      return node && ts.isObjectLiteralExpression(node) ? node : null;
+    };
+    const find = node => {
+      if (ts.isCallExpression(node) && /exposeInMainWorld$/.test(node.expression.getText(source)) && node.arguments[0] && ts.isStringLiteralLike(node.arguments[0])) {
+        const name = node.arguments[0].text;
+        // `agentlas` exposes `api` (or its One-window subset); the members are api's.
+        let object = name === "agentlas" ? null : objectOf(node.arguments[1]);
+        if (name === "agentlas") {
+          const visitApi = child => { if (!object && ts.isVariableDeclaration(child) && ts.isIdentifier(child.name) && child.name.text === "api" && child.initializer) object = objectOf(child.initializer); ts.forEachChild(child, visitApi); };
+          visitApi(source);
+        }
+        if (object && !bridgeObjects.some(entry => entry.object === object)) bridgeObjects.push({ name, object, source, surface });
+      }
+      ts.forEachChild(node, find);
+    };
+    find(source);
+  }
+  const payloadOf = fn => {
+    const signature = checker.getSignaturesOfType(checker.getTypeAtLocation(fn), ts.SignatureKind.Call)[0];
+    const callback = signature?.parameters.find(parameter => {
+      const declaration = parameter.valueDeclaration ?? parameter.declarations?.[0];
+      return declaration && checker.getSignaturesOfType(checker.getNonNullableType(checker.getTypeOfSymbolAtLocation(parameter, declaration)), ts.SignatureKind.Call).length;
+    });
+    const callbackDeclaration = callback && (callback.valueDeclaration ?? callback.declarations?.[0]);
+    const callbackSignature = callbackDeclaration && checker.getSignaturesOfType(checker.getNonNullableType(checker.getTypeOfSymbolAtLocation(callback, callbackDeclaration)), ts.SignatureKind.Call)[0];
+    const payload = callbackSignature?.parameters[0];
+    const payloadDeclaration = payload && (payload.valueDeclaration ?? payload.declarations?.[0]);
+    const payloadType = payloadDeclaration && checker.getTypeOfSymbolAtLocation(payload, payloadDeclaration);
+    if (!callbackSignature) return { payloadSchema: { description: "The member's callback is untyped." }, payloadBasis: "untyped" };
+    if (!payload) return { payloadSchema: { type: "null", description: "The callback takes no payload." }, payloadBasis: "none" };
+    if (untypedType(payloadType)) return { payloadSchema: { description: "The callback payload is untyped; read it as data." }, payloadBasis: "untyped" };
+    return { payloadSchema: schema(payloadType, 1), payloadBasis: "bridge-type" };
+  };
+  for (const { name, object, source, surface } of bridgeObjects) {
+    const root = name === "agentlas" ? "" : name === "agentlasScience" ? "science" : name;
+    const walk = (literal, prefix) => {
+      for (const property of literal.properties) {
+        if (!ts.isPropertyAssignment(property) && !ts.isMethodDeclaration(property)) continue;
+        const key = property.name && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) ? property.name.text : null;
+        if (!key) continue;
+        const at = prefix ? `${prefix}.${key}` : key;
+        let value = ts.isPropertyAssignment(property) ? unwrap(property.initializer) : property;
+        if (ts.isCallExpression(value) && value.expression.getText(source) === "Object.freeze") value = unwrap(value.arguments[0]);
+        if (ts.isObjectLiteralExpression(value)) { walk(value, at); continue; }
+        if (!ts.isArrowFunction(value) && !ts.isFunctionExpression(value) && !ts.isMethodDeclaration(value) || !value.body) continue;
+        const channels = new Set(), prefixes = new Set();
+        let dynamic = false;
+        const visit = node => {
+          if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "on"
+            && /ipcRenderer$/.test(node.expression.expression.getText(source)) && node.arguments[0]) {
+            if (ts.isStringLiteralLike(node.arguments[0])) channels.add(node.arguments[0].text); else dynamic = true;
+          }
+          if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "startsWith"
+            && node.arguments[0] && ts.isStringLiteralLike(node.arguments[0]) && node.arguments[0].text.endsWith(":")) prefixes.add(node.arguments[0].text);
+          ts.forEachChild(node, visit);
+        };
+        visit(value.body);
+        const member = root ? `${root}.${at}` : at;
+        if (channels.size === 1 && !dynamic) events.push({ member, surface, channel: [...channels][0], ...payloadOf(value) });
+        else if (dynamic && !channels.size) for (const streamPrefix of [...prefixes].sort()) events.push({ member, surface, channel: `${streamPrefix}<id>`, ...payloadOf(value) });
+      }
+    };
+    walk(object, "");
+  }
+  events.sort((a, b) => a.member.localeCompare(b.member));
+  // Result types repeat (the same chat, project or manuscript record under many operations). A sub-schema of 200+
+  // characters that occurs more than once is stored once under $defs and referenced; descriptors attach the $defs an
+  // operation uses, so each output schema stays a complete JSON Schema.
+  // Only schema positions are shared (a property's schema, items, anyOf/oneOf members, additional*): keyword containers
+  // such as a `properties` map stay in place, so every reference still sits where a schema belongs.
+  const schemaChildren = (node, visit) => {
+    const copy = {};
+    for (const [key, value] of Object.entries(node)) {
+      if (key === "properties" && value && typeof value === "object" && !Array.isArray(value)) copy[key] = Object.fromEntries(Object.entries(value).map(([name, field]) => [name, visit(field)]));
+      else if ((key === "anyOf" || key === "oneOf") && Array.isArray(value)) copy[key] = value.map(visit);
+      else if (key === "items") copy[key] = Array.isArray(value) ? value.map(visit) : visit(value);
+      else if ((key === "additionalProperties" || key === "additionalItems") && value && typeof value === "object") copy[key] = visit(value);
+      else copy[key] = value;
+    }
+    return copy;
+  };
+  const occurrences = new Map();
+  const count = node => {
+    if (!node || typeof node !== "object" || Array.isArray(node)) return node;
+    const text = JSON.stringify(node);
+    if (text.length >= 200) occurrences.set(text, (occurrences.get(text) ?? 0) + 1);
+    schemaChildren(node, count);
+    return node;
+  };
+  for (const key of Object.keys(contracts).sort()) count(contracts[key].output);
+  for (const event of events) count(event.payloadSchema);
+  const defs = {};
+  const intern = (node, top = false) => {
+    if (!node || typeof node !== "object" || Array.isArray(node)) return node;
+    const text = JSON.stringify(node);
+    const copy = schemaChildren(node, child => intern(child));
+    if (!top && text.length >= 200 && (occurrences.get(text) ?? 0) > 1) {
+      const id = `d${require("node:crypto").createHash("sha256").update(text).digest("hex").slice(0, 12)}`;
+      defs[id] ??= copy;
+      return { $ref: `#/$defs/${id}` };
+    }
+    return copy;
+  };
+  for (const key of Object.keys(contracts)) contracts[key].output = intern(contracts[key].output, true);
+  for (const event of events) event.payloadSchema = intern(event.payloadSchema, true);
+  const contractOutput = path.join(outputDirectory, "operation-contracts.generated.ts");
+  const contractBody = "// Generated from the app's TypeScript bridges, Main handlers and the Science daemon by scripts/generate-app-control-catalog.cjs. Do not edit.\n"
+    + "export type AppControlOutputBasis = \"bridge-type\" | \"void\" | \"main-handler-type\" | \"daemon-command-type\" | \"untyped\";\n"
+    + "export interface AppControlGeneratedContract { output: Record<string, unknown>; outputBasis: AppControlOutputBasis; untypedReason?: string; /** Main handler result vs the renderer bridge's declared type. */ handlerAgreement?: \"assignable\" | \"mismatch\" | \"bridge-untyped\" | \"handler-untyped\" | \"shared-table-handler\"; execution: \"domain-service\" | \"owner-interaction\"; registration: string; daemonCommand?: string }\n"
+    + "export interface AppControlEventChannel { member: string; surface: \"desktop\" | \"science\"; /** Exact channel, or \"<prefix>:<id>\" for a per-id stream. */ channel: string; payloadSchema: Record<string, unknown>; payloadBasis: \"bridge-type\" | \"none\" | \"untyped\" }\n"
+    + "export const APP_CONTROL_OPERATION_CONTRACTS: Readonly<Record<string, AppControlGeneratedContract>> = {\n"
+    + Object.keys(contracts).sort().map(key => `${JSON.stringify(key)}:${JSON.stringify(contracts[key])}`).join(",\n") + "};\n"
+    + "export const APP_CONTROL_EVENT_CHANNELS: readonly AppControlEventChannel[] = [\n"
+    + events.map(event => JSON.stringify(event)).join(",\n") + "];\n"
+    + "/** Shared result sub-schemas referenced as {\"$ref\":\"#/$defs/<id>\"}. */\n"
+    + "export const APP_CONTROL_OUTPUT_DEFS: Readonly<Record<string, Record<string, unknown>>> = {\n"
+    + Object.keys(defs).sort().map(key => `${JSON.stringify(key)}:${JSON.stringify(defs[key])}`).join(",\n") + "};\n";
   const output = path.join(outputDirectory, "argument-schemas.generated.ts");
   const body = "// Generated from the app's TypeScript bridges by scripts/generate-app-control-catalog.cjs.\n"
     + "export const APP_CONTROL_ARGUMENT_SCHEMAS: Readonly<Record<string, Record<string, unknown>>> = "
@@ -515,7 +816,10 @@ function generateAppControlSchemas({ root, operations, check, outputDirectory = 
     + JSON.stringify(preferenceSchemas, null, 0) + ";\n";
   if (check) {
     if (!fs.existsSync(output) || fs.readFileSync(output, "utf8") !== body) throw new Error("app-control argument schemas are stale: run node scripts/generate-app-control-catalog.cjs");
-  } else { fs.mkdirSync(path.dirname(output), { recursive: true }); fs.writeFileSync(output, body); }
+    if (!fs.existsSync(contractOutput) || fs.readFileSync(contractOutput, "utf8") !== contractBody) throw new Error("app-control operation contracts are stale: run node scripts/generate-app-control-catalog.cjs");
+  } else {
+    fs.mkdirSync(path.dirname(output), { recursive: true }); fs.writeFileSync(output, body); fs.writeFileSync(contractOutput, contractBody);
+  }
   return Object.keys(docs).length;
 }
 

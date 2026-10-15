@@ -15,6 +15,9 @@ export interface BusinessOrganizationExecutionContext {
 }
 export interface BusinessOrganizationExecutionPending {
   readonly action: BusinessOrganizationExecutionAction; readonly expectedRevision: number;
+  /** Original claim display identity supplied by its owner, never a permission or
+   * an extra control/receipt lookup field. Legacy missing identity stays held. */
+  readonly originalOwnerPrincipalId?: string | null;
 }
 export interface BusinessOrganizationExecutionRow {
   readonly candidateId: string; readonly ownerPrincipalId: string; readonly projectId: string;
@@ -29,7 +32,9 @@ export interface BusinessOrganizationExecutionSnapshot {
   readonly context: BusinessOrganizationExecutionContext;
   readonly rows: readonly BusinessOrganizationExecutionRow[];
 }
-export interface BusinessOrganizationExecutionLookup extends BusinessOrganizationExecutionPending { readonly candidateId: string }
+export interface BusinessOrganizationExecutionLookup {
+  readonly candidateId: string; readonly action: BusinessOrganizationExecutionAction; readonly expectedRevision: number;
+}
 export interface BusinessOrganizationExecutionResult {
   readonly schema: typeof BUSINESS_ORGANIZATION_EXECUTION_CONTROL_SCHEMA;
   readonly candidateId: string; readonly ownerPrincipalId: string;
@@ -88,7 +93,9 @@ export function isBusinessOrganizationExecutionContext(raw: unknown): raw is Bus
     && typeof raw.expiresAt === 'string' && raw.expiresAt.length <= 40 && Number.isFinite(Date.parse(raw.expiresAt));
 }
 function pending(raw: unknown): raw is BusinessOrganizationExecutionPending {
-  return exact(raw, ['action', 'expectedRevision']) && isBusinessOrganizationExecutionAction(raw.action) && revision(raw.expectedRevision);
+  return (exact(raw, ['action', 'expectedRevision']) || exact(raw, ['action', 'expectedRevision', 'originalOwnerPrincipalId'])
+    && (raw.originalOwnerPrincipalId === null || isBusinessId(raw.originalOwnerPrincipalId)))
+    && isBusinessOrganizationExecutionAction(raw.action) && revision(raw.expectedRevision);
 }
 export function businessOrganizationExecutionPendingKey(value: BusinessOrganizationExecutionPending): string {
   return JSON.stringify([value.action, value.expectedRevision]);

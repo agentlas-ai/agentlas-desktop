@@ -25,8 +25,6 @@ export function mcpOutageNotice(serverKey: string, locale: "ko" | "en" | undefin
 }
 
 /** 모델용 한 줄 — 시스템 프롬프트 꼬리에 붙는다. */
-export function toolOutageGuidance(locale: "ko" | "en" | undefined): string {
-  return locale === "ko"
-    ? `\n\n[도구 장애] 도구 결과가 'MCP server "…" is not connected' 이면 그 도구는 이 턴 내내 죽은 것이다 — 같은 도구를 다시 부르거나 "변화 없음"을 반복하지 마라. 어떤 도구가 끊겨 무엇을 못 했는지 한 번 적고 이 턴을 끝내라. 다음 메시지에서 호스트가 다시 연결한다.`
-    : `\n\n[Tool outage] If a tool result says 'MCP server "…" is not connected', that tool is down for the rest of this turn — do not call it again or repeat "no change". State once which tool is down and what could not be done, then end the turn. The host reconnects it on the next message.`;
+export function toolOutageGuidance(_locale: "ko" | "en" | undefined): string {
+  return `\n\n[Tool outage] result 'MCP server "…" is not connected': tool down this turn; no retry. State which tool and what failed once, end turn.`;
 }

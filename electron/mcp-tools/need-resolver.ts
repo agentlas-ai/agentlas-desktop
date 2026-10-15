@@ -226,12 +226,13 @@ export async function resolveMcpNeeds(input: {
     requireNoTools: true,
     question: MCP_NEED_JUDGMENT_QUESTION,
     labels: candidates.map((candidate) => candidate.id),
+    // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.judgment.kind.mcp-need.user).
     input: [
-      renderMcpGoalNeedContext(input.goal),
+      `AVAILABLE TOOLS:\n${inventory}`,
       renderMcpRuntimeCapabilities(input.runtimeCapabilities),
+      renderMcpGoalNeedContext(input.goal),
       ...(input.taskContext ? [renderMcpTaskContext(input.taskContext)] : []),
       `CURRENT TASK${input.taskContext ? " (the user's request for this turn; judge this)" : ""}:\n${input.task.trim()}`,
-      `AVAILABLE TOOLS:\n${inventory}`,
     ].join("\n\n"),
     guidance: MCP_NEED_JUDGMENT_GUIDANCE,
     maxInputChars: null,

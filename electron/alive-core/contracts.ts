@@ -45,6 +45,11 @@ export interface AliveActionPacket {
 }
 export interface AliveActionResult {
   ok: boolean; actionId: string; code: string; replayed?: boolean; invocationRunId?: string;
+  /**
+   * The effect was handed to the domain's custodian in another process and settles there: the reservation stays
+   * `executing` and its durable receipt (actionReceipt) settles it on a later beat. Never a settled result.
+   */
+  pending?: true;
 }
 export type AliveDecision =
   | { kind: "wait" | "review"; reason: string; nextWakeAtMs: number | null }
@@ -110,4 +115,10 @@ export interface AlivePlaygroundPort {
   execute?(attachment: AliveAttachment, action: AliveActionPacket, nowMs: number): AliveActionResult;
   /** Read-only recovery for a dispatch whose return receipt may have been lost. */
   actionReceipt?(actionId: string): AliveActionResult | null;
+  /**
+   * execute() hands the effect to a custodian in another process, which re-validates against the shared store and
+   * settles a receipt for every outcome (refusals included). The service keeps handing an executing reservation over
+   * until that receipt exists, whatever happened to the life's epoch or attachment meanwhile.
+   */
+  readonly remoteCustody?: boolean;
 }

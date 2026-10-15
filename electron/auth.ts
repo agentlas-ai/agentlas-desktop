@@ -80,6 +80,20 @@ export interface AuthSessionInvalidationEvent {
 
 const sessionInvalidationListeners = new Set<(event: AuthSessionInvalidationEvent) => void>();
 const sessionRestorationListeners = new Set<(session: AuthSession) => void>();
+const ownershipChangeListeners = new Set<() => void>();
+
+/** Value-free, synchronous custody invalidation at the authoritative cache edge.
+ * It precedes durable cookie I/O and does not change the older UI hooks.
+ */
+export function onAuthSessionOwnershipChanged(listener: () => void): () => void {
+  ownershipChangeListeners.add(listener);
+  return () => ownershipChangeListeners.delete(listener);
+}
+function emitAuthSessionOwnershipChanged(): void {
+  for (const listener of ownershipChangeListeners) {
+    try { listener(); } catch { /* One observer cannot block sign-out or auth. */ }
+  }
+}
 
 function queueCookieMutation<T>(mutation: () => Promise<T>): Promise<T> {
   const next = _cookieMutationChain.then(mutation, mutation);
@@ -597,6 +611,7 @@ function invalidateCachedSession(reason: AuthSessionInvalidationReason): void {
   _sessionGeneration += 1;
   _cache = null;
   _metaRefreshAt = 0;
+  emitAuthSessionOwnershipChanged();
   void queueCookieMutation(deleteStoredSessionCookie);
   const event: AuthSessionInvalidationEvent = {
     previousWorkspaceId: previous.workspaceId,
@@ -696,6 +711,7 @@ export async function bootAuthFromKeychain(): Promise<AuthRestoreResult> {
       workspaceId: decoded.value.workspaceId,
       expiresAt: decoded.value.expiresAt,
     };
+    emitAuthSessionOwnershipChanged();
     // 이메일/이름은 백그라운드로 fetch (실패해도 무방; 실패 시 getAuthSession 폴링이 재시도)
     scheduleMetaRefresh();
     return { status: "restored", signedIn: true };
@@ -840,6 +856,7 @@ async function persistSession(value: string): Promise<AuthSession> {
     workspaceId: decoded.value.workspaceId,
     expiresAt: decoded.value.expiresAt,
   };
+  emitAuthSessionOwnershipChanged();
   const meta = await fetchAccountMeta(value);
   if (generation !== _sessionGeneration || !_cache || _cache.cookieValue !== value) {
     return getAuthSession();
@@ -871,12 +888,13 @@ export function sessionForDaemonHandoff(): HostSessionHandoff | null {
 /** Daemon only: adopt (or clear, with null) the session Main handed over. */
 export function adoptHostSessionHandoff(session: HostSessionHandoff | null): boolean {
   if (process.env.ELECTRON_RUN_AS_NODE !== "1") throw new Error("auth-session-handoff-daemon-only");
-  if (session === null) { _cache = null; return false; }
+  if (session === null) { _cache = null; emitAuthSessionOwnershipChanged(); return false; }
   if (typeof session.cookieValue !== "string" || !session.cookieValue || session.cookieValue.length > 16_384 || /[\s;]/.test(session.cookieValue)) {
     throw new Error("auth-session-handoff-invalid");
   }
-  if (session.expiresAt !== undefined && (!Number.isFinite(session.expiresAt) || session.expiresAt < Date.now())) { _cache = null; return false; }
+  if (session.expiresAt !== undefined && (!Number.isFinite(session.expiresAt) || session.expiresAt < Date.now())) { _cache = null; emitAuthSessionOwnershipChanged(); return false; }
   _cache = { cookieValue: session.cookieValue, userId: session.userId, workspaceId: session.workspaceId, expiresAt: session.expiresAt };
+  emitAuthSessionOwnershipChanged();
   return true;
 }
 
@@ -1095,6 +1113,7 @@ export async function signOut(): Promise<void> {
   const suppressed = developmentEffectsSuppressed();
   _sessionGeneration += 1;
   _cache = null;
+  emitAuthSessionOwnershipChanged();
   try {
     await queueCookieMutation(deleteStoredSessionCookie);
   } catch (err) {

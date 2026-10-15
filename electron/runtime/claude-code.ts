@@ -1,5 +1,6 @@
 import { selectionFor } from "../capabilities/one-capabilities";
 import { reportModelPayload, ledgerFromCliSent } from "./model-call-ledger";
+import { recordNativeCompaction } from "./native-compaction-event";
 import { claudeMcpIsolation, withClaudePersonalContext, withDisallowedTools } from "./claude-personal-context";
 import { recordClaudeCapabilityRequest, recordClaudeCapabilityInit } from "./capability-receipt";
 import { claudeBrowserSurfaceArgs, claudeEngineBrowserEnabled } from "./claude-browser-surface";
@@ -24,6 +25,7 @@ import {
   startCliHeartbeat,
   startCliSilenceGuard,
   runtimeSilentTimeoutFailure,
+  runtimeProtocolUnrecognizedFailure,
   cliSilenceWindowMs,
   cliToolSilenceWindowMs,
   workforceObservedHostAuthorityEnforcement,
@@ -31,6 +33,7 @@ import {
   workforceZeroToolsEnforcement,
   wrapSystemPrompt,
   RuntimeTurnUnsettledError,
+  childExitReason,
 } from "./runner";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import { detectApprovalRequired } from "./runtime-refusal";
@@ -59,7 +62,7 @@ import {
 } from "./claude-session";
 import { isResidencyExemptAgent, resolveAgentResidencySource } from "./agent-residency";
 import {
-  CLI_HISTORY_CONTEXT_TOKENS,
+  cliHistoryContextTokens,
   composeResumeTurnPrompt,
   renderConversationContext,
   renderGapContext,
@@ -403,10 +406,9 @@ async function claudeExecutionSettings(req: RunnerRequest): Promise<string | nul
 }
 
 /**
- * 답변 언어는 사용자가 쓴 언어를 따른다(오너 2026-10-14, runner.ts responseLanguageGuide). 그런데 Claude Code 사용자 설정
- * `"language": "korean"` 은 CLI 가 시스템 수준에 넣어서, 우리 시스템 프롬프트의 "Always reply in English" 를 맨 앞에
- * 두든 맨 끝에 두든 이겼다(실측 2026-09-14, claude 2.1.270: 두 배치 모두 한국어, `--settings '{"language":"english"}'`
- * 는 영어). 영어 화면·영어 프로젝트에서 연구 디렉터가 한국어로 답하던 원인 — 그 설정을 해 둔 사용자 누구에게나 난다.
+ * 답변 언어는 사용자가 쓴 언어를 따른다(오너 2026-10-14, 화면 언어는 메뉴용). 그런데 Claude Code 사용자 설정
+ * `"language": "korean"` 은 CLI 가 시스템 수준에 넣어서 프롬프트를 이긴다(실측 2026-09-14, claude 2.1.270). 그래서
+ * 제품 실행은 그 값을 빈 문자열로 덮는다 — 2.1.296 실측: 덮지 않으면 영어 질문에도 한국어, "" 이면 질문 언어 그대로.
  * --settings 는 두 번 주면 뒤의 것만 남으므로(위 claudeExecutionSettings 주석) 기존 설정 객체에 language 만 합친다.
  */
 /**
@@ -428,9 +430,10 @@ export function withoutPersonalClaudeInstructions(settings: string, env: NodeJS.
   return JSON.stringify({ ...base, claudeMdExcludes: [...new Set([...existing, ...personalClaudeInstructionFiles(env)])] });
 }
 
-export async function withProductReplyLanguage(settings: string | null, _locale: RunnerRequest["locale"]): Promise<string> {
-  // Owner 2026-10-14: the reply follows the user's language. "" clears a personal "language" setting without forcing
-  // one (measured claude 2.1.296 with a personal "korean": unset answered English in Korean; "" answered each in kind).
+export async function withProductReplyLanguage(settings: string | null, _locale?: RunnerRequest["locale"]): Promise<string> {
+  // Owner 2026-10-14: the reply follows the user's language; the app language is for menus. A personal
+  // "language": "korean" would still force Korean, so the product run clears it. Measured (claude 2.1.296, personal
+  // setting korean): unset → an English question answered in Korean; "" → English for English, Korean for Korean.
   const language = "";
   let base: Record<string, unknown> = {};
   if (settings) {
@@ -711,7 +714,7 @@ function flattenHistory(req: RunnerRequest): string {
   // CLI는 단일 turn — 이전 대화를 연속성 프레이밍과 함께 user 메시지에 inline으로 prepend.
   // 컨텍스트 예산을 넘길 때만 오래된 턴이 다이제스트로 접힌다(그 외 원문 유지).
   if (req.history.length === 0) return req.userPrompt;
-  const { block } = renderConversationContext(req.history, req.locale, CLI_HISTORY_CONTEXT_TOKENS);
+  const { block } = renderConversationContext(req.history, req.locale, cliHistoryContextTokens(KIND, req.model));
   return [block, "", tStatus(req.locale, "histThis"), req.userPrompt].join("\n");
 }
 
@@ -764,6 +767,33 @@ function systemFingerprint(req: RunnerRequest, executableFingerprint: string): s
     .digest("hex");
 }
 
+
+/**
+ * True when a stream-json line has a protocol shape this adapter understands: assistant/user messages carrying
+ * content, a stream_event with a typed inner event, a rate-limit event with info, or a system/result line whose
+ * subtype / is_error are the documented types. Well-formed JSON of the wrong shape is NOT an event.
+ */
+export function claudeStreamEventRecognized(ev: unknown): boolean {
+  if (!ev || typeof ev !== "object" || Array.isArray(ev)) return false;
+  const e = ev as { type?: unknown; subtype?: unknown; is_error?: unknown; message?: unknown; event?: unknown; rate_limit_info?: unknown };
+  switch (e.type) {
+    case "assistant":
+    case "user": {
+      const content = e.message && typeof e.message === "object" ? (e.message as { content?: unknown }).content : undefined;
+      return Array.isArray(content) || typeof content === "string";
+    }
+    case "stream_event":
+      return Boolean(e.event) && typeof e.event === "object" && typeof (e.event as { type?: unknown }).type === "string";
+    case "rate_limit_event":
+      return Boolean(e.rate_limit_info) && typeof e.rate_limit_info === "object";
+    case "system":
+      return typeof e.subtype === "string";
+    case "result":
+      return typeof e.subtype === "string" || typeof e.is_error === "boolean";
+    default:
+      return false;
+  }
+}
 
 /**
  * claude stream-json 이벤트 하나에서 실패 표식을 읽는다 — 순수 함수(게이트가 픽스처 주입).
@@ -826,7 +856,8 @@ export function claudeFailureFromEvent(
 
 /** 구형 CLI 판별 — 상주 스폰이 아무 이벤트도 못 내고 죽었을 때 stderr 로만 판정한다. */
 function looksLikeUnknownInputFormat(stderr: string): boolean {
-  return /input-format/i.test(stderr);
+  // Argument-parser rejection of the flag itself (clap/commander wording), not any message that mentions it.
+  return /input-format/i.test(stderr) && /unknown|unrecognized|unexpected|invalid|no such|not (?:a )?(?:valid|supported|recognized)/i.test(stderr);
 }
 
 // Captured session identity remains valid after its exclusive lease is returned.
@@ -937,6 +968,8 @@ const runClaudeTurn = async (
     "claude-code",
     runReq.sciencePromptProfile,
     runReq.judgmentOnly === true ? "host-judgment" : undefined,
+      undefined,
+      runReq.systemPromptComposition,
   );
   const fingerprint = aliveProfile ? crypto.createHash("sha256").update(JSON.stringify([aliveProfile.bindingKey,
     executableIdentity.fingerprint, systemPrompt, runReq.outputSchema, runReq.model])).digest("hex")
@@ -976,9 +1009,7 @@ const runClaudeTurn = async (
    */
   const readOnlyToolNotice =
     !runReq.untrustedNoTools && req.permission !== "write" && req.permission !== "full"
-      ? (runReq.locale === "ko"
-        ? `\n\n[읽기 전용 실행] 이 세션에는 파일 쓰기·편집·셸 도구가 없다(제거됨). 서브에이전트 위임이나 다른 도구로 우회하지 마라. 작업에 쓰기·실행이 필요하면 무엇이 왜 필요한지 한 문장으로 말한 뒤, 답의 마지막 줄에 정확히 ${PERMISSION_ESCALATION_MARKER} 를 한 줄로 남겨라 — 앱이 사용자에게 전체 액세스 승격을 묻고, 승인되면 이어서 실행된다. 읽기·검색·분석은 평소대로 하면 된다. 에이전트 메일 도구(agent_mail_*)가 있으면 사용자가 요청한 메일 보내기·답장·초안은 이 실행에서도 그 도구로 바로 하라 — 전체 액세스 승격이 필요 없다.`
-        : `\n\n[Read-only run] This session has no file write, edit, or shell tools — they were removed. Do not work around it by delegating to a subagent or substituting another tool. If the task needs writing or shell execution, say in one sentence what is needed and why, then put exactly ${PERMISSION_ESCALATION_MARKER} on its own final line — the app will ask the user to escalate to full access and resume. Reading, searching, and analysis work as usual. If agent mail tools (agent_mail_*) are available, sending, replying to or drafting mail the user asked for works in this run through those tools — no full-access escalation is needed.`)
+      ? `\n\n[Read-only run] write/edit/shell: removed; no workaround (subagent, other tool). Needs write: one sentence why, then final line exactly ${PERMISSION_ESCALATION_MARKER}. agent_mail_*: allowed.`
       : "";
   /*
    * 쓰기 실행은 작업 폴더 샌드박스 안에서 돈다. 샌드박스·승인 거부를 말해 주지 않으면 모델은 그것을
@@ -987,17 +1018,17 @@ const runClaudeTurn = async (
    */
   const writeSandboxNotice =
     !runReq.untrustedNoTools && req.permission === "write"
-      ? (runReq.locale === "ko"
-        ? `\n\n[쓰기 실행] 셸 명령은 작업 폴더 샌드박스 안에서 돈다. 어떤 명령이 승인 필요·샌드박스 거부로 막히면(권한 없음, Operation not permitted, GUI 앱·에뮬레이터·가상화·시스템 서비스 실행 실패, 프로세스가 시작하자마자 SIGILL·exit 132 로 즉사하는 것 포함) 그것은 이 컴퓨터의 한계가 아니라 이 실행의 권한 경계다. open·osascript·launchctl·.command·tmux 처럼 샌드박스 밖에 프로세스를 만드는 길로 우회하지 마라 — 막히며 그것도 같은 권한 경계다. 기계 문제로 진단하거나 우회를 반복하지 말고, 무엇이 왜 필요한지 한 문장으로 말한 뒤 답의 마지막 줄에 정확히 ${PERMISSION_ESCALATION_MARKER} 를 한 줄로 남겨라 — 앱이 사용자에게 전체 액세스 승격을 묻고, 승인되면 이어서 실행된다.`
-        : `\n\n[Write run] Shell commands run inside a workspace sandbox. If a command is blocked by an approval requirement or the sandbox (permission denied, Operation not permitted, GUI apps, emulators, virtualization or system services failing to start, a process dying immediately with SIGILL / exit 132), that is this run's permission boundary, not a limit of this computer. Do not route around it through launchers that start processes outside the sandbox (open, osascript, launchctl, .command files, tmux) — they are blocked and are the same boundary. Do not diagnose the machine or keep trying workarounds: say in one sentence what is needed and why, then put exactly ${PERMISSION_ESCALATION_MARKER} on its own final line — the app will ask the user to escalate to full access and resume.`)
+      ? `\n\n[Write run] shell: workspace sandbox. Blocked (approval, Operation not permitted, GUI/emulator/service start failure, SIGILL/exit 132) = permission boundary, not machine limit; no launcher workaround (open, osascript, launchctl, .command, tmux). Needs more: one sentence why, then final line exactly ${PERMISSION_ESCALATION_MARKER}.`
       : "";
   // Snapshot what this prompt actually dispatches before asynchronous native init.
   const stableContextSnapshot = { turnContext: aliveProfile ? undefined : runReq.turnContext,
     stableBlocks: !aliveProfile && runReq.turnContextStable ? [...runReq.turnContextStable] : undefined };
-  const seededSystemPrompt = (!resumeSessionId && stableContextSnapshot.turnContext?.trim()
-    ? `${systemPrompt}\n\n${stableContextSnapshot.turnContext.trim()}`
-    : systemPrompt) + (runReq.minimalObservation ? ""
-      : readOnlyToolNotice + writeSandboxNotice + (runReq.untrustedNoTools ? "" : toolOutageGuidance(runReq.locale)));
+  // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.main.claude-code.system).
+  // The wrapped prompt (runner.ts wrapSystemPrompt) leads; then the tool-outage guidance and the permission notices;
+  // the per-session turn context comes last.
+  const seededSystemPrompt = systemPrompt + (runReq.minimalObservation ? ""
+    : (runReq.untrustedNoTools ? "" : toolOutageGuidance(runReq.locale)) + readOnlyToolNotice + writeSandboxNotice)
+    + (!resumeSessionId && stableContextSnapshot.turnContext?.trim() ? `\n\n${stableContextSnapshot.turnContext.trim()}` : "");
 
   if (stagedImages.images.length > 0) {
     events.onStatus(
@@ -1134,7 +1165,7 @@ const runClaudeTurn = async (
   // Personal skills, plugins and project memory stay out of every product run; One alone gets the ones the person
   // switched on (capabilities/one-capabilities.ts, claude-personal-context.ts). A settings overlay, not a config-dir mirror:
   // Claude's sign-in is keyed by its config dir.
-  const personalSettings = withClaudePersonalContext(productSettings, selectionFor(runReq.agentId),
+  const personalSettings = withClaudePersonalContext(productSettings, selectionFor(runReq.agentId, undefined, runReq.chatId),
     path.resolve((runReq.env ?? process.env).CLAUDE_CONFIG_DIR || path.join((runReq.env ?? process.env).HOME || os.homedir(), ".claude")),
     req.cwd ?? agentRunCwd());
   // The run's config dir is the product mirror (claude-product-home.ts): exclude the same files under its path too.
@@ -1181,7 +1212,7 @@ const runClaudeTurn = async (
   if (browserSurface.receipt) events.onStatus(browserSurface.receipt);
   // The person's user-scope MCP servers stay out of every product run (owner decision 2026-10-11): strict config, or
   // a deny by name where strict would also drop a plugin server the run needs (claude-personal-context.ts).
-  const mcpIsolation = claudeMcpIsolation(selectionFor(runReq.agentId), runReq.mcpAllowedTools ?? [], browserSurface.pluginBrowserNeeded);
+  const mcpIsolation = claudeMcpIsolation(selectionFor(runReq.agentId, undefined, runReq.chatId), runReq.mcpAllowedTools ?? [], browserSurface.pluginBrowserNeeded);
   events.onStatus(mcpIsolation.receipt);
   const alreadyStrict = noToolsArgs.includes("--strict-mcp-config") || minimalObservationArgs.includes("--strict-mcp-config");
   const browserOnlyArgs: string[] = browserSurface.args;
@@ -1221,7 +1252,13 @@ const runClaudeTurn = async (
       await fs.access(sysPromptFile);
       resumeAppendArgs = ["--append-system-prompt-file", sysPromptFile];
     } catch {
-      // 세션 생성 때의 파일이 없다 — append 없이 재개(레거시 형상). 이 턴만 재작성된다.
+      // 세션 생성 때의 파일이 없다(앱 재시작 뒤 임시 폴더 정리 등). Claude 기록에는 시스템 프롬프트가 남지 않으므로
+      // append 없이 재개하면 이 세션은 이후 모든 턴을 Agentlas 지시 없이 돈다 — 현재 지시로 파일을 다시 써서 붙인다.
+      // 이 턴만 캐시가 다시 쓰이고, 다음 턴부터는 같은 바이트를 다시 읽는다.
+      try {
+        await fs.writeFile(sysPromptFile, seededSystemPrompt, "utf8");
+        resumeAppendArgs = ["--append-system-prompt-file", sysPromptFile];
+      } catch { /* 쓸 수 없으면 이전처럼 append 없이 재개한다 */ }
     }
   }
   const cleanupSysFile = () => {
@@ -1306,7 +1343,7 @@ const runClaudeTurn = async (
   // person's keychain sign-in is reused unchanged (claude-product-home.ts). One keeps the user MCP servers it switched on.
   const runEnv = withClaudeProductHome(aliveProfile ? { ...process.env, CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(req.maxOutputTokens),
     MAX_STRUCTURED_OUTPUT_RETRIES: "1", CLAUDE_CODE_MAX_TURNS: "1", CLAUDE_CODE_MAX_RETRIES: "0" } : req.env ?? process.env, {
-    keepMcpServers: (selectionFor(runReq.agentId)?.items ?? []).filter((item) => item.source === "claude" && item.kind === "connector" && item.enabled).map((item) => item.name),
+    keepMcpServers: (selectionFor(runReq.agentId, undefined, runReq.chatId)?.items ?? []).filter((item) => item.source === "claude" && item.kind === "connector" && item.enabled).map((item) => item.name),
   });
   // A product session an older install wrote into ~/.claude/projects moves into the mirror before it is resumed.
   if (resumeSessionId) { try { adoptClaudeSessionIntoProductHome(runEnv, resumeSessionId, runCwd); } catch { /* resume falls back below */ } }
@@ -1474,6 +1511,7 @@ const runClaudeTurn = async (
   // only its valid terminal result acknowledges delivery, never init/stdin alone.
   let contextSessionId = session?.nativeSessionId ?? resumeSessionId;
   let initialSeedCompacted = false;
+  let compactionsThisTurn = 0;
   if (contextSessionId && lease?.fresh) {
     invalidateStableTurnContext({ chatId: contextChatId, runtimeKind: KIND, sessionId: contextSessionId });
   }
@@ -1606,6 +1644,8 @@ const runClaudeTurn = async (
     let resumedConversationMissing = false;
     /** 스트림 표식이 말한 실패 — 있으면 종료코드와 무관하게 이 턴은 답이 아니다. */
     let runnerFailure: import("./runner").RunnerFailure | null = null;
+    /** Stream events of a shape this adapter understands (assistant/user content, stream_event, typed result, ...). Zero + exit 0 = runtime_protocol_unrecognized. */
+    let recognizedEventCount = 0;
     let lastEmit = 0;
     let sessionId: string | undefined;
     let terminalSessionId = contextSessionId ?? null;
@@ -1962,6 +2002,7 @@ const runClaudeTurn = async (
         usage?: { output_tokens?: number };
       };
     }): void {
+      if (claudeStreamEventRecognized(ev)) recognizedEventCount += 1;
       if (hostObservation) {
         hostObservation.observe(ev);
         if (hostObservation.error) {
@@ -2034,6 +2075,16 @@ const runClaudeTurn = async (
       }
       if (ev.type === "system" && ev.subtype === "compact_boundary"
         && !ev.parent_tool_use_id && ev.isSidechain !== true) {
+        // G17: structured per-occurrence record (compact_metadata.{trigger,pre_tokens} when the CLI gives them).
+        const compactMeta = (ev as { compact_metadata?: { trigger?: unknown; pre_tokens?: unknown } }).compact_metadata;
+        compactionsThisTurn += 1;
+        recordNativeCompaction({
+          runtime: "claude-code", chatId: contextChatId, model: runReq.model, signal: "compact_boundary",
+          nativeRef: typeof (ev as { uuid?: unknown }).uuid === "string" ? (ev as { uuid: string }).uuid : null,
+          sessionRef: typeof ev.session_id === "string" ? ev.session_id : contextSessionId ?? null,
+          reason: typeof compactMeta?.trigger === "string" ? compactMeta.trigger : null,
+          tokensBefore: typeof compactMeta?.pre_tokens === "number" ? compactMeta.pre_tokens : null, tokensBeforeSource: "provider",
+          compactionsThisTurn });
         if (!contextSessionId) initialSeedCompacted = true;
         else if (ev.session_id == null || ev.session_id === contextSessionId) {
           invalidateStableTurnContext({ chatId: contextChatId, runtimeKind: KIND, sessionId: contextSessionId });
@@ -2401,11 +2452,24 @@ const runClaudeTurn = async (
         });
         return;
       }
+      // A resident process that exits on its own argument parser ("unknown option '--input-format'") never read the
+      // turn from stdin: arg parsing precedes any model or tool work, so degrading to the one-shot path cannot act
+      // twice. This must run BEFORE the dispatched-without-result rule below, which would otherwise make a renamed or
+      // removed flag a permanent runtime_turn_unsettled for every turn (G35).
+      if (session && !sawResult && !combined() && !finalText && session.completedTurns === 0
+        && looksLikeUnknownInputFormat((stderr || session.stderrTail).slice(-500))) {
+        broken = true;
+        executableState.residencySupported = false;
+        console.warn(`[residency] claude-code degraded to one-shot: ${(stderr || session.stderrTail).slice(-500).trim().slice(0, 200)}`);
+        events.onStatus(`[residency] disabled kind=${KIND} reason=input-format-unsupported`);
+        void runClaudeTurn(req, events, false, observeNativeFile).then(resolve, reject);
+        return;
+      }
       // No result after a dispatched turn is uncertain, including tool-only
       // turns with no visible text. Only an unattempted resident write may fall
       // back to one-shot without risking another model or external action.
       if (turnDispatchAttempted && !sawResult) {
-        rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale, sessionId, runnerFailure?.message));
+        rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale, sessionId, runnerFailure?.message ?? childExitReason(code, stderr || session?.stderrTail)));
         return;
       }
       if (aliveProfile && (!sawResult || !terminalSucceeded)) {
@@ -2457,6 +2521,20 @@ const runClaudeTurn = async (
         return;
       }
       if (code === 0) {
+        if (recognizedEventCount === 0 && !runnerFailure && !structuredRuntimeError && !combined() && !finalText.trim()) {
+          // Exit 0 but not one recognized protocol event (wrong-shape JSON only): a typed failure, never a quiet empty "success".
+          broken = true;
+          const protocolFailure = runtimeProtocolUnrecognizedFailure("claude", stderr || session?.stderrTail);
+          resolve({
+            text: protocolFailure.message,
+            ownerControlTerminal: "uncertain",
+            failure: protocolFailure,
+            sessionId,
+            tokens,
+            observedUsage,
+          });
+          return;
+        }
         const observedModel = turnModel.observedModel;
         let observedHostEnforcement: RunnerResult["workforcePermissionEnforcement"];
         if (hostObservation && !runnerFailure && !structuredRuntimeError) {

@@ -37,30 +37,15 @@ export type CommerceCategoryJudge = (spec: {
   signal?: AbortSignal;
 }) => Promise<{ verdict: CommerceCategory | null; source: "llm" | "unavailable"; confidence: number; reason: string }>;
 
-const COMMERCE_TERMS =
-  /(shop|store|commerce|ecommerce|e-commerce|mall|boutique|catalog|checkout|payment|orders|inventory|fashion|clothing|apparel|쇼핑몰|커머스|이커머스|스토어|상점|결제|주문|재고|의류|옷|패션|여성복|여자옷)/i;
-
-/**
- * Lexical prefilter — a HINT for the pack-intent judge, never a gate and never
- * a seed source. Contract (unified 2026-08-20): with NO connected model the
- * seed is NEUTRAL — the pack does not appear, regardless of what this matches.
- */
-export function shouldSeedEcommerceOps(prompt: string): boolean {
-  return COMMERCE_TERMS.test(prompt);
-}
-
 export async function prepareEcommerceOpsManifest(input: {
   prompt: string;
   now?: string;
   judgeSubsetFn?: import("../pack-intents").OnePackIntentJudge;
   judgeCategoryFn?: CommerceCategoryJudge;
 }): Promise<AgentlasSurfaceManifest | null> {
-  // ONE judged pack-intent decision shared with the creative seed (subset cache):
-  // "make the font small", "restore my backup" hit the commerce wordlist and used
-  // to seed an e-commerce ops surface, while a genuine store request phrased
-  // without the listed words could never seed. The prefilter is a hint, not a
-  // gate; with NO connected model we do NOT seed from the keyword prefilter — the
-  // pack simply does not appear (undecided).
+  // ONE judged pack-intent decision shared with the creative seed (subset cache).
+  // The model-selected subset is the only seed; there is no keyword prior. With
+  // NO connected model the pack simply does not appear (undecided).
   const { resolveOnePackIntents } = await import("../pack-intents");
   const intents = await resolveOnePackIntents({
     prompt: input.prompt,
@@ -135,11 +120,11 @@ export function buildEcommerceOpsManifest(input: {
   ] as AgentlasSurfaceManifest["evidence"];
 
   const routes = [
-    { path: "/", label: "Command", purpose: "Daily operating dashboard for launch tasks, blockers, and agent handoffs.", status: "planned" },
-    { path: "/storefront", label: "Storefront", purpose: "Review brand, product cards, sections, and conversion copy.", status: "planned" },
-    { path: "/catalog", label: "Catalog", purpose: "Manage product ideas, images, SKU state, margin assumptions, and source labels.", status: "planned" },
-    { path: "/orders", label: "Orders", purpose: "Track paid orders, fulfillment status, refunds, and customer messages.", status: "planned" },
-    { path: "/finance", label: "Finance", purpose: "Monitor payment setup, fees, payout readiness, and estimate-vs-verified numbers.", status: "planned" },
+    { path: "/", label: "Command", purpose: "Daily operating dashboard for launch tasks, blockers, and agent handoffs.", status: "planned", section: "overview" },
+    { path: "/storefront", label: "Storefront", purpose: "Review brand, product cards, sections, and conversion copy.", status: "planned", section: "storefront" },
+    { path: "/catalog", label: "Catalog", purpose: "Manage product ideas, images, SKU state, margin assumptions, and source labels.", status: "planned", section: "catalog" },
+    { path: "/orders", label: "Orders", purpose: "Track paid orders, fulfillment status, refunds, and customer messages.", status: "planned", section: "orders" },
+    { path: "/finance", label: "Finance", purpose: "Monitor payment setup, fees, payout readiness, and estimate-vs-verified numbers.", status: "planned", section: "finance" },
   ];
 
   const connectors = [

@@ -33,7 +33,19 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { AcpConnection, AcpRpcError } from "./acp-protocol";
+import { AcpConnection, AcpRpcError, classifyAcpFailure, nativeProcessErrorCode } from "./acp-protocol";
+import type { NativeFailureEvidence, NativeTransportSnapshot, NativeProtocolCounters } from "./native-runtime-diagnostics";
+
+type CodexInitializationEvidence={failure:NativeFailureEvidence;transport:NativeTransportSnapshot|null;protocol:NativeProtocolCounters|null};
+const initializationFailures=new WeakMap<object,CodexInitializationEvidence>();
+export function codexInitializationFailure(error:unknown):CodexInitializationEvidence|null { return error&&typeof error==="object"?initializationFailures.get(error)??null:null; }
+function initializationEvidence(error:unknown,connection?:AcpConnection):CodexInitializationEvidence {
+  let snapshot:{transport:NativeTransportSnapshot;protocol:NativeProtocolCounters}|undefined;
+  let failure:NativeFailureEvidence=Object.freeze({category:"unknown",rpcCode:null,timeoutMs:null,requestMethod:null});
+  try{failure=classifyAcpFailure(error);}catch{/* An absent or failed optional classifier cannot replace the primary error. */}
+  try{snapshot=connection?.diagnosticSnapshot();}catch{/* Preserve primary failure and mandatory cleanup when optional capture fails. */}
+  return Object.freeze({failure,transport:snapshot?.transport??null,protocol:snapshot?.protocol??null});
+}
 import { AcpSessionPool, type AcpSessionLease } from "./acp-session-pool";
 import { accountCodexHome } from "./codex-product-home";
 import { detachedSpawnOpts, killCliTree, markRunChildResident, spawnCli, trackRunChild, waitForCliTreeTermination } from "./exec";
@@ -70,6 +82,9 @@ export const CODEX_CLIENT_REQUESTS = [
   "turn/start",
   "turn/steer",
 ] as const;
+
+/** 우리가 보내는 알림. initialize 응답 뒤 `initialized`로 핸드셰이크를 닫는다(Alive 세션과 같은 순서). */
+export const CODEX_CLIENT_NOTIFICATIONS = ["initialized"] as const;
 
 /** 실행 승인을 묻는 서버 요청. MCP form elicitation은 정보 입력이며 별도 경계다. */
 export const CODEX_APPROVAL_REQUESTS = [
@@ -142,13 +157,21 @@ export async function openCodexResidentSession(opts: {
   timeoutMs?: number;
 }): Promise<CodexResidentSession> {
   const timeoutMs = opts.timeoutMs ?? 60_000;
-  const child = spawnCli(opts.bin, opts.args, {
+  let child:ChildProcess;
+  try {child = spawnCli(opts.bin, opts.args, {
     stdio: ["pipe", "pipe", "pipe"],
     cwd: opts.cwd,
     env: opts.env,
     // POSIX 그룹킬 대상 — 취소/앱종료 시 codex 가 띄운 MCP 서버·손자까지 정리.
     ...detachedSpawnOpts(),
-  });
+  });}catch(error){
+    if(error&&typeof error==="object"){
+      let code:string|null=null;
+      try{code=nativeProcessErrorCode(error);}catch{/* Older inert facades may omit optional diagnostics. */}
+      initializationFailures.set(error,Object.freeze({failure:Object.freeze({category:code?"child-process-error":"unknown",rpcCode:null,timeoutMs:null,requestMethod:"initialize"}),transport:null,protocol:null}));
+    }
+    throw error;
+  }
   const session: CodexResidentSession = {
     child,
     conn: null as unknown as AcpConnection,
@@ -207,19 +230,26 @@ export async function openCodexResidentSession(opts: {
         },
         { timeoutMs },
       );
+      // The protocol's handshake is initialize → response → `initialized` (JSON-RPC notification, no reply). The Alive
+      // session already sends it (codex-alive-session.ts); a server that waits for it must not see this session skip it.
+      session.conn.notify(CODEX_CLIENT_NOTIFICATIONS[0], {});
     } catch (err) {
       /*
        * ★사유를 들고 나간다. 구형 CLI 는 `app-server` 하위 명령 자체를 모르고, 그 사실은
        * stderr 에만 있다("error: unrecognized subcommand 'app-server'"). 여기서 붙이지
        * 않으면 호출자는 "연결이 닫혔다"만 보고 영구 강등을 판정할 근거를 잃는다.
        */
+      const evidence=initializationEvidence(err,session.conn);
       const stderr = (session.conn?.lastStderr ?? "").trim();
       await closeCodexResidentSession(session);
       const message = err instanceof Error ? err.message : String(err);
-      throw new Error(stderr && !message.includes(stderr.slice(-80)) ? `${message}\n${stderr.slice(-500)}` : message);
+      const wrapped=new Error(stderr && !message.includes(stderr.slice(-80)) ? `${message}\n${stderr.slice(-500)}` : message);
+      initializationFailures.set(wrapped,evidence);
+      throw wrapped;
     }
     return session;
   } catch (error) {
+    if(error&&typeof error==="object"&&!initializationFailures.has(error))initializationFailures.set(error,initializationEvidence(error,session.conn));
     await closeCodexResidentSession(session);
     throw error;
   }

@@ -1,6 +1,6 @@
 import { setAttachedDaemonBootId, clearAttachedDaemonBootId } from "./attached-daemon-boot";
 import { createHash } from "node:crypto";
-import { getInvocationAdmission } from "../store/invocation-admissions";
+import { getInvocationAdmission, getPendingInvocationAdmissionForChat } from "../store/invocation-admissions";
 import { invocationRunOwners } from "../store/invocation-run-owners";
 import { getCurrentTurnSteer } from "../store/current-turn-steers";
 import { getDb } from "../store/db";
@@ -17,7 +17,20 @@ import { NATIVE_MAIN_PREPARATION_POLICY, NATIVE_DAEMON_INVOCATION_POLICY, NATIVE
 
 type Channel = object & { dispatch(method: string, params: unknown): Promise<unknown>; onClose(listener: () => void): () => void };
 type Capture = Readonly<{ chatId: string; runId: string; nativeCustody: "released" | "retained" }>;
-type Approval = { chatId: string; runId: string; descriptor: unknown; retainedBytes: number; request?: ToolApprovalRequestEvent; read?: Promise<void>; readSettled?: boolean; readFailed?: boolean; decision?: { actionId: string; promise: Promise<ToolApprovalResolutionReceipt>; settled?: boolean; known?: boolean }; receipt?: ToolApprovalResolutionReceipt };
+type Approval = { chatId: string; runId: string; descriptor: unknown; observedDescriptor?: unknown; retainedBytes: number; request?: ToolApprovalRequestEvent; historical?: WeakRef<ToolApprovalRequestEvent>; sourceMode?: "live" | "post-denial"; hydrate?: () => Promise<ToolApprovalRequestEvent>; read?: Promise<void>; readSettled?: boolean; readFailed?: boolean; decision?: { actionId: string; promise: Promise<ToolApprovalResolutionReceipt>; settled?: boolean; known?: boolean }; receipt?: ToolApprovalResolutionReceipt };
+/** Main-owned port. This object and its authorizer never cross IPC or Mobile JSON. */
+export interface NativeMobileApprovalSelection {
+  readonly sourceKey: string;
+  request(): ToolApprovalRequestEvent | undefined;
+  resolve(context: object, decision: ToolApprovalDecision, actionId: string): Promise<ToolApprovalResolutionReceipt>;
+}
+export interface NativeMobileApprovalSource {
+  list(): ToolApprovalRequestEvent[];
+  owns(requestId: string): boolean;
+  select(requestId: string): NativeMobileApprovalSelection | undefined;
+  subscribe(listener: () => void): () => void;
+}
+export type NativeMobileApprovalAuthorizer = (context: object, request: ToolApprovalRequestEvent) => void;
 export class NativeGuiControlError extends Error { constructor(readonly code: string) { super(code); } }
 function fail(code: string): never { throw new NativeGuiControlError(code); }
 function exact(v: unknown, keys: string[], optional: string[] = []): v is Record<string, unknown> {
@@ -59,18 +72,34 @@ export function createNativeGuiControls(ports: { authorizeRenderer(event: object
   const observationPolicy = ports.observationPolicy ?? { maxRecords: NATIVE_APPROVAL_OBSERVATION_POLICY.maxRecords, maxRetainedBytes: NATIVE_MAIN_PREPARATION_POLICY.maxRetainedBytes };
   if (![observationPolicy.maxRecords, observationPolicy.maxRetainedBytes].every(v => Number.isSafeInteger(v) && v > 0)) fail("native_gui_observation_policy_invalid");
   let retainedApprovalBytes = 0;
+  let historicalReads: Promise<unknown> = Promise.resolve();
+  const liveCount = () => [...approvals.values()].filter(record => record.sourceMode !== "post-denial" && !record.readFailed).length;
   let channel: Channel | undefined, identity: NativeAuthenticatedIdentity | undefined;
   let controller = new AbortController();
+  const closedChatSources = new Map<string, { runId: string; epoch: string }>();
+  const captureEpochs = new Map<string, string>();
   const captures = new Map<string, Capture>(), activeRuns = new Set<string>(), approvals = new Map<string, Approval>();
   const stops = new Map<string, { promise: Promise<"requested" | "already-requested" | "not-found">; acknowledged: boolean }>();
   let refreshPromise: Promise<void> | undefined, snapshotKnown = false, routeUnavailable = false;
+  const approvalListeners = new Set<() => void>();
+  const mobilePorts = new WeakMap<NativeMobileApprovalAuthorizer, NativeMobileApprovalSource>();
+  function approvalChanged(): void { for (const listener of approvalListeners) { try { listener(); } catch { /* One observer cannot change source custody. */ } } }
+  function decodedApproval(record: Approval): ToolApprovalRequestEvent | undefined {
+    // Match the peer's successfully observed current descriptor; explicit re-hydration
+    // can succeed after the original read failed, so stale read flags are not authority.
+    if (record.observedDescriptor !== record.descriptor) return undefined;
+    try { current(); return record.request ?? record.historical?.deref(); } catch { return undefined; }
+  }
+  function availableApproval(record: Approval): ToolApprovalRequestEvent | undefined {
+    return record.receipt && !record.receipt.pending ? undefined : decodedApproval(record);
+  }
   function current(): Channel { if (!channel || !identity || nativeGuiChannelIdentity(channel) !== identity) fail("native_gui_original_channel_unavailable"); return channel; }
   function human(event: object): void { if (!ports.authorizeRenderer(event)) fail("native_gui_original_renderer_required"); current(); }
   async function call(method: string, params: unknown): Promise<unknown> { const original = current(), captured = identity; const result = await original.dispatch(method, params); if (current() !== original || identity !== captured) fail("native_gui_original_channel_unavailable"); return result; }
   function unavailable(): void { routeUnavailable = true; const original = current(); ports.onUnavailable?.(original, identity!); }
   function pruneApprovals(requiredBytes = 0): void {
     for (const [requestId, record] of approvals) {
-      if (approvals.size < observationPolicy.maxRecords && requiredBytes <= observationPolicy.maxRetainedBytes - retainedApprovalBytes) break;
+      if (liveCount() < observationPolicy.maxRecords && requiredBytes <= observationPolicy.maxRetainedBytes - retainedApprovalBytes) break;
       if (record.readSettled && !record.readFailed && record.receipt?.ok && !record.receipt.pending
         && record.receipt.resolvedDecision !== null && ["resolved", "replayed"].includes(record.receipt.status)
         && (!record.decision || (record.decision.settled && record.decision.known))) { approvals.delete(requestId); retainedApprovalBytes -= record.retainedBytes; }
@@ -96,7 +125,13 @@ export function createNativeGuiControls(ports: { authorizeRenderer(event: object
     channel = actualChannel; identity = actualIdentity; configured = control;
     setAttachedDaemonBootId(actualIdentity.bootId);
     const mine = controller;
-    actualChannel.onClose(() => { clearAttachedDaemonBootId(actualIdentity.bootId); mine.abort(new NativeGuiControlError("native_gui_original_channel_unavailable")); });
+    actualChannel.onClose(() => { clearAttachedDaemonBootId(actualIdentity.bootId); mine.abort(new NativeGuiControlError("native_gui_original_channel_unavailable")); approvalChanged(); });
+    approvalChanged();
+  }
+  function resetObservation(actualChannel: Channel, actualIdentity: NativeAuthenticatedIdentity): void {
+    if (channel !== actualChannel || identity !== actualIdentity || nativeGuiChannelIdentity(actualChannel) !== actualIdentity) fail("native_gui_original_channel_required");
+    controller.abort(new NativeGuiControlError("native_gui_observation_replaced"));
+    controller = new AbortController(); refreshPromise = undefined; snapshotKnown = false; routeUnavailable = false;
   }
   function refresh(): Promise<void> {
     if (refreshPromise) return refreshPromise;
@@ -110,53 +145,103 @@ export function createNativeGuiControls(ports: { authorizeRenderer(event: object
       const next = new Map<string, Capture>();
       for (const record of value.captures) {
         if (!exact(record, ["chatId", "runId", "nativeCustody"]) || !id(record.chatId) || !id(record.runId) || !["released", "retained"].includes(String(record.nativeCustody)) || next.has(record.runId)) fail("native_gui_recovery_snapshot_invalid");
+        if (!captureEpochs.has(record.runId)) captureEpochs.set(record.runId, originalIdentity!.bootId);
         next.set(record.runId, Object.freeze({ ...record }) as Capture);
       }
       const nextActiveRuns = value.activeRunIds as string[], nextActiveChats = value.activeChatIds as string[];
       if (nextActiveRuns.some(runId => !next.has(runId)) || nextActiveChats.some(chatId => !nextActiveRuns.some(runId => next.get(runId)?.chatId === chatId))) fail("native_gui_recovery_snapshot_invalid");
       // Absence in a bounded later snapshot is not no-execution proof. Keep
       // original retained custody until source explicitly reports released.
-      for (const [runId, value] of captures) if (value.nativeCustody === "retained" && !next.has(runId)) next.set(runId, value);
+      for (const [runId, value] of captures) {
+        const epoch = captureEpochs.get(runId);
+        if (epoch && closedStoredSource(value.chatId, runId, epoch)) closedChatSources.set(value.chatId, { runId, epoch });
+        if (value.nativeCustody === "retained" && activeCustody(value) && !next.has(runId)) next.set(runId, value);
+      }
       captures.clear(); for (const [runId, value] of next) captures.set(runId, value);
+      for (const runId of captureEpochs.keys()) if (!captures.has(runId)) captureEpochs.delete(runId);
       activeRuns.clear(); for (const runId of value.activeRunIds) activeRuns.add(runId);
       snapshotKnown = true; pruneStops(); ports.onRecoveryChatIds([...value.activeChatIds]);
     })(); refreshPromise = operation;
     void operation.finally(() => { if (refreshPromise === operation) refreshPromise = undefined; }).catch(() => {});
     return operation;
   }
-  function approvalReady(value: unknown): void {
+  function approvalReady(value: unknown, sourceMode?: "live" | "post-denial"): void {
     current(); if (!exact(value, ["version", "requestId", "runId", "chatId", "transfer"]) || value.version !== "agentlas.native-approval.v1" || !id(value.requestId) || !id(value.runId) || !id(value.chatId)) fail("native_gui_approval_ready_invalid");
-    if (approvals.has(value.requestId)) fail("native_gui_approval_ready_replayed");
+    const previous = approvals.get(value.requestId);
+    if (previous && (previous.chatId !== value.chatId || previous.runId !== value.runId)) fail("native_gui_original_approval_required");
     const transfer = value.transfer;
     if (!exact(transfer, ["version", "transferId", "kind", "byteLength", "digest"]) || transfer.version !== "agentlas.native-json.v1"
       || transfer.kind !== "checkpoint-value" || typeof transfer.transferId !== "string" || !/^[a-f0-9-]{36}$/.test(transfer.transferId)
       || typeof transfer.digest !== "string" || !/^[a-f0-9]{64}$/.test(transfer.digest) || !Number.isSafeInteger(transfer.byteLength)
       || Number(transfer.byteLength) < 1 || Number(transfer.byteLength) > NATIVE_MAIN_PREPARATION_POLICY.maxCheckpointBytes) fail("native_gui_approval_descriptor_invalid");
-    const bytes = Number(transfer.byteLength); pruneApprovals(bytes);
-    if (approvals.size >= observationPolicy.maxRecords || bytes > observationPolicy.maxRetainedBytes - retainedApprovalBytes) { unavailable(); fail("native_gui_approval_capacity_reached"); }
-    const record: Approval = { runId: value.runId, chatId: value.chatId, descriptor: transfer, retainedBytes: bytes };
-    retainedApprovalBytes += bytes; approvals.set(value.requestId, record);
-    const read = (async () => {
+    if (previous && (previous.descriptor as {transferId?:unknown}).transferId === transfer.transferId) return;
+    const bytes = Number(transfer.byteLength), retainedBytes = sourceMode === "post-denial" ? 0 : bytes;
+    pruneApprovals(retainedBytes - (previous?.retainedBytes ?? 0));
+    if ((sourceMode !== "post-denial" && !previous && liveCount() >= observationPolicy.maxRecords) || retainedBytes > observationPolicy.maxRetainedBytes - retainedApprovalBytes + (previous?.retainedBytes ?? 0)) fail("native_gui_approval_capacity_reached");
+    const mine = controller;
+    const record: Approval = { ...previous, observedDescriptor: undefined, read: undefined, readFailed: undefined, readSettled: undefined, runId: value.runId, chatId: value.chatId, descriptor: transfer, sourceMode, retainedBytes };
+    retainedApprovalBytes += retainedBytes - (previous?.retainedBytes ?? 0); approvals.set(value.requestId, record); approvalChanged();
+    const hydrate = async () => {
       const raw = await importNativeJsonValue(record.descriptor, { kind: "checkpoint-value", maxBytes: NATIVE_MAIN_PREPARATION_POLICY.maxCheckpointBytes,
-        signal: controller.signal, assertCurrent: () => { current(); }, read: (transferId, offset) => call("native.attach", { version: "agentlas.native-approval-read.v1", read: { requestId: value.requestId, transferId, offset } }) });
-      current();
-      if (Buffer.byteLength(JSON.stringify(raw), "utf8") > record.retainedBytes) fail("native_gui_approval_size_invalid");
-      record.request = card(raw, value.requestId as string, record.chatId);
-      if (!record.receipt || record.receipt.pending) broadcast("runtime:toolApprovalRequest", record.request);
-    })(); record.read = read;
-    void read.then(() => { record.readSettled = true; }, error => { record.readSettled = true; record.readFailed = true; console.warn("[native-invocation] approval card unavailable", error); try { unavailable(); } catch { /* Original unavailable state retained. */ } });
+        signal: mine.signal, assertCurrent: () => { if (controller !== mine) fail("native_gui_observation_replaced"); current(); }, read: (transferId, offset) => call("native.attach", { version: "agentlas.native-approval-read.v1", read: { requestId: value.requestId, transferId, offset } }) });
+      if (controller !== mine || approvals.get(value.requestId as string) !== record) fail("native_gui_observation_replaced"); current();
+      if (Buffer.byteLength(JSON.stringify(raw), "utf8") > bytes) fail("native_gui_approval_size_invalid");
+      const request = card(raw, value.requestId as string, record.chatId);
+      if (sourceMode !== undefined && request.mode !== sourceMode) fail("native_gui_approval_mode_invalid");
+      if (request.mode === "post-denial") {
+        retainedApprovalBytes -= record.retainedBytes; record.retainedBytes = 0;
+        record.sourceMode = "post-denial"; record.historical = new WeakRef(request); record.request = undefined;
+      } else record.request = request;
+      // Only this current descriptor passed import/digest/card and source checks.
+      record.observedDescriptor = record.descriptor; approvalChanged();
+      return request;
+    };
+    record.hydrate = hydrate;
+    const run = async () => { const request = await hydrate(); if (!record.receipt || record.receipt.pending) broadcast("runtime:toolApprovalRequest", request); };
+    // At most one historical transport read is outstanding; fresh live reads
+    // bypass that queue. Reset never opens another read behind a held old one.
+    const read = sourceMode === "post-denial" ? historicalReads.then(run) : run();
+    if (sourceMode === "post-denial") historicalReads = read.catch(() => {});
+    record.read = read;
+    void read.then(() => { record.readSettled = true; approvalChanged(); }, error => {
+      record.readSettled = true; record.readFailed = true; approvalChanged();
+      if (approvals.get(value.requestId as string) === record) { retainedApprovalBytes -= record.retainedBytes; record.retainedBytes = 0; }
+      console.warn("[native-invocation] approval card unavailable", error);
+    });
   }
-  function accept(method: string, value: unknown, fromIdentity?: NativeAuthenticatedIdentity): void {
+  function closedStoredSource(chatId: string, runId: string, epoch: string): boolean {
+    const a = getInvocationAdmission(runId);
+    if (!a || a.runId !== runId || a.chatId !== chatId || a.ownerProcessEpoch !== epoch) return false;
+    const owner = invocationRunOwners.getRunOwner(chatId, runId);
+    if (owner && (owner.chatId !== chatId || owner.runId !== runId || owner.state !== "released" || owner.ownerKind !== "daemon" || owner.ownerId !== epoch)) return false;
+    if (a.status === "admitted") return !!owner;
+    return a.status === "rejected" && !!a.rejectionReasonCode
+      && !getDb().prepare("SELECT 1 FROM run_events WHERE run_id=? AND kind='invoke_started' LIMIT 1").get(runId);
+  }
+  function activeCustody(r: Capture): boolean {
+    if (r.nativeCustody !== "retained") return false;
+    const epoch = captureEpochs.get(r.runId);
+    return !epoch || !closedStoredSource(r.chatId, r.runId, epoch);
+  }
+  function closedChatIds(): string[] {
+    const result = new Set([...captures.values()].filter(r => !activeCustody(r)).map(r => r.chatId));
+    for (const [chatId, old] of closedChatSources) {
+      if (closedStoredSource(chatId, old.runId, old.epoch)) result.add(chatId);
+      else closedChatSources.delete(chatId);
+    }
+    return [...result];
+  }
+  function accept(method: string, value: unknown, fromIdentity?: NativeAuthenticatedIdentity, sourceMode?: "live" | "post-denial"): void {
     if (fromIdentity !== undefined && fromIdentity !== identity) return; // event from a previous generation
     if (method === "invocation.approval.unavailable") {
       try { const original = current(); if (!exact(value, ["version", "code"]) || value.version !== "agentlas.native-approval.v1" || typeof value.code !== "string" || !/^[a-z][a-z0-9_]{1,99}$/.test(value.code)) fail("native_gui_approval_unavailable_invalid"); ports.onUnavailable?.(original, identity!); } catch (error) { console.warn("[native-invocation] approval stream unavailable", error); try { unavailable(); } catch { /* No current channel can restore readiness. */ } }
     }
-    if (method === "invocation.approval.ready") { try { approvalReady(value); } catch (error) { console.warn("[native-invocation] approval stream unavailable", error); try { unavailable(); } catch { /* No current channel can restore readiness. */ } } }
+    if (method === "invocation.approval.ready") { try { approvalReady(value, sourceMode); } catch (error) { console.warn("[native-invocation] approval card unavailable", error); /* Per-card uncertainty is not a future-input gate. */ } }
     if (method === "invocation.approval.resolved") {
       try { current(); if (!exact(value, ["version", "requestId", "receipt"]) || value.version !== "agentlas.native-approval.v1" || !id(value.requestId)) fail("native_gui_approval_receipt_invalid");
         const record = approvals.get(value.requestId); if (!record) fail("native_gui_original_approval_required");
-        record.receipt = receipt(value.receipt, value.requestId); broadcast("runtime:toolApprovalResolution", record.receipt);
-      } catch (error) { console.warn("[native-invocation] approval resolution unavailable", error); try { unavailable(); } catch { /* No current channel can restore readiness. */ } }
+        record.receipt = receipt(value.receipt, value.requestId); broadcast("runtime:toolApprovalResolution", record.receipt); approvalChanged();
+      } catch (error) { console.warn("[native-invocation] approval resolution unavailable", error); /* Original per-card receipt uncertainty is not start authority. */ }
     }
   }
   async function approvalReceipt(event: object, requestId: string): Promise<ToolApprovalResolutionReceipt> {
@@ -165,7 +250,14 @@ export function createNativeGuiControls(ports: { authorizeRenderer(event: object
     record.receipt = value; return value;
   }
   function resolveApproval(event: object, requestId: string, value: ToolApprovalDecision, actionId: string): Promise<ToolApprovalResolutionReceipt> {
-    human(event); const record = approvals.get(requestId); if (!record?.request) fail("native_gui_original_approval_required");
+    human(event); const record = approvals.get(requestId); if (!record) fail("native_gui_original_approval_required");
+    if (!record.request && !record.historical?.deref()) {
+      if (record.sourceMode !== "post-denial" || !record.hydrate) fail("native_gui_original_approval_required");
+      return record.hydrate().then(request => { const actual = resolveApproval(event, requestId, value, actionId); void request; return actual; }, () => fail("native_gui_original_approval_observation_unavailable"));
+    }
+    return resolveCapturedApproval(record, requestId, value, actionId);
+  }
+  function resolveCapturedApproval(record: Approval, requestId: string, value: ToolApprovalDecision, actionId: string): Promise<ToolApprovalResolutionReceipt> {
     if (!decision(value) || actionId !== toolApprovalActionId(requestId, value)) fail("native_gui_approval_action_invalid");
     if (record.decision) { if (record.decision.actionId !== actionId) fail("native_gui_approval_action_conflict"); return record.decision.promise; }
     let resolve!: (value: ToolApprovalResolutionReceipt) => void, reject!: (error: unknown) => void;
@@ -173,10 +265,45 @@ export function createNativeGuiControls(ports: { authorizeRenderer(event: object
     record.decision = { actionId, promise: pending }; // BEFORE actual signed dispatch/reentry.
     try {
       void call("native.approvalReply", { version: "agentlas.native-approval-reply.v1", requestId, decision: value, actionId }).then(raw => {
-        try { const result = receipt(raw, requestId); if (result.requestedDecision !== value || (result.ok && result.actionId !== actionId)) fail("native_gui_approval_receipt_invalid"); record.receipt = result; record.decision!.known = true; resolve(result); } catch (error) { reject(error); }
+        try { const result = receipt(raw, requestId); if (result.requestedDecision !== value || (result.ok && result.actionId !== actionId)) fail("native_gui_approval_receipt_invalid"); record.receipt = result; record.decision!.known = true; approvalChanged(); resolve(result); } catch (error) { reject(error); }
       }, reject);
     } catch (error) { reject(error); }
     void pending.finally(() => { record.decision!.settled = true; }).catch(() => {}); return pending;
+  }
+  function mobileApprovalPort(authorize: NativeMobileApprovalAuthorizer): NativeMobileApprovalSource {
+    const existing = mobilePorts.get(authorize); if (existing) return existing;
+    const selections = new WeakMap<Approval, NativeMobileApprovalSelection>();
+    const source: NativeMobileApprovalSource = Object.freeze({
+      list: () => [...approvals.values()].flatMap(record => { const request = availableApproval(record); return request ? [request] : []; }),
+      owns: (requestId: string) => approvals.has(requestId),
+      select(requestId: string) {
+        const record = approvals.get(requestId); if (!record) return undefined;
+        const originalIdentity = identity;
+        const prior = selections.get(record);
+        if (!decodedApproval(record)) return undefined;
+        // The native source supplies run/chat/attachment. Public labels cannot mint it.
+        // Do not close over a materialized historical card; weak source observation stays weak.
+        const sourceKeyNow = () => createHash("sha256").update(JSON.stringify([originalIdentity?.bootId, record.chatId, record.runId, decodedApproval(record)])).digest("hex");
+        const sourceKey = sourceKeyNow();
+        if (prior) { if (prior.sourceKey !== sourceKey) fail("native_mobile_approval_source_changed"); return prior; }
+        const selection: NativeMobileApprovalSelection = Object.freeze({ sourceKey,
+          request: () => approvals.get(requestId) === record && identity === originalIdentity ? decodedApproval(record) : undefined,
+          resolve(context: object, value: ToolApprovalDecision, actionId: string) {
+            current();
+            if (approvals.get(requestId) !== record || identity !== originalIdentity) fail("native_mobile_approval_source_changed");
+            const original = decodedApproval(record);
+            if (!original) fail("native_mobile_approval_unavailable");
+            if (sourceKeyNow() !== sourceKey) fail("native_mobile_approval_source_changed");
+            if (original.mode !== "live") fail("native_mobile_approval_not_live");
+            authorize(context, original);
+            // Authorization is synchronous, reentrant host callbacks still cannot swap source custody.
+            current(); if (approvals.get(requestId) !== record || identity !== originalIdentity || decodedApproval(record) !== original || sourceKeyNow() !== sourceKey) fail("native_mobile_approval_source_changed");
+            return resolveCapturedApproval(record, requestId, value, actionId);
+          },
+        }); selections.set(record, selection); return selection;
+      },
+      subscribe(listener: () => void) { approvalListeners.add(listener); return () => { approvalListeners.delete(listener); }; },
+    }); mobilePorts.set(authorize, source); return source;
   }
   function cancel(event: object, runId: string): Promise<"requested" | "already-requested" | "not-found"> {
     human(event); const record = captures.get(runId); if (!record) fail("native_gui_observed_run_required");
@@ -220,7 +347,7 @@ export function createNativeGuiControls(ports: { authorizeRenderer(event: object
     human(event);return textReceipt(await call("native.attach",{version:"agentlas.native-owner-text-receipt.v1",...binding,intentId}),binding,intentId,expected);
   }
   function observedTextBinding(event: object, chatId: string): NativeOwnerTextBinding {
-    human(event);const matches=[...captures.values()].filter(r=>r.chatId===chatId&&r.nativeCustody==="retained");
+    human(event);const matches=[...captures.values()].filter(r=>r.chatId===chatId&&activeCustody(r));
     if(matches.length!==1)fail("native_gui_observed_text_parent_required");const r=matches[0],row=getInvocationAdmission(r.runId);
     if(!row||row.chatId!==chatId||row.ownerProcessEpoch!==identity!.bootId)fail("native_gui_original_text_context_required");
     return Object.freeze({chatId,runId:r.runId,inputDigest:row.inputDigest});
@@ -297,19 +424,45 @@ export function createNativeGuiControls(ports: { authorizeRenderer(event: object
     const value=await importNativeJsonValue(wire.transfer,{kind:"checkpoint-value",maxBytes:NATIVE_MAIN_PREPARATION_POLICY.maxCheckpointBytes,signal:controller.signal,assertCurrent:()=>{current()},read:(transferId,offset)=>call("native.attach",{version:"agentlas.native-recovery-read.v1",read:{transferId,offset}})});
     const d=wire.transfer as {transferId:unknown;digest:unknown};if(await call("native.attach",{version:"agentlas.native-recovery-ack.v1",ack:{transferId:d.transferId,digest:d.digest}})!==null)fail("native_gui_recovery_ack_invalid");return value;
   }
-  const control = Object.freeze({ bind, refresh, accept, cancel, resolveApproval, approvalReceipt, ownerText, ownerTextReceipt, observedTextBinding, recoveredTextBinding, ownerTextUnsteer, durableDaemonTextBinding, durableDaemonTextBindingForRequest, durableCurrentTurn, durableReceipt,
+  const control = Object.freeze({ bind, resetObservation, refresh, accept, cancel, resolveApproval, approvalReceipt, mobileApprovalPort, ownerText, ownerTextReceipt, observedTextBinding, recoveredTextBinding, ownerTextUnsteer, durableDaemonTextBinding, durableDaemonTextBindingForRequest, durableCurrentTurn, durableReceipt,
     ownerTextAttach:(event:object,binding:NativeOwnerTextBinding,includeEvents:boolean)=>recoveryValue(event,binding,"agentlas.native-owner-text-attach.v1",{includeEvents}),
     ownerTextRecovery:(event:object,binding:NativeOwnerTextBinding)=>recoveryValue(event,binding,"agentlas.native-owner-text-recovery.v1"),
-    hasRun: (runId: string) => captures.has(runId), hasChat: (chatId: string) => [...captures.values()].some(r => r.chatId === chatId && r.nativeCustody === "retained"), hasApproval: (requestId: string) => approvals.has(requestId),
-    listApprovals: () => [...approvals.values()].filter(r => r.request && (!r.receipt || r.receipt.pending)).map(r => r.request!),
+    hasRun: (runId: string) => captures.has(runId), hasChat: (chatId: string) => [...captures.values()].some(r => r.chatId === chatId && activeCustody(r)), hasApproval: (requestId: string) => approvals.has(requestId),
+    listApprovals: () => [...approvals.values()].filter(r => !r.receipt || r.receipt.pending).map(r => {
+      const request = r.request ?? r.historical?.deref(); if (!request) fail("native_gui_original_approval_observation_unavailable"); return request;
+    }),
+    /** UI recovery returns existing successfully observed originals, including
+     * materialized historical consent. Unknown per-card reads remain uncertain
+     * in the strict API and never hold unrelated available originals. */
+    listAvailableApprovals: () => [...approvals.values()].flatMap(record => {
+      if ((record.receipt && !record.receipt.pending) || record.observedDescriptor !== record.descriptor) return [];
+      const request = record.request ?? record.historical?.deref();
+      return request ? [request] : [];
+    }),
+    async listApprovalsHydrated() {
+      const result: ToolApprovalRequestEvent[] = [];
+      for (const record of approvals.values()) if (!record.receipt || record.receipt.pending) {
+        let request = record.request ?? record.historical?.deref();
+        if (!request) {
+          if (record.read && !record.readSettled) await record.read.catch(() => {});
+          try { request = record.request ?? record.historical?.deref() ?? await record.hydrate?.(); }
+          catch { fail("native_gui_original_approval_observation_unavailable"); }
+        }
+        if (!request) fail("native_gui_original_approval_observation_unavailable"); result.push(request);
+      }
+      return result;
+    },
     retainedChatIds: () => [...new Set([...captures.values()].filter(r => r.nativeCustody === "retained").map(r => r.chatId))],
-    activeChatIds: () => [...new Set([...activeRuns].map(runId => captures.get(runId)!.chatId))],
+    closedAuthorityChatIds: closedChatIds,
+    hasOpenStoredAuthority: (chatId: string) => !!invocationRunOwners.getActiveOwner(chatId) || !!getPendingInvocationAdmissionForChat(chatId),
+    activeAuthorityChatIds: () => [...new Set([...captures.values()].filter(activeCustody).map(r => r.chatId))],
+    activeChatIds: () => [...new Set([...activeRuns].map(runId => captures.get(runId)!).filter(r => r && activeCustody(r)).map(r => r.chatId))],
     async receipt(event: object, runId: string) {
       human(event); const r = captures.get(runId); if (!r) fail("native_gui_observed_run_required");
       return receiptFor(r.chatId, runId);
     },
     async currentTurn(event: object, chatId: string) { human(event); await refresh(); for (const runId of activeRuns) if (captures.get(runId)?.chatId === chatId) { const value = await call("invoke.currentTurn", { chatId, runId }); if (value !== null) { if (!exact(value, ["runId"]) || value.runId !== runId) fail("native_gui_current_turn_invalid"); return value; } } return null; },
-    observationCounts() { return Object.freeze({ approvals: approvals.size, retainedApprovalBytes, stops: stops.size, captures: captures.size }); },
+    observationCounts() { return Object.freeze({ approvals: approvals.size, liveApprovals: liveCount(), historicalApprovals: [...approvals.values()].filter(r => r.sourceMode === "post-denial").length, retainedApprovalBytes, stops: stops.size, captures: captures.size }); },
     get available() { return snapshotKnown && !routeUnavailable && !!channel && nativeGuiChannelIdentity(channel) === identity; },
     async quiesce() { await Promise.all([...approvals.values()].map(r => r.read?.catch(() => {}))); },
   }); return control;

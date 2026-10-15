@@ -572,7 +572,7 @@ export function setCanonicalTaskStatus(
        WHERE id = ?`,
     ).run(status, now, status, now, taskId);
   });
-  update();
+  update.immediate();
   emitDesktopStoreChange({ entity: "task", id: taskId });
   return getCanonicalTask(taskId) as CanonicalTask;
 }
@@ -643,7 +643,7 @@ export function acceptCanonicalTaskResult(
       throw new Error("Task changed before result acceptance; review the current Task state");
     }
   });
-  accept();
+  accept.immediate();
   emitDesktopStoreChange({ entity: "task", id: input.taskId });
   const completed = getCanonicalTask(input.taskId) as CanonicalTask;
   tryRecordOneDomainEvent({

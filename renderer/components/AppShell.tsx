@@ -535,10 +535,10 @@ function GuideFab({
             title={ko ? "도움말 버튼 숨기기 — 다시 보려면 설정에서" : "Hide help button — re-enable in Settings"}
             style={{
               position: "absolute",
-              top: -4,
-              right: -4,
-              width: 18,
-              height: 18,
+              top: -7,
+              right: -7,
+              width: 24,
+              height: 24,
               borderRadius: "50%",
               border: "1px solid var(--paper-edge)",
               background: "var(--paper)",
@@ -680,11 +680,17 @@ function FirstRunTour({
               aria-label={`${index + 1}`}
               onClick={() => onStep(index)}
               style={{
-                width: 22,
-                height: 4,
-                borderRadius: 999,
+                // 24px 단추 안에 22x4 막대를 그대로 그린다(보이는 크기·배치 불변).
+                width: 24,
+                height: 24,
+                margin: "-10px -1px",
+                borderRadius: 0,
                 border: "none",
-                background: index === step ? "var(--accent)" : "var(--paper-edge)",
+                backgroundColor: "transparent",
+                backgroundImage: `linear-gradient(${index === step ? "var(--accent)" : "var(--paper-edge)"}, ${index === step ? "var(--accent)" : "var(--paper-edge)"})`,
+                backgroundRepeat: "no-repeat",
+                backgroundPosition: "center",
+                backgroundSize: "22px 4px",
                 padding: 0,
                 cursor: "pointer",
               }}

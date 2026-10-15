@@ -1,5 +1,8 @@
 import { Buffer } from "node:buffer";
-import { normalizeChatHostNotice } from "../../shared/chat-host-notice";
+import { listUiInstances } from "../harness/ui-instances";
+import { mergeInlineUiTranscript, fitInlineUiTranscriptText } from "../../shared/inline-ui-transcript";
+import { withoutArchivedAgents } from "../archive/auto-archive";
+import { isHousekeepingHostNotice, normalizeChatHostNotice } from "../../shared/chat-host-notice";
 import { oneDispatchRoomUpdatedAt } from "../one/dispatch-presentation";
 import { projectOneDecisionOwnerAnswerV4 } from "./one-decision-owner-answer";
 import path from "node:path";
@@ -126,7 +129,6 @@ import {
   type MobileBridgeFirmDto,
   type MobileBridgeHostDto,
   type MobileBridgePendingConfirmationDto,
-  type MobileBridgeOntologyProjectionDto,
   type MobileBridgeOneBriefingDto,
   type MobileBridgeOneDecisionDto,
   type MobileBridgeOneDecisionMultiSelectionV2Dto,
@@ -181,6 +183,9 @@ function mobileBridgeChatImages(urls: readonly string[] | undefined): MobileBrid
     const attachmentId = CHAT_ATTACHMENT_URL_RE.exec(url.trim())?.[1]?.toLowerCase();
     if (!attachmentId || seen.has(attachmentId)) continue;
     seen.add(attachmentId);
+    // Exactly { attachmentId }: phones up to Mobile 1.1.46 (build 109) drop an image DTO with any other key
+    // (exact-key check, relaxed in mobile ada1d0f). Measured: that build's real decoder passes 11/12 against
+    // Desktop HEAD and fails only an extra image key. Keep the shape until those builds are below the support floor.
     images.push({ attachmentId });
     if (images.length >= 8) break;
   }
@@ -284,10 +289,6 @@ export interface MobileBridgeProjectionOptions {
   /** Explicit client refreshes bypass the shared usage cache, subject to the provider cooldown. */
   forceUsageRefresh?: boolean;
   now?: Date;
-  ontology?: {
-    supported: boolean;
-    projections: readonly MobileBridgeOntologyProjectionDto[];
-  };
 }
 
 function displayText(value: string, maxBytes = MOBILE_BRIDGE_DISPLAY_TEXT_BYTES): string {
@@ -530,7 +531,7 @@ function hostDto(options: MobileBridgeProjectionOptions): MobileBridgeHostDto {
       // registered agents. The old price method is refusal-only for old clients.
       "hub-publish-v1",
       "remote-build",
-      ...(options.ontology?.supported ? ["ontology-chips"] : []),
+      "remote-build-question-set-v2",
     ],
   };
 }
@@ -611,7 +612,8 @@ function agentsDto(
     const cloudId = typeof listing.cloudId === "string" ? listing.cloudId.trim() : "";
     if (cloudId && !cloudListingByCloudId.has(cloudId)) cloudListingByCloudId.set(cloudId, listing);
   }
-  const installed = listInstalledAgents().map<MobileBridgeAgentDto>((agent) => {
+  // Archived agents (30 days unused) leave the phone list too, the same as the Desktop pickers.
+  const installed = withoutArchivedAgents(listInstalledAgents()).map<MobileBridgeAgentDto>((agent) => {
     const binding = bindingByAgentId.get(agent.id);
     const cloudListing = (agent.packageHash
       ? cloudListingByPackageHash.get(agent.packageHash.trim())
@@ -939,11 +941,16 @@ function chatsDto(activeChatIds: ReadonlySet<string>): MobileBridgeChatDto[] {
   );
 }
 
+/** Rows a page walked through (newest first), visible or not: the cursor anchors on the oldest one. */
+export interface MobileBridgeHistoryConsumption { consumed: number; oldest?: { id: string; createdAt: string } }
+
 export function projectMobileBridgeHistory(
   history: readonly ChatHistoryEntry[],
   limit: number,
   budgetBytes = MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES,
   chatId?: string,
+  inlineUiFallbacks?: ReadonlyMap<string, string>,
+  consumption?: MobileBridgeHistoryConsumption,
 ): MobileBridgeChatMessageDto[] {
   const budget = Math.max(1_024, Math.min(MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES, Math.floor(budgetBytes)));
   const out: MobileBridgeChatMessageDto[] = [];
@@ -961,8 +968,14 @@ export function projectMobileBridgeHistory(
   for (let index = selected.length - 1; index >= 0; index -= 1) {
     const message = selected[index];
     const images = mobileBridgeChatImages(message.imageDataUrls);
-    const files = mobileBridgeChatFiles(chatId, message.role, message.text);
     const notice = normalizeChatHostNotice(message.role, message.hostNotice);
+    // Housekeeping host rows (check, continue, wait, resume; native-harness notyet NH26) never reach the phone: older
+    // builds drew them as assistant bubbles or "desktop event" lines. Walked past, so paging continues behind them.
+    if (isHousekeepingHostNotice(notice)) {
+      if (consumption) { consumption.consumed += 1; consumption.oldest = { id: message.id, createdAt: message.createdAt }; }
+      continue;
+    }
+    const files = mobileBridgeChatFiles(chatId, message.role, message.text);
     const hostNotice = notice?.purpose === "one-dispatch-link" || notice?.purpose === "one-dispatch-result"
       ? { ...notice, memberName: sanitizeMobileBridgeText(notice.memberName, 256),
           ...(notice.dispatch ? { dispatch: { ...notice.dispatch,
@@ -972,6 +985,13 @@ export function projectMobileBridgeHistory(
             ...(notice.dispatch.pendingQuestion ? { pendingQuestion: { sourceMessageId:notice.dispatch.pendingQuestion.sourceMessageId,
               ...(notice.dispatch.pendingQuestion.continuationRunId && notice.dispatch.pendingQuestion.committedReply !== undefined
                 ? {continuationRunId:notice.dispatch.pendingQuestion.continuationRunId,committedReply:sanitizeMobileBridgeText(notice.dispatch.pendingQuestion.committedReply,12000)} : {}),
+              ...(notice.dispatch.pendingQuestion.questionBank ? {questionBank:{
+                ...notice.dispatch.pendingQuestion.questionBank,
+                questions:notice.dispatch.pendingQuestion.questionBank.questions.map(q => ({ ...q, question:sanitizeMobileBridgeText(q.question,4000),
+                  ...(q.header ? {header:sanitizeMobileBridgeText(q.header,200)} : {}),
+                  options:q.options.map(o => ({label:sanitizeMobileBridgeText(o.label,200),...(o.description ? {description:sanitizeMobileBridgeText(o.description,1000)} : {})})),
+                })),
+              }} : {}),
               questions:notice.dispatch.pendingQuestion.questions.map(q => ({ ...q, question:sanitizeMobileBridgeText(q.question,4000),
                 ...(q.header ? {header:sanitizeMobileBridgeText(q.header,200)} : {}),
                 options:q.options.map(o => ({label:sanitizeMobileBridgeText(o.label,200),...(o.description ? {description:sanitizeMobileBridgeText(o.description,1000)} : {})})),
@@ -1000,6 +1020,21 @@ export function projectMobileBridgeHistory(
     // Older Mobile builds ignore typed notices. Preserve their existing room row and expose only verified output.
     const messageText = hostNotice?.dispatch?.resultText
       ? `${hostNotice.memberName} · ${hostNotice.dispatch.status}\n\n${hostNotice.dispatch.resultText}` : message.text;
+    const inlineFallback = inlineUiFallbacks?.get(message.id);
+    // Typed views stay atomic. If boundary redaction would mutate their data,
+    // use safe prose instead of sending corrupt JSON or sensitive HTML.
+    const safeInlineFallback = inlineFallback === undefined ? undefined
+      : sanitizeMobileBridgeText(stripMobileBridgeControlFences(inlineFallback), MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES);
+    const inlineMessageText = safeInlineFallback === undefined ? undefined
+      : `${safeInlineFallback}\n\n${messageText.slice(inlineFallback!.length + 2)}`;
+    const inlineText = inlineMessageText !== undefined
+      ? fitInlineUiTranscriptText(
+          sanitizeMobileBridgeText(inlineMessageText, Buffer.byteLength(inlineMessageText, "utf8") + 64) === inlineMessageText
+            ? inlineMessageText : safeInlineFallback!,
+          safeInlineFallback!,
+          MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES,
+          remaining,
+        ) : undefined;
     const candidate: MobileBridgeChatMessageDto = {
       ...shell,
       // 제어 블록 제거는 **모델의 답**에만 적용한다.
@@ -1009,7 +1044,7 @@ export function projectMobileBridgeHistory(
       //    통째로 잘려 나갔고,
       // ② 폰이 자기 낙관적 에코를 되돌아온 텍스트와 대조하는데 원문과 잘린 본문이
       //    영영 일치하지 않아 "보내는 중…" 말풍선이 중복으로 남았다.
-      text: sanitizeMobileBridgeText(
+      text: inlineText ?? sanitizeMobileBridgeText(
         stripProjectedChatAttachmentMarkdown(
           stripProjectedChatFileMarkers(message.role === "user"
             ? messageText
@@ -1023,15 +1058,16 @@ export function projectMobileBridgeHistory(
     if (outBytes + candidateBytes > budget) break;
     out.unshift(candidate);
     outBytes += candidateBytes;
+    if (consumption) { consumption.consumed += 1; consumption.oldest = { id: message.id, createdAt: message.createdAt }; }
   }
   return out;
 }
 
-function messagesDto(
+async function messagesDto(
   chatIds: readonly string[],
   maxMessagesPerChat: number,
   budgetBytes: number,
-): Record<string, MobileBridgeChatMessageDto[]> {
+): Promise<Record<string, MobileBridgeChatMessageDto[]>> {
   const messages = Object.create(null) as Record<string, MobileBridgeChatMessageDto[]>;
   const ids = [...new Set(chatIds.filter((id) => id && id.length <= 256).slice(0, 20))];
   const totalBudget = Math.max(0, Math.floor(budgetBytes));
@@ -1042,11 +1078,14 @@ function messagesDto(
   let usedBytes = 2;
   let entries = 0;
   for (const chatId of ids) {
+    const inline = mergeInlineUiTranscript(chatId,
+      listChatMessages(chatId, maxMessagesPerChat), await listUiInstances(chatId));
     const projected = projectMobileBridgeHistory(
-      listChatMessages(chatId, maxMessagesPerChat),
+      inline.history,
       maxMessagesPerChat,
       perChatBudget,
       chatId,
+      inline.fallbackByMessageId,
     );
     const entryBytes =
       mobileBridgeJsonBytes(chatId) + 1 + mobileBridgeJsonBytes(projected) + (entries > 0 ? 1 : 0);
@@ -2180,15 +2219,12 @@ export async function projectMobileBridgeSnapshot(
       taskVersion: task.version,
       updatedAt: task.updatedAt,
     })),
-    ...(options.ontology?.supported
-      ? { ontologyChipProjections: [...options.ontology.projections] }
-      : {}),
   };
   const baseBytes = trimMobileBridgeDecisionMetadata(snapshot);
   if (baseBytes > MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES) {
     throw new Error("Mobile Bridge snapshot metadata exceeds the safe wire budget");
   }
-  snapshot.messages = messagesDto(
+  snapshot.messages = await messagesDto(
     options.includeMessagesForChatIds ?? [],
     maxMessages,
     MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES - baseBytes,

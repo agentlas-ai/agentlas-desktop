@@ -1,12 +1,14 @@
-import { cacheAffinityFields, cachedTokensFromOpenAiUsage } from "./prompt-cache";
-import { reportModelPayload, ledgerFromApiBody } from "./model-call-ledger";
+import { cachedTokensFromOpenAiUsage } from "./prompt-cache";
+import { cacheCapabilityFor, planCache, planRequestFields, segmentOf, type CachePlan, type CacheSegment } from "./cache-planner";
+import { reportModelPayload, reportCachePlan, ledgerFromApiBody } from "./model-call-ledger";
 import { assertCurrentHistoryRunnerResult } from "./observed-runner";
-import { withCurrentHistoryTool, currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
+import { withCurrentHistoryTool, withCurrentHistoryProducer, withCurrentHistoryApplication, currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { boundedLocalOutputTokens, localContextFailure, localHttpFailureClass, measureLocalContext } from "./local-context";
-import { compactHistoryToBudget, estimateTransportTokens, stableHistoryWindow } from "./compact";
-import { GENERATION_CONTEXT_RATIO } from "./session-generation";
-import { estimateRequestPromptTokens, ollamaNativeFetch, planOllamaContext, probeOllamaContextLimits } from "./ollama-native";
+import { compactHistoryToBudget, estimateTransportTokens } from "./compact";
+import { openStatelessGeneration, statelessHistoryTokens, type StatelessWindow } from "./stateless-generation";
+import { ownerControlHistoryImages } from "./owner-control-pump";
+import { estimateRequestPromptTokens, ollamaNativeFetch, planOllamaContext, probeOllamaContextLimits, remeasureOllamaWindow } from "./ollama-native";
 import { browserDownloadAvailable, beginBrowserDownloadProof } from "../long-run/download-proof";
 import { beginBuiltinFileProof, beginNativeFileProof, mcpFileProofCandidate } from "../long-run/file-proof";
 import { assertScienceCollectionCapability, assertScienceCollectionTool, SCIENCE_COLLECTION_TOOLS } from "./science-collection-boundary";
@@ -29,6 +31,7 @@ import { installLazyToolMenu, invalidateToolMenu, resolveToolMenu } from "./tool
 import { CODE_MODE_TOOL, installMainCodeMode, runMainCodeMode } from "./code-mode";
 import { TOOL_RESULT_READ, hasToolResultContext, installToolResultContext, projectToolResult, readToolResult, toolResultReadRequest } from "./tool-result-context";
 import { createHash, randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createRuntimeUsageCollector, type ObservedTokenUsage } from "../../shared/observed-usage";
 import { createNoProgressGuard, noteNoProgressEvent } from "../automation-progress-guard";
 import type { RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
@@ -41,6 +44,7 @@ import {
 } from "./workforce-broker";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { tStatus } from "./status-i18n";
+import { openAiStrictSchemaOrNull } from "./strict-output-schema";
 import { abortReasonError } from "./abort-reason";
 import { builtinShellEnv } from "./builtin-shell-env";
 import { attestMainToolPreDispatchRejection, withDurableMainToolStart } from "../invocation/adapter-effect-context";
@@ -56,6 +60,7 @@ import {
 } from "./tool-approval";
 import type { ToolPermission } from "../../shared/builtin-tools";
 import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
+import type { ToolResultTrust } from "../../shared/types";
 
 function agentlasDispatchedOrigin(toolName: string): ToolInvocationOrigin {
   return { kind: "agentlas", providerName: "Agentlas", toolName };
@@ -95,6 +100,34 @@ export interface MainToolDispatchResult {
   content: string;
   visionMessage: ChatMessage | null;
   isError: boolean;
+  /** Provenance of `content` (docs native-harness 07 G02): tool output is data and never drives grants, goals or consent. */
+  trust?: ToolResultTrust;
+  /** The effect already ran before a crash; this is its recorded result, not a new execution (effect ledger G12). */
+  replayed?: true;
+}
+
+/**
+ * Cache plan for an OpenAI-style /chat/completions request. Segments (render order): tools (S0) and the leading system
+ * messages (S1) are the stable prefix; everything between is append-only history (S4); a final user message is this
+ * turn's input (S5, volatile). Placement is by role/position only, never by reading the text.
+ */
+function openAiStyleCachePlan(input: { runtimeKind: string; host: string; chatId?: string | null; ownerId?: string | null;
+  model: string; tools: unknown[]; messages: ChatMessage[] }): CachePlan {
+  const { messages } = input;
+  const segments: CacheSegment[] = [];
+  if (input.tools.length > 0) segments.push(segmentOf("tools", "S0", "stable-prefix", JSON.stringify(input.tools)));
+  let systemEnd = 0;
+  while (systemEnd < messages.length && messages[systemEnd].role === "system") systemEnd += 1;
+  segments.push(segmentOf("system", "S1", "stable-prefix", JSON.stringify(messages.slice(0, systemEnd))));
+  const last = messages.length - 1;
+  const tailIsOwnerInput = last >= systemEnd && messages[last].role === "user";
+  const historyEnd = tailIsOwnerInput ? last : messages.length;
+  if (historyEnd > systemEnd) segments.push({ id: "history", layer: "S4", cacheClass: "append-only", bytes: JSON.stringify(messages.slice(systemEnd, historyEnd)).length });
+  if (tailIsOwnerInput) segments.push({ id: "owner-input", layer: "S5", cacheClass: "volatile-tail", bytes: JSON.stringify(messages[last]).length });
+  const capability = input.runtimeKind === "byok"
+    ? cacheCapabilityFor({ family: "openai-style", baseUrl: input.host, model: input.model })
+    : cacheCapabilityFor({ family: "local", model: input.model });
+  return planCache({ capability, segments, model: input.model, scope: { chatId: input.chatId, ownerId: input.ownerId } });
 }
 
 export type ChatMessage =
@@ -224,9 +257,11 @@ export async function loadMainToolInventory(
 
   // ★내장 도구 먼저. MCP 설정이 없어도(그게 흔한 경우다) 이 런타임은 일할 수 있어야
   // 한다. 권한 칩보다 위의 도구는 목록에 **아예 없다** — "있는데 거절"이 아니라 "없다".
-  if (!collectionBinding && ((workspaceRoot && !browserOnly) || canBrowserDownload)) {
-    for (const def of builtinToolsAsOpenAi(permission, { canAskUser, canGenerateImage, canBrowserDownload })) {
-      if ((browserOnly || !workspaceRoot) && def.function.name !== "browser_download") continue;
+  const historyWorkTools=currentHistoryRuntimeFence()?(await import("../one/personal-integrations-runtime")).currentOneHistoryWorkTools():[];
+  if (!collectionBinding && ((workspaceRoot && !browserOnly) || canBrowserDownload || historyWorkTools.length)) {
+    for (const def of builtinToolsAsOpenAi(permission, { canAskUser, canGenerateImage, canBrowserDownload, historyWorkTools })) {
+      if(historyWorkTools.length&&!historyWorkTools.includes(def.function.name))continue;
+      if ((browserOnly || !workspaceRoot) && def.function.name !== "browser_download"&&!historyWorkTools.includes(def.function.name)) continue;
       tools.push(def);
       byName.set(def.function.name, {
         kind: "builtin",
@@ -236,7 +271,7 @@ export async function loadMainToolInventory(
     }
   }
 
-  if (!mcpConfigPath) return { tools, byName };
+  if (historyWorkTools.length || !mcpConfigPath) return { tools, byName };
   const admitted = preparedMcpBindings(mcpConfigPath);
   for (const prepared of admitted) {
     if (collectionBinding && prepared !== collectionBinding) throw new Error("science_collection_server_identity_changed");
@@ -563,13 +598,24 @@ export async function runMainToolDispatch(
   approval: LocalToolApprovalContext,
   broker?: MainWorkforceBroker,
 ): Promise<MainToolDispatchResult> {
-  const result = await dispatchMainToolRaw(byName, call, events, approval, broker);
+  const acks: string[] = [];
+  const result = await effectAckScope.run(acks, () => dispatchMainToolRaw(byName, call, events, approval, broker));
   if(result.canonicalWorkAction) result.content += `\nHost work reference: ${JSON.stringify(result.canonicalWorkAction)}`;
   // Pages already have their own bounded, exact range protocol. Do not replace
   // a page with another reference or duplicate the screenshot channel.
-  return call.toolName === TOOL_RESULT_READ || approval.retainMcpToolResult ? result : {
+  const handedBack: MainToolDispatchResult = call.toolName === TOOL_RESULT_READ || approval.retainMcpToolResult ? result : {
     ...result, content: projectToolResult(byName, approval, result.content, call.providerCallId, result.isError),
   };
+  // The result is now being handed back to the model: settled effects stored for crash replay are acknowledged (G12).
+  await acknowledgeMainEffects(acks);
+  return handedBack;
+}
+
+/** Refs of effects settled during one model-visible dispatch (a code-mode call nests several). Acknowledged when that dispatch returns. */
+const effectAckScope = new AsyncLocalStorage<string[]>();
+async function acknowledgeMainEffects(refs: readonly string[]): Promise<void> {
+  if (!refs.length) return;
+  try { const ledger = await import("../harness/effect-ledger"); for (const ref of refs) await ledger.acknowledgeEffect(ref); } catch { /* never fails a tool result */ }
 }
 
 /** Nested code-mode calls consume actual values, not provider projections. */
@@ -580,8 +626,26 @@ async function dispatchMainToolRaw(
   if (approval.beforeMcpToolResult) approval.mcpResultDeliveryState ??= { blocked: false, pending: new Set() };
   assertMcpResultDelivery(approval);
   let result:MainToolDispatchResult;
-  if(currentHistoryRuntimeFence()){const resolved=byName.get(call.toolName);const input={kind:resolved?.kind??"builtin" as const,serverId:resolved?.kind==="mcp"?resolved.server.id:null,catalogId:resolved?.kind==="mcp"?resolved.server.catalogId??null:null,toolName:resolved?.kind==="mcp"?resolved.serverToolName:resolved?.kind==="builtin"?resolved.builtinName:call.toolName,args:JSON.parse(call.arguments),schemaDigest:resolved?.kind==="mcp"?resolved.schemaDigest:null};result=await withCurrentHistoryTool(input,()=>dispatchMainToolRawUnchecked(byName, call, events, approval, broker));}
-  else result=await dispatchMainToolRawUnchecked(byName, call, events, approval, broker);
+  // Pre-effect checkpoint (harness/effect-ledger.ts): the unchecked dispatcher begins it right before the effect leaves
+  // Main; the outcome is settled here, an exception after dispatch counting as uncertain.
+  const effectSlot: MainEffectSlot = {};
+  try {
+    if(currentHistoryRuntimeFence()){const resolved=byName.get(call.toolName);const input={kind:resolved?.kind??"builtin" as const,serverId:resolved?.kind==="mcp"?resolved.server.id:null,catalogId:resolved?.kind==="mcp"?resolved.server.catalogId??null:null,toolName:resolved?.kind==="mcp"?resolved.serverToolName:resolved?.kind==="builtin"?resolved.builtinName:call.toolName,args:JSON.parse(call.arguments),schemaDigest:resolved?.kind==="mcp"?resolved.schemaDigest:null};result=await withCurrentHistoryTool(input,()=>dispatchMainToolRawUnchecked(byName, call, events, approval, broker, effectSlot));}
+    else result=await dispatchMainToolRawUnchecked(byName, call, events, approval, broker, effectSlot);
+    result = { ...result, trust: result.trust ?? "tool-result" };
+  } catch (error) {
+    if (effectSlot.ref) await settleMainEffect(effectSlot.ref, "uncertain");
+    throw error;
+  }
+  if (effectSlot.ref) {
+    await settleMainEffect(effectSlot.ref, result.isError ? "failed" : "settled", result.content);
+    const acks = effectAckScope.getStore();
+    if (acks) acks.push(effectSlot.ref); else await acknowledgeMainEffects([effectSlot.ref]);
+  }
+  if (effectSlot.replayedRef) {
+    const acks = effectAckScope.getStore();
+    if (acks) acks.push(effectSlot.replayedRef); else await acknowledgeMainEffects([effectSlot.replayedRef]);
+  }
   // A timed-out code guest can return while its detached host calls are still
   // awaiting Main. Its bounded cleanup must not release a provider response.
   while (approval.mcpResultDeliveryState?.pending.size) {
@@ -621,9 +685,15 @@ async function awaitMcpResultDelivery(
   approval.assertCurrent?.();
 }
 
+interface MainEffectSlot { ref?: string; replayedRef?: string }
+
+async function settleMainEffect(ref: string, state: "settled" | "failed" | "uncertain", resultText?: string): Promise<void> {
+  try { await (await import("../harness/effect-ledger")).settleEffect(ref, state, state === "settled" && resultText !== undefined ? { result: resultText } : undefined); } catch { /* the ledger never fails a tool result */ }
+}
+
 async function dispatchMainToolRawUnchecked(
   byName: Map<string, ResolvedTool>, call: MainToolDispatchCall, events: RunnerEvents,
-  approval: LocalToolApprovalContext, broker?: MainWorkforceBroker,
+  approval: LocalToolApprovalContext, broker?: MainWorkforceBroker, effectSlot?: MainEffectSlot,
 ): Promise<MainToolDispatchResult> {
   approval.signal?.throwIfAborted();
   try {
@@ -810,6 +880,29 @@ async function dispatchMainToolRawUnchecked(
     if(actionId)broker?.finishAction(actionId,work.reused.isError ? "failed" : "succeeded");
     return {...work.reused,canonicalWorkAction:{action_id:work.action.actionId,step_id:work.action.stepId}} as MainToolDispatchResult;
   }
+  // Mutating calls (the same closed classification approval used above) checkpoint before the effect; canonical work
+  // recovery already owns its own original-outcome custody, so it is not checkpointed twice.
+  const mutatingEffect = resolved.kind === "builtin" ? planMutation : !admittedMcpRead;
+  if (mutatingEffect && !work && effectSlot) {
+    const ledger = await import("../harness/effect-ledger");
+    const effectTool = resolved.kind === "mcp" ? `mcp:${resolved.server.catalogId ?? resolved.server.id}:${resolved.serverToolName}` : `builtin:${resolved.builtinName}`;
+    const begun = await ledger.beginEffect({ surface: "main-loop", chatId: approval.chatId ?? null, run: ledger.effectRunId(approval), tool: effectTool, args });
+    if (begun.status === "uncertain_prior") {
+      if (actionId) broker?.finishAction(actionId, "not_dispatched");
+      (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, begun.content, eventCallId, true));
+      return { content: `Error: ${begun.content}`, visionMessage: null, isError: true };
+    }
+    if (begun.status === "replayed") {
+      // The identical effect already ran and settled but its result never reached the model (crash before ACK): hand the
+      // stored, redacted result back instead of executing again. The caller acknowledges it once it is handed back.
+      if (actionId) broker?.finishAction(actionId, "succeeded");
+      const content = `[replayed: true - the host recorded this result when the identical call ran at ${begun.priorAt}; the call was not executed again]\n${begun.content}`;
+      (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, content, eventCallId, false));
+      effectSlot.replayedRef = begun.priorRef;
+      return { content, visionMessage: null, isError: false, replayed: true };
+    }
+    effectSlot.ref = begun.ref;
+  }
   withDurableMainToolStart(() => (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, undefined, eventCallId, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName))));
   if (resolved.kind === "builtin") {
     const [{ runBuiltinTool }, { askUser }, { multimodalImageSlot }, { generateImage }] = await Promise.all([
@@ -848,6 +941,11 @@ async function dispatchMainToolRawUnchecked(
       signal: approval.signal,
       ...(shellEnv ? { env: shellEnv } : {}),
       ...(downloadProof ? {browserDownload:downloadProof.download} : {}),
+      ...(currentHistoryRuntimeFence()?{historyWork:async(name:string,value:Record<string,unknown>)=>{
+        if(name==="history_work_draft")return withCurrentHistoryProducer("agent",p=>p.agent.draftFinite(value),()=>{throw new Error("history_work_original_scope_required")});
+        if(name==="history_work_apply"&&Reflect.ownKeys(value).length===0)return withCurrentHistoryApplication();
+        throw new Error("history_work_original_scope_required");
+      }}:{}),
       askUser: (input) =>
         askUser(
           { ...input, askedBy: approval.runtimeKind, ...(approval.chatId ? { chatId: approval.chatId } : {}) },
@@ -1198,6 +1296,8 @@ export interface RunLocalOpenAiChatOptions {
   providerLabel?: string;
   /** Ollama accepts this on its native API; OpenAI-compatible servers may ignore it. */
   keepAlive?: string;
+  /** Owner-chosen DeepSeek Responses wire (byok-wire.ts): same loop, the request/stream converted by deepseek-responses.ts. */
+  responsesWire?: "deepseek";
   /** Ollama only: serve each request from the native /api/chat with a context window sized to the prompt
    * (ollama-native.ts). The OpenAI-compatible route cannot request a window. */
   ollamaContext?: true;
@@ -1209,6 +1309,11 @@ export interface RunLocalOpenAiChatOptions {
    * conservative fallback). Exact managed-local measurement uses contextWindow. */
   estimatedContextWindow?: number;
   estimatedOutputReserve?: number;
+  /**
+   * G32: re-read the window the server really has loaded right now (LM Studio loaded-instance config). Called at most once
+   * per run, after a context failure, never for managed llama.cpp (exact n_ctx). undefined = the server reports none.
+   */
+  remeasureContextWindow?: () => Promise<number | undefined>;
   capacitySource?: "built-in" | "catalog" | "unknown";
   /**
    * BYOK cloud providers only: the estimated window is a default, not evidence, and the
@@ -1224,6 +1329,8 @@ export interface RunLocalOpenAiChatOptions {
    * only when the measured request does not fit; the swap is reported as a notice.
    */
   systemPromptFallback?: string;
+  /** Trusted caller re-renders declared contracts before the final boundary, preserving history offsets. */
+  renderOutputSchemaSystem?: () => { system: string; fallback?: string };
 }
 
 /**
@@ -1247,6 +1354,19 @@ async function runLocalOpenAiChatInner(
   messages: ChatMessage[],
 ): Promise<RunnerResult> {
   const { req, events, runtimeKind, host, model } = opts;
+  const nativeOutputSchema = req.outputSchema ? openAiStrictSchemaOrNull(req.outputSchema.schema) : null;
+  if (req.outputSchema && !nativeOutputSchema) {
+    const first = messages[0];
+    if (first?.role !== "system" || typeof first.content !== "string") throw new Error("output_schema_system_message_required");
+    if (!opts.renderOutputSchemaSystem) throw new Error("output_schema_declared_system_required");
+    const declared = opts.renderOutputSchemaSystem();
+    messages[0] = { ...first, content: declared.system };
+    if (opts.systemPromptFallback) {
+      if (!declared.fallback) throw new Error("output_schema_declared_fallback_required");
+      opts = { ...opts, systemPromptFallback: declared.fallback };
+    }
+    events.onStatus(tStatus(req.locale, "schemaInPromptOnly"));
+  }
   const recovery = assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
   const chatEndpoint = opts.chatEndpoint ?? `${host}/v1/chat/completions`;
   const providerLabel = opts.providerLabel ?? host;
@@ -1305,7 +1425,7 @@ async function runLocalOpenAiChatInner(
       // 실제 파일 도구 계약에 맞춰 작업 폴더 상대경로를 안내한다.
       messages.splice(1, 0, {
         role: "system",
-        content: `File tools are sandboxed to this run's workspace folder: ${req.cwd}. Pass workspace-relative paths (for example, src/index.ts); absolute paths and paths escaping this folder will be rejected.`,
+        content: `file tools root: ${req.cwd}; relative paths only (others rejected).`,
       });
     }
   }
@@ -1333,6 +1453,40 @@ async function runLocalOpenAiChatInner(
   };
   // Host-side history trimming is background work: nothing about it is shown to the user (owner 2026-10-13).
   const reportHistoryCompaction = (_droppedCount: number): void => { historyCompactionReported = true; };
+  // The conversation's "session" for a runtime with no provider session (stateless-generation.ts, native-harness NH10):
+  // the handoff it installed, a new one at a settled boundary when a request's input reaches 80% of the window that admits
+  // it, acknowledged by the next complete response. Only the slice proven to come from req.history is ever replaced.
+  const generations = canCompactInitialHistory ? openStatelessGeneration({ runtime: runtimeKind, chatId: req.chatId,
+    ownerId: runtimeSessionOwnerId ?? null, model, history: historicalEntries, locale: req.locale, agentId: req.agentId ?? null }) : null;
+  const installGeneration = (digest: string, rows: RunnerRequest["history"]): void => {
+    messages.splice(historyStartIndex, transmittedHistoryCount,
+      { role: "user", content: digest },
+      ...rows.filter((entry) => entry.role === "user" || entry.role === "assistant").map((entry) => {
+        const images = entry.role === "user" ? ownerControlHistoryImages(entry) : [];
+        return { role: entry.role, content: images.length ? [
+          ...images.map((image) => ({ type: "image_url" as const, image_url: { url: `data:${image.mediaType};base64,${image.data}` } })),
+          { type: "text" as const, text: entry.text },
+        ] : entry.text } as ChatMessage;
+      }));
+    transmittedHistoryCount = rows.length + 1;
+    historyBudgetTokens = statelessHistoryTokens(digest, rows);
+  };
+  if (generations?.seed) installGeneration(generations.seed.digest, generations.seed.rows);
+  /** The window the rotation rule reads: measured/loaded/requested or a catalog number; a labelled default never moves it.
+   * Ollama: the num_ctx this very request is sent with (the window that admits it), not the ceiling it may grow to. */
+  const generationWindow = (window: number | undefined, ollamaPlan: { numCtx: number } | null): StatelessWindow | null => {
+    if (opts.contextWindow !== undefined) return { tokens: opts.contextWindow, source: "measured", known: true };
+    if (ollamaPlan) return { tokens: ollamaPlan.numCtx, source: "requested", known: true };
+    if (window === undefined) return null;
+    if (remeasuredWindow !== undefined) return { tokens: window, source: "loaded", known: true };
+    const known = !opts.unknownCapacityProviderEnforced && opts.capacitySource !== "unknown";
+    return { tokens: window, source: opts.capacitySource ?? "loaded", known };
+  };
+  let generationStep = 0, lastRequestTokens: number | null = null, lastObservedInput: number | null = null;
+  // The window the last request was actually admitted into (measured, loaded, or the num_ctx sent) — reported on the
+  // result so the context detail shows the real local window instead of a catalog figure (native-harness notyet NH18).
+  let admittedWindow: number | null = null;
+  let stepExactInput: number | null = null, sentRequestTokens: number | null = null;
   let finalText = "";
   let sawAnyToolCall = false;
   let summaryTurnRequested = false;
@@ -1347,6 +1501,9 @@ async function runLocalOpenAiChatInner(
   let surfaceFallbackApplied = false;
   let streamUsageUnsupported = false;
   let ollamaWindowReported = 0;
+  // G32: a context failure earns exactly one re-measure; a window that did not shrink (or is unknown) fails typed at once.
+  let contextRemeasures = 0;
+  let remeasuredWindow: number | undefined;
   /** Raised when a reply is cut by the output cap before it produced a tool call or any text. */
   let outputTokenFloor: number | undefined;
   let outputGrowths = 0;
@@ -1369,6 +1526,10 @@ async function runLocalOpenAiChatInner(
     }
     if (req.signal?.aborted) throw abortReasonError(req);
     ownerControlTerminal = "completed";
+    const observedInput = result.terminalUsage && result.terminalUsage.inputTokens > 0 ? result.terminalUsage.inputTokens : stepExactInput;
+    generations?.completed(generationStep, observedInput);
+    lastObservedInput = observedInput;
+    lastRequestTokens = sentRequestTokens;
     if (ownerControlPending) {
       req.ownerControlInbox!.settle(ownerControlPending, "applied");
       ownerControlPending = null;
@@ -1412,20 +1573,27 @@ async function runLocalOpenAiChatInner(
         for (const entry of batch) messages.push({ role: "user", content: entry.text });
       }
     }
+    // After a re-measure shrank the window, the output reserve follows it (an explicit req.maxOutputTokens never shrinks).
+    const turnReserve = remeasuredWindow !== undefined && opts.estimatedContextWindow !== undefined && req.maxOutputTokens === undefined
+      ? Math.min(opts.estimatedOutputReserve ?? 8_192, Math.max(1, Math.floor(Math.min(remeasuredWindow, opts.estimatedContextWindow) / 4)))
+      : opts.estimatedOutputReserve;
+    // One planner decides the provider cache fields (OpenAI prompt_cache_key / OpenRouter session_id only on endpoints
+    // whose capability supports them; compatible and local servers get nothing extra).
+    const cachePlan = openAiStyleCachePlan({ runtimeKind, host, chatId: req.chatId, ownerId: runtimeSessionOwnerId, model, tools, messages });
     const requestBody: Record<string, unknown> = {
             model,
             stream: true,
             ...(!streamUsageUnsupported && (runtimeKind === "byok" || runtimeKind === "lmstudio")
               ? { stream_options: { include_usage: true } } : {}),
             messages,
-            ...(runtimeKind === "byok" ? cacheAffinityFields({ baseUrl: host, chatId: req.chatId, ownerId: runtimeSessionOwnerId }) : {}),
+            ...planRequestFields(cachePlan),
             ...(opts.keepAlive ? { keep_alive: opts.keepAlive } : {}),
             ...(opts.chatTemplateKwargs ? { chat_template_kwargs: opts.chatTemplateKwargs } : {}),
             // A malformed tool call repeated identically 3 of 3 times (measured); a fresh seed makes the retry a new sample.
             ...(toolParseRetries > 0 ? { seed: Math.floor(Math.random() * 2_147_483_647) } : {}),
             ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
             ...(opts.estimatedContextWindow !== undefined
-              ? { max_tokens: Math.max(outputTokenFloor ?? 0, opts.estimatedOutputReserve ?? Math.min(8_192, Math.floor(opts.estimatedContextWindow / 4))) }
+              ? { max_tokens: Math.max(outputTokenFloor ?? 0, turnReserve ?? Math.min(8_192, Math.floor(opts.estimatedContextWindow / 4))) }
               : {}),
             ...(tools.length > 0 ? { tools } : {}),
             /*
@@ -1437,52 +1605,34 @@ async function runLocalOpenAiChatInner(
              * 토큰을 뱉을 수 없게 만든다 — 남는 것은 판단력 문제뿐이고, 그건 배선으로
              * 고칠 수 없다는 것이 정직한 경계다.
              */
-            ...(req.outputSchema
+            ...(req.outputSchema && nativeOutputSchema
               ? {
                   response_format: {
                     type: "json_schema",
                     json_schema: {
                       name: req.outputSchema.name,
-                      schema: req.outputSchema.schema,
+                      schema: nativeOutputSchema,
                       strict: true,
                     },
                   },
                 }
               : {}),
         };
-    // The conversation's "session" for a runtime with no provider session: start from a handoff that only changes when the
-    // history outgrows 80% of the model's own window (compact.ts stableHistoryWindow), so the prefix stays byte-stable and
-    // the provider cache / local KV cache keeps hitting. Silent: nothing is shown to the user.
-    if (turn === 0 && historicalEntries.length > 0 && canCompactInitialHistory && !opts.ollamaContext) {
-      const sessionWindow = opts.contextWindow ?? opts.estimatedContextWindow;
-      if (sessionWindow) {
-        const reserve = opts.estimatedOutputReserve ?? Math.min(8_192, Math.floor(sessionWindow / 4));
-        const outgoing = estimateTransportTokens(JSON.stringify(requestBody)) - historyBudgetTokens + reserve;
-        const ceiling = Math.floor(sessionWindow * GENERATION_CONTEXT_RATIO) - outgoing;
-        if (ceiling > 0 && historyBudgetTokens > ceiling) {
-          const stable = stableHistoryWindow(historicalEntries, {
-            ceilingTokens: ceiling, targetTokens: Math.min(ceiling, Math.floor(sessionWindow * (1 - GENERATION_CONTEXT_RATIO))), locale: req.locale });
-          if (stable?.digest) {
-            messages.splice(historyStartIndex, transmittedHistoryCount,
-              { role: "user", content: stable.digest },
-              ...stable.recent.map((entry) => ({ role: entry.role, content: entry.text } as ChatMessage)));
-            transmittedHistoryCount = stable.recent.length + 1;
-            historyBudgetTokens = stable.estimatedTokens;
-          }
-        }
-      }
-    }
     // Ollama: size the window to this request and ask for it on the native route; otherwise the
     // catalog estimate stands. The window is reported, never silently left at the server default.
     let turnFetch: typeof fetch = fetch;
-    let turnWindow = opts.estimatedContextWindow;
-    let turnCeiling = opts.estimatedContextWindow;
+    let turnWindow = remeasuredWindow !== undefined
+      ? Math.min(remeasuredWindow, opts.estimatedContextWindow ?? remeasuredWindow) : opts.estimatedContextWindow;
+    let turnCeiling = turnWindow;
+    let ollamaPlan: { numCtx: number } | null = null;
     if (opts.ollamaContext && !req.untrustedNoTools) {
-      const limits = await probeOllamaContextLimits(host, model, req.signal);
+      // The first request of a run reads the server fresh: a model swapped since the last run must not reuse a cached window.
+      const limits = await probeOllamaContextLimits(host, model, req.signal, undefined, { fresh: turn === 0 && contextRemeasures === 0 });
       const reserve = typeof requestBody.max_tokens === "number" ? requestBody.max_tokens : 4_096;
       const plan = planOllamaContext({ host, model, promptTokens: estimateRequestPromptTokens(requestBody), outputReserve: reserve, limits });
       turnWindow = plan.numCtx;
       turnCeiling = plan.ceiling;
+      ollamaPlan = plan;
       turnFetch = ollamaNativeFetch(host, plan.numCtx, { thinkingByCallId });
       if (ollamaWindowReported !== plan.numCtx) {
         ollamaWindowReported = plan.numCtx;
@@ -1490,9 +1640,25 @@ async function runLocalOpenAiChatInner(
           message: `Requested a ${plan.numCtx}-token context window from Ollama (model maximum ${plan.modelMax ?? "unknown"}, loaded ${plan.loaded ?? "none"}, prompt about ${plan.needTokens - reserve} tokens).` });
       }
     }
+    // Rotation at this settled boundary (turn start, or after a tool step whose results are all in): the request's INPUT
+    // against 80% of the window that admits it. Input + output reserve is admission, below, and never records a generation.
+    generationStep = turn; stepExactInput = null;
+    const rotationWindow = generations ? generationWindow(turnWindow, ollamaPlan) : null;
+    const observedWindow = rotationWindow ?? generationWindow(turnWindow, ollamaPlan);
+    if (observedWindow?.known && ["measured", "loaded", "requested"].includes(observedWindow.source)) admittedWindow = observedWindow.tokens;
+    if (generations && rotationWindow) {
+      const rotation = await generations.boundary({ boundary: turn === 0 ? "turn-start" : "tool-step", step: turn, window: rotationWindow,
+        requestTokens: estimateTransportTokens(JSON.stringify(requestBody)), historyTokens: historyBudgetTokens,
+        observedLastInput: lastObservedInput, lastRequestTokens });
+      if (rotation.action === "rotated") installGeneration(rotation.digest, rotation.rows);
+    }
+    if (opts.responsesWire === "deepseek") {
+      const { deepseekResponsesFetch } = await import("./deepseek-responses");
+      turnFetch = deepseekResponsesFetch(host, { thinkingByCallId });
+    }
     if (turnWindow !== undefined) {
       const window = turnWindow;
-      const reserve = opts.estimatedOutputReserve ?? Math.min(8_192, Math.floor(window / 4));
+      const reserve = turnReserve ?? Math.min(8_192, Math.floor(window / 4));
       let inputEstimate = estimateTransportTokens(JSON.stringify(requestBody));
       for (let attempt = 0; attempt < 8 && inputEstimate + reserve > window
         && historicalEntries.length > 0; attempt += 1) {
@@ -1560,6 +1726,7 @@ async function runLocalOpenAiChatInner(
         }
         requestBody.max_tokens = admittedOutputTokens;
         if (opts.contextInputSink) opts.contextInputSink.value = measured.inputTokens;
+        stepExactInput = measured.inputTokens > 0 ? measured.inputTokens : null;
       } catch {
         if (req.signal?.aborted) throw abortReasonError(req);
         return assertCurrentHistoryRunnerResult({text:"",failure:localContextFailure("local_context_measurement_unavailable",runtimeKind,req.locale)});
@@ -1568,6 +1735,8 @@ async function runLocalOpenAiChatInner(
     assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
     let resp: Response;
     reportModelPayload(() => ledgerFromApiBody(requestBody, { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
+    sentRequestTokens = estimateTransportTokens(JSON.stringify(requestBody));
+    reportCachePlan(cachePlan);
     let usageAttempt = usage.start();
     try {
       if (req.signal?.aborted) throw abortReasonError(req);
@@ -1630,8 +1799,27 @@ async function runLocalOpenAiChatInner(
           events.onStatus(req.locale === "ko" ? "모델의 도구 호출 형식이 깨져 같은 요청을 다시 보냅니다…" : "The model's tool call was malformed; sending the same request again…");
           continue;
         }
-        const failureClass = localHttpFailureClass(errText);
-        if (failureClass === "context") return assertCurrentHistoryRunnerResult({text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)});
+        const failureClass = localHttpFailureClass(errText, resp.status);
+        if (failureClass === "context") {
+          // G32: the window we sized for may belong to a model that was swapped for a smaller one. Re-measure once; retry
+          // only if the server now reports a window below the one this request was sized for. Same or unknown -> typed failure.
+          if (contextRemeasures < 1 && opts.contextWindow === undefined && !ownerControlPending && !req.signal?.aborted) {
+            contextRemeasures += 1;
+            const failedWindow = turnWindow;
+            let now: number | undefined;
+            try {
+              now = opts.ollamaContext ? (await remeasureOllamaWindow(host, model, req.signal)).window
+                : await opts.remeasureContextWindow?.();
+            } catch { now = undefined; }
+            if (now !== undefined && failedWindow !== undefined && now < failedWindow) {
+              remeasuredWindow = now;
+              events.onNotice?.({ level: "info", code: "local-context-window-remeasured",
+                message: `The model's context window is now ${now} tokens (was sized for ${failedWindow}); retrying once.` });
+              continue;
+            }
+          }
+          return assertCurrentHistoryRunnerResult({text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)});
+        }
         // Only explicit structured unsupported-tools markers permit the legacy downgrade.
         if (!ownerControlPending && failureClass === "tools" && tools.length > 0 && !sawAnyToolCall && resp.status >= 400 && resp.status < 500) {
           // A host-broker receipt must describe the inventory admitted to the
@@ -1725,9 +1913,7 @@ async function runLocalOpenAiChatInner(
       if ((!result.text.trim() || envelopeOnly) && sawAnyToolCall && !req.untrustedNoTools && !summaryTurnRequested) {
         summaryTurnRequested = true;
         messages.push({ role: "assistant", content: result.text });
-        messages.push({ role: "user", content: req.locale === "ko"
-          ? "도구 실행은 끝났습니다. 이제 사용자에게 무엇을 했고 결과가 무엇인지 한국어 평문으로 짧게 답하세요. 도구를 더 부르지 말고, Memory Events 블록이나 JSON 은 쓰지 마세요."
-          : "Tool execution is finished. Now tell the user in plain prose, briefly, what was done and the result. Do not call more tools and do not write a Memory Events block or JSON." });
+        messages.push({ role: "user", content: "tools: done. Answer the user: what was done + result, brief prose. No tools, no Memory Events, no JSON." });
         continue;
       }
       finalText = result.text;
@@ -1796,6 +1982,7 @@ async function runLocalOpenAiChatInner(
     ownerControlTerminal: failure ? "uncertain" : ownerControlTerminal,
     ...(failure ? { failure } : {}),
     ...(observedUsage ? { observedUsage } : {}),
+    ...(admittedWindow ? { contextWindowTokens: admittedWindow } : {}),
     workforcePermissionEnforcement: enforcement,
   });
   } finally {

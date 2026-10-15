@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { IconRefresh } from '../../components/Icon';
 import type { BusinessSession } from '../../../shared/business/context';
 import { BUSINESS_ORGANIZATION_EXECUTION_ACTIONS, businessOrganizationExecutionContextMatches, businessOrganizationExecutionPendingKey,
   businessOrganizationExecutionResultMatches, freezeBusinessOrganizationExecutionMetadata, isBusinessOrganizationExecutionSnapshot,
@@ -14,6 +15,11 @@ const stateLabels: Record<BusinessOrganizationExecutionState, string> = { candid
   'source-stale': '자료 확인 필요', blocked: '연결 확인 필요', unknown: '상태 미확인', restoring: '복원안 준비 중' };
 function contextKey(snapshot: BusinessOrganizationExecutionSnapshot): string { return JSON.stringify(snapshot.context); }
 function lookupKey(lookup: BusinessOrganizationExecutionLookup): string { return JSON.stringify([lookup.candidateId, lookup.action, lookup.expectedRevision]); }
+interface OriginalDisplayControl {
+  readonly lookup: BusinessOrganizationExecutionLookup;
+  readonly ownerPrincipalId: string | null;
+  readonly closed?: boolean;
+}
 function current(snapshot: BusinessOrganizationExecutionSnapshot | null, expected: BusinessSession | null | undefined): snapshot is BusinessOrganizationExecutionSnapshot {
   try { return isBusinessOrganizationExecutionSnapshot(snapshot) && (expected === undefined
     || expected !== null && businessOrganizationExecutionContextMatches(snapshot.context, expected)); } catch { return false; }
@@ -27,8 +33,8 @@ function outcome(result: BusinessOrganizationExecutionResult): string {
 }
 /** Organization metadata only. Self History/learning content and native controls are
  * never substituted for registered target owners. Missing callbacks supply no rows. */
-export function BusinessOrganizationExecutionPanel({ port, expectedSession }: {
-  port: BusinessOrganizationExecutionPanelPort | null; expectedSession?: BusinessSession | null;
+export function BusinessOrganizationExecutionPanel({ port, expectedSession, displayClosed = false }: {
+  port: BusinessOrganizationExecutionPanelPort | null; expectedSession?: BusinessSession | null; displayClosed?: boolean;
 }) {
   const [snapshot, setSnapshot] = useState<BusinessOrganizationExecutionSnapshot | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -39,7 +45,7 @@ export function BusinessOrganizationExecutionPanel({ port, expectedSession }: {
   const active = useRef(new Set<string>());
   // These are display holds, never commands or authority. The adapter/server keep
   // the original claim across refresh or remount. No mutation is automatically retried.
-  const controls = useRef(new Map<string, { context: string; lookup: BusinessOrganizationExecutionLookup; pending: boolean }>());
+  const controls = useRef(new Map<string, { context: string; original: Readonly<OriginalDisplayControl>; pending: boolean }>());
   const snapshotRef = useRef<BusinessOrganizationExecutionSnapshot | null>(null);
   const expectedKey = expectedSession === undefined ? 'owner-current-session' : JSON.stringify(expectedSession);
   const clear = (message: string) => {
@@ -71,9 +77,10 @@ export function BusinessOrganizationExecutionPanel({ port, expectedSession }: {
     let off: (() => void) | undefined;
     try { off = port.subscribeInvalidation?.(() => clear('계정 또는 조직 권한이 바뀌어 실행 목록을 닫았습니다.')); }
     catch { clear('현재 조직의 실행 목록을 확인할 수 없습니다.'); }
-    void reload();
+    if (!displayClosed) void reload();
     return () => { generation.current++; readRequest.current++; try { off?.(); } catch { /* Teardown cannot dispatch a control. */ } };
   }, [port, expectedKey]);
+  useEffect(() => { if (displayClosed) clear('현재 조직 연결 확인 필요'); }, [displayClosed]);
   useEffect(() => {
     if (!snapshot) return;
     const expiresAt = Date.parse(snapshot.context.expiresAt); let timer: ReturnType<typeof setTimeout>;
@@ -85,28 +92,35 @@ export function BusinessOrganizationExecutionPanel({ port, expectedSession }: {
     return () => clearTimeout(timer);
   }, [snapshot?.context.expiresAt]);
 
-  function pendingFor(row: BusinessOrganizationExecutionRow, scope: string): BusinessOrganizationExecutionLookup[] {
-    const original = new Map(row.pendingControls.map(value => [businessOrganizationExecutionPendingKey(value), { candidateId: row.candidateId, ...value }]));
-    for (const value of controls.current.values()) if (value.pending && value.context === scope && value.lookup.candidateId === row.candidateId)
-      original.set(businessOrganizationExecutionPendingKey(value.lookup), value.lookup);
+  function pendingFor(row: BusinessOrganizationExecutionRow, scope: string): OriginalDisplayControl[] {
+    const original = new Map<string, OriginalDisplayControl>(row.pendingControls.map(value => [businessOrganizationExecutionPendingKey(value), {
+      lookup: { candidateId: row.candidateId, action: value.action, expectedRevision: value.expectedRevision },
+      ownerPrincipalId: value.originalOwnerPrincipalId ?? null, closed: value.originalOwnerPrincipalId === null }]));
+    for (const value of controls.current.values()) if (value.pending && value.context === scope && value.original.lookup.candidateId === row.candidateId) {
+      const key = businessOrganizationExecutionPendingKey(value.original.lookup), remote = original.get(key);
+      original.set(key, remote?.closed || remote?.ownerPrincipalId != null && remote.ownerPrincipalId !== value.original.ownerPrincipalId
+        ? { lookup: value.original.lookup, ownerPrincipalId: null } : value.original);
+    }
     return [...original.values()];
   }
-  async function act(row: BusinessOrganizationExecutionRow, action: BusinessOrganizationExecutionAction, original?: BusinessOrganizationExecutionLookup) {
+  async function act(row: BusinessOrganizationExecutionRow, action: BusinessOrganizationExecutionAction, original?: OriginalDisplayControl) {
     const view = snapshotRef.current;
     if (!port || !current(view, expectedSession)) return;
     const scope = contextKey(view);
-    const lookup = freezeBusinessOrganizationExecutionMetadata(original ?? { candidateId: row.candidateId, action, expectedRevision: row.revision });
+    const ownerPrincipalId = original ? original.ownerPrincipalId : row.ownerPrincipalId;
+    if (ownerPrincipalId === null) return;
+    const lookup = freezeBusinessOrganizationExecutionMetadata(original?.lookup ?? { candidateId: row.candidateId, action, expectedRevision: row.revision });
     const id = lookupKey(lookup), workKey = `${scope}:${original ? 'receipt' : 'control'}:${id}`;
     if (active.current.has(workKey)) return;
     if (!original && (!row.allowedActions.includes(action) || !row.readyActions.includes(action)
-      || pendingFor(row, scope).some(value => value.action === action) || controls.current.has(`${scope}:${id}`))) return;
+      || pendingFor(row, scope).some(value => value.lookup.action === action) || controls.current.has(`${scope}:${id}`))) return;
     const stamp = generation.current;
-    if (!original) controls.current.set(`${scope}:${id}`, { context: scope, lookup, pending: true });
+    if (!original) controls.current.set(`${scope}:${id}`, { context: scope, original: Object.freeze({ lookup, ownerPrincipalId }), pending: true });
     active.current.add(workKey); redraw(value => value + 1); setNotice(null);
     try {
       const result = await (original ? port.receipt(lookup) : port.control(lookup));
       if (stamp !== generation.current || !current(snapshotRef.current, expectedSession) || contextKey(snapshotRef.current) !== scope) return;
-      if (!businessOrganizationExecutionResultMatches(result, lookup, row.ownerPrincipalId)) throw Error('invalid_original_control_receipt');
+      if (!businessOrganizationExecutionResultMatches(result, lookup, ownerPrincipalId)) throw Error('invalid_original_control_receipt');
       const record = controls.current.get(`${scope}:${id}`);
       if (record) record.pending = result.stateWrite === 'unknown' || result.effectState === 'unreconciled';
       setNotice(outcome(result));
@@ -115,24 +129,24 @@ export function BusinessOrganizationExecutionPanel({ port, expectedSession }: {
         setNotice(original ? '원래 처리 기록을 확인하지 못했습니다. 같은 제어를 다시 보내지 마세요.' : '처리 결과를 확인하지 못했습니다. 원래 처리 기록을 확인하세요.');
     } finally { active.current.delete(workKey); redraw(value => value + 1); }
   }
-  const visible = current(snapshot, expectedSession) ? snapshot : null;
+  const visible = !displayClosed && current(snapshot, expectedSession) ? snapshot : null;
   const scope = visible ? contextKey(visible) : '';
-  const pending = visible ? visible.rows.flatMap(row => pendingFor(row, scope).map(lookup => ({ row, lookup }))) : [];
+  const pending = visible ? visible.rows.flatMap(row => pendingFor(row, scope).map(original => ({ row, original }))) : [];
   return <section className="business-organization-execution-panel" aria-labelledby="business-organization-execution-heading">
-    <div className="business-section-header"><div><h2 id="business-organization-execution-heading">조직 실행 관리</h2>
-      <p>허용된 조직 실행의 상태와 원래 처리 기록을 확인합니다.</p></div>
-      <button type="button" disabled={!port || loading} onClick={() => void reload()}>현재 상태 확인</button></div>
-    {!port && <p role="status">조직 실행 관리 연결 필요 · 목록과 제어를 사용할 수 없습니다.</p>}
+    <div className="business-section-header"><h2 id="business-organization-execution-heading">조직 실행 관리</h2>
+      <button type="button" className="business-icon-button" title="현재 상태 확인" aria-label="현재 상태 확인" disabled={displayClosed || !port || loading} onClick={() => void reload()}><IconRefresh size={16} /></button></div>
+    {!port && <span role="status" className="business-status">조직 실행 연결 필요</span>}
     {loading && <p role="status">현재 조직 상태를 확인하고 있습니다.</p>}
-    {visible && <p>조직 {visible.context.organizationId} · 관리자 계정 {visible.context.principalId}</p>}
+    {visible && <details className="business-details"><summary>조직 {visible.context.organizationId}</summary>관리자 계정 {visible.context.principalId}</details>}
     {visible && visible.rows.length === 0 && <p>현재 권한으로 확인할 수 있는 실행이 없습니다.</p>}
     {visible && <div aria-label="허용된 조직 실행">{visible.rows.slice(0, rowLimit).map(row => <article key={row.candidateId}>
-      <h3>실행 {row.candidateId}</h3><p>소유자 {row.ownerPrincipalId} · 프로젝트 {row.projectId} · {stateLabels[row.state]} · revision {row.revision}</p>
-      <div>{BUSINESS_ORGANIZATION_EXECUTION_ACTIONS.map(action => {
+      <div className="business-setting-row"><h3>실행 {row.candidateId}</h3><span className="business-status" data-state={row.state}>{stateLabels[row.state]}</span><small>revision {row.revision}</small></div>
+      <details className="business-details"><summary>실행 범위</summary>소유자 {row.ownerPrincipalId} · 프로젝트 {row.projectId}</details>
+      <div className="business-actions">{BUSINESS_ORGANIZATION_EXECUTION_ACTIONS.map(action => {
         const lookup = { candidateId: row.candidateId, action, expectedRevision: row.revision };
         const id = lookupKey(lookup);
         const permitted = row.allowedActions.includes(action), prepared = row.readyActions.includes(action);
-        const disabled = !permitted || !prepared || pendingFor(row, scope).some(value => value.action === action)
+        const disabled = !permitted || !prepared || pendingFor(row, scope).some(value => value.lookup.action === action)
           || controls.current.has(`${scope}:${id}`) || active.current.has(`${scope}:control:${id}`);
         return <button key={action} type="button" disabled={disabled} aria-label={`${row.candidateId} ${actionLabels[action]}`}
           title={!permitted ? '현재 권한이 필요합니다.' : !prepared ? '원래 실행의 제어 연결이 필요합니다.' : undefined}
@@ -140,11 +154,12 @@ export function BusinessOrganizationExecutionPanel({ port, expectedSession }: {
       })}</div></article>)}</div>}
     {visible && visible.rows.length > rowLimit && <button type="button" onClick={() => setRowLimit(value => Math.min(64, value + 20))}>실행 더 보기</button>}
     {pending.length > 0 && <section aria-labelledby="business-organization-pending-heading"><h3 id="business-organization-pending-heading">처리 확인 필요</h3>
-      <p>같은 요청을 다시 보내지 않고 원래 영수증만 확인합니다.</p><ul>{pending.slice(0, receiptLimit).map(({ row, lookup }) => {
+      <ul className="business-receipt-list">{pending.slice(0, receiptLimit).map(({ row, original }) => {
+        const lookup = original.lookup;
         const id = lookupKey(lookup);
-        return <li key={id}>{lookup.candidateId} · {actionLabels[lookup.action]} · 원래 revision {lookup.expectedRevision}{' '}
-          <button type="button" disabled={active.current.has(`${scope}:receipt:${id}`)} aria-label={`${lookup.candidateId} ${actionLabels[lookup.action]} revision ${lookup.expectedRevision} 처리 기록 확인`}
-            onClick={() => void act(row, lookup.action, lookup)}>처리 기록 확인</button></li>;
+        return <li key={id}><span>{lookup.candidateId} · {actionLabels[lookup.action]} · 원래 revision {lookup.expectedRevision}</span>
+          <button type="button" disabled={original.ownerPrincipalId === null || active.current.has(`${scope}:receipt:${id}`)} aria-label={`${lookup.candidateId} ${actionLabels[lookup.action]} revision ${lookup.expectedRevision} 처리 기록 확인`}
+            onClick={() => void act(row, lookup.action, original)}>처리 기록 확인</button></li>;
       })}</ul>{pending.length > receiptLimit && <button type="button" onClick={() => setReceiptLimit(value => Math.min(4096, value + 20))}>처리 기록 더 보기</button>}</section>}
     {notice && <p role="status">{notice}</p>}
   </section>;

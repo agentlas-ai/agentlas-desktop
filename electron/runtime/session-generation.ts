@@ -40,19 +40,73 @@ const RUNTIME_PROVIDER: Readonly<Record<string, string>> = {
   "claude-code": "anthropic", codex: "openai", antigravity: "google", grok: "xai", kimi: "kimi", cursor: "cursor",
 };
 
-/** The model's own window as the product knows it (built-in table, then the model catalog); null when unknown. */
-export function runtimeContextWindow(kind: string, model: string | null | undefined): number | null {
+/**
+ * Windows a runtime itself reported for a model the product's table does not know (Codex app-server
+ * `thread/tokenUsage/updated` → tokenUsage.modelContextWindow, codex 0.162.1 schema). Kept in memory and in the meta store,
+ * so a restart keeps the observed number. Never a guess: only a positive integer the runtime sent.
+ */
+const observedWindows = new Map<string, number>();
+const observedKey = (kind: string, model: string): string => `runtime-observed-window:${kind}:${model}`;
+type MetaApi = { getMeta(key: string): string | null; setMeta(key: string, value: string): void };
+function meta(): MetaApi | null { try { return require("../store/meta") as MetaApi; } catch { return null; } }
+
+export function recordObservedContextWindow(kind: string, model: string | null | undefined, tokens: unknown): boolean {
+  if (!model || typeof tokens !== "number" || !Number.isSafeInteger(tokens) || tokens <= 0) return false;
+  const key = observedKey(kind, model);
+  if (observedWindows.get(key) === tokens) return true;
+  observedWindows.set(key, tokens);
+  try { meta()?.setMeta(key, JSON.stringify({ tokens, observedAt: new Date().toISOString() })); } catch { /* this process keeps it */ }
+  return true;
+}
+
+export function observedContextWindow(kind: string, model: string | null | undefined): number | null {
+  if (!model) return null;
+  const key = observedKey(kind, model);
+  const cached = observedWindows.get(key);
+  if (cached) return cached;
+  try {
+    const raw = meta()?.getMeta(key);
+    const tokens = raw ? (JSON.parse(raw) as { tokens?: unknown }).tokens : null;
+    if (typeof tokens === "number" && Number.isSafeInteger(tokens) && tokens > 0) { observedWindows.set(key, tokens); return tokens; }
+  } catch { /* unknown */ }
+  return null;
+}
+
+/**
+ * The model's own window and where it came from. What the runtime itself reported for this model wins (it is the window
+ * that actually admits the requests: a catalog may list 1M where the account's model runs 32768); the product's table
+ * (built-in, then catalog) is the fallback for a model the runtime has not reported yet.
+ */
+export function runtimeContextWindowProvenance(kind: string, model: string | null | undefined): { tokens: number; source: "catalog" | "observed" } | null {
+  const observed = observedContextWindow(kind, model);
+  if (observed) return { tokens: observed, source: "observed" };
   for (const backend of [kind, RUNTIME_PROVIDER[kind]].filter((value): value is string => Boolean(value))) {
     try {
       const window = resolveEffectiveContextWindow(backend, model, false).contextWindow;
-      if (window) return window;
+      if (window) return { tokens: window, source: "catalog" };
     } catch { /* next candidate */ }
   }
   return null;
+}
+
+/** The model's own window as the product knows it (the runtime's own report, then the table); null when unknown. */
+export function runtimeContextWindow(kind: string, model: string | null | undefined): number | null {
+  return runtimeContextWindowProvenance(kind, model)?.tokens ?? null;
 }
 
 /** A native compaction threshold at the same 80% of the model's window; undefined leaves the runtime's default. */
 export function compactionTokenLimit(kind: string, model: string | null | undefined): number | undefined {
   const window = runtimeContextWindow(kind, model);
   return window ? Math.floor(window * GENERATION_CONTEXT_RATIO) : undefined;
+}
+
+/**
+ * The native compaction limit handed to the runtime: 80% of the model's window for every caller, the Science controller
+ * included (native-harness notyet NH14). The runtime's reported window wins over the table. With the window unknown (never
+ * reported by the runtime and not in the table) nothing is handed over and the runtime's own compaction, which knows its
+ * model, stays in charge; a fixed number would be wrong for any model whose real window is smaller. The first `thread/tokenUsage/updated` that reports the window records it
+ * (recordObservedContextWindow), and the next spawn derives 80% from that observed number.
+ */
+export function nativeCompactionLimit(kind: string, model: string | null | undefined): number | undefined {
+  return compactionTokenLimit(kind, model);
 }

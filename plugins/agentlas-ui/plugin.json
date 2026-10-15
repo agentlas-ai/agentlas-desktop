@@ -13,8 +13,8 @@
     "displayNameKo": "채팅 UI 스키마",
     "tagline": "Native chat components, read on demand",
     "taglineKo": "채팅 네이티브 컴포넌트 스키마를 필요할 때 읽습니다",
-    "description": "Agentlas built-in read-only server that returns the chat's native component schema (comparisons, tables, step flows, metrics, charts) and the interactive surface spec when the model decides to use one. Nothing else.",
-    "descriptionKo": "모델이 비교표·단계 흐름·지표·차트나 인터랙티브 화면을 쓰기로 했을 때 그 형식만 돌려주는 Agentlas 내장 읽기 전용 서버입니다.",
+    "description": "Agentlas built-in read-only server that returns the chat's native component schema (comparisons, tables, step flows, metrics, charts) the interactive surface spec and the recurring-automation spec when the model decides to use one. Nothing else.",
+    "descriptionKo": "모델이 비교표·단계 흐름·지표·차트, 인터랙티브 화면, 반복 자동화를 쓰기로 했을 때 그 형식만 돌려주는 Agentlas 내장 읽기 전용 서버입니다.",
     "category": "data",
     "brandColor": "#0F766E",
     "defaultPrompts": []

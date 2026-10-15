@@ -453,12 +453,13 @@ export async function materializeCatalogAssets(
       : budget.lastApproval,
   };
   trust.budget = nextBudget as unknown as JsonValue;
-  trust.jobs = jobs.map((job) => ({
-    ...job,
-    status: /image|visual|catalog/i.test(`${job.id || ""} ${job.label || ""}`) ? "completed" : job.status,
-    lastRunAt: /image|visual|catalog/i.test(`${job.id || ""} ${job.label || ""}`) ? now : job.lastRunAt,
-    outputCount: /image|visual|catalog/i.test(`${job.id || ""} ${job.label || ""}`) ? materialized.length : job.outputCount,
-  })) as unknown as JsonValue;
+  // The host records the work it did as its own job; it does not guess which model-written job this was from words
+  // in its id or label (docs/2026-10-13-native-harness 04 §3).
+  const HOST_CATALOG_JOB_ID = "agentlas-catalog-assets";
+  trust.jobs = [
+    ...jobs.filter((job) => job.id !== HOST_CATALOG_JOB_ID),
+    { id: HOST_CATALOG_JOB_ID, label: "Catalog assets", status: "completed", lastRunAt: now, outputCount: materialized.length },
+  ] as unknown as JsonValue;
   operations.trust = trust as unknown as JsonValue;
 
   const providerTasks = arrayOfObjects(operations.providerTasks).map((task) =>
@@ -2520,17 +2521,10 @@ function roundMoney(value: number): number {
   return Math.round((value + Number.EPSILON) * 100) / 100;
 }
 
+// The local stack reports only what it ran, in rows it owns (typed ids). Rows the generated app wrote keep their own
+// status: their labels are product copy, never read for meaning (native-harness notyet NH25).
 function mergeLocalOrderLanes(value: unknown, now: string): JsonObject[] {
-  const existing = arrayOfObjects(value).map((row) => {
-    const label = `${row.lane || row.name || row.label || ""}`.toLowerCase();
-    if (label.includes("new order") || label.includes("orders")) {
-      return { ...row, status: "sandbox-checkout-ready", trust: "verified-local", lastRunAt: now };
-    }
-    if (label.includes("fulfillment")) {
-      return { ...row, status: "local-db-connected", trust: "verified-local", lastRunAt: now };
-    }
-    return row;
-  });
+  const existing = arrayOfObjects(value);
   const hasCheckout = existing.some((row) => stringValue(row.id) === "sandbox-checkout-lane");
   return [
     ...existing,
@@ -2549,36 +2543,24 @@ function mergeLocalOrderLanes(value: unknown, now: string): JsonObject[] {
   ];
 }
 
+const LOCAL_STACK_METRIC_IDS = new Set(["local-payment-sandbox", "local-database", "local-assets", "local-stack-status"]);
+
 function updateLocalMetrics(value: unknown, assetCount: number): JsonObject[] {
-  const rows = arrayOfObjects(value);
-  const next = rows.map((row) => {
-    const label = `${row.label || row.name || ""}`.toLowerCase();
-    if (label.includes("payment")) {
-      return { ...row, value: "sandbox connected", trust: "verified-local", evidenceIds: ["local_commerce_stack"] };
-    }
-    if (label.includes("database")) {
-      return { ...row, value: "local database connected", trust: "verified-local", evidenceIds: ["local_commerce_stack"] };
-    }
-    if (label.includes("image")) {
-      return {
-        ...row,
-        value: assetCount > 0 ? `${assetCount} assets materialized` : "waiting for budget-approved assets",
-        trust: assetCount > 0 ? "verified-local" : "estimated",
-        evidenceIds: assetCount > 0 ? ["local_commerce_stack"] : row.evidenceIds,
-      };
-    }
-    return row;
-  });
-  if (!next.some((row) => stringValue(row.id) === "local-stack-status")) {
-    next.push({
-      id: "local-stack-status",
-      label: "Local commerce stack",
-      value: "active",
-      trust: "verified-local",
-      evidenceIds: ["local_commerce_stack"],
-    });
-  }
-  return next;
+  // Replace the stack's own rows on every activation; leave every generated row as written.
+  const rows = arrayOfObjects(value).filter((row) => !LOCAL_STACK_METRIC_IDS.has(stringValue(row.id) ?? ""));
+  return [
+    ...rows,
+    { id: "local-payment-sandbox", label: "Payment", value: "sandbox connected", trust: "verified-local", evidenceIds: ["local_commerce_stack"] },
+    { id: "local-database", label: "Database", value: "local database connected", trust: "verified-local", evidenceIds: ["local_commerce_stack"] },
+    {
+      id: "local-assets",
+      label: "Assets",
+      value: assetCount > 0 ? `${assetCount} assets materialized` : "waiting for budget-approved assets",
+      trust: assetCount > 0 ? "verified-local" : "estimated",
+      ...(assetCount > 0 ? { evidenceIds: ["local_commerce_stack"] } : {}),
+    },
+    { id: "local-stack-status", label: "Local commerce stack", value: "active", trust: "verified-local", evidenceIds: ["local_commerce_stack"] },
+  ];
 }
 
 function updateCredentialMetrics(value: unknown, resolvedCount: number, missingCount: number): JsonObject[] {

@@ -59,13 +59,14 @@ export function createNativeMainPreparationRouter(ports: NativeMainPreparationRo
   for (const limit of [ports.maxRequestBytes, ports.maxCheckpointBytes, ports.maxRetainedBytes, ports.maxRecords ?? 32, ports.maxCallbacks ?? 32]) positive(limit);
   const records = new Map<string, RecordState>(), handles = new WeakMap<NativeMainPreparationRouterHandle, RecordState>();
   const noStartProofs = new WeakMap<object, RecordState>();
+  const closedTerminalRecords = new Map<string, WeakRef<RecordState>>();
   const issuer = createNativeMainPreparationIssuer({ ...ports, maxPending: ports.maxRecords ?? 32,
     nativeChannelIdentity(channel) { const identity = nativeGuiChannelIdentity(channel); return identity ? Object.freeze({ peer: identity, generation: identity.generation, serviceIdentity: identity.serviceIdentity, bootId: identity.bootId, ownerId: identity.bootId, storeIdentity: identity.scope }) : null; },
-    consumeVerifiedNativeIngressNoStart(binding, proof) { const r = noStartProofs.get(proof); noStartProofs.delete(proof); if (!r || !sameNativeStartBinding(r.start.binding, binding)) fail("native_main_router_no_start_proof_required"); assertCurrent(r); },
+    consumeVerifiedNativeIngressNoStart(binding, proof) { const r = noStartProofs.get(proof); noStartProofs.delete(proof); if (!r || !sameNativeStartBinding(r.start.binding, binding)) fail("native_main_router_no_start_proof_required"); assertCurrent(r, r.channel, r.identity, true); },
   });
   let callbacks = 0, terminalCallbacks = 0;
-  function assertCurrent(r: RecordState, channel = r.channel, identity = r.identity): void {
-    if (r.released || r.detached || channel !== r.channel || identity !== r.identity || nativeGuiChannelIdentity(channel) !== identity) fail("native_main_router_channel_changed");
+  function assertCurrent(r: RecordState, channel = r.channel, identity = r.identity, terminalOnly = false): void {
+    if ((!terminalOnly && issuer.inspect(r.issuer).authorityClosed) || r.released || r.detached || channel !== r.channel || identity !== r.identity || nativeGuiChannelIdentity(channel) !== identity) fail("native_main_router_channel_changed");
   }
   const transfers = createNativeJsonTransfers({ isCurrent(owner) { const r = handles.get(owner as NativeMainPreparationRouterHandle); return !!r && !r.released && !r.detached && nativeGuiChannelIdentity(r.channel) === r.identity && !issuer.inspect(r.issuer).aborted; }, maxPending: (ports.maxRecords ?? 32) * 24, maxRetainedBytes: ports.maxRetainedBytes });
   function issue(input: { event: object; hostOrigin?: object; actualChannel: object; request: McpInvocationRequest; mainAdmission: MainInvocationAdmission | undefined; admission: InvocationAdmissionIdentity }) {
@@ -82,10 +83,11 @@ export function createNativeMainPreparationRouter(ports: NativeMainPreparationRo
   function ack(r: RecordState, request: NativePreparationWireRequest, state: string) { return Object.freeze({ requestId: request.requestId, binding: r.start.binding, status: state }); }
   async function handleCheckpoint(actualChannel: object, method: "native.checkpoint", wire: unknown, actualIdentity: NativeAuthenticatedIdentity): Promise<unknown> {
     if (method !== "native.checkpoint" || nativeGuiChannelIdentity(actualChannel) !== actualIdentity || !actualIdentity) fail("native_main_router_authenticated_callback_required");
-    const request = nativePreparationWireRequest(wire), r = records.get(request.start.handle);
-    if (!r || !sameNativeStartBinding(r.start.binding, request.start.binding)) fail("native_main_router_binding_changed");
-    assertCurrent(r, actualChannel, actualIdentity);
+    const request = nativePreparationWireRequest(wire);
     const terminal = ["cancel", "quiesce", "finish", "ingress.reject"].includes(request.action) || (request.action === "checkpoint" && ["team.fail-start", "attachments.release"].includes(String(request.payload.kind)));
+    const r = records.get(request.start.handle) ?? (terminal ? closedTerminalRecords.get(request.start.handle)?.deref() : undefined);
+    if (!r || !sameNativeStartBinding(r.start.binding, request.start.binding)) fail("native_main_router_binding_changed");
+    assertCurrent(r, actualChannel, actualIdentity, terminal);
     if (terminal ? terminalCallbacks >= 2 : callbacks >= (ports.maxCallbacks ?? 32)) fail("native_main_router_callback_capacity");
     terminal ? terminalCallbacks++ : callbacks++;
     try {
@@ -97,15 +99,15 @@ export function createNativeMainPreparationRouter(ports: NativeMainPreparationRo
         }
         case "one.inline.image.read": {
           if (!exact(p, ["imageIndex", "offset"]) || !Number.isSafeInteger(p.imageIndex) || !Number.isSafeInteger(p.offset)) fail("native_main_router_payload_invalid");
-          const value = issuer.readOneInlineImageChunk(r.issuer, actualChannel, p as unknown as { imageIndex: number; offset: number }); assertCurrent(r); return value;
+          const value = issuer.readOneInlineImageChunk(r.issuer, actualChannel, p as unknown as { imageIndex: number; offset: number }); assertCurrent(r, r.channel, r.identity, terminal); return value;
         }
         case "one.image.read": {
           if (!exact(p, ["imageIndex", "offset"]) || !Number.isSafeInteger(p.imageIndex) || !Number.isSafeInteger(p.offset)) fail("native_main_router_payload_invalid");
-          const value = issuer.readOneImageChunk(r.issuer, actualChannel, p as unknown as { imageIndex: number; offset: number }); assertCurrent(r); return value;
+          const value = issuer.readOneImageChunk(r.issuer, actualChannel, p as unknown as { imageIndex: number; offset: number }); assertCurrent(r, r.channel, r.identity, terminal); return value;
         }
         case "work.image.read": {
           if (!exact(p, ["imageIndex", "component", "offset"]) || !Number.isSafeInteger(p.imageIndex) || !Number.isSafeInteger(p.offset) || (p.component !== "image" && p.component !== "metadata")) fail("native_main_router_payload_invalid");
-          const value = issuer.readWorkImageChunk(r.issuer, actualChannel, p as unknown as Parameters<typeof issuer.readWorkImageChunk>[2]); assertCurrent(r); return value;
+          const value = issuer.readWorkImageChunk(r.issuer, actualChannel, p as unknown as Parameters<typeof issuer.readWorkImageChunk>[2]); assertCurrent(r, r.channel, r.identity, terminal); return value;
         }
         case "request.snapshot": {
           if (!exact(p, [])) fail("native_main_router_payload_invalid");
@@ -120,35 +122,35 @@ export function createNativeMainPreparationRouter(ports: NativeMainPreparationRo
         // consume a new preparation/claim nonce or restart an original source.
         return issuer.supervisorCommand(r.issuer,actualChannel,p.name,p.input as Record<string,unknown>);
       }
-      if (request.action === "cancel") { if (!exact(p, [])) fail("native_main_router_payload_invalid"); issuer.cancel(r.issuer); assertCurrent(r); return ack(r, request, "cancelled"); }
+      if (request.action === "cancel") { if (!exact(p, [])) fail("native_main_router_payload_invalid"); issuer.cancel(r.issuer); assertCurrent(r, r.channel, r.identity, terminal); return ack(r, request, "cancelled"); }
       if (r.nonces.has(request.requestId)) fail("native_main_router_request_replayed");
       if (r.nonces.size >= (terminal ? 40 : 32)) fail("native_main_router_nonce_capacity");
       // Claim/authorization is never repeated after a lost completion ACK.
       r.nonces.add(request.requestId);
       switch (request.action) {
-        case "issuer.authorize": if (!exact(p, [])) fail("native_main_router_payload_invalid"); issuer.activate(r.issuer, actualChannel, request.start.binding); assertCurrent(r); return ack(r, request, "authorized");
+        case "issuer.authorize": if (!exact(p, [])) fail("native_main_router_payload_invalid"); issuer.activate(r.issuer, actualChannel, request.start.binding); assertCurrent(r, r.channel, r.identity, terminal); return ack(r, request, "authorized");
         case "checkpoint": {
           if (!exact(p, ["kind", "payload"]) || typeof p.kind !== "string" || !checkpoints.has(p.kind) || !p.payload || typeof p.payload !== "object" || Array.isArray(p.payload)) fail("native_main_router_payload_invalid");
           const value = await issuer.execute(r.issuer, { requestId: request.requestId, kind: p.kind as Parameters<typeof issuer.execute>[1]["kind"], payload: p.payload as Record<string, unknown> }, actualChannel);
-          assertCurrent(r);
+          assertCurrent(r, r.channel, r.identity, terminal);
           if (p.kind === "team.fail-start" || p.kind === "attachments.release") return ack(r, request, "cleanup-recorded");
           if (value === undefined) fail("native_main_router_checkpoint_value_missing");
           return transfers.issue(r.handle, "checkpoint-value", preparedCheckpointValue(p.kind, value), ports.maxCheckpointBytes);
         }
-        case "quiesce": if (!exact(p, ["status"])) fail("native_main_router_payload_invalid"); await issuer.quiesce(r.issuer, status(p.status) as Exclude<Status, "settled">); assertCurrent(r); return ack(r, request, "quiescent");
+        case "quiesce": if (!exact(p, ["status"])) fail("native_main_router_payload_invalid"); await issuer.quiesce(r.issuer, status(p.status) as Exclude<Status, "settled">); assertCurrent(r, r.channel, r.identity, terminal); return ack(r, request, "quiescent");
         case "ingress.reject": {
           if (!exact(p, [])) fail("native_main_router_payload_invalid");
           ports.assertClosedIngressNoStart(actualChannel, actualIdentity, r.handle, request);
           const proof = Object.freeze({}); noStartProofs.set(proof, r);
           await issuer.rejectNativeIngressBeforeStart(r.issuer, actualChannel, proof);
-          assertCurrent(r); return ack(r, request, "rejected-before-start");
+          assertCurrent(r, r.channel, r.identity, terminal); return ack(r, request, "rejected-before-start");
         }
         case "finish": {
           if (!exact(p, ["status"])) fail("native_main_router_payload_invalid");
           const result = await issuer.finish(r.issuer, status(p.status, true));
           // Recheck peer even if authoritative cleanup already completed. A lost
           // reply never converts a new peer into the original callback owner.
-          assertCurrent(r);
+          assertCurrent(r, r.channel, r.identity, terminal);
           if (result.state === "released") release(r);
           return ack(r, request, result.state);
         }
@@ -156,11 +158,21 @@ export function createNativeMainPreparationRouter(ports: NativeMainPreparationRo
       }
     } finally { terminal ? terminalCallbacks-- : callbacks--; }
   }
-  function release(r: RecordState): void { transfers.release(r.handle); r.released = true; records.delete(r.start.handle); }
+  function release(r: RecordState): void { transfers.release(r.handle); r.released = true; records.delete(r.start.handle); closedTerminalRecords.delete(r.start.handle); }
   /** Private actual custody observer. Never exposed as a JSON router action. */
   async function finishForSettlement(handle: NativeMainPreparationRouterHandle, finalStatus: Status) { const r = privateRecord(handle); const result = await issuer.finish(r.issuer, finalStatus); if (result.state === "released") release(r); return result; }
   function disconnect(actualChannel: object): void { issuer.disconnect(actualChannel); for (const r of records.values()) if (r.channel === actualChannel) r.detached = true; }
   function cancel(handle: NativeMainPreparationRouterHandle): void { issuer.cancel(privateRecord(handle).issuer); }
+  function closeAuthorityIfSettled(handle: NativeMainPreparationRouterHandle): boolean {
+    const r = privateRecord(handle);
+    if (!issuer.closeAuthorityIfSettled(r.issuer)) return false;
+    transfers.release(r.handle); records.delete(r.start.handle);
+    // Only the existing original terminal channel can observe old cleanup. The
+    // thin weak index cannot retain source buffers or restore business authority.
+    closedTerminalRecords.set(r.start.handle, new WeakRef(r));
+    while (closedTerminalRecords.size > 128) closedTerminalRecords.delete(closedTerminalRecords.keys().next().value!);
+    return true;
+  }
   function inspect(handle: NativeMainPreparationRouterHandle) { const r = privateRecord(handle); return Object.freeze({ ...issuer.inspect(r.issuer), released: r.released, detached: r.detached, nonceCount: r.nonces.size, transferCount: transfers.pendingCount, retainedBytes: transfers.retainedBytes }); }
-  return { issue, handleCheckpoint, finishForSettlement, disconnect, cancel, inspect, get recordCount() { return records.size; } };
+  return { closeAuthorityIfSettled, issue, handleCheckpoint, finishForSettlement, disconnect, cancel, inspect, get recordCount() { return [...records.values()].filter(r => !closeAuthorityIfSettled(r.handle)).length; } };
 }

@@ -32,13 +32,13 @@ import { AgentlasMobileBridgeServer } from "./server";
 import { MobileBridgeAccountPairingClient } from "./account-pairing";
 import { MobileBridgeCloudRelay } from "./relay";
 import { loadOrCreateMobileBridgeTls, preferredMobileBridgeHost } from "./tls";
-import { getDefaultOntologyHubClient } from "./ontology-hub-client";
-import { getAuthSession, getSessionCookieHeader } from "../auth";
-import { listInstalledAgentHubBindings } from "../ontology/hub-bindings";
-import {
-  TerminalOntologyLoadoutFeedWriter,
-  terminalOntologyLoadoutFeedPath,
-} from "../ontology/terminal-loadout-feed";
+import { getAuthSession, getSessionCookieHeader, getAuthenticatedSessionBinding } from "../auth";
+import { toolApprovalConsentActorBinding } from "../runtime/host-tool-permission-policy";
+import { toolApprovalActionId } from "../../shared/tool-approval-action";
+import type { ToolApprovalRequestEvent } from "../../shared/types";
+import type { NativeMobileApprovalAuthorizer, NativeMobileApprovalSource, NativeMobileApprovalSelection } from "../invocation/native-gui-controls";
+import type { MobileNativeToolApprovalPort } from "./authority";
+import type { MobileBridgeConnectionContext, MobileBridgeConnectionLease } from "./server";
 import {
   createDesktopMobileTerminalControl,
   type DesktopMobileTerminalControl,
@@ -50,6 +50,71 @@ export interface MobileBridgeRuntimeOptions {
   appVersion: string;
   displayName?: string;
   visualSessionControl?: MobileVisualSessionControl;
+  nativeToolApprovals?: (authorize: NativeMobileApprovalAuthorizer) => NativeMobileApprovalSource | null;
+}
+
+/** Host-only session enrollment and original-account validation; no model or network call. */
+export function createMobileNativeToolApprovalPort(ports: {
+  source(authorize: NativeMobileApprovalAuthorizer): NativeMobileApprovalSource | null;
+  actor(): { userId: string; workspaceId: string; sessionId: string } | null;
+  pairedWorkspace(deviceId: string): string | null;
+  actorBinding?: typeof toolApprovalConsentActorBinding;
+}): MobileNativeToolApprovalPort {
+  const sessions = new WeakMap<object, { digest: string; lease: MobileBridgeConnectionLease; actor: string }>();
+  // Source identity tombstones are not an admission quota. Unknown old approvals
+  // select only their native route and never gate fresh independent turns.
+  const known = new Map<string, { key: string; selection: WeakRef<NativeMobileApprovalSelection> }>();
+  let disposed = false;
+  const actorNow = () => { const actor = ports.actor(); if (!actor || !actor.userId || !actor.workspaceId || !actor.sessionId) throw new Error("native_mobile_approval_account_unavailable"); return { workspaceId: actor.workspaceId, userId: actor.userId, sessionId: actor.sessionId }; };
+  const assertContext = (context: object, request: ToolApprovalRequestEvent): void => {
+    const state = sessions.get(context), actor = actorNow();
+    if (disposed || !state || state.digest !== JSON.stringify(context) || !state.lease.current() || state.actor !== JSON.stringify(actor)) throw new Error("native_mobile_approval_connection_changed");
+    const mobile = context as MobileBridgeConnectionContext;
+    if (mobile.devBootstrap || ports.pairedWorkspace(mobile.deviceId) !== actor.workspaceId) throw new Error("native_mobile_approval_pair_changed");
+    const expected = (ports.actorBinding ?? toolApprovalConsentActorBinding)(request, actor);
+    if (!request.consentBinding || request.consentBinding.userIdentity !== expected.userIdentity || request.consentBinding.workspaceIdentity !== expected.workspaceIdentity) throw new Error("native_mobile_approval_original_account_required");
+  };
+  let source: NativeMobileApprovalSource | null = null;
+  const currentSource = () => source ??= ports.source(assertContext);
+  function capture(id: string): NativeMobileApprovalSelection | undefined {
+    const actual = currentSource()?.select(id), prior = known.get(id);
+    if (actual) {
+      if (prior && prior.key !== actual.sourceKey) throw new Error("native_mobile_approval_source_conflict");
+      known.set(id, { key: actual.sourceKey, selection: new WeakRef(actual) }); return actual;
+    }
+    return prior?.selection.deref();
+  }
+  return {
+    connectionOpened(context, lease) {
+      // Older callers without the actual server lease retain their local path;
+      // they cannot mint native Mobile authority by copying a context.
+      if (disposed || !lease || typeof lease.current !== "function" || !lease.current() || context.devBootstrap) return;
+      const actor = actorNow();
+      if (ports.pairedWorkspace(context.deviceId) !== actor.workspaceId) throw new Error("native_mobile_approval_pair_changed");
+      if (sessions.has(context)) throw new Error("native_mobile_approval_context_rebound");
+      sessions.set(context, { digest: JSON.stringify(context), lease, actor: JSON.stringify(actor) });
+    },
+    connectionClosed(context) { sessions.delete(context); },
+    list() {
+      if (disposed) return [];
+      let actor: ReturnType<typeof actorNow>; try { actor = actorNow(); } catch { return []; }
+      return (currentSource()?.list() ?? []).filter(request => {
+        if (request.mode !== "live") return false;
+        try {
+          capture(request.id);
+          const expected = (ports.actorBinding ?? toolApprovalConsentActorBinding)(request, actor);
+          return !!request.consentBinding && request.consentBinding.userIdentity === expected.userIdentity && request.consentBinding.workspaceIdentity === expected.workspaceIdentity;
+        } catch { return false; } // A bad native card cannot block local queues or a fresh independent turn.
+      });
+    },
+    has(id) { if (disposed) return known.has(id); return !!capture(id) || currentSource()?.owns(id) === true || known.has(id); },
+    async resolve(context, id, decision) {
+      const selection = capture(id); if (!selection || disposed) throw new Error("native_mobile_approval_unavailable");
+      return selection.resolve(context, decision, toolApprovalActionId(id, decision));
+    },
+    subscribe(listener) { return currentSource()?.subscribe(listener) ?? (() => {}); },
+    dispose() { disposed = true; source = null; known.clear(); },
+  };
 }
 
 interface RunningBridge {
@@ -61,7 +126,6 @@ interface RunningBridge {
   push: MobilePushService | null;
   stopPushObserver: () => void;
   manifest: MobileBridgeEndpointManifest;
-  terminalLoadoutFeedWriter: TerminalOntologyLoadoutFeedWriter;
   terminalControl: DesktopMobileTerminalControl;
 }
 
@@ -224,9 +288,6 @@ async function startBridgeInternal(
   });
   const replayStore = new MobileBridgeRequestReplayStore(options.userDataPath);
   const displayName = (options.displayName?.trim() || os.hostname() || "Agentlas Desktop").slice(0, 160);
-  const ontologyHubClient = getDefaultOntologyHubClient(options.userDataPath);
-  const terminalLoadoutFeedFile = terminalOntologyLoadoutFeedPath(options.userDataPath);
-  const terminalLoadoutFeedWriter = new TerminalOntologyLoadoutFeedWriter(terminalLoadoutFeedFile);
   const terminalControl = createDesktopMobileTerminalControl();
   try {
     push = new MobilePushService({ userDataPath: options.userDataPath, hostId: identity.hostId,
@@ -236,7 +297,13 @@ async function startBridgeInternal(
       publish: (payload) => relay?.publishPush(payload) ?? Promise.resolve("unavailable"),
     });
   } catch { console.warn("[mobile-push] registration store unavailable; push capability disabled"); }
+  const nativeToolApprovals = options.nativeToolApprovals ? createMobileNativeToolApprovalPort({
+    source: options.nativeToolApprovals,
+    actor: getAuthenticatedSessionBinding,
+    pairedWorkspace: deviceId => pairing.deviceWorkspaceId(deviceId),
+  }) : undefined;
   const authority = createMobileBridgeAuthority({
+    ...(nativeToolApprovals ? { nativeToolApprovals } : {}),
     oneSecure: currentOneMobileSecureAdapter,
     currentTurnControl: invocationCurrentTurnControl,
     cancelInvocationRun: cancelInvocationOwnerRun,
@@ -255,8 +322,6 @@ async function startBridgeInternal(
       if (!active || !paired) return "unknown";
       return active === paired ? "ok" : "mismatch";
     },
-    ontologyHubClient,
-    terminalOntologyLoadoutFeedWriter: terminalLoadoutFeedWriter,
     terminalControl,
     visualSessionControl: options.visualSessionControl,
     onError: (error) => console.error("[mobile-bridge-authority]", error.message),
@@ -319,34 +384,8 @@ async function startBridgeInternal(
         void service.dispatch(notice, stillCurrent).catch(() => console.warn("[mobile-push] dispatch unavailable"));
       });
     }
-    running = { authority, pairing, accountPairing, server, relay, push, stopPushObserver, manifest, terminalLoadoutFeedWriter, terminalControl };
+    running = { authority, pairing, accountPairing, server, relay, push, stopPushObserver, manifest, terminalControl };
     relay.start();
-    // Refresh once at Desktop startup even when no phone is connected. This is
-    // a read-only Hub query; the independent Terminal still has to opt in with
-    // an explicit CLI flag and revalidates the exact local DB binding.
-    const exactBindings = listInstalledAgentHubBindings(64);
-    if (exactBindings.length > 0) {
-      void ontologyHubClient.query(exactBindings.map((binding) => ({
-        agentDefinitionId: binding.agentDefinitionId,
-        agentReleaseId: binding.agentReleaseId,
-      })), true).then((result) => {
-        terminalLoadoutFeedWriter.write({
-          bindings: exactBindings,
-          result,
-        });
-      }).catch((error) => {
-        try {
-          terminalLoadoutFeedWriter.write({
-            bindings: exactBindings,
-            result: { supported: false, status: "endpoint-absent", projections: [] },
-          });
-        } catch {}
-        console.error(
-          "[terminal-loadout] startup projection failed",
-          error instanceof Error ? error.message : String(error),
-        );
-      });
-    }
     emitMobileBridgeStateChange("runtime-started");
     console.info(`[mobile-bridge] listening on ${address.url}`);
     return mobileBridgeRuntimeStatus();
@@ -356,7 +395,6 @@ async function startBridgeInternal(
     push?.dispose();
     relay?.stop();
     if (server) await server.close().catch(() => {});
-    terminalLoadoutFeedWriter.dispose();
     await terminalControl.dispose();
     pairing.dispose();
     authority.dispose();
@@ -374,7 +412,6 @@ async function stopRunningBridge(emitStopped: boolean): Promise<void> {
     state.relay.stop();
     await state.server.close();
   } finally {
-    state.terminalLoadoutFeedWriter.dispose();
     await state.terminalControl.dispose();
     state.pairing.dispose();
     state.authority.dispose();

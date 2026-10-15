@@ -5,6 +5,7 @@
 //   oneCapabilities:detail        ({ id })                                    -> CapabilityDetail | null
 //   oneCapabilities:setEnabled    ({ id, enabled })                           -> CapabilityItem | null
 //   oneCapabilities:setSourceEnabled ({ source, enabled, kind? })             -> { source, changed }
+//   oneCapabilities:setRole       ({ id, role: both|personal|ceo })            -> CapabilityItem | null
 //
 // Agentlas built-ins are not listed and cannot be switched; neither can an item whose runtime loads it on its own.
 // Both setters throw `capability_not_switchable` for those instead of storing a state no run would honor.
@@ -15,7 +16,9 @@ import {
   listCapabilities,
   setCapabilityEnabled,
   setSourceEnabled,
+  setCapabilityRole,
   type CapabilityKind,
+  type CapabilityRole,
   type CapabilitySource,
 } from "./one-capabilities";
 
@@ -55,6 +58,11 @@ export function registerOneCapabilitiesIpc(ipc: Pick<IpcMain, "handle">): void {
     const { id, enabled } = record(input);
     if (typeof id !== "string" || typeof enabled !== "boolean") throw new Error("oneCapabilities:setEnabled needs { id: string, enabled: boolean }");
     return setCapabilityEnabled(id, enabled);
+  });
+  registerAppControlDomainIpc(ipc, "oneCapabilities:setRole", (input: unknown) => {
+    const { id, role } = record(input);
+    if (typeof id !== "string" || !["both", "personal", "ceo"].includes(String(role))) throw new Error("oneCapabilities:setRole needs { id: string, role: both|personal|ceo }");
+    return setCapabilityRole(id, role as CapabilityRole);
   });
   registerAppControlDomainIpc(ipc, "oneCapabilities:setSourceEnabled", (input: unknown) => {
     const body = record(input);

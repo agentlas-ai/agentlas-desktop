@@ -1,4 +1,7 @@
+import { carryRunnerTurnContext, finalizeRunnerTurnContext, renderRunnerTurnContext, runnerTurnContextSource } from "./runner-turn-context-binding";
+import type { DeclaredPromptPart } from "./prompt-order";
 import { createHash } from "node:crypto";
+import { UNKNOWN_CONTEXT_WINDOW } from "../../shared/models";
 import { getDb } from "../store/db";
 import {
   createAgentContextStore, agentContextKey, agentContextProviderKey,
@@ -6,17 +9,21 @@ import {
   type AgentContextSnapshot, type AgentContextDelivery, type AgentContextPendingDelivery,
 } from "../store/agent-context";
 import type { Runner, RunnerRequest, RunnerEvents, RunnerResult } from "./runner";
-import type { ChatHistoryEntry } from "../../shared/types";
+import type { ChatHistoryEntry, RuntimeSelection } from "../../shared/types";
 import { redactOperationalSecrets } from "../invocation/event-secret-redaction";
 import { redactSecrets } from "../../shared/secret-patterns";
 import { composeResumeTurnPrompt } from "./continuity";
-import { stripAllMemoryEventBlocks } from "../memory/events";
+import { parseMemoryEvents, stripAllMemoryEventBlocks } from "../memory/events";
 import { decideGeneration, runtimeContextWindow } from "./session-generation";
 import { stripGoalWaitDisplayText } from "../long-run/wait-emitter";
 import { stripGoalCompleteMarker, stripStormbreakerContinueMarker } from "../hephaestus/loop-engineering";
 import { stripStaffGuidance } from "../one/owner-prompt";
 import { aliveDecisionProfileForRequest } from "./alive-decision-context";
 import { retainedResponsesPromptPacket, type ResponsesContextPolicy, type RetainedResponsesPromptPacket } from "./responses-context-policy";
+import { sessionCheckpointStore, type SessionTaskBoundary, type SessionHostObservation } from "../memory/session-checkpoints";
+import { getMemoryStoreInfo } from "../memory/database";
+import { findCanonicalTaskForChat } from "../store/tasks";
+import { estimateTransportTokens } from "./compact";
 
 declare const contextCapability: unique symbol;
 /** A private host object, never an identity or grant accepted from JSON. */
@@ -29,6 +36,24 @@ export interface AgentContextTurnBinding {
 const capabilities = new WeakMap<object, { identity: AgentContextIdentity; binding: AgentContextTurnBinding }>();
 const prepared = new WeakMap<object, { capability: AgentContextCapability; acknowledged: boolean }>();
 const store = createAgentContextStore(getDb);
+/** Existing host records, never a topic classifier or a renderer supplied id. */
+function checkpointTask(req: RunnerRequest): SessionTaskBoundary | null {
+  if (!req.chatId) return null;
+  try {
+    const goal = getDb().prepare(`SELECT goal_id,objective,acceptance_criteria_json,updated_at
+      FROM chat_goal_contracts WHERE chat_id=? AND status='active' AND objective IS NOT NULL
+      ORDER BY updated_at DESC LIMIT 1`).get(req.chatId) as {
+      goal_id: string; objective: string; acceptance_criteria_json: string; updated_at: string;
+    } | undefined;
+    if (goal) {
+      const criteria: unknown = JSON.parse(goal.acceptance_criteria_json);
+      return { id: `goal:${goal.goal_id}`, revision: Date.parse(goal.updated_at) || 0, goal: goal.objective,
+        constraints: Array.isArray(criteria) ? criteria.filter((v): v is string => typeof v === "string") : [] };
+    }
+    const task = findCanonicalTaskForChat(req.chatId);
+    return task ? { id: `task:${task.id}`, revision: task.version, goal: task.title, constraints: [] } : null;
+  } catch { return null; }
+}
 function fail(code: string): never { throw Object.assign(new Error(code), { code }); }
 function current(capability: AgentContextCapability) {
   const value = capabilities.get(capability);
@@ -274,7 +299,7 @@ export function materializeAgentContextHistory(snapshot: Pick<AgentContextSnapsh
     }
     if(entry.kind==="checkpoint-reference"){rows.push({row:{id:entry.eventId,durableMessageId:entry.eventId,role:"user" as const,
       text:`${LEDGER_PREFIX}${JSON.stringify(p)}`,createdAt:typeof p.createdAt==="string"?p.createdAt:""}});continue;}
-    if(entry.kind!=="message" || p.turnId===excludeTurnId || !["user","assistant","system"].includes(String(p.role)) || typeof p.text!=="string")continue;
+    if(entry.kind!=="message" || (excludeTurnId!==undefined && p.turnId===excludeTurnId) || !["user","assistant","system"].includes(String(p.role)) || typeof p.text!=="string")continue;
     const role=p.role as "user"|"assistant"|"system";
     // What was said, not the host blocks around it: hidden envelopes/markers out of answers (also in journals written
     // before the append stripped them), the standing-staff background out of requests, and a turn the host wrote itself
@@ -354,6 +379,10 @@ const activeBootstraps = new WeakMap<AgentContextCapability, {
   delivery: AgentContextDelivery;
   packet?: Readonly<AgentContextBootstrapPacket>;
   create(): Readonly<AgentContextBootstrapPacket>;
+  /** The provider kind and request of the turn, for a cold native session's host facts. */
+  kind: string;
+  request: RunnerRequest;
+  hostFactsApplied?: boolean;
 }>();
 /** Data for a measured cold native session, resolved only while the exact
  * original host delivery is active. It grants no replay or tool authority.
@@ -365,6 +394,80 @@ export function agentContextBootstrapForRequest(req: RunnerRequest): Readonly<Ag
   const held = activeBootstraps.get(capability);
   if (!held || activeDeliveries.get(capability) !== held.delivery) return null;
   return held.packet ??= held.create();
+}
+/**
+ * A runner whose native session turned out cold although the host expected to resume it (an unusable handle, an
+ * unloaded ACP session) seeds the new session from the journal; that is a host replay, so the host facts lead the
+ * packet's turn context exactly as on a fresh turn (native-harness NH13). The facts already installed for this turn
+ * are reused, never journaled twice.
+ */
+export async function agentContextColdBootstrapForRequest(req: RunnerRequest): Promise<Readonly<AgentContextBootstrapPacket> | null> {
+  const packet = agentContextBootstrapForRequest(req);
+  const capability = req.agentContext, held = capability ? activeBootstraps.get(capability) : undefined;
+  if (!packet || !capability || !held || held.hostFactsApplied) return packet;
+  held.hostFactsApplied = true;
+  const block = hostFactsSent.get(capability)?.block ?? await installHostFacts(capability, held.request, held.kind, held.delivery, packet.history);
+  if (!block || activeBootstraps.get(capability) !== held) return packet;
+  return held.packet = Object.freeze({ ...packet, turnContext: [block, packet.turnContext].filter(Boolean).join("\n\n") });
+}
+/*
+ * Host facts for a native session that starts from host history (native-harness NH13, docs 05:76,83, 07 G11): a new
+ * generation after an 80% rotation or a retired handle, a new binding (an Antigravity model change), or a handle the
+ * runner could not use. The facts come from host stores at dispatch time (grants in force, unconfirmed effects, Goal
+ * revision and active plan nodes, the frontier of what this session is given), are rendered ahead of any checkpoint
+ * summary, and are journaled with the turn: the turn's delivery ACK is their install receipt, recorded once acknowledged.
+ */
+const hostFactsSent = new WeakMap<AgentContextCapability, { block: string; eventId: string; factsDigest: string;
+  turnId: string; bindingKey: string; generation: number }>();
+type MetaStore = { getMeta(key: string): string | null; setMeta(key: string, value: string): void };
+function metaStore(): MetaStore | null {
+  try { return require("../store/meta") as MetaStore; } catch { return null; }
+}
+const rotationMetaKey = (contextKey: string, bindingKey: string) => `agent-context-rotation:${contextKey}:${bindingKey}`;
+const hostFactsMetaKey = (contextKey: string, bindingKey: string) => `agent-context-host-facts:${contextKey}:${bindingKey}`;
+interface AgentContextRotationRecord { fromGeneration: number; toGeneration: number; reason: "context_ratio" | "resume_failed";
+  reportedInputTokens: number | null; contextWindowTokens: number | null; rotatedAt: string }
+function recordRotation(delivery: AgentContextDelivery, record: Omit<AgentContextRotationRecord, "fromGeneration" | "toGeneration" | "rotatedAt">): void {
+  try {
+    metaStore()?.setMeta(rotationMetaKey(delivery.contextKey, delivery.bindingKey), JSON.stringify({ fromGeneration: delivery.generation,
+      toGeneration: delivery.generation + 1, rotatedAt: new Date().toISOString(), ...record } satisfies AgentContextRotationRecord));
+  } catch { /* The rotation itself is in the binding row; a lost reason renders as "none". */ }
+}
+function readRotation(delivery: AgentContextDelivery): AgentContextRotationRecord | null {
+  try {
+    const raw = metaStore()?.getMeta(rotationMetaKey(delivery.contextKey, delivery.bindingKey));
+    const value = raw ? JSON.parse(raw) as AgentContextRotationRecord : null;
+    return value && value.toGeneration === delivery.generation ? value : null;
+  } catch { return null; }
+}
+async function installHostFacts(capability: AgentContextCapability, req: RunnerRequest, kind: string, delivery: AgentContextDelivery,
+  history: readonly ChatHistoryEntry[]): Promise<string | null> {
+  const sent = hostFactsSent.get(capability);
+  if (sent) return sent.turnId === delivery.turnId ? sent.block : null;
+  try {
+    const { collectHostFacts, renderHostFacts } = await import("./handoff-facts");
+    const rotation = readRotation(delivery), task = checkpointTask(req);
+    const facts = await collectHostFacts({ chatId: req.chatId ?? null, agentId: req.agentId ?? null, runtime: kind, kind: "host-replay",
+      fromGeneration: rotation?.fromGeneration ?? null, toGeneration: delivery.generation, ...(rotation ? { reason: rotation.reason } : {}),
+      deliveredHistory: [...history], goalId: task?.id.startsWith("goal:") ? task.id.slice("goal:".length) : null });
+    if (activeDeliveries.get(capability) !== delivery) return null;
+    const block = renderHostFacts(facts), eventId = `turn:${delivery.turnId}:host-facts`;
+    appendAgentContextEvent(capability, { eventId, kind: "turn-context", producerBinding: delivery.bindingKey,
+      payload: { text: block, hostFacts: facts, generation: delivery.generation } });
+    hostFactsSent.set(capability, { block, eventId, factsDigest: digest(facts), turnId: delivery.turnId,
+      bindingKey: delivery.bindingKey, generation: delivery.generation });
+    return block;
+  } catch { return null; }
+}
+/** The install receipt: the facts reached the provider in a turn whose delivery the runtime acknowledged. */
+function recordHostFactsInstalled(capability: AgentContextCapability, delivery: AgentContextDelivery, receiptId: string, nativeHandle: string | undefined): void {
+  const sent = hostFactsSent.get(capability);
+  if (!sent || sent.turnId !== delivery.turnId) return;
+  try {
+    metaStore()?.setMeta(hostFactsMetaKey(delivery.contextKey, delivery.bindingKey), JSON.stringify({ generation: sent.generation,
+      turnId: sent.turnId, eventId: sent.eventId, factsDigest: sent.factsDigest, receiptId, nativeHandle: nativeHandle ?? null,
+      acknowledgedAt: new Date().toISOString() }));
+  } catch { /* The journaled block and the acknowledged delivery remain the record. */ }
 }
 export interface AgentContextNoToolsPacket {
   readonly priorRows: readonly Readonly<{ role: "user" | "assistant"; text: string }>[];
@@ -525,8 +628,31 @@ function omitAcknowledgedBlocks(text:string,blocks:readonly string[],known:Set<s
   for(const block of blocks){if(block && known.has(digest(block)))text=text.split(block).join("");}
   return text.replace(/\n{3,}/g,"\n\n").trim();
 }
-const NATIVE_CONTEXT_RESUME_KINDS=new Set(["claude-code","codex","kimi","grok","cursor","acp"]);
+// Antigravity resumes its own conversation (agy --conversation) like every other CLI here (native-harness NH11).
+const NATIVE_CONTEXT_RESUME_KINDS=new Set(["claude-code","codex","kimi","grok","cursor","acp","antigravity"]);
+/** Declared host-alternative (native-harness NH11): an Antigravity conversation belongs to the model that produced it
+ * (antigravity.ts antigravitySessionFingerprint), so its native binding keeps the model. A model change opens another
+ * binding of the same journal, seeded by host replay, instead of handing one model's conversation to another. */
+const MODEL_OWNED_NATIVE_KINDS=new Set(["antigravity"]);
 const HOST_MESSAGE_CONTEXT_KINDS=new Set(["byok","agentlas","lmstudio","mlx","agentlas-local","ollama"]);
+/** Built from the same private host metadata that selected the adapter, not a
+ * display label or renderer claim. An unknown ACP seat cannot be substituted. */
+function checkpointRuntimeSelection(req: RunnerRequest, provider: Omit<AgentContextProvider,"model"|"configurationDigest">,
+  options: AgentContextRunnerOptions): RuntimeSelection | undefined {
+  if (!NATIVE_CONTEXT_RESUME_KINDS.has(provider.kind) && !HOST_MESSAGE_CONTEXT_KINDS.has(provider.kind) && provider.kind !== "antigravity") return undefined;
+  let acpAgentId: string | undefined;
+  if (provider.kind === "acp") {
+    try { const spec: unknown = JSON.parse(options.configurationIdentity ?? "null");
+      if (Array.isArray(spec) && typeof spec[0] === "string" && spec[0].trim()) acpAgentId = spec[0];
+    } catch { /* Without an exact host seat, only the configured no-tools pool may run. */ }
+    if (!acpAgentId) return undefined;
+  }
+  return { kind: provider.kind as RuntimeSelection["kind"],
+    ...(provider.backend ? { backend: provider.backend as RuntimeSelection["backend"] } : {}),
+    ...(req.runtimeSource ?? options.configurationSource ? { source: req.runtimeSource ?? options.configurationSource } : {}),
+    ...(acpAgentId ? { acpAgentId } : {}), ...(req.model ? { model: req.model } : {}),
+    ...(req.effort ? { effort: req.effort } : {}), ...(req.longContext !== undefined ? { longContext: req.longContext } : {}) };
+}
 /** The daemon retains the neutral transcript. Stateless providers still get
  * materialized messages; only adapters with measured session handles may send
  * an incremental provider wire request. The wrapper never invents a handle. */
@@ -537,7 +663,10 @@ const HOST_MESSAGE_CONTEXT_KINDS=new Set(["byok","agentlas","lmstudio","mlx","ag
  */
 const deliveredInstructions=new Map<string,string>();
 const MAX_DELIVERED_INSTRUCTIONS=512;
-function instructionsBlockFor(bindingKey:string,resumedHandle:string|null|undefined,systemPrompt:string|undefined):{block:string|null;delivered:(handle:string)=>void}{
+/** Short ACK key for one instructions version: it rides the turn's stable-block list, so the store's stable-block ACK index
+ * remembers which version the session received across restarts without journaling another copy of the prompt. */
+const instructionsAckKey=(systemPrompt:string)=>`agent-instructions:${digest(systemPrompt)}`;
+function instructionsBlockFor(bindingKey:string,resumedHandle:string|null|undefined,systemPrompt:string|undefined,acknowledged?:ReadonlySet<string>):{block:string|null;delivered:(handle:string)=>void}{
   const current=digest(systemPrompt??"");
   const remember=(handle:string)=>{
     const key=`${bindingKey}\0${handle}`;
@@ -546,7 +675,9 @@ function instructionsBlockFor(bindingKey:string,resumedHandle:string|null|undefi
   };
   if(!resumedHandle || !systemPrompt?.trim())return {block:null,delivered:remember};
   if(deliveredInstructions.get(`${bindingKey}\0${resumedHandle}`)===current)return {block:null,delivered:remember};
-  return {block:`[Agent instructions, current version: they replace the instructions this conversation started with]\n${systemPrompt}\n[End agent instructions]`,delivered:remember};
+  // After a restart the memo is empty; the acknowledged stable blocks of this binding generation still name the version.
+  if(acknowledged?.has(digest(instructionsAckKey(systemPrompt)))){remember(resumedHandle);return {block:null,delivered:remember};}
+  return {block:`[Agent instructions, current version: replaces earlier ones]\n${systemPrompt}\n[End agent instructions]`,delivered:remember};
 }
 
 export function withAgentContext(runner: Runner, provider: Omit<AgentContextProvider,"model"|"configurationDigest">,options:AgentContextRunnerOptions={}): Runner {
@@ -555,7 +686,30 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
     if(!capability)return runner(req,events);
     if(!isAgentContextCapability(capability))fail("agent_context_host_capability_required");
     req.signal?.throwIfAborted();const value=current(capability),turnId=value.binding.turnId;
+    // A genuine restricted recall rotates the provider conversation when its
+    // selected sources or forget epoch change. Read before request copies;
+    // JSON fields cannot supply this process-local reader binding.
+    let surfaceMemory: typeof import("../memory/surface-recall") | null = null;
+    try { surfaceMemory = require("../memory/surface-recall") as typeof import("../memory/surface-recall"); }
+    catch { /* An unavailable optional reader has no derived binding. */ }
+    const surfaceMemoryRequest = req;
+    const derivedMemoryKey = surfaceMemory?.sourceMemoryRequestKey(surfaceMemoryRequest) ?? null;
+    const assertSurfaceMemoryCurrent = () => {
+      if (derivedMemoryKey && surfaceMemory?.sourceMemoryRequestKey(surfaceMemoryRequest) !== derivedMemoryKey)
+        fail("agent_context_memory_source_changed");
+    };
+    // The recall reader registered this exact prefix under the original host
+    // source scope. Unknown/foreign/manual data remains in the original input.
+    let memoryWire: typeof import("../memory/generation-pack") | null = null;
+    let memoryBinding: import("../memory/generation-pack").MemoryPackWireBinding | null = null;
+    try { memoryWire = require("../memory/generation-pack") as typeof import("../memory/generation-pack");
+      memoryBinding = memoryWire.prepareMemoryPackWire(req, value.identity, checkpointTask(req)); }
+    catch { /* Missing coverage cannot suppress any input. */ }
+    const memoryBlocks = memoryWire?.memoryPackWireBlocks(memoryBinding) ?? [];
+    if (memoryBlocks.length) req = carryRunnerTurnContext(req, { ...req, turnContextStable: [...new Set([...(req.turnContextStable ?? []), ...memoryBlocks])] });
     const decision=aliveDecisionProfileForRequest(req);
+    let checkpointCustody: ReturnType<typeof getMemoryStoreInfo> | null = null;
+    if (!decision) try { checkpointCustody = getMemoryStoreInfo(); } catch { /* Journal-only execution remains available. */ }
     if(req.agentId!==value.identity.agentId)fail("agent_context_actor_binding_changed");
     const policy=options.transportForRequest?.(req)??null;
     const consumeMissingProof=options.consumePreviousContextMissingProof;
@@ -579,16 +733,17 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
      * observation acknowledges the thread it starts). Stateless and Responses-transport providers keep the full key.
      */
     const nativeSessionKey=NATIVE_CONTEXT_RESUME_KINDS.has(provider.kind) && !policy;
-    const adapter:AgentContextProvider={...provider,...(nativeSessionKey?{}:{model:req.model}),configurationDigest:digest(nativeSessionKey ? [
+    const adapter:AgentContextProvider={...provider,...(nativeSessionKey && !MODEL_OWNED_NATIVE_KINDS.has(provider.kind)?{}:{model:req.model}),configurationDigest:digest(nativeSessionKey ? [
       "native-session.v3",req.runtimeSource??options.configurationSource??"",options.configurationIdentity??"",
-      req.workforceRuntimeToolGrant?.canonicalConfigSha256??null] : [
+      req.workforceRuntimeToolGrant?.canonicalConfigSha256??null,...(derivedMemoryKey?["derived-memory.v1",derivedMemoryKey]:[])] : [
       req.runtimeSource??options.configurationSource??"",options.configurationIdentity??"",req.locale,req.permission??"",req.planMode??false,
       req.cwd??null,req.isolatedMcpConfig??false,req.mcpGrantCatalogOnly??false,req.mcpAllowedTools??null,
       req.workforceRuntimeToolGrant?.canonicalConfigSha256??null,
       packet?digest(packet.systemPrompt):NATIVE_CONTEXT_RESUME_KINDS.has(provider.kind)?digest(req.systemPrompt):"",
-      policy??null])};
+      policy??null,...(derivedMemoryKey?["derived-memory.v1",derivedMemoryKey]:[])])};
     const bindingKey=agentContextProviderKey(adapter);
-    const delivery=prepareAgentContextTurn(capability,{turnId,provider:adapter,signal:req.signal,events:contextEvents(req,turnId,bindingKey,[...(req.turnContextStable??[]),...(packet?.stableBlocks??[])])});
+    const delivery=prepareAgentContextTurn(capability,{turnId,provider:adapter,signal:req.signal,events:contextEvents(req,turnId,bindingKey,[...(req.turnContextStable??[]),...(packet?.stableBlocks??[]),
+      ...(nativeSessionKey && req.systemPrompt?.trim() ? [instructionsAckKey(req.systemPrompt)] : [])])});
     activeDeliveries.set(capability,delivery);
     const nativeKind=NATIVE_CONTEXT_RESUME_KINDS.has(provider.kind);
     const continuationHandle=continuationHandles.get(turnId)??null;continuationHandles.delete(turnId);
@@ -599,34 +754,106 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
       remember(unsettledTurns,turnId,{resumable:stateful?!!handle:true,handle,retire(){
         // The same rule as a completed turn's rotation (session-generation.ts), with the symptom the host observed.
         if(decideGeneration({kind:provider.kind,contextWindowTokens:null,lastInputTokens:null,symptom:"resume_failed"}).action!=="new_generation")return;
-        try{store.invalidateProvider(value.identity,adapter,delivery.generation);}catch{/* a concurrent delivery or generation owns the binding */}
+        try{store.invalidateProvider(value.identity,adapter,delivery.generation);
+          recordRotation(delivery,{reason:"resume_failed",reportedInputTokens:null,contextWindowTokens:null});}catch{/* a concurrent delivery or generation owns the binding */}
       }});
     };
     if(policy && packet)activeTransports.set(capability,Object.freeze({policy:Object.freeze({...policy}),packet}));
-    let toolIndex=0;
-    const wrapped:RunnerEvents={...events,onTool(name,args,result,id,isError,artifactPaths,imageDataUrl,origin){
+    const saveCheckpoint = async (allowSemantic: boolean, observation: SessionHostObservation): Promise<void> => {
+      if (!checkpointCustody || decision) return;
+      try {
+        const assertCustody = () => {
+          const custody = getMemoryStoreInfo();
+          if (custody.ownerNamespace !== checkpointCustody!.ownerNamespace || custody.revocationEpoch !== checkpointCustody!.revocationEpoch)
+            fail("session_checkpoint_custody_changed");
+          assertSurfaceMemoryCurrent();
+        };
+        assertCustody(); if (allowSemantic) current(capability);
+        const observed = store.readRange(value.identity, { after: delivery.throughSeq });
+        let throughSeq = delivery.throughSeq;
+        for (const entry of observed.entries) { if (entry.producerBinding !== delivery.bindingKey) break; throughSeq = entry.seq; }
+        const source = store.readRange(value.identity, { through: throughSeq }), sourceHead = store.readHead(value.identity);
+        // Unknown window: the shared, labelled degraded value (docs native-harness 07 G08), not a literal guess.
+        const task = checkpointTask(req), window = runtimeContextWindow(provider.kind, req.model) ?? UNKNOWN_CONTEXT_WINDOW;
+        const historyBudgetTokens = Math.max(0, Math.floor(window * 0.5) - estimateTransportTokens(req.systemPrompt)
+          - estimateTransportTokens(req.userPrompt) - estimateTransportTokens(req.turnContext ?? ""));
+        await sessionCheckpointStore.save({ identity: value.identity, snapshot: { ...source, throughSeq },
+          rows: materializeAgentContextHistory(source), task, historyBudgetTokens,
+          ...(allowSemantic ? { signal: req.signal } : {}), allowSemantic, hostObservation: observation,
+          expectedForgetEpoch: checkpointCustody.revocationEpoch, runtimeSelection: checkpointRuntimeSelection(req, provider, options),
+          assertSourceCurrent() {
+            // Stop revokes execution, not the original actor's data custody.
+            // This path grants no tool, provider ACK, native handle or resume.
+            assertCustody(); if (allowSemantic) current(capability);
+            const head = store.readHead(value.identity);
+            if (head.revision !== sourceHead.revision || head.throughSeq !== sourceHead.throughSeq) fail("session_checkpoint_source_revision_changed");
+            if (digest(checkpointTask(req)) !== digest(task)) fail("session_checkpoint_task_revision_changed");
+          },
+        });
+      } catch { /* Prior checkpoint plus authoritative journal delta remains usable. */ }
+    };
+    let toolIndex=0, partialTail="", toolBoundaryTokens=0;
+    const recordUnsettled = (outcome: "failed" | "cancelled" | "uncertain", text: string, failureCode?: string): void => {
+      try {
+        // A stale derived read cannot become a new partial-output source.
+        assertSurfaceMemoryCurrent();
+        if (!checkpointCustody || getMemoryStoreInfo().ownerNamespace !== checkpointCustody.ownerNamespace
+          || getMemoryStoreInfo().revocationEpoch !== checkpointCustody.revocationEpoch) return;
+        const clean = replayVisibleAssistantText(text);
+        if (clean) store.append(value.identity, sanitizeEvent({ eventId: `turn:${turnId}:partial-output`, kind: "message",
+          producerBinding: delivery.bindingKey, payload: { role: "assistant", text: clean, turnId, partial: true,
+            representation: "observed-partial-extract", createdAt: new Date().toISOString() } }));
+        store.append(value.identity, sanitizeEvent({ eventId: `turn:${turnId}:terminal-observation`, kind: "checkpoint-reference",
+          producerBinding: delivery.bindingKey, payload: { turnId, continuationOutcome: outcome, providerAcknowledged: false,
+            ...(failureCode ? { failureCode } : {}) } }));
+      } catch { /* Recording continuity never changes the original failure/Stop result. */ }
+    };
+    const wrapped:RunnerEvents={...events,onPartial(text) {
+      partialTail = `${partialTail}${text}`.slice(-4096); events.onPartial?.(text);
+    },onTool(name,args,result,id,isError,artifactPaths,imageDataUrl,origin){
       // Actual adapter emissions, retained as context data with canonical host
       // references when supplied. Tool effect authority remains in its ledger.
       appendAgentContextEvent(capability,{eventId:`turn:${turnId}:tool:${toolIndex++}`,kind:"tool",producerBinding:delivery.bindingKey,
         payload:{name,createdAt:new Date().toISOString(),...(args!==undefined?{arguments:args}:{}),...(result!==undefined?{result}:{}),...(id?{callId:id}:{}),...(isError!==undefined?{isError}:{}),...(artifactPaths?{artifactPaths:[...artifactPaths]}:{}),...(imageDataUrl?{imageDataUrl}:{}),...(origin?{origin}:{})}});
       events.onTool?.(name,args,result,id,isError,artifactPaths,imageDataUrl,origin);
+      if (result !== undefined) {
+        toolBoundaryTokens += estimateTransportTokens(typeof result === "string" ? result : JSON.stringify(result));
+        // The size trigger needs a known window; an unknown one never checkpoints on a guessed number (G08).
+        const boundaryWindow = runtimeContextWindow(provider.kind, req.model);
+        if (isError || artifactPaths?.length || (boundaryWindow != null && toolBoundaryTokens > boundaryWindow * 0.5)) {
+          toolBoundaryTokens = 0;
+          void saveCheckpoint(false, { turnId, outcome: "processing", providerAcknowledged: false });
+        }
+      }
     }};
     try {
       const native=nativeKind,stateful=native || !!policy,resume=stateful && !!nativeHandle;
       // The prepared input frontier is immutable. Later owner updates stay
       // for their own authorized turn, even if another writer appends now.
-      const snapshot=!resume && delivery.fromSeq>0
+      const snapshot=!resume && !decision
         ?store.readRange(value.identity,{through:delivery.throughSeq})
         :{contextKey:delivery.contextKey,revision:0,throughSeq:delivery.throughSeq,entries:delivery.entries};
+      const taskBoundary = decision ? null : checkpointTask(req);
+      const rawHistory = materializeAgentContextHistory(snapshot, turnId);
+      let checkpointReplay: ReturnType<typeof sessionCheckpointStore.restore> = null;
+      if (!resume && !decision) {
+        try { checkpointReplay = sessionCheckpointStore.restore(value.identity, snapshot, rawHistory, taskBoundary); }
+        catch { /* The journal is authoritative; a missing/damaged projection never blocks a turn. */ }
+      }
       const originalPrompt=req.userPrompt,originalContext=req.turnContext??"",originalLocale=req.locale;
       const originalImages=(req.images??[]).map(image=>Object.freeze({...image}));
-      activeBootstraps.set(capability, { delivery, create: () => {
+      activeBootstraps.set(capability, { delivery, kind: provider.kind, request: req, create: () => {
         const full=resume?store.readRange(current(capability).identity,{through:delivery.throughSeq}):snapshot;
+        let bootstrapReplay = checkpointReplay;
+        if (resume && !decision) {
+          try { bootstrapReplay = sessionCheckpointStore.restore(value.identity, full, materializeAgentContextHistory(full, turnId), taskBoundary); }
+          catch { /* Missing native state still falls back to the authoritative journal. */ }
+        }
         return Object.freeze({
-        history: Object.freeze(materializeAgentContextHistory(full, turnId).map(row => Object.freeze({ ...row,
+        history: Object.freeze((bootstrapReplay?.history ?? materializeAgentContextHistory(full, turnId)).map(row => Object.freeze({ ...row,
           ...(row.imageDataUrls ? { imageDataUrls: Object.freeze([...row.imageDataUrls]) as unknown as string[] } : {}) }))),
         images: Object.freeze([...materializeAttachments(full.entries, turnId), ...originalImages].map(value => Object.freeze({ ...value }))),
-        currentPrompt: originalPrompt, turnContext: originalContext, throughSeq: delivery.throughSeq,
+        currentPrompt: originalPrompt, turnContext: [bootstrapReplay?.block, originalContext].filter(Boolean).join("\n\n"), throughSeq: delivery.throughSeq,
         turnId, nativeHandle: nativeHandle ?? null,locale:originalLocale,
       }); } });
       const foreignEntries=delivery.entries.filter(entry=>entry.producerBinding!==delivery.bindingKey);
@@ -644,20 +871,57 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
         }
         return bounded;
       };
-      const history=resume?[]:boundRows(materializeAgentContextHistory(snapshot,turnId));
+      const history=resume?[]:boundRows(checkpointReplay?.history ?? rawHistory);
       const delta=resume?boundRows(materializeAgentContextHistory({entries:foreignEntries},turnId)).map(row=>`${row.role}: ${row.text}`).join("\n\n"):"";
       const olderImages=materializeAttachments(resume?foreignEntries:snapshot.entries,turnId);
       const known=new Set<string>();
-      if(resume && packet)for(const hash of store.acknowledgedStableBlockHashes(value.identity,delivery.bindingKey,delivery.generation))known.add(hash);
-      const currentBackground=packet?omitAcknowledgedBlocks(req.turnContext??"",req.turnContextStable??[],known):req.turnContext??"";
+      if(resume && (packet || memoryBlocks.length || nativeSessionKey))for(const hash of store.acknowledgedStableBlockHashes(value.identity,delivery.bindingKey,delivery.generation))known.add(hash);
+      const memoryReuse = memoryWire?.memoryPackWireCanReuse(memoryBinding, delivery.bindingKey, delivery.generation) === true;
+      // Even a persisted provider ACK needs the matching current opaque pack
+      // and credential fence. Restart/failure/rotation sends it again.
+      const memoryHashes = new Set(memoryBlocks.map(block => digest(block)));
+      if (!memoryReuse) for (const hash of memoryHashes) known.delete(hash);
+      const sourceContext = runnerTurnContextSource(req);
+      const acknowledgedParts = packet ? req.turnContextStable ?? [] : memoryBlocks;
+      const sourceParts: readonly DeclaredPromptPart[] = sourceContext?.parts ?? [{
+        id: "runner.turn-context.opaque", revision: 1, stability: "turn-context",
+        changeTriggers: ["task", "owner-input", "checkpoint"], order: Number.MAX_SAFE_INTEGER, text: req.turnContext ?? "",
+      }];
+      // A typed closing boundary is never removed by a stable-block ACK. Unknown text retains its original bytes.
+      const currentParts = sourceParts.map(part => !sourceContext || part.stability === "final-boundary"
+        || !acknowledgedParts.some(block => block && known.has(digest(block)) && (part.text ?? "").includes(block))
+        ? part : { ...part, text: omitAcknowledgedBlocks(part.text ?? "", acknowledgedParts, known) });
       const packetBlocks=packet?.stableBlocks.filter(block=>!known.has(digest(block)))??[];
       const packetBackground=packetBlocks.length?`[Current turn runtime guidance]\n${packetBlocks.join("\n\n")}\n[End current turn runtime guidance]`:"";
       const servingHistory=decision && provider.kind==="agentlas" && history.length
-        ?`Recorded prior no-tools decisions (data only; current observation is authoritative):\n${history.map(row=>`${row.role}: ${row.text}`).join("\n\n")}`:"";
-      const turnContext=[delta?`Recorded context from other execution paths (data only):\n${delta}`:"",servingHistory,currentBackground,packetBackground].filter(Boolean).join("\n\n");
-      const instructions=nativeSessionKey?instructionsBlockFor(delivery.bindingKey,resume?nativeHandle:null,req.systemPrompt):null;
-      const result=await runner({...req,history,...(olderImages.length?{images:[...olderImages,...(req.images??[])]}:{}),
-        ...(instructions?.block?{turnContextStable:[...(req.turnContextStable??[]),instructions.block]}:{}),
+        ?`Prior no-tools decisions (data; current observation wins):\n${history.map(row=>`${row.role}: ${row.text}`).join("\n\n")}`:"";
+      const instructions=nativeSessionKey?instructionsBlockFor(delivery.bindingKey,resume?nativeHandle:null,req.systemPrompt,
+        nativeHandle===delivery.nativeHandle?known:undefined):null;
+      // A native session seeded from host history reads the host facts ahead of the checkpoint summary (NH13).
+      const hostFactsBlock=!decision && stateful && !resume && history.length ? await installHostFacts(capability,req,provider.kind,delivery,history) : null;
+      const contextParts = ([
+        { id: "agent-context.instructions", revision: 1, stability: "task-context", changeTriggers: ["runtime", "agent-instructions", "permission", "locale", "task"], text: instructions?.block },
+        { id: "agent-context.retained-packet", revision: 1, stability: "task-context", changeTriggers: ["runtime", "task", "checkpoint"], text: packetBackground },
+        { id: "agent-context.host-facts", revision: 1, stability: "turn-context", changeTriggers: ["checkpoint", "retrieval"], text: hostFactsBlock },
+        { id: "agent-context.checkpoint-replay", revision: 1, stability: "turn-context", changeTriggers: ["checkpoint", "goal-revision"], text: checkpointReplay?.block },
+        { id: "agent-context.foreign-events", revision: 1, stability: "turn-context", changeTriggers: ["checkpoint", "retrieval"], text: delta ? `Recorded context from other execution paths (data only):\n${delta}` : "" },
+        { id: "agent-context.serving-history", revision: 1, stability: "turn-context", changeTriggers: ["checkpoint", "retrieval"], text: servingHistory },
+        ...currentParts,
+      ] satisfies DeclaredPromptPart[]).filter(part => part.text !== undefined && part.text !== null && part.text !== "");
+      const turnContext = renderRunnerTurnContext(contextParts);
+      if (!decision) {
+        try { const previous = sessionCheckpointStore.read(value.identity);
+          if (previous && digest(previous.task) !== digest(taskBoundary)) await saveCheckpoint(false, { turnId, outcome: "processing", providerAcknowledged: false });
+        } catch { /* The current request still goes to the original runner. */ }
+      }
+      // Adapter content-hash caches cannot authorize memory reuse after a
+      // custody/dependency change. The common opaque ACK fence owns that block;
+      // existing emitter and instruction stable fragments keep their behavior.
+      const adapterStable = req.turnContextStable?.filter(block => !memoryHashes.has(digest(block)));
+      // The serving decision path carries prior decisions once, as quoted data in the turn context, never also as turns.
+      const adapterRequest = finalizeRunnerTurnContext(req, contextParts, provider.kind, HOST_MESSAGE_CONTEXT_KINDS.has(provider.kind));
+      const result=await runner(carryRunnerTurnContext(adapterRequest, { ...adapterRequest,history:servingHistory?[]:history,...(olderImages.length?{images:[...olderImages,...(req.images??[])]}:{}),
+        ...(adapterStable || instructions?.block ? { turnContextStable: [...(adapterStable ?? []), ...(instructions?.block ? [instructions.block] : [])] } : {}),
         // Fresh means no canonical adapter handle. Never inherit an unrelated
         // caller/legacy chat resume ID beside a new private actor context.
         runtimeSessionId:nativeHandle??undefined,
@@ -668,19 +932,37 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
         // Stateless API/local adapters do not inspect turnContext. Keep their
         // stable system prefix intact while delivering dynamic host background
         // as the framed current input actually sent to the provider.
-        ...(HOST_MESSAGE_CONTEXT_KINDS.has(provider.kind) && turnContext?{userPrompt:composeResumeTurnPrompt(req.userPrompt,turnContext,req.locale)}:{}),
-        ...(turnContext?{turnContext}:{}),
-      },wrapped);
+        // The exact private placement descriptor already framed API/local input above; never parse ledgerHints or old strings.
+        // adapterRequest carries the exact composed context and original current-user input.
+      }),wrapped);
+      // Validate the original branded read before recording or acknowledging
+      // provider output; outer UI guards run after this journal boundary.
+      try { assertSurfaceMemoryCurrent(); }
+      catch {
+        memoryWire?.settleMemoryPackWire(memoryBinding, delivery.bindingKey, delivery.generation, false);
+        markAgentContextTurnUncertain(capability, delivery);
+        // A changed read cannot supply a resumable conversation. Preserve the
+        // actual usage already observed even though its answer is withheld.
+        unsettledTurns.delete(turnId);
+        return { ...result, text: "", sessionId: undefined, ownerControlTerminal: "uncertain" };
+      }
       if(decision){
         try{current(capability);decision.assertCurrent();}
-        catch{markAgentContextTurnUncertain(capability,delivery);noteUnsettled(result.sessionId??null);return {...result,ownerControlTerminal:"uncertain"};}
+        catch{memoryWire?.settleMemoryPackWire(memoryBinding, delivery.bindingKey, delivery.generation, false);markAgentContextTurnUncertain(capability,delivery);noteUnsettled(result.sessionId??null);return {...result,ownerControlTerminal:"uncertain"};}
       }
       if(result.failure || result.ownerControlTerminal==="uncertain" || req.signal?.aborted || (decision ? result.ownerControlTerminal!=="completed" : stateful && !result.sessionId)){
+        memoryWire?.settleMemoryPackWire(memoryBinding, delivery.bindingKey, delivery.generation, false);
+        const outcome = req.signal?.aborted ? "cancelled" as const : result.failure ? "failed" as const : "uncertain" as const;
+        const failureCode = result.failure?.providerCode ?? result.failure?.kind;
+        if (!decision) recordUnsettled(outcome, result.text || partialTail, failureCode);
         markAgentContextTurnUncertain(capability,delivery);noteUnsettled(result.sessionId??null);
+        if (!decision) await saveCheckpoint(false, { turnId, outcome, providerAcknowledged: false, ...(failureCode ? { failureCode } : {}) });
         return req.signal?.aborted ? {...result,ownerControlTerminal:"uncertain"} : result;
       }
+      const turnSummary = parseMemoryEvents(result.text).turnSummary;
       appendAgentContextEvent(capability,{eventId:`turn:${turnId}:output`,kind:"message",producerBinding:delivery.bindingKey,
-        payload:{role:"assistant",text:replayVisibleAssistantText(result.text),createdAt:new Date().toISOString(),turnId,speakerAgentId:value.identity.agentId}});
+        payload:{role:"assistant",text:replayVisibleAssistantText(result.text),createdAt:new Date().toISOString(),turnId,speakerAgentId:value.identity.agentId,
+          ...(turnSummary ? { turnSummary, turnSummarySource: "emitter" } : {})}});
       // This is the validated runner's completed response receipt. It is not
       // an admission ACK or a claim that a stateless provider stores context.
       const observed=store.readRange(current(capability).identity,{after:delivery.throughSeq});
@@ -691,25 +973,46 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
       }
       const acknowledged = acknowledgeAgentContextTurn(capability,delivery,
         {receiptId:`completed:${turnId}`,nativeHandle:result.sessionId,observedThroughSeq});
-      if(instructions && result.sessionId)instructions.delivered(result.sessionId);
+      memoryWire?.settleMemoryPackWire(memoryBinding, delivery.bindingKey, delivery.generation, acknowledged === true);
+      if(acknowledged === true)recordHostFactsInstalled(capability,delivery,`completed:${turnId}`,result.sessionId);
+      if(acknowledged === true && instructions && result.sessionId)instructions.delivered(result.sessionId);
       if (decision && acknowledged === true) await publishAliveTerminalAck(capability,delivery,result,observedThroughSeq);
+      if (!decision && acknowledged === true) await saveCheckpoint(true, { turnId, outcome: "completed", providerAcknowledged: true });
       // A native session whose last request reached 80% of the model's own window gives way to a new generation for the
       // NEXT turn, seeded from this journal (session-generation.ts, owner 2026-10-13). Background only: nothing on screen.
       if (!decision && stateful && acknowledged === true) {
-        const generation = decideGeneration({ kind: provider.kind, contextWindowTokens: runtimeContextWindow(provider.kind, req.model),
-          lastInputTokens: result.contextInputTokens ?? null });
+        // The runtime's own window when it reports one (ACP usage_update size), else the model catalog's.
+        const contextWindowTokens = result.contextWindowTokens ?? runtimeContextWindow(provider.kind, req.model);
+        const generation = decideGeneration({ kind: provider.kind, contextWindowTokens, lastInputTokens: result.contextInputTokens ?? null });
         if (generation.action === "new_generation") {
-          try { store.invalidateProvider(current(capability).identity,adapter,delivery.generation); }
+          try { store.invalidateProvider(current(capability).identity,adapter,delivery.generation);
+            recordRotation(delivery, { reason: "context_ratio", reportedInputTokens: result.contextInputTokens ?? null, contextWindowTokens }); }
           catch { /* a concurrent delivery owns the binding; the next completed turn decides again */ }
+          // Same rotation receipt as CLI threads and stateless loops, with host facts (docs native-harness 07 G07, G11).
+          if (req.chatId) {
+            const chatId = req.chatId;
+            void import("./handoff-facts").then(async ({ collectHostFacts, recordGenerationSwitch }) => {
+              const facts = await collectHostFacts({ chatId, agentId: req.agentId ?? null, runtime: provider.kind, kind: "host-replay",
+                fromGeneration: delivery.generation, toGeneration: "next", reason: "context_ratio",
+                deliveredHistory: req.history ?? [] });
+              recordGenerationSwitch({ chatId, runtime: provider.kind, previousSessionId: result.sessionId ?? String(delivery.generation),
+                reason: "context_ratio", facts, reportedInputTokens: result.contextInputTokens ?? null });
+            }).catch(() => { /* the receipt is evidence only; the rotation itself already happened */ });
+          }
         }
       }
       return result;
     }catch(error){
+      memoryWire?.settleMemoryPackWire(memoryBinding, delivery.bindingKey, delivery.generation, false);
       // A measured pre-effect missing retained response resets only this
       // adapter generation, for the NEXT separately admitted turn.
       let missing=false;
       try{if(policy)missing=consumeMissingProof!(error,req)===true;}catch{/* Preserve original failure and unresolved custody. */}
+      const outcome = req.signal?.aborted ? "cancelled" as const : "failed" as const;
+      const failureCode = error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code.slice(0,128) : undefined;
+      if (!decision) recordUnsettled(outcome, partialTail, failureCode);
       markAgentContextTurnUncertain(capability,delivery);noteUnsettled(errorSessionId(error));
+      if (!decision) await saveCheckpoint(false, { turnId, outcome, providerAcknowledged: false, ...(failureCode ? { failureCode } : {}) });
       if(missing)store.invalidateProvider(current(capability).identity,adapter,delivery.generation);
       throw error;
     }finally{
@@ -718,7 +1021,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
         aliveAckRegistrations.delete(capability);
         try { await pendingAliveAck.callbacks.onAbandon(); } catch { /* No retained chain after uncertain custody. */ }
       }
-      activeDeliveries.delete(capability);activeTransports.delete(capability);activeBootstraps.delete(capability);referenceOrdinals.delete(capability);
+      activeDeliveries.delete(capability);activeTransports.delete(capability);activeBootstraps.delete(capability);referenceOrdinals.delete(capability);hostFactsSent.delete(capability);
     }
   };
 }

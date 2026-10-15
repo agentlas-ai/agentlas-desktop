@@ -21,9 +21,10 @@ const IMAGE_ENGINE_BY_RUNTIME: Record<RuntimeKind, ImageModel | null> = {
   codex: "codex",
   // Antigravity(agy) 는 나노바나나(Gemini image)를 CLI 안에서 부른다.
   antigravity: "gemini",
+  // Grok CLI 는 Imagine(image_gen)을 구독 OAuth 로 부른다(API 키면 거절 — grok-imagine.ts).
+  grok: "grok",
   // 아래는 그리는 능력이 없다. "auto" 로 몰래 떨어뜨리지 않는다.
   "claude-code": null,
-  grok: null,
   kimi: null,
   cursor: null,
   byok: null,

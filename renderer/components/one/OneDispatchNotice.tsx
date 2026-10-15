@@ -88,7 +88,7 @@ export function OneDispatchNotice({ notice, locale }: { notice: Notice; locale: 
     </details>}
     {dispatch?.resultText && <Markdown text={stripAgentControlBlocks(flattenAskFences(dispatch.resultText, locale))} messageId={`one-dispatch-result:${dispatch.dispatchId}:${current.runId}`} />}
     {question && answeredSource !== question.sourceMessageId && <ChatQuestionSheet
-      questions={question.questions.map((item,index) => ({...item,id:`${question.sourceMessageId}-q${index}`}))}
+      questions={(question.questionBank?.questions ?? question.questions).map((item,index) => ({...item,id:`${question.sourceMessageId}-q${index}`}))}
       initialReply={question.committedReply}
       onRetryCommitted={question.committedReply ? () => { void answer(question.committedReply!); } : undefined}
       busy={answerBusy} onConfirm={(reply) => { void answer(reply); }} onDismiss={() => setAnsweredSource(question.sourceMessageId)} />}

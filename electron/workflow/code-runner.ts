@@ -10,9 +10,10 @@
  *     OS가 실제로 차단**한다. Codex CLI·Claude Code·Chromium·Bazel이 쓰는 검증된 경로
  *     (deprecated 표시는 있으나 대체재 없이 전부 현역 — 리서치 2026-08-05).
  *     ★macOS에서 샌드박스 구성이 실패하면 **폴백하지 않고 실패**한다 — 조용한 강등이 최악이다.
- *   - 그 외 OS: `process-isolated` — 별도 프로세스 + 타임아웃뿐. 윈도우는 관리자 권한 없이
- *     네트워크를 막을 실용 수단이 업계 전체에 없다(Codex도 비관리자 모드에선 포기,
- *     Claude Code는 네이티브 윈도우 미지원). 리눅스 bwrap/Landlock은 백로그.
+ *   - Linux: `os-sandboxed` — bubblewrap(linux-sandbox.ts)이 같은 경계를 건다(쓰기 제한·비밀 폴더 가림·
+ *     denied면 네트워크 차단). bwrap이 없거나 사용자 네임스페이스가 막힌 호스트는 `process-isolated`.
+ *   - Windows: `process-isolated` — 별도 프로세스 + 타임아웃뿐. 관리자 권한 없이 네트워크를 막을
+ *     실용 수단이 업계 전체에 없다(Codex도 비관리자 모드에선 포기, Claude Code는 네이티브 윈도우 미지원).
  *   - 바깥을 바꾸는 코드(effect: mutation)는 어느 OS든 **실행 전 승인 게이트**를 지난다.
  *   - ★비밀 폴더는 read 코드도 **읽기 차단**(macOS) — 네트워크를 막아도 stdout이 유출 통로다:
  *     읽은 비밀이 결과 JSON에 실리면 LLM을 거쳐 밖으로 나간다.
@@ -20,7 +21,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { resolveHephaestusPython } from "../hephaestus/engine";
 import { withPythonCacheBoundary } from "../runtime/python-cache";
@@ -33,6 +34,7 @@ import {
 } from "../runtime/exec";
 import { userDataPath } from "../runtime-paths";
 import { currentUiLocale } from "../ui-locale";
+import { buildBwrapArgs, linuxSandbox } from "./linux-sandbox";
 
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
@@ -62,6 +64,13 @@ export interface CodeRunInput {
   signal?: AbortSignal;
   /** 노드의 선언 효과 — read/pure면 쓰기·네트워크를 OS가 차단한다(가능한 OS에서). */
   effect?: "pure" | "read" | "mutation";
+  /**
+   * 네트워크 허용 여부. 기본(`allowed`)은 2026-08-09 정책 그대로 — "가져오기"가 막히면 어떤 그래프도
+   * 안 돈다. `denied`는 호출자가 명시할 때만 OS(Seatbelt `deny network*`)가 connect·bind·DNS를 막는다.
+   * Linux는 bwrap `--unshare-net`. 막을 수단이 없는 호스트(Windows, bwrap을 못 쓰는 Linux)는 `denied`를 받으면
+   * **돌리지 않고 실패**한다(조용한 강등 금지).
+   */
+  network?: "allowed" | "denied";
   /**
    * 스크립트가 쓰는 서드파티 파이썬 패키지의 pip 이름들.
    * ★근본 배경(실측 2026-08-05): AI가 `import yfinance`를 쓰는 코드를 지었는데 번들
@@ -122,6 +131,91 @@ export function codeFailureAllowsAutomaticRetry(result: CodeRunResult,
 }
 
 const RESULT_MARKER = "__AGENTLAS_CODE_RESULT__";
+
+/** Seatbelt 문자열 리터럴 — 역슬래시를 먼저 이스케이프한다. 따옴표만 이스케이프하면 cwd 이름의
+ * `\")`가 문자열을 닫고 `(allow file-write* ...)` 규칙을 끼워 넣을 수 있다(실측 재현). */
+export function sbplQuote(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\0/g, "")}"`;
+}
+
+/** 경로의 실경로도 함께 연다 — Seatbelt는 심볼릭 링크를 해석한 뒤 판정하므로
+ * `/tmp/x`(→ /private/tmp/x) 같은 cwd를 그대로 쓰면 허용 폴더 안 쓰기가 거절된다. */
+function withRealPaths(paths: string[]): string[] {
+  const out = new Set<string>();
+  for (const p of paths) {
+    if (!p) continue;
+    out.add(p);
+    try { out.add(fs.realpathSync(p)); } catch { /* 아직 없는 경로 — 그대로만 */ }
+  }
+  return [...out];
+}
+
+export function buildSeatbeltProfile(opts: { writable: string[]; home?: string; network?: "allowed" | "denied"; confineWrites?: boolean }): string {
+  const home = opts.home ?? os.homedir();
+  const denyRead = withRealPaths([
+    path.join(home, ".ssh"), path.join(home, ".aws"),
+    path.join(home, ".config", "gh"), path.join(home, ".gnupg"),
+    path.join(home, "Library", "Keychains"),
+  ]);
+  return [
+    "(version 1)",
+    "(allow default)",
+    ...(opts.confineWrites === false ? [] : [
+      "(deny file-write*)",
+      ...withRealPaths(opts.writable).map((p) => `(allow file-write* (subpath ${sbplQuote(p)}))`),
+    ]),
+    ...denyRead.map((p) => `(deny file-read* (subpath ${sbplQuote(p)}))`),
+    ...(opts.network === "denied" ? ["(deny network*)"] : []),
+  ].join("\n");
+}
+
+/** 중지·타임아웃 때 프로세스 그룹 밖으로 빠져나간 후손(setsid·이중 fork)까지 찾는다.
+ * killCliTree는 그룹(-pid)만 죽이므로 `start_new_session=True` 자식은 고아로 남고, 그 자식이 stdout을
+ * 쥐고 있으면 close 이벤트가 영영 오지 않아 Stop이 돌아오지 못한다(실측). 살아 있는 리더에서 부모-자식
+ * 관계를 걸어 후손 목록(pid+시작시각)을 먼저 확보한다. Windows는 killCliTree의 taskkill /T가 담당. */
+export interface TreeMember { pid: number; started: string }
+export function parsePsTree(psOutput: string, rootPid: number): TreeMember[] {
+  const rows = new Map<number, { ppid: number; started: string }>();
+  for (const line of psOutput.split("\n")) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line);
+    if (m) rows.set(Number(m[1]), { ppid: Number(m[2]), started: m[3] });
+  }
+  const out: TreeMember[] = [];
+  const queue = [rootPid];
+  const seen = new Set<number>([rootPid]);
+  while (queue.length) {
+    const parent = queue.shift()!;
+    for (const [pid, row] of rows) {
+      if (row.ppid === parent && !seen.has(pid)) { seen.add(pid); out.push({ pid, started: row.started }); queue.push(pid); }
+    }
+  }
+  return out;
+}
+
+function psSnapshot(): string {
+  try {
+    return spawnSync("/bin/ps", ["-axo", "pid=,ppid=,lstart="], { encoding: "utf8", timeout: 3000, env: { ...process.env, LC_ALL: "C" } }).stdout ?? "";
+  } catch { return ""; }
+}
+
+/** 트리 전체 종료: 후손 목록 확보 → 그룹 종료 → 그룹 밖 후손 TERM → grace 뒤 시작시각이 같은 것만 KILL(pid 재사용 오폭 방지). */
+export function killCodeTree(child: ChildProcess, graceMs = 4000): void {
+  if (process.platform === "win32" || !child.pid) { killCliTree(child, graceMs); return; }
+  const members = parsePsTree(psSnapshot(), child.pid);
+  killCliTree(child, graceMs);
+  const signalMembers = (signal: NodeJS.Signals, verify: boolean) => {
+    const now = verify ? psSnapshot() : "";
+    const current = verify ? new Map([...now.split("\n")].map((l) => /^\s*(\d+)\s+\d+\s+(.+?)\s*$/.exec(l)).filter(Boolean).map((m) => [Number(m![1]), m![2]] as const)) : null;
+    for (const member of members) {
+      if (current && current.get(member.pid) !== member.started) continue;
+      try { process.kill(member.pid, signal); } catch { /* 이미 종료 */ }
+    }
+  };
+  signalMembers("SIGTERM", false);
+  const timer = setTimeout(() => signalMembers("SIGKILL", true), graceMs);
+  timer.unref?.();
+}
+
 
 async function fileState(root: string, signal?: AbortSignal): Promise<Map<string, string>> {
   const out = new Map<string, string>();
@@ -355,11 +449,23 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
       }
     }
     // ── macOS Seatbelt — read 코드의 쓰기·네트워크를 OS가 실제로 차단 ──────
-    const wantSandbox = process.platform === "darwin" && input.effect !== "mutation";
+    const bwrap = process.platform === "linux" ? linuxSandbox() : null;
+    if (input.network === "denied" && process.platform !== "darwin" && !bwrap) {
+      // 막을 수단이 없는 OS에서 "막았다"고 말하며 돌리면 안 된다(Windows Job Object는 백로그, Linux는 bwrap이 쓸 수 있을 때만).
+      return {
+        ok: false, isolation: "unavailable", execution: executionReceipt(),
+        reason: L("이 OS에서는 코드의 네트워크를 OS가 막을 수 없어 코드를 돌리지 않았습니다.", "The code did not run because this OS cannot block the code's network access."),
+      };
+    }
+    const wantSandbox = (process.platform === "darwin" || bwrap !== null) && (input.effect !== "mutation" || input.network === "denied");
     let command = interpreter;
     let args = [file];
     let isolation: CodeIsolationLevel = "process-isolated";
-    if (wantSandbox) {
+    if (wantSandbox && bwrap) {
+      command = bwrap.path;
+      args = buildBwrapArgs({ writable: [path.dirname(file), os.tmpdir(), cwd], network: input.network, confineWrites: input.effect !== "mutation" }, interpreter, [file]);
+      isolation = "os-sandboxed";
+    } else if (wantSandbox) {
       /* (allow default) 후 deny — 인터프리터가 자기 dylib·/dev/urandom을 읽어야 해서
          (deny default)는 못 쓴다(Bazel·Codex와 같은 접근). 쓰기는 스크립트 폴더·tmp·
          파이썬 캐시 경계만 열고, 비밀 폴더는 읽기도 차단한다.
@@ -379,21 +485,7 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
          바깥으로 HTTP 요청을 보내는 것은 이 기계에 흔적을 남기지 않는다. 나가는 것에
          대한 통제는 여기가 아니라 계약 층이 한다 — 시뮬레이션은 mutation 단계를
          호출조차 하지 않고, 멱등키 없는 mutation 은 재시도하지 않는다. */
-      const home = os.homedir();
-      const writable = [path.dirname(file), os.tmpdir(), cwd];
-      const denyRead = [
-        path.join(home, ".ssh"), path.join(home, ".aws"),
-        path.join(home, ".config", "gh"), path.join(home, ".gnupg"),
-        path.join(home, "Library", "Keychains"),
-      ];
-      const esc = (p: string) => p.replace(/"/g, '\\"');
-      const profile = [
-        "(version 1)",
-        "(allow default)",
-        "(deny file-write*)",
-        ...writable.map((p) => `(allow file-write* (subpath "${esc(p)}"))`),
-        ...denyRead.map((p) => `(deny file-read* (subpath "${esc(p)}"))`),
-      ].join("\n");
+      const profile = buildSeatbeltProfile({ writable: [path.dirname(file), os.tmpdir(), cwd], network: input.network, confineWrites: input.effect !== "mutation" });
       command = "/usr/bin/sandbox-exec";
       args = ["-p", profile, interpreter, file];
       isolation = "os-sandboxed";
@@ -424,10 +516,15 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
       child.stderr.on("data", (d: Buffer) => { stderr += d.toString("utf8"); });
       // 앞 단계 값을 stdin으로 넘긴다 — argv에 실으면 크기·따옴표에서 깨진다.
       try { child.stdin.write(JSON.stringify({ vars: input.vars })); child.stdin.end(); } catch { /* 프로세스가 이미 죽었을 수 있다 */ }
-      const timer = setTimeout(() => { killCliTree(child); }, timeoutMs);
-      const onAbort = () => killCliTree(child);
+      const timer = setTimeout(() => { killCodeTree(child); }, timeoutMs);
+      const onAbort = () => killCodeTree(child);
       input.signal?.addEventListener("abort", onAbort, { once: true });
       const code: number | null = await new Promise((resolve) => {
+        // 리더가 끝났는데 그룹 밖 후손이 stdout/stderr를 쥐고 있으면 close가 오지 않는다 — 잠깐 기다린 뒤 파이프를 놓는다.
+        child.once("exit", () => {
+          const t = setTimeout(() => { child.stdout?.destroy(); child.stderr?.destroy(); }, 1500);
+          t.unref?.();
+        });
         child.on("close", (c) => resolve(c));
         child.on("error", () => resolve(-1));
       });

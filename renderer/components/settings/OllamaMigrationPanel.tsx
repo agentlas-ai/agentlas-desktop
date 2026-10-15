@@ -19,7 +19,7 @@ export function OllamaMigrationPanel({ locale }: { locale: string }) {
     setBusy(true);
     try {
       const result = mutate ? await api.reconcile() : await api.snapshot();
-      setOneEntry(await reconcileOneOllamaSelection());
+      setOneEntry(await reconcileOneOllamaSelection({ apply: mutate }));
       setSnapshot(result);
       setNotice(null);
     } catch (error) {

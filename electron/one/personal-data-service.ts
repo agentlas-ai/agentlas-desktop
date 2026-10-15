@@ -118,17 +118,25 @@ export class OnePersonalDataService {
         || batch.permissionRevision!==current.permissionRevision || batch.credentialGeneration!==current.credentialGeneration)throw personalDataError("personal_data_permission_changed");
       if(batch.cursor!==source.cursor)throw personalDataError("personal_data_cursor_mismatch");
       if(!batch.complete && (batch.nextCursor===null || batch.nextCursor===batch.cursor))throw personalDataError("personal_data_partial_cursor_invalid");
-      const occurrenceId=`pd:${personalDataHash([target,current,batch.sourceRevision,batch.items.map(i=>[i.id,i.revision,i.deleted]).sort((a,b)=>String(a[0]).localeCompare(String(b[0])))])}`;
       return this.deps.store.atomic(()=>{
         this.authorize(target,"source-read",[current]);this.authorize(target,"inference",[current],undefined,budgetId);
         const latest=this.source(target,input.sourceId);
         if(latest.revision!==source.revision)throw personalDataError("personal_data_source_revision_conflict");
+        // Reconcile against this exact source's original committed items under
+        // its current CAS. A new cursor/provider revision alone is not new work.
+        // This does not infer query membership or synthesize missing deletions.
+        const previous=new Map(this.deps.store.items(target,input.sourceId).map(i=>[i.id,i]));
+        const changed={...batch,items:batch.items.filter(item=>{
+          const prior=previous.get(item.id);
+          return !prior || personalDataHash(prior)!==personalDataHash(item);
+        })};
+        if(changed.items.length===0)return {occurrenceId:null,source:this.deps.store.applyBatch(latest,changed),supervisor:null};
+        const occurrenceId=`pd:${personalDataHash([target,current,changed.sourceRevision,changed.items.map(i=>[i.id,personalDataHash(i)]).sort((a,b)=>String(a[0]).localeCompare(String(b[0])))])}`;
         const prior=this.deps.store.occurrence(occurrenceId,target);
-        if(prior) return {occurrenceId,source:this.deps.store.applyBatch(latest,batch),supervisor:this.deps.supervisor.receipt({oneId:target.oneId,commandId:prior.commandId})??prior.receipt};
-        if(batch.items.length===0 && batch.sourceRevision===latest.sourceRevision)return {occurrenceId:null,source:this.deps.store.applyBatch(latest,batch),supervisor:null};
+        if(prior) return {occurrenceId,source:this.deps.store.applyBatch(latest,changed),supervisor:this.deps.supervisor.receipt({oneId:target.oneId,commandId:prior.commandId})??prior.receipt};
         // Snapshot + existing Supervisor receipt are durable before advancing the cursor, in ONE DB transaction.
-        const staged=this.deps.store.setSource({...source,sourceRevision:batch.sourceRevision,observedAt:batch.observedAt,status:batch.complete?"ready":"partial",reason:null},source.revision,
-          (()=>{const m=new Map(this.deps.store.items(target,input.sourceId).map(i=>[i.id,i]));batch.items.forEach(i=>m.set(i.id,i));if(m.size>10_000)throw personalDataError("personal_data_retention_limit");return [...m.values()];})());
+        const staged=this.deps.store.setSource({...source,sourceRevision:changed.sourceRevision,observedAt:changed.observedAt,status:changed.complete?"ready":"partial",reason:null},source.revision,
+          (()=>{changed.items.forEach(i=>previous.set(i.id,i));if(previous.size>10_000)throw personalDataError("personal_data_retention_limit");return [...previous.values()];})());
         const commandId=`pd-work:${personalDataHash([occurrenceId,budgetId])}`;
         this.deps.supervisor.bindOccurrence({commandId,target,sourceBindings:[current],sourceRevision:staged.revision,budgetId});
         const receipt=this.deps.supervisor.startWork({commandId,oneId:target.oneId,budgetId,permissions:"read",...(target.projectId?{projectId:target.projectId}:{}),

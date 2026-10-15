@@ -1,3 +1,7 @@
+import { bindRunnerTurnContext, carryRunnerTurnContext, renderRunnerTurnContext, replaceRunnerUserPrompt, runnerTurnContextSource } from "../runtime/runner-turn-context-binding";
+import { composeTracedPrompt } from "../runtime/prompt-composition-trace";
+import { fixedPurposePrompt, purposePrompt } from "../runtime/purpose-prompts";
+import { captureNativeOsCuratorRun } from "../runtime/os-memory-curator-binding";
 import { placeTurnContextForRuntime } from "../runtime/serving-prefix";
 import { currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { withOneHistoryNativeInvocation } from "../one/personal-integrations-runtime";
@@ -96,6 +100,7 @@ import {
   type GoalLedgerSnapshot,
 } from "./goal-ledger";
 import { getAgentById, listInstalledAgents } from "./registry";
+import { isAgentArchived, restoreAgentForUse } from "../archive/auto-archive";
 import { applyGoalPlanMarkers, bindGoalPlanDispatch, buildGoalPlanTurnContext, ensureGoalShapeBeforeTurn, goalPlanContinuationNote, recordGoalPlanPassStop } from "../long-run/goal-shaping";
 import { readGoalPlan } from "../store/goal-plans";
 import { goalPassStopCause } from "../long-run/goal-pass-stop";
@@ -157,7 +162,7 @@ import { livePartialCommitBoundary } from "../../shared/interrupted-partial";
 import { EFFECT_OBSERVATION_SYSTEM_PROMPT, effectObservationOutputSchema, stripEffectObservationMarker } from "../../shared/effect-observation";
 import { effectObservationTicket } from "../long-run/effect-observation-tickets";
 import { goalExecutionDirectivePromptBlock } from "../long-run/goal-execution-context";
-import { extractAskFences } from "../../shared/ask-fence-flatten";
+import { canonicalAskFenceText, extractAskFences } from "../../shared/ask-fence-flatten";
 import { AGENT_ASK_OPEN } from "../../shared/agent-control-blocks";
 
 /**
@@ -208,21 +213,16 @@ import { runSwarmInvocation } from "./swarm-run";
 import { canReadActivatedFolderMemory, recordFolderVisit } from "../architecture/activation";
 import { ensureDesktopProjectBootstrap } from "../architecture/project-bootstrap";
 import { buildMemoryContext } from "../memory/context";
+import { orderPromptParts, registerDeclaredPromptModule, type DeclaredPromptPart, type PromptChangeTrigger, type PromptOrderingMetadata, type PromptStability } from "../runtime/prompt-order";
+import { renderControllerSurfaceMemory, bindSurfaceMemoryRequest } from "../memory/surface-recall";
+import { scienceAliveMemory, scienceAliveMemoryGuard } from "../memory/science-alive-memory";
+import { bindAppMemoryRequest, appRunMemory, appMemoryRunGuard } from "../memory/agent-app-memory";
 import { invocationMemoryScope } from "../memory/invocation-scope";
 import {
   ingestWorkingFolderOntologyInBackground,
   queryWorkingFolderOntologyContext,
 } from "../ontology/project-runtime";
-import {
-  buildExperienceContext,
-} from "../experience/context";
-import { promoteExperienceCandidatesForRun, promoteWaitingExperienceCandidates } from "../experience/store";
-import { prepareExperienceDispatch, recordExperienceApplication } from "../experience/application";
 import { writeEvolutionProposalsForProject, evolutionSessionContextLine } from "../agents/evolution-hep";
-import { resolveDesktopOperationalRuntimeSession } from "../ontology/operational-runtime-session";
-import { operationalRuntimeOverlayMatchesTask } from "../ontology/operational-runtime-contract";
-import { resolveDesktopTasteRuntimeSession } from "../ontology/taste-runtime-session";
-import { tasteRuntimeOverlayMatchesTask } from "../ontology/taste-runtime-contract";
 import {
   curateReply,
   recordTerminalMemoryTurn,
@@ -240,7 +240,7 @@ import { APP_BUILDER_SLUG } from "../architecture/manifest";
 import { memoryEmitterPromptFor } from "../system-agents/memory";
 import { roomMemberContext } from "../one/room-chat";
 import { automationProtocolFor, parseAutomations, automationRegistrationGateProblems } from "../automation-emitter";
-import { SURFACE_CLOSE_FENCE, SURFACE_OPEN_FENCE, parseSurfaces } from "../surface-emitter";
+import { SURFACE_CLOSE_FENCE, SURFACE_OPEN_FENCE, SURFACE_PROTOCOL, parseSurfaces } from "../surface-emitter";
 import { applyFinalDisplayBackstop } from "./final-display-backstop";
 import {
   oneFriendlyFollowupProtocol,
@@ -272,9 +272,10 @@ import { buildMcpConfigFile, isKeylessPlaywrightMcpDuplicate, type BrowserApprov
 import { AGENTLAS_WORKSPACE_PREVIEW_CATALOG_ID } from "../workspace-preview/mcp-server";
 import { AGENTLAS_UI_CATALOG_ID } from "../ui-schema/mcp-server";
 import { AGENTLAS_TURN_CATALOG_ID } from "../turn-tools/mcp-server";
-import { takeTurnMemoryNotes, turnNotesKey } from "../turn-tools/notes";
+import { takeTurnAsks, takeTurnMemoryNotes, turnNotesKey } from "../turn-tools/notes";
 import { applyGoalSignalsToText, takeGoalSignals, typedGoalDeadlineClause, typedGoalLifecycleProtocol } from "../turn-tools/goal-signals";
 import { turnToolReplacesText } from "../turn-tools/attach";
+import { appendTurnAsks } from "../turn-tools/ask";
 import type { WorkspacePreviewOwnerGrant } from "../workspace-preview/channel";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import { resolveMcpNeeds } from "../mcp-tools/need-resolver";
@@ -318,7 +319,6 @@ import {
   type RunnerRequest,
   SURFACE_INTENT_MARKER,
   UNATTENDED_NO_ASK_DIRECTIVE,
-  ATTENDED_ASK_DIRECTIVE,
   MOBILE_DURABLE_ASK_DIRECTIVE,
 } from "../runtime/runner";
 import { validatedRunnerNativeControlState } from "../runtime/runner";
@@ -357,7 +357,7 @@ import {
   type MaterializedToolBroker,
 } from "../workflow/tool-broker-runtime";
 import type { ToolBrokerLevel } from "../../shared/graph-tool-broker";
-import { runtimeKindCanUseMcp } from "../../shared/runtime-mcp";
+import { runtimeKindCanUseMcp, RUNTIME_MCP_SUPPORT } from "../../shared/runtime-mcp";
 import { RUNTIME_NATIVE_CAPABILITIES } from "../runtime/native-capabilities";
 import { listInstalledPluginCandidates, pluginSlugsNamedInToolEvent } from "../plugins/plugin-candidates";
 import type {
@@ -615,15 +615,9 @@ function oneRecoveryApprovalExample(locale: "ko" | "en"): string {
 function buildOneRecoveryPrompt(previousText: string, attempt: number, locale: "ko" | "en"): string {
   const clipped = previousText.length > 6_000 ? previousText.slice(-6_000) : previousText;
   return [
-    `Recovery pass ${attempt}: at least one required tool step failed earlier in this run, so the work is not finished yet.`,
-    "Continue the same task in this conversation and finish it completely:",
-    "1. Identify which step failed.",
-    "2. Re-execute that step now with your tools, or take a working alternative path to the same outcome.",
-    "3. Verify the outcome with tool evidence, then write the complete final result for the user.",
-    "If and only if the next safe action requires user authority, credentials, money, or a consequential choice, do not emit a failure notice. Propose the exact repair and emit one valid confirmation:",
-    oneRecoveryApprovalExample(locale),
-    "Never apologize, expose internal errors, or tell the user to retry. Finish the result, or leave one executable approval choice.",
-    "Your previous visible output was:",
+    `recovery pass ${attempt}: a required tool step failed; find it, re-run it or take another path to the same outcome, verify with tool evidence, then write the complete result`,
+    `only if the next safe action needs the owner's authority, credentials, money or a consequential choice: propose the exact repair as one choice card (ask_form, or ${oneRecoveryApprovalExample(locale)})`,
+    "never apologize, expose internal errors or ask for a retry",
     "<previous-output>",
     clipped,
     "</previous-output>",
@@ -633,14 +627,8 @@ function buildOneRecoveryPrompt(previousText: string, attempt: number, locale: "
 function buildOneRecoveryDecisionPrompt(previousText: string, locale: "ko" | "en"): string {
   const clipped = previousText.length > 6_000 ? previousText.slice(-6_000) : previousText;
   return [
-    "A required step still needs intervention after safe automatic repair attempts.",
-    "Do not call tools in this pass and do not end with a failure notice.",
-    "Choose the most practical concrete repair that One can execute after approval.",
-    "Explain it in one short sentence, then emit exactly one valid confirmation fence.",
-    `Use this shape: ${oneRecoveryApprovalExample(locale)}`,
-    "The first option must approve the exact proposed action. The second must preserve user control without claiming completion.",
-    "Do not ask the user to retry and do not mention internal tool names or raw errors.",
-    "Latest task context:",
+    "recovery decision: no tools this pass; pick the most practical repair One can run after approval, say it in one sentence, then exactly one choice card (first option approves that action, second keeps the owner in control without claiming completion); no retry requests, tool names or raw errors",
+    `card: ${oneRecoveryApprovalExample(locale)}`,
     "<previous-output>",
     clipped,
     "</previous-output>",
@@ -1010,7 +998,9 @@ function cleanPathCandidate(raw: string | undefined): string | null {
 const REASONING_SPAN_TEXT_CAP = 6_000;
 
 /**
- * 사람이 "이 폴더에서 일해"라고 적었을 때 그 폴더를 잡는다.
+ * 사람이 쓴 요청에 **이미 있는 폴더의 절대 경로가 정확히 하나** 있으면 그 폴더를 잡는다(구조 판정).
+ * 2026-10-14: "작업 폴더/working folder" 같은 단어로 고르던 정규식을 뺐다 — 호스트는 단어로 의미를 판단하지
+ * 않는다(docs/2026-10-13-native-harness 04 §3). 폴더 경로가 둘 이상이면 어느 쪽인지 모르므로 잡지 않는다.
  *
  * ★두 가지를 못 박는다. 실측 2026-08-20 (E2E 캠페인 E1, 다운로드 폴더 정리 자동화):
  *   사용자 폴더에 `IMG_9931/` 이라는 **없던 폴더**가 생기고 그 안에 `.agentlas`
@@ -1031,18 +1021,16 @@ export function inferWorkingFolderFromPrompt(
   opts?: { authored: "human" | "machine" },
 ): string | null {
   if (opts?.authored === "machine") return null;
-  const explicit = prompt.match(
-    /(?:(?:project|working|workspace|target|output)?\s*(?:folder|directory|dir)|(?:작업|프로젝트|워크스페이스|대상|출력)\s*(?:루트|폴더|디렉터리|경로))\s*(?:only|전용|만)?[^/]*(\/[^\s`"'<>]+)/i,
-  );
-  const candidate = cleanPathCandidate(explicit?.[1]);
-  if (!candidate) return null;
-  try {
-    if (!fs.statSync(candidate).isDirectory()) return null;
-  } catch {
-    // 없는 경로다. 만들지 않는다 — 추측으로 사용자 폴더에 흔적을 남기지 않는다.
-    return null;
+  const directories = new Set<string>();
+  for (const match of prompt.matchAll(/(?:^|[\s`"'(])(\/[^\s`"'<>]+)/g)) {
+    const candidate = cleanPathCandidate(match[1]);
+    if (!candidate) continue;
+    try {
+      // 없는 경로는 만들지 않는다 — 추측으로 사용자 폴더에 흔적을 남기지 않는다. 파일 경로도 작업 폴더가 아니다.
+      if (fs.statSync(candidate).isDirectory()) directories.add(path.resolve(candidate));
+    } catch { /* not an existing path */ }
   }
-  return candidate;
+  return directories.size === 1 ? [...directories][0] : null;
 }
 
 function refreshCareerGraphInBackground(projectPath: string, sink: EventSink, locale: "ko" | "en"): void {
@@ -1071,44 +1059,55 @@ function refreshCareerGraphInBackground(projectPath: string, sink: EventSink, lo
     });
 }
 
-function buildAppEditUserPrompt(prompt: string, appRecord: AppFactoryAppRecord, locale: "ko" | "en"): string {
+type CurrentUserEnvelope = "one" | "host-facts" | "automation-edit" | "automation-run" | "session" | "preference";
+
+/** Closed framing belongs to each declared body, never to an interleaved owner turn. */
+function closedCurrentUserPart(part: DeclaredPromptPart, envelope: CurrentUserEnvelope): DeclaredPromptPart {
+  const frames = {
+    one: { id: "purpose.one.invocation.frame", revision: 2, open: "[Agentlas One execution boundary]", close: "[/Agentlas One execution boundary]" },
+    "host-facts": { id: "user.current.host-facts.frame", revision: 1, open: "[Host-confirmed facts for this run]", close: "[/Host-confirmed facts for this run]" },
+    "automation-edit": { id: "user.current.automation-edit.frame", revision: 1, open: "[Agentlas automation edit contract]", close: "[/Agentlas automation edit contract]" },
+    "automation-run": { id: "user.current.automation-run.frame", revision: 1, open: "[Agentlas automation execution boundary]", close: "[/Agentlas automation execution boundary]" },
+    session: { id: "user.current.session.frame", revision: 1, open: "[Agentlas session-team policy]", close: "[/Agentlas session-team policy]" },
+    preference: { id: "user.current.preference.frame", revision: 1, open: "[Explicit preference for this turn]", close: "[/Explicit preference for this turn]" },
+  } as const;
+  const frame = frames[envelope];
+  registerDeclaredPromptModule({ id: frame.id, revision: frame.revision, stability: "fixed-policy", changeTriggers: ["release"] });
+  // Framing is a registered static template around one body, not a separate sorted field.
+  return { ...part, text: part.text ? `${frame.open}\n${part.text}\n${frame.close}` : "" };
+}
+
+function currentUserRequestPart(prompt: string): DeclaredPromptPart {
+  return { id: "user.current.request", revision: 1, stability: "turn-context", changeTriggers: ["owner-input", "task", "checkpoint", "child-result", "validation-result"], order: 1000, text: prompt };
+}
+
+/** Labels stay with this exact current-request slot; no text parsing or authority reconstruction. */
+function labelCurrentUserRequest(parts: readonly DeclaredPromptPart[], label: string): DeclaredPromptPart[] {
+  return parts.map(part => part.id === "user.current.request" ? { ...part, text: `${label}\n${part.text ?? ""}` } : part);
+}
+
+function composeCurrentUserPrompt(parts: readonly DeclaredPromptPart[]): string {
+  return purposePrompt(parts, "\n\n");
+}
+
+function buildAppEditUserPromptParts(prompt: string, appRecord: AppFactoryAppRecord, locale: "ko" | "en"): DeclaredPromptPart[] {
   const appRoute = `/apps/generated?id=${appRecord.id}`;
   const manifestJson = JSON.stringify(appRecord.manifest, null, 2).slice(0, 7000);
-  const guide =
-    locale === "ko"
-      ? [
-          "기존 Agentlas 생성 App 수정 요청이다.",
-          "새 App이나 새 Surface를 만들지 말고, 아래 App rootPath의 기존 구현 파일을 수정하라.",
-          "사용자 저장 상태, 편집본, 데이터 파일은 보존하고 필요한 변경만 적용하라.",
-          "수정 뒤 가능하면 타입체크/스모크/렌더 검증을 실행하고 결과를 짧게 한국어로 보고하라.",
-        ].join("\n")
-      : [
-          "This is an edit request for an existing generated Agentlas App.",
-          "Do not create a new App or new Surface. Modify the existing implementation under the App rootPath below.",
-          "Preserve saved state, user edits, and data files; apply only the requested changes.",
-          "After editing, run a focused typecheck/smoke/render verification when practical and report briefly.",
-        ].join("\n");
   return [
-    guide,
-    "",
-    `App id: ${appRecord.id}`,
-    `App name: ${appRecord.appName}`,
-    `Apps registry route: ${appRoute}`,
-    `Root path: ${appRecord.rootPath}`,
-    `Launch URL: ${appRecord.scaffold.launchUrl || appRecord.previewPath}`,
-    `Dev command: ${appRecord.scaffold.devCommand || "node scripts/serve.mjs"}`,
-    `Preview path: ${appRecord.previewPath}`,
-    `Status: ${appRecord.status}`,
-    "",
-    "Current manifest:",
-    manifestJson,
-    "",
-    `User edit request:\n${prompt}`,
-    "",
-    locale === "ko"
-      ? `완료 후 CTA: [Apps에서 확인하기](${appRoute})`
-      : `Finish with CTA: [Open in Apps](${appRoute})`,
-  ].join("\n");
+    { id: "user.current.app-edit.guide", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], text: "app edit: modify the existing implementation under the root path below (no new App or Surface); keep saved state, user edits and data files; run a focused typecheck/smoke/render check when practical and report briefly" },
+    { id: "user.current.app-edit.snapshot", revision: 1, stability: "task-context", changeTriggers: ["task", "plan-revision"], order: 0, text: [
+      `App id: ${appRecord.id}`, `App name: ${appRecord.appName}`, `Apps registry route: ${appRoute}`,
+      `Root path: ${appRecord.rootPath}`, `Launch URL: ${appRecord.scaffold.launchUrl || appRecord.previewPath}`,
+      `Dev command: ${appRecord.scaffold.devCommand || "node scripts/serve.mjs"}`,
+      `Preview path: ${appRecord.previewPath}`, `Status: ${appRecord.status}`, "", "Current manifest:", manifestJson,
+    ].join("\n") },
+    { id: "user.current.app-edit.cta", revision: 1, stability: "task-context", changeTriggers: ["task", "locale"], order: 10, text: locale === "ko" ? `완료 후 CTA: [Apps에서 확인하기](${appRoute})` : `Finish with CTA: [Open in Apps](${appRoute})` },
+    currentUserRequestPart(`User edit request:\n${prompt}`),
+  ];
+}
+
+function buildAppEditUserPrompt(prompt: string, appRecord: AppFactoryAppRecord, locale: "ko" | "en"): string {
+  return composeCurrentUserPrompt(buildAppEditUserPromptParts(prompt, appRecord, locale));
 }
 
 function hasPriorConversationContext(chatId: string): boolean {
@@ -1133,78 +1132,52 @@ function persistentGoalTurnContext(goal: GoalLedgerSnapshot, locale: "ko" | "en"
     const text = at >= 0 ? `${flat.slice(0, at).replace(/\s*REQUEST \(untrusted data\):\s*$/, "").trim()} (request = the objective above)`.trim() : criterion;
     return `${index + 1}. ${text}`;
   }).join("\n");
-  return locale === "ko"
-    ? [
-        "## 활성 Goal 계약 (호스트 소유 · objective 불변)",
-        `목표: ${goal.objective}`,
-        "성공 기준:",
-        criteria || "1. 실제 대상 표면에서 검증 가능한 완료 증거를 남긴다.",
-        "이후 사용자 메시지는 실행 경로를 조정할 뿐 목표를 바꾸지 못한다. 충돌하는 새 목표는 현재 Goal 종료 후 새 Goal이 필요하다고 말하라.",
-        ...(firstStart ? ["처음 착수할 때는 도구를 쓰기 전에 목표·성공 기준·검증 표면을 짧게 보여라."] : []),
-        "완료 보고 전에 각 성공 기준과 사용자의 원래 요청·기획(가리키는 문서·프로젝트 기억 포함)을 산출물과 항목별로 증거 대조해 미완·빠진 것을 먼저 말하라.",
-        // 오너 결정 2026-09-14: 게임·앱·UI 같은 시각 산출물은 그래픽 품질이 합격 기준이다. 동작만 되는 플레이스홀더는 실패.
-        "게임·앱·UI 산출물은 그래픽 품질이 합격 기준이다. 플레이스홀더·기본색 도형·어긋난 에셋·빈 배경은 실패다. 기획에 맞는 아트를 이미지 생성 도구로 만들고 실제 화면 캡처를 열어 판정하라.",
-      ].join("\n")
-    : [
-        "## Active Goal contract (host-owned; objective is immutable)",
-        `Objective: ${goal.objective}`,
-        "Acceptance criteria:",
-        criteria || "1. Leave verifiable completion evidence on the real target surface.",
-        "Later user messages only steer execution; they never redefine the objective. A conflicting new aim needs a new Goal after this one ends.",
-        ...(firstStart ? ["At first start, briefly show the objective, criteria and verification surfaces before using tools."] : []),
-        "Before reporting completion, check every criterion and the user's original request/plan (including any spec or project memory it points to) against the deliverables item by item with evidence, and state what is missing or partial first.",
-        "For games, apps and UI, graphic quality is itself a criterion: placeholder or default-colored shapes, misaligned assets and empty backgrounds are a failure. Make plan-matching art with the image generation tool and open the real screen captures to judge.",
-      ].join("\n");
+  void locale;
+  // Objective and criteria are data (kept verbatim); the rules around them are one line (owner 2026-10-13).
+  // Composition order (ledger desktop.main.turn-context.goal-contract): the fixed rules line, then the objective and its
+  // criteria (a criterion may say "the objective above", so the objective stays before the criteria), then the first-start line.
+  return [
+    "goal rules: later messages steer, never redefine (a new aim → a new Goal after this one); before reporting done, check every criterion and the original request/plan (and any spec or memory it points to) against the deliverables with evidence, missing first; games/apps/UI: graphic quality is a criterion (no placeholders or default shapes; make plan-matching art, judge real screen captures)",
+    `goal (host-owned, objective immutable): ${goal.objective}`,
+    "criteria:",
+    criteria || "1. Leave verifiable completion evidence on the real target surface.",
+    ...(firstStart ? ["first start: show objective, criteria and verification surfaces briefly before tools"] : []),
+  ].join("\n");
+}
+
+function buildPlanUserPromptParts(prompt: string, locale: "ko" | "en"): DeclaredPromptPart[] {
+  void locale;
+  return [
+    { id: "user.current.plan.guide", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], text: "plan mode: first a short user-facing plan (order, evidence to verify, risks/unknowns), then proceed; call it done only with real verification" },
+    currentUserRequestPart(`User request:\n${prompt}`),
+  ];
 }
 
 function buildPlanUserPrompt(prompt: string, locale: "ko" | "en"): string {
-  const guide =
-    locale === "ko"
-      ? [
-          "Agentlas Plan mode가 켜져 있다.",
-          "바로 실행으로 뛰어들기 전에 사용자에게 읽히는 짧은 작업 계획을 먼저 세워라.",
-          "계획에는 작업 순서, 실제 확인할 증거, 위험하거나 아직 모르는 부분을 포함하라.",
-          "필요한 실행은 계획 뒤에 이어서 하되, 완료라고 말할 때는 실제 검증 결과를 함께 말하라.",
-        ].join("\n")
-      : [
-          "Agentlas Plan mode is enabled.",
-          "Before jumping into execution, first write a concise user-facing work plan.",
-          "Include the order of work, the evidence you will verify, and any risks or unknowns.",
-          "Then proceed when appropriate, and only call the work complete with real verification results.",
-        ].join("\n");
-  return `${guide}\n\nUser request:\n${prompt}`;
+  return composeCurrentUserPrompt(buildPlanUserPromptParts(prompt, locale));
+}
+
+function buildRecommendedPipelineUserPromptParts(parts: readonly DeclaredPromptPart[], stages: RecStage[], locale: "ko" | "en"): DeclaredPromptPart[] {
+  void locale;
+  const stageLines = stages.map(stage => [
+    `${stage.order}. ${stage.kind}`,
+    stage.agentId ? `agent: ${stage.agentName ?? stage.agentId} (${stage.agentId})` : undefined,
+    stage.consumes?.length ? `consumes: ${stage.consumes.join(", ")}` : undefined,
+    stage.produces?.length ? `produces: ${stage.produces.join(", ")}` : undefined,
+  ].filter(Boolean).join(" | ")).join("\n");
+  return [
+    { id: "user.current.pipeline.guide", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 10, text: "pipeline: the stages below are an execution contract; define each stage's input packet (inputType, inputKind, brief, consumes, expectedOutput, constraints), carry each output into the next, synthesize one answer; a stage that cannot call its own agent runs here and you say so" },
+    { id: "user.current.pipeline.stages", revision: 1, stability: "task-context", changeTriggers: ["plan-revision"], order: 20, text: `Recommended stages:\n${stageLines}` },
+    ...labelCurrentUserRequest(parts, "User request:"),
+  ];
 }
 
 function buildRecommendedPipelineUserPrompt(prompt: string, stages: RecStage[], locale: "ko" | "en"): string {
-  const stageLines = stages
-    .map((stage) =>
-      [
-        `${stage.order}. ${stage.kind}`,
-        stage.agentId ? `agent: ${stage.agentName ?? stage.agentId} (${stage.agentId})` : undefined,
-        stage.consumes?.length ? `consumes: ${stage.consumes.join(", ")}` : undefined,
-        stage.produces?.length ? `produces: ${stage.produces.join(", ")}` : undefined,
-      ]
-        .filter(Boolean)
-        .join(" | "),
-    )
-    .join("\n");
-  const guide =
-    locale === "ko"
-      ? [
-          "Agentlas 추천 파이프라인 모드가 켜져 있다.",
-          "아래 stage들을 단순 장식이 아니라 실행 계약으로 취급하라.",
-          "먼저 각 stage에 들어갈 input packet을 정하라: inputType, inputKind, brief, consumes, expectedOutput, constraints.",
-          "각 stage의 산출물을 다음 stage 입력으로 넘기고, 마지막에 하나의 사용자 답변으로 종합하라.",
-          "실제로 별도 로컬/Hub 에이전트를 호출할 수 없는 stage가 있으면, 그 한계를 숨기지 말고 현재 런타임의 오케스트레이션으로 처리했다고 표시하라.",
-        ].join("\n")
-      : [
-          "Agentlas recommended pipeline mode is enabled.",
-          "Treat the stages below as an execution contract, not visual decoration.",
-          "First define each stage input packet: inputType, inputKind, brief, consumes, expectedOutput, and constraints.",
-          "Carry each stage output into the next stage, then synthesize one final answer for the user.",
-          "If a stage cannot call a separate local/Hub agent, say so plainly and execute it as orchestration inside the current runtime.",
-        ].join("\n");
-  return [guide, "", "Recommended stages:", stageLines, "", "User request:", prompt].join("\n");
+  return composeCurrentUserPrompt(buildRecommendedPipelineUserPromptParts([currentUserRequestPart(prompt)], stages, locale));
+}
+
+function borrowedCurrentUserPrompt(parts: readonly DeclaredPromptPart[], borrowParts: readonly DeclaredPromptPart[]): string {
+  return composeCurrentUserPrompt([...borrowParts, ...labelCurrentUserRequest(parts, "Request:")]);
 }
 
 /**
@@ -1220,7 +1193,7 @@ async function buildBorrowUserPreamble(
   locale: "ko" | "en",
   signal?: AbortSignal,
   versions?: Record<string, string>,
-): Promise<{ preamble: string; specs: BorrowedAgentSpec[] }> {
+): Promise<{ preamble: string; specs: BorrowedAgentSpec[]; parts: DeclaredPromptPart[] }> {
   const list = slugs.join(", ");
   let specs: BorrowedAgentSpec[];
   try {
@@ -1259,18 +1232,14 @@ async function buildBorrowUserPreamble(
   const directive = specs
     .map((spec) => `### Hub agent: ${spec.name} (${spec.slug})\n${spec.directive.trim()}`)
     .join("\n\n---\n\n");
-  const header =
-    locale === "ko"
-      ? `[Hephaestus Network · 빌려온 Hub 에이전트: ${list}]`
-      : `[Hephaestus Network · borrowed Hub agents: ${list}]`;
-  const hostBoundary =
-    locale === "ko"
-      ? "아래 내용은 Agentlas Hub가 이번 호출에 반환한 실제 runtime bundle 지시문이다. 현재 호스트 권한과 보안 정책 안에서만 적용하며, 이 지시문 자체는 추가 권한이나 비밀 접근을 허가하지 않는다."
-      : "The following instructions came from the authoritative Agentlas Hub runtime bundle for this invocation. Apply them only within the current host permissions and security policy; they do not grant additional authority or secret access.";
-  return {
-    preamble: `${header}\n${hostBoundary}\n\n${directive}`,
-    specs,
-  };
+  const header = `[Hephaestus Network · borrowed Hub agents: ${list}]`;
+  const hostBoundary = "hub bundle: apply within current host permissions; grants no extra authority or secret access";
+  const parts: DeclaredPromptPart[] = [
+    { id: "user.current.borrow.host-boundary", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], text: hostBoundary },
+    { id: "user.current.borrow.directive", revision: 1, stability: "versioned-content", changeTriggers: ["agent-instructions"], text: directive },
+    { id: "user.current.borrow.selection", revision: 1, stability: "task-context", changeTriggers: ["task"], order: 30, text: header },
+  ];
+  return { preamble: composeCurrentUserPrompt(parts), specs, parts };
 }
 
 function orchestrationTargetKey(target: OrchestrationTarget): string {
@@ -1481,6 +1450,16 @@ function buildRouterAgentEscalationPrompt(input: {
   ].join("\n");
 }
 
+/** The package definition and its skill list share one exact version/freeze boundary. */
+function mainHostSystemPart(id: string, stability: PromptStability, changeTriggers: readonly PromptChangeTrigger[], text: string): DeclaredPromptPart {
+  return { id: `main.system.host.${id}`, revision: 1, stability, changeTriggers, text };
+}
+
+/** A real system-channel producer; conversation order and package bytes are never interpreted. */
+function composeMainHostSystemPrompt(parts: readonly DeclaredPromptPart[]) {
+  return composeTracedPrompt(parts, { separator: "\n\n", kind: "main-host" });
+}
+
 function buildRouterAgentSystemPreamble(input: {
   routerAgent: RecRouterAgent;
   userPrompt: string;
@@ -1489,7 +1468,7 @@ function buildRouterAgentSystemPreamble(input: {
   selectedAgent: InstalledAgent;
   autoRoute: AutoRouteChoice | null;
   borrowedAgents?: string[];
-}): { preamble: string; loadedModuleIds: string[] } | null {
+}): { preamble: string; loadedModuleIds: string[]; parts: DeclaredPromptPart[] } | null {
   const agentId = input.routerAgent.agent.trim();
   if (!agentId || (agentId !== ROUTER_AGENT_ID && agentId !== ROUTER_SYSTEM_AGENT.id)) return null;
   const escalationPrompt = buildRouterAgentEscalationPrompt(input);
@@ -1505,7 +1484,12 @@ function buildRouterAgentSystemPreamble(input: {
     "### Escalation directive",
     escalationPrompt,
   ].join("\n");
-  return { preamble, loadedModuleIds: assembled.loadedModuleIds };
+  const parts = [
+    mainHostSystemPart("router.heading", "fixed-policy", ["release"], "## Agentlas Router Agent escalation"),
+    ...assembled.parts.map(part => mainHostSystemPart(`router.${part.id}`, "fixed-policy", ["release"], part.text)),
+    mainHostSystemPart("router.directive", "turn-context", ["task", "owner-input", "locale"], `### Escalation directive\n${escalationPrompt}`),
+  ];
+  return { preamble, loadedModuleIds: assembled.loadedModuleIds, parts };
 }
 
 type AutomationRegistrationResult = {
@@ -1835,31 +1819,21 @@ const ONE_TASK_SURFACE_RECIPE_GUIDANCE =
 let oneTaskSurfaceJudgmentModule: typeof import("../system-agents/judgment") | null = null;
 
 function oneTaskSurfaceRecipeCopy(kind: OneTaskSurfaceRecipeLabel, ko: boolean): string | null {
+  void ko;
+  // One line per recipe (owner 2026-10-13); the Surface field shapes come from read_surface_protocol.
   switch (kind) {
     case "travel":
-      return ko
-        ? "이 여행 결과의 Surface에는 data.schedule={type:'timeline',items:[{title,detail,status,evidenceIds}]}와 widgets.timeline, data.costs={type:'pricing',currency:'KRW',limit,items:[{label,amount,verificationStatus,evidenceIds}]}와 widgets.cost-summary, data.checklist={type:'launch-checklist',items:[{label,status}]}와 widgets.launch-checklist를 반드시 각각 넣으세요. 숫자·날짜가 있는 일정/비용 항목에는 반드시 Surface evidence에 존재하는 id를 evidenceIds로 연결하고, 출처 없는 추정값에는 trust:'estimated'를 넣으세요. 일정·예산·체크리스트를 markdown이나 하나의 table로 합치지 마세요. 좌표를 실제로 확인했을 때만 data.routes={type:'routes',items:[{label,latitude,longitude,evidenceIds}]}와 widgets.map을 추가하세요."
-        : "This travel Surface must separately include data.schedule={type:'timeline',items:[{title,detail,status,evidenceIds}]} with widgets.timeline, data.costs={type:'pricing',currency,limit,items:[{label,amount,verificationStatus,evidenceIds}]} with widgets.cost-summary, and data.checklist={type:'launch-checklist',items:[{label,status}]} with widgets.launch-checklist. Every schedule or cost item containing a number or date must reference ids that exist in Surface evidence; use trust:'estimated' for an unsupported estimate. Do not flatten the schedule, budget, and checklist into markdown or one table. Add data.routes={type:'routes',items:[{label,latitude,longitude,evidenceIds}]} with widgets.map only for coordinates actually verified.";
+      return purposePrompt([{ id: `purpose.surface.recipe.${kind}`, revision: 3, stability: "task-context", changeTriggers: ["release", "task", "owner-input"], text: "recipe travel: data.schedule type=timeline + widgets.timeline; data.costs type=pricing(currency,limit,items) + widgets.cost-summary; data.checklist type=launch-checklist + widgets.launch-checklist; dates/prices evidenceIds or trust:'estimated'; data.routes/widgets.map verified coordinates only" }]);
     case "study":
-      return ko
-        ? "학습 결과는 핵심 설명을 data.summary markdown으로, 풀이·학습 단계를 data.steps table로, 사용자가 할 일을 data.checklist launch-checklist로 분리하세요. 정답만 쓰지 말고 단계의 순서를 보존하세요."
-        : "Separate the learning result into a concise data.summary markdown explanation, ordered data.steps table, and data.checklist launch-checklist for practice. Preserve the reasoning steps instead of returning only the answer.";
+      return purposePrompt([{ id: `purpose.surface.recipe.${kind}`, revision: 3, stability: "task-context", changeTriggers: ["release", "task", "owner-input"], text: "recipe study: summary explains; steps keep ordered solution/reasoning; checklist practice" }]);
     case "document":
-      return ko
-        ? "문서 결과는 data.summary markdown과, 실제 파일 생성에 성공한 경우에만 data.artifacts={type:'artifacts',items:[{label,type}]} 및 widgets.report를 사용하세요. 존재하지 않는 파일을 선언하지 마세요."
-        : "Use data.summary markdown for the document result and data.artifacts={type:'artifacts',items:[{label,type}]} only when the file was actually created. Never declare a nonexistent file.";
+      return purposePrompt([{ id: `purpose.surface.recipe.${kind}`, revision: 3, stability: "task-context", changeTriggers: ["release", "task", "owner-input"], text: "recipe document: summary markdown; artifacts/report only for files actually created and kept" }]);
     case "spreadsheet":
-      return ko
-        ? "스프레드시트 결과는 실제 행·열을 data.table과 widgets.table로 보존하고, 실제 파일 생성에 성공한 경우에만 data.artifacts를 추가하세요."
-        : "Preserve actual rows and columns in data.table with widgets.table, and add data.artifacts only if the spreadsheet file was actually created.";
+      return purposePrompt([{ id: `purpose.surface.recipe.${kind}`, revision: 3, stability: "task-context", changeTriggers: ["release", "task", "owner-input"], text: "recipe spreadsheet: table real rows/columns; artifacts only for files actually created and kept" }]);
     case "media":
-      return ko
-        ? "미디어 결과는 실제 입력·생성 자산만 data.media와 widgets.asset-board로 보존하고, 자막·장면·출력 파일은 각각 별도 데이터로 두세요. 생성하지 않은 이미지를 미리보기처럼 선언하지 마세요."
-        : "Use data.media with widgets.asset-board only for actual input or generated assets, keeping scenes, captions, and output files separate. Never declare media that was not created.";
+      return purposePrompt([{ id: `purpose.surface.recipe.${kind}`, revision: 3, stability: "task-context", changeTriggers: ["release", "task", "owner-input"], text: "recipe media: media/asset-board real inputs/generated assets permanently saved; separate scenes/captions/output files" }]);
     case "research":
-      return ko
-        ? "조사·전략 결과는 일반론 요약으로 끝내지 마세요. data.summary에는 사용자가 바로 판단할 결론과 추천 이유를 쓰고, data.table에는 우선순위·대상·채널/방법·바로 할 행동·필요 자원·위험/제약·검증 상태를 넣어 구체적인 선택지를 비교하세요. 정확히 한 행만 recommended로 표시하고, data.checklist에는 추천안을 실제로 시작할 첫 3~7단계를 순서대로 넣으세요. 준비만 한 일을 실행했다고 쓰지 마세요. 이 결과를 document로 판단하고 inspectable, editable, reusable capability에 맞는 후속 행동 2~3개를 반드시 제안하세요. 예를 들어 추천안 실행계획 구체화, 채널별 초안 작성, 측정 기준 설계처럼 방금 결과에서 바로 이어지는 행동이어야 하며 '원본 보기'나 '마무리'는 제안하지 마세요."
-        : "Do not end research or strategy work with generic summary prose. Put the decision-ready conclusion and rationale in data.summary, and compare concrete options in data.table with priority, audience, channel or method, immediate action, required resources, risks or constraints, and verification state. Mark exactly one row recommended. Add the first 3–7 ordered launch steps in data.checklist. Never claim an unexecuted preparation was completed. Treat this result as a document with inspectable, editable, and reusable capabilities and always propose 2–3 next actions that continue directly from the result, such as detailing the recommended execution plan, drafting channel-specific copy, or defining measurement criteria. Never propose viewing an original or finishing here.";
+      return purposePrompt([{ id: `purpose.surface.recipe.${kind}`, revision: 3, stability: "task-context", changeTriggers: ["release", "task", "owner-input"], text: "recipe research: conclusion/why; table concrete options(priority,audience,method,next action,resources,risk,verification), one recommended; checklist first launch steps; preparation ≠ execution; follow-ups continue result within scope" }]);
     default:
       return null;
   }
@@ -1917,7 +1891,8 @@ function deterministicOneCompletionCopy(
       ? "요청한 결과와 파일을 준비했어요. 아래에서 바로 확인할 수 있어요."
       : "Your result and files are ready. You can review them below.";
   }
-  if (types.has("timeline") || (/(?:여행|trip|itinerary)/i.test(prompt) && types.has("pricing"))) {
+  // Dataset types only (docs/2026-10-13-native-harness 04 §3): no wording of the request picks the copy.
+  if (types.has("timeline") || (types.has("pricing") && types.has("launch-checklist"))) {
     return locale === "ko"
       ? "일정과 비용, 준비할 내용을 한눈에 정리했어요."
       : "I organized the schedule, costs, and preparations below.";
@@ -2506,6 +2481,11 @@ async function runMcpInvocationInContext(
   // Persist it at the first safe point after the exact local chat is resolved;
   // later orchestration branches keep calling this idempotent helper.
   persistUserMessage();
+  // The run's own origin: graph tools called later in this run anchor their reports here, never on the conversation's
+  // latest message (a second owner message can arrive while this run is still saving its graph — notyet NH15).
+  if (req.runId && persistedUserMessageId) {
+    tryRecordRunEvent({ runId: req.runId, chatId: chat.id, kind: "origin_user_message", payload: { messageId: persistedUserMessageId } });
+  }
   if (persistedUserMessageId && onDurableUserMessage && !signal?.aborted) {
     try {
       const hookResult = await onDurableUserMessage(persistedUserMessageId);
@@ -2563,6 +2543,15 @@ async function runMcpInvocationInContext(
     }
   } catch (error) {
     console.warn("[local-agent] freshness check unavailable:", error instanceof Error ? error.message : String(error));
+  }
+  // Owner 2026-10-13: an archived agent is not called directly — only the Settings restore button or routing brings it back.
+  // Routing (One's roster pick, task-force targets) restores it; a direct call to it is refused with a typed code.
+  for (const target of req.taskForceTargets ?? []) {
+    if (target.source === "local" && target.entityKind === "agent") restoreAgentForUse(target.agentId);
+  }
+  if (isAgentArchived(chat.agentId)) {
+    sink({ kind: "error", error: { code: "agent_archived", message: tStatus(locale, "errAgentArchived") } });
+    return earlyResult();
   }
   let agent = getAgentById(chat.agentId);
   if (!agent) {
@@ -2670,11 +2659,16 @@ async function runMcpInvocationInContext(
     });
     return earlyResult();
   }
-  let effectiveUserPrompt = isTargetAppEdit && targetApp
-    ? buildAppEditUserPrompt(req.userPrompt, targetApp, locale)
+  let effectiveUserPromptParts: DeclaredPromptPart[] = isTargetAppEdit && targetApp
+    ? buildAppEditUserPromptParts(req.userPrompt, targetApp, locale)
     : req.planMode && !scienceReview
-        ? buildPlanUserPrompt(req.userPrompt, locale)
-        : req.userPrompt;
+        ? buildPlanUserPromptParts(req.userPrompt, locale)
+        : [currentUserRequestPart(req.userPrompt)];
+  let effectiveUserPrompt = composeCurrentUserPrompt(effectiveUserPromptParts);
+  const addEffectiveUserParts = (parts: readonly DeclaredPromptPart[]) => {
+    effectiveUserPromptParts.push(...parts);
+    return composeCurrentUserPrompt(effectiveUserPromptParts);
+  };
   /*
    * What this turn was asked to do, as the agent's experience records it ("이 에이전트는 다음과 같은 요청을
    * 수행한다: …"). A host-written prompt — a Goal continuation, an update resume, One's review of finished work — is
@@ -2686,52 +2680,21 @@ async function runMcpInvocationInContext(
     const taskSurfaceRecipe = oneTaskSurfaceRecipe(req.userPrompt, locale === "ko");
     // Output presentation and optional follow-ups do not constrain the current
     // task's execution authority. Keep them outside the Main-owned team boundary.
-    const oneInvocationInstructions = locale === "ko"
-      ? [
-          "[Agentlas One 실행 경계]",
-          oneTeamExecutionPolicy === "confirmed_existing_roster"
-            ? "Main이 확정한 기존 설치 로스터만 사용하세요. 다른 에이전트나 팀을 검색하거나 추가하지 마세요."
-            : oneTeamExecutionPolicy === "confirmed_external_workforce"
-              ? "사용자가 이 요청에 필요한 Hub Workforce 편성과 실행을 확인했습니다. Hub가 검증하고 고정한 정확한 릴리스만 사용하고, 대체 후보를 조용히 끼워 넣지 마세요."
-              : oneTeamExecutionPolicy === "native_one_staffing"
-                ? "사용자가 요청한 팀원 생성·초대·위임은 기존 One 팀 도구로 실행하세요. 현재 방의 팀원과 세션을 먼저 확인하고 재사용하며, 사용자 요청의 범위와 도구의 권한 검사를 따르세요."
-                : "이 요청은 단일 에이전트 실행입니다. 다른 에이전트나 팀을 검색하거나 추가하지 마세요.",
-          "이 경계를 넓혀야 한다면 실행하지 말고 One에서 새 팀 검토가 필요하다고 알리세요.",
-          "[/Agentlas One 실행 경계]",
-          "",
-          "[Agentlas One 결과 표시 형식]",
-          "아래는 현재 요청의 결과와 선택적 후속 제안을 표시하는 형식입니다. 현재 요청의 실행 범위와 완료 조건은 위의 실행 경계 및 사용자 요청을 따릅니다.",
-          "최종 답변에 '사용 에이전트:', '사용 스킬:' 같은 라우팅 보고를 쓰지 말고 사용자에게 필요한 답부터 바로 시작하세요.",
-          `조사·비교·일정·문서·미디어처럼 구조화할 수 있는 최종 결과는 긴 평문으로 끝내지 말고, 검증한 사실과 출처를 담은 정확히 하나의 기계 판독 Surface를 답변 맨 끝에 ${SURFACE_OPEN_FENCE} JSON ${SURFACE_CLOSE_FENCE} 형식으로 반환하세요. "Agentlas Surface"라는 Markdown 제목이나 가짜 표로 대신하지 마세요. 비교는 data.table·widgets.table/source-matrix, 날짜별 일정은 data.timeline·widgets.timeline, 좌표가 확인된 이동 경로는 data.routes·widgets.map, 예산은 data.pricing의 currency·limit·items(label, amount, verificationStatus), 실제로 만든 파일만 data.artifacts를 사용하세요. 좌표·금액·파일을 추측해 채우지 마세요.`,
-          "Surface의 제목·요약·data.summary에는 사용자가 받을 완성된 결론만 쓰세요. '이제 검색하겠습니다', 도구 호출 계획, 진행 상황, 메모리나 작업 폴더를 확인한 과정은 넣지 마세요. 반환 전에 추천 제목·설명·표의 제품명과 숫자가 서로 모순되지 않는지 다시 확인하세요.",
-          oneFriendlyFollowupProtocol("ko"),
-          "비교 표에는 choice 열을 두고 정확히 한 행만 recommended로 표시하세요. 추천 행을 포함한 모든 행은 사용자가 결정할 핵심 열을 구체적인 값이나 '확인하지 못함' 같은 정직한 상태로 채우세요. 대시(—), 빈칸, 임시 문구로 채우지 말고, 근거가 부족하면 추천을 단정하지 마세요. Surface 문자열 안에는 URL이나 Markdown 링크 문법을 넣지 말고 출처는 evidence에만 넣으세요.",
-          ...(taskSurfaceRecipe ? [taskSurfaceRecipe] : []),
-          "[/Agentlas One 결과 표시 형식]",
-        ].join("\n")
-      : [
-          "[Agentlas One execution boundary]",
-          oneTeamExecutionPolicy === "confirmed_existing_roster"
-            ? "Use only the exact existing installed roster confirmed by Main. Do not search for or add another agent or team."
-            : oneTeamExecutionPolicy === "confirmed_external_workforce"
-              ? "The user confirmed Hub Workforce selection and execution for this request. Use only the exact releases validated and pinned by Hub, and never silently substitute another candidate."
-              : oneTeamExecutionPolicy === "native_one_staffing"
-                ? "Use the existing One team tools for the owner-requested member creation, invitation, or delegation. First inspect and reuse current room members and sessions, respecting the owner request and tool permission checks."
-                : "This is a single-agent run. Do not search for or add another agent or team.",
-          "If the boundary is insufficient, stop and say that a new One team review is required.",
-          "[/Agentlas One execution boundary]",
-          "",
-          "[Agentlas One result format]",
-          "The following formats the current result and optional follow-up proposals. The execution boundary above and the user request govern the current task's execution scope and completion criteria.",
-          "Never include routing reports such as 'Agents used:' or 'Skills used:' in the final answer. Start directly with the answer the user needs.",
-          `For a structured final result such as research, comparison, schedule, document, or media work, do not end with a long plain-text answer. Return exactly one machine-readable Surface at the very end in the form ${SURFACE_OPEN_FENCE} JSON ${SURFACE_CLOSE_FENCE}. Do not substitute a Markdown heading named "Agentlas Surface" or a fake text table. Use data.table with widgets.table/source-matrix for comparisons, data.timeline with widgets.timeline for dated plans, data.routes with widgets.map only for verified coordinates, data.pricing with currency, limit, and items(label, amount, verificationStatus) for budgets, and data.artifacts only for files that were actually created. Never invent coordinates, prices, or files to fill a Surface.`,
-          "Write only the finished user-facing conclusion in the Surface title, summary, and data.summary. Never include future tool plans, progress narration, or checks of memory and work folders. Before returning, verify that the recommendation title, explanation, product names, and numbers in every table do not contradict one another.",
-          oneFriendlyFollowupProtocol("en"),
-          "For a comparison table, include a choice column and mark exactly one row recommended. Fill every decision-critical cell in every row, including the recommended row, with a concrete value or an honest state such as 'not verified'. Never use dashes, blanks, or placeholder copy. If the evidence is insufficient, do not make a definitive recommendation. Put no URL or Markdown link syntax inside Surface strings; keep sources only in evidence.",
-          ...(taskSurfaceRecipe ? [taskSurfaceRecipe] : []),
-          "[/Agentlas One result format]",
-        ].join("\n");
-    effectiveUserPrompt = `${oneInvocationInstructions}\n\n${effectiveUserPrompt}`;
+    // Each body is independently closed before ordering; the unchanged Taskforce
+    // display consumer can never strip an interleaved owner slot with a host block.
+    const oneInvocationInstructions: DeclaredPromptPart[] = [
+      { id: "purpose.one.invocation.result", revision: 3, stability: "fixed-policy", changeTriggers: ["release"], text: `result: no routing openers; a structured result (research, comparison, schedule, document, media) ends with exactly one ${SURFACE_OPEN_FENCE} JSON ${SURFACE_CLOSE_FENCE} Surface (read_surface_protocol or exact host-delivered Surface contract); its title/summary is the finished conclusion only; comparisons: a choice column, exactly one recommended row, every key cell a value or "not verified"; sources only in evidence (no links in strings); never invent coordinates, prices or files; numbers and names must not contradict each other` },
+      { id: "purpose.one.invocation.followups", revision: 2, stability: "configuration", changeTriggers: ["locale"], text: oneFriendlyFollowupProtocol(locale === "ko" ? "ko" : "en") },
+      { id: "purpose.one.invocation.recipe", revision: 3, stability: "task-context", changeTriggers: ["task", "owner-input"], text: taskSurfaceRecipe },
+      { id: "purpose.one.invocation.authority", revision: 2, stability: "final-boundary", changeTriggers: ["permission", "tool-grant", "task"], text: `boundary: ${oneTeamExecutionPolicy === "confirmed_existing_roster"
+        ? "only the exact installed roster Main confirmed; no other agent or team"
+        : oneTeamExecutionPolicy === "confirmed_external_workforce"
+          ? "only the Hub Workforce releases the owner confirmed and Hub pinned; never a silent substitute"
+          : oneTeamExecutionPolicy === "native_one_staffing"
+            ? "the owner-requested member creation/invitation/delegation through the One team tools; reuse current room members and sessions first"
+            : "single-agent run; no other agent or team"}; need more → stop and say a new One team review is needed` },
+    ];
+    effectiveUserPrompt = addEffectiveUserParts(oneInvocationInstructions.map(part => closedCurrentUserPart(part, "one")));
   }
   // 자동화 세션에서 온 사용자 채팅: 이 자동화의 실시간 수정 계약을 앞에 세운다.
   // 오너 결정 2026-08-19: 채팅 리얼타임 수정이 본선이고 편집 버튼은 보조다. 실측:
@@ -2745,28 +2708,12 @@ async function runMcpInvocationInContext(
       const target = listAutomations().find((a) => a.id === req.automationId);
       if (target) {
         const graphJson = target.graph ? JSON.stringify(target.graph) : null;
-        const editContract = locale === "ko"
-          ? [
-              "[Agentlas 자동화 편집 계약]",
-              `이 대화는 자동화 "${target.name}"의 세션입니다. 사용자가 이 자동화의 동작·조건·스케줄·단계를 바꾸라고 지시하면, 답변 끝에 \`## Automation\` 블록을 방출하세요 — name을 정확히 "${target.name}"으로 두고, 바뀐 전체 graph를 함께 실으면 호스트가 즉시 이 자동화에 적용합니다. 이것이 이 자동화를 바꾸는 유일한 경로입니다.`,
-              graphJson ? `현재 graph: ${graphJson}` : "현재 graph: (없음 — 단일 프롬프트 자동화)",
-              "터미널 graph CLI(`agentlas graph`, hep-graph 스킬)는 다른 저장소를 편집하므로 이 자동화에는 절대 사용하지 마세요. 그것으로는 이 자동화가 바뀌지 않습니다.",
-              "적용했다고 말하기 전에 반드시 블록을 방출하세요 — 방출 없는 적용 보고는 거짓이 됩니다.",
-              "등록 게이트: 반복 실행 자동화의 action 단계 프롬프트에 80자 이상 고정 인용문을 박으면 **거부되어 아무것도 바뀌지 않습니다**(같은 글이 매번 나가면 플랫폼이 중복으로 막습니다). 사용자가 특정 문구를 주더라도, 그 문구는 지켜야 할 **사실·링크·해시태그**로 옮기고 매 실행 새 문안을 짓도록 프롬프트를 쓰세요. 고정 인용을 고집해야 한다면 적용됐다고 말하지 말고, 왜 거부되는지 먼저 알리고 선택지를 제시하세요.",
-              "[/Agentlas 자동화 편집 계약]",
-            ].join("\n")
-          : [
-              "[Agentlas automation edit contract]",
-              `This chat is the session of automation "${target.name}". When the user asks to change its behavior, filters, schedule or steps, emit an \`## Automation\` block at the end of your reply — keep name exactly "${target.name}" and include the full updated graph; the host applies it to THIS automation immediately. That block is the only path that changes this automation.`,
-              graphJson ? `Current graph: ${graphJson}` : "Current graph: (none — single-prompt automation)",
-              "Never use the terminal graph CLI (`agentlas graph`, the hep-graph skill) for this purpose — it edits a different store and this automation will not change.",
-              "Emit the block before claiming the change was applied — a claim without the block is false.",
-              "Registration gate: pinning a quoted payload of 80+ characters inside an action step's prompt on a recurring automation is **refused, and nothing changes** (posting identical text every run gets blocked as duplicate content). Even when the user hands you exact copy, carry it as the facts, links and hashtags that must survive, and have the prompt compose fresh wording each run. If exact pinned text is truly required, do not claim the change was applied — say why it is refused and offer the choice.",
-              "[/Agentlas automation edit contract]",
-            ].join("\n");
-        effectiveUserPrompt = `${editContract}
-
-${effectiveUserPrompt}`;
+        const editContract: DeclaredPromptPart[] = [
+          closedCurrentUserPart({ id: "user.current.automation-edit.guide", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 20, text: "never the terminal graph CLI (another store); claim the change only after emitting the block; a recurring action prompt pinning 80+ chars of quoted text is refused → carry facts/links/hashtags and compose fresh wording each run" }, "automation-edit"),
+          closedCurrentUserPart({ id: "user.current.automation-edit.target", revision: 1, stability: "task-context", changeTriggers: ["task", "plan-revision"], order: 40, text: `automation: this chat edits "${target.name}"; to change it, end the reply with a \`## Automation\` block named exactly "${target.name}" holding the full updated graph (the only path; call read_automation_protocol for the format)` }, "automation-edit"),
+          closedCurrentUserPart({ id: "user.current.automation-edit.graph", revision: 1, stability: "task-context", changeTriggers: ["plan-revision"], order: 50, text: graphJson ? `graph: ${graphJson}` : "graph: none (single-prompt automation)" }, "automation-edit"),
+        ];
+        effectiveUserPrompt = addEffectiveUserParts(editContract);
       }
     } catch {
       // 계약 주입 실패가 대화 자체를 막으면 안 된다.
@@ -2778,24 +2725,11 @@ ${effectiveUserPrompt}`;
       source: project.sourceType,
       connected: Boolean(project.folderPath || project.sourceRef),
     }));
-    const automationBoundary = locale === "ko"
-      ? [
-          "[Agentlas 자동화 실행 경계]",
-          "최종 결과에 사용 에이전트, 사용 스킬, 라우팅, 런타임 같은 내부 운용 보고를 노출하지 마세요.",
-          "프로젝트를 임의로 선택하거나 존재하지 않는다고 단정하지 마세요. 아래 프로젝트 목록과 자동화에 결합된 문맥만 근거로 판단하고, 확정할 수 없으면 사용자에게 필요한 짧은 질문을 결과로 제시하세요.",
-          `사용 가능한 프로젝트: ${JSON.stringify(availableProjects)}`,
-          "완료된 사용자 결과부터 바로 작성하세요.",
-          "[/Agentlas 자동화 실행 경계]",
-        ].join("\n")
-      : [
-          "[Agentlas automation execution boundary]",
-          "Do not expose internal routing reports such as agents used, skills used, routing, or runtime details in the final result.",
-          "Do not choose a project arbitrarily or claim that none exists. Judge only from the project list below and the context bound to this automation; if the project cannot be determined, return the short question the user needs to answer.",
-          `Available projects: ${JSON.stringify(availableProjects)}`,
-          "Start directly with the finished user result.",
-          "[/Agentlas automation execution boundary]",
-        ].join("\n");
-    effectiveUserPrompt = `${automationBoundary}\n\n${effectiveUserPrompt}`;
+    const automationBoundary: DeclaredPromptPart[] = [
+      closedCurrentUserPart({ id: "user.current.automation-run.guide", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 30, text: "automation run: start with the finished result; no routing/runtime reports; pick a project only from this list and the bound context (unclear → return the short question):" }, "automation-run"),
+      closedCurrentUserPart({ id: "user.current.automation-run.projects", revision: 1, stability: "task-context", changeTriggers: ["task", "capability-inventory"], order: 60, text: JSON.stringify(availableProjects) }, "automation-run"),
+    ];
+    effectiveUserPrompt = addEffectiveUserParts(automationBoundary);
   }
   if (req.sessionRouting) {
     const incumbentRoster = [agent.nameEn || agent.name || agent.slug].filter(Boolean);
@@ -2809,71 +2743,27 @@ ${effectiveUserPrompt}`;
           }
         })()
       : null;
-    const rentPolicyLines = rentAllowed === null
-      ? []
-      : locale === "ko"
-        ? [rentAllowed.length > 0
-            ? `Hub 자동 사용은 이 프로젝트에서 허용된 에이전트로만 제한됩니다: ${rentAllowed.join(", ")}. 그 밖의 Hub 에이전트는 사용자가 명시적으로 지목한 경우에만 부르세요.`
-            : "이 프로젝트는 자동 사용이 허용된 Hub 에이전트가 없습니다. 사용자가 명시적으로 지목하지 않는 한 Hub 에이전트를 자동으로 호출하지 마세요."]
-        : [rentAllowed.length > 0
-            ? `Hub auto-use is limited to the agents this project allows: ${rentAllowed.join(", ")}. Call any other Hub agent only when the user explicitly names it.`
-            : "This project has no Hub agents enabled for automatic use. Call one only when the user explicitly names it."];
-    const sessionRoutingPolicy = locale === "ko"
-      ? [
-          "[Agentlas 세션 팀 정책]",
-          `현재 세션 팀: ${incumbentRoster.join(", ")}`,
-          "이 팀이 요청을 수행할 수 있으면 그대로 수행하세요. 매 메시지마다 전역 에이전트를 검색하거나 다른 에이전트 이름을 끼워 넣지 마세요.",
-          "현재 팀에 실제 역량·도구 공백이 있을 때만 사용 가능한 Agentlas Workforce/Hephaestus 도구로 Agent Hub 또는 Cloud에서 필요한 최소 인원만 동적으로 보강하세요.",
-          ...rentPolicyLines,
-          "보강이 필요하면 이유와 새로 합류한 역할만 짧게 알리고, 관련 없는 휴면 에이전트는 언급하지 마세요.",
-          "[/Agentlas 세션 팀 정책]",
-        ].join("\n")
-      : [
-          "[Agentlas session-team policy]",
-          `Current session team: ${incumbentRoster.join(", ")}`,
-          "If this team can complete the request, keep it and execute. Do not globally search or inject unrelated agent names on every message.",
-          "Only on a genuine capability or tool gap, use available Agentlas Workforce/Hephaestus tools to recruit the minimum required role from Agent Hub or Cloud.",
-          ...rentPolicyLines,
-          "When recruiting, state the gap and the newly joined role briefly; never mention unrelated dormant agents.",
-          "[/Agentlas session-team policy]",
-        ].join("\n");
-    effectiveUserPrompt = `${sessionRoutingPolicy}\n\n${effectiveUserPrompt}`;
+    const rentPolicy = rentAllowed === null
+      ? ""
+      : rentAllowed.length > 0
+        ? `; Hub auto-use only: ${rentAllowed.join(", ")} (others only when the user names them)`
+        : "; no Hub agent auto-use (only when the user names one)";
+    const sessionRoutingPolicy: DeclaredPromptPart[] = [
+      closedCurrentUserPart({ id: "user.current.session.guide", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 40, text: "keep it when it can do the work; only a real capability gap → recruit the minimum role via Workforce (Hub/Cloud) and say which and why" }, "session"),
+      closedCurrentUserPart({ id: "user.current.session.roster", revision: 1, stability: "task-context", changeTriggers: ["task", "agent-instructions"], order: 70, text: `team: ${incumbentRoster.join(", ")}` }, "session"),
+      closedCurrentUserPart({ id: "user.current.session.rent-policy", revision: 1, stability: "task-context", changeTriggers: ["task", "project-instructions"], order: 80, text: rentPolicy }, "session"),
+    ];
+    effectiveUserPrompt = addEffectiveUserParts(sessionRoutingPolicy);
   }
   if (req.oneMode && req.stormbreakerMode === true) {
-    const oneStormbreakerPreference = locale === "ko"
-      ? [
-          "[이번 턴의 명시적 실행 선호]",
-          "사용자가 이번 턴에 Stormbreaker 사용을 명시적으로 선호했습니다.",
-          "One이 유일한 컨트롤러로 남아 필요성을 판단하고, 유용할 때만 하위 실행·검증·복구 루프를 사용하세요.",
-          "이 선호는 세션 소유권이나 다음 턴으로 전파되지 않습니다.",
-          "[/이번 턴의 명시적 실행 선호]",
-        ].join("\n")
-      : [
-          "[Explicit preference for this turn]",
-          "The user explicitly prefers Stormbreaker for this turn.",
-          "One remains the sole controller and may use subordinate execution, verification, and repair loops only when useful.",
-          "This preference changes neither session ownership nor later turns.",
-          "[/Explicit preference for this turn]",
-        ].join("\n");
-    effectiveUserPrompt = `${oneStormbreakerPreference}\n\n${effectiveUserPrompt}`;
+    effectiveUserPrompt = addEffectiveUserParts([
+      closedCurrentUserPart({ id: "user.current.preference.stormbreaker", revision: 1, stability: "turn-context", changeTriggers: ["owner-input"], order: 10, text: "stormbreaker: the user prefers it this turn; you stay the only controller and use its execute/verify/repair loops only when useful; not carried to later turns" }, "preference"),
+    ]);
   }
   if (req.oneMode && req.fastMode === true) {
-    const oneFastPreference = locale === "ko"
-      ? [
-          "[이번 턴의 빠른 실행 선호]",
-          "단일 직접 패스로 처리하고, 반복 실행·Stormbreaker·하위 실행은 시작하지 마세요.",
-          "요청을 끝낼 수 없으면 추측하거나 재시도하지 말고 필요한 다음 조건만 짧게 제시하세요.",
-          "이 선호는 다음 턴으로 전파되지 않습니다.",
-          "[/이번 턴의 빠른 실행 선호]",
-        ].join("\n")
-      : [
-          "[Fast execution preference for this turn]",
-          "Use one direct pass. Do not start repeat execution, Stormbreaker, or subordinate execution.",
-          "If the request cannot finish, do not guess or retry; state only the next condition needed.",
-          "This preference does not carry into later turns.",
-          "[/Fast execution preference for this turn]",
-        ].join("\n");
-    effectiveUserPrompt = `${oneFastPreference}\n\n${effectiveUserPrompt}`;
+    effectiveUserPrompt = addEffectiveUserParts([
+      closedCurrentUserPart({ id: "user.current.preference.fast", revision: 1, stability: "turn-context", changeTriggers: ["owner-input"], order: 0, text: "fast: one direct pass; no repeat execution, Stormbreaker or sub-runs; cannot finish → state only the next condition needed, no guessing or retry; not carried to later turns" }, "preference"),
+    ]);
   }
   // `/hep-network` now enters the host-LLM Agent Workforce Ontology path.
   // The old lexical recommendation path remains available only as the explicit
@@ -2897,18 +2787,21 @@ ${effectiveUserPrompt}`;
       return earlyResult();
     }
     req = { ...req, userPrompt: routedGoal, borrowAgents: undefined, taskForceTargets: undefined };
-    effectiveUserPrompt = routedGoal;
+    effectiveUserPromptParts = [currentUserRequestPart(routedGoal)];
+    effectiveUserPrompt = composeCurrentUserPrompt(effectiveUserPromptParts);
   }
   const borrowedAgentSlugs = [...new Set((req.borrowAgents ?? []).map((slug) => slug.trim()).filter(Boolean))];
   // 이번 턴에 사용자가 대상을 직접 지목했는가. 아래 경로들이 req를 다시 만들며
   // taskForceTargets를 지우므로, 지목 사실은 여기서 한 번 붙잡아 둔다.
   const userNamedTargetsThisTurn = (req.taskForceTargets?.length ?? 0) > 0;
   let explicitBorrowUserPreamble: string | null = null;
+  let explicitBorrowUserParts: DeclaredPromptPart[] = [];
   let explicitBorrowSpecs: BorrowedAgentSpec[] = [];
   let explicitBorrowMemoryKeys: string[] = [];
   const explicitBorrowOwnerScopeKey = activeBorrowedOwnerScopeKey();
   if (req.pipelineStages && req.pipelineStages.length > 0) {
-    effectiveUserPrompt = buildRecommendedPipelineUserPrompt(effectiveUserPrompt, req.pipelineStages, locale);
+    effectiveUserPromptParts = buildRecommendedPipelineUserPromptParts(effectiveUserPromptParts, req.pipelineStages, locale);
+    effectiveUserPrompt = composeCurrentUserPrompt(effectiveUserPromptParts);
   }
 
   // 추천 시트 네트워크 모드(단일) — 고른 Hub 에이전트를 빌려와 프롬프트 앞에 borrow 지시를 붙인다(BYOM).
@@ -2938,6 +2831,7 @@ ${effectiveUserPrompt}`;
         req.borrowVersions,
       );
       explicitBorrowUserPreamble = preparedBorrow.preamble;
+      explicitBorrowUserParts = preparedBorrow.parts;
       explicitBorrowSpecs = preparedBorrow.specs;
       explicitBorrowMemoryKeys = preparedBorrow.specs.map((spec) =>
         borrowedMemoryKey(spec.agentDefinitionId!, spec.agentReleaseId!)
@@ -3467,10 +3361,11 @@ ${effectiveUserPrompt}`;
     emitControllerRuntimeFallback(controllerFallbackBeforeRun, null);
   }
   if (oneTeamExecutionPolicy) {
-    const hostRunFacts = locale === "ko"
-      ? `[이번 실행의 호스트 확인 사실]\n모델=${active.model ?? active.kind}; 권한=${req.permissions}. 최종 답변에서 모델·권한·사용 에이전트를 보고해야 하면 이 사실을 그대로 사용하세요. 확인된 선택을 '요청만 됨', '독립 확인 불가' 또는 일반 모델명으로 바꿔 쓰지 마세요.\n[/이번 실행의 호스트 확인 사실]`
-      : `[Host-confirmed facts for this run]\nmodel=${active.model ?? active.kind}; permission=${req.permissions}. If the final answer reports model, permission, or agents used, use these facts exactly. Never downgrade a confirmed selection to merely requested or independently unverifiable, and never replace it with a generic model name.\n[/Host-confirmed facts for this run]`;
-    effectiveUserPrompt = `${hostRunFacts}\n\n${effectiveUserPrompt}`;
+    const hostRunFacts: DeclaredPromptPart[] = [
+      closedCurrentUserPart({ id: "user.current.host-facts.reporting", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 50, text: 'report exactly these when asked (never "requested only", "unverifiable" or a generic name)' }, "host-facts"),
+      closedCurrentUserPart({ id: "user.current.host-facts.settings", revision: 1, stability: "configuration", changeTriggers: ["runtime", "permission"], text: `model=${active.model ?? active.kind}; permission=${req.permissions}` }, "host-facts"),
+    ];
+    effectiveUserPrompt = addEffectiveUserParts(hostRunFacts);
   }
   if (explicitWorkforceGoal && !isWorkforceLeaderRuntimeAllowed(active.kind)) {
     sink({
@@ -3567,6 +3462,9 @@ ${effectiveUserPrompt}`;
   // Goal turns that get goal_wait / goal_complete from agentlas-turn (same turns the wait/completion text is injected on).
   const turnGoalToolsOffered = Boolean(req.runId) && !scienceRecovery && !req.agentAppMode && chat.kind !== "division"
     && !effectObservationRun && !roomMemberTurn && !executionContext && (Boolean(getChatGoalId(chat.id)) || (req.goalMode === true && canWrite));
+  // ask_form is offered on attended runs only (not unattended, Mobile durable, app-mode or division runs).
+  const turnAskToolOffered = Boolean(req.runId) && !(isUnattendedExecution(executionContext) && !isAliveControllerRun)
+    && !usesMobileDurableDecision(executionContext) && !req.agentAppMode && chat.kind !== "division";
   // One Team attached to a Work task as a Toolchain consumer: it may search and run, not author.
   let mcpToolchainConsumer = false;
   let mcpAutoSelectionPrompt = "";
@@ -4021,6 +3919,8 @@ ${effectiveUserPrompt}`;
       }
       mcpPrepStage = "config-build";
       const cfg = await buildMcpConfigFile({
+        osMemoryCuratorRun: captureNativeOsCuratorRun({ runId: req.runId!, model: confirmedRuntime.model ?? "",
+          current: isMcpConfigCurrent, signal }),
         supervisorReplyRunId: req.runId,
         nativeScopedSelectionForServer: scopedMcpPreflight.selectionForServer,
         // Graph nodes can share a runId. Every preparation, including doctor
@@ -4028,6 +3928,7 @@ ${effectiveUserPrompt}`;
         configKey: `invocation-${randomUUID()}`,
         ...(req.runId ? { turnRunId: req.runId } : {}),
         ...(turnGoalToolsOffered ? { turnGoalTools: true as const } : {}),
+        ...(turnAskToolOffered ? { turnAskTool: true as const } : {}),
         admissionCurrent: isMcpConfigCurrent,
         ...(nativeBrowserGrant ? { nativeBrowser: nativeBrowserGrant } : {}),
         ...(workspacePreviewOwnerGrant ? { workspacePreviewOwnerGrant } : {}),
@@ -4294,9 +4195,14 @@ ${effectiveUserPrompt}`;
      */
     ephemeralToolGrant = (scienceGrant as { sessionScoped?: true }).sessionScoped !== true;
     mcpIncludedServers = [scienceGrant.includedServer];
-    mcpAutoSelectionPrompt = scienceReview ? "Independently assess the reserved scientific input. All tools and native runtime actions remain read-only. Only read_criterion_review_input is granted; do not create research state or borrow another agent. Return the exact requested findings JSON." : planReadOnly
-      ? "Agentlas Science Plan mode is read-only for files, shell, and research state. Only the exact granted discovery tools may be called. Describe a plan without creating contracts, hypotheses, studies, artifacts, approvals, downloads, or other state. Unavailable research tools remain unavailable until a separate execution turn."
-      : `Agentlas Science owns this research session and its Science Lab tools. Choose the tools relevant to the user request from the live catalog and returned descriptors; Desktop tools are available through the Science bridge when listed. Follow any route and limits in the Science surface context and each tool receipt. Ground claims about prior research, novelty, citations, and measured results in returned source IDs or provider receipts; distinguish metadata from verified full text and disclose partial failures. Do not invent data, artifacts, external effects, or completion receipts. Stop when the user stops or a host authority becomes stale. Respond as Agentlas Science without the One or Hope prefix. Native file and shell actions follow the selected runtime permission and project workspace. Claim a research state change or artifact only after its typed receipt.`.trim();
+    mcpAutoSelectionPrompt = purposePrompt([{
+      id: "purpose.science.session.scope", revision: 2, stability: "configuration", changeTriggers: ["release", "profile", "permission", "tool-grant"],
+      text: scienceReview
+      ? "science review: independent, read-only; only read_criterion_review_input; no research state, no borrowed agents; return the exact requested findings JSON"
+      : planReadOnly
+        ? "science plan: read-only (files, shell, research state); only the granted discovery tools; describe the plan, create no state"
+        : "science: Agentlas Science owns this session; pick tools from the live catalog; claims cite returned source ids or receipts; metadata ≠ full text; disclose partial failure; typed receipt before state claims; respect stale grants/Stop; reply as Agentlas Science (no Hope prefix)",
+    }]);
   }
 
   // Alive is a separate actor: its attachment, not its hidden Work chat or
@@ -4316,7 +4222,7 @@ ${effectiveUserPrompt}`;
       || typeof science.revokeAliveScienceMcpGrant !== "function") {
       // An older installed Science pin must not stop the Alive actor's other
       // branches. It receives no Science tools and is told so explicitly.
-      mcpAutoSelectionPrompt = "The attached Science tool bridge is unavailable in this installed build. No Science tools are granted; do not claim a Science tool call or receipt. You may still reason about the observed state and propose only a host-validated action.";
+      mcpAutoSelectionPrompt = "science bridge: unavailable in this build; no Science tools, claim no Science call or receipt; reason about observed state and propose only host-validated actions";
     } else {
       const aliveGrant = await science.materializeAliveScienceMcpGrant(authority, { cwd: workingFolder ?? agentRunCwd() });
       let releaseAliveDesktopTools: (() => void) | undefined;
@@ -4347,10 +4253,10 @@ ${effectiveUserPrompt}`;
       mcpRuntimeEnv = aliveGrant.runtimeEnv;
       mcpIncludedServers = [aliveGrant.includedServer];
       const canProposeAliveHypothesis = aliveGrant.allowedTools.some((tool) => tool.endsWith("__alive_propose_research_hypothesis"));
-      mcpAutoSelectionPrompt = "The attached Agentlas Science playground is available through its separately granted tools. Read exact project state before decisions. Its tool authority is separate from your Alive identity and from the LLM runtime. Do not claim a tool action without its receipt."
+      mcpAutoSelectionPrompt = "science bridge: current grant only, separate from Alive identity; read project state; honor expiry/Stop; exact receipt before action claims"
         + (canProposeAliveHypothesis
-          ? " You may call alive_propose_research_hypothesis for an evidence-bound proposal; Science independently requires a current standing hypothesis grant and may refuse. Copy wake_id exactly from this wake's host-provided context. A proposal is not an approval or an experimental result; inspect the returned receipt before changing your plan."
-          : " No Alive-specific Science write tool is granted in this installed build; do not claim you changed research state through one.");
+          ? "; alive_propose_research_hypothesis: evidence-bound proposal, copy wake_id exactly, Science may refuse, a proposal is not approval or a result"
+          : "; no Alive Science write tool in this build");
       ephemeralToolGrant = aliveGrant.sessionScoped !== true;
       const previousCleanup = mcpConfigCleanup;
       mcpConfigCleanup = () => {
@@ -4859,6 +4765,7 @@ ${effectiveUserPrompt}`;
               systemPrompt: turn.systemPrompt,
               history: [],
               userPrompt: turn.userPrompt,
+              ...(turn.outputSchema ? { outputSchema: turn.outputSchema } : {}),
               // Attachments stay inside the selected local/BYOM leader runtime. Hub receives
               // only the validated redacted WorkOrder, never image bytes or attachment paths.
               images: req.images,
@@ -5395,7 +5302,7 @@ ${effectiveUserPrompt}`;
       if (org.divisions.length > 0) {
         try {
           const firmUserPrompt = explicitBorrowUserPreamble
-            ? `${explicitBorrowUserPreamble}\n\nRequest:\n${effectiveUserPrompt}`
+            ? borrowedCurrentUserPrompt(effectiveUserPromptParts, explicitBorrowUserParts)
             : effectiveUserPrompt;
           assertMcpGoalSelectionCurrent();
           await runFirmInvocation({
@@ -5440,6 +5347,8 @@ ${effectiveUserPrompt}`;
     && !executionContext?.aliveScience && !effectObservationRun);
   // Agent instructions are stable; task-selected host context is transported per turn.
   let systemPrompt = effectivePromptFor(agent);
+  const systemContextParts: DeclaredPromptPart[] = [mainHostSystemPart("agent-definition", "versioned-content",
+    ["agent-instructions", "skill-package"], systemPrompt)];
   // ── 턴 컨텍스트 — 사용자 프롬프트에 따라 매 턴 달라지는 주입(메모리 캡슐·온톨로지·
   // MCP 자동선택·브리핑 게이트·Experience/Taste)은 시스템 프롬프트가 아니라 여기 모은다.
   // 시스템 프롬프트를 턴마다 바꾸면 CLI 세션 지문이 매번 달라져 대화 연속성이 전멸한다
@@ -5449,30 +5358,39 @@ ${effectiveUserPrompt}`;
   const turnContextParts: string[] = [];
   // 세션 내내 같은 블록 — resume 턴에서 러너가 최근 보낸 것을 생략한다(runner.turnContextStable).
   const stableTurnContextParts: string[] = [];
+  // Declared lifetime of each collector block, by its slot (docs/PROMPT-COMPOSITION-POLICY.md, ledger
+  // desktop.main.turn-context.collector); the turn context is ordered by it at serialization (orderPromptParts).
+  const turnContextDeclarations = new Map<number, PromptOrderingMetadata>();
+  const declareLastTurnContext = (id: string, stability: PromptStability, changeTriggers: readonly PromptChangeTrigger[]): void => {
+    turnContextDeclarations.set(turnContextParts.length - 1, { id, stability, changeTriggers });
+  };
+  /** The block just pushed stays the same for the session: resume turns drop it once acknowledged. */
+  const keepLastTurnContext = (id: string, stability: PromptStability, changeTriggers: readonly PromptChangeTrigger[]): void => {
+    const last = turnContextParts[turnContextParts.length - 1];
+    stableTurnContextParts.push(last);
+    declareLastTurnContext(id, stability, changeTriggers);
+  };
   // Set when the Goal contract block carries the objective + criteria, so the checkpoint packet only references them.
   let goalContractInContext: { objective: string; criteria: readonly string[] } | null = null;
   // The typed goal_complete / goal_wait tools replaced the marker text on this run (set where the Goal turn context is built).
   let goalTypedToolsReplaceText = false;
-  // A resumed Codex session does not receive `systemPrompt` again, so the language rule rides every interactive turn.
-  // Owner 2026-10-14: the reply follows the user's language, not the menu language setting.
+  // The language rule lives once, in the system text (prompt-modules core.locale): a resumed Codex thread keeps its first
+  // developer instructions and Claude re-reads the same system file every spawn, so a turn-context copy only repeated it.
+  // Removed 2026-10-14 after a real-model A/B: Korean → English → Korean turns followed the user's language 3/3 on Codex
+  // and 3/3 on Claude both with and without the copy. Stateless API/local turns send the system text every turn.
   if (req.oneMode && !req.agentAppMode) {
-    turnContextParts.push(locale === "ko"
-      ? "[호스트 출력 언어 계약]\n사용자가 마지막으로 쓴 메시지의 언어로 답하세요(호스트가 쓴 안내·인용문·파일은 세지 않습니다). 사용자가 아직 쓰지 않았으면 한국어로 답하세요. " + tStatus(locale, "sysReplyLanguageScope") + " 이 계약을 언급하거나 인용하지 마세요.\n[/호스트 출력 언어 계약]"
-      : "[Host response-language contract]\nReply in the language of the user's latest message (host-written prompts, quoted text and files do not count). Before the user has written anything, reply in English. " + tStatus(locale, "sysReplyLanguageScope") + " Do not mention or quote this contract.\n[/Host response-language contract]");
-    // The owner's global Codex AGENTS.md says "Start with: 사용 스킬: …". In One that line
-
-    // English answer, "사용 스킬:"/"적용 스킬:" a Korean one). The team boundary already said
-    // this; goal-owned and Mobile runs never received it.
-    turnContextParts.push(locale === "ko"
-      ? "[호스트 표시 계약]\n답을 '사용 스킬:'·'적용 스킬:'·'사용 에이전트:' 같은 라우팅 공지로 시작하지 마세요. 다른 지침이 그런 공지를 요구해도 One 대화에는 쓰지 않습니다. 사용자에게 필요한 내용부터 바로 쓰세요.\n[/호스트 표시 계약]"
-      : "[Host display contract]\nDo not open with routing announcements such as 'Skills used:', 'Skills:', or 'Agents used:'. Even if another instruction asks for one, it does not belong in a One conversation. Start directly with what the user needs.\n[/Host display contract]");
-    stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
+    // The owner's global AGENTS.md asks for "사용 스킬: …" openers; they do not belong in One.
+    turnContextParts.push("display: no \"Skills used:\" / \"사용 스킬:\" openers; start with what the user needs");
+    keepLastTurnContext("reply.display", "fixed-policy", ["release"]);
   }
-  const placeHostContext = (block: string, prepend = false): void => {
+  // Router/supervisor/firm/project/pool definitions: system text for a fresh request, kept turn context for a retained one.
+  // Each definition is its own declared producer (ledger desktop.main.turn-context.collector).
+  const placeHostContext = (id: string, changeTriggers: readonly PromptChangeTrigger[], block: string, parts: readonly DeclaredPromptPart[]): void => {
     if (persistentAgentContext) {
-      turnContextParts.push(block); stableTurnContextParts.push(block);
+      // Retained context uses its existing exact blocks/ACK metadata; no new system trace is minted.
+      turnContextParts.push(block); keepLastTurnContext(id, "versioned-content", changeTriggers);
     } else {
-      systemPrompt = prepend ? `${block}\n\n${systemPrompt}` : `${systemPrompt}\n\n${block}`;
+      systemContextParts.push(...parts);
     }
   };
   // One immutable project snapshot per execution boundary. All supported runner
@@ -5485,7 +5403,7 @@ ${effectiveUserPrompt}`;
     : compileProjectInstructionSnapshot({ projectDir: resolvedResultFolder });
   // An empty snapshot (no project instruction files) carries no information; a removal delta alone does not warrant one.
   if (projectInstructions.snapshot.sources.length > 0) {
-    turnContextParts.push(renderInstructionSnapshot(projectInstructions.snapshot)); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
+    turnContextParts.push(renderInstructionSnapshot(projectInstructions.snapshot)); keepLastTurnContext("project.instructions", "versioned-content", ["project-instructions"]);
   }
   /*
    * 보고서로 낼지는 에이전트가 정한다(오너 지시 2026-08-24). 호스트는 글의
@@ -5494,28 +5412,32 @@ ${effectiveUserPrompt}`;
    * 보고서다" 라고 스스로 밝히는 표식 하나를 알려 준다.
    */
   if (req.oneMode && !req.agentAppMode) {
-    turnContextParts.push(locale === "ko"
-      ? "[보고서 표식]\n이번 답이 읽을 문서(보고서·기획서·조사 결과·제안서처럼 목차가 있고 나중에 다시 꺼내 볼 글)라면, 답 맨 앞에 다음 세 줄을 그대로 두고 그 아래 마크다운 본문을 쓰세요.\n---\ndocument: <문서 제목>\n---\n그러면 대화가 아니라 문서로 그려지고, 사람이 마크다운이나 PDF로 받아 갈 수 있습니다. 짧은 답·잡담·한두 문단 설명에는 쓰지 마세요. 쓸지 말지는 당신이 판단합니다. 이 표식을 설명하거나 언급하지 마세요.\n[/보고서 표식]"
-      : "[Document marker]\nIf this answer is a document to read (a report, plan, research write-up, or proposal — something with sections that will be opened again later), begin the answer with exactly these three lines and write the markdown body below them.\n---\ndocument: <document title>\n---\nIt is then rendered as a document rather than chat, and the person can take it away as Markdown or PDF. Do not use it for short answers, small talk, or a paragraph or two. Whether to use it is your judgment. Never explain or mention this marker.\n[/Document marker]");
+    turnContextParts.push("document: a document to keep (report, plan, proposal) starts with the lines `---`, `document: <title>`, `---`; never for short answers");
     // Same text every turn: a resumed native session already has it (runner dedupe, continuity.ts).
-    stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
+    keepLastTurnContext("reply.document", "fixed-policy", ["release"]);
   }
   /*
    * 차트·시각물·agentlas-ui 계약은 더 이상 턴 맥락에 넣지 않는다(오너 2026-10-12: 사용자 프롬프트
    * 단어장이 아니라 모델이 도구로 판단). 시스템 프롬프트의 한 줄 규칙이 read_ui_schema 호출을 지시하고,
    * 그 도구(agentlas-ui 내장 MCP)가 스키마와 차트·시각물 안내를 돌려준다.
    */
+  // One output needs the exact contract even if this run cannot discover a reader.
+  // In-process providers have lazy menus/unprobed tool capability; never rely on a nonexistent reader.
+  if (oneTeamExecutionPolicy && (!mcpIncludedServers.some(row => row.catalogId === AGENTLAS_UI_CATALOG_ID)
+    || RUNTIME_MCP_SUPPORT[active.kind]?.delivery === "in-process-loop")) {
+    turnContextParts.push(SURFACE_PROTOCOL); keepLastTurnContext("surface.protocol.execution", "fixed-policy", ["release"]);
+  }
   // An installed agent's entry file names its own docs by relative path; the run works in the owner's project.
   {
     const agentFolder = agentPromptFolder(agent.id);
     if (agentFolder) {
-      const block = `[Agent folder]\n${agentFolder}\nRelative paths in your instructions (docs/, contracts/, tools/, ...) are files in that folder; read them there. Work and deliver in the current working directory.\n[/Agent folder]`;
-      turnContextParts.push(block); stableTurnContextParts.push(block);
+      const block = `agent folder: ${agentFolder} (your relative paths; deliver to the working folder)`;
+      turnContextParts.push(block); keepLastTurnContext("agent.folder", "versioned-content", ["agent-instructions"]);
     }
   }
   // 표면 안내는 프롬프트가 아니라 이 턴의 맥락으로 들어간다.
   if (executionContext?.surfaceContext?.trim()) {
-    turnContextParts.push(executionContext.surfaceContext.trim());
+    turnContextParts.push(executionContext.surfaceContext.trim()); declareLastTurnContext("surface.state", "turn-context", ["task"]);
   }
   // One context remains Main-selected regardless of whether the chat is shown
   // in Desktop, on its paired Mobile remote, or in the paired Telegram channel.
@@ -5527,19 +5449,21 @@ ${effectiveUserPrompt}`;
       ? mainOneProfileContext(req)
       : "";
   // Persona and approved profile repeat verbatim; held reports change, and a changed block is always sent again.
-  if (approvedOneContext) { turnContextParts.push(approvedOneContext); stableTurnContextParts.push(approvedOneContext); }
+  if (approvedOneContext) { turnContextParts.push(approvedOneContext); keepLastTurnContext("owner.definition", "versioned-content", ["owner-profile"]); }
   const approvedOneAttachmentContext = !workspaceBinding && !req.agentAppMode
     ? mainOneAttachmentContext(req)
     : "";
-  if (approvedOneAttachmentContext) turnContextParts.push(approvedOneAttachmentContext);
+  if (approvedOneAttachmentContext) { turnContextParts.push(approvedOneAttachmentContext); declareLastTurnContext("attachments.one", "turn-context", ["attachments"]); }
   const approvedWorkAttachmentContext = mainWorkAttachmentContext(req, resolvedResultFolder);
-  if (approvedWorkAttachmentContext) turnContextParts.push(approvedWorkAttachmentContext);
+  if (approvedWorkAttachmentContext) { turnContextParts.push(approvedWorkAttachmentContext); declareLastTurnContext("attachments.work", "turn-context", ["attachments"]); }
   if (autoRoute) {
-    placeHostContext(autoRouteSystemPreamble(
+    const routePreamble = autoRouteSystemPreamble(
       autoRoute,
       locale,
       isTargetAppEdit ? "app-edit" : req.appsGenerateMode ? "apps-generate" : "default",
-    ), true);
+    );
+    placeHostContext("host.auto-route", ["agent-instructions", "task"], routePreamble,
+      [mainHostSystemPart("auto-route", "task-context", ["agent-instructions", "task"], routePreamble)]);
   }
   const routerAgentPreamble = routerAgent
     ? buildRouterAgentSystemPreamble({
@@ -5553,7 +5477,7 @@ ${effectiveUserPrompt}`;
       })
     : null;
   if (routerAgentPreamble) {
-    placeHostContext(routerAgentPreamble.preamble, true);
+    placeHostContext("host.router", ["agent-instructions", "task"], routerAgentPreamble.preamble, routerAgentPreamble.parts);
     sink({
       kind: "tool-use",
       status:
@@ -5588,22 +5512,18 @@ ${effectiveUserPrompt}`;
     // No question/option counts here: the host parser decides (extractAskFences, shared/ask-fence-flatten.ts:28-29,98-100:
     // at most 8 questions per reply, 2-8 options each, unfilled templates dropped). Prose counts only contradicted ASK_PROTOCOL.
     turnContextParts.push(
-      `## Briefing gate (before executing)\n` +
-      `Judge silently: is the GOAL specific, are the CONSTRAINTS stated, is the SUCCESS CRITERION checkable? ` +
-      `If all are clear, ask NOTHING — always so for a greeting, a pure question, a reaction or an already-specific instruction. ` +
-      `Length is not a signal; a short request can be the heaviest one. ` +
-      `If a dimension is genuinely unclear on an execution-shaped request, ask once about the weakest of: anti-scope, smallest acceptable version, ` +
-      `done signal, audience (the ask mechanism is below), then STOP. After the answers, restate the goal in one sentence and proceed; ` +
-      `record what stays open as assumptions ('decide later' is a valid answer).`,
+      "briefing: judge silently whether goal, constraints and done-criterion are clear; clear (or a greeting/question) → ask nothing; an unclear execution request → ask once about the weakest (anti-scope, smallest version, done signal, audience), then stop; after answers restate the goal in one sentence and proceed, open points as assumptions",
     );
-    stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
+    keepLastTurnContext("briefing.contract", "fixed-policy", ["release"]);
   }
   if (invocationProjectId) {
     const project = getProject(invocationProjectId);
     if (project?.systemPrompt) {
-      placeHostContext(`${tStatus(locale, "projectContext", {
+      const projectDefinition = `${tStatus(locale, "projectContext", {
         name: project.name,
-      })}\n${project.systemPrompt}`);
+      })}\n${project.systemPrompt}`;
+      placeHostContext("host.project", ["project-instructions"], projectDefinition,
+        [mainHostSystemPart("project", "versioned-content", ["project-instructions", "locale"], projectDefinition)]);
     }
     if (project?.agentPool.length) {
       const userFacingPool = project.agentPool.filter((member) => {
@@ -5634,19 +5554,16 @@ ${effectiveUserPrompt}`;
           : `- ${label} [${member.entityKind}; ${member.source}; ${member.releaseId ?? "local"}]`;
       }).join("\n");
       if (pool) {
-        const poolContext = `## Project tool pool\n${pool}\n` +
-          `You are the task orchestrator for this project and own decomposition, staffing, execution, and verification. ` +
-          `The saved rows are unordered reusable tools, not session owners or a mandatory chain. Use suitable project tools first. ` +
-          `A row with a call handle is a remote Agentlas agent: call it directly with the Hephaestus call tool (hephaestus_call, agents set to that exact handle); do not search, recruit, or rename it to find it again. ` +
-          // 실측(2026-09-26): 호출은 저장된 Cloud 행과 같은 package_hash 로 정확히 돌았는데, 결과의
-          // agent_id "hub:<slug>" 와 agr_ 릴리스 id 가 저장 토큰(rev_…)과 모양이 달라 모델이
-          // "공개 Hub판이 대신 불렸고 릴리스가 다르다"고 사용자에게 거짓 보고했다. 이름공간 차이를 알려 준다.
-          `The saved revision is a catalog token, not a release id: a successful call may report agd_/agr_ ids and an agent_id of the form "hub:<slug>" even for your own Cloud agent. Those alone do not mean a public substitute or a different release ran; do not tell the user so unless the call itself reports an error or mismatch. ` +
-          `When a WorkOrder has a genuine capability or tool gap, use the available Agentlas Workforce/Hephaestus tools ` +
-          `to recruit the minimum suitable role from Network (Local + owner Cloud + public Hub). ` +
-          `Any recruited worker is scoped to that WorkOrder and must not mutate the saved project team. ` +
-          `Do not ask the user to type @ or choose internal roles; @ is only an optional one-turn manual override.`;
-        placeHostContext(poolContext);
+        // A call handle is the source's own identifier (measured 2026-09-26: guessed slugs failed). A successful call may
+        // report agd_/agr_ ids and "hub:<slug>" even for the owner's Cloud agent; that is not a substitute release.
+        const poolRoster = `project tools (unordered, reusable; you decompose, staff, run and verify):\n${pool}\n`;
+        const poolPolicy = "pool: a call handle → hephaestus_call with that exact handle (agd_/agr_/hub: ids in its result are normal, not a substitute); " +
+          "a real gap → recruit the minimum role via Workforce (Local + Cloud + Hub), scoped to that work order, never into the saved team; never ask the user to type @";
+        const poolContext = poolRoster + poolPolicy;
+        placeHostContext("host.project-pool", ["agent-instructions"], poolContext, [
+          mainHostSystemPart("project-pool.policy", "fixed-policy", ["release"], poolPolicy),
+          mainHostSystemPart("project-pool.roster", "versioned-content", ["agent-instructions", "capability-inventory"], poolRoster),
+        ]);
       }
     }
   }
@@ -5662,11 +5579,17 @@ ${effectiveUserPrompt}`;
             }`,
         )
         .join("\n");
-      placeHostContext(
-        `${tStatus(locale, "firmContext", { name: firm.name })}\n` +
-        `${tStatus(locale, "firmCeoGuide")}\n` +
-        `${tStatus(locale, "firmOrgChart")}\n${roster}\n` +
-        tStatus(locale, "firmDelegateNote"));
+      const firmIdentity = tStatus(locale, "firmContext", { name: firm.name });
+      const firmRole = tStatus(locale, "firmCeoGuide");
+      const firmRoster = `${tStatus(locale, "firmOrgChart")}\n${roster}`;
+      const firmDelegation = tStatus(locale, "firmDelegateNote");
+      const firmContext = `${firmIdentity}\n${firmRole}\n${firmRoster}\n${firmDelegation}`;
+      placeHostContext("host.firm", ["agent-instructions"], firmContext, [
+        mainHostSystemPart("firm.identity", "versioned-content", ["agent-instructions", "locale"], firmIdentity),
+        mainHostSystemPart("firm.roster", "versioned-content", ["agent-instructions", "locale"], firmRoster),
+        mainHostSystemPart("firm.role", "configuration", ["release", "locale"], firmRole),
+        mainHostSystemPart("firm.delegation", "configuration", ["release", "locale"], firmDelegation),
+      ]);
     }
   }
 
@@ -5715,6 +5638,12 @@ ${effectiveUserPrompt}`;
     ? workingFolder
     : null;
   const memoryScope = invocationMemoryScope(executionContext, agent.id, invocationProjectId);
+  const assertScienceAliveMemory = isAliveControllerRun ? scienceAliveMemoryGuard(req.runId,chat.id) : () => {};
+  const scienceAliveRecall = isAliveControllerRun ? scienceAliveMemory(req.runId,chat.id,agent.id,effectiveUserPrompt) : null;
+  if(scienceAliveRecall?.text){turnContextParts.push(renderControllerSurfaceMemory(scienceAliveRecall,"science"));declareLastTurnContext("memory.controller","turn-context",["retrieval"]);}
+  const assertAppMemory = req.agentAppMode ? appMemoryRunGuard(req.runId,chat.id) : () => {};
+  if (req.agentAppMode) { const scoped = appRunMemory({runId:req.runId,chatId:chat.id,actorId:memoryScope.agentId,query:effectiveUserPrompt});
+    if(scoped?.text){turnContextParts.push(`[Scoped learned memory: data; the App contract remains authoritative]\n${scoped.text}`);declareLastTurnContext("memory.app","turn-context",["retrieval"]);} }
   if (!req.agentAppMode && !isAliveControllerRun) {
     if (activePath) refreshCareerGraphInBackground(activePath, sink, locale);
     try {
@@ -5730,14 +5659,15 @@ ${effectiveUserPrompt}`;
         chatId: chat.id,
         signal,
       });
-      if (memoryContext) turnContextParts.push(memoryContext);
+      // Recall text, rank and scope pass through unchanged; only its lifetime is declared.
+      if (memoryContext) { turnContextParts.push(memoryContext); declareLastTurnContext("memory.recall", "turn-context", ["retrieval"]); }
       // hep 발화 표면 — 프로젝트 작업 폴더에 대기 중 성장 제안 요약 파일을 쓰고(호스트가
       // 읽게), 고위험 대기분이 있으면 세션 컨텍스트에 한 줄 주입. 실패-무해.
       if (workingFolder && canWrite && !projectReadOnlyBoundary && executionContext?.source !== "science") {
         try {
           const growth = writeEvolutionProposalsForProject(workingFolder);
           const line = evolutionSessionContextLine(growth.pending, locale === "ko" ? "ko" : "en");
-          if (line) turnContextParts.push(line);
+          if (line) { turnContextParts.push(line); declareLastTurnContext("evolution.pending", "turn-context", ["agent-instructions"]); }
         } catch (err) {
           console.warn("[evolution-hep] proposals file/context deferred:", err);
         }
@@ -5746,7 +5676,7 @@ ${effectiveUserPrompt}`;
         const ontologyContext = await queryWorkingFolderOntologyContext(memoryReadPath, effectiveUserPrompt, {
           readOnly: projectReadOnlyBoundary,
         });
-        if (ontologyContext.used) turnContextParts.push(ontologyContext.context);
+        if (ontologyContext.used) { turnContextParts.push(ontologyContext.context); declareLastTurnContext("memory.ontology", "turn-context", ["retrieval"]); }
         // The query above is deliberately read-only so a slow ingest never
         // blocks the answer, but that path never fills the DB. When this turn
         // has write authority over the folder, kick off a background ingest so
@@ -5761,112 +5691,22 @@ ${effectiveUserPrompt}`;
     }
     throwIfInvocationAborted(signal, locale);
   }
-  let experienceApplication: ReturnType<typeof buildExperienceContext>["application"];
-  let experienceContextPartIndex = -1;
-  let experienceStablePartIndex = -1;
-  let remoteOperationalSnapshot: Awaited<ReturnType<typeof resolveDesktopOperationalRuntimeSession>> = null;
-  if (!req.agentAppMode && !isAliveControllerRun) {
-    try {
-      // Runs before Taste so a previously approved next-session loadout is
-      // activated once for this new chat. The local task and chat id stay local.
-      remoteOperationalSnapshot = await resolveDesktopOperationalRuntimeSession({
-        sessionId: chat.id,
-        installedAgentId: agent.id,
-      });
-    } catch (err) {
-      console.error("[architecture] Hub Operational runtime overlay skipped:", err);
-    }
-  }
-  let tasteSnapshot: Awaited<ReturnType<typeof resolveDesktopTasteRuntimeSession>> = null;
-  if (!req.agentAppMode && !isAliveControllerRun) {
-    try {
-      tasteSnapshot = await resolveDesktopTasteRuntimeSession({
-        sessionId: chat.id,
-        installedAgentId: agent.id,
-      });
-    } catch (err) {
-      // A missing/offline/revoked/malformed Taste projection degrades to the
-      // exact base agent and cannot block the invocation.
-      console.error("[architecture] Taste runtime overlay skipped:", err);
-    }
-  }
-  const applicableTasteSnapshot = tasteSnapshot && tasteRuntimeOverlayMatchesTask(tasteSnapshot.overlay, effectiveUserPrompt)
-    ? tasteSnapshot
-    : null;
-  if (!req.agentAppMode && !isAliveControllerRun) {
-    const applicableRemoteOperational = remoteOperationalSnapshot && operationalRuntimeOverlayMatchesTask(
-      remoteOperationalSnapshot.overlay,
-      effectiveUserPrompt,
-    ) ? remoteOperationalSnapshot : null;
-    if (applicableRemoteOperational) {
-      turnContextParts.push(applicableRemoteOperational.directive); stableTurnContextParts.push(applicableRemoteOperational.directive);
-      sink({
-        kind: "tool-use",
-        status: locale === "ko"
-          ? "문제 해결 경험 적용 · 이 대화에 고정"
-          : "Problem-solving experience applied · fixed for this conversation",
-      });
-    } else {
-      try {
-        const experienceContext = memoryScope.agentId ? buildExperienceContext({
-          agentId: memoryScope.agentId,
-          projectId: memoryScope.projectId,
-          projectPath: suppressMutableProjectContext ? null : workingFolder,
-          environment: { platform: process.platform, arch: process.arch, runtimeKind: active.kind },
-          basePackageHash: agent.packageHash ?? null,
-          task: effectiveUserPrompt,
-          reservedApproxTokens: applicableTasteSnapshot?.overlay.estimatedTokens ?? 0,
-        }) : null;
-        if (experienceContext?.prompt) {
-          experienceContextPartIndex = turnContextParts.length;
-          experienceStablePartIndex = stableTurnContextParts.length;
-          turnContextParts.push(experienceContext.prompt); stableTurnContextParts.push(experienceContext.prompt);
-          experienceApplication = experienceContext.application;
-          if (req.runId) {
-            recordContextSourceMarker({
-              runId: req.runId,
-              chatId: chat.id,
-              agentId: agent.id,
-              source: "experience",
-              approxTokens: Math.ceil(Buffer.byteLength(experienceContext.prompt, "utf8") / 3),
-              projectKey: projectContextKey(invocationProjectId, suppressMutableProjectContext ? null : workingFolder),
-            });
-          }
-        }
-      } catch (err) {
-        // Experience is an optional host-local projection. A damaged/missing
-        // projection can never block the base agent or Memory architecture.
-        console.error("[architecture] buildExperienceContext failed:", err);
-      }
-    }
-  }
-  if (!req.agentAppMode && !isAliveControllerRun && applicableTasteSnapshot) {
-    // Taste stays a separate, lower-authority aesthetic overlay. The exact
-    // verified snapshot is frozen for this chat and can change only when a
-    // new runtime session starts.
-    turnContextParts.push(applicableTasteSnapshot.directive); stableTurnContextParts.push(applicableTasteSnapshot.directive);
-    sink({
-      kind: "tool-use",
-      status: locale === "ko"
-        ? "취향 경험 적용 · 이 대화에 고정"
-        : "Taste preference applied · fixed for this conversation",
-    });
-  }
   // Compact core is always on; the full schema is loaded only for explicit
   // memory tasks. This keeps the recurring contract under ~150 tokens.
   // Every runtime writes the one-line turn_summary receipt itself (owner 2026-10-13: the host's 360-char cut of the answer is
   // not a summary); the contract is the 285-byte block, the same on every path.
   if (!req.agentAppMode && !isAliveControllerRun && !restrictedReadBoundary && executionContext?.source !== "science") {
-    turnContextParts.push(memoryEmitterPromptFor(effectiveUserPrompt, pickLocale(req))); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
+    turnContextParts.push(memoryEmitterPromptFor(effectiveUserPrompt, pickLocale(req))); keepLastTurnContext("memory.receipt", "fixed-policy", ["release"]);
   }
-  if (mcpAutoSelectionPrompt) turnContextParts.push(mcpAutoSelectionPrompt);
+  if (mcpAutoSelectionPrompt) { turnContextParts.push(mcpAutoSelectionPrompt); declareLastTurnContext("tools.selection", "turn-context", ["tool-grant", "capability-inventory"]); }
   if (!req.agentAppMode && !isAliveControllerRun && chat.kind === "division" && (req.toolMode || req.hubMode)) {
     const supervisor = assembleSystemPrompt(
       AUTOMATION_SUPERVISOR_SYSTEM_AGENT,
       [effectiveUserPrompt, req.toolMode ?? "", req.hubMode ?? ""].join("\n"),
       { threshold: 0.6, maxModules: 3 },
     );
-    placeHostContext(supervisor.systemPrompt);
+    placeHostContext("host.automation-supervisor", ["agent-instructions", "task"], supervisor.systemPrompt,
+      supervisor.parts.map(part => mainHostSystemPart(`automation-supervisor.${part.id}`, "fixed-policy", ["release"], part.text)));
     sink({
       kind: "tool-use",
       status:
@@ -5895,20 +5735,23 @@ ${effectiveUserPrompt}`;
     // division(무인 시드)은 기존처럼 시스템 프롬프트에. 인터랙티브 채팅은 engaged가 턴 단위
     // 상태이므로 턴 컨텍스트로 — resume 세션에서도 이번 턴에 확실히 전달된다.
     if (chat.kind === "division") {
-      placeHostContext(`${coreHarness.system_prompt}\n\n${STORMBREAKER_LOOP_PROTOCOL}`);
+      placeHostContext("host.stormbreaker", ["release", "task"], `${coreHarness.system_prompt}\n\n${STORMBREAKER_LOOP_PROTOCOL}`, [
+        mainHostSystemPart("stormbreaker.core", "fixed-policy", ["release"], coreHarness.system_prompt),
+        mainHostSystemPart("stormbreaker.continuation", "fixed-policy", ["release"], STORMBREAKER_LOOP_PROTOCOL),
+      ]);
     } else {
-      turnContextParts.push(`${coreHarness.system_prompt}\n\n${STORMBREAKER_LOOP_PROTOCOL}`); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
+      turnContextParts.push(`${coreHarness.system_prompt}\n\n${STORMBREAKER_LOOP_PROTOCOL}`); keepLastTurnContext("stormbreaker.definition", "versioned-content", ["release", "task"]);
     }
   }
   if (!req.agentAppMode && executionContext?.source !== "automation" && (chat.kind !== "division" || req.automationId)) {
     const officeContext = officeTaskContextForInvocation(chat.id);
     if (officeContext) {
-      turnContextParts.push(officeContext);
+      turnContextParts.push(officeContext); declareLastTurnContext("office.assignment", "task-context", ["task"]);
     }
     const lifecycleContext = mcpIncludedServers.some(server => server.catalogId === "one-team") && !mcpToolchainConsumer
       ? null : automationLifecycleContext(chat.id, req.automationId);
     if (lifecycleContext) {
-      turnContextParts.push(lifecycleContext);
+      turnContextParts.push(lifecycleContext); declareLastTurnContext("automation.state", "turn-context", ["task"]);
     }
   }
   // 사용자 채팅에서만 자동화 생성 protocol 주입 (백그라운드 automation 실행 세션은 제외 → 재귀 방지)
@@ -5922,7 +5765,7 @@ ${effectiveUserPrompt}`;
     // resumed sessions receive it with their turn. Do not inject it twice.
     if (executionContext?.source !== "science") {
       const automationProtocol = automationProtocolFor(mcpIncludedServers.some(server => server.catalogId === "one-team"), mcpToolchainConsumer);
-      turnContextParts.push(automationProtocol); stableTurnContextParts.push(automationProtocol);
+      turnContextParts.push(automationProtocol); keepLastTurnContext("automation.contract", "configuration", ["capability-inventory"]);
     }
   }
   // One 실행 경계의 태스크 Surface 레시피 — 선택은 판정기(LLM) 경유. 경계 블록 조립은
@@ -5934,22 +5777,21 @@ ${effectiveUserPrompt}`;
       locale === "ko",
       signal,
     );
-    if (judgedTaskSurfaceRecipe) turnContextParts.push(judgedTaskSurfaceRecipe);
+    if (judgedTaskSurfaceRecipe) { turnContextParts.push(judgedTaskSurfaceRecipe); declareLastTurnContext("surface.recipe", "task-context", ["task"]); }
   }
   // 일반 무인 실행은 질문을 받을 사람이 없다. Alive의 질문은 별도 작업공간 도구로
   // 연결되어야 하므로 이 Work 지침을 상속하지 않는다. ASK_PROTOCOL보다 뒤에 오는 최종
   // 지침으로 질문 fence를 금지하고, 안전한 기본값이 없으면 "NEEDS-INPUT:"으로 명시적 실패를
   // 유도한다. automation-result.ts 분류기가 이 계약을 짝으로 감지한다(조용한 가짜 성공 방지).
   if (isUnattendedExecution(executionContext) && !isAliveControllerRun) {
-    turnContextParts.push(UNATTENDED_NO_ASK_DIRECTIVE); stableTurnContextParts.push(UNATTENDED_NO_ASK_DIRECTIVE);
+    // An authority boundary closes the turn context on every turn (final-boundary, never deduped as a kept block): the
+    // run's own question channel decides what the model may emit after everything above (native-harness notyet NH03).
+    turnContextParts.push(UNATTENDED_NO_ASK_DIRECTIVE); declareLastTurnContext("ask.unattended", "final-boundary", ["profile"]);
   } else if (usesMobileDurableDecision(executionContext)) {
-    turnContextParts.push(MOBILE_DURABLE_ASK_DIRECTIVE); stableTurnContextParts.push(MOBILE_DURABLE_ASK_DIRECTIVE);
-  } else if (!req.agentAppMode && chat.kind !== "division") {
-    // 사람이 보고 있는 실행에는 **묻는 방법**을 알려 준다. 질문 시트 UI 와 렌더러 파서는
-    // 이미 있는데 그 형식을 아는 프롬프트가 태스크포스 합성뿐이라, 기본 경로인 CLI 실행은
-    // 구조화해서 물을 수단이 없어 산문으로 되물었다(2026-09-04 실측).
-    turnContextParts.push(ATTENDED_ASK_DIRECTIVE); stableTurnContextParts.push(ATTENDED_ASK_DIRECTIVE);
+    turnContextParts.push(MOBILE_DURABLE_ASK_DIRECTIVE); declareLastTurnContext("ask.mobile", "final-boundary", ["profile"]);
   }
+  // Attended runs need no turn-context ask line: the system `ask:` module already says call ask_form (or ask_user),
+  // else the <<agentlas-ask>> block (2026-10-14: the two lines said the same thing twice).
 
   // 사용자 메시지 영구화 + 첫 메시지면 제목 자동 생성
   persistUserMessage();
@@ -5973,7 +5815,7 @@ ${effectiveUserPrompt}`;
   let modelTurnStarted = false;
   try {
     const runtimeUserPrompt = explicitBorrowUserPreamble
-      ? `${explicitBorrowUserPreamble}\n\nRequest:\n${effectiveUserPrompt}`
+      ? borrowedCurrentUserPrompt(effectiveUserPromptParts, explicitBorrowUserParts)
       : effectiveUserPrompt;
     // ── persistent goal contract ─────────────────────────────────
     // Goal definition and steering are different authorities. The first
@@ -6023,7 +5865,7 @@ ${effectiveUserPrompt}`;
           // Goals stored before the objective came from ownerVisiblePrompt carry the standing-staff block; show the owner's goal only.
           activeGoal = { ...activeGoal, objective: stripStaffGuidance(activeGoal.objective), acceptanceCriteria: activeGoal.acceptanceCriteria.map(stripStaffGuidance) };
           goalContractInContext = { objective: activeGoal.objective, criteria: activeGoal.acceptanceCriteria };
-          turnContextParts.push(persistentGoalTurnContext(activeGoal, locale, !latestTaskCheckpoint(activeGoalId))); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
+          turnContextParts.push(persistentGoalTurnContext(activeGoal, locale, !latestTaskCheckpoint(activeGoalId))); keepLastTurnContext("goal.contract", "task-context", ["goal-revision"]);
           // A room teammate gets the contract (what is wanted) but not the controller machinery: the completion/wait
           // protocols, the plan-shape judgement and the tactic grammar are One's and the orchestrator's. Since 2026-10-01
           // no teammate or installed agent emitted a plan marker (1,941 + 607 tactic_status from the orchestrator and One).
@@ -6033,9 +5875,9 @@ ${effectiveUserPrompt}`;
           const goalToolsReplaceText = turnGoalToolsOffered && turnToolReplacesText(active.kind, mcpIncludedServers);
           goalTypedToolsReplaceText = goalToolsReplaceText;
           const typedGoalText = goalToolsReplaceText ? typedGoalLifecycleProtocol(getChatGoalRevision(activeGoalId)?.lifecycle) : null;
-          if (typedGoalText) { turnContextParts.push(typedGoalText); stableTurnContextParts.push(typedGoalText); }
-          if (!goalToolsReplaceText) { turnContextParts.push(goalCompletionProtocol(locale, getChatGoalRevision(activeGoalId)?.lifecycle)); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]); }
-          if (!executionContext && !goalToolsReplaceText) { turnContextParts.push(goalWaitProtocol((() => { try { return getLegacyGoalLifecycleSnapshot(activeGoalId) ? null : getChatGoalRevision(activeGoalId)?.lifecycle; } catch { return null; } })())); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]); }
+          if (typedGoalText) { turnContextParts.push(typedGoalText); keepLastTurnContext("goal.lifecycle.typed", "configuration", ["tool-grant", "goal-revision"]); }
+          if (!goalToolsReplaceText) { turnContextParts.push(goalCompletionProtocol(locale, getChatGoalRevision(activeGoalId)?.lifecycle)); keepLastTurnContext("goal.lifecycle.text", "configuration", ["goal-revision"]); }
+          if (!executionContext && !goalToolsReplaceText) { turnContextParts.push(goalWaitProtocol((() => { try { return getLegacyGoalLifecycleSnapshot(activeGoalId) ? null : getChatGoalRevision(activeGoalId)?.lifecycle; } catch { return null; } })())); keepLastTurnContext("goal.wait", "configuration", ["goal-revision"]); }
           /*
            * 골 구조 판단(오너 최우선 2026-09-24): 이 목표 개정의 모양(단일 전술/전술 목록/대계-전략-전술 트리)이
            * 없으면 이 턴을 시작하기 전에 정한다. 실패는 단일 전술 폴백 — 목표를 막지 않는다. 턴마다 바뀌는 절이라
@@ -6055,12 +5897,12 @@ ${effectiveUserPrompt}`;
               onDecisionRecorded: (id) => { reservedDecisionIds.add(id); } }));
             // Measured 1.3.24: the 6,190-char plan was byte-identical on consecutive turns and resent each time.
             // A refreshed slot no longer matches this copy, so a changed plan is still delivered.
-            stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
+            keepLastTurnContext("goal.plan", "task-context", ["goal-revision", "plan-revision"]);
           }
           // A finite Goal with a deadline may wait for its next cycle up to that deadline (goal-deadline.ts).
           if (!executionContext && getChatGoalRevision(activeGoalId)?.lifecycle === "finite") {
             const deadlineAt = goalDeadlineAt(activeGoalId);
-            if (deadlineAt && Date.parse(deadlineAt) > Date.now()) turnContextParts.push(goalToolsReplaceText ? typedGoalDeadlineClause(deadlineAt) : goalDeadlineWaitClause(deadlineAt));
+            if (deadlineAt && Date.parse(deadlineAt) > Date.now()) { turnContextParts.push(goalToolsReplaceText ? typedGoalDeadlineClause(deadlineAt) : goalDeadlineWaitClause(deadlineAt)); declareLastTurnContext("goal.deadline", "task-context", ["goal-revision"]); }
           }
           }
         }
@@ -6068,7 +5910,21 @@ ${effectiveUserPrompt}`;
     }
     // 세션 지원 러너(claude-code/codex/kimi)는 턴 컨텍스트를 분리 전달해 러너가
     // 새 세션/resume에 맞게 배치한다. 그 외 stateless 러너는 기존처럼 시스템 프롬프트에 합친다.
-    const turnContext = turnContextParts.filter((part) => part && part.trim()).join("\n\n");
+    // Composition order (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.main.turn-context.collector): every block carries
+    // its declared lifetime; serialization orders fixed → versioned → configuration → task → turn → final boundary (stable
+    // within a tier), so unchanged blocks stay a byte-identical prefix. Runners drop acknowledged kept blocks wherever they sit.
+    // Every producer declares its slot; an undeclared one is a host defect and the turn is refused, never sorted by guess
+    // (native-harness notyet NH02).
+    const declaredTurnContext = (parts: readonly string[]): Array<PromptOrderingMetadata & { text: string }> =>
+      parts.flatMap((text, index) => {
+        if (!text || !text.trim()) return [];
+        const declared = turnContextDeclarations.get(index);
+        if (!declared) throw new Error(`prompt-context-undeclared-slot:${index}`);
+        return [{ ...declared, text }];
+      });
+    const hostSystemComposition = persistentAgentContext ? null : composeMainHostSystemPrompt(systemContextParts);
+    if (hostSystemComposition) systemPrompt = hostSystemComposition.text;
+    const turnContext = orderPromptParts(declaredTurnContext(turnContextParts)).map((part) => part.text).join("\n\n");
     const frozenTurnContextParts = [...turnContextParts];
     // A settled Goal checkpoint is the authoritative handoff packet. When no
     // valid checkpoint exists yet (for example on the first or a failed Goal
@@ -6264,7 +6120,13 @@ ${effectiveUserPrompt}`;
         assertScienceCollectionRuntimeSelection(runtime, req.runtimeSelection);
         if (!scienceCollectionCapability) throw new Error("science_collection_transport_unsupported");
       }
-      const sessionCapable = persistentAgentContext || runtime.kind === "claude-code" || runtime.kind === "codex" || runtime.kind === "kimi" || runtime.kind === "antigravity";
+      // Runners that place req.turnContext themselves after their wrapped system text: the session runners, plus grok,
+      // cursor and ACP (grok appends it after the wrapper and frames it on resume, cursor's print path follows the wrapper,
+      // ACP frames and dedupes it). Gluing it onto systemPrompt put per-turn blocks inside the agent slot, which the
+      // stability order now places before the configuration lines (docs/PROMPT-COMPOSITION-POLICY.md), and a loaded ACP
+      // session never received it again.
+      const sessionCapable = persistentAgentContext || runtime.kind === "claude-code" || runtime.kind === "codex" || runtime.kind === "kimi"
+        || runtime.kind === "antigravity" || runtime.kind === "grok" || runtime.kind === "cursor" || runtime.kind === "acp";
       const checkpoint = activeGoalId ? latestTaskCheckpoint(activeGoalId) : null;
       let checkpointAdvisory: string | null = null;
       let checkpointAdmitted = false;
@@ -6290,7 +6152,7 @@ ${effectiveUserPrompt}`;
           checkpointAdmitted = true;
         } catch (error) {
           if (signal?.aborted) throw error;
-          checkpointAdvisory = "The prior checkpoint could not authorize a replay. Start a fresh planning episode from the current goal and user constraints. Treat prior external effects as unknown, inspect them in parallel, and continue independent work without replaying those specific actions.";
+          checkpointAdvisory = "checkpoint: no replay authorized; plan fresh from the goal and constraints; prior external effects unknown → inspect, never replay them";
           if (req.runId) tryRecordRunEvent({ runId: req.runId, chatId: chat.id, kind: "checkpoint_dispatch_advisory",
             payload: { goalId: activeGoalId, action: "fresh_independent_episode",
               reason: error instanceof Error ? error.message.slice(0, 160) : "checkpoint_unavailable" } });
@@ -6341,9 +6203,16 @@ ${effectiveUserPrompt}`;
             reservedDecisionIds: goalPlanContextSlot.reservedDecisionIds ?? undefined });
         bindGoalPlanDispatch(currentPlan, req.runId ?? null);
       }
-      const dispatchTurnContext = dispatchTurnContextParts.filter((part) => part && part.trim()).join("\n\n");
-      const runtimeTurnContext = [dispatchTurnContext, checkpointContext, checkpointAdvisory, ownerExecutionDirectives,
-        canonicalWorkRecovery?.packet(), progressAdvisory?.()].filter(Boolean).join("\n\n");
+      // Same declared order at dispatch: the refreshed plan keeps its slot's declaration; the checkpoint rule/packet, owner
+      // directives and recovery packet are task context after the collector's task blocks; the progress advisory is per turn.
+      const runtimeTurnContextParts = orderPromptParts([...declaredTurnContext(dispatchTurnContextParts),
+        ...([["checkpoint.advisory", checkpointAdvisory], ["checkpoint.context", checkpointContext],
+          ["owner.execution-directives", ownerExecutionDirectives], ["canonical.recovery-packet", canonicalWorkRecovery?.packet()]] as const)
+          .flatMap(([id, text]) => text ? [{ id, stability: "task-context" as const, changeTriggers: ["checkpoint", "goal-revision"] as const, text }] : []),
+        ...((): Array<PromptOrderingMetadata & { text: string }> => { const text = progressAdvisory?.();
+          return text ? [{ id: "progress.advisory", stability: "turn-context", changeTriggers: ["task"], text }] : []; })(),
+      ]);
+      const runtimeTurnContext = renderRunnerTurnContext(runtimeTurnContextParts);
       // Every runtime gets the minimal observation request; runners that support the mode (claude-code, codex, serving,
       // BYOK/local host loop) also shed their own headers, user setup and extra tool servers.
       if (effectObservationRun) {
@@ -6372,18 +6241,24 @@ ${effectiveUserPrompt}`;
       }
       const placedTurnContext = placeTurnContextForRuntime({ runtimeKind: runtime.kind, sessionCapable,
         systemPrompt, turnContext: runtimeTurnContext, userPrompt, locale });
-      return {
+      const hostSystemProjection = hostSystemComposition
+        ? placedTurnContext.placement === "system-tail" && runtimeTurnContext.trim()
+          ? composeMainHostSystemPrompt([...systemContextParts, ...runtimeTurnContextParts])
+          : hostSystemComposition
+        : null;
+      const composedRequest: RunnerRequest = {
         ...runnerReq,
         ...(continuationSession ? { runtimeSessionOwnerId: continuationSession.ownerId,
           sessionFingerprintSeed: continuationSession.fingerprintSeed } : continuationRuntimePinned && req.runId
           ? { runtimeSessionOwnerId: `goal-independent:${req.runId}`, sessionFingerprintSeed: `goal-independent:${req.runId}` } : {}),
         // Serving keeps the cached prefix (tools, system, history) byte-stable: its per-turn host
         // context rides in front of the current user message, not on the system tail.
-        systemPrompt: placedTurnContext.systemPrompt,
+        systemPrompt: hostSystemProjection?.text ?? placedTurnContext.systemPrompt,
+        ...(hostSystemProjection ? { systemPromptComposition: hostSystemProjection.composition } : {}),
         ...(sessionCapable && runtimeTurnContext ? { turnContext: runtimeTurnContext } : { turnContext: undefined }),
         ...(sessionCapable && runtimeTurnContext ? { turnContextStable: stableTurnContextParts } : {}),
         userPrompt: placedTurnContext.userPrompt,
-        ledgerHints: { hostContextTokens: estimateTextTokens(runtimeTurnContext ?? ""),
+        ledgerHints: { hostContextTokens: estimateTextTokens(runtimeTurnContext ?? ""), hostContextText: runtimeTurnContext,
           hostContextPlacement: placedTurnContext.placement, ownerTextTokens: estimateTextTokens(userPrompt) },
         backendLabel: runtimePicked.label,
         runtimeSource: runtime.source ?? undefined,
@@ -6393,6 +6268,8 @@ ${effectiveUserPrompt}`;
           ? effortForSelectedModel(runtime, runtime.model, "minimal") ?? undefined
           : runtime.effort ?? undefined,
       };
+      return bindRunnerTurnContext(composedRequest, { parts: runtimeTurnContextParts, runtimeKind: runtime.kind,
+        sessionCapable, systemPrompt, ...(hostSystemComposition ? { systemPromptComposition: hostSystemComposition.composition } : {}), userPrompt, locale });
     };
     // ★관문이 "설치됨"인지는 런타임이 실제로 받은 것으로 판정한다. settingsPath 하나만
     // 보면 grok 실행은 관문을 받고도 영원히 미설치로 기록된다.
@@ -6768,13 +6645,15 @@ ${effectiveUserPrompt}`;
       let attemptCount = 0;
       let originalFailure: RunnerFailure | null = null;
       let terminalNoticeEmitted = false;
-      let requestForRuntime: RunnerRequest = {
-        ...runnerRequestForRuntime(active, currentPicked, request.userPrompt),
+      const currentOwnerPrompt = runnerTurnContextSource(request)?.userPrompt ?? request.userPrompt;
+      const requestForRuntimeBase = runnerRequestForRuntime(active, currentPicked, currentOwnerPrompt);
+      let requestForRuntime: RunnerRequest = carryRunnerTurnContext(requestForRuntimeBase, {
+        ...requestForRuntimeBase,
         history: request.history,
         runtimeSessionId: request.runtimeSessionId,
         ownerControlInbox,
         images: scienceRecovery ? undefined : request.images,
-      };
+      });
       const emitTerminalRecoveryFailure = (
         result: Awaited<ReturnType<Runner>>,
         reason: "candidate-exhausted" | "attempt-limit" | "time-limit" | "event-limit",
@@ -6919,31 +6798,17 @@ ${effectiveUserPrompt}`;
             const current = getAgentWorkspace(agentId);
             if (current.currentRevisionId !== pin.revisionId || current.treeDigest !== pin.treeDigest) throw new Error("agent_revision_changed_before_dispatch");
           }
-          const experienceDispatch = prepareExperienceDispatch({
-            request: requestForRuntime, snapshot: experienceApplication,
-            contextParts: turnContextParts, partIndex: experienceContextPartIndex,
-            stablePartIndex: experienceStablePartIndex, baseSystemPrompt: systemPrompt,
-            runId: req.runId,
-          });
-          requestForRuntime = experienceDispatch.request;
           onGoalDispatched?.(activeGoalId ?? null);
           directRuntimeDispatched = true;
-          if (req.runId && experienceDispatch.application) {
-            recordExperienceApplication({
-              runId: req.runId, chatId: chat.id, executionAgentId: agent.id,
-              snapshot: experienceDispatch.application,
-              runtime: { kind: selectedRuntime.kind, backend: selectedRuntime.backend,
-                model: selectedRuntime.model, effort: selectedRuntime.effort },
-            });
-          }
           invocationUsageAttempt = beginInvocationUsageAttempt();
           assertGraphWorkerAttempt(executionContext?.graphWorkerAttempt);
           noteGraphWorkerDispatch(executionContext?.graphWorkerAttempt, selectionForRuntime(selectedRuntime));
           currentHistoryRuntimeFence()?.assertRuntimeCoverage(selectedRuntime.kind);
           // Binding the agent context is a host check: a refusal here is pre-dispatch, never an unsettled turn.
-          const boundRequest = persistentRunnerRequest(requestForRuntime);
+          const boundRequest = bindAppMemoryRequest(bindSurfaceMemoryRequest(persistentRunnerRequest(requestForRuntime),scienceAliveRecall),
+            {runId:req.runId,chatId:chat.id,actorId:memoryScope.agentId});
           runnerInvoked = true;
-          result = await withCurrentHistoryProvider(async()=>{const returned=await selected.runner(boundRequest, attemptEvents.events);historyReturnedUsage=returned.observedUsage;return assertCurrentHistoryRunnerResult(returned);});
+          result = await withCurrentHistoryProvider(async()=>{assertAppMemory();assertScienceAliveMemory();const returned=await selected.runner(boundRequest, attemptEvents.events);historyReturnedUsage=returned.observedUsage;assertAppMemory();assertScienceAliveMemory();return assertCurrentHistoryRunnerResult(returned);});
           runtimeTerminalEvidence.closedHttpRefusal = runtimeFailureIsClosedHttpRefusal(result.failure, {
             text: result.text, nativeActivity: attemptEvents.nativeActivity(), aborted: signal?.aborted === true,
             observedUsage: result.observedUsage,
@@ -7094,10 +6959,11 @@ ${effectiveUserPrompt}`;
         });
         active = fallback;
         picked = fallbackPicked;
-        requestForRuntime = {
-          ...runnerRequestForRuntime(active, picked, request.userPrompt),
+        const fallbackRequestBase = runnerRequestForRuntime(active, picked, currentOwnerPrompt);
+        requestForRuntime = carryRunnerTurnContext(fallbackRequestBase, {
+          ...fallbackRequestBase,
           images: request.images,
-        };
+        });
       }
       throw new Error("runtime recovery loop exited without a terminal result");
     };
@@ -7156,9 +7022,7 @@ ${effectiveUserPrompt}`;
       );
       const workspaceImageCopy = copyGeneratedImageIntoWorkspace({ cwd: resolvedResultFolder ?? workingFolder,
         permission: normalizedPermission, sourcePath: generated.artifactPath, label: "image" });
-      hostGeneratedImageContext = locale === "ko"
-        ? `\n\n[Agentlas 이미지 결과]\n호스트가 실제 이미지 한 장을 생성해 이 메시지에 첨부했습니다. 첨부된 이미지를 실제 결과로 사용하고, 추가 이미지를 생성했다고 말하지 마세요.${workspaceImageCopy ? `\n작업 폴더 사본: ${workspaceImageCopy} — 업로드·문서 등 다음 단계에는 이 경로를 쓰세요.` : ""}`
-        : `\n\n[Agentlas image result]\nThe host generated and attached one real image for this request. Use that attached image as the actual result and do not claim that another image was generated.${workspaceImageCopy ? `\nWorking-folder copy: ${workspaceImageCopy} — use this path for uploads, documents and later steps.` : ""}`;
+      hostGeneratedImageContext = `\n\n[Agentlas image result]\nimage: the host generated and attached exactly one real image; it is the result, claim no other${workspaceImageCopy ? `\ncopy: ${workspaceImageCopy} (use for uploads, documents, later steps)` : ""}`;
       sink({
         kind: "tool-use",
         status: locale === "ko" ? "실제 이미지 결과를 채팅과 결과 탭에 연결했습니다." : "The real image result is attached to the chat and Results rail.",
@@ -7166,16 +7030,24 @@ ${effectiveUserPrompt}`;
     }
     // Only the first call carries the host-authored purpose; an owner steer the pump delivers after it is the owner's words.
     const runCurrentRuntimeOnce = (request: RunnerRequest, hostAuthored?: string, continuationHandle?: string): Promise<Awaited<ReturnType<Runner>>> => {
-      const first: RunnerRequest = { ...request, ownerControlInbox };
+      const first: RunnerRequest = carryRunnerTurnContext(request, { ...request, ownerControlInbox });
       const settled = runWithOwnerControl(first, (r) => {
         hostAuthoredNext = r === first ? hostAuthored : undefined;
         continuationHandleNext = r === first ? continuationHandle : undefined;
         return invokeBrainRuntime(r);
       });
       // goal_wait / goal_complete calls of this pass re-enter as the exact text blocks the unchanged parsers read.
-      return turnGoalToolsOffered && req.chatId && req.runId
-        ? settled.then((res) => ({ ...res, text: applyGoalSignalsToText(res.text, takeGoalSignals(turnNotesKey(req.chatId!, req.runId!))) }))
+      // When the typed tools replace the marker teaching, a completion marker the model wrote into its reply is not a
+      // completion (docs native-harness 07 G02): only the goal_complete tool call closes the Goal on that run.
+      const withGoalSignals = turnGoalToolsOffered && req.chatId && req.runId
+        ? settled.then((res) => ({ ...res, text: applyGoalSignalsToText(
+          goalTypedToolsReplaceText ? stripGoalCompleteMarker(res.text).text : res.text,
+          takeGoalSignals(turnNotesKey(req.chatId!, req.runId!))) }))
         : settled;
+      // ask_form calls of this pass re-enter as canonical <<agentlas-ask>> blocks (ordinary attended turns too).
+      return turnAskToolOffered && req.chatId && req.runId
+        ? withGoalSignals.then((res) => ({ ...res, text: appendTurnAsks(res.text, takeTurnAsks(turnNotesKey(req.chatId!, req.runId!))) }))
+        : withGoalSignals;
     };
     /*
      * A dispatched turn that ends without its terminal event is unknown, not failed (RuntimeTurnUnsettledError).
@@ -7192,7 +7064,10 @@ ${effectiveUserPrompt}`;
       lastJournalTurnId = null;
       return invokeWithUnsettledContinuation<RunnerRequest>({
         dispatch(r, purpose, handle) { lastJournalTurnId = null; return runCurrentRuntimeOnce(r, purpose, handle); },
-        continuationRequest: (r, sessionId) => ({ ...r, userPrompt: UNSETTLED_CONTINUATION_PROMPT, images: undefined, runtimeSessionId: sessionId }),
+        continuationRequest: (r, sessionId) => {
+          const next = replaceRunnerUserPrompt(r, UNSETTLED_CONTINUATION_PROMPT, { images: undefined });
+          return carryRunnerTurnContext(next, { ...next, runtimeSessionId: sessionId });
+        },
         eligible: !isAliveControllerRun && !scienceRecovery && !request.minimalObservation && !request.judgmentOnly && !request.untrustedNoTools,
         aborted: () => signal?.aborted === true,
         noModelWork: () => runtimeTerminalEvidence.closedHttpRefusal || runtimeTerminalEvidence.locallyRejected,
@@ -7205,11 +7080,9 @@ ${effectiveUserPrompt}`;
     };
     let activeRunnerReq = runnerRequestForRuntime(active, picked);
     if (hostGeneratedImageAttachment) {
-      activeRunnerReq = {
-        ...activeRunnerReq,
-        userPrompt: `${activeRunnerReq.userPrompt}${hostGeneratedImageContext}`,
-        images: [...(req.images ?? []), hostGeneratedImageAttachment],
-      };
+      activeRunnerReq = replaceRunnerUserPrompt(activeRunnerReq,
+        `${runnerTurnContextSource(activeRunnerReq)?.userPrompt ?? activeRunnerReq.userPrompt}${hostGeneratedImageContext}`,
+        { images: [...(req.images ?? []), hostGeneratedImageAttachment] });
     }
     modelTurnStarted = true;
     const nativeGoalEpisode = activeGoalId && req.runId && !executionContext && continuousMode
@@ -7476,18 +7349,14 @@ ${effectiveUserPrompt}`;
             typedGoalTools: goalTypedToolsReplaceText,
           })
         : buildStormbreakerContinuationPrompt(passCarriesContext ? null : result.text, pass);
-      const continuationPrompt = [baseContinuationPrompt, passRecoveryNote].filter(Boolean).join("\n\n");
+      // Composition order (ledger desktop.main.user.goal-continuation): continuation request, the plan note (task), then
+      // this pass's recovery note (turn).
       const planNote = !goalPlanContextSlot && activeGoalId ? goalPlanContinuationNote(activeGoalId, Date.now(), goalTypedToolsReplaceText) : null;
-      activeRunnerReq = {
-        ...nextRunnerReq,
-        // Remote Hub instructions stay at user authority. Reattach the exact
-        // verified preamble for stateless BYOK passes without promoting it into
-        // the local system prompt.
-        userPrompt: explicitBorrowUserPreamble
-          ? `${explicitBorrowUserPreamble}\n\nContinuation request:\n${continuationPrompt}${planNote ? `\n\n${planNote}` : ""}`
-          : `${continuationPrompt}${planNote ? `\n\n${planNote}` : ""}`,
-        images: undefined,
-      };
+      const continuationPrompt = [baseContinuationPrompt, planNote, passRecoveryNote].filter(Boolean).join("\n\n");
+      // Remote Hub text remains user authority; rebase the exact current host context without string stripping.
+      activeRunnerReq = replaceRunnerUserPrompt(nextRunnerReq, explicitBorrowUserPreamble
+        ? `${explicitBorrowUserPreamble}\n\nContinuation request:\n${continuationPrompt}`
+        : continuationPrompt, { images: undefined });
       const toolCallsBeforePass = completedToolCalls;
       result = await invokeCurrentRuntime(activeRunnerReq, "goal-continuation");
       if (result.ownerControlTerminal !== "completed" && !runtimeTerminalEvidence.closedHttpRefusal && !runtimeTerminalEvidence.locallyRejected) {
@@ -7586,13 +7455,9 @@ ${effectiveUserPrompt}`;
         passToolSuccesses = 0;
         const nextRunnerReq = runnerRequestForRuntime(active, picked!);
         const recoveryPrompt = buildOneRecoveryPrompt(result.text, attempt, locale);
-        activeRunnerReq = {
-          ...nextRunnerReq,
-          userPrompt: explicitBorrowUserPreamble
-            ? `${explicitBorrowUserPreamble}\n\nContinuation request:\n${recoveryPrompt}`
-            : recoveryPrompt,
-          images: undefined,
-        };
+        activeRunnerReq = replaceRunnerUserPrompt(nextRunnerReq, explicitBorrowUserPreamble
+          ? `${explicitBorrowUserPreamble}\n\nContinuation request:\n${recoveryPrompt}`
+          : recoveryPrompt, { images: undefined });
         result = await invokeCurrentRuntime(activeRunnerReq, "run-recovery");
         if (result.failure) {
           throw new InvocationRunnerFailureError(result.failure);
@@ -7612,13 +7477,9 @@ ${effectiveUserPrompt}`;
         });
         const nextRunnerReq = runnerRequestForRuntime(active, picked!);
         const recoveryDecisionPrompt = buildOneRecoveryDecisionPrompt(result.text, locale);
-        activeRunnerReq = {
-          ...nextRunnerReq,
-          userPrompt: explicitBorrowUserPreamble
-            ? `${explicitBorrowUserPreamble}\n\nContinuation request:\n${recoveryDecisionPrompt}`
-            : recoveryDecisionPrompt,
-          images: undefined,
-        };
+        activeRunnerReq = replaceRunnerUserPrompt(nextRunnerReq, explicitBorrowUserPreamble
+          ? `${explicitBorrowUserPreamble}\n\nContinuation request:\n${recoveryDecisionPrompt}`
+          : recoveryDecisionPrompt, { images: undefined });
         result = await invokeCurrentRuntime(activeRunnerReq, "run-recovery");
         if (result.failure) {
           throw new InvocationRunnerFailureError(result.failure);
@@ -8440,60 +8301,6 @@ ${effectiveUserPrompt}`;
           },
         });
       }
-    }
-
-    // 인터랙티브 성공 턴의 outcome-attested 자동 승격 — 이 턴의 큐레이션이 방금
-    // 만든 경험 후보(영수증에 run_id로 연결됨)를, durable 시작 영수증이 있는
-    // 성공 런에 한해 'local-run-receipt' 방식으로 승격한다. 실패/차단 턴
-    // (oneToolFailureBlocksCompletion)과 read-only 경계 턴은 승격하지 않으며,
-    // 승격 실패는 경고로만 남기고 사용자 턴을 깨지 않는다(후보는 보존됨).
-    if (!req.agentAppMode && !projectReadOnlyBoundary && req.runId && !oneToolFailureBlocksCompletion()) {
-      try {
-        const outcome = promoteExperienceCandidatesForRun({ agentId: agent.id, runId: req.runId });
-        /*
-         * ★그리고 이 에이전트가 붙들고 있던 대기 후보도 함께 승격한다(오너 결정 2026-08-16).
-         *
-         * 위 호출은 **이 런이 만든** 후보만 본다(영수증의 run_id 로 이어진 것). 그런데
-         * One durable 기억·임포트·복구 경로는 run_id 를 싣지 않아, 그 경로로 들어온
-         * 후보는 어떤 런에서도 대상이 되지 못하고 영영 대기했다 — 실측: One 176건,
-         * appbridge 30건 전부 run_id 가 null 이고 승격 0건. 사람이 손으로 올릴 화면도
-         * 그 후보들에는 닿지 않는다.
-         */
-        const waiting = promoteWaitingExperienceCandidates({ agentId: agent.id, runId: req.runId });
-        if (waiting.promoted > 0) {
-          console.log(
-            `[experience] promoted ${waiting.promoted}/${waiting.eligible} waiting candidate(s) ` +
-              `(agent ${agent.id}, run ${req.runId})`,
-          );
-          tryRecordRunEvent({
-            runId: req.runId,
-            kind: "experience_auto_promotion",
-            chatId: chat.id,
-            agentId: agent.id,
-            payload: { eligible: waiting.eligible, promoted: waiting.promoted, method: "waiting-backlog" },
-          });
-        }
-        if (outcome.eligible > 0) {
-          console.log(
-            `[experience] interactive run promoted ${outcome.promoted}/${outcome.eligible} candidate(s) ` +
-              `(agent ${agent.id}, run ${req.runId})`,
-          );
-          // Content-free ledger marker so live run-receipt promotion is queryable
-          // (the live "0 run-receipt promotions" symptom was unmeasurable before).
-          tryRecordRunEvent({
-            runId: req.runId,
-            kind: "experience_auto_promotion",
-            chatId: chat.id,
-            agentId: agent.id,
-            payload: { eligible: outcome.eligible, promoted: outcome.promoted, method: "local-run-receipt" },
-          });
-        }
-      } catch (err) {
-        console.warn("[experience] interactive outcome promotion deferred:", err);
-      }
-      // Successful-run evidence is retained above, but code does not author or
-      // auto-apply prompt semantics from counters. One may later turn the
-      // evidence into a specific proposal through a model-required judgment.
     }
 
     // 컴팩션 요약 수집 — Claude Code가 이번 세션에서 컨텍스트를 자동 압축했다면 그 요약을

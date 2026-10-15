@@ -8,7 +8,7 @@ import { mapIntellectUiProse } from "@shared/intellect-ui";
 import { snapMarkdownAnchor } from "@shared/streaming-segments";
 import { GoalResultReport } from "./GoalResultReport";
 import type { ChatHostNotice } from "../../shared/types";
-import { normalizeChatHostNotice } from "../../shared/chat-host-notice";
+import { isHousekeepingHostNotice, normalizeChatHostNotice } from "../../shared/chat-host-notice";
 import { HostContinuationNotice } from "./HostContinuationNotice";
 import { AutomationLiveRows, AutomationReportSummary } from "./automation/AutomationChatActivity";
 // 메시지 스트림 렌더 — agent 메시지는 Markdown으로, 사용자 메시지는 plain.
@@ -37,10 +37,12 @@ import { McpResultPreview } from "./McpResultPreview";
 import { LiveOutputViewer } from "./LiveOutputViewer";
 import { ChatFileCards } from "./ChatFileExperience";
 import { IconAlertTriangle, IconChevronDown, IconClose } from "./Icon";
+import { InlineUiInstances } from "./UiInstances";
 import type { ChatFileItem } from "@/lib/chat-files";
 import { OneTurnWork } from "./one/OneTurnWork";
 import type { OneWorkerWorkGroup } from "@/lib/one-turn-work";
 import type { OneActivityItem, OneActivityState } from "@/lib/one-activity";
+import { ChatContinuationProjector } from "@/lib/chat-continuations";
 
 /**
  * Work keeps its transport projection in StreamMessage for compatibility with
@@ -209,6 +211,12 @@ export interface StreamActivityRun {
 }
 
 export interface StreamMessage {
+  /** Display-only segments; canonical transcript/run identities stay upstream. */
+  continuation?: boolean;
+  continuationFrozen?: boolean;
+  continuationOwnsMetadata?: boolean;
+  continuationSourceMessageId?: string;
+  continuationMarkdownText?: string;
   /** Renderer identity retained across an exact durable transcript match. */
   intellectUiMessageId?: string;
   goalResult?: GoalResultPresentation;
@@ -308,7 +316,7 @@ const CHAT_HISTORY_PAGE_SIZE = 24;
 const CHAT_OUTLINE_PAGE_SIZE = 24;
 
 export function ChatStream({
-  messages,
+  messages: sourceMessages,
   agentName,
   agentTone,
   emptyDirectory,
@@ -357,7 +365,39 @@ export function ChatStream({
   focusMessageId?: string | null;
 }) {
   const { t, locale } = useT();
-  const uiActionsDisabled = Boolean(interactionBusy || stopRequested || messages.some(message => message.busy || message.streaming));
+  const continuationProjectorRef = useRef<ChatContinuationProjector | null>(null);
+  if (!continuationProjectorRef.current) continuationProjectorRef.current = new ChatContinuationProjector();
+  const messages = useMemo(() => continuationProjectorRef.current!.project(
+    artifactChatId ?? "work:preview", sourceMessages, {
+      key: message => message.intellectUiMessageId ?? message.durableMessageId ?? message.id,
+      role: message => message.role === "agent" ? "assistant" : message.role,
+      text: message => message.role === "agent" ? userFacingAssistantText(message.text, Boolean(message.streaming)) : message.text,
+      active: message => Boolean(message.busy || message.streaming),
+      createdAt: message => message.createdAt ?? (message.startedAt ? new Date(message.startedAt).toISOString() : undefined),
+      run: message => message.runId,
+    },
+  ).map(row => {
+    const message = row.message;
+    if (!row.continuation && !row.frozen) return message;
+    return {
+      ...message, id: row.id, text: row.text, createdAt: row.createdAt,
+      continuation: row.continuation, continuationFrozen: row.frozen,
+      continuationOwnsMetadata: row.tail,
+      continuationSourceMessageId: row.sourceId,
+      continuationMarkdownText: row.markdownText,
+      streaming: row.frozen ? false : message.streaming,
+      ...(row.tail ? {
+        steps: message.steps?.map(step => ({ ...step,
+          anchorTextLen: step.anchorTextLen == null ? undefined : Math.max(0, step.anchorTextLen - row.textStart) })),
+      } : {
+        busy: false, status: undefined, steps: undefined, activityState: undefined, activityRuns: undefined,
+        notices: undefined, thinking: undefined, pipeline: undefined, tokens: undefined, liveTokens: undefined,
+        goalResult: undefined, chatFiles: undefined, chatFileGroupIds: undefined, imageDataUrls: undefined,
+        questions: undefined, needsMultimodalSetup: undefined, failure: undefined,
+      }),
+    } satisfies StreamMessage;
+  }), [sourceMessages, artifactChatId]);
+  const uiActionsDisabled = Boolean(interactionBusy || stopRequested || sourceMessages.some(message => message.busy || message.streaming));
   const uiActions = useMemo(() => ({
     prepareFollowup: onUiFollowup,
     disabled: uiActionsDisabled,
@@ -682,11 +722,12 @@ export function ChatStream({
           {locale === "ko" ? "이전 대화 접기 · 최신 보기" : "Hide earlier messages · Latest"}
         </button>}
         {visibleMessages.map((m, index) => (
-          <MessageActions key={m.intellectUiMessageId ?? m.id} messageId={m.id} author={m.role === "user" ? (locale === "ko" ? "나" : "You") : agentName} text={displayMessageReply(m.role === "user" ? m.text : userFacingAssistantText(m.text, Boolean(m.streaming)), locale)} locale={locale} onReply={onReply}>
+          <MessageActions key={m.continuation ? m.id : m.intellectUiMessageId ?? m.id} messageId={m.continuationSourceMessageId ?? m.id} author={m.role === "user" ? (locale === "ko" ? "나" : "You") : agentName} text={displayMessageReply(m.role === "user" ? m.text : userFacingAssistantText(m.text, Boolean(m.streaming)), locale)} locale={locale} onReply={onReply}>
           <div
             id={messageDomId(m.id)}
             tabIndex={-1}
             data-chat-message-id={m.id}
+            data-chat-message-source-id={m.continuationSourceMessageId ?? m.id}
             data-timeline-focus={focusMessageId === m.id ? "true" : "false"}
             className="agentlas-chat-message-anchor"
             style={{ marginTop: messageGap(messages[historyStart + index - 1], m) }}
@@ -1147,6 +1188,8 @@ const Bubble = memo(function Bubble({
     || !workActivities.some(({ state }) => state.items.some((item) =>
       item.kind === "notice" && item.message === notice.message
       && (item.detail ?? "") === (notice.details ?? ""))));
+  // Housekeeping host rows (check, continue, wait, resume; NH26) are drawn on no surface; hooks above have already run.
+  if (isHousekeepingHostNotice(normalizeChatHostNotice(message.role, message.hostNotice))) return null;
   if (message.role === "user") {
     // 질문 시트 배치 답장(스캐폴드 "질문:/선택:/답변:")은 어시스턴트 턴의 인용 카드가
     // 이미 질문+답을 보여준다 — 영상처럼 원문 버블은 숨긴다(첨부 이미지가 있으면 유지).
@@ -1247,7 +1290,7 @@ const Bubble = memo(function Bubble({
   // agent — Markdown 렌더링.
   // 단일 실행은 기본적으로 영상형 인터리브 본문을 쓰되, 런타임이 공개한 reasoning
   // summary가 있으면 One과 같은 투명 활동 타임라인으로 남긴다.
-  const displayText = userFacingAssistantText(message.text, Boolean(message.streaming));
+  const displayText = message.continuationMarkdownText ?? userFacingAssistantText(message.text, Boolean(message.streaming));
   const hasInlineUi = hasIntellectUiFence(displayText);
   const displayMessage = displayText === message.text ? message : { ...message, text: displayText };
   const hasCanonicalActivity = workActivities.some(({ state }) => (
@@ -1257,10 +1300,10 @@ const Bubble = memo(function Bubble({
     || state.handoffs.length > 0
   ));
   const hasProgress = Boolean(message.busy || message.status || (message.steps && message.steps.length > 0) || hasCanonicalActivity);
-  const showWorkActivity = hasCanonicalActivity || (hasProgress && (
+  const showWorkActivity = message.continuationOwnsMetadata !== false && (hasCanonicalActivity || (hasProgress && (
     isParallelWorkMessage(message)
     || (message.steps ?? []).some((step) => step.reasoning === true || step.kind === "tool")
-  ));
+  )));
   return (
     <div className="agentlas-chat-turn" data-work-run-unbound={message.unboundRun ? "true" : undefined} style={{ display: "flex", gap: 0, alignSelf: "stretch", width: "100%", maxWidth: 740, minWidth: 0 }}>
       <div className="agentlas-chat-avatar" style={{ position: "relative", flexShrink: 0 }}>
@@ -1270,6 +1313,9 @@ const Bubble = memo(function Bubble({
         className="agentlas-chat-answer"
         style={{ minWidth: 0, flex: 1, width: "100%", overflow: "hidden", padding: "9px 0 14px" }}
       >
+        {message.continuation && message.busy && <div style={{ color: "var(--muted-deep)", fontSize: 11.5, marginBottom: 7 }}>
+          {locale === "ko" ? "이어서 진행 중" : "Continuing"}
+        </div>}
         {message.chatFiles && message.chatFiles.length > 0 && onOpenChatFile && (
           <ChatFileCards files={message.chatFiles} locale={locale === "ko" ? "ko" : "en"} onOpen={onOpenChatFile} />
         )}
@@ -1294,7 +1340,7 @@ const Bubble = memo(function Bubble({
           </div>
         )}
         <GoalResultReport result={message.goalResult} locale={locale}>
-        {hasInlineUi && <StreamingMarkdown text={displayText} messageId={message.intellectUiMessageId ?? message.id}
+        {hasInlineUi && <StreamingMarkdown text={displayText} messageId={message.continuation ? message.id : message.intellectUiMessageId ?? message.id}
           onOpenArtifact={onOpenArtifact} onOpenMedia={onOpenMedia}
           onOpenLinkedFile={onOpenLinkedFile} mediaBasePaths={mediaBasePaths} />}
         {showWorkActivity && displayText && message.busy && !hasInlineUi && (
@@ -1339,6 +1385,8 @@ const Bubble = memo(function Bubble({
           />
         )}
         </GoalResultReport>
+        {message.continuationOwnsMetadata !== false && <InlineUiInstances chatId={artifactChatId} locale={locale === "ko" ? "ko" : "en"}
+          turnIds={[message.runId, ...(message.activityRuns ?? []).map((run) => run.runId)].filter((id): id is string => Boolean(id))} />}
         {message.imageDataUrls && message.imageDataUrls.length > 0 && (
           <div
             data-testid="chat-generated-images"
@@ -1356,7 +1404,7 @@ const Bubble = memo(function Bubble({
             ))}
           </div>
         )}
-        {!showWorkActivity && <RunStatusLine message={message} onOpenWorkflow={onOpenWorkflow} />}
+        {!showWorkActivity && message.continuationOwnsMetadata !== false && <RunStatusLine message={message} onOpenWorkflow={onOpenWorkflow} />}
         {/* 질문은 이제 바텀 시트(ChatQuestionSheet)에서 답한다 — 스트림에는 답변이 끝난
             질문만 잠긴 기록으로 남긴다. ("—"는 시트에서 스킵된 질문의 잠금 마커라 숨김.) */}
         {message.questions && message.questions.some((q) => q.answer && q.answer.length > 0 && q.answer[0] !== "—") && (
@@ -1368,7 +1416,7 @@ const Bubble = memo(function Bubble({
                   key={q.id}
                   question={q}
                   disabled
-                  onAnswer={(answers) => onAnswerQuestion?.(message.id, q.id, answers)}
+                  onAnswer={(answers) => onAnswerQuestion?.(message.questionSourceMessageId ?? message.continuationSourceMessageId ?? message.id, q.id, answers)}
                 />
               ))}
           </div>

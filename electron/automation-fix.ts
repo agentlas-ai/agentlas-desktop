@@ -19,6 +19,7 @@ import type {
 import { findGraphContradictions, requiredPermissionFor } from "../shared/graph-contradictions";
 import { judgeRequiredAction, secretValueFloor, type RequiredActionOption } from "./system-agents/judgment";
 import { checkComputerUsePermissions } from "./mac-permissions";
+import { openSystemPermissionSettings } from "./os-permission-settings";
 import { getBrowserStatus, browserListSites, browserOpenLogin } from "./browser/connect";
 import type { BrowserSiteRow } from "./store/browser-vault";
 import { getAutomation, listRunHistory } from "./store/automations";
@@ -26,9 +27,6 @@ import { listTriggerEventAttention } from "./store/trigger-events";
 import { getAutomationGraphReconciliation } from "./store/graph-reconciliation";
 import { getAuthSession, signInWithBrowser } from "./auth";
 import { currentUiLocale } from "./ui-locale";
-
-/** macOS 개인정보 보호 및 보안 > 손쉬운 사용. */
-const MAC_ACCESSIBILITY_PANE = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
 
 interface Capability {
   option: RequiredActionOption;
@@ -427,12 +425,14 @@ export async function applyAutomationFix(
   }
 
   if (cap.kind === "open_mac_permissions") {
-    await shell.openExternal(MAC_ACCESSIBILITY_PANE).catch(() => undefined);
+    const state = checkComputerUsePermissions();
+    const opened = await openSystemPermissionSettings(state.accessibility && !state.screenRecording ? "screen" : "accessibility");
     return {
-      ok: true,
-      message: ko
-        ? "macOS 설정을 열었습니다. Agentlas를 켜 주시면 다음 예약부터 다시 시도합니다."
-        : "Opened macOS settings. Turn Agentlas on and the next run retries automatically.",
+      ok: opened.ok,
+      message: opened.ok ? (ko
+        ? "권한 설정을 열었습니다. 현재 실행 중인 Agentlas의 권한을 확인해 주세요."
+        : "Opened permission settings. Review access for this running copy of Agentlas.")
+        : (ko ? "권한 설정을 열지 못했습니다. 시스템 설정에서 확인해 주세요." : "Could not open permission settings. Review access in system settings."),
       navigate: null,
       plan: null,
     };

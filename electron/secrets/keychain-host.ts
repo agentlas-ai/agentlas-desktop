@@ -199,7 +199,9 @@ function runKeychainChild(
 const [modPath, op, service, account] = process.argv.slice(1);
 const keytar = require(modPath);
 let stdin = "";
-const done = (payload) => { process.stdout.write(JSON.stringify(payload)); process.exit(0); };
+const stdinChunks = [];
+// 파이프에 다 쓴 뒤에 종료한다 — write 직후 exit 하면 64KB 넘는 값이 중간에서 잘려 "unreadable output" 이 된다.
+const done = (payload) => { process.stdout.write(JSON.stringify(payload), () => process.exit(0)); };
 const fail = (e) => done({ error: e && e.message ? e.message : String(e) });
 const go = async () => {
   if (op === "get") return done({ value: await keytar.getPassword(service, account) });
@@ -211,8 +213,9 @@ const go = async () => {
   }
   return fail(new Error("unknown op"));
 };
-process.stdin.on("data", (c) => { stdin += c.toString("utf8"); });
-process.stdin.on("end", () => { go().catch(fail); });
+// Buffer 로 모아 한 번에 디코드한다 — 청크마다 toString 하면 청크 경계에 걸친 한국어(3바이트) 글자가 깨진다.
+process.stdin.on("data", (c) => { stdinChunks.push(c); });
+process.stdin.on("end", () => { stdin = Buffer.concat(stdinChunks).toString("utf8"); go().catch(fail); });
 `;
   return new Promise((resolve) => {
     const child = execFile(

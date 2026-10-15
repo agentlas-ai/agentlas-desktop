@@ -66,8 +66,8 @@ interface PreparationRecord {
   request: Readonly<McpInvocationRequest>; admission: Readonly<InvocationAdmissionIdentity>; binding: Readonly<NativeMainPreparationBinding>;
   refs: NativeOneCapabilityRefs; producer: NativeOneProducer; capsule?: NativeOneCapabilityCapsule; work?: NativeWorkImageSnapshot; inlineOne?: ReturnType<typeof captureNativeOneInlineImages>;
   lifetime: NativePreparationLifetime; controller: AbortController; done: Promise<void>; resolveDone(): void;
-  requests: Map<string, Completed>; kinds: Set<string>; handedOff: boolean; activated: boolean; busy: boolean; uncertain: boolean; closed: boolean; finished: boolean;
-  failTeam: boolean; releaseAttachments: boolean; teamFailed: boolean;
+  requests: Map<string, Completed>; kinds: Set<string>; handedOff: boolean; activated: boolean; busy: boolean; uncertain: boolean; closed: boolean; finished: boolean; authorityClosed: boolean;
+  failTeam: boolean; releaseAttachments: boolean; teamFailed: boolean; cleanupCompletion?: Promise<Readonly<{ state: "released" }>>;
   leaseId?: string;
   hostOrigin?: object;
   hostNoticePurpose?: SupervisorHostNoticePurpose;
@@ -117,7 +117,7 @@ export function createNativeMainPreparationIssuer(ports: NativeMainPreparationIs
     if (!identity || identity.ownerId !== identity.bootId) fail("native_main_preparation_channel_required");
     const canonical = canonicalInvocationRequestJson(input.request);
     if (!input.request.runId || input.admission.runId !== input.request.runId || input.admission.chatId !== input.request.chatId || input.admission.canonicalRequestJson !== canonical || input.admission.ownerProcessEpoch !== identity.bootId) fail("native_main_preparation_binding_changed");
-    if (handles.size >= (ports.maxPending ?? 32)) fail("native_main_preparation_capacity");
+    if ([...byRun.values()].filter(r => !closeAuthorityIfSettled(recordsHandle(r))).length >= (ports.maxPending ?? 32)) fail("native_main_preparation_capacity");
     if (byRun.has(input.request.runId)) fail("native_main_preparation_already_issued");
     const request = snapshot(input.request) as Readonly<McpInvocationRequest>;
     if (canonicalInvocationRequestJson(request) !== canonical) fail("native_main_preparation_binding_changed");
@@ -133,7 +133,7 @@ export function createNativeMainPreparationIssuer(ports: NativeMainPreparationIs
     const r: PreparationRecord = { handle: randomUUID(), channel: input.channel, identity: Object.freeze({ ...identity }), sender,
       hostOrigin: input.hostOrigin, hostNoticePurpose: input.hostOrigin ? ports.hostNoticePurpose?.(input.hostOrigin,request) : undefined, request, admission: Object.freeze({ ...input.admission }), binding: Object.freeze({ chatId: request.chatId, runId: request.runId!, inputDigest: digest(canonical) }), refs,
       producer: broker.enroll(input.channel), lifetime: createNativePreparationLifetime({}), controller: new AbortController(), done, resolveDone,
-      requests: new Map(), kinds: new Set(), handedOff: false, activated: false, busy: false, uncertain: false, closed: false, finished: false, failTeam: false, releaseAttachments: false, teamFailed: false };
+      requests: new Map(), kinds: new Set(), handedOff: false, activated: false, busy: false, uncertain: false, closed: false, finished: false, authorityClosed: false, failTeam: false, releaseAttachments: false, teamFailed: false };
     assertPending(r);
     const handle = Object.freeze({}) as NativeMainPreparationHandle;
     records.set(handle, r); handles.set(r.handle, handle); byRun.set(r.binding.runId, r);
@@ -260,6 +260,11 @@ export function createNativeMainPreparationIssuer(ports: NativeMainPreparationIs
     ports.consumeVerifiedNativeIngressNoStart(r.binding, proof);
     await quiesce(handle, "rejected");
     current(r, channel, true);
+    const existing = getInvocationAdmission(r.binding.runId);
+    if (existing?.status === "rejected" && existing.chatId === r.binding.chatId && existing.inputDigest === r.binding.inputDigest
+      && existing.ownerProcessEpoch === r.identity.bootId && existing.rejectionReasonCode
+      && !getDb().prepare("SELECT 1 FROM run_events WHERE run_id=? AND kind='invoke_started' LIMIT 1").get(r.binding.runId)
+      && !ports.getRunOwner(r.binding.chatId, r.binding.runId)) return Object.freeze({ state: "rejected-before-start" as const, binding: r.binding });
     assertPending(r);
     const owner = ports.getRunOwner(r.binding.chatId, r.binding.runId);
     if (owner && (owner.state !== "released" || owner.ownerKind !== "daemon" || owner.ownerId !== r.identity.bootId)) fail("native_main_preparation_rejection_required");
@@ -290,12 +295,16 @@ export function createNativeMainPreparationIssuer(ports: NativeMainPreparationIs
       if (status === "uncertain") { r.uncertain = true; return Object.freeze({ state: "retained-uncertain" as const }); }
       fail("native_main_preparation_settlement_required");
     }
-    if (r.failTeam && r.refs.team && !r.teamFailed) { failOneTeamPreflightStart(r.refs.team); r.teamFailed = true; }
-    if (r.capsule) { if (a.status === "rejected") broker.releaseRejectedBeforeStart(r.capsule); else broker.releaseAfterSettlement(r.capsule); }
-    else if (r.releaseAttachments && r.refs.attachments) releaseOneAttachmentRun(r.refs.attachments);
-    if (r.work) work.release(r.work);
-    if (r.inlineOne) r.inlineOne.release();
-    r.closed = true; r.finished = true; handles.delete(r.handle); byRun.delete(r.binding.runId); r.resolveDone(); return Object.freeze({ state: "released" as const });
+    // Only the real terminal resource cleanup is single-flight. Earlier active
+    // handoff/uncertain observations above never consume this final operation.
+    return r.cleanupCompletion ??= Promise.resolve().then(() => {
+      if (r.failTeam && r.refs.team && !r.teamFailed) { failOneTeamPreflightStart(r.refs.team); r.teamFailed = true; }
+      if (r.capsule) { if (a.status === "rejected") broker.releaseRejectedBeforeStart(r.capsule); else broker.releaseAfterSettlement(r.capsule); }
+      else if (r.releaseAttachments && r.refs.attachments) releaseOneAttachmentRun(r.refs.attachments);
+      if (r.work) work.release(r.work);
+      if (r.inlineOne) r.inlineOne.release();
+      r.closed = true; r.authorityClosed = true; r.uncertain = false; r.finished = true; handles.delete(r.handle); byRun.delete(r.binding.runId); r.resolveDone(); return Object.freeze({ state: "released" as const });
+    });
   }
   function disconnect(channel: object) {
     for (const r of byRun.values()) if (r.channel === channel) {
@@ -305,12 +314,38 @@ export function createNativeMainPreparationIssuer(ports: NativeMainPreparationIs
     }
   }
   function recordsHandle(r: PreparationRecord) { const h = handles.get(r.handle); if (!h) fail("native_main_preparation_required"); return h; }
-  function inspect(handle: NativeMainPreparationHandle) { const r = record(handle); return Object.freeze({ activated: r.activated, handedOff: r.handedOff, aborted: r.controller.signal.aborted, pendingCount: r.lifetime.pendingCount, admissionClosed: r.lifetime.admissionClosed, closed: r.closed, uncertain: r.uncertain, finished: r.finished, checkpointCount: r.requests.size }); }
+  /** Private local observation: actual Main operations and exact durable execution authority are closed.
+   * This is independent of staging/team cleanup success and sends no RPC. */
+  function closeAuthorityIfSettled(handle: NativeMainPreparationHandle): boolean {
+    const r = record(handle); if (r.authorityClosed || r.finished) return true;
+    const a = getInvocationAdmission(r.binding.runId), owner = ports.getRunOwner(r.binding.chatId, r.binding.runId);
+    if (!a || a.chatId !== r.binding.chatId || a.inputDigest !== r.binding.inputDigest || a.ownerProcessEpoch !== r.identity.bootId) return false;
+    if (a.status === "rejected") {
+      if (!a.rejectionReasonCode || getDb().prepare("SELECT 1 FROM run_events WHERE run_id=? AND kind='invoke_started' LIMIT 1").get(r.binding.runId)
+        || (owner && (owner.state !== "released" || owner.ownerKind !== "daemon" || owner.ownerId !== r.identity.bootId))) return false;
+    } else if (a.status !== "admitted" || !owner || owner.state !== "released" || owner.ownerKind !== "daemon" || owner.ownerId !== r.identity.bootId
+      || (r.leaseId !== undefined && owner.leaseId !== r.leaseId)) return false;
+    r.closed = true; r.lifetime.closeAdmission();
+    if (!r.controller.signal.aborted) r.controller.abort(new NativeMainPreparationError("native_main_preparation_authority_closed"));
+    if (r.lifetime.pendingCount !== 0) return false;
+    if (r.capsule) broker.sealAuthority(r.capsule);
+    r.authorityClosed = true;
+    byRun.delete(r.binding.runId); handles.delete(r.handle);
+    // Immutable transfer buffers have no remaining reader after actual local drain.
+    // These operations only retire snapshots; attachment/team cleanup stays separate.
+    if (r.work) { try { work.release(r.work); } catch {} }
+    if (r.inlineOne) { try { r.inlineOne.release(); } catch {} }
+    const { images: _closedImages, ...requestMetadata } = r.request;
+    r.request = requestMetadata as Readonly<McpInvocationRequest>;
+    r.attachmentTransfer = undefined; r.requests.clear();
+    return true;
+  }
+  function inspect(handle: NativeMainPreparationHandle) { const r = record(handle); return Object.freeze({ activated: r.activated, handedOff: r.handedOff, aborted: r.controller.signal.aborted, pendingCount: r.lifetime.pendingCount, admissionClosed: r.lifetime.admissionClosed, closed: r.closed, authorityClosed: r.authorityClosed, uncertain: r.uncertain, finished: r.finished, checkpointCount: r.requests.size }); }
   function settled(handle: NativeMainPreparationHandle): Promise<void> { return record(handle).done; }
   async function supervisorCommand(handle:NativeMainPreparationHandle,channel:object,name:string,input:Record<string,unknown>):Promise<unknown> {
     const r=record(handle);current(r,channel);
     if(!r.hostOrigin || !r.request.oneMode || !ports.supervisorCommand)fail("native_supervisor_original_source_required");
     return ports.supervisorCommand(r.hostOrigin,r.request,name,input);
   }
-  return { supervisorCommand, issue, projection, activate, resolve, inspect, settled, execute, readOneImageChunk, readOneInlineImageChunk, readWorkImageChunk, cancel, quiesce, rejectNativeIngressBeforeStart, finish, disconnect };
+  return { closeAuthorityIfSettled, supervisorCommand, issue, projection, activate, resolve, inspect, settled, execute, readOneImageChunk, readOneInlineImageChunk, readWorkImageChunk, cancel, quiesce, rejectNativeIngressBeforeStart, finish, disconnect };
 }

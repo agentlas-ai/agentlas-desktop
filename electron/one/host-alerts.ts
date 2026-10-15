@@ -31,3 +31,50 @@ export function reportHostAlertToOne(alert: OneHostAlert): boolean {
   if (!alert.chatId || !alert.code) return false;
   try { return sink ? sink(alert) : false; } catch { return false; }
 }
+
+/**
+ * A teammate result that came back to a room One messaged from the personal conversation (docs native-harness 22 O1).
+ * team-dispatch reports it; the supervisor links it to the exact one_chat_send run that started the teammate
+ * (parent_run_id) and queues it for One's review. No link → nothing is queued; the room keeps its own report.
+ */
+export interface OneTeamResult {
+  dispatchId: string;
+  roomChatId: string;
+  parentRunId: string | null;
+  memberName: string;
+  brief: string;
+  status: string;
+  childRunId: string;
+  /** Exact shared-result coordinates; optional for older host producers. */
+  childChatId?: string;
+  memberAgentId?: string;
+  result: string | null;
+}
+
+let teamSink: ((result: OneTeamResult) => boolean) | null = null;
+
+export function registerOneTeamResultSink(fn: (result: OneTeamResult) => boolean): () => void {
+  teamSink = fn;
+  return () => { if (teamSink === fn) teamSink = null; };
+}
+
+export function reportTeamResultToOne(result: OneTeamResult): boolean {
+  if (!result.parentRunId || result.status === "running") return false;
+  try { return teamSink ? teamSink(result) : false; } catch { return false; }
+}
+
+/**
+ * A graph or automation result was queued for One's review inside the scheduler's delivery transaction
+ * (one/graph-review.ts, native-harness notyet NH16). The supervisor registers a wake so the review starts now; when
+ * another process hosts One, its 30-second tick finds the queued result instead. A wake never carries the result.
+ */
+let graphWake: (() => void) | null = null;
+
+export function registerOneGraphResultWake(fn: () => void): () => void {
+  graphWake = fn;
+  return () => { if (graphWake === fn) graphWake = null; };
+}
+
+export function wakeOneForGraphResult(): void {
+  try { graphWake?.(); } catch { /* The queued result stays pending for the next tick. */ }
+}

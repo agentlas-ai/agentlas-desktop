@@ -55,14 +55,12 @@ function publicAgentSummary(agent: InstalledAgent): string {
   return `${trimText(agent.nameEn || agent.name, 120)} ${trimText(agent.taglineEn || agent.tagline, 240)} ${agent.mcpServers.map((item) => trimText(item, 60)).join(" ")}`;
 }
 
-function chooseAstryxTemplate(publicSummary: string): SiteAstryxTemplate {
-  const normalized = publicSummary.toLowerCase();
-  if (/(chat|conversation|assistant|copilot|상담|대화|채팅)/i.test(normalized)) return "ai-chat";
-  if (/(schema|form|field|upload|file|csv|pdf|url|score|analy|extract|validator|입력|출력|분석|파일|검증)/i.test(normalized)) {
-    return "form-two-column";
-  }
-  return "ai-chat-landing";
-}
+// The host never reads the agent's description to pick a template or a UI contract.
+// A builder model proposes a schema (and optionally a template) in the package's
+// .agentlas/agent-app-contract.json; normalizeSiteAgentAppContract validates its
+// structure and the owner reviews it. Without a declaration the template is the
+// neutral chat landing and the contract is the neutral request/context -> result.
+const NEUTRAL_ASTRYX_TEMPLATE: SiteAstryxTemplate = "ai-chat-landing";
 
 function parameter(
   name: string,
@@ -73,90 +71,10 @@ function parameter(
   return { name, type: "string", label, description, required: false, ...opts };
 }
 
-export function inferSiteAgentAppUiContract(publicSummary: string): {
+export function neutralSiteAgentAppUiContract(): {
   parameters: AgentlasSurfaceToolParameterSpec[];
   outputs: JsonObject[];
 } {
-  const text = publicSummary.toLowerCase();
-  if (/(research|evidence|citation|source|논문|리서치|조사|근거|출처)/i.test(text)) {
-    return {
-      parameters: [
-        parameter("topic", "Research topic", "The question or topic to investigate.", { required: true, format: "textarea" }),
-        parameter("sources", "Sources or URLs", "Optional source constraints, URLs, or evidence to prioritize.", { format: "textarea" }),
-        parameter("depth", "Research depth", "Choose the level of detail.", { required: true, options: ["Quick scan", "Standard brief", "Deep research"], default: "Standard brief" }),
-      ],
-      outputs: [
-        { name: "brief", label: "Cited brief", type: "markdown", description: "A structured research brief with findings and caveats." },
-        { name: "citations", label: "Sources", type: "array", description: "Source links and evidence references used in the brief." },
-      ],
-    };
-  }
-  if (/(instagram|social|marketing|campaign|content|copy|sns|마케팅|콘텐츠|카피|홍보)/i.test(text)) {
-    return {
-      parameters: [
-        parameter("brief", "Campaign brief", "Describe the offer, message, and desired outcome.", { required: true, format: "textarea" }),
-        parameter("audience", "Audience", "Who should this content reach?", { required: true }),
-        parameter("channel", "Channel", "Choose the publishing surface.", { required: true, options: ["Instagram", "TikTok", "LinkedIn", "Blog"], default: "Instagram" }),
-        parameter("tone", "Tone", "Optional voice or brand direction."),
-      ],
-      outputs: [
-        { name: "content", label: "Publish-ready content", type: "markdown", description: "Channel-ready copy and structure." },
-        { name: "assets", label: "Asset plan", type: "array", description: "Recommended visual or production assets." },
-      ],
-    };
-  }
-  if (/(code|developer|build|repository|github|frontend|backend|개발|코드|빌드|레포)/i.test(text)) {
-    return {
-      parameters: [
-        parameter("requirements", "Requirements", "Describe the change, constraints, and acceptance target.", { required: true, format: "textarea" }),
-        parameter("repository", "Repository or workspace", "Repository URL, branch, or local workspace context."),
-        parameter("stack", "Technology stack", "Optional framework or runtime constraints."),
-      ],
-      outputs: [
-        { name: "implementation", label: "Implementation", type: "code", description: "The proposed implementation or patch." },
-        { name: "verification", label: "Verification", type: "markdown", description: "Tests, risks, and handoff notes." },
-      ],
-    };
-  }
-  if (/(csv|spreadsheet|dataset|analytics|metric|sql|data|데이터|분석|지표|엑셀)/i.test(text)) {
-    return {
-      parameters: [
-        parameter("question", "Analysis question", "What decision or question should the analysis answer?", { required: true, format: "textarea" }),
-        parameter("dataSource", "Data source", "Dataset, sheet, SQL table, or file reference.", { required: true }),
-        parameter("includeCharts", "Include charts", "Whether to propose visual summaries.", { type: "boolean", default: true }),
-      ],
-      outputs: [
-        { name: "analysis", label: "Analysis", type: "markdown", description: "Findings, caveats, and recommended actions." },
-        { name: "metrics", label: "Metrics", type: "object", description: "Structured metrics and chart-ready values." },
-      ],
-    };
-  }
-  if (/(image|visual|design|photo|video|creative|이미지|디자인|사진|영상|크리에이티브)/i.test(text)) {
-    return {
-      parameters: [
-        parameter("brief", "Creative brief", "Describe the scene, message, and must-keep details.", { required: true, format: "textarea" }),
-        parameter("style", "Visual direction", "Optional style, palette, or reference direction."),
-        parameter("format", "Output format", "Choose the intended surface.", { required: true, options: ["Landscape", "Portrait", "Square"], default: "Landscape" }),
-      ],
-      outputs: [
-        { name: "creative", label: "Creative output", type: "image", description: "The generated or directed visual output." },
-        { name: "productionNotes", label: "Production notes", type: "markdown", description: "Prompt, composition, and delivery notes." },
-      ],
-    };
-  }
-  if (/(legal|contract|litigation|compliance|법률|계약|소송|준법)/i.test(text)) {
-    return {
-      parameters: [
-        parameter("facts", "Facts and documents", "Summarize the facts and relevant document text.", { required: true, format: "textarea" }),
-        parameter("jurisdiction", "Jurisdiction", "Country, state, or court context.", { required: true }),
-        parameter("objective", "Objective", "The decision, review, or filing outcome needed.", { required: true }),
-      ],
-      outputs: [
-        { name: "analysis", label: "Issue analysis", type: "markdown", description: "Structured issues, risks, and next steps." },
-        { name: "checklist", label: "Action checklist", type: "array", description: "Documents, deadlines, and follow-up actions." },
-      ],
-    };
-  }
   return {
     parameters: [
       parameter("request", "Request", "Describe the outcome you want from this agent.", { required: true, format: "textarea" }),
@@ -166,8 +84,8 @@ export function inferSiteAgentAppUiContract(publicSummary: string): {
   };
 }
 
-function contractSnapshot(publicSummary: string): SiteAgentAppContractSnapshot {
-  const inferred = inferSiteAgentAppUiContract(publicSummary);
+function contractSnapshot(): SiteAgentAppContractSnapshot {
+  const inferred = neutralSiteAgentAppUiContract();
   const inputs = inferred.parameters.slice(0, 8).map((field, index) => {
     const rawType = String(field.type ?? "string").toLowerCase();
     const type: SiteAgentAppContractInput["type"] = rawType === "number" || rawType === "boolean" || rawType === "object" || rawType === "array"
@@ -437,10 +355,10 @@ export function resolveSiteAgentAppContext(ref: SiteAgentAppTargetRef): SiteAgen
   const declarations = declarationRoots
     .map((root) => readResolvedSiteAgentAppContract(root))
     .filter((declaration): declaration is NonNullable<typeof declaration> => Boolean(declaration));
-  const template = declarations.find((declaration) => declaration.template)?.template ?? chooseAstryxTemplate(publicSummary);
+  const template = declarations.find((declaration) => declaration.template)?.template ?? NEUTRAL_ASTRYX_TEMPLATE;
   const declaredContract = mergeDeclaredContracts(declarations, declaredMcpCatalogIds, capabilityUnavailable);
   const contract = declaredContract ?? {
-    ...contractSnapshot(publicSummary),
+    ...contractSnapshot(),
     capabilities: mergeSiteAgentAppCapabilities([], declaredMcpCatalogIds, capabilityUnavailable),
   };
   return siteAgentAppContextFromSnapshot(target, template, contract, defaultSiteAgentAppVisual(target));

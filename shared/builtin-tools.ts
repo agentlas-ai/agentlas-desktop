@@ -36,6 +36,7 @@ export interface BuiltinToolContext {
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
   /** Main-owned native browser download; no caller-selected path or profile. */
+  historyWork?: (name:string,args:Record<string,unknown>)=>Promise<unknown>;
   browserDownload?: (url: string) => Promise<{id:string;fileName:string;bytes:number;savePath:string}>;
   /**
    * 사용자에게 묻고 **답을 기다리는** 함수. 주입으로 받는 이유는 이 파일이 electron 을
@@ -359,6 +360,8 @@ function num(value: unknown): number | undefined {
 }
 
 export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
+  {name:"history_work_draft",minPerm:"write",description:"Produce one immutable canonical finite-record declaration for the currently registered personal file. No file paths, execution identifiers or oracle cases.",parameters:{type:"object",properties:{program:{type:"object"}},required:["program"],additionalProperties:false},run:async(args,ctx)=>{if(!ctx.historyWork)throw new Error("history_work_original_scope_required");return JSON.stringify(await ctx.historyWork("history_work_draft",args));}},
+  {name:"history_work_apply",minPerm:"write",description:"Request separate employee native review of the already admitted finite-record file change. This does not itself approve the change.",parameters:{type:"object",properties:{},additionalProperties:false},run:async(args,ctx)=>{if(!ctx.historyWork||Object.keys(args).length)throw new Error("history_work_original_scope_required");return JSON.stringify(await ctx.historyWork("history_work_apply",args));}},
   {
     name: "list_dir",
     minPerm: "read",
@@ -654,11 +657,12 @@ const BY_NAME = new Map(BUILTIN_TOOLS.map((tool) => [tool.name, tool]));
 /** 이 권한에서 **존재하는** 도구들. 부족한 도구는 목록에 아예 없다. */
 export function allowedBuiltinTools(
   permission: ToolPermission,
-  opts: { canAskUser?: boolean; canGenerateImage?: boolean; canBrowserDownload?: boolean } = {},
+  opts: { canAskUser?: boolean; canGenerateImage?: boolean; canBrowserDownload?: boolean; historyWorkTools?:readonly string[] } = {},
 ): BuiltinTool[] {
   const rank = PERM_RANK[permission] ?? 0;
   return BUILTIN_TOOLS.filter((tool) => {
     if (PERM_RANK[tool.minPerm] > rank) return false;
+    if (tool.name.startsWith("history_work_") && !opts.historyWorkTools?.includes(tool.name)) return false;
     // 물을 표면이 없으면 묻는 도구도 없다 — 있는데 못 쓰는 도구는 함정이다.
     if (tool.name === "ask_user" && !opts.canAskUser) return false;
     // 멀티모달 슬롯이 비어 있으면 그리는 도구도 없다. "있는데 못 그림"은 함정이다.
@@ -673,7 +677,7 @@ export function builtinToolByName(name: string): BuiltinTool | undefined {
 }
 
 /** OpenAI 함수 호출 형식. */
-export function builtinToolsAsOpenAi(permission: ToolPermission, opts: { canAskUser?: boolean; canGenerateImage?: boolean; canBrowserDownload?: boolean } = {}): {
+export function builtinToolsAsOpenAi(permission: ToolPermission, opts: { canAskUser?: boolean; canGenerateImage?: boolean; canBrowserDownload?: boolean; historyWorkTools?:readonly string[] } = {}): {
   type: "function";
   function: { name: string; description: string; parameters: Record<string, unknown> };
 }[] {
@@ -684,7 +688,7 @@ export function builtinToolsAsOpenAi(permission: ToolPermission, opts: { canAskU
 }
 
 /** Anthropic 도구 형식. */
-export function builtinToolsAsAnthropic(permission: ToolPermission, opts: { canAskUser?: boolean; canGenerateImage?: boolean; canBrowserDownload?: boolean } = {}): {
+export function builtinToolsAsAnthropic(permission: ToolPermission, opts: { canAskUser?: boolean; canGenerateImage?: boolean; canBrowserDownload?: boolean; historyWorkTools?:readonly string[] } = {}): {
   name: string;
   description: string;
   input_schema: Record<string, unknown>;

@@ -22,7 +22,7 @@ export function extractBuildInterviewQuestions(text: unknown): BuildInterviewQue
   const questions: BuildInterviewQuestion[] = [];
   const matches = text.matchAll(/<<agentlas-ask>>([\s\S]*?)<<\/agentlas-ask>>/g);
   for (const match of matches) {
-    if (questions.length >= 7) break;
+    if (questions.length >= 64) break;
     const body = match[1].trim().replace(/^```(?:json)?\s*/i, "").replace(/```$/i, "").trim();
     try {
       const raw = JSON.parse(body) as Record<string, unknown>;
