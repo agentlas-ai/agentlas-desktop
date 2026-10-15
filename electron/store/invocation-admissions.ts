@@ -274,6 +274,12 @@ export function getPendingInvocationAdmissionForChat(chatId: string): Invocation
   return row ? decode(row) : null;
 }
 
+// Every epoch this process has reserved under, registered before the INSERT (no async gap can see the row first).
+// Desktop Main: its own Desktop-run epoch plus each daemon boot it issued a native start to. Process memory only.
+const epochsReservedHere = new Set<string>();
+/** Epochs this process reserved under; see rejectPendingAdmissionsOfTerminatedEpochs for the only consumer. */
+export function invocationAdmissionEpochsReservedHere(): string[] { return [...epochsReservedHere]; }
+
 /** Exact run/digest replay is idempotent; another pending run in the chat is not. */
 export function createInvocationAdmission(
   input: InvocationAdmissionIdentity,
@@ -281,6 +287,7 @@ export function createInvocationAdmission(
 ): InvocationAdmissionWriteResult {
   const digest = validateIdentity(input);
   const timestamp = now.toISOString();
+  epochsReservedHere.add(input.ownerProcessEpoch);
   return getDb().transaction((): InvocationAdmissionWriteResult => {
     const old = rowForRun(input.runId);
     if (old) {
@@ -424,4 +431,49 @@ export function rejectClosedNativeIngressAdmission(proof: object, now: Date = ne
   // It cannot grant execution; an exact terminal row is observed idempotently.
   consumeClosedNativeIngressFrontier(proof);
   return result;
+}
+
+/**
+ * The prior-owner-epoch-terminated producer. A pending reservation is a hard
+ * per-chat lock (one pending row per chat) that only its owner process decides.
+ * When that process died before its start boundary (a daemon killed mid-
+ * preparation, a Desktop crash during local preparation), nobody else could
+ * decide it and every later turn of the chat waited forever on
+ * invocation_admission_chat_pending.
+ *
+ * The caller must hold independent proof that EVERY epoch outside
+ * `liveOwnerProcessEpochs` has terminated (Main: its exclusive single-instance
+ * lock, the boot of the one authenticated daemon, and its own reserved epochs
+ * that are not daemon boots it attached to). Each decision is the same
+ * monotonic pending->rejected CAS as decideInvocationAdmission: a run with a
+ * start receipt or an unreleased run owner is never touched, and a zombie owner
+ * that later tries to admit loses the CAS instead of dispatching.
+ */
+export function rejectPendingAdmissionsOfTerminatedEpochs(input: {
+  liveOwnerProcessEpochs: readonly string[];
+  reasonCode: string;
+}, now: Date = new Date()): InvocationAdmission[] {
+  const live = new Set(input.liveOwnerProcessEpochs);
+  if (live.size < 1) throw new Error("invocation_admission_live_epochs_required");
+  for (const epoch of live) {
+    validId(epoch, "owner_process_epoch");
+    if (epoch.length > 128) throw new Error("invocation_admission_invalid_owner_process_epoch");
+  }
+  if (!/^[a-z][a-z0-9_-]{0,79}$/.test(input.reasonCode)) throw new Error("invocation_admission_invalid_reason_code");
+  const timestamp = now.toISOString();
+  return getDb().transaction((): InvocationAdmission[] => {
+    const rows = getDb().prepare("SELECT * FROM invocation_admissions WHERE status = 'pending'").all() as AdmissionRow[];
+    const decided: InvocationAdmission[] = [];
+    for (const row of rows) {
+      if (live.has(row.owner_process_epoch) || anyStartReceipt(row.run_id)) continue;
+      const owner = getDb().prepare("SELECT state FROM invocation_run_owners WHERE run_id = ?")
+        .get(row.run_id) as { state?: string } | undefined;
+      if (owner && owner.state !== "released") continue;
+      const changed = getDb().prepare(`UPDATE invocation_admissions SET status='rejected', rejected_at=?,
+        rejection_reason_code=?, updated_at=? WHERE run_id=? AND owner_process_epoch=? AND status='pending'`)
+        .run(timestamp, input.reasonCode, timestamp, row.run_id, row.owner_process_epoch);
+      if (changed.changes === 1) decided.push(decode(rowForRun(row.run_id)!));
+    }
+    return decided;
+  }).immediate();
 }

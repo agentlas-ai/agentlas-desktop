@@ -27,6 +27,8 @@ export interface PromptModuleContext {
   runtimeKind?: string;
   /** Main-owned managed-local profile: connections line only names granted tools. */
   managedLocal?: boolean;
+  /** Main-authored RunnerRequest.unattendedNoAsk: nobody can answer, so no ask channel is offered. */
+  unattendedNoAsk?: boolean;
   /** Untrusted stateless completion: the exact read-only MCP tools, empty for none. */
   untrustedTools?: readonly string[];
   /** Native abilities line, already rendered by native-capabilities.ts. */
@@ -151,7 +153,10 @@ registerPromptModule({
 registerPromptModule({
   id: "capability.ask", revision: 2, kind: "capability", layer: "S1", profiles: ["ordinary", "restricted"],
   stability: "fixed-policy", changeTriggers: ["release", "profile"], order: 0,
-  render: () => ASK_LINE,
+  // An unattended run has no question channel (ask_form is not listed; the turn context closes with the
+  // unattended boundary). Offering the ask line there let the developer channel outrank that boundary
+  // (2026-10-15 Codex V2 fixture, old/new 2/2 asked an absent owner). Attended and Mobile runs keep it.
+  render: (ctx) => ctx.unattendedNoAsk ? null : ASK_LINE,
 });
 
 registerPromptModule({

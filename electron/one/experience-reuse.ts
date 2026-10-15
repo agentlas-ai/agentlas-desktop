@@ -13,6 +13,7 @@ import { getCanonicalTask } from "../store/tasks";
 import { getOneMemoryState } from "./memory-candidates";
 import { tryRecordOneDomainEvent } from "./domain-events";
 import { getOneValueClosureState } from "./value-closure";
+import { canonicalAppliedMemoryBindings } from "./canonical-memory-reuse";
 
 export const ONE_EXPERIENCE_REUSE_META_KEY = "agentlas.one.experience-reuse.v1";
 const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/;
@@ -113,27 +114,14 @@ function receiptId(input: EnsureOneExperienceReuseReceiptInput): string {
   return `one_reuse_receipt_${digest}`;
 }
 
-function exactAppliedAssets(input: EnsureOneExperienceReuseReceiptInput): {
-  memoryStoreVersion: number;
+/**
+ * Legacy approved-asset application (one_memory_context_applied). Writers are retired (0b9185be), so
+ * only assets approved before 2026-10-14 can appear here; null means no attestable legacy reuse.
+ */
+function legacyAppliedBindings(events: ReturnType<typeof listRunEvents>): {
+  storeVersion: number;
   bindings: OneExperienceReuseAssetBinding[];
 } | null {
-  const task = getCanonicalTask(input.taskId);
-  if (
-    !task
-    || task.version !== input.expectedTaskVersion
-    || task.updatedAt !== input.expectedTaskUpdatedAt
-    || task.status !== "completed"
-    || !task.originChatId
-  ) throw new Error("Canonical Task changed before the experience-reuse receipt was recorded");
-  const run = getInvocationRunReceipt(input.expectedRunId);
-  if (
-    !run
-    || run.status !== "completed"
-    || run.chatId !== task.originChatId
-    || run.eventCount > MAX_RUN_EVENTS
-  ) throw new Error("Exact durable completed run is unavailable for experience reuse");
-  const events = listRunEvents(run.runId, MAX_RUN_EVENTS);
-  if (events.length !== run.eventCount) throw new Error("Run ledger is incomplete for experience reuse");
   const appliedEvents = events.filter((event) => event.kind === "one_memory_context_applied");
   if (appliedEvents.length === 0) return null;
   if (appliedEvents.length !== 1) throw new Error("Run has ambiguous Memory application receipts");
@@ -253,10 +241,41 @@ function exactAppliedAssets(input: EnsureOneExperienceReuseReceiptInput): {
       || asset.scope !== binding.scope
     ) throw new Error("Applied Memory asset changed before exact reuse could be attested");
   }
-  const crossTask = parsed.filter((item) => item.sourceTaskId !== task.id);
+  return { storeVersion: payload.storeVersion as number, bindings: parsed };
+}
+
+function exactAppliedAssets(input: EnsureOneExperienceReuseReceiptInput): {
+  memoryStoreVersion: number;
+  bindings: OneExperienceReuseAssetBinding[];
+} | null {
+  const task = getCanonicalTask(input.taskId);
+  if (
+    !task
+    || task.version !== input.expectedTaskVersion
+    || task.updatedAt !== input.expectedTaskUpdatedAt
+    || task.status !== "completed"
+    || !task.originChatId
+  ) throw new Error("Canonical Task changed before the experience-reuse receipt was recorded");
+  const run = getInvocationRunReceipt(input.expectedRunId);
+  if (
+    !run
+    || run.status !== "completed"
+    || run.chatId !== task.originChatId
+    || run.eventCount > MAX_RUN_EVENTS
+  ) throw new Error("Exact durable completed run is unavailable for experience reuse");
+  const events = listRunEvents(run.runId, MAX_RUN_EVENTS);
+  if (events.length !== run.eventCount) throw new Error("Run ledger is incomplete for experience reuse");
+  const legacy = legacyAppliedBindings(events);
+  const closureState = getOneValueClosureState();
+  // Canonical learned memory applied by ordinary recall (memory_recall_applied), attested against
+  // the exact accepted run that produced it. This is the live source since the approval writers retired.
+  const canonical = canonicalAppliedMemoryBindings(events, { taskId: task.id, runStartedAt: run.startedAt }, closureState);
+  const legacyCross = (legacy?.bindings ?? []).filter((item) => item.sourceTaskId !== task.id);
+  const canonicalCross = (canonical?.bindings ?? []).filter((item) =>
+    item.sourceTaskId !== task.id && !legacyCross.some((other) => other.assetId === item.assetId));
+  const crossTask = [...legacyCross, ...canonicalCross].slice(0, 32);
   if (crossTask.length === 0) return null;
 
-  const closureState = getOneValueClosureState();
   for (const binding of crossTask) {
     const sourceTask = getCanonicalTask(binding.sourceTaskId);
     if (
@@ -328,7 +347,10 @@ function exactAppliedAssets(input: EnsureOneExperienceReuseReceiptInput): {
     && item.sourceRunRef === run.runId,
   );
   if (!acceptance || !execution) throw new Error("Value Closure lacks exact acceptance and execution evidence");
-  return { memoryStoreVersion: payload.storeVersion, bindings: crossTask };
+  return {
+    memoryStoreVersion: legacyCross.length > 0 ? legacy!.storeVersion : canonical!.authorityRevision,
+    bindings: crossTask,
+  };
 }
 
 export function getOneExperienceReuseState(): OneExperienceReuseState {

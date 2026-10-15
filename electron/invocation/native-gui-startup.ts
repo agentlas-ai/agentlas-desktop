@@ -5,6 +5,7 @@ import type { NativeAuthenticatedIdentity } from "../daemon/native-session-auth"
 import { userDataDir } from "../runtime-paths";
 import { CHAT_HANDOVER_VERSION, chatReleaseReplyFromWire, registerChatHandoverPeer } from "../runtime/chat-host-handover";
 import { assertNativeGuiOwnerBootstrap, type createNativeGuiOwnerClient } from "./native-gui-owner";
+import { invocationAdmissionEpochsReservedHere, rejectPendingAdmissionsOfTerminatedEpochs } from "../store/invocation-admissions";
 import type { createNativeMainAuthCallbackAdapter } from "./native-main-auth-callback";
 
 declare const enrolledGui: unique symbol;
@@ -98,6 +99,31 @@ export function recoverNativeGuiObservation(enrollment: NativeGuiEnrollment, onE
   const settled = () => { if (value.observationRecovery === operation) value.observationRecovery = undefined; };
   operation.then(settled, settled); void operation.catch(() => {}); return operation;
 }
+/**
+ * A daemon killed (or a Desktop crashed) before its start boundary leaves a pending reservation that only that
+ * dead process could decide, and a pending reservation locks its chat: every later owner turn waited forever on
+ * invocation_admission_chat_pending (measured: daemon SIGKILL while a turn waited on Main, respawn, re-attach).
+ * The authenticated attach is the proof point. The signed transcript names the one live daemon boot; Electron's
+ * exclusive single-instance lock proves every earlier Desktop process ended; this process's own epochs are the ones
+ * it reserved under minus the daemon boots it attached to. Every other epoch has terminated. Without the lock (dev
+ * multi-instance, headless host) nothing is decided. Lazy electron require: the daemon never calls this.
+ */
+const attachedDaemonBoots = new Set<string>();
+function settleReservationsOfEndedOwners(liveDaemonBootId: string): void {
+  attachedDaemonBoots.add(liveDaemonBootId);
+  let exclusive = false;
+  try { exclusive = (require("electron") as { app?: { hasSingleInstanceLock?: () => boolean } }).app?.hasSingleInstanceLock?.() === true; }
+  catch { /* not an Electron GUI host: no exclusivity proof */ }
+  if (!exclusive) return;
+  try {
+    const ownEpochs = invocationAdmissionEpochsReservedHere().filter(epoch => !attachedDaemonBoots.has(epoch));
+    const settled = rejectPendingAdmissionsOfTerminatedEpochs({ liveOwnerProcessEpochs: [liveDaemonBootId, ...ownEpochs], reasonCode: "owner_process_epoch_terminated" });
+    if (settled.length > 0) console.warn("[native-invocation] settled reservations left by ended processes", { runIds: settled.map(row => row.runId) });
+  } catch (error) {
+    // The next authenticated attach observes again; an unreadable store is not a decision.
+    console.warn("[native-invocation] ended-process reservations remain unsettled", (error as { code?: unknown })?.code ?? (error as Error)?.message);
+  }
+}
 /** Public ping supplies discovery only. The boot becomes trusted solely after
  * the actual enrolled signature and strict native.attach transcript agree. */
 export function attachNativeGuiDaemon(enrollment: NativeGuiEnrollment, discoveredBootId: string,
@@ -168,6 +194,7 @@ export function attachNativeGuiDaemon(enrollment: NativeGuiEnrollment, discovere
         || Object.values(reply.capabilities).some(flag => typeof flag !== "boolean")) fail("native_gui_attach_reply_invalid");
       const capabilities = Object.freeze({ ...reply.capabilities }) as NativeGuiCapabilities;
       value.capabilities = capabilities; value.ready = reply.ready;
+      settleReservationsOfEndedOwners(identity.bootId);
       // Device bridge: revoke daemon-run screen scopes if this channel closes, forward lock/sleep, push the current state.
       void import("./device-bridge-main").then(async m => (await m.deviceBridgeMain()).attached(channel as never)).catch(() => undefined);
       // Chat host handover (1.3.0 A2): this process can ask the attached service to release its idle resident sessions of a

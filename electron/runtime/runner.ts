@@ -1,4 +1,4 @@
-import { carryRunnerTurnContext, extendRunnerTurnContext } from "./runner-turn-context-binding";
+import { carryRunnerTurnContext, deliverUnboundTurnContext, extendRunnerTurnContext } from "./runner-turn-context-binding";
 import { composeTracedPrompt, restoreTracedPrompt, type PromptCompositionTrace } from "./prompt-composition-trace";
 import { composeDeclaredPrompt, type DeclaredPromptPart } from "./prompt-order";
 import type { HistoryRuntimeFence } from "../one/history-runtime-fences";
@@ -126,6 +126,10 @@ export interface RunnerRequest {
   unattended?: true;
   /** Interactive remote surface can show durable Decisions but cannot answer a blocking host tool call. */
   noSynchronousAsk?: true;
+  /** Main-authored: nobody can answer a question in this run. Set by the same decision that adds
+   * UNATTENDED_NO_ASK_DIRECTIVE and withholds ask_form (mcp/client.ts), never from renderer/model input.
+   * wrapSystemPrompt then omits the system `ask:` module, so no channel offers an ask the run cannot use. */
+  unattendedNoAsk?: true;
   /** Stable configuration identity for durable unattended sessions. Mutable routing/tool
    * overlays stay in the prompt but do not force a new CLI conversation every run. */
   sessionFingerprintSeed?: string;
@@ -1181,8 +1185,10 @@ function carrySurfaceMemoryRequest<T extends object>(original: object, next: T):
   return memory.carrySurfaceMemoryRequest(original, next);
 }
 
-/** Display guidance only: this marker never grants tools, credentials or authority. */
-export function withNativeBrowserGuidance(runner: Runner): Runner {
+/** Display guidance only: this marker never grants tools, credentials or authority. `runtimeKind` is the selected
+ * adapter kind: a stateless API/local host loop never reads req.turnContext, so an unbound request's turn context (and
+ * any addition here) is framed into its current user message instead (runner-turn-context-binding.ts). */
+export function withNativeBrowserGuidance(runner: Runner, runtimeKind?: string): Runner {
   return (req, events) => {
     if (assertScienceRecoveryRequest(req)) return runner(req, events);
     const additions: DeclaredPromptPart[] = [];
@@ -1207,20 +1213,25 @@ export function withNativeBrowserGuidance(runner: Runner): Runner {
         changeTriggers: ["release", "permission", "tool-grant", "runtime"], text: guidance });
       stable.push(guidance);
     }
-    if (!additions.length) return runner(req, events);
-    return runner(carrySurfaceMemoryRequest(req, extendRunnerTurnContext(req, additions, stable)), events);
+    if (!additions.length) {
+      const delivered = deliverUnboundTurnContext(req, runtimeKind);
+      return runner(delivered === req ? req : carrySurfaceMemoryRequest(req, delivered), events);
+    }
+    return runner(carrySurfaceMemoryRequest(req, extendRunnerTurnContext(req, additions, stable, runtimeKind)), events);
   };
 }
 
 /* Ask counts are never stated in prose (they used to contradict each other: "multiple blocks" / "exactly one" / "one batch of 3-5").
- * The host parser decides: extractAskFences (shared/ask-fence-flatten.ts) keeps at most 8 questions per reply, each with 2-8 options,
+ * The host parser decides: extractAskFences (shared/ask-fence-flatten.ts) keeps at most 64 questions per reply, each with 2-8 options,
  * and drops unfilled template placeholders (isUnfilledQuestionTemplate). Same for the Briefing gate. */
 /** 에이전트가 사용자에게 옵션 질문을 emit할 수 있는 프로토콜 — renderer/lib/ask-question.ts의 파서와 짝.
  *  로케일 무관, 영어로 — 모델은 항상 영어 docstring을 잘 따른다.
  *  토큰을 아끼기 위해 짧게. */
 const ASK_PROTOCOL = ASK_LINE;
 
-/** 무인 실행(스케줄 자동화·백그라운드 생성) 최종 지침 — 앞선 ASK_PROTOCOL을 뒤에서 무효화한다.
+/** 무인 실행(스케줄 자동화·백그라운드 생성) 최종 지침. 같은 실행의 시스템 `ask:` 모듈은 렌더하지 않는다
+ *  (RunnerRequest.unattendedNoAsk) — 2026-10-15 실측: 개발자 채널의 ask 줄이 남아 있으면 Codex가 이 사용자 채널
+ *  경계보다 그 줄을 따라 질문 fence를 냈다(old/new 2/2 FAIL). 쓸 수 없는 질문 수단은 아예 주지 않는다.
  *  Main이 executionContext로만 붙인다(렌더러/모델 입력에서 파생 금지).
  *  automation-result.ts의 분류기가 이 계약(<<agentlas-ask>> 금지, "NEEDS-INPUT:" 접두)을 짝으로 감지해,
  *  무인 런의 질문이 조용한 가짜 성공으로 끝나는 것을 막는다. */
@@ -1364,6 +1375,8 @@ export function wrapSystemPrompt(
   supplements?: readonly DeclaredPromptPart[],
   /** Exact host Build parts; validated against the delivered string before composition. */
   systemPromptComposition?: PromptCompositionTrace,
+  /** RunnerRequest.unattendedNoAsk, forwarded unchanged by each adapter: the run has no question channel. */
+  unattendedNoAsk?: boolean,
 ): string {
   // Every line is a registered PromptModule (prompt-modules.ts): `key: value` one-liners, typed tools for anything
   // a tool can do, name lists for catalogs (owner 2026-10-13). Profiles keep their boundaries; only the bytes shrink.
@@ -1392,6 +1405,7 @@ export function wrapSystemPrompt(
   const mainAgentPrompt = mainHostParts ? mainAgentParts?.[0]?.text ?? "" : agentSystemPrompt;
   const mainHostSupplements = mainHostParts?.filter(part => part.id !== "main.system.host.agent-definition");
   const base = { locale, permission, agentSeparator: tStatus(locale, "sysAgentDef"), agentPrompt: mainAgentPrompt,
+    ...(unattendedNoAsk === true ? { unattendedNoAsk: true } : {}),
     supplements: mainHostSupplements ? [...mainHostSupplements.map(part => part.stability === "final-boundary"
       ? { ...part, order: -1 } : part), ...(supplements ?? [])] : supplements };
   if (untrustedNoTools) {

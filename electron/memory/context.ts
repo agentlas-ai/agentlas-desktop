@@ -44,6 +44,7 @@ import {
   recordContextSourceMarker,
 } from "../store/run-events";
 import { previousTurnMemorySection } from "./previous-turn";
+import { recordMemoryRecallApplied } from "./recall-receipt";
 import {
   buildProjectContextSlice,
   projectSourceSignature,
@@ -767,8 +768,11 @@ function selectedMemorySection(projectPath: string | null, agentId: string | nul
 }
 
 function globalMemorySections(agentId: string | null | undefined, taskPrompt: string | undefined,
-  options: { projectId?: string | null; chatId?: string | null; visibilityDomain?: string }): string[] {
-  const section = selectedMemorySection(null, agentId, taskPrompt, options);
+  options: { projectId?: string | null; chatId?: string | null; visibilityDomain?: string },
+  applied?: Set<string>): string[] {
+  const selection = { eligibleIds: new Set<string>(), selectedIds: new Set<string>() };
+  const section = selectedMemorySection(null, agentId, taskPrompt, options, selection);
+  if (section && applied) for (const id of selection.selectedIds) applied.add(id);
   return section ? [section] : [];
 }
 
@@ -862,7 +866,10 @@ export async function buildMemoryContext(
   // turn's prompt and their approximate injected token size. Emitted only when a
   // runId is supplied; the marker carries source name + size, never any value.
   const injected: Array<{ source: ContextSourceName; text: string }> = [];
+  // Canonical entry ids whose rendered section actually entered this prompt (ids only, never text).
+  const appliedMemoryIds = new Set<string>();
   const flushMarkers = (): void => {
+    recordMemoryRecallApplied({ runId: options.runId, chatId: options.chatId ?? null, memoryIds: appliedMemoryIds });
     if (!options.runId || injected.length === 0) return;
     const projectKey = projectContextKey(options.projectId ?? null, projectPath);
     for (const item of injected) {
@@ -882,8 +889,11 @@ export async function buildMemoryContext(
     // the stored folder identity again immediately before touching any project
     // memory, and once more before returning the assembled prompt.
     if (!verifyActivatedFolderIdentity(projectPath)) {
-      const fallback = formatMemorySections(withPreviousTurn(globalMemorySections(agentId, options.taskPrompt, options)));
-      return stillCurrent() ? fallback : "";
+      const fallbackApplied = new Set<string>();
+      const fallback = formatMemorySections(withPreviousTurn(globalMemorySections(agentId, options.taskPrompt, options, fallbackApplied)));
+      if (!stillCurrent()) return "";
+      recordMemoryRecallApplied({ runId: options.runId, chatId: options.chatId ?? null, memoryIds: fallbackApplied });
+      return fallback;
     }
     const selection = { eligibleIds: new Set<string>(), selectedIds: new Set<string>() };
     const memorySection = selectedMemorySection(projectPath, agentId, options.taskPrompt, options, selection);
@@ -941,15 +951,19 @@ export async function buildMemoryContext(
     if (memorySection) {
       sections.push(memorySection);
       injected.push({ source: "memory", text: memorySection });
+      for (const id of selection.selectedIds) appliedMemoryIds.add(id);
     }
     const timeline = timelineSection(options.projectId, projectPath, options.taskPrompt, { agentId, chatId: options.chatId });
     if (timeline) sections.push(timeline);
     if (!verifyActivatedFolderIdentity(projectPath)) {
-      const fallback = formatMemorySections(withPreviousTurn(globalMemorySections(agentId, options.taskPrompt, options)));
-      return stillCurrent() ? fallback : "";
+      const fallbackApplied = new Set<string>();
+      const fallback = formatMemorySections(withPreviousTurn(globalMemorySections(agentId, options.taskPrompt, options, fallbackApplied)));
+      if (!stillCurrent()) return "";
+      recordMemoryRecallApplied({ runId: options.runId, chatId: options.chatId ?? null, memoryIds: fallbackApplied });
+      return fallback;
     }
   } else {
-    const globalSections = globalMemorySections(agentId, options.taskPrompt, options);
+    const globalSections = globalMemorySections(agentId, options.taskPrompt, options, appliedMemoryIds);
     sections.push(...globalSections);
     if (globalSections.length > 0) injected.push({ source: "memory", text: globalSections.join("\n\n") });
     const timeline = timelineSection(options.projectId, null, options.taskPrompt, { agentId, chatId: options.chatId });

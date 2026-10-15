@@ -2127,6 +2127,10 @@ async function runMcpInvocationInContext(
   if (!req.runId) req = { ...req, runId: `direct-${randomUUID()}` };
   // Alive's host-supplied state, not its hidden Work chat, owns this wake.
   const isAliveControllerRun = executionContext?.source === "alive";
+  // One question-channel decision for this run: nobody can answer (scheduled/background, not Alive's own controller).
+  // It closes the turn context with UNATTENDED_NO_ASK_DIRECTIVE, withholds ask_form, skips the briefing ask contract
+  // and makes every runtime omit the system `ask:` module (RunnerRequest.unattendedNoAsk), so no channel offers an ask.
+  const unattendedNoAsk = isUnattendedExecution(executionContext) && !isAliveControllerRun;
   const scienceRecovery = readScienceRecoveryAuthority(executionContext, req.runId!, req.chatId, req.runtimeSelection);
   if (scienceRecovery) {
     if (req.oneMode || req.agentAppMode || req.borrowAgents?.length || req.taskForceTargets !== undefined
@@ -3463,7 +3467,7 @@ async function runMcpInvocationInContext(
   const turnGoalToolsOffered = Boolean(req.runId) && !scienceRecovery && !req.agentAppMode && chat.kind !== "division"
     && !effectObservationRun && !roomMemberTurn && !executionContext && (Boolean(getChatGoalId(chat.id)) || (req.goalMode === true && canWrite));
   // ask_form is offered on attended runs only (not unattended, Mobile durable, app-mode or division runs).
-  const turnAskToolOffered = Boolean(req.runId) && !(isUnattendedExecution(executionContext) && !isAliveControllerRun)
+  const turnAskToolOffered = Boolean(req.runId) && !unattendedNoAsk
     && !usesMobileDurableDecision(executionContext) && !req.agentAppMode && chat.kind !== "division";
   // One Team attached to a Work task as a Toolchain consumer: it may search and run, not author.
   let mcpToolchainConsumer = false;
@@ -5507,10 +5511,12 @@ async function runMcpInvocationInContext(
     !req.agentAppMode &&
     executionContext?.source !== "science" &&
     getInterviewMode() === "smart" &&
-    chat.kind !== "division"
+    chat.kind !== "division" &&
+    // "ask once" is an ask instruction; an unattended run has nobody to answer it (its final boundary forbids asking).
+    !unattendedNoAsk
   ) {
     // No question/option counts here: the host parser decides (extractAskFences, shared/ask-fence-flatten.ts:28-29,98-100:
-    // at most 8 questions per reply, 2-8 options each, unfilled templates dropped). Prose counts only contradicted ASK_PROTOCOL.
+    // at most 64 questions per reply, 2-8 options each, unfilled templates dropped). Prose counts only contradicted ASK_PROTOCOL.
     turnContextParts.push(
       "briefing: judge silently whether goal, constraints and done-criterion are clear; clear (or a greeting/question) → ask nothing; an unclear execution request → ask once about the weakest (anti-scope, smallest version, done signal, audience), then stop; after answers restate the goal in one sentence and proceed, open points as assumptions",
     );
@@ -5783,7 +5789,7 @@ async function runMcpInvocationInContext(
   // 연결되어야 하므로 이 Work 지침을 상속하지 않는다. ASK_PROTOCOL보다 뒤에 오는 최종
   // 지침으로 질문 fence를 금지하고, 안전한 기본값이 없으면 "NEEDS-INPUT:"으로 명시적 실패를
   // 유도한다. automation-result.ts 분류기가 이 계약을 짝으로 감지한다(조용한 가짜 성공 방지).
-  if (isUnattendedExecution(executionContext) && !isAliveControllerRun) {
+  if (unattendedNoAsk) {
     // An authority boundary closes the turn context on every turn (final-boundary, never deduped as a kept block): the
     // run's own question channel decides what the model may emit after everything above (native-harness notyet NH03).
     turnContextParts.push(UNATTENDED_NO_ASK_DIRECTIVE); declareLastTurnContext("ask.unattended", "final-boundary", ["profile"]);
@@ -5984,6 +5990,7 @@ async function runMcpInvocationInContext(
       ...(req.toolMode === "computer-use" ? { desktopControlGrant: true as const } : {}),
       ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
       ...(isUnattendedExecution(executionContext) ? { unattended: true as const } : {}),
+      ...(unattendedNoAsk ? { unattendedNoAsk: true as const } : {}),
       ...(usesMobileDurableDecision(executionContext) ? { noSynchronousAsk: true as const } : {}),
       // 세션 지문 시드 — 인터랙티브 채팅은 모델·effort·권한·턴별 주입이 바뀌어도
       // 같은 CLI 세션을 이어간다. 단, 명시적으로 바꾼 UI 언어는 시스템 프롬프트를

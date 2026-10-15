@@ -161,6 +161,7 @@ function promptFor(req: RunnerRequest): string {
       req.judgmentOnly === true ? "host-judgment" : undefined,
       req.outputSchema ? [schemaFallbackPromptPart(req.outputSchema.schema)] : undefined,
       req.systemPromptComposition,
+      req.unattendedNoAsk,
     )}${turnContext ? `\n\n${turnContext}` : ""}`,
     "",
   ];

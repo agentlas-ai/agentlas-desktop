@@ -120,6 +120,7 @@ function prepareContext(
       req.judgmentOnly === true ? "host-judgment" : undefined,
       schemaInPrompt && req.outputSchema ? [schemaFallbackPromptPart(req.outputSchema.schema)] : undefined,
       req.systemPromptComposition,
+      req.unattendedNoAsk,
     ),
   };
 }

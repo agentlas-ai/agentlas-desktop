@@ -83,6 +83,7 @@ export const runOllama: Runner = async (
       req.surfaceGate, undefined, req.sciencePromptProfile, req.judgmentOnly === true ? "host-judgment" : undefined,
       withSchema && req.outputSchema ? [schemaFallbackPromptPart(req.outputSchema.schema)] : undefined,
       req.systemPromptComposition,
+      req.unattendedNoAsk,
     );
   const messages: ChatMessage[] = [{
     role: "system",

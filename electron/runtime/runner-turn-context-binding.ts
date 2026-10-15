@@ -119,16 +119,36 @@ export function replaceRunnerUserPrompt<T extends RunnerRequest>(request: T, use
 }
 
 /** Known additions precede unknown input; opaque text is retained byte-for-byte, never labelled final/authoritative. */
-function opaque<T extends RunnerRequest>(request: T, additions: readonly DeclaredPromptPart[]): T {
+function opaque<T extends RunnerRequest>(request: T, additions: readonly DeclaredPromptPart[], runtimeKind?: string): T {
   const prefix = renderRunnerTurnContext(additions), original = request.turnContext;
   registerDeclaredPromptModule({ id: "runner.turn-context.opaque", revision: 1, stability: "turn-context",
     changeTriggers: ["task", "owner-input", "checkpoint"], order: Number.MAX_SAFE_INTEGER });
-  if (!prefix) return request;
-  return { ...request, turnContext: prefix + (original === undefined || original === "" ? "" : "\n\n" + original) };
+  if (!prefix) return deliverUnboundTurnContext(request, runtimeKind);
+  const turnContext = prefix + (original === undefined || original === "" ? "" : "\n\n" + original);
+  return statelessFrame({ ...request, turnContext }, runtimeKind) ?? { ...request, turnContext };
 }
 
+/**
+ * A stateless API/local host loop never reads req.turnContext; Main (serving-prefix) and the AgentContext wrapper place
+ * it for that kind. An unbound request with no AgentContext (a direct selected-runner caller) has neither, so its turn
+ * context is framed before the current user message here, exactly as serving-prefix places it. Any other request is
+ * returned as the same object.
+ */
+export function deliverUnboundTurnContext<T extends RunnerRequest>(request: T, runtimeKind?: string): T {
+  return runnerTurnContextSource(request) ? request : statelessFrame(request, runtimeKind) ?? request;
+}
+
+function statelessFrame<T extends RunnerRequest>(request: T, runtimeKind?: string): T | null {
+  const turnContext = request.turnContext;
+  if (!runtimeKind || request.agentContext || !turnContext?.trim()) return null;
+  const body = placeTurnContextForRuntime({ runtimeKind, sessionCapable: false, systemPrompt: request.systemPrompt,
+    userPrompt: request.userPrompt, turnContext, locale: request.locale });
+  return body.placement === "user-message" ? { ...request, userPrompt: body.userPrompt, turnContext } : null;
+}
+
+/** `runtimeKind` is the selected adapter kind (selection.ts); it only decides where an unbound addition is delivered. */
 export function extendRunnerTurnContext<T extends RunnerRequest>(request: T, additions: readonly DeclaredPromptPart[],
-  stable: readonly string[] = []): T {
+  stable: readonly string[] = [], runtimeKind?: string): T {
   const safe = snapshot(additions);
   if (!safe) return request;
   const source = runnerTurnContextSource(request);
@@ -136,7 +156,7 @@ export function extendRunnerTurnContext<T extends RunnerRequest>(request: T, add
   const parts = source ? snapshot([...source.parts.filter(part => !replaced.has(part.id)), ...safe]) : null;
   const target = stable.length ? { ...request, turnContextStable: [...(request.turnContextStable ?? []), ...stable] } : request;
   if (source && parts) return placed(target, Object.freeze({ ...source, parts }));
-  return opaque(target, safe);
+  return opaque(target, safe, runtimeKind);
 }
 
 /** Final AgentContext serialization uses current parts after ACK selection and the actual provider placement. */

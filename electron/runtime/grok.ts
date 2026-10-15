@@ -394,6 +394,7 @@ function buildSystemText(req: RunnerRequest): string {
     req.judgmentOnly === true ? "host-judgment" : undefined,
       undefined,
       req.systemPromptComposition,
+      req.unattendedNoAsk,
   );
   const turnContext = req.turnContext?.trim();
   return `${sys}${turnContext ? `\n\n${turnContext}` : ""}`;

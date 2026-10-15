@@ -1,5 +1,5 @@
 import { BLUEPRINT_SCHEMA, CONDITION_OPS } from "./graph-blueprint";
-import { CAPABILITIES } from "./graph-tool-binding";
+import { CAPABILITIES, PROVIDER_CATALOG } from "./graph-tool-binding";
 
 // Wire shape only. All topology/data-flow semantics still belong to the
 // canonical blueprint validator/compiler; the host never compiles model ids.
@@ -30,7 +30,9 @@ export const GRAPH_BLUEPRINT_INPUT_SCHEMA = object({
   steps: array(object({
     title: string(160), instruction: string(16000), effect: { enum: ["read", "mutation"] },
     produces: string(80), consumes: array(string(80)),
-    uses: array(object({ capability: { enum: CAPABILITIES }, provider: { anyOf: [{ type: "null" }, string(128)] } }, ["capability"])),
+    // The provider vocabulary travels in the schema: 8fb6f65c moved the prompt's "provider must be one of" list into
+    // "supplied schema", and a free string there left the model guessing service ids the validator then refuses.
+    uses: array(object({ capability: { enum: CAPABILITIES }, provider: { anyOf: [{ type: "null" }, { enum: PROVIDER_CATALOG.map(p => p.id) }] } }, ["capability"])),
     kind: { enum: ["agent", "code", "runGraph", "mcp_call", "toolchain_call"] }, graphRef: id,
     mcpCall: GRAPH_MCP_CALL_INPUT_SCHEMA,
     toolchainCall: GRAPH_TOOLCHAIN_CALL_INPUT_SCHEMA,

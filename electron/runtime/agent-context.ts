@@ -408,7 +408,20 @@ export async function agentContextColdBootstrapForRequest(req: RunnerRequest): P
   held.hostFactsApplied = true;
   const block = hostFactsSent.get(capability)?.block ?? await installHostFacts(capability, held.request, held.kind, held.delivery, packet.history);
   if (!block || activeBootstraps.get(capability) !== held) return packet;
-  return held.packet = Object.freeze({ ...packet, turnContext: [block, packet.turnContext].filter(Boolean).join("\n\n") });
+  // Same declared parts and canonical order as a fresh turn's composition (withAgentContext contextParts): the original
+  // typed task parts stay ahead of the per-turn facts, the facts stay ahead of the checkpoint summary. An unbound original
+  // is one opaque tail, so its bytes and position are unchanged.
+  const parts = bootstrapParts.get(packet);
+  const cold = parts ? [coldBootstrapPart("agent-context.host-facts", ["checkpoint", "retrieval"], block), ...parts] : null;
+  const next = Object.freeze({ ...packet, turnContext: cold ? renderRunnerTurnContext(cold) : [block, packet.turnContext].filter(Boolean).join("\n\n") });
+  if (cold) bootstrapParts.set(next, cold);
+  return held.packet = next;
+}
+/** A cold packet's turn context as declared parts (the fresh-turn declarations), kept beside the frozen packet. */
+const bootstrapParts = new WeakMap<object, readonly DeclaredPromptPart[]>();
+function coldBootstrapPart(id: "agent-context.host-facts" | "agent-context.checkpoint-replay",
+  changeTriggers: DeclaredPromptPart["changeTriggers"], text: string): DeclaredPromptPart {
+  return { id, revision: 1, stability: "turn-context", changeTriggers, text };
 }
 /*
  * Host facts for a native session that starts from host history (native-harness NH13, docs 05:76,83, 07 G11): a new
@@ -841,6 +854,12 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
         catch { /* The journal is authoritative; a missing/damaged projection never blocks a turn. */ }
       }
       const originalPrompt=req.userPrompt,originalContext=req.turnContext??"",originalLocale=req.locale;
+      // The original turn context as declared parts: the exact bound Main parts when they render this text, else one
+      // opaque tail (bytes kept). A cold packet composes them like the fresh turn below, never by string prepend.
+      const originalSource=runnerTurnContextSource(req);
+      const originalParts:readonly DeclaredPromptPart[]=!originalContext?[]
+        :originalSource && renderRunnerTurnContext(originalSource.parts)===originalContext?originalSource.parts
+        :[{ id: "runner.turn-context.opaque", revision: 1, stability: "turn-context", changeTriggers: ["task", "owner-input", "checkpoint"], order: Number.MAX_SAFE_INTEGER, text: originalContext }];
       const originalImages=(req.images??[]).map(image=>Object.freeze({...image}));
       activeBootstraps.set(capability, { delivery, kind: provider.kind, request: req, create: () => {
         const full=resume?store.readRange(current(capability).identity,{through:delivery.throughSeq}):snapshot;
@@ -849,13 +868,16 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
           try { bootstrapReplay = sessionCheckpointStore.restore(value.identity, full, materializeAgentContextHistory(full, turnId), taskBoundary); }
           catch { /* Missing native state still falls back to the authoritative journal. */ }
         }
-        return Object.freeze({
+        const coldParts = [...(bootstrapReplay?.block ? [coldBootstrapPart("agent-context.checkpoint-replay", ["checkpoint", "goal-revision"], bootstrapReplay.block)] : []), ...originalParts];
+        const packet = Object.freeze({
         history: Object.freeze((bootstrapReplay?.history ?? materializeAgentContextHistory(full, turnId)).map(row => Object.freeze({ ...row,
           ...(row.imageDataUrls ? { imageDataUrls: Object.freeze([...row.imageDataUrls]) as unknown as string[] } : {}) }))),
         images: Object.freeze([...materializeAttachments(full.entries, turnId), ...originalImages].map(value => Object.freeze({ ...value }))),
-        currentPrompt: originalPrompt, turnContext: [bootstrapReplay?.block, originalContext].filter(Boolean).join("\n\n"), throughSeq: delivery.throughSeq,
+        currentPrompt: originalPrompt, turnContext: renderRunnerTurnContext(coldParts), throughSeq: delivery.throughSeq,
         turnId, nativeHandle: nativeHandle ?? null,locale:originalLocale,
-      }); } });
+      });
+        bootstrapParts.set(packet, coldParts);
+        return packet; } });
       const foreignEntries=delivery.entries.filter(entry=>entry.producerBinding!==delivery.bindingKey);
       // The prior ceiling is a UTF-8 byte budget, shared by current input
       // and retained observations. Keep whole rows; never fabricate cut JSON.

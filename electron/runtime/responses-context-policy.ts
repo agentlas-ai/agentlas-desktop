@@ -41,6 +41,7 @@ export function retainedResponsesPromptPacket(req: RunnerRequest): Readonly<Reta
     req.sciencePromptProfile, req.judgmentOnly === true ? "host-judgment" : undefined,
       undefined,
       req.systemPromptComposition,
+      req.unattendedNoAsk,
   );
   // Preserve the existing early-return isolation profiles. A dynamic packet
   // must not reintroduce ordinary tools/plugins/Surface into those boundaries.

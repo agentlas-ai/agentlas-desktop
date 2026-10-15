@@ -366,9 +366,13 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
   const tactics = selectActiveTactics(plan, { nowMs });
   const readiness = projectGoalPlanReadiness(plan, { nowMs });
   const strategyOf = (id: string | null) => plan.strategies.find((s) => s.id === id) ?? null;
-  const lines: string[] = ["## Goal plan (agentlas.goal-shape.v1)"];
+  // Two declared parts (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.goal.plan.turn-context): `snapshot` is the plan
+  // state (plan line, mission, tactics), changed by plan revisions and checkpoints; `lines` are the notices this pass
+  // re-evaluates (native-harness hand-offs, KPI measurement, KPI shift, a due strategy review) and compose last.
+  const snapshot: string[] = [];
+  const lines: string[] = [];
   // Goal id / revision / planSeq / problem_nature are host state the model never has to echo (markers carry only tactic ids).
-  lines.push(`Plan ${plan.shape}${plan.fallback ? " (provisional)" : ""}: ${plan.rationale}`);
+  snapshot.push(`Plan ${plan.shape}${plan.fallback ? " (provisional)" : ""}: ${plan.rationale}`);
   for (const entry of activeNativeHarness(plan.goalId, plan.revision, plan.planSeq, nowMs)) lines.push(nativeHarnessLine(entry));
   // Agent Strategy: 이 패스의 KPI 상태를 먼저 갱신한다(멱등). 읽기 전용 재렌더(record:false)는 쓰지 않는다.
   if (plan.shape === "mission_tree" && input.record !== false) {
@@ -380,10 +384,10 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
   const krView = plan.shape === "mission_tree" ? krStrategyView(plan.goalId) : new Map();
   if (plan.shape === "mission_tree" && plan.mission) {
     // The mission objective is the Goal objective, stated once in the Goal contract above.
-    lines.push(`Diagnosis: ${plan.mission.diagnosis}`);
+    snapshot.push(`Diagnosis: ${plan.mission.diagnosis}`);
     for (const { krId, metric, target, unit, targetText, pace } of paces) {
       const view = krView.get(krId);
-      lines.push(`- KR ${metric}: ${target}${unit ? ` ${unit}` : ""}${String(targetText).trim() === String(target) ? "" : ` (owner: "${targetText}")`}`
+      snapshot.push(`- KR ${metric}: ${target}${unit ? ` ${unit}` : ""}${String(targetText).trim() === String(target) ? "" : ` (owner: "${targetText}")`}`
         + (view?.current != null ? ` · current ${view.current}` : "")
         + (pace.daysLeft !== null ? ` · ${pace.daysLeft} days left` : "")
         + (pace.requiredPerDay !== null ? ` · required ≈ ${pace.requiredPerDay}/day`
@@ -391,26 +395,26 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
         + ` · sensor: ${pace.status === "no_sensor" ? (view?.current != null ? "one sample so far" : "none yet") : pace.status}`
         + (view?.state && view.state !== "no_data" ? ` · KPI state: ${view.state}` : ""));
     }
-    if (plan.mission.boundaries.length) lines.push(`Boundaries: ${plan.mission.boundaries.map((b) => b.text).join("; ")}`);
+    if (plan.mission.boundaries.length) snapshot.push(`Boundaries: ${plan.mission.boundaries.map((b) => b.text).join("; ")}`);
     const active = plan.strategies.filter((s) => s.status === "active").map((s) => `${s.id}: ${s.hypothesis}`);
-    if (active.length) lines.push(`Active strategies: ${active.join(" | ")}`);
+    if (active.length) snapshot.push(`Active strategies: ${active.join(" | ")}`);
     activeStrategyIds = new Set(plan.strategies.filter((s) => s.status === "active").map((s) => s.id));
     const cadence = plan.strategies.filter((s) => s.status === "active" && s.actions_per_day !== null)
       .map((s) => `${s.id}: ${s.actions_per_day}/day`);
-    if (cadence.length) lines.push(`Cadence (advisory; assignments are not done work, check results before repeating an external action): ${cadence.join(" | ")}`);
+    if (cadence.length) snapshot.push(`Cadence (advisory; assignments are not done work, check results before repeating an external action): ${cadence.join(" | ")}`);
   }
   if (tactics.length) {
-    lines.push("Current tactics:");
+    snapshot.push("Current tactics:");
     for (const tactic of tactics) {
       const strategy = strategyOf(tactic.strategy_id);
-      lines.push(`- ${tactic.id}${strategy ? (activeStrategyIds.has(strategy.id) ? ` [${strategy.id}; KPI: ${strategy.kpi || "—"}]` : ` [strategy ${strategy.id}: ${strategy.hypothesis}; KPI: ${strategy.kpi || "—"}]`) : ""}: ${tactic.description}`);
-      lines.push(`  Done when: ${tactic.done_when}${tactic.kind === "recurring" ? ` (recurring; runs so far ${tactic.runs})` : ""}`);
+      snapshot.push(`- ${tactic.id}${strategy ? (activeStrategyIds.has(strategy.id) ? ` [${strategy.id}; KPI: ${strategy.kpi || "—"}]` : ` [strategy ${strategy.id}: ${strategy.hypothesis}; KPI: ${strategy.kpi || "—"}]`) : ""}: ${tactic.description}`);
+      snapshot.push(`  Done when: ${tactic.done_when}${tactic.kind === "recurring" ? ` (recurring; runs so far ${tactic.runs})` : ""}`);
       const branch = readiness.branches.find(branch => branch.nodeId === tactic.id)!;
       // Only a narrowing carries information: an unrestricted branch (incl. "legacy_unknown" prerequisites) is the default.
       const held = (["observe", "prepare", "local_write", "external_effect"] as const).filter((kind) => !branch.workClasses.includes(kind));
-      if (held.length) lines.push(`  Held: ${held.join(", ")} — ${branch.reasonCodes.filter((code) => code !== "prerequisites_legacy_unknown").join(", ") || branch.prerequisiteState}.`);
+      if (held.length) snapshot.push(`  Held: ${held.join(", ")} — ${branch.reasonCodes.filter((code) => code !== "prerequisites_legacy_unknown").join(", ") || branch.prerequisiteState}.`);
       const guidance = guidanceLine(tactic);
-      if (guidance) lines.push(`  Guidance: ${guidance}`);
+      if (guidance) snapshot.push(`  Guidance: ${guidance}`);
     }
     // 목록은 순서가 이미 정해진 계획이다 — 남은 전술의 id 를 보여 줘야 같은 턴에 이어서 끝낸 전술도 표식할 수 있다.
     // (실측 2026-09-24 E2E: 한 패스에 t1~t3 을 다 했는데 t1 만 알아서 t1 만 표식했다.) 트리는 활성 전술만(R9).
@@ -420,15 +424,15 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
       const later = [...plan.tactics].filter((t) => (t.status === "active" || t.status === "proposed") && !current.has(t.id)
         && readiness.branches.find(branch => branch.nodeId === t.id)?.workClasses.includes("external_effect")).sort((a, b) => a.ord - b.ord);
       // A tool path the AGI unblocker chose applies whenever the tactic is reached in this turn, not only when current.
-      if (later.length) lines.push(`Then, in order: ${later.map((t) => `${t.id}: ${t.description} (done when: ${t.done_when})${laterHint(t)}`).join(" | ")}`);
+      if (later.length) snapshot.push(`Then, in order: ${later.map((t) => `${t.id}: ${t.description} (done when: ${t.done_when})${laterHint(t)}`).join(" | ")}`);
     }
   } else if (ownerPausedOpen(plan).length) {
     // Only the owner's explicit branch pause holds these; they are open leaves, so the goal is not done.
-    lines.push(`The remaining sub-goals (${ownerPausedOpen(plan).map((t) => t.id).join(", ")}) owner-paused: skip them, goal not complete; report briefly, end turn.`);
+    snapshot.push(`The remaining sub-goals (${ownerPausedOpen(plan).map((t) => t.id).join(", ")}) owner-paused: skip them, goal not complete; report briefly, end turn.`);
   } else if (plan.tactics.some((tactic) => tactic.status === "active" || tactic.status === "proposed")) {
-    lines.push("Open tactics remain, none eligible now: not complete; inspect strategy state first.");
+    snapshot.push("Open tactics remain, none eligible now: not complete; inspect strategy state first.");
   } else {
-    lines.push("All tactics done or retired: verify acceptance criteria; work remains: add_tactic plan-op.");
+    snapshot.push("All tactics done or retired: verify acceptance criteria; work remains: add_tactic plan-op.");
   }
   const review = reviewDue(plan, nowMs, reservedDecisionIds);
   const strategyLocale = input.locale ?? (currentUiLocale() === "ko" ? "ko" : "en");
@@ -467,10 +471,15 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
       input.onDecisionRecorded?.(receipt.id);
     }
   }
+  // The collector keeps this whole block as one exact stable block (client.ts keepLastTurnContext("goal.plan")); runners
+  // match it as one substring (continuity.ts dedupeStableTurnContext, agent-context.ts omitAcknowledgedBlocks). The order
+  // of the parts inside it therefore does not decide when it is resent; a change in any part resends the whole block.
   return purposePrompt([
+    { id: "purpose.goal.plan.heading", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], text: "## Goal plan (agentlas.goal-shape.v1)" },
     { id: "purpose.goal.plan.report-contract", revision: 3, stability: "configuration", changeTriggers: ["release", "tool-grant", "runtime"], text: reportInstructions.join("\n") },
     { id: "purpose.goal.plan.locale", revision: 1, stability: "configuration", changeTriggers: ["locale"], text: `locale: plan-op text = ${strategyLocale === "ko" ? "Korean" : "English"}` },
-    { id: "purpose.goal.plan.snapshot", revision: 1, stability: "turn-context", changeTriggers: ["plan-revision", "checkpoint", "retrieval"], text: lines.join("\n") },
+    { id: "purpose.goal.plan.snapshot", revision: 2, stability: "task-context", changeTriggers: ["plan-revision", "goal-revision", "checkpoint"], text: snapshot.join("\n") },
+    { id: "purpose.goal.plan.live", revision: 1, stability: "turn-context", changeTriggers: ["checkpoint", "retrieval", "tool-grant"], text: lines.join("\n") },
   ]);
 }
 

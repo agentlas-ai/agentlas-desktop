@@ -31,6 +31,14 @@ import {
 } from "./improvement-proof";
 import { getOneTeamPreflightForChat } from "./team-preflight";
 import { getOneValueClosureState } from "./value-closure";
+import type { OneExperienceReuseAssetBinding } from "../../shared/one-experience-reuse";
+import { sameMemoryActor } from "../../shared/memory-actor-family";
+import {
+  canonicalAcceptedSource,
+  canonicalMemoryEntryIdFromAsset,
+  readActiveCanonicalReuseMemory,
+  type CanonicalReuseMemory,
+} from "./canonical-memory-reuse";
 
 const MAX_RUN_EVENTS = 500;
 const MAX_RECONCILE_TASKS = 100;
@@ -156,6 +164,36 @@ function memoryScopeMatchesCurrent(
   if (memory.scope === "project") return Boolean(current.task.projectId) && memory.scopeRef === current.task.projectId;
   if (memory.scope === "agent") return memory.scopeRef === chat.agentId;
   return Boolean(current.task.firmId) && memory.scopeRef === current.task.firmId;
+}
+
+function canonicalReuseMemoryForBinding(
+  asset: OneExperienceReuseAssetBinding,
+  valueState: OneValueClosureState,
+): CanonicalReuseMemory | null {
+  const entryId = canonicalMemoryEntryIdFromAsset(asset.assetId);
+  if (!entryId) return null;
+  const memory = readActiveCanonicalReuseMemory(entryId);
+  if (!memory || memory.revision !== asset.assetVersion || memory.reuseScope !== asset.scope) return null;
+  const source = canonicalAcceptedSource(entryId, valueState);
+  if (
+    !source
+    || source.task.id !== asset.sourceTaskId
+    || source.task.version !== asset.sourceTaskVersion
+    || source.run.runId !== asset.sourceRunId
+    || source.closure.closure.valueClosureId !== asset.sourceValueClosureId
+    || source.closure.version !== asset.sourceValueClosureVersion
+  ) return null;
+  return memory;
+}
+
+function canonicalMemoryScopeMatchesCurrent(memory: CanonicalReuseMemory, current: VerifiedTaskResult): boolean {
+  if (memory.reuseScope === "personal") return true;
+  if (!current.task.originChatId) return false;
+  const chat = getChat(current.task.originChatId);
+  if (!chat) return false;
+  if (memory.reuseScope === "project") return Boolean(current.task.projectId) && memory.projectId === current.task.projectId;
+  if (memory.reuseScope === "agent") return sameMemoryActor(memory.actorId, chat.agentId);
+  return Boolean(current.task.firmId) && sameMemoryActor(memory.actorId, chat.agentId);
 }
 
 function payload(event: RunEventUi | undefined): Record<string, unknown> {
@@ -663,7 +701,7 @@ function memoryAssetDrafts(
   const memoryState = getOneMemoryState();
   const baselineCache = new Map<string, VerifiedTaskResult | null>();
   return receipt.receipt.assetBindings.flatMap((asset): ReusedAssetDraft[] => {
-    const memory = memoryState.memories.find((item) =>
+    const legacyMemory = memoryState.memories.find((item) =>
       item.id === asset.assetId
       && item.version === asset.assetVersion
       && item.provenanceStatus === "verified"
@@ -673,6 +711,31 @@ function memoryAssetDrafts(
       && item.sourceValueClosureId === asset.sourceValueClosureId
       && item.sourceValueClosureVersion === asset.sourceValueClosureVersion
       && item.enabled);
+    // Canonical learned memory (current path since 0b9185be): the entry must still be the same
+    // active revision, its learning run must still be the exact accepted source run, and its owner
+    // controls are the Inspector's edit/forget.
+    const canonicalMemory = legacyMemory ? null : canonicalReuseMemoryForBinding(asset, valueState);
+    const memory = legacyMemory
+      ? {
+          id: legacyMemory.id,
+          version: legacyMemory.version,
+          learnedAt: legacyMemory.approvedAt,
+          controlSource: legacyMemory.sourceCandidateId,
+          controls: ["edit", "use_once", "disable", "delete"] as OneImprovementAssetControl[],
+          label: "Approved Memory",
+          scopeMatches: (result: VerifiedTaskResult) => memoryScopeMatchesCurrent(legacyMemory, result),
+        }
+      : canonicalMemory
+        ? {
+            id: asset.assetId,
+            version: canonicalMemory.revision,
+            learnedAt: canonicalMemory.createdAt,
+            controlSource: `memory-entry:${canonicalMemory.entryId}`,
+            controls: ["edit", "delete"] as OneImprovementAssetControl[],
+            label: "Memory from an accepted result",
+            scopeMatches: (result: VerifiedTaskResult) => canonicalMemoryScopeMatchesCurrent(canonicalMemory, result),
+          }
+        : null;
     if (!memory) return [];
     const baselineKey = [
       asset.sourceTaskId,
@@ -694,11 +757,11 @@ function memoryAssetDrafts(
       || !hasExactAcceptedSourceProvenance(valueState, asset)
       || !sameTaskScope(baseline.task, current.task)
       || !completedBeforeCurrentRun(baseline, current)
-      || !memoryScopeMatchesCurrent(memory, current)
-      || Date.parse(memory.approvedAt) > Date.parse(current.run.startedAt)
+      || !memory.scopeMatches(current)
+      || Date.parse(memory.learnedAt) > Date.parse(current.run.startedAt)
       || baseline.signature !== current.signature
     ) return [];
-    const controls: OneImprovementAssetControl[] = ["edit", "use_once", "disable", "delete"];
+    const controls = memory.controls;
     const controlRefs = controls.map((control) => ({
       control,
       controlRef: stableRef("control", memory.id, String(memory.version), control),
@@ -719,9 +782,9 @@ function memoryAssetDrafts(
       assetId: memory.id,
       assetVersion: memory.version,
       assetKind: "memory",
-      sourceControlRef: memory.sourceCandidateId,
+      sourceControlRef: memory.controlSource,
       controlRefs,
-      rollbackRef: memory.sourceCandidateId,
+      rollbackRef: memory.controlSource,
       removeRef: controlRefs.find((item) => item.control === "delete")!.controlRef,
     };
     return [{
@@ -729,7 +792,7 @@ function memoryAssetDrafts(
       publicAsset: {
         assetRef: memory.id,
         assetType: "memory",
-        label: "Approved Memory",
+        label: memory.label,
         sourceTaskRef: baseline.task.id,
         receiptRefs: [evidence.receiptRef],
         controls,

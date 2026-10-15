@@ -331,3 +331,29 @@ scripts/local/
 
 # Local operator notes are not public runtime package inputs.
 /agents/oberon-film-studio/memory.md
+# ── Public allowlist, strict (owner 2026-10-15: "깃이그노어 빡세게") ─────────────
+# Local main is pushed to the public repo as is. Only what users need to build,
+# install and run goes in; everything below stays on disk and is never committed.
+# Internal prompt composition ledger (audit document, read by no shipped code).
+/prompt-audit/
+# Private release machinery (the public release workflow fetches its own copies).
+/scripts/release-private-proof.mjs
+/scripts/private-release-dispatch-plan.mjs
+/scripts/product-artifact.mjs
+/scripts/release-execution-boundary.mjs
+# Contract tests of every kind stay local (scripts/*-contract.* above); the
+# briefing contract generator is build tooling, not a test.
+!/scripts/generate-one-briefing-contract.cjs
+# Root documents other than the public README, CHANGELOG and license files.
+/*.md
+!/README.md
+!/CHANGELOG.md
+# Handoffs, session notes, transcripts and local tool state, anywhere.
+**/HANDOFF*.md
+**/*.transcript.*
+**/*.session.jsonl
+.npmrc
+*.secret
+*.secrets.*
+.claude/
+.codex/

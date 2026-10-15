@@ -59,7 +59,7 @@ import {
 import { AcpSessionPool, type AcpSessionLease } from "./acp-session-pool";
 import { resolveAgentResidencySource, isResidencyExemptAgent } from "./agent-residency";
 import { classifyDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
-import { schemaFallbackInstruction, schemaFallbackPromptPart } from "../../shared/runtime-capabilities";
+import { schemaFallbackInstruction } from "../../shared/runtime-capabilities";
 import { composeDeclaredPrompt } from "./prompt-order";
 import { observeCliExecutableIdentity } from "./cli-executable-identity";
 import { waitForRetiredCliExit } from "./retired-cli-exit";
@@ -1336,12 +1336,16 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       const context = dedupeStableTurnContext({ chatId: contextChatId, runtimeKind: sessionKind,
         sessionId, contextFingerprint, turnContext: bootstrap?.turnContext ?? req.turnContext, stableBlocks: req.turnContextStable });
       stableContextDelivery = context.delivery;
+      // The output contract closes the ACP text on both paths: a declared final-boundary-adjacent exception to the lifetime
+      // order (ledger desktop.main.acp.session-prompt.fresh / .resume). ACP has no schema or system channel, so the contract
+      // shares one text with the owner's words. Measured 2026-10-15 with the real codex and claude CLIs on these exact
+      // texts (108 calls): plain tasks 18/18 either way; with a conflicting owner format request, last 36/36 and ahead of
+      // the owner text 31/36 (all five misses answered in the owner's format). Placement only; the declared module is unchanged.
       const promptText = resumed
-        ? composeResumeTurnPrompt(userPrompt, composeDeclaredPrompt([
-            ...(req.outputSchema ? [schemaFallbackPromptPart(req.outputSchema.schema)] : []),
+        ? `${composeResumeTurnPrompt(userPrompt, composeDeclaredPrompt([
             { id: "transport.acp.resume.gap", revision: 1, stability: "turn-context", changeTriggers: ["owner-input", "checkpoint", "task"], order: 10, text: gapContext },
             { id: "transport.acp.resume.host-turn", revision: 1, stability: "turn-context", changeTriggers: ["owner-input", "checkpoint", "task"], order: 20, text: context.text },
-          ], "\n\n"), locale)
+          ], "\n\n"), locale)}${schemaFallback}`
         : [
           wrapSystemPrompt(
             req.systemPrompt, locale, req.permission, userPrompt,
@@ -1351,12 +1355,14 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
             spec.id,
             req.sciencePromptProfile,
             req.judgmentOnly === true ? "host-judgment" : undefined,
-            req.outputSchema ? [schemaFallbackPromptPart(req.outputSchema.schema)] : undefined,
+            undefined,
       req.systemPromptComposition,
+      req.unattendedNoAsk,
           ),
           (bootstrap?.history ?? req.history).length > 0 ? renderConversationContext([...(bootstrap?.history ?? req.history)], locale, cliHistoryContextTokens(spec.id, req.model)).block : "",
           context.text,
           userPrompt,
+          schemaFallback,
         ].filter(Boolean).join("\n\n");
       nativeMcp?.assertCurrent();
       assertScienceRecoveryAcpRequest(req, spec.id);

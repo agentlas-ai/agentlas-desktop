@@ -292,7 +292,7 @@ export function pickRunner(active: RuntimeStatus): { runner: Runner; label: stri
       withMemorySourceRunner(withRemoteCurationRuntime(withModelCallLedger(async(req,events)=>{if(!configurationCurrent())throw new Error("runtime_selected_configuration_changed");return selected.runner(req,events);}, { kind: active.kind, backend: active.backend ?? null, model: active.model ?? null, effort: null }), active, configurationCurrent)),
       { kind: active.kind, ...(active.backend ? { backend: active.backend } : {}) },
       { configurationSource:active.source,configurationIdentity }),
-      { kind: active.kind,configurationIdentity,...(active.backend ? { backend: active.backend } : {}) })), invocationBreakerKey(active), selected.label) }
+      { kind: active.kind,configurationIdentity,...(active.backend ? { backend: active.backend } : {}) }), active.kind), invocationBreakerKey(active), selected.label) }
     : null;
 }
 

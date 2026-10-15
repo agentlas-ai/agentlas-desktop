@@ -127,11 +127,13 @@ export function buildInterviewPrompt(state: InterviewState, locale: "ko" | "en" 
       "last round: ask only what makes it impossible to build; otherwise return the blueprint",
     );
   }
+  // The saved-automation list is the owner's versioned inventory (changes when automations are saved or removed), so it
+  // composes before the locale and the request (ledger desktop.workflow.graph-interview.user; Terminal interview.cjs same).
   return purposePrompt([
     { id: "purpose.graph.interview.policy", revision: 2, stability: "fixed-policy", changeTriggers: ["release"], text: RULES },
+    { id: "purpose.graph.interview.catalog", revision: 2, stability: "versioned-content", changeTriggers: ["capability-inventory"], text: graphCatalog },
     { id: "purpose.graph.interview.locale", revision: 1, stability: "configuration", changeTriggers: ["locale"], text: `PRODUCT LANGUAGE: ${locale === "ko" ? "Korean" : "English"}` },
     { id: "purpose.graph.interview.request", revision: 1, stability: "task-context", changeTriggers: ["owner-input", "task"], text: `What the person asked for:\n${state.request}` },
-    { id: "purpose.graph.interview.catalog", revision: 1, stability: "task-context", changeTriggers: ["capability-inventory"], text: graphCatalog },
     { id: "purpose.graph.interview.answers-repair", revision: 1, stability: "turn-context", changeTriggers: ["owner-input", "checkpoint"], text: lines.join("\n") },
   ]);
 }

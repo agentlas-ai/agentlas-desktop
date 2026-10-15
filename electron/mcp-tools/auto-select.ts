@@ -1337,6 +1337,9 @@ export function buildMcpAutoSelectionPrompt(
         ? `hub catalog unreachable (${selected.hubPluginError}) → say so; never "no such tool"`
         : "";
   const pendingApproval = (selected.pendingApprovalTools ?? []).filter((name) => name.trim().length > 0);
+  // Declared parts (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.main.turn-context.tools-selection): the state of the
+  // tools this conversation selected (sticky per goal/conversation), then what this request retrieved last — the Hub
+  // shelf (its "more" count is listings minus the plugins offered for this request) and the routed plugin routers.
   const inventoryLines = [
     installed.length === 0 && pendingApproval.length === 0 && blocked.length === 0 ? "tools: none" : "",
     computerUseSelected && !computerUseReady
@@ -1344,9 +1347,6 @@ export function buildMcpAutoSelectionPrompt(
         ? "computer use: unavailable → no OS-level control; browser covers only the signed-in browser"
         : "computer use: unavailable → no screen or OS-level control"
       : "",
-    // The selection receipt (needsNote) stays in the ledger; the model only needs what it can act on.
-    selected.hubNotOffered ? `hub: ${selected.hubNotOffered} more plugins (harness_search)` : "",
-    hubCandidates,
     pendingApproval.length > 0
       ? `approval pending: ${JSON.stringify(pendingApproval)}; current grant first; ask only missing authorization`
       : "",
@@ -1356,10 +1356,16 @@ export function buildMcpAutoSelectionPrompt(
     unavailable.length > 0
       ? `MCP unavailable: ${JSON.stringify(unavailable.map(tool => ({ id: tool.id, state: tool.state, required: Boolean(tool.required), ...(tool.connectionOutcome ? { reason: describeScopedMcpOutcome(tool.connectionOutcome, "en") } : {}) })))}; degrade dependent work only`
       : "",
+  ].filter(Boolean).join("\n");
+  const retrievedLines = [
+    // The selection receipt (needsNote) stays in the ledger; the model only needs what it can act on.
+    selected.hubNotOffered ? `hub: ${selected.hubNotOffered} more plugins (harness_search)` : "",
+    hubCandidates,
     selectedPluginRouterPrompt(selected.routedPlugins ?? [], opts?.userPrompt ?? ""),
   ].filter(Boolean).join("\n");
   return purposePrompt([
     { id: "purpose.mcp.selection.mode", revision: 2, stability: "configuration", changeTriggers: ["runtime", "permission"], text: [modeLine, hubLine].filter(Boolean).join("\n") },
-    { id: "purpose.mcp.selection.inventory", revision: 2, stability: "turn-context", changeTriggers: ["capability-inventory", "connector-inventory", "plugin-inventory", "tool-grant", "owner-input"], text: inventoryLines },
+    { id: "purpose.mcp.selection.inventory", revision: 3, stability: "task-context", changeTriggers: ["capability-inventory", "connector-inventory", "plugin-inventory", "tool-grant"], text: inventoryLines },
+    { id: "purpose.mcp.selection.retrieved", revision: 1, stability: "turn-context", changeTriggers: ["retrieval", "plugin-inventory", "owner-input"], text: retrievedLines },
   ]);
 }

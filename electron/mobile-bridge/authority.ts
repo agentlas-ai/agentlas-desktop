@@ -4604,10 +4604,14 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         if (answerError) {
           return asJsonValue({ refusal: this.buildAnswerRefusal("build_answer_invalid", answerError) }, request.method);
         }
-        const answerText = revision2
+        // A legacy (7-card) client never saw questions 8+ as cards. Their prose still reached it, but its answer must
+        // not drop them silently: when the bank is larger than what was offered, the answer is the same typed owner-answer
+        // data as revision 2, with every unanswered question (unoffered ones included) listed as deferred. A bank of at
+        // most 7 keeps the legacy formatter byte for byte.
+        const answerText = revision2 || run.questions.length > offeredQuestions.length
           ? purposePrompt([{ id: "mobile.build.interview.owner-answer-data", revision: 1, order: 0, stability: "turn-context", changeTriggers: ["owner-input", "task"], text: JSON.stringify({
               answers: answers.map((answer) => ({ ...answer, question: offeredQuestions.find((question) => question.questionId === answer.questionId)!.question })),
-              deferredQuestionIds: offeredQuestions.filter((question) => !answers.some((answer) => answer.questionId === question.questionId)).map((question) => question.questionId),
+              deferredQuestionIds: run.questions.filter((question) => !answers.some((answer) => answer.questionId === question.questionId)).map((question) => question.questionId),
             }) }])
           : this.buildAnswerPrompt(offeredQuestions, answers);
         run.answerInFlight = true;

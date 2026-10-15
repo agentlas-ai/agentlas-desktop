@@ -970,6 +970,7 @@ const runClaudeTurn = async (
     runReq.judgmentOnly === true ? "host-judgment" : undefined,
       undefined,
       runReq.systemPromptComposition,
+      runReq.unattendedNoAsk,
   );
   const fingerprint = aliveProfile ? crypto.createHash("sha256").update(JSON.stringify([aliveProfile.bindingKey,
     executableIdentity.fingerprint, systemPrompt, runReq.outputSchema, runReq.model])).digest("hex")

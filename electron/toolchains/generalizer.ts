@@ -139,14 +139,16 @@ function compileDecision(decision: Exclude<ToolchainGeneralizationDecision, { de
 
 function generalizerContext(input: ToolchainGenerationInput, requested: ToolchainAsset | null, assets: ToolchainAsset[], installedProviders: unknown[], feedback: string): string {
   // JSON members come from explicit producer fields; the canonical composer orders their declared lifetimes.
+  // The installed connector/tool list is versioned inventory (above locale); the requested asset's graph is chosen by
+  // this task's toolchainId (task-context). Member bytes are unchanged; JSON member order carries no meaning.
   return "{" + composeDeclaredPrompt([
         { id: "toolchains.generalizer.user.catalog", revision: 1, stability: "versioned-content", changeTriggers: ["skill-package", "plan-revision"], order: 0, text: '"catalog":' + JSON.stringify(catalogContext(assets)) },
-        { id: "toolchains.generalizer.user.implementation", revision: 1, stability: "versioned-content", changeTriggers: ["skill-package", "plan-revision", "task"], order: 10, text: '"requestedImplementation":' + JSON.stringify(requested?.versions.at(-1)?.implementation.snapshot.graph ?? null) },
+        { id: "toolchains.generalizer.user.tool-inventory", revision: 2, stability: "versioned-content", changeTriggers: ["plugin-inventory", "connector-inventory", "tool-grant"], order: 10, text: '"installedProviders":' + JSON.stringify(installedProviders) },
         { id: "toolchains.generalizer.user.locale", revision: 1, stability: "configuration", changeTriggers: ["locale"], order: 0, text: '"productLanguage":' + JSON.stringify(currentUiLocale()) },
-        { id: "toolchains.generalizer.user.tool-inventory", revision: 1, stability: "configuration", changeTriggers: ["plugin-inventory", "connector-inventory", "tool-grant"], order: 10, text: '"installedProviders":' + JSON.stringify(installedProviders) },
-        { id: "toolchains.generalizer.user.target", revision: 1, stability: "task-context", changeTriggers: ["task"], order: 0, text: '"requestedAssetId":' + JSON.stringify(input.toolchainId ?? null) },
+        { id: "toolchains.generalizer.user.implementation", revision: 2, stability: "task-context", changeTriggers: ["task", "plan-revision"], order: 0, text: '"requestedImplementation":' + JSON.stringify(requested?.versions.at(-1)?.implementation.snapshot.graph ?? null) },
+        { id: "toolchains.generalizer.user.target", revision: 2, stability: "task-context", changeTriggers: ["task"], order: 10, text: '"requestedAssetId":' + JSON.stringify(input.toolchainId ?? null) },
         { id: "toolchains.generalizer.user.request", revision: 1, stability: "turn-context", changeTriggers: ["owner-input"], order: 0, text: '"request":' + JSON.stringify(input.request) },
-        { id: "toolchains.generalizer.user.feedback", revision: 1, stability: "turn-context", changeTriggers: ["retrieval"], order: 10, text: '"feedback":' + JSON.stringify(feedback) },
+        { id: "toolchains.generalizer.user.feedback", revision: 2, stability: "turn-context", changeTriggers: ["validation-result", "checkpoint"], order: 10, text: '"feedback":' + JSON.stringify(feedback) },
       ], ",") + "}";
 }
 
