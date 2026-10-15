@@ -283,7 +283,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '9966e69ce9930c0db33e9e6e05023322de66ec5a644f903d944b7d22eb99350b') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '2edbb8f2df1a8d4ae7cdd834cc20cab462f6acb24a8184dcaa19ec74c7b8ffa0') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -331,9 +331,10 @@ jobs:
             "scripts/verify-one-team-permission-boundary.mjs": "f2373e909cd59c6957d6014fe6ab6f3e0a924b13b335f1d06ff8beaef353a126",
             "scripts/verify-one-team-surface.mjs": "3f48266b181c420c3f9cfcf718a6c91adecdc92c2b56aebef62d337f00981eeb",
             "scripts/current-sidebar-route-contract.cjs": "46d8f58f57e0a7a93cbde54582387d4f937e9f2bf07cd50956eb6520eb004f37",
-            "scripts/verify-unanswerable-questions-hidden.mjs": "9fb5dbc618cf61511c52b171273939ab6d024bf152039ccf2c8c949c70d8b554"
+            "scripts/verify-unanswerable-questions-hidden.mjs": "9fb5dbc618cf61511c52b171273939ab6d024bf152039ccf2c8c949c70d8b554",
+            "scripts/verify-updater-withdrawn-release-guard.mjs": "71eb64235395257297ee37ddc26d3cee486c9b5bb355310d52fcfd7b6d716861"
           }));
-          if (manifest.files?.length !== 46 || approvedPins.size !== 46) throw new Error('All 44 original private Mac entries, the sealed R7 sidebar helper and the unanswerable-questions gate are required');
+          if (manifest.files?.length !== 47 || approvedPins.size !== 47) throw new Error('All 44 original private Mac entries, the sealed R7 sidebar helper, the unanswerable-questions gate and the withdrawn-release guard are required');
           if (manifest.schema !== 'agentlas.private-release-verification.v1' || !Array.isArray(manifest.files)) throw new Error('Invalid private verification manifest');
           const seen = new Set();
           const sourceCommit = require('node:child_process').execFileSync('git', ['rev-parse', '--verify', 'HEAD^{commit}']).toString().trim();
@@ -708,7 +709,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '9966e69ce9930c0db33e9e6e05023322de66ec5a644f903d944b7d22eb99350b') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '2edbb8f2df1a8d4ae7cdd834cc20cab462f6acb24a8184dcaa19ec74c7b8ffa0') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -756,9 +757,10 @@ jobs:
             "scripts/verify-one-team-permission-boundary.mjs": "f2373e909cd59c6957d6014fe6ab6f3e0a924b13b335f1d06ff8beaef353a126",
             "scripts/verify-one-team-surface.mjs": "3f48266b181c420c3f9cfcf718a6c91adecdc92c2b56aebef62d337f00981eeb",
             "scripts/current-sidebar-route-contract.cjs": "46d8f58f57e0a7a93cbde54582387d4f937e9f2bf07cd50956eb6520eb004f37",
-            "scripts/verify-unanswerable-questions-hidden.mjs": "9fb5dbc618cf61511c52b171273939ab6d024bf152039ccf2c8c949c70d8b554"
+            "scripts/verify-unanswerable-questions-hidden.mjs": "9fb5dbc618cf61511c52b171273939ab6d024bf152039ccf2c8c949c70d8b554",
+            "scripts/verify-updater-withdrawn-release-guard.mjs": "71eb64235395257297ee37ddc26d3cee486c9b5bb355310d52fcfd7b6d716861"
           }));
-          if (manifest.files?.length !== 46 || approvedPins.size !== 46) throw new Error('All 44 original private Mac entries, the sealed R7 sidebar helper and the unanswerable-questions gate are required');
+          if (manifest.files?.length !== 47 || approvedPins.size !== 47) throw new Error('All 44 original private Mac entries, the sealed R7 sidebar helper, the unanswerable-questions gate and the withdrawn-release guard are required');
           if (manifest.schema !== 'agentlas.private-release-verification.v1' || !Array.isArray(manifest.files)) throw new Error('Invalid private verification manifest');
           const seen = new Set();
           const sourceCommit = require('node:child_process').execFileSync('git', ['rev-parse', '--verify', 'HEAD^{commit}']).toString().trim();
@@ -1085,7 +1087,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '9966e69ce9930c0db33e9e6e05023322de66ec5a644f903d944b7d22eb99350b') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '2edbb8f2df1a8d4ae7cdd834cc20cab462f6acb24a8184dcaa19ec74c7b8ffa0') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -1133,9 +1135,10 @@ jobs:
             "scripts/verify-one-team-permission-boundary.mjs": "f2373e909cd59c6957d6014fe6ab6f3e0a924b13b335f1d06ff8beaef353a126",
             "scripts/verify-one-team-surface.mjs": "3f48266b181c420c3f9cfcf718a6c91adecdc92c2b56aebef62d337f00981eeb",
             "scripts/current-sidebar-route-contract.cjs": "46d8f58f57e0a7a93cbde54582387d4f937e9f2bf07cd50956eb6520eb004f37",
-            "scripts/verify-unanswerable-questions-hidden.mjs": "9fb5dbc618cf61511c52b171273939ab6d024bf152039ccf2c8c949c70d8b554"
+            "scripts/verify-unanswerable-questions-hidden.mjs": "9fb5dbc618cf61511c52b171273939ab6d024bf152039ccf2c8c949c70d8b554",
+            "scripts/verify-updater-withdrawn-release-guard.mjs": "71eb64235395257297ee37ddc26d3cee486c9b5bb355310d52fcfd7b6d716861"
           }));
-          if (manifest.files?.length !== 46 || approvedPins.size !== 46) throw new Error('All 44 original private Mac entries, the sealed R7 sidebar helper and the unanswerable-questions gate are required');
+          if (manifest.files?.length !== 47 || approvedPins.size !== 47) throw new Error('All 44 original private Mac entries, the sealed R7 sidebar helper, the unanswerable-questions gate and the withdrawn-release guard are required');
           if (manifest.schema !== 'agentlas.private-release-verification.v1' || !Array.isArray(manifest.files)) throw new Error('Invalid private verification manifest');
           const seen = new Set();
           const sourceCommit = require('node:child_process').execFileSync('git', ['rev-parse', '--verify', 'HEAD^{commit}']).toString().trim();

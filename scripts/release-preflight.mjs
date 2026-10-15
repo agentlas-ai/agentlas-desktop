@@ -560,7 +560,10 @@ if (!run(process.execPath, [degradeGate], { cwd: root })) {
 }
 
 // 세 번째 겹: 철회된 릴리스가 이미 내려받아져 있어도 설치되지 않아야 한다.
-const withdrawnGate = releaseVerificationFile("verify-updater-withdrawn-release-guard.mjs");
+// The install press now replaces a withdrawn payload with the feed's version and installs that once (owner rule
+// 2026-10-11). The guard for that contract is the hash-bound private copy the release workflow installs from the pinned
+// private verification manifest (scripts/), not the immutable predecessor that forbade any install after a withdrawal.
+const withdrawnGate = join(root, "scripts", "verify-updater-withdrawn-release-guard.mjs");
 if (!existsSync(withdrawnGate)) {
   fail("updater withdrawn-release gate is missing — a release must not proceed without it");
 }
