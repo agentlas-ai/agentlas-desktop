@@ -273,6 +273,12 @@ export interface UpdaterControllerDependencies {
    * the behavior this guard exists to remove.
    */
   offeredVersion: OfferedVersionReader;
+  /**
+   * How an install requested earlier (the person pressed the button while the payload was stale) is
+   * carried out once the replacement has downloaded. Main routes it through the same entry the button
+   * uses so running work is checkpointed; default is a plain install().
+   */
+  requestInstall?: () => Promise<UpdaterActionResult>;
 }
 
 interface InstallAccessResult {
@@ -715,6 +721,8 @@ export class DesktopUpdaterController {
   private transientRetryTimer: NodeJS.Timeout | null = null;
   private transientFailureCount = 0;
   private checkPromise: Promise<UpdaterState> | null = null;
+  /** The button was pressed on a stale payload: install the replacement the moment it has downloaded. */
+  private installWhenDownloaded = false;
   private reconcilePromise: Promise<void> | null = null;
   private downloadPromise: Promise<void> | null = null;
   private availablePromise: Promise<void> | null = null;
@@ -1634,6 +1642,18 @@ export class DesktopUpdaterController {
         releaseNotes: this.availableReleaseNotes,
         compatibility: this.state.compatibility,
       });
+      if (this.installWhenDownloaded) {
+        this.installWhenDownloaded = false;
+        this.logger.log(`[updater] ${version} downloaded after the install press; installing it now`);
+        // The refused press that started this re-download may still be unwinding: let it finish first.
+        const refusedPress = this.installPromise;
+        void (async () => {
+          if (refusedPress) await refusedPress.catch(() => undefined);
+          await (this.deps.requestInstall ?? (() => this.install()))();
+        })().catch((error: unknown) => {
+          this.logger.warn("[updater] install after re-download failed", error);
+        });
+      }
     });
     this.listen("error", (error: unknown) => {
       if (this.state.status === "installing") {
@@ -1841,7 +1861,25 @@ export class DesktopUpdaterController {
       this.availableReleaseNotes = undefined;
       this.publish({ status: "idle" });
     }
-    if (this.state.status === "installing" || this.state.status === "downloaded") {
+    if (this.state.status === "downloaded" && this.state.version) {
+      // A pending payload can be outdated by a newer release. Looking at the feed is one small request;
+      // answering "ready" for a version the feed no longer serves is the defect this guards.
+      const pending = this.state.version;
+      this.checkPromise = (async () => {
+        let offered: string | null = null;
+        try { offered = await this.deps.offeredVersion(); } catch { offered = null; }
+        if (this.state.status === "downloaded" && this.state.version === pending && offered !== null && offered !== pending) {
+          if (!this.discardStalePayload(pending, offered, "update check")) return this.state;
+          this.checkPromise = null;
+          return this.check();
+        }
+        return this.state;
+      })().finally(() => {
+        this.checkPromise = null;
+      });
+      return this.checkPromise;
+    }
+    if (this.state.status === "installing") {
       return Promise.resolve(this.state);
     }
     this.checkPromise = (async () => {
@@ -1864,6 +1902,7 @@ export class DesktopUpdaterController {
         }
       } finally {
         this.lastCheckedAt = this.now();
+        if (this.state.status !== "downloaded" && !this.downloadPromise) this.installWhenDownloaded = false;
         this.publish(this.state);
       }
       return this.state;
@@ -1924,15 +1963,23 @@ export class DesktopUpdaterController {
 
     // The feed names a different version: the payload we hold was superseded or
     // withdrawn. Drop it and let the normal flow fetch what is offered now.
+    // The person pressed install: the replacement installs by itself once it has downloaded.
+    if (!this.discardStalePayload(version, offered, "install press")) return false;
+    this.installWhenDownloaded = true;
+    this.logger.log(`[updater] install ${version}: downloading ${offered} instead and installing it when ready`);
+    void this.check();
+    return false;
+  }
+
+  private discardStalePayload(version: string, offered: string, via: string): boolean {
     this.logger.warn(
-      `[updater] the downloaded payload (${version}) is no longer what the feed offers (${offered}); discarding it`,
+      `[updater] the downloaded payload (${version}) is no longer what the feed offers (${offered}); discarding it (${via})`,
     );
     this.availableVersion = null;
     this.availableReleaseNotes = undefined;
     if (!this.cleanupOrBlock(version)) return false;
     this.publish({ status: "checking" });
-    void this.check();
-    return false;
+    return true;
   }
 
   private async installOnce(): Promise<UpdaterActionResult> {

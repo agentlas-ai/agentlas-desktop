@@ -8,6 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { updaterCanUseOfficialInstaller } from "../shared/types";
 import type { UpdaterActionResult, UpdaterState } from "../shared/types";
+import { requestUpdaterInstall } from "./updater/update-resume";
 import { bootAuthFromKeychain, getAuthSession, type AuthRestoreResult } from "./auth";
 import { quiesceAutomationSchedulerForUpdate } from "./automation-scheduler";
 import { quiesceHubBookmarkSyncForUpdate } from "./hub-bookmark-sync";
@@ -476,6 +477,7 @@ export async function initAutoUpdater(options: AutoUpdaterInitOptions = {}): Pro
     uid: typeof process.getuid === "function" ? process.getuid() : null,
     runtimeVersion: () => readBundledRuntimeVersion(process.resourcesPath, sourceRoot),
     offeredVersion: readOfferedVersion,
+    requestInstall: () => requestUpdaterInstall(undefined, quitAndInstall),
     databaseSchemaVersion: () => readDatabaseSchemaVersion(dbPath),
     inspectInstalledAppTrust: (bundlePath) => inspectMacInstalledAppTrust({
       bundlePath,
