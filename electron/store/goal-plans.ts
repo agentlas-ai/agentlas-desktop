@@ -152,6 +152,9 @@ export function saveGoalPlan(input: {
   ensureGoalPlanTables();
   const db = getDb();
   const at = input.createdAt ?? new Date().toISOString();
+  // IMMEDIATE: the body reads the latest plan sequence before it writes. A deferred transaction whose snapshot went stale
+  // (the daemon committed in between) fails that first write at once with SQLITE_BUSY_SNAPSHOT ("database is locked"),
+  // and busy_timeout never waits for it (R-067: reproduced by one commit from a second connection, 0 ms to failure).
   return db.transaction(() => {
     const planSeq = latestGoalPlanSeq(input.goalId, input.revision) + 1;
     const insert = db.prepare(`INSERT INTO goal_plan_nodes (goal_id, revision, plan_seq, node_id, kind, parent_id, status, ord, payload_json, created_at, updated_at)
@@ -177,7 +180,7 @@ export function saveGoalPlan(input: {
     const live = readGoalPlan(input.goalId, input.revision);
     if (!live) throw new Error("goal_plan_write_lost");
     return live;
-  })();
+  }).immediate();
 }
 
 /** 가장 최근 개정(또는 지정 개정)의 가장 최근 차수 계획. */
@@ -253,6 +256,7 @@ export { tacticPayload as goalPlanTacticPayload };
 /** Main-only exact compare-and-apply. The callback is synchronous local work, never provider/network work. */
 export function withCurrentGoalPlan<T>(goalId: string, expectedIdentity: string, apply: (plan: LiveGoalPlan) => T): T {
   const db = getDb();
+  // IMMEDIATE like saveGoalPlan: it reads the current plan, then the callback writes its decision (every Goal turn).
   return db.transaction(() => {
     const current = readGoalPlan(goalId);
     if (!current || current.mutationIdentity !== expectedIdentity) throw new Error("goal_plan_stale");
@@ -262,7 +266,7 @@ export function withCurrentGoalPlan<T>(goalId: string, expectedIdentity: string,
       if (latest.revision !== null && latest.revision !== current.revision) throw new Error("goal_revision_stale");
     }
     return apply(current);
-  })();
+  }).immediate();
 }
 
 /** All receipts for one producing invocation, in append order, independent of wall-clock order. */
