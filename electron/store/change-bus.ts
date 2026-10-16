@@ -26,6 +26,12 @@ export type DesktopStoreEntity =
 export interface DesktopStoreChange {
   entity: DesktopStoreEntity;
   id?: string;
+  /**
+   * Task changes only: the opaque id of the project the task belongs to, null when it belongs to none, absent when the
+   * writer could not tell. A project screen filters on it instead of refreshing on every task in every project
+   * (review 2026-10-16 H3).
+   */
+  projectId?: string | null;
 }
 
 type DesktopStoreChangeListener = (change: DesktopStoreChange) => void;
@@ -77,11 +83,30 @@ export function onDesktopStoreChange(listener: DesktopStoreChangeListener): () =
   return () => listeners.delete(bound);
 }
 
+/**
+ * Announce a task change with the task's project scope (review 2026-10-16 H3). Every task change goes through here so a
+ * project screen can tell its own tasks from every other project's. Without `projectId` the stored row is read; a
+ * missing row (already deleted) or table leaves the scope absent, which subscribers treat as unknown.
+ */
+export function emitTaskStoreChange(db: Database.Database, taskId: string, projectId?: string | null): void {
+  let scope = projectId;
+  if (scope === undefined) {
+    try {
+      const row = db.prepare("SELECT project_id FROM tasks WHERE id = ?").get(taskId) as { project_id: string | null } | undefined;
+      if (row) scope = row.project_id ?? null;
+    } catch { /* no tasks table yet: scope stays unknown */ }
+  }
+  emitDesktopStoreChange({ entity: "task", id: taskId, ...(scope !== undefined ? { projectId: scope } : {}) });
+}
+
 export function emitDesktopStoreChange(change: DesktopStoreChange): void {
   const safeChange: DesktopStoreChange = {
     entity: change.entity,
     ...(typeof change.id === "string" && change.id.length > 0 && change.id.length <= 256
       ? { id: change.id }
+      : {}),
+    ...(change.projectId === null || (typeof change.projectId === "string" && change.projectId.length > 0 && change.projectId.length <= 256)
+      ? { projectId: change.projectId }
       : {}),
   };
   const pending = deferredChanges[deferredChanges.length - 1];

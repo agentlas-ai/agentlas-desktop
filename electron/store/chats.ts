@@ -11,7 +11,7 @@ import { oneDispatchSidebarPredicate, createOneDispatchNoticeProjector } from ".
 import { getChatGoalRevision } from "./chat-goals";
 import { parseGoalResult, type GoalResultPresentation } from "../../shared/goal-result";
 import { repairAskOpenMarkers } from "../../shared/agent-control-blocks";
-import { emitDesktopStoreChange } from "./change-bus";
+import { emitDesktopStoreChange, emitTaskStoreChange } from "./change-bus";
 import { getFirm } from "./firms";
 import { evictRuntimeSessionsForChat } from "./runtime-sessions";
 import { touchProject } from "./projects";
@@ -829,7 +829,7 @@ export function renameChat(id: string, title: string): Chat {
   })();
   const chat = getChat(id) as Chat;
   emitDesktopStoreChange({ entity: "chat", id });
-  emitDesktopStoreChange({ entity: "task", id: `task_${id}` });
+  emitTaskStoreChange(getDb(), `task_${id}`);
   return chat;
 }
 
@@ -842,7 +842,7 @@ export function archiveChat(id: string): Chat {
   const task = findCanonicalTaskForChat(id);
   if (task) {
     ensureCanonicalTaskForChat(id);
-    emitDesktopStoreChange({ entity: "task", id: task.id });
+    emitTaskStoreChange(getDb(), task.id);
   }
   const chat = getChat(id) as Chat;
   emitDesktopStoreChange({ entity: "chat", id });
@@ -856,7 +856,7 @@ export function unarchiveChat(id: string): Chat {
   const task = findCanonicalTaskForChat(id);
   if (task) {
     ensureCanonicalTaskForChat(id);
-    emitDesktopStoreChange({ entity: "task", id: task.id });
+    emitTaskStoreChange(getDb(), task.id);
   }
   const chat = getChat(id) as Chat;
   emitDesktopStoreChange({ entity: "chat", id });

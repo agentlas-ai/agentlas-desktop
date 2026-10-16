@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
-import { emitDesktopStoreChange } from "../store/change-bus";
+import { emitDesktopStoreChange, emitTaskStoreChange } from "../store/change-bus";
 import { parseDurableOneSurfaceJson } from "../../shared/one-surface-durable";
 import type { OneSurfaceManifestV1 } from "../../shared/one-surface";
 import {
@@ -625,7 +625,7 @@ export function mutateOneTaskArchive(input: unknown): OneTaskArchiveMutationResu
     } satisfies OneTaskArchiveMutationResultV1;
   });
   const result = mutate();
-  emitDesktopStoreChange({ entity: "task", id: result.taskId });
+  emitTaskStoreChange(getDb(), result.taskId);
   emitDesktopStoreChange({ entity: "chat", id: result.chatId });
   return result;
 }

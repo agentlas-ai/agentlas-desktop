@@ -1,5 +1,5 @@
 import { getDb } from "./db";
-import { emitDesktopStoreChange } from "./change-bus";
+import { emitTaskStoreChange } from "./change-bus";
 import { tryRecordOneDomainEvent } from "../one/domain-events";
 import type {
   CanonicalTask,
@@ -502,7 +502,7 @@ export function ensurePairingVerificationTask(
          archived_at = NULL`,
     )
     .run(id, issuedAt, updatedAt);
-  emitDesktopStoreChange({ entity: "task", id });
+  emitTaskStoreChange(db, id, null);
   return getCanonicalTask(id) as CanonicalTask;
 }
 
@@ -573,7 +573,7 @@ export function setCanonicalTaskStatus(
     ).run(status, now, status, now, taskId);
   });
   update.immediate();
-  emitDesktopStoreChange({ entity: "task", id: taskId });
+  emitTaskStoreChange(getDb(), taskId);
   return getCanonicalTask(taskId) as CanonicalTask;
 }
 
@@ -644,7 +644,7 @@ export function acceptCanonicalTaskResult(
     }
   });
   accept.immediate();
-  emitDesktopStoreChange({ entity: "task", id: input.taskId });
+  emitTaskStoreChange(getDb(), input.taskId);
   const completed = getCanonicalTask(input.taskId) as CanonicalTask;
   tryRecordOneDomainEvent({
     eventType: "task.state_changed",
@@ -667,9 +667,9 @@ export function acceptCanonicalTaskResult(
 export function removeCanonicalTaskForOriginChat(chatId: string): void {
   if (!tableExists("tasks")) return;
   const row = getDb()
-    .prepare("SELECT id FROM tasks WHERE origin_chat_id = ? LIMIT 1")
-    .get(chatId) as { id: string } | undefined;
+    .prepare("SELECT id, project_id FROM tasks WHERE origin_chat_id = ? LIMIT 1")
+    .get(chatId) as { id: string; project_id: string | null } | undefined;
   if (!row) return;
   getDb().prepare("DELETE FROM tasks WHERE id = ?").run(row.id);
-  emitDesktopStoreChange({ entity: "task", id: row.id });
+  emitTaskStoreChange(getDb(), row.id, row.project_id ?? null);
 }

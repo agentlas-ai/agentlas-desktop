@@ -35,7 +35,7 @@ import { classifyToolFailure } from "../../shared/tool-failure";
 import { boundInvocationPlan } from "../../shared/invocation-plan";
 import type { ObservedToolActivity } from "../automation-result";
 import { decodeToolInvocationOrigin } from "../../shared/tool-invocation-origin";
-import { emitDesktopStoreChange } from "./change-bus";
+import { emitTaskStoreChange } from "./change-bus";
 import { projectObservedTaskParticipantInDb } from "./task-participant-projection";
 import { redactOperationalSecrets } from "../invocation/event-secret-redaction";
 import type {
@@ -1470,7 +1470,7 @@ export function recordRunEvent(input: RecordRunEventInput): RunEventUi {
           seenAt: row.ts,
         });
         if (projected.changed && projected.taskId) {
-          emitDesktopStoreChange({ entity: "task", id: projected.taskId });
+          emitTaskStoreChange(getDb(), projected.taskId);
         }
       }
     }

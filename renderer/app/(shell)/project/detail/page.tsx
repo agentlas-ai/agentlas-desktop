@@ -445,10 +445,13 @@ function ProjectPage() {
       if (change.entity === "project" && change.id === id) {
         scheduleRefresh({ background: true });
       } else if (change.entity === "task") {
-        // Task events carry no project id: one of this page's tasks refreshes now, any other task (possibly a new one
-        // in this project) at most once a second. Every automation run emits these from all projects.
+        // Task changes carry the task's project (change-bus emitTaskStoreChange). A task of this project, or one that
+        // just left it, refreshes now; a task of another project, or of none, never refreshes this page. Every
+        // automation run emits these from all projects. Only a change whose scope is unknown keeps the old
+        // at-most-once-a-second refresh.
         const ownTask = typeof change.id === "string" && taskIdsRef.current.has(change.id);
-        scheduleRefresh({ background: true, delayMs: ownTask ? 0 : 1_000 });
+        if (ownTask || change.projectId === id) scheduleRefresh({ background: true });
+        else if (change.projectId === undefined) scheduleRefresh({ background: true, delayMs: 1_000 });
       }
     });
     scheduleRefresh({ background: false });
