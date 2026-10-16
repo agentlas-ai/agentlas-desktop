@@ -14,6 +14,7 @@ import { cliConfiguredDefaultModel } from "./cli-default-model";
 import { registerProbeModels } from "./model-catalog";
 import { ACP_AGENTS, acpDisabledFor, probeAcpModelsCached } from "./acp";
 import { listAcpKindSpecs, resolveAcpCommand } from "./acp-agents";
+import { withForeignCliContext } from "./foreign-cli-context";
 import { invalidateAntigravityModelDiscovery, probeAntigravity } from "./antigravity";
 import { probeKimi } from "./kimi";
 import { invalidateGrokModelDiscovery, probeGrok } from "./grok";
@@ -582,7 +583,9 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
   const acpDiscovery = async (kind: "cursor" | "grok" | "kimi", command: string, current?: DiscoveryOutcome): Promise<DiscoveryOutcome> => {
     if (current && current.status === "ok") return current;
     if (acpDisabledFor(kind)) return current ?? unsupportedDiscovery("acp-disabled", "acp");
-    const viaAcp = await probeAcpModelsCached(ACP_AGENTS[kind], { command });
+    // The probe opens a real ACP session (session/new). It runs in the product's CLI home like every product run, so the
+    // empty probe session never lands in the person's own folder (2026-10-17: the owner's ~/.copilot held 23 of them).
+    const viaAcp = await probeAcpModelsCached(ACP_AGENTS[kind], { command, env: withForeignCliContext(kind, process.env, undefined) });
     if (viaAcp.status === "ok") return viaAcp;
     return current ?? viaAcp;
   };
@@ -817,7 +820,7 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
       if (!found) continue;
       const discovery = acpDisabledFor("acp")
         ? unsupportedDiscovery("acp-disabled", "acp")
-        : await probeAcpModelsCached(spec, { command: found.path });
+        : await probeAcpModelsCached(spec, { command: found.path, env: withForeignCliContext(spec.id, process.env, undefined) });
       const acpModels = discovery.models;
       const remembered = cliModelOf("acp", active, acpModels, "custom");
       const agentDefault = discovery.defaultModel && acpModels.includes(discovery.defaultModel) ? discovery.defaultModel : undefined;
