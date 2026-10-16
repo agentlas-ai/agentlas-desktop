@@ -212,78 +212,150 @@ export function commitCloudRegistryPackage(input: CommitCloudRegistryPackageInpu
   return expectedRoute;
 }
 
-/** Recover every transaction left by an interrupted Desktop process. */
+/**
+ * Recover every transaction left by an interrupted Desktop process.
+ *
+ * Strict: a journal that cannot be recovered throws, and the journal, SQLite row and route stay exactly as they are.
+ * Writers call this before they commit, so a new transaction never starts on top of a split one.
+ */
 export function recoverCloudRegistryTransactions(): void {
+  for (const file of pendingJournalFiles()) recoverCloudRegistryJournal(file);
+}
+
+/**
+ * The same recovery for read paths (installed-agent lists and lookups): it never throws.
+ *
+ * Review 2026-10-16 (desktop-b-01): every list and lookup ran the strict recovery first, so one journal that could not
+ * be recovered (a failed Windows rename) made all of them throw until someone deleted the journal by hand. Here such a
+ * journal is left in place for the strict path, reported once with the machine code
+ * `agent_cloud_registry_recovery_blocked`, and skipped by reads for a minute while it is unchanged; the other slugs
+ * carry on.
+ */
+export function recoverCloudRegistryTransactionsForRead(): void {
+  let files: string[];
+  try {
+    files = pendingJournalFiles();
+  } catch (error) {
+    reportBlockedJournal(journalRoot(), null, error);
+    return;
+  }
+  const now = Date.now();
+  for (const file of files) {
+    const signature = journalSignature(file);
+    const blocked = blockedJournals.get(file);
+    if (blocked && blocked.signature === signature && now - blocked.at < BLOCKED_JOURNAL_RETRY_MS) continue;
+    try {
+      recoverCloudRegistryJournal(file);
+      blockedJournals.delete(file);
+    } catch (error) {
+      const reason = errorMessage(error).slice(0, 300);
+      if (!blocked || blocked.reason !== reason) reportBlockedJournal(file, journalSlug(file), error);
+      blockedJournals.set(file, { signature, at: now, reason });
+    }
+  }
+}
+
+const BLOCKED_JOURNAL_RETRY_MS = 60_000;
+const blockedJournals = new Map<string, { signature: string; at: number; reason: string }>();
+
+function pendingJournalFiles(): string[] {
   const root = journalRoot();
-  if (!fs.existsSync(root)) return;
-  const files = fs
+  if (!fs.existsSync(root)) return [];
+  return fs
     .readdirSync(root, { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
     .map((entry) => path.join(root, entry.name))
     .sort();
+}
 
-  for (const file of files) {
-    const journal = readJournal(file);
-    validateJournal(file, journal);
-    const currentRow = readRow(journal.agentId);
-    const dbIsExpected = rowsEqual(currentRow, journal.expectedRow);
-    const diskIsExpected = diskMatchesJournal(journal);
-    const dbIsPrevious = rowsEqual(currentRow, journal.previousRow);
-    const currentRoute = getRoute(journal.agentId);
-    const routeIsKnown =
-      routesEqual(currentRoute, journal.previousRoute) ||
-      routesEqual(currentRoute, journal.expectedRoute);
-
-    if (journal.phase === "committed") {
-      if (dbIsExpected && diskIsExpected && routeIsKnown) {
-        setRoute(journal.expectedRoute);
-        finalizeJournal(file, journal);
-        continue;
-      }
-      if ((!dbIsExpected && !dbIsPrevious) || !routeIsKnown) {
-        throw new Error(
-          `Agent Cloud committed registry recovery stopped for ${journal.slug}: durable authority changed outside transaction ${journal.transactionId}.`,
-        );
-      }
-      // A committed marker is not proof that every live byte reached durable
-      // storage. If exact CAS verification fails while the old backup exists,
-      // compensate all three surfaces and preserve any modified new copy.
-      rollbackJournal(file, journal);
-      continue;
-    }
-
-    if (dbIsExpected && diskIsExpected) {
-      // SQLite committed before the process could mark the journal. The package
-      // marker is exact, so repairing the atomic route file safely rolls forward.
-      setRoute(journal.expectedRoute);
-      updateJournal(file, journal, "committed");
-      finalizeJournal(file, journal);
-      continue;
-    }
-
-    if (!dbIsExpected && !dbIsPrevious) {
-      throw new Error(
-        `Agent Cloud registry recovery stopped: SQLite row for ${journal.slug} changed outside transaction ${journal.transactionId}.`,
-      );
-    }
-    if (!routeIsKnown) {
-      throw new Error(
-        `Agent Cloud registry recovery stopped: route for ${journal.slug} changed outside transaction ${journal.transactionId}.`,
-      );
-    }
-
-    if (!fs.existsSync(journal.backupDir) && diskIsExpected && journal.hadDestination) {
-      // The new package is complete but the obsolete backup disappeared. It is
-      // safer and lossless to finish the journal than to delete the only copy.
-      writeRow(journal.expectedRow);
-      setRoute(journal.expectedRoute);
-      updateJournal(file, journal, "committed");
-      finalizeJournal(file, journal);
-      continue;
-    }
-
-    rollbackJournal(file, journal);
+function journalSignature(file: string): string {
+  try {
+    const stat = fs.statSync(file);
+    return `${stat.size}:${stat.mtimeMs}`;
+  } catch {
+    return "missing";
   }
+}
+
+function journalSlug(file: string): string | null {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { slug?: unknown };
+    return typeof parsed.slug === "string" ? parsed.slug : null;
+  } catch {
+    return null;
+  }
+}
+
+function reportBlockedJournal(file: string, slug: string | null, error: unknown): void {
+  console.warn("[agent-cloud] registry recovery blocked", JSON.stringify({
+    code: "agent_cloud_registry_recovery_blocked",
+    slug,
+    journal: path.basename(file),
+    reason: errorMessage(error).slice(0, 300),
+  }));
+}
+
+function recoverCloudRegistryJournal(file: string): void {
+  const journal = readJournal(file);
+  validateJournal(file, journal);
+  const currentRow = readRow(journal.agentId);
+  const dbIsExpected = rowsEqual(currentRow, journal.expectedRow);
+  const diskIsExpected = diskMatchesJournal(journal);
+  const dbIsPrevious = rowsEqual(currentRow, journal.previousRow);
+  const currentRoute = getRoute(journal.agentId);
+  const routeIsKnown =
+    routesEqual(currentRoute, journal.previousRoute) ||
+    routesEqual(currentRoute, journal.expectedRoute);
+
+  if (journal.phase === "committed") {
+    if (dbIsExpected && diskIsExpected && routeIsKnown) {
+      setRoute(journal.expectedRoute);
+      finalizeJournal(file, journal);
+      return;
+    }
+    if ((!dbIsExpected && !dbIsPrevious) || !routeIsKnown) {
+      throw new Error(
+        `Agent Cloud committed registry recovery stopped for ${journal.slug}: durable authority changed outside transaction ${journal.transactionId}.`,
+      );
+    }
+    // A committed marker is not proof that every live byte reached durable
+    // storage. If exact CAS verification fails while the old backup exists,
+    // compensate all three surfaces and preserve any modified new copy.
+    rollbackJournal(file, journal);
+    return;
+  }
+
+  if (dbIsExpected && diskIsExpected) {
+    // SQLite committed before the process could mark the journal. The package
+    // marker is exact, so repairing the atomic route file safely rolls forward.
+    setRoute(journal.expectedRoute);
+    updateJournal(file, journal, "committed");
+    finalizeJournal(file, journal);
+    return;
+  }
+
+  if (!dbIsExpected && !dbIsPrevious) {
+    throw new Error(
+      `Agent Cloud registry recovery stopped: SQLite row for ${journal.slug} changed outside transaction ${journal.transactionId}.`,
+    );
+  }
+  if (!routeIsKnown) {
+    throw new Error(
+      `Agent Cloud registry recovery stopped: route for ${journal.slug} changed outside transaction ${journal.transactionId}.`,
+    );
+  }
+
+  if (!fs.existsSync(journal.backupDir) && diskIsExpected && journal.hadDestination) {
+    // The new package is complete but the obsolete backup disappeared. It is
+    // safer and lossless to finish the journal than to delete the only copy.
+    writeRow(journal.expectedRow);
+    setRoute(journal.expectedRoute);
+    updateJournal(file, journal, "committed");
+    finalizeJournal(file, journal);
+    return;
+  }
+
+  rollbackJournal(file, journal);
 }
 
 function rollbackJournal(
@@ -323,6 +395,10 @@ function restoreManagedDirectory(journal: CloudRegistryJournal): void {
     }
     return;
   }
+
+  // "prepared" is written before the rename to the backup and becomes "backup-created" only after that rename
+  // succeeds. With no backup, this transaction never moved or wrote anything: the live copy is the previous one.
+  if (journal.phase === "prepared") return;
 
   if (!journal.hadDestination && destinationExists) {
     if (diskMatchesJournal(journal)) {
@@ -381,12 +457,9 @@ function fsyncManagedTree(root: string): void {
         fs.closeSync(fd);
       }
     }
-    const fd = fs.openSync(directory, fs.constants.O_RDONLY);
-    try {
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
+    // File fsync stays strict. A directory fsync is best-effort: Windows cannot fsync a directory handle (EPERM), and
+    // failing here reverted every Windows install after SQLite had committed (review 2026-10-16, desktop-b-02).
+    fsyncDirectoryBestEffort(directory);
     const after = fs.lstatSync(directory);
     if (
       !after.isDirectory() ||

@@ -16,6 +16,7 @@ import { readCloudAgentRestoreMarker } from "../cloud-agents/restore";
 import {
   commitCloudRegistryPackage,
   recoverCloudRegistryTransactions,
+  recoverCloudRegistryTransactionsForRead,
   type CloudRegistryAgentRow,
 } from "../cloud-agents/registry-transaction";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
@@ -154,7 +155,8 @@ export function backfillEntityKinds(): void {
 }
 
 export function listInstalledAgents(): InstalledAgent[] {
-  recoverCloudRegistryTransactions();
+  // A read never throws on one slug's unrecoverable journal (review 2026-10-16, desktop-b-01); writers stay strict.
+  recoverCloudRegistryTransactionsForRead();
   recoverRestoredTeamFirms();
   try {
     // The dedupe module owns its route-generation cache. Calling it on every
@@ -180,7 +182,7 @@ export function listInstalledAgentsReadOnly(): InstalledAgent[] {
 }
 
 export function getAgentById(id: string): InstalledAgent | null {
-  recoverCloudRegistryTransactions();
+  recoverCloudRegistryTransactionsForRead();
   recoverRestoredTeamFirms(id);
   const row = getDb()
     .prepare("SELECT * FROM installed_agents WHERE id = ?")
