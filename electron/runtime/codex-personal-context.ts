@@ -96,6 +96,13 @@ export function codexPersonalContextArgs(input: CodexPersonalContextInput = {}):
   const memoriesOn = personal?.memories === true;
   if (!memoriesOn) args.push("-c", "features.memories=false");
 
+  // Codex's own thread goals stay off in every product run. A goal makes Codex start the next turn by itself the moment a
+  // turn ends with the goal open, so a run waiting on outside work re-reads its whole context in a loop. Dev replay r02
+  // (2026-10-17, TCIagent graph step1, owner's config.toml [features] goals = true): the step called create_goal, then
+  // four "Continue working toward the active thread goal" turns in two minutes (~1.45M input tokens) only re-checked
+  // teammates that were still working. Agentlas owns continuation (Goals, a graph team step waiting on its teammates).
+  args.push("-c", "features.goals=false");
+
   // Skills: every Codex skill that is switched off, in each root this run's Codex will actually scan.
   const scanned = [path.join(home, ".agents", "skills") + path.sep];
   if (codexHome === realCodexHome(env) || personal?.skills) scanned.push(path.join(realCodexHome(env), "skills") + path.sep);
