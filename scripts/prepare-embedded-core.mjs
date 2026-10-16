@@ -169,7 +169,7 @@ function transformRuntimeInstructions(files) {
     const file = path.join(temporaryRoot, relative);
     let source = fs.readFileSync(file, "utf8");
     const digest = require("node:crypto").createHash("sha256").update(source).digest("hex");
-    if (digest !== "d5aefa551e97a0ed02d3b4c73b4153ad8d80cffd93c67d7692f9b227ed10b968") {
+    if (digest !== "940e3dfae6c9d10c10526c7b7aa69c421dcef7a7605230532c12bfa464600a72") {
       throw new Error(`embedded Core runtime instruction source checksum mismatch: ${relative}`);
     }
     function replaceSpan(startText, endText, replacement) {
@@ -190,7 +190,7 @@ function transformRuntimeInstructions(files) {
     replaceSpan("It is mandatory for the same reason the\n", "Do not report\n", "It is mandatory. ");
     replaceSpan("18. For development changes to the engine ontology runtime, run\n", "19. For long-running or multi-file execution work", "");
     const outputDigest = require("node:crypto").createHash("sha256").update(source).digest("hex");
-    if (outputDigest !== "dbfd444c60df33cfd88d3e49101b3b28053a83cee1f9fc96c1985f8a6ddc0939") throw new Error("embedded Core projected instruction checksum mismatch");
+    if (outputDigest !== "29a4e9ca30a3203630a60079ee8e880afad2132e567b94507ffb43e145bcab9c") throw new Error("embedded Core projected instruction checksum mismatch");
     fs.writeFileSync(file, source);
 
   }
