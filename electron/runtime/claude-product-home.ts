@@ -11,11 +11,12 @@
 // (Linux/Windows) is the person's own, unchanged. Claude forwards that variable to its own teammate processes, so the
 // pair is a supported combination, not a trick.
 //
-// The mirror links the configuration entries of ~/.claude (CLAUDE.md, rules, skills, commands, agents, plugins — the
+// The mirror links the configuration entries of ~/.claude (CLAUDE.md, rules, skills, commands, plugins — the
 // settings overlay in claude-personal-context.ts still decides which of those a run may use) except the session and
 // state stores below, which are the mirror's own. settings.json is the mirror's own file holding only the sign-in,
-// endpoint and model-default part of the person's (productClaudeSettings): never their hooks, env or permissions. `.claude.json` (global config) is the mirror's own copy of the person's
-// without their per-project history and user-scope MCP servers (One keeps the servers it switched on).
+// endpoint and model-default part of the person's (productClaudeSettings): never their hooks, env or permissions.
+// `.claude.json` (global config) is the mirror's own file holding only the sign-in, install and first-run part of the
+// person's (productClaudeGlobalConfig) plus the user-scope MCP servers One switched on.
 // If links cannot be made (Windows without the right), the run keeps the real config dir.
 import fs from "node:fs";
 import os from "node:os";
@@ -27,9 +28,12 @@ import { userDataPath } from "../runtime-paths";
  * projects (sessions), history, todos, shell snapshots, file history, plans, jobs, telemetry, caches, backups, locks —
  * is the person's own and stays out; Claude creates the mirror's own stores. An allowlist, so a store a future Claude
  * version adds never leaks product sessions into the person's dir or the person's into product runs.
+ * `agents/` (the person's own subagent definitions) is not linked: no settings key switches a user subagent off and
+ * One's capability inventory has no subagent kind, so linked, every product run could delegate to the person's
+ * subagents (their prompts, tools and models). A product agent's subagents are Agentlas's.
  */
 export const CLAUDE_CONFIG_ENTRIES: readonly string[] = [
-  "CLAUDE.md", "rules", "skills", "commands", "agents", "plugins", "output-styles",
+  "CLAUDE.md", "rules", "skills", "commands", "plugins", "output-styles",
   "keybindings.json", "policy-limits.json", "remote-settings.json", "managed-settings.json",
 ];
 export function isClaudePersonalSessionEntry(name: string): boolean {
@@ -130,14 +134,31 @@ function quietly(action: () => void): void {
   try { action(); } catch { /* best effort */ }
 }
 
-/** The person's global config without per-project history and user-scope MCP servers (kept: the ones One chose). */
+/**
+ * Keys of the person's global config (~/.claude.json) a product run keeps, each for one reason:
+ *   - sign-in: `oauthAccount` (the signed-in account and organisation the keychain token belongs to), `primaryApiKey`
+ *     (an API-key login, kept here where no keychain holds it), `customApiKeyResponses` (which ANTHROPIC_API_KEY the
+ *     person approved), `userID`;
+ *   - how the Claude Code install the person shares with product runs updates itself: `installMethod`, `autoUpdates`,
+ *     `autoUpdatesProtectedForNative` (a product run must not update the person's install against their choice);
+ *   - first-run and migration state, so a product run never replays onboarding or the settings migrations:
+ *     `hasCompletedOnboarding`, `lastOnboardingVersion`, `migrationVersion`, every `*MigrationComplete` flag.
+ * Everything else is left out by construction (the file was copied whole minus `projects` and `mcpServers` until
+ * 2026-10-17): the person's Claude in Chrome switches (`claudeInChromeDefaultEnabled`, `chromeExtension`), auto-mode
+ * opt-ins, remote-control state, usage counters, tips, caches Claude refetches, `githubRepoPaths`, `projects` (the
+ * mirror keeps its own) and any key a later release adds. User-scope MCP servers: only the ones One switched on.
+ */
+const CLAUDE_GLOBAL_CONFIG_KEYS: ReadonlySet<string> = new Set(["oauthAccount", "primaryApiKey", "customApiKeyResponses", "userID",
+  "installMethod", "autoUpdates", "autoUpdatesProtectedForNative", "hasCompletedOnboarding", "lastOnboardingVersion", "migrationVersion"]);
+
+/** The mirror's own global config: the allowlisted keys of the person's, the mirror's own `projects`, One's MCP servers. */
 export function productClaudeGlobalConfig(text: string, keep: readonly string[] = [], previousOwn?: string): string {
   const source = JSON.parse(text) as Record<string, unknown>;
   const own = previousOwn ? (() => { try { return JSON.parse(previousOwn) as Record<string, unknown>; } catch { return {}; } })() : {};
   const servers = source.mcpServers && typeof source.mcpServers === "object" ? source.mcpServers as Record<string, unknown> : {};
   const keptServers = Object.fromEntries(Object.entries(servers).filter(([name]) => keep.includes(name)));
-  const { projects: _projects, mcpServers: _servers, ...rest } = source;
-  return JSON.stringify({ ...rest, ...(own.projects ? { projects: own.projects } : {}), mcpServers: keptServers }, null, 2);
+  const kept = Object.fromEntries(Object.entries(source).filter(([key]) => CLAUDE_GLOBAL_CONFIG_KEYS.has(key) || /MigrationComplete$/.test(key)));
+  return JSON.stringify({ ...kept, ...(own.projects ? { projects: own.projects } : {}), mcpServers: keptServers }, null, 2);
 }
 
 function writeIfChanged(at: string, content: string): void {
@@ -170,11 +191,14 @@ export function syncClaudeProductHome(realDir: string, mirror = claudeProductHom
   } catch {
     return { skip: "links-unavailable" };
   }
-  // Links to entries the person removed go away; the mirror's own stores stay.
+  // Links to entries the person removed, or that are no longer linked at all (an older mirror's `agents`), go away; the
+  // mirror's own stores are never links and stay.
   for (const name of fs.readdirSync(mirror)) {
-    if (wanted.has(name) || isClaudePersonalSessionEntry(name) || name === ".claude.json") continue;
+    if (wanted.has(name) || name === ".claude.json") continue;
     const at = path.join(mirror, name);
-    quietly(() => { if (fs.lstatSync(at).isSymbolicLink()) fs.unlinkSync(at); });
+    quietly(() => {
+      if (fs.lstatSync(at).isSymbolicLink() && (!isClaudePersonalSessionEntry(name) || fs.readlinkSync(at) === path.join(realDir, name))) fs.unlinkSync(at);
+    });
   }
   // The mirror's own settings.json (productClaudeSettings). An older mirror's links to the person's settings files are
   // removed first: written through, the link would replace the person's file, and left alone it keeps their hooks.

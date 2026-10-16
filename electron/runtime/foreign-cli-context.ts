@@ -12,22 +12,30 @@
 //     `[disabled]` and the Harness Compatibility table shows OFF (env).
 //
 //  2. Its OWN folder (GROK_HOME, default ~/.grok): Agents.md (global instructions), memory-v2, skills/, hooks/,
-//     installed-plugins and the `[mcp_servers.*]` / `[[hooks.*]]` of config.toml. No switch exists for the
-//     instructions file, so a product run points GROK_HOME at a mirror (config-home-mirror.ts) in which every other
-//     entry is a symlink (auth.json and trust files stay one and the same file, so the sign-in works; the session store
-//     is the mirror's own since 2026-10-12) and config.toml is the person's own with those tables cut out.
+//     hooks-paths, installed-plugins, sandbox.toml and the person's config.toml. No switch exists for the
+//     instructions file, so a product run points GROK_HOME at a mirror (config-home-mirror.ts) that links only the
+//     entries in GROK_LINKED_ENTRIES (sign-in, binaries, caches, org policy, folder trust: auth.json stays one and the
+//     same file, so the sign-in works; the session store is the mirror's own since 2026-10-12). config.toml and
+//     user-settings.json are the mirror's own files holding only an allowlist of the person's (productGrokConfig).
+//     Until 2026-10-17 every other entry was linked and config.toml was the person's minus five tables, so their
+//     `[permission]` rules, `[sandbox]`, `[shell_environment_policy] set` values, `[ui]` (always-approve, notification
+//     hook commands, status-line command), `[agent]`, `[paths]`, `[plugins]` and `[session] load_envrc` reached
+//     product runs, like the Codex copy did (owner 2026-10-06/10-11: the person's settings never drive product agents).
 //     Skills Grok also reads from the generic `~/.agents/skills` root are hidden with `[skills] ignore`.
 //     Memory is turned off with GROK_MEMORY=0.
 //
 // Not closable (reported in the receipt, not hidden): plugins that Grok discovers from `~/.claude/plugins` bring
 // their MCP servers, hooks and agents; no env switch or `[plugins] disabled` entry removed them in the measurement.
+// The same holds for the permission rules of `~/.claude/settings.json` and `settings.local.json` (grok 1.0.60
+// `grok inspect --json` with every cell above off: 127 rules loaded from them); Grok reads them under HOME, not
+// CLAUDE_CONFIG_DIR, and has no switch for them.
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { userDataPath } from "../runtime-paths";
 import { isMirrorLink, syncConfigHomeMirror } from "./config-home-mirror";
-import { withCliProductHome } from "./cli-product-homes";
+import { allowlistedToml, withCliProductHome } from "./cli-product-homes";
 import type { CapabilityItem, CapabilityKind, CapabilitySelection } from "../capabilities/one-capabilities";
 
 const GROK_CELLS: ReadonlyArray<{ cell: string; kind: CapabilityKind }> = [
@@ -62,36 +70,70 @@ export function realGrokHome(env: NodeJS.ProcessEnv = process.env): string {
   return path.resolve(env.GROK_HOME || path.join(env.HOME || os.homedir(), ".grok"));
 }
 
-/** config.toml tables that are the person's own context: their MCP servers, hooks, skills and memory settings. */
-const GROK_CONTEXT_TABLE = /^(mcp_servers|hooks|skills|memory|memory_v2)(\.|$)/;
+/**
+ * Parts of the person's config.toml a product run keeps (grok 1.0.60 docs/user-guide/26-config-reference.md), each for
+ * one reason:
+ *   - sign-in and provider plumbing, without which a custom, enterprise or BYOK account cannot reach its model:
+ *     `auth.*` / `grok_com_config.*` (its alias: auth provider command, OIDC/OAuth2 issuer, team pin, relay URLs),
+ *     `auth_provider.*` (named credential helpers a model uses), `model.*` and `model_providers.*` (custom model
+ *     endpoints, wire API, credentials or the env names holding them), the endpoint keys in GROK_ENDPOINT_KEYS (inference,
+ *     model list and the deployment's managed-config source; never the feedback or trace-upload destinations), and
+ *     `models.extra_headers` (headers every model request carries, e.g. a gateway's tenant tag);
+ *   - the model default the CLI falls back to when the app passes no model: `models.default`,
+ *     `models.default_reasoning_effort`;
+ *   - how the CLI binary the person shares with product runs (bin/ and downloads/ are links) updates itself:
+ *     `cli.auto_update`, `cli.installer`, `cli.channel`. A product run must not update the person's install against
+ *     their choice;
+ *   - `telemetry.trace_upload`: the person's choice about uploading session traces; it changes nothing an agent does.
+ * Plus the MCP servers One switched on. Everything else is left out by construction, including `permission`,
+ * `sandbox`, `shell_environment_policy` (its `set` injects values into every bash), `ui` (always-approve, notification
+ * hook commands, the status-line command), `hooks`, `agent`, `paths`, `plugins`, `marketplace`, `skills`, `memory`,
+ * `features`, `subagents`, `workflows`, `session` (`load_envrc`), `toolset`, `relay`, the telemetry exporters and any
+ * table a later release adds.
+ */
+const GROK_KEEP_TABLES: ReadonlySet<string> = new Set(["auth", "grok_com_config", "auth_provider", "model", "model_providers"]);
+const GROK_ENDPOINT_KEYS: ReadonlySet<string> = new Set(["cli_chat_proxy_base_url", "models_base_url", "models_list_url", "models_endpoint",
+  "xai_api_base_url", "managed_config_url", "deployment_key"]);
+const GROK_KEEP_KEYS: Readonly<Record<string, ReadonlySet<string>>> = {
+  endpoints: GROK_ENDPOINT_KEYS,
+  models: new Set(["default", "default_reasoning_effort", "extra_headers"]),
+  cli: new Set(["auto_update", "installer", "channel"]),
+  telemetry: new Set(["trace_upload"]),
+};
 
-/** The person's config.toml with the context tables cut out, except the MCP servers One switched on. */
-export function grokConfigWithoutPersonalContext(text: string, keepServers: ReadonlySet<string>, skillsIgnore: readonly string[]): string {
-  const out: string[] = [];
-  let keep = true;
-  for (const line of text.split(/\r?\n/)) {
-    const table = /^\s*\[\[?\s*([^\[\]]+?)\s*\]\]?\s*(#.*)?$/.exec(line);
-    if (table) {
-      const name = table[1].replace(/"/g, "");
-      const server = /^mcp_servers\.([^.]+)/.exec(name);
-      keep = server ? keepServers.has(server[1]) : !GROK_CONTEXT_TABLE.test(name);
-    }
-    if (keep) out.push(line);
-  }
-  if (skillsIgnore.length > 0) out.push("", "[skills]", `ignore = [${skillsIgnore.map((p) => JSON.stringify(p)).join(", ")}]`);
-  return `${out.join("\n").replace(/\n+$/, "")}\n`;
+/** The mirror's own config.toml: the allowlisted parts of the person's, One's MCP servers and the skills ignore. */
+export function productGrokConfig(text: string, keepServers: ReadonlySet<string>, skillsIgnore: readonly string[]): string {
+  const out = allowlistedToml(text, ({ path: [head, second] }) => GROK_KEEP_TABLES.has(head)
+    || (second !== undefined && GROK_KEEP_KEYS[head]?.has(second) === true)
+    || (head === "mcp_servers" && second !== undefined && keepServers.has(second)));
+  const ignore = skillsIgnore.length > 0 ? `[skills]\nignore = [${skillsIgnore.map((p) => JSON.stringify(p)).join(", ")}]\n` : "";
+  return out && ignore ? `${out}\n${ignore}` : out || ignore;
 }
 
-const HIDDEN_BY_DEFAULT = new Set(["Agents.md", "AGENTS.md", "agents.md", "memory-v2", "installed-plugins", "hooks", "skills", "config.toml"]);
+/** user-settings.json keys a product run keeps: the model default (`/model` writes it). Nothing else of the file. */
+const GROK_USER_SETTINGS_KEYS: readonly string[] = ["defaultModel"];
+
+function productGrokUserSettings(text: string | null): string {
+  let source: Record<string, unknown> = {};
+  try { const v = text === null ? {} : JSON.parse(text) as unknown; if (v && typeof v === "object" && !Array.isArray(v)) source = v as Record<string, unknown>; }
+  catch { /* not JSON: nothing */ }
+  return `${JSON.stringify(Object.fromEntries(GROK_USER_SETTINGS_KEYS.filter((key) => key in source).map((key) => [key, source[key]])), null, 2)}\n`;
+}
+
 /**
- * Grok's session store and per-session state (grok.db holds sessions, messages, tool calls and compactions). A product
- * mirror never links them, so Agentlas sessions stay out of the person's Grok history and theirs out of the product
- * (owner 2026-10-12: Agentlas sessions are kept apart from personal sessions in every app). Grok creates its own copies
- * in the mirror. Sign-in, binaries, model cache and trust files are still linked.
+ * The only entries of the person's GROK_HOME a product mirror links: sign-in (auth.json), install identity and version
+ * state, the binaries and their vendored libraries, built-in bundles and extracted docs, model and signed remote-settings
+ * caches, the organisation's managed policy (managed_config.toml, requirements.toml: a fleet pin still applies), and
+ * folder trust (the person's consent for a folder, which headless runs cannot ask for). An ALLOWLIST: the person's
+ * instructions, memory, skills, hooks, hooks-paths, plugins, sandbox profiles, pager settings, marketplace caches, the
+ * leader socket and every store a later release adds stay out, and so does the session store (grok.db, sessions,
+ * delegations, logs...: owner 2026-10-12, Agentlas sessions are kept apart from personal sessions in every app); Grok
+ * creates its own copies in the mirror. One gets back the instructions and memory it switched on.
  */
-const GROK_PERSONAL_SESSION_ENTRIES = new Set(["grok.db", "grok.db-shm", "grok.db-wal", "sessions", "active_sessions.json",
-  "active_sessions.lock", "delegations", "logs", "memtrace", "sandbox-events.jsonl", "slash-mru.json", "tip_cursor.json",
-  "upload_queue", "worktrees.db", "worktrees.db-shm", "worktrees.db-wal"]);
+const GROK_LINKED_ENTRIES: ReadonlySet<string> = new Set(["auth.json", "auth.json.lock", "agent_id", "install.json", "version.json",
+  ".metadata_version", ".config-init.lock", "bin", "downloads", "lib", "vendor", "bundled", "bundles", "completions", "docs", "README.md",
+  "models_cache.json", "settings_cache.json", "managed_config.toml", "managed_config.lock", "requirements.toml",
+  "trusted_folders.toml", "trusted_folders.toml.lock", "workspace-trust.json"]);
 
 export type GrokProductHomeSkip = "no-real-home" | "no-file-sign-in" | "links-unavailable";
 
@@ -109,13 +151,17 @@ export function syncGrokProductHome(realHome: string, selection: CapabilitySelec
   let config = "";
   try { config = fs.readFileSync(path.join(realHome, "config.toml"), "utf8"); } catch { /* none */ }
   try {
+    let userSettings: string | null = null;
+    try { userSettings = fs.readFileSync(path.join(realHome, "user-settings.json"), "utf8"); } catch { /* none */ }
     syncConfigHomeMirror({
       realDir: realHome,
       mirrorDir: home,
-      hide: (name) => GROK_PERSONAL_SESSION_ENTRIES.has(name)
-        || (HIDDEN_BY_DEFAULT.has(name) && !(name === instructions?.name) && !(name === "memory-v2" && wantMemoryV2)),
+      hide: (name) => !GROK_LINKED_ENTRIES.has(name) && !(name === instructions?.name) && !(name === "memory-v2" && wantMemoryV2),
       folders: ["hooks", "skills"],
-      own: { "config.toml": grokConfigWithoutPersonalContext(config, keepServers, codexSkillsOn ? [] : [path.join(os.homedir(), ".agents", "skills")]) },
+      own: {
+        "config.toml": productGrokConfig(config, keepServers, codexSkillsOn ? [] : [path.join(os.homedir(), ".agents", "skills")]),
+        "user-settings.json": productGrokUserSettings(userSettings),
+      },
     });
     // hooks/ and skills/ are folders of links to exactly the files One switched on.
     for (const [folder, items] of [["hooks", oneHas(selection, "grok", "hook")], ["skills", oneHas(selection, "grok", "skill")]] as const) {

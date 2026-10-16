@@ -167,7 +167,7 @@ export function productCodexConfig(text: string): string {
   return lines.length > 0 ? `${lines.join("\n")}\n` : "";
 }
 
-interface TomlStatement {
+export interface TomlStatement {
   /** Full key path: the enclosing table's path plus the statement's own (dotted) key. */
   path: string[];
   /** The value's source text, exactly as written (strings, arrays and inline tables may span lines). */
@@ -176,7 +176,7 @@ interface TomlStatement {
   inArrayTable: boolean;
 }
 
-function tomlKey(segment: string): string {
+export function tomlKey(segment: string): string {
   return /^[A-Za-z0-9_-]+$/.test(segment) ? segment : JSON.stringify(segment);
 }
 
@@ -193,7 +193,7 @@ function tomlStringValue(value: string): string | null {
  * statement boundaries exactly (comments, the four string forms, nested arrays and inline tables across lines, quoted
  * and dotted keys, table and array-of-table headers); values are never interpreted. Throws on what it cannot follow.
  */
-function scanTomlStatements(text: string): TomlStatement[] {
+export function scanTomlStatements(text: string): TomlStatement[] {
   const src = text.replace(/\r\n/g, "\n");
   const out: TomlStatement[] = [];
   let i = 0;
