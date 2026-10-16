@@ -9,6 +9,9 @@ import fs from "node:fs/promises";
 import { createHash } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, runtimeProtocolUnrecognizedFailure, cliToolSilenceWindowMs, RuntimeTurnUnsettledError, preDispatchRefusal, runnerRefusedBeforeDispatch } from "./runner";
+import { attendedTurnStartsFresh, unattendedFreshSessionStatus } from "./unattended-session-turns";
+import { kimiSessionGone } from "./kimi-journal";
+import { realCliHome } from "./cli-product-homes";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { schemaFallbackPromptPart } from "../../shared/runtime-capabilities";
 import { composeDeclaredPrompt } from "./prompt-order";
@@ -438,7 +441,22 @@ async function runKimiTurn(req: RunnerRequest, events: RunnerEvents, dispatch: {
     clearRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
   }
   const storedSessionId = saved && fingerprint && saved.fingerprint === fingerprint ? saved.sessionId : null;
-  const resumeSessionId = runReq.runtimeSessionId ?? storedSessionId;
+  // The same folder the spawn below uses (its product mirror), read for the session store.
+  const runEnv = withForeignCliContext("kimi", runReq.env ?? process.env, selectionFor(runReq.agentId, undefined, runReq.chatId));
+  /*
+   * A session Kimi no longer holds (no session directory in its store: kimi-journal.ts; measured on Kimi Code 0.28.0,
+   * whose `--session <missing>` exits 1 before any turn) failed this turn and every later turn of the chat. It continues
+   * once in a fresh session that carries the chat history (unattended-session-turns.ts rules 2 and 4). An attended
+   * caller-managed session id carries no history, so it keeps its refusal.
+   */
+  const candidateResume = runReq.runtimeSessionId ?? storedSessionId;
+  const goneFresh = Boolean(candidateResume && kimiSessionGone(realCliHome("kimi", runEnv), candidateResume)
+    && (runReq.unattended || attendedTurnStartsFresh("session_not_found", !runReq.runtimeSessionId)));
+  if (goneFresh) {
+    events.onStatus(unattendedFreshSessionStatus(KIND, "session_not_found"));
+    if (runReq.chatId) clearRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
+  }
+  const resumeSessionId = goneFresh ? null : candidateResume;
   const gapContext = resumeSessionId && !runReq.runtimeSessionId && storedSessionId && saved
     ? renderGapContext(unseenHistoryGap(runReq.history, saved.updatedAt), runReq.locale)
     : "";

@@ -8,6 +8,8 @@
  *   Codex app-server   turn/plan/updated { plan: [{ step, status: pending|inProgress|completed }] }
  *   codex exec --json  item.* { type: "todo_list", items: [{ text, completed }] }
  *   ACP                session/update { sessionUpdate: "plan", entries: [{ content, status }] }
+ *   Cursor ACP         cursor/update_todos { toolCallId, todos: [{ id, content, status }], merge } (Cursor's documented
+ *                      extension notification; cursor.com/docs/cli/acp, read 2026-10-17, not run: no cursor-agent here)
  *   Claude Code        TodoWrite { todos: [{ content, status, activeForm }] }
  *                      TaskCreate { subject, activeForm } + result { task: { id } }
  *                      TaskUpdate { taskId, status, subject, activeForm } + result { success }
@@ -243,6 +245,40 @@ export class ClaudeTaskPlanTracker {
 }
 
 /** One emitter per turn: forwards a bounded snapshot only when it differs from the last one sent. */
+/**
+ * Cursor sends its todo list as the vendor notification `cursor/update_todos` instead of an ACP `plan` update.
+ * `merge: true` updates the turn's list by todo id (an unknown id is appended), `merge: false` replaces it; a
+ * `cancelled` todo leaves the list (it has no checklist status). Returns the new full list, or null for a malformed one.
+ */
+export class CursorTodoPlanTracker {
+  private entries: InvocationPlanEntry[] = [];
+
+  update(params: unknown): InvocationPlan | null {
+    const value = record(params);
+    if (!value || !Array.isArray(value.todos)) return null;
+    const incoming = value.todos.flatMap((todo) => {
+      const item = record(todo);
+      const id = taskId(item?.id);
+      if (!item || !id) return [];
+      return [{ id, text: text(item.content), cancelled: item.status === "cancelled", status: status(item.status) }];
+    });
+    let next: InvocationPlanEntry[] = value.merge === true ? [...this.entries] : [];
+    for (const todo of incoming) {
+      const at = next.findIndex((entry) => entry.id === todo.id);
+      if (todo.cancelled) { if (at >= 0) next.splice(at, 1); continue; }
+      const known = at >= 0 ? next[at] : undefined;
+      const textValue = todo.text ?? known?.text;
+      const statusValue = todo.status ?? known?.status;
+      if (!textValue || !statusValue) continue;
+      const entry: InvocationPlanEntry = { id: todo.id, text: textValue, status: statusValue };
+      if (at >= 0) next[at] = entry; else next.push(entry);
+    }
+    next = boundInvocationPlan({ entries: next })?.entries ?? [];
+    this.entries = next;
+    return { entries: next };
+  }
+}
+
 export function createRuntimePlanEmitter(onPlan: ((plan: InvocationPlan) => void) | undefined): (plan: InvocationPlan | null) => void {
   let last: InvocationPlan | null = null;
   return (plan) => {

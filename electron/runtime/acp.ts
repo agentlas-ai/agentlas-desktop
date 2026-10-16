@@ -1,7 +1,12 @@
 import { selectionFor } from "../capabilities/one-capabilities";
 import { withForeignCliContext } from "./foreign-cli-context";
-import { adoptCopilotSession, copilotSessionGone } from "./cli-product-homes";
-import { unattendedFreshSessionStatus } from "./unattended-session-turns";
+import { adoptCopilotSession, copilotSessionGone, realCliHome } from "./cli-product-homes";
+import { attendedTurnStartsFresh, freshSessionReplacesStored, unattendedFreshSessionStatus, type UnattendedFreshSessionReason } from "./unattended-session-turns";
+import { attestKimiTurn, kimiJournalCursor, kimiSessionGone, type KimiJournalCursor } from "./kimi-journal";
+import { acpSpawnEnvWithoutMcpSecrets, resolveAcpMcpConfig, ACP_MCP_SECRET_ALIAS_RE } from "./acp-mcp-binding";
+import { reportModelEffort, type ModelEffortApplication } from "./model-call-ledger";
+import { appendTurnAsks } from "../turn-tools/ask";
+import { parseAskFenceBody, type AgentlasAskQuestion } from "../../shared/ask-fence-flatten";
 import { registerNativeApprovalChildSignal } from "./native-approval-provenance";
 import { claimAttemptChild, releaseAttemptChild } from "./attempt-children";
 import { beginAdapterEffectRun, type AdapterEffectReport } from "../invocation/adapter-effect-context";
@@ -40,7 +45,7 @@ import {
   type AcpMcpTranslation,
 } from "./acp-protocol";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliToolSilenceWindowMs, type CliSilenceGuard, wrapSystemPrompt, RuntimeTurnUnsettledError, runnerFailureFromError, markRefusedBeforeDispatch } from "./runner";
+import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliToolSilenceWindowMs, type CliSilenceGuard, wrapSystemPrompt, RuntimeTurnUnsettledError, runnerFailureFromError, markRefusedBeforeDispatch, preDispatchRefusal, runnerRefusedBeforeDispatch } from "./runner";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, spawnCli, trackRunChild, waitForCliTreeTermination } from "./exec";
 import { pickLocale, tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
@@ -48,10 +53,10 @@ import { cliHistoryContextTokens, composeResumeTurnPrompt, renderConversationCon
   renderGapContext, unseenHistoryGap, dedupeStableTurnContext, acknowledgeStableTurnContext,
   invalidateStableTurnContext, type StableTurnContextDelivery } from "./continuity";
 import { stageCliImageAttachments } from "./image-attachments";
-import { createRuntimePlanEmitter, planFromAcpPlanUpdate } from "./runtime-plan";
+import { createRuntimePlanEmitter, CursorTodoPlanTracker, planFromAcpPlanUpdate } from "./runtime-plan";
 import type { InvocationPlan } from "../../shared/invocation-plan";
 import { agentContextColdBootstrapForRequest, agentContextDeliveryForRequest, agentContextSessionKey } from "./agent-context";
-import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
+import { clearRuntimeSession, getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
 import {
   getRuntimeToolPermissionArbiter,
   setRuntimeToolPermissionArbiter,
@@ -76,11 +81,21 @@ export interface AcpAgentSpec {
   args: string[];
   /** Registry id in agentclientprotocol/registry, for drift monitoring. */
   registryId?: string;
+  /**
+   * Measured: `session/resume` of a session this same process holds rebinds its MCP servers (the old server processes
+   * stop, the turn's table starts), so a resident process can carry each turn's own servers (acp-mcp-binding.ts).
+   * Unset means unmeasured or measured not to (then a changed table needs a new process).
+   */
+  mcpRebindOnResume?: true;
 }
 
 export const ACP_AGENTS: Record<string, AcpAgentSpec> = {
   cursor: { id: "cursor", label: "Cursor Agent (ACP)", command: "cursor-agent", args: ["acp"], registryId: "cursor" },
-  grok: { id: "grok", label: "Grok Build (ACP)", command: "grok", args: ["agent", "stdio"], registryId: "grok-build" },
+  // Grok Build 1.0.51, measured 2026-10-16 with a fake stdio MCP server: session/load and session/resume of the live
+  // session each stopped the previous server (stdin closed) and started the new table within ~60 ms, no model call.
+  grok: { id: "grok", label: "Grok Build (ACP)", command: "grok", args: ["agent", "stdio"], registryId: "grok-build", mcpRebindOnResume: true },
+  // Kimi Code 0.28.0, measured 2026-10-16: session/load and session/resume of the live session keep its first servers
+  // (the new table never starts), so a changed MCP table opens a new process (acp-mcp-binding.ts).
   kimi: { id: "kimi", label: "Kimi CLI (ACP)", command: "kimi", args: ["acp"], registryId: "kimi" },
   // 오너 결정(2026-08-18): 내장 제공은 **구독 인증 자산이 있는 CLI만** 둔다.
   // OpenCode·Goose는 자체 모델도 구독도 없이 사용자의 API 키를 중개하는 껍데기라,
@@ -210,8 +225,18 @@ export class AcpSessionClient {
     private readonly events: RunnerEvents,
     private readonly permission: RunnerRequest["permission"],
     private readonly locale: "ko" | "en",
-    private readonly approval: { runtime: string; sessionKey: string; cwd?: string; chatId?: string; agentId?: string; unattended?: boolean; planMode?: true; signal?: AbortSignal } = { runtime: "acp", sessionKey: "acp" },
+    private readonly approval: { runtime: string; sessionKey: string; cwd?: string; chatId?: string; agentId?: string; unattended?: boolean; planMode?: true; signal?: AbortSignal;
+      /** A native question the agent asked (acpNativeQuestion): recorded for the owner on an attended run. */
+      ownerQuestion?: (question: AgentlasAskQuestion) => void } = { runtime: "acp", sessionKey: "acp" },
   ) {}
+
+  /** Cursor's `cursor/update_todos` / `cursor/create_plan` todo list, projected into the same checklist as ACP `plan`. */
+  private cursorTodos: CursorTodoPlanTracker | null = null;
+  cursorTodoUpdate(params: unknown, replace = false): void {
+    if (this.replaying) return;
+    const tracker = this.cursorTodos ??= new CursorTodoPlanTracker();
+    this.emitPlan(tracker.update(replace && params && typeof params === "object" ? { ...(params as object), merge: false } : params));
+  }
 
   /** Everything between these two calls is history replay, not this turn. */
   beginReplay(): void { this.replaying = true; }
@@ -336,6 +361,14 @@ export class AcpSessionClient {
       : find("allow_once");
     const selected = (option: any) => (option ? { outcome: { outcome: "selected", optionId: option.optionId } } : { outcome: { outcome: "cancelled" } });
 
+    // Kimi asks its AskUserQuestion through this same request; approving it used to select the first answer for the
+    // owner. The question is dismissed now and, on an attended run, shown to the owner after the turn (ask_form's path).
+    const question = this.approval.runtime === "kimi" ? kimiPermissionQuestion(params, options) : null;
+    if (question) {
+      if (question.ask) this.approval.ownerQuestion?.(question.ask);
+      return selected(question.skip);
+    }
+
     if (this.approval.planMode && mutating) return selected(rejectOption());
 
     const permissionArbiter = getRuntimeToolPermissionArbiter();
@@ -379,6 +412,39 @@ export class AcpSessionClient {
   }
 
   finish(): void { this.endThinking(); }
+}
+
+/**
+ * Kimi Code's AskUserQuestion bridge (measured 2026-10-16, Kimi Code 0.28.0 over ACP): session/request_permission with
+ * toolCall.title "AskUserQuestion", the question as the toolCall's text content, one allow_once option per answer
+ * (`q0_opt_<n>`, named by the answer label) and one reject_once `q0_skip`. Selecting `q0_skip` dismisses it (the model
+ * reads "User dismissed the question without answering"). Only that exact shape is read as a question.
+ */
+function kimiPermissionQuestion(params: any, options: any[]): { skip: any; ask: AgentlasAskQuestion | null } | null {
+  if (params?.toolCall?.title !== "AskUserQuestion" || options.length < 2) return null;
+  if (!options.every((option) => typeof option?.optionId === "string" && /^q0_(?:opt_\d+|skip)$/.test(option.optionId))) return null;
+  const skips = options.filter((option) => option.optionId === "q0_skip" && option.kind === "reject_once");
+  const answers = options.filter((option) => option.optionId !== "q0_skip");
+  if (skips.length !== 1 || answers.some((option) => option.kind !== "allow_once" || typeof option.name !== "string")) return null;
+  const content = Array.isArray(params.toolCall.content) ? params.toolCall.content : [];
+  const questionText = content.map((block: any) => typeof block?.content?.text === "string" ? block.content.text : "").join("\n").trim();
+  const ask = parseAskFenceBody(JSON.stringify({ question: questionText, options: answers.map((option) => ({ label: option.name })) }));
+  return { skip: skips[0], ask };
+}
+
+/** Cursor's `cursor/ask_question` params ({ title?, questions: [{ id, prompt, options: [{ id, label }], allowMultiple? }] })
+ * as choice cards, through the same parser ask_form uses (2-8 labelled options, no templates). */
+function cursorQuestions(params: any): AgentlasAskQuestion[] {
+  const questions: unknown[] = Array.isArray(params?.questions) ? params.questions : [];
+  return questions.flatMap((raw: any) => {
+    const parsed = parseAskFenceBody(JSON.stringify({
+      question: typeof raw?.prompt === "string" ? raw.prompt : "",
+      ...(typeof params?.title === "string" ? { header: params.title } : {}),
+      options: Array.isArray(raw?.options) ? raw.options.map((option: any) => ({ label: typeof option?.label === "string" ? option.label : "" })) : [],
+      multiSelect: raw?.allowMultiple === true,
+    }));
+    return parsed ? [parsed] : [];
+  });
 }
 
 function textOf(content: unknown): string {
@@ -431,6 +497,8 @@ interface Session {
   modelSelectionResponse?: unknown;
   requestedModel?: string;
   defaultModel?: string;
+  /** Resolved MCP table this session's servers were bound from (acp-mcp-binding.ts); rebound when a reused turn differs. */
+  mcpTable?: string;
   poolKey?: string;
   /** 생존 신호 정지 — 세션을 놓을 때 부른다. */
   stopHeartbeat: () => void;
@@ -657,9 +725,13 @@ export function disposeAcpSessionPool(): void {
 
 /**
  * 재사용 키. 세션 지문(모델·시스템프롬프트·권한)은 기존 계약 그대로 쓰고, 그 위에
- * **프로세스 정체성**(cwd·MCP 설정·실행 파일·도구 관문)을 더한다 — 지문이 같아도 이
- * 넷 중 하나가 다르면 그 세션은 다른 프로세스여야 하기 때문이다(MCP 서버는 session/new
- * 때 붙으므로 나중에 바꿀 수 없다).
+ * **프로세스 정체성**(cwd·MCP·실행 파일·도구 관문)을 더한다.
+ *
+ * MCP is `mcpIdentity` (acp-mcp-binding.ts), never the per-invocation config path: `grant:<names>` for an agent that
+ * rebinds a resident session's servers with session/resume (the runner rebinds them before each reused turn),
+ * `table:<resolved content>` for any other. The path alone changed on every invocation, and the MCP secret aliases in
+ * the env carried per-run values, so every turn spawned a new process (W3a-F1, the defect codex had before 2f77db63).
+ * Alias names whose values travel inline in the table leave the env digest; they also leave the spawned env.
  */
 export function acpPoolKey(input: {
   specId: string;
@@ -671,7 +743,8 @@ export function acpPoolKey(input: {
   /** Filesystem-observed executable generation; unavailable callers remain compatible. */
   executableGeneration?: string;
   cwd: string;
-  mcpConfigPath?: string;
+  /** `grant:<digest>` or `table:<digest>` (acp-mcp-binding.ts); absent without MCP. */
+  mcpIdentity?: string;
   runtimeSource?: string;
   toolBrokerPluginDir?: string;
   /**
@@ -684,17 +757,18 @@ export function acpPoolKey(input: {
 }): string {
   const envDigest = createHash("sha256");
   for (const name of Object.keys(input.env ?? {}).sort()) {
+    if (ACP_MCP_SECRET_ALIAS_RE.test(name)) continue;
     envDigest.update(name).update("\0").update(String((input.env ?? {})[name] ?? "")).update("\0");
   }
   return createHash("sha256")
-    .update("acp-pool-v1\0")
+    .update("acp-pool-v2\0")
     .update(input.specId).update("\0")
     .update(input.chatId).update("\0")
     .update(input.fingerprint).update("\0")
     .update(JSON.stringify([input.sessionOwnerId ?? null, input.isolateOwner ?? false])).update("\0")
     .update(input.executableGeneration ?? "").update("\0")
     .update(input.cwd).update("\0")
-    .update(input.mcpConfigPath ?? "").update("\0")
+    .update(input.mcpIdentity ?? "").update("\0")
     .update(input.runtimeSource ?? "").update("\0")
     .update(input.toolBrokerPluginDir ?? "").update("\0")
     .update(envDigest.digest("hex"))
@@ -950,6 +1024,61 @@ export async function configureAcpSessionModel(
   throw new Error(`ACP runtime ${spec.id} did not advertise a model selection contract for ${model}`);
 }
 
+/** An ACP `thought_level` select option (the protocol's reserved category for reasoning effort), if advertised. */
+export function thoughtLevelConfigOptionFromSession(response: unknown): { configId: string; currentValue: string | null; values: string[] } | null {
+  const options = (response as { configOptions?: unknown } | null)?.configOptions;
+  if (!Array.isArray(options)) return null;
+  for (const option of options) {
+    if (!option || typeof option !== "object" || (option as any).category !== "thought_level" || (option as any).type !== "select") continue;
+    const id = (option as any).id;
+    if (typeof id !== "string" || !id) continue;
+    const entries: unknown[] = Array.isArray((option as any).options) ? (option as any).options : [];
+    const values = entries.flatMap((entry: any) => Array.isArray(entry?.options) ? entry.options : [entry])
+      .map((entry: any) => entry?.value).filter((value: unknown): value is string => typeof value === "string" && value.length > 0);
+    if (values.length === 0) continue;
+    const current = (option as any).currentValue;
+    return { configId: id, currentValue: typeof current === "string" ? current : null, values };
+  }
+  return null;
+}
+
+/**
+ * Apply a requested effort through the agent's advertised thought_level option with session/set_config_option, only
+ * when the agent offers that exact level, and confirm the acknowledgement. Measured 2026-10-16: Grok Build 1.0.51
+ * advertises `reasoning_effort` (xhigh, high, medium, low; current high); Kimi Code 0.28.0 advertises `thinking`
+ * (off, on), which is not an effort level, so a requested level is recorded as unsupported, never mapped by guess.
+ * GitHub Copilot CLI (403 for this account) and Cursor (not installed) were not measured; the same rule applies.
+ */
+export async function configureAcpSessionEffort(
+  spec: AcpAgentSpec,
+  conn: Pick<AcpConnection, "request">,
+  sessionId: string,
+  response: unknown,
+  requested: string | undefined,
+): Promise<{ response: unknown; application: ModelEffortApplication }> {
+  const want = typeof requested === "string" && requested.trim() ? requested.trim().toLowerCase() : null;
+  if (!want) return { response, application: { status: "not_requested" } };
+  const option = thoughtLevelConfigOptionFromSession(response);
+  if (!option) return { response, application: { status: "unsupported", requested: want, reason: "acp_effort_option_unavailable" } };
+  const value = option.values.find((candidate) => candidate.toLowerCase() === want);
+  if (!value) return { response, application: { status: "unsupported", requested: want, reason: "acp_effort_level_not_advertised" } };
+  const applied = { status: "applied" as const, applied: value, requested: want, wire: "session/set_config_option" };
+  if (option.currentValue === value) return { response, application: applied };
+  // An effort the agent refuses or does not confirm leaves the turn at the agent's own level, recorded as such; unlike a
+  // model, it never changes who answers, so it does not stop the turn.
+  let acknowledged: unknown;
+  try {
+    acknowledged = await conn.request("session/set_config_option", { sessionId, configId: option.configId, value }, { timeoutMs: 10_000 });
+  } catch {
+    return { response, application: { status: "unsupported", requested: want, reason: "acp_effort_refused" } };
+  }
+  const confirmed = thoughtLevelConfigOptionFromSession(acknowledged);
+  if (!confirmed || confirmed.currentValue !== value) {
+    return { response, application: { status: "unsupported", requested: want, reason: "acp_effort_not_acknowledged" } };
+  }
+  return { response: modelConfigOptionFromSession(acknowledged) ? acknowledged : response, application: applied };
+}
+
 /** Runner factory — one Runner per ACP agent spec. */
 export function createAcpRunner(spec: AcpAgentSpec): Runner {
   /**
@@ -958,16 +1087,30 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
    * that the previous attempt did not infer or act.
    */
   const runTurn = async (req: RunnerRequest, events: RunnerEvents, allowStaleRetry: boolean): Promise<RunnerResult> => {
-    const recovery = assertScienceRecoveryAcpRequest(req, spec.id);
     const locale = pickLocale(req);
-    const nativeMcp = prepareNativeAcpMcpBinding(req);
-    events.onStatus(tStatus(locale, "callingBackend", { backend: req.backendLabel || spec.label }));
     const cwd = req.cwd ?? agentRunCwd();
-    // Other tools' personal context (Claude/Cursor folders) stays out unless One chose it (foreign-cli-context.ts).
-    const runEnv = withForeignCliContext(spec.id, req.env ?? process.env, selectionFor(req.agentId, undefined, req.chatId));
     const configuredCommand = req.runtimeSource ?? spec.command;
-    const executableIdentity = observeCliExecutableIdentity({ bin: configuredCommand, cwd, env: runEnv });
-    if (!executableIdentity) throw new Error(`ACP executable unavailable: ${configuredCommand}`);
+    // Everything before the pool or a process is touched is a refusal before dispatch (RuntimeTurnDelivery
+    // "not-dispatched", runner.ts preDispatchRefusal keeps the innermost machine code): a science-recovery transport
+    // refusal, a task browser scope without its MCP binding, an executable that cannot be observed.
+    const prepared = (() => {
+      try {
+        const recovery = assertScienceRecoveryAcpRequest(req, spec.id);
+        const nativeMcp = prepareNativeAcpMcpBinding(req);
+        events.onStatus(tStatus(locale, "callingBackend", { backend: req.backendLabel || spec.label }));
+        // Other tools' personal context (Claude/Cursor folders) stays out unless One chose it (foreign-cli-context.ts).
+        // MCP secret aliases never reach the agent process: the servers get their values inline (acp-mcp-binding.ts).
+        const runEnv = withForeignCliContext(spec.id, req.env ?? process.env, selectionFor(req.agentId, undefined, req.chatId));
+        const agentEnv = acpSpawnEnvWithoutMcpSecrets(runEnv);
+        const executableIdentity = observeCliExecutableIdentity({ bin: configuredCommand, cwd, env: agentEnv });
+        if (!executableIdentity) throw Object.assign(new Error(`ACP executable unavailable: ${configuredCommand}`), { code: "acp_executable_unavailable" });
+        return { recovery, nativeMcp, runEnv, agentEnv, executableIdentity };
+      } catch (error) {
+        if (req.signal?.aborted || runnerRefusedBeforeDispatch(error)) throw error;
+        throw preDispatchRefusal(error, "acp-prepare", "acp_pre_dispatch_refused");
+      }
+    })();
+    const { recovery, nativeMcp, runEnv, agentEnv, executableIdentity } = prepared;
     /*
      * The turn's lifetime for pending permission cards: Stop or turn settle
      * withdraws the card (Paseo rejectAllPendingPermissions on interrupt/close,
@@ -979,7 +1122,17 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
     const endApprovalTurn = () => approvalTurn.abort(req.signal?.reason ?? new Error("acp_turn_settled"));
     if (req.signal?.aborted) endApprovalTurn();
     else req.signal?.addEventListener("abort", endApprovalTurn, { once: true });
+    /*
+     * Native questions (Kimi's AskUserQuestion, Cursor's cursor/ask_question and cursor/create_plan) take the owner-ask
+     * path ask_form takes: answered now as not answered, and on an attended run shown to the owner as the reply's
+     * canonical choice card, whose pick arrives as the next message. Unattended runs and team workers never ask the
+     * owner (unattendedNoAsk, 274ed968): their agent gets the typed refusal and nothing is shown.
+     */
+    const ownerCanAnswer = !req.unattended && !req.unattendedNoAsk;
+    const turnAsks: AgentlasAskQuestion[] = [];
+    let turnPlanText = "";
     const client = new AcpSessionClient(events, req.permission, locale, {
+      ownerQuestion: (question) => { if (ownerCanAnswer) turnAsks.push(question); },
       signal: approvalTurn.signal,
       ...(req.planMode ? { planMode: true as const } : {}),
       runtime: spec.id,
@@ -1045,6 +1198,10 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
      * 실행) 예전 그대로 열고 닫는다 — 이어 쓸 다음 턴이 정의상 없기 때문이다.
      */
     const pool = acpSessionPool();
+    // The turn's MCP servers, self-contained (acp-mcp-binding.ts): secrets resolved inline from the turn's env, keyed
+    // by grant (an agent that rebinds a resident session's servers) or by resolved content (any other agent).
+    const mcpBinding = resolveAcpMcpConfig(nativeMcp?.config ?? await readMcpConfig(req.mcpConfigPath), req.env ?? process.env);
+    const mcpIdentity = mcpBinding.config ? (spec.mcpRebindOnResume ? `grant:${mcpBinding.grant}` : `table:${mcpBinding.table}`) : undefined;
     const poolKey = !req.singleUse && req.chatId && fingerprint
       ? acpPoolKey({
         specId: spec.id,
@@ -1054,7 +1211,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         isolateOwner: isolateRuntimeSessionOwner,
         executableGeneration: executableIdentity.generation,
         cwd,
-        ...(req.mcpConfigPath ? { mcpConfigPath: req.mcpConfigPath } : {}),
+        ...(mcpIdentity ? { mcpIdentity } : {}),
         ...(req.runtimeSource ? { runtimeSource: req.runtimeSource } : {}),
         ...(req.toolBrokerPluginDir ? { toolBrokerPluginDir: req.toolBrokerPluginDir } : {}),
         env: req.env ?? process.env,
@@ -1066,6 +1223,9 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         if (method === "session/update") {
           // Setup can produce live activity too; retain it without admitting replayed history.
           client.onUpdate(params, ensureEffectRun);
+        } else if (method === "cursor/update_todos") {
+          // Cursor's checklist arrives as its documented vendor notification instead of an ACP plan update.
+          client.cursorTodoUpdate(params);
         }
       },
       onRequest: async (method, params) => {
@@ -1076,6 +1236,18 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
           assertScienceRecoveryAcpRequest(req, spec.id);
           return client.answerPermission(params);
         }
+        // Cursor's blocking vendor requests (cursor.com/docs/cli/acp). Answered with their own typed outcomes instead of
+        // -32601; the reason is a machine code. The question or plan reaches an attended owner through the reply.
+        if (method === "cursor/ask_question") {
+          if (ownerCanAnswer) turnAsks.push(...cursorQuestions(params));
+          return { outcome: { outcome: "skipped", reason: ownerCanAnswer ? "owner_answers_after_turn" : "unattended_no_owner" } };
+        }
+        if (method === "cursor/create_plan") {
+          client.cursorTodoUpdate(params, true);
+          const plan = typeof params?.plan === "string" ? params.plan.trim() : "";
+          if (ownerCanAnswer && plan) turnPlanText = plan;
+          return { outcome: { outcome: "rejected", reason: ownerCanAnswer ? "owner_reviews_after_turn" : "unattended_no_owner" } };
+        }
         throw new AcpRpcError({ code: -32601, message: `Method not found: ${method}` });
       },
       onStatus: (s) => events.onStatus(s),
@@ -1085,7 +1257,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       return openAcp(spec, {
         command: executableIdentity.executable,
         cwd,
-        env: runEnv,
+        env: agentEnv,
         timeoutMs: 60_000,
         label: req.backendLabel || spec.label,
         ...(executableOwner ? { executableOwner } : {}),
@@ -1098,6 +1270,8 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
     let lease: AcpSessionLease<Session> | null = null;
     /** 이 세션을 풀에 되돌리면 안 되는가(취소·오류·프로토콜 파손). */
     let broken = false;
+    /** Why a broken lease is closed (acp-session-pool.ts discard): a Stop or a healthy process retired is "shutdown". */
+    let closeReason: "error" | "shutdown" | null = null;
     let contextSessionId: string | null = null;
     let stableContextDelivery: StableTurnContextDelivery | undefined;
     let stableContextAcknowledged = false;
@@ -1113,6 +1287,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
     };
     const onAbort = () => {
       broken = true;
+      closeReason ??= "shutdown";
       if (!session) return;
       // ACP cancellation belongs to the active prompt. Retain its response
       // channel briefly so the agent can finish tool cancellation and persist
@@ -1130,7 +1305,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
     req.signal?.addEventListener("abort", onAbort, { once: true });
     try {
       if (poolKey && executableOwner) {
-        const current = observeCliExecutableIdentity({ bin: configuredCommand, cwd, env: runEnv });
+        const current = observeCliExecutableIdentity({ bin: configuredCommand, cwd, env: agentEnv });
         if (!retainExecutableOwner() || current?.generation !== executableIdentity.generation) {
           throw new Error("cli_executable_identity_changed_during_preparation");
         }
@@ -1160,28 +1335,36 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
        * 전송이 안 되는 서버는 조용히 버리지 않고 상태줄로 말한다.
        */
       const agentCaps = session.init?.agentCapabilities ?? {};
-      // 이어 쓰는 턴에는 MCP 를 다시 붙이지 않는다 — 서버는 session/new 때 붙고, 설정이
-      // 바뀌면 풀 키가 달라져 애초에 이 세션을 재사용하지 않는다.
-      const mcp: AcpMcpTranslation = reusing
-        ? { servers: [], unsupported: [], malformed: [] }
-        : acpMcpServersFromConfig(
-          nativeMcp?.config ?? await readMcpConfig(req.mcpConfigPath),
-          agentCaps.mcpCapabilities ?? null,
-        );
+      // The turn's own servers. A new process binds them with session/new or session/load. A reused process already
+      // holds them when its bound table is this turn's (an agent keyed by table never differs); an agent keyed by
+      // grant is rebound with session/resume below, before the prompt.
+      const mcp: AcpMcpTranslation = acpMcpServersFromConfig(mcpBinding.config, agentCaps.mcpCapabilities ?? null);
+      const rebindMcp = reusing && (session.mcpTable ?? "") !== mcpBinding.table;
+      if (rebindMcp && !(spec.mcpRebindOnResume && agentCaps.sessionCapabilities?.resume)) {
+        throw new StaleAcpSessionError(new Error("acp_mcp_rebind_unavailable"));
+      }
+      const bindingMcp = !reusing || rebindMcp;
       nativeMcp?.assertCurrent();
-      if (nativeMcp && !reusing && !mcp.servers.some((server) => server.name === "agentlas-browser")) {
+      if (nativeMcp && bindingMcp && !mcp.servers.some((server) => server.name === "agentlas-browser")) {
         throw new Error("native_browser_mcp_translation_required");
       }
-      if (mcp.servers.length > 0) {
+      if (bindingMcp && mcpBinding.dropped.length > 0) {
+        events.onStatus(locale === "ko"
+          ? `이번 실행에 자격증명 값이 없어 제외한 MCP 항목: ${mcpBinding.dropped.join(", ")}`
+          : `Skipped MCP entries whose credential this run does not carry: ${mcpBinding.dropped.join(", ")}`);
+      }
+      if (!bindingMcp) {
+        // Same servers as the turn that bound them: nothing to report again.
+      } else if (mcp.servers.length > 0) {
         events.onStatus(locale === "ko" ? `MCP 서버 ${mcp.servers.length}개 연결됨` : `${mcp.servers.length} MCP server(s) attached`);
       }
-      if (mcp.unsupported.length > 0) {
+      if (bindingMcp && mcp.unsupported.length > 0) {
         const names = mcp.unsupported.map((s) => `${s.name}(${s.transport})`).join(", ");
         events.onStatus(locale === "ko"
           ? `이 에이전트가 지원하지 않는 MCP 전송이라 제외했습니다: ${names}`
           : `Skipped MCP servers whose transport this agent does not support: ${names}`);
       }
-      if (mcp.malformed.length > 0) {
+      if (bindingMcp && mcp.malformed.length > 0) {
         events.onStatus(locale === "ko"
           ? `command 도 url 도 없어 해석하지 못한 MCP 항목을 제외했습니다: ${mcp.malformed.join(", ")}`
           : `Skipped MCP entries with neither command nor url: ${mcp.malformed.join(", ")}`);
@@ -1207,6 +1390,28 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         sessionId = session.acpSessionId!;
         resumed = true;
         events.onStatus(`[runtime-session] resumed kind=${sessionKind}`);
+        if (rebindMcp) {
+          // This turn's servers replace the previous turn's in the live session (the agent stops the old server
+          // processes and starts these); the previous invocation's handles are never used again.
+          client.beginReplay();
+          try {
+            nativeMcp?.assertCurrent();
+            const rebound = await session.conn.request("session/resume", { sessionId, cwd, mcpServers: mcp.servers },
+              { timeoutMs: 60_000, signal: req.signal });
+            session.mcpTable = mcpBinding.table;
+            if (modelConfigOptionFromSession(rebound) || legacyModelSelectionFromSession(rebound)) {
+              session.modelSelectionResponse = rebound;
+              // Re-check the requested model against what the resumed session now reports.
+              if (req.model?.trim()) session.requestedModel = undefined;
+            }
+            events.onStatus(`[runtime-session] mcp_rebound kind=${sessionKind}`);
+          } catch (error) {
+            if (req.signal?.aborted) throw abortReasonError(req);
+            throw new StaleAcpSessionError(error);
+          } finally {
+            client.endReplay();
+          }
+        }
       }
       // A Copilot session an older install wrote into the person's own folder is copied into the product mirror first.
       if (!sessionId && resumeSessionId && spec.id === "github-copilot-cli") adoptCopilotSession(runEnv.COPILOT_HOME, resumeSessionId);
@@ -1225,19 +1430,38 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         } catch (err) {
           if (req.signal?.aborted) throw abortReasonError(req);
           events.onStatus(`[runtime-session] resume_failed kind=${sessionKind}`);
-          // A session the runtime proves gone, before any replay activity, is a definitive loss: the owner's turn
-          // continues in a fresh session seeded from the journal (unattended-session-turns.ts rule 4).
-          const gone = !req.unattended && !client.turnActivityObserved && !agentRequestObserved && !effectRun
-            && acpLoadedSessionGone(spec.id, err, runEnv, resumeSessionId);
-          // -32601 is the source protocol's closed method-not-found error.
-          // Other load errors cannot establish that no work happened. Never
-          // turn an ambiguous canonical load into another provider operation.
-          if (canonicalContextKey && !gone && (!(err instanceof AcpRpcError) || err.code !== -32601
-            || client.turnActivityObserved || agentRequestObserved || effectRun)) throw err;
-          if (req.unattended) {
-            throw new Error(`Automation runtime session resume failed for ${sessionKind}; refusing to create a fresh ACP session.`);
+          /*
+           * session/load starts no turn (its history replay is ignored above), so a refused load did nothing external.
+           * The rules every CLI runner keeps (unattended-session-turns.ts), from typed evidence only:
+           *  - unattended (rule 2): the agent's own JSON-RPC refusal of the load, or a session the runtime proves gone,
+           *    continues once in a fresh session that carries the automation's capsule, the chat history or the journal
+           *    seed. An automation on Copilot, Grok, Kimi or Cursor used to stop here on every run once its stored
+           *    session was gone. A dead or silent transport is not a refusal and still surfaces (not dispatched).
+           *  - attended under the agent-context layer (rule 4): only a session the runtime proves gone (or a load the
+           *    agent does not implement, -32601), and only when the journal can seed the new session.
+           *  - an attended per-chat binding re-attaches the chat's own history to a fresh session, as before.
+           * Never when the attempt already showed turn activity, a request or an effect.
+           */
+          const beforeEffects = !client.turnActivityObserved && !agentRequestObserved && !effectRun;
+          const gone = beforeEffects && acpLoadedSessionGone(spec.id, err, runEnv, resumeSessionId);
+          const refused = beforeEffects && (gone || err instanceof AcpRpcError);
+          const freshReason: UnattendedFreshSessionReason = gone ? "session_not_found" : "resume_failed_before_turn";
+          // The journal can seed the replacement (the same facts-bearing packet the fresh session below starts from).
+          let carried = !req.runtimeSessionId;
+          if (!carried && canonicalContextKey && !req.unattended && gone) {
+            carried = (await agentContextColdBootstrapForRequest(req).catch(() => null)) !== null;
           }
-          events.onStatus(unattendedFreshSessionStatus(sessionKind, gone ? "session_not_found" : "resume_failed_before_turn"));
+          const fresh = req.unattended ? refused
+            : canonicalContextKey ? attendedTurnStartsFresh(freshReason, carried)
+              || (refused && err instanceof AcpRpcError && err.code === -32601)
+              : beforeEffects;
+          if (!fresh) throw err;
+          events.onStatus(unattendedFreshSessionStatus(sessionKind, freshReason));
+          // The dead binding never seeds a later turn, and context delivered to it is not counted as delivered.
+          if (!req.runtimeSessionId && req.chatId && freshSessionReplacesStored(freshReason)) {
+            clearRuntimeSession(req.chatId, sessionKind, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
+          }
+          invalidateStableTurnContext({ chatId: contextChatId, runtimeKind: sessionKind, sessionId: resumeSessionId });
         } finally {
           client.endReplay();
         }
@@ -1271,8 +1495,13 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
           session.modelSelectionResponse, targetModel);
         session.requestedModel = requestedModel;
       }
+      // Effort through the agent's own thought_level option (AS1 gap 5); the ledger records what was applied.
+      const effort = await configureAcpSessionEffort(spec, session.conn, sessionId, session.modelSelectionResponse, req.effort);
+      session.modelSelectionResponse = effort.response;
+      reportModelEffort(effort.application);
       // 모델 선택을 확인한 세션만 다음 턴에 재사용할 수 있게 붙인다.
       session.acpSessionId = sessionId;
+      if (!reusing) session.mcpTable = mcpBinding.table;
       contextSessionId = sessionId;
       /*
        * ★모드 — plan 모드는 ACP 로는 고를 방법이 아예 없었다(session/set_mode 미호출).
@@ -1392,6 +1621,10 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       req.signal?.throwIfAborted();
       promptCancellation = new AbortController();
       const promptAcknowledgementId = `acp-prompt-completed:${randomUUID()}`;
+      // Kimi answers every turn end_turn, failed or not; its own session journal tells them apart (kimi-journal.ts).
+      // The cursor marks where this turn's records start.
+      const kimiTurn: KimiJournalCursor | null = spec.id === "kimi" || spec.registryId === "kimi"
+        ? kimiJournalCursor(realCliHome("kimi", runEnv), sessionId) : null;
       // Mark before calling transport: an exception cannot prove nothing was sent.
       promptDispatchAttempted = true;
       {
@@ -1410,16 +1643,22 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         { signal: promptCancellation.signal },
       );
       if (cancelFallback !== undefined) clearTimeout(cancelFallback);
-      const stopReason = result?.stopReason;
-      if (typeof stopReason !== "string" || !["end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"].includes(stopReason)) {
+      const wireStopReason = result?.stopReason;
+      if (typeof wireStopReason !== "string" || !["end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"].includes(wireStopReason)) {
         throw new RuntimeTurnUnsettledError(spec.id, locale, sessionId);
       }
+      const isKimi = spec.id === "kimi" || spec.registryId === "kimi";
+      // Kimi's end_turn becomes what its journal says: completed, cut at the output limit (max_tokens), failed, or
+      // unattested (no journal of the measured layout: the conservative reading below).
+      const kimiOutcome = isKimi && wireStopReason === "end_turn"
+        ? (kimiTurn ? await attestKimiTurn(kimiTurn, { signal: req.signal }) : "unattested") : null;
+      const stopReason = kimiOutcome === "truncated" ? "max_tokens" : wireStopReason;
       effectTerminal = stopReason;
       client.finish();
       // The RPC response is bound to this exact session/prompt request. Only a
       // confirmed ordinary terminal advances delivery; truncated/cancelled or
-      // Kimi's unconfirmed native terminal never proves retained context.
-      if (stopReason === "end_turn" && !req.signal?.aborted && spec.id !== "kimi" && spec.registryId !== "kimi"
+      // a Kimi turn its journal does not show completed never proves retained context.
+      if (stopReason === "end_turn" && !req.signal?.aborted && (!isKimi || kimiOutcome === "completed")
         && session.acpSessionId === contextSessionId) {
         stableContextAcknowledged = acknowledgeStableTurnContext(stableContextDelivery,
           { sessionId, acknowledgementId: promptAcknowledgementId });
@@ -1429,7 +1668,10 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         events.onStatus(`[runtime-session] store_failed kind=${sessionKind}`);
       }
       if (req.signal?.aborted) throw abortReasonError(req);
-      const text = client.text.trim();
+      // Native questions and a proposed plan reach an attended owner through the reply (the choice card is canonical).
+      const ownText = client.text.trim();
+      const text = appendTurnAsks(turnPlanText && !ownText.includes(turnPlanText)
+        ? [ownText, turnPlanText].filter(Boolean).join("\n\n") : ownText, turnAsks);
       // The session/prompt response is bound to this exact request: the agent acknowledged this turn (RuntimeTurnDelivery
       // "accepted"), so a continuation of an uncertain terminal (max_tokens, max_turn_requests, Kimi's end_turn) resumes
       // without re-sending it (team-step-settlement.ts, unsettled-continuation.ts).
@@ -1438,9 +1680,16 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         return { text, failure: { kind: "refused", message: "ACP stopReason=refusal", runtime: spec.id, source: "marker" }, sessionId, turnDelivery };
       }
       if (stopReason === "cancelled") throw abortReasonError(req);
-      // Kimi's ACP bridge maps ordinary native failures to end_turn and drops
-      // truncation evidence. It cannot certify a complete control episode.
-      if (stopReason === "end_turn" && (spec.id === "kimi" || spec.registryId === "kimi")) {
+      // A Kimi turn whose last step began and never ended failed (Kimi's log has the provider error): a typed failure,
+      // not an unsettled turn. Without a journal of the measured layout the old conservative reading stays.
+      if (kimiOutcome === "failed") {
+        return { text, sessionId, ownerControlTerminal: "uncertain", turnDelivery,
+          failure: { kind: "exit", runtime: spec.id, source: "marker", providerCode: "kimi_turn_failed",
+            message: locale === "ko"
+              ? "Kimi가 이번 턴을 끝내지 못했습니다(세션 기록에 마지막 단계의 끝이 없습니다). 공급자 오류는 Kimi 로그에 있습니다."
+              : "Kimi ended this turn without finishing it (its session journal has no end for the last step). The provider error is in Kimi's log." } };
+      }
+      if (kimiOutcome === "unattested") {
         return { text, sessionId, ownerControlTerminal: "uncertain", turnDelivery,
           failure: runnerFailureFromError(new RuntimeTurnUnsettledError(spec.id, locale), spec.id) };
       }
@@ -1460,6 +1709,8 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       // 실패한 세션은 풀에 되돌리지 않는다 — 상태를 모르는 세션을 물려주면 다음 턴이
       // 원인 없는 실패를 겪는다. 다시 여는 비용이 그보다 싸다.
       broken = true;
+      closeReason ??= req.signal?.aborted || (err instanceof StaleAcpSessionError && session && acpSessionAlive(session))
+        ? "shutdown" : "error";
       if (req.signal?.aborted) throw abortReasonError(req);
       // ★침묵 한도로 호스트가 끝낸 시도 — 이 catch 가 유일한 정산이다(취소는 위에서 처리했다).
       if (silence?.tripped && !effectTerminal) {
@@ -1546,7 +1797,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       if (lease) {
         // 취소·오류면 버리고, 아니면 반납한다(다음 턴이 이어 쓴다).
         if (broken || req.signal?.aborted) {
-          pool.discard(lease);
+          pool.discard(lease, closeReason ?? (req.signal?.aborted ? "shutdown" : "error"));
           if (session) await waitForRetiredCliExit(session.child);
         }
         else pool.release(lease);
@@ -1574,14 +1825,26 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
  */
 /**
  * A session/load refusal that proves the session no longer exists, from a typed marker or a host check, never from message
- * text. Grok Build 1.0.51 (measured 2026-10-16 offline, scratch HOME): -32603 with data.code "FS_NOT_FOUND" for a
- * session it holds no file for. GitHub Copilot CLI: no session-state/<id> folder in its product mirror or the account
- * folder (cli-product-homes.ts copilotSessionGone). Kimi and Cursor have no measured marker: their refusal stays ambiguous.
+ * text:
+ *  - ACP's own resource_not_found, -32002 (the official SDK's RequestError.resourceNotFound). GitHub Copilot CLI 1.0.95
+ *    answers session/load of a missing id with it (measured 2026-10-16: -32002, data {uri: "Session <id> not found"}).
+ *  - Grok Build 1.0.51 (measured 2026-10-16 offline, scratch HOME): -32603 with data.code "FS_NOT_FOUND".
+ *  - Kimi Code 0.28.0 (measured 2026-10-16, scratch KIMI_CODE_HOME): -32602 with data exactly {sessionId: <the id>}
+ *    (its harness maps session.not_found there), or no session directory in its store (kimi-journal.ts).
+ *  - GitHub Copilot CLI: no session-state/<id> folder in its product mirror or the account folder (copilotSessionGone).
+ *  - Cursor has no measured marker (cursor-agent is not installed here); only -32002 would count.
  */
 export function acpLoadedSessionGone(specId: string, error: unknown, env: NodeJS.ProcessEnv, sessionId: string): boolean {
+  if (error instanceof AcpRpcError && error.code === -32002) return true;
   if (specId === "grok") {
     return error instanceof AcpRpcError && error.code === -32603
       && (error.data as { code?: unknown } | null | undefined)?.code === "FS_NOT_FOUND";
+  }
+  if (specId === "kimi") {
+    const data = error instanceof AcpRpcError && error.code === -32602 ? error.data : null;
+    if (data && typeof data === "object" && !Array.isArray(data) && Object.keys(data).length === 1
+      && (data as { sessionId?: unknown }).sessionId === sessionId) return true;
+    return kimiSessionGone(realCliHome("kimi", env), sessionId);
   }
   if (specId === "github-copilot-cli") return copilotSessionGone(env.COPILOT_HOME, sessionId);
   return false;
