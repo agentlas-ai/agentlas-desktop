@@ -1014,6 +1014,8 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       .update(spec.id)
       .update("\0")
       .update(req.sessionFingerprintSeed ?? req.systemPrompt ?? "")
+      // The system `ask:` module is left out for RunnerRequest.unattendedNoAsk (team workers): a thread seeded with it is another conversation.
+      .update(!req.sessionFingerprintSeed && req.unattendedNoAsk ? "\0unattended-no-ask" : "")
       .update("\0")
       // Model is selected and acknowledged on the held ACP session before every changed-model turn.
       .update(mode ? (req.permission ?? "") : "")

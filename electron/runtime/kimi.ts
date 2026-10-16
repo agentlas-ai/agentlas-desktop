@@ -197,6 +197,8 @@ function systemFingerprint(req: RunnerRequest): string {
     .update("\0")
     .update(req.forceSurface ? "force-surface" : "normal")
     .update("\0")
+    // The system `ask:` module is left out for RunnerRequest.unattendedNoAsk (team workers): a thread seeded with it is another conversation.
+    .update(req.unattendedNoAsk ? "unattended-no-ask\0" : "")
     .digest("hex");
 }
 

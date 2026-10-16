@@ -541,6 +541,8 @@ function systemFingerprint(req: RunnerRequest): string {
     .update("\0")
     .update(JSON.stringify(req.mcpCodexConfigArgs ?? []))
     .update(scienceHome ? `\0science-codex-home.v1\0${scienceHome}` : "")
+    // The system `ask:` module is left out for RunnerRequest.unattendedNoAsk (team workers): a thread seeded with it is another conversation.
+    .update(req.unattendedNoAsk ? "\0unattended-no-ask" : "")
     .digest("hex");
 }
 

@@ -518,6 +518,8 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
     ? createHash("sha256")
         .update("grok-session-v1\0")
         .update(req.sessionFingerprintSeed ?? req.systemPrompt ?? "")
+        // The system `ask:` module is left out for RunnerRequest.unattendedNoAsk (team workers): a thread seeded with it is another conversation.
+        .update(!req.sessionFingerprintSeed && req.unattendedNoAsk ? "\0unattended-no-ask" : "")
         .update("\0")
         .digest("hex")
     : null;

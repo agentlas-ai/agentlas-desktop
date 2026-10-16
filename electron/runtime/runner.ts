@@ -129,6 +129,8 @@ export interface RunnerRequest {
   noSynchronousAsk?: true;
   /** Main-authored: nobody can answer a question in this run. Set by the same decision that adds
    * UNATTENDED_NO_ASK_DIRECTIVE and withholds ask_form (mcp/client.ts), never from renderer/model input.
+   * The team orchestrators (borrowed-task-force, firm-orchestrator, swarm-run) set it on every worker turn too:
+   * a worker's questions belong to its orchestrator (owner 2026-10-16), and withholdTurnAskForRun takes ask_form away.
    * wrapSystemPrompt then omits the system `ask:` module, so no channel offers an ask the run cannot use. */
   unattendedNoAsk?: true;
   /** Stable configuration identity for durable unattended sessions. Mutable routing/tool

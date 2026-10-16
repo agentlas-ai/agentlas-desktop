@@ -1887,13 +1887,15 @@ async function reconcileAgyMcpServersUnderLease(
  * version claim or a substitute for Agentlas-owned cross-model context.
  */
 export function antigravitySessionFingerprint(
-  req: Pick<RunnerRequest, "chatId" | "sessionFingerprintSeed" | "systemPrompt" | "model">,
+  req: Pick<RunnerRequest, "chatId" | "sessionFingerprintSeed" | "systemPrompt" | "model" | "unattendedNoAsk">,
   executableFingerprint: string,
 ): string | null {
   if (!req.chatId) return null;
   return createHash("sha256")
     .update("agy-session-v3\0")
     .update(req.sessionFingerprintSeed ?? req.systemPrompt ?? "")
+    // The system `ask:` module is left out for RunnerRequest.unattendedNoAsk (team workers): a thread seeded with it is another conversation.
+    .update(!req.sessionFingerprintSeed && req.unattendedNoAsk ? "\0unattended-no-ask" : "")
     .update("\0")
     // A provider conversation is model-owned. Agentlas may bridge a model
     // switch with its durable transcript, but must not pass the old model's

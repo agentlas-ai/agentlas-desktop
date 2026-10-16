@@ -68,6 +68,10 @@ let serverToken = "";
 let serverStarting: Promise<number> | null = null;
 let shutdownRegistered = false;
 const capabilities = new Map<string, TurnToolsCapabilityBinding>();
+/** capabilityId → its file, so a withheld tool also leaves the list the child reads. */
+const capabilityFiles = new Map<string, string>();
+/** runId → open team dispatches holding ask_form back, and the capabilities' tool lists to restore. */
+const askWithheld = new Map<string, { holders: number; restore: Map<string, readonly string[]> }>();
 
 function safeKey(value: string): string {
   return value.replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 96) || randomUUID();
@@ -227,6 +231,8 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
 
 function dispose(): void {
   capabilities.clear();
+  capabilityFiles.clear();
+  askWithheld.clear();
   if (server) { try { server.close(); } catch { /* best effort */ } }
   server = null;
   boundPort = 0;
@@ -277,15 +283,71 @@ export async function createTurnToolsCapability(
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   if (process.platform !== "win32") fs.chmodSync(directory, 0o700);
   const target = capabilityPath(configKey, binding.capabilityId);
+  writeCapabilityFile(target, port, binding);
+  capabilityFiles.set(binding.capabilityId, target);
+  // A capability minted while this run's team dispatch is open starts without ask_form too.
+  const held = askWithheld.get(binding.runId);
+  if (held && binding.tools?.includes("ask_form")) {
+    held.restore.set(binding.capabilityId, binding.tools);
+    setCapabilityTools(binding, binding.tools.filter((tool) => tool !== "ask_form"));
+  }
+  return { path: target, binding };
+}
+
+function writeCapabilityFile(target: string, port: number, binding: TurnToolsCapabilityBinding): void {
   const temp = `${target}.${process.pid}.${randomUUID()}.tmp`;
   fs.writeFileSync(temp, JSON.stringify({ schemaVersion: 1, port, token: serverToken, capabilityId: binding.capabilityId, tools: binding.tools ?? TURN_TOOLS_BASE }), { flag: "wx", mode: 0o600 });
   if (process.platform !== "win32") fs.chmodSync(temp, 0o600);
   fs.renameSync(temp, target);
-  return { path: target, binding };
+}
+
+/** The host check (binding.tools) and the list the child re-reads on every tools/list and tools/call move together. */
+function setCapabilityTools(binding: TurnToolsCapabilityBinding, tools: readonly string[]): void {
+  binding.tools = tools;
+  const file = capabilityFiles.get(binding.capabilityId);
+  if (file && boundPort) {
+    try { writeCapabilityFile(file, boundPort, binding); } catch { /* the host check above still refuses the call */ }
+  }
+}
+
+/**
+ * Team workers never ask the owner: the orchestrator owns owner questions (owner 2026-10-16, A/B T1). Task-force,
+ * swarm and firm delegates share the run's MCP config, so while a dispatch is open ask_form leaves every capability
+ * bound to that run — the child lists it no more and the host refuses it. The orchestrator's own turns of those
+ * dispatches carry no MCP config and keep their text ask. Nested and parallel dispatches of one run are counted;
+ * the last release restores the run's original tools. Returns the release (idempotent).
+ */
+export function withholdTurnAskForRun(runId: string | undefined | null): () => void {
+  if (!runId) return () => {};
+  let held = askWithheld.get(runId);
+  if (!held) {
+    held = { holders: 0, restore: new Map() };
+    askWithheld.set(runId, held);
+    for (const binding of capabilities.values()) {
+      if (binding.runId !== runId || !binding.tools?.includes("ask_form")) continue;
+      held.restore.set(binding.capabilityId, binding.tools);
+      setCapabilityTools(binding, binding.tools.filter((tool) => tool !== "ask_form"));
+    }
+  }
+  held.holders += 1;
+  const entry = held;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    entry.holders -= 1;
+    if (entry.holders > 0 || askWithheld.get(runId) !== entry) return;
+    askWithheld.delete(runId);
+    for (const [capabilityId, tools] of entry.restore) {
+      const binding = capabilities.get(capabilityId);
+      if (binding) setCapabilityTools(binding, tools);
+    }
+  };
 }
 
 export function removeTurnToolsCapability(configKey: string, capabilityId: string): void {
   capabilities.delete(capabilityId);
+  capabilityFiles.delete(capabilityId);
   try { fs.rmSync(capabilityPath(configKey, capabilityId), { force: true }); } catch { /* best effort */ }
 }
 

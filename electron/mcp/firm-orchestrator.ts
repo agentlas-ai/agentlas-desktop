@@ -79,6 +79,7 @@ import {
   type InvocationWorkspaceBinding,
 } from "../invocation/workspace-binding";
 import { withProjectWriteLease } from "./project-write-lease";
+import { withholdTurnAskForRun } from "../turn-tools/control-server";
 import { createInactivityGuard } from "./inactivity-guard";
 import {
   FirmExecutionEvidenceCollector,
@@ -898,6 +899,10 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     && p.runtimePinHonored === true
     && Boolean(p.req.runtimeSelection);
   const nodePermission = firmNodePermission(p, turn);
+  // The owner talks only to the tier-1 controller of the owner's own firm chat. A delegated turn, and every turn of a
+  // firm borrowed as a Taskforce worker, has no owner channel: its questions belong to the orchestrator (owner
+  // 2026-10-16), so it gets neither the system ask module nor ask_form / ask_user.
+  const ownerAskWithheld = tier !== 1 || phase === "delegate" || p.controllerRuntimeRole === "worker";
   // 두 id 를 가른다 — 섞으면 고아 기억이 생긴다.
   //  · nodeRuntimeId: **관측용**. 이 노드가 실제로 무엇으로 돌았나(이벤트 태깅·실행 기록).
   //    설치 에이전트가 없으면 노드 id 로 부르는 것이 맞다 — 화면이 그 줄을 그린다.
@@ -1125,14 +1130,20 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       const capabilityAttemptId = `firm-worker:${node.id}:${randomUUID()}`;
       // Reapply the host ceiling after prepared capability fields are merged,
       // including retries on another runtime. A child cannot lower Plan mode.
-      const boundedRunner: Runner = (request, events) => {
+      const boundedRunner: Runner = async (request, events) => {
         assertAppMemory();
         runnerCalled = true;
-        return withModelCallScope({ role: "worker", phase: "firm-worker", nodeId: node.id }, () => runObservedRunner(runtimePicked.runner,
-          bindAppMemoryRequest(p.req.planMode === true ? { ...request, permission: "read", planMode: true } : request,
-            {runId:p.req.runId,chatId:p.chat.id,actorId:memoryOwnerId}),
-          events,
-        ));
+        const planBounded = p.req.planMode === true ? { ...request, permission: "read" as const, planMode: true as const } : request;
+        const releaseOwnerAsk = ownerAskWithheld ? withholdTurnAskForRun(p.req.runId) : null;
+        try {
+          return await withModelCallScope({ role: "worker", phase: "firm-worker", nodeId: node.id }, () => runObservedRunner(runtimePicked.runner,
+            bindAppMemoryRequest(ownerAskWithheld ? { ...planBounded, unattendedNoAsk: true as const } : planBounded,
+              {runId:p.req.runId,chatId:p.chat.id,actorId:memoryOwnerId}),
+            events,
+          ));
+        } finally {
+          releaseOwnerAsk?.();
+        }
       };
       const workerRunner = turn.runtimeToolsDisabled || controlPlaneTurn ? boundedRunner
         : workerCapabilityRunner(p.prepareWorkerCapabilities, {

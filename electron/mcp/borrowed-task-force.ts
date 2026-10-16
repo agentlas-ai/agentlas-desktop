@@ -92,7 +92,10 @@ import {
   runtimeFailureBlocksReplay,
   selectRuntimeForTargets,
 } from "../runtime/selection";
-import { getAgentById } from "./registry";
+import { getAgentById, listInstalledAgentsReadOnly } from "./registry";
+import { getDb } from "../store/db";
+import { extractAskFences } from "../../shared/ask-fence-flatten";
+import { withholdTurnAskForRun } from "../turn-tools/control-server";
 import { runFirmInvocation } from "./firm-orchestrator";
 import { memoryEmitterPromptFor } from "../system-agents/memory";
 import { canReadActivatedFolderMemory, recordFolderVisit } from "../architecture/activation";
@@ -1408,6 +1411,18 @@ function taskForceRunnerRequest(p: BorrowedTaskForceParams, request: RunnerReque
     {runId:p.req.runId,chatId:p.chat.id,actorId:currentModelCallScope()?.agentId ?? null}) : bounded;
 }
 
+/**
+ * Every worker-seat call (direct and nested workers, a nested team's manager, the escalated retry) has no owner channel:
+ * the Taskforce orchestrator — planner and synthesis — owns owner questions (owner 2026-10-16; A/B T1: a worker got the
+ * system ask line, wrote <<agentlas-ask>>, and the question never reached the owner). RunnerRequest.unattendedNoAsk makes
+ * every runtime omit the system `ask:` module and the local tool loop drop ask_user; withholdTurnAskForRun (the
+ * dispatch wrapper below) takes ask_form out of the run's shared MCP config.
+ */
+function taskForceWorkerRunnerRequest(p: BorrowedTaskForceParams, request: RunnerRequest): RunnerRequest {
+  // Marked before taskForceRunnerRequest: its App-memory binding is keyed by the final request object.
+  return taskForceRunnerRequest(p, { ...request, unattendedNoAsk: true });
+}
+
 function taskForceRunnerBase(
   p: BorrowedTaskForceParams,
   childPermission: RunnerRequest["permission"] = taskForcePermission(p),
@@ -2576,54 +2591,104 @@ export function selectLocalPlannerRepair(input: {
 
 
 
+/** The name the room shows for a worker: its seat's name, else the localized installed name (renderer seatDisplayName +
+ *  pickLocalized). A firm counts as its installed team (team-preflight's firm match rule). Never a package slug. */
+function taskForceRoomName(
+  spec: BorrowedAgentSpec, locale: RuntimeLocale, installed: readonly InstalledAgent[], seats: ReadonlyMap<string, string>,
+): string {
+  const firm = spec.firmId ? getFirm(spec.firmId) : null;
+  const linked = installed.filter((agent) => agent.id === spec.installedAgentId
+    || (firm !== null && (agent.id === firm.id || agent.id === firm.ceoAgentId || (agent.kind === "team" && agent.slug === firm.slug))));
+  // A team's own seat before its CEO agent's seat.
+  const seated = [...linked].sort((left, right) => Number(right.kind === "team") - Number(left.kind === "team"))
+    .find((agent) => seats.has(agent.id));
+  if (seated) return seats.get(seated.id) || seated.localDisplayName || seated.name;
+  const localized = (name?: string, nameEn?: string) => (locale === "en" ? nameEn?.trim() || name?.trim() : name?.trim()) || "";
+  if (firm) return localized(firm.name, firm.nameEn) || spec.name;
+  const agent = linked.find((candidate) => candidate.id === spec.installedAgentId);
+  if (agent) return localized(agent.name, agent.nameEn) || spec.name;
+  return localized(spec.localized?.titleKo, spec.localized?.titleEn) || spec.name || spec.slug;
+}
+
+function taskForceSeatNames(): Map<string, string> {
+  try {
+    const rows = getDb().prepare("SELECT installed_agent_id, display_name FROM one_org_members WHERE archived_at IS NULL")
+      .all() as Array<{ installed_agent_id: string; display_name: string | null }>;
+    return new Map(rows.map((row) => [row.installed_agent_id, row.display_name?.trim() ?? ""]));
+  } catch {
+    return new Map();
+  }
+}
+
+/** What is left, one row per room name in plan order: incomplete workers (their owner decisions and reported
+ *  blockers) and completed workers whose reported blockers no later review cleared. */
+function taskForceRemainingForOwner(
+  locale: RuntimeLocale, results: readonly BorrowedAgentResult[],
+  uncleared: ReadonlyArray<{ result: BorrowedAgentResult; items: string[] }>,
+): Array<{ name: string; incomplete: boolean; decisions: string[]; blockers: string[] }> {
+  let installed: InstalledAgent[] = [];
+  try { installed = listInstalledAgentsReadOnly(); } catch { /* names fall back to the package's own */ }
+  const seats = taskForceSeatNames();
+  const rows: Array<{ name: string; incomplete: boolean; decisions: string[]; blockers: string[] }> = [];
+  for (const result of results) {
+    if (!result) continue;
+    const blocked = uncleared.find((entry) => entry.result === result);
+    if (result.ok && !blocked) continue;
+    const decisions = taskForceOwnerDecisions(result.blockingRemaining);
+    rows.push({
+      name: taskForceRoomName(result.spec, locale, installed, seats),
+      incomplete: !result.ok,
+      decisions,
+      blockers: (blocked?.items ?? result.blockingRemaining ?? []).filter((item) => !item.startsWith(TASK_FORCE_OWNER_DECISION_PREFIX)),
+    });
+  }
+  return rows;
+}
+
+/**
+ * The owner sentence of a run that did not pass verification: what is left per worker (room names, each once), then
+ * what happens next. Owner 2026-10-16: "완료되지 않은 담당자: No-AI-Slop Copywriter, Vibecoder, No-AI-Slop Copywriter"
+ * named package ids, repeated a worker and said nothing about what to do. Minimal text, the app's UI language, no codes.
+ */
 export function taskForceIncompleteMessage(input: {
   locale: "ko" | "en";
-  incompleteWorkerNames: string[];
-  unclearedBlockers: Array<{ name: string; items: string[] }>;
+  remaining: Array<{ name: string; incomplete: boolean; decisions: string[]; blockers: string[] }>;
   requiredSurfaceMissing: boolean;
 }): string {
   const ko = input.locale === "ko";
-  const blockerLines = input.unclearedBlockers
-    .filter((blocker) => blocker.items.length > 0)
-    .map((blocker) => `- ${blocker.name}: ${blocker.items.slice(0, 3).join(" / ").slice(0, 400)}`);
-  const blockerBlock = blockerLines.length > 0
-    ? `${ko ? "남은 막힘(담당자 보고):" : "Still blocking (as reported by each worker):"}\n${blockerLines.join("\n")}`
-    : "";
-  return ko
-    ? [
-        "이 작업은 아직 완료되지 않았습니다.",
-        input.incompleteWorkerNames.length > 0
-          ? `완료되지 않은 담당자: ${input.incompleteWorkerNames.join(", ")}`
-          : "완료 확인이 아직 끝나지 않았습니다.",
-        blockerBlock,
-        // Owner 2026-10-12: no host meta-commentary in the room; the activity record already holds the reports.
-        input.requiredSurfaceMissing ? "요청한 결과 화면도 아직 확인되지 않았습니다." : "",
-      ].filter(Boolean).join("\n\n")
-    : [
-        "This task is not complete yet.",
-        input.incompleteWorkerNames.length > 0
-          ? `Incomplete owners: ${input.incompleteWorkerNames.join(", ")}`
-          : "Completion has not been confirmed yet.",
-        blockerBlock,
-        input.requiredSurfaceMissing ? "The requested result view has not been verified yet either." : "",
-      ].filter(Boolean).join("\n\n");
+  // A reported item that is one code-, id- or path-shaped token is machine state, not owner copy.
+  const readable = (item: string): string => {
+    const value = String(item ?? "").replace(/\s+/g, " ").trim();
+    return value && !(!/\s/.test(value) && /[_:/\\]/.test(value)) ? value : "";
+  };
+  const rows = new Map<string, { incomplete: boolean; said: string[] }>();
+  for (const entry of input.remaining) {
+    const name = entry.name.trim();
+    if (!name) continue;
+    const row = rows.get(name) ?? { incomplete: false, said: [] };
+    row.incomplete ||= entry.incomplete;
+    for (const question of entry.decisions.map(readable).filter(Boolean)) {
+      const line = ko ? `결정 필요 — ${question}` : `needs your decision — ${question}`;
+      if (!row.said.includes(line)) row.said.push(line);
+    }
+    for (const blocker of entry.blockers.map(readable).filter(Boolean)) if (!row.said.includes(blocker)) row.said.push(blocker);
+    rows.set(name, row);
+  }
+  const lines = [...rows].map(([name, row]) => `- ${name}: ${row.said.length
+    ? row.said.slice(0, 3).join(" / ").slice(0, 400)
+    : row.incomplete ? (ko ? "아직 끝내지 못했습니다" : "not finished yet") : (ko ? "막힌 부분이 남아 있습니다" : "still blocked")}`);
+  const decisionPending = input.remaining.some((entry) => entry.decisions.some((question) => readable(question)));
+  return [
+    ko ? "이 작업은 아직 완료되지 않았습니다." : "This task is not complete yet.",
+    lines.length > 0
+      ? `${ko ? "남은 일:" : "Still to do:"}\n${lines.join("\n")}`
+      : ko ? "완료 확인이 아직 끝나지 않았습니다." : "Completion has not been confirmed yet.",
+    input.requiredSurfaceMissing ? (ko ? "요청한 결과 화면도 아직 확인되지 않았습니다." : "The requested result view has not been verified yet either.") : "",
+    decisionPending
+      ? ko ? "답하시거나 \"계속해줘\"라고 하시면 남은 일부터 이어서 합니다." : "Answer, or say \"continue\", and the remaining work picks up from here."
+      : ko ? "\"계속해줘\"라고 하시면 남은 일부터 이어서 합니다." : "Say \"continue\" and the remaining work picks up from here.",
+  ].filter(Boolean).join("\n\n");
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 export function hostDerivedWorkspaceAccess(
   packet: Pick<BorrowedInputPacket, "inputType" | "allocation">,
@@ -3136,6 +3201,44 @@ export function taskForcePacketOutcome(
     blockingRemaining,
     typed: false,
   };
+}
+
+/** Host-authored blocker prefix: the rest of the item is a question a worker addressed to the owner. */
+const TASK_FORCE_OWNER_DECISION_PREFIX = "owner_decision: ";
+
+/** The questions a reply wrote as <<agentlas-ask>> blocks, read by the host ask parser (no prose is interpreted). */
+export function taskForceOwnerAskQuestions(text: string): string[] {
+  return [...new Set(extractAskFences(String(text ?? "")).questions.map((question) => question.question.trim()).filter(Boolean))];
+}
+
+/** The owner decisions a packet's typed blockers carry. */
+export function taskForceOwnerDecisions(blockingRemaining: readonly string[] | undefined): string[] {
+  return (blockingRemaining ?? []).filter((item) => item.startsWith(TASK_FORCE_OWNER_DECISION_PREFIX))
+    .map((item) => item.slice(TASK_FORCE_OWNER_DECISION_PREFIX.length).trim()).filter(Boolean);
+}
+
+/** `rendered` as a PARTIAL packet (FAILED stays FAILED) whose typed blockers carry `questions`; unchanged without any. */
+function withTaskForceOwnerDecisions(rendered: string, questions: readonly string[]): string {
+  if (!questions.length) return rendered;
+  const prior = taskForcePacketOutcome(rendered);
+  const packetStatus = prior.completionStatus === "failed" ? "failed" : "partial";
+  const blockingRemaining = [...new Set([...questions.map((question) => `${TASK_FORCE_OWNER_DECISION_PREFIX}${question}`),
+    ...prior.blockingRemaining])].slice(0, 16);
+  const encoded = JSON.stringify({ packetStatus, reviewComplete: false, blockingRemaining }).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
+  // The question now lives in the typed blockers; the raw block would only invite the orchestrator to copy it verbatim.
+  const body = extractAskFences(rendered.replace(/<<agentlas-packet-outcome>>[\s\S]*?<<\/agentlas-packet-outcome>>\s*/giu, "")).text.trim();
+  return [`<<agentlas-packet-outcome>>${encoded}<</agentlas-packet-outcome>>`, body,
+    `STATUS: ${packetStatus.toUpperCase()}`, `blocking_remaining: ${blockingRemaining.join("; ")}`].filter(Boolean).join("\n");
+}
+
+/**
+ * A team worker has no owner channel (taskForceWorkerRunnerRequest). A question it still wrote is an open owner
+ * decision: its packet is PARTIAL, never COMPLETED, and each question rides as a typed blocker the orchestrator, the
+ * verifier, the one retry and the owner's incomplete message read (A/B T1 2026-10-16: the packet counted as COMPLETED and
+ * nothing was built). Composes with the handoff salvage: `raw` is the runtime reply, `rendered` the handoff text from it.
+ */
+export function taskForceWorkerOwnerAskText(raw: string, rendered: string = raw): string {
+  return withTaskForceOwnerDecisions(rendered, taskForceOwnerAskQuestions(raw));
 }
 
 function plannerAllocationContractExample(
@@ -4220,17 +4323,23 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         signal: link.signal,
         emitFinal: false,
       });
+      // An installed team borrowed as a worker answers its packet, not the owner. A question it ended with (A/B T1: the
+      // HQ plan turn wrote only <<agentlas-ask>>, runFirmInvocation returned ok) is an open owner decision, not a done packet.
+      const firmDecisions = taskForceOwnerAskQuestions(teamResult.text);
+      const firmOk = teamResult.ok && firmDecisions.length === 0;
       p.sink(tag({
         kind: "tool-use",
         done: true,
-        status: teamResult.ok
+        status: firmOk
           ? p.locale === "ko" ? `${spec.name} 팀 완료` : `${spec.name} team completed`
-          : p.locale === "ko" ? `${spec.name} 팀 실패` : `${spec.name} team failed`,
+          : firmDecisions.length
+            ? p.locale === "ko" ? `${spec.name} 팀 미완료` : `${spec.name} team incomplete`
+            : p.locale === "ko" ? `${spec.name} 팀 실패` : `${spec.name} team failed`,
         runtimeSelection: observedRuntimeSelection,
         agentLifecycle: {
           source: "cli-process",
-          state: teamResult.ok ? "idle" : "failed",
-          reason: teamResult.ok ? "turn-complete" : "error",
+          state: firmOk ? "idle" : "failed",
+          reason: firmOk ? "turn-complete" : "error",
           runtime: active.kind,
         },
         agentMessage: {
@@ -4246,8 +4355,12 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         ...resultMeta,
         spec,
         packet,
-          text: redactSensitiveText(teamResult.text),
-        ok: teamResult.ok,
+          text: redactSensitiveText(withTaskForceOwnerDecisions(teamResult.text, firmDecisions)),
+        ok: firmOk,
+        ...(firmDecisions.length ? {
+          completionStatus: teamResult.ok ? "partial" as const : "failed" as const,
+          blockingRemaining: firmDecisions.map((question) => `${TASK_FORCE_OWNER_DECISION_PREFIX}${question}`).slice(0, 16),
+        } : {}),
       };
     }
     if ((spec.source === "hub" || spec.source === "cloud" || !spec.source) && spec.entityKind === "team") {
@@ -4321,7 +4434,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
               agentId: null,
               runtime: managerPlanActive,
             }, () => runObservedRunner(managerPlanPicked.runner,
-          taskForceRunnerRequest(p, {
+          taskForceWorkerRunnerRequest(p, {
             ...taskForceSystemRequest([
 ...borrowedAgentSystemPromptParts(managerSpec, packagePermission, undefined, { node: graph.manager.content, package: spec.directive }),
 ...taskForceRuntimeContextParts(!p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "", nodeMemory),
@@ -4486,7 +4599,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
               attempt,
               agentId: null,
               runtime: observedWorkerRuntime,
-            }, () => runObservedRunner(observedWorkerPicked.runner, taskForceRunnerRequest(p, request), events)).then(result => { result.text = taskForceWorkerHandoffText(result.text); return result; }), capabilityEvidence(`${id}:hub-team:${worker.id}`, observedWorkerInvocationId))(
+            }, () => runObservedRunner(observedWorkerPicked.runner, taskForceWorkerRunnerRequest(p, request), events)).then(result => { result.text = taskForceWorkerOwnerAskText(result.text, taskForceWorkerHandoffText(result.text)); return result; }), capabilityEvidence(`${id}:hub-team:${worker.id}`, observedWorkerInvocationId))(
               {
                 ...taskForceSystemRequest([
 ...borrowedAgentSystemPromptParts(workerSpec, packagePermission, materializedWorkerMcpTools, { node: worker.content, package: spec.directive }),
@@ -4579,6 +4692,8 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
             return attemptResult;
           });
           const result = outcome.result;
+          // Read before curation: the typed packet state is the runtime's, curation owns only visible prose.
+          const ownerDecisions = taskForceOwnerDecisions(taskForcePacketOutcome(redactSensitiveText(result.text)).blockingRemaining);
           const workerText = await curateOwnedTaskForceResult({
             p,
             spec,
@@ -4627,7 +4742,8 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
           }));
           return {
             worker,
-            ok: true,
+            ok: ownerDecisions.length === 0,
+            ownerDecisions,
             text: workerText,
             tokens: result.tokens ?? 0,
             invocationEvidence: {
@@ -4664,6 +4780,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
           return {
             worker,
             ok: false,
+            ownerDecisions: [] as string[],
             text: redactSensitiveText(error instanceof Error ? error.message : String(error)),
             tokens: 0,
             ...(typedRuntimeFailure
@@ -4721,7 +4838,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         agentId: null,
         runtime: managerSynthesisActive,
           }, () => runObservedRunner(managerSynthesisPicked.runner,
-        taskForceRunnerRequest(p, {
+        taskForceWorkerRunnerRequest(p, {
           ...taskForceSystemRequest([
 ...borrowedAgentSystemPromptParts(managerSpec, packagePermission, undefined, { node: graph.manager.content, package: spec.directive }),
 ...taskForceRuntimeContextParts(!p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "", nodeMemory, nodeMemoryEmitter)
@@ -4847,19 +4964,25 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         });
       }
       const tokens = (managerPlan.tokens ?? 0) + workerResults.reduce((sum, item) => sum + item.tokens, 0) + (managerSynthesis.tokens ?? 0);
+      // A nested worker's or the manager's question to the owner leaves the team packet open (PARTIAL), never COMPLETED.
+      const teamOwnerDecisions = [...new Set([...workerResults.flatMap((item) => item.ownerDecisions),
+        ...taskForceOwnerAskQuestions(managerSynthesis.text)])];
+      const teamOk = workerResults.every((item) => item.ok) && teamOwnerDecisions.length === 0;
       p.sink(tag({
         kind: "tool-use",
         done: true,
-        status: workerResults.every((item) => item.ok)
+        status: teamOk
           ? p.locale === "ko" ? `${spec.name} 팀 완료` : `${spec.name} team completed`
-          : p.locale === "ko" ? `${spec.name} 팀 일부 실패` : `${spec.name} team completed with worker failures`,
+          : teamOwnerDecisions.length
+            ? p.locale === "ko" ? `${spec.name} 팀 미완료` : `${spec.name} team incomplete`
+            : p.locale === "ko" ? `${spec.name} 팀 일부 실패` : `${spec.name} team completed with worker failures`,
         tokens,
         observedModel: taskForceObservedModel(managerSynthesis) ?? undefined,
         runtimeSelection: observedRuntimeSelection,
         agentLifecycle: {
           source: "cli-process",
-          state: workerResults.every((item) => item.ok) ? "idle" : "failed",
-          reason: workerResults.every((item) => item.ok) ? "turn-complete" : "error",
+          state: teamOk ? "idle" : "failed",
+          reason: teamOk ? "turn-complete" : "error",
           runtime: active.kind,
         },
         agentMessage: {
@@ -4875,8 +4998,12 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         ...resultMeta,
         spec,
         packet,
-        text: teamText,
-        ok: workerResults.every((item) => item.ok),
+        text: withTaskForceOwnerDecisions(teamText, teamOwnerDecisions),
+        ok: teamOk,
+        ...(teamOwnerDecisions.length ? {
+          completionStatus: workerResults.every((item) => item.ok || item.ownerDecisions.length > 0) ? "partial" as const : "failed" as const,
+          blockingRemaining: teamOwnerDecisions.map((question) => `${TASK_FORCE_OWNER_DECISION_PREFIX}${question}`).slice(0, 16),
+        } : {}),
         tokens,
         nestedExecutionEvidence: {
           nestedExecutionId,
@@ -4938,7 +5065,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         attempt,
         agentId: installedAgent?.id ?? p.chat.agentId,
         runtime: observedDirectRuntime,
-      }, () => runObservedRunner(observedDirectPicked.runner, taskForceRunnerRequest(p, request), events)).then(result => { result.text = taskForceWorkerHandoffText(result.text); return result; }), capabilityEvidence(id, observedDirectInvocationId))(
+      }, () => runObservedRunner(observedDirectPicked.runner, taskForceWorkerRunnerRequest(p, request), events)).then(result => { result.text = taskForceWorkerOwnerAskText(result.text, taskForceWorkerHandoffText(result.text)); return result; }), capabilityEvidence(id, observedDirectInvocationId))(
         {
           ...taskForceSystemRequest([
 ...borrowedAgentSystemPromptParts(spec, packagePermission, materializedWorkerMcpTools),
@@ -6744,7 +6871,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
   const workforce = p.workforceSelectionReceipt;
   const verifierIssues: string[] = [];
   // What each worker said still blocks the result — shown to the owner when the run is not verified.
-  const unclearedBlockers: Array<{ name: string; items: string[] }> = [];
+  const unclearedBlockers: Array<{ result: BorrowedAgentResult; items: string[] }> = [];
   if (!plan.parseSuccess) verifierIssues.push("planner_parse_failed");
   if (plan.fallbackUsed) verifierIssues.push("planner_fallback_used");
   for (const result of results) {
@@ -6778,7 +6905,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
     ));
     if (!clearedByLaterReview) {
       verifierIssues.push(`blocking_remaining:${stepIds[index]}`);
-      unclearedBlockers.push({ name: result.spec.name || result.spec.slug, items: result.blockingRemaining ?? [] });
+      unclearedBlockers.push({ result, items: result.blockingRemaining ?? [] });
     }
   }
   if (!displayText.trim()) verifierIssues.push("empty_synthesis");
@@ -7051,14 +7178,9 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
     oneTaskForceSurfaces = [];
   }
   if (!taskForceExecutionVerified) {
-    const incompleteWorkerNames = results
-      .filter((result) => !result.ok)
-      .map((result) => result.spec.name)
-      .filter(Boolean);
     displayText = taskForceIncompleteMessage({
       locale: p.locale,
-      incompleteWorkerNames,
-      unclearedBlockers,
+      remaining: taskForceRemainingForOwner(p.locale, results, unclearedBlockers),
       requiredSurfaceMissing: Boolean(requiredSurfaceMissing),
     });
   }
@@ -7135,6 +7257,9 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
     ...p,
     borrowedCareerOwnerScopeKey: p.borrowedCareerOwnerScopeKey ?? activeBorrowedOwnerScopeKey(),
   };
+  // Workers share the run's MCP config; ask_form leaves it while this dispatch is open (taskForceWorkerRunnerRequest).
+  // The planner and synthesis carry no MCP config and keep their owner ask.
+  const releaseOwnerAsk = withholdTurnAskForRun(ownerBoundParams.req.runId);
   try {
     return await runBorrowedTaskForceInvocationInternal(ownerBoundParams);
   } catch (error) {
@@ -7142,5 +7267,7 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
     // Planner/synthesis CLI errors can contain stderr, local paths, or runtime
     // details. Agent Apps receive one fixed failure without preserving `cause`.
     throw createUntrustedRuntimeFailure();
+  } finally {
+    releaseOwnerAsk();
   }
 }

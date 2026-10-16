@@ -452,7 +452,9 @@ export async function prepareMainToolLoop(
           req.mcpConfigPath,
           catalogMcpOnly ? undefined : req.cwd,
           (req.permission ?? "read") as ToolPermission,
-          req.unattended !== true && req.noSynchronousAsk !== true,
+          // Nobody answers an unattended run, Mobile answers later, and a team worker's questions belong to its
+          // orchestrator (RunnerRequest.unattendedNoAsk): none of them lists the synchronous ask_user tool.
+          req.unattended !== true && req.noSynchronousAsk !== true && req.unattendedNoAsk !== true,
           imageSlotDiagnosis.state === "ready",
           req.signal,
           req.browserOnly === true,

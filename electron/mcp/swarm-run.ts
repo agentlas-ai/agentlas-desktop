@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { RunnerResult } from "../runtime/runner";
 import { runObservedRunner, observedRunnerUsage, observedRunnerUsageEvidence, ObservedRunnerFailureError } from "../runtime/observed-runner";
 import { withModelCallScope } from "../runtime/model-call-ledger";
+import { withholdTurnAskForRun } from "../turn-tools/control-server";
 // 스웜 실행 배선 — 순수 엔진(swarm-engine)을 실제 러너/채팅에 연결한다.
 //   - 각 작업(task)을 활성 런타임으로 실행하며 이벤트를 task 단위로 태깅 → UI가 스웜을 라이브로 표시
 //   - 에이전트 출력의 `## Spawn` 블록을 파싱해 런타임에 새 작업/핸드오프를 그래프에 추가(emergent)
@@ -597,10 +598,13 @@ export async function runSwarmInvocation(
     ], "\n\n");
     const runWorkerOn = async (target: typeof p.active, targetRunner: typeof taskRunner) => {
       const usageInvocationId = `swarm-model-call:${randomUUID()}`;
+      // A swarm worker's questions belong to the synthesizer (owner 2026-10-16): no system ask module, no ask_form.
+      const releaseOwnerAsk = withholdTurnAskForRun(p.req.runId);
       try {
         const measuredResult = await runObservedRunner(targetRunner.runner,
           {
             systemPrompt: workerSystemPrompt,
+            unattendedNoAsk: true,
             history: [],
             outputSchema: { name: "agentlas_swarm_worker_result", schema: swarmWorkerOutputSchema(!task.spawnedBy, runtimeInventory) },
             userPrompt: composeDeclaredPrompt([{ id: "swarm.worker.user.current-task", revision: 1, stability: "task-context", changeTriggers: ["task", "plan-revision", "goal-revision"], order: 0, text: task.brief || task.title }], "\n"),
@@ -634,6 +638,8 @@ export async function runSwarmInvocation(
         recordUsage(usageInvocationId, target, task.id, "worker", observedRunnerUsage(error), (signal ?? p.signal)?.aborted ? "cancelled" : "failed", error);
         if ((signal ?? p.signal)?.aborted) throw error;
         return { text: "", failure: runnerFailureFromError(error, target.kind) };
+      } finally {
+        releaseOwnerAsk();
       }
     };
     // A worker failure advances through the configured worker pool. The
