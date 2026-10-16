@@ -1821,6 +1821,7 @@ const runClaudeTurn = async (
     let observedUsage: { inputTokens: number; outputTokens: number; cachedInputTokens?: number } | undefined;
     /** Input of the turn's last root model request (fresh + cache read + cache write): what the next request starts from. */
     let contextInputTokens: number | undefined;
+    let contextCachedInputTokens: number | undefined;
     /** Root assistant messages only; result.modelUsage may include resumed turns. */
     const turnModel = new ClaudeTurnModelTracker();
     let stderr = "";
@@ -2399,7 +2400,11 @@ const runClaudeTurn = async (
           const u = (ev.message as { usage?: { input_tokens?: unknown; cache_read_input_tokens?: unknown; cache_creation_input_tokens?: unknown } }).usage;
           const part = (v: unknown) => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : 0);
           const total = u ? part(u.input_tokens) + part(u.cache_read_input_tokens) + part(u.cache_creation_input_tokens) : 0;
-          if (total > 0) contextInputTokens = total;
+          if (total > 0) {
+            // One assistant message is one API request: its own usage is the window, unlike the result envelope's turn sum.
+            contextInputTokens = total;
+            contextCachedInputTokens = part(u?.cache_read_input_tokens);
+          }
         }
         for (const block of ev.message.content) {
           if (block.type === "text" && block.text) {
@@ -2697,7 +2702,7 @@ const runClaudeTurn = async (
           sessionId,
           tokens,
           observedUsage,
-          ...(contextInputTokens ? { contextInputTokens } : {}),
+          ...(contextInputTokens ? { contextInputTokens, ...(contextCachedInputTokens !== undefined && contextCachedInputTokens <= contextInputTokens ? { contextCachedInputTokens } : {}) } : {}),
           ...(turnDeliveryFact() ? { turnDelivery: turnDeliveryFact() } : {}),
           appliedEffort,
         });
@@ -2827,7 +2832,7 @@ const runClaudeTurn = async (
           sessionId,
           tokens,
           observedUsage,
-          ...(contextInputTokens ? { contextInputTokens } : {}),
+          ...(contextInputTokens ? { contextInputTokens, ...(contextCachedInputTokens !== undefined && contextCachedInputTokens <= contextInputTokens ? { contextCachedInputTokens } : {}) } : {}),
           ...(observedModel ? { observedModel } : {}),
           ...(turnDeliveryFact() ? { turnDelivery: turnDeliveryFact() } : {}),
           appliedEffort,
@@ -2858,7 +2863,7 @@ const runClaudeTurn = async (
             failure: runnerFailure,
             tokens,
             observedUsage,
-            ...(contextInputTokens ? { contextInputTokens } : {}),
+            ...(contextInputTokens ? { contextInputTokens, ...(contextCachedInputTokens !== undefined && contextCachedInputTokens <= contextInputTokens ? { contextCachedInputTokens } : {}) } : {}),
             ...(observedModel ? { observedModel } : {}),
             // A typed provider refusal of a turn the CLI took in: post-dispatch, with its provider code intact.
             ...(turnDeliveryFact() ? { turnDelivery: turnDeliveryFact() } : {}),

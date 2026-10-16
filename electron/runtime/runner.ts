@@ -806,6 +806,8 @@ export interface RunnerResult {
   observedUsage?: { inputTokens: number; outputTokens: number; cachedInputTokens?: number };
   /** Input tokens of the turn's LAST model request (cached included): the context the next request starts from. */
   contextInputTokens?: number;
+  /** The cached part of `contextInputTokens` (a subset of it, never added to it), when the runtime reports it. */
+  contextCachedInputTokens?: number;
   /** The context window the runtime itself reported for this session (ACP usage_update size); the catalog's otherwise. */
   contextWindowTokens?: number;
   /** Exact effort explicitly applied by the runner; null means no explicit effort was sent. */

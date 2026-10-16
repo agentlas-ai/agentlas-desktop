@@ -37,6 +37,15 @@ export const MODEL_CALL_LEDGER_EVENT_KIND = "model_call_ledger";
 /** Same per-image upper estimate the serving admission uses (agentlas-serving.ts IMAGE_TOKEN_ESTIMATE). */
 export const LEDGER_IMAGE_TOKEN_ESTIMATE = 2_000;
 
+/**
+ * Runtimes whose one ledger row is a whole CLI turn: the usage they report adds up every internal model request of the
+ * turn's tool loop (codex `turn.completed`, claude-code `result.usage`; measured 2026-10-16: main rows of 1.7M-132M input
+ * against a 475k window). That sum is the turn's cost, not the window the next request starts from, so the row carries
+ * `usageScope: "turn_aggregate"` and the window comes from `observedContextInput` (the LAST single request), never from
+ * `observedInput`. API and local-loop runtimes record one row per HTTP dispatch, so their `observedInput` is one request.
+ */
+export const TURN_AGGREGATE_USAGE_RUNTIMES: ReadonlySet<string> = new Set(["codex", "claude-code"]);
+
 export type ModelCallRole =
   | "main" | "planner" | "worker" | "synthesis" | "judgment" | "observation"
   | "curator" | "repair" | "compaction" | "router" | "build" | "unscoped";
@@ -511,6 +520,8 @@ export function ledgerEventPayload(input: {
   status: string; failureKind?: string; failureCode?: string; durationMs: number;
   /** The context window the runtime itself reported for this session (RunnerResult.contextWindowTokens). */
   contextWindowObserved?: number;
+  /** Input of the call's LAST single model request (RunnerResult.contextInputTokens / contextCachedInputTokens). */
+  contextInput?: { tokens: number; cached?: number };
 }): Record<string, unknown> {
   const { payload } = input;
   const out: Record<string, unknown> = {
@@ -564,7 +575,15 @@ export function ledgerEventPayload(input: {
     out.observedInput = usage.inputTokens;
     out.observedOutput = usage.outputTokens;
     if (sanitizeCount(usage.cachedInputTokens) !== undefined) out.observedCachedInput = usage.cachedInputTokens;
+    if (TURN_AGGREGATE_USAGE_RUNTIMES.has(input.identity.kind)) out.usageScope = "turn_aggregate";
   } else out.usageStatus = "unknown";
+  // The last single request is independent of the receipt: ACP reports only this (no tokens receipt at all).
+  const contextInput = sanitizeCount(input.contextInput?.tokens);
+  if (contextInput !== undefined && contextInput > 0) {
+    out.observedContextInput = contextInput;
+    const cached = sanitizeCount(input.contextInput?.cached);
+    if (cached !== undefined && cached <= contextInput) out.observedContextCachedInput = cached;
+  }
   Object.assign(out, usageNormalizationFields(input.identity, input.usage, input.detail));
   // Cache planner fields are flat and additive; observedCachedInput above is untouched (context-inspect reads it).
   Object.assign(out, cacheLedgerFields(input.cachePlan, out.observedCachedInput));
@@ -688,6 +707,9 @@ function emit(collector: Collector, input: {
   // The window the runtime reported (ACP usage_update size, a local server's loaded n_ctx when the adapter reports it).
   const window = (result as { contextWindowTokens?: unknown } | undefined)?.contextWindowTokens;
   const reportedWindow = typeof window === "number" && Number.isSafeInteger(window) && window > 0 ? window : undefined;
+  const lastRequest = result as { contextInputTokens?: unknown; contextCachedInputTokens?: unknown } | undefined;
+  const lastRequestInput = sanitizeCount(lastRequest?.contextInputTokens);
+  const lastRequestCached = sanitizeCount(lastRequest?.contextCachedInputTokens);
   attempts.forEach((attempt, index) => {
     // Only the first attempt may fall back to the pre-adapter request view; later rounds (tool loops, retries)
     // carry state the request does not show, so an unreported payload stays unknown instead of being guessed.
@@ -706,6 +728,8 @@ function emit(collector: Collector, input: {
         ...(failureCode ? { failureCode } : {}),
         ...(collector.meta ? { meta: collector.meta } : {}),
         ...(reportedWindow && index === attempts.length - 1 ? { contextWindowObserved: reportedWindow } : {}),
+        ...(lastRequestInput !== undefined && index === attempts.length - 1
+          ? { contextInput: { tokens: lastRequestInput, ...(lastRequestCached !== undefined ? { cached: lastRequestCached } : {}) } } : {}),
         durationMs: Math.max(0, Date.now() - attempt.startedAt),
       }),
     });

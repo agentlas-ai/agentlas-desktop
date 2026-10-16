@@ -6,6 +6,10 @@
  * Rules the snapshot obeys:
  *  - one window view: last_request (the newest, or an exact past request by requestId). The session's cumulative usage
  *    and the next request's estimate from current settings are separate views, never mixed into window occupancy.
+ *  - the window input is ONE model request. A CLI runtime's turn receipt (codex, claude-code) sums every request of its
+ *    tool loop, so for those rows the window is the runtime's own last-request figure (`observedContextInput`); the
+ *    turn sum is shown apart as `turnUsage` and, session-wide, in sessionCumulative. Without a last-request figure a
+ *    turn sum is never presented as the window (host estimate or unavailable instead).
  *  - every item carries its measurement: provider_reported (the provider's input total), host_estimated (the adapter's
  *    block estimate of what it transmitted) or unavailable (a resumed native thread keeps that block inside the
  *    provider). Unknown is never written as 0.
@@ -19,7 +23,7 @@
  * No electron import: the daemon and the SDK read the same snapshot.
  */
 import { createHash } from "node:crypto";
-import { MODEL_CALL_LEDGER_EVENT_KIND } from "../runtime/model-call-ledger";
+import { MODEL_CALL_LEDGER_EVENT_KIND, TURN_AGGREGATE_USAGE_RUNTIMES } from "../runtime/model-call-ledger";
 import { GENERATION_CONTEXT_RATIO, runtimeContextWindow } from "../runtime/session-generation";
 
 export type ContextCategory =
@@ -55,6 +59,11 @@ export interface ContextSnapshot {
   /** runtime-reported: the window the runtime reported for that session (a local server's loaded n_ctx, ACP size). */
   capacity: { tokens: number | null; source: "runtime-reported" | "model-catalog" | "unavailable" };
   input: { tokens: number | null; measurement: ContextMeasurement; cachedTokens?: number };
+  /**
+   * What the whole call used when its runtime reports a turn sum (every request of the CLI's tool loop): cost of the
+   * turn, not window occupancy. Absent for runtimes whose row is one request.
+   */
+  turnUsage?: { inputTokens: number; cachedTokens?: number; outputTokens?: number };
   outputTokens?: number;
   /** The session rolls to a new generation at this input size (80% of the window); null without a window. */
   rotationAtTokens: number | null;
@@ -76,6 +85,28 @@ export interface ContextSnapshot {
   };
   /** The chat's recorded requests, newest first: pick one by requestId. */
   requests?: Array<{ requestId: string; snapshotId: string; ts: string; role: string; model: string | null; inputTokens: number | null; measurement: ContextMeasurement }>;
+}
+
+/**
+ * The window input of one ledger row: the provider-reported size of ONE request. The runtime's last-request figure
+ * wins; a row whose receipt is a turn sum (usageScope turn_aggregate) never stands in for it. Other observed rows are
+ * one HTTP dispatch each, so their receipt is the request.
+ */
+/** A receipt that sums a CLI turn's requests: stamped on the row, else (a row written before the stamp) by its runtime. */
+const isTurnAggregate = (p: Record<string, unknown>): boolean =>
+  p.usageScope === "turn_aggregate" || (p.usageScope === undefined && typeof p.runtimeKind === "string" && TURN_AGGREGATE_USAGE_RUNTIMES.has(p.runtimeKind));
+
+function windowObservation(p: Record<string, unknown>): { tokens: number; cachedTokens?: number } | null {
+  const last = count(p.observedContextInput);
+  if (last !== null && last > 0) {
+    const cached = count(p.observedContextCachedInput);
+    return { tokens: last, ...(cached !== null && cached <= last ? { cachedTokens: cached } : {}) };
+  }
+  if (p.usageStatus !== "observed" || isTurnAggregate(p)) return null;
+  const observed = count(p.observedInput);
+  if (observed === null) return null;
+  const cached = count(p.observedCachedInput);
+  return { tokens: observed, ...(cached !== null ? { cachedTokens: cached } : {}) };
 }
 
 /** Ledger block field → inspector category, in display order. */
@@ -105,10 +136,14 @@ export function snapshotFromLedger(row: { runId: string; ts: string; payload: Re
     return { category, tokens, measurement: tokens === null ? "unavailable" : "host_estimated" };
   });
   const attributed = items.reduce((sum, item) => sum + (item.tokens ?? 0), 0);
-  const observed = p.usageStatus === "observed" ? count(p.observedInput) : null;
+  const observedWindow = windowObservation(p);
+  const observed = observedWindow ? observedWindow.tokens : null;
   const estimated = count(p.sentTokensEst) ?? count(p.wholeRequestEstimate);
-  const input: ContextSnapshot["input"] = observed !== null
-    ? { tokens: observed, measurement: "provider_reported", ...(count(p.observedCachedInput) !== null ? { cachedTokens: count(p.observedCachedInput)! } : {}) }
+  const turnInput = p.usageStatus === "observed" && isTurnAggregate(p) ? count(p.observedInput) : null;
+  const turnCached = turnInput !== null ? count(p.observedCachedInput) : null;
+  const turnOutput = turnInput !== null ? count(p.observedOutput) : null;
+  const input: ContextSnapshot["input"] = observedWindow
+    ? { tokens: observedWindow.tokens, measurement: "provider_reported", ...(observedWindow.cachedTokens !== undefined ? { cachedTokens: observedWindow.cachedTokens } : {}) }
     : estimated !== null && estimated > 0
       ? { tokens: estimated, measurement: "host_estimated" }
       : { tokens: null, measurement: "unavailable" };
@@ -143,6 +178,8 @@ export function snapshotFromLedger(row: { runId: string; ts: string; payload: Re
     },
     capacity: reported ? { tokens: reported, source: "runtime-reported" } : catalog ? { tokens: catalog, source: "model-catalog" } : { tokens: null, source: "unavailable" },
     input,
+    ...(turnInput !== null ? { turnUsage: { inputTokens: turnInput, ...(turnCached !== null ? { cachedTokens: turnCached } : {}),
+      ...(turnOutput !== null ? { outputTokens: turnOutput } : {}) } } : {}),
     ...(count(p.observedOutput) !== null ? { outputTokens: count(p.observedOutput)! } : {}),
     rotationAtTokens: window ? Math.floor(window * GENERATION_CONTEXT_RATIO) : null,
     usedRatio: window && input.tokens !== null ? Math.min(1, input.tokens / window) : null,
@@ -238,7 +275,7 @@ export async function inspectContext(chatId: string, options: { requestId?: stri
     },
     requests: parsed.slice(0, 20).map((row) => {
       const requestId = requestIdOf(row.payload);
-      const observed = row.payload.usageStatus === "observed" ? count(row.payload.observedInput) : null;
+      const observed = windowObservation(row.payload)?.tokens ?? null;
       const estimated = count(row.payload.sentTokensEst);
       return { requestId, snapshotId: snapshotIdOf(row.runId, requestId, row.ts), ts: row.ts,
         role: typeof row.payload.role === "string" ? row.payload.role : "unscoped",

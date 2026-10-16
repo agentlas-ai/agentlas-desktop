@@ -1966,8 +1966,8 @@ async function runCodexResidentTurn(input: {
   } = { observed: undefined, total: null };
   // Thread-health observations for rotation (session-rotation.ts): last model-call input of this turn and
   // native compactions seen. Recorded only for a turn that reached a terminal; a failed turn adds nothing.
-  const health: { lastInputTokens: number | null; contextWindowTokens: number | null; compactionItems: Set<string>; compactedNotices: number } =
-    { lastInputTokens: null, contextWindowTokens: null, compactionItems: new Set(), compactedNotices: 0 };
+  const health: { lastInputTokens: number | null; lastCachedInputTokens: number | null; contextWindowTokens: number | null; compactionItems: Set<string>; compactedNotices: number } =
+    { lastInputTokens: null, lastCachedInputTokens: null, contextWindowTokens: null, compactionItems: new Set(), compactedNotices: 0 };
   const persistTurnCounters = (): void => {
     if (!session.threadId) return;
     if (terminalObserved) {
@@ -2273,7 +2273,13 @@ async function runCodexResidentTurn(input: {
           usage.observed = codexObservedTurnUsage(usage.total, turnUsageBaseline);
           if (usage.observed) events.onUsage?.(usage.observed.outputTokens);
         }
-        if (last && Number.isSafeInteger(last.inputTokens) && last.inputTokens > 0) health.lastInputTokens = last.inputTokens;
+        if (last && Number.isSafeInteger(last.inputTokens) && last.inputTokens > 0) {
+          // `last` is ONE response (the newest of the turn's tool loop): the window the next request starts from. The cached
+          // part belongs to the same response, so it moves with it and is dropped when this one does not report it.
+          health.lastInputTokens = last.inputTokens;
+          health.lastCachedInputTokens = Number.isSafeInteger(last.cachedInputTokens) && last.cachedInputTokens >= 0 && last.cachedInputTokens <= last.inputTokens
+            ? last.cachedInputTokens : null;
+        }
         if (last && typeof last.inputTokens === "number" && typeof last.cachedInputTokens === "number" && last.inputTokens > 0) {
           events.onStatus(`[cache] read=${last.cachedInputTokens} fresh=${last.inputTokens - last.cachedInputTokens} hit=${Math.round((last.cachedInputTokens / last.inputTokens) * 100)}%`);
         }
@@ -3039,6 +3045,7 @@ async function runCodexResidentTurn(input: {
         tokens: usage.observed?.outputTokens ?? Math.ceil(estChars / 4),
         ...(usage.observed ? { observedUsage: usage.observed } : {}),
         ...(health.lastInputTokens ? { contextInputTokens: health.lastInputTokens } : {}),
+        ...(health.lastInputTokens && health.lastCachedInputTokens !== null ? { contextCachedInputTokens: health.lastCachedInputTokens } : {}),
         // The window Codex reported for this session: the 80% rule reads it before any catalog number (NH14).
         ...(health.contextWindowTokens ? { contextWindowTokens: health.contextWindowTokens } : {}),
         ...(workforcePermissionEnforcement ? { workforcePermissionEnforcement } : {}),
