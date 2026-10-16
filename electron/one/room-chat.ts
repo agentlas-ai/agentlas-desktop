@@ -11,6 +11,7 @@
  * Only One dispatches. Hidden brakes keep a misbehaving pair of members from flooding each other or One.
  */
 import { createRoomDiscussionStore, type RoomDb } from "./room-discussion-store";
+import { deliverGraphTeamStepEvent } from "./graph-team-step";
 
 export const ROOM_SAY_TOOL = "room_say";
 export const MAX_ROOM_SAY_CHARS = 4_000;
@@ -206,7 +207,15 @@ export function createRoomChat(ports: RoomChatPorts) {
     if (!recipients.length && !toOne && !unknown.length) delivered.push({ to: "room", via: "room" });
 
     const reachesOne = toOne || notesForOne.idle.length > 0;
-    if (reachesOne && underBrake(wakeLog, roomChatId, MAX_ONE_WAKES_PER_ROOM)) {
+    // A session an open graph step dispatched: that step is the one orchestrating it, so the note wakes the step, not the
+    // room's One (two orchestrators would steer the same teammate). graph-team-step.ts.
+    let stepOwner: string | null = null;
+    try {
+      stepOwner = (ports.db().prepare("SELECT graph_owner FROM one_team_dispatches WHERE id = ?").get(self.dispatchId) as { graph_owner?: string | null } | undefined)?.graph_owner ?? null;
+    } catch { stepOwner = null; }
+    if (reachesOne && stepOwner && deliverGraphTeamStepEvent(stepOwner, { kind: "note", dispatchId: self.dispatchId, from: senderName, text })) {
+      // delivered to the step
+    } else if (reachesOne && underBrake(wakeLog, roomChatId, MAX_ONE_WAKES_PER_ROOM)) {
       try { ports.wakeOne({ roomChatId, notes: [notesForOne] }); }
       catch (error) { console.warn("[room-chat] One follow-up not queued:", error instanceof Error ? error.message : error); }
     }

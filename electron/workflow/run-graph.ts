@@ -46,6 +46,7 @@ import {
 } from "../../shared/graph-tool-broker";
 import { runMcpInvocation } from "../mcp/client";
 import { mintGraphTeamGrant, revokeGraphTeamGrant, type GraphTeamGrant } from "../one/graph-team-grant";
+import { graphTeamStepHold, runGraphTeamStep } from "../one/graph-team-step";
 import { claimInvocationRunOwner, invocationRunOwners } from "../store/invocation-run-owners";
 import { sameMethodAttemptLimit, MAX_SAME_METHOD_STARTS, type WorkUnit } from "../../shared/work-recovery";
 import { GraphWorkRecovery, type GraphWorkRecoveryScope } from "./work-recovery";
@@ -4893,10 +4894,14 @@ export async function runGraph(
         const relayRunAbort = () => nodeAbort.abort(runSignal.reason);
         if (runSignal.aborted) relayRunAbort();
         else runSignal.addEventListener("abort", relayRunAbort, { once: true });
-        const nodeTimer = setTimeout(() => {
+        // A team step's budget bounds its own turns, not the teammates' work it waits for (graph-team-step.ts).
+        const armNodeTimer = (ms: number): ReturnType<typeof setTimeout> => setTimeout(() => {
+          const hold = graphTeamStepHold(runId, node.id);
+          if (hold !== null && hold > Date.now()) { nodeTimer = armNodeTimer(hold - Date.now()); return; }
           nodeTimedOut = true;
           nodeAbort.abort(new Error("automation_node_timeout"));
-        }, Math.max(1, Math.min(nodeDeadlineMs, workerDeadline - Date.now())));
+        }, Math.max(1, ms));
+        let nodeTimer = armNodeTimer(Math.min(nodeDeadlineMs, workerDeadline - Date.now()));
         let markedQuotaFailure = false;
         let graphWorkerAttempt: GraphWorkerAttempt | undefined;
         let graphWorkerReceipt: GraphWorkerFailureReceipt | null = null;
@@ -4955,7 +4960,7 @@ export async function runGraph(
                   }
                 }
                 assertFiniteCurrent();
-                if (runSignal.aborted || nodeAbort.signal.aborted || Date.now() >= captured.deadline) throw new Error("graph_worker_owner_stopped");
+                if (runSignal.aborted || nodeAbort.signal.aborted || Date.now() >= Math.max(captured.deadline, graphTeamStepHold(runId, node.id) ?? 0)) throw new Error("graph_worker_owner_stopped");
                 if (getAutomationDefinitionDigest(automation.id) !== definitionDigest) throw new Error("graph_worker_definition_changed");
                 revalidateAutomationWorkspace(automationWorkspace);
                 if (captured.pool && readGraphWorkerPool()?.fingerprint !== captured.pool.fingerprint) throw new Error("graph_worker_pool_changed");
@@ -5004,6 +5009,8 @@ export async function runGraph(
               return nativeResult;
             }
             : runMcpInvocation;
+          // A continuation turn of a team step runs inside the work unit its first turn began (graph-team-step.ts).
+          let graphTeamContinuation = false;
           const invokeNode: typeof runMcpInvocation = async (...args) => {
             assertFiniteCurrent();
             // An agent node's context is bound to its run owner lease. Without one every agent node refused before its
@@ -5013,7 +5020,7 @@ export async function runGraph(
             // attempt) on the same chat reopens this run's released lease instead of being refused as another run.
             const ownerLease = nativeMcpCall ? null : claimInvocationRunOwner(nodeChat.id, runId, { reopenReleased: true });
             try {
-            if (!dryRun) {
+            if (!dryRun && !graphTeamContinuation) {
               const scope = commonScope(node, prompt);
               commonScopes.set(node.id, scope);
               reviseCompletedRequest(node, scope);
@@ -5035,9 +5042,22 @@ export async function runGraph(
           revokeGraphTeamGrant(graphTeamGrant);
           graphTeamGrant = nativeMcpCall ? null : mintGraphTeamGrant({ automationId: automation.id, node, runId, chatId: nodeChat.id,
             effect, dryRun: Boolean(dryRun), ...(opts.permissionCeiling ? { permissionCeiling: opts.permissionCeiling } : {}) });
+          // A step that hands work to its room's teammates stays open until that work settles and is woken, with its team
+          // tools, by each result (graph-team-step.ts). Any other step: exactly one turn, as before.
+          const invokeTeamStep: typeof runMcpInvocation = (request, eventSink, signal, binding, context) => runGraphTeamStep({
+            grant: graphTeamGrant, dryRun: Boolean(dryRun), turnBudgetMs: nodeDeadlineMs, signal: nodeAbort.signal,
+            turnFailed: () => Boolean(runnerError) || nodeAbort.signal.aborted,
+            onWaiting: (work) => sink({ kind: "notice", agentId: node.id, nodeId: node.id, notice: { level: "info", code: "graph-team-step-waiting",
+              message: L(`팀원 작업 중: ${work.filter((item) => item.inFlight).map((item) => item.member).join(", ")}`,
+                `Teammates working: ${work.filter((item) => item.inFlight).map((item) => item.member).join(", ")}`) } }),
+            first: () => invokeNode(request, eventSink, signal, binding, context),
+            // A continuation turn is a new invocation: the first turn's worker-fallback attempt closed when it settled.
+            next: (prompt) => { graphTeamContinuation = true; accumulatedText = ""; return invokeNode({ ...request, userPrompt: prompt }, eventSink, signal, binding,
+              context ? { ...context, graphWorkerAttempt: undefined } : context); },
+          });
           const result = await withFiniteDispatch(() => withAutomationNodeAccounting({
             runId, automationId: automation.id, nodeId: node.id, chatId: nodeChat.id,
-          }, () => invokeNode(
+          }, () => invokeTeamStep(
             {
               runId,
               chatId: nodeChat.id,
@@ -6145,10 +6165,14 @@ export async function runGraph(
       const relayAbort = () => nodeController.abort(runSignal.reason);
       if (runSignal.aborted) relayAbort();
       else runSignal.addEventListener("abort", relayAbort, { once: true });
-      const timer = setTimeout(() => {
+      // A team step waiting on its teammates is not timed out here either (graph-team-step.ts graphTeamStepHold).
+      const armTimer = (ms: number): ReturnType<typeof setTimeout> => setTimeout(() => {
+        const hold = graphTeamStepHold(runId, node.id);
+        if (hold !== null && hold > Date.now()) { timer = armTimer(hold - Date.now()); return; }
         timedOut = true;
         nodeController.abort(new Error("automation_node_timeout"));
-      }, nodeTimeoutMs(node));
+      }, Math.max(1, ms));
+      let timer = armTimer(nodeTimeoutMs(node));
       const nodeWork = runNode(node, nodeController.signal);
       const recordSettled = () => {
         if (backgroundCheckNodes.has(node.id)) tryRecordRunEvent({ runId: `${runId}:check:${node.id}`,
