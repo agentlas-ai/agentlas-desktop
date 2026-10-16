@@ -139,6 +139,9 @@ export function OneRecoveryPlane() {
               taskIntent: "conversation",
               oneMode: true,
               locale,
+              // One Main reads the mode, not `permissions`; without it the turn was Auto and an
+              // intent promotion to "task" ran it with write (P17 replay, 2026-10-16).
+              onePermissionMode: "read",
               permissions: "read",
             });
             queued.started = true;

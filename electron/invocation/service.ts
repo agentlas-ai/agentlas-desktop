@@ -492,13 +492,20 @@ function normalizeOnePermissionMode(value: unknown): OnePermissionMode | null {
 export function authoritativeOnePermission(
   mode: OnePermissionMode | null,
   taskIntent: McpInvocationRequest["taskIntent"],
+  requestedPermission?: unknown,
 ): "read" | "write" | "full" {
   if (mode === "read") return "read";
   if (mode === "write") return "write";
   if (mode === "full") return "full";
+  const auto = taskIntent === "task" ? "write" : "read";
+  if (mode === "auto") return auto;
   // Missing legacy mode is treated as Auto, never as permission supplied by
   // the renderer. Desktop One always sends the explicit chip value now.
-  return taskIntent === "task" ? "write" : "read";
+  // An explicit read is still honored: it can only narrow. The Desktop
+  // recovery turn, team reports and Agent Mail send read without a mode,
+  // and intent promotion to "task" turned each into write (P17 replay
+  // 2026-10-16: two recovery turns ran write under a read-only chip).
+  return requestedPermission === "read" ? "read" : auto;
 }
 
 type InvocationEventListener = (envelope: InvocationEventEnvelope) => void;
@@ -2747,7 +2754,7 @@ export class InvocationService {
       ...(workspaceBinding
         ? { permissions: normalizeRemoteInvocationPermission(req.permissions) }
         : requestedOneMode
-          ? { permissions: authoritativeOnePermission(selectedOnePermissionMode, requestWithoutMainContext.taskIntent) }
+          ? { permissions: authoritativeOnePermission(selectedOnePermissionMode, requestWithoutMainContext.taskIntent, incoming.permissions) }
         : {}),
     };
     if (requestedOneMode) {
@@ -2851,7 +2858,7 @@ export class InvocationService {
         // Other bounded workspaces retain their prepared capability limit.
         permissions: workspaceBinding && !mobileOneBoundary
           ? preparedOneTeamPreflight.permission
-          : authoritativeOnePermission(selectedOnePermissionMode, "task"),
+          : authoritativeOnePermission(selectedOnePermissionMode, "task", incoming.permissions),
         sessionRouting: false,
         hubMode: preparedOneTeamPreflight.mode === "workforce"
           ? oneTeamWorkforceHubMode(preparedOneTeamPreflight.staffingAuthority)
@@ -3033,7 +3040,7 @@ export class InvocationService {
       !workspaceBinding && requestedOneMode
         ? preparedOneBriefingAction
           ? "read"
-          : authoritativeOnePermission(selectedOnePermissionMode, effectiveTaskIntent)
+          : authoritativeOnePermission(selectedOnePermissionMode, effectiveTaskIntent, incoming.permissions)
         : invocationRequest.permissions,
       invocationRequest.planMode,
     );

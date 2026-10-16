@@ -163,6 +163,14 @@ import { toCustomerSafeText } from "@shared/one-customer-safe";
 import { stripAgentControlBlocks, stripAgentIdentityBadges, stripAgentRoutingBanners } from "@shared/agent-control-blocks";
 import { isInterruptedPartial, isLivePartialCommitBoundary } from "@shared/interrupted-partial";
 import { classifyOneRequestIntent } from "@shared/one-request-intent";
+import { narrowerOnePermission } from "@shared/invocation-permission";
+import {
+  oneTeamPreflightAutoStartStep,
+  oneTeamPreflightFailureCode,
+  oneTeamPreflightProposalPending,
+  oneTeamPreflightRecoveryAllowed,
+  restoreOwnerDraft,
+} from "@/lib/one-team-preflight-auto-start";
 import { runtimeSelectionReceiptMatches } from "@shared/runtime-selection-receipt";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import { OneSubmitPreflightError, oneSubmitPreflightNotice, prepareOneTeamPreflightForSubmit, type OneSubmitTaskBinding } from "@/lib/one-submit-binding";
@@ -5705,9 +5713,11 @@ function OneSessionsShell() {
     if (!options?.permissionMode && options?.promptOrigin === "system") {
       // Automatic retry, clarification, and recovery are continuations, not a
       // fresh user grant. Re-read Main's durable receipt and fail closed if it
-      // is unavailable so Task promotion can never widen read to write.
+      // is unavailable so Task promotion can never widen read to write. The
+      // owner's chip as it is now stays the ceiling: a chip lowered after the
+      // source run must bind the continuation too (P17: write under read-only).
       const sourceReceipt = await api.invoke.latestReceipt(chatId).catch(() => null);
-      runPermissionMode = sourceReceipt?.executionPermission ?? "read";
+      runPermissionMode = narrowerOnePermission(onePermission, sourceReceipt?.executionPermission ?? "read");
     }
     const executionPermission = runPermissionMode === "auto"
       ? taskIntent === "task" ? "write" : "read"
@@ -6120,23 +6130,55 @@ function OneSessionsShell() {
     } catch (cause) {
       const failures = (autoResolveFailuresRef.current.get(proposal.proposalId) ?? 0) + 1;
       autoResolveFailuresRef.current.set(proposal.proposalId, failures);
-      const code = /\[agentlas:code=([a-z_]+)\]/.exec(cause instanceof Error ? cause.message : String(cause))?.[1];
       // A proposal is bound to one exact Task version, roster and runtime. When Main says that binding is gone,
       // asking again can never succeed — only a fresh proposal can. Stop on this one and hand the text back.
-      const settled = code !== undefined && ONE_TEAM_PREFLIGHT_BINDING_GONE_CODES.has(code);
-      if (settled || failures >= 3) {
-        setPendingTeamPrompt((currentPrompt) => currentPrompt?.proposalId === proposal.proposalId ? null : currentPrompt);
-        if (!startRejected) setActionNotice(normalizedLocale === "ko"
-          ? "대화가 바뀌어 팀 확정을 마치지 못했어요. 보낸 글은 대화에 남아 있어요. 다시 보내면 새로 준비해요."
-          : "The conversation changed before the team could be confirmed. Your message is still in the conversation; send it again to prepare it afresh.");
-      } else {
+      // Any run started in this room (a recovery turn too) moves that Task and ends the binding, so nothing may
+      // ask One to recover while an attempt is still to come (P17 replay 2026-10-16; production 1.3.47 Yotube).
+      const step = oneTeamPreflightAutoStartStep({
+        code: oneTeamPreflightFailureCode(cause),
+        failures,
+        startRejected,
+        bindingGoneCodes: ONE_TEAM_PREFLIGHT_BINDING_GONE_CODES,
+      });
+      if (step.kind === "retry") {
         // A transient miss (runtime probe, store busy) may succeed shortly: wait before the state change re-runs the effect.
-        await new Promise<void>((resolve) => { window.setTimeout(resolve, 1_000 * 2 ** (failures - 1)); });
+        await new Promise<void>((resolve) => { window.setTimeout(resolve, step.delayMs); });
+        const current = await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => null);
+        // A fresh state object re-runs the effect that makes the next attempt. An unreadable proposal still
+        // gets that attempt: Main then answers with a code (binding gone) instead of the start stalling silently.
+        setTeamPreflight((existing) => current
+          ?? (existing?.proposalId === proposal.proposalId ? { ...existing } : existing));
+        setError(null);
+        return;
       }
+      setPendingTeamPrompt((currentPrompt) => currentPrompt?.proposalId === proposal.proposalId ? null : currentPrompt);
       const current = await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => null);
       if (current) setTeamPreflight(current);
       setError(null);
-      requestOneOperationalRecovery("one-team-preflight-start", cause);
+      // startRun refused the reserved start and already reported it (and Main kept the message); nothing to add.
+      if (step.outcome === "start_rejected") return;
+      // The run that would have saved the owner's message never started: give back the exact text.
+      if (activeThreadChatIdRef.current === proposal.binding.chatId) {
+        setComposer((currentDraft) => restoreOwnerDraft(currentDraft, prompt.text));
+      } else {
+        const draftKey = `chat:${proposal.binding.chatId}`;
+        writeOneComposerDraft(draftKey, { composer: restoreOwnerDraft(readOneComposerDraft(draftKey).composer, prompt.text) });
+      }
+      const ko = normalizedLocale === "ko";
+      setActionNotice(step.outcome === "binding_gone"
+        ? (ko
+          ? "대화가 바뀌어 팀 확정을 마치지 못했어요. 보낸 글은 작성창에 되돌려 두었어요. 다시 보내면 새로 준비해요."
+          : "The conversation changed before the team could be confirmed. Your message is back in the composer; send it again to prepare it afresh.")
+        : step.outcome === "refused" && step.code
+          ? `${oneSubmitPreflightNotice(step.code, ko)} ${ko ? "보낸 글은 작성창에 되돌려 두었어요." : "Your message is back in the composer."}`
+          : (ko
+            ? "팀 확정을 마치지 못해 시작하지 않았어요. 보낸 글은 작성창에 되돌려 두었어요."
+            : "The team could not be confirmed, so nothing started. Your message is back in the composer."));
+      // A typed refusal is a product state with its own notice. Only an unclassified failure may ask One to
+      // recover, and only once the proposal is no longer pending, so the recovery cannot be what ends it.
+      if (oneTeamPreflightRecoveryAllowed(step, oneTeamPreflightProposalPending(current, proposal.proposalId))) {
+        requestOneOperationalRecovery("one-team-preflight-start", cause, { chatId: proposal.binding.chatId });
+      }
     } finally {
       if (autoResolvingProposalRef.current === proposal.proposalId) autoResolvingProposalRef.current = null;
       setTeamPreflightBusy(false);
@@ -6292,9 +6334,13 @@ function OneSessionsShell() {
         confirmedByUser: true,
       });
     } catch (cause) {
-      requestOneOperationalRecovery("one-activation-concern", cause);
+      // A version race is retried once below. Ask One to recover only when that retry cannot happen or also
+      // fails: a recovery turn started first lands in this chat just before the owner's own message.
       const latest = await api.oneActivation.getState({ platform: "desktop", locale: appLocale }).catch(() => null);
-      if (!latest) return;
+      if (!latest) {
+        requestOneOperationalRecovery("one-activation-concern", cause);
+        return;
+      }
       current = latest;
       if (current.status === "active" && current.concern.status === "pending") {
         current = await api.oneActivation.resolveConcern({
@@ -7324,7 +7370,8 @@ function OneSessionsShell() {
       // A missing receipt must fail closed. Falling back to the current Auto
       // chip would turn the newly materialized Task into write authority even
       // though the preceding conversation was read-only.
-      const continuationPermission: OnePermissionMode = sourceReceipt?.executionPermission ?? "read";
+      // The answer continues the source run's authority, never more than the owner's chip now.
+      const continuationPermission: OnePermissionMode = narrowerOnePermission(onePermission, sourceReceipt?.executionPermission ?? "read");
       // 영수증 목록 갱신은 이어지는 실행을 막지 않는다.
       void api.confirm.committedAnswers(confirmation.chatId).then(setCommittedAnswers, () => undefined);
       setConfirmations((items) => items.filter((item) => item.sourceMessageId !== confirmation.sourceMessageId));
@@ -7370,7 +7417,7 @@ function OneSessionsShell() {
       requestOneOperationalRecovery("one-decision-answer", cause);
       setError(null);
     }
-  }, [busy, conversation?.id, conversation?.originSurface, projections, startRun, submit]);
+  }, [busy, conversation?.id, conversation?.originSurface, onePermission, projections, startRun, submit]);
 
   /*
    * "항상 승인"은 그 대화 안에서만 산다.
