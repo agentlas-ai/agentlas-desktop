@@ -3,7 +3,8 @@ import path from "node:path";
 import type Database from "better-sqlite3";
 
 /**
- * Removes CLI resume transcripts (Codex rollouts, Claude Code session files)
+ * Removes CLI resume transcripts (Codex rollouts, Claude Code session files,
+ * Copilot session-state folders)
  * that Agentlas product runs wrote, for chats unused for `idleDays`. Owner
  * decision 2026-10-16: on the owner's Mac the Codex product store alone held
  * 6.9 GB.
@@ -24,12 +25,15 @@ import type Database from "better-sqlite3";
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 
 interface TranscriptStore {
+  /** chat_runtime_sessions.kind of this runtime's bindings. */
   kind: string;
   /** Folders under userData that hold this runtime's transcripts. */
   roots: string[][];
   /** Session id named by a transcript entry (file or same-named folder). */
   sessionIdOf(name: string): string | null;
   maxDepth: number;
+  /** A folder named by a session id belongs to that session (Claude subagents, Copilot session-state). */
+  dirEntries: boolean;
 }
 
 export const CLI_TRANSCRIPT_STORES: TranscriptStore[] = [
@@ -38,12 +42,23 @@ export const CLI_TRANSCRIPT_STORES: TranscriptStore[] = [
     roots: [["codex-product-home", "store", "sessions"], ["codex-product-home", "store", "archived_sessions"]],
     sessionIdOf: (name) => new RegExp(`^rollout-.*-(${UUID})\\.jsonl$`, "i").exec(name)?.[1]?.toLowerCase() ?? null,
     maxDepth: 4,
+    dirEntries: false,
   },
   {
     kind: "claude-code",
     roots: [["claude-product-home", "projects"]],
     sessionIdOf: (name) => new RegExp(`^(${UUID})(?:\\.jsonl)?$`, "i").exec(name)?.[1]?.toLowerCase() ?? null,
     maxDepth: 1,
+    dirEntries: true,
+  },
+  {
+    // copilot-product-home/<home hash>/session-state/<session id>/ (cli-product-homes.ts adoptCopilotSession).
+    // 40,465 session folders (316 MB) on the owner's Mac, 2026-10-16.
+    kind: "acp:github-copilot-cli",
+    roots: [["copilot-product-home"]],
+    sessionIdOf: (name) => new RegExp(`^(${UUID})$`, "i").exec(name)?.[1]?.toLowerCase() ?? null,
+    maxDepth: 2,
+    dirEntries: true,
   },
 ];
 
@@ -75,7 +90,7 @@ async function indexStore(userDataRoot: string, store: TranscriptStore): Promise
       if (entry.isSymbolicLink()) continue;
       const full = path.join(dir, entry.name);
       const id = store.sessionIdOf(entry.name);
-      if (id && (entry.isFile() || (entry.isDirectory() && store.kind === "claude-code"))) {
+      if (id && (entry.isFile() || (entry.isDirectory() && store.dirEntries))) {
         const stat = await treeStat(full);
         const current = index.get(id) ?? { paths: [], newestMs: 0, bytes: 0 };
         current.paths.push(full);
@@ -93,6 +108,8 @@ async function indexStore(userDataRoot: string, store: TranscriptStore): Promise
 
 export interface CliTranscriptRetentionResult {
   sessions: number;
+  /** Idle bindings whose transcript no longer exists anywhere we index; resuming them would fail. */
+  staleBindings: number;
   orphans: number;
   files: number;
   bytes: number;
@@ -106,7 +123,7 @@ export async function retireIdleCliTranscripts(input: {
   dryRun?: boolean;
   clearSession: (chatId: string, kind: string, agentId: string) => void;
 }): Promise<CliTranscriptRetentionResult> {
-  const result: CliTranscriptRetentionResult = { sessions: 0, orphans: 0, files: 0, bytes: 0 };
+  const result: CliTranscriptRetentionResult = { sessions: 0, staleBindings: 0, orphans: 0, files: 0, bytes: 0 };
   const now = input.now ?? Date.now();
   const cutoffMs = now - input.idleDays * 86_400_000;
   const cutoffIso = new Date(cutoffMs).toISOString();
@@ -155,6 +172,13 @@ export async function retireIdleCliTranscripts(input: {
         index.delete(id);
         retired.add(id);
         result.sessions += 1;
+      }
+      if (!entry && !retired.has(id)) {
+        // The transcript is already gone (measured 2026-10-16: 275 idle Codex bindings on the owner's
+        // Mac named rollouts that exist nowhere). An attended resume of one fails; the policy says start fresh.
+        if (!input.dryRun) input.clearSession(row.chat_id, row.kind, row.agent_id ?? "");
+        result.staleBindings += 1;
+        continue;
       }
       // Every binding of a removed transcript goes, including a second chat sharing the thread.
       if (retired.has(id) && !input.dryRun) input.clearSession(row.chat_id, row.kind, row.agent_id ?? "");
