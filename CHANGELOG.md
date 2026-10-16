@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.51 — 2026-10-16
+
+- Teammates in a room set to an API model, such as Agentlas Light, can read and write files and use their tools again; before, every tool call came back "not approved for this run" and the team stopped without doing the work.
+- This release binds Agentlas OS v1.2.65 at 8b303608eea746e7ea8d7560890816784bdaa86c; public runtime asset `hephaestus-runtime-v1.2.65.tar.gz` is pinned at SHA-256 `7dae16f12a78515dfa7adbc732197e26aa06a2cd413452e81b2675450caba7de`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.50 — 2026-10-16
 
 - New messages keep starting after the app briefly loses its link to the background service; before, nothing could start until you restarted Agentlas.
