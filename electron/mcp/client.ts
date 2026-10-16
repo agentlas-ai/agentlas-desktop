@@ -257,6 +257,7 @@ import { automationRegistrationMonitoring, hasAutomationRegistrationHandoff, res
 import { createAutomation, findAutomationByGoalId, getAutomation, listAutomations, toggleAutomation, updateAutomation, updateAutomationGraph } from "../store/automations";
 import { graphTeamGrantCurrent, type GraphTeamGrant } from "../one/graph-team-grant";
 import { isCompletedToolEvent, previousTurnObservation, projectContextKey, recordContextSourceMarker, recordRunEvent, tryRecordRunEvent } from "../store/run-events";
+import { RUNTIME_TURN_ATTEMPT_EVENT, RUNTIME_TURN_PLACED_EVENT } from "../invocation/turn-placement";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import {
   resolveSiteAgentAppInlineMcpConfigForDispatch,
@@ -6586,6 +6587,19 @@ async function runMcpInvocationInContext(
     // Seal each runner's callbacks to its own generation so a late callback
     // cannot mutate the next runtime's counters, artifacts, or transcript.
     const runtimeTerminalEvidence = { closedHttpRefusal: false, locallyRejected: false };
+    /*
+     * Typed placement evidence for the send queue (invocation/pending-chat-sends.ts removes a queued message only on it):
+     * the first protocol fact that this run's turn reached the runtime's conversation. The native turn ACK
+     * (onNativeTurnController after the exact receipt or uuid echo), model output of this turn (text, tool, thinking,
+     * plan, provider usage), or a returned/thrown terminal the runner reports accepted or completed. A dispatch alone
+     * (onRuntimeAttemptStarted) is not placement. Recorded once per run as a durable run event, on Main and daemon alike.
+     */
+    let turnPlacementRecorded = false;
+    const recordTurnPlacement = (evidence: "turn-ack" | "output" | "terminal"): void => {
+      if (turnPlacementRecorded || !req.runId) return;
+      turnPlacementRecorded = true;
+      tryRecordRunEvent({ runId: req.runId, chatId: chat.id, kind: RUNTIME_TURN_PLACED_EVENT, payload: { runtime: active.kind, evidence } });
+    };
     const createAttemptRunnerEvents = (): {
       events: RunnerEvents; settle: () => void;
       observedUsage: (returnedUsage?: LongRunUsageInput["observedUsage"]) => LongRunUsageInput["observedUsage"];
@@ -6599,6 +6613,7 @@ async function runMcpInvocationInContext(
       const recordTerminalUsage: NonNullable<RunnerEvents["onTerminalObservedUsage"]> = (usage, attemptId): void => {
         if (settled || generation !== runnerEventGeneration) return;
         nativeActivity = true;
+        recordTurnPlacement("output");
         if (usage && (!Number.isFinite(usage.outputTokens) || usage.outputTokens !== 0)) { creditRetryBlocked = true; noteGraphWorkerActivity(executionContext?.graphWorkerAttempt); }
         usageCollector.recordTerminal(usage, attemptId);
       };
@@ -6609,7 +6624,7 @@ async function runMcpInvocationInContext(
       return {
         events: {
           onPartial: forward((...args: Parameters<RunnerEvents["onPartial"]>) => {
-            if (args[0]) nativeActivity = true;
+            if (args[0]) { nativeActivity = true; recordTurnPlacement("output"); }
             if (args[0]) { creditRetryBlocked = true; noteGraphWorkerActivity(executionContext?.graphWorkerAttempt); }
             currentHistoryRuntimeFence()?.assertCurrent();
             runnerEvents.onPartial(...args);
@@ -6617,6 +6632,7 @@ async function runMcpInvocationInContext(
           onStatus: forward(runnerEvents.onStatus),
           onTool: forward((...args: Parameters<NonNullable<RunnerEvents["onTool"]>>) => {
             nativeActivity = true;
+            recordTurnPlacement("output");
             creditRetryBlocked = true;
             currentHistoryRuntimeFence()?.assertCurrent();
             runnerEvents.onTool(...args);
@@ -6637,13 +6653,14 @@ async function runMcpInvocationInContext(
             if (state !== undefined && !observed) { if (!controller) onNativeTurnController?.(null); return; }
             // Withdrawal must still pass after Stop; it has no provider effect.
             if (controller && signal?.aborted) return;
-            if (controller) nativeActivity = true;
+            if (controller) { nativeActivity = true; recordTurnPlacement("turn-ack"); }
             onNativeTurnController?.(controller, observed ?? undefined);
 
           },
           onTerminalObservedUsage: recordTerminalUsage,
           onThinking: forward((...args: Parameters<NonNullable<RunnerEvents["onThinking"]>>) => {
             nativeActivity = true;
+            recordTurnPlacement("output");
             if (args[0]) { creditRetryBlocked = true; noteGraphWorkerActivity(executionContext?.graphWorkerAttempt); }
             if(args[0]!=="end"||args[2])currentHistoryRuntimeFence()?.assertCurrent();
             runnerEvents.onThinking(...args);
@@ -6651,6 +6668,7 @@ async function runMcpInvocationInContext(
           onNotice: forward(runnerEvents.onNotice),
           onPlan: forward((...args: Parameters<NonNullable<RunnerEvents["onPlan"]>>) => {
             nativeActivity = true;
+            recordTurnPlacement("output");
             runnerEvents.onPlan(...args);
           }),
         },
@@ -6805,6 +6823,8 @@ async function runMcpInvocationInContext(
         }
         const attemptEvents = createAttemptRunnerEvents();
         let runnerInvoked = false;
+        /** This attempt provably sent nothing (runner never entered, or its typed pre-dispatch refusal). */
+        let attemptRefusedBeforeDispatch = false;
         let historyReturnedUsage:LongRunUsageInput["observedUsage"];
         runtimeTerminalEvidence.closedHttpRefusal = false;
         runtimeTerminalEvidence.locallyRejected = false;
@@ -6865,6 +6885,7 @@ async function runMcpInvocationInContext(
           // provider code, exactly like a locally rejected throw below: no model work, never an unknown dispatch.
           if (runnerResultRefusedBeforeDispatch(result)) {
             runtimeTerminalEvidence.locallyRejected = true;
+            attemptRefusedBeforeDispatch = true;
             const { ownerControlTerminal: _unknownEffect, ...refused } = result;
             result = refused;
           }
@@ -6884,6 +6905,9 @@ async function runMcpInvocationInContext(
           if (signal?.aborted) throw signal.reason ?? new Error(tStatus(locale, "aborted"));
         } catch (error) {
           persistAttemptUsage(attemptEvents.observedUsage(historyReturnedUsage??observedRunnerUsage(error)), signal?.aborted ? "cancelled" : "failed");
+          // The session acknowledged the turn before it went silent (RuntimeTurnUnsettledError turnDelivery "accepted").
+          if ((error as { turnDelivery?: unknown } | null)?.turnDelivery === "accepted") recordTurnPlacement("terminal");
+          attemptRefusedBeforeDispatch = !runnerInvoked || runnerRefusedBeforeDispatch(error);
           // A typed admission refusal raised before dispatch (the Work project's resident owner is busy) is that refusal,
           // not an unknown dispatch: wrapping it made the one continuation replace the owner's question (2026-10-16).
           if (runnerInvoked && !signal?.aborted && !runnerRefusedBeforeDispatch(error)) {
@@ -6906,8 +6930,12 @@ async function runMcpInvocationInContext(
           };
         } finally {
           attemptEvents.settle();
+          // One delivery fact per attempt for the send queue (invocation/turn-placement.ts).
+          if (req.runId) tryRecordRunEvent({ runId: req.runId, chatId: chat.id, kind: RUNTIME_TURN_ATTEMPT_EVENT,
+            payload: { runtime: selectedRuntime.kind, delivery: attemptRefusedBeforeDispatch ? "not-dispatched" : "dispatched" } });
         }
         if (result.text.trim()) { creditRetryBlocked = true; noteGraphWorkerActivity(executionContext?.graphWorkerAttempt); }
+        if (!runnerResultRefusedBeforeDispatch(result) && (result.turnDelivery === "accepted" || result.ownerControlTerminal === "completed")) recordTurnPlacement("terminal");
         persistGoalUsage(result.observedUsage);
         // A partial reply without a proven terminal is an unknown effect,
         // never permission to retry this request on another brain.

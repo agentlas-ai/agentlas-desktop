@@ -73,10 +73,15 @@ import {
   answerCodexApproval,
   codexApprovalCapability,
   codexAppServerSupported,
+  codexMcpThreadConfig,
   codexPoolKey,
   codexProtocolReceipt,
   codexResidentSessionAlive,
+  codexResidentThreadState,
   codexSessionPool,
+  codexThreadMcpRebindSupported,
+  markCodexThreadMcpRebindUnsupported,
+  releaseCodexResidentThread,
   isCodexApprovalRequest,
   isCodexMcpElicitationRequest,
   looksLikeMissingAppServer,
@@ -1707,58 +1712,143 @@ async function runCodexResidentTurn(input: {
    */
   // Native compaction at 80% of the model's own window (session-generation.ts), Science included; unknown window keeps Codex's default.
   const compactLimit = nativeCompactionLimit(KIND, req.model);
-  const args = [...CODEX_APP_SERVER_ARGS, "-c", "model_reasoning_summary=auto", ...(compactLimit ? ["-c", `model_auto_compact_token_limit=${compactLimit}`] : []), ...surfaceArgs, ...mcpArgs];
   const pool = codexSessionPool();
-  const poolKey = codexPoolKey({
-    // A turn-scoped process is never checked out by another turn.
-    chatId: `${canonicalContextKey ?? req.approvalChatId ?? chatId}${turnScoped ? `#turn:${crypto.randomUUID()}` : ""}`,
-    fingerprint,
-    sessionOwnerId: runtimeSessionOwnerId ?? null,
-    isolateOwner: isolateRuntimeSessionOwner,
-    cwd,
-    bin,
-    ...(req.mcpConfigPath ? { mcpConfigPath: req.mcpConfigPath } : {}),
-    ...(req.toolBrokerSettingsPath ? { toolBrokerSettingsPath: req.toolBrokerSettingsPath } : {}),
-    args,
-    env,
-  });
+  /*
+   * Process identity. The invocation's MCP servers ride thread config on a resident keyed by the grant (the server
+   * names; codex-session.ts codexMcpThreadConfig), so an owner's follow-up reuses the warm process and rebinds its own
+   * servers before turn/start. Spawn arguments used to carry them, and every invocation mints new launch handles and
+   * capability files, so every turn got a new key (production 10-13..16: 374 spawns, 4 reuses). A turn-scoped process
+   * (its grant dies with it) and a Workforce observation (which proves its exact argv) keep the spawn-argument form, as
+   * does an executable that refused thread/unsubscribe.
+   */
+  const residentIdentity = () => {
+    const mcpThread = !turnScoped && !req.workforceRuntimeToolGrant && codexThreadMcpRebindSupported()
+      ? codexMcpThreadConfig(mcpArgs, env) : null;
+    const args = [...CODEX_APP_SERVER_ARGS, "-c", "model_reasoning_summary=auto", ...(compactLimit ? ["-c", `model_auto_compact_token_limit=${compactLimit}`] : []),
+      ...surfaceArgs, ...(mcpThread ? [] : mcpArgs)];
+    const poolKey = codexPoolKey({
+      // A turn-scoped process is never checked out by another turn.
+      chatId: `${canonicalContextKey ?? req.approvalChatId ?? chatId}${turnScoped ? `#turn:${crypto.randomUUID()}` : ""}`,
+      fingerprint,
+      sessionOwnerId: runtimeSessionOwnerId ?? null,
+      isolateOwner: isolateRuntimeSessionOwner,
+      cwd,
+      bin,
+      ...(mcpThread ? { mcpGrant: mcpThread.grant, omitEnv: mcpThread.inlinedEnvNames }
+        : req.mcpConfigPath ? { mcpConfigPath: req.mcpConfigPath } : {}),
+      ...(req.toolBrokerSettingsPath ? { toolBrokerSettingsPath: req.toolBrokerSettingsPath } : {}),
+      args,
+      env,
+    });
+    return { mcpThread, args, poolKey };
+  };
+  let identity = residentIdentity();
 
-  let lease: AcpSessionLease<CodexResidentSession> | null = null;
-  try {
-    lease = await pool.acquire(
-      poolKey,
-      {
-        agentId: req.agentId ?? null,
-        nodeId: req.orchestrationAgentId ?? req.agentId ?? null,
-        chatId,
-        projectId: req.workProjectId ?? null,
-        runtimeKind: KIND,
-        source: resolveAgentResidencySource(req.agentId),
-        reaperExempt: isResidencyExemptAgent(req.agentId),
-        ...(req.signal ? { signal: req.signal } : {}),
-      },
-      () => openCodexResidentSession({ bin, args, cwd, env, label: req.backendLabel || "codex" }),
-    );
-  } catch (err) {
-    if (err && typeof err === "object" && "code" in err && err.code === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
-      // Attributable refusal: the turn never started and no session was leased (no prose, no paths).
-      diagnose({ phase: "turn-start-failed", runtimeAttemptId: null, transport: null, protocol: null, protocolScope: null,
-        terminal: { accepted: false, threadMismatch: 0, turnMismatch: 0, earlyOverflow: 0 }, failure: null,
-        turnStart: { code: WORK_PROJECT_RESIDENCY_BUSY_CODE, transportState: "not-opened", evictionReason: busyAdmissionEvictionReason(err) } });
-      throw err;
+  const acquireResident = async (): Promise<AcpSessionLease<CodexResidentSession> | ResidentTurnOutcome> => {
+    const { args, poolKey } = identity;
+    try {
+      return await pool.acquire(
+        poolKey,
+        {
+          agentId: req.agentId ?? null,
+          nodeId: req.orchestrationAgentId ?? req.agentId ?? null,
+          chatId,
+          projectId: req.workProjectId ?? null,
+          runtimeKind: KIND,
+          source: resolveAgentResidencySource(req.agentId),
+          reaperExempt: isResidencyExemptAgent(req.agentId),
+          ...(req.signal ? { signal: req.signal } : {}),
+        },
+        () => openCodexResidentSession({ bin, args, cwd, env, label: req.backendLabel || "codex" }),
+      );
+    } catch (err) {
+      if (err && typeof err === "object" && "code" in err && err.code === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
+        // Attributable refusal: the turn never started and no session was leased (no prose, no paths).
+        diagnose({ phase: "turn-start-failed", runtimeAttemptId: null, transport: null, protocol: null, protocolScope: null,
+          terminal: { accepted: false, threadMismatch: 0, turnMismatch: 0, earlyOverflow: 0 }, failure: null,
+          turnStart: { code: WORK_PROJECT_RESIDENCY_BUSY_CODE, transportState: "not-opened", evictionReason: busyAdmissionEvictionReason(err) } });
+        throw err;
+      }
+      const initialization = codexInitializationFailure(err);
+      if (initialization) diagnose({ phase: "initialize-failed", runtimeAttemptId: null,
+        transport: initialization.transport, protocol: initialization.protocol, protocolScope: initialization.protocol ? "attempt" : null,
+        terminal: { accepted: false, threadMismatch: 0, turnMismatch: 0, earlyOverflow: 0 }, failure: initialization.failure });
+      // 구형 CLI 는 `app-server` 하위 명령 자체가 없다 — 프로세스 수명 동안 1회 학습해 영구 강등.
+      if (looksLikeMissingAppServer("", err)) {
+        markCodexAppServerUnsupported(err instanceof Error ? err.message : String(err));
+        events.onStatus(`[residency] disabled kind=${KIND} reason=app-server-unsupported`);
+      }
+      if (req.workforceRuntimeToolGrant) throw err;
+      return { retryOneShot: true };
     }
-    const initialization = codexInitializationFailure(err);
-    if (initialization) diagnose({ phase: "initialize-failed", runtimeAttemptId: null,
-      transport: initialization.transport, protocol: initialization.protocol, protocolScope: initialization.protocol ? "attempt" : null,
-      terminal: { accepted: false, threadMismatch: 0, turnMismatch: 0, earlyOverflow: 0 }, failure: initialization.failure });
-    // 구형 CLI 는 `app-server` 하위 명령 자체가 없다 — 프로세스 수명 동안 1회 학습해 영구 강등.
-    if (looksLikeMissingAppServer("", err)) {
-      markCodexAppServerUnsupported(err instanceof Error ? err.message : String(err));
-      events.onStatus(`[residency] disabled kind=${KIND} reason=app-server-unsupported`);
+  };
+
+  const acquired = await acquireResident();
+  if (!("session" in acquired)) return acquired;
+  let lease: AcpSessionLease<CodexResidentSession> = acquired;
+  /*
+   * Reuse preflight, before anything of this turn reaches the process. Paseo checks thread/loaded/list before reusing a
+   * thread and drops a dead handle itself; here a handle that cannot answer (dead, wedged, malformed) is discarded and
+   * this turn opens a fresh process. A thread Codex no longer has loaded is resumed instead of sent a turn/start. When
+   * the thread runs another invocation's MCP table (its launch handles and capability files were revoked when that
+   * invocation ended), the subscription is released so the thread/resume below reloads it with this turn's table; a
+   * model change forks instead, and the fork carries the table. A process whose rebind cannot be confirmed never takes
+   * the turn.
+   */
+  let rebindThread = false;
+  /** The thread this process held, still subscribed, that a model-change fork leaves behind (released after the fork). */
+  let forkSourceToRelease: string | null = null;
+  if (!lease.fresh && lease.session.threadId) {
+    const held = lease.session;
+    const heldThreadId = held.threadId!;
+    const heldModelChanged = Boolean(req.model && held.modelAcknowledgement?.requestedModel !== req.model);
+    const tableChanged = Boolean(identity.mcpThread && held.mcpConfigDigest !== identity.mcpThread.digest);
+    let dropReason: string | null = null;
+    try {
+      if (!codexResidentSessionAlive(held)) throw new Error("codex_resident_dead");
+      const state = await codexResidentThreadState(held, heldThreadId, { ...(req.signal ? { signal: req.signal } : {}) });
+      if (state === "not-loaded") {
+        rebindThread = true;
+      } else if (tableChanged) {
+        const forks = heldModelChanged && !req.runtimeSessionId;
+        const resumesOther = Boolean(req.runtimeSessionId && req.runtimeSessionId !== heldThreadId);
+        if (forks) {
+          forkSourceToRelease = heldThreadId;
+        } else if (resumesOther) {
+          // The named thread loads with this turn's table; the one this process held is released for Codex to unload.
+          forkSourceToRelease = heldThreadId;
+        } else {
+          const released = await releaseCodexResidentThread(held, heldThreadId, { ...(req.signal ? { signal: req.signal } : {}) });
+          if (released === "unsupported") {
+            markCodexThreadMcpRebindUnsupported();
+            dropReason = "rebind_unsupported";
+          } else {
+            // No longer subscribed: only a thread/resume (which re-subscribes) may follow, never a bare turn/start.
+            held.mcpConfigDigest = null;
+            rebindThread = true;
+          }
+        }
+      }
+    } catch {
+      dropReason = "unverified";
     }
-    if (req.workforceRuntimeToolGrant) throw err;
-    return { retryOneShot: true };
+    if (req.signal?.aborted) {
+      // A Stop during the preflight: nothing of this turn was sent; a process that answered is returned intact.
+      if (dropReason) pool.discard(lease, "shutdown"); else pool.release(lease);
+      throw abortReasonError(req);
+    }
+    if (dropReason) {
+      pool.discard(lease, "error");
+      events.onStatus(`[residency] resident_dropped kind=${KIND} reason=${dropReason}`);
+      rebindThread = false;
+      forkSourceToRelease = null;
+      if (dropReason === "rebind_unsupported") identity = residentIdentity();
+      const reopened = await acquireResident();
+      if (!("session" in reopened)) return reopened;
+      lease = reopened;
+    }
   }
+  const mcpThread = identity.mcpThread;
 
   const session = lease.session;
   // Parsing counters belong to the pooled connection. Subtract this checkout's
@@ -2416,21 +2506,32 @@ async function runCodexResidentTurn(input: {
     // even when given a new one. Fork that thread in the same app-server instead:
     // the fork inherits its history and acknowledges the requested model before
     // any prompt is sent. A model change must not create another CLI process.
-    if (!reusing || workforceObservation || explicitResume || modelChanged) {
+    // A reused thread runs another invocation's MCP table only until the preflight above rebinds it (rebindThread), forks
+    // it (modelChanged) or resumes another named thread (explicitResume); anything else never reaches turn/start.
+    if (reusing && mcpThread && session.mcpConfigDigest !== mcpThread.digest && !rebindThread && !modelChanged && !explicitResume) {
+      throw new Error("codex_resident_mcp_table_unbound");
+    }
+    if (!reusing || rebindThread || workforceObservation || explicitResume || modelChanged) {
+      // Thread config: the Workforce policy proof, or this invocation's MCP table (codexMcpThreadConfig). The two never
+      // meet: a Workforce observation keeps its servers in the spawn arguments.
+      const threadConfig: Record<string, unknown> = {
+        // Thread start/resume acknowledges effective policy. Request the same
+        // workspace-write values that turn/start will use before admitting a
+        // Workforce model turn; a requested turn override alone is no proof.
+        ...(workforceObservation && req.permission === "write" ? {
+          "sandbox_workspace_write.writable_roots": [path.resolve(cwd)],
+          "sandbox_workspace_write.network_access": true,
+          "sandbox_workspace_write.exclude_tmpdir_env_var": true,
+          "sandbox_workspace_write.exclude_slash_tmp": true,
+        } : {}),
+        ...(mcpThread && Object.keys(mcpThread.servers).length > 0 ? { mcp_servers: mcpThread.servers } : {}),
+      };
       const commonThreadParams: Record<string, unknown> = {
         cwd,
         approvalPolicy: policy.approvalPolicy,
         approvalsReviewer,
         sandbox: policy.sandbox,
-        // Thread start/resume acknowledges effective policy. Request the same
-        // workspace-write values that turn/start will use before admitting a
-        // Workforce model turn; a requested turn override alone is no proof.
-        ...(workforceObservation && req.permission === "write" ? { config: {
-          "sandbox_workspace_write.writable_roots": [path.resolve(cwd)],
-          "sandbox_workspace_write.network_access": true,
-          "sandbox_workspace_write.exclude_tmpdir_env_var": true,
-          "sandbox_workspace_write.exclude_slash_tmp": true,
-        } } : {}),
+        ...(Object.keys(threadConfig).length > 0 ? { config: threadConfig } : {}),
         // The one-line image contract rides every ordinary thread (no media-intent word list, owner 2026-10-13).
         developerInstructions: codexImageToolCapability(req) !== "disabled" && req.sciencePromptProfile !== true
           ? buildDeveloperInstructions(req, codexImageToolInstructions(Boolean(imageToolSlot)))
@@ -2472,6 +2573,9 @@ async function runCodexResidentTurn(input: {
           workforceObservation?.acknowledgeThread(response, modelAcknowledgement, policy, cwd, approvalsReviewer, threadToResume);
           session.threadId = forkHeldThreadForModel ? response.thread.id : threadToResume;
           session.modelAcknowledgement = modelAcknowledgement;
+          session.mcpConfigDigest = mcpThread?.digest ?? null;
+          // A fork's source keeps its own thread-config servers loaded; it is not this process's thread any more.
+          if (forkHeldThreadForModel && mcpThread && Object.keys(mcpThread.servers).length > 0) forkSourceToRelease ??= threadToResume;
           resumed = true;
         } catch (err) {
           if (req.signal?.aborted) throw abortReasonError(req);
@@ -2498,7 +2602,13 @@ async function runCodexResidentTurn(input: {
         session.threadId = id;
         nativeThreadCreated = true;
         session.modelAcknowledgement = modelAcknowledgement;
+        session.mcpConfigDigest = mcpThread?.digest ?? null;
         await nameNewCodexThread(session, id, req, events);
+      }
+      // The thread this process held before a model-change fork (or before resuming another named thread) still runs
+      // the previous invocation's revoked MCP table: release it so Codex unloads it (best effort, never this turn's).
+      if (forkSourceToRelease && forkSourceToRelease !== session.threadId) {
+        await releaseCodexResidentThread(session, forkSourceToRelease, { timeoutMs: 2_000 }).catch(() => undefined);
       }
       // 버전 스큐 관측 — 이 세션이 어떤 app-server 였는지 영수증에 남긴다.
       events.onStatus(codexProtocolReceipt(session.init));
@@ -2778,7 +2888,11 @@ async function runCodexResidentTurn(input: {
       effects.complete(turnDispatchAttempted ? "resident_turn_closed" : "not_dispatched", (!turnDispatchAttempted || terminalObserved) && !req.signal?.aborted && (!turnDispatchAttempted || !broken));
     } finally {
       try {
-        if (broken || req.signal?.aborted || turnScoped) pool.discard(lease);
+        // Typed close reasons: a Stop is "shutdown", a broken process "error", and a healthy turn-scoped process after its
+        // turn "turn-complete" (it used to be logged as an error: audit A1, 174 `closed reason=error`).
+        if (req.signal?.aborted) pool.discard(lease, "shutdown");
+        else if (broken) pool.discard(lease, "error");
+        else if (turnScoped) pool.discard(lease, "turn-complete");
         else pool.release(lease);
       } finally {
         if (req.signal?.aborted) throw abortReasonError(req);

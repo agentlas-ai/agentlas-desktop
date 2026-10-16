@@ -18,6 +18,9 @@ import {
   type PendingSendRecord,
 } from "./pending-chat-sends";
 import { isTransientSendRefusal } from "../../shared/transient-send-refusal";
+import { liveAppControlRendererEvent } from "../app-control/ipc-registry";
+import { getInvocationRunReceipt } from "../store/run-events";
+import { readRunTurnPlacement } from "./turn-placement";
 
 /**
  * The Main-side wiring of the per-chat send queue (pending-chat-sends.ts) for the messages the renderer sends.
@@ -77,6 +80,33 @@ export function diagnoseBusyChat(chatId: string, waitedMs: number, now: number =
   });
 }
 
+/**
+ * Whether the run that took a queued message is still live: in this process, or in the daemon (its receipt says
+ * running while the daemon's owner row holds it). Anything else has a terminal and can be decided.
+ */
+export function queuedSendRunState(runId: string): "running" | "settled" {
+  if (invocationService.activeRunIds().includes(runId)) return "running";
+  const receipt = getInvocationRunReceipt(runId);
+  return receipt && (receipt.status === "running" || receipt.status === "cancelling") ? "running" : "settled";
+}
+
+/**
+ * Typed placement of a settled run (turn-placement.ts). A run that completed, or stopped to ask the owner, has handled
+ * the message even when no runtime fact was recorded (a host-only answer).
+ */
+export function queuedSendPlacement(runId: string): "placed" | "not-dispatched" | "unconfirmed" {
+  const receipt = getInvocationRunReceipt(runId);
+  if (receipt && (receipt.status === "completed" || receipt.status === "waiting_input")) return "placed";
+  return readRunTurnPlacement(runId);
+}
+
+/** One neutral line for a message whose run ended without proof that it reached the model (never re-sent). */
+export function queuedSendUncertainNotice(locale: "ko" | "en"): string {
+  return locale === "ko"
+    ? "이 메시지가 모델에 전달됐는지 확인되지 않아 다시 보내지 않았어요. 작업 기록을 확인하고 필요하면 다시 보내 주세요."
+    : "It is not confirmed that this message reached the model, so it was not sent again. Check the work history and send it again if needed.";
+}
+
 /** The neutral line for a message that could not run and needs the owner (one line, no codes, no process names). */
 export function queuedSendEndedNotice(locale: "ko" | "en"): string {
   return locale === "ko"
@@ -102,6 +132,10 @@ export function createRendererSendQueue(startNow: RendererStartNow): {
     isChatFree: chatIsFree,
     onBusyWait: ({ chatId, waitedMs }) => diagnoseBusyChat(chatId, waitedMs),
     senderAlive: (event) => { try { return !event.sender.isDestroyed(); } catch { return false; } },
+    // The queue is Main's: a closed window's messages start from another open window of the app (its real IPC event).
+    replacementSender: () => liveAppControlRendererEvent(),
+    runState: queuedSendRunState,
+    placement: queuedSendPlacement,
     saveUserRow: (request) => {
       if (request.promptOrigin === "system") return null;
       const row = appendChatMessage(request.chatId, "user", request.userPrompt, request.images?.length ? { images: request.images } : undefined);
@@ -115,10 +149,22 @@ export function createRendererSendQueue(startNow: RendererStartNow): {
         ? withPreparedUserRow<ChatHistoryEntry, { runId: string }>(request.chatId, request.userPrompt, userRow as ChatHistoryEntry, start)
         : start();
     },
-    onEnded: ({ chatId, request, reason }) => {
-      // The message stays in the transcript. A message that could not run because a window closed or a restart happened
-      // is not announced; one that hit a refusal the owner must fix gets one neutral line.
+    onEnded: ({ chatId, request, reason, code, runId }) => {
+      // The message stays in the transcript. A message that could not run because a restart happened is not announced;
+      // one that hit a refusal the owner must fix gets one neutral line.
       if (reason === "closed") return;
+      if (reason === "uncertain") {
+        // Never re-sent. The run already showed its own failure or the owner stopped it; otherwise say it once.
+        if (code === "process_restarted") return;
+        let status: string | undefined;
+        try { status = runId ? getInvocationRunReceipt(runId)?.status : undefined; } catch { status = undefined; }
+        if (status === "failed" || status === "cancelled") return;
+        try {
+          appendChatMessage(chatId, "assistant", queuedSendUncertainNotice(pickLocale(request)),
+            { hostNotice: { purpose: "host-status", runId: runId ?? request.runId ?? randomUUID(), status: "needs-owner" } });
+        } catch { /* the saved message and the log remain */ }
+        return;
+      }
       try {
         appendChatMessage(chatId, "assistant", queuedSendEndedNotice(pickLocale(request)),
           { hostNotice: { purpose: "host-status", runId: request.runId ?? randomUUID(), status: "needs-owner" } });
@@ -127,6 +173,9 @@ export function createRendererSendQueue(startNow: RendererStartNow): {
     onChange: (chatId) => { try { emitDesktopStoreChange({ entity: "chat", id: chatId }); } catch { /* cosmetic */ } },
     log: (message, detail) => console.info(`[send-queue] ${message}`, detail),
   });
+
+  // A run that settles in this process decides its message at once (runs settled in the daemon are found by the poll).
+  invocationService.onSettled((envelope) => { try { queue.settleRun(envelope.runId); } catch { /* the poll decides it */ } });
 
   const accept = (event: IpcMainInvokeEvent, req: McpInvocationRequest, intentId: string | undefined, cause?: unknown): PendingSendRecord =>
     queue.enqueue(event, req, { ...(intentId ? { intentId } : {}), ...(cause === undefined ? {} : { cause }) });
@@ -162,9 +211,12 @@ export function createRendererSendQueue(startNow: RendererStartNow): {
       const record = queue.find(chatId, intentId);
       if (!record) return null;
       return {
-        accepted: true, chatId, queued: record.state === "queued", interruptsCurrent: false,
+        accepted: true, chatId, queued: record.state === "queued" || record.state === "starting", interruptsCurrent: false,
         queuedRequestId: `pending-send:${record.id}`, promptHash: record.promptHash, intentId,
-        status: record.state === "queued" ? "queued" : record.state === "started" ? "started" : "failed",
+        ...(record.runId ? { runId: record.runId } : {}),
+        // "draining": admitted, placement not known yet. "held": ended without proof of placement; never re-sent.
+        status: record.state === "queued" ? "queued" : record.state === "starting" ? "draining" : record.state === "started" ? "started"
+          : record.state === "uncertain" ? "held" : "failed",
       };
     },
     currentTurnReceiptFor(chatId, intentId, runId) {

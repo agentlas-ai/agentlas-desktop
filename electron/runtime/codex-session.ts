@@ -75,9 +75,11 @@ export const CODEX_APP_SERVER_ARGS = ["app-server", "--listen", "stdio://"] as c
 export const CODEX_CLIENT_REQUESTS = [
   "initialize",
   "model/list",
+  "thread/loaded/list",
   "thread/resume",
   "thread/start",
   "thread/name/set",
+  "thread/unsubscribe",
   "turn/interrupt",
   "turn/start",
   "turn/steer",
@@ -139,6 +141,11 @@ export interface CodexResidentSession {
   threadId: string | null;
   /** thread/start 또는 thread/resume 이 실제로 확인한 모델 선택. */
   modelAcknowledgement: CodexModelAcknowledgement | null;
+  /**
+   * Digest of the thread-config MCP table (codexMcpThreadConfig) the loaded thread runs, set only after the thread
+   * start/resume/fork that carried it was acknowledged; null for a process whose MCP servers are spawn arguments.
+   */
+  mcpConfigDigest: string | null;
   /** `turn/completed` 까지 완주한 턴 수 — 구형 CLI(즉시 실패) 판별에 쓴다. */
   completedTurns: number;
   stopHeartbeat: () => void;
@@ -180,6 +187,7 @@ export async function openCodexResidentSession(opts: {
     closed: false,
     threadId: null,
     modelAcknowledgement: null,
+    mcpConfigDigest: null,
     completedTurns: 0,
     stopHeartbeat: () => {},
   };
@@ -461,6 +469,225 @@ export function disposeCodexSessionPool(): void {
   sessionPool?.disposeAll();
   sessionPool = null;
   appServerSupported = true;
+  threadMcpRebindSupported = true;
+}
+
+/* ──────────────────── Run-scoped MCP servers on a resident thread ──────────────────── */
+
+/*
+ * A resident app-server used to carry each invocation's MCP servers as spawn arguments (`-c mcp_servers.*`). Every
+ * invocation mints new launch handles and capability files (mcp-config.ts), so the argv, and with it the pool key,
+ * changed on every turn: production 10-13..16, codex spawned 374 times and reused 4. Measured offline on the installed
+ * codex-cli 0.163.0 (empty CODEX_HOME, no sign-in, no model request; /tmp/prompt-audit/w3a/probe):
+ *   - thread/start and thread/resume accept the servers as thread config (`config.mcp_servers`), and the thread runs
+ *     exactly those (mcpServerStatus/list with the threadId);
+ *   - thread/resume of a thread this connection still subscribes keeps its old servers, and config/mcpServer/reload
+ *     does not replace thread config;
+ *   - thread/unsubscribe followed by thread/resume with a new table stops the old server processes and starts the new
+ *     ones in the same process (27-53 ms), keeping the thread; identical tables restart too;
+ *   - inline `env` values of that table were found nowhere under CODEX_HOME (rollout and state files included).
+ * So the resident is keyed on the grant identity (the server names) and each turn rebinds its own table before
+ * turn/start; a process whose rebind cannot be confirmed is discarded, never reused with the previous grant.
+ */
+let threadMcpRebindSupported = true;
+/** False once this executable refused thread/unsubscribe: residents key on the per-invocation argv again. */
+export function codexThreadMcpRebindSupported(): boolean { return threadMcpRebindSupported; }
+export function markCodexThreadMcpRebindUnsupported(): void { threadMcpRebindSupported = false; }
+
+export interface CodexMcpThreadConfig {
+  /** `mcp_servers` for thread config; empty when the invocation binds no server. */
+  servers: Record<string, Record<string, unknown>>;
+  /** Process identity: sha256 of the sorted server names (the grant), never the per-invocation values. */
+  grant: string;
+  /** sha256 of the exact table (values included): equal digests need no rebind. Memory only. */
+  digest: string;
+  /** Runtime secret aliases now carried inline in the table; their values leave the pool key's env digest. */
+  inlinedEnvNames: ReadonlySet<string>;
+}
+
+const TOML_BARE_KEY = /^[A-Za-z0-9_-]+$/;
+
+/** One JSON/TOML basic string token starting at `at`; returns [value, nextIndex] or null. */
+function readBasicString(text: string, at: number): [string, number] | null {
+  if (text[at] !== "\"") return null;
+  for (let i = at + 1; i < text.length; i += 1) {
+    if (text[i] === "\\") { i += 1; continue; }
+    if (text[i] === "\"") {
+      try { const value = JSON.parse(text.slice(at, i + 1)); return typeof value === "string" ? [value, i + 1] : null; }
+      catch { return null; }
+    }
+  }
+  return null;
+}
+
+/** The TOML value shapes mcp-config.ts writes (basic string, string array, inline string table, boolean); else undefined. */
+function parseCodexOverrideValue(raw: string): unknown {
+  const text = raw.trim();
+  if (text === "true") return true;
+  if (text === "false") return false;
+  if (text.startsWith("\"")) {
+    const parsed = readBasicString(text, 0);
+    return parsed && parsed[1] === text.length ? parsed[0] : undefined;
+  }
+  if (text.startsWith("[")) {
+    try {
+      const value = JSON.parse(text);
+      return Array.isArray(value) && value.every((item) => typeof item === "string") ? value : undefined;
+    } catch { return undefined; }
+  }
+  if (text.startsWith("{") && text.endsWith("}")) {
+    const out: Record<string, string> = {};
+    const body = text.slice(1, -1);
+    let i = 0;
+    while (i < body.length) {
+      while (body[i] === " " || body[i] === ",") i += 1;
+      if (i >= body.length) break;
+      const keyMatch = /^[A-Za-z0-9_-]+/.exec(body.slice(i));
+      if (!keyMatch) return undefined;
+      i += keyMatch[0].length;
+      while (body[i] === " ") i += 1;
+      if (body[i] !== "=") return undefined;
+      i += 1;
+      while (body[i] === " ") i += 1;
+      const value = readBasicString(body, i);
+      if (!value) return undefined;
+      out[keyMatch[0]] = value[0];
+      i = value[1];
+      while (body[i] === " ") i += 1;
+      if (i < body.length && body[i] !== ",") return undefined;
+    }
+    return out;
+  }
+  return undefined;
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value as Record<string, unknown>).sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * The invocation's `-c mcp_servers.<name>.<prop>=<value>` overrides as a thread-config table. null when any argument is
+ * not such an override or its value is not a shape mcp-config.ts writes: the caller then keeps the spawn-argument form.
+ * `env_vars` aliases are resolved from `env` (the env the run would have spawned with) into the server's inline `env`,
+ * so a reused process never serves a stale per-run value from its own spawn env; `bearer_token_env_var` stays an env
+ * reference (Codex reads it from its own process env, so its value stays in the pool key).
+ */
+export function codexMcpThreadConfig(args: readonly string[], env: NodeJS.ProcessEnv): CodexMcpThreadConfig | null {
+  if (args.length % 2 !== 0) return null;
+  const servers: Record<string, Record<string, unknown>> = {};
+  for (let index = 0; index < args.length; index += 2) {
+    if (args[index] !== "-c") return null;
+    const override = args[index + 1] ?? "";
+    const eq = override.indexOf("=");
+    if (eq <= 0) return null;
+    const keyPath = override.slice(0, eq);
+    const match = /^mcp_servers\.("[^"]+"|[A-Za-z0-9_-]+)\.(.+)$/.exec(keyPath);
+    if (!match) return null;
+    const name = match[1]!.replace(/^"|"$/g, "");
+    const props = match[2]!.split(".");
+    if (!name || name === "__proto__" || props.some((part) => !TOML_BARE_KEY.test(part) || part === "__proto__")) return null;
+    const value = parseCodexOverrideValue(override.slice(eq + 1));
+    if (value === undefined) return null;
+    let node: Record<string, unknown> = servers[name] ??= {};
+    for (const part of props.slice(0, -1)) {
+      const next = node[part];
+      if (next === undefined) node = (node[part] = {}) as Record<string, unknown>;
+      else if (next && typeof next === "object" && !Array.isArray(next)) node = next as Record<string, unknown>;
+      else return null;
+    }
+    const leaf = props[props.length - 1]!;
+    const previous = node[leaf];
+    if (previous && typeof previous === "object" && !Array.isArray(previous) && !(value && typeof value === "object" && !Array.isArray(value))) return null;
+    node[leaf] = value;
+  }
+  const inlined = new Set<string>();
+  for (const entry of Object.values(servers)) {
+    const aliases = entry.env_vars;
+    if (aliases === undefined) continue;
+    if (!Array.isArray(aliases) || !aliases.every((alias) => typeof alias === "string")) return null;
+    if (entry.env !== undefined && (!entry.env || typeof entry.env !== "object" || Array.isArray(entry.env))) return null;
+    const inline: Record<string, string> = { ...((entry.env as Record<string, string> | undefined) ?? {}) };
+    for (const alias of aliases as string[]) {
+      inlined.add(alias);
+      const value = env[alias];
+      if (typeof value === "string") inline[alias] = value;
+    }
+    entry.env = inline;
+    delete entry.env_vars;
+  }
+  for (const entry of Object.values(servers)) {
+    if (typeof entry.bearer_token_env_var === "string") inlined.delete(entry.bearer_token_env_var);
+  }
+  const names = Object.keys(servers).sort();
+  return {
+    servers,
+    grant: crypto.createHash("sha256").update("codex-mcp-grant-v1\0").update(JSON.stringify(names)).digest("hex"),
+    digest: crypto.createHash("sha256").update("codex-mcp-table-v1\0").update(stableJson(servers)).digest("hex"),
+    inlinedEnvNames: inlined,
+  };
+}
+
+export type CodexResidentThreadState = "loaded" | "not-loaded" | "unverifiable";
+
+/**
+ * The executable does not know this request: JSON-RPC -32601, or -32600, which is what codex-cli 0.163.0 answers for a
+ * method it does not have (measured: "Invalid request: unknown variant `thread/doesNotExist`"). Codes only, no text.
+ */
+function codexRequestUnknown(error: unknown): boolean {
+  return error instanceof AcpRpcError && (error.code === -32601 || error.code === -32600);
+}
+
+/**
+ * Whether this live process still has `threadId` loaded (Paseo checks thread/loaded/list before reusing a thread).
+ * "unverifiable": the executable has no thread/loaded/list (codexRequestUnknown). Any other failure (timeout, closed
+ * transport, an internal error, a malformed page) throws: the caller drops the handle instead of reusing it.
+ */
+export async function codexResidentThreadState(session: CodexResidentSession, threadId: string,
+  opts: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<CodexResidentThreadState> {
+  const deadline = Date.now() + (opts.timeoutMs ?? 5_000);
+  let cursor: string | null = null;
+  for (let page = 0; page < 16; page += 1) {
+    let response: any;
+    try {
+      response = await session.conn.request("thread/loaded/list", cursor ? { cursor } : {},
+        { timeoutMs: Math.max(1, deadline - Date.now()), ...(opts.signal ? { signal: opts.signal } : {}) });
+    } catch (error) {
+      if (codexRequestUnknown(error)) return "unverifiable";
+      throw error;
+    }
+    if (!response || !Array.isArray(response.data) || !response.data.every((id: unknown) => typeof id === "string")) {
+      throw new Error("codex_thread_loaded_list_malformed");
+    }
+    if ((response.data as string[]).includes(threadId)) return "loaded";
+    if (typeof response.nextCursor !== "string" || !response.nextCursor) return "not-loaded";
+    cursor = response.nextCursor;
+  }
+  throw new Error("codex_thread_loaded_list_unbounded");
+}
+
+/**
+ * Release this connection's subscription so the next thread/resume reloads the thread with the turn's own config
+ * (measured above). "unsupported": the executable has no thread/unsubscribe (codexRequestUnknown). Any other failure
+ * throws.
+ */
+export async function releaseCodexResidentThread(session: CodexResidentSession, threadId: string,
+  opts: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<"released" | "unsupported"> {
+  let response: any;
+  try {
+    response = await session.conn.request("thread/unsubscribe", { threadId },
+      { timeoutMs: opts.timeoutMs ?? 5_000, ...(opts.signal ? { signal: opts.signal } : {}) });
+  } catch (error) {
+    if (codexRequestUnknown(error)) return "unsupported";
+    throw error;
+  }
+  const status = response?.status;
+  if (status !== "unsubscribed" && status !== "notSubscribed" && status !== "notLoaded") throw new Error("codex_thread_unsubscribe_unacknowledged");
+  return "released";
 }
 
 export class CodexSessionContinuityError extends Error {
@@ -712,30 +939,44 @@ export function codexPoolKey(input: {
   cwd: string;
   bin: string;
   mcpConfigPath?: string;
+  /**
+   * CodexMcpThreadConfig.grant: the invocation's servers travel as thread config (rebound before each turn), so the
+   * process identity holds the grant (server names) instead of the per-invocation config path. The JSON config file is
+   * not a Codex input and leaves the key with it.
+   */
+  mcpGrant?: string;
+  /** Env names whose values travel inline in the thread-config table (CodexMcpThreadConfig.inlinedEnvNames). */
+  omitEnv?: ReadonlySet<string>;
   toolBrokerSettingsPath?: string;
   /** 스폰 argv 그대로: 반복된 옵션은 순서에 따라 적용 값이 달라진다. */
   args: string[];
   env?: NodeJS.ProcessEnv;
 }): string {
+  const byGrant = input.mcpGrant !== undefined;
+  const env: NodeJS.ProcessEnv = byGrant && input.omitEnv?.size
+    ? Object.fromEntries(Object.entries(input.env ?? {}).filter(([name]) => !input.omitEnv!.has(name)))
+    : input.env ?? {};
   const envDigest = crypto.createHash("sha256");
-  for (const name of Object.keys(input.env ?? {}).sort()) {
-    envDigest.update(name).update("\0").update(String((input.env ?? {})[name] ?? "")).update("\0");
+  for (const name of Object.keys(env).sort()) {
+    envDigest.update(name).update("\0").update(String(env[name] ?? "")).update("\0");
   }
   const argvDigest = crypto.createHash("sha256");
   for (const arg of input.args) argvDigest.update(arg).update("\0");
   return crypto
     .createHash("sha256")
-    .update("codex-pool-v2\0")
+    .update(byGrant ? "codex-pool-v3\0" : "codex-pool-v2\0")
     .update(input.chatId).update("\0")
     .update(JSON.stringify([input.sessionOwnerId ?? null, input.isolateOwner ?? false])).update("\0")
     .update(input.fingerprint).update("\0")
     .update(input.cwd).update("\0")
     .update(input.bin).update("\0")
-    .update(input.mcpConfigPath ?? "").update("\0")
+    .update(byGrant ? `grant:${input.mcpGrant}` : input.mcpConfigPath ?? "").update("\0")
     .update(input.toolBrokerSettingsPath ?? "").update("\0")
     .update(argvDigest.digest("hex")).update("\0")
     .update(envDigest.digest("hex"))
-    .update("\0").update(localLaunchState(input))
+    .update("\0").update(localLaunchState({ cwd: input.cwd, bin: input.bin, args: input.args, env: input.env === undefined && !byGrant ? undefined : env,
+      ...(!byGrant && input.mcpConfigPath ? { mcpConfigPath: input.mcpConfigPath } : {}),
+      ...(input.toolBrokerSettingsPath ? { toolBrokerSettingsPath: input.toolBrokerSettingsPath } : {}) }))
     .digest("hex");
 }
 

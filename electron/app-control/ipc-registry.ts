@@ -51,6 +51,22 @@ export function recordAppControlRendererEvent(event: IpcMainInvokeEvent): void {
   }
 }
 
+/**
+ * The latest real top-frame IPC event of a still-open, still-trusted app window (no fake events), or null. The send
+ * queue (invocation/renderer-send-queue.ts) starts a waiting message from it when the message's own window was closed;
+ * the start path re-validates the event exactly as for a click.
+ */
+export function liveAppControlRendererEvent(): IpcMainInvokeEvent | null {
+  for (const event of [...rendererEvents.values()].reverse()) {
+    try {
+      if (event.sender.isDestroyed() || event.senderFrame !== event.sender.mainFrame) continue;
+      if (interactionValidator) interactionValidator(event);
+      return event;
+    } catch { /* closed or no longer trusted: try the next window */ }
+  }
+  return null;
+}
+
 export function appControlHandlerRegistered(channel: string): boolean {
   return handlers.has(channel) || domainHandlers.has(channel);
 }

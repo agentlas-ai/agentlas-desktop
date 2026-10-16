@@ -318,12 +318,17 @@ export class AcpSessionPool<S> {
     this.enforceBudget(0);
   }
 
-  /** 세션을 버린다(취소·프로토콜 파손·재사용 실패). 조용히 닫고 목록에서 지운다. */
-  discard(lease: AcpSessionLease<S>): void {
+  /**
+   * 세션을 버린다(취소·프로토콜 파손·재사용 실패). 조용히 닫고 목록에서 지운다.
+   * `reason` is the typed lifecycle fact: "error" (the default) for a broken or unverifiable process; a caller closing
+   * a healthy one names why ("turn-complete" for a turn-scoped process after its turn, "shutdown" for a Stop), so a
+   * normal release is never counted as a failure (audit A1: 174 `closed reason=error`, mostly normal releases).
+   */
+  discard(lease: AcpSessionLease<S>, reason: Extract<AgentProcessLifecycleReason, "error" | "turn-complete" | "shutdown"> = "error"): void {
     const entry = this.leases.get(lease);
     if (!entry) return;
     this.leases.delete(lease);
-    this.remove(entry, { close: true, reason: "error" });
+    this.remove(entry, { close: true, reason });
   }
 
   /** Retire matching idle owners atomically; never interrupt a checked-out owner. */
