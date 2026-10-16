@@ -29,6 +29,7 @@ import { tryRecordRunEvent } from "../store/run-events";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { withMemorySourceScope } from "../memory/source-custody";
 import { RETAINED_CONTEXT_BLOCKS, retainContextOriginal } from "./context-originals";
+import { looksSecret } from "../../shared/secret-patterns";
 
 export const MODEL_CALL_LEDGER_SCHEMA = "agentlas.model-call-ledger.v1";
 export const MODEL_CALL_LEDGER_EVENT_KIND = "model_call_ledger";
@@ -469,7 +470,7 @@ export function ledgerEventPayload(input: {
   identity: ModelCallIdentity; requestModel?: string | null; effort?: string | null;
   payload: PayloadLedger | null; usage: AttemptRecord["usage"]; detail: AttemptRecord["detail"];
   cachePlan?: CachePlan | null; meta?: CallMeta;
-  status: string; failureKind?: string; durationMs: number;
+  status: string; failureKind?: string; failureCode?: string; durationMs: number;
   /** The context window the runtime itself reported for this session (RunnerResult.contextWindowTokens). */
   contextWindowObserved?: number;
 }): Record<string, unknown> {
@@ -482,7 +483,8 @@ export function ledgerEventPayload(input: {
     role: input.role, roleSource: input.roleSource, ...(input.phase ? { phase: input.phase } : {}), scoped: input.scoped,
     runtimeKind: input.identity.kind, ...(input.identity.backend ? { runtimeBackend: input.identity.backend } : {}),
     ...(input.requestModel ? { model: input.requestModel } : {}), ...(input.effort ? { effort: input.effort } : {}),
-    status: input.status, ...(input.failureKind ? { failureKind: input.failureKind } : {}), durationMs: input.durationMs,
+    status: input.status, ...(input.failureKind ? { failureKind: input.failureKind } : {}),
+    ...(input.failureCode ? { failureCode: input.failureCode } : {}), durationMs: input.durationMs,
     payloadSource: payload?.source ?? "unknown", mode: payload?.mode ?? "unknown",
     tokenizerRevision: TOKEN_ESTIMATE_REVISION,
     ...(input.meta?.endpointHost ? { endpointHost: input.meta.endpointHost } : {}),
@@ -594,6 +596,15 @@ export function withModelCallLedger(runner: Runner, identity: ModelCallIdentity)
   };
 }
 
+/**
+ * The runner's own machine code for a failed call (a returned RunnerFailure.providerCode, or a thrown error's code).
+ * Production 1.3.47/1.3.48 (2026-10-16): every dreaming pass failed with only failureKind "unsupported" on this row
+ * while the cause, codex_no_tools_model_required, existed nowhere persisted. Identifier-shaped values only, no prose.
+ */
+function ledgerFailureCode(value: unknown): string | undefined {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$/.test(value) && !looksSecret(value) ? value : undefined;
+}
+
 function emit(collector: Collector, input: {
   req: RunnerRequest; identity: ModelCallIdentity; scope: ModelCallScope | undefined; callRef: string;
   startedAt: number; result: RunnerResult | undefined; threw: boolean; thrown: unknown;
@@ -606,6 +617,7 @@ function emit(collector: Collector, input: {
   const aborted = req.signal?.aborted === true;
   const status = input.threw ? (aborted ? "cancelled" : "failed") : result?.failure ? "failed" : "completed";
   const failureKind = result?.failure?.kind;
+  const failureCode = ledgerFailureCode(input.threw ? (input.thrown as { code?: unknown } | null)?.code : result?.failure?.providerCode);
   const effort = result && Object.prototype.hasOwnProperty.call(result, "appliedEffort") ? result.appliedEffort ?? null : req.effort ?? null;
   // Attempts the adapter announced; a runner that announced none still made (at most) one call we must account for.
   const attempts: AttemptRecord[] = collector.attempts.length
@@ -631,6 +643,7 @@ function emit(collector: Collector, input: {
         attemptId: attempt.id, role, roleSource: source, ...(scope?.phase ? { phase: scope.phase } : {}),
         userTurnId, scoped: Boolean(scope?.runId), identity, requestModel: req.model ?? identity.model ?? null, effort,
         payload, usage: attempt.usage, detail: attempt.detail, cachePlan: attempt.cachePlan ?? null, status, ...(failureKind ? { failureKind } : {}),
+        ...(failureCode ? { failureCode } : {}),
         ...(collector.meta ? { meta: collector.meta } : {}),
         ...(reportedWindow && index === attempts.length - 1 ? { contextWindowObserved: reportedWindow } : {}),
         durationMs: Math.max(0, Date.now() - attempt.startedAt),

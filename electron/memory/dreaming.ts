@@ -1,4 +1,3 @@
-import { runObservedRunnerAs, ObservedRunnerFailureError } from "../runtime/observed-runner";
 // 유휴 드리밍 큐레이션 — Claude Code/Codex의 "드리밍"처럼, 사용자가 자리를 비운 유휴 시간에
 // 큐레이터가 쌓아둔 durable 메모리를 정리한다. 1단계는 결정론 dedup(무LLM), 2단계는 메모리가
 // 많이 쌓인 에이전트에 한해 LLM 1회 호출로 규칙 통합.
@@ -7,13 +6,18 @@ import { runObservedRunnerAs, ObservedRunnerFailureError } from "../runtime/obse
 //   · 기본 ON — 저장된 ON/OFF 선택은 유지 (meta "memory_dreaming_enabled")
 //   · 시스템 유휴 ≥ 10분(powerMonitor) · 실행 슬롯 완전 유휴(inUse=0, queued=0)
 //   · 쿨다운 6시간 · 동시 1패스 · 사용자가 돌아오면(유휴 리셋) 즉시 abort
-//   · LLM 호출은 selection의 슬롯 래핑 러너 경유 → 전역 동시성 예산 + nice 5 상속
+//   · LLM 호출은 다른 백그라운드 판정과 같은 판정 경로(callConnectedModelDetailed, 무도구) 경유 →
+//     설정된 오케스트레이터 판정 풀(없으면 활성 오케스트레이터 고정), 모델·노력 지정, 전역 동시성 예산 상속
 import { dreamingCooldownMs, dreamingIdleRequiredSec } from "./curator-rules";
 import { powerMonitor } from "electron";
 import { getMeta, setMeta } from "../store/meta";
 import { runSlotStats } from "../runtime/run-slots";
 import { detectRuntimes } from "../runtime/detect";
-import { pickActive, pickRunner } from "../runtime/selection";
+import { pickActive } from "../runtime/selection";
+import { withModelCallScope } from "../runtime/model-call-ledger";
+import { withRunnerSettlementObserver } from "../runtime/observed-runner";
+import { selectionForRuntime } from "../../shared/runtime-selection";
+import type { RuntimeSelection } from "../../shared/types";
 import {
   dedupExactDuplicateMemories,
   supersedeLegacyRequestEchoMemories,
@@ -32,7 +36,15 @@ import { getAgentById } from "../mcp/registry";
 import { createHash, randomUUID } from "node:crypto";
 import { getMemoryDb, getMemoryStoreInfo } from "./database";
 import { assertMemorySourceCustody, currentMemorySourceCustody, withIndependentMemoryWorker } from "./source-custody";
-import { connectedModelTimeoutMs } from "../system-agents/judgment";
+import {
+  callConnectedModelDetailed,
+  configuredOrchestratorJudgmentPolicy,
+  connectedModelTimeoutMs,
+  type JudgmentRuntimeAttempt,
+  type JudgmentRuntimeReceipt,
+  type JudgmentSelectionPolicy,
+} from "../system-agents/judgment";
+import type { RunnerFailure } from "../runtime/runner";
 
 const DREAM_POLICY = "agentlas.dreaming-source.v1";
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -75,10 +87,81 @@ const COOLDOWN_MS = dreamingCooldownMs();
 const TICK_MS = 5 * 60 * 1000; // 5분마다 조건 확인(조건 체크 자체는 ~0 비용)
 // A pass whose model call failed backs off (5 min, doubling, six-hour cap) so a
 // down judgment path is probed once per interval, not on every tick forever.
+// The streak and the failure's machine code persist in meta: an app restart
+// (several a day during releases) must not restart the probing at five minutes.
 const FAILURE_BACKOFF_CAP_MS = 6 * 60 * 60_000;
-let failureStreak = 0, backoffUntil = 0, passFailed = false;
+const FAILURE_KEY = "memory_dreaming_failure";
 export const dreamingFailureBackoffMs = (streak: number): number =>
   Math.min(FAILURE_BACKOFF_CAP_MS, TICK_MS * 2 ** Math.max(0, Math.min(streak, 20) - 1));
+
+/** Content-free cause of a failed pass: machine codes and route identity only, never prose or memory text. */
+export interface DreamingFailureCause {
+  code: string;
+  /** The runner's own returned typed code when the observed-runner boundary reported it as runtime_turn_unsettled. */
+  causeCode?: string;
+  failureKind?: string;
+  /** Constructor name of an untyped thrown error (TypeError, SqliteError ...), never its message. */
+  errorName?: string;
+  route?: JudgmentRuntimeReceipt["route"];
+  runtimeKind?: string;
+  execution?: JudgmentRuntimeReceipt["execution"];
+}
+interface DreamingFailureRecord extends DreamingFailureCause { schemaVersion: "agentlas.dreaming-failure.v1"; failures: number; until: number }
+const machineCode = (value: unknown): string | undefined =>
+  typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$/.test(value) ? value : undefined;
+class DreamingJudgmentFailure extends Error {
+  constructor(readonly failureCause: DreamingFailureCause) { super(failureCause.code); this.name = "DreamingJudgmentFailure"; }
+}
+function readDreamingFailure(): DreamingFailureRecord | null {
+  try {
+    const raw = getMeta(FAILURE_KEY);
+    const value = raw ? JSON.parse(raw) as Partial<DreamingFailureRecord> : null;
+    return value && Number.isSafeInteger(value.failures) && Number.isFinite(value.until) && typeof value.code === "string"
+      ? value as DreamingFailureRecord : null;
+  } catch { return null; }
+}
+function errorFailureCause(error: unknown): DreamingFailureCause {
+  if (error instanceof DreamingJudgmentFailure) return error.failureCause;
+  const code = machineCode((error as { code?: unknown } | null)?.code) ?? machineCode(error instanceof Error ? error.message : undefined);
+  const errorName = error instanceof Error && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(error.name) ? error.name : undefined;
+  return { code: code ?? "dreaming_pass_failed", ...(errorName ? { errorName } : {}) };
+}
+/**
+ * The judgment path's typed outcome, reduced to machine identifiers. `returned` is the last runner's own returned
+ * failure: observed-runner.ts reports a returned failure without a completed terminal as runtime_turn_unsettled, which
+ * is all the judgment receipt then says (production: codex_no_tools_model_required was visible nowhere).
+ */
+function judgmentFailureCause(detailed: { text: string | null; failure?: RunnerFailure;
+  runtimeReceipt?: JudgmentRuntimeReceipt; attempts?: JudgmentRuntimeAttempt[] }, returned?: RunnerFailure): DreamingFailureCause {
+  const last = detailed.attempts?.at(-1);
+  const failure = detailed.failure;
+  const code = detailed.text !== null || last?.outcome === "invalid_output" ? "dreaming_result_invalid"
+    : machineCode(failure?.providerCode) ?? machineCode(failure?.message) ?? (failure ? `judgment_${failure.kind}` : "dreaming_judgment_unavailable");
+  const causeCode = machineCode(returned?.providerCode);
+  const receipt = detailed.runtimeReceipt;
+  return { code, ...(causeCode && causeCode !== code ? { causeCode } : {}), ...(failure ? { failureKind: failure.kind } : {}),
+    ...(receipt ? { route: receipt.route, runtimeKind: receipt.selection.kind, execution: receipt.execution } : {}) };
+}
+function recordDreamingFailure(cause: DreamingFailureCause, stage: "consolidation" | "pass"): DreamingFailureRecord {
+  const failures = (readDreamingFailure()?.failures ?? 0) + 1;
+  const backoffMs = dreamingFailureBackoffMs(failures);
+  const record: DreamingFailureRecord = { schemaVersion: "agentlas.dreaming-failure.v1", ...cause, failures, until: Date.now() + backoffMs };
+  try { setMeta(FAILURE_KEY, JSON.stringify(record)); } catch { /* The log line below still names the cause. */ }
+  console.error(`[dreaming] ${stage} failed`, JSON.stringify({ ...cause, failures, backoffMs }));
+  return record;
+}
+/**
+ * Same route as the other background judgments (criterion-proof classificationRoute, strategy reflection): the
+ * configured orchestrator judgment pool, else the active orchestrator runtime as an exact pin. Either way the call
+ * carries the selection's model and effort. Production 1.3.43-1.3.48 (2026-10-15 23:05Z on): the raw active runner got
+ * no model, so the Codex no-tools judgment lane refused it (codex_no_tools_model_required) before any process started.
+ */
+async function dreamingJudgmentRoute(): Promise<{ selectionPolicy: JudgmentSelectionPolicy } | { runtimeSelection: RuntimeSelection } | null> {
+  const selectionPolicy = configuredOrchestratorJudgmentPolicy();
+  if (selectionPolicy) return { selectionPolicy };
+  const active = pickActive(await detectRuntimes());
+  return active ? { runtimeSelection: selectionForRuntime(active) } : null;
+}
 const MAX_AGENTS_PER_PASS = 2; // 한 번의 드리밍에서 LLM 통합할 에이전트 수 상한
 const LLM_TIMEOUT_MS = 300_000;
 
@@ -167,7 +250,10 @@ function idleSeconds(): number {
 }
 
 async function tick(): Promise<void> {
-  if (running || Date.now() < backoffUntil) return;
+  if (running) return;
+  const backoff = readDreamingFailure();
+  // A wall-clock step backwards cannot stretch the wait past the six-hour cap.
+  if (backoff && Date.now() < backoff.until && backoff.until - Date.now() <= FAILURE_BACKOFF_CAP_MS) return;
   running = true;
   try {
     await withIndependentMemoryWorker(async () => {
@@ -194,12 +280,10 @@ async function tick(): Promise<void> {
         });
         if (!pending) return;
       }
-      passFailed = false;
-      const passDone = await dreamOnce();
-      if (passFailed) {
-        failureStreak++;
-        backoffUntil = Date.now() + dreamingFailureBackoffMs(failureStreak);
-      } else if (passDone) { failureStreak = 0; backoffUntil = 0; }
+      const pass = await dreamOnce();
+      if (pass.failure) recordDreamingFailure(pass.failure, "consolidation");
+      else if (pass.completed && backoff) { try { setMeta(FAILURE_KEY, ""); } catch { /* Cleared on the next success. */ } }
+      const passDone = pass.completed;
       if (passDone) {
         assertMemorySourceCustody(custody);
         const current = getMemoryStoreInfo(), completedAt = new Date().toISOString();
@@ -208,13 +292,14 @@ async function tick(): Promise<void> {
       }
     });
   } catch (err) {
-    console.error("[dreaming] pass failed:", err);
+    // A pass that throws outside one agent's consolidation backs off too, with its machine code only.
+    recordDreamingFailure(errorFailureCause(err), "pass");
   } finally {
     running = false;
   }
 }
 
-async function dreamOnce(): Promise<boolean> {
+async function dreamOnce(): Promise<{ completed: boolean; failure?: DreamingFailureCause }> {
   const custody = currentMemorySourceCustody();
   assertMemorySourceCustody(custody);
   const origin = getMemoryStoreInfo();
@@ -225,19 +310,17 @@ async function dreamOnce(): Promise<boolean> {
 
   // 2단계 — 메모리가 많이 쌓인 에이전트만 LLM 통합(패스당 상한).
   const targets = listAgentIdsWithLiveMemory(8);
-  if (targets.length === 0) return false;
+  if (targets.length === 0) return { completed: false };
 
-  const runtimes = await detectRuntimes();
-  const active = pickActive(runtimes);
-  const picked = active ? pickRunner(active) : null;
-  if (!picked) return false; // 사용 가능한 런타임 없음 — 다음 기회에
+  const route = await dreamingJudgmentRoute();
+  if (!route) return { completed: false }; // 사용 가능한 런타임 없음 — 다음 기회에
 
   for (const target of targets) {
     // 사용자가 돌아왔으면 즉시 중단 — 드리밍은 항상 양보한다.
-    if (idleSeconds() < 30) return completed;
+    if (idleSeconds() < 30) return { completed };
     const agent = getAgentById(target.agentId);
     if (!agent) continue;
-    if (dispatched >= MAX_AGENTS_PER_PASS) return completed;
+    if (dispatched >= MAX_AGENTS_PER_PASS) return { completed };
     assertMemorySourceCustody(custody);
     const selected = selectedDreamingSources(target.agentId);
     if (!selected) continue;
@@ -275,6 +358,7 @@ async function dreamOnce(): Promise<boolean> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     let onStopped: (() => void) | undefined;
+    let failureCause: DreamingFailureCause | undefined;
     // 유휴 이탈 감시 — 30초마다 확인, 사용자가 활동하면 즉시 abort.
     const watchdog = setInterval(() => {
       if (idleSeconds() < 30) controller.abort();
@@ -287,13 +371,16 @@ async function dreamOnce(): Promise<boolean> {
         .join("\n");
       const intakeEpoch = origin.revocationEpoch;
       assertLease();
-      if (controller.signal.aborted) return completed;
+      if (controller.signal.aborted) return { completed };
       const stopped = new Promise<never>((_resolve, reject) => {
         onStopped = () => reject(controller.signal.reason ?? new Error("memory_dreaming_cancelled"));
         controller.signal.addEventListener("abort", onStopped, { once: true });
       });
-      const call = runObservedRunnerAs("curator", "dreaming", picked.runner,
-        {
+      let returnedFailure: RunnerFailure | undefined;
+      // Diagnostic only: the last settled attempt's own returned failure; it never changes settlement or replay.
+      const observeReturned = (provider: PromiseLike<unknown>) => { provider.then((value) => {
+        returnedFailure = (value as { failure?: RunnerFailure } | null)?.failure; }, () => { returnedFailure = undefined; }); };
+      const call = withModelCallScope({ role: "curator", phase: "dreaming" }, () => withRunnerSettlementObserver(observeReturned, () => callConnectedModelDetailed({
           systemPrompt: [
             "judgment: merge redundant or fragmentary memory entries into a few durable rules",
             'output: ONLY valid JSON {"rules": ["..."], "absorbed": [1,2,...]}, no fences, no prose',
@@ -303,32 +390,23 @@ async function dreamOnce(): Promise<boolean> {
             "absorbed: entry numbers fully covered by the rules; never absorb an entry whose specifics are not preserved",
             "already clean and distinct: {\"rules\": [], \"absorbed\": []}",
           ].join("\n"),
-          history: [],
-          userPrompt: `Agent: ${agent.name}\nMemory entries:\n${numbered}`,
-          backendLabel: picked.label,
-          permission: "read",
-          judgmentOnly: true, untrustedNoTools: true,
+          input: `Agent: ${agent.name}\nMemory entries:\n${numbered}`,
+          timeoutMs,
           signal: controller.signal,
           locale: "en",
-        },
-        { onPartial: () => {}, onStatus: () => {} },
-      );
+          // Memory text is untrusted source material: the runner's enforced no-tools judgment lane only.
+          requireNoTools: true,
+          ...route,
+          // An unparseable reply is that candidate's failure; the next pool member may answer.
+          accept: (text) => parseDreamingResult(text, entries.length) !== null,
+        })));
       void call.catch(() => {});
-      const result = await Promise.race([call, stopped]);
-      if (controller.signal.aborted) return completed;
+      const detailed = await Promise.race([call, stopped]);
+      if (controller.signal.aborted) return { completed };
       assertLease();
-      if (result.failure) throw new ObservedRunnerFailureError(result.failure);
-      const parsed = extractJson(result.text);
-      if (!parsed || !Array.isArray(parsed.rules) || !Array.isArray(parsed.absorbed)
-        || parsed.rules.length > 5 || !parsed.rules.every(rule => typeof rule === "string" && rule.trim() && rule.length <= 4_000)
-        || !parsed.absorbed.every(n => Number.isInteger(n) && Number(n) >= 1 && Number(n) <= entries.length)) throw new Error("dreaming_result_invalid");
-      const rules = (Array.isArray(parsed.rules) ? parsed.rules : []).filter(
-        (r): r is string => typeof r === "string" && r.trim().length > 0,
-      );
-      const absorbed = (Array.isArray(parsed.absorbed) ? parsed.absorbed : [])
-        .map((n) => Number(n))
-        .filter((n) => Number.isInteger(n) && n >= 1 && n <= entries.length);
-      if ((rules.length === 0) !== (absorbed.length === 0)) throw new Error("dreaming_result_invalid");
+      const parsed = detailed.text === null ? null : parseDreamingResult(detailed.text, entries.length);
+      if (!parsed) throw new DreamingJudgmentFailure(judgmentFailureCause(detailed, returnedFailure));
+      const { rules, absorbed } = parsed;
       if (rules.length === 0) {
         db.transaction(() => { assertLease(); db.prepare("UPDATE memory_dreaming_sources SET state='completed',result_json=?,completed_at=?,lease_token=NULL,lease_expires_at=NULL WHERE scope_key=? AND input_digest=? AND intake_epoch=? AND lease_token=?")
           .run(JSON.stringify({ rules: [], absorbed: [] }), new Date().toISOString(), scope, inputDigest, origin.revocationEpoch, lease); }).immediate();
@@ -387,18 +465,32 @@ async function dreamOnce(): Promise<boolean> {
         continue;
       }
       // abort(사용자 복귀/타임아웃) 포함 — 조용히 다음 기회로.
-      if (!controller.signal.aborted) { passFailed = true; console.error("[dreaming] consolidation failed:", err); }
-      return completed;
+      if (controller.signal.aborted) return { completed };
+      failureCause = errorFailureCause(err);
+      return { completed, failure: failureCause };
     } finally {
       // A failed/unavailable model or changed source is retryable, never a
       // successful processed digest. A peer reclaimed lease is untouched.
-      try { db.prepare("UPDATE memory_dreaming_sources SET state='retry',lease_token=NULL,lease_expires_at=NULL WHERE scope_key=? AND input_digest=? AND intake_epoch=? AND state='processing' AND lease_token=?").run(scope, inputDigest, origin.revocationEpoch, lease); } catch { /* Old owner facade is fenced. */ }
+      // The retry row keeps the failure's machine code (no prose) next to the source digest.
+      try { db.prepare("UPDATE memory_dreaming_sources SET state='retry',lease_token=NULL,lease_expires_at=NULL,result_json=COALESCE(?,result_json) WHERE scope_key=? AND input_digest=? AND intake_epoch=? AND state='processing' AND lease_token=?").run(failureCause ? JSON.stringify({ schemaVersion: "agentlas.dreaming-failure.v1", failure: failureCause }) : null, scope, inputDigest, origin.revocationEpoch, lease); } catch { /* Old owner facade is fenced. */ }
       clearTimeout(timeout);
       clearInterval(watchdog);
       if (onStopped) controller.signal.removeEventListener("abort", onStopped);
     }
   }
-  return completed;
+  return { completed };
+}
+
+/** One validity rule for both the judgment's accept() and the write below. */
+function parseDreamingResult(text: string, entryCount: number): { rules: string[]; absorbed: number[] } | null {
+  const parsed = extractJson(text);
+  if (!parsed || !Array.isArray(parsed.rules) || !Array.isArray(parsed.absorbed)
+    || parsed.rules.length > 5 || !parsed.rules.every(rule => typeof rule === "string" && rule.trim() && rule.length <= 4_000)
+    || !parsed.absorbed.every(n => Number.isInteger(n) && Number(n) >= 1 && Number(n) <= entryCount)) return null;
+  const rules = parsed.rules.filter((r): r is string => typeof r === "string" && r.trim().length > 0);
+  const absorbed = parsed.absorbed.map((n) => Number(n)).filter((n) => Number.isInteger(n) && n >= 1 && n <= entryCount);
+  if ((rules.length === 0) !== (absorbed.length === 0)) return null;
+  return { rules, absorbed };
 }
 
 function extractJson(text: string): { rules?: unknown; absorbed?: unknown } | null {
