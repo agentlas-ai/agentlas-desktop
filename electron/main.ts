@@ -88,6 +88,8 @@ import { closeStore, getDb, initStore, openedStorePath, resolveStorePath, runPos
 import { getDaemonAutostartEnabled, markDaemonAutostartStoreReady, readDaemonAutostartStoreReady, resolveDaemonAutostartPolicy } from "./store/daemon-autostart";
 import { storeIdentityDigest } from "./daemon/diagnostic-log";
 import { mainWindowDevToolsAllowed } from "./devtools-policy";
+import { rememberedMainWindowRoute, rememberMainWindowUrl } from "./main-route-memory";
+import { mainWindowInitialRoute } from "../shared/restorable-route";
 import { startMemoryRevocationCleanup, stopMemoryRevocationCleanup } from "./memory/revocation-cleanup";
 import { emitDesktopStoreChange, onDesktopStoreChange } from "./store/change-bus";
 import { watchExternalChatChanges } from "./store/external-chat-changes";
@@ -1040,14 +1042,22 @@ void singleInstanceLockPromise.then((acquired) => {
  * 바깥에서 온 URL 로 창을 항해시키지 않는다.
  */
 const PLUGIN_DEEP_LINK_RE = /^agentlas:\/\/plugin\/([a-z0-9][a-z0-9-]{0,63})\/([a-z0-9][a-z0-9-]{0,79})\/?$/i;
+// A link that arrives before the main window shows a product document becomes that window's first screen,
+// ahead of the remembered one (mainWindowInitialRoute); delivered once, by whichever comes first.
+let pendingDeepLinkRoute: string | null = null;
 
 function routeAgentlasDeepLink(rawUrl: string): void {
   if (developmentEffectsSuppressed()) return;
   const match = PLUGIN_DEEP_LINK_RE.exec(rawUrl.trim());
   if (!match) return; // 모르는 모양은 무시한다 — 바깥 입력이 임의 경로를 열 수 없다.
   const route = `/marketplace?install=${encodeURIComponent(match[2])}&family=${encodeURIComponent(match[1])}`;
+  pendingDeepLinkRoute = route;
   const deliver = (): void => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
+    // Still on the startup placeholder: the product load that follows opens this route itself.
+    if (mainWindow.webContents.getURL().startsWith("data:")) return;
+    if (pendingDeepLinkRoute !== route) return;
+    pendingDeepLinkRoute = null;
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();
@@ -1240,8 +1250,13 @@ function armOsMaintenanceAfterProductLoad(window: BrowserWindow): void {
 async function loadMainRendererIntoWindow(initialRoute?: string): Promise<void> {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const startUrl = process.env.ELECTRON_START_URL;
+  // An explicit route or a pending deep link wins; otherwise the last product screen reopens (an update relaunch or a
+  // quit and relaunch used to land on Work home every time).
+  const deepLink = initialRoute ? null : pendingDeepLinkRoute;
+  if (deepLink) pendingDeepLinkRoute = null;
+  const route = mainWindowInitialRoute({ requested: initialRoute, deepLink, remembered: rememberedMainWindowRoute() });
   if (isDev && startUrl) {
-    await loadMainUrl(initialRoute ? new URL(initialRoute, startUrl).href : startUrl);
+    await loadMainUrl(new URL(route, startUrl).href);
     // Keep normal local QA launches to one visible Agentlas window. Detached
     // DevTools are opt-in so restarting the renderer does not accumulate extra
     // Electron windows beside the product under test.
@@ -1249,7 +1264,7 @@ async function loadMainRendererIntoWindow(initialRoute?: string): Promise<void> 
       mainWindow.webContents.openDevTools({ mode: "detach" });
     }
   } else {
-    await loadMainUrl(new URL(initialRoute ?? "/dashboard", "agentlas://app").href);
+    await loadMainUrl(new URL(route, "agentlas://app").href);
   }
 }
 
@@ -1343,8 +1358,16 @@ async function createWindow(options: { startupPlaceholder?: boolean; initialRout
     } catch { /* keep the default minimum for unparseable URLs */ }
     startupWindow.setMinimumSize(personal ? 380 : 960, personal ? 560 : 640);
   };
-  mainWindow.webContents.on("did-navigate", (_event, url) => applyRouteMinimumSize(url));
-  mainWindow.webContents.on("did-navigate-in-page", (_event, url, isMainFrame) => { if (isMainFrame) applyRouteMinimumSize(url); });
+  const developmentStartUrl = isDev ? process.env.ELECTRON_START_URL ?? null : null;
+  mainWindow.webContents.on("did-navigate", (_event, url) => {
+    applyRouteMinimumSize(url);
+    if (mainWindow === startupWindow) rememberMainWindowUrl(url, developmentStartUrl);
+  });
+  mainWindow.webContents.on("did-navigate-in-page", (_event, url, isMainFrame) => {
+    if (!isMainFrame) return;
+    applyRouteMinimumSize(url);
+    if (mainWindow === startupWindow) rememberMainWindowUrl(url, developmentStartUrl);
+  });
   mainWindow.once("closed", () => {
     if (mainWindow && mainWindow !== startupWindow) return;
     mainDocumentGeneration += 1;
