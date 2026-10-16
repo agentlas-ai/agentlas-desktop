@@ -568,7 +568,7 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
   // boundary, before authentication, prompt construction or a charged call.
   assertScienceRecoveryRequest(req, "agentlas");
   const cookie = getSessionCookieHeader();
-  if (!cookie) return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain", failure: { kind: "auth", runtime: "agentlas", source: "marker",
+  if (!cookie) return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain", turnDelivery: "not-dispatched", failure: { kind: "auth", runtime: "agentlas", source: "marker",
     providerCode: "sign_in_required", message: signInRequired(req.locale).message } });
 
   const model = servingModelId(req);
@@ -590,7 +590,7 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
       historyTokens: servingAdmissionTokens(JSON.stringify(context.turns.slice(0, -1))) });
     if (rotation.action === "rotated") context = turnsFor(req, events, outputReserve, rotation) ?? context;
   }
-  if (!context) return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain", failure: { kind: "refused", runtime: "agentlas", source: "marker",
+  if (!context) return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain", turnDelivery: "not-dispatched", failure: { kind: "refused", runtime: "agentlas", source: "marker",
     providerCode: "model_context_capacity_exceeded",
     message: req.locale === "ko"
       ? "Agentlas 모델의 보수적 문맥 예산을 넘었습니다. 현재 요청과 지시는 잘라내지 않았습니다."

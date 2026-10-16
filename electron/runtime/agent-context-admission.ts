@@ -9,8 +9,8 @@ import { createDaemonAgentContextHost } from "../daemon/agent-context-host";
 import { getDb } from "../store/db";
 import { invocationProcessOwner, invocationRunOwners, assertInvocationRunOwner } from "../store/invocation-run-owners";
 import { createAgentContextCapability, agentContextHostBinding, bootstrapAgentContextHistory, markAgentContextHostAuthored, copyAgentContextHostAuthored,
-  reconcileInterruptedAgentContext, type AgentContextCapability } from "./agent-context";
-import type { Runner, RunnerRequest } from "./runner";
+  reconcileInterruptedAgentContext, nextAgentContextTurnOrdinal, type AgentContextCapability } from "./agent-context";
+import { markRefusedBeforeDispatch, type Runner, type RunnerRequest } from "./runner";
 
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 function fail(code: string): never { throw Object.assign(new Error(code), { code }); }
@@ -45,8 +45,12 @@ export function bindInvocationAgentContext(request: RunnerRequest, input: {
     const current = getDb().prepare("SELECT agent_id,kind,parent_chat_id,archived_at,origin_surface AS origin FROM chats WHERE id=?").get(input.chatId) as typeof row;
     if (!current || current.agent_id !== row.agent_id || current.kind !== row.kind || current.parent_chat_id !== row.parent_chat_id || current.origin !== row.origin || current.archived_at) fail("agent_context_visibility_changed");
   };
-  const capability = createAgentContextCapability({ ...identity, agentId: input.agentId, visibilityDomain },
-    { turnId: `agent-context-turn:${JSON.stringify([input.chatId, input.runId, input.attempt])}`, assertCurrent });
+  const contextIdentity = { ...identity, agentId: input.agentId, visibilityDomain };
+  // One run may invoke this chat's agent more than once (graph agent steps on their automation chat): each invocation's
+  // attempt counter restarts at 1, so the turn ordinal continues after every turn of this run the journal already holds.
+  const ordinal = nextAgentContextTurnOrdinal(contextIdentity, input.chatId, input.runId, input.attempt);
+  const capability = createAgentContextCapability(contextIdentity,
+    { turnId: `agent-context-turn:${JSON.stringify([input.chatId, input.runId, ordinal])}`, assertCurrent });
   // Initial migration belongs to this exact authorized chat only. The journal
   // becomes authoritative afterwards; chat projections are not imported again.
   bootstrapAgentContextHistory(capability, request.history);
@@ -106,7 +110,9 @@ export function withDaemonAgentContext(runner: Runner, provider: { kind: string;
     if(aliveDecisionProfileForRequest(request))return runner(request,events);
     const held = agentContextHostBinding(request.agentContext as AgentContextCapability), owner = invocationProcessOwner();
     if (owner.ownerKind !== "daemon") {
-      reconcileInterruptedAgentContext(request.agentContext, assertPreviousTurnTerminal);
+      // An unsettled earlier turn refuses this one before anything is sent (typed RuntimeTurnDelivery "not-dispatched").
+      try { reconcileInterruptedAgentContext(request.agentContext, assertPreviousTurnTerminal); }
+      catch (error) { throw markRefusedBeforeDispatch(error); }
       return runner(request, events);
     }
     const binding = agentContextOwnerBinding(), key = digest([owner.ownerId, binding]);
@@ -123,7 +129,8 @@ export function withDaemonAgentContext(runner: Runner, provider: { kind: string;
       request.mcpAllowedTools ?? null, request.workforceRuntimeToolGrant?.canonicalConfigSha256 ?? null]);
     return daemon.host.runTurn(held.identity, { turnId: held.turnId, adapterKey, assertCurrent: held.assertCurrent, signal: request.signal },
       (capability, signal) => {
-        reconcileInterruptedAgentContext(capability, assertPreviousTurnTerminal);
+        try { reconcileInterruptedAgentContext(capability, assertPreviousTurnTerminal); }
+        catch (error) { throw markRefusedBeforeDispatch(error); }
         // The daemon admits the same turn under its own capability; the host-authored marker follows the turn.
         copyAgentContextHostAuthored(request.agentContext as AgentContextCapability, capability);
         return runner(carrySurfaceMemoryRequest(request, carryRunnerTurnContext(request, { ...request, agentContext: capability, signal })), events);

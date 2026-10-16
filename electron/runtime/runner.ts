@@ -871,6 +871,19 @@ export function runnerResultRefusedBeforeDispatch(result: Pick<RunnerResult, "fa
 }
 
 /**
+ * Puts RuntimeTurnDelivery "not-dispatched" on a refusal a runner or host wrapper throws before anything was sent (a
+ * missing executable, a journal or admission refusal, a closed pre-send check) and returns it, so
+ * runnerRefusedBeforeDispatch keeps its own code. Only for throws that precede every provider send.
+ */
+export function markRefusedBeforeDispatch<T>(error: T): T {
+  if (error && typeof error === "object" && Object.isExtensible(error)) {
+    try { Object.defineProperty(error, "turnDelivery", { value: "not-dispatched", enumerable: true, configurable: true, writable: true }); }
+    catch { /* A sealed host error keeps its own code and the caller's previous handling. */ }
+  }
+  return error;
+}
+
+/**
  * The CLI's own words when it exited non-zero before any terminal event (argument-parser rejections such as
  * "unexpected argument '--x'" / "unknown option", bad config). Carried as RuntimeTurnUnsettledError's providerReason so a
  * renamed or removed flag reads as that, not as a bare "no terminal receipt" (G35). Null when the child exited cleanly or said nothing.

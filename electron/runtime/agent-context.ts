@@ -9,6 +9,7 @@ import {
   type AgentContextSnapshot, type AgentContextDelivery, type AgentContextPendingDelivery,
 } from "../store/agent-context";
 import type { Runner, RunnerRequest, RunnerEvents, RunnerResult } from "./runner";
+import { markRefusedBeforeDispatch, runnerRefusedBeforeDispatch } from "./runner";
 import type { ChatHistoryEntry, RuntimeSelection } from "../../shared/types";
 import { redactOperationalSecrets } from "../invocation/event-secret-redaction";
 import { redactSecrets } from "../../shared/secret-patterns";
@@ -55,6 +56,28 @@ function checkpointTask(req: RunnerRequest): SessionTaskBoundary | null {
   } catch { return null; }
 }
 function fail(code: string): never { throw Object.assign(new Error(code), { code }); }
+// A host refusal before the native runner was entered: RuntimeTurnDelivery "not-dispatched" (runner.ts), its code kept.
+function refuseBeforeDispatch(code: string): never { throw markRefusedBeforeDispatch(Object.assign(new Error(code), { code })); }
+// Process-local high-water marks of allocated turn ordinals: two binds of one [chat, run] that have not appended yet.
+const reservedTurnOrdinals = new Map<string, number>();
+/**
+ * The ordinal for the next agent-context turn of one invocation run on one chat. Every runMcpInvocation counts its own
+ * attempts from 1, but one run can invoke the same chat's agent again: graph agent steps share their automation chat and
+ * run id (run-graph.ts claimInvocationRunOwner reopenReleased). The second step then bound step1's turn id, its first
+ * journal append collided with step1's recorded event (agent_context_event_collision) and the refusal was reported as
+ * "antigravity ... may have acted" (production 1.3.49, 2026-10-16 08:02:17Z, run-cdf732ca-…-56680954). The ordinal is
+ * the caller's attempt or the next one after every turn this conversation's journal (and this process) already holds.
+ */
+export function nextAgentContextTurnOrdinal(identity: AgentContextIdentity, chatId: string, runId: string, floor: number): number {
+  const prefix = `agent-context-turn:${JSON.stringify([chatId, runId]).slice(0, -1)},`;
+  const reservationKey = `${agentContextKey(identity)}\0${prefix}`;
+  const ordinal = Math.max(floor, store.maxTurnOrdinal(identity, prefix) + 1, (reservedTurnOrdinals.get(reservationKey) ?? 0) + 1);
+  reservedTurnOrdinals.delete(reservationKey);
+  reservedTurnOrdinals.set(reservationKey, ordinal);
+  // The journal stays authoritative; the marks only cover binds that have not appended yet.
+  if (reservedTurnOrdinals.size > 512) reservedTurnOrdinals.delete(reservedTurnOrdinals.keys().next().value!);
+  return ordinal;
+}
 function current(capability: AgentContextCapability) {
   const value = capabilities.get(capability);
   if (!value) fail("agent_context_host_capability_required");
@@ -723,10 +746,10 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
     const decision=aliveDecisionProfileForRequest(req);
     let checkpointCustody: ReturnType<typeof getMemoryStoreInfo> | null = null;
     if (!decision) try { checkpointCustody = getMemoryStoreInfo(); } catch { /* Journal-only execution remains available. */ }
-    if(req.agentId!==value.identity.agentId)fail("agent_context_actor_binding_changed");
+    if(req.agentId!==value.identity.agentId)refuseBeforeDispatch("agent_context_actor_binding_changed");
     const policy=options.transportForRequest?.(req)??null;
     const consumeMissingProof=options.consumePreviousContextMissingProof;
-    if(policy && typeof consumeMissingProof!=="function")fail("agent_context_transport_proof_required");
+    if(policy && typeof consumeMissingProof!=="function")refuseBeforeDispatch("agent_context_transport_proof_required");
     const packet=policy?retainedResponsesPromptPacket(req):null;
     /*
      * A native session is the agent's conversation with its runtime, not one turn's tool surface. The tools routed for a
@@ -755,8 +778,10 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
       packet?digest(packet.systemPrompt):NATIVE_CONTEXT_RESUME_KINDS.has(provider.kind)?digest(req.systemPrompt):"",
       policy??null,...(derivedMemoryKey?["derived-memory.v1",derivedMemoryKey]:[])])};
     const bindingKey=agentContextProviderKey(adapter);
-    const delivery=prepareAgentContextTurn(capability,{turnId,provider:adapter,signal:req.signal,events:contextEvents(req,turnId,bindingKey,[...(req.turnContextStable??[]),...(packet?.stableBlocks??[]),
-      ...(nativeSessionKey && req.systemPrompt?.trim() ? [instructionsAckKey(req.systemPrompt)] : [])])});
+    // A journal refusal here (a busy or unresolved delivery, a replayed turn, a colliding event) precedes every provider send.
+    const delivery=(()=>{try{return prepareAgentContextTurn(capability,{turnId,provider:adapter,signal:req.signal,events:contextEvents(req,turnId,bindingKey,[...(req.turnContextStable??[]),...(packet?.stableBlocks??[]),
+      ...(nativeSessionKey && req.systemPrompt?.trim() ? [instructionsAckKey(req.systemPrompt)] : [])])});}
+      catch(error){throw markRefusedBeforeDispatch(error);}})();
     activeDeliveries.set(capability,delivery);
     const nativeKind=NATIVE_CONTEXT_RESUME_KINDS.has(provider.kind);
     const continuationHandle=continuationHandles.get(turnId)??null;continuationHandles.delete(turnId);
@@ -806,6 +831,9 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
       } catch { /* Prior checkpoint plus authoritative journal delta remains usable. */ }
     };
     let toolIndex=0, partialTail="", toolBoundaryTokens=0;
+    // Typed dispatch evidence for the catch below: the native runner (and any provider send) starts only at this call.
+    let runnerEntered=false;
+    const enterRunner:Runner=(request,runnerEvents)=>{runnerEntered=true;return runner(request,runnerEvents);};
     const recordUnsettled = (outcome: "failed" | "cancelled" | "uncertain", text: string, failureCode?: string): void => {
       try {
         // A stale derived read cannot become a new partial-output source.
@@ -942,7 +970,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
       const adapterStable = req.turnContextStable?.filter(block => !memoryHashes.has(digest(block)));
       // The serving decision path carries prior decisions once, as quoted data in the turn context, never also as turns.
       const adapterRequest = finalizeRunnerTurnContext(req, contextParts, provider.kind, HOST_MESSAGE_CONTEXT_KINDS.has(provider.kind));
-      const result=await runner(carryRunnerTurnContext(adapterRequest, { ...adapterRequest,history:servingHistory?[]:history,...(olderImages.length?{images:[...olderImages,...(req.images??[])]}:{}),
+      const result=await enterRunner(carryRunnerTurnContext(adapterRequest, { ...adapterRequest,history:servingHistory?[]:history,...(olderImages.length?{images:[...olderImages,...(req.images??[])]}:{}),
         ...(adapterStable || instructions?.block ? { turnContextStable: [...(adapterStable ?? []), ...(instructions?.block ? [instructions.block] : [])] } : {}),
         // Fresh means no canonical adapter handle. Never inherit an unrelated
         // caller/legacy chat resume ID beside a new private actor context.
@@ -1033,7 +1061,11 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
       const outcome = req.signal?.aborted ? "cancelled" as const : "failed" as const;
       const failureCode = error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code.slice(0,128) : undefined;
       if (!decision) recordUnsettled(outcome, partialTail, failureCode);
-      markAgentContextTurnUncertain(capability,delivery);noteUnsettled(errorSessionId(error));
+      markAgentContextTurnUncertain(capability,delivery);
+      // A failure before the native runner was entered (or one the runner itself proved pre-dispatch) left nothing behind
+      // to continue: it is a refusal before dispatch, never an unsettled turn.
+      if(runnerEntered && !runnerRefusedBeforeDispatch(error))noteUnsettled(errorSessionId(error));
+      else markRefusedBeforeDispatch(error);
       if (!decision) await saveCheckpoint(false, { turnId, outcome, providerAcknowledged: false, ...(failureCode ? { failureCode } : {}) });
       if(missing)store.invalidateProvider(current(capability).identity,adapter,delivery.generation);
       throw error;

@@ -19,7 +19,7 @@ import { RuntimeJudgmentRefusal } from "./judgment-refusal";
 import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, runtimeProtocolUnrecognizedFailure, cliToolSilenceWindowMs } from "./runner";
+import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, runtimeProtocolUnrecognizedFailure, cliToolSilenceWindowMs, markRefusedBeforeDispatch } from "./runner";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { schemaFallbackPromptPart } from "../../shared/runtime-capabilities";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild } from "./exec";
@@ -245,7 +245,7 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
     );
   }
   const bin = await resolveCursorBinary();
-  if (!bin) throw new Error(req.locale === "ko" ? "Cursor Agent CLI를 찾지 못했습니다." : "Cursor Agent CLI is not installed.");
+  if (!bin) throw markRefusedBeforeDispatch(new Error(req.locale === "ko" ? "Cursor Agent CLI를 찾지 못했습니다." : "Cursor Agent CLI is not installed."));
   events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
   if (req.outputSchema) events.onStatus(tStatus(req.locale, "schemaInPromptOnly"));
   const args = ["--print", "--output-format", "stream-json"];

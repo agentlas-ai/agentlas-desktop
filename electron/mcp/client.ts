@@ -321,6 +321,7 @@ import {
   type RunnerFailure,
   type RunnerEvents,
   type RunnerRequest,
+  type RuntimeTurnDelivery,
   SURFACE_INTENT_MARKER,
   UNATTENDED_NO_ASK_DIRECTIVE,
   MOBILE_DURABLE_ASK_DIRECTIVE,
@@ -801,10 +802,13 @@ function stripDanglingLanguageFence(text: string): string {
  */
 class InvocationRunnerFailureError extends Error {
   readonly #failure: Readonly<RunnerFailure>;
+  /** The runner's own RuntimeTurnDelivery for this failure; "not-dispatched" reaches run-graph as a definite non-execution. */
+  readonly turnDelivery?: RuntimeTurnDelivery;
 
-  constructor(failure: RunnerFailure, includeHeuristic = false) {
+  constructor(failure: RunnerFailure, includeHeuristic = false, turnDelivery?: RuntimeTurnDelivery) {
     super(`${failure.runtime} runtime ${failure.kind}${includeHeuristic && failure.source === "heuristic" ? " (appears)" : ""}: ${failure.message}`);
     this.#failure = Object.freeze({ ...failure });
+    if (turnDelivery) this.turnDelivery = turnDelivery;
   }
 
   static isMarkedQuota(error: unknown): boolean {
@@ -6930,7 +6934,7 @@ async function runMcpInvocationInContext(
         // choose another connected provider before dispatch.
         if (result.failure) noteRuntimeFailure(active, result.failure);
         if (result.failure && executionContext?.graphWorkerAttempt) {
-          graphDirectFailureError = new InvocationRunnerFailureError(result.failure);
+          graphDirectFailureError = new InvocationRunnerFailureError(result.failure, false, result.turnDelivery);
           noteGraphWorkerReturnedFailure(executionContext.graphWorkerAttempt,
             selectionForRuntime(selectedRuntime, { longContext: selectedRuntime.longContextEnabled }), result.failure);
           throw graphDirectFailureError;
@@ -7161,7 +7165,7 @@ async function runMcpInvocationInContext(
      * 경로(sink error → NODE_FAILED/챗 오류 카드)를 그대로 탄다.
      */
     if (result.failure) {
-      throw new InvocationRunnerFailureError(result.failure, true);
+      throw new InvocationRunnerFailureError(result.failure, true, result.turnDelivery);
     }
     // The first pass (including its predispatch runtime fallbacks) has consumed
     // its booked plan receipts. Later passes observe their normal budget/cadence.
@@ -8638,7 +8642,9 @@ async function runMcpInvocationInContext(
     }
     noteGraphWorkerFailure(executionContext?.graphWorkerAttempt);
     if (executionContext?.graphWorkerAttempt && err !== graphDirectFailureError) noteGraphWorkerCoverageUnknown(executionContext.graphWorkerAttempt);
-    sink({ kind: "error", error: invocationFailure(req, "runner-failed", err, executionContext) });
+    // The typed delivery fact rides on the event: run-graph reads it to tell a refusal before dispatch from an unknown effect.
+    sink({ kind: "error", error: { ...invocationFailure(req, "runner-failed", err, executionContext),
+      ...(runnerRefusedBeforeDispatch(err) ? { turnDelivery: "not-dispatched" as const } : {}) } });
     return InvocationRunnerFailureError.isMarkedQuota(err)
       ? { ...earlyResult(), markedQuotaFailure: true }
       : earlyResult();

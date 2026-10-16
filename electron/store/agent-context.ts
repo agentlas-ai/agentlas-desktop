@@ -315,5 +315,28 @@ export function createAgentContextStore(getDb: () => Database.Database) {
         .run(key,binding,expectedGeneration).changes!==1)fail("agent_context_generation_changed");
     }).immediate();
   }
-  return {adoptPriorHead,read,readRange,readSource,readHead,acknowledgedStableBlockHashes,append,beginDelivery,readPendingDelivery,readOpenPendingDelivery,acknowledgeDelivery,markDeliveryUncertain,invalidateProvider};
+  /**
+   * The highest ordinal `n` this agent's conversation journal already holds for a turn id `${turnPrefix}${n}]` (its
+   * deliveries, and the events a turn appends before its delivery opens), under every key the conversation has had
+   * (adoptPriorHead); 0 when none. Range reads on the (context_key, turn_id) and (context_key, event_id) indexes: the
+   * prefix ends with "," so every id of the family sorts below the same prefix ending with "-".
+   */
+  function maxTurnOrdinal(identity: AgentContextIdentity, turnPrefix: string): number {
+    nonempty(turnPrefix); if (!turnPrefix.endsWith(",")) fail("agent_context_turn_prefix_invalid");
+    const db = getDb(), upper = `${turnPrefix.slice(0, -1)}-`, eventPrefix = `turn:${turnPrefix}`;
+    const keys = (db.prepare(`SELECT context_key FROM agent_context_heads
+      WHERE json_extract(identity_json,'$.ownerScope')=? AND json_extract(identity_json,'$.agentId')=?
+        AND json_extract(identity_json,'$.visibilityDomain')=?`)
+      .all(identity.ownerScope, identity.agentId, identity.visibilityDomain) as Array<{ context_key: string }>).map(row => row.context_key);
+    let max = 0;
+    const take = (rest: string) => { const n = /^(\d{1,15})\]/.exec(rest)?.[1]; if (n && Number(n) > max) max = Number(n); };
+    for (const key of new Set([agentContextKey(identity), ...keys])) {
+      for (const row of db.prepare("SELECT turn_id FROM agent_context_deliveries WHERE context_key=? AND turn_id>=? AND turn_id<?")
+        .all(key, turnPrefix, upper) as Array<{ turn_id: string }>) take(row.turn_id.slice(turnPrefix.length));
+      for (const row of db.prepare("SELECT event_id FROM agent_context_entries WHERE context_key=? AND event_id>=? AND event_id<?")
+        .all(key, eventPrefix, `turn:${upper}`) as Array<{ event_id: string }>) take(row.event_id.slice(eventPrefix.length));
+    }
+    return max;
+  }
+  return {adoptPriorHead,read,readRange,readSource,readHead,acknowledgedStableBlockHashes,append,beginDelivery,readPendingDelivery,readOpenPendingDelivery,acknowledgeDelivery,markDeliveryUncertain,invalidateProvider,maxTurnOrdinal};
 }

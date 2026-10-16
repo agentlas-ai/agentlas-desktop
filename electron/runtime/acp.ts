@@ -40,7 +40,7 @@ import {
   type AcpMcpTranslation,
 } from "./acp-protocol";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliToolSilenceWindowMs, type CliSilenceGuard, wrapSystemPrompt, RuntimeTurnUnsettledError, runnerFailureFromError } from "./runner";
+import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliToolSilenceWindowMs, type CliSilenceGuard, wrapSystemPrompt, RuntimeTurnUnsettledError, runnerFailureFromError, markRefusedBeforeDispatch } from "./runner";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, spawnCli, trackRunChild, waitForCliTreeTermination } from "./exec";
 import { pickLocale, tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
@@ -1520,9 +1520,12 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         const kind = quota ? "quota" as const
           : (prescription || authish) ? "auth" as const
             : "exit" as const;
-        return { text: "", failure: { kind, message: message + help, runtime: spec.id, source: "marker" } };
+        // Reached only when no prompt was dispatched and the agent showed no turn activity (the branch above throws
+        // otherwise): a refusal before dispatch (RuntimeTurnDelivery), never an unsettled turn.
+        return { text: "", failure: { kind, message: message + help, runtime: spec.id, source: "marker" },
+          ...(!promptDispatchAttempted && !client.turnActivityObserved && !agentRequestObserved ? { turnDelivery: "not-dispatched" as const } : {}) };
       }
-      throw err;
+      throw !promptDispatchAttempted && !client.turnActivityObserved && !agentRequestObserved ? markRefusedBeforeDispatch(err) : err;
     } finally {
       if (cancelFallback !== undefined) clearTimeout(cancelFallback);
       if (contextSessionId && (broken || req.signal?.aborted || effectTerminal !== "end_turn"

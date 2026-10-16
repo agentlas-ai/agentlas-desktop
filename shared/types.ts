@@ -5025,7 +5025,10 @@ export interface McpInvocationEvent {
   delta?: string;
   /** 델타 적용 후 전체 텍스트 길이 — 렌더러가 누적 결과를 검증해 어긋나면 재동기화한다. */
   textLen?: number;
-  error?: { code: string; message: string; runtimeFailure?: InvocationRuntimeFailure };
+  error?: { code: string; message: string; runtimeFailure?: InvocationRuntimeFailure;
+    /** Present only when the failed attempt provably sent nothing to a provider (RuntimeTurnDelivery in runtime/runner.ts):
+     *  a definite non-execution, never an unknown effect. Optional; older readers ignore it. */
+    turnDelivery?: "not-dispatched" };
   /** kind:"notice" 전용 — 호스트 고지. 답변 본문과 절대 합치지 않는다. */
   notice?: {
     level: "info" | "success" | "warning" | "error";

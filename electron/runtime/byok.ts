@@ -614,7 +614,7 @@ async function runAnthropicMessagesInner(
         messages.splice(0, transmittedHistoryCount, ...next);
         transmittedHistoryCount = next.length;
       },
-    })) return assertCurrentHistoryRunnerResult({ text: "", failure: byokContextFailure(req) });
+    })) return assertCurrentHistoryRunnerResult({ text: "", failure: byokContextFailure(req), ...(turn === 0 ? { turnDelivery: "not-dispatched" as const } : {}) });
     assertScienceRecoveryRequest(req, "byok", backend);
     reportModelPayload(() => ledgerFromApiBody(outgoingBody(), { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
     reportModelEffort(effortApplication);
@@ -1297,7 +1297,7 @@ export const runGoogleByok: Runner = async (
         contents.splice(0, transmittedHistoryCount, ...next);
         transmittedHistoryCount = next.length;
       },
-    })) return assertCurrentHistoryRunnerResult({ text: "", failure: byokContextFailure(req) });
+    })) return assertCurrentHistoryRunnerResult({ text: "", failure: byokContextFailure(req), ...(turn === 0 ? { turnDelivery: "not-dispatched" as const } : {}) });
     const requestBody = outgoingBody();
     const sentRequestTokens = estimateTransportTokens(JSON.stringify(requestBody));
     reportModelEndpoint({ url });

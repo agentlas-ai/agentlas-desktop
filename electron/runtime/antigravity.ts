@@ -33,7 +33,7 @@ import { randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult, RunnerFailure, RunnerFailureKind } from "./runner";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import { detectRuntimeRefusal } from "./runtime-refusal";
-import { cumulativeSurfaceGateText, childExitReason, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliToolSilenceWindowMs, wrapSystemPrompt } from "./runner";
+import { cumulativeSurfaceGateText, childExitReason, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliToolSilenceWindowMs, wrapSystemPrompt, markRefusedBeforeDispatch } from "./runner";
 import { announceToolDenied } from "./tool-approval";
 import {
   acknowledgeStableTurnContext,
@@ -1980,7 +1980,7 @@ async function runPreparedAntigravity(
   if (commonContext && commonHandle && !agyResumeId) {
     const bootstrap = await agentContextColdBootstrapForRequest(runReq);
     if (!bootstrap) {
-      return { text: "", ownerControlTerminal: "uncertain", failure: { kind: "unavailable", runtime: "antigravity", source: "marker",
+      return { text: "", ownerControlTerminal: "uncertain", turnDelivery: "not-dispatched", failure: { kind: "unavailable", runtime: "antigravity", source: "marker",
         providerCode: "agy_native_handle_unverified",
         message: runReq.locale === "ko" ? "Antigravity 대화를 이 실행 파일·모델로 이어갈 수 없고, 기록에서 새 대화를 시작할 자료도 없습니다."
           : "The Antigravity conversation cannot continue on this executable and model, and no journal seed is available for a new one." } };
@@ -2187,7 +2187,7 @@ async function runPreparedAntigravity(
     req.signal?.throwIfAborted();
     if (agyToolsAllowed) mcpReconcile = await reconcileAgyMcpServers(req.mcpConfigPath, events.onStatus, req.env ?? process.env, req.signal);
     req.signal?.throwIfAborted();
-    if (mcpReconcile.failure) return { text: "", ownerControlTerminal: "uncertain", failure: mcpReconcile.failure };
+    if (mcpReconcile.failure) return { text: "", ownerControlTerminal: "uncertain", turnDelivery: "not-dispatched", failure: mcpReconcile.failure };
     if (req.env?.AGENTLAS_NATIVE_BROWSER_SCOPE === "task") {
       if (!req.mcpConfigPath) throw new Error("native_browser_mcp_config_required");
       for (const row of preparedMcpBindings(req.mcpConfigPath)) preparedMcpTransport(row, row.server);
@@ -2196,7 +2196,7 @@ async function runPreparedAntigravity(
       try { await mcpReconcile.assertReady?.(); }
       catch (error) {
         if (req.signal?.aborted) throw error;
-        return { text: "", ownerControlTerminal: "uncertain", failure: { kind: "refused", source: "marker", runtime: "antigravity",
+        return { text: "", ownerControlTerminal: "uncertain", turnDelivery: "not-dispatched", failure: { kind: "refused", source: "marker", runtime: "antigravity",
         providerCode: "agy_mcp_configuration_drift", message: "Antigravity MCP scope changed before model execution." } }; }
     }
     req.signal?.throwIfAborted();
@@ -2262,7 +2262,7 @@ async function runPreparedAntigravity(
       if (commonContext && !agyResumeId) {
         // A cold common-context turn starts a new conversation; an idle process of this key holds an earlier one in memory.
         const stale = pool.retireIdleMatching((session) => session.executableOwner.scopeKey === key);
-        if (stale.busy) throw new Error("runtime_session_owner_busy");
+        if (stale.busy) throw markRefusedBeforeDispatch(Object.assign(new Error("runtime_session_owner_busy"), { code: "runtime_session_owner_busy" }));
         await Promise.all(stale.retired.map((session) => waitForRetiredCliExit(session.child)));
       }
       try {
@@ -2300,7 +2300,7 @@ async function runPreparedAntigravity(
     try {
       if (!residentLease) {
         const failure = await prepareOneShotPrompt();
-        if (failure) return { text: "", ownerControlTerminal: "uncertain", failure };
+        if (failure) return { text: "", ownerControlTerminal: "uncertain", turnDelivery: "not-dispatched", failure };
       }
       req.signal?.throwIfAborted();
       const result = await runAgyProcess(residentLease);
@@ -2914,20 +2914,20 @@ export const runAntigravity: Runner = async (
     );
   }
   if (req.restrictedReadBoundary) {
-    throw new Error(
+    throw markRefusedBeforeDispatch(new Error(
       "Antigravity is not enabled for restricted read-only execution because its host filesystem boundary is not release-verified.",
-    );
+    ));
   }
   const readToolFailure = antigravityReadToolFailure(req);
-  if (readToolFailure) return { text: "", ownerControlTerminal: "uncertain", failure: readToolFailure };
+  if (readToolFailure) return { text: "", ownerControlTerminal: "uncertain", turnDelivery: "not-dispatched", failure: readToolFailure };
   const bin = await getBin({ source: req.runtimeSource });
-  if (!bin) throw new Error(tStatus(req.locale, "errCliMissingAntigravity"));
+  if (!bin) throw markRefusedBeforeDispatch(new Error(tStatus(req.locale, "errCliMissingAntigravity")));
   const executableIdentity = observeCliExecutableIdentity({
     bin,
     cwd: req.cwd ?? agentRunCwd(),
     env: req.env ?? process.env,
   });
-  if (!executableIdentity) throw new Error(tStatus(req.locale, "errCliMissingAntigravity"));
+  if (!executableIdentity) throw markRefusedBeforeDispatch(new Error(tStatus(req.locale, "errCliMissingAntigravity")));
   const stagedImages = await stageCliImageAttachments(req);
   const runReq = stagedImages.images.length > 0 ? { ...req, userPrompt: stagedImages.userPrompt } : req;
   if (stagedImages.images.length > 0) {

@@ -3,6 +3,7 @@ import { composeDeclaredPrompt, type DeclaredPromptPart } from "../runtime/promp
 import { createGraphWorkerAttempt, readGraphWorkerFailure, readGraphWorkerPool, chooseGraphWorker, graphPinUnavailable, graphWorkerIdentity,
   type GraphWorkerAttempt, type GraphWorkerFailureReceipt, type GraphWorkerPool } from "./graph-worker-fallback";
 import { selectExactRuntime } from "../runtime/selection";
+import { runnerRefusedBeforeDispatch } from "../runtime/runner";
 import { looksSecret } from "../../shared/secret-patterns";
 import { captureFiniteAutomationGoalExecutionOwner, assertAutomationGoalExecutionOwner, bindFiniteGraphRunStop } from "../automation-execution-control";
 import type { BrowserLoginWait } from "../browser/login-prerequisite";
@@ -1127,6 +1128,8 @@ const REPLAY_SAFE_PRE_DISPATCH_ERROR_CODES = new Set([
   "no-runner",
   "workforce-leader-runtime-unsupported",
   "stormbreaker-core-harness-unavailable",
+  // mcp/client.ts: this run's tool connections could not be prepared; the runner is never called (earlyResult).
+  "mcp-runtime-config-unavailable",
 ]);
 
 function isTypedReplaySafeWorkforceError(code: string): boolean {
@@ -4360,6 +4363,9 @@ export async function runGraph(
         let checkpointPersistenceError: Error | null = null;
         let unsafeToolObserved = false;
         let unsafeToolRequested = false;
+        // This attempt's dispatch evidence (see providerNeverDispatched in the catch below).
+        let preDispatchErrorCode: string | null = null;
+        let providerOutputObserved = false;
         let nativeReadOnly = false;
         let nativeOutput: unknown;
         let restoredCommonOutput = false;
@@ -4685,6 +4691,16 @@ export async function runGraph(
                 if (typeof ev.text === "string") accumulatedText = ev.text;
                 else if (typeof ev.delta === "string") accumulatedText += ev.delta;
               }
+              // Model text or a non-host tool frame proves a provider answered; host status (thinking/status lines,
+              // Agentlas Plugins preflight) does not.
+              if ((ev.kind === "partial" && ((typeof ev.text === "string" && ev.text.length > 0) || (typeof ev.delta === "string" && ev.delta.length > 0)))
+                || (ev.kind === "tool-use" && !!ev.tool?.name && !isHostPreflightTool(ev.tool.name))) {
+                providerOutputObserved = true;
+              }
+              if (ev.kind === "error" && ev.error?.code && !providerOutputObserved
+                && (ev.error.turnDelivery === "not-dispatched" || REPLAY_SAFE_PRE_DISPATCH_ERROR_CODES.has(ev.error.code))) {
+                preDispatchErrorCode ??= ev.error.code;
+              }
               if (ev.kind === "error") {
                 runnerError = ev.error?.message || "runner failed";
                 if (ev.error?.message) {
@@ -4933,6 +4949,17 @@ export async function runGraph(
           if (currentCommonUnit?.state === "started") commonUnits.set(node.id, commonRecovery.fail(currentCommonUnit));
           const rawMessage = nodeErr instanceof Error ? nodeErr.message : String(nodeErr);
           const receipts = checkpoint!.toolReceipts[node.id] ?? [];
+          /*
+           * Typed dispatch evidence, never intent: the invocation's refusal carries RuntimeTurnDelivery "not-dispatched"
+           * (runtime/runner.ts: a runner's or host wrapper's refusal before any provider send; mcp/client.ts keeps it and
+           * puts it on the error event, or it is thrown as is), or the host failed a pre-runner stage with a typed
+           * pre-dispatch code (REPLAY_SAFE_PRE_DISPATCH_ERROR_CODES). With no provider output and no tool request observed in this attempt,
+           * the step did not run: a definite failure the normal retry/recovery handles, never an ambiguous side effect.
+           * Production 1.3.49 (2026-10-16 08:02:17Z, daily YouTube graph step2): a journal refusal before the antigravity
+           * process started became "may have committed an external action" and stopped the automation for review.
+           */
+          const providerNeverDispatched = (runnerRefusedBeforeDispatch(nodeErr) || preDispatchErrorCode !== null)
+            && !providerOutputObserved && !unsafeToolRequested && !unsafeToolObserved && checkpointPersistenceError === null;
           const replaySafeObservedReceipts = receipts.length > 0 && receipts.every((receipt) => (
             isReplaySafeGraphToolReceipt(checkpoint!, node.id, receipt)
           ));
@@ -4960,7 +4987,8 @@ export async function runGraph(
             replaySafeObservedReceipts;
           let ambiguous = checkpointPersistenceError !== null || unsafeToolRequested ||
             unsafeToolObserved || !replaySafeFailure ||
-            (modelInvocationFailed && modelInvocationStarted && (!graphWorkerReceipt || graphWorkerReceipt.status !== "retryable" || !graphWorkerReceipt.runtimeQuiesced));
+            (modelInvocationFailed && modelInvocationStarted && !providerNeverDispatched
+              && (!graphWorkerReceipt || graphWorkerReceipt.status !== "retryable" || !graphWorkerReceipt.runtimeQuiesced));
           // 재시도 레인 — 부수효과가 **확실히 없었을 때만** 다시 시도한다. 모호하면
           // 재시도가 곧 이중 실행이므로, 그 판단은 사람에게 넘긴다.
           const claimedWithoutTools = graphFailureOf(nodeErr)?.code === "NODE_CLAIMED_WITHOUT_TOOLS";
