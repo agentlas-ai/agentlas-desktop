@@ -67,6 +67,12 @@ export interface AgyProductHomeInput {
   mirrorRoot?: string;
 }
 
+/** Where the product HOME of `realHome` lives (the One variant carries "-one"); syncAgyProductHome builds it there. */
+export function agyProductHomePath(realHome: string, isOne: boolean, mirrorRoot?: string): string {
+  const root = mirrorRoot ?? userDataPath("agy-product-home");
+  return path.join(root, crypto.createHash("sha256").update(realHome).digest("hex").slice(0, 12) + (isOne ? "-one" : ""));
+}
+
 /** Builds or refreshes the product HOME. Never throws; a skip means the run keeps the real HOME. */
 export function syncAgyProductHome(input: AgyProductHomeInput): { home: string } | { skip: AgyProductHomeSkip } {
   if (process.platform !== "darwin" && process.platform !== "linux") return { skip: "unsupported-platform" };
@@ -77,8 +83,7 @@ export function syncAgyProductHome(input: AgyProductHomeInput): { home: string }
   const signInFiles = [path.join(realGemini, "antigravity-cli", "antigravity-oauth-token"), path.join(realGemini, "oauth_creds.json")];
   if (!signInFiles.some((file) => fs.existsSync(file))) return { skip: "no-sign-in-files" };
   const isOne = selection?.isOne === true;
-  const root = input.mirrorRoot ?? userDataPath("agy-product-home");
-  const home = path.join(root, crypto.createHash("sha256").update(realHome).digest("hex").slice(0, 12) + (isOne ? "-one" : ""));
+  const home = agyProductHomePath(realHome, isOne, input.mirrorRoot);
   const gemini = path.join(home, ".gemini");
   const realConfig = path.join(realGemini, "config");
   try {

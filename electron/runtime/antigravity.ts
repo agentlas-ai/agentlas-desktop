@@ -28,9 +28,12 @@ import {
   mkdirSync,
   openSync,
   readSync,
+  readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult, RunnerFailure, RunnerFailureKind } from "./runner";
@@ -49,7 +52,7 @@ import { agentContextColdBootstrapForRequest, agentContextDeliveryForRequest } f
 import { waitForRetiredCliExit } from "./retired-cli-exit";
 import { tStatus } from "./status-i18n";
 import { selectionFor } from "../capabilities/one-capabilities";
-import { withAgyProductHome } from "./antigravity-personal-context";
+import { agyProductHomePath, withAgyProductHome } from "./antigravity-personal-context";
 import { abortReasonError } from "./abort-reason";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, standardAntigravityBinDirs, windowsCliCommandBudget } from "./exec";
 import { stageCliImageAttachments } from "./image-attachments";
@@ -384,14 +387,15 @@ const buildPrompt = buildAntigravityPrompt;
 export function antigravityPermissionArgs(
   permission?: "read" | "write" | "full",
   browserOnly = false,
+  /** The scoped-read browser profile (antigravityBrowserProfile): its project grants are the whole gate. */
+  browserScopedRead = false,
 ): string[] {
-  // Antigravity's headless CLI does not honor project settings' allow-rules for
-  // MCP calls; its own diagnostic says to use `--dangerously-skip-permissions`
-  // when no interactive approver is attached. Browser-only runs therefore need
-  // the CLI bypass to get past its internal MCP gate, but keep `--sandbox` and
-  // the Agentlas-owned one-server MCP config/Browser approval rail. This opens
-  // the headless CLI gate without opening an unmanaged shell/browser path.
-  if (browserOnly) return ["--dangerously-skip-permissions", "--sandbox"];
+  // Legacy browser profile (agy before 1.4.0, measured 2026-09-03): the headless CLI did not honor project allow-rules
+  // for MCP calls, so browser-only runs needed the CLI bypass to get past its MCP gate; `--sandbox` and the project's
+  // deny list (command/read/write/url) stay. agy 1.4.0 honors project allow-rules headlessly (measured 2026-10-16:
+  // `mcp(<server>/*)` authorizes the call, without it the call is auto-denied), so the scoped-read profile drops the
+  // bypass: workspace reads are allowed, reads outside the workspace are auto-denied, and its grants decide the rest.
+  if (browserOnly) return browserScopedRead ? ["--sandbox"] : ["--dangerously-skip-permissions", "--sandbox"];
   if (permission === "full") return ["--dangerously-skip-permissions"];
   if (permission === "write") return ["--dangerously-skip-permissions", "--sandbox"];
   return [];
@@ -462,6 +466,120 @@ export async function ensureAntigravityBrowserProjectPolicy(
   return { projectId: AGY_BROWSER_PROJECT_ID, workspace, configPath };
 }
 
+/*
+ * Scoped-read browser profile: an Antigravity browser-only run works in the step's own working folder and may read it.
+ *
+ * Root cause it replaces (YouTube graph cdf732ca, 1.3.49, 07:57Z run): the legacy profile ran agy in a private runtime
+ * home (~/.agentlas/runtime-homes/antigravity-browser-v1) and named that folder as the project's resource, while the
+ * step's files live in the step's working folder (the room's or agent-cwd). agy resolves a relative path against the
+ * project resource and its cwd (measured 1.4.0: with the resource elsewhere the model first stats
+ * <runtime-home>/outputs/..., exactly the production failure), and the project denied read_file(*), so a browser step
+ * could not read anything the room or an earlier step produced.
+ *
+ * Measured agy 1.4.0, 2026-10-16 (scratch HOME, tiny prompts, AGY2):
+ *   - no `--dangerously-skip-permissions`: a relative read in the cwd workspace is allowed without any grant; a read
+ *     outside the workspace is auto-denied (denied_actions read_file); `write_file(*)`/`command(*)`/`read_url(*)` deny
+ *     rules hold (agy's own read_url_content browser fallback is denied).
+ *   - MCP: `mcp(*)` authorizes call_mcp_tool for every configured server. The model reads the tool descriptor
+ *     <appData>/mcp/<server>/<tool>.json first and big tool outputs spill to <appData>/brain/<conversation>/
+ *     .system_generated/...; both are outside the workspace, so they need `read_file(<dir>)` grants. A grant is a
+ *     resolved-path prefix (`read_file(/private/tmp/x)`); `/**` globs match nothing; a deny always beats an allow.
+ *   - with the bypass flag every read is allowed (deny rules still hold), so the bypass profile cannot confine reads.
+ * The project file carries no per-run content (the workspace comes from cwd/--add-dir), so one Agentlas-owned file
+ * covers every run. `mcp(*)` keeps the MCP authority the bypass gave (the servers in the run's HOME config: the run's
+ * authorized ones, e.g. the room's One Team for a graph step, cafffb4d). The person's own conversation spill files
+ * (real HOME brain) are never granted.
+ */
+const AGY_BROWSER_READ_PROJECT_ID = "agentlas-browser-automation-v2";
+const AGY_BROWSER_READ_POLICY_MARKER = "agentlas.desktop.browser-read-policy.v2";
+/** agy versions measured to honor project allow-rules headlessly (scoped-read browser profile). */
+const AGY_SCOPED_READ_MIN_VERSION = [1, 4, 0] as const;
+
+export type AntigravityBrowserProfile = "scoped-read" | "legacy";
+
+/** Which browser profile an agy executable gets: scoped-read on a measured version and a POSIX HOME, legacy otherwise. */
+export function antigravityBrowserProfile(version: string | null | undefined, platform: NodeJS.Platform = process.platform): AntigravityBrowserProfile {
+  if (platform !== "darwin" && platform !== "linux") return "legacy";
+  const match = /^(\d+)\.(\d+)\.(\d+)/u.exec(version?.trim() ?? "");
+  if (!match) return "legacy";
+  const parts = match.slice(1, 4).map(Number);
+  for (let index = 0; index < 3; index += 1) {
+    if (parts[index]! !== AGY_SCOPED_READ_MIN_VERSION[index]) return parts[index]! > AGY_SCOPED_READ_MIN_VERSION[index]! ? "scoped-read" : "legacy";
+  }
+  return "scoped-read";
+}
+
+/** A path as agy checks it: symlinks of its longest existing prefix resolved (measured: /tmp is matched as /private/tmp). */
+function agyResolvedPath(target: string): string {
+  let head = path.resolve(target);
+  const rest: string[] = [];
+  for (;;) {
+    try { return path.join(realpathSync(head), ...rest); }
+    catch {
+      const parent = path.dirname(head);
+      if (parent === head) return path.resolve(target);
+      rest.unshift(path.basename(head));
+      head = parent;
+    }
+  }
+}
+
+/** The scoped-read project document (pure; deterministic for one machine so concurrent runs write the same bytes). */
+export function antigravityBrowserReadPolicy(input: { realHome: string; spawnHome: string; productHomes: readonly string[] }): Record<string, unknown> {
+  const appData = (home: string) => path.join(home, ".gemini", "antigravity-cli");
+  const realHome = agyResolvedPath(input.realHome);
+  const homes = [...new Set([input.realHome, ...input.productHomes, input.spawnHome].map(agyResolvedPath))];
+  const reads = homes.flatMap((home) => [
+    `read_file(${path.join(appData(home), "mcp")})`,
+    // A product HOME holds Agentlas conversations only; the real HOME's brain is the person's own sessions.
+    ...(home === realHome ? [] : [`read_file(${path.join(appData(home), "brain")})`]),
+  ]);
+  return {
+    id: AGY_BROWSER_READ_PROJECT_ID,
+    name: "Agentlas Browser Automation (workspace read)",
+    agentlasOwner: AGY_BROWSER_READ_POLICY_MARKER,
+    permissionGrants: {
+      permissionGrants: {
+        allow: ["mcp(*)", ...reads],
+        deny: ["command(*)", "write_file(*)", "read_url(*)"],
+      },
+    },
+    settings: {
+      fileAccessPolicy: "AGENT_SETTING_POLICY_DENY",
+      internetPolicy: "AGENT_SETTING_POLICY_DENY",
+      autoExecutionPolicy: "CASCADE_COMMANDS_AUTO_EXECUTION_OFF",
+      artifactReviewMode: "ARTIFACT_REVIEW_MODE_NEVER",
+    },
+  };
+}
+
+/**
+ * Writes the scoped-read project into the projects folder of the HOME agy is spawned with (a product HOME links it to
+ * the person's, the folder the legacy browser project already uses). Rewritten only when its bytes differ; a file of
+ * that id owned by anything else is never overwritten.
+ */
+export function ensureAntigravityBrowserReadProjectPolicy(spawnHome: string, realHome = os.homedir()): { projectId: string; configPath: string } {
+  const configDir = path.join(spawnHome, ".gemini", "config", "projects");
+  const configPath = path.join(configDir, `${AGY_BROWSER_READ_PROJECT_ID}.json`);
+  const text = `${JSON.stringify(antigravityBrowserReadPolicy({ realHome, spawnHome,
+    productHomes: [agyProductHomePath(realHome, false), agyProductHomePath(realHome, true)] }), null, 2)}\n`;
+  mkdirSync(configDir, { recursive: true, mode: 0o700 });
+  let current: string | null = null;
+  try { current = readFileSync(configPath, "utf8"); } catch { /* none yet */ }
+  if (current !== null) {
+    let owner: unknown;
+    try { owner = (JSON.parse(current) as { agentlasOwner?: unknown }).agentlasOwner; }
+    catch { throw new Error("Existing Antigravity browser read policy is unreadable; refusing to overwrite it"); }
+    if (owner !== AGY_BROWSER_READ_POLICY_MARKER) throw new Error("Antigravity browser read policy id is already owned by another project");
+  }
+  if (current !== text) {
+    const tempPath = `${configPath}.${process.pid}.${randomUUID()}.tmp`;
+    writeFileSync(tempPath, text, { encoding: "utf8", mode: 0o600 });
+    renameSync(tempPath, configPath);
+  }
+  return { projectId: AGY_BROWSER_READ_PROJECT_ID, configPath };
+}
+
 /** Antigravity headless args: one-shot prompt argv or resident stream-json stdin. */
 export function buildAntigravitySpawnArgs(
   model: string | undefined,
@@ -475,12 +593,15 @@ export function buildAntigravitySpawnArgs(
    * `--conversation <id>` 로 되돌린 턴이 이전 턴의 코드워드를 기억했다.
    */
   resumeConversationId?: string,
-  browserProjectId?: string,
+  /** Browser-only project: a bare id is the legacy profile; `scopedRead` drops the CLI bypass (antigravityPermissionArgs). */
+  browserProject?: string | { projectId: string; scopedRead: boolean },
   inputFormat?: "stream-json",
   /** `["--effort", level]` from antigravityEffortPlan, or nothing (a suffixed model id already fixes the level). */
   effortArgs: readonly string[] = [],
 ): string[] {
   const modelArgs = model && model.trim() ? ["--model", model.trim(), ...effortArgs] : [];
+  const browserProjectId = typeof browserProject === "string" ? browserProject : browserProject?.projectId;
+  const browserScopedRead = typeof browserProject === "object" && browserProject.scopedRead === true;
   const directoryArgs = [...new Set(addDirectories.filter((value) => value.trim()))]
     .flatMap((value) => ["--add-dir", value]);
   /*
@@ -495,7 +616,7 @@ export function buildAntigravitySpawnArgs(
   return [
     ...modelArgs, ...directoryArgs,
     ...(browserProjectId ? ["--project", browserProjectId] : []),
-    ...antigravityPermissionArgs(permission, Boolean(browserProjectId)),
+    ...antigravityPermissionArgs(permission, Boolean(browserProjectId), browserScopedRead),
     "--output-format", "stream-json",
     "--print-timeout", "30m",
     ...(inputFormat ? ["--input-format", inputFormat] : []),
@@ -2128,9 +2249,22 @@ async function runPreparedAntigravityAttempt(
   const agyToolsAllowed = runReq.browserOnly
     || runReq.permission === "write"
     || runReq.permission === "full";
-  const browserProject = runReq.browserOnly
-    ? await ensureAntigravityBrowserProjectPolicy()
+  /*
+   * Browser-only profile (see ensureAntigravityBrowserReadProjectPolicy): scoped-read on an agy measured to honor
+   * project grants headlessly (the project file is written before each spawn, in the HOME agy gets); the legacy bypass
+   * profile, whose project denies every file read, otherwise. Both run in the step's own working folder.
+   */
+  const browserProfile: AntigravityBrowserProfile | null = runReq.browserOnly
+    ? antigravityBrowserProfile(await probeCliVersion(bin))
     : null;
+  const browserProject: { projectId: string; scopedRead: boolean } | null = browserProfile === "scoped-read"
+    ? { projectId: AGY_BROWSER_READ_PROJECT_ID, scopedRead: true }
+    : browserProfile === "legacy"
+      ? { projectId: (await ensureAntigravityBrowserProjectPolicy()).projectId, scopedRead: false }
+      : null;
+  const ensureBrowserReadPolicy = (env: NodeJS.ProcessEnv): void => {
+    if (browserProject?.scopedRead) ensureAntigravityBrowserReadProjectPolicy(env.HOME || os.homedir(), env.AGENTLAS_AGY_REAL_HOME || os.homedir());
+  };
 
   // One-shot agy has no stdin prompt input. Its oversized prompt needs a
   // private file, whereas a resident stream-json process receives the full
@@ -2156,7 +2290,9 @@ async function runPreparedAntigravityAttempt(
    * (~/.gemini/antigravity-cli/scratch)로 돌렸다. 모델은 "만들었다"고 답하고 사용자가
    * 연 폴더는 비어 있다. 실행 중 프로세스의 인자와 cwd 를 직접 떠서 확인했다.
    */
-  const agyWorkDir = browserProject?.workspace ?? runReq.cwd ?? agentRunCwd();
+  // A browser-only run works in the same folder as every other run of the step (the room's or the run's folder): it
+  // used to run in the legacy profile's private runtime home and could not reach the step's files.
+  const agyWorkDir = runReq.cwd ?? agentRunCwd();
   let agyReadDirs = [agyWorkDir, ...agyAdditionalDirs];
   /*
    * ★agy 프롬프트는 **argv 한계에 걸릴 때만** 파일로 우회한다.
@@ -2190,7 +2326,11 @@ async function runPreparedAntigravityAttempt(
     ...(runReq.browserOnly
       ? [
           "- tools: only the Agentlas Browser MCP, pre-approved; use it directly",
-          "- never: run_command, file tools, provider-native browser tools, another Playwright runtime",
+          // The scoped-read profile's grants allow reading the workspace and nothing else on disk (A/B 2026-10-17).
+          ...(browserProject?.scopedRead
+            ? ["- files: read-only, this workspace only",
+              "- never: run_command, file writes, provider-native browser tools, another Playwright runtime"]
+            : ["- never: run_command, file tools, provider-native browser tools, another Playwright runtime"]),
           "- never print or pass cookies, auth headers, session tokens",
           "- report only observed results",
         ]
@@ -2226,7 +2366,7 @@ async function runPreparedAntigravityAttempt(
   }
   const oneShotSpawnArgs = (): string[] => buildAntigravitySpawnArgs(
     req.model, spawnPrompt, agyReadDirs, agyToolsAllowed ? req.permission : undefined,
-    req.outputSchema?.schema, agyResumeId ?? undefined, browserProject?.projectId, undefined, effortPlan.args,
+    req.outputSchema?.schema, agyResumeId ?? undefined, browserProject ?? undefined, undefined, effortPlan.args,
   );
   // agy reads the person's GEMINI.md, skills, plugins, hooks and MCP servers from HOME; a product run gets a mirrored HOME
   // without them (only One gets back what the person switched on). Must run after the run's MCP servers were reconciled.
@@ -2339,7 +2479,7 @@ async function runPreparedAntigravityAttempt(
       agyToolsAllowed ? runReq.permission : undefined,
       runReq.outputSchema?.schema,
       agyResumeId ?? undefined,
-      browserProject?.projectId,
+      browserProject ?? undefined,
       "stream-json",
       effortPlan.args,
     );
@@ -2400,14 +2540,18 @@ async function runPreparedAntigravityAttempt(
             source: resolveAgentResidencySource(runReq.agentId),
             reaperExempt: isResidencyExemptAgent(runReq.agentId),
           },
-          async () => openAntigravityResidentSession({
+          async () => {
+            const residentEnv = agyProductEnv({ ...(runReq.env ?? process.env), GEMINI_CLI_TRUST_WORKSPACE: "true" });
+            ensureBrowserReadPolicy(residentEnv);
+            return openAntigravityResidentSession({
             executableOwner: residentOwner,
             bin,
             args: residentArgs,
             cwd: agyWorkDir,
-            env: agyProductEnv({ ...(runReq.env ?? process.env), GEMINI_CLI_TRUST_WORKSPACE: "true" }),
+            env: residentEnv,
             onPersistentMcpScopeClose: (key, owner) => { revokeMcpProxyResidentKey(key, owner); },
-          }),
+            });
+          },
         );
       } catch (error) {
         if (error && typeof error === "object" && "code" in error && error.code === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
@@ -2493,6 +2637,8 @@ async function runPreparedAntigravityAttempt(
   }
   // Antigravity는 빈 prompt를 거부하므로 긴 요청만 private 파일 bootstrap으로 우회한다.
   const env = oneShotSpawnEnv();
+  // A resident already found its project when it started; a one-shot reads it now.
+  if (!residentSession) ensureBrowserReadPolicy(env);
   /*
    * A process started with `--conversation <id>` for this turn (one-shot, or a resident opened for it) resumes the
    * stored conversation. A resident reused from an earlier turn of this key holds its conversation in memory instead.
