@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { HarnessCallContext } from "./capability-ports";
 import type { InstalledMcpServer } from "../../shared/types";
+import type { PreparedMcpBinding } from "../mcp-tools/prepared-transport";
 import { redactSecrets } from "../../shared/secret-patterns";
 import { redactToolJson, redactToolText } from "./tool-result-store";
 
@@ -169,7 +170,7 @@ async function installedServers(): Promise<InstalledMcpServer[]> {
 }
 
 /** providerRef: catalog id, server id, or `connector:<id>`. */
-async function findServer(providerRef: string): Promise<InstalledMcpServer | null> {
+export async function findServer(providerRef: string): Promise<InstalledMcpServer | null> {
   const ref = providerRef.replace(/^connector:/, "").replace(/^tool:/, "");
   const all = (await installedServers()).filter((server) => server.id === ref || server.catalogId === ref);
   return all.find((server) => server.enabled) ?? all[0] ?? null;
@@ -177,22 +178,58 @@ async function findServer(providerRef: string): Promise<InstalledMcpServer | nul
 
 type InventoryTool = { name: string; [key: string]: unknown };
 
+// ── run-scoped built-ins (host channels) ─────────────────────────────────────────────────────────────────────────────
+//
+// A built-in whose plugin manifest declares a host channel (plugins/builtin.ts hostChannelToolIds: one-team, agent-mail,
+// agentlas-turn, workspace-preview, cua-driver, agentlas-browser) gets that channel only when Main prepares a run's MCP
+// config (mcp-config.ts mints the per-run capability and seals the launch, prepared-transport.ts). Launched from the
+// installed row it lists its tools and fails every call: production 2026-10-16, graph run cdf732ca, a worker without
+// One Team described it live through harness_call and both one_team_list and one_team_session_status settled as
+// "One team tools are not connected in this run.". Such a tool is therefore described and called only through the
+// calling run's sealed binding (same launch, same channel env as the run's runtime); a run without one is refused.
+
+export type RunScopedBinding =
+  | { ok: true; server: InstalledMcpServer; prepared?: PreparedMcpBinding }
+  | { ok: false; code: "not_available_in_this_run" | "run_binding_ended"; next: string };
+
+/** The launch a harness port must use for `server` in this call: the run's prepared binding for a host-channel tool. */
+export async function runScopedBinding(server: InstalledMcpServer, ctx?: Pick<HarnessCallContext, "mcpConfigPath">): Promise<RunScopedBinding> {
+  const { hostChannelToolIds } = await import("../plugins/builtin");
+  if (!server.catalogId || !hostChannelToolIds().has(server.catalogId)) return { ok: true, server };
+  const unavailable = { ok: false as const, code: "not_available_in_this_run" as const,
+    next: `${server.catalogId} is attached only to runs whose own tool list carries it; this run has none, so use your listed tools or report the missing capability` };
+  const configPath = str(ctx?.mcpConfigPath);
+  if (!configPath) return unavailable;
+  const { preparedMcpBindings } = await import("../mcp-tools/prepared-transport");
+  let bindings: PreparedMcpBinding[];
+  try { bindings = preparedMcpBindings(configPath); } catch {
+    return { ok: false, code: "run_binding_ended", next: "this run's tool binding ended or changed; the next turn binds tools again" };
+  }
+  const prepared = bindings.find((binding) => binding.server.id === server.id)
+    ?? bindings.find((binding) => binding.server.catalogId === server.catalogId);
+  return prepared ? { ok: true, server: prepared.server, prepared } : unavailable;
+}
+
 /** Current tools/list of one installed connector, with the digest tool.call must carry. */
-export async function describeConnectorTools(providerRef: string): Promise<
-  | { ok: true; server: InstalledMcpServer; tools: Array<{ name: string; description: string; schemaDigest: string; inputSchema: unknown }> }
+export async function describeConnectorTools(providerRef: string, ctx?: Pick<HarnessCallContext, "mcpConfigPath">): Promise<
+  | { ok: true; server: InstalledMcpServer; prepared?: PreparedMcpBinding; tools: Array<{ name: string; description: string; schemaDigest: string; inputSchema: unknown }> }
   | { ok: false; code: string; next?: string }
 > {
-  const server = await findServer(providerRef);
-  if (!server) return { ok: false, code: "not-installed", next: "connector.search finds installed connectors" };
-  if (!server.enabled) return { ok: false, code: "disabled", next: "connector.connect switches it on" };
+  const installed = await findServer(providerRef);
+  if (!installed) return { ok: false, code: "not-installed", next: "connector.search finds installed connectors" };
+  if (!installed.enabled) return { ok: false, code: "disabled", next: "connector.connect switches it on" };
+  const bound = await runScopedBinding(installed, ctx);
+  if (!bound.ok) return { ok: false, code: bound.code, next: bound.next };
+  const { server, prepared } = bound;
   const { testServerConnection } = await import("../mcp-tools/client");
   const { mcpToolSchemaDigest } = await import("../mcp-tools/tool-schema");
-  const status = await testServerConnection(server, { timeoutMs: 20_000 });
+  const status = await testServerConnection(server, { timeoutMs: 20_000, ...(prepared ? { prepared } : {}) });
   if (status.missingEnv.length > 0 || status.failureCode === "authentication_required") return { ok: false, code: "auth-required", next: "auth.status then auth.ensure/auth.login" };
   if (!status.connected) return { ok: false, code: "offline", next: "connector.status; retry when the server answers" };
   return {
     ok: true,
     server,
+    ...(prepared ? { prepared } : {}),
     tools: (status.tools as InventoryTool[]).map((tool) => ({
       name: tool.name,
       description: typeof tool.description === "string" ? tool.description.slice(0, 280) : "",
@@ -242,13 +279,14 @@ async function settle(call: LiveCall, state: ToolCallState, error: CallRecord["e
   await appendReceipt({ operationId: "tool.call.settled", callId: record.callId, resultRef: record.resultRef, state, providerRef: record.providerRef, toolId: record.toolId, chatId: record.chatId, runId: record.runId });
 }
 
-async function run(call: LiveCall, server: InstalledMcpServer, args: Args): Promise<void> {
+async function run(call: LiveCall, server: InstalledMcpServer, args: Args, prepared?: PreparedMcpBinding): Promise<void> {
   const { record, controller } = call;
   const { callServerToolContent, McpToolCallError } = await import("../mcp-tools/client");
   try {
     record.state = "running";
     await pushEvent(record, "started");
     const result = await callServerToolContent(server, record.toolId, args, {
+      ...(prepared ? { prepared } : {}),
       expectedToolSchemaDigest: record.schemaDigest,
       retainFullResult: true,
       signal: controller.signal,
@@ -295,7 +333,7 @@ export async function toolCall(args: Args, ctx: HarnessCallContext): Promise<Por
   }
   if (ctx.dryRun) return refused("dry_run", "a dry run validates only; nothing was dispatched");
 
-  const inventory = await describeConnectorTools(providerRef);
+  const inventory = await describeConnectorTools(providerRef, ctx);
   if (!inventory.ok) return refused(inventory.code, inventory.next);
   const toolName = toolRef.replace(/^tool:/, "").replace(new RegExp(`^${providerRef.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[:/]`), "");
   const tool = inventory.tools.find((item) => item.name === toolName);
@@ -329,7 +367,7 @@ export async function toolCall(args: Args, ctx: HarnessCallContext): Promise<Por
   await pushEvent(record, "accepted");
   // The accept receipt is written before the request can leave: an uncertain outcome always has evidence of the attempt.
   await appendReceipt({ operationId: "tool.call", callId, resultRef: record.resultRef, providerRef, toolId: toolName, schemaDigest, argumentsDigest: record.argumentsDigest, chatId: ctx.chatId, runId: ctx.runId });
-  entry.done = run(entry, inventory.server, callArgs as Args).catch(() => undefined);
+  entry.done = run(entry, inventory.server, callArgs as Args, inventory.prepared).catch(() => undefined);
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   await Promise.race([entry.done, new Promise<void>((resolve) => { timer = setTimeout(resolve, inlineWaitMs()); timer.unref?.(); })]);

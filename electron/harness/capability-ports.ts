@@ -28,6 +28,9 @@ export interface HarnessCallContext {
   graphAuthoring?: boolean;
   /** Exactly-once key of the caller's command (UI actions): an operation with an outside effect may dedupe on it. */
   commandId?: string;
+  /** Main-only: the calling run's sealed MCP config (mcp-config.ts, prepared-transport.ts). Host-channel built-ins are
+   * described and called only through it; absent (UI, mobile, SDK) they are refused, never launched bare. */
+  mcpConfigPath?: string;
 }
 
 export interface HarnessPortResult {
@@ -773,14 +776,19 @@ const PORTS: PortDefinition[] = [
   },
   {
     operationId: "tool.describe", kind: "query", purpose: "Read exact schema, provider, availability and result/UI contract.", required: ["toolId"],
-    handler: async (args) => {
+    handler: async (args, ctx) => {
       const id = str(args.toolId).replace(/^tool:/, "");
       const row = (await toolRows()).find((item) => item.providerRef === id);
       if (!row) return refused("tool_not_in_catalog");
+      const dispatch = await import("./tool-dispatch");
+      // A host-channel built-in exists for this call only through the calling run's sealed binding (no launch here).
+      const installed = row.enabled ? await dispatch.findServer(row.providerRef) : null;
+      const bound = installed ? await dispatch.runScopedBinding(installed, ctx) : null;
+      if (bound && !bound.ok) return { status: "refused", reason: bound.code, next: bound.next, data: { ...row, availability: bound.code } };
       // Live tool names and schema digests (tool.call requires the digest it was described with).
       // Opt-in (live: true): it starts the server once; plain describe stays inert.
-      const live = row.enabled && args.live === true ? await (await import("./tool-dispatch")).describeConnectorTools(row.providerRef) : null;
-      return ok({ ...row, availability: row.enabled ? "attached_when_the_run_needs_it" : row.installed ? "installed_off" : "not_installed",
+      const live = row.enabled && args.live === true ? await dispatch.describeConnectorTools(row.providerRef, ctx) : null;
+      return ok({ ...row, availability: bound?.ok && bound.prepared ? "attached_to_this_run" : row.enabled ? "attached_when_the_run_needs_it" : row.installed ? "installed_off" : "not_installed",
         ...(live?.ok ? { tools: live.tools.map(({ name, description, schemaDigest, inputSchema }) => ({ name, description, schemaDigest, inputSchema })) }
           : live ? { liveState: live.code } : {}),
         next: row.enabled ? "call it by its MCP tool name, or describe with live: true and tool.call with providerRef + schemaDigest" : "connector.connect" });

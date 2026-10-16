@@ -1096,7 +1096,9 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           const capability = await createTurnToolsCapability(
             { chatId: callerChatId, runId: opts.turnRunId, tools: turnToolsFor(opts.turnGoalTools === true, opts.turnAskTool === true), dryRun: opts?.toolGate?.simulation === true || opts?.toolGate?.planMode === true,
               permission: opts?.toolGate?.permission ?? "read",
-              graphAuthoring: serializedServers.some((server) => server.catalogId === "one-team") && !toolchainConsumer && !roomMember },
+              graphAuthoring: serializedServers.some((server) => server.catalogId === "one-team") && !toolchainConsumer && !roomMember,
+              // Harness tool ports reach this run's host-channel built-ins only through this sealed file.
+              mcpConfigPath: configPath },
             capabilityConfigKey,
           );
           turnToolsCapabilityCleanup.push(() => removeTurnToolsCapability(capabilityConfigKey, capability.binding.capabilityId));

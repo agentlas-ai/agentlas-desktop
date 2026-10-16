@@ -32,6 +32,9 @@ export interface TurnToolsCapabilityBinding {
   permission?: "read" | "write" | "full";
   /** One Team is attached and the run is neither a Toolchain consumer nor a room member (one_graph_* scope). */
   graphAuthoring?: boolean;
+  /** Main-only: the sealed MCP config this capability was minted in. Harness ports dispatch the run's host-channel
+   * built-ins through it (harness/tool-dispatch.ts runScopedBinding). Never written to the capability file. */
+  mcpConfigPath?: string;
 }
 
 export type TurnGoalTimerAuthority =
@@ -215,7 +218,8 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       const a = request.args && typeof request.args === "object" && !Array.isArray(request.args) ? request.args as Record<string, unknown> : {};
       const harness = await import("../harness/capability-ports");
       const ctx = { chatId: binding.chatId, runId: binding.runId, dryRun: binding.dryRun === true,
-        ...(binding.permission ? { permission: binding.permission } : {}), ...(binding.graphAuthoring === true ? { graphAuthoring: true } : {}) };
+        ...(binding.permission ? { permission: binding.permission } : {}), ...(binding.graphAuthoring === true ? { graphAuthoring: true } : {}),
+        ...(binding.mcpConfigPath ? { mcpConfigPath: binding.mcpConfigPath } : {}) };
       if (operation === "harness_search") {
         const kind = typeof a.kind === "string" ? a.kind as Parameters<typeof harness.searchHarness>[1] : undefined;
         return { items: await harness.searchHarness(typeof a.query === "string" ? a.query.slice(0, 500) : "", kind) };

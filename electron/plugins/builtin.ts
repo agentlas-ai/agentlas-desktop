@@ -294,6 +294,22 @@ export function channelSupersededTools(): Map<string, string> {
 }
 
 /**
+ * Tool ids whose manifest declares a host-injected channel (PLUGIN-SPEC §2.9). Main mints that channel only while it
+ * prepares one run's MCP config (mcp-config.ts), so a launch from the installed row alone lists the tools and fails
+ * every call. Callers outside the runtime (the harness tool ports) dispatch these only through the calling run's
+ * prepared binding. Derived from the manifests, like channelSupersededTools, never from an id list.
+ */
+export function hostChannelToolIds(): ReadonlySet<string> {
+  const ids = new Set<string>();
+  for (const plugin of BUILTIN_PLUGINS) {
+    for (const tool of (plugin.provides?.tools ?? []) as PluginTool[]) {
+      if ((tool.hostChannels ?? []).length > 0) ids.add(tool.id);
+    }
+  }
+  return ids;
+}
+
+/**
  * Should this tool be dropped from auto-mode candidacy because a live same-capability peer
  * supersedes it? Returns the peer id when it should, `null` otherwise.
  *
