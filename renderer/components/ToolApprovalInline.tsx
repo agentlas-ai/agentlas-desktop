@@ -45,7 +45,9 @@ const RUNTIME_LABEL: Record<string, string> = {
  * "mcp__one-team__one_supervi…" in an approval chip); the server prefix and underscores are machine spelling.
  */
 export function toolDisplayName(tool: string): string {
-  const mcp = /^mcp__([^_]+(?:[-.][^_]+)*)__(.+)$/.exec(tool.trim());
+  // The server part may itself contain underscores ("claude_ai_Notion"): it ends at the next "__" (mobile
+  // tool_approval_presentation.dart toolApprovalDisplayName is the same rule).
+  const mcp = /^mcp__(.+?)__(.+)$/.exec(tool.trim());
   const name = (mcp ? mcp[2] : tool).replace(/[_]+/g, " ").replace(/\s+/g, " ").trim();
   return name || tool;
 }
@@ -123,7 +125,11 @@ export function ToolApprovalCard({
       title: ko ? "이번만 허용" : "Allow once",
       note: escalation
         ? (ko ? "이번 이어가기 실행에만 전체 액세스를 줍니다." : "Full access for this resumed run only.")
-        : (ko ? `${runtimeName} 가 지금 이 호출에만 씁니다.` : `${runtimeName} uses it for this call only.`),
+        // No "<runtime> 가": the particle does not fit every name. Folder notes say what happens to the
+        // folder; mobile agentlas_screen.dart _inlineToolApprovalCard uses the same notes.
+        : folderAccess
+          ? (ko ? "지금 이 요청에만 허용합니다." : "This request only.")
+          : (ko ? "이번 호출에만 씁니다." : "For this call only."),
       active: true,
       disabled: locked,
     },
@@ -140,7 +146,11 @@ export function ToolApprovalCard({
       title: ko ? "항상 허용" : "Always allow",
       note: escalation
         ? (ko ? "권한이 모자랄 때 항상 전체 액세스로 진행합니다." : "Always continue with full access when permission falls short.")
-        : (ko ? "이 도구의 같은 작업 패턴을 다시 묻지 않습니다." : "Do not ask again for this tool's matching action pattern."),
+        : folderAccess
+          ? folderWrite
+            ? (ko ? "이 폴더의 파일 생성과 수정을 다시 묻지 않습니다." : "Never ask again about editing files here.")
+            : (ko ? "이 폴더 읽기를 다시 묻지 않습니다." : "Never ask again about reading this folder.")
+          : (ko ? "이 도구의 같은 작업 패턴을 다시 묻지 않습니다." : "Do not ask again for this tool's matching action pattern."),
       disabled: locked,
     },
     {
@@ -148,7 +158,11 @@ export function ToolApprovalCard({
       title: ko ? "거부" : "Deny",
       note: escalation
         ? (ko ? "읽기 전용을 유지합니다 — 요청된 변경은 실행되지 않습니다." : "Stay read-only — the requested change is not executed.")
-        : (ko ? "이 호출만 거부되고 나머지는 그대로 진행됩니다." : "Only this call is refused; the rest of the run continues."),
+        : folderAccess
+          ? folderWrite
+            ? (ko ? "이 폴더에 파일을 만들거나 수정하지 않고 계속합니다." : "Continues without editing files in this folder.")
+            : (ko ? "이 폴더를 읽지 않고 계속합니다." : "Continues without reading this folder.")
+          : (ko ? "이 호출만 거부하고 계속합니다." : "Refuses this call; the run continues."),
       disabled: locked,
     },
   ];
