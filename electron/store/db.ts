@@ -15,6 +15,7 @@ import { materializeTeamMemberCells, type MaterializableFirmNode } from "./team-
 import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-projection";
 import { currentUiLocale } from "../ui-locale";
 import { pruneLegacyDatabaseBackups } from "./backup-retention";
+import { sameMigrationBackupFile, sameMigrationBackupSource, type MigrationBackupFingerprint } from "./migration-backup-identity";
 import { createOneDomainEventIndexes } from "./one-domain-event-indexes";
 import { createAgentContextSchema } from "./agent-context";
 import { createAgentStrategySchema } from "./agent-strategy-schema";
@@ -963,7 +964,7 @@ const MANAGED_MIGRATION_BACKUP_SCHEMA = "agentlas.managed-migration-backup.v1";
 const MAX_MANAGED_MIGRATION_BACKUPS = 3;
 const MIGRATION_BACKUP_TAG_RE = /^(?:pre-upgrade-v[1-9]\d*|v102-seats|v103-seat-session)$/;
 
-function migrationBackupFingerprint(file: string): Record<string, string> {
+function migrationBackupFingerprint(file: string): MigrationBackupFingerprint {
   const stat = fs.lstatSync(file, { bigint: true });
   if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("migration_backup_unsafe_file");
   return { dev: String(stat.dev), ino: String(stat.ino), size: String(stat.size),
@@ -988,7 +989,7 @@ function pruneManagedMigrationBackups(db: Database.Database, currentBackup: stri
     const sourceIdentity = migrationBackupFingerprint(source);
     const liveVersion = Number(db.pragma("user_version", { simple: true }));
     if (!Number.isSafeInteger(liveVersion) || liveVersion < 0) return;
-    const copies: Array<{ file: string; metadataFile: string; createdAt: number; sourceVersion: number; fingerprint: Record<string, string> }> = [];
+    const copies: Array<{ file: string; metadataFile: string; createdAt: number; sourceVersion: number; fingerprint: MigrationBackupFingerprint }> = [];
     for (const name of names) {
       if (name.endsWith(".bak.retention.json") && !backupNames.includes(name.slice(0, -".retention.json".length))) return;
     }
@@ -1004,14 +1005,13 @@ function pruneManagedMigrationBackups(db: Database.Database, currentBackup: stri
       const targetVersion = Number(meta.targetSchemaVersion);
       const fingerprint = migrationBackupFingerprint(file);
       if (meta.schemaVersion !== MANAGED_MIGRATION_BACKUP_SCHEMA || meta.backupName !== name
-        || meta.sourceName !== path.basename(source) || !identity
-        || identity.dev !== sourceIdentity.dev || identity.ino !== sourceIdentity.ino
+        || meta.sourceName !== path.basename(source) || !sameMigrationBackupSource(identity, sourceIdentity)
         || typeof meta.tag !== "string" || !MIGRATION_BACKUP_TAG_RE.test(meta.tag)
         || !suffix.startsWith(`${meta.tag}.`) || !Number.isSafeInteger(meta.sourceSchemaVersion)
         || !Number.isSafeInteger(meta.targetSchemaVersion) || Number(meta.sourceSchemaVersion) < 0
         || targetVersion < Number(meta.sourceSchemaVersion) || targetVersion > SCHEMA_VERSION
         || (meta.tag.startsWith("pre-upgrade-v") && Number(meta.tag.slice("pre-upgrade-v".length)) !== meta.sourceSchemaVersion)
-        || JSON.stringify(meta.fingerprint) !== JSON.stringify(fingerprint)
+        || !sameMigrationBackupFile(meta.fingerprint, fingerprint)
         || typeof meta.createdAt !== "string" || !Number.isFinite(Date.parse(meta.createdAt))
         || new Date(meta.createdAt).toISOString() !== meta.createdAt) return;
       for (const sidecar of ["-wal", "-shm", "-journal"]) if (fs.existsSync(`${file}${sidecar}`)) return;
@@ -1025,19 +1025,23 @@ function pruneManagedMigrationBackups(db: Database.Database, currentBackup: stri
       .sort((a, b) => b.createdAt - a.createdAt || b.file.localeCompare(a.file))
       .slice(MAX_MANAGED_MIGRATION_BACKUPS - 1);
     if (candidates.length === 0) return;
+    // Complete preflight before deleting anything. Read failures, corruption,
+    // or any actual ledger reference preserve the whole set, even above cap.
+    // The integrity checks are read-only and run before the write lock: each
+    // takes ~4 s per 1.6 GB copy (measured 2026-10-16), so inside .immediate()
+    // the first real prune would have blocked every other writer for ~40 s.
+    // The fingerprint re-check under the lock still catches a copy that changed.
+    if (String(db.pragma("quick_check", { simple: true })) !== "ok") return;
+    if ((db.pragma("foreign_key_check") as unknown[]).length > 0) return;
+    for (const copy of copies) {
+      let backup: Database.Database | null = null;
+      try {
+        backup = new Database(copy.file, { readonly: true, fileMustExist: true });
+        if (String(backup.pragma("quick_check", { simple: true })) !== "ok"
+          || Number(backup.pragma("user_version", { simple: true })) !== copy.sourceVersion) return;
+      } finally { backup?.close(); }
+    }
     db.transaction(() => {
-      // Complete preflight before deleting anything. Read failures, corruption,
-      // or any actual ledger reference preserve the whole set, even above cap.
-      if (String(db.pragma("quick_check", { simple: true })) !== "ok") return;
-      if ((db.pragma("foreign_key_check") as unknown[]).length > 0) return;
-      for (const copy of copies) {
-        let backup: Database.Database | null = null;
-        try {
-          backup = new Database(copy.file, { readonly: true, fileMustExist: true });
-          if (String(backup.pragma("quick_check", { simple: true })) !== "ok"
-            || Number(backup.pragma("user_version", { simple: true })) !== copy.sourceVersion) return;
-        } finally { backup?.close(); }
-      }
       const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
         .all() as Array<{ name: string }>;
       for (const candidate of candidates) {
@@ -1050,7 +1054,7 @@ function pruneManagedMigrationBackups(db: Database.Database, currentBackup: stri
         }
       }
       for (const copy of copies) {
-        if (JSON.stringify(migrationBackupFingerprint(copy.file)) !== JSON.stringify(copy.fingerprint)) return;
+        if (!sameMigrationBackupFile(copy.fingerprint, migrationBackupFingerprint(copy.file))) return;
       }
       for (const candidate of candidates) {
         fs.unlinkSync(candidate.file);
