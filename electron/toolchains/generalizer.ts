@@ -14,7 +14,8 @@ import { getProject } from "../store/projects";
 import { listInstalledServers } from "../mcp-tools/registry";
 import { GLOBAL_ORCHESTRATOR_SLUG } from "../architecture/manifest";
 import { callToolchainPreparation, type ToolchainPreparationProducer } from "./preparation";
-import { TOOLCHAIN_GENERALIZER_AGENT, TOOLCHAIN_GENERALIZATION_OUTPUT_SCHEMA, type ToolchainGeneralizationDecision } from "../system-agents/toolchain-generalizer";
+import { TOOLCHAIN_GENERALIZER_AGENT, TOOLCHAIN_GENERALIZATION_ENVELOPE_KEY, TOOLCHAIN_GENERALIZATION_OUTPUT_SCHEMA, TOOLCHAIN_GENERALIZATION_PROVIDER_SCHEMA,
+  type ToolchainGeneralizationDecision } from "../system-agents/toolchain-generalizer";
 import { graphMcpEffectProblems, graphMcpToolNeverReadOnly, inspectGraphMcpTools } from "../workflow/mcp-call";
 import { currentUiLocale } from "../ui-locale";
 import { addToolchainVersion, createToolchainAsset, getToolchainAsset, listToolchainAssets, matchingToolchainVersion, toolchainSchemaProblems } from "./assets";
@@ -74,7 +75,12 @@ function readResult(key: string, inputHash: string): ToolchainGenerationResult |
   return { ...result, asset };
 }
 function parseDecision(text: string): ToolchainGeneralizationDecision {
-  const value: unknown = JSON.parse(text.trim());
+  const parsed: unknown = JSON.parse(text.trim());
+  // The provider schema carries the decision under one member (TOOLCHAIN_GENERALIZATION_PROVIDER_SCHEMA). A runtime that only
+  // read the schema in its prompt may answer the bare decision; the full decision schema decides either shape.
+  const value: unknown = parsed && typeof parsed === "object" && !Array.isArray(parsed) && Object.keys(parsed).length === 1
+    && Object.hasOwn(parsed, TOOLCHAIN_GENERALIZATION_ENVELOPE_KEY)
+    ? (parsed as Record<string, unknown>)[TOOLCHAIN_GENERALIZATION_ENVELOPE_KEY] : parsed;
   if (!validateDecision(value)) throw new Error(`toolchain_generalization_shape_invalid:${JSON.stringify(validateDecision.errors)}`);
   return value;
 }
@@ -207,7 +213,7 @@ async function prepare(input: ToolchainGenerationInput, actor: GenerationActor, 
       if (Buffer.byteLength(context) > 1024 * 1024) throw new Error("toolchain_catalog_context_too_large");
       const detailed = await callToolchainPreparation({ purpose: "generalization",
         systemPrompt: TOOLCHAIN_GENERALIZER_AGENT.core, input: context,
-        outputSchema: { name: "agentlas_toolchain_generalization", schema: TOOLCHAIN_GENERALIZATION_OUTPUT_SCHEMA },
+        outputSchema: { name: "agentlas_toolchain_generalization", schema: TOOLCHAIN_GENERALIZATION_PROVIDER_SCHEMA },
         producer: actor.preparationProducer, signal, deadlineAt: deadline });
       signal.throwIfAborted(); actor.assertCurrent?.();
       if (!detailed.text && detailed.failure?.kind === "refused" && detailed.failure.source === "marker"
