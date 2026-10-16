@@ -352,16 +352,19 @@ export function reflectionSystemPrompt(): string {
   ]);
 }
 
-/** Closed native output contract; absent optional patches are explicit nulls. */
+/** Closed native output contract; absent optional patches are explicit nulls.
+ * No text or list carries a cap (shared/provider-output-schema.ts): codex decodes this schema strictly, so a 2,000
+ * character cap cut a node prompt mid-sentence and the cut prompt was accepted as the proposal. The bounds stay in
+ * parseAutomationStrategyProposalEnvelope (2,000 characters, 4 ops), which refuses overflow as reflection_invalid_output. */
 export function automationStrategyReflectionOutputSchema(graph: WorkflowGraph): Record<string, unknown> {
-  const text = { type: "string", minLength: 1, maxLength: 2_000 };
+  const text = { type: "string", minLength: 1 };
   const closed = (properties: Record<string, unknown>) => ({
     type: "object", properties, required: Object.keys(properties), additionalProperties: false,
   });
   const nullable = (schema: Record<string, unknown>) => ({ anyOf: [schema, { type: "null" }] });
   const strategy = closed({ schemaVersion: { type: "string", enum: ["agentlas.automation-strategy.v1"] },
     summary: text, change: text, rationale: text });
-  const graphPatch = closed({ ops: { type: "array", minItems: 1, maxItems: 4, items: closed({
+  const graphPatch = closed({ ops: { type: "array", minItems: 1, items: closed({
     op: { type: "string", enum: ["editNode"] },
     nodeId: { type: "string", enum: graph.nodes.length ? graph.nodes.map(node => node.id) : ["__no_existing_nodes__"] },
     config: closed({ prompt: text }),

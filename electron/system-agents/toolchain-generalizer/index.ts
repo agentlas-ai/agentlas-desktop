@@ -1,6 +1,7 @@
 import { composeDeclaredPrompt, registerDeclaredPromptModule, type DeclaredPromptPart } from "../../runtime/prompt-order";
 import type { SystemAgentSpec } from "../types";
 import { GRAPH_BLUEPRINT_INPUT_SCHEMA } from "../../../shared/graph-authoring";
+import { providerOutputSchema } from "../../../shared/provider-output-schema";
 import type { GraphBlueprint } from "../../../shared/graph-blueprint";
 import type { ToolchainAssetContract } from "../../../shared/toolchain-asset";
 
@@ -36,7 +37,8 @@ const contractSchema = {
   required: ["name", "description", "whenToUse", "whenNotToUse", "inputSchema", "outputSchema", "examples", "variationStatement"],
 };
 
-registerDeclaredPromptModule({ id: "toolchains.generalizer.response-schema", revision: 3, stability: "versioned-content", changeTriggers: ["release"], order: 0 });
+// revision 4 (2026-10-17): the provider copy carries no maxItems / maxLength (whenToUse 20, steps 20, texts 80-24000).
+registerDeclaredPromptModule({ id: "toolchains.generalizer.response-schema", revision: 4, stability: "versioned-content", changeTriggers: ["release"], order: 0 });
 
 const toolchainBlueprintSchema = {
   ...GRAPH_BLUEPRINT_INPUT_SCHEMA,
@@ -79,14 +81,18 @@ export const TOOLCHAIN_GENERALIZATION_OUTPUT_SCHEMA = {
 export const TOOLCHAIN_GENERALIZATION_ENVELOPE_KEY = "proposal";
 
 /**
- * What the provider receives: the decision schema unchanged, under one object member. A native structured-output lane
+ * What the provider receives: the decision schema, under one object member. A native structured-output lane
  * takes an object schema with no combinator at its root (Claude `--json-schema` answers API 400 "input_schema does not
  * support oneOf, allOf, or anyOf at the top level", NH07 A/B 2026-10-15), so the decision's top-level `oneOf` cannot be
  * the root. The host unwraps the member and validates the full decision schema (toolchains/generalizer.ts parseDecision).
+ *
+ * The member is the provider copy of that schema (shared/provider-output-schema.ts): no list or text cap reaches a
+ * strict decoder, where a full whenToUse or steps list leaves the model writing in the last open string. Every bound
+ * (whenToUse 20, steps 20, text lengths) stays in the host Ajv validator, which refuses overflow as a typed result.
  */
 export const TOOLCHAIN_GENERALIZATION_PROVIDER_SCHEMA = {
   type: "object", additionalProperties: false,
-  properties: { [TOOLCHAIN_GENERALIZATION_ENVELOPE_KEY]: TOOLCHAIN_GENERALIZATION_OUTPUT_SCHEMA },
+  properties: { [TOOLCHAIN_GENERALIZATION_ENVELOPE_KEY]: providerOutputSchema(TOOLCHAIN_GENERALIZATION_OUTPUT_SCHEMA) },
   required: [TOOLCHAIN_GENERALIZATION_ENVELOPE_KEY],
 };
 

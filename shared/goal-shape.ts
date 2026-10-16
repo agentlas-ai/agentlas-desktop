@@ -43,15 +43,21 @@ export const GOAL_SHAPE_LIMITS = {
   defaultTimeboxHours: 72,
 } as const;
 
-/** Model draft wire contract. Host validation still binds owner numbers, quotes and the dependency DAG. */
+/** Model draft wire contract. Host validation still binds owner numbers, quotes and the dependency DAG.
+ *
+ * No text or list carries a cap (shared/provider-output-schema.ts): a strict decoder cuts a capped text mid-sentence
+ * and keeps a model with one more tactic writing inside the last open string. GOAL_SHAPE_LIMITS stay in the host
+ * normalizer, which keeps the first N items with a typed note (tactics_capped, ...) and trims text to the limit.
+ * The id pattern keeps its width: it is the host identifier format (idOf), its character class admits no whitespace, so
+ * no prose can enter the string. */
 export const GOAL_SHAPE_OUTPUT_SCHEMA: Record<string, unknown> = (() => {
-  const text = { type: "string", minLength: 1, maxLength: GOAL_SHAPE_LIMITS.text };
+  const text = { type: "string", minLength: 1 };
   const id = { type: "string", pattern: "^[A-Za-z][A-Za-z0-9_.-]{0,39}$" };
   const nullable = (schema: Record<string, unknown>) => ({ anyOf: [schema, { type: "null" }] });
   const object = (properties: Record<string, unknown>, required = Object.keys(properties)) =>
     ({ type: "object", properties, required, additionalProperties: false });
-  const array = (items: Record<string, unknown>, maxItems?: number, minItems?: number) =>
-    ({ type: "array", items, ...(maxItems === undefined ? {} : { maxItems }), ...(minItems === undefined ? {} : { minItems }) });
+  const array = (items: Record<string, unknown>, minItems?: number) =>
+    ({ type: "array", items, ...(minItems === undefined ? {} : { minItems }) });
   const hours = { type: "number", minimum: GOAL_SHAPE_LIMITS.minReviewHours, maximum: GOAL_SHAPE_LIMITS.maxReviewHours * 4 };
   const prerequisite = object({ id, state: { enum: ["met", "unmet", "unknown"] }, evidence_refs: array(text),
     blocks: array({ enum: ["prepare", "local_write", "external_effect"] }) });
@@ -63,14 +69,13 @@ export const GOAL_SHAPE_OUTPUT_SCHEMA: Record<string, unknown> = (() => {
     deadline: nullable(deadline), baseline: nullable({ type: "number" }) });
   const boundary = { anyOf: [object({ text, source: { const: "owner" }, quote: text }),
     object({ text, source: { const: "platform_rule" }, rule_ref: text })] };
-  const mission = object({ objective: text, diagnosis: text, key_results: array(kr, GOAL_SHAPE_LIMITS.keyResults),
-    boundaries: array(boundary, GOAL_SHAPE_LIMITS.boundaries) });
+  const mission = object({ objective: text, diagnosis: text, key_results: array(kr), boundaries: array(boundary) });
   const strategy = object({ id, hypothesis: text, serves_krs: array(text), kpi: text,
     budget: object({ actions_per_day: nullable({ type: "number", minimum: 0 }) }),
     timebox_hours: hours, observation_window_hours: hours });
   return object({ shape: { enum: GOAL_SHAPE_KINDS }, problem_nature: { enum: PROBLEM_NATURES }, rationale: text,
-    mission: nullable(mission), strategies: array(strategy, GOAL_SHAPE_LIMITS.strategies),
-    tactics: array(tactic, GOAL_SHAPE_LIMITS.tactics, 1),
+    mission: nullable(mission), strategies: array(strategy),
+    tactics: array(tactic, 1),
     review_every_hours: nullable({ type: "number", minimum: GOAL_SHAPE_LIMITS.minReviewHours, maximum: GOAL_SHAPE_LIMITS.maxReviewHours }),
     deadline: nullable(deadline) });
 })();
@@ -424,6 +429,9 @@ export function validateGoalShape(raw: unknown, ownerText: string, createdAtIso:
         const empty = strategies.filter((strategy) => !cited.has(strategy.id));
         if (empty.length) notes.push(`strategy_without_tactic_dropped:${empty.map((s) => s.id).join(",")}`);
         strategies = strategies.filter((strategy) => cited.has(strategy.id)).map((strategy, index) => ({ ...strategy, priority: index }));
+        // The draft schema carries no count cap; the host keeps the first N and says so.
+        if (krs.length > GOAL_SHAPE_LIMITS.keyResults) notes.push("key_results_capped");
+        if (boundaries.length > GOAL_SHAPE_LIMITS.boundaries) notes.push("boundaries_capped");
         mission = { objective, diagnosis, key_results: krs.slice(0, GOAL_SHAPE_LIMITS.keyResults),
           boundaries: boundaries.slice(0, GOAL_SHAPE_LIMITS.boundaries) };
         const review = finiteOrNull(raw.review_every_hours);

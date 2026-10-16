@@ -1,5 +1,6 @@
 import { BLUEPRINT_SCHEMA, CONDITION_OPS } from "./graph-blueprint";
 import { CAPABILITIES, PROVIDER_CATALOG } from "./graph-tool-binding";
+import { providerOutputSchema } from "./provider-output-schema";
 
 // Wire shape only. All topology/data-flow semantics still belong to the
 // canonical blueprint validator/compiler; the host never compiles model ids.
@@ -53,17 +54,21 @@ export const GRAPH_BLUEPRINT_INPUT_SCHEMA = object({
   }, ["afterStep", "subject", "criteria"])),
 }, ["schema", "name", "goal", "trigger", "steps"]);
 
-/** UI interview output: both alternatives travel to the actual model call. */
-export const GRAPH_INTERVIEW_OUTPUT_SCHEMA = {
+/** UI interview output: both alternatives travel to the actual model call.
+ * The provider copy (shared/provider-output-schema.ts): the shapes above keep their caps for the host checks
+ * (graphAuthoringShapeProblems, the blueprint compiler, graph-interview normalizeQuestions); none reaches a decoder. */
+export const GRAPH_INTERVIEW_OUTPUT_SCHEMA = providerOutputSchema({
   anyOf: [
     object({ ask: array(object({ id: string(128), question: string(2000), why: string(2000),
       choices: array(string(1000), 20) }, ["id", "question"]), 3, 1) }, ["ask"]),
     object({ blueprint: GRAPH_BLUEPRINT_INPUT_SCHEMA }, ["blueprint"]),
   ],
-};
+});
 
-/** Patch wire shape; topology/effect/compiler checks remain authoritative after generation. */
-export const GRAPH_PATCH_OUTPUT_SCHEMA = object({
+/** Patch wire shape; topology/effect/compiler checks remain authoritative after generation.
+ * Provider copy without caps, like GRAPH_INTERVIEW_OUTPUT_SCHEMA; parseGraphPatchProposal and the supervision checks
+ * own the bounds and answer overflow with a typed code the self-correction round carries back. */
+export const GRAPH_PATCH_OUTPUT_SCHEMA = providerOutputSchema(object({
   ops: array({ anyOf: [
     object({ op: { const: "addNode" }, node: object({ id, type: { enum: ["trigger", "agent", "tool", "action", "condition", "transform", "output", "eval", "subgraph", "code", "toolchain_call"] }, label: string(200), config: { type: "object", additionalProperties: true } }, ["id", "type", "config"]) }, ["op", "node"]),
     ...["editNode", "setPolicy"].map(op => object({ op: { const: op }, nodeId: id, config: { type: "object", additionalProperties: true } }, ["op", "nodeId", "config"])),
@@ -72,7 +77,7 @@ export const GRAPH_PATCH_OUTPUT_SCHEMA = object({
     object({ op: { const: "removeEdge" }, edgeId: id }, ["op", "edgeId"]),
     object({ op: { const: "setTrigger" }, config: { type: "object", additionalProperties: true } }, ["op", "config"]),
   ] }, 24), rationale: string(2000),
-}, ["ops", "rationale"]);
+}, ["ops", "rationale"]));
 
 const ro = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
 const act = { readOnlyHint: false, destructiveHint: false, openWorldHint: false };

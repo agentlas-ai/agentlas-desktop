@@ -16,6 +16,7 @@ import type { DeclaredPromptPart } from "../runtime/prompt-order";
  */
 import { agiDecisionRefusal, agiDecisionAbortSignal, AGI_DECISION_CONTROL_CHANGED } from "./decision-control";
 import Ajv from "ajv";
+import { providerOutputSchema } from "../../shared/provider-output-schema";
 import { currentUiLocale } from "../ui-locale";
 import type Database from "better-sqlite3";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
@@ -108,8 +109,12 @@ const argsAjv = new Ajv({ strict: false, allErrors: false });
 const actionArgsValidators = new Map(Object.entries(AGI_ACTION_ARGS_SCHEMAS).map(([key, schema]) => [key, argsAjv.compile(schema)]));
 const readArgsValidators = new Map(Object.entries(AGI_READ_ARGS_SCHEMAS).map(([key, schema]) => [key, argsAjv.compile(schema)]));
 
-/** Full decision schema reaches native structured output or the exact text fallback. */
-export const AGI_DECISION_JSON_SCHEMA: Record<string, unknown> = argObject({
+/** Full decision schema reaches native structured output or the exact text fallback.
+ * It is the provider copy (shared/provider-output-schema.ts): no list cap travels to the model. The host keeps every
+ * bound after decoding: parseAgiDecision refuses more than AGI_MAX_EXTRA_READS reads or AGI_MAX_ACTIONS_STRUCTURAL
+ * actions, and the per-action Ajv validators (replan_tree ops 12, split into 2-5) refuse their own overflow, all as the
+ * typed "agi.model.answer-invalid". */
+export const AGI_DECISION_JSON_SCHEMA: Record<string, unknown> = providerOutputSchema(argObject({
   schema: { const: AGI_MODEL_ATTEMPT_SCHEMA },
   diagnosis: argObject({ summary: argText, ownerClass: { enum: ["our_defect", "agent_resolvable", "human_only"] } }),
   reads: { type: "array", maxItems: AGI_MAX_EXTRA_READS, items: { anyOf: AGI_READ_TOOL_NAMES.map(tool =>
@@ -117,7 +122,7 @@ export const AGI_DECISION_JSON_SCHEMA: Record<string, unknown> = argObject({
   actions: { type: "array", maxItems: AGI_MAX_ACTIONS_STRUCTURAL, items: { anyOf: AGI_ACTION_KINDS.map(action =>
     argObject({ action: { const: action }, args: AGI_ACTION_ARGS_SCHEMAS[action] })) } },
   reflection: { type: "string" },
-});
+}));
 
 export const AGI_UNBLOCK_SYSTEM_PROMPT = purposePrompt([{
   id: "purpose.agi.unblock.policy", revision: 3, stability: "fixed-policy", changeTriggers: ["release"],

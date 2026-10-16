@@ -136,8 +136,14 @@ function swarmAllocationInInventory(value: Record<string, unknown>, inventory: R
     || requirements.multimodalRequired && profile?.supportsMultimodal !== true && !profile?.capabilities.includes("multimodal"));
 }
 
+/**
+ * No list in the worker result carries a cap (shared/provider-output-schema.ts): a strict decoder that reaches maxItems
+ * masks the item separator and the model keeps writing in the last open string. The engine's own budget
+ * (SWARM_MAX_TASKS, enforced when children join the board) bounds the fan-out; reason codes are trimmed by
+ * normalizeWorkloadAllocation. revision 4 (2026-10-17): tasks, files and reasonCodes lost maxItems 12 / 24 / 8.
+ */
 export function swarmWorkerOutputSchema(seed: boolean, inventory: ReturnType<typeof workloadRuntimeInventory> = []): Record<string, unknown> {
-  registerDeclaredPromptModule({ id: "swarm.worker.response-schema", revision: 3, stability: "task-context", changeTriggers: ["release", "runtime", "capability-inventory", "profile", "task", "plan-revision"], order: 0 });
+  registerDeclaredPromptModule({ id: "swarm.worker.response-schema", revision: 4, stability: "task-context", changeTriggers: ["release", "runtime", "capability-inventory", "profile", "task", "plan-revision"], order: 0 });
   const allocation = (phase: "delegate" | "synthesize") => {
     const base = taskForceAllocationOutputSchema(phase) as { required: string[]; properties: Record<string, unknown>; [key: string]: unknown };
     return { ...base, required: ["schema", ...base.required], properties: {
@@ -148,13 +154,13 @@ export function swarmWorkerOutputSchema(seed: boolean, inventory: ReturnType<typ
         effort: { type: "string", enum: [...new Set(inventory.flatMap(row => Object.values(row.modelProfiles).flatMap(profile => profile.efforts ?? row.efforts)))] } } : {}),
       requirements: { type: "object", additionalProperties: false, required: ["inputTokens", "expectedOutputTokens", "toolRequired", "multimodalRequired"], properties: {
         inputTokens: { type: "integer", minimum: 0, maximum: 10_000_000 }, expectedOutputTokens: { type: "integer", minimum: 0, maximum: 10_000_000 }, toolRequired: { type: "boolean" }, multimodalRequired: { type: "boolean" } } },
-      reasonCodes: { type: "array", minItems: 1, maxItems: 8, items: { type: "string", minLength: 1 } },
+      reasonCodes: { type: "array", minItems: 1, items: { type: "string", minLength: 1 } },
     } };
   };
   return { type: "object", additionalProperties: false, required: ["schemaVersion", "result", "tasks", "synthesis"], properties: {
     schemaVersion: { type: "string", enum: ["agentlas.swarm-worker-result.v1"] }, result: { type: "string" },
-    tasks: { type: "array", maxItems: 12, items: { type: "object", additionalProperties: false, required: ["role", "brief", "files", "allocation"], properties: {
-      role: { type: "string" }, brief: { type: "string", minLength: 1 }, files: { type: "array", maxItems: 24, uniqueItems: true, items: { type: "string", minLength: 1 } }, allocation: allocation("delegate") } } },
+    tasks: { type: "array", items: { type: "object", additionalProperties: false, required: ["role", "brief", "files", "allocation"], properties: {
+      role: { type: "string" }, brief: { type: "string", minLength: 1 }, files: { type: "array", uniqueItems: true, items: { type: "string", minLength: 1 } }, allocation: allocation("delegate") } } },
     synthesis: seed ? allocation("synthesize") : { anyOf: [allocation("synthesize"), { type: "null" }] },
   } };
 }
@@ -169,7 +175,8 @@ function swarmTypedAllocationValid(value: unknown, phase: "delegate" | "synthesi
     || !(SWARM_ALLOCATION_MODEL_CLASSES as readonly string[]).includes(String(a.modelClass))
     || [a.runtimeId, a.modelId, a.modelClass, a.effort, a.rationale].some(value => typeof value !== "string")
     || typeof a.runtimeId !== "string" || !a.runtimeId.trim() || typeof a.modelId !== "string" || !a.modelId.trim()
-    || !Array.isArray(a.reasonCodes) || !a.reasonCodes.length || a.reasonCodes.length > 8
+    // No count bound: the schema carries none, and normalizeWorkloadAllocation keeps the first 8 distinct codes.
+    || !Array.isArray(a.reasonCodes) || !a.reasonCodes.length
     || a.reasonCodes.some(code => typeof code !== "string" || !code.trim())) return false;
   if (normalizeWorkloadAllocation(a, phase).modelClass !== a.modelClass) return false;
   const r = a.requirements as Record<string, unknown>;
@@ -191,14 +198,16 @@ export function parseSwarmOutput(text: string, typedContract = false, inventory?
     if (typedContract && typed?.schemaVersion !== "agentlas.swarm-worker-result.v1" && typed && typeof typed === "object") throw new Error("swarm_worker_result_invalid");
     if (typed?.schemaVersion === "agentlas.swarm-worker-result.v1") {
       if (Object.keys(typed).some(key => !["schemaVersion", "result", "tasks", "synthesis"].includes(key))
-        || typeof typed.result !== "string" || !Array.isArray(typed.tasks) || typed.tasks.length > 12
+        // No task or file count is a format error (swarmWorkerOutputSchema carries no cap): the board's SWARM_MAX_TASKS
+        // admits children and reports the overflow as a typed "capped" event (swarm-engine.ts).
+        || typeof typed.result !== "string" || !Array.isArray(typed.tasks)
         || !Object.hasOwn(typed, "synthesis") || typed.synthesis !== null && !swarmTypedAllocationValid(typed.synthesis, "synthesize")) throw new Error("swarm_worker_result_invalid");
       for (const raw of typed.tasks) {
         const child = raw as Record<string, unknown>;
         if (!child || typeof child !== "object" || Array.isArray(child)
           || Object.keys(child).some(key => !["role", "brief", "files", "allocation"].includes(key))
           || typeof child.role !== "string" || typeof child.brief !== "string" || !child.brief.trim()
-          || !Array.isArray(child.files) || child.files.length > 24
+          || !Array.isArray(child.files)
           || child.files.some(file => typeof file !== "string" || !file.trim()) || !swarmTypedAllocationValid(child.allocation, "delegate")) throw new Error("swarm_worker_result_invalid");
       }
       if (inventory && (typed.tasks.some(raw => !swarmAllocationInInventory((raw as Record<string, unknown>).allocation as Record<string, unknown>, inventory))

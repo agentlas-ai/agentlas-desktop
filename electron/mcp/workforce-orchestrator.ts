@@ -11,6 +11,7 @@ import workforceProtocolContract from "../mcp-tools/workforce-protocol-contract.
 import workOrderBoundaryContract from "../mcp-tools/workforce-work-order-boundary.json";
 import type { BorrowedAgentSpec } from "./borrowed-task-force";
 import { maskPrivateKeyBlocks } from "../../shared/secret-patterns";
+import { providerOutputSchema } from "../../shared/provider-output-schema";
 
 const WORK_ORDER_SCHEMA = "agentlas.workforce-work-order.v1";
 const CANDIDATE_SET_SCHEMA = workforceProtocolContract.protocolMetadata.candidateSetSchemaVersion;
@@ -3185,9 +3186,12 @@ function selectionExactShape(modelId: string, runtimeId: string): string {
   return `${SELECTION_HEADING}\n\`\`\`json\n{"schemaVersion":"${SELECTION_SCHEMA}","selectionSessionId":"<copy>","candidateSetDigest":"<copy>","decisionAuthor":{"kind":"host_llm","modelId":"${modelId}","runtimeId":"${runtimeId}"},"assignments":[{"slotId":"<exact slot>","agentReleaseId":"<exact candidate release>","reasonCodes":["reason:host-semantic-judgment"]}],"edges":[],"alternativesConsidered":["<exact non-selected candidate release>"],"requestExpansionForSlots":[]}\n\`\`\``;
 }
 
-/** Shape of a Selection; candidate-set semantics stay in validateLeaderSelection. */
+/** Shape of a Selection; candidate-set semantics stay in validateLeaderSelection.
+ * No list or ID pattern carries an upper bound (shared/provider-output-schema.ts); revision 3 (2026-10-17) dropped
+ * assignments maxItems 64, reasonCodes maxItems 256 and the {1,255} range of the alternative ID format.
+ * validateLeaderSelection owns every bound and reports a violation as a repairable decision. */
 export function selectionOutputSchema(modelId: string, runtimeId: string, slotIds: readonly string[], candidateSet?: JsonObject): { name: string; schema: Record<string, unknown> } {
-  registerDeclaredPromptModule({ id: "workforce.selection.response-schema", revision: 2, stability: "task-context", changeTriggers: ["release", "runtime", "plan-revision"], order: 0 });
+  registerDeclaredPromptModule({ id: "workforce.selection.response-schema", revision: 3, stability: "task-context", changeTriggers: ["release", "runtime", "plan-revision"], order: 0 });
   const slot = slotIds.length ? { type: "string", enum: [...new Set(slotIds)] } : { type: "string" };
   const strings = { type: "array", items: { type: "string" } };
   // Candidate IDs/evidence are already delivered in the exact candidate set.
@@ -3204,11 +3208,11 @@ export function selectionOutputSchema(modelId: string, runtimeId: string, slotId
       candidateSetDigest: candidateSet ? { type: "string", enum: [candidateSet.candidateSetDigest] } : { type: "string" },
       decisionAuthor: { type: "object", additionalProperties: false, required: ["kind", "modelId", "runtimeId"], properties: {
         kind: { type: "string", enum: ["host_llm"] }, modelId: { type: "string", enum: [modelId] }, runtimeId: { type: "string", enum: [runtimeId] } } },
-      assignments: { type: "array", minItems: 1, maxItems: 64, items: { type: "object", additionalProperties: false, required: ["slotId", "agentReleaseId", "reasonCodes"],
-        properties: { slotId: slot, agentReleaseId: release, reasonCodes: { type: "array", minItems: 1, maxItems: 256, uniqueItems: true, items: reason } } } },
+      assignments: { type: "array", minItems: 1, items: { type: "object", additionalProperties: false, required: ["slotId", "agentReleaseId", "reasonCodes"],
+        properties: { slotId: slot, agentReleaseId: release, reasonCodes: { type: "array", minItems: 1, uniqueItems: true, items: reason } } } },
       edges: { type: "array", items: { type: "object", additionalProperties: false, required: ["fromSlot", "toSlot", "relation", "artifactKinds"],
         properties: { fromSlot: slot, toSlot: slot, relation: { type: "string", enum: WORKFORCE_RELATION_ENUM.split(" | ") }, artifactKinds: strings } } },
-      alternativesConsidered: { type: "array", items: { type: "string", pattern: ID_RE.source } },
+      alternativesConsidered: { type: "array", items: providerOutputSchema({ type: "string", pattern: ID_RE.source }) },
       requestExpansionForSlots: { type: "array", items: slot },
     },
   } };
@@ -3230,27 +3234,31 @@ export function validateLeaderAuthoredWorkOrder(value: unknown): JsonObject {
   return order;
 }
 
-/** Exact generation contract; the host still checks DAG, privacy and semantic coverage. */
+/** Exact generation contract; the host still checks DAG, privacy and semantic coverage.
+ * No text, list or ID pattern carries an upper bound (shared/provider-output-schema.ts): validateWorkOrder owns the
+ * bounds (1-32 role slots, ID formats) and reports a violation as a repairable decision. revision 3 (2026-10-17). */
 export function workOrderOutputSchema(workOrderId: string): { name: string; schema: Record<string, unknown> } {
-  registerDeclaredPromptModule({ id: "workforce.work-order.response-schema", revision: 2, stability: "task-context", changeTriggers: ["release", "task"], order: 0 });
-  const text = (maxLength: number) => ({ type: "string", minLength: 1, maxLength });
-  const definitions: Record<string, unknown> = { semanticId: { type: "string", pattern: ID_RE.source } };
+  registerDeclaredPromptModule({ id: "workforce.work-order.response-schema", revision: 3, stability: "task-context", changeTriggers: ["release", "task"], order: 0 });
+  const text = { type: "string", minLength: 1 };
+  // The host ID formats (ID_RE, opaque/ordinal) without their length range: an exact digest width stays.
+  const definitions: Record<string, unknown> = { semanticId: providerOutputSchema({ type: "string", pattern: ID_RE.source }) };
   for (const kind of ["slotId", "artifact", "authority", "runtime", "language", "modality"] as WorkOrderPublicIdKind[]) {
-    definitions[kind] = { anyOf: [{ type: "string", enum: workOrderBoundaryContract.publicIds[kind] },
-      { type: "string", pattern: workOrderBoundaryContract.opaqueOrOrdinalIdPattern }] };
+    definitions[kind] = providerOutputSchema({ anyOf: [{ type: "string", enum: workOrderBoundaryContract.publicIds[kind] },
+      { type: "string", pattern: workOrderBoundaryContract.opaqueOrOrdinalIdPattern }] });
   }
   const id = { $ref: "#/$defs/semanticId" };
   const wire = (kind: WorkOrderPublicIdKind) => ({ $ref: `#/$defs/${kind}` });
-  const ids = (items: Record<string, unknown> = id) => ({ type: "array", maxItems: 256, uniqueItems: true, items });
+  const ids = (items: Record<string, unknown> = id) => ({ type: "array", uniqueItems: true, items });
   const slotProperties: Record<string, unknown> = {
-    slotId: wire("slotId"), title: text(160), task: text(2_000),
+    slotId: wire("slotId"), title: text, task: text,
     cardinality: { type: "integer", minimum: 1, maximum: 16 },
     criticality: { type: "string", enum: ["required", "optional"] },
     ...Object.fromEntries(["requiredCommunities", "optionalCommunities", "excludedCommunities", "requiredSkills", "optionalSkills", "requiredKnowledge", "requiredToolCapabilities"].map(key => [key, ids()])),
     // Existing model-authoring boundary, not a generic WorkOrder DTO or execution-permission restriction.
+    // maxItems 0 is a constant-empty list: no item can open, so nothing can overflow.
     ...Object.fromEntries(WORK_ORDER_MODEL_EMPTY_LISTS.map(key => [key, { type: "array", maxItems: 0, items: id }])),
     ...Object.fromEntries(Object.entries({ runtimes: "runtime", languages: "language", modalities: "modality" }).map(([key, kind]) => [key, ids(wire(kind as WorkOrderPublicIdKind))])),
-    allowedEntityKinds: { type: "array", minItems: 1, maxItems: 2, uniqueItems: true, items: { type: "string", enum: ["agent", "team"] } },
+    allowedEntityKinds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", enum: ["agent", "team"] } },
   };
   const slot = (evidence: boolean) => ({ type: "object", additionalProperties: false,
     properties: { ...slotProperties, ...(evidence ? { minimumEvidenceLevel: { type: "string", enum: [...EVIDENCE_LEVELS] } } : {}) },
@@ -3259,9 +3267,9 @@ export function workOrderOutputSchema(workOrderId: string): { name: string; sche
     $defs: definitions,
     type: "object", additionalProperties: false, required: [...WORK_ORDER_KEYS], properties: {
       schemaVersion: { type: "string", enum: [WORK_ORDER_SCHEMA] }, workOrderId: { type: "string", enum: [workOrderId] },
-      taskBrief: text(4_000), redacted: { type: "boolean", enum: [true] }, ontologyVersion: { type: "string", enum: [WORKFORCE_ONTOLOGY_VERSION] },
-      roleSlots: { type: "array", minItems: 1, maxItems: 32, items: { anyOf: [slot(false), slot(true)] } },
-      edges: { type: "array", maxItems: 128, items: { type: "object", additionalProperties: false, required: [...WORK_ORDER_EDGE_KEYS], properties: {
+      taskBrief: text, redacted: { type: "boolean", enum: [true] }, ontologyVersion: { type: "string", enum: [WORKFORCE_ONTOLOGY_VERSION] },
+      roleSlots: { type: "array", minItems: 1, items: { anyOf: [slot(false), slot(true)] } },
+      edges: { type: "array", items: { type: "object", additionalProperties: false, required: [...WORK_ORDER_EDGE_KEYS], properties: {
         from: wire("slotId"), to: wire("slotId"), relation: { type: "string", enum: [...RELATIONS] }, artifactKinds: ids(wire("artifact")) } } },
       forbiddenCommunities: ids(), selectionPolicy: { type: "object", additionalProperties: false, required: [...WORK_ORDER_POLICY_KEYS], properties: {
         minimumCandidatesPerSlot: { type: "integer", minimum: 2, maximum: 30 }, maximumCandidatesPerSlot: { type: "integer", minimum: 2, maximum: 100 }, allowHistoryEvidence: { type: "boolean", enum: [false] } } },

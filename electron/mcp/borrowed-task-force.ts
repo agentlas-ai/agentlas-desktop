@@ -3830,11 +3830,17 @@ export function taskForceAllocationOutputSchema(phase: "delegate" | "synthesize"
  * The dynamic agent enum prevents a model from inventing or omitting the
  * roster identity; allocation normalization stays host-owned. This schema must
  * stay OpenAI-strict-valid (openAiStrictSchemaOrNull) or codex silently loses
- * it — test-task-force-planner-strict-schema.cjs pins that. */
+ * it — test-task-force-planner-strict-schema.cjs pins that.
+ *
+ * No text or list in it carries a cap (shared/provider-output-schema.ts): codex enforces caps while decoding, so a
+ * brief at 900 characters was cut mid-sentence and a packet count or a 7th constraint had nowhere to go but the last
+ * open string. The host reads packets without a length or count bound (parseBorrowedInputPackets). */
 export function ordinaryTaskForcePlannerOutputSchema(specs: BorrowedAgentSpec[]): Record<string, unknown> {
   // revision 2 (2026-10-16): requestedWorkspace — the host validates it and grants it for this run only
   // (run-workspace-grant.ts); the room's saved working folder never changes.
-  registerDeclaredPromptModule({ id: "taskforce.planner.ordinary.response-schema", revision: 2, stability: "task-context", changeTriggers: ["release", "runtime", "plan-revision"], order: 0 });
+  // revision 3 (2026-10-17): no maxItems / maxLength on packets, brief, expectedOutput, context, constraints, doneWhen
+  // or requestedWorkspace.
+  registerDeclaredPromptModule({ id: "taskforce.planner.ordinary.response-schema", revision: 3, stability: "task-context", changeTriggers: ["release", "runtime", "plan-revision"], order: 0 });
   const strings = { type: "array", items: { type: "string" } } as const;
   return {
     type: "object",
@@ -3843,7 +3849,6 @@ export function ordinaryTaskForcePlannerOutputSchema(specs: BorrowedAgentSpec[])
     properties: {
       requestedWorkspace: {
         type: "string",
-        maxLength: 1024,
         description: "Absolute folder path the owner explicitly named as where this work happens; empty string when none was named.",
       },
       approvalStop: {
@@ -3855,7 +3860,6 @@ export function ordinaryTaskForcePlannerOutputSchema(specs: BorrowedAgentSpec[])
       packets: {
         type: "array",
         minItems: 1,
-        maxItems: Math.max(1, Math.min(64, specs.length * 2)),
         items: {
           type: "object",
           additionalProperties: false,
@@ -3873,11 +3877,11 @@ export function ordinaryTaskForcePlannerOutputSchema(specs: BorrowedAgentSpec[])
             phase: { type: "string", enum: [...TASK_FORCE_PACKET_PHASES] },
             inputType: { type: "string", enum: ["research", "implementation", "review", "writing", "analysis", "planning", "other"] },
             inputKind: { type: "string", enum: ["text", "codebase", "files", "image", "data", "browser", "mixed"] },
-            brief: { type: "string", maxLength: 900 },
-            context: { ...strings, maxItems: 6 },
-            expectedOutput: { type: "string", maxLength: 900 },
-            constraints: { ...strings, maxItems: 6 },
-            doneWhen: { ...strings, maxItems: 6 },
+            brief: { type: "string" },
+            context: strings,
+            expectedOutput: { type: "string" },
+            constraints: strings,
+            doneWhen: strings,
             allocation: taskForceAllocationOutputSchema("delegate"),
           },
         },
@@ -3887,14 +3891,19 @@ export function ordinaryTaskForcePlannerOutputSchema(specs: BorrowedAgentSpec[])
   };
 }
 
-/** Frozen Workforce contract: the parser and resolver still validate exact coverage and allocation pairing. */
+/** Frozen Workforce contract: the parser and resolver still validate exact coverage and allocation pairing.
+ *
+ * No text or list carries a cap and the packet list has no upper bound (shared/provider-output-schema.ts). The bounds
+ * stay in the host: parseStrictWorkforcePlannerPlan rejects an over-long text, too many items or an inexact roster
+ * coverage with a typed message, and the schema-repair attempt carries that message back to the planner. */
 export function strictWorkforcePlannerOutputSchema(
   specs: BorrowedAgentSpec[], runtimes: RuntimeStatus[], receipt: WorkforceSelectionReceipt,
   menu: { entries: Array<{ slotId: string; agentReleaseId: string; toolId: string }> } | null,
 ): Record<string, unknown> {
-  registerDeclaredPromptModule({ id: "taskforce.planner.frozen.response-schema", revision: 1, stability: "task-context", changeTriggers: ["release", "runtime", "plan-revision"], order: 0 });
-  const text = (maxLength: number) => ({ type: "string", minLength: 1, maxLength });
-  const strings = (maxItems: number, maxLength: number, minItems = 0) => ({ type: "array", minItems, maxItems, items: text(maxLength) });
+  // revision 2 (2026-10-17): no maxItems / maxLength / bounded pattern on any model-filled field; packets minItems only.
+  registerDeclaredPromptModule({ id: "taskforce.planner.frozen.response-schema", revision: 2, stability: "task-context", changeTriggers: ["release", "runtime", "plan-revision"], order: 0 });
+  const text = { type: "string", minLength: 1 };
+  const strings = (minItems = 0) => ({ type: "array", minItems, items: text });
   const inventory = workloadRuntimeInventory(runtimes);
   const allocation = (phase: "delegate" | "synthesize") => {
     const base = taskForceAllocationOutputSchema(phase) as { properties: Record<string, unknown>; required: string[]; [key: string]: unknown };
@@ -3906,7 +3915,7 @@ export function strictWorkforcePlannerOutputSchema(
       effort: { type: "string", enum: [...new Set(inventory.flatMap(row => Object.values(row.modelProfiles).flatMap(profile => profile.efforts ?? row.efforts)))] },
       requirements: { type: "object", additionalProperties: false, required: ["inputTokens", "expectedOutputTokens", "toolRequired", "multimodalRequired"], properties: {
         inputTokens: { type: "integer", minimum: 0, maximum: 10_000_000 }, expectedOutputTokens: { type: "integer", minimum: 0, maximum: 10_000_000 }, toolRequired: { type: "boolean" }, multimodalRequired: { type: "boolean" } } },
-      reasonCodes: { type: "array", minItems: 1, maxItems: 8, uniqueItems: true, items: { type: "string", pattern: "^[a-z0-9][a-z0-9_-]{0,47}$" } }, rationale: text(240),
+      reasonCodes: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", pattern: "^[a-z0-9][a-z0-9_-]*$" } }, rationale: text,
     } };
   };
   const packetVariants = specs.map(spec => {
@@ -3916,14 +3925,15 @@ export function strictWorkforcePlannerOutputSchema(
     return { type: "object", additionalProperties: false,
       required: ["agent", "inputType", "inputKind", "brief", "context", "expectedOutput", "constraints", "doneWhen", "allocation", "capabilityBindings"], properties: {
         agent: { type: "string", enum: [spec.slug] }, inputType: { type: "string", enum: ["research", "implementation", "review", "writing", "analysis", "planning", "other"] }, inputKind: { type: "string", enum: ["text", "codebase", "files", "image", "data", "browser", "mixed"] },
-        brief: text(2_000), context: strings(64, 1_000), expectedOutput: text(2_000), constraints: strings(64, 1_000), doneWhen: strings(16, 500, 1), allocation: allocation("delegate"),
-        capabilityBindings: { type: "array", maxItems: 256, ...(capabilities.length ? { minItems: capabilities.length } : { maxItems: 0 }), items: {
+        brief: text, context: strings(), expectedOutput: text, constraints: strings(), doneWhen: strings(1), allocation: allocation("delegate"),
+        // maxItems 0 is a constant-empty list (no capability to bind): no item can open, so nothing can overflow.
+        capabilityBindings: { type: "array", ...(capabilities.length ? { minItems: capabilities.length } : { maxItems: 0 }), items: {
           type: "object", additionalProperties: false, required: ["capabilityId", "provider", "toolId"], properties: {
-            capabilityId: capabilities.length ? { type: "string", enum: capabilities } : text(256), provider: { type: "string", enum: ["mcp"] }, toolId: tools.length ? { type: "string", enum: [...new Set(tools)] } : text(128) } } },
+            capabilityId: capabilities.length ? { type: "string", enum: capabilities } : text, provider: { type: "string", enum: ["mcp"] }, toolId: tools.length ? { type: "string", enum: [...new Set(tools)] } : text } } },
       } };
   });
   return { type: "object", additionalProperties: false, required: ["packets", "synthesis"], properties: {
-    packets: { type: "array", minItems: specs.length, maxItems: specs.length, items: { anyOf: packetVariants } }, synthesis: allocation("synthesize") } };
+    packets: { type: "array", minItems: specs.length, items: { anyOf: packetVariants } }, synthesis: allocation("synthesize") } };
 }
 
 export function taskForcePlannerAdmission(

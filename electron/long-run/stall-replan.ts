@@ -11,13 +11,16 @@ type Action = OngoingStallReplan["action"];
 const ACTIONS = new Set<Action>(["inspect_read_only", "wait_backoff", "needs_person"]);
 const MAX_INPUT_CHARS = 12_000;
 
+/** No text in it carries a cap (shared/provider-output-schema.ts): a strict decoder cuts a capped string mid-sentence
+ * and a validating lane drops what does not fit. The old 400-character bound had no consumer that needs it (the plan
+ * stores and replays the wording as descriptive data), so the host accepts any length too. */
 export const STALL_REPLAN_OUTPUT_SCHEMA: Record<string, unknown> = {
   type: "object", additionalProperties: false,
   required: ["schemaVersion", "action", "diagnosis", "alternative", "boundary"],
   properties: {
     schemaVersion: { const: "agentlas.ongoing-stall-diagnosis.v1" },
-    action: { enum: [...ACTIONS] }, diagnosis: { type: "string", minLength: 1, maxLength: 400 },
-    alternative: { type: "string", maxLength: 400 },
+    action: { enum: [...ACTIONS] }, diagnosis: { type: "string", minLength: 1 },
+    alternative: { type: "string" },
     boundary: { anyOf: [{ enum: ["payment", "credential", "security_consent", "owner_stop", "purpose_change"] }, { type: "null" }] },
   },
 };
@@ -65,8 +68,7 @@ function parse(text: string): Pick<StallReplanProposal, "action" | "diagnosis" |
   if (value.schemaVersion !== "agentlas.ongoing-stall-diagnosis.v1"
     || typeof value.action !== "string" || !ACTIONS.has(value.action as Action)
     || typeof value.diagnosis !== "string" || !value.diagnosis.trim()
-    || typeof value.alternative !== "string"
-    || value.diagnosis.length > 400 || value.alternative.length > 400) return null;
+    || typeof value.alternative !== "string") return null;
   const diagnosis = redactOperationalSecrets(value.diagnosis.trim());
   const alternative = redactOperationalSecrets(value.alternative.trim());
   if (!diagnosis || (value.action === "inspect_read_only" && !alternative)) return null;
