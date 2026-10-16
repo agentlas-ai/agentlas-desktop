@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.47 — 2026-10-16
+
+- Includes everything planned for 1.3.46, which was not published.
+- When Hope works in another app on a Mac, its panel moves to the right edge at full height and the app fills the space to its left. A small badge on the app says Hope is working and turns to Done when it finishes, and a name label follows the pointer Hope moves.
+- Team members no longer stop to ask you questions in the middle of a team task. They decide the details themselves; if one still needs your decision, the task is reported as unfinished with that question, instead of being counted as done.
+- Saved conversations, directions queued from your phone and finished previews keep working after you restart your Mac, instead of starting over or being refused as a changed folder.
+- Activity lines in One and Work read plainly: process and connection chatter is gone, teammates appear by name, and team steps say who got the work, who returned it and who is retrying.
+- Agentlas Light, Normal and Hard, and your own Anthropic or Google keys, no longer fail a turn when a reply reaches the output limit. The reply continues where it stopped, so long answers and files are written in full.
+- Pressing the update button when an older download is waiting now downloads the current version, installs it and restarts, without a second press.
+- Old database copies made during upgrades are cleaned up again after a restart of the Mac. The first start after this update can take up to about 30 seconds longer while old copies are removed.
+- This release binds Agentlas OS v1.2.63 at 70b53f0714865617ca5a4947fbd8c113078d572f; public runtime asset `hephaestus-runtime-v1.2.63.tar.gz` is pinned at SHA-256 `16589f4d43e98c5bdd15e8c6f01acd62174f55cad6a3507fe21464bc4b58187e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.46 — 2026-10-16
 
 - Includes everything planned for 1.3.45, which was not published.
