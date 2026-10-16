@@ -8,6 +8,7 @@ import fs, { type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { BrowserWindow, session as electronSession, shell } from "electron";
 import { userDataDir } from "../runtime-paths";
+import { ownerFailureReason } from "../../shared/owner-visible-activity-text";
 import { currentUiLocale } from "../ui-locale";
 import {
   resolveTelegramAutomationReportIntent,
@@ -2614,7 +2615,7 @@ function formatAutomationReport(
     tg("automation.status_label", { status: statusText }),
     tg("automation.time_label", { time: when }),
   ];
-  if (detail?.error) lines.push(tg("automation.error_label", { error: clipForTelegram(detail.error, 800) }));
+  if (detail?.error) lines.push(tg("automation.error_label", { error: clipForTelegram(ownerFailureReason(detail.error, ko ? "ko" : "en"), 800) }));
   else if (detail?.output?.trim()) lines.push(tg("automation.summary_label", { summary: clipForTelegram(detail.output, 1200) }));
   return lines.join("\n");
 }

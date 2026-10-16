@@ -191,3 +191,143 @@ export function collapseOwnerActivityLines(lines: readonly string[]): string[] {
   for (const line of lines) if (out.at(-1) !== line) out.push(line);
   return out;
 }
+
+/* ───────────────────────── 그래프 노드 실패 문구 ─────────────────────────
+ *
+ * 실측 2026-10-15~16(운영 1.3.44): 노드가 실패하면 화면이 `invocation_chat_owned_by_other_run` 같은 기계 코드와
+ * 영어 안내문을 그대로 보였다 — run-graph 가 예상 못 한 오류를 `{code:"NODE_FAILED", reason: err.message}` 로 담고,
+ * 화면이 reason/nextAction 을 그대로 그렸기 때문이다. 기계 코드는 run_events·실패 상세에 남고, 오너에게는
+ * 이 함수가 만든 평문만 간다(실행 로그·카드·알림·텔레그램·실행 기록이 모두 같은 함수를 쓴다).
+ *
+ * 규칙: ① 아는 코드 → 무슨 일이었고 무엇을 할 수 있는지 한두 문장. ② 모르는 snake/dotted 코드 → 일반 평문.
+ * ③ 사용자 언어로 쓴 사람 문장 → 그대로(뒤에 붙은 "원문: …"·남은 코드 조각만 뗀다). ④ 다른 언어로 쓴 문장은 일반 평문.
+ */
+
+export interface OwnerFailureInput {
+  code?: string | null;
+  reason?: string | null;
+  nextAction?: string | null;
+}
+
+interface FailureSentence { ko: string; en: string }
+interface KnownFailure { match: RegExp; reason: FailureSentence; action: FailureSentence }
+
+const FAILURE_RETRY: FailureSentence = {
+  ko: "[이 노드부터 재실행]을 눌러 다시 시도해 보세요.",
+  en: "Try [Rerun from this node] again.",
+};
+const FAILURE_GENERIC_REASON: FailureSentence = {
+  ko: "이 단계가 끝까지 진행되지 못했어요.",
+  en: "This step could not finish.",
+};
+
+/** 위에서부터 먼저 맞는 항목을 쓴다. 코드는 문장 어디에 박혀 있어도(`NODE_FAILED: 코드`) 찾는다. */
+const KNOWN_FAILURES: readonly KnownFailure[] = [
+  {
+    match: /invocation_chat_owned_by_other_run|invocation_chat_busy_other_host|invocation_chat_busy/i,
+    reason: {
+      ko: "이 대화를 다른 작업이 쓰고 있어서 이 단계를 시작하지 못했어요.",
+      en: "Another task is using this chat, so this step could not start.",
+    },
+    action: {
+      ko: "다른 작업이 끝난 뒤 [이 노드부터 재실행]을 눌러 주세요.",
+      en: "Once the other task finishes, choose [Rerun from this node].",
+    },
+  },
+  {
+    match: /agent_context_original_invocation_owner_required|owner_required|liveness_unknown/i,
+    reason: {
+      ko: "이 단계를 처음 시작한 실행이 더는 확인되지 않아 이어가지 못했어요.",
+      en: "The run that started this step can no longer be confirmed, so it could not continue.",
+    },
+    action: FAILURE_RETRY,
+  },
+  {
+    match: /parent execution permission|permission_ceiling|read_only_ceiling/i,
+    reason: {
+      ko: "이 실행은 읽기만 허용돼 있어서, 무언가를 바꾸는 이 단계는 실행하지 않았어요.",
+      en: "This run is read-only, so this step, which changes something, was not run.",
+    },
+    action: {
+      ko: "쓰기가 허용된 실행에서 다시 시도해 주세요.",
+      en: "Run it again from a run that is allowed to make changes.",
+    },
+  },
+];
+
+const HANGUL = /[가-힣]/;
+/** snake_case 와 UPPER_SNAKE 기계 토큰(밑줄로 이어진 2토막 이상). 파일명 같은 점 표기는 건드리지 않는다. */
+const MACHINE_TOKEN_RE = /(?<![\w가-힣])(?:[a-z][a-z0-9]*(?:_[a-z0-9]+)+|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)(?![\w가-힣])/g;
+
+function known(text: string): KnownFailure | undefined {
+  return KNOWN_FAILURES.find((entry) => entry.match.test(text));
+}
+
+/** 사용자 언어로 쓴 평문인가: 공백이 있고, `CODE: …` 꼴이 아니며, 한국어 UI면 한글이 있고 영어 UI면 한글이 없다. */
+function isOwnerSentence(text: string, locale: OwnerActivityLocale): boolean {
+  if (!/\s/.test(text)) return false;
+  // 옛 실행기가 저장한 영어 개발자 문구("…in the background while independent branches continue.")는 사람 문장이 아니다.
+  if (/\bin the background\b|\bindependent (?:branches|nodes?|node targets)\b/i.test(text)) return false;
+  if (/^[A-Za-z0-9_.-]+\s*:/.test(text) && /[_.]/.test(text.split(":")[0])) return false;
+  return locale === "ko" ? HANGUL.test(text) : !HANGUL.test(text);
+}
+
+function tidySentence(text: string): string {
+  return text
+    .replace(/\s*(?:원문|Original)\s*:.*$/is, "")
+    .replace(MACHINE_TOKEN_RE, "")
+    .replace(/\(\s*\)|\[\s*\]/g, "")
+    .replace(/\s+([,.;:])/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function localized(sentence: FailureSentence, locale: OwnerActivityLocale): string {
+  return locale === "ko" ? sentence.ko : sentence.en;
+}
+
+/** 알아볼 수 있는 사유만: 아는 코드의 문장 또는 사용자 언어의 평문. 못 알아보면 null(호출자가 자기 문구를 고른다). */
+export function ownerFailureReasonOrNull(raw: string | null | undefined, locale: OwnerActivityLocale, code?: string | null): string | null {
+  const text = String(raw ?? "").replace(/\s+/g, " ").trim();
+  // "원문: …" 꼬리는 진단용이라 코드 판정에서 뺀다 — 안 그러면 "반영 여부 미확인" 같은 본문이 꼬리 코드에 덮인다.
+  const head = text.replace(/\s*(?:원문|Original)\s*:.*$/is, "");
+  const entry = known(head) ?? (head ? undefined : known(String(code ?? "")));
+  if (entry) return localized(entry.reason, locale);
+  // `MUTATION_UNVERIFIED: 문장` 처럼 코드가 앞에 붙은 줄은 코드를 떼고 문장만 본다.
+  const body = text.replace(/^[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+\s*:\s*/, "");
+  if (body && isOwnerSentence(body, locale)) return tidySentence(body) || null;
+  return null;
+}
+
+/** 실패 사유 한 줄을 오너 언어의 평문으로. 기계 코드·다른 언어 문장은 새지 않는다. */
+export function ownerFailureReason(raw: string | null | undefined, locale: OwnerActivityLocale, code?: string | null): string {
+  return ownerFailureReasonOrNull(raw, locale, code) ?? localized(FAILURE_GENERIC_REASON, locale);
+}
+
+/** 지금 할 수 있는 행동 한 줄. 다른 언어로 쓰였거나 코드뿐이면 아는 코드의 행동, 없으면 다시 실행 안내. */
+export function ownerFailureNextAction(
+  nextAction: string | null | undefined,
+  locale: OwnerActivityLocale,
+  context?: { reason?: string | null; code?: string | null },
+): string {
+  const entry = known(`${context?.reason ?? ""} ${context?.code ?? ""}`);
+  const text = String(nextAction ?? "").replace(/\s+/g, " ").trim();
+  // 아는 코드면 우리 행동 문장이 정본이다 — 실행기가 붙인 일반 안내("사유를 확인하고…")보다 구체적이다.
+  if (entry) return localized(entry.action, locale);
+  if (text && isOwnerSentence(text, locale)) {
+    const tidy = tidySentence(text);
+    if (tidy) return tidy;
+  }
+  return localized(FAILURE_RETRY, locale);
+}
+
+/** 노드 실패 `{code, reason, nextAction}` → 오너 문구. 기계 코드는 반환하지 않는다. */
+export function ownerFailureText(
+  failure: OwnerFailureInput,
+  locale: OwnerActivityLocale,
+): { reason: string; nextAction: string } {
+  return {
+    reason: ownerFailureReason(failure.reason || failure.code, locale, failure.code),
+    nextAction: ownerFailureNextAction(failure.nextAction, locale, { reason: failure.reason, code: failure.code }),
+  };
+}

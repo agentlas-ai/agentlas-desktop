@@ -13,6 +13,7 @@ import { navigate } from "@/lib/navigation";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { askAutomationSession } from "@/components/automation/AutomationSessionPanel";
 import { AgiIncidentReportButton } from "@/components/agi/AgiBugReport";
+import { ownerFailureReasonOrNull } from "@shared/owner-visible-activity-text";
 import { IconAlertTriangle, IconClose } from "@/components/Icon";
 import {
   runtimeBackendForSelection,
@@ -1412,8 +1413,9 @@ function plainRun(run: AutomationRunRecord, ko: boolean): { title: string; body:
    * 모르는 쪽이 사람이 됐다. 판별은 모양이 아니라 **한글이 섞여 있고 길이가 사람 문장인가**로 한다.
    */
   const recorded = stripReasonCode((run.error ?? "").trim());
-  const readable = recorded.length > 0 && recorded.length <= 400 && (!ko || /[\uac00-\ud7a3]/.test(recorded));
-  return readable ? { title: plain.title, body: recorded } : plain;
+  // 판별은 공유 층이 한다 — 영어 화면에서 `invocation_chat_owned_by_other_run` 같은 코드가 "사람 문장"으로 통과하던 것을 막는다.
+  const readable = recorded.length > 0 && recorded.length <= 400 ? ownerFailureReasonOrNull(recorded, ko ? "ko" : "en") : null;
+  return readable ? { title: plain.title, body: readable } : plain;
 }
 
 /**

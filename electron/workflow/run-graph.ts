@@ -1755,8 +1755,8 @@ export async function runGraph(
     .filter((row) => row.target && !/^[0-9a-f]{64}$/.test(row.target.version ?? ""));
   if (unpinnedHubTargets.length > 0) {
     for (const row of unpinnedHubTargets) admissionPending.set(row.nodeId, {
-      code: "automation_hub_version_pin_required", reason: "The Hub package version is unresolved for this node.",
-      nextAction: "Resolve this package in the background while other branches continue.",
+      code: "automation_hub_version_pin_required", reason: L("이 단계가 쓸 Hub 패키지의 버전이 정해지지 않았어요.", "The Hub package version is unresolved for this node."),
+      nextAction: L("다른 단계는 계속 진행돼요. 이 패키지를 확인한 뒤 [이 노드부터 재실행]을 눌러 주세요.", "Other branches continue. Check this package, then choose [Rerun from this node]."),
     });
   }
   const graphDigest = graphExecutionDigest(automation, graph);
@@ -1773,8 +1773,8 @@ export async function runGraph(
     unrelatedToOccurrence: requestedOccurrenceId,
     onUnreadablePriorEvidence: () => {
       for (const node of graph.nodes.filter(nodeCouldHaveActedOutside)) historicalEffectNotes.set(node.id, {
-        code: "MUTATION_UNVERIFIED", reason: "An earlier request's effect for this leaf remains unconfirmed.",
-        nextAction: "Read the original effect outcome while independent branches continue.",
+        code: "MUTATION_UNVERIFIED", reason: L("앞선 요청이 이 단계에서 실제로 반영됐는지 아직 확인되지 않았어요.", "An earlier request's effect for this step remains unconfirmed."),
+        nextAction: L("실제로 반영됐는지 확인한 뒤 [이 노드부터 재실행] 또는 [건너뛰기]를 고르세요.", "Check whether it actually took effect, then choose [Rerun from this node] or [Skip]."),
       });
     },
   } : undefined;
@@ -1803,14 +1803,14 @@ export async function runGraph(
     for (const node of held.nodes) if (graphNodeIds.has(node.nodeId)) {
       if (!belongsToCurrentOccurrence(held)) {
         historicalEffectNotes.set(node.nodeId, { code: "MUTATION_UNVERIFIED",
-          reason: "An earlier request's effect for this leaf remains unconfirmed.",
-          nextAction: "Read the original effect outcome while independent branches continue." });
+          reason: L("앞선 요청이 이 단계에서 실제로 반영됐는지 아직 확인되지 않았어요.", "An earlier request's effect for this step remains unconfirmed."),
+          nextAction: L("실제로 반영됐는지 확인한 뒤 [이 노드부터 재실행] 또는 [건너뛰기]를 고르세요.", "Check whether it actually took effect, then choose [Rerun from this node] or [Skip].") });
         continue;
       }
       historicalMcpSources.set(node.nodeId, [...historicalMcpSources.get(node.nodeId) ?? [], held]);
       admissionPending.set(node.nodeId, {
-        code: "MUTATION_UNVERIFIED", reason: "An earlier request's effect for this leaf remains unconfirmed.",
-        nextAction: "Read the original effect outcome while independent branches continue.",
+        code: "MUTATION_UNVERIFIED", reason: L("앞선 요청이 이 단계에서 실제로 반영됐는지 아직 확인되지 않았어요.", "An earlier request's effect for this step remains unconfirmed."),
+        nextAction: L("실제로 반영됐는지 확인한 뒤 [이 노드부터 재실행] 또는 [건너뛰기]를 고르세요.", "Check whether it actually took effect, then choose [Rerun from this node] or [Skip]."),
       });
     }
   }
@@ -1831,15 +1831,15 @@ export async function runGraph(
     if (unknownEffects || held.size === 0) for (const id of effectNodeIds) held.add(id);
     for (const nodeId of held) if (graphNodeIds.has(nodeId)) admissionPending.set(nodeId, {
       code: "RESUME_CONFLICT", reason,
-      nextAction: "Reconcile this login or effect receipt in the background; independent nodes continue.",
+      nextAction: L("다른 단계는 계속 진행돼요. 로그인이나 반영 여부를 확인한 뒤 [이 노드부터 재실행]을 눌러 주세요.", "Other nodes continue. Check the login or what was applied, then choose [Rerun from this node]."),
     });
   };
   if (hasGraphLoginWait(automation.id) && !originalWaitingSource) quarantineLoginSource("Login checkpoint is invalid.", true);
   if (waitingSource && (!loginSourceRunId || waitingSource.runId !== loginSourceRunId
       || !graphLoginWaitReady((waitingSource.checkpoint as GraphCheckpoint).loginWaits))) {
     for (const nodeId of Object.keys((waitingSource.checkpoint as GraphCheckpoint).loginWaits)) admissionPending.set(nodeId, {
-      code: "browser_login_required", reason: "This node's login is still unresolved.",
-      nextAction: "Recover the login in the background while independent branches continue.",
+      code: "browser_login_required", reason: L("이 단계에 필요한 로그인이 아직 되어 있지 않아요.", "The login this step needs is not done yet."),
+      nextAction: L("다른 단계는 계속 진행돼요. 로그인을 마친 뒤 [이 노드부터 재실행]을 눌러 주세요.", "Other branches continue. Finish the login, then choose [Rerun from this node]."),
     });
   }
   if (waitingSource && (opts.fresh === true || waitingSource.graphDigest !== graphDigest
@@ -1941,8 +1941,8 @@ export async function runGraph(
       // (graph-reconciliation.ts loadRevisedGraphReconciliation).
       if (completedEffectFromSnapshot && !hasRevisedGraphReconciliationClose(latestFailed)) {
         for (const nodeId of effectNodeIds) admissionPending.set(nodeId, {
-          code: "automation_partial_graph_changed", reason: "Prior external effects belong to a changed graph.",
-          nextAction: "Reconcile those effects in the background while independent branches continue.",
+          code: "automation_partial_graph_changed", reason: L("이전 실행이 바깥에 남긴 작업이 지금과 다른 그래프의 것이에요.", "The earlier run changed things outside that belong to a different version of this graph."),
+          nextAction: L("다른 단계는 계속 진행돼요. 실제로 반영된 내용을 확인한 뒤 이어가 주세요.", "Other branches continue. Check what was actually applied, then continue."),
         });
         // A direct transport cannot read a prompt note before repeating an effect.
         // Retain its exact failed source through the existing resume lineage.
@@ -1966,8 +1966,8 @@ export async function runGraph(
       }
       if (!checkpoint && completedEffectFromSnapshot) {
         for (const nodeId of effectNodeIds) admissionPending.set(nodeId, {
-          code: "automation_partial_reconciliation_required", reason: "The prior effect has no resumable output receipt.",
-          nextAction: "Observe the effect in the background while independent branches continue.",
+          code: "automation_partial_reconciliation_required", reason: L("이전 실행이 바깥에 한 작업의 결과 기록이 없어 이어갈 수 없어요.", "The earlier run left no record of its outside change, so it cannot continue from there."),
+          nextAction: L("다른 단계는 계속 진행돼요. 실제로 반영됐는지 확인한 뒤 [이 노드부터 재실행]을 눌러 주세요.", "Other branches continue. Check whether it took effect, then choose [Rerun from this node]."),
         });
       }
       if (checkpoint) {
@@ -1981,8 +1981,8 @@ export async function runGraph(
         if (checkpoint.inFlightNodeIds.length > 0 || checkpoint.ambiguousNodeIds.length > 0) {
           const held = [...new Set([...checkpoint.inFlightNodeIds, ...checkpoint.ambiguousNodeIds])];
           for (const nodeId of held) admissionPending.set(nodeId, {
-            code: "MUTATION_UNVERIFIED", reason: "The previous attempt's outward effect is unconfirmed.",
-            nextAction: "Observe this effect in the background while independent branches continue.",
+            code: "MUTATION_UNVERIFIED", reason: L("지난 시도가 바깥에 무언가를 반영했는지 확인되지 않았어요.", "It is unconfirmed whether the previous attempt changed anything outside."),
+            nextAction: L("다른 단계는 계속 진행돼요. 실제로 반영됐는지 확인한 뒤 [이 노드부터 재실행] 또는 [건너뛰기]를 고르세요.", "Other branches continue. Check whether it took effect, then choose [Rerun from this node] or [Skip]."),
           });
           checkpoint.ambiguousNodeIds = held;
           checkpoint.inFlightNodeIds = [];
@@ -2275,8 +2275,8 @@ export async function runGraph(
   // cannot become a fresh allowance merely because the host restarted.
   if (resumeOfRunId && !(checkpoint as unknown as Record<string, unknown>).executionState && loops.length > 0) {
     for (const nodeId of new Set(loops.flatMap((loop) => loop.body))) admissionPending.set(nodeId, {
-      code: "LOOP_COUNTERS_UNCONFIRMED", reason: "The old checkpoint does not record this loop's iteration count.",
-      nextAction: "Reconcile loop counters in the background; independent nodes continue.",
+      code: "LOOP_COUNTERS_UNCONFIRMED", reason: L("이전 기록에 이 반복이 몇 번 돌았는지 남아 있지 않아요.", "The earlier record does not say how many times this loop ran."),
+      nextAction: L("다른 단계는 계속 진행돼요. 처음부터 다시 실행해 주세요.", "Other nodes continue. Please run it again from the start."),
     });
   }
 
@@ -2630,8 +2630,8 @@ export async function runGraph(
         if (!["agent", "action", "output", "eval"].includes(node.type)) continue;
         const ref = str(node.config, "ref");
         if (ref && ref !== automation.targetId) continue;
-        const failure = { code: "TARGET_PENDING", reason: `The default target ${automation.targetId} is unavailable.`,
-          nextAction: "Repair this target in the background while independent node targets continue." };
+        const failure = { code: "TARGET_PENDING", reason: L("이 자동화의 기본 실행 대상을 찾을 수 없어요.", "This automation's default target is unavailable."),
+          nextAction: L("다른 단계는 계속 진행돼요. 실행 대상을 다시 골라 주세요.", "Other steps continue. Please choose the target again.") };
         admissionPending.set(node.id, failure);
         nodeFailures[node.id] = failure;
       }
@@ -3221,8 +3221,8 @@ export async function runGraph(
     const runSignal = scopedSignal;
     if (!dryRun && opts.permissionCeiling === "read" && nodeEffect(node) === "mutation") {
       beginNode(node);
-      failGraphNode(node, { code: "NODE_FAILED", reason: "Parent execution permission does not allow this mutation step.",
-        nextAction: "Use a read-only capability or invoke it from an authorized write execution." });
+      failGraphNode(node, { code: "NODE_FAILED", reason: L("이 실행은 읽기만 허용돼 있어서, 무언가를 바꾸는 이 단계는 실행하지 않았어요.", "This run is read-only, so this step, which changes something, was not run."),
+        nextAction: L("쓰기가 허용된 실행에서 다시 시도해 주세요.", "Run it again from a run that is allowed to make changes.") });
       return;
     }
     const historicalHold = deferredMcpHolds.get(node.id);
@@ -4771,7 +4771,7 @@ export async function runGraph(
           if (result.browserLoginWait) {
             const handle = result.browserLoginWait; const ref = handle.prerequisite;
             if (ref.runId !== runId || ref.chatId !== nodeChat.id || ref.nodeId !== node.id) {
-              handle.cancel(); throw new GraphContractError({ code: "RESUME_CONFLICT", reason: "Login prerequisite identity did not match this node attempt.",
+              handle.cancel(); throw new GraphContractError({ code: "RESUME_CONFLICT", reason: L("이 단계의 로그인 확인이 지금 시도와 맞지 않아요.", "The login check does not match this attempt of the step."),
                 nextAction: L("실행 기록에서 이 단계를 확인해 주세요.", "Review this step in the run history.") });
             }
             const receipts = checkpoint!.toolReceipts[node.id] ?? [];
@@ -5205,8 +5205,8 @@ export async function runGraph(
           if (!receipt.ok) {
             if (receipt.status === "uncertain" && !checkpoint!.ambiguousNodeIds.includes(node.id)) checkpoint!.ambiguousNodeIds.push(node.id);
             failGraphNode(node, { code: receipt.status === "uncertain" ? "MUTATION_UNVERIFIED" : "TOOLCHAIN_CALL_FAILED",
-              reason: receipt.error ?? "Toolchain execution failed without a valid contract result.",
-              nextAction: "Inspect the Toolchain call receipt and repair its release before resuming." });
+              reason: receipt.error ?? L("이 단계의 도구 묶음이 올바른 결과 없이 끝났어요.", "This step's toolchain ended without a valid result."),
+              nextAction: L("도구 묶음 설정을 확인한 뒤 [이 노드부터 재실행]을 눌러 주세요.", "Check the toolchain settings, then choose [Rerun from this node].") });
             return;
           }
           if (!Object.hasOwn(receipt, "result")) throw new Error("toolchain_result_missing");
@@ -5227,7 +5227,7 @@ export async function runGraph(
           if (scopedSignal.aborted) throw error;
           failGraphNode(node, { code: "TOOLCHAIN_CALL_FAILED",
             reason: error instanceof Error ? error.message : String(error),
-            nextAction: "Check the exact Toolchain release and its typed argument bindings." });
+            nextAction: L("이 단계의 도구 묶음 설정을 확인한 뒤 [이 노드부터 재실행]을 눌러 주세요.", "Check this step's toolchain settings, then choose [Rerun from this node].") });
         }
         return;
       }
@@ -5592,7 +5592,7 @@ export async function runGraph(
           if (uncertain && !checkpoint!.ambiguousNodeIds.includes(node.id)) checkpoint!.ambiguousNodeIds.push(node.id);
           failGraphNode(node, graphFailureOf(unexpected) ?? { code: uncertain ? "MUTATION_UNVERIFIED" : timedOut ? "NODE_TIMEOUT" : "NODE_FAILED",
             reason: unexpected instanceof Error ? unexpected.message : String(unexpected),
-            nextAction: "Repair this node in the background while independent branches continue." });
+            nextAction: L("다른 단계는 계속 진행돼요. [이 노드부터 재실행]을 눌러 다시 시도해 보세요.", "Other branches continue. Try [Rerun from this node] again.") });
           if (timedOut) backgroundCheckNodes.add(node.id);
         }).finally(() => {
           clearTimeout(timer);

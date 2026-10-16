@@ -6,6 +6,7 @@ import { goalContinuationSourceChat, settleGoalContinuationRun, settleRefusedGoa
 import { selectionForRuntime } from "../shared/runtime-selection";
 import { pollGoalWaitSubscriptions } from "./long-run/wait-subscriptions";
 import { automationRunOrigin, deliverAutomationResult, sealAutomationRunOrigin } from "./automation-delivery";
+import { ownerFailureReason } from "../shared/owner-visible-activity-text";
 import { claimAutomationNotification } from "./automation-notifications";
 import { getDb } from "./store/db";
 import { emitDesktopStoreChange } from "./store/change-bus";
@@ -503,7 +504,7 @@ function notifyDone(a: Automation, status: AutomationResultStatus, error?: strin
       body: ok
         ? "Completed successfully."
         : error
-          ? redactOperationalSecrets(error).slice(0, 200)
+          ? ownerFailureReason(redactOperationalSecrets(error), currentUiLocale()).slice(0, 200)
           : waiting
             ? "It remains enabled and will retry on the next schedule."
             : "See run history.",

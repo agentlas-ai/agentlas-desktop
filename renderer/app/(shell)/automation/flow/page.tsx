@@ -13,6 +13,7 @@ import { useAppUiPreference } from "@/lib/app-ui-preferences";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { navigate } from "@/lib/navigation";
 import { humanSchedule } from "@shared/graph-blueprint";
+import { ownerFailureText } from "@shared/owner-visible-activity-text";
 import { resolveAutomationGraphForEditing } from "@shared/automation-graph-definition";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
@@ -912,7 +913,7 @@ function AutomationFlowPage() {
         code: "dangling-node", // 로그 표시용 자리 — 문구는 message가 전부 말한다.
         // ★시각을 앞세운다 — 어제의 실패(옛 claude 핀 시절 기록)가 "지금 클로드를 쓰고
         //   있다"는 오해를 낳았다(실측). 기록은 기록으로 읽히게 한다.
-        message: `${when ? `[${when}] ` : ""}${node?.label || nodeId} — ${failure.reason || failure.code}`,
+        message: `${when ? `[${when}] ` : ""}${node?.label || nodeId} — ${ownerFailureText(failure, locale === "en" ? "en" : "ko").reason}`,
       } as unknown as WorkflowIssue);
     }
     if (liveRunning) {
@@ -1905,8 +1906,8 @@ function AutomationFlowPage() {
             }}
           >
             <div style={{ fontWeight: 600 }}>{String(nodeLabel)}</div>
-            <div style={{ color: "var(--ink-soft)", lineHeight: 1.6 }}>{failure.reason}</div>
-            <div style={{ color: "var(--muted-deep)", lineHeight: 1.6 }}>{failure.nextAction}</div>
+            <div style={{ color: "var(--ink-soft)", lineHeight: 1.6 }}>{ownerFailureText(failure, locale === "en" ? "en" : "ko").reason}</div>
+            <div style={{ color: "var(--muted-deep)", lineHeight: 1.6 }}>{ownerFailureText(failure, locale === "en" ? "en" : "ko").nextAction}</div>
             {/* ★"기준이 틀렸을 수도"의 두 갈래: 채점표를 고치거나(캔버스에서),
                 판정이 틀렸다고 교정한다. 교정은 그 노드의 이후 판정에 few-shot으로
                 주입된다 — 사람의 채점 감각이 그래프에 쌓이는 자리(5건이면 유의미). */}
