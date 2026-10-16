@@ -11,10 +11,17 @@
 // Output goes straight to the file descriptor, so it survives the service. A task this service instance did not
 // start (the service restarted while it ran) cannot report its exit any more; it is marked "lost" with the time
 // the service noticed — never "completed" — and its output so far stays readable.
-import { spawn, type ChildProcess } from "node:child_process";
+//
+// Every OS: the shell comes from runtime/exec (cmd.exe /d /s /c on Windows; a shell that exists on macOS and Linux),
+// and stop ends the whole tree (process group, or taskkill /T). A lost task can still be stopped when its pid still
+// names the process it started (pid plus process start time). output.log is capped, and finished task directories
+// are removed after 7 days.
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { observeLocalProcessIdentity } from "../local-model-hub/platform";
+import { commandLineShellSpawn, killCliTree } from "../runtime/exec";
 
 export type BackgroundTaskStatus = "running" | "completed" | "failed" | "stopped" | "lost";
 
@@ -40,6 +47,11 @@ export interface BackgroundTaskRecord {
   /** The service instance that started it; another instance cannot observe its exit. */
   serviceInstance: string;
   outputPath: string;
+  /**
+   * The OS's start time for `pid`, recorded shortly after start. With `pid` it proves a later process is still
+   * this task before a lost task is stopped. Absent in older records and when the OS would not say.
+   */
+  processStartedAt?: string | null;
 }
 
 export interface BackgroundTaskStartInput {
@@ -65,6 +77,27 @@ const MAX_DESCRIPTION = 240;
 const DEFAULT_TAIL = 16_384;
 const MAX_TAIL = 262_144;
 const TERMINAL: ReadonlySet<BackgroundTaskStatus> = new Set(["completed", "failed", "stopped", "lost"]);
+const STOP_GRACE_MS = 5_000;
+/** output.log over this is cut to its last OUTPUT_KEEP_BYTES (a render's progress lines can run for days). */
+const OUTPUT_CAP_BYTES = 16 * 1024 * 1024;
+const OUTPUT_KEEP_BYTES = 4 * 1024 * 1024;
+const FINISHED_RETENTION_MS = 7 * 86_400_000;
+const MAINTENANCE_INTERVAL_MS = 30_000;
+const PRUNE_INTERVAL_MS = 3_600_000;
+
+/** The OS's start time for a pid: `ps -o lstart=` on macOS and Linux, Win32_Process.CreationDate on Windows. */
+async function defaultProcessStartTime(pid: number): Promise<string | null> {
+  if (process.platform === "win32") return (await observeLocalProcessIdentity(pid))?.createdAt ?? null;
+  for (const ps of ["/bin/ps", "/usr/bin/ps"]) {
+    if (!fs.existsSync(ps)) continue;
+    const text = await new Promise<string>((resolve) => {
+      execFile(ps, ["-o", "lstart=", "-p", String(pid)], { timeout: 5_000, env: { ...process.env, LC_ALL: "C" } },
+        (error, stdout) => resolve(error ? "" : String(stdout)));
+    });
+    return text.trim() || null;
+  }
+  return null;
+}
 
 function newTaskId(): string {
   // "b" + 8 base36 characters, like the ids the owner already reads in Claude Code.
@@ -80,13 +113,21 @@ export class BackgroundTaskRegistry {
   private readonly children = new Map<string, ChildProcess>();
   private readonly stopRequested = new Set<string>();
   private readonly listeners = new Set<(record: BackgroundTaskRecord) => void>();
+  private readonly lostStops = new Set<string>();
+  private lastPruneAt = 0;
 
   constructor(private readonly root: string, private readonly opts: {
     serviceInstance: string;
     now?: () => Date;
     shell?: string;
+    processStartTime?: (pid: number) => Promise<string | null>;
   }) {
     fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+    setInterval(() => { try { this.maintain(); } catch { /* the next pass retries */ } }, MAINTENANCE_INTERVAL_MS).unref?.();
+  }
+
+  private processStartTime(pid: number): Promise<string | null> {
+    return (this.opts.processStartTime ?? defaultProcessStartTime)(pid).catch(() => null);
   }
 
   private now(): string { return (this.opts.now?.() ?? new Date()).toISOString(); }
@@ -142,8 +183,12 @@ export class BackgroundTaskRegistry {
     let child: ChildProcess;
     try {
       // Its own process group, so stop() ends the whole command line (pipes, subshells), not only the shell.
-      child = spawn(this.opts.shell ?? process.env.SHELL ?? "/bin/zsh", ["-lc", command],
-        { cwd, env, detached: true, stdio: ["ignore", out, out] });
+      // On Windows, detached keeps the task out of the service's job object, so it outlives the service as on POSIX.
+      const shell = commandLineShellSpawn(command, this.opts.shell);
+      child = spawn(shell.file, shell.args, {
+        cwd, env, detached: true, stdio: ["ignore", out, out],
+        windowsHide: true, windowsVerbatimArguments: shell.windowsVerbatimArguments,
+      });
     } finally {
       fs.closeSync(out);
     }
@@ -171,6 +216,13 @@ export class BackgroundTaskRegistry {
     child.once("exit", (code, signal) => settle(code, signal));
     child.once("error", (error) => settle(null, null, error));
     child.unref();
+    const pid = child.pid;
+    if (pid) {
+      void this.processStartTime(pid).then((processStartedAt) => {
+        const current = this.get(id);
+        if (processStartedAt && current?.status === "running" && current.pid === pid) this.write({ ...current, processStartedAt });
+      });
+    }
     return record;
   }
 
@@ -196,14 +248,99 @@ export class BackgroundTaskRegistry {
   stop(id: string): BackgroundTaskRecord {
     const record = this.get(id);
     if (!record) throw new Error("background_task_not_found");
+    if (record.status === "lost") return this.stopLost(record);
     if (TERMINAL.has(record.status)) return record;
     const child = this.children.get(id);
     if (!child?.pid) throw new Error("background_task_not_owned");
     this.stopRequested.add(id);
-    try { process.kill(-child.pid, "SIGTERM"); } catch { try { child.kill("SIGTERM"); } catch { /* already gone */ } }
-    const pid = child.pid;
-    setTimeout(() => { if (this.children.has(id)) { try { process.kill(-pid, "SIGKILL"); } catch { /* exited */ } } }, 5_000).unref?.();
+    // Process group SIGTERM then SIGKILL on POSIX; taskkill /T then /F on Windows.
+    killCliTree(child, STOP_GRACE_MS);
     return { ...record };
+  }
+
+  /**
+   * A task an earlier service started may still run ("detached_still_running"). It is stopped only while its pid
+   * still names that process: the OS start time must equal the one recorded at start, before each signal. A reused
+   * pid is never signalled. The task stays "lost" (its exit was never observed); `signal` records the outcome:
+   * stop_requested, then detached_stopped or stop_refused_process_changed.
+   */
+  private stopLost(record: BackgroundTaskRecord): BackgroundTaskRecord {
+    const pid = record.pid;
+    const expected = record.processStartedAt;
+    if (!pid || !expected || !pidAlive(pid) || this.lostStops.has(record.id)) return record;
+    this.lostStops.add(record.id);
+    const requested: BackgroundTaskRecord = { ...record, signal: "stop_requested" };
+    this.write(requested);
+    const settle = (signal: string) => {
+      this.lostStops.delete(record.id);
+      const current = this.get(record.id);
+      if (current?.status === "lost") this.write({ ...current, signal });
+    };
+    const sameProcess = async () => (await this.processStartTime(pid)) === expected;
+    void (async () => {
+      if (!await sameProcess()) return settle("stop_refused_process_changed");
+      if (process.platform === "win32") {
+        const killer = spawn("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+        killer.once("error", () => undefined);
+        killer.unref?.();
+      } else {
+        try { process.kill(-pid, "SIGTERM"); } catch { try { process.kill(pid, "SIGTERM"); } catch { /* exited */ } }
+      }
+      const deadline = Date.now() + STOP_GRACE_MS;
+      while (pidAlive(pid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
+      if (pidAlive(pid) && process.platform !== "win32") {
+        if (!await sameProcess()) return settle("stop_refused_process_changed");
+        try { process.kill(-pid, "SIGKILL"); } catch { try { process.kill(pid, "SIGKILL"); } catch { /* exited */ } }
+      }
+      settle("detached_stopped");
+    })().catch(() => settle("stop_requested"));
+    return requested;
+  }
+
+  /**
+   * Periodic upkeep: cap the output of tasks this instance runs, and prune finished tasks hourly. The cap keeps
+   * the last OUTPUT_KEEP_BYTES behind a one-line note. It is lossy by design: a line the task writes during the
+   * cut can be lost.
+   */
+  maintain(): void {
+    for (const id of this.children.keys()) {
+      const record = this.get(id);
+      if (record) this.capOutput(record.outputPath);
+    }
+    const now = (this.opts.now?.() ?? new Date()).getTime();
+    if (now - this.lastPruneAt >= PRUNE_INTERVAL_MS) this.pruneFinished();
+  }
+
+  private capOutput(file: string): void {
+    let size: number;
+    try { size = fs.statSync(file).size; } catch { return; }
+    if (size <= OUTPUT_CAP_BYTES) return;
+    const fd = fs.openSync(file, "r+");
+    try {
+      const keep = Buffer.alloc(OUTPUT_KEEP_BYTES);
+      const read = fs.readSync(fd, keep, 0, OUTPUT_KEEP_BYTES, size - OUTPUT_KEEP_BYTES);
+      const note = Buffer.from(`[agentlasd] output passed ${OUTPUT_CAP_BYTES} bytes; the first ${size - read} bytes were dropped\n`);
+      fs.ftruncateSync(fd, 0);
+      fs.writeSync(fd, note, 0, note.length, 0);
+      fs.writeSync(fd, keep, 0, read, note.length);
+    } finally { fs.closeSync(fd); }
+  }
+
+  /**
+   * Removes task directories that finished more than 7 days ago. A lost task whose pid is still alive is kept: it
+   * may still be writing its output.
+   */
+  pruneFinished(): string[] {
+    const now = (this.opts.now?.() ?? new Date()).getTime();
+    this.lastPruneAt = now;
+    const removed: string[] = [];
+    for (const record of this.list()) {
+      if (!TERMINAL.has(record.status) || !record.endedAt || this.children.has(record.id)) continue;
+      if (now - Date.parse(record.endedAt) < FINISHED_RETENTION_MS) continue;
+      if (record.status === "lost" && pidAlive(record.pid)) continue;
+      try { fs.rmSync(this.dir(record.id), { recursive: true, force: true }); removed.push(record.id); } catch { /* next pass */ }
+    }
+    return removed;
   }
 
   /**
@@ -220,6 +357,7 @@ export class BackgroundTaskRegistry {
       this.write(settled);
       lost.push(settled);
     }
+    this.pruneFinished();
     return lost;
   }
 

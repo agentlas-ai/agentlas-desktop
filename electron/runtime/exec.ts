@@ -470,6 +470,32 @@ function runProbeCliVersion(command: string, timeoutMs: number): Promise<string 
   });
 }
 
+/**
+ * The shell that runs one command line written for a shell (a workspace preview, a daemon background task).
+ * - Windows: cmd.exe /d /s /c with the command inside one outer quote pair, passed verbatim. /s strips that pair;
+ *   Node's default quoting would escape inner quotes as \" , which cmd.exe does not read.
+ * - macOS: zsh, then bash, then sh; Linux: $SHELL, then bash, then sh. Only an absolute, executable path is used,
+ *   so a missing $SHELL (a service environment) or a missing /bin/zsh never fails every command. Login shell (-lc).
+ * `preferred` (a caller's explicit shell) is tried first on macOS and Linux.
+ */
+export function commandLineShellSpawn(command: string, preferred?: string): {
+  file: string;
+  args: string[];
+  windowsVerbatimArguments: boolean;
+} {
+  if (process.platform === "win32") {
+    return { file: process.env.ComSpec?.trim() || "cmd.exe", args: ["/d", "/s", "/c", `"${command}"`], windowsVerbatimArguments: true };
+  }
+  const candidates = process.platform === "darwin"
+    ? [preferred, "/bin/zsh", "/bin/bash", "/bin/sh"]
+    : [preferred, process.env.SHELL, "/bin/bash", "/bin/sh"];
+  const file = candidates.find((candidate) => {
+    if (!candidate || !path.isAbsolute(candidate)) return false;
+    try { fs.accessSync(candidate, fs.constants.X_OK); return true; } catch { return false; }
+  }) ?? "/bin/sh";
+  return { file, args: ["-lc", command], windowsVerbatimArguments: false };
+}
+
 /** POSIX에서 프로세스 그룹 킬이 가능하도록 detached 스폰 옵션(런 자식용). Windows는 미지원. */
 export function detachedSpawnOpts(): { detached?: boolean } {
   return process.platform !== "win32" ? { detached: true } : {};

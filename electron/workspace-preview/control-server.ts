@@ -6,7 +6,7 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { onHostShutdown } from "../host-lifecycle";
 import { userDataPath } from "../runtime-paths";
-import { killCliTree } from "../runtime/exec";
+import { commandLineShellSpawn, killCliTree } from "../runtime/exec";
 import { redactSecrets } from "../../shared/secret-patterns";
 import {
   removeWorkspacePreviewCapability,
@@ -123,21 +123,6 @@ function fingerprintCommand(command: string): string {
   return createHash("sha256").update(command).digest("hex").slice(0, 32);
 }
 
-function shellSpec(): { command: string; args: string[]; windowsVerbatim: boolean } {
-  // cmd.exe /s strips one outer quote pair and runs the rest as written. Node's
-  // default argument quoting escapes inner quotes as \" , which cmd.exe does not
-  // read (`cd "my app"` became `cd \"my app\"`), so the command is passed
-  // verbatim inside that pair, as runtime/install-cli.ts does.
-  if (process.platform === "win32") return { command: process.env.ComSpec?.trim() || "cmd.exe", args: ["/d", "/s", "/c"], windowsVerbatim: true };
-  const candidates = process.platform === "darwin"
-    ? ["/bin/zsh", "/bin/bash", "/bin/sh"]
-    : [process.env.SHELL, "/bin/bash", "/bin/sh"];
-  const command = candidates.find((candidate) => {
-    if (!candidate || !path.isAbsolute(candidate)) return false;
-    try { fs.accessSync(candidate, fs.constants.X_OK); return true; } catch { return false; }
-  }) ?? "/bin/sh";
-  return { command, args: ["-lc"], windowsVerbatim: false };
-}
 
 /**
  * Why a preview exited: the last stderr line of a failed exit, redacted and
@@ -276,14 +261,15 @@ async function startPreview(binding: WorkspacePreviewCapabilityBinding, request:
   // A preview receives normal project tooling but never Main's opaque credential aliases.
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !/(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|PRIVATE_KEY|API_KEY|AUTH)/iu.test(key)));
-  const shell = shellSpec();
-  const child = spawn(shell.command, [...shell.args, shell.windowsVerbatim ? `"${command}"` : command], {
+  // On Windows the command goes verbatim inside one quote pair (`cd "my app"` used to reach cmd.exe as `cd \"my app\"`).
+  const shell = commandLineShellSpawn(command);
+  const child = spawn(shell.file, shell.args, {
       cwd: binding.cwd,
       env,
       detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
-      windowsVerbatimArguments: shell.windowsVerbatim,
+      windowsVerbatimArguments: shell.windowsVerbatimArguments,
     });
   child.unref();
   const receipt: WorkspacePreviewReceipt = {
