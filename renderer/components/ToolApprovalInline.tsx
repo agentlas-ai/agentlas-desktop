@@ -92,6 +92,17 @@ export function ToolApprovalCard({
    */
   const escalation = request.tool === "permission-escalation";
   /*
+   * A folder a room run needs (owner-named folder or a teammate's write lift, electron/mcp/run-workspace-grant.ts). The
+   * phone already words this tool as a folder question (mobile tool_approval_presentation.dart); Desktop says the same:
+   * the folder's last two path parts, and "edit" capability means creating and editing files there.
+   */
+  const folderAccess = request.tool === "folder-access";
+  const folderWrite = folderAccess && request.capability === "edit";
+  const folderLabel = folderAccess
+    ? (request.detail || request.cwd || "").replace(/[\x00-\x1f\x7f]/g, "").split(/[\\/]+/).filter(Boolean).slice(-2).join("/")
+      || (ko ? "요청한 폴더" : "the requested folder")
+    : "";
+  /*
    * 오너 지시 2026-08-24: 묻는 자리는 앱 어디서나 한 모양이다.
    * 예전에는 도구 이름과 [거부][이 작업 동안][이번만 허용] 이 한 줄에 가로로
    * 늘어서서, 무엇을 허락하는지 읽기 전에 버튼부터 보였다.
@@ -99,6 +110,10 @@ export function ToolApprovalCard({
    */
   const askTitle = escalation
     ? (ko ? "전체 액세스로 진행할까요?" : "Continue with full access?")
+    : folderAccess
+      ? folderWrite
+        ? (ko ? `“${folderLabel}”에 파일을 만들고 수정할까요?` : `Allow creating and editing files in “${folderLabel}”?`)
+        : (ko ? `“${folderLabel}” 폴더를 읽을까요?` : `Allow reading the “${folderLabel}” folder?`)
     : imageTool
       ? (ko ? "이미지 생성을 허용할까요?" : "Allow image generation?")
       : (ko ? `${toolDisplayName(request.tool)} 사용을 허용할까요?` : `Allow ${toolDisplayName(request.tool)}?`);
