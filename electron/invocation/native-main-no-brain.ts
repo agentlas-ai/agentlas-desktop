@@ -3,6 +3,7 @@ import { createInvocationRunOwnerStore, type InvocationRunOwner } from "../store
 import { getInvocationAdmission } from "../store/invocation-admissions";
 import { getDb } from "../store/db";
 import { RUNTIME_TURN_UNSETTLED_CODE } from "../runtime/runner";
+import { isTypedCode } from "../../shared/turn-settlement";
 import type { NativeAuthenticatedIdentity } from "../daemon/native-session-auth";
 import type { NativeMainPreparationBinding } from "./native-main-preparation-issuer";
 export class NativeMainNoBrainProofError extends Error {
@@ -33,7 +34,10 @@ export function createNativeMainNoBrainChecker(ports: {
       let payload: unknown; try { payload = JSON.parse(row.payload_json); } catch { return false; }
       if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
       const facts = payload as Record<string, unknown>;
-      return facts.providerDispatched === false && (facts.errorCode === "native_preparation_cancelled" || facts.errorCode === RUNTIME_TURN_UNSETTLED_CODE);
+      // The daemon records the refusal's own machine code with turnDelivery "not-dispatched" (service.ts
+      // startNativePreparedOwned); rows written by older builds carry the generic unsettled code.
+      return facts.providerDispatched === false && (facts.errorCode === "native_preparation_cancelled" || facts.errorCode === RUNTIME_TURN_UNSETTLED_CODE
+        || (facts.turnDelivery === "not-dispatched" && isTypedCode(facts.errorCode)));
     });
     if (!nativeFailure) fail();
     // Durable facts are necessary diagnostics, never sufficient source proof.

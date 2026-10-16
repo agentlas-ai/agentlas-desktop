@@ -35,6 +35,7 @@ import {
   wrapSystemPrompt,
   RuntimeTurnUnsettledError,
   childExitReason,
+  markRefusedBeforeDispatch,
 } from "./runner";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import { detectApprovalRequired } from "./runtime-refusal";
@@ -848,7 +849,9 @@ const CLAUDE_ASSISTANT_ERROR_KIND: Record<string, RunnerFailure["kind"]> = {
   oauth_org_not_allowed: "auth",
   verification_required: "auth",
   cloud_credential_error: "auth",
-  rate_limit: "quota",
+  // Request throttling. An exhausted subscription window arrives first as rate_limit_event "rejected" (quota, below),
+  // and that earlier marker is kept over this echo.
+  rate_limit: "rate_limit",
   billing_error: "quota",
 };
 
@@ -890,11 +893,14 @@ export function claudeFailureFromEvent(
     };
   }
   if (ev.type === "assistant" && typeof ev.error === "string" && CLAUDE_ASSISTANT_ERROR_KIND[ev.error]) {
-    // Keep an earlier, more specific marker (a rate-limit event with its reset hint) over this message-level echo.
-    if (prior?.source === "marker" && prior.kind === CLAUDE_ASSISTANT_ERROR_KIND[ev.error]) return prior;
+    // Keep an earlier, more specific marker (a rate-limit event with its reset hint) over this message-level echo; the
+    // subscription window's rejection (quota) stays quota when the assistant echoes rate_limit.
+    if (prior?.source === "marker" && (prior.kind === CLAUDE_ASSISTANT_ERROR_KIND[ev.error]
+      || (ev.error === "rate_limit" && prior.kind === "quota"))) return prior;
     return { kind: CLAUDE_ASSISTANT_ERROR_KIND[ev.error]!, message: ev.error, providerCode: ev.error, runtime: "claude", source: "marker",
       ...(prior?.retryAfterHint ? { retryAfterHint: prior.retryAfterHint } : {}) };
   }
+  // The subscription's usage window rejected the request: an exhausted plan until resetsAt (quota), not throttling.
   if (ev.type === "rate_limit_event" && ev.rate_limit_info?.status === "rejected") {
     return {
       kind: "quota", message: "Claude rate limit rejected", providerCode: "rate_limit_rejected", runtime: "claude", source: "marker",
@@ -909,7 +915,7 @@ export function claudeFailureFromEvent(
     if (prior?.source === "marker" && prior.kind !== "exit") {
       // The rate-limit event supplies only a placeholder. A matching terminal
       // 429 may add the provider's explanation without replacing its cause or reset hint.
-      if (prior.kind === "quota" && (prior.message === "Claude rate limit rejected" || prior.message === prior.providerCode)
+      if ((prior.kind === "quota" || prior.kind === "rate_limit") && (prior.message === "Claude rate limit rejected" || prior.message === prior.providerCode)
         && ev.api_error_status === 429 && typeof ev.result === "string" && ev.result.trim()) {
         return { ...prior, message: ev.result.trim().slice(0, 2000) };
       }
@@ -926,7 +932,8 @@ export function claudeFailureFromEvent(
     const lead = claudeErrorLead(code, locale);
     const message = `${lead}${code ? ` (${code})` : ""}${providerText ? `: ${providerText}` : ""}`.slice(0, 2000);
     return {
-      kind: ev.api_error_status === 429 ? "quota"
+      // A bare 429 with no window rejection before it is request throttling (rate_limit), retried after its reset hint.
+      kind: ev.api_error_status === 429 ? "rate_limit"
         : /not logged in|please run \/login/i.test(finalText) ? "auth"
         : "exit",
       message, runtime: "claude",
@@ -967,19 +974,20 @@ const runClaudeTurn = async (
   assertScienceRecoveryRequest(req, "claude-code");
   const aliveProfile = aliveDecisionProfileForRequest(req);
   const alivePacket = aliveProfile ? agentContextNoToolsPacketForRequest(req) : null;
-  if (aliveProfile && !alivePacket) throw new Error("alive_claude_packet_required");
+  if (aliveProfile && !alivePacket) throw markRefusedBeforeDispatch(new Error("alive_claude_packet_required"));
   if (aliveProfile) {
     const prior = aliveClaudeResources.get(aliveProfile.resourceOwnerKey);
     if (prior && !claudeResidentSessionAlive(prior.session)) prior.close();
   }
   if (req.restrictedReadBoundary) {
-    throw new Error(
+    throw markRefusedBeforeDispatch(new Error(
       "Claude Code is not enabled for restricted read-only execution because its host filesystem boundary is not release-verified.",
-    );
+    ));
   }
   const executableIdentity = getExecutable(req.runtimeSource, req.cwd ?? agentRunCwd(), req.env ?? process.env);
   if (!executableIdentity) {
-    throw new Error(tStatus(req.locale, "errCliMissingClaude"));
+    // Nothing was spawned: a refusal before dispatch, never an unknown effect (docs 31 W1).
+    throw markRefusedBeforeDispatch(new Error(tStatus(req.locale, "errCliMissingClaude")));
   }
   const bin = executableIdentity.executable;
   const executableState = capabilitiesFor(executableIdentity);
@@ -1260,7 +1268,9 @@ const runClaudeTurn = async (
   // ★C38 — 도구 호출 직전 관문. 실측(2026-08-04, claude 2.1.220): PreToolUse deny가
   // `--permission-mode bypassPermissions`를 이기고 Bash 호출을 실제로 막았다. 허용 깃발
   // (`--allowedTools`)은 켜기만 하므로, 선언되지 않은 호출을 거절하는 곳은 여기뿐이다.
-  const executionSettings = await withProductReplyLanguage(await claudeExecutionSettings(runReq), runReq.locale);
+  // Settings and the write-sandbox launch guard are checked before the CLI starts: their refusals precede dispatch.
+  const executionSettings = await withProductReplyLanguage(await claudeExecutionSettings(runReq)
+    .catch((error: unknown) => { throw markRefusedBeforeDispatch(error); }), runReq.locale);
   const productSettings = withoutPersonalClaudeInstructions(executionSettings, runReq.env ?? process.env);
   // Personal skills, plugins and project memory stay out of every product run; One alone gets the ones the person
   // switched on (capabilities/one-capabilities.ts, claude-personal-context.ts). A settings overlay, not a config-dir mirror:

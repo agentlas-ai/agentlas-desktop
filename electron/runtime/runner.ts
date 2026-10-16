@@ -20,6 +20,7 @@ import { preferredProviderPairs } from "../../shared/capability-priority";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import { isJudgmentRefusal } from "./judgment-refusal";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
+import { innermostTypedCode, isTypedCode } from "../../shared/turn-settlement";
 
 /** Main-only delivery boundary; never serialized into a provider request. */
 export type BeforeMcpToolResult = (input: {
@@ -753,7 +754,13 @@ export interface RunnerEvents {
  * ("You've hit your weekly limit")이 text에 실려 정상 답 행세를 했다 — 판정 폴백이
  * 안 걸리고, 노드 산출물·챗 답변이 됐다. throw 아니면 텍스트, 두 상태뿐이었던 것이 뿌리다.
  */
-export type RunnerFailureKind = "quota" | "auth" | "refused" | "empty" | "exit" | "timeout" | "unavailable" | "unsupported";
+/*
+ * "quota" is an exhausted plan, credit balance or usage window (it lifts at a reset the provider names, or never without
+ * the owner). "rate_limit" is transient request throttling (HTTP 429 without a plan verdict): it lifts by itself, the
+ * same request may be retried after `retryAfterHint`, and shared/turn-settlement.ts bounds those retries (docs 31 W1;
+ * audit A5 C8.1, opencode/pi split the two the same way).
+ */
+export type RunnerFailureKind = "quota" | "rate_limit" | "auth" | "refused" | "empty" | "exit" | "timeout" | "unavailable" | "unsupported";
 
 export interface RunnerFailure {
   kind: RunnerFailureKind;
@@ -769,7 +776,7 @@ export interface RunnerFailure {
   providerCode?: string;
   /** Exact child exit status when the runner observed one; null/unknown is omitted. */
   exitCode?: number;
-  /** 한도 리셋 시각 등 — 표식에 실려 오면 그대로. */
+  /** 한도 리셋 시각 등 — 표식에 실려 오면 그대로. For "rate_limit", the provider's Retry-After (ISO time or "in 30s"). */
   retryAfterHint?: string;
 }
 
@@ -884,6 +891,80 @@ export function markRefusedBeforeDispatch<T>(error: T): T {
 }
 
 /**
+ * A start or turn the host refused before anything reached a runtime, whose cause carries no machine code of its own
+ * (a plain Error). Its `code` is the innermost machine code of the cause chain, the cause's own code-shaped message,
+ * or `fallbackCode`; `turnDelivery` is "not-dispatched"; the original stays as the standard `cause`.
+ */
+export class PreDispatchRefusalError extends Error {
+  readonly code: string;
+  readonly turnDelivery = "not-dispatched" as const;
+  constructor(code: string, message: string, cause: unknown, readonly stage?: string) {
+    super(message);
+    this.name = "PreDispatchRefusalError";
+    this.code = code;
+    Object.defineProperty(this, "cause", { value: cause, configurable: true, writable: true });
+  }
+}
+
+/** The machine code a refusal reports outward: its innermost typed code, else a message that is itself a code. */
+export function refusalCode(error: unknown): string | undefined {
+  const typed = innermostTypedCode(error);
+  if (typed) return typed;
+  const message = error instanceof Error ? error.message.trim() : typeof error === "string" ? error.trim() : "";
+  return isTypedCode(message) ? message : undefined;
+}
+
+/**
+ * The outward code of a failure: an unknown-effect outcome (RuntimeTurnUnsettledError, RuntimeNoProgressError) keeps its
+ * own protective code, which every replay guard reads; any other failure reports its innermost machine code.
+ */
+export function outwardFailureCode(error: unknown): string | undefined {
+  if (error instanceof RuntimeTurnUnsettledError || error instanceof RuntimeNoProgressError) return error.code;
+  return refusalCode(error);
+}
+
+/**
+ * The one way a host wrapper reports a refusal before dispatch: the cause itself, marked "not-dispatched", when it
+ * carries a machine code of its own; otherwise a PreDispatchRefusalError whose code is the cause's innermost code.
+ * Never RuntimeTurnUnsettledError: nothing was sent, so nothing may have acted (docs 31 W1).
+ */
+export function preDispatchRefusal(cause: unknown, stage: string, fallbackCode = "pre_dispatch_refused"): Error {
+  // A runner's own unsettled turn (a post-handoff custody failure) is never relabelled as not dispatched.
+  if (cause instanceof RuntimeTurnUnsettledError) return cause;
+  if (cause instanceof Error && isTypedCode((cause as { code?: unknown }).code) && Object.isExtensible(cause)) {
+    return markRefusedBeforeDispatch(cause);
+  }
+  const message = cause instanceof Error ? cause.message : String(cause ?? fallbackCode);
+  return new PreDispatchRefusalError(refusalCode(cause) ?? fallbackCode, message, cause, stage);
+}
+
+/**
+ * The one way a host wrapper reports a dispatched turn that ended without its terminal receipt. Unlike a bare
+ * `new RuntimeTurnUnsettledError(kind)`, it keeps what the runner proved: the typed cause (standard `cause`, so its
+ * innermost code stays readable), the provider's own words, the session id and the RuntimeTurnDelivery it observed.
+ */
+export function unsettledTurnError(input: {
+  runtimeKind: string;
+  locale?: string;
+  cause?: unknown;
+  sessionId?: string | null;
+  providerReason?: string | null;
+  turnDelivery?: RuntimeTurnDelivery;
+}): RuntimeTurnUnsettledError {
+  const cause = input.cause;
+  const failure = (cause && typeof cause === "object" && "failure" in cause ? (cause as { failure?: RunnerFailure }).failure : undefined)
+    ?? (cause && typeof cause === "object" && "kind" in cause && "message" in cause ? cause as RunnerFailure : undefined);
+  const causeDelivery = cause && typeof cause === "object" ? (cause as { turnDelivery?: unknown }).turnDelivery : undefined;
+  const delivery = input.turnDelivery ?? (causeDelivery === "accepted" || causeDelivery === "not-accepted" ? causeDelivery : undefined);
+  const sessionId = input.sessionId ?? (cause && typeof cause === "object" ? (cause as { sessionId?: unknown }).sessionId : undefined);
+  const reason = input.providerReason ?? (failure && failure.providerCode !== RUNTIME_TURN_UNSETTLED_CODE ? failure.message : null);
+  const error = new RuntimeTurnUnsettledError(input.runtimeKind, input.locale, typeof sessionId === "string" ? sessionId : null, reason,
+    delivery === "accepted" || delivery === "not-accepted" ? delivery : undefined);
+  if (cause !== undefined) Object.defineProperty(error, "cause", { value: cause, configurable: true, writable: true });
+  return error;
+}
+
+/**
  * The CLI's own words when it exited non-zero before any terminal event (argument-parser rejections such as
  * "unexpected argument '--x'" / "unknown option", bad config). Carried as RuntimeTurnUnsettledError's providerReason so a
  * renamed or removed flag reads as that, not as a bare "no terminal receipt" (G35). Null when the child exited cleanly or said nothing.
@@ -897,13 +978,27 @@ export function childExitReason(code: number | null | undefined, stderr: string 
 
 /** Terminal HTTP status is machine evidence; prose/network errors do not grant replay. */
 const runtimeHttpRefusals = new WeakMap<RunnerFailure, number>();
-export function runtimeHttpFailure(status: number, runtime: string, provider: string): RunnerFailure | null {
-  const kind = status === 401 ? "auth" : status === 429 ? "quota" : status === 403 ? "refused" : null;
+export function runtimeHttpFailure(status: number, runtime: string, provider: string, retryAfter?: string | null): RunnerFailure | null {
+  // 429 is request throttling, not an exhausted plan: "rate_limit" (a plan verdict arrives as its own typed code).
+  const kind = status === 401 ? "auth" : status === 429 ? "rate_limit" : status === 403 ? "refused" : null;
   if (!kind) return null;
+  const hint = status === 429 ? httpRetryAfterHint(retryAfter) : undefined;
   const failure: RunnerFailure = { kind, runtime, source: "marker", providerCode: `http_${status}`,
-    message: `${provider} API returned HTTP ${status}.` };
+    message: `${provider} API returned HTTP ${status}.`, ...(hint ? { retryAfterHint: hint } : {}) };
   runtimeHttpRefusals.set(failure, status);
   return failure;
+}
+
+/**
+ * An HTTP Retry-After value as a RunnerFailure.retryAfterHint: seconds become an ISO time, an HTTP date is kept as ISO.
+ * Anything else is dropped (the provider's header, never prose).
+ */
+export function httpRetryAfterHint(value: string | null | undefined, now = Date.now()): string | undefined {
+  const text = String(value ?? "").trim();
+  if (!text) return undefined;
+  if (/^\d{1,7}$/.test(text)) return new Date(now + Number(text) * 1_000).toISOString();
+  const at = Date.parse(text);
+  return Number.isFinite(at) ? new Date(at).toISOString() : undefined;
 }
 
 /** Only this process's actual HTTP rejection factory can prove no model work. */
@@ -912,7 +1007,7 @@ export function runtimeFailureIsClosedHttpRefusal(failure: RunnerFailure | null 
 }): boolean {
   if (!failure || evidence.nativeActivity !== false || evidence.aborted !== false || evidence.text !== "") return false;
   const status = runtimeHttpRefusals.get(failure);
-  const kind = status === 401 ? "auth" : status === 403 ? "refused" : status === 429 ? "quota" : null;
+  const kind = status === 401 ? "auth" : status === 403 ? "refused" : status === 429 ? "rate_limit" : null;
   if (!kind || failure.kind !== kind || failure.source !== "marker" || failure.providerCode !== `http_${status}`) return false;
   const usage = evidence.observedUsage;
   return usage === undefined || (usage !== null && usage.inputTokens === 0 && usage.outputTokens === 0
@@ -960,8 +1055,14 @@ export function runnerFailureFromError(error: unknown, runtime: string): RunnerF
       providerCode: error.code,
     };
   }
-  const kind: RunnerFailureKind = /\b429\b|rate.?limit|quota|usage limit|weekly limit|credits?|resets?/i.test(message)
+  // A thrown error's own machine code (its innermost typed code, or a message that is itself a code) is its cause, kept as
+  // providerCode; prose is read only for an error that carries none (R-054, docs 31 W1).
+  const typedCode = refusalCode(error);
+  if (typedCode) return { kind: "exit", message: message.slice(0, 2_000), runtime, source: "exit", providerCode: typedCode };
+  const kind: RunnerFailureKind = /quota|usage limit|weekly limit|credits?|resets?/i.test(message)
     ? "quota"
+    : /\b429\b|rate.?limit/i.test(message)
+    ? "rate_limit"
     : /unauthori[sz]ed|authentication|not logged in|please run \/login|\blogin\b|\bsign in\b|token.*(?:expired|invalid)|\bforbidden\b/i.test(message)
       ? "auth"
       : /timed? ?out|timeout/i.test(message)

@@ -63,7 +63,8 @@ export function goalPassStopCause(stop: Pick<GoalPassStop, "reason" | "failureKi
   if (stop.failureKind === "refused" || stop.failureKind === "unsupported"
     || stop.reason === "refused" || stop.reason === "unsupported"
     || stop.reason === "context_capacity" || stop.reason === "context_measurement") return { kind: "tool_refused" };
-  if (["timeout", "unavailable", "empty", "exit"].includes(stop.failureKind)) return { kind: "runtime_unavailable" };
+  // Request throttling clears by itself: the same request can run again soon (shared/persistence-policy.ts).
+  if (["timeout", "unavailable", "empty", "exit", "rate_limit"].includes(stop.failureKind)) return { kind: "runtime_unavailable" };
   return { kind: "unknown" };
 }
 

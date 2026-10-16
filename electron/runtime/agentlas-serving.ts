@@ -45,7 +45,7 @@ function servingAdmissionTokens(text: string): number {
 }
 import type { Runner, RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
 import { schemaFallbackPromptPart, observationSystemWithSchema } from "../../shared/runtime-capabilities";
-import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
+import { cumulativeSurfaceGateText, httpRetryAfterHint, markRefusedBeforeDispatch, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { createToolLoopProgress, createToolLoopUsage, prepareMainToolLoop, runMainToolDispatch } from "./local-tool-loop";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
@@ -256,10 +256,13 @@ async function servingHttpFailure(response: Response, locale: RunnerRequest["loc
       message: locale === "ko" ? "크레딧이 부족합니다. 크레딧을 보충한 뒤 다시 시도해 주세요."
         : "You are out of credits. Top up and try again." };
   }
+  // Throttling, not an exhausted balance (that is insufficient_credits above): retried after the service's Retry-After.
   if (response.status === 429) {
-    return { kind: "quota", runtime: "agentlas", source: "marker", providerCode,
+    const retryAfterHint = httpRetryAfterHint(response.headers.get("retry-after"));
+    return { kind: "rate_limit", runtime: "agentlas", source: "marker", providerCode,
       message: locale === "ko" ? "Agentlas 모델 요청 한도에 걸렸습니다. 잠시 뒤 다시 시도해 주세요."
-        : "The Agentlas model service is rate limited. Try again shortly." };
+        : "The Agentlas model service is rate limited. Try again shortly.",
+      ...(retryAfterHint ? { retryAfterHint } : {}) };
   }
   return { kind: "exit", runtime: "agentlas", source: "marker", providerCode,
     message: locale === "ko" ? "Agentlas 모델에 연결하지 못했습니다. 잠시 뒤 다시 시도해 주세요."
@@ -380,10 +383,11 @@ async function runAgentlasServingWithTools(
   cookie: string,
   generations?: StatelessGenerationSession,
 ): Promise<RunnerResult | null> {
-  const { tools, byName, broker, approval } = await prepareMainToolLoop(req, "agentlas");
+  // Tool inventory preparation precedes every request to the service: its refusals are refusals before dispatch.
+  const { tools, byName, broker, approval } = await prepareMainToolLoop(req, "agentlas").catch((error: unknown) => { throw markRefusedBeforeDispatch(error); });
   if (tools.length < 1) {
     // A granted MCP config that yields nothing is a broken grant, not a chat turn.
-    if (req.mcpConfigPath) throw new Error("science_tool_inventory_unavailable");
+    if (req.mcpConfigPath) throw markRefusedBeforeDispatch(new Error("science_tool_inventory_unavailable"));
     return null;
   }
   const originalByAlias = new Map<string, string>();
@@ -392,7 +396,7 @@ async function runAgentlasServingWithTools(
     const name = original.length <= 64 && /^[A-Za-z0-9_-]+$/.test(original)
       ? original
       : `tool_${createHash("sha256").update(original).digest("hex").slice(0, 32)}`;
-    if (originalByAlias.has(name)) throw new Error("serving_tool_name_collision");
+    if (originalByAlias.has(name)) throw markRefusedBeforeDispatch(new Error("serving_tool_name_collision"));
     originalByAlias.set(name, original);
     return { name, description: (tool.function.description ?? original).slice(0, 4_096),
       inputSchema: tool.function.parameters };

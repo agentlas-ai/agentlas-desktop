@@ -2,7 +2,7 @@ import { currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/h
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createRuntimeUsageCollector, type ObservedTokenUsage } from "../../shared/observed-usage";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult, RunnerFailure } from "./runner";
-import { RuntimeTurnUnsettledError, runnerResultRefusedBeforeDispatch, runtimeFailureIsClosedHttpRefusal,
+import { runnerResultRefusedBeforeDispatch, runtimeFailureIsClosedHttpRefusal, unsettledTurnError,
   RUNTIME_TURN_UNSETTLED_CODE, RUNTIME_SILENT_TIMEOUT_CODE, RUNTIME_PROTOCOL_UNRECOGNIZED_CODE } from "./runner";
 import { beginInvocationUsageAttempt } from "./invocation-usage";
 import { withModelCallScope, type ModelCallRole } from "./model-call-ledger";
@@ -21,18 +21,21 @@ function observeRunnerSettlement<T>(provider: Promise<T>): Promise<T> {
 }
 
 /*
- * A provider's own typed refusal (quota/rate limit/billing, sign-in, an unsupported request, unavailable or at capacity),
- * reported as a marker with or without dispatch, is that failure: callers keep its kind and providerCode (a judgment walks
- * to its next candidate, system-agents/judgment.ts). Only an unknown terminal stays unsettled: no typed cause, the
- * unsettled code itself, a silent timeout, an unrecognized stream. A refusal that follows observed tool activity in a run
- * that had tools also stays unsettled: the tools may have acted before the refusal.
+ * A provider's own typed refusal (quota/billing, sign-in, an unsupported request, unavailable or at capacity, a policy
+ * refusal), reported as a marker with or without dispatch, is that failure: callers keep its kind and providerCode (a
+ * judgment walks to its next candidate, system-agents/judgment.ts; the no-tools lane's own refusals such as
+ * codex_no_tools_frame_unknown are "refused"). Only an unknown terminal stays unsettled: no typed cause, the unsettled
+ * code itself, a silent timeout, an unrecognized stream, a bare exit; it keeps the result as its cause. A refusal that
+ * follows observed tool activity in a run that had tools also stays unsettled: the tools may have acted before it.
+ * Production 2026-10-15..16: 2,849 judgment calls reported runtime_turn_unsettled while the runner had returned
+ * codex_no_tools_frame_unknown (audit A7 M1).
  */
-const TYPED_PROVIDER_FAILURE_KINDS: ReadonlySet<RunnerFailure["kind"]> = new Set(["quota", "auth", "unsupported", "unavailable"]);
+const TYPED_PROVIDER_FAILURE_KINDS: ReadonlySet<RunnerFailure["kind"]> = new Set(["quota", "rate_limit", "auth", "unsupported", "unavailable", "refused"]);
 const UNKNOWN_TERMINAL_CODES: ReadonlySet<string> = new Set([RUNTIME_TURN_UNSETTLED_CODE, RUNTIME_SILENT_TIMEOUT_CODE, RUNTIME_PROTOCOL_UNRECOGNIZED_CODE]);
 function typedProviderFailure(failure: RunnerFailure | undefined, toolActivity: boolean, request: RunnerRequest): boolean {
-  return !!failure && failure.source === "marker" && TYPED_PROVIDER_FAILURE_KINDS.has(failure.kind)
-    && !UNKNOWN_TERMINAL_CODES.has(failure.providerCode ?? "")
-    && (!toolActivity || request.untrustedNoTools === true || request.judgmentOnly === true);
+  if (!failure || failure.source !== "marker" || UNKNOWN_TERMINAL_CODES.has(failure.providerCode ?? "")) return false;
+  const toolless = request.untrustedNoTools === true || request.judgmentOnly === true;
+  return TYPED_PROVIDER_FAILURE_KINDS.has(failure.kind) && (!toolActivity || toolless);
 }
 
 const usageOnError = new WeakMap<object, ReturnType<typeof createRuntimeUsageCollector>>();
@@ -144,7 +147,10 @@ export async function runObservedRunner(
     // never an unknown dispatch.
     if (result.ownerControlTerminal !== "completed" && !httpRefusal && !runnerResultRefusedBeforeDispatch(result)
       && !typedProviderFailure(result.failure, toolActivityObserved, request)) {
-      throw new RuntimeTurnUnsettledError("runtime", request.locale);
+      // Unknown effect, but never anonymous: the runtime kind, the returned result (typed failure, session) as the cause
+      // and the delivery the runner observed survive (audit A7 M1 dropped all three and named the runtime "runtime").
+      throw unsettledTurnError({ runtimeKind: nativeRuntimeKind ?? result.failure?.runtime ?? "runtime", locale: request.locale,
+        cause: result, turnDelivery: result.turnDelivery });
     }
     invocationAttempt.complete(observedUsage);
     nativeReceipts.set(measuredResult, receipts);

@@ -156,7 +156,7 @@ export function automationRuntimeFailureCause(runId: string): FailureCause | nul
         return { kind: "quota", retryAfterAt: at };
       }
       if (kind === "auth") return { kind: "auth" };
-      if (["timeout", "unavailable", "empty", "exit"].includes(kind)) return { kind: "runtime_unavailable" };
+      if (["timeout", "unavailable", "empty", "exit", "rate_limit"].includes(kind)) return { kind: "runtime_unavailable" };
     }
   } catch {
     /* 원장을 못 읽으면 원인을 지어내지 않는다 */

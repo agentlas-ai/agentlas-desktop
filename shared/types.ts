@@ -5147,7 +5147,8 @@ export interface McpInvocationEvent {
 /** Host-observed provider failure. The reset time is parsed from a runner hint,
  * never inferred from the human-readable error message. */
 export interface InvocationRuntimeFailure {
-  kind: "quota" | "auth" | "refused";
+  /** "rate_limit": transient throttling (retried after retryAfterAt); "quota": an exhausted plan or balance. */
+  kind: "quota" | "rate_limit" | "auth" | "refused";
   source: "marker" | "exit" | "heuristic";
   providerCode?: string;
   retryAfterAt?: string;

@@ -1,7 +1,7 @@
 import type { McpInvocationRequest } from "../../shared/types";
 import type { InvocationAdmissionIdentity } from "../store/invocation-admissions";
 import { handoffNativePreparation, type NativePreparationLifetime } from "../runtime/native-preparation-lifetime";
-import { RuntimeTurnUnsettledError } from "../runtime/runner";
+import { preDispatchRefusal, RuntimeTurnUnsettledError } from "../runtime/runner";
 
 export type NativeOneStartCheckpointKind = "preparation.handoff" | "judge" | "team.prepare" | "team.attachments-required" | "briefing.prepare" | "memory.prepare" | "attachments.claim" | "team.claim" | "briefing.claim" | "memory.claim" | "images.transfer" | "team.fail-start" | "attachments.release";
 export interface NativeOneStartBinding { readonly chatId: string; readonly runId: string; readonly admission: InvocationAdmissionIdentity }
@@ -94,7 +94,11 @@ export async function driveNativeOneStart<T>(steps: Generator<NativeOneStartChec
       if (!terminalCleanup) signal.throwIfAborted();
     } catch (cause) {
       await lifetime.awaitRetained();
-      const error = signal.aborted && !terminalCleanup ? signal.reason : localPorts.has(port) ? cause : new RuntimeTurnUnsettledError("native-one-claim");
+      // A checkpoint precedes every provider send, so its refusal is that refusal on both hosts: the remote (daemon) port
+      // keeps the innermost machine code Main signed back (attachments.claim -> native_main_preparation_binding_changed),
+      // exactly as the same-process port rethrows it. Wrapping it as an unsettled turn made the daemon report
+      // runtime_turn_unsettled for a start that never dispatched (docs 31 W1, audit A7 M6).
+      const error = signal.aborted && !terminalCleanup ? signal.reason : localPorts.has(port) ? cause : preDispatchRefusal(cause, step.value.kind, "native_one_checkpoint_refused");
       if (error instanceof Error && error !== cause) {
         Object.defineProperty(error, "cause", { value: cause });
         checkpointFailures.set(error, step.value.kind);

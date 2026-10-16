@@ -129,7 +129,8 @@ import {
 import { stripStrayProtocolTokens } from "../../shared/protocol-token-strip";
 import { advanceMainLivePartial, markInterruptedPartial } from "./interrupted-partial";
 import { untrustedRuntimeFailurePayload } from "../runtime/untrusted-error";
-import { validatedRunnerNativeControlState, RUNTIME_TURN_UNSETTLED_CODE, RuntimeTurnUnsettledError } from "../runtime/runner";
+import { validatedRunnerNativeControlState, markRefusedBeforeDispatch, outwardFailureCode, preDispatchRefusal, RuntimeTurnUnsettledError } from "../runtime/runner";
+import { innermostTypedCode } from "../../shared/turn-settlement";
 import {
   getInvocationRunReceipt,
   getLatestInvocationRunReceipt,
@@ -1075,10 +1076,14 @@ function immutableWorkspaceBinding(
 /** Typed run event that keeps a refused start's cause next to its outward ledger code (no prose, no paths). */
 export const INVOCATION_START_REFUSAL_EVENT = "invocation_start_refusal";
 
-/** Admission ledger reason for a proven pre-dispatch refusal: the thrown machine code, never prose. */
+/**
+ * Admission ledger reason for a proven pre-dispatch refusal: the innermost machine code of the thrown cause chain
+ * (shared/turn-settlement.ts typedCodeChain), never prose and never a wrapper's generic code; Main and the daemon record
+ * the same code for the same refusal.
+ */
 export function preDispatchRefusalReasonCode(error: unknown): string {
   const identifier = /^[a-z][a-z0-9_-]{0,79}$/;
-  const own = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+  const own = innermostTypedCode(error);
   if (typeof own === "string" && identifier.test(own)) return own;
   const message = error instanceof Error ? error.message.trim() : "";
   if (identifier.test(message)) return message;
@@ -1894,7 +1899,8 @@ export class InvocationService {
       if (chatBusy) { refusedBeforeStart=true; throw Object.assign(new Error("invocation_chat_busy"),{code:"invocation_chat_busy"}); }
       // The other process (Desktop <-> background service) is running a turn of this chat: one host per chat at a time.
       if (otherHostBusy) { refusedBeforeStart=true; throw Object.assign(new Error(CHAT_BUSY_OTHER_HOST_CODE),{code:CHAT_BUSY_OTHER_HOST_CODE}); }
-      if (!this.acceptingStarts) throw new Error("desktop_execution_admission_closed");
+      // Shutdown closed admission before anything was authorized or read: a definite pre-start refusal, like a busy chat.
+      if (!this.acceptingStarts) { refusedBeforeStart=true; throw Object.assign(new Error("desktop_execution_admission_closed"),{code:"desktop_execution_admission_closed"}); }
       diagnosticPhase="native-ingress-authorize";
       const admission=await withNativePreparationLifetime(lifetime,()=>runNativePreparation(()=>owned.authorize(controller.signal)));
       await lifetime.awaitRetained();owned.assertCurrent();controller.signal.throwIfAborted();
@@ -1912,9 +1918,12 @@ export class InvocationService {
     } catch(cause) {
       status=controller.signal.aborted?"cancelled":"uncertain";
       if(controller.signal.aborted) throw controller.signal.reason;
-      if(refusedBeforeStart){ status="cancelled"; throw cause; }
+      if(refusedBeforeStart){ status="cancelled"; throw markRefusedBeforeDispatch(cause); }
       this.recordStartRefusalCause(binding.runId,binding.chatId,cause,{phase:diagnosticPhase});
-      const error=new RuntimeTurnUnsettledError("native-ingress");Object.defineProperty(error,"cause",{value:cause});
+      // Every failure here precedes handoff, so nothing was dispatched: the refusal keeps its innermost machine code and
+      // turnDelivery "not-dispatched", exactly as the Main-local start rethrows it (docs 31 W1, audit A7 M7). Wrapping it
+      // as runtime_turn_unsettled ("may have acted") hid the real cause of the daemon's refused starts.
+      const error=preDispatchRefusal(cause,diagnosticPhase,"native_ingress_refused");
       this.logNativePreparationFailure(binding.runId,binding.chatId,error,{phase:diagnosticPhase,agentAppMode:diagnosticAgentAppMode});
       throw error;
     } finally {
@@ -2033,7 +2042,11 @@ export class InvocationService {
         if (!controller.signal.aborted) this.recordStartRefusalCause(nativeRunId, req.chatId, error, { phase: "native-prepared-start", reasonCode, startBoundaryCrossed: false });
       }
       if (boundary.crossed && !boundary.handedOff && boundary.runId) {
-        tryRecordRunEvent({ runId: boundary.runId, chatId: req.chatId, kind: "invoke_threw", payload: { errorCode: controller.signal.aborted ? "native_preparation_cancelled" : RUNTIME_TURN_UNSETTLED_CODE, providerDispatched: false } });
+        // The refusal's own innermost code with its delivery fact; "providerDispatched:false" next to runtime_turn_unsettled
+        // contradicted itself (audit A7 M9). native-main-no-brain.ts reads this row.
+        tryRecordRunEvent({ runId: boundary.runId, chatId: req.chatId, kind: "invoke_threw", payload: controller.signal.aborted
+          ? { errorCode: "native_preparation_cancelled", providerDispatched: false }
+          : { errorCode: preDispatchRefusalReasonCode(error), providerDispatched: false, turnDelivery: "not-dispatched" } });
         // Keep the slot and custody until exact Main preparation/claim quiescence.
       }
       // Unknown remote claims do not release custody or restore original capabilities.
@@ -2514,6 +2527,8 @@ export class InvocationService {
       }
       return started;
     } catch (error) {
+      // Nothing was handed to a runtime: the same typed fact the daemon's native ingress reports for this refusal.
+      if (!startBoundary.handedOff && !(error instanceof RuntimeTurnUnsettledError)) markRefusedBeforeDispatch(error);
       if (startBoundary.crossed && !startBoundary.handedOff && startBoundary.runId) {
         this.releaseUndispatchedStart(startBoundary.runId, req.chatId, error, startBoundary.cleanups ?? []);
       }
@@ -5592,7 +5607,8 @@ export class InvocationService {
               ...untrustedRuntimeFailurePayload(),
               ...(terminalDisposition.errorCode ? { code: terminalDisposition.errorCode } : {}),
             }
-          : { code: terminalDisposition.errorCode ?? "invoke-threw", message: rawMessage };
+          // The thrown failure's own machine code; the wrapper code only when it carries none (audit A7 M10).
+          : { code: terminalDisposition.errorCode ?? outwardFailureCode(error) ?? "invoke-threw", message: rawMessage };
         const message = safeFailure.message;
         tryRecordRunEvent({
           runId,
@@ -5819,7 +5835,9 @@ export class InvocationService {
         kind: "invoke_threw",
         chatId,
         agentId: this.activeRuns.get(runId)?.actualAgentId,
-        payload: { errorCode: "invoke-start-failed", errorMessage: message.slice(0, 500), providerDispatched: false },
+        // The refusal's own machine code, not a wrapper the AGI monitor had to re-parse from the message (audit A7 M10).
+        payload: { errorCode: outwardFailureCode(error) ?? "invoke-start-failed", errorMessage: message.slice(0, 500), providerDispatched: false,
+          turnDelivery: "not-dispatched" },
       });
     }
     this.settlingRuns.delete(runId);

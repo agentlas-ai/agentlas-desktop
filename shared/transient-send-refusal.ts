@@ -39,6 +39,11 @@ const TRANSIENT_CODES: ReadonlySet<string> = new Set([
   "native_gui_public_original_channel_required",
   "native_gui_daemon_discovery_unavailable",
   "native_gui_capacity_reached",
+  // The background service lost (or had not yet enrolled) its signed checkpoint channel to the app window mid-start.
+  // Its start refusal now keeps this innermost code instead of the generic runtime_turn_unsettled (docs 31 W1).
+  "native_auth_channel_lost",
+  "native_auth_checkpoint_busy",
+  "native_auth_checkpoint_unenrolled",
   // The ledger row the native ingress writes for any refusal before start. The real cause is not in it.
   "native_ingress_rejected_before_start",
 ]);

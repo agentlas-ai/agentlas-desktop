@@ -1,4 +1,6 @@
 import type { RunnerFailure } from "../runtime/runner";
+import { parseRetryHint } from "../runtime/runtime-cooldown";
+import { decideTurnSettlement } from "../../shared/turn-settlement";
 
 /**
  * What a failed continuation pass means for the goal that is driving it.
@@ -76,6 +78,19 @@ export function passFailureVerdict(
        * with the runtime's own reset hint preserved verbatim rather than a number we invented.
        */
       return { action: "pause", reason: "usage_limited", retryAfterMs: 0, ...hint };
+    case "rate_limit": {
+      /*
+       * Request throttling clears by itself. The one settlement decision (shared/turn-settlement.ts) bounds the retry and
+       * waits at least the provider's Retry-After; past that bound the goal parks like a usage limit, hint kept verbatim.
+       */
+      const now = Date.now();
+      const resetAt = parseRetryHint(failure.retryAfterHint, now);
+      const settlement = decideTurnSettlement({ outcome: "failed", kind: "rate_limit", unattended: true,
+        attempt: transientAttemptsSoFar, resumeBudget: 0, ...(resetAt !== null ? { retryAfterMs: resetAt - now } : {}) });
+      return settlement.action === "retry"
+        ? { action: "retry", reason: "transient", retryAfterMs: settlement.delayMs, ...hint }
+        : { action: "pause", reason: "usage_limited", retryAfterMs: 0, ...hint };
+    }
     case "auth":
       return { action: "block", reason: "unauthorized", retryAfterMs: 0, ...hint };
     case "refused":

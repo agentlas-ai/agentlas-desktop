@@ -327,7 +327,8 @@ import {
   UNATTENDED_NO_ASK_DIRECTIVE,
   MOBILE_DURABLE_ASK_DIRECTIVE,
 } from "../runtime/runner";
-import { validatedRunnerNativeControlState } from "../runtime/runner";
+import { outwardFailureCode, unsettledTurnError, validatedRunnerNativeControlState } from "../runtime/runner";
+import { decideTurnSettlement, isTypedCode } from "../../shared/turn-settlement";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import {
   effortForSelectedModel,
@@ -871,8 +872,8 @@ class InvocationRunnerFailureError extends Error {
 
 function invocationRuntimeFailure(error: unknown, now = Date.now()): InvocationRuntimeFailure | null {
   const failure = InvocationRunnerFailureError.providerFailure(error);
-  if (!failure || !["quota", "auth", "refused"].includes(failure.kind)) return null;
-  const reset = failure.kind === "quota" ? parseRetryHint(failure.retryAfterHint, now) : null;
+  if (!failure || !["quota", "rate_limit", "auth", "refused"].includes(failure.kind)) return null;
+  const reset = failure.kind === "quota" || failure.kind === "rate_limit" ? parseRetryHint(failure.retryAfterHint, now) : null;
   return {
     kind: failure.kind as InvocationRuntimeFailure["kind"],
     source: failure.source,
@@ -908,12 +909,20 @@ function invocationFailure(
     ?? InvocationRunnerFailureError.readToolScopeFailure(error);
   if (capabilityFailure) return { ...capabilityFailure, ...(runtimeFailure ? { runtimeFailure } : {}) };
   const raw = error instanceof Error ? error.message : String(error);
+  /*
+   * The outward code is the failure's innermost machine code (shared/turn-settlement.ts): the typed runner failure's
+   * provider code, else the thrown error's own code, its cause chain's, or a message that is itself a code. The caller's
+   * fallback code is used only when the failure carries none (docs 31 W1, audit A7 M11: the AGI monitor filed 58
+   * incidents of unknown cause because runner-failed replaced codes such as goal_episode_admission_missing).
+   */
+  const typedCode = (isTypedCode(typedFailure?.providerCode) ? typedFailure!.providerCode : undefined) ?? outwardFailureCode(error);
   if (runtimeFailure?.kind === "auth" || runtimeFailure?.kind === "refused") {
-    return { code: runtimeFailure.kind === "auth" ? "runtime_auth" : "runtime_refused", message: raw, runtimeFailure };
+    return { code: typedCode ?? (runtimeFailure.kind === "auth" ? "runtime_auth" : "runtime_refused"), message: raw, runtimeFailure };
   }
-  if (error && typeof error === "object" && "code" in error && error.code === "mcp-goal-tool-scope-changed") {
-    return { code: error.code, message: raw };
+  if (typedCode && runtimeFailure?.kind !== "quota") {
+    return { code: typedCode, message: raw, ...(runtimeFailure ? { runtimeFailure } : {}) };
   }
+  // Prose is read only for an untyped throw (no machine code anywhere in it): the legacy quota wording.
   const quota = runtimeFailure?.kind === "quota" ? runtimeFailure.kind : /\bquota\b|hit your weekly limit|usage limit/i.test(raw)
     ? raw.match(/^([a-z0-9-]+) runtime quota:/i)?.[1] ?? null
     : undefined;
@@ -927,7 +936,7 @@ function invocationFailure(
         : getOneProfile().timeZone) ?? undefined;
     } catch { /* Display-only fallback uses the local time zone. */ }
     return {
-      code: "runtime_quota",
+      code: typedCode ?? "runtime_quota",
       ...(runtimeFailure ? { runtimeFailure } : {}),
       message: runtimeQuotaFailureMessage({ runtime: who, locale: pickLocale(req),
         retryAfterAt: runtimeFailure?.retryAfterAt, unattended: isUnattendedExecution(executionContext), timeZone }),
@@ -6709,6 +6718,8 @@ async function runMcpInvocationInContext(
       const recoveryElapsedMs = () => (recoveryStartedAt == null ? 0 : Date.now() - recoveryStartedAt);
       let recoveryRetryEvents = 0;
       let attemptCount = 0;
+      /** Same-runtime retries the settlement decision spent on request throttling (reset when the runtime changes). */
+      let sameRuntimeRetries = 0;
       let originalFailure: RunnerFailure | null = null;
       let terminalNoticeEmitted = false;
       const currentOwnerPrompt = runnerTurnContextSource(request)?.userPrompt ?? request.userPrompt;
@@ -6914,9 +6925,9 @@ async function runMcpInvocationInContext(
             const observedUsage = attemptEvents.observedUsage(historyReturnedUsage??observedRunnerUsage(error));
             persistGoalUsage(observedUsage);
             if (runtimeFailureBlocksReplay(runnerFailureFromError(error, selectedRuntime.kind))) throw error;
-            const unsettled = new RuntimeTurnUnsettledError(selectedRuntime.kind, locale);
-            unsettled.cause = { error, observedUsage };
-            throw unsettled;
+            // Unknown effect after dispatch, but never an anonymous one: the thrown error stays the standard cause (its
+            // innermost code is still readable) with the delivery it carried (docs 31 W1, audit A7 M4).
+            throw unsettledTurnError({ runtimeKind: selectedRuntime.kind, locale, cause: error });
           }
           if (!directRuntimeFallbackAllowed || signal?.aborted) {
             persistGoalUsage(attemptEvents.observedUsage(historyReturnedUsage??observedRunnerUsage(error)));
@@ -6972,6 +6983,40 @@ async function runMcpInvocationInContext(
         // First failure: this is when recovery actually begins.
         if (recoveryStartedAt == null) recoveryStartedAt = Date.now();
         originalFailure = originalFailure ?? failed;
+        /*
+         * The one settlement decision (shared/turn-settlement.ts) chooses between a bounded same-runtime retry (request
+         * throttling that provably did no work), the role pool's next candidate, and surfacing this failure as is. It
+         * reads typed facts only; a closed HTTP refusal is a provider rejection ("rejected"): no model work.
+         */
+        const resetAt = parseRetryHint(failed.retryAfterHint, Date.now());
+        const settlement = decideTurnSettlement({
+          outcome: "failed",
+          delivery: attemptRefusedBeforeDispatch ? "not-dispatched" : runtimeTerminalEvidence.closedHttpRefusal ? "rejected" : result.turnDelivery,
+          kind: failed.kind, providerCode: failed.providerCode,
+          ...(resetAt !== null ? { retryAfterMs: Math.max(0, resetAt - Date.now()) } : {}),
+          unattended: isUnattendedExecution(executionContext), attempt: sameRuntimeRetries, resumeBudget: 0,
+          effectsObserved: !attemptEvents.creditRetrySafe() || Boolean(result.text.trim()),
+          fallbackAvailable: true,
+        });
+        if (settlement.action === "surface") return result;
+        if (settlement.action === "retry" && attemptCount < DIRECT_RUNTIME_RECOVERY_MAX_ATTEMPTS
+          && recoveryElapsedMs() + settlement.delayMs < DIRECT_RUNTIME_RECOVERY_MAX_ELAPSED_MS) {
+          sameRuntimeRetries += 1;
+          const seconds = Math.max(1, Math.round(settlement.delayMs / 1000));
+          const koRetry = `${active.kind} 요청 한도에 걸려 ${seconds}초 뒤 같은 모델로 다시 보냅니다.`;
+          const enRetry = `${active.kind} is rate limited; sending again on the same model in ${seconds}s.`;
+          runnerEvents.onNotice({ level: "warning", code: "runtime-rate-limit-retry", message: locale === "ko" ? koRetry : enRetry,
+            i18n: { ko: koRetry, en: enRetry },
+            details: JSON.stringify({ runtime: active.kind, providerCode: failed.providerCode ?? null, attempt: sameRuntimeRetries,
+              delayMs: settlement.delayMs, reason: settlement.reason }) });
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(() => { signal?.removeEventListener("abort", stop); resolve(); }, settlement.delayMs);
+            const stop = (): void => { clearTimeout(timer); resolve(); };
+            signal?.addEventListener("abort", stop, { once: true });
+          });
+          throwIfInvocationAborted(signal, locale);
+          continue;
+        }
         // A paid request must not replay work that has already produced output
         // or run tools. Only an explicit provider quota rejection can admit it.
         const allowCreditFallback = failed.kind === "quota" && failed.source === "marker"
@@ -7044,6 +7089,7 @@ async function runMcpInvocationInContext(
         });
         active = fallback;
         picked = fallbackPicked;
+        sameRuntimeRetries = 0;
         const fallbackRequestBase = runnerRequestForRuntime(active, picked, currentOwnerPrompt);
         requestForRuntime = carryRunnerTurnContext(fallbackRequestBase, {
           ...fallbackRequestBase,
@@ -7180,9 +7226,8 @@ async function runMcpInvocationInContext(
     const passLoopStartedAtMs = Date.now();
     let result = await invokeCurrentRuntime(activeRunnerReq, hostNoticePurpose);
     if (result.ownerControlTerminal !== "completed" && !runtimeTerminalEvidence.closedHttpRefusal && !runtimeTerminalEvidence.locallyRejected) {
-      const error = new RuntimeTurnUnsettledError(active.kind, locale);
-      error.cause = result;
-      throw error;
+      // The result (typed failure, session, delivery) is the cause; the provider's words lead the message (audit A7 M5).
+      throw unsettledTurnError({ runtimeKind: active.kind, locale, cause: result, turnDelivery: result.turnDelivery });
     }
     /*
      * ★런타임이 표식으로 실패를 말했으면 그 text는 답이 아니다 — 거절 고지문이다.
@@ -7449,8 +7494,7 @@ async function runMcpInvocationInContext(
       const toolCallsBeforePass = completedToolCalls;
       result = await invokeCurrentRuntime(activeRunnerReq, "goal-continuation");
       if (result.ownerControlTerminal !== "completed" && !runtimeTerminalEvidence.closedHttpRefusal && !runtimeTerminalEvidence.locallyRejected) {
-        const error = new RuntimeTurnUnsettledError(active.kind, locale);
-        error.cause = result;
+        const error = unsettledTurnError({ runtimeKind: active.kind, locale, cause: result, turnDelivery: result.turnDelivery });
         throw error;
       }
       // A failed pass is retried or handed on below; it is not an idle pass.

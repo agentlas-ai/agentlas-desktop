@@ -698,13 +698,13 @@ function sameRuntimeIdentity(left: RuntimeStatus, right: RuntimeStatus): boolean
     && left.acpAgentId === right.acpAgentId;
 }
 
-/** Quota/auth is provider-wide; other failures stay scoped to one runtime/model pair. */
+/** Quota/rate-limit/auth is provider-wide; other failures stay scoped to one runtime/model pair. */
 export function runtimeFailureSharesProviderDomain(
   candidate: RuntimeStatus,
   failed: RuntimeStatus,
   failure: Pick<RunnerFailure, "kind">,
 ): boolean {
-  if (failure.kind === "auth" || failure.kind === "quota") {
+  if (failure.kind === "auth" || failure.kind === "quota" || failure.kind === "rate_limit") {
     return candidate.kind === failed.kind && candidate.backend === failed.backend;
   }
   // A transport/exit failure on one model must still allow the next model

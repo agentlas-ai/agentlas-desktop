@@ -1,6 +1,6 @@
 import type { HostActionProposal, HostModelSnapshot } from "./host-action-loop";
 import type { Runner, RunnerEvents, RunnerRequest } from "./runtime/runner";
-import { RuntimeTurnUnsettledError, runtimeFailureIsClosedHttpRefusal } from "./runtime/runner";
+import { runtimeFailureIsClosedHttpRefusal, unsettledTurnError } from "./runtime/runner";
 
 /** Runtime families whose Main-owned runner has a verified zero-tool branch. */
 export type HostProposalRuntimeKind = "byok" | "agentlas-local" | "lmstudio" | "mlx";
@@ -76,7 +76,8 @@ export function createHostActionModelStep(options: HostActionModelStepOptions):
     if (result.ownerControlTerminal !== "completed" && !runtimeFailureIsClosedHttpRefusal(result.failure, {
       text: result.text, nativeActivity, aborted: signal.aborted, observedUsage: result.observedUsage,
     })) {
-      throw new RuntimeTurnUnsettledError(options.runtimeKind, options.locale);
+      // The returned result (typed failure, session, delivery) stays the cause of the unknown effect (audit A7 M5).
+      throw unsettledTurnError({ runtimeKind: options.runtimeKind, locale: options.locale, cause: result, turnDelivery: result.turnDelivery });
     }
     if (toolObserved) throw new Error("host-action-model-tool-observed");
     if (result.failure) throw new Error(`host-action-model-failed:${result.failure.kind}`);

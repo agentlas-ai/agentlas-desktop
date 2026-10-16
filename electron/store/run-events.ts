@@ -101,11 +101,11 @@ interface FailureEventRow {
 function boundedRuntimeFailure(value: unknown): InvocationRuntimeFailure | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const candidate = value as Record<string, unknown>;
-  if (candidate.kind !== "quota" && candidate.kind !== "auth" && candidate.kind !== "refused") return undefined;
+  if (candidate.kind !== "quota" && candidate.kind !== "rate_limit" && candidate.kind !== "auth" && candidate.kind !== "refused") return undefined;
   if (candidate.source !== "marker" && candidate.source !== "exit" && candidate.source !== "heuristic") return undefined;
   const providerCode = typeof candidate.providerCode === "string" && /^[a-zA-Z0-9_.-]{1,96}$/.test(candidate.providerCode)
     ? candidate.providerCode : undefined;
-  const retryAfterAt = candidate.kind === "quota" && typeof candidate.retryAfterAt === "string"
+  const retryAfterAt = (candidate.kind === "quota" || candidate.kind === "rate_limit") && typeof candidate.retryAfterAt === "string"
     && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(candidate.retryAfterAt)
     && Number.isFinite(Date.parse(candidate.retryAfterAt))
     ? candidate.retryAfterAt : undefined;

@@ -111,7 +111,7 @@ function closedEffectCoverage(s: AttemptState): boolean {
   // This is request rejection, not an OS descendant or global effect-zero proof.
   const apiRejected = s.selected?.kind === "byok" && s.failure?.runtime === "byok"
     && ((s.failure.kind === "auth" && s.failure.providerCode === "http_401")
-      || (s.failure.kind === "quota" && s.failure.providerCode === "http_429"));
+      || ((s.failure.kind === "rate_limit" || s.failure.kind === "quota") && s.failure.providerCode === "http_429"));
   return (apiRejected && s.nativeDispatches === 0) || (s.nativeDispatches === 1 && [...s.coverage.values()].some(scope => !scope.preparation && !scope.child
     && (scope.adapter === s.selected?.kind || (scope.adapter === "claude" && s.selected?.kind === "claude-code"))));
 }

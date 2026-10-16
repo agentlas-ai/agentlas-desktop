@@ -18,7 +18,7 @@ import { assertScienceRecoveryRequest } from "../science-host/recovery-authority
 //  - 압축: 모델 컨텍스트 윈도우 초과 시 compactHistory로 과거 대화를 다이제스트로 접음
 import { readApiKey } from "../secrets/vault";
 import type { Runner, RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
-import { cumulativeSurfaceGateText, RuntimeTurnUnsettledError, runtimeHttpFailure, workforceZeroToolsEnforcement, wrapSystemPrompt } from "./runner";
+import { cumulativeSurfaceGateText, markRefusedBeforeDispatch, RuntimeTurnUnsettledError, runtimeHttpFailure, workforceZeroToolsEnforcement, wrapSystemPrompt } from "./runner";
 import { applyPlannedMessageBreakpoints, cachedTokensFromGeminiUsage } from "./prompt-cache";
 import { cacheCapabilityFor, planCache, segmentOf, type CachePlan, type CacheSegment } from "./cache-planner";
 import { readByokWire } from "./byok-wire";
@@ -508,7 +508,8 @@ async function runAnthropicMessagesInner(
    *
    * 무도구 격리 실행(Agent App)은 도구를 받지 않는다 — 그 계약이 이 런타임의 존재 이유다.
    */
-  const { tools, byName, broker, approval } = await prepareMainToolLoop(req, "byok");
+  // Tool inventory preparation precedes every provider request: its refusal is a refusal before dispatch (docs 31 W1).
+  const { tools, byName, broker, approval } = await prepareMainToolLoop(req, "byok").catch((error: unknown) => { throw markRefusedBeforeDispatch(error); });
   const toolsEnabled = tools.length > 0;
   const anthropicTools = tools.map((tool) => ({
     name: tool.function.name,
@@ -642,7 +643,7 @@ async function runAnthropicMessagesInner(
         return assertCurrentHistoryRunnerResult({ text: acc.trim(), failure: byokContextFailure(req), ...(observedUsage ? { observedUsage } : {}),
           workforcePermissionEnforcement: broker?.finish(false) });
       }
-      const failure = runtimeHttpFailure(resp.status, "byok", "Anthropic");
+      const failure = runtimeHttpFailure(resp.status, "byok", "Anthropic", resp.headers.get("retry-after"));
       if (failure) {
         const observedUsage = measuredUsage.total();
         return assertCurrentHistoryRunnerResult({ text: acc.trim(), failure, ...(observedUsage ? { observedUsage } : {}),
@@ -941,7 +942,7 @@ function makeAnthropicCompatByok(backend: ByokBackend): Runner {
   return async (req, events) => {
     assertScienceRecoveryRequest(req, "byok", backend);
     const preset = anthropicCompatProvider(backend);
-    if (!preset) throw new Error(`Unknown Anthropic-compatible backend: ${backend}`);
+    if (!preset) throw markRefusedBeforeDispatch(new Error(`Unknown Anthropic-compatible backend: ${backend}`));
     const key = await readApiKey(backend);
     if (!key) {
       return byokCredentialMissing(
@@ -1189,7 +1190,7 @@ export const runGoogleByok: Runner = async (
   contents.push({ role: "user", parts: lastParts });
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(key)}`;
-  const { tools, byName, broker, approval } = await prepareMainToolLoop(req, "byok");
+  const { tools, byName, broker, approval } = await prepareMainToolLoop(req, "byok").catch((error: unknown) => { throw markRefusedBeforeDispatch(error); });
   const functionDeclarations = tools.map((tool) => ({
     name: tool.function.name,
     ...(tool.function.description ? { description: tool.function.description } : {}),
@@ -1241,8 +1242,8 @@ export const runGoogleByok: Runner = async (
   const progress = createToolLoopProgress("byok", req, events);
   /** Monotonic across every SSE event in this provider invocation. */
   let responseIndex = 0;
-  const httpFailureResult = (status: number): RunnerResult | null => {
-    const failure = runtimeHttpFailure(status, "byok", "Google");
+  const httpFailureResult = (status: number, retryAfter?: string | null): RunnerResult | null => {
+    const failure = runtimeHttpFailure(status, "byok", "Google", retryAfter);
     if (!failure) return null;
     const observedUsage = measuredUsage.total();
     return assertCurrentHistoryRunnerResult({ text: acc.trim(), failure, ...(observedUsage ? { observedUsage } : {}),
@@ -1336,7 +1337,7 @@ export const runGoogleByok: Runner = async (
       }));
     }
     if (!resp.ok) {
-      const terminal = httpFailureResult(resp.status);
+      const terminal = httpFailureResult(resp.status, resp.headers.get("retry-after"));
       if (terminal) return terminal;
       // HTTP 413: the request is over the endpoint's size limit. A typed capacity refusal, not a tools problem to retry around.
       if (resp.status === 413) {
@@ -1392,7 +1393,7 @@ export const runGoogleByok: Runner = async (
       }));
     }
     if (!resp.ok) {
-      const terminal = httpFailureResult(resp.status);
+      const terminal = httpFailureResult(resp.status, resp.headers.get("retry-after"));
       if (terminal) return terminal;
       const errText = await resp.text().catch(() => "");
       throw new Error(`Google API ${resp.status}: ${errText.slice(0, 300)}`);

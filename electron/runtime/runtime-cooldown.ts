@@ -28,7 +28,9 @@ const DEFAULT_COOLDOWN_MS = 10 * 60_000;
 /** 런타임이 알려준 시각이라도 이보다 길게는 믿지 않는다(“24시간 롤링”류를 그대로 받으면 하루가 잠긴다). */
 const MAX_COOLDOWN_MS = 60 * 60_000;
 /** 한도/인증만 시한부다. refused·empty·exit 는 요청 자체의 문제일 수 있어 런타임을 잠그지 않는다. */
-const COOLDOWN_KINDS: ReadonlySet<RunnerFailureKind> = new Set(["quota", "auth"]);
+const COOLDOWN_KINDS: ReadonlySet<RunnerFailureKind> = new Set(["quota", "rate_limit", "auth"]);
+/** Request throttling lifts by itself: without the provider's Retry-After, step aside briefly, not for ten minutes. */
+const RATE_LIMIT_DEFAULT_COOLDOWN_MS = 60_000;
 
 export interface RuntimeCooldown {
   until: number;
@@ -72,7 +74,7 @@ export function noteRuntimeFailure(
 ): RuntimeCooldown | null {
   if (!COOLDOWN_KINDS.has(failure.kind)) return null;
   const hinted = parseRetryHint(failure.retryAfterHint, now);
-  const until = Math.min(hinted ?? now + DEFAULT_COOLDOWN_MS, now + MAX_COOLDOWN_MS);
+  const until = Math.min(hinted ?? now + (failure.kind === "rate_limit" ? RATE_LIMIT_DEFAULT_COOLDOWN_MS : DEFAULT_COOLDOWN_MS), now + MAX_COOLDOWN_MS);
   const entry: RuntimeCooldown = {
     until,
     kind: failure.kind,

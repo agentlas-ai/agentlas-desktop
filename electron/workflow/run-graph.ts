@@ -4,6 +4,7 @@ import { createGraphWorkerAttempt, readGraphWorkerFailure, readGraphWorkerPool, 
   type GraphWorkerAttempt, type GraphWorkerFailureReceipt, type GraphWorkerPool } from "./graph-worker-fallback";
 import { selectExactRuntime } from "../runtime/selection";
 import { runnerRefusedBeforeDispatch } from "../runtime/runner";
+import { decideTurnSettlement, RATE_LIMIT_MAX_RETRIES, retryAfterMs, type TurnFailureKind } from "../../shared/turn-settlement";
 import { looksSecret } from "../../shared/secret-patterns";
 import { captureFiniteAutomationGoalExecutionOwner, assertAutomationGoalExecutionOwner, bindFiniteGraphRunStop } from "../automation-execution-control";
 import type { BrowserLoginWait } from "../browser/login-prerequisite";
@@ -4365,6 +4366,8 @@ export async function runGraph(
         let unsafeToolRequested = false;
         // This attempt's dispatch evidence (see providerNeverDispatched in the catch below).
         let preDispatchErrorCode: string | null = null;
+        /** The invocation's typed runtime failure from its error event (kind, provider code, retry hint), never prose. */
+        let nodeRuntimeFailure: { kind?: string; providerCode?: string; retryAfterAt?: string } | null = null;
         let providerOutputObserved = false;
         let nativeReadOnly = false;
         let nativeOutput: unknown;
@@ -4702,6 +4705,7 @@ export async function runGraph(
                 preDispatchErrorCode ??= ev.error.code;
               }
               if (ev.kind === "error") {
+                if (ev.error?.runtimeFailure) nodeRuntimeFailure = ev.error.runtimeFailure;
                 runnerError = ev.error?.message || "runner failed";
                 if (ev.error?.message) {
                   notes.push({ at: "error", name: ev.error.code, text: ev.error.message.slice(0, 2000) });
@@ -5105,7 +5109,28 @@ export async function runGraph(
           // 변경 단계는 멱등키 없이 재시도하지 않는다(이중 발행). 그 금지의 근거는 "이미
           // 발행했는지 모른다"인데, '도구 0건 주장'은 **아무것도 부르지 않았음이 관측된**
           // 경우라 그 근거가 성립하지 않는다. 한 번은 다시 시켜야 사용자가 원한 일이 일어난다.
-          const maxAttempts = claimedWithoutTools || quotaHandoff
+          /*
+           * The one settlement decision (shared/turn-settlement.ts): request throttling that provably did no work (the
+           * provider never received the step, or refused it before any output) is retried after its Retry-After, at most
+           * RATE_LIMIT_MAX_RETRIES times, even on a step that may not otherwise repeat: nothing ran, so nothing can be
+           * duplicated. Never for an ambiguous step.
+           */
+          // Assigned inside the event callback, which control-flow narrowing does not see.
+          const seenRuntimeFailure = nodeRuntimeFailure as { kind?: string; providerCode?: string; retryAfterAt?: string } | null;
+          const settlement = decideTurnSettlement({
+            outcome: runSignal.aborted ? "cancelled" : "failed",
+            ...(providerNeverDispatched ? { delivery: "not-dispatched" as const } : {}),
+            ...(seenRuntimeFailure?.kind ? { kind: seenRuntimeFailure.kind as TurnFailureKind } : {}),
+            ...(seenRuntimeFailure?.providerCode ? { providerCode: seenRuntimeFailure.providerCode } : {}),
+            retryAfterMs: retryAfterMs(seenRuntimeFailure?.retryAfterAt),
+            unattended: true, attempt: attempts - 1, resumeBudget: 0,
+            effectsObserved: providerOutputObserved || unsafeToolObserved || unsafeToolRequested,
+            fallbackAvailable: false,
+          });
+          const settlementRetry = settlement.action === "retry" && !ambiguous;
+          const maxAttempts = settlementRetry
+            ? Math.max(RATE_LIMIT_MAX_RETRIES + 1, nodeMaxAttempts(node))
+            : claimedWithoutTools || quotaHandoff
             ? Math.max(MAX_SAME_METHOD_STARTS, nodeMaxAttempts(node))
             : nodeMaxAttempts(node);
           // 계약 실패는 원칙적으로 재시도하지 않는다 — 다만 '도구 0건 주장'은 예외다.
@@ -5119,12 +5144,12 @@ export async function runGraph(
           // "도구 0건 주장"은 일시 오류는 아니지만 **관측으로 부수효과 0이 증명된** 실패다.
           // 다시 시키는 것이 이중 실행을 만들 수 없고, 그대로 두면 사용자가 원한 일이 영영
           // 일어나지 않는다(오너 원칙: 목적은 실패를 잘 보고하는 게 아니라 완주하는 것).
-          const transientSignal = claimedWithoutTools || quotaHandoff || receipts.some((receipt) =>
+          const transientSignal = claimedWithoutTools || quotaHandoff || settlementRetry || receipts.some((receipt) =>
             receipt.name.startsWith("error:") &&
             isTypedReplaySafeInvocationError(receipt.name.slice("error:".length)),
           ) || retriesDeclared(node);
           if (
-            commonRetryAllowed && transientSignal && (!modelInvocationFailed || quotaHandoff) && !ambiguous && !nodeTimedOut && !contractStop &&
+            commonRetryAllowed && transientSignal && (!modelInvocationFailed || quotaHandoff || settlementRetry) && !ambiguous && !nodeTimedOut && !contractStop &&
             !runSignal.aborted && attempts < maxAttempts
           ) {
             checkpoint!.inFlightNodeIds = checkpoint!.inFlightNodeIds.filter((id) => id !== node.id);
@@ -5138,7 +5163,12 @@ export async function runGraph(
               nodeId: node.id,
               payload: { attempt: attempts, maxAttempts, reason: rawMessage.slice(0, 240) },
             });
-            await new Promise<void>((resolve) => setTimeout(resolve, retryBackoffMs(attempts)));
+            const backoffMs = settlementRetry && settlement.action === "retry" ? settlement.delayMs : retryBackoffMs(attempts);
+            await new Promise<void>((resolve) => {
+              const timer = setTimeout(() => { runSignal.removeEventListener("abort", stop); resolve(); }, backoffMs);
+              const stop = (): void => { clearTimeout(timer); resolve(); };
+              runSignal.addEventListener("abort", stop, { once: true });
+            });
             return;
           }
           const message = ambiguous

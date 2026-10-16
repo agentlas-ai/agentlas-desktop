@@ -3,6 +3,7 @@
 // turn's RuntimeTurnDelivery) and names
 // no CLI, tool or cause. See the comment at its single call site, mcp/client.ts invokeCurrentRuntime.
 import { RuntimeTurnUnsettledError, RUNTIME_TURN_UNSETTLED_CODE, type RunnerResult, type RuntimeTurnDelivery } from "./runner";
+import { decideTurnSettlement } from "../../shared/turn-settlement";
 import type { AgentContextUnsettledTurn } from "./agent-context";
 
 /** Host-authored (purpose "run-recovery", compacted on replay); names no tool, runtime or cause. */
@@ -16,7 +17,11 @@ export const UNSETTLED_CONTINUATION_PROMPT = "previous turn: no completion signa
  * "nothing remains" for a question it never saw (owner 2026-10-16, every follow-up of one Work chat), so it rides along.
  */
 export function unsettledContinuationCarriesRequest(delivery: RuntimeTurnDelivery | undefined): boolean {
-  return delivery !== "accepted";
+  // The one settlement decision (shared/turn-settlement.ts) owns this rule; a resumable unsettled turn continues in its
+  // session and re-sends its request unless that session acknowledged it.
+  if (delivery === "not-dispatched") return true;
+  const decision = decideTurnSettlement({ outcome: "unsettled", delivery, unattended: false, attempt: 0, resumeBudget: 1, resumable: true });
+  return decision.action === "continue-same-session" && decision.resendOriginal;
 }
 
 /**
@@ -67,13 +72,16 @@ export async function invokeWithUnsettledContinuation<Req>(port: UnsettledContin
   const left = port.leftBehind();
   const thrown = !first.ok && first.error instanceof RuntimeTurnUnsettledError ? first.error : null;
   const handle = (first.ok ? first.result.sessionId : undefined) ?? thrown?.sessionId ?? left?.handle ?? undefined;
-  if (!(left ? left.resumable || handle : handle)) {
+  // A typed protocol fact from the first dispatch, never prose: did the session acknowledge that turn?
+  const delivery = thrown?.turnDelivery ?? (first.ok ? first.result.turnDelivery : undefined);
+  // The one settlement decision: one same-session continuation when the conversation can be resumed, else surface.
+  const decision = decideTurnSettlement({ outcome: "unsettled", delivery, unattended: false, attempt: 0, resumeBudget: 1,
+    resumable: Boolean(left ? left.resumable || handle : handle) });
+  if (decision.action !== "continue-same-session") {
     left?.retire();
     port.record("not_resumable");
     return surface(first);
   }
-  // A typed protocol fact from the first dispatch, never prose: did the session acknowledge that turn?
-  const delivery = thrown?.turnDelivery ?? (first.ok ? first.result.turnDelivery : undefined);
   port.record("dispatched", delivery);
   const next = await run(port.continuationRequest(request, handle, delivery), "run-recovery", handle);
   // A definite refusal (owner stop, budget, custody) is that failure, not the first turn's unknown.
