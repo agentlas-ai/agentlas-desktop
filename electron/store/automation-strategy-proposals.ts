@@ -245,6 +245,21 @@ function defaultStrategyScopeJudge(spec: StrategyScopeJudgeSpec): Promise<Requir
   return judgeRequired<StrategyScopeVerdict>(spec);
 }
 
+/**
+ * Owner decision OD-1 (2026-10-16): a "needs approval" verdict is split by what the proposal changes,
+ * measured by Main from the typed patch, not read from the judge's prose.
+ * - timing_choice: only the recurring cadence moves (cron/interval schedule patch). Stays autonomous, as the
+ *   2026-08-09 rule ("every approval happens once, at creation") intends.
+ * - effect_or_permission_expansion: any agent prompt patch, the only place a new outward effect or wider
+ *   permission can enter a strategy revision. Held as ONE approval card (this proposal; the backlog keeps
+ *   one live proposal per automation) and never applied until the owner approves it.
+ */
+type StrategyApprovalKind = "timing_choice" | "effect_or_permission_expansion";
+
+function strategyApprovalKind(proposal: AutomationStrategyProposalReceipt): StrategyApprovalKind {
+  return proposal.schedulePatch && !proposal.graphPatch ? "timing_choice" : "effect_or_permission_expansion";
+}
+
 export class AutomationStrategyProposalError extends Error {
   readonly code: string;
 
@@ -1883,7 +1898,8 @@ export async function adjudicateAutomationStrategyProposal(
   if (verdict.verdict === "goal_amendment_required") {
     return saveAdjudication(current, storedConflict, "needs_user_approval", adjudication);
   }
-  if ((verdict.verdict === "within_scope" || verdict.verdict === "needs_user_approval")
+  const approvalKind = strategyApprovalKind(current);
+  if ((verdict.verdict === "within_scope" || (verdict.verdict === "needs_user_approval" && approvalKind === "timing_choice"))
     && !current.requiresPaymentApproval
     && current.goalOwnershipUnverified && !boundary.originAdoption) {
     const authorityRef = ownerDelegatedAuthorityRef(current, boundary);
@@ -1920,17 +1936,18 @@ export async function adjudicateAutomationStrategyProposal(
     }
   }
   if (verdict.verdict === "needs_user_approval"
+    && approvalKind === "timing_choice"
     && !current.requiresPaymentApproval
     && (!current.goalOwnershipUnverified || boundary.originAdoption)) {
-    // A strategy/cadence decision is autonomous by default. The independent
-    // judge may still say "needs_user_approval" for a timing choice, but that
-    // is not a human gate unless Main measured a payment/checkout boundary.
+    // A cadence decision is autonomous by default. The independent judge may
+    // still say "needs_user_approval" for a timing choice, but that is not a
+    // human gate unless Main measured a payment/checkout boundary. A prompt
+    // patch (effect_or_permission_expansion) never takes this path (OD-1).
     // Goal-contract amendments, unverified ownership, and CAS failures remain
-    // fail-closed below; this path only applies the existing allowlisted
-    // prompt/schedule surface.
+    // fail-closed below; this path only applies the allowlisted schedule surface.
     const autonomousAdjudication = judgedAdjudication(
       "within_scope",
-      "Autonomous strategy revision applied; no payment or Goal-contract change was required.",
+      "timing_choice: Autonomous cadence revision applied; no payment or Goal-contract change was required.",
       verdict.runtimeReceipt,
       "within_scope",
     );
@@ -1954,7 +1971,15 @@ export async function adjudicateAutomationStrategyProposal(
     }
   }
   if (verdict.verdict === "needs_user_approval") {
-    return saveAdjudication(current, storedConflict, "needs_user_approval", adjudication);
+    const held = approvalKind === "effect_or_permission_expansion"
+      ? judgedAdjudication(
+        "needs_user_approval",
+        `effect_or_permission_expansion: ${(verdict.reason || "The prompt change may add an outward effect or permission.").slice(0, MAX_TEXT_CHARS - 40)}`,
+        verdict.runtimeReceipt,
+        "user_approval",
+      )
+      : adjudication;
+    return saveAdjudication(current, storedConflict, "needs_user_approval", held);
   }
   if (current.goalOwnershipUnverified && !boundary.originAdoption) {
     // The exact creation/owner receipt is missing and this automation has not
