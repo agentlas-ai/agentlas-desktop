@@ -605,7 +605,7 @@ function request(operation, args) {
       const chunks = [];
       let total = 0;
       res.on("data", (chunk) => { total += chunk.length; if (total <= MAX_REQUEST_BYTES) chunks.push(chunk); else req.destroy(new Error("Turn tool response is too large.")); });
-      res.on("end", () => { try { const value = JSON.parse(Buffer.concat(chunks).toString("utf8")); if (!value.ok) reject(new Error(value.error || "turn-tool-failed")); else resolve(value.result); } catch { reject(new Error("Turn tool returned an invalid response.")); } });
+      res.on("end", () => { try { const value = JSON.parse(Buffer.concat(chunks).toString("utf8")); if (!value.ok) reject(new Error(value.error || "turn-tool-failed")); else resolve(value.isError === true ? { content: [{ type: "text", text: JSON.stringify(value.result) }], isError: true, _meta: { "agentlas/errorCode": String(value.errorCode || "tool_failed") } } : value.result); } catch { reject(new Error("Turn tool returned an invalid response.")); } });
     });
     req.once("timeout", () => req.destroy(new Error("Turn tool request timed out.")));
     req.once("error", reject);

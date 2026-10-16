@@ -152,6 +152,17 @@ export async function dispatchOneSupervisorTool(binding: Pick<OneTeamCapabilityB
     }
 }
 
+/**
+ * The code of a One team tool result that refused as data, or null. Graph and Toolchain dispatch return a refusal as
+ * { ok: false, code, … } (one/graph-dispatch.ts: nothing saved or applied); answered as {ok:true} it reached the model
+ * and the receipts as an MCP success (same defect as harness_call, production 2026-10-16).
+ */
+export function oneTeamResultFailureCode(result: unknown): string | null {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return null;
+  const r = result as { ok?: unknown; code?: unknown };
+  return r.ok === false && typeof r.code === "string" && r.code ? r.code : null;
+}
+
 async function handleOneTeamControlRequestUnchecked(request: Record<string, unknown>): Promise<unknown> {
   if (typeof request.token !== "string" || !serverToken || request.token !== serverToken) throw new Error("one-team-capability-invalid");
   const binding = typeof request.capabilityId === "string" ? capabilities.get(request.capabilityId) : undefined;
@@ -269,7 +280,10 @@ export function startOneTeamControlServer(): Promise<number> {
       void readJsonBody(req).then(async (body) => {
         if (!body) return writeJson(res, 400, { ok: false, error: "invalid-request" });
         try {
-          writeJson(res, 200, { ok: true, result: await outsideInvocationJudgmentContext(() => handleOneTeamControlRequest(body)) });
+          const result = await outsideInvocationJudgmentContext(() => handleOneTeamControlRequest(body));
+          // A refusal returned as data ({ ok: false, code }: graph and Toolchain saves) is an MCP tool error with its code.
+          const errorCode = oneTeamResultFailureCode(result);
+          writeJson(res, 200, { ok: true, result, ...(errorCode ? { isError: true, errorCode } : {}) });
         } catch (error) {
           writeJson(res, 409, { ok: false, error: error instanceof Error ? error.message : "one-team-failed" });
         }

@@ -107,6 +107,26 @@ function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown
   });
 }
 
+/**
+ * The typed code of a harness call that did not succeed, or null. The control server answered every harness result as
+ * {ok:true}, so the agentlas-turn child returned refused/unavailable results — and a tool.call whose connector tool
+ * failed — as an MCP success: production 2026-10-16 00:00Z (graph cdf732ca) recorded harness_call → one_team_list
+ * "One team tools are not connected in this run." as toolIsError 0 with the graph receipt succeeded:true, and the
+ * model and the receipts took failed calls for done ones. Failed here: status refused/unavailable (reason is the
+ * code), or a tool.call that settled tool-error/failed/cancelled. In flight or unknown effect (dispatching, running,
+ * dispatch-unsettled) is not failed: the effect may have happened, so it stays an effect, never "nothing happened".
+ */
+export function harnessCallFailureCode(operation: unknown, result: unknown): string | null {
+  if (operation !== "harness_call" && operation !== "harness_describe") return null;
+  if (!result || typeof result !== "object") return null;
+  const r = result as { status?: unknown; reason?: unknown; operationId?: unknown; data?: unknown };
+  if (r.status === "refused" || r.status === "unavailable") return typeof r.reason === "string" && r.reason ? r.reason : r.status;
+  if (r.status !== "ok" || r.operationId !== "tool.call" || !r.data || typeof r.data !== "object") return null;
+  const call = r.data as { state?: unknown; error?: { code?: unknown } | null };
+  if (call.state !== "tool-error" && call.state !== "failed" && call.state !== "cancelled") return null;
+  return typeof call.error?.code === "string" && call.error.code ? call.error.code : call.state;
+}
+
 export async function handleTurnToolsControlRequest(request: Record<string, unknown>): Promise<unknown> {
   if (typeof request.token !== "string" || !serverToken || request.token !== serverToken) throw new Error("turn-tools-capability-invalid");
   const binding = typeof request.capabilityId === "string" ? capabilities.get(request.capabilityId) : undefined;
@@ -253,7 +273,10 @@ export function startTurnToolsControlServer(): Promise<number> {
       void readJsonBody(req).then(async (body) => {
         if (!body) return writeJson(res, 400, { ok: false, error: "invalid-request" });
         try {
-          writeJson(res, 200, { ok: true, result: await handleTurnToolsControlRequest(body) });
+          const result = await handleTurnToolsControlRequest(body);
+          // A failed harness call reaches the model and every receipt as an MCP tool error with its typed code.
+          const errorCode = harnessCallFailureCode(body.operation, result);
+          writeJson(res, 200, { ok: true, result, ...(errorCode ? { isError: true, errorCode } : {}) });
         } catch (error) {
           writeJson(res, 409, { ok: false, error: error instanceof Error ? error.message : "turn-tool-failed" });
         }
