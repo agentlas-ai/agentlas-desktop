@@ -11,9 +11,10 @@
 // (Linux/Windows) is the person's own, unchanged. Claude forwards that variable to its own teammate processes, so the
 // pair is a supported combination, not a trick.
 //
-// The mirror links every entry of ~/.claude (settings, CLAUDE.md, rules, skills, commands, agents, plugins — the
+// The mirror links the configuration entries of ~/.claude (CLAUDE.md, rules, skills, commands, agents, plugins — the
 // settings overlay in claude-personal-context.ts still decides which of those a run may use) except the session and
-// state stores below, which are the mirror's own. `.claude.json` (global config) is the mirror's own copy of the person's
+// state stores below, which are the mirror's own. settings.json is the mirror's own file holding only the sign-in,
+// endpoint and model-default part of the person's (productClaudeSettings): never their hooks, env or permissions. `.claude.json` (global config) is the mirror's own copy of the person's
 // without their per-project history and user-scope MCP servers (One keeps the servers it switched on).
 // If links cannot be made (Windows without the right), the run keeps the real config dir.
 import fs from "node:fs";
@@ -28,11 +29,77 @@ import { userDataPath } from "../runtime-paths";
  * version adds never leaks product sessions into the person's dir or the person's into product runs.
  */
 export const CLAUDE_CONFIG_ENTRIES: readonly string[] = [
-  "settings.json", "settings.local.json", "CLAUDE.md", "rules", "skills", "commands", "agents", "plugins", "output-styles",
+  "CLAUDE.md", "rules", "skills", "commands", "agents", "plugins", "output-styles",
   "keybindings.json", "policy-limits.json", "remote-settings.json", "managed-settings.json",
 ];
 export function isClaudePersonalSessionEntry(name: string): boolean {
   return !CLAUDE_CONFIG_ENTRIES.includes(name);
+}
+
+/**
+ * The person's user settings files. Never linked: the mirror's settings.json is its own file holding only
+ * productClaudeSettings of them. Linked (until 2026-10-17), every product Claude run loaded the person's `hooks` (the
+ * owner's: a PostToolUse gate runner and a SessionEnd/Stop `reap-dev-instances.sh` that ends dev app instances, run at
+ * the end of every product session), their `env` (APP_STORE_CONNECT_*, GOOGLE_APPLICATION_CREDENTIALS and
+ * GOOGLE_PLAY_KEY_FILE in every product shell: the class of leak Codex's shell environment was closed for on 2026-10-12),
+ * `permissions` (pre-approved commands), `language`, `statusLine` and the rest. A `--settings` overlay cannot take hooks
+ * or env back out (arrays and objects merge; `disableAllHooks` would also stop the product's own tool-broker hook).
+ */
+export const CLAUDE_PERSONAL_SETTINGS_FILES: readonly string[] = ["settings.json", "settings.local.json"];
+/**
+ * Kept from the person's settings, each for one reason: sign-in (`apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport`,
+ * `forceLoginMethod`, `forceLoginOrgUUID`: without them an API-key, Bedrock or org-pinned account cannot authenticate) and
+ * the model default the app falls back to when it passes no `--model` / `--effort` (`model`, `effortLevel`;
+ * cli-default-model.ts shows that `model` as the run's model).
+ */
+const CLAUDE_SETTINGS_KEYS: ReadonlySet<string> = new Set(["apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "forceLoginMethod",
+  "forceLoginOrgUUID", "model", "effortLevel"]);
+/** `env` entries kept: which endpoint and sign-in Claude uses, and the network path to it. Nothing else of `env`. */
+const CLAUDE_ENV_KEYS = /^(?:ANTHROPIC_[A-Z0-9_]+|CLAUDE_CODE_USE_(?:BEDROCK|VERTEX|FOUNDRY)|CLAUDE_CODE_SKIP_(?:BEDROCK|VERTEX|FOUNDRY)_AUTH|CLAUDE_CODE_CLIENT_(?:CERT|KEY|KEY_PASSPHRASE)|HTTPS?_PROXY|NO_PROXY|https?_proxy|no_proxy|NODE_EXTRA_CA_CERTS)$/;
+/** Cloud credentials kept only when the same settings route Claude through that cloud (else they are the person's own tools'). */
+const CLAUDE_CLOUD_ENV_KEYS: ReadonlyArray<{ when: RegExp; keys: RegExp }> = [
+  { when: /^CLAUDE_CODE_USE_BEDROCK$/, keys: /^(?:AWS_[A-Z0-9_]+)$/ },
+  { when: /^CLAUDE_CODE_USE_VERTEX$/, keys: /^(?:CLOUD_ML_REGION|VERTEX_REGION_[A-Z0-9_]+|GOOGLE_APPLICATION_CREDENTIALS|GOOGLE_CLOUD_PROJECT|GCLOUD_PROJECT)$/ },
+];
+/** Agentlas's own marketplaces (the same set as one-capabilities.ts AGENTLAS_MARKETPLACES): their plugins stay enabled. */
+const AGENTLAS_CLAUDE_MARKETPLACES: ReadonlySet<string> = new Set(["agentlas-core-engine", "agentlas-sei"]);
+
+/**
+ * The mirror's own settings.json from the person's settings.json and settings.local.json (the latter wins, as in
+ * Claude): only CLAUDE_SETTINGS_KEYS, the sign-in/endpoint part of `env`, and the Agentlas engine's plugins with their
+ * marketplaces (always on for product runs; the engine plugin also carries the browser claude-browser-surface.ts falls
+ * back to). Everything else is left out by construction. A file that is not JSON contributes nothing.
+ */
+export function productClaudeSettings(settingsText: string | null, localText: string | null = null): string {
+  const read = (text: string | null): Record<string, unknown> => {
+    if (!text) return {};
+    try { const v = JSON.parse(text) as unknown; return v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {}; }
+    catch { return {}; }
+  };
+  const obj = (value: unknown): Record<string, unknown> => (value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {});
+  const out: Record<string, unknown> = {};
+  const env: Record<string, unknown> = {};
+  const plugins: Record<string, unknown> = {};
+  const markets: Record<string, unknown> = {};
+  for (const source of [read(settingsText), read(localText)]) {
+    for (const [key, value] of Object.entries(source)) if (CLAUDE_SETTINGS_KEYS.has(key)) out[key] = value;
+    const personalEnv = obj(source.env);
+    for (const [key, value] of Object.entries(personalEnv)) {
+      if (CLAUDE_ENV_KEYS.test(key)) env[key] = value;
+      for (const cloud of CLAUDE_CLOUD_ENV_KEYS) {
+        const routed = Object.entries(personalEnv).some(([name, on]) => cloud.when.test(name) && on !== "" && on !== "0" && on !== false && on !== "false");
+        if (routed && cloud.keys.test(key)) env[key] = value;
+      }
+    }
+    for (const [id, value] of Object.entries(obj(source.enabledPlugins))) {
+      if (AGENTLAS_CLAUDE_MARKETPLACES.has(id.slice(id.lastIndexOf("@") + 1))) plugins[id] = value;
+    }
+    for (const [name, value] of Object.entries(obj(source.extraKnownMarketplaces))) if (AGENTLAS_CLAUDE_MARKETPLACES.has(name)) markets[name] = value;
+  }
+  if (Object.keys(env).length > 0) out.env = env;
+  if (Object.keys(plugins).length > 0) out.enabledPlugins = plugins;
+  if (Object.keys(markets).length > 0) out.extraKnownMarketplaces = markets;
+  return `${JSON.stringify(out, null, 2)}\n`;
 }
 
 export interface ClaudeProductHomeOptions {
@@ -109,6 +176,14 @@ export function syncClaudeProductHome(realDir: string, mirror = claudeProductHom
     const at = path.join(mirror, name);
     quietly(() => { if (fs.lstatSync(at).isSymbolicLink()) fs.unlinkSync(at); });
   }
+  // The mirror's own settings.json (productClaudeSettings). An older mirror's links to the person's settings files are
+  // removed first: written through, the link would replace the person's file, and left alone it keeps their hooks.
+  for (const name of CLAUDE_PERSONAL_SETTINGS_FILES) {
+    quietly(() => { if (fs.lstatSync(path.join(mirror, name)).isSymbolicLink()) fs.unlinkSync(path.join(mirror, name)); });
+  }
+  const personalSettings = (name: string): string | null => { try { return fs.readFileSync(path.join(realDir, name), "utf8"); } catch { return null; } };
+  // A failed write leaves the mirror without user settings (Claude's defaults), never with the person's.
+  quietly(() => writeIfChanged(path.join(mirror, "settings.json"), productClaudeSettings(personalSettings("settings.json"), personalSettings("settings.local.json"))));
   const ownGlobal = path.join(mirror, ".claude.json");
   try {
     const previous = (() => { try { return fs.readFileSync(ownGlobal, "utf8"); } catch { return undefined; } })();
