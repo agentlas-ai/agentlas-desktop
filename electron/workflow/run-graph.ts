@@ -72,11 +72,12 @@ import {
   consumeGraphResumeCoordinate,
   releaseGraphResumeCoordinate,
   appendGraphJournal,
+  listEvalCorrections,
 } from "../store/automations";
 import { getAgentById } from "../mcp/registry";
 import { getFirm } from "../store/firms";
 import { getAgentConcurrency } from "../store/concurrency";
-import { listRunEvents, tryRecordFailureEvent, tryRecordRunEvent } from "../store/run-events";
+import { getRunEventBySource, listRunEvents, recordRunEvent, tryRecordFailureEvent, tryRecordRunEvent } from "../store/run-events";
 import { classifyToolFailure } from "../../shared/tool-failure";
 import { hasAutomationGraphTerminalClose } from "../store/graph-terminal-close";
 import { awaitAutomationRunnerWithAbortGrace } from "../automation-watchdog";
@@ -313,6 +314,13 @@ export interface RunGraphResult {
   tokensUsed?: number;
   /** 상한이 선언됐는데 런타임이 사용량을 보고하지 않아 집행할 수 없었는가. */
   budgetUnmeasured?: boolean;
+  /**
+   * Present when resuming cannot change this failure: a failed check whose judged steps cannot be re-run
+   * safely, already returned the same output with the same failing items, or used their rework budget.
+   * Schedulers and trigger outboxes do not retry it automatically (production 2026-10-16: three resumes
+   * re-judged one unchanged output). Typed; never derived from prose.
+   */
+  automaticRetry?: { allowed: false; reasonCode: EvalReworkStopReason; nodeId: string; fingerprint: string | null };
 }
 
 /**
@@ -1026,6 +1034,42 @@ export function hasReplaySafePreparedWorkforce(checkpoint: GraphCheckpoint, node
  * the live run uses. Anything unknown keeps the hold. Only `agent` steps
  * qualify - other step types act through the host, not through tool calls.
  */
+/**
+ * Every tool request the host recorded for this step in this run (run_events, written before the call
+ * executes) passes the argument-checked read-only classifier. A request whose completion never arrived
+ * leaves no receipt, so receipts alone cannot prove a step only looked. Anything unknown is not read-only.
+ */
+function graphNodeToolRequestsReadOnly(runId: string, nodeId: string): boolean {
+  let rows: Array<{ payload_json: string | null }> = [];
+  try {
+    rows = getDb().prepare(
+      `SELECT payload_json FROM run_events
+        WHERE run_id = ? AND node_id = ? AND kind = 'mcp_tool-use'
+        ORDER BY seq ASC LIMIT 2001`,
+    ).all(runId, nodeId) as Array<{ payload_json: string | null }>;
+  } catch {
+    return false;
+  }
+  if (rows.length > 2000) return false;
+  const readOnlyRequests = new Map<string, string>();
+  for (const row of rows) {
+    let payload: Record<string, unknown> | null = null;
+    try { payload = row.payload_json ? JSON.parse(row.payload_json) as Record<string, unknown> : null; } catch { payload = null; }
+    if (!payload) return false;
+    const name = typeof payload.toolName === "string" ? payload.toolName : "";
+    if (!name) continue;
+    const id = typeof payload.toolId === "string" ? payload.toolId : "";
+    const args = payload.toolArgs;
+    if (args === undefined && id && readOnlyRequests.get(id) === name) continue;
+    if (isReadOnlyCheckpointTool(name, args)) {
+      if (id) readOnlyRequests.set(id, name);
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
 export function reconcileReadOnlyInterruptedAgentNodes(
   checkpoint: GraphCheckpoint,
   failedRunId: string,
@@ -1037,36 +1081,7 @@ export function reconcileReadOnlyInterruptedAgentNodes(
     const node = graph.nodes.find((candidate) => candidate.id === nodeId);
     if (!node || node.type !== "agent" || checkpoint.loginWaits[nodeId]?.automaticResumeSafe === false) continue;
     if ((checkpoint.toolReceipts[nodeId] ?? []).some((receipt) => !receipt.readOnly)) continue;
-    let rows: Array<{ payload_json: string | null }> = [];
-    try {
-      rows = getDb().prepare(
-        `SELECT payload_json FROM run_events
-          WHERE run_id = ? AND node_id = ? AND kind = 'mcp_tool-use'
-          ORDER BY seq ASC LIMIT 2001`,
-      ).all(failedRunId, nodeId) as Array<{ payload_json: string | null }>;
-    } catch {
-      continue;
-    }
-    if (rows.length > 2000) continue;
-    const readOnlyRequests = new Map<string, string>();
-    let readOnly = true;
-    for (const row of rows) {
-      let payload: Record<string, unknown> | null = null;
-      try { payload = row.payload_json ? JSON.parse(row.payload_json) as Record<string, unknown> : null; } catch { payload = null; }
-      if (!payload) { readOnly = false; break; }
-      const name = typeof payload.toolName === "string" ? payload.toolName : "";
-      if (!name) continue;
-      const id = typeof payload.toolId === "string" ? payload.toolId : "";
-      const args = payload.toolArgs;
-      if (args === undefined && id && readOnlyRequests.get(id) === name) continue;
-      if (isReadOnlyCheckpointTool(name, args)) {
-        if (id) readOnlyRequests.set(id, name);
-        continue;
-      }
-      readOnly = false;
-      break;
-    }
-    if (readOnly) safe.add(nodeId);
+    if (graphNodeToolRequestsReadOnly(failedRunId, nodeId)) safe.add(nodeId);
   }
   if (safe.size === 0) return [];
   checkpoint.inFlightNodeIds = checkpoint.inFlightNodeIds.filter((nodeId) => !safe.has(nodeId));
@@ -1084,6 +1099,287 @@ export function reconcileReplaySafePreparedWorkforceNodes(checkpoint: GraphCheck
   checkpoint.ambiguousNodeIds = checkpoint.ambiguousNodeIds
     .filter((nodeId) => !replaySafePreparedNodes.has(nodeId));
   return [...replaySafePreparedNodes].sort();
+}
+
+// ── A failed verification is reworked, never re-judged on the same output ────
+/*
+ * A check that fails judges what earlier steps produced. Re-judging that same output gives the same
+ * verdict. Production 2026-10-16 (TCIagent daily graph cdf732ca): after verify2 EVAL_FAILED the
+ * scheduler resumed the occurrence at 00:55, 01:56 and 03:56; each checkpoint listed step2 as
+ * completed, so only verify2 ran again, on the unchanged step2 output, with 0 tokens and the same
+ * verdict. The owner saw only failures.
+ *
+ * A resume after such a failure re-runs the steps the check judges, with the check's reasons in the
+ * node prompt's registered "[last attempt failed: fix these]" part, at most MAX_EVAL_REWORKS times
+ * per occurrence. It stops once, with a typed reason and no automatic retry, when a judged step
+ * may already have acted outside (no double publish), when the rework returned the input already
+ * judged (it is not judged again), when the budget is used, or when the judged value is run input.
+ */
+export const MAX_EVAL_REWORKS = 2;
+export const EVAL_FAILURE_EVENT_KIND = "workflow_eval_failure";
+export const EVAL_REWORK_EVENT_KIND = "workflow_eval_rework";
+const EVAL_FAILURE_EVENT_SCHEMA = "agentlas.graph-eval-failure.v1";
+const EVAL_REWORK_EVENT_SCHEMA = "agentlas.graph-eval-rework.v1";
+const EVAL_FAILURE_CODES = new Set(["EVAL_FAILED", "EVAL_STUCK"]);
+const EVAL_REWORK_STOP_REASONS = [
+  "eval_stuck",
+  "eval_rework_no_upstream",
+  "eval_rework_unsafe_effect",
+  "eval_rework_no_change",
+  "eval_rework_exhausted",
+  "eval_rework_unrecorded",
+] as const;
+export type EvalReworkStopReason = (typeof EVAL_REWORK_STOP_REASONS)[number];
+export type EvalReworkPlan = {
+  /** Steps on every path from what the check reads back to the check, in graph order. */
+  reworkNodeIds: string[];
+  /** Completed judged steps that running again could repeat an outside effect. */
+  unsafe: Array<{ nodeId: string; cause: "declared_mutation" | "unconfirmed_tool_effect" }>;
+};
+export type EvalReworkDecision =
+  | { disposition: "rework" }
+  | { disposition: "stop"; reasonCode: EvalReworkStopReason };
+
+/** The variable a step writes. A transform writes `to` (falling back as applyTransform does). */
+function graphNodeProducedVar(node: WorkflowNode): string | null {
+  const config = node.config ?? {};
+  const produced = node.type === "transform"
+    ? str(config, "to") ?? str(config, "produces") ?? str(config, "from")
+    : str(config, "produces");
+  return produced && produced.trim() ? produced : null;
+}
+
+/**
+ * Which steps a failed check judges, and whether running them again is replay-safe.
+ * The check reads `subject` (the claim) and `evidence` (the observation). Their producers are the
+ * rework roots; a deterministic host step (transform, pure code) gives the same value from the same
+ * inputs, so the root moves up to the step that made it. Every step on a path from a root to the
+ * check runs again. A completed step declared `mutation`, or one whose receipts show a call that
+ * could have changed the outside world, is not replay-safe.
+ */
+export function planEvalRework(
+  graph: WorkflowGraph,
+  evalNodeId: string,
+  checkpoint: Pick<GraphCheckpoint, "toolReceipts" | "prepareReceipts">,
+  completed: ReadonlySet<string>,
+  effectNodeIds: ReadonlySet<string>,
+  /** Runs of this occurrence whose recorded tool requests must also be read-only (receipts miss unanswered calls). */
+  requestRunIds: readonly string[] = [],
+): EvalReworkPlan {
+  const evalNode = graph.nodes.find((node) => node.id === evalNodeId);
+  if (!evalNode || evalNode.type !== "eval") return { reworkNodeIds: [], unsafe: [] };
+  const backEdgeIds = findBackEdges(graph);
+  const forward = new Map<string, string[]>();
+  const reverse = new Map<string, string[]>();
+  for (const node of graph.nodes) { forward.set(node.id, []); reverse.set(node.id, []); }
+  for (const edge of graph.edges) {
+    if (backEdgeIds.has(edge.id) || !forward.has(edge.source) || !forward.has(edge.target)) continue;
+    forward.get(edge.source)!.push(edge.target);
+    reverse.get(edge.target)!.push(edge.source);
+  }
+  const reach = (starts: Iterable<string>, map: Map<string, string[]>): Set<string> => {
+    const out = new Set<string>(starts);
+    const stack = [...out];
+    while (stack.length) {
+      for (const next of map.get(stack.pop()!) ?? []) if (!out.has(next)) { out.add(next); stack.push(next); }
+    }
+    return out;
+  };
+  const upstream = reach([evalNodeId], reverse);
+  upstream.delete(evalNodeId);
+  const byId = new Map(graph.nodes.map((node) => [node.id, node] as const));
+  const judged = new Set([str(evalNode.config ?? {}, "subject"), str(evalNode.config ?? {}, "evidence")]
+    .filter((name): name is string => !!name && name.trim() !== ""));
+  const roots = new Set<string>();
+  const expanded = new Set<string>();
+  const expand = (nodeId: string): void => {
+    if (expanded.has(nodeId)) return;
+    expanded.add(nodeId);
+    const node = byId.get(nodeId);
+    if (!node || node.type === "trigger") return;
+    if (node.type === "transform" || (node.type === "code" && nodeEffect(node) === "pure")) {
+      for (const source of reverse.get(nodeId) ?? []) expand(source);
+      return;
+    }
+    roots.add(nodeId);
+  };
+  for (const node of graph.nodes) {
+    const produced = graphNodeProducedVar(node);
+    if (upstream.has(node.id) && produced && judged.has(produced)) expand(node.id);
+  }
+  const fromRoots = reach(roots, forward);
+  const reworkNodeIds = graph.nodes
+    .filter((node) => node.type !== "trigger" && upstream.has(node.id) && fromRoots.has(node.id))
+    .map((node) => node.id);
+  const unsafe: EvalReworkPlan["unsafe"] = [];
+  for (const nodeId of reworkNodeIds) {
+    if (!completed.has(nodeId)) continue;
+    if (nodeEffect(byId.get(nodeId)!) === "mutation") {
+      unsafe.push({ nodeId, cause: "declared_mutation" });
+    } else if (effectNodeIds.has(nodeId) && (!(checkpoint.toolReceipts[nodeId] ?? [])
+      .every((receipt) => isReplaySafeGraphToolReceipt(checkpoint as GraphCheckpoint, nodeId, receipt))
+      || requestRunIds.some((runId) => !graphNodeToolRequestsReadOnly(runId, nodeId)))) {
+      unsafe.push({ nodeId, cause: "unconfirmed_tool_effect" });
+    }
+  }
+  return { reworkNodeIds, unsafe };
+}
+
+/** Same evaluated output + same failing items = same fingerprint. Typed, never prose. */
+export function evalFailureFingerprint(input: {
+  evalNodeId: string; evaluatedDigest: string; verdictCode: string;
+}): string {
+  return sha256Value({ schema: "agentlas.graph-eval-failure-fingerprint.v1", ...input });
+}
+
+/** Everything the judge reads for this check: the subject, the evidence and the owner's corrections. */
+export function evalEvaluatedDigest(subjectText: string, evidenceText: string | null, corrections: unknown = null): string {
+  return sha256Value({ subject: subjectText, evidence: evidenceText, corrections: corrections ?? null });
+}
+
+/** A checklist check (config.items) reads subject + evidence + corrections; a criteria check reads the subject only. */
+function evalUsesChecklist(node: WorkflowNode): boolean {
+  return Array.isArray(node.config?.items) && (node.config.items as unknown[]).some((entry) =>
+    typeof (entry as { text?: unknown })?.text === "string" && (entry as { text: string }).text.trim() !== "");
+}
+
+export function decideEvalRework(input: {
+  plan: EvalReworkPlan;
+  stuck: boolean;
+  reworksDone: number;
+  /** The previous failure in this occurrence produced the same evaluated output and verdict. */
+  sameAsPrevious: boolean;
+}): EvalReworkDecision {
+  const stop = (reasonCode: EvalReworkStopReason): EvalReworkDecision => ({ disposition: "stop", reasonCode });
+  if (input.stuck) return stop("eval_stuck");
+  if (input.sameAsPrevious) return stop("eval_rework_no_change");
+  if (input.plan.reworkNodeIds.length === 0) return stop("eval_rework_no_upstream");
+  if (input.plan.unsafe.length > 0) return stop("eval_rework_unsafe_effect");
+  if (input.reworksDone >= MAX_EVAL_REWORKS) return stop("eval_rework_exhausted");
+  return { disposition: "rework" };
+}
+
+type EvalFailureRecord = {
+  depth: number; runId: string; failureCode: string; fingerprint: string; evaluatedDigest: string;
+  reworksDone: number; decision: EvalReworkDecision;
+};
+type EvalReworkRecord = { depth: number; runId: string; attempt: number; priorFingerprint: string | null; priorEvaluatedDigest: string | null };
+
+/** This failed run and the runs it resumed, newest first, within one occurrence and graph digest. */
+function graphRunLineage(automationId: string, runId: string): string[] {
+  try {
+    const rows = getDb().prepare(`WITH RECURSIVE lineage(id, parent, depth, seen) AS (
+        SELECT id, resume_of_run_id, 0, ',' || id || ',' FROM automation_runs WHERE id = ? AND automation_id = ?
+        UNION ALL SELECT r.id, r.resume_of_run_id, l.depth + 1, l.seen || r.id || ','
+          FROM automation_runs r JOIN lineage l ON r.id = l.parent
+          JOIN automation_runs start ON start.id = ?
+          WHERE r.automation_id = ? AND r.occurrence_id IS start.occurrence_id AND r.graph_digest IS start.graph_digest
+            AND l.depth < 64 AND instr(l.seen, ',' || r.id || ',') = 0
+      ) SELECT id FROM lineage ORDER BY depth ASC`).all(runId, automationId, runId, automationId) as Array<{ id: string }>;
+    return rows.map((row) => row.id);
+  } catch {
+    return [runId];
+  }
+}
+
+function readEvalReworkHistory(lineage: string[], evalNodeId: string): { failure: EvalFailureRecord | null; rework: EvalReworkRecord | null } {
+  let failure: EvalFailureRecord | null = null;
+  let rework: EvalReworkRecord | null = null;
+  const count = (value: unknown): number | null =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 64 ? value : null;
+  const digest = (value: unknown): string | null => typeof value === "string" && SHA256_RE.test(value) ? value : null;
+  for (let depth = 0; depth < lineage.length && (!failure || !rework); depth += 1) {
+    const runId = lineage[depth]!;
+    try {
+      if (!failure) {
+        const payload = getRunEventBySource(runId, `graph-eval-failure:${evalNodeId}`)?.payload as Record<string, unknown> | undefined;
+        const fingerprint = digest(payload?.fingerprint);
+        const evaluatedDigest = digest(payload?.evaluatedDigest);
+        const reworksDone = count(payload?.reworksDone);
+        const failureCode = typeof payload?.failureCode === "string" && EVAL_FAILURE_CODES.has(payload.failureCode) ? payload.failureCode : null;
+        const reasonCode = EVAL_REWORK_STOP_REASONS.find((reason) => reason === payload?.reasonCode);
+        if (payload?.schemaVersion === EVAL_FAILURE_EVENT_SCHEMA && payload.evalNodeId === evalNodeId && fingerprint
+          && evaluatedDigest && reworksDone !== null && failureCode
+          && (payload.disposition === "rework" || (payload.disposition === "stop" && reasonCode))) {
+          failure = { depth, runId, failureCode, fingerprint, evaluatedDigest, reworksDone,
+            decision: payload.disposition === "rework" ? { disposition: "rework" } : { disposition: "stop", reasonCode: reasonCode! } };
+        }
+      }
+      if (!rework) {
+        const payload = getRunEventBySource(runId, `graph-eval-rework:${evalNodeId}`)?.payload as Record<string, unknown> | undefined;
+        const attempt = count(payload?.attempt);
+        if (payload?.schemaVersion === EVAL_REWORK_EVENT_SCHEMA && payload.evalNodeId === evalNodeId && attempt) {
+          rework = { depth, runId, attempt, priorFingerprint: digest(payload.priorFingerprint),
+            priorEvaluatedDigest: digest(payload.priorEvaluatedDigest) };
+        }
+      }
+    } catch { /* An unreadable receipt is not evidence; the legacy path below decides from typed failure codes. */ }
+  }
+  return { failure, rework };
+}
+
+function graphRunFailureCodes(runId: string): Record<string, string> {
+  try {
+    const row = getDb().prepare("SELECT node_failures_json FROM automation_runs WHERE id = ?").get(runId) as
+      { node_failures_json: string | null } | undefined;
+    const parsed = row?.node_failures_json ? JSON.parse(row.node_failures_json) as Record<string, { code?: unknown }> : {};
+    return Object.fromEntries(Object.entries(parsed ?? {})
+      .filter(([, failure]) => typeof failure?.code === "string")
+      .map(([nodeId, failure]) => [nodeId, failure.code as string]));
+  } catch {
+    return {};
+  }
+}
+
+/** Owner-facing next step for a failed check. Host notice, not model input. */
+function evalReworkNextAction(
+  decision: EvalReworkDecision,
+  labelsOf: (nodeIds: string[]) => string,
+  plan: EvalReworkPlan,
+  remaining: number,
+): string {
+  if (decision.disposition === "rework") {
+    const names = labelsOf(plan.reworkNodeIds);
+    return L(
+      `"${names}" 단계를 이 검증의 사유와 함께 자동으로 다시 실행합니다(남은 자동 재작업 ${remaining}회). 그래도 떨어지면 앞 단계의 지시를 고치거나, 이 검증이 떨어졌을 때 다시 시도할 경로를 그려 주세요.`,
+      `"${names}" will run again automatically with this check's reasons (${remaining} automatic rework(s) left). If it still fails, fix the earlier step's instructions, or draw a retry path for when this verification fails.`,
+    );
+  }
+  switch (decision.reasonCode) {
+    case "eval_rework_unsafe_effect": {
+      const names = labelsOf(plan.unsafe.map((row) => row.nodeId));
+      return L(
+        `자동으로 다시 하지 않습니다 — "${names}" 단계가 이미 바깥에 반영했을 수 있어, 다시 돌리면 같은 작업이 두 번 나갈 수 있습니다. 실제 결과를 확인한 뒤 앞 단계의 지시나 이 검증의 기준을 고쳐 다시 실행하세요.`,
+        `Not retried automatically — "${names}" may already have acted outside, and running it again could do the same thing twice. Check the actual result, then fix the earlier step's instructions or this check's criteria and run again.`,
+      );
+    }
+    case "eval_rework_no_change":
+      return L(
+        "다시 한 앞 단계가 같은 결과를 냈고 같은 항목에서 떨어졌습니다. 같은 판정을 되풀이하지 않도록 자동 재시도를 멈췄습니다. 앞 단계의 지시나 이 검증의 기준을 고쳐 주세요.",
+        "The earlier step produced the same result again and failed on the same items, so automatic retries stopped instead of repeating the same verdict. Fix the earlier step's instructions or this check's criteria.",
+      );
+    case "eval_rework_exhausted":
+      return L(
+        `앞 단계를 ${MAX_EVAL_REWORKS}번 다시 했지만 이 검증을 통과하지 못해 자동 재시도를 멈췄습니다. 앞 단계의 지시나 이 검증의 기준을 고쳐 주세요.`,
+        `The earlier step ran again ${MAX_EVAL_REWORKS} time(s) and still did not pass this check, so automatic retries stopped. Fix the earlier step's instructions or this check's criteria.`,
+      );
+    case "eval_rework_no_upstream":
+      return L(
+        "이 검증이 보는 값은 실행 입력에서 왔기 때문에 다시 판정해도 결과가 같습니다. 자동 재시도는 하지 않습니다. 입력이나 이 검증의 기준을 고쳐 다시 실행하세요.",
+        "The value this check reads came from the run's input, so judging it again gives the same result. It is not retried automatically. Fix the input or this check's criteria and run again.",
+      );
+    case "eval_rework_unrecorded":
+      return L(
+        "다시 시도한 기록을 남기지 못해, 같은 일을 되풀이하지 않도록 자동 재시도를 멈췄습니다. 다시 실행해 주세요.",
+        "The rework record could not be saved, so automatic retries stopped rather than repeat the same work. Please run it again.",
+      );
+    case "eval_stuck":
+    default:
+      return L(
+        "같은 항목으로 연속 통과하지 못해 자동 재시도는 하지 않습니다. 채점표를 고치거나 앞 단계의 지시를 바꿔 주세요.",
+        "It failed on the same items twice in a row, so it is not retried automatically. Fix the checklist or change the earlier step's instructions.",
+      );
+  }
 }
 
 const REPLAY_SAFE_WORKFORCE_ERROR_CODES = new Set([
@@ -1907,6 +2203,8 @@ export async function runGraph(
     ? latestFailedCandidate
     : null;
   let resumeOfRunId: string | undefined;
+  /** The failed run's own sealed checkpoint was restored (not a changed-graph lineage). */
+  let resumedFromCheckpoint = false;
   let checkpoint: GraphCheckpoint | null = null;
   if (latestFailed) {
     // 재개 좌표는 한 번만 소비된다. 두 실행이 같은 실패 스냅샷을 동시에 집으면
@@ -1993,6 +2291,7 @@ export async function runGraph(
           checkpoint.inFlightNodeIds = [];
         }
         resumeOfRunId = latestFailed.runId;
+        resumedFromCheckpoint = true;
       }
     }
   }
@@ -2185,6 +2484,101 @@ export async function runGraph(
       }
     }
   }
+  /** Eval node → the rework this run continues for it, with what the previous failure looked like. */
+  const evalReworkState = new Map<string, { attempt: number; priorFingerprint: string | null; priorEvaluatedDigest: string | null }>();
+  /** Eval node → the steps that read its reasons in this run. A resumed rework is scoped to what the check judges. */
+  const evalReworkScope = new Map<string, Set<string>>();
+  let automaticRetryStop: { nodeId: string; reasonCode: EvalReworkStopReason; fingerprint: string | null } | null = null;
+  // A check that failed in the run this one resumes: rework what it judges, or stop once. The same
+  // output is never judged again (see planEvalRework).
+  if (resumedFromCheckpoint && latestFailed) {
+    const lineage = graphRunLineage(automation.id, latestFailed.runId);
+    const failedCodes = graphRunFailureCodes(latestFailed.runId);
+    const labelsOf = (ids: string[]): string =>
+      ids.map((id) => graph.nodes.find((candidate) => candidate.id === id)?.label || id).join(", ");
+    for (const node of graph.nodes) {
+      if (node.type !== "eval" || completed.has(node.id) || admissionPending.has(node.id)) continue;
+      const history = readEvalReworkHistory(lineage, node.id);
+      const plan = planEvalRework(graph, node.id, checkpoint, completed, effectNodeIds, lineage);
+      if (history.rework && (!history.failure || history.rework.depth < history.failure.depth)) {
+        // An earlier attempt already started this rework; the check has not judged its result yet.
+        evalReworkState.set(node.id, { attempt: history.rework.attempt, priorFingerprint: history.rework.priorFingerprint,
+          priorEvaluatedDigest: history.rework.priorEvaluatedDigest });
+        evalReworkScope.set(node.id, new Set(plan.reworkNodeIds));
+        continue;
+      }
+      // Only a failure the graph did not receive: a routed failure leaves no node failure on the run.
+      const failureCode = failedCodes[node.id];
+      if (!failureCode || !EVAL_FAILURE_CODES.has(failureCode)) continue;
+      const subjectName = str(node.config ?? {}, "subject");
+      const evidenceName = str(node.config ?? {}, "evidence");
+      let failure = history.failure;
+      let legacy = false;
+      if (!failure) {
+        // Failed before this receipt existed: decide from its typed code and the sealed checkpoint.
+        legacy = true;
+        const checklist = evalUsesChecklist(node);
+        const evaluatedDigest = evalEvaluatedDigest(judgeableText(subjectName ? vars[subjectName] : undefined),
+          checklist && evidenceName ? judgeableText(vars[evidenceName]) : null,
+          checklist ? listEvalCorrections(automation.id, node.id) : null);
+        failure = { depth: 0, runId: latestFailed.runId, failureCode, evaluatedDigest, reworksDone: 0,
+          fingerprint: evalFailureFingerprint({ evalNodeId: node.id, evaluatedDigest, verdictCode: "legacy" }),
+          decision: decideEvalRework({ plan, stuck: failureCode === "EVAL_STUCK", reworksDone: 0, sameAsPrevious: false }) };
+      }
+      // A saved rework decision was made against the checkpoint it judged; re-check the restored one.
+      let decision: EvalReworkDecision = failure.decision.disposition === "rework"
+        ? decideEvalRework({ plan, stuck: false, reworksDone: failure.reworksDone, sameAsPrevious: false })
+        : failure.decision;
+      const attempt = failure.reworksDone + 1;
+      const priorFingerprint = legacy ? null : failure.fingerprint;
+      if (decision.disposition === "rework") {
+        try {
+          recordRunEvent({
+            runId, kind: EVAL_REWORK_EVENT_KIND, automationId: automation.id, nodeId: node.id,
+            sourceEventId: `graph-eval-rework:${node.id}`,
+            payload: {
+              schemaVersion: EVAL_REWORK_EVENT_SCHEMA, evalNodeId: node.id, attempt, sourceRunId: failure.runId,
+              reworkNodeIds: plan.reworkNodeIds, priorEvaluatedDigest: failure.evaluatedDigest,
+              ...(priorFingerprint ? { priorFingerprint } : {}),
+            },
+          });
+        } catch {
+          decision = { disposition: "stop", reasonCode: "eval_rework_unrecorded" };
+        }
+      }
+      if (decision.disposition === "stop") {
+        const produces = str(node.config ?? {}, "produces") ?? `${node.id}_verdict`;
+        const lastReason = typeof vars[`${produces}_reason`] === "string" ? String(vars[`${produces}_reason`]).trim() : "";
+        const label = node.label || node.id;
+        admissionPending.set(node.id, {
+          code: failure.failureCode,
+          reason: L(
+            `검증 "${label}"이(가) 지난 시도에서 통과하지 못했고, 같은 결과를 다시 판정하지 않았습니다.${lastReason ? `\n${lastReason}` : ""}`,
+            `Check "${label}" did not pass on the last attempt, and the same result was not judged again.${lastReason ? `\n${lastReason}` : ""}`,
+          ),
+          nextAction: evalReworkNextAction(decision, labelsOf, plan, 0),
+        });
+        automaticRetryStop ??= { nodeId: node.id, reasonCode: decision.reasonCode, fingerprint: priorFingerprint };
+        continue;
+      }
+      for (const id of plan.reworkNodeIds) {
+        const reworked = graph.nodes.find((candidate) => candidate.id === id)!;
+        completed.delete(id);
+        skipped.delete(id);
+        delete outputs[id];
+        const produced = graphNodeProducedVar(reworked);
+        if (produced) delete vars[produced];
+        delete checkpoint.nodeInputDigests[id];
+        delete checkpoint.toolReceipts[id];
+        delete checkpoint.prepareReceipts[id];
+      }
+      evalReworkState.set(node.id, { attempt, priorFingerprint, priorEvaluatedDigest: failure.evaluatedDigest });
+      evalReworkScope.set(node.id, new Set(plan.reworkNodeIds));
+      console.info("[graph] failed check reworks its judged steps", JSON.stringify({
+        automationId: automation.id, failedRunId: failure.runId, evalNodeId: node.id, reworkNodeIds: plan.reworkNodeIds, attempt,
+      }));
+    }
+  }
   // ★재개할 때, **다시 돌 노드가 지난번에 막아 둔 출구**는 풀어 준다.
   //
   //   막힘은 지난 실행의 판단이다. 그 노드를 다시 돌리기로 한 이상 판단도 다시 해야 하는데,
@@ -2366,8 +2760,13 @@ export async function runGraph(
   const commonScopes = new Map<string, GraphWorkRecoveryScope>();
   const commonScope = (node: WorkflowNode, originalPrompt: string): GraphWorkRecoveryScope => ({
     automationId: automation.id, occurrenceId: checkpoint!.occurrenceId, nodeId: node.id, graphDigest,
-    loops: loops.filter(loop => loop.body.includes(node.id))
-      .map(loop => [loop.edgeId, loopIterations.get(loop.edgeId) ?? 0] as const).sort((a, b) => a[0].localeCompare(b[0])),
+    // A rework of a failed check is an iteration of the judged step: its own work unit, so the completed
+    // attempt's result is never restored in place of the rework.
+    loops: [...loops.filter(loop => loop.body.includes(node.id))
+      .map(loop => [loop.edgeId, loopIterations.get(loop.edgeId) ?? 0] as const),
+    ...[...evalReworkScope].filter(([, ids]) => ids.has(node.id))
+      .map(([evalNodeId]) => [`eval-rework:${evalNodeId}`, evalReworkState.get(evalNodeId)?.attempt ?? 0] as const)]
+      .sort((a, b) => a[0].localeCompare(b[0])),
     inputDigest: sha256Value({ graphDigest, nodeId: node.id, config: node.config, originalPrompt, initialVars }), ownerEpoch: runId,
   });
   const commonFacts = (node: WorkflowNode) => ({ userStopped: runSignal.aborted, scopeCurrent: true,
@@ -2498,6 +2897,13 @@ export async function runGraph(
   // ★실행(run) 스코프다: 새 실행은 빈 상태에서 시작한다. 같은 실행의 반복 바퀴 사이에서만 비교한다.
   const evalFailSignatures = new Map<string, string>();
   const evalFeedback = new Map<string, string>();
+  // A resumed rework carries the failed check's own reasons (its `<produces>_reason`, sealed in the checkpoint).
+  for (const evalNodeId of evalReworkScope.keys()) {
+    const evalNode = graph.nodes.find((candidate) => candidate.id === evalNodeId);
+    const produces = (evalNode && str(evalNode.config ?? {}, "produces")) ?? `${evalNodeId}_verdict`;
+    const reason = vars[`${produces}_reason`];
+    if (typeof reason === "string" && reason.trim()) evalFeedback.set(evalNodeId, reason);
+  }
 
   /** 실행 후 실제 사용량을 반영한다. 상한이 있는데 보고가 없으면 그 사실을 남긴다. */
   const settleBudget = (node: WorkflowNode, tokens: number | undefined): void => {
@@ -3142,6 +3548,61 @@ export async function runGraph(
     ok = false;
   };
 
+  /**
+   * A check failed and nothing in the graph receives the failure. Decide, once, what a resume may do:
+   * rework the judged steps (bounded, replay-safe only) or stop with a typed reason. The receipt lets
+   * the next attempt continue the same budget and recognise an identical result.
+   */
+  const settleEvalFailure = (node: WorkflowNode, input: {
+    evaluatedDigest: string; verdictCode: string; failureCode: "EVAL_FAILED" | "EVAL_STUCK";
+  }): { decision: EvalReworkDecision; nextAction: string } => {
+    const state = evalReworkState.get(node.id);
+    const evaluatedDigest = input.evaluatedDigest;
+    // An unchanged rework result was not judged again; it carries the previous failure's fingerprint.
+    const unchanged = !!state && state.priorEvaluatedDigest === evaluatedDigest;
+    const fingerprint = unchanged && state.priorFingerprint
+      ? state.priorFingerprint
+      : evalFailureFingerprint({ evalNodeId: node.id, evaluatedDigest, verdictCode: input.verdictCode });
+    const sameAsPrevious = unchanged || (!!state?.priorFingerprint && state.priorFingerprint === fingerprint);
+    const reworksDone = state?.attempt ?? 0;
+    const plan = planEvalRework(graph, node.id, checkpoint!, completed, effectNodeIds,
+      [runId, ...(resumeOfRunId ? graphRunLineage(automation.id, resumeOfRunId) : [])]);
+    let decision = decideEvalRework({ plan, stuck: input.failureCode === "EVAL_STUCK", reworksDone, sameAsPrevious });
+    try {
+      recordRunEvent({
+        runId, kind: EVAL_FAILURE_EVENT_KIND, automationId: automation.id, nodeId: node.id,
+        sourceEventId: `graph-eval-failure:${node.id}`,
+        payload: {
+          schemaVersion: EVAL_FAILURE_EVENT_SCHEMA, evalNodeId: node.id, failureCode: input.failureCode,
+          verdictCode: input.verdictCode, evaluatedDigest, fingerprint, reworksDone, disposition: decision.disposition,
+          ...(decision.disposition === "stop" ? { reasonCode: decision.reasonCode } : {}),
+          reworkNodeIds: plan.reworkNodeIds, unsafeNodeIds: plan.unsafe.map((row) => row.nodeId),
+        },
+      });
+    } catch {
+      // Without the receipt the next attempt cannot count this rework or see an identical result.
+      if (decision.disposition === "rework") decision = { disposition: "stop", reasonCode: "eval_rework_unrecorded" };
+    }
+    if (decision.disposition === "stop") automaticRetryStop ??= { nodeId: node.id, reasonCode: decision.reasonCode, fingerprint };
+    const labelsOf = (ids: string[]): string =>
+      ids.map((id) => graph.nodes.find((candidate) => candidate.id === id)?.label || id).join(", ");
+    return { decision, nextAction: evalReworkNextAction(decision, labelsOf, plan, Math.max(0, MAX_EVAL_REWORKS - reworksDone)) };
+  };
+  /** The rework returned exactly what was already judged: same input, same verdict. It is not judged again. */
+  const failUnchangedRework = (node: WorkflowNode, produces: string, evaluatedDigest: string): void => {
+    const settled = settleEvalFailure(node, { evaluatedDigest, verdictCode: "unjudged:unchanged", failureCode: "EVAL_FAILED" });
+    const lastReason = typeof vars[`${produces}_reason`] === "string" ? String(vars[`${produces}_reason`]).trim() : "";
+    journal("node_settled", node.id, { verdict: "fail", unchangedRework: true });
+    failGraphNode(node, {
+      code: "EVAL_FAILED",
+      reason: L(
+        `검증 "${node.label || node.id}"이(가) 통과하지 못했습니다: 다시 한 앞 단계가 이미 판정한 결과와 같은 결과를 냈습니다.${lastReason ? `\n${lastReason}` : ""}`,
+        `Verification "${node.label || node.id}" did not pass: the reworked step returned the result already judged.${lastReason ? `\n${lastReason}` : ""}`,
+      ),
+      nextAction: settled.nextAction,
+    });
+  };
+
   /** Value-only diagnostics: each actual call has its own join key even in graph loops. */
   const recordEvalJudgment = (node: WorkflowNode, phase: "criteria" | "checklist" | "stability",
     result?: import("../system-agents/judgment").JudgmentDiagnostics & {
@@ -3475,8 +3936,13 @@ export async function runGraph(
           }
           // 사람의 교정 기록 — 판정이 그래프 주인의 기준을 배우는 통로.
           //   (1차 판정과 흔들림 재판정이 같은 교정을 봐야 하므로 시도 블록 밖에서 읽는다.)
-          const { listEvalCorrections } = await import("../store/automations");
           const corrections = listEvalCorrections(automation.id, node.id);
+          const evidenceText = evidenceValue != null ? judgeableText(evidenceValue) : null;
+          const evaluatedDigest = evalEvaluatedDigest(subjectText, evidenceText, corrections);
+          if (evalReworkState.get(node.id)?.priorEvaluatedDigest === evaluatedDigest) {
+            failUnchangedRework(node, produces, evaluatedDigest);
+            return;
+          }
           let list: import("../system-agents/judgment").ChecklistVerdict;
           try {
             const { judgeChecklist } = await import("../system-agents/judgment");
@@ -3597,16 +4063,18 @@ export async function runGraph(
                *   떨어진 사실은 사라지지 않는다 — 아래에서 실행 기록에 그대로 남는다.
                */
               if (evalIsBoundary(node)) {
+                const settled = settleEvalFailure(node, {
+                  evaluatedDigest,
+                  verdictCode: `items:${list.items.filter((v) => v.verdict === "no").map((v) => v.id).sort().join(",")}`,
+                  failureCode: "EVAL_FAILED",
+                });
                 failGraphNode(node, {
                   code: "EVAL_FAILED",
                   reason: L(
                     `검증 "${node.label || node.id}"이(가) 통과하지 못했습니다:\n${list.reasonText}`,
                     `Verification "${node.label || node.id}" did not pass:\n${list.reasonText}`,
                   ),
-                  nextAction: L(
-                    "앞 단계의 지시를 고치거나, 이 검증이 떨어졌을 때 다시 시도할 경로를 그려 주세요.",
-                    "Fix the earlier step's instructions, or draw a retry path for when this verification fails.",
-                  ),
+                  nextAction: settled.nextAction,
                 });
                 return;
               }
@@ -3622,9 +4090,11 @@ export async function runGraph(
             const signature = failedIds.join(",");
             evalFailSignatures.set(node.id, signature);
             evalFeedback.set(node.id, list.reasonText);
+            evalReworkScope.delete(node.id);
             if (prev !== undefined && prev === signature) {
               // ★같은 항목으로 연속 2회 — 더 돌려도 같은 이유로 떨어진다.
               //   상한을 다 태우지 않고 멈춰 사람에게 넘긴다(기준 자체가 안 맞을 수 있다).
+              settleEvalFailure(node, { evaluatedDigest, verdictCode: `items:${signature}`, failureCode: "EVAL_STUCK" });
               failGraphNode(node, {
                 code: "EVAL_STUCK",
                 reason: L(
@@ -3641,12 +4111,19 @@ export async function runGraph(
           } else {
             evalFailSignatures.delete(node.id);
             evalFeedback.delete(node.id);
+            evalReworkScope.delete(node.id);
           }
           completeNode(node.id);
           status.set(node.id, "done");
           return;
         }
 
+        // The criteria judge reads only the subject, so that is the evaluated input.
+        const criteriaDigest = evalEvaluatedDigest(subjectText, null);
+        if (evalReworkState.get(node.id)?.priorEvaluatedDigest === criteriaDigest) {
+          failUnchangedRework(node, produces, criteriaDigest);
+          return;
+        }
         let verdict: import("../system-agents/judgment").RequiredVerdict<"pass" | "fail">;
         try {
           const { judgeRequired } = await import("../system-agents/judgment");
@@ -3713,20 +4190,19 @@ export async function runGraph(
           ? `${verdict.verdict}: ${verdict.reason}`
           : verdict.verdict;
         journal("node_settled", node.id, { verdict: verdict.verdict });
+        if (verdict.verdict === "pass") { evalFeedback.delete(node.id); evalReworkScope.delete(node.id); }
         // 채점표 경로와 같은 규칙 — 아무도 안 받는 fail 은 지나칠 수 없다.
         if (verdict.verdict === "fail" && !evalFailureIsHandled(node.id, produces)) {
           // 위와 같은 규칙 — 금지선만 멈춘다. (한 문장 기준 경로)
           if (evalIsBoundary(node)) {
+            const settled = settleEvalFailure(node, { evaluatedDigest: criteriaDigest, verdictCode: "criteria:fail", failureCode: "EVAL_FAILED" });
             failGraphNode(node, {
               code: "EVAL_FAILED",
               reason: L(
                 `검증 "${node.label || node.id}"이(가) 통과하지 못했습니다${verdict.reason ? `: ${verdict.reason}` : "."}`,
                 `Verification "${node.label || node.id}" did not pass${verdict.reason ? `: ${verdict.reason}` : "."}`,
               ),
-              nextAction: L(
-                "앞 단계의 지시를 고치거나, 이 검증이 떨어졌을 때 다시 시도할 경로를 그려 주세요.",
-                "Fix the earlier step's instructions, or draw a retry path for when this verification fails.",
-              ),
+                  nextAction: settled.nextAction,
             });
             return;
           }
@@ -4230,7 +4706,9 @@ export async function runGraph(
         if (evalFeedback.size > 0 && !isOutwardOutput) {
           const alreadyReferenced = /\{\{\s*[\w-]*_reason\s*\}\}/.test(rawPrompt);
           if (!alreadyReferenced) {
-            const lines = [...evalFeedback.values()].filter((text) => text.trim());
+            const lines = [...evalFeedback.entries()]
+              .filter(([evalNodeId, text]) => text.trim() && (evalReworkScope.get(evalNodeId)?.has(node.id) ?? true))
+              .map(([, text]) => text);
             if (lines.length > 0) {
               feedbackBlock = [
                 "",
@@ -5825,7 +6303,8 @@ export async function runGraph(
         loginWaitSource: { automationId: automation.id, runId, occurrenceId: checkpoint!.occurrenceId, graphDigest }, ...failures, ...budget, ...brokerage }
     : ok
     ? { ok: true, outputs, vars, ...failures, ...simulation, ...budget, ...brokerage }
-    : { ok: false, outputs, vars, error, ...failures, ...simulation, ...budget, ...brokerage };
+    : { ok: false, outputs, vars, error, ...failures, ...simulation, ...budget, ...brokerage,
+        ...(automaticRetryStop ? { automaticRetry: { allowed: false as const, ...automaticRetryStop } } : {}) };
   // A late advisory check must not mutate the result already delivered to the
   // scheduler. Its child events carry the eventual checked outcome instead.
   result.outputs = { ...outputs };

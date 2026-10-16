@@ -82,6 +82,8 @@ export interface TriggerDispatchResult {
   status?: AutomationRunRecord["status"];
   error?: string | null;
   output?: string;
+  /** The run's failure is typed as one a resume cannot change; the event is not redelivered automatically. */
+  automaticRetry?: false;
 }
 
 function parsePayload(raw: string): { payload: TriggerEventPayload; valid: boolean } {

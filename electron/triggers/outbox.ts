@@ -132,6 +132,14 @@ async function deliverClaimedEvent(event: TriggerEventRecord, run: TriggerEventR
       }
       return;
     }
+    // The graph kernel typed this failure as one a redelivery cannot change (a failed check that cannot
+    // rework its judged steps, returned the same output again, or used its budget). Park it once.
+    if (result.automaticRetry === false) {
+      if (!parkTriggerEventClaim(event.id, OWNER, result.error ?? "trigger_event_deterministic_failure")) {
+        throw new Error("trigger_event_deterministic_failure_park_conflict");
+      }
+      return;
+    }
     const completedEvent = getTriggerEvent(event.id);
     if (completedEvent?.runId && completedEvent.runStatus === "ok") {
       if (!parkTriggerEventClaim(

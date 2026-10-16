@@ -1915,6 +1915,12 @@ export function markAutomationRun(
      */
     outcome?: AutomationRunRecord["outcome"];
     outcomeReason?: string | null;
+    /**
+     * False when the graph kernel typed this failure as one a resume cannot change (a failed check that
+     * cannot rework its judged steps safely, returned the same output again, or used its rework budget).
+     * No deferred retry is scheduled; the next natural slot (or none, for a one-shot) stands.
+     */
+    automaticRetry?: boolean;
   },
 ): void {
   const db = getDb();
@@ -1966,7 +1972,7 @@ export function markAutomationRun(
     || ["blocked", "needs_input", "rejected"].includes(opts?.outcome ?? "")
     || opts?.suspendForReconciliation === true;
   const deferRetry = internalDiagnostic || !executionConsumed || opts?.deferRetry !== false;
-  const retryNeeded = !executionConsumed || internalDiagnostic;
+  const retryNeeded = (!executionConsumed || internalDiagnostic) && opts?.automaticRetry !== false;
   const nextRunAt = retryNeeded && !pastEnd && triggerType === "schedule" && (advance || internalDiagnostic)
     ? !deferRetry
       ? computedNextRunAt

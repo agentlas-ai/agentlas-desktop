@@ -1176,6 +1176,11 @@ async function runOne(
    * 기계 판단(부수효과 모호 → 재실행 정지)은 반드시 이 값으로 한다.
    */
   let machineError: string | null = null;
+  /**
+   * The graph kernel's typed verdict that resuming cannot change this failure (a failed check whose judged
+   * steps cannot run again safely, returned the same output, or used their rework budget). No deferred retry.
+   */
+  let automaticRetryStopped: NonNullable<RunGraphResult["automaticRetry"]> | null = null;
   let workspaceFailure: AutomationWorkspaceError | null = null;
   let output: string | undefined;
   let currentRunId: string | null = null;
@@ -1612,6 +1617,12 @@ async function runOne(
         : result.error ?? null;
       runStatus = result.ok && !graphStall ? "ok" : "error";
       runError = graphError;
+      if (!result.ok && !graphStall && result.automaticRetry?.allowed === false) {
+        automaticRetryStopped = result.automaticRetry;
+        tryRecordRunEvent({ runId, automationId: a.id, nodeId: result.automaticRetry.nodeId, kind: "automation_retry_stopped",
+          payload: { schemaVersion: "agentlas.automation-retry-stop.v1", reasonCode: result.automaticRetry.reasonCode,
+            ...(result.automaticRetry.fingerprint ? { fingerprint: result.automaticRetry.fingerprint } : {}) } });
+      }
       // 판정이 이 문장을 사용자용으로 갈아끼우기 전에 원문을 붙들어 둔다(안전 판단용).
       machineError = graphHasUnconfirmedMutation
         ? `MUTATION_UNVERIFIED: ${graphError ?? "graph node effect was not confirmed"}`
@@ -1810,6 +1821,7 @@ async function runOne(
               finishedAt: new Date(),
               deferredRetryMs: SCHEDULE_RETRY_BASE_MS * 2 ** Math.max(0, occurrenceAttempt - 1),
               deferRetry: !graphLoginWait && occurrenceAttempt < MAX_SCHEDULE_OCCURRENCE_ATTEMPTS,
+              ...(automaticRetryStopped ? { automaticRetry: false } : {}),
               outcome: runOutcome,
               outcomeReason: runOutcomeReason,
               suspendForReconciliation: false,
@@ -2168,7 +2180,8 @@ async function runOne(
       }
     }
   }
-  return { accepted: true, automationId: a.id, runId: currentRunId, status: runStatus, error: runError, output };
+  return { accepted: true, automationId: a.id, runId: currentRunId, status: runStatus, error: runError, output,
+    ...(automaticRetryStopped ? { automaticRetry: false as const } : {}) };
 }
 
 export async function runDueAutomationsNow(now: Date = new Date()): Promise<void> {
