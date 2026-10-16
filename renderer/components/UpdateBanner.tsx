@@ -223,13 +223,14 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
           {!collapsed && showReleaseNotes && (
             <div className="sidenav-update-changelog" id={releaseNotesId}>
               <p className="sidenav-update-description">{t("update.ready_description")}</p>
-              <strong>{t("update.changelog_title")}</strong>
-              {releaseNoteLines.length > 0 ? (
-                <ul>
-                  {releaseNoteLines.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}
-                </ul>
-              ) : (
-                <p>{t("update.changelog_unavailable")}</p>
+              {/* No in-app summary: just the link (owner rule: minimal text, no explanation of internals). */}
+              {releaseNoteLines.length > 0 && (
+                <>
+                  <strong>{t("update.changelog_title")}</strong>
+                  <ul>
+                    {releaseNoteLines.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}
+                  </ul>
+                </>
               )}
               <div className="sidenav-update-changelog-actions">
                 <button
@@ -237,7 +238,7 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
                   className="sidenav-update-release-link"
                   onClick={() => void openReleaseNotes()}
                 >
-                  {t("update.open_release_notes")}
+                  {t(releaseNoteLines.length > 0 ? "update.open_release_notes" : "update.release_notes")}
                 </button>
                 <button
                   type="button"

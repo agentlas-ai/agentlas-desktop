@@ -6,7 +6,7 @@ import { Markdown } from "@/components/Markdown";
 import { IconArrowLeft, IconClose, IconLock, IconSearch } from "@/components/Icon";
 import type { OneCapabilitiesAPI, OneCapabilityDetail, OneCapabilityItem, OneCapabilityKind, OneCapabilityRole } from "../../../shared/one-capabilities";
 import {
-  CAPABILITY_KIND_ORDER, capabilityTitle, CAPABILITY_PAGE_SIZE, CAPABILITY_SOURCE_ORDER, detailIsMarkdown, filterCapabilities, itemEnabledTotals,
+  CAPABILITY_KIND_ORDER, capabilityDescription, capabilityTitle, CAPABILITY_PAGE_SIZE, CAPABILITY_SOURCE_ORDER, detailIsMarkdown, filterCapabilities, itemEnabledTotals,
   kindCounts, kindLabel, limitTip, sourceBadge, sourceCounts, sourceLabel, SWITCH_TIMING_TIP, toggleCapability,
   type CapabilityLocale, type CapabilitySourceFilter,
 } from "@/lib/one-capabilities-view";
@@ -88,7 +88,7 @@ export function OneCapabilitiesModal({ open, locale, onClose, api: apiProp, init
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiProp]);
 
-  const visible = useMemo(() => filterCapabilities(items, { kind, source, query }), [items, kind, source, query]);
+  const visible = useMemo(() => filterCapabilities(items, { kind, source, query, locale }), [items, kind, source, query, locale]);
   const navCounts = useMemo(() => kindCounts(items, source), [items, source]);
   // Only Agentlas's own items are listed (owner 2026-10-14): a kind with nothing in it is not shown, and the screen
   // opens on the first kind that has items instead of an empty list.
@@ -124,7 +124,7 @@ export function OneCapabilitiesModal({ open, locale, onClose, api: apiProp, init
   // No switch where no run can enforce one: a lock with the reason instead (owner 2026-10-12).
   const switchFor = (item: OneCapabilityItem) => item.applies ? (
     <CapabilitySwitch checked={item.enabled} tip={SWITCH_TIMING_TIP[locale]}
-      label={`${capabilityTitle(item)} ${item.enabled ? copy("끄기", "Turn off") : copy("켜기", "Turn on")}`}
+      label={`${capabilityTitle(item, locale)} ${item.enabled ? copy("끄기", "Turn off") : copy("켜기", "Turn on")}`}
       onChange={(next) => void toggle(item.id, next)} />
   ) : (
     <span className={styles.locked} role="img" aria-label={limitTip(item, locale)} title={limitTip(item, locale)} data-capability-locked={item.limit ?? "runtime_reads_itself"}>
@@ -150,7 +150,7 @@ export function OneCapabilitiesModal({ open, locale, onClose, api: apiProp, init
             <ol className={styles.crumbs} aria-label={copy("현재 위치", "Breadcrumb")}>
               <li><button type="button" onClick={closeDetail}>{title}</button></li>
               <li><button type="button" onClick={closeDetail} aria-current={detailId ? undefined : "page"}>{kindLabel(kind, locale)}</button></li>
-              {detailId && <li aria-current="page">{openItem ? capabilityTitle(openItem) : detail?.name ?? ""}</li>}
+              {detailId && <li aria-current="page">{openItem ? capabilityTitle(openItem, locale) : detail?.name ?? ""}</li>}
             </ol>
             <button type="button" className={styles.iconButton} aria-label={copy("닫기", "Close")} data-capability-close="true" onClick={onClose}><IconClose size={14} /></button>
           </header>
@@ -158,8 +158,8 @@ export function OneCapabilitiesModal({ open, locale, onClose, api: apiProp, init
             <div className={styles.detail} data-capability-detail={detailId}>
               <div className={styles.detailTop}>
                 <div className={styles.rowText}>
-                  <strong>{openItem ? capabilityTitle(openItem) : detail?.name}</strong>
-                  {openItem?.description && <span>{openItem.description}</span>}
+                  <strong>{openItem ? capabilityTitle(openItem, locale) : detail?.name}</strong>
+                  {openItem && capabilityDescription(openItem, locale) && <span>{capabilityDescription(openItem, locale)}</span>}
                 </div>
                 {openItem && <span className={styles.badge} data-personal={sourceBadge(openItem.source, locale).personal ? "true" : "false"}>{sourceBadge(openItem.source, locale).label}</span>}
                 {openItem && switchFor(openItem)}
@@ -202,8 +202,8 @@ export function OneCapabilitiesModal({ open, locale, onClose, api: apiProp, init
                       <div className={styles.row} role="button" tabIndex={0} onClick={() => setDetailId(item.id)}
                         onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setDetailId(item.id); } }}>
                         <div className={styles.rowText}>
-                          <strong>{capabilityTitle(item)}</strong>
-                          {item.description && <span>{item.description}</span>}
+                          <strong>{capabilityTitle(item, locale)}</strong>
+                          {capabilityDescription(item, locale) && <span>{capabilityDescription(item, locale)}</span>}
                         </div>
                         <span className={styles.badge} data-personal={badge.personal ? "true" : "false"}>{badge.label}</span>
                         {roleFor(item)}

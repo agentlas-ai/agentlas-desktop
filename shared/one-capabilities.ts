@@ -11,6 +11,9 @@ export interface OneCapabilityItem {
   /** Display name when it differs from the runtime key in `name`. */
   title?: string;
   description: string;
+  /** Korean display name and description when the item's own manifest carries them; the screen picks by locale. */
+  titleKo?: string;
+  descriptionKo?: string;
   path: string;
   enabled: boolean;
   /** False: no switch is offered; `limit` says why. Agentlas built-ins never reach the renderer at all. */

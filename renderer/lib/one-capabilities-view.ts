@@ -46,16 +46,21 @@ export function sourceBadge(source: OneCapabilitySource, locale: CapabilityLocal
   return { label: `${locale === "ko" ? "개인" : "Personal"} · ${SOURCE_NAME[source]}`, personal: true };
 }
 
-export interface CapabilityFilter { kind: OneCapabilityKind; source: CapabilitySourceFilter; query: string }
+export interface CapabilityFilter { kind: OneCapabilityKind; source: CapabilitySourceFilter; query: string; locale?: CapabilityLocale }
 
 const norm = (value: string): string => value.normalize("NFKC").toLocaleLowerCase();
 
-export const capabilityTitle = (item: Pick<OneCapabilityItem, "name" | "title">): string => item.title || item.name;
+/** The item's name in the screen's language: its own Korean name on the Korean screen when it has one. */
+export const capabilityTitle = (item: Pick<OneCapabilityItem, "name" | "title" | "titleKo">, locale?: CapabilityLocale): string =>
+  (locale === "ko" ? item.titleKo : undefined) || item.title || item.name;
+/** The item's description in the screen's language. */
+export const capabilityDescription = (item: Pick<OneCapabilityItem, "description" | "descriptionKo">, locale?: CapabilityLocale): string =>
+  (locale === "ko" ? item.descriptionKo : undefined) || item.description;
 
-export function matchesQuery(item: Pick<OneCapabilityItem, "name" | "title" | "description">, query: string): boolean {
+export function matchesQuery(item: Pick<OneCapabilityItem, "name" | "title" | "description" | "titleKo" | "descriptionKo">, query: string): boolean {
   const terms = norm(query).split(/\s+/).filter(Boolean);
   if (!terms.length) return true;
-  const hay = norm(`${item.name} ${item.title ?? ""} ${item.description}`);
+  const hay = norm(`${item.name} ${item.title ?? ""} ${item.description} ${item.titleKo ?? ""} ${item.descriptionKo ?? ""}`);
   return terms.every((term) => hay.includes(term));
 }
 
@@ -63,7 +68,7 @@ export function matchesQuery(item: Pick<OneCapabilityItem, "name" | "title" | "d
 export function filterCapabilities(items: readonly OneCapabilityItem[], filter: CapabilityFilter): OneCapabilityItem[] {
   return items
     .filter((item) => item.kind === filter.kind && (filter.source === "all" || item.source === filter.source) && matchesQuery(item, filter.query))
-    .sort((a, b) => Number(b.enabled) - Number(a.enabled) || capabilityTitle(a).localeCompare(capabilityTitle(b)));
+    .sort((a, b) => Number(b.enabled) - Number(a.enabled) || capabilityTitle(a, filter.locale).localeCompare(capabilityTitle(b, filter.locale)));
 }
 
 /** Left-nav counts: how many items each kind has under the current source filter (search is not applied). */

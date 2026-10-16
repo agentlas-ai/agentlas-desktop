@@ -37,6 +37,9 @@ export interface CapabilityItem {
   /** Display name when it differs from the runtime key in `name` (a plugin key is `slug@marketplace`). */
   title?: string;
   description: string;
+  /** Korean display name and description, when the item's own manifest carries them (an Agentlas plugin's surface). */
+  titleKo?: string;
+  descriptionKo?: string;
   path: string;
   enabled: boolean;
   /** Whether a product run can enforce this item's switch (false: listed with `limit`, never switchable). */
@@ -568,8 +571,13 @@ function agentlasItems(r: CapabilityRoots): Draft[] {
     if (!manifest || typeof manifest !== "object" || !/^agentlas\.plugin\//.test(str(manifest.schema)) || str(manifest.slug) !== name) continue;
     const surface = (manifest.surface && typeof manifest.surface === "object" ? manifest.surface : {}) as Record<string, unknown>;
     const title = str(surface.displayName) || str(manifest.name) || name;
+    // The Korean screen showed the English text although the package carries its own Korean (displayNameKo,
+    // descriptionKo/taglineKo); the renderer picks by locale (one-capabilities-view.ts).
+    const titleKo = str(surface.displayNameKo);
+    const descriptionKo = oneLine(str(surface.descriptionKo) || str(surface.taglineKo) || str(manifest.descriptionKo));
     out.push({ key: dir, canon: name.toLowerCase(), kind: "plugin", source: "agentlas", name: title, title,
       description: oneLine(str(surface.description) || str(surface.tagline) || str(manifest.description)), path: dir, applies: false,
+      ...(titleKo ? { titleKo } : {}), ...(descriptionKo ? { descriptionKo } : {}),
       ...(bundled.has(name) ? { builtin: true } : { limit: "agentlas_managed" as const }) });
   }
   return out;
