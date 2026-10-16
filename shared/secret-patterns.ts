@@ -38,9 +38,25 @@ const SECRET_SHAPES: RegExp[] = [
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
 ];
 
-/** `password: hunter2` style assignments, where the value shape alone proves nothing. */
-const SECRET_ASSIGNMENT_RE =
-  /\b(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|bearer)\b\s*[:=]\s*\S+/i;
+/*
+ * Credential assignments (`password: hunter22`, `token=…`): ONE rule for every boundary (review 2026-10-16 H4). Before,
+ * this list and the mobile bridge sanitizer each had their own: the sanitizer also caught bare token/session/cookie, so
+ * `token=<value>` passed the suggestion validator while the phone redacted it, and the phone (which copies the bridge
+ * sanitizer verbatim) disagreed with every Desktop write boundary. Measured on the owner's store before choosing the
+ * value shape: a plain union of the two key lists newly flagged 3 of 4,571 memory entries, all prose ("session: <word>",
+ * "token: <Korean word>") — each of those boundaries drops or rewrites the whole item. So:
+ *   - a key that only ever names a credential (password, passwd, secret, api key, access/auth token) counts with any
+ *     value of 4+ characters;
+ *   - a key that is also an everyday word (token, session, cookie, pwd, bearer, authorization) counts in config syntax
+ *     (`token=value`, no space before the value, 4+ characters), or with any separator when the value is
+ *     credential-shaped: 6+ characters holding a digit, or a 16+ character run of key characters. Prose such as
+ *     "session: Tuesday" stays. An `Authorization: Bearer …` header is still caught by the Bearer shape at the
+ *     boundaries that have it.
+ * Exported as a source string so the mobile bridge sanitizer builds its pattern from it; the phone ports it verbatim.
+ */
+const ASSIGNMENT_VALUE_CHAR = String.raw`[^,\s"'}\`\]]`;
+export const SECRET_ASSIGNMENT_SOURCE = String.raw`\b(?:(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token)\b\s*[:=]\s*["']?${ASSIGNMENT_VALUE_CHAR}{4,}|(?:token|session|cookie|pwd|bearer|authorization)\b(?:=["']?${ASSIGNMENT_VALUE_CHAR}{4,}|\s*[:=]\s*["']?(?:(?=${ASSIGNMENT_VALUE_CHAR}*[0-9])${ASSIGNMENT_VALUE_CHAR}{6,}|[A-Za-z0-9._~+=-]{16,})))`;
+const SECRET_ASSIGNMENT_RE = new RegExp(SECRET_ASSIGNMENT_SOURCE, "i");
 
 /** Single source of truth. Case-insensitive: providers are inconsistent about casing. */
 export const SECRET_PATTERNS: RegExp[] = [
