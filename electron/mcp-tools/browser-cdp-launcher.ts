@@ -3317,6 +3317,9 @@ function reportSocialEngage(report) {
   });
 }
 function browserApprovalFailure(denied) {
+  const refused = /^approval-refused:([a-z][a-z0-9_]{2,63}):([\s\S]*)$/.exec(String(denied));
+  if (refused) return { code: refused[1], content: [{ type: 'text', text: refused[2] || ('REFUSED: ' + refused[1] + '. The action was not executed.') }], isError: true,
+    _meta: { agentlasToolDispatch: 'not-dispatched', agentlasFailureCode: refused[1] } };
               const code = denied === 'approval-expired' ? 'approval_expired'
                 : denied === 'approval-cancelled' ? 'cancelled'
                 : denied === 'approval-required' || denied === 'approval-unavailable' || denied === 'unverified-site' ? 'approval_required' : 'approval_declined';
@@ -3352,7 +3355,10 @@ function requestApproval(site, actionType, summary, signal) {
     if (!info || !info.port) { log('no approver (app not running); autonomy=' + autonomy + ' action=' + actionType); return finish('unavailable'); }
     const payload = JSON.stringify({ site, actionType, summary, authority: process.env.AGENTLAS_BROWSER_APPROVAL_AUTHORITY });
     req = http.request({ host: '127.0.0.1', port: info.port, path: '/approve', method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'authorization': 'Bearer ' + info.token }, timeout: 125000 }, (res) => {
-      let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => { try { const decision = JSON.parse(b).decision; finish(['approved', 'denied', 'expired', 'cancelled', 'required'].includes(decision) ? decision : 'unavailable'); } catch (e) { finish('unavailable'); } });
+      let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => { try { const answer = JSON.parse(b); const decision = answer.decision;
+        // Main refused the action itself (typed, e.g. the per-item publish record): the code and Main's message reach the tool result.
+        if (decision === 'refused' && typeof answer.code === 'string' && /^[a-z][a-z0-9_]{2,63}$/.test(answer.code)) { finish('refused:' + answer.code + ':' + String(answer.message || '').replace(/[\u0000-\u001f]+/g, ' ').slice(0, 600)); return; }
+        finish(['approved', 'denied', 'expired', 'cancelled', 'required'].includes(decision) ? decision : 'unavailable'); } catch (e) { finish('unavailable'); } });
     });
     req.on('error', () => finish(signal && signal.aborted ? 'cancelled' : 'unavailable'));
     req.on('timeout', () => { finish('expired'); req.destroy(); });

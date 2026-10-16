@@ -129,6 +129,16 @@ export function startBrowserApprovalServer(): Promise<number> {
             }));
             return;
           }
+          // A publish in a session acting for a room-saved automation step publishes one checked, unpublished item
+          // (one/graph-effect-items.ts). A refusal is typed and reaches the model as the tool's error; the click never runs.
+          const admission = (require("../one/graph-effect-items") as typeof import("../one/graph-effect-items")).graphEffectPublishAdmission({
+            chatId: authority.owner.chatId, actionType: parsed.actionType ?? "action", site: parsed.site ?? "",
+          });
+          if (admission.refused) {
+            logBrowserAction({ site: parsed.site ?? null, action: parsed.actionType ?? "action", target: parsed.target, result: "blocked", approval: admission.code });
+            res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ decision: "refused", code: admission.code, message: admission.message }));
+            return;
+          }
           const decision = await browserRequestApproval({
             site: parsed.site ?? "",
             actionType: parsed.actionType ?? "action",

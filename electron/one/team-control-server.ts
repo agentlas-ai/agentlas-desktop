@@ -163,16 +163,53 @@ export function oneTeamResultFailureCode(result: unknown): string | null {
   return r.ok === false && typeof r.code === "string" && r.code ? r.code : null;
 }
 
+/**
+ * effect_item_check / effect_item_record (one/graph-effect-items.ts): only for a capability that holds them, scoped by
+ * the host to the automation step the session acts for (the graph-step grant, or the teammate's graph-owned dispatch).
+ * Nothing about the automation, occurrence, run or step is read from the model.
+ */
+function graphEffectOperation(binding: OneTeamCapabilityBinding, request: Record<string, unknown>): unknown {
+  const name = String(request.name ?? "");
+  if (!binding.tools?.includes(name)) throw new Error("one-team-effect-item-scope");
+  const effects = require("./graph-effect-items") as typeof import("./graph-effect-items");
+  let scope: import("./graph-effect-items").GraphEffectScope | null = null;
+  if (binding.scope === "graph-step") {
+    const grants = require("./graph-team-grant") as typeof import("./graph-team-grant");
+    if (!grants.graphTeamGrantCurrent(binding.graphTeamGrant) || binding.graphTeamGrant.ownerChatId !== binding.chatId) throw new Error("one-team-graph-authority-changed");
+    if (!binding.graphTeamGrant.effectTools.includes(name)) throw new Error("one-team-effect-item-scope");
+    scope = effects.graphEffectScopeForGrant(binding.graphTeamGrant);
+  } else if (binding.scope === "room-member") {
+    scope = effects.graphEffectScopeForTeammate(binding.chatId);
+  }
+  if (!scope) return { ok: false, code: "effect_item_scope_unavailable", message: "this session no longer works for an automation step; nothing was checked or recorded" };
+  const input = request.input && typeof request.input === "object" && !Array.isArray(request.input) ? request.input as Record<string, unknown> : {};
+  if (name === "effect_item_check") return effects.effectItemCheck(scope, input);
+  if (name === "effect_item_record") return effects.effectItemRecord(scope, input);
+  throw new Error("one-team-effect-item-scope");
+}
+
+/** The session whose publish clicks the effect tools of this capability govern (graph-effect-items publish admission). */
+function effectToolSession(binding: OneTeamCapabilityBinding): string | null {
+  if (!binding.tools?.some((name) => name === "effect_item_check")) return null;
+  if (binding.scope === "graph-step") return binding.graphTeamGrant?.chatId ?? null;
+  return binding.scope === "room-member" ? binding.chatId : null;
+}
+
 async function handleOneTeamControlRequestUnchecked(request: Record<string, unknown>): Promise<unknown> {
   if (typeof request.token !== "string" || !serverToken || request.token !== serverToken) throw new Error("one-team-capability-invalid");
   const binding = typeof request.capabilityId === "string" ? capabilities.get(request.capabilityId) : undefined;
   if (!binding) throw new Error("one-team-capability-invalid");
   // A teammate working on a hand-off from a group room: room_say and nothing else, checked here, not in the child.
   if (binding.scope === "room-member") {
+    if (request.operation === "effect") return graphEffectOperation(binding, request);
     if (request.operation !== "room" || !binding.tools?.includes("room_say")) throw new Error("one-team-room-member-scope");
     return (await import("./room-chat")).roomChat().say(binding.chatId, { text: request.text, to: request.to, replyTo: request.replyTo });
   }
   if (request.operation === "room") throw new Error("one-team-room-member-scope");
+  if (request.operation === "effect") {
+    if (binding.scope !== "graph-step") throw new Error("one-team-effect-item-scope");
+    return graphEffectOperation(binding, request);
+  }
   // A graph step acting for its room: the listed team tools only, while the graph authority it started with is current.
   if (binding.scope === "graph-step") {
     const grants = require("./graph-team-grant") as typeof import("./graph-team-grant");
@@ -260,6 +297,10 @@ async function handleOneTeamControlRequestUnchecked(request: Record<string, unkn
 function dispose(): void {
   try { forgetAllOneToolchainNativeCapabilities(); }
   finally {
+    for (const binding of capabilities.values()) {
+      const effectSession = effectToolSession(binding);
+      if (effectSession) try { (require("./graph-effect-items") as typeof import("./graph-effect-items")).unmarkGraphEffectToolSession(effectSession); } catch { /* shutting down */ }
+    }
     capabilities.clear();
     if (server) {
       try { server.close(); } catch { /* best effort */ }
@@ -345,6 +386,8 @@ export async function createOneTeamCapability(
   if(tools&&!graphStep)tools=[...tools.filter(name=>!(ONE_HISTORY_TOOL_NAMES as readonly string[]).includes(name)),...(historySource?['one_history_source_read']:personalSupervisorConversation(input.chatId)?ONE_HISTORY_TOOL_NAMES.filter(name=>name!=='one_history_source_read'):[])];
   const binding: OneTeamCapabilityBinding = { ...input, ...(tools ? { tools } : {}), ...(personalSource?{personalSource}:{}), ...(historySource?{historySource}:{}), capabilityId: randomUUID() };
   capabilities.set(binding.capabilityId, binding);
+  const effectSession = effectToolSession(binding);
+  if (effectSession) (require("./graph-effect-items") as typeof import("./graph-effect-items")).markGraphEffectToolSession(effectSession);
   let target: string | null = null, temp: string | null = null;
   try {
     registerOneToolchainNativeCapability(binding, () => capabilities.get(binding.capabilityId) === binding);
@@ -362,6 +405,7 @@ export async function createOneTeamCapability(
     // Failed publication must not leave an unpublished native capability live.
     try { forgetOneToolchainNativeCapability(binding); } catch { /* all local revocation still follows */ }
     capabilities.delete(binding.capabilityId);
+    if (effectSession) (require("./graph-effect-items") as typeof import("./graph-effect-items")).unmarkGraphEffectToolSession(effectSession);
     for (const file of [temp, target]) if (file) {
       try { fs.rmSync(file, { force: true }); } catch { /* exact unpublished capability file cleanup is best effort */ }
     }
@@ -385,6 +429,8 @@ export function removeOneTeamCapability(configKey: string, capabilityId: string)
   try { if (binding) forgetOneToolchainNativeCapability(binding); }
   finally {
     capabilities.delete(capabilityId);
+    const effectSession = binding ? effectToolSession(binding) : null;
+    if (effectSession) (require("./graph-effect-items") as typeof import("./graph-effect-items")).unmarkGraphEffectToolSession(effectSession);
     try { fs.rmSync(capabilityPath(configKey, capabilityId), { force: true }); } catch { /* best effort */ }
   }
 }

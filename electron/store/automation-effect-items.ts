@@ -31,7 +31,9 @@ export interface AutomationEffectItem {
 }
 
 const MAX_FIELD = 512;
-const ledgerRunId = (automationId: string): string => `automation-effect-items:${automationId}`;
+/** The ledger run that holds every per-item fact of one automation (records here, host-seen publish attempts in one/graph-effect-items). */
+export const automationEffectLedgerRunId = (automationId: string): string => `automation-effect-items:${automationId}`;
+const ledgerRunId = automationEffectLedgerRunId;
 const itemSourceId = (effectKind: AutomationEffectKind, itemKey: string): string =>
   `${effectKind}:${createHash("sha256").update(itemKey, "utf8").digest("hex")}`;
 

@@ -27,6 +27,11 @@ export const AGENTLAS_ONE_TEAM_TOOL_NAMES = [
 
 /** Offered only to a teammate working on a hand-off from a group room (its own capability), never to One. */
 export const ROOM_MEMBER_TOOL_NAMES = ["room_say"] as const;
+/**
+ * Per-item outside-effect tools (one/graph-effect-items.ts): offered only to a session acting for a room-saved graph
+ * step (its graph-step grant, or a teammate on a dispatch that step owns), never to an unscoped One conversation.
+ */
+export const GRAPH_EFFECT_ITEM_TOOL_NAMES = ["effect_item_check", "effect_item_record"] as const;
 
 // Inline discovery uses concise guidance; canonical input schemas and annotations
 // remain exact. This keeps the authenticated compressed launch below its 12k limit.
@@ -104,6 +109,9 @@ const tools = [
   { name: "one_team_compose_group", annotations: act, description: "Make this exact One conversation a group with specified EXISTING active local teammates, or add them to its existing group. Use only when the owner requests a group conversation. First check one_team_list.conversation and use exact member_id values from teammates; create a missing teammate separately. Needs write or full permission. Preserves this conversation, task, goal, messages and runtime. Never removes current members or starts work. Repeating the same composition returns the same group without duplicates. Check confirmed, created, added_member_ids and owner_message; hand work separately with one_team_start_session.", inputSchema: { type: "object", properties: { members: { type: "array", minItems: 1, maxItems: 16, uniqueItems: true, items: { type: "string", minLength: 3, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$" }, description: "Exact member_id values returned by one_team_list for existing active local teammates." } }, required: ["members"], additionalProperties: false } },
 ];
 tools.push({ name: "room_say", annotations: act, description: "Post a short message in the group room as yourself while you work: hand off, ask a teammate, or answer a message. to = teammate name or One; reply_to = a room message id.", inputSchema: { type: "object", properties: { text: { type: "string", minLength: 1, maxLength: 4000 }, to: { type: "string", maxLength: 200 }, reply_to: { type: "string", maxLength: 128 } }, required: ["text"], additionalProperties: false } });
+const itemKey = { type: "string", minLength: 1, maxLength: 200, description: "One work item's key, same in every retry (e.g. 2026-10-17-time-machine-longform)." };
+tools.push({ name: "effect_item_check", annotations: ro, description: "Before publishing a work item (upload/post/send) for this automation. published = done, never publish it again; not_published = publish it, then effect_item_record. A publish click without a check is refused.", inputSchema: { type: "object", properties: { item_key: itemKey }, required: ["item_key"], additionalProperties: false } });
+tools.push({ name: "effect_item_record", annotations: act, description: "After publishing, record the id the site returned (e.g. YouTube video id) under the same item_key. First record wins; a different id is refused.", inputSchema: { type: "object", properties: { item_key: itemKey, external_id: { type: "string", minLength: 1, maxLength: 512 } }, required: ["item_key", "external_id"], additionalProperties: false } });
 tools.push(...${JSON.stringify(ONE_SUPERVISOR_TOOLS)});
 tools.push(...${JSON.stringify(ONE_PERSONAL_TOOLS)});
 tools.push(...${JSON.stringify(ONE_HISTORY_TOOLS)});
@@ -115,12 +123,13 @@ function handle(requestValue) {
   }
   if (requestValue.method === "notifications/initialized" || requestValue.method === "ping") return requestValue.method === "ping" ? {} : undefined;
   const allowed = allowedTools();
-  if (requestValue.method === "tools/list") return { tools: allowed ? tools.filter((tool) => allowed.includes(tool.name)) : tools.filter((tool) => tool.name !== "room_say") };
+  if (requestValue.method === "tools/list") return { tools: allowed ? tools.filter((tool) => allowed.includes(tool.name)) : tools.filter((tool) => tool.name !== "room_say" && !tool.name.startsWith("effect_item_")) };
   if (requestValue.method !== "tools/call") throw new Error("Method not found");
   const name = requestValue.params && requestValue.params.name;
   if (allowed && !allowed.includes(name)) return Promise.resolve(error("This One team tool is not available in this conversation."));
   const args = requestValue.params && requestValue.params.arguments && typeof requestValue.params.arguments === "object" ? requestValue.params.arguments : {};
   if (name === "room_say") return request("room", { text: args.text, to: args.to, replyTo: args.reply_to });
+  if (name === "effect_item_check" || name === "effect_item_record") return allowed ? request("effect", { name, input: args }) : Promise.resolve(error("This One team tool is not available in this conversation."));
   if (name === "one_team_list") return request("list", {});
   if (name === "one_team_start_session") return request("start", { member: args.member, brief: args.brief, newSession: args.new_session });
   if (name === "one_team_steer") return request("steer", { sessionId: args.session_id, message: args.message });

@@ -47,6 +47,7 @@ import {
 import { runMcpInvocation } from "../mcp/client";
 import { mintGraphTeamGrant, revokeGraphTeamGrant, type GraphTeamGrant } from "../one/graph-team-grant";
 import { graphTeamStepHold, runGraphTeamStep } from "../one/graph-team-step";
+import { graphEffectItemsHeldSummary, graphEffectItemsPromptBlock } from "../one/graph-effect-items";
 import { claimInvocationRunOwner, invocationRunOwners } from "../store/invocation-run-owners";
 import { sameMethodAttemptLimit, MAX_SAME_METHOD_STARTS, type WorkUnit } from "../../shared/work-recovery";
 import { GraphWorkRecovery, type GraphWorkRecoveryScope } from "./work-recovery";
@@ -2378,8 +2379,14 @@ export async function runGraph(
           checkpoint.ambiguousNodeIds = held;
           checkpoint.inFlightNodeIds = [];
         }
+        // The items this occurrence already published (host record) are listed for the owner: a rerun never publishes them again.
+        const publishedSoFar = interruptedHolds.size > 0 ? graphEffectItemsHeldSummary(automation.id, latestFailed.occurrenceId) : { count: 0, keys: [] };
+        const publishedNote = publishedSoFar.count > 0
+          ? L(` 이 실행에서 이미 게시된 항목 ${publishedSoFar.count}개(${publishedSoFar.keys.join(", ")}${publishedSoFar.count > publishedSoFar.keys.length ? " …" : ""})는 다시 실행해도 다시 게시되지 않아요.`,
+            ` ${publishedSoFar.count} item(s) this run already published (${publishedSoFar.keys.join(", ")}${publishedSoFar.count > publishedSoFar.keys.length ? " …" : ""}) are recorded and are not published again on a rerun.`)
+          : "";
         for (const nodeId of interruptedHolds) admissionPending.set(nodeId, {
-          code: "MUTATION_UNVERIFIED", reason: L("앱이 멈출 때 이 단계가 진행 중이었고, 바깥에 이미 반영됐을 수 있어요(게시·업로드·전송).", "The app stopped while this step was running, and it may already have acted outside (post, upload, message)."),
+          code: "MUTATION_UNVERIFIED", reason: L("앱이 멈출 때 이 단계가 진행 중이었고, 바깥에 이미 반영됐을 수 있어요(게시·업로드·전송).", "The app stopped while this step was running, and it may already have acted outside (post, upload, message).") + publishedNote,
           nextAction: L("자동으로 다시 실행하지 않아요. 실제로 반영됐는지 확인한 뒤 [이 노드부터 재실행] 또는 [건너뛰기]를 고르세요.", "It is not run again automatically. Check whether it took effect, then choose [Rerun from this node] or [Skip]."),
         });
         if (interruptedHolds.size > 0) checkpoint.ambiguousNodeIds = [...new Set([...checkpoint.ambiguousNodeIds, ...interruptedHolds])].sort();
@@ -5151,7 +5158,7 @@ export async function runGraph(
           };
           revokeGraphTeamGrant(graphTeamGrant);
           graphTeamGrant = nativeMcpCall ? null : mintGraphTeamGrant({ automationId: automation.id, node, runId, chatId: nodeChat.id,
-            effect, dryRun: Boolean(dryRun), ...(opts.permissionCeiling ? { permissionCeiling: opts.permissionCeiling } : {}) });
+            effect, dryRun: Boolean(dryRun), occurrenceId: checkpoint.occurrenceId, ...(opts.permissionCeiling ? { permissionCeiling: opts.permissionCeiling } : {}) });
           // A step that hands work to its room's teammates stays open until that work settles and is woken, with its team
           // tools, by each result (graph-team-step.ts). Any other step: exactly one turn, as before.
           const invokeTeamStep: typeof runMcpInvocation = (request, eventSink, signal, binding, context) => runGraphTeamStep({
@@ -5174,7 +5181,9 @@ export async function runGraph(
               automationId: automation.id,
               // The overlay block is a host-read hint, not node input: it stays out of
               // beginNode's input digest so resume decisions are unchanged.
-              userPrompt: executionPrompt + (toolchainSession?.promptBlock ?? ""),
+              // A re-run of this occurrence's team step starts from what it already published (host record,
+              // graph-effect-items.ts); like the overlay it stays out of the node input digest.
+              userPrompt: executionPrompt + (toolchainSession?.promptBlock ?? "") + graphEffectItemsPromptBlock(graphTeamGrant),
               // ★오너에게 가는 보고의 언어 = 오너의 화면 언어. 요청에 locale 이 없으면 pickLocale 이
               //   "en" 으로 떨어져, 한국어 화면의 오너도 자동화 보고를 영어로 받았다(게시물 언어 규칙과 별개).
               locale: currentUiLocale(),

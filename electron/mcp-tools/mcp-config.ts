@@ -52,7 +52,7 @@ import { AGENT_MAIL_AUTO_RUN_MCP, createAgentMailCapability, isAgentMailAutoRunC
 import { agentMailToolsOfferedForRun } from "../agent-mail/client";
 import { AGENT_TURN_CONTROL_ENV, turnToolsFor, isAuthenticTurnToolsMcpLaunch } from "../turn-tools/mcp-server";
 import { createTurnToolsCapability, removeTurnToolsCapability } from "../turn-tools/control-server";
-import { ONE_TEAM_CONTROL_ENV, ROOM_MEMBER_TOOL_NAMES, isAuthenticOneTeamMcpLaunch } from "../one/team-mcp-server";
+import { GRAPH_EFFECT_ITEM_TOOL_NAMES, ONE_TEAM_CONTROL_ENV, ROOM_MEMBER_TOOL_NAMES, isAuthenticOneTeamMcpLaunch } from "../one/team-mcp-server";
 import { createOneTeamCapability, removeOneTeamCapability } from "../one/team-control-server";
 import { oneTeamDispatchAllowedFor } from "../one/team-dispatch";
 import { graphTeamGrantCurrent, type GraphTeamGrant } from "../one/graph-team-grant";
@@ -1124,12 +1124,14 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           const capability = await createOneTeamCapability(graphTeamGrant
             // Acts for the room that saved the graph; the grant's permission and tools, never the run's wider ones.
             ? { chatId: graphTeamGrant.ownerChatId, permission: graphTeamGrant.permission, scope: "graph-step" as const,
-                tools: graphTeamGrant.tools, graphTeamGrant }
+                tools: [...graphTeamGrant.tools, ...graphTeamGrant.effectTools], graphTeamGrant }
             : { chatId: callerChatId ?? null, permission: opts?.toolGate?.permission ?? "read",
               ...(opts?.supervisorReplyRunId ? { supervisorReplyRunId: opts.supervisorReplyRunId } : {}),
               ...(toolchainConsumer ? { scope: "toolchain-consumer" as const,
                 tools: (await import("../toolchains/consumer")).TOOLCHAIN_CONSUMER_TOOLS } : {}),
-              ...(roomMember ? { scope: "room-member" as const, tools: ROOM_MEMBER_TOOL_NAMES } : {}) },
+              // A teammate on a dispatch a graph step owns also checks and records each item it publishes (graph-effect-items).
+              ...(roomMember ? { scope: "room-member" as const, tools: (await import("../one/graph-effect-items")).graphEffectScopeForTeammate(callerChatId)
+                ? [...ROOM_MEMBER_TOOL_NAMES, ...GRAPH_EFFECT_ITEM_TOOL_NAMES] : ROOM_MEMBER_TOOL_NAMES } : {}) },
             capabilityConfigKey,
           );
           oneTeamCapabilityCleanup.push(() => removeOneTeamCapability(capabilityConfigKey, capability.binding.capabilityId));
