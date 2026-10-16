@@ -248,9 +248,15 @@ async function renderWithChromium(input: DocumentPdfInput): Promise<DocumentPdfR
     show: false,
     webPreferences: { offscreen: true, javascript: false, sandbox: true, contextIsolation: true },
   });
+  // data: URL 은 Chromium URL 상한(2MB)에 걸린다 — encodeURIComponent 가 한글 한 글자를 9바이트로 늘려
+  // 약 23만 자 한국어 원고가 ERR_INVALID_URL 로 끝났다. 임시 .html 로 써서 loadFile 로 연다.
+  let workDir: string | null = null;
   try {
     const html = markdownToHtml(input);
-    await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    workDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-pdf-"));
+    const htmlPath = path.join(workDir, "document.html");
+    fs.writeFileSync(htmlPath, html, "utf8");
+    await win.loadFile(htmlPath);
     const pdf = await win.webContents.printToPDF({
       printBackground: true,
       pageSize: "A4",
@@ -262,6 +268,7 @@ async function renderWithChromium(input: DocumentPdfInput): Promise<DocumentPdfR
     return { ok: false, reason: error instanceof Error ? error.message : String(error) };
   } finally {
     if (!win.isDestroyed()) win.destroy();
+    if (workDir) fs.rmSync(workDir, { recursive: true, force: true });
   }
 }
 
