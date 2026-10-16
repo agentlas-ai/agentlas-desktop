@@ -59,6 +59,7 @@ import { runtimeFailureBlocksReplay, pickRunner, rolePriorityRuntimes, selectRun
 import { currentRunPriority } from "../runtime/run-priority";
 import { getAgentConcurrency } from "../store/concurrency";
 import { tryRecordRunEvent } from "../store/run-events";
+import { hasPermissionEscalationMarker } from "../../shared/permission-escalation";
 import { buildEffectiveAgentSystemPrompt } from "../agents/files";
 import { getAgentById } from "./registry";
 import { roomPinnedTeammateRuntime, roomRuntimeTeammateRefusal } from "./room-runtime";
@@ -1687,12 +1688,8 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
     chatId: chat.id,
     withImages: true,
   });
-  if (!plan.ok) {
-    mainStatus(
-      ko
-        ? "CEO 위임 계획이 지연되어 단독 실행으로 자동 재시도합니다…"
-        : "CEO planning stalled — retrying as a direct execution…",
-    );
+  // The CEO's own turn without a plan: a direct execution under the firm's grant (not a control-plane turn).
+  const runCeoDirectExecution = async (): Promise<FirmRunResult> => {
     const solo = await runNodeTurnSafe(p, {
       node: org.ceo,
       tier: 1,
@@ -1712,12 +1709,41 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
     if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", redactWorkAttachmentText(p.req, solo.text));
     if (p.emitFinal !== false) sink({ kind: "final", text: solo.text });
     return { ok: true, text: solo.text };
+  };
+
+  if (!plan.ok) {
+    mainStatus(
+      ko
+        ? "CEO 위임 계획이 지연되어 단독 실행으로 자동 재시도합니다…"
+        : "CEO planning stalled — retrying as a direct execution…",
+    );
+    return runCeoDirectExecution();
   }
 
   const matched = matchTargets(plan.delegations, ceoReports);
   // The declared stage of each node this run delegated to (later follow-ups update it).
   const stageByNode = new Map<string, DelegationStage>(matched.map((item) => [item.node.id, item.stage]));
   const isVerificationResult = (result: FirmStageResult) => stageByNode.get(result.node.id) === "verification";
+  /*
+   * ★ A plan turn is read-only control plane by design, so the read-only prompt tells it to end with the escalation
+   *   marker when work needs writing. A CEO that did that instead of delegating (A/B2 room fc53939f: "the target is
+   *   outside the allowed folder; current permission is read-only" + [[NEEDS-FULL-ACCESS]], no Delegate block) asked
+   *   for something this firm's own grant already allows. Nobody above a worker seat answers that marker; the firm host
+   *   lifts it the way it lifts a stalled plan: the CEO continues as a direct execution under the firm's grant.
+   */
+  if (matched.length === 0 && hasPermissionEscalationMarker(plan.text)
+    && firmNodePermission(p, { tier: 1, phase: "synthesize" }) !== "read") {
+    tryRecordRunEvent({
+      runId: p.req.runId ?? `firm:${chat.id}`, chatId: chat.id, nodeId: org.ceo.id, agentId: org.ceo.agentId ?? null,
+      kind: "firm_plan_access_lifted",
+      payload: { schemaVersion: "agentlas.firm-plan-access-lift.v1", grant: firmNodePermission(p, { tier: 1, phase: "synthesize" }),
+        controllerRole: p.controllerRuntimeRole ?? "orchestrator" },
+    });
+    mainStatus(ko
+      ? "CEO 계획이 권한을 요청해, 이 팀이 받은 권한으로 직접 진행합니다…"
+      : "The CEO plan asked for access; continuing directly under this team's grant…");
+    return runCeoDirectExecution();
+  }
   if (matched.length === 0) {
     // CEO가 위임 안 함 → plan.text가 곧 최종 답
     if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", redactWorkAttachmentText(p.req, plan.text));

@@ -139,6 +139,27 @@ import {
 } from "../agents/borrowed-profiles";
 import { parseWholeOrTrailingTypedJson } from "../../shared/typed-json-tail";
 import { linkAbort } from "../runtime/linked-abort";
+import os from "node:os";
+import path from "node:path";
+import {
+  hasPermissionEscalationMarker,
+  PERMISSION_ESCALATION_TOOL,
+  stripPermissionEscalationMarker,
+} from "../../shared/permission-escalation";
+import { getRuntimeToolPermissionArbiter } from "../runtime/tool-approval";
+import {
+  isRemoteInvocationWorkspaceBindingSource,
+  rebindInvocationWorkspace,
+} from "../invocation/workspace-binding";
+import {
+  ensureRunWorkspaceDirectory,
+  RUN_WORKSPACE_GRANT_SCHEMA,
+  RUN_WORKSPACE_GRANT_TOOL,
+  runWorkspaceChipCovers,
+  runWorkspaceDigest,
+  validateRequestedRunWorkspace,
+  type RunAccessChip,
+} from "./run-workspace-grant";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
@@ -427,6 +448,11 @@ export interface BorrowedInputPacket {
   phase?: TaskForcePacketPhase;
   /** Explicit local planner filesystem intent; strict legacy contracts keep their own ceiling. */
   workspaceAccess?: "read" | "write";
+  /**
+   * Host-only: the room lifted this step's access after its worker reported `accessNeeded` (the room chip covered it,
+   * or the owner approved the one card). Never read from planner output; capped by the host permission.
+   */
+  grantedPermission?: "write" | "full";
   inputKind: string;
   brief: string;
   context: string[];
@@ -1013,8 +1039,16 @@ export function taskForceChildPermission(
   toolRequired = false,
   preApprovalStage = false,
   workspaceAccess?: "read" | "write",
+  /** Host-only lift for this step (BorrowedInputPacket.grantedPermission), never a planner value. */
+  hostGrant?: "write" | "full",
 ): RunnerRequest["permission"] {
   const host = effectiveInvocationPermission(p.req.appsGenerateMode ? "read" : p.req.permissions, p.req.planMode);
+  if (role === "worker" && hostGrant && !preApprovalStage && !p.req.agentAppMode && !p.req.planMode) {
+    // The room lifted this step after its worker asked: the chip covered it, or the owner approved the one card for it
+    // (liftTaskForceWorkerAccess). "full" holds only when the host is full or the owner granted it on that card.
+    if (hostGrant === "full") return "full";
+    if (host !== "read" || hostGrant === "write") return "write";
+  }
   if (host === "read") return "read";
   // A PRD-first gate is an execution boundary, not just prose in the packet.
   // While implementation is deferred, every child is forced read-only even
@@ -2147,6 +2181,8 @@ export function parseBorrowedWorkloadPlan(text: string): {
   packets: BorrowedInputPacket[];
   synthesisAllocation: WorkloadAllocation | null;
   approvalStop: TaskForceApprovalStopRequest | null;
+  /** Typed planner field: an absolute folder the owner named for this work (validated by the host before any use). */
+  requestedWorkspace: string | null;
 } {
   const packets = parseBorrowedInputPackets(text);
   try {
@@ -2158,9 +2194,12 @@ export function parseBorrowedWorkloadPlan(text: string): {
         ? normalizeWorkloadAllocation(obj.synthesis, "synthesize")
         : null,
       approvalStop: parseTaskForceApprovalStop(obj.approvalStop),
+      requestedWorkspace: typeof obj.requestedWorkspace === "string" && obj.requestedWorkspace.trim()
+        ? obj.requestedWorkspace.trim()
+        : null,
     };
   } catch {
-    return { packets, synthesisAllocation: null, approvalStop: null };
+    return { packets, synthesisAllocation: null, approvalStop: null, requestedWorkspace: null };
   }
 }
 
@@ -2625,16 +2664,18 @@ function taskForceSeatNames(): Map<string, string> {
   }
 }
 
+type TaskForceRemainingRow = { name: string; incomplete: boolean; decisions: string[]; blockers: string[]; access?: TaskForceAccessBlock };
+
 /** What is left, one row per room name in plan order: incomplete workers (their owner decisions and reported
  *  blockers) and completed workers whose reported blockers no later review cleared. */
 function taskForceRemainingForOwner(
   locale: RuntimeLocale, results: readonly BorrowedAgentResult[],
   uncleared: ReadonlyArray<{ result: BorrowedAgentResult; items: string[] }>,
-): Array<{ name: string; incomplete: boolean; decisions: string[]; blockers: string[] }> {
+): TaskForceRemainingRow[] {
   let installed: InstalledAgent[] = [];
   try { installed = listInstalledAgentsReadOnly(); } catch { /* names fall back to the package's own */ }
   const seats = taskForceSeatNames();
-  const rows: Array<{ name: string; incomplete: boolean; decisions: string[]; blockers: string[] }> = [];
+  const rows: TaskForceRemainingRow[] = [];
   for (const result of results) {
     if (!result) continue;
     const blocked = uncleared.find((entry) => entry.result === result);
@@ -2645,6 +2686,7 @@ function taskForceRemainingForOwner(
       incomplete: !result.ok,
       decisions,
       blockers: (blocked?.items ?? result.blockingRemaining ?? []).filter((item) => !item.startsWith(TASK_FORCE_OWNER_DECISION_PREFIX)),
+      ...(result.accessBlock ? { access: result.accessBlock } : {}),
     });
   }
   return rows;
@@ -2657,7 +2699,7 @@ function taskForceRemainingForOwner(
  */
 export function taskForceIncompleteMessage(input: {
   locale: "ko" | "en";
-  remaining: Array<{ name: string; incomplete: boolean; decisions: string[]; blockers: string[] }>;
+  remaining: TaskForceRemainingRow[];
   requiredSurfaceMissing: boolean;
 }): string {
   const ko = input.locale === "ko";
@@ -2666,12 +2708,25 @@ export function taskForceIncompleteMessage(input: {
     const value = String(item ?? "").replace(/\s+/g, " ").trim();
     return value && !(!/\s/.test(value) && /[_:/\\]/.test(value)) ? value : "";
   };
+  // A typed access block is worded by the host: the room already lifted it once when its chip covered it, or asked the
+  // owner on one card. Owner 2026-10-16: telling the owner to say "continue" while the chip already permits the action
+  // is a host bug — "continue" cannot clear it.
+  const accessLine = (access: TaskForceAccessBlock): string => access.reason === "owner_denied"
+    ? ko ? "권한을 허용하지 않아 멈췄습니다" : "stopped: the access it needed was not allowed"
+    : access.reason === "approval_unavailable"
+      ? ko ? "권한 확인을 받지 못해 멈췄습니다" : "stopped: the access it needed could not be confirmed"
+      : ko ? "필요한 권한으로 다시 실행했지만 끝내지 못했습니다" : "ran again with the access it needed and still did not finish";
+  const liftedAccess = (entry: TaskForceRemainingRow): boolean => Boolean(entry.access && entry.access.reason !== "stage_gate");
   const rows = new Map<string, { incomplete: boolean; said: string[] }>();
   for (const entry of input.remaining) {
     const name = entry.name.trim();
     if (!name) continue;
     const row = rows.get(name) ?? { incomplete: false, said: [] };
     row.incomplete ||= entry.incomplete;
+    if (entry.access && liftedAccess(entry)) {
+      const line = accessLine(entry.access);
+      if (!row.said.includes(line)) row.said.push(line);
+    }
     for (const question of entry.decisions.map(readable).filter(Boolean)) {
       const line = ko ? `결정 필요 — ${question}` : `needs your decision — ${question}`;
       if (!row.said.includes(line)) row.said.push(line);
@@ -2683,15 +2738,22 @@ export function taskForceIncompleteMessage(input: {
     ? row.said.slice(0, 3).join(" / ").slice(0, 400)
     : row.incomplete ? (ko ? "아직 끝내지 못했습니다" : "not finished yet") : (ko ? "막힌 부분이 남아 있습니다" : "still blocked")}`);
   const decisionPending = input.remaining.some((entry) => entry.decisions.some((question) => readable(question)));
+  const accessNeedsChip = input.remaining.some((entry) => entry.access?.reason === "owner_denied" || entry.access?.reason === "approval_unavailable");
+  const onlyLiftedAccess = input.remaining.length > 0 && input.remaining.every(liftedAccess) && !input.requiredSurfaceMissing;
+  const closing = accessNeedsChip
+    ? ko ? "작성창에서 권한을 올린 뒤 \"계속해줘\"라고 하시면 남은 일부터 이어서 합니다." : "Raise the permission in the composer, then say \"continue\" and the remaining work picks up from here."
+    : onlyLiftedAccess
+      ? ko ? "필요한 권한으로 한 번 더 실행했지만 끝나지 않아 여기서 멈췄습니다." : "It ran once more with the access it needed and still did not finish, so it stopped here."
+      : decisionPending
+        ? ko ? "답하시거나 \"계속해줘\"라고 하시면 남은 일부터 이어서 합니다." : "Answer, or say \"continue\", and the remaining work picks up from here."
+        : ko ? "\"계속해줘\"라고 하시면 남은 일부터 이어서 합니다." : "Say \"continue\" and the remaining work picks up from here.";
   return [
     ko ? "이 작업은 아직 완료되지 않았습니다." : "This task is not complete yet.",
     lines.length > 0
       ? `${ko ? "남은 일:" : "Still to do:"}\n${lines.join("\n")}`
       : ko ? "완료 확인이 아직 끝나지 않았습니다." : "Completion has not been confirmed yet.",
     input.requiredSurfaceMissing ? (ko ? "요청한 결과 화면도 아직 확인되지 않았습니다." : "The requested result view has not been verified yet either.") : "",
-    decisionPending
-      ? ko ? "답하시거나 \"계속해줘\"라고 하시면 남은 일부터 이어서 합니다." : "Answer, or say \"continue\", and the remaining work picks up from here."
-      : ko ? "\"계속해줘\"라고 하시면 남은 일부터 이어서 합니다." : "Say \"continue\" and the remaining work picks up from here.",
+    closing,
   ].filter(Boolean).join("\n\n");
 }
 
@@ -3100,7 +3162,9 @@ export function taskForceWorkerHandoffText(text: string): string {
     return text;
   }
   const keys = ["schemaVersion", "handoff", "limitations", "packetStatus", "reviewComplete", "blockingRemaining", "handoffFacts"];
-  if (Object.keys(parsed).some(key => !keys.includes(key)) || keys.some(key => !(key in parsed))
+  // `accessNeeded` is optional and typed: a worker may state it instead of (or with) the marker line.
+  if (Object.keys(parsed).some(key => !keys.includes(key) && key !== "accessNeeded") || keys.some(key => !(key in parsed))
+    || ("accessNeeded" in parsed && typeof parsed.accessNeeded !== "boolean")
     || typeof parsed.handoff !== "string" || !parsed.handoff.trim()
     || typeof parsed.limitations !== "string" || !parsed.limitations.trim()
     || !["completed", "partial", "failed"].includes(String(parsed.packetStatus))
@@ -3110,7 +3174,10 @@ export function taskForceWorkerHandoffText(text: string): string {
     || [...parsed.blockingRemaining, ...parsed.handoffFacts].some(item => typeof item !== "string" || !item.trim())) {
     return salvagedTaskForceHandoff(text);
   }
-  const outcome = { packetStatus: parsed.packetStatus, reviewComplete: parsed.reviewComplete, blockingRemaining: parsed.blockingRemaining };
+  const accessNeeded = parsed.accessNeeded === true || hasPermissionEscalationMarker(parsed.handoff)
+    || hasPermissionEscalationMarker(parsed.limitations);
+  const outcome = { packetStatus: parsed.packetStatus, reviewComplete: parsed.reviewComplete, blockingRemaining: parsed.blockingRemaining,
+    ...(accessNeeded ? { accessNeeded: true } : {}) };
   // Canonical typed state precedes unrestricted human text. Escape delimiters in
   // JSON strings so quoted legacy envelopes cannot terminate or shadow this one.
   const encodedOutcome = JSON.stringify(outcome).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
@@ -3127,6 +3194,18 @@ interface TaskForcePacketOutcome {
   reviewComplete: boolean;
   blockingRemaining: string[];
   typed: boolean;
+  /**
+   * The worker asked for more access than it ran with: the envelope's typed `accessNeeded`, or the fixed
+   * `[[NEEDS-FULL-ACCESS]]` marker line the read-only/write prompts contract for (shared/permission-escalation.ts). A
+   * worker has no owner channel, so this is lifted by the room (liftTaskForceWorkerAccess), never shown to the owner.
+   */
+  accessNeeded: boolean;
+}
+
+/** Why a worker's access request did not clear its step (typed; the owner message words it). */
+export interface TaskForceAccessBlock {
+  needed: "write" | "full";
+  reason: "owner_denied" | "approval_unavailable" | "still_blocked_after_grant" | "already_full" | "stage_gate";
 }
 
 function taskForceWorkerCompletionStatus(text: string): TaskForceWorkerCompletionStatus {
@@ -3181,6 +3260,7 @@ export function taskForcePacketOutcome(
         reviewComplete: parsed.reviewComplete === true,
         blockingRemaining,
         typed: completionStatus !== "missing",
+        accessNeeded: parsed.accessNeeded === true || hasPermissionEscalationMarker(text),
       };
     } catch {
       // Fall through to the backwards-compatible appendix parser. A malformed
@@ -3205,6 +3285,7 @@ export function taskForcePacketOutcome(
     ),
     blockingRemaining,
     typed: false,
+    accessNeeded: hasPermissionEscalationMarker(text),
   };
 }
 
@@ -3229,7 +3310,8 @@ function withTaskForceOwnerDecisions(rendered: string, questions: readonly strin
   const packetStatus = prior.completionStatus === "failed" ? "failed" : "partial";
   const blockingRemaining = [...new Set([...questions.map((question) => `${TASK_FORCE_OWNER_DECISION_PREFIX}${question}`),
     ...prior.blockingRemaining])].slice(0, 16);
-  const encoded = JSON.stringify({ packetStatus, reviewComplete: false, blockingRemaining }).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
+  const encoded = JSON.stringify({ packetStatus, reviewComplete: false, blockingRemaining, ...(prior.accessNeeded ? { accessNeeded: true } : {}) })
+    .replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
   // The question now lives in the typed blockers; the raw block would only invite the orchestrator to copy it verbatim.
   const body = extractAskFences(rendered.replace(/<<agentlas-packet-outcome>>[\s\S]*?<<\/agentlas-packet-outcome>>\s*/giu, "")).text.trim();
   return [`<<agentlas-packet-outcome>>${encoded}<</agentlas-packet-outcome>>`, body,
@@ -3471,13 +3553,20 @@ export function taskForceAllocationOutputSchema(phase: "delegate" | "synthesize"
  * stay OpenAI-strict-valid (openAiStrictSchemaOrNull) or codex silently loses
  * it — test-task-force-planner-strict-schema.cjs pins that. */
 export function ordinaryTaskForcePlannerOutputSchema(specs: BorrowedAgentSpec[]): Record<string, unknown> {
-  registerDeclaredPromptModule({ id: "taskforce.planner.ordinary.response-schema", revision: 1, stability: "task-context", changeTriggers: ["release", "runtime", "plan-revision"], order: 0 });
+  // revision 2 (2026-10-16): requestedWorkspace — the host validates it and grants it for this run only
+  // (run-workspace-grant.ts); the room's saved working folder never changes.
+  registerDeclaredPromptModule({ id: "taskforce.planner.ordinary.response-schema", revision: 2, stability: "task-context", changeTriggers: ["release", "runtime", "plan-revision"], order: 0 });
   const strings = { type: "array", items: { type: "string" } } as const;
   return {
     type: "object",
     additionalProperties: false,
-    required: ["packets", "approvalStop", "synthesis"],
+    required: ["packets", "approvalStop", "synthesis", "requestedWorkspace"],
     properties: {
+      requestedWorkspace: {
+        type: "string",
+        maxLength: 1024,
+        description: "Absolute folder path the owner explicitly named as where this work happens; empty string when none was named.",
+      },
       approvalStop: {
         type: "object",
         additionalProperties: false,
@@ -3939,6 +4028,12 @@ interface BorrowedAgentResult {
    * 쓴 산문이 아니라 **관측된 사실**로 만든다. 지어낼 수 없는 값이다.
    */
   usedTools?: string[];
+  /** Typed: the worker asked for more access than it ran with (outcome envelope or the fixed escalation marker). */
+  accessNeeded?: boolean;
+  /** The permission this step actually ran with (the base for lifting it one level). */
+  ranWithPermission?: RunnerRequest["permission"];
+  /** Typed: why a requested access lift did not clear this step. Read by the owner message, never shown as a code. */
+  accessBlock?: TaskForceAccessBlock;
   /** Internal-only typed provider failure used for one bounded recovery. */
   runtimeFailure?: RunnerFailure;
   failedRuntime?: RuntimeStatus;
@@ -4041,6 +4136,7 @@ async function runBorrowedAgentTurn(
     packet.allocation.requirements.toolRequired,
     preApprovalStage,
     packet.workspaceAccess,
+    packet.grantedPermission,
   );
   tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id, nodeId: id,
     kind: "task_force_workspace_access", payload: { stepId: packet.stepId ?? null,
@@ -4332,13 +4428,19 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       // An installed team borrowed as a worker answers its packet, not the owner. A question it ended with (A/B T1: the
       // HQ plan turn wrote only <<agentlas-ask>>, runFirmInvocation returned ok) is an open owner decision, not a done packet.
       const firmDecisions = taskForceOwnerAskQuestions(teamResult.text);
-      const firmOk = teamResult.ok && firmDecisions.length === 0;
+      // The team answers its packet with the same typed outcome envelope a direct worker writes. A PARTIAL/FAILED team
+      // packet is not a done packet (A/B2 room fc53939f: "Vibecoder 팀 완료" for a PARTIAL lead that built nothing), and
+      // an access request is lifted by the room, never handed to the owner.
+      const firmOutcome = taskForcePacketOutcome(redactSensitiveText(teamResult.text), packet);
+      const firmTypedIncomplete = firmOutcome.typed && firmOutcome.completionStatus !== "completed" && !firmOutcome.reviewComplete;
+      const firmOk = teamResult.ok && firmDecisions.length === 0 && !firmTypedIncomplete && !firmOutcome.accessNeeded;
+      const firmVisibleText = stripPermissionEscalationMarker(teamResult.text);
       p.sink(tag({
         kind: "tool-use",
         done: true,
         status: firmOk
           ? p.locale === "ko" ? `${spec.name} 팀 완료` : `${spec.name} team completed`
-          : firmDecisions.length
+          : firmDecisions.length || (teamResult.ok && firmOutcome.completionStatus !== "failed")
             ? p.locale === "ko" ? `${spec.name} 팀 미완료` : `${spec.name} team incomplete`
             : p.locale === "ko" ? `${spec.name} 팀 실패` : `${spec.name} team failed`,
         runtimeSelection: observedRuntimeSelection,
@@ -4353,19 +4455,24 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
           direction: "worker-to-orchestrator",
           fromAgentId: id,
           toAgentId: controllerAgentId,
-          reportAvailable: persistWorkerReport(p, id, `${handoffId}:result`, teamResult.text),
-          text: redactSensitiveText(teamResult.text).slice(0, 1_000),
+          reportAvailable: persistWorkerReport(p, id, `${handoffId}:result`, firmVisibleText),
+          text: redactSensitiveText(firmVisibleText).slice(0, 1_000),
         },
       }));
       return {
         ...resultMeta,
         spec,
         packet,
-          text: redactSensitiveText(withTaskForceOwnerDecisions(teamResult.text, firmDecisions)),
+          text: redactSensitiveText(withTaskForceOwnerDecisions(firmVisibleText, firmDecisions)),
         ok: firmOk,
+        ranWithPermission: workerPermission,
+        ...(firmOutcome.accessNeeded ? { accessNeeded: true } : {}),
         ...(firmDecisions.length ? {
           completionStatus: teamResult.ok ? "partial" as const : "failed" as const,
           blockingRemaining: firmDecisions.map((question) => `${TASK_FORCE_OWNER_DECISION_PREFIX}${question}`).slice(0, 16),
+        } : firmTypedIncomplete ? {
+          completionStatus: firmOutcome.completionStatus,
+          blockingRemaining: firmOutcome.blockingRemaining,
         } : {}),
       };
     }
@@ -4699,7 +4806,8 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
           });
           const result = outcome.result;
           // Read before curation: the typed packet state is the runtime's, curation owns only visible prose.
-          const ownerDecisions = taskForceOwnerDecisions(taskForcePacketOutcome(redactSensitiveText(result.text)).blockingRemaining);
+          const workerOutcome = taskForcePacketOutcome(redactSensitiveText(result.text));
+          const ownerDecisions = taskForceOwnerDecisions(workerOutcome.blockingRemaining);
           const workerText = await curateOwnedTaskForceResult({
             p,
             spec,
@@ -4748,9 +4856,10 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
           }));
           return {
             worker,
-            ok: ownerDecisions.length === 0,
+            ok: ownerDecisions.length === 0 && !workerOutcome.accessNeeded,
             ownerDecisions,
-            text: workerText,
+            accessNeeded: workerOutcome.accessNeeded,
+            text: stripPermissionEscalationMarker(workerText),
             tokens: result.tokens ?? 0,
             invocationEvidence: {
               invocationId: observedWorkerInvocationId,
@@ -4787,6 +4896,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
             worker,
             ok: false,
             ownerDecisions: [] as string[],
+            accessNeeded: false,
             text: redactSensitiveText(error instanceof Error ? error.message : String(error)),
             tokens: 0,
             ...(typedRuntimeFailure
@@ -4973,7 +5083,8 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       // A nested worker's or the manager's question to the owner leaves the team packet open (PARTIAL), never COMPLETED.
       const teamOwnerDecisions = [...new Set([...workerResults.flatMap((item) => item.ownerDecisions),
         ...taskForceOwnerAskQuestions(managerSynthesis.text)])];
-      const teamOk = workerResults.every((item) => item.ok) && teamOwnerDecisions.length === 0;
+      const teamAccessNeeded = workerResults.some((item) => item.accessNeeded) || hasPermissionEscalationMarker(managerSynthesis.text);
+      const teamOk = workerResults.every((item) => item.ok) && teamOwnerDecisions.length === 0 && !teamAccessNeeded;
       p.sink(tag({
         kind: "tool-use",
         done: true,
@@ -5004,8 +5115,10 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         ...resultMeta,
         spec,
         packet,
-        text: withTaskForceOwnerDecisions(teamText, teamOwnerDecisions),
+        text: withTaskForceOwnerDecisions(stripPermissionEscalationMarker(teamText), teamOwnerDecisions),
         ok: teamOk,
+        ranWithPermission: workerPermission,
+        ...(teamAccessNeeded ? { accessNeeded: true } : {}),
         ...(teamOwnerDecisions.length ? {
           completionStatus: workerResults.every((item) => item.ok || item.ownerDecisions.length > 0) ? "partial" as const : "failed" as const,
           blockingRemaining: teamOwnerDecisions.map((question) => `${TASK_FORCE_OWNER_DECISION_PREFIX}${question}`).slice(0, 16),
@@ -5152,6 +5265,9 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
     const packetOutcome = runtimeOutcome.completionStatus !== "missing"
       ? runtimeOutcome
       : curatedOutcome;
+    // The access request is typed state for the room (liftTaskForceWorkerAccess); its marker line is not room prose.
+    const accessNeeded = runtimeOutcome.accessNeeded || curatedOutcome.accessNeeded;
+    const visibleWorkerText = stripPermissionEscalationMarker(workerText);
     const completionStatus = packetOutcome.completionStatus;
     const workerAccepted = completionStatus === "completed" || packetOutcome.reviewComplete;
     const executedResolution = reconcileWorkloadRunnerResult(observedDirectResolution, result);
@@ -5211,8 +5327,8 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         direction: "worker-to-orchestrator",
         fromAgentId: id,
         toAgentId: controllerAgentId,
-        reportAvailable: persistWorkerReport(p, id, `${handoffId}:result`, workerText),
-        text: workerText.slice(0, 1_000),
+        reportAvailable: persistWorkerReport(p, id, `${handoffId}:result`, visibleWorkerText),
+        text: visibleWorkerText.slice(0, 1_000),
         ...(observedTools.length > 0 ? { usedTools: [...observedTools] } : {}),
       },
     }));
@@ -5223,8 +5339,10 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       provider: providerLabel(observedDirectRuntime),
       spec,
       packet,
-      text: workerText,
+      text: visibleWorkerText,
       ok: workerAccepted,
+      ...(accessNeeded ? { accessNeeded: true } : {}),
+      ranWithPermission: observedDirectRole === "worker" ? workerPermission : "read",
       completionStatus,
       reviewComplete: packetOutcome.reviewComplete,
       blockingRemaining: packetOutcome.blockingRemaining,
@@ -5409,6 +5527,8 @@ async function runPlanner(
   synthesisAllocation: WorkloadAllocation;
   /** Model-typed approval-stop request (ordinary local planner only); null = none. */
   approvalStop: TaskForceApprovalStopRequest | null;
+  /** Model-typed folder the owner named (ordinary local planner only); the host validates it. null = none. */
+  requestedWorkspace: string | null;
   parseSuccess: boolean;
   fallbackUsed: boolean;
   invocationId: string;
@@ -5622,6 +5742,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
   let packets: BorrowedInputPacket[] = [];
   let synthesisAllocation: WorkloadAllocation | null = null;
   let approvalStop: TaskForceApprovalStopRequest | null = null;
+  let requestedWorkspace: string | null = null;
   let parseSuccess = false;
   let fallbackUsed = false;
   let result: RunnerResult | undefined;
@@ -5832,6 +5953,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
     let normalized = normalizePacketsForRoster(parsedPlan.packets, specs, taskForceOwnerRequest(p.req), p.locale, !p.benchmarkMode && !p.req.agentAppMode, semanticSubset);
     synthesisAllocation = parsedPlan.synthesisAllocation ?? defaultWorkloadAllocation("synthesize");
     approvalStop = parsedPlan.approvalStop;
+    requestedWorkspace = parsedPlan.requestedWorkspace;
 
     // One bounded same-model correction is cheaper and substantially safer
     // than silently handing the full user/control prompt to every omitted
@@ -5909,6 +6031,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         plannerText = repairedText;
         synthesisAllocation = repairedPlan.synthesisAllocation ?? synthesisAllocation;
         approvalStop = repairedPlan.approvalStop;
+        requestedWorkspace = repairedPlan.requestedWorkspace ?? requestedWorkspace;
         result = repairedResult;
       } else {
         plannerInvocationId = firstPlannerInvocationId;
@@ -6005,6 +6128,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
     packets,
     synthesisAllocation: synthesisAllocation ?? defaultWorkloadAllocation("synthesize"),
     approvalStop,
+    requestedWorkspace,
     parseSuccess,
     fallbackUsed,
     invocationId: plannerInvocationId,
@@ -6013,6 +6137,172 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
     capabilityBinding,
     controllerRuntime: plannerRuntime,
   };
+}
+
+/*
+ * Access the room decides for its workers (owner 2026-10-16, consistent with 274ed968 "team workers never ask the owner").
+ *
+ * Two typed inputs reach the room: the planner's `requestedWorkspace` (a folder the owner named) and a worker's
+ * `accessNeeded` (it ran with less than it needed). In both, the room first asks whether the owner's chip already covers
+ * the scope; if it does, the host grants it with no card. Only when it does not does the room raise ONE approval card
+ * naming the concrete scope, in the room's own conversation (so it also reaches the paired phone), and resume on approval.
+ * Every decision leaves a typed run_event receipt (path digest only, never the path).
+ */
+type TaskForceOwnerAccessAnswer = "allowed" | "denied" | "unavailable";
+
+/** Per room run: one card per concrete scope, and none after the owner refused one. */
+interface TaskForceOwnerAccessState {
+  answers: Map<string, TaskForceOwnerAccessAnswer>;
+  refused: boolean;
+}
+
+function newTaskForceOwnerAccessState(): TaskForceOwnerAccessState {
+  return { answers: new Map(), refused: false };
+}
+
+const ACCESS_RANK: Record<"read" | "write" | "full", number> = { read: 0, write: 1, full: 2 };
+
+async function askOwnerForTaskForceAccess(
+  p: BorrowedTaskForceParams,
+  state: TaskForceOwnerAccessState,
+  scopeKey: string,
+  card: { tool: string; kind: string; detail: string; cwd?: string },
+): Promise<TaskForceOwnerAccessAnswer> {
+  const prior = state.answers.get(scopeKey);
+  if (prior) return prior;
+  if (state.refused) return "denied";
+  if (!p.chat.id || p.req.agentAppMode || p.signal?.aborted) return "unavailable";
+  const arbiter = getRuntimeToolPermissionArbiter();
+  if (!arbiter) return "unavailable";
+  let answer: TaskForceOwnerAccessAnswer;
+  try {
+    // permission "read" + mutating: the host policy shows a live card for this exact scope (a stored "always allow" rule
+    // for it answers without one); the chip check already happened above, so a write/full chip never reaches here.
+    const decision = await arbiter({
+      runtime: "agentlas",
+      sessionKey: `task-force-access:${p.req.runId ?? p.chat.id}`,
+      tool: card.tool,
+      kind: card.kind,
+      detail: card.detail,
+      ...(card.cwd ? { cwd: card.cwd } : {}),
+      permission: "read",
+      mutating: true,
+      chatId: p.chat.id,
+      agentId: p.orchestratorAgent.id,
+      ...(p.signal ? { signal: p.signal } : {}),
+    });
+    answer = decision === "deny" ? "denied" : "allowed";
+  } catch {
+    answer = "unavailable";
+  }
+  state.answers.set(scopeKey, answer);
+  if (answer === "denied") state.refused = true;
+  return answer;
+}
+
+/** Saved folders of the owner's other team rooms; a run in this room never writes into one of them. */
+function otherRoomWorkingFolders(chatId: string): string[] {
+  try {
+    return (getDb().prepare(
+      "SELECT working_folder FROM chats WHERE id != ? AND archived_at IS NULL AND working_folder IS NOT NULL AND origin_surface = 'one' AND participants_json IS NOT NULL",
+    ).all(chatId) as Array<{ working_folder: string }>).map((row) => row.working_folder).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The planner's typed `requestedWorkspace`, granted for this run only (A/B2 room fc53939f). Returns the params every
+ * later stage uses: the lead, the teammates and the synthesis then run with that folder as cwd and write scope. The room's
+ * saved working folder is never changed.
+ */
+async function grantRequestedRunWorkspace(
+  p: BorrowedTaskForceParams,
+  requested: string | null,
+  writeStep: boolean,
+  access: TaskForceOwnerAccessState,
+): Promise<{ params: BorrowedTaskForceParams; ownerApprovedWrite: boolean }> {
+  if (!requested) return { params: p, ownerApprovedWrite: false };
+  const orchestratorId = `${p.chat.id}:borrow-orchestrator`;
+  const chip = (taskForcePermission(p) ?? "read") as RunAccessChip;
+  const record = (payload: Record<string, unknown>) => tryRecordRunEvent({
+    runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id, nodeId: orchestratorId,
+    agentId: p.orchestratorAgent.id, kind: "task_force_workspace_grant",
+    payload: { schemaVersion: RUN_WORKSPACE_GRANT_SCHEMA, source: "planner", chip, writeStep, ...payload },
+  });
+  const bindingSource = p.workspaceBinding?.source ?? null;
+  if (p.req.agentAppMode || p.restrictedReadBoundary || bindingSource === "automation" || bindingSource === "science") {
+    // App/restricted runs have no owner folder authority; an automation or Science run is bound to its own folder.
+    record({ decision: "denied", reason: p.req.agentAppMode ? "agent_app" : p.restrictedReadBoundary ? "restricted_boundary" : "bound_surface" });
+    return { params: p, ownerApprovedWrite: false };
+  }
+  let roomFolder: string | null = null;
+  try {
+    roomFolder = p.workspaceBinding ? revalidateInvocationWorkspaceBinding(p.workspaceBinding) : p.workingFolder ?? null;
+  } catch { roomFolder = null; }
+  const validation = validateRequestedRunWorkspace(requested, {
+    home: os.homedir(), roomFolder, otherRoomFolders: otherRoomWorkingFolders(p.chat.id),
+  });
+  if (!validation.ok) {
+    record({ decision: "denied", reason: validation.reason, pathDigest: runWorkspaceDigest(path.isAbsolute(requested) ? path.resolve(requested) : requested) });
+    return { params: p, ownerApprovedWrite: false };
+  }
+  const pathDigest = runWorkspaceDigest(validation.path);
+  if (validation.sameAsRoomFolder) {
+    record({ decision: "not_needed", reason: "same_as_room_folder", pathDigest });
+    return { params: p, ownerApprovedWrite: false };
+  }
+  // A phone never supplies a local path to Desktop on its own authority (workspace-binding.ts): on a remote surface the
+  // folder always takes the owner's card, whatever the chip says.
+  const remote = bindingSource !== null && isRemoteInvocationWorkspaceBindingSource(bindingSource);
+  const covered = !remote && runWorkspaceChipCovers(chip, validation);
+  let approval: "not_needed" | TaskForceOwnerAccessAnswer = "not_needed";
+  if (!covered) {
+    approval = await askOwnerForTaskForceAccess(p, access, `workspace:${pathDigest}`, {
+      tool: RUN_WORKSPACE_GRANT_TOOL, kind: writeStep ? "edit" : "read", detail: validation.path, cwd: validation.path,
+    });
+    if (approval !== "allowed") {
+      record({ decision: "denied", reason: approval === "denied" ? "owner_denied" : "approval_unavailable", pathDigest, remote });
+      return { params: p, ownerApprovedWrite: false };
+    }
+  }
+  let granted: string;
+  let binding: InvocationWorkspaceBinding | undefined;
+  try {
+    granted = ensureRunWorkspaceDirectory(validation.path, os.homedir());
+    if (p.workspaceBinding) binding = rebindInvocationWorkspace(p.workspaceBinding, granted);
+  } catch {
+    record({ decision: "denied", reason: "uncreatable", pathDigest });
+    return { params: p, ownerApprovedWrite: false };
+  }
+  record({
+    decision: "granted", reason: covered ? "chip_covers" : "owner_approved", pathDigest, created: !validation.exists,
+    insideRoomFolder: validation.insideRoomFolder, approval, remote,
+  });
+  p.sink({
+    kind: "tool-use",
+    status: p.locale === "ko" ? "이번 작업은 요청하신 폴더에서 진행합니다." : "This run works in the folder you named.",
+    agentId: orchestratorId,
+    runtimeAgentId: p.orchestratorAgent.id,
+    agentName: p.orchestratorAgent.nameEn || p.orchestratorAgent.name || "Agentlas Orchestrator",
+    role: "orchestrator",
+    tier: 1,
+    phase: "plan",
+  });
+  const params = await prepareTaskForceMemoryBoundary({ ...p, workingFolder: granted, ...(binding ? { workspaceBinding: binding } : {}) });
+  return { params, ownerApprovedWrite: approval === "allowed" && writeStep };
+}
+
+/** Packet context for a step the room re-runs after lifting its access (data inside PACKET_DATA, like the retry lines). */
+function taskForceAccessGrantedContext(locale: RuntimeLocale, granted: "write" | "full"): string {
+  if (granted === "full") {
+    return locale === "ko"
+      ? "호스트가 이 단계에 전체 액세스를 주었습니다. 같은 공유 작업공간에서 막혔던 일을 이어서 끝내세요. 처음부터 다시 시작하지 마세요."
+      : "host granted this step full access; finish the blocked work in the same shared workspace; no restart";
+  }
+  return locale === "ko"
+    ? "호스트가 이 단계에 작업 폴더 안 읽기·쓰기·실행 권한을 주었습니다. 같은 공유 작업공간에서 막혔던 일을 이어서 끝내세요. 처음부터 다시 시작하지 마세요."
+    : "host granted this step read, write and run inside the working folder; finish the blocked work in the same shared workspace; no restart";
 }
 
 async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams): Promise<BorrowedTaskForceResult> {
@@ -6098,6 +6388,17 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     userRequestedApproval: taskForceOwnerApprovalStop(plan.approvalStop, p.req.oneUserAuthoredPrompt ?? p.req.userPrompt),
   });
   const executionPackets = approvalPartition.ready;
+  const ownerAccess = newTaskForceOwnerAccessState();
+  if (plan.requestedWorkspace) {
+    const grant = await grantRequestedRunWorkspace(p, plan.requestedWorkspace,
+      executionPackets.some((packet) => packet.workspaceAccess === "write"), ownerAccess);
+    p = grant.params;
+    // The owner approved writing in that folder on the card while the chip itself was read-only: the write steps of
+    // this run carry that one approval (host-only field, capped in taskForceChildPermission).
+    if (grant.ownerApprovedWrite && (taskForcePermission(p) ?? "read") === "read") {
+      for (const packet of executionPackets) if (packet.workspaceAccess === "write") packet.grantedPermission = "write";
+    }
+  }
   if (approvalPartition.gateActive) {
     tryRecordRunEvent({
       runId: p.req.runId ?? `task-force:${p.chat.id}`,
@@ -6176,6 +6477,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
           packet.allocation.requirements.toolRequired,
           approvalPartition.gateActive,
           packet.workspaceAccess,
+          packet.grantedPermission,
         ),
         permissionInherited: false,
       },
@@ -6269,6 +6571,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
           packet.allocation.requirements.toolRequired,
           approvalPartition.gateActive,
           packet.workspaceAccess,
+          packet.grantedPermission,
         ),
         permissionInherited: false,
       },
@@ -6298,6 +6601,73 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       approvalPartition.gateActive,
       initialDelegationMessageId,
     );
+  };
+  const liftTaskForceWorkerAccess = async (
+    packet: (typeof plan.packets)[number],
+    blocked: BorrowedAgentResult,
+    rerun: (next: (typeof plan.packets)[number]) => Promise<BorrowedAgentResult>,
+  ): Promise<BorrowedAgentResult> => {
+    const ran = blocked.ranWithPermission ?? "read";
+    const needed: "write" | "full" = ran === "read" ? "write" : "full";
+    const chip = (taskForcePermission(p) ?? "read") as RunAccessChip;
+    const record = (payload: Record<string, unknown>) => tryRecordRunEvent({
+      runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id, nodeId: orchestratorId,
+      agentId: p.orchestratorAgent.id, kind: "task_force_access_escalation",
+      payload: { schemaVersion: "agentlas.task-force-access-escalation.v1", stepId: packet.stepId ?? null,
+        agent: packet.agent, ranWith: ran, needed, chip, ...payload },
+    });
+    const withBlock = (result: BorrowedAgentResult, reason: TaskForceAccessBlock["reason"]): BorrowedAgentResult =>
+      ({ ...result, accessBlock: { needed, reason } });
+    // A PRD-first gate, an Agent App, a restricted boundary or Plan mode is a deliberate boundary, not a shortfall.
+    if (approvalPartition.gateActive || p.req.agentAppMode || p.restrictedReadBoundary || p.req.planMode) {
+      record({ decision: "not_liftable", reason: "stage_gate" });
+      return withBlock(blocked, "stage_gate");
+    }
+    if (ran === "full" || packet.grantedPermission === "full" || packet.grantedPermission === needed) {
+      record({ decision: "not_liftable", reason: ran === "full" ? "already_full" : "still_blocked_after_grant" });
+      return withBlock(blocked, ran === "full" ? "already_full" : "still_blocked_after_grant");
+    }
+    const covered = ACCESS_RANK[chip] >= ACCESS_RANK[needed];
+    let approval: "not_needed" | TaskForceOwnerAccessAnswer = "not_needed";
+    if (!covered) {
+      let folder: string | null = null;
+      try {
+        folder = p.workspaceBinding ? revalidateInvocationWorkspaceBinding(p.workspaceBinding) : p.workingFolder ?? null;
+      } catch { folder = null; }
+      approval = await askOwnerForTaskForceAccess(p, ownerAccess, `escalation:${needed}`, needed === "write"
+        ? { tool: RUN_WORKSPACE_GRANT_TOOL, kind: "edit", detail: folder ?? blocked.spec.name, ...(folder ? { cwd: folder } : {}) }
+        : { tool: PERMISSION_ESCALATION_TOOL, kind: "escalate", detail: folder ? `${blocked.spec.name} · ${folder}` : blocked.spec.name,
+          ...(folder ? { cwd: folder } : {}) });
+      if (approval !== "allowed") {
+        const reason = approval === "denied" ? "owner_denied" as const : "approval_unavailable" as const;
+        record({ decision: "denied", reason });
+        return withBlock(blocked, reason);
+      }
+    }
+    record({ decision: "granted", reason: covered ? "chip_covers" : "owner_approved", approval });
+    p.sink({
+      kind: "tool-use",
+      status: p.locale === "ko"
+        ? `${blocked.spec.name}에 필요한 권한을 주고 이 단계를 다시 진행합니다.`
+        : `Giving ${blocked.spec.name} the access it needs and running this step again.`,
+      agentId: orchestratorId,
+      runtimeAgentId: p.orchestratorAgent.id,
+      agentName: orchestratorName,
+      role: "orchestrator",
+      tier: 1,
+      phase: "delegate",
+    });
+    const lifted = {
+      ...packet,
+      grantedPermission: needed,
+      context: [...(packet.context ?? []), taskForceAccessGrantedContext(p.locale, needed)],
+    };
+    const after = await rerun(lifted);
+    if (!after.ok && after.accessNeeded) {
+      record({ decision: "still_blocked", reason: "still_blocked_after_grant" });
+      return withBlock(after, "still_blocked_after_grant");
+    }
+    return after;
   };
   const runPacketWithRetry = async (
     packet: (typeof plan.packets)[number],
@@ -6351,6 +6721,12 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       return result;
     };
     let result = await runWithRecovery(packet, initialDelegationMessageId);
+    // A worker that asked for more access than it ran with is lifted here, by the room, never by the owner reading
+    // a worker's marker (owner 2026-10-16). The lift replaces the content retry below: re-running without the access
+    // would only repeat the same refusal.
+    if (!result.ok && result.accessNeeded && !result.runtimeFailure && !p.signal?.aborted) {
+      return liftTaskForceWorkerAccess(packet, result, runWithRecovery);
+    }
     if (result.ok || p.signal?.aborted) return result;
     if (result.runtimeFailure) return result;
     // A firm or packaged team is already a composite execution graph with its

@@ -202,6 +202,25 @@ export function captureTelegramOneInvocationBinding(
 }
 
 /**
+ * The same host surface bound to a folder Main granted for one run (mcp/run-workspace-grant.ts: validated, and on a
+ * remote surface approved by the owner on an approval card). The caller supplies a Main-canonical path, never a wire
+ * value; the captured identity is fresh, so revalidation fails closed if the folder is replaced afterwards.
+ */
+export function rebindInvocationWorkspace(
+  binding: InvocationWorkspaceBinding,
+  grantedCanonicalPath: string,
+): InvocationWorkspaceBinding {
+  if (!isWorkspaceBindingSource(binding.source)) throw unavailableWorkspaceError();
+  const directory = canonicalDirectory(grantedCanonicalPath);
+  if (directory.canonicalPath !== grantedCanonicalPath) throw replacedWorkspaceError();
+  return Object.freeze({
+    source: binding.source,
+    canonicalPath: directory.canonicalPath,
+    directoryIdentity: directory.directoryIdentity,
+  });
+}
+
+/**
  * Revalidate immediately before execution. The path must still resolve to the
  * exact directory captured by Desktop; replacement symlinks fail closed.
  */
