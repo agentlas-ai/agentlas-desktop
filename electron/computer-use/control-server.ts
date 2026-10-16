@@ -4,7 +4,7 @@ import { handleNativeGuestComputerUse, revokeNativeGuestComputerUseScopes } from
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { screen } from "electron";
 import { checkComputerUsePermissions } from "../mac-permissions";
 import { captureComputerUsePreview } from "./preview";
@@ -494,6 +494,13 @@ function writePrivateInfoFile(): void {
   if (process.platform !== "win32") fs.chmodSync(infoPath, 0o600);
 }
 
+/** Constant-time bearer check, as native-guest.ts does for its scoped tokens. */
+function bearerMatches(header: string | undefined, expected: string): boolean {
+  const actual = Buffer.from(typeof header === "string" ? header : "");
+  const wanted = Buffer.from(`Bearer ${expected}`);
+  return Boolean(expected) && actual.length === wanted.length && timingSafeEqual(actual, wanted);
+}
+
 export function startComputerUseControlServer(): Promise<number> {
   if (server && boundPort) return Promise.resolve(boundPort);
 
@@ -515,7 +522,7 @@ export function startComputerUseControlServer(): Promise<number> {
         return;
       }
       if (process.platform !== "darwin") { req.resume(); writeJson(res, 403, { ok: false, error: "native-os-driver-unavailable" }); return; }
-      if ((req.headers.authorization ?? "") !== `Bearer ${token}`) {
+      if (!bearerMatches(req.headers.authorization, token)) {
         writeJson(res, 401, { ok: false, error: "unauthorized" });
         return;
       }

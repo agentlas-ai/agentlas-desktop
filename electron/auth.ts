@@ -648,7 +648,9 @@ export async function fetchWithHubSession(
 ): Promise<Response> {
   assertDevelopmentEffectAllowed("auth.fetch-hub-session");
   const ctrl = new AbortController();
+  // One deadline for headers and body: clearing it once headers arrived left the caller's res.json() unbounded.
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  timer.unref?.();
   try {
     const res = await fetch(url, {
       ...init,
@@ -657,8 +659,9 @@ export async function fetchWithHubSession(
     });
     if (res.status === 401) invalidateAuthSessionFromServer(cookieHeader);
     return res;
-  } finally {
+  } catch (error) {
     clearTimeout(timer);
+    throw error;
   }
 }
 

@@ -11,11 +11,14 @@ const TIMEOUT_MS = 10_000;
 
 async function timedFetch(url: string, init: RequestInit): Promise<Response> {
   const ctrl = new AbortController();
+  // 헤더와 본문에 같은 마감 — 헤더 도착 시 타이머를 지우면 멈춘 본문의 res.json()이 영원히 기다렸다.
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  timer.unref?.();
   try {
     return await fetch(url, { ...init, signal: ctrl.signal });
-  } finally {
+  } catch (error) {
     clearTimeout(timer);
+    throw error;
   }
 }
 

@@ -6,7 +6,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { browserRequestApproval } from "./connect";
 import { BROWSER_SOCIAL_ENGAGE_ACTION, browserApprovalInfoPath } from "./approval-channel";
 import { resolveBrowserApprovalAuthority } from "./approval-authority";
@@ -78,6 +78,13 @@ function readBody(req: http.IncomingMessage, maxBytes = 64 * 1024): Promise<stri
   });
 }
 
+/** Constant-time bearer check (same rule as computer-use/control-server.ts). */
+function bearerMatches(header: string | undefined, expected: string): boolean {
+  const actual = Buffer.from(typeof header === "string" ? header : "");
+  const wanted = Buffer.from(`Bearer ${expected}`);
+  return Boolean(expected) && actual.length === wanted.length && timingSafeEqual(actual, wanted);
+}
+
 export function startBrowserApprovalServer(): Promise<number> {
   if (server && boundPort) return Promise.resolve(boundPort);
   token = randomUUID();
@@ -88,7 +95,7 @@ export function startBrowserApprovalServer(): Promise<number> {
         res.writeHead(404).end("not found");
         return;
       }
-      if ((req.headers["authorization"] ?? "") !== `Bearer ${token}`) {
+      if (!bearerMatches(req.headers["authorization"], token)) {
         res.writeHead(401).end("unauthorized");
         return;
       }
