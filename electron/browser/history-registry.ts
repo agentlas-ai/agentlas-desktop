@@ -8,6 +8,9 @@ import type { BrowserDurableHistoryEntry } from "../../shared/browser-ui";
 const HISTORY_SCHEMA_VERSION = "agentlas.browser-history.v1" as const;
 const MAX_RECORDS = 2_000;
 const MAX_STATE_BYTES = 2 * 1024 * 1024;
+const MAX_URL_LENGTH = 2_048;
+// SPAs fire did-navigate-in-page constantly; one write per window instead of a full sync rewrite per event.
+const PERSIST_DEBOUNCE_MS = 1_000;
 
 interface HistoryRecord extends BrowserDurableHistoryEntry {
   schemaVersion: typeof HISTORY_SCHEMA_VERSION;
@@ -24,6 +27,10 @@ const records = new Map<string, HistoryRecord>();
 const installed = new Set<number>();
 let loaded = false;
 let unavailable = false;
+let persistTimer: NodeJS.Timeout | null = null;
+let writeGeneration = 0;
+let exitFlushInstalled = false;
+const warnedPersistCodes = new Set<string>();
 
 function statePath(): string {
   return userDataPath("browser", "history-v1.json");
@@ -33,7 +40,8 @@ function clean(value: unknown, max: number): string {
   return String(value ?? "").replace(/[\u0000-\u001f\u007f]/gu, "").trim().slice(0, max);
 }
 
-const SECRET_PARAMETER_KEY = /^(?:access_token|auth_token|authorization|credential|id_token|oauth_code|password|passwd|refresh_token|secret|session_token|token)$/iu;
+// OAuth codes/state, signed-URL signatures (X-Amz-*) and API keys are single-use or secret too.
+const SECRET_PARAMETER_KEY = /^(?:access_token|api_key|auth_token|authorization|code|credential|id_token|key|oauth_code|password|passwd|refresh_token|secret|session_token|sig|signature|state|token|x-amz-[a-z0-9-]+)$/iu;
 
 function safeParameters(input: string): { value: string; redacted: boolean } {
   const output = new URLSearchParams();
@@ -46,6 +54,17 @@ function safeParameters(input: string): { value: string; redacted: boolean } {
 }
 
 export function sanitizeBrowserHistoryUrl(value: string): { url: string; redactedQuery: boolean } | null {
+  const safe = redactHistoryUrl(value);
+  if (!safe || safe.url.length <= MAX_URL_LENGTH) return safe;
+  // Over the cap: keep origin and path only. A path that alone exceeds the cap is not recorded.
+  const parsed = new URL(safe.url);
+  parsed.search = "";
+  parsed.hash = "";
+  const url = parsed.toString();
+  return url.length <= MAX_URL_LENGTH ? { url, redactedQuery: true } : null;
+}
+
+function redactHistoryUrl(value: string): { url: string; redactedQuery: boolean } | null {
   try {
     const parsed = new URL(value);
     const local = parsed.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname);
@@ -79,7 +98,8 @@ function validRecord(value: unknown): value is HistoryRecord {
     && typeof row.id === "string" && /^history_[a-f0-9]{32}$/u.test(row.id)
     && typeof row.taskScopeId === "string" && /^[A-Za-z0-9_:.-]{8,200}$/u.test(row.taskScopeId)
     && typeof row.viewId === "string" && /^[A-Za-z0-9_-]{8,80}$/u.test(row.viewId)
-    && sanitizeBrowserHistoryUrl(String(row.url ?? ""))?.url === row.url
+    // Older files were written under a narrower redaction rule; load() re-sanitizes each URL.
+    && typeof row.url === "string" && redactHistoryUrl(row.url) !== null
     && typeof row.title === "string" && row.title.length <= 512
     && typeof row.redactedQuery === "boolean"
     && Number.isSafeInteger(row.visitCount) && Number(row.visitCount) > 0
@@ -98,27 +118,103 @@ function load(): void {
       unavailable = true;
       return;
     }
-    for (const record of parsed.records) records.set(record.id, record);
+    let rewritten = false;
+    for (const record of parsed.records) {
+      const safe = sanitizeBrowserHistoryUrl(record.url);
+      if (!safe) { rewritten = true; continue; }
+      if (safe.url === record.url) { mergeRecord(record); continue; }
+      // A secret parameter or an over-long URL kept under the older rule is scrubbed, not trusted as is.
+      rewritten = true;
+      mergeRecord({ ...record, id: recordId(record.taskScopeId, safe.url), url: safe.url, redactedQuery: true });
+    }
+    if (rewritten) schedulePersist();
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") unavailable = true;
   }
 }
 
-function persist(): void {
-  if (unavailable) return;
-  const file = statePath();
-  const dir = path.dirname(file);
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const all = [...records.values()].sort((a, b) => a.lastVisitedAt.localeCompare(b.lastVisitedAt)).slice(-MAX_RECORDS);
-  const bytes = Buffer.from(`${JSON.stringify({ schemaVersion: HISTORY_SCHEMA_VERSION, records: all } satisfies HistoryStateFile)}\n`, "utf8");
-  if (bytes.byteLength > MAX_STATE_BYTES) throw new Error("browser_history_state_too_large");
-  const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
-  fs.writeFileSync(temp, bytes, { mode: 0o600, flag: "wx" });
-  fs.renameSync(temp, file);
+function mergeRecord(record: HistoryRecord): void {
+  const existing = records.get(record.id);
+  if (!existing) { records.set(record.id, record); return; }
+  const newer = existing.lastVisitedAt >= record.lastVisitedAt ? existing : record;
+  records.set(record.id, {
+    ...newer,
+    visitCount: Math.min(Number.MAX_SAFE_INTEGER, existing.visitCount + record.visitCount),
+    redactedQuery: existing.redactedQuery || record.redactedQuery,
+  });
+}
+
+/** Trim to the record cap and the byte cap (newest kept) before serializing, so a write never overflows. */
+function serializeState(): Buffer {
+  const sorted = [...records.values()].sort((a, b) => a.lastVisitedAt.localeCompare(b.lastVisitedAt)).slice(-MAX_RECORDS);
+  const budget = MAX_STATE_BYTES - 256;
+  let used = 0;
+  let start = sorted.length;
+  while (start > 0) {
+    const size = Buffer.byteLength(JSON.stringify(sorted[start - 1]), "utf8") + 1;
+    if (used + size > budget) break;
+    used += size;
+    start -= 1;
+  }
+  const all = sorted.slice(start);
   if (records.size > all.length) {
     records.clear();
     for (const record of all) records.set(record.id, record);
   }
+  const bytes = Buffer.from(`${JSON.stringify({ schemaVersion: HISTORY_SCHEMA_VERSION, records: all } satisfies HistoryStateFile)}\n`, "utf8");
+  if (bytes.byteLength > MAX_STATE_BYTES) throw new Error("browser_history_state_too_large");
+  return bytes;
+}
+
+/** Owner actions (import, clear) are written at once and supersede any batched write still in flight. */
+function persistNow(): void {
+  if (unavailable) return;
+  if (persistTimer) { clearTimeout(persistTimer); persistTimer = null; }
+  writeGeneration += 1;
+  const file = statePath();
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const bytes = serializeState();
+  const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  fs.writeFileSync(temp, bytes, { mode: 0o600, flag: "wx" });
+  fs.renameSync(temp, file);
+}
+
+function schedulePersist(): void {
+  if (unavailable || persistTimer) return;
+  persistTimer = setTimeout(() => { persistTimer = null; void persistBatched(); }, PERSIST_DEBOUNCE_MS);
+  persistTimer.unref?.();
+  if (!exitFlushInstalled) {
+    exitFlushInstalled = true;
+    process.once("exit", () => {
+      if (!persistTimer) return;
+      try { persistNow(); } catch { /* quitting: the last batch is best effort */ }
+    });
+  }
+}
+
+async function persistBatched(): Promise<void> {
+  if (unavailable) return;
+  const generation = ++writeGeneration;
+  const file = statePath();
+  const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    const bytes = serializeState();
+    await fs.promises.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+    await fs.promises.writeFile(temp, bytes, { mode: 0o600, flag: "wx" });
+    // A newer write owns the file now; an older snapshot must never land over it (a clear would come back).
+    if (generation !== writeGeneration) { await fs.promises.rm(temp, { force: true }); return; }
+    fs.renameSync(temp, file);
+  } catch (error) {
+    void fs.promises.rm(temp, { force: true }).catch(() => undefined);
+    warnPersistFailure(error);
+  }
+}
+
+function warnPersistFailure(error: unknown): void {
+  const code = String((error as NodeJS.ErrnoException)?.code || (error instanceof Error ? error.message : "unknown")).slice(0, 80);
+  if (warnedPersistCodes.has(code)) return;
+  warnedPersistCodes.add(code);
+  console.warn(`[browser-history] persist failed: ${code}`);
 }
 
 function recordId(taskScopeId: string, url: string): string {
@@ -126,6 +222,12 @@ function recordId(taskScopeId: string, url: string): string {
 }
 
 function recordVisit(taskScopeId: string, viewId: string, contents: WebContents, increment: boolean): void {
+  // Runs inside webContents listeners: it must never throw into Electron's event dispatch.
+  try { recordVisitUnsafe(taskScopeId, viewId, contents, increment); }
+  catch (error) { warnPersistFailure(error); }
+}
+
+function recordVisitUnsafe(taskScopeId: string, viewId: string, contents: WebContents, increment: boolean): void {
   load();
   if (unavailable || contents.isDestroyed()) return;
   const safe = sanitizeBrowserHistoryUrl(contents.getURL());
@@ -144,7 +246,7 @@ function recordVisit(taskScopeId: string, viewId: string, contents: WebContents,
     visitCount: Math.min(Number.MAX_SAFE_INTEGER, (prior?.visitCount ?? 0) + (increment || !prior ? 1 : 0)),
     redactedQuery: Boolean(prior?.redactedQuery || safe.redactedQuery),
   });
-  persist();
+  schedulePersist();
 }
 
 export function ensureBrowserHistoryForGuest(taskScopeId: string, viewId: string, contents: WebContents): void {
@@ -225,7 +327,7 @@ export function importBrowserHistory(
     }
   }
   if (changedIds.size > 0) {
-    try { persist(); }
+    try { persistNow(); }
     catch {
       for (const [id, row] of prior) row ? records.set(id, row) : records.delete(id);
       return { ok: false, reason: "history-unavailable" };
@@ -243,6 +345,6 @@ export function clearBrowserHistory(taskScopeId: string): number | null {
     records.delete(id);
     removed += 1;
   }
-  if (removed) persist();
+  if (removed) persistNow();
   return removed;
 }
