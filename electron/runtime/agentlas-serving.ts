@@ -213,14 +213,18 @@ type ServingDone = {
   outputFormat?: unknown;
 };
 
-function servingToolCalls(value: unknown, admitted: ReadonlySet<string>): ServingToolCall[] {
+function servingToolCalls(value: unknown): ServingToolCall[] {
   if (!Array.isArray(value) || value.length < 1) throw new Error("invalid_serving_tool_frame");
   const ids = new Set<string>();
   return value.map((raw: unknown) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid_serving_tool_frame");
     const call = raw as Partial<ServingToolCall>;
+    // A name this request did not offer (copied from the conversation history: another runtime's tool name, or a tool the
+    // menu listed earlier) is not a broken frame. The dispatcher resolves it to the one tool it denotes or answers the
+    // model with the exact names, and never runs an unknown tool (tool-name-alias.ts). Refusing the reply ended the turn
+    // as "no completion receipt" (production 2026-10-16, Hope on Agentlas Light).
     if (typeof call.id !== "string" || !/^[A-Za-z0-9_.:-]{1,64}$/.test(call.id) || ids.has(call.id)
-      || typeof call.name !== "string" || !admitted.has(call.name)
+      || typeof call.name !== "string" || !call.name || call.name.length > 256
       || !call.input || typeof call.input !== "object" || Array.isArray(call.input))
       throw new Error("invalid_serving_tool_frame");
     ids.add(call.id);
@@ -391,7 +395,6 @@ async function runAgentlasServingWithTools(
     return { name, description: (tool.function.description ?? original).slice(0, 4_096),
       inputSchema: tool.function.parameters };
   });
-  const admitted = new Set(originalByAlias.keys());
   const toolExchanges: ServingToolExchange[] = [];
   const seenCallIds = new Set<string>();
   const usage = new ServingUsage(events);
@@ -516,7 +519,7 @@ async function runAgentlasServingWithTools(
         ownerControlTerminal: !req.signal?.aborted && (done.toolUses === undefined || (Array.isArray(done.toolUses) && done.toolUses.length === 0))
           ? "completed" : "uncertain" });
     }
-    const calls = servingToolCalls(done.toolUses, admitted);
+    const calls = servingToolCalls(done.toolUses);
     for (const call of calls) {
       if (seenCallIds.has(call.id)) throw new Error("invalid_serving_tool_frame");
       seenCallIds.add(call.id);
@@ -528,7 +531,7 @@ async function runAgentlasServingWithTools(
     const images: ServingImage[] = [];
     for (const call of calls) {
       const result = await runMainToolDispatch(byName,
-        { providerCallId: call.id, toolName: originalByAlias.get(call.name)!, arguments: JSON.stringify(call.input) },
+        { providerCallId: call.id, toolName: originalByAlias.get(call.name) ?? call.name, arguments: JSON.stringify(call.input) },
         progress.events, approval, broker);
       progress.assertProgress();
       results.push({ id: call.id, text: result.content, isError: result.isError });
