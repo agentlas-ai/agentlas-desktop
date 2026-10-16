@@ -32,7 +32,10 @@ function guestAndDocument(ownerId: number, input: BrowserUiTarget): { contents: 
   return contents && document?.state === "ready" ? { contents, document } : null;
 }
 
-const FILL_SCRIPT = String.raw`((payload) => {
+// The origin Main checked comes from a cached document record; the page can navigate before the script runs.
+// The script refuses itself unless it runs in the top frame of that exact origin, as vault-login.ts does.
+const FILL_SCRIPT = String.raw`((payload, permittedOrigin) => {
+  if (location.origin !== permittedOrigin || window.top !== window) return { refused: 'origin-changed' };
   const selectors = {
     username: ['input[autocomplete="username"]','input[autocomplete="email"]','input[type="email"]','input[name*="user" i]','input[name*="login" i]'],
     password: ['input[autocomplete="current-password"]','input[autocomplete="password"]','input[type="password"]'],
@@ -66,9 +69,10 @@ const FILL_SCRIPT = String.raw`((payload) => {
   return filled;
 })`;
 
-async function inject(contents: WebContents, values: Record<string, string>): Promise<string[] | null> {
+async function inject(contents: WebContents, values: Record<string, string>, permittedOrigin: string): Promise<string[] | "origin-changed" | null> {
   try {
-    const result = await contents.executeJavaScript(`${FILL_SCRIPT}(${JSON.stringify(values)})`, true);
+    const result = await contents.executeJavaScript(`${FILL_SCRIPT}(${JSON.stringify(values)}, ${JSON.stringify(permittedOrigin)})`, true);
+    if (result && typeof result === "object" && !Array.isArray(result) && (result as { refused?: unknown }).refused === "origin-changed") return "origin-changed";
     return Array.isArray(result) && result.every((value) => typeof value === "string") ? result : null;
   } catch { return null; }
 }
@@ -86,9 +90,13 @@ export async function fillBrowserCredential(ownerId: number, input: BrowserUiTar
   const saved = await browserCredentialForFill(String(input.credentialId ?? ""));
   if (!saved.ok) return { ok: false, reason: saved.reason };
   if (documentOrigin(scoped.document.url) !== saved.record.origin) return { ok: false, reason: "origin-mismatch" };
-  const filled = await inject(scoped.contents, { username: saved.record.username, password: saved.record.password });
+  const filled = await inject(scoped.contents, { username: saved.record.username, password: saved.record.password }, saved.record.origin);
+  if (filled === "origin-changed") return { ok: false, reason: "origin-mismatch" };
   const latest = nativeBrowserGuestDocument(ownerId, input.taskScopeId, input.viewId);
-  if (!sameDocument(scoped.document, latest)) return { ok: false, reason: "guest-changed" };
+  // The document changed after the script ran on the permitted origin: report what may have been written.
+  if (!sameDocument(scoped.document, latest)) {
+    return { ok: false, reason: "guest-changed", ...(filled ? { filled: { username: filled.includes("username"), password: filled.includes("password") } } : {}) };
+  }
   if (!filled) return { ok: false, reason: "operation-failed" };
   return { ok: true, filled: { username: filled.includes("username"), password: filled.includes("password") },
     document: { webContentsId: scoped.document.webContentsId, navigationEpoch: scoped.document.navigationEpoch } };
@@ -104,12 +112,16 @@ export async function fillBrowserContact(ownerId: number, input: BrowserUiTarget
   if (input?.userConfirmed !== true) return { ok: false, reason: "user-confirmation-required" };
   const scoped = guestAndDocument(ownerId, input);
   if (!scoped) return { ok: false, reason: validTarget(input) ? "guest-unavailable" : "invalid-request" };
-  if (!documentOrigin(scoped.document.url)) return { ok: false, reason: "origin-mismatch" };
+  const origin = documentOrigin(scoped.document.url);
+  if (!origin) return { ok: false, reason: "origin-mismatch" };
   const saved = await browserContactForFill(String(input.contactId ?? ""));
   if (!saved.ok) return { ok: false, reason: saved.reason };
-  const filled = await inject(scoped.contents, saved.record.fields as Record<string, string>);
+  const filled = await inject(scoped.contents, saved.record.fields as Record<string, string>, origin);
+  if (filled === "origin-changed") return { ok: false, reason: "origin-mismatch" };
   const latest = nativeBrowserGuestDocument(ownerId, input.taskScopeId, input.viewId);
-  if (!sameDocument(scoped.document, latest)) return { ok: false, reason: "guest-changed" };
+  if (!sameDocument(scoped.document, latest)) {
+    return { ok: false, reason: "guest-changed", ...(filled ? { filledFields: filled as BrowserContactField[] } : {}) };
+  }
   if (!filled) return { ok: false, reason: "operation-failed" };
   return { ok: true, filledFields: filled as BrowserContactField[],
     document: { webContentsId: scoped.document.webContentsId, navigationEpoch: scoped.document.navigationEpoch } };
