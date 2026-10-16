@@ -212,6 +212,15 @@ export function setToolApprovalLedger(ledger: ToolApprovalLedger | null): void {
  */
 const arbiterFaults = new WeakMap<object, string>();
 export function toolApprovalFaultCode(ask: object): string | undefined { return arbiterFaults.get(ask); }
+
+/**
+ * Asks the arbiter answered "deny" because the owner's card expired unanswered (5 minutes, requestToolApproval), not
+ * because the owner refused. Callers that remember a refusal (the room's access cards, borrowed-task-force.ts) read this
+ * so an unanswered card never counts as the owner's "no" (W7 S-room-owner-folder, 2026-10-16).
+ */
+const expiredAsks = new WeakSet<object>();
+export function markToolApprovalExpired(ask: object): void { expiredAsks.add(ask); }
+export function toolApprovalExpired(ask: object): boolean { return expiredAsks.has(ask); }
 function faultCodeOf(error: unknown): string {
   // Only an identifier-shaped code or message is passed on; free text (paths, ids) never leaves the process.
   for (const raw of [(error as { code?: unknown } | null)?.code, (error as { message?: unknown } | null)?.message]) {
@@ -264,6 +273,8 @@ export type { ToolApprovalDecision };
 export interface ToolApprovalOutcome {
   decision: ToolApprovalDecision;
   decidedAt: string;
+  /** "expired": nobody answered the card before it closed. A deny for the run, never the owner's answer. */
+  reason?: "expired";
   durableConsent?: ToolApprovalDurableConsentReceipt;
 }
 
@@ -442,7 +453,7 @@ function expirePending(entry: Pending): void {
   if (entry.durable) {
     try { toolApprovalLedger?.cancel(entry.request.id); } catch { /* the ledger's own expiry closes it */ }
   }
-  const outcome: ToolApprovalOutcome = { decision: "deny", decidedAt: new Date().toISOString() };
+  const outcome: ToolApprovalOutcome = { decision: "deny", decidedAt: new Date().toISOString(), reason: "expired" };
   rememberResolution({ requestId: entry.request.id, decision: "deny", actionId: null,
     status: "expired", decidedAt: outcome.decidedAt });
   for (const waiter of entry.waiters) { waiter.cleanup(); waiter.resolve(outcome); }

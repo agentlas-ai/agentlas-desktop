@@ -149,7 +149,7 @@ import {
   PERMISSION_ESCALATION_TOOL,
   stripPermissionEscalationMarker,
 } from "../../shared/permission-escalation";
-import { getRuntimeToolPermissionArbiter } from "../runtime/tool-approval";
+import { getRuntimeToolPermissionArbiter, toolApprovalExpired, type RuntimeToolPermissionAsk } from "../runtime/tool-approval";
 import {
   isRemoteInvocationWorkspaceBindingSource,
   rebindInvocationWorkspace,
@@ -2958,6 +2958,8 @@ export function taskForceIncompleteMessage(input: {
   // is a host bug — "continue" cannot clear it.
   const accessLine = (access: TaskForceAccessBlock): string => access.reason === "owner_denied"
     ? ko ? "권한을 허용하지 않아 멈췄습니다" : "stopped: the access it needed was not allowed"
+    : access.reason === "approval_expired"
+      ? ko ? "권한 확인에 답이 없어 멈췄습니다" : "stopped: the access request expired unanswered"
     : access.reason === "approval_unavailable"
       ? ko ? "권한 확인을 받지 못해 멈췄습니다" : "stopped: the access it needed could not be confirmed"
       : ko ? "필요한 권한으로 다시 실행했지만 끝내지 못했습니다" : "ran again with the access it needed and still did not finish";
@@ -2984,9 +2986,12 @@ export function taskForceIncompleteMessage(input: {
     : row.incomplete ? (ko ? "아직 끝내지 못했습니다" : "not finished yet") : (ko ? "막힌 부분이 남아 있습니다" : "still blocked")}`);
   const decisionPending = input.remaining.some((entry) => entry.decisions.some((question) => readable(question)));
   const accessNeedsChip = input.remaining.some((entry) => entry.access?.reason === "owner_denied" || entry.access?.reason === "approval_unavailable");
+  const accessExpired = input.remaining.some((entry) => entry.access?.reason === "approval_expired");
   const onlyLiftedAccess = input.remaining.length > 0 && input.remaining.every(liftedAccess) && !input.requiredSurfaceMissing;
   const closing = accessNeedsChip
     ? ko ? "작성창에서 권한을 올린 뒤 \"계속해줘\"라고 하시면 남은 일부터 이어서 합니다." : "Raise the permission in the composer, then say \"continue\" and the remaining work picks up from here."
+    : accessExpired
+      ? ko ? "\"계속해줘\"라고 하시면 권한을 다시 묻고 이어서 합니다." : "Say \"continue\" and it asks for the access again and picks up from here."
     : onlyLiftedAccess
       ? ko ? "필요한 권한으로 한 번 더 실행했지만 끝나지 않아 여기서 멈췄습니다." : "It ran once more with the access it needed and still did not finish, so it stopped here."
       : decisionPending
@@ -3459,7 +3464,7 @@ interface TaskForcePacketOutcome {
 /** Why a worker's access request did not clear its step (typed; the owner message words it). */
 export interface TaskForceAccessBlock {
   needed: "write" | "full";
-  reason: "owner_denied" | "approval_unavailable" | "still_blocked_after_grant" | "already_full" | "stage_gate";
+  reason: "owner_denied" | "approval_expired" | "approval_unavailable" | "still_blocked_after_grant" | "already_full" | "stage_gate";
 }
 
 function taskForceWorkerCompletionStatus(text: string): TaskForceWorkerCompletionStatus {
@@ -6443,9 +6448,10 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
  * naming the concrete scope, in the room's own conversation (so it also reaches the paired phone), and resume on approval.
  * Every decision leaves a typed run_event receipt (path digest only, never the path).
  */
-type TaskForceOwnerAccessAnswer = "allowed" | "denied" | "unavailable";
+/** "expired": the card closed unanswered (tool-approval.ts, 5 minutes). Never the owner's "no": not remembered, no latch. */
+type TaskForceOwnerAccessAnswer = "allowed" | "denied" | "expired" | "unavailable";
 
-/** Per room run: one card per concrete scope, and none after the owner refused one. */
+/** Per room run: one card per concrete scope, and none after the owner refused one (an expired card is not a refusal). */
 interface TaskForceOwnerAccessState {
   answers: Map<string, TaskForceOwnerAccessAnswer>;
   refused: boolean;
@@ -6473,7 +6479,7 @@ async function askOwnerForTaskForceAccess(
   try {
     // permission "read" + mutating: the host policy shows a live card for this exact scope (a stored "always allow" rule
     // for it answers without one); the chip check already happened above, so a write/full chip never reaches here.
-    const decision = await arbiter({
+    const ask: RuntimeToolPermissionAsk = {
       runtime: "agentlas",
       sessionKey: `task-force-access:${p.req.runId ?? p.chat.id}`,
       tool: card.tool,
@@ -6485,12 +6491,16 @@ async function askOwnerForTaskForceAccess(
       chatId: p.chat.id,
       agentId: p.orchestratorAgent.id,
       ...(p.signal ? { signal: p.signal } : {}),
-    });
-    answer = decision === "deny" ? "denied" : "allowed";
+    };
+    const decision = await arbiter(ask);
+    // A deny is the owner's only when the card was answered: an unanswered card that expired is typed apart (W7
+    // S-room-owner-folder, 2026-10-16: an expiry was recorded as owner_denied and latched every later card of the run).
+    answer = decision !== "deny" ? "allowed" : toolApprovalExpired(ask) ? "expired" : "denied";
   } catch {
     answer = "unavailable";
   }
-  state.answers.set(scopeKey, answer);
+  // An expired card leaves nothing behind: the next need for this scope raises a fresh card.
+  if (answer !== "expired") state.answers.set(scopeKey, answer);
   if (answer === "denied") state.refused = true;
   return answer;
 }
@@ -6557,7 +6567,8 @@ async function grantRequestedRunWorkspace(
       tool: RUN_WORKSPACE_GRANT_TOOL, kind: writeStep ? "edit" : "read", detail: validation.path, cwd: validation.path,
     });
     if (approval !== "allowed") {
-      record({ decision: "denied", reason: approval === "denied" ? "owner_denied" : "approval_unavailable", pathDigest, remote });
+      record({ decision: approval === "expired" ? "expired" : "denied",
+        reason: approval === "denied" ? "owner_denied" : approval === "expired" ? "approval_expired" : "approval_unavailable", pathDigest, remote });
       return { params: p, ownerApprovedWrite: false };
     }
   }
@@ -6934,8 +6945,9 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         : { tool: PERMISSION_ESCALATION_TOOL, kind: "escalate", detail: folder ? `${blocked.spec.name} · ${folder}` : blocked.spec.name,
           ...(folder ? { cwd: folder } : {}) });
       if (approval !== "allowed") {
-        const reason = approval === "denied" ? "owner_denied" as const : "approval_unavailable" as const;
-        record({ decision: "denied", reason });
+        const reason = approval === "denied" ? "owner_denied" as const
+          : approval === "expired" ? "approval_expired" as const : "approval_unavailable" as const;
+        record({ decision: approval === "expired" ? "expired" : "denied", reason });
         return withBlock(blocked, reason);
       }
     }

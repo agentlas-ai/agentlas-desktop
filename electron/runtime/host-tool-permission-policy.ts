@@ -14,6 +14,7 @@ import { mainToolConsentResource } from "./tool-consent";
 import {
   announceToolDenied,
   capabilityClassFor,
+  markToolApprovalExpired,
   requestToolApproval,
   setCapabilityGrantPersister,
   setRuntimeToolPermissionArbiter,
@@ -82,6 +83,9 @@ export function createHostToolPermissionPolicy(ports: HostToolPermissionPolicyPo
     recordCapabilityGrant, requestToolApproval, announceToolDenied } = ports;
   const now = ports.now ?? Date.now;
   const recentUserDenials = new Map<string, number>();
+  // Cards that expired unanswered: the same scope is not asked again in the TTL (no 5-minute wait per call while the
+  // owner is away), but the refusal stays typed as an expiry, never as the owner's denial.
+  const recentExpiries = new Map<string, number>();
   const USER_DENIAL_TTL_MS = 5 * 60_000;
   const denialKey = (ask: { sessionKey: string; tool: string; detail?: string }) => `${ask.sessionKey}\u0000${ask.tool}\u0000${mainToolConsentResource(ask) ?? ask.detail ?? ""}`;
 
@@ -185,6 +189,8 @@ export function createHostToolPermissionPolicy(ports: HostToolPermissionPolicyPo
     if (ask.permission === "write") return "allow_session";
     const deniedAt = recentUserDenials.get(denialKey(ask));
     if (deniedAt && now() - deniedAt < USER_DENIAL_TTL_MS) return "deny";
+    const expiredAt = recentExpiries.get(denialKey(ask));
+    if (expiredAt && now() - expiredAt < USER_DENIAL_TTL_MS) { markToolApprovalExpired(ask); return "deny"; }
     /*
      * 대화가 붙어 있지 않은 실행(자동화/그래프/헤드리스)은 답할 사람이 없다 — 5분을
      * 매달아 두었다가 거부하는 대신 즉시 거부하고 사실만 남긴다(08-09 결정: 실행 중
@@ -217,7 +223,11 @@ export function createHostToolPermissionPolicy(ports: HostToolPermissionPolicyPo
       agentId: ask.agentId,
       consentBinding,
     });
-    if (outcome.decision === "deny") recentUserDenials.set(denialKey(ask), now());
+    if (outcome.decision === "deny") {
+      // An unanswered card closed by its timer is not the owner's answer: typed as an expiry for the caller.
+      if (outcome.reason === "expired") { markToolApprovalExpired(ask); recentExpiries.set(denialKey(ask), now()); }
+      else recentUserDenials.set(denialKey(ask), now());
+    }
     // Durable consent is checked again for each call, including its first approval.
     // A native session permit would outlive revocation of the saved rule.
     if (outcome.decision === "allow_always" || outcome.decision === "allow_session") {
