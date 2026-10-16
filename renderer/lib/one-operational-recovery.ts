@@ -1,10 +1,30 @@
 import { redactSecrets } from "@shared/secret-patterns";
+import { ipcErrorCode } from "@shared/ipc-error-code";
+import { isTransientSendRefusal } from "@shared/transient-send-refusal";
+import { innermostTypedCode, isTypedCode, type TurnDelivery } from "@shared/turn-settlement";
 
 export const ONE_OPERATIONAL_RECOVERY_EVENT = "agentlas:one-operational-recovery";
 
+/**
+ * What a recovery turn may know about a failure: machine facts only (docs 31 W1, audit A7 M19). The error's message and
+ * stack never reach the model: 10 recovery turns built from that prose finished 0 of 3 owner requests (2026-10-11..16).
+ */
+export type OneOperationalRecoveryFacts = {
+  /** The failure's machine code (IPC code marker, own code or innermost cause code); "uncoded" when it has none. */
+  code: string;
+  /** Where it failed: the product call site's scope. */
+  stage: string;
+  /** Whether the failed turn reached a runtime (RuntimeTurnDelivery), when the failure carries it. */
+  turnDelivery?: TurnDelivery;
+  /** The machine code of a failed recovery attempt itself, from its receipt. */
+  attemptFailureCode?: string;
+};
+
 export type OneOperationalRecoveryDetail = {
   scope: string;
+  /** The serialized typed facts (OneOperationalRecoveryFacts), never error prose. */
   evidence: string;
+  facts: OneOperationalRecoveryFacts;
   /**
    * 실패가 일어난 대화. 복구는 "가장 최근 One 대화"가 아니라 **실패한 방**에서 이어져야
    * 사용자가 맥락을 잃지 않는다(PRD §4.6). 호출부 89곳을 고치는 대신, 실패 순간 화면이
@@ -42,18 +62,11 @@ export function requestOneOperationalRecovery(
   options?: { userMessage?: string; chatId?: string },
 ): void {
   if (typeof window === "undefined" || recoveryDispatchSuppressionDepth > 0) return;
-  let rawEvidence: string;
-  if (cause instanceof Error) {
-    rawEvidence = [cause.name, cause.message, cause.stack].filter(Boolean).join("\n");
-  } else if (cause && typeof cause === "object") {
-    try { rawEvidence = JSON.stringify(cause); }
-    catch { rawEvidence = Object.prototype.toString.call(cause); }
-  } else {
-    rawEvidence = String(cause ?? "");
-  }
-  const evidence = redactSecrets(rawEvidence, "[private value removed]")
-    .replace(/\s+/g, " ")
-    .trim();
+  // A transient refusal (the chat or the app-service channel is not ready yet) is Main's to retry; no recovery turn.
+  if (isTransientSendRefusal(cause)) return;
+  const facts = oneOperationalRecoveryFacts(scope, cause);
+  const rawEvidence = JSON.stringify(facts);
+  const evidence = redactSecrets(rawEvidence, "[private value removed]");
   let chatId = options?.chatId;
   let taskId: string | undefined;
   try {
@@ -73,10 +86,32 @@ export function requestOneOperationalRecovery(
       detail: {
         scope: scope.slice(0, 120),
         evidence: evidence.slice(0, 4_000),
+        facts,
         ...(chatId && /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/.test(chatId) ? { chatId } : {}),
         ...(taskId ? { taskId } : {}),
         ...(options?.userMessage?.trim() ? { userMessage: options.userMessage.trim().slice(0, 500) } : {}),
       },
     },
   ));
+}
+
+/** Read a data property only (no getter runs). */
+function dataField(value: unknown, name: string): unknown {
+  if (!value || typeof value !== "object") return undefined;
+  try {
+    const property = Object.getOwnPropertyDescriptor(value, name);
+    return property && Object.hasOwn(property, "value") ? property.value : undefined;
+  } catch { return undefined; }
+}
+
+/** Typed facts of a failure for operational recovery: codes and delivery only, no message, stack or provider text. */
+export function oneOperationalRecoveryFacts(scope: string, cause: unknown): OneOperationalRecoveryFacts {
+  // The innermost code of a same-process cause chain; across IPC only the marker Main encoded survives.
+  const code = innermostTypedCode(cause) ?? ipcErrorCode(cause);
+  const delivery = dataField(cause, "turnDelivery");
+  return {
+    code: isTypedCode(code) ? code : "uncoded",
+    stage: scope.slice(0, 120),
+    ...(delivery === "not-dispatched" || delivery === "not-accepted" || delivery === "accepted" ? { turnDelivery: delivery } : {}),
+  };
 }

@@ -8,13 +8,15 @@ import {
 } from "@/lib/one-operational-recovery";
 import { useT } from "@/lib/i18n";
 import { ONE_OPERATIONAL_RECOVERY_PROMPT_LEAD } from "@shared/one-operational-recovery-prompt";
+import { isTypedCode } from "@shared/turn-settlement";
 import styles from "./OneRecoveryPlane.module.css";
 
 function recoveryPrompt(detail: OneOperationalRecoveryDetail): string {
+  // Typed facts only (code, stage, turn delivery): never the error's message or stack (docs 31 W1, audit A7 M19).
   return [
     ONE_OPERATIONAL_RECOVERY_PROMPT_LEAD,
     `Operation surface: ${detail.scope}`,
-    detail.evidence,
+    `Failure facts: ${JSON.stringify(detail.facts)}`,
     "Judge the complete current situation. Perform safe reversible recovery within current authority, verify the original requested outcome, and store only the concise useful result. If a change needs authority beyond read-only inspection, request it through One's normal decision flow. Ask one short question only when identity, irreversible action, or new authority is required.",
   ].join("\n");
 }
@@ -37,6 +39,11 @@ const RECOVERY_RETRY_MAX_MS = 60_000;
 const RECOVERY_MAX_ATTEMPTS = 3;
 /** PRD §5.28 — 큐에 길이 상한이 없었다. 오래된 것부터 버린다(가장 최근 실패가 더 유용하다). */
 const RECOVERY_QUEUE_MAX = 12;
+/**
+ * The same failure code in the same chat and surface gets one recovery turn per window. Episode B (2026-10-14): three
+ * recovery turns in a row ran into the same mcp_proxy_gate_unavailable and none answered the owner.
+ */
+const RECOVERY_SAME_CAUSE_WINDOW_MS = 10 * 60_000;
 
 function recoveryRetryDelay(attempts: number): number {
   return Math.min(
@@ -101,13 +108,10 @@ export function OneRecoveryPlane() {
               || receipt?.status === "cancelled"
               || receipt?.status === "interrupted"
             ) {
-              queued.detail = {
-                ...queued.detail,
-                evidence: [queued.detail.evidence, receipt.errorMessage]
-                  .filter(Boolean)
-                  .join(" ")
-                  .slice(0, 4_000),
-              };
+              // The failed attempt adds its own machine code, never its message.
+              const facts = { ...queued.detail.facts,
+                ...(isTypedCode(receipt.errorCode) ? { attemptFailureCode: receipt.errorCode } : {}) };
+              queued.detail = { ...queued.detail, facts, evidence: JSON.stringify(facts) };
               queued.runId = crypto.randomUUID();
               queued.started = false;
               queued.attempts += 1;
@@ -191,8 +195,9 @@ export function OneRecoveryPlane() {
       const detail = (event as CustomEvent<OneOperationalRecoveryDetail>).detail;
       const scope = detail?.scope?.trim();
       const evidence = detail?.evidence?.trim();
+      const facts = detail?.facts;
       // Missing evidence is not a failure class and code may not invent one.
-      if (!scope || !evidence) return;
+      if (!scope || !evidence || !facts || !isTypedCode(facts.code)) return;
       /*
        * ★ 실패한 방을 여기서 잃어버리면 안 된다. 아래 드레인은 `detail.chatId` 를 보고
        * "실패가 일어난 방에서 이어간다"(PRD §4.6)를 실행하는데, 정규화가 그 칸을 빼고
@@ -213,6 +218,8 @@ export function OneRecoveryPlane() {
       const normalized: OneOperationalRecoveryDetail = {
         scope,
         evidence,
+        facts: { code: facts.code, stage: scope.slice(0, 120),
+          ...(facts.turnDelivery ? { turnDelivery: facts.turnDelivery } : {}) },
         ...(chatId ? { chatId } : {}),
         ...(typeof detail.taskId === "string" ? { taskId: detail.taskId.slice(0, 128) } : {}),
         ...(userMessage ? { userMessage } : {}),
@@ -227,10 +234,11 @@ export function OneRecoveryPlane() {
           message: userMessage,
         });
       }
-      const fingerprint = `${normalized.chatId ?? normalized.taskId ?? "unbound"}\u0000${normalized.scope}\u0000${normalized.evidence}`;
+      // One recovery per failure code: the fingerprint is the typed code, not prose that differs on every throw.
+      const fingerprint = `${normalized.chatId ?? normalized.taskId ?? "unbound"}\u0000${normalized.scope}\u0000${normalized.facts.code}`;
       const now = Date.now();
       const last = recentRef.current.get(fingerprint) ?? 0;
-      if (now - last < 60_000 || queuedFingerprintsRef.current.has(fingerprint)) return;
+      if (now - last < RECOVERY_SAME_CAUSE_WINDOW_MS || queuedFingerprintsRef.current.has(fingerprint)) return;
       for (const [key, seenAt] of recentRef.current) {
         if (now - seenAt > 10 * 60_000) recentRef.current.delete(key);
       }
