@@ -19,7 +19,7 @@ import fs from "node:fs/promises";
 import { unlinkSync } from "node:fs";
 import crypto from "node:crypto";
 import { ToolRequestReplayGuard } from "../../shared/tool-request-replay";
-import type { Runner, RunnerRequest, RunnerEvents, RunnerResult , RunnerFailure } from "./runner";
+import type { Runner, RunnerRequest, RunnerEvents, RunnerResult , RunnerFailure, RunnerNativeSteerResult, RunnerNativeTurnController } from "./runner";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import {
   ensureChildCloseAfterExit,
@@ -44,6 +44,9 @@ import { detectMcpServerDisconnected, mcpOutageNotice, toolOutageGuidance } from
 import { announceToolDenied } from "./tool-approval";
 import { PERMISSION_ESCALATION_MARKER } from "../../shared/permission-escalation";
 import {
+  claudeMcpGrantDigest,
+  claudeMcpSwapApplied,
+  claudeMcpSwapPayload,
   claudePoolKey,
   claudeResidentSessionAlive,
   claudeSessionPool,
@@ -53,10 +56,12 @@ import {
   retireClaudeModelSiblings,
   retireSupersededClaudeSessions,
   captureClaudeExecutableOwner,
+  sendClaudeResidentControl,
   setClaudeResidentModel,
   writeClaudeResidentTurn,
   interruptClaudeResidentTurn,
   type AcpSessionLease,
+  type ClaudeInterruptReceipt,
   type ClaudeResidentSession,
   type ClaudeStreamEvent,
   type ClaudeTurnSink,
@@ -165,6 +170,14 @@ export function claudeArtifactPathsFromToolResult(name: string, content: unknown
 
 /** Stop → protocol interrupt → tree kill if the CLI has not ended the turn by then (Paseo: 3s). */
 const CLAUDE_INTERRUPT_GRACE_MS = 3_000;
+/**
+ * One-shot `-p` keeps running after its result while background work (a background shell, subagent or monitor) lives:
+ * up to 10 minutes idle, or as long as that work runs (headless docs; default since 2.1.292). The turn is over at its
+ * root result, so a process still alive this long after it is ended instead of waiting for the 20-minute silence guard.
+ */
+const CLAUDE_ONESHOT_EXIT_GRACE_MS = 5_000;
+/** mcp_set_servers answers after the new servers connected and listed their tools (2.1.301, measured offline). */
+const CLAUDE_MCP_SWAP_TIMEOUT_MS = 45_000;
 const KIND = "claude-code";
 const terminalResultReceipts = new Map<string, Set<string>>();
 const AGENT_APP_MCP_SECRET_ALIAS_RE = /^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/;
@@ -520,6 +533,25 @@ async function inspectWorkforceMcpConfig(req: RunnerRequest): Promise<{
   }
 }
 
+/**
+ * The invocation's MCP servers for a resident swap: the config Main wrote (a file path, or the canonical inline JSON),
+ * its grant identity (claudeMcpGrantDigest) and the digest of its bytes. null when it cannot be read as `{mcpServers}`;
+ * the pool key then keeps the per-path identity and nothing is reused.
+ */
+async function readClaudeMcpServers(config: string): Promise<{ servers: Record<string, unknown>; grant: string; digest: string } | null> {
+  try {
+    const bytes = config.trimStart().startsWith("{") ? config : await fs.readFile(config, "utf8");
+    const parsed = JSON.parse(bytes) as { mcpServers?: unknown };
+    const servers = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed.mcpServers : undefined;
+    if (!servers || typeof servers !== "object" || Array.isArray(servers)) return null;
+    if (Object.values(servers).some((entry) => !entry || typeof entry !== "object" || Array.isArray(entry))) return null;
+    return { servers: servers as Record<string, unknown>, grant: claudeMcpGrantDigest(servers as Record<string, unknown>),
+      digest: crypto.createHash("sha256").update(bytes, "utf8").digest("hex") };
+  } catch {
+    return null;
+  }
+}
+
 async function materializeWorkforceMcpConfig(bytes: string): Promise<{ arg: string; cleanup: () => void }> {
   const file = path.join(os.tmpdir(), `agentlas-workforce-mcp-${process.pid}-${crypto.randomUUID()}.json`);
   await fs.writeFile(file, bytes, { encoding: "utf8", mode: 0o600, flag: "wx" });
@@ -633,6 +665,8 @@ function getExecutable(source?: string, cwd = process.cwd(), env = process.env):
 type ClaudeExecutableCapabilities = {
   includePartialMessagesSupported: boolean;
   residencySupported: boolean;
+  /** This executable refused the mcp_set_servers control request: a resident keeps its per-invocation MCP config identity. */
+  mcpSwapUnsupported?: boolean;
   efforts?: Array<{ id: string; label: string }>;
   effortRead?: Promise<Array<{ id: string; label: string }>>;
 };
@@ -804,11 +838,47 @@ export function claudeStreamEventRecognized(ev: unknown): boolean {
  * 실측 스트림(2026-08-06): rate_limit_event(status:rejected) → assistant(error:"rate_limit")
  * → result(is_error:true, api_error_status:429). 종료코드는 가변 — 이벤트가 진실.
  */
+/**
+ * The assistant message's typed `error` (Agent SDK SDKAssistantMessageError, 2.1.301): provider-wide sign-in and quota
+ * refusals become the same typed kinds as the measured auth and rate-limit markers; every other value keeps "exit" with
+ * the provider's own code, so no failure class gains a new fallback path.
+ */
+const CLAUDE_ASSISTANT_ERROR_KIND: Record<string, RunnerFailure["kind"]> = {
+  authentication_failed: "auth",
+  oauth_org_not_allowed: "auth",
+  verification_required: "auth",
+  cloud_credential_error: "auth",
+  rate_limit: "quota",
+  billing_error: "quota",
+};
+
+/** A provider machine code is kept only when it is identifier-shaped and bounded (RunnerFailure.providerCode). */
+function claudeProviderCode(value: unknown): string | undefined {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/.test(value) ? value : undefined;
+}
+
+/** Short owner-language lead for a terminal error; the provider's own words follow it unchanged. */
+function claudeErrorLead(code: string | undefined, locale: string | undefined): string {
+  const ko = locale === "ko";
+  switch (code) {
+    case "prompt_too_long": return ko ? "대화가 모델이 받을 수 있는 길이를 넘었습니다" : "The conversation is longer than the model accepts";
+    case "model_error": return ko ? "모델이 오류로 답을 끝냈습니다" : "The model ended its answer with an error";
+    case "api_error": return ko ? "Claude API 오류로 턴이 끝났습니다" : "The turn ended on a Claude API error";
+    case "max_turns": case "error_max_turns": return ko ? "턴 수 한도에 닿았습니다" : "The turn limit was reached";
+    case "budget_exhausted": case "error_max_budget_usd": return ko ? "예산 한도에 닿았습니다" : "The budget limit was reached";
+    case "structured_output_retry_exhausted": case "error_max_structured_output_retries":
+      return ko ? "구조화 답 재시도를 모두 썼습니다" : "Structured answer retries were used up";
+    case "turn_setup_failed": return ko ? "Claude Code가 턴을 시작하지 못했습니다" : "Claude Code could not start the turn";
+    default: return ko ? "Claude Code가 오류로 턴을 끝냈습니다" : "Claude Code ended the turn with an error";
+  }
+}
+
 export function claudeFailureFromEvent(
-  ev: { type?: string; error?: unknown; is_error?: boolean; result?: unknown; terminal_reason?: string;
-        api_error_status?: number; rate_limit_info?: { status?: string; resetsAt?: number } },
+  ev: { type?: string; subtype?: string; error?: unknown; is_error?: boolean; result?: unknown; terminal_reason?: string;
+        errors?: unknown; api_error_status?: number | null; rate_limit_info?: { status?: string; resetsAt?: number } },
   finalText: string,
   prior: RunnerFailure | null,
+  locale?: string,
 ): RunnerFailure | null {
   if (ev.error === "authentication_failed") {
     return {
@@ -819,9 +889,15 @@ export function claudeFailureFromEvent(
       source: "marker",
     };
   }
+  if (ev.type === "assistant" && typeof ev.error === "string" && CLAUDE_ASSISTANT_ERROR_KIND[ev.error]) {
+    // Keep an earlier, more specific marker (a rate-limit event with its reset hint) over this message-level echo.
+    if (prior?.source === "marker" && prior.kind === CLAUDE_ASSISTANT_ERROR_KIND[ev.error]) return prior;
+    return { kind: CLAUDE_ASSISTANT_ERROR_KIND[ev.error]!, message: ev.error, providerCode: ev.error, runtime: "claude", source: "marker",
+      ...(prior?.retryAfterHint ? { retryAfterHint: prior.retryAfterHint } : {}) };
+  }
   if (ev.type === "rate_limit_event" && ev.rate_limit_info?.status === "rejected") {
     return {
-      kind: "quota", message: "Claude rate limit rejected", runtime: "claude", source: "marker",
+      kind: "quota", message: "Claude rate limit rejected", providerCode: "rate_limit_rejected", runtime: "claude", source: "marker",
       ...(typeof ev.rate_limit_info.resetsAt === "number"
         ? { retryAfterHint: new Date(ev.rate_limit_info.resetsAt * 1000).toISOString() }
         : {}),
@@ -833,19 +909,28 @@ export function claudeFailureFromEvent(
     if (prior?.source === "marker" && prior.kind !== "exit") {
       // The rate-limit event supplies only a placeholder. A matching terminal
       // 429 may add the provider's explanation without replacing its cause or reset hint.
-      if (prior.kind === "quota" && prior.message === "Claude rate limit rejected"
+      if (prior.kind === "quota" && (prior.message === "Claude rate limit rejected" || prior.message === prior.providerCode)
         && ev.api_error_status === 429 && typeof ev.result === "string" && ev.result.trim()) {
         return { ...prior, message: ev.result.trim().slice(0, 2000) };
       }
       return prior;
     }
-    const message = typeof ev.result === "string" && ev.result.trim()
-      ? ev.result.trim().slice(0, 2000) : "claude error";
+    // Error results (error_during_execution, error_max_turns, …) carry `errors[]` and no `result` (probe 2.1.301).
+    const providerText = typeof ev.result === "string" && ev.result.trim() ? ev.result.trim()
+      : Array.isArray(ev.errors) ? ev.errors.filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
+        .map((item) => item.trim()).join("; ") : "";
+    const code = claudeProviderCode(ev.terminal_reason && ev.terminal_reason !== "completed" ? ev.terminal_reason : undefined)
+      ?? claudeProviderCode(ev.subtype && ev.subtype !== "success" ? ev.subtype : undefined)
+      ?? (typeof ev.api_error_status === "number" ? `api_error_${ev.api_error_status}` : undefined)
+      ?? prior?.providerCode;
+    const lead = claudeErrorLead(code, locale);
+    const message = `${lead}${code ? ` (${code})` : ""}${providerText ? `: ${providerText}` : ""}`.slice(0, 2000);
     return {
       kind: ev.api_error_status === 429 ? "quota"
         : /not logged in|please run \/login/i.test(finalText) ? "auth"
         : "exit",
       message, runtime: "claude",
+      ...(ev.api_error_status === 429 ? { providerCode: code ?? "api_error_429" } : code ? { providerCode: code } : {}),
       source: ev.api_error_status !== 429 && /not logged in|please run \/login/i.test(finalText) ? "heuristic" : "marker",
       ...(prior?.retryAfterHint ? { retryAfterHint: prior.retryAfterHint } : {}),
     };
@@ -863,6 +948,12 @@ function looksLikeUnknownInputFormat(stderr: string): boolean {
   // Argument-parser rejection of the flag itself (clap/commander wording), not any message that mentions it.
   return /input-format/i.test(stderr) && /unknown|unrecognized|unexpected|invalid|no such|not (?:a )?(?:valid|supported|recognized)/i.test(stderr);
 }
+
+/** Result origins (SDKMessageOrigin kinds) raised by work that is not the owner's turn. */
+const CLAUDE_BACKGROUND_ORIGINS = new Set(["task-notification", "observer", "observer-activity", "coordinator"]);
+
+/** Resident processes seen stamping a turn's system/init with the client uuids it answers (2.1.301 does). */
+const initEchoSessions = new WeakSet<ClaudeResidentSession>();
 
 // Captured session identity remains valid after its exclusive lease is returned.
 const aliveClaudeResources = new Map<string, { session: ClaudeResidentSession; close(): void }>();
@@ -1375,6 +1466,10 @@ const runClaudeTurn = async (
     !hostAuthorityWorkforce &&
     Boolean(aliveProfile || runReq.chatId) &&
     Boolean(fingerprint);
+  // The invocation's MCP servers, when a reused resident can take them by an acknowledged mcp_set_servers: the pool key
+  // then holds the grant (server names) instead of this invocation's file path (claude-session.ts claudePoolKey).
+  const mcpSwap = residencyEligible && !aliveProfile && mcpArgs.length > 0 && agentAppMcpConfigArg && !executableState.mcpSwapUnsupported
+    ? await readClaudeMcpServers(agentAppMcpConfigArg) : null;
   const poolKey =
     residencyEligible && contextChatId && fingerprint
       ? claudePoolKey({
@@ -1385,7 +1480,7 @@ const runClaudeTurn = async (
           executableGeneration: executableIdentity.generation,
           cwd: runCwd,
           bin,
-          ...(runReq.mcpConfigPath ? { mcpConfigPath: runReq.mcpConfigPath } : {}),
+          ...(mcpSwap ? { mcpGrant: mcpSwap.grant } : runReq.mcpConfigPath ? { mcpConfigPath: runReq.mcpConfigPath } : {}),
           ...(runReq.toolBrokerSettingsPath ? { toolBrokerSettingsPath: runReq.toolBrokerSettingsPath } : {}),
           args,
           env: runEnv,
@@ -1452,6 +1547,7 @@ const runClaudeTurn = async (
             env: runEnv,
             model: runReq.model,
             poolKey,
+            mcpConfigDigest: mcpSwap?.digest ?? null,
           }),
         retainAliveExecutableOwner,
       );
@@ -1502,6 +1598,32 @@ const runClaudeTurn = async (
     const switched = await setClaudeResidentModel(lease.session, runReq.model, req.signal);
     if (switched) modelHandoff = { retired: 0, pending: 0 };
     else {
+      const retiredChild = lease.session.child;
+      pool.discard(lease);
+      lease = null;
+      try { await waitForRetiredCliExit(retiredChild); }
+      catch (error) { cleanupSysFile(); cleanupAgentAppMcpConfig(); throw error; }
+    }
+  }
+  /*
+   * A reused resident still runs the previous invocation's MCP servers, whose launch handles and capability files Main
+   * revoked when that invocation ended. Swap in this invocation's servers (same grant: the pool key matched) and wait for
+   * the acknowledgement before the turn. Identical config bytes (a Science session grant) need no swap. Anything short of
+   * success with no per-server error discards the resident; the turn then runs one-shot with this config, as before.
+   */
+  if (lease && !lease.fresh && mcpSwap && lease.session.mcpConfigDigest !== mcpSwap.digest) {
+    const payload = claudeMcpSwapPayload(mcpSwap.servers, runEnv);
+    const response = payload
+      ? await sendClaudeResidentControl(lease.session, { subtype: "mcp_set_servers", servers: payload },
+        { timeoutMs: CLAUDE_MCP_SWAP_TIMEOUT_MS, ...(req.signal ? { signal: req.signal } : {}) })
+      : null;
+    if (claudeMcpSwapApplied(response)) {
+      lease.session.mcpConfigDigest = mcpSwap.digest;
+    } else {
+      if (response?.subtype === "error" && /unsupported control request/i.test(String(response.error ?? ""))) {
+        executableState.mcpSwapUnsupported = true;
+      }
+      if (!req.signal?.aborted) events.onStatus(`[residency] mcp_swap_refused kind=${KIND}`);
       const retiredChild = lease.session.child;
       pool.discard(lease);
       lease = null;
@@ -1561,6 +1683,46 @@ const runClaudeTurn = async (
     let child: ReturnType<typeof spawnCli>;
     const runtimeAttemptId = crypto.randomUUID();
     let turnDispatchAttempted = false;
+    /*
+     * This turn's own client uuid on a resident process. Measured offline on 2.1.301: the CLI answers a uuid'd
+     * stream-json user message with command_lifecycle queued/started frames and stamps the uuid as user_message_uuid(s)
+     * on that turn's init, assistant and result frames. It binds settlement to this turn (a result raised by background
+     * work carries none of our uuids) and gives native steering a confirmed turn to target.
+     */
+    const turnUuid = session ? crypto.randomUUID() : null;
+    /** Client uuids this runner turn owns: the turn message and every direction steered into it. */
+    const ownUuids = new Set<string>(turnUuid ? [turnUuid] : []);
+    /** Owned uuids a result of ours answered (its user_message_uuids). */
+    const answeredUuids = new Set<string>();
+    /** Owned directions the CLI dropped before they ran (command_lifecycle cancelled / discarded / refused). */
+    const droppedUuids = new Set<string>();
+    let turnAcknowledged = false;
+    let lifecycleObserved = false;
+    /** null = unknown; false = the CLI turn now streaming answers another message (a background notification). */
+    let cliTurnOwned: boolean | null = null;
+    /** A result answered every owned uuid: the turn is settling and takes no further direction. */
+    let turnClosing = false;
+    const steerWaiters = new Map<string, (result: RunnerNativeSteerResult) => void>();
+    let nativeTurnController: RunnerNativeTurnController | null = null;
+    const settleSteerWaiters = (decide: (uuid: string) => RunnerNativeSteerResult): void => {
+      for (const [uuid, resolveSteer] of [...steerWaiters]) {
+        steerWaiters.delete(uuid);
+        try { resolveSteer(decide(uuid)); } catch { /* a waiter settles its own receipt */ }
+      }
+    };
+    // The interrupt receipt names what survives a Stop (still_queued: it will still run, so it is never sent again) and
+    // what the Stop withdrew (cancelled: it never reached the model).
+    const settleSteersFromInterrupt = (receipt: ClaudeInterruptReceipt | null): void => {
+      if (receipt) {
+        events.onStatus(`[runtime-session] interrupt_receipt kind=${KIND} still_queued=${receipt.stillQueued.length} cancelled=${receipt.cancelled.length}`);
+        for (const uuid of receipt.cancelled) if (ownUuids.has(uuid) && uuid !== turnUuid) droppedUuids.add(uuid);
+      }
+      settleSteerWaiters((uuid) => receipt?.cancelled.includes(uuid)
+        ? { status: "rejected", code: "native_steer_cancelled", reason: "Stop withdrew this direction before Claude read it." }
+        : receipt?.stillQueued.includes(uuid)
+          ? { status: "uncertain", code: "native_steer_still_queued", reason: "The direction survived the stop in Claude's queue; it is not sent again." }
+          : { status: "uncertain", code: "native_steer_ack_lost", reason: "The turn ended before Claude took this direction in." });
+    };
     if (session) {
       child = session.child;
     } else {
@@ -1617,10 +1779,19 @@ const runClaudeTurn = async (
     const onAbort = () => {
       broken = true;
       const graceful = session
-        ? interruptClaudeResidentTurn(session)
+        // Stop means stop: queued directions are withdrawn too where the CLI advertises it (interrupt_cancel_queued_v1).
+        ? interruptClaudeResidentTurn(session, {
+            cancelQueued: session.capabilities?.has("interrupt_cancel_queued_v1") === true,
+            onReceipt: settleSteersFromInterrupt,
+            receiptTimeoutMs: CLAUDE_INTERRUPT_GRACE_MS,
+          })
         : process.platform !== "win32" && child.pid != null && child.exitCode === null && child.signalCode === null
           && (() => { try { return child.kill("SIGINT"); } catch { return false; } })();
-      if (!graceful) { killCliTree(child); return; }
+      if (!graceful) {
+        if (session) settleSteersFromInterrupt(null);
+        killCliTree(child);
+        return;
+      }
       const fallback = setTimeout(() => killCliTree(child), CLAUDE_INTERRUPT_GRACE_MS);
       fallback.unref?.();
       // The leader exiting early still leaves its process group (MCP servers) to reap.
@@ -1656,6 +1827,8 @@ const runClaudeTurn = async (
     /** Stream events of a shape this adapter understands (assistant/user content, stream_event, typed result, ...). Zero + exit 0 = runtime_protocol_unrecognized. */
     let recognizedEventCount = 0;
     let lastEmit = 0;
+    /** Results of this runner turn handed to handleEvent (a steered direction may add a second one). */
+    let ownResultCount = 0;
     let sessionId: string | undefined;
     let terminalSessionId = contextSessionId ?? null;
     let aliveInventoryVerified = Boolean(aliveProfile && session?.nativeSessionId && !lease?.fresh);
@@ -2103,7 +2276,7 @@ const runClaudeTurn = async (
         }
       }
       if (ev.error === "authentication_failed") {
-        runnerFailure = claudeFailureFromEvent(ev, finalText, runnerFailure);
+        runnerFailure = claudeFailureFromEvent(ev, finalText, runnerFailure, runReq.locale);
         structuredRuntimeError = new Error(
           runReq.locale === "ko"
             ? "Claude Code 로그인이 만료됐습니다. 설정에서 Claude를 다시 연결한 뒤 재시도해주세요."
@@ -2203,6 +2376,11 @@ const runClaudeTurn = async (
           }
         }
         return;
+      }
+      // A root assistant message's typed provider error (rate_limit, billing_error, …) is the turn's cause; the terminal
+      // result envelope then keeps it (claudeFailureFromEvent). Authentication was handled above.
+      if (ev.type === "assistant" && !fromSubAgent && typeof ev.error === "string" && ev.error !== "authentication_failed") {
+        runnerFailure = claudeFailureFromEvent(ev, finalText, runnerFailure, runReq.locale);
       }
       if (ev.type === "assistant" && ev.message?.content) {
         turnModel.observe(ev);
@@ -2311,7 +2489,7 @@ const runClaudeTurn = async (
         }
       } else if (ev.type === "rate_limit_event") {
         // ★한도 거절은 표식이다 — 예전에는 케이스가 없어 조용히 버려졌다(분류는 순수 함수 한 곳).
-        runnerFailure = claudeFailureFromEvent(ev, finalText, runnerFailure);
+        runnerFailure = claudeFailureFromEvent(ev, finalText, runnerFailure, runReq.locale);
       } else if (ev.type === "result") {
         sawResult = true;
         // Older SDK results used success/is_error:false; newer versions also
@@ -2354,7 +2532,10 @@ const runClaudeTurn = async (
         if (resumeSessionId && ev.is_error === true && resultShape.subtype === "error_during_execution"
           && resultShape.num_turns === 0) resumedConversationMissing = true;
         if (typeof ev.result === "string") finalText = ev.result;
-        if (ev.usage?.output_tokens != null) tokens = ev.usage.output_tokens;
+        // A direction that ran as its own CLI turn ends with a second result of this runner turn: its usage adds up.
+        ownResultCount += 1;
+        const priorUsage = ownResultCount > 1 ? observedUsage : undefined;
+        if (ev.usage?.output_tokens != null) tokens = (ownResultCount > 1 && tokens !== undefined ? tokens : 0) + ev.usage.output_tokens;
         if (ev.usage) {
           // `inputTokens` 는 **모델에 실제로 들어간 토큰 전부**로 센다:
           // 새 입력 + 캐시에서 읽은 것 + 캐시에 쓴 것. 새 입력만 세면 실측상
@@ -2369,11 +2550,14 @@ const runClaudeTurn = async (
             && Number.isSafeInteger(usage.output_tokens) && usage.output_tokens! >= 0
             && Number.isSafeInteger(inputTotal)
             && inputTotal + usage.output_tokens! <= Number.MAX_SAFE_INTEGER) {
+            const cachedNow = Number.isSafeInteger(usage.cache_read_input_tokens) && usage.cache_read_input_tokens! >= 0
+              ? usage.cache_read_input_tokens! : undefined;
+            const cached = priorUsage?.cachedInputTokens !== undefined || cachedNow !== undefined
+              ? (priorUsage?.cachedInputTokens ?? 0) + (cachedNow ?? 0) : undefined;
             observedUsage = {
-              inputTokens: inputTotal,
-              outputTokens: usage.output_tokens!,
-              ...(Number.isSafeInteger(usage.cache_read_input_tokens) && usage.cache_read_input_tokens! >= 0
-                ? { cachedInputTokens: usage.cache_read_input_tokens } : {}),
+              inputTokens: (priorUsage?.inputTokens ?? 0) + inputTotal,
+              outputTokens: (priorUsage?.outputTokens ?? 0) + usage.output_tokens!,
+              ...(cached !== undefined ? { cachedInputTokens: cached } : {}),
             };
             events.onTerminalObservedUsage?.(observedUsage, runtimeAttemptId);
             events.onModelUsageDetail?.(runtimeAttemptId, {
@@ -2383,7 +2567,7 @@ const runClaudeTurn = async (
         }
         // ★모든 is_error가 표식이다 — 예전에는 로그인 만료 한 케이스만 집고 나머지를
         //   버려서, 성공 분기(exit 0)가 거절문을 정상 답으로 내보냈다.
-        runnerFailure = claudeFailureFromEvent(ev, finalText, runnerFailure);
+        runnerFailure = claudeFailureFromEvent(ev, finalText, runnerFailure, runReq.locale);
         if (
           ev.is_error === true
           && runnerFailure?.kind === "auth"
@@ -2402,8 +2586,23 @@ const runClaudeTurn = async (
     /** 이 턴이 result 까지 갔는가(상주 세션을 되돌려도 되는가의 판정). */
     let sawResult = false;
     let terminalSucceeded = false;
+    let oneShotExitTimer: NodeJS.Timeout | null = null;
+    /** RuntimeTurnDelivery from protocol facts: this turn's lifecycle/echo or its own result; null when the CLI cannot tell. */
+    const turnDeliveryFact = (): "accepted" | "not-accepted" | undefined => {
+      if (turnAcknowledged || sawResult) return "accepted";
+      return session && (lifecycleObserved || session.capabilities?.has("msg_lifecycle_v1")) ? "not-accepted" : undefined;
+    };
+    const appliedEffort = effortArgs.length === 2 ? effortArgs[1]! : null;
     const detachTurn = () => {
       stopHeartbeat();
+      if (oneShotExitTimer) { clearTimeout(oneShotExitTimer); oneShotExitTimer = null; }
+      if (nativeTurnController) {
+        nativeTurnController = null;
+        try { events.onNativeTurnController?.(null); } catch { /* the host's withdrawal is best effort */ }
+      }
+      // A direction still waiting when the turn ends without a Stop never reached a turn of ours: unknown, never resent.
+      if (!req.signal?.aborted) settleSteerWaiters(() => ({ status: "uncertain", code: "native_steer_ack_lost",
+        reason: "The turn ended before Claude took this direction in." }));
       if (session) {
         // 유휴 세션이 지난 턴의 events 로 상태를 흘리면 안 된다(ACP 와 같은 계약).
         if (session.active === turnSink) session.active = null;
@@ -2421,7 +2620,26 @@ const runClaudeTurn = async (
       handleEvent(ev as unknown as Parameters<typeof handleEvent>[0]);
 
     if (!session) {
-      const readNdjsonLines = createNdjsonLineReader(dispatchEvent);
+      /*
+       * One-shot settlement follows the root result, not process exit: a `-p` run that started background work stays
+       * open after its result (headless docs; default since 2.1.292). A normal exit still settles through close (the
+       * exit code and stderr keep their meaning); a process still alive CLAUDE_ONESHOT_EXIT_GRACE_MS after the result
+       * is settled from the result and its tree ended.
+       */
+      const noteOneShotResult = (ev: ClaudeStreamEvent): void => {
+        const origin = ev.origin && typeof ev.origin === "object" ? (ev.origin as { kind?: unknown }).kind : undefined;
+        if (ev.type !== "result" || ev.parent_tool_use_id || ev.isSidechain === true || oneShotExitTimer || settled
+          || (typeof origin === "string" && CLAUDE_BACKGROUND_ORIGINS.has(origin))) return;
+        oneShotExitTimer = setTimeout(() => {
+          oneShotExitTimer = null;
+          if (settled) return;
+          events.onStatus(`[runtime-session] result_settled_before_exit kind=${KIND}`);
+          settle(structuredRuntimeError || runnerFailure ? 1 : 0);
+          killCliTree(child);
+        }, CLAUDE_ONESHOT_EXIT_GRACE_MS);
+        oneShotExitTimer.unref?.();
+      };
+      const readNdjsonLines = createNdjsonLineReader((ev) => { dispatchEvent(ev); noteOneShotResult(ev); });
       child.stdout?.on("data", (chunk: Buffer) => { silence.touch(); readNdjsonLines(chunk); });
       const stderrDecoder = new StringDecoder("utf8");
       child.stderr?.on("data", (chunk: Buffer) => {
@@ -2436,7 +2654,7 @@ const runClaudeTurn = async (
       broken = true;
       detachTurn();
       rejectRuntime(turnDispatchAttempted && !sawResult && !req.signal?.aborted
-        ? new RuntimeTurnUnsettledError(KIND, req.locale, sessionId, runnerFailure?.message) : err);
+        ? new RuntimeTurnUnsettledError(KIND, req.locale, sessionId, runnerFailure?.message, turnDeliveryFact()) : err);
     };
     const settle = (code: number | null) => {
       if (settled) return;
@@ -2468,6 +2686,8 @@ const runClaudeTurn = async (
           tokens,
           observedUsage,
           ...(contextInputTokens ? { contextInputTokens } : {}),
+          ...(turnDeliveryFact() ? { turnDelivery: turnDeliveryFact() } : {}),
+          appliedEffort,
         });
         return;
       }
@@ -2488,11 +2708,12 @@ const runClaudeTurn = async (
       // turns with no visible text. Only an unattempted resident write may fall
       // back to one-shot without risking another model or external action.
       if (turnDispatchAttempted && !sawResult) {
-        rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale, sessionId, runnerFailure?.message ?? childExitReason(code, stderr || session?.stderrTail)));
+        rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale, sessionId, runnerFailure?.message ?? childExitReason(code, stderr || session?.stderrTail),
+          turnDeliveryFact()));
         return;
       }
       if (aliveProfile && (!sawResult || !terminalSucceeded)) {
-        broken = true; rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale, sessionId, runnerFailure?.message)); return;
+        broken = true; rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale, sessionId, runnerFailure?.message, turnDeliveryFact())); return;
       }
       if (session && !sawResult && !combined() && !finalText) {
         broken = true;
@@ -2532,12 +2753,10 @@ const runClaudeTurn = async (
         broken = true;
         if (req.chatId) clearRuntimeSession(req.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
         events.onStatus(`[runtime-session] resume_missing kind=${KIND}`);
-        if (req.unattended) {
-          reject(new Error(`Automation runtime session resume failed for ${KIND}; refusing to create a fresh CLI session.`));
-          return;
-        }
-        // The owner's turn continues fresh (unattended-session-turns.ts rule 4). A resume of the agent-context handle
-        // carried no history (the session held it): the fresh session starts from that journal, host facts first.
+        // Nothing ran (a zero-turn result), so the turn continues in a fresh session that replaces the binding
+        // (unattended-session-turns.ts): rule 2 for an unattended run, whose continuity is the host capsule its prompt
+        // carries, and rule 4 for an owner turn. A resume of the agent-context handle carried no history (the session
+        // held it): the fresh session starts from that journal, host facts first.
         events.onStatus(unattendedFreshSessionStatus(KIND, "session_not_found"));
         void agentContextColdBootstrapForRequest(req).then((bootstrap) => runClaudeTurn({ ...req, runtimeSessionId: undefined,
           ...(bootstrap ? { history: [...bootstrap.history], turnContext: bootstrap.turnContext } : {}) }, events, false, observeNativeFile))
@@ -2556,6 +2775,8 @@ const runClaudeTurn = async (
             sessionId,
             tokens,
             observedUsage,
+            ...(turnDeliveryFact() ? { turnDelivery: turnDeliveryFact() } : {}),
+            appliedEffort,
           });
           return;
         }
@@ -2596,6 +2817,8 @@ const runClaudeTurn = async (
           observedUsage,
           ...(contextInputTokens ? { contextInputTokens } : {}),
           ...(observedModel ? { observedModel } : {}),
+          ...(turnDeliveryFact() ? { turnDelivery: turnDeliveryFact() } : {}),
+          appliedEffort,
           workforcePermissionEnforcement: hostAuthorityWorkforce
             ? observedHostEnforcement
             : hasExactWorkforceMcpGrant
@@ -2625,6 +2848,9 @@ const runClaudeTurn = async (
             observedUsage,
             ...(contextInputTokens ? { contextInputTokens } : {}),
             ...(observedModel ? { observedModel } : {}),
+            // A typed provider refusal of a turn the CLI took in: post-dispatch, with its provider code intact.
+            ...(turnDeliveryFact() ? { turnDelivery: turnDeliveryFact() } : {}),
+            appliedEffort,
             workforcePermissionEnforcement: hostAuthorityWorkforce
             ? undefined
             : hasExactWorkforceMcpGrant
@@ -2680,7 +2906,7 @@ const runClaudeTurn = async (
           events.onStatus(`[runtime-session] resume_failed kind=${KIND} exit=${code}`);
           // A settled failure alone does not prove that earlier tool effects
           // were absent. The typed zero-turn result above is the safe exception.
-          rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale, sessionId));
+          rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale, sessionId, undefined, turnDeliveryFact()));
           return;
         }
         reject(new Error(`claude CLI exit ${code}${stderr ? `\n${stderr.slice(0, 500)}` : ""}`));
@@ -2691,16 +2917,154 @@ const runClaudeTurn = async (
      * 이번 턴의 수신자. 세션은 여러 턴을 살고 받는 사람은 턴마다 다르다 — 정산 신호가
      * close(종료코드)가 아니라 `result` 이벤트라는 점만 일회성 경로와 다르다.
      */
+    const heldFrames: ClaudeStreamEvent[] = [];
+    const replayHeldFrames = (): void => {
+      const frames = heldFrames.splice(0, heldFrames.length);
+      for (const frame of frames) dispatchEvent(frame);
+    };
+    /** Client uuids a frame names as the messages its turn answers (user_message_uuids, else user_message_uuid). */
+    const echoedUuids = (ev: ClaudeStreamEvent): string[] => {
+      const list = Array.isArray(ev.user_message_uuids)
+        ? (ev.user_message_uuids as unknown[]).filter((item): item is string => typeof item === "string") : [];
+      if (list.length === 0 && typeof ev.user_message_uuid === "string") list.push(ev.user_message_uuid);
+      return list;
+    };
+    const acceptSteer = (uuid: string): void => {
+      const resolveSteer = steerWaiters.get(uuid);
+      if (!resolveSteer || !nativeTurnController) return;
+      steerWaiters.delete(uuid);
+      resolveSteer({ status: "accepted", turnId: nativeTurnController.binding.turnId });
+    };
+    /** command_lifecycle (msg_lifecycle_v1): queued → started → completed | cancelled | discarded | refused. */
+    const observeLifecycle = (ev: ClaudeStreamEvent): void => {
+      const uuid = typeof ev.command_uuid === "string" ? ev.command_uuid : "";
+      const state = typeof ev.state === "string" ? ev.state : "";
+      if (!uuid || !ownUuids.has(uuid)) return;
+      lifecycleObserved = true;
+      if (uuid === turnUuid) {
+        if (state === "queued" || state === "started") turnAcknowledged = true;
+        return;
+      }
+      // A direction counts once Claude takes it into a turn ("started": folded into this one, or run right after it).
+      if (state === "started") acceptSteer(uuid);
+      else if (state === "cancelled" || state === "discarded" || state === "refused") {
+        if (!answeredUuids.has(uuid)) droppedUuids.add(uuid);
+        const resolveSteer = steerWaiters.get(uuid);
+        if (resolveSteer) {
+          steerWaiters.delete(uuid);
+          resolveSteer({ status: "rejected", code: "native_steer_rejected", reason: `Claude did not take this direction in (${state}).` });
+        }
+      }
+    };
+    /** Owned uuids no result of ours has answered yet (a dropped direction will not run). */
+    const unansweredUuids = (): string[] => [...ownUuids].filter((uuid) => !answeredUuids.has(uuid) && !droppedUuids.has(uuid));
+    /*
+     * Native steering (turn-steer, claude-print): an owner's text written into this live turn as a stream-json user
+     * message with priority "next" (read after the running tool calls) and a human origin. Published only for an
+     * attended resident turn the CLI confirmed by echoing this turn's uuid, on a CLI that reports message lifecycle.
+     */
+    const nativeSteerEligible = Boolean(session && turnUuid && events.onNativeTurnController && runReq.chatId
+      && !req.unattended && !aliveProfile && !runReq.judgmentOnly && !runReq.untrustedNoTools && !runReq.minimalObservation);
+    const steerUuidFor = (requestId: string): string => {
+      const h = crypto.createHash("sha256").update(`claude-steer-v1\0${turnUuid}\0${requestId}`).digest("hex");
+      return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${((parseInt(h[16]!, 16) & 3) | 8).toString(16)}${h.slice(17, 20)}-${h.slice(20, 32)}`;
+    };
+    const maybePublishNativeController = (): void => {
+      if (!nativeSteerEligible || nativeTurnController || settled || turnClosing || !turnAcknowledged || !sessionId
+        || !session || !session.capabilities?.has("msg_lifecycle_v1") || req.signal?.aborted) return;
+      const residentSession = session;
+      const binding = Object.freeze({
+        runtime: KIND, chatId: runReq.chatId!, runtimeSessionOwnerId: runtimeSessionOwnerId ?? null,
+        threadId: sessionId, turnId: turnUuid!, model: runReq.model?.trim() || null,
+        permission: (req.permission === "write" || req.permission === "full" ? req.permission : "read") as "read" | "write" | "full",
+        cwd: runCwd,
+      });
+      const receipts = new Map<string, { text: string; promise: Promise<RunnerNativeSteerResult> }>();
+      const rejected = (code: string, reason: string): Promise<RunnerNativeSteerResult> => Promise.resolve({ status: "rejected", code, reason });
+      const controller: RunnerNativeTurnController = Object.freeze({
+        binding,
+        steer: (request: Parameters<RunnerNativeTurnController["steer"]>[0]): Promise<RunnerNativeSteerResult> => {
+          if (!request || typeof request.requestId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(request.requestId)
+            || typeof request.text !== "string" || !request.text.trim() || request.text.length > 262_144) {
+            return rejected("native_steer_invalid", "The native direction requires an exact request ID and nonempty bounded text.");
+          }
+          if (request.expectedThreadId !== binding.threadId || request.expectedTurnId !== binding.turnId) {
+            return rejected("native_turn_stale", "The direction does not target this confirmed native turn.");
+          }
+          const previous = receipts.get(request.requestId);
+          if (previous) return previous.text === request.text ? previous.promise
+            : rejected("native_steer_request_conflict", "The request ID is already bound to different text.");
+          if (settled || turnClosing || nativeTurnController !== controller || req.signal?.aborted || !claudeResidentSessionAlive(residentSession)) {
+            return rejected("native_turn_stale", "The confirmed native turn is no longer active.");
+          }
+          if (receipts.size >= 1024) return rejected("native_steer_limit", "This native turn has reached its bounded direction receipt limit.");
+          const uuid = steerUuidFor(request.requestId);
+          const promise = new Promise<RunnerNativeSteerResult>((resolveSteer) => {
+            steerWaiters.set(uuid, resolveSteer);
+            ownUuids.add(uuid);
+            if (!writeClaudeResidentTurn(residentSession, request.text, { uuid, priority: "next", origin: { kind: "human" } })) {
+              steerWaiters.delete(uuid);
+              ownUuids.delete(uuid);
+              resolveSteer({ status: "rejected", code: "native_steer_write_failed", reason: "The direction could not be written to the live Claude process." });
+            }
+          });
+          receipts.set(request.requestId, { text: request.text, promise });
+          return promise;
+        },
+      });
+      nativeTurnController = controller;
+      try { events.onNativeTurnController?.(controller); } catch { nativeTurnController = null; }
+    };
+
     const turnSink: ClaudeTurnSink = {
       onEvent: (ev) => {
         silence.touch();
-        dispatchEvent(ev);
+        if (ev.type === "command_lifecycle") { observeLifecycle(ev); return; }
+        const echoed = echoedUuids(ev);
+        if (echoed.length > 0) {
+          const ours = echoed.filter((uuid) => ownUuids.has(uuid));
+          cliTurnOwned = ours.length > 0;
+          if (cliTurnOwned) replayHeldFrames();
+          for (const uuid of ours) {
+            if (uuid === turnUuid) turnAcknowledged = true;
+            else acceptSteer(uuid);
+          }
+        } else if (ev.type === "system" && ev.subtype === "init" && session && initEchoSessions.has(session)) {
+          // This process stamps each turn's init with the client uuids it answers; one naming none of ours is a turn
+          // started by background work (a task notification), not this one.
+          cliTurnOwned = false;
+        }
+        if (session && echoed.length > 0 && ev.type === "system" && ev.subtype === "init") initEchoSessions.add(session);
         if (ev.type === "result") {
+          const origin = ev.origin && typeof ev.origin === "object" ? (ev.origin as { kind?: unknown }).kind : undefined;
+          // Ours: it names one of our uuids; or, from a CLI that echoes none, it is not attributed to background work
+          // (a task notification, an observer or a coordinator). Anything else keeps the old "any result settles" rule.
+          const ours = echoed.length > 0 ? echoed.some((uuid) => ownUuids.has(uuid))
+            : cliTurnOwned !== false && !(typeof origin === "string" && CLAUDE_BACKGROUND_ORIGINS.has(origin));
+          cliTurnOwned = null;
+          // A result raised by background work (a task notification) is not this turn's terminal: skip it and its frames.
+          if (!ours) { heldFrames.length = 0; return; }
+          replayHeldFrames();
+          for (const uuid of echoed) if (ownUuids.has(uuid)) answeredUuids.add(uuid);
+          if (echoed.length === 0 && turnUuid) answeredUuids.add(turnUuid);
+          dispatchEvent(ev);
           sawResult = true;
           if (session) session.completedTurns += 1;
+          // A direction taken in after this result runs as the next CLI turn: its result ends this runner turn.
+          if (unansweredUuids().length > 0 && !req.signal?.aborted) return;
+          turnClosing = true;
           // 같은 청크에 뒤따라오는 줄까지 소비한 뒤 정산한다.
           queueMicrotask(() => settle(structuredRuntimeError ? 1 : 0));
+          return;
         }
+        // Frames of a turn that names none of our uuids are held until its result says whose turn it was: dropped for
+        // background work, replayed in order if the result turns out to be ours.
+        if (cliTurnOwned === false) {
+          if (heldFrames.length < 4096) heldFrames.push(ev);
+          return;
+        }
+        dispatchEvent(ev);
+        maybePublishNativeController();
       },
       onStderr: (chunk) => { silence.touch(); stderr += chunk; },
       onDeath: (code) => settle(code),
@@ -2723,7 +3087,7 @@ const runClaudeTurn = async (
           systemText: lease && !lease.fresh ? null : seededSystemPrompt,
           historyInSentText: !(lease && !lease.fresh) && !resumeSessionId, hostContextInSystem: !resumeSessionId, hostContextText: runReq.turnContext }));
         events.onRuntimeAttemptStarted?.(runtimeAttemptId);
-        if (!writeClaudeResidentTurn(session, turnText)) settle(null);
+        if (!writeClaudeResidentTurn(session, turnText, { uuid: turnUuid! })) settle(null);
       }
     } else {
       child.on("error", onProcessError);

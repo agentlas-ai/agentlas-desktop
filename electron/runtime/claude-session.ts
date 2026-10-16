@@ -49,6 +49,12 @@ export interface ClaudeResidentSession {
   /** Model selected in this process; updated only after an acknowledged set_model. */
   model: string;
   pendingModelSwitch: { requestId: string; resolve: (accepted: boolean) => void; timer: NodeJS.Timeout } | null;
+  /** Other control requests awaiting their control_response (mcp_set_servers, interrupt); null on death or close. */
+  pendingControls: Map<string, (response: Record<string, unknown> | null) => void>;
+  /** `capabilities` of the latest system/init on this process (interrupt_cancel_queued_v1, msg_lifecycle_v1, ...). */
+  capabilities: ReadonlySet<string> | null;
+  /** sha256 of the MCP config bytes this process runs (from spawn, or the last acknowledged mcp_set_servers). */
+  mcpConfigDigest: string | null;
   /** Pool identity captured at spawn; changes in cwd/MCP/env must not reuse this process. */
   poolKey: string | null;
   /** 우리가 놓았다(풀 축출·리퍼·호스트 종료). */
@@ -95,6 +101,7 @@ export function openClaudeResidentSession(opts: {
   env: NodeJS.ProcessEnv;
   model?: string | null;
   poolKey?: string | null;
+  mcpConfigDigest?: string | null;
 }): ClaudeResidentSession | Promise<never> {
   const child = spawnCli(opts.bin, opts.args, {
     stdio: ["pipe", "pipe", "pipe"],
@@ -110,6 +117,9 @@ export function openClaudeResidentSession(opts: {
     nativeSessionId: null,
     model: opts.model?.trim() ?? "",
     pendingModelSwitch: null,
+    pendingControls: new Map(),
+    capabilities: null,
+    mcpConfigDigest: opts.mcpConfigDigest ?? null,
     poolKey: opts.poolKey ?? null,
     closed: false,
     dead: false,
@@ -131,6 +141,16 @@ export function openClaudeResidentSession(opts: {
         clearTimeout(pending.timer);
         pending.resolve(response.subtype === "success");
         return;
+      }
+      const control = response && typeof response.request_id === "string" ? session.pendingControls.get(response.request_id) : undefined;
+      if (control) {
+        session.pendingControls.delete(response!.request_id as string);
+        control(response);
+        return;
+      }
+      // Each turn's system/init repeats the process capabilities (2.1.301: one init per stream-json turn).
+      if (ev.type === "system" && ev.subtype === "init" && Array.isArray(ev.capabilities)) {
+        session.capabilities = new Set((ev.capabilities as unknown[]).filter((item): item is string => typeof item === "string"));
       }
       try {
         session.active?.onEvent(ev);
@@ -154,6 +174,7 @@ export function openClaudeResidentSession(opts: {
       session.dead = true;
       const pending = session.pendingModelSwitch;
       if (pending) { session.pendingModelSwitch = null; clearTimeout(pending.timer); pending.resolve(false); }
+      settlePendingControls(session);
       const sink = session.active;
       session.active = null;
       try {
@@ -192,6 +213,7 @@ export function closeClaudeResidentSession(session: ClaudeResidentSession): Prom
   session.closed = true;
   const pending = session.pendingModelSwitch;
   if (pending) { session.pendingModelSwitch = null; clearTimeout(pending.timer); pending.resolve(false); }
+  settlePendingControls(session);
   session.active = null;
   try {
     session.child.stdin?.end();
@@ -246,27 +268,113 @@ export async function setClaudeResidentModel(session: ClaudeResidentSession, mod
  * providers/claude/agent.ts:2257-2275). Our steering flow resumes the stored
  * session right after a Stop, so the interrupted turn must be on disk.
  */
-export function interruptClaudeResidentTurn(session: ClaudeResidentSession): boolean {
+export function interruptClaudeResidentTurn(session: ClaudeResidentSession, opts: {
+  /** Also withdraw queued user messages (init capability interrupt_cancel_queued_v1); older CLIs ignore the field. */
+  cancelQueued?: boolean;
+  /** The interrupt receipt (interrupt_receipt_v1): uuids that survive (still_queued) and that were withdrawn (cancelled). */
+  onReceipt?: (receipt: ClaudeInterruptReceipt | null) => void;
+  receiptTimeoutMs?: number;
+} = {}): boolean {
   if (!claudeResidentSessionAlive(session)) return false;
+  const requestId = crypto.randomUUID();
+  if (opts.onReceipt) {
+    const onReceipt = opts.onReceipt;
+    const timer = setTimeout(() => {
+      if (session.pendingControls.delete(requestId)) onReceipt(null);
+    }, opts.receiptTimeoutMs ?? 3_000);
+    timer.unref?.();
+    session.pendingControls.set(requestId, (response) => { clearTimeout(timer); onReceipt(claudeInterruptReceipt(response)); });
+  }
   try {
-    session.child.stdin!.write(`${JSON.stringify({ type: "control_request", request_id: crypto.randomUUID(),
-      request: { subtype: "interrupt" } })}\n`);
+    session.child.stdin!.write(`${JSON.stringify({ type: "control_request", request_id: requestId,
+      request: { subtype: "interrupt", ...(opts.cancelQueued ? { cancel_queued: true } : {}) } })}\n`);
     return true;
   } catch {
+    session.pendingControls.get(requestId)?.(null);
+    session.pendingControls.delete(requestId);
     return false;
   }
+}
+
+export interface ClaudeInterruptReceipt {
+  /** Messages that survive the interrupt and will still run in this session (never re-sent by the host). */
+  stillQueued: string[];
+  /** Messages the interrupt withdrew (cancel_queued): they never reached the model. */
+  cancelled: string[];
+}
+
+/** Parse a control_response to an interrupt: a receipt only when it is a success carrying still_queued (interrupt_receipt_v1). */
+export function claudeInterruptReceipt(response: Record<string, unknown> | null): ClaudeInterruptReceipt | null {
+  if (!response || response.subtype !== "success") return null;
+  const body = response.response && typeof response.response === "object" ? response.response as Record<string, unknown> : null;
+  const ids = (value: unknown): string[] | null => Array.isArray(value) && value.every((item) => typeof item === "string") ? [...value] as string[] : null;
+  const stillQueued = ids(body?.still_queued);
+  if (!stillQueued) return null;
+  return { stillQueued, cancelled: ids(body?.cancelled) ?? [] };
+}
+
+/**
+ * One control request to a live resident and its control_response (`{subtype, request_id, response?|error?}`); null on
+ * timeout, abort, death or a failed write. Used for requests whose acknowledgement gates the next step (mcp_set_servers).
+ */
+export function sendClaudeResidentControl(session: ClaudeResidentSession, request: Record<string, unknown>,
+  opts: { timeoutMs: number; signal?: AbortSignal }): Promise<Record<string, unknown> | null> {
+  if (!claudeResidentSessionAlive(session) || opts.signal?.aborted) return Promise.resolve(null);
+  const requestId = crypto.randomUUID();
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (response: Record<string, unknown> | null) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      opts.signal?.removeEventListener("abort", abort);
+      session.pendingControls.delete(requestId);
+      resolve(response);
+    };
+    const abort = () => finish(null);
+    const timer = setTimeout(() => finish(null), opts.timeoutMs);
+    timer.unref?.();
+    opts.signal?.addEventListener("abort", abort, { once: true });
+    session.pendingControls.set(requestId, finish);
+    try {
+      session.child.stdin!.write(`${JSON.stringify({ type: "control_request", request_id: requestId, request })}\n`);
+    } catch { finish(null); }
+  });
+}
+
+function settlePendingControls(session: ClaudeResidentSession): void {
+  const pending = [...session.pendingControls.values()];
+  session.pendingControls.clear();
+  for (const resolve of pending) {
+    try { resolve(null); } catch { /* the waiter settles its own turn */ }
+  }
+}
+
+/** Provenance and queue placement of a stream-json user message (Agent SDK SDKUserMessage). */
+export interface ClaudeResidentMessageOptions {
+  /** Client uuid: echoed as command_lifecycle.command_uuid and user_message_uuid(s) on this turn's frames. */
+  uuid?: string;
+  /** "next": read in the running turn after its current tool calls; "now": interrupt or background them. */
+  priority?: "now" | "next" | "later";
+  /** A person's typed input is stamped human; absent origin is unattributed (CLI docs). */
+  origin?: { kind: "human" };
 }
 
 /**
  * 한 턴의 사용자 메시지를 stdin 으로 보낸다(NDJSON 한 줄, stdin 은 열어 둔다).
  * 실측 형태 그대로 — 이 모양이 아니면 CLI 가 그 줄을 조용히 버린다.
+ * `uuid`/`priority`/`origin` are optional SDKUserMessage fields (measured offline on 2.1.301: the uuid comes back as
+ * command_lifecycle queued/started and as user_message_uuid on the turn's init, assistant and result frames).
  */
-export function writeClaudeResidentTurn(session: ClaudeResidentSession, text: string): boolean {
+export function writeClaudeResidentTurn(session: ClaudeResidentSession, text: string, opts: ClaudeResidentMessageOptions = {}): boolean {
   const stdin = session.child.stdin;
   if (!stdin || !stdin.writable) return false;
   const line = `${JSON.stringify({
     type: "user",
     message: { role: "user", content: [{ type: "text", text }] },
+    ...(opts.uuid ? { parent_tool_use_id: null, uuid: opts.uuid } : {}),
+    ...(opts.priority ? { priority: opts.priority } : {}),
+    ...(opts.origin ? { origin: opts.origin } : {}),
   })}\n`;
   try {
     stdin.write(line);
@@ -405,13 +513,21 @@ export function residencyDisabledFor(kind: string, env: NodeJS.ProcessEnv = proc
 
 /**
  * 재사용 키. ACP 와 **같은 축**이다: 세션 지문(시스템프롬프트·권한 — 기존 계약
- * 그대로) 위에 프로세스 정체성(cwd · MCP 설정 경로 · 실행 파일 · 도구 관문 · argv)을
+ * 그대로) 위에 프로세스 정체성(cwd · MCP 권한 · 실행 파일 · 도구 관문 · argv)을
  * 더하고, 마지막에 env 다이제스트를 얹는다.
  *
  * ★env 가 키에 들어가는 이유: 뜬 프로세스는 자기가 뜰 때의 env 를 **평생** 든다.
  * 자격증명이 갱신돼도 이미 떠 있는 CLI 는 옛 값을 쓴다. 그래서 env 가 바뀌면 이어 쓰지
  * 않는다(다이제스트만 쓰므로 값 자체는 어디에도 남지 않는다). env 에 매 실행 달라지는
  * 값이 있으면 재사용이 안 될 뿐 — 안전한 쪽으로 실패한다.
+ *
+ * ★MCP: Main writes a new config file for every invocation (mcp/client.ts configKey `invocation-<uuid>`), and its
+ * entries carry that invocation's proxy launch handles and capability files, all revoked when the invocation ends.
+ * Keying on that path made every owner follow-up spawn a new CLI (production: 1 resident reuse in 38 main calls). With
+ * `mcpGrant` the key holds the grant's identity instead (the server names; the allowed tools, permission and env are in
+ * argv and env), and the runner swaps the new invocation's servers into a reused process with an acknowledged
+ * mcp_set_servers before the turn (claudeMcpSwapPayload). `mcpConfigPath` keeps the old per-path identity for an
+ * executable that cannot swap.
  */
 export function claudePoolKey(input: {
   chatId: string;
@@ -422,6 +538,8 @@ export function claudePoolKey(input: {
   cwd: string;
   bin: string;
   mcpConfigPath?: string;
+  /** claudeMcpGrantDigest of the invocation's MCP servers; the `--mcp-config` value then leaves the argv identity. */
+  mcpGrant?: string;
   toolBrokerSettingsPath?: string;
   /** 스폰 argv. `--resume <id>` 와 `--model <name>` 쌍은 빼고 정렬한다(모델은 제어 요청으로 바뀐다). */
   args: string[];
@@ -432,17 +550,17 @@ export function claudePoolKey(input: {
     envDigest.update(name).update("\0").update(String((input.env ?? {})[name] ?? "")).update("\0");
   }
   const argvDigest = crypto.createHash("sha256");
-  for (const arg of stableSpawnArgs(input.args)) argvDigest.update(arg).update("\0");
+  for (const arg of stableSpawnArgs(input.args, { mcpConfigByGrant: input.mcpGrant !== undefined })) argvDigest.update(arg).update("\0");
   return crypto
     .createHash("sha256")
-    .update("claude-pool-v1\0")
+    .update("claude-pool-v2\0")
     .update(input.chatId).update("\0")
     .update(JSON.stringify([input.sessionOwnerId ?? null, input.isolateOwner ?? false])).update("\0")
     .update(input.fingerprint).update("\0")
     .update(input.executableGeneration).update("\0")
     .update(input.cwd).update("\0")
     .update(input.bin).update("\0")
-    .update(input.mcpConfigPath ?? "").update("\0")
+    .update(input.mcpGrant !== undefined ? `grant:${input.mcpGrant}` : `path:${input.mcpConfigPath ?? ""}`).update("\0")
     .update(input.toolBrokerSettingsPath ?? "").update("\0")
     .update(argvDigest.digest("hex")).update("\0")
     .update(envDigest.digest("hex"))
@@ -454,15 +572,71 @@ export function claudePoolKey(input: {
  * set_model 로 바꿀 수 있고, 리퍼에 거둬진 뒤 재개할 때는 새 argv 로 시작한다.
  * 다시 열릴 때 그 한 쌍 때문에 키가 갈리면, 재사용이 아니라 매번 새 항목이 쌓인다.
  * 순서는 정렬로 지운다(새 세션 형상과 재개 형상은 같은 플래그를 다른 순서로 싣는다).
+ * With `mcpConfigByGrant` the per-invocation `--mcp-config` path is replaced by a fixed token (the grant is keyed apart).
  */
-export function stableSpawnArgs(args: string[]): string[] {
+export function stableSpawnArgs(args: string[], opts: { mcpConfigByGrant?: boolean } = {}): string[] {
   const out: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
     if (args[i] === "--resume" || args[i] === "-r" || args[i] === "--model") {
       i += 1; // 세션 id 도 함께 건너뛴다
       continue;
     }
+    if (opts.mcpConfigByGrant && args[i] === "--mcp-config") {
+      out.push("--mcp-config", "<grant>");
+      i += 1;
+      continue;
+    }
     out.push(args[i]!);
   }
   return out.sort();
+}
+
+/** The MCP grant identity a resident may keep across invocations: the exact set of server names. */
+export function claudeMcpGrantDigest(servers: Record<string, unknown>): string {
+  return crypto.createHash("sha256").update("claude-mcp-grant-v1\0").update(JSON.stringify(Object.keys(servers).sort())).digest("hex");
+}
+
+const ENV_REFERENCE_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g;
+
+/**
+ * The mcp_set_servers payload for a reused resident: this invocation's server entries with `${VAR}` / `${VAR:-default}`
+ * resolved from the env the CLI was spawned with. Measured offline on 2.1.301: a --mcp-config entry gets that expansion,
+ * a mcp_set_servers entry does not (the child saw the literal "${VAR}"). null when a reference has no value and no
+ * default (the swap is then not attempted; a fresh process reads the file itself).
+ */
+export function claudeMcpSwapPayload(servers: Record<string, unknown>, env: NodeJS.ProcessEnv): Record<string, unknown> | null {
+  let unresolved = false;
+  const expand = (value: string): string => value.replace(ENV_REFERENCE_RE, (_match, name: string, fallback: string | undefined) => {
+    const resolved = env[name];
+    if (typeof resolved === "string") return resolved;
+    if (fallback !== undefined) return fallback;
+    unresolved = true;
+    return "";
+  });
+  const out: Record<string, unknown> = {};
+  for (const [name, raw] of Object.entries(servers)) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const entry: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
+    for (const field of ["command", "url"] as const) {
+      if (typeof entry[field] === "string") entry[field] = expand(entry[field] as string);
+    }
+    if (Array.isArray(entry.args)) entry.args = entry.args.map((arg) => typeof arg === "string" ? expand(arg) : arg);
+    for (const field of ["env", "headers"] as const) {
+      const map = entry[field];
+      if (map && typeof map === "object" && !Array.isArray(map)) {
+        entry[field] = Object.fromEntries(Object.entries(map as Record<string, unknown>)
+          .map(([key, value]) => [key, typeof value === "string" ? expand(value) : value]));
+      }
+    }
+    out[name] = entry;
+  }
+  return unresolved ? null : out;
+}
+
+/** True when an mcp_set_servers control_response applied every server (success with an empty `errors` map). */
+export function claudeMcpSwapApplied(response: Record<string, unknown> | null): boolean {
+  if (!response || response.subtype !== "success") return false;
+  const body = response.response && typeof response.response === "object" ? response.response as Record<string, unknown> : null;
+  const errors = body?.errors;
+  return Boolean(errors && typeof errors === "object" && !Array.isArray(errors) && Object.keys(errors).length === 0);
 }

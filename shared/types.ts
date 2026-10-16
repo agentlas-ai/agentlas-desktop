@@ -974,6 +974,8 @@ export interface RuntimeStatus {
     efforts?: string[];
     /** Host-provided effort to use when a chat has not pinned one. */
     defaultEffort?: string;
+    /** "provider": with no pinned effort and no defaultEffort, send none; the runtime applies its own per-model default. */
+    effortDefault?: "provider";
   }>;
   /** BYOK 긴 컨텍스트(1M) 토글 상태. beta-header 모델에서만 의미 있음. */
   longContextEnabled?: boolean;

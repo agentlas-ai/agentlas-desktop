@@ -88,6 +88,7 @@ function mergedProfile(
     ...(live?.defaultEffort ?? defaults.defaultEffort
       ? { defaultEffort: live?.defaultEffort ?? defaults.defaultEffort }
       : {}),
+    ...(live?.effortDefault ?? defaults.effortDefault ? { effortDefault: live?.effortDefault ?? defaults.effortDefault } : {}),
   };
   return Object.keys(merged).length > 0 ? merged : null;
 }

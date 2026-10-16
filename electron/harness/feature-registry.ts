@@ -216,7 +216,9 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
     connections: {
       // Evidence was "live" with no recorded run; the only gate found (test-codex-residency.cjs) drives a fake app-server.
       "codex-app-server": { mode: "native", evidence: "fake", note: "turn/steer + expectedTurnId ACK: runtime/codex-native-steering.ts:84; host intake invocation/service.ts:5730" },
-      "claude-print": ALT("queued intake invocation/service.ts:5730, taken at the next resident input (runtime/claude-session.ts)", "next-input delivery, not an ACK on the live turn"),
+      // A resident (stream-json) turn the CLI confirmed by echoing its uuid publishes the controller; a one-shot turn (old
+      // CLI, residency off, untrusted/no-tools runs) keeps the queued intake. The fake-CLI gate is test-claude-lane-settlement-and-steer.cjs.
+      "claude-print": { mode: "native", evidence: "fake", note: "stream-json user message {uuid, priority:\"next\", origin:{kind:\"human\"}}; ACK = command_lifecycle started or user_message_uuids echo; Stop's interrupt receipt (cancelled / still_queued) settles directions not taken in: runtime/claude-code.ts maybePublishNativeController" },
       acp: ALT("queued intake invocation/service.ts:5730; ACP has no stable steer RPC (runtime/acp.ts)", "applied at the next session/prompt, not an ACK on the live turn"),
       antigravity: ALT("queued intake invocation/service.ts:5730; headless agy has no steer input (runtime/antigravity.ts)", "applied at the next prompt, not an ACK on the live turn"),
       "api-loop": ALT("ownerControlInbox take(phase) at loop boundaries: invocation/service.ts ownerControlInbox", "applied at the next loop boundary; target turn and apply time are recorded"),
@@ -291,7 +293,7 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
     requiredHostPorts: ["invocation"], surfaces: ["model", "effort"],
     connections: {
       "codex-app-server": NATIVE("turn/start model/effort; a held thread forks on model change: runtime/codex.ts:2318"),
-      "claude-print": NATIVE("control set_model ACK before the next user turn: runtime/claude-session.ts:230; --effort at launch"),
+      "claude-print": NATIVE("control set_model ACK before the next user turn: runtime/claude-session.ts setClaudeResidentModel; --effort at launch only when chosen (no chip effort = the CLI's own default, profile effortDefault \"provider\")"),
       acp: ALT("model via session/set_config_option (runtime/acp.ts:909) with legacy session/set_model (:927); effort config not wired", "model switch acknowledged by config currentValue; effort stays at the launch/default value"),
       antigravity: ALT("--model argv only at spawn: runtime/antigravity.ts:468", "model change applies to the next launch, not a live switch; no effort control"),
       "api-loop": HOST_EQ("model chosen per request by the host loop: runtime/local-tool-loop.ts"),

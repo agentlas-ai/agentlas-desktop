@@ -254,7 +254,10 @@ export function effortForSelectedModel(
   const supported = runtime.allocationModelProfiles?.[model]?.efforts;
   if (supported === undefined) return requested;
   const defaultEffort = runtime.allocationModelProfiles?.[model]?.defaultEffort;
-  if (requested == null) return defaultEffort ?? supported[0] ?? null;
+  // effortDefault "provider": with nothing chosen the runner sends no effort and the CLI applies its own per-model
+  // default. The lowest advertised level was sent instead (claude-code ran `--effort low`, below Claude's own default).
+  const providerDefault = runtime.allocationModelProfiles?.[model]?.effortDefault === "provider";
+  if (requested == null) return defaultEffort ?? (providerDefault ? null : supported[0] ?? null);
   if (supported.includes(requested)) return requested;
   // An exact, empty profile means the host could not validate any explicit
   // effort. Let the provider use its model default rather than inventing one.
@@ -266,7 +269,7 @@ export function effortForSelectedModel(
     const rank = known.indexOf(candidate);
     return rank >= 0 && rank <= requestedRank;
   });
-  return below.at(-1) ?? defaultEffort ?? supported[0] ?? null;
+  return below.at(-1) ?? defaultEffort ?? (providerDefault ? null : supported[0] ?? null);
 }
 
 export function pickRunner(active: RuntimeStatus): { runner: Runner; label: string } | null {

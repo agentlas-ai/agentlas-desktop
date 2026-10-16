@@ -630,6 +630,8 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
           supportsTools: true,
           supportsMultimodal: true,
           efforts: claudeEfforts.map((effort) => effort.id),
+          // No chip effort → no --effort flag: Claude Code applies its own per-model default (medium on 5.5 models).
+          effortDefault: "provider",
         },
       }),
       // 작업량 — 현재 선택값 + 이 CLI가 지원하는 레벨(--help 파싱으로 자동 동기화).
