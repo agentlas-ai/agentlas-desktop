@@ -128,7 +128,10 @@ export interface ProjectOntologyQueryOptions {
   limit?: number;
   timeoutMs?: number;
   maxContextChars?: number;
-  /** Query an already-provisioned DB only; never materialize or ingest project files. */
+  /**
+   * Query an already-provisioned DB only; never materialize or ingest project files. Without it, a working-folder
+   * query also starts a background refresh of that folder's DB; the query itself never waits for it.
+   */
   readOnly?: boolean;
 }
 
@@ -1380,12 +1383,27 @@ async function runCoreVerify(status: ProjectOntologyLifecycleStatus): Promise<Co
   return verifyPayload(requireCorePayload(result, "Core ontology verify"));
 }
 
+const ingestFailureBackoff = new Map<string, { failures: number; retryAt: number }>();
+const INGEST_FAILURE_BACKOFF_BASE_MS = 10 * 60_000;
+const INGEST_FAILURE_BACKOFF_MAX_MS = 6 * 60 * 60_000;
+
+/*
+ * Only the background ingest calls this; no turn awaits it (review 2026-10-16, desktop-b-04). A failed ingest (no
+ * Python, nothing ingestible) is not re-run on every turn: the next attempt for that folder waits 10 minutes, doubling
+ * up to 6 hours, kept in memory for this process. The work starts on a later tick so its synchronous index walk is not
+ * charged to the turn that asked for it.
+ */
 async function ensureWorkingFolderOntologyReady(projectFolder: string): Promise<WorkingFolderOntologyRuntime> {
   const projectPath = fs.realpathSync.native(projectFolder);
   const existing = workingFolderQueues.get(projectPath);
   if (existing) return existing;
+  const backoff = ingestFailureBackoff.get(projectPath);
+  if (backoff && Date.now() < backoff.retryAt) {
+    throw new Error(`Working-folder ontology sync is backing off after ${backoff.failures} failure(s) until ${new Date(backoff.retryAt).toISOString()}.`);
+  }
   let operation: Promise<WorkingFolderOntologyRuntime>;
   operation = (async () => {
+    await new Promise<void>((resolve) => setImmediate(resolve));
     const memoryDir = ensureProjectMemory(projectPath, path.basename(projectPath) || "Project");
     if (!memoryDir) throw new Error("Could not provision the working-folder ontology runtime.");
     const dbPath = path.join(memoryDir, ONTOLOGY_DB_FILE);
@@ -1413,7 +1431,15 @@ async function ensureWorkingFolderOntologyReady(projectFolder: string): Promise<
       throw new Error("Working-folder ontology sync completed without ingesting its generated project index.");
     }
     return { projectPath, dbPath, indexPath, synced: true };
-  })().finally(() => {
+  })().then((runtime) => {
+    ingestFailureBackoff.delete(projectPath);
+    return runtime;
+  }, (error) => {
+    const failures = (backoff?.failures ?? 0) + 1;
+    const delay = Math.min(INGEST_FAILURE_BACKOFF_BASE_MS * 2 ** (failures - 1), INGEST_FAILURE_BACKOFF_MAX_MS);
+    ingestFailureBackoff.set(projectPath, { failures, retryAt: Date.now() + delay });
+    throw error;
+  }).finally(() => {
     if (workingFolderQueues.get(projectPath) === operation) workingFolderQueues.delete(projectPath);
   });
   workingFolderQueues.set(projectPath, operation);
@@ -1424,15 +1450,16 @@ const backgroundIngestReported = new Set<string>();
 
 /**
  * Fire-and-forget ingest for a chat turn that has write authority over an
- * activated folder. The turn itself still queries read-only (so a slow ingest
- * never blocks the answer); this fills the folder's ontology DB in the
- * background so the NEXT turn has something to retrieve.
+ * activated folder. The turn itself queries the existing DB through a
+ * read-only snapshot (so a slow ingest never blocks the answer); this fills the
+ * folder's ontology DB in the background so the NEXT turn has something to
+ * retrieve.
  *
- * Without this the DB stays empty forever: every chat turn queries with
- * readOnly:true, which takes existingWorkingFolderOntology (never ingests), and
+ * Without this the DB stays empty forever: the turn query never ingests, and
  * no renderer path calls the ingesting sync. ensureWorkingFolderOntologyReady is
- * idempotent — it dedupes concurrent runs via workingFolderQueues and skips when
- * the index has not changed — so calling it every eligible turn is cheap.
+ * idempotent — it dedupes concurrent runs via workingFolderQueues, skips when
+ * the index has not changed, and backs off after a failure — so calling it every
+ * eligible turn is cheap.
  */
 export function ingestWorkingFolderOntologyInBackground(projectFolder: string): void {
   void ensureWorkingFolderOntologyReady(projectFolder).catch((error) => {
@@ -1909,14 +1936,15 @@ export async function queryWorkingFolderOntologyContext(
   });
   if (!question) return empty("empty_query");
 
+  // A turn never awaits an ingest (review 2026-10-16, desktop-b-04): a writable turn used to wait for the full
+  // `ontology auto` run (up to 180 s, not cancellable) before the model was dispatched. It now queries what the DB
+  // already holds, like a read-only turn, and refreshes the DB in the background for the next turn.
+  if (!options.readOnly) ingestWorkingFolderOntologyInBackground(projectFolder);
   let runtime: WorkingFolderOntologyRuntime;
   try {
-    runtime = options.readOnly
-      ? existingWorkingFolderOntology(projectFolder)
-      : await ensureWorkingFolderOntologyReady(projectFolder);
+    runtime = existingWorkingFolderOntology(projectFolder);
   } catch (error) {
-    const action = options.readOnly ? "read-only lookup" : "sync";
-    return empty("not_ready", `Working-folder ontology ${action} failed: ${cleanText((error as Error).message, 800)}`);
+    return empty("not_ready", `Working-folder ontology read-only lookup failed: ${cleanText((error as Error).message, 800)}`);
   }
   const limit = boundedInteger(options.limit, DEFAULT_QUERY_LIMIT, 1, MAX_QUERY_LIMIT);
   const timeoutMs = boundedInteger(options.timeoutMs, DEFAULT_QUERY_TIMEOUT_MS, 250, MAX_QUERY_TIMEOUT_MS);
@@ -1928,14 +1956,13 @@ export async function queryWorkingFolderOntologyContext(
   );
   let queryDbPath = runtime.dbPath;
   let snapshotDirectory: string | null = null;
-  if (options.readOnly) {
-    try {
-      const snapshot = await createReadOnlyOntologySnapshot(runtime.dbPath);
-      queryDbPath = snapshot.dbPath;
-      snapshotDirectory = snapshot.directory;
-    } catch (error) {
-      return empty("not_ready", `Working-folder ontology read-only snapshot failed: ${cleanText((error as Error).message, 800)}`);
-    }
+  // Always a snapshot: a background ingest may be writing the live DB while this turn reads it.
+  try {
+    const snapshot = await createReadOnlyOntologySnapshot(runtime.dbPath);
+    queryDbPath = snapshot.dbPath;
+    snapshotDirectory = snapshot.directory;
+  } catch (error) {
+    return empty("not_ready", `Working-folder ontology read-only snapshot failed: ${cleanText((error as Error).message, 800)}`);
   }
   const args = ["--db", queryDbPath, "query", question, "--limit", String(limit)];
   for (const scope of scopes) args.push("--scope", scope);
