@@ -1897,7 +1897,8 @@ const runClaudeTurn = async (
 
     const toolNameById = new Map<string, string>();
     const toolRequestReplay = new ToolRequestReplayGuard();
-    // Claude's own checklist (TodoWrite / TaskCreate·TaskUpdate), from tool input + structured tool_use_result only.
+    // Claude's own checklist (TodoWrite / TaskCreate·TaskUpdate·TaskList·TaskGet), from tool input + structured
+    // tool_use_result only. Every product run offers these tools (claude-product-home.ts CLAUDE_PRODUCT_RUN_ENV).
     const planTracker = new ClaudeTaskPlanTracker();
     const emitPlan = createRuntimePlanEmitter(events.onPlan);
 
@@ -2429,8 +2430,9 @@ const runClaudeTurn = async (
               toolInputById.set(block.id, block.input);
               toolCallById.set(block.id, { name: block.name, detail: detailOfToolInput(block.input) });
             }
-            // A sub-agent's todo list is its own; only the root turn's checklist is this run's plan.
-            if (!fromSubAgent) planTracker.toolUse(block.id, block.name, block.input);
+            // A sub-agent's todo list is its own; only the root turn's checklist is this run's plan. Claude keeps the task
+            // list per native session, so the tracker is told the session (runtime-plan.ts).
+            if (!fromSubAgent) planTracker.toolUse(block.id, block.name, block.input, ev.session_id ?? sessionId);
             // 도구 이벤트 전에 본문을 강제 플러시 — 렌더러 인터리브 앵커가 최신 좌표를 본다.
             emitPartial(true);
             silence.toolStart(block.id);

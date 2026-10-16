@@ -117,15 +117,31 @@ export function syncClaudeProductHome(realDir: string, mirror = claudeProductHom
   return { dir: mirror };
 }
 
-/** The product run's env: the mirror as config dir, the person's own sign-in. Unchanged env when the mirror cannot hold. */
+/**
+ * Env every product Claude Code run carries, on every path (one-shot, resident, Alive, judgment) and whether or not the
+ * mirror below can hold. Owner decision 2026-10-16: the collapsed progress checklist Codex shows (turn/plan/updated).
+ * Claude Code 2.1.268+ offers its todo tools (TaskCreate, TaskUpdate, TaskList, TaskGet; TodoWrite on older CLIs) only on
+ * models up to Opus 4.7 / Sonnet 4.6 unless CLAUDE_CODE_ENABLE_TODO_TOOLS=1; on 2.1.301 with claude-opus-5-5 the
+ * system/init tool list has none of them without it (measured 2026-10-16). runtime-plan.ts reads those tools into the
+ * one typed plan. This changes the tool list Claude sees, not any prompt text; the task store stays in the mirror (the
+ * `tasks` dir is not a linked config entry).
+ */
+export const CLAUDE_PRODUCT_RUN_ENV: Readonly<Record<string, string>> = Object.freeze({ CLAUDE_CODE_ENABLE_TODO_TOOLS: "1" });
+
+/** `env` itself when it already carries CLAUDE_PRODUCT_RUN_ENV (idempotent), else a copy that does. */
+function withClaudeProductRunEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.entries(CLAUDE_PRODUCT_RUN_ENV).every(([key, value]) => env[key] === value) ? env : { ...env, ...CLAUDE_PRODUCT_RUN_ENV };
+}
+
+/** The product run's env: the mirror as config dir, the person's own sign-in. Only CLAUDE_PRODUCT_RUN_ENV when the mirror cannot hold. */
 export function withClaudeProductHome(env: NodeJS.ProcessEnv = process.env, options: ClaudeProductHomeOptions = {}, mirror?: string): NodeJS.ProcessEnv {
-  if (env.CLAUDE_SECURESTORAGE_CONFIG_DIR !== undefined) return env; // already a product env (or the caller chose)
+  if (env.CLAUDE_SECURESTORAGE_CONFIG_DIR !== undefined) return withClaudeProductRunEnv(env); // already a product env (or the caller chose)
   const real = realClaudeConfigDir(env);
   const result = syncClaudeProductHome(real, mirror, options, personalClaudeGlobalConfigPath(env));
-  if (!("dir" in result)) return env;
+  if (!("dir" in result)) return withClaudeProductRunEnv(env);
   // A person who runs Claude with their own CLAUDE_CONFIG_DIR keeps its keychain item: name that dir for secure storage.
   const secure = env.CLAUDE_CONFIG_DIR ? real : "";
-  return { ...env, CLAUDE_CONFIG_DIR: result.dir, CLAUDE_SECURESTORAGE_CONFIG_DIR: secure };
+  return { ...env, ...CLAUDE_PRODUCT_RUN_ENV, CLAUDE_CONFIG_DIR: result.dir, CLAUDE_SECURESTORAGE_CONFIG_DIR: secure };
 }
 
 /** Claude names a project's session folder after its working directory: every non-alphanumeric becomes "-". */
