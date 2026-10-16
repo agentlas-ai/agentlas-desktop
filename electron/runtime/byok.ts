@@ -47,6 +47,10 @@ import { schemaFallbackInstruction, schemaFallbackPromptPart, observationSystemW
 import { compactHistoryToBudget, estimateTransportTokens } from "./compact";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import {
+  serverFailure, serverFailureCodeForStatus, serverFailureResendable, serverFailureResendDelayMs, SERVER_FAILURE_RESENDS,
+  waitForServerResend,
+} from "./provider-overload";
+import {
   ANTHROPIC_1M_BETA,
   anthropicCompatProvider,
   type ByokBackend,
@@ -566,6 +570,8 @@ async function runAnthropicMessagesInner(
   // ★도구 왕복. 모델이 tool_use 로 멈추면 실행하고 tool_result 로 답한 뒤 다시 부른다.
   // 상한을 두는 이유는 로컬/저가 모델이 같은 도구를 무한 반복하는 실측 때문이다.
   let toolTurnsTaken = 0;
+  /** G24: resends spent on an overloaded endpoint before anything streamed or ran in this invocation (provider-overload.ts). */
+  let serverResends = 0;
   const ownerControl = createOwnerControlBoundary(req);
   try {
   for (let turn = 0; turn < MAX_BYOK_TOOL_TURNS; turn += 1) {
@@ -650,6 +656,24 @@ async function runAnthropicMessagesInner(
           ...(outputTokens > 0 ? { tokens: outputTokens } : {}), workforcePermissionEnforcement: broker?.finish(false) });
       }
       const errText = await resp.text().catch(() => "");
+      // G24: 5xx / 529 is a typed failure; overloaded earns one resend while nothing streamed and no tool ran.
+      const serverCode = serverFailureCodeForStatus(resp.status);
+      if (serverCode) {
+        if (serverFailureResendable(serverCode) && serverResends < SERVER_FAILURE_RESENDS && turn === 0 && toolTurnsTaken === 0
+          && !acc && !ownerControl.hasPending() && !req.signal?.aborted) {
+          serverResends += 1;
+          events.onStatus(req.locale === "ko" ? "모델 서버가 바빠 잠시 뒤 같은 요청을 한 번 더 보냅니다…" : "The model server is busy; sending the same request once more shortly…");
+          await waitForServerResend(serverFailureResendDelayMs(resp.headers.get("retry-after")), req.signal);
+          if (req.signal?.aborted) throw abortReasonError(req);
+          turn -= 1; // the same request again, not a new tool turn
+          continue;
+        }
+        const observedUsage = measuredUsage.total();
+        return assertCurrentHistoryRunnerResult({ text: acc.trim(),
+          failure: serverFailure({ code: serverCode, status: resp.status, runtime: "byok", providerLabel: "Anthropic", locale: req.locale,
+            body: errText, retryAfter: resp.headers.get("retry-after") }),
+          ...(observedUsage ? { observedUsage } : {}), workforcePermissionEnforcement: broker?.finish(false) });
+      }
       throw new Error(`Anthropic API ${resp.status}: ${errText.slice(0, 300)}`);
     }
 
@@ -1253,6 +1277,8 @@ export const runGoogleByok: Runner = async (
   const ownerControl = createOwnerControlBoundary(req);
   // Explicit cachedContents only when the owner turned it on (doc 13 §7); off, nothing below changes the request.
   const geminiCacheSetting = await readGeminiCacheSetting().catch(() => ({ ...GEMINI_CACHE_DEFAULT }));
+  /** G24: resends spent on an overloaded endpoint before anything streamed or ran in this invocation (provider-overload.ts). */
+  let serverResends = 0;
   try {
   for (let turn = 0; turn < MAX_BYOK_TOOL_TURNS; turn += 1) {
     if (req.signal?.aborted) throw abortReasonError(req);
@@ -1396,6 +1422,24 @@ export const runGoogleByok: Runner = async (
       const terminal = httpFailureResult(resp.status, resp.headers.get("retry-after"));
       if (terminal) return terminal;
       const errText = await resp.text().catch(() => "");
+      // G24: 5xx / 529 is a typed failure; overloaded earns one resend while nothing streamed and no tool ran.
+      const serverCode = serverFailureCodeForStatus(resp.status);
+      if (serverCode) {
+        if (serverFailureResendable(serverCode) && serverResends < SERVER_FAILURE_RESENDS && turn === 0
+          && !acc && !ownerControl.hasPending() && !req.signal?.aborted) {
+          serverResends += 1;
+          events.onStatus(req.locale === "ko" ? "모델 서버가 바빠 잠시 뒤 같은 요청을 한 번 더 보냅니다…" : "The model server is busy; sending the same request once more shortly…");
+          await waitForServerResend(serverFailureResendDelayMs(resp.headers.get("retry-after")), req.signal);
+          if (req.signal?.aborted) throw abortReasonError(req);
+          turn -= 1; // the same request again, not a new tool turn
+          continue;
+        }
+        const observedUsage = measuredUsage.total();
+        return assertCurrentHistoryRunnerResult({ text: acc.trim(),
+          failure: serverFailure({ code: serverCode, status: resp.status, runtime: "byok", providerLabel: "Google", locale: req.locale,
+            body: errText, retryAfter: resp.headers.get("retry-after") }),
+          ...(observedUsage ? { observedUsage } : {}), workforcePermissionEnforcement: broker?.finish(false) });
+      }
       throw new Error(`Google API ${resp.status}: ${errText.slice(0, 300)}`);
     }
 

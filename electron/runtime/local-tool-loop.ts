@@ -56,6 +56,10 @@ import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions
 import { OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS, outputLimitContinuationTurn } from "./output-limit-continuation";
 import { resolveToolNameAlias, unknownToolMessage } from "./tool-name-alias";
 import {
+  LOCAL_MODEL_UNLOADED_CODE, localModelResident, refineServerFailureCode, RUNTIME_SERVER_ERROR_CODE, serverFailure,
+  serverFailureCodeForStatus, serverFailureResendable, serverFailureResendDelayMs, SERVER_FAILURE_RESENDS, waitForServerResend,
+} from "./provider-overload";
+import {
   defaultRuntimeToolPermission,
   getRuntimeToolPermissionArbiter,
   toolApprovalFaultCode,
@@ -1656,6 +1660,8 @@ async function runLocalOpenAiChatInner(
   let outputCuts = 0;
   let continuedText = "";
   let toolParseRetries = 0;
+  /** G24: resends spent on a server that answered 5xx before anything streamed or ran in this invocation. */
+  let serverResends = 0;
   /** Reasoning behind each tool call, replayed to Ollama's native route (gpt-oss loses its plan between calls without it). */
   const thinkingByCallId = new Map<string, string>();
   /** Screenshot messages this loop appended after tool results (structural identity, never their wording). */
@@ -1742,6 +1748,31 @@ async function runLocalOpenAiChatInner(
     const observedUsage = usage.total();
     return assertCurrentHistoryRunnerResult({ text: finalText.trim(), failure, ...(observedUsage ? { observedUsage } : {}),
       workforcePermissionEnforcement: broker?.finish(false) });
+  };
+  /**
+   * G24: a 5xx is a typed failure (provider-overload.ts). Overloaded, or a local server that no longer has the model loaded,
+   * earns one resend after a short wait, but only while nothing streamed and no tool ran in this invocation.
+   */
+  const serverFailureOutcome = async (response: Response, body: string, allowResend: boolean): Promise<"resend" | RunnerResult | null> => {
+    const plain = serverFailureCodeForStatus(response.status);
+    if (!plain) return null;
+    const resident = plain === RUNTIME_SERVER_ERROR_CODE ? await localModelResident({ runtimeKind, host, model, signal: req.signal }) : null;
+    const code = refineServerFailureCode(plain, resident);
+    const retryAfter = response.headers.get("retry-after");
+    if (allowResend && serverFailureResendable(code) && serverResends < SERVER_FAILURE_RESENDS && !sawAnyToolCall
+      && !finalText.trim() && !continuedText && !ownerControlPending && !req.signal?.aborted) {
+      serverResends += 1;
+      events.onStatus(code === LOCAL_MODEL_UNLOADED_CODE
+        ? req.locale === "ko" ? "모델 서버가 오류 뒤 모델을 내렸습니다. 잠시 뒤 같은 요청을 한 번 더 보냅니다…" : "The model server dropped the model after an error; sending the same request once more shortly…"
+        : req.locale === "ko" ? "모델 서버가 바빠 잠시 뒤 같은 요청을 한 번 더 보냅니다…" : "The model server is busy; sending the same request once more shortly…");
+      await waitForServerResend(serverFailureResendDelayMs(retryAfter), req.signal);
+      if (req.signal?.aborted) throw abortReasonError(req);
+      return "resend";
+    }
+    const observedUsage = usage.total();
+    return assertCurrentHistoryRunnerResult({ text: finalText.trim(),
+      failure: serverFailure({ code, status: response.status, runtime: runtimeKind, providerLabel, locale: req.locale, body, retryAfter }),
+      ...(observedUsage ? { observedUsage } : {}), workforcePermissionEnforcement: broker?.finish(false) });
   };
 
   try {
@@ -2059,6 +2090,8 @@ async function runLocalOpenAiChatInner(
             const terminal = httpFailureResult(fallback.status);
             if (terminal) return terminal;
             const fallbackErrText = await fallback.text().catch(() => "");
+            const server = await serverFailureOutcome(fallback, fallbackErrText, false);
+            if (server && server !== "resend") return server;
             throw new Error(`${providerLabel} API ${fallback.status}: ${fallbackErrText.slice(0, 300)}`);
           }
           const result = await streamChatTurn(fallback, events.onPartial, events.onThinking, localCompatibleTerminal ? { turn } : undefined);
@@ -2071,6 +2104,13 @@ async function runLocalOpenAiChatInner(
           reachedAnswer = true;
           break;
         }
+        const server = await serverFailureOutcome(resp, errText, true);
+        if (server === "resend") {
+          // The same request again, not a new tool-loop turn: the for-loop step brings `turn` back to this value.
+          turn -= 1;
+          continue;
+        }
+        if (server) return server;
         throw new Error(`${providerLabel} API ${resp.status}: ${errText.slice(0, 300)}`);
       }
     }
