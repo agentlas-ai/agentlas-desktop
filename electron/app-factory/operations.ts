@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -51,7 +51,7 @@ import type {
   JsonValue,
 } from "../../shared/types";
 import { getServer, installCustomServer, removeServer } from "../mcp-tools/registry";
-import { readEnvVar } from "../secrets/vault";
+import { readEnvVar, readSecret, setSecret } from "../secrets/vault";
 import { AGENTLAS_OS_FALLBACK_LADDER } from "../../shared/surface-delegation";
 import { refreshServiceAppViews } from "./scaffold";
 import { astryxReactProfile } from "./astryx-react";
@@ -1170,10 +1170,13 @@ export async function resolveProviderCredentials(
     .filter(Boolean) as AppFactoryProviderCredentialGate[];
   const gates = dedupeCredentialGates(gatesFromRuntime.length > 0 ? gatesFromRuntime : providerCredentialGates(pkg));
   const requestedSource = input.source || "agentlas-env-vault";
+  // Main의 process.env는 패키지 커넥터가 선언한 키만 읽는다(operations.json의 임의 envKey로 Main 환경을 떠보지 못하게).
+  const declaredEnvKeys = new Set(pkg.connectors.map(credentialEnvKey).filter((key): key is string => Boolean(key)));
   // keytar 자격증명 해석을 동시성 3으로 제한(gates 무제한 → 키체인 동시 접근 폭주 방지). 결과 순서/형태 보존.
   const credentials: AppFactoryProviderCredentialResolution[] = await runWithConcurrency(gates, 3, async (gate) => {
-    const { value, source } = await resolveCredentialValue(gate.envKey, requestedSource);
+    const { value, source } = await resolveCredentialValue(gate.envKey, requestedSource, declaredEnvKeys);
     const resolved = typeof value === "string" && value.trim().length > 0;
+    const fingerprint = resolved ? await credentialFingerprint(value) : null;
     return {
       envKey: gate.envKey,
       label: gate.label,
@@ -1188,7 +1191,7 @@ export async function resolveProviderCredentials(
       source,
       saveTarget: gate.saveTarget,
       inputMode: gate.inputMode,
-      ...(resolved ? { fingerprint: credentialFingerprint(value) } : {}),
+      ...(fingerprint ? { fingerprint } : {}),
     };
   });
   const resolvedCount = credentials.filter((item) => item.status === "live-credential-ready").length;
@@ -2636,8 +2639,8 @@ App root: \`${rootPath}\`
 
 This file intentionally stores no raw passwords, tokens, API keys, cookies,
 card numbers, CVV/CVC values, or OTP values. Ready credentials are represented
-only by short SHA-256 fingerprints so the agent can prove continuity without
-leaking secrets.
+only by short keyed (HMAC-SHA256) fingerprints so the agent can prove continuity
+without leaking secrets.
 
 ## Status
 
@@ -2654,20 +2657,49 @@ ${credentials.map((item) => `- \`${item.envKey}\`: ${item.status}${item.provider
 async function resolveCredentialValue(
   envKey: string,
   requestedSource: AppFactoryProviderCredentialResolveRequest["source"] | undefined,
+  declaredEnvKeys: ReadonlySet<string>,
 ): Promise<{ value: string | undefined; source: string }> {
-  if (requestedSource === "env") return { value: process.env[envKey], source: "env" };
+  // 선언되지 않은 키는 값이 있든 없든 같은 답 — 응답으로 Main 환경 변수의 존재를 알 수 없다.
+  const envAllowed = declaredEnvKeys.has(envKey);
+  if (requestedSource === "env") {
+    return envAllowed ? { value: process.env[envKey], source: "env" } : { value: undefined, source: "env-key-not-declared" };
+  }
 
   const vaultValue = await readEnvVar(envKey).catch(() => null);
   if (vaultValue) return { value: vaultValue, source: "agentlas-env-vault" };
 
   if (requestedSource === "auto") {
+    if (!envAllowed) return { value: undefined, source: "env-key-not-declared" };
     return { value: process.env[envKey], source: process.env[envKey] ? "env" : "missing" };
   }
   return { value: undefined, source: "agentlas-env-vault" };
 }
 
-function credentialFingerprint(value: string): string {
-  return `sha256:${createHash("sha256").update(value).digest("hex").slice(0, 16)}`;
+const CREDENTIAL_FINGERPRINT_KEY_REF = "app-factory.credential-fingerprint-key";
+let credentialFingerprintKeyRead: Promise<Buffer | null> | null = null;
+
+/**
+ * 설치마다 한 번 만들어 금고에 두는 지문 키. 프로젝트 폴더(공유·커밋될 수 있음)에 남는 지문으로
+ * 추측한 키를 맞혀 보거나 짧은 비밀을 무차별 대입하지 못하게 한다. 금고를 못 읽으면 null — 지문을 남기지 않는다.
+ */
+function credentialFingerprintKey(): Promise<Buffer | null> {
+  credentialFingerprintKeyRead ??= (async () => {
+    const decode = (raw: string | null) => (raw ? Buffer.from(raw, "base64") : null);
+    const existing = decode(await readSecret(CREDENTIAL_FINGERPRINT_KEY_REF));
+    if (existing && existing.length >= 32) return existing;
+    await setSecret(CREDENTIAL_FINGERPRINT_KEY_REF, randomBytes(32).toString("base64"));
+    const saved = decode(await readSecret(CREDENTIAL_FINGERPRINT_KEY_REF));
+    return saved && saved.length >= 32 ? saved : null;
+  })().catch(() => null);
+  const pending = credentialFingerprintKeyRead;
+  void pending.then((key) => { if (!key && credentialFingerprintKeyRead === pending) credentialFingerprintKeyRead = null; });
+  return pending;
+}
+
+async function credentialFingerprint(value: string): Promise<string | null> {
+  const key = await credentialFingerprintKey();
+  if (!key) return null;
+  return `hmac-sha256:${createHmac("sha256", key).update(value).digest("hex").slice(0, 16)}`;
 }
 
 function localTaskStatus(task: JsonObject, now: string): JsonObject {
