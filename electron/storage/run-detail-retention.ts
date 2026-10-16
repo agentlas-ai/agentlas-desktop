@@ -14,7 +14,8 @@ import type Database from "better-sqlite3";
  *
  * - Model reasoning and thinking text is deleted. It is only ever displayed.
  * - Chat runs (no automation): tool-call and notice rows are deleted, unless
- *   the chat has an active Goal (Goal facts check for later tool activity).
+ *   the chat has an active or blocked Goal (Goal facts check for later tool
+ *   activity).
  * - Automation runs: tool-call and notice rows stay. Only the large output
  *   fields go. toolArgs stays, because a graph resume compares a node's
  *   arguments with the previous run of the same occurrence before it
@@ -79,7 +80,8 @@ export function retireRunDetailSlice(
   const cutoff = new Date((options.now ?? Date.now()) - options.days * 86_400_000).toISOString();
   let watermark: RunDetailWatermark = options.watermark ?? { ts: "", id: 0 };
   const slice: RunDetailSlice = { runs: 0, deleted: 0, compacted: 0, watermark, done: false };
-  const activeGoalChats = `SELECT chat_id FROM chat_goal_contracts WHERE status = 'active'`;
+  // A blocked Goal resumes into active, so it is protected too (statuses: active, blocked, completed, cancelled).
+  const activeGoalChats = `SELECT chat_id FROM chat_goal_contracts WHERE status IN ('active', 'blocked')`;
   const chatCalls = `kind IN (${list(RUN_DETAIL_CALL_KINDS)}) AND automation_id IS NULL
     AND (chat_id IS NULL OR chat_id NOT IN (${activeGoalChats}))`;
   const automationCalls = `kind IN (${list(RUN_DETAIL_CALL_KINDS)}) AND automation_id IS NOT NULL

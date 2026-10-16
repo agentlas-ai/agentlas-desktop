@@ -7,12 +7,19 @@ import path from "node:path";
  * beside the videos they had been encoded into.
  *
  * An intermediate is one of two things:
- * - a frame sequence: a folder of at least 24 numbered images, inside a
- *   project (up to three folders up) that holds a video written after the last
- *   frame (the frames were encoded)
+ * - a frame sequence: a folder of numbered images, inside a project (up to
+ *   three folders up) that holds a video written after the last frame (the
+ *   frames were encoded). It needs at least 120 images, or at least 24 in a
+ *   folder whose path names frames, renders, samples, QA, stills or evidence.
+ *   A smaller numbered set (30 slides beside an explainer video) can be the
+ *   deliverable itself.
  * - a temp file: .tmp, .part, .partial, .crdownload
  *
- * "Done" means nothing in the project was written for `idleMs`.
+ * "Done" means nothing in the project was written for a quiet period:
+ * - `idleMs` when the project records a verified finish written after the
+ *   last frame (verification.json or .agentlas-complete)
+ * - `unverifiedIdleMs` otherwise. A render waiting for review keeps its
+ *   frames; deleting them would force a full re-render.
  *
  * Never touched:
  * - anything under a folder named `inputs` (owner-supplied originals)
@@ -30,6 +37,9 @@ const NUMBERED = /\d{3,}/;
 const SKIP_DIRS = new Set(["node_modules", ".git", "inputs", ".agentlas"]);
 const DELIVERED = /^(deliver(y|ables?)|exports?|publish(ed)?|release)$/i;
 export const FRAME_SEQUENCE_MIN = 24;
+export const FRAME_SEQUENCE_UNNAMED_MIN = 120;
+const FRAME_FOLDER = /(^|[-_/])(frames?|renders?|seq|sequences?|samples?|encoded|qa|stills|evidence|previews?|tmp|temp|cache|scratch)([-_/]|$)/i;
+const FINISH_MARKERS = new Set(["verification.json", ".agentlas-complete"]);
 export const KEEP_MARKER = ".agentlas-keep";
 
 export interface IntermediateSweepResult {
@@ -45,6 +55,8 @@ interface DirInfo {
   newestMs: number;
   /** Newest video mtime in this subtree. */
   newestVideoMs: number;
+  /** Newest verified-finish record in this subtree. */
+  newestFinishMs: number;
   temps: Array<{ file: string; mtimeMs: number; size: number }>;
   keep: boolean;
 }
@@ -52,7 +64,7 @@ interface DirInfo {
 // Asynchronous throughout: the sweep runs in the Desktop main process, whose
 // event loop must never stall (a synchronous walk of the owner's workspace took 0.9 s).
 async function scan(dir: string, infos: Map<string, DirInfo>, inheritedKeep: boolean): Promise<DirInfo> {
-  const info: DirInfo = { frames: [], newestFrameMs: 0, newestMs: 0, newestVideoMs: 0, temps: [], keep: inheritedKeep };
+  const info: DirInfo = { frames: [], newestFrameMs: 0, newestMs: 0, newestVideoMs: 0, newestFinishMs: 0, temps: [], keep: inheritedKeep };
   let entries: fs.Dirent[] = [];
   try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return info; }
   if (entries.some((entry) => entry.name === KEEP_MARKER) || DELIVERED.test(path.basename(dir))) info.keep = true;
@@ -64,12 +76,14 @@ async function scan(dir: string, infos: Map<string, DirInfo>, inheritedKeep: boo
       const child = await scan(full, infos, info.keep);
       info.newestMs = Math.max(info.newestMs, child.newestMs);
       info.newestVideoMs = Math.max(info.newestVideoMs, child.newestVideoMs);
+      info.newestFinishMs = Math.max(info.newestFinishMs, child.newestFinishMs);
       continue;
     }
     if (!entry.isFile()) continue;
     let stat: fs.Stats;
     try { stat = await fs.promises.lstat(full); } catch { continue; }
     info.newestMs = Math.max(info.newestMs, stat.mtimeMs);
+    if (FINISH_MARKERS.has(entry.name)) info.newestFinishMs = Math.max(info.newestFinishMs, stat.mtimeMs);
     if (VIDEO.test(entry.name)) info.newestVideoMs = Math.max(info.newestVideoMs, stat.mtimeMs);
     else if (IMAGE.test(entry.name) && NUMBERED.test(entry.name)) {
       info.frames.push(full);
@@ -95,7 +109,7 @@ async function remove(file: string, root: string, result: IntermediateSweepResul
 
 export async function sweepAgentIntermediates(
   workspaceRoot: string,
-  options: { idleMs: number; now?: number; dryRun?: boolean },
+  options: { idleMs: number; unverifiedIdleMs: number; now?: number; dryRun?: boolean },
 ): Promise<IntermediateSweepResult> {
   const result: IntermediateSweepResult = { removedFiles: 0, removedBytes: 0, frameDirs: [] };
   let root: string;
@@ -111,6 +125,7 @@ export async function sweepAgentIntermediates(
       if (now - temp.mtimeMs >= options.idleMs) await remove(temp.file, root, result, dryRun);
     }
     if (info.frames.length < FRAME_SEQUENCE_MIN) continue;
+    if (info.frames.length < FRAME_SEQUENCE_UNNAMED_MIN && !FRAME_FOLDER.test(path.relative(root, dir))) continue;
     // The project is the nearest folder (the frame folder itself, then up to
     // three levels above it) whose subtree holds a video written after the last frame.
     let project: DirInfo | null = info.newestVideoMs >= info.newestFrameMs ? info : null;
@@ -121,7 +136,9 @@ export async function sweepAgentIntermediates(
       const candidate = infos.get(cursor);
       if (candidate && candidate.newestVideoMs >= info.newestFrameMs) project = candidate;
     }
-    if (!project || now - project.newestMs < options.idleMs) continue;
+    if (!project) continue;
+    const verified = project.newestFinishMs >= info.newestFrameMs && project.newestFinishMs > 0;
+    if (now - project.newestMs < (verified ? options.idleMs : options.unverifiedIdleMs)) continue;
     for (const frame of info.frames) await remove(frame, root, result, dryRun);
     result.frameDirs.push(path.relative(root, dir));
     if (!dryRun) {

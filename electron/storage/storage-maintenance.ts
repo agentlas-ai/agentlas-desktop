@@ -79,6 +79,7 @@ export async function runStorageMaintenance(now = Date.now()): Promise<StorageMa
     const lowDisk = isLowDisk(space);
     const sweep = await sweepAgentIntermediates(userDataPath("agent-cwd"), {
       idleMs: STORAGE_POLICY.intermediateIdleMinutes * 60_000,
+      unverifiedIdleMs: STORAGE_POLICY.intermediateUnverifiedIdleHours * 3_600_000,
       now,
     });
     const db = getDb();
@@ -93,7 +94,20 @@ export async function runStorageMaintenance(now = Date.now()): Promise<StorageMa
     let watermark = readWatermark();
     for (let slice = 0; slice < RUN_DETAIL_SLICES_PER_PASS; slice += 1) {
       await yieldToLoop();
-      const step = retireRunDetailSlice(db, { days: STORAGE_POLICY.runDetailDays, now, watermark });
+      // Wait at most 200 ms for another process's write lock: better-sqlite3 waits
+      // synchronously, and the main thread must not stall behind a long daemon write.
+      // A busy database ends this pass; the next pass resumes from the watermark.
+      const previousBusyTimeout = Number(db.pragma("busy_timeout", { simple: true }) ?? 0);
+      db.pragma("busy_timeout = 200");
+      let step: ReturnType<typeof retireRunDetailSlice>;
+      try {
+        step = retireRunDetailSlice(db, { days: STORAGE_POLICY.runDetailDays, now, watermark });
+      } catch (error) {
+        if ((error as { code?: string }).code === "SQLITE_BUSY") break;
+        throw error;
+      } finally {
+        db.pragma(`busy_timeout = ${Math.max(0, Math.floor(previousBusyTimeout))}`);
+      }
       runDetail.runs += step.runs;
       runDetail.deleted += step.deleted;
       runDetail.compacted += step.compacted;

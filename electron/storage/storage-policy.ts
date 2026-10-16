@@ -5,7 +5,8 @@
  * never deleted automatically. Only these lose detail:
  *
  * - agent intermediates (frame sequences, temp files): removed once the work
- *   is done ("완료 즉시 삭제")
+ *   is done ("완료 즉시 삭제"). The work is done 10 minutes after a recorded
+ *   verified finish, or after 24 quiet hours without one.
  * - run detail (each tool call's arguments and output, model reasoning):
  *   kept 3 days, after which only the result, cost and error summary remain
  * - CLI resume transcripts: removed for chats unused for 30 days; the chat
@@ -15,8 +16,13 @@
 export const STORAGE_POLICY = {
   runDetailDays: 3,
   cliTranscriptIdleDays: 30,
-  /** "Done" for an agent workspace: nothing in the project written for this long. */
+  /** "Done" for a project whose agent recorded a verified finish (verification.json or .agentlas-complete). */
   intermediateIdleMinutes: 10,
+  /**
+   * "Done" without that record. A render waiting for owner review must keep its
+   * frames; deleting them after a short pause would force a full re-render.
+   */
+  intermediateUnverifiedIdleHours: 24,
   sweepIntervalMinutes: 30,
   lowDisk: {
     freeBytes: 15 * 1024 ** 3,
