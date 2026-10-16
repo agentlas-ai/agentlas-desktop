@@ -72,6 +72,7 @@ import { isJudgmentRefusal } from "../runtime/judgment-refusal";
 import { runnerFailureFromError, RuntimeTurnUnsettledError, SURFACE_INTENT_MARKER } from "../runtime/runner";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import { runTeamStepWithSettlement, teamStepFailureNote, type TeamStepFailureNote, type TeamStepSettlementPhase } from "./team-step-settlement";
+import { degenerateOutputReceipt, runGuardedTeamStep, WORKER_OUTPUT_DEGENERATE_CODE } from "../runtime/degenerate-output";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import { recordWorkerReport, tryRecordRunEvent } from "../store/run-events";
 import {
@@ -1290,10 +1291,16 @@ function runSettledTaskForceStep(
   runner: Runner,
   request: RunnerRequest,
   events: RunnerEvents,
+  /** A teammate's own turn (direct or nested worker): its output carries the loop safety net (degenerate-output.ts). */
+  worker = false,
 ): Promise<RunnerResult> {
   return runTeamStepWithSettlement({
     request,
-    dispatch: (next) => runObservedRunner(runner, next, events),
+    dispatch: (next) => worker
+      ? runGuardedTeamStep({ request: next, events, dispatch: (guarded, guardedEvents) => runObservedRunner(runner, guarded, guardedEvents),
+        record: (verdict) => tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id, nodeId,
+          kind: WORKER_OUTPUT_DEGENERATE_CODE, payload: degenerateOutputReceipt(verdict) }) })
+      : runObservedRunner(runner, next, events),
     eligible: !p.req.agentAppMode,
     aborted: () => request.signal?.aborted === true || p.signal?.aborted === true,
     record: (phase: TeamStepSettlementPhase, note: TeamStepFailureNote) => tryRecordRunEvent({
@@ -4989,7 +4996,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
               attempt,
               agentId: null,
               runtime: observedWorkerRuntime,
-            }, () => runSettledTaskForceStep(p, `${id}:hub-team:${worker.id}`, observedWorkerPicked.runner, taskForceWorkerRunnerRequest(p, request), events)).then(result => { result.text = taskForceWorkerOwnerAskText(result.text, taskForceWorkerHandoffText(result.text)); return result; }), capabilityEvidence(`${id}:hub-team:${worker.id}`, observedWorkerInvocationId))(
+            }, () => runSettledTaskForceStep(p, `${id}:hub-team:${worker.id}`, observedWorkerPicked.runner, taskForceWorkerRunnerRequest(p, request), events, true)).then(result => { result.text = taskForceWorkerOwnerAskText(result.text, taskForceWorkerHandoffText(result.text)); return result; }), capabilityEvidence(`${id}:hub-team:${worker.id}`, observedWorkerInvocationId))(
               {
                 ...taskForceSystemRequest([
 ...borrowedAgentSystemPromptParts(workerSpec, packagePermission, materializedWorkerMcpTools, { node: worker.content, package: spec.directive }),
@@ -5468,7 +5475,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         attempt,
         agentId: installedAgent?.id ?? p.chat.agentId,
         runtime: observedDirectRuntime,
-      }, () => runSettledTaskForceStep(p, id, observedDirectPicked.runner, taskForceWorkerRunnerRequest(p, request), events)).then(result => { result.text = taskForceWorkerOwnerAskText(result.text, taskForceWorkerHandoffText(result.text)); return result; }), capabilityEvidence(id, observedDirectInvocationId))(
+      }, () => runSettledTaskForceStep(p, id, observedDirectPicked.runner, taskForceWorkerRunnerRequest(p, request), events, true)).then(result => { result.text = taskForceWorkerOwnerAskText(result.text, taskForceWorkerHandoffText(result.text)); return result; }), capabilityEvidence(id, observedDirectInvocationId))(
         {
           ...taskForceSystemRequest([
 ...borrowedAgentSystemPromptParts(spec, packagePermission, materializedWorkerMcpTools),

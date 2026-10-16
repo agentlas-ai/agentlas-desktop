@@ -3,6 +3,7 @@ import { toolObservationDigest } from "../automation-progress-guard";
 import { randomUUID } from "node:crypto";
 import type { RunnerEvents, RunnerRequest, RunnerResult } from "../runtime/runner";
 import { runTeamStepWithSettlement } from "./team-step-settlement";
+import { degenerateOutputReceipt, runGuardedTeamStep, WORKER_OUTPUT_DEGENERATE_CODE } from "../runtime/degenerate-output";
 import { runObservedRunner, observedRunnerUsage, observedRunnerUsageEvidence, ObservedRunnerFailureError } from "../runtime/observed-runner";
 import { withModelCallScope } from "../runtime/model-call-ledger";
 import { withholdTurnAskForRun } from "../turn-tools/control-server";
@@ -640,7 +641,11 @@ export async function runSwarmInvocation(
           };
         const measuredResult = await runTeamStepWithSettlement({
           request: workerRequest,
-          dispatch: (next) => runObservedRunner(targetRunner.runner, next, workerEvents),
+          // The worker's own output carries the loop safety net (degenerate-output.ts).
+          dispatch: (next) => runGuardedTeamStep({ request: next, events: workerEvents,
+            dispatch: (guarded, guardedEvents) => runObservedRunner(targetRunner.runner, guarded, guardedEvents),
+            record: (verdict) => tryRecordRunEvent({ runId, chatId: p.chat.id, nodeId: task.id, kind: WORKER_OUTPUT_DEGENERATE_CODE,
+              payload: degenerateOutputReceipt(verdict) }) }),
           eligible: !p.req.agentAppMode,
           aborted: () => (signal ?? p.signal)?.aborted === true,
           record: (phase, note) => tryRecordRunEvent({ runId, chatId: p.chat.id, nodeId: task.id, kind: "team_step_settlement",

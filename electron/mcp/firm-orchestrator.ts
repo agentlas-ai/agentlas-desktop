@@ -6,6 +6,7 @@ import { ownerVisiblePrompt } from "../one/owner-prompt";
 import { mainWorkAttachmentContext, redactWorkAttachmentText } from "../invocation/work-attachments";
 import { workerCapabilityRunner, WorkerCapabilityError, type PrepareWorkerCapabilities, type WorkerCapabilityInput } from "./worker-capabilities";
 import { runTeamStepWithSettlement } from "./team-step-settlement";
+import { degenerateOutputReceipt, runGuardedTeamStep, WORKER_OUTPUT_DEGENERATE_CODE } from "../runtime/degenerate-output";
 import { withoutMcpTransportEnv } from "../runtime/runner";
 // 멀티 에이전트 firm 오케스트레이터 — 3-tier (CEO → 본부 → 전문가).
 //   PLAN: 리더가 <<Delegate>>로 필요한 하위만 선택 → DELEGATE: 하위 병렬 실행 → SYNTHESIZE.
@@ -1140,7 +1141,12 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
             // An Agent App's memory binding is keyed by this exact request object: it is never continued (eligible).
             request: bindAppMemoryRequest(ownerAskWithheld ? { ...planBounded, unattendedNoAsk: true as const } : planBounded,
               {runId:p.req.runId,chatId:p.chat.id,actorId:memoryOwnerId}),
-            dispatch: (next) => runObservedRunner(runtimePicked.runner, next, events),
+            // A delegated node's own output carries the loop safety net (degenerate-output.ts); planning/synthesis do not.
+            dispatch: (next) => phase === "delegate"
+              ? runGuardedTeamStep({ request: next, events, dispatch: (guarded, guardedEvents) => runObservedRunner(runtimePicked.runner, guarded, guardedEvents),
+                record: (verdict) => tryRecordRunEvent({ runId: p.req.runId ?? `firm:${p.chat.id}`, chatId: p.chat.id, nodeId: node.id,
+                  kind: WORKER_OUTPUT_DEGENERATE_CODE, payload: degenerateOutputReceipt(verdict) }) })
+              : runObservedRunner(runtimePicked.runner, next, events),
             eligible: !p.req.agentAppMode,
             aborted: () => (turn.signal ?? p.signal)?.aborted === true,
             record: (phase, note) => tryRecordRunEvent({ runId: p.req.runId ?? `firm:${p.chat.id}`, chatId: p.chat.id,
