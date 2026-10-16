@@ -77,7 +77,7 @@ function pastTurnsFor(agentId: string, limit: number): PastTurn[] {
     const message = getDb().prepare(
       `SELECT text FROM chat_messages
         WHERE chat_id = ? AND role = 'user' AND text IS NOT NULL AND TRIM(text) <> ''
-        ORDER BY created_at ASC LIMIT 1`,
+        ORDER BY created_at ASC, rowid ASC LIMIT 1`,
     ).get(row.chatId) as { text?: string } | undefined;
     const raw = String(message?.text ?? "").replace(/\s+/g, " ").trim();
     if (raw.length < MIN_REQUEST_CHARS) continue;

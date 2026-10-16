@@ -309,7 +309,7 @@ function latestOpenQuestionMessage(chatId: string): { id: string; role: string; 
   const rows = getDb()
     .prepare(`SELECT id, role, text, created_at FROM chat_messages
       WHERE chat_id = ? AND (role = 'user' OR (role = 'assistant' AND instr(text, ?) > 0))
-      ORDER BY created_at DESC LIMIT 8`)
+      ORDER BY created_at DESC, rowid DESC LIMIT 8`)
     .all(chatId, OPEN) as Array<{ id: string; role: string; text: string; created_at: string }>;
   for (const row of rows) {
     if (row.role === "user") return null;

@@ -753,7 +753,7 @@ export function goalConversationExchange(chatId: string, goalBinding: { goalId: 
     .get(origin, chatId) as { created_at: string } | undefined)?.created_at : undefined;
   if (since) {
     const owner = getDb().prepare(`SELECT id, text, created_at FROM chat_messages WHERE chat_id = ? AND role = 'user'
-      AND created_at > ? AND id <> ? ORDER BY created_at`).all(chatId, since, origin) as Array<{ text: string; created_at: string }>;
+      AND created_at > ? AND id <> ? ORDER BY created_at, rowid`).all(chatId, since, origin) as Array<{ text: string; created_at: string }>;
     for (const row of owner) if (row.text.trim()) entries.push({ ref: null, role: "owner", createdAt: row.created_at, text: row.text });
   }
   return entries.sort((a, b) => a.createdAt.localeCompare(b.createdAt)).slice(-GOAL_CONVERSATION_MAX_ENTRIES);

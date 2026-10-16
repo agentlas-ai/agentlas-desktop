@@ -32,7 +32,7 @@ function unreadMessages(chatId: string): { lastViewedAt: string | null; messages
   if (!lastViewedAt) return { lastViewedAt, messages: [] };
   // No first-40 cap: the coverage includes the whole observed unread range.
   const messages = db.prepare(`SELECT id,role,text,created_at FROM chat_messages
-    WHERE chat_id=? AND role='assistant' AND created_at>? ORDER BY created_at ASC,id ASC`).all(chatId, lastViewedAt) as Array<{
+    WHERE chat_id=? AND role='assistant' AND created_at>? ORDER BY created_at ASC,rowid ASC`).all(chatId, lastViewedAt) as Array<{
       id: string; role: "assistant"; text: string; created_at: string;
     }>;
   return { lastViewedAt, messages: messages.map(row => ({ id: row.id, role: row.role, text: row.text, createdAt: row.created_at })) };

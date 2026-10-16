@@ -231,7 +231,7 @@ export function listRecentOneChats(limit = 50): Chat[] {
          (SELECT text FROM chat_messages
            WHERE chat_messages.chat_id = chats.id
              AND chat_messages.role IN ('user', 'assistant')
-           ORDER BY chat_messages.created_at DESC
+           ORDER BY chat_messages.created_at DESC, chat_messages.rowid DESC
            LIMIT 1) AS last_message_preview,
          /*
           * 세션 목록의 "최근" 은 화면에 보이는 줄이 마지막으로 생긴 시각이다(오너 2026-09-28
@@ -1286,13 +1286,13 @@ export function listChatMessages(chatId: string, limit = 200): ChatHistoryEntry[
   const rows = getDb()
     .prepare(
       `SELECT id, role, text, created_at, host_notice_json, speaker_agent_id FROM (
-         SELECT id, role, text, created_at, host_notice_json, speaker_agent_id
+         SELECT rowid AS seq, id, role, text, created_at, host_notice_json, speaker_agent_id
            FROM chat_messages
           WHERE chat_id = ?
             AND NOT (role = 'user' AND instr(text, ?) > 0)
-          ORDER BY created_at DESC
+          ORDER BY created_at DESC, rowid DESC
           LIMIT ?
-       ) ORDER BY created_at ASC`,
+       ) ORDER BY created_at ASC, seq ASC`,
     )
     .all(chatId, LEGACY_FIRM_SYNTHESIS_MARKER, limit) as MessageRow[];
   return projectChatMessageRows(chatId, rows);
@@ -1344,24 +1344,34 @@ export function listChatMessagesBeforeUiAnchor(
   if (!Number.isInteger(limit) || limit < 1 || limit > 200
     || !/^ui-instance:[A-Za-z0-9_.:-]+$/.test(before.id)
     || !Number.isFinite(Date.parse(before.createdAt))) throw new TypeError("Invalid verified UI history bound");
-  return readChatMessageKeyset(chatId, limit, before);
+  return readChatMessageKeyset(chatId, limit, before, { uiAnchor: true });
 }
+
+/**
+ * Store order of chat rows: created_at, then insertion order (rowid) for rows saved in the same millisecond (NH26). The
+ * random UUID id never orders rows: a question and its answer written in one millisecond came back swapped. A cursor
+ * stays `{ id, createdAt }` (Work, One, Terminal thread read and every phone build send that shape); its rowid is read
+ * from the row it names. A UI-instance anchor (Mobile history) is not a stored row and sorts after every stored row of
+ * its millisecond, as `ui-instance:` sorted after every UUID before.
+ */
+const BEFORE_STORED_ROW = "AND (created_at < ? OR (created_at = ? AND rowid < (SELECT rowid FROM chat_messages WHERE id = ?)))";
+const BEFORE_UI_ANCHOR = "AND created_at <= ?";
 
 function readChatMessageKeyset(
   chatId: string,
   limit: number,
   before?: { id: string; createdAt: string },
-  options: { excludeSystem?: boolean } = {},
+  options: { excludeSystem?: boolean; uiAnchor?: boolean } = {},
 ): { messages: ChatHistoryEntry[]; hasOlder: boolean } {
   const rows = getDb().prepare(
     `SELECT id, role, text, created_at, host_notice_json, speaker_agent_id
        FROM chat_messages
       WHERE chat_id = ? AND NOT (role = 'user' AND instr(text, ?) > 0)
         ${options.excludeSystem ? "AND role != 'system'" : ""}
-        ${before ? "AND (created_at < ? OR (created_at = ? AND id < ?))" : ""}
-      ORDER BY created_at DESC, id DESC LIMIT ?`,
+        ${before ? options.uiAnchor ? BEFORE_UI_ANCHOR : BEFORE_STORED_ROW : ""}
+      ORDER BY created_at DESC, rowid DESC LIMIT ?`,
   ).all(chatId, LEGACY_FIRM_SYNTHESIS_MARKER,
-    ...(before ? [before.createdAt, before.createdAt, before.id] : []), limit + 1) as MessageRow[];
+    ...(before ? options.uiAnchor ? [before.createdAt] : [before.createdAt, before.createdAt, before.id] : []), limit + 1) as MessageRow[];
   return {
     messages: projectChatMessageRows(chatId, rows.slice(0, limit).reverse()),
     hasOlder: rows.length > limit,
@@ -1392,8 +1402,8 @@ export function listSeatMessagesPage(
     `SELECT m.id, m.chat_id, m.role, m.text, m.created_at, m.host_notice_json, m.speaker_agent_id
        FROM chat_messages m
       WHERE ${direct} AND NOT (m.role = 'user' AND instr(m.text, ?) > 0)
-        ${before ? "AND (m.created_at < ? OR (m.created_at = ? AND m.id < ?))" : ""}
-      ORDER BY m.created_at DESC, m.id DESC LIMIT ?`,
+        ${before ? "AND (m.created_at < ? OR (m.created_at = ? AND m.rowid < (SELECT rowid FROM chat_messages WHERE id = ?)))" : ""}
+      ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?`,
   ).all(seatId, LEGACY_FIRM_SYNTHESIS_MARKER,
     ...(before ? [before.createdAt, before.createdAt, before.id] : []), limit + 1) as Array<MessageRow & { chat_id: string }>;
   const page = rows.slice(0, limit).reverse();
@@ -1426,7 +1436,7 @@ export function listAgentRoomWorkMessages(agentId: string, limit: number): Array
        JOIN chats p ON p.id = c.parent_chat_id
       WHERE c.kind = 'division' AND c.origin_surface = 'one' AND c.agent_id = ? AND c.archived_at IS NULL
         AND p.archived_at IS NULL AND m.role IN ('user', 'assistant')
-      ORDER BY m.created_at DESC, m.id DESC LIMIT ?`,
+      ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?`,
   ).all(agentId, limit) as Array<MessageRow & { chat_id: string; room_id: string; room_title: string | null }>;
   const page = rows.reverse();
   const byChat = new Map<string, MessageRow[]>();
@@ -1472,7 +1482,7 @@ export function getRecapSince(chatId: string): { lastViewedAt: string | null; me
   if (!lastViewedAt) return { lastViewedAt: null, messages: [] };
   const rows = db
     .prepare(
-      "SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? AND role = 'assistant' AND created_at > ? ORDER BY created_at ASC LIMIT 40",
+      "SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? AND role = 'assistant' AND created_at > ? ORDER BY created_at ASC, rowid ASC LIMIT 40",
     )
     .all(chatId, lastViewedAt) as MessageRow[];
   return { lastViewedAt, messages: rows.map((r) => ({ id: r.id, role: r.role, text: r.text, createdAt: r.created_at })) };
@@ -1488,7 +1498,7 @@ export function markChatViewed(chatId: string): void {
 export function getLastChatMessage(chatId: string): ChatHistoryEntry | null {
   const row = getDb()
     .prepare(
-      "SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? ORDER BY created_at DESC LIMIT 1",
+      "SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
     )
     .get(chatId) as MessageRow | undefined;
   return row
@@ -1531,7 +1541,7 @@ export function repairPlaceholderTaskTitles(): number {
             (SELECT m.text
              FROM chat_messages m
              WHERE m.chat_id = c.id AND m.role = 'user'
-             ORDER BY m.created_at ASC
+             ORDER BY m.created_at ASC, m.rowid ASC
              LIMIT 1) AS first_user_text
      FROM chats c
      WHERE c.kind <> 'division'
@@ -1580,7 +1590,7 @@ export function retitleAutoTitledChatForTask(chatId: string, taskPrompt: string)
   const chat = getChat(chatId);
   if (!chat) return null;
   const firstUser = getDb()
-    .prepare("SELECT text FROM chat_messages WHERE chat_id = ? AND role = 'user' ORDER BY created_at ASC LIMIT 1")
+    .prepare("SELECT text FROM chat_messages WHERE chat_id = ? AND role = 'user' ORDER BY created_at ASC, rowid ASC LIMIT 1")
     .get(chatId) as { text: string } | undefined;
   const inheritedAutoTitle = firstUser ? autoTitleValue(firstUser.text) : "";
   const isAutomatic = chat.title === inheritedAutoTitle

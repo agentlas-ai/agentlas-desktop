@@ -29,15 +29,24 @@ function compareStoreText(left: string, right: string): number {
   return a.length - b.length;
 }
 
-/** Older reads cannot overwrite a newer in-memory revision of the same row. */
+/**
+ * Older reads cannot overwrite a newer in-memory revision of the same row. Rows are ordered by createdAt; rows of one
+ * millisecond keep the store's insertion order (store/chats.ts, NH26), never their random ids: the store page keeps its
+ * own order, and the rows only `current` holds are the older pages in "newest" mode and the newer rows in "older" mode.
+ */
 export function mergeOneChatHistory<T extends HistoryMessage>(
   current: readonly T[], incoming: readonly T[], mode: "older" | "newest",
 ): T[] {
   if (mode === "newest" && incoming.length === 0) return [];
-  const rows = new Map<string, T>();
-  for (const row of mode === "older" ? [...incoming, ...current] : [...current, ...incoming]) rows.set(row.id, row);
-  return [...rows.values()].sort((left, right) => compareStoreText(left.createdAt ?? "\uffff", right.createdAt ?? "\uffff")
-    || compareStoreText(left.id, right.id));
+  const incomingIds = new Set(incoming.map(row => row.id));
+  const currentById = new Map(current.map(row => [row.id, row]));
+  const page = incoming.map(row => mode === "older" ? currentById.get(row.id) ?? row : row);
+  const rest = current.filter(row => !incomingIds.has(row.id));
+  const seen = new Set<string>();
+  const ordered = (mode === "older" ? [...page, ...rest] : [...rest, ...page])
+    .filter(row => !seen.has(row.id) && Boolean(seen.add(row.id)));
+  // Array.prototype.sort is stable: equal createdAt keeps the order built above.
+  return ordered.sort((left, right) => compareStoreText(left.createdAt ?? "\uffff", right.createdAt ?? "\uffff"));
 }
 
 /** The durable oldest row is the next keyset boundary; optimistic rows have no cursor. */

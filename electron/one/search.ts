@@ -250,7 +250,7 @@ function matchingMessage(chatId: string, terms: string[]): string | null {
   const row = getDb().prepare(
     `SELECT text FROM chat_messages
      WHERE chat_id = ? AND ${matches}
-     ORDER BY created_at DESC, id ASC LIMIT 1`,
+     ORDER BY created_at DESC, rowid DESC LIMIT 1`,
   ).get(chatId, ...terms.map(likeTerm)) as { text: string } | undefined;
   return row ? safeSnippet(row.text, terms) : null;
 }

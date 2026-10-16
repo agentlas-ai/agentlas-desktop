@@ -52,17 +52,24 @@ export async function readMobileBridgeHistoryPage(
   const page = virtualAnchor
     ? listChatMessagesBeforeUiAnchor(chatId, limit, before!)
     : listChatMessagesPage(chatId, limit, before);
+  // One order for stored rows and UI rows (store/chats.ts readChatMessageKeyset): created_at, then stored rows in insertion
+  // order, then UI rows by id. A stored row's cursor therefore has no UI row of its millisecond before it; a UI anchor has
+  // every stored row of its millisecond and the UI rows whose id sorts below it.
   const isBefore = (row: { id: string; createdAt: string }) => !before
-    || row.createdAt < before.createdAt || (row.createdAt === before.createdAt && row.id < before.id);
+    || row.createdAt < before.createdAt || (row.createdAt === before.createdAt && virtualAnchor === true && row.id < before.id);
   const lower = page.hasOlder ? page.messages[0] : undefined;
   const inline = mergeInlineUiTranscript(chatId, page.messages, instances.filter(instance => {
     const row = { id: `ui-instance:${instance.instanceId}`, createdAt: instance.createdAt };
-    return isBefore(row) && (!lower || row.createdAt > lower.createdAt
-      || (row.createdAt === lower.createdAt && row.id >= lower.id));
+    return isBefore(row) && (!lower || row.createdAt >= lower.createdAt);
   }));
-  // Match SQLite's textual (timestamp,id) order, including equal-time DB/UI rows.
-  inline.history.sort((left, right) => left.createdAt < right.createdAt ? -1 : left.createdAt > right.createdAt ? 1
-    : left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+  const storeIndex = new Map(page.messages.map((message, index) => [message.id, index]));
+  inline.history.sort((left, right) => {
+    if (left.createdAt !== right.createdAt) return left.createdAt < right.createdAt ? -1 : 1;
+    const l = storeIndex.get(left.id), r = storeIndex.get(right.id);
+    if (l !== undefined && r !== undefined) return l - r;
+    if (l !== undefined || r !== undefined) return l !== undefined ? -1 : 1;
+    return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+  });
   // Housekeeping rows are walked past without being sent (NH26): paging counts and anchors on what the page consumed.
   const consumption: MobileBridgeHistoryConsumption = { consumed: 0 };
   const messages = projectMobileBridgeHistory(

@@ -218,7 +218,7 @@ export function callAgiReadTool(deps: AgiReadDeps, ctx: AgiReadContext, tool: st
       if (!scope.chatId || !tableExists(db, "chat_messages")) return capped(name, { chatId: null }, []);
       const n = Number.isSafeInteger(args.n) ? Math.min(12, Math.max(1, args.n as number)) : 8;
       const rows = (db.prepare(`SELECT role, substr(text, 1, 400) AS content, created_at FROM chat_messages WHERE chat_id = ?
-        ORDER BY created_at DESC LIMIT ?`).all(scope.chatId, n) as Array<Record<string, unknown>>).reverse()
+        ORDER BY created_at DESC, rowid DESC LIMIT ?`).all(scope.chatId, n) as Array<Record<string, unknown>>).reverse()
         .map((row) => ({ role: row.role, at: row.created_at, text: clip(row.content, 400) }));
       return capped(name, { chatId: scope.chatId }, rows);
     }

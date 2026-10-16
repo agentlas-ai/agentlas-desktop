@@ -154,7 +154,7 @@ export function createRoomChat(ports: RoomChatPorts) {
     // A retried call is one message.
     const since = new Date(now() - DUPLICATE_WINDOW_MS).toISOString();
     const twin = ports.db().prepare(
-      "SELECT id FROM chat_messages WHERE chat_id = ? AND speaker_agent_id = ? AND text = ? AND created_at >= ? ORDER BY created_at DESC LIMIT 1",
+      "SELECT id FROM chat_messages WHERE chat_id = ? AND speaker_agent_id = ? AND text = ? AND created_at >= ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
     ).get(roomChatId, self.memberAgentId, text, since) as { id: string } | undefined;
     if (twin) return { ok: true, message_id: twin.id, duplicate: true, delivered: [] };
 
