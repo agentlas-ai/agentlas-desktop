@@ -213,7 +213,7 @@ export function createRoomChat(ports: RoomChatPorts) {
     try {
       stepOwner = (ports.db().prepare("SELECT graph_owner FROM one_team_dispatches WHERE id = ?").get(self.dispatchId) as { graph_owner?: string | null } | undefined)?.graph_owner ?? null;
     } catch { stepOwner = null; }
-    if (reachesOne && stepOwner && deliverGraphTeamStepEvent(stepOwner, { kind: "note", dispatchId: self.dispatchId, from: senderName, text })) {
+    if (reachesOne && stepOwner && deliverGraphTeamStepEvent(stepOwner, { kind: "note", dispatchId: self.dispatchId, from: senderName, text, urgent: notesForOne.idle.length > 0 })) {
       // delivered to the step
     } else if (reachesOne && underBrake(wakeLog, roomChatId, MAX_ONE_WAKES_PER_ROOM)) {
       try { ports.wakeOne({ roomChatId, notes: [notesForOne] }); }
