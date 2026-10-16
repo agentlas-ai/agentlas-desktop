@@ -52,6 +52,7 @@ import {
 import { runSemanticMemoryReview } from "../memory/semantic-curator";
 import { parseMemoryEvents, stripAllMemoryEventBlocks } from "../memory/events";
 import { memoryEmitterPromptFor } from "../system-agents/memory";
+import { mainOneMachineTurnContext } from "../one/turn-context";
 import { parseAutomations } from "../automation-emitter";
 import { parseSurfaces } from "../surface-emitter";
 import { stripStormbreakerContinueMarker } from "../hephaestus/loop-engineering";
@@ -960,8 +961,12 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       ? "\n\n## Execution authority\npermission: read-only; inspect and report, no writes"
       : "\n\n## Execution authority\npermission: read-write in assigned folder, already granted; do the work, do not re-ask";
   }
+  // A firm holding one Taskforce worker seat answers its packet, never the owner (electron/one/turn-context.ts): each of
+  // its turns gets the owner's substance only and no memory receipt, whose "end each completed reply" would contend with
+  // the packet's typed outcome envelope; One's persona and the owner's voice end the owner's reply, not a teammate's.
+  const workerSeatFirm = p.controllerRuntimeRole === "worker";
   const approvedOneContext = !turn.runtimeToolsDisabled && !controlPlaneTurn && !p.workspaceBinding && !p.req.agentAppMode
-    ? mainOneProfileContext(p.req)
+    ? workerSeatFirm ? mainOneMachineTurnContext(p.req) : mainOneProfileContext(p.req)
     : "";
   if (approvedOneContext) systemPrompt += `\n\n${approvedOneContext}`;
   if (node.agentId && node.prompt?.trim() && !systemPrompt.includes(node.prompt.trim())) {
@@ -1053,7 +1058,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       "output: synthesis, or only a Delegate block for a genuinely missing listed report, then stop",
     ].join("\n");
   }
-  if (!p.req.agentAppMode && !turn.runtimeToolsDisabled && !controlPlaneTurn && !firmProjectReadOnly(p, nodePermission)) {
+  if (!workerSeatFirm && !p.req.agentAppMode && !turn.runtimeToolsDisabled && !controlPlaneTurn && !firmProjectReadOnly(p, nodePermission)) {
     systemPrompt += `\n\n${memoryEmitterPromptFor(turn.userPrompt)}`;
   }
 

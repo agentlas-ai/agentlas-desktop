@@ -233,6 +233,7 @@ import { detectExplicitOneMemoryIntent, judgedOneMemoryIntent } from "../one/mem
 import { judgedOneRequestIntent } from "../one/judged-request-intent";
 import { oneTeamWorkforceHubMode, oneTeamUsesNativeStaffing, type OneTeamStaffingAuthority } from "../../shared/one-team-preflight";
 import { ONE_PERSONA_DIRECTIVE } from "../one/persona";
+import { composeMachineTurnOwnerContext } from "../one/turn-context";
 import {
   deriveOneTaskKindRef,
   snapshotOneParticipantExecution,
@@ -470,6 +471,8 @@ type OneInvocationRequest = McpInvocationRequest & {
   oneMode?: boolean;
   /** Main-only. Renderer and Mobile input are always discarded before this is built. */
   oneProfileContext?: string;
+  /** Main-only owner substance for turns whose output the host parses (electron/one/turn-context.ts). Discarded on input. */
+  oneMachineTurnContext?: string;
   /** Main-only execution boundary. Renderer and Mobile input are discarded. */
   oneTeamExecutionPolicy?: "solo_locked" | "confirmed_existing_roster" | "confirmed_external_workforce" | "native_one_staffing";
   /** Main-only binding revalidated again in the runtime immediately before dispatch. */
@@ -2640,6 +2643,7 @@ export class InvocationService {
     const incoming = req as OneInvocationRequest;
     const {
       oneProfileContext: _untrustedOneProfileContext,
+      oneMachineTurnContext: _untrustedOneMachineTurnContext,
       oneTeamExecutionPolicy: _untrustedOneTeamExecutionPolicy,
       oneTeamRuntimeBinding: _untrustedOneTeamRuntimeBinding,
       oneTeamStaffingAuthority: _untrustedOneTeamStaffingAuthority,
@@ -2955,6 +2959,7 @@ export class InvocationService {
       }>;
     } | null = null;
     let oneProfileContext: string | undefined;
+    let oneMachineTurnContext: string | undefined;
     // A teammate in a One room does its piece and answers One. One's persona, the owner's One profile and the approved One
     // memory are One's own; a teammate re-reading them every turn only costs input (production 2026-10-12: the Motiondirector
     // room turns carried "You are One … Identity: Hope" and ended with the owner's progress-bar instruction).
@@ -3008,6 +3013,9 @@ export class InvocationService {
         ...(preparedOneMemoryUseOnce ? [preparedOneMemoryUseOnce.context] : []),
         ...(preparedOneBriefingAction ? [preparedOneBriefingAction.context] : []),
       ].filter(Boolean).join("\n\n");
+      // A turn whose output the host parses never gets the persona, identity or voice above: they end the owner's reply.
+      oneMachineTurnContext = composeMachineTurnOwnerContext(profile, invocationScope,
+        [approvedMemoryContext, preparedOneMemoryUseOnce?.context]) || undefined;
       oneProfileReceipt = {
         oneId: profile.oneId,
         profileVersion: profile.version,
@@ -3029,6 +3037,7 @@ export class InvocationService {
       const workPreferenceContext = buildApprovedOwnerWorkPreferenceContext(profile, invocationScope);
       if (workPreferenceContext) {
         oneProfileContext = workPreferenceContext;
+        oneMachineTurnContext = composeMachineTurnOwnerContext(profile, invocationScope) || undefined;
         const appliedPrinciples = selectApprovedOneOperatingPrinciples(profile, invocationScope);
         oneProfileReceipt = {
           oneId: profile.oneId,
@@ -3148,6 +3157,7 @@ export class InvocationService {
       taskIntent: effectiveTaskIntent,
       permissions: invocationPermission,
       ...(oneProfileContext ? { oneProfileContext } : {}),
+      ...(oneMachineTurnContext ? { oneMachineTurnContext } : {}),
       ...(claimedOneAttachments ? {
         images: claimedOneAttachments.images,
         oneAttachmentContext: claimedOneAttachments.runtimeContext,

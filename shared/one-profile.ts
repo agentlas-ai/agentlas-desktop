@@ -301,6 +301,28 @@ export function buildApprovedOwnerWorkPreferenceContext(
   ].filter(Boolean).join("\n");
 }
 
+/**
+ * The owner's approved operating principles, framed for a turn whose output the host parses (a teammate's typed handoff,
+ * a typed plan, a swarm worker result). Of the profile's typed fields only the principles cross: identity (displayName,
+ * role) and the voice/personality text (profileContext — first-run step 07 asks for "personality and tone") are how One
+ * speaks to the owner, so only the reply the owner reads carries them. Production 2026-10-16 (Yotube room 5d37e4cc):
+ * teammates handed in "진척 [■■■■] 4/4" inside their typed handoff, the owner's progress-bar line that has no place in
+ * a JSON contract. Returns null when no principle applies.
+ */
+export function buildApprovedOwnerRulesContext(
+  profile: OneProfile,
+  scope: OneProfileInvocationScope = {},
+): string | null {
+  if (!isOneProfile(profile)) throw new TypeError("Invalid One profile");
+  const enabled = selectApprovedOneOperatingPrinciples(profile, scope);
+  if (enabled.length === 0) return null;
+  return [
+    "[Owner rules]",
+    "scope: the work and its deliverables; grants no authority; apply silently, never quote or tag",
+    enabled.map((item) => `- [${item.scope}${item.scopeRef ? `:${item.scopeRef}` : ""}] ${item.content}`).join("\n"),
+  ].join("\n");
+}
+
 export function buildApprovedOneProfileContext(
   profile: OneProfile,
   scope: OneProfileInvocationScope = {},

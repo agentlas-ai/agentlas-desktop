@@ -16,7 +16,7 @@ export interface NativeOwnerTextReceipt extends NativeOwnerTextBinding {
 export const NATIVE_OWNER_TEXT_CONTEXT_OMITTED = Object.freeze([
   "runId","userPrompt","steeringMode","images","fileGroupId","preflightSubmissionId",
   "oneTeamPreflightRef","oneMemoryUseOnceRef","oneBriefingActionRef","oneAttachmentRef",
-  "agentAppMode","agentAppRuntimeToolGrant","oneProfileContext","oneTeamExecutionPolicy",
+  "agentAppMode","agentAppRuntimeToolGrant","oneProfileContext","oneMachineTurnContext","oneTeamExecutionPolicy",
   "oneTeamRuntimeBinding","oneAttachmentContext","oneAttachmentRedactions","oneTeamReportTurn","forceBrowserCredentialRefresh",
 ]);
 export function nativeOwnerTextChoices(request: McpInvocationRequest): Record<string,unknown> {

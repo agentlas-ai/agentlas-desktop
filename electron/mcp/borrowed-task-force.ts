@@ -102,6 +102,7 @@ import { withholdTurnAskForRun } from "../turn-tools/control-server";
 import { runFirmInvocation } from "./firm-orchestrator";
 import { roomPinnedTeammateRuntime, roomRuntimeTeammateRefusal } from "./room-runtime";
 import { memoryEmitterPromptFor } from "../system-agents/memory";
+import { mainOneMachineTurnContext } from "../one/turn-context";
 import { canReadActivatedFolderMemory, recordFolderVisit } from "../architecture/activation";
 import {
   revalidateInvocationWorkspaceBinding,
@@ -4069,11 +4070,27 @@ function taskForceSystemRequest(parts: readonly DeclaredPromptPart[]): { systemP
   return { systemPrompt: composeDeclaredPrompt(parts, "\n"), [TASK_FORCE_SYSTEM_PARTS]: parts };
 }
 
-function taskForceRuntimeContextParts(profile: string, memory: string, emitter = ""): DeclaredPromptPart[] {
+/**
+ * Who reads a task-force turn's output decides its owner context and closing duty (electron/one/turn-context.ts). Only
+ * the synthesis answers the owner: One's persona, the owner's profile and the memory receipt end that reply. Every other
+ * turn (planner, direct and nested worker, a nested team's manager plan and synthesis) returns a contract the host
+ * parses, its only closing contract; it gets the owner's substance and no receipt (curateOwnedTaskForceResult keeps its
+ * memory: host-observed fact and semantic review). Production 2026-10-16 (Yotube room 5d37e4cc): the worker was told
+ * "no memory-event JSON" and "end each completed reply with ## Memory Events", "end with one next action" and the
+ * owner's progress-bar line at once, and wrote its closing lines into the last string of its JSON handoff for 56 minutes.
+ */
+type TaskForceTurnReader = { reader: "owner"; memory: string; emitter: string } | { reader: "host"; memory: string };
+function taskForceRuntimeContextParts(p: Pick<BorrowedTaskForceParams, "req" | "workspaceBinding">, turn: TaskForceTurnReader): DeclaredPromptPart[] {
+  const ownerContext = !p.workspaceBinding && !p.req.agentAppMode;
+  const memory: DeclaredPromptPart = { id: "taskforce.shared.system.memory", revision: 1, stability: "turn-context", changeTriggers: ["retrieval", "owner-input"], order: 110, text: turn.memory };
+  if (turn.reader === "host") return [
+    { id: "taskforce.shared.system.owner-substance", revision: 1, stability: "turn-context", changeTriggers: ["owner-profile", "owner-input"], order: 100, text: ownerContext ? mainOneMachineTurnContext(p.req) : "" },
+    memory,
+  ];
   return [
-    { id: "taskforce.shared.system.memory-receipt", revision: 1, stability: "configuration", changeTriggers: ["release", "profile", "permission"], order: 60, text: emitter },
-    { id: "taskforce.shared.system.profile", revision: 1, stability: "turn-context", changeTriggers: ["owner-profile", "owner-input"], order: 100, text: profile },
-    { id: "taskforce.shared.system.memory", revision: 1, stability: "turn-context", changeTriggers: ["retrieval", "owner-input"], order: 110, text: memory },
+    { id: "taskforce.shared.system.memory-receipt", revision: 1, stability: "configuration", changeTriggers: ["release", "profile", "permission"], order: 60, text: turn.emitter },
+    { id: "taskforce.shared.system.profile", revision: 1, stability: "turn-context", changeTriggers: ["owner-profile", "owner-input"], order: 100, text: ownerContext ? mainOneProfileContext(p.req) : "" },
+    memory,
   ];
 }
 
@@ -4620,9 +4637,6 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
    * 화면은 이것으로 "무엇을 써서 일했나"를 말한다(시연의 Skill used 줄이 원하던 것).
    */
   const observedTools: string[] = [];
-  const nodeMemoryEmitter = !p.req.agentAppMode && !p.restrictedReadBoundary
-    ? memoryEmitterPromptFor(nodeTask)
-    : "";
   let observedDirectResult: RunnerResult | undefined;
   let observedDirectRole: WorkerHandoffRole = "worker";
   let observedDirectRuntime = active;
@@ -4844,7 +4858,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
           taskForceWorkerRunnerRequest(p, {
             ...taskForceSystemRequest([
 ...borrowedAgentSystemPromptParts(managerSpec, packagePermission, undefined, { node: graph.manager.content, package: spec.directive }),
-...taskForceRuntimeContextParts(!p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "", nodeMemory),
+...taskForceRuntimeContextParts(p, { reader: "host", memory: nodeMemory }),
 { id: "taskforce.nested.manager-plan.system.role", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 130, text: "role: manager of this prepared team; output: delegation plan only; no worker tasks; declared workers unchanged, none omitted/added/reordered" },
 { id: "taskforce.nested.manager-plan.system.output-contract", revision: 1, stability: "task-context", changeTriggers: ["plan-revision", "output-schema"], order: 60, text: `output:\n${TEAM_MANAGER_PLAN_HEADING}\n\`\`\`json\n${JSON.stringify({
                 plannedWorkerIds: expectedWorkerIds,
@@ -5010,7 +5024,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
               {
                 ...taskForceSystemRequest([
 ...borrowedAgentSystemPromptParts(workerSpec, packagePermission, materializedWorkerMcpTools, { node: worker.content, package: spec.directive }),
-...taskForceRuntimeContextParts(!p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "", nodeMemory, nodeMemoryEmitter),
+...taskForceRuntimeContextParts(p, { reader: "host", memory: nodeMemory }),
 { id: "taskforce.worker.system.handoff-correction", revision: 1, stability: "turn-context", changeTriggers: ["validation-result", "child-result"], order: 80, text: directive }
 ]),
                 history: [],
@@ -5258,7 +5272,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         taskForceWorkerRunnerRequest(p, {
           ...taskForceSystemRequest([
 ...borrowedAgentSystemPromptParts(managerSpec, packagePermission, undefined, { node: graph.manager.content, package: spec.directive }),
-...taskForceRuntimeContextParts(!p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "", nodeMemory, nodeMemoryEmitter)
+...taskForceRuntimeContextParts(p, { reader: "host", memory: nodeMemory })
 ]),
           history: [],
           userPrompt: composeDeclaredPrompt([
@@ -5489,7 +5503,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         {
           ...taskForceSystemRequest([
 ...borrowedAgentSystemPromptParts(spec, packagePermission, materializedWorkerMcpTools),
-...taskForceRuntimeContextParts(!p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "", nodeMemory, nodeMemoryEmitter),
+...taskForceRuntimeContextParts(p, { reader: "host", memory: nodeMemory }),
 { id: "taskforce.worker.system.handoff-correction", revision: 1, stability: "turn-context", changeTriggers: ["validation-result", "child-result"], order: 80, text: directive }
 ]),
           history: [],
@@ -5920,7 +5934,7 @@ async function runPlanner(
       semanticSubset,
       true,
     ),
-...taskForceRuntimeContextParts(!p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "", plannerMemory),
+...taskForceRuntimeContextParts(p, { reader: "host", memory: plannerMemory }),
 ...(workforceToolMenu ? workforceToolMenuPromptParts(workforceToolMenu) : []),
 ];
   const baseUserPromptParts = plannerPromptParts(
@@ -7288,7 +7302,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
           forceSurfaceForCall,
         ),
 ...(approvalPartition.gateActive ? taskForceApprovalGatePromptParts(p.locale, approvalPartition.deferred.length) : []),
-...taskForceRuntimeContextParts(!p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "", synthesisMemory, synthesisMemoryEmitter)
+...taskForceRuntimeContextParts(p, { reader: "owner", memory: synthesisMemory, emitter: synthesisMemoryEmitter })
 ]),
       history: p.chat.goalId ? [] : taskForceConversationWindow(history, p.req.userPrompt),
       userPrompt: composeDeclaredPrompt([

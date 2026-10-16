@@ -46,6 +46,7 @@ import { STORMBREAKER_LOOP_PROTOCOL } from "../hephaestus/loop-engineering";
 import type { CoreStormbreakerHarness } from "../hephaestus/commands";
 import { parseWholeOrTrailingTypedJson } from "../../shared/typed-json-tail";
 import { roomPinnedTeammateRuntime, roomRuntimeTeammateRefusal } from "./room-runtime";
+import { mainOneMachineTurnContext } from "../one/turn-context";
 
 // 총 작업 수/라운드 안전 상한 — 무한 스폰·무한루프로부터 컴/지갑을 지키는 최후 방어선(엔진이 강제).
 // 각 작업 = 실 LLM 호출이라 비용이 나가므로 보수적으로. (동시 실행 수는 별개로 슬라이더가 제어)
@@ -102,17 +103,26 @@ function swarmProtocolParts(
   ];
 }
 
-/** Shared host inputs are typed before the worker/synthesis channel is serialized. */
+/**
+ * Shared host inputs are typed before the worker/synthesis channel is serialized. Who reads the output picks the owner
+ * context (electron/one/turn-context.ts): the synthesis answers the owner with One's persona and profile; a worker
+ * returns the typed swarm result the host parses and gets only the owner's substance.
+ */
 function swarmSystemContextParts(
   p: BorrowedTaskForceParams & { stormbreakerMode?: boolean },
   coreHarnessPrompt: string | undefined,
   projectContextSlice: string | null | undefined,
+  reader: "owner" | "host",
 ): DeclaredPromptPart[] {
+  const ownerContext = !p.workspaceBinding && !p.req.agentAppMode;
   return [
     { id: "swarm.shared.system.agent-definition", revision: 1, stability: "versioned-content", changeTriggers: ["agent-instructions", "skill-package"], order: 0,
       text: buildEffectiveAgentSystemPrompt(p.orchestratorAgent.id, p.orchestratorAgent.systemPrompt) },
-    { id: "swarm.shared.system.profile", revision: 1, stability: "turn-context", changeTriggers: ["owner-profile", "owner-input", "permission"], order: 0,
-      text: !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "" },
+    reader === "owner"
+      ? { id: "swarm.shared.system.profile", revision: 1, stability: "turn-context", changeTriggers: ["owner-profile", "owner-input", "permission"], order: 0,
+        text: ownerContext ? mainOneProfileContext(p.req) : "" }
+      : { id: "swarm.shared.system.owner-substance", revision: 1, stability: "turn-context", changeTriggers: ["owner-profile", "owner-input", "permission"], order: 0,
+        text: ownerContext ? mainOneMachineTurnContext(p.req) : "" },
     { id: "swarm.shared.system.core-harness", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 20, text: coreHarnessPrompt },
     { id: "swarm.shared.system.loop-protocol", revision: 1, stability: "fixed-policy", changeTriggers: ["release", "profile"], order: 30,
       text: p.stormbreakerMode ? STORMBREAKER_LOOP_PROTOCOL : "" },
@@ -608,7 +618,7 @@ export async function runSwarmInvocation(
     // swarm protocol is invocation context. Passing both as the fallback
     // silently drops the protocol whenever a canonical prompt file exists.
     const workerSystemPrompt = composeDeclaredPrompt([
-      ...swarmSystemContextParts(p, coreHarnessPrompt, projectContextSlice),
+      ...swarmSystemContextParts(p, coreHarnessPrompt, projectContextSlice, "host"),
       ...swarmProtocolParts(goal, board, task, runtimeInventory, conversationContext),
     ], "\n\n");
     const runWorkerOn = async (target: typeof p.active, targetRunner: typeof taskRunner) => {
@@ -822,7 +832,7 @@ export async function runSwarmInvocation(
         const measuredResult = await runObservedRunner(targetRunner.runner,
           {
             systemPrompt: composeDeclaredPrompt([
-              ...swarmSystemContextParts(p, coreHarnessPrompt, projectContextSlice),
+              ...swarmSystemContextParts(p, coreHarnessPrompt, projectContextSlice, "owner"),
               { id: "swarm.synthesis.system.role", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 0, text: "You are the synthesizer of an agent swarm." },
               { id: "swarm.synthesis.system.scope", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 10, text: "task: peer results -> ONE final answer; reconcile overlaps, flag incomplete; no concatenation; no `## Spawn`" },
               { id: "swarm.synthesis.system.goal", revision: 1, stability: "task-context", changeTriggers: ["goal-revision", "task"], order: 0, text: `goal: ${goal}` },
