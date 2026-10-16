@@ -19,6 +19,19 @@ export function isTypedCode(value: unknown): value is string {
   return typeof value === "string" && value.length <= CODE_MAX && CODE_RE.test(value);
 }
 
+/**
+ * A local SQLite store refused a read or write because another connection held its lock ("database is locked"): the
+ * typed code of SQLITE_BUSY, SQLITE_LOCKED, their extended codes (SQLITE_BUSY_SNAPSHOT, which busy_timeout never waits
+ * on) and SQLITE_PROTOCOL. Transient, and never a runtime's fault.
+ */
+export const STORE_BUSY_CODE = "store_busy";
+const SQLITE_STORE_BUSY_RE = /^SQLITE_(?:BUSY|LOCKED)(?:_[A-Z]+)?$|^SQLITE_PROTOCOL$/;
+
+/** The driver's own result code (better-sqlite3 SqliteError `code`) as its typed code: store_busy, else unchanged. */
+function typedDriverCode(value: unknown): unknown {
+  return typeof value === "string" && SQLITE_STORE_BUSY_RE.test(value) ? STORE_BUSY_CODE : value;
+}
+
 /** Read a data property only: a getter, proxy trap or serialization hook is never invoked. */
 function dataProperty(value: unknown, name: string): unknown {
   if (!value || (typeof value !== "object" && typeof value !== "function")) return undefined;
@@ -35,7 +48,8 @@ function dataProperty(value: unknown, name: string): unknown {
 /**
  * The machine codes of a failure's cause chain, outermost first. Each level contributes its own `code`, then the
  * `providerCode` of the typed failure it is or carries (`failure`), then its standard `cause` (or the `error` of a
- * `{ error, … }` cause record) is the next level. Data properties only; messages are never read.
+ * `{ error, … }` cause record) is the next level. Data properties only; messages are never read. A SQLite lock result
+ * code ("SQLITE_BUSY", …) reads as STORE_BUSY_CODE.
  */
 export function typedCodeChain(error: unknown): string[] {
   const codes: string[] = [];
@@ -44,7 +58,10 @@ export function typedCodeChain(error: unknown): string[] {
   for (let depth = 0; depth < CHAIN_LIMIT && current && (typeof current === "object" || typeof current === "function"); depth += 1) {
     if (seen.has(current as object)) break;
     seen.add(current as object);
-    const push = (value: unknown): void => { if (isTypedCode(value) && codes[codes.length - 1] !== value) codes.push(value); };
+    const push = (raw: unknown): void => {
+      const value = typedDriverCode(raw);
+      if (isTypedCode(value) && codes[codes.length - 1] !== value) codes.push(value);
+    };
     push(dataProperty(current, "code"));
     push(dataProperty(current, "providerCode"));
     push(dataProperty(dataProperty(current, "failure"), "providerCode"));
@@ -100,7 +117,8 @@ export interface TurnSettlementInput {
 export type TurnSettlementReason =
   | "owner_stopped" | "replay_blocked" | "rate_limited" | "rate_limit_exhausted" | "no_model_work"
   | "accepted_continue" | "unacknowledged_resend" | "not_resumable" | "continuation_budget_exhausted"
-  | "accepted_no_idempotency" | "effects_observed" | "provider_capability" | "no_fallback";
+  | "accepted_no_idempotency" | "effects_observed" | "provider_capability" | "no_fallback"
+  | "store_busy" | "store_busy_exhausted" | "store_busy_after_dispatch";
 
 export type TurnSettlementDecision =
   /** Run the same request on the same runtime again after `delayMs`. Only for work that provably did not run. */
@@ -119,6 +137,9 @@ export const RATE_LIMIT_MAX_RETRIES = 3;
 const RATE_LIMIT_BASE_MS = 2_000;
 /** Longest wait before a retry: an owner is not kept waiting more than a minute; unattended work may wait 15 minutes. */
 const RATE_LIMIT_MAX_WAIT_MS = { attended: 60_000, unattended: 15 * 60_000 } as const;
+/** At most this many same-runtime retries for a store lock refused before dispatch (STORE_BUSY_CODE), 250 ms then 500 ms. */
+export const STORE_BUSY_MAX_RETRIES = 2;
+const STORE_BUSY_BASE_MS = 250;
 /** Codes whose turn must never be replayed by anyone (the host already knows it may have acted or is looping). */
 const REPLAY_BLOCKING_CODES: ReadonlySet<string> = new Set(["runtime_turn_unsettled", "serving_reconciliation_required", "automation_no_progress_loop"]);
 
@@ -130,7 +151,7 @@ const REPLAY_BLOCKING_CODES: ReadonlySet<string> = new Set(["runtime_turn_unsett
  *    idempotency receipt for that turn; an accepted unsettled turn only continues in its own session without its request;
  *  - a retry happens only for request throttling that did no work (not dispatched, a closed provider rejection, or the
  *    provider's own throttling refusal before any output), at most RATE_LIMIT_MAX_RETRIES times, waiting at least the
- *    provider's Retry-After;
+ *    provider's Retry-After, or for a store lock refused before dispatch, at most STORE_BUSY_MAX_RETRIES times;
  *  - prose is never an input.
  */
 export function decideTurnSettlement(input: TurnSettlementInput): TurnSettlementDecision {
@@ -150,6 +171,15 @@ export function decideTurnSettlement(input: TurnSettlementInput): TurnSettlement
     return idempotent
       ? { action: "fresh-session", resendOriginal: true, reason: "unacknowledged_resend" }
       : { action: "surface", reason: input.delivery === "accepted" ? "accepted_no_idempotency" : "not_resumable" };
+  }
+  // The local store refused a read or write (another connection held its lock). Another runtime meets the same store, so
+  // it is never a recovery. Before dispatch nothing ran: the same request again after a short bounded wait. After
+  // dispatch (or when the runner could not tell) the turn may have acted: surfaced with its own code, never replayed.
+  if (input.providerCode === STORE_BUSY_CODE) {
+    if (!noModelWork) return { action: "surface", reason: "store_busy_after_dispatch" };
+    return input.attempt < STORE_BUSY_MAX_RETRIES
+      ? { action: "retry", delayMs: STORE_BUSY_BASE_MS * 2 ** Math.max(0, input.attempt), reason: "store_busy" }
+      : { action: "surface", reason: "store_busy_exhausted" };
   }
   // A typed failure. Output or tool activity after dispatch means the work may have acted: never replayed elsewhere.
   if (!noModelWork && input.effectsObserved && input.effectFree !== true) return { action: "surface", reason: "effects_observed" };

@@ -130,7 +130,7 @@ import { stripStrayProtocolTokens } from "../../shared/protocol-token-strip";
 import { advanceMainLivePartial, markInterruptedPartial } from "./interrupted-partial";
 import { untrustedRuntimeFailurePayload } from "../runtime/untrusted-error";
 import { validatedRunnerNativeControlState, markRefusedBeforeDispatch, outwardFailureCode, preDispatchRefusal, RuntimeTurnUnsettledError } from "../runtime/runner";
-import { innermostTypedCode } from "../../shared/turn-settlement";
+import { innermostTypedCode, STORE_BUSY_CODE } from "../../shared/turn-settlement";
 import {
   getInvocationRunReceipt,
   getLatestInvocationRunReceipt,
@@ -958,11 +958,9 @@ export function invocationEventPromotesTask(event: McpInvocationEvent): boolean 
     invocationEventRequestsDecision(event);
 }
 
+/** A store lock (SQLITE_BUSY / SQLITE_LOCKED and their extended codes, SQLITE_PROTOCOL): the shared typed STORE_BUSY_CODE. */
 function isRetryableDecisionStoreError(error: unknown): boolean {
-  const code = error && typeof error === "object" && "code" in error
-    ? String((error as { code?: unknown }).code ?? "")
-    : "";
-  return code === "SQLITE_BUSY" || code === "SQLITE_LOCKED" || code === "SQLITE_PROTOCOL";
+  return innermostTypedCode(error) === STORE_BUSY_CODE;
 }
 
 /** A completion judge is advisory and side-effect free. A provider timeout,

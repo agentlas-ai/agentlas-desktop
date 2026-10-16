@@ -327,8 +327,8 @@ import {
   UNATTENDED_NO_ASK_DIRECTIVE,
   MOBILE_DURABLE_ASK_DIRECTIVE,
 } from "../runtime/runner";
-import { outwardFailureCode, unsettledTurnError, validatedRunnerNativeControlState } from "../runtime/runner";
-import { decideTurnSettlement, isTypedCode } from "../../shared/turn-settlement";
+import { markRefusedBeforeDispatch, outwardFailureCode, unsettledTurnError, validatedRunnerNativeControlState } from "../runtime/runner";
+import { decideTurnSettlement, innermostTypedCode, isTypedCode, STORE_BUSY_CODE } from "../../shared/turn-settlement";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import {
   effortForSelectedModel,
@@ -916,6 +916,17 @@ function invocationFailure(
    * incidents of unknown cause because runner-failed replaced codes such as goal_episode_admission_missing).
    */
   const typedCode = (isTypedCode(typedFailure?.providerCode) ? typedFailure!.providerCode : undefined) ?? outwardFailureCode(error);
+  if (typedCode === STORE_BUSY_CODE) {
+    // The local store stayed locked by another write (R-067): its own code, never runner-failed, and whether it can be sent again.
+    const beforeDispatch = runnerRefusedBeforeDispatch(error);
+    const ko = beforeDispatch
+      ? "Agentlas 저장소가 다른 기록으로 잠겨 있어 모델에 보내기 전에 멈췄습니다. 모델에는 아무것도 보내지 않았으니 다시 보내도 됩니다."
+      : "Agentlas 저장소가 다른 기록으로 잠겨 있어 이 턴을 끝까지 기록하지 못했습니다. 이미 실행됐을 수 있어 자동으로 다시 보내지 않았습니다.";
+    const en = beforeDispatch
+      ? "The Agentlas store stayed locked by another write, so this turn stopped before anything was sent to the model. Nothing reached the model; it is safe to send again."
+      : "The Agentlas store was locked by another write, so this turn could not be fully recorded. It may already have run, so it was not sent again automatically.";
+    return { code: STORE_BUSY_CODE, message: `${pickLocale(req) === "ko" ? ko : en} (${raw})`, ...(runtimeFailure ? { runtimeFailure } : {}) };
+  }
   if (runtimeFailure?.kind === "auth" || runtimeFailure?.kind === "refused") {
     return { code: typedCode ?? (runtimeFailure.kind === "auth" ? "runtime_auth" : "runtime_refused"), message: raw, runtimeFailure };
   }
@@ -2132,6 +2143,10 @@ async function runMcpInvocationInContext(
   let unbindBrowserLadder: (() => void) | undefined;
   let browserLadderSettled = false;
   let graphDirectFailureError: unknown;
+  // Dispatch facts for a store lock refused on the way (STORE_BUSY_CODE): a planning, team or swarm call before the turn,
+  // and the turn itself (modelTurnStarted: every dispatch below it goes through invokeCurrentRuntime).
+  let preparationDispatched = false;
+  let modelTurnStarted = false;
   try {
   // A scheduled invocation is the worker leg of the automation, even though
   // it shares this implementation with an interactive orchestrator turn.
@@ -4487,6 +4502,7 @@ async function runMcpInvocationInContext(
     // A synthesis final precedes the aggregate return. Main ignores errors
     // after its first terminal, so hold that final until worker verification.
     let finalEvent: McpInvocationEvent | undefined;
+    preparationDispatched = true;
     const result = await runBorrowedTaskForceInvocation({
       ...params,
       sink: event => {
@@ -4557,6 +4573,7 @@ async function runMcpInvocationInContext(
         };
       } else {
         assertMcpGoalSelectionCurrent();
+        preparationDispatched = true;
         const decisionResult = await runInvocationPlanningRunner(picked.runner,
           {
             ...(planReadOnly ? { planMode: true as const } : {}),
@@ -4808,6 +4825,7 @@ async function runMcpInvocationInContext(
         leader: async (turn) => {
           throwIfInvocationAborted(signal, locale);
           assertMcpGoalSelectionCurrent();
+          preparationDispatched = true;
           const result = await withAdapterEffectChildDispatch(turn.invocationId, () => runInvocationPlanningRunner(pickedForWorkforceLeader.runner,
             {
               ...(planReadOnly ? { planMode: true as const } : {}),
@@ -5305,6 +5323,7 @@ async function runMcpInvocationInContext(
         });
       }
       assertMcpGoalSelectionCurrent();
+      preparationDispatched = true;
       await runSwarmInvocation({
         // Persist the exact user command above, but give workers the actual
         // goal rather than a route slug that could be mistaken for work.
@@ -5863,7 +5882,6 @@ async function runMcpInvocationInContext(
   // Main-authored before model execution. The renderer/model never controls
   // Memory Ticket identity, so success/error/cancel handling converges.
   const memoryTurnId = `chat:${chat.id}:run:${req.runId ?? randomUUID()}:node:${executionContext?.nodeId ?? "root"}`;
-  let modelTurnStarted = false;
   try {
     const runtimeUserPrompt = explicitBorrowUserPreamble
       ? borrowedCurrentUserPrompt(effectiveUserPromptParts, explicitBorrowUserParts)
@@ -6720,6 +6738,8 @@ async function runMcpInvocationInContext(
       let attemptCount = 0;
       /** Same-runtime retries the settlement decision spent on request throttling (reset when the runtime changes). */
       let sameRuntimeRetries = 0;
+      /** Same-runtime retries spent on a store lock refused before dispatch (STORE_BUSY_CODE). */
+      let storeBusyRetries = 0;
       let originalFailure: RunnerFailure | null = null;
       let terminalNoticeEmitted = false;
       const currentOwnerPrompt = runnerTurnContextSource(request)?.userPrompt ?? request.userPrompt;
@@ -6802,6 +6822,36 @@ async function runMcpInvocationInContext(
           },
         });
         return result;
+      };
+      /*
+       * A store write refused this attempt before dispatch because another connection held the lock (R-067: production
+       * "database is locked" ×5 became runner-failed). Nothing reached the provider and another runtime would meet the
+       * same store, so the settlement's short bounded retry runs the same request on the same runtime, on every lane
+       * whose runtime choice is pinned too (a retry changes nothing about the choice). A graph worker attempt is left to
+       * its graph, which retries the step itself. An Alive wake is left as it was: each attempt opens a provider-usage
+       * marker its wake total must close (alive-runtime.ts measuredWakeUsage), so a second attempt would turn a known
+       * total unknown. True when the caller should run the attempt again.
+       */
+      const retryStoreBusyBeforeDispatch = async (failure: unknown): Promise<boolean> => {
+        if (signal?.aborted || executionContext?.graphWorkerAttempt || executionContext?.source === "alive"
+          || innermostTypedCode(failure) !== STORE_BUSY_CODE) return false;
+        const settlement = decideTurnSettlement({ outcome: "failed", delivery: "not-dispatched", providerCode: STORE_BUSY_CODE,
+          unattended: isUnattendedExecution(executionContext), attempt: storeBusyRetries, resumeBudget: 0, fallbackAvailable: false });
+        if (settlement.action !== "retry") return false;
+        storeBusyRetries += 1;
+        const koRetry = "Agentlas 저장소가 다른 기록으로 잠시 잠겨 있어 같은 요청을 곧 다시 보냅니다. 모델에는 아직 아무것도 보내지 않았습니다.";
+        const enRetry = "The Agentlas store was briefly locked by another write; sending the same request again shortly. Nothing has reached the model yet.";
+        runnerEvents.onNotice({ level: "info", code: "runtime-store-busy-retry", message: locale === "ko" ? koRetry : enRetry,
+          i18n: { ko: koRetry, en: enRetry },
+          details: JSON.stringify({ runtime: active.kind, providerCode: STORE_BUSY_CODE, attempt: storeBusyRetries,
+            delayMs: settlement.delayMs, reason: settlement.reason }) });
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(() => { signal?.removeEventListener("abort", stop); resolve(); }, settlement.delayMs);
+          const stop = (): void => { clearTimeout(timer); resolve(); };
+          signal?.addEventListener("abort", stop, { once: true });
+        });
+        throwIfInvocationAborted(signal, locale);
+        return true;
       };
       while (attemptCount < DIRECT_RUNTIME_RECOVERY_MAX_ATTEMPTS) {
         if (signal?.aborted) throw new Error(tStatus(locale, "aborted"));
@@ -6929,15 +6979,19 @@ async function runMcpInvocationInContext(
             // innermost code is still readable) with the delivery it carried (docs 31 W1, audit A7 M4).
             throw unsettledTurnError({ runtimeKind: selectedRuntime.kind, locale, cause: error });
           }
+          if (attemptRefusedBeforeDispatch && await retryStoreBusyBeforeDispatch(error)) continue;
           if (!directRuntimeFallbackAllowed || signal?.aborted) {
             persistGoalUsage(attemptEvents.observedUsage(historyReturnedUsage??observedRunnerUsage(error)));
             throw error;
           }
           runtimeTerminalEvidence.locallyRejected = true;
+          // Every throw that reaches here preceded dispatch (the runner was never entered, or proved it sent nothing): the
+          // returned failure keeps that fact, so the thrown InvocationRunnerFailureError and the error event carry it.
           result = {
             text: "",
             failure: runnerFailureFromError(error, active.kind),
             observedUsage: attemptEvents.observedUsage() ?? undefined,
+            turnDelivery: "not-dispatched",
           };
         } finally {
           attemptEvents.settle();
@@ -6978,6 +7032,7 @@ async function runMcpInvocationInContext(
             selectionForRuntime(selectedRuntime, { longContext: selectedRuntime.longContextEnabled }), result.failure);
           throw graphDirectFailureError;
         }
+        if (result.failure && attemptRefusedBeforeDispatch && await retryStoreBusyBeforeDispatch(result.failure)) continue;
         if (!result.failure || !directRuntimeFallbackAllowed || signal?.aborted) return result;
         const failed = result.failure;
         // First failure: this is when recovery actually begins.
@@ -6994,7 +7049,8 @@ async function runMcpInvocationInContext(
           delivery: attemptRefusedBeforeDispatch ? "not-dispatched" : runtimeTerminalEvidence.closedHttpRefusal ? "rejected" : result.turnDelivery,
           kind: failed.kind, providerCode: failed.providerCode,
           ...(resetAt !== null ? { retryAfterMs: Math.max(0, resetAt - Date.now()) } : {}),
-          unattended: isUnattendedExecution(executionContext), attempt: sameRuntimeRetries, resumeBudget: 0,
+          unattended: isUnattendedExecution(executionContext),
+          attempt: failed.providerCode === STORE_BUSY_CODE ? storeBusyRetries : sameRuntimeRetries, resumeBudget: 0,
           effectsObserved: !attemptEvents.creditRetrySafe() || Boolean(result.text.trim()),
           fallbackAvailable: true,
         });
@@ -8714,6 +8770,8 @@ async function runMcpInvocationInContext(
     }
     noteGraphWorkerFailure(executionContext?.graphWorkerAttempt);
     if (executionContext?.graphWorkerAttempt && err !== graphDirectFailureError) noteGraphWorkerCoverageUnknown(executionContext.graphWorkerAttempt);
+    // A store lock refused before this invocation sent anything (no planning, team or swarm call, no turn) did no work.
+    if (!modelTurnStarted && !preparationDispatched && innermostTypedCode(err) === STORE_BUSY_CODE) markRefusedBeforeDispatch(err);
     // The typed delivery fact rides on the event: run-graph reads it to tell a refusal before dispatch from an unknown effect.
     sink({ kind: "error", error: { ...invocationFailure(req, "runner-failed", err, executionContext),
       ...(runnerRefusedBeforeDispatch(err) ? { turnDelivery: "not-dispatched" as const } : {}) } });
@@ -8721,6 +8779,11 @@ async function runMcpInvocationInContext(
       ? { ...earlyResult(), markedQuotaFailure: true }
       : earlyResult();
   }
+  } catch (err) {
+    // A store lock refused while the invocation was being prepared, before it sent anything anywhere: typed
+    // not-dispatched, so a graph step or caller may retry it instead of treating it as possibly acted.
+    if (!modelTurnStarted && !preparationDispatched && innermostTypedCode(err) === STORE_BUSY_CODE) markRefusedBeforeDispatch(err);
+    throw err;
   } finally {
     for (const [agentId, leaseId] of workspaceLeases) {
       const pin = workspacePins.get(agentId);

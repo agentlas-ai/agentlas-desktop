@@ -4,7 +4,7 @@ import { createGraphWorkerAttempt, readGraphWorkerFailure, readGraphWorkerPool, 
   type GraphWorkerAttempt, type GraphWorkerFailureReceipt, type GraphWorkerPool } from "./graph-worker-fallback";
 import { selectExactRuntime } from "../runtime/selection";
 import { runnerRefusedBeforeDispatch } from "../runtime/runner";
-import { decideTurnSettlement, RATE_LIMIT_MAX_RETRIES, retryAfterMs, type TurnFailureKind } from "../../shared/turn-settlement";
+import { decideTurnSettlement, innermostTypedCode, RATE_LIMIT_MAX_RETRIES, retryAfterMs, STORE_BUSY_CODE, type TurnFailureKind } from "../../shared/turn-settlement";
 import { looksSecret } from "../../shared/secret-patterns";
 import { captureFiniteAutomationGoalExecutionOwner, assertAutomationGoalExecutionOwner, bindFiniteGraphRunStop } from "../automation-execution-control";
 import type { BrowserLoginWait } from "../browser/login-prerequisite";
@@ -4846,6 +4846,8 @@ export async function runGraph(
         let preDispatchErrorCode: string | null = null;
         /** The invocation's typed runtime failure from its error event (kind, provider code, retry hint), never prose. */
         let nodeRuntimeFailure: { kind?: string; providerCode?: string; retryAfterAt?: string } | null = null;
+        /** The invocation reported a store lock (STORE_BUSY_CODE) as its error code: a host failure, no runtime failure row. */
+        let nodeStoreBusy = false;
         let providerOutputObserved = false;
         let nativeReadOnly = false;
         let nativeOutput: unknown;
@@ -5184,6 +5186,7 @@ export async function runGraph(
               }
               if (ev.kind === "error") {
                 if (ev.error?.runtimeFailure) nodeRuntimeFailure = ev.error.runtimeFailure;
+                if (ev.error?.code === STORE_BUSY_CODE) nodeStoreBusy = true;
                 runnerError = ev.error?.message || "runner failed";
                 if (ev.error?.message) {
                   notes.push({ at: "error", name: ev.error.code, text: ev.error.message.slice(0, 2000) });
@@ -5595,11 +5598,16 @@ export async function runGraph(
            */
           // Assigned inside the event callback, which control-flow narrowing does not see.
           const seenRuntimeFailure = nodeRuntimeFailure as { kind?: string; providerCode?: string; retryAfterAt?: string } | null;
+          // A store lock (R-067) arrives as the invocation's error code or the thrown error's own code, not as a runtime
+          // failure: the settlement retries it briefly only when nothing was dispatched, and never replays it after.
+          const storeBusyProviderCode = !seenRuntimeFailure?.providerCode
+            && (nodeStoreBusy || innermostTypedCode(nodeErr) === STORE_BUSY_CODE) ? STORE_BUSY_CODE : undefined;
           const settlement = decideTurnSettlement({
             outcome: runSignal.aborted ? "cancelled" : "failed",
             ...(providerNeverDispatched ? { delivery: "not-dispatched" as const } : {}),
             ...(seenRuntimeFailure?.kind ? { kind: seenRuntimeFailure.kind as TurnFailureKind } : {}),
-            ...(seenRuntimeFailure?.providerCode ? { providerCode: seenRuntimeFailure.providerCode } : {}),
+            ...(seenRuntimeFailure?.providerCode ? { providerCode: seenRuntimeFailure.providerCode }
+              : storeBusyProviderCode ? { providerCode: storeBusyProviderCode } : {}),
             retryAfterMs: retryAfterMs(seenRuntimeFailure?.retryAfterAt),
             unattended: true, attempt: attempts - 1, resumeBudget: 0,
             effectsObserved: providerOutputObserved || unsafeToolObserved || unsafeToolRequested,
@@ -5626,10 +5634,28 @@ export async function runGraph(
             receipt.name.startsWith("error:") &&
             isTypedReplaySafeInvocationError(receipt.name.slice("error:".length)),
           ) || retriesDeclared(node);
-          if (
-            commonRetryAllowed && transientSignal && (!modelInvocationFailed || quotaHandoff || settlementRetry) && !ambiguous && !nodeTimedOut && !contractStop &&
-            !runSignal.aborted && attempts < maxAttempts
-          ) {
+          const retryAdmitted = commonRetryAllowed && transientSignal && (!modelInvocationFailed || quotaHandoff || settlementRetry) && !ambiguous && !nodeTimedOut && !contractStop &&
+            !runSignal.aborted && attempts < maxAttempts;
+          /*
+           * A step that provably never reached a provider (providerNeverDispatched) left no worker behind. Its work unit
+           * failed with no observation, and the next attempt's begin() then refused it as work_recovery_worker_liveness_unknown
+           * whenever no retryable Worker receipt had recorded one (measured: a store lock before dispatch, R-067; the
+           * settlement's not-dispatched rate-limit retry takes the same lane). Record the typed fact the step's own failure
+           * proved: nothing ran, nothing was produced, no effect to settle.
+           */
+          let notDispatchedRecoveryAdmitted = true;
+          const workerReceiptRecorded = graphWorkerReceipt?.status === "retryable" && graphWorkerReceipt.runtimeQuiesced;
+          const failedUnit = commonUnits.get(node.id);
+          if (retryAdmitted && !dryRun && providerNeverDispatched && !workerReceiptRecorded && failedUnit?.state === "failed") {
+            const verdict = commonRecovery.retry(failedUnit, { checkpointMatches: true, completed: false,
+              evidenceRef: `graph-attempt:${runId}:${node.id}:${attempts}:not-dispatched`, effectSafe: true, workerEnded: true }, {
+              userStopped: runSignal.aborted, scopeCurrent: true, authorized: true, budgetAvailable: budgetGuard(node) === null });
+            notDispatchedRecoveryAdmitted = verdict.action === "retry";
+            tryRecordRunEvent({ runId, automationId: automation.id, nodeId: node.id, kind: "workflow_common_recovery",
+              payload: { unitId: failedUnit.unitId, attemptId: failedUnit.attemptId, methodStarts: failedUnit.methodStarts,
+                action: verdict.action, reason: verdict.reason, attention: verdict.attention, delivery: "not-dispatched" } });
+          }
+          if (retryAdmitted && notDispatchedRecoveryAdmitted) {
             checkpoint!.inFlightNodeIds = checkpoint!.inFlightNodeIds.filter((id) => id !== node.id);
             status.set(node.id, "pending");
             emitNodeState(node.id, "pending");
