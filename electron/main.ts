@@ -41,6 +41,7 @@ import { installModelCatalogResolver, refreshRemoteCatalog } from "./runtime/mod
 import { scheduleLegacyProductSessionMove } from "./runtime/legacy-product-sessions-once";
 import { installGoogleSessionTrace } from "./browser/google-session-trace";
 import { capAppBrowserCache, trimOversizedSessionCaches } from "./browser/session-cache-budget";
+import { startStorageMaintenance } from "./storage/storage-maintenance";
 import { registerOneCapabilitiesIpc } from "./capabilities/one-capabilities-ipc";
 import { registerArchiveIpc } from "./archive/archive-ipc";
 import path from "node:path";
@@ -2281,6 +2282,20 @@ app.whenReady().then(async () => {
   if (!developmentEffectsSuppressed()) {
     const { initializeVideoJobs } = await import("./multimodal/video");
     initializeVideoJobs();
+    // Storage budget for every user (owner 2026-10-16): intermediates, run detail, CLI transcripts, low-disk notice.
+    startStorageMaintenance({
+      notifyLowDisk: ({ freeBytes, footprintBytes, freedBytes }) => {
+        if (!Notification.isSupported()) return;
+        const gb = (bytes: number): string => (bytes / 1024 ** 3).toFixed(1);
+        const ko = currentUiLocale() === "ko";
+        new Notification({
+          title: ko ? "디스크 공간이 부족합니다" : "Your disk is almost full",
+          body: ko
+            ? `남은 공간 ${gb(freeBytes)}GB · Agentlas 사용 ${gb(footprintBytes)}GB · 방금 ${gb(freedBytes)}GB 정리`
+            : `${gb(freeBytes)} GB free · Agentlas uses ${gb(footprintBytes)} GB · just freed ${gb(freedBytes)} GB`,
+        }).show();
+      },
+    });
   }
   try {
     const scrubbed = scrubLegacyRunEventSecrets();
