@@ -5161,6 +5161,14 @@ app.whenReady().then(async () => {
     }
   }
   startAutomationScheduler(); // 자동화 스케줄러 — 60초마다 due 자동화를 백그라운드로 실행
+  // A sign-in made outside Agentlas (terminal, the vendor's app) re-reads that provider's usage within 30 s instead of
+  // whenever a usage screen is next opened (owner 2026-10-16), and screens holding the old figures re-read too.
+  void import("./usage")
+    .then(({ startUsageAccountWatch }) => startUsageAccountWatch(() => {
+      clearDetectCache();
+      emitDesktopStoreChange({ entity: "runtime" });
+    }))
+    .catch((error) => console.error("[usage] account watch failed to start", error));
   void import("./telegram/connect")
     .then(({ reconcileTelegramWorkers }) => {
       if (!shellReadyForWindows) return;

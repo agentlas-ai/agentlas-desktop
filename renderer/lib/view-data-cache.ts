@@ -76,7 +76,7 @@ const STORE_ENTITY_TO_VIEW_PREFIXES: Record<string, string[]> = {
   agent: ["dashboard.team"],
   firm: ["dashboard.firms", "dashboard.team"],
   project: ["dashboard.projects", "dashboard.tasks"],
-  runtime: ["dashboard.runtimes", "dashboard.runtime-role-pool"],
+  runtime: ["dashboard.runtimes", "dashboard.runtime-role-pool", "dashboard.usage"],
 };
 
 /** Main의 store:changed 영수증을 화면 스냅샷 캐시에도 동일하게 적용한다. */

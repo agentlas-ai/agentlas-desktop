@@ -355,6 +355,50 @@ function localFallback(id: string, base: ProviderUsage | null, now: number): Pro
   };
 }
 
+/**
+ * Owner 2026-10-16: "사용량을 제때제때 갈아끼워줘야지". Only Agentlas's own login button invalidated usage
+ * (ipc.ts runtime:openCliLogin), so a sign-in made outside it — a terminal `claude` login, the vendor's own app — left the
+ * previous account's figures in place until a usage screen happened to be opened. Production: Claude switched accounts at
+ * 13:21Z while usage-last-good still held the old account's weekly 100% read at 08:18Z.
+ * Main reads each provider's LOCAL identity on an interval (a file read, never the network). When it changes, that
+ * provider's cache is dropped and the new account's usage is read once (fetchProvider discards an entry whose account
+ * no longer matches, on disk too); `onChange` lets screens re-read.
+ */
+const USAGE_ACCOUNT_WATCH_MS = 30_000;
+const USAGE_ACCOUNT_READERS: ReadonlyArray<readonly [UsageRetryProviderId, () => string | undefined]> = [
+  ["claude-code", currentClaudeUsageAccountFingerprint],
+  ["codex", currentCodexUsageAccountFingerprint],
+  ["kimi", currentKimiUsageCredentialFingerprint],
+];
+function readAccountFingerprint(read: () => string | undefined): string | undefined {
+  try { return read(); } catch { return undefined; }
+}
+export function checkUsageAccountChanges(seen: Map<string, string | undefined>, onChange: (providerId: UsageRetryProviderId) => void): UsageRetryProviderId[] {
+  if (developmentEffectsSuppressed()) return [];
+  const changed: UsageRetryProviderId[] = [];
+  for (const [id, read] of USAGE_ACCOUNT_READERS) {
+    const current = readAccountFingerprint(read);
+    if (!seen.has(id)) { seen.set(id, current); continue; }
+    if (seen.get(id) === current) continue;
+    seen.set(id, current);
+    changed.push(id);
+    invalidateUsage(id);
+    void buildUsageSnapshot({ forceProviderId: id })
+      .catch((error) => console.warn(`[usage] account change refresh ${id} failed:`, error instanceof Error ? error.message : error))
+      .finally(() => onChange(id));
+  }
+  return changed;
+}
+export function startUsageAccountWatch(onChange: (providerId: UsageRetryProviderId) => void): () => void {
+  const seen = new Map<string, string | undefined>();
+  checkUsageAccountChanges(seen, onChange);
+  const timer = setInterval(() => {
+    for (const id of checkUsageAccountChanges(seen, onChange)) console.info(`[usage] ${id} account changed; usage re-read`);
+  }, USAGE_ACCOUNT_WATCH_MS);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
 /** Main 내부에서 재로그인/실행 영수증 직후 호출 — Renderer에는 직접 노출하지 않는다.
  *  스냅샷 캐시와 프로바이더별 lastResult/backoff를
  *  즉시 무효화해, 다음 조회(force든 일반 폴링이든)가 새 토큰으로 서버를 실제로 다시 치게 한다.

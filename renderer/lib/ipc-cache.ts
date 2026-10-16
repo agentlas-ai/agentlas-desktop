@@ -259,7 +259,8 @@ const STORE_ENTITY_TO_NAMESPACES: Record<string, string[]> = {
   firm: ["firms", "team"],
   project: ["projects", "tasks"],
   automation: ["automations"],
-  runtime: ["runtime"],
+  // A runtime sign-in change (Main's usage account watch) also makes cached usage figures stale.
+  runtime: ["runtime", "usage"],
 };
 
 export function connectIpcCacheToStoreEvents(
