@@ -4739,6 +4739,7 @@ app.whenReady().then(async () => {
   let nativePublicBridge: ReturnType<typeof import("./invocation/native-gui-public").createNativeGuiPublicBridge> | undefined;
   let nativeGuiControls: ReturnType<typeof import("./invocation/native-gui-controls").createNativeGuiControls> | undefined;
   let nativeChannelReattacher: ReturnType<typeof import("./invocation/native-gui-reattach").createNativeChannelReattacher> | undefined;
+  let foreignNativeStartFenceInstalled = false;
   const ensureDesktopDaemon = () => import("./daemon/app-launcher")
     .then(async (module) => {
       const native = await import("./invocation/native-gui-startup");
@@ -4791,10 +4792,16 @@ app.whenReady().then(async () => {
             async onObservationReady() { await bridge.quiesce(); await controls.refresh(); return bridge.available && controls.available; },
             onAuthenticated(channel: Parameters<typeof bridge.bind>[0], identity: Parameters<typeof bridge.bind>[1]) {
               bridge.bind(channel, identity); controls.bind(channel, identity);
-              invocationService.setForeignNativeStartFence(chatId => !!native.configuredNativeGuiOwner()?.activeAuthorityChatIds().includes(chatId)
-                || controls.activeAuthorityChatIds().includes(chatId) || (bridge.activeChatIds().includes(chatId)
-                  && (controls.hasOpenStoredAuthority(chatId) || !(native.configuredNativeGuiOwner()?.closedAuthorityChatIds().includes(chatId)
-                    || controls.closedAuthorityChatIds().includes(chatId)))));
+              // Once per process: this hook runs for every channel generation and the service refuses a second fence, which
+              // closed every re-attach (1.3.48, 2026-10-16: invocation_native_fence_already_configured until restart).
+              // The fence reads the live owner/controls/bridge, so the first installation stays current.
+              if (!foreignNativeStartFenceInstalled) {
+                invocationService.setForeignNativeStartFence(chatId => !!native.configuredNativeGuiOwner()?.activeAuthorityChatIds().includes(chatId)
+                  || controls.activeAuthorityChatIds().includes(chatId) || (bridge.activeChatIds().includes(chatId)
+                    && (controls.hasOpenStoredAuthority(chatId) || !(native.configuredNativeGuiOwner()?.closedAuthorityChatIds().includes(chatId)
+                      || controls.closedAuthorityChatIds().includes(chatId)))));
+                foreignNativeStartFenceInstalled = true;
+              }
               reattacher.watch(channel);
             },
           };
