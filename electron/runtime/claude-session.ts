@@ -19,6 +19,7 @@ import { claimAttemptChild, releaseAttemptChild } from "./attempt-children";
 // 이름만 ACP 를 달고 있을 뿐, 이 파일이 두 번째 사용자다.
 import type { ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
+import { readFileSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import { AcpSessionPool, type AcpSessionLease } from "./acp-session-pool";
 import { detachedSpawnOpts, killCliTree, spawnCli, markRunChildResident, trackRunChild, waitForCliTreeTermination } from "./exec";
@@ -528,6 +529,16 @@ export function residencyDisabledFor(kind: string, env: NodeJS.ProcessEnv = proc
  * argv and env), and the runner swaps the new invocation's servers into a reused process with an acknowledged
  * mcp_set_servers before the turn (claudeMcpSwapPayload). `mcpConfigPath` keeps the old per-path identity for an
  * executable that cannot swap.
+ *
+ * ★Runtime secret aliases under a grant (claudeEnvDigestOmissions): Main merges every invocation's MCP runtime env
+ * into the runner env (mcp/client.ts), and some of it is minted per invocation (the native browser token, the OS
+ * execution capability, guest computer use, the memory-curator bridge). Hashing those values defeated the grant: a
+ * One Team member or writable-Goal chat that carried the Agentlas Browser spawned a new CLI on every follow-up
+ * (measured through runMcpInvocation: 6 turns, 6 spawns). An alias the `--mcp-config` file never references is not read
+ * by this process: those servers run behind Main's proxy (mcp-config.ts mcpProxySpec), which launches them with the
+ * env Main registered for the new invocation's launch handle, and the swap hands the reused process that handle. So
+ * its value leaves the key (its name stays). An alias the file references (`${ALIAS}`) is expanded once, at spawn,
+ * into a process the swap might not touch, so its value stays in the key exactly as before.
  */
 export function claudePoolKey(input: {
   chatId: string;
@@ -545,9 +556,13 @@ export function claudePoolKey(input: {
   args: string[];
   env?: NodeJS.ProcessEnv;
 }): string {
+  const omitted = input.mcpGrant !== undefined ? claudeEnvDigestOmissions(input.env ?? {}, input.args) : new Set<string>();
   const envDigest = crypto.createHash("sha256");
   for (const name of Object.keys(input.env ?? {}).sort()) {
-    envDigest.update(name).update("\0").update(String((input.env ?? {})[name] ?? "")).update("\0");
+    envDigest.update(name).update("\0");
+    if (omitted.has(name)) envDigest.update("\u0001proxied-alias");
+    else envDigest.update(String((input.env ?? {})[name] ?? ""));
+    envDigest.update("\0");
   }
   const argvDigest = crypto.createHash("sha256");
   for (const arg of stableSpawnArgs(input.args, { mcpConfigByGrant: input.mcpGrant !== undefined })) argvDigest.update(arg).update("\0");
@@ -589,6 +604,28 @@ export function stableSpawnArgs(args: string[], opts: { mcpConfigByGrant?: boole
     out.push(args[i]!);
   }
   return out.sort();
+}
+
+/** mcp-config.ts mcpRuntimeSecretAlias: an opaque per-server name whose value is a vault secret or a per-run capability. */
+const MCP_RUNTIME_SECRET_ALIAS_RE = /^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/;
+
+/**
+ * The names of the runtime secret aliases in `env` whose values do not identify the process: the ones the process's
+ * `--mcp-config` never references (`${NAME}` / `${NAME:-default}` anywhere in it, a superset of the fields the CLI
+ * expands). The config is that argument itself when it is inline JSON, else the file it names; when there is none or it
+ * cannot be read, nothing is omitted and every value stays in the key. Only names are returned, never values.
+ */
+export function claudeEnvDigestOmissions(env: NodeJS.ProcessEnv, args: readonly string[]): Set<string> {
+  const aliases = Object.keys(env).filter((name) => MCP_RUNTIME_SECRET_ALIAS_RE.test(name));
+  if (aliases.length === 0) return new Set();
+  const at = args.indexOf("--mcp-config");
+  const config = at >= 0 ? args[at + 1] : undefined;
+  if (!config) return new Set();
+  let text: string;
+  try { text = config.trimStart().startsWith("{") ? config : readFileSync(config, "utf8"); }
+  catch { return new Set(); }
+  const referenced = new Set([...text.matchAll(ENV_REFERENCE_RE)].map((match) => match[1]!));
+  return new Set(aliases.filter((name) => !referenced.has(name)));
 }
 
 /** The MCP grant identity a resident may keep across invocations: the exact set of server names. */
