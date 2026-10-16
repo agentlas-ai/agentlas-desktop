@@ -8,7 +8,7 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import { createHash } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, runtimeProtocolUnrecognizedFailure, cliToolSilenceWindowMs, RuntimeTurnUnsettledError } from "./runner";
+import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, runtimeProtocolUnrecognizedFailure, cliToolSilenceWindowMs, RuntimeTurnUnsettledError, preDispatchRefusal, runnerRefusedBeforeDispatch } from "./runner";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { schemaFallbackPromptPart } from "../../shared/runtime-capabilities";
 import { composeDeclaredPrompt } from "./prompt-order";
@@ -379,7 +379,22 @@ function runKimiProcess(
   });
 }
 
+/**
+ * Every throw before the Kimi process is started is a refusal before dispatch (RuntimeTurnDelivery "not-dispatched",
+ * runner.ts preDispatchRefusal keeps the innermost machine code): the no-tools refusal (RuntimeJudgmentRefusal), the
+ * browser-only and native-browser boundaries, a missing binary or sign-in, attachment staging.
+ */
 export const runKimi: Runner = async (req, events): Promise<RunnerResult> => {
+  const dispatch = { started: false };
+  try {
+    return await runKimiTurn(req, events, dispatch);
+  } catch (error) {
+    if (dispatch.started || req.signal?.aborted || runnerRefusedBeforeDispatch(error)) throw error;
+    throw preDispatchRefusal(error, "kimi-prepare", "kimi_pre_dispatch_refused");
+  }
+};
+
+async function runKimiTurn(req: RunnerRequest, events: RunnerEvents, dispatch: { started: boolean }): Promise<RunnerResult> {
   if (assertScienceRecoveryRequest(req, "kimi"))
     throw new Error("science_recovery_acp_transport_required");
   if (req.env?.AGENTLAS_NATIVE_BROWSER_SCOPE === "task") {
@@ -470,6 +485,7 @@ export const runKimi: Runner = async (req, events): Promise<RunnerResult> => {
     ? (runReq.locale === "ko" ? "Kimi Code 대화를 이어가는 중..." : "Resuming the Kimi Code conversation...")
     : tStatus(runReq.locale, "callingBackend", { backend: runReq.backendLabel }));
   if (runReq.outputSchema) events.onStatus(tStatus(runReq.locale, "schemaInPromptOnly"));
+  dispatch.started = true;
   const result = await runKimiProcess(bin, args, runReq, events);
   if (runReq.signal?.aborted) throw new Error(tStatus(runReq.locale, "aborted"));
   if (result.silentLimitMs !== undefined) {
@@ -507,4 +523,4 @@ export const runKimi: Runner = async (req, events): Promise<RunnerResult> => {
     ownerControlTerminal: "uncertain", failure: { kind: "exit", runtime: KIND, source: "marker",
       providerCode: error.code, ...(result.code != null ? { exitCode: result.code } : {}),
       message: `${error.message}${result.stderr ? `\n${result.stderr.slice(0, 500)}` : ""}` } };
-};
+}

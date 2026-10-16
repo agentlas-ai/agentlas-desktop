@@ -19,7 +19,7 @@ import { RuntimeJudgmentRefusal } from "./judgment-refusal";
 import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, runtimeProtocolUnrecognizedFailure, cliToolSilenceWindowMs, markRefusedBeforeDispatch } from "./runner";
+import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, runtimeProtocolUnrecognizedFailure, cliToolSilenceWindowMs, markRefusedBeforeDispatch, preDispatchRefusal, runnerRefusedBeforeDispatch } from "./runner";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { schemaFallbackPromptPart } from "../../shared/runtime-capabilities";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild } from "./exec";
@@ -221,7 +221,23 @@ export function cursorEventRecognized(event: unknown): boolean {
   }
 }
 
+/**
+ * Every throw before the Cursor process is started is a refusal before dispatch (RuntimeTurnDelivery "not-dispatched",
+ * runner.ts preDispatchRefusal keeps the innermost machine code): the no-tools refusal (RuntimeJudgmentRefusal), the
+ * native-browser boundary, a missing binary. This legacy driver never resumes a stored session (each turn carries the
+ * conversation in its prompt), so a lost Cursor session cannot strand it.
+ */
 export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> => {
+  const dispatch = { started: false };
+  try {
+    return await runCursorTurn(req, events, dispatch);
+  } catch (error) {
+    if (dispatch.started || req.signal?.aborted || runnerRefusedBeforeDispatch(error)) throw error;
+    throw preDispatchRefusal(error, "cursor-prepare", "cursor_pre_dispatch_refused");
+  }
+};
+
+async function runCursorTurn(req: RunnerRequest, events: RunnerEvents, dispatch: { started: boolean }): Promise<RunnerResult> {
   if (assertScienceRecoveryRequest(req, "cursor"))
     throw new Error("science_recovery_acp_transport_required");
   if (req.env?.AGENTLAS_NATIVE_BROWSER_SCOPE === "task") {
@@ -256,6 +272,7 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
   if (req.model && req.model !== "auto") args.push("--model", req.model);
   args.push(promptFor(req));
   const cwd = req.cwd ?? agentRunCwd();
+  dispatch.started = true;
 
   return new Promise<RunnerResult>((resolve, reject) => {
     let child: ReturnType<typeof spawnCli>;
@@ -350,4 +367,4 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
         ownerControlTerminal: terminalCompleted ? "completed" : "uncertain" });
     });
   });
-};
+}

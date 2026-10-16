@@ -11,7 +11,7 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, runtimeProtocolUnrecognizedFailure, cliToolSilenceWindowMs, RuntimeTurnUnsettledError } from "./runner";
+import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, runtimeProtocolUnrecognizedFailure, cliToolSilenceWindowMs, RuntimeTurnUnsettledError, preDispatchRefusal, runnerRefusedBeforeDispatch } from "./runner";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { cliHistoryContextTokens, composeResumeTurnPrompt, renderConversationContext } from "./continuity";
 import { tStatus } from "./status-i18n";
@@ -470,7 +470,22 @@ export function isGrokQuotaExhausted(value: string): boolean {
   );
 }
 
+/**
+ * Every throw before the headless grok turn starts is a refusal before dispatch (RuntimeTurnDelivery "not-dispatched",
+ * runner.ts preDispatchRefusal keeps the innermost machine code): the Agent App and restricted-read boundaries, the
+ * native-browser boundary, a missing binary, the MCP reconcile. Same rule as the ACP lane (acp.ts) for this legacy driver.
+ */
 export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> => {
+  const dispatch = { started: false };
+  try {
+    return await runGrokTurn(req, events, dispatch);
+  } catch (error) {
+    if (dispatch.started || req.signal?.aborted || runnerRefusedBeforeDispatch(error)) throw error;
+    throw preDispatchRefusal(error, "grok-prepare", "grok_pre_dispatch_refused");
+  }
+};
+
+async function runGrokTurn(req: RunnerRequest, events: RunnerEvents, dispatch: { started: boolean }): Promise<RunnerResult> {
   if (assertScienceRecoveryRequest(req, "grok"))
     throw new Error("science_recovery_acp_transport_required");
   if (req.env?.AGENTLAS_NATIVE_BROWSER_SCOPE === "task") {
@@ -587,6 +602,7 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
 
   const mcpReconcile = await reconcileGrokMcpServers(bin, cwd, env, req.mcpConfigPath);
   try {
+    dispatch.started = true;
     return await runGrokProcess();
   } finally {
     await mcpReconcile.cleanup();
@@ -857,4 +873,4 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
     });
   });
   }
-};
+}
