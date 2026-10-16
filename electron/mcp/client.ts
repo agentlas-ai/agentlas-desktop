@@ -61,7 +61,7 @@ import { isCallOnlyHubAgent } from "../../shared/call-only-agent";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { bindInvocationAgentContext } from "../runtime/agent-context-admission";
-import { invokeWithUnsettledContinuation, UNSETTLED_CONTINUATION_PROMPT } from "../runtime/unsettled-continuation";
+import { invokeWithUnsettledContinuation, unsettledContinuationPrompt } from "../runtime/unsettled-continuation";
 import { agentContextHostBinding, agentContextUnsettledTurn, markAgentContextContinuationHandle, type AgentContextCapability } from "../runtime/agent-context";
 import { createMainHostControlSink, createMainHostOperationBridge, withAdapterEffectChildDispatch } from "../invocation/adapter-effect-context";
 import { detectRuntimes } from "../runtime/detect";
@@ -7107,7 +7107,9 @@ async function runMcpInvocationInContext(
       return invokeWithUnsettledContinuation<RunnerRequest>({
         dispatch(r, purpose, handle) { lastJournalTurnId = null; return runCurrentRuntimeOnce(r, purpose, handle); },
         continuationRequest: (r, sessionId) => {
-          const next = replaceRunnerUserPrompt(r, UNSETTLED_CONTINUATION_PROMPT, { images: undefined });
+          // The interrupted request may never have reached the resumed conversation: it rides along with its images
+          // (owner 2026-10-16: a follow-up question was replaced by the fixed line and answered "nothing remains").
+          const next = replaceRunnerUserPrompt(r, unsettledContinuationPrompt(runnerTurnContextSource(r)?.userPrompt ?? r.userPrompt));
           return carryRunnerTurnContext(next, { ...next, runtimeSessionId: sessionId });
         },
         eligible: !isAliveControllerRun && !scienceRecovery && !request.minimalObservation && !request.judgmentOnly && !request.untrustedNoTools,

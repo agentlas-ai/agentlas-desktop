@@ -7,6 +7,19 @@ import type { AgentContextUnsettledTurn } from "./agent-context";
 /** Host-authored (purpose "run-recovery", compacted on replay); names no tool, runtime or cause. */
 export const UNSETTLED_CONTINUATION_PROMPT = "previous turn: no completion signal. Check history, finish what remains, repeat nothing done.";
 
+/**
+ * The continuation turn's prompt. An unsettled dispatch is UNKNOWN, so the request may never have reached the resumed
+ * conversation (a transport that closed before the turn was accepted): sending the fixed line alone then made the model
+ * report "nothing remains" for a question it never saw (owner 2026-10-16, every follow-up of one Work chat). The turn's
+ * own request rides along, below the fixed line, and the model answers it only when its history has no reply to it.
+ */
+export function unsettledContinuationPrompt(turnRequest: string | undefined): string {
+  const request = turnRequest?.trim();
+  return request
+    ? `${UNSETTLED_CONTINUATION_PROMPT}\nthat turn's request (reply to it now if history has no reply to it):\n${request}`
+    : UNSETTLED_CONTINUATION_PROMPT;
+}
+
 export type UnsettledOutcome = { ok: true; result: RunnerResult } | { ok: false; error: unknown };
 
 export interface UnsettledContinuationPort<Req> {
