@@ -250,6 +250,28 @@ const SECRET_PATTERNS: Array<{ id: string; re: RegExp; label: string }> = [
   { id: "generic-secret", re: /\b(?:api[_-]?key|secret|token|password)\s*[:=]\s*['"][^'"]{8,}['"]/i, label: "hard-coded credential" },
 ];
 
+/**
+ * The id of the first canonical secret pattern in `text`, or null. Site publish scans app source with the same
+ * patterns as Agent Cloud packaging (review 2026-10-16, desktop-b-09: its own single regex had drifted and missed
+ * Stripe, GitHub, Slack, AWS and npm keys).
+ */
+export function scanTextForSecrets(text: string): string | null {
+  for (const pattern of SECRET_PATTERNS) if (pattern.re.test(text)) return pattern.id;
+  return null;
+}
+
+/**
+ * True when `text` names a private per-user location: this machine's home folder, a macOS `/Users/<name>/`, or a
+ * Windows `<drive>:\Users\<name>\`. Narrower than containsAbsoluteLocalPath on purpose: published app source may
+ * legitimately name `/tmp`, `/var` or `/etc` (serverless functions write to /tmp), but never someone's home folder.
+ */
+export function containsPrivateUserPath(text: string): boolean {
+  const home = os.homedir();
+  if (home && home.length > 3 && text.includes(home)) return true;
+  return /(?:^|[^A-Za-z0-9_.~-])\/Users\/(?!Shared\/)[^/\s"'`]+\//u.test(text) ||
+    /(?:^|[^A-Za-z0-9_])[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s"'`]+[\\/]/iu.test(text);
+}
+
 export interface PackagedFile {
   path: string;
   /** Size of the ORIGINAL file. packageHash is built from this and sha256, so it does not move with the encoding. */

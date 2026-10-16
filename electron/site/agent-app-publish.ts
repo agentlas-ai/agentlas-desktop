@@ -34,6 +34,7 @@ import type {
   SitePublishProviderStatus,
 } from "../../shared/site-studio";
 import { getAgentApp } from "../store/agent-apps";
+import { containsPrivateUserPath, scanTextForSecrets } from "../cloud-agents/package";
 import {
   deleteSecret,
   describeApiKey,
@@ -1096,14 +1097,25 @@ async function validateArtifactTree(sourceRoot: string): Promise<ArtifactFile[]>
       });
       if (stat.size <= 1024 * 1024 && TEXT_SOURCE_EXTENSIONS.has(path.extname(relativePath).toLowerCase())) {
         const text = bytes.toString("utf8");
-        if (EMBEDDED_SECRET_PATTERN.test(text)) {
-          throw new Error(L(`배포 artifact 소스에 secret 값으로 보이는 문자열이 있습니다: ${relativePath}`, `The deployment artifact source appears to contain a secret-like string: ${relativePath}`));
+        // The canonical cloud-agent patterns plus this file's own (Render, Vercel) ones, and no private home-folder path
+        // (review 2026-10-16, desktop-b-09).
+        const secretPattern = EMBEDDED_SECRET_PATTERN.test(text) ? "provider-token" : scanTextForSecrets(text);
+        if (secretPattern) {
+          throw new Error(L(`배포 artifact 소스에 secret 값으로 보이는 문자열이 있습니다(${secretPattern}): ${relativePath}`, `The deployment artifact source appears to contain a secret-like string (${secretPattern}): ${relativePath}`));
+        }
+        if (containsPrivateUserPath(text)) {
+          throw new Error(L(`배포 artifact 소스에 이 컴퓨터의 개인 폴더 경로가 있습니다: ${relativePath}`, `The deployment artifact source contains a private home-folder path: ${relativePath}`));
         }
       }
     }
   };
   await walk(sourceRoot);
   return files.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+}
+
+/** Contract-test seam: the artifact tree checks a publish runs before anything leaves the machine. */
+export async function validateSiteArtifactTreeForTests(sourceRoot: string): Promise<number> {
+  return (await validateArtifactTree(sourceRoot)).length;
 }
 
 function artifactTreeDigest(files: ArtifactFile[]): string {
