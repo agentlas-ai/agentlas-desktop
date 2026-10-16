@@ -22,6 +22,7 @@ import { developmentEffectsSuppressed, assertDevelopmentEffectAllowed } from "..
 //  4) **덮어쓰지 않는다(merge).** 전용 프로필에 이미 있는 쿠키 행은 건드리지 않고, 없는 것만 넣는다.
 //     에이전트가 전용 창에서 새로 만든 세션을 평소 브라우저 상태가 지우면 안 된다.
 import Database from "better-sqlite3";
+import { AUTOMATION_PROFILE_FEATURE_FLAG } from "./automation-profile-flags";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createCipheriv, createDecipheriv, createHash, pbkdf2Sync, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
@@ -905,7 +906,7 @@ async function importMacCookiesThroughDedicatedRuntime(
       "--no-first-run",
       "--no-default-browser-check",
       "--disable-session-crashed-bubble",
-      "--disable-features=Translate",
+      AUTOMATION_PROFILE_FEATURE_FLAG,
       "--disable-component-update",
       "--disable-background-networking",
       "--headless=new",

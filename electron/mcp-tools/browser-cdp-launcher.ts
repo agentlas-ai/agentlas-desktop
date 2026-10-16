@@ -20,6 +20,7 @@ import { createHash } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { createOwnedChildDrain, OWNED_CHILD_DRAIN_SOURCE } from "../runtime/owned-child-drain";
 import { BROWSER_APPROVAL_FILE_ENV } from "../browser/approval-channel";
+import { AUTOMATION_PROFILE_FEATURE_FLAG } from "../browser/automation-profile-flags";
 import { assertDedicatedBrowserProfilePath } from "../browser/profile-path-boundary";
 import { assertInstallBrowserPath, assertInstallBrowserTarget, installBrowserBoundary } from "../browser/install-browser-boundary";
 import { userDataPath } from "../runtime-paths";
@@ -3179,7 +3180,7 @@ async function ensureChromeUnlocked() {
     '--user-data-dir=' + CDP_PROFILE, '--remote-debugging-port=' + PORT,
     '--remote-debugging-address=127.0.0.1',
     '--no-first-run', '--no-default-browser-check',
-    '--disable-session-crashed-bubble', '--disable-features=Translate',
+    '--disable-session-crashed-bubble', ${JSON.stringify(AUTOMATION_PROFILE_FEATURE_FLAG)},
     // Stability for a long-lived automation profile: stop Chrome from crashing
     // "unexpectedly" out from under the agent. Background component/self-updates
     // swap the binary under a running instance; occluded/backgrounded renderers
