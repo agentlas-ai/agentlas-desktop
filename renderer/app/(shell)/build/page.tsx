@@ -1,5 +1,5 @@
 "use client";
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { Suspense, memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties } from "react";
 import Link from "next/link";
 import {
@@ -50,6 +50,7 @@ import {
   chooseBuildLocalOnly,
   type Mode,
   type BuildAttachment,
+  type LogLine,
   reattachRunningBuild,
 } from "@/lib/build-session";
 import { buildScanDisposition, buildScanFindings, buildScanSeverityBucket } from "@/lib/build-scan";
@@ -152,6 +153,32 @@ function fmtLogTime(at: number): string {
   const p = (n: number) => String(n).padStart(2, "0");
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
+
+/** Rows drawn in the activity box; the earlier ones are counted, not drawn. */
+const BUILD_LOG_VISIBLE_ROWS = 400;
+
+/**
+ * The log rows re-render only when the log itself changes. The liveness row beside them is replaced every 2 s, and
+ * without this boundary each tick re-rendered every row of a long build (review 2026-10-16 clients-13 / H5).
+ */
+const BuildLogRows = memo(function BuildLogRows({ log, ko }: { log: readonly LogLine[]; ko: boolean }) {
+  const hidden = Math.max(0, log.length - BUILD_LOG_VISIBLE_ROWS);
+  return (
+    <>
+      {hidden > 0 && (
+        <div data-kind="log" className="build-log-omitted">
+          {ko ? `이전 기록 ${hidden}줄은 생략했습니다.` : `${hidden} earlier lines not shown.`}
+        </div>
+      )}
+      {log.slice(hidden).map((l, i) => (
+        <div key={hidden + i} data-kind={l.kind}>
+          <span className="build-log-time">{fmtLogTime(l.at)}</span>
+          <span>{l.text}</span>
+        </div>
+      ))}
+    </>
+  );
+});
 
 function cloudUploadStageLabel(stage: CloudAgentPublishStage, detail: string, ko: boolean): string {
   const labels: Record<CloudAgentPublishStage, [string, string]> = {
@@ -1158,12 +1185,7 @@ export default function BuildPage() {
                   : phase === "done" && <span>{ko ? "완료" : "complete"}</span>}
               </summary>
               <div className="build-log-body">
-                {log.map((l, i) => (
-                  <div key={i} data-kind={l.kind}>
-                    <span className="build-log-time">{fmtLogTime(l.at)}</span>
-                    <span>{l.text}</span>
-                  </div>
-                ))}
+                <BuildLogRows log={log} ko={ko} />
                 {/* One replaceable tail row, never appended history. It is the
                     only thing in this box while a runtime streams nothing. */}
                 {liveness && (

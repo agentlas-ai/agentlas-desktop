@@ -570,6 +570,10 @@ export function setBuildMcpSelection(ids: string[]): void {
 }
 
 function pushLog(kind: HephaestusBuildEvent["kind"], text: string) {
+  // A row identical to the one just above it says nothing new. Long model output collapses to one fixed sentence in
+  // safeBuildProgressText, so a streaming turn used to stack that same sentence once per line (review 2026-10-16 H5).
+  const last = state.log[state.log.length - 1];
+  if (last && last.kind === kind && last.text === text) return;
   state.log = [...state.log, { kind, text, at: Date.now() }];
 }
 
