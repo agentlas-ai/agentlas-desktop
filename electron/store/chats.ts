@@ -251,11 +251,22 @@ export function listRecentOneChats(limit = 50): Chat[] {
          AND used_at IS NOT NULL
          AND origin_surface = 'one'
          ${oneDispatchSidebarPredicate()}
+         ${personalSupervisorConversationPredicate()}
        ORDER BY COALESCE(last_activity_at, updated_at) DESC
        LIMIT ?`,
     )
     .all(limit) as ChatRow[];
   return rows.map(toChat);
+}
+
+/**
+ * The personal One's own conversation (one_supervisor_conversations, the supervisor binding) is not a One home session
+ * (owner 2026-10-16: "supervisor one은 따로 one 세션에 표기하지마"). It opens from the personal One entry; work it hands
+ * off runs in a task chat of its own, which stays listed. Decided by the binding row only, never by title or text.
+ */
+function personalSupervisorConversationPredicate(): string {
+  return getDb().prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='one_supervisor_conversations'").get()
+    ? "AND NOT EXISTS (SELECT 1 FROM one_supervisor_conversations p WHERE p.chat_id = chats.id)" : "";
 }
 
 export function listArchivedChats(): Chat[] {

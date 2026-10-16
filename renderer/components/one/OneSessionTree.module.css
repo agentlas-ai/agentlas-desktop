@@ -1,0 +1,126 @@
+/* One session list as a tree: rooms are parent rows, their members small child rows (owner 2026-10-16). */
+.tree {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.item {
+  min-width: 0;
+}
+
+.roomRow {
+  display: flex;
+  min-width: 0;
+  align-items: stretch;
+}
+
+.toggle {
+  flex: 0 0 16px;
+  width: 16px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-deep);
+  cursor: pointer;
+}
+
+.toggle:hover {
+  color: var(--ink);
+}
+
+/* The whole column is the hit area; only the chevron itself shows hover and focus (data-hover="own"). */
+.toggle svg {
+  box-sizing: content-box;
+  padding: 2px;
+  border-radius: 5px;
+}
+
+.toggle:focus-visible {
+  color: var(--ink);
+  outline: 2px solid transparent;
+}
+
+.toggle:hover svg,
+.toggle:focus-visible svg {
+  background: var(--paper-3);
+}
+
+.roomRowBody {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Members sit behind a thin guide line under the room, smaller and without portraits. */
+.children {
+  display: grid;
+  gap: 1px;
+  margin: 1px 0 5px 32px;
+  padding: 0 0 0 8px;
+  border-left: 1px solid var(--paper-edge);
+  list-style: none;
+}
+
+.children[hidden] {
+  display: none;
+}
+
+.child {
+  width: 100%;
+  min-height: 28px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px 4px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--one-ink);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 450;
+  line-height: 1.35;
+  text-align: left;
+  cursor: pointer;
+}
+
+.child:hover {
+  color: var(--ink);
+}
+
+.child:focus-visible,
+.child[data-active="true"] {
+  background: var(--paper-3);
+  outline: 2px solid transparent;
+}
+
+.childName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.child[data-status="unavailable"] .childName {
+  color: var(--muted-deep);
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.dot[data-status="attention"] { background: var(--attention); }
+.dot[data-status="running"] { background: var(--ok); }
+.dot[data-status="failed"] { background: var(--danger); }
+.dot[data-status="unavailable"] { background: transparent; box-shadow: inset 0 0 0 1px var(--muted-deep); }
