@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.49 — 2026-10-16
+
+- The model you pick for a team room now runs the whole room: its teammates and the turns Agentlas starts on its own (continuing a Goal, recovering, reporting) use that model and its effort, instead of quietly falling back to the default worker list. If that model can't run right now, you're told why instead of getting a different one.
+- A team-room message with a file attached starts with its team again; a refused start now keeps its real cause instead of showing that the conversation changed.
+- Agentlas keeps its own disk use small: step-by-step render frames are removed once the finished video exists and nothing has changed for a while, detailed run logs are trimmed after 3 days, and coding-tool transcripts of chats you haven't used for 30 days are removed. Your results, conversation text and settings are never deleted.
+- Updating while the app is busy no longer skips the recovery copy.
+- A conversation whose coding-tool transcript is gone continues in a fresh session instead of failing.
+- The usage meter counts the coding-tool runs Agentlas makes for you.
+- This release binds Agentlas OS v1.2.65 at 8b303608eea746e7ea8d7560890816784bdaa86c; public runtime asset `hephaestus-runtime-v1.2.65.tar.gz` is pinned at SHA-256 `7dae16f12a78515dfa7adbc732197e26aa06a2cd413452e81b2675450caba7de`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.48 — 2026-10-16
 
 - Automations that run several agent steps on the same conversation finish again; the second step was refused as "another run" every time.
