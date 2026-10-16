@@ -20,6 +20,19 @@ let scheduled: NodeJS.Timeout | null = null;
 let draining = false;
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 
+// Failure pacing. A failing curation job doubles its wait from one minute up to
+// six hours; after MAX_JOB_ATTEMPTS it is parked in 'deferred' (payload kept,
+// still revocable) and re-probed once a day. When the judgment path itself is
+// down, one durable circuit (shared by Main, daemon and Terminal peers through
+// the owner store) spaces whole-worker probes instead of one call per job.
+const BACKOFF_BASE_MS = 60_000;
+const BACKOFF_CAP_MS = 6 * 60 * 60_000;
+const MAX_JOB_ATTEMPTS = 10;
+const DEFERRED_REPROBE_MS = 24 * 60 * 60_000;
+const CIRCUIT_KEY = "automatic_curator_model_circuit";
+export const curationBackoffMs = (failures: number): number =>
+  Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** Math.max(0, Math.min(failures, 30) - 1));
+
 export interface AutomaticMemoryModelInput {
   systemPrompt: string;
   input: string;
@@ -160,6 +173,15 @@ When the host outcome is unknown, reported success is an unverified observation,
 Use existing memories by reference, revise/supersede only the supplied exact recalled owner-bound block.
 This is one extraction and curation decision, not a request to execute any work.`;
 
+function readCircuit(db: ReturnType<typeof ensureSchema>): { failures: number; until: number } | null {
+  try {
+    const row = db.prepare("SELECT value FROM memory_store_meta WHERE key=?").get(CIRCUIT_KEY) as { value: string } | undefined;
+    if (!row) return null;
+    const parsed = JSON.parse(row.value) as { failures?: number; until?: number };
+    return { failures: Number(parsed.failures) || 0, until: Number(parsed.until) || 0 };
+  } catch { return null; }
+}
+
 interface Job { job_id: string; ticket_id: string; owner_namespace: string; group_key: string; input_digest: string; runtime_digest: string; payload_json: string; intake_epoch: number; state: string; attempts: number; lease_token?: string | null; }
 interface Source { context: CurationContext; summary: string; sourceTicketId: string; request?: string; sourceExtract?: string; }
 
@@ -247,8 +269,13 @@ async function processAutomaticMemoryCurationOwned(model?: AutomaticMemoryRuntim
     // SQLite lease outlives the judgment and settlement budget. A crashed
     // worker can be reclaimed after expiry.
     const claim = db.transaction(() => {
-      db.prepare(`UPDATE memory_curation_jobs SET state='retry',lease_token=NULL,lease_expires_at=NULL
-        WHERE state='processing' AND (lease_expires_at IS NULL OR lease_expires_at<=?)`).run(now);
+      db.prepare(`UPDATE memory_curation_jobs SET state=CASE WHEN attempts>=? THEN 'deferred' ELSE 'retry' END,
+        next_attempt_at=CASE WHEN attempts>=? THEN ? ELSE next_attempt_at END,lease_token=NULL,lease_expires_at=NULL
+        WHERE state='processing' AND (lease_expires_at IS NULL OR lease_expires_at<=?)`)
+        .run(MAX_JOB_ATTEMPTS, MAX_JOB_ATTEMPTS, new Date(Date.now() + DEFERRED_REPROBE_MS).toISOString(), now);
+      db.prepare(`UPDATE memory_curation_jobs SET state='retry' WHERE state='deferred' AND next_attempt_at<=?`).run(now);
+      const circuit = readCircuit(db);
+      if (circuit && circuit.until > Date.now()) return [] as Job[];
       const first = db.prepare(`SELECT j.* FROM memory_curation_jobs j WHERE j.owner_namespace=? AND j.state IN ('queued','retry')
         AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=?)
         AND NOT EXISTS(SELECT 1 FROM memory_curation_jobs p WHERE p.group_key=j.group_key AND p.state='processing')
@@ -351,14 +378,29 @@ async function processAutomaticMemoryCurationOwned(model?: AutomaticMemoryRuntim
         return report;
       });
       const report = commit.immediate(); processed = jobs.length; written = report.written;
+      try { db.prepare("DELETE FROM memory_store_meta WHERE key=?").run(CIRCUIT_KEY); } catch { /* best effort */ }
     } catch (error) {
       const code = error instanceof Error && ["memory_intake_revoked", "memory_revision_changed", "memory_decision_invalid", "memory_model_unavailable", "memory_lease_changed"].includes(error.message) ? error.message : "memory_curator_failed";
       // A forgotten/reclaimed job is never rewritten by its former worker.
       // The captured facade also rejects any account transition.
       try {
-        for (const job of jobs) db.prepare("UPDATE memory_curation_jobs SET state=?,next_attempt_at=?,result_json=?,updated_at=?,lease_token=NULL,lease_expires_at=NULL WHERE job_id=? AND state='processing' AND lease_token=?")
-          .run(code === "memory_intake_revoked" ? "revoked" : "retry", new Date(Date.now() + 60_000).toISOString(),
-            code === "memory_intake_revoked" ? null : JSON.stringify({ code }), new Date().toISOString(), job.job_id, lease);
+        const nowMs = Date.now();
+        let circuitMs = 0;
+        if (code === "memory_model_unavailable") {
+          const failures = (readCircuit(db)?.failures ?? 0) + 1;
+          circuitMs = curationBackoffMs(failures);
+          db.prepare("INSERT OR REPLACE INTO memory_store_meta(key,value) VALUES(?,?)")
+            .run(CIRCUIT_KEY, JSON.stringify({ failures, until: nowMs + circuitMs }));
+        }
+        for (const job of jobs) {
+          // job.attempts is the pre-claim value; the claim already counted this try.
+          const tries = job.attempts + 1;
+          const parked = code !== "memory_intake_revoked" && tries >= MAX_JOB_ATTEMPTS;
+          const wait = parked ? DEFERRED_REPROBE_MS : Math.max(curationBackoffMs(tries), circuitMs);
+          db.prepare("UPDATE memory_curation_jobs SET state=?,next_attempt_at=?,result_json=?,updated_at=?,lease_token=NULL,lease_expires_at=NULL WHERE job_id=? AND state='processing' AND lease_token=?")
+            .run(code === "memory_intake_revoked" ? "revoked" : parked ? "deferred" : "retry", new Date(nowMs + wait).toISOString(),
+              code === "memory_intake_revoked" ? null : JSON.stringify({ code, attempts: tries }), new Date().toISOString(), job.job_id, lease);
+        }
       } catch { /* An owner change leaves the old lease for expiry/recovery. */ }
       deferred = jobs.length;
     }
@@ -368,8 +410,11 @@ async function processAutomaticMemoryCurationOwned(model?: AutomaticMemoryRuntim
     if (!target && process.env.AGENTLAS_MEMORY_AUTOMATIC_JOBS !== "0") {
       try {
         const next = ensureSchema().prepare(`SELECT MIN(COALESCE(next_attempt_at,created_at)) AS due
-          FROM memory_curation_jobs WHERE state IN ('queued','retry')`).get() as { due: string | null };
-        if (next?.due) scheduleAutomaticMemoryCuration(Math.max(1_500, Date.parse(next.due) - Date.now()));
+          FROM memory_curation_jobs WHERE state IN ('queued','retry','deferred')`).get() as { due: string | null };
+        if (next?.due) {
+          const gate = readCircuit(ensureSchema())?.until ?? 0;
+          scheduleAutomaticMemoryCuration(Math.max(1_500, Date.parse(next.due) - Date.now(), gate - Date.now()));
+        }
       } catch { /* No active owner/store; durable jobs resume at the next boot. */ }
     }
   }

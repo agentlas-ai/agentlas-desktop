@@ -73,6 +73,12 @@ const LAST_AT_KEY = "memory_dreaming_last_at";
 const IDLE_REQUIRED_SEC = dreamingIdleRequiredSec();
 const COOLDOWN_MS = dreamingCooldownMs();
 const TICK_MS = 5 * 60 * 1000; // 5분마다 조건 확인(조건 체크 자체는 ~0 비용)
+// A pass whose model call failed backs off (5 min, doubling, six-hour cap) so a
+// down judgment path is probed once per interval, not on every tick forever.
+const FAILURE_BACKOFF_CAP_MS = 6 * 60 * 60_000;
+let failureStreak = 0, backoffUntil = 0, passFailed = false;
+export const dreamingFailureBackoffMs = (streak: number): number =>
+  Math.min(FAILURE_BACKOFF_CAP_MS, TICK_MS * 2 ** Math.max(0, Math.min(streak, 20) - 1));
 const MAX_AGENTS_PER_PASS = 2; // 한 번의 드리밍에서 LLM 통합할 에이전트 수 상한
 const LLM_TIMEOUT_MS = 300_000;
 
@@ -161,7 +167,7 @@ function idleSeconds(): number {
 }
 
 async function tick(): Promise<void> {
-  if (running) return;
+  if (running || Date.now() < backoffUntil) return;
   running = true;
   try {
     await withIndependentMemoryWorker(async () => {
@@ -188,7 +194,13 @@ async function tick(): Promise<void> {
         });
         if (!pending) return;
       }
-      if (await dreamOnce()) {
+      passFailed = false;
+      const passDone = await dreamOnce();
+      if (passFailed) {
+        failureStreak++;
+        backoffUntil = Date.now() + dreamingFailureBackoffMs(failureStreak);
+      } else if (passDone) { failureStreak = 0; backoffUntil = 0; }
+      if (passDone) {
         assertMemorySourceCustody(custody);
         const current = getMemoryStoreInfo(), completedAt = new Date().toISOString();
         db.prepare("INSERT OR REPLACE INTO memory_dreaming_clock VALUES(1,?,?,?)").run(current.revocationEpoch, current.revision, completedAt);
@@ -375,7 +387,7 @@ async function dreamOnce(): Promise<boolean> {
         continue;
       }
       // abort(사용자 복귀/타임아웃) 포함 — 조용히 다음 기회로.
-      if (!controller.signal.aborted) console.error("[dreaming] consolidation failed:", err);
+      if (!controller.signal.aborted) { passFailed = true; console.error("[dreaming] consolidation failed:", err); }
       return completed;
     } finally {
       // A failed/unavailable model or changed source is retryable, never a

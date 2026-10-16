@@ -298,7 +298,7 @@ function cancelResolvedCandidates(sourceKey: string, previous: OneMemoryState, n
     const receipt = db.prepare("SELECT value FROM memory_store_meta WHERE key=?").get(candidateKey(sourceKey, old.id, old.version)) as { value: string } | undefined;
     if (!receipt) continue;
     db.prepare(`UPDATE memory_curation_jobs SET state='revoked',payload_json='{}',lease_token=NULL,lease_expires_at=NULL
-      WHERE ticket_id=? AND state IN ('queued','retry','processing')`).run(receipt.value);
+      WHERE ticket_id=? AND state IN ('queued','retry','deferred','processing')`).run(receipt.value);
     // Rejection/deletion also hides already-admitted derivatives of this
     // exact source; saving/using once retains its separate user action.
     if (candidate && candidate.status !== "rejected") continue;
