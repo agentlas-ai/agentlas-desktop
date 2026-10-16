@@ -12,10 +12,17 @@
  * - CLI resume transcripts: removed for chats unused for 30 days; the chat
  *   stays, and the next turn starts a fresh CLI session
  * - low disk (under 15 GB or 10% free): transcripts after 7 days, then a notice
+ * - delivered automation trigger events: removed 30 days after delivery once
+ *   their run is over; the run itself and parked events stay
+ * - Telegram attachment copies: removed 7 days after their run is over, since
+ *   Telegram keeps the original (owner decision OD-4). Desktop chat images are
+ *   conversation content and are never removed.
  */
 export const STORAGE_POLICY = {
   runDetailDays: 3,
   cliTranscriptIdleDays: 30,
+  triggerEventDeliveredDays: 30,
+  telegramAttachmentDays: 7,
   /** "Done" for a project whose agent recorded a verified finish (verification.json or .agentlas-complete). */
   intermediateIdleMinutes: 10,
   /**

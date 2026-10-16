@@ -575,9 +575,36 @@ export function reconcileParkedTriggerEvent(input: AutomationTriggerEventReconci
 }
 
 export function listTriggerEventAttention(automationId: string): AutomationTriggerEventAttention[] {
-  return listTriggerEvents(automationId)
-    .filter((event) => event.status === "parked")
-    .map(toAttention);
+  // Parked rows only, read through the (automation_id, status, created_at) index:
+  // an automation's delivered history can be long and each payload up to 256 KB.
+  const rows = getDb().prepare(
+    `SELECT e.*, r.status AS run_status
+     FROM automation_trigger_events e
+     LEFT JOIN automation_runs r ON r.id = e.run_id
+     WHERE e.automation_id = ? AND e.status = 'parked' ORDER BY e.created_at ASC, e.id ASC`,
+  ).all(automationId) as TriggerEventRow[];
+  return rows.map(toRecord).map(toAttention);
+}
+
+/**
+ * Storage budget (storage/storage-maintenance.ts): deletes up to `limit`
+ * delivered rows delivered before `cutoffIso`, in one statement.
+ * - Pending, claimed and parked rows are never touched: they are work or attention.
+ * - A row whose bound run is still `running` keeps its receipt.
+ * - Command rows started by One or a Toolchain caller stay. The Toolchain
+ *   history (toolchains/history.ts) reads their `source` and `ownerChatId` to
+ *   say who ran each run.
+ */
+export function pruneDeliveredTriggerEvents(cutoffIso: string, limit = 500): number {
+  return getDb().prepare(
+    `DELETE FROM automation_trigger_events WHERE id IN (
+       SELECT e.id FROM automation_trigger_events e
+       WHERE e.status = 'delivered' AND e.delivered_at < ?
+         AND NOT EXISTS (SELECT 1 FROM automation_runs r WHERE r.id = e.run_id AND r.status = 'running')
+         AND COALESCE(CASE WHEN e.trigger_kind = 'command' AND json_valid(e.payload_json)
+           THEN json_extract(e.payload_json, '$.source') END, '') NOT IN ('one-mcp', 'toolchain')
+       LIMIT ?)`,
+  ).run(cutoffIso, Math.max(1, Math.floor(limit))).changes;
 }
 
 export function getTriggerEvent(id: string): TriggerEventRecord | null {
