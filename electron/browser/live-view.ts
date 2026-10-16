@@ -53,8 +53,16 @@ onHostShutdown(() => {
 // Agent MCP processes are intentionally ephemeral and close the pages they
 // created when a worker finishes. The output rail therefore owns one durable
 // CDP target per observed task URL instead of borrowing the worker's tab.
+// A rail target lives while a live session shows it and is closed (/json/close)
+// when the last one ends; a restart of the same view keeps it (no reload).
 const railTargetIdsByUrl = new Map<string, string>();
 const railTargetFlights = new Map<string, Promise<VerifiedCdpTarget | null>>();
+const railTargetsKeptForRestart = new Map<string, number>();
+// A rail target is a second GET of the worker's URL with the same cookie jar.
+// OAuth codes/state, tokens, signatures, OTPs, nonces and keys are single-use or
+// secret: replaying them breaks the worker's own exchange. Such a URL is shown
+// only from the worker's own tab while it lives, never re-opened.
+const SINGLE_USE_URL_PARAMETER = /(?:^|[_.-])(?:code|token|state|sig|signature|otp|nonce|key)$/iu;
 // 24fps is the lowest common cinematic cadence and stays visibly smoother than
 // the old 15fps rail while CDP acknowledgements still provide backpressure.
 const LIVE_FRAME_INTERVAL_MS = 1_000 / 24;
@@ -157,6 +165,14 @@ function matchUrl(raw: string | undefined): string | null {
   }
 }
 
+function replaysSingleUseSecret(normalizedUrl: string): boolean {
+  try {
+    return [...new URL(normalizedUrl).searchParams.keys()].some((key) => SINGLE_USE_URL_PARAMETER.test(key));
+  } catch {
+    return true;
+  }
+}
+
 function fetchTargets(port: number): Promise<CdpTarget[]> {
   return new Promise((resolve) => {
     const req = http.get(
@@ -251,6 +267,29 @@ function createRailTarget(port: number, normalizedUrl: string): Promise<Verified
   });
 }
 
+function closeRailTarget(port: number, targetId: string): Promise<void> {
+  return new Promise((resolve) => {
+    const req = http.get(
+      { host: "127.0.0.1", port, path: `/json/close/${encodeURIComponent(targetId)}`, timeout: 2_000 },
+      (res) => { res.resume(); res.once("end", () => resolve()); },
+    );
+    req.once("error", () => resolve());
+    req.once("timeout", () => { req.destroy(); resolve(); });
+  });
+}
+
+/** Close a rail-owned target once no live session shows it. A worker's own tab is never closed here. */
+function releaseRailTarget(port: number, targetId: string): void {
+  const owned = [...railTargetIdsByUrl].find(([, id]) => id === targetId);
+  if (!owned) return;
+  const [url] = owned;
+  if ((railTargetsKeptForRestart.get(url) ?? 0) > 0) return;
+  if ([...liveSessions.values()].some((record) => record.stream.target.id === targetId)) return;
+  railTargetIdsByUrl.delete(url);
+  logLiveDiagnostic("rail-target-closed", { outcome: "session-ended" });
+  void closeRailTarget(port, targetId);
+}
+
 async function ensureRailTarget(port: number, normalizedUrl: string): Promise<VerifiedCdpTarget | null> {
   const active = railTargetFlights.get(normalizedUrl);
   if (active) return active;
@@ -261,6 +300,10 @@ async function ensureRailTarget(port: number, normalizedUrl: string): Promise<Ve
     const owned = ownedId ? pages.find((page) => page.id === ownedId) : undefined;
     if (owned) return owned;
     if (ownedId) railTargetIdsByUrl.delete(normalizedUrl);
+    if (replaysSingleUseSecret(normalizedUrl)) {
+      logLiveDiagnostic("rail-target-skipped", { outcome: "single-use-url" });
+      return pages.find((page) => matchUrl(page.url) === normalizedUrl) ?? null;
+    }
 
     // Always create a rail-owned target. Reusing the matching worker tab looks
     // correct during execution but turns into an empty sidebar the instant the
@@ -1019,14 +1062,23 @@ export async function startBrowserLiveSession(
     releaseBrowserCdpLease(lease, { scheduleShutdown });
   };
   let target: VerifiedCdpTarget | null = null;
+  // Restarting the same view (viewport toggle) must not close and reload its rail target.
+  railTargetsKeptForRestart.set(preferred, (railTargetsKeptForRestart.get(preferred) ?? 0) + 1);
+  const releaseRestartKeep = () => {
+    const left = (railTargetsKeptForRestart.get(preferred) ?? 1) - 1;
+    if (left > 0) railTargetsKeptForRestart.set(preferred, left);
+    else railTargetsKeptForRestart.delete(preferred);
+  };
   try {
     await stopBrowserLiveSessionsForOwner(ownerId);
     target = await ensureRailTarget(port, preferred);
   } catch {
+    releaseRestartKeep();
     releaseLease();
     logLiveDiagnostic("target-resolution-failed", { error: "capture-failed", viewport: viewportMode });
     return { sessionId: null, interactive: false, frame: unavailable("capture-failed", viewportMode) };
   }
+  releaseRestartKeep();
   if (!target) {
     releaseLease();
     logLiveDiagnostic("target-missing", { error: "no-page", viewport: viewportMode });
@@ -1040,9 +1092,11 @@ export async function startBrowserLiveSession(
 
   const sessionId = randomUUID();
   let stream!: CdpLiveStream;
+  const targetId = target.id;
   stream = new CdpLiveStream(sessionId, target, viewportMode, sink, () => {
     const current = liveSessions.get(sessionId);
     if (current?.stream === stream) liveSessions.delete(sessionId);
+    releaseRailTarget(port, targetId);
     releaseLease();
   });
   liveSessions.set(sessionId, { ownerId, stream, releaseLease });
