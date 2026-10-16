@@ -1,19 +1,46 @@
 "use strict";
 // Build JSON argument documentation from the same TypeScript API that the app uses, including imported interfaces.
-const fs = require("node:fs"), path = require("node:path"), ts = require("typescript");
+const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto"), ts = require("typescript");
+
+// Output order never follows checker internals. The checker keeps a union's members in type-id order and lists a mapped
+// type's fields (Omit, Pick, Record) in the type-id order of its literal keys; type ids follow whatever the checker
+// happened to resolve first, so an unrelated declaration (a dependency adding "hwpx" somewhere) reshuffled enums
+// across the whole file. Literal members and union variants are sorted by value, fields keep their source order.
+// No text sort uses the default collation, which follows LANG.
+const byText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+const literalRank = value => (value === null ? 0 : typeof value === "boolean" ? 1 : typeof value === "number" ? 2 : 3);
+const byLiteral = (a, b) => literalRank(a) - literalRank(b)
+  || (typeof a === "string" ? byText(a, b) : Number(a) - Number(b));
+const byJson = (a, b) => byText(JSON.stringify(a), JSON.stringify(b));
 
 function generateAppControlSchemas({ root, operations, check, outputDirectory = path.join(root, "electron/app-control") }) {
   const hostSources = fs.readdirSync(path.join(root, "electron/science-host"))
     .filter(name => name.endsWith("-ipc.ts")).sort()
     .map(name => path.join(root, "electron/science-host", name));
+  // The program never depends on the caller's directory: automatic @types come from this checkout only.
+  const options = {
+    target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, moduleResolution: ts.ModuleResolutionKind.Node10,
+    skipLibCheck: true, esModuleInterop: true, strict: true, typeRoots: [path.join(root, "node_modules/@types")],
+  };
+  const host = ts.createCompilerHost(options);
+  host.getCurrentDirectory = () => root;
   const program = ts.createProgram([path.join(root, "shared/types.ts"), path.join(root, "shared/app-ui-preferences.ts"), path.join(root, "electron/preload.ts"), path.join(root, "electron/science-preload.ts"), path.join(root, "electron/main.ts"),
     path.join(root, "electron/daemon/science-service.ts"), path.join(root, "electron/science-host/daemon-ipc.ts"),
     path.join(root, "electron/science-host/publication-ipc.ts"), path.join(root, "electron/science-host/style-library-ipc.ts"),
-    path.join(root, "electron/science-host/math-ipc.ts"), ...hostSources], {
-    target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, moduleResolution: ts.ModuleResolutionKind.Node10,
-    skipLibCheck: true, esModuleInterop: true, strict: true,
-  });
+    path.join(root, "electron/science-host/math-ipc.ts"), ...hostSources], options, host);
   const checker = program.getTypeChecker();
+  // Which TypeScript and which agentlas-science build the schemas were read from. package-lock pins agentlas-science to a
+  // git commit, but npm cannot tell an installed git package from a local build copied over it (same version, same lock
+  // entry), and such a build documents inputs the shipped SDK rejects. --check names that case instead of "stale".
+  const sciencePackage = /[\\/]node_modules[\\/]agentlas-science[\\/]/;
+  const scienceFiles = program.getSourceFiles().filter(file => sciencePackage.test(file.fileName))
+    .map(file => ({ file, name: file.fileName.slice(file.fileName.search(sciencePackage)).replace(/\\/g, "/").replace(/^\/node_modules\/agentlas-science\//, "") }))
+    .sort((a, b) => byText(a.name, b.name));
+  const scienceDigest = crypto.createHash("sha256");
+  for (const { file, name } of scienceFiles) scienceDigest.update(name).update("\0").update(file.text).update("\0");
+  const sciencePackageRoot = scienceFiles[0] && scienceFiles[0].file.fileName.slice(0, scienceFiles[0].file.fileName.search(sciencePackage)) + "/node_modules/agentlas-science";
+  const scienceVersion = sciencePackageRoot && fs.existsSync(path.join(sciencePackageRoot, "package.json")) ? JSON.parse(fs.readFileSync(path.join(sciencePackageRoot, "package.json"), "utf8")).version : "unknown";
+  const inputsStamp = `// Read with typescript ${ts.version} and agentlas-science ${scienceFiles.length ? `${scienceVersion} (${scienceFiles.length} declaration files, sha256:${scienceDigest.digest("hex").slice(0, 16)})` : "(not installed)"}.`;
   const shared = program.getSourceFile(path.join(root, "shared/types.ts"));
   const ipc = shared.statements.find(node => ts.isInterfaceDeclaration(node) && node.name.text === "AgentlasIpc");
   const ipcType = checker.getTypeAtLocation(ipc);
@@ -29,7 +56,37 @@ function generateAppControlSchemas({ root, operations, check, outputDirectory = 
   };
   findScience(science);
   const flags = ts.TypeFlags;
-  const describe = type => checker.typeToString(type).replace(/import\("[^\"]*"\)\./g, "").slice(0, 160);
+  // typeToString prints a union in type-id order and elides members by that order once it passes 160 characters.
+  // Print the full type with every union's members sorted by their text, then cut.
+  const printer = ts.createPrinter({ removeComments: true });
+  const printFile = ts.createSourceFile("describe.ts", "", ts.ScriptTarget.Latest);
+  const printed = node => printer.printNode(ts.EmitHint.Unspecified, node, printFile);
+  const sortUnions = context => function visit(node) {
+    const next = ts.visitEachChild(node, visit, context);
+    if (!ts.isUnionTypeNode(next)) return next;
+    const members = next.types.map(member => [printed(member), member]).sort((a, b) => byText(a[0], b[0])).map(([, member]) => member);
+    return ts.factory.updateUnionTypeNode(next, ts.factory.createNodeArray(members));
+  };
+  const describe = type => {
+    const node = checker.typeToTypeNode(type, undefined, ts.NodeBuilderFlags.AllowUniqueESSymbolType | ts.NodeBuilderFlags.UseAliasDefinedOutsideCurrentScope
+      | ts.NodeBuilderFlags.IgnoreErrors | ts.NodeBuilderFlags.NoTruncation);
+    const text = node ? printed(ts.transform(node, [sortUnions]).transformed[0]) : checker.typeToString(type);
+    return text.replace(/import\("[^\"]*"\)\./g, "").slice(0, 160);
+  };
+  // A symbol-keyed member's checker name embeds the symbol's id (__@iterator@97); its source name is stable.
+  const fieldName = field => String(field.escapedName).startsWith("__@") ? checker.symbolToString(field) : field.name;
+  // Fields in source order: grouped by the declaration that declares them (an interface before its base, an intersection's
+  // parts in order), each group in declaration order. Fields with no declaration (a Record over literal keys) sort by name.
+  function sourceOrdered(fields) {
+    const groups = new Map();
+    for (const field of fields) {
+      const declaration = field.valueDeclaration ?? field.declarations?.[0];
+      const owner = declaration?.parent ?? null;
+      if (!groups.has(owner)) groups.set(owner, []);
+      groups.get(owner).push({ field, at: declaration ? declaration.pos : -1, name: fieldName(field) });
+    }
+    return [...groups.values()].flatMap(group => group.sort((a, b) => a.at - b.at || byText(a.name, b.name)).map(entry => entry.field));
+  }
   // Owner-local labels (the experience map's local titles) never reach an agent-facing schema; see relation-index.ts.
   const OWNER_LOCAL_FIELDS = new Set(["localLabel"]);
   function withoutOwnerLocalFields(node) {
@@ -51,8 +108,8 @@ function generateAppControlSchemas({ root, operations, check, outputDirectory = 
       const parts = type.types.filter(t => !(t.flags & (flags.Undefined | flags.Never)));
       if (!parts.length) return {};
       const literals = parts.map(t => t.flags & flags.StringLiteral ? t.value : t.flags & flags.NumberLiteral ? t.value : t.flags & flags.BooleanLiteral ? t.intrinsicName === "true" : t.flags & flags.Null ? null : undefined);
-      if (literals.every(v => v !== undefined)) return { enum: [...new Set(literals)] };
-      const variants = [...new Map(parts.map(t => { const value = schema(t, depth, seen); return [JSON.stringify(value), value]; })).values()];
+      if (literals.every(v => v !== undefined)) return { enum: [...new Set(literals)].sort(byLiteral) };
+      const variants = [...new Map(parts.map(t => { const value = schema(t, depth, seen); return [JSON.stringify(value), value]; })).values()].sort(byJson);
       return variants.length === 1 ? variants[0] : { anyOf: variants };
     }
     if (type.flags & flags.StringLiteral) return { enum: [type.value] };
@@ -84,12 +141,12 @@ function generateAppControlSchemas({ root, operations, check, outputDirectory = 
       return { type: "array", items: items.length === 1 ? schema(items[0], depth + 1, nextSeen) : {} };
     }
     if (checker.getSignaturesOfType(type, ts.SignatureKind.Call).length) return { description: "A callback cannot be supplied as JSON." };
-    const fields = checker.getPropertiesOfType(type);
+    const fields = sourceOrdered(checker.getPropertiesOfType(type));
     const properties = {}, required = [];
     for (const field of fields.slice(0, 80)) {
       const declaration = field.valueDeclaration ?? field.declarations?.[0] ?? ipc;
-      properties[field.name] = schema(checker.getTypeOfSymbolAtLocation(field, declaration), depth + 1, nextSeen);
-      if (!(field.flags & ts.SymbolFlags.Optional)) required.push(field.name);
+      properties[fieldName(field)] = schema(checker.getTypeOfSymbolAtLocation(field, declaration), depth + 1, nextSeen);
+      if (!(field.flags & ts.SymbolFlags.Optional)) required.push(fieldName(field));
     }
     const index = checker.getIndexTypeOfType(type, ts.IndexKind.String);
     return { type: "object", properties, ...(required.length ? { required } : {}),
@@ -517,7 +574,7 @@ function generateAppControlSchemas({ root, operations, check, outputDirectory = 
   if (!preferenceInterface) throw new Error("AppUiPreferences interface was not found");
   const preferenceType = checker.getTypeAtLocation(preferenceInterface);
   const preferenceSchemas = {};
-  for (const field of checker.getPropertiesOfType(preferenceType)) {
+  for (const field of sourceOrdered(checker.getPropertiesOfType(preferenceType))) {
     const declaration = field.valueDeclaration ?? field.declarations?.[0] ?? preferenceInterface;
     preferenceSchemas[field.name] = schema(checker.getTypeOfSymbolAtLocation(field, declaration));
   }
@@ -571,7 +628,7 @@ function generateAppControlSchemas({ root, operations, check, outputDirectory = 
     };
     visit(source, new Map());
   }
-  for (const source of [...program.getSourceFiles()].sort((a, b) => a.fileName.localeCompare(b.fileName))) {
+  for (const source of [...program.getSourceFiles()].sort((a, b) => a.fileName.localeCompare(b.fileName, "en"))) {
     if (source.fileName.startsWith(electronDirectory) && !source.isDeclarationFile) scanRegistrations(source);
   }
   function handlerReturn(registration) {
@@ -755,7 +812,7 @@ function generateAppControlSchemas({ root, operations, check, outputDirectory = 
     };
     walk(object, "");
   }
-  events.sort((a, b) => a.member.localeCompare(b.member));
+  events.sort((a, b) => a.member.localeCompare(b.member, "en"));
   // Result types repeat (the same chat, project or manuscript record under many operations). A sub-schema of 200+
   // characters that occurs more than once is stored once under $defs and referenced; descriptors attach the $defs an
   // operation uses, so each output schema stays a complete JSON Schema.
@@ -788,7 +845,7 @@ function generateAppControlSchemas({ root, operations, check, outputDirectory = 
     const text = JSON.stringify(node);
     const copy = schemaChildren(node, child => intern(child));
     if (!top && text.length >= 200 && (occurrences.get(text) ?? 0) > 1) {
-      const id = `d${require("node:crypto").createHash("sha256").update(text).digest("hex").slice(0, 12)}`;
+      const id = `d${crypto.createHash("sha256").update(text).digest("hex").slice(0, 12)}`;
       defs[id] ??= copy;
       return { $ref: `#/$defs/${id}` };
     }
@@ -809,13 +866,20 @@ function generateAppControlSchemas({ root, operations, check, outputDirectory = 
     + "export const APP_CONTROL_OUTPUT_DEFS: Readonly<Record<string, Record<string, unknown>>> = {\n"
     + Object.keys(defs).sort().map(key => `${JSON.stringify(key)}:${JSON.stringify(defs[key])}`).join(",\n") + "};\n";
   const output = path.join(outputDirectory, "argument-schemas.generated.ts");
-  const body = "// Generated from the app's TypeScript bridges by scripts/generate-app-control-catalog.cjs.\n"
+  const body = "// Generated from the app's TypeScript bridges by scripts/generate-app-control-catalog.cjs.\n" + inputsStamp + "\n"
     + "export const APP_CONTROL_ARGUMENT_SCHEMAS: Readonly<Record<string, Record<string, unknown>>> = "
     + JSON.stringify(docs, null, 0).replace(/\},\"([^\"]+)\":\{\"type\":\"object\",\"properties\"/g, "},\n\"$1\":{\"type\":\"object\",\"properties\"") + ";\n"
     + "export const APP_UI_PREFERENCE_VALUE_SCHEMAS: Readonly<Record<string, Record<string, unknown>>> = "
     + JSON.stringify(preferenceSchemas, null, 0) + ";\n";
   if (check) {
-    if (!fs.existsSync(output) || fs.readFileSync(output, "utf8") !== body) throw new Error("app-control argument schemas are stale: run node scripts/generate-app-control-catalog.cjs");
+    const current = fs.existsSync(output) ? fs.readFileSync(output, "utf8") : "";
+    const recorded = current.split("\n")[1] ?? "";
+    if (current && recorded !== inputsStamp && /^\/\/ Read with typescript /.test(recorded)) {
+      throw new Error(`app-control argument schemas were generated from other dependency builds than node_modules holds.\n  file:         ${recorded}\n  node_modules: ${inputsStamp}\n`
+        + "If package-lock.json now pins these builds, regenerate (node scripts/generate-app-control-catalog.cjs). Otherwise node_modules differs from the lockfile\n"
+        + "(agentlas-science is a git dependency npm does not verify): run npm ci first. Regenerating against an unlocked build commits that build's Science schemas.");
+    }
+    if (current !== body) throw new Error("app-control argument schemas are stale: run node scripts/generate-app-control-catalog.cjs");
     if (!fs.existsSync(contractOutput) || fs.readFileSync(contractOutput, "utf8") !== contractBody) throw new Error("app-control operation contracts are stale: run node scripts/generate-app-control-catalog.cjs");
   } else {
     fs.mkdirSync(path.dirname(output), { recursive: true }); fs.writeFileSync(output, body); fs.writeFileSync(contractOutput, contractBody);
