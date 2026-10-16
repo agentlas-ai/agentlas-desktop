@@ -20,7 +20,7 @@ import { createHash } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { createOwnedChildDrain, OWNED_CHILD_DRAIN_SOURCE } from "../runtime/owned-child-drain";
 import { BROWSER_APPROVAL_FILE_ENV } from "../browser/approval-channel";
-import { AUTOMATION_PROFILE_FEATURE_FLAG } from "../browser/automation-profile-flags";
+import { AUTOMATION_PROFILE_CACHE_BYTES, AUTOMATION_PROFILE_DISPOSABLE, AUTOMATION_PROFILE_FLAGS } from "../browser/automation-profile-flags";
 import { assertDedicatedBrowserProfilePath } from "../browser/profile-path-boundary";
 import { assertInstallBrowserPath, assertInstallBrowserTarget, installBrowserBoundary } from "../browser/install-browser-boundary";
 import { userDataPath } from "../runtime-paths";
@@ -3128,6 +3128,55 @@ function portReady(port) {
 ${BROWSER_CDP_OWNERSHIP_RUNTIME_SOURCE}
 ${BROWSER_CDP_LIFECYCLE_RUNTIME_SOURCE}
 
+// Automation keeps sign-ins and site data only. Chrome's models are removed
+// outright; compiled-code and GPU caches once they pass the cache ceiling
+// (--disk-cache-size bounds only the HTTP cache). Never while a Chrome holds
+// the profile: a live SingletonLock (macOS/Linux) or lockfile (Windows) skips it.
+const PROFILE_DISPOSABLE = ${JSON.stringify(AUTOMATION_PROFILE_DISPOSABLE)};
+const PROFILE_CACHE_BYTES = ${AUTOMATION_PROFILE_CACHE_BYTES};
+function profileHeldByChrome() {
+  if (fs.existsSync(path.join(CDP_PROFILE, 'lockfile'))) return true;
+  let target = '';
+  try { target = fs.readlinkSync(path.join(CDP_PROFILE, 'SingletonLock')); } catch (e) { return false; }
+  const pid = Number(String(target).split('-').pop());
+  if (!Number.isInteger(pid) || pid <= 0) return true;
+  try { process.kill(pid, 0); return true; } catch (e) { return e && e.code === 'EPERM'; }
+}
+function treeBytes(target, limit) {
+  let total = 0;
+  const stack = [target];
+  while (stack.length && total <= limit) {
+    const current = stack.pop();
+    let stat;
+    try { stat = fs.lstatSync(current); } catch (e) { continue; }
+    if (stat.isSymbolicLink()) continue;
+    if (!stat.isDirectory()) { total += stat.size; continue; }
+    let names = [];
+    try { names = fs.readdirSync(current); } catch (e) { continue; }
+    for (const name of names) stack.push(path.join(current, name));
+  }
+  return total;
+}
+function removeProfileEntry(relative) {
+  const target = path.join(CDP_PROFILE, ...relative.split('/'));
+  assertSafeProfile([target]);
+  try { fs.rmSync(target, { recursive: true, force: true }); } catch (e) {}
+}
+function trimRegenerableProfileStorage() {
+  assertSafeProfile();
+  if (profileHeldByChrome()) return;
+  for (const relative of PROFILE_DISPOSABLE.always) removeProfileEntry(relative);
+  let cached = 0;
+  for (const relative of PROFILE_DISPOSABLE.overBudget) {
+    cached += treeBytes(path.join(CDP_PROFILE, ...relative.split('/')), PROFILE_CACHE_BYTES - cached + 1);
+    if (cached > PROFILE_CACHE_BYTES) break;
+  }
+  if (cached > PROFILE_CACHE_BYTES) {
+    for (const relative of PROFILE_DISPOSABLE.overBudget) removeProfileEntry(relative);
+    log('trimmed regenerable profile caches over', PROFILE_CACHE_BYTES, 'bytes');
+  }
+}
+
 function resetSessionRestoreArtifacts() {
   assertSafeProfile();
   for (const relative of [
@@ -3176,11 +3225,12 @@ async function ensureChromeUnlocked() {
   // Users sign in directly in the Agentlas window; that dedicated profile is then reused as-is.
   log('using persistent Agentlas dedicated profile (no personal-profile import)');
   resetSessionRestoreArtifacts();
+  trimRegenerableProfileStorage();
   const args = [
     '--user-data-dir=' + CDP_PROFILE, '--remote-debugging-port=' + PORT,
     '--remote-debugging-address=127.0.0.1',
     '--no-first-run', '--no-default-browser-check',
-    '--disable-session-crashed-bubble', ${JSON.stringify(AUTOMATION_PROFILE_FEATURE_FLAG)},
+    '--disable-session-crashed-bubble', ...${JSON.stringify(AUTOMATION_PROFILE_FLAGS)},
     // Stability for a long-lived automation profile: stop Chrome from crashing
     // "unexpectedly" out from under the agent. Background component/self-updates
     // swap the binary under a running instance; occluded/backgrounded renderers

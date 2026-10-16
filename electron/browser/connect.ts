@@ -9,7 +9,7 @@ import { spawn } from "node:child_process";
 import { createOwnedChildDrain } from "../runtime/owned-child-drain";
 import { randomUUID } from "node:crypto";
 import { probeBrowserSession } from "./session-probe";
-import { AUTOMATION_PROFILE_FEATURE_FLAG } from "./automation-profile-flags";
+import { AUTOMATION_PROFILE_FLAGS } from "./automation-profile-flags";
 import {
   acquireBrowserCdpLease,
   browserCdpProfilePath,
@@ -196,7 +196,7 @@ export function browserLoginArgs(profile: string, url: string): string[] {
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-session-crashed-bubble",
-    AUTOMATION_PROFILE_FEATURE_FLAG,
+    ...AUTOMATION_PROFILE_FLAGS,
     // Same stability flags as the CDP launcher so a login window opened on the
     // shared dedicated profile does not later crash the automation's browser.
     "--disable-component-update",

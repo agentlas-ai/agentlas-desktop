@@ -22,7 +22,7 @@
 // 설정 파일에도 값이 아니라 런타임 alias 참조만 나간다(mcp-config.ts).
 
 import crypto from "node:crypto";
-import { AUTOMATION_PROFILE_FEATURE_FLAG } from "../browser/automation-profile-flags";
+import { AUTOMATION_PROFILE_FLAGS } from "../browser/automation-profile-flags";
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { AddressInfo } from "node:net";
@@ -455,7 +455,7 @@ async function openInAgentlasChrome(url: string, signal?: AbortSignal): Promise<
         "--disable-session-crashed-bubble",
         // Same profile as the automation browser: no component or on-device
         // model downloads from this window either.
-        AUTOMATION_PROFILE_FEATURE_FLAG,
+        ...AUTOMATION_PROFILE_FLAGS,
         "--disable-component-update",
         "--disable-background-networking",
         "--new-window",

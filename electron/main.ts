@@ -40,6 +40,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { installModelCatalogResolver, refreshRemoteCatalog } from "./runtime/model-catalog";
 import { scheduleLegacyProductSessionMove } from "./runtime/legacy-product-sessions-once";
 import { installGoogleSessionTrace } from "./browser/google-session-trace";
+import { capAppBrowserCache, trimOversizedSessionCaches } from "./browser/session-cache-budget";
 import { registerOneCapabilitiesIpc } from "./capabilities/one-capabilities-ipc";
 import { registerArchiveIpc } from "./archive/archive-ipc";
 import path from "node:path";
@@ -603,6 +604,8 @@ function initializeInstallIdentity(): InstallIdentity {
 
 const installIdentity = initializeInstallIdentity();
 traceUpdaterStartup("install-identity-ready");
+// Browser caches are bounded so the profile keeps only what automation needs (2026-10-16).
+capAppBrowserCache();
 
 /** A reopening GUI cannot migrate or boot-repair a store still owned by an
  * older service. A compatible live daemon keeps its execution and the GUI
@@ -2117,6 +2120,7 @@ app.whenReady().then(async () => {
   if (!developmentEffectsSuppressed()) scheduleLegacyProductSessionMove();
   // Records every change to the Agentlas browser's Google sign-in cookies (names and causes only) — owner 2026-10-13.
   installGoogleSessionTrace("persist:agentlas-browser-default");
+  void trimOversizedSessionCaches(["persist:agentlas-browser-default"]);
   // 4-tier model catalog (PRD 2026-08-15 D-4): wire the context-window resolver
   // so BYOK compaction stops assuming 128k, and refresh models.dev in the
   // background (TTL 24h; failure keeps the stale copy, never blocks startup).
