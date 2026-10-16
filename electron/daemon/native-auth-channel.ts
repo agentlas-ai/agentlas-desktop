@@ -8,6 +8,7 @@ import { TextDecoder } from "node:util";
 import { createHash, randomBytes } from "node:crypto";
 import type { Readable, Writable } from "node:stream";
 import { defaultControlSocketPath, type ControlSocketPeer } from "./control-socket";
+import { canonicalDaemonPath } from "./service-identity";
 import { assertNativeAuthBinding, nativeAuthCanonical, nativeAuthError, nativeDaemonEnrollment, acceptNativeDaemonEnrollment, type NativeAuthBinding, type NativeCredential, type NativeIngressNoStartObservation, type NativeServiceObservation, validateNativeServiceObservationRequest, validateNativeIngressNoStartRequest, validateNativeTerminalPreparationRequest } from "./native-auth-credentials";
 import { createNativeDaemonAuthenticator, createNativeGuiAuthenticator, decodeNativeAuthLine, type NativeAuthenticatedIdentity, type NativeTerminalCheckpointCapability, type NativeIngressNoStartConsumer, type NativeServiceObservationConsumer } from "./native-session-auth";
 const guiChannelIdentities = new WeakMap<object, () => NativeAuthenticatedIdentity | undefined>();
@@ -60,10 +61,19 @@ const errorCode = (e: unknown): string => {
   }
   return "native_operation_failed";
 };
+/**
+ * Both ends must name this socket from the same canonical userData. The daemon resolves its directory with
+ * canonicalDaemonPath before calling here (daemon/main.ts startDaemon), while the GUI passed its configured
+ * path. When userData is reached through a symlink or a Windows junction (/tmp -> /private/tmp in QA, or a
+ * support folder the user moved and linked back), the two hashes differed and native_auth_channel_lost
+ * repeated forever. Canonicalising here is idempotent: an already-canonical path, such as the installed
+ * default with no link in it, yields exactly the bytes it did before, so existing daemons keep their name.
+ */
 export function nativeAuthSocketPath(userData: string): string {
-  const ordinary = defaultControlSocketPath(userData);
+  const canonical = canonicalDaemonPath(userData);
+  const ordinary = defaultControlSocketPath(canonical);
   if (process.platform === "win32") return ordinary + "-native";
-  const name = "na-" + createHash("sha256").update(userData).digest("hex").slice(0, 16) + ".sock";
+  const name = "na-" + createHash("sha256").update(canonical).digest("hex").slice(0, 16) + ".sock";
   const preferred = path.join(path.dirname(ordinary), name);
   // The native filename is longer than daemon.sock. Bound the final published
   // address too, otherwise bind can succeed while clients cannot connect.
