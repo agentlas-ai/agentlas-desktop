@@ -2,8 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 
 const TEST_PATH_RE = /(?:^|[\s"'`=(,])((?:(?:[A-Za-z]:|\.{0,2})[\\/]|[A-Za-z0-9_@-])[A-Za-z0-9_@.:\\/-]*\.(?:test|spec)\.[cm]?[jt]sx?)(?=$|[\s"'`),:;.])/giu;
-const MUTATION_TOOL_RE = /^(?:apply_patch|write|edit|multiedit|notebookedit|bash)$/iu;
-const SHELL_TOOL_RE = /^(?:bash|shell|terminal)$/iu;
+// Display names differ per runtime: Claude Code `Bash`/`Edit`, Codex `bash`/`apply_patch`, ACP agents (copilot, cursor,
+// grok, kimi) `<kind>: <title>` (runtime/acp.ts), Antigravity `run_command`/`write_to_file`/`replace_file_content`.
+// Review 2026-10-16 (desktop-b-03): only the first two matched, so a verification stage that ran the named test on an
+// ACP runtime or Antigravity reported named-test-not-executed. The typed tool kind belongs at the runner boundary
+// (handoff); until then every runtime's names are listed here.
+const MUTATION_TOOL_RE = /^(?:(?:apply_patch|write|edit|multiedit|notebookedit|bash|write_to_file|replace_file_content)$|(?:edit|delete|move)(?::|$))/iu;
+const SHELL_TOOL_RE = /^(?:(?:bash|shell|terminal|run_command)$|execute(?::|$))/iu;
 
 interface PendingTool {
   name: string;
@@ -110,13 +115,16 @@ function parsedArgs(raw: string | undefined): Record<string, unknown> | null {
   }
 }
 
+/** One shell command line from a tool's arguments: `command` (or Antigravity's `CommandLine`), and its `cwd`/`Cwd`. */
 function commandFromArgs(raw: string | undefined): { command: string; cwd: string | null } | null {
   const parsed = parsedArgs(raw);
-  const command = typeof parsed?.command === "string" ? parsed.command : null;
+  const value = parsed?.command ?? parsed?.CommandLine;
+  const command = typeof value === "string" ? value : null;
   if (!command || command.length > 128_000) return null;
+  const cwd = parsed?.cwd ?? parsed?.Cwd;
   return {
     command,
-    cwd: typeof parsed?.cwd === "string" ? parsed.cwd : null,
+    cwd: typeof cwd === "string" ? cwd : null,
   };
 }
 
