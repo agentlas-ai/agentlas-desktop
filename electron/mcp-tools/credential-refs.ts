@@ -13,16 +13,14 @@ import { createHash, randomBytes } from "node:crypto";
  * Values never pass through this module; it only names where they live. No electron import (the daemon loads it).
  */
 
-const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+import { MCP_ENV_KEY_RE as ENV_KEY, credentialVaultKey, type McpCredentialRefs } from "../../shared/mcp-credential-slot";
+
 const CONNECTION_KEY = /^AGENTLAS_CONN_[a-f0-9]{12}_[A-Za-z0-9_]{1,100}$/;
 
-export type CredentialRefs = Readonly<Record<string, string>>;
+export type CredentialRefs = McpCredentialRefs;
 
-/** The Vault key that holds `envKey`'s value for this connection. */
-export function credentialVaultKey(server: { credentialRefs?: CredentialRefs | null }, envKey: string): string {
-  const ref = server.credentialRefs?.[envKey];
-  return typeof ref === "string" && ENV_KEY.test(ref) ? ref : envKey;
-}
+/** The Vault key that holds `envKey`'s value for this connection. One rule for Main, the daemon and the renderer. */
+export { credentialVaultKey };
 
 /** A fresh connection token; one per connection, shared by all of that connection's keys. */
 export function newConnectionCredentialToken(): string {

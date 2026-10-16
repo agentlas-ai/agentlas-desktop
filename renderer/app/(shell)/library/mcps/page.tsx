@@ -406,7 +406,7 @@ function LibraryMcpsView({ passiveEntry }: { passiveEntry: boolean }) {
 
   const enterKeys = (server: InstalledMcpServer, keys: string[]) => {
     if (!keys.length) { setConnecting(server); return; }
-    setKeyStep({ state: { queue: [{ slug: server.catalogId ?? pluginSlugOfServer(server) ?? server.name, name: serverName(server), envKeys: keys }], index: 0, result: EMPTY_RESULT }, serverIds: [server.id] });
+    setKeyStep({ state: { queue: [{ slug: server.catalogId ?? pluginSlugOfServer(server) ?? server.name, name: serverName(server), envKeys: keys, serverIds: [server.id] }], index: 0, result: EMPTY_RESULT }, serverIds: [server.id] });
   };
 
   /* ── sidebar ──────────────────────────────────────────────────── */

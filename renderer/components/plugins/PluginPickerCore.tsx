@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { BUNDLED_HUB_CATALOG_REVISION, listBundledHubPlugins } from "../../../shared/bundled-hub-catalog";
+import { connectionKeySaveTargets } from "../../../shared/mcp-credential-slot";
 import { pluginSlugCandidates } from "@/components/PluginLogo";
 import { ToolLogo } from "./ToolLogo";
 import type {
@@ -150,10 +151,17 @@ export function usePluginCatalog(options?: { enabled?: boolean }): PluginCatalog
 
 // ── 설치 실행 ─────────────────────────────────────────────────────────────────
 
+/**
+ * One connection's keys to ask for. `serverIds` names the installed rows the keys are for: a row that owns its keys
+ * (Hub-sourced since 30ef9c84, imported connectors) keeps them under its own Vault key, so the value is saved there and
+ * not under the global name the runtime would never read for that row (review 2026-10-16 HD1-a).
+ */
+export interface KeyQueueEntry { slug: string; name: string; envKeys: string[]; serverIds?: string[] }
+
 export interface PluginInstallOutcome {
   result: PluginPickerResult;
   /** 설치는 됐지만 환경변수를 받아야 하는 항목. */
-  needKeys: Array<{ slug: string; name: string; envKeys: string[] }>;
+  needKeys: KeyQueueEntry[];
   /** 설치는 됐지만 인가(OAuth)를 돌려야 하는 항목. */
   needLogin: Array<{ slug: string; name: string; serverId: string }>;
 }
@@ -302,7 +310,8 @@ export async function installPlugins(input: {
           // Only the typed probe's missing names enter the existing secure form.
           // Declared keys that are already available must never be requested again.
           const envKeys = missingEnv;
-          needKeys.push({ slug: listing.slug, name: listing.name, envKeys });
+          const serverIds = [...new Set([...connected, ...pending].map((row) => row.serverId).filter((id): id is string => !!id))];
+          needKeys.push({ slug: listing.slug, name: listing.name, envKeys, serverIds });
         } else if (failed.length > 0) {
           result.skipped.push({
             slug: listing.slug,
@@ -329,7 +338,7 @@ export interface LoginStepState {
   queue: Array<{ slug: string; name: string; serverId: string }>;
   index: number;
   /** 로그인이 끝난 뒤에 이어서 물어볼 키 목록. */
-  keyQueue: Array<{ slug: string; name: string; envKeys: string[] }>;
+  keyQueue: KeyQueueEntry[];
   result: PluginPickerResult;
 }
 
@@ -406,7 +415,7 @@ export function LoginStep({
       const status = await api.mcpTools.test(current.serverId);
       if (!stillCurrent()) return;
       if (status.missingEnv.length) {
-        const keyQueue = [...state.keyQueue, { slug: current.slug, name: current.name, envKeys: status.missingEnv }];
+        const keyQueue = [...state.keyQueue, { slug: current.slug, name: current.name, envKeys: status.missingEnv, serverIds: [current.serverId] }];
         controllerRef.current = null;
         if (state.index + 1 >= state.queue.length) onDone(state.result, keyQueue);
         else onAdvance({ ...state, index: state.index + 1, keyQueue });
@@ -485,7 +494,7 @@ export function LoginStep({
 // ── 키 입력 단계 ──────────────────────────────────────────────────────────────
 
 export interface KeyStepState {
-  queue: Array<{ slug: string; name: string; envKeys: string[] }>;
+  queue: KeyQueueEntry[];
   index: number;
   result: PluginPickerResult;
 }
@@ -544,12 +553,15 @@ export function KeyStep({
     setError(null);
     const deferred: string[] = [];
     try {
+      // Where each key lives is the connection's own slot (shared/mcp-credential-slot.ts). Read the rows once; a
+      // failed read stops the save instead of guessing the global name for a row that owns its key.
+      const servers = current.serverIds?.length ? await api.mcpTools.listInstalled() : [];
       for (const key of current.envKeys) {
         const value = (values[key] ?? "").trim();
         // 값은 여기서 곧장 vault로 간다. 빈 칸은 저장하지 않고 "나중에"로 남긴다 —
         // 빈 문자열을 저장하면 "키가 있다"고 잘못 보고된다.
         if (!value) { deferred.push(key); continue; }
-        await api.env.set(key, value);
+        for (const target of connectionKeySaveTargets(servers, current.serverIds, key)) await api.env.set(target, value);
       }
       advance(deferred);
     } catch (saveError) {

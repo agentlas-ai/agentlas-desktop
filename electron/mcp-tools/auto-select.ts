@@ -17,6 +17,7 @@ import { installFromCatalog, listInstalledServers } from "./registry";
 import { testServerConnection, requiredMcpManualEnvKeys } from "./client";
 import { resolveMcpOAuthAccessToken } from "./oauth";
 import { vaultUrlKey } from "../opencrab/constants";
+import { credentialVaultKey } from "./credential-refs";
 import { readEnvVarAliased as readEnvVar } from "../secrets/env-alias";
 import { KeychainUnavailableError } from "../secrets/keychain-host";
 import { getSource as getMarketSource } from "../marketplace";
@@ -319,10 +320,19 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   });
 }
 
+/**
+ * Read one of this connection's keys where the runtime reads it (credential-refs.ts, NH29). A connection that owns its
+ * key keeps it under its own Vault key; a same-named global key is a different account and never stands in for it.
+ * Every presence check below goes through here, so selection and the run config agree on "missing".
+ */
+function readServerEnv(server: InstalledMcpServer, key: string, deps: AutoSelectMcpDependencies): Promise<string | null> {
+  return deps.readEnvVar(credentialVaultKey(server, key));
+}
+
 async function serverHasOAuth(server: InstalledMcpServer, deps: AutoSelectMcpDependencies): Promise<boolean> {
   if (server.transport === "stdio" || !server.url) return false;
   const endpointKey = vaultUrlKey(server.url);
-  const endpoint = endpointKey ? await deps.readEnvVar(endpointKey) : server.url;
+  const endpoint = endpointKey ? await readServerEnv(server, endpointKey, deps) : server.url;
   return endpoint ? Boolean(await deps.resolveOAuthAccessToken(server.id, endpoint)) : false;
 }
 
@@ -1044,9 +1054,10 @@ export async function autoSelectMcpTools(input: {
     const hasOAuth = existingServer && existingServer.transport !== "stdio"
       ? await serverHasOAuth(existingServer, deps) : false;
     const manualKeys = existingServer && hasOAuth ? requiredMcpManualEnvKeys(existingServer, true) : null;
+    // An installed row may own its keys; a fresh catalog install has no references, so the bare name is its slot.
     const missingEnv = await missingRequiredEnv(manualKeys
       ? { ...entry, envRequirements: entry.envRequirements.filter(requirement => manualKeys.includes(requirement.key)) }
-      : entry, deps.readEnvVar);
+      : entry, existingServer ? (key) => readServerEnv(existingServer, key, deps) : deps.readEnvVar);
     if (missingEnv.length > 0) return { ...base, installed: false, missingEnv, state: "missing-key" };
 
     let server = deps.listInstalledServers().find((candidate) =>
@@ -1076,7 +1087,7 @@ export async function autoSelectMcpTools(input: {
     if (!server.enabled || server.configurationValid === false) return { ...base, installed: false, missingEnv: [], state: "disabled" };
     if (activeGoalScope) {
       const missingConfiguredEnv: string[] = [];
-      for (const key of requiredMcpManualEnvKeys(server, hasOAuth)) if (!await deps.readEnvVar(key)) missingConfiguredEnv.push(key);
+      for (const key of requiredMcpManualEnvKeys(server, hasOAuth)) if (!await readServerEnv(server, key, deps)) missingConfiguredEnv.push(key);
       if (missingConfiguredEnv.length) return { ...base, installed: false, missingEnv: missingConfiguredEnv, state: "missing-key" };
     }
     // 이 대화에서 방금 붙었던 서버는 다시 띄우지 않는다. **성공만** 기억한다.
@@ -1161,7 +1172,7 @@ export async function autoSelectMcpTools(input: {
       try {
         const hasOAuth = await serverHasOAuth(server, deps);
         for (const key of requiredMcpManualEnvKeys(server, hasOAuth)) {
-          const value = await deps.readEnvVar(key);
+          const value = await readServerEnv(server, key, deps);
           if (!value) missingEnv.push(key);
         }
         if (missingEnv.length > 0) state = "missing-key";
