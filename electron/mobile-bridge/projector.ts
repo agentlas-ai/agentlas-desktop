@@ -155,6 +155,7 @@ import {
   MOBILE_BRIDGE_DISPLAY_TEXT_BYTES,
   MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES,
   MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES,
+  mobileBridgeDecisionTextUnchanged,
   mobileBridgeJsonBytes,
   sanitizeMobileBridgeText,
   stripMobileBridgeControlFences,
@@ -353,7 +354,8 @@ function deviceSafeOneDecision(value: MobileBridgeOneDecisionDto): boolean {
     if (typeof current === "string") {
       // Rewriting a field would no longer be the exact Main Decision. Omit the
       // entire row instead of sending a sanitized-but-semantically-different approval.
-      if (sanitizeMobileBridgeText(current, Buffer.byteLength(current, "utf8") + 64) !== current) return false;
+      // Also omit a row an older phone decoder would reject: it decodes the list atomically (sanitize.ts).
+      if (!mobileBridgeDecisionTextUnchanged(current)) return false;
       continue;
     }
     if (Array.isArray(current)) {

@@ -111,6 +111,29 @@ export function stripMobileBridgeControlFences(value: string, locale: "ko" | "en
  * boundary. Ordinary transcript text stays readable; credential material,
  * local absolute paths, and in-memory attachment data URLs never cross.
  */
+/*
+ * Phone apps in the field before mobile 3ed08e1 decode the One Decision list atomically with their own copies of the
+ * pre-2026-10-17 patterns: one row they reject empties the whole list on that phone. The path boundary and the
+ * credential-assignment rule above accept more Decision text than those phones do (measured on the owner's store: 40 of
+ * 97,104 assistant lines newly pass, and the old phone decoder rejects all 40). Until a phone tells Desktop it skips a
+ * bad row and carries the new patterns, a Decision is sent only when the previous rule also accepts it, so an old phone
+ * keeps seeing exactly the list it saw before. Transcript text uses the new rule everywhere (it is display, not a decoded
+ * Decision). Retire with the phone capability; the corpus is scripts/fixtures/mobile-text-sanitize-parity.fixtures.json.
+ */
+const LEGACY_DECISION_POSIX_ABSOLUTE_RE = new RegExp(
+  "(?:file:\\/\\/)?\\/" + POSIX_ROOT + "(?:\\/[^\\/,\\r\\n\"'`<>|}\\]]+)*\\/[^\\s\\/,\\r\\n\"'`<>|}\\]]+\\/?",
+);
+const LEGACY_DECISION_POSIX_ROOT_RE = new RegExp("(?:file:\\/\\/)?\\/" + POSIX_ROOT + "(?=$|[\\s,;:\"'`<>|}\\]])");
+const LEGACY_DECISION_ASSIGNMENT_RE =
+  /\b(?:api[_-]?key|token|secret|password|passwd|pwd|cookie|session|authorization)\b\s*[:=]\s*["']?[^,\s"'}`\]]{4,}/i;
+
+/** True when Decision text is safe for every phone decoder in the field: the current rule and the previous one. */
+export function mobileBridgeDecisionTextUnchanged(value: string): boolean {
+  if (sanitizeMobileBridgeText(value, Buffer.byteLength(value, "utf8") + 64) !== value) return false;
+  return !LEGACY_DECISION_POSIX_ABSOLUTE_RE.test(value) && !LEGACY_DECISION_POSIX_ROOT_RE.test(value)
+    && !LEGACY_DECISION_ASSIGNMENT_RE.test(value);
+}
+
 export function sanitizeMobileBridgeText(value: string, maxBytes: number): string {
   const safe = maskPrivateKeyBlocks(repairMobileBridgeUtf16(value)
     .replace(DATA_URL_RE, "[redacted-data-url]"), "[redacted-secret]")
