@@ -114,6 +114,11 @@ export interface AgiBlockerFacts {
   blockedNodeId?: string | null;
   /** Evidence refs the fact reader already resolved (long_run_events seq, run ids, log line ids). */
   evidenceRefs?: readonly string[];
+  /**
+   * The goal has a continuation automation with a recorded run, the only thing switch_runtime can move
+   * (electron/agi/wiring.ts recordAgiMove). false = that move is structurally refused. Absent = unknown, not refused.
+   */
+  continuationAutomation?: boolean;
 }
 
 /** What the goal chip shows (owner correction D7): only explicit states differ from running. */
@@ -147,6 +152,28 @@ export interface AgiBlockerDiagnosis {
   evidenceRefs: string[];
   /** Why the class was chosen, a finite vocabulary. */
   reasonCode: string;
+}
+
+/** Paths whose admission depends on the goal's own structure (status, plan, automation), not on the cause. */
+const STRUCTURAL_PATHS: ReadonlySet<AgiActionKind> = new Set(["start_work_turn", "dispatch_teammate", "create_teammate", "replan_tree", "retry_node_with", "switch_runtime"]);
+/** Signals whose only remedies are the structural paths: when none is admissible nothing is left for AGI to try. */
+const STRANDABLE_SIGNALS: ReadonlySet<AgiBlockerSignalKind> = new Set(["run_failed", "pre_run_refused", "stall_detected", "missed_due_run", "blocked_status"]);
+/** Close reason of an incident whose every path the host refuses by structure (typed, never parsed from prose). */
+export const AGI_NO_ADMISSIBLE_PATH = "no_admissible_path";
+
+/**
+ * Would the host admit this path for this goal at all? Mirrors the refusals the executor returns every time for the same
+ * shape (production 2026-10-16, auto-message goals: agi.turn.deferred for a queued goal, agi.move.no-continuation-automation
+ * for a goal without a continuation automation). Unknown facts (undefined) count as admissible.
+ */
+function pathAdmissible(action: AgiActionKind, facts: AgiBlockerFacts, eligibleTactics: readonly string[]): boolean {
+  switch (action) {
+    case "start_work_turn": return goalContinuationAdmissible(facts.status, facts.pauseReason);
+    case "dispatch_teammate": case "create_teammate": return eligibleTactics.length > 0;
+    case "replan_tree": case "retry_node_with": return facts.tactics === undefined || facts.tactics.length > 0;
+    case "switch_runtime": return facts.continuationAutomation !== false;
+    default: return true;
+  }
 }
 
 const TERMINAL = new Set(["completed", "failed", "cancelled", "cancelling"]);
@@ -279,6 +306,15 @@ export function classifyAgiBlocker(facts: AgiBlockerFacts): AgiBlockerDiagnosis 
     // host defers it every time and the refusals come back as defect reports.
     if (!goalContinuationAdmissible(facts.status, facts.pauseReason)) altPaths = altPaths.filter((action) => action !== "start_work_turn");
     else if (rest.attemptDue && boundary !== "owner_stop" && !altPaths.includes("start_work_turn")) altPaths.unshift("start_work_turn");
+    // Every remaining path is refused by this goal's structure (not by a transient state): nothing AGI can attempt will ever be
+    // admitted. The failure stays visible to the owner as needs_owner (the run failed; sending the message again is theirs),
+    // and the incident settles instead of retrying forever on its backoff.
+    if (rest.attemptDue && STRANDABLE_SIGNALS.has(rest.primarySignal as AgiBlockerSignalKind) && ownerClass !== "our_defect" && !defects.length
+      && boundary !== "owner_stop"
+      && altPaths.filter((action) => !AGI_NON_ALTERNATIVE_ACTIONS.has(action)).every((action) => STRUCTURAL_PATHS.has(action) && !pathAdmissible(action, facts, eligibleTactics))) {
+      return { schemaVersion: AGI_BLOCKER_SCHEMA, goalId: facts.goalId, stateDigest, eligibleTactics, branchReadiness: facts.planReadiness?.branches.map(({ evidenceRefs: _refs, ...branch }) => branch), defects, evidenceRefs,
+        ...rest, display: "needs_owner", attemptDue: false, ownerClass, boundary, altPaths: [], reasonCode: AGI_NO_ADMISSIBLE_PATH };
+    }
     return { schemaVersion: AGI_BLOCKER_SCHEMA, goalId: facts.goalId, stateDigest, eligibleTactics, branchReadiness: facts.planReadiness?.branches.map(({ evidenceRefs: _refs, ...branch }) => branch), defects, evidenceRefs,
       ...rest, display: rest.attemptDue && boundary !== "owner_stop" ? "running" : rest.display,
       ownerClass, boundary, altPaths };

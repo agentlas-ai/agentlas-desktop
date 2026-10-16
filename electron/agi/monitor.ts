@@ -16,7 +16,7 @@
 import type { AgiDecisionControl } from "./decision-control";
 import type Database from "better-sqlite3";
 import { onDesktopStoreChange } from "../store/change-bus";
-import { AGI_NON_ALTERNATIVE_ACTIONS, type AgiActionKind, classifyAgiBlocker, type AgiBlockerDiagnosis, type AgiBlockerFacts, type AgiGoalDisplayState } from "./blocker";
+import { AGI_NO_ADMISSIBLE_PATH, AGI_NON_ALTERNATIVE_ACTIONS, type AgiActionKind, classifyAgiBlocker, type AgiBlockerDiagnosis, type AgiBlockerFacts, type AgiGoalDisplayState } from "./blocker";
 import { AgiIncidentStore, type AgiIncident } from "./incident-store";
 
 export const AGI_MONITOR_INTERVAL_MS = 60_000;
@@ -214,7 +214,7 @@ export class AgiGoalMonitor {
     if (!diagnosis.attemptDue) {
       // Running, finished, or an explicit owner stop: nothing is an impediment AGI owns.
       this.incidents.resolveGoal(goalId, diagnosis.display === "terminal" ? "goal_terminal"
-        : diagnosis.display === "paused" ? "owner_stop" : "running", nowMs);
+        : diagnosis.display === "paused" ? "owner_stop" : diagnosis.reasonCode === AGI_NO_ADMISSIBLE_PATH ? AGI_NO_ADMISSIBLE_PATH : "running", nowMs);
     } else {
       incident = this.incidents.open(diagnosis, facts.runId, nowMs).incident;
     }

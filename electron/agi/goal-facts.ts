@@ -339,7 +339,15 @@ export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): Agi
     // Audit rows and evidence refs remain intact. Only baseline blockers already
     // superseded by this exact registered wait leave the current diagnosis.
     signals: quiet ? [] : signals, tactics: plan.tactics, planReadiness: plan.readiness,
-    blockedNodeId: plan.blockedNodeId, evidenceRefs: refs };
+    blockedNodeId: plan.blockedNodeId, evidenceRefs: refs, continuationAutomation: hasContinuationAutomation(db, goalId) };
+}
+
+/** The same lookup recordAgiMove uses for switch_runtime: the newest automation of the goal and its latest recorded run. */
+function hasContinuationAutomation(db: Database.Database, goalId: string): boolean | undefined {
+  if (!tableExists(db, "automations") || !tableExists(db, "run_history")) return undefined;
+  const automation = db.prepare("SELECT id FROM automations WHERE goal_id = ? ORDER BY created_at DESC LIMIT 1").get(goalId) as { id: string } | undefined;
+  if (!automation) return false;
+  return Boolean(db.prepare("SELECT 1 FROM run_history WHERE automation_id = ? LIMIT 1").get(automation.id));
 }
 
 function episodeFactSignature(db: Database.Database, longRunId: string | null, chatId: string | null, signals: readonly AgiBlockerSignal[], refs: readonly string[],
