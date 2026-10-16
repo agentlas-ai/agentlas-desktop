@@ -26,6 +26,7 @@ import { getDb } from "../store/db";
 import { getChat } from "../store/chats";
 import { getLongRunByGoalId } from "../store/long-runs";
 import { tryRecordRunEvent } from "../store/run-events";
+import { followDaemonTurnGoal } from "../long-run/daemon-turn-goal";
 import { isGoalAdmittingDecision, prepareInvocationAutomaticGoal } from "./automatic-goal";
 
 export type GoalIntakePermission = "read" | "write" | "full";
@@ -110,7 +111,11 @@ async function performIntake(input: GoalIntakeForward, text: string): Promise<vo
     const prepared = await prepareInvocationAutomaticGoal({ runId: input.runId, chatId: input.chatId, sourceMessageId: input.sourceMessageId,
       userPrompt: text, permission: input.permission, signal: new AbortController().signal });
     if (prepared.kind === "admitted") {
-      return done("admitted", "classified_goal", { goalId: prepared.run.goalId });
+      done("admitted", "classified_goal", { goalId: prepared.run.goalId });
+      // The service turn is this Goal's run: start the Goal with it, or settle it when that turn already ended
+      // (production 2026-10-15T23:12Z: both team-room Goals stayed queued after their runs failed).
+      try { followDaemonTurnGoal(prepared.run.goalId); } catch (error) { console.warn("[goal-intake] Goal could not follow its service turn:", error); }
+      return;
     }
     if (prepared.kind === "bypass") return done("bypass", "classified_not_goal");
     return done("unavailable", prepared.reason);

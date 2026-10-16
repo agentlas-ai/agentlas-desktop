@@ -21,6 +21,7 @@ import {
   failDesktopLongRunResumeDispatch,
 } from "./app-runtime-coordinator";
 import { latestGoalWaitSubscription } from "./wait-subscriptions";
+import { settleDaemonTurnGoals } from "./daemon-turn-goal";
 import { type EffectObservationDispatcher } from "./effect-observation-tickets";
 import { currentUiLocale } from "../ui-locale";
 import { holdingAgentResidency } from "../runtime/agent-residency";
@@ -434,6 +435,9 @@ export function continueGoalForAlive(runId: string, expectedVersion: number, dis
  */
 export function sweepBlockedGoals(dispatcher: EffectObservationDispatcher, trigger: "startup" | "periodic"): BlockedGoalSweepResult[] {
   try { assertDesktopLongRunAdmissionOpen(); } catch { return []; }
+  // First, close the Goals whose only run was a background-service turn that has ended: below, a queued Goal is a resume
+  // candidate, and resuming one whose work already finished would redo it.
+  try { settleDaemonTurnGoals(); } catch (error) { console.warn("[blocked-goal-sweep] service-turn Goals could not be settled:", error); }
   const results: BlockedGoalSweepResult[] = [];
   const budget = { dispatches: 0 };
   // The per-sweep dispatch budget is first come, first served, so the order is the fairness rule. Id order always

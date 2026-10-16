@@ -81,6 +81,7 @@ import {
 import { armChatGoalContract, completeChatGoalContract, defineChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapshot, migrateLegacyGoalLifecycle } from "../store/chat-goals";
 import { automaticGoalReplayBlockerCode, prepareInvocationAutomaticGoal } from "./automatic-goal";
 import { classifyAndHandGoalIntakeToMain } from "./goal-intake-forward";
+import { followDaemonTurnGoalOfChat } from "../long-run/daemon-turn-goal";
 import { holdFiniteGoalForPendingAmendment, reviewOwnerGoalMessage } from "../long-run/goal-owner-amendment";
 import { prepareLegacyGoalLifecycle, type LegacyGoalLifecyclePreparation } from "./legacy-goal-lifecycle";
 import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
@@ -2609,6 +2610,11 @@ export class InvocationService {
       oneAttachmentRef: requestedOneAttachmentRef,
       ...requestWithoutMainContext
     } = incoming;
+    // A Goal Main admitted for an earlier background-service turn of this chat follows that turn; once it ended the room is
+    // not bound to it any more (2026-10-15: both team rooms stayed bound to Goals whose runs had failed).
+    if (!backgroundObservation && invocationProcessOwner().ownerKind !== "daemon") {
+      try { followDaemonTurnGoalOfChat(req.chatId); } catch (error) { console.warn("[invocation] service-turn Goal could not be settled:", error); }
+    }
     const storedChat = getChat(req.chatId);
     if (!storedChat) throw new Error("Chat not found");
     const chat = backgroundObservation ? { ...storedChat } : repairRootChatSurfaceController(storedChat);
