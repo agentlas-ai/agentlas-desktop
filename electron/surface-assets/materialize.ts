@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { fetchPublicHttps } from "../net/public-address-guard";
 import type {
   AgentlasSurfaceDataSet,
   AgentlasSurfaceManifest,
@@ -71,6 +72,7 @@ const FORBIDDEN_FILE_CHARS = /[^a-z0-9._-]+/g;
 const MAX_INLINE_MEDIA_BYTES = 25 * 1024 * 1024;
 const MAX_REMOTE_MEDIA_BYTES = 25 * 1024 * 1024;
 const REMOTE_FETCH_TIMEOUT_MS = 10_000;
+const REMOTE_FETCH_MAX_REDIRECTS = 3;
 
 export async function materializeSurfaceAssetPack(
   request: SurfaceAssetPackRequest,
@@ -378,33 +380,36 @@ async function hydrateRemoteAssets(
   }
 }
 
+// The URL and its allowlist entry both come from the surface manifest, which an
+// agent authors. Main fetches it outside any CLI sandbox, so every hop must be a
+// public https address (net/public-address-guard.ts), and the body is capped while
+// it streams.
 async function downloadRemoteAsset(url: string): Promise<{ mediaType: string; buffer: Buffer }> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REMOTE_FETCH_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: { "user-agent": "Agentlas/0.2 surface-asset-pack" },
-    });
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status} while fetching remote media.`);
-    }
-    const mediaType = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
-    if (!isSupportedRemoteMediaType(mediaType)) {
-      throw new Error(`Unsupported remote media type: ${mediaType || "unknown"}.`);
-    }
-    const declaredLength = Number(res.headers.get("content-length") || "0");
-    if (declaredLength > MAX_REMOTE_MEDIA_BYTES) {
-      throw new Error(`Remote media exceeds ${MAX_REMOTE_MEDIA_BYTES} bytes.`);
-    }
-    const buffer = Buffer.from(await res.arrayBuffer());
-    if (!buffer.byteLength || buffer.byteLength > MAX_REMOTE_MEDIA_BYTES) {
-      throw new Error(`Remote media exceeds ${MAX_REMOTE_MEDIA_BYTES} bytes.`);
-    }
-    return { mediaType, buffer };
-  } finally {
-    clearTimeout(timeout);
+  let mediaType = "";
+  const res = await fetchPublicHttps(url, {
+    maxBytes: MAX_REMOTE_MEDIA_BYTES,
+    timeoutMs: REMOTE_FETCH_TIMEOUT_MS,
+    maxRedirects: REMOTE_FETCH_MAX_REDIRECTS,
+    headers: { "user-agent": "Agentlas/0.2 surface-asset-pack" },
+    acceptResponse: (status, headers) => {
+      if (status < 200 || status > 299) {
+        throw new Error(`HTTP ${status} while fetching remote media.`);
+      }
+      mediaType = String(headers["content-type"] || "").split(";")[0].trim().toLowerCase();
+      if (!isSupportedRemoteMediaType(mediaType)) {
+        throw new Error(`Unsupported remote media type: ${mediaType || "unknown"}.`);
+      }
+      const declaredLength = Number(headers["content-length"] || "0");
+      if (declaredLength > MAX_REMOTE_MEDIA_BYTES) {
+        throw new Error(`Remote media exceeds ${MAX_REMOTE_MEDIA_BYTES} bytes.`);
+      }
+    },
+  });
+  const buffer = res.body;
+  if (!buffer.byteLength) {
+    throw new Error(`Remote media exceeds ${MAX_REMOTE_MEDIA_BYTES} bytes.`);
   }
+  return { mediaType, buffer };
 }
 
 function readme(model: AssetPackModel): string {
