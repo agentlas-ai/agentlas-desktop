@@ -2283,7 +2283,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   connectionClosed(context: MobileBridgeConnectionContext): void {
     this.options.nativeToolApprovals?.connectionClosed(context);
     this.options.oneSecure?.()?.connectionClosed(context);
-    this.visualSessions.closeDeviceSessions(context.deviceId);
+    // By connection, not device: a phone on LAN and relay at once keeps the visual session its live connection drives.
+    this.visualSessions.closeConnectionSessions(context.connectionId);
   }
 
   private terminalLease(terminalId: string): MobileTerminalLeaseState {

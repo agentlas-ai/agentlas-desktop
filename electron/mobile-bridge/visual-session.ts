@@ -48,6 +48,11 @@ interface VisualSessionState {
   visualSessionId: string;
   sessionEpoch: string;
   deviceId: string;
+  /**
+   * The connection that created or last drove this session. One phone can hold a LAN and a relay connection at once;
+   * a session belongs to the connection that is using it, so closing the other one leaves it alone (review 2026-10-16 H2).
+   */
+  connectionId: string;
   source: MobileBridgeVisualSourceDto;
   inputOwner: "desktop" | "mobile";
   ownerEpoch: number;
@@ -145,6 +150,7 @@ export class MobileVisualSessionManager {
       visualSessionId: `visual_${randomUUID()}`,
       sessionEpoch: `ve_${randomUUID()}`,
       deviceId: context.deviceId,
+      connectionId: context.connectionId,
       source,
       inputOwner: "desktop",
       ownerEpoch: 0,
@@ -373,9 +379,10 @@ export class MobileVisualSessionManager {
     };
   }
 
-  closeDeviceSessions(deviceId: string): void {
+  /** A closed connection takes only the sessions it was driving; the same phone's other live connection keeps its own. */
+  closeConnectionSessions(connectionId: string): void {
     for (const [id, session] of this.sessions) {
-      if (session.deviceId === deviceId) this.sessions.delete(id);
+      if (session.connectionId === connectionId) this.sessions.delete(id);
     }
   }
 
@@ -397,6 +404,8 @@ export class MobileVisualSessionManager {
     if (session.sessionEpoch !== sessionEpoch) {
       return refusal("visual_session_epoch_conflict", "The visual session epoch is stale.", session);
     }
+    // The phone moved this session to another of its connections (LAN to relay): that connection now owns it.
+    session.connectionId = context.connectionId;
     return session;
   }
 
