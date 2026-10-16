@@ -93,7 +93,10 @@ export function realGrokHome(env: NodeJS.ProcessEnv = process.env): string {
  *   - how the CLI binary the person shares with product runs (bin/ and downloads/ are links) updates itself:
  *     `cli.auto_update`, `cli.installer`, `cli.channel`. A product run must not update the person's install against
  *     their choice;
- *   - `telemetry.trace_upload`: the person's choice about uploading session traces; it changes nothing an agent does.
+ *   - the person's telemetry OPT-OUTS, never an opt-in (owner decision 2026-10-17, every product home; otherwise the
+ *     vendor default): `telemetry.trace_upload = false`, `features.telemetry = false` / `"off"`,
+ *     `diagnostics.error_reporting = false` (GROK_OPT_OUTS). They change nothing an agent does. The OTEL exporters and
+ *     the trace-upload destinations are never carried.
  * Plus the MCP servers One switched on. Everything else is left out by construction, including `permission`,
  * `sandbox`, `shell_environment_policy` (its `set` injects values into every bash), `ui` (always-approve, notification
  * hook commands, the status-line command), `hooks`, `agent`, `paths`, `plugins`, `marketplace`, `skills`, `memory`,
@@ -107,14 +110,20 @@ const GROK_KEEP_KEYS: Readonly<Record<string, ReadonlySet<string>>> = {
   endpoints: GROK_ENDPOINT_KEYS,
   models: new Set(["default", "default_reasoning_effort", "extra_headers"]),
   cli: new Set(["auto_update", "installer", "channel"]),
-  telemetry: new Set(["trace_upload"]),
+};
+/** The person's telemetry opt-outs a product run keeps: key path -> the values that mean "off" (grok 1.0.60 config reference). */
+const GROK_OPT_OUTS: Readonly<Record<string, ReadonlySet<string>>> = {
+  "telemetry.trace_upload": new Set(["false"]),
+  "features.telemetry": new Set(["false", "\"off\"", "'off'"]),
+  "diagnostics.error_reporting": new Set(["false"]),
 };
 
 /** The mirror's own config.toml: the allowlisted parts of the person's, One's MCP servers and the skills ignore. */
 export function productGrokConfig(text: string, keepServers: ReadonlySet<string>, skillsIgnore: readonly string[]): string {
-  const out = allowlistedToml(text, ({ path: [head, second] }) => GROK_KEEP_TABLES.has(head)
+  const out = allowlistedToml(text, ({ path: [head, second, ...rest], value }) => GROK_KEEP_TABLES.has(head)
     || (second !== undefined && GROK_KEEP_KEYS[head]?.has(second) === true)
-    || (head === "mcp_servers" && second !== undefined && keepServers.has(second)));
+    || (head === "mcp_servers" && second !== undefined && keepServers.has(second))
+    || (second !== undefined && rest.length === 0 && GROK_OPT_OUTS[`${head}.${second}`]?.has(value.trim()) === true));
   const ignore = skillsIgnore.length > 0 ? `[skills]\nignore = [${skillsIgnore.map((p) => JSON.stringify(p)).join(", ")}]\n` : "";
   return out && ignore ? `${out}\n${ignore}` : out || ignore;
 }

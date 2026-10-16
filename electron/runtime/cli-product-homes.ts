@@ -71,15 +71,17 @@ export function allowlistedToml(text: string, keep: (statement: TomlStatement) =
  *     fetch endpoints and their credentials, which the CLI's built-in web tools call);
  *   - the model default the CLI falls back to when the app passes no `--model` (without one Kimi stops with "No model
  *     configured"): `default_model`, `models` (the aliases mapping a model name to its provider), `thinking`;
- *   - `telemetry`: the person's choice about sending usage data; it changes nothing an agent does.
+ *   - `telemetry = false` only: the person's opt-out of usage data (owner decision 2026-10-17, every product home: carry
+ *     telemetry OPT-OUTS, never an opt-in; otherwise the vendor default). It changes nothing an agent does.
  * Everything else is left out by construction: `permission` (rules), `yolo`, `plan_mode`, `default_permission_mode`,
  * `default_plan_mode`, `hooks` (commands run on agent events), `extra_skill_dirs`, `merge_all_available_skills`,
  * `loop_control`, `background`, `subagent`, `image`, `model_catalog`, `experimental` and any key a later release adds.
  */
-const KIMI_PRODUCT_CONFIG_KEYS: ReadonlySet<string> = new Set(["providers", "default_provider", "services", "default_model", "models", "thinking", "telemetry"]);
+const KIMI_PRODUCT_CONFIG_KEYS: ReadonlySet<string> = new Set(["providers", "default_provider", "services", "default_model", "models", "thinking"]);
 
 export function productKimiConfig(text: string): string {
-  return allowlistedToml(text, (s) => KIMI_PRODUCT_CONFIG_KEYS.has(s.path[0]));
+  return allowlistedToml(text, (s) => KIMI_PRODUCT_CONFIG_KEYS.has(s.path[0])
+    || (s.path.length === 1 && s.path[0] === "telemetry" && s.value.trim() === "false"));
 }
 
 /**

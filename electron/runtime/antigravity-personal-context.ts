@@ -89,11 +89,15 @@ export function productAgyConfig(config: Record<string, unknown> | null, keepPlu
  * Headless runs honor this file's `permissions`, file access, sandbox mode, auto-execution and artifact review (agy
  * changelog), and it holds `agentMode`, `trustedWorkspaces` and UI preferences: all of that is the person's and is left
  * out by construction. Agentlas trusts the run's folder itself (GEMINI_CLI_TRUST_WORKSPACE).
+ * Plus `enableTelemetry: false` only: the person's telemetry OPT-OUT (owner decision 2026-10-17, every product home:
+ * never an opt-in; otherwise the vendor default). The key name is the CLI's own settings key read from the agy 1.4.0
+ * binary beside `hideActiveItems` / `seasonalPalette`; not measured against agy's upload.
  */
 const AGY_PRODUCT_CLI_SETTINGS_KEYS: ReadonlySet<string> = new Set(["modelProvider", "customModels", "customModelsConfig"]);
 
 export function productAgyCliSettings(settings: Record<string, unknown> | null): string {
-  return `${JSON.stringify(Object.fromEntries(Object.entries(settings ?? {}).filter(([key]) => AGY_PRODUCT_CLI_SETTINGS_KEYS.has(key))), null, 2)}\n`;
+  const kept = Object.entries(settings ?? {}).filter(([key, value]) => AGY_PRODUCT_CLI_SETTINGS_KEYS.has(key) || (key === "enableTelemetry" && value === false));
+  return `${JSON.stringify(Object.fromEntries(kept), null, 2)}\n`;
 }
 
 /** The person's project files that agy applies to a run in no project of its own: kept as identity only. */

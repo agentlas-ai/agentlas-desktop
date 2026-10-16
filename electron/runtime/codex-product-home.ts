@@ -128,6 +128,9 @@ function productStoreFor(mirrorRoot: string): string {
  *     `model`, `model_reasoning_effort`.
  * A selected `profile` is resolved here: its values for the keys above replace the root ones (Codex applies a profile over
  * the root), and nothing else of any profile is carried.
+ * Plus the person's telemetry OPT-OUTS, never an opt-in (owner decision 2026-10-17, every product home: a person who
+ * turned vendor telemetry off keeps it off in product runs; otherwise the vendor default): `analytics.enabled = false`
+ * and `feedback.enabled = false` (PRODUCT_CODEX_OPT_OUTS). `[otel]` (exporters and their endpoints) is never carried.
  * Everything else is left out by construction, including `features`, `plugins`, `marketplaces`, `mcp_servers`,
  * `skills`, `hooks`, `projects`, `notify`, `approval_policy`, `sandbox_mode`, `shell_environment_policy`, instruction
  * keys (`developer_instructions`, `model_instructions_file`, `experimental_*`), `service_tier`, `personality`,
@@ -143,6 +146,17 @@ export const PRODUCT_CODEX_CONFIG_KEYS: ReadonlySet<string> = new Set([
 ]);
 /** Tables kept whole (every key under them). */
 export const PRODUCT_CODEX_CONFIG_TABLES: ReadonlySet<string> = new Set(["model_providers"]);
+/** Tables whose `enabled = false` (the person's opt-out of Codex's usage analytics / feedback upload) a product run keeps. */
+export const PRODUCT_CODEX_OPT_OUTS: ReadonlySet<string> = new Set(["analytics", "feedback"]);
+
+/** `<table>.enabled = false` when the statement is the person's opt-out of an opt-out table (dotted or inline form), else null. */
+function codexOptOut(s: TomlStatement): string | null {
+  if (s.inArrayTable || !PRODUCT_CODEX_OPT_OUTS.has(s.path[0])) return null;
+  const value = s.value.trim();
+  if (s.path.length === 2 && s.path[1] === "enabled" && value === "false") return `${s.path[0]}.enabled = false`;
+  if (s.path.length === 1 && /^\{\s*enabled\s*=\s*false\s*\}$/.test(value)) return `${s.path[0]}.enabled = false`;
+  return null;
+}
 
 export function productCodexConfig(text: string): string {
   let statements: TomlStatement[];
@@ -154,16 +168,19 @@ export function productCodexConfig(text: string): string {
     if (s.path.length === 1 && s.path[0] === "profile") profile = tomlStringValue(s.value);
   }
   const lifted = new Map<string, string>();
+  const optOuts = new Set<string>();
   for (const s of statements) {
     const [head] = s.path;
-    if (s.path.length === 1 && PRODUCT_CODEX_CONFIG_KEYS.has(head)) root.set(head, s.value);
+    const optOut = codexOptOut(s);
+    if (optOut) optOuts.add(optOut);
+    else if (s.path.length === 1 && PRODUCT_CODEX_CONFIG_KEYS.has(head)) root.set(head, s.value);
     else if (PRODUCT_CODEX_CONFIG_TABLES.has(head) && !s.inArrayTable) tables.push(`${s.path.map(tomlKey).join(".")} = ${s.value}`);
     else if (profile !== null && s.path.length === 3 && head === "profiles" && s.path[1] === profile && PRODUCT_CODEX_CONFIG_KEYS.has(s.path[2])) {
       lifted.set(s.path[2], s.value);
     }
   }
   for (const [key, value] of lifted) root.set(key, value);
-  const lines = [...[...root].map(([key, value]) => `${tomlKey(key)} = ${value}`), ...tables];
+  const lines = [...[...root].map(([key, value]) => `${tomlKey(key)} = ${value}`), ...tables, ...optOuts];
   return lines.length > 0 ? `${lines.join("\n")}\n` : "";
 }
 

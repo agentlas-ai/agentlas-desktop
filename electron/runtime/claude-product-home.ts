@@ -60,6 +60,13 @@ const CLAUDE_SETTINGS_KEYS: ReadonlySet<string> = new Set(["apiKeyHelper", "awsA
   "forceLoginOrgUUID", "model", "effortLevel"]);
 /** `env` entries kept: which endpoint and sign-in Claude uses, and the network path to it. Nothing else of `env`. */
 const CLAUDE_ENV_KEYS = /^(?:ANTHROPIC_[A-Z0-9_]+|CLAUDE_CODE_USE_(?:BEDROCK|VERTEX|FOUNDRY)|CLAUDE_CODE_SKIP_(?:BEDROCK|VERTEX|FOUNDRY)_AUTH|CLAUDE_CODE_CLIENT_(?:CERT|KEY|KEY_PASSPHRASE)|HTTPS?_PROXY|NO_PROXY|https?_proxy|no_proxy|NODE_EXTRA_CA_CERTS)$/;
+/**
+ * `env` telemetry OPT-OUTS kept when switched on (owner decision 2026-10-17, every product home: a person who turned
+ * vendor telemetry off keeps it off in product runs; never an opt-in such as CLAUDE_CODE_ENABLE_TELEMETRY or an OTEL
+ * exporter; otherwise the vendor default). They change nothing an agent does.
+ */
+const CLAUDE_OPT_OUT_ENV_KEYS = /^(?:DISABLE_TELEMETRY|DISABLE_ERROR_REPORTING|CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC|CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY)$/;
+const switchedOn = (value: unknown): boolean => value !== undefined && value !== null && value !== "" && value !== "0" && value !== 0 && value !== false && value !== "false";
 /** Cloud credentials kept only when the same settings route Claude through that cloud (else they are the person's own tools'). */
 const CLAUDE_CLOUD_ENV_KEYS: ReadonlyArray<{ when: RegExp; keys: RegExp }> = [
   { when: /^CLAUDE_CODE_USE_BEDROCK$/, keys: /^(?:AWS_[A-Z0-9_]+)$/ },
@@ -70,7 +77,7 @@ const AGENTLAS_CLAUDE_MARKETPLACES: ReadonlySet<string> = new Set(["agentlas-cor
 
 /**
  * The mirror's own settings.json from the person's settings.json and settings.local.json (the latter wins, as in
- * Claude): only CLAUDE_SETTINGS_KEYS, the sign-in/endpoint part of `env`, and the Agentlas engine's plugins with their
+ * Claude): only CLAUDE_SETTINGS_KEYS, the sign-in/endpoint part of `env` and its telemetry opt-outs, and the Agentlas engine's plugins with their
  * marketplaces (always on for product runs; the engine plugin also carries the browser claude-browser-surface.ts falls
  * back to). Everything else is left out by construction. A file that is not JSON contributes nothing.
  */
@@ -90,6 +97,7 @@ export function productClaudeSettings(settingsText: string | null, localText: st
     const personalEnv = obj(source.env);
     for (const [key, value] of Object.entries(personalEnv)) {
       if (CLAUDE_ENV_KEYS.test(key)) env[key] = value;
+      if (CLAUDE_OPT_OUT_ENV_KEYS.test(key) && switchedOn(value)) env[key] = value;
       for (const cloud of CLAUDE_CLOUD_ENV_KEYS) {
         const routed = Object.entries(personalEnv).some(([name, on]) => cloud.when.test(name) && on !== "" && on !== "0" && on !== false && on !== "false");
         if (routed && cloud.keys.test(key)) env[key] = value;
