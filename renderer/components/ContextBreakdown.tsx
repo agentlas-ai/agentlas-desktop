@@ -42,7 +42,7 @@ const LABEL: Record<Category | "unattributed" | "overAttributed", { ko: string; 
   attachments: { ko: "첨부", en: "Attachments", color: "#c45d8c" },
   current_input: { ko: "이번 입력", en: "Input", color: "#8a8f98" },
   framing: { ko: "형식", en: "Framing", color: "#b8bcc4" },
-  unattributed: { ko: "네이티브", en: "Native", color: "var(--paper-edge-strong)" },
+  unattributed: { ko: "실행기 내장", en: "Runtime built-in", color: "var(--paper-edge-strong)" },
   overAttributed: { ko: "추정 차이", en: "Estimate gap", color: "transparent" },
 };
 
