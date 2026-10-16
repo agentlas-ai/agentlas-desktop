@@ -283,7 +283,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '2edbb8f2df1a8d4ae7cdd834cc20cab462f6acb24a8184dcaa19ec74c7b8ffa0') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '26f7da7a18e0343011356afeada67d4b35142e8ed175bf77dd3cf8fce5460d23') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -324,11 +324,11 @@ jobs:
             "scripts/test-taste-runtime-application.cjs": "d8f0fbef5b47d44b7504b8c6eb10231d5edfc3bee094657f53433f951abcb667",
             "scripts/test-terminal-ontology-loadout-feed.cjs": "c157aab78946ae9ef98f6b9af04fe207919dcf7a18e21cc664ee32bb65420e46",
             "scripts/test-toolchain-apps.cjs": "ab8c4009fd12ee9efccbbc85487bb98ef0836469402147581bf0c06be1503574",
-            "scripts/verify-agentlas-one-ui.cjs": "de342560162bf39178dfa2cac0bd4681078a3fe3b1d7935dbbc34999f627e360",
+            "scripts/verify-agentlas-one-ui.cjs": "5839102ccba184163455a5d0a6f5bb48044e8f9eb383a668e6087b8a81b0d7c1",
             "scripts/verify-build-recovery.mjs": "aa62f09ba3511d75762393cb747bf6654ef666c91b0cb90ef6bde61ed037f7fe",
             "scripts/verify-builtin-plugins-degrade.mjs": "47801c16ef3dd39c0da35d56103f8ba3eca3d179f4ce5ca8b73a8f556324eaaf",
             "scripts/verify-one-composer-surface.mjs": "4dc0eec040819d5db15d1e0e48ee866a139e33d8f3ff525cb25b3c75e5445f08",
-            "scripts/verify-one-team-permission-boundary.mjs": "f2373e909cd59c6957d6014fe6ab6f3e0a924b13b335f1d06ff8beaef353a126",
+            "scripts/verify-one-team-permission-boundary.mjs": "d95e8b6bcf2271083a8e7d12321d23f172df0426d4fffffec0571d4c23019211",
             "scripts/verify-one-team-surface.mjs": "3f48266b181c420c3f9cfcf718a6c91adecdc92c2b56aebef62d337f00981eeb",
             "scripts/current-sidebar-route-contract.cjs": "46d8f58f57e0a7a93cbde54582387d4f937e9f2bf07cd50956eb6520eb004f37",
             "scripts/verify-unanswerable-questions-hidden.mjs": "9fb5dbc618cf61511c52b171273939ab6d024bf152039ccf2c8c949c70d8b554",
@@ -709,7 +709,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '2edbb8f2df1a8d4ae7cdd834cc20cab462f6acb24a8184dcaa19ec74c7b8ffa0') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '26f7da7a18e0343011356afeada67d4b35142e8ed175bf77dd3cf8fce5460d23') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -750,11 +750,11 @@ jobs:
             "scripts/test-taste-runtime-application.cjs": "d8f0fbef5b47d44b7504b8c6eb10231d5edfc3bee094657f53433f951abcb667",
             "scripts/test-terminal-ontology-loadout-feed.cjs": "c157aab78946ae9ef98f6b9af04fe207919dcf7a18e21cc664ee32bb65420e46",
             "scripts/test-toolchain-apps.cjs": "ab8c4009fd12ee9efccbbc85487bb98ef0836469402147581bf0c06be1503574",
-            "scripts/verify-agentlas-one-ui.cjs": "de342560162bf39178dfa2cac0bd4681078a3fe3b1d7935dbbc34999f627e360",
+            "scripts/verify-agentlas-one-ui.cjs": "5839102ccba184163455a5d0a6f5bb48044e8f9eb383a668e6087b8a81b0d7c1",
             "scripts/verify-build-recovery.mjs": "aa62f09ba3511d75762393cb747bf6654ef666c91b0cb90ef6bde61ed037f7fe",
             "scripts/verify-builtin-plugins-degrade.mjs": "47801c16ef3dd39c0da35d56103f8ba3eca3d179f4ce5ca8b73a8f556324eaaf",
             "scripts/verify-one-composer-surface.mjs": "4dc0eec040819d5db15d1e0e48ee866a139e33d8f3ff525cb25b3c75e5445f08",
-            "scripts/verify-one-team-permission-boundary.mjs": "f2373e909cd59c6957d6014fe6ab6f3e0a924b13b335f1d06ff8beaef353a126",
+            "scripts/verify-one-team-permission-boundary.mjs": "d95e8b6bcf2271083a8e7d12321d23f172df0426d4fffffec0571d4c23019211",
             "scripts/verify-one-team-surface.mjs": "3f48266b181c420c3f9cfcf718a6c91adecdc92c2b56aebef62d337f00981eeb",
             "scripts/current-sidebar-route-contract.cjs": "46d8f58f57e0a7a93cbde54582387d4f937e9f2bf07cd50956eb6520eb004f37",
             "scripts/verify-unanswerable-questions-hidden.mjs": "9fb5dbc618cf61511c52b171273939ab6d024bf152039ccf2c8c949c70d8b554",
@@ -1087,7 +1087,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '2edbb8f2df1a8d4ae7cdd834cc20cab462f6acb24a8184dcaa19ec74c7b8ffa0') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '26f7da7a18e0343011356afeada67d4b35142e8ed175bf77dd3cf8fce5460d23') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -1128,11 +1128,11 @@ jobs:
             "scripts/test-taste-runtime-application.cjs": "d8f0fbef5b47d44b7504b8c6eb10231d5edfc3bee094657f53433f951abcb667",
             "scripts/test-terminal-ontology-loadout-feed.cjs": "c157aab78946ae9ef98f6b9af04fe207919dcf7a18e21cc664ee32bb65420e46",
             "scripts/test-toolchain-apps.cjs": "ab8c4009fd12ee9efccbbc85487bb98ef0836469402147581bf0c06be1503574",
-            "scripts/verify-agentlas-one-ui.cjs": "de342560162bf39178dfa2cac0bd4681078a3fe3b1d7935dbbc34999f627e360",
+            "scripts/verify-agentlas-one-ui.cjs": "5839102ccba184163455a5d0a6f5bb48044e8f9eb383a668e6087b8a81b0d7c1",
             "scripts/verify-build-recovery.mjs": "aa62f09ba3511d75762393cb747bf6654ef666c91b0cb90ef6bde61ed037f7fe",
             "scripts/verify-builtin-plugins-degrade.mjs": "47801c16ef3dd39c0da35d56103f8ba3eca3d179f4ce5ca8b73a8f556324eaaf",
             "scripts/verify-one-composer-surface.mjs": "4dc0eec040819d5db15d1e0e48ee866a139e33d8f3ff525cb25b3c75e5445f08",
-            "scripts/verify-one-team-permission-boundary.mjs": "f2373e909cd59c6957d6014fe6ab6f3e0a924b13b335f1d06ff8beaef353a126",
+            "scripts/verify-one-team-permission-boundary.mjs": "d95e8b6bcf2271083a8e7d12321d23f172df0426d4fffffec0571d4c23019211",
             "scripts/verify-one-team-surface.mjs": "3f48266b181c420c3f9cfcf718a6c91adecdc92c2b56aebef62d337f00981eeb",
             "scripts/current-sidebar-route-contract.cjs": "46d8f58f57e0a7a93cbde54582387d4f937e9f2bf07cd50956eb6520eb004f37",
             "scripts/verify-unanswerable-questions-hidden.mjs": "9fb5dbc618cf61511c52b171273939ab6d024bf152039ccf2c8c949c70d8b554",
