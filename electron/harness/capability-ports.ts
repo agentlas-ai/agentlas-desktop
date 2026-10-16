@@ -528,6 +528,19 @@ const PORTS: PortDefinition[] = [
     },
   },
   {
+    // One host seam for keyed providers (keyed-provider.ts): the owner's saved key is used by Main and never reaches the model.
+    operationId: "provider.request", kind: "job",
+    purpose: "Call a keyed provider's own API (elevenlabs-audio, openai-audio, deepgram-audio, stability-image, replicate-video, runway-video) with the owner's saved key, which never reaches you; a binary answer is written to outputDir/fileName.",
+    required: ["routeId", "path"],
+    handler: async (args, ctx) => (await import("./keyed-provider")).keyedProviderRequest(args, ctx),
+  },
+  {
+    operationId: "speech.synthesize", kind: "job",
+    purpose: "Narration with the owner's saved speech connection (elevenlabs-audio with timing, or openai-audio); the key never reaches you. text or an absolute textPath → an mp3 in outputDir, with digest, duration and a receipt; the same request again returns the same file.",
+    required: ["outputDir"],
+    handler: async (args, ctx) => (await import("./keyed-provider")).speechSynthesize(args, ctx),
+  },
+  {
     operationId: "media.image.generate", kind: "job", purpose: "Generate one image through a subscription route (Codex imagegen, AGY Gemini or Grok Imagine); the file is kept and optionally copied into <outputDir>/assets.", required: ["prompt"],
     handler: async (args, ctx) => {
       const route = str(args.routeId) || "auto";
