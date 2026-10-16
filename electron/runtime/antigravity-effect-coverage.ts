@@ -21,7 +21,13 @@ export class AntigravityEffectCoverage {
   constructor(private readonly scopeId: string,
     private readonly claimMcpEffect?: (server: string, tool: string, args: unknown, failed: boolean, operationId: string, outputDigest: string | null) => MainMcpEffectReceipt | undefined,
     private readonly unmatchedMcpEffects?: () => number,
-    private readonly attestMetadataSteps?: (conversationId: string, indices: readonly number[]) => boolean) {}
+    private readonly attestMetadataSteps?: (conversationId: string, indices: readonly number[]) => boolean,
+    /**
+     * structuredAnswerChannel: the run passed `--json-schema`. agy 1.4.0 (measured 2026-10-16) takes the answer through its
+     * built-in `finish` tool: a schema-invalid submission is a `finish` tool step in ERROR, the accepted one closes as a
+     * `finish` step (DONE, no payload). Both are the answer protocol, never an operation on the outside world.
+     */
+    private readonly options: { structuredAnswerChannel?: boolean } = {}) {}
   toolId(id: string): string { return `${this.scopeId}:${id}`; }
   private frame(kind: string): void {
     if (this.frames.size < MAX_FRAME_KINDS || this.frames.has(kind)) this.frames.add(kind);
@@ -88,6 +94,16 @@ export class AntigravityEffectCoverage {
       if (step.state === "ERROR") this.reasons.add("agent-step-error");
       else if (step.state !== "ACTIVE" && step.state !== "DONE") this.reasons.add("unsupported-agent-state");
       return;
+    }
+    if (this.options.structuredAnswerChannel) {
+      if (step.step_type === "finish") {
+        if (step.tool_info !== undefined || step.tool_name !== undefined || step.subagent_info !== undefined || step.state !== "DONE") this.reasons.add("invalid-finish-step");
+        return;
+      }
+      if (step.step_type === "tool" && (step.tool_name || step.tool_info?.name) === "finish") {
+        if (!["ACTIVE", "DONE", "ERROR"].includes(step.state)) this.reasons.add("unsupported-tool-state");
+        return;
+      }
     }
     if (step.step_type !== "tool") { this.reasons.add("unsupported-step-type"); return; }
     const index = step.step_index, name = step.tool_name || step.tool_info?.name;

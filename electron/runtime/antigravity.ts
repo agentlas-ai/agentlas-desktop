@@ -735,6 +735,17 @@ export function reduceAgyLine(
     resultError?: string;
     resultErrorCode?: string;
     resultRetryAfterHint?: string;
+    /**
+     * The run passed `--json-schema`. agy 1.4.0 (measured 2026-10-16) enforces the schema through its built-in `finish`
+     * tool: the model writes a draft as an agent_response, submits it as `finish` arguments, and a schema-invalid
+     * submission comes back as a `finish` tool step in ERROR ("invalid arguments: ...") after which the model writes the
+     * next draft. The accepted submission closes as a `finish` step and is carried by `result.structured_output`.
+     * `result.response` is the concatenation of every agent_response of the turn, i.e. all drafts (4 in the measured
+     * run: 3644+4172+4068+4048 = 15932 characters = response length; only the last draft was valid).
+     */
+    schemaBound?: boolean;
+    /** JSON of `result.structured_output`: the schema-accepted answer of a `--json-schema` run. */
+    structuredOutput?: string;
   },
 ): {
   delta?: string;
@@ -790,6 +801,8 @@ export function reduceAgyLine(
       errorCode?: unknown;
       retry_after?: unknown;
       retryAfter?: unknown;
+      /** `--json-schema` runs: the arguments of the accepted `finish` submission (measured agy 1.4.0). */
+      structured_output?: unknown;
     };
     step_update?: {
       conversation_id?: string;
@@ -825,6 +838,10 @@ export function reduceAgyLine(
    */
   if (ev.event === "result" && ev.result) {
     if (typeof ev.result.response === "string") state.finalResponse = ev.result.response;
+    // The typed final answer of a `--json-schema` run (see schemaBound); `response` holds every draft of the turn.
+    if (state.schemaBound && Object.hasOwn(ev.result, "structured_output") && ev.result.structured_output !== undefined) {
+      try { state.structuredOutput = JSON.stringify(ev.result.structured_output); } catch { /* unserializable: no typed answer */ }
+    }
     state.resultStatus = typeof ev.result.status === "string" ? ev.result.status : undefined;
     state.resultConversationId = typeof (ev.result.conversation_id ?? ev.conversation_id) === "string"
       ? ev.result.conversation_id ?? ev.conversation_id : undefined;
@@ -878,6 +895,11 @@ export function reduceAgyLine(
   if (step.step_type === "user_input" && state.firstUserInputStepIndex === undefined) {
     const index = (step as { step_index?: unknown }).step_index;
     if (typeof index === "number" && Number.isSafeInteger(index) && index >= 0) state.firstUserInputStepIndex = index;
+  }
+  // A `--json-schema` run submits its answer through agy's built-in `finish` tool (see schemaBound): a rejected
+  // submission is a schema retry inside agy, not a tool the run used, so it is neither shown nor counted as an action.
+  if (state.schemaBound && step.step_type === "tool" && (step.tool_name || step.tool_info?.name) === "finish") {
+    return { activity: "finish" };
   }
 
   /*
@@ -2501,7 +2523,8 @@ async function runPreparedAntigravityAttempt(
     if (receipt) claimedEffects.add(receipt.id);
     if (exact) executionClaims.push({operationId,outputDigest,receipt:exact});
     return receipt;
-  }, () => hostEffects.size - claimedEffects.size + Number(hostReceiptOverflow), attestAntigravityMetadataSteps);
+  }, () => hostEffects.size - claimedEffects.size + Number(hostReceiptOverflow), attestAntigravityMetadataSteps,
+  { structuredAnswerChannel: Boolean(runReq.outputSchema) });
   let effectExitCode: number | null = null, effectStdoutEnded = false;
   return new Promise<AntigravityAttemptResult>((resolve, reject) => {
     const invocationStartedAtMs = Date.now();
@@ -2563,7 +2586,9 @@ async function runPreparedAntigravityAttempt(
       resultError?: string;
       resultErrorCode?: string;
       resultRetryAfterHint?: string;
-    } = { text: "", inputTokens: 0, outputTokens: 0 };
+      schemaBound?: boolean;
+      structuredOutput?: string;
+    } = { text: "", inputTokens: 0, outputTokens: 0, schemaBound: Boolean(runReq.outputSchema) };
     const announcedDenials = new Set<string>();
     const reportedAgyTools = new Set<string>();
     const stagedAgyGeneratedImageSources = new Set<string>();
@@ -2822,7 +2847,11 @@ async function runPreparedAntigravityAttempt(
         // If the final event itself is malformed, prefer a clean accumulated
         // response. If every candidate contains U+FFFD, fail closed instead of
         // persisting a visibly corrupted answer.
-        const responseCandidates = [agyState.finalResponse, agyState.text]
+        // A `--json-schema` run answers on its typed channel, result.structured_output (the accepted `finish` submission);
+        // its result.response is every draft of the turn joined, never the answer. An agy that reports no typed answer
+        // keeps the earlier reading.
+        const structuredAnswer = runReq.outputSchema ? agyState.structuredOutput : undefined;
+        const responseCandidates = (structuredAnswer !== undefined ? [structuredAnswer] : [agyState.finalResponse, agyState.text])
           .filter((value): value is string => typeof value === "string" && value.length > 0);
         const agyBody = responseCandidates.find((value) => !value.includes("\uFFFD"));
         if (responseCandidates.length > 0 && !agyBody) {
@@ -2831,6 +2860,8 @@ async function runPreparedAntigravityAttempt(
         }
         const body = agyBody ?? "";
         const trimmed = body.trim();
+        // The drafts streamed as partials were not the answer; the last partial is (as Claude's StructuredOutput channel).
+        if (structuredAnswer !== undefined && trimmed) events.onPartial(trimmed);
         /*
          * ★승인 거부로 답이 비었으면 성공이 아니다.
          *
