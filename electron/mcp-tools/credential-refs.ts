@@ -36,6 +36,11 @@ export function connectionVaultKey(token: string, envKey: string): string {
   return `AGENTLAS_CONN_${token}_${suffix}`;
 }
 
+/** True for a connection-owned Vault key. Its value belongs to that one connection, so no reader may stand another saved key in for it. */
+export function isConnectionVaultKey(key: string): boolean {
+  return CONNECTION_KEY.test(key);
+}
+
 /** Vault keys this connection alone owns (safe to delete on its sign-out or removal; global keys are never listed). */
 export function connectionOwnedVaultKeys(server: { credentialRefs?: CredentialRefs | null }): string[] {
   return Object.values(server.credentialRefs ?? {}).filter((ref) => typeof ref === "string" && CONNECTION_KEY.test(ref));
