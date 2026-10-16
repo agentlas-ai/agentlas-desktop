@@ -251,6 +251,13 @@ function ProjectPage() {
   const [rosterQuery, setRosterQuery] = useState("");
   const [inspectorCollapsed, setInspectorCollapsed] = useAppUiPreference("projectInspectorCollapsed");
   const [loading, setLoading] = useState(true);
+  // Read by background refreshes without re-creating them: an open editor keeps its draft, and a task event from
+  // another project does not reload this one (review 2026-10-16, clients-05).
+  const editingNoteRef = useRef(false);
+  const editingTeamRef = useRef(false);
+  const taskIdsRef = useRef<ReadonlySet<string>>(new Set());
+  useEffect(() => { editingNoteRef.current = editingNote; }, [editingNote]);
+  useEffect(() => { editingTeamRef.current = editingTeam; }, [editingTeam]);
   const [recoveryPending, setRecoveryPending] = useState(false);
   /** "새 채팅" 만들기가 실패한 이유. 읽기 실패(recoveryPending)와 섞지 않는다. */
   const [startChatError, setStartChatError] = useState("");
@@ -324,9 +331,12 @@ function ProjectPage() {
     }
   }
 
-  const refresh = useCallback(async () => {
+  // A background refresh (store or window events after the first load) never shows the loading placeholder: that
+  // unmounted the whole page, and with it whatever the owner was typing.
+  const refresh = useCallback(async (opts?: { background?: boolean }) => {
+    const background = opts?.background === true;
     const api = ipc();
-    setLoading(true);
+    if (!background) setLoading(true);
     setRecoveryPending(false);
     if (!id) {
       navigate("/dashboard", "replace");
@@ -356,11 +366,14 @@ function ProjectPage() {
       // Keep the complete saved pool in state. The editor shows only
       // user-facing members, but saving it must preserve older hidden roles.
       setProject(p);
-      setNoteDraft(p.systemPrompt ?? "");
+      // An open editor owns its draft; a refresh only resets the drafts nobody is editing.
+      if (!editingNoteRef.current) setNoteDraft(p.systemPrompt ?? "");
       // Older projects and imported fixtures can predate the ordered pool.
       // Keep that state explicit and empty instead of inventing a controller.
-      setAgentPoolDraft(userFacingPool);
-      setTasks(taskRows.filter((task) => task.projectId === id));
+      if (!editingTeamRef.current) setAgentPoolDraft(userFacingPool);
+      const projectTasks = taskRows.filter((task) => task.projectId === id);
+      taskIdsRef.current = new Set(projectTasks.map((task) => task.id));
+      setTasks(projectTasks);
       // Keep the complete installed graph for identity resolution. The roster
       // builder exposes only executable user-facing teams and agents; internal
       // HQ role cells remain private to their controller.
@@ -390,37 +403,55 @@ function ProjectPage() {
   useEffect(() => {
     let disposed = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let timerDueAt = 0;
+    let foregroundPending = false;
     let refreshing = false;
     let refreshQueued = false;
 
-    const scheduleRefresh = () => {
-      if (disposed || timer) return;
+    // Only the first load of this project shows the loading placeholder; every later refresh is a background one.
+    const scheduleRefresh = (opts: { background: boolean; delayMs?: number }) => {
+      if (disposed) return;
+      if (!opts.background) foregroundPending = true;
+      const delayMs = opts.delayMs ?? 0;
+      const dueAt = Date.now() + delayMs;
+      if (timer) {
+        if (dueAt >= timerDueAt) return;
+        clearTimeout(timer);
+      }
+      timerDueAt = dueAt;
       timer = setTimeout(() => {
         timer = null;
         if (refreshing) {
           refreshQueued = true;
           return;
         }
+        const background = !foregroundPending;
+        foregroundPending = false;
         refreshing = true;
-        void refresh().finally(() => {
+        void refresh({ background }).finally(() => {
           refreshing = false;
           if (refreshQueued && !disposed) {
             refreshQueued = false;
-            scheduleRefresh();
+            scheduleRefresh({ background: true });
           }
         });
-      }, 0);
+      }, delayMs);
     };
 
-    const onChanged = () => scheduleRefresh();
+    const onChanged = () => scheduleRefresh({ background: true });
     window.addEventListener("agentlas:projects-changed", onChanged);
     window.addEventListener("agentlas:tasks-changed", onChanged);
     const unsubscribe = ipcEvents()?.onStoreChanged?.((change) => {
-      if ((change.entity === "project" && change.id === id) || change.entity === "task") {
-        scheduleRefresh();
+      if (change.entity === "project" && change.id === id) {
+        scheduleRefresh({ background: true });
+      } else if (change.entity === "task") {
+        // Task events carry no project id: one of this page's tasks refreshes now, any other task (possibly a new one
+        // in this project) at most once a second. Every automation run emits these from all projects.
+        const ownTask = typeof change.id === "string" && taskIdsRef.current.has(change.id);
+        scheduleRefresh({ background: true, delayMs: ownTask ? 0 : 1_000 });
       }
     });
-    scheduleRefresh();
+    scheduleRefresh({ background: false });
 
     return () => {
       disposed = true;
