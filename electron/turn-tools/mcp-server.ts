@@ -1,7 +1,6 @@
 import { fixedPurposePrompt, purposePrompt } from "../runtime/purpose-prompts";
-import { createHash } from "node:crypto";
 import path from "node:path";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { BUILTIN_MCP_LAUNCH_ARGV_MAX_CHARS, defineBuiltinMcpLaunch } from "../mcp-tools/builtin-mcp-launch";
 import { MEMORY_KINDS, MEMORY_SCOPES } from "../architecture/manifest";
 
 /*
@@ -13,8 +12,8 @@ import { MEMORY_KINDS, MEMORY_SCOPES } from "../architecture/manifest";
  * Tools now: memory_note (replaces the `## Memory Events` envelope; the per-turn receipt/turn_summary is host-built),
  * ask_form (replaces the `<<agentlas-ask>>` block; attended runs only).
  *
- * Must not import electron (the daemon loads it). The source rides in argv as an audited, hash-checked inline launch
- * (same contract as agent-mail / workspace-preview): no disk path exists to swap.
+ * Must not import electron (the daemon loads it). The audited source launches through a file the child checks for its
+ * exact length and hash before running it (same contract as every built-in, mcp-tools/builtin-mcp-launch.ts).
  */
 export const AGENTLAS_TURN_CATALOG_ID = "agentlas-turn";
 export const AGENT_TURN_CONTROL_ENV = "AGENTLAS_TURN_CONTROL_FILE";
@@ -640,33 +639,24 @@ process.stdin.on("data", (chunk) => { input += chunk; if (Buffer.byteLength(inpu
 `;
 
 const SOURCE = `${SOURCE_HEAD}const tools = ${JSON.stringify(AGENTLAS_TURN_TOOLS)};\n${SOURCE_TAIL}`;
-const SOURCE_SHA256 = createHash("sha256").update(SOURCE).digest("hex");
-const MAX_SOURCE_BYTES = 65_536;
-const BOOTSTRAP =
-  `const z=require("node:zlib"),c=require("node:crypto"),v=require("node:vm"),b=z.gunzipSync(Buffer.from(process.argv[1],"base64"),{maxOutputLength:${MAX_SOURCE_BYTES}});` +
-  `if(b.length>${MAX_SOURCE_BYTES}||c.createHash("sha256").update(b).digest("hex")!==${JSON.stringify(SOURCE_SHA256)})process.exit(78);` +
-  `v.runInThisContext(b.toString("utf8"),{filename:"agentlas-turn.cjs"});`;
-const PAYLOAD = gzipSync(Buffer.from(SOURCE, "utf8"), { level: 9 }).toString("base64");
+// The source is a file the child verifies before running it (mcp-tools/builtin-mcp-launch.ts); argv stays short.
+const LAUNCH = defineBuiltinMcpLaunch("agentlas-turn", SOURCE);
 
 export function turnToolsMcpLaunchArgs(): string[] {
-  return ["-e", BOOTSTRAP, PAYLOAD];
+  return LAUNCH.launchArgs();
 }
 
-// The bound is the spawn's command line (Windows caps a whole one at 32,767 chars).
+/** Gate assertion only (not part of authenticity): the launch is a fixed loader and a path, whatever the source size. */
 export function turnToolsMcpLaunchWithinBudget(): boolean {
-  return JSON.stringify(turnToolsMcpLaunchArgs()).length <= 16_000;
+  return JSON.stringify(turnToolsMcpLaunchArgs()).length <= BUILTIN_MCP_LAUNCH_ARGV_MAX_CHARS;
 }
 
-export function turnToolsMcpSourceDigest(): string { return SOURCE_SHA256; }
+export function turnToolsMcpSourceDigest(): string { return LAUNCH.sourceSha256; }
 
-/** Authenticity is the decompressed source hash, never the compressed bytes (zlib versions differ). */
+/** This executable, the pinned loader, and the canonical source file holding exactly the audited source. */
 export function isAuthenticTurnToolsMcpLaunch(command: string | null, args: readonly string[]): boolean {
-  if (!command || path.resolve(command) !== path.resolve(process.execPath) || !turnToolsMcpLaunchWithinBudget()) return false;
-  if (args.length !== 3 || args[0] !== "-e" || args[1] !== BOOTSTRAP) return false;
-  try {
-    const source = gunzipSync(Buffer.from(args[2], "base64"), { maxOutputLength: MAX_SOURCE_BYTES });
-    return source.length <= MAX_SOURCE_BYTES && createHash("sha256").update(source).digest("hex") === SOURCE_SHA256;
-  } catch { return false; }
+  if (!command || path.resolve(command) !== path.resolve(process.execPath)) return false;
+  return LAUNCH.isAuthenticArgs(args);
 }
 
 export function isCanonicalTurnToolsMcpServer(server: {

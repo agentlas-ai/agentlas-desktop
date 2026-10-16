@@ -106,10 +106,11 @@ export function builtinPluginLoadFailures(): string[] {
 /**
  * The host-owned closed list of resolvers (PLUGIN-SPEC.md §2.3).
  *
- * A `kind:"builtin"` tool declares a resolver NAME, never a command line. For the two
- * `form:"inline"` tools that is the whole point: the audited source rides in argv, so there
- * is no disk path to swap between validation and spawn (INV-1). Baking their argv into a
- * manifest string would destroy that guarantee.
+ * A `kind:"builtin"` tool declares a resolver NAME, never a command line. For the
+ * `form:"inline"` tools that is the whole point: the audited source lives in the signed bundle
+ * and argv carries a loader that pins its exact length and sha256, so a source file swapped
+ * between validation and spawn is refused by the child (INV-1, mcp-tools/builtin-mcp-launch.ts).
+ * Baking their argv into a manifest string would destroy that guarantee.
  */
 const RESOLVERS: Record<string, () => { command: string; args: string[] }> = {
   // Materialized form: the launcher file is written by materializeBrowserCdpLauncher().
@@ -118,7 +119,7 @@ const RESOLVERS: Record<string, () => { command: string; args: string[] }> = {
     command: process.execPath,
     args: [`~/.agentlas/${BROWSER_CDP_LAUNCHER_BASENAME}`],
   }),
-  // Inline form — argv carries the audited, hash-checked source (INV-1..INV-4).
+  // Inline form — a pinned loader plus the content-addressed source file (INV-1..INV-4).
   "computer-use": () => ({ command: process.execPath, args: computerUseMcpLaunchArgs() }),
   "system-time": () => ({ command: process.execPath, args: systemTimeMcpLaunchArgs() }),
   "workspace-preview": () => ({ command: process.execPath, args: workspacePreviewMcpLaunchArgs() }),

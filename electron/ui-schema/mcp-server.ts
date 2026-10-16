@@ -1,6 +1,5 @@
-import { createHash } from "node:crypto";
 import path from "node:path";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { BUILTIN_MCP_LAUNCH_ARGV_MAX_CHARS, defineBuiltinMcpLaunch } from "../mcp-tools/builtin-mcp-launch";
 import { intellectUiToolText } from "../../shared/intellect-ui-prompt";
 import { SURFACE_PROTOCOL } from "../surface-emitter";
 import { AUTOMATION_PROTOCOL } from "../automation-emitter";
@@ -17,8 +16,8 @@ import { AUTOMATION_PROTOCOL } from "../automation-emitter";
  * filesystem, Main, or any credential, and the module must not import electron (the daemon loads
  * it; a top-level electron import crash-looped the daemon once already).
  *
- * The text is embedded at build time and rides in argv as an audited, hash-checked inline source
- * (same launch contract as system-time / workspace-preview): there is no disk path to swap.
+ * The text is embedded at build time in the audited source, which the child runs only after checking its exact
+ * length and hash (same launch contract as the other built-ins, mcp-tools/builtin-mcp-launch.ts).
  */
 export const AGENTLAS_UI_CATALOG_ID = "agentlas-ui";
 export const AGENTLAS_UI_TOOL_NAMES = ["read_ui_schema", "read_surface_protocol", "read_automation_protocol"] as const;
@@ -57,33 +56,24 @@ process.stdin.on("data", (chunk) => { input += chunk; if (Buffer.byteLength(inpu
 `;
 
 const SOURCE = `${SOURCE_HEAD}const SCHEMA_TEXT = ${JSON.stringify(intellectUiToolText())};\nconst SURFACE_TEXT = ${JSON.stringify(SURFACE_PROTOCOL)};\nconst AUTOMATION_TEXT = ${JSON.stringify(AUTOMATION_PROTOCOL)};\n${SOURCE_TAIL}`;
-const SOURCE_SHA256 = createHash("sha256").update(SOURCE).digest("hex");
-const BOOTSTRAP =
-  `const z=require("node:zlib"),c=require("node:crypto"),v=require("node:vm"),b=z.gunzipSync(Buffer.from(process.argv[1],"base64"),{maxOutputLength:131072});` +
-  `if(b.length>131072||c.createHash("sha256").update(b).digest("hex")!==${JSON.stringify(SOURCE_SHA256)})process.exit(78);` +
-  `v.runInThisContext(b.toString("utf8"),{filename:"agentlas-ui.cjs"});`;
-const PAYLOAD = gzipSync(Buffer.from(SOURCE, "utf8"), { level: 9 }).toString("base64");
+// The source is a file the child verifies before running it (mcp-tools/builtin-mcp-launch.ts); argv stays short.
+const LAUNCH = defineBuiltinMcpLaunch("agentlas-ui", SOURCE);
 
 export function uiSchemaMcpLaunchArgs(): string[] {
-  return ["-e", BOOTSTRAP, PAYLOAD];
+  return LAUNCH.launchArgs();
 }
 
-// The bound is the spawn's command line, not a prompt: Windows caps a whole command line at 32,767 chars,
-// so the inline launch (bootstrap + gzip payload of both texts, ~14K) stays under 24,000 with headroom.
+/** Gate assertion only (not part of authenticity): the launch is a fixed loader and a path, whatever the source size. */
 export function uiSchemaMcpLaunchWithinBudget(): boolean {
-  return JSON.stringify(uiSchemaMcpLaunchArgs()).length <= 24_000;
+  return JSON.stringify(uiSchemaMcpLaunchArgs()).length <= BUILTIN_MCP_LAUNCH_ARGV_MAX_CHARS;
 }
 
-export function uiSchemaMcpSourceDigest(): string { return SOURCE_SHA256; }
+export function uiSchemaMcpSourceDigest(): string { return LAUNCH.sourceSha256; }
 
-/** Authenticity is the decompressed source hash, never the compressed bytes (zlib versions differ). */
+/** This executable, the pinned loader, and the canonical source file holding exactly the audited source. */
 export function isAuthenticUiSchemaMcpLaunch(command: string | null, args: readonly string[]): boolean {
-  if (!command || path.resolve(command) !== path.resolve(process.execPath) || !uiSchemaMcpLaunchWithinBudget()) return false;
-  if (args.length !== 3 || args[0] !== "-e" || args[1] !== BOOTSTRAP) return false;
-  try {
-    const source = gunzipSync(Buffer.from(args[2], "base64"), { maxOutputLength: 131_072 });
-    return source.length <= 131_072 && createHash("sha256").update(source).digest("hex") === SOURCE_SHA256;
-  } catch { return false; }
+  if (!command || path.resolve(command) !== path.resolve(process.execPath)) return false;
+  return LAUNCH.isAuthenticArgs(args);
 }
 
 export function isCanonicalUiSchemaMcpServer(server: {

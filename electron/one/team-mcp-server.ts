@@ -1,5 +1,4 @@
-import { createHash } from "node:crypto";
-import { brotliCompressSync, brotliDecompressSync, constants } from "node:zlib";
+import { BUILTIN_MCP_LAUNCH_ARGV_MAX_CHARS, defineBuiltinMcpLaunch } from "../mcp-tools/builtin-mcp-launch";
 import { ONE_GRAPH_TOOLS, ONE_GRAPH_TOOL_NAMES } from "../../shared/graph-authoring";
 import { ONE_SUPERVISOR_TOOLS, ONE_SUPERVISOR_TOOL_NAMES } from "../../shared/one-supervisor-tools";
 import { ONE_PERSONAL_TOOLS, ONE_PERSONAL_TOOL_NAMES } from '../../shared/one-personal-tools';
@@ -33,8 +32,8 @@ export const ROOM_MEMBER_TOOL_NAMES = ["room_say"] as const;
  */
 export const GRAPH_EFFECT_ITEM_TOOL_NAMES = ["effect_item_check", "effect_item_record"] as const;
 
-// Inline discovery uses concise guidance; canonical input schemas and annotations
-// remain exact. This keeps the authenticated compressed launch below its 12k limit.
+// Inline discovery uses concise guidance; canonical input schemas and annotations remain exact. (Written to fit the
+// former 12k argv budget; the launch no longer carries the source, so lengthening these is a prompt change for an A/B.)
 const INLINE_GRAPH_DESCRIPTIONS: Record<string, string> = {
   one_graph_schema: "Get canonical blueprint schema or installed MCP argument schema/digest by catalog_id. Include registration protocol only for typed monitor sources.",
   one_graph_inspect: "Inspect this conversation's saved graphs/revisions. Omit graph_id to list; node_ids, node_offset or offset/limit page large results. if_cache_key avoids unchanged instructions.",
@@ -157,27 +156,23 @@ process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => { input += chunk; if (Buffer.byteLength(input, "utf8") > MAX_REQUEST_BYTES) process.exit(78); let end; while ((end = input.indexOf("\n")) >= 0) { line(input.slice(0, end).replace(/\r$/, "")); input = input.slice(end + 1); } });
 `;
 
-const SOURCE_SHA256 = createHash("sha256").update(SOURCE).digest("hex");
-const BOOTSTRAP =
-  `const z=require("node:zlib"),c=require("node:crypto"),v=require("node:vm"),b=z.brotliDecompressSync(Buffer.from(process.argv[1],"base64"),{maxOutputLength:65536});` +
-  `if(b.length>65536||c.createHash("sha256").update(b).digest("hex")!==${JSON.stringify(SOURCE_SHA256)})process.exit(78);` +
-  `v.runInThisContext(b.toString("utf8"),{filename:"agentlas-one-team.cjs"});`;
-const PAYLOAD = brotliCompressSync(Buffer.from(SOURCE, "utf8"), { params: { [constants.BROTLI_PARAM_QUALITY]: 11 } }).toString("base64");
+// The source is a file the child verifies before running it (mcp-tools/builtin-mcp-launch.ts); argv stays short.
+const LAUNCH = defineBuiltinMcpLaunch("agentlas-one-team", SOURCE);
 
 export function oneTeamMcpLaunchArgs(): string[] {
-  return ["-e", BOOTSTRAP, PAYLOAD];
+  return LAUNCH.launchArgs();
 }
 
+/** Gate assertion only (not part of authenticity): the launch is a fixed loader and a path, whatever the source size. */
 export function oneTeamMcpLaunchWithinBudget(): boolean {
-  return JSON.stringify(oneTeamMcpLaunchArgs()).length <= 12_000;
+  return JSON.stringify(oneTeamMcpLaunchArgs()).length <= BUILTIN_MCP_LAUNCH_ARGV_MAX_CHARS;
+}
+
+export function oneTeamMcpSourceDigest(): string {
+  return LAUNCH.sourceSha256;
 }
 
 export function isAuthenticOneTeamMcpLaunch(command: string | null, args: readonly string[]): boolean {
-  if (!command || command !== process.execPath || !oneTeamMcpLaunchWithinBudget()) return false;
-  if (args.length !== 3 || args[0] !== "-e" || args[1] !== BOOTSTRAP) return false;
-  try {
-    return createHash("sha256").update(brotliDecompressSync(Buffer.from(args[2], "base64"), { maxOutputLength: 65536 })).digest("hex") === SOURCE_SHA256;
-  } catch {
-    return false;
-  }
+  if (!command || command !== process.execPath) return false;
+  return LAUNCH.isAuthenticArgs(args);
 }

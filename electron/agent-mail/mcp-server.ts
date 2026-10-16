@@ -1,5 +1,4 @@
-import { createHash } from "node:crypto";
-import { gzipSync, gunzipSync } from "node:zlib";
+import { BUILTIN_MCP_LAUNCH_ARGV_MAX_CHARS, defineBuiltinMcpLaunch } from "../mcp-tools/builtin-mcp-launch";
 
 // Built-in inline MCP server: One reads and sends its own agent mail. The child
 // holds no credentials — each tool call is forwarded to Main's loopback control
@@ -134,31 +133,23 @@ process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => { input += chunk; if (Buffer.byteLength(input, "utf8") > MAX_REQUEST_BYTES) process.exit(78); let end; while ((end = input.indexOf("\n")) >= 0) { line(input.slice(0, end).replace(/\r$/, "")); input = input.slice(end + 1); } });
 `;
 
-const SOURCE_SHA256 = createHash("sha256").update(SOURCE).digest("hex");
-const BOOTSTRAP =
-  `const z=require("node:zlib"),c=require("node:crypto"),v=require("node:vm"),b=z.gunzipSync(Buffer.from(process.argv[1],"base64"),{maxOutputLength:65536});` +
-  `if(b.length>65536||c.createHash("sha256").update(b).digest("hex")!==${JSON.stringify(SOURCE_SHA256)})process.exit(78);` +
-  `v.runInThisContext(b.toString("utf8"),{filename:"agentlas-agent-mail.cjs"});`;
-const PAYLOAD = gzipSync(Buffer.from(SOURCE, "utf8"), { level: 9 }).toString("base64");
+// The source is a file the child verifies before running it (mcp-tools/builtin-mcp-launch.ts); argv stays short.
+const LAUNCH = defineBuiltinMcpLaunch("agentlas-agent-mail", SOURCE);
 
 export function agentMailMcpLaunchArgs(): string[] {
-  return ["-e", BOOTSTRAP, PAYLOAD];
+  return LAUNCH.launchArgs();
 }
 
+/** Gate assertion only (not part of authenticity): the launch is a fixed loader and a path, whatever the source size. */
 export function agentMailMcpLaunchWithinBudget(): boolean {
-  return JSON.stringify(agentMailMcpLaunchArgs()).length <= 12_000;
+  return JSON.stringify(agentMailMcpLaunchArgs()).length <= BUILTIN_MCP_LAUNCH_ARGV_MAX_CHARS;
 }
 
 export function agentMailMcpSourceDigest(): string {
-  return SOURCE_SHA256;
+  return LAUNCH.sourceSha256;
 }
 
 export function isAuthenticAgentMailMcpLaunch(command: string | null, args: readonly string[]): boolean {
-  if (!command || command !== process.execPath || !agentMailMcpLaunchWithinBudget()) return false;
-  if (args.length !== 3 || args[0] !== "-e" || args[1] !== BOOTSTRAP) return false;
-  try {
-    return createHash("sha256").update(gunzipSync(Buffer.from(args[2], "base64"))).digest("hex") === SOURCE_SHA256;
-  } catch {
-    return false;
-  }
+  if (!command || command !== process.execPath) return false;
+  return LAUNCH.isAuthenticArgs(args);
 }

@@ -1,6 +1,5 @@
-import { createHash } from "node:crypto";
 import path from "node:path";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { BUILTIN_MCP_LAUNCH_ARGV_MAX_CHARS, defineBuiltinMcpLaunch } from "./builtin-mcp-launch";
 
 export const AGENTLAS_SYSTEM_TIME_CATALOG_ID = "agentlas-time";
 export const AGENTLAS_SYSTEM_TIME_TOOL_NAMES = ["get_current_time", "convert_time"] as const;
@@ -177,69 +176,45 @@ process.stdin.on("data", (chunk) => {
 });
 `;
 
-// Both tools carry MCP readOnlyHint (READ_ONLY above; kept terse because the
-// source rides in argv). codex exec runs every write/automation turn with
+// Both tools carry MCP readOnlyHint (READ_ONLY above; kept terse from when the
+// source rode in argv). codex exec runs every write/automation turn with
 // approval_policy "never" and refused each unannotated call before the server saw
 // it: "MCP tool call requires approval, but approval policy is never" (Threads
 // automation 2026-09-24 14:14Z/19:11Z, 2026-09-25 00:03Z; probed on codex-cli
 // 0.156.1 — same source without the hint failed, with it completed).
 // Contract: scripts/system-time-tools-are-read-only-contract.cjs.
 //
-// Keep the audited server in the signed Main bundle and launch it from an
-// in-memory compressed payload. A pathname under ~/.agentlas (or even a
-// packaged resource) can be replaced after validation but before the child
-// process opens it. Exact argv removes that validate-then-open window across
-// macOS, Windows portable/installers, and Linux packages.
-const SYSTEM_TIME_SOURCE_SHA256 = createHash("sha256").update(SYSTEM_TIME_SERVER_SOURCE).digest("hex");
-const SYSTEM_TIME_INLINE_BOOTSTRAP =
-  `const z=require("node:zlib"),c=require("node:crypto"),v=require("node:vm"),b=z.gunzipSync(Buffer.from(process.argv[1],"base64"),{maxOutputLength:65536});` +
-  `if(b.length>65536||c.createHash("sha256").update(b).digest("hex")!==${JSON.stringify(SYSTEM_TIME_SOURCE_SHA256)})process.exit(78);` +
-  `v.runInThisContext(b.toString("utf8"),{filename:"agentlas-system-time.cjs"});`;
-const SYSTEM_TIME_INLINE_PAYLOAD = gzipSync(Buffer.from(SYSTEM_TIME_SERVER_SOURCE, "utf8"), {
-  level: 9,
-}).toString("base64");
-
-/** Conservative guard for Claude's Windows .cmd command-line boundary. */
-export const AGENTLAS_SYSTEM_TIME_INLINE_ARGS_MAX_JSON_CHARS = 4_096;
+// Keep the audited server in the signed Main bundle. The launch is a pinned
+// loader and a content-addressed file (builtin-mcp-launch.ts): the child checks
+// the file's exact length and sha256 on the bytes it then runs, so a pathname
+// replaced after validation is refused, never executed, on macOS, Windows
+// portable/installers and Linux packages alike. (The source used to ride in
+// argv, under a 4,096-char budget that was part of authenticity.)
+const LAUNCH = defineBuiltinMcpLaunch("agentlas-system-time", SYSTEM_TIME_SERVER_SOURCE);
 
 export function systemTimeMcpLaunchArgs(): string[] {
-  return ["-e", SYSTEM_TIME_INLINE_BOOTSTRAP, SYSTEM_TIME_INLINE_PAYLOAD];
+  return LAUNCH.launchArgs();
 }
 
+/** Gate assertion only (not part of authenticity): the launch is a fixed loader and a path, whatever the source size. */
 export function systemTimeMcpLaunchWithinBudget(): boolean {
-  return JSON.stringify(systemTimeMcpLaunchArgs()).length <= AGENTLAS_SYSTEM_TIME_INLINE_ARGS_MAX_JSON_CHARS;
+  return JSON.stringify(systemTimeMcpLaunchArgs()).length <= BUILTIN_MCP_LAUNCH_ARGV_MAX_CHARS;
 }
 
 export function systemTimeMcpSourceDigest(): string {
-  return SYSTEM_TIME_SOURCE_SHA256;
+  return LAUNCH.sourceSha256;
 }
 
 /**
- * ★압축된 바이트로 판정하지 않는다 — 같은 병이 컴퓨터 유즈에서 실제로 터졌다
- * (2026-09-07: 소스 sha256 은 바이트까지 같은데 gzip 결과가 6372 vs 6424 로 달라
- * 설치된 서버가 "위조"로 걸려 MCP 설정에서 통째로 빠졌다. 화면엔 아무 오류도 없었다).
- * gzip 출력은 zlib 버전이 바뀌면 재현되지 않으므로, 앱 업데이트가 곧 기능 소멸이 된다.
- *
- * 지켜야 할 것은 "저 인자가 **우리 코드**를 실행하는가"다. 그러니 소스 해시로 판정한다.
- * 자세한 근거는 electron/computer-use/mcp-server.ts 의 같은 함수 주석에 있다.
+ * Is this launch our System Time server: this executable, the loader that pins
+ * the audited source's length and sha256, and the canonical source file holding
+ * exactly that source. Decided by the source, never by compressed bytes (a zlib
+ * update once turned an identical installed source into a "forgery" and dropped
+ * Computer Use without a word, 2026-09-07; electron/computer-use/mcp-server.ts).
  */
 export function isAuthenticSystemTimeMcpLaunch(command: string | null, args: readonly string[]): boolean {
   if (!command || path.resolve(command) !== path.resolve(process.execPath)) return false;
-  if (!systemTimeMcpLaunchWithinBudget()) return false;
-  if (args.length !== 3 || args[0] !== "-e" || args[1] !== SYSTEM_TIME_INLINE_BOOTSTRAP) return false;
-  return systemTimeInlinePayloadDigest(args[2]) === SYSTEM_TIME_SOURCE_SHA256;
-}
-
-/** 인라인 payload 를 풀어 소스 sha256 을 낸다. 못 풀면 null. 상한은 부트스트랩과 같다. */
-export function systemTimeInlinePayloadDigest(payloadBase64: string): string | null {
-  try {
-    if (typeof payloadBase64 !== "string" || payloadBase64.length > AGENTLAS_SYSTEM_TIME_INLINE_ARGS_MAX_JSON_CHARS) return null;
-    const source = gunzipSync(Buffer.from(payloadBase64, "base64"), { maxOutputLength: 65_536 });
-    if (source.length > 65_536) return null;
-    return createHash("sha256").update(source).digest("hex");
-  } catch {
-    return null;
-  }
+  return LAUNCH.isAuthenticArgs(args);
 }
 
 export function isCanonicalSystemTimeMcpServer(server: {

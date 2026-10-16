@@ -1,6 +1,5 @@
-import { createHash } from "node:crypto";
 import path from "node:path";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { BUILTIN_MCP_LAUNCH_ARGV_MAX_CHARS, defineBuiltinMcpLaunch } from "../mcp-tools/builtin-mcp-launch";
 
 export const AGENTLAS_COMPUTER_USE_CATALOG_ID = "cua-driver";
 export const AGENTLAS_COMPUTER_USE_TOOL_NAMES = [
@@ -415,69 +414,40 @@ process.stdin.on("data", (chunk) => {
 });
 `;
 
-const SOURCE_SHA256 = createHash("sha256").update(COMPUTER_USE_MCP_SOURCE).digest("hex");
-const INLINE_BOOTSTRAP =
-  `const z=require("node:zlib"),c=require("node:crypto"),v=require("node:vm"),b=z.gunzipSync(Buffer.from(process.argv[1],"base64"),{maxOutputLength:131072});` +
-  `if(b.length>131072||c.createHash("sha256").update(b).digest("hex")!==${JSON.stringify(SOURCE_SHA256)})process.exit(78);` +
-  `v.runInThisContext(b.toString("utf8"),{filename:"agentlas-computer-use.cjs"});`;
-const INLINE_PAYLOAD = gzipSync(Buffer.from(COMPUTER_USE_MCP_SOURCE, "utf8"), { level: 9 }).toString("base64");
-
-export const AGENTLAS_COMPUTER_USE_INLINE_ARGS_MAX_JSON_CHARS = 24_000;
+// The source is a file the child verifies before running it (mcp-tools/builtin-mcp-launch.ts); argv stays short.
+// (It used to ride in argv under a 24,000-char budget that was part of authenticity.)
+const LAUNCH = defineBuiltinMcpLaunch("agentlas-computer-use", COMPUTER_USE_MCP_SOURCE);
 
 export function computerUseMcpLaunchArgs(): string[] {
-  return ["-e", INLINE_BOOTSTRAP, INLINE_PAYLOAD];
+  return LAUNCH.launchArgs();
 }
 
+/** Gate assertion only (not part of authenticity): the launch is a fixed loader and a path, whatever the source size. */
 export function computerUseMcpLaunchWithinBudget(): boolean {
-  return JSON.stringify(computerUseMcpLaunchArgs()).length <= AGENTLAS_COMPUTER_USE_INLINE_ARGS_MAX_JSON_CHARS;
+  return JSON.stringify(computerUseMcpLaunchArgs()).length <= BUILTIN_MCP_LAUNCH_ARGV_MAX_CHARS;
 }
 
 export function computerUseMcpSourceDigest(): string {
-  return SOURCE_SHA256;
+  return LAUNCH.sourceSha256;
 }
 
 /**
  * 이 실행이 우리가 만든 컴퓨터 유즈 드라이버인가.
  *
  * ★압축된 바이트를 비교하면 안 된다 (실측 2026-09-07, 오너 "컴퓨터 유즈를 못하네").
+ *   압축해제 소스 sha256 은 바이트까지 같았는데 gzip payload 길이가 6372 vs 6424 로 달라,
+ *   앱을 업데이트하자 설치된 cua-driver 행이 "위조"로 판정돼 MCP 설정에서 통째로 빠졌다.
+ *   화면에는 아무 오류도 안 떴다 — One 과 Work 둘 다 컴퓨터 유즈가 그냥 없어졌다.
  *
- *   저장된 서버 행과 현재 빌드를 실제로 대조했더니:
- *     압축해제 소스 sha256   현재 2c22587e…5020  ==  저장 2c22587e…5020   (**바이트까지 동일**)
- *     base64 압축 payload    현재 6372자          !=  저장 6424자
- *   **gzip 출력은 재현되지 않는다.** zlib 버전이 바뀌면 같은 소스가 다른 바이트로 압축된다.
- *
- *   그래서 앱을 업데이트하면 설치된 cua-driver 행이 "위조"로 판정되고
- *   (mcp-config.ts / client.ts 가 이 함수로 거른다) MCP 설정에서 **통째로 빠진다.**
- *   화면에는 아무 오류도 안 뜬다 — 그냥 컴퓨터 유즈가 없어진다. One 과 Work 둘 다.
- *
- * 우리가 실제로 지키려는 것은 "저 인자가 **우리 코드**를 실행하는가"이지
- * "저 바이트가 오늘 빌드의 압축 결과와 같은가"가 아니다. 그러니 소스로 판정한다:
+ * 지키려는 것은 "저 인자가 **우리 코드**를 실행하는가"다. 그래서 소스로 판정한다:
  *   ① 실행 파일이 지금 이 실행 파일이고
- *   ② 부트스트랩이 우리 것이며(그 안에 소스 해시 핀이 박혀 있다 — 런타임 검증의 주체)
- *   ③ payload 를 풀었을 때 **소스 해시가 우리 것과 같다**
- * 이 셋이면 압축 방식이 무엇이든 실행되는 코드는 우리 것이다. 압축 바이트 비교보다
- * 약해지지 않는다 — 오히려 우연한 재압축에 안 깨지면서 같은 것을 증명한다.
+ *   ② 로더가 우리 것이며(소스의 정확한 길이와 sha256 핀이 박혀 있다 — 자식이 실행 직전에 검증한다)
+ *   ③ 인자의 경로가 이 소스의 정규 파일이고, 그 파일이 소스와 바이트까지 같다(없거나 바뀌었으면 다시 쓴다)
+ * 판정은 매번 다시 계산한다(INV-2). 검증 뒤 파일이 바뀌어도 자식이 핀으로 거절하므로 실행되지 않는다.
  */
 export function isAuthenticComputerUseMcpLaunch(command: string | null, args: readonly string[]): boolean {
   if (!command || path.resolve(command) !== path.resolve(process.execPath)) return false;
-  if (!computerUseMcpLaunchWithinBudget()) return false;
-  if (args.length !== 3 || args[0] !== "-e" || args[1] !== INLINE_BOOTSTRAP) return false;
-  return computerUseInlinePayloadDigest(args[2]) === SOURCE_SHA256;
-}
-
-/**
- * 인라인 payload 를 풀어 그 소스의 sha256 을 낸다. 못 풀면 null(짐작하지 않는다).
- * 부트스트랩과 같은 상한(131072)을 건다 — 압축 폭탄으로 메인 프로세스를 묶을 수 없다.
- */
-export function computerUseInlinePayloadDigest(payloadBase64: string): string | null {
-  try {
-    if (typeof payloadBase64 !== "string" || payloadBase64.length > AGENTLAS_COMPUTER_USE_INLINE_ARGS_MAX_JSON_CHARS) return null;
-    const source = gunzipSync(Buffer.from(payloadBase64, "base64"), { maxOutputLength: 131_072 });
-    if (source.length > 131_072) return null;
-    return createHash("sha256").update(source).digest("hex");
-  } catch {
-    return null;
-  }
+  return LAUNCH.isAuthenticArgs(args);
 }
 
 export function isCanonicalComputerUseMcpServer(server: {
