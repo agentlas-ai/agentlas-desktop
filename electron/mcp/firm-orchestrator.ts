@@ -211,9 +211,28 @@ export interface FirmRunParams {
   handoffGuard?: HandoffGuard;
 }
 
+/**
+ * How a firm run settled, host-observed, for a parent that holds the firm in a worker seat (borrowed-task-force reads it,
+ * never the reply's prose). "plan-only": the CEO's read-only plan turn named no delegation and its text is the answer, so
+ * the run produced and delegated nothing; "direct": the CEO executed the request itself; "delegated": reports ran.
+ */
+export interface FirmRunSettlement {
+  kind: "plan-only" | "direct" | "delegated";
+  /** Tool calls that completed in any turn of this run. */
+  completedToolCount: number;
+  /** Project files this run's tools wrote inside the bound project. */
+  artifactCount: number;
+}
+
 export interface FirmRunResult {
   ok: boolean;
   text: string;
+  settlement?: FirmRunSettlement;
+}
+
+function firmRunSettlement(kind: FirmRunSettlement["kind"], evidence: readonly (FirmExecutionEvidence | undefined)[]): FirmRunSettlement {
+  const merged = mergeFirmExecutionEvidence(evidence);
+  return { kind, completedToolCount: merged.completedToolCount, artifactCount: merged.artifactPaths.length };
 }
 
 interface FirmStageResult {
@@ -1689,11 +1708,11 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
     });
     if (!solo.ok) {
       sink({ kind: "error", error: firmFailure(req.agentAppMode, "ceo-failed", solo.text) });
-      return { ok: false, text: solo.text };
+      return { ok: false, text: solo.text, settlement: firmRunSettlement("direct", [solo.evidence]) };
     }
     if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", redactWorkAttachmentText(p.req, solo.text));
     if (p.emitFinal !== false) sink({ kind: "final", text: solo.text });
-    return { ok: true, text: solo.text };
+    return { ok: true, text: solo.text, settlement: firmRunSettlement("direct", [solo.evidence]) };
   }
 
   // 1) CEO PLAN — 어떤 하위를 쓸지 선택
@@ -1721,14 +1740,15 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
       withImages: true,
       directExecution: true,
     });
+    const settlement = firmRunSettlement("direct", [plan.evidence, solo.evidence]);
     if (!solo.ok) {
       if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", redactWorkAttachmentText(p.req, solo.text));
       sink({ kind: "error", error: firmFailure(req.agentAppMode, "ceo-failed", solo.text) });
-      return { ok: false, text: solo.text };
+      return { ok: false, text: solo.text, settlement };
     }
     if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", redactWorkAttachmentText(p.req, solo.text));
     if (p.emitFinal !== false) sink({ kind: "final", text: solo.text });
-    return { ok: true, text: solo.text };
+    return { ok: true, text: solo.text, settlement };
   };
 
   if (!plan.ok) {
@@ -1764,11 +1784,34 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
       : "The CEO plan asked for access; continuing directly under this team's grant…");
     return runCeoDirectExecution();
   }
+  /*
+   * ★ D1 (A/B3 room fc53939f, 2026-10-16, codex gpt-6.1-sol): a firm holding a Taskforce worker seat answered its write
+   *   packet with this read-only plan turn — a leaked monologue, no Delegate block — and that prose became the team's
+   *   completed packet: nothing built, nothing delegated, verifier pass. The protocol tells a CEO with no report to pick
+   *   "do it yourself" (delegate.ts), but the plan turn cannot write, and in a worker seat nobody answers after it. Under
+   *   a grant that can act, the CEO's own turn runs as a direct execution, as an unassigned division slot does
+   *   (firmDivisionRequiresDirectExecution). The owner's own firm keeps the plan answer (a conversational reply), and a
+   *   read-only seat settles "plan-only", which the parent reads as typed state.
+   */
+  if (matched.length === 0 && p.controllerRuntimeRole === "worker"
+    && firmNodePermission(p, { tier: 1, phase: "synthesize" }) !== "read"
+    && !firmTurnNeedsZeroAuthority(p, {})) {
+    tryRecordRunEvent({
+      runId: p.req.runId ?? `firm:${chat.id}`, chatId: chat.id, nodeId: org.ceo.id, agentId: org.ceo.agentId ?? null,
+      kind: "firm_plan_direct_execution",
+      payload: { schemaVersion: "agentlas.firm-plan-direct-execution.v1", reason: "no_delegation",
+        grant: firmNodePermission(p, { tier: 1, phase: "synthesize" }), controllerRole: "worker" },
+    });
+    mainStatus(ko
+      ? "CEO가 맡길 팀원을 정하지 않아, 이 팀이 받은 권한으로 직접 진행합니다…"
+      : "The CEO named no teammate; continuing directly under this team's grant…");
+    return runCeoDirectExecution();
+  }
   if (matched.length === 0) {
     // CEO가 위임 안 함 → plan.text가 곧 최종 답
     if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", redactWorkAttachmentText(p.req, plan.text));
     if (p.emitFinal !== false) sink({ kind: "final", text: plan.text });
-    return { ok: true, text: plan.text };
+    return { ok: true, text: plan.text, settlement: firmRunSettlement("plan-only", [plan.evidence]) };
   }
 
   // 핸드오프: 네트워크 패널(속성) + 메인 버블(진행) 둘 다
@@ -2081,6 +2124,8 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
   // 있어도 One 화면과 원장은 성공 terminal 로 뒤집혔다. 실패 종합문은 대화에 보존하되
   // user-visible terminal 은 error 로 닫고, nested Firm은 부모가 같은 ok=false를 정산한다.
   const teamOk = latestTeamResultsAllOk(teamResults);
+  const delegatedSettlement = (): FirmRunSettlement => firmRunSettlement("delegated", [
+    plan.evidence, ...teamResults.map((result) => result.evidence), finalTurn.evidence]);
   if (!teamOk) {
     if (p.emitFinal !== false) {
       sink({
@@ -2092,8 +2137,8 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
         ),
       });
     }
-    return { ok: false, text: finalTurn.text };
+    return { ok: false, text: finalTurn.text, settlement: delegatedSettlement() };
   }
   if (p.emitFinal !== false) sink({ kind: "final", text: finalTurn.text });
-  return { ok: true, text: finalTurn.text };
+  return { ok: true, text: finalTurn.text, settlement: delegatedSettlement() };
 }
