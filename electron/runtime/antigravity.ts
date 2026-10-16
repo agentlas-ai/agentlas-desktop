@@ -3,6 +3,8 @@ import { beginAdapterEffectRun } from "../invocation/adapter-effect-context";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { AntigravityEffectCoverage } from "./antigravity-effect-coverage";
 import { antigravityConversationGone, antigravityConversationHome, attestAntigravityMetadataSteps } from "./antigravity-conversation-metadata";
+import { antigravityEffortNeedsHelp, antigravityEffortPlan, probeAntigravityEffortLevels } from "./antigravity-effort";
+import { reportModelEffort } from "./model-call-ledger";
 import { attendedTurnStartsFresh, unattendedFreshSessionStatus } from "./unattended-session-turns";
 import { observeMainMcpEffects, mcpEffectArgumentsDigest, mainMcpExecutionCompletion, type MainMcpEffectReceipt } from "../mcp-tools/effect-receipts";
 import { recordMainExecutionProofs } from "../long-run/execution-proof";
@@ -475,8 +477,10 @@ export function buildAntigravitySpawnArgs(
   resumeConversationId?: string,
   browserProjectId?: string,
   inputFormat?: "stream-json",
+  /** `["--effort", level]` from antigravityEffortPlan, or nothing (a suffixed model id already fixes the level). */
+  effortArgs: readonly string[] = [],
 ): string[] {
-  const modelArgs = model && model.trim() ? ["--model", model.trim()] : [];
+  const modelArgs = model && model.trim() ? ["--model", model.trim(), ...effortArgs] : [];
   const directoryArgs = [...new Set(addDirectories.filter((value) => value.trim()))]
     .flatMap((value) => ["--add-dir", value]);
   /*
@@ -2075,6 +2079,15 @@ async function runPreparedAntigravityAttempt(
     runReq = { ...runReq, history: [...bootstrap.history], turnContext: bootstrap.turnContext };
     events.onStatus(`[runtime-session] cold kind=antigravity reason=${freshReason ?? "handle_unverified"}`);
   }
+  /*
+   * Effort (antigravity-effort.ts, measured agy 1.4.0): a suffixed model id fixes the thinking level and never gets
+   * `--effort` (agy refuses the pair before any model call); a base id gets the requested level when the installed
+   * CLI's help lists it. The ledger records the level applied, not the one requested.
+   */
+  const effortLevels = antigravityEffortNeedsHelp(runReq.model, runReq.effort)
+    ? await probeAntigravityEffortLevels(bin, executableGeneration) : null;
+  const effortPlan = antigravityEffortPlan(runReq.model, runReq.effort, effortLevels);
+  reportModelEffort(effortPlan.application);
   // Blocks the resumed conversation already holds are sent once per conversation (the common stable-block contract).
   const stableContext = agyResumeId ? dedupeStableTurnContext({ chatId: runReq.chatId, runtimeKind: ANTIGRAVITY_KIND, sessionId: agyResumeId,
     contextFingerprint: createHash("sha256").update(JSON.stringify([agyFingerprint, runtimeSessionOwnerId ?? null, runReq.systemPrompt,
@@ -2191,7 +2204,7 @@ async function runPreparedAntigravityAttempt(
   }
   const oneShotSpawnArgs = (): string[] => buildAntigravitySpawnArgs(
     req.model, spawnPrompt, agyReadDirs, agyToolsAllowed ? req.permission : undefined,
-    req.outputSchema?.schema, agyResumeId ?? undefined, browserProject?.projectId,
+    req.outputSchema?.schema, agyResumeId ?? undefined, browserProject?.projectId, undefined, effortPlan.args,
   );
   // agy reads the person's GEMINI.md, skills, plugins, hooks and MCP servers from HOME; a product run gets a mirrored HOME
   // without them (only One gets back what the person switched on). Must run after the run's MCP servers were reconciled.
@@ -2306,6 +2319,7 @@ async function runPreparedAntigravityAttempt(
       agyResumeId ?? undefined,
       browserProject?.projectId,
       "stream-json",
+      effortPlan.args,
     );
     const residencyEligible = Boolean(
       runReq.chatId
@@ -3021,7 +3035,8 @@ async function runPreparedAntigravityAttempt(
   }).then(result => {
     effectRun?.complete(effectCoverage.finish({ exitCode: effectExitCode, stdoutEnded: effectStdoutEnded, cancelled: req.signal?.aborted === true, failed: !!result.failure }));
     if (effectRun && !result.failure) recordMainExecutionProofs({scopeId:effectRun.scopeId,bindings:effectBindings,signal:req.signal,claims:executionClaims});
-    return result;
+    // The effort level this process ran at (antigravity-effort.ts); null when this runner set none.
+    return { ...result, appliedEffort: effortPlan.applied };
   }, error => {
     effectRun?.complete(effectCoverage.finish({ exitCode: effectExitCode, stdoutEnded: effectStdoutEnded, cancelled: req.signal?.aborted === true, failed: true }));
     throw error;
