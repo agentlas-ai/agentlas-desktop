@@ -63,9 +63,6 @@ export type BuildSink = (ev: HephaestusBuildEvent) => void;
 
 const buildWorkloadCache = new Map<string, WorkloadResolution>();
 
-/** How often a long reasoning span reports that it is still alive in the Build log. */
-const THINKING_HEARTBEAT_MS = 20_000;
-
 /**
  * How often Main proves the Build is alive, independently of the runtime.
  *
@@ -1240,19 +1237,11 @@ async function runHephaestusBuildInScope(
     if (typeof livenessTimer.unref === "function") livenessTimer.unref();
     stopBuildLiveness = () => clearInterval(livenessTimer);
 
-    // A high-effort reasoning turn can run for minutes with NO runner event at
-    // all: codex only emits agent_message on item.completed, and a turn that
-    // reasons before touching a tool produces nothing in between. The log then
-    // stops dead after "Calling Codex CLI…" and a healthy build is
-    // indistinguishable from a hang. Heartbeat the reasoning span so the log
-    // keeps proving liveness.
-    let thinkingTimer: NodeJS.Timeout | null = null;
-    const stopThinkingHeartbeat = () => {
-      if (thinkingTimer) {
-        clearInterval(thinkingTimer);
-        thinkingTimer = null;
-      }
-    };
+    // A long reasoning span is proven alive by the host liveness row above (activity "Thinking", elapsed and silent
+    // times every BUILD_LIVENESS_TICK_MS), never by Build log lines. A 20 s "Still thinking · Ns" log line used to be
+    // appended here for the whole span, so the log grew with time instead of with work and the page re-rendered a
+    // longer list on every tick (review 2026-10-16 clients-13 / H5). The log carries only the span's start and end.
+    let thinkingStartedAt: number | null = null;
     const runnerEvents: Parameters<typeof buildPicked.runner>[1] = {
         onPartial: (chunk) => {
           markActivity(ko ? "빌더가 답변을 쓰는 중" : "Builder is writing");
@@ -1264,22 +1253,13 @@ async function runHephaestusBuildInScope(
         },
         onThinking: (phase, durationMs) => {
           if (phase === "start") {
-            stopThinkingHeartbeat();
-            const startedAt = Date.now();
             markActivity(ko ? "생각 중" : "Thinking");
-            sink({ runId, kind: "log", text: ko ? "생각 중…" : "Thinking…" });
-            thinkingTimer = setInterval(() => {
-              const seconds = Math.round((Date.now() - startedAt) / 1000);
-              sink({
-                runId,
-                kind: "log",
-                text: ko ? `아직 생각 중 · ${seconds}초 경과` : `Still thinking · ${seconds}s elapsed`,
-              });
-            }, THINKING_HEARTBEAT_MS);
-            if (typeof thinkingTimer.unref === "function") thinkingTimer.unref();
+            // One start line per span: a runtime that repeats "start" without an "end" does not add a line each time.
+            if (thinkingStartedAt === null) sink({ runId, kind: "log", text: ko ? "생각 중…" : "Thinking…" });
+            thinkingStartedAt = Date.now();
             return;
           }
-          stopThinkingHeartbeat();
+          thinkingStartedAt = null;
           const seconds = Math.round((durationMs ?? 0) / 1000);
           if (seconds >= 5) {
             sink({ runId, kind: "log", text: ko ? `생각 정리 완료 · ${seconds}초` : `Finished thinking · ${seconds}s` });
@@ -1332,9 +1312,7 @@ async function runHephaestusBuildInScope(
       },
       });
     } finally {
-      // A turn that ends mid-reasoning (error, abort, cancel) must not leave the
-      // heartbeat ticking into the next turn's log.
-      stopThinkingHeartbeat();
+      thinkingStartedAt = null;
     }
     const result = runnerOutcome.result;
     if (signal.aborted) throw signal.reason ?? new Error("Build cancelled");
