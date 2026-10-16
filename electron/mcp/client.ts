@@ -35,6 +35,7 @@ import { recordAutomationPinProvenance } from "../automation-runtime-provenance"
 import { AutomationWorkspaceError, bindCreatedGoalContinuationWorkspace } from "../automation-workspace";
 import { assertFiniteGoalLifecycleCurrent, isGoalDispatchRefusal } from "../automation-execution-control";
 import { selectionForRuntime } from "../../shared/runtime-selection";
+import { roomChipRuntimeSelection } from "../runtime/room-chip-runtime";
 import { officeTaskContextForInvocation } from "../office-task-context";
 import { goalDeadlineWaitClause, goalWaitProtocol, parseGoalWaitIntent, stripGoalWaitDisplayText, type ParsedGoalWait } from "../long-run/wait-emitter";
 import { prepareCheckpointContinuation } from "../long-run/continuation";
@@ -2430,6 +2431,19 @@ async function runMcpInvocationInContext(
     sink({ kind: "error", error: { code: "no-chat", message: tStatus(locale, "errChatNotFound") } });
     return earlyResult();
   }
+  // The room's model chip governs the room's orchestrator: a turn the host starts here without naming a runtime (Goal
+  // resume, operational recovery, a teammate's report, a Mobile message) runs the chat's pin like the owner's own turn
+  // (runtime/room-chip-runtime.ts). Flags that mean "the request itself named this runtime" keep reading the explicit one.
+  const explicitRuntimeSelection = req.runtimeSelection;
+  const roomChipSelection = roomChipRuntimeSelection({
+    explicit: explicitRuntimeSelection,
+    chatPin: chat.runtimeSelection,
+    executionSource: executionContext?.source ?? null,
+    graphWorker: Boolean(executionContext?.graphWorkerAttempt),
+    automationId: req.automationId ?? null,
+    agentAppMode: req.agentAppMode === true,
+  });
+  if (roomChipSelection) req = { ...req, runtimeSelection: roomChipSelection };
   const browserApprovalScope: BrowserApprovalScope | undefined = chat.id === req.chatId
     ? executionContext?.source === "science"
       ? Object.freeze({ surface: "science" as const, chatId: chat.id })
@@ -3047,7 +3061,8 @@ async function runMcpInvocationInContext(
   // An effect observation also starts as a goal-continuation run and now carries the Goal's exact runtime (2a85294b),
   // but it is one look, not a checkpoint successor: treating it as one demanded a checkpoint it never has
   // (checkpoint_dispatch_context_missing on every codex/serving look, live 2026-09-25).
-  const continuationRuntimePinned = hostNoticePurpose === "goal-continuation" && Boolean(req.runtimeSelection)
+  // The room chip is not a producer binding: a Goal resume running it keeps the One fallback chain.
+  const continuationRuntimePinned = hostNoticePurpose === "goal-continuation" && Boolean(explicitRuntimeSelection)
     && !effectObservationTicket(req.runId);
   // One's composer selection is the controller's first runtime for both One
   // chat and One Work/graph runs. A normal Library assignment remains the
@@ -3056,11 +3071,12 @@ async function runMcpInvocationInContext(
   // A model chosen on the interactive composer is the user's execution
   // decision for this turn.  Library role assignments may fill an Auto choice,
   // but must not replace this explicit pin.
-  const directUserRuntimePinRequested = req.promptOrigin !== "system" && Boolean(req.runtimeSelection);
+  const directUserRuntimePinRequested = req.promptOrigin !== "system" && Boolean(explicitRuntimeSelection);
   const runtimeResolution = selectInvocationRuntime(runtimes, runtimeTargets, {
     pin: req.runtimeSelection,
+    // The room chip has the authority the owner's own turn gives it.
     pinIsAuthoritative:
-      directUserRuntimePinRequested || isUnattendedExecution(executionContext) || req.oneMode === true || automationRuntimePinned || scienceRuntimePinned || aliveRuntimePinned || continuationRuntimePinned,
+      directUserRuntimePinRequested || Boolean(roomChipSelection) || isUnattendedExecution(executionContext) || req.oneMode === true || automationRuntimePinned || scienceRuntimePinned || aliveRuntimePinned || continuationRuntimePinned,
     agentAppMode: req.agentAppMode === true,
   });
   const directUserRuntimePinHonored = directUserRuntimePinRequested && runtimeResolution.pinHonored;
