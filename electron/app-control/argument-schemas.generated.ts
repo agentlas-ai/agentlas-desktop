@@ -1,5 +1,5 @@
 // Generated from the app's TypeScript bridges by scripts/generate-app-control-catalog.cjs.
-// Read with typescript 5.9.3 and agentlas-science 0.1.62 (187 declaration files, sha256:8249b1c2355c0f81).
+// Read with typescript 5.9.3 and agentlas-science 0.1.62 at lock 20ae603bce0c (307 declaration files, sha256:05ac72d987ad7362).
 export const APP_CONTROL_ARGUMENT_SCHEMAS: Readonly<Record<string, Record<string, unknown>>> = {"agentEvolution.approveAndApply":{"type":"object","properties":{"proposalId":{"type":"string"},"note":{"type":"string"}},"required":["proposalId"],"additionalProperties":false},
 "agentEvolution.createProposal":{"type":"object","properties":{"input":{"type":"object","properties":{"agentId":{"type":"string"},"targetPath":{"type":"string"},"currentContent":{"type":"string"},"proposedContent":{"type":"string"},"proposalType":{"enum":["playbook","plugin","rule","setup_doc","skill"]},"summary":{"type":"string"},"risk":{"enum":["high","low","medium"]},
 "source":{"type":"object","properties":{},"additionalProperties":{"description":"Host validates this JSON value."}},"decisionNote":{"type":"string"}},"required":["agentId","targetPath","currentContent","proposedContent"],"additionalProperties":false}},"required":["input"],"additionalProperties":false},

@@ -201,12 +201,15 @@ const body = [
   "",
 ].join("\n");
 
-const schemaCount = require("./generate-app-control-schemas.cjs").generateAppControlSchemas({ root, operations, check: process.argv.includes("--check"), outputDirectory });
+const schemas = require("./generate-app-control-schemas.cjs").generateAppControlSchemas({ root, operations, check: process.argv.includes("--check"), outputDirectory });
 
 if (process.argv.includes("--check")) {
   const current = fs.existsSync(OUT) ? fs.readFileSync(OUT, "utf8") : "";
   if (current !== body) { console.error("app-control catalog is stale: run node scripts/generate-app-control-catalog.cjs"); process.exit(1); }
-  console.log(`app-control catalog fresh: ${operations.length} operations, ${schemaCount} argument schemas`);
+  // Exit 3: the catalog is fresh, but this tree cannot produce the pinned agentlas-science declarations to check the
+  // schemas against (see generate-app-control-schemas.cjs). Not a pass and not a failure.
+  if (schemas.notEvaluable) { console.log(`app-control catalog fresh: ${operations.length} operations; argument schemas not evaluable here: ${schemas.notEvaluable}`); process.exit(3); }
+  console.log(`app-control catalog fresh: ${operations.length} operations, ${schemas.count} argument schemas`);
 } else {
   fs.mkdirSync(path.dirname(OUT), { recursive: true });
   fs.writeFileSync(OUT, body);

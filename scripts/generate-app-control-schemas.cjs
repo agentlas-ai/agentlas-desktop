@@ -1,6 +1,7 @@
 "use strict";
 // Build JSON argument documentation from the same TypeScript API that the app uses, including imported interfaces.
-const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto"), ts = require("typescript");
+const fs = require("node:fs"), path = require("node:path"), os = require("node:os"), crypto = require("node:crypto"), ts = require("typescript");
+const { execFileSync } = require("node:child_process");
 
 // Output order never follows checker internals. The checker keeps a union's members in type-id order and lists a mapped
 // type's fields (Omit, Pick, Record) in the type-id order of its literal keys; type ids follow whatever the checker
@@ -13,7 +14,117 @@ const byLiteral = (a, b) => literalRank(a) - literalRank(b)
   || (typeof a === "string" ? byText(a, b) : Number(a) - Number(b));
 const byJson = (a, b) => byText(JSON.stringify(a), JSON.stringify(b));
 
+// ── agentlas-science as package-lock pins it ─────────────────────────────────────────────────────────────────────────
+// The Science input schemas come from agentlas-science's declarations. package-lock pins it to a git commit, but npm does
+// not verify an installed git package: a developer checkout may hold a local Science build in node_modules on purpose
+// (the Science session's), while clean clones and CI hold the pinned one. The schemas are always read from the pinned
+// declarations: node_modules when it holds them, else a content-addressed rebuild of the locked commit from the local
+// agentlas-science checkout (~/.cache/agentlas/app-control-science/<commit>-<recipe>), never from another build.
+const SCIENCE = "agentlas-science";
+const SCIENCE_CACHE_RECIPE = "r1"; // git archive <commit> + tsc --emitDeclarationOnly with that checkout's own toolchain
+const slash = file => file.replace(/\\/g, "/");
+function scienceDeclarations(packageDir) {
+  const dist = path.join(packageDir, "dist");
+  if (!fs.existsSync(path.join(packageDir, "package.json")) || !fs.existsSync(dist)) return null;
+  const files = [];
+  const walk = (dir, relative) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const name = `${relative}/${entry.name}`;
+      if (entry.isDirectory()) walk(path.join(dir, entry.name), name);
+      else if (entry.isFile() && entry.name.endsWith(".d.ts")) files.push(name);
+    }
+  };
+  walk(dist, "dist");
+  files.sort(byText);
+  const digest = crypto.createHash("sha256");
+  for (const name of files) digest.update(name).update("\0").update(fs.readFileSync(path.join(packageDir, name))).update("\0");
+  return { packageDir, files, digest: digest.digest("hex").slice(0, 16), version: JSON.parse(fs.readFileSync(path.join(packageDir, "package.json"), "utf8")).version };
+}
+function lockedScience(root) {
+  const lockFile = path.join(root, "package-lock.json");
+  const entry = fs.existsSync(lockFile) ? JSON.parse(fs.readFileSync(lockFile, "utf8")).packages?.[`node_modules/${SCIENCE}`] : null;
+  if (!entry?.resolved) return null;
+  const commit = /#([0-9a-f]{40})$/.exec(entry.resolved)?.[1] ?? null;
+  return { resolved: entry.resolved, commit, key: commit ?? crypto.createHash("sha256").update(`${entry.resolved}\n${entry.integrity ?? ""}`).digest("hex") };
+}
+// A local agentlas-science checkout that can rebuild the locked commit: beside this checkout, or beside the checkout whose
+// node_modules this tree links to (a pre-commit index snapshot). Clean clones have none.
+function scienceSource(root) {
+  const candidates = [process.env.AGENTLAS_SCIENCE_SOURCE, path.resolve(root, "..", SCIENCE)];
+  try { candidates.push(path.resolve(fs.realpathSync(path.join(root, "node_modules")), "..", "..", SCIENCE)); } catch {}
+  return candidates.find(dir => dir && fs.existsSync(path.join(dir, ".git")) && fs.existsSync(path.join(dir, "package.json"))) ?? null;
+}
+function pinnedScienceBuild(lock, source) {
+  const home = process.env.AGENTLAS_CACHE_HOME || path.join(os.homedir(), ".cache", "agentlas");
+  const base = path.join(home, "app-control-science", `${lock.key}-${SCIENCE_CACHE_RECIPE}`);
+  const ready = () => fs.existsSync(path.join(base, "manifest.json")) ? { base, ...scienceDeclarations(path.join(base, "node_modules", SCIENCE)) } : null;
+  if (ready()) return ready();
+  if (!lock.commit) return { error: "package-lock does not name a git commit to rebuild" };
+  try { execFileSync("git", ["-C", source, "cat-file", "-e", `${lock.commit}^{commit}`], { stdio: "ignore" }); }
+  catch { return { error: `${source} does not have commit ${lock.commit.slice(0, 12)}` }; }
+  const tsc = path.join(source, "node_modules", "typescript", "bin", "tsc");
+  if (!fs.existsSync(tsc)) return { error: `${source} has no node_modules/typescript to build with` };
+  fs.mkdirSync(path.dirname(base), { recursive: true });
+  const work = fs.mkdtempSync(path.join(path.dirname(base), ".build-"));
+  try {
+    const tree = path.join(work, "tree");
+    fs.mkdirSync(tree);
+    execFileSync("tar", ["-x", "-C", tree], { input: execFileSync("git", ["-C", source, "archive", lock.commit], { maxBuffer: 1 << 30 }) });
+    fs.symlinkSync(path.join(source, "node_modules"), path.join(tree, "node_modules"), "dir");
+    execFileSync(process.execPath, [tsc, "-p", path.join(tree, "tsconfig.json"), "--emitDeclarationOnly"],
+      { cwd: tree, stdio: "pipe", maxBuffer: 64 * 1024 * 1024, env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" } });
+    const built = scienceDeclarations(tree);
+    if (!built?.files.length) throw new Error("the build wrote no declarations");
+    const target = path.join(work, "out", "node_modules", SCIENCE);
+    for (const name of ["package.json", ...built.files]) {
+      fs.mkdirSync(path.dirname(path.join(target, name)), { recursive: true });
+      fs.copyFileSync(path.join(tree, name), path.join(target, name));
+    }
+    fs.writeFileSync(path.join(work, "out", "manifest.json"), `${JSON.stringify({ resolved: lock.resolved, recipe: SCIENCE_CACHE_RECIPE,
+      typescript: JSON.parse(fs.readFileSync(path.join(source, "node_modules", "typescript", "package.json"), "utf8")).version,
+      files: built.files.length, digest: built.digest }, null, 2)}\n`);
+    try { fs.renameSync(path.join(work, "out"), base); } catch (error) { if (!ready()) throw error; } // another run finished first
+  } catch (error) {
+    return { error: `rebuilding ${lock.commit.slice(0, 12)} from ${source} failed: ${String(error.stderr || error.message || error).trim().split("\n")[0]}` };
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+  return ready() ?? { error: `the rebuild of ${lock.commit.slice(0, 12)} did not land in ${base}` };
+}
+const STAMP = /^\/\/ Read with typescript (\S+) and agentlas-science (?:(\S+) at lock ([0-9a-f]{12}) \((\d+) declaration files, sha256:([0-9a-f]{16})\)|\(not installed\))\.$/;
+const stampOf = (science, lock) => `// Read with typescript ${ts.version} and agentlas-science ${science && lock
+  ? `${science.version} at lock ${lock.key.slice(0, 12)} (${science.files.length} declaration files, sha256:${science.digest})` : "(not installed)"}.`;
+// Which declarations to read: { science, stamp } or { unavailable } when this tree cannot produce the pinned ones.
+function pinnedScience(root, recordedLine) {
+  const lock = lockedScience(root);
+  const installed = scienceDeclarations(path.join(root, "node_modules", SCIENCE));
+  if (!lock) return { science: installed, stamp: stampOf(installed, lock), lock };
+  const recorded = STAMP.exec(recordedLine ?? "");
+  const recordedKey = recorded?.[3], recordedDigest = recorded?.[5];
+  // This tree holds the build the committed files were read from, for this lock.
+  if (installed && recordedKey === lock.key.slice(0, 12) && recordedDigest === installed.digest) return { science: installed, stamp: stampOf(installed, lock), lock };
+  // No local Science checkout: node_modules is npm's install of the lock (a clean clone), so a mismatch is a real one.
+  const source = scienceSource(root);
+  if (!source) return { science: installed, stamp: stampOf(installed, lock), lock };
+  const build = pinnedScienceBuild(lock, source);
+  const shown = installed ? `${installed.version}, ${installed.files.length} declaration files, sha256:${installed.digest}` : "not installed";
+  if (build.error) return { unavailable: `node_modules ${SCIENCE} (${shown}) is not the package-lock build ${lock.key.slice(0, 12)}, and ${build.error}`, recorded, lock };
+  if (recordedKey === lock.key.slice(0, 12) && recordedDigest !== build.digest) {
+    return { unavailable: `node_modules ${SCIENCE} (${shown}) is not the package-lock build, and a rebuild of ${lock.key.slice(0, 12)} (sha256:${build.digest}) is not the build the files were read from (sha256:${recordedDigest})`, recorded, lock };
+  }
+  return { science: build, stamp: stampOf(build, lock), lock, rebuilt: true };
+}
+
 function generateAppControlSchemas({ root, operations, check, outputDirectory = path.join(root, "electron/app-control") }) {
+  const output = path.join(outputDirectory, "argument-schemas.generated.ts");
+  const recordedLine = fs.existsSync(output) ? fs.readFileSync(output, "utf8").split("\n")[1] : "";
+  const pinned = pinnedScience(root, recordedLine);
+  if (pinned.unavailable) {
+    // Only an agentlas-science difference is "not evaluable here": any other dependency difference is checked as usual.
+    const sameTypescript = !pinned.recorded || pinned.recorded[1] === ts.version;
+    if (check && sameTypescript) return { count: 0, notEvaluable: `${pinned.unavailable}. Clean clones and CI enforce it.` };
+    throw new Error(`app-control schemas are not regenerated from an unpinned ${SCIENCE}: ${pinned.unavailable}.`);
+  }
   const hostSources = fs.readdirSync(path.join(root, "electron/science-host"))
     .filter(name => name.endsWith("-ipc.ts")).sort()
     .map(name => path.join(root, "electron/science-host", name));
@@ -24,23 +135,24 @@ function generateAppControlSchemas({ root, operations, check, outputDirectory = 
   };
   const host = ts.createCompilerHost(options);
   host.getCurrentDirectory = () => root;
+  if (pinned.rebuilt) {
+    // "agentlas-science" resolves to the rebuilt package; its own bare imports (better-sqlite3, node:*) resolve as they
+    // would from node_modules/agentlas-science, so the pinned declarations see the same dependencies as in a clean clone.
+    const packageDir = slash(pinned.science.packageDir), installedDir = slash(path.join(root, "node_modules", SCIENCE));
+    const resolution = ts.createModuleResolutionCache(root, file => host.getCanonicalFileName(file), options);
+    host.resolveModuleNameLiterals = (literals, containingFile, redirectedReference, compilerOptions) => literals.map(literal => {
+      const name = literal.text, from = slash(containingFile);
+      const origin = name === SCIENCE || name.startsWith(`${SCIENCE}/`) ? `${slash(pinned.science.base)}/index.ts`
+        : !name.startsWith(".") && from.startsWith(`${packageDir}/`) ? `${installedDir}/${from.slice(packageDir.length + 1)}` : containingFile;
+      return ts.resolveModuleName(name, origin, compilerOptions, host, resolution, redirectedReference);
+    });
+  }
   const program = ts.createProgram([path.join(root, "shared/types.ts"), path.join(root, "shared/app-ui-preferences.ts"), path.join(root, "electron/preload.ts"), path.join(root, "electron/science-preload.ts"), path.join(root, "electron/main.ts"),
     path.join(root, "electron/daemon/science-service.ts"), path.join(root, "electron/science-host/daemon-ipc.ts"),
     path.join(root, "electron/science-host/publication-ipc.ts"), path.join(root, "electron/science-host/style-library-ipc.ts"),
     path.join(root, "electron/science-host/math-ipc.ts"), ...hostSources], options, host);
   const checker = program.getTypeChecker();
-  // Which TypeScript and which agentlas-science build the schemas were read from. package-lock pins agentlas-science to a
-  // git commit, but npm cannot tell an installed git package from a local build copied over it (same version, same lock
-  // entry), and such a build documents inputs the shipped SDK rejects. --check names that case instead of "stale".
-  const sciencePackage = /[\\/]node_modules[\\/]agentlas-science[\\/]/;
-  const scienceFiles = program.getSourceFiles().filter(file => sciencePackage.test(file.fileName))
-    .map(file => ({ file, name: file.fileName.slice(file.fileName.search(sciencePackage)).replace(/\\/g, "/").replace(/^\/node_modules\/agentlas-science\//, "") }))
-    .sort((a, b) => byText(a.name, b.name));
-  const scienceDigest = crypto.createHash("sha256");
-  for (const { file, name } of scienceFiles) scienceDigest.update(name).update("\0").update(file.text).update("\0");
-  const sciencePackageRoot = scienceFiles[0] && scienceFiles[0].file.fileName.slice(0, scienceFiles[0].file.fileName.search(sciencePackage)) + "/node_modules/agentlas-science";
-  const scienceVersion = sciencePackageRoot && fs.existsSync(path.join(sciencePackageRoot, "package.json")) ? JSON.parse(fs.readFileSync(path.join(sciencePackageRoot, "package.json"), "utf8")).version : "unknown";
-  const inputsStamp = `// Read with typescript ${ts.version} and agentlas-science ${scienceFiles.length ? `${scienceVersion} (${scienceFiles.length} declaration files, sha256:${scienceDigest.digest("hex").slice(0, 16)})` : "(not installed)"}.`;
+  const inputsStamp = pinned.stamp;
   const shared = program.getSourceFile(path.join(root, "shared/types.ts"));
   const ipc = shared.statements.find(node => ts.isInterfaceDeclaration(node) && node.name.text === "AgentlasIpc");
   const ipcType = checker.getTypeAtLocation(ipc);
@@ -865,7 +977,6 @@ function generateAppControlSchemas({ root, operations, check, outputDirectory = 
     + "/** Shared result sub-schemas referenced as {\"$ref\":\"#/$defs/<id>\"}. */\n"
     + "export const APP_CONTROL_OUTPUT_DEFS: Readonly<Record<string, Record<string, unknown>>> = {\n"
     + Object.keys(defs).sort().map(key => `${JSON.stringify(key)}:${JSON.stringify(defs[key])}`).join(",\n") + "};\n";
-  const output = path.join(outputDirectory, "argument-schemas.generated.ts");
   const body = "// Generated from the app's TypeScript bridges by scripts/generate-app-control-catalog.cjs.\n" + inputsStamp + "\n"
     + "export const APP_CONTROL_ARGUMENT_SCHEMAS: Readonly<Record<string, Record<string, unknown>>> = "
     + JSON.stringify(docs, null, 0).replace(/\},\"([^\"]+)\":\{\"type\":\"object\",\"properties\"/g, "},\n\"$1\":{\"type\":\"object\",\"properties\"") + ";\n"
@@ -875,16 +986,16 @@ function generateAppControlSchemas({ root, operations, check, outputDirectory = 
     const current = fs.existsSync(output) ? fs.readFileSync(output, "utf8") : "";
     const recorded = current.split("\n")[1] ?? "";
     if (current && recorded !== inputsStamp && /^\/\/ Read with typescript /.test(recorded)) {
-      throw new Error(`app-control argument schemas were generated from other dependency builds than node_modules holds.\n  file:         ${recorded}\n  node_modules: ${inputsStamp}\n`
-        + "If package-lock.json now pins these builds, regenerate (node scripts/generate-app-control-catalog.cjs). Otherwise node_modules differs from the lockfile\n"
-        + "(agentlas-science is a git dependency npm does not verify): run npm ci first. Regenerating against an unlocked build commits that build's Science schemas.");
+      throw new Error(`app-control argument schemas were read from other dependency builds than this tree's pinned ones.\n  file: ${recorded}\n  here: ${inputsStamp}\n`
+        + "If package-lock.json or typescript moved, regenerate (node scripts/generate-app-control-catalog.cjs). Otherwise the committed files were read from\n"
+        + "an unpinned build: regenerate them in a tree that holds the lock's build.");
     }
     if (current !== body) throw new Error("app-control argument schemas are stale: run node scripts/generate-app-control-catalog.cjs");
     if (!fs.existsSync(contractOutput) || fs.readFileSync(contractOutput, "utf8") !== contractBody) throw new Error("app-control operation contracts are stale: run node scripts/generate-app-control-catalog.cjs");
   } else {
     fs.mkdirSync(path.dirname(output), { recursive: true }); fs.writeFileSync(output, body); fs.writeFileSync(contractOutput, contractBody);
   }
-  return Object.keys(docs).length;
+  return { count: Object.keys(docs).length };
 }
 
 module.exports = { generateAppControlSchemas };
