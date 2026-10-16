@@ -178,6 +178,21 @@ export function createRoomDiscussionRuntime(services: RoomDiscussionServices, op
     try { engine.recover(); } catch (error) { console.warn("[room-discussion] recovery skipped:", error instanceof Error ? error.message : error); }
   };
   const stateOf = (chatId: string): OneDiscussionState => ({ ...engine.view(chatId), messages: store.messageMeta(chatId) });
+  /**
+   * Routing off (production, owner decision OD-7 2026-10-16: park, do not delete). The screen still asks for state
+   * on every room change. Parked, that answer runs no recovery pass (it scanned every orphaned discussion and
+   * restarted one from an owner post an older version had queued, starting member model runs) and no roster scan
+   * (every taskforce plus the org state per call). It keeps the room's thread index (`messages`) of rooms that already
+   * hold discussion posts. Tables stay, so an older or newer app can open the same DB.
+   */
+  const parkedStateOf = (chatId: string): OneDiscussionState => {
+    const last = store.state.lastDiscussion(chatId);
+    return {
+      chatId, enabled: false, explicit: store.state.setting(chatId), memberCount: 0, active: null,
+      last: last ? { discussionId: last.id, status: last.status, stopReason: last.stopReason, roundNo: last.roundNo } : null,
+      messages: store.messageMeta(chatId),
+    };
+  };
   return {
     engine, caps,
     post(input) {
@@ -185,9 +200,19 @@ export function createRoomDiscussionRuntime(services: RoomDiscussionServices, op
       ensureRecovered();
       return engine.post(input);
     },
-    stop(chatId) { ensureRecovered(); return { stopped: engine.stop(chatId).stopped }; },
-    state(chatId) { ensureRecovered(); return stateOf(chatId); },
-    setEnabled(chatId, enabled) { ensureRecovered(); engine.setEnabled(chatId, enabled); return stateOf(chatId); },
+    // Stop is unconditional in both modes; parked, it only closes a stale row (no loop runs in this process).
+    stop(chatId) { if (routing) ensureRecovered(); return { stopped: engine.stop(chatId).stopped }; },
+    state(chatId) {
+      if (!routing) return parkedStateOf(chatId);
+      ensureRecovered();
+      return stateOf(chatId);
+    },
+    setEnabled(chatId, enabled) {
+      if (!routing) { engine.setEnabled(chatId, enabled); return parkedStateOf(chatId); }
+      ensureRecovered();
+      engine.setEnabled(chatId, enabled);
+      return stateOf(chatId);
+    },
     recover() { recovered = true; return engine.recover(); },
   };
 }
