@@ -100,6 +100,35 @@ function upgradeRefusal(response: unknown): string | null {
 /** 재페어링 말고는 회복 경로가 없는 사유 — 터널을 계속 열면 안 된다. */
 const TERMINAL_REFUSALS = new Set(["device_unknown_or_revoked", "device_repair_required"]);
 
+/*
+ * 터널이 "relay side closed" 로 닫혔을 때, 닫은 쪽이 폰인지 중계인지 로그만으로 가리는 증거.
+ *
+ * ★ 왜 (2026-10-16)
+ *   오너가 5G 에서 "계속 데탑이 끊긴다"고 했을 때 이 줄에는 코드도 사유도 없어서, 폰이 앱 전환·
+ *   네트워크 전환으로 소켓을 놓은 건지 중계가 닫은 건지 가를 수 없었다. 중계(mobile-relay.mjs
+ *   closeChannel)는 닫을 때 항상 코드와 사유를 싣는다:
+ *     - 1000 "device closed"        폰 쪽 소켓이 닫혔다(앱이 내려가 심박 응답이 끊겨 중계가
+ *                                   정리한 경우 포함 — 중계는 25초 심박 두 번 못 받으면 끊는다)
+ *     - 1012 "relay restarting"     중계 재배포·재시작
+ *     - 1012 "relay unavailable"    채널 시간 초과·반대편 오류
+ *   코드는 서버가 정한 고정 어휘이고 사용자 데이터가 아니다.
+ */
+export type RelayCloseSide = "phone" | "relay-restart" | "relay-other" | "unknown";
+
+export function relayCloseSide(code: unknown, reason: unknown): RelayCloseSide {
+  const text = Buffer.isBuffer(reason) ? reason.toString("utf8") : typeof reason === "string" ? reason : "";
+  if (code === 1000 && text === "device closed") return "phone";
+  if (code === 1012 && text === "relay restarting") return "relay-restart";
+  if (code === 1012 || code === 1013 || code === 1008 || code === 1009) return "relay-other";
+  return "unknown";
+}
+
+export function relayCloseDetail(code: unknown, reason: unknown): string {
+  const raw = Buffer.isBuffer(reason) ? reason.toString("utf8") : typeof reason === "string" ? reason : "";
+  const text = raw.replace(/[^\x20-\x7e]/g, "?").slice(0, 64);
+  return `code=${typeof code === "number" ? code : "none"}${text ? ` reason="${text}"` : ""} side=${relayCloseSide(code, reason)}`;
+}
+
 interface RelaySocketOptions {
   headers?: Record<string, string>;
   handshakeTimeout?: number;
@@ -499,7 +528,10 @@ export class MobileBridgeCloudRelay {
         const detail = args[0] instanceof Error ? `: ${args[0].message}` : "";
         this.logControl("error", `remote access control channel unavailable${detail}`, true);
       } else {
-        this.logControl("closed", "remote access control channel closed; retrying");
+        this.logControl(
+          "closed",
+          `remote access control channel closed (${relayCloseDetail(args[0], args[1])}); retrying`,
+        );
       }
       this.options.onStatusChanged?.();
       if (refusedStatus !== null && isRelayAuthRefusal(refusedStatus)) {
@@ -634,6 +666,7 @@ export class MobileBridgeCloudRelay {
     let pending: Array<{ data: unknown; binary: boolean }> = [];
     let pendingBytes = 0;
     let closed = false;
+    const openedAt = Date.now();
     // Every tunnel failure used to funnel into closeBoth() with no log on this
     // side and no log on the relay, while the phone was told only "relay
     // unavailable". A remote command that never arrived left no evidence
@@ -646,7 +679,7 @@ export class MobileBridgeCloudRelay {
       const reachedLocal = local !== null;
       console.warn(
         `[mobile-bridge-relay] tunnel ${channelId} closed: ${why}` +
-          ` (localHopStarted=${reachedLocal})` +
+          ` (localHopStarted=${reachedLocal}, ageSec=${Math.round((Date.now() - openedAt) / 1000)})` +
           (detail ? ` — ${detail instanceof Error ? detail.message : String(detail)}` : ""),
       );
       if (cloud.readyState === WS_OPEN) cloud.close(1012, "tunnel closed");
@@ -703,7 +736,7 @@ export class MobileBridgeCloudRelay {
         local?.terminate();
       });
     });
-    cloud.on("close", () => closeBoth("relay side closed"));
+    cloud.on("close", (code, reason) => closeBoth("relay side closed", relayCloseDetail(code, reason)));
     cloud.on("error", (error) => closeBoth("relay side failed", error));
     cloud.on("unexpected-response", (_request, response) => {
       closeBoth(`relay refused the tunnel upgrade (HTTP ${upgradeStatus(response)})`);
