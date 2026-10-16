@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.3.52 — 2026-10-16
+
+- Teammates in a room set to an API model, such as Agentlas Light, can read and write files and use their tools again; before, every tool call came back "not approved for this run".
+- When you name a folder for a room's task, the team works in that folder; if a teammate needs more access, the room asks you once (or proceeds when the chip already allows it) instead of ending with "say keep going".
+- A second step of a saved automation in the same chat runs again; before, it was refused before starting and held as "may have acted".
+- Follow-ups in Work projects and in Codex and Claude chats reuse the running session instead of refusing or starting over, a message you queue is sent once, and a new conversation no longer loses itself and another when the app makes room for it.
+- Hope's personal window shows its model chip, and every Hope turn runs the model the chip shows.
+- After an update or a relaunch, the app reopens the screen you were on instead of Work home.
+- A room's first plan no longer spends an extra round when it splits a team into passes.
+- API and local models get what each provider accepts, see images from tools, report the effort actually applied, and keep long tool runs going.
+- Capabilities show Korean text in the Korean interface, and the update card says only "Release notes".
+- This release binds Agentlas OS v1.2.65 at 8b303608eea746e7ea8d7560890816784bdaa86c; public runtime asset `hephaestus-runtime-v1.2.65.tar.gz` is pinned at SHA-256 `7dae16f12a78515dfa7adbc732197e26aa06a2cd413452e81b2675450caba7de`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.51 — 2026-10-16
 
 - Teammates in a room set to an API model, such as Agentlas Light, can read and write files and use their tools again; before, every tool call came back "not approved for this run" and the team stopped without doing the work.
