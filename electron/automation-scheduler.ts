@@ -8,6 +8,7 @@ import { pollGoalWaitSubscriptions } from "./long-run/wait-subscriptions";
 import { automationRunOrigin, deliverAutomationResult, sealAutomationRunOrigin } from "./automation-delivery";
 import { ownerFailureReason } from "../shared/owner-visible-activity-text";
 import { claimAutomationNotification } from "./automation-notifications";
+import { STORE_BUSY_CODE, typedCodeChain } from "../shared/turn-settlement";
 import { getDb } from "./store/db";
 import { emitDesktopStoreChange } from "./store/change-bus";
 import { chatGoalStoppedByOwner, getLongRunByGoalId, longRunOwnerHold } from "./store/long-runs";
@@ -485,7 +486,7 @@ async function runWithConcurrency<T>(
 }
 
 /** 완료 시 OS 알림(설계 §2.7 한계 #10 — 결과 미표출 해소). Notification 미지원이면 조용히 무시. */
-function notifyDone(a: Automation, status: AutomationResultStatus, error?: string): void {
+function notifyDone(a: Automation, status: AutomationResultStatus, error?: string, interrupted = false): void {
   if (status === "skipped") return;
   try {
     if (!app.isReady()) return;
@@ -494,7 +495,9 @@ function notifyDone(a: Automation, status: AutomationResultStatus, error?: strin
     const partial = status === "partial";
     const waiting = status === "blocked" || status === "needs_input";
     new Notification({
-      title: ok
+      title: interrupted
+        ? `Automation interrupted: ${a.name}`
+        : ok
         ? `Automation ran: ${a.name}`
         : partial
           ? `Automation partially completed: ${a.name}`
@@ -1831,8 +1834,8 @@ async function runOne(
             runLedgerRecorded = true;
             break;
           } catch (err) {
-            const busy = err && typeof err === "object" && "code" in err &&
-              (err.code === "SQLITE_BUSY" || err.code === "SQLITE_LOCKED");
+            // Every lock result code (SQLITE_BUSY_SNAPSHOT included) is the shared typed store_busy.
+            const busy = typedCodeChain(err).includes(STORE_BUSY_CODE);
             if (busy && attempt < 2) {
               await new Promise<void>((resolve) => setTimeout(resolve, 100 * 2 ** attempt));
               continue;
@@ -1989,10 +1992,12 @@ async function runOne(
       // 외부 mutation의 성패가 확인되지 않은 실행도 복구를 보류하지 않는다(1.2.54부터). 위에서
       // graph_effect_check_pending 사실을 남기고, 복구 사유에 "모르는 결과는 보존하고 그 미확인
       // 외부 행동은 반복하지 말라"를 항상 붙여 System Optimizer가 같은 효과를 재시도하지 않게 한다.
+      // An interrupted step that may have acted waits for the owner's choice. No recovery worker is sent to "redo
+      // what has not happened" in its place: that is the same repeat the hold exists to prevent.
       if (
         (runStatus !== "ok" && runStatus !== "skipped") &&
         !shutdownDispatchClosed && !controller.signal.aborted && getAutomation(a.id)?.enabled === true &&
-        !parentMissing && !leaseOwnershipLost
+        !parentMissing && !leaseOwnershipLost && automaticRetryStopped?.reasonCode !== "run_interrupted_effect"
       ) {
         try {
           const repairReason = `${runError ?? "Result check is pending"}. Check the current external state yourself and decide what still needs doing; redo only what has not happened.`;
@@ -2423,6 +2428,27 @@ async function notifyPendingMonitorAttention(): Promise<void> {
   }
 }
 
+/**
+ * A run whose host died is closed by stale-run recovery with a typed automation_run_interrupted event (store/db.ts),
+ * often at store open, before this scheduler exists. The owner hears about it once, from that durable event, with
+ * the same per-run notification claim as every run result. What the resume may do is decided by the graph kernel.
+ */
+export async function notifyPendingInterruptedRuns(): Promise<void> {
+  const rows = getDb().prepare(`SELECT e.run_id, e.automation_id FROM run_events e JOIN automations a ON a.id = e.automation_id
+    WHERE e.kind = 'automation_run_interrupted' AND NOT EXISTS (
+      SELECT 1 FROM run_events n WHERE n.run_id = e.run_id AND n.kind IN ('automation_notification_attempt', 'automation_notification_suppressed'))
+    ORDER BY e.rowid ASC LIMIT 100`).all() as Array<{ run_id: string; automation_id: string }>;
+  for (const row of rows) {
+    const automation = getAutomation(row.automation_id);
+    if (!automation) continue;
+    const error = L("앱이 멈춰 실행이 중단됐어요. 다시 해도 안전한 단계만 이어서 하고, 바깥에 이미 반영됐을 수 있는 단계는 실행 기록에서 고르실 때까지 기다려요.",
+      "The app stopped during this run. Only steps that are safe to repeat continue; a step that may already have acted outside waits for your choice in run history.");
+    if (!claimAutomationNotification({ automationId: automation.id, runId: row.run_id, status: "partial", error })) continue;
+    notifyDone(automation, "partial", error, true);
+    await notifyTelegramAutomationDone(automation, "partial", { error, output: "", at: new Date().toISOString() });
+  }
+}
+
 function tick(): void {
   if (dispatchPaused()) return;
   // A GUI and the optional headless runner may share this DB. Recovery only
@@ -2434,9 +2460,10 @@ function tick(): void {
     // Recovery runs with busy_timeout 0 on purpose (a tick must not hold Main for 15 s), so a locked store is the
     // expected outcome of contention and is retried next tick. Logged as one line: 23 full stacks in a day buried
     // real errors in app.log (2026-09-27).
-    if ((err as { code?: string } | null)?.code === "SQLITE_BUSY") console.warn("[automation] stale run recovery skipped: store busy; retrying next tick");
+    if (typedCodeChain(err).includes(STORE_BUSY_CODE)) console.warn("[automation] stale run recovery skipped: store busy; retrying next tick");
     else console.error("[automation] stale run recovery failed:", err);
   }
+  void notifyPendingInterruptedRuns().catch((error) => console.error("[automation] interrupted run notice failed:", error));
   try {
     for (const recovered of recoverReadOnlySuspendedGraphs()) {
       if (!recovered.resumeRequired || recovered.eventStatus !== null) continue;

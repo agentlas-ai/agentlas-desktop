@@ -498,6 +498,27 @@ function sealedRecoveryCheckpointIsReplaySafe(row: RecoverableAutomationRunRow):
   }
 }
 
+export const AUTOMATION_RUN_INTERRUPTED_SCHEMA = "agentlas.automation-run-interrupted.v1";
+
+/** Host facts only: whose process held the run, whether it is proven gone, and what was in flight. */
+function interruptedRunPayload(row: RecoverableAutomationRunRow): Record<string, unknown> {
+  let inFlightNodeIds: string[] = [];
+  try {
+    const checkpoint = row.checkpoint_json ? JSON.parse(row.checkpoint_json) as { inFlightNodeIds?: unknown } : null;
+    if (Array.isArray(checkpoint?.inFlightNodeIds)) {
+      inFlightNodeIds = checkpoint.inFlightNodeIds.filter((id): id is string => typeof id === "string" && id.length <= 512).sort();
+    }
+  } catch { /* a malformed checkpoint still records the interruption; the resume re-reads its own checkpoint */ }
+  const hostPid = trustedRecoveryPid(row.lease_owner);
+  return {
+    schemaVersion: AUTOMATION_RUN_INTERRUPTED_SCHEMA,
+    reasonCode: recoveryOwnerProvenDead(row) ? "automation_host_died" : "automation_host_unresponsive",
+    hostPid,
+    occurrenceId: row.occurrence_id,
+    inFlightNodeIds,
+  };
+}
+
 function recoverStaleAutomationRunsInDb(db: Database.Database, now: Date): number {
   if (!tableExists(db, "automation_runs") || !tableExists(db, "automations")) return 0;
   const nowMs = now.getTime();
@@ -637,6 +658,22 @@ function recoverStaleAutomationRunsInDb(db: Database.Database, now: Date): numbe
           now.toISOString(),
           candidate.automation_id,
           JSON.stringify({ replaySafeCheckpoint: sealedRecoveryCheckpointIsReplaySafe(candidate) }),
+        );
+        // The typed fact the resume and the owner notice read: this occurrence was interrupted because the host
+        // that ran it died (or went silent past every active-tool ceiling), with the steps that were in flight.
+        // A resume re-runs only those proven replay-safe; one that may have acted waits for the owner
+        // (run-graph.ts interruptedRunFacts).
+        db.prepare(
+          `INSERT INTO run_events
+             (id, run_id, seq, ts, kind, automation_id, payload_json)
+           VALUES (?, ?, ?, ?, 'automation_run_interrupted', ?, ?)`,
+        ).run(
+          `evt_${randomUUID()}`,
+          candidate.id,
+          seq + 1,
+          now.toISOString(),
+          candidate.automation_id,
+          JSON.stringify(interruptedRunPayload(candidate)),
         );
       }
       /*

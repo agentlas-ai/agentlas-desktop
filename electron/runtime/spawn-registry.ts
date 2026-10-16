@@ -375,6 +375,29 @@ function taskkillWindowsTree(pid: number, force: boolean): Promise<boolean> {
   });
 }
 
+/**
+ * A dead host's runtime work has ended: the host process is gone and no child it recorded here is still alive.
+ * An unreadable record proves nothing, so it keeps the answer false. Read-only: the orphan sweeper owns reaping.
+ */
+export function hostRunChildrenEnded(hostPid: number): boolean {
+  if (!Number.isSafeInteger(hostPid) || hostPid <= 0 || hostPid === process.pid || processAlive(hostPid)) return false;
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(registryDir()).filter((name) => name.endsWith(".json"));
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"; // no registry: this host never spawned a child
+  }
+  for (const name of entries) {
+    try {
+      const record = JSON.parse(fs.readFileSync(path.join(registryDir(), name), "utf8")) as SpawnRecord;
+      if (record.hostPid === hostPid && Number.isInteger(record.pid) && record.pid > 0 && processAlive(record.pid)) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
 export interface OrphanSweepResult {
   scanned: number;
   /** 이번 패스에 SIGTERM/SIGKILL 을 보낸 고아 수. */

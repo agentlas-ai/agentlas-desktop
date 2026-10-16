@@ -50,6 +50,7 @@ import { graphTeamStepHold, runGraphTeamStep } from "../one/graph-team-step";
 import { claimInvocationRunOwner, invocationRunOwners } from "../store/invocation-run-owners";
 import { sameMethodAttemptLimit, MAX_SAME_METHOD_STARTS, type WorkUnit } from "../../shared/work-recovery";
 import { GraphWorkRecovery, type GraphWorkRecoveryScope } from "./work-recovery";
+import { hostRunChildrenEnded } from "../runtime/spawn-registry";
 import { listAutomationGraphReconciliations } from "../store/graph-reconciliation";
 import { runGraphMcpCall, projectGraphMcpArguments } from "./mcp-call";
 import { nativeGraphSuccessNeedsReflection } from "../../shared/automation-graph-definition";
@@ -320,8 +321,10 @@ export interface RunGraphResult {
    * safely, already returned the same output with the same failing items, or used their rework budget.
    * Schedulers and trigger outboxes do not retry it automatically (production 2026-10-16: three resumes
    * re-judged one unchanged output). Typed; never derived from prose.
+   * `run_interrupted_effect`: the host died while a step that may have acted outside was running; that step waits
+   * for the owner's [Rerun from this node] / [Skip], so a retry could only hold it again.
    */
-  automaticRetry?: { allowed: false; reasonCode: EvalReworkStopReason; nodeId: string; fingerprint: string | null };
+  automaticRetry?: { allowed: false; reasonCode: GraphRetryStopReason; nodeId: string; fingerprint: string | null };
 }
 
 /**
@@ -1090,6 +1093,54 @@ export function reconcileReadOnlyInterruptedAgentNodes(
   return [...safe].sort();
 }
 
+// ── A run whose host died mid-step (automation_run_interrupted, store/db.ts recovery) ────────────
+/*
+ * Owner decision 2026-10-16 (YouTube daily upload): when the app dies mid-run the occurrence is interrupted, the
+ * owner is told, and the resume re-runs only steps proven replay-safe. A step that may already have acted outside
+ * (declared mutation, a non-read receipt, a tool request that never reported a result) is never re-run
+ * automatically: it is held until the owner chooses [Rerun from this node] or [Skip]. Its unknown outcome is never
+ * turned into a prompt note (UNCERTAIN_EFFECT_NOTE_CODES), which would dispatch the upload again.
+ */
+export type InterruptedRunSource = { runId: string; hostPid: number | null };
+
+/** In-flight steps of every interrupted run in this occurrence's resume lineage, newest interruption first. */
+export function interruptedRunFacts(automationId: string, runId: string): Map<string, InterruptedRunSource> {
+  const facts = new Map<string, InterruptedRunSource>();
+  for (const lineageRunId of graphRunLineage(automationId, runId)) {
+    let rows: Array<{ payload_json: string | null }> = [];
+    try {
+      rows = getDb().prepare(`SELECT payload_json FROM run_events WHERE run_id = ? AND automation_id = ?
+        AND kind = 'automation_run_interrupted' ORDER BY seq DESC LIMIT 1`).all(lineageRunId, automationId) as typeof rows;
+    } catch { rows = []; }
+    for (const row of rows) {
+      let payload: Record<string, unknown> | null = null;
+      try { payload = row.payload_json ? JSON.parse(row.payload_json) as Record<string, unknown> : null; } catch { payload = null; }
+      if (payload?.schemaVersion !== "agentlas.automation-run-interrupted.v1" || !Array.isArray(payload.inFlightNodeIds)) continue;
+      const hostPid = typeof payload.hostPid === "number" && Number.isSafeInteger(payload.hostPid) ? payload.hostPid : null;
+      for (const nodeId of payload.inFlightNodeIds) {
+        if (typeof nodeId === "string" && !facts.has(nodeId)) facts.set(nodeId, { runId: lineageRunId, hostPid });
+      }
+    }
+  }
+  return facts;
+}
+
+/**
+ * The interrupted attempt of this step provably acted only by reading: an invocation-backed step (the host records
+ * its tool requests before they run), no declared mutation, every receipt and every recorded request read-only in
+ * every run of the lineage (graphStepEffectRisk, the same judgement a failed check's rework uses).
+ */
+export function interruptedStepReplaySafe(
+  node: WorkflowNode,
+  checkpoint: GraphCheckpoint,
+  effectNodeIds: ReadonlySet<string>,
+  requestRunIds: readonly string[],
+): boolean {
+  if (!["agent", "action"].includes(node.type) || Object.hasOwn(node.config ?? {}, "mcpCall")) return false;
+  if (checkpoint.loginWaits[node.id]?.automaticResumeSafe === false) return false;
+  return graphStepEffectRisk(node, checkpoint, effectNodeIds, requestRunIds) === null;
+}
+
 export function reconcileReplaySafePreparedWorkforceNodes(checkpoint: GraphCheckpoint): string[] {
   const replaySafePreparedNodes = new Set(
     [...checkpoint.inFlightNodeIds, ...checkpoint.ambiguousNodeIds]
@@ -1131,6 +1182,8 @@ const EVAL_REWORK_STOP_REASONS = [
   "eval_rework_unrecorded",
 ] as const;
 export type EvalReworkStopReason = (typeof EVAL_REWORK_STOP_REASONS)[number];
+/** Why a failed run must not be retried automatically: a check that cannot change, or an interrupted effect. */
+export type GraphRetryStopReason = EvalReworkStopReason | "run_interrupted_effect";
 export type EvalReworkPlan = {
   /** Steps on every path from what the check reads back to the check, in graph order. */
   reworkNodeIds: string[];
@@ -1215,15 +1268,28 @@ export function planEvalRework(
   const unsafe: EvalReworkPlan["unsafe"] = [];
   for (const nodeId of reworkNodeIds) {
     if (!completed.has(nodeId)) continue;
-    if (nodeEffect(byId.get(nodeId)!) === "mutation") {
-      unsafe.push({ nodeId, cause: "declared_mutation" });
-    } else if (effectNodeIds.has(nodeId) && (!(checkpoint.toolReceipts[nodeId] ?? [])
-      .every((receipt) => isReplaySafeGraphToolReceipt(checkpoint as GraphCheckpoint, nodeId, receipt))
-      || requestRunIds.some((runId) => !graphNodeToolRequestsReadOnly(runId, nodeId)))) {
-      unsafe.push({ nodeId, cause: "unconfirmed_tool_effect" });
-    }
+    const cause = graphStepEffectRisk(byId.get(nodeId)!, checkpoint, effectNodeIds, requestRunIds);
+    if (cause) unsafe.push({ nodeId, cause });
   }
   return { reworkNodeIds, unsafe };
+}
+
+/**
+ * May this step's recorded attempt have changed the outside world? A declared mutation, a receipt that is not
+ * replay-safe, or a recorded tool request that is not read-only (a request with no result leaves no receipt).
+ * One judgement for a failed check's rework and for an interrupted step's resume.
+ */
+export function graphStepEffectRisk(
+  node: WorkflowNode,
+  checkpoint: Pick<GraphCheckpoint, "toolReceipts" | "prepareReceipts">,
+  effectNodeIds: ReadonlySet<string>,
+  requestRunIds: readonly string[],
+): "declared_mutation" | "unconfirmed_tool_effect" | null {
+  if (nodeEffect(node) === "mutation") return "declared_mutation";
+  if (effectNodeIds.has(node.id) && (!(checkpoint.toolReceipts[node.id] ?? [])
+    .every((receipt) => isReplaySafeGraphToolReceipt(checkpoint as GraphCheckpoint, node.id, receipt))
+    || requestRunIds.some((runId) => !graphNodeToolRequestsReadOnly(runId, node.id)))) return "unconfirmed_tool_effect";
+  return null;
 }
 
 /** Same evaluated output + same failing items = same fingerprint. Typed, never prose. */
@@ -2204,6 +2270,10 @@ export async function runGraph(
     ? latestFailedCandidate
     : null;
   let resumeOfRunId: string | undefined;
+  /** Steps a dead host left in flight: begun again only when admission let them run (interruptedRunFacts). */
+  const interruptedReplay = new Map<string, InterruptedRunSource>();
+  /** Interrupted steps that may have acted outside: held for the owner, never turned into a prompt note. */
+  const interruptedHolds = new Set<string>();
   /** The failed run's own sealed checkpoint was restored (not a changed-graph lineage). */
   let resumedFromCheckpoint = false;
   let checkpoint: GraphCheckpoint | null = null;
@@ -2275,6 +2345,23 @@ export async function runGraph(
         });
       }
       if (checkpoint) {
+        const interrupted = interruptedRunFacts(automation.id, latestFailed.runId);
+        if (interrupted.size > 0) {
+          const requestRunIds = graphRunLineage(automation.id, latestFailed.runId);
+          const replayed: string[] = [];
+          for (const [nodeId, source] of interrupted) {
+            interruptedReplay.set(nodeId, source);
+            if (!checkpoint.inFlightNodeIds.includes(nodeId) && !checkpoint.ambiguousNodeIds.includes(nodeId)) continue;
+            const node = graph.nodes.find((candidate) => candidate.id === nodeId);
+            if (node && interruptedStepReplaySafe(node, checkpoint, effectNodeIds, requestRunIds)) replayed.push(nodeId);
+            else interruptedHolds.add(nodeId);
+            checkpoint.inFlightNodeIds = checkpoint.inFlightNodeIds.filter((id) => id !== nodeId);
+            checkpoint.ambiguousNodeIds = checkpoint.ambiguousNodeIds.filter((id) => id !== nodeId);
+          }
+          tryRecordRunEvent({ runId, kind: "workflow_interrupted_resume", automationId: automation.id, payload: {
+            schemaVersion: "agentlas.graph-interrupted-resume.v1", interruptedRunIds: [...new Set([...interrupted.values()].map((s) => s.runId))],
+            replayNodeIds: replayed.sort(), heldNodeIds: [...interruptedHolds].sort() } });
+        }
         reconcileReplaySafePreparedWorkforceNodes(checkpoint);
         const readOnlyReplayable = reconcileReadOnlyInterruptedAgentNodes(checkpoint, latestFailed.runId, graph);
         if (readOnlyReplayable.length > 0) {
@@ -2291,6 +2378,11 @@ export async function runGraph(
           checkpoint.ambiguousNodeIds = held;
           checkpoint.inFlightNodeIds = [];
         }
+        for (const nodeId of interruptedHolds) admissionPending.set(nodeId, {
+          code: "MUTATION_UNVERIFIED", reason: L("앱이 멈출 때 이 단계가 진행 중이었고, 바깥에 이미 반영됐을 수 있어요(게시·업로드·전송).", "The app stopped while this step was running, and it may already have acted outside (post, upload, message)."),
+          nextAction: L("자동으로 다시 실행하지 않아요. 실제로 반영됐는지 확인한 뒤 [이 노드부터 재실행] 또는 [건너뛰기]를 고르세요.", "It is not run again automatically. Check whether it took effect, then choose [Rerun from this node] or [Skip]."),
+        });
+        if (interruptedHolds.size > 0) checkpoint.ambiguousNodeIds = [...new Set([...checkpoint.ambiguousNodeIds, ...interruptedHolds])].sort();
         resumeOfRunId = latestFailed.runId;
         resumedFromCheckpoint = true;
       }
@@ -2333,7 +2425,7 @@ export async function runGraph(
   // remains scoped to that node while independent branches continue.
   const uncertainEffectNotes = new Map<string, GraphNodeFailure>(historicalEffectNotes);
   for (const [nodeId, failure] of [...admissionPending.entries()]) {
-    if (!UNCERTAIN_EFFECT_NOTE_CODES.has(failure.code)) continue;
+    if (!UNCERTAIN_EFFECT_NOTE_CODES.has(failure.code) || interruptedHolds.has(nodeId)) continue;
     const node = graph.nodes.find(candidate => candidate.id === nodeId);
     // A direct call's payload may come from an upstream node. Compare its
     // actual arguments at the runnable boundary, rather than holding a new
@@ -2489,7 +2581,8 @@ export async function runGraph(
   const evalReworkState = new Map<string, { attempt: number; priorFingerprint: string | null; priorEvaluatedDigest: string | null }>();
   /** Eval node → the steps that read its reasons in this run. A resumed rework is scoped to what the check judges. */
   const evalReworkScope = new Map<string, Set<string>>();
-  let automaticRetryStop: { nodeId: string; reasonCode: EvalReworkStopReason; fingerprint: string | null } | null = null;
+  let automaticRetryStop: { nodeId: string; reasonCode: GraphRetryStopReason; fingerprint: string | null } | null = interruptedHolds.size > 0
+    ? { nodeId: [...interruptedHolds].sort()[0]!, reasonCode: "run_interrupted_effect", fingerprint: null } : null;
   // A check that failed in the run this one resumes: rework what it judges, or stop once. The same
   // output is never judged again (see planEvalRework).
   if (resumedFromCheckpoint && latestFailed) {
@@ -2772,6 +2865,23 @@ export async function runGraph(
   });
   const commonFacts = (node: WorkflowNode) => ({ userStopped: runSignal.aborted, scopeCurrent: true,
     authorized: true, budgetAvailable: budgetGuard(node) === null });
+  /**
+   * A dead host's attempt of an interrupted step stays `started` in the work-recovery journal, and begin() refuses a
+   * started unit (work_recovery_outcome_unconfirmed): before this, every resume and the owner's [Rerun from this
+   * node] failed there for good. When admission let the step run (proven replay-safe, or the owner chose to rerun
+   * it), that attempt is settled as ended with the host's evidence: the host is gone and so is every child it spawned.
+   */
+  const settleInterruptedUnit = (node: WorkflowNode, unit: WorkUnit): WorkUnit => {
+    const source = interruptedReplay.get(node.id);
+    if (!source || unit.state !== "started" || unit.ownerEpoch === runId) return unit;
+    const failed = commonRecovery.fail(unit);
+    const workerEnded = source.hostPid !== null && hostRunChildrenEnded(source.hostPid);
+    const verdict = commonRecovery.retry(failed, { checkpointMatches: true, completed: false,
+      evidenceRef: `automation-run-interrupted:${source.runId}`, effectSafe: true, workerEnded }, commonFacts(node));
+    tryRecordRunEvent({ runId, automationId: automation.id, nodeId: node.id, kind: "workflow_interrupted_unit_settled",
+      payload: { interruptedRunId: source.runId, unitId: failed.unitId, workerEnded, action: verdict.action, reason: verdict.reason } });
+    return failed;
+  };
   const readCommonCheckpoint = (node: WorkflowNode): GraphCheckpoint | null => {
     const row = getDb().prepare("SELECT checkpoint_json FROM automation_runs WHERE id=? AND automation_id=?")
       .get(runId, automation.id) as { checkpoint_json: string | null } | undefined;
@@ -5029,7 +5139,7 @@ export async function runGraph(
                 restoredCommonOutput = true;
                 return { finalText: outputs[node.id], stormbreakerContinueRequested: false };
               }
-              if (!nativeMcpCall) commonUnits.set(node.id, commonRecovery.begin(unit, commonFacts(node)));
+              if (!nativeMcpCall) commonUnits.set(node.id, commonRecovery.begin(settleInterruptedUnit(node, unit), commonFacts(node)));
             }
             modelInvocationStarted = !nativeMcpCall;
             const result = await invokeNodeRaw(...args);
