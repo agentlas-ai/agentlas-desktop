@@ -34,7 +34,7 @@ import { randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult, RunnerFailure, RunnerFailureKind } from "./runner";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import { detectRuntimeRefusal } from "./runtime-refusal";
-import { cumulativeSurfaceGateText, childExitReason, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliToolSilenceWindowMs, wrapSystemPrompt, markRefusedBeforeDispatch } from "./runner";
+import { cumulativeSurfaceGateText, childExitReason, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliToolSilenceWindowMs, wrapSystemPrompt, markRefusedBeforeDispatch, preDispatchRefusal, runnerRefusedBeforeDispatch } from "./runner";
 import { announceToolDenied } from "./tool-approval";
 import {
   acknowledgeStableTurnContext,
@@ -2410,9 +2410,14 @@ async function runPreparedAntigravityAttempt(
       if (residentLease) {
         // A completed provider result keeps a live resident reusable. Abort or
         // a dead process is discarded by the pool's alive check, so no broken
-        // or per-run authority crosses the next turn. A process bound to a
-        // conversation agy no longer holds is never reused.
-        if (req.signal?.aborted || conversationLost || (browserResidentScope && !browserResidentPromoted)) antigravitySessionPool().discard(residentLease);
+        // or per-run authority crosses the next turn. The close reason is the
+        // typed lifecycle fact (acp-session-pool.ts discard): a Stop is a
+        // shutdown, a healthy process whose browser scope stays one-shot is
+        // turn-complete, and only a process bound to a conversation agy no
+        // longer holds is an error.
+        if (req.signal?.aborted) antigravitySessionPool().discard(residentLease, "shutdown");
+        else if (conversationLost) antigravitySessionPool().discard(residentLease, "error");
+        else if (browserResidentScope && !browserResidentPromoted) antigravitySessionPool().discard(residentLease, "turn-complete");
         else antigravitySessionPool().release(residentLease);
         residentLease = null;
       }
@@ -2422,14 +2427,15 @@ async function runPreparedAntigravityAttempt(
         // one-shot retry cannot duplicate an accepted provider action.
         residentProtocolFallback = false;
         const failure = await prepareOneShotPrompt();
-        if (failure) return { text: "", ownerControlTerminal: "uncertain", failure };
+        // "not-dispatched" only when the resident never accepted the turn's write; otherwise the delivery is unknown.
+        if (failure) return { text: "", ownerControlTerminal: "uncertain", ...(dispatch.attempted ? {} : { turnDelivery: "not-dispatched" as const }), failure };
         req.signal?.throwIfAborted();
         return await runAgyProcess(null);
       }
       return result;
     } catch (error) {
       if (residentLease) {
-        antigravitySessionPool().discard(residentLease);
+        antigravitySessionPool().discard(residentLease, req.signal?.aborted ? "shutdown" : "error");
         residentLease = null;
       }
       throw error;
@@ -2447,7 +2453,7 @@ async function runPreparedAntigravityAttempt(
   const notDispatched = (): { turnDelivery?: "not-dispatched" } => (dispatch.attempted ? {} : { turnDelivery: "not-dispatched" });
   if (!residentSession) {
     const failure = oneShotWindowsBudgetFailure();
-    if (failure) return Promise.resolve({ text: "", ownerControlTerminal: "uncertain", failure });
+    if (failure) return Promise.resolve({ text: "", ownerControlTerminal: "uncertain", ...notDispatched(), failure });
   }
   // Antigravity는 빈 prompt를 거부하므로 긴 요청만 private 파일 bootstrap으로 우회한다.
   const env = oneShotSpawnEnv();
@@ -2485,6 +2491,8 @@ async function runPreparedAntigravityAttempt(
   let effectExitCode: number | null = null, effectStdoutEnded = false;
   return new Promise<AntigravityAttemptResult>((resolve, reject) => {
     const invocationStartedAtMs = Date.now();
+    /** Whether an earlier attempt of this run (a dead resident) already reached agy. */
+    const dispatchedBefore = dispatch.attempted;
 
     let child: ReturnType<typeof spawnCli>;
     if (residentSession) {
@@ -2493,7 +2501,7 @@ async function runPreparedAntigravityAttempt(
       try {
         req.signal?.throwIfAborted();
         const failure = oneShotWindowsBudgetFailure();
-        if (failure) { resolve({ text: "", ownerControlTerminal: "uncertain", failure }); return; }
+        if (failure) { resolve({ text: "", ownerControlTerminal: "uncertain", ...notDispatched(), failure }); return; }
         child = spawnCli(
           bin,
           oneShotSpawnArgs(),
@@ -2507,8 +2515,10 @@ async function runPreparedAntigravityAttempt(
         );
       } catch (error) {
         cleanupAgyPrompt();
-        if (residentLease) antigravitySessionPool().discard(residentLease);
-        reject(error instanceof Error ? error : new Error(String(error)));
+        if (residentLease) antigravitySessionPool().discard(residentLease, "error");
+        // spawn itself threw: no process exists, so nothing of this attempt reached agy.
+        const thrown = error instanceof Error ? error : new Error(String(error));
+        reject(dispatchedBefore || req.signal?.aborted ? thrown : preDispatchRefusal(thrown, "antigravity-spawn", "agy_spawn_failed"));
         return;
       }
       dispatch.attempted = true;
@@ -2981,6 +2991,12 @@ async function runPreparedAntigravityAttempt(
         child.stderr?.removeAllListeners("data");
         cleanupAgyPrompt();
         req.signal?.removeEventListener("abort", onAbort);
+        // A child with no pid never started (ENOENT, EACCES): nothing of this attempt reached agy.
+        if (child.pid === undefined && !dispatchedBefore && !req.signal?.aborted) {
+          dispatch.attempted = false;
+          reject(preDispatchRefusal(err, "antigravity-spawn", "agy_spawn_failed"));
+          return;
+        }
         reject(err);
       });
     } else {
@@ -3030,6 +3046,8 @@ export const runAntigravity: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
 ): Promise<RunnerResult> => withAgyDispatchAncestry(async () => {
+  const dispatch: AntigravityDispatchState = { attempted: false };
+  try {
   assertScienceRecoveryRequest(req, "antigravity");
   // Propagate root lifetime through preparation, final pre-spawn checks and
   // the child itself; an inherited detached callback cannot outlive its grant.
@@ -3074,7 +3092,7 @@ export const runAntigravity: Runner = async (
       }),
     );
   }
-  return runPreparedAntigravity(
+  return await runPreparedAntigravity(
     runReq,
     events,
     executableIdentity.executable,
@@ -3082,5 +3100,15 @@ export const runAntigravity: Runner = async (
     executableIdentity.generation,
     stagedImages.directory ? [stagedImages.directory] : [],
     executableIdentity.legacyFingerprint,
+    dispatch,
   );
+  } catch (error) {
+    // Every throw before an agy process started or a resident accepted the turn is a refusal before dispatch
+    // (RuntimeTurnDelivery "not-dispatched", runner.ts preDispatchRefusal keeps its innermost machine code): the
+    // untrusted/read-boundary refusals, attachment staging, an oversized browser prompt, a task browser scope without
+    // its config, a busy resident owner. The graph and the owner's turn then fail with that cause instead of "may have
+    // acted". A Stop keeps its abort; an already marked refusal is rethrown as it is.
+    if (dispatch.attempted || req.signal?.aborted || runnerRefusedBeforeDispatch(error)) throw error;
+    throw preDispatchRefusal(error, "antigravity-prepare", "agy_pre_dispatch_refused");
+  }
 });
