@@ -474,6 +474,17 @@ export function parseUpdaterCompatibility(value: unknown): UpdaterCompatibility 
   };
 }
 
+/**
+ * Root of electron-updater's download cache, mirroring its own rule
+ * (electron-updater AppAdapter.getAppCacheDir). The macOS path used on every OS
+ * meant the Windows and Linux sweeps deleted nothing and still reported success.
+ */
+export function updaterCacheRoot(platform: string, homePath: string, env: NodeJS.ProcessEnv = process.env): string {
+  if (platform === "win32") return env.LOCALAPPDATA || path.join(homePath, "AppData", "Local");
+  if (platform === "darwin") return path.join(homePath, "Library", "Caches");
+  return env.XDG_CACHE_HOME || path.join(homePath, ".cache");
+}
+
 export function resolveMacAppBundle(execPath: string): string | null {
   const normalized = path.resolve(execPath);
   const parts = normalized.split(path.sep);
@@ -859,7 +870,7 @@ export class DesktopUpdaterController {
   }
 
   private updaterCachePath(): string {
-    return path.join(this.deps.homePath, "Library", "Caches", "agentlas-desktop-updater");
+    return path.join(updaterCacheRoot(this.deps.platform, this.deps.homePath), "agentlas-desktop-updater");
   }
 
   private shipItPath(): string {
