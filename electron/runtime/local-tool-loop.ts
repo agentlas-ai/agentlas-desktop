@@ -1,6 +1,8 @@
 import { cachedTokensFromOpenAiUsage } from "./prompt-cache";
 import { cacheCapabilityFor, planCache, planRequestFields, segmentOf, type CachePlan, type CacheSegment } from "./cache-planner";
-import { reportModelPayload, reportCachePlan, ledgerFromApiBody } from "./model-call-ledger";
+import { reportModelPayload, reportCachePlan, reportModelEffort, ledgerFromApiBody, type ModelEffortApplication } from "./model-call-ledger";
+import { openAiChatWireFamily, openAiReasoningEffort, outputLimitField, rejectsOptionalParameter, requestOutputLimit } from "./openai-wire-family";
+import { GENERATION_CONTEXT_RATIO } from "./session-generation";
 import { assertCurrentHistoryRunnerResult } from "./observed-runner";
 import { withCurrentHistoryTool, withCurrentHistoryProducer, withCurrentHistoryApplication, currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
@@ -29,7 +31,7 @@ import { readOnlyBrowserToolIsMutating } from "../../shared/read-only-browser-to
 import { mcpToolSchemaDigest } from "../mcp-tools/tool-schema";
 import { installLazyToolMenu, invalidateToolMenu, resolveToolMenu } from "./tool-menu";
 import { CODE_MODE_TOOL, installMainCodeMode, runMainCodeMode } from "./code-mode";
-import { TOOL_RESULT_READ, hasToolResultContext, installToolResultContext, projectToolResult, readToolResult, toolResultReadRequest } from "./tool-result-context";
+import { TOOL_RESULT_READ, foldRetainedToolResult, hasToolResultContext, installToolResultContext, projectToolResult, readToolResult, toolResultReadRequest } from "./tool-result-context";
 import { createHash, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createRuntimeUsageCollector, type ObservedTokenUsage } from "../../shared/observed-usage";
@@ -66,6 +68,35 @@ import type { ToolResultTrust } from "../../shared/types";
 
 function agentlasDispatchedOrigin(toolName: string): ToolInvocationOrigin {
   return { kind: "agentlas", providerName: "Agentlas", toolName };
+}
+
+/** The typed code of a runner asked to run with no model id (A4 C6.2): refused before any request, never unsettled. */
+export const NO_MODEL_SELECTED_CODE = "no_model_selected";
+
+/**
+ * A refusal raised before any HTTP request left Main (RuntimeTurnDelivery "not-dispatched", runner.ts): the host keeps the
+ * provider code (observed-runner.ts, mcp/client.ts runnerResultRefusedBeforeDispatch) and never reports "may have acted".
+ * ownerControlTerminal stays "uncertain" so no follow-up episode is dispatched on top of a refusal.
+ */
+export function refusedBeforeDispatch(failure: RunnerFailure): RunnerResult {
+  return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain", turnDelivery: "not-dispatched", failure });
+}
+
+/** Typed no-model refusal shared by Ollama, LM Studio, MLX, agentlas-local and every BYOK backend. */
+export function noModelSelectedResult(runtimeKind: string, message: string): RunnerResult {
+  return refusedBeforeDispatch({ kind: "unsupported", runtime: runtimeKind, source: "marker", providerCode: NO_MODEL_SELECTED_CODE, message });
+}
+
+/** Socket-level codes that prove the request never reached the server (no TCP connection, no name). Typed, not prose. */
+const NOT_CONNECTED_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH"]);
+export function fetchNeverConnected(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current && typeof current === "object"; depth += 1) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string" && NOT_CONNECTED_CODES.has(code)) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 export type LocalChatContent =
@@ -1105,10 +1136,15 @@ export async function runOneToolCall(
   events: RunnerEvents,
   approval: LocalToolApprovalContext,
   broker?: MainWorkforceBroker,
+  /** Set when the host synthesized `call.id` for a local server that sent none: the broker gets the measured location,
+   * never a made-up provider correlation id (MainToolDispatchCall contract). The wire message still pairs by `call.id`. */
+  synthesizedLocation?: WorkforceBrokerProviderCallLocation,
 ): Promise<{ toolMessage: Extract<ChatMessage, { role: "tool" }>; visionMessage: ChatMessage | null; isError: boolean }> {
   const outcome = await runMainToolDispatch(
     byName,
-    { providerCallId: call.id, toolName: call.function.name, arguments: call.function.arguments },
+    synthesizedLocation
+      ? { providerCallId: null, providerCallLocation: synthesizedLocation, toolName: call.function.name, arguments: call.function.arguments }
+      : { providerCallId: call.id, toolName: call.function.name, arguments: call.function.arguments },
     events,
     approval,
     broker,
@@ -1151,7 +1187,20 @@ interface StreamTurnResult {
   terminalUsage?: { inputTokens: number; outputTokens: number; cachedInputTokens?: number };
   /** The model's reasoning text for this turn (empty when the server sends none). */
   thinking: string;
+  /** Tool-call ids the host synthesized for a local server that sent none (local compatible normalization only). */
+  synthesizedCallIds?: ReadonlySet<string>;
+  /** Machine codes of the local-server non-conformances normalized on this reply (never shown; diagnostics only). */
+  compatNormalized?: readonly string[];
 }
+
+/**
+ * Local OpenAI-compatible servers (LM Studio, mlx_lm.server, managed llama.cpp, Ollama's /v1 route) are looser than the
+ * OpenAI platform wire, the same way Ollama's native route is (ollama-native.ts ollamaNdjsonToOpenAiSse): mlx_lm.server
+ * documents finish_reason "stop" | "length" only, so a tool-calling reply ends "stop"; some servers omit tool-call ids or
+ * the finish_reason chunk. The strict check below stays for cloud providers. Typed by runtime kind, never by prose.
+ */
+const LOCAL_COMPATIBLE_RUNTIMES = new Set(["ollama", "lmstudio", "mlx", "agentlas-local"]);
+const STOP_EQUIVALENT_FINISH = new Set(["stop", "eos", "end_turn", "stop_sequence"]);
 
 function rejectsStreamUsageOption(status: number, text: string): boolean {
   if (status !== 400 && status !== 422) return false;
@@ -1167,10 +1216,12 @@ async function streamChatTurn(
   resp: Response,
   onPartial: (acc: string) => void,
   onThinking?: RunnerEvents["onThinking"],
+  localCompatible?: { turn: number },
 ): Promise<StreamTurnResult> {
   let acc = "";
   let finishReason: string | undefined;
   let conflictingFinishReason = false;
+  const rawFinishReasons = new Set<string>();
   let sawDone = false;
   let terminalUsage: StreamTurnResult["terminalUsage"];
   let terminalUsageChunks = 0;
@@ -1220,6 +1271,7 @@ async function streamChatTurn(
       }
       const nextFinishReason = event.choices?.[0]?.finish_reason;
       if (typeof nextFinishReason === "string") {
+        rawFinishReasons.add(nextFinishReason);
         if (finishReason !== undefined && finishReason !== nextFinishReason) conflictingFinishReason = true;
         finishReason = nextFinishReason;
       }
@@ -1258,6 +1310,8 @@ async function streamChatTurn(
     }
   }
   if (thinkingOpen) (onThinking?.("end", Date.now() - thinkingStartedAt));
+  if (localCompatible) return normalizeLocalCompatibleTurn({ acc, thinkingText, pending: [...pending.values()], rawFinishReasons,
+    sawDone, terminalUsage, terminalUsageChunks, lastChunkWasUsage, turn: localCompatible.turn });
   const pendingCalls = [...pending.values()];
   const toolCalls: OpenAiToolCall[] = pendingCalls
     .filter((entry) => entry.name)
@@ -1278,6 +1332,68 @@ async function streamChatTurn(
         return !args || typeof args !== "object" || Array.isArray(args);
       } catch { return true; }
     }) || new Set(pendingCalls.map((entry) => entry.id)).size !== pendingCalls.length,
+  };
+}
+
+/**
+ * The same terminal facts as the strict path, after the local-server normalization: a missing or duplicate tool-call id gets
+ * a host id (reported as synthesized, so the broker never sees it as a provider id); "function_call" and stop-equivalent
+ * reasons with complete tool calls read as "tool_calls"; a missing finish_reason after [DONE] or a clean close reads from
+ * what arrived. A reply with no terminal sentinel and no finish reason, or with a cut/invalid tool call, stays unsettled.
+ */
+export function normalizeLocalCompatibleTurn(input: {
+  acc: string; thinkingText: string; pending: Array<{ id?: string; name: string; args: string }>;
+  rawFinishReasons: ReadonlySet<string>; sawDone: boolean; terminalUsage?: StreamTurnResult["terminalUsage"];
+  terminalUsageChunks: number; lastChunkWasUsage: boolean; turn: number;
+}): StreamTurnResult {
+  const codes: string[] = [];
+  const argsValid = (args: string): boolean => {
+    try { const value: unknown = JSON.parse(args || "{}"); return !!value && typeof value === "object" && !Array.isArray(value); } catch { return false; }
+  };
+  const seen = new Set<string>();
+  const synthesizedCallIds = new Set<string>();
+  const named = input.pending.filter((entry) => entry.name);
+  const toolCalls: OpenAiToolCall[] = named.map((entry, index) => {
+    let id = entry.id;
+    if (!id || seen.has(id)) {
+      codes.push(id ? "tool_call_id_duplicate" : "tool_call_id_missing");
+      id = `agentlas_local_call_${input.turn}_${index}`;
+      synthesizedCallIds.add(id);
+    }
+    seen.add(id);
+    return { id, type: "function" as const, function: { name: entry.name, arguments: entry.args } };
+  });
+  const incompleteToolCalls = input.pending.some((entry) => !entry.name || !argsValid(entry.args));
+  const normalizedReasons = new Set([...input.rawFinishReasons].map((reason) => {
+    if (reason === "function_call") { codes.push("finish_reason_function_call"); return "tool_calls"; }
+    if (reason === "length" || reason === "content_filter") return reason;
+    if (toolCalls.length > 0 && !incompleteToolCalls && (reason === "tool_calls" || STOP_EQUIVALENT_FINISH.has(reason))) {
+      if (reason !== "tool_calls") codes.push("finish_reason_stop_with_tool_calls");
+      return "tool_calls";
+    }
+    if (STOP_EQUIVALENT_FINISH.has(reason)) { if (reason !== "stop") codes.push(`finish_reason_${reason}`); return "stop"; }
+    return reason;
+  }));
+  let finishReason: string | undefined = normalizedReasons.size === 1 ? [...normalizedReasons][0] : undefined;
+  const conflicting = normalizedReasons.size > 1;
+  if (input.rawFinishReasons.size === 0 && input.sawDone && !incompleteToolCalls) {
+    // [DONE] is the stream's terminal sentinel; the finish reason chunk alone was missing.
+    codes.push("finish_reason_missing");
+    finishReason = toolCalls.length > 0 ? "tool_calls" : "stop";
+  }
+  // A local server is reached directly (no proxy): a clean close after a finish reason is the end of the reply.
+  const closedAfterReason = !input.sawDone && input.rawFinishReasons.size > 0;
+  if (closedAfterReason) codes.push("done_sentinel_missing");
+  const terminalObserved = (input.sawDone || closedAfterReason) && Boolean(finishReason) && !conflicting;
+  return {
+    text: input.acc.trim(), rawText: input.acc, toolCalls, finishReason, thinking: input.thinkingText,
+    terminalObserved,
+    ...(terminalObserved && input.terminalUsageChunks === 1 && input.lastChunkWasUsage && input.terminalUsage
+      ? { terminalUsage: input.terminalUsage } : {}),
+    missingToolCallIds: false,
+    incompleteToolCalls,
+    ...(synthesizedCallIds.size ? { synthesizedCallIds } : {}),
+    ...(codes.length ? { compatNormalized: [...new Set(codes)] } : {}),
   };
 }
 
@@ -1382,6 +1498,20 @@ async function runLocalOpenAiChatInner(
   const recovery = assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
   const chatEndpoint = opts.chatEndpoint ?? `${host}/v1/chat/completions`;
   const providerLabel = opts.providerLabel ?? host;
+  // Typed dialect of this endpoint (openai-wire-family.ts): OpenAI's platform takes max_completion_tokens and
+  // reasoning_effort; every compatible server keeps max_tokens and gets no effort field.
+  const wireFamily = opts.responsesWire ? "openai-compatible" as const
+    : openAiChatWireFamily({ runtimeKind, backend: opts.recoveryBackend, endpoint: chatEndpoint });
+  const outputField = outputLimitField(wireFamily);
+  const effortPlan = openAiReasoningEffort(wireFamily, req.effort);
+  /** Set after OpenAI's structured refusal of reasoning_effort for this model; the rest of the run sends none. */
+  let effortRejected = false;
+  const effortApplication = (): ModelEffortApplication => "send" in effortPlan && !effortRejected
+    ? { status: "applied", applied: effortPlan.send, requested: req.effort ?? null, wire: "reasoning_effort" }
+    : req.effort ? { status: "unsupported", requested: req.effort,
+      reason: effortRejected ? "provider_rejected_reasoning_effort" : "skip" in effortPlan ? effortPlan.skip : "not_requested" }
+      : { status: "not_requested" };
+  const localCompatibleTerminal = LOCAL_COMPATIBLE_RUNTIMES.has(runtimeKind);
   const runtimeSessionOwnerId = req.runtimeSessionOwnerId ?? req.agentId;
   const isolateRuntimeSessionOwner = req.runtimeSessionOwnerId != null;
   const sessionFingerprint = req.chatId
@@ -1528,6 +1658,45 @@ async function runLocalOpenAiChatInner(
   let toolParseRetries = 0;
   /** Reasoning behind each tool call, replayed to Ollama's native route (gpt-oss loses its plan between calls without it). */
   const thinkingByCallId = new Map<string, string>();
+  /** Screenshot messages this loop appended after tool results (structural identity, never their wording). */
+  const toolVisionMessages = new WeakSet<ChatMessage>();
+  /**
+   * In-turn compaction (A4 C3.3), at a settled tool-step boundary only. The 80% rotation folds history; this folds the
+   * current turn's EARLIER tool output so a long tool loop does not refuse mid-run: old screenshots first (serving already
+   * sends each tool image once), then old tool results become durable read_tool_result references
+   * (foldRetainedToolResult). The latest tool group, every assistant tool_calls message and every tool message stay in
+   * place, so pairs remain protocol-valid; nothing is folded without a byte-exact read path.
+   */
+  let inTurnFolds = 0;
+  const foldEarlierToolOutput = (fits: () => boolean): number => {
+    if (fits()) return 0;
+    let lastGroup = -1;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const row = messages[index];
+      if (row.role === "assistant" && row.tool_calls?.length) { lastGroup = index; break; }
+    }
+    if (lastGroup <= 0) return 0;
+    let folded = 0;
+    for (let index = 0; index < lastGroup && !fits(); index += 1) {
+      const row = messages[index];
+      if (row.role === "user" && toolVisionMessages.has(row)) {
+        // Machine-keyed data, no prose (the folded projection is tool-result data, not a prompt module).
+        const replacement: ChatMessage = { role: "user", content: JSON.stringify({ schema: "agentlas.tool-image-folded.v1", newestImageKept: true }) };
+        toolVisionMessages.delete(row);
+        messages[index] = replacement;
+        folded += 1;
+      }
+    }
+    for (let index = 0; index < lastGroup && !fits(); index += 1) {
+      const row = messages[index];
+      if (row.role !== "tool") continue;
+      const reference = foldRetainedToolResult(byName, approvalContext, row.content);
+      if (reference) { messages[index] = { ...row, content: reference }; folded += 1; }
+    }
+    inTurnFolds += folded;
+    if (folded && process.env.AGENTLAS_LOCAL_TOOL_DEBUG === "1") console.log("[local-tool-loop] in-turn folds:", folded, "total:", inTurnFolds);
+    return folded;
+  };
   let ownerControlPending: string[] | null = null;
   let ownerControlDispatched = false;
   let ownerControlTerminal: "completed" | "uncertain" = "uncertain";
@@ -1611,8 +1780,9 @@ async function runLocalOpenAiChatInner(
             ...(toolParseRetries > 0 ? { seed: Math.floor(Math.random() * 2_147_483_647) } : {}),
             ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
             ...(opts.estimatedContextWindow !== undefined
-              ? { max_tokens: Math.max(outputTokenFloor ?? 0, turnReserve ?? Math.min(8_192, Math.floor(opts.estimatedContextWindow / 4))) }
+              ? { [outputField]: Math.max(outputTokenFloor ?? 0, turnReserve ?? Math.min(8_192, Math.floor(opts.estimatedContextWindow / 4))) }
               : {}),
+            ...("send" in effortPlan && !effortRejected ? { reasoning_effort: effortPlan.send } : {}),
             ...(tools.length > 0 ? { tools } : {}),
             /*
              * ★제약 디코딩 — 형식 붕괴를 배선으로 없앤다.
@@ -1646,7 +1816,7 @@ async function runLocalOpenAiChatInner(
     if (opts.ollamaContext && !req.untrustedNoTools) {
       // The first request of a run reads the server fresh: a model swapped since the last run must not reuse a cached window.
       const limits = await probeOllamaContextLimits(host, model, req.signal, undefined, { fresh: turn === 0 && contextRemeasures === 0 });
-      const reserve = typeof requestBody.max_tokens === "number" ? requestBody.max_tokens : 4_096;
+      const reserve = requestOutputLimit(requestBody) ?? 4_096;
       const plan = planOllamaContext({ host, model, promptTokens: estimateRequestPromptTokens(requestBody), outputReserve: reserve, limits });
       turnWindow = plan.numCtx;
       turnCeiling = plan.ceiling;
@@ -1686,8 +1856,18 @@ async function runLocalOpenAiChatInner(
         inputEstimate = estimateTransportTokens(JSON.stringify(requestBody));
         if (inputEstimate + reserve <= window) reportHistoryCompaction(droppedCount);
       }
+      // The same 80% point as rotation, on the window that admits this request (Ollama: the ceiling num_ctx may grow to),
+      // and never past admission. A labelled default never moves the 80% point; admission still applies to it.
+      const foldWindow = ollamaPlan && turnCeiling !== undefined ? turnCeiling : window;
+      const foldKnown = observedWindow?.known === true;
+      const foldTarget = Math.min(foldKnown ? Math.floor(foldWindow * GENERATION_CONTEXT_RATIO) : Number.POSITIVE_INFINITY, foldWindow - reserve);
+      if (turn > 0 && inputEstimate > foldTarget && (foldKnown || !opts.unknownCapacityProviderEnforced)) {
+        foldEarlierToolOutput(() => estimateTransportTokens(JSON.stringify(requestBody)) <= foldTarget);
+        inputEstimate = estimateTransportTokens(JSON.stringify(requestBody));
+      }
       if (inputEstimate + reserve > window && !opts.unknownCapacityProviderEnforced) {
-        return assertCurrentHistoryRunnerResult({ text: "", failure: { kind: "refused", runtime: runtimeKind, source: "marker",
+        return assertCurrentHistoryRunnerResult({ text: "", ...(turn === 0 ? { turnDelivery: "not-dispatched" as const } : {}),
+          failure: { kind: "refused", runtime: runtimeKind, source: "marker",
           providerCode: "model_context_capacity_exceeded",
           message: req.locale === "ko"
             ? "현재 모델의 추정 문맥 용량을 넘었습니다. 요청·지시·도구 내용은 잘라내지 않았습니다."
@@ -1737,12 +1917,20 @@ async function runLocalOpenAiChatInner(
             reportHistoryCompaction(droppedCount);
           }
         }
-        if (!measured.fits) return assertCurrentHistoryRunnerResult({text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)});
+        // Exact tokenizer, same in-turn compaction: fold earlier tool output of this turn and measure the body again.
+        for (let attempt = 0; attempt < 4 && turn > 0 && (!measured.fits || (req.maxOutputTokens ?? 0) > measured.maxOutputTokens); attempt += 1) {
+          const shrinkTo = estimateTransportTokens(JSON.stringify(requestBody)) - Math.max(1, measured.reserveTokens - measured.maxOutputTokens) * 8
+            - Math.ceil(opts.contextWindow * 0.02);
+          if (!foldEarlierToolOutput(() => estimateTransportTokens(JSON.stringify(requestBody)) <= shrinkTo)) break;
+          measured = await measureLocalContext({host,headers:opts.headers,signal:req.signal,contextWindow:opts.contextWindow,body:requestBody});
+        }
+        if (!measured.fits) return assertCurrentHistoryRunnerResult({text:"",...(turn === 0 ? { turnDelivery: "not-dispatched" as const } : {}),
+          failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)});
         const admittedOutputTokens = boundedLocalOutputTokens(measured.maxOutputTokens, req.maxOutputTokens);
         if (req.maxOutputTokens && admittedOutputTokens < req.maxOutputTokens) {
           return assertCurrentHistoryRunnerResult({text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)});
         }
-        requestBody.max_tokens = admittedOutputTokens;
+        requestBody[outputField] = admittedOutputTokens;
         if (opts.contextInputSink) opts.contextInputSink.value = measured.inputTokens;
         stepExactInput = measured.inputTokens > 0 ? measured.inputTokens : null;
       } catch {
@@ -1753,6 +1941,7 @@ async function runLocalOpenAiChatInner(
     assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
     let resp: Response;
     reportModelPayload(() => ledgerFromApiBody(requestBody, { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
+    reportModelEffort(effortApplication());
     sentRequestTokens = estimateTransportTokens(JSON.stringify(requestBody));
     reportCachePlan(cachePlan);
     let usageAttempt = usage.start();
@@ -1766,6 +1955,12 @@ async function runLocalOpenAiChatInner(
           body: JSON.stringify(requestBody),
       }));
     } catch (err) {
+      // The first request of the turn never reached the server (connection refused, no such host): nothing was sent, so this
+      // is a typed pre-dispatch refusal, not an unsettled turn. A later request follows dispatched tool work and stays a throw.
+      if (!req.signal?.aborted && turn === 0 && !sawAnyToolCall && fetchNeverConnected(err)) {
+        return refusedBeforeDispatch({ kind: "unavailable", runtime: runtimeKind, source: "marker",
+          providerCode: "endpoint_unreachable", message: opts.unreachableMessage.slice(0, 400) });
+      }
       // 사용자가 멈춘 것을 "서버에 연결 못 함"이라고 말하면 거짓말이 된다 —
       // 취소는 취소로 올려보낸다. 다만 **원 에러를 그대로 던지면 안 된다**:
       // AbortController 의 DOMException 문구("This operation was aborted")가 그대로
@@ -1778,25 +1973,28 @@ async function runLocalOpenAiChatInner(
     if (!resp.ok) {
       const terminal = httpFailureResult(resp.status);
       if (terminal) return terminal;
-      const errText = await resp.text().catch(() => "");
-      if (!ownerControlPending && !req.signal?.aborted && Object.hasOwn(requestBody, "stream_options")
-        && rejectsStreamUsageOption(resp.status, errText)) {
-        // This structured validation refusal precedes generation. Retry the
-        // identical request once without the unsupported usage option. Since
-        // the retry cannot promise a terminal usage pair, keep the whole
-        // invocation's observed usage unknown, including earlier tool turns.
-        streamUsageUnsupported = true;
-        const retryBody = { ...requestBody };
-        delete retryBody.stream_options;
+      let errText = await resp.text().catch(() => "");
+      // A structured validation refusal of one OPTIONAL field precedes generation: resend the identical request once
+      // without it. stream_options: the retry cannot promise a terminal usage pair, so the whole invocation's observed
+      // usage stays unknown. reasoning_effort (OpenAI's platform, openai-wire-family.ts): the model takes no effort, so
+      // the ledger records "unsupported" with the provider's refusal as the reason, never the requested value as applied.
+      for (let optionalRetry = 0; optionalRetry < 2 && !resp.ok && !ownerControlPending && !req.signal?.aborted; optionalRetry += 1) {
+        const rejected = Object.hasOwn(requestBody, "stream_options") && rejectsStreamUsageOption(resp.status, errText) ? "stream_options"
+          : Object.hasOwn(requestBody, "reasoning_effort") ? rejectsOptionalParameter(resp.status, errText, ["reasoning_effort"]) : null;
+        if (!rejected) break;
+        if (rejected === "stream_options") streamUsageUnsupported = true;
+        else effortRejected = true;
+        delete requestBody[rejected];
         assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
-        reportModelPayload(() => ledgerFromApiBody(retryBody, { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
+        reportModelPayload(() => ledgerFromApiBody(requestBody, { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
+        reportModelEffort(effortApplication());
         usageAttempt = usage.start();
         try {
           resp = await withCurrentHistoryProvider(()=>turnFetch(chatEndpoint, {
             method: "POST",
             headers: { "content-type": "application/json", ...opts.headers },
             signal: req.signal,
-            body: JSON.stringify(retryBody),
+            body: JSON.stringify(requestBody),
           }));
         } catch {
           if (req.signal?.aborted) throw abortReasonError(req);
@@ -1805,10 +2003,10 @@ async function runLocalOpenAiChatInner(
         if (!resp.ok) {
           const terminal = httpFailureResult(resp.status);
           if (terminal) return terminal;
-          const retryError = await resp.text().catch(() => "");
-          throw new Error(`${providerLabel} API ${resp.status}: ${retryError.slice(0, 300)}`);
+          errText = await resp.text().catch(() => "");
         }
-      } else {
+      }
+      if (!resp.ok) {
         // The server could not parse the model's own tool-call text (gpt-oss on Ollama, measured 2026-10-11:
         // HTTP 500 "error parsing tool call"). Nothing was executed, and sampling differs on the next
         // request, so repeat the identical request a bounded number of times before failing.
@@ -1863,7 +2061,7 @@ async function runLocalOpenAiChatInner(
             const fallbackErrText = await fallback.text().catch(() => "");
             throw new Error(`${providerLabel} API ${fallback.status}: ${fallbackErrText.slice(0, 300)}`);
           }
-          const result = await streamChatTurn(fallback, events.onPartial, events.onThinking);
+          const result = await streamChatTurn(fallback, events.onPartial, events.onThinking, localCompatibleTerminal ? { turn } : undefined);
           (usage.complete(usageAttempt, result.terminalUsage), result.terminalUsage && opts.contextInputSink && (opts.contextInputSink.value = result.terminalUsage.inputTokens), currentHistoryRuntimeFence()?.assertCurrent());
           const failure = terminalFailure(result);
           if (failure) return failure;
@@ -1877,7 +2075,9 @@ async function runLocalOpenAiChatInner(
       }
     }
 
-    const result = await streamChatTurn(resp, (partial) => events.onPartial(continuedText + partial), events.onThinking);
+    const result = await streamChatTurn(resp, (partial) => events.onPartial(continuedText + partial), events.onThinking,
+      localCompatibleTerminal ? { turn } : undefined);
+    if (result.compatNormalized && process.env.AGENTLAS_LOCAL_TOOL_DEBUG === "1") console.log("[local-tool-loop] compat normalized:", result.compatNormalized.join(","));
     (usage.complete(usageAttempt, result.terminalUsage), result.terminalUsage && opts.contextInputSink && (opts.contextInputSink.value = result.terminalUsage.inputTokens), currentHistoryRuntimeFence()?.assertCurrent());
     const cutAtCap = result.finishReason === "length" && result.terminalObserved;
     // A text answer cut at the cap is kept and continued below; only an empty / tool-call cut may first earn a larger budget.
@@ -1890,7 +2090,7 @@ async function runLocalOpenAiChatInner(
       // Only a reply with nothing at all (a reasoning model spent the whole cap thinking) earns a larger budget; a cut
       // text answer or a cut tool call is continued below instead.
       && !cutTextAnswer && result.toolCalls.length === 0 && !result.incompleteToolCalls && !req.untrustedNoTools && !ownerControlPending) {
-      const spent = typeof requestBody.max_tokens === "number" ? requestBody.max_tokens : undefined;
+      const spent = requestOutputLimit(requestBody);
       const room = (turnCeiling ?? 32_768) - estimateRequestPromptTokens(requestBody) - 512;
       if (req.maxOutputTokens === undefined && spent !== undefined && outputGrowths < 2 && spent * 2 <= room) {
         outputGrowths += 1;
@@ -1963,12 +2163,16 @@ async function runLocalOpenAiChatInner(
     if (result.thinking && result.toolCalls[0]) thinkingByCallId.set(result.toolCalls[0].id, result.thinking);
     messages.push({ role: "assistant", content: result.text, tool_calls: result.toolCalls });
     const visionMessages: ChatMessage[] = [];
-    for (const call of result.toolCalls) {
+    for (const [partIndex, call] of result.toolCalls.entries()) {
       assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
-      const outcome = await runOneToolCall(byName, call, progress.events, approvalContext, broker);
+      const outcome = await runOneToolCall(byName, call, progress.events, approvalContext, broker,
+        result.synthesizedCallIds?.has(call.id) ? { responseIndex: turn, partIndex } : undefined);
       progress.assertProgress();
       messages.push(outcome.toolMessage);
-      if (outcome.visionMessage && opts.acceptsImageResults !== false) visionMessages.push(outcome.visionMessage);
+      if (outcome.visionMessage && opts.acceptsImageResults !== false) {
+        toolVisionMessages.add(outcome.visionMessage);
+        visionMessages.push(outcome.visionMessage);
+      }
     }
     // Keep every protocol-required tool response directly after the assistant
     // tool_calls message, then provide screenshots as normal vision input.

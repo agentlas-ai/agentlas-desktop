@@ -356,8 +356,36 @@ interface Collector {
   attempts: AttemptRecord[];
   pending: PayloadLedger | null;
   pendingCachePlan?: CachePlan | null;
+  /** What the adapter actually put on the wire for effort (reportModelEffort); absent = the adapter said nothing. */
+  effort?: ModelEffortApplication;
 }
 const collectors = new AsyncLocalStorage<Collector>();
+
+/**
+ * The effort a host-loop adapter actually sent (A4 C6.3). `applied` is the provider-native value on the wire, `requested`
+ * the chip value it came from; `unsupported` means a value was requested but none was sent, with the machine reason.
+ * The ledger records the applied value only, never the requested value as if it had been applied.
+ */
+export type ModelEffortApplication =
+  | { status: "applied"; applied: string; requested: string | null; wire: string }
+  | { status: "unsupported"; requested: string; reason: string }
+  | { status: "not_requested" };
+
+/**
+ * Adapter hook: report the effort this call puts on the wire (or why none). The last report of a call wins, so an adapter
+ * that drops the field after a structured provider refusal reports again. No-op outside a wrapped runner.
+ */
+export function reportModelEffort(application: ModelEffortApplication): void {
+  try {
+    const collector = collectors.getStore();
+    if (collector) collector.effort = { ...application };
+  } catch { /* observability must not break a run */ }
+}
+
+/** The RunnerResult.appliedEffort the adapter's report implies: the applied value, or null when nothing was sent. */
+function appliedEffortOf(application: ModelEffortApplication): string | null {
+  return application.status === "applied" ? application.applied : null;
+}
 
 /**
  * Adapter hook: report the payload you are about to transmit (lazily: the builder only runs under a wrapped runner and
@@ -468,6 +496,8 @@ export function ledgerEventPayload(input: {
   callRef: string; scopeCallRef?: string; attemptIndex: number; attemptCount: number; attemptId: string | null;
   role: ModelCallRole; roleSource: "scope" | "inferred"; phase?: string; userTurnId: string; scoped: boolean;
   identity: ModelCallIdentity; requestModel?: string | null; effort?: string | null;
+  /** applied | unsupported | not_requested | requested_unconfirmed (a runner that reports no effort fact). */
+  effortStatus?: string; effortRequested?: string; effortReason?: string;
   payload: PayloadLedger | null; usage: AttemptRecord["usage"]; detail: AttemptRecord["detail"];
   cachePlan?: CachePlan | null; meta?: CallMeta;
   status: string; failureKind?: string; failureCode?: string; durationMs: number;
@@ -483,6 +513,9 @@ export function ledgerEventPayload(input: {
     role: input.role, roleSource: input.roleSource, ...(input.phase ? { phase: input.phase } : {}), scoped: input.scoped,
     runtimeKind: input.identity.kind, ...(input.identity.backend ? { runtimeBackend: input.identity.backend } : {}),
     ...(input.requestModel ? { model: input.requestModel } : {}), ...(input.effort ? { effort: input.effort } : {}),
+    ...(input.effortStatus ? { effortStatus: input.effortStatus } : {}),
+    ...(input.effortRequested ? { effortRequested: input.effortRequested } : {}),
+    ...(input.effortReason ? { effortReason: input.effortReason } : {}),
     status: input.status, ...(input.failureKind ? { failureKind: input.failureKind } : {}),
     ...(input.failureCode ? { failureCode: input.failureCode } : {}), durationMs: input.durationMs,
     payloadSource: payload?.source ?? "unknown", mode: payload?.mode ?? "unknown",
@@ -583,6 +616,11 @@ export function withModelCallLedger(runner: Runner, identity: ModelCallIdentity)
     let threw = false;
     try {
       result = await collectors.run(collector, () => runner(req, wrappedEvents));
+      // A host-loop adapter that reported its wire effort and returned no appliedEffort: the result carries the applied
+      // value (null = none sent), so Workforce receipts (workload-routing appliedEffortResolution) say what really ran.
+      if (collector.effort && result && !Object.prototype.hasOwnProperty.call(result, "appliedEffort")) {
+        result = { ...result, appliedEffort: appliedEffortOf(collector.effort) };
+      }
       return result;
     } catch (error) {
       threw = true;
@@ -618,7 +656,17 @@ function emit(collector: Collector, input: {
   const status = input.threw ? (aborted ? "cancelled" : "failed") : result?.failure ? "failed" : "completed";
   const failureKind = result?.failure?.kind;
   const failureCode = ledgerFailureCode(input.threw ? (input.thrown as { code?: unknown } | null)?.code : result?.failure?.providerCode);
-  const effort = result && Object.prototype.hasOwnProperty.call(result, "appliedEffort") ? result.appliedEffort ?? null : req.effort ?? null;
+  // The applied effort, never the requested one presented as applied (A4 C6.3): the adapter's wire report first, then a
+  // runner-returned appliedEffort; only a runner that reports neither keeps the legacy requested value, marked unconfirmed.
+  const reportedEffort = collector.effort;
+  const returnedEffort = result && Object.prototype.hasOwnProperty.call(result, "appliedEffort");
+  const effort = reportedEffort ? appliedEffortOf(reportedEffort)
+    : returnedEffort ? result!.appliedEffort ?? null : req.effort ?? null;
+  const effortStatus = reportedEffort ? reportedEffort.status
+    : returnedEffort ? (result!.appliedEffort ? "applied" : req.effort ? "unsupported" : "not_requested")
+      : req.effort ? "requested_unconfirmed" : undefined;
+  const effortRequested = ledgerFailureCode(req.effort ?? undefined);
+  const effortReason = reportedEffort?.status === "unsupported" ? ledgerFailureCode(reportedEffort.reason) : undefined;
   // Attempts the adapter announced; a runner that announced none still made (at most) one call we must account for.
   const attempts: AttemptRecord[] = collector.attempts.length
     ? collector.attempts
@@ -642,6 +690,7 @@ function emit(collector: Collector, input: {
         callRef, ...(scope?.callRef ? { scopeCallRef: scope.callRef } : {}), attemptIndex: index + 1, attemptCount: attempts.length,
         attemptId: attempt.id, role, roleSource: source, ...(scope?.phase ? { phase: scope.phase } : {}),
         userTurnId, scoped: Boolean(scope?.runId), identity, requestModel: req.model ?? identity.model ?? null, effort,
+        ...(effortStatus ? { effortStatus } : {}), ...(effortRequested ? { effortRequested } : {}), ...(effortReason ? { effortReason } : {}),
         payload, usage: attempt.usage, detail: attempt.detail, cachePlan: attempt.cachePlan ?? null, status, ...(failureKind ? { failureKind } : {}),
         ...(failureCode ? { failureCode } : {}),
         ...(collector.meta ? { meta: collector.meta } : {}),

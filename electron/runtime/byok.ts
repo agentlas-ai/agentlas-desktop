@@ -1,6 +1,9 @@
 import { assertCurrentHistoryRunnerResult } from "./observed-runner";
 import { openStatelessGeneration, statelessHistoryTokens, type StatelessWindowSource } from "./stateless-generation";
-import { reportModelPayload, reportCachePlan, reportModelEndpoint, ledgerFromApiBody } from "./model-call-ledger";
+import { reportModelPayload, reportCachePlan, reportModelEndpoint, reportModelEffort, ledgerFromApiBody, type ModelEffortApplication } from "./model-call-ledger";
+import { GENERATION_CONTEXT_RATIO } from "./session-generation";
+import { foldRetainedToolResult } from "./tool-result-context";
+import { createHash } from "node:crypto";
 import { currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 // BYOK 직접 API 러너 — Anthropic Messages / OpenAI Chat Completions / Google Generative API.
@@ -32,8 +35,11 @@ import {
   runOneToolCall,
   createToolLoopProgress,
   createToolLoopUsage,
+  noModelSelectedResult,
+  refusedBeforeDispatch,
   type ChatMessage,
   type LocalChatContent,
+  type MainToolDispatchResult,
 } from "./local-tool-loop";
 import { tStatus } from "./status-i18n";
 import { OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS, outputLimitContinuationTurn } from "./output-limit-continuation";
@@ -73,6 +79,131 @@ function byokContextFailure(req: RunnerRequest): RunnerFailure {
 
 function resolveModel(backend: ByokBackend, req: RunnerRequest): string {
   return req.model?.trim() || defaultByokModel(backend) || "";
+}
+
+/** No model id and no pinned default (DEFAULT_BYOK_MODEL is empty): a typed refusal before any request (A4 C6.2). */
+function byokNoModel(backend: ByokBackend, req: RunnerRequest): RunnerResult | null {
+  if (resolveModel(backend, req)) return null;
+  return noModelSelectedResult("byok", req.locale === "ko"
+    ? "사용할 모델 ID가 없습니다. 설정에서 실시간 모델을 선택하거나 모델 ID를 직접 입력하세요."
+    : "No model ID is selected. Choose a live model or enter a model ID in Settings.");
+}
+
+/** A missing provider key: refused before any request leaves Main, with a typed code instead of a thrown sentence. */
+function byokCredentialMissing(message: string): RunnerResult {
+  return refusedBeforeDispatch({ kind: "auth", runtime: "byok", source: "marker", providerCode: "credential_missing", message: message.slice(0, 400) });
+}
+
+/**
+ * Images a host tool returned (visionMessage of the shared dispatcher, OpenAI image_url data URLs) as base64 parts for a
+ * provider's own content format (A4 C7.3). Only well-formed data URLs of the four image types every provider accepts.
+ */
+function toolResultImages(outcome: Pick<MainToolDispatchResult, "visionMessage" | "isError">): Array<{ mediaType: string; data: string }> {
+  const content = outcome.isError ? null : outcome.visionMessage?.content;
+  if (!Array.isArray(content)) return [];
+  const images: Array<{ mediaType: string; data: string }> = [];
+  for (const part of content) {
+    if (part?.type !== "image_url") continue;
+    const match = /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/]+={0,2})$/.exec(part.image_url?.url ?? "");
+    if (match) images.push({ mediaType: match[1], data: match[2] });
+  }
+  return images.slice(0, 8);
+}
+
+/**
+ * In-turn compaction for the BYOK wire loops (A4 C3.3), same rule as local-tool-loop.ts: at a settled tool-step boundary,
+ * when the request reaches 80% of a known window or would fail admission, earlier tool results of this turn become durable
+ * read_tool_result references, oldest first; the latest tool group stays verbatim and every call/result pair stays.
+ */
+function foldByokToolResults(slots: Array<{ get(): string; set(value: string): void }>, fits: () => boolean,
+  byName: Parameters<typeof foldRetainedToolResult>[0], scope: Parameters<typeof foldRetainedToolResult>[1]): number {
+  let folded = 0;
+  for (const slot of slots) {
+    if (fits()) break;
+    const reference = foldRetainedToolResult(byName, scope, slot.get());
+    if (reference) { slot.set(reference); folded += 1; }
+  }
+  return folded;
+}
+
+const ANTHROPIC_EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+const anthropicEffortCapabilities = new Map<string, Promise<ReadonlySet<string> | null>>();
+
+/**
+ * The effort levels Anthropic's own Models API says this model accepts (GET /v1/models/{id} -> capabilities.effort, each
+ * level with `supported`). Typed capability, never a model-name rule; cached per endpoint, key and model for the process.
+ * null = the capability could not be read (no effort is sent, and the ledger says why).
+ */
+function anthropicEffortLevels(baseUrl: string, headers: Record<string, string>, model: string, signal?: AbortSignal): Promise<ReadonlySet<string> | null> {
+  const keyDigest = createHash("sha256").update(headers["x-api-key"] ?? headers.authorization ?? "").digest("hex").slice(0, 16);
+  const cacheKey = `${baseUrl}\0${keyDigest}\0${model}`;
+  const cached = anthropicEffortCapabilities.get(cacheKey);
+  if (cached) return cached;
+  const lookup = (async () => {
+    try {
+      const response = await fetch(`${baseUrl}/v1/models/${encodeURIComponent(model)}`, { headers, ...(signal ? { signal } : {}) });
+      if (!response.ok) return null;
+      const body = await response.json() as { capabilities?: { effort?: Record<string, unknown> } };
+      const effort = body?.capabilities?.effort;
+      if (!effort || typeof effort !== "object" || (effort as { supported?: unknown }).supported !== true) return new Set<string>();
+      return new Set(ANTHROPIC_EFFORT_ORDER.filter((level) => (effort[level] as { supported?: unknown } | undefined)?.supported === true));
+    } catch { return null; }
+  })();
+  anthropicEffortCapabilities.set(cacheKey, lookup);
+  void lookup.then((levels) => { if (levels === null) anthropicEffortCapabilities.delete(cacheKey); });
+  return lookup;
+}
+
+/** The requested level when the model takes it, else the highest supported level below it, else its lowest level. */
+function pickSupportedEffort(requested: string, supported: ReadonlySet<string>): string | null {
+  if (supported.has(requested)) return requested;
+  const rank = ANTHROPIC_EFFORT_ORDER.indexOf(requested);
+  if (rank < 0) return null;
+  const below = ANTHROPIC_EFFORT_ORDER.filter((level, index) => index <= rank && supported.has(level));
+  return below.at(-1) ?? ANTHROPIC_EFFORT_ORDER.find((level) => supported.has(level)) ?? null;
+}
+
+/** Gemini generateContent thinkingConfig.thinkingLevel (API reference ThinkingLevel: MINIMAL | LOW | MEDIUM | HIGH). */
+function geminiThinkingLevel(requested: string | undefined): "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" | null {
+  switch (requested) {
+    case "none": case "minimal": return "MINIMAL";
+    case "low": return "LOW";
+    case "medium": return "MEDIUM";
+    case "high": case "xhigh": case "max": return "HIGH";
+    default: return null;
+  }
+}
+
+/**
+ * Gemini's structured BadRequest for the thinking level ("Use with earlier models results in an error", API reference):
+ * a field violation whose path names the thinking config. Nothing else permits dropping the field.
+ */
+export function geminiThinkingConfigRejected(body: string): boolean {
+  try {
+    const details = (JSON.parse(body) as { error?: { details?: Array<{ fieldViolations?: Array<{ field?: unknown }> }> } })?.error?.details;
+    return Array.isArray(details) && details.some((detail) => Array.isArray(detail?.fieldViolations)
+      && detail.fieldViolations.some((violation) => typeof violation?.field === "string"
+        && /(?:^|\.)(?:generation_config|generationConfig)\.(?:thinking_config|thinkingConfig)(?:\.|$)/.test(violation.field)));
+  } catch {
+    return false;
+  }
+}
+
+/** Google's machine status for a request the API rejected as malformed (error.status "INVALID_ARGUMENT"). */
+function geminiInvalidArgument(body: string): boolean {
+  try { return (JSON.parse(body) as { error?: { status?: unknown } })?.error?.status === "INVALID_ARGUMENT"; } catch { return false; }
+}
+
+/** Gemini's structured BadRequest naming a function response's media parts (models before Gemini 3 take text only). */
+export function geminiFunctionResponsePartsRejected(body: string): boolean {
+  try {
+    const details = (JSON.parse(body) as { error?: { details?: Array<{ fieldViolations?: Array<{ field?: unknown }> }> } })?.error?.details;
+    return Array.isArray(details) && details.some((detail) => Array.isArray(detail?.fieldViolations)
+      && detail.fieldViolations.some((violation) => typeof violation?.field === "string"
+        && /(?:function_response|functionResponse)\.parts/.test(violation.field)));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -203,7 +334,9 @@ type AnthropicContent =
     } & CacheControl)
   // 도구 왕복 — 어시스턴트가 tool_use 를 내면 우리가 실행하고 tool_result 로 답한다.
   | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
-  | { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean }
+  | { type: "tool_result"; tool_use_id: string; is_error?: boolean;
+      // Anthropic tool_result content: a string, or text + image blocks (a host screenshot the model must see).
+      content: string | Array<{ type: "text"; text: string } | { type: "image"; source: { type: "base64"; media_type: string; data: string } }> }
   // Opaque continuation blocks: the provider requires them back unchanged (signature included) before the tool_use they precede.
   | { type: "thinking"; thinking: string; signature: string }
   | { type: "redacted_thinking"; data: string };
@@ -323,6 +456,8 @@ async function runAnthropicMessagesInner(
   events: RunnerEvents,
   sink: { value?: number },
 ): Promise<RunnerResult> {
+  const noModel = byokNoModel(backend, req);
+  if (noModel) return noModel;
   events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
 
   const { model, recent, system } = prepareContext(backend, req, events, true);
@@ -382,6 +517,20 @@ async function runAnthropicMessagesInner(
   }));
   const capacity = byokContextCapacity(backend, model, req, events);
   const outputLimit = req.maxOutputTokens ?? Math.min(8_192, Math.floor(capacity.window / 4));
+  // Effort (A4 C6.3): Anthropic's output_config.effort, only at a level the model's own Models API capability lists.
+  // Anthropic-compatible third parties document no effort field, so they get none and the ledger says so.
+  let outputEffort: string | null = null;
+  let effortApplication: ModelEffortApplication = req.effort
+    ? { status: "unsupported", requested: req.effort, reason: backend === "anthropic" ? "model_capability_unavailable" : "endpoint_family_has_no_effort_control" }
+    : { status: "not_requested" };
+  if (req.effort && backend === "anthropic") {
+    const levels = await anthropicEffortLevels(baseUrl, headers, model, req.signal);
+    const picked = levels && levels.size > 0 ? pickSupportedEffort(req.effort, levels) : null;
+    if (picked) {
+      outputEffort = picked;
+      effortApplication = { status: "applied", applied: picked, requested: req.effort, wire: "output_config.effort" };
+    } else if (levels) effortApplication = { status: "unsupported", requested: req.effort, reason: levels.size === 0 ? "model_has_no_effort_control" : "effort_value_not_supported" };
+  }
   let transmittedHistoryCount = req.history.filter((row) => row.role === "user" || row.role === "assistant").length;
   const historyBudgetState = { value: req.history.reduce((sum, row) => sum + estimateTransportTokens(row.text) + 12, 0) };
   // The conversation's "session" (stateless-generation.ts): the handoff it installed, a new one at a settled boundary when
@@ -427,13 +576,30 @@ async function runAnthropicMessagesInner(
     }
     const outgoingWire = () => anthropicWire({ native: backend === "anthropic", model, system, tools: anthropicTools, messages });
     const outgoingBody = () => { const wire = outgoingWire(); return { model, max_tokens: outputLimit, stream: true, system: wire.system,
-      messages: wire.messages, ...(anthropicTools.length > 0 ? { tools: anthropicTools } : {}) }; };
+      messages: wire.messages, ...(anthropicTools.length > 0 ? { tools: anthropicTools } : {}),
+      ...(outputEffort ? { output_config: { effort: outputEffort } } : {}) }; };
     // Rotation at this settled boundary (turn start, or after a tool step whose results are all in): the request's INPUT
     // against 80% of the window. Input + output reserve is admission, checked next, and never records a generation.
     const rotation = await generations.boundary({ boundary: turn === 0 ? "turn-start" : "tool-step", step: turn,
       window: byokGenerationWindow(capacity), requestTokens: estimateTransportTokens(JSON.stringify(outgoingBody())),
       historyTokens: historyBudgetState.value, observedLastInput: lastObservedInput, lastRequestTokens });
     if (rotation.action === "rotated") installGeneration(rotation.digest, rotation.rows);
+    // In-turn compaction of earlier tool results (foldByokToolResults). Never when this turn carries thinking blocks:
+    // Anthropic invalidates thinking after an edited earlier block (preserved thinking), so the transcript stays append-only
+    // there and a full window remains the typed capacity refusal below.
+    const turnHasThinking = messages.some((message) => message.role === "assistant" && Array.isArray(message.content)
+      && message.content.some((block) => block.type === "thinking" || block.type === "redacted_thinking"));
+    if (turn > 0 && !turnHasThinking && capacity.known) {
+      const target = Math.min(Math.floor(capacity.window * GENERATION_CONTEXT_RATIO), capacity.window - outputLimit);
+      const resultMessages = messages.filter((message) => message.role === "user" && Array.isArray(message.content)
+        && message.content.some((block) => block.type === "tool_result"));
+      const slots = resultMessages.slice(0, -1).flatMap((message) => (message.content as AnthropicContent[])
+        .filter((block): block is Extract<AnthropicContent, { type: "tool_result" }> & { content: string } => block.type === "tool_result" && typeof block.content === "string")
+        .map((block) => ({ get: () => block.content, set: (value: string) => { block.content = value; } })));
+      if (slots.length) {
+        foldByokToolResults(slots, () => estimateTransportTokens(JSON.stringify(outgoingBody())) <= target, byName, approval);
+      }
+    }
     if (!byokHistoryAdmission({ req, events, window: capacity.window, capacityKnown: capacity.known, outputReserve: outputLimit,
       budgetState: historyBudgetState,
       outgoingBody,
@@ -451,6 +617,7 @@ async function runAnthropicMessagesInner(
     })) return assertCurrentHistoryRunnerResult({ text: "", failure: byokContextFailure(req) });
     assertScienceRecoveryRequest(req, "byok", backend);
     reportModelPayload(() => ledgerFromApiBody(outgoingBody(), { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
+    reportModelEffort(effortApplication);
     const sentRequestTokens = estimateTransportTokens(JSON.stringify(outgoingBody()));
     reportCachePlan(() => outgoingWire().plan);
     reportModelEndpoint({ url: baseUrl });
@@ -677,10 +844,16 @@ async function runAnthropicMessagesInner(
         broker,
       );
       progress.assertProgress();
+      // A host screenshot goes back inside its own tool_result as Anthropic image blocks (A4 C7.3); compatible
+      // third-party endpoints keep the text form they document.
+      const images = backend === "anthropic" ? toolResultImages(outcome) : [];
       resultContent.push({
         type: "tool_result",
         tool_use_id: entry.id,
-        content: outcome.toolMessage.content,
+        content: images.length
+          ? [{ type: "text", text: outcome.toolMessage.content },
+            ...images.map((image) => ({ type: "image" as const, source: { type: "base64" as const, media_type: image.mediaType, data: image.data } }))]
+          : outcome.toolMessage.content,
         ...(outcome.isError ? { is_error: true } : {}),
       });
     }
@@ -754,7 +927,7 @@ export const runAnthropicByok: Runner = async (
 ): Promise<RunnerResult> => {
   assertScienceRecoveryRequest(req, "byok", "anthropic");
   const key = await readApiKey("anthropic");
-  if (!key) throw new Error(tStatus(req.locale, "errKeyMissingAnthropic"));
+  if (!key) return byokCredentialMissing(tStatus(req.locale, "errKeyMissingAnthropic"));
   return runAnthropicMessages("anthropic", "https://api.anthropic.com", { "x-api-key": key }, req, events);
 };
 
@@ -771,7 +944,7 @@ function makeAnthropicCompatByok(backend: ByokBackend): Runner {
     if (!preset) throw new Error(`Unknown Anthropic-compatible backend: ${backend}`);
     const key = await readApiKey(backend);
     if (!key) {
-      throw new Error(
+      return byokCredentialMissing(
         req.locale === "ko"
           ? `${preset.label} API 키가 없습니다. 설정에서 키를 저장하세요.`
           : `Missing ${preset.label} API key. Save it in Settings.`,
@@ -832,6 +1005,8 @@ async function runOpenAiCompletionWithMainToolLoop(
   req: RunnerRequest,
   events: RunnerEvents,
 ): Promise<RunnerResult> {
+  const noModel = byokNoModel(backend, req);
+  if (noModel) return noModel;
   events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
   const { model, recent, system } = prepareContext(backend, req, events);
   const capacity = byokContextCapacity(backend, model, req, events);
@@ -873,7 +1048,7 @@ async function runOpenAICompatible(
   assertScienceRecoveryRequest(req, "byok", backend);
   const key = await readApiKey(backend);
   if (!key) {
-    throw new Error(
+    return byokCredentialMissing(
       req.locale === "ko"
         ? `${providerLabel} API 키가 없습니다. 설정에서 키를 저장하세요.`
         : `Missing ${providerLabel} API key. Save it in Settings.`,
@@ -923,7 +1098,7 @@ export const runOpenAIByok: Runner = async (
 ): Promise<RunnerResult> => {
   assertScienceRecoveryRequest(req, "byok", "openai");
   const key = await readApiKey("openai");
-  if (!key) throw new Error(tStatus(req.locale, "errKeyMissingOpenAI"));
+  if (!key) return byokCredentialMissing(tStatus(req.locale, "errKeyMissingOpenAI"));
   return runOpenAiCompletionWithMainToolLoop(
     "openai", "https://api.openai.com/v1", "OpenAI", key, req, events,
   );
@@ -936,7 +1111,7 @@ export const runUpstageByok: Runner = async (
 ): Promise<RunnerResult> => {
   assertScienceRecoveryRequest(req, "byok", "upstage");
   const key = await readApiKey("upstage");
-  if (!key) throw new Error("Upstage Solar API key missing (Settings → BYOK)");
+  if (!key) return byokCredentialMissing("Upstage Solar API key missing (Settings → BYOK)");
   return runOpenAiCompletionWithMainToolLoop(
     "upstage", "https://api.upstage.ai/v1", "Upstage", key, req, events,
   );
@@ -951,7 +1126,7 @@ export const runCustomByok: Runner = async (
 ): Promise<RunnerResult> => {
   assertScienceRecoveryRequest(req, "byok", "custom");
   const key = await readApiKey("custom");
-  if (!key) throw new Error("Custom API key missing (Settings → BYOK)");
+  if (!key) return byokCredentialMissing("Custom API key missing (Settings → BYOK)");
 
   let baseUrl = "https://api.openai.com/v1";
   try {
@@ -971,8 +1146,10 @@ export const runGoogleByok: Runner = async (
 ): Promise<RunnerResult> => {
   assertScienceRecoveryRequest(req, "byok", "google");
   const key = await readApiKey("google");
-  if (!key) throw new Error(tStatus(req.locale, "errKeyMissingGoogle"));
+  if (!key) return byokCredentialMissing(tStatus(req.locale, "errKeyMissingGoogle"));
 
+  const noModel = byokNoModel("google", req);
+  if (noModel) return noModel;
   events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
 
   const { model, recent, system } = prepareContext("google", req, events, true);
@@ -985,7 +1162,9 @@ export const runGoogleByok: Runner = async (
     text?: string;
     inlineData?: { mimeType: string; data: string };
     functionCall?: GoogleFunctionCall;
-    functionResponse?: { id?: string; name: string; response: Record<string, unknown> };
+    functionResponse?: { id?: string; name: string; response: Record<string, unknown>;
+      /** FunctionResponse.parts (API reference): media the function returned, e.g. a host screenshot. */
+      parts?: Array<{ inlineData: { mimeType: string; data: string } }> };
     thought?: boolean;
     thoughtSignature?: string;
     partMetadata?: Record<string, unknown>;
@@ -1047,6 +1226,17 @@ export const runGoogleByok: Runner = async (
   let outputCuts = 0;
   let reachedAnswer = false;
   let includeTools = functionDeclarations.length > 0;
+  // Effort (A4 C6.3): generationConfig.thinkingConfig.thinkingLevel. The API reference says it is for Gemini 3 or later and
+  // "use with earlier models results in an error": a structured field violation on the thinking config drops it for the
+  // rest of the run and the ledger records "unsupported" with that reason.
+  const thinkingLevel = geminiThinkingLevel(req.effort);
+  let thinkingRejected = false;
+  const geminiEffort = (): ModelEffortApplication => thinkingLevel && !thinkingRejected
+    ? { status: "applied", applied: thinkingLevel.toLowerCase(), requested: req.effort ?? null, wire: "generationConfig.thinkingConfig.thinkingLevel" }
+    : req.effort ? { status: "unsupported", requested: req.effort, reason: thinkingRejected ? "provider_rejected_thinking_level" : "effort_value_not_in_provider_enum" }
+      : { status: "not_requested" };
+  /** Set after a structured refusal of function-response media parts: later screenshots go back as text only. */
+  let functionResponsePartsRejected = false;
   const measuredUsage = createToolLoopUsage(events);
   const progress = createToolLoopProgress("byok", req, events);
   /** Monotonic across every SSE event in this provider invocation. */
@@ -1071,7 +1261,8 @@ export const runGoogleByok: Runner = async (
     const outgoingBody = () => ({
       systemInstruction: { parts: [{ text: system }] },
       contents,
-      generationConfig: { maxOutputTokens: outputLimit },
+      generationConfig: { maxOutputTokens: outputLimit,
+        ...(thinkingLevel && !thinkingRejected ? { thinkingConfig: { thinkingLevel } } : {}) },
       ...(includeTools ? { tools: [{ functionDeclarations }] } : {}),
     });
     // Rotation at this settled boundary: input against 80% of the window (admission, next, is a separate check).
@@ -1079,6 +1270,21 @@ export const runGoogleByok: Runner = async (
       window: byokGenerationWindow(capacity), requestTokens: estimateTransportTokens(JSON.stringify(outgoingBody())),
       historyTokens: historyBudgetState.value, observedLastInput: lastObservedInput, lastRequestTokens });
     if (rotation.action === "rotated") installGeneration(rotation.digest, rotation.rows);
+    // In-turn compaction of earlier function responses (same rule as the other host loops, foldByokToolResults).
+    if (turn > 0 && capacity.known) {
+      const target = Math.min(Math.floor(capacity.window * GENERATION_CONTEXT_RATIO), capacity.window - outputLimit);
+      const responseTurns = contents.filter((content) => content.role === "user" && content.parts.some((part) => part.functionResponse));
+      const slots = responseTurns.slice(0, -1).flatMap((content) => content.parts
+        .filter((part) => typeof part.functionResponse?.response?.output === "string" || typeof part.functionResponse?.response?.error === "string")
+        .map((part) => {
+          const key = typeof part.functionResponse!.response.output === "string" ? "output" : "error";
+          return { get: () => String(part.functionResponse!.response[key]), set: (value: string) => {
+            part.functionResponse = { ...part.functionResponse!, response: { [key]: value } };
+            delete part.functionResponse.parts;
+          } };
+        }));
+      if (slots.length) foldByokToolResults(slots, () => estimateTransportTokens(JSON.stringify(outgoingBody())) <= target, byName, approval);
+    }
     if (!byokHistoryAdmission({ req, events, window: capacity.window, capacityKnown: capacity.known, outputReserve: outputLimit,
       budgetState: historyBudgetState,
       outgoingBody,
@@ -1097,6 +1303,7 @@ export const runGoogleByok: Runner = async (
     reportModelEndpoint({ url });
     assertScienceRecoveryRequest(req, "byok", "google");
     reportModelPayload(() => ledgerFromApiBody(requestBody, { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
+    reportModelEffort(geminiEffort());
     const explicitCache = geminiCacheSetting.enabled
       ? await ensureGeminiCachedContent({
         apiKey: key, model, systemInstruction: requestBody.systemInstruction, tools: requestBody.tools,
@@ -1137,6 +1344,30 @@ export const runGoogleByok: Runner = async (
         return assertCurrentHistoryRunnerResult({ text: acc.trim(), failure: byokContextFailure(req), ...(observedUsage ? { observedUsage } : {}),
           workforcePermissionEnforcement: broker?.finish(false) });
       }
+    }
+    // A structured field violation on an OPTIONAL field this host added (the thinking level on a model before Gemini 3, or
+    // function-response media parts on a model that takes text only) precedes generation: drop that field and resend once.
+    for (let optionalRetry = 0; optionalRetry < 2 && !resp.ok && resp.status === 400 && !ownerControl.hasPending() && !req.signal?.aborted; optionalRetry += 1) {
+      const errBody = await resp.clone().text().catch(() => "");
+      // The field path when Gemini names it; on the run's first request also a bare INVALID_ARGUMENT (Google's status enum),
+      // because the reference documents the error without its shape. The resend without the field decides: a second 400 is
+      // reported as before.
+      if (thinkingLevel && !thinkingRejected && (geminiThinkingConfigRejected(errBody) || (turn === 0 && geminiInvalidArgument(errBody)))) thinkingRejected = true;
+      else if (!functionResponsePartsRejected && geminiFunctionResponsePartsRejected(errBody)) {
+        functionResponsePartsRejected = true;
+        for (const content of contents) for (const part of content.parts) if (part.functionResponse?.parts) delete part.functionResponse.parts;
+      } else break;
+      assertScienceRecoveryRequest(req, "byok", "google");
+      reportModelPayload(() => ledgerFromApiBody(outgoingBody(), { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
+      reportModelEffort(geminiEffort());
+      reportCachePlan(() => geminiCachePlan(outgoingBody()));
+      usageAttempt = measuredUsage.start();
+      resp = await withCurrentHistoryProvider(()=>fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        signal: req.signal,
+        body: JSON.stringify(outgoingBody()),
+      }));
     }
     // Retry without tools only when Gemini says, in its structured BadRequest field paths, that a tool declaration is
     // what it rejected (docs native-harness 07 G23). Any other 4xx (prose-only, quota, bad image) stays a loud failure:
@@ -1299,6 +1530,8 @@ export const runGoogleByok: Runner = async (
         broker,
       );
       progress.assertProgress();
+      // A host screenshot rides in FunctionResponse.parts as inlineData (API reference; multimodal function responses).
+      const images = functionResponsePartsRejected ? [] : toolResultImages(outcome);
       resultParts.push({
         functionResponse: {
           ...(call.providerCallId ? { id: call.providerCallId } : {}),
@@ -1306,6 +1539,7 @@ export const runGoogleByok: Runner = async (
           response: outcome.isError
             ? { error: outcome.content }
             : { output: outcome.content },
+          ...(images.length ? { parts: images.map((image) => ({ inlineData: { mimeType: image.mediaType, data: image.data } })) } : {}),
         },
       });
     }

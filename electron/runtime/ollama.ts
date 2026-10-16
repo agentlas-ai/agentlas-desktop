@@ -11,7 +11,7 @@ import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { resolveEffectiveContextWindow } from "../../shared/models";
-import { runLocalOpenAiChat, type ChatMessage, type LocalChatContent } from "./local-tool-loop";
+import { runLocalOpenAiChat, type ChatMessage, type LocalChatContent, noModelSelectedResult } from "./local-tool-loop";
 import { ownerControlHistoryImages } from "./owner-control-pump";
 
 /** 기본 로컬 호스트. env OLLAMA_HOST로 재정의 가능(원격 Ollama도 지원). */
@@ -65,9 +65,8 @@ export const runOllama: Runner = async (
 ): Promise<RunnerResult> => {
   const host = ollamaHost();
   const model = req.model?.trim();
-  if (!model) {
-    throw new Error(tStatus(req.locale, "errOllamaNoModel"));
-  }
+  // No model id: a typed refusal before any request (A4 C6.2), never a throw the host reads as "may have acted".
+  if (!model) return noModelSelectedResult("ollama", tStatus(req.locale, "errOllamaNoModel"));
 
   events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
 

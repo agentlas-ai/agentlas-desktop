@@ -14,7 +14,10 @@
 // acknowledged only after the first request that used it came back complete; a response that arrives after another writer
 // installed a newer generation never acknowledges. A crash between install and acknowledgement leaves the prepared handoff
 // in place: the next turn starts from it, and no tool is run again. The current request, its tool call/result groups and
-// owner directions after the frontier are never folded (they are the frontier's delta).
+// owner directions after the frontier are never folded into the handoff (they are the frontier's delta). Inside a turn the
+// loops may only shrink the TEXT of an earlier, settled tool result to its durable read_tool_result reference (in-turn
+// compaction, tool-result-context.ts foldRetainedToolResult): the pair stays, the exact bytes stay readable, and the
+// newest tool group is never touched.
 //
 // No electron import, no module-level store require (the daemon runs the same loops).
 import { createHash } from "node:crypto";

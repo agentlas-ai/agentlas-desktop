@@ -1,4 +1,4 @@
-import { redactToolText, lookupToolResult, writeToolResult, type RedactedText } from "../harness/tool-result-store";
+import { redactToolText, lookupToolResult, writeToolResult, sha256Hex, toolResultRef, type RedactedText } from "../harness/tool-result-store";
 import type { OpenAiToolDef, ResolvedTool } from "./local-tool-loop";
 import type { ToolResultTrust } from "../../shared/types";
 
@@ -146,6 +146,43 @@ export function projectToolResult(
   const referenceWireBytes = Buffer.byteLength(JSON.stringify(reference), "utf8");
   return referenceWireBytes < entry.bytes + 2
     || referenceWireBytes < Buffer.byteLength(JSON.stringify(text), "utf8") ? reference : text;
+}
+
+export const TOOL_RESULT_FOLDED_SCHEMA = "agentlas.tool-result-folded.v1";
+
+/**
+ * In-turn compaction (A4 C3.3): the provider-visible text of an EARLIER, settled tool result of this turn becomes a short
+ * durable reference the model can page back with read_tool_result. Only text that is retrievable byte-for-byte from this
+ * chat scope is folded (a reference projection, or inline text whose stored copy is found by its content address); the
+ * call/result pair itself stays, so the transcript remains protocol-valid. Returns null when it cannot be folded safely
+ * (no result context, not retained, or already folded) and the caller keeps the text as it is.
+ */
+export function foldRetainedToolResult(byName: Map<string, ResolvedTool>, scope: Scope, providerText: string): string | null {
+  if (!stores.has(byName)) return null;
+  const store = storeFor(byName, scope);
+  let entry: Entry | undefined;
+  let isError = false;
+  try {
+    const parsed = JSON.parse(providerText) as { schema?: unknown; ref?: unknown; isError?: unknown };
+    if (parsed?.schema === TOOL_RESULT_FOLDED_SCHEMA) return null;
+    if (parsed?.schema === "agentlas.tool-result-reference.v1" && typeof parsed.ref === "string") {
+      entry = lookup(store, parsed.ref);
+      isError = parsed.isError === true;
+    }
+  } catch { /* plain text result */ }
+  if (!entry) {
+    // projectToolResult stores the redacted text under its content address; inline text is exactly that stored text.
+    const digest = sha256Hex(providerText);
+    for (const error of [false, true]) {
+      let found: Entry | undefined;
+      try { found = lookup(store, toolResultRef(error, digest)); } catch { found = undefined; }
+      if (found && found.text === providerText) { entry = found; isError = error; break; }
+    }
+  }
+  if (!entry) return null;
+  const folded = JSON.stringify({ schema: TOOL_RESULT_FOLDED_SCHEMA, trust: "tool-result" satisfies ToolResultTrust, ref: entry.ref,
+    sha256: entry.sha256, utf8Bytes: entry.bytes, isError, completeTextInline: false, readTool: TOOL_RESULT_READ });
+  return Buffer.byteLength(folded, "utf8") < Buffer.byteLength(providerText, "utf8") ? folded : null;
 }
 
 /** Validate the exact range before approval, without returning its text. */

@@ -17,7 +17,9 @@ import { OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS, outputLimitContinuationTurn, type
  * 실행 1회가 크레딧을 쓴다. 잔액 판정·예약·정산은 전부 서버가 한다. 여기서 값을 지어내
  * 미리 보여 주지 않는다 — 앱이 계산한 값과 실제 청구가 어긋나면 그것이 곧 거짓말이 된다.
  */
-import { reportModelPayload, reportCachePlan, reportModelEndpoint, ledgerFromApiBody } from "./model-call-ledger";
+import { reportModelPayload, reportCachePlan, reportModelEndpoint, reportModelEffort, ledgerFromApiBody } from "./model-call-ledger";
+import { GENERATION_CONTEXT_RATIO } from "./session-generation";
+import { foldRetainedToolResult } from "./tool-result-context";
 import { cacheCapabilityFor, planCache, segmentOf, type CachePlan, type CacheSegment } from "./cache-planner";
 import { assertCurrentHistoryRunnerResult } from "./observed-runner";
 import { currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
@@ -433,9 +435,25 @@ async function runAgentlasServingWithTools(
         results: exchange.results.map((result, at) => at < exchange.results.length - 1 ? result : { ...result,
           text: [result.text, outputLimitContinuationTurn(cutKind!, cutPartial)].filter(Boolean).join("\n\n") }) })
       : toolExchanges;
+    const toolImageCount = wireExchanges.reduce((count, exchange) => count + (exchange.images?.length ?? 0), 0);
+    // In-turn compaction (A4 C3.3; same rule as local-tool-loop.ts): at this settled tool-step boundary, results of EARLIER
+    // exchanges become durable read_tool_result references, oldest first, until the request is back under 80% of the
+    // serving window and inside admission. The newest exchange and every call/result pair stay; images already go once.
+    if (toolExchanges.length > 1) {
+      const target = Math.min(Math.floor(AGENTLAS_SERVING_CONTEXT_WINDOW * GENERATION_CONTEXT_RATIO),
+        AGENTLAS_SERVING_CONTEXT_WINDOW - outputReserve - 256 - imageTokenEstimate(req, toolImageCount));
+      const size = () => servingAdmissionTokens(JSON.stringify({ model, system: context.system, messages: wireTurns, maxTokens: outputReserve,
+        toolProtocol: TOOL_PROTOCOL, tools: definitions, toolExchanges: wireExchanges.map(({ images: _images, ...exchange }) => exchange) }));
+      for (const exchange of toolExchanges.slice(0, -1)) {
+        for (const result of exchange.results) {
+          if (size() <= target) break;
+          const reference = foldRetainedToolResult(byName, approval, result.text);
+          if (reference) result.text = reference;
+        }
+      }
+    }
     const textPayload = { model, system: context.system, messages: wireTurns, maxTokens: outputReserve,
       toolProtocol: TOOL_PROTOCOL, tools: definitions, toolExchanges: wireExchanges };
-    const toolImageCount = wireExchanges.reduce((count, exchange) => count + (exchange.images?.length ?? 0), 0);
     const sentImageCount = (req.images?.length ?? 0) + toolImageCount;
     if (sentImageCount > 8) throw new Error("serving_tool_image_capacity_exceeded");
     const requestBody = JSON.stringify({ ...textPayload, ...servingRequestFields(req) });
@@ -452,6 +470,8 @@ async function runAgentlasServingWithTools(
     }
     // Context-reduction C01: the exact round about to be sent (system, tools, history, tool exchanges), sizes only.
     reportModelPayload(() => ledgerFromApiBody(textPayload, { ledgerHints: req.ledgerHints, imageCount: sentImageCount }));
+    // The serving protocol carries no effort field (servingRequestFields): the tier decides. Recorded as such, never as applied.
+    reportModelEffort(req.effort ? { status: "unsupported", requested: req.effort, reason: "serving_protocol_has_no_effort_field" } : { status: "not_requested" });
     reportCachePlan(() => servingCachePlan({ system: context.system, tools: definitions, turns: wireTurns }));
     reportModelEndpoint({ url: webBaseUrl() });
     const usageAttempt = usage.start();
@@ -597,6 +617,7 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
     reportModelPayload(() => ledgerFromApiBody({ model, system, messages: roundTurns, maxTokens: outputReserve },
       { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
     reportCachePlan(() => servingCachePlan({ system, tools: [], turns: roundTurns }));
+    reportModelEffort(req.effort ? { status: "unsupported", requested: req.effort, reason: "serving_protocol_has_no_effort_field" } : { status: "not_requested" });
     reportModelEndpoint({ url: webBaseUrl() });
     const usageAttempt = usage.start();
     const response = await postServing(JSON.stringify({

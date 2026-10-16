@@ -10,7 +10,7 @@ import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { resolveEffectiveContextWindow } from "../../shared/models";
 import { reportModelEndpoint } from "./model-call-ledger";
-import { runLocalOpenAiChat, type ChatMessage, type LocalChatContent } from "./local-tool-loop";
+import { noModelSelectedResult, runLocalOpenAiChat, type ChatMessage, type LocalChatContent } from "./local-tool-loop";
 import { ownerControlHistoryImages } from "./owner-control-pump";
 import { agentContextHostBinding } from "./agent-context";
 
@@ -83,9 +83,8 @@ export function makeLocalOpenAiRunner(
     assertScienceRecoveryRequest(req, runtimeKind);
     const host = hostFn();
     const model = req.model?.trim();
-    if (!model) {
-      throw new Error(req.locale === "ko" ? "모델이 선택되지 않았습니다." : "No model selected.");
-    }
+    // No model id: a typed refusal before any request (A4 C6.2), never a throw the host reads as "may have acted".
+    if (!model) return noModelSelectedResult(runtimeKind, req.locale === "ko" ? "모델이 선택되지 않았습니다." : "No model selected.");
     // Capture before any callback/await so the optional metadata read cannot
     // silently observe a different selection or invocation halfway through.
     const loadedBinding = { model: req.model, signal: req.signal, capability: req.agentContext,
