@@ -61,6 +61,7 @@ import { getAgentConcurrency } from "../store/concurrency";
 import { tryRecordRunEvent } from "../store/run-events";
 import { buildEffectiveAgentSystemPrompt } from "../agents/files";
 import { getAgentById } from "./registry";
+import { roomPinnedTeammateRuntime, roomRuntimeTeammateRefusal } from "./room-runtime";
 import { buildAgentAppRunnerEnv } from "../runtime/env-resolver";
 import {
   UNTRUSTED_RUNTIME_FAILURE_MESSAGE,
@@ -1018,20 +1019,28 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
         // manager's own plan/synthesis inside that delegated branch.
         runtimeRole,
       );
-  const baseActive = pinnedControllerPreferred
+  // A One room's chosen model serves its delegated teammates too (owner 2026-10-16) unless the member, division or
+  // firm carries its own explicit model; only then, or in a room without a pin, does the worker pool decide.
+  const teammatePinnedToRoom = tier !== 1
+    && !pinnedControllerPreferred
+    && !runtimeChoice?.override
+    && Boolean(roomPinnedTeammateRuntime(p));
+  const baseActive = pinnedControllerPreferred || teammatePinnedToRoom
     ? p.active
     : runtimeChoice?.picked
       ? runtimeChoice.active
       : p.active;
-  const basePicked = pinnedControllerPreferred
+  const basePicked = pinnedControllerPreferred || teammatePinnedToRoom
     ? p.picked
     : runtimeChoice?.picked ?? p.picked;
-  const candidateRuntimes = firmCandidateRuntimes(
-    p,
-    baseActive,
-    runtimeRole,
-    pinnedControllerPreferred || Boolean(runtimeChoice?.override),
-  );
+  const candidateRuntimes = teammatePinnedToRoom
+    ? [baseActive]
+    : firmCandidateRuntimes(
+      p,
+      baseActive,
+      runtimeRole,
+      pinnedControllerPreferred || Boolean(runtimeChoice?.override),
+    );
   if (turn.reports && turn.reports.length > 0) {
     systemPrompt += `\n\n${buildDelegateProtocol(
       turn.reports.map((r) => ({ role: r.role, name: r.name })),
@@ -1262,11 +1271,16 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   let executedRuntime = active;
   let executedPicked = picked;
   const failedNodeRuntimes: RuntimeStatus[] = [];
-  let result = await runNodeOn(executedRuntime, executedPicked);
+  // The room's pinned model cannot take this teammate now: a typed refusal, never a silent swap.
+  const teammateRefusal = teammatePinnedToRoom ? roomRuntimeTeammateRefusal(executedRuntime) : null;
+  let result: Awaited<ReturnType<typeof runNodeOn>> = teammateRefusal
+    ? { text: "", failure: teammateRefusal }
+    : await runNodeOn(executedRuntime, executedPicked);
   while (
     result.failure
     && !p.req.agentAppMode
     && !pinnedControllerPreferred
+    && !teammatePinnedToRoom
     && !(turn.signal ?? p.signal)?.aborted
   ) {
     if (result.failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) break;

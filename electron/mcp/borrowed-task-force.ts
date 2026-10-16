@@ -97,6 +97,7 @@ import { getDb } from "../store/db";
 import { extractAskFences } from "../../shared/ask-fence-flatten";
 import { withholdTurnAskForRun } from "../turn-tools/control-server";
 import { runFirmInvocation } from "./firm-orchestrator";
+import { roomPinnedTeammateRuntime, roomRuntimeTeammateRefusal } from "./room-runtime";
 import { memoryEmitterPromptFor } from "../system-agents/memory";
 import { canReadActivatedFolderMemory, recordFolderVisit } from "../architecture/activation";
 import {
@@ -712,13 +713,16 @@ function taskForceCodexRuntimeAllowed(p: BorrowedTaskForceParams): boolean {
   });
 }
 
-function taskForceCandidateRuntimes(p: BorrowedTaskForceParams): RuntimeStatus[] {
+function taskForceCandidateRuntimes(p: BorrowedTaskForceParams, options: { ignoreRoomPin?: boolean } = {}): RuntimeStatus[] {
   // Do not let the historical active-runtime fallback re-admit a Codex model
   // after it was excluded by an Agent App, restricted-read, no-tools, or
   // non-host-authority Workforce boundary.
   if (p.active.kind === "codex" && !taskForceCodexRuntimeAllowed(p)) {
     throw new Error("workforce_runtime_isolation_unverified:codex-collaboration-authority");
   }
+  // A One room's chosen model serves the whole room (owner 2026-10-16): the planner menu, the workers, nested teams
+  // and the escalated retry all see only that runtime, so nothing can allocate a teammate to a different provider.
+  if (!options.ignoreRoomPin && roomPinnedTeammateRuntime(p)) return [p.active];
   // Architecture benchmarks compare the same pipeline under one selected
   // model. Letting workload allocation switch worker providers would confound
   // model quality with orchestration quality.
@@ -4071,15 +4075,24 @@ async function runBorrowedAgentTurn(
     workerPermission !== "read" || readQaAutoReviewAllowed(p, packet, workerPermission, preApprovalStage),
   );
   const candidateRuntimes = taskForceCandidateRuntimes(p);
+  // (a) the member's own explicit model; its lookup needs every live runtime, not only the room's.
   const agentRuntimeChoice = installedAgent && !p.workforceSelectionReceipt && !p.req.agentAppMode
-    ? selectRuntimeForTargets(candidateRuntimes, [{ scope: "agent", targetId: installedAgent.id }], "worker")
+    ? selectRuntimeForTargets(taskForceCandidateRuntimes(p, { ignoreRoomPin: true }), [{ scope: "agent", targetId: installedAgent.id }], "worker")
     : null;
+  // (b) the room's pinned model, when the member has none (or its own is unavailable); (c) the global worker pool.
+  const roomPinnedWorker = roomPinnedTeammateRuntime(p);
+  const memberExplicitChoice = agentRuntimeChoice?.override ? agentRuntimeChoice : null;
+  const roomPinServesWorker = Boolean(roomPinnedWorker) && !memberExplicitChoice;
   const workerPriority = rolePriorityRuntimes(candidateRuntimes, "worker");
-  const workerDefault = agentRuntimeChoice?.active
+  const workerDefault = memberExplicitChoice?.active
+    ?? (roomPinServesWorker ? roomPinnedWorker : null)
+    ?? agentRuntimeChoice?.active
     ?? workerPriority[0]
     ?? pickActive(candidateRuntimes, "worker")
     ?? p.active;
-  const workerDefaultRunner = agentRuntimeChoice?.picked
+  const workerDefaultRunner = memberExplicitChoice?.picked
+    ?? (roomPinServesWorker ? p.picked : null)
+    ?? agentRuntimeChoice?.picked
     ?? (sameRuntime(workerDefault, p.active) ? p.picked : pickRunner(workerDefault) ?? p.picked);
   const orchestratorRuntimes = [...(p.runtimes ?? [p.active])];
   if (!orchestratorRuntimes.some((runtime) => sameRuntime(runtime, p.active))) {
@@ -4131,7 +4144,7 @@ async function runBorrowedAgentTurn(
   // remains runtimeAgentId/accounting metadata; using it as a second topology
   // identity creates a duplicate edge for the same handoff.
   const controllerAgentId = `${p.chat.id}:borrow-orchestrator`;
-  if (agentRuntimeChoice?.fallbackStage) {
+  if (agentRuntimeChoice?.fallbackStage && !roomPinServesWorker) {
     p.sink(tag({
       kind: "tool-use",
       status: p.locale === "ko"
@@ -4244,6 +4257,12 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
   let observedDirectFailureCount: 2 | undefined;
   let observedDirectEscalationAttempt: 1 | undefined;
   try {
+    // The room's pinned model cannot take this teammate now (cooling down, quota snapshot exhausted, model gone):
+    // a typed refusal the owner can read, never a silent swap to the worker pool.
+    if (roomPinServesWorker && roomPinnedWorker && sameRuntime(active, roomPinnedWorker)) {
+      const refusal = roomRuntimeTeammateRefusal(active);
+      if (refusal) throw new TaskForceRuntimeFailureError(refusal, active);
+    }
     if (spec.source === "firm" && spec.firmId) {
       const firm = getFirm(spec.firmId);
       const ceoAgent = firm ? getAgentById(firm.ceoAgentId) : null;

@@ -511,6 +511,16 @@ function runtimeSelectionUnavailableReason(
   return null;
 }
 
+/**
+ * Why an exact runtime the owner chose cannot take a dispatch right now (null = usable). A room's pinned model that
+ * serves its teammates is checked with this before each dispatch: an unusable pin is a typed refusal, never a swap.
+ */
+export function pinnedRuntimeUnavailableReason(runtime: RuntimeStatus): string | null {
+  const cooling = runtimeCooldown(runtime);
+  if (cooling) return `cooldown-${cooling.kind}`;
+  return runtimeSelectionUnavailableReason(runtime, runtimeStatusSelection(runtime)) ?? null;
+}
+
 function runtimeStatusSelection(runtime: RuntimeStatus): import("../../shared/types").RuntimeSelection {
   return {
     kind: runtime.kind,

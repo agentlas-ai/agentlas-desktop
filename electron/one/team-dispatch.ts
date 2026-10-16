@@ -749,6 +749,21 @@ function withRoomParagraph(brief: string, roomChatId: string, member: OneOrgMemb
   }
 }
 
+/**
+ * Owner 2026-10-16 ("방에서 고른 모델을 팀원에게도 적용"): a teammate the room hands work to runs the room's chosen model
+ * (model, effort, long context) unless that teammate carries its own explicit model. A room without a pin keeps the
+ * existing selection. Host selection only; the run itself starts exactly as before.
+ */
+export function roomRuntimeSelectionForTeammate(parentChatId: string, member: OneOrgMember): import("../../shared/types").RuntimeSelection | undefined {
+  try {
+    const { getAgentRuntimeOverride } = require("../store/agent-runtime-overrides") as typeof import("../store/agent-runtime-overrides");
+    if (getAgentRuntimeOverride("agent", member.installedAgentId)) return undefined;
+    return runtime().chats.getChat(parentChatId)?.runtimeSelection ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Owner 2026-10-04: "one이 다른곳에 시키는건 무조건 전체권한에 항상허용". */
 export const ONE_DELEGATION_PERMISSION = "full" as const;
 
@@ -905,6 +920,10 @@ function launchDispatch(input: { parentChatId: string; member: OneOrgMember; bri
       onePermissionMode: ONE_DELEGATION_PERMISSION,
       taskIntent: "conversation",
       oneMode: true,
+      ...((): { runtimeSelection?: import("../../shared/types").RuntimeSelection } => {
+        const roomSelection = roomRuntimeSelectionForTeammate(parentChatId, member);
+        return roomSelection ? { runtimeSelection: roomSelection } : {};
+      })(),
     }, undefined, undefined, undefined, "one-dispatch-brief");
   } catch (error) {
     if (input.queuedId) {

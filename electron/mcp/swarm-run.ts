@@ -43,6 +43,7 @@ import { buildProjectContextSlice } from "../memory/context-map";
 import { STORMBREAKER_LOOP_PROTOCOL } from "../hephaestus/loop-engineering";
 import type { CoreStormbreakerHarness } from "../hephaestus/commands";
 import { parseWholeOrTrailingTypedJson } from "../../shared/typed-json-tail";
+import { roomPinnedTeammateRuntime, roomRuntimeTeammateRefusal } from "./room-runtime";
 
 // 총 작업 수/라운드 안전 상한 — 무한 스폰·무한루프로부터 컴/지갑을 지키는 최후 방어선(엔진이 강제).
 // 각 작업 = 실 LLM 호출이라 비용이 나가므로 보수적으로. (동시 실행 수는 별개로 슬라이더가 제어)
@@ -370,8 +371,11 @@ export async function runSwarmInvocation(
     );
   }
   if (candidateRuntimes.length === 0) candidateRuntimes.push(p.active);
+  // A One room's chosen model serves its swarm workers too (owner 2026-10-16); only a room without a pin uses the pool.
+  const roomPinnedWorker = roomPinnedTeammateRuntime(p);
+  if (roomPinnedWorker) candidateRuntimes.splice(0, candidateRuntimes.length, roomPinnedWorker);
   const workerPriority = rolePriorityRuntimes(candidateRuntimes, "worker");
-  const workerDefault = workerPriority[0] ?? pickActive(candidateRuntimes, "worker") ?? p.active;
+  const workerDefault = roomPinnedWorker ?? workerPriority[0] ?? pickActive(candidateRuntimes, "worker") ?? p.active;
   const workerDefaultRunner = sameRuntime(workerDefault, p.active)
     ? p.picked
     : pickRunner(workerDefault) ?? p.picked;
@@ -659,8 +663,12 @@ export async function runSwarmInvocation(
     };
     let result: Awaited<ReturnType<typeof runWorkerOn>>;
     const failedWorkerRuntimes: typeof candidateRuntimes = [];
-    result = await withModelCallScope({ role: "worker", phase: "swarm-worker" }, () => runWorkerOn(executedRuntime, executedRunner));
-    while (result.failure && !directUserRuntimePinHonored && !(signal ?? p.signal)?.aborted) {
+    // The room's pinned model cannot take this worker now: a typed refusal, never a silent swap to the pool.
+    const roomPinRefusal = roomPinnedWorker ? roomRuntimeTeammateRefusal(executedRuntime) : null;
+    result = roomPinRefusal
+      ? { text: "", failure: roomPinRefusal }
+      : await withModelCallScope({ role: "worker", phase: "swarm-worker" }, () => runWorkerOn(executedRuntime, executedRunner));
+    while (result.failure && !directUserRuntimePinHonored && !roomPinnedWorker && !(signal ?? p.signal)?.aborted) {
       if (result.failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) break;
       if (!failedWorkerRuntimes.some((runtime) => sameRuntime(runtime, executedRuntime)
         && runtime.model === executedRuntime.model)) {
