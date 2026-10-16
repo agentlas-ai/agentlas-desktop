@@ -35,7 +35,8 @@ import type { Runner, RunnerEvents, RunnerRequest, RunnerResult , RunnerFailure 
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import { codexShellEnvironmentArgs } from "./env-key-reach";
 import { imageOutputContract } from "./prompt-sections";
-import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliSilenceWindowMs, cliToolSilenceWindowMs, type CliSilenceGuard, childExitReason, RUNTIME_SILENT_TIMEOUT_CODE, runtimeProtocolUnrecognizedFailure, wrapSystemPrompt, workforceObservedHostAuthorityEnforcement, RuntimeTurnUnsettledError } from "./runner";
+import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliSilenceWindowMs, cliToolSilenceWindowMs, type CliSilenceGuard, childExitReason, RUNTIME_SILENT_TIMEOUT_CODE, runtimeProtocolUnrecognizedFailure, wrapSystemPrompt, workforceObservedHostAuthorityEnforcement, RuntimeTurnUnsettledError, markRefusedBeforeDispatch, preDispatchRefusal } from "./runner";
+import { decideTurnSettlement } from "../../shared/turn-settlement";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { abortReasonError } from "./abort-reason";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
@@ -130,6 +131,16 @@ const KIND = "codex";
 const CODEX_COMPACTION_WAIT_MS = 10 * 60_000;
 /** Wait before the one retry of a turn/start refused because another non-steerable turn holds the thread. */
 const CODEX_TURN_START_BUSY_RETRY_MS = 2_000;
+
+/**
+ * A typed cut (output limit) or overflow of a turn this thread ACCEPTED: the shared decider (docs 31 W1) answers
+ * whether it continues in the same session without its request; `budget` is what this runner may still spend.
+ */
+function continuesSameSession(failure: RunnerFailure, budget: number, unattended: boolean): boolean {
+  const decision = decideTurnSettlement({ outcome: "unsettled", delivery: "accepted", kind: failure.kind,
+    providerCode: failure.providerCode, unattended, attempt: 0, resumeBudget: Math.max(0, budget), resumable: true });
+  return decision.action === "continue-same-session" && !decision.resendOriginal;
+}
 const CODEX_IMAGE_TOOL_NAME = "generate_image";
 const CODEX_IMAGE_TOOL_VERSION = "agentlas.generate-image.v1";
 
@@ -620,6 +631,21 @@ interface CodexRunResult {
   turnStarted: boolean;
   turnCompleted: boolean;
   terminalObserved: boolean;
+}
+
+/**
+ * An exec run that exited non-zero without emitting a single event (no thread.started, no turn event, no text): codex
+ * stopped before it created or resumed the session, so the turn never reached the model. That is a refusal before
+ * dispatch (RuntimeTurnDelivery "not-dispatched", runner.ts) with the CLI's own words, never an unsettled turn: no
+ * continuation re-sends it and a graph step fails typed instead of being held as a possible side effect (docs 31 W1;
+ * W7 acceptance S-graph-two-steps, 2026-10-16: a refused turn/start, then a refused exec, ended MUTATION_UNVERIFIED).
+ */
+function codexExecRefusedBeforeTurn(run: CodexRunResult): RunnerResult | null {
+  if (run.terminalObserved || run.turnStarted || run.threadId !== null || run.text.trim()
+    || typeof run.code !== "number" || run.code === 0) return null;
+  return { text: "", turnDelivery: "not-dispatched", failure: run.failure ?? { kind: "exit", runtime: KIND, source: "exit",
+    providerCode: "codex_exec_refused_before_turn", exitCode: run.code,
+    message: childExitReason(run.code, run.stderr) ?? `codex CLI exit ${run.code}` } };
 }
 
 /**
@@ -2537,6 +2563,8 @@ async function runCodexResidentTurn(input: {
   let schemaBoundTurn = false;
   /** A busy turn/start refusal (another non-steerable turn holds the thread) already had its one retry. */
   let turnStartBusyRetried = false;
+  /** turn/start retries of this turn (no turn began), counted for the shared decider's bound. */
+  let turnStartRetries = 0;
   const restoreCutResult = (cut: NonNullable<typeof cutResult>): void => {
     failure = cut.failure;
     terminalObserved = true;
@@ -2663,7 +2691,8 @@ async function runCodexResidentTurn(input: {
             signal: req.signal,
           });
           if (forkHeldThreadForModel && response.thread.id === threadToResume) {
-            throw new CodexModelSelectionError("resolution_unverified", "Codex model fork returned the previous thread instead of a new one.");
+            // Before turn/start: nothing of this turn was sent (RuntimeTurnDelivery "not-dispatched", its own code kept).
+            throw markRefusedBeforeDispatch(new CodexModelSelectionError("resolution_unverified", "Codex model fork returned the previous thread instead of a new one."));
           }
           workforceObservation?.acknowledgeThread(response, modelAcknowledgement, policy, cwd, approvalsReviewer, threadToResume);
           session.threadId = forkHeldThreadForModel ? response.thread.id : threadToResume;
@@ -2675,10 +2704,10 @@ async function runCodexResidentTurn(input: {
         } catch (err) {
           if (req.signal?.aborted) throw abortReasonError(req);
           events.onStatus(`[runtime-session] resume_failed kind=${KIND}`);
-          if (err instanceof CodexModelSelectionError) throw err;
-          throw err instanceof CodexSessionContinuityError ? err : new CodexSessionContinuityError(
+          if (err instanceof CodexModelSelectionError) throw markRefusedBeforeDispatch(err);
+          throw markRefusedBeforeDispatch(err instanceof CodexSessionContinuityError ? err : new CodexSessionContinuityError(
             "resume_failed", `Codex thread resume failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
+          ));
         } finally {
           releaseResume?.();
         }
@@ -2710,7 +2739,7 @@ async function runCodexResidentTurn(input: {
     }
     if (!session.threadId) throw new Error("codex app-server session has no thread");
     if (req.model && session.modelAcknowledgement?.requestedModel !== req.model) {
-      throw new CodexModelSelectionError("resolution_unverified", "The resident Codex thread has no acknowledgement for the requested model.");
+      throw markRefusedBeforeDispatch(new CodexModelSelectionError("resolution_unverified", "The resident Codex thread has no acknowledgement for the requested model."));
     }
     if (workforceObservation) {
       workforceObservation.observeInventory(await waitForCodexWorkforceInventory(
@@ -2822,11 +2851,19 @@ async function runCodexResidentTurn(input: {
         // as the typed refusal, "not-dispatched", for the caller's settlement (audit A1 C2.2, plan R-070).
         turnDispatchAttempted = false;
         const refusal = codexTurnStartRefusalFailure(error);
-        if (codexTurnStartRefusalIsBusy(error) && !turnStartBusyRetried && !req.signal?.aborted) {
-          turnStartBusyRetried = true;
-          events.onStatus(`[turn-start] kind=${KIND} refused=${refusal.providerCode} retry=1/1`);
+        // The shared decider (shared/turn-settlement.ts) owns retries of work that did not run (rate_limit backoff); a
+        // busy thread (another non-steerable turn) adds one short app-server retry of its own.
+        const settlement = decideTurnSettlement({ outcome: "failed", delivery: "not-dispatched", kind: refusal.kind,
+          providerCode: refusal.providerCode, unattended: req.unattended === true, attempt: turnStartRetries, resumeBudget: 0,
+          fallbackAvailable: false });
+        const busyRetry = codexTurnStartRefusalIsBusy(error) && !turnStartBusyRetried;
+        if ((settlement.action === "retry" || busyRetry) && !req.signal?.aborted) {
+          if (busyRetry && settlement.action !== "retry") turnStartBusyRetried = true;
+          turnStartRetries += 1;
+          const delayMs = settlement.action === "retry" ? settlement.delayMs : CODEX_TURN_START_BUSY_RETRY_MS;
+          events.onStatus(`[turn-start] kind=${KIND} refused=${refusal.providerCode} retry=${settlement.action === "retry" ? turnStartRetries : "1/1"}`);
           await new Promise<void>((resolve) => {
-            const timer = setTimeout(done, CODEX_TURN_START_BUSY_RETRY_MS);
+            const timer = setTimeout(done, delayMs);
             function done(): void { clearTimeout(timer); req.signal?.removeEventListener("abort", done); resolve(); }
             req.signal?.addEventListener("abort", done, { once: true });
           });
@@ -2929,7 +2966,8 @@ async function runCodexResidentTurn(input: {
     }
     const recoverable = Boolean(failure) && terminalObserved && !broken && !interrupted && !workforceObservation
       && !modelSelectionError && !req.signal?.aborted && codexResidentSessionAlive(session);
-    if (recoverable && isCodexOutputLimitFailure(failure) && outputLimitRounds < OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS) {
+    if (recoverable && isCodexOutputLimitFailure(failure)
+      && continuesSameSession(failure!, OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS - outputLimitRounds, req.unattended === true)) {
       outputLimitRounds += 1;
       // Typed receipt; the next attempt's ledger row carries hostTurn=output_limit_continuation.
       events.onStatus(`[output-limit] kind=${KIND} continuation=${outputLimitRounds}/${OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS} cut=text`);
@@ -2940,7 +2978,8 @@ async function runCodexResidentTurn(input: {
       beginHostTurn("output_limit_continuation");
       continue;
     }
-    if (recoverable && isCodexContextOverflowFailure(failure) && !contextOverflowRecovered) {
+    if (recoverable && isCodexContextOverflowFailure(failure)
+      && continuesSameSession(failure!, contextOverflowRecovered ? 0 : 1, req.unattended === true)) {
       contextOverflowRecovered = true;
       cutResult = { failure: failure!, answerFrom, messageCount: messageOrder.length };
       beginHostTurn("context_overflow_continuation");
@@ -3217,7 +3256,8 @@ export const runCodex: Runner = async (
   }
   const bin = await getBin(req.runtimeSource, req.cwd ?? agentRunCwd(), req.env ?? process.env);
   if (!bin) {
-    throw new Error(tStatus(req.locale, "errCliMissingCodex"));
+    // No executable: nothing can have been sent. A typed pre-dispatch refusal, not an unsettled turn (docs 31 W1).
+    throw preDispatchRefusal(new Error(tStatus(req.locale, "errCliMissingCodex")), "cli-discovery", "codex_cli_missing");
   }
   if (req.untrustedNoTools && req.judgmentOnly) {
     const inventory = await readCodexModelInventory(accountCodexHome(req.env?.CODEX_HOME));
@@ -3557,8 +3597,10 @@ export const runCodex: Runner = async (
     let rounds = 0;
     let overflowRetried = false;
     while (!runReq.signal?.aborted && last.terminalObserved && last.threadId && !runReq.workforceRuntimeToolGrant) {
-      const outputLimit = isCodexOutputLimitFailure(last.failure) && rounds < OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS;
-      const overflow = !outputLimit && isCodexContextOverflowFailure(last.failure) && !overflowRetried;
+      const outputLimit = isCodexOutputLimitFailure(last.failure)
+        && continuesSameSession(last.failure!, OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS - rounds, runReq.unattended === true);
+      const overflow = !outputLimit && isCodexContextOverflowFailure(last.failure)
+        && continuesSameSession(last.failure!, overflowRetried ? 0 : 1, runReq.unattended === true);
       if (!outputLimit && !overflow) break;
       const hostTurn: LedgerHostTurn = outputLimit ? "output_limit_continuation" : "context_overflow_continuation";
       if (outputLimit) rounds += 1; else overflowRetried = true;
@@ -3693,6 +3735,8 @@ export const runCodex: Runner = async (
         return { text: r.text.trim(), ownerControlTerminal: "uncertain", failure: r.failure!,
           sessionId: r.threadId ?? resumeSessionId, tokens: r.tokens, appliedEffort };
       }
+      const refused = codexExecRefusedBeforeTurn(r);
+      if (refused) return { ...refused, ...(resumeSessionId ? { sessionId: resumeSessionId } : {}), appliedEffort };
       throw new RuntimeTurnUnsettledError(KIND, runReq.locale, r.threadId ?? resumeSessionId, childExitReason(r.code, r.stderr));
     }
     if (r.code === 0) {
@@ -3777,6 +3821,8 @@ export const runCodex: Runner = async (
       return { text: created.text.trim(), ownerControlTerminal: "uncertain", failure: created.failure!,
         sessionId: created.threadId ?? undefined, tokens: created.tokens, appliedEffort };
     }
+    const refused = codexExecRefusedBeforeTurn(created);
+    if (refused) return { ...refused, appliedEffort };
     throw new RuntimeTurnUnsettledError(KIND, runReq.locale, created.threadId, childExitReason(created.code, created.stderr));
   }
   if (created.code === 0) {
