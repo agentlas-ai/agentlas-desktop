@@ -2,7 +2,8 @@ import { copyGeneratedImageIntoWorkspace } from "../multimodal/workspace-image-c
 import { beginAdapterEffectRun } from "../invocation/adapter-effect-context";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { AntigravityEffectCoverage } from "./antigravity-effect-coverage";
-import { attestAntigravityMetadataSteps } from "./antigravity-conversation-metadata";
+import { antigravityConversationGone, antigravityConversationHome, attestAntigravityMetadataSteps } from "./antigravity-conversation-metadata";
+import { attendedTurnStartsFresh, unattendedFreshSessionStatus } from "./unattended-session-turns";
 import { observeMainMcpEffects, mcpEffectArgumentsDigest, mainMcpExecutionCompletion, type MainMcpEffectReceipt } from "../mcp-tools/effect-receipts";
 import { recordMainExecutionProofs } from "../long-run/execution-proof";
 // Antigravity CLI (agy) — 감지 + 실호출.
@@ -39,6 +40,7 @@ import {
   acknowledgeStableTurnContext,
   cliHistoryContextTokens,
   dedupeStableTurnContext,
+  invalidateStableTurnContext,
   renderConversationContext,
 } from "./continuity";
 import { agentContextColdBootstrapForRequest, agentContextDeliveryForRequest } from "./agent-context";
@@ -52,7 +54,7 @@ import { stageCliImageAttachments } from "./image-attachments";
 import { parseAgyModels, unsupportedDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
 import { resolveEffectiveContextWindow, UNKNOWN_CONTEXT_WINDOW } from "../../shared/models";
 import { settleDiscovery } from "./model-discovery-store";
-import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
+import { clearRuntimeSession, getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
 import { createHash } from "node:crypto";
 import {
   MCP_PROXY_CONTROL_FILE_ENV,
@@ -717,6 +719,12 @@ export function reduceAgyLine(
      * 않아도 된다 — 재개가 실제로 기억한다는 것은 코드워드 실측으로 확인했다.
      */
     conversationId?: string;
+    /**
+     * step_index of this run's first `user_input` step. agy numbers a conversation's steps across turns: measured agy
+     * 1.4.0, a new conversation starts its first turn at 0 and a resumed one with two earlier steps at 2 (result
+     * num_turns 2). So 0 on a resumed run means the conversation held nothing.
+     */
+    firstUserInputStepIndex?: number;
     /** result 이벤트의 status/error — 표식이지 문구 판별이 아니다. */
     resultStatus?: string;
     resultConversationId?: string;
@@ -863,6 +871,10 @@ export function reduceAgyLine(
     return ev.event ? { activity: String(ev.event) } : {};
   }
   const step = ev.step_update;
+  if (step.step_type === "user_input" && state.firstUserInputStepIndex === undefined) {
+    const index = (step as { step_index?: unknown }).step_index;
+    if (typeof index === "number" && Number.isSafeInteger(index) && index >= 0) state.firstUserInputStepIndex = index;
+  }
 
   /*
    * ★승인이 없어 거부된 도구 호출 — 실측(agy 1.1.13, 플래그 없이 파일 쓰기 요청):
@@ -1935,6 +1947,36 @@ function antigravityBrowserResidentScope(configPath: string | undefined): Antigr
   return key ? { key, handles } : null;
 }
 
+/**
+ * The attempt resumed a stored conversation agy no longer holds: the host found no conversation file before dispatch
+ * (`dispatched: false`), or agy reported another conversation id or began the turn at step 0 of an empty conversation
+ * and the process was stopped (`dispatched: true`). `replayable` is false when that run had already produced text or a
+ * tool step (it may have acted). runPreparedAntigravity re-runs a replayable turn once in a fresh conversation seeded
+ * with the conversation it lost.
+ */
+const AGY_CONVERSATION_LOST = Symbol("agy-conversation-lost");
+type AntigravityAttemptResult = RunnerResult & { [AGY_CONVERSATION_LOST]?: { dispatched: boolean; replayable: boolean } };
+
+/** Whether this run already started an agy process or wrote a turn to one (RuntimeTurnDelivery "not-dispatched" otherwise). */
+interface AntigravityDispatchState { attempted: boolean }
+
+function antigravityConversationLostFailure(locale: string | undefined): RunnerFailure {
+  return { kind: "unavailable", runtime: "antigravity", source: "marker", providerCode: "agy_conversation_lost",
+    message: locale === "ko"
+      ? "저장된 Antigravity 대화가 더 이상 없습니다. 이전 대화 없이 답한 내용은 결과로 쓰지 않습니다."
+      : "The stored Antigravity conversation no longer exists. An answer given without the earlier conversation is not used as a result." };
+}
+
+/**
+ * A stored agy conversation can disappear (the owner's 30-day deletion of unused CLI originals, agy's own pruning). agy
+ * then answers from a new, empty conversation (measured, antigravity-conversation-metadata.ts antigravityConversationGone);
+ * saving that conversation and returning its answer made the turn, and every later one, run without the chat's history
+ * (A3 live probe 2026-10-16: 33 of 49 agy bindings named missing conversations). The turn instead continues once in a
+ * fresh conversation that carries the conversation (unattended-session-turns.ts rule 4): the chat's own history for a
+ * per-chat binding, the agent-context journal for its native handle. The dead binding is replaced and one typed
+ * receipt is emitted. A turn that cannot be handed the conversation, or whose lost run already produced text or a tool
+ * step (rule 3), fails with the typed agy_conversation_lost and keeps nothing from that run.
+ */
 async function runPreparedAntigravity(
   req: RunnerRequest,
   events: RunnerEvents,
@@ -1944,12 +1986,49 @@ async function runPreparedAntigravity(
   agyAdditionalDirs: string[] = [],
   /** Pre-2026-10-16 executable fingerprint (it hashed st_dev); read-only, see cli-executable-identity.ts. */
   legacyExecutableFingerprint?: string,
+  dispatch: AntigravityDispatchState = { attempted: false },
 ): Promise<RunnerResult> {
+  const attempt = (freshReason: "session_not_found" | null) => runPreparedAntigravityAttempt(req, events, bin, executableFingerprint,
+    executableGeneration, agyAdditionalDirs, legacyExecutableFingerprint, dispatch, freshReason);
+  const first = await attempt(null);
+  const lost = first[AGY_CONVERSATION_LOST];
+  if (!lost) return first;
+  const { [AGY_CONVERSATION_LOST]: _lost, ...refusal } = first;
+  if (!lost.replayable) return refusal;
+  // A per-chat binding resumes with the chat's history in hand; an agent-context handle needs the journal seed.
+  const carried = agentContextDeliveryForRequest(req) === null || (await agentContextColdBootstrapForRequest(req)) !== null;
+  if (!attendedTurnStartsFresh("session_not_found", carried)) return refusal;
+  events.onStatus(unattendedFreshSessionStatus(ANTIGRAVITY_KIND, "session_not_found"));
+  if (req.chatId) {
+    const ownerId = req.runtimeSessionOwnerId ?? req.agentId;
+    clearRuntimeSession(req.chatId, ANTIGRAVITY_KIND, ownerId, { isolateOwner: req.runtimeSessionOwnerId != null });
+  }
+  const fresh = await attempt("session_not_found");
+  // The lost run reached agy before it was stopped, so the turn as a whole was dispatched.
+  if (lost.dispatched && fresh.turnDelivery === "not-dispatched") {
+    const { turnDelivery: _delivery, ...dispatched } = fresh;
+    return dispatched;
+  }
+  return fresh;
+}
+
+async function runPreparedAntigravityAttempt(
+  req: RunnerRequest,
+  events: RunnerEvents,
+  bin: string,
+  executableFingerprint: string,
+  executableGeneration: string,
+  agyAdditionalDirs: string[],
+  legacyExecutableFingerprint: string | undefined,
+  dispatch: AntigravityDispatchState,
+  /** The stored conversation is gone: start a fresh one even when the record would resume it. */
+  freshReason: "session_not_found" | null,
+): Promise<AntigravityAttemptResult> {
   // A fresh conversation gets the full prompt; a resumed one (--conversation) gets this turn's input only.
   let runReq = req;
   const runtimeSessionOwnerId = runReq.runtimeSessionOwnerId ?? runReq.agentId;
   const isolateRuntimeSessionOwner = runReq.runtimeSessionOwnerId != null;
-  events.onStatus(tStatus(runReq.locale, "callingBackend", { backend: runReq.backendLabel }));
+  if (!freshReason) events.onStatus(tStatus(runReq.locale, "callingBackend", { backend: runReq.backendLabel }));
   /*
    * ★세션 재개 — agy 는 `--conversation <id>` 를 갖고 있었는데 우리가 안 썼다.
    *
@@ -1974,20 +2053,27 @@ async function runPreparedAntigravity(
    */
   const commonContext = agentContextDeliveryForRequest(runReq) !== null;
   const commonHandle = commonContext ? runReq.runtimeSessionId?.trim() || null : null;
-  const agyResumeId = commonContext
+  const storedResumeId = commonContext
     ? (commonHandle && agySaved && agyFingerprint && agySavedMatches(agySaved.fingerprint) && agySaved.sessionId === commonHandle ? commonHandle : null)
     : agySaved && agyFingerprint && agySavedMatches(agySaved.fingerprint) ? agySaved.sessionId : null;
+  // A conversation agy no longer holds is never resumed again: this attempt starts a fresh one (runPreparedAntigravity).
+  const agyResumeId = freshReason ? null : storedResumeId;
+  if (freshReason && storedResumeId && runReq.chatId) {
+    invalidateStableTurnContext({ chatId: runReq.chatId, runtimeKind: ANTIGRAVITY_KIND, sessionId: storedResumeId });
+  }
   if (commonContext && commonHandle && !agyResumeId) {
     const bootstrap = await agentContextColdBootstrapForRequest(runReq);
     if (!bootstrap) {
-      return { text: "", ownerControlTerminal: "uncertain", turnDelivery: "not-dispatched", failure: { kind: "unavailable", runtime: "antigravity", source: "marker",
-        providerCode: "agy_native_handle_unverified",
-        message: runReq.locale === "ko" ? "Antigravity 대화를 이 실행 파일·모델로 이어갈 수 없고, 기록에서 새 대화를 시작할 자료도 없습니다."
-          : "The Antigravity conversation cannot continue on this executable and model, and no journal seed is available for a new one." } };
+      return { text: "", ownerControlTerminal: "uncertain", turnDelivery: "not-dispatched", failure: freshReason
+        ? antigravityConversationLostFailure(runReq.locale)
+        : { kind: "unavailable", runtime: "antigravity", source: "marker",
+          providerCode: "agy_native_handle_unverified",
+          message: runReq.locale === "ko" ? "Antigravity 대화를 이 실행 파일·모델로 이어갈 수 없고, 기록에서 새 대화를 시작할 자료도 없습니다."
+            : "The Antigravity conversation cannot continue on this executable and model, and no journal seed is available for a new one." } };
     }
     // The current input is the one this runner already staged; only the earlier conversation comes from the journal.
     runReq = { ...runReq, history: [...bootstrap.history], turnContext: bootstrap.turnContext };
-    events.onStatus("[runtime-session] cold kind=antigravity reason=handle_unverified");
+    events.onStatus(`[runtime-session] cold kind=antigravity reason=${freshReason ?? "handle_unverified"}`);
   }
   // Blocks the resumed conversation already holds are sent once per conversation (the common stable-block contract).
   const stableContext = agyResumeId ? dedupeStableTurnContext({ chatId: runReq.chatId, runtimeKind: ANTIGRAVITY_KIND, sessionId: agyResumeId,
@@ -2259,8 +2345,9 @@ async function runPreparedAntigravity(
       // eligible for this turn again.
       const residentOwner: AntigravityResidentOwner = { ...residentBaseOwner, scopeKey: key };
       await retireSupersededAntigravitySessions(pool, residentOwner);
-      if (commonContext && !agyResumeId) {
-        // A cold common-context turn starts a new conversation; an idle process of this key holds an earlier one in memory.
+      if ((commonContext || freshReason) && !agyResumeId) {
+        // A cold common-context turn, or a fresh one after a lost conversation, starts a new conversation; an idle
+        // process of this key holds an earlier one in memory.
         const stale = pool.retireIdleMatching((session) => session.executableOwner.scopeKey === key);
         if (stale.busy) throw markRefusedBeforeDispatch(Object.assign(new Error("runtime_session_owner_busy"), { code: "runtime_session_owner_busy" }));
         await Promise.all(stale.retired.map((session) => waitForRetiredCliExit(session.child)));
@@ -2304,6 +2391,7 @@ async function runPreparedAntigravity(
       }
       req.signal?.throwIfAborted();
       const result = await runAgyProcess(residentLease);
+      const conversationLost = Boolean(result[AGY_CONVERSATION_LOST]);
       let browserResidentPromoted = false;
       if (residentLease && browserResidentScope && !result.failure && !residentProtocolFallback) {
         try {
@@ -2322,8 +2410,9 @@ async function runPreparedAntigravity(
       if (residentLease) {
         // A completed provider result keeps a live resident reusable. Abort or
         // a dead process is discarded by the pool's alive check, so no broken
-        // or per-run authority crosses the next turn.
-        if (req.signal?.aborted || (browserResidentScope && !browserResidentPromoted)) antigravitySessionPool().discard(residentLease);
+        // or per-run authority crosses the next turn. A process bound to a
+        // conversation agy no longer holds is never reused.
+        if (req.signal?.aborted || conversationLost || (browserResidentScope && !browserResidentPromoted)) antigravitySessionPool().discard(residentLease);
         else antigravitySessionPool().release(residentLease);
         residentLease = null;
       }
@@ -2351,12 +2440,26 @@ async function runPreparedAntigravity(
 
   function runAgyProcess(
     residentLease: AcpSessionLease<AntigravityResidentSession> | null = null,
-  ): Promise<RunnerResult> {
+  ): Promise<AntigravityAttemptResult> {
   const residentSession = residentLease?.session ?? null;
   req.signal?.throwIfAborted();
+  /** Nothing of this run reached agy yet: a refusal here is RuntimeTurnDelivery "not-dispatched" (runner.ts). */
+  const notDispatched = (): { turnDelivery?: "not-dispatched" } => (dispatch.attempted ? {} : { turnDelivery: "not-dispatched" });
   if (!residentSession) {
     const failure = oneShotWindowsBudgetFailure();
     if (failure) return Promise.resolve({ text: "", ownerControlTerminal: "uncertain", failure });
+  }
+  // Antigravity는 빈 prompt를 거부하므로 긴 요청만 private 파일 bootstrap으로 우회한다.
+  const env = oneShotSpawnEnv();
+  /*
+   * A process started with `--conversation <id>` for this turn (one-shot, or a resident opened for it) resumes the
+   * stored conversation. A resident reused from an earlier turn of this key holds its conversation in memory instead.
+   */
+  const resumesStoredConversation = Boolean(agyResumeId) && (!residentSession || residentLease?.fresh === true);
+  if (resumesStoredConversation && antigravityConversationGone(antigravityConversationHome(env), agyResumeId!)) {
+    events.onStatus("[runtime-session] resume_failed kind=antigravity reason=session_not_found source=store");
+    return Promise.resolve({ text: "", ownerControlTerminal: "uncertain", ...notDispatched(),
+      failure: antigravityConversationLostFailure(runReq.locale), [AGY_CONVERSATION_LOST]: { dispatched: dispatch.attempted, replayable: true } });
   }
   const effectBindings = runReq.mcpConfigPath ? preparedMcpBindings(runReq.mcpConfigPath) : [];
   const effectRun = beginAdapterEffectRun({ adapterKind: "antigravity", chatId: runReq.chatId, agentId: runReq.agentId });
@@ -2380,10 +2483,8 @@ async function runPreparedAntigravity(
     return receipt;
   }, () => hostEffects.size - claimedEffects.size + Number(hostReceiptOverflow), attestAntigravityMetadataSteps);
   let effectExitCode: number | null = null, effectStdoutEnded = false;
-  return new Promise<RunnerResult>((resolve, reject) => {
+  return new Promise<AntigravityAttemptResult>((resolve, reject) => {
     const invocationStartedAtMs = Date.now();
-    // Antigravity는 빈 prompt를 거부하므로 긴 요청만 private 파일 bootstrap으로 우회한다.
-    const env = oneShotSpawnEnv();
 
     let child: ReturnType<typeof spawnCli>;
     if (residentSession) {
@@ -2410,6 +2511,7 @@ async function runPreparedAntigravity(
         reject(error instanceof Error ? error : new Error(String(error)));
         return;
       }
+      dispatch.attempted = true;
       trackRunChild(child);
     }
     // 취소 — Stop 누르면 자식 프로세스 트리 종료.
@@ -2431,6 +2533,7 @@ async function runPreparedAntigravity(
       usagePairObserved?: boolean;
       deniedTools?: AntigravityDenial[];
       conversationId?: string;
+      firstUserInputStepIndex?: number;
       resultStatus?: string;
       resultConversationId?: string;
       resultError?: string;
@@ -2443,6 +2546,8 @@ async function runPreparedAntigravity(
     let agyLineBuf = "";
     let settled = false;
     let resultSeen = false;
+    /** agy reported another conversation than the one this process was told to resume (the stored one is gone). */
+    let conversationLost: { acted: boolean } | null = null;
     // Assigned before either child listener is attached. Resident turns call
     // this on the provider result event; one-shot turns call it on close.
     let settle: (code: number | null) => void = () => {};
@@ -2468,15 +2573,36 @@ async function runPreparedAntigravity(
       // result. The result is the per-turn boundary; never route late data to
       // the next turn's sink.
       if (residentSession && resultSeen) return;
+      // Output of a conversation that was stopped because it is not the stored one is never shown or used.
+      if (conversationLost && !conversationLost.acted) return;
       const trimmedLine = line.trim();
       if (!trimmedLine) return;
       const normalizedLine = effectCoverage.normalizeLine(trimmedLine);
       effectCoverage.observe(normalizedLine);
+      const actedBefore = reportedAgyTools.size > 0 || Boolean(agyState.text) || (agyState.deniedTools?.length ?? 0) > 0;
       // A well-formed JSON line of the wrong shape (e.g. a non-string tool_name) must not throw out of the stdout
       // data listener: that is an uncaughtException in Main. Treat it as noise; the terminal result still decides.
       let step: ReturnType<typeof reduceAgyLine>;
       try { step = reduceAgyLine(normalizedLine, agyState); }
       catch { events.onStatus("agy: ignored an event line with an unexpected shape"); step = {}; }
+      /*
+       * Two typed protocol facts tell a process told to resume conversation X that X's turns are not there (measured agy
+       * 1.4.0): it reports another conversation id (its first `init` event: X was gone and agy opened a new one), or its
+       * first `user_input` step is step 0 (X's id was kept but X held no steps, e.g. an emptied store file). Stop it at
+       * once, before it answers or uses a tool from an empty context; the turn re-runs fresh with the conversation carried
+       * (runPreparedAntigravity). If the run already produced text or a tool step, it may have acted and is never replayed
+       * (unattended-session-turns.ts rule 3); it still ends as the typed loss, not as an answer.
+       */
+      const lostSignal = !resumesStoredConversation || conversationLost ? null
+        : agyState.conversationId && agyState.conversationId !== agyResumeId ? "conversation_id"
+          : agyState.firstUserInputStepIndex === 0 ? "empty_conversation" : null;
+      if (lostSignal) {
+        const acted = actedBefore || Boolean(step.tool || step.delta || step.approvalDenied);
+        conversationLost = { acted };
+        events.onStatus(`[runtime-session] resume_failed kind=antigravity reason=session_not_found source=${lostSignal}${acted ? " acted=1" : ""}`);
+        killCliTree(child);
+        if (!acted) return;
+      }
       // 도구 호출을 화면으로 올린다 — 같은 도구가 진행(ACTIVE)/완료(DONE)로 두 번 오면 같은
       // id 로 갱신된다(ACTIVE 1회 + DONE 1회만 올린다; 반복 ACTIVE는 무시).
       if (step.tool) {
@@ -2614,7 +2740,7 @@ async function runPreparedAntigravity(
       effectStdoutEnded = residentSession
         ? code === 0 && resultSeen
         : child.stdout?.readableEnded === true;
-      if (residentSession && !resultSeen && !req.signal?.aborted
+      if (residentSession && !resultSeen && !req.signal?.aborted && !conversationLost
         && !agyState.text && reportedAgyTools.size === 0) {
         // Safe downgrade: no model text or tool frame was accepted, so the
         // failed resident transport has no effect to replay.
@@ -2646,6 +2772,14 @@ async function runPreparedAntigravity(
       }
       if (req.signal?.aborted) {
         reject(abortReasonError(req));
+        return;
+      }
+      // A run stopped on another conversation id: never its text, its conversation id or a saved binding.
+      if (conversationLost) {
+        resolve({ text: "", ownerControlTerminal: "uncertain", failure: antigravityConversationLostFailure(runReq.locale),
+          [AGY_CONVERSATION_LOST]: { dispatched: true, replayable: !conversationLost.acted },
+          ...(resultSeen && agyState.usagePairObserved
+            ? { observedUsage: { inputTokens: agyState.inputTokens, outputTokens: agyState.outputTokens } } : {}) });
         return;
       }
       // ★침묵 한도로 호스트가 끝낸 시도 — 이 settle 이 유일한 정산이다(취소는 위에서 처리했고, result 를 받은 턴은 해당 없다).
@@ -2864,6 +2998,8 @@ async function runPreparedAntigravity(
         )) {
         residentSession.active = null;
         settle(null);
+      } else {
+        dispatch.attempted = true;
       }
     }
   }).then(result => {

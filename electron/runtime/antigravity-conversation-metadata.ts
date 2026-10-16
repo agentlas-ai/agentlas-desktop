@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { lstatSync, realpathSync } from "node:fs";
+import { lstatSync, realpathSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -39,6 +39,39 @@ function ephemeralPayload(bytes: unknown): boolean {
     const message = fields(body);
     return message.size === 1 && Buffer.isBuffer(message.get(1));
   } catch { return false; }
+}
+
+const AGY_CONVERSATION_ID_RE = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
+
+/** The HOME agy reads for this run's environment (Go's os.UserHomeDir: USERPROFILE on Windows, HOME elsewhere). */
+export function antigravityConversationHome(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): string {
+  return (platform === "win32" ? env.USERPROFILE : env.HOME) || os.homedir();
+}
+
+/**
+ * Whether agy no longer holds a conversation, from the filesystem only (never from its output text).
+ *
+ * agy keeps every conversation in <HOME>/.gemini/antigravity-cli/conversations/<id>.db (the store
+ * attestAntigravityMetadataSteps reads). Measured 2026-10-16 on agy 1.4.0 with a scratch product HOME:
+ * `--conversation <id>` for an id it has no file for writes a stderr warning, exits 0 and runs the turn in a NEW
+ * conversation (another conversation_id from the first `init` event on) that holds none of the earlier turns.
+ * The owner's storage policy deletes CLI originals unused for 30 days and agy prunes its own store, so this is routine.
+ *
+ * Gone means: the store folder exists and holds neither `<id>.db` nor an `<id>` entry. An id of another shape, a
+ * missing or unreadable store (a layout this build does not know, a HOME agy never ran in) answers false: the turn
+ * then still checks the conversation id agy reports for the run.
+ */
+export function antigravityConversationGone(home: string, conversationId: string): boolean {
+  if (!AGY_CONVERSATION_ID_RE.test(conversationId)) return false;
+  const directory = path.join(home, ".gemini", "antigravity-cli", "conversations");
+  try {
+    if (!statSync(directory).isDirectory()) return false;
+  } catch { return false; }
+  for (const name of [`${conversationId}.db`, conversationId]) {
+    try { lstatSync(path.join(directory, name)); return false; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false; }
+  }
+  return true;
 }
 
 /** Read only this CLI conversation's bounded typed metadata after process exit.
