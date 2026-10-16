@@ -75,6 +75,10 @@ export const CODEX_APP_SERVER_ARGS = ["app-server", "--listen", "stdio://"] as c
 export const CODEX_CLIENT_REQUESTS = [
   "initialize",
   "model/list",
+  // A context overflow compacts the thread once before its one recovery turn (codex.ts, plan R-007).
+  "thread/compact/start",
+  // A model change forks the held thread in the same process (codex.ts); pinned so the drift gate sees it (audit A1 C1.4).
+  "thread/fork",
   "thread/loaded/list",
   "thread/resume",
   "thread/start",
@@ -103,6 +107,8 @@ export const CODEX_SERVER_REQUESTS = [
   ...CODEX_APPROVAL_REQUESTS,
   CODEX_MCP_ELICITATION_METHOD,
   "item/tool/call",
+  // Experimental: Codex asks the client for the current time; the host answers from its clock (codex.ts).
+  "currentTime/read",
 ] as const;
 
 /** 우리가 실제로 소비하는 알림. 여기 없는 알림은 무시된다(모르는 것을 지어내지 않는다). */

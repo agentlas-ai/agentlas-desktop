@@ -6,7 +6,12 @@ import { registerNativeApprovalChildSignal } from "./native-approval-provenance"
 // 호출 형식: codex exec "<prompt>"  (—— Codex CLI의 exec 모드)
 // V0는 single-turn; 이전 대화를 user 입력에 inline.
 import { prepareRotationHandoff } from "./handoff-facts";
-import { reportModelPayload, ledgerFromCliSent } from "./model-call-ledger";
+import { reportModelPayload, ledgerFromCliSent, type LedgerHostTurn } from "./model-call-ledger";
+import { codexExecFallbackLedgerValue, codexExecFallbackStatus, codexExecTypedFailure, codexTurnErrorFailure,
+  codexTurnStartRefusalFailure, codexTurnStartRefusalIsBusy, isCodexContextOverflowFailure, isCodexOutputLimitFailure,
+  type CodexExecFallback } from "./codex-turn-failure";
+import { OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS, outputLimitContinuationTurn } from "./output-limit-continuation";
+import { UNSETTLED_CONTINUATION_PROMPT } from "./unsettled-continuation";
 import { recordNativeCompaction } from "./native-compaction-event";
 import { createRuntimePlanEmitter, planFromCodexTodoList, planFromCodexTurnPlan } from "./runtime-plan";
 import path from "node:path";
@@ -121,6 +126,10 @@ import {
 } from "./tool-approval";
 
 const KIND = "codex";
+/** Longest wait for the compaction turn a context overflow starts (it calls the model to summarize the thread). */
+const CODEX_COMPACTION_WAIT_MS = 10 * 60_000;
+/** Wait before the one retry of a turn/start refused because another non-steerable turn holds the thread. */
+const CODEX_TURN_START_BUSY_RETRY_MS = 2_000;
 const CODEX_IMAGE_TOOL_NAME = "generate_image";
 const CODEX_IMAGE_TOOL_VERSION = "agentlas.generate-image.v1";
 
@@ -681,12 +690,13 @@ export function codexFailureFromEvent(
   if (ev.type === "item.completed" && ev.item?.type === "error") {
     const message = typeof ev.item.message === "string" && ev.item.message.trim()
       ? ev.item.message.trim().slice(0, 2000) : "codex error";
-    return { kind: "exit", message, runtime: "codex", source: "marker" };
+    return codexExecTypedFailure(message) ?? { kind: "exit", message, runtime: "codex", source: "marker" };
   }
   if (ev.type === "turn.failed") {
     const message = typeof ev.error?.message === "string" && ev.error.message.trim()
       ? ev.error.message.trim().slice(0, 2000) : "codex turn failed";
-    return { kind: "exit", message, runtime: "codex", source: "marker" };
+    // exec carries no codexErrorInfo: only the output cap and the context window are typed here (codex-turn-failure.ts).
+    return codexExecTypedFailure(message) ?? { kind: "exit", message, runtime: "codex", source: "marker" };
   }
   return null;
 }
@@ -757,30 +767,8 @@ export function codexFailureFromTurn(turn: {
   error?: { message?: unknown; additionalDetails?: unknown; codexErrorInfo?: unknown } | null;
 } | null | undefined): RunnerFailure | null {
   if (!turn || turn.status !== "failed") return null;
-  const raw = typeof turn.error?.message === "string" && turn.error.message.trim()
-    ? turn.error.message.trim()
-    : "codex turn failed";
-  const detail = typeof turn.error?.additionalDetails === "string" && turn.error.additionalDetails.trim()
-    ? ` — ${turn.error.additionalDetails.trim()}`
-    : "";
-  const info = turn.error?.codexErrorInfo;
-  const code = typeof info === "string"
-    ? info
-    : info && typeof info === "object"
-      ? Object.keys(info as Record<string, unknown>)[0] ?? ""
-      : "";
-  const kind: RunnerFailure["kind"] =
-    code === "usageLimitExceeded" || code === "sessionBudgetExceeded" ? "quota"
-      : code === "unauthorized" ? "auth"
-      : code === "cyberPolicy" || code === "misalignmentPolicyViolation" ? "refused"
-      : code === "contextWindowExceeded" ? "exit"
-      : "exit";
-  return {
-    kind,
-    message: `${raw}${detail}`.slice(0, 2000),
-    runtime: "codex",
-    source: "marker",
-  };
+  // Every CodexErrorInfo of the installed schema has a kind and a providerCode (codex-turn-failure.ts, audit A1 C8.1).
+  return codexTurnErrorFailure(turn.error);
 }
 
 /** True when the host itself ended this exec attempt for total silence (single close-based settlement). */
@@ -797,6 +785,8 @@ function runCodexProcess(
   usageBaseline: CodexUsageBaseline,
   observeNativeFile: NativeFileProofObserver,
   stableContextDelivery?: StableTurnContextDelivery,
+  /** Typed ledger facts of this attempt: a host continuation turn, or why it runs on exec instead of the app-server. */
+  ledgerFacts: { hostTurn?: LedgerHostTurn; transportFallback?: string } = {},
 ): Promise<CodexRunResult> {
   const diagnose = bindCodexRuntimeDiagnostics(req, "exec");
   const effects = createAdapterEffectLedger({ adapterKind: KIND, chatId: req.chatId, agentId: req.agentId }, events);
@@ -860,8 +850,11 @@ function runCodexProcess(
     const runtimeAttemptId = crypto.randomUUID();
     // Context-reduction C01: exec resume sends only a delta; a fresh exec seeds [SYSTEM]+history+context+owner text.
     const execResume = args.includes("resume");
-    reportModelPayload(() => ledgerFromCliSent({ mode: execResume ? "resume" : "fresh", sentText: stdinPayload, req,
-      instructionsInSentText: !execResume && stdinPayload.startsWith("[SYSTEM]"), historyInSentText: !execResume && stdinPayload.startsWith("[SYSTEM]") }));
+    reportModelPayload(() => ledgerFacts.hostTurn
+      ? ledgerFromCliSent({ mode: "resume", sentText: stdinPayload, req: { ...req, userPrompt: "", images: undefined }, ...ledgerFacts })
+      : ledgerFromCliSent({ mode: execResume ? "resume" : "fresh", sentText: stdinPayload, req,
+        instructionsInSentText: !execResume && stdinPayload.startsWith("[SYSTEM]"), historyInSentText: !execResume && stdinPayload.startsWith("[SYSTEM]"),
+        ...ledgerFacts }));
     events.onRuntimeAttemptStarted?.(runtimeAttemptId);
     // The attempt callback can synchronously stop this admitted child.
     if (!req.signal?.aborted) writeStdin(child, stdinPayload);
@@ -1655,8 +1648,11 @@ export function codexNativeItemMayOutliveTurn(item: any): boolean {
 interface ResidentTurnOutcome {
   /** 완주했다 — 이 결과를 그대로 돌려준다(성공이든 표식 실패든). */
   result?: RunnerResult;
-  /** 화면에 아무것도 나가지 않았다 — 이 턴을 1회성 exec 경로로 **한 번** 다시 시도한다. */
-  retryOneShot?: true;
+  /**
+   * 화면에 아무것도 나가지 않았다 — 이 턴을 1회성 exec 경로로 **한 번** 다시 시도한다. Typed (R-070): the caller records the
+   * downgrade as a receipt and in the exec attempt's ledger row, so it is never silent.
+   */
+  retryOneShot?: CodexExecFallback;
 }
 
 /**
@@ -1779,7 +1775,7 @@ async function runCodexResidentTurn(input: {
         events.onStatus(`[residency] disabled kind=${KIND} reason=app-server-unsupported`);
       }
       if (req.workforceRuntimeToolGrant) throw err;
-      return { retryOneShot: true };
+      return { retryOneShot: { reason: "app_server_start_failed" } };
     }
   };
 
@@ -1910,7 +1906,8 @@ async function runCodexResidentTurn(input: {
       effects.uncertain("native-terminal-observation-failed");
     }
   };
-  const runtimeAttemptId = crypto.randomUUID();
+  /** One host-minted id per native turn: a host continuation turn (output limit, context overflow) is its own attempt. */
+  let runtimeAttemptId = crypto.randomUUID();
   let diagnosticRuntimeAttemptId: string | null = null;
   let diagnosticFailure: NativeFailureEvidence | null = null;
   const terminalDiagnostics = { threadMismatch: 0, turnMismatch: 0, earlyOverflow: 0 };
@@ -1928,6 +1925,10 @@ async function runCodexResidentTurn(input: {
   let transportDiagnosticObserved = false;
   let nativeThreadCreated = false;
   let turnUsageBaseline: CodexUsageBaseline = { input: null, output: null, cachedInput: null };
+  /** Baseline of the current native turn: a continuation turn's ledger attempt carries only its own usage. */
+  let attemptUsageBaseline: CodexUsageBaseline = turnUsageBaseline;
+  /** A `thread/compact/start` this runner sent after a context overflow: settled by that compaction turn's terminal. */
+  let compactionWaiter: ((ok: boolean) => void) | null = null;
   const pendingModelReroutes = new Map<string, { fromModel: string; toModel: string }>();
   /*
    * 사용량은 알림 콜백에서 채워진다 — 홀더 객체에 담는다(let 변수는 TS 흐름 분석이
@@ -1984,7 +1985,29 @@ async function runCodexResidentTurn(input: {
     thinkingOpen = false;
     events.onThinking?.("end", Date.now() - thinkingStartedAt);
   };
-  const bodyText = (): string => messageOrder.map((id) => messages.get(id) ?? "").filter(Boolean).join("\n");
+  /*
+   * A prose reply cut by the output cap continues in the next host turn (same thread): that turn's first message is the
+   * same reply, joined without a separator (a JSON string cut mid-value stays one value). A schema-bound reply's
+   * continuation is its whole typed answer instead (answerFrom), as in team-step-settlement.
+   */
+  const joinedMessageIds = new Set<string>();
+  let joinNextMessage = false;
+  let answerFrom = 0;
+  const noteMessageId = (id: string): void => {
+    if (messages.has(id)) return;
+    messages.set(id, "");
+    messageOrder.push(id);
+    if (joinNextMessage) { joinedMessageIds.add(id); joinNextMessage = false; }
+  };
+  const bodyText = (): string => {
+    let out = "";
+    for (const id of messageOrder.slice(answerFrom)) {
+      const piece = messages.get(id) ?? "";
+      if (!piece) continue;
+      out += out && !joinedMessageIds.has(id) ? `\n${piece}` : piece;
+    }
+    return out;
+  };
   const emitPartial = (force = false): void => {
     const now = Date.now();
     if (!force && now - lastEmit <= 60) return;
@@ -2131,7 +2154,7 @@ async function runCodexResidentTurn(input: {
         const delta = typeof params?.delta === "string" ? params.delta : "";
         if (!id || !delta) break;
         closeThinking();
-        if (!messages.has(id)) { messages.set(id, ""); messageOrder.push(id); }
+        noteMessageId(id);
         messages.set(id, (messages.get(id) ?? "") + delta);
         estChars += delta.length;
         events.onUsage?.(Math.ceil(estChars / 4));
@@ -2148,7 +2171,7 @@ async function runCodexResidentTurn(input: {
           const id = String(item.id ?? "");
           if (id) {
             // 완결 아이템의 text 가 권위다 — 델타 누락/중복이 있어도 여기서 자가 교정된다.
-            if (!messages.has(id)) messageOrder.push(id);
+            noteMessageId(id);
             messages.set(id, typeof item.text === "string" ? item.text : messages.get(id) ?? "");
           }
           emitPartial(true);
@@ -2259,6 +2282,13 @@ async function runCodexResidentTurn(input: {
         if (typeof params?.threadId === "string" && typeof session.threadId === "string" && session.threadId
           && params.threadId !== session.threadId) terminalDiagnostics.threadMismatch = Math.min(Number.MAX_SAFE_INTEGER, terminalDiagnostics.threadMismatch + 1);
         if (!turn || params?.threadId !== session.threadId || typeof turn.id !== "string" || !turn.id) break;
+        if (compactionWaiter && !acknowledgedTurnId && !turnRequestInFlight) {
+          // The compaction turn this runner started after a context overflow (thread/compact/start runs as a turn).
+          const settle = compactionWaiter;
+          compactionWaiter = null;
+          settle(turn.status === "completed");
+          break;
+        }
         // Notifications may precede the turn/start response. Only its exact
         // acknowledged ID can bind a terminal result to this submitted prompt.
         if (!acknowledgedTurnId) {
@@ -2273,12 +2303,18 @@ async function runCodexResidentTurn(input: {
         terminalObserved = true;
         terminalSucceeded = turn.status === "completed";
         if (turn.status === "interrupted") interrupted = true;
-        failure = codexFailureFromTurn(turn) ?? failure;
+        {
+          // This turn's `error` notification may carry the typed code its terminal error lacks: a terminal without its
+          // own codexErrorInfo never replaces it (audit A1 C8.1: the code must survive to the ledger and the room).
+          const terminalFailure = codexFailureFromTurn(turn);
+          failure = terminalFailure && (turn.error?.codexErrorInfo != null || !failure) ? terminalFailure : failure ?? terminalFailure;
+        }
         // CodexSession catches sink exceptions. Always settle this exact native
         // terminal, then propagate authority/accounting errors in the caller.
         try {
           observeTerminalCallback(withdrawNativeTurnController);
-          if (usage.observed) observeTerminalCallback(() => events.onTerminalObservedUsage?.(usage.observed!, runtimeAttemptId));
+          const attemptUsage = usage.total ? codexObservedTurnUsage(usage.total, attemptUsageBaseline) : undefined;
+          if (attemptUsage) observeTerminalCallback(() => events.onTerminalObservedUsage?.(attemptUsage, runtimeAttemptId));
           observeTerminalCallback(() => workforceObservation?.completeTurn(params));
         } finally { settleTurn?.("completed"); }
         break;
@@ -2309,6 +2345,8 @@ async function runCodexResidentTurn(input: {
       const silenceRequestKey = `server-request:${++serverRequestSeq}`;
       silence?.toolStart(silenceRequestKey);
       try {
+      // Experimental server request: the host's clock, whole Unix seconds (CurrentTimeReadResponse). Not an approval.
+      if (method === "currentTime/read") return { currentTimeAt: Math.floor(Date.now() / 1000) };
       if (method === "item/tool/call" || isCodexApprovalRequest(method)) {
         workforceObservation?.assertRequestContext(params, turnId);
       }
@@ -2463,6 +2501,7 @@ async function runCodexResidentTurn(input: {
       withdrawNativeTurnController();
       closedReason = reason;
       elicitationAbort.abort(new Error(reason));
+      compactionWaiter?.(false);
       settleTurn?.("closed");
     },
   };
@@ -2482,6 +2521,7 @@ async function runCodexResidentTurn(input: {
      * 취소가 프로토콜에 도달하지 못한다(게이트에서 실측한 경합). 그래서 응답을 기다리는
      * 약속을 남기고, 폐기하는 finally 가 그것을 (상한을 두고) 먼저 기다린다.
      */
+    compactionWaiter?.(false);
     if (session.threadId && turnId && codexResidentSessionAlive(session)) {
       interruptAck = session.conn
         .request("turn/interrupt", { threadId: session.threadId, turnId }, { timeoutMs: 5_000 })
@@ -2489,6 +2529,61 @@ async function runCodexResidentTurn(input: {
     }
     settleTurn?.("closed");
   };
+
+  /* ── host continuation turns (output limit, context overflow) ── */
+  /** The typed failure of the last turn a host continuation followed, restored when that continuation cannot begin. */
+  let cutResult: { failure: RunnerFailure; answerFrom: number; messageCount: number } | null = null;
+  /** The turn carries a strict output schema (its continuation is then a whole typed answer, not a spliced tail). */
+  let schemaBoundTurn = false;
+  /** A busy turn/start refusal (another non-steerable turn holds the thread) already had its one retry. */
+  let turnStartBusyRetried = false;
+  const restoreCutResult = (cut: NonNullable<typeof cutResult>): void => {
+    failure = cut.failure;
+    terminalObserved = true;
+    terminalSucceeded = false;
+    answerFrom = cut.answerFrom;
+  };
+  /** Per-turn state back to "no turn yet"; the thread, its messages and the run's usage baseline stay. */
+  const beginHostTurn = (kind: LedgerHostTurn): void => {
+    failure = null;
+    terminalObserved = false;
+    terminalSucceeded = false;
+    turnId = "";
+    confirmedTurnId = "";
+    acknowledgedTurnId = "";
+    pendingTurnCompletions.clear();
+    pendingModelReroutes.clear();
+    requestEchoed = false;
+    sentClientUserMessageId = null;
+    runtimeAttemptId = crypto.randomUUID();
+    if (usage.total) attemptUsageBaseline = { output: usage.total.outputTokens, input: usage.total.inputTokens ?? null,
+      cachedInput: usage.total.cachedInputTokens ?? null };
+    silence?.stop();
+    silence = null;
+    if (kind === "output_limit_continuation") {
+      // Prose: the next reply continues this one. Schema-bound: the next reply is the whole typed answer.
+      if (schemaBoundTurn) answerFrom = messageOrder.length; else joinNextMessage = true;
+    }
+  };
+  /** Codex runs thread/compact/start as a turn; its terminal settles the wait. Bounded; false when it cannot be proven. */
+  const compactResidentThread = async (): Promise<boolean> => {
+    if (!session.threadId || !codexResidentSessionAlive(session) || req.signal?.aborted) return false;
+    const done = new Promise<boolean>((resolve) => { compactionWaiter = resolve; });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await session.conn.request("thread/compact/start", { threadId: session.threadId }, { timeoutMs: 30_000, signal: req.signal });
+      return await Promise.race([done, new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), CODEX_COMPACTION_WAIT_MS);
+        timer.unref?.();
+      })]);
+    } catch {
+      return false;
+    } finally {
+      if (timer) clearTimeout(timer);
+      compactionWaiter = null;
+    }
+  };
+
   req.signal?.addEventListener("abort", onAbort, { once: true });
   if (req.signal?.aborted) onAbort();
 
@@ -2631,6 +2726,7 @@ async function runCodexResidentTurn(input: {
         ? { input: storedUsageSession.reportedInputTokens, output: storedUsageSession.reportedOutputTokens,
             cachedInput: storedUsageSession.reportedCachedInputTokens }
         : { input: null, output: null, cachedInput: null };
+    attemptUsageBaseline = turnUsageBaseline;
 
     /* ── 턴 ── */
     // 새 스레드면 시스템+히스토리 시드, 이어가는 스레드면 사용자 턴만(+gap/turn 컨텍스트).
@@ -2650,9 +2746,24 @@ async function runCodexResidentTurn(input: {
         req.locale,
       )
       : buildResidentInitialTurnPrompt({ ...req, turnContext: resumeContext.text });
+    /*
+     * Host continuation turns in the SAME thread (owner rule 2026-10-13: never end a turn on the output cap; production
+     * 1.3.49 run 5d37e4cc: a teammate cut at 128,000 output tokens after 62 minutes failed the whole owner turn).
+     *   output limit      one host turn with the registered continuation module (output-limit-continuation.ts), at most
+     *                     OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS in a row, exactly as the API lanes do;
+     *   context overflow  one thread/compact/start, then one host turn with the run-recovery line (plan R-007).
+     * Both keep the thread's history (the cut reply is in it); the owner's request is never sent again. A Workforce turn
+     * keeps its single-turn observation contract and surfaces the typed failure instead.
+     */
+    let hostTurn: { kind: LedgerHostTurn; text: string } | null = null;
+    let outputLimitRounds = 0;
+    let contextOverflowRecovered = false;
+    schemaBoundTurn = Boolean(req.outputSchema && openAiStrictSchemaOrNull(req.outputSchema.schema));
+    for (;;) {
+    const turnPrompt = hostTurn ? hostTurn.text : promptText;
     const turnParams: Record<string, unknown> = {
       threadId: session.threadId,
-      input: [{ type: "text", text: promptText }],
+      input: [{ type: "text", text: turnPrompt }],
       cwd,
       // Reassert sticky policy on every turn. A resident thread can survive a
       // permission/reviewer change, and inheriting its previous values would
@@ -2674,7 +2785,12 @@ async function runCodexResidentTurn(input: {
     if (turnParams.clientUserMessageId) sentClientUserMessageId = runtimeAttemptId;
     turnDispatchAttempted = true;
     diagnosticRuntimeAttemptId = runtimeAttemptId;
-    reportModelPayload(() => ledgerFromCliSent({
+    const sentHostTurn = hostTurn;
+    reportModelPayload(() => sentHostTurn
+      // A host continuation turn: no owner text, no history, no attachments; its line is host context.
+      ? ledgerFromCliSent({ mode: "resume", sentText: sentHostTurn.text, req: { ...req, userPrompt: "", images: undefined },
+        systemText: null, hostTurn: sentHostTurn.kind })
+      : ledgerFromCliSent({
       // nativeThreadCreated = new thread (full seed); a thread/resume or fork on a cold process = reopen; a live resident thread = resume.
       mode: nativeThreadCreated ? "fresh" : developerInstructionsSent !== null ? "reopen" : "resume",
       sentText: promptText, req, systemText: developerInstructionsSent,
@@ -2694,7 +2810,34 @@ async function runCodexResidentTurn(input: {
       }));
       // A JSON-RPC error response is the server refusing the request: no turn began, so nothing may
       // have acted. Only a closed transport or a timeout leaves the dispatch genuinely uncertain.
-      if (error instanceof AcpRpcError) turnDispatchAttempted = false;
+      if (error instanceof AcpRpcError && sentHostTurn && cutResult) {
+        // The continuation never began: the cut turn's typed result stands (its reply is kept, its turn was accepted).
+        events.onStatus(`[${sentHostTurn.kind === "output_limit_continuation" ? "output-limit" : "context-overflow"}] kind=${KIND} continuation=refused rpc=${error.code}`);
+        restoreCutResult(cutResult);
+        break;
+      }
+      if (error instanceof AcpRpcError && !sentHostTurn) {
+        // No turn began. Never re-run it as one-shot exec (that silently drops live approvals and steering, and repeated
+        // the refusal 3x in W7 S-graph-two-steps): a busy thread gets ONE bounded retry here, anything else is returned
+        // as the typed refusal, "not-dispatched", for the caller's settlement (audit A1 C2.2, plan R-070).
+        turnDispatchAttempted = false;
+        const refusal = codexTurnStartRefusalFailure(error);
+        if (codexTurnStartRefusalIsBusy(error) && !turnStartBusyRetried && !req.signal?.aborted) {
+          turnStartBusyRetried = true;
+          events.onStatus(`[turn-start] kind=${KIND} refused=${refusal.providerCode} retry=1/1`);
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(done, CODEX_TURN_START_BUSY_RETRY_MS);
+            function done(): void { clearTimeout(timer); req.signal?.removeEventListener("abort", done); resolve(); }
+            req.signal?.addEventListener("abort", done, { once: true });
+          });
+          if (req.signal?.aborted) throw abortReasonError(req);
+          runtimeAttemptId = crypto.randomUUID();
+          continue;
+        }
+        events.onStatus(`[turn-start] kind=${KIND} refused=${refusal.providerCode}${Number.isInteger(error.code) ? ` rpc=${error.code}` : ""}`);
+        return { result: { text: "", ownerControlTerminal: "uncertain", failure: refusal, sessionId: session.threadId,
+          appliedEffort, turnDelivery: "not-dispatched" } };
+      }
       throw error;
     } finally {
       turnRequestInFlight = false;
@@ -2712,6 +2855,7 @@ async function runCodexResidentTurn(input: {
     // Dispatch is acknowledged: from here a child that stops emitting is the host's to end (single settlement below).
     {
       const guardedChild = session.child;
+      silence?.stop();
       silence = startCliSilenceGuard(guardedChild, {
         label: "codex", onStatus: events.onStatus, windowMs: silenceWindowMs, toolWindowMs: cliToolSilenceWindowMs(env),
         kill: () => { try { killCliTree(guardedChild); } catch { /* the transport-closed settlement still runs */ } settleTurn?.("closed"); },
@@ -2748,7 +2892,7 @@ async function runCodexResidentTurn(input: {
       catch { withdrawNativeTurnController(); }
     }
     if (!nativeTurnController) publishCodexNativeControlState(events, "app-server", "unavailable", "native_control_unavailable");
-    events.onStatus(`[runtime-session] ${continuing ? "resumed" : "created"} kind=${KIND}`);
+    if (!sentHostTurn) events.onStatus(`[runtime-session] ${continuing ? "resumed" : "created"} kind=${KIND}`);
     if (modelSelectionError) throw modelSelectionError;
     const reason = await settled;
     if (req.signal?.aborted || interrupted) {
@@ -2782,6 +2926,34 @@ async function runCodexResidentTurn(input: {
       }
       // The exact turn/start receipt was received above: the session holds this turn's request.
       throw new RuntimeTurnUnsettledError(KIND, req.locale, session.threadId, null, "accepted");
+    }
+    const recoverable = Boolean(failure) && terminalObserved && !broken && !interrupted && !workforceObservation
+      && !modelSelectionError && !req.signal?.aborted && codexResidentSessionAlive(session);
+    if (recoverable && isCodexOutputLimitFailure(failure) && outputLimitRounds < OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS) {
+      outputLimitRounds += 1;
+      // Typed receipt; the next attempt's ledger row carries hostTurn=output_limit_continuation.
+      events.onStatus(`[output-limit] kind=${KIND} continuation=${outputLimitRounds}/${OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS} cut=text`);
+      cutResult = { failure: failure!, answerFrom, messageCount: messageOrder.length };
+      // codex never names whether the cap fell inside text, reasoning or a tool call: the "text" variant (continue where
+      // it stopped) is the one that is true for all three; a cut tool call never reached item/started, so it was not run.
+      hostTurn = { kind: "output_limit_continuation", text: outputLimitContinuationTurn("text") };
+      beginHostTurn("output_limit_continuation");
+      continue;
+    }
+    if (recoverable && isCodexContextOverflowFailure(failure) && !contextOverflowRecovered) {
+      contextOverflowRecovered = true;
+      cutResult = { failure: failure!, answerFrom, messageCount: messageOrder.length };
+      beginHostTurn("context_overflow_continuation");
+      const compacted = await compactResidentThread();
+      events.onStatus(`[context-overflow] kind=${KIND} compacted=${compacted ? "yes" : "no"}${compacted ? " continuation=1/1" : ""}`);
+      if (compacted && !req.signal?.aborted && !broken) {
+        hostTurn = { kind: "context_overflow_continuation", text: UNSETTLED_CONTINUATION_PROMPT };
+        continue;
+      }
+      if (req.signal?.aborted) throw abortReasonError(req);
+      restoreCutResult(cutResult);
+    }
+    break;
     }
     // Record both native inventories. Selected capability changes invalidate
     // the invocation; unrelated host changes are evidence, never a replay.
@@ -2844,7 +3016,8 @@ async function runCodexResidentTurn(input: {
       if (req.signal?.aborted) throw abortReasonError(req);
       if (turnDispatchAttempted && !terminalObserved) throw new RuntimeTurnUnsettledError(KIND, req.locale, session.threadId, failure?.message ?? childExitReason(session.child?.exitCode, session.conn?.lastStderr),
         // Protocol fact: the turn/start receipt or this turn's turn/started notification is the session's acknowledgement.
-        acknowledgedTurnId || confirmedTurnId || requestEchoed ? "accepted" : "not-accepted");
+        // A host continuation that never reached its own receipt still follows a turn this session accepted (cutResult).
+        acknowledgedTurnId || confirmedTurnId || requestEchoed || cutResult ? "accepted" : "not-accepted");
       if (req.workforceRuntimeToolGrant) throw err;
       if (err instanceof CodexModelSelectionError) throw err;
       if (err instanceof CodexSessionContinuityError) throw err;
@@ -2854,7 +3027,7 @@ async function runCodexResidentTurn(input: {
       }
       // Empty visible text is not evidence of no dispatch or no external action.
       if (turnDispatchAttempted) throw err;
-      if (!emitted && !bodyText()) return { retryOneShot: true };
+      if (!emitted && !bodyText()) return { retryOneShot: { reason: "app_server_pre_dispatch_failed" } };
       throw err;
     } catch (error) {
       // Preserve the chosen outgoing failure, including uncertainty/Stop
@@ -3284,6 +3457,8 @@ export const runCodex: Runner = async (
   // app-server has no --ignore-user-config: an isolated run may use it only from the isolated mirror. A home Main did
   // not mirror (a custom CODEX_HOME, keyring sign-in) keeps the one-shot exec, which passes the flag.
   const isolationHeld = !runReq.isolatedMcpConfig || isIsolatedCodexProductHome(runReq.env?.CODEX_HOME);
+  /** Why this turn runs on exec although the app-server path took it first (typed, R-070); null = exec by design. */
+  let execFallback: CodexExecFallback | null = null;
   if (
     isolationHeld &&
     !freshReason &&
@@ -3326,12 +3501,16 @@ export const runCodex: Runner = async (
       if (!runReq.unattended && refusal !== "writer_busy" && !attendedTurnStartsFresh(refusal, conversationCarried())) throw err;
       freshReason = refusal;
       events.onStatus(unattendedFreshSessionStatus(KIND, freshReason));
+      execFallback = { reason: "resume_refused", detail: refusal };
       if (freshSessionReplacesStored(freshReason)) {
         clearRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
       }
       runReq = await withAgentContextJournalSeed(runReq);
     }
     if (attempt.result) return attempt.result;
+    if (attempt.retryOneShot) execFallback = attempt.retryOneShot;
+    // R-070: the downgrade (no live approvals, no steering) is a typed receipt and rides the exec attempt's ledger row.
+    if (execFallback) events.onStatus(codexExecFallbackStatus(execFallback));
   }
   if (runReq.workforceRuntimeToolGrant) throw new Error("workforce_codex_observation_no_exec_fallback");
   publishCodexNativeControlState(events, "exec", "unavailable", "native_control_exec_boundary");
@@ -3349,6 +3528,76 @@ export const runCodex: Runner = async (
     await fs.writeFile(schemaFile, JSON.stringify(strictOutputSchema), { encoding: "utf8", mode: 0o600 });
   }
   const schemaArgs = schemaFile ? ["--output-schema", schemaFile] : [];
+  const execLedgerFacts = execFallback ? { transportFallback: codexExecFallbackLedgerValue(execFallback) } : {};
+  const execResumeArgsFor = (threadId: string): string[] => [
+    "exec",
+    ...approvalArgs,
+    "resume",
+    ...isolatedConfigArgs,
+    ...browserOnlyConfigArgs,
+    "--json",
+    "--skip-git-repo-check",
+    ...resumePermissionArgs(runReq.permission, runReq.approvalsReviewer),
+    ...mcpArgs,
+    ...modelArgs,
+    ...schemaArgs,
+    threadId,
+    "-",
+  ];
+  /*
+   * exec twin of the resident host continuations (same bound, same registered modules; owner rule 2026-10-13): a turn cut
+   * by the output cap, or one whose context ran out, continues in the thread it ran in with `codex exec resume`. exec has
+   * no thread/compact/start; Codex compacts a thread over its configured auto-compact limit before the next turn
+   * (model_auto_compact_token_limit, set above), so the overflow retry is that one resume. The owner's request is not sent
+   * again: it is in that thread.
+   */
+  const continueExecCut = async (first: CodexRunResult): Promise<CodexRunResult> => {
+    let merged = first;
+    let last = first;
+    let rounds = 0;
+    let overflowRetried = false;
+    while (!runReq.signal?.aborted && last.terminalObserved && last.threadId && !runReq.workforceRuntimeToolGrant) {
+      const outputLimit = isCodexOutputLimitFailure(last.failure) && rounds < OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS;
+      const overflow = !outputLimit && isCodexContextOverflowFailure(last.failure) && !overflowRetried;
+      if (!outputLimit && !overflow) break;
+      const hostTurn: LedgerHostTurn = outputLimit ? "output_limit_continuation" : "context_overflow_continuation";
+      if (outputLimit) rounds += 1; else overflowRetried = true;
+      events.onStatus(outputLimit
+        ? `[output-limit] kind=${KIND} continuation=${rounds}/${OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS} cut=text`
+        : `[context-overflow] kind=${KIND} compacted=native continuation=1/1`);
+      const threadId = last.threadId;
+      let next: CodexRunResult;
+      let releaseWriter: (() => void) | undefined;
+      try {
+        releaseWriter = await prepareCodexExecThreadResume(path.resolve(runReq.cwd ?? agentRunCwd(),
+          runReq.env?.CODEX_HOME || process.env.CODEX_HOME || path.join(os.homedir(), ".codex")), threadId, runReq.signal);
+        next = await runCodexProcess(bin, execResumeArgsFor(threadId),
+          outputLimit ? outputLimitContinuationTurn("text") : UNSETTLED_CONTINUATION_PROMPT, runReq, events,
+          { output: last.reportedOutputTokens ?? null, input: last.reportedInputTokens ?? null, cachedInput: last.reportedCachedInputTokens ?? null },
+          observeNativeFile, undefined, { hostTurn, ...execLedgerFacts });
+      } finally {
+        releaseWriter?.();
+      }
+      // A prose cut joins the next reply without a separator; a schema-bound reply's continuation is its whole answer.
+      const text = outputLimit && strictOutputSchema ? next.text
+        : outputLimit ? `${merged.text}${next.text}` : [merged.text, next.text].filter((part) => part.trim()).join("\n");
+      const usage = merged.observedUsage && next.observedUsage ? {
+        inputTokens: merged.observedUsage.inputTokens + next.observedUsage.inputTokens,
+        outputTokens: merged.observedUsage.outputTokens + next.observedUsage.outputTokens,
+        ...(merged.observedUsage.cachedInputTokens != null || next.observedUsage.cachedInputTokens != null
+          ? { cachedInputTokens: (merged.observedUsage.cachedInputTokens ?? 0) + (next.observedUsage.cachedInputTokens ?? 0) } : {}),
+      } : undefined;
+      const { observedUsage: _dropped, ...rest } = next;
+      merged = { ...rest, text, threadId: next.threadId ?? threadId,
+        tokens: (merged.tokens ?? 0) + (next.tokens ?? 0) || undefined, ...(usage ? { observedUsage: usage } : {}) };
+      last = next;
+    }
+    return merged;
+  };
+  /** A typed cut or overflow that outlived its continuations was a turn the thread accepted (turn events were observed). */
+  const execCutDelivery = (run: CodexRunResult): { turnDelivery?: "accepted" } =>
+    run.terminalObserved && run.threadId && (isCodexOutputLimitFailure(run.failure) || isCodexContextOverflowFailure(run.failure))
+      ? { turnDelivery: "accepted" } : {};
   /*
    * 정리는 실행 경로에 맡기지 않는다 — 이 함수에는 return 지점이 여러 개고(resume 성공,
    * resume 실패, create 성공, abort throw), 그중 하나만 빠뜨려도 0600 파일이 남는다.
@@ -3366,22 +3615,7 @@ export const runCodex: Runner = async (
   // RESUME: 새 user 턴만 stdin으로 — 시스템 프롬프트/히스토리는 세션이 이미 갖고 있다.
   // Resume reasserts the same permission boundary as the first turn.
   execResume: if (canResume && !freshReason) {
-    const resumePerm = resumePermissionArgs(runReq.permission, runReq.approvalsReviewer);
-    const args = [
-      "exec",
-      ...approvalArgs,
-      "resume",
-      ...isolatedConfigArgs,
-      ...browserOnlyConfigArgs,
-      "--json",
-      "--skip-git-repo-check",
-      ...resumePerm,
-      ...mcpArgs,
-      ...modelArgs,
-      ...schemaArgs,
-      resumeSessionId!,
-      "-",
-    ];
+    const args = execResumeArgsFor(resumeSessionId!);
     // gap-replay — 이 세션이 마지막으로 본 이후 다른 경로(스웜/다른 러너)로 진행된 턴을 메운다.
     // 호출자가 세션 수명을 직접 관리하는 runtimeSessionId(Build 등)에는 적용하지 않는다.
     const gapContext = !runReq.runtimeSessionId && storedSessionId && existing
@@ -3411,6 +3645,7 @@ export const runCodex: Runner = async (
       usageBaseline,
       observeNativeFile,
       resumeContext.delivery,
+      execLedgerFacts,
       );
     } catch (error) {
       if (runReq.chatId && fingerprint && persistSession()) {
@@ -3423,6 +3658,7 @@ export const runCodex: Runner = async (
     } finally {
       releaseWriter?.();
     }
+    r = await continueExecCut(r);
     // `codex exec resume` refused before any turn: exit 1, no event, and Codex's thread/resume protocol phrase on stderr
     // (codex-cli 0.163.0, measured 2026-10-16 for a gone rollout: "thread/resume failed: no rollout found for thread id …";
     // a held writer is the same shape). Only those typed refusals qualify, as on the thread/resume path above; any other
@@ -3475,6 +3711,7 @@ export const runCodex: Runner = async (
         tokens: r.tokens,
         ...(r.observedUsage ? { observedUsage: r.observedUsage } : {}),
         appliedEffort,
+        ...execCutDelivery(r),
       };
     }
     // Build continuation recovery is owned by Main, which can remove exactly
@@ -3503,6 +3740,7 @@ export const runCodex: Runner = async (
       tokens: r.tokens,
       ...(r.observedUsage ? { observedUsage: r.observedUsage } : {}),
       appliedEffort,
+      ...execCutDelivery(r),
     };
   }
 
@@ -3520,7 +3758,8 @@ export const runCodex: Runner = async (
     ...schemaArgs,
     "-",
   ];
-  const created = await runCodexProcess(bin, createArgs, buildPrompt(runReq), runReq, events, { output: 0, input: 0, cachedInput: 0 }, observeNativeFile);
+  const created = await continueExecCut(await runCodexProcess(bin, createArgs, buildPrompt(runReq), runReq, events,
+    { output: 0, input: 0, cachedInput: 0 }, observeNativeFile, undefined, execLedgerFacts));
   if (runReq.signal?.aborted) {
     if (runReq.chatId && fingerprint && created.threadId && persistSession()) {
       saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint, { ...codexUsageCounters(created), agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner });
@@ -3556,6 +3795,7 @@ export const runCodex: Runner = async (
       tokens: created.tokens,
       ...(created.observedUsage ? { observedUsage: created.observedUsage } : {}),
       appliedEffort,
+      ...execCutDelivery(created),
     };
   }
   // The stream may already have said *why* (turn.failed: "You've hit your
@@ -3570,6 +3810,7 @@ export const runCodex: Runner = async (
       tokens: created.tokens,
       ...(created.observedUsage ? { observedUsage: created.observedUsage } : {}),
       appliedEffort,
+      ...execCutDelivery(created),
     };
   }
   throw new Error(

@@ -42,6 +42,7 @@ export type ModelCallRole =
   | "curator" | "repair" | "compaction" | "router" | "build" | "unscoped";
 export type ModelCallMode = "fresh" | "resume" | "reopen" | "stateless" | "unknown";
 export type PayloadSource = "adapter-final" | "request" | "unknown";
+export type LedgerHostTurn = "output_limit_continuation" | "context_overflow_continuation";
 export type BlockName = "instructions" | "tools" | "history" | "hostContext" | "attachments" | "ownerText" | "toolExchanges" | "framing";
 const BLOCK_NAMES: readonly BlockName[] = ["instructions", "tools", "history", "hostContext", "attachments", "ownerText", "toolExchanges", "framing"];
 
@@ -50,6 +51,10 @@ export interface PayloadLedger {
   source: PayloadSource;
   /** Where the framed per-turn host context travelled, when the adapter knows. */
   placement?: string;
+  /** A host-authored turn of this call, not the owner's request (an output-limit or context-overflow continuation). */
+  hostTurn?: LedgerHostTurn;
+  /** Typed reason this attempt ran on a fallback transport (codex exec after the app-server path refused or failed). */
+  transportFallback?: string;
   /** Estimated tokens of what was transmitted for each block. null = the adapter cannot see it. */
   blocks: Record<BlockName, number | null>;
   toolsCount: number | null;
@@ -295,6 +300,7 @@ export function ledgerFromCliSent(input: {
   hostContextText?: string; placement?: string;
   /** The host context was appended to systemText (Claude fresh seed) rather than sent in sentText. */
   hostContextInSystem?: boolean;
+  hostTurn?: LedgerHostTurn; transportFallback?: string;
 }): PayloadLedger {
   const { req } = input;
   const sent = tokens(input.sentText);
@@ -320,6 +326,8 @@ export function ledgerFromCliSent(input: {
     blocks.instructions = input.systemText != null ? tokens(input.systemText) : null;
   }
   return { mode: input.mode, source: "adapter-final", ...(input.placement ? { placement: input.placement } : {}),
+    ...(input.hostTurn ? { hostTurn: input.hostTurn } : {}),
+    ...(input.transportFallback ? { transportFallback: input.transportFallback } : {}),
     blocks, toolsCount: null, attachmentsCount: req.images?.length ?? 0,
     wholeEstimate: sent + tokens(input.systemText) + (blocks.attachments ?? 0),
     blockDigests: digestsOf({ instructions: input.systemText, ownerText: req.userPrompt,
@@ -526,6 +534,9 @@ export function ledgerEventPayload(input: {
   };
   if (payload) {
     if (payload.placement) out.placement = payload.placement;
+    if (payload.hostTurn) out.hostTurn = payload.hostTurn;
+    const fallback = ledgerFailureCode(payload.transportFallback);
+    if (fallback) out.transportFallback = fallback;
     const names: Record<BlockName, string> = {
       instructions: "instructionsTokens", tools: "toolsTokens", history: "historyTokens", hostContext: "hostContextTokens",
       attachments: "attachmentsTokens", ownerText: "ownerTextTokens", toolExchanges: "toolExchangeTokens", framing: "framingTokens",

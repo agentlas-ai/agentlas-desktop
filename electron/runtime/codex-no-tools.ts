@@ -52,10 +52,16 @@ function providerStreamFailure(frame: Record<string, any>): RunnerFailure {
   const error = object(frame.error) ?? object(frame.response?.error);
   const marker = error?.code ?? error?.type;
   const code = typeof marker === "string" && /^[a-zA-Z0-9_.-]{1,96}$/.test(marker) ? marker : undefined;
-  const kind: RunnerFailure["kind"] = code && ["rate_limit_exceeded", "usage_limit_reached", "insufficient_quota", "quota_exceeded"].includes(code)
+  // Throttling is "rate_limit" (docs 31 W1); an exhausted plan or credit is "quota".
+  const kind: RunnerFailure["kind"] = code === "rate_limit_exceeded" ? "rate_limit"
+    : code && ["usage_limit_reached", "insufficient_quota", "quota_exceeded"].includes(code)
     ? "quota" : code && ["invalid_api_key", "invalid_token", "token_expired", "authentication_error", "unauthorized"].includes(code)
       ? "auth" : code && ["request_timeout", "timeout"].includes(code) ? "timeout" : "unavailable";
-  return failure(code ?? (frame.type === "response.incomplete" ? "codex_no_tools_provider_incomplete" : "codex_no_tools_provider_failed"), kind);
+  // An incomplete response names its reason in a typed field; the output-token cap keeps its own code (same family as
+  // codex_output_limit_exceeded / local_output_limit_exceeded). The kind is unchanged: a judgment is retried or reassigned.
+  const incompleteReason = frame.type === "response.incomplete" ? object(frame.response?.incomplete_details)?.reason : undefined;
+  return failure(code ?? (incompleteReason === "max_output_tokens" ? "codex_no_tools_output_limit_exceeded"
+    : frame.type === "response.incomplete" ? "codex_no_tools_provider_incomplete" : "codex_no_tools_provider_failed"), kind);
 }
 function validatePart(value: unknown): void {
   const part = object(value);
@@ -232,7 +238,7 @@ export async function runCodexNoTools(
         return;
       }
       if (!response.ok) {
-        fail(failure(`codex_no_tools_provider_http_${response.status}`, response.status === 429 ? "quota"
+        fail(failure(`codex_no_tools_provider_http_${response.status}`, response.status === 429 ? "rate_limit"
           : [401, 403].includes(response.status) ? "auth" : "unavailable"));
         throw new Error(gatewayFailure!.providerCode);
       }
@@ -487,7 +493,7 @@ function createAliveGateway(profile: Readonly<AliveDecisionProfile>, bindingKey:
         return;
       }
         if (error instanceof CodexNoToolsSessionError && error.httpStatus) {
-          failAliveTurn(turn, failure(`codex_no_tools_provider_http_${error.httpStatus}`, error.httpStatus === 429 ? "quota"
+          failAliveTurn(turn, failure(`codex_no_tools_provider_http_${error.httpStatus}`, error.httpStatus === 429 ? "rate_limit"
             : [401, 403].includes(error.httpStatus) ? "auth" : "unavailable"));
         }
         throw error;
