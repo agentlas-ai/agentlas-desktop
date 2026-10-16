@@ -6,7 +6,11 @@ import { withCliPath } from "./exec";
 export type CliExecutableIdentity = {
   executable: string;
   realPath: string;
+  /** Persisted inside runtime-session fingerprints, so it must survive a reboot: no device number (see below). */
   fingerprint: string;
+  /** The pre-2026-10-16 formula, which also hashed st_dev. Read-only compatibility: a session saved by an older build
+   * with no reboot since still resumes once and is then re-saved under `fingerprint`. Never written. */
+  legacyFingerprint: string;
   generation: string;
 };
 
@@ -67,13 +71,21 @@ export function observeCliExecutableIdentity(input: {
     if (observedScopes.size > 128) observedScopes.delete(observedScopes.keys().next().value!);
     const realPath = fs.realpathSync(executable);
     const stat = fs.statSync(realPath, { bigint: true });
+    // st_dev is left out: macOS gives the volume a new device number at every boot (owner Mac 16777229 -> 16777231
+    // -> 16777233 across three boots), Linux renumbers NFS/FUSE/btrfs and hot-plugged disks per mount. This
+    // fingerprint is stored in each runtime session, and with st_dev in it every saved Claude Code, ACP (Copilot,
+    // Cursor, Grok, Kimi) and Antigravity session was refused after a reboot. A real replacement still changes the
+    // inode, size, mtime or ctime (user space cannot set ctime).
     const fingerprint = crypto.createHash("sha256").update(JSON.stringify([
+      executable, realPath, ...[stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].map(String),
+    ])).digest("hex");
+    const legacyFingerprint = crypto.createHash("sha256").update(JSON.stringify([
       executable, realPath, ...[stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].map(String),
     ])).digest("hex");
     const previous = generations.get(resource);
     const generation = previous?.fingerprint === fingerprint ? previous.generation : crypto.randomUUID();
     saveGeneration(resource, fingerprint, generation);
-    return { executable, realPath, fingerprint, generation };
+    return { executable, realPath, fingerprint, legacyFingerprint, generation };
   } catch {
     // A transient unreadable state cannot regain an old resident generation.
     if (resource) saveGeneration(resource, null, crypto.randomUUID());

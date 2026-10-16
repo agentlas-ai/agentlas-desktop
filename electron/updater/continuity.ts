@@ -447,9 +447,11 @@ function recoveryCleanFingerprint(databasePath: string): RecoveryCleanFingerprin
   }
 }
 
+/** The clean ledger is a file read on later launches: dev stays recorded but is not compared, because macOS renumbers the
+ * volume at every boot and each reboot re-ran quick_check and the scrub over every inactive recovery database. */
 function sameRecoveryFingerprint(left: RecoveryCleanFingerprint | undefined, right: RecoveryCleanFingerprint | null): boolean {
   return Boolean(left && right)
-    && left!.dev === right!.dev && left!.ino === right!.ino && left!.size === right!.size
+    && left!.ino === right!.ino && left!.size === right!.size
     && left!.mtimeMs === right!.mtimeMs && left!.ctimeMs === right!.ctimeMs;
 }
 

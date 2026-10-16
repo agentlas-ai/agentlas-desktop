@@ -1403,7 +1403,10 @@ function matchesCleanupFingerprint(
   expected: ProjectCleanupFingerprint,
 ): boolean {
   const actual = cleanupFingerprint(stat);
-  return Object.keys(actual).every((key) => (
+  // `dev` stays in the persisted cursor (shape unchanged) but is not compared: the cursor outlives a reboot and macOS
+  // renumbers the volume at every boot, which restarted every chunked cleanup from the beginning. Inode, birth time,
+  // size, mtime and ctime still detect a replaced or edited source.
+  return Object.keys(actual).every((key) => key === "dev" || (
     actual[key as keyof ProjectCleanupFingerprint] === expected[key as keyof ProjectCleanupFingerprint]
   ));
 }

@@ -973,17 +973,21 @@ const runClaudeTurn = async (
       runReq.systemPromptComposition,
       runReq.unattendedNoAsk,
   );
-  const fingerprint = aliveProfile ? crypto.createHash("sha256").update(JSON.stringify([aliveProfile.bindingKey,
-    executableIdentity.fingerprint, systemPrompt, runReq.outputSchema, runReq.model])).digest("hex")
-    : !runReq.untrustedNoTools && runReq.chatId ? systemFingerprint(runReq, executableIdentity.fingerprint) : null;
+  const sessionFingerprint = (executableFingerprint: string) => aliveProfile ? crypto.createHash("sha256").update(JSON.stringify([aliveProfile.bindingKey,
+    executableFingerprint, systemPrompt, runReq.outputSchema, runReq.model])).digest("hex")
+    : !runReq.untrustedNoTools && runReq.chatId ? systemFingerprint(runReq, executableFingerprint) : null;
+  const fingerprint = sessionFingerprint(executableIdentity.fingerprint);
+  // Read-only: a session an older build saved under the device-number fingerprint (no reboot since) resumes once; the
+  // turn then saves it under `fingerprint` (cli-executable-identity.ts).
+  const savedFingerprintMatches = (saved: string) => saved === fingerprint || saved === sessionFingerprint(executableIdentity.legacyFingerprint);
   const savedSession = !assertScienceRecoveryRequest(runReq, "claude-code") && !runReq.untrustedNoTools && runReq.chatId
     ? getRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner })
     : null;
   const storedSessionId =
-    savedSession && fingerprint && savedSession.fingerprint === fingerprint
+    savedSession && fingerprint && savedFingerprintMatches(savedSession.fingerprint)
       ? savedSession.sessionId
       : null;
-  if (runReq.chatId && savedSession && fingerprint && savedSession.fingerprint !== fingerprint) {
+  if (runReq.chatId && savedSession && fingerprint && !savedFingerprintMatches(savedSession.fingerprint)) {
     events.onStatus(`[runtime-session] fingerprint_changed kind=${KIND}`);
     clearRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
   }

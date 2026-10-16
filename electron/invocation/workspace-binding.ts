@@ -27,11 +27,27 @@ function isWorkspaceBindingSource(value: string): value is InvocationWorkspaceBi
 export interface InvocationWorkspaceBinding {
   readonly source: InvocationWorkspaceBindingSource;
   readonly canonicalPath: string | null;
-  /** BigInt strings keep the host file identity precise without entering JSON DTOs. */
+  /** BigInt strings keep the host file identity precise without entering JSON DTOs. `device` is recorded (the row shape
+   * in invocation_steers.workspace_binding_json is unchanged) but never compared: see sameWorkspaceDirectory. */
   readonly directoryIdentity: {
     readonly device: string;
     readonly inode: string;
   } | null;
+}
+
+/**
+ * The same captured directory: same canonical path (compared by the callers) and same inode. The device number is not
+ * part of the identity. macOS gives a volume a new st_dev at every boot (owner Mac 16777229 -> 16777231 -> 16777233),
+ * Linux renumbers NFS/FUSE/btrfs and hot-plugged disks per mount, and a binding outlives a reboot inside a queued owner
+ * direction (invocation_steers): with st_dev compared, every direction queued from the phone before a reboot was refused
+ * after it as "changed after approval". Deleting and recreating the folder at that path still yields another inode.
+ * Old rows that carry any device value are read the same way.
+ */
+function sameWorkspaceDirectory(
+  left: NonNullable<InvocationWorkspaceBinding["directoryIdentity"]>,
+  right: NonNullable<InvocationWorkspaceBinding["directoryIdentity"]>,
+): boolean {
+  return typeof left.inode === "string" && left.inode !== "" && left.inode === right.inode;
 }
 
 /** Legacy unbound Science runs remain valid; a bound run must match its host surface. */
@@ -203,10 +219,7 @@ export function revalidateInvocationWorkspaceBinding(
   if (!binding.directoryIdentity) throw unverifiableWorkspaceError();
   const current = canonicalDirectory(binding.canonicalPath);
   if (current.canonicalPath !== binding.canonicalPath) throw replacedWorkspaceError();
-  if (
-    current.directoryIdentity?.device !== binding.directoryIdentity.device ||
-    current.directoryIdentity?.inode !== binding.directoryIdentity.inode
-  ) {
+  if (!current.directoryIdentity || !sameWorkspaceDirectory(current.directoryIdentity, binding.directoryIdentity)) {
     throw replacedWorkspaceError();
   }
   return current.canonicalPath;
@@ -225,10 +238,7 @@ export function invocationWorkspaceBindingsEqual(
     return left.directoryIdentity === null && right.directoryIdentity === null;
   }
   if (!left.directoryIdentity || !right.directoryIdentity) return false;
-  return (
-    left.directoryIdentity.device === right.directoryIdentity.device &&
-    left.directoryIdentity.inode === right.directoryIdentity.inode
-  );
+  return sameWorkspaceDirectory(left.directoryIdentity, right.directoryIdentity);
 }
 
 /**

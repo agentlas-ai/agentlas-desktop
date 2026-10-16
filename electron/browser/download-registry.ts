@@ -304,8 +304,11 @@ export async function readAgentBrowserDownload(id: string, identity: AgentDownlo
     const reading = captureDownloadFile(downloadsRoot(),relativePath).identity, pinned = record.observedFileIdentity;
     // OS download metadata may change ctime after completion without changing
     // bytes. Pin ctime for this whole read, while immutable inode/mtime/size and
-    // the complete SHA bind separate reads to the completed download.
-    if (pinned && (reading.dev !== pinned.dev || reading.ino !== pinned.ino || reading.bytes !== pinned.bytes || reading.mtimeNs !== pinned.mtimeNs)) return null;
+    // the complete SHA bind separate reads to the completed download. The pin is
+    // persisted with the record and read after restarts, so the device number is
+    // not compared: macOS renumbers the volume at every boot, which made every
+    // download from before a reboot unreadable to its agent.
+    if (pinned && (reading.ino !== pinned.ino || reading.bytes !== pinned.bytes || reading.mtimeNs !== pinned.mtimeNs)) return null;
     const observed = await hashDownloadFile(downloadsRoot(),relativePath,{
       signal,expectedIdentity:reading,
       current:()=>records.get(id) === record && record.state === "completed",

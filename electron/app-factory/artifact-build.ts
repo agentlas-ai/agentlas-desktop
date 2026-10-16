@@ -20,7 +20,27 @@ export function assertArtifactBuildOwner(record: AppFactoryAppRecord): void {
   if (!current || !ownerMatches(current, record)) throw new Error("artifact_build_owner_changed");
 }
 
-export async function readAppArtifactSource(record: AppFactoryAppRecord, signal?: AbortSignal): Promise<{snapshot: ArtifactSourceSnapshot; react: boolean; identityDigest: string}> {
+/**
+ * Identity of an app's source root, stored in every build receipt (sourceIdentityDigest) and compared with the ready build
+ * on later launches. st_dev is left out: macOS gives the volume a new device number at every boot, and with it every app
+ * that had a ready build before a reboot refused each later update as artifact_source_identity_changed and stayed on its
+ * old build. The canonical paths and inodes still detect a replaced app or source folder. `legacyIdentityDigest` is the
+ * pre-2026-10-16 formula for read-only comparison with a receipt an older build wrote (no reboot since); never written.
+ */
+export function artifactSourceIdentityDigests(input: { root: string; rootStat: { dev: number; ino: number }; snapshot: Pick<ArtifactSourceSnapshot, "root" | "identity"> }): { identityDigest: string; legacyIdentityDigest: string } {
+  const { root, rootStat, snapshot } = input;
+  return {
+    identityDigest: artifactBytesDigest(JSON.stringify({ root, ino: rootStat.ino, sourceRoot: snapshot.root, sourceIdentity: { ino: snapshot.identity.ino } })),
+    legacyIdentityDigest: artifactBytesDigest(JSON.stringify({root,dev:rootStat.dev,ino:rootStat.ino,sourceRoot:snapshot.root,sourceIdentity:snapshot.identity})),
+  };
+}
+
+/** True when a stored receipt digest names this source root, in the current or the read-only legacy formula. */
+export function artifactSourceIdentityMatches(stored: string, input: { identityDigest: string; legacyIdentityDigest?: string }): boolean {
+  return stored === input.identityDigest || (input.legacyIdentityDigest !== undefined && stored === input.legacyIdentityDigest);
+}
+
+export async function readAppArtifactSource(record: AppFactoryAppRecord, signal?: AbortSignal): Promise<{snapshot: ArtifactSourceSnapshot; react: boolean; identityDigest: string; legacyIdentityDigest: string}> {
   assertArtifactBuildOwner(record);
   const stat = await fs.lstat(record.rootPath);
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("artifact_app_root_invalid");
@@ -33,8 +53,8 @@ export async function readAppArtifactSource(record: AppFactoryAppRecord, signal?
   const now = await fs.lstat(record.rootPath);
   if (now.dev !== stat.dev || now.ino !== stat.ino || now.isSymbolicLink()) throw new Error("artifact_app_root_changed");
   assertArtifactBuildOwner(record);
-  const identityDigest = artifactBytesDigest(JSON.stringify({root,dev:stat.dev,ino:stat.ino,sourceRoot:snapshot.root,sourceIdentity:snapshot.identity}));
-  return {snapshot, react, identityDigest};
+  const { identityDigest, legacyIdentityDigest } = artifactSourceIdentityDigests({ root, rootStat: stat, snapshot });
+  return {snapshot, react, identityDigest, legacyIdentityDigest};
 }
 
 /** Builds read-once bytes in a private snapshot; only a later render receipt may make it ready. */

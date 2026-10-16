@@ -115,12 +115,17 @@ export function harvestCompactionSummaries(opts: {
     fd = fs.openSync(real, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
     const stat = fs.fstatSync(fd);
     if (!stat.isFile()) return { intake: 0 };
-    const identity = hash([stat.dev, stat.ino, stat.birthtimeMs]);
+    // The cursor row outlives a reboot, so its source identity leaves st_dev out (macOS renumbers the volume at every
+    // boot; with it, each reboot restarted every transcript from byte 0). Inode + birth time + the anchor/tail digests
+    // below still detect a rotated or replaced transcript. A cursor an older build wrote with st_dev (no reboot since)
+    // is still accepted and rewritten under the new identity by the next commit.
+    const identity = hash([stat.ino, stat.birthtimeMs]);
+    const legacyIdentity = hash([stat.dev, stat.ino, stat.birthtimeMs]);
     const source = hash([real, sessionId]);
     const partition = hash([info.ownerNamespace, ctx.agentId, ctx.projectId, ctx.projectPath, ctx.chatId, source]);
     const db = cursorSchema();
     let cursor = db.prepare("SELECT * FROM memory_compaction_cursors WHERE partition_key=?").get(partition) as Cursor | undefined;
-    const matches = cursor && cursor.source_identity === identity && stat.size >= cursor.byte_offset
+    const matches = cursor && (cursor.source_identity === identity || cursor.source_identity === legacyIdentity) && stat.size >= cursor.byte_offset
       && hash(bytes(fd, 0, cursor.anchor_bytes)) === cursor.anchor_digest
       && hash(bytes(fd, Math.max(0, cursor.byte_offset - 256), Math.min(256, cursor.byte_offset))) === cursor.tail_digest;
     let offset = matches ? cursor!.byte_offset : 0;

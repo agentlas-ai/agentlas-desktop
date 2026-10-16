@@ -713,7 +713,8 @@ function fingerprintInboxFile(
   }
 }
 
-function boundedInboxFingerprint(inboxPath: string): string {
+/** Exported for the reboot-stability gate; production reads it only through materializeProjectOntologyIndex. */
+export function boundedInboxFingerprint(inboxPath: string): string {
   const root = path.resolve(inboxPath);
   const rootStat = fs.lstatSync(root, { bigint: true });
   if (
@@ -801,9 +802,10 @@ function boundedInboxFingerprint(inboxPath: string): string {
   records.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
   const digest = createHash("sha256");
   digest.update(`entries:${records.length}\n`);
+  // The fingerprint is written into the index file, so a change re-runs the ontology ingest. st_dev is left out: macOS
+  // renumbers the volume at every boot, which re-ingested every project after each reboot with nothing changed.
   for (const record of records) {
     digest.update(record.relativePath).update("\0")
-      .update(record.stat.dev.toString()).update("\0")
       .update(record.stat.ino.toString()).update("\0")
       .update(record.stat.size.toString()).update("\0")
       .update(record.stat.mtimeNs.toString()).update("\0")

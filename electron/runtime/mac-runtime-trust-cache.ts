@@ -17,15 +17,20 @@ import {
  * be reused only while every one of these is byte-identical to the moment the
  * full gate passed:
  *   - realpath of the .app, CFBundleVersion, CFBundleShortVersionString
- *   - dev/ino/size/mtime/ctime of Contents/_CodeSignature/CodeResources,
+ *   - ino/size/mtime/ctime of Contents/_CodeSignature/CodeResources,
  *     the main executable and Info.plist
  *   - the CDHash, bundle identifier, team and leaf authority (`codesign -d`)
  *   - sha256 of the signing policy, the OS release/build
  *   - an lstat digest of EVERY entry in the bundle (path, type, mode, size,
- *     dev, ino, mtime, ctime, link target). Any write, chmod, rename, add or
+ *     ino, mtime, ctime, link target). Any write, chmod, rename, add or
  *     remove anywhere in the bundle changes ctime/ino/the entry set, and
  *     user space cannot set ctime, so content drift cannot hide behind an
  *     unchanged CodeResources.
+ *   - st_dev is NOT part of it: macOS gives the volume a new device number at
+ *     every boot (owner Mac 16777229 -> 16777231 -> 16777233), so a recorded
+ *     PASS never survived a reboot and every first launch after one paid the
+ *     3.4-5.8 s full gate. A record written with dev by an older build simply
+ *     misses (full gate), as after any update.
  * and the PASS is younger than MAX_AGE_MS (Gatekeeper/revocation freshness).
  *
  * A FAIL is never written. A missing, malformed, foreign-owned, linked or
@@ -38,7 +43,7 @@ export const MAC_RUNTIME_TRUST_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const MAX_RECORD_BYTES = 64 * 1024;
 const MAX_TREE_ENTRIES = 250_000;
 
-type FileIdentity = { dev: string; ino: string; size: string; mtimeNs: string; ctimeNs: string };
+type FileIdentity = { ino: string; size: string; mtimeNs: string; ctimeNs: string };
 
 export type MacBundleIdentity = {
   bundleRealpath: string;
@@ -64,7 +69,6 @@ function fileIdentity(file: string): FileIdentity | null {
   const stat = fs.lstatSync(file, { bigint: true });
   if (!stat.isFile() || stat.isSymbolicLink()) return null;
   return {
-    dev: stat.dev.toString(),
     ino: stat.ino.toString(),
     size: stat.size.toString(),
     mtimeNs: stat.mtimeNs.toString(),
@@ -80,7 +84,7 @@ export function macBundleTreeDigest(bundleRoot: string): { entries: number; sha2
     if (++entries > MAX_TREE_ENTRIES) return false;
     const stat = fs.lstatSync(absolute, { bigint: true });
     const type = stat.isSymbolicLink() ? "l" : stat.isDirectory() ? "d" : stat.isFile() ? "f" : "o";
-    hash.update(`${relative}\0${type}\0${stat.mode}\0${stat.size}\0${stat.dev}\0${stat.ino}\0${stat.mtimeNs}\0${stat.ctimeNs}\0`);
+    hash.update(`${relative}\0${type}\0${stat.mode}\0${stat.size}\0${stat.ino}\0${stat.mtimeNs}\0${stat.ctimeNs}\0`);
     if (type === "l") hash.update(fs.readlinkSync(absolute));
     hash.update("\n");
     if (type !== "d") return true;

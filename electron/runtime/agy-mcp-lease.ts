@@ -34,8 +34,12 @@ function boundOwnerState(ownerPath: string, lock: fs.Stats): OwnerState {
     const owner = JSON.parse(fs.readFileSync(ownerPath, "utf8"));
     if (owner.lockIdentity !== undefined) {
       const identity = owner.lockIdentity;
-      if (!identity || !Number.isFinite(lock.dev) || !Number.isFinite(lock.ino) || lock.ino <= 0
-        || identity.dev !== lock.dev || identity.ino !== lock.ino || identity.birthtimeMs !== lock.birthtimeMs) return "unknown";
+      // dev is recorded but not compared: a lock left by a crash or forced reboot is judged after the reboot, and macOS
+      // renumbers the volume at every boot. With dev compared that lock read as "unknown" forever and every Antigravity
+      // run failed agy_mcp_lease_owner_unverified until someone deleted it by hand. Inode + birth time identify the
+      // lock generation; a recreated lock has a new birth time.
+      if (!identity || !Number.isFinite(lock.ino) || lock.ino <= 0
+        || identity.ino !== lock.ino || identity.birthtimeMs !== lock.birthtimeMs) return "unknown";
     } else {
       // Legacy metadata is usable only if it was written after this lock was
       // born. Equal/unknown timestamp resolution is not positive ownership.

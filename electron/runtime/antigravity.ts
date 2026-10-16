@@ -1940,6 +1940,8 @@ async function runPreparedAntigravity(
   executableFingerprint: string,
   executableGeneration: string,
   agyAdditionalDirs: string[] = [],
+  /** Pre-2026-10-16 executable fingerprint (it hashed st_dev); read-only, see cli-executable-identity.ts. */
+  legacyExecutableFingerprint?: string,
 ): Promise<RunnerResult> {
   // A fresh conversation gets the full prompt; a resumed one (--conversation) gets this turn's input only.
   let runReq = req;
@@ -1955,6 +1957,10 @@ async function runPreparedAntigravity(
    * 것은 히스토리를 다시 보내는 비용보다 나쁘다.
    */
   const agyFingerprint = antigravitySessionFingerprint(runReq, executableFingerprint);
+  // A record an older build saved under the device-number fingerprint (no reboot since) resumes once and is saved again
+  // under agyFingerprint when the turn ends.
+  const agyLegacyFingerprint = legacyExecutableFingerprint ? antigravitySessionFingerprint(runReq, legacyExecutableFingerprint) : null;
+  const agySavedMatches = (saved: string) => saved === agyFingerprint || (agyLegacyFingerprint !== null && saved === agyLegacyFingerprint);
   const agySaved = !assertScienceRecoveryRequest(runReq, "antigravity") && runReq.chatId
     ? getRuntimeSession(runReq.chatId, ANTIGRAVITY_KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner })
     : null;
@@ -1967,8 +1973,8 @@ async function runPreparedAntigravity(
   const commonContext = agentContextDeliveryForRequest(runReq) !== null;
   const commonHandle = commonContext ? runReq.runtimeSessionId?.trim() || null : null;
   const agyResumeId = commonContext
-    ? (commonHandle && agySaved && agyFingerprint && agySaved.fingerprint === agyFingerprint && agySaved.sessionId === commonHandle ? commonHandle : null)
-    : agySaved && agyFingerprint && agySaved.fingerprint === agyFingerprint ? agySaved.sessionId : null;
+    ? (commonHandle && agySaved && agyFingerprint && agySavedMatches(agySaved.fingerprint) && agySaved.sessionId === commonHandle ? commonHandle : null)
+    : agySaved && agyFingerprint && agySavedMatches(agySaved.fingerprint) ? agySaved.sessionId : null;
   if (commonContext && commonHandle && !agyResumeId) {
     const bootstrap = await agentContextColdBootstrapForRequest(runReq);
     if (!bootstrap) {
@@ -2937,5 +2943,6 @@ export const runAntigravity: Runner = async (
     executableIdentity.fingerprint,
     executableIdentity.generation,
     stagedImages.directory ? [stagedImages.directory] : [],
+    executableIdentity.legacyFingerprint,
   );
 });

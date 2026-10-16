@@ -12,7 +12,7 @@ import { randomBytes } from "node:crypto";
 import type { AppFactoryAppRecord, AppFactoryLivePreviewResult } from "../../shared/types";
 import { getAgentApp, isCloudAppRoot } from "../store/agent-apps";
 import type { ArtifactReadyRevision } from "../../shared/artifact-build";
-import { readAppArtifactSource, buildAppArtifact, loadReadyArtifact, publishReadyArtifact, recordArtifactBuildFailure, type ArtifactBundle } from "./artifact-build";
+import { readAppArtifactSource, buildAppArtifact, loadReadyArtifact, publishReadyArtifact, recordArtifactBuildFailure, artifactSourceIdentityMatches, type ArtifactBundle } from "./artifact-build";
 import { observeArtifactRender, ARTIFACT_PREVIEW_CSP } from "./artifact-render";
 import { readArtifactPresentation, writeArtifactPresentation } from "../store/artifact-presentation";
 import { artifactPresentationClient } from "./presentation-client";
@@ -238,9 +238,11 @@ async function prepareReadyArtifact(record: AppFactoryAppRecord, signal: AbortSi
   let sourceDigest: string | null = null;
   try {
     const input = await readAppArtifactSource(record, signal);
-    if(prior && prior.build.sourceIdentityDigest !== input.identityDigest) throw new Error("artifact_source_identity_changed");
+    if(prior && !artifactSourceIdentityMatches(prior.build.sourceIdentityDigest, input)) throw new Error("artifact_source_identity_changed");
     sourceDigest = input.snapshot.digest;
-    if (prior && prior.build.sourceDigest === sourceDigest) return {bundle:prior,ready:prior.ready};
+    // A receipt still keyed by the legacy (device-number) identity is rebuilt once, so the stored ready build carries
+    // the reboot-stable digest before the next reboot can strand it.
+    if (prior && prior.build.sourceDigest === sourceDigest && prior.build.sourceIdentityDigest === input.identityDigest) return {bundle:prior,ready:prior.ready};
     const bundle = await buildAppArtifact(record,input,signal);
     const render = await observeArtifactRender(bundle,signal);
     if ((await readAppArtifactSource(record,signal)).snapshot.digest !== sourceDigest) throw new Error("artifact_source_changed_before_publish");
@@ -264,9 +266,9 @@ function refreshManagedPreview(preview: ActivePreview): Promise<void> {
       let digest:string|null=null;
       try {
         const input=await readAppArtifactSource(preview.record,preview.controller.signal);
-        if(preview.ready.build.sourceIdentityDigest !== input.identityDigest) throw new Error("artifact_source_identity_changed");
+        if(!artifactSourceIdentityMatches(preview.ready.build.sourceIdentityDigest, input)) throw new Error("artifact_source_identity_changed");
         digest=input.snapshot.digest;
-        if(digest===preview.ready.build.sourceDigest) {preview.updateFailure=undefined;continue;}
+        if(digest===preview.ready.build.sourceDigest && preview.ready.build.sourceIdentityDigest===input.identityDigest) {preview.updateFailure=undefined;continue;}
         if(digest===preview.lastFailureKey) continue;
         const bundle=await buildAppArtifact(preview.record,input,preview.controller.signal);
         const render=await observeArtifactRender(bundle,preview.controller.signal);

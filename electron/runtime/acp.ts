@@ -1009,7 +1009,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
     // The conversation (which ACP session id this chat resumes) does not depend on the permission: a permission change opens a
     // new process/session (the mode is chosen when a session is created or loaded) that loads the same conversation back
     // (owner 2026-10-12: permission is the one exception, a new session that resumes), never a cold start.
-    const identityHash = (mode: boolean) => createHash("sha256")
+    const identityHash = (mode: boolean, executableFingerprint = executableIdentity.fingerprint) => createHash("sha256")
       .update(mode ? "acp-session-v3\0" : "acp-conversation-v4\0")
       .update(spec.id)
       .update("\0")
@@ -1020,14 +1020,18 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       .update(mode && req.planMode ? "\0plan-read-only" : "")
       .update(nativeMcp ? `\0native-mcp\0${nativeMcp.fingerprint}` : "")
       .update("\0executable\0")
-      .update(executableIdentity.fingerprint)
+      .update(executableFingerprint)
       .digest("hex");
     const fingerprint = req.chatId ? identityHash(true) : null;
     const conversationFingerprint = req.chatId ? identityHash(false) : null;
+    // Read-only: a session an older build saved under the device-number fingerprint (no reboot since) resumes once and is
+    // saved again under conversationFingerprint below (cli-executable-identity.ts).
+    const legacyConversationFingerprint = req.chatId ? identityHash(false, executableIdentity.legacyFingerprint) : null;
     const savedSession = !recovery && req.chatId
       ? getRuntimeSession(req.chatId, sessionKind, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner })
       : null;
-    const storedSessionId = savedSession && conversationFingerprint && savedSession.fingerprint === conversationFingerprint ? savedSession.sessionId : null;
+    const storedSessionId = savedSession && conversationFingerprint
+      && (savedSession.fingerprint === conversationFingerprint || savedSession.fingerprint === legacyConversationFingerprint) ? savedSession.sessionId : null;
     const resumeSessionId = req.runtimeSessionId ?? storedSessionId;
 
     /*

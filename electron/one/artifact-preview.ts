@@ -380,7 +380,6 @@ function bindCandidate(input: {
       && existing.kind === spec.kind
       && existing.mime_type === spec.mimeType
       && existing.size_bytes === opened.size
-      && existing.file_dev === opened.dev
       && existing.file_ino === opened.ino
       && existing.file_mtime_ns === opened.mtimeNs
       && existing.file_ctime_ns === opened.ctimeNs
@@ -749,8 +748,10 @@ function verifiedFile(input: unknown): VerifiedFile | null {
   if (resolved !== row.source_path || pathIsArchived(resolved)) return null;
   try {
     const opened = safeOpen(resolved, spec);
+    // file_dev is recorded but not compared: the binding row outlives a reboot and macOS renumbers the volume at every
+    // boot, which made every accepted One deliverable unviewable after one. Inode, timestamps, size and the full SHA-256
+    // still bind the reopened bytes to the bound file.
     const same = opened.size === row.size_bytes
-      && opened.dev === row.file_dev
       && opened.ino === row.file_ino
       && opened.mtimeNs === row.file_mtime_ns
       && opened.ctimeNs === row.file_ctime_ns
@@ -770,7 +771,8 @@ function verifiedFile(input: unknown): VerifiedFile | null {
  *
  * This intentionally ignores renderer/model-authored `verificationStatus`.
  * Authority comes only from the Main-private binding row and a fresh
- * O_NOFOLLOW reopen whose dev/ino/timestamps/size/SHA-256 still match. A mixed
+ * O_NOFOLLOW reopen whose ino/timestamps/size/SHA-256 still match (not dev: it
+ * changes at every macOS boot). A mixed
  * document bundle, an unbound media item, or even one stale byte keeps the
  * accepted result partially verified.
  */
