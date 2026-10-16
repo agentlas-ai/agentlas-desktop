@@ -3,7 +3,7 @@ import https from "node:https";
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { onHostShutdown } from "../host-lifecycle";
 import { userDataPath } from "../runtime-paths";
 import { commandLineShellSpawn, killCliTree } from "../runtime/exec";
@@ -223,10 +223,17 @@ async function checkReachable(url: string | null): Promise<boolean | null> {
   });
 }
 
+/** Constant-time token check, as computer-use/control-server.ts bearerMatches does. */
+function tokenMatches(token: string, expected: string): boolean {
+  const actual = Buffer.from(token);
+  const wanted = Buffer.from(expected);
+  return Boolean(expected) && actual.length === wanted.length && timingSafeEqual(actual, wanted);
+}
+
 function requireBinding(request: ControlRequest): WorkspacePreviewCapabilityBinding | null {
   const token = nonEmpty(request.token, 128);
   const capabilityId = nonEmpty(request.capabilityId, 128);
-  if (!token || token !== serverToken || !capabilityId) return null;
+  if (!token || !tokenMatches(token, serverToken) || !capabilityId) return null;
   return capabilities.get(capabilityId) ?? null;
 }
 
