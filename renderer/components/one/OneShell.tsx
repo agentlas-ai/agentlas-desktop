@@ -237,6 +237,7 @@ import { useOneMail } from "./mail/useOneMail";
 import { llmLogoSrc } from "@/lib/llm-logo";
 import { OneCreateAgentDialog, type OneCreateAgentSeed, type OneEditMemberTarget, type OneEditSelfTarget } from "./OneCreateAgentDialog";
 import { OneTaskforceDialog, OneTaskforceRail } from "./OneTaskforces";
+import { OneSessionTree } from "./OneSessionTree";
 import { OneRunComet, oneRunCometHostClass, useOneRunSignals } from "./OneRunComet";
 import { OneComputerHistory } from "./OneComputerHistory";
 import { OneToolchains, toolchainStackClassName } from "./OneToolchains";
@@ -9352,7 +9353,19 @@ function OneSessionsShell() {
               onPointerEnter={() => setSessionOrderHold(sessionGroups.rows.map((row) => row.key))}
               onPointerLeave={() => setSessionOrderHold(null)}
             >
-              {sessionGroups.rows.map((row) => (row.chat ? (
+              <OneSessionTree
+                rows={sessionGroups.rows}
+                taskforces={taskforces}
+                members={oneOrgState?.members}
+                runningChatIds={liveRunningChatIds}
+                activeChatId={activeThreadChatId}
+                activeMemberAgentId={activeTaskforce ? null : activeOneMember?.installedAgentId ?? null}
+                locale={appLocale}
+                onOpenMember={(agentId) => {
+                  const member = oneOrgState?.members.find((item) => item.installedAgentId === agentId && !item.archivedAt);
+                  if (member) void openOneMember(member);
+                }}
+                renderRow={(row) => (row.chat ? (
                 <ConversationListButton
                   key={row.key}
                   item={row.chat}
@@ -9373,7 +9386,8 @@ function OneSessionsShell() {
                 />
               ) : row.task ? (
                 <TaskListButton key={row.key} item={row.task} active={row.task.taskId === selectedTaskId} locale={appLocale} onOpen={openTask} />
-              ) : null))}
+              ) : null)}
+              />
             </div>
             </>}
             {selected && <nav className={`${styles.railUtilities} ${styles.railTaskActions}`} aria-label={tFor(appLocale, "one.shell.rail.manage_task_aria")}>
