@@ -15,7 +15,6 @@ import { IntellectUiActions } from "@/lib/intellect-ui-actions";
 import { IconArrowUp, IconBrain, IconCheck, IconChevronRight, IconClose, IconMoreHorizontal, IconExpand, IconFileUp, IconLayers, IconPanelRight, IconPlus, IconPuzzle, IconSidebar, IconRefresh, IconSettings, IconSparkles } from "@/components/Icon";
 import type { OneSupervisorSnapshot, SupervisorCommandReceipt, SupervisorTask, SupervisorDelegation, SupervisorReplyTurn } from "../../../shared/one-supervisor";
 import { ONE_BUBBLE_COLORS, type OneBubbleColor, type OneProfile } from "../../../shared/one-profile";
-import { readAppUiPreference } from "@/lib/app-ui-preferences";
 import { stripAgentControlBlocks, stripAgentIdentityBadges, stripAgentRoutingBanners } from "../../../shared/agent-control-blocks";
 import { ProductModeMenu } from "./ProductModeMenu";
 import { OneBottomSheet } from "./OneBottomSheet";
@@ -43,6 +42,7 @@ import { bindAgentScreenScope } from "@/lib/agent-screen-scope";
 import { AgiDefectChip, AgiIncidentReportButton } from "../agi/AgiBugReport";
 import { PersonalOneCapabilities, type PersonalOneCapabilityTab } from "./PersonalOneCapabilities";
 import { OneVoiceInputHelp } from "./OneVoiceInputHelp";
+import { OneRuntimeChips } from "./OneRuntimeChips";
 import { personalOnePanelMaximum } from "@/lib/personal-one-result";
 import { registerRouter } from "@/lib/navigation";
 import { PersonalOneBudget, usePersonalOneBudgets, personalOneBudgetName } from "./PersonalOneBudget";
@@ -65,9 +65,8 @@ type PersonalOneConversationMessage = ChatHistoryEntry & {
   pendingCommandId?: string;
 };
 // Personal One runs every turn with full access and Computer Use; Main decides that (owner 2026-10-05).
-function storedOneRuntime() {
-  return readAppUiPreference("oneRuntimeSelection");
-}
+// Its model is the conversation's chip (OneRuntimeChips): a message names no runtime, and Main runs the chip's pin for
+// it as for every host-started or phone turn of this conversation (electron/runtime/room-chip-runtime.ts).
 export function PersonalOneWorkspace({ detached = false }: { detached?: boolean }) {
   const router=useRouter();const routeParams=useSearchParams();const requestedTaskId=routeParams.get("task");const consumedTask=useRef<string|null>(null);
   const {locale}=useT(); const ko=locale==="ko"; const copy=(a:string,b:string)=>ko?a:b;
@@ -373,9 +372,9 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     if(submitting.current)return;const submittedText=answer??text;const submittedReply=answer===undefined?messageReply:null;const rawMessage=submittedText.trim();const message=composeMessageReply(rawMessage,submittedReply);if((!rawMessage&&!outgoing.length)||!outbox.current||!snapshot||attachmentBusy)return;let intent:PendingSupervisorWrite;
     if(message.length>8000){setAttachmentError(copy("인용을 포함한 메시지가 너무 깁니다 (최대 8,000자). 답장을 줄이거나 인용을 취소해 주세요.","The message including its quotation is too long (8,000 characters maximum). Shorten your reply or cancel the quotation."));return;}
     submitting.current=true;setAttachmentBusy(true);
-    try{const runtimeSelection=storedOneRuntime();let fileGroupId:string|undefined;
+    try{let fileGroupId:string|undefined;
       if(outgoing.length){const bridge=chatFilesBridge();if(!bridge)throw new Error("attachment_bridge_unavailable");const stored=await bridge.snapshot({chatId:snapshot.conversationChatId,files:outgoing.map(item=>item.draft)});fileGroupId=stored.groupId;}
-      intent=outbox.current.prepare("send",{text:message||copy("첨부 파일을 확인해 주세요.","Please review the attached files."),...(fileGroupId?{fileGroupId}:{}),...(runtimeSelection?{runtimeSelection}:{})});
+      intent=outbox.current.prepare("send",{text:message||copy("첨부 파일을 확인해 주세요.","Please review the attached files."),...(fileGroupId?{fileGroupId}:{})});
       if(answer===undefined){for(const item of attachments)if(item.preview)URL.revokeObjectURL(item.preview);setAttachments([]);}setAttachmentError(null);
     }catch(cause){setAttachmentError(cause instanceof Error?cause.message:String(cause));setAttachmentBusy(false);submitting.current=false;return;}
     setAttachmentBusy(false);submitting.current=false;
@@ -550,7 +549,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
         <input ref={attachmentPicker} type="file" multiple hidden onChange={event=>{if(event.target.files)void pickAttachments(Array.from(event.target.files));event.target.value="";}}/>
         {attachmentError&&<p role="alert" className={styles.feedback}>{attachmentError}</p>}
         <MessageReplyPreview reply={messageReply} locale={locale} onDismiss={()=>setMessageReply(null)}/>
-        <form className={styles.composer} data-expanded={composerExpanded} data-has-files={attachments.length>0} onSubmit={event=>{event.preventDefault();void send();}}>
+        <form className={styles.composer} data-one-composer="true" data-expanded={composerExpanded} data-has-files={attachments.length>0} onSubmit={event=>{event.preventDefault();void send();}}>
           {attachments.length>0&&<div className={styles.attachmentDrafts} aria-label={copy("선택한 첨부","Selected attachments")}>{attachments.map((item,index)=><div className={styles.attachmentDraft} data-kind={item.preview?"image":"file"} key={index} title={item.draft.name}>
             {item.preview?<img src={item.preview} alt={item.draft.name}/>:<span className={styles.attachmentFile}><IconFileUp size={18}/><strong>{item.draft.name}</strong><small>{formatChatFileSize(item.draft.size)}</small></span>}
             <button type="button" aria-label={copy("첨부 삭제: ","Remove attachment: ")+item.draft.name} onClick={()=>{if(item.preview)URL.revokeObjectURL(item.preview);setAttachments(prior=>prior.filter((_,position)=>position!==index));}}><IconClose size={12}/></button>
@@ -580,7 +579,10 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
             if(!files.length)for(const item of Array.from(clipboard.items))if(item.kind==="file")add(item.getAsFile());
             if(!files.length)return;event.preventDefault();void pickAttachments(files);
           }} maxLength={8000} rows={1} placeholder={copy("메시지 보내기","Send a message")}/>
-          <div className={styles.voice}><OneVoiceInputHelp locale={ko?"ko":"en"} composerRef={composerInput} /></div>
+          <div className={styles.trail}>
+            <OneRuntimeChips chatId={snapshot?.conversationChatId ?? null} locale={ko?"ko":"en"} disabled={!snapshot} adoptStoredSelection />
+            <div className={styles.voice}><OneVoiceInputHelp locale={ko?"ko":"en"} composerRef={composerInput} /></div>
+          </div>
           <button className={styles.send} type="submit" aria-label={copy("보내기","Send")} disabled={!snapshot||savedRequestError||attachmentBusy||(!text.trim()&&!attachments.length)}><IconArrowUp size={16}/></button>
         </form>
         {activeReply?.runId&&<button className={styles.stopReply} onClick={()=>void write("stopReply",{runId:activeReply.runId!}).then(value=>{showReceipt(value);void sync();}).catch(()=>setError(true))}>{copy("이 답변 중지","Stop this reply")}</button>}

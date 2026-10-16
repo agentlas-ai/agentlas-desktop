@@ -2728,10 +2728,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const snapshot = await oneSupervisor().snapshot();
         const inline = mergeInlineUiTranscript(snapshot.conversationChatId, snapshot.messages,
           await listUiInstances(snapshot.conversationChatId));
-        // Read the same ordered role configuration as runtime detection without
-        // launching probes in a frequently polled conversation snapshot. This is
-        // the configured default, not a claim about an old/current run's fallback.
-        const selected = pickModelRoleFromPool("orchestrator")?.selection;
+        // The model Hope's next turn runs: the conversation's chip (room-chip-runtime.ts), else the
+        // orchestrator default read from the same ordered role configuration as runtime detection, without
+        // launching probes in a frequently polled snapshot. Not a claim about an old/current run's fallback.
+        const selected = getChat(snapshot.conversationChatId)?.runtimeSelection ?? pickModelRoleFromPool("orchestrator")?.selection;
         const orchestratorModel = selected ? { provider: selected.kind, model: selected.model ?? null } : null;
         return asJsonValue({...snapshot, orchestratorModel,
           displayName:boundedRedactedText(snapshot.displayName,240),
