@@ -1812,6 +1812,24 @@ function usesMobileDurableDecision(executionContext?: InvocationExecutionContext
   return executionContext?.source === "mobile";
 }
 
+/**
+ * The project the host bound an automation run to, or null. Binding sources: automations.project_id, which every
+ * automation session chat of the run carries (store/automation-sessions.ts getOrCreateAutomationSession, run-graph
+ * chatForNode), then the run's captured automation workspace (automation-workspace.ts captureAutomationWorkspace: a
+ * project folder, or a followed Goal's folder) when exactly one project owns that folder. Never a model choice.
+ */
+function automationBoundProject(chatProjectId: string | null | undefined, binding: InvocationWorkspaceBinding | undefined): ReturnType<typeof getProject> {
+  const bound = chatProjectId ? getProject(chatProjectId) : null;
+  if (bound) return bound;
+  const folder = binding?.source === "automation" ? binding.canonicalPath : null;
+  if (!folder) return null;
+  const owners = listProjects().filter((project) => {
+    if (!project.folderPath) return false;
+    try { return fs.realpathSync.native(project.folderPath) === folder; } catch { return false; }
+  });
+  return owners.length === 1 ? owners[0] : null;
+}
+
 // ── One 태스크 Surface 레시피 — 선택은 판정기(LLM) 경유 ──────────────────────
 // 2026-08-20: 사용자 프롬프트를 6개 정규식(여행/풀이/문서/엑셀/미디어/조사)으로 분기해
 // 레시피를 확정하던 단어장 게이트를 제거했다. 어떤 레시피가 맞는지는 연결된 모델이
@@ -2770,14 +2788,19 @@ async function runMcpInvocationInContext(
     }
   }
   if (executionContext?.source === "automation") {
-    const availableProjects = listProjects().map((project) => ({
-      name: project.name,
-      source: project.sourceType,
-      connected: Boolean(project.folderPath || project.sourceRef),
-    }));
+    /*
+     * The project of an automation run is a host fact, never the model's pick. This boundary used to list every owner
+     * project and tell the model to choose one from that list, returning a short question when unclear, on every run,
+     * bound or not. An unattended run told to ask when unclear asks: production 2026-10-13..16, graph
+     * cdf732ca (YouTube daily, project_id NULL) step 1 ended 9+ times with "Which connected project and publishing
+     * account should I use…?" / blocker "Connected project selection required from available project list" while its
+     * real work (room, channel, files) needed no project. Now: a bound project is stated as the fact it is; an unbound
+     * run gets no list and no choice, and works in its own automation workspace as before.
+     */
+    const boundProject = automationBoundProject(chat.projectId, workspaceBinding);
     const automationBoundary: DeclaredPromptPart[] = [
-      closedCurrentUserPart({ id: "user.current.automation-run.guide", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 30, text: "automation run: start with the finished result; no routing/runtime reports; pick a project only from this list and the bound context (unclear → return the short question):" }, "automation-run"),
-      closedCurrentUserPart({ id: "user.current.automation-run.projects", revision: 1, stability: "task-context", changeTriggers: ["task", "capability-inventory"], order: 60, text: JSON.stringify(availableProjects) }, "automation-run"),
+      closedCurrentUserPart({ id: "user.current.automation-run.guide", revision: 2, stability: "fixed-policy", changeTriggers: ["release"], order: 30, text: "automation run: start with the finished result; no routing/runtime reports" }, "automation-run"),
+      ...(boundProject ? [closedCurrentUserPart({ id: "user.current.automation-run.project", revision: 1, stability: "task-context", changeTriggers: ["task", "project-instructions"], order: 60, text: `project: ${JSON.stringify(boundProject.name)} (the host bound this run to it)` }, "automation-run")] : []),
     ];
     effectiveUserPrompt = addEffectiveUserParts(automationBoundary);
   }
