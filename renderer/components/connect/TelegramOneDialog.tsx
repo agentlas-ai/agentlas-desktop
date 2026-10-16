@@ -26,6 +26,7 @@ import {
   telegramOneNowLabel,
 } from "../../lib/telegram-one-dialog";
 import type { TelegramConnectBinding, TelegramConnectStatus } from "../../lib/types";
+import { telegramPairingCommand, telegramPairingLink } from "@shared/telegram-pairing";
 import styles from "./TelegramOneDialog.module.css";
 
 type ConnectMode = "auto" | "manual";
@@ -247,6 +248,17 @@ export default function TelegramOneDialog() {
     [appendLog, busy, refresh, t],
   );
 
+  // 수동 토큰 연결의 짝짓기(OD-3): t.me 링크의 시작 버튼이 정확한 "/start <연결 id>" 를 보낸다.
+  // 링크를 못 여는 환경을 위해 같은 문장을 복사할 수 있게 둔다.
+  const copyPairingCommand = async (command: string) => {
+    try {
+      await navigator.clipboard.writeText(command);
+      appendLog(t("tgone.pair.copied"), "success");
+    } catch (err) {
+      appendLog(friendlyTelegramError(err), "error");
+    }
+  };
+
   if (!open) return null;
 
   const connected = oneBindings.length > 0;
@@ -324,6 +336,22 @@ export default function TelegramOneDialog() {
                 <p className={styles.connectedChat}>
                   {oneBinding.telegramChatTitle || t("tgone.connected.chat_waiting")}
                 </p>
+                {(() => {
+                  if (oneBinding.status !== "waiting_for_chat" || oneBinding.telegramChatId) return null;
+                  const link = telegramPairingLink(oneBinding.botUsername, oneBinding.id);
+                  if (!link) return null;
+                  const command = telegramPairingCommand(oneBinding.id);
+                  return (
+                    <>
+                      <p className={styles.hint}>{t("tgone.pair.link_hint")}</p>
+                      <div className={styles.actions}>
+                        <a href={link} target="_blank" rel="noopener noreferrer">{t("tgone.pair.open_link")}</a>
+                        <button type="button" onClick={() => void copyPairingCommand(command)}>{t("tgone.pair.copy")}</button>
+                      </div>
+                      <p className={styles.hint}><code className={styles.pairCommand}>{command}</code></p>
+                    </>
+                  );
+                })()}
                 <p className={styles.hint}>{t("tgone.connected.commands_hint")}</p>
                 <div className={styles.actions}>
                   <button type="button" onClick={() => void runBindingAction("open", oneBinding)} disabled={Boolean(busy)}>

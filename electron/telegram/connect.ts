@@ -56,6 +56,7 @@ import type {
   TelegramLegacyCleanupResult,
 } from "../../shared/types";
 import { TELEGRAM_ONE_TARGET_ID } from "../../shared/types";
+import { telegramPairingCommand, telegramPairingLink } from "../../shared/telegram-pairing";
 
 export interface TelegramBindingRow {
   id: string;
@@ -218,6 +219,7 @@ const TELEGRAM_COPY = {
     "auto.chat_connected": "Telegram 방까지 연결했습니다. 이제 그 방에서 말하면 Agentlas가 선택한 에이전트에게 보냅니다.",
     "auto.bot_ready": "봇은 준비됐습니다. 열린 Telegram 창에서 시작을 누르면 방 연결이 끝납니다.",
     "start.bot_verified": "봇 확인 완료. 이제 Telegram에서 봇에게 메시지를 보내면 이 연결이 방을 기억합니다.",
+    "start.bot_verified_link": "봇 확인 완료. {link} 를 열어 시작을 누르거나, 봇에게 {command} 를 보내면 이 연결이 그 대화를 기억합니다.",
     "clone.bot_verified": "같은 봇으로 새 방 포트를 만들었습니다. Telegram 방에서 시작 메시지를 보내면 연결됩니다.",
     "open.title": "Agentlas Telegram 열기",
     "open.success": "Telegram 창을 열었습니다: @{username}",
@@ -332,6 +334,7 @@ const TELEGRAM_COPY = {
     "auto.chat_connected": "Telegram chat connected. Messages in that chat now route to the selected Agentlas target.",
     "auto.bot_ready": "Bot is ready. Press Start in the Telegram window to finish pairing the chat.",
     "start.bot_verified": "Bot verified. Send a Telegram message to the bot and this connection will remember that chat.",
+    "start.bot_verified_link": "Bot verified. Open {link} and press Start, or send {command} to the bot, and this connection will remember that chat.",
     "clone.bot_verified": "Created another chat port with the same bot. Send the start message in Telegram to pair it.",
     "open.title": "Agentlas Telegram",
     "open.success": "Telegram window opened: @{username}",
@@ -1050,9 +1053,14 @@ export async function startTelegramConnection(input: TelegramConnectStartInput):
   await telegramApi<boolean>(token, "deleteWebhook", { drop_pending_updates: false }).catch(() => false);
   await reconcileTelegramWorkers();
   const binding = await toBinding(getBindingRow(id) as TelegramBindingRow);
+  // OD-3: offer the deep link — its Start sends the exact "/start <bindingId>" proof, so the owner does not
+  // depend on the first-message fallback (kept, fenced to messages sent after this binding existed).
+  const link = telegramPairingLink(me.username, id);
   return {
     binding,
-    message: tg("start.bot_verified"),
+    message: link
+      ? tg("start.bot_verified_link", { link, command: telegramPairingCommand(id) })
+      : tg("start.bot_verified"),
   };
 }
 
