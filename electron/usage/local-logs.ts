@@ -8,7 +8,9 @@
 // 서버(usage/*.ts)가, 절대 토큰량·추세는 로컬(여기)이 담당하는 하이브리드로 병합한다.
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
+import { realClaudeConfigDir } from "../runtime/claude-product-home";
+import { realCodexHome } from "../runtime/codex-product-home";
+import { userDataPath } from "../runtime-paths";
 
 export interface LocalWindowTokens {
   /** 5시간 롤링 윈도우 토큰 합(input+output+cache, 지금-5h 이후). */
@@ -105,14 +107,40 @@ function accumulateFile(
   }
 }
 
-/** Claude Code 로컬 로그 → 윈도우 토큰. (~/.claude/projects 하위 .jsonl 재귀) */
+/**
+ * Every folder one CLI's logs live in: the person's own, and the product home Agentlas's own runs of that CLI write to
+ * (claude-product-home.ts, codex-product-home.ts). Product runs spend the same subscription, so a meter that read only the
+ * person's folder undercounted once product sessions moved out of it (owner 2026-10-12/13). No userData (a host that never
+ * set one) leaves the person's folder alone.
+ */
+function logRoots(personal: string[], product: () => string[]): string[] {
+  try { return [...personal, ...product()]; } catch { return personal; }
+}
+
+/** Recent files under all roots, each counted once: a file reachable through a linked mirror is the same file. */
+function recentJsonlFilesUnder(roots: string[], now: number): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const root of roots) {
+    if (!fs.existsSync(root)) continue;
+    for (const file of recentJsonlFiles(root, now)) {
+      let real: string;
+      try { real = fs.realpathSync(file); } catch { real = path.resolve(file); }
+      if (seen.has(real)) continue;
+      seen.add(real);
+      out.push(file);
+    }
+  }
+  return out;
+}
+
+/** Claude Code 로컬 로그 → 윈도우 토큰. (개인 $CLAUDE_CONFIG_DIR/projects + 제품 claude-product-home/projects 하위 .jsonl 재귀) */
 export function getClaudeLocalTokens(): LocalWindowTokens {
   return withCache("claude", () => {
     const now = Date.now();
-    const root = path.join(os.homedir(), ".claude", "projects");
+    const roots = logRoots([path.join(realClaudeConfigDir(), "projects")], () => [userDataPath("claude-product-home", "projects")]);
     const acc = { fiveHour: 0, sevenDay: 0, lastActivity: null as number | null };
-    if (!fs.existsSync(root)) return acc;
-    for (const file of recentJsonlFiles(root, now)) {
+    for (const file of recentJsonlFilesUnder(roots, now)) {
       accumulateFile(file, now, (obj) => {
         const msg = (obj.message ?? null) as Record<string, unknown> | null;
         const usage = (msg?.usage ?? null) as Record<string, unknown> | null;
@@ -126,30 +154,29 @@ export function getClaudeLocalTokens(): LocalWindowTokens {
   });
 }
 
-/** Codex CLI 로컬 로그 → 윈도우 토큰. (~/.codex/sessions·archived_sessions 하위 .jsonl 재귀) */
+/** Codex CLI 로컬 로그 → 윈도우 토큰. (개인 $CODEX_HOME + 제품 codex-product-home/store 의 sessions·archived_sessions 하위 .jsonl 재귀) */
 export function getCodexLocalTokens(): LocalWindowTokens {
   return withCache("codex", () => {
     const now = Date.now();
     const acc = { fiveHour: 0, sevenDay: 0, lastActivity: null as number | null };
-    for (const sub of ["sessions", "archived_sessions"]) {
-      const root = path.join(os.homedir(), ".codex", sub);
-      if (!fs.existsSync(root)) continue;
-      for (const file of recentJsonlFiles(root, now)) {
-        accumulateFile(file, now, (obj) => {
-          // Codex rollout 라인은 형태가 다양 — usage/token_usage 어느 쪽이든 총합을 집는다.
-          const usage =
-            (obj.usage as Record<string, unknown> | undefined) ??
-            ((obj.info as Record<string, unknown> | undefined)?.token_usage as Record<string, unknown> | undefined) ??
-            ((obj.payload as Record<string, unknown> | undefined)?.usage as Record<string, unknown> | undefined);
-          if (!usage) return null;
-          const tsRaw = obj.timestamp ?? obj.ts ?? (obj.payload as Record<string, unknown> | undefined)?.timestamp;
-          const ts = typeof tsRaw === "string" ? Date.parse(tsRaw) : typeof tsRaw === "number" ? tsRaw : NaN;
-          if (Number.isNaN(ts)) return null;
-          const total = Number(usage.total_tokens);
-          const tokens = Number.isFinite(total) && total > 0 ? total : sumTokens(usage);
-          return { ts, tokens };
-        }, acc);
-      }
+    const subs = ["sessions", "archived_sessions"];
+    const roots = logRoots(subs.map((sub) => path.join(realCodexHome(), sub)),
+      () => subs.map((sub) => userDataPath("codex-product-home", "store", sub)));
+    for (const file of recentJsonlFilesUnder(roots, now)) {
+      accumulateFile(file, now, (obj) => {
+        // Codex rollout 라인은 형태가 다양 — usage/token_usage 어느 쪽이든 총합을 집는다.
+        const usage =
+          (obj.usage as Record<string, unknown> | undefined) ??
+          ((obj.info as Record<string, unknown> | undefined)?.token_usage as Record<string, unknown> | undefined) ??
+          ((obj.payload as Record<string, unknown> | undefined)?.usage as Record<string, unknown> | undefined);
+        if (!usage) return null;
+        const tsRaw = obj.timestamp ?? obj.ts ?? (obj.payload as Record<string, unknown> | undefined)?.timestamp;
+        const ts = typeof tsRaw === "string" ? Date.parse(tsRaw) : typeof tsRaw === "number" ? tsRaw : NaN;
+        if (Number.isNaN(ts)) return null;
+        const total = Number(usage.total_tokens);
+        const tokens = Number.isFinite(total) && total > 0 ? total : sumTokens(usage);
+        return { ts, tokens };
+      }, acc);
     }
     return acc;
   });
