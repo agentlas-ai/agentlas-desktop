@@ -197,6 +197,40 @@ export function beginAgentResidencyAdmission(agentId: string | null | undefined)
   openingAdmissions.set(token, { awake });
   return token;
 }
+/** Bound for evicted resident processes to exit before a new conversation is admitted (mirrors the Work-project wait). */
+export const AGENT_RESIDENCY_EVICTION_EXIT_WAIT_MS = 15_000;
+/**
+ * Make room for one new resident seat and wait (bounded, Stop-aware) for the evicted idle processes to exit.
+ * A closing process still holds its seat until measured termination, so without this wait the new conversation was
+ * refused (agent_residency_capacity) on the very seat its LRU eviction was freeing and silently ran one-shot, while the
+ * old session was closed anyway. Never interrupts a busy session; a failed close stays charged; the admission that
+ * follows (beginAgentResidencyAdmission) still makes the final, synchronous capacity decision.
+ */
+export async function awaitAgentResidencyHeadroom(
+  agentId: string | null | undefined,
+  options: { waitMs?: number; signal?: AbortSignal } = {},
+): Promise<void> {
+  if (isAwakeAgentResidencyAdmission(currentAwakeAgentResidency(agentId))) return;
+  enforceAgentResidencyBudget(1);
+  if (reservedResidencyCount() + 1 <= agentResidencyBudget()) return;
+  const pending = [...entries.values()]
+    .filter((entry) => entry.closing && !entry.closeFailed && entry.closeCompletion)
+    .map((entry) => entry.closeCompletion as Promise<void>);
+  if (pending.length === 0 || options.signal?.aborted) return;
+  const waitMs = Math.max(0, Math.min(options.waitMs ?? AGENT_RESIDENCY_EVICTION_EXIT_WAIT_MS, 120_000));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  try {
+    await Promise.race([
+      Promise.allSettled(pending),
+      new Promise<void>((resolve) => { timer = setTimeout(resolve, waitMs); }),
+      new Promise<void>((resolve) => { onAbort = () => resolve(); options.signal?.addEventListener("abort", onAbort, { once: true }); }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (onAbort) options.signal?.removeEventListener("abort", onAbort);
+  }
+}
 export function finishAgentResidencyAdmission(token: AgentResidencyAdmission | undefined): void {
   if (token) openingAdmissions.delete(token);
 }

@@ -17,6 +17,7 @@
 //      사용자에게는 아무 차이가 없어야 한다(문구도 새로 만들지 않는다).
 import {
   agentResidencyBudget,
+  awaitAgentResidencyHeadroom,
   beginAgentResidencyAdmission,
   finishAgentResidencyAdmission,
   retainAgentResidencyAdmissionUntilClosed,
@@ -220,6 +221,9 @@ export class AcpSessionPool<S> {
       if (this.opts.budget && this.entries.length + this.opening >= this.budget()) {
         throw Object.assign(new Error("agent_residency_capacity"), { code: "agent_residency_capacity" });
       }
+      // Production pools share the registry's global seats: an LRU eviction closes asynchronously, so wait for it
+      // (bounded, Stop-aware) instead of refusing the new conversation on the seat being freed.
+      if (!this.opts.budget) await awaitAgentResidencyHeadroom(meta.agentId, { signal: meta.signal });
       residentAdmission = beginAgentResidencyAdmission(meta.agentId);
       this.opening += 1;
       opening = true;
