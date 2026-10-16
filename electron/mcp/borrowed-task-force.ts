@@ -3372,7 +3372,7 @@ function taskForcePeerResultPromptParts(peerResults: BorrowedAgentResult[]): Dec
  * A team worker has no owner channel (274ed968), so a detail the owner could choose is the worker's to settle when a safe,
  * reversible default exists; it records the choice in the typed `ownerChoices` instead of holding its packet open with a
  * blocker or an ask the room can only answer with "계속해줘" (A/B3 room a1ab9a72). Whether the room applies it or asks the
- * owner is the host's decision from the owner's chip (settleTaskForceOwnerChoices), never the worker's.
+ * owner is the host's decision from the choice's typed fields (settleTaskForceOwnerChoices), never the worker's.
  */
 const TASK_FORCE_OWNER_CHOICES_LINE = "ownerChoices: nobody answers questions mid-task; a detail the owner could choose that has a safe reversible default → apply it, finish, record {question, applied, external:false}, never a blocker or question; no safe default → blockingRemaining; publish/send/pay/delete beyond the workspace → don't, record external:true";
 
@@ -3632,20 +3632,20 @@ export function taskForceOwnerDecisions(blockingRemaining: readonly string[] | u
 }
 
 /**
- * The owner's own delegation level decides who settles a worker's typed owner choices (owner 2026-10-16 night: on a
- * full-access chip "알아서" — the details are the agents' to decide). A/B3 room a1ab9a72: a finished, tested build ended
- * "이 작업은 아직 완료되지 않았습니다 … 결정 필요" only because its worker held safe-default choices open, and the
- * owner's only way on was "계속해줘".
- * - Full chip: a choice with a default and no external effect is applied — the worker already finished with it — so it
- *   never holds the packet open; the owner reads it as a "바꾸려면" line (taskForceAppliedChoiceLines).
- * - An external effect (publish, send, pay, delete), a choice without a default, or any choice on a lower chip stays the
- *   owner's: an owner_decision blocker, the packet PARTIAL (FAILED stays FAILED), as an ask from a worker is.
+ * Who settles a worker's typed owner choices. A/B3 room a1ab9a72 (2026-10-16): a finished, tested build ended "이 작업은
+ * 아직 완료되지 않았습니다 … 결정 필요" only because its worker held safe-default choices open, and the owner's only way on
+ * was "계속해줘". Owner rule ("알아서"): a content default inside work the room already allowed is not a permission — the
+ * chip governs permissions — so the decision is the same on every chip (coordinator decision 2026-10-17: asking on a
+ * write/auto chip would turn builds that used to complete quietly into new "결정 필요" stops).
+ * - A choice with a default and no external effect is applied — the worker already finished with it — so it never holds
+ *   the packet open; the owner reads it as a "바꾸려면" line (taskForceAppliedChoiceLines).
+ * - An external effect (publish, send, pay, delete) or a choice without a default stays the owner's: an owner_decision
+ *   blocker, the packet PARTIAL (FAILED stays FAILED), as an ask from a worker is.
  */
 export function settleTaskForceOwnerChoices(
   outcome: TaskForcePacketOutcome,
-  chipFull: boolean,
 ): { outcome: TaskForcePacketOutcome; applied: TaskForceOwnerChoice[] } {
-  const applied = chipFull ? outcome.ownerChoices.filter((choice) => !choice.external && choice.applied) : [];
+  const applied = outcome.ownerChoices.filter((choice) => !choice.external && choice.applied);
   const owners = outcome.ownerChoices.filter((choice) => !applied.includes(choice));
   if (!owners.length) return { outcome, applied };
   return {
@@ -3660,7 +3660,7 @@ export function settleTaskForceOwnerChoices(
   };
 }
 
-/** The owner's "바꾸려면" lines for the choices a full-chip room applied, once per question, in the app's UI language. */
+/** The owner's "바꾸려면" lines for the choices a room applied, once per question, in the app's UI language. */
 export function taskForceAppliedChoiceLines(locale: RuntimeLocale, choices: readonly TaskForceOwnerChoice[]): string {
   const seen = new Set<string>();
   const lines: string[] = [];
@@ -3672,6 +3672,15 @@ export function taskForceAppliedChoiceLines(locale: RuntimeLocale, choices: read
     lines.push(locale === "ko" ? `바꾸려면: ${question} (지금: ${applied})` : `To change: ${question} (now: ${applied})`);
   }
   return lines.join("\n");
+}
+
+/** A PARTIAL step whose every typed blocker is an owner decision (no other work left, no access request). */
+export function taskForceOnlyOwnerDecisionsOpen(
+  result: { ok: boolean; completionStatus?: TaskForceWorkerCompletionStatus; blockingRemaining?: readonly string[]; accessNeeded?: boolean },
+): boolean {
+  const open = result.blockingRemaining ?? [];
+  return !result.ok && result.completionStatus === "partial" && !result.accessNeeded && open.length > 0
+    && open.every((item) => item.startsWith(TASK_FORCE_OWNER_DECISION_PREFIX));
 }
 
 /** `rendered` as a PARTIAL packet (FAILED stays FAILED) whose typed blockers carry `questions`; unchanged without any. */
@@ -4431,7 +4440,7 @@ interface BorrowedAgentResult {
   usedTools?: string[];
   /** Typed: the worker asked for more access than it ran with (outcome envelope or the fixed escalation marker). */
   accessNeeded?: boolean;
-  /** Owner choices this full-chip room applied (settleTaskForceOwnerChoices); the owner reads them as "바꾸려면" lines. */
+  /** Owner choices this room applied (settleTaskForceOwnerChoices); the owner reads them as "바꾸려면" lines. */
   appliedOwnerChoices?: TaskForceOwnerChoice[];
   /**
    * Typed verdict: the step produced nothing and delegated nothing — a firm in this seat answered a write packet with its
@@ -4837,12 +4846,12 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       const firmDecisions = taskForceOwnerAskQuestions(teamResult.text);
       // The team answers its packet with the same typed outcome envelope a direct worker writes. A PARTIAL/FAILED team
       // packet is not a done packet (A/B2 room fc53939f: "Vibecoder 팀 완료" for a PARTIAL lead that built nothing), and
-      // an access request is lifted by the room, never handed to the owner. Its typed owner choices settle by the owner's
-      // chip, as a direct worker's do.
+      // an access request is lifted by the room, never handed to the owner. Its typed owner choices settle as a direct
+      // worker's do.
       // A CEO that answered in the typed handoff JSON is read like a direct worker's handoff (same envelope).
       const firmRendered = taskForceWorkerHandoffText(teamResult.text);
       const { outcome: firmOutcome, applied: firmAppliedChoices } = settleTaskForceOwnerChoices(
-        taskForcePacketOutcome(redactSensitiveText(firmRendered), packet), taskForcePermission(p) === "full");
+        taskForcePacketOutcome(redactSensitiveText(firmRendered), packet));
       // ★ D1 (A/B3 room fc53939f, 2026-10-16): the firm's CEO answered this write packet with its read-only plan turn —
       //   a leaked monologue, no Delegate block, no outcome envelope — runFirmInvocation returned ok, and an untyped reply
       //   counted as done here, so the room's verifier passed with nothing built. A seat is done only on its own typed
@@ -5232,7 +5241,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
           const result = outcome.result;
           // Read before curation: the typed packet state is the runtime's, curation owns only visible prose.
           const { outcome: workerOutcome, applied: workerAppliedChoices } = settleTaskForceOwnerChoices(
-            taskForcePacketOutcome(redactSensitiveText(result.text)), taskForcePermission(p) === "full");
+            taskForcePacketOutcome(redactSensitiveText(result.text)));
           const ownerDecisions = taskForceOwnerDecisions(workerOutcome.blockingRemaining);
           const workerText = await curateOwnedTaskForceResult({
             p,
@@ -5516,19 +5525,28 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       }
       const tokens = (managerPlan.tokens ?? 0) + workerResults.reduce((sum, item) => sum + item.tokens, 0) + (managerSynthesis.tokens ?? 0);
       // A nested worker's or the manager's question to the owner leaves the team packet open (PARTIAL), never COMPLETED.
-      // The manager's typed owner choices settle by the owner's chip, as each worker's did.
-      const managerChoices = settleTaskForceOwnerChoices(taskForcePacketOutcome(managerSynthesis.text), taskForcePermission(p) === "full");
+      // The manager's typed owner choices settle as each worker's did.
+      const managerChoices = settleTaskForceOwnerChoices(taskForcePacketOutcome(managerSynthesis.text));
       const teamOwnerDecisions = [...new Set([...workerResults.flatMap((item) => item.ownerDecisions),
         ...taskForceOwnerAskQuestions(managerSynthesis.text), ...taskForceOwnerDecisions(managerChoices.outcome.blockingRemaining)])];
       const teamAppliedChoices = [...workerResults.flatMap((item) => item.appliedOwnerChoices), ...managerChoices.applied];
       const teamAccessNeeded = workerResults.some((item) => item.accessNeeded) || hasPermissionEscalationMarker(managerSynthesis.text);
-      const teamOk = workerResults.every((item) => item.ok) && teamOwnerDecisions.length === 0 && !teamAccessNeeded;
+      // ★ The manager's synthesis is the team's own handoff. Its typed PARTIAL/FAILED was never read here: the verdict came
+      //   only from the nested workers' runner success and asks, so a team that reported PARTIAL counted done and the room
+      //   ended on "계속해줘" for work the team itself said was unfinished (the dead-end class of A/B2 room fc53939f, "팀
+      //   PARTIAL을 완료로 셈"). A firm seat already reads its CEO's typed outcome; this seat now reads its manager's.
+      const managerOutcome = managerChoices.outcome;
+      const teamTypedIncomplete = (managerOutcome.completionStatus === "partial" || managerOutcome.completionStatus === "failed")
+        && !managerOutcome.reviewComplete;
+      const teamOk = workerResults.every((item) => item.ok) && teamOwnerDecisions.length === 0 && !teamAccessNeeded && !teamTypedIncomplete;
       p.sink(tag({
         kind: "tool-use",
         done: true,
         status: teamOk
           ? p.locale === "ko" ? `${spec.name} 팀 완료` : `${spec.name} team completed`
-          : teamOwnerDecisions.length
+          : managerOutcome.completionStatus === "failed"
+            ? p.locale === "ko" ? `${spec.name} 팀 실패` : `${spec.name} team failed`
+          : teamOwnerDecisions.length || teamTypedIncomplete
             ? p.locale === "ko" ? `${spec.name} 팀 미완료` : `${spec.name} team incomplete`
             : p.locale === "ko" ? `${spec.name} 팀 일부 실패` : `${spec.name} team completed with worker failures`,
         tokens,
@@ -5559,8 +5577,13 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         ...(teamAccessNeeded ? { accessNeeded: true } : {}),
         ...(teamAppliedChoices.length ? { appliedOwnerChoices: teamAppliedChoices } : {}),
         ...(teamOwnerDecisions.length ? {
-          completionStatus: workerResults.every((item) => item.ok || item.ownerDecisions.length > 0) ? "partial" as const : "failed" as const,
-          blockingRemaining: teamOwnerDecisions.map((question) => `${TASK_FORCE_OWNER_DECISION_PREFIX}${question}`).slice(0, 16),
+          completionStatus: workerResults.every((item) => item.ok || item.ownerDecisions.length > 0) && managerOutcome.completionStatus !== "failed"
+            ? "partial" as const : "failed" as const,
+          blockingRemaining: [...new Set([...teamOwnerDecisions.map((question) => `${TASK_FORCE_OWNER_DECISION_PREFIX}${question}`),
+            ...managerOutcome.blockingRemaining])].slice(0, 16),
+        } : teamTypedIncomplete ? {
+          completionStatus: managerOutcome.completionStatus,
+          blockingRemaining: managerOutcome.blockingRemaining,
         } : {}),
         tokens,
         nestedExecutionEvidence: {
@@ -5701,10 +5724,9 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       permission: observedDirectRole === "worker" ? workerPermission : "read",
     });
     const curatedOutcome = taskForcePacketOutcome(workerText, packet);
-    // The owner's chip decides whether the worker's typed owner choices hold the packet open (owner 2026-10-16 night).
+    // The worker's typed owner choices: a safe default is applied, an external effect or no default asks the owner.
     const { outcome: packetOutcome, applied: appliedOwnerChoices } = settleTaskForceOwnerChoices(
       runtimeOutcome.completionStatus !== "missing" ? runtimeOutcome : curatedOutcome,
-      taskForcePermission(p) === "full",
     );
     // The access request is typed state for the room (liftTaskForceWorkerAccess); its marker line is not room prose.
     const accessNeeded = runtimeOutcome.accessNeeded || curatedOutcome.accessNeeded;
@@ -7205,6 +7227,11 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     }
     if (result.ok || p.signal?.aborted) return result;
     if (result.runtimeFailure) return result;
+    // A step whose only open items are owner decisions is settled as it is: the content retry below asks the worker to
+    // "finish the blocking remaining work", and nobody can answer an owner question in a worker seat (274ed968). Running
+    // it again only repeats the question or makes the worker guess the owner's answer. The decision reaches the owner as
+    // the typed blocker it already is (taskForceIncompleteMessage).
+    if (taskForceOnlyOwnerDecisionsOpen(result)) return result;
     // A firm or packaged team is already a composite execution graph with its
     // own planner, workers, verifier, and synthesis. Replaying that packet here
     // restarts every completed worker and can duplicate writes after only the
@@ -8059,7 +8086,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       synthesis: displayText,
     }) ? `${displayText.trim()}\n\n${incomplete}` : incomplete;
   }
-  // What a full-chip room decided for the owner, so the owner can change it (settleTaskForceOwnerChoices): host-written,
+  // What the room decided for the owner, so the owner can change it (settleTaskForceOwnerChoices): host-written,
   // typed, once per question — never a reason to call the result incomplete.
   const appliedChoiceLines = taskForceAppliedChoiceLines(p.locale, results.flatMap((result) => result?.appliedOwnerChoices ?? []));
   if (appliedChoiceLines) displayText = `${displayText.trim()}\n\n${appliedChoiceLines}`;
