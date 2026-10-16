@@ -347,17 +347,22 @@ export async function listOneTaskProjections(
 
   // Transitional fallbacks must respect the same membership rule as Main:
   // One shows only work that One itself started, never the global Work list.
-  const canonicalTasks = await api.tasks.list({ limit: 40 }).catch(() => []);
-  if (canonicalTasks.length > 0) {
-    const confirmations = new Map(pendingConfirmations.map((item) => [item.chatId, item]));
-    const details = await Promise.all(
-      canonicalTasks.map(async (task) => {
-        const chat = task.originChatId ? await api.chats.get(task.originChatId).catch(() => null) : null;
-        if (chat?.originSurface !== "one") return null;
-        return reconcileDormantProjection(canonicalProjection(task, chat, confirmations, null, oneId, locale), activeChatIds);
-      }),
-    );
-    return details.filter((item): item is OneTaskProjection => Boolean(item));
+  // With Main's projection bridge present, Main's One list is the membership (it also leaves out the personal One's own
+  // conversation by its binding row); an empty or failed answer goes to the recent One chat list below, which applies
+  // that binding too, never to the raw Task list, which would bring that row back.
+  if (!bridge?.listProjections) {
+    const canonicalTasks = await api.tasks.list({ limit: 40 }).catch(() => []);
+    if (canonicalTasks.length > 0) {
+      const confirmations = new Map(pendingConfirmations.map((item) => [item.chatId, item]));
+      const details = await Promise.all(
+        canonicalTasks.map(async (task) => {
+          const chat = task.originChatId ? await api.chats.get(task.originChatId).catch(() => null) : null;
+          if (chat?.originSurface !== "one") return null;
+          return reconcileDormantProjection(canonicalProjection(task, chat, confirmations, null, oneId, locale), activeChatIds);
+        }),
+      );
+      return details.filter((item): item is OneTaskProjection => Boolean(item));
+    }
   }
 
   // One 것만 골라 받는다 — 전체 최근 40개를 잘라 쓰면 Work 대화가 One 을 밀어내

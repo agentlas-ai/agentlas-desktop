@@ -35,6 +35,7 @@ import type {
 } from "../../shared/types";
 import { listPendingConfirmations } from "../confirm";
 import { chatOriginSurface } from "../store/chats";
+import { getDb } from "../store/db";
 import { getOneProfile } from "../store/one-profile";
 import { getDurableOneSurfaceResult } from "../store/one-surface-results";
 import { getLatestInvocationRunReceipt } from "../store/run-events";
@@ -66,6 +67,8 @@ export interface OneTaskProjectionReadSources {
   listPendingOperations(taskId: string): unknown;
   /** 대화의 origin 표면 — One 목록이 전역 Work 작업으로 오염되지 않게 하는 멤버십 판별. */
   chatOriginSurface(chatId: string): "one" | "work" | null;
+  /** Whether the chat is the personal One's own conversation (the one_supervisor_conversations binding row). */
+  personalOneConversation(chatId: string): boolean;
 }
 
 export interface CreateOneTaskProjectionRuntimeOptions {
@@ -115,7 +118,18 @@ const DEFAULT_SOURCES: OneTaskProjectionReadSources = {
   getLatestOneValueClosure,
   listPendingOperations: () => [],
   chatOriginSurface,
+  personalOneConversation,
 };
+
+/**
+ * The personal One's own conversation: the one_supervisor_conversations binding row (the predicate listRecentOneChats
+ * applies), never a title, a task id shape or text.
+ */
+function personalOneConversation(chatId: string): boolean {
+  const db = getDb();
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='one_supervisor_conversations'").get()) return false;
+  return !!db.prepare("SELECT 1 FROM one_supervisor_conversations WHERE chat_id = ?").get(chatId);
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -715,6 +729,11 @@ export function createOneTaskProjectionRuntime(
       return rows.slice(0, listLimit(request.limit)).flatMap((value) => {
         const task = canonicalTask(value);
         if (!task) return [];
+        // The personal One's own conversation is not a One home session (owner 2026-10-16, the rule listRecentOneChats
+        // applies): its task stays off the One list, decided by the binding row only. Opening it by id
+        // (getProjection), the phone ("mobile") and Work ("work") keep it.
+        if (request.surface === "one" && task.originChatId
+          && safeRead(() => listSources.personalOneConversation(task.originChatId as string)) === true) return [];
         const projection = projectionFor(task.id, {
           surface: request.surface,
           ...(request.mode ? { mode: request.mode } : {}),
