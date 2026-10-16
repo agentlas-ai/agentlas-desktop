@@ -4,6 +4,7 @@
 // System Optimizer)만 호출해 방법 전환이 정의상 불가능했다.
 // 이 모듈은 순수(스토어 읽기 전용)이며 러너 결과에 영향을 주는 실패는 던지지 않는다.
 import { countConsecutiveFailures, listRunHistory } from "./store/automations";
+import { maskPrivateKeyBlocks } from "../shared/secret-patterns";
 
 export interface AutomationFailureContext {
   /** 직전 실행부터 끊기지 않고 이어진 error 런 수. 0이면 지시문 없음. */
@@ -35,7 +36,8 @@ const URL_REDACT_RE = /https?:\/\/([^\s/?#]+)[^\s]*/gi;
  * 소지가 있는 서식은 이미 제거된 상태로만 호출부에 노출한다.
  */
 export function normalizeFailureText(raw: string): string {
-  return raw
+  // A private key is masked with its body (shared rule), not only its "BEGIN … PRIVATE KEY" words.
+  return maskPrivateKeyBlocks(raw, "[redacted]")
     .replace(/\s+/g, " ")
     .replace(SECRET_REDACT_RE, "[redacted]")
     .replace(URL_REDACT_RE, (_m, host: string) => `<url:${host}>`)

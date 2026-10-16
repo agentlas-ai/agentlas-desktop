@@ -53,11 +53,37 @@ export function looksSecret(content: string): boolean {
   return SECRET_PATTERNS.some((re) => re.test(content));
 }
 
+/*
+ * Private-key blocks: ONE rule for every masking boundary (owner decision 2026-10-16, option B, "비밀키 안가려도됨":
+ * do not over-mask the text around a key; this is not "stop masking keys").
+ *   - A complete block (BEGIN header … END line) is masked whole, END line included. It never spans into another
+ *     block's BEGIN, so prose between an unterminated header and a later block stays.
+ *   - An unterminated header is masked with the body that follows it, and the mask stops at the first token that is
+ *     not body. Body tokens: base64 runs of 16+ characters holding a digit, "+" or "/" (a wrapped PEM line), shorter
+ *     "="-padded runs (a last line), and the RFC 1421 Proc-Type / DEK-Info lines of a legacy encrypted key. Tokens are
+ *     separated by whitespace, CRLF or LF, or the escaped \n / \r of a JSON string. Prose words carry no digit, so a
+ *     sentence after a truncated key stays readable.
+ *   - Accepted by that decision: a truncated key may expose a short trailing fragment (an unpadded last line under 16
+ *     characters, or one with no digit, "+" or "/").
+ * Terminal keeps its own copy (agentlas_terminal engine/agentlas-secret-patterns.cjs); the owner is retiring it.
+ */
+const PRIVATE_KEY_HEADER = "-----BEGIN [A-Z ]*PRIVATE KEY-----";
+const PRIVATE_KEY_COMPLETE_RE = new RegExp(`${PRIVATE_KEY_HEADER}(?:(?!-----BEGIN )[\\s\\S])*?-----END [A-Z ]*PRIVATE KEY-----`, "gi");
+const PRIVATE_KEY_BODY_SEPARATOR = String.raw`(?:[ \t\r\n]|\\[rn])+`;
+const PRIVATE_KEY_BODY_TOKEN = String.raw`(?:(?=[A-Za-z0-9+/]*[0-9+/])[A-Za-z0-9+/]{16,}={0,2}|[A-Za-z0-9+/]{2,}={1,2}|(?:Proc-Type|DEK-Info):[ \t]*[A-Za-z0-9,-]+)(?![A-Za-z0-9+/=._:@-])`;
+const PRIVATE_KEY_UNTERMINATED_RE = new RegExp(`${PRIVATE_KEY_HEADER}(?:${PRIVATE_KEY_BODY_SEPARATOR}${PRIVATE_KEY_BODY_TOKEN})*`, "gi");
+
+/** Mask private-key blocks by the one bounded rule above, keeping every character around them. */
+export function maskPrivateKeyBlocks(content: string, marker = "[redacted-secret]"): string {
+  if (!/-----BEGIN [A-Z ]*PRIVATE KEY-----/i.test(content)) return content;
+  return content.replace(PRIVATE_KEY_COMPLETE_RE, marker).replace(PRIVATE_KEY_UNTERMINATED_RE, marker);
+}
+
 /** Replace credential-shaped substrings with a marker, preserving the surrounding text.
  *  Use where dropping the whole payload would lose more than it protects. */
 export function redactSecrets(content: string, marker = "[redacted-secret]"): string {
-  // Redacting only the header leaves the multiline key material visible.
-  let out = content.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/gi, marker);
+  // A whole key block, or a truncated one with its body; never the header alone, never the text after it.
+  let out = maskPrivateKeyBlocks(content, marker);
   for (const re of SECRET_PATTERNS) {
     out = out.replace(new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`), marker);
   }

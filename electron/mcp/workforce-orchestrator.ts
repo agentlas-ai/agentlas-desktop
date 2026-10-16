@@ -10,6 +10,7 @@ import { listInstalledServers } from "../mcp-tools/registry";
 import workforceProtocolContract from "../mcp-tools/workforce-protocol-contract.json";
 import workOrderBoundaryContract from "../mcp-tools/workforce-work-order-boundary.json";
 import type { BorrowedAgentSpec } from "./borrowed-task-force";
+import { maskPrivateKeyBlocks } from "../../shared/secret-patterns";
 
 const WORK_ORDER_SCHEMA = "agentlas.workforce-work-order.v1";
 const CANDIDATE_SET_SCHEMA = workforceProtocolContract.protocolMetadata.candidateSetSchemaVersion;
@@ -3329,11 +3330,10 @@ function sanitizeSchemaValidationError(error: unknown): string {
 }
 
 function redactLeaderDecisionText(text: string): string {
-  return text
+  return maskPrivateKeyBlocks(text, "[redacted-private-key]")
     .replace(/\/(?:Users|home|root|Volumes|private|tmp|var\/folders|workspace|mnt)\/[^\s,;)}\]]+/gi, "[redacted-path]")
     .replace(/(?:file:\/\/|~[/\\]|\\\\)[^\s,;)}\]]+/gi, "[redacted-path]")
     .replace(/[A-Za-z]:\\(?:Users|Documents and Settings)\\[^\s,;)}\]]+/gi, "[redacted-path]")
-    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gi, "[redacted-private-key]")
     .replace(/\bAKIA[0-9A-Z]{16}\b/g, "[redacted-secret]")
     .replace(/\b(?:sk|rk|pk|xox[baprs]|gh[pousr]|glpat|npm_)[-_A-Za-z0-9=]{8,}\b/g, "[redacted-secret]")
     .replace(/\bBearer\s+[A-Za-z0-9._~-]{12,}/gi, "[redacted-secret]")

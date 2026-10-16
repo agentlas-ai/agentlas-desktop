@@ -138,6 +138,7 @@ import {
   recordBorrowedAgentCareer,
 } from "../agents/borrowed-profiles";
 import { parseWholeOrTrailingTypedJson } from "../../shared/typed-json-tail";
+import { maskPrivateKeyBlocks } from "../../shared/secret-patterns";
 import { linkAbort } from "../runtime/linked-abort";
 import os from "node:os";
 import path from "node:path";
@@ -1685,8 +1686,7 @@ function taskForceSessionId(p: BorrowedTaskForceParams, suffix: string): string 
 }
 
 export function redactSensitiveText(text: string): string {
-  return text
-    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[redacted-private-key]")
+  return maskPrivateKeyBlocks(text, "[redacted-private-key]")
     .replace(/\bAKIA[0-9A-Z]{16}\b/g, "[redacted-secret]")
     .replace(/\b(?:sk|rk|pk|xox[baprs]|gh[pousr])-[A-Za-z0-9_=-]{16,}\b/g, "[redacted-secret]")
     .replace(

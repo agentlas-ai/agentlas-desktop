@@ -3,8 +3,10 @@ import { Buffer } from "node:buffer";
 import { stripAgentControlBlocks } from "../../shared/agent-control-blocks";
 import { flattenAskFences } from "../../shared/ask-fence-flatten";
 import { MOBILE_BRIDGE_MAX_MESSAGE_BYTES } from "../../shared/mobile-bridge";
+import { maskPrivateKeyBlocks } from "../../shared/secret-patterns";
 
-const SECRET_RE = /(?:-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|\bAIza[0-9A-Za-z_-]{35}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b|\b(?:sk|rk|pk|xox[baprs]|gh[pousr])[-_][A-Za-z0-9_=-]{12,}\b|\b(?:api[_-]?key|token|secret|password|passwd|pwd|cookie|session|authorization)\b\s*[:=]\s*["']?[^,\s"'}`\]]{4,}|\bBearer\s+[A-Za-z0-9._~+\/-]{8,})/gi;
+// Private-key blocks go through the one shared rule (maskPrivateKeyBlocks): a truncated key is masked with its body too.
+const SECRET_RE = /(?:\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|\bAIza[0-9A-Za-z_-]{35}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b|\b(?:sk|rk|pk|xox[baprs]|gh[pousr])[-_][A-Za-z0-9_=-]{12,}\b|\b(?:api[_-]?key|token|secret|password|passwd|pwd|cookie|session|authorization)\b\s*[:=]\s*["']?[^,\s"'}`\]]{4,}|\bBearer\s+[A-Za-z0-9._~+\/-]{8,})/gi;
 const POSIX_ROOT = "(?:Applications|System|Users|home|private|var|tmp|Volumes|opt|etc|usr|Library|root|mnt|media|srv|run|proc|sys|dev|bin|sbin|workspace|workspaces|app|data)";
 const POSIX_ABSOLUTE_PATH_RE = new RegExp(
   "(?:file:\\/\\/)?\\/" + POSIX_ROOT + "(?:\\/[^\\/,\\r\\n\"'`<>|}\\]]+)*\\/[^\\s\\/,\\r\\n\"'`<>|}\\]]+\\/?",
@@ -104,8 +106,8 @@ export function stripMobileBridgeControlFences(value: string, locale: "ko" | "en
  * local absolute paths, and in-memory attachment data URLs never cross.
  */
 export function sanitizeMobileBridgeText(value: string, maxBytes: number): string {
-  const safe = repairMobileBridgeUtf16(value)
-    .replace(DATA_URL_RE, "[redacted-data-url]")
+  const safe = maskPrivateKeyBlocks(repairMobileBridgeUtf16(value)
+    .replace(DATA_URL_RE, "[redacted-data-url]"), "[redacted-secret]")
     .replace(SECRET_RE, "[redacted-secret]")
     .replace(POSIX_ABSOLUTE_PATH_RE, "[local-path]")
     .replace(POSIX_ROOT_PATH_RE, "[local-path]")
