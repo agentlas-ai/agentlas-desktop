@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.50 — 2026-10-16
+
+- New messages keep starting after the app briefly loses its link to the background service; before, nothing could start until you restarted Agentlas.
+- Agentlas Light keeps going when the model names a tool used earlier in the conversation (for example after you switch a chat from Codex to Light); before, the reply was thrown away and the turn failed.
+- A brief hiccup while starting a team no longer replaces your message with a recovery reply, and turns Agentlas starts on its own stay within the permission shown on the chip.
+- A follow-up question no longer gets "nothing left to do" when the previous turn's connection dropped before it started; the question itself is answered.
+- Memory organizing in the background works again, and a pass that fails says why.
+- Agentlas finds its background service when its data folder is reached through a link.
+- This release binds Agentlas OS v1.2.65 at 8b303608eea746e7ea8d7560890816784bdaa86c; public runtime asset `hephaestus-runtime-v1.2.65.tar.gz` is pinned at SHA-256 `7dae16f12a78515dfa7adbc732197e26aa06a2cd413452e81b2675450caba7de`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.49 — 2026-10-16
 
 - The model you pick for a team room now runs the whole room: its teammates and the turns Agentlas starts on its own (continuing a Goal, recovering, reporting) use that model and its effort, instead of quietly falling back to the default worker list. If that model can't run right now, you're told why instead of getting a different one.
