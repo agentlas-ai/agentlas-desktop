@@ -110,30 +110,52 @@ function getWorkspaceRoot(cwd: string): string {
   return root;
 }
 
-function validateRelativePath(input: unknown): string {
+/** The nearest existing ancestor resolved through symlinks, with the missing tail re-appended. */
+function realPrefixPath(target: string): string {
+  const tail: string[] = [];
+  let cursor = target;
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync(cursor), ...tail);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+      const parent = path.dirname(cursor);
+      if (parent === cursor) return target;
+      tail.unshift(path.basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
+function validateRelativePath(root: string, input: unknown): string {
   if (typeof input !== "string" || input.length === 0 || input.includes("\0")) {
     pathDenied("path must be a non-empty string");
-  }
-  // 두 방언 모두 검사한다. Windows 절대/UNC 경로는 POSIX 호스트에서 준비·테스트되더라도
-  // 여전히 무효여야 한다(그 반대도 마찬가지).
-  if (
-    path.isAbsolute(input) ||
-    path.posix.isAbsolute(input) ||
-    path.win32.isAbsolute(input) ||
-    /^[A-Za-z]:/.test(input)
-  ) {
-    pathDenied("absolute paths are not allowed");
   }
   // path.resolve()가 정규화해 없애기 **전에** traversal을 거부한다. 지금 바깥으로
   // 나가는 것만이 아니라 `safe/../file` 자체를 거부하는 것이 의도다.
   if (input.split(/[\\/]+/u).some((segment) => segment === "..")) {
     pathDenied("parent traversal is not allowed");
   }
+  // Production 2026-10-16 (A/B, Haiku room): teammates named files by the absolute folder the owner gave and got
+  // "absolute paths are not allowed" 14 times, one wasted round trip each, while CLI lanes accept the same path.
+  // An absolute path of this host's dialect is accepted when it lies inside the working folder (also through a
+  // symlinked prefix such as /tmp → /private/tmp); the containment and symlink checks below still apply.
+  if (path.isAbsolute(input)) {
+    const lexical = path.resolve(input);
+    const inside = contained(root, lexical) ? lexical : realPrefixPath(lexical);
+    if (!contained(root, inside)) pathDenied("absolute path is outside the working folder; use a path relative to it");
+    return path.relative(root, inside) || ".";
+  }
+  // 두 방언 모두 검사한다. 다른 방언의 Windows 절대/UNC 경로(POSIX 호스트) 또는 POSIX 절대
+  // 경로(Windows 호스트)는 여전히 무효다.
+  if (path.posix.isAbsolute(input) || path.win32.isAbsolute(input) || /^[A-Za-z]:/.test(input)) {
+    pathDenied("absolute paths are not allowed");
+  }
   return input;
 }
 
 function lexicalPath(root: string, input: unknown): string {
-  const candidate = path.resolve(root, validateRelativePath(input));
+  const candidate = path.resolve(root, validateRelativePath(root, input));
   if (!contained(root, candidate)) pathDenied("path leaves the working folder");
   return candidate;
 }
