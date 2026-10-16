@@ -11,8 +11,8 @@
 //
 // So a product run gets a mirror of the real home in which every entry is a symlink to the original
 // — sign-in (Codex writes auth.json in place, following the link), plugins, hooks and skills stay one and the
-// same — except the two instruction files, which are simply absent, config.toml, which is the person's config
-// without their shell environment (productCodexConfig), and the session store. Product sessions are Agentlas's own
+// same — except the two instruction files and the person's command rules (rules/), which are simply absent, config.toml, which is the mirror's own file holding
+// only the allowlisted sign-in, provider and model-default keys of the person's (productCodexConfig), and the session store. Product sessions are Agentlas's own
 // (owner 2026-10-12: "agentlas 세션은 개인 세션과 분리"): the mirrors share one product store for rollouts
 // (codex-product-home/store), and the thread index, logs, prompt history and Codex app state are each mirror's own,
 // so nothing an agent runs appears in the person's Codex app. A thread an older install wrote into the person's home
@@ -40,6 +40,15 @@ import { userDataPath } from "../runtime-paths";
 
 /** Read by Codex as global user instructions; never mirrored. */
 export const CODEX_PERSONAL_INSTRUCTION_FILES: ReadonlySet<string> = new Set(["AGENTS.md", "AGENTS.override.md"]);
+/**
+ * The person's command rules ($CODEX_HOME/rules/*.rules); never mirrored, for One neither. Codex auto-approves a command
+ * an `allow` rule matches and lists every approved prefix in the model's instructions whenever approval is on-request,
+ * which is the policy of every product read/write turn. Measured 2026-10-17 (codex-cli 0.163.0, `codex debug
+ * prompt-input`): through the mirror the owner's 13 rules (`railway up`, `flutter build`, ...) were the only
+ * model-visible difference from a home holding nothing but the sign-in. Agentlas decides approvals for product runs; a
+ * prefix a product turn approves stays in the mirror's own rules folder instead of being written into the person's.
+ */
+const CODEX_PERSONAL_RULES_DIR = "rules";
 /** The person's Codex memory stores, skills and hooks; mirrored only for One, and only what it switched on. */
 export function isCodexPersonalContextEntry(name: string): boolean {
   return name === "skills" || name === "skills_archive" || name === "hooks" || name === "hooks.json" || name === "memories_extensions"
@@ -67,8 +76,8 @@ export interface CodexProductHomeOptions {
 
 /** Entries a product run's mirror must not link: personal instruction files, and personal context unless One chose it. */
 function mirrorExcludes(name: string, personal: CodexProductHomeOptions["personal"]): boolean {
-  // config.toml is the mirror's own copy without the person's shell environment (productCodexConfig).
-  if (CODEX_PERSONAL_INSTRUCTION_FILES.has(name) || name === "skills_archive" || name === "config.toml") return true;
+  // config.toml is the mirror's own file: the allowlisted keys of the person's (productCodexConfig).
+  if (CODEX_PERSONAL_INSTRUCTION_FILES.has(name) || name === "skills_archive" || name === "config.toml" || name === CODEX_PERSONAL_RULES_DIR) return true;
   if (!isCodexPersonalContextEntry(name)) return false;
   if (name === "skills") return !personal?.skills;
   if (name === "hooks.json") return true; // never linked: One gets its own cut-down copy
@@ -97,32 +106,221 @@ function productStoreFor(mirrorRoot: string): string {
 }
 
 /**
- * The person's config.toml without `[shell_environment_policy]`. Its `set` table holds values the person exports to their
- * own Codex shells (database URIs, store credentials, cloud key files), and Codex applies `set` after every exclude, so no
- * `-c` override can take them back out. Measured 2026-10-12 through the linked config: a product run's shell had
- * MONGODB_URI and GOOGLE_APPLICATION_CREDENTIALS from it although neither Main nor the run environment held them (owner
- * decision 2026-10-11: personal context stays out of product runs). Agentlas decides what a product shell receives
- * (env-key-reach.ts). Everything else (model, providers, MCP servers, profiles) is kept as written.
+ * The only parts of the person's config.toml a product run gets: what it takes to reach the account's model the way the
+ * person's own Codex does. An ALLOWLIST (owner 2026-10-06/10-11: the person's settings never drive product agents). The
+ * mirror used to copy the whole file minus `[shell_environment_policy]`, so every table a Codex release or the ChatGPT
+ * app adds reached product agents until someone noticed (2026-10-17, owner's config through the mirror: `[features]`
+ * chronicle/multi_agent, 28 `[plugins]` incl. OAuth ones (canva, github, notion), 10 `[mcp_servers]`, `notify` (the
+ * ChatGPT app's computer-use client, run after every product turn), `[hooks.state]` trust for personal and plugin hooks,
+ * 672 trusted `[projects]` (Codex loads a project's `.codex/config.toml` layer only for a trusted folder), personal
+ * `approval_policy`/`sandbox_mode`, and the `set` table of `[shell_environment_policy]`, whose values Codex applies after
+ * every exclude: MONGODB_URI and GOOGLE_APPLICATION_CREDENTIALS in a product shell, 2026-10-12).
+ *
+ * Kept, each for one reason:
+ *   - sign-in and provider plumbing (without it a custom, enterprise or gateway account cannot authenticate):
+ *     `model_provider` (which provider requests go to), `model_providers` (those providers' base URL, wire API, auth
+ *     env-var names and headers), `openai_base_url` (the built-in OpenAI provider's endpoint override),
+ *     `chatgpt_base_url` (the ChatGPT backend Codex signs in and refreshes tokens against), `forced_login_method` and
+ *     `forced_chatgpt_workspace_id` (the sign-in and workspace the account is pinned to), `cli_auth_credentials_store`
+ *     (where the sign-in lives; a keyring-only home gets no mirror at all);
+ *   - the model default the app falls back to only when it passes no `--model` / effort of its own (codex.ts, "앱이
+ *     모델을 갖고 있으면 그 모델이 반드시 이긴다"; cli-default-model.ts shows that same `model` as the run's model):
+ *     `model`, `model_reasoning_effort`.
+ * A selected `profile` is resolved here: its values for the keys above replace the root ones (Codex applies a profile over
+ * the root), and nothing else of any profile is carried.
+ * Everything else is left out by construction, including `features`, `plugins`, `marketplaces`, `mcp_servers`,
+ * `skills`, `hooks`, `projects`, `notify`, `approval_policy`, `sandbox_mode`, `shell_environment_policy`, instruction
+ * keys (`developer_instructions`, `model_instructions_file`, `experimental_*`), `service_tier`, `personality`,
+ * `history`/`sqlite_home`/`log_dir`, `model_catalog_json` (read at start-up, and a relative path would resolve against
+ * the mirror: a catalog path that does not exist stops Codex before the first turn, codex-cli 0.163.0) and the app's UI
+ * tables. Agentlas sets what a product run needs per run (permission,
+ * features, skills, its own MCP servers, the shell environment: codex.ts, codex-personal-context.ts, env-key-reach.ts).
+ * A file this cannot read as TOML yields an empty config: a product run then uses Codex's defaults, never the file.
  */
+export const PRODUCT_CODEX_CONFIG_KEYS: ReadonlySet<string> = new Set([
+  "model_provider", "openai_base_url", "chatgpt_base_url", "forced_login_method", "forced_chatgpt_workspace_id",
+  "cli_auth_credentials_store", "model", "model_reasoning_effort",
+]);
+/** Tables kept whole (every key under them). */
+export const PRODUCT_CODEX_CONFIG_TABLES: ReadonlySet<string> = new Set(["model_providers"]);
+
 export function productCodexConfig(text: string): string {
-  const out: string[] = [];
-  let atRoot = true;
-  let skipping = false;
-  for (const line of text.split(/\r?\n/)) {
-    const header = /^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(?:#.*)?$/.exec(line);
-    if (header) {
-      atRoot = false;
-      skipping = /^shell_environment_policy(?:\.|$)/.test(header[1].replace(/["'\s]/g, ""));
-      if (skipping) continue;
-    } else if (skipping || (atRoot && /^\s*["']?shell_environment_policy["']?\s*[.=]/.test(line))) {
-      continue;
-    }
-    out.push(line);
+  let statements: TomlStatement[];
+  try { statements = scanTomlStatements(text); } catch { return ""; }
+  const root = new Map<string, string>(); // key -> raw value, in first-seen order
+  const tables: string[] = [];
+  let profile: string | null = null;
+  for (const s of statements) {
+    if (s.path.length === 1 && s.path[0] === "profile") profile = tomlStringValue(s.value);
   }
-  return out.join("\n");
+  const lifted = new Map<string, string>();
+  for (const s of statements) {
+    const [head] = s.path;
+    if (s.path.length === 1 && PRODUCT_CODEX_CONFIG_KEYS.has(head)) root.set(head, s.value);
+    else if (PRODUCT_CODEX_CONFIG_TABLES.has(head) && !s.inArrayTable) tables.push(`${s.path.map(tomlKey).join(".")} = ${s.value}`);
+    else if (profile !== null && s.path.length === 3 && head === "profiles" && s.path[1] === profile && PRODUCT_CODEX_CONFIG_KEYS.has(s.path[2])) {
+      lifted.set(s.path[2], s.value);
+    }
+  }
+  for (const [key, value] of lifted) root.set(key, value);
+  const lines = [...[...root].map(([key, value]) => `${tomlKey(key)} = ${value}`), ...tables];
+  return lines.length > 0 ? `${lines.join("\n")}\n` : "";
 }
 
-/** Writes the mirror's config.toml from the person's, only when it changed (Codex may be reading it). */
+interface TomlStatement {
+  /** Full key path: the enclosing table's path plus the statement's own (dotted) key. */
+  path: string[];
+  /** The value's source text, exactly as written (strings, arrays and inline tables may span lines). */
+  value: string;
+  /** Under an `[[array.of.tables]]` header: its keys cannot be written back as dotted root keys. */
+  inArrayTable: boolean;
+}
+
+function tomlKey(segment: string): string {
+  return /^[A-Za-z0-9_-]+$/.test(segment) ? segment : JSON.stringify(segment);
+}
+
+/** A TOML basic or literal single-line string value, decoded; null for anything else. */
+function tomlStringValue(value: string): string | null {
+  const v = value.trim();
+  if (/^'[^'\n]*'$/.test(v)) return v.slice(1, -1);
+  if (/^"(?:[^"\\\n]|\\.)*"$/.test(v)) { try { return JSON.parse(v) as string; } catch { return null; } }
+  return null;
+}
+
+/**
+ * Key/value statements of a TOML document with their full key paths and raw value text. Enough of TOML 1.0 to find
+ * statement boundaries exactly (comments, the four string forms, nested arrays and inline tables across lines, quoted
+ * and dotted keys, table and array-of-table headers); values are never interpreted. Throws on what it cannot follow.
+ */
+function scanTomlStatements(text: string): TomlStatement[] {
+  const src = text.replace(/\r\n/g, "\n");
+  const out: TomlStatement[] = [];
+  let i = 0;
+  let table: string[] = [];
+  let inArrayTable = false;
+  const n = src.length;
+  const skipSpace = (): void => { while (i < n && (src[i] === " " || src[i] === "\t")) i += 1; };
+  const skipComment = (): void => { if (src[i] === "#") while (i < n && src[i] !== "\n") i += 1; };
+  const endOfLine = (): void => {
+    skipSpace(); skipComment();
+    if (i < n && src[i] !== "\n") throw new Error(`toml: unexpected text at ${i}`);
+    i += 1;
+  };
+  const readKeySegment = (): string => {
+    skipSpace();
+    const c = src[i];
+    if (c === '"') {
+      let j = i + 1;
+      while (j < n && src[j] !== '"') { if (src[j] === "\\") j += 1; if (src[j] === "\n") throw new Error("toml: newline in key"); j += 1; }
+      if (j >= n) throw new Error("toml: unterminated key");
+      const raw = src.slice(i, j + 1);
+      i = j + 1;
+      return JSON.parse(raw.replace(/\\U([0-9A-Fa-f]{8})/g, (_m, hex: string) => String.fromCodePoint(parseInt(hex, 16)).replace(/[\\"]/g, (ch) => `\\${ch}`))) as string;
+    }
+    if (c === "'") {
+      const j = src.indexOf("'", i + 1);
+      if (j < 0 || src.slice(i + 1, j).includes("\n")) throw new Error("toml: unterminated key");
+      const raw = src.slice(i + 1, j);
+      i = j + 1;
+      return raw;
+    }
+    const m = /^[A-Za-z0-9_-]+/.exec(src.slice(i, i + 256));
+    if (!m) throw new Error(`toml: bad key at ${i}`);
+    i += m[0].length;
+    return m[0];
+  };
+  const readKey = (): string[] => {
+    const parts = [readKeySegment()];
+    for (;;) {
+      skipSpace();
+      if (src[i] !== ".") return parts;
+      i += 1;
+      parts.push(readKeySegment());
+    }
+  };
+  /** Scans one value from `i`; returns its source text. Stops before the comment/newline that ends the statement. */
+  const readValue = (): string => {
+    const start = i;
+    let depth = 0;
+    while (i < n) {
+      const c = src[i];
+      if (c === '"' || c === "'") {
+        const triple = src.startsWith(c.repeat(3), i);
+        if (triple) {
+          let j = i + 3;
+          for (;;) {
+            const k = src.indexOf(c.repeat(3), j);
+            if (k < 0) throw new Error("toml: unterminated multi-line string");
+            if (c === '"') {
+              let backslashes = 0;
+              for (let b = k - 1; b >= i + 3 && src[b] === "\\"; b -= 1) backslashes += 1;
+              if (backslashes % 2 === 1) { j = k + 1; continue; }
+            }
+            i = k + 3;
+            while (src[i] === c) i += 1; // up to two quotes may close the content
+            break;
+          }
+        } else {
+          let j = i + 1;
+          while (j < n && src[j] !== c) {
+            if (src[j] === "\n") throw new Error("toml: newline in string");
+            if (c === '"' && src[j] === "\\") j += 1;
+            j += 1;
+          }
+          if (j >= n) throw new Error("toml: unterminated string");
+          i = j + 1;
+        }
+        continue;
+      }
+      if (c === "[" || c === "{") { depth += 1; i += 1; continue; }
+      if (c === "]" || c === "}") { depth -= 1; if (depth < 0) throw new Error("toml: unbalanced bracket"); i += 1; continue; }
+      if (c === "#") {
+        if (depth === 0) break;
+        while (i < n && src[i] !== "\n") i += 1;
+        continue;
+      }
+      if (c === "\n" && depth === 0) break;
+      i += 1;
+    }
+    if (depth !== 0) throw new Error("toml: unterminated array or inline table");
+    const value = src.slice(start, i).trim();
+    if (!value) throw new Error("toml: empty value");
+    return value;
+  };
+  while (i < n) {
+    skipSpace();
+    if (i >= n) break;
+    const c = src[i];
+    if (c === "\n") { i += 1; continue; }
+    if (c === "#") { skipComment(); continue; }
+    if (c === "[") {
+      const array = src[i + 1] === "[";
+      i += array ? 2 : 1;
+      table = readKey();
+      skipSpace();
+      if (!src.startsWith(array ? "]]" : "]", i)) throw new Error("toml: bad table header");
+      i += array ? 2 : 1;
+      inArrayTable = array;
+      endOfLine();
+      continue;
+    }
+    const key = readKey();
+    skipSpace();
+    if (src[i] !== "=") throw new Error(`toml: expected = at ${i}`);
+    i += 1;
+    skipSpace();
+    const value = readValue();
+    out.push({ path: [...table, ...key], value, inArrayTable });
+    endOfLine();
+  }
+  return out;
+}
+
+/**
+ * Writes the mirror's config.toml from the person's, only when it changed (Codex may be reading it). A mirror an older
+ * install filled with the whole copied config is rewritten to the allowlisted one on its next sync, the same way.
+ */
 function writeProductConfig(realHome: string, home: string, isolated = false): void {
   const at = path.join(home, "config.toml");
   let source: string | null = null;
@@ -259,6 +457,22 @@ export function accountCodexHome(home: string | undefined): string | undefined {
     const at = path.resolve(home);
     return at === mirrorPathFor(realHome) || at === mirrorPathFor(realHome, undefined, true)
       || at === mirrorPathFor(realHome, undefined, false, true) ? realHome : home;
+  } catch {
+    return home;
+  }
+}
+
+/**
+ * The home whose config a product run started from `home` actually reads, for readers that decide before the run starts
+ * (codex-desktop-surface.ts codexUserConfigOutsideBrowser): the product mirror once it holds the person's sign-in, else
+ * `home` itself (a home Main chose, a keyring sign-in, no mirror made yet). Every mirror's config is the allowlisted one.
+ */
+export function codexProductRunHome(home: string): string {
+  try {
+    const realHome = realCodexHome(process.env);
+    if (path.resolve(home) !== realHome) return home;
+    const mirror = mirrorPathFor(realHome);
+    return isLink(path.join(mirror, "auth.json")) && !keyringOnly(realHome) ? mirror : home;
   } catch {
     return home;
   }

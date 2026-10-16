@@ -16,7 +16,9 @@
 //   - MCP servers declared in the person's config.toml start late and add their tool schemas to every request
 //     from the second one on (measured +20,794 tokens). Closed with `-c mcp_servers.<name>.enabled=false`, except
 //     what the run itself bound (host), the Agentlas browser, user browser-automation servers (kept as the
-//     fallback by codex-desktop-surface.ts) and, on a Computer Use grant, the desktop-control servers.
+//     fallback by codex-desktop-surface.ts) and, on a Computer Use grant, the desktop-control servers. A product mirror's
+//     config declares no server of the person's (codex-product-home.ts allowlist), so this closes something only where
+//     a run keeps the person's own home (keyring sign-in, no links).
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -25,6 +27,7 @@ import {
   declaredAgentlasBrowserServers,
   declaredBrowserAutomationServers,
   declaredDesktopControlServers,
+  declaredUserMcpServers,
 } from "./codex-desktop-surface";
 import { realCodexHome, type CodexProductHomeOptions } from "./codex-product-home";
 import { skillFilesUnder, type CapabilityItem, type CapabilitySelection } from "../capabilities/one-capabilities";
@@ -132,15 +135,20 @@ export function codexPersonalContextArgs(input: CodexPersonalContextInput = {}):
   if (!pluginsOn) args.push("-c", "features.plugins=false");
   else for (const id of plugins) args.push("-c", `plugins.${id}.enabled=false`);
 
-  // Connectors: switched-off servers, except what the run binds itself or keeps as a documented fallback.
+  // Connectors: switched-off servers, except what the run binds itself or keeps as a documented fallback. Only a server
+  // the config this run reads actually declares can be closed: `-c mcp_servers.<name>.enabled=false` for any other name
+  // is a transport-less server and Codex refuses to start ("invalid transport", codex-cli 0.163.0). The inventory lists
+  // the person's own servers, and a product mirror's config declares none of them (codex-product-home.ts allowlist).
   const closed: string[] = [];
   if (!input.userConfigIgnored) {
     const keep = new Set(input.hostServerNames ?? []);
+    const declared = new Set<string>();
     for (const text of codexUserConfigTexts({ env, cwd })) {
       for (const name of [...declaredAgentlasBrowserServers(text), ...declaredBrowserAutomationServers(text), ...(input.desktopControlGrant ? declaredDesktopControlServers(text) : [])]) keep.add(name);
+      for (const name of declaredUserMcpServers(text)) declared.add(name);
     }
     for (const item of codexItems(selection, "connector")) {
-      if (!item.enabled && /^[A-Za-z0-9_-]+$/.test(item.name) && !keep.has(item.name)) closed.push(item.name);
+      if (!item.enabled && /^[A-Za-z0-9_-]+$/.test(item.name) && !keep.has(item.name) && declared.has(item.name)) closed.push(item.name);
     }
   }
   const servers = [...new Set(closed)].sort();

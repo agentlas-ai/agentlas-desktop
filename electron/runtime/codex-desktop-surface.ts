@@ -266,7 +266,11 @@ function enabledPluginShipsAgentlasBrowser(codexHome: string, texts: readonly st
  * browser instead, which then closes the outside one (`hostBound`).
  */
 export function codexUserConfigOutsideBrowser(input: { env?: NodeJS.ProcessEnv; cwd?: string }): boolean {
-  const home = codexHomeFor(input);
+  // Asked before the run starts, about the config the run will read: a product run started from the person's own home
+  // runs from the product mirror, whose config carries none of the person's servers or plugins (codex-product-home.ts).
+  // Required here, not at the top: codexDesktopSurfaceArgs stays a module with no file-system dependencies of its own.
+  const { codexProductRunHome } = require("./codex-product-home") as typeof import("./codex-product-home");
+  const home = codexProductRunHome(codexHomeFor(input));
   const texts = readUserConfigTexts(home);
   if (texts.length === 0) return false;
   if (readUserConfigServers(texts, declaredAgentlasBrowserServers).length > 0) return false;
