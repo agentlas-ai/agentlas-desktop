@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.3.54 — 2026-10-17
+
+- A teammate that stops mid-reply no longer throws away the room's finished work; the room continues once and reports what the team did.
+- A teammate stuck repeating itself is stopped and asked once for a short report, instead of running on for an hour and ending the room's run.
+- Your first message in a room survives a reload or restart and is sent exactly once, and a room no longer stays locked after a reload.
+- When an automation's check fails, it redoes the checked step or stops once with the reason, instead of re-checking the same result again and again.
+- An access card nobody answered is recorded as expired, not as your refusal, and no longer blocks later cards.
+- Antigravity steps return structured results and run their browser work in the step's own folder.
+- Private keys in logs and results are masked with their full body and nothing else around them.
+- The personal One no longer shows up in the session list.
+- A busy local store, an overloaded local model, and a connector key stored for one connection are each handled where they occur instead of failing the turn.
+- This release binds Agentlas OS v1.2.65 at 8b303608eea746e7ea8d7560890816784bdaa86c; public runtime asset `hephaestus-runtime-v1.2.65.tar.gz` is pinned at SHA-256 `7dae16f12a78515dfa7adbc732197e26aa06a2cd413452e81b2675450caba7de`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.53 — 2026-10-16
 
 - Usage figures follow a sign-in you make outside Agentlas (in a terminal or the vendor's own app) within 30 seconds; before, the previous account's figures stayed until a usage screen was opened.
