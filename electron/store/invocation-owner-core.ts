@@ -80,11 +80,23 @@ export function createInvocationRunOwnerStore(ports: InvocationRunOwnerStorePort
       .all() as OwnerRow[]).map(row => owner(row)!);
   }
 
-  function claim(input: Pick<InvocationRunOwner, "chatId" | "runId" | "ownerId" | "ownerKind">):
+  function claim(input: Pick<InvocationRunOwner, "chatId" | "runId" | "ownerId" | "ownerKind"> & { reopenReleased?: boolean }):
     { kind: "claimed" | "busy"; owner: InvocationRunOwner } {
     validate(input);
     return ports.getDb().transaction(() => {
       const prior = getOwnerByRunId(input.runId);
+      // A graph run invokes its agent nodes one after another under one run id, often on the same chat. The process that
+      // released the run's lease may open it again for the next node, with a new lease id, so whoever still holds the old
+      // lease stays refused. Without this, every second node on a chat failed with invocation_chat_owned_by_other_run
+      // (production 2026-10-15..16: the daily YouTube graph, step2, right after step1 released).
+      if (prior && input.reopenReleased && prior.state === "released" && prior.chatId === input.chatId
+        && prior.ownerId === input.ownerId && prior.ownerKind === input.ownerKind) {
+        const active = getActiveOwner(input.chatId);
+        if (active) return { kind: "busy" as const, owner: active };
+        const reopened = ports.getDb().prepare(`UPDATE invocation_run_owners SET state = 'active', lease_id = ?, updated_at = ?
+          WHERE run_id = ? AND lease_id = ? AND state = 'released'`).run(randomUUID(), now(), prior.runId, prior.leaseId);
+        if (reopened.changes === 1) return { kind: "claimed" as const, owner: getRunOwner(input.chatId, input.runId)! };
+      }
       if (prior) return { kind: prior.chatId === input.chatId && prior.ownerId === input.ownerId
         && prior.ownerKind === input.ownerKind && prior.state === "active" ? "claimed" as const : "busy" as const,
       owner: prior };

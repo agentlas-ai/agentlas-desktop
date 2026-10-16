@@ -22,9 +22,11 @@ export function invocationProcessOwner(): { ownerId: string; ownerKind: Invocati
 
 export const invocationRunOwners = createInvocationRunOwnerStore({ getDb });
 
-export function claimInvocationRunOwner(chatId: string, runId: string): InvocationRunOwner {
+/** `reopenReleased`: the caller runs several executions in sequence under one run id (graph agent nodes) and may open
+ * this process's own released lease again. Chat turns never pass it: a released turn stays closed. */
+export function claimInvocationRunOwner(chatId: string, runId: string, opts: { reopenReleased?: boolean } = {}): InvocationRunOwner {
   ownerUsed = true;
-  const claim = invocationRunOwners.claim({ chatId, runId, ...invocationProcessOwner() });
+  const claim = invocationRunOwners.claim({ chatId, runId, ...invocationProcessOwner(), reopenReleased: opts.reopenReleased === true });
   if (claim.kind !== "claimed") {
     // The other run is live in the other process (Desktop <-> background service): one host per chat at a time (A2).
     const local = invocationProcessOwner(), other = claim.owner;

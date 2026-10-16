@@ -4516,8 +4516,9 @@ export async function runGraph(
             // An agent node's context is bound to its run owner lease. Without one every agent node refused before its
             // runtime started (agent_context_original_invocation_owner_required; production 2026-10-12..14, earlier
             // masked as "no completion receipt"), and each resume then stopped on worker_liveness_unknown. Claimed before
-            // the work unit begins, so a busy chat is a clean refusal, not an unconfirmed mutation.
-            const ownerLease = nativeMcpCall ? null : claimInvocationRunOwner(nodeChat.id, runId);
+            // the work unit begins, so a busy chat is a clean refusal, not an unconfirmed mutation. The next agent node (or
+            // attempt) on the same chat reopens this run's released lease instead of being refused as another run.
+            const ownerLease = nativeMcpCall ? null : claimInvocationRunOwner(nodeChat.id, runId, { reopenReleased: true });
             try {
             if (!dryRun) {
               const scope = commonScope(node, prompt);
