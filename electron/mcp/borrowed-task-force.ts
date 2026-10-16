@@ -27,6 +27,7 @@ import type {
 } from "../../shared/types";
 import type {
   Runner,
+  RunnerEvents,
   RunnerFailure,
   RunnerRequest,
   RunnerResult,
@@ -70,6 +71,7 @@ import {
 import { isJudgmentRefusal } from "../runtime/judgment-refusal";
 import { runnerFailureFromError, RuntimeTurnUnsettledError, SURFACE_INTENT_MARKER } from "../runtime/runner";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
+import { runTeamStepWithSettlement, teamStepFailureNote, type TeamStepFailureNote, type TeamStepSettlementPhase } from "./team-step-settlement";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import { recordWorkerReport, tryRecordRunEvent } from "../store/run-events";
 import {
@@ -293,7 +295,12 @@ export function requireTaskForceRunnerSuccess<T extends { failure?: RunnerFailur
   result: T,
   runtime: RuntimeStatus,
 ): T {
-  if (result.failure) throw new TaskForceRuntimeFailureError(result.failure, runtime);
+  if (result.failure) {
+    // The returned result stays the standard cause: its typed delivery, session and settlement trail remain readable.
+    const error = new TaskForceRuntimeFailureError(result.failure, runtime);
+    Object.defineProperty(error, "cause", { value: result, configurable: true, writable: true });
+    throw error;
+  }
   return result;
 }
 
@@ -1258,13 +1265,42 @@ async function observeTaskForceModelCall<T>(
     // Keep both cases on the same recovery path for ordinary One/Work calls;
     // strict callers still fail closed in taskForceRecoveryRuntime.
     if (!p.signal?.aborted && !(error instanceof TaskForceRuntimeFailureError)) {
-      throw new TaskForceRuntimeFailureError(
+      const typed = new TaskForceRuntimeFailureError(
         taskForceFailureFromError(error, input.runtime),
         input.runtime,
       );
+      // The runner's own error stays the standard cause (delivery, session, the settlement trail), with its evidence.
+      if (error !== null && typeof error === "object") copyObservedRunnerEvidence(error, typed);
+      Object.defineProperty(typed, "cause", { value: error, configurable: true, writable: true });
+      throw typed;
     }
     throw error;
   }
+}
+
+/**
+ * One task-force model step (a teammate, a nested team's worker, the room's synthesis) under the room's bounded settlement
+ * policy (team-step-settlement.ts): a turn its session acknowledged that ended without a terminal receipt, or a typed
+ * output-limit cut, continues once in that session; a transient refusal before dispatch runs once more; anything else
+ * surfaces for the caller to mark the step FAILED. Agent Apps keep their bound request identity and are not continued.
+ */
+function runSettledTaskForceStep(
+  p: BorrowedTaskForceParams,
+  nodeId: string,
+  runner: Runner,
+  request: RunnerRequest,
+  events: RunnerEvents,
+): Promise<RunnerResult> {
+  return runTeamStepWithSettlement({
+    request,
+    dispatch: (next) => runObservedRunner(runner, next, events),
+    eligible: !p.req.agentAppMode,
+    aborted: () => request.signal?.aborted === true || p.signal?.aborted === true,
+    record: (phase: TeamStepSettlementPhase, note: TeamStepFailureNote) => tryRecordRunEvent({
+      runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id, nodeId, kind: "team_step_settlement",
+      payload: { schemaVersion: "agentlas.team-step-settlement.v1", phase, ...note },
+    }),
+  });
 }
 
 async function prepareTaskForceMemoryBoundary(
@@ -2966,6 +3002,13 @@ export function taskForceIncompleteMessage(input: {
   ].filter(Boolean).join("\n\n");
 }
 
+/** Whether an unverified room still shows its synthesis (above the host's remaining-work note). */
+export function taskForceKeepsPartialSynthesis(input: {
+  fixedContract: boolean; completedSteps: number; synthesisReplacedByHost: boolean; synthesis: string;
+}): boolean {
+  return !input.fixedContract && input.completedSteps > 0 && !input.synthesisReplacedByHost && input.synthesis.trim().length > 0;
+}
+
 export function hostDerivedWorkspaceAccess(
   packet: Pick<BorrowedInputPacket, "inputType" | "allocation">,
   host: { permission: RunnerRequest["permission"]; agentAppMode?: boolean },
@@ -4096,9 +4139,12 @@ function synthesisPromptParts(input: {
   return [
     { id: "taskforce.synthesis.user.artifact-policy", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 0, text: "Artifact claims require this host evidence; model prose proves no saved file. Retain permanent artifacts." },
     { id: "taskforce.synthesis.user.delivery", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 10, text: "Write the final user-facing answer now." },
+    // Only when a step carries a typed failure note: without it the model echoed the machine codes to the owner (A/B P25, 2/2).
+    { id: "taskforce.synthesis.user.failure-policy", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 20, text: input.results.some((result) => result && !result.ok && result.stepFailure) ? "failure: host-typed facts of a step that did not finish; name it in plain words, no codes; never present its work as done." : null },
     { id: "taskforce.synthesis.user.validated-packets", revision: 1, stability: "task-context", changeTriggers: ["plan-revision"], order: 0, text: "Validated dispatch packets (authoritative plan projection):\n" + JSON.stringify(input.packets) },
     { id: "taskforce.synthesis.user.output-evidence", revision: 1, stability: "turn-context", changeTriggers: ["attachments"], order: 0, text: "Host-verified One Outputs evidence:\n" + JSON.stringify({ count: input.artifacts.length, artifacts: input.artifacts.map(artifact => ({ label: artifact.label, type: artifact.type, sizeBytes: artifact.sizeBytes })) }) },
-    { id: "taskforce.synthesis.user.worker-results", revision: 1, stability: "turn-context", changeTriggers: ["plan-revision", "child-result", "model-output"], order: 10, text: "Borrowed agent results:\n" + input.results.map(result => [`## ${result.spec.name} (${result.spec.slug})`, `status: ${result.ok ? "ok" : "failed"}`, result.workforceResponsibility ? `AUTHORITATIVE_WORKFORCE_RESPONSIBILITY: ${JSON.stringify(result.workforceResponsibility)}` : "", result.text].filter(Boolean).join("\n")).join("\n\n") },
+    // A step the room marked FAILED carries its typed cause (team-step-settlement.ts), not the runner's prose.
+    { id: "taskforce.synthesis.user.worker-results", revision: 2, stability: "turn-context", changeTriggers: ["plan-revision", "child-result", "model-output"], order: 10, text: "Borrowed agent results:\n" + input.results.map(result => [`## ${result.spec.name} (${result.spec.slug})`, `status: ${result.ok ? "ok" : "failed"}`, result.workforceResponsibility ? `AUTHORITATIVE_WORKFORCE_RESPONSIBILITY: ${JSON.stringify(result.workforceResponsibility)}` : "", !result.ok && result.stepFailure ? `failure: ${JSON.stringify(result.stepFailure)}` : result.text].filter(Boolean).join("\n")).join("\n\n") },
     { id: "taskforce.synthesis.user.owner-request", revision: 1, stability: "turn-context", changeTriggers: ["owner-input"], order: 20, text: "Original user request:\n" + input.originalRequest },
     { id: "taskforce.synthesis.user.output-boundary", revision: 1, stability: "final-boundary", changeTriggers: ["attachments"], order: 0, text: input.artifacts.length > 0 ? "Outputs: only the files listed above, exact labels" : "Outputs: none bound; never say a file, document, PRD, or artifact was saved, created, attached, shown, or available in Outputs/the output panel" },
   ];
@@ -4248,6 +4294,8 @@ interface BorrowedAgentResult {
   /** Internal-only typed provider failure used for one bounded recovery. */
   runtimeFailure?: RunnerFailure;
   failedRuntime?: RuntimeStatus;
+  /** Typed cause of a step the room marked FAILED (team-step-settlement.ts); the synthesis reads it instead of prose. */
+  stepFailure?: TeamStepFailureNote;
   workforceResponsibility?: WorkforceResponsibility;
   invocationEvidence?: WorkforceInvocationEvidence;
   nestedExecutionEvidence?: WorkforceNestedExecutionEvidence;
@@ -4923,7 +4971,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
               attempt,
               agentId: null,
               runtime: observedWorkerRuntime,
-            }, () => runObservedRunner(observedWorkerPicked.runner, taskForceWorkerRunnerRequest(p, request), events)).then(result => { result.text = taskForceWorkerOwnerAskText(result.text, taskForceWorkerHandoffText(result.text)); return result; }), capabilityEvidence(`${id}:hub-team:${worker.id}`, observedWorkerInvocationId))(
+            }, () => runSettledTaskForceStep(p, `${id}:hub-team:${worker.id}`, observedWorkerPicked.runner, taskForceWorkerRunnerRequest(p, request), events)).then(result => { result.text = taskForceWorkerOwnerAskText(result.text, taskForceWorkerHandoffText(result.text)); return result; }), capabilityEvidence(`${id}:hub-team:${worker.id}`, observedWorkerInvocationId))(
               {
                 ...taskForceSystemRequest([
 ...borrowedAgentSystemPromptParts(workerSpec, packagePermission, materializedWorkerMcpTools, { node: worker.content, package: spec.directive }),
@@ -5094,21 +5142,28 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
             },
           };
         } catch (error) {
-          if (error instanceof RuntimeTurnUnsettledError) {
-            const typed = new TaskForceRuntimeFailureError(
-              runnerFailureFromError(error, observedWorkerRuntime.kind), observedWorkerRuntime,
-            );
-            copyObservedRunnerEvidence(error, typed);
-            throw typed;
-          }
-          const typedRuntimeFailure = error instanceof TaskForceRuntimeFailureError ? error : null;
-          if (typedRuntimeFailure && runtimeFailureBlocksReplay(typedRuntimeFailure.failure)) throw error;
+          // A nested worker that did not complete is a failed worker of its team, never the end of the room: the team's
+          // manager synthesizes over the workers that finished (same rule as a direct teammate, runBorrowedAgentTurn).
+          const typedRuntimeFailure = error instanceof TaskForceRuntimeFailureError ? error
+            : error instanceof RuntimeTurnUnsettledError
+              ? (() => {
+                const typed = new TaskForceRuntimeFailureError(
+                  runnerFailureFromError(error, observedWorkerRuntime.kind), observedWorkerRuntime,
+                );
+                copyObservedRunnerEvidence(error, typed);
+                Object.defineProperty(typed, "cause", { value: error, configurable: true, writable: true });
+                return typed;
+              })()
+              : null;
+          const stepFailure = typedRuntimeFailure ? teamStepFailureNote(error) : null;
           return {
             worker,
             ok: false,
             ownerDecisions: [] as string[],
             accessNeeded: false,
-            text: redactSensitiveText(error instanceof Error ? error.message : String(error)),
+            text: stepFailure?.settlement === "unsettled"
+              ? `failure: ${JSON.stringify(stepFailure)}`
+              : redactSensitiveText(error instanceof Error ? error.message : String(error)),
             tokens: 0,
             ...(typedRuntimeFailure
               ? { runtimeFailure: typedRuntimeFailure.failure, failedRuntime: typedRuntimeFailure.runtime }
@@ -5395,7 +5450,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         attempt,
         agentId: installedAgent?.id ?? p.chat.agentId,
         runtime: observedDirectRuntime,
-      }, () => runObservedRunner(observedDirectPicked.runner, taskForceWorkerRunnerRequest(p, request), events)).then(result => { result.text = taskForceWorkerOwnerAskText(result.text, taskForceWorkerHandoffText(result.text)); return result; }), capabilityEvidence(id, observedDirectInvocationId))(
+      }, () => runSettledTaskForceStep(p, id, observedDirectPicked.runner, taskForceWorkerRunnerRequest(p, request), events)).then(result => { result.text = taskForceWorkerOwnerAskText(result.text, taskForceWorkerHandoffText(result.text)); return result; }), capabilityEvidence(id, observedDirectInvocationId))(
         {
           ...taskForceSystemRequest([
 ...borrowedAgentSystemPromptParts(spec, packagePermission, materializedWorkerMcpTools),
@@ -5583,20 +5638,25 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
     };
   } catch (err) {
     if (p.signal?.aborted) throw err;
-    if (err instanceof RuntimeTurnUnsettledError) {
-      const typed = new TaskForceRuntimeFailureError(
-        runnerFailureFromError(err, observedDirectRuntime.kind), observedDirectRuntime,
-      );
-      copyObservedRunnerEvidence(err, typed);
-      throw typed;
-    }
-    if ((err instanceof ObservedRunnerFailureError || err instanceof TaskForceRuntimeFailureError)
-      && runtimeFailureBlocksReplay(err.failure)) {
-      p.sink(tag({ kind: "tool-use", done: true,
-        status: p.locale === "ko" ? "실행 중단 — 작업 기록을 확인하세요." : "Execution stopped — review the work history." }));
-      throw err;
-    }
-    const typedRuntimeFailure = err instanceof TaskForceRuntimeFailureError ? err : null;
+    /*
+     * A step that did not complete is that step's FAILED packet, never the end of the owner turn. Installed 1.3.49 run
+     * 5d37e4cc (2026-10-16): four teammates finished, the fifth (codex, after acceptance) hit `max_output_tokens`, this
+     * catch rethrew its runtime_turn_unsettled out of the room, and the owner got a generic failure line after 3h10m
+     * with none of the finished work. The settlement policy already continued the step once where that is safe
+     * (runSettledTaskForceStep). Nothing here replays it: a replay-blocking cause keeps its typed runtimeFailure, so the
+     * room's recovery never runs it again anywhere, its dependants are withheld, and the room synthesizes over the rest.
+     */
+    const typedRuntimeFailure = err instanceof TaskForceRuntimeFailureError ? err
+      : (err instanceof ObservedRunnerFailureError && runtimeFailureBlocksReplay(err.failure)) || err instanceof RuntimeTurnUnsettledError
+        ? (() => {
+          const typed = new TaskForceRuntimeFailureError(err instanceof ObservedRunnerFailureError
+            ? { ...err.failure } : runnerFailureFromError(err, observedDirectRuntime.kind), observedDirectRuntime);
+          copyObservedRunnerEvidence(err, typed);
+          Object.defineProperty(typed, "cause", { value: err, configurable: true, writable: true });
+          return typed;
+        })()
+        : null;
+    const stepFailure = typedRuntimeFailure ? teamStepFailureNote(err) ?? undefined : undefined;
     // Agent App 실패는 원인을 남기지 않기로 한 자리다 — 관측한 도구 이름도 여기서는
     // 싣지 않는다(고정 실패 한 벌이라는 계약).
     if (p.req.agentAppMode) {
@@ -5611,6 +5671,10 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         packet,
         text: UNTRUSTED_RUNTIME_FAILURE_MESSAGE,
         ok: false,
+        // Internal only: a replay-blocking cause must not be retried as a content failure.
+        ...(typedRuntimeFailure && runtimeFailureBlocksReplay(typedRuntimeFailure.failure)
+          ? { runtimeFailure: { ...typedRuntimeFailure.failure }, failedRuntime: { ...typedRuntimeFailure.runtime } }
+          : {}),
       };
     }
     /*
@@ -5636,9 +5700,12 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         ? p.locale === "ko"
           ? `${quotaFailure.runtime} 사용 한도가 찼습니다. 다른 모델로 바꾸거나 한도가 풀린 뒤 다시 보내세요. (${quotaFailure.message})`
           : `${quotaFailure.runtime} has hit its usage limit. Switch models or send again after it resets. (${quotaFailure.message})`
-        : err instanceof Error
-          ? err.message
-          : String(err);
+        // An unsettled step is worded by the host, one line (the runner's "review the work history" prose is not owner copy).
+        : stepFailure?.settlement === "unsettled"
+          ? p.locale === "ko" ? "응답이 끝나기 전에 멈춰 이 단계를 마치지 못했습니다." : "This step stopped before its reply finished."
+          : err instanceof Error
+            ? err.message
+            : String(err);
     p.sink(tag({
       kind: "tool-use",
       done: true,
@@ -5666,6 +5733,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
             failedRuntime: { ...typedRuntimeFailure.runtime },
           }
         : {}),
+      ...(stepFailure ? { stepFailure } : {}),
       invocationEvidence: {
         invocationId: observedDirectInvocationId,
         runtimeId: observedDirectResolution.resolvedRuntimeId
@@ -6906,9 +6974,9 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     let responseRuntime: RuntimeStatus | undefined;
     const runWithRecovery = async (nextPacket: typeof packet, delegationId?: string) => {
       let result = await runPacket(nextPacket, peerResults, responseRuntime, delegationId);
-      if (result.runtimeFailure && result.failedRuntime && runtimeFailureBlocksReplay(result.runtimeFailure)) {
-        throw new TaskForceRuntimeFailureError(result.runtimeFailure, result.failedRuntime);
-      }
+      // A replay-blocking cause (the step may have acted) is this packet's FAILED result: never run again anywhere, and
+      // never the end of the room (it used to be rethrown here and failed the whole owner turn).
+      if (result.runtimeFailure && result.failedRuntime && runtimeFailureBlocksReplay(result.runtimeFailure)) return result;
       if (result.ok || p.signal?.aborted) return result;
       // A typed provider refusal is never an output-format problem. Walk the
       // remaining worker pool in DB priority order, once per configured member,
@@ -6940,9 +7008,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         };
         responseRuntime = recoveryRuntime;
         result = await runPacket(recoveryPacket, peerResults, responseRuntime);
-        if (result.runtimeFailure && result.failedRuntime && runtimeFailureBlocksReplay(result.runtimeFailure)) {
-          throw new TaskForceRuntimeFailureError(result.runtimeFailure, result.failedRuntime);
-        }
+        if (result.runtimeFailure && result.failedRuntime && runtimeFailureBlocksReplay(result.runtimeFailure)) return result;
         if (result.ok) return result;
       }
       return result;
@@ -7169,7 +7235,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     phase: "synthesis",
     agentId: p.orchestratorAgent.id,
     runtime: runtimeForCall,
-  }, () => runObservedRunner(pickedForCall.runner,
+  }, () => runSettledTaskForceStep(p, orchestratorId, pickedForCall.runner,
     taskForceRunnerRequest(p, {
       ...taskForceSystemRequest([
 ...synthesisSystemPromptParts(
@@ -7311,6 +7377,8 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
   // Nested units never own visible/durable result surfaces.
   let oneTaskForceSurfaces: AgentlasSurfaceManifest[] = [];
   let requiredSurfaceMissing = false;
+  // True once displayText is a host failure line instead of the synthesis (the result cannot be shown as-is).
+  let synthesisReplacedByHost = false;
   if (synthesisCanEmitOneSurface) {
     try {
       const surfaceRequestedByModel = displayText.includes(SURFACE_INTENT_MARKER);
@@ -7377,11 +7445,13 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       const parserFailed = parsed.diagnostics.some((diagnostic) => diagnostic.code === "surface-parse-failed");
       if (parserFailed) {
         oneTaskForceSurfaces = [];
+        synthesisReplacedByHost = true;
         displayText = p.locale === "ko"
           ? "결과를 정리하는 중 문제가 생겨 이번 응답을 완성하지 못했어요."
           : "Something went wrong while preparing this result, so it is not complete.";
       } else if (parsed.surfaces.length > 0 || parsed.errors.length > 0) {
         const exactSafeSurface = oneTaskForceSurfaces.length === 1;
+        if (!parsed.cleanedText.trim()) synthesisReplacedByHost = true;
         displayText = parsed.cleanedText.trim() || (exactSafeSurface
           ? p.locale === "ko"
             ? "요청하신 결과를 정리했어요."
@@ -7392,6 +7462,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       }
       requiredSurfaceMissing = surfaceRequestedByModel && oneTaskForceSurfaces.length !== 1;
       if (requiredSurfaceMissing && !parserFailed) {
+        synthesisReplacedByHost = true;
         displayText = p.locale === "ko"
           ? "요청한 네이티브 결과 화면을 안전하게 구성하지 못해 이번 결과를 완료로 표시하지 않습니다."
           : "The requested native result Surface could not be built safely, so this result is not marked complete.";
@@ -7400,6 +7471,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       // Never log the rejected model body: a legacy manifest may contain a
       // local media path that must remain Main-private.
       oneTaskForceSurfaces = [];
+      synthesisReplacedByHost = true;
       // The parser itself is an untrusted-input boundary. If recursive or
       // otherwise hostile JSON makes it throw, none of the original synthesis
       // may continue to chat/final because it can still contain a raw Surface
@@ -7787,11 +7859,20 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
     oneTaskForceSurfaces = [];
   }
   if (!taskForceExecutionVerified) {
-    displayText = taskForceIncompleteMessage({
+    const incomplete = taskForceIncompleteMessage({
       locale: p.locale,
       remaining: taskForceRemainingForOwner(p.locale, results, unclearedBlockers),
       requiredSurfaceMissing: Boolean(requiredSurfaceMissing),
     });
+    // Real work finished: the owner gets the room's synthesis over it, then the host's short note of what is left (typed
+    // per step, room names). Production 1.3.49 run 5d37e4cc: four finished steps were replaced by a failure line. A fixed
+    // contract (prepared Workforce, benchmark, Agent App) or a synthesis the host already replaced keeps the note alone.
+    displayText = taskForceKeepsPartialSynthesis({
+      fixedContract: Boolean(p.workforceSelectionReceipt || p.benchmarkMode || p.req.agentAppMode),
+      completedSteps: results.filter((result) => result?.ok).length,
+      synthesisReplacedByHost,
+      synthesis: displayText,
+    }) ? `${displayText.trim()}\n\n${incomplete}` : incomplete;
   }
   displayText = redactOneAttachmentText(p.req, displayText);
   for (let index = 0; index < oneTaskForceSurfaces.length; index += 1) {

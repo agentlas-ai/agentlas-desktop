@@ -5,6 +5,7 @@ import { withModelCallScope } from "../runtime/model-call-ledger";
 import { ownerVisiblePrompt } from "../one/owner-prompt";
 import { mainWorkAttachmentContext, redactWorkAttachmentText } from "../invocation/work-attachments";
 import { workerCapabilityRunner, WorkerCapabilityError, type PrepareWorkerCapabilities, type WorkerCapabilityInput } from "./worker-capabilities";
+import { runTeamStepWithSettlement } from "./team-step-settlement";
 import { withoutMcpTransportEnv } from "../runtime/runner";
 // 멀티 에이전트 firm 오케스트레이터 — 3-tier (CEO → 본부 → 전문가).
 //   PLAN: 리더가 <<Delegate>>로 필요한 하위만 선택 → DELEGATE: 하위 병렬 실행 → SYNTHESIZE.
@@ -1132,11 +1133,19 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
         const planBounded = p.req.planMode === true ? { ...request, permission: "read" as const, planMode: true as const } : request;
         const releaseOwnerAsk = ownerAskWithheld ? withholdTurnAskForRun(p.req.runId) : null;
         try {
-          return await withModelCallScope({ role: "worker", phase: "firm-worker", nodeId: node.id }, () => runObservedRunner(runtimePicked.runner,
-            bindAppMemoryRequest(ownerAskWithheld ? { ...planBounded, unattendedNoAsk: true as const } : planBounded,
+          // Same bounded settlement as a room teammate (team-step-settlement.ts): a turn its session acknowledged that ended
+          // without a terminal receipt, or a typed output-limit cut, continues once in that session; a transient refusal
+          // before dispatch runs once more; anything else surfaces and runNodeTurnSafe closes this node as failed.
+          return await withModelCallScope({ role: "worker", phase: "firm-worker", nodeId: node.id }, () => runTeamStepWithSettlement({
+            // An Agent App's memory binding is keyed by this exact request object: it is never continued (eligible).
+            request: bindAppMemoryRequest(ownerAskWithheld ? { ...planBounded, unattendedNoAsk: true as const } : planBounded,
               {runId:p.req.runId,chatId:p.chat.id,actorId:memoryOwnerId}),
-            events,
-          ));
+            dispatch: (next) => runObservedRunner(runtimePicked.runner, next, events),
+            eligible: !p.req.agentAppMode,
+            aborted: () => (turn.signal ?? p.signal)?.aborted === true,
+            record: (phase, note) => tryRecordRunEvent({ runId: p.req.runId ?? `firm:${p.chat.id}`, chatId: p.chat.id,
+              nodeId: node.id, kind: "team_step_settlement", payload: { schemaVersion: "agentlas.team-step-settlement.v1", phase, ...note } }),
+          }));
         } finally {
           releaseOwnerAsk?.();
         }

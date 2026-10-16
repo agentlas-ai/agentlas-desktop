@@ -1,7 +1,8 @@
 import { composeDeclaredPrompt, registerDeclaredPromptModule, type DeclaredPromptPart } from "../runtime/prompt-order";
 import { toolObservationDigest } from "../automation-progress-guard";
 import { randomUUID } from "node:crypto";
-import type { RunnerResult } from "../runtime/runner";
+import type { RunnerEvents, RunnerRequest, RunnerResult } from "../runtime/runner";
+import { runTeamStepWithSettlement } from "./team-step-settlement";
 import { runObservedRunner, observedRunnerUsage, observedRunnerUsageEvidence, ObservedRunnerFailureError } from "../runtime/observed-runner";
 import { withModelCallScope } from "../runtime/model-call-ledger";
 import { withholdTurnAskForRun } from "../turn-tools/control-server";
@@ -605,8 +606,10 @@ export async function runSwarmInvocation(
       // A swarm worker's questions belong to the synthesizer (owner 2026-10-16): no system ask module, no ask_form.
       const releaseOwnerAsk = withholdTurnAskForRun(p.req.runId);
       try {
-        const measuredResult = await runObservedRunner(targetRunner.runner,
-          {
+        // Same bounded settlement as a room teammate (team-step-settlement.ts): an acknowledged turn that ended without a
+        // terminal receipt, or a typed output-limit cut, continues once in its session; anything else surfaces and the
+        // swarm engine marks this task failed while the rest of the board continues to the synthesis.
+        const workerRequest: RunnerRequest = {
             systemPrompt: workerSystemPrompt,
             unattendedNoAsk: true,
             history: [],
@@ -626,16 +629,23 @@ export async function runSwarmInvocation(
             mcpCodexConfigArgs: p.mcpCodexConfigArgs,
             env: p.runnerEnv,
             locale: p.locale,
-          },
-          {
+          };
+        const workerEvents: RunnerEvents = {
             onStatus: (status) => emit(task, { kind: "tool-use", status }),
             onPartial: (text) => {
               // Typed result is published after parsing; keep raw JSON off all desktop/mobile streams.
               void text;
             },
             onTool: (name, args, r, id, isError, artifactPaths, imageDataUrl) => emit(task, { kind: "tool-use", tool: { name, args, result: r, id, isError, observationDigest: toolObservationDigest(artifactPaths, imageDataUrl) } }),
-          },
-        );
+          };
+        const measuredResult = await runTeamStepWithSettlement({
+          request: workerRequest,
+          dispatch: (next) => runObservedRunner(targetRunner.runner, next, workerEvents),
+          eligible: !p.req.agentAppMode,
+          aborted: () => (signal ?? p.signal)?.aborted === true,
+          record: (phase, note) => tryRecordRunEvent({ runId, chatId: p.chat.id, nodeId: task.id, kind: "team_step_settlement",
+            payload: { schemaVersion: "agentlas.team-step-settlement.v1", phase, ...note } }),
+        });
         recordUsage(usageInvocationId, target, task.id, "worker", measuredResult.observedUsage, measuredResult.failure ? "failed" : "completed", measuredResult);
         return measuredResult;
       } catch (error) {

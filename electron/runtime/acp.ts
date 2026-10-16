@@ -1430,18 +1430,22 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       }
       if (req.signal?.aborted) throw abortReasonError(req);
       const text = client.text.trim();
+      // The session/prompt response is bound to this exact request: the agent acknowledged this turn (RuntimeTurnDelivery
+      // "accepted"), so a continuation of an uncertain terminal (max_tokens, max_turn_requests, Kimi's end_turn) resumes
+      // without re-sending it (team-step-settlement.ts, unsettled-continuation.ts).
+      const turnDelivery = "accepted" as const;
       if (stopReason === "refusal") {
-        return { text, failure: { kind: "refused", message: "ACP stopReason=refusal", runtime: spec.id, source: "marker" }, sessionId };
+        return { text, failure: { kind: "refused", message: "ACP stopReason=refusal", runtime: spec.id, source: "marker" }, sessionId, turnDelivery };
       }
       if (stopReason === "cancelled") throw abortReasonError(req);
       // Kimi's ACP bridge maps ordinary native failures to end_turn and drops
       // truncation evidence. It cannot certify a complete control episode.
       if (stopReason === "end_turn" && (spec.id === "kimi" || spec.registryId === "kimi")) {
-        return { text, sessionId, ownerControlTerminal: "uncertain",
+        return { text, sessionId, ownerControlTerminal: "uncertain", turnDelivery,
           failure: runnerFailureFromError(new RuntimeTurnUnsettledError(spec.id, locale), spec.id) };
       }
       if (!text) {
-        return { text: "", failure: { kind: "empty", message: session.conn.lastStderr.slice(-500) || `ACP stopReason=${stopReason || "unknown"}`, runtime: spec.id, source: "marker" }, sessionId };
+        return { text: "", failure: { kind: "empty", message: session.conn.lastStderr.slice(-500) || `ACP stopReason=${stopReason || "unknown"}`, runtime: spec.id, source: "marker" }, sessionId, turnDelivery };
       }
       if (client.contextUsed !== undefined && client.contextSize) {
         const pct = Math.round((client.contextUsed / client.contextSize) * 100);
@@ -1449,7 +1453,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       }
       // observedUsage intentionally absent: ACP v1 gives context occupancy, not tokens. The occupancy IS the size of the
       // context the next request starts from, so it feeds the common 80% generation rule with the agent's own window.
-      return { text, sessionId, ownerControlTerminal: stopReason === "end_turn" ? "completed" : "uncertain",
+      return { text, sessionId, ownerControlTerminal: stopReason === "end_turn" ? "completed" : "uncertain", turnDelivery,
         ...(client.contextUsed !== undefined && client.contextUsed > 0 ? { contextInputTokens: client.contextUsed } : {}),
         ...(client.contextSize ? { contextWindowTokens: client.contextSize } : {}) };
     } catch (err) {
