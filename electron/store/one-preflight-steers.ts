@@ -108,11 +108,32 @@ export function beginOnePreflightSubmission(
   const promptHash = hash(input.userPrompt);
   const runtimeHash = hash(runtimeJson);
   const now = new Date().toISOString();
+  if (input.resume !== undefined && input.resume !== true) throw new Error("one_preflight_invalid_resume");
   return getDb().transaction(() => {
     const old = submissionRow(input.submissionId);
     if (old) {
-      if (old.chat_id !== input.chatId || old.prompt_digest !== promptHash
-        || old.runtime_digest !== runtimeHash || old.owner_process_epoch !== ownerProcessEpoch) {
+      if (old.chat_id !== input.chatId || old.prompt_digest !== promptHash || old.runtime_digest !== runtimeHash) {
+        throw new Error("one_preflight_submission_identity_conflict");
+      }
+      if (input.resume === true && old.state === "held"
+        && (old.parent_run_id === null || getInvocationAdmission(old.parent_run_id)?.status === "rejected")) {
+        // The renderer that opened this submission is gone (reload, crash, closed window, restart) and it never
+        // started. Its saved send takes it over exactly once: the CAS below opens it for the current owner epoch.
+        if (liveRuntimeJson(input.chatId) !== runtimeJson) adoptShownRuntime(input.chatId, input.runtimeSelection);
+        if (liveRuntimeJson(input.chatId) !== runtimeJson) throw new Error("one_preflight_runtime_changed");
+        const open = getDb().prepare(
+          "SELECT submission_id FROM one_preflight_submissions WHERE chat_id = ? AND state = 'open' LIMIT 1",
+        ).get(input.chatId);
+        if (open) throw new Error("one_preflight_chat_pending");
+        const reopened = getDb().prepare("UPDATE one_preflight_submissions " +
+          "SET state = 'open', owner_process_epoch = ?, parent_run_id = NULL, steer_template_json = NULL, updated_at = ? " +
+          "WHERE submission_id = ? AND state = 'held'").run(ownerProcessEpoch, now, input.submissionId);
+        if (reopened.changes !== 1) throw new Error("one_preflight_submission_changed");
+        return submissionReceipt(submissionRow(input.submissionId)!);
+      }
+      // A reopened renderer may read any state of its own send (bound = Main started it). A plain begin keeps the
+      // original owner-epoch identity rule.
+      if (input.resume !== true && old.owner_process_epoch !== ownerProcessEpoch) {
         throw new Error("one_preflight_submission_identity_conflict");
       }
       return submissionReceipt(old);
@@ -358,6 +379,26 @@ export function holdOnePreflightSubmission(submissionId: string): OnePreflightSu
       "WHERE submission_id = ? AND state IN ('open','reserved')").run(now, submissionId);
     return submissionReceipt(submissionRow(submissionId)!);
   }).immediate();
+}
+
+/**
+ * The renderer document that opened this submission is gone (reload, crash, closed window) while Main's epoch is the
+ * same. An open submission is driven by that renderer (team preflight, then invoke:run); nothing else can finish it,
+ * and as an open row it refused every later send of the chat with one_preflight_chat_pending until the app restarted
+ * (release peer, room fc53939f, 2026-10-16). It is held by the same rule as holdOnePreflightSubmission: a reserved
+ * parent that may have crossed the start boundary stays. A run Main's own send queue already accepted for it
+ * (pending_chat_sends) owns the start, so it is not held under that queue.
+ */
+export function releaseOnePreflightSubmissionOfGoneRenderer(submissionId: string): OnePreflightSubmissionReceipt | null {
+  validId(submissionId, "submission_id");
+  const row = submissionRow(submissionId);
+  if (!row || (row.state !== "open" && row.state !== "reserved")) return row ? submissionReceipt(row) : null;
+  try {
+    const queued = getDb().prepare("SELECT 1 FROM pending_chat_sends WHERE chat_id = ? AND state IN ('queued','starting') " +
+      "AND json_extract(request_json, '$.preflightSubmissionId') = ? LIMIT 1").get(row.chat_id, submissionId);
+    if (queued) return submissionReceipt(row);
+  } catch { /* No send queue table yet: nothing queued under this submission. */ }
+  return holdOnePreflightSubmission(submissionId);
 }
 
 /** A different Main epoch can never finish an unbound preflight. */

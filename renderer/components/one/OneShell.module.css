@@ -4605,3 +4605,27 @@
 .body .messages[data-one-room="true"] { gap: 12px; }
 .body .messages[data-one-room="true"] .message { gap: 3px; }
 .body .messages[data-one-room="true"] .message[data-taskforce="true"][data-role="assistant"] .messageBody { padding: 7px 11px; }
+
+/* A send Main never took (one-first-send-outbox): not sent, with a one-tap resend. */
+.firstSendStatus {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  max-width: min(790px, 88%);
+  margin: 2px 0 0 auto;
+  color: var(--muted-deep);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.firstSendStatus button {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}

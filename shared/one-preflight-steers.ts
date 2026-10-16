@@ -37,6 +37,9 @@ export interface OnePreflightSubmissionInput {
   chatId: string;
   userPrompt: string;
   runtimeSelection?: RuntimeSelection;
+  /** A reopened renderer takes over its own saved send: a held, never-started submission with this exact identity
+   * opens again once. Without it a held submission is only reported. */
+  resume?: true;
 }
 
 export interface OnePreflightSubmissionReceipt {

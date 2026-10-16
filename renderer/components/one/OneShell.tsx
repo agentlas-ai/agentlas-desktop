@@ -17,6 +17,7 @@ import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
 import { ChatContinuationProjector } from "@/lib/chat-continuations";
 import { readOneFollowupOutbox, saveOneFollowupIntent, removeOneFollowupIntent, pauseOneFollowupOutbox, pauseOneFollowupIntent, resumeOneFollowupIntent, waitForOneFollowupDelivery, type OneFollowupIntent } from "@/lib/one-followup-outbox";
 import { ONE_PREFLIGHT_STEER_REQUEST_KEYS, normalizeOnePreflightSteerRequest } from "@shared/one-preflight-steers";
+import { firstSendEchoed, firstSendRowId, firstSendsToDraw, moveFirstSendToChat, patchFirstSend, readFirstSends, removeFirstSend, resumeFirstSends, saveFirstSend, type FirstSendEntry, type FirstSendHold } from "@/lib/one-first-send-outbox";
 
 import { AutomationMonitorStrip } from "../AutomationMonitorStrip";
 import { ContinuityStatus } from "../ContinuityStatus";
@@ -167,8 +168,6 @@ import { narrowerOnePermission } from "@shared/invocation-permission";
 import {
   oneTeamPreflightAutoStartStep,
   oneTeamPreflightFailureCode,
-  oneTeamPreflightProposalPending,
-  oneTeamPreflightRecoveryAllowed,
   restoreOwnerDraft,
 } from "@/lib/one-team-preflight-auto-start";
 import { runtimeSelectionReceiptMatches } from "@shared/runtime-selection-receipt";
@@ -503,6 +502,10 @@ function readStoredOnePermission(): OnePermissionMode {
   return value === "auto" || value === "read" || value === "write" || value === "full" ? value : "full";
 }
 
+function isOnePermissionMode(value: unknown): value is OnePermissionMode {
+  return value === "auto" || value === "read" || value === "write" || value === "full";
+}
+
 function readStoredBoolean(key: string, fallback: boolean): boolean {
   if (typeof window === "undefined") return fallback;
   const value = window.localStorage.getItem(key);
@@ -668,6 +671,38 @@ function currentOneGoalOverride(overrides: OneTurnOverrides, epoch: number): One
   if (overrides.goalControlEpoch === epoch) return overrides;
   const { goalMode: _goal, goalControlEpoch: _epoch, ...remaining } = overrides;
   return remaining;
+}
+
+/** Main's typed refusal of a second open submission in one chat (store/one-preflight-steers.ts). A state, not a fault. */
+function isPreviousOneSendPending(cause: unknown): boolean {
+  return /\bone_preflight_chat_pending\b/.test(String((cause as { message?: unknown } | null)?.message ?? cause));
+}
+
+/** Another live window is preparing this exact saved send. */
+function isOneSendOwnedElsewhere(cause: unknown): boolean {
+  return /\bone_preflight_submission_owned_elsewhere\b/.test(String((cause as { message?: unknown } | null)?.message ?? cause));
+}
+
+/** One plain line per local not-sent state (no codes, no process names). */
+function firstSendHoldLine(reason: FirstSendHold, ko: boolean): string {
+  switch (reason) {
+    case "previous_pending": return ko ? "보내지 않음 · 이전 메시지를 준비하는 중이었어요" : "Not sent · an earlier message was still being prepared";
+    case "attachments": return ko ? "보내지 않음 · 첨부는 다시 붙여 주세요" : "Not sent · attach the files again";
+    case "stale": return ko ? "보내지 않음 · 시간이 지나 자동으로 이어 보내지 않았어요" : "Not sent · too old to continue automatically";
+    case "setup": return ko ? "보내지 않음 · 새 대화 준비가 끝나기 전에 끊겼어요" : "Not sent · interrupted before the new conversation was ready";
+    default: return ko ? "보내지 않음" : "Not sent";
+  }
+}
+
+/** The turn switches a saved send was made with (only the ones that were on). */
+function oneTurnOverridesFromFirstSend(choices: FirstSendEntry["choices"]): OneTurnOverrides {
+  const flags = choices.overrides ?? {};
+  return {
+    ...(flags.goalMode ? { goalMode: true as const } : {}),
+    ...(flags.planMode ? { planMode: true as const } : {}),
+    ...(flags.fastMode ? { fastMode: true as const } : {}),
+    ...(flags.sessionRouting ? { sessionRouting: true as const } : {}),
+  };
 }
 
 type OneAttachmentDraft = {
@@ -1574,6 +1609,12 @@ function OneSessionsShell() {
   const preflightSubmissionRef = useRef<{ submissionId: string; chatId: string; ready?: Promise<void> } | null>(null);
   const preflightSubmissionGenerationRef = useRef(0);
   const [localFollowupIntents, setLocalFollowupIntents] = useState<OneFollowupIntent[]>([]);
+  // Sends Main has not taken yet (one-first-send-outbox): drawn in the transcript and resumed after a reload.
+  const [firstSends, setFirstSends] = useState<FirstSendEntry[]>([]);
+  // Driven by a submit of this renderer right now; never resumed underneath it.
+  const liveFirstSendIdsRef = useRef(new Set<string>());
+  // Created or resumed by this renderer session: settled by their own outcome, never auto-resumed a second time.
+  const sessionFirstSendIdsRef = useRef(new Set<string>());
   const [delayedFollowupIds, setDelayedFollowupIds] = useState<ReadonlySet<string>>(() => new Set());
   const [currentTurnFollowups, setCurrentTurnFollowups] = useState<Array<{ intent: OneFollowupIntent; receipt: import("@shared/types").InvocationCurrentTurnSteerReceipt }>>([]);
   const [heldFollowupRecovery, setHeldFollowupRecovery] = useState<InvocationSteerRecovery[]>([]);
@@ -2347,7 +2388,17 @@ function OneSessionsShell() {
   }, [activity, activityStateRunId, contextRailOpen, threadRuns, workerChatId, workerSelection]);
   useEffect(() => { setWorkerSelection(null); }, [workerChatId]);
   const continuationProjectorRef = useRef(new ChatContinuationProjector());
-  const displayMessages = useMemo(() => continuationProjectorRef.current.project(workerChatId ?? "one-home", messages, {
+  // Saved sends Main has not taken yet are part of the conversation the owner sees (after a reload too). A row with
+  // the same words already on screen at or after the send (the optimistic or durable row) is that send.
+  const transcriptMessages = useMemo<UiMessage[]>(() => {
+    const rows = firstSendsToDraw(firstSends, messages, workerChatId);
+    if (!rows.length) return messages;
+    return [...messages, ...rows.map((entry): UiMessage => ({
+      id: firstSendRowId(entry.intentId), intellectUiMessageId: firstSendRowId(entry.intentId), role: "user",
+      text: entry.userPrompt, ...(entry.chatId ? { chatId: entry.chatId } : {}), createdAt: entry.createdAt,
+    }))];
+  }, [firstSends, messages, workerChatId]);
+  const displayMessages = useMemo(() => continuationProjectorRef.current.project(workerChatId ?? "one-home", transcriptMessages, {
     key: (message) => message.intellectUiMessageId ?? (message.id === "one-live-response"
       ? `one-live:${activeActivityRunId ?? "pending"}` : message.durableMessageId ?? message.id),
     role: (message) => message.role,
@@ -2373,7 +2424,7 @@ function OneSessionsShell() {
       streaming: !row.frozen && row.tail && message.streaming,
       ...(!row.tail ? { goalResult: undefined, images: undefined, files: undefined, chatFiles: undefined, chatFileGroupIds: undefined } : {}),
     };
-  }), [activeActivityRunId, messages, renderedActivityStartedAt, workerChatId]);
+  }), [activeActivityRunId, transcriptMessages, renderedActivityStartedAt, workerChatId]);
   const transcriptIds = useMemo(() => displayMessages.map(message => message.id), [displayMessages]);
   const [historyWindow, setHistoryWindow] = useState<{ chatId: string | null; oldestId: string | null } | null>(null);
   const historyAnchor = historyWindow?.chatId === workerChatId ? historyWindow.oldestId : null;
@@ -4211,6 +4262,48 @@ function OneSessionsShell() {
   // a picker started in chat A can settle after navigation and paint A's path
   // into chat B.
   activeThreadChatIdRef.current = activeThreadChatId;
+  const showFirstSends = useCallback((chatId: string | null) => {
+    if (activeThreadChatIdRef.current !== chatId) return;
+    const next = readFirstSends(window.localStorage, "one", chatId);
+    setFirstSends(current => JSON.stringify(current) === JSON.stringify(next) ? current : next);
+  }, []);
+  /** Main took the send (or the exact text went back to the composer): the saved copy goes. */
+  const settleFirstSend = useCallback((chatId: string | null, intentId: string) => {
+    try { removeFirstSend(window.localStorage, "one", chatId, intentId); } catch { /* the next read retries */ }
+    showFirstSends(chatId);
+  }, [showFirstSends]);
+  /** Not sent and not retried automatically: the text stays in the transcript with a one-tap resend. */
+  const holdFirstSend = useCallback((chatId: string | null, intentId: string, reason: FirstSendHold) => {
+    try { patchFirstSend(window.localStorage, "one", chatId, intentId, { notSent: reason }); } catch { /* kept as it was */ }
+    showFirstSends(chatId);
+  }, [showFirstSends]);
+  /** The run start answered for a saved send. "uncertain" keeps it with its run ID: Main's admission decides later. */
+  const settleFirstSendOutcome = useCallback((chatId: string, submissionId: string | undefined, text: string,
+    outcome: { status: string } | null | undefined) => {
+    if (!submissionId || !outcome) return;
+    if (outcome.status === "started" || outcome.status === "queued" || outcome.status === "reconciled") {
+      settleFirstSend(chatId, submissionId);
+    } else if (outcome.status === "rejected") {
+      holdFirstSend(chatId, submissionId, "refused");
+    } else if (outcome.status === "no-dispatch") {
+      const composerNow = (composerHandleRef.current?.getValue() ?? composerValueRef.current).trim();
+      if (composerNow === text.trim()) settleFirstSend(chatId, submissionId);
+      else if (!readFirstSends(window.localStorage, "one", chatId).find(item => item.intentId === submissionId)?.runId) {
+        holdFirstSend(chatId, submissionId, "refused");
+      }
+    }
+  }, [holdFirstSend, settleFirstSend]);
+  /** Main kept this exact owner request in the chat's transcript (a durable user row written at or after the send). */
+  const ownerRequestInTranscript = useCallback(async (chatId: string, text: string, sentAt: number): Promise<boolean> => {
+    const api = ipc();
+    if (!api) return false;
+    try {
+      const history = typeof api.chats.messagesPage === "function"
+        ? (await readOneChatHistoryPage(api, chatId, undefined, 40)).messages
+        : await readOneChatHistory(api, chatId);
+      return firstSendEchoed({ userPrompt: text, createdAt: new Date(sentAt).toISOString() }, toUiMessages(history));
+    } catch { return false; }
+  }, []);
   const noticeChatReady = shownThreadChatIdRef.current === activeThreadChatId;
   useEffect(() => {
     const api = ipc();
@@ -5417,7 +5510,7 @@ function OneSessionsShell() {
     }
   }, [appLocale, busy, composer, oneRuntimeInventory, reconcileUncertainPreflightSteer, setOnePermission, teamPreflightBusy]);
 
-  const submitTextRef = useRef<((text: string) => Promise<void>) | null>(null);
+  const submitTextRef = useRef<((text: string, resume?: FirstSendEntry) => Promise<void>) | null>(null);
   const resumePausedFollowup = useCallback(async (intent: OneFollowupIntent) => {
     // "Send again" on a direction for a turn that has since ended cannot reach that turn any more; retrying it only
     // re-paused the card (room "Youtube launch", 2026-10-11). The owner asked to send it, so it goes as a new message.
@@ -5786,6 +5879,12 @@ function OneSessionsShell() {
     const attachedOneMemoryUseOnce = !options?.teamRef && armedOneMemoryUseOnce?.targetKey === targetKey
       ? armedOneMemoryUseOnce.receipt
       : null;
+    // The saved send learns its run ID before the request crosses IPC: after a reload Main's admission for this exact
+    // ID decides whether it was taken, never a guess.
+    if (options?.preflightSubmissionId) {
+      try { patchFirstSend(window.localStorage, "one", chatId, options.preflightSubmissionId, { runId, runIdAt: Date.now() }); }
+      catch { /* The uncertain-admission record below still fences a second run ID. */ }
+    }
     // Persist only the opaque ID and its chat binding, never text or
     // capabilities. A renderer reload while Main preflight is still awaiting
     // its judges must not silently allocate a second run ID for this chat.
@@ -6048,6 +6147,11 @@ function OneSessionsShell() {
         ? "이 메시지는 실행되지 못했어요. 모델 연결과 사용 한도를 확인한 뒤 다시 보내 주세요."
         : "This message could not run. Check the model connection and usage limits, then send it again."));
       await refreshAll();
+      // A recovery turn may only be about this request. The owner's own message qualifies only when Main kept it in
+      // the transcript (a refusal after reservation saves it); otherwise the recovery could only read the room's
+      // older request and answer that instead (production Yotube 8f3e09ee, run bc515c4b). The message itself stays
+      // visible as a saved send shown as not sent.
+      if (!options?.promptOrigin && !(await ownerRequestInTranscript(chatId, text, optimisticStartedAt))) return { status: "rejected", runId };
       if (!controlFailure && !isChatBusyFailure(cause)) requestOneOperationalRecovery("one-run-start", cause, { chatId });
       return { status: "rejected", runId };
     } finally {
@@ -6116,6 +6220,7 @@ function OneSessionsShell() {
           displayUserMessage: userAlreadyShown,
         },
       );
+      settleFirstSendOutcome(proposal.binding.chatId, prompt.preflightSubmissionId, prompt.text, outcome);
       if (!["started", "queued", "reconciled"].includes(outcome.status)) {
         setPendingTeamPrompt(current => current?.proposalId === proposal.proposalId ? null : current);
         if (outcome.status === "rejected") {
@@ -6164,6 +6269,8 @@ function OneSessionsShell() {
         const draftKey = `chat:${proposal.binding.chatId}`;
         writeOneComposerDraft(draftKey, { composer: restoreOwnerDraft(readOneComposerDraft(draftKey).composer, prompt.text) });
       }
+      // The exact text is the composer draft again; the saved send would otherwise be shown (or resumed) twice.
+      if (prompt.preflightSubmissionId) settleFirstSend(proposal.binding.chatId, prompt.preflightSubmissionId);
       const ko = normalizedLocale === "ko";
       setActionNotice(step.outcome === "binding_gone"
         ? (ko
@@ -6174,11 +6281,8 @@ function OneSessionsShell() {
           : (ko
             ? "팀 확정을 마치지 못해 시작하지 않았어요. 보낸 글은 작성창에 되돌려 두었어요."
             : "The team could not be confirmed, so nothing started. Your message is back in the composer."));
-      // A typed refusal is a product state with its own notice. Only an unclassified failure may ask One to
-      // recover, and only once the proposal is no longer pending, so the recovery cannot be what ends it.
-      if (oneTeamPreflightRecoveryAllowed(step, oneTeamPreflightProposalPending(current, proposal.proposalId))) {
-        requestOneOperationalRecovery("one-team-preflight-start", cause, { chatId: proposal.binding.chatId });
-      }
+      // No recovery turn: the owner's exact request is back in the composer, not in Main's transcript, so a recovery
+      // turn could only answer the room's older request in its place (production Yotube 8f3e09ee, run bc515c4b).
     } finally {
       if (autoResolvingProposalRef.current === proposal.proposalId) autoResolvingProposalRef.current = null;
       setTeamPreflightBusy(false);
@@ -6274,6 +6378,7 @@ function OneSessionsShell() {
           displayUserMessage: true,
         },
       );
+      settleFirstSendOutcome(proposal.binding.chatId, prompt.preflightSubmissionId, prompt.text, outcome);
       if (!["started", "queued", "reconciled"].includes(outcome.status)) {
         setPendingTeamPrompt(current => current?.proposalId === proposal.proposalId ? null : current);
         if (outcome.status === "rejected") throw new Error("[agentlas:code=recovery_required] Reserved run was rejected before start");
@@ -6282,11 +6387,15 @@ function OneSessionsShell() {
       const currentProposal = await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => result.proposal);
       if (activeThreadChatIdRef.current === proposal.binding.chatId) setTeamPreflight(current =>
         !current || current.proposalId === proposal.proposalId ? currentProposal : current);
-    } catch (cause) {
+    } catch {
       const current = await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => null);
       if (current) setTeamPreflight(current);
       setError(null);
-      requestOneOperationalRecovery("one-team-preflight-consent", cause);
+      // The request behind the card is still there (the card, or its saved send shown as not sent). A recovery turn
+      // would answer the room's older request instead, so none starts.
+      setActionNotice(appLocale === "ko"
+        ? "팀 결정을 반영하지 못해 시작하지 않았어요. 보낸 글은 그대로 있어요 — 다시 눌러 주세요."
+        : "The team decision could not be applied, so nothing started. Your message is still there; try again.");
     } finally {
       setTeamPreflightBusy(false);
     }
@@ -6356,15 +6465,21 @@ function OneSessionsShell() {
     setOneActivationState(current);
   }, [appLocale, oneActivationState]);
 
-  const submit = useCallback(async (text: string) => {
-    const attachmentSnapshot = attachmentDraftsRef.current.slice();
+  const submit = useCallback(async (text: string, resume?: FirstSendEntry) => {
+    // `resume` is this room's own saved send after a reload: it runs with the choices frozen when the owner pressed
+    // send, never the composer's current state, and it never touches what the owner is typing now.
+    const attachmentSnapshot = resume ? [] : attachmentDraftsRef.current.slice();
     // Repetition is configured in One's automation surface, not in the chat
     // composer. Keeping a third scheduling sheet here duplicated that product
     // boundary and made the composer feel like a form.
     const recurrenceSnapshot: OneRecurrenceSelectionV1 | null = null;
-    const overrideSnapshot = { ...turnOverrides, goalControlEpoch: goalControlEpochRef.current };
-    const taskForceTargetSnapshot: OrchestrationTarget[] = turnAgentIds.map((agentId) => orchestrationTargetForAgentId(agentId));
-    const submittedReply = messageReply;
+    const overrideSnapshot: OneTurnOverrides = resume
+      ? { ...oneTurnOverridesFromFirstSend(resume.choices), goalControlEpoch: goalControlEpochRef.current }
+      : { ...turnOverrides, goalControlEpoch: goalControlEpochRef.current };
+    const taskForceTargetSnapshot: OrchestrationTarget[] = resume
+      ? (resume.choices.taskForceTargets ?? [])
+      : turnAgentIds.map((agentId) => orchestrationTargetForAgentId(agentId));
+    const submittedReply = resume ? null : messageReply;
     const rawReply = text.trim();
     const explicitValue = composeMessageReply(rawReply, submittedReply);
     if (!rawReply && attachmentSnapshot.length === 0) return;
@@ -6387,6 +6502,8 @@ function OneSessionsShell() {
       return;
     }
     const currentSubmitChatId = selected?.chatId ?? conversation?.id;
+    // A saved send resumes only in its own room, which the owner has open.
+    if (resume && (!currentSubmitChatId || resume.chatId !== currentSubmitChatId)) return;
     const preserveFollowup = (chatId: string, binding: { submissionId?: string; waitingParentRunId?: string } = {},
       files?: { groupId: string; prompt: string }) => {
       if (binding.submissionId && promptBytes > 32_000) {
@@ -6455,8 +6572,8 @@ function OneSessionsShell() {
       ?? (uncertainRunId ? { chatId: currentSubmitChatId, runId: uncertainRunId } : null) : null;
     const preparingParent = preflightSubmissionRef.current;
     const pendingProposalSubmissionId = teamPreflight?.binding.chatId === currentSubmitChatId ? pendingTeamPrompt?.preflightSubmissionId : undefined;
-    if (teamPreflightBusy || uncertainParent || pendingProposalSubmissionId
-      || (preparingParent && preparingParent.chatId === currentSubmitChatId)) {
+    if (!resume && (teamPreflightBusy || uncertainParent || pendingProposalSubmissionId
+      || (preparingParent && preparingParent.chatId === currentSubmitChatId))) {
       if (!explicitValue || attachmentSnapshot.length > 0) {
         setActionNotice(appLocale === "ko" ? "첨부 파일은 현재 요청이 시작된 뒤 보낼 수 있어요. 작성창에 그대로 있어요." : "Attachments can be sent once the current request starts. They stay in the composer.");
         return;
@@ -6474,7 +6591,8 @@ function OneSessionsShell() {
       return;
     }
     preflightSubmissionGenerationRef.current += 1;
-    const preflightSubmissionId = uid();
+    // A resumed send keeps its submission identity: Main hands the held row back to it exactly once.
+    const preflightSubmissionId = resume?.intentId ?? uid();
     const submissionNavigationEpoch = navigationEpochRef.current;
     const setSubmissionBusy = (value: boolean) => {
       if (navigationEpochRef.current === submissionNavigationEpoch) {
@@ -6482,10 +6600,14 @@ function OneSessionsShell() {
       }
     };
     const value = explicitValue || tFor(appLocale, "one.shell.composer.attachment_prompt", { n: attachmentSnapshot.length, s: attachmentSnapshot.length === 1 ? "" : "s" });
-    let submissionRuntimeSelection = oneRuntimeSelection;
+    let submissionRuntimeSelection = resume ? resume.choices.runtimeSelection : oneRuntimeSelection;
+    // The permission the owner pressed send with; a resumed send never inherits a chip changed since.
+    const submissionPermission: OnePermissionMode = resume && isOnePermissionMode(resume.choices.permission)
+      ? resume.choices.permission : onePermission;
     const api = ipc();
     if (!api) {
       setError(null);
+      if (resume) return; // The saved send stays; it resumes when the bridge is back.
       requestOneOperationalRecovery("one-submit-connection", "Desktop bridge unavailable");
       return;
     }
@@ -6531,7 +6653,7 @@ function OneSessionsShell() {
     // 시작하면 Main 이 거절해 요청이 사라졌다(2026-09-26 QA 0b03862a: invocation_cleanup_pending →
     // 20초 뒤 옛 목표만 재개). 그 경우 새 요청은 줄에 세우고 정리가 끝나면 바로 돌린다.
     let settlingChatId: string | null = null;
-    if (!busy && attachmentSnapshot.length === 0 && activeThreadChatIdRef.current) {
+    if (!resume && !busy && attachmentSnapshot.length === 0 && activeThreadChatIdRef.current) {
       const threadChatId = activeThreadChatIdRef.current;
       try {
         if ((await api.invoke.activeChats()).includes(threadChatId)) settlingChatId = threadChatId;
@@ -6539,12 +6661,12 @@ function OneSessionsShell() {
     }
     // React state can lag a second send while the first active-chat read resolves.
     const latestPreparingParent = preflightSubmissionRef.current;
-    if (currentSubmitChatId && latestPreparingParent?.chatId === currentSubmitChatId) {
+    if (!resume && currentSubmitChatId && latestPreparingParent?.chatId === currentSubmitChatId) {
       if (attachmentSnapshot.length === 0) preserveFollowup(currentSubmitChatId, { submissionId: latestPreparingParent.submissionId });
       else setActionNotice(appLocale === "ko" ? "첨부 파일은 첫 요청이 시작된 뒤 보낼 수 있어요. 작성창에 그대로 있어요." : "Attachments can be sent once the first request starts. They stay in the composer.");
       return;
     }
-    if (busy || settlingChatId || (runIdRef.current && runChatIdRef.current === currentSubmitChatId)) {
+    if (!resume && (busy || settlingChatId || (runIdRef.current && runChatIdRef.current === currentSubmitChatId))) {
       const chatId = busy || runIdRef.current ? runChatIdRef.current : settlingChatId;
       if (!chatId) {
         setActionNotice(appLocale === "ko" ? "첨부 파일은 현재 실행이 끝난 뒤 보낼 수 있습니다. 작성창에 보관합니다." : "Attachments can be sent after the current run settles. They remain in the composer.");
@@ -6580,13 +6702,18 @@ function OneSessionsShell() {
     );
     if (selected && (!selected.chatId || (!selected.truth.mayStartExecution && !canContinueInPlace))) {
       setError(null);
-      requestOneOperationalRecovery("one-submit-continuation", "Current task cannot continue with its present verified state");
+      // A refused request is never a reason to start a recovery turn (it would answer the task's older request in
+      // place of this one): a saved send is shown as not sent; a fresh one stays in the composer with one line.
+      if (resume) { holdFirstSend(resume.chatId, resume.intentId, "refused"); return; }
+      setActionNotice(appLocale === "ko"
+        ? "이 작업은 지금 상태로는 이어서 실행할 수 없어 보내지 않았어요. 글은 작성창에 그대로 있어요."
+        : "This task cannot continue in its current state, so nothing was sent. Your text is still in the composer.");
       return;
     }
     // PRD §4.14 — 제안 카드가 떠 있는 동안 사용자가 평상어로 답하면 **조용히 버려졌다.**
     // 버리지 않는다: 만료된 제안이면 그 사실을 말하고 이번 입력을 그대로 진행시키고,
     // 아직 살아 있는 제안이면 왜 지금 못 받는지 한 줄로 답한다.
-    if (teamPreflight && isOneTeamPreflightPendingStatus(teamPreflight.status)) {
+    if (!resume && teamPreflight && isOneTeamPreflightPendingStatus(teamPreflight.status)) {
       const expired = isOneTeamPreflightExpired(teamPreflight);
       if (!expired) {
         setError(appLocale === "ko"
@@ -6616,6 +6743,7 @@ function OneSessionsShell() {
       let preparedAttachments: PreparedOneAttachments | null = null;
       let runPrompt = value;
       let awaitingProposal = false;
+      let runOutcome: OneRunStartOutcome | null = null;
       // Resolve new-chat intent in Main before team preflight. A cold model can
       // miss the fast judgment budget, in which case the explicitly labeled
       // undecided result keeps the safe conversational default.
@@ -6653,7 +6781,16 @@ function OneSessionsShell() {
         const submissionReceipt = await api.invoke.preflightSubmissionBegin({
           submissionId: preflightSubmissionId, chatId, userPrompt: runPrompt,
           ...(submissionRuntimeSelection ? { runtimeSelection: submissionRuntimeSelection } : {}),
+          ...(resume ? { resume: true as const } : {}),
         });
+        if (resume && submissionReceipt.submissionId === preflightSubmissionId && submissionReceipt.chatId === chatId
+          && submissionReceipt.state !== "open") {
+          // Main's own state of this send decides: bound = it already started (the transcript has it); reserved = Main
+          // is starting it now (looked at again later); held/cancelled without a start = not sent, text kept.
+          if (submissionReceipt.state === "bound") settleFirstSend(chatId, preflightSubmissionId);
+          else if (submissionReceipt.state !== "reserved") holdFirstSend(chatId, preflightSubmissionId, "refused");
+          return;
+        }
         if (submissionReceipt.submissionId !== preflightSubmissionId
           || submissionReceipt.chatId !== chatId || submissionReceipt.state !== "open") {
           throw new Error("one_preflight_submission_receipt_mismatch");
@@ -6691,7 +6828,7 @@ function OneSessionsShell() {
         // quick answers appear under Work even when the authoritative intent
         // verdict was `conversation`.
         if (resolvedIntent === "conversation" && !explicitTeamRequest) {
-          await startRun(
+          runOutcome = await startRun(
             chatId,
             taskId,
             taskVersion,
@@ -6705,8 +6842,10 @@ function OneSessionsShell() {
               runtimeSelection: submissionRuntimeSelection,
               preflightSubmissionId,
               userAlreadyShown: true,
+              ...(resume ? { permissionMode: submissionPermission } : {}),
             },
           );
+          settleFirstSendOutcome(chatId, preflightSubmissionId, runPrompt, runOutcome);
           return;
         }
         // Taskforce conversations intentionally keep /one?chat=... so the
@@ -6718,7 +6857,7 @@ function OneSessionsShell() {
         const admissionBinding: OneSubmitTaskBinding = { chatId, taskId, taskVersion, taskIntent: resolvedIntent };
         const { binding: preparedBinding, prepared } = await prepareOneTeamPreflightForSubmit(api, admissionBinding, {
           userPrompt: runPrompt,
-          permission: onePermission === "read" ? "read" : "write",
+          permission: submissionPermission === "read" ? "read" : "write",
           ...(preparedAttachments ? { attachmentRef: preparedAttachments.ref } : {}),
           ...(submissionRuntimeSelection ? { runtimeSelection: submissionRuntimeSelection } : {}),
           ...((() => {
@@ -6749,7 +6888,7 @@ function OneSessionsShell() {
           throw Object.assign(new Error(unsupportedInputMessage), { code: prepared.code });
         }
         if (prepared.kind === "not_required") {
-          await startRun(
+          runOutcome = await startRun(
             chatId,
             preparedBinding.taskId,
             preparedBinding.taskVersion,
@@ -6763,8 +6902,10 @@ function OneSessionsShell() {
               runtimeSelection: submissionRuntimeSelection,
               preflightSubmissionId,
               userAlreadyShown: true,
+              ...(resume ? { permissionMode: submissionPermission } : {}),
             },
           );
+          settleFirstSendOutcome(chatId, preflightSubmissionId, runPrompt, runOutcome);
           return;
         }
         if (preparedAttachments) {
@@ -6805,7 +6946,9 @@ function OneSessionsShell() {
       } finally {
         releaseParentReadiness();
         setSubmissionBusy(false);
-        if (!awaitingProposal && !runIdRef.current) {
+        // A queued start belongs to Main's send queue, which starts it later under this open submission: holding it
+        // here made that later start fail one_preflight_submission_changed.
+        if (!awaitingProposal && !runIdRef.current && runOutcome?.status !== "queued") {
           await api.invoke.preflightSubmissionHold(preflightSubmissionId).catch(() => null);
         }
         if (preflightSubmissionRef.current?.submissionId === preflightSubmissionId) {
@@ -6823,12 +6966,64 @@ function OneSessionsShell() {
         }
       }
     };
-    setComposer("");
-    setTurnOverrides({});
-    setTurnAgentIds(activeTaskforceAgentIds);
-    setAgentPickerOpen(false);
-    setComposerMenu(null);
-    clearAttachmentDrafts({ preserveSubmittedPreviews: true });
+    /*
+     * ★The composer empties and the saved send appears in one synchronous step (one-first-send-outbox). Main records
+     *   the message only when its run starts — seconds later in a room (intent judgment, team preflight, planner). A
+     *   reload in that window deleted it without a trace (release peer, dev instance of af6ca162, twice: no admission,
+     *   no pending send, no chat row). From here on the text survives reload, crash and relaunch, and Main's receipts
+     *   decide whether it resumes once or is shown as not sent.
+     */
+    const firstSendChatId = selected?.chatId && !homeTransitionPendingRef.current && selectedTaskIdRef.current === selected.taskId
+      ? selected.chatId
+      : conversation && !homeTransitionPendingRef.current && selectedConversationIdRef.current === conversation.id
+        ? conversation.id : null;
+    if (resume && firstSendChatId !== resume.chatId) {
+      // The room is not settled on screen as an existing conversation yet: never let a resume create a new chat.
+      releaseParentReadiness();
+      if (preflightSubmissionRef.current?.submissionId === preflightSubmissionId) preflightSubmissionRef.current = null;
+      sessionFirstSendIdsRef.current.delete(resume.intentId);
+      return;
+    }
+    const currentGoalSnapshot = currentOneGoalOverride(overrideSnapshot, goalControlEpochRef.current);
+    const firstSend: FirstSendEntry = resume ?? {
+      intentId: preflightSubmissionId, surface: "one", chatId: firstSendChatId,
+      userPrompt: value, createdAt: new Date().toISOString(),
+      // A fresh conversation is ready only once it exists with its workspace and model pin (see below).
+      ready: firstSendChatId !== null, replayable: attachmentSnapshot.length === 0,
+      choices: {
+        ...(submissionRuntimeSelection ? { runtimeSelection: submissionRuntimeSelection } : {}),
+        permission: submissionPermission,
+        overrides: {
+          ...(currentGoalSnapshot.goalMode ? { goalMode: true } : {}),
+          ...(overrideSnapshot.planMode ? { planMode: true } : {}),
+          ...(overrideSnapshot.fastMode ? { fastMode: true } : {}),
+          ...(overrideSnapshot.sessionRouting ? { sessionRouting: true } : {}),
+        },
+        taskForceTargets: taskForceTargetSnapshot,
+      },
+    };
+    if (!resume) {
+      try {
+        saveFirstSend(window.localStorage, firstSend);
+      } catch {
+        // Not durable means not sent: the draft stays exactly where it is.
+        releaseParentReadiness();
+        if (preflightSubmissionRef.current?.submissionId === preflightSubmissionId) preflightSubmissionRef.current = null;
+        setActionNotice(appLocale === "ko"
+          ? "보낸 글을 이 기기에 보관하지 못해 보내지 않았습니다. 글은 작성창에 그대로 있습니다. 저장 공간을 확인한 뒤 다시 보내 주세요."
+          : "The message could not be kept on this device, so it was not sent. Your text is still in the composer; check storage and send it again.");
+        return;
+      }
+      setComposer("");
+      setTurnOverrides({});
+      setTurnAgentIds(activeTaskforceAgentIds);
+      setAgentPickerOpen(false);
+      setComposerMenu(null);
+      clearAttachmentDrafts({ preserveSubmittedPreviews: true });
+    }
+    liveFirstSendIdsRef.current.add(preflightSubmissionId);
+    sessionFirstSendIdsRef.current.add(preflightSubmissionId);
+    showFirstSends(firstSend.chatId);
     freshChatSubmissionPendingRef.current = !(
       (selected?.chatId && !homeTransitionPendingRef.current && selectedTaskIdRef.current === selected.taskId)
       || (conversation && !homeTransitionPendingRef.current && selectedConversationIdRef.current === conversation.id)
@@ -6836,7 +7031,7 @@ function OneSessionsShell() {
     // Commit the request before any attachment, intent, team, or runtime work
     // begins. The user now sees a truthful "Preparing execution" phase rather
     // than the prior answer's stale, falsely-live Activity.
-    const preflightId = `one-preflight:${uid()}`;
+    const preflightId = firstSendRowId(preflightSubmissionId);
     const preflightStartedAt = Date.now();
     const sentChatId = freshChatSubmissionPendingRef.current ? null : (conversation?.id ?? selected?.chatId ?? null);
     flushSync(() => {
@@ -6849,7 +7044,7 @@ function OneSessionsShell() {
       setSurface(null);
       setReceipt(null);
       oneTranscriptRevisionRef.current += 1;
-      setMessages((current) => [
+      setMessages((current) => current.some((item) => item.id === preflightId) ? current : [
         ...current.filter((item) => item.id !== "one-live-response"),
         {
           id: preflightId,
@@ -6885,6 +7080,8 @@ function OneSessionsShell() {
         attachmentDraftsRef.current = restored;
         setAttachmentDrafts(restored);
       }
+      // The exact draft is back in the composer: the saved copy would show the same text a second time.
+      settleFirstSend(firstSend.chatId, preflightSubmissionId);
       setActionNotice(notice);
     };
     try {
@@ -6908,6 +7105,9 @@ function OneSessionsShell() {
         throw new Error("fresh_chat_receipt_mismatch");
       }
       freshCreatedChatId = chat.id;
+      // The saved send now belongs to this conversation (a reload lands here through the replaced URL below).
+      try { moveFirstSendToChat(window.localStorage, "one", preflightSubmissionId, chat.id); firstSend.chatId = chat.id; }
+      catch { /* It stays in the "new" slot and is handed back to the composer there. */ }
       preflightSubmissionRef.current = { submissionId: preflightSubmissionId, chatId: chat.id, ready: parentReadiness };
       // A later "New conversation" action owns navigation. An older async
       // submission may still finish preparing, but it must not pull the UI
@@ -6974,12 +7174,43 @@ function OneSessionsShell() {
           return;
         }
       }
+      // Workspace and model pin are durable: a resume after a reload may now run exactly this conversation.
+      try { patchFirstSend(window.localStorage, "one", chat.id, preflightSubmissionId, { ready: true }); } catch { /* resumes as not sent */ }
       await resolveActivationConcern(chat.id);
       await prepareOrRun(chat.id, null, null, "conversation");
     } catch (cause) {
       freshChatSubmissionPendingRef.current = false;
       setSubmissionBusy(false);
       setPreflightPrompt(null);
+      if (resume) {
+        // After a reload nothing is moved into the composer the owner may be typing in, and no recovery turn starts.
+        if (runIdRef.current) return; // its run started; that run reports its own outcome
+        setMessages((current) => current.filter((item) => item.id !== preflightId));
+        if (isOneSendOwnedElsewhere(cause)) return; // the window that has it finishes it
+        if (isPreviousOneSendPending(cause)) {
+          // Another message of this room is still being prepared: this one is looked at again once it settles.
+          sessionFirstSendIdsRef.current.delete(resume.intentId);
+          return;
+        }
+        holdFirstSend(resume.chatId, resume.intentId, "refused");
+        setActionNotice(appLocale === "ko"
+          ? "새로고침 전에 보낸 메시지를 이어서 보내지 못했어요. 글은 대화에 남아 있어요 — 다시 보내기를 눌러 주세요."
+          : "The message sent before the reload could not be continued. Its text is still in the conversation; press Send again.");
+        return;
+      }
+      if (isPreviousOneSendPending(cause) && !runIdRef.current) {
+        // Main still prepares an earlier message of this room (another window, or one sent just before). That is a
+        // state, not a fault: the text stays in the conversation as not sent, with a one-tap resend, and no
+        // operational recovery turn starts (release peer 2026-10-16: the refusal became recovery run 14815f00 and
+        // the owner's resent text was never saved).
+        setMessages((current) => current.filter((item) => item.id !== preflightId));
+        holdFirstSend(firstSend.chatId, preflightSubmissionId, "previous_pending");
+        setActionNotice(appLocale === "ko"
+          ? "이전 메시지를 아직 준비하는 중이라 이 메시지는 보내지 않았어요. 글은 대화에 남아 있어요 — 준비가 끝나면 다시 보내기를 눌러 주세요."
+          : "An earlier message is still being prepared, so this one was not sent. Its text stays in the conversation; press Send again once that finishes.");
+        setError(null);
+        return;
+      }
       if (freshCreatedChatId && !runIdRef.current) {
         recoverFreshCreatedChatDraft(unsupportedInputMessage ?? (appLocale === "ko"
           ? "새 대화는 열렸지만 실행 준비를 저장하고 확인하지 못해 아무 작업도 시작하지 않았습니다. 입력과 첨부는 이 대화에 복원했습니다. 다시 시도해 주세요."
@@ -6997,6 +7228,7 @@ function OneSessionsShell() {
           ? "첨부를 준비하지 못했습니다. 파일은 전송되지 않았습니다. 다시 시도해 주세요."
           : "The attachment was not sent. Prepare it again and retry.");
         setComposer(value);
+        settleFirstSend(firstSend.chatId, preflightSubmissionId);
         return;
       }
       /*
@@ -7027,6 +7259,7 @@ function OneSessionsShell() {
         }
         setTurnOverrides(currentOneGoalOverride(overrideSnapshot, goalControlEpochRef.current));
         setTurnAgentIds(turnAgentIds);
+        settleFirstSend(firstSend.chatId, preflightSubmissionId);
       }
       /*
        * ★되돌려 주는 것만으로는 부족하다 — **왜 안 갔는지**도 말해야 한다 (2026-09-08).
@@ -7056,7 +7289,6 @@ function OneSessionsShell() {
         // Every automatic path (Goal steer bypass, judge fallback, one rebind)
         // already ran in the shared helper. Name the exact cause and next step.
         setActionNotice(oneSubmitPreflightNotice(cause.code, appLocale === "ko"));
-        requestOneOperationalRecovery("one-submit", cause);
         setError(null);
         return;
       }
@@ -7068,14 +7300,153 @@ function OneSessionsShell() {
             ? `보내지 못했습니다${raw ? `: ${raw}` : " (이유가 오지 않았습니다)"}. 글과 첨부는 작성창에 그대로 있습니다 — 다시 보내 주세요.`
             : `The message was not sent${raw ? `: ${raw}` : " (no reason came back)"}. Your text and attachments are still in the composer; send it again.`),
       );
-      if (!controlFailure) requestOneOperationalRecovery("one-submit", cause);
+      /*
+       * ★No operational recovery turn for a request refused before it started (release peer 2026-10-16; production
+       *   Yotube 8f3e09ee 04:00Z, run bc515c4b). The refused request is not in Main's transcript — it is back in the
+       *   composer — so a recovery turn could only read the room's older task and answered "the original work is
+       *   done, nothing is left" in its place. The owner's exact request stays with the owner instead.
+       */
       setError(null);
     } finally {
       releaseParentReadiness();
       if (preflightSubmissionRef.current?.submissionId === preflightSubmissionId) preflightSubmissionRef.current = null;
+      liveFirstSendIdsRef.current.delete(preflightSubmissionId);
+      showFirstSends(firstSend.chatId);
     }
   }, [messageReply, activeTaskforce, discussion.refresh, oneProfile, activeTaskforceAgentIds, autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, normalizedLocale, onePermission, oneRuntimeInventory, oneRuntimeSelection, orchestrationTargetForAgentId, reconcileUncertainPreflightSteer, resolveActivationConcern, router, scrollToLatest, selected, startRun, pendingTeamPrompt, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides, workspaceGrant]);
   submitTextRef.current = submit;
+
+  /*
+   * ★A send Main never took survives a reload (one-first-send-outbox). When its room is open again, Main's receipts
+   *   decide: taken -> the saved copy goes; never received -> it resumes exactly once, with the choices it was sent
+   *   with; refused, interrupted mid-setup or older than the resume window -> it stays in the transcript as not sent,
+   *   with a one-tap resend. Never a second run on an unknown answer, never a recovery turn.
+   */
+  const firstSendResumeTriesRef = useRef(new Map<string, number>());
+  const firstSendResumeRunningRef = useRef(false);
+  const resumeFirstSendsRef = useRef<(chatId: string) => Promise<void>>(async () => undefined);
+  resumeFirstSendsRef.current = async (chatId: string) => {
+    const api = ipc();
+    if (!api || activeThreadChatIdRef.current !== chatId || firstSendResumeRunningRef.current) return;
+    firstSendResumeRunningRef.current = true;
+    showFirstSends(chatId);
+    try {
+      await resumeFirstSends({
+        entries: () => readFirstSends(window.localStorage, "one", chatId),
+        isLive: (intentId) => liveFirstSendIdsRef.current.has(intentId),
+        isOwnSession: (intentId) => sessionFirstSendIdsRef.current.has(intentId),
+        blocked: () => Boolean(runIdRef.current || preflightSubmissionRef.current || teamPreflightBusy),
+        admission: (runId) => api.invoke.admission(runId),
+        stillOpen: () => activeThreadChatIdRef.current === chatId,
+        uncertainRunId: () => readOneUncertainAdmission(chatId)?.runId ?? null,
+        clearUncertain: (runId) => clearOneUncertainAdmission(chatId, runId),
+        chatActive: async () => (await api.invoke.activeChats()).includes(chatId),
+        settle: (intentId) => settleFirstSend(chatId, intentId),
+        hold: (intentId, reason) => holdFirstSend(chatId, intentId, reason),
+        tries: (intentId) => firstSendResumeTriesRef.current.get(intentId) ?? 0,
+        setTries: (intentId, tries) => { firstSendResumeTriesRef.current.set(intentId, tries); },
+        resume: async (entry) => {
+          // The look is over; the resumed submit owns the entry now (it is live until it settles).
+          firstSendResumeRunningRef.current = false;
+          await submitTextRef.current?.(entry.userPrompt, entry);
+        },
+        now: () => Date.now(),
+      });
+    } finally {
+      firstSendResumeRunningRef.current = false;
+    }
+  };
+  useEffect(() => {
+    if (!activeThreadChatId) {
+      setFirstSends([]);
+      // A send captured before its fresh conversation existed never reached Main: its exact text goes back to the
+      // home composer (unless the owner is already writing there).
+      try {
+        const orphan = readFirstSends(window.localStorage, "one", null)
+          .find(entry => !liveFirstSendIdsRef.current.has(entry.intentId) && !sessionFirstSendIdsRef.current.has(entry.intentId));
+        if (orphan && !(composerHandleRef.current?.getValue() ?? composerValueRef.current).trim()) {
+          setComposer(orphan.userPrompt);
+          removeFirstSend(window.localStorage, "one", null, orphan.intentId);
+          setActionNotice(appLocale === "ko"
+            ? "새 대화를 만들기 전에 끊겨 보내지 못한 메시지를 작성창에 되돌려 두었어요."
+            : "A message interrupted before its new conversation existed is back in the composer.");
+        }
+      } catch { /* kept for the next look */ }
+      return;
+    }
+    showFirstSends(activeThreadChatId);
+    if (hydratedThreadChatId !== activeThreadChatId || busy || teamPreflightBusy) return;
+    const chatId = activeThreadChatId;
+    void resumeFirstSendsRef.current(chatId);
+    // Main may still be admitting a recorded run; look again a few times instead of guessing.
+    let ticks = 0;
+    const timer = window.setInterval(() => {
+      if ((ticks += 1) > 24 || activeThreadChatIdRef.current !== chatId) { window.clearInterval(timer); return; }
+      const pending = readFirstSends(window.localStorage, "one", chatId)
+        .some(entry => !entry.notSent && !liveFirstSendIdsRef.current.has(entry.intentId));
+      if (!pending) { window.clearInterval(timer); return; }
+      void resumeFirstSendsRef.current(chatId);
+    }, 5_000);
+    const onStorage = (event: StorageEvent) => {
+      if (event.key?.startsWith("agentlas.first-send-outbox.v1:one:")) {
+        showFirstSends(chatId);
+        void resumeFirstSendsRef.current(chatId);
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => { window.clearInterval(timer); window.removeEventListener("storage", onStorage); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeThreadChatId, hydratedThreadChatId, busy, teamPreflightBusy, showFirstSends]);
+  // A durable user row with the same words, written at or after the send, is that send: the saved copy goes.
+  useEffect(() => {
+    const chatId = activeThreadChatId;
+    if (!chatId || hydratedThreadChatId !== chatId) return;
+    for (const entry of firstSends) {
+      if (entry.chatId === chatId && !liveFirstSendIdsRef.current.has(entry.intentId) && firstSendEchoed(entry, messages)) {
+        settleFirstSend(chatId, entry.intentId);
+      }
+    }
+  }, [activeThreadChatId, firstSends, hydratedThreadChatId, messages, settleFirstSend]);
+  /** The owner's one tap on a send shown as not sent: a new send with the same words and the same frozen choices. */
+  const resendFirstSend = useCallback(async (entry: FirstSendEntry) => {
+    const chatId = entry.chatId;
+    if (!chatId || activeThreadChatIdRef.current !== chatId) return;
+    if (busy || teamPreflightBusy || runIdRef.current || preflightSubmissionRef.current) {
+      setActionNotice(appLocale === "ko" ? "지금 진행 중인 작업이 끝나면 다시 보내 주세요." : "Send it again once the current work finishes.");
+      return;
+    }
+    if (entry.notSent === "attachments") {
+      // Files cannot be replayed: the words go back to the composer so the owner attaches them again.
+      if ((composerHandleRef.current?.getValue() ?? composerValueRef.current).trim()) {
+        setActionNotice(appLocale === "ko" ? "작성 중인 글이 있어 가져오지 않았어요. 비운 뒤 다시 눌러 주세요." : "There is a draft in the composer. Clear it and press again.");
+        return;
+      }
+      setComposer(entry.userPrompt);
+      settleFirstSend(chatId, entry.intentId);
+      return;
+    }
+    if (entry.runId) {
+      // Main may have taken it after all: never a second run over a taken message.
+      const admission = await ipc()?.invoke.admission(entry.runId).catch(() => null);
+      if (admission?.status === "admitted" || admission?.status === "pending") { settleFirstSend(chatId, entry.intentId); return; }
+      clearOneUncertainAdmission(chatId, entry.runId);
+    }
+    const again: FirstSendEntry = { intentId: uid(), surface: "one", chatId, userPrompt: entry.userPrompt,
+      createdAt: new Date().toISOString(), ready: true, replayable: true, choices: entry.choices };
+    try {
+      saveFirstSend(window.localStorage, again);
+      removeFirstSend(window.localStorage, "one", chatId, entry.intentId);
+    } catch {
+      setActionNotice(appLocale === "ko" ? "다시 보내기를 보관하지 못했어요. 글은 그대로 있어요." : "The resend could not be kept. The text is unchanged.");
+      return;
+    }
+    firstSendResumeTriesRef.current.set(again.intentId, 1);
+    showFirstSends(chatId);
+    await submitTextRef.current?.(again.userPrompt, again);
+  }, [appLocale, busy, settleFirstSend, showFirstSends, teamPreflightBusy]);
+  const discardFirstSend = useCallback((entry: FirstSendEntry) => {
+    settleFirstSend(entry.chatId, entry.intentId);
+  }, [settleFirstSend]);
 
   const stopRun = useCallback(() => {
     // Stop is terminal for the visible work item: Main drops the directions
@@ -9512,6 +9883,23 @@ function OneSessionsShell() {
                                   : "Goal direction saved in chat · not run · choose revision or resume in the Goal controls above"}
                               </p>
                             )}
+                            {message.role === "user" && sourceMessageId.startsWith("first-send:") && (() => {
+                              const entry = firstSends.find(item => firstSendRowId(item.intentId) === sourceMessageId);
+                              if (!entry?.notSent) return null;
+                              return (
+                                <p className={styles.firstSendStatus} role="status" data-one-first-send="not-sent" data-one-first-send-reason={entry.notSent}>
+                                  <span>{firstSendHoldLine(entry.notSent, appLocale === "ko")}</span>
+                                  <button type="button" data-one-first-send-action="resend" onClick={() => { void resendFirstSend(entry); }}>
+                                    {entry.notSent === "attachments"
+                                      ? (appLocale === "ko" ? "작성창으로 가져오기" : "Move to composer")
+                                      : (appLocale === "ko" ? "다시 보내기" : "Send again")}
+                                  </button>
+                                  <button type="button" data-one-first-send-action="discard" onClick={() => discardFirstSend(entry)}>
+                                    {appLocale === "ko" ? "지우기" : "Discard"}
+                                  </button>
+                                </p>
+                              );
+                            })()}
                             </div>
                           </article>
                           </MessageActions>
@@ -9711,6 +10099,10 @@ function OneSessionsShell() {
                               expectedProposalVersion: latest.version,
                               confirmedByUser: true,
                             });
+                            // The message behind an expired or cancelled proposal never ran: it stays as not sent.
+                            if (pendingTeamPrompt?.proposalId === latest.proposalId && pendingTeamPrompt.preflightSubmissionId) {
+                              holdFirstSend(latest.binding.chatId, pendingTeamPrompt.preflightSubmissionId, "stale");
+                            }
                             setTeamPreflight(null);
                             setPendingTeamPrompt(null);
                           } catch (cause) {

@@ -31,6 +31,7 @@ import { Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, us
 import { useRouter, useSearchParams } from "next/navigation";
 import { grantForPastedImage, ipc, ipcEvents } from "@/lib/ipc";
 import { readOneFollowupOutbox, saveOneFollowupIntent, removeOneFollowupIntent, pauseOneFollowupOutbox, resumeOneFollowupIntent, type OneFollowupIntent } from "@/lib/one-followup-outbox";
+import { patchFirstSend, planFirstSendResume, readFirstSends, removeFirstSend, saveFirstSend, type FirstSendEntry } from "@/lib/one-first-send-outbox";
 import type {
   Chat,
   AgentlasSurfaceAction,
@@ -130,6 +131,10 @@ const workFollowupTails = new Map<string, Promise<unknown>>();
 const workFollowupPreparations = new Map<string, Promise<unknown>>();
 const workFollowupStopEpochs = new Map<string, number>();
 const workFollowupAutoBlockedChats = new Set<string>();
+/** Saved first sends a live send() of this renderer is driving right now (never resumed underneath it). */
+const liveWorkFirstSendIds = new Set<string>();
+/** Saved first sends this renderer already looked at once after opening their chat. */
+const resumedWorkFirstSendIds = new Set<string>();
 const workFollowupPumps = new Map<string, Promise<void>>();
 type WorkFollowupDeliveryOptions = { automatic?: boolean; stopEpoch?: number; canDeliver?: () => boolean };
 function workFollowupMayDeliver(intent: OneFollowupIntent, options: WorkFollowupDeliveryOptions, stopEpoch: number): boolean {
@@ -4756,6 +4761,8 @@ function ChatPage() {
         stormbreakerMode?: boolean;
         /** Main-owned exact Decision continuation; never used by ordinary sends. */
         decisionContinuation?: { sourceMessageId: string; runId: string };
+        /** A saved send resumed after a reload keeps the run ID it was captured with (Main dedups by it). */
+        resumeRunId?: string;
       },
     ) => {
       const api = ipc();
@@ -4809,6 +4816,37 @@ function ChatPage() {
         return false;
       }
       setCancelPending(false);
+      // Reserve the Main-owned run identity before painting the placeholder so
+      // every live event and replacement snapshot has the same exact anchor.
+      const runId = opts?.decisionContinuation?.runId ?? opts?.resumeRunId ?? crypto.randomUUID();
+      /*
+       * ★The composer already emptied itself (ChatInput clears on send), and Main records the message only when
+       *   invoke.run reaches it — after the goal contract, the file snapshot and the first-message rename below. A
+       *   reload in that window lost the message. It is saved here first (one-first-send-outbox) and settled by
+       *   Main's answer; a reopened chat resumes it once or hands the exact text back.
+       */
+      const sendChatId = chat.id;
+      const firstSend: FirstSendEntry | null = opts?.decisionContinuation ? null : {
+        intentId: runId, surface: "work", chatId: sendChatId, userPrompt, createdAt: new Date().toISOString(),
+        ready: true, replayable: !opts?.images?.length && !opts?.files?.length,
+        choices: { work: JSON.parse(JSON.stringify({ ...opts, images: undefined, files: undefined, resumeRunId: undefined })) as Record<string, unknown> },
+      };
+      if (firstSend) {
+        try { saveFirstSend(window.localStorage, firstSend); }
+        catch {
+          setComposerPrefill(userPrompt);
+          setSessionNotice(locale === "ko"
+            ? "보낸 글을 이 기기에 보관하지 못해 보내지 않았습니다. 글을 작성창에 되돌려 두었습니다."
+            : "The message could not be kept on this device, so it was not sent. It is back in the composer.");
+          return false;
+        }
+        liveWorkFirstSendIds.add(runId);
+      }
+      const settleWorkFirstSend = () => {
+        if (!firstSend) return;
+        liveWorkFirstSendIds.delete(runId);
+        try { removeFirstSend(window.localStorage, "work", sendChatId, runId); } catch { /* the next look retries */ }
+      };
       if (opts?.goalMode && chat.goalId && !goalContext?.objective) {
         // Define exactly once, before the run. `defineGoal` returns the
         // existing active contract instead of overwriting it, so a later
@@ -4849,6 +4887,8 @@ function ChatPage() {
       if (opts?.files?.length) {
         const bridge = chatFilesBridge();
         if (!bridge) {
+          setComposerPrefill(userPrompt);
+          settleWorkFirstSend();
           setSessionNotice(locale === "ko" ? "Desktop 파일 연결을 사용할 수 없어 첨부를 보내지 않았습니다." : "The attachment was not sent because the Desktop file bridge is unavailable.");
           return false;
         }
@@ -4858,8 +4898,10 @@ function ChatPage() {
           hydratedChatFileGroupsRef.current.set(snapshot.groupId, attachedChatFiles);
           boundUserPrompt = appendChatFileMarker(userPrompt, snapshot.groupId);
         } catch (cause) {
-          if (!isCurrentChat()) return false;
+          if (!isCurrentChat()) { liveWorkFirstSendIds.delete(runId); return false; }
           const detail = cause instanceof Error ? cause.message : String(cause);
+          setComposerPrefill(userPrompt);
+          settleWorkFirstSend();
           setSessionNotice(locale === "ko" ? `첨부를 보내지 않았습니다: ${detail}` : `The attachment was not sent: ${detail}`);
           return false;
         }
@@ -4884,9 +4926,6 @@ function ChatPage() {
         }
       }
       const images = opts?.images;
-      // Reserve the Main-owned run identity before painting the placeholder so
-      // every live event and replacement snapshot has the same exact anchor.
-      const runId = opts?.decisionContinuation?.runId ?? crypto.randomUUID();
       const placeholderId = uid();
       const imageDataUrls = images?.map(
         (img) => `data:${img.mediaType};base64,${img.data}`,
@@ -4959,13 +4998,16 @@ function ChatPage() {
           }).catch(() => null);
           return Boolean(continued && continued.status !== "rejected");
         }
-        if (!writeWorkUncertainAdmission(chat.id, runId)) return false;
+        if (!writeWorkUncertainAdmission(chat.id, runId)) { liveWorkFirstSendIds.delete(runId); return false; }
+        if (firstSend) { try { patchFirstSend(window.localStorage, "work", sendChatId, runId, { runId, runIdAt: Date.now() }); } catch { /* the fence above still guards */ } }
         try {
           await api.invoke.run(runRequest);
           clearWorkUncertainAdmission(chat.id, runId);
+          settleWorkFirstSend();
           return true;
         } catch {
           // The admission fence stays; the chat reconciles it on return (never a blind resend).
+          liveWorkFirstSendIds.delete(runId);
           return false;
         }
       }
@@ -5087,16 +5129,19 @@ function ChatPage() {
           if (!writeWorkUncertainAdmission(chat.id, runId)) {
             throw new Error("work_admission_fence_unavailable");
           }
+          // The saved send learns that its run request crosses IPC now: after a reload, Main's admission decides.
+          if (firstSend) { try { patchFirstSend(window.localStorage, "work", sendChatId, runId, { runId, runIdAt: Date.now() }); } catch { /* the fence above still guards */ } }
           requestDispatched = true;
           await api.invoke.run(runRequest);
           clearWorkUncertainAdmission(chat.id, runId);
+          settleWorkFirstSend();
         }
         if (!isCurrentChat()) return false;
         // runId 도착 전에 Stop을 눌렀다면(레이스) 구독을 건 직후 즉시 취소 — abort 종료 이벤트를 수신해 busy 해제.
         if (cancelRequestedRef.current) requestRunCancellation(runId);
         return true;
       } catch (cause) {
-        if (!isCurrentChat()) return false;
+        if (!isCurrentChat()) { liveWorkFirstSendIds.delete(runId); return false; }
         let admissionStatus: "absent" | "pending" | "admitted" | "rejected" | null = null;
         if (!opts?.decisionContinuation && requestDispatched) {
           try {
@@ -5106,6 +5151,7 @@ function ChatPage() {
               const receipt = await api.invoke.receipt(runId);
               if (receipt?.runId === runId && receipt.chatId === chat.id) {
                 clearWorkUncertainAdmission(chat.id, runId);
+                settleWorkFirstSend();
                 setSessionNotice(locale === "ko"
                   ? "이 요청 ID의 실행 기록을 확인했습니다. 지시를 재전송하지 않았습니다."
                   : "This request ID has a run record. The instruction was not resent.");
@@ -5172,6 +5218,7 @@ function ChatPage() {
           if (!isCurrentChat()) return false;
           if (steered?.accepted && steered.chatId === chat.id && ["queued", "draining", "started"].includes(steered.status ?? "")) {
             clearWorkUncertainAdmission(chat.id, runId);
+            settleWorkFirstSend();
             const attached = await api.invoke.attach(chat.id).catch(() => null);
             if (!isCurrentChat()) return false;
             const liveRunId = attached?.runId ?? steered.activeRunId ?? steered.runId ?? null;
@@ -5210,6 +5257,8 @@ function ChatPage() {
          * "보냈다"로 읽히고 새로고침 때 또 사라진다.
          */
         setComposerPrefill(userPrompt);
+        // The exact text is back in the composer; Main's answer for the fenced run decides the rest.
+        settleWorkFirstSend();
         const hadImages = (images?.length ?? 0) > 0;
         transcriptRevisionRef.current += 1;
         setMessages((m) => m
@@ -5263,6 +5312,51 @@ function ChatPage() {
   );
 
   useWorkStartHandoff({ intentId: searchParams.get("workStart"), chatId, ready: Boolean(chat && agent), send, prefill: setComposerPrefill, notice: setSessionNotice });
+
+  /*
+   * A Work message saved at send time (one-first-send-outbox) that Main had not taken when the renderer went away.
+   * Main's admission for its fenced run decides; a message whose run request never left is sent once with the run ID
+   * it was captured with (Main dedups by it). Anything else hands the exact text back to the composer.
+   */
+  const workSendRef = useRef(send);
+  workSendRef.current = send;
+  useEffect(() => {
+    const api = ipc();
+    if (!api || !chat || chat.id !== chatId || !agent || busy || !isCurrentChat()) return;
+    const head = readFirstSends(window.localStorage, "work", chat.id)[0];
+    if (!head || liveWorkFirstSendIds.has(head.intentId) || resumedWorkFirstSendIds.has(head.intentId)) return;
+    resumedWorkFirstSendIds.add(head.intentId);
+    const sendChatId = chat.id;
+    void (async () => {
+      let admission: Awaited<ReturnType<typeof api.invoke.admission>> | null = null;
+      if (head.runId) {
+        try { admission = await api.invoke.admission(head.runId); }
+        catch { resumedWorkFirstSendIds.delete(head.intentId); return; }
+      }
+      if (!isCurrentChat()) { resumedWorkFirstSendIds.delete(head.intentId); return; }
+      const plan = planFirstSendResume(head, { now: Date.now(), admission });
+      if (plan.kind === "wait") { resumedWorkFirstSendIds.delete(head.intentId); return; }
+      if (plan.kind === "remove") {
+        if (head.runId) clearWorkUncertainAdmission(sendChatId, head.runId);
+        removeFirstSend(window.localStorage, "work", sendChatId, head.intentId);
+        return;
+      }
+      if (head.runId && admission?.status !== "pending") clearWorkUncertainAdmission(sendChatId, head.runId);
+      if (plan.kind === "resume") {
+        const accepted = await workSendRef.current(head.userPrompt, {
+          ...(head.choices.work as Parameters<typeof send>[1]), resumeRunId: head.intentId,
+        });
+        if (!accepted) resumedWorkFirstSendIds.delete(head.intentId);
+        return;
+      }
+      setComposerPrefill(head.userPrompt);
+      removeFirstSend(window.localStorage, "work", sendChatId, head.intentId);
+      setSessionNotice(locale === "ko"
+        ? "새로고침 전에 보내지 못한 메시지를 작성창에 되돌려 두었어요. 확인한 뒤 다시 보내 주세요."
+        : "A message that was not sent before the reload is back in the composer. Review it and send it again.");
+    })().catch(() => { resumedWorkFirstSendIds.delete(head.intentId); });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chat?.id, chatId, agent?.id, busy]);
 
   // 진행 중 실행 취소 — 입력창의 정지 버튼(전송 버튼이 busy일 때 변신) / Cmd/Ctrl+Esc.
   const stop = useCallback(() => {

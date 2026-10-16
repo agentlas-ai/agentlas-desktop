@@ -249,8 +249,10 @@ import {
   getOnePreflightSteerReceipt,
   holdOnePreflightSubmission,
   listOnePreflightSteers,
+  releaseOnePreflightSubmissionOfGoneRenderer,
   reserveOnePreflightParent,
 } from "./store/one-preflight-steers";
+import { createPreflightSubmissionRenderers } from "./one/preflight-submission-renderers";
 import { createDurableOwnerTextRoutes, NOT_DAEMON_OWNED } from "./invocation/native-owner-text-routes";
 import { dispatchOnePreflightSteers, recoverOnePreflightSteers, installNativePreflightSteerPort, captureNativePreflightSteerGesture } from "./invocation/preflight-steer-admission";
 import type { OnePreflightSteerInput, OnePreflightSteerLookupInput, OnePreflightSubmissionInput } from "../shared/one-preflight-steers";
@@ -7006,6 +7008,13 @@ export function registerIpcHandlers(): void {
       catch { /* Exact queued rows remain durable; no uncertain claim is replayed. */ }
     });
   });
+  // An open submission is driven by the renderer document that opened it. When that document ends with Main's epoch
+  // unchanged (reload, crash, closed window), its submission is held so the chat takes new messages again; the
+  // renderer's saved send can take it over once (beginOnePreflightSubmission resume).
+  const preflightSubmissionRenderers = createPreflightSubmissionRenderers((submissionId) => {
+    const receipt = releaseOnePreflightSubmissionOfGoneRenderer(submissionId);
+    console.info("[one-preflight] renderer gone; open submission released", { submissionId, state: receipt?.state ?? "absent" });
+  });
   ipcMain.handle("invoke:preflightSubmissionBegin", (_event, input: OnePreflightSubmissionInput) => {
     assertTrustedSitePublishIpcSender(_event);
     const configuredOwner = configuredNativeGuiOwner();
@@ -7014,7 +7023,15 @@ export function registerIpcHandlers(): void {
     // native owner while invoke:run started on Desktop refused every One message with one_preflight_submission_changed
     // (1.2.89, 2026-10-10T21:05Z).
     const native = ownerTurnStarter(configuredOwner, input?.chatId);
-    return beginOnePreflightSubmission(input, native ? native.assertCanStart(randomUUID()).bootId : rendererInvocationProcessEpoch);
+    // Another live window is still preparing this exact send; it is never taken over under that window.
+    if (typeof input?.submissionId === "string"
+      && preflightSubmissionRenderers.ownership(input.submissionId, _event.sender) === "other-live-document") {
+      throw new Error("one_preflight_submission_owned_elsewhere");
+    }
+    const receipt = beginOnePreflightSubmission(input, native ? native.assertCanStart(randomUUID()).bootId : rendererInvocationProcessEpoch);
+    if (receipt.state === "open") preflightSubmissionRenderers.bind(receipt.submissionId, _event.sender);
+    else preflightSubmissionRenderers.forget(receipt.submissionId);
+    return receipt;
   });
   ipcMain.handle("invoke:preflightSteerEnqueue", (_event, input: OnePreflightSteerInput) => {
     assertTrustedSitePublishIpcSender(_event);
@@ -7039,7 +7056,9 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle("invoke:preflightSubmissionHold", (_event, submissionId: string) => {
     assertTrustedSitePublishIpcSender(_event);
-    return holdOnePreflightSubmission(submissionId);
+    const receipt = holdOnePreflightSubmission(submissionId);
+    if (receipt && receipt.state !== "open") preflightSubmissionRenderers.forget(submissionId);
+    return receipt;
   });
   // The owner's message is accepted by the per-chat send queue: it starts here when the chat is free, otherwise it waits
   // there (saved, shown once, retried silently) and starts by itself. See invocation/renderer-send-queue.ts.
@@ -7205,6 +7224,7 @@ export function registerIpcHandlers(): void {
       if (preflightSubmissionId) {
         try {
           bindOnePreflightSubmission(preflightSubmissionId, started.runId, request, invocationOwnerEpoch);
+          preflightSubmissionRenderers.forget(preflightSubmissionId);
           dispatchOnePreflightSteers(preflightSubmissionId);
         } catch (cause) {
           // The parent has already crossed admitted+invoke_started. Never turn
