@@ -50,6 +50,39 @@ const sha = (value: string | Buffer): string => createHash("sha256").update(valu
 
 export interface KeyedCallContext { chatId: string; runId: string; dryRun?: boolean; permission?: "read" | "write" | "full" }
 
+/*
+ * A provider call can outlast one tool request: the agentlas-turn gateway gives a call 30 s (turn-tools/mcp-server.ts).
+ * Dev replay r04 (2026-10-17): a 4,901-character ElevenLabs narration took ~45 s; Main finished and wrote the file and
+ * its receipt, but the teammate was told "Turn tool request timed out." So a call answers within ANSWER_WINDOW_MS: done
+ * → the result; still running → state "running" and the same arguments again later return the finished result. The work
+ * keeps running in Main either way, and the same request never starts a second provider call (no double spend).
+ */
+export const ANSWER_WINDOW_MS = 25_000;
+const inflight = new Map<string, Promise<Outcome>>();
+const finished = new Map<string, { outcome: Outcome; at: number }>();
+const FINISHED_KEEP_MS = 6 * 60 * 60_000;
+let answerWindowMs = ANSWER_WINDOW_MS;
+/** Contract gates only: a short answer window. */
+export function setKeyedAnswerWindowForTests(ms: number): void { answerWindowMs = Math.max(10, ms); }
+
+async function answerWithin(key: string, start: () => Promise<Outcome>, running: () => Outcome, windowMs = answerWindowMs): Promise<Outcome> {
+  const now = Date.now();
+  for (const [k, v] of finished) if (now - v.at > FINISHED_KEEP_MS) finished.delete(k);
+  const done = finished.get(key);
+  if (done) return done.outcome;
+  let job = inflight.get(key);
+  if (!job) {
+    job = start().then((outcome) => { if (outcome.status === "ok") finished.set(key, { outcome, at: Date.now() }); return outcome; })
+      .finally(() => { inflight.delete(key); });
+    inflight.set(key, job);
+  }
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const windowEnd = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), windowMs); });
+  const first = await Promise.race([job, windowEnd]);
+  if (timer) clearTimeout(timer);
+  return first ?? running();
+}
+
 /** Gate-only API host override: loopback http, read from Main's environment, never from the model. */
 function apiBase(adapter: KeyedAdapter): string {
   const override = process.env.AGENTLAS_KEYED_PROVIDER_TEST_BASE?.trim();
@@ -148,6 +181,14 @@ export async function keyedProviderRequest(args: Record<string, unknown>, ctx: K
   }
   const key = await providerKey(adapter);
   if (!key) return refused("provider_key_missing", `the owner saves ${adapter.envKey} for ${adapter.label} in Settings`);
+  const requestKey = sha(JSON.stringify({ op: "provider.request", routeId, method, apiPath, json: args.json ?? null, outputFile, chatId: ctx.chatId }));
+  return answerWithin(requestKey, () => keyedProviderRequestNow(adapter, key, { routeId, method, apiPath, json: args.json, outputFile }, ctx),
+    () => ok({ routeId, state: "running", next: "the call is still running in the host; call provider.request again with the same arguments to get its result (it is not sent twice)" }));
+}
+
+async function keyedProviderRequestNow(adapter: KeyedAdapter, key: string, input: { routeId: string; method: string; apiPath: string; json: unknown; outputFile: string | null }, ctx: KeyedCallContext): Promise<Outcome> {
+  const { routeId, method, apiPath, outputFile } = input;
+  const args = { json: input.json };
   const res = await send(adapter, key, { method, pathAndQuery: apiPath, ...(args.json !== undefined ? { json: args.json } : {}) });
   if ("networkError" in res) { await observe(routeId, "unavailable", "provider.request"); return refused("provider_unreachable", res.networkError); }
   const requestId = requestIdOf(res.headers);
@@ -230,6 +271,13 @@ export async function speechSynthesize(args: Record<string, unknown>, ctx: Keyed
     if (prior.requestDigest === digest && fs.existsSync(outputFile) && sha(fs.readFileSync(outputFile)) === prior.sha256) return ok({ ...prior, reused: true });
   } catch { /* no prior receipt */ }
   if (fs.existsSync(outputFile)) return refused("output_exists", "the file exists from another request; choose another fileName");
+  return answerWithin(`speech:${digest}:${outputFile}`, () => speechSynthesizeNow(adapter, key, { routeId, text, voiceId, modelId, digest, outputFile, receiptFile }, ctx),
+    () => ok({ routeId, state: "running", path: outputFile, requestDigest: digest,
+      next: "narration is still being made in the host; call speech.synthesize again with the same arguments to get the file (nothing is generated twice)" }));
+}
+
+async function speechSynthesizeNow(adapter: KeyedAdapter, key: string, input: { routeId: string; text: string; voiceId: string; modelId: string; digest: string; outputFile: string; receiptFile: string }, ctx: KeyedCallContext): Promise<Outcome> {
+  const { routeId, text, voiceId, modelId, digest, outputFile, receiptFile } = input;
   const res = routeId === "openai-audio"
     ? await send(adapter, key, { method: "POST", pathAndQuery: "/v1/audio/speech", json: { model: modelId, voice: voiceId, input: text, response_format: "mp3" } })
     : await send(adapter, key, { method: "POST", pathAndQuery: `/v1/text-to-speech/${encodeURIComponent(voiceId)}/with-timestamps?output_format=mp3_44100_128`, json: { text, model_id: modelId } });
