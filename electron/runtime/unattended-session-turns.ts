@@ -22,6 +22,12 @@
  *      carries (automation-progress-facts.ts), not from the provider thread.
  *   3. A resume whose turn already started may have acted; it is never replayed
  *      in a fresh session (that could repeat an external action).
+ *   4. An attended (owner) turn whose stored session the runtime itself reports
+ *      as gone also continues in a fresh session that replaces the binding
+ *      (attendedTurnStartsFresh). Refusing it was a dead end: the owner got the
+ *      same error on every later turn of that chat until something cleared the
+ *      binding (2026-10-16: 275 Codex bindings on the owner's Mac named rollouts
+ *      that no longer existed anywhere).
  * Every fresh-session decision emits one machine-readable status receipt.
  */
 
@@ -83,6 +89,17 @@ export function classifyCodexResumeFailure(stderr: string): UnattendedFreshSessi
   if (/already has an active writer/.test(stderr)) return "writer_busy";
   if (/no rollout found for thread id/.test(stderr)) return "session_not_found";
   return "resume_failed_before_turn";
+}
+
+/**
+ * Rule 4: an attended turn starts fresh only when the resume source is definitively gone (the runtime's own typed
+ * not-found: Codex "no rollout found", Claude's zero-turn result, an ACP not-found marker or a missing session folder)
+ * and the host can hand the new session the conversation: the chat's own history (a resume from the stored binding)
+ * or the agent-context journal (a resume of its native handle). A caller-managed session id with neither keeps the
+ * refusal, and so does every transient refusal (writer busy, an unclassified failure): those may succeed on retry.
+ */
+export function attendedTurnStartsFresh(reason: UnattendedFreshSessionReason, conversationCarried: boolean): boolean {
+  return reason === "session_not_found" && conversationCarried;
 }
 
 /** The one status receipt for a fresh-session decision (parsed by the run ledger as a status line). */

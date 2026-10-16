@@ -68,7 +68,8 @@ import {
   renderConversationContext,
   renderGapContext,
   unseenHistoryGap, dedupeStableTurnContext, acknowledgeStableTurnContext, invalidateStableTurnContext } from "./continuity";
-import { agentContextSessionKey, agentContextNoToolsPacketForRequest } from "./agent-context";
+import { agentContextColdBootstrapForRequest, agentContextSessionKey, agentContextNoToolsPacketForRequest } from "./agent-context";
+import { unattendedFreshSessionStatus } from "./unattended-session-turns";
 import { aliveDecisionProfileForRequest } from "./alive-decision-context";
 import { tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
@@ -2535,7 +2536,12 @@ const runClaudeTurn = async (
           reject(new Error(`Automation runtime session resume failed for ${KIND}; refusing to create a fresh CLI session.`));
           return;
         }
-        void runClaudeTurn({ ...req, runtimeSessionId: undefined }, events, false, observeNativeFile).then(resolve, reject);
+        // The owner's turn continues fresh (unattended-session-turns.ts rule 4). A resume of the agent-context handle
+        // carried no history (the session held it): the fresh session starts from that journal, host facts first.
+        events.onStatus(unattendedFreshSessionStatus(KIND, "session_not_found"));
+        void agentContextColdBootstrapForRequest(req).then((bootstrap) => runClaudeTurn({ ...req, runtimeSessionId: undefined,
+          ...(bootstrap ? { history: [...bootstrap.history], turnContext: bootstrap.turnContext } : {}) }, events, false, observeNativeFile))
+          .then(resolve, reject);
         return;
       }
       if (code === 0) {

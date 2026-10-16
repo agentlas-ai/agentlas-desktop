@@ -118,6 +118,23 @@ export function withCliProductHome(kind: ProductHomeKind, env: NodeJS.ProcessEnv
   return "home" in mirror ? { ...env, [spec.envVar]: mirror.home } : env;
 }
 
+/**
+ * Whether a Copilot session no longer exists: the session-state/<id> folder IS the session, and neither the product mirror
+ * nor the account folder it was made from (where adoptCopilotSession copies one from) holds it. Only an Agentlas mirror
+ * is judged; any other folder, or one that cannot be read, answers false.
+ */
+export function copilotSessionGone(mirrorHome: string | undefined, sessionId: string, mirrorRoot = userDataPath(SPECS["github-copilot-cli"].mirrorDir)): boolean {
+  if (!mirrorHome || !/^[0-9a-f-]{16,64}$/i.test(sessionId)) return false;
+  if (path.dirname(path.resolve(mirrorHome)) !== path.resolve(mirrorRoot)) return false;
+  try {
+    if (fs.existsSync(path.join(mirrorHome, "session-state", sessionId))) return false;
+    const realHome = path.dirname(path.resolve(mirrorHome, fs.readlinkSync(path.join(mirrorHome, "config.json"))));
+    return !fs.existsSync(path.join(realHome, "session-state", sessionId));
+  } catch {
+    return false;
+  }
+}
+
 const adoptedCopilot = new Set<string>();
 /**
  * A Copilot session an older install wrote into the person's own ~/.copilot/session-state, copied into the product

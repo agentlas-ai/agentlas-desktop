@@ -1,6 +1,7 @@
 import { selectionFor } from "../capabilities/one-capabilities";
 import { withForeignCliContext } from "./foreign-cli-context";
-import { adoptCopilotSession } from "./cli-product-homes";
+import { adoptCopilotSession, copilotSessionGone } from "./cli-product-homes";
+import { unattendedFreshSessionStatus } from "./unattended-session-turns";
 import { registerNativeApprovalChildSignal } from "./native-approval-provenance";
 import { claimAttemptChild, releaseAttemptChild } from "./attempt-children";
 import { beginAdapterEffectRun, type AdapterEffectReport } from "../invocation/adapter-effect-context";
@@ -1224,14 +1225,19 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         } catch (err) {
           if (req.signal?.aborted) throw abortReasonError(req);
           events.onStatus(`[runtime-session] resume_failed kind=${sessionKind}`);
+          // A session the runtime proves gone, before any replay activity, is a definitive loss: the owner's turn
+          // continues in a fresh session seeded from the journal (unattended-session-turns.ts rule 4).
+          const gone = !req.unattended && !client.turnActivityObserved && !agentRequestObserved && !effectRun
+            && acpLoadedSessionGone(spec.id, err, runEnv, resumeSessionId);
           // -32601 is the source protocol's closed method-not-found error.
           // Other load errors cannot establish that no work happened. Never
           // turn an ambiguous canonical load into another provider operation.
-          if (canonicalContextKey && (!(err instanceof AcpRpcError) || err.code !== -32601
+          if (canonicalContextKey && !gone && (!(err instanceof AcpRpcError) || err.code !== -32601
             || client.turnActivityObserved || agentRequestObserved || effectRun)) throw err;
           if (req.unattended) {
             throw new Error(`Automation runtime session resume failed for ${sessionKind}; refusing to create a fresh ACP session.`);
           }
+          events.onStatus(unattendedFreshSessionStatus(sessionKind, gone ? "session_not_found" : "resume_failed_before_turn"));
         } finally {
           client.endReplay();
         }
@@ -1559,6 +1565,21 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
  * Prefer the ACP runner for a kind; fall back to the legacy driver when ACP is
  * disabled by env. The decision is per call so a setting change needs no restart.
  */
+/**
+ * A session/load refusal that proves the session no longer exists, from a typed marker or a host check, never from message
+ * text. Grok Build 1.0.51 (measured 2026-10-16 offline, scratch HOME): -32603 with data.code "FS_NOT_FOUND" for a
+ * session it holds no file for. GitHub Copilot CLI: no session-state/<id> folder in its product mirror or the account
+ * folder (cli-product-homes.ts copilotSessionGone). Kimi and Cursor have no measured marker: their refusal stays ambiguous.
+ */
+export function acpLoadedSessionGone(specId: string, error: unknown, env: NodeJS.ProcessEnv, sessionId: string): boolean {
+  if (specId === "grok") {
+    return error instanceof AcpRpcError && error.code === -32603
+      && (error.data as { code?: unknown } | null | undefined)?.code === "FS_NOT_FOUND";
+  }
+  if (specId === "github-copilot-cli") return copilotSessionGone(env.COPILOT_HOME, sessionId);
+  return false;
+}
+
 export function acpOrLegacyRunner(kind: string, legacy: Runner): Runner {
   return (req, events) => {
     // Selection creates these adapters while cold ACP imports are still

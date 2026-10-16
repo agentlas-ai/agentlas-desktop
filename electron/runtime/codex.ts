@@ -41,7 +41,7 @@ import {
   renderGapContext,
   unseenHistoryGap, dedupeStableTurnContext, acknowledgeStableTurnContext, invalidateStableTurnContext,
   type StableTurnContextDelivery } from "./continuity";
-import { agentContextSessionKey } from "./agent-context";
+import { agentContextBootstrapForRequest, agentContextColdBootstrapForRequest, agentContextSessionKey } from "./agent-context";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, firstExistingCli, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
 import { nativeCliCandidates } from "./native-cli";
@@ -95,6 +95,7 @@ import { codexDesktopSurfaceArgs } from "./codex-desktop-surface";
 import { codexPersonalContextArgs, codexPersonalHomeOptions } from "./codex-personal-context";
 import { selectionFor } from "../capabilities/one-capabilities";
 import {
+  attendedTurnStartsFresh,
   claimRuntimeSessionTurn,
   classifyCodexResumeFailure,
   freshSessionReplacesStored,
@@ -278,6 +279,17 @@ async function getBin(source?: string, cwd = agentRunCwd(), env = process.env): 
  * so it follows the wrapped system sections instead of sitting inside the agent-definition slot. */
 function codexSchemaFallbackBlock(req: RunnerRequest): string {
   return codexOutputSchemaFallbackBlock(req);
+}
+
+/**
+ * A fresh session after a refused resume. A turn that resumed the agent-context layer's native handle carries no
+ * history (that session held it), and the layer takes the fresh session as its new handle, so the session starts from
+ * the journal with the host facts ahead of it, the same packet a cold ACP or Antigravity session gets
+ * (agentContextColdBootstrapForRequest). Any other turn already carries the chat's history.
+ */
+async function withAgentContextJournalSeed(req: RunnerRequest): Promise<RunnerRequest> {
+  const bootstrap = await agentContextColdBootstrapForRequest(req);
+  return bootstrap ? { ...req, history: [...bootstrap.history], turnContext: bootstrap.turnContext } : req;
 }
 
 function buildPrompt(req: RunnerRequest): string {
@@ -3063,6 +3075,11 @@ export const runCodex: Runner = async (
   const resumeSessionId = runReq.runtimeSessionId ?? (freshReason ? null : storedSessionId);
   /** Whether this turn's session may be written back as the chat's durable session. */
   const persistSession = (): boolean => !freshReason || freshSessionReplacesStored(freshReason);
+  /** Whether a replacement session can be handed this conversation (unattended-session-turns.ts rule 4). */
+  const conversationCarried = (): boolean => {
+    if (!runReq.runtimeSessionId) return true;
+    try { return agentContextBootstrapForRequest(runReq) !== null; } catch { return false; }
+  };
   /*
    * 이 실행의 누적 카운터 기준선. 세 갈래다:
    *   새 세션        → 0 (이번 턴이 곧 전부)
@@ -3141,15 +3158,17 @@ export const runCodex: Runner = async (
       // continues in a fresh one-shot session instead of stopping for a human.
       // An owner's turn does too when another writer holds the thread: Desktop and
       // the background service each keep a resident Codex, and one cannot retire
-      // the other's (production 1.2.93, 2026-10-11 03:54Z, "already has an active writer").
+      // the other's (production 1.2.93, 2026-10-11 03:54Z, "already has an active writer"),
+      // and when the thread's rollout is gone (rule 4: refusing repeated the error on every later turn).
       if (runReq.signal?.aborted || !(err instanceof CodexSessionContinuityError)) throw err;
       const refusal = err.code === "resume_failed" ? classifyCodexResumeFailure(err.message) : "writer_busy";
-      if (!runReq.unattended && refusal !== "writer_busy") throw err;
+      if (!runReq.unattended && refusal !== "writer_busy" && !attendedTurnStartsFresh(refusal, conversationCarried())) throw err;
       freshReason = refusal;
       events.onStatus(unattendedFreshSessionStatus(KIND, freshReason));
       if (freshSessionReplacesStored(freshReason)) {
         clearRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
       }
+      runReq = await withAgentContextJournalSeed(runReq);
     }
     if (attempt.result) return attempt.result;
   }
@@ -3185,7 +3204,7 @@ export const runCodex: Runner = async (
 
   // RESUME: 새 user 턴만 stdin으로 — 시스템 프롬프트/히스토리는 세션이 이미 갖고 있다.
   // Resume reasserts the same permission boundary as the first turn.
-  if (canResume && !freshReason) {
+  execResume: if (canResume && !freshReason) {
     const resumePerm = resumePermissionArgs(runReq.permission, runReq.approvalsReviewer);
     const args = [
       "exec",
@@ -3242,6 +3261,22 @@ export const runCodex: Runner = async (
       throw error;
     } finally {
       releaseWriter?.();
+    }
+    // `codex exec resume` refused before any turn: exit 1, no event, and Codex's thread/resume protocol phrase on stderr
+    // (codex-cli 0.163.0, measured 2026-10-16 for a gone rollout: "thread/resume failed: no rollout found for thread id …";
+    // a held writer is the same shape). Only those typed refusals qualify, as on the thread/resume path above; any other
+    // failed exec may already have acted. Nothing started, so the turn continues fresh (CREATE below).
+    const execRefusal = !runReq.signal?.aborted && r.code !== 0 && !r.turnStarted && !r.terminalObserved && !r.threadId && !r.text.trim()
+      ? classifyCodexResumeFailure(r.stderr) : null;
+    if (execRefusal && execRefusal !== "resume_failed_before_turn"
+      && (runReq.unattended || execRefusal === "writer_busy" || attendedTurnStartsFresh(execRefusal, conversationCarried()))) {
+      freshReason = execRefusal;
+      events.onStatus(unattendedFreshSessionStatus(KIND, freshReason));
+      if (freshSessionReplacesStored(freshReason) && runReq.chatId) {
+        clearRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
+      }
+      runReq = await withAgentContextJournalSeed(runReq);
+      break execResume;
     }
     if (runReq.signal?.aborted) {
       // 취소여도 스레드가 생겼으면 저장 → steering 메시지가 이 세션을 resume해 문맥 유지.
