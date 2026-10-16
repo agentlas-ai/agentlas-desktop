@@ -52,6 +52,7 @@ import { assertMainWorkRecoveryContext, mainWorkToolSchema, type MainWorkRecover
 import type { InstalledMcpServer } from "../../shared/types";
 import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
 import { OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS, outputLimitContinuationTurn } from "./output-limit-continuation";
+import { resolveToolNameAlias, unknownToolMessage } from "./tool-name-alias";
 import {
   defaultRuntimeToolPermission,
   getRuntimeToolPermissionArbiter,
@@ -628,6 +629,12 @@ async function dispatchMainToolRaw(
 ): Promise<MainToolDispatchResult> {
   if (approval.beforeMcpToolResult) approval.mcpResultDeliveryState ??= { blocked: false, pending: new Set() };
   assertMcpResultDelivery(approval);
+  // A name copied from another runtime's history ("codex_apps.google_calendar.search_events") resolves to the one
+  // registered tool it denotes (tool-name-alias.ts); the resolved name then goes through the same menu and approval.
+  if (!byName.has(call.toolName)) {
+    const alias = resolveToolNameAlias(byName.keys(), call.toolName);
+    if (alias) call = { ...call, toolName: alias };
+  }
   let result:MainToolDispatchResult;
   // Pre-effect checkpoint (harness/effect-ledger.ts): the unchecked dispatcher begins it right before the effect leaves
   // Main; the outcome is settled here, an exception after dispatch counting as uncertain.
@@ -765,7 +772,7 @@ async function dispatchMainToolRawUnchecked(
     if (actionId) broker?.finishAction(actionId, "not_dispatched");
     (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, "unknown tool", eventCallId, true));
     return {
-      content: `Error: unknown tool "${call.toolName}"`,
+      content: unknownToolMessage(call.toolName, byName.keys()),
       visionMessage: null,
       isError: true,
     };

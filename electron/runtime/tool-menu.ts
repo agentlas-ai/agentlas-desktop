@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { preparedMcpTransport } from "../mcp-tools/prepared-transport";
 import { mcpToolSchemaDigest } from "../mcp-tools/tool-schema";
 import { toolSchemaVariants, type ToolSchemaVariant } from "./tool-schema-selection";
+import { closestToolNames, resolveToolNameAlias } from "./tool-name-alias";
 import type { OpenAiToolDef, ResolvedTool } from "./local-tool-loop";
 
 const LIST = "agentlas_tools_list";
@@ -145,8 +146,11 @@ export function resolveToolMenu(byName: Map<string, ResolvedTool>, name: string,
     const exactName = typeof args.name === "string" ? { name: args.name } : {};
     const prepareAction = { tool: PREPARE, arguments: exactName };
     if (typeof args.name !== "string") invalidArguments(["name"], { tool: LIST, arguments: {} });
-    const descriptor = typeof args.name === "string" ? menu.descriptors.get(args.name) : undefined;
-    if (!descriptor) throw new Error("tool_menu_exact_name_unknown");
+    const descriptor = typeof args.name === "string"
+      ? menu.descriptors.get(args.name) ?? menu.descriptors.get(resolveToolNameAlias(menu.descriptors.keys(), args.name) ?? "")
+      : undefined;
+    if (!descriptor) throw new Error(`tool_menu_exact_name_unknown${typeof args.name === "string"
+      ? (() => { const near = closestToolNames(menu.descriptors.keys(), args.name as string); return near.length ? `: exact names ${near.join(", ")}` : ""; })() : ""}`);
     const toolName = descriptor.function.name;
     let preparedDescriptor = descriptor;
     let selector: ToolSchemaVariant["selector"] = {};
