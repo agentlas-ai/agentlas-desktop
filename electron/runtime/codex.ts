@@ -64,7 +64,7 @@ import {
 } from "./session-rotation";
 import { decideGeneration, nativeCompactionLimit, recordObservedContextWindow, runtimeContextWindow } from "./session-generation";
 import { AcpRpcError, classifyAcpFailure, createNativeRuntimeDiagnostic, NativeProtocolDiagnostics, NativeTransportDiagnostics, nativeProcessErrorCode } from "./acp-protocol";
-import type { NativeFailureEvidence, NativeProtocolCounters, NativeRuntimeDiagnostic } from "./native-runtime-diagnostics";
+import type { NativeEvictionReason, NativeFailureEvidence, NativeProtocolCounters, NativeRuntimeDiagnostic, NativeTurnStartFailure } from "./native-runtime-diagnostics";
 import {
   CODEX_APP_SERVER_ARGS,
   CodexModelSelectionError,
@@ -145,6 +145,25 @@ function codexProtocolDelta(current: NativeProtocolCounters, baseline: NativePro
 }
 function codexProcessErrorCode(error: unknown): string | null {
   try { return nativeProcessErrorCode(error); } catch { return null; }
+}
+/** A busy admission names the reason its first closing blocker is retiring (project-residency.ts), else null. */
+function busyAdmissionEvictionReason(error: unknown): NativeEvictionReason | null {
+  const blockers = error && typeof error === "object" && "blockers" in error && Array.isArray(error.blockers) ? error.blockers : [];
+  const closing = blockers.find((blocker: unknown) => !!blocker && typeof blocker === "object"
+    && (blocker as { state?: unknown }).state === "closing") as { closeReason?: unknown } | undefined;
+  return codexEvictionReason(closing?.closeReason);
+}
+function codexEvictionReason(value: unknown): NativeEvictionReason | null {
+  return value === "transport-closed" || value === "process-exit" || value === "reaped" || value === "shutdown"
+    || value === "evicted" || value === "error" ? value : null;
+}
+function codexTurnStartFailureCode(failure: NativeFailureEvidence | null): NativeTurnStartFailure["code"] {
+  switch (failure?.category) {
+    case "rpc-error": return "turn_start_rpc_error";
+    case "rpc-timeout": return "turn_start_timeout";
+    case "transport-ended": case "child-process-error": return "turn_start_transport_closed";
+    default: return "turn_start_unknown";
+  }
 }
 function codexDiagnosticFailure(error: unknown): NativeFailureEvidence {
   try {
@@ -1716,11 +1735,16 @@ async function runCodexResidentTurn(input: {
         runtimeKind: KIND,
         source: resolveAgentResidencySource(req.agentId),
         reaperExempt: isResidencyExemptAgent(req.agentId),
+        ...(req.signal ? { signal: req.signal } : {}),
       },
       () => openCodexResidentSession({ bin, args, cwd, env, label: req.backendLabel || "codex" }),
     );
   } catch (err) {
     if (err && typeof err === "object" && "code" in err && err.code === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
+      // Attributable refusal: the turn never started and no session was leased (no prose, no paths).
+      diagnose({ phase: "turn-start-failed", runtimeAttemptId: null, transport: null, protocol: null, protocolScope: null,
+        terminal: { accepted: false, threadMismatch: 0, turnMismatch: 0, earlyOverflow: 0 }, failure: null,
+        turnStart: { code: WORK_PROJECT_RESIDENCY_BUSY_CODE, transportState: "not-opened", evictionReason: busyAdmissionEvictionReason(err) } });
       throw err;
     }
     const initialization = codexInitializationFailure(err);
@@ -1779,6 +1803,9 @@ async function runCodexResidentTurn(input: {
   let stableContextDelivery: StableTurnContextDelivery | undefined;
   let turnRequestInFlight = false;
   let turnDispatchAttempted = false;
+  /** The client user message id this turn was sent with (schema-proven), and whether the session echoed it back. */
+  let sentClientUserMessageId: string | null = null;
+  let requestEchoed = false;
   let terminalObserved = false;
   let terminalSucceeded = false;
   let terminalObservationFailed = false;
@@ -1797,13 +1824,15 @@ async function runCodexResidentTurn(input: {
   let diagnosticRuntimeAttemptId: string | null = null;
   let diagnosticFailure: NativeFailureEvidence | null = null;
   const terminalDiagnostics = { threadMismatch: 0, turnMismatch: 0, earlyOverflow: 0 };
-  const emitResidentDiagnostic = (phase: NativeRuntimeDiagnostic["phase"], failure: NativeFailureEvidence | null = diagnosticFailure): void => {
+  const emitResidentDiagnostic = (phase: NativeRuntimeDiagnostic["phase"], failure: NativeFailureEvidence | null = diagnosticFailure,
+    turnStart?: (transport: NativeRuntimeDiagnostic["transport"]) => NativeTurnStartFailure): void => {
     try {
       const snapshot = session.conn.diagnosticSnapshot();
       diagnose({ phase, runtimeAttemptId: diagnosticRuntimeAttemptId, transport: snapshot.transport,
         protocol: protocolBaseline ? codexProtocolDelta(snapshot.protocol, protocolBaseline) : null,
         protocolScope: protocolBaseline ? "connection-delta" : null,
-        terminal: { accepted: terminalObserved, ...terminalDiagnostics }, failure });
+        terminal: { accepted: terminalObserved, ...terminalDiagnostics }, failure,
+        ...(turnStart ? { turnStart: turnStart(snapshot.transport) } : {}) });
     } catch { /* Optional content-free observation. */ }
   };
   let transportDiagnosticObserved = false;
@@ -1911,6 +1940,10 @@ async function runCodexResidentTurn(input: {
 
   const onNotification = (method: string, params: any): void => {
     silence?.touch();
+    // TurnStartParams.clientUserMessageId comes back as this turn's user item clientId: a typed acknowledgement of the
+    // request that survives a lost turn/start receipt (RuntimeTurnDelivery "accepted").
+    if ((method === "item/started" || method === "item/completed") && sentClientUserMessageId && params?.threadId === session.threadId
+      && params?.item?.type === "userMessage" && params.item.clientId === sentClientUserMessageId) requestEchoed = true;
     if ((method === "item/started" || method === "item/completed") && typeof params?.item?.id === "string"
       && !NON_TOOL_ITEM_TYPES.has(String(params?.item?.type ?? ""))) {
       // A started tool suspends the plain window until it completes (long builds/renders are silent).
@@ -2519,6 +2552,8 @@ async function runCodexResidentTurn(input: {
       approvalsReviewer,
       sandboxPolicy: policy.sandboxPolicy,
       ...(appliedEffort ? { effort: appliedEffort } : {}),
+      // Idempotency and correlation key for this attempt, sent only where the executable's own schema has it.
+      ...(nativeSteeringCapability?.turnStartClientUserMessageId ? { clientUserMessageId: runtimeAttemptId } : {}),
       // ★출력 형태 계약 — app-server 는 스키마를 **인라인**으로 받는다(exec 은 파일 경로만).
       ...(req.outputSchema && openAiStrictSchemaOrNull(req.outputSchema.schema) ? { outputSchema: req.outputSchema.schema } : {}),
     };
@@ -2526,6 +2561,7 @@ async function runCodexResidentTurn(input: {
       settleTurn = (reason) => { settleTurn = null; resolve(reason); };
     });
     let started: any;
+    if (turnParams.clientUserMessageId) sentClientUserMessageId = runtimeAttemptId;
     turnDispatchAttempted = true;
     diagnosticRuntimeAttemptId = runtimeAttemptId;
     reportModelPayload(() => ledgerFromCliSent({
@@ -2539,7 +2575,13 @@ async function runCodexResidentTurn(input: {
       started = await session.conn.request("turn/start", turnParams, { timeoutMs: 120_000, signal: req.signal });
     } catch (error) {
       diagnosticFailure = codexDiagnosticFailure(error);
-      emitResidentDiagnostic("turn-start-failed");
+      // Typed attribution: failure class, the transport at that moment, and the host's own close reason when the host
+      // closed this process (eviction, shutdown) while the turn was starting.
+      emitResidentDiagnostic("turn-start-failed", diagnosticFailure, (transport) => ({
+        code: codexTurnStartFailureCode(diagnosticFailure),
+        transportState: transport && (transport.transportEndReason !== null || transport.childCloseObserved) ? "ended" : "open",
+        evictionReason: codexEvictionReason(pool.closeReasonOf(lease!)),
+      }));
       // A JSON-RPC error response is the server refusing the request: no turn began, so nothing may
       // have acted. Only a closed transport or a timeout leaves the dispatch genuinely uncertain.
       if (error instanceof AcpRpcError) turnDispatchAttempted = false;
@@ -2628,7 +2670,8 @@ async function runCodexResidentTurn(input: {
         markCodexAppServerUnsupported(closedReason || session.conn.lastStderr);
         events.onStatus(`[residency] disabled kind=${KIND} reason=app-server-unsupported`);
       }
-      throw new RuntimeTurnUnsettledError(KIND, req.locale);
+      // The exact turn/start receipt was received above: the session holds this turn's request.
+      throw new RuntimeTurnUnsettledError(KIND, req.locale, session.threadId, null, "accepted");
     }
     // Record both native inventories. Selected capability changes invalidate
     // the invocation; unrelated host changes are evidence, never a replay.
@@ -2679,6 +2722,8 @@ async function runCodexResidentTurn(input: {
         ...(health.contextWindowTokens ? { contextWindowTokens: health.contextWindowTokens } : {}),
         ...(workforcePermissionEnforcement ? { workforcePermissionEnforcement } : {}),
         appliedEffort,
+        // Reached only after the turn/start receipt: an uncertain result here is a turn the session holds.
+        turnDelivery: "accepted",
       },
     };
   } catch (err) {
@@ -2687,7 +2732,9 @@ async function runCodexResidentTurn(input: {
     try {
       if (turnDispatchAttempted) persistTurnCounters();
       if (req.signal?.aborted) throw abortReasonError(req);
-      if (turnDispatchAttempted && !terminalObserved) throw new RuntimeTurnUnsettledError(KIND, req.locale, session.threadId, failure?.message ?? childExitReason(session.child?.exitCode, session.conn?.lastStderr));
+      if (turnDispatchAttempted && !terminalObserved) throw new RuntimeTurnUnsettledError(KIND, req.locale, session.threadId, failure?.message ?? childExitReason(session.child?.exitCode, session.conn?.lastStderr),
+        // Protocol fact: the turn/start receipt or this turn's turn/started notification is the session's acknowledgement.
+        acknowledgedTurnId || confirmedTurnId || requestEchoed ? "accepted" : "not-accepted");
       if (req.workforceRuntimeToolGrant) throw err;
       if (err instanceof CodexModelSelectionError) throw err;
       if (err instanceof CodexSessionContinuityError) throw err;

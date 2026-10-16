@@ -23,7 +23,6 @@ import {
   currentAwakeAgentResidency,
   isAgentContextResidencyAdmissionCurrent,
   isAgentResidencyAwake,
-  holdingAgentResidency,
   dropAgentResidency,
   isResidencyExemptAgent,
   registerAgentResidency,
@@ -33,8 +32,8 @@ import {
   type AwakeAgentResidencyAdmission,
 } from "./agent-residency";
 import {
+  awaitProjectResidencySiblingsExit,
   beginProjectResidencyAdmission,
-  ProjectResidencyBusyError,
   enforceProjectResidencyIdle,
   finishProjectResidencyAdmission,
 } from "./project-residency";
@@ -50,6 +49,8 @@ export interface AcpPoolMeta {
   source?: AgentResidencySource;
   /** 명시적 면제만 허용; 미지정이면 One도 12h 유휴 회수 대상. */
   reaperExempt?: boolean;
+  /** The acquiring turn's lifetime: a Stop ends the wait for a retiring project sibling (never stored). */
+  signal?: AbortSignal;
 }
 
 interface PoolEntry<S> {
@@ -67,6 +68,8 @@ interface PoolEntry<S> {
   awakeAdmission?: AwakeAgentResidencyAdmission;
   registered?: boolean;
   closing?: boolean;
+  /** Typed lifecycle reason it was closed for (registry or pool). */
+  closeReason?: AgentProcessLifecycleReason;
   closeFailed?: boolean;
   closeCompletion?: Promise<void>;
 }
@@ -98,6 +101,8 @@ export interface AcpSessionPoolOptions<S> {
   /** 붙들 수 있는 상한. 기본은 스웜 예산. */
   budget?: () => number;
   now?: () => number;
+  /** Bound for a retiring Work-project sibling to exit before this pool opens (project-residency default). */
+  projectSiblingExitWaitMs?: number;
 }
 
 let leaseSeq = 0;
@@ -182,12 +187,14 @@ export class AcpSessionPool<S> {
         projectId,
         keepResidencyKey: reusable?.residencyKey ?? null,
       });
-      // Project admission starts idle retirement synchronously. A physical
-      // sibling may still be exiting even when global budget has spare seats.
+      // Project admission starts idle retirement synchronously and every close is a measured, asynchronous process
+      // exit. Holding the admission, wait (bounded, Stop-aware) for those exits: one physical CLI per Work project, and a
+      // follow-up whose key changed no longer refuses itself on the sibling it just retired (production 2026-10-16).
       if (projectId) {
-        const closing = holdingAgentResidency().filter(entry => entry.projectId === projectId
-          && entry.closing && entry.key !== reusable?.residencyKey);
-        if (closing.length) throw new ProjectResidencyBusyError(projectId, closing);
+        await awaitProjectResidencySiblingsExit(projectId, reusable?.residencyKey ?? null,
+          { waitMs: this.opts.projectSiblingExitWaitMs, signal: meta.signal });
+        // The wait yielded: an idle candidate may have been retired meanwhile (LRU, reaper). Never lend a closing one.
+        if (reusable && (reusable.closing || reusable.inUse || !this.entries.includes(reusable))) reusable = undefined;
       }
       if (reusable) {
         reusable.inUse = true;
@@ -245,7 +252,7 @@ export class AcpSessionPool<S> {
         inUse: true,
         // 리퍼(12h)와 호스트 종료가 이 세션을 놓는 방법 — 등록소는 이것만 안다.
         // 풀 목록에서도 함께 빠진다(등록소만 지우면 죽은 항목이 재사용 후보로 남는다).
-        close: () => this.closeEntry(entry),
+        close: (reason) => this.closeEntry(entry, reason),
         now: entry.lastActivityAt,
         admission: residentAdmission,
       });
@@ -364,6 +371,13 @@ export class AcpSessionPool<S> {
     for (const entry of [...this.entries]) this.remove(entry, { close: true, reason: "shutdown" });
   }
 
+  /** Why this lease's process was closed by the host (typed lifecycle reason), or null while it is open. Diagnostics
+   * only: it names the eviction/shutdown that ended a turn's transport, never authorizes a retry. */
+  closeReasonOf(lease: AcpSessionLease<S>): AgentProcessLifecycleReason | null {
+    const entry = this.leases.get(lease);
+    return entry?.closing ? entry.closeReason ?? null : null;
+  }
+
   /** 진단용 — 붙든 수 / 유휴 수. */
   stats(): { size: number; idle: number } {
     return { size: this.entries.length, idle: this.entries.filter((e) => !e.inUse && !e.closing).length };
@@ -371,9 +385,10 @@ export class AcpSessionPool<S> {
 
   /** The registry invokes this callback once, after marking its seat closing.
    * It never calls back into the registry, avoiding recursive drop/close. */
-  private closeEntry(entry: PoolEntry<S>): void | Promise<void> {
+  private closeEntry(entry: PoolEntry<S>, reason?: AgentProcessLifecycleReason): void | Promise<void> {
     if (entry.closing) return entry.closeCompletion;
     entry.closing = true;
+    entry.closeReason = reason ?? "process-exit";
     entry.inUse = false;
     const finish = (): void => {
       const index = this.entries.indexOf(entry);
@@ -408,7 +423,7 @@ export class AcpSessionPool<S> {
     } else {
       // Opening succeeded but retain/registration failed. No registry callback
       // exists yet; the acquire catch keeps its opening reservation charged.
-      try { this.closeEntry(entry); } catch { /* quarantined until termination */ }
+      try { this.closeEntry(entry, opts.reason); } catch { /* quarantined until termination */ }
     }
   }
 }

@@ -2,7 +2,7 @@ import { currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/h
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createRuntimeUsageCollector, type ObservedTokenUsage } from "../../shared/observed-usage";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult, RunnerFailure } from "./runner";
-import { RuntimeTurnUnsettledError, runtimeFailureIsClosedHttpRefusal } from "./runner";
+import { RuntimeTurnUnsettledError, runnerResultRefusedBeforeDispatch, runtimeFailureIsClosedHttpRefusal } from "./runner";
 import { beginInvocationUsageAttempt } from "./invocation-usage";
 import { withModelCallScope, type ModelCallRole } from "./model-call-ledger";
 
@@ -121,7 +121,9 @@ export async function runObservedRunner(
       text: result.text, nativeActivity: providerActivityObserved,
       aborted: request.signal?.aborted === true, observedUsage: result.observedUsage,
     });
-    if (result.ownerControlTerminal !== "completed" && !httpRefusal) {
+    // A failure the runner proved pre-dispatch (RuntimeTurnDelivery "not-dispatched") keeps its provider code: it is
+    // never an unknown dispatch.
+    if (result.ownerControlTerminal !== "completed" && !httpRefusal && !runnerResultRefusedBeforeDispatch(result)) {
       throw new RuntimeTurnUnsettledError("runtime", request.locale);
     }
     invocationAttempt.complete(observedUsage);

@@ -68,10 +68,12 @@ export interface AgentResidencyEntry {
   inUse: boolean;
   /** 살아 있는 자원을 실제로 붙들고 있는가(false 면 활동 기록일 뿐). */
   holdsSession: boolean;
-  /** 붙든 자원을 놓는 방법. holdsSession 인 항목만 가진다. */
-  close?: () => void | Promise<void>;
+  /** 붙든 자원을 놓는 방법. holdsSession 인 항목만 가진다. The registry passes the lifecycle reason it closes for. */
+  close?: (reason?: AgentProcessLifecycleReason) => void | Promise<void>;
   /** Closing resources still occupy capacity until measured termination. */
   closing?: boolean;
+  /** Why the registry is closing it (typed lifecycle reason); set together with `closing`. */
+  closeReason?: AgentProcessLifecycleReason;
   closeFailed?: boolean;
   closeCompletion?: Promise<void>;
   /** Host-minted, generation-bound reservation; never inferred from agentId. */
@@ -398,7 +400,7 @@ export interface RegisterAgentResidencyInput {
   /** Explicit exemption only; omitted means the normal 12h idle policy. */
   reaperExempt?: boolean;
   inUse?: boolean;
-  close?: () => void | Promise<void>;
+  close?: (reason?: AgentProcessLifecycleReason) => void | Promise<void>;
   now?: number;
   admission?: AgentResidencyAdmission;
 }
@@ -490,9 +492,10 @@ export function dropAgentResidency(
   };
   if (opts?.close && entry.close) {
     entry.closing = true;
+    entry.closeReason = opts?.reason ?? "process-exit";
     entry.inUse = false;
     try {
-      const completion = entry.close();
+      const completion = entry.close(entry.closeReason);
       if (completion && typeof completion.then === "function") {
         entry.closeCompletion = completion.then(finish, () => {
           entry.closeFailed = true;

@@ -11,6 +11,15 @@ export interface CodexNativeSteeringCapability {
   readonly schemaDigest: string;
   readonly executableGeneration: string;
   readonly clientUserMessageId: boolean;
+  /** TurnStartParams.clientUserMessageId is in this executable's own schema (the session echoes it as the user item's
+   * clientId: a typed acknowledgement of the turn's request). Schema proof only; false when the file is absent. */
+  readonly turnStartClientUserMessageId: boolean;
+}
+
+/** Schema proof that turn/start accepts a client user message id. */
+export function codexTurnStartClientIdSchema(params: any): boolean {
+  const type = params?.type === "object" ? params.properties?.clientUserMessageId?.type : undefined;
+  return type === "string" || (Array.isArray(type) && type.includes("string"));
 }
 
 /** Schema proof, not a version guess or a provider prompt. */
@@ -57,7 +66,10 @@ export async function probeCodexNativeSteering(input: { bin: string; cwd: string
         .map((file) => fs.readFile(path.join(dir, file), "utf8")));
       const capability = codexNativeSteeringSchema(...raw.map((text) => JSON.parse(text)) as [any, any, any]);
       if (!capability) return null;
-      return Object.freeze({ ...capability, executableGeneration: identity.generation,
+      let turnStartClientUserMessageId = false;
+      try { turnStartClientUserMessageId = codexTurnStartClientIdSchema(JSON.parse(await fs.readFile(path.join(dir, "v2/TurnStartParams.json"), "utf8"))); }
+      catch { /* An absent or unreadable file proves nothing: the id is not sent. */ }
+      return Object.freeze({ ...capability, turnStartClientUserMessageId, executableGeneration: identity.generation,
         schemaDigest: createHash("sha256").update(JSON.stringify(raw)).digest("hex") });
     } catch { return null; }
     finally { await fs.rm(dir, { recursive: true, force: true }).catch(() => {}); }

@@ -776,6 +776,9 @@ export interface RunnerFailure {
 export interface RunnerResult {
   /** Explicit missing terminal proof prevents the common harness from dispatching another episode. */
   ownerControlTerminal?: "completed" | "uncertain";
+  /** Whether this turn reached the provider session (RuntimeTurnDelivery); absent = the runner cannot tell. A failure with
+   * "not-dispatched" is a definite pre-dispatch refusal: hosts keep its provider code and never treat it as unsettled. */
+  turnDelivery?: RuntimeTurnDelivery;
   text: string;
   /**
    * 실려 있으면 text는 답이 아니다(표시용 고지문일 수 있다). 소비자는 이 칸으로만
@@ -812,6 +815,18 @@ export interface RunnerResult {
 
 /** No terminal receipt after dispatch is uncertainty, not permission to replay. */
 export const RUNTIME_TURN_UNSETTLED_CODE = "runtime_turn_unsettled";
+/**
+ * The one shared typed fact "did this turn reach the provider session?", set by a runner from protocol/transport facts
+ * only, never from prose (RunnerResult.turnDelivery; RuntimeTurnUnsettledError.turnDelivery; a thrown pre-dispatch
+ * refusal may carry the same property).
+ *  - "not-dispatched": refused before anything was sent (admission, preparation, a closed pre-send check). With a
+ *    failure it is that failure: no model work happened, so it is never unsettled and its provider code is kept
+ *    (runnerResultRefusedBeforeDispatch / runnerRefusedBeforeDispatch; observed-runner.ts and mcp/client.ts honor it).
+ *  - "not-accepted": sent, but no acknowledgement of this turn was observed (the transport closed before the receipt).
+ *  - "accepted": the session acknowledged this turn (receipt, its turn-started event, or its echoed client message id),
+ *    so its request is in the transcript a continuation resumes (unsettled-continuation.ts does not re-send it).
+ */
+export type RuntimeTurnDelivery = "not-dispatched" | "not-accepted" | "accepted";
 export class RuntimeTurnUnsettledError extends Error {
   readonly code = RUNTIME_TURN_UNSETTLED_CODE;
   /**
@@ -819,19 +834,40 @@ export class RuntimeTurnUnsettledError extends Error {
    * The host resumes this same conversation once (mcp/client.ts invokeCurrentRuntime); it is never read from prose.
    */
   readonly sessionId?: string;
+  /** RuntimeTurnDelivery, when the runner observed it (an unsettled turn was dispatched, so never "not-dispatched"). */
+  readonly turnDelivery?: Exclude<RuntimeTurnDelivery, "not-dispatched">;
   /**
    * `providerReason`: the provider's own final error for this turn when it sent one (e.g. "Selected model is at
    * capacity"). The owner saw only "no terminal receipt" while the real cause was a provider capacity refusal
    * (Yotube room, 2026-10-13 12:58Z), so the provider's words lead the message.
    */
-  constructor(readonly runtimeKind: string, locale?: string, sessionId?: string | null, providerReason?: string | null) {
+  constructor(readonly runtimeKind: string, locale?: string, sessionId?: string | null, providerReason?: string | null,
+    turnDelivery?: Exclude<RuntimeTurnDelivery, "not-dispatched">) {
     const reason = typeof providerReason === "string" ? providerReason.trim().slice(0, 300) : "";
     super(locale === "ko"
       ? `${reason ? `${runtimeKind}: ${reason} — ` : ""}${runtimeKind} 요청을 보낸 뒤 완료 영수증을 받지 못했습니다. 실행 여부가 불확실해 자동 재전송을 멈췄습니다. 작업 기록을 확인한 뒤 이어가세요.`
       : `${reason ? `${runtimeKind}: ${reason} — ` : ""}${runtimeKind} did not return a terminal receipt after dispatch. Automatic replay stopped because the request may have acted. Review the work history before continuing.`);
     this.name = "RuntimeTurnUnsettledError";
     if (typeof sessionId === "string" && sessionId.trim() && sessionId.length <= 256) this.sessionId = sessionId;
+    if (turnDelivery === "accepted" || turnDelivery === "not-accepted") this.turnDelivery = turnDelivery;
   }
+}
+
+/**
+ * A thrown runner rejection that is a typed refusal raised before anything was dispatched: the Work project's resident
+ * owner is busy (its own code), or any error carrying turnDelivery "not-dispatched". It is that refusal, never an
+ * unsettled turn: nothing reached a model, so there is nothing to continue, and the caller's handling (busy Goal sweep,
+ * firm/swarm stop, provider fallback) must see the typed code.
+ */
+export function runnerRefusedBeforeDispatch(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  if ("code" in error && error.code === WORK_PROJECT_RESIDENCY_BUSY_CODE) return true;
+  return (error as { turnDelivery?: unknown }).turnDelivery === "not-dispatched";
+}
+
+/** A returned failure the runner proved pre-dispatch (RuntimeTurnDelivery "not-dispatched"): keep it, never unsettled. */
+export function runnerResultRefusedBeforeDispatch(result: Pick<RunnerResult, "failure" | "turnDelivery"> | null | undefined): boolean {
+  return !!result?.failure && result.turnDelivery === "not-dispatched";
 }
 
 /**

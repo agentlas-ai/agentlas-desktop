@@ -61,7 +61,7 @@ import { isCallOnlyHubAgent } from "../../shared/call-only-agent";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { bindInvocationAgentContext } from "../runtime/agent-context-admission";
-import { invokeWithUnsettledContinuation, unsettledContinuationPrompt } from "../runtime/unsettled-continuation";
+import { invokeWithUnsettledContinuation, unsettledContinuationCarriesRequest, unsettledContinuationPrompt } from "../runtime/unsettled-continuation";
 import { agentContextHostBinding, agentContextUnsettledTurn, markAgentContextContinuationHandle, type AgentContextCapability } from "../runtime/agent-context";
 import { createMainHostControlSink, createMainHostOperationBridge, withAdapterEffectChildDispatch } from "../invocation/adapter-effect-context";
 import { detectRuntimes } from "../runtime/detect";
@@ -311,6 +311,8 @@ import {
 } from "../invocation/workspace-binding";
 import {
   runnerFailureFromError,
+  runnerRefusedBeforeDispatch,
+  runnerResultRefusedBeforeDispatch,
   runtimeFailureIsClosedHttpRefusal,
   RuntimeTurnUnsettledError,
   RuntimeNoProgressError,
@@ -6855,9 +6857,16 @@ async function runMcpInvocationInContext(
             text: result.text, nativeActivity: attemptEvents.nativeActivity(), aborted: signal?.aborted === true,
             observedUsage: result.observedUsage,
           });
+          // A failure the runner proved pre-dispatch (RuntimeTurnDelivery "not-dispatched") is that failure with its own
+          // provider code, exactly like a locally rejected throw below: no model work, never an unknown dispatch.
+          if (runnerResultRefusedBeforeDispatch(result)) {
+            runtimeTerminalEvidence.locallyRejected = true;
+            const { ownerControlTerminal: _unknownEffect, ...refused } = result;
+            result = refused;
+          }
           // Dispatch is not completion. Preserve partial text, session and
           // usage while fencing authentication-success and provider recovery.
-          if (result.ownerControlTerminal !== "completed" && !runtimeTerminalEvidence.closedHttpRefusal) {
+          if (result.ownerControlTerminal !== "completed" && !runtimeTerminalEvidence.closedHttpRefusal && !runtimeTerminalEvidence.locallyRejected) {
             result = { ...result, ownerControlTerminal: "uncertain",
               failure: result.failure ?? runnerFailureFromError(new RuntimeTurnUnsettledError(selectedRuntime.kind, locale), selectedRuntime.kind) };
           }
@@ -6871,7 +6880,9 @@ async function runMcpInvocationInContext(
           if (signal?.aborted) throw signal.reason ?? new Error(tStatus(locale, "aborted"));
         } catch (error) {
           persistAttemptUsage(attemptEvents.observedUsage(historyReturnedUsage??observedRunnerUsage(error)), signal?.aborted ? "cancelled" : "failed");
-          if (runnerInvoked && !signal?.aborted) {
+          // A typed admission refusal raised before dispatch (the Work project's resident owner is busy) is that refusal,
+          // not an unknown dispatch: wrapping it made the one continuation replace the owner's question (2026-10-16).
+          if (runnerInvoked && !signal?.aborted && !runnerRefusedBeforeDispatch(error)) {
             const observedUsage = attemptEvents.observedUsage(historyReturnedUsage??observedRunnerUsage(error));
             persistGoalUsage(observedUsage);
             if (runtimeFailureBlocksReplay(runnerFailureFromError(error, selectedRuntime.kind))) throw error;
@@ -7106,19 +7117,21 @@ async function runMcpInvocationInContext(
       lastJournalTurnId = null;
       return invokeWithUnsettledContinuation<RunnerRequest>({
         dispatch(r, purpose, handle) { lastJournalTurnId = null; return runCurrentRuntimeOnce(r, purpose, handle); },
-        continuationRequest: (r, sessionId) => {
-          // The interrupted request may never have reached the resumed conversation: it rides along with its images
-          // (owner 2026-10-16: a follow-up question was replaced by the fixed line and answered "nothing remains").
-          const next = replaceRunnerUserPrompt(r, unsettledContinuationPrompt(runnerTurnContextSource(r)?.userPrompt ?? r.userPrompt));
+        continuationRequest: (r, sessionId, delivery) => {
+          // The interrupted request rides along (with its images) unless the session acknowledged that turn: an accepted
+          // request is in the resumed transcript and is not re-sent (runner.ts RuntimeTurnDelivery; owner 2026-10-16:
+          // a follow-up that never reached the session was replaced by the fixed line and answered "nothing remains").
+          const next = replaceRunnerUserPrompt(r, unsettledContinuationPrompt(runnerTurnContextSource(r)?.userPrompt ?? r.userPrompt, delivery),
+            unsettledContinuationCarriesRequest(delivery) ? {} : { images: undefined });
           return carryRunnerTurnContext(next, { ...next, runtimeSessionId: sessionId });
         },
         eligible: !isAliveControllerRun && !scienceRecovery && !request.minimalObservation && !request.judgmentOnly && !request.untrustedNoTools,
         aborted: () => signal?.aborted === true,
         noModelWork: () => runtimeTerminalEvidence.closedHttpRefusal || runtimeTerminalEvidence.locallyRejected,
         leftBehind: () => (lastJournalTurnId ? agentContextUnsettledTurn(lastJournalTurnId) : null),
-        record(phase) {
+        record(phase, delivery) {
           if (req.runId) tryRecordRunEvent({ runId: req.runId, chatId: chat.id, kind: "runtime_unsettled_continuation",
-            payload: { runtime: active.kind, phase } });
+            payload: { runtime: active.kind, phase, ...(delivery ? { turnDelivery: delivery } : {}) } });
         },
       }, request, hostAuthored);
     };

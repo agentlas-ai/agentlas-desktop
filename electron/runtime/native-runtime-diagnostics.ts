@@ -3,7 +3,14 @@ export interface NativeProtocolCounters { lines:number; parsed:number; invalidJs
 export type NativeStderrHint = "empty"|"configuration"|"argument"|"authentication"|"permission"|"unclassified";
 export interface NativeTransportSnapshot { connectionLifetime:true; transportEndReason:"stdout-end"|"child-error"|"child-close"|null; childCloseObserved:boolean; exitCode:number|null; signal:string|null; spawnErrorCode:string|null; stderrBytesObserved:number; stderrPrefixBytes:number; stderrPrefixSha256:string; stderrPrefixLimitBytes:65536; stderrHint?:NativeStderrHint; }
 export interface NativeFailureEvidence { category:"rpc-error"|"rpc-timeout"|"transport-ended"|"child-process-error"|"unknown"; rpcCode:number|null; timeoutMs:number|null; requestMethod:"initialize"|"turn/start"|"thread/start"|"thread/resume"|null; }
-export interface NativeRuntimeDiagnostic { schemaVersion:"agentlas.native-runtime-diagnostic.v1"; runtime:"codex"; driver:"app-server"|"exec"; phase:"initialize-failed"|"turn-start-failed"|"transport-ended"|"child-closed"|"process-error"|"process-closed"|"turn-terminal"; diagnosticAttemptId:string; runtimeAttemptId:string|null; sequence:number; transport:NativeTransportSnapshot|null; protocol:NativeProtocolCounters|null; protocolScope:"connection-delta"|"attempt"|null; terminal:{accepted:boolean;threadMismatch:number;turnMismatch:number;earlyOverflow:number}; failure:NativeFailureEvidence|null; observedAt:string; }
+/** Why a turn never started (phase "turn-start-failed" only). Fixed enums: no prose, path or provider text.
+ * code: the admission refusal or the turn/start failure class. transportState: the session transport at that moment
+ * ("not-opened": no session was leased). evictionReason: the host's typed reason when the host closed the process the
+ * turn needed (or, for a busy admission, the reason a blocking sibling is closing); null when the host closed nothing. */
+export type NativeTurnStartFailureCode = "work_project_residency_busy"|"turn_start_rpc_error"|"turn_start_timeout"|"turn_start_transport_closed"|"turn_start_unknown";
+export type NativeEvictionReason = "transport-closed"|"process-exit"|"reaped"|"shutdown"|"evicted"|"error";
+export interface NativeTurnStartFailure { code:NativeTurnStartFailureCode; transportState:"not-opened"|"open"|"ended"; evictionReason:NativeEvictionReason|null; }
+export interface NativeRuntimeDiagnostic { schemaVersion:"agentlas.native-runtime-diagnostic.v1"; runtime:"codex"; driver:"app-server"|"exec"; phase:"initialize-failed"|"turn-start-failed"|"transport-ended"|"child-closed"|"process-error"|"process-closed"|"turn-terminal"; diagnosticAttemptId:string; runtimeAttemptId:string|null; sequence:number; transport:NativeTransportSnapshot|null; protocol:NativeProtocolCounters|null; protocolScope:"connection-delta"|"attempt"|null; terminal:{accepted:boolean;threadMismatch:number;turnMismatch:number;earlyOverflow:number}; failure:NativeFailureEvidence|null; turnStart?:NativeTurnStartFailure; observedAt:string; }
 
 import { createHash } from "node:crypto";
 import { types } from "node:util";
@@ -102,21 +109,34 @@ function failureValid(v:unknown):v is NativeFailureEvidence {
     && (v.category==="rpc-error" || v.rpcCode===null) && (v.category==="rpc-timeout" || v.timeoutMs===null);
 }
 const inputKeys=["driver","phase","diagnosticAttemptId","runtimeAttemptId","sequence","transport","protocol","protocolScope","terminal","failure"];
+const turnStartCodes=new Set(["work_project_residency_busy","turn_start_rpc_error","turn_start_timeout","turn_start_transport_closed","turn_start_unknown"]);
+const evictionReasons=new Set(["transport-closed","process-exit","reaped","shutdown","evicted","error"]);
+// Existing v1 receipts have no turnStart; it is present only on a turn-start-failed diagnostic.
+function turnStartValid(v:Record<string,unknown>):boolean {
+  if(!Object.hasOwn(v,"turnStart"))return true;
+  const t=v.turnStart;
+  if(v.phase!=="turn-start-failed"||!plain(t,["code","transportState","evictionReason"]))return false;
+  return typeof t.code==="string"&&turnStartCodes.has(t.code)&&typeof t.transportState==="string"&&["not-opened","open","ended"].includes(t.transportState)
+    && (t.evictionReason===null||typeof t.evictionReason==="string"&&evictionReasons.has(t.evictionReason))
+    && (t.transportState!=="not-opened"||v.transport===null);
+}
+function keysValid(v:unknown,extra:readonly string[]=[]):v is Record<string,unknown> { return plain(v,[...inputKeys,...extra])||plain(v,[...inputKeys,...extra,"turnStart"]); }
 const branded=new WeakSet<object>();
 function validFields(v:Record<string,unknown>):boolean {
   return (v.driver==="app-server"||v.driver==="exec")&&typeof v.phase==="string"&&phases.has(v.phase)&&uuid(v.diagnosticAttemptId)&&(v.runtimeAttemptId===null||uuid(v.runtimeAttemptId))
     && count(v.sequence)&&v.sequence>=1&&v.sequence<=32&&(v.transport===null||transportValid(v.transport))&&(v.protocol===null||protocolValid(v.protocol))
     && (v.protocolScope===null||v.protocolScope==="connection-delta"||v.protocolScope==="attempt") && (v.protocol===null)===(v.protocolScope===null)
     && plain(v.terminal,["accepted","threadMismatch","turnMismatch","earlyOverflow"])&&typeof v.terminal.accepted==="boolean"&&count(v.terminal.threadMismatch)&&count(v.terminal.turnMismatch)&&count(v.terminal.earlyOverflow)
-    && (v.failure===null||failureValid(v.failure));
+    && (v.failure===null||failureValid(v.failure)) && turnStartValid(v);
 }
 export function createNativeRuntimeDiagnostic(input:Omit<NativeRuntimeDiagnostic,"schemaVersion"|"runtime"|"observedAt">):NativeRuntimeDiagnostic|null {
   try{
-    if(!plain(input,inputKeys)||!validFields(input))return null;
-    const result:NativeRuntimeDiagnostic={...input,schemaVersion:"agentlas.native-runtime-diagnostic.v1",runtime:"codex",observedAt:new Date().toISOString(),transport:input.transport===null?null:Object.freeze({...input.transport}),protocol:input.protocol===null?null:Object.freeze({...input.protocol}),terminal:Object.freeze({...input.terminal}),failure:input.failure===null?null:Object.freeze({...input.failure})};
+    if(!keysValid(input)||!validFields(input))return null;
+    const result:NativeRuntimeDiagnostic={...input,schemaVersion:"agentlas.native-runtime-diagnostic.v1",runtime:"codex",observedAt:new Date().toISOString(),transport:input.transport===null?null:Object.freeze({...input.transport}),protocol:input.protocol===null?null:Object.freeze({...input.protocol}),terminal:Object.freeze({...input.terminal}),failure:input.failure===null?null:Object.freeze({...input.failure}),
+      ...(input.turnStart?{turnStart:Object.freeze({...input.turnStart})}:{})};
     Object.freeze(result);branded.add(result);return result;
   }catch{return null;}
 }
 export function validatedHostNativeRuntimeDiagnostic(value:unknown):value is NativeRuntimeDiagnostic {
-  try{return !!value&&typeof value==="object"&&branded.has(value)&&plain(value,[...inputKeys,"schemaVersion","runtime","observedAt"])&&validFields(value)&&value.schemaVersion==="agentlas.native-runtime-diagnostic.v1"&&value.runtime==="codex"&&typeof value.observedAt==="string"&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value.observedAt);}catch{return false;}
+  try{return !!value&&typeof value==="object"&&branded.has(value)&&keysValid(value,["schemaVersion","runtime","observedAt"])&&validFields(value)&&value.schemaVersion==="agentlas.native-runtime-diagnostic.v1"&&value.runtime==="codex"&&typeof value.observedAt==="string"&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value.observedAt);}catch{return false;}
 }
