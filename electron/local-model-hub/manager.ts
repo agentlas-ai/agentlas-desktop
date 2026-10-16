@@ -47,6 +47,10 @@ interface OwnerLease {
   instanceId: string;
   pid: number;
   createdAt: string;
+  /** Owner identity, observed the same way as the process lease (matchesLocalProcessIdentity):
+   * Windows compares the CIM creation time, macOS/Linux the ps command line. Absent on older leases. */
+  processCreatedAt?: string | null;
+  processCommandLine?: string | null;
 }
 
 interface ProcessLease {
@@ -158,6 +162,25 @@ function awaitAbortableExecutor<T>(operation: Promise<T>, signal: AbortSignal): 
   });
 }
 
+/** Manager failures are machine codes; carry them as `.code` so the daemon status and RPC do not mask them. */
+function hubError(code: string): Error & { code: string } {
+  return Object.assign(new Error(code), { code });
+}
+
+/**
+ * A live PID alone does not identify the owner: after a crash or reboot the PID may belong to another process.
+ * The lease is stale only when it recorded an identity and the live process provably differs. A lease without
+ * identity, or a process that cannot be observed, keeps the conservative answer (still owned).
+ */
+async function ownerLeaseProvesPidReuse(lease: OwnerLease): Promise<boolean> {
+  const identity = await observeLocalProcessIdentity(lease.pid);
+  if (!identity || identity.pid !== lease.pid) return false;
+  if (process.platform === "win32") {
+    return Boolean(lease.processCreatedAt && identity.createdAt && identity.createdAt !== lease.processCreatedAt);
+  }
+  return Boolean(lease.processCommandLine && identity.commandLine && identity.commandLine !== lease.processCommandLine);
+}
+
 function processAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -218,6 +241,7 @@ export class LocalModelHubManager {
   private readonly progress = new Map<string, LocalPackageProgress>();
   private state: PersistedHubState = emptyState();
   private initialized = false;
+  private initializing: Promise<void> | null = null;
   private unavailableReason: string | null = null;
   private shutdownPromise: Promise<void> | null = null;
   private saveChain: Promise<void> = Promise.resolve();
@@ -252,12 +276,20 @@ export class LocalModelHubManager {
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
+    // Single flight: two racing attempts would read each other's fresh lease as foreign.
+    this.initializing ??= this.initializeOnce().finally(() => { this.initializing = null; });
+    return this.initializing;
+  }
+
+  private async initializeOnce(): Promise<void> {
+    this.unavailableReason = null;
     try {
       await mkdir(this.rootPath, { recursive: true, mode: 0o700 });
       await this.claimOwnerLease();
     } catch (error) {
+      // Not latched: the owner may be an old daemon still draining after an update. The next
+      // ready() tries again, and the snapshot shows this reason until then.
       this.unavailableReason = error instanceof Error ? error.message : "local_model_hub_initialization_failed";
-      this.initialized = true;
       return;
     }
     try {
@@ -297,11 +329,14 @@ export class LocalModelHubManager {
   }
 
   private async claimOwnerLease(): Promise<void> {
+    const self = await observeLocalProcessIdentity(process.pid);
     const lease: OwnerLease = {
       schemaVersion: 1,
       instanceId: this.instanceId,
       pid: process.pid,
       createdAt: new Date().toISOString(),
+      processCreatedAt: self?.createdAt ?? null,
+      processCommandLine: self?.commandLine ?? null,
     };
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
@@ -317,22 +352,25 @@ export class LocalModelHubManager {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         let current: OwnerLease | null = null;
         try { current = JSON.parse(await readFile(this.ownerLeasePath, "utf8")) as OwnerLease; } catch { /* stale */ }
-        if (current && Number.isSafeInteger(current.pid) && current.pid > 0 && processAlive(current.pid)) {
-          throw new Error("local_model_hub_owned_by_other_process");
+        if (
+          current && Number.isSafeInteger(current.pid) && current.pid > 0 && processAlive(current.pid)
+          && !(await ownerLeaseProvesPidReuse(current))
+        ) {
+          throw hubError("local_model_hub_owned_by_other_process");
         }
         const stale = `${this.ownerLeasePath}.stale-${randomUUID()}`;
         await rename(this.ownerLeasePath, stale).catch(() => undefined);
         await rm(stale, { force: true }).catch(() => undefined);
       }
     }
-    throw new Error("local_model_hub_owner_lease_failed");
+    throw hubError("local_model_hub_owner_lease_failed");
   }
 
   private async reconcileStaleProcessLease(): Promise<void> {
     let lease: ProcessLease | null = null;
     try { lease = JSON.parse(await readFile(this.processLeasePath, "utf8")) as ProcessLease; } catch { return; }
     if (!lease || lease.schemaVersion !== 1 || !Number.isSafeInteger(lease.pid) || lease.pid < 1) {
-      throw new Error("local_model_process_lease_invalid");
+      throw hubError("local_model_process_lease_invalid");
     }
     if (!processAlive(lease.pid)) {
       await rm(this.processLeasePath, { force: true });
@@ -341,22 +379,22 @@ export class LocalModelHubManager {
     const engineBoundary = `${resolve(this.engineRoot)}${sep}`;
     const modelBoundary = `${resolve(this.packageRoot)}${sep}`;
     if (!resolve(lease.executablePath).startsWith(engineBoundary) || !resolve(lease.modelPath).startsWith(modelBoundary)) {
-      throw new Error("local_model_process_lease_path_rejected");
+      throw hubError("local_model_process_lease_path_rejected");
     }
     if (
       await sha256File(lease.executablePath).catch(() => null) !== lease.executableSha256
       || await sha256File(lease.modelPath).catch(() => null) !== lease.modelSha256
-    ) throw new Error("local_model_process_lease_hash_mismatch");
+    ) throw hubError("local_model_process_lease_hash_mismatch");
     const identity = await observeLocalProcessIdentity(lease.pid);
     if (!identity || !matchesLocalProcessIdentity(identity, lease)) {
-      throw new Error("local_model_process_lease_command_mismatch");
+      throw hubError("local_model_process_lease_command_mismatch");
     }
     await terminateMatchedLocalProcess(lease);
     await rm(this.processLeasePath, { force: true });
   }
 
   private async save(): Promise<void> {
-    if (this.unavailableReason) throw new Error(this.unavailableReason);
+    if (this.unavailableReason) throw hubError(this.unavailableReason);
     const snapshot = JSON.stringify(this.state, null, 2);
     this.saveChain = this.saveChain.then(async () => {
       const temporary = `${this.statePath}.tmp-${randomUUID()}`;
@@ -372,7 +410,7 @@ export class LocalModelHubManager {
 
   private async readyForMutation(): Promise<void> {
     await this.ready();
-    if (this.unavailableReason) throw new Error(this.unavailableReason);
+    if (this.unavailableReason) throw hubError(this.unavailableReason);
   }
 
   /** Host-service fence after initialization. initialize() retains a readable
@@ -382,9 +420,9 @@ export class LocalModelHubManager {
     await this.readyForMutation();
     let lease: OwnerLease;
     try { lease = JSON.parse(await readFile(this.ownerLeasePath, "utf8")) as OwnerLease; }
-    catch { throw new Error("local_model_hub_owner_lease_lost"); }
+    catch { throw hubError("local_model_hub_owner_lease_lost"); }
     if (!lease || lease.schemaVersion !== 1 || lease.instanceId !== this.instanceId || lease.pid !== process.pid) {
-      throw new Error("local_model_hub_owner_lease_lost");
+      throw hubError("local_model_hub_owner_lease_lost");
     }
   }
 
@@ -403,14 +441,14 @@ export class LocalModelHubManager {
     await this.readyForMutation();
     const identity = await this.modelIndex.resolveModel(input);
     return this.enqueueLifecycle(async () => {
-      if (this.shutdownPromise) throw new Error("local_model_hub_admission_closed");
-      if (this.unavailableReason) throw new Error(this.unavailableReason);
+      if (this.shutdownPromise) throw hubError("local_model_hub_admission_closed");
+      if (this.unavailableReason) throw hubError(this.unavailableReason);
       const existing = this.modelCatalog().find(value => value.repository === identity.repository && value.revision === identity.revision && value.fileName === identity.fileName);
       if (existing) {
-        if (existing.sha256 !== identity.sha256 || existing.byteLength !== identity.byteLength) throw new Error("local_model_identity_conflict");
+        if (existing.sha256 !== identity.sha256 || existing.byteLength !== identity.byteLength) throw hubError("local_model_identity_conflict");
         return existing;
       }
-      if ((this.state.registeredModels?.length ?? 0) >= 1000) throw new Error("local_model_registry_capacity_exceeded");
+      if ((this.state.registeredModels?.length ?? 0) >= 1000) throw hubError("local_model_registry_capacity_exceeded");
       this.state.registeredModels = [...(this.state.registeredModels ?? []), identity];
       try { await this.save(); } catch (error) { this.unavailableReason = "local_model_registry_write_failed"; throw error; }
       return { ...identity };
@@ -453,8 +491,9 @@ export class LocalModelHubManager {
       state: "pending", ownerEpoch: this.instanceId, reasonCode,
     });
     if (this.shutdownPromise) return pending("local_model_hub_admission_closed");
-    if (!this.initialized) return pending("local_model_hub_initialization_pending");
+    // A failed owner claim is retried and leaves initialized=false; show its reason, not "pending".
     if (this.unavailableReason) return pending(this.unavailableReason);
+    if (!this.initialized) return pending("local_model_hub_initialization_pending");
     // A small existing lease read fences the instance without reaching the
     // mutation-oriented assertOwnership()/ready()/initialize() path.
     try {
@@ -786,7 +825,7 @@ export class LocalModelHubManager {
       if (await sha256File(projectorPath) !== projectorIdentity.sha256) throw new Error("projector_file_sha256_mismatch");
     }
 
-    if (this.activeInference.size > 0) throw new Error("local_model_runs_active");
+    if (this.activeInference.size > 0) throw hubError("local_model_runs_active");
     await this.terminateResidentProcess();
     const startedAt = new Date().toISOString();
     const processEpoch = randomUUID();
@@ -841,7 +880,7 @@ export class LocalModelHubManager {
       const processIdentity = process.platform === "win32" ? await observeLocalProcessIdentity(child.pid) : null;
       if (process.platform === "win32" && (!processIdentity || !matchesLocalProcessIdentity(processIdentity, {
         pid: child.pid, executablePath: executable, modelPath, processCreatedAt: processIdentity.createdAt,
-      }))) throw new Error("local_model_process_identity_unavailable");
+      }))) throw hubError("local_model_process_identity_unavailable");
       const processLease: ProcessLease = {
         schemaVersion: 1,
         processEpoch,
@@ -930,21 +969,21 @@ export class LocalModelHubManager {
 
   endpoint(): string {
     if (!this.residentProcess || this.residentReceipt?.state !== "resident") {
-      throw new Error("local_model_not_resident");
+      throw hubError("local_model_not_resident");
     }
     return this.residentReceipt.endpoint;
   }
 
   authorizationHeaders(): Record<string, string> {
     if (!this.residentProcess || !this.residentAuthToken || this.residentReceipt?.state !== "resident") {
-      throw new Error("local_model_not_resident");
+      throw hubError("local_model_not_resident");
     }
     return { authorization: `Bearer ${this.residentAuthToken}` };
   }
 
   residentInstallation(): LocalModelInstallationReceipt {
     const receipt = this.residentReceipt;
-    if (!this.residentProcess || receipt?.state !== "resident") throw new Error("local_model_not_resident");
+    if (!this.residentProcess || receipt?.state !== "resident") throw hubError("local_model_not_resident");
     const installation = this.state.modelInstallations.find((item) => item.installationId === receipt.installationId);
     if (!installation) throw new Error("resident_model_installation_missing");
     return installation;
@@ -958,7 +997,7 @@ export class LocalModelHubManager {
           throw new Error("stale_local_model_process_epoch");
         }
         if (this.activeInference.size > 0) {
-          if (!options.cancelActiveRuns) throw new Error("local_model_runs_active");
+          if (!options.cancelActiveRuns) throw hubError("local_model_runs_active");
           await this.cancelActiveRuns();
         }
         await this.terminateResidentProcess();
@@ -1050,7 +1089,7 @@ export class LocalModelHubManager {
   ): Promise<T> {
     await this.readyForMutation();
     const resident = this.residentReceipt;
-    if (!resident || !this.residentProcess) throw new Error("local_model_not_resident");
+    if (!resident || !this.residentProcess) throw hubError("local_model_not_resident");
     const queuedAt = new Date().toISOString();
     const startedAt = new Date().toISOString();
     const active = this.beginActiveInference(signal);

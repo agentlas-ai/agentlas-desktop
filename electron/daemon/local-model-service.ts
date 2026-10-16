@@ -29,6 +29,9 @@ function serviceError(code: string): Error & { code: string } {
   return Object.assign(new Error(code), { code });
 }
 
+const START_RETRY_MIN_MS = 1_000;
+const START_RETRY_MAX_MS = 60_000;
+
 /** One service owns the real manager, native engine, credentials and runner.
  * Only the daemon lifecycle may close it. Merely constructing this service
  * does not open a hub, reconcile old processes, or download any model. */
@@ -52,6 +55,11 @@ export function createDaemonLocalModelService(options: {
   let startPromise: Promise<DaemonLocalModelStatus> | null = null;
   let closePromise: Promise<void> | null = null;
   let runnerPromise: Promise<Runner> | null = null;
+  // A failed start is retried after a capped backoff, never latched: the usual cause
+  // (an old daemon still draining after an update, a reused PID) clears on its own.
+  let retryAt = 0;
+  let retryDelayMs = 0;
+  let retiring: Promise<void> | null = null;
   const pending = new Set<Promise<unknown>>();
   const stop = new AbortController();
   const status = (): DaemonLocalModelStatus => ({
@@ -60,7 +68,7 @@ export function createDaemonLocalModelService(options: {
     settled: (state === "idle" || state === "ready" || state === "closed") && pending.size === 0,
   });
   const assertAdmission = () => {
-    if (stop.signal.aborted || state === "failed") throw serviceError("local_model_service_admission_closed");
+    if (stop.signal.aborted) throw serviceError("local_model_service_admission_closed");
     options.assertOwner();
   };
   const signal = (parent?: AbortSignal): AbortSignal => parent ? AbortSignal.any([stop.signal, parent]) : stop.signal;
@@ -70,23 +78,39 @@ export function createDaemonLocalModelService(options: {
     catch (error) { return Promise.reject(error); }
     if (state === "ready") return manager!.assertOwnership().then(() => status());
     if (startPromise) return startPromise;
+    if (Date.now() < retryAt) return Promise.reject(serviceError(errorCode ?? "local_model_service_operation_failed"));
     state = "starting";
-    // Assign before awaiting any filesystem operation: initialize() itself is
-    // not a single-flight API and racing it can mistake its own lease for foreign.
-    manager ??= new LocalModelHubManager(options.rootPath, {
-      windowsRuntimeDir: options.windowsRuntimeDir,
-      onResidentChanged: () => { try { options.onResidentChanged?.(); } catch { /* observation only */ } },
-    } satisfies LocalModelHubManagerOptions);
+    const previous = retiring;
     startPromise = (async () => {
-      await manager!.initialize();
+      // A dropped manager releases whatever it held before a new one claims the lease.
+      await previous;
       assertAdmission();
-      await manager!.assertOwnership();
+      // Assign before awaiting any filesystem operation: start() is the single
+      // flight, and racing initialize() can mistake its own lease for foreign.
+      manager ??= new LocalModelHubManager(options.rootPath, {
+        windowsRuntimeDir: options.windowsRuntimeDir,
+        onResidentChanged: () => { try { options.onResidentChanged?.(); } catch { /* observation only */ } },
+      } satisfies LocalModelHubManagerOptions);
+      await manager.initialize();
+      assertAdmission();
+      await manager.assertOwnership();
       assertAdmission();
       state = "ready";
+      errorCode = null;
+      retryAt = 0;
+      retryDelayMs = 0;
       return status();
     })().catch(error => {
       errorCode = machineCode(error);
-      if (!stop.signal.aborted) state = "failed";
+      if (!stop.signal.aborted) {
+        state = "idle";
+        retryDelayMs = Math.min(Math.max(retryDelayMs * 2, START_RETRY_MIN_MS), START_RETRY_MAX_MS);
+        retryAt = Date.now() + retryDelayMs;
+        const dropped = manager;
+        manager = null;
+        runnerPromise = null;
+        retiring = dropped ? dropped.shutdown().catch(() => {}) : null;
+      }
       throw error;
     }).finally(() => { startPromise = null; });
     return startPromise;
@@ -143,6 +167,7 @@ export function createDaemonLocalModelService(options: {
     const drain = (async () => {
       // Never release a lease while an in-flight initialize can still create it.
       await startup?.catch(() => {});
+      await retiring;
       // Stop the engine to unblock inference, but retain the manager lease
       // until downloads/installers and receipt writes have actually settled.
       await manager?.unload(undefined, { cancelActiveRuns: true });
