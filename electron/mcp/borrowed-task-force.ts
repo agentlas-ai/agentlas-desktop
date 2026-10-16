@@ -3385,8 +3385,20 @@ export function packetToPrompt(
   return composeDeclaredPrompt(packetPromptParts(packet, originalRequest, workforceResponsibility, background, typedHandoff), "\n");
 }
 
-registerDeclaredPromptModule({ id: "taskforce.worker.response-schema", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 0 });
-/** Typed final response, rendered back to the installed appendix/UI contract. */
+registerDeclaredPromptModule({ id: "taskforce.worker.response-schema", revision: 2, stability: "fixed-policy", changeTriggers: ["release"], order: 0 });
+/**
+ * Typed final response, rendered back to the installed appendix/UI contract.
+ *
+ * The two lists carry no item cap. Strict-schema runtimes (codex/OpenAI strict, Claude --json-schema, local json_schema
+ * grammars) enforce `maxItems` while decoding: once a list is full the item separator is masked, and a model that still
+ * has items to write keeps writing them inside the last string, the only place the grammar leaves open. Production
+ * 2026-10-16 (Yotube room 5d37e4cc, independent-review, gpt-6.1-sol xhigh): handoffFacts reached its cap of 8 with a
+ * 15-video review still to report; facts 1-7 were 65-169 chars, fact 8 never closed and ran 56 minutes (257,684 chars,
+ * 11,875 sentences from 174 distinct closing lines) until codex's output cap ended the turn and the room lost 3 hours.
+ * Real-model probes (gpt-6.1-sol): wanting 5 items under maxItems 2 corrupted the last item 3/3 ("E رواI"); wanting
+ * 20 under maxItems 8 ended the last item malformed 2/2, one after 320 s; uncapped: every item, clean, 4/4. Length is the
+ * prompt's job ("concise"), never a grammar wall.
+ */
 export const TASK_FORCE_WORKER_HANDOFF_SCHEMA: Record<string, unknown> = {
   type: "object", additionalProperties: false,
   required: ["schemaVersion", "handoff", "limitations", "packetStatus", "reviewComplete", "blockingRemaining", "handoffFacts"],
@@ -3394,8 +3406,8 @@ export const TASK_FORCE_WORKER_HANDOFF_SCHEMA: Record<string, unknown> = {
     schemaVersion: { type: "string", enum: ["agentlas.packet-handoff.v1"] },
     handoff: { type: "string", minLength: 1 }, limitations: { type: "string", minLength: 1 },
     packetStatus: { type: "string", enum: ["completed", "partial", "failed"] }, reviewComplete: { type: "boolean" },
-    blockingRemaining: { type: "array", maxItems: 16, items: { type: "string", minLength: 1 } },
-    handoffFacts: { type: "array", maxItems: 8, items: { type: "string", minLength: 1 } },
+    blockingRemaining: { type: "array", items: { type: "string", minLength: 1 } },
+    handoffFacts: { type: "array", items: { type: "string", minLength: 1 } },
   },
 };
 
@@ -3428,8 +3440,9 @@ export function taskForceWorkerHandoffText(text: string): string {
     || typeof parsed.limitations !== "string" || !parsed.limitations.trim()
     || !["completed", "partial", "failed"].includes(String(parsed.packetStatus))
     || typeof parsed.reviewComplete !== "boolean"
-    || !Array.isArray(parsed.blockingRemaining) || parsed.blockingRemaining.length > 16
-    || !Array.isArray(parsed.handoffFacts) || parsed.handoffFacts.length > 8
+    // No item count is a format error: the schema carries no list cap (TASK_FORCE_WORKER_HANDOFF_SCHEMA).
+    || !Array.isArray(parsed.blockingRemaining)
+    || !Array.isArray(parsed.handoffFacts)
     || [...parsed.blockingRemaining, ...parsed.handoffFacts].some(item => typeof item !== "string" || !item.trim())) {
     return salvagedTaskForceHandoff(text);
   }
