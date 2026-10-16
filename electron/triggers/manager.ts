@@ -11,6 +11,7 @@
 import type { Automation } from "../../shared/types";
 import { randomUUID } from "node:crypto";
 import { listEnabledByTrigger, reconcileDurableChainDeliveries } from "../store/automations";
+import { getDb } from "../store/db";
 import { enqueueTriggerEvent, parkRejectedSourceTriggerEvent } from "../store/trigger-events";
 import { watchPath, unwatchAutomation, closeAllWatchers, type FsChangeKind } from "./fs-watcher";
 import { onAutomationDone, type AutomationCompletion } from "./chain-bus";
@@ -29,6 +30,40 @@ const fsUnsubs = new Map<string, Array<() => void>>();
 let chainUnsub: (() => void) | null = null;
 let started = false;
 const sourceRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** 자동화 하나가 밀린 fs 이벤트를 이만큼 넘게 쌓지 않는다. 넘친 것은 주의 항목으로 남긴다. */
+const FS_TRIGGER_MAX_PENDING = 20;
+
+function pendingFsEventCount(automationId: string): number {
+  const row = getDb()
+    .prepare(
+      `SELECT COUNT(*) AS n FROM automation_trigger_events
+       WHERE automation_id = ? AND trigger_kind = 'fs' AND status = 'pending'`,
+    )
+    .get(automationId) as { n: number } | undefined;
+  return row?.n ?? 0;
+}
+
+/**
+ * 넘친 fs 발사는 실행하지 않고 parked 주의 항목 하나로 남긴다. 시간 단위로 묶어 넘침이
+ * 계속돼도 행이 늘지 않게 한다(같은 시간대의 다음 넘침은 같은 키라 INSERT OR IGNORE).
+ */
+function parkFsOverflow(a: Automation, payload: Record<string, unknown>): void {
+  const dedupeKey = `fs-overflow:${new Date().toISOString().slice(0, 13)}`;
+  try {
+    if (parkRejectedSourceTriggerEvent({
+      automationId: a.id,
+      triggerKind: "fs",
+      dedupeKey,
+      payload,
+      error: "fs_trigger_overflow",
+    })) {
+      console.warn(`[triggers] fs_trigger_overflow automation=${a.id}: ${FS_TRIGGER_MAX_PENDING} fs events already waiting`);
+    }
+  } catch (error) {
+    console.error(`[triggers] fs overflow attention persistence failed (${a.id}):`, error);
+  }
+}
+
 
 function fire(a: Automation, vars: Record<string, unknown>, dedupeKey: string): void {
   // 트리거 게이트 조건(onlyIf) 1회 평가. false면 스킵(설계 §3.4 Tier 0 #3 하이브리드).
@@ -38,8 +73,21 @@ function fire(a: Automation, vars: Record<string, unknown>, dedupeKey: string): 
   const payload = Object.fromEntries(
     Object.entries(vars).filter(([, value]) =>
       value == null || typeof value === "string" || typeof value === "number" || typeof value === "boolean"
+      || (Array.isArray(value) && value.every((item) => typeof item === "string"))
     ),
   );
+  if (a.trigger.kind === "fs") {
+    let backlog = 0;
+    try {
+      backlog = pendingFsEventCount(a.id);
+    } catch {
+      // 세지 못했다고 이벤트를 버리지 않는다 — 아래 영속화 경로가 재시도를 맡는다.
+    }
+    if (backlog >= FS_TRIGGER_MAX_PENDING) {
+      parkFsOverflow(a, payload);
+      return;
+    }
+  }
   const persist = (attempt: number): void => {
     try {
       enqueueTriggerEvent({
@@ -104,9 +152,18 @@ function registerFs(a: Automation): void {
     debounceMs,
     fire: (info) => fire(
       a,
-      { path: info.path, changedPath: info.changedPath ?? "", kind: info.kind },
+      {
+        path: info.path,
+        changedPath: info.changedPath ?? "",
+        changedPaths: info.changedPaths,
+        overflowCount: info.overflowCount,
+        kind: info.kind,
+      },
       `fs:${randomUUID()}`,
     ),
+    // 감시를 멈춘 것은 이벤트가 아니다(실행할 변경이 없다) — 기계 코드로 남기고, 자동화를
+    // 다시 켜거나 앱을 다시 열면 syncTriggers 가 새로 건다.
+    onUnavailable: (info) => console.warn(`[triggers] ${info.reason} automation=${a.id} path=${info.path}`),
   });
   const list = fsUnsubs.get(a.id) ?? [];
   list.push(unsub);
