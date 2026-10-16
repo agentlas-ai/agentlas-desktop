@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.3.48 — 2026-10-16
+
+- Automations that run several agent steps on the same conversation finish again; the second step was refused as "another run" every time.
+- An automation saved by a team room can work with that room's team — start a teammate session and read its result — within the automation's own permission, so daily team production runs again.
+- Background checks no longer burn your Codex quota: memory organizing backs off and stops retrying after repeated failures, and quick judgments (tool selection, automation reflection, memory) work again after Codex's provider started sending a new kind of message.
+- A failed automation step explains what happened in plain words in your language instead of showing an internal code.
+- A team room's request is marked finished or stopped when its work ends, so the next message in that room starts fresh instead of joining a stale request.
+- Problems that can never resolve on their own (no remaining recovery path) are handed to you instead of retrying forever.
+- When you switch a conversation from a Codex or Claude model to Agentlas Light or your own API key, tools used earlier in that conversation keep working.
+- Agents in a run reach One Team, mail, the browser and screen control only through that run's own connection; a run without them gets a clear refusal instead of a tool that never answers.
+- The automation browser no longer downloads Chrome's 4 GB built-in AI model, and browser caches stay within a fixed size.
+- This release binds Agentlas OS v1.2.65 at 8b303608eea746e7ea8d7560890816784bdaa86c; public runtime asset `hephaestus-runtime-v1.2.65.tar.gz` is pinned at SHA-256 `7dae16f12a78515dfa7adbc732197e26aa06a2cd413452e81b2675450caba7de`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.47 — 2026-10-16
 
 - Includes everything planned for 1.3.46, which was not published.
