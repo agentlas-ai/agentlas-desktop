@@ -274,9 +274,28 @@ if (import.meta.url === "file://" + process.argv[1]) {
 `;
 }
 
-function mcpServer(tool: JsonObject): string {
+/**
+ * Every `mcp/server.mjs` scaffold has written for this tool definition: the current adapter and, when the name holds
+ * no line terminator, the adapter of builds before the comment was escaped. installToolMcp re-renders these from
+ * `agentlas.tool.json` and refuses an adapter that matches none (`src/tool.mjs` stays owner-editable).
+ */
+export function renderToolMcpServers(tool: JsonObject): string[] {
+  const name = stringValue(tool.name) || "Agentlas Tool";
+  const current = mcpServer(tool);
+  return /[\r\n\u2028\u2029]/u.test(name) ? [current] : [current, mcpServer(tool, name)];
+}
+
+/** A model-authored string inside a `//` comment: one JSON literal with every line terminator escaped. */
+function commentLiteral(value: string): string {
+  return JSON.stringify(value).replace(/[\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16)}`);
+}
+
+function mcpServer(tool: JsonObject, legacyHeaderName?: string): string {
+  // Review 2026-10-16 (desktop-b-06): the name went raw into this comment, so a newline in a model-authored tool name
+  // made the next line executable code in the generated server.
+  const header = legacyHeaderName ?? commentLiteral(stringValue(tool.name) || "Agentlas Tool");
   return `#!/usr/bin/env node
-// Generated local MCP adapter for ${stringValue(tool.name) || "Agentlas Tool"}.
+// Generated local MCP adapter for ${header}.
 
 import { run } from "../src/tool.mjs";
 

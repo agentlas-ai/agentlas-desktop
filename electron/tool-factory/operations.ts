@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { getServer, installCustomServer, removeServer } from "../mcp-tools/registry";
 import { getAgentToolByRoot } from "../store/agent-tools";
+import { renderToolMcpServers } from "./scaffold";
 import type { JsonObject, ToolFactoryMcpInstallResult, ToolFactoryRootRequest } from "../../shared/types";
 
 export async function installToolMcp(
@@ -18,6 +19,7 @@ export async function installToolMcp(
 
   const definition = await readDefinition(configPath);
   await fs.access(mcpPath);
+  await assertGeneratedAdapterUnmodified(definition, mcpPath);
 
   const existingRecord = getAgentToolByRoot(rootPath);
   const existingServer =
@@ -182,6 +184,7 @@ async function restoreToolMcpRegistration(rootPath: string): Promise<string | nu
   if (!removedServerId) return null;
   const configPath = path.join(rootPath, "agentlas.tool.json");
   const definition = await readDefinition(configPath);
+  await assertGeneratedAdapterUnmodified(definition, mcpPath);
   const existingRecord = getAgentToolByRoot(rootPath);
   const existingServer =
     existingRecord?.installedServerId ? getServer(existingRecord.installedServerId) : null;
@@ -195,6 +198,18 @@ async function restoreToolMcpRegistration(rootPath: string): Promise<string | nu
       envKeys: [],
     });
   return server.id;
+}
+
+/**
+ * The MCP server registered for a generated tool runs `mcp/server.mjs` unsandboxed as the owner, so it must be exactly
+ * what scaffold renders from `agentlas.tool.json` (review 2026-10-16, desktop-b-06): the owner consents to "a safe
+ * local tool package", not to whatever a later turn appended to the adapter. `src/tool.mjs` stays owner-editable.
+ */
+async function assertGeneratedAdapterUnmodified(definition: JsonObject, mcpPath: string): Promise<void> {
+  const onDisk = await fs.readFile(mcpPath);
+  if (!renderToolMcpServers(definition).some((rendered) => onDisk.equals(Buffer.from(rendered, "utf8")))) {
+    throw new Error("tool_adapter_modified: mcp/server.mjs differs from the adapter Tool Factory generates for agentlas.tool.json; scaffold the tool again.");
+  }
 }
 
 async function readDefinition(configPath: string): Promise<JsonObject> {
