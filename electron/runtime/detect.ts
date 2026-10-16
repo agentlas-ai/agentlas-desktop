@@ -121,6 +121,10 @@ const LOCAL_RUNTIME_CONTEXT_WINDOW = 32_000;
  * capability metadata or reasoning-effort control. Advertise only facts the
  * host itself enforces so the parent LLM can author an exactly executable
  * allocation instead of being rejected after planning.
+ *
+ * Tools are such a fact: Ollama, LM Studio and MLX all run Main's own tool loop (local-tool-loop.ts: tool admission,
+ * approval, dispatch, effect ledger), so the lane takes tool work (A4 gap 10). A model that cannot emit tool calls is a
+ * typed refusal of that run (workforce_broker_tool_protocol_unsupported for a team grant), never a silent tool-less pass.
  */
 export function conservativeLocalRuntimeAllocation(models: string[]): Pick<
   RuntimeStatus,
@@ -135,7 +139,7 @@ export function conservativeLocalRuntimeAllocation(models: string[]): Pick<
         costTier: "balanced" as const,
         contextWindow: LOCAL_RUNTIME_CONTEXT_WINDOW,
         capabilities: [],
-        supportsTools: false,
+        supportsTools: true,
         supportsMultimodal: false,
         efforts: ["none"],
       },
@@ -865,7 +869,8 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
         {
           costTier: model.tier === "hard" ? "frontier" : model.tier === "normal" ? "balanced" : "economy",
           contextWindow: AGENTLAS_SERVING_CONTEXT_WINDOW,
-          supportsTools: false,
+          // The serving tool protocol runs Main's tool loop (agentlas-serving.ts runAgentlasServingWithTools).
+          supportsTools: true,
           supportsMultimodal: false,
         },
       ])),
@@ -897,7 +902,9 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
       // OpenAI-compatible /models lists can include embeddings, audio and images.
       // Unknown capability permits only the owner's exact provider-scoped selection.
       ...allocationAdvertisement({ live: discovery.status === "ok" && !discovery.stale ? discovery.chatModels : [],
-        selected: selectedModel, catalogFallback: false }),
+        selected: selectedModel, catalogFallback: false,
+        // Every BYOK backend runs Main's tool loop (Anthropic tool_use, OpenAI-compatible tool_calls, Gemini function calls).
+        profileDefaults: { supportsTools: true } }),
     };
   }));
   for (const runtime of apiRuntimes) if (runtime) list.push(runtime);
