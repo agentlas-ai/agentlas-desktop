@@ -37,6 +37,7 @@ import {
 } from "./judgment-capability";
 import type { RuntimeLocale } from "../runtime/status-i18n";
 import type { RunnerFailure, RunnerFailureKind, RunnerRequest } from "../runtime/runner";
+import { decideTurnSettlement, RATE_LIMIT_MAX_RETRIES } from "../../shared/turn-settlement";
 import { looksSecret, redactSecrets } from "../../shared/secret-patterns";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
 
@@ -720,7 +721,7 @@ function workerFallbackFailureAllowsNext(failure: RunnerFailure, returned = fals
   // does not prove a settled auth/quota failure. Only a returned typed empty
   // result has the narrow exit-source exception (for example AGY exit 0).
   return failure.source === "marker"
-    ? failure.kind === "auth" || failure.kind === "quota" || failure.kind === "unavailable" || failure.kind === "empty"
+    ? failure.kind === "auth" || failure.kind === "quota" || failure.kind === "rate_limit" || failure.kind === "unavailable" || failure.kind === "empty"
     : returned && failure.source === "exit" && failure.kind === "empty";
 }
 
@@ -1101,8 +1102,17 @@ async function callJudgmentModelDetailed(opts: {
            */
           lastFailure = result.failure;
           recordAttempt(startedAt, failedOutcome(lastFailure), lastFailure);
-          if (runtimeFailureBlocksReplay(lastFailure) || requiresNoTools && (lastFailure.kind === "unsupported" || lastFailure.kind === "refused")) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
-          if (workerFallback && (toolObserved || !workerFallbackFailureAllowsNext(lastFailure, true))) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
+          /*
+           * The one settlement decision (shared/turn-settlement.ts) says whether the next candidate may take this
+           * judgment. A judgment runs read-only (permission "read"), so running it again duplicates nothing (effectFree).
+           * It never waits on one candidate: the deadline is shared, so throttling walks on instead of retrying here.
+           */
+          const settlement = decideTurnSettlement({ outcome: "failed", kind: lastFailure.kind, providerCode: lastFailure.providerCode,
+            ...(result.turnDelivery ? { delivery: result.turnDelivery } : {}), unattended: true, attempt: RATE_LIMIT_MAX_RETRIES,
+            resumeBudget: 0, effectFree: true, effectsObserved: toolObserved,
+            fallbackAvailable: !(requiresNoTools && (lastFailure.kind === "unsupported" || lastFailure.kind === "refused"))
+              && !(workerFallback && (toolObserved || !workerFallbackFailureAllowsNext(lastFailure, true))) });
+          if (settlement.action !== "recover" || runtimeFailureBlocksReplay(lastFailure)) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
           continue;
         }
         const text = result.text ?? "";
