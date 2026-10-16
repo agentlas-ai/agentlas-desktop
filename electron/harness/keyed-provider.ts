@@ -41,6 +41,8 @@ export const KEYED_ADAPTERS: Readonly<Record<string, KeyedAdapter>> = Object.fre
 
 /** Routes with a typed speech.synthesize adapter. */
 export const SPEECH_ROUTES = Object.freeze(["elevenlabs-audio", "openai-audio"] as const);
+/** Routes with a typed speech.transcribe adapter (word timings): ElevenLabs Scribe, OpenAI Whisper, Deepgram. */
+export const TRANSCRIBE_ROUTES = Object.freeze(["elevenlabs-audio", "openai-audio", "deepgram-audio"] as const);
 
 type Outcome = { status: "ok"; data: unknown } | { status: "refused" | "unavailable"; reason: string; next?: string; data?: unknown };
 const ok = (data: unknown): Outcome => ({ status: "ok", data });
@@ -141,6 +143,103 @@ function safeOutputFile(outputDir: string, fileName: string): string | null {
 }
 
 interface SendResult { status: number; headers: Headers; body: Buffer }
+
+/** Multipart or raw-body upload to an adapter's own host (speech.transcribe). */
+async function sendBody(adapter: KeyedAdapter, key: string, input: { pathAndQuery: string; body: FormData | Buffer; contentType?: string; timeoutMs?: number }): Promise<SendResult | { networkError: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error("provider_timeout")), input.timeoutMs ?? 300_000);
+  try {
+    const res = await fetch(`${apiBase(adapter)}${input.pathAndQuery}`, {
+      method: "POST",
+      headers: { ...adapter.auth(key), ...(adapter.extraHeaders ?? {}), ...(input.contentType ? { "Content-Type": input.contentType } : {}), Accept: "application/json" },
+      body: input.body as BodyInit,
+      signal: controller.signal,
+    });
+    return { status: res.status, headers: res.headers, body: Buffer.from(await res.arrayBuffer()) };
+  } catch (error) {
+    return { networkError: error instanceof Error ? error.message.slice(0, 200) : "network_error" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export interface TranscriptWord { text: string; start: number; end: number }
+export interface Transcript { routeId: string; modelId: string; text: string; words: TranscriptWord[]; language: string | null; requestId: string | null }
+
+/** A compact mono speech track of any local audio/video file (ffmpeg); null when ffmpeg is missing or fails. */
+export function speechTrack(input: string, workDir: string): string | null {
+  const out = path.join(workDir, `speech-${sha(input + fs.statSync(input).mtimeMs).slice(0, 12)}.mp3`);
+  try {
+    const r = spawnSync("ffmpeg", ["-v", "error", "-y", "-protocol_whitelist", "file", "-i", input, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", out], { encoding: "utf8", timeout: 180_000 });
+    return r.status === 0 && fs.existsSync(out) ? out : null;
+  } catch { return null; }
+}
+
+/** Word-timed transcript of one audio file through a keyed adapter (the key stays in Main). */
+export async function transcribeFile(routeId: string, audioFile: string, ctx: KeyedCallContext, languageCode?: string): Promise<{ ok: true; transcript: Transcript } | { ok: false; outcome: Outcome }> {
+  if (!(TRANSCRIBE_ROUTES as readonly string[]).includes(routeId)) return { ok: false, outcome: refused("route_not_transcribe_capable", `transcribe routes: ${TRANSCRIBE_ROUTES.join(", ")}`) };
+  const admitted = admit(ctx, routeId);
+  if (!("adapter" in admitted)) return { ok: false, outcome: admitted };
+  const { adapter } = admitted;
+  const key = await providerKey(adapter);
+  if (!key) return { ok: false, outcome: refused("provider_key_missing", `the owner saves ${adapter.envKey} for ${adapter.label} in Settings`) };
+  const bytes = fs.readFileSync(audioFile);
+  let res: SendResult | { networkError: string }; let modelId: string;
+  if (routeId === "deepgram-audio") {
+    modelId = "nova-3";
+    res = await sendBody(adapter, key, { pathAndQuery: `/v1/listen?model=${modelId}&smart_format=true&punctuate=true${languageCode ? `&language=${encodeURIComponent(languageCode)}` : ""}`, body: bytes, contentType: "audio/mpeg" });
+  } else {
+    const form = new FormData();
+    form.append("file", new Blob([bytes], { type: "audio/mpeg" }), path.basename(audioFile));
+    if (routeId === "elevenlabs-audio") {
+      modelId = "scribe_v1";
+      form.append("model_id", modelId); form.append("timestamps_granularity", "word"); form.append("tag_audio_events", "false");
+      if (languageCode) form.append("language_code", languageCode);
+      res = await sendBody(adapter, key, { pathAndQuery: "/v1/speech-to-text", body: form });
+    } else {
+      modelId = "whisper-1";
+      form.append("model", modelId); form.append("response_format", "verbose_json"); form.append("timestamp_granularities[]", "word");
+      if (languageCode) form.append("language", languageCode);
+      res = await sendBody(adapter, key, { pathAndQuery: "/v1/audio/transcriptions", body: form });
+    }
+  }
+  if ("networkError" in res) { await observe(routeId, "unavailable", "speech.transcribe"); return { ok: false, outcome: refused("provider_unreachable", res.networkError) }; }
+  const requestId = requestIdOf(res.headers);
+  if (res.status < 200 || res.status >= 300) {
+    const f = failure(res.status, res.body.toString("utf8"));
+    await observe(routeId, f.outcome, "speech.transcribe");
+    return { ok: false, outcome: { status: "refused", reason: f.reason, next: f.detail, data: { httpStatus: res.status, requestId } } };
+  }
+  let parsed: Record<string, unknown>;
+  try { parsed = JSON.parse(res.body.toString("utf8")) as Record<string, unknown>; } catch { return { ok: false, outcome: refused("provider_answer_unreadable") }; }
+  let words: TranscriptWord[] = []; let text = ""; let language: string | null = null;
+  const numOr = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  if (routeId === "deepgram-audio") {
+    const alt = (((parsed.results as { channels?: Array<{ alternatives?: Array<{ transcript?: string; words?: Array<{ word?: string; punctuated_word?: string; start?: number; end?: number }> }> }> } | undefined)?.channels ?? [])[0]?.alternatives ?? [])[0];
+    text = alt?.transcript ?? ""; words = (alt?.words ?? []).map((w) => ({ text: w.punctuated_word ?? w.word ?? "", start: numOr(w.start) ?? 0, end: numOr(w.end) ?? 0 }));
+  } else if (routeId === "elevenlabs-audio") {
+    text = typeof parsed.text === "string" ? parsed.text : ""; language = typeof parsed.language_code === "string" ? parsed.language_code : null;
+    words = ((parsed.words as Array<{ text?: string; start?: number; end?: number; type?: string }> | undefined) ?? [])
+      .filter((w) => (w.type ?? "word") === "word").map((w) => ({ text: w.text ?? "", start: numOr(w.start) ?? 0, end: numOr(w.end) ?? 0 }));
+  } else {
+    text = typeof parsed.text === "string" ? parsed.text : ""; language = typeof parsed.language === "string" ? parsed.language : null;
+    words = ((parsed.words as Array<{ word?: string; start?: number; end?: number }> | undefined) ?? []).map((w) => ({ text: w.word ?? "", start: numOr(w.start) ?? 0, end: numOr(w.end) ?? 0 }));
+  }
+  await observe(routeId, "ok", "speech.transcribe");
+  await receipt({ operationId: "speech.transcribe", routeId, modelId, audioSha256: sha(bytes), words: words.length, requestId, chatId: ctx.chatId, runId: ctx.runId });
+  return { ok: true, transcript: { routeId, modelId, text, words, language, requestId } };
+}
+
+/** The first transcribe route whose key is saved (ElevenLabs first: the YouTube team's voice account), or null. */
+export async function firstTranscribeRoute(): Promise<string | null> {
+  for (const routeId of TRANSCRIBE_ROUTES) if (await providerKey(KEYED_ADAPTERS[routeId]!)) return routeId;
+  return null;
+}
+
+/** Shared answer window for host jobs built on this seam (media.listen). */
+export function answerWithinWindow(key: string, start: () => Promise<Outcome>, running: () => Outcome): Promise<Outcome> {
+  return answerWithin(key, start, running);
+}
 
 async function send(adapter: KeyedAdapter, key: string, input: { method: string; pathAndQuery: string; json?: unknown; timeoutMs?: number }): Promise<SendResult | { networkError: string }> {
   const controller = new AbortController();

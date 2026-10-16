@@ -541,6 +541,19 @@ const PORTS: PortDefinition[] = [
     handler: async (args, ctx) => (await import("./keyed-provider")).speechSynthesize(args, ctx),
   },
   {
+    operationId: "speech.transcribe", kind: "job",
+    purpose: "Word-timed transcript of a local audio or video file through the owner's saved speech connection (elevenlabs-audio Scribe, openai-audio Whisper, deepgram-audio); the key never reaches you.",
+    required: ["path"],
+    handler: async (args, ctx) => (await import("./media-listen")).speechTranscribePort(args, ctx),
+  },
+  {
+    // The listening check a run cannot do itself when its model takes no audio (media-listen.ts).
+    operationId: "media.listen", kind: "job",
+    purpose: "Listen to a local audio/video file for you: what is actually heard (word-timed transcript), how it differs from the script (scriptPath/scriptText: word error rate and differing spans with times), silences inside the speech, loudness and true peak, subtitle sync (subtitlePath); each check with its threshold; with outputDir a listening receipt bound to the file's sha256.",
+    required: ["path"],
+    handler: async (args, ctx) => (await import("./media-listen")).mediaListen(args, ctx),
+  },
+  {
     operationId: "media.image.generate", kind: "job", purpose: "Generate one image through a subscription route (Codex imagegen, AGY Gemini or Grok Imagine); the file is kept and optionally copied into <outputDir>/assets.", required: ["prompt"],
     handler: async (args, ctx) => {
       const route = str(args.routeId) || "auto";

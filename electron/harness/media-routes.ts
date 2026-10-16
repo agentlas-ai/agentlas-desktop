@@ -46,8 +46,9 @@ const ROUTE_FACTS: Record<string, { transport: RouteTransport; operations: Media
   "seedance-video": { transport: "api-adapter", operations: ["media.video.generate", "media.video.animate-image"] },
   "kling-video": { transport: "api-adapter", operations: ["media.video.generate", "media.video.animate-image"] },
   // Keyed speech through the host (keyed-provider.ts speech.synthesize); the key is used by Main, never by the model.
-  "elevenlabs-audio": { transport: "api-adapter", operations: ["speech.synthesize"] },
-  "openai-audio": { transport: "api-adapter", operations: ["speech.synthesize"] },
+  "elevenlabs-audio": { transport: "api-adapter", operations: ["speech.synthesize", "speech.transcribe"] },
+  "openai-audio": { transport: "api-adapter", operations: ["speech.synthesize", "speech.transcribe"] },
+  "deepgram-audio": { transport: "api-adapter", operations: ["speech.transcribe"] },
 };
 
 /** Video job provider id per catalog id (electron/multimodal/video.ts). */
