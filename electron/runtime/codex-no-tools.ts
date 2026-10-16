@@ -35,6 +35,9 @@ const FRAME_TYPES = new Set([
   "response.reasoning_summary_text.delta", "response.reasoning_summary_text.done",
   "response.reasoning_text.delta", "response.reasoning_text.done", "response.reasoning_part.added", "response.reasoning_part.done",
   "response.completed", "response.failed", "response.incomplete", "error",
+  // ChatGPT's Responses backend (seen 2026-10-15 with Codex 0.163) interleaves provider-side moderation/accounting
+  // metadata. It carries no item, part or output, so it grants no capability; rejecting it refused every such turn.
+  "response.metadata",
 ]);
 function object(value: unknown): Record<string, any> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : null;
@@ -87,6 +90,9 @@ export function validateCodexNoToolsResponse(body: string): string {
     const frame = object(JSON.parse(data));
     const event = lines.find(line => line.startsWith("event:"))?.slice(6).trim();
     if (!frame || !FRAME_TYPES.has(frame.type) || (event && event !== frame.type) || terminal) {
+      throw new Error("codex_no_tools_frame_unknown");
+    }
+    if (frame.type === "response.metadata" && (frame.item !== undefined || frame.part !== undefined || frame.response !== undefined)) {
       throw new Error("codex_no_tools_frame_unknown");
     }
     if (frame.item !== undefined) validateItem(frame.item);

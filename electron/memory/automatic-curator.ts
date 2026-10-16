@@ -222,7 +222,10 @@ async function runModel(request: AutomaticMemoryModelInput, runtime: AutomaticMe
         const result = await runObservedRunnerAs("curator", "automatic-memory-curator", runtime.runner, {
           systemPrompt: request.systemPrompt, history: [], userPrompt: request.input,
           backendLabel: runtime.backendLabel, model: runtime.model, effort: runtime.effort,
+          // judgmentOnly is the same lane remote curation and dreaming use. Without it, Codex and Grok refuse an
+          // untrusted no-tools request before any process starts (~60 ms), so this call could never succeed there.
           env: withoutMcpTransportEnv(runtime.env), permission: "read", untrustedNoTools: true,
+          judgmentOnly: true, surfaceGate: "exclude", runPriority: "background",
           chatId: `memory-curator:${hash(request.input).slice(0, 24)}`, singleUse: true,
           locale: runtime.locale, signal: controller.signal,
         }, { onStatus: () => undefined, onPartial: () => undefined, onTool: () => undefined });
