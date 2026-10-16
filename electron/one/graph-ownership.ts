@@ -40,3 +40,10 @@ export function oneGraphAuthorityOwner(a: Automation): string | null {
     return id;
   } catch { return null; }
 }
+
+/** The owner chat and the exact authority digest the current definition carries, or null when absent or stale.
+ * A graph step's room-scoped One Team grant (graph-team-grant.ts) pins this digest. */
+export function currentOneGraphAuthority(a: Automation): { ownerChatId: string; digest: string } | null {
+  const ownerChatId = oneGraphAuthorityOwner(a);
+  return ownerChatId ? { ownerChatId, digest: authority(a).digest } : null;
+}

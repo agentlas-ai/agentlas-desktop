@@ -254,6 +254,7 @@ import { resolveToolInvocationOrigin } from "../invocation/tool-origin";
 import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
 import { automationRegistrationMonitoring, hasAutomationRegistrationHandoff, resolveAutomationRegistrationTarget } from "../automation-registration";
 import { createAutomation, findAutomationByGoalId, getAutomation, listAutomations, toggleAutomation, updateAutomation, updateAutomationGraph } from "../store/automations";
+import { graphTeamGrantCurrent, type GraphTeamGrant } from "../one/graph-team-grant";
 import { isCompletedToolEvent, previousTurnObservation, projectContextKey, recordContextSourceMarker, recordRunEvent, tryRecordRunEvent } from "../store/run-events";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import {
@@ -1695,6 +1696,9 @@ export interface InvocationExecutionContext {
    * that a final invocation result alone would leave.
    */
   onWorkforcePrepareReceipt?: (receipt: WorkforcePrepareCheckpointReceipt) => void;
+  /** Main-minted by the graph runner (one/graph-team-grant.ts): a room-saved graph step acting for that room's One
+   * Team. Object identity is the authority; a copied or renderer-supplied value is never current. */
+  graphTeamGrant?: GraphTeamGrant;
 }
 
 export interface McpInvocationResult {
@@ -3922,7 +3926,14 @@ async function runMcpInvocationInContext(
           permission: normalizedPermission, signal: login?.ownerSignal ?? signal ?? new AbortController().signal });
       }
       mcpPrepStage = "config-build";
+      // Owner decision 2026-10-16: this exact graph step (run, chat, node) of a room-saved graph carries the room's
+      // One Team. The runner minted the grant at step start; it is re-checked here and again in mcp-config.ts.
+      const graphTeamGrant = executionContext?.source === "automation" && req.simulation !== true && !planReadOnly
+        && graphTeamGrantCurrent(executionContext.graphTeamGrant) && executionContext.graphTeamGrant.runId === req.runId
+        && executionContext.graphTeamGrant.chatId === req.chatId && executionContext.graphTeamGrant.automationId === req.automationId
+        && executionContext.graphTeamGrant.nodeId === executionContext.nodeId ? executionContext.graphTeamGrant : null;
       const cfg = await buildMcpConfigFile({
+        ...(graphTeamGrant ? { graphTeamGrant } : {}),
         osMemoryCuratorRun: captureNativeOsCuratorRun({ runId: req.runId!, model: confirmedRuntime.model ?? "",
           current: isMcpConfigCurrent, signal }),
         supervisorReplyRunId: req.runId,
@@ -3944,6 +3955,8 @@ async function runMcpInvocationInContext(
           ...installedTools.map((tool) => tool.id),
           ...hubBridgedServerIds,
           ...(req.requiredToolCatalogIds ?? []),
+          // The room's One Team for a room-saved graph step (graphTeamGrant above); no grant, no row.
+          ...(graphTeamGrant ? ["one-team"] : []),
           ...(workspacePreviewOwnerGrant
             ? [AGENTLAS_WORKSPACE_PREVIEW_CATALOG_ID]
             : []),

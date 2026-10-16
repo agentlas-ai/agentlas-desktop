@@ -12,6 +12,7 @@ import { oneGraphDispatch } from "./graph-dispatch";
 import { registerOneToolchainNativeCapability, forgetOneToolchainNativeCapability,
   forgetAllOneToolchainNativeCapabilities, withOneToolchainNativeInvocation } from "./toolchain-native-runtime";
 import { AGENTLAS_ONE_TEAM_TOOL_NAMES } from "./team-mcp-server";
+import type { GraphTeamGrant } from "./graph-team-grant";
 import { ONE_SUPERVISOR_TOOL_NAMES } from "../../shared/one-supervisor-tools";
 import { ONE_PERSONAL_TOOL_NAMES } from '../../shared/one-personal-tools';
 import { ONE_HISTORY_TOOL_NAMES } from '../../shared/one-history-tools';
@@ -49,9 +50,12 @@ const hostRootContext = AsyncLocalStorage.snapshot();
 export interface OneTeamCapabilityBinding extends OneTeamCaller {
   /** Exact Main invocation; optional for legacy capabilities, never supplied by the MCP child. */
   supervisorReplyRunId?: string;
-  /** A Work task: only `tools` (Toolchain search/run/result) may be called through this capability. */
-  scope?: "toolchain-consumer" | "room-member";
+  /** A Work task: only `tools` (Toolchain search/run/result) may be called through this capability.
+   * "graph-step": a room-saved graph's agent/action step acting for that room (graph-team-grant.ts), `tools` only. */
+  scope?: "toolchain-consumer" | "room-member" | "graph-step";
   tools?: readonly string[];
+  /** graph-step only: the Main-minted grant, re-checked on every call (authority current, step not ended). */
+  graphTeamGrant?: GraphTeamGrant;
   capabilityId: string;
   personalSource?: { commandId: string; runId: string; occurrenceId: string };
   historySource?: { commandId: string; runId: string };
@@ -158,6 +162,13 @@ async function handleOneTeamControlRequestUnchecked(request: Record<string, unkn
     return (await import("./room-chat")).roomChat().say(binding.chatId, { text: request.text, to: request.to, replyTo: request.replyTo });
   }
   if (request.operation === "room") throw new Error("one-team-room-member-scope");
+  // A graph step acting for its room: the listed team tools only, while the graph authority it started with is current.
+  if (binding.scope === "graph-step") {
+    const grants = require("./graph-team-grant") as typeof import("./graph-team-grant");
+    const tool = grants.GRAPH_STEP_TEAM_OPERATION_TOOL[String(request.operation)];
+    if (!tool || !binding.tools?.includes(tool)) throw new Error("one-team-graph-step-scope");
+    if (!grants.graphTeamGrantCurrent(binding.graphTeamGrant) || binding.graphTeamGrant.ownerChatId !== binding.chatId) throw new Error("one-team-graph-authority-changed");
+  }
   if(request.operation==='history') {
     const name=String(request.name??'');
     if(!(ONE_HISTORY_TOOL_NAMES as readonly string[]).includes(name)||binding.tools&&!binding.tools.includes(name))throw personalDataError('history_native_tool_not_granted');
@@ -287,9 +298,12 @@ export function startOneTeamControlServer(): Promise<number> {
 
 /** Mint a per-config capability file (0600) that the MCP child reads. */
 export async function createOneTeamCapability(
-  input: OneTeamCaller & Pick<OneTeamCapabilityBinding, "scope" | "tools" | "supervisorReplyRunId">,
+  input: OneTeamCaller & Pick<OneTeamCapabilityBinding, "scope" | "tools" | "supervisorReplyRunId" | "graphTeamGrant">,
   configKey: string,
 ): Promise<{ path: string; binding: OneTeamCapabilityBinding }> {
+  if (input.scope === "graph-step" && (!input.tools?.length
+    || !(require("./graph-team-grant") as typeof import("./graph-team-grant")).graphTeamGrantCurrent(input.graphTeamGrant)
+    || input.graphTeamGrant.ownerChatId !== input.chatId || input.supervisorReplyRunId)) throw new Error("one-team-graph-step-grant-invalid");
   const port = await startOneTeamControlServer();
   if (!port) throw new Error("one-team-control-unavailable");
   // The personal-supervisor tools answer only in the owner's personal One conversation (the request handler below
@@ -301,18 +315,20 @@ export async function createOneTeamCapability(
   let personalSource: OneTeamCapabilityBinding['personalSource'];
   let historySource: OneTeamCapabilityBinding['historySource'];
   const db=getDb();
-  if(input.chatId && db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_personal_data_occurrences'").get()) {
+  // A graph step's list is exactly its grant: no personal or history tool is ever added to it.
+  const graphStep = input.scope === "graph-step";
+  if(!graphStep && input.chatId && db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_personal_data_occurrences'").get()) {
     const rows=db.prepare(`SELECT r.command_id,r.run_id,json_extract(o.value_json,'$.occurrenceId') AS occurrence_id FROM one_supervisor_requests r
       JOIN one_personal_data_occurrences o ON json_extract(o.value_json,'$.commandId')=r.command_id
       WHERE json_extract(r.payload_json,'$.workerChatId')=? AND r.state IN ('dispatching','accepted')`).all(input.chatId) as Array<{command_id:string;run_id:string;occurrence_id:string}>;
     if(rows.length===1){const r=rows[0];personalSource={commandId:r.command_id,runId:r.run_id,occurrenceId:r.occurrence_id};}
   }
-  if(input.chatId&&db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_history_native_bindings'").get()){
+  if(!graphStep&&input.chatId&&db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_history_native_bindings'").get()){
     const rows=db.prepare("SELECT r.command_id,r.run_id FROM one_history_native_bindings b JOIN one_supervisor_requests r ON r.command_id=b.command_id WHERE json_extract(r.payload_json,'$.workerChatId')=? AND r.state IN ('dispatching','accepted')").all(input.chatId) as Array<{command_id:string;run_id:string}>;
     if(rows.length===1){historySource={commandId:rows[0].command_id,runId:rows[0].run_id};currentOneHistoryExecution()?.assertRun({chatId:input.chatId,runId:rows[0].run_id});}
   }
-  if(tools)tools=[...tools.filter(name=>!ONE_PERSONAL_TOOL_NAMES.includes(name as typeof ONE_PERSONAL_TOOL_NAMES[number])),...(personalSource?['one_personal_source_read']:personalSupervisorConversation(input.chatId)?ONE_PERSONAL_TOOL_NAMES.filter(name=>name!=='one_personal_source_read'):[])];
-  if(tools)tools=[...tools.filter(name=>!(ONE_HISTORY_TOOL_NAMES as readonly string[]).includes(name)),...(historySource?['one_history_source_read']:personalSupervisorConversation(input.chatId)?ONE_HISTORY_TOOL_NAMES.filter(name=>name!=='one_history_source_read'):[])];
+  if(tools&&!graphStep)tools=[...tools.filter(name=>!ONE_PERSONAL_TOOL_NAMES.includes(name as typeof ONE_PERSONAL_TOOL_NAMES[number])),...(personalSource?['one_personal_source_read']:personalSupervisorConversation(input.chatId)?ONE_PERSONAL_TOOL_NAMES.filter(name=>name!=='one_personal_source_read'):[])];
+  if(tools&&!graphStep)tools=[...tools.filter(name=>!(ONE_HISTORY_TOOL_NAMES as readonly string[]).includes(name)),...(historySource?['one_history_source_read']:personalSupervisorConversation(input.chatId)?ONE_HISTORY_TOOL_NAMES.filter(name=>name!=='one_history_source_read'):[])];
   const binding: OneTeamCapabilityBinding = { ...input, ...(tools ? { tools } : {}), ...(personalSource?{personalSource}:{}), ...(historySource?{historySource}:{}), capabilityId: randomUUID() };
   capabilities.set(binding.capabilityId, binding);
   let target: string | null = null, temp: string | null = null;

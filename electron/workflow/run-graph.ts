@@ -43,6 +43,7 @@ import {
   type ToolBrokerLevel,
 } from "../../shared/graph-tool-broker";
 import { runMcpInvocation } from "../mcp/client";
+import { mintGraphTeamGrant, revokeGraphTeamGrant, type GraphTeamGrant } from "../one/graph-team-grant";
 import { claimInvocationRunOwner, invocationRunOwners } from "../store/invocation-run-owners";
 import { sameMethodAttemptLimit, MAX_SAME_METHOD_STARTS, type WorkUnit } from "../../shared/work-recovery";
 import { GraphWorkRecovery, type GraphWorkRecoveryScope } from "./work-recovery";
@@ -4420,6 +4421,9 @@ export async function runGraph(
           workspaceBinding: automationWorkspace.binding,
         });
         let toolchainSettled = false;
+        // Owner decision 2026-10-16: a step of a graph that a group room's One saved acts with that room's One Team for
+        // this step only. Minted (authority re-checked) at step start, revoked when the step ends (graph-team-grant.ts).
+        let graphTeamGrant: GraphTeamGrant | null = null;
         try {
           // agent 노드는 config.ref가 가리키는 에이전트/회사 세션에서 실행(멀티에이전트 그래프).
           let runnerError: string | null = null;
@@ -4539,6 +4543,9 @@ export async function runGraph(
               if (ownerLease) { try { invocationRunOwners.release(ownerLease); } catch { /* the startup sweep frees a stranded lease */ } }
             }
           };
+          revokeGraphTeamGrant(graphTeamGrant);
+          graphTeamGrant = nativeMcpCall ? null : mintGraphTeamGrant({ automationId: automation.id, node, runId, chatId: nodeChat.id,
+            effect, dryRun: Boolean(dryRun), ...(opts.permissionCeiling ? { permissionCeiling: opts.permissionCeiling } : {}) });
           const result = await withFiniteDispatch(() => withAutomationNodeAccounting({
             runId, automationId: automation.id, nodeId: node.id, chatId: nodeChat.id,
           }, () => invokeNode(
@@ -4741,6 +4748,7 @@ export async function runGraph(
               nodeId: node.id,
               occurrenceId: checkpoint.occurrenceId,
               onWorkforcePrepareReceipt: persistWorkforcePrepareReceipt,
+              ...(graphTeamGrant ? { graphTeamGrant } : {}),
             },
           )));
           toolchainSettled = true;
@@ -5171,6 +5179,7 @@ export async function runGraph(
         } finally {
           clearTimeout(nodeTimer);
           runSignal.removeEventListener("abort", relayRunAbort);
+          revokeGraphTeamGrant(graphTeamGrant);
           if (!toolchainSettled) toolchainSession?.finish({ resultFolder: null });
         }
         return;

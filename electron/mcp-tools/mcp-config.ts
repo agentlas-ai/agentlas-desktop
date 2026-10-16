@@ -55,6 +55,7 @@ import { createTurnToolsCapability, removeTurnToolsCapability } from "../turn-to
 import { ONE_TEAM_CONTROL_ENV, ROOM_MEMBER_TOOL_NAMES, isAuthenticOneTeamMcpLaunch } from "../one/team-mcp-server";
 import { createOneTeamCapability, removeOneTeamCapability } from "../one/team-control-server";
 import { oneTeamDispatchAllowedFor } from "../one/team-dispatch";
+import { graphTeamGrantCurrent, type GraphTeamGrant } from "../one/graph-team-grant";
 import { roomMemberContext } from "../one/room-chat";
 import {
   isAuthenticComputerUseMcpLaunch,
@@ -215,6 +216,8 @@ export interface McpConfigBuildOptions {
   skipDefaultSeed?: boolean;
   /** Per-run file key. Prevents concurrent Build plans from racing on one shared config. */
   configKey?: string;
+  /** Main-minted (graph-team-grant.ts): a room-saved graph's agent/action step acting for that room's One Team. */
+  graphTeamGrant?: GraphTeamGrant;
   /** This run's id: pins the agentlas-turn capability so its notes land in this turn only. */
   turnRunId?: string;
   /** Goal turns: also offer goal_wait / goal_complete from agentlas-turn. */
@@ -869,6 +872,13 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   const roomMember = Boolean(callerChatId) && !toolchainConsumer && serializedServers.some((s) => s.catalogId === "one-team")
     && !oneTeamDispatchAllowedFor(callerChatId) && roomMemberContext(callerChatId) !== null;
 
+  // Owner decision 2026-10-16: a room-saved graph's agent/action step gets that room's One Team, its grant's tools only.
+  // The grant is Main-minted for exactly this step's chat and re-checked here; a dry run or plan never gets it.
+  const graphTeamGrant = callerChatId && !toolchainConsumer && !roomMember && !oneTeamDispatchAllowedFor(callerChatId)
+    && opts?.graphTeamGrant && graphTeamGrantCurrent(opts.graphTeamGrant) && opts.graphTeamGrant.chatId === callerChatId
+    && opts.toolGate?.simulation !== true && opts.toolGate?.planMode !== true && opts.toolGate?.oneTeamReport !== true
+    ? opts.graphTeamGrant : null;
+
   try {
   for (const s of serializedServers) {
     let preparedRuntimeRoot: string | null = null;
@@ -907,7 +917,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     }
     if (s.catalogId === "one-team" && (!callerChatId || opts?.toolGate?.simulation === true || opts?.toolGate?.planMode === true
       || opts?.toolGate?.oneTeamReport === true
-      || (!oneTeamDispatchAllowedFor(callerChatId) && !toolchainConsumer && !roomMember) || !isAuthenticOneTeamMcpLaunch(s.command, s.args ?? []))) {
+      || (!oneTeamDispatchAllowedFor(callerChatId) && !toolchainConsumer && !roomMember && !graphTeamGrant) || !isAuthenticOneTeamMcpLaunch(s.command, s.args ?? []))) {
       // One's own conversation only (depth 1): a teammate chat, a session One
       // opened and dry runs never see the team dispatch tools. A Work task sees
       // the Toolchain consumer subset only (toolchainConsumer above).
@@ -1096,7 +1106,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           const capability = await createTurnToolsCapability(
             { chatId: callerChatId, runId: opts.turnRunId, tools: turnToolsFor(opts.turnGoalTools === true, opts.turnAskTool === true), dryRun: opts?.toolGate?.simulation === true || opts?.toolGate?.planMode === true,
               permission: opts?.toolGate?.permission ?? "read",
-              graphAuthoring: serializedServers.some((server) => server.catalogId === "one-team") && !toolchainConsumer && !roomMember,
+              graphAuthoring: serializedServers.some((server) => server.catalogId === "one-team") && !toolchainConsumer && !roomMember && !graphTeamGrant,
               // Harness tool ports reach this run's host-channel built-ins only through this sealed file.
               mcpConfigPath: configPath },
             capabilityConfigKey,
@@ -1111,8 +1121,11 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       if (s.catalogId === "one-team") {
         try {
           const capabilityConfigKey = opts?.configKey ?? key;
-          const capability = await createOneTeamCapability(
-            { chatId: callerChatId ?? null, permission: opts?.toolGate?.permission ?? "read",
+          const capability = await createOneTeamCapability(graphTeamGrant
+            // Acts for the room that saved the graph; the grant's permission and tools, never the run's wider ones.
+            ? { chatId: graphTeamGrant.ownerChatId, permission: graphTeamGrant.permission, scope: "graph-step" as const,
+                tools: graphTeamGrant.tools, graphTeamGrant }
+            : { chatId: callerChatId ?? null, permission: opts?.toolGate?.permission ?? "read",
               ...(opts?.supervisorReplyRunId ? { supervisorReplyRunId: opts.supervisorReplyRunId } : {}),
               ...(toolchainConsumer ? { scope: "toolchain-consumer" as const,
                 tools: (await import("../toolchains/consumer")).TOOLCHAIN_CONSUMER_TOOLS } : {}),
@@ -1449,8 +1462,9 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
 
   writePrivateFile(configPath, JSON.stringify({ mcpServers }, null, 2));
   const configurations = preparedRows.map(({ server }) => [server.id, mcpServerConfigurationDigest(server)] as const);
+  // graphTeamGrant is an object identity: a delegated host never inherits it (it would not be current there anyway).
   const { osMemoryCuratorRun: _osMemoryCuratorRun, admissionCurrent: _admissionCurrent, nativeScopedSelection: _nativeScopedSelection,
-    nativeScopedSelectionForServer: _nativeScopedSelectionForServer, ...delegationBuildOptions } = opts ?? {};
+    nativeScopedSelectionForServer: _nativeScopedSelectionForServer, graphTeamGrant: _graphTeamGrant, ...delegationBuildOptions } = opts ?? {};
   for (const row of preparedRows) {
     const entry = mcpServers[row.configKey] as { env?: Record<string, string> };
     const handle = entry.env?.[MCP_PROXY_LAUNCH_ENV];
