@@ -659,24 +659,27 @@ export function resolveManagedNodeRuntime(): ManagedNodeResolution {
   return cached;
 }
 
-function expectedResolvedNodePath(
+/**
+ * Every node path the verifier child may legitimately return.
+ *
+ * On Windows the child materializes a persistent copy, and when a copy fails it falls back (c2a0db94) to the next
+ * persistent parent (`%LOCALAPPDATA%`) or to the packaged executable itself. Accepting only the home copy turned every
+ * fallback into `invalid_receipt`, so local-model engine attestation always failed on those machines (review
+ * 2026-10-16, desktop-b-05). The path stays pinned to the packaged layout and the known parents.
+ */
+function expectedResolvedNodePaths(
   root: string,
   platform: NodeJS.Platform,
   arch: string,
   materializePersistent: boolean,
-): string | null {
+): string[] {
   const layout = expectedLayout(platform);
-  if (platform !== "win32" || !materializePersistent) return path.join(root, ...layout.node.split("/"));
+  const packaged = path.join(root, ...layout.node.split("/"));
+  if (platform !== "win32" || !materializePersistent) return [packaged];
   const locked = LOCKED_NODE_ASSETS[`${platform}:${arch}`];
-  if (!locked) return null;
-  return path.join(
-    os.homedir(),
-    ".agentlas",
-    "runtime",
-    "node",
-    `v${MANAGED_NODE_VERSION}-${arch}-${locked.runtimeTreeSha256.slice(0, 16)}`,
-    "node.exe",
-  );
+  if (!locked) return [];
+  const copy = `v${MANAGED_NODE_VERSION}-${arch}-${locked.runtimeTreeSha256.slice(0, 16)}`;
+  return [...persistentNodeParents().map((parent) => path.join(parent, copy, "node.exe")), packaged];
 }
 
 function parseAsyncVerificationReceipt(
@@ -688,7 +691,7 @@ function parseAsyncVerificationReceipt(
 ): AsyncVerificationResult | null {
   try {
     const value = JSON.parse(raw) as Partial<AsyncVerificationReceipt>;
-    const expectedNode = expectedResolvedNodePath(expectedRoot, platform, arch, materializePersistent);
+    const expectedNodes = expectedResolvedNodePaths(expectedRoot, platform, arch, materializePersistent).map((node) => path.resolve(node));
     const expectedNpmCli = path.join(expectedRoot, ...expectedLayout(platform).npmCli.split("/"));
     if (
       !value || typeof value !== "object" || Array.isArray(value) ||
@@ -711,8 +714,8 @@ function parseAsyncVerificationReceipt(
       Object.keys(resolution.runtime).sort().join("\0") !== ["node", "npmCli", "root", "version"].join("\0") ||
       resolution.runtime.root !== expectedRoot ||
       resolution.runtime.version !== MANAGED_NODE_VERSION ||
-      !expectedNode ||
-      path.resolve(resolution.runtime.node) !== path.resolve(expectedNode) ||
+      typeof resolution.runtime.node !== "string" ||
+      !expectedNodes.includes(path.resolve(resolution.runtime.node)) ||
       path.resolve(resolution.runtime.npmCli) !== path.resolve(expectedNpmCli)
     ) return null;
     return {
@@ -932,6 +935,18 @@ export function validateManagedNodeRuntimeRootAsyncForTests(
     }
     return attempt.resolution;
   });
+}
+
+/** Contract-test seam for the verifier receipt the parent accepts. */
+export function parseAsyncVerificationReceiptForTests(
+  raw: string,
+  expectedRoot: string,
+  platform: NodeJS.Platform,
+  arch: string,
+  materializePersistent: boolean,
+): "verified" | "rejected" | "invalid_receipt" {
+  return parseAsyncVerificationReceipt(raw, expectedRoot, platform, arch, materializePersistent)?.status as "verified" | "rejected" | undefined
+    ?? "invalid_receipt";
 }
 
 export function managedNodeRuntimeVerificationChildCountForTests(): number {
