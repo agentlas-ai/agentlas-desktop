@@ -219,10 +219,7 @@ import { renderControllerSurfaceMemory, bindSurfaceMemoryRequest } from "../memo
 import { scienceAliveMemory, scienceAliveMemoryGuard } from "../memory/science-alive-memory";
 import { bindAppMemoryRequest, appRunMemory, appMemoryRunGuard } from "../memory/agent-app-memory";
 import { invocationMemoryScope } from "../memory/invocation-scope";
-import {
-  ingestWorkingFolderOntologyInBackground,
-  queryWorkingFolderOntologyContext,
-} from "../ontology/project-runtime";
+import { queryWorkingFolderOntologyContext } from "../ontology/project-runtime";
 import { writeEvolutionProposalsForProject, evolutionSessionContextLine } from "../agents/evolution-hep";
 import {
   curateReply,
@@ -5743,18 +5740,13 @@ async function runMcpInvocationInContext(
         }
       }
       if (memoryReadPath) {
+        // A writable turn's query also refreshes the folder's DB in the background for the next turn (it never waits for
+        // it); both end with this turn's Stop.
         const ontologyContext = await queryWorkingFolderOntologyContext(memoryReadPath, effectiveUserPrompt, {
           readOnly: projectReadOnlyBoundary,
+          ...(signal ? { signal } : {}),
         });
         if (ontologyContext.used) { turnContextParts.push(ontologyContext.context); declareLastTurnContext("memory.ontology", "turn-context", ["retrieval"]); }
-        // The query above is deliberately read-only so a slow ingest never
-        // blocks the answer, but that path never fills the DB. When this turn
-        // has write authority over the folder, kick off a background ingest so
-        // the next turn has something to retrieve — without it the folder
-        // ontology stays provisioned-but-empty forever (0 rows across projects).
-        if (activePath && canWrite && !restrictedReadBoundary) {
-          ingestWorkingFolderOntologyInBackground(memoryReadPath);
-        }
       }
     } catch (err) {
       console.error("[architecture] buildMemoryContext failed:", err);

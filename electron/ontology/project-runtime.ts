@@ -133,6 +133,8 @@ export interface ProjectOntologyQueryOptions {
    * query also starts a background refresh of that folder's DB; the query itself never waits for it.
    */
   readOnly?: boolean;
+  /** The turn's lifetime: a Stop ends this query's engine process and the refresh it started. */
+  signal?: AbortSignal;
 }
 
 export type ProjectOntologyQueryReason =
@@ -1393,7 +1395,7 @@ const INGEST_FAILURE_BACKOFF_MAX_MS = 6 * 60 * 60_000;
  * up to 6 hours, kept in memory for this process. The work starts on a later tick so its synchronous index walk is not
  * charged to the turn that asked for it.
  */
-async function ensureWorkingFolderOntologyReady(projectFolder: string): Promise<WorkingFolderOntologyRuntime> {
+async function ensureWorkingFolderOntologyReady(projectFolder: string, signal?: AbortSignal): Promise<WorkingFolderOntologyRuntime> {
   const projectPath = fs.realpathSync.native(projectFolder);
   const existing = workingFolderQueues.get(projectPath);
   if (existing) return existing;
@@ -1414,11 +1416,13 @@ async function ensureWorkingFolderOntologyReady(projectFolder: string): Promise<
       materialized.changed || fs.statSync(indexPath).mtimeMs > databaseMtime;
     if (!shouldSync) return { projectPath, dbPath, indexPath, synced: false };
 
+    signal?.throwIfAborted();
     const result = await runHephaestus<CoreAutoPayload>(
       "ontology",
       ["--db", dbPath, "auto", projectPath],
-      { cwd: projectPath, timeoutMs: CORE_INGEST_TIMEOUT_MS, locale: "en" },
+      { cwd: projectPath, timeoutMs: CORE_INGEST_TIMEOUT_MS, locale: "en", ...(signal ? { signal } : {}) },
     );
+    signal?.throwIfAborted();
     const payload = requireCorePayload(result, "Working-folder ontology sync");
     if (path.resolve(String(payload.project_root ?? "")) !== projectPath) {
       throw new Error("Core working-folder ontology sync returned a different project root.");
@@ -1435,6 +1439,8 @@ async function ensureWorkingFolderOntologyReady(projectFolder: string): Promise<
     ingestFailureBackoff.delete(projectPath);
     return runtime;
   }, (error) => {
+    // A stopped turn is not a broken ingest: the next eligible turn starts it again without a backoff.
+    if (signal?.aborted) throw error;
     const failures = (backoff?.failures ?? 0) + 1;
     const delay = Math.min(INGEST_FAILURE_BACKOFF_BASE_MS * 2 ** (failures - 1), INGEST_FAILURE_BACKOFF_MAX_MS);
     ingestFailureBackoff.set(projectPath, { failures, retryAt: Date.now() + delay });
@@ -1461,8 +1467,9 @@ const backgroundIngestReported = new Set<string>();
  * the index has not changed, and backs off after a failure — so calling it every
  * eligible turn is cheap.
  */
-export function ingestWorkingFolderOntologyInBackground(projectFolder: string): void {
-  void ensureWorkingFolderOntologyReady(projectFolder).catch((error) => {
+export function ingestWorkingFolderOntologyInBackground(projectFolder: string, signal?: AbortSignal): void {
+  void ensureWorkingFolderOntologyReady(projectFolder, signal).catch((error) => {
+    if (signal?.aborted) return;
     // Report once per project per process; a broken ingest must be findable in
     // the log rather than failing silently like the pipes it is fixing.
     const key = projectFolder;
@@ -1939,7 +1946,7 @@ export async function queryWorkingFolderOntologyContext(
   // A turn never awaits an ingest (review 2026-10-16, desktop-b-04): a writable turn used to wait for the full
   // `ontology auto` run (up to 180 s, not cancellable) before the model was dispatched. It now queries what the DB
   // already holds, like a read-only turn, and refreshes the DB in the background for the next turn.
-  if (!options.readOnly) ingestWorkingFolderOntologyInBackground(projectFolder);
+  if (!options.readOnly) ingestWorkingFolderOntologyInBackground(projectFolder, options.signal);
   let runtime: WorkingFolderOntologyRuntime;
   try {
     runtime = existingWorkingFolderOntology(projectFolder);
@@ -1971,7 +1978,7 @@ export async function queryWorkingFolderOntologyContext(
     result = await runHephaestus<CoreQueryPayload>(
       "ontology",
       args,
-      { cwd: runtime.projectPath, timeoutMs, locale: "en" },
+      { cwd: runtime.projectPath, timeoutMs, locale: "en", ...(options.signal ? { signal: options.signal } : {}) },
     );
   } finally {
     if (snapshotDirectory) fs.rmSync(snapshotDirectory, { recursive: true, force: true });
