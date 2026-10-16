@@ -6068,6 +6068,8 @@ function OneSessionsShell() {
     setActivity(initialOneActivityState());
     setTeamPreflightBusy(true);
     setError(null);
+    // startRun already showed why a reserved start was refused; that is not "the conversation changed".
+    let startRejected = false;
     try {
       const result = await api.oneTeamPreflight.autoResolve({
         proposalId: proposal.proposalId,
@@ -6106,7 +6108,10 @@ function OneSessionsShell() {
       );
       if (!["started", "queued", "reconciled"].includes(outcome.status)) {
         setPendingTeamPrompt(current => current?.proposalId === proposal.proposalId ? null : current);
-        if (outcome.status === "rejected") throw new Error("[agentlas:code=recovery_required] Reserved run was rejected before start");
+        if (outcome.status === "rejected") {
+          startRejected = true;
+          throw new Error("[agentlas:code=recovery_required] Reserved run was rejected before start");
+        }
         return;
       }
       const currentProposal = await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => result.proposal);
@@ -6121,7 +6126,7 @@ function OneSessionsShell() {
       const settled = code !== undefined && ONE_TEAM_PREFLIGHT_BINDING_GONE_CODES.has(code);
       if (settled || failures >= 3) {
         setPendingTeamPrompt((currentPrompt) => currentPrompt?.proposalId === proposal.proposalId ? null : currentPrompt);
-        setActionNotice(normalizedLocale === "ko"
+        if (!startRejected) setActionNotice(normalizedLocale === "ko"
           ? "대화가 바뀌어 팀 확정을 마치지 못했어요. 보낸 글은 대화에 남아 있어요. 다시 보내면 새로 준비해요."
           : "The conversation changed before the team could be confirmed. Your message is still in the conversation; send it again to prepare it afresh.");
       } else {

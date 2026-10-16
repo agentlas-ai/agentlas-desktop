@@ -253,7 +253,7 @@ import {
 } from "../one/attachments";
 import { redactMcpInvocationEventSecrets } from "./event-secret-redaction";
 import { redactSecrets } from "../../shared/secret-patterns";
-import { invocationErrorDiagnostic, nativePreparationErrorDiagnostic, type NativePreparationDiagnosticPhase } from "./error-diagnostic";
+import { invocationErrorDiagnostic, nativePreparationErrorDiagnostic, preparationRefusalCause, type NativePreparationDiagnosticPhase } from "./error-diagnostic";
 import { normalizeOneRecurrenceSelectionV1 } from "../../shared/one-recurrence";
 import { classifyOneRequestIntent } from "../../shared/one-request-intent";
 import { oneVersionPinRosterIds } from "../../shared/one-team-preflight";
@@ -1065,6 +1065,9 @@ function immutableWorkspaceBinding(
   });
 }
 
+/** Typed run event that keeps a refused start's cause next to its outward ledger code (no prose, no paths). */
+export const INVOCATION_START_REFUSAL_EVENT = "invocation_start_refusal";
+
 /** Admission ledger reason for a proven pre-dispatch refusal: the thrown machine code, never prose. */
 export function preDispatchRefusalReasonCode(error: unknown): string {
   const identifier = /^[a-z][a-z0-9_-]{0,79}$/;
@@ -1838,6 +1841,22 @@ export class InvocationService {
     } catch { /* Diagnostics cannot replace the original error or prevent cleanup. */ }
   }
 
+  /** The no-start ledger keeps its outward code; this typed run event keeps the cause. Production 1.3.47 (2026-10-16):
+   * the daemon wrapped a Main checkpoint refusal as runtime_turn_unsettled and its console is not persisted.
+   * Machine identifiers only: phase, host kind, ledger code, checkpoint kind, cause codes. One event per error. */
+  private recordStartRefusalCause(runId: string, chatId: string, error: unknown, context: { phase: string; reasonCode?: string; startBoundaryCrossed?: boolean }): void {
+    try {
+      if (error && typeof error === "object") { if (this.startRefusalCausesRecorded.has(error)) return; this.startRefusalCausesRecorded.add(error); }
+      tryRecordRunEvent({ runId, chatId, kind: INVOCATION_START_REFUSAL_EVENT, payload: {
+        schemaVersion: "agentlas.invocation-start-refusal.v1", phase: context.phase, host: invocationProcessOwner().ownerKind,
+        ...(context.reasonCode ? { reasonCode: context.reasonCode } : {}),
+        ...(typeof context.startBoundaryCrossed === "boolean" ? { startBoundaryCrossed: context.startBoundaryCrossed } : {}),
+        ...preparationRefusalCause(error, nativeOneStartCheckpointFailureKind),
+      } });
+    } catch { /* Attribution never replaces the original refusal. */ }
+  }
+  private readonly startRefusalCausesRecorded = new WeakSet<object>();
+
   /** Source capability, not a request/JSON switch. Registration precedes every chunk await. */
   async startNativeIngress(source: NativeInvocationIngressSource): Promise<InvocationStartResult> {
     const owned = takeNativeInvocationIngressSource(source), binding = owned.binding;
@@ -1887,6 +1906,7 @@ export class InvocationService {
       status=controller.signal.aborted?"cancelled":"uncertain";
       if(controller.signal.aborted) throw controller.signal.reason;
       if(refusedBeforeStart){ status="cancelled"; throw cause; }
+      this.recordStartRefusalCause(binding.runId,binding.chatId,cause,{phase:diagnosticPhase});
       const error=new RuntimeTurnUnsettledError("native-ingress");Object.defineProperty(error,"cause",{value:cause});
       this.logNativePreparationFailure(binding.runId,binding.chatId,error,{phase:diagnosticPhase,agentAppMode:diagnosticAgentAppMode});
       throw error;
@@ -1999,9 +2019,11 @@ export class InvocationService {
       this.logNativePreparationFailure(nativeRunId,req.chatId,error,{phase:"native-prepared-start",startBoundaryCrossed:boundary.crossed,agentAppMode:req.agentAppMode === true});
       status = controller.signal.aborted ? "cancelled" : "uncertain";
       if (durableAdmission && !boundary.crossed) {
-        try { decideInvocationAdmission({ ...durableAdmission, decision: "rejected", reasonCode: preDispatchRefusalReasonCode(error),
+        const reasonCode = preDispatchRefusalReasonCode(error);
+        try { decideInvocationAdmission({ ...durableAdmission, decision: "rejected", reasonCode,
           noStartProof: { kind: "owner-start-boundary-not-crossed", verifiedOwnerProcessEpoch: durableAdmission.ownerProcessEpoch } }); }
         catch { /* Original source failure remains primary; the exact closed frontier reconciles below. */ }
+        if (!controller.signal.aborted) this.recordStartRefusalCause(nativeRunId, req.chatId, error, { phase: "native-prepared-start", reasonCode, startBoundaryCrossed: false });
       }
       if (boundary.crossed && !boundary.handedOff && boundary.runId) {
         tryRecordRunEvent({ runId: boundary.runId, chatId: req.chatId, kind: "invoke_threw", payload: { errorCode: controller.signal.aborted ? "native_preparation_cancelled" : RUNTIME_TURN_UNSETTLED_CODE, providerDispatched: false } });
@@ -2495,18 +2517,20 @@ export class InvocationService {
       if (durableAdmission && !startBoundary.crossed) {
         // Direct control flow proves no provider dispatch occurred. Absence of
         // a receipt alone would not prove that, especially across epochs.
+        const reasonCode = preDispatchRefusalReasonCode(error);
         const decision = decideInvocationAdmission({
           ...durableAdmission,
           decision: "rejected",
           // ★2026-09-23 — 실제 거절 코드를 남긴다. 고정 사유만 남기면 화면이 구체 문구
           //   (예산 소진·정리 중·앱 종료 중…)를 원리적으로 고를 수 없었다. 식별자 모양일 때만
           //   쓴다(사용자 내용은 원장에 들어가지 않는다). 아니면 예전 고정 사유.
-          reasonCode: preDispatchRefusalReasonCode(error),
+          reasonCode,
           noStartProof: {
             kind: "owner-start-boundary-not-crossed",
             verifiedOwnerProcessEpoch: durableAdmission.ownerProcessEpoch,
           },
         });
+        if (decision.kind === "rejected") this.recordStartRefusalCause(durableAdmission.runId, req.chatId, error, { phase: "local-start", reasonCode, startBoundaryCrossed: false });
         if (decision.kind === "conflict" && decision.reason !== "already-decided") {
           throw new Error(`invocation_admission_rejection_${decision.reason}`, { cause: error });
         }
@@ -3050,9 +3074,13 @@ export class InvocationService {
       ingress.selectedCwd = executionCwd;
     }
     const resultFolder = executionCwd;
+    // The attachment grant is bound to the owner's exact text. A team run executes the proposal's prompt, which
+    // prepends standing-staff preferences when a member has a handover note or style (production 1.3.47,
+    // 2026-10-16: every room turn with a file was refused before start, runtime_turn_unsettled).
+    const oneAttachmentPrompt = preparedOneTeamPreflight ? preparedOneTeamPreflight.userAuthoredPrompt : invocationRequest.userPrompt;
     const claimedOneAttachments = requestedOneAttachmentRef
-      ? (yield oneStartCheckpoint("attachments.claim", { ref: requestedOneAttachmentRef, chatId: chat.id, userPrompt: invocationRequest.userPrompt, runId, resultFolder, teamProposalId: preparedOneTeamPreflight?.proposalId ?? null }, () => claimOneAttachments({
-          ref: requestedOneAttachmentRef, chatId: chat.id, userPrompt: invocationRequest.userPrompt, runId, resultFolder, teamProposalId: preparedOneTeamPreflight?.proposalId ?? null,
+      ? (yield oneStartCheckpoint("attachments.claim", { ref: requestedOneAttachmentRef, chatId: chat.id, userPrompt: oneAttachmentPrompt, runId, resultFolder, teamProposalId: preparedOneTeamPreflight?.proposalId ?? null }, () => claimOneAttachments({
+          ref: requestedOneAttachmentRef, chatId: chat.id, userPrompt: oneAttachmentPrompt, runId, resultFolder, teamProposalId: preparedOneTeamPreflight?.proposalId ?? null,
         }))) as ReturnType<typeof claimOneAttachments>
       : null;
     validateChatAttachmentSelection(chat.id,invocationRequest.fileGroupId,invocationRequest.images);

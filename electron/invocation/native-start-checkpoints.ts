@@ -20,7 +20,11 @@ export interface NativeOneStartPort {
   finish(binding: NativeOneStartBinding, status: "handed-off" | "rejected" | "cancelled" | "uncertain" | "settled"): Promise<void>;
 }
 const checkpointFailures = new WeakMap<object, NativeOneStartCheckpointKind>();
-/** Private observation of an error created here; copied fields and wire values carry no phase authority. */
+/** A same-process checkpoint rethrows its own error; record where it first failed (diagnostic only). */
+function observeLocalCheckpointFailure(error: unknown, kind: NativeOneStartCheckpointKind): void {
+  if (error && (typeof error === "object" || typeof error === "function") && !checkpointFailures.has(error)) checkpointFailures.set(error, kind);
+}
+/** Private observation of an error created or first observed here; copied fields and wire values carry no phase authority. */
 export function nativeOneStartCheckpointFailureKind(error: unknown): NativeOneStartCheckpointKind | undefined {
   return error && (typeof error === "object" || typeof error === "function") ? checkpointFailures.get(error) : undefined;
 }
@@ -53,7 +57,7 @@ export function driveLocalOneStart<T>(steps: Generator<NativeOneStartCheckpoint,
   while (!step.done) {
     let value: unknown;
     try { value = step.value.local(); }
-    catch (error) { step = steps.throw(error); continue; }
+    catch (error) { observeLocalCheckpointFailure(error, step.value.kind); step = steps.throw(error); continue; }
     step = steps.next(value);
   }
   return step.value;
@@ -71,7 +75,10 @@ export async function driveNativeOneStart<T>(steps: Generator<NativeOneStartChec
         if (!terminalCleanup) { port.assertCurrent(binding); signal.throwIfAborted(); }
         value = step.value.local();
         if (!terminalCleanup) { port.assertCurrent(binding); signal.throwIfAborted(); }
-      } catch (cause) { step = steps.throw(signal.aborted && !terminalCleanup ? signal.reason : cause); continue; }
+      } catch (cause) {
+        if (!(signal.aborted && !terminalCleanup)) observeLocalCheckpointFailure(cause, step.value.kind);
+        step = steps.throw(signal.aborted && !terminalCleanup ? signal.reason : cause); continue;
+      }
       step = steps.next(value);
       continue;
     }
@@ -91,7 +98,7 @@ export async function driveNativeOneStart<T>(steps: Generator<NativeOneStartChec
       if (error instanceof Error && error !== cause) {
         Object.defineProperty(error, "cause", { value: cause });
         checkpointFailures.set(error, step.value.kind);
-      }
+      } else if (error === cause) observeLocalCheckpointFailure(cause, step.value.kind);
       step = steps.throw(error);
       continue;
     }

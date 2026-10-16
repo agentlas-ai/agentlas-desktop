@@ -99,6 +99,14 @@ export function nativeMachineCauseDiagnostic(error: unknown, checkpointKindForEr
   }
   return { machineCauseChain: chain, machineCauseTruncated: truncated, machineCauseCycle: cyclic };
 }
+/** Durable cause of a no-start refusal: the checkpoint that failed and the machine codes of the cause chain, outermost
+ * first (causeCode is the innermost one). Content-free like the diagnostic below. */
+export function preparationRefusalCause(error: unknown, checkpointKindForError?: (error: unknown) => unknown): { checkpointKind?: string; causeCode?: string; causeCodes?: string[] } {
+  const chain = nativeMachineCauseDiagnostic(error, checkpointKindForError).machineCauseChain as Array<{ code?: unknown; checkpointKind?: unknown }>;
+  const causeCodes = chain.flatMap(item => typeof item.code === "string" ? [item.code] : []);
+  const checkpointKind = chain.find(item => typeof item.checkpointKind === "string")?.checkpointKind as string | undefined;
+  return { ...(checkpointKind ? { checkpointKind } : {}), ...(causeCodes.length ? { causeCode: causeCodes[causeCodes.length - 1], causeCodes } : {}) };
+}
 /** Pre-boundary diagnostic is intentionally content-free: no request, prose, stack, SQL or path. */
 export function nativePreparationErrorDiagnostic(error: unknown, context: {
   phase: NativePreparationDiagnosticPhase; startBoundaryCrossed?: boolean;
