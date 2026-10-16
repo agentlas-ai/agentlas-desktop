@@ -318,7 +318,7 @@ export function syncGrokProductUserHome(realHome: string, selection: CapabilityS
  * HOME for a Grok run: the product HOME of the person's HOME. `AGENTLAS_GROK_KEEP_HOME=1`, a HOME that is already not the
  * person's (a resident re-entry carries the mirror) or a mirror that cannot hold keeps `env.HOME`.
  */
-function withGrokProductUserHome(env: NodeJS.ProcessEnv, selection: CapabilitySelection | undefined): NodeJS.ProcessEnv {
+export function withGrokProductUserHome(env: NodeJS.ProcessEnv, selection: CapabilitySelection | undefined): NodeJS.ProcessEnv {
   if (env.AGENTLAS_GROK_KEEP_HOME === "1") return env;
   const realHome = env.AGENTLAS_GROK_REAL_HOME || os.homedir();
   if (env.HOME && path.resolve(env.HOME) !== path.resolve(realHome)) return env;

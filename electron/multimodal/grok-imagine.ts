@@ -1,12 +1,13 @@
 // Grok Imagine via the official xAI Grok CLI 0.2.x.
-// This is a media-only, OAuth-subscription boundary: exact tool allowlists, minimal env,
-// prompt-file input, isolated session harvesting, and deterministic cleanup.
+// This is a media-only, OAuth-subscription boundary: exact tool allowlists, minimal env with the product HOME and no
+// foreign-tool context (foreign-cli-context.ts), prompt-file input, isolated session harvesting, and deterministic cleanup.
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { grokAuthSource } from "./availability";
 import { detachedSpawnOpts, killCliTree, spawnCli, trackRunChild } from "../runtime/exec";
+import { grokCompatEnv, realGrokHome, withGrokProductUserHome } from "../runtime/foreign-cli-context";
 
 const GROK_BIN_CANDIDATES = [
   path.join(os.homedir(), ".grok/bin/grok"),
@@ -18,10 +19,9 @@ const GROK_BIN_CANDIDATES = [
 
 const IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
 const VIDEO_EXTS = new Set([".mp4"]);
-const DEFAULT_GROK_SESSIONS_DIR = path.join(os.homedir(), ".grok", "sessions");
-
-function grokSessionsDir(): string {
-  return process.env.AGENTLAS_GROK_SESSIONS_DIR || DEFAULT_GROK_SESSIONS_DIR;
+/** The session store of the Grok home the media run used (its GROK_HOME). */
+function grokSessionsDir(env: NodeJS.ProcessEnv): string {
+  return process.env.AGENTLAS_GROK_SESSIONS_DIR || path.join(env.GROK_HOME || path.join(os.homedir(), ".grok"), "sessions");
 }
 
 export function resolveGrokBin(): string | null {
@@ -49,8 +49,8 @@ function canonicalCwd(cwd: string): string {
   }
 }
 
-function sessionRoot(cwd: string, sessionId: string): string {
-  return path.join(grokSessionsDir(), encodeURIComponent(canonicalCwd(cwd)), sessionId);
+function sessionRoot(cwd: string, sessionId: string, env: NodeJS.ProcessEnv): string {
+  return path.join(grokSessionsDir(env), encodeURIComponent(canonicalCwd(cwd)), sessionId);
 }
 
 function validMedia(file: string, kind: "image" | "video"): boolean {
@@ -76,8 +76,8 @@ function validMedia(file: string, kind: "image" | "video"): boolean {
 }
 
 /** Harvest only the exact session requested by this invocation. */
-function harvestBySession(cwd: string, sessionId: string, kind: "image" | "video"): string | null {
-  const mediaDir = path.join(sessionRoot(cwd, sessionId), kind === "video" ? "videos" : "images");
+function harvestBySession(cwd: string, sessionId: string, kind: "image" | "video", env: NodeJS.ProcessEnv): string | null {
+  const mediaDir = path.join(sessionRoot(cwd, sessionId, env), kind === "video" ? "videos" : "images");
   const exts = kind === "video" ? VIDEO_EXTS : IMAGE_EXTS;
   const found: Array<{ file: string; mtime: number }> = [];
   let entries: fs.Dirent[];
@@ -149,6 +149,15 @@ export async function runGrokImagine(opts: GrokImagineOptions): Promise<string |
   }
 
   const sessionId = randomUUID();
+  // A media run is a product run (foreign-cli-context.ts). Measured 2026-10-17 with grok 1.0.60 and this run's environment
+  // before: 127 personal permission rules, 5 Claude plugins, 13 hooks (the owner's Stop/SessionEnd reap-dev-instances.sh
+  // among them), 5 MCP servers, 147 personal skills and the personal Agents.md / CLAUDE.md loaded. It now gets the
+  // product HOME (no ~/.claude settings, plugins or subagents) and every Claude/Cursor/Codex compat cell and Grok memory
+  // off. GROK_HOME stays the person's own folder, named explicitly: `--sandbox strict` refuses a GROK_HOME whose entries
+  // are links (measured: "hooks-paths registry has wrong type (expected real file)" for trusted_folders.toml, then
+  // "Grok directory has wrong type (expected real directory)" for bundled/, then the linked policy lock is not
+  // accessible), so the product GROK_HOME mirror cannot hold this run.
+  const childEnv = withGrokProductUserHome({ ...mediaChildEnv(), ...grokCompatEnv(undefined), GROK_HOME: realGrokHome(process.env) }, undefined);
   const promptFile = path.join(os.tmpdir(), `agentlas-grok-imagine-${sessionId}.txt`);
   const timeoutMs = opts.timeoutMs ?? (opts.kind === "video" ? 15 * 60_000 : 5 * 60_000);
   try {
@@ -212,7 +221,7 @@ export async function runGrokImagine(opts: GrokImagineOptions): Promise<string |
           "--session-id",
           sessionId,
         ],
-        { cwd: opts.cwd, env: mediaChildEnv(), stdio: ["ignore", "ignore", "ignore"], ...detachedSpawnOpts() },
+        { cwd: opts.cwd, env: childEnv, stdio: ["ignore", "ignore", "ignore"], ...detachedSpawnOpts() },
       );
       trackRunChild(child);
     } catch {
@@ -230,8 +239,8 @@ export async function runGrokImagine(opts: GrokImagineOptions): Promise<string |
     child.once("error", finish);
   });
 
-  const root = sessionRoot(opts.cwd, sessionId);
-  const harvested = harvestBySession(opts.cwd, sessionId, opts.kind);
+  const root = sessionRoot(opts.cwd, sessionId, childEnv);
+  const harvested = harvestBySession(opts.cwd, sessionId, opts.kind, childEnv);
   if (!harvested) {
     try {
       fs.rmSync(root, { recursive: true, force: true });
