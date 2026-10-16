@@ -30,6 +30,7 @@ import {
   syncTelegramBotCommands,
   type TelegramCommandSyncApi,
 } from "./commands-sync";
+import type { TelegramCommandHandler } from "./commands-catalog";
 import { clearInlineSelect, type InlineKeyboardMarkup } from "./inline-select";
 import { getAgentById, listInstalledAgents } from "../mcp/registry";
 import { createChat, getChat, getChatWorkingFolder, setChatWorkingFolder } from "../store/chats";
@@ -102,6 +103,8 @@ export interface TelegramChat {
 
 export interface TelegramMessage {
   message_id: number;
+  /** 텔레그램이 메시지를 받은 시각(유닉스 초). */
+  date?: number;
   from?: TelegramUser;
   chat: TelegramChat;
   text?: string;
@@ -222,6 +225,7 @@ const TELEGRAM_COPY = {
     "terminal_import.done_file_kept": "연결은 가져왔지만 Terminal 토큰 파일은 안전하게 지우지 못해 그대로 두었습니다.",
     "pair.connected": "Agentlas에 연결되었습니다. 이제 메시지로 실행할 수 있어요.",
     "pair.room_taken": "이 방에는 이미 다른 Agentlas 봇이 연결되어 있어요. 한 방에는 봇 하나만 붙습니다 — 다른 방(또는 이 봇과의 1:1 대화)에서 다시 시작해 주세요.",
+    "pair.sender_not_owner": "이 방의 Agentlas 연결은 연결한 사람만 쓸 수 있어요.",
     "run.started": "시작했어요. 웹/파일 제작은 몇 분 걸릴 수 있습니다. 끝나면 이 방에 결과 경로와 여는 방법을 보냅니다.",
     "run.working": "받았어요. 지금 작업 중입니다 — 몇 분 걸릴 수 있어요. 끝나면 이 방에 결과를 보냅니다.",
     "run.timeout": "작업이 너무 오래 걸려 자동으로 멈췄습니다. 이 방에 \"계속 진행해\"라고 보내면 같은 세션에서 이어갈 수 있습니다.",
@@ -335,6 +339,7 @@ const TELEGRAM_COPY = {
     "terminal_import.done_file_kept": "The connection was imported, but the Terminal token file could not be removed safely and was left in place.",
     "pair.connected": "Connected to Agentlas. You can now run it by messaging here.",
     "pair.room_taken": "Another Agentlas bot is already connected in this chat. Only one bot can live in a chat — start again in a different chat (or in this bot's direct message).",
+    "pair.sender_not_owner": "Only the person who connected this chat to Agentlas can use it here.",
     "run.started": "Started. Website/file creation can take a few minutes. I will send the result path and how to open it here when it finishes.",
     "run.working": "Got it. Working on it now — this can take a few minutes. I will send the result here when it's done.",
     "run.timeout": "The run took too long and was stopped automatically. Send \"continue\" in this chat to resume the same session.",
@@ -1203,6 +1208,7 @@ export async function removeTelegramConnection(
     botDeleted = await deleteBotViaBotFather(row.bot_username).catch(() => false);
   }
   getDb().prepare("DELETE FROM telegram_bindings WHERE id = ?").run(id);
+  forgetPairedTelegramUser(id);
   await deleteSecret(secretKey(id));
   forgetTelegramCommandSync(id);
   clearInlineSelect(id);
@@ -1285,6 +1291,7 @@ export async function pruneOrphanedTelegramBindings(): Promise<{ removed: number
   const db = getDb();
   for (const row of orphans) {
     db.prepare("DELETE FROM telegram_bindings WHERE id = ?").run(row.id);
+    forgetPairedTelegramUser(row.id);
     // ★ 봇 토큰은 지우지 않는다.
     //
     // `target_id` 는 FK 가 없는 칸이라 "대상을 못 찾았다"가 곧 "대상이 없다"는 뜻이
@@ -1588,6 +1595,10 @@ async function handleTelegramCallbackQuery(
     const binding = findBindingForChat([...poller.bindingIds], chatId);
     if (!binding) return;
     const locale = callbackReplyLocale(query);
+    if (!telegramSenderAuthorized(binding, query.message?.chat, query.from?.id)) {
+      await refuseTelegramSender(poller.token, binding, chatId, query.from?.id, locale);
+      return;
+    }
     await handleTelegramSelectCallback(
       binding,
       telegramDispatchDeps(poller.token, chatId, locale),
@@ -1695,6 +1706,20 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
   // 그리고 선행 슬래시가 붙은 오타는 절대 LLM 작업 요청으로 새지 않는다.
   const cleanedForCommand = cleanTelegramPrompt(binding, text);
   const parsed = parseTelegramCommand(binding, message, cleanedForCommand, binding.bot_username);
+  // 페어링한 사람이 아니면 실행도, 설정 변경도 없다. 도움말만 연다.
+  if (
+    !telegramSenderAuthorized(binding, message.chat, message.from?.id) &&
+    !(parsed.kind === "known" && TELEGRAM_OPEN_COMMAND_HANDLERS.has(parsed.entry.handler))
+  ) {
+    await refuseTelegramSender(
+      poller.token,
+      binding,
+      chatId,
+      message.from?.id,
+      commandReplyLocale(message, cleanedForCommand),
+    );
+    return;
+  }
   let forcedWriteText = "";
   if (parsed.kind === "unknown") {
     await telegramApi(poller.token, "sendMessage", {
@@ -1870,6 +1895,11 @@ function tryPairFreshPrivateBinding(bindingIds: string[], message: TelegramMessa
   if (rows.length !== 1) return null;
   const createdAt = Date.parse(rows[0].created_at);
   if (!Number.isFinite(createdAt) || Date.now() - createdAt > 30 * 60 * 1000) return null;
+  // 바인딩보다 먼저 온 메시지는 이 연결을 청한 게 아니다 — 텔레그램은 폴링이 없던 동안의
+  // 메시지를 24시간 쌓아 두고(drop_pending_updates:false) 첫 getUpdates 가 그것을 되돌려 준다.
+  // 시계 오차는 5초까지 봐준다.
+  const sentAtMs = typeof message.date === "number" ? message.date * 1000 : Number.NaN;
+  if (!Number.isFinite(sentAtMs) || sentAtMs < createdAt - 5000) return null;
   return pairBindingToMessage(rows[0], message);
 }
 
@@ -1896,19 +1926,95 @@ function pairBindingToMessage(row: TelegramBindingRow, message: TelegramMessage)
   const chatId = String(message.chat.id);
   if (row.target_kind === "one" && roomHasOtherOnePort(chatId, row.id)) return "room_taken";
   const title = chatTitle(message.chat);
+  const pairedUserId = message.from?.id;
   try {
-    getDb()
-      .prepare(
+    const db = getDb();
+    db.transaction(() => {
+      db.prepare(
         `UPDATE telegram_bindings
          SET telegram_chat_id = ?, telegram_chat_title = ?, status = 'chat_paired', updated_at = ?
          WHERE id = ?`,
-      )
-      .run(chatId, title, nowIso(), row.id);
+      ).run(chatId, title, nowIso(), row.id);
+      // 방과 함께 "누가 붙였는지"를 같은 트랜잭션에 남긴다. 방만 남고 사람이 빠지면
+      // 그룹의 아무나 실행할 수 있는 옛 상태로 열린다.
+      if (typeof pairedUserId === "number" && Number.isSafeInteger(pairedUserId)) {
+        db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+          .run(pairedTelegramUserKey(row.id), String(pairedUserId));
+      }
+    })();
   } catch {
     // 유니크 인덱스가 경합에서 이겼다 — 위 검사와 같은 뜻이다. 폴러를 죽이지 않는다.
     return "room_taken";
   }
   return getBindingRow(row.id);
+}
+
+/**
+ * 페어링한 텔레그램 사용자 id. telegram_bindings 에 칸을 더하지 않고 meta 키로 둔다 —
+ * 같은 표를 Terminal(벤더된 옛 코어 포함)도 열기 때문에 스키마를 건드리지 않는다.
+ */
+function pairedTelegramUserKey(bindingId: string): string {
+  return `telegram.paired_user:${bindingId}`;
+}
+
+function pairedTelegramUserId(bindingId: string): number | null {
+  const row = getDb()
+    .prepare("SELECT value FROM meta WHERE key = ?")
+    .get(pairedTelegramUserKey(bindingId)) as { value: string } | undefined;
+  const id = row ? Number(row.value) : Number.NaN;
+  return Number.isSafeInteger(id) ? id : null;
+}
+
+function forgetPairedTelegramUser(bindingId: string): void {
+  getDb().prepare("DELETE FROM meta WHERE key = ?").run(pairedTelegramUserKey(bindingId));
+}
+
+/** 페어링하지 않은 사람에게도 열어 두는 명령. 정적 안내뿐이라 아무것도 바꾸지 않는다. */
+const TELEGRAM_OPEN_COMMAND_HANDLERS: ReadonlySet<TelegramCommandHandler> = new Set(["help", "pairing"]);
+const refusedTelegramSenders = new Set<string>();
+const unverifiedGroupBindingsWarned = new Set<string>();
+
+/**
+ * 이 사람이 이 연결로 실행하거나 설정을 바꿀 수 있는가.
+ *
+ * 페어링한 사람이 기록돼 있으면 그 사람만이다. 기록이 없는 옛 연결은 예전 그대로 둔다 —
+ * 1:1 대화는 보낸 사람이 곧 방이라 달라질 게 없고, 옛 그룹 연결을 잠글지는 오너가 정한다.
+ * 다만 옛 그룹 연결은 다시 페어링하라는 줄을 한 번 남긴다.
+ */
+function telegramSenderAuthorized(
+  binding: TelegramBindingRow,
+  chat: TelegramChat | undefined,
+  senderId: number | undefined,
+): boolean {
+  const pairedUserId = pairedTelegramUserId(binding.id);
+  if (pairedUserId === null) {
+    if (chat && chat.type !== "private" && !unverifiedGroupBindingsWarned.has(binding.id)) {
+      unverifiedGroupBindingsWarned.add(binding.id);
+      console.warn(
+        `[telegram] telegram_group_pairing_user_unknown binding=${binding.id}: any group member can run this connection; reconnect it in Agentlas so only you can.`,
+      );
+    }
+    return true;
+  }
+  return typeof senderId === "number" && senderId === pairedUserId;
+}
+
+/** 거절은 보낸 사람마다 한 번만 말한다. 그룹에서 매 메시지마다 답하면 방을 도배한다. */
+async function refuseTelegramSender(
+  token: string,
+  binding: TelegramBindingRow,
+  chatId: string,
+  senderId: number | undefined,
+  locale: "ko" | "en",
+): Promise<void> {
+  const key = `${binding.id}:${senderId ?? "unknown"}`;
+  if (refusedTelegramSenders.has(key)) return;
+  if (refusedTelegramSenders.size >= 1000) refusedTelegramSenders.clear();
+  refusedTelegramSenders.add(key);
+  await telegramApi(token, "sendMessage", {
+    chat_id: chatId,
+    text: tg("pair.sender_not_owner", {}, locale),
+  }).catch(() => undefined);
 }
 
 function chatTitle(chat: TelegramChat): string {
