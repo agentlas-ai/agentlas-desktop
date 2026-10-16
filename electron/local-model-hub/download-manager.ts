@@ -3,10 +3,12 @@ import {
   copyFile,
   mkdir,
   open,
+  readdir,
   readFile,
   rename,
   rm,
   stat,
+  statfs,
   writeFile,
 } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -85,10 +87,83 @@ async function existingBytes(path: string): Promise<number> {
   }
 }
 
+/** A paused download older than this is dropped with its resume journal (a model file is several GB). */
+const STALE_PARTIAL_MS = 7 * 86_400_000;
+/** Free space a download or import must leave room for: its remaining bytes times this. */
+const DISK_HEADROOM = 1.1;
+const PACKAGE_DIR_RE = /^[a-f0-9]{64}$/;
+
+async function defaultDiskFreeBytes(path: string): Promise<number | null> {
+  try {
+    const space = await statfs(path);
+    return space.bavail * space.bsize;
+  } catch {
+    return null;
+  }
+}
+
 export class LocalPackageDownloadManager {
   private readonly active = new Map<string, Promise<PackageDownloadResult>>();
+  private readonly activeRoots = new Set<string>();
+  private readonly diskFreeBytes: (path: string) => Promise<number | null>;
 
-  constructor(private readonly rootPath: string) {}
+  constructor(private readonly rootPath: string, options: { diskFreeBytes?: (path: string) => Promise<number | null> } = {}) {
+    this.diskFreeBytes = options.diskFreeBytes ?? defaultDiskFreeBytes;
+    // Paused downloads nobody resumed, and quarantine copies kept by older versions, are cleared once per host start.
+    void this.expireStale().catch(() => undefined);
+  }
+
+  /**
+   * Removes `.partial` files and resume journals untouched for 7 days, and keeps only the newest quarantine copy
+   * of each package. A package downloading now is skipped.
+   */
+  async expireStale(now = Date.now()): Promise<{ removed: number }> {
+    let removed = 0;
+    let packages: string[] = [];
+    try { packages = (await readdir(this.rootPath)).filter((name) => PACKAGE_DIR_RE.test(name)); } catch { return { removed }; }
+    for (const name of packages) {
+      const packageRoot = join(this.rootPath, name);
+      if (this.activeRoots.has(packageRoot)) continue;
+      let entries: string[] = [];
+      try { entries = await readdir(packageRoot); } catch { continue; }
+      for (const entry of entries) {
+        if (!entry.endsWith(".partial") && entry !== "resume.json") continue;
+        const file = join(packageRoot, entry);
+        try {
+          if (now - (await stat(file)).mtimeMs < STALE_PARTIAL_MS || this.activeRoots.has(packageRoot)) continue;
+          await rm(file, { force: true });
+          removed += 1;
+        } catch { /* gone */ }
+      }
+      removed += await this.keepNewestQuarantine(join(packageRoot, "quarantine"));
+    }
+    return { removed };
+  }
+
+  /** A failed sha check keeps a full-size copy for inspection; only the newest copy is worth keeping. */
+  private async keepNewestQuarantine(quarantineRoot: string, keepName?: string): Promise<number> {
+    let names: string[] = [];
+    try { names = await readdir(quarantineRoot); } catch { return 0; }
+    const dated = await Promise.all(names.map(async (entry) => {
+      try { return { entry, mtimeMs: (await stat(join(quarantineRoot, entry))).mtimeMs }; } catch { return null; }
+    }));
+    const present = dated.filter((value): value is { entry: string; mtimeMs: number } => Boolean(value))
+      .sort((left, right) => right.mtimeMs - left.mtimeMs);
+    const keep = keepName ?? present[0]?.entry;
+    let removed = 0;
+    for (const { entry } of present) {
+      if (entry === keep) continue;
+      await rm(join(quarantineRoot, entry), { force: true }).catch(() => undefined);
+      removed += 1;
+    }
+    return removed;
+  }
+
+  /** Refuses before any byte is written when the volume cannot hold `bytes` with headroom. Unknown space is not refused. */
+  private async assertDiskRoom(path: string, bytes: number): Promise<void> {
+    const free = await this.diskFreeBytes(path);
+    if (free !== null && free < bytes * DISK_HEADROOM) throw new Error("local_model_disk_insufficient");
+  }
 
   verifiedPath(identity: DownloadIdentity): string {
     return join(this.rootPath, packageKey(identity), "verified", basename(identity.fileName));
@@ -103,8 +178,11 @@ export class LocalPackageDownloadManager {
     const activeKey = `${kind}:${identity.packageId}`;
     const current = this.active.get(activeKey);
     if (current) return current;
+    const packageRoot = join(this.rootPath, packageKey(identity));
+    this.activeRoots.add(packageRoot);
     const operation = this.downloadOnce(identity, kind, options).finally(() => {
       if (this.active.get(activeKey) === operation) this.active.delete(activeKey);
+      this.activeRoots.delete(packageRoot);
     });
     this.active.set(activeKey, operation);
     return operation;
@@ -132,6 +210,7 @@ export class LocalPackageDownloadManager {
       observedSha256 = await sha256File(sourcePath, signal);
       if (observedSha256 !== identity.sha256) throw new Error("package_sha256_mismatch");
       await mkdir(join(this.rootPath, packageKey(identity), "verified"), { recursive: true, mode: 0o700 });
+      await this.assertDiskRoom(join(this.rootPath, packageKey(identity)), identity.byteLength);
       await copyFile(sourcePath, temp);
       if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
       const copiedSha256 = await sha256File(temp, signal);
@@ -194,6 +273,12 @@ export class LocalPackageDownloadManager {
     const journalPath = join(packageRoot, "resume.json");
     const target = this.verifiedPath(identity);
     await mkdir(join(packageRoot, "verified"), { recursive: true, mode: 0o700 });
+    try {
+      if (Date.now() - (await stat(partial)).mtimeMs >= STALE_PARTIAL_MS) {
+        await rm(partial, { force: true });
+        await rm(journalPath, { force: true });
+      }
+    } catch { /* no partial */ }
 
     let resumedFromBytes = await existingBytes(partial);
     let rangeAccepted = false;
@@ -289,13 +374,16 @@ export class LocalPackageDownloadManager {
         }
         const quarantineRoot = join(packageRoot, "quarantine");
         await mkdir(quarantineRoot, { recursive: true, mode: 0o700 });
-        await rename(partial, join(quarantineRoot, `${identity.fileName}.${receiptId}.sha256-mismatch`));
+        const quarantined = `${identity.fileName}.${receiptId}.sha256-mismatch`;
+        await rename(partial, join(quarantineRoot, quarantined));
+        await this.keepNewestQuarantine(quarantineRoot, quarantined);
         await rm(journalPath, { force: true });
         resumedFromBytes = 0;
         observedBytes = 0;
         observedSha256 = null;
       }
 
+      await this.assertDiskRoom(packageRoot, identity.byteLength - resumedFromBytes);
       emit("downloading");
       const headers: Record<string, string> = { Accept: "application/octet-stream" };
       if (resumedFromBytes > 0) {
@@ -382,8 +470,16 @@ export class LocalPackageDownloadManager {
       const reason = error instanceof Error ? error.message : "package_download_failed";
       if (!cancelled && ["package_sha256_mismatch", "package_size_overflow"].includes(reason) && observedBytes > 0) {
         const quarantineRoot = join(packageRoot, "quarantine");
+        const quarantined = `${identity.fileName}.${receiptId}.${reason}`;
         await mkdir(quarantineRoot, { recursive: true, mode: 0o700 }).catch(() => undefined);
-        await rename(partial, join(quarantineRoot, `${identity.fileName}.${receiptId}.${reason}`)).catch(() => undefined);
+        await rename(partial, join(quarantineRoot, quarantined)).catch(() => undefined);
+        await this.keepNewestQuarantine(quarantineRoot, quarantined).catch(() => 0);
+        await rm(journalPath, { force: true }).catch(() => undefined);
+      }
+      // A server that answers every ranged request with a wrong Content-Range would fail each retry the same way.
+      // Dropping the partial makes the next attempt a plain full request.
+      if (reason === "package_invalid_content_range") {
+        await rm(partial, { force: true }).catch(() => undefined);
         await rm(journalPath, { force: true }).catch(() => undefined);
       }
       emit(cancelled ? "available" : "failed", cancelled ? "download_cancelled_resumable" : (error instanceof Error ? error.message : "package_download_failed"));
