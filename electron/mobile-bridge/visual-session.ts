@@ -19,6 +19,10 @@ const VISUAL_SESSION_TTL_MS = 5 * 60_000;
 const VISUAL_INPUT_LEASE_MS = 15_000;
 const MAX_VISUAL_SESSIONS = 8;
 const MAX_VISUAL_SESSIONS_PER_DEVICE = 2;
+/** JPEG qualities, best first. A frame steps down until it fits the transport budget. */
+const VISUAL_JPEG_QUALITIES = [78, 65, 50, 35] as const;
+/** Frames are encoded on Main's UI thread; a phone pulling back to back gets at most one per this interval. */
+const VISUAL_MIN_FRAME_INTERVAL_MS = 150;
 
 export interface MobileVisualCapturedFrame {
   source: MobileBridgeVisualSourceDto;
@@ -517,9 +521,19 @@ export function createAgentlasWindowVisualSessionControl(
     };
   };
 
+  // Encoding is synchronous on the UI thread. Each frame starts at the quality
+  // the previous frame ended on, so steady state is one toJPEG per frame (it was
+  // up to four), and frames are spaced VISUAL_MIN_FRAME_INTERVAL_MS apart. Slots
+  // are reserved synchronously, so two devices pulling at once are spaced too.
+  let qualityIndex = 0;
+  let nextFrameAt = 0;
+
   return {
     describe,
     async capture({ maxWidth, maxHeight }) {
+      const slot = Math.max(Date.now(), nextFrameAt);
+      nextFrameAt = slot + VISUAL_MIN_FRAME_INTERVAL_MS;
+      if (slot > Date.now()) await new Promise((resolve) => setTimeout(resolve, slot - Date.now()));
       const window = getWindow();
       const before = describe();
       if (!window || !before) throw new Error("Agentlas main window is unavailable");
@@ -535,11 +549,13 @@ export function createAgentlasWindowVisualSessionControl(
           quality: "good",
         });
       }
-      let bytes = image.toJPEG(78);
-      for (const quality of [65, 50, 35]) {
-        if (bytes.byteLength <= MOBILE_BRIDGE_VISUAL_FRAME_MAX_BYTES) break;
-        bytes = image.toJPEG(quality);
+      let bytes = image.toJPEG(VISUAL_JPEG_QUALITIES[qualityIndex]);
+      while (bytes.byteLength > MOBILE_BRIDGE_VISUAL_FRAME_MAX_BYTES && qualityIndex < VISUAL_JPEG_QUALITIES.length - 1) {
+        qualityIndex += 1;
+        bytes = image.toJPEG(VISUAL_JPEG_QUALITIES[qualityIndex]);
       }
+      // Well under budget: the next frame tries one step better. This frame is never re-encoded.
+      if (qualityIndex > 0 && bytes.byteLength <= MOBILE_BRIDGE_VISUAL_FRAME_MAX_BYTES * 0.4) qualityIndex -= 1;
       const after = describe();
       if (!after || !sourceEqual(before, after)) {
         throw new Error("Agentlas visual source changed during capture");
