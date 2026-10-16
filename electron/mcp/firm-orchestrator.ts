@@ -82,6 +82,7 @@ import {
 import { withProjectWriteLease } from "./project-write-lease";
 import { withholdTurnAskForRun } from "../turn-tools/control-server";
 import { createInactivityGuard } from "./inactivity-guard";
+import { linkAbort } from "../runtime/linked-abort";
 import {
   FirmExecutionEvidenceCollector,
   evaluateFirmVerificationEvidence,
@@ -570,21 +571,6 @@ function latestTeamResultsAllOk(results: FirmStageResult[]): boolean {
   const latest = new Map<string, boolean>();
   for (const result of results) latest.set(result.node.id, result.ok);
   return [...latest.values()].every(Boolean);
-}
-
-/** 부모 signal에 연결된 자식 AbortController — 부모 취소 전파 + 자체 abort(타임아웃) 가능. */
-function linkAbort(parent?: AbortSignal) {
-  const ctrl = new AbortController();
-  const onParent = () => ctrl.abort();
-  if (parent) {
-    if (parent.aborted) ctrl.abort();
-    else parent.addEventListener("abort", onParent, { once: true });
-  }
-  return {
-    signal: ctrl.signal,
-    abort: () => ctrl.abort(),
-    dispose: () => parent?.removeEventListener("abort", onParent),
-  };
 }
 
 function firmTurnProjectWriteKey(p: FirmRunParams, turn: NodeTurn): string | null {

@@ -138,6 +138,7 @@ import {
   recordBorrowedAgentCareer,
 } from "../agents/borrowed-profiles";
 import { parseWholeOrTrailingTypedJson } from "../../shared/typed-json-tail";
+import { linkAbort } from "../runtime/linked-abort";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
@@ -3897,20 +3898,6 @@ export function stripUnsupportedArtifactClaims(
     ? "이번 실행에서 Outputs에 연결된 파일은 아직 없습니다."
     : "No file is available in Outputs for this run yet.";
   return restoreFences([cleaned, evidenceNote].filter(Boolean).join("\n\n"));
-}
-
-function linkAbort(parent?: AbortSignal) {
-  const ctrl = new AbortController();
-  const onParent = () => ctrl.abort();
-  if (parent) {
-    if (parent.aborted) ctrl.abort();
-    else parent.addEventListener("abort", onParent, { once: true });
-  }
-  return {
-    signal: ctrl.signal,
-    abort: () => ctrl.abort(),
-    dispose: () => parent?.removeEventListener("abort", onParent),
-  };
 }
 
 async function parallelCap<I, O>(
