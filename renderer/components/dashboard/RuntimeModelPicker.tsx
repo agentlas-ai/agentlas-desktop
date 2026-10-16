@@ -11,7 +11,13 @@ export type RuntimeModelPickerOption = {
   label: string;
   tag?: string;
   runtime: RuntimeStatus;
+  /**
+   * 모델을 비워 둔 선택(엔진 설정을 따름)을 가리키는 내부 항목. 목록에 행으로 보이지 않고,
+   * 그 선택이 현재 값일 때 트리거 이름과 하이라이트가 실제로 돌 모델(resolvesTo)을 가리키게 한다.
+   */
   isDefault?: boolean;
+  /** isDefault 항목이 실제로 가리키는 모델 id — 목록의 같은 런타임 행 중 이 id 인 행이 하이라이트된다. */
+  resolvesTo?: string;
   unavailable?: boolean;
   /**
    * 이 별칭이 실제로 어느 모델로 풀렸는지 — 실행이 알려준 값(우리가 적은 값이 아니다).
@@ -124,10 +130,31 @@ function optionModelLabel(option: RuntimeModelPickerOption, locale: "ko" | "en")
 }
 
 /*
- * 모델 미지정 행의 이름. 예전 이름 "엔진 설정 사용"은 무슨 모델인지 아무도 몰랐다(오너 2026-09-13).
- * 이제 행이 스스로 말한다 — "Claude Code 기본값 · Opus" 처럼 CLI 가 자기 설정 파일에 적어 둔
- * 기본 모델(cliDefaultModel)을, 그것도 없으면 마지막 실행이 실제로 쓴 모델(observedDefaultModel)을
- * 붙인다. 둘 다 모르면 모른다고 적는다. 짐작해서 채우지 않는다.
+ * 모델을 비워 둔(엔진 설정을 따르는) 선택이 **실제로 돌 모델의 id**.
+ * 명시한 모델이 있으면 그것, 없으면 CLI 가 자기 설정 파일에 적어 둔 모델(cliDefaultModel),
+ * 그것도 없으면 마지막 실행이 알려준 모델(observedDefaultModel)을 목록 행에서 찾아 그 id 를 준다.
+ * 모르면 undefined — 짐작해서 채우지 않는다. 런타임 마지막 선택(runtime.model)은 설정 파일과
+ * 다를 수 있어서 비어 있을 때의 근거로 쓰지 않는다(오너 2026-10-16: 낡은 gpt-5.6-sol 이 보였다).
+ */
+export function runtimeEffectiveModelId(
+  runtime: Pick<RuntimeStatus, "kind" | "model" | "cliDefaultModel" | "observedDefaultModel">,
+  models: ReadonlyArray<{ id: string; resolvedId?: string }> = [],
+): string | undefined {
+  const explicit = runtime.model?.trim();
+  if (explicit) return explicit;
+  if (!runtimeUsesEngineModelSetting(runtime.kind)) return undefined;
+  const configured = runtime.cliDefaultModel?.trim();
+  if (configured) return configured;
+  const observed = runtime.observedDefaultModel?.trim();
+  if (!observed) return undefined;
+  return models.find((model) => model.id === observed || model.resolvedId === observed)?.id ?? observed;
+}
+
+/*
+ * 모델 이름을 비워 둔 선택이 화면에 보일 이름. "기본값" 같은 말은 쓰지 않는다 — 실제로 돌
+ * 모델 이름을 그대로 보여 준다(오너 2026-10-16: "기본값이라는 건 필요 없다").
+ * 실제 모델을 모르면 엔진 이름만 쓴다. 다른 런타임의 모델 이름으로 새지 않도록 반드시 그
+ * 런타임(runtime)의 값만 본다.
  */
 export function runtimeModelFallbackLabel(
   kind: RuntimeKind,
@@ -137,14 +164,36 @@ export function runtimeModelFallbackLabel(
   if (!runtimeUsesEngineModelSetting(kind)) {
     return locale === "ko" ? "모델 미지정" : "Model not specified";
   }
-  const engine = runtime?.label ?? RUNTIME_LABEL[kind] ?? kind;
   const configured = runtime?.cliDefaultModel
     ? (cliModels(kind).find((option) => option.id === runtime.cliDefaultModel)?.label ?? runtime.cliDefaultModel)
     : "";
   const model = configured || runtime?.observedDefaultModel || "";
-  if (model) return locale === "ko" ? `${engine} 기본값 · ${model}` : `${engine} default · ${model}`;
-  // 좁은 목록에서 잘리지 않게 짧게 — 무엇인지는 첫 실행이 알려 준다.
-  return locale === "ko" ? `${engine} 기본값 · 모델 미확인` : `${engine} default · model unknown`;
+  if (model) return model;
+  return runtime?.label ?? RUNTIME_LABEL[kind] ?? kind;
+}
+
+/** 모델 칩·헤더에 쓰는 이름: 고른 모델 라벨 → 실제로 돌 모델 이름. 목록(models)에 있으면 그 라벨을 쓴다. */
+export function runtimeModelDisplayLabel(
+  runtime: Pick<RuntimeStatus, "kind" | "model" | "cliDefaultModel" | "observedDefaultModel" | "label">,
+  locale: "ko" | "en",
+  models: ReadonlyArray<{ id: string; label: string; resolvedId?: string }> = [],
+): string {
+  const id = runtimeEffectiveModelId(runtime, models);
+  if (id) {
+    const row = models.find((model) => model.id === id);
+    if (row) return row.label;
+    if (runtime.model?.trim()) return runtime.model.trim();
+    const configured = cliModels(runtime.kind).find((option) => option.id === id)?.label;
+    if (configured) return configured;
+  }
+  return runtimeModelFallbackLabel(runtime.kind, locale, runtime);
+}
+
+function sameRuntimeIdentity(
+  a: Pick<RuntimeStatus, "kind" | "backend" | "source" | "acpAgentId">,
+  b: Pick<RuntimeStatus, "kind" | "backend" | "source" | "acpAgentId">,
+): boolean {
+  return a.kind === b.kind && a.backend === b.backend && a.source === b.source && (a.acpAgentId ?? "") === (b.acpAgentId ?? "");
 }
 
 export function RuntimeBrandIdentity({
@@ -261,11 +310,31 @@ export function RuntimeModelPicker({
   }, [open, placePopover]);
   const instanceId = useId();
   const listId = `runtime-model-picker-${instanceId.replace(/:/g, "")}`;
-  const selectedIndex = useMemo(
-    () => options.findIndex((option) => option.key === value),
+  /*
+   * "모델을 비워 둔" 항목(isDefault)은 행으로 보이지 않는다 — 오너가 "기본값이라는 건 필요 없다"고 했다.
+   * 다만 그 선택이 현재 값이면 트리거는 실제로 돌 모델 이름을 말하고, 목록에서는 같은 런타임의
+   * 그 모델 행이 하이라이트된다. 고를 구체 모델 행이 하나도 없는 런타임만 그 항목을 행으로 남긴다.
+   */
+  const visibleOptions = useMemo(
+    () => options.filter((option) => !option.isDefault
+      || !options.some((other) => !other.isDefault && sameRuntimeIdentity(other.runtime, option.runtime))),
+    [options],
+  );
+  const selected = useMemo(
+    () => options.find((option) => option.key === value) ?? null,
     [options, value],
   );
-  const selected = selectedIndex >= 0 ? options[selectedIndex] : null;
+  const isHighlighted = useCallback((option: RuntimeModelPickerOption): boolean => (
+    option.key === value
+    || (selected?.isDefault === true
+      && selected.resolvesTo !== undefined
+      && option.model === selected.resolvesTo
+      && sameRuntimeIdentity(option.runtime, selected.runtime))
+  ), [selected, value]);
+  const selectedIndex = useMemo(
+    () => visibleOptions.findIndex(isHighlighted),
+    [visibleOptions, isHighlighted],
+  );
   const selectedProvider = selected ? runtimeProviderLabel(selected.runtime) : "";
   const identityWithModel = (option: RuntimeModelPickerOption, base: string): string => (
     // 별칭이 어느 세대로 풀렸는지 아는 경우에만 덧붙인다. 모르면 아무 말도 하지 않는다.
@@ -322,8 +391,8 @@ export function RuntimeModelPicker({
   };
 
   const moveActive = (delta: number) => {
-    if (options.length === 0) return;
-    setActiveIndex((current) => (current + delta + options.length) % options.length);
+    if (visibleOptions.length === 0) return;
+    setActiveIndex((current) => (current + delta + visibleOptions.length) % visibleOptions.length);
   };
 
   /*
@@ -342,7 +411,7 @@ export function RuntimeModelPicker({
    *    포커스가 도달하지 못한 것이 원인이었다.)
    */
   const onPickerKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (disabled || options.length === 0) return;
+    if (disabled || visibleOptions.length === 0) return;
     if (!open) {
       if (event.key !== "Enter" && event.key !== " " && event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
       event.preventDefault();
@@ -361,12 +430,12 @@ export function RuntimeModelPicker({
       setActiveIndex(0);
     } else if (event.key === "End") {
       event.preventDefault();
-      setActiveIndex(Math.max(0, options.length - 1));
+      setActiveIndex(Math.max(0, visibleOptions.length - 1));
     } else if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       // 손으로 받은 index 가 아니라 **지금 활성인 것**을 고른다 — 포커스가 항목에 없을 때도
       // 사람이 화면에서 보고 있는 그 줄이 선택된다.
-      const option = options[activeIndex];
+      const option = visibleOptions[activeIndex];
       if (option) selectOption(option);
     } else if (event.key === "Escape") {
       event.preventDefault();
@@ -392,19 +461,19 @@ export function RuntimeModelPicker({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={open ? listId : undefined}
-        disabled={disabled || options.length === 0}
+        disabled={disabled || visibleOptions.length === 0}
         /*
          * ★좁은 창에서 모델 이름이 말줄임으로 잘리는데 **전문을 볼 곳이 없었다**
          *   (실측 2026-09-08, 1180px: "GPT-5.1 Codex" 가 62px 자리에 83px).
          *   그리고 고를 모델이 하나도 없어 회색일 때도 이유가 없었다.
          */
-        title={open ? undefined : options.length === 0
+        title={open ? undefined : visibleOptions.length === 0
           ? (locale === "ko" ? "고를 수 있는 모델이 없습니다. 설정에서 런타임을 먼저 연결하세요." : "No models to choose from. Connect a runtime in Settings first.")
           : selected
             ? `${optionModelLabel(selected, locale)} · ${selectedIdentity}`
             : undefined}
         onClick={() => {
-          if (disabled || options.length === 0) return;
+          if (disabled || visibleOptions.length === 0) return;
           setActiveIndex(selectedIndex >= 0 ? selectedIndex : 0);
           setOpen((current) => !current);
         }}
@@ -442,7 +511,7 @@ export function RuntimeModelPicker({
             className="dashboard-runtime-model-picker-list"
             style={popover ? { maxHeight: popover.maxHeight } : undefined}
           >
-            {options.map((option, index) => {
+            {visibleOptions.map((option, index) => {
               const provider = runtimeProviderLabel(option.runtime);
               const identity = runtimeProviderEngineLabel(option.runtime);
               const logo = llmLogoSrc({ model: option.model, backend: option.runtime.backend, kind: option.runtime.kind });
@@ -453,7 +522,7 @@ export function RuntimeModelPicker({
                   id={optionId(listId, index)}
                   role="option"
                   tabIndex={activeIndex === index ? 0 : -1}
-                  aria-selected={option.key === value}
+                  aria-selected={isHighlighted(option)}
                   aria-disabled={optionIsUnavailable(option) ? "true" : undefined}
                   data-unavailable={optionIsUnavailable(option) ? "true" : "false"}
                   className="dashboard-runtime-model-picker-option"
@@ -467,7 +536,7 @@ export function RuntimeModelPicker({
                     <small>{identityWithModel(option, identity)}</small>
                     {option.tag && <em>{cliModelTagLabel(option.tag, locale)}</em>}
                   </span>
-                  {option.key === value && <span className="dashboard-runtime-model-picker-check" aria-hidden="true">✓</span>}
+                  {isHighlighted(option) && <span className="dashboard-runtime-model-picker-check" aria-hidden="true">✓</span>}
                 </div>
               );
             })}

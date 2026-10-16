@@ -6,7 +6,7 @@
 // (renderer/lib/one-runtime-chip.ts, electron/runtime/room-chip-runtime.ts).
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { IconAlertTriangle, IconChevronDown, IconRoute, IconSparkles } from "@/components/Icon";
-import { runtimeModelFallbackLabel } from "@/components/dashboard/RuntimeModelPicker";
+import { runtimeModelDisplayLabel, runtimeModelFallbackLabel } from "@/components/dashboard/RuntimeModelPicker";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { llmLogoSrc } from "@/lib/llm-logo";
 import { adoptStoredOneRuntimeOnce, chipRuntimeFor, withOneRuntimeSelection } from "@/lib/one-runtime-chip";
@@ -144,8 +144,10 @@ export function OneRuntimeChips({
 
   // Nothing until this conversation's pin is read: a default label first would claim a model the turn may not run.
   if (!chatId || pin?.chatId !== chatId || (inventory.length === 0 && !runtime?.model)) return null;
-  const modelLabel = models.find((model) => model.runtime.kind === runtime?.kind && model.runtime.backend === runtime?.backend && model.id === runtime?.model)?.label
-    ?? runtime?.model ?? runtimeModelFallbackLabel(runtime?.kind ?? "agentlas", locale);
+  // 선택이 비어 있으면 실제로 돌 모델 이름을 보인다 — "기본값" 문구는 없다.
+  const modelLabel = runtime
+    ? runtimeModelDisplayLabel(runtime, locale, models.filter((model) => model.runtime.kind === runtime.kind && model.runtime.backend === runtime.backend))
+    : runtimeModelFallbackLabel("agentlas", locale);
   const effortLabel = runtime?.efforts?.find((effort) => effort.id === runtime.effort)?.label ?? (locale === "ko" ? "기본" : "Default");
   const failure = locale === "ko" ? "모델을 바꾸지 못했습니다" : "Model not changed";
   const toggle = (next: "model" | "effort") => setMenu((current) => current === next ? null : next);

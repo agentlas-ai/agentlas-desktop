@@ -28,10 +28,10 @@ import type {
   RuntimeStatus,
 } from "@/lib/types";
 import { useRouter } from "next/navigation";
-import { CONTEXT_MANAGED_BY, runtimeUsesEngineModelSetting } from "@shared/models";
+import { CONTEXT_MANAGED_BY } from "@shared/models";
 import { goalObjectiveText } from "@shared/auto-goal";
 import { goalDisplayState, GOAL_OWNER_REVIEW_REASONS } from "@shared/goal-display-state";
-import { runtimeModelFallbackLabel } from "./dashboard/RuntimeModelPicker";
+import { runtimeEffectiveModelId, runtimeModelDisplayLabel } from "./dashboard/RuntimeModelPicker";
 import type { OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent } from "@shared/types";
 import { buildAppRoutePrompt, parseAppSlashRoute, type AgentlasAppDefinition } from "@/lib/apps";
 import { callableHubBookmarks } from "@/lib/hub-bookmark-events";
@@ -80,7 +80,11 @@ const LOCAL_RUNTIME_LABEL: Record<string, string> = {
 
 /** 모델 칩에 보일 라벨 — 현재 모델 라벨(opts에서) 또는 런타임 기본명. */
 function modelChipLabel(s: RuntimeStatus, opts: ModelOption[]): string {
-  const label = opts.find((o) => o.id === s.model)?.label ?? (s.model || null);
+  // 선택이 비어 있으면 그 런타임이 실제로 돌 모델 이름을 쓴다("기본값" 문구 없음). 모르면 엔진 이름만.
+  const effective = runtimeEffectiveModelId(s, opts);
+  const label = effective
+    ? runtimeModelDisplayLabel(s, "en", opts)
+    : null;
   const localName = LOCAL_RUNTIME_LABEL[s.kind];
   if (localName) return label ? `${localName} · ${label}` : localName;
   if (s.kind === "byok") return label ? `(API) ${label}` : "(API)";
@@ -3152,13 +3156,12 @@ function ModelMenu({
   onSelectEffort: (id: string) => void;
   t: TFunction;
 }) {
-  const { locale } = useT();
   const efforts = effortOptionsForModel(runtime);
   const currentEffort = efforts.some((effort) => effort.id === runtime.effort)
     ? runtime.effort
     : null;
-  // CLI/ACP에서 모델을 생략하면 엔진 설정을 사용한다. BYOK·로컬·Agentlas는 실제 모델이 필수다.
-  const allowDefaultModel = runtimeUsesEngineModelSetting(runtime.kind);
+  // 모델을 고르지 않았으면(엔진 설정을 따름) 실제로 돌 모델 행이 체크된다 — "기본값" 행은 없다.
+  const effectiveModelId = runtimeEffectiveModelId(runtime, options);
   const managedByRuntime = CONTEXT_MANAGED_BY[runtime.kind] === "runtime";
   const check = <IconCheck size={14} style={{ color: "var(--accent)" }} />;
   const modelIcon = <IconSparkles size={13} style={{ color: "var(--accent)" }} />;
@@ -3166,16 +3169,6 @@ function ModelMenu({
 
   return (
     <Popover title={t("chatinput.model")} dataKind="model">
-      {allowDefaultModel && (
-        <Row
-          onClick={() => onSelectModel("")}
-          icon={modelIcon}
-          title={runtimeModelFallbackLabel(runtime.kind, locale === "ko" ? "ko" : "en", runtime)}
-          selected={!runtime.model}
-          right={!runtime.model ? check : undefined}
-          compact
-        />
-      )}
       {options.map((o) => (
         <Row
           key={o.id}
@@ -3183,8 +3176,8 @@ function ModelMenu({
           icon={modelIcon}
           title={o.label}
           subtitle={o.tag}
-          selected={runtime.model === o.id}
-          right={runtime.model === o.id ? check : undefined}
+          selected={effectiveModelId === o.id}
+          right={effectiveModelId === o.id ? check : undefined}
           compact
         />
       ))}

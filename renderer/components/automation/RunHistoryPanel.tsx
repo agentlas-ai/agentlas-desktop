@@ -18,7 +18,6 @@ import { IconAlertTriangle, IconClose } from "@/components/Icon";
 import {
   runtimeBackendForSelection,
   runtimeEngineLabel,
-  runtimeModelFallbackLabel,
   runtimeProviderLabel,
 } from "@/components/dashboard/RuntimeModelPicker";
 import type {
@@ -1462,7 +1461,7 @@ function runtimeFactLabel(fact: WorkflowRunRuntimeFact, ko: boolean): string {
   const engine = runtimeEngineLabel(runtimeIdentity);
   const model = selection.model?.trim();
   const effort = selection.effort?.trim() || (ko ? "기본 작업량" : "Default effort");
-  const runtime = `${provider} · ${engine} · ${model ?? runtimeModelFallbackLabel(selection.kind, ko ? "ko" : "en")} · ${ko ? "작업량" : "effort"} ${effort}`;
+  const runtime = `${provider} · ${engine} · ${model ?? (ko ? "모델 미확인" : "model unknown")} · ${ko ? "작업량" : "effort"} ${effort}`;
   if (!fact.role) return runtime;
   const roleLabels: Record<string, string> = {
     worker: ko ? "워커" : "worker",

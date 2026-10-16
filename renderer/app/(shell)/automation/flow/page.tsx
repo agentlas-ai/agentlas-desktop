@@ -57,7 +57,6 @@ import { AutomationSessionPanel } from "@/components/automation/AutomationSessio
 import {
   runtimeBackendForSelection,
   runtimeEngineLabel,
-  runtimeModelFallbackLabel,
   runtimeProviderLabel,
 } from "@/components/dashboard/RuntimeModelPicker";
 import { IconBolt, IconClose, IconPaperclip, IconRefresh, IconEdit, IconCpu, IconKey, IconMoreHorizontal, IconPlus, IconLayers, IconPower, IconPanelRight, IconChat, IconCheck, IconArchive } from "@/components/Icon";
@@ -87,7 +86,7 @@ function runtimeSelectionPresentation(selection: RuntimeSelection | null | undef
   const effort = selection.effort?.trim() || (locale === "en" ? "Default effort" : "기본 작업량");
   return {
     label: locale === "en" ? "Automation pin · overrides role default" : "자동화별 고정 · 역할 기본보다 우선",
-    detail: `${provider} · ${engine} · ${model ?? runtimeModelFallbackLabel(selection.kind, locale === "en" ? "en" : "ko")} · ${locale === "en" ? "effort" : "작업량"} ${effort} · ${locale === "en" ? "Worker if unavailable · review uncertain execution" : "불가 시 Worker · 실행 불확실 시 확인"}`,
+    detail: `${provider} · ${engine} · ${model ?? (locale === "en" ? "model unknown" : "모델 미확인")} · ${locale === "en" ? "effort" : "작업량"} ${effort} · ${locale === "en" ? "Worker if unavailable · review uncertain execution" : "불가 시 Worker · 실행 불확실 시 확인"}`,
   };
 }
 

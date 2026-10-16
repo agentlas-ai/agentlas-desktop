@@ -12,6 +12,7 @@ import type {
 } from "@/lib/types";
 import {
   RuntimeModelPicker,
+  runtimeEffectiveModelId,
   runtimeModelFallbackLabel,
   type RuntimeModelPickerOption,
 } from "./RuntimeModelPicker";
@@ -477,9 +478,14 @@ export function RuntimeControl() {
           label: "",
           runtime,
           isDefault: true,
-          // 기본값 행이 실제로 무엇으로 풀렸는지 — 실행이 알려준 값, 없으면 CLI 설정 파일의
-          // 기본 모델이 카탈로그에서 풀린 값만 붙는다. 기본값으로 쓰는 사람이 대다수라,
-          // 이 행이 비어 있으면 아무도 실제 모델을 못 본다.
+          // 모델을 비워 둔 선택은 행으로 보이지 않는다. 그 선택이 현재 값일 때 트리거 이름과
+          // 하이라이트가 실제로 돌 모델(resolvesTo)을 가리킨다.
+          ...((): { resolvesTo?: string } => {
+            const id = runtimeEffectiveModelId({ ...runtime, model: undefined }, models);
+            return id ? { resolvesTo: id } : {};
+          })(),
+          // 이 선택이 실제로 무엇으로 풀렸는지 — 실행이 알려준 값, 없으면 CLI 설정 파일의
+          // 모델이 카탈로그에서 풀린 값만 붙는다.
           ...((): { resolvedId?: string } => {
             const fromCatalog = runtime.cliDefaultModel
               ? models.find((model) => model.id === runtime.cliDefaultModel)?.resolvedId

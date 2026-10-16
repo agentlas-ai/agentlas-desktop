@@ -33,6 +33,7 @@ import {
   RuntimeBrandIdentity,
   RuntimeModelPicker,
   runtimeBackendForSelection,
+  runtimeEffectiveModelId,
   runtimeModelFallbackLabel,
   type RuntimeModelPickerOption,
 } from "@/components/dashboard/RuntimeModelPicker";
@@ -405,6 +406,10 @@ function NewAutomationPage() {
           label: "",
           runtime,
           isDefault: true,
+          ...((): { resolvesTo?: string } => {
+            const id = runtimeEffectiveModelId({ ...runtime, model: undefined }, models);
+            return id ? { resolvesTo: id } : {};
+          })(),
         });
       }
       for (const model of models) {

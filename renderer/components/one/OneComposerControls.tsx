@@ -18,8 +18,7 @@ import {
   IconTarget,
 } from "@/components/Icon";
 import { PluginLogo, usePluginBrandMap } from "@/components/PluginLogo";
-import { runtimeModelFallbackLabel } from "@/components/dashboard/RuntimeModelPicker";
-import { runtimeUsesEngineModelSetting } from "@shared/models";
+import { runtimeEffectiveModelId } from "@/components/dashboard/RuntimeModelPicker";
 import { ContextBreakdown } from "@/components/ContextBreakdown";
 import type { ChatAlwaysApprovalControl } from "@/lib/use-chat-always-approval";
 import type { RuntimeStatus } from "@shared/types";
@@ -183,6 +182,13 @@ export function OneComposerControls({
     option?.focus({ preventScroll: true });
   }, [activeMenu, portalHost, permission]);
   const normalizedQuery = query.trim().toLocaleLowerCase();
+  // 모델을 고르지 않았으면(빈 선택) 실제로 돌 모델 행이 체크된다 — "기본값" 행은 없다.
+  const effectiveModelId = useMemo(
+    () => runtime
+      ? runtimeEffectiveModelId(runtime, models.filter((item) => item.runtime.kind === runtime.kind && item.runtime.backend === runtime.backend))
+      : undefined,
+    [models, runtime],
+  );
   const filteredModels = useMemo(
     () => models.filter((item) => !normalizedQuery || `${item.label} ${item.tag ?? ""}`.toLocaleLowerCase().includes(normalizedQuery)),
     [models, normalizedQuery],
@@ -305,14 +311,11 @@ export function OneComposerControls({
             ))}
             {activeMenu === "model" && (
               <>
-                {runtime && runtimeUsesEngineModelSetting(runtime.kind) && (
-                  <ComposerRow icon={<IconSparkles size={15} />} title={runtimeModelFallbackLabel(runtime.kind, locale, runtime)} checked={!runtime.model} onClick={() => onSelectModel(runtime, "")} />
-                )}
                 {filteredModels.map((item) => (
                   <ComposerRow key={`${item.runtime.kind}:${item.runtime.backend}:${item.id}`} icon={item.logo
                     ? /* eslint-disable-next-line @next/next/no-img-element */
                       <img src={item.logo} alt="" className={styles.modelLogo} />
-                    : <IconSparkles size={15} />} title={item.label} subtitle={item.tag} checked={runtime?.kind === item.runtime.kind && runtime?.backend === item.runtime.backend && runtime?.model === item.id} onClick={() => onSelectModel(item.runtime, item.id)} />
+                    : <IconSparkles size={15} />} title={item.label} subtitle={item.tag} checked={runtime?.kind === item.runtime.kind && runtime?.backend === item.runtime.backend && effectiveModelId === item.id} onClick={() => onSelectModel(item.runtime, item.id)} />
                 ))}
               </>
             )}
