@@ -7,6 +7,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { onHostShutdown } from "../host-lifecycle";
 import { userDataPath } from "../runtime-paths";
 import { killCliTree } from "../runtime/exec";
+import { redactSecrets } from "../../shared/secret-patterns";
 import {
   removeWorkspacePreviewCapability,
   writeWorkspacePreviewCapability,
@@ -16,6 +17,8 @@ import {
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_COMMAND_LENGTH = 4_000;
 const PREVIEW_RECEIPT_DIR = "receipts";
+const STDERR_TAIL_CHARS = 2_048;
+const EXIT_REASON_MAX_CHARS = 300;
 
 export interface WorkspacePreviewCapability {
   path: string;
@@ -37,6 +40,8 @@ export interface WorkspacePreviewReceipt {
   endedAt: string | null;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
+  /** Last stderr line of a failed exit, redacted, at most EXIT_REASON_MAX_CHARS. Absent in older receipts. */
+  exitReason?: string | null;
   reachable: boolean | null;
   callerPermission: "read" | "write" | "full";
   ownerGrantId: string | null;
@@ -118,8 +123,12 @@ function fingerprintCommand(command: string): string {
   return createHash("sha256").update(command).digest("hex").slice(0, 32);
 }
 
-function shellSpec(): { command: string; args: string[] } {
-  if (process.platform === "win32") return { command: process.env.ComSpec?.trim() || "cmd.exe", args: ["/d", "/s", "/c"] };
+function shellSpec(): { command: string; args: string[]; windowsVerbatim: boolean } {
+  // cmd.exe /s strips one outer quote pair and runs the rest as written. Node's
+  // default argument quoting escapes inner quotes as \" , which cmd.exe does not
+  // read (`cd "my app"` became `cd \"my app\"`), so the command is passed
+  // verbatim inside that pair, as runtime/install-cli.ts does.
+  if (process.platform === "win32") return { command: process.env.ComSpec?.trim() || "cmd.exe", args: ["/d", "/s", "/c"], windowsVerbatim: true };
   const candidates = process.platform === "darwin"
     ? ["/bin/zsh", "/bin/bash", "/bin/sh"]
     : [process.env.SHELL, "/bin/bash", "/bin/sh"];
@@ -127,7 +136,18 @@ function shellSpec(): { command: string; args: string[] } {
     if (!candidate || !path.isAbsolute(candidate)) return false;
     try { fs.accessSync(candidate, fs.constants.X_OK); return true; } catch { return false; }
   }) ?? "/bin/sh";
-  return { command, args: ["-lc"] };
+  return { command, args: ["-lc"], windowsVerbatim: false };
+}
+
+/**
+ * Why a preview exited: the last stderr line of a failed exit, redacted and
+ * bounded. Nothing else of the output is kept or returned (it may hold project
+ * secrets).
+ */
+function exitReason(code: number | null, stderrTail: string): string | null {
+  if (code === 0) return null;
+  const line = stderrTail.split(/\r?\n/).map((value) => value.trim()).filter(Boolean).pop();
+  return line ? redactSecrets(line).slice(0, EXIT_REASON_MAX_CHARS) : null;
 }
 
 function receiptDir(): string {
@@ -257,12 +277,13 @@ async function startPreview(binding: WorkspacePreviewCapabilityBinding, request:
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !/(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|PRIVATE_KEY|API_KEY|AUTH)/iu.test(key)));
   const shell = shellSpec();
-  const child = spawn(shell.command, [...shell.args, command], {
+  const child = spawn(shell.command, [...shell.args, shell.windowsVerbatim ? `"${command}"` : command], {
       cwd: binding.cwd,
       env,
       detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
+      windowsVerbatimArguments: shell.windowsVerbatim,
     });
   child.unref();
   const receipt: WorkspacePreviewReceipt = {
@@ -280,6 +301,7 @@ async function startPreview(binding: WorkspacePreviewCapabilityBinding, request:
     endedAt: null,
     exitCode: null,
     signal: null,
+    exitReason: null,
     reachable: null,
     callerPermission: binding.permission,
     ownerGrantId: binding.ownerGrantId,
@@ -290,8 +312,10 @@ async function startPreview(binding: WorkspacePreviewCapabilityBinding, request:
   persistReceipt(receipt);
   // Drain output so a chatty dev server cannot block on a pipe. Output is
   // deliberately not returned or persisted: it may contain project secrets.
+  // Only a bounded stderr tail is held in memory for exitReason().
+  let stderrTail = "";
   child.stdout?.on("data", () => undefined);
-  child.stderr?.on("data", () => undefined);
+  child.stderr?.on("data", (chunk: Buffer | string) => { stderrTail = (stderrTail + String(chunk)).slice(-STDERR_TAIL_CHARS); });
   child.once("spawn", () => {
     if (receipt.status === "starting") receipt.status = "running";
     persistReceipt(receipt);
@@ -309,6 +333,7 @@ async function startPreview(binding: WorkspacePreviewCapabilityBinding, request:
       activePreviews.delete(receipt.previewId);
     } else if (receipt.status !== "stopped" && receipt.status !== "failed") {
       receipt.status = "exited";
+      receipt.exitReason = exitReason(code, stderrTail);
       receipt.endedAt = new Date().toISOString();
       persistReceipt(receipt);
       activePreviews.delete(receipt.previewId);
