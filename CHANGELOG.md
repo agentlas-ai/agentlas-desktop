@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.53 — 2026-10-16
+
+- Usage figures follow a sign-in you make outside Agentlas (in a terminal or the vendor's own app) within 30 seconds; before, the previous account's figures stayed until a usage screen was opened.
+- A Codex reply cut off by the output limit continues in the same conversation instead of failing the turn.
+- When a run is refused before it starts, the real reason is kept, a brief rate limit retries by itself, and a recovery runs once per cause instead of on every hiccup.
+- Teammates on API and local models can name files by the folder's full path.
+- Antigravity conversations whose stored session is gone continue with the chat's history, and Stop ends them cleanly.
+- Claude shows its own progress checklist, and Claude follow-ups that use the Agentlas Browser reuse the running session.
+- Connectors installed from the Hub no longer read your global keys.
+- Telegram pairs only with messages sent after you connect it, only the person who paired a group can run or change it, a failed run no longer silences the bot, and /stop and /status answer while a run is going.
+- Messages saved in the same instant keep their order everywhere, including the phone.
+- Toolchain proposals work on Claude and Codex again, and Antigravity applies the effort you choose.
+- A folder trigger runs once per burst of changes instead of once per file, and a turn that writes files no longer waits for the folder index.
+- Local models come back after a conflict over who runs them clears, and the Agent Cloud list recovers from a failed rename.
+- This release binds Agentlas OS v1.2.65 at 8b303608eea746e7ea8d7560890816784bdaa86c; public runtime asset `hephaestus-runtime-v1.2.65.tar.gz` is pinned at SHA-256 `7dae16f12a78515dfa7adbc732197e26aa06a2cd413452e81b2675450caba7de`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.52 — 2026-10-16
 
 - Teammates in a room set to an API model, such as Agentlas Light, can read and write files and use their tools again; before, every tool call came back "not approved for this run".
