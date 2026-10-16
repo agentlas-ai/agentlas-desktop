@@ -51,6 +51,7 @@ import { attestMainToolPreDispatchRejection, withDurableMainToolStart } from "..
 import { assertMainWorkRecoveryContext, mainWorkToolSchema, type MainWorkRecoveryContext, type MainWorkReference } from "../invocation/main-work-recovery";
 import type { InstalledMcpServer } from "../../shared/types";
 import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
+import { OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS, outputLimitContinuationTurn } from "./output-limit-continuation";
 import {
   defaultRuntimeToolPermission,
   getRuntimeToolPermissionArbiter,
@@ -1133,6 +1134,8 @@ interface StreamTurnResult {
   terminalObserved: boolean;
   finishReason?: string;
   text: string;
+  /** The reply as streamed, untrimmed: pieces of an answer cut by the output cap join without losing the space at the seam. */
+  rawText?: string;
   toolCalls: OpenAiToolCall[];
   missingToolCallIds: boolean;
   incompleteToolCalls: boolean;
@@ -1254,7 +1257,7 @@ async function streamChatTurn(
       type: "function" as const,
       function: { name: entry.name, arguments: entry.args },
     }));
-  return { text: acc.trim(), toolCalls, finishReason, thinking: thinkingText,
+  return { text: acc.trim(), rawText: acc, toolCalls, finishReason, thinking: thinkingText,
     terminalObserved: sawDone && Boolean(finishReason) && !conflictingFinishReason,
     ...(sawDone && finishReason && terminalUsageChunks === 1 && lastChunkWasUsage && terminalUsage
       ? { terminalUsage } : {}),
@@ -1507,6 +1510,12 @@ async function runLocalOpenAiChatInner(
   /** Raised when a reply is cut by the output cap before it produced a tool call or any text. */
   let outputTokenFloor: number | undefined;
   let outputGrowths = 0;
+  /**
+   * Replies cut by the output cap and continued on the same conversation (never a failed turn): consecutive cuts so far,
+   * and the text of a cut answer so far, joined with the pieces that follow it.
+   */
+  let outputCuts = 0;
+  let continuedText = "";
   let toolParseRetries = 0;
   /** Reasoning behind each tool call, replayed to Ollama's native route (gpt-oss loses its plan between calls without it). */
   const thinkingByCallId = new Map<string, string>();
@@ -1859,14 +1868,19 @@ async function runLocalOpenAiChatInner(
       }
     }
 
-    const result = await streamChatTurn(resp, events.onPartial, events.onThinking);
+    const result = await streamChatTurn(resp, (partial) => events.onPartial(continuedText + partial), events.onThinking);
     (usage.complete(usageAttempt, result.terminalUsage), result.terminalUsage && opts.contextInputSink && (opts.contextInputSink.value = result.terminalUsage.inputTokens), currentHistoryRuntimeFence()?.assertCurrent());
+    const cutAtCap = result.finishReason === "length" && result.terminalObserved;
+    // A text answer cut at the cap is kept and continued below; only an empty / tool-call cut may first earn a larger budget.
+    const cutTextAnswer = cutAtCap && result.text.trim() !== "" && result.toolCalls.length === 0 && !result.incompleteToolCalls;
     // A reply cut at the output cap carries no usable tool call. A reasoning model (qwen3 spent all 2000
     // tokens thinking before its first call, measured 2026-10-11) used to surface here as "did not return
     // a terminal receipt ... the request may have acted", which is false: nothing was dispatched. Give the
     // model a larger budget once or twice when the caller did not pin one; otherwise say what happened.
     if (result.finishReason === "length" && result.terminalObserved && opts.contextWindow === undefined
-      && (result.toolCalls.length === 0 || result.incompleteToolCalls) && !req.untrustedNoTools && !ownerControlPending) {
+      // Only a reply with nothing at all (a reasoning model spent the whole cap thinking) earns a larger budget; a cut
+      // text answer or a cut tool call is continued below instead.
+      && !cutTextAnswer && result.toolCalls.length === 0 && !result.incompleteToolCalls && !req.untrustedNoTools && !ownerControlPending) {
       const spent = typeof requestBody.max_tokens === "number" ? requestBody.max_tokens : undefined;
       const room = (turnCeiling ?? 32_768) - estimateRequestPromptTokens(requestBody) - 512;
       if (req.maxOutputTokens === undefined && spent !== undefined && outputGrowths < 2 && spent * 2 <= room) {
@@ -1875,10 +1889,23 @@ async function runLocalOpenAiChatInner(
         events.onStatus(req.locale === "ko" ? "모델이 답을 끝내기 전에 출력 한도에 닿아 한도를 늘려 다시 요청합니다…" : "The model reached its output limit before answering; retrying with a larger limit…");
         continue;
       }
-      return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain",
-        failure: localContextFailure("local_output_limit_exceeded", runtimeKind, req.locale),
-        workforcePermissionEnforcement: broker?.finish(false) });
+      if (outputCuts >= OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS) {
+        return assertCurrentHistoryRunnerResult({ text: continuedText, ownerControlTerminal: "uncertain",
+          failure: localContextFailure("local_output_limit_exceeded", runtimeKind, req.locale),
+          workforcePermissionEnforcement: broker?.finish(false) });
+      }
     }
+    if (cutAtCap && !req.signal?.aborted && outputCuts < OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS) {
+      // Cut by the output cap: a partial reply, not a failed turn. A tool call cut mid-arguments (or any call in a cut
+      // reply) is never run; the text so far is kept and one host turn continues the same conversation.
+      outputCuts += 1;
+      const toolCut = !req.untrustedNoTools && (result.toolCalls.length > 0 || result.incompleteToolCalls);
+      if (result.text.trim()) messages.push({ role: "assistant", content: result.text });
+      messages.push({ role: "user", content: outputLimitContinuationTurn(toolCut ? "tool-call" : "text") });
+      if (!toolCut) continuedText += result.rawText ?? result.text;
+      continue;
+    }
+    outputCuts = 0;
     const failure = terminalFailure(result);
     if (failure) return failure;
     observeOwnerControlResponse(result);
@@ -1910,18 +1937,19 @@ async function runLocalOpenAiChatInner(
       // 화면엔 아무 말도 없음). CLI 래핑은 늘 말로 끝난다 — 한 번만 "사람에게 결과를 말하라" 고 다시 묻는다.
       // 소형 모델은 답 대신 시스템 프롬프트의 "## Memory Events" 봉투만 따라 쓰기도 한다(같은 실측). 그것도 빈 답이다.
       const envelopeOnly = /^\s*#{1,6}\s*Memory Events/i.test(result.text) || /^\s*\{\s*"?schema_version"?\s*:\s*"?agentlas\.memory-ticket/i.test(result.text);
-      if ((!result.text.trim() || envelopeOnly) && sawAnyToolCall && !req.untrustedNoTools && !summaryTurnRequested) {
+      if ((!(continuedText + result.text).trim() || envelopeOnly) && sawAnyToolCall && !req.untrustedNoTools && !summaryTurnRequested) {
         summaryTurnRequested = true;
         messages.push({ role: "assistant", content: result.text });
         messages.push({ role: "user", content: "tools: done. Answer the user: what was done + result, brief prose. No tools, no Memory Events, no JSON." });
         continue;
       }
-      finalText = result.text;
+      finalText = continuedText ? continuedText + (result.rawText ?? result.text) : result.text;
       reachedAnswer = true;
       if (process.env.AGENTLAS_LOCAL_TOOL_DEBUG === "1") console.log("[local-tool-loop] final text:", JSON.stringify(result.text.slice(0, 400)), "summaryTurn:", summaryTurnRequested);
       break;
     }
     sawAnyToolCall = true;
+    continuedText = "";
     toolTurnsTaken += 1;
     if (result.thinking && result.toolCalls[0]) thinkingByCallId.set(result.toolCalls[0].id, result.thinking);
     messages.push({ role: "assistant", content: result.text, tool_calls: result.toolCalls });

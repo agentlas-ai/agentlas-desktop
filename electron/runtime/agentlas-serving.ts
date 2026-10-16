@@ -1,5 +1,6 @@
 import { portableServingStrictSchemaOrNull } from "./serving-output-schema";
 import { registerDeclaredPromptModule } from "./prompt-order";
+import { OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS, outputLimitContinuationTurn, type OutputLimitCut } from "./output-limit-continuation";
 /*
  * Agentlas 서빙 러너 — CLI 도 API 키도 없는 사람이 답을 받는 길.
  *
@@ -49,11 +50,17 @@ import { assertScienceRecoveryRequest } from "../science-host/recovery-authority
 
 const TOOL_PROTOCOL = "agentlas-serving-tools-v1";
 
-/** 세기별 답 길이 상한. 서버도 같은 상한을 다시 건다 — 여기 값은 요청이지 보장이 아니다. */
+/**
+ * 세기별 답 길이 상한. 서버도 같은 상한을 다시 건다 — 여기 값은 요청이지 보장이 아니다.
+ * 서버는 maxTokens 를 256..8000 으로 자른다(AgentsAtlas /api/one/serving/chat/route.ts). 세 세기 모두 그 최댓값을 요청한다:
+ * 상한은 단계당 길이일 뿐 청구는 실제 출력 토큰이고, 낮은 상한은 한 단계에서 긴 파일·답을 못 쓰게 만들었다
+ * (Light 1,600). 코드에 더 낮은 상한을 두어야 할 비용·계약 근거는 없다. 상한에 닿으면 이어 쓴다(아래 연속 라운드).
+ */
+const SERVING_MAX_OUTPUT_TOKENS = 8_000;
 const MAX_TOKENS: Record<string, number> = {
-  "agentlas-hard": 4_800,
-  "agentlas-normal": 2_600,
-  "agentlas-light": 1_600,
+  "agentlas-hard": SERVING_MAX_OUTPUT_TOKENS,
+  "agentlas-normal": SERVING_MAX_OUTPUT_TOKENS,
+  "agentlas-light": SERVING_MAX_OUTPUT_TOKENS,
 };
 
 /**
@@ -390,6 +397,10 @@ async function runAgentlasServingWithTools(
   const usage = new ServingUsage(events);
   const progress = createToolLoopProgress("agentlas", req, events);
   let accumulatedText = "";
+  /** A reply cut by the output cap: its text so far, kept and continued on the same conversation (never a failed turn). */
+  let cutPartial = "";
+  let cutKind: OutputLimitCut | null = null;
+  let cutRounds = 0;
   let firstRound = true;
   let round = 0, lastRequestTokens: number | null = null, lastObservedInput: number | null = null;
   for (;; round += 1) {
@@ -406,14 +417,27 @@ async function runAgentlasServingWithTools(
         if (rebuilt) context = { turns: rebuilt.turns, system: context.system };
       }
     }
-    const textPayload = { model, system: context.system, messages: context.turns, maxTokens: outputReserve,
-      toolProtocol: TOOL_PROTOCOL, tools: definitions, toolExchanges };
-    const toolImageCount = toolExchanges.reduce((count, exchange) => count + (exchange.images?.length ?? 0), 0);
+    // The continuation is part of the conversation the server rebuilds each round (it holds no state). With no tool
+    // exchange yet it is an assistant turn plus a host user turn; the server places `messages` before `toolExchanges`, so
+    // once exchanges exist the host turn rides on the last tool result instead (quoting the partial tail).
+    const continuing = cutKind !== null;
+    const wireTurns: ServingTurn[] = continuing && toolExchanges.length === 0
+      ? [...context.turns, ...(cutPartial.trim() ? [{ role: "assistant" as const, text: cutPartial }] : []),
+        { role: "user" as const, text: outputLimitContinuationTurn(cutKind!) }]
+      : context.turns;
+    const wireExchanges: ServingToolExchange[] = continuing && toolExchanges.length > 0
+      ? toolExchanges.map((exchange, index) => index < toolExchanges.length - 1 ? exchange : { ...exchange,
+        results: exchange.results.map((result, at) => at < exchange.results.length - 1 ? result : { ...result,
+          text: [result.text, outputLimitContinuationTurn(cutKind!, cutPartial)].filter(Boolean).join("\n\n") }) })
+      : toolExchanges;
+    const textPayload = { model, system: context.system, messages: wireTurns, maxTokens: outputReserve,
+      toolProtocol: TOOL_PROTOCOL, tools: definitions, toolExchanges: wireExchanges };
+    const toolImageCount = wireExchanges.reduce((count, exchange) => count + (exchange.images?.length ?? 0), 0);
     const sentImageCount = (req.images?.length ?? 0) + toolImageCount;
     if (sentImageCount > 8) throw new Error("serving_tool_image_capacity_exceeded");
     const requestBody = JSON.stringify({ ...textPayload, ...servingRequestFields(req) });
     // Image bytes have a visual admission estimate, not a text-token estimate.
-    const admissionPayload = { ...textPayload, toolExchanges: toolExchanges.map(({ images: _images, ...exchange }) => exchange) };
+    const admissionPayload = { ...textPayload, toolExchanges: wireExchanges.map(({ images: _images, ...exchange }) => exchange) };
     lastRequestTokens = servingAdmissionTokens(JSON.stringify(admissionPayload));
     // The serving tier exposes a conservative 128k window. Count the full
     // growing tool transcript and schemas before another charged model call.
@@ -425,7 +449,7 @@ async function runAgentlasServingWithTools(
     }
     // Context-reduction C01: the exact round about to be sent (system, tools, history, tool exchanges), sizes only.
     reportModelPayload(() => ledgerFromApiBody(textPayload, { ledgerHints: req.ledgerHints, imageCount: sentImageCount }));
-    reportCachePlan(() => servingCachePlan({ system: context.system, tools: definitions, turns: context.turns }));
+    reportCachePlan(() => servingCachePlan({ system: context.system, tools: definitions, turns: wireTurns }));
     reportModelEndpoint({ url: webBaseUrl() });
     const usageAttempt = usage.start();
     const response = await postServing(requestBody, cookie, req);
@@ -438,7 +462,7 @@ async function runAgentlasServingWithTools(
           const delta = (frame.data as { text?: unknown })?.text;
           if (typeof delta === "string") {
             text += delta;
-            (currentHistoryRuntimeFence()?.assertCurrent(), events.onPartial(accumulatedText + text));
+            (currentHistoryRuntimeFence()?.assertCurrent(), events.onPartial(accumulatedText + cutPartial + text));
           }
         } else if (frame.event === "done") {
           done = frame.data && typeof frame.data === "object" ? frame.data as ServingDone : null;
@@ -464,6 +488,21 @@ async function runAgentlasServingWithTools(
     }
     if (firstRound) { reportDeliveredCapabilities(req, events, done); firstRound = false; }
     if (typeof done.text === "string" && done.text.length >= text.length) text = done.text;
+    if (done.stopReason === "max_tokens" && !req.signal?.aborted) {
+      // Cut by the output cap. A tool_use frame cut mid-arguments is never run (it may be half a write_file); a cut
+      // text answer is kept. Either way one host turn continues the same conversation, a bounded number of times.
+      const partial = cutPartial + text;
+      if (cutRounds >= OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS) {
+        return assertCurrentHistoryRunnerResult({ text: accumulatedText + partial, ownerControlTerminal: "uncertain", ...usage.settle() });
+      }
+      cutRounds += 1;
+      cutKind = Array.isArray(done.toolUses) && done.toolUses.length > 0 ? "tool-call" : "text";
+      cutPartial = partial;
+      continue;
+    }
+    // A response that did not stop at the cap: the pending continuation (if any) is part of this answer or tool step.
+    text = cutPartial + text;
+    cutPartial = ""; cutKind = null; cutRounds = 0;
     if (done.stopReason !== "tool_use") {
       if (done.stopReason !== "end_turn" && done.stopReason !== "stop_sequence")
         throw new Error("invalid_serving_stop_reason");
@@ -516,7 +555,7 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
       ? "서버의 실제 모델 용량은 공개되지 않아 보수적 문맥 예산으로 전송합니다."
       : "The server's exact model capacity is undisclosed; using a conservative transport budget." });
 
-  const outputReserve = Math.min(MAX_TOKENS[model] ?? 2_600, req.maxOutputTokens ?? Number.POSITIVE_INFINITY);
+  const outputReserve = Math.min(MAX_TOKENS[model] ?? SERVING_MAX_OUTPUT_TOKENS, req.maxOutputTokens ?? Number.POSITIVE_INFINITY);
   // The conversation's "session" (stateless-generation.ts, native-harness NH10): the handoff it installed, a new one when a
   // request's input reaches 80% of the serving window, acknowledged by the next complete response. Silent.
   const generations = openStatelessGeneration({ runtime: "agentlas", chatId: req.chatId, ownerId: req.runtimeSessionOwnerId ?? req.agentId ?? null,
@@ -540,47 +579,64 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
     const withTools = await runAgentlasServingWithTools(req, events, model, { turns, system }, outputReserve, cookie, generations);
     if (withTools) return withTools;
   }
-  reportModelPayload(() => ledgerFromApiBody({ model, system, messages: turns, maxTokens: outputReserve },
-    { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
-  reportCachePlan(() => servingCachePlan({ system, tools: [], turns }));
-  reportModelEndpoint({ url: webBaseUrl() });
   const usage = new ServingUsage(events);
-  const usageAttempt = usage.start();
-  const response = await postServing(JSON.stringify({
-    model,
-    system,
-    messages: turns,
-    maxTokens: outputReserve,
-    ...servingRequestFields(req),
-  }), cookie, req);
-  if (!response.ok) return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain", failure: await servingHttpFailure(response, req.locale) });
-
+  // A reply cut by the output cap is continued on the same conversation (assistant partial + one host turn), a bounded
+  // number of times; the pieces are joined into one answer and every round's usage is added.
+  let joined = "";
+  let cutRounds = 0;
   let text = "";
   let done: ServingDone | null = null;
-  try {
-    for await (const frame of iterServingEvents(response)) {
-      if (frame.event === "delta") {
-        const delta = (frame.data as { text?: unknown })?.text;
-        if (typeof delta === "string" && delta) {
-          text += delta;
-          (currentHistoryRuntimeFence()?.assertCurrent(), events.onPartial(text));
+  for (;;) {
+    const roundTurns: ServingTurn[] = joined
+      ? [...turns, ...(joined.trim() ? [{ role: "assistant" as const, text: joined }] : []),
+        { role: "user" as const, text: outputLimitContinuationTurn("text") }]
+      : turns;
+    reportModelPayload(() => ledgerFromApiBody({ model, system, messages: roundTurns, maxTokens: outputReserve },
+      { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
+    reportCachePlan(() => servingCachePlan({ system, tools: [], turns: roundTurns }));
+    reportModelEndpoint({ url: webBaseUrl() });
+    const usageAttempt = usage.start();
+    const response = await postServing(JSON.stringify({
+      model,
+      system,
+      messages: roundTurns,
+      maxTokens: outputReserve,
+      ...servingRequestFields(req),
+    }), cookie, req);
+    if (!response.ok) return assertCurrentHistoryRunnerResult({ text: joined, ownerControlTerminal: "uncertain", failure: await servingHttpFailure(response, req.locale), ...(joined ? usage.settle() : {}) });
+
+    text = "";
+    done = null;
+    try {
+      for await (const frame of iterServingEvents(response)) {
+        if (frame.event === "delta") {
+          const delta = (frame.data as { text?: unknown })?.text;
+          if (typeof delta === "string" && delta) {
+            text += delta;
+            (currentHistoryRuntimeFence()?.assertCurrent(), events.onPartial(joined + text));
+          }
+        } else if (frame.event === "done") {
+          done = frame.data && typeof frame.data === "object" ? frame.data as ServingDone : null;
+          const final = done?.text;
+          if (typeof final === "string" && final.length > text.length) text = final;
+        } else if (frame.event === "error") {
+          return assertCurrentHistoryRunnerResult({ text: joined, ownerControlTerminal: "uncertain", failure: streamFailure(frame.data, req.locale), ...(joined ? usage.settle() : {}) });
         }
-      } else if (frame.event === "done") {
-        done = frame.data && typeof frame.data === "object" ? frame.data as ServingDone : null;
-        const final = done?.text;
-        if (typeof final === "string" && final.length > text.length) text = final;
-      } else if (frame.event === "error") {
-        return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain", failure: streamFailure(frame.data, req.locale) });
       }
+    } catch {
+      return assertCurrentHistoryRunnerResult({ text: joined, ownerControlTerminal: "uncertain", failure: servingReconciliationFailure(req.locale), ...(joined ? usage.settle() : {}) });
     }
-  } catch {
-    return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain", failure: servingReconciliationFailure(req.locale) });
-  }
-  if (!done) return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain", failure: servingReconciliationFailure(req.locale) });
-  if (done) {
+    if (!done) return assertCurrentHistoryRunnerResult({ text: joined, ownerControlTerminal: "uncertain", failure: servingReconciliationFailure(req.locale), ...(joined ? usage.settle() : {}) });
     (usage.add(usageAttempt, done), currentHistoryRuntimeFence()?.assertCurrent());
-    reportDeliveredCapabilities(req, events, done);
+    if (cutRounds === 0) reportDeliveredCapabilities(req, events, done);
+    if (done.stopReason === "max_tokens" && !req.signal?.aborted && cutRounds < OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS) {
+      joined += text;
+      cutRounds += 1;
+      continue;
+    }
+    break;
   }
+  text = joined + text;
   if (!text.trim()) {
     return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain", failure: { kind: "exit", runtime: "agentlas", source: "marker", providerCode: "empty_answer",
       message: req.locale === "ko"
@@ -589,7 +645,7 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
   }
   const completedTerminal = !req.signal?.aborted && (done.stopReason === "end_turn" || done.stopReason === "stop_sequence")
     && (done.toolUses === undefined || Array.isArray(done.toolUses) && done.toolUses.length === 0);
-  // Only the complete final response acknowledges the generation it used; a partial (max_tokens) or invalid one does not.
+  // Only the complete final response acknowledges the generation it used; a still-cut (continuation bound spent) or invalid one does not.
   if (completedTerminal) generations.completed(0, Number.isSafeInteger(done.usage?.inputTokens) && Number(done.usage?.inputTokens) > 0 ? Number(done.usage?.inputTokens) : null);
   return assertCurrentHistoryRunnerResult({ text, ...usage.settle(),
     ownerControlTerminal: completedTerminal ? "completed" : "uncertain" });

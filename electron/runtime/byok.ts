@@ -36,6 +36,7 @@ import {
   type LocalChatContent,
 } from "./local-tool-loop";
 import { tStatus } from "./status-i18n";
+import { OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS, outputLimitContinuationTurn } from "./output-limit-continuation";
 import { schemaFallbackInstruction, schemaFallbackPromptPart, observationSystemWithSchema } from "../../shared/runtime-capabilities";
 import { compactHistoryToBudget, estimateTransportTokens } from "./compact";
 import { detectRuntimeRefusal } from "./runtime-refusal";
@@ -399,6 +400,8 @@ async function runAnthropicMessagesInner(
 
   let acc = "";
   let lastEmit = 0;
+  /** Consecutive replies cut by the output cap (continued on the same conversation, never a failed turn). */
+  let outputCuts = 0;
   // 계측(2026-08-18): 이 러너는 cache_control을 보내면서도 응답 usage를 한 번도 읽지
   // 않았다 — 캐시가 먹는지 제품 안에서 확인할 방법이 없어 회귀가 보이지 않았다.
   // message_start가 입력/캐시 계열을, message_delta가 누적 출력을 싣는다.
@@ -484,6 +487,8 @@ async function runAnthropicMessagesInner(
 
     // 이번 턴에 모인 tool_use 블록. index 로 들어와 조각조각 쌓인다.
     const pendingToolUse = new Map<number, { id: string; name: string; json: string }>();
+    /** Where this response's text starts in `acc` (a text-cut reply keeps the earlier pieces in `acc`). */
+    const responseStart = acc.length;
     /** Thinking blocks of this response, verbatim (text + signature, or the redacted payload), by content index. */
     const opaqueThinking = new Map<number, { type: "thinking"; thinking: string; signature: string } | { type: "redacted_thinking"; data: string }>();
     let stopReason: string | null = null;
@@ -586,6 +591,19 @@ async function runAnthropicMessagesInner(
     const completeBoundary = messageStopped && completeTools && !conflictingStopReason
       && ((["end_turn", "stop_sequence"].includes(stopReason ?? "") && pendingToolUse.size === 0)
         || (stopReason === "tool_use" && pendingToolUse.size > 0));
+    if (!completeBoundary && stopReason === "max_tokens" && messageStopped && !conflictingStopReason && !req.signal?.aborted
+      && outputCuts < OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS) {
+      // Cut by the output cap: a partial reply, not a failed turn. A tool_use block cut mid-arguments is never run.
+      // Keep the text, put it back as an assistant turn and add one host turn; the next reply continues it.
+      outputCuts += 1;
+      const piece = acc.slice(responseStart);
+      const toolCut = pendingToolUse.size > 0;
+      if (piece.trim()) messages.push({ role: "assistant", content: [{ type: "text", text: piece }] });
+      messages.push({ role: "user", content: outputLimitContinuationTurn(toolCut ? "tool-call" : "text") });
+      // A cut tool step's preface is not the answer; a cut text answer stays in `acc` and the next pieces append to it.
+      if (toolCut) acc = acc.slice(0, responseStart);
+      continue;
+    }
     if (!completeBoundary) {
       const error = new RuntimeTurnUnsettledError("byok", req.locale);
       // The provider's own structured stop reason: the context window ran out. Same typed refusal as a pre-send overflow.
@@ -608,6 +626,7 @@ async function runAnthropicMessagesInner(
     if (req.scienceCollectionCapability && stopReason === "tool_use" && pendingToolUse.size === 0) {
       throw new Error("science_collection_tool_frame_invalid");
     }
+    outputCuts = 0;
     if (stopReason !== "tool_use" || pendingToolUse.size === 0) {
       reachedAnswer = true;
       break;
@@ -638,7 +657,7 @@ async function runAnthropicMessagesInner(
     const assistantContent: AnthropicContent[] = [];
     // Thinking blocks first, byte-for-byte as received: a tool_use turn is rejected when its thinking/signature is altered or dropped.
     for (const [, block] of [...opaqueThinking.entries()].sort((a, b) => a[0] - b[0])) assistantContent.push({ ...block });
-    if (acc.trim()) assistantContent.push({ type: "text", text: acc });
+    if (acc.slice(responseStart).trim()) assistantContent.push({ type: "text", text: acc.slice(responseStart) });
     const resultContent: AnthropicContent[] = [];
     for (const [, entry] of orderedToolUse) {
       let input: Record<string, unknown> = {};
@@ -1024,6 +1043,8 @@ export const runGoogleByok: Runner = async (
   let lastRequestTokens: number | null = null, lastObservedInput: number | null = null;
   let acc = "";
   let lastEmit = 0;
+  /** Consecutive replies cut by the output cap (continued on the same conversation, never a failed turn). */
+  let outputCuts = 0;
   let reachedAnswer = false;
   let includeTools = functionDeclarations.length > 0;
   const measuredUsage = createToolLoopUsage(events);
@@ -1147,6 +1168,8 @@ export const runGoogleByok: Runner = async (
     }
 
     const modelParts: GooglePart[] = [];
+    /** Where this response's text starts in `acc` (a text-cut reply keeps the earlier pieces in `acc`). */
+    const responseStart = acc.length;
     const functionCalls: Array<{
       providerCallId: string | null;
       providerCallLocation: { responseIndex: number; partIndex: number };
@@ -1225,7 +1248,18 @@ export const runGoogleByok: Runner = async (
         // authority, so ignore them just as the previous text-only adapter did.
       }
     }
-    (measuredUsage.complete(usageAttempt, finishReason === "STOP" ? terminalUsage : undefined), currentHistoryRuntimeFence()?.assertCurrent());
+    // A MAX_TOKENS reply is billed like any other: its terminal usage is real and counts toward the turn.
+    (measuredUsage.complete(usageAttempt, finishReason === "STOP" || finishReason === "MAX_TOKENS" ? terminalUsage : undefined), currentHistoryRuntimeFence()?.assertCurrent());
+    if (finishReason === "MAX_TOKENS" && !conflictingFinishReason && !req.signal?.aborted
+      && outputCuts < OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS) {
+      // Cut by the output cap: keep the text, never run a call from a cut reply, continue on the same conversation.
+      outputCuts += 1;
+      const piece = acc.slice(responseStart);
+      if (piece.trim()) contents.push({ role: "model", parts: [{ text: piece }] });
+      contents.push({ role: "user", parts: [{ text: outputLimitContinuationTurn(functionCalls.length > 0 ? "tool-call" : "text") }] });
+      if (functionCalls.length > 0) acc = acc.slice(0, responseStart);
+      continue;
+    }
     if (finishReason !== "STOP" || conflictingFinishReason) {
       const error = new RuntimeTurnUnsettledError("byok", req.locale);
       const refused = ["SAFETY", "RECITATION", "LANGUAGE", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII",
@@ -1243,6 +1277,7 @@ export const runGoogleByok: Runner = async (
     generations.completed(turn, observedInput);
     lastObservedInput = observedInput;
     lastRequestTokens = sentRequestTokens;
+    outputCuts = 0;
     if (functionCalls.length === 0 || req.untrustedNoTools) {
       reachedAnswer = true;
       break;
