@@ -47,6 +47,7 @@ import {
 import { runMcpInvocation } from "../mcp/client";
 import { mintGraphTeamGrant, revokeGraphTeamGrant, type GraphTeamGrant } from "../one/graph-team-grant";
 import { graphTeamStepHold, runGraphTeamStep } from "../one/graph-team-step";
+import { claimRoomWhenFree, graphRoomWaitHold } from "./graph-room-wait";
 import { createNodeLiveness, type NodeLiveness } from "./node-liveness";
 import { createDegenerateOutputDetector, degenerateOutputReceipt, WORKER_OUTPUT_DEGENERATE_CODE, WorkerOutputDegenerateError } from "../runtime/degenerate-output";
 import { graphEffectItemsHeldSummary, graphEffectItemsPromptBlock } from "../one/graph-effect-items";
@@ -5024,7 +5025,7 @@ export async function runGraph(
         // A team step's budget bounds its own turns, not the teammates' work it waits for (graph-team-step.ts).
         const armNodeTimer = (ms: number): ReturnType<typeof setTimeout> => setTimeout(() => {
           const hold = graphTeamStepHold(runId, node.id);
-          const until = Math.max(hold ?? 0, liveness.liveUntil());
+          const until = Math.max(hold ?? 0, graphRoomWaitHold(runId, node.id) ?? 0, liveness.liveUntil());
           if (until > Date.now()) { nodeTimer = armNodeTimer(until - Date.now()); return; }
           nodeTimedOut = true;
           nodeAbort.abort(new Error("automation_node_timeout"));
@@ -5088,7 +5089,7 @@ export async function runGraph(
                   }
                 }
                 assertFiniteCurrent();
-                if (runSignal.aborted || nodeAbort.signal.aborted || Date.now() >= Math.max(captured.deadline, graphTeamStepHold(runId, node.id) ?? 0, liveness.liveUntil())) throw new Error("graph_worker_owner_stopped");
+                if (runSignal.aborted || nodeAbort.signal.aborted || Date.now() >= Math.max(captured.deadline, graphTeamStepHold(runId, node.id) ?? 0, graphRoomWaitHold(runId, node.id) ?? 0, liveness.liveUntil())) throw new Error("graph_worker_owner_stopped");
                 if (getAutomationDefinitionDigest(automation.id) !== definitionDigest) throw new Error("graph_worker_definition_changed");
                 revalidateAutomationWorkspace(automationWorkspace);
                 if (captured.pool && readGraphWorkerPool()?.fingerprint !== captured.pool.fingerprint) throw new Error("graph_worker_pool_changed");
@@ -5146,7 +5147,14 @@ export async function runGraph(
             // masked as "no completion receipt"), and each resume then stopped on worker_liveness_unknown. Claimed before
             // the work unit begins, so a busy chat is a clean refusal, not an unconfirmed mutation. The next agent node (or
             // attempt) on the same chat reopens this run's released lease instead of being refused as another run.
-            const ownerLease = nativeMcpCall ? null : claimInvocationRunOwner(nodeChat.id, runId, { reopenReleased: true });
+            // A room busy with another run (the owner's Goal turn in the same room) is waited for, not a failure
+            // (graph-room-wait.ts); the node's deadline is held meanwhile.
+            const ownerLease = nativeMcpCall ? null : await claimRoomWhenFree({ runId, nodeId: node.id, signal: nodeAbort.signal,
+              claim: () => claimInvocationRunOwner(nodeChat.id, runId, { reopenReleased: true }),
+              onWait: ({ phase, code, waitedMs }) => {
+                tryRecordRunEvent({ runId, automationId: automation.id, nodeId: node.id, kind: "workflow_node_room_wait",
+                  payload: { phase, code, waitedMs, chatId: nodeChat.id } });
+              } });
             try {
             if (!dryRun && !graphTeamContinuation) {
               const scope = commonScope(node, prompt);
@@ -6310,7 +6318,7 @@ export async function runGraph(
       // A team step waiting on its teammates is not timed out here either (graph-team-step.ts graphTeamStepHold).
       const armTimer = (ms: number): ReturnType<typeof setTimeout> => setTimeout(() => {
         const hold = graphTeamStepHold(runId, node.id);
-        const until = Math.max(hold ?? 0, nodeLiveness.get(node.id)?.liveUntil() ?? 0);
+        const until = Math.max(hold ?? 0, graphRoomWaitHold(runId, node.id) ?? 0, nodeLiveness.get(node.id)?.liveUntil() ?? 0);
         if (until > Date.now()) { timer = armTimer(until - Date.now()); return; }
         timedOut = true;
         nodeController.abort(new Error("automation_node_timeout"));
