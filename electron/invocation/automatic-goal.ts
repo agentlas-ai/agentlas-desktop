@@ -285,10 +285,14 @@ export function automaticGoalReplayBlockerCode(runId: string): string | null {
  * The owner's newest message that no finished answer followed, if any. A message the owner sent mid-turn interrupts
  * that turn; the resume then carried only the plan, so the owner's request sat in history below a "preserve every
  * original constraint" instruction and the run went on with the old plan (Thread Marketing, 2026-10-14 12:08Z: "쓰레드
- * 전략을 찾아보고 바꾸던지"). Interrupted fragments and host/system rows do not count as an answer.
+ * 전략을 찾아보고 바꾸던지"). Interrupted fragments and host/system rows do not count as an answer. The app's own notices
+ * are assistant rows with a host notice ("the run failed, your request is saved", "retrying in 5 minutes"); counting them
+ * dropped the owner's answer from the resume (Yotube 2026-10-17 11:51Z "문장 삭제 후 오디오 재생성", followed by two
+ * host-status rows), so they are left out in the query, where they also cannot crowd the owner out of the window.
  */
 export function unansweredOwnerMessage(chatId: string): string | null {
-  const rows = getDb().prepare("SELECT role, text FROM chat_messages WHERE chat_id = ? ORDER BY created_at DESC LIMIT 40")
+  const rows = getDb().prepare(`SELECT role, text FROM chat_messages WHERE chat_id = ? AND role IN ('user', 'assistant')
+    AND host_notice_json IS NULL ORDER BY created_at DESC LIMIT 40`)
     .all(chatId) as Array<{ role: string; text: string | null }>;
   for (const row of rows) {
     const text = (row.text ?? "").trim();
