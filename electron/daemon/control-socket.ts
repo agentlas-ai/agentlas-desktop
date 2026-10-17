@@ -58,8 +58,10 @@ export interface ControlSocketHandle {
  */
 export function defaultControlSocketPath(userDataDir: string): string {
   if (process.platform === "win32") {
-    // 파이프 이름에는 경로를 못 쓴다. userData 를 짧게 접어 넣어 인스턴스를 가른다.
-    const tag = Buffer.from(userDataDir).toString("base64url").slice(-16);
+    // 파이프 이름에는 경로를 못 쓴다. userData 전체를 해시로 접어 넣어 인스턴스를 가른다.
+    // 예전 base64url(userData).slice(-16) 은 경로 끝("…ing\Agentlas")만 담아 C:\Users\<누구든> 이
+    // 같은 이름이 됐다 — 파이프는 머신 전역이라 두 번째 사용자의 데몬이 못 뜨고, 관리자는 남의 데몬에 붙었다.
+    const tag = createHash("sha256").update(userDataDir).digest("hex").slice(0, 24);
     return `\\\\.\\pipe\\agentlas-daemon-${tag}`;
   }
   const preferred = path.join(userDataDir, "daemon.sock");
