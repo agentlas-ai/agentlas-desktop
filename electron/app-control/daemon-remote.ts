@@ -11,6 +11,8 @@ type AppBridge = Pick<DaemonDeviceBridge, "appControl">;
 function unavailable(error: unknown): { code: string; message: string } {
   const code = error instanceof DeviceBridgeError ? error.code : "device_bridge_unavailable";
   if (code === "device_bridge_timeout") return { code: "app-call-timeout", message: "Agentlas did not answer in time; the operation may or may not have run, so read its state before repeating it." };
+  // The request itself could not be carried (not plain JSON, or over the channel's size limit): the window is fine.
+  if (code === "device_bridge_refused" && /^native_auth_(value|frame)_/.test((error as Error).message)) return { code: "invalid-arguments", message: `The arguments could not be sent to the app: plain JSON values within the size limit only (${(error as Error).message}).` };
   return { code: "app-window-unavailable", message: `${DEVICE_BRIDGE_UNAVAILABLE_MESSAGE} (${code}).` };
 }
 
@@ -27,7 +29,9 @@ export async function remoteAppControlOperations<T extends object>(input: Record
 
 export async function remoteAppControlCall(caller: { ownerTurn: boolean }, input: { operation?: unknown; args?: unknown }, bridge: AppBridge = daemonDeviceBridge()): Promise<Record<string, unknown>> {
   let answer;
-  try { answer = await bridge.appControl({ kind: "call", ownerTurn: caller.ownerTurn === true, input: { operation: input.operation, args: input.args } }); }
+  // An absent args stays absent: { args: undefined } is not a wire value (dev 2026-10-18 run9, app.call automations.list).
+  const request = { operation: input.operation, ...(input.args !== undefined ? { args: input.args } : {}) };
+  try { answer = await bridge.appControl({ kind: "call", ownerTurn: caller.ownerTurn === true, input: request }); }
   catch (error) { const { code, message } = unavailable(error); throw new AppControlError(code, message); }
   if (answer.outcome === "value") return answer.value as Record<string, unknown>;
   // Main's AppControlError text already leads with its code ("operation-not-allowed: ..."); keep it once.

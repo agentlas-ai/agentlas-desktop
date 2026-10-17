@@ -111,6 +111,10 @@ export async function startNativeAuthChannel(options: { address: string; binding
     if (method !== "native.checkpoint" || !state || !identity) return Promise.reject(nativeAuthError("native_auth_checkpoint_unenrolled"));
     const lane = observation ? (validateNativeServiceObservationRequest(params).action === "finish" ? "terminal" : "ordinary") : capability ? "terminal" : "ordinary";
     if ([...state.pending.values()].filter(p => p.lane === lane).length >= (lane === "terminal" ? 2 : 8)) return Promise.reject(nativeAuthError("native_auth_checkpoint_busy"));
+    // Params the wire cannot carry (undefined, NaN, an instance) fail this request only: nothing is signed or sent and no
+    // sequence is used, so the channel and the other pending requests stay up. Dev 2026-10-18: an app.call with no
+    // arguments sent { args: undefined }, the frame build below threw, and its catch closed the whole channel.
+    try { nativeAuthCanonical(params); } catch (error) { return Promise.reject(error); }
     const requestId = randomBytes(32).toString("hex");
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => state.close(), NATIVE_START_REPLY_TIMEOUT_MS);

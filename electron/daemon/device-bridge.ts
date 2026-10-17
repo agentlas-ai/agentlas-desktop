@@ -69,8 +69,11 @@ export function createDaemonDeviceBridge(options: { now?: () => number; newReque
       }, (error: unknown) => {
         if (!pending.delete(entry)) return;
         clearTimeout(entry.timer);
-        // The reverse path rejects when the channel is gone (lost) or Main could not answer at all.
-        const lost = (error as { code?: unknown } | null)?.code === "native_auth_channel_lost" || transport !== t;
+        // The reverse path rejects when the channel is gone (lost) or Main could not answer at all, or when this request
+        // could not be put on the wire (the channel stays up; the code names why).
+        const code = (error as { code?: unknown } | null)?.code;
+        if (typeof code === "string" && /^native_auth_(value|frame)_/.test(code)) { reject(new DeviceBridgeError("device_bridge_refused", code)); return; }
+        const lost = code === "native_auth_channel_lost" || transport !== t;
         reject(new DeviceBridgeError(lost ? "device_bridge_disconnected" : "device_bridge_unavailable"));
       });
     });
