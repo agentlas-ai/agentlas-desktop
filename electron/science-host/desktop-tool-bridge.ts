@@ -11,6 +11,7 @@ import { getDb } from "../store/db";
 import { recordRunEvent } from "../store/run-events";
 import type { ToolPermission } from "../../shared/builtin-tools";
 import type { InstalledMcpServer } from "../../shared/types";
+import { runScienceDocumentTool, scienceDocumentToolDescriptors, SCIENCE_DOCUMENT_SERVER_DESCRIPTION, SCIENCE_DOCUMENT_SERVER_ID } from "./document-tools";
 
 export interface ScienceDesktopToolScope {
   projectId: string;
@@ -50,7 +51,7 @@ interface ToolDescriptor {
 
 interface Inventory {
   id: string;
-  kind: "mcp" | "builtin";
+  kind: "mcp" | "builtin" | "documents";
   serverId: string;
   serverDigest: string;
   envRevision: number;
@@ -184,7 +185,7 @@ function assertInventoryCurrent(scope: DesktopToolScope, inventory: Inventory): 
   const binding = current(scope);
   if (binding.inventories.get(inventory.id) !== inventory)
     throw new Error("science_desktop_tool_inventory_stale");
-  if (inventory.kind === "builtin") return binding;
+  if (inventory.kind !== "mcp") return binding;
   const server = installed().find(candidate => candidate.id === inventory.serverId);
   if (!server || mcpServerConfigurationDigest(server) !== inventory.serverDigest
     || getEnvConfigurationRevision() !== inventory.envRevision)
@@ -284,6 +285,9 @@ export const scienceDesktopTools = {
       const servers = [
         ...(binding.cwd ? [{ id: BUILTIN_SERVER_ID, name: "Desktop built-in tools",
           description: "Workspace file and shell tools available under this turn's permission." }] : []),
+        // An Alive wake is a background actor with no owner at the document: only an ordinary turn edits office files.
+        ...(binding.cwd && !isAliveScope(scope) ? [{ id: SCIENCE_DOCUMENT_SERVER_ID, name: "Office documents",
+          description: SCIENCE_DOCUMENT_SERVER_DESCRIPTION }] : []),
         ...available.map(server => ({ id: server.id, name: (server.nameEn || server.name).slice(0, 200),
           ...(server.catalogId ? { catalogId: server.catalogId.slice(0, 160) } : {}),
           description: (server.catalogId && getCatalogEntry(server.catalogId)?.descriptionEn
@@ -312,6 +316,20 @@ export const scienceDesktopTools = {
       }
       const result = page(binding, builtin.id, builtin.tools, query.page);
       return { inventoryId: builtin.id, tools: result.items, ...(result.nextPage ? { nextPage: result.nextPage } : {}) };
+    }
+    if (query.serverId === SCIENCE_DOCUMENT_SERVER_ID) {
+      if (!binding.cwd || isAliveScope(scope)) throw new Error("science_desktop_tool_server_unavailable");
+      let documents = binding.serverInventories.get(SCIENCE_DOCUMENT_SERVER_ID)
+        ? binding.inventories.get(binding.serverInventories.get(SCIENCE_DOCUMENT_SERVER_ID)!) : undefined;
+      if (!documents) {
+        // The six tools are the harness document ports; there is no Main tool behind them, so nothing resolves by name.
+        documents = { id: randomUUID(), kind: "documents", serverId: SCIENCE_DOCUMENT_SERVER_ID,
+          serverDigest: "", envRevision: 0, tools: scienceDocumentToolDescriptors(), byName: new Map() };
+        binding.inventories.set(documents.id, documents);
+        binding.serverInventories.set(SCIENCE_DOCUMENT_SERVER_ID, documents.id);
+      }
+      const result = page(binding, documents.id, documents.tools, query.page);
+      return { inventoryId: documents.id, tools: result.items, ...(result.nextPage ? { nextPage: result.nextPage } : {}) };
     }
     const server = available.find(candidate => candidate.id === query.serverId);
     if (!server) throw new Error("science_desktop_tool_server_unavailable");
@@ -373,10 +391,12 @@ export const scienceDesktopTools = {
     const binding = current(scope);
     const inventory = binding.inventories.get(input.inventoryId);
     const reader = input.name === TOOL_RESULT_READ;
-    if (!inventory || (!reader && (!inventory.byName.has(input.name)
+    const documents = inventory?.kind === "documents";
+    if (!inventory || (!reader && !documents && (!inventory.byName.has(input.name)
       || inventory.byName.get(input.name)?.kind !== inventory.kind))
       || !inventory.tools.some(tool => tool.name === input.name))
       throw new Error("science_desktop_tool_inventory_stale");
+    if (documents && !binding.cwd) throw new Error("science_desktop_tool_server_unavailable");
     assertInventoryCurrent(scope, inventory);
     if (!input.arguments || typeof input.arguments !== "object" || Array.isArray(input.arguments))
       throw new Error("science_desktop_tool_arguments_invalid");
@@ -420,13 +440,17 @@ export const scienceDesktopTools = {
     }).immediate();
     const result = (async () => {
       assertInventoryCurrent(scope, inventory);
-      const dispatched = await runMainToolDispatch(inventory.byName,
-        { providerCallId: input.toolCallId, toolName: input.name, arguments: argumentsJson },
-        { onStatus: () => {}, onPartial: () => {} },
-        { runtimeKind: binding.runtimeKind, sessionKey: `science:${runId(scope)}`,
-          permission: binding.permission, cwd: binding.cwd, chatId: binding.chatId,
-          agentId: binding.agentId, unattended: true, signal: binding.signal, retainMcpToolResult: true,
-          assertCurrent: () => { assertInventoryCurrent(scope, inventory); } });
+      // The document ports take the turn's own chat, run and permission; their refusals are results, not exceptions.
+      const dispatched: MainToolDispatchResult = documents
+        ? { visionMessage: null, ...await runScienceDocumentTool(input.name, input.arguments,
+          { chatId: binding.chatId, runId: runId(scope), permission: binding.permission, cwd: binding.cwd! }) }
+        : await runMainToolDispatch(inventory.byName,
+          { providerCallId: input.toolCallId, toolName: input.name, arguments: argumentsJson },
+          { onStatus: () => {}, onPartial: () => {} },
+          { runtimeKind: binding.runtimeKind, sessionKey: `science:${runId(scope)}`,
+            permission: binding.permission, cwd: binding.cwd, chatId: binding.chatId,
+            agentId: binding.agentId, unattended: true, signal: binding.signal, retainMcpToolResult: true,
+            assertCurrent: () => { assertInventoryCurrent(scope, inventory); } });
       const projected = projectDesktopResult(binding, inventory, dispatched, input.toolCallId);
       recordRunEvent({ runId: runId(scope), chatId: binding.chatId,
         kind: "science_desktop_tool_result_received", sourceEventId: `science-desktop-tool:${input.toolCallId}:result`,
