@@ -4506,8 +4506,14 @@ async function runMcpInvocationInContext(
   const bindInvocationOneArtifacts = (
     toolId: string,
     paths: readonly string[],
+    observedBy?: { name: string; kind?: RuntimeToolKind },
   ): NonNullable<McpInvocationEvent["oneArtifacts"]> => {
     const runId = req.runId;
+    // Only files the run produced are outputs. A file the model only read (Claude `Read` of an image, any typed
+    // `read` tool) is an observation: the Yotube QA contact sheets it inspected were bound as 15 "results"
+    // (2026-10-17) while the rendered videos were not.
+    if (observedBy && (observedBy.kind === "read"
+      || (!observedBy.kind && /^(?:Read|view_image|read_image|read_file|view_file)$/u.test(observedBy.name.trim())))) return [];
     // A conversational One run can become a canonical Task on its first tool
     // event. The Task did not exist when this invocation was prepared, but it
     // is already durable by the successful completion event that carries the
@@ -6544,7 +6550,7 @@ async function runMcpInvocationInContext(
         // 도구 이름을 추측하는 대신 **우리 정본 폴더 안에 있는가**로 판정한다 —
         // 아래 봉인이 fail-closed 라 남의 경로는 어차피 통과하지 못한다.
         const oneArtifacts = !isError && id && artifactPaths?.length
-          ? bindInvocationOneArtifacts(id, artifactPaths)
+          ? bindInvocationOneArtifacts(id, artifactPaths, { name, ...(_toolKind ? { kind: _toolKind } : {}) })
           : undefined;
         if (!isError && artifactPaths?.length) {
           const boundImageLabels = new Set((oneArtifacts ?? [])

@@ -35,6 +35,7 @@ import type {
 } from "../runtime/runner";
 import type { RuntimeLocale } from "../runtime/status-i18n";
 import type { RuntimeRole } from "../../shared/runtime-roles";
+import type { RuntimeToolKind } from "../../shared/runtime-tool-kind";
 import { compileLongRunCheckpoint, type LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
 import { hepCall } from "../hephaestus/commands";
 import {
@@ -585,6 +586,8 @@ export interface BorrowedTaskForceParams {
   bindOneRuntimeToolArtifacts?: (
     toolId: string,
     paths: readonly string[],
+    /** The tool that surfaced the paths: a read-only observation binds nothing (mcp/client.ts). */
+    observedBy?: { name: string; kind?: RuntimeToolKind },
   ) => NonNullable<McpInvocationEvent["oneArtifacts"]>;
 }
 
@@ -593,9 +596,10 @@ function taskForceOneArtifacts(
   toolId: string | undefined,
   isError: boolean | undefined,
   artifactPaths: readonly string[] | undefined,
+  toolName?: string,
 ): NonNullable<McpInvocationEvent["oneArtifacts"]> | undefined {
   if (isError || !toolId || !artifactPaths?.length || !p.bindOneRuntimeToolArtifacts) return undefined;
-  const bound = p.bindOneRuntimeToolArtifacts(toolId, artifactPaths);
+  const bound = p.bindOneRuntimeToolArtifacts(toolId, artifactPaths, toolName ? { name: toolName } : undefined);
   return bound.length > 0 ? bound : undefined;
 }
 
@@ -5079,7 +5083,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
             onStatus: (status) => p.sink(teamEvent("manager", spec.name, { kind: "tool-use", status: redactSensitiveText(status) })),
             onPartial: () => {},
             onTool: (name, args, result, toolId, isError, artifactPaths, imageDataUrl) => {
-              const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths);
+              const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths, name);
               p.sink(teamEvent("manager", spec.name, {
                 kind: "tool-use",
                 tool: { name, args: redactEventValue(args), result: redactEventValue(result), id: toolId, isError, observationDigest: toolObservationDigest(artifactPaths, imageDataUrl) },
@@ -5244,7 +5248,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
                 onStatus: (status) => p.sink(teamEvent(worker.id, worker.id, { kind: "tool-use", status: redactSensitiveText(status) })),
                 onPartial: () => {},
                 onTool: (name, args, toolResult, toolId, isError, artifactPaths, imageDataUrl) => {
-                  const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths);
+                  const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths, name);
                   p.sink(teamEvent(worker.id, worker.id, {
                     kind: "tool-use",
                     tool: { name, args: redactEventValue(args), result: redactEventValue(toolResult), id: toolId, isError, observationDigest: toolObservationDigest(artifactPaths, imageDataUrl) },
@@ -5492,7 +5496,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
           onStatus: (status) => p.sink(teamEvent("manager", spec.name, { kind: "tool-use", status: redactSensitiveText(status) })),
           onPartial: () => {},
           onTool: (name, args, result, toolId, isError, artifactPaths, imageDataUrl) => {
-            const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths);
+            const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths, name);
             p.sink(teamEvent("manager", spec.name, {
               kind: "tool-use",
               tool: { name, args: redactEventValue(args), result: redactEventValue(result), id: toolId, isError, observationDigest: toolObservationDigest(artifactPaths, imageDataUrl) },
@@ -5750,7 +5754,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
           onPartial: () => {},
           onTool: (name, args, result, toolId, isError, artifactPaths, imageDataUrl) => {
             if (typeof name === "string" && name && !observedTools.includes(name)) observedTools.push(name);
-            const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths);
+            const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths, name);
             p.sink(tag({
               kind: "tool-use",
               tool: { name, args: redactEventValue(args), result: redactEventValue(result), id: toolId, isError, observationDigest: toolObservationDigest(artifactPaths, imageDataUrl) },
@@ -6883,8 +6887,8 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   if (upstreamArtifactBinder) {
     p = {
       ...p,
-      bindOneRuntimeToolArtifacts: (toolId, paths) => {
-        const bound = upstreamArtifactBinder(toolId, paths);
+      bindOneRuntimeToolArtifacts: (toolId, paths, observedBy) => {
+        const bound = upstreamArtifactBinder(toolId, paths, observedBy);
         for (const artifact of bound) observedOneArtifacts.set(artifact.artifactRef, artifact);
         return bound;
       },
