@@ -102,7 +102,6 @@ export function createCurrentTurnSteerStore(ports: CurrentTurnSteerStorePorts) {
     if (phase !== "current-boundary" && phase !== "episode-terminal") {
       throw new Error("invocation_current_turn_steer_delivery_phase_invalid");
     }
-    let rejectedAny = false;
     const directions = getDb().transaction(() => {
       if (phase === "episode-terminal" && getDb().prepare(`SELECT 1 FROM invocation_current_turn_steers
         WHERE chat_id = ? AND run_id = ? AND status = 'uncertain' LIMIT 1`).get(chatId, runId)) return [];
@@ -118,15 +117,10 @@ export function createCurrentTurnSteerStore(ports: CurrentTurnSteerStorePorts) {
         const kind = (binding as Record<string, unknown>).deliveryKind;
         if (kind !== undefined && kind !== "current" && kind !== "queue") break;
         if (kind === "queue" && phase === "current-boundary") continue;
-        // Explicit current-only never becomes a next-episode send. Existing
-        // dispatching rows remain the same FIFO/CAS barrier; uncertain stays held.
-        if (kind === "current" && phase === "episode-terminal") {
-          if (row.status !== "queued") break;
-          const rejected = getDb().prepare(`UPDATE invocation_current_turn_steers SET status = 'rejected', code = 'native_control_current_boundary_expired', updated_at = ? WHERE intent_id = ? AND status = 'queued'`);
-          if (rejected.run(now(), row.intent_id).changes !== 1) break;
-          rejectedAny = true;
-          continue;
-        }
+        // A current-turn direction the run could not take mid-turn is delivered at the episode end, like every other
+        // owner direction. It used to be refused here (native_control_current_boundary_expired) and nothing re-sent it:
+        // a daemon-owned claude-code or ACP run lost every follow-up while a Desktop-owned run delivered it (2026-10-17).
+        // Existing dispatching rows remain the same FIFO/CAS barrier; uncertain stays held.
         if (row.status !== "queued") {
           if (phase === "current-boundary") continue;
           break;
@@ -136,7 +130,6 @@ export function createCurrentTurnSteerStore(ports: CurrentTurnSteerStorePorts) {
       }
       return result;
     }).immediate();
-    if (rejectedAny) onChange?.(chatId);
     return directions;
   }
 

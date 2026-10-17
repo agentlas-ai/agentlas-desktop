@@ -208,6 +208,7 @@ import {
 } from "../store/one-surface-results";
 import { getOneProfile } from "../store/one-profile";
 import { personalSupervisorConversationInDb } from "../one/supervisor-store";
+import { CARRIED_FOLLOWUP_STEER_PREFIX, carryUndeliveredOwnerFollowups as carryOwnerFollowupsToNextTurn } from "./carried-owner-followups";
 import { personalSupervisorGuidance } from "../../shared/one-supervisor-context";
 import { tryRecordOneDomainEvent } from "../one/domain-events";
 import {
@@ -5110,7 +5111,8 @@ export class InvocationService {
             ? { ...state, phase: "unavailable" as const, code: "native_control_unavailable" as const }
             : state;
           record.nativeControlState = Object.freeze({ ...observed });
-          if (observed.phase === "unavailable" || observed.phase === "withdrawn") this.rejectUnsentNativeCurrentInputs(runId, record);
+          // Without a native handle an owner direction waits for the episode end (runWithOwnerControl) or, when the run
+          // never reads its inbox, for the next turn (carryUndeliveredOwnerFollowups). It is never refused for that.
           if (observed.phase === "unavailable") this.publishQueuedNativeBoundaryNotice(runId, record);
           tryRecordRunEvent({ runId, chatId: record.chatId, kind: "invoke_native_control_state",
             payload: { ...observed, inputDigest: getInvocationAdmission(runId)?.inputDigest ?? null } });
@@ -5824,6 +5826,7 @@ export class InvocationService {
         if (nativePreparation) this.finishOrdinaryOneTurn(nativePreparation, "execution");
         // Actual execution authority is closed; original resource cleanup remains separate.
         this.publishSettled(runId, record);
+        this.carryUndeliveredOwnerFollowups(runId, record);
         const hasQueuedSteer = Boolean(this.steerQueues.get(record.chatId)?.length);
         this.drainSteerQueue(runReq.chatId);
         // A turn in a Work project released it: Goals refused as project-busy continue now (event-driven).
@@ -6576,8 +6579,7 @@ export class InvocationService {
     claimCurrentTurnSteer(request,{source:"native-owner-text",chatId:input.chatId,runId:input.runId,inputDigest:input.inputDigest,
       requestedMode:input.deliveryKind,deliveryKind:input.deliveryKind === "current" ? "current" : "queue"});
     if (input.deliveryKind === "current" && !this.activeRuns.get(input.runId)?.nativeTurnController) {
-      const record = this.activeRuns.get(input.runId);
-      if (record) this.rejectUnsentNativeCurrentInputs(input.runId, record);
+      // Stays queued: the episode end or the next turn delivers it (see the native control observer above).
     } else if (input.deliveryKind === "interrupt") {
       this.cancel(input.runId); // unconditional Stop; no source-safe successor is manufactured.
       settleCurrentTurnSteer(input.chatId,input.intentId,"uncertain","native_owner_text_interrupt_held");
@@ -6634,31 +6636,27 @@ export class InvocationService {
       code: record.nativeControlState?.code ?? "native_control_pending" };
   }
 
-  /** A pending current-only intent waits for this exact run's handle, never a later episode. */
-  private rejectUnsentNativeCurrentInputs(runId: string, record: RunRecord): void {
-    if (this.activeRuns.get(runId) !== record || record.background || record.controller.signal.aborted
-      || record.nativeTurnController || this.pendingGoalVerifications.has(runId)) return;
-    const observation = record.nativeControlState;
-    const state = validatedRunnerNativeControlState(observation);
-    if (!state || state.phase !== "unavailable" && state.phase !== "withdrawn") return;
-    const admission = getInvocationAdmission(runId); if (!admission || admission.chatId !== record.chatId) return;
-    if (record.ownerLease) assertInvocationRunOwner(record.ownerLease);
-    const changed = getDb().transaction(() => {
-      let rejected = 0;
-      for (const row of this.nativeOwnerTextRows({chatId:record.chatId,runId,inputDigest:admission.inputDigest})) {
-        if (row.status !== "queued") continue;
-        const binding = JSON.parse(row.binding_json);
-        if (binding.deliveryKind !== "current" || binding.chatId !== record.chatId || binding.runId !== runId
-          || this.nativeOwnerTextTarget(binding) !== record.controller) continue;
-        if (this.activeRuns.get(runId) !== record || record.controller.signal.aborted || record.nativeTurnController
-          || record.nativeControlState !== observation || this.pendingGoalVerifications.has(runId)) break;
-        rejected += getDb().prepare(`UPDATE invocation_current_turn_steers SET status = 'rejected', code = ?, updated_at = ?
-          WHERE intent_id = ? AND chat_id = ? AND run_id = ? AND binding_json = ? AND status = 'queued'`)
-          .run(state.code,new Date().toISOString(),row.intent_id,record.chatId,runId,row.binding_json).changes;
-      }
-      return rejected;
-    }).immediate();
-    if (changed) try { emitDesktopStoreChange({entity:"chat",id:record.chatId}); } catch { /* Receipt is already durable. */ }
+  /**
+   * When a run ends without the owner stopping it, the owner directions it never dispatched become the chat's next turn
+   * (carried-owner-followups.ts: production 2026-10-17, a team run left the owner's style direction queued for 81
+   * minutes and then refused it, so it was lost). A stopped run keeps them refused: the stop withdrew the turn.
+   */
+  private carryUndeliveredOwnerFollowups(runId: string, record: RunRecord): void {
+    if (record.background || (record.controller.signal.aborted && !record.steeringInterruptRequested)) return;
+    try {
+      // An ordinary owner turn: the room resolves its workspace and execution context afresh, as for a typed message.
+      const carried = carryOwnerFollowupsToNextTurn({ chatId: record.chatId, runId, request: record.request });
+      if (!carried) return;
+      const queue = this.steerQueues.get(record.chatId) ?? [];
+      if (!queue.some((queued) => queued.id === carried.id)) queue.push(queuedSteerFromDurable(carried));
+      this.steerQueues.set(record.chatId, queue);
+      tryRecordRunEvent({ runId, chatId: record.chatId, agentId: record.actualAgentId, kind: "owner_followup_carried",
+        payload: { queuedSteerId: carried.id } });
+      try { emitDesktopStoreChange({ entity: "chat", id: record.chatId }); } catch { /* the queued turn is durable */ }
+    } catch (error) {
+      // The rows stay queued and the receipt read settles them as before; nothing is half-carried (one transaction).
+      console.warn("[invocation] owner follow-up carry failed:", error instanceof Error ? error.message : String(error));
+    }
   }
 
   /** A delivery notice describes an admitted queued intent, never driver readiness or an effect. */
@@ -6675,8 +6673,8 @@ export class InvocationService {
       for (const row of rows) {
         if (intentId !== undefined && row.intent_id !== intentId || record.nativeBoundaryNoticeIntents?.has(row.intent_id)) continue;
         const binding = JSON.parse(row.binding_json);
-        if (binding.chatId !== record.chatId || binding.runId !== runId || binding.deliveryKind === "current"
-          || binding.deliveryKind !== undefined && binding.deliveryKind !== "queue") continue;
+        if (binding.chatId !== record.chatId || binding.runId !== runId
+          || binding.deliveryKind !== undefined && binding.deliveryKind !== "queue" && binding.deliveryKind !== "current") continue;
         if (binding.source === "native-owner-text") {
           const admission = getInvocationAdmission(runId);
           if (!admission || binding.inputDigest !== admission.inputDigest || this.nativeOwnerTextTarget(binding) !== record.controller) continue;
@@ -7323,7 +7321,8 @@ export class InvocationService {
         try {
           const request = next.request;
           const text = typeof request.userPrompt === "string" ? request.userPrompt : "";
-          if (text.trim() && request.promptOrigin !== "system" && !request.agentAppMode) {
+          // A carried direction's own rows are already in the chat (carried-owner-followups.ts): never a second copy.
+          if (text.trim() && request.promptOrigin !== "system" && !request.agentAppMode && !next.id.startsWith(CARRIED_FOLLOWUP_STEER_PREFIX)) {
             // A preflight copy of the same direction may already have been delivered as a user turn.
             const delivered = getDb().prepare(
               "SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'user' AND text = ? AND created_at >= ? LIMIT 1",

@@ -139,6 +139,7 @@ import { getLongRunByGoalId, longRunOwnerHold, recordLongRunUsage, transitionLon
 import { getDb } from "../store/db";
 import { desktopStoreTransaction } from "../store/change-bus";
 import { supervisorExcludedHistoryMessages, supervisorIngressMessage } from "../one/supervisor-store";
+import { carriedFollowupMessageIds } from "../invocation/carried-owner-followups";
 import { isOneQuietReply } from "../../shared/one-supervisor";
 import { listAgentSurfaces } from "../store/agent-surfaces";
 import { listRentAllowedSlugs } from "../store/project-agent-rent";
@@ -2512,6 +2513,10 @@ async function runMcpInvocationInContext(
   // the automation's durable chat here only injects stale recovery prose and
   // can make a model change rebuild an enormous, unrelated transcript.
   const excludedSupervisorInputs = supervisorExcludedHistoryMessages(getDb(), chat.id, req.runId);
+  // A turn carried from directions the owner wrote into the previous run answers those rows: they are its prompt, so
+  // they are not history too (invocation/carried-owner-followups.ts).
+  const carriedFollowupMessages = carriedFollowupMessageIds(getDb(), chat.id, req.runId);
+  for (const id of carriedFollowupMessages) excludedSupervisorInputs.add(id);
   const history = req.agentAppMode || executionContext?.source === "automation" || scienceRecovery
     ? []
     : listChatMessages(chat.id, 80).filter(message => !excludedSupervisorInputs.has(message.id));
@@ -2524,7 +2529,8 @@ async function runMcpInvocationInContext(
   // exactly once regardless of which executable orchestrator owns it.
   // Personal ingress already committed this exact human message with its ACK.
   // Reuse that binding instead of appending a second copy during dispatch.
-  let persistedUserMessageId: string | null = supervisorIngressMessage(getDb(), chat.id, req.runId);
+  let persistedUserMessageId: string | null = supervisorIngressMessage(getDb(), chat.id, req.runId)
+    ?? carriedFollowupMessages.at(-1) ?? null;
   let userMessagePersisted = persistedUserMessageId !== null;
   // A product-authored continuation is not the person's turn. It stays durable
   // so the next turn keeps the context, but it is written as a system turn:
