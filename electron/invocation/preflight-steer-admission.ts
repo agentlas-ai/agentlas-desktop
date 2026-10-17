@@ -124,6 +124,13 @@ export function dispatchOnePreflightSteers(submissionId?: string, chatId?: strin
       } catch { /* No effect proof is not an auto-resume grant. */ }
     }
     if (!activeParent && !settledParent) {
+      // This row is queued: it was never claimed, so nothing was sent. While its parent has no terminal yet (Main's
+      // in-memory owner does not attest it, e.g. a run still in team preflight, or the durable ledger shows it unended),
+      // holding it here dropped the owner's message for good: W7 S-send-reload at 4a96bbb2 held the second message 1 ms
+      // after it was enqueued while its parent was in team preflight, and the room went idle without it. It stays
+      // queued; the parent's settlement dispatches it again (ipc.ts invocationService.onSettled), attached to a live
+      // parent or materialized as the successor of a completed, settled one. A parent with a terminal keeps the hold.
+      if (receipt?.chatId === item.chatId && (receipt.status === "interrupted" || receipt.status === "running")) continue;
       if (holdOnePreflightSteer(item.steerId)) held += 1;
       continue;
     }
