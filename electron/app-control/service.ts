@@ -435,7 +435,11 @@ export async function appControlCallLocal(caller: AppControlCaller, input: { ope
   const operation = operations().find((candidate) => candidate.path === path);
   if (!operation) {
     if (catalogEntry?.surface === "science") throw new AppControlError("science-not-installed", "Agentlas Science is not installed or not active.");
-    throw new AppControlError("operation-unknown", `Unknown operation ${path || "(empty)"}; find one with one_app_operations.`);
+    // The refusal names the closest catalog operations (the same deterministic search). Dev 2026-10-18 run11: Haiku guessed
+    // automations.runs.list, automations.history and automations.executions for automations.listRuns, and the hint named
+    // one_app_operations, a tool the harness path does not have (it was tried as an operation name).
+    const closest = path ? (appControlOperationsLocal({ query: path, limit: 5 }).operations ?? []).map((item) => String(item.operation)) : [];
+    throw new AppControlError("operation-unknown", `Unknown operation ${path || "(empty)"}.${closest.length ? ` Closest: ${closest.join(", ")}.` : ""} Search the catalog with one_app_operations (in harness_call: app.operations).`);
   }
   if (appControlEffectNeedsOwnerTurn(operation.effect) && !caller.ownerTurn) {
     throw new AppControlError("owner-turn-required", `${path} ${operation.effect === "destructive" ? "deletes or stops something" : "needs the owner's say-so"}; only a message the owner wrote can ask for it. Tell the owner what you would do.`);
