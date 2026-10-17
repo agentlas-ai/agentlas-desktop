@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.57 — 2026-10-17
+
+- A step that keeps working past an hour is no longer cut off; only a step that has stopped making progress is ended.
+- "Always approve" on a decision card appears only for yes-or-no questions and never picks one of a question's real choices for you; turn on approval for the whole chat from the composer's permission menu.
+- A second message sent right after reloading the window is no longer left unsent.
+- Turns that only used tools and wrote no text now finish normally on every runtime.
+- A strategy change that would alter an agent's instructions waits for your approval; schedule-only changes apply on their own.
+- Screen assets download only from public https addresses, autofill checks the page it writes into, and local control tokens are compared safely.
+- Telegram pairs with a t.me start link, Windows previews and background tasks work, model downloads stop cleanly when the disk is full, and long Korean documents export to PDF without extra tools.
+- One's home shows the model chip, and the room discussion engine stays off when routing is off.
+- This release binds Agentlas OS v1.2.65 at 8b303608eea746e7ea8d7560890816784bdaa86c; public runtime asset `hephaestus-runtime-v1.2.65.tar.gz` is pinned at SHA-256 `7dae16f12a78515dfa7adbc732197e26aa06a2cd413452e81b2675450caba7de`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.56 — 2026-10-17
 
 - Storage cleanup no longer deletes the records that keep an automation chain from running twice. In 1.3.54 a chained automation could run again on month-old output (sending mail or posting again) once those records were older than 30 days.
