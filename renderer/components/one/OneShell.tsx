@@ -61,7 +61,7 @@ import {
   type AskActionBlock,
 } from "@shared/ask-action-bar";
 import { OneDocumentCard } from "@/components/one/OneDocumentCard";
-import { runtimeModelFallbackLabel } from "@/components/dashboard/RuntimeModelPicker";
+import { runtimeModelDisplayLabel, runtimeModelFallbackLabel } from "@/components/dashboard/RuntimeModelPicker";
 import { readOneDocumentMark } from "@/lib/one-document-mark";
 import { OneSplitPane } from "@/components/one/OneSplitPane";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
@@ -905,6 +905,13 @@ function attachmentTypeLabel(mediaType: string, name: string): string {
   if (mediaType.trim()) return mediaType;
   const extension = name.match(/\.([A-Za-z0-9]{1,12})$/)?.[1];
   return extension ? extension.toUpperCase() : "file";
+}
+
+// 선택이 비어 있으면 실제로 돌 모델 이름을 보인다 — "기본값" 문구는 없다 (OneRuntimeChips modelLabel 과 같은 식).
+function oneModelChipLabel(runtime: RuntimeStatus | null, models: readonly OneComposerModelOption[], locale: "ko" | "en"): string {
+  return runtime
+    ? runtimeModelDisplayLabel(runtime, locale, models.filter((model) => model.runtime.kind === runtime.kind && model.runtime.backend === runtime.backend))
+    : runtimeModelFallbackLabel("agentlas", locale);
 }
 
 function toUiMessages(history: ChatHistoryEntry[]): UiMessage[] {
@@ -10779,12 +10786,12 @@ function OneSessionsShell() {
                       aria-haspopup="dialog"
                       aria-controls={composerMenu === "model" ? "one-composer-popover" : undefined}
                       aria-label={appLocale === "ko"
-                        ? `모델: ${oneModelOptions.find((model) => model.runtime.kind === oneRuntime?.kind && model.runtime.backend === oneRuntime?.backend && model.id === oneRuntime?.model)?.label ?? oneRuntime?.model ?? runtimeModelFallbackLabel(oneRuntime?.kind ?? "agentlas", "ko")}`
-                        : `Model: ${oneModelOptions.find((model) => model.runtime.kind === oneRuntime?.kind && model.runtime.backend === oneRuntime?.backend && model.id === oneRuntime?.model)?.label ?? oneRuntime?.model ?? runtimeModelFallbackLabel(oneRuntime?.kind ?? "agentlas", "en")}`}
+                        ? `모델: ${oneModelChipLabel(oneRuntime, oneModelOptions, "ko")}`
+                        : `Model: ${oneModelChipLabel(oneRuntime, oneModelOptions, "en")}`}
                       onClick={() => setComposerMenu((current) => current === "model" ? null : "model")}
                     >
                       <IconSparkles size={15} />
-                      <span>{oneModelOptions.find((model) => model.runtime.kind === oneRuntime?.kind && model.runtime.backend === oneRuntime?.backend && model.id === oneRuntime?.model)?.label ?? oneRuntime?.model ?? runtimeModelFallbackLabel(oneRuntime?.kind ?? "agentlas", appLocale)}</span>
+                      <span>{oneModelChipLabel(oneRuntime, oneModelOptions, appLocale)}</span>
                       <IconChevronDown size={12} />
                     </button>
                   )}
