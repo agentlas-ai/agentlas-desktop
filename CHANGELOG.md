@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.56 — 2026-10-17
+
+- Storage cleanup no longer deletes the records that keep an automation chain from running twice. In 1.3.54 a chained automation could run again on month-old output (sending mail or posting again) once those records were older than 30 days.
+- A connector whose key is already saved, such as ElevenLabs, no longer asks you to sign in again.
+- Includes everything in 1.3.55, which was not published: team automations wait for their team, keyed services are called by Agentlas so the key never reaches a model, uploads are recorded per video, interrupted runs never repeat an upload, and finished work no longer ends as "not complete" over a minor choice.
+- This release binds Agentlas OS v1.2.65 at 8b303608eea746e7ea8d7560890816784bdaa86c; public runtime asset `hephaestus-runtime-v1.2.65.tar.gz` is pinned at SHA-256 `7dae16f12a78515dfa7adbc732197e26aa06a2cd413452e81b2675450caba7de`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.55 — 2026-10-17
 
 - A saved automation's team step waits for the team's results before moving on; before, daily team automations finished without the work they started.
