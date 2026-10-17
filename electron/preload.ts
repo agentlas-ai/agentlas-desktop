@@ -1333,6 +1333,7 @@ const api: AgentlasIpc = {
     decideNodeApproval: (id: string, nodeId: string, decision: "approved" | "rejected" | "always") =>
       ipcRenderer.invoke("automations:decideNodeApproval", id, nodeId, decision),
     listRuns: (id: string, limit?: number) => ipcRenderer.invoke("automations:listRuns", id, limit),
+    runCounts: (id: string, since?: string | null, until?: string | null) => ipcRenderer.invoke("automations:runCounts", id, since, until),
     runCaptures: (ranAtIso: string, limit?: number) =>
       ipcRenderer.invoke("automations:runCaptures", ranAtIso, limit) as Promise<
         { name: string; at: string; dataUrl: string }[]

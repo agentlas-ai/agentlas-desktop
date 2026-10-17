@@ -2401,6 +2401,21 @@ export interface AutomationRunRecord {
   acknowledgedAt?: string | null;
 }
 
+/** One automation's run history counted over a period (ranAt in [since, until)), from every stored run. */
+export interface AutomationRunCounts {
+  automationId: string;
+  /** The period as applied (ISO, UTC); null = open-ended. */
+  since: string | null;
+  until: string | null;
+  total: number;
+  /** Kernel answer per run (`status`). */
+  byStatus: Partial<Record<AutomationRunRecord["status"], number>>;
+  /** Judgment per run (`outcome`); runs with no judgment count under "none". */
+  byOutcome: Partial<Record<NonNullable<AutomationRunRecord["outcome"]> | "none", number>>;
+  firstRanAt: string | null;
+  lastRanAt: string | null;
+}
+
 /** Main이 실제 스케줄러 판정을 끝낸 뒤 반환하는 수동 실행 결과. */
 export interface AutomationRunNowResult {
   /** Exact automation whose terminal result this receipt describes. */
@@ -8591,7 +8606,10 @@ export interface AgentlasIpc {
       /** "always" = 이 노드는 앞으로 다시 묻지 않는다(그래프는 안 바뀐다 — 재개가 살아 있어야 하므로). */
       decision: "approved" | "rejected" | "always",
     ) => Promise<{ ok: boolean; occurrenceId: string | null; always?: boolean }>;
+    /** Newest runs first, at most `limit` (default 50). Counts over a whole period: runCounts. */
     listRuns: (id: string, limit?: number) => Promise<AutomationRunRecord[]>;
+    /** Every stored run of one automation counted by status and judgment over [since, until) (ISO times; omit for open-ended). */
+    runCounts: (id: string, since?: string | null, until?: string | null) => Promise<AutomationRunCounts>;
     /** 실행 창(ranAt±10분)의 호스트 캡처 — 지어낸 사유 대신 보여줄 물증. */
     runCaptures: (ranAtIso: string, limit?: number) => Promise<{ name: string; at: string; dataUrl: string }[]>;
     /** 확인필요 카드 닫기 — 기록은 남고 "지금 조치하라"는 요구만 꺼진다. */

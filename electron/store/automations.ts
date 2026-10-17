@@ -31,6 +31,7 @@ import type {
   AutomationHubMode,
   AutomationTargetType,
   WorkflowGraph,
+  AutomationRunCounts,
   AutomationRunRecord,
   AutomationToolMode,
   AutomationUpdatePatch,
@@ -1824,6 +1825,35 @@ export function listRunHistory(automationId: string, limit = 50): AutomationRunR
     error: r.error == null ? null : redactOperationalSecrets(r.error),
     acknowledgedAt: (r as { acknowledged_at?: string | null }).acknowledged_at ?? null,
   }));
+}
+
+/**
+ * Every stored run of one automation counted over [since, until). Dev 2026-10-18: "지난주 자동화별 성공·실패 횟수" for a
+ * monitor with 925 runs that week could only be read 50 at a time from listRunHistory (newest first, no older page), and a
+ * reply holds about 55 runs, so no surface could give the count. Times are compared as UTC ISO strings, the stored form.
+ */
+export function countRunHistory(automationId: string, since?: string | null, until?: string | null): AutomationRunCounts {
+  const bound = (value: string | null | undefined, name: string): string | null => {
+    if (value === undefined || value === null || value === "") return null;
+    const at = typeof value === "string" ? Date.parse(value) : Number.NaN;
+    if (!Number.isFinite(at)) throw new Error(`${name} must be an ISO date-time`);
+    return new Date(at).toISOString();
+  };
+  const from = bound(since, "since"), to = bound(until, "until");
+  const rows = getDb().prepare(`SELECT status, outcome, COUNT(*) AS n, MIN(ran_at) AS first, MAX(ran_at) AS last FROM run_history
+    WHERE automation_id = ? AND (? IS NULL OR ran_at >= ?) AND (? IS NULL OR ran_at < ?) GROUP BY status, outcome`)
+    .all(automationId, from, from, to, to) as Array<{ status: string | null; outcome: string | null; n: number; first: string | null; last: string | null }>;
+  const counts: AutomationRunCounts = { automationId, since: from, until: to, total: 0, byStatus: {}, byOutcome: {}, firstRanAt: null, lastRanAt: null };
+  const byStatus = counts.byStatus as Record<string, number>, byOutcome = counts.byOutcome as Record<string, number>;
+  for (const row of rows) {
+    counts.total += row.n;
+    const status = row.status ?? "ok", outcome = row.outcome ?? "none";
+    byStatus[status] = (byStatus[status] ?? 0) + row.n;
+    byOutcome[outcome] = (byOutcome[outcome] ?? 0) + row.n;
+    if (row.first && (!counts.firstRanAt || row.first < counts.firstRanAt)) counts.firstRanAt = row.first;
+    if (row.last && (!counts.lastRanAt || row.last > counts.lastRanAt)) counts.lastRanAt = row.last;
+  }
+  return counts;
 }
 
 /**

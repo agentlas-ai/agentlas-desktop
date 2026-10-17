@@ -688,6 +688,7 @@ import {
   listGraphVersions,
   restoreGraphVersion,
   listRunHistory,
+  countRunHistory,
   acknowledgeAutomationRun,
   getLatestGraphRun,
   enqueueRunInput,
@@ -5507,6 +5508,7 @@ export function registerIpcHandlers(): void {
     return a ? automationWorkspaceView(a) : null;
   });
   registerAppControlDomainIpc(ipcMain, "automations:listRuns", (id: string, limit?: number) => listRunHistory(id, limit ?? 50));
+  registerAppControlDomainIpc(ipcMain, "automations:runCounts", (id: string, since?: string | null, until?: string | null) => countRunHistory(id, since, until));
   // ★실패의 물증 — 실행 창(ranAt±10분)에 cua-driver가 저장한 화면 캡처를 그 실행의
   // 증거로 돌려준다. 실측 2026-08-19: 모델이 "글자수 초과"를 지어내는 동안 진짜
   // 원인(중복 차단으로 비활성화된 Reply 버튼)은 이미 캡처에 찍혀 있었다 — 디스크에만
