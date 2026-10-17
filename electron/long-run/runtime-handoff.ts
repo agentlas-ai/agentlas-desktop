@@ -161,7 +161,7 @@ export function requestGoalRuntimeSelection(input: {
     // Preserve the semantic preference, never an executable path. Only the
     // Goal handoff event owns the inventory-confirmed source for this episode.
     const { source: _exactSource, ...chatPreference } = input.selection;
-    const updated = setChatRuntimeSelection(chat.id, chatPreference);
+    const updated = setChatRuntimeSelection(chat.id, chatPreference, "runtime-handoff");
     appendLongRunEvent({ runId: run.id, kind: "run.goal_runtime_selection", actorKind: "user",
       payload: { goalId: run.goalId, goalRevision: revision.revision, chatId: chat.id,
         selectionRevision, state: "pending", requested } satisfies HandoffEvent });

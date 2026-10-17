@@ -133,7 +133,7 @@ export const scienceCriterionReviewHost:ScienceCriterionReviewHost={
     if(chat.agentId!==review.reviewer.agentId || chat.kind!=="division" || parentRow.parent_chat_id!==parent.runtimeChatId)throw new Error("science-review-chat-binding-mismatch");
     if(review.basis.runtimeSelection.role!==undefined && !["orchestrator","worker","multimodal"].includes(review.basis.runtimeSelection.role))throw new Error("science-review-runtime-binding-invalid");
     const selection=review.basis.runtimeSelection as RuntimeSelection;
-    setChatRuntimeSelection(chat.id,selection);
+    setChatRuntimeSelection(chat.id,selection,"science");
     const authority=Object.freeze({});authorities.set(authority,{projectId,reviewRequestId,invocationRunId:review.invocationRunId,runtimeChatId:review.runtimeChatId,inputSha256:review.inputSha256});
     launched.add(review.invocationRunId);
     const unsubscribe=invocationService.onSettled(async event=>{

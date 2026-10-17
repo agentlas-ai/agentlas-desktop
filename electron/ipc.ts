@@ -4812,7 +4812,7 @@ export function registerIpcHandlers(): void {
   registerAppControlDomainIpc(
     ipcMain, "chats:setRuntimeSelection",
     (id: string, selection: RuntimeSelection | null) =>
-      setChatRuntimeSelection(id, selection),
+      setChatRuntimeSelection(id, selection, "desktop-ui"),
   );
   registerAppControlDomainIpc(ipcMain, "chats:requestGoalRuntimeSelection", async (id: string, input: {
     expectedGoalId: string; expectedGoalRevision: number; selection: RuntimeSelection;

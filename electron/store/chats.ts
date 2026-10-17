@@ -934,12 +934,27 @@ export function setChatSwarmMode(chatId: string, enabled: boolean): void {
   emitDesktopStoreChange({ entity: "chat", id: chatId });
 }
 
+/**
+ * Who changed a chat's model chip. 2026-10-17: the production Yotube room's chip moved from codex gpt-6.1-sol xhigh to
+ * claude-code sonnet low between 00:25Z and 01:05Z, and nothing recorded who did it (the release peer read every log).
+ */
+export type ChatRuntimeSelectionActor =
+  | "desktop-ui" | "mobile" | "work-start" | "external-cli-import" | "science" | "runtime-handoff" | "host";
+
 /** Exact chat-scoped orchestrator pin. It never mutates the role defaults. */
 export function setChatRuntimeSelection(
   chatId: string,
   selection: RuntimeSelection | null,
+  actor: ChatRuntimeSelectionActor = "host",
 ): Chat {
   const normalized = normalizeChatRuntimeSelection(selection);
+  const before = (getDb().prepare("SELECT runtime_selection_json AS v FROM chats WHERE id = ?").get(chatId) as { v: string | null } | undefined)?.v ?? null;
+  const after = normalized ? JSON.stringify(normalized) : null;
+  if (before !== after) {
+    // One typed line per change (no prompt or secret is in a selection): actor, previous and next chip.
+    console.info("[chat-runtime-selection]", JSON.stringify({ schemaVersion: "agentlas.chat-runtime-selection-change.v1",
+      chatId, actor, at: new Date().toISOString(), previous: before ? JSON.parse(before) : null, next: normalized ?? null }));
+  }
   getDb()
     .prepare(
       "UPDATE chats SET runtime_selection_json = ?, updated_at = ? WHERE id = ?",

@@ -3110,7 +3110,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           : await resolveMobileRoleSelection(
               mobileRuntimeSelectionFromValue(rawSelection, "orchestrator"),
             );
-        const chat = setChatRuntimeSelection(id, runtimeSelection);
+        const chat = setChatRuntimeSelection(id, runtimeSelection, "mobile");
         this.scheduleSnapshotUpdated(id);
         return asJsonValue(
           projectMobileBridgeChat(chat, invocationService.activeChatIds().includes(chat.id)),
@@ -3536,7 +3536,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         });
         let result;
         try {
-          if (runtimeSelection) setChatRuntimeSelection(chat.id, runtimeSelection);
+          if (runtimeSelection) setChatRuntimeSelection(chat.id, runtimeSelection, "mobile");
           // Mobile's optimistic transcript is not durable Desktop history.
           // Persist the person's exact turn before execution so reconnect,
           // restart recovery, and One memory all retain the same conversation.

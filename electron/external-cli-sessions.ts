@@ -365,7 +365,7 @@ export async function importExternalCliSession(
     source: "external-cli-session-import",
     role: "orchestrator",
     inherit: false,
-  });
+  }, "external-cli-import");
   const db = getDb();
   db.transaction(() => {
     for (const message of parsed.messages) {

@@ -89,7 +89,7 @@ export async function createWorkStart(raw: WorkStartInput, detect = detectRuntim
     } else if (!fs.existsSync(folder) || !fs.statSync(folder).isDirectory()) throw new Error('work_start_project_folder_unavailable');
     const chat=createChat({projectId:project.id,agentId:controller.id,title,taskMode:'task',originSurface:'work'});
     if (chat.agentId!==controller.id) throw new Error('work_start_controller_mismatch');
-    setChatRuntimeSelection(chat.id,selection);setChatWorkingFolder(chat.id,folder);
+    setChatRuntimeSelection(chat.id,selection,"work-start");setChatWorkingFolder(chat.id,folder);
     const task=getCanonicalTaskForChat(chat.id);if(!task)throw new Error('work_start_task_unavailable');
     const now=new Date().toISOString();
     db.prepare("INSERT INTO work_start_intents(intent_id,input_digest,project_id,chat_id,task_id,prompt_text,options_json,runtime_selection_json,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'queued',?,?)").run(input.intentId,digest,project.id,chat.id,task.id,input.prompt,JSON.stringify(input.options),JSON.stringify(selection),now,now);
