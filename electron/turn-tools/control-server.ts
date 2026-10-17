@@ -1,7 +1,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { onHostShutdown } from "../host-lifecycle";
 import { userDataPath } from "../runtime-paths";
 import { memoryNoteToEvent } from "../memory/events";
@@ -127,8 +127,20 @@ export function harnessCallFailureCode(operation: unknown, result: unknown): str
   return typeof call.error?.code === "string" && call.error.code ? call.error.code : call.state;
 }
 
+// Constant-time, like the computer-use and workspace-preview control servers: a local process (or a DNS-rebound page)
+// cannot time `!==` toward the token. Hashing first makes the lengths equal; an empty expected token never matches.
+function tokenMatches(actual: unknown, expected: string): boolean {
+  if (typeof actual !== "string" || !expected) return false;
+  return timingSafeEqual(createHash("sha256").update(actual).digest(), createHash("sha256").update(expected).digest());
+}
+
+/** The MCP child dials 127.0.0.1:<port>; any other Host (a rebound browser page) is refused before the body is read. */
+function loopbackHost(host: string | undefined, port: number): boolean {
+  return port > 0 && (host === `127.0.0.1:${port}` || host === `localhost:${port}`);
+}
+
 export async function handleTurnToolsControlRequest(request: Record<string, unknown>): Promise<unknown> {
-  if (typeof request.token !== "string" || !serverToken || request.token !== serverToken) throw new Error("turn-tools-capability-invalid");
+  if (!tokenMatches(request.token, serverToken)) throw new Error("turn-tools-capability-invalid");
   const binding = typeof request.capabilityId === "string" ? capabilities.get(request.capabilityId) : undefined;
   if (!binding) throw new Error("turn-tools-capability-invalid");
   switch (request.operation) {
@@ -270,6 +282,7 @@ export function startTurnToolsControlServer(): Promise<number> {
   const startup = new Promise<number>((resolve) => {
     const srv = http.createServer((req, res) => {
       if (req.method !== "POST" || req.url !== "/turn") return writeJson(res, 404, { ok: false, error: "not-found" });
+      if (!loopbackHost(req.headers.host, boundPort)) return writeJson(res, 403, { ok: false, error: "invalid-host" });
       void readJsonBody(req).then(async (body) => {
         if (!body) return writeJson(res, 400, { ok: false, error: "invalid-request" });
         try {

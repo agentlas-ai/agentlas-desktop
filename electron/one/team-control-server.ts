@@ -4,7 +4,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { onHostShutdown } from "../host-lifecycle";
 import { userDataPath } from "../runtime-paths";
 import { outsideInvocationJudgmentContext } from "../runtime/judgment-context";
@@ -195,8 +195,20 @@ function effectToolSession(binding: OneTeamCapabilityBinding): string | null {
   return binding.scope === "room-member" ? binding.chatId : null;
 }
 
+// Constant-time, like the computer-use and workspace-preview control servers: a local process (or a DNS-rebound page)
+// cannot time `!==` toward the token. Hashing first makes the lengths equal; an empty expected token never matches.
+function tokenMatches(actual: unknown, expected: string): boolean {
+  if (typeof actual !== "string" || !expected) return false;
+  return timingSafeEqual(createHash("sha256").update(actual).digest(), createHash("sha256").update(expected).digest());
+}
+
+/** The MCP child dials 127.0.0.1:<port>; any other Host (a rebound browser page) is refused before the body is read. */
+function loopbackHost(host: string | undefined, port: number): boolean {
+  return port > 0 && (host === `127.0.0.1:${port}` || host === `localhost:${port}`);
+}
+
 async function handleOneTeamControlRequestUnchecked(request: Record<string, unknown>): Promise<unknown> {
-  if (typeof request.token !== "string" || !serverToken || request.token !== serverToken) throw new Error("one-team-capability-invalid");
+  if (!tokenMatches(request.token, serverToken)) throw new Error("one-team-capability-invalid");
   const binding = typeof request.capabilityId === "string" ? capabilities.get(request.capabilityId) : undefined;
   if (!binding) throw new Error("one-team-capability-invalid");
   // A teammate working on a hand-off from a group room: room_say and nothing else, checked here, not in the child.
@@ -318,6 +330,7 @@ export function startOneTeamControlServer(): Promise<number> {
   const startup = hostRootContext(() => new Promise<number>((resolve) => {
     const srv = http.createServer((req, res) => {
       if (req.method !== "POST" || req.url !== "/one-team") return writeJson(res, 404, { ok: false, error: "not-found" });
+      if (!loopbackHost(req.headers.host, boundPort)) return writeJson(res, 403, { ok: false, error: "invalid-host" });
       void readJsonBody(req).then(async (body) => {
         if (!body) return writeJson(res, 400, { ok: false, error: "invalid-request" });
         try {
@@ -437,7 +450,7 @@ export function removeOneTeamCapability(configKey: string, capabilityId: string)
 
 /** Bind only the original authenticated native capability before dispatch; renderer/model JSON supplies no native identity. */
 export async function handleOneTeamControlRequest(request:Record<string,unknown>):Promise<unknown>{
-  if(typeof request.token!=="string"||!serverToken||request.token!==serverToken)throw new Error("one-team-capability-invalid");
+  if(!tokenMatches(request.token,serverToken))throw new Error("one-team-capability-invalid");
   const binding=typeof request.capabilityId==="string"?capabilities.get(request.capabilityId):undefined;
   if(!binding)throw new Error("one-team-capability-invalid");
   if(!binding.historySource)return handleOneTeamControlRequestUnchecked(request);
