@@ -1830,8 +1830,13 @@ export function stripTaskForceControlEnvelopes(text: string): string {
     // all-caps token) unless it carries an explicit heading marker.
     .replace(/\s*(?:-{3,}\s*)?(?:#{1,6}\s*)?\*{0,2}LIMITATIONS\*{0,2}\s*[:：]?[\s\S]*$/u, "")
     .replace(/\s*(?:-{3,}\s*)?(?:#{1,6}\s*\*{0,2}|\*{1,2})(?:제한\s*사항|한계)\*{0,2}\s*[:：]?[\s\S]*$/u, "")
-    .replace(/\s*(?:-{3,}\s*)?(?:#{1,6}\s*)?\*{0,2}STATUS\*{0,2}\s*[:：]?\s*\*{0,2}(?:COMPLETED|PARTIAL|FAILED)\b[\s\S]*$/iu, "")
-    .replace(/\s*(?:-{3,}\s*)?(?:#{1,6}\s*)?\*{0,2}HANDOFF\s+FACTS\*{0,2}\s*[:：]?[\s\S]*$/iu, "")
+    // STATUS and HANDOFF FACTS are the contract's all-caps tokens, matched case-sensitively unless an explicit heading
+    // marker carries them. Case-insensitive, they cut prose: dev 2026-10-17 run7, a Vibecoder report "QA 결과가
+    // `status: failed`라서 검증으로 인정할 수 없습니다…" reached the room and the stored report as "QA 결과가 `".
+    .replace(/\s*(?:-{3,}\s*)?(?:#{1,6}\s*)?\*{0,2}STATUS(?:\s*[:：])?\*{0,2}\s*[:：]?\s*\*{0,2}(?:COMPLETED|PARTIAL|FAILED|Completed|Partial|Failed|completed|partial|failed)\b[\s\S]*$/u, "")
+    .replace(/\s*(?:-{3,}\s*)?#{1,6}\s*\*{0,2}status(?:\s*[:：])?\*{0,2}\s*[:：]?\s*\*{0,2}(?:completed|partial|failed)\b[\s\S]*$/iu, "")
+    .replace(/\s*(?:-{3,}\s*)?(?:#{1,6}\s*)?\*{0,2}HANDOFF\s+FACTS\*{0,2}\s*[:：]?[\s\S]*$/u, "")
+    .replace(/\s*(?:-{3,}\s*)?#{1,6}\s*\*{0,2}handoff\s+facts\*{0,2}\s*[:：]?[\s\S]*$/iu, "")
     // 부록 절단 뒤에 남는 고아 구분선/여는 강조 기호까지 정리한다(라이브 실측:
     // "---\n\n**"가 말풍선 끝에 남았다, 2026-08-25).
     .replace(/\s*-{3,}\s*\*{0,2}\s*$/u, "")
