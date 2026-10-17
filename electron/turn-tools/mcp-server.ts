@@ -565,13 +565,16 @@ export const AGENTLAS_TURN_TOOLS = ([
   {
     name: "harness_call",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-    description: "Run one harness operation (skill.activate, connector.connect, auth.ensure, auth.login, plugin.enable, ...); returns ok | refused | unavailable + reason.",
+    description: "Run one harness operation (skill.activate, connector.connect, auth.ensure, auth.login, plugin.enable, media.listen: hear a local audio/video file for you, ...); returns ok | refused | unavailable + reason.",
     inputSchema: { type: "object", properties: { operation: { type: "string", minLength: 1, maxLength: 100 }, args: { type: "object" } }, required: ["operation"], additionalProperties: false },
   },
 ] as const).map(tool => {
   purposePrompt([{ id: `tool.agentlas-turn.${tool.name}.schema`, revision: 1, stability: "fixed-policy", changeTriggers: ["release"], text: JSON.stringify(tool.inputSchema) }]);
   return { ...tool, description: purposePrompt([
-  { id: `tool.agentlas-turn.${tool.name}.description`, revision: 2, stability: "fixed-policy", changeTriggers: ["release"], text: tool.description },
+  // revision 3 (2026-10-17): harness_call names media.listen. Dev replay r06 stopped before upload on the owner's "직접 청취"
+  // gate with the host listening port unused; real-model A/B (claude sonnet low, codex gpt-6.1-sol; 8 runs per arm) called it
+  // 8/8 with this line and 0/8 without (/tmp/prompt-audit/listen-ab).
+  { id: `tool.agentlas-turn.${tool.name}.description`, revision: tool.name === "harness_call" ? 3 : 2, stability: "fixed-policy", changeTriggers: ["release"], text: tool.description },
 ]) };
 });
 
