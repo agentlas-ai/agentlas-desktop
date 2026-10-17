@@ -23,7 +23,7 @@ import { developmentEffectsSuppressed, assertDevelopmentEffectAllowed } from "..
 //     에이전트가 전용 창에서 새로 만든 세션을 평소 브라우저 상태가 지우면 안 된다.
 import Database from "better-sqlite3";
 import { AUTOMATION_PROFILE_FLAGS } from "./automation-profile-flags";
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { createCipheriv, createDecipheriv, createHash, pbkdf2Sync, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -581,32 +581,55 @@ function agentlasMacSafeStorageService(): string | null {
   });
 }
 
-function readMacSafeStorageKey(service: string): Buffer | null {
+/**
+ * A GUI app's first Keychain read shows the "allow" dialog, which asks for the login password. A 5 s synchronous read
+ * froze Main and was killed before the owner could answer (usage/claude.ts learned the same and uses 20 s, async).
+ */
+const KEYCHAIN_READ_TIMEOUT_MS = 30_000;
+type MacSafeStorageKeyRead = { key: Buffer } | { key: null; reason: "keychain_prompt_pending" | "keychain_unavailable" };
+
+function readMacKeychainPassword(service: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    execFile("/usr/bin/security", ["find-generic-password", "-w", "-s", service],
+      { encoding: "buffer", timeout: KEYCHAIN_READ_TIMEOUT_MS, maxBuffer: 64 * 1024 }, (error, stdout) => {
+        // A failed read can still carry partial output; it never outlives this callback.
+        if (error) { if (Buffer.isBuffer(stdout)) stdout.fill(0); reject(error); return; }
+        resolve(stdout);
+      });
+  });
+}
+
+async function readMacSafeStorageKey(service: string): Promise<MacSafeStorageKeyRead> {
   assertDevelopmentEffectAllowed("browser.credentials-native-key");
   let password: Buffer | null = null;
   try {
-    password = execFileSync(
-      "/usr/bin/security",
-      ["find-generic-password", "-w", "-s", service],
-      { encoding: "buffer", stdio: ["ignore", "pipe", "ignore"], timeout: 5_000 },
-    );
+    password = await readMacKeychainPassword(service);
     let length = password.length;
     while (length > 0 && (password[length - 1] === 0x0a || password[length - 1] === 0x0d)) length -= 1;
     if (length === 0) {
       reportImportPrerequisite("keychain");
-      return null;
+      return { key: null, reason: "keychain_unavailable" };
     }
-    return pbkdf2Sync(password.subarray(0, length), "saltysalt", 1_003, 16, "sha1");
+    return { key: pbkdf2Sync(password.subarray(0, length), "saltysalt", 1_003, 16, "sha1") };
   } catch (error) {
-    // execFileSync can throw before assigning password while retaining partial output.
-    const partial = error && typeof error === "object" && "stdout" in error ? error.stdout : null;
-    if (Buffer.isBuffer(partial)) partial.fill(0);
-    // Unavailable only: process exit bytes cannot identify a precise Keychain OSStatus.
+    // Still unanswered after KEYCHAIN_READ_TIMEOUT_MS: execFile killed the read (SIGTERM). Otherwise unavailable only:
+    // process exit bytes cannot identify a precise Keychain OSStatus.
+    const killed = Boolean(error && typeof error === "object"
+      && ((error as { killed?: boolean }).killed || (error as { signal?: string }).signal === "SIGTERM"));
     reportImportPrerequisite("keychain");
-    return null;
+    return { key: null, reason: killed ? "keychain_prompt_pending" : "keychain_unavailable" };
   } finally {
     password?.fill(0);
   }
+}
+
+/** The keychain error family, with a typed code when the access dialog was still open. */
+function keychainKeyError(read: { reason: "keychain_prompt_pending" | "keychain_unavailable" }, ko: string, en: string): Error {
+  if (read.reason !== "keychain_prompt_pending") return new Error(importCopy(ko, en));
+  return Object.assign(new Error(importCopy(
+    "macOS 키체인 접근 확인 창이 아직 답을 기다리고 있습니다. 허용한 뒤 다시 시도해 주세요.",
+    "The macOS Keychain access prompt is still waiting for an answer. Allow it, then try again.",
+  )), { code: "keychain_prompt_pending" });
 }
 
 export function reencryptMacChromiumCookie(
@@ -650,14 +673,14 @@ function decryptMacChromiumCookie(
   return plaintext;
 }
 
-function macCookieReencryptor(
+async function macCookieReencryptor(
   browser: string,
   schemaVersion: number,
-): {
+): Promise<{
   transform: (row: Record<string, unknown>) => Record<string, unknown>;
   destinationCanRead: (row: Record<string, unknown>) => boolean;
   dispose: () => void;
-} | null {
+} | null> {
   if (process.platform !== "darwin") return null;
   const sourceService = MAC_SAFE_STORAGE_SERVICE[browser];
   if (!sourceService) throw new Error(importCopy(`${browser}의 macOS 쿠키 암호화 방식을 지원하지 않습니다.`, `${browser}'s macOS cookie encryption is not supported.`));
@@ -665,12 +688,11 @@ function macCookieReencryptor(
   if (!destinationService) {
     throw new Error(importCopy("Agentlas 전용 브라우저의 macOS 쿠키 암호화 대상을 확인하지 못했습니다.", "Could not determine the macOS cookie encryption target of the Agentlas browser."));
   }
-  const destinationKey = readMacSafeStorageKey(destinationService);
-  if (!destinationKey) {
-    throw new Error(
-      importCopy("macOS 키체인에서 Agentlas 브라우저의 로그인 변환 키를 읽지 못했습니다. 키체인 접근을 허용한 뒤 다시 시도해 주세요.", "Could not read the Agentlas browser's sign-in conversion key from the macOS Keychain. Allow Keychain access and try again."),
-    );
+  const destinationRead = await readMacSafeStorageKey(destinationService);
+  if (!destinationRead.key) {
+    throw keychainKeyError(destinationRead, "macOS 키체인에서 Agentlas 브라우저의 로그인 변환 키를 읽지 못했습니다. 키체인 접근을 허용한 뒤 다시 시도해 주세요.", "Could not read the Agentlas browser's sign-in conversion key from the macOS Keychain. Allow Keychain access and try again.");
   }
+  const destinationKey = destinationRead.key;
   const destinationCanRead = (row: Record<string, unknown>): boolean => {
     const encrypted = row.encrypted_value;
     if (!Buffer.isBuffer(encrypted) || encrypted.length === 0) return true;
@@ -704,13 +726,12 @@ function macCookieReencryptor(
     };
   }
 
-  const sourceKey = readMacSafeStorageKey(sourceService);
-  if (!sourceKey) {
+  const sourceRead = await readMacSafeStorageKey(sourceService);
+  if (!sourceRead.key) {
     destinationKey.fill(0);
-    throw new Error(
-      importCopy("macOS 키체인에서 브라우저 로그인 변환 키를 읽지 못했습니다. 키체인 접근을 허용한 뒤 다시 시도해 주세요.", "Could not read the browser's sign-in conversion key from the macOS Keychain. Allow Keychain access and try again."),
-    );
+    throw keychainKeyError(sourceRead, "macOS 키체인에서 브라우저 로그인 변환 키를 읽지 못했습니다. 키체인 접근을 허용한 뒤 다시 시도해 주세요.", "Could not read the browser's sign-in conversion key from the macOS Keychain. Allow Keychain access and try again.");
   }
+  const sourceKey = sourceRead.key;
   return {
     transform(row) {
       const encrypted = row.encrypted_value;
@@ -788,17 +809,18 @@ export interface PortableSourceCookie {
  * maintenance-window import and the login-recovery targeted feed, so both use exactly one
  * decryption path. The caller must call `wipe()` once the cookies were handed to a browser.
  */
-function decryptMacSourceCookies(
+async function decryptMacSourceCookies(
   browser: string,
   schemaVersion: number,
   jobs: Array<{ domain: string; rows: Record<string, unknown>[] }>,
-): { cookies: PortableSourceCookie[]; cookieDomain: Map<string, string>; observed: number; skipped: { expired: number; partitioned: number; invalid: number }; wipe: () => void } {
+): Promise<{ cookies: PortableSourceCookie[]; cookieDomain: Map<string, string>; observed: number; skipped: { expired: number; partitioned: number; invalid: number }; wipe: () => void }> {
   const sourceService = MAC_SAFE_STORAGE_SERVICE[browser];
   if (!sourceService) throw new Error(importCopy(`${browser}의 macOS 쿠키 암호화 방식을 지원하지 않습니다.`, `${browser}'s macOS cookie encryption is not supported.`));
-  const sourceKey = readMacSafeStorageKey(sourceService);
-  if (!sourceKey) {
-    throw new Error(importCopy("macOS 키체인에서 원본 브라우저의 로그인 키를 읽지 못했습니다.", "Could not read the source browser's sign-in key from the macOS Keychain."));
+  const sourceRead = await readMacSafeStorageKey(sourceService);
+  if (!sourceRead.key) {
+    throw keychainKeyError(sourceRead, "macOS 키체인에서 원본 브라우저의 로그인 키를 읽지 못했습니다.", "Could not read the source browser's sign-in key from the macOS Keychain.");
   }
+  const sourceKey = sourceRead.key;
 
   const plaintexts: Buffer[] = [];
   const cookies: PortableSourceCookie[] = [];
@@ -879,7 +901,7 @@ async function importMacCookiesThroughDedicatedRuntime(
   if (jobs.length === 0) {
     return { accepted: 0, domains: [], verifiedDomains: [], loginRequiredDomains: [] };
   }
-  const decrypted = decryptMacSourceCookies(browser, schemaVersion, jobs);
+  const decrypted = await decryptMacSourceCookies(browser, schemaVersion, jobs);
   const { cookies, cookieDomain } = decrypted;
   if (cookies.length === 0) {
     decrypted.wipe();
@@ -1150,9 +1172,9 @@ export async function importBrowserCredentials(
     const schemaVersion = Number(
       (src.prepare("SELECT value FROM meta WHERE key = 'version'").get() as { value?: unknown } | undefined)?.value ?? 0,
     );
-    let reencryptor: ReturnType<typeof macCookieReencryptor> = null;
+    let reencryptor: Awaited<ReturnType<typeof macCookieReencryptor>> = null;
     try {
-      reencryptor = macCookieReencryptor(profile.browser, schemaVersion);
+      reencryptor = await macCookieReencryptor(profile.browser, schemaVersion);
     } catch (error) {
       src.close();
       dest.close();
@@ -1388,8 +1410,8 @@ export async function importSourceCookiesIntoNativeSession(
   const { browserCredentialConsentRevision } = await import("./credential-sync");
   const revision = browserCredentialConsentRevision();
   const isCurrent = () => browserCredentialConsentRevision() === revision;
-  let source: ReturnType<typeof readSourceSessionCookies>;
-  try { source = readSourceSessionCookies(profileId, domains); }
+  let source: Awaited<ReturnType<typeof readSourceSessionCookies>>;
+  try { source = await readSourceSessionCookies(profileId, domains); }
   catch { return { ok: false, cookiesAdded: 0, linkedSites: [], skipped, error: "browser-import-source-unreadable" }; }
   if (!source.ok) return { ok: false, cookiesAdded: 0, linkedSites: [], skipped, error: `browser-import-${source.reason}` };
   try {
@@ -1518,10 +1540,10 @@ export function dedicatedCookieStoreFile(): string | null {
  * macOS only — other platforms keep the maintenance-window import path. Values never leave memory;
  * the caller must call `wipe()` after handing the cookies to a browser.
  */
-export function readSourceSessionCookies(
+export async function readSourceSessionCookies(
   profileId: string,
   domains: readonly string[],
-): { ok: true; cookies: PortableSourceCookie[]; observed: number; skipped: { expired: number; partitioned: number; invalid: number }; wipe: () => void } | { ok: false; reason: "unsupported-platform" | "no-profile" | "snapshot-failed" | "no-cookies" } {
+): Promise<{ ok: true; cookies: PortableSourceCookie[]; observed: number; skipped: { expired: number; partitioned: number; invalid: number }; wipe: () => void } | { ok: false; reason: "unsupported-platform" | "no-profile" | "snapshot-failed" | "no-cookies" }> {
   if (developmentEffectsSuppressed()) return { ok: false, reason: "unsupported-platform" };
   if (process.platform !== "darwin") return { ok: false, reason: "unsupported-platform" };
   const profile = resolveDiscoveredBrowserProfile(profileId);
@@ -1545,7 +1567,7 @@ export function readSourceSessionCookies(
       src.close();
     }
     if (jobs.length === 0) return { ok: false, reason: "no-cookies" };
-    const decrypted = decryptMacSourceCookies(profile.browser, schemaVersion, jobs);
+    const decrypted = await decryptMacSourceCookies(profile.browser, schemaVersion, jobs);
     if (decrypted.cookies.length === 0) {
       decrypted.wipe();
       return { ok: false, reason: "no-cookies" };

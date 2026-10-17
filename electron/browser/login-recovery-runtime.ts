@@ -361,7 +361,7 @@ async function targetedImport(input: { domains: string[]; surface: BrowserCookie
   const credential = await import("./credential-import");
   assertLoginImportCurrent(custody);
   if (!isCurrent()) return { state: "not-consented", written: 0 };
-  const source = credential.readSourceSessionCookies(scope.profileId, scope.domains);
+  const source = await credential.readSourceSessionCookies(scope.profileId, scope.domains);
   if (!source.ok) {
     if (source.reason !== "unsupported-platform") return { state: "failed", written: 0 };
     // The explicitly selected dedicated surface keeps its maintenance-window importer.

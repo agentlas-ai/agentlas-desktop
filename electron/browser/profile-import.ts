@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { createDecipheriv, createHash, pbkdf2Sync } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 
 import {
   BROWSER_PROFILE_IMPORT_SCHEMA_VERSION,
@@ -58,7 +58,7 @@ export interface BrowserProfileImportDependencies {
   makeWorkDir: typeof makeBrowserProfileImportWorkDir;
   removeWorkDir: typeof removeBrowserProfileImportWorkDir;
   snapshotSqlite: typeof snapshotBrowserSqlite;
-  createDecryptBoundary: (profile: { browser: string; path: string }) => BrowserProfilePasswordDecryptBoundary;
+  createDecryptBoundary: (profile: { browser: string; path: string }) => BrowserProfilePasswordDecryptBoundary | Promise<BrowserProfilePasswordDecryptBoundary>;
   persistCredentials: typeof importBrowserCredentialRecords;
   persistHistory: typeof importBrowserHistory;
 }
@@ -273,14 +273,28 @@ function passwordCipherCapability(
   return "unsupported-platform";
 }
 
-function readMacSafeStorageKey(browser: string): Buffer | null {
+/**
+ * A GUI app's first Keychain read shows the "allow" dialog, which asks for the login password. A 5 s synchronous read
+ * froze Main and was killed before the owner could answer (usage/claude.ts learned the same and uses 20 s, async).
+ */
+const KEYCHAIN_READ_TIMEOUT_MS = 30_000;
+
+function readMacKeychainPassword(service: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    execFile("/usr/bin/security", ["find-generic-password", "-w", "-s", service],
+      { encoding: "buffer", timeout: KEYCHAIN_READ_TIMEOUT_MS, maxBuffer: 64 * 1024 }, (error, stdout) => {
+        if (error) { if (Buffer.isBuffer(stdout)) stdout.fill(0); reject(error); return; }
+        resolve(stdout);
+      });
+  });
+}
+
+async function readMacSafeStorageKey(browser: string): Promise<Buffer | null> {
   const service = MAC_SAFE_STORAGE_SERVICE[browser];
   if (!service) return null;
   let password: Buffer | null = null;
   try {
-    password = execFileSync("/usr/bin/security", ["find-generic-password", "-w", "-s", service], {
-      encoding: "buffer", stdio: ["ignore", "pipe", "ignore"], timeout: 5_000,
-    });
+    password = await readMacKeychainPassword(service);
     let length = password.length;
     while (length > 0 && (password[length - 1] === 0x0a || password[length - 1] === 0x0d)) length -= 1;
     return length > 0 ? pbkdf2Sync(password.subarray(0, length), "saltysalt", 1_003, 16, "sha1") : null;
@@ -324,12 +338,12 @@ export function decryptWindowsChromiumPasswordWithKey(encryptedValue: Buffer, ke
   return Buffer.concat([decipher.update(encryptedValue.subarray(15, encryptedValue.length - 16)), decipher.final()]);
 }
 
-export function createNativeBrowserProfilePasswordDecryptBoundary(
+export async function createNativeBrowserProfilePasswordDecryptBoundary(
   profile: { browser: string; path: string },
   platform: NodeJS.Platform = process.platform,
-): BrowserProfilePasswordDecryptBoundary {
+): Promise<BrowserProfilePasswordDecryptBoundary> {
   if (platform === "darwin") {
-    const key = readMacSafeStorageKey(profile.browser);
+    const key = await readMacSafeStorageKey(profile.browser);
     return {
       decrypt(encryptedValue) {
         if (!key) return { ok: false, reason: "decrypt-unavailable" };
@@ -435,7 +449,7 @@ export async function importBrowserProfileData(
   const passwordById = new Map(scan.passwords.map((item) => [item.id, item]));
   const historyById = new Map(scan.public.history.map((item) => [item.id, item]));
   const decrypted: ImportedBrowserCredential[] = [];
-  const boundary = deps.createDecryptBoundary(profile);
+  const boundary = await deps.createDecryptBoundary(profile);
   try {
     for (const id of passwordIds) {
       const item = passwordById.get(id);
