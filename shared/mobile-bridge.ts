@@ -253,8 +253,10 @@ export const MOBILE_BRIDGE_METHODS = [
  * - "text.sanitize.v3": the phone ports mobile-text-sanitize-parity fixture version 3 (relative paths, the
  *   unified credential-assignment rule). With both, the LEGACY_DECISION guard
  *   (mobileBridgeDecisionTextUnchanged) is no longer needed for that phone.
+ * - "plan.checklist.v1": the phone draws kind:"plan" invocation events (the runtime's own checklist, 50a63a5d).
+ *   Only such a phone receives them; an older one would read the unknown kind as an empty row.
  */
-export const MOBILE_CLIENT_CAPABILITIES = ["decision.rowSkip.v1", "text.sanitize.v3"] as const;
+export const MOBILE_CLIENT_CAPABILITIES = ["decision.rowSkip.v1", "text.sanitize.v3", "plan.checklist.v1"] as const;
 export type MobileClientCapability = (typeof MOBILE_CLIENT_CAPABILITIES)[number];
 
 /** Accepted only to give installed Mobile clients a terminal retirement response. */
@@ -1096,7 +1098,7 @@ export interface MobileBridgeOneArtifactsPageDto {
 }
 
 export interface MobileBridgeInvocationEventDto {
-  kind: "thinking" | "tool-use" | "partial" | "final" | "error" | "surface" | "usage" | "reasoning" | "notice";
+  kind: "thinking" | "tool-use" | "partial" | "final" | "error" | "surface" | "usage" | "reasoning" | "notice" | "plan";
   status?: string;
   /**
    * kind:"notice" only — what the HOST says, with its own severity.
@@ -1137,6 +1139,8 @@ export interface MobileBridgeInvocationEventDto {
   oneArtifacts?: MobileBridgeInvocationArtifactDto[];
   /** Main-sanitized, non-executable semantic result shared with Flutter. */
   surface?: OneSurfaceManifestV1;
+  /** kind:"plan" only, and only to a phone that reported "plan.checklist.v1": the complete bounded checklist. */
+  plan?: { entries: Array<{ text: string; activeText?: string; status: "pending" | "in_progress" | "completed" }> };
 }
 
 export interface MobileBridgeHostDto {

@@ -238,6 +238,7 @@ import {
   MOBILE_CLIENT_CAPABILITIES,
   type MobileClientCapability,
 } from "../../shared/mobile-bridge";
+import { boundInvocationPlan } from "../../shared/invocation-plan";
 import { buildToolCallDisplay, normalizeToolCall } from "../../shared/tool-call-detail";
 import type { MobileBridgeHostIdentity } from "./pairing";
 import type { MobileBridgeRevocationCause } from "./pairing";
@@ -1880,7 +1881,9 @@ export function projectMobileBridgeInvocationEvent(
   event: McpInvocationEvent,
   context?: { taskId?: string | null; chatId?: string | null; runId?: string | null; syncedAt?: string; cwd?: string | null;
     /** Opt-in only after Main establishes this is not a personal One chat. */
-    toolBodies?: boolean; toolBodyBytes?: number; historyPreview?: boolean },
+    toolBodies?: boolean; toolBodyBytes?: number; historyPreview?: boolean;
+    /** The receiving phone reported "plan.checklist.v1": a plan event keeps its kind and checklist. */
+    planChecklist?: boolean },
 ): MobileBridgeInvocationEventDto {
   // "mcp-key-request" is a desktop-renderer-only elicitation signal — the
   // mobile client has no key sheet and its DTO union stays closed. Project it
@@ -1889,8 +1892,21 @@ export function projectMobileBridgeInvocationEvent(
     // The current phone protocol predates the explicit desktop lifecycle item.
     // Project it to the existing value-free thinking beat until the mobile
     // contract grows the same typed boundary; never leak a free-form status.
-    kind: event.kind === "mcp-key-request" || event.kind === "lifecycle" || event.kind === "plan" ? "thinking" : event.kind,
+    kind: event.kind === "plan" && context?.planChecklist ? "plan"
+      : event.kind === "mcp-key-request" || event.kind === "lifecycle" || event.kind === "plan" ? "thinking" : event.kind,
   };
+  if (projected.kind === "plan") {
+    // The runner already bounded it (boundInvocationPlan); text is redacted again for the phone, ids stay home.
+    const plan = boundInvocationPlan(event.plan) ?? { entries: [] };
+    projected.plan = {
+      entries: plan.entries.map((entry) => ({
+        text: boundedRedactedText(entry.text, 1_024),
+        ...(entry.activeText ? { activeText: boundedRedactedText(entry.activeText, 1_024) } : {}),
+        status: entry.status,
+      })),
+    };
+    return projected;
+  }
   if (event.kind === "notice" && event.notice) {
     // 고지는 폰에도 간다. 다만 기계 원문(details)은 보내지 않는다 — 화면에 쓸 값만.
     // 심각도와 표시 형태는 같이 보낸다. 그게 없으면 폰은 "컨텍스트를 압축했습니다"와
@@ -2140,6 +2156,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   private readonly mailAccountVerdicts = new Map<string, "ok" | "mismatch" | "signed-out" | "unknown">();
   /** What each paired device reported it can decode (device.capabilities); absent means an older phone. */
   private readonly clientCapabilities = new Map<string, ReadonlySet<MobileClientCapability>>();
+
+  clientHasCapability(deviceId: string, capability: MobileClientCapability): boolean {
+    return this.clientCapabilities.get(deviceId)?.has(capability) === true;
+  }
   private readonly projectFilePreviews = new MobileProjectFilePreviewRegistry();
   /**
    * Mobile terminal ownership is kept in the Desktop authority, not in the
@@ -3713,14 +3733,15 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const taskId = findCanonicalTaskForChat(chatId)?.id ?? null;
         const cwd = resolveChatCwd(chatId);
         const toolBodies = !isPersonalOneConversation(chatId);
+        const planChecklist = this.clientHasCapability(context.deviceId, "plan.checklist.v1");
         // A run may contain thousands of tool events. Bound the aggregate
         // payload below the relay budget; expanded complete bodies use chunks.
         const toolBodyBytes = Math.min(512 * 1024, Math.floor(2 * 1024 * 1024 / Math.max(1, attached.events.length)));
         return asJsonValue(
           {
             runId: attached.runId,
-            events: attached.events.filter((event) => event.kind !== "plan")
-              .map((event) => projectMobileBridgeInvocationEvent(event, { taskId, chatId, runId: attached.runId, cwd, toolBodies, toolBodyBytes })),
+            events: attached.events.filter((event) => event.kind !== "plan" || planChecklist)
+              .map((event) => projectMobileBridgeInvocationEvent(event, { taskId, chatId, runId: attached.runId, cwd, toolBodies, toolBodyBytes, planChecklist })),
           },
           request.method,
         );
@@ -5506,12 +5527,23 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     if (this.upstreamUnsubscribers.length > 0) return;
     // One handler for Main-hosted and daemon-hosted runs (personal One runs in the daemon since 2026-10-12).
     const forwardInvocationEvent = ({ runId, chatId, event }: { runId: string; chatId: string; event: McpInvocationEvent }) => {
-      // The phone protocol has no checklist row; an older app would read an unknown kind as an empty assistant row.
-      if (event.kind === "plan") return;
       // Live events arrive per token; the folder and Task lookups are per
       // RUN, not per event. The cache is dropped when the run terminates.
       const { cwd, taskId, personalOne } = cachedRunContext(runId, chatId);
       const oneMessage = personalOne ? projectOneMessageForPhone(event) : null;
+      if (event.kind === "plan") {
+        // Only a phone that draws checklists receives it (server fan-out gate); an older app would read the
+        // unknown kind as an empty assistant row.
+        this.emit({
+          event: "invoke.event",
+          requiresClientCapability: "plan.checklist.v1",
+          payload: asJsonValue(
+            { runId, chatId, event: projectMobileBridgeInvocationEvent(event, { taskId, chatId, runId, cwd, planChecklist: true }) },
+            "invoke.event envelope",
+          ),
+        });
+        return;
+      }
       this.emit({
         event: "invoke.event",
         payload: asJsonValue(

@@ -31,6 +31,7 @@ import {
   type MobileBridgeSnapshot,
   type MobileBridgeVisualFrameDto,
   type MobileBridgeVisualSessionRefusalDto,
+  type MobileClientCapability,
 } from "../../shared/mobile-bridge";
 import type { MobileBridgeVisualBinaryFrame } from "./visual-session";
 import {
@@ -127,6 +128,8 @@ export interface MobileBridgeAuthorityEvent {
   event: MobileBridgeEventName;
   payload: MobileBridgeJsonValue;
   occurredAt?: string;
+  /** Delivered only to connections whose device reported this decoder capability (device.capabilities). */
+  requiresClientCapability?: MobileClientCapability;
 }
 
 /**
@@ -137,6 +140,8 @@ export interface MobileBridgeAuthorityEvent {
 export interface MobileBridgeAuthority {
   /** Only server.accept mints this lifecycle event; never RPC-selectable. */
   connectionOpened?(context: MobileBridgeConnectionContext, lease?: MobileBridgeConnectionLease): void;
+  /** Whether this device reported the capability with device.capabilities; absent means none did. */
+  clientHasCapability?(deviceId: string, capability: MobileClientCapability): boolean;
   snapshot(context: MobileBridgeConnectionContext): Promise<MobileBridgeSnapshot>;
   pairingVerification?(context: MobileBridgeConnectionContext): Promise<{
     hostId: string;
@@ -1432,6 +1437,10 @@ export class AgentlasMobileBridgeServer {
     const queuedBytes = Buffer.byteLength(JSON.stringify(event), "utf8");
     for (const state of this.clients) {
       if (state.revoked || state.revocationPending) continue;
+      if (
+        event.requiresClientCapability
+        && !this.authority.clientHasCapability?.(state.context.deviceId, event.requiresClientCapability)
+      ) continue;
       if (!state.initialized) {
         if (
           state.pendingAuthorityEvents.length >= MAX_INITIAL_EVENT_QUEUE ||
