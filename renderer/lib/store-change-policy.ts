@@ -82,3 +82,41 @@ export function sameMessageList<T extends { id: string; text?: string }>(previou
   }
   return true;
 }
+
+/** Whether a per-key action may run now: never run for this key, or its window has passed. Records the run. */
+export function shouldRunPerKey(lastRunAt: Map<string, number>, key: string, now: number, windowMs: number): boolean {
+  const last = lastRunAt.get(key);
+  if (last !== undefined && now - last < windowMs) return false;
+  lastRunAt.set(key, now);
+  if (lastRunAt.size > 64) lastRunAt.delete(lastRunAt.keys().next().value as string);
+  return true;
+}
+
+/**
+ * Leading-and-trailing throttle per key: the first request runs at once, later ones inside the window collapse into
+ * one run at the window's end, so the last request is never lost.
+ */
+export function createKeyedThrottle(options: {
+  windowMs: number;
+  run: (key: string) => void;
+  now?: () => number;
+  setTimer?: (callback: () => void, ms: number) => TimerHandle;
+  clearTimer?: (handle: TimerHandle) => void;
+}): { request(key: string): void; dispose(): void } {
+  const now = options.now ?? Date.now;
+  const setTimer = options.setTimer ?? ((callback: () => void, ms: number) => setTimeout(callback, ms));
+  const clearTimer = options.clearTimer ?? ((handle: TimerHandle) => clearTimeout(handle));
+  const lastRunAt = new Map<string, number>();
+  const trailing = new Map<string, TimerHandle>();
+  let disposed = false;
+  const request = (key: string): void => {
+    if (disposed || trailing.has(key)) return;
+    if (shouldRunPerKey(lastRunAt, key, now(), options.windowMs)) { options.run(key); return; }
+    const wait = (lastRunAt.get(key) ?? now()) + options.windowMs - now();
+    trailing.set(key, setTimer(() => { trailing.delete(key); if (!disposed) request(key); }, Math.max(0, wait)));
+  };
+  return {
+    request,
+    dispose() { disposed = true; for (const handle of trailing.values()) clearTimer(handle); trailing.clear(); },
+  };
+}

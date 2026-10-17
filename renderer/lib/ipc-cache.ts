@@ -77,6 +77,14 @@ const READ_TTL_MS: Record<string, number> = {
   "automations.chatActivity": 0,
   "chats.getContinuitySnapshot": 0,
   "oneSupervisor.snapshot": 0,
+  // Pure reads (handlers checked in electron/ipc.ts, perf review 2026-10-17 R-08). Unlisted, each call wiped its
+  // namespace as if it wrote: tasks.findForChat, fired on One teammate/tool events, emptied tasks.list every time.
+  // chats.get is not here: its handler may repair the chat's controller row.
+  "chats.listRecentOne": 0,
+  "tasks.findForChat": 0,
+  "tasks.get": 0,
+  "automations.get": 0,
+  "automations.getGraphReconciliation": 0,
 };
 
 const MAX_CACHE_ENTRIES = 200;
@@ -159,6 +167,8 @@ function wrapMethod(
   const ttl = READ_TTL_MS[spec];
   const wrapper = (...args: unknown[]): unknown => {
     if (ttl === undefined) {
+      // Subscribing to a push channel (on*) or moving the profile view writes no store: pass through untouched.
+      if (/^on[A-Z]/.test(method) || spec === "marketplace.setProfileViewBounds") return fn.apply(target, args);
       // 잠재적 쓰기: 이 네임스페이스의 읽기 캐시를 비우고 그대로 통과.
       invalidateIpcCache(namespace);
       return fn.apply(target, args);

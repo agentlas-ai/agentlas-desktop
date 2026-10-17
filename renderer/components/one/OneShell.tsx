@@ -10,6 +10,7 @@ import { runtimeMatchesSelection, selectionForRuntime } from "@shared/runtime-se
 import { createOneScrollFollow, oneRunReceiptIsTerminal } from "@/lib/one-scroll-follow";
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
 import { createFrameBatcher, isLiveStreamTick, type FrameBatcher } from "@/lib/frame-coalescer";
+import { createKeyedThrottle } from "@/lib/store-change-policy";
 import { mergeAutomationHostNotices, mergeRoomWorkRows } from "@/lib/chat-host-notice-refresh";
 import { readOneChatHistory, readOneChatHistoryPage, mergeOneChatHistory, oneChatHistoryCursor } from "@/lib/one-chat-history";
 import { OneComposerInput, type OneComposerInputHandle } from "./OneComposerInput";
@@ -3494,6 +3495,19 @@ function OneSessionsShell() {
     await refreshAll();
     return task;
   }, [refreshAll, router, taskforces]);
+  // Teammate and tool events arrive by the hundred per run (avg 125, max 2,162); each looked the task up over IPC.
+  // At most one lookup per chat per 3 s, the last one trailing, and only while this run's chat is still unbound.
+  const reconcileConversationTaskRef = useRef(reconcileConversationTask);
+  reconcileConversationTaskRef.current = reconcileConversationTask;
+  const taskReconcileThrottleRef = useRef<ReturnType<typeof createKeyedThrottle> | null>(null);
+  useEffect(() => () => { taskReconcileThrottleRef.current?.dispose(); }, []);
+  const requestConversationTaskReconcile = useCallback((chatId: string) => {
+    const throttle = taskReconcileThrottleRef.current ??= createKeyedThrottle({ windowMs: 3_000, run: (key) => {
+      if (runTaskIdRef.current || runChatIdRef.current !== key) return;
+      void reconcileConversationTaskRef.current(key);
+    } });
+    throttle.request(chatId);
+  }, []);
 
   const settleRun = useCallback(async (chatId: string, taskId: string | null, settledRunId: string | null) => {
     if (settledRunId) {
@@ -3662,11 +3676,11 @@ function OneSessionsShell() {
       return;
     }
     if (event.agentId && event.phase !== "synthesize") {
-      if (!taskId) void reconcileConversationTask(chatId);
+      if (!taskId) requestConversationTaskReconcile(chatId);
       return;
     }
     if (event.kind === "thinking" || event.kind === "tool-use") {
-      if (!taskId && event.kind === "tool-use") void reconcileConversationTask(chatId);
+      if (!taskId && event.kind === "tool-use") requestConversationTaskReconcile(chatId);
       return;
     }
     if (event.kind === "partial" && isLivePartialCommitBoundary(event)) {
@@ -3785,7 +3799,7 @@ function OneSessionsShell() {
       unsubscribeRunRef.current = null;
       void settleRun(chatId, taskId, settledRunId);
     }
-  }, [reconcileConversationTask, scrollToLatest, settleRun, followStreamToLatest]);
+  }, [reconcileConversationTask, requestConversationTaskReconcile, scrollToLatest, settleRun, followStreamToLatest]);
   // Same events, same order: stream ticks wait for the frame; any other event lands after the queued ticks.
   const consumeRunEvent = useCallback((event: McpInvocationEvent, sourceRunId?: string) => {
     const frame = streamFrameRef.current ??= createFrameBatcher({ minIntervalMs: 50 });
