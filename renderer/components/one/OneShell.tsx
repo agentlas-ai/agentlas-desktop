@@ -10,7 +10,7 @@ import { runtimeMatchesSelection, selectionForRuntime } from "@shared/runtime-se
 import { createOneScrollFollow, oneRunReceiptIsTerminal } from "@/lib/one-scroll-follow";
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
 import { createFrameBatcher, isLiveStreamTick, type FrameBatcher } from "@/lib/frame-coalescer";
-import { createKeyedThrottle } from "@/lib/store-change-policy";
+import { createKeyedThrottle, stableTurnIds } from "@/lib/store-change-policy";
 import { needsProjectionRefresh, PROJECTION_DIRTY_ENTITIES } from "@/lib/one-projection-refresh";
 import { mergeAutomationHostNotices, mergeRoomWorkRows } from "@/lib/chat-host-notice-refresh";
 import { readOneChatHistory, readOneChatHistoryPage, mergeOneChatHistory, oneChatHistoryCursor } from "@/lib/one-chat-history";
@@ -9261,6 +9261,11 @@ function OneSessionsShell() {
     composerInputRef.current?.focus();
     return true;
   }, [activeThreadChatId, busy, activeSeatDissolved, activeDirectSessionUnavailable]);
+  // One value for the per-message inline-UI providers, so their consumers re-render only when these change (perf
+  // review R-07). The rare UI-only reply bubble keeps its literal: scripts/test-ui-instances-mounted.cjs pins it.
+  const oneUiActions = useMemo(() => ({
+    prepareFollowup: prepareUiFollowup, disabled: busy || activeSeatDissolved || activeDirectSessionUnavailable,
+  }), [prepareUiFollowup, busy, activeSeatDissolved, activeDirectSessionUnavailable]);
 
   if (!loaded) {
     return <div className={styles.shell}><div className={styles.loadingShell} role="status" aria-live="polite">
@@ -9970,8 +9975,8 @@ function OneSessionsShell() {
                                 })())}
                               {message.role === "assistant" && !message.streaming && message.continuationTail !== false && <LinkedLocalFiles text={message.text} chatId={activeThreadChatId} locale={appLocale} />}
                               </GoalResultReport>
-                              <IntellectUiActions.Provider value={{ prepareFollowup: prepareUiFollowup, disabled: busy || activeSeatDissolved || activeDirectSessionUnavailable }}>
-                                <InlineUiInstances chatId={activeThreadChatId ?? undefined} instances={ownedUi} turnIds={uiTurnId ? [uiTurnId] : []} locale={appLocale === "ko" ? "ko" : "en"}/>
+                              <IntellectUiActions.Provider value={oneUiActions}>
+                                <InlineUiInstances chatId={activeThreadChatId ?? undefined} instances={ownedUi} turnIds={stableTurnIds(uiTurnId)} locale={appLocale === "ko" ? "ko" : "en"}/>
                               </IntellectUiActions.Provider>
                             </div>
                             )}

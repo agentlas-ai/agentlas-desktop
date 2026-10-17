@@ -140,3 +140,20 @@ export function createDirtyGate(options: { maxAgeMs: number; now?: () => number 
     },
   };
 }
+
+const NO_TURN_IDS: readonly string[] = Object.freeze([]);
+const turnIdLists = new Map<string, readonly string[]>();
+/**
+ * The same one-element array for the same turn id on every render, so a memoized consumer that takes `turnIds`
+ * does not re-render because a fresh `[id]` literal arrived. Bounded: the oldest ids are forgotten.
+ */
+export function stableTurnIds(turnId: string | null | undefined): readonly string[] {
+  if (!turnId) return NO_TURN_IDS;
+  let list = turnIdLists.get(turnId);
+  if (!list) {
+    list = Object.freeze([turnId]);
+    turnIdLists.set(turnId, list);
+    if (turnIdLists.size > 512) turnIdLists.delete(turnIdLists.keys().next().value as string);
+  }
+  return list;
+}
