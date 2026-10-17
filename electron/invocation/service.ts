@@ -2779,7 +2779,7 @@ export class InvocationService {
     if (boundGoal?.status === "paused" && !resumesPausedGoal) {
       throw new Error("goal_explicit_resume_required");
     }
-    let stoppedGoalReactivation: { runId: string; version: number; status: "paused" | "blocked" | "waiting_tool"; ownerAnswer?: boolean } | null = null;
+    let stoppedGoalReactivation: { runId: string; version: number; status: "paused" | "blocked" | "waiting_tool" | "queued"; ownerAnswer?: boolean } | null = null;
     // The request's taskIntent is only a claim for One: semantic intake may
     // promote a conversation to a task below. Defer blocked-goal eligibility
     // until runReq carries that effective intent; otherwise a valid One task
@@ -3242,8 +3242,16 @@ export class InvocationService {
     // A host continuation or retry may wait between turns without a pending
     // wait subscription. The owner's task still needs the durable resume below
     // before a new controller can acquire this Goal's execution authority.
-    if (boundGoal && (boundGoal.status === "blocked" || boundGoal.status === "paused" || boundGoal.status === "waiting_tool")
-      && localUserTurn && reopen.reopens) {
+    /*
+     * A Goal the sweep has just queued for its next continuation (retry due) has no turn running yet. The owner's task
+     * message takes that turn: it was refused goal_episode_admission_stale (the producer is admitted only while the Goal
+     * is running) and the owner's message failed in 3 s (W7 2026-10-17, YouTube room, the owner wrote while the sweep's
+     * retry had queued the Goal). The chat still runs one turn at a time; the sweep's continuation, if it comes later,
+     * finds the chat busy and schedules its next retry.
+     */
+    const queuedGoalTakeover = boundGoal?.status === "queued" && localUserTurn && runReq.taskIntent !== "conversation";
+    if (boundGoal && (boundGoal.status === "blocked" || boundGoal.status === "paused" || boundGoal.status === "waiting_tool"
+      || boundGoal.status === "queued") && localUserTurn && (reopen.reopens || queuedGoalTakeover)) {
       // A new task message must not silently reactivate a claimed wait whose
       // successor may already have reached an external runtime before crash.
       if (boundGoal.surface === "science" || boundGoal.rootChatId !== chat.id) {
@@ -4767,7 +4775,8 @@ export class InvocationService {
           let reasonCode = "legacy-lifecycle-stopped-native-resume-required";
           // A between-turn owner task resumes the existing lifecycle. Only a
           // paused or blocked legacy Goal may enter lifecycle migration here.
-          if (stoppedGoalReactivation && stoppedGoalReactivation.status !== "waiting_tool" && lifetime.ownsActiveRoot()) {
+          if (stoppedGoalReactivation && stoppedGoalReactivation.status !== "waiting_tool" && stoppedGoalReactivation.status !== "queued"
+            && lifetime.ownsActiveRoot()) {
             legacyLifecycle = await prepareLegacyGoalLifecycle({
               goalId: legacyGoalId, longRunId: stoppedGoalReactivation.runId,
               expectedVersion: stoppedGoalReactivation.version, expectedStatus: stoppedGoalReactivation.status,
@@ -4885,7 +4894,9 @@ export class InvocationService {
               }
               const resumeVersion = getLongRun(current.id)!.version;
               stall.reason = "not-ready";
-              const queued = resumeLongRunByUser(current.id, desktopAppInstanceId(), resumeVersion);
+              // A Goal already queued (the sweep's retry, no turn started) goes straight to running for this message.
+              const queued = current.status === "queued" ? getLongRun(current.id)!
+                : resumeLongRunByUser(current.id, desktopAppInstanceId(), resumeVersion);
               if (!longRunContinueDecision(queued.goalId)?.continue) throw new Error("auto_goal_resume_not_ready");
               const running = transitionLongRun({
                 runId: queued.id,
