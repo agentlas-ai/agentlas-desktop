@@ -24,6 +24,8 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { inflateSync } from "node:zlib";
+import { classifyLaunchEscape, launchEscapeDenialReason } from "./write-sandbox-launch-guard";
+import { PERMISSION_ESCALATION_MARKER } from "./permission-escalation";
 
 export type ToolPermission = "read" | "write" | "full";
 
@@ -35,6 +37,13 @@ export interface BuiltinToolContext {
   permission: ToolPermission;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
+  /**
+   * The write-permission shell: wraps one command so that it runs in an OS sandbox that writes only inside the working
+   * folder (electron/runtime/confined-shell.ts). This is the boundary a CLI runtime's workspace-write sandbox gives its
+   * commands. Injected only where such a boundary exists (macOS Seatbelt, Linux bubblewrap); without it, `bash` stays a
+   * full-permission tool.
+   */
+  confineShell?: (command: string) => { file: string; args: string[] };
   /** Main-owned native browser download; no caller-selected path or profile. */
   historyWork?: (name:string,args:Record<string,unknown>)=>Promise<unknown>;
   browserDownload?: (url: string) => Promise<{id:string;fileName:string;bytes:number;savePath:string}>;
@@ -236,6 +245,121 @@ function readUtf8File(file: string): string {
   }
 }
 
+/**
+ * read_file on a file above FILE_OBSERVATION_MAX_BYTES (no file observation is
+ * possible there). The tool used to read the whole file into one string on the
+ * host thread, Main or the daemon, and then return at most 20,000 characters:
+ * a 500 MB log blocked the host for seconds and allocated the whole file.
+ *
+ * This returns exactly what that code returned, but reads in 1 MiB steps on
+ * the libuv pool and keeps only what the result needs:
+ * - the selected lines are located on raw bytes. 0x0A always decodes to "\n"
+ *   and never belongs to a multi-byte or invalid sequence, so line k starts
+ *   right after the k-th 0x0A byte;
+ * - each step is decoded up to the last byte that cannot continue an earlier
+ *   sequence, so the pieces concatenate to the whole-file decode;
+ * - the first 20,000 UTF-16 units and the total length give the same
+ *   truncate() text. Decoding goes in 64 KiB steps, so each piece is a
+ *   short-lived young-generation string, not a large object kept until a
+ *   full GC.
+ */
+const READ_FILE_STEP_BYTES = 1024 * 1024;
+const READ_FILE_DECODE_STEP_BYTES = 64 * 1024;
+const READ_FILE_MAX_CHARS = 20_000;
+
+function readAt(fd: number, buffer: Buffer, position: number): Promise<number> {
+  return new Promise((resolve, reject) => {
+    fs.read(fd, buffer, 0, buffer.length, position, (error, bytesRead) => (error ? reject(error) : resolve(bytesRead)));
+  });
+}
+
+/** Byte offset just after the `count`-th 0x0A at or after `from`, or null when the file has fewer. */
+async function offsetAfterNewlines(fd: number, count: number, from = 0): Promise<number | null> {
+  if (count <= 0) return from;
+  const buffer = Buffer.allocUnsafe(READ_FILE_STEP_BYTES);
+  let position = from;
+  let seen = 0;
+  for (;;) {
+    const read = await readAt(fd, buffer, position);
+    if (!read) return null;
+    let index = buffer.indexOf(0x0a, 0);
+    while (index !== -1 && index < read) {
+      seen += 1;
+      if (seen === count) return position + index + 1;
+      index = buffer.indexOf(0x0a, index + 1);
+    }
+    position += read;
+  }
+}
+
+async function countNewlines(fd: number): Promise<number> {
+  const buffer = Buffer.allocUnsafe(READ_FILE_STEP_BYTES);
+  let position = 0;
+  let seen = 0;
+  for (;;) {
+    const read = await readAt(fd, buffer, position);
+    if (!read) return seen;
+    let index = buffer.indexOf(0x0a, 0);
+    while (index !== -1 && index < read) { seen += 1; index = buffer.indexOf(0x0a, index + 1); }
+    position += read;
+  }
+}
+
+/** truncate(decode(bytes[from, to)), READ_FILE_MAX_CHARS); `to` null = end of file. */
+async function truncatedTextBetween(fd: number, from: number, to: number | null): Promise<string> {
+  const buffer = Buffer.allocUnsafe(READ_FILE_DECODE_STEP_BYTES);
+  let position = from;
+  let carry = Buffer.alloc(0);
+  let head = "";
+  let length = 0;
+  const take = (piece: string): void => {
+    length += piece.length;
+    if (head.length < READ_FILE_MAX_CHARS) head += piece.slice(0, READ_FILE_MAX_CHARS + 1 - head.length);
+  };
+  for (;;) {
+    const want = to === null ? buffer.length : Math.min(buffer.length, to - position);
+    const read = want > 0 ? await readAt(fd, want === buffer.length ? buffer : buffer.subarray(0, want), position) : 0;
+    if (!read) break;
+    position += read;
+    const bytes = carry.length ? Buffer.concat([carry, buffer.subarray(0, read)]) : buffer.subarray(0, read);
+    let split = bytes.length - 1;
+    while (split >= 0 && (bytes[split] & 0xc0) === 0x80) split -= 1;
+    // A lead byte in the last three may still need continuation bytes from the next step.
+    const cut = split >= 0 && split >= bytes.length - 3 ? split : bytes.length;
+    take(bytes.toString("utf8", 0, cut));
+    carry = Buffer.from(bytes.subarray(cut));
+  }
+  if (carry.length) take(carry.toString("utf8"));
+  return length <= READ_FILE_MAX_CHARS ? head : truncationText(head.slice(0, READ_FILE_MAX_CHARS), length - READ_FILE_MAX_CHARS);
+}
+
+/** Array.prototype.slice index normalization, as lines.slice(start, end) applied it. */
+function sliceIndex(value: number, length: number): number {
+  const integer = Math.trunc(value);
+  return integer < 0 ? Math.max(length + integer, 0) : Math.min(integer, length);
+}
+
+async function readLargeTextFile(file: string, offset: number | undefined, limit: number | undefined): Promise<string> {
+  const fd = openRegularFile(file, fs.constants.O_RDONLY);
+  try {
+    if (!offset && !limit) return await truncatedTextBetween(fd, 0, null);
+    // Same arithmetic as the in-memory path below.
+    const start = Math.max(0, (offset || 1) - 1);
+    const end = limit ? start + limit : Number.POSITIVE_INFINITY;
+    // Only a negative end needs the line count (slice counts it from the end).
+    const lineCount = Math.trunc(end) < 0 ? (await countNewlines(fd)) + 1 : Number.POSITIVE_INFINITY;
+    const first = sliceIndex(start, lineCount);
+    const last = sliceIndex(end, lineCount);
+    if (last <= first) return "";
+    const from = await offsetAfterNewlines(fd, first);
+    if (from === null) return "";
+    const lineEnd = last === Number.POSITIVE_INFINITY ? null : await offsetAfterNewlines(fd, last - first, from);
+    return await truncatedTextBetween(fd, from, lineEnd === null ? null : lineEnd - 1);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 const IMAGE_DATA_URL_PREFIX = "data:image/png;base64,";
 const IMAGE_DATA_URL_MAX_CHARS = 8_000_000;
 const IMAGE_MAX_BYTES = Math.min(FILE_OBSERVATION_MAX_BYTES,
@@ -370,7 +494,11 @@ function writeUtf8File(file: string, content: string): void {
 
 function truncate(value: unknown, max: number): string {
   const s = String(value);
-  return s.length <= max ? s : `${s.slice(0, max)}\n…(${s.length - max} chars truncated)`;
+  return s.length <= max ? s : truncationText(s.slice(0, max), s.length - max);
+}
+
+function truncationText(head: string, dropped: number): string {
+  return `${head}\n…(${dropped} chars truncated)`;
 }
 
 function str(value: unknown): string | undefined {
@@ -417,6 +545,11 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
     },
     run(args, ctx) {
       const file = resolveExistingIn(ctx.cwd, args.path);
+      const stat = fs.statSync(file);
+      if (!stat.isFile()) pathDenied("only regular files may be read");
+      // Same result, read off the host thread (readLargeTextFile). Files at or
+      // below the cap keep the in-memory path and their file observation.
+      if (stat.size > FILE_OBSERVATION_MAX_BYTES) return readLargeTextFile(file, num(args.offset), num(args.limit)).then((content) => ({ content }));
       let content = readUtf8File(file);
       const fileObservation = observeWorkspaceFile(ctx.cwd, String(args.path), "read", content);
       const offset = num(args.offset);
@@ -611,11 +744,18 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
       if (!command) throw new Error("command must be a non-empty string");
       const requested = num(args.timeout_ms);
       const timeout = Math.min(Math.max(requested && requested > 0 ? requested : 120_000, 1_000), 600_000);
+      // Below full permission the command runs in the working-folder sandbox. A command that would start a process outside
+      // it through an OS launcher is refused first: the sandbox cannot stop that (same rule as Claude Code write runs).
+      const confined = ctx.permission !== "full";
+      if (confined && !ctx.confineShell) throw new Error(`permission denied: 'bash' requires 'full' but this run has '${ctx.permission}'.`);
+      const escape = confined ? classifyLaunchEscape(command) : null;
+      if (escape) throw new Error(launchEscapeDenialReason(escape, PERMISSION_ESCALATION_MARKER));
+      const launch = confined ? ctx.confineShell!(command) : { file: "bash", args: ["-lc", command] };
       // ★비동기 spawn 을 쓴다. 터미널 사본은 spawnSync 였는데, 데스크탑에서 그러면
       // 명령이 끝날 때까지 **메인 프로세스 전체가 멈춘다**(UI·다른 실행·IPC 포함).
       // 최대 10분짜리 도구가 앱을 10분 얼리는 것은 도구가 아니라 결함이다.
       return await new Promise<string>((resolve, reject) => {
-        const child = spawn("bash", ["-lc", command], {
+        const child = spawn(launch.file, launch.args, {
           cwd: ctx.cwd,
           env: ctx.env ?? process.env,
         });
@@ -676,14 +816,19 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
 
 const BY_NAME = new Map(BUILTIN_TOOLS.map((tool) => [tool.name, tool]));
 
+/** `bash` at write permission, inside the working-folder sandbox (BuiltinToolContext.confineShell). */
+function confinedShellAllowed(name: string, permission: ToolPermission, confined: boolean): boolean {
+  return name === "bash" && permission === "write" && confined;
+}
+
 /** 이 권한에서 **존재하는** 도구들. 부족한 도구는 목록에 아예 없다. */
 export function allowedBuiltinTools(
   permission: ToolPermission,
-  opts: { canAskUser?: boolean; canGenerateImage?: boolean; canBrowserDownload?: boolean; historyWorkTools?:readonly string[] } = {},
+  opts: { canAskUser?: boolean; canGenerateImage?: boolean; canBrowserDownload?: boolean; historyWorkTools?:readonly string[]; canConfineShell?: boolean } = {},
 ): BuiltinTool[] {
   const rank = PERM_RANK[permission] ?? 0;
   return BUILTIN_TOOLS.filter((tool) => {
-    if (PERM_RANK[tool.minPerm] > rank) return false;
+    if (PERM_RANK[tool.minPerm] > rank && !confinedShellAllowed(tool.name, permission, opts.canConfineShell === true)) return false;
     if (tool.name.startsWith("history_work_") && !opts.historyWorkTools?.includes(tool.name)) return false;
     // 물을 표면이 없으면 묻는 도구도 없다 — 있는데 못 쓰는 도구는 함정이다.
     if (tool.name === "ask_user" && !opts.canAskUser) return false;
@@ -699,7 +844,7 @@ export function builtinToolByName(name: string): BuiltinTool | undefined {
 }
 
 /** OpenAI 함수 호출 형식. */
-export function builtinToolsAsOpenAi(permission: ToolPermission, opts: { canAskUser?: boolean; canGenerateImage?: boolean; canBrowserDownload?: boolean; historyWorkTools?:readonly string[] } = {}): {
+export function builtinToolsAsOpenAi(permission: ToolPermission, opts: { canAskUser?: boolean; canGenerateImage?: boolean; canBrowserDownload?: boolean; historyWorkTools?:readonly string[]; canConfineShell?: boolean } = {}): {
   type: "function";
   function: { name: string; description: string; parameters: Record<string, unknown> };
 }[] {
@@ -710,7 +855,7 @@ export function builtinToolsAsOpenAi(permission: ToolPermission, opts: { canAskU
 }
 
 /** Anthropic 도구 형식. */
-export function builtinToolsAsAnthropic(permission: ToolPermission, opts: { canAskUser?: boolean; canGenerateImage?: boolean; canBrowserDownload?: boolean; historyWorkTools?:readonly string[] } = {}): {
+export function builtinToolsAsAnthropic(permission: ToolPermission, opts: { canAskUser?: boolean; canGenerateImage?: boolean; canBrowserDownload?: boolean; historyWorkTools?:readonly string[]; canConfineShell?: boolean } = {}): {
   name: string;
   description: string;
   input_schema: Record<string, unknown>;
@@ -734,7 +879,7 @@ export async function runBuiltinTool(
 ): Promise<BuiltinToolRunResult & { ok: boolean }> {
   const tool = BY_NAME.get(name);
   if (!tool) return { ok: false, content: `unknown tool: ${name}` };
-  if (PERM_RANK[tool.minPerm] > (PERM_RANK[ctx.permission] ?? 0)) {
+  if (PERM_RANK[tool.minPerm] > (PERM_RANK[ctx.permission] ?? 0) && !confinedShellAllowed(name, ctx.permission, !!ctx.confineShell)) {
     return {
       ok: false,
       content: `permission denied: '${name}' requires '${tool.minPerm}' but this run has '${ctx.permission}'.`,
