@@ -1108,10 +1108,31 @@ async function harnessOwnerTurn(ctx: HarnessCallContext): Promise<boolean> {
   }
 }
 
-export async function callHarnessPort(operationId: string, args: Record<string, unknown>, ctx: HarnessCallContext): Promise<HarnessPortResult> {
+/**
+ * A required "<x>Id" also arrives as "<x>", or as "id" when it is the operation's only required id. Production 2026-10-17
+ * (Yotube room, 1.3.61): skill.read {skill:"motion-explainer-video-producer"} and tool.describe {id:"provider.request"} were
+ * refused as arguments_missing although the value was right there, and each refusal cost the model another turn. The
+ * same alias rule as the operation key itself (turn-tools/control-server.ts harnessId). An exact key always wins, and only
+ * a non-empty string is carried over.
+ */
+function withRequiredIdAliases(required: readonly string[], args: Record<string, unknown>): Record<string, unknown> {
+  const text = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
+  const ids = required.filter((key) => /^[a-z][A-Za-z]*Id$/.test(key));
+  let out = args;
+  for (const key of ids) {
+    if (out[key] !== undefined && out[key] !== null && !(typeof out[key] === "string" && !(out[key] as string).trim())) continue;
+    const stem = key.slice(0, -2);
+    const alias = text(args[stem]) ? stem : ids.length === 1 && text(args.id) ? "id" : null;
+    if (alias) out = { ...out, [key]: args[alias] };
+  }
+  return out;
+}
+
+export async function callHarnessPort(operationId: string, rawArgs: Record<string, unknown>, ctx: HarnessCallContext): Promise<HarnessPortResult> {
   const port = PORT_BY_ID.get(operationId);
   const base = { schemaVersion: "agentlas.harness-result.v1" as const, operationId };
   if (!port) return { ...base, status: "refused", reason: "operation_unknown", next: "harness_search with kind \"operation\" lists them", receiptId: `hr_${randomUUID()}` };
+  const args = withRequiredIdAliases(port.required, rawArgs);
   const missing = port.required.filter((key) => args[key] === undefined || args[key] === null || (typeof args[key] === "string" && !(args[key] as string).trim()));
   if (missing.length) return { ...base, status: "refused", reason: "arguments_missing", next: `required: ${missing.join(", ")}`, receiptId: `hr_${randomUUID()}` };
   if (!port.handler) return { ...base, status: "unavailable", reason: port.unavailable!.reason, next: port.unavailable!.next, receiptId: `hr_${randomUUID()}` };
