@@ -73,6 +73,7 @@ import {
 } from "./proxy-channel";
 import { mcpProxyApprovalPort, READ_ONLY_BROWSER_TOOLS } from "./proxy-server";
 import { userDataPath } from "../runtime-paths";
+import { HEPHAESTUS_NETWORK_WORK_CORE_TOOLS, hephaestusClaudeDeniedTools, registerMcpToolSurfaceDenial, type HephaestusToolSurface } from "./hephaestus-tool-surface";
 import { agentRunCwd } from "../runtime/exec";
 import {
   BROWSER_CDP_LAUNCHER_BASENAME,
@@ -210,6 +211,11 @@ export interface McpConfigBuildOptions {
   catalogIds?: string[];
   /** Graph-declared ids before the selected-tool union; used for safe canonical aliases. */
   requiredToolCatalogIds?: string[];
+  /**
+   * Which `hephaestus-network` tools the model sees (hephaestus-tool-surface.ts). Absent = every tool the engine lists;
+   * an ordinary Work turn asks for `work-core`. Codex binds it as `enabled_tools`, Claude Code as `--disallowedTools`.
+   */
+  hephaestusToolSurface?: HephaestusToolSurface;
   /** Main-authoritative exact server allowlist. Prefer this for consented Build plans. */
   serverIds?: string[];
   /** Build plans must never seed defaults as a side effect of config serialization. */
@@ -775,6 +781,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   const mcpServers: Record<string, unknown> = {};
   const allowedTools: string[] = [];
   const codexConfigArgs: string[] = [];
+  const toolSurfaceDenied: string[] = [];
   const runtimeEnv: Record<string, string> = {};
   const mainOnlyRemoteAliases = new Set<string>();
   let nativeBrowserBound = false;
@@ -794,9 +801,11 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   let osExecution:SupervisorOsExecutionOutcome|null|undefined;
   let releasePrepared: (() => boolean) | undefined;
   let released = false;
+  let releaseToolSurfaceDenial: (() => void) | undefined;
   const cleanup = () => {
     if (released) return;
     released = true;
+    releaseToolSurfaceDenial?.();
     const ownsFile = releasePrepared?.() === true;
     for (const handle of proxyHandles) revokeMcpProxyLaunch(handle);
     for (const handle of residentProxyHandles) {
@@ -1288,6 +1297,12 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         if (aliases.length > 0) {
           pushCodexConfig(codexConfigArgs, key, "env_vars", tomlStringArray(aliases));
         }
+        if (s.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID && opts?.hephaestusToolSurface === "work-core") {
+          // Fixed for every ordinary turn of a conversation: the thread's MCP table digest (codexMcpThreadConfig)
+          // covers this list, so a list that flipped per turn would rebind the thread and break the cached prefix.
+          pushCodexConfig(codexConfigArgs, key, "enabled_tools", tomlStringArray([...HEPHAESTUS_NETWORK_WORK_CORE_TOOLS]));
+          toolSurfaceDenied.push(...hephaestusClaudeDeniedTools(key));
+        }
         if (browserReadOnly && codexLaunch) {
           // Codex's own gate stays "never" for everything else. Only the read-only
           // profile's tools are pre-approved at the vendor layer, and every one of
@@ -1488,6 +1503,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     endpoint: opts.nativeBrowser.endpoint, token: opts.nativeBrowser.token,
     ...(opts.nativeBrowser.nativeComputerUse ? { nativeComputerUse: opts.nativeBrowser.nativeComputerUse } : {}),
   };
+  releaseToolSurfaceDenial = registerMcpToolSurfaceDenial(configPath, toolSurfaceDenied);
   releasePrepared = registerPreparedMcpConfig({ path: configPath, servers: preparedRows, runtimeEnv,
     buildOptions: delegationBuildOptions, isCurrent: () => {
     if (opts?.admissionCurrent && !opts.admissionCurrent()) return false;

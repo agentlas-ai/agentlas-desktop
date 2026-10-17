@@ -4036,6 +4036,9 @@ async function runMcpInvocationInContext(
         ...(req.requiredToolCatalogIds?.length
           ? { requiredToolCatalogIds: req.requiredToolCatalogIds }
           : {}),
+        // Owner 2026-10-17: an ordinary turn carries the work-core Hub tools (hephaestus-tool-surface.ts). A graph or
+        // owner that requires the network server by name gets every tool the engine lists.
+        ...(req.requiredToolCatalogIds?.includes("hephaestus-network") ? {} : { hephaestusToolSurface: "work-core" as const }),
         /*
          * ★도구 관문을 이 실행에 붙인다 — 어느 런타임이든.
          *

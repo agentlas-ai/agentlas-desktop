@@ -3,6 +3,7 @@ import { reportModelPayload, ledgerFromCliSent } from "./model-call-ledger";
 import { recordNativeCompaction } from "./native-compaction-event";
 import { ClaudeTaskPlanTracker, createRuntimePlanEmitter } from "./runtime-plan";
 import { claudeMcpIsolation, withClaudePersonalContext, withDisallowedTools } from "./claude-personal-context";
+import { mcpToolSurfaceDenial } from "../mcp-tools/hephaestus-tool-surface";
 import { recordClaudeCapabilityRequest, recordClaudeCapabilityInit } from "./capability-receipt";
 import { claudeBrowserSurfaceArgs, claudeEngineBrowserEnabled } from "./claude-browser-surface";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
@@ -1406,7 +1407,7 @@ const runClaudeTurn = async (
           ...permArgs,
           ...noToolsArgs,
           ...minimalObservationArgs,
-          ...withDisallowedTools(browserOnlyArgs, mcpIsolation.deny),
+          ...withDisallowedTools(browserOnlyArgs, [...mcpIsolation.deny, ...mcpToolSurfaceDenial(runReq.mcpConfigPath)]),
           ...mcpIsolationArgs,
           ...isolatedMcpArgs,
           ...mcpArgs,
@@ -1427,7 +1428,7 @@ const runClaudeTurn = async (
           ...permArgs,
           ...noToolsArgs,
           ...minimalObservationArgs,
-          ...withDisallowedTools(browserOnlyArgs, mcpIsolation.deny),
+          ...withDisallowedTools(browserOnlyArgs, [...mcpIsolation.deny, ...mcpToolSurfaceDenial(runReq.mcpConfigPath)]),
           ...mcpIsolationArgs,
           ...isolatedMcpArgs,
           ...mcpArgs,
