@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { getDb } from "../store/db";
+import { pruneJudgmentVerdicts } from "../store/judgment-verdict-retention";
 import { getMeta, setMeta } from "../store/meta";
 import { retireManagedMigrationBackups, type MigrationBackupRetention } from "../store/migration-backup-retention";
 import { clearRuntimeSession } from "../store/runtime-sessions";
@@ -48,6 +49,7 @@ export interface StorageMaintenanceReport {
   transcripts: { sessions: number; orphans: number; bytes: number };
   runDetail: { runs: number; deleted: number; compacted: number; complete: boolean; watermarkTs: string | null };
   triggerEvents: { compacted: number; complete: boolean };
+  judgmentVerdicts: { deleted: number; complete: boolean };
   telegramAttachments: { folders: number; bytes: number };
   cloudPackages: { dirs: number; bytes: number };
   /** Managed DB-upgrade copies above the cap of three (store/migration-backup-retention.ts). */
@@ -60,6 +62,8 @@ const WATERMARK_KEY = "storage.runDetail.watermark.v1";
 const RUN_DETAIL_SLICES_PER_PASS = 40;
 const TRIGGER_EVENT_BATCH = 500;
 const TRIGGER_EVENT_BATCHES_PER_PASS = 20;
+const JUDGMENT_VERDICT_BATCH = 500;
+const JUDGMENT_VERDICT_BATCHES_PER_PASS = 20;
 const yieldToLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 /**
@@ -206,6 +210,15 @@ export async function runStorageMaintenance(now = Date.now()): Promise<StorageMa
       triggerEvents.compacted += removed;
       if (removed < TRIGGER_EVENT_BATCH) { triggerEvents.complete = true; break; }
     }
+    const judgmentVerdicts = { deleted: 0, complete: false };
+    const verdictCutoff = new Date(now - STORAGE_POLICY.judgmentVerdictDays * DAY_MS).toISOString();
+    for (let batch = 0; batch < JUDGMENT_VERDICT_BATCHES_PER_PASS; batch += 1) {
+      await yieldToLoop();
+      const removed = withShortBusyWait(db, () => pruneJudgmentVerdicts(verdictCutoff, JUDGMENT_VERDICT_BATCH));
+      if (removed === null) break;
+      judgmentVerdicts.deleted += removed;
+      if (removed < JUDGMENT_VERDICT_BATCH) { judgmentVerdicts.complete = true; break; }
+    }
     const telegramAttachments = await pruneTelegramAttachmentCopies(userDataPath("agent-cwd"), {
       keepDays: STORAGE_POLICY.telegramAttachmentDays,
       now,
@@ -224,6 +237,7 @@ export async function runStorageMaintenance(now = Date.now()): Promise<StorageMa
       transcripts: { sessions: transcripts.sessions, orphans: transcripts.orphans, bytes: transcripts.bytes },
       runDetail,
       triggerEvents,
+      judgmentVerdicts,
       telegramAttachments,
       cloudPackages,
       migrationBackups,
@@ -265,14 +279,14 @@ export function startStorageMaintenance(options: {
     }
     if (!report) return;
     // A blocked backup cap is printed too, so "nothing freed" is never silent about why.
-    if (report.freedBytes > 0 || report.runDetail.runs > 0 || report.triggerEvents.compacted > 0
+    if (report.freedBytes > 0 || report.runDetail.runs > 0 || report.triggerEvents.compacted > 0 || report.judgmentVerdicts.deleted > 0
       || report.migrationBackups.skipped !== "none") {
       console.info(`[storage] freed ${report.freedBytes} bytes; intermediates ${report.intermediates.files} files; `
         + `transcripts ${report.transcripts.sessions}+${report.transcripts.orphans}; run detail ${report.runDetail.runs} runs `
         + `(deleted ${report.runDetail.deleted}, compacted ${report.runDetail.compacted}, complete ${report.runDetail.complete}, `
         + `watermark ${report.runDetail.watermarkTs ?? "none"}); `
         + `trigger events compacted ${report.triggerEvents.compacted}; telegram copies ${report.telegramAttachments.folders}; `
-        + `cloud packages ${report.cloudPackages.dirs}; `
+        + `judgment verdicts deleted ${report.judgmentVerdicts.deleted}; cloud packages ${report.cloudPackages.dirs}; `
         + `migration backups removed ${report.migrationBackups.removed} (${report.migrationBackups.bytes} bytes, skipped ${report.migrationBackups.skipped})`);
     }
     if (!report.lowDisk || report.freeBytes === null) return;

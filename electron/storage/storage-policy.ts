@@ -20,6 +20,8 @@
  * - cloud agent package folders (cloud-agent-packages/<slug>-<stamp>/, the
  *   JSON bundle written for each Cloud save or publish and read only during
  *   it): removed after 7 days; the newest folder of each agent always stays
+ * - durable judgment verdicts (a cache of model verdicts): removed 30 days
+ *   after their last use; a removed one costs one model call at most
  * - managed DB-upgrade copies (agentlas.sqlite.migration-backup.v1.*): the
  *   newest three stay (store/db.ts MAX_MANAGED_MIGRATION_BACKUPS); older ones
  *   go after integrity checks of the live store and of the three that stay.
@@ -31,6 +33,7 @@ export const STORAGE_POLICY = {
   triggerEventDeliveredDays: 30,
   telegramAttachmentDays: 7,
   cloudPackageDays: 7,
+  judgmentVerdictDays: 30,
   /** "Done" for a project whose agent recorded a verified finish (verification.json or .agentlas-complete). */
   intermediateIdleMinutes: 10,
   /**
