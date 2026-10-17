@@ -23,9 +23,8 @@
 
 import crypto from "node:crypto";
 import { promises as fsp } from "node:fs";
-import { AUTOMATION_PROFILE_FLAGS } from "../browser/automation-profile-flags";
 import http from "node:http";
-import { spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { AddressInfo } from "node:net";
 import {
   CLIENT_CAPABILITIES_META_KEY, CLIENT_INFO_META_KEY, LATEST_PROTOCOL_VERSION,
@@ -34,16 +33,6 @@ import {
 
 import { deleteSecret, readSecret, setSecret } from "../secrets/vault";
 import { userDataPath } from "../runtime-paths";
-import {
-  browserCdpPort,
-  browserCdpPortReady,
-  browserCdpProfilePath,
-  ensureBrowserCdpProfilePrivate,
-  reconcileBrowserCdpOwnerWithRetry,
-  resolveChromeExe,
-  scheduleBrowserCdpGuardian,
-  withBrowserCdpMaintenance,
-} from "./browser-cdp-launcher";
 
 /** 발견·등록·토큰의 만료 없는 부분. 값(토큰)은 별도 시크릿에 둔다. */
 export interface McpOAuthSession {
@@ -70,7 +59,8 @@ interface StoredTokens {
 const DISCOVERY_TIMEOUT_MS = 10_000;
 const TOKEN_TIMEOUT_MS = 15_000;
 /** 사람이 브라우저에서 동의를 마칠 때까지 기다리는 시간. */
-const AUTHORIZE_TIMEOUT_MS = 5 * 60_000;
+// Long enough to switch to another browser window and sign in before approving (owner 2026-10-17 missed 5 min).
+const AUTHORIZE_TIMEOUT_MS = 10 * 60_000;
 /** 만료 직전에 미리 갱신하는 여유. 실행 도중 만료돼 호출이 깨지는 것을 막는다. */
 const REFRESH_SKEW_MS = 60_000;
 const MAX_METADATA_BYTES = 256 * 1024;
@@ -432,58 +422,39 @@ async function metadataDocumentClient(rawUrl: string): Promise<{ clientId: strin
 }
 
 /**
- * 인가 URL을 Agentlas 전용 Chrome으로 연다.
+ * 인가 URL을 사용자의 기본 브라우저로 연다.
  *
- * 이 한 줄이 "이미 로그인돼 있으면 동의만 누르면 된다"를 만든다. 기본 브라우저로 열면
- * 사용자가 Agentlas에 붙여 둔 로그인이 쓰이지 않아, 자격증명을 가져온 의미가 사라진다.
- * Chrome을 못 찾으면 호출자가 URL을 사람에게 보여줄 수 있도록 false를 돌려준다 —
- * 조용히 다른 브라우저로 흘려보내지 않는다.
+ * 오너 실측(2026-10-17, ElevenLabs): Agentlas 전용 Chrome(자동화 프로필, 원격 디버깅)으로 열면 평소 로그인
+ * 쿠키가 없고, Google 로그인은 원격 디버깅 브라우저를 거절해 "로그인 아예 안 됨"이 됐다. 같은 URL을 기본
+ * 브라우저로 열자 이미 로그인된 탭에서 바로 승인됐다. Claude Code·Codex·Gemini CLI·OpenCode 도 OAuth 를
+ * 시스템 기본 브라우저와 loopback redirect 로 연다. 데몬처럼 Electron 이 없는 호스트에서는 OS 오프너를 쓴다.
+ * 열지 못하면 false — 시작 응답의 manualUrl 링크가 그대로 남는다.
  */
-async function openInAgentlasChrome(url: string, signal?: AbortSignal): Promise<boolean> {
-  if (signal?.aborted) return false;
-  const exe = resolveChromeExe();
-  if (!exe) return false;
+async function openInDefaultBrowser(url: string): Promise<boolean> {
+  if (!/^https:\/\//i.test(url)) return false;
   try {
-    await withBrowserCdpMaintenance(async () => {
-      signal?.throwIfAborted();
-      ensureBrowserCdpProfilePrivate();
-      const child = spawn(exe, [
-        `--user-data-dir=${browserCdpProfilePath()}`,
-        `--remote-debugging-port=${browserCdpPort()}`,
-        "--remote-debugging-address=127.0.0.1",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--restore-last-session=false",
-        "--disable-session-crashed-bubble",
-        // Same profile as the automation browser: no component or on-device
-        // model downloads from this window either.
-        ...AUTOMATION_PROFILE_FLAGS,
-        "--disable-component-update",
-        "--disable-background-networking",
-        "--new-window",
-        url,
-      ], { detached: true, stdio: "ignore" });
-      child.unref();
-      for (let attempt = 0; attempt < 40; attempt += 1) {
-        signal?.throwIfAborted();
-        if (await browserCdpPortReady()) {
-          const ownership = await reconcileBrowserCdpOwnerWithRetry({ attempts: 2, delayMs: 50 });
-          if (ownership.state === "owned" && ownership.pid) {
-            scheduleBrowserCdpGuardian(ownership.pid);
-            return;
-          }
-          if (ownership.state === "foreign") {
-            throw new Error(`OAuth browser ownership verification failed (${ownership.reason}).`);
-          }
-        }
-        await new Promise<void>((resolve) => setTimeout(resolve, 250));
-      }
-      throw new Error("OAuth browser did not become ready.");
-    });
-    return true;
-  } catch {
-    return false;
-  }
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const electron = require("electron") as typeof import("electron") | string;
+    if (typeof electron === "object" && electron?.shell?.openExternal) {
+      await electron.shell.openExternal(url);
+      return true;
+    }
+  } catch { /* no Electron in this host: use the OS opener */ }
+  const [command, args] = process.platform === "darwin" ? ["/usr/bin/open", [url]]
+    : process.platform === "win32" ? ["explorer.exe", [url]]
+      : ["xdg-open", [url]];
+  return new Promise<boolean>((resolve) => {
+    execFile(command as string, args as string[], { timeout: 10_000 }, (error) => resolve(!error || process.platform === "win32"));
+  });
+}
+
+function oauthFailureReason(status: string, failure: unknown): string {
+  const raw = failure instanceof Error ? failure.message : status;
+  if (/timed out/i.test(raw)) return "consent_timeout";
+  if (/callback was closed/i.test(raw)) return "callback_closed";
+  if (/state|issuer/i.test(raw)) return "callback_mismatch";
+  if (/token|exchange|HTTP \d{3}/i.test(raw)) return "token_exchange_failed";
+  return status === "cancelled" ? "cancelled" : "authorization_failed";
 }
 
 export interface McpOAuthAuthorizeResult {
@@ -662,8 +633,9 @@ async function beginMcpOAuthAuthorization(input: McpOAuthAuthorizationInput): Pr
     activeAuthorizations.set(input.serverId, attempt);
     const codePromise = waitForAuthorizationCode(callbackServer, state, discovery.issuer, discovery.authorizationResponseIssuerSupported);
     void codePromise.catch(() => {});
-    const browserOpened = openInAgentlasChrome(authorizeUrl.toString(), controller.signal);
+    const browserOpened = openInDefaultBrowser(authorizeUrl.toString());
     attempt.completion = (async () => {
+      let failure: unknown = null;
       try {
         const code = await codePromise;
         controller.signal.throwIfAborted();
@@ -683,6 +655,7 @@ async function beginMcpOAuthAuthorization(input: McpOAuthAuthorizationInput): Pr
         attempt.status = "connected";
         return { session, manualUrl: await browserOpened ? null : authorizeUrl.toString() };
       } catch (error) {
+        failure = error;
         if (controller.signal.aborted && !attempt.cleanupFailed) attempt.status = "cancelled";
         else {
           attempt.status = "failed";
@@ -694,6 +667,8 @@ async function beginMcpOAuthAuthorization(input: McpOAuthAuthorizationInput): Pr
         controller.abort();
         await closeAuthorizationCallback(callbackServer);
         attempt.finishedAt = Date.now();
+        // An approval that never reached Agentlas left nothing to read (owner 2026-10-17); say what happened.
+        console.info(`[mcp-oauth] ${input.serverId.slice(0, 8)} ${attempt.status}${attempt.status === "connected" ? "" : ` (${oauthFailureReason(attempt.status, failure)})`}`);
         if (activeAuthorizations.get(input.serverId) === attempt) activeAuthorizations.delete(input.serverId);
       }
     })();

@@ -441,8 +441,8 @@ export function LoginStep({
           </h2>
           <p className={styles.keySub}>
             {ko
-              ? "Agentlas 브라우저에서 동의 화면이 열립니다. 이미 로그인해 두셨다면 아이디를 다시 칠 필요 없이 허용만 누르시면 됩니다."
-              : "A consent screen opens in the Agentlas browser. If you are already signed in there, just approve — no need to type your credentials again."}
+              ? "평소 쓰시는 기본 브라우저에서 공식 동의 화면이 열립니다. 이미 로그인돼 있다면 허용만 누르시면 됩니다."
+              : "The official consent screen opens in your default browser. If you are already signed in there, just approve."}
           </p>
         </div>
       </header>
