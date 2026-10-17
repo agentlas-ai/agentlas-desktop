@@ -116,6 +116,22 @@ function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown
  * code), or a tool.call that settled tool-error/failed/cancelled. In flight or unknown effect (dispatching, running,
  * dispatch-unsettled) is not failed: the effect may have happened, so it stays an effect, never "nothing happened".
  */
+/** The first non-empty string under these keys, in order. */
+export function harnessId(a: Record<string, unknown>, keys: readonly string[]): string {
+  for (const key of keys) if (typeof a[key] === "string" && (a[key] as string).trim()) return (a[key] as string).trim();
+  return "";
+}
+
+/** harness_call arguments under args (or input/arguments), as an object or a JSON object string. */
+export function harnessArgs(a: Record<string, unknown>): Record<string, unknown> {
+  for (const key of ["args", "input", "arguments"]) {
+    let value = a[key];
+    if (typeof value === "string") { try { value = JSON.parse(value); } catch { continue; } }
+    if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+  }
+  return {};
+}
+
 export function harnessCallFailureCode(operation: unknown, result: unknown): string | null {
   if (operation !== "harness_call" && operation !== "harness_describe") return null;
   if (!result || typeof result !== "object") return null;
@@ -256,9 +272,12 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
         const kind = typeof a.kind === "string" ? a.kind as Parameters<typeof harness.searchHarness>[1] : undefined;
         return { items: await harness.searchHarness(typeof a.query === "string" ? a.query.slice(0, 500) : "", kind) };
       }
-      if (operation === "harness_describe") return harness.describeHarness(typeof a.id === "string" ? a.id : "", ctx);
-      const args = a.args && typeof a.args === "object" && !Array.isArray(a.args) ? a.args as Record<string, unknown> : {};
-      return harness.callHarnessPort(typeof a.operation === "string" ? a.operation : "", args, ctx);
+      // A model passes the id it just read under the key that result used: dev replay r09 (2026-10-17) Film sent
+      // harness_call {id:"media.listen",args} (harness_search items are {id}) and then {operationId:"media.listen",
+      // input:"{…}"} (harness_describe answers {operationId}); both were refused operation_unknown before it found
+      // `operation`. The id is the same under any of these keys, and arguments may arrive as an object or a JSON string.
+      if (operation === "harness_describe") return harness.describeHarness(harnessId(a, ["id", "operationId", "operation", "name"]), ctx);
+      return harness.callHarnessPort(harnessId(a, ["operation", "operationId", "id", "name"]), harnessArgs(a), ctx);
     }
     default:
       throw new Error("turn-tools-operation-invalid");
