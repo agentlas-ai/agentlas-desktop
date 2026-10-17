@@ -298,7 +298,10 @@ export async function loadMainToolInventory(
   // 한다. 권한 칩보다 위의 도구는 목록에 **아예 없다** — "있는데 거절"이 아니라 "없다".
   const historyWorkTools=currentHistoryRuntimeFence()?(await import("../one/personal-integrations-runtime")).currentOneHistoryWorkTools():[];
   if (!collectionBinding && ((workspaceRoot && !browserOnly) || canBrowserDownload || historyWorkTools.length)) {
-    for (const def of builtinToolsAsOpenAi(permission, { canAskUser, canGenerateImage, canBrowserDownload, historyWorkTools })) {
+    // A write run gets `bash` only inside the working-folder sandbox (confined-shell.ts); where none exists it has no shell.
+    const canConfineShell = permission === "write" && !!workspaceRoot && !browserOnly
+      && (await (await import("./confined-shell")).writeConfinedShell(workspaceRoot)) !== null;
+    for (const def of builtinToolsAsOpenAi(permission, { canAskUser, canGenerateImage, canBrowserDownload, historyWorkTools, canConfineShell })) {
       if(historyWorkTools.length&&!historyWorkTools.includes(def.function.name))continue;
       if ((browserOnly || !workspaceRoot) && def.function.name !== "browser_download"&&!historyWorkTools.includes(def.function.name)) continue;
       tools.push(def);
@@ -985,11 +988,15 @@ async function dispatchMainToolRawUnchecked(
         return { content: `Error: ${content}`, visionMessage: null, isError: true };
       }
     }
+    const builtinCwd = approval.cwd ?? process.cwd();
+    const confineShell = resolved.builtinName === "bash" && approval.permission === "write"
+      ? await (await import("./confined-shell")).writeConfinedShell(builtinCwd) : null;
     const outcome = await runBuiltinTool(resolved.builtinName, args, {
-      cwd: approval.cwd ?? process.cwd(),
+      cwd: builtinCwd,
       permission: (approval.permission ?? "read") as ToolPermission,
       signal: approval.signal,
       ...(shellEnv ? { env: shellEnv } : {}),
+      ...(confineShell ? { confineShell } : {}),
       ...(downloadProof ? {browserDownload:downloadProof.download} : {}),
       ...(currentHistoryRuntimeFence()?{historyWork:async(name:string,value:Record<string,unknown>)=>{
         if(name==="history_work_draft")return withCurrentHistoryProducer("agent",p=>p.agent.draftFinite(value),()=>{throw new Error("history_work_original_scope_required")});
