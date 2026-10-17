@@ -93,6 +93,16 @@ export const ASK_LINE =
   "ask: call ask_form or ask_user for a real choice; no tool → end with <<agentlas-ask>>{\"question\":\"…?\",\"options\":[{\"label\":\"…\"}]}<</agentlas-ask>>";
 
 export const UI_LINE = "ui: call read_ui_schema before showing ui; surface: read_surface_protocol";
+/**
+ * The live document ports (document.*, live-document/ports.ts) are reachable only through harness_call, and both
+ * Claude Code and Codex list MCP tools behind a search, so a run asked to change a docx rewrote it with a script and the
+ * owner never saw the edit in the Document tab. Real-model A/B (2026-10-17, real agentlas-turn server and ports,
+ * /tmp/prompt-audit/doc-ab/real, task "change paragraph 2 of report.docx and save", 6 runs per arm): document.* called
+ * claude 0/6 and codex 0/6 without a system line, claude 6/6 and codex 6/6 with this line alone; the MCP server
+ * instructions line alone gave claude 6/6 and codex 0/6; dedicated document_* tools gave claude 6/6 and codex 0/6.
+ */
+export const DOCUMENTS_LINE =
+  "documents: to change a local xlsx/docx/pptx/hwpx/hwp file, use the agentlas-turn harness_call document.open → document.apply → document.save so the owner watches the edit typed in the Document tab; never rewrite the file with a script.";
 export const CONNECTIONS_LINE =
   [
     "connections: connector, browser or API, never \"no API\"; keys = env vars by tool name, never printed; logged-in browser/Vault first; auth.ensure before auth.login (missing or reauth only)",
@@ -165,6 +175,12 @@ registerPromptModule({
   render: (ctx) => ctx.profile === "restricted"
     ? "ui: prose only in this mode"
     : UI_LINE,
+});
+
+registerPromptModule({
+  id: "capability.documents", revision: 1, kind: "capability", layer: "S1", profiles: ["ordinary"],
+  stability: "fixed-policy", changeTriggers: ["release", "profile"], order: 0,
+  render: () => DOCUMENTS_LINE,
 });
 
 registerPromptModule({
