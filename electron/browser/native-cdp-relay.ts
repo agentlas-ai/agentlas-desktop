@@ -95,6 +95,20 @@ export function nativeBrowserCommandFailure(error: unknown): string {
     ? message : "native-browser-command-failed";
 }
 
+/** Playwright's scale:"css" sends visualViewport.scale over the layout ratio
+ * (device content width / CSS content width). Page zoom, including a level the
+ * browser partition kept per host, makes that ratio differ from 1; the clip
+ * still names the same CSS rectangle, so it is not a resampling request. */
+export function nativeScreenshotScaleAccepted(scale: unknown, metrics: {
+  contentSize?: { width?: unknown }; cssContentSize?: { width?: unknown }; visualViewport?: { scale?: unknown };
+} | null | undefined): boolean {
+  if (scale === undefined || scale === 1) return true;
+  if (typeof scale !== "number" || !Number.isFinite(scale) || scale <= 0) return false;
+  const ratio = Number(metrics?.contentSize?.width) / Number(metrics?.cssContentSize?.width);
+  const cssScale = Number(metrics?.visualViewport?.scale ?? 1) / (Number.isFinite(ratio) && ratio > 0 ? ratio : 1);
+  return Number.isFinite(cssScale) && cssScale > 0 && Math.abs(scale - cssScale) <= cssScale * 0.01;
+}
+
 async function waitForStableNativeBrowserViewport(
   ownerId: number,
   taskScopeId: string,
@@ -747,7 +761,7 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
       let documentClip: { x: number; y: number; width: number; height: number } | undefined;
       if (clip) {
         const values = [clip.x, clip.y, clip.width, clip.height];
-        if (!values.every((value) => typeof value === "number" && Number.isFinite(value)) || (clip.scale !== undefined && clip.scale !== 1)) throw new Error("native-browser-screenshot-clip-invalid");
+        if (!values.every((value) => typeof value === "number" && Number.isFinite(value)) || !nativeScreenshotScaleAccepted(clip.scale, metrics)) throw new Error("native-browser-screenshot-clip-invalid");
         const clipX = Number(clip.x);
         const clipY = Number(clip.y);
         const clipWidth = Number(clip.width);
