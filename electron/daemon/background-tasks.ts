@@ -298,14 +298,20 @@ export class BackgroundTaskRegistry {
   }
 
   /**
-   * Periodic upkeep: cap the output of tasks this instance runs, and prune finished tasks hourly. The cap keeps
-   * the last OUTPUT_KEEP_BYTES behind a one-line note. It is lossy by design: a line the task writes during the
-   * cut can be lost.
+   * Periodic upkeep: cap the output of tasks this instance runs and of lost tasks that still run, and prune
+   * finished tasks hourly. The cap keeps the last OUTPUT_KEEP_BYTES behind a one-line note. It is lossy by design:
+   * a line the task writes during the cut can be lost.
    */
   maintain(): void {
     for (const id of this.children.keys()) {
       const record = this.get(id);
       if (record) this.capOutput(record.outputPath);
+    }
+    // A task an earlier service started keeps appending after an update restarts the service
+    // (detached_still_running). Unlike stopLost, no start-time check: capping a file this service owns is harmless
+    // even if the pid was reused, and maintain() stays synchronous.
+    for (const record of this.list({ status: "lost" })) {
+      if (record.pid && pidAlive(record.pid)) this.capOutput(record.outputPath);
     }
     const now = (this.opts.now?.() ?? new Date()).getTime();
     if (now - this.lastPruneAt >= PRUNE_INTERVAL_MS) this.pruneFinished();
