@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.3.67 — 2026-10-18
+
+- A daily Goal you start with /goal can wait for its next day. Before, its wait was refused, so it kept checking the same state and posting the same report in the room all night.
+- A teammate's browser step that needs approval runs when the team works in the background. Before, every such step was cancelled.
+- A teammate's report that arrives while a Goal is waiting is delivered once with its next turn, instead of being sent again as a failed report.
+- A team's checker that ran the tests is counted as having run them, including Codex and runs that shorten or pipe the test output. Before, the team could finish its work and still end "not complete".
+- An automation run that finished and was judged fine is no longer treated as stuck. Read-only monitors stop switching models every other run.
+- A room's final answer no longer shows a raw access marker or a leftover memory block.
+- Listening to audio and video works when the app cannot find ffmpeg on its own path.
+- Science's right panel shows a read-only Preview of your manuscript drafts and data tables.
+- Other fixes: a removed automation's queued run stops cleanly; One Memory loads after the app's data folder moves; an app operation called without a required value is refused instead of answering empty; screenshots work on zoomed pages.
+- This release binds Agentlas OS v1.2.66 at c0acd99be22114569e20bca94bed4540ba046eb4; public runtime asset `hephaestus-runtime-v1.2.66.tar.gz` is pinned at SHA-256 `20019d3ba4df1c540d0ef549c07a82188bd40fe12dafb2f8a6c75cc4bdcc89f7`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.66 — 2026-10-17
 
 - When a Goal resumes after a failed turn, it carries the message you sent that was never answered. Before, the app's own status notices counted as an answer and your message was dropped from the resumed turn.
