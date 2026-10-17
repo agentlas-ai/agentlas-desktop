@@ -37,6 +37,7 @@ import {
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult, RunnerFailure, RunnerFailureKind } from "./runner";
+import type { RuntimeToolKind } from "../../shared/runtime-tool-kind";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import { normalEndToolEvidence, settleNormalEnd } from "../../shared/turn-settlement";
 import { detectRuntimeRefusal } from "./runtime-refusal";
@@ -828,6 +829,22 @@ export function antigravityEmptyRunOutcome(input: {
   return undefined;
 }
 
+/**
+ * agy reports `step_type:"tool"` with its native `tool_name`, a fixed tool identifier rather than a display title. Known
+ * native tools map to the ACP tool kind (shared/runtime-tool-kind.ts); MCP calls, `finish`, image and browser tools are
+ * "other". Consumers read this kind, never the name (review 2026-10-16 H1).
+ */
+const AGY_TOOL_KINDS: Readonly<Record<string, RuntimeToolKind>> = {
+  run_command: "execute", send_command_input: "execute",
+  write_to_file: "edit", replace_file_content: "edit", multi_replace_file_content: "edit",
+  view_file: "read", view_file_outline: "read", view_code_item: "read", list_dir: "read", command_status: "read",
+  grep_search: "search", find_by_name: "search", codebase_search: "search",
+  read_url_content: "fetch", search_web: "fetch",
+};
+function agyToolKind(toolName: string): RuntimeToolKind {
+  return Object.prototype.hasOwnProperty.call(AGY_TOOL_KINDS, toolName) ? AGY_TOOL_KINDS[toolName] : "other";
+}
+
 export function reduceAgyLine(
   line: string,
   state: {
@@ -892,6 +909,8 @@ export function reduceAgyLine(
     done: boolean;
     /** Exact output argument from a successful, known write operation; never prose. */
     artifactPaths?: string[];
+    /** Typed kind from agy's native tool name (shared/runtime-tool-kind.ts); consumers never read `name` for it. */
+    kind?: RuntimeToolKind;
   };
 } {
   let ev: {
@@ -1123,6 +1142,7 @@ export function reduceAgyLine(
           result: done ? (stringify(output) ?? (step.state === "ERROR" ? (step.tool_info?.error?.message ?? "error") : "")) : undefined,
           done,
           ...(artifactPaths.length > 0 ? { artifactPaths } : {}),
+          kind: agyToolKind(name),
         },
       };
     }
@@ -2838,7 +2858,8 @@ async function runPreparedAntigravityAttempt(
             }
           }
           const artifactPaths = freshAgyArtifactPaths(toolArtifactPaths, invocationStartedAtMs);
-          events.onTool?.(step.tool.name, step.tool.args, step.tool.result, effectCoverage.toolId(step.tool.id), step.tool.failed, artifactPaths);
+          events.onTool?.(step.tool.name, step.tool.args, step.tool.result, effectCoverage.toolId(step.tool.id), step.tool.failed, artifactPaths,
+            undefined, undefined, step.tool.kind);
         }
       }
       /*

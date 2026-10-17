@@ -11,6 +11,7 @@ import { createHash } from "node:crypto";
 import { featureIsNative } from "../harness/feature-registry";
 import type { ChatHistoryEntry, ImageAttachment, McpInvocationEvent } from "../../shared/types";
 import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
+import type { RuntimeToolKind } from "../../shared/runtime-tool-kind";
 import type { InvocationPlan } from "../../shared/invocation-plan";
 import { tStatus, type RuntimeLocale } from "./status-i18n";
 import { composePrompt, ASK_LINE, type PluginCatalog } from "./prompt-modules";
@@ -702,8 +703,10 @@ export interface RunnerEvents {
    * `artifactPaths` is host-structured completion evidence, never parsed from
    * command/prose output. Main still opens and verifies every candidate before
    * it can reach One's Outputs rail.
+   * `toolKind` is the typed kind when the runtime reports one (ACP `ToolCall.kind`, agy's native tool), so consumers never
+   * classify a tool by its display name (shared/runtime-tool-kind.ts). Absent for runtimes with fixed native names.
    */
-  onTool?: (name: string, args?: string, result?: string, id?: string, isError?: boolean, artifactPaths?: readonly string[], imageDataUrl?: string, origin?: ToolInvocationOrigin) => void;
+  onTool?: (name: string, args?: string, result?: string, id?: string, isError?: boolean, artifactPaths?: readonly string[], imageDataUrl?: string, origin?: ToolInvocationOrigin, toolKind?: RuntimeToolKind) => void;
   /** 라이브 누적 출력 토큰 — 스트리밍 중 "N tokens" 실시간 표시용. 단조 증가 값(usage 실측 + 추정). 선택. */
   onUsage?: (tokens: number) => void;
   /** One host-minted id per native turn dispatched inside this runner, including retries. */

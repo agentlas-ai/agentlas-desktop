@@ -54,6 +54,7 @@ import { cliHistoryContextTokens, composeResumeTurnPrompt, renderConversationCon
   invalidateStableTurnContext, type StableTurnContextDelivery } from "./continuity";
 import { stageCliImageAttachments } from "./image-attachments";
 import { createRuntimePlanEmitter, CursorTodoPlanTracker, planFromAcpPlanUpdate } from "./runtime-plan";
+import type { RuntimeToolKind } from "../../shared/runtime-tool-kind";
 import { normalEndToolEvidence, settleNormalEnd } from "../../shared/turn-settlement";
 import type { InvocationPlan } from "../../shared/invocation-plan";
 import { agentContextColdBootstrapForRequest, agentContextDeliveryForRequest, agentContextSessionKey } from "./agent-context";
@@ -330,7 +331,8 @@ export class AcpSessionClient {
     const done = merged.status === "completed" || merged.status === "failed";
     if (!done || merged.reported) return;
     merged.reported = true;
-    this.events.onTool?.(name, text(merged.rawInput), text(merged.rawOutput ?? merged.content) ?? "", id, merged.status === "failed");
+    this.events.onTool?.(name, text(merged.rawInput), text(merged.rawOutput ?? merged.content) ?? "", id, merged.status === "failed",
+      undefined, undefined, undefined, kind as RuntimeToolKind);
   }
 
   effectReport(terminal: string | null): AdapterEffectReport {

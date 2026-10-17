@@ -250,6 +250,7 @@ import { bindOneRuntimeToolArtifacts, promoteBoundOneMarkdownImages } from "../o
 import { classifyToolFailure, toolFailureCopy } from "../../shared/tool-failure";
 import { resolveToolInvocationOrigin } from "../invocation/tool-origin";
 import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
+import type { RuntimeToolKind } from "../../shared/runtime-tool-kind";
 import { automationRegistrationMonitoring, hasAutomationRegistrationHandoff, resolveAutomationRegistrationTarget } from "../automation-registration";
 import { createAutomation, findAutomationByGoalId, getAutomation, listAutomations, toggleAutomation, updateAutomation, updateAutomationGraph } from "../store/automations";
 import { graphTeamGrantCurrent, type GraphTeamGrant } from "../one/graph-team-grant";
@@ -6480,7 +6481,8 @@ async function runMcpInvocationInContext(
         }
       },
       // Claude Code식 tool-use 블록 — 이름 + 인자 JSON
-      onTool: (name: string, args?: string, result?: string, id?: string, isError?: boolean, artifactPaths?: readonly string[], imageDataUrl?: string, dispatchedOrigin?: ToolInvocationOrigin) => {
+      // `_toolKind` (typed ACP/agy kind, runner.ts) is accepted so the forwarding wrapper keeps the runner signature.
+      onTool: (name: string, args?: string, result?: string, id?: string, isError?: boolean, artifactPaths?: readonly string[], imageDataUrl?: string, dispatchedOrigin?: ToolInvocationOrigin, _toolKind?: RuntimeToolKind) => {
         let sourceUrls: string[] | undefined;
         if (!isError && req.runId && !req.agentAppMode) {
           try {

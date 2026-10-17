@@ -1,18 +1,23 @@
 import fs from "node:fs";
 import path from "node:path";
+import type { RuntimeToolKind } from "../../shared/runtime-tool-kind";
 
 const TEST_PATH_RE = /(?:^|[\s"'`=(,])((?:(?:[A-Za-z]:|\.{0,2})[\\/]|[A-Za-z0-9_@-])[A-Za-z0-9_@.:\\/-]*\.(?:test|spec)\.[cm]?[jt]sx?)(?=$|[\s"'`),:;.])/giu;
-// Display names differ per runtime: Claude Code `Bash`/`Edit`, Codex `bash`/`apply_patch`, ACP agents (copilot, cursor,
-// grok, kimi) `<kind>: <title>` (runtime/acp.ts), Antigravity `run_command`/`write_to_file`/`replace_file_content`.
-// Review 2026-10-16 (desktop-b-03): only the first two matched, so a verification stage that ran the named test on an
-// ACP runtime or Antigravity reported named-test-not-executed. The typed tool kind belongs at the runner boundary
-// (handoff); until then every runtime's names are listed here.
-const MUTATION_TOOL_RE = /^(?:(?:apply_patch|write|edit|multiedit|notebookedit|bash|write_to_file|replace_file_content)$|(?:edit|delete|move)(?::|$))/iu;
-const SHELL_TOOL_RE = /^(?:(?:bash|shell|terminal|run_command)$|execute(?::|$))/iu;
+// A tool is classified by its typed kind when the runner reports one: ACP agents (copilot, cursor, grok, kimi) send
+// `ToolCall.kind`, and Antigravity's native tool maps to the same kinds (shared/runtime-tool-kind.ts, review 2026-10-16
+// H1). Their display names ("execute: <title>") are never read. Runtimes with fixed native names and no kind (Claude
+// Code `Bash`/`Edit`, Codex `bash`/`apply_patch`, the legacy Kimi driver's `Shell`) keep their native-name rule.
+const NATIVE_MUTATION_TOOL_RE = /^(?:apply_patch|write|edit|multiedit|notebookedit|bash)$/iu;
+const NATIVE_SHELL_TOOL_RE = /^(?:bash|shell|terminal)$/iu;
+const isMutationTool = (name: string, kind: RuntimeToolKind | undefined): boolean =>
+  kind ? kind === "edit" || kind === "delete" || kind === "move" || kind === "execute" : NATIVE_MUTATION_TOOL_RE.test(name);
+const isShellTool = (name: string, kind: RuntimeToolKind | undefined): boolean =>
+  kind ? kind === "execute" : NATIVE_SHELL_TOOL_RE.test(name);
 
 interface PendingTool {
   name: string;
   args?: string;
+  kind?: RuntimeToolKind;
 }
 
 export interface FirmExecutionEvidence {
@@ -221,25 +226,27 @@ export class FirmExecutionEvidenceCollector {
     id: string | undefined,
     isError: boolean | undefined,
     artifactPaths: readonly string[] | undefined,
+    toolKind?: RuntimeToolKind,
   ): void {
     const toolId = id?.trim() || null;
-    if (toolId && result === undefined && !isError) this.pending.set(toolId, { name, args });
+    if (toolId && result === undefined && !isError) this.pending.set(toolId, { name, args, ...(toolKind ? { kind: toolKind } : {}) });
     const pending = toolId ? this.pending.get(toolId) : undefined;
     const effectiveName = pending?.name ?? name;
     const effectiveArgs = args ?? pending?.args;
+    const effectiveKind = toolKind ?? pending?.kind;
     const completed = result !== undefined || isError === true;
     if (completed) {
       this.completedToolCount += 1;
       if (toolId) this.pending.delete(toolId);
     }
 
-    if (artifactPaths?.length && MUTATION_TOOL_RE.test(effectiveName)) {
+    if (artifactPaths?.length && isMutationTool(effectiveName, effectiveKind)) {
       for (const rawCandidate of artifactPaths.slice(0, 128)) {
         this.recordProjectArtifact(rawCandidate, effectiveArgs, effectiveName);
       }
     }
 
-    if (!completed || !SHELL_TOOL_RE.test(effectiveName)) return;
+    if (!completed || !isShellTool(effectiveName, effectiveKind)) return;
     const command = commandFromArgs(effectiveArgs);
     if (!command) return;
     if (!this.commandCwdInsideProject(command.cwd)) {

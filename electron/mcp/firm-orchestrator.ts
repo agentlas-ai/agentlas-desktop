@@ -1277,8 +1277,8 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
               if (turn.toMainBubble) p.sink({ kind: "partial", text });
             }
           },
-          onTool: (name, args, result, id, isError, artifactPaths, imageDataUrl) => {
-            executionEvidence.recordTool(name, args, result, id, isError, artifactPaths);
+          onTool: (name, args, result, id, isError, artifactPaths, imageDataUrl, _origin, toolKind) => {
+            executionEvidence.recordTool(name, args, result, id, isError, artifactPaths, toolKind);
             const tool = { name, args, result, id, isError, observationDigest: toolObservationDigest(artifactPaths, imageDataUrl) };
             emit({ kind: "tool-use", tool });
             if (turn.toMainBubble) p.sink({ kind: "tool-use", tool });
