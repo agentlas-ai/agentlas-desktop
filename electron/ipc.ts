@@ -978,6 +978,8 @@ const buildTranscripts = new Map<string, {
   startedAt: string;
   running: boolean;
   events: HephaestusBuildEvent[];
+  /** Events dropped from the front by the window below: events[i] is event number firstSeq + i of this build. */
+  firstSeq: number;
 }>();
 /** 한 빌드가 남기는 이벤트 상한 — 긴 빌드가 메모리를 무한히 쓰지 않게. */
 const BUILD_TRANSCRIPT_MAX_EVENTS = 4_000;
@@ -7808,6 +7810,7 @@ export function registerIpcHandlers(): void {
       startedAt: latest.startedAt,
       running: latest.running,
       events: latest.events,
+      firstSeq: latest.firstSeq,
     };
   });
 
@@ -7828,6 +7831,7 @@ export function registerIpcHandlers(): void {
       startedAt: new Date().toISOString(),
       running: true,
       events: [],
+      firstSeq: 0,
     });
     // 렌더러는 build() 응답을 await 한 뒤에야 채널을 구독하므로, 그 사이에 발생한 첫 이벤트
     // (예: 'build' stage 틱)가 유실될 수 있다. 렌더러가 buildReady 로 구독 완료를 알릴 때까지
@@ -7846,7 +7850,9 @@ export function registerIpcHandlers(): void {
       if (transcript) {
         transcript.events.push(ev);
         if (transcript.events.length > BUILD_TRANSCRIPT_MAX_EVENTS) {
-          transcript.events.splice(0, transcript.events.length - BUILD_TRANSCRIPT_MAX_EVENTS);
+          const dropped = transcript.events.length - BUILD_TRANSCRIPT_MAX_EVENTS;
+          transcript.events.splice(0, dropped);
+          transcript.firstSeq += dropped;
         }
       }
       if (ready) {

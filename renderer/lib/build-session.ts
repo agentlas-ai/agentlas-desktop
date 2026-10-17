@@ -451,18 +451,28 @@ async function reattachOnce(): Promise<boolean> {
   commit();
   // 리로드된 화면에는 살아 있는 이벤트 채널이 없다(채널 구독은 빌드를 시작한
   // 렌더러 인스턴스에 묶여 있다). 전사를 주기적으로 다시 읽어 새 이벤트만 잇는다.
-  if (active.running) pollReattached(active.events.length);
+  if (active.running) pollReattached(active.runId, (active.firstSeq ?? 0) + active.events.length);
   return true;
 }
 
-function pollReattached(seen: number): void {
+/**
+ * Follows a reattached build by re-reading Main's transcript (independent review wave 2, clients-w2-02). The poll is bound to
+ * this run and this session generation, and it stops the moment either changes: a new build B no longer gets A's cursor
+ * and a forced "done", and Stop (cancelBuild sets runId null) is never overwritten by the abort's own end. The cursor is
+ * absolute (Main's firstSeq + index), so it keeps moving after a long build passes Main's 4,000-event window.
+ */
+function pollReattached(runId: string, seen: number): void {
+  const generation = buildGeneration;
   let cursor = seen;
+  const owned = () => isCurrentBuild(generation) && state.runId === runId;
   const timer = window.setInterval(async () => {
+    if (!owned()) { window.clearInterval(timer); return; }
     const api = ipc();
     const latest = await api?.hephaestus?.activeBuild?.().catch(() => null);
-    if (!latest) { window.clearInterval(timer); return; }
+    if (!latest || latest.runId !== runId || !owned()) { window.clearInterval(timer); return; }
     const ko = currentLocale() === "ko";
-    for (const ev of latest.events.slice(cursor)) {
+    const firstSeq = latest.firstSeq ?? 0;
+    for (const ev of latest.events.slice(Math.max(0, cursor - firstSeq))) {
       if (ev.kind === "stage") {
         const visible = safeBuildProgressText(ev.text ?? ev.stage ?? "", ko);
         if (visible) pushLog("stage", visible);
@@ -473,9 +483,10 @@ function pollReattached(seen: number): void {
         pushLog("error", ev.text ?? "");
       }
     }
-    cursor = latest.events.length;
+    cursor = firstSeq + latest.events.length;
     if (!latest.running) {
-      state.phase = "done";
+      // Only a build still shown as running becomes done; a stopped one keeps its error and Resume.
+      if (state.phase === "running") state.phase = "done";
       window.clearInterval(timer);
     }
     commit();
@@ -588,7 +599,9 @@ function safeBuildProgressText(raw: string, ko: boolean): string | null {
     || /(?:^|\s)(?:tool_call|function_call|exec_command|write_stdin|apply_patch|mcp__|BUILD_COMPLETE:)(?:\s|$)/i.test(clean)
     || /<\|(?:system|assistant|tool|end)[^>]*\|>/i.test(clean)
     || /"(?:type|role|content|message|arguments|command|tool|schemaVersion|event|payload|status|delta)"\s*:/i.test(clean)
-    || /^\s*(?:\$|>|#)\s*(?:bash|zsh|sh|python\d*|node|npm|npx|pnpm|yarn|git|mkdir|cp|mv|rm)\b/im
+    // `.test(clean)` was missing here since ebe4b777 (v0.9.31, 2026-07-31): a regex literal is truthy, so machineEnvelope was
+    // always true and every stage and log line of the Build page was hidden, live and after a reattach (found 2026-10-17).
+    || /^\s*(?:\$|>|#)\s*(?:bash|zsh|sh|python\d*|node|npm|npx|pnpm|yarn|git|mkdir|cp|mv|rm)\b/im.test(clean)
   );
   if (machineEnvelope) return null;
   const oneLine = clean.replace(/\s+/g, " ");

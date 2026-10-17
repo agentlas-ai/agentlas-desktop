@@ -8925,6 +8925,8 @@ export interface AgentlasIpc {
       startedAt: string;
       running: boolean;
       events: HephaestusBuildEvent[];
+      /** Absolute number of events[0] (events before it fell out of Main's 4,000-event window). Absent on older hosts. */
+      firstSeq?: number;
     } | null>;
     /**
      * 패키지 계약 게이트를 직접 물어본다. 모델의 완료 선언과 무관하게 사실을 잰다.
