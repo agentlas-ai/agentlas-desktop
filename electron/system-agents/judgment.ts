@@ -454,17 +454,34 @@ function intentSignature(text: string): string {
 // ── ② 판정 영속 (durable verdicts) ────────────────────────────────────────
 // store 를 정적 import 하면 판정 모듈이 Electron 부팅 순서에 묶인다(테스트도 깨진다).
 // 실패는 조용히 삼키되 **캐시로만 취급**한다 — 기록이 없다고 판정을 지어내지 않는다.
+//
+// 저장 키는 서명의 sha256 이다. 정규화한 프롬프트 원문을 키로 두면 행이 평균 19.8KB(최대
+// 142KB)였고 PK 색인이 그 사본을 또 들었다(오너 Mac 2026-10-17: 2,602행, 표 29MB + 색인 31MB).
+// 같은 서명은 같은 해시라 정확 일치 의미는 그대로다. 예전 원문 키 행은 더 이상 맞지 않고,
+// 저장 정리(storage-maintenance)가 마지막 사용 30일 뒤 지운다.
+// 사용 기록(hits, last_hit_at)은 한 시간에 한 번만 쓴다 — 매 적중이 공유 DB 의 쓰기
+// 트랜잭션이었다.
+const DURABLE_HIT_WRITE_INTERVAL_MS = 3_600_000;
+
+function durableKey(signature: string): string {
+  return createHash("sha256").update(signature).digest("hex");
+}
+
 function durableGet(kind: string, signature: string): Verdict<string> | undefined {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { getDb } = require("../store/db") as typeof import("../store/db");
+    const key = durableKey(signature);
     const row = getDb()
-      .prepare("SELECT verdict, confidence, reason FROM judgment_verdicts WHERE kind = ? AND signature = ?")
-      .get(kind, signature) as { verdict: string; confidence: number; reason: string } | undefined;
+      .prepare("SELECT verdict, confidence, reason, last_hit_at FROM judgment_verdicts WHERE kind = ? AND signature = ?")
+      .get(kind, key) as { verdict: string; confidence: number; reason: string; last_hit_at: string } | undefined;
     if (!row) return undefined;
-    getDb()
-      .prepare("UPDATE judgment_verdicts SET hits = hits + 1, last_hit_at = ? WHERE kind = ? AND signature = ?")
-      .run(new Date().toISOString(), kind, signature);
+    const now = Date.now();
+    if (!(Date.parse(row.last_hit_at) >= now - DURABLE_HIT_WRITE_INTERVAL_MS)) {
+      getDb()
+        .prepare("UPDATE judgment_verdicts SET hits = hits + 1, last_hit_at = ? WHERE kind = ? AND signature = ?")
+        .run(new Date(now).toISOString(), kind, key);
+    }
     return { verdict: row.verdict, confidence: row.confidence, reason: row.reason, source: "llm" };
   } catch {
     return undefined;
@@ -475,6 +492,7 @@ function durablePut(kind: string, signature: string, value: Verdict<string>): vo
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { getDb } = require("../store/db") as typeof import("../store/db");
+    const key = durableKey(signature);
     const now = new Date().toISOString();
     getDb()
       .prepare(
@@ -486,7 +504,7 @@ function durablePut(kind: string, signature: string, value: Verdict<string>): vo
            reason = excluded.reason,
            last_hit_at = excluded.last_hit_at`,
       )
-      .run(kind, signature, value.verdict, value.confidence, value.reason, now, now);
+      .run(kind, key, value.verdict, value.confidence, value.reason, now, now);
   } catch {
     // 기록 실패가 판정을 막지 않는다.
   }
