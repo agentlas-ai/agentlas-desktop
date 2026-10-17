@@ -10,6 +10,7 @@ import { compactDeliveredTriggerEvents } from "../store/trigger-events";
 import { userDataPath } from "../runtime-paths";
 import { retireIdleCliTranscripts } from "./cli-transcript-retention";
 import { retireCloudAgentPackages } from "./cloud-package-retention";
+import { retireNestedProductHomeMirrors } from "./product-home-retention";
 import { sweepAgentIntermediates } from "./intermediate-sweep";
 import { retireRunDetailSlice, type RunDetailWatermark } from "./run-detail-retention";
 import { DAY_MS, STORAGE_POLICY } from "./storage-policy";
@@ -52,6 +53,8 @@ export interface StorageMaintenanceReport {
   judgmentVerdicts: { deleted: number; complete: boolean };
   telegramAttachments: { folders: number; bytes: number };
   cloudPackages: { dirs: number; bytes: number };
+  /** Product-home mirrors of another mirror, idle for the CLI-original window (product-home-retention.ts). */
+  nestedProductHomes: { dirs: number; bytes: number };
   /** Managed DB-upgrade copies above the cap of three (store/migration-backup-retention.ts). */
   migrationBackups: MigrationBackupRetention;
 }
@@ -227,12 +230,13 @@ export async function runStorageMaintenance(now = Date.now()): Promise<StorageMa
       process.env.AGENTLAS_CLOUD_PACKAGE_DIR || userDataPath("cloud-agent-packages"),
       { keepDays: STORAGE_POLICY.cloudPackageDays, now },
     );
+    const nestedProductHomes = await retireNestedProductHomeMirrors(userDataPath(), { keepDays: STORAGE_POLICY.cliTranscriptIdleDays, now });
     // DB-upgrade copies: checked in a child process, never on this thread.
     const migrationBackups = await retireManagedMigrationBackups({ storePath: db.name });
     return {
       lowDisk,
       freeBytes: space?.freeBytes ?? null,
-      freedBytes: sweep.removedBytes + transcripts.bytes + telegramAttachments.bytes + cloudPackages.bytes + migrationBackups.bytes,
+      freedBytes: sweep.removedBytes + transcripts.bytes + telegramAttachments.bytes + cloudPackages.bytes + nestedProductHomes.bytes + migrationBackups.bytes,
       intermediates: { files: sweep.removedFiles, bytes: sweep.removedBytes },
       transcripts: { sessions: transcripts.sessions, orphans: transcripts.orphans, bytes: transcripts.bytes },
       runDetail,
@@ -240,6 +244,7 @@ export async function runStorageMaintenance(now = Date.now()): Promise<StorageMa
       judgmentVerdicts,
       telegramAttachments,
       cloudPackages,
+      nestedProductHomes,
       migrationBackups,
     };
   } finally {
@@ -287,6 +292,7 @@ export function startStorageMaintenance(options: {
         + `watermark ${report.runDetail.watermarkTs ?? "none"}); `
         + `trigger events compacted ${report.triggerEvents.compacted}; telegram copies ${report.telegramAttachments.folders}; `
         + `judgment verdicts deleted ${report.judgmentVerdicts.deleted}; cloud packages ${report.cloudPackages.dirs}; `
+        + `nested product homes ${report.nestedProductHomes.dirs}; `
         + `migration backups removed ${report.migrationBackups.removed} (${report.migrationBackups.bytes} bytes, skipped ${report.migrationBackups.skipped})`);
     }
     if (!report.lowDisk || report.freeBytes === null) return;
