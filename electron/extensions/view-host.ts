@@ -85,6 +85,11 @@ interface ActiveScienceView {
 }
 
 const activeViews = new Map<number, ActiveScienceView>();
+/** Seams for the Science Document panel (science-host/document-panel-main.ts); view-host imports nothing from it. */
+export const scienceViewHooks: {
+  closed?: (ownerId: number) => void;
+  download?: (ownerId: number, item: Electron.DownloadItem) => void;
+} = {};
 const scienceToolApprovalChatByRequestId = new Map<string, string>();
 const scienceCaptureTails = new WeakMap<Electron.WebContents, Promise<void>>();
 
@@ -222,6 +227,7 @@ function closeActive(active: ActiveScienceView, notify = true): void {
   activeViews.delete(active.ownerId);
   closeScienceQuestionSurface(active);
   closeRenderer(active);
+  try { scienceViewHooks.closed?.(active.ownerId); } catch { /* the panel never keeps a view open */ }
   try { active.window.contentView.removeChildView(active.view); } catch {}
   try { active.view.webContents.close(); } catch {}
   if (notify) active.send({ id: SCIENCE_EXTENSION_ID, leaseId: active.leaseId, state: "closed" });
@@ -240,6 +246,11 @@ export function closeAllScienceExtensionViews(): void {
 
 export function isScienceExtensionViewSender(senderId: number): boolean {
   return [...activeViews.values()].some((active) => !active.view.webContents.isDestroyed() && active.view.webContents.id === senderId);
+}
+
+/** The owner window (the Desktop page hosting the view) of a Science view's webContents, or null. */
+export function scienceViewOwnerId(senderId: number): number | null {
+  return activeViewForSender(senderId)?.ownerId ?? null;
 }
 
 export function sendScienceTurnEventToView(senderId: number, event: unknown): boolean {
@@ -961,6 +972,10 @@ export async function openScienceExtensionView(input: {
     event.preventDefault();
   });
   view.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  // The view saves exports as Blob downloads through the native save dialog; observing one never changes it.
+  view.webContents.session.on("will-download", (_event, item) => {
+    try { scienceViewHooks.download?.(active.ownerId, item); } catch { /* an observer cannot cancel a download */ }
+  });
   view.webContents.on("render-process-gone", (_event, details) => {
     active.send({ id: SCIENCE_EXTENSION_ID, leaseId: active.leaseId, state: "error", errorCode: "science-renderer-stopped", errorMessage: details.reason });
   });

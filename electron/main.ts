@@ -80,6 +80,7 @@ import { ScienceProjectFolderSelections, validateScienceProjectFolderPath } from
 import { installDesktopScienceHost } from "./science-host";
 import { createScienceDaemonClient, type ScienceDaemonClientOptions } from "./science-host/daemon-client";
 import { registerScienceDaemonExecutionIpc } from "./science-host/daemon-ipc";
+import { scienceDocumentPanel } from "./science-host/document-panel-main";
 import { isScienceStoreFormatRefusal, scienceBootstrapFailure } from "./science-host/bootstrap-failure";
 import { createAgentlasWindowVisualSessionControl } from "./mobile-bridge/visual-session";
 import { listPendingAskUserRequests, submitAskUserAnswer } from "./confirm/ask-user";
@@ -236,6 +237,7 @@ import {
   assertScienceExtensionReleasePermission,
   assertScienceExtensionViewPermission,
   isScienceExtensionViewSender,
+  scienceViewOwnerId,
   openScienceExtensionView,
   setScienceExtensionViewBounds,
   mountScienceRendererView,
@@ -2780,6 +2782,10 @@ app.whenReady().then(async () => {
       },
       onConnectionState: state => {
         if (state.errorCode) console.warn("[science-runtime] observation disconnected", state);
+      },
+      onConversationWatched: (senderId, watched) => {
+        const ownerId = scienceViewOwnerId(senderId);
+        if (ownerId !== null) scienceDocumentPanel().watchConversation(ownerId, watched);
       },
     });
   }
