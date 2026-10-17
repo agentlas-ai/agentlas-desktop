@@ -22,6 +22,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { userDataPath } from "../runtime-paths";
+import { inheritedProductHome, personalHomeDir, personalHomeOverride } from "./product-home-identity";
 
 /**
  * Entries of ~/.claude a product run reads as configuration; only these are linked into the mirror. Everything else —
@@ -135,7 +136,7 @@ export function withClaudeMirrorExcludes(settings: string, realDir: string, mirr
 export type ClaudeProductHomeSkip = "no-real-dir" | "links-unavailable";
 
 export function realClaudeConfigDir(env: NodeJS.ProcessEnv = process.env): string {
-  return path.resolve(env.CLAUDE_CONFIG_DIR || path.join(env.HOME || os.homedir(), ".claude"));
+  return path.resolve(personalHomeOverride(env, "CLAUDE_CONFIG_DIR") || path.join(personalHomeDir(env), ".claude"));
 }
 
 function quietly(action: () => void): void {
@@ -242,7 +243,8 @@ function withClaudeProductRunEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 
 /** The product run's env: the mirror as config dir, the person's own sign-in. Only CLAUDE_PRODUCT_RUN_ENV when the mirror cannot hold. */
 export function withClaudeProductHome(env: NodeJS.ProcessEnv = process.env, options: ClaudeProductHomeOptions = {}, mirror?: string): NodeJS.ProcessEnv {
-  if (env.CLAUDE_SECURESTORAGE_CONFIG_DIR !== undefined) return withClaudeProductRunEnv(env); // already a product env (or the caller chose)
+  // already a product env (or the caller chose); a product env merely inherited by this process is not the run's choice
+  if (env.CLAUDE_SECURESTORAGE_CONFIG_DIR !== undefined && !inheritedProductHome(env, "CLAUDE_CONFIG_DIR")) return withClaudeProductRunEnv(env);
   const real = realClaudeConfigDir(env);
   const result = syncClaudeProductHome(real, mirror, options, personalClaudeGlobalConfigPath(env));
   if (!("dir" in result)) return withClaudeProductRunEnv(env);

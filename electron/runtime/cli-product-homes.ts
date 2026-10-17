@@ -32,6 +32,7 @@ import { userDataPath } from "../runtime-paths";
 import { isMirrorLink, syncConfigHomeMirror } from "./config-home-mirror";
 import { scanTomlStatements, tomlKey, type TomlStatement } from "./codex-product-home";
 import type { CapabilitySelection } from "../capabilities/one-capabilities";
+import { personalHomeDir, personalHomeOverride } from "./product-home-identity";
 
 export type ProductHomeKind = "kimi" | "cursor" | "github-copilot-cli";
 
@@ -139,7 +140,7 @@ export type CliProductHomeSkip = "keep-home" | "links-unavailable" | "unsupporte
 
 export function realCliHome(kind: ProductHomeKind, env: NodeJS.ProcessEnv = process.env): string {
   const spec = SPECS[kind];
-  return path.resolve(env[spec.envVar] || path.join(env.HOME || env.USERPROFILE || os.homedir(), spec.folder));
+  return path.resolve(personalHomeOverride(env, spec.envVar) || path.join(personalHomeDir(env), spec.folder));
 }
 
 export function cliProductHomePath(kind: ProductHomeKind, realHome: string, isOne = false, mirrorRoot = userDataPath(SPECS[kind].mirrorDir)): string {

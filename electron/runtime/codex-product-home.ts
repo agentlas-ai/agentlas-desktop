@@ -37,6 +37,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { userDataPath } from "../runtime-paths";
+import { inheritedProductHome, personalHomeDir, personalHomeOverride } from "./product-home-identity";
 
 /** Read by Codex as global user instructions; never mirrored. */
 export const CODEX_PERSONAL_INSTRUCTION_FILES: ReadonlySet<string> = new Set(["AGENTS.md", "AGENTS.override.md"]);
@@ -363,7 +364,8 @@ const CODEX_SHARED_STORES = ["generated_images"] as const;
 export type CodexProductHomeSkip = "no-real-home" | "no-file-sign-in" | "keyring-sign-in" | "links-unavailable";
 
 export function realCodexHome(env: NodeJS.ProcessEnv = process.env): string {
-  return path.resolve(env.CODEX_HOME || path.join(env.HOME || os.homedir(), ".codex"));
+  // An inherited product mirror is never the person's folder (product-home-identity.ts): mirroring it nested 1.48 GB.
+  return path.resolve(personalHomeOverride(env, "CODEX_HOME") || path.join(personalHomeDir(env), ".codex"));
 }
 
 function keyringOnly(realHome: string): boolean {
@@ -501,7 +503,7 @@ export function codexProductRunHome(home: string): string {
  */
 export function withCodexProductHome(env: NodeJS.ProcessEnv = process.env, options: CodexProductHomeOptions = {}): NodeJS.ProcessEnv {
   const realHome = realCodexHome(process.env);
-  if (env.CODEX_HOME && path.resolve(env.CODEX_HOME) !== realHome) return env;
+  if (env.CODEX_HOME && path.resolve(env.CODEX_HOME) !== realHome && !inheritedProductHome(env, "CODEX_HOME")) return env;
   const mirror = syncCodexProductHome(realHome, undefined, options);
   return "home" in mirror ? { ...env, CODEX_HOME: mirror.home } : env;
 }

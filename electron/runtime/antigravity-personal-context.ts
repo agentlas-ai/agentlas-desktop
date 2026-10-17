@@ -30,6 +30,7 @@ import path from "node:path";
 import { userDataPath } from "../runtime-paths";
 import { isMirrorLink, syncConfigHomeMirror } from "./config-home-mirror";
 import type { CapabilityItem, CapabilityKind, CapabilitySelection } from "../capabilities/one-capabilities";
+import { inheritedProductHome, personalHomeDir } from "./product-home-identity";
 
 /** Antigravity's conversation stores (per-conversation brain, annotations, recordings). Never linked into a product mirror. */
 const AGY_PERSONAL_SESSION_ENTRIES = new Set(["conversations", "brain", "annotations", "implicit", "html_artifacts",
@@ -282,9 +283,9 @@ export function runMcpKeysOf(mcpConfigPath: string | undefined): string[] {
  */
 export function withAgyProductHome(env: NodeJS.ProcessEnv, selection: CapabilitySelection | undefined, mcpConfigPath: string | undefined): NodeJS.ProcessEnv {
   if (env.AGENTLAS_AGY_KEEP_HOME === "1") return env;
-  const realHome = env.AGENTLAS_AGY_REAL_HOME || os.homedir();
-  // A HOME that is already a product mirror (resident re-entry) is kept.
-  if (env.HOME && path.resolve(env.HOME) !== path.resolve(realHome)) return env;
+  const realHome = personalHomeDir({ HOME: env.AGENTLAS_AGY_REAL_HOME || os.homedir() });
+  // A HOME that is already a product mirror (resident re-entry) is kept; one merely inherited by this process is not.
+  if (env.HOME && path.resolve(env.HOME) !== path.resolve(realHome) && !inheritedProductHome(env, "HOME")) return env;
   const mirror = syncAgyProductHome({ realHome, selection, runMcpKeys: runMcpKeysOf(mcpConfigPath) });
   if (!("home" in mirror)) return env;
   return { ...env, HOME: mirror.home, AGENTLAS_AGY_REAL_HOME: realHome };

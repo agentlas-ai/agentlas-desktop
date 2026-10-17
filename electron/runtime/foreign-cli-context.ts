@@ -46,6 +46,7 @@ import { isMirrorLink, syncConfigHomeMirror } from "./config-home-mirror";
 import { allowlistedToml, withCliProductHome } from "./cli-product-homes";
 import { productClaudeGlobalConfig } from "./claude-product-home";
 import type { CapabilityItem, CapabilityKind, CapabilitySelection } from "../capabilities/one-capabilities";
+import { inheritedProductHome, personalHomeDir, personalHomeOverride } from "./product-home-identity";
 
 const GROK_CELLS: ReadonlyArray<{ cell: string; kind: CapabilityKind }> = [
   { cell: "SKILLS", kind: "skill" },
@@ -76,7 +77,7 @@ export function grokCompatEnv(selection: CapabilitySelection | undefined): Recor
 }
 
 export function realGrokHome(env: NodeJS.ProcessEnv = process.env): string {
-  return path.resolve(env.GROK_HOME || path.join(env.HOME || os.homedir(), ".grok"));
+  return path.resolve(personalHomeOverride(env, "GROK_HOME") || path.join(personalHomeDir(env), ".grok"));
 }
 
 /**
@@ -320,8 +321,8 @@ export function syncGrokProductUserHome(realHome: string, selection: CapabilityS
  */
 export function withGrokProductUserHome(env: NodeJS.ProcessEnv, selection: CapabilitySelection | undefined): NodeJS.ProcessEnv {
   if (env.AGENTLAS_GROK_KEEP_HOME === "1") return env;
-  const realHome = env.AGENTLAS_GROK_REAL_HOME || os.homedir();
-  if (env.HOME && path.resolve(env.HOME) !== path.resolve(realHome)) return env;
+  const realHome = personalHomeDir({ HOME: env.AGENTLAS_GROK_REAL_HOME || os.homedir() });
+  if (env.HOME && path.resolve(env.HOME) !== path.resolve(realHome) && !inheritedProductHome(env, "HOME")) return env;
   let mirror: ReturnType<typeof syncGrokProductUserHome>;
   try { mirror = syncGrokProductUserHome(realHome, selection); } catch { return env; /* no app folder (a host outside the app) */ }
   return "home" in mirror ? { ...env, HOME: mirror.home, AGENTLAS_GROK_REAL_HOME: realHome } : env;
