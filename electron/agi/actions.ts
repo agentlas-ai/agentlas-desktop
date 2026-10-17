@@ -666,9 +666,13 @@ export class AgiActionExecutor {
         return ok("agi.browser.restart-dispatched");
       }
       case "request_app_restart": {
+        // The owner pays for a restart; ask only when the incident's typed cause is one a restart clears
+        // (AGI_APP_RESTART_CAUSES). "Not tried yet" is not a basis (Yotube 2026-10-17: the restart changed nothing).
+        const indicated = this.incidents.get(incidentId)?.diagnosis.appRestart;
+        if (!indicated) return no("agi.app-restart.not-indicated");
         const asked = this.deps.db.prepare("SELECT 1 FROM agi_action_receipts WHERE incident_id = ? AND action = 'request_app_restart' AND ok = 1").get(incidentId);
         if (asked) return no("agi.ask.already-asked");
-        return ok("agi.app-restart.asked", { reason: text(args.reason, 200) });
+        return ok("agi.app-restart.asked", { reason: text(args.reason, 200), cause: indicated.code });
       }
       case "file_defect": {
         const named = text(args.code, 160);

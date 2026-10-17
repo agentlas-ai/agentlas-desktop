@@ -152,6 +152,38 @@ export interface AgiBlockerDiagnosis {
   evidenceRefs: string[];
   /** Why the class was chosen, a finite vocabulary. */
   reasonCode: string;
+  /**
+   * Present only when a signal's code is one an app restart actually clears (AGI_APP_RESTART_CAUSES). The executor
+   * refuses request_app_restart without it (agi.app-restart.not-indicated). Host-only: never projected to the model.
+   */
+  appRestart?: { code: string; reason: string };
+}
+
+/**
+ * Causes an app restart can actually clear: state that lives only in the running process and is rebuilt at launch.
+ * Production Yotube 2026-10-17: AGI asked the owner to restart because restarting was "the one path not tried yet" on
+ * goal_episode_admission_missing (a custody defect only new code fixes). The owner restarted at 12:49Z; the next retries
+ * failed the same way and the 14:38Z update fixed it. A restart ask needs one of these typed codes as its basis.
+ */
+export const AGI_APP_RESTART_CAUSES: ReadonlyArray<{ readonly code: string; readonly reason: string }> = Object.freeze([
+  { code: "invocation_native_fence_already_configured",
+    reason: "The background-service start fence is installed once per process; a stale one blocks every new turn until relaunch (1.3.48)." },
+  { code: "native_auth_not_provisioned",
+    reason: "The background service started before its signed channel was provisioned; only a relaunch provisions it first (2026-10-17 first launch)." },
+  { code: "native_auth_channel_lost",
+    reason: "The signed channel to the background service is rebuilt at launch; when every re-attach fails it stays lost until relaunch." },
+  { code: "native_gui_activation_prerequisites_missing",
+    reason: "The background service died under the app window (EPIPE); the window's native turns fail until the service is relaunched." },
+]);
+
+/** The first signal whose code a restart clears, with the reason; null when a restart would not change the state. */
+export function agiAppRestartIndication(signals: readonly AgiBlockerSignal[]): { code: string; reason: string } | null {
+  for (const signal of signals) {
+    const code = signal.kind === "run_failed" || signal.kind === "pre_run_refused" || signal.kind === "repeated_notice" ? signal.code : null;
+    const cause = code ? AGI_APP_RESTART_CAUSES.find((entry) => entry.code === code) : undefined;
+    if (cause) return { code: cause.code, reason: cause.reason };
+  }
+  return null;
 }
 
 /** Paths whose admission depends on the goal's own structure (status, plan, automation), not on the cause. */
@@ -278,6 +310,8 @@ export function classifyAgiBlocker(facts: AgiBlockerFacts): AgiBlockerDiagnosis 
     signals.find((signal) => signal.kind === kind) as Extract<AgiBlockerSignal, { kind: K }> | undefined;
   const eligibleTactics = agiEligibleTactics(facts.tactics, facts.blockedNodeId ?? null);
   const stateDigest = agiBlockerStateDigest(facts);
+  const appRestartIndication = agiAppRestartIndication(signals);
+  const appRestart = appRestartIndication ? { appRestart: appRestartIndication } : {};
   const defects: AgiDefectFinding[] = [];
   const addDefect = (code: string, category: AgiDefectFinding["category"], signal: AgiBlockerSignal | null) => {
     if (!defects.some((entry) => entry.code === code)) defects.push({ code, category, evidenceRefs: refsOf(facts, signal) });
@@ -313,11 +347,11 @@ export function classifyAgiBlocker(facts: AgiBlockerFacts): AgiBlockerDiagnosis 
       && boundary !== "owner_stop"
       && altPaths.filter((action) => !AGI_NON_ALTERNATIVE_ACTIONS.has(action)).every((action) => STRUCTURAL_PATHS.has(action) && !pathAdmissible(action, facts, eligibleTactics))) {
       return { schemaVersion: AGI_BLOCKER_SCHEMA, goalId: facts.goalId, stateDigest, eligibleTactics, branchReadiness: facts.planReadiness?.branches.map(({ evidenceRefs: _refs, ...branch }) => branch), defects, evidenceRefs,
-        ...rest, display: "needs_owner", attemptDue: false, ownerClass, boundary, altPaths: [], reasonCode: AGI_NO_ADMISSIBLE_PATH };
+        ...rest, display: "needs_owner", attemptDue: false, ownerClass, boundary, altPaths: [], reasonCode: AGI_NO_ADMISSIBLE_PATH, ...appRestart };
     }
     return { schemaVersion: AGI_BLOCKER_SCHEMA, goalId: facts.goalId, stateDigest, eligibleTactics, branchReadiness: facts.planReadiness?.branches.map(({ evidenceRefs: _refs, ...branch }) => branch), defects, evidenceRefs,
       ...rest, display: rest.attemptDue && boundary !== "owner_stop" ? "running" : rest.display,
-      ownerClass, boundary, altPaths };
+      ownerClass, boundary, altPaths, ...appRestart };
   };
   const branchWork: AgiActionKind[] = eligibleTactics.length ? ["start_work_turn", "dispatch_teammate", "create_teammate"] : [];
 
