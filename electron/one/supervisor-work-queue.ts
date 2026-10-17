@@ -51,6 +51,8 @@ export class OneSupervisorWorkQueue {
   }
   private write<T>(fn: () => T): T { return this.db.transaction(fn).immediate(); }
   setActiveIdentity(oneId: string): void {
+    // Idle executor ticks call this every second; an unchanged identity takes no write lock (perf MP-03).
+    if (this.activeIdentity() === oneId) return;
     this.db.prepare(`INSERT INTO one_supervisor_host_identity(slot,one_id,revision,updated_at) VALUES('active',?,1,?)
       ON CONFLICT(slot) DO UPDATE SET one_id=excluded.one_id,revision=revision+1,updated_at=excluded.updated_at
       WHERE one_id<>excluded.one_id`).run(oneId, this.now());
@@ -93,9 +95,12 @@ export class OneSupervisorWorkQueue {
     const leaseMs = input.leaseMs ?? 30_000;
     if (!input.ownerEpoch || input.ownerEpoch.length > 200 || !["desktop-main", "work-daemon"].includes(input.ownerKind)
       || !Number.isSafeInteger(leaseMs) || leaseMs < 100 || leaseMs > 120_000) throw supervisorError('supervisor_work_claim_invalid');
+    const next = () => this.db.prepare(`SELECT * FROM one_supervisor_work_jobs WHERE phase='queued'
+      AND one_id=(SELECT one_id FROM one_supervisor_host_identity WHERE slot='active') ORDER BY rowid LIMIT 1`).get() as SupervisorWorkLease | undefined;
+    // An empty queue answers without taking the write lock (perf MP-03); the claim itself stays a CAS inside it.
+    if (!next()) return null;
     return this.write(() => {
-      const candidate = this.db.prepare(`SELECT * FROM one_supervisor_work_jobs WHERE phase='queued'
-        AND one_id=(SELECT one_id FROM one_supervisor_host_identity WHERE slot='active') ORDER BY rowid LIMIT 1`).get() as SupervisorWorkLease | undefined;
+      const candidate = next();
       if (!candidate) return null;
       const now = this.now();
       const changed = this.db.prepare(`UPDATE one_supervisor_work_jobs SET phase='claimed',generation=generation+1,
@@ -130,6 +135,8 @@ export class OneSupervisorWorkQueue {
   recoverUnstarted(): number {
     // A stale starter must successfully begin() before invoking a runtime. The
     // phase/generation CAS fences it after this provably pre-dispatch recovery.
+    // Nothing expired: answer from a read, so an idle tick takes no write lock (perf MP-03).
+    if (!this.db.prepare("SELECT 1 FROM one_supervisor_work_jobs WHERE phase='claimed' AND lease_until<=? LIMIT 1").get(this.now())) return 0;
     return Number(this.db.prepare(`UPDATE one_supervisor_work_jobs SET phase='queued',owner_epoch=NULL,owner_kind=NULL,
       lease_until=0,reason='unstarted_claim_recovered',updated_at=? WHERE phase='claimed' AND lease_until<=?`)
       .run(this.now(), this.now()).changes);

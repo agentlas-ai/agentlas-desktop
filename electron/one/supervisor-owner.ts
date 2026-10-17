@@ -51,6 +51,13 @@ export class OneSupervisorOwner {
   current(): SupervisorRuntimeOwner | null { const row=this.row();return row ? this.project(row) : null; }
   assert(oneId: string, control = false): SupervisorRuntimeOwner {
     if (!oneId || oneId.length > 200) throw supervisorError('supervisor_owner_identity_invalid');
+    // Read-only while this process still holds a fresh lease for the same identity. The work executor
+    // asserts every second; renewing on each call committed a write per tick and kept the idle store busy
+    // (perf MP-03). The lease is renewed once less than half of it remains; takeover still needs a dead pid.
+    const seen=this.row();
+    if (seen?.owner_epoch === this.options.ownerEpoch && seen.owner_pid === this.pid && seen.owner_kind === this.options.ownerKind
+      && seen.one_id === oneId && (seen.phase === "active" || seen.phase === "draining" && control)
+      && seen.lease_until - this.now() > this.leaseMs / 2) return this.project(seen);
     return this.db.transaction(() => {
       const row=this.row(), now=this.now();
       if (row?.owner_epoch === this.options.ownerEpoch && row.owner_pid === this.pid && row.owner_kind === this.options.ownerKind) {
