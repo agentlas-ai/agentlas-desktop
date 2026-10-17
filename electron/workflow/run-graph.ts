@@ -79,6 +79,8 @@ import {
   releaseGraphResumeCoordinate,
   appendGraphJournal,
   listEvalCorrections,
+  getAutomation as getStoredAutomation,
+  AutomationRunParentMissingError,
 } from "../store/automations";
 import { getAgentById } from "../mcp/registry";
 import { getFirm } from "../store/firms";
@@ -2168,6 +2170,11 @@ export async function runGraph(
       .filter((node) => nodeCouldHaveActedOutside(node))
       .map((node) => node.id),
   );
+  // A cached automation whose row was deleted stops here with the typed parent-missing error, before any chat or
+  // runtime side effect. The reconciliation read below threw a generic error for it since 8d82ae99, so the scheduler
+  // treated a deleted automation's run as a failed run (test-automations-store "a cached graph whose parent was
+  // deleted").
+  if (!dryRun && !getStoredAutomation(automation.id)) throw new AutomationRunParentMissingError(automation.id);
   // Historical evidence stays visible in its original occurrence. Only a native
   // owning ingress may identify a different authorized logical request.
   if (!dryRun) for (const held of listAutomationGraphReconciliations(automation.id, priorEvidenceReadContext)) {
