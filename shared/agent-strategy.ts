@@ -10,6 +10,7 @@
  * 순수 모듈 — DB·시계·런타임·난수 없음. Memory Sphere(기억 쓰기)와 무관하다: 목표 원장 곁 테이블만 쓴다.
  */
 import { GOAL_SHAPE_LIMITS } from "./goal-shape";
+import { maskPrivateKeyBlocks } from "./secret-patterns";
 
 export const STRATEGY_SHIFT_SCHEMA = "agentlas.strategy-shift.v1" as const;
 export const KPI_MARKER = "<<agentlas-kpi>>";
@@ -126,14 +127,16 @@ const round2 = (value: number | null): number | null => value === null || !Numbe
 const finiteNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
 const inRange = (value: number, [lo, hi]: readonly [number, number]): boolean => value >= lo && value < hi;
 
-// ── 시크릿 스크럽 (electron/automation-strategy.ts normalizeFailureText 와 같은 규칙 — 순수 모듈이라 복제) ──
+// ── 시크릿 스크럽 (electron/automation-strategy.ts normalizeFailureText 와 같은 규칙. 비밀키 블록은 shared/secret-patterns.ts
+//    maskPrivateKeyBlocks 하나의 규칙을 쓴다 — 그 모듈도 순수라 복제할 이유가 없다) ──
 const SECRET_REDACT_RE = /(?:(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{12,}|(?<![A-Za-z0-9_-])gh[pousr]_[A-Za-z0-9]{20,}|(?:api[_-]?key|token|secret|password|authorization|cookie|private[_-]?key)\s*[:=]\s*\S+|BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY|Bearer\s+[A-Za-z0-9._~-]{12,})/gi;
 const URL_REDACT_RE = /https?:\/\/([^\s/?#]+)[^\s]*/gi;
 
 /** 사람이 읽는 짧은 글(근거·진단)에서 시크릿과 URL 세부(경로·쿼리)를 지운다. */
 export function scrubStrategyText(raw: unknown, max: number = AGENT_STRATEGY_LIMITS.textMaxChars): string {
   if (typeof raw !== "string") return "";
-  return raw.replace(/\s+/g, " ")
+  // A private key is masked with its body (shared rule), not only its "BEGIN … PRIVATE KEY" words.
+  return maskPrivateKeyBlocks(raw, "[redacted]").replace(/\s+/g, " ")
     .replace(SECRET_REDACT_RE, "[redacted]")
     .replace(URL_REDACT_RE, (_m, host: string) => `<url:${host}>`)
     .trim().slice(0, max);
