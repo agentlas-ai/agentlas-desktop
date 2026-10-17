@@ -222,6 +222,12 @@ export function oneSupervisor():OneSupervisorService {
       while(nativeBudgetAdmissions.size>1000)nativeBudgetAdmissions.delete(nativeBudgetAdmissions.keys().next().value!);
       if(hostOptions){hostOptions.assertAuthority();return startSupervisorPreparedInvocation({store,owner,oneId:getOneProfile().oneId,request:req,purpose:hostNoticePurpose,epoch:hostOptions.ownerEpoch});}
       if(oneSupervisorNativeRuntime())return nativeRuntime!.start(req,hostNoticePurpose);
+      // A personal reply with no domain host and no native runtime (the background service is still attaching, or is
+      // down) takes the same admitted, prepared start as the service, owned by this process. The plain start wrote no
+      // admission row, so a computer-use reply was fenced by prepareSupervisorOsExecution and Hope's first personal
+      // message after launch failed (W7 8fe667af run b6d473f4: supervisor_os_source_fenced; AGENTLAS_DISABLE_DAEMON=1
+      // reproduced it every time). The epoch is this process's run-owner id, which that fence compares. Work keeps its start.
+      if(row.kind==="reply")return startSupervisorPreparedInvocation({store,owner,oneId:getOneProfile().oneId,request:req,purpose:hostNoticePurpose,epoch:invocationProcessOwner().ownerId});
       return invocationService.start(req,undefined,undefined,undefined,hostNoticePurpose,admitMainInvocation(req.chatId,req.runId));
     });
   };
