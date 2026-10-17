@@ -33,7 +33,7 @@ export const HEPHAESTUS_NETWORK_WORK_CORE_TOOLS: readonly string[] = Object.free
 ]);
 
 /**
- * Every tool the engine 1.2.65 lists. Claude Code has no allow filter, so the deny list is this set minus the core;
+ * Every tool the engine 1.2.66 lists. Claude Code has no allow filter, so the deny list is this set minus the core;
  * a tool a newer engine adds simply stays visible there (extra schema, never a missing one). Codex's allow list is
  * fail-closed instead. `scripts/test-hephaestus-tool-surface.cjs` compares both against the live `tools/list`.
  */
