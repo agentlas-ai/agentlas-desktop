@@ -498,7 +498,7 @@ function SheetView({ model, cursor, typing, locale, focusSheet, focusSeq, onSele
                 }} />
             </td>;
           }
-          const numeric = cell && cell.f === undefined && /^[-+]?[\d,.]+%?$/.test(cell.v.trim());
+          const numeric = cell && (cell.n !== undefined || /^[-+]?\$?[\d,.]+%?$/.test(cell.v.trim()));
           return <td key={col} className={styles.gridCell} data-live-id={id} data-selected={isSel ? "true" : "false"} data-numeric={numeric ? "true" : "false"}
             {...activeAttrs(id, cursor)} style={{ ...formatCss(cell?.format), ...cursorStyle(id, cursor) }}
             onClick={() => setSel(address)} onDoubleClick={() => { setSel(address); setBar(raw(address)); setEditing(address); }}>

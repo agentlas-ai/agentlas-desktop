@@ -19,5 +19,5 @@ description: Edit an xlsx workbook live in the Document tab (cells, formulas, sh
 # Notes
 
 - The cell keeps its number format (percent, thousands, dates) when only its value changes.
-- Formulas are recalculated when the file is next opened in Excel. The tab shows a new formula until then.
+- Formulas compute as you write them: the outline shows each result in parentheses after the formula (`=SUMIFS(…)	(1500)`), so check results there. A function the tab does not know keeps its formula text until Excel opens the file; the save stores computed values for the rest.
 - On `revision_conflict`, call `document.read` and apply again.

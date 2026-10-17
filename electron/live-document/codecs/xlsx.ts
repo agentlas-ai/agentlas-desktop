@@ -4,6 +4,7 @@ import {
   attr, createElement, decodeXml, elements, escapeXmlAttr, escapeXmlText, localName, markDirty, parseXml,
   serializeNode, serializeXml, setAttr, textContent, type XmlDocument, type XmlElement,
 } from "../xml-lite";
+import { formatNumberCode, generalNumber, recalculateSheets } from "../../../shared/sheet-formula";
 import { displayNumber, LiveDocumentCodecError, type LiveDocumentCodec } from "./common";
 import { el, hex6, insertOrdered, isEmptyFormat, normColor, removeChildren } from "./format";
 
@@ -158,31 +159,31 @@ function cellFormat(styles: StyleInfo, styleIndex: number): LiveFormat | undefin
 
 const DATE_IDS = new Set([14, 15, 16, 17, 18, 19, 20, 21, 22, 45, 46, 47]);
 
-function formatNumber(raw: string, format: { id: number; code: string } | undefined): string {
-  const value = Number(raw);
-  if (!format || !Number.isFinite(value)) return displayNumber(raw);
+/**
+ * The cell's number format as a normalised code the shared formula engine formats with (percent, date, thousands,
+ * fixed decimals); undefined for General. Reading and recalculating use the same code, so an unchanged value reads
+ * back identical and is not rewritten.
+ */
+function numberFormatCode(format: { id: number; code: string } | undefined): string | undefined {
+  if (!format) return undefined;
   const code = format.code.replace(/"[^"]*"|\[[^\]]*\]|\\./g, "");
   if (format.id === 9 || format.id === 10 || code.includes("%")) {
     const decimals = format.id === 10 ? 2 : (/\.(0+)%/.exec(code)?.[1].length ?? 0);
-    return `${(value * 100).toFixed(decimals)}%`;
+    return `0${decimals ? `.${"0".repeat(decimals)}` : ""}%`;
   }
-  if (DATE_IDS.has(format.id) || (/[yd]/i.test(code) && !/[#0]/.test(code))) {
-    const ms = Math.round((value - 25569) * 86_400_000);
-    const date = new Date(ms);
-    if (Number.isNaN(date.getTime())) return displayNumber(raw);
-    const iso = date.toISOString();
-    const timeShown = /h/i.test(code) || format.id === 22;
-    return timeShown ? `${iso.slice(0, 10)} ${iso.slice(11, 16)}` : iso.slice(0, 10);
-  }
+  if (DATE_IDS.has(format.id) || (/[yd]/i.test(code) && !/[#0]/.test(code))) return /h/i.test(code) || format.id === 22 ? "yyyy-mm-dd hh:mm" : "yyyy-mm-dd";
   if (format.id === 3 || format.id === 4 || code.includes("#,##0")) {
     const decimals = format.id === 4 ? 2 : (/#,##0\.(0+)/.exec(code)?.[1].length ?? 0);
-    return value.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+    return `#,##0${decimals ? `.${"0".repeat(decimals)}` : ""}`;
   }
-  if (format.id === 2 || /^0\.(0+)$/.test(code.trim())) {
-    const decimals = format.id === 2 ? 2 : code.trim().length - 2;
-    return value.toFixed(decimals);
-  }
-  return displayNumber(raw);
+  if (format.id === 2 || /^0\.(0+)$/.test(code.trim())) return format.id === 2 ? "0.00" : code.trim();
+  return undefined;
+}
+
+function formatNumber(raw: string, nf: string | undefined): string {
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return displayNumber(raw);
+  return nf ? formatNumberCode(value, nf) : generalNumber(value);
 }
 
 /** Cells of a worksheet, keyed by address, with their element (for patching). */
@@ -211,7 +212,9 @@ function readCells(doc: XmlDocument, info: Pick<WorkbookInfo, "shared" | "format
       else if (type === "inlineStr") display = is ? richText(is) : "";
       else if (type === "b") display = rawV === "1" ? "TRUE" : rawV === "0" ? "FALSE" : rawV;
       else if (type === "str" || type === "e") display = rawV;
-      else if (rawV !== "") display = formatNumber(rawV, info.formats[Number(attr(c, "s") ?? 0)]);
+      const nf = numberFormatCode(info.formats[Number(attr(c, "s") ?? 0)]);
+      const numeric = (type === "n" || type === "d") && rawV !== "" && Number.isFinite(Number(rawV)) ? Number(rawV) : undefined;
+      if (type !== "s" && type !== "inlineStr" && type !== "b" && type !== "str" && type !== "e" && rawV !== "") display = type === "n" ? formatNumber(rawV, nf) : rawV;
       let formula = f ? textContent(f) : "";
       if (f && attr(f, "t") === "shared") {
         const si = attr(f, "si") ?? "";
@@ -223,7 +226,7 @@ function readCells(doc: XmlDocument, info: Pick<WorkbookInfo, "shared" | "format
       }
       if (display === "" && !formula) continue;
       const format = info.styles ? cellFormat(info.styles, Number(attr(c, "s") ?? 0) || 0) : undefined;
-      out.set(address, { cell: { v: display, ...(formula ? { f: formula } : {}), ...(format ? { format } : {}) }, element: c, row });
+      out.set(address, { cell: { v: display, ...(formula ? { f: formula } : {}), ...(numeric !== undefined ? { n: numeric } : {}), ...(nf ? { nf } : {}), ...(format ? { format } : {}) }, element: c, row });
     }
   }
   return out;
@@ -243,7 +246,15 @@ const NUMBER_RE = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
 function cellMarkup(address: string, style: string | undefined, cell: LiveCell): string {
   const s = style !== undefined ? ` s="${escapeXmlAttr(style)}"` : "";
   if (cell.f === undefined && cell.v === "") return `<c r="${address}"${s}/>`;
-  if (cell.f !== undefined) return `<c r="${address}"${s}><f>${escapeXmlText(cell.f)}</f></c>`;
+  if (cell.f !== undefined) {
+    // The computed result is written as the cached value, so viewers that do not recalculate still show it.
+    const f = `<f>${escapeXmlText(cell.f)}</f>`;
+    if (cell.n !== undefined && Number.isFinite(cell.n)) return `<c r="${address}"${s}>${f}<v>${cell.n}</v></c>`;
+    if (cell.v === "") return `<c r="${address}"${s}>${f}</c>`;
+    if (cell.v === "TRUE" || cell.v === "FALSE") return `<c r="${address}"${s} t="b">${f}<v>${cell.v === "TRUE" ? 1 : 0}</v></c>`;
+    if (/^#(?:DIV\/0!|N\/A|VALUE!|REF!|NAME\?|NUM!|NULL!)$/.test(cell.v)) return `<c r="${address}"${s} t="e">${f}<v>${escapeXmlText(cell.v)}</v></c>`;
+    return `<c r="${address}"${s} t="str">${f}<v>${escapeXmlText(cell.v)}</v></c>`;
+  }
   if (NUMBER_RE.test(cell.v.trim())) return `<c r="${address}"${s}><v>${cell.v.trim()}</v></c>`;
   if (cell.v === "TRUE" || cell.v === "FALSE") return `<c r="${address}"${s} t="b"><v>${cell.v === "TRUE" ? 1 : 0}</v></c>`;
   return `<c r="${address}"${s} t="inlineStr"><is><t xml:space="preserve">${escapeXmlText(cell.v)}</t></is></c>`;
@@ -504,7 +515,10 @@ function addSheet(info: WorkbookInfo, name: string): SheetRef {
 
 export const xlsxCodec: LiveDocumentCodec = {
   parse(bytes) {
-    return { kind: "sheet", sheets: sheetModel(readWorkbook(bytes)) };
+    const sheets = sheetModel(readWorkbook(bytes));
+    // Formulas saved without cached values (openpyxl, scripts, earlier saves) show their result, not their text.
+    recalculateSheets(sheets);
+    return { kind: "sheet", sheets };
   },
   write(bytes, original, final) {
     if (original.kind !== "sheet" || final.kind !== "sheet") throw new LiveDocumentCodecError("model_kind_mismatch");
@@ -512,22 +526,31 @@ export const xlsxCodec: LiveDocumentCodec = {
     const before = new Map(original.sheets.map((sheet) => [sheet.id, sheet]));
     const styleWriter = new StyleWriter(info.pkg);
     let changed = false;
-    for (const sheet of final.sheets) {
+    const plans = final.sheets.map((sheet) => {
       let ref = info.sheets.find((item) => item.id === sheet.id);
-      const prior = before.get(sheet.id);
       if (!ref) { ref = addSheet(info, sheet.name); changed = true; }
       const changes = new Map<string, LiveCell | null>();
-      const priorCells = prior?.cells ?? {};
+      const priorCells = before.get(sheet.id)?.cells ?? {};
       for (const [address, cell] of Object.entries(sheet.cells)) {
         const old = priorCells[address];
         if (!old || old.v !== cell.v || old.f !== cell.f || JSON.stringify(old.format ?? null) !== JSON.stringify(cell.format ?? null)) changes.set(address, cell);
       }
       for (const address of Object.keys(priorCells)) if (!(address in sheet.cells)) changes.set(address, null);
-      if (!changes.size) continue;
+      if (changes.size) changed = true;
+      return { sheet, ref, changes, priorCells };
+    });
+    for (const { sheet, ref, changes, priorCells } of plans) {
       const doc = parseXml(info.pkg.text(ref.part)!);
+      // A workbook being written anyway also gets cached values for formulas the file stored without one.
+      if (changed) {
+        for (const [address, entry] of readCells(doc, info)) {
+          const cell = sheet.cells[address];
+          if (cell?.f !== undefined && cell.v !== "" && !changes.has(address) && !elements(entry.element).some((el) => localName(el) === "v")) changes.set(address, cell);
+        }
+      }
+      if (!changes.size) continue;
       patchSheet(doc, changes, info, styleWriter, new Map(Object.entries(priorCells).map(([address, cell]) => [address, cell.format])));
       info.pkg.setText(ref.part, serializeXml(doc));
-      changed = true;
     }
     if (!changed) return bytes;
     styleWriter.flush();

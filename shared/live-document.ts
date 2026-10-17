@@ -10,6 +10,8 @@
  * Pure: no node or DOM imports (Main, daemon and renderer all load it).
  */
 
+import { recalculateSheets } from "./sheet-formula";
+
 export const LIVE_DOCUMENT_VERSION = "agentlas.live-document.v1" as const;
 export const LIVE_DOCUMENT_FORMATS = ["xlsx", "docx", "pptx", "hwpx", "hwp"] as const;
 export type LiveDocumentFormat = (typeof LIVE_DOCUMENT_FORMATS)[number];
@@ -39,10 +41,14 @@ export interface LivePage {
 export type LiveFormatPatch = { [K in keyof LiveFormat]?: LiveFormat[K] | null };
 
 export interface LiveCell {
-  /** Displayed value (cached result for formulas). */
+  /** Displayed value (the computed result for formulas, shown with the cell's number format). */
   v: string;
   /** Formula without the leading "=". */
   f?: string;
+  /** The number behind `v` when it is numeric (a date is its serial), so formulas compute on exact values. */
+  n?: number;
+  /** Excel number-format code of the cell ("0.0%", "#,##0", "yyyy-mm-dd"); absent for General. */
+  nf?: string;
   format?: LiveFormat;
 }
 
@@ -415,6 +421,7 @@ function insertIndex(ids: string[], after: string | undefined): number {
  */
 export function applyLiveDocumentOps(model: LiveDocumentModel, ops: LiveDocumentOp[]): LiveDocumentModel {
   const next = cloneModel(model);
+  let recalc = false;
   for (const op of ops) {
     if (op.op === "set_cell" || op.op === "add_sheet") {
       if (next.kind !== "sheet") throw new LiveDocumentOpError("op_unsupported_for_format", op.op);
@@ -426,9 +433,13 @@ export function applyLiveDocumentOps(model: LiveDocumentModel, ops: LiveDocument
       const sheet = findSheet(next, op.sheet);
       if (!sheet) throw new LiveDocumentOpError("target_unknown", `sheet ${op.sheet}`);
       const value = op.value;
+      // The cell keeps its format and number format when only its value changes.
+      const prior = sheet.cells[op.cell];
+      const keep = { ...(prior?.format ? { format: prior.format } : {}), ...(prior?.nf ? { nf: prior.nf } : {}) };
       if (value === "") delete sheet.cells[op.cell];
-      else if (value.startsWith("=") && value.length > 1) sheet.cells[op.cell] = { v: "", f: value.slice(1) };
-      else sheet.cells[op.cell] = { v: value };
+      else if (value.startsWith("=") && value.length > 1) sheet.cells[op.cell] = { v: "", f: value.slice(1), ...keep };
+      else sheet.cells[op.cell] = { v: value, ...keep };
+      recalc = true;
       continue;
     }
     if (op.op === "set_format") {
@@ -506,6 +517,8 @@ export function applyLiveDocumentOps(model: LiveDocumentModel, ops: LiveDocument
       continue;
     }
   }
+  // Formulas show what they compute: every formula cell is re-evaluated after a cell changed.
+  if (recalc && next.kind === "sheet") recalculateSheets(next.sheets);
   return next;
 }
 
