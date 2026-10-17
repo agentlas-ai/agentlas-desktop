@@ -42,6 +42,7 @@ import {
   agentMailThread,
   agentMailToolsOffered,
   agentMailUpdateMailbox,
+  onAgentMailMailboxKnown,
   resetAgentMailLastKnown,
 } from "./client";
 import { agentMailAutoRunRefusal, registerAgentMailAutoRun } from "./control-server";
@@ -51,6 +52,14 @@ const FALLBACK_POLL_MS = 60_000;
 const HANDLED_KEEP = 500;
 /** Offline: double the wait per failed pass, never longer than this. */
 const MAX_BACKOFF_MS = 5 * 60_000;
+/**
+ * The server says this account has no mailbox (none, deleted, or provisioning failed): check again this rarely.
+ * Perf review MP-10 (2026-10-17): every signed-in Desktop asked every 60 s, 1,440 GETs a day per install, though
+ * none of those states turns active without the owner issuing a mailbox (afterChange → sync now) or a status read
+ * that sees it active (the mailbox screen, a run, the phone: onAgentMailMailboxKnown → sync now) or a sign-in
+ * (onAuthSessionRestored → sync now).
+ */
+const NO_MAILBOX_POLL_MS = 6 * 60 * 60_000;
 /** A received message whose details could not be read is retried this many passes. */
 const PENDING_MAX_ATTEMPTS = 5;
 const PENDING_KEEP = 100;
@@ -90,6 +99,8 @@ let failureStreak = 0;
 let lastMailboxFingerprint: string | null = null;
 /** A session cookie was present at some pass in this process (sign-out detection). */
 let sawSession = false;
+/** The last pass found no mailbox; a status read that sees one active wakes the sync. */
+let waitingForMailbox = false;
 
 function forgetSignedOutMailbox(): void {
   sawSession = false;
@@ -225,6 +236,7 @@ function isTransient(code: string): boolean {
 async function tick(): Promise<void> {
   if (running || stopped) return;
   running = true;
+  waitingForMailbox = false;
   let next = pollDelay(null);
   try {
     if (!getSessionCookieHeader()) {
@@ -241,7 +253,14 @@ async function tick(): Promise<void> {
     if (!agentMailToolsOffered()) {
       // Refresh what we know at most as often as we would poll.
       const status = await agentMailStatus();
-      if (!status.ok || status.mailbox?.status !== "active") return;
+      if (!status.ok) return;
+      if (status.mailbox?.status !== "active") {
+        if (!status.mailbox || status.mailbox.status === "deleted" || status.mailbox.status === "provisioning-failed") {
+          waitingForMailbox = true;
+          next = NO_MAILBOX_POLL_MS;
+        }
+        return;
+      }
     }
     next = await pull();
   } catch (error) {
@@ -730,6 +749,11 @@ export function startAgentMailSync(): void {
   const { onAuthSessionRestored, onAuthSessionInvalidated } = require("../auth") as typeof import("../auth");
   disposers.push(onAuthSessionRestored(() => agentMailSyncNow()));
   disposers.push(onAuthSessionInvalidated(() => forgetSignedOutMailbox()));
+  try {
+    disposers.push(onAgentMailMailboxKnown((mailbox) => { if (waitingForMailbox && mailbox?.status === "active") agentMailSyncNow(); }));
+  } catch {
+    // Client without mailbox listeners (contract runs).
+  }
   disposers.push(onHostShutdown(stopAgentMailSync));
   schedule(5_000);
 }
