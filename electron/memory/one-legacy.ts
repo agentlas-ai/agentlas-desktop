@@ -22,12 +22,13 @@ function source() {
   const sourceKey = digest(JSON.stringify([product.name, legacyKey]));
   return { product, legacyKey, sourceKey, stateKey: `one-legacy-state:${sourceKey}` };
 }
-/** The product shadow this module writes after the central commit (never a state). */
-function isCutoverPointer(raw: string, sourceKey: string): boolean {
+/** The product shadow this module writes after the central commit (never a state): the source key it names, or null. */
+function cutoverPointerSource(raw: string): string | null {
   try {
     const value = JSON.parse(raw) as { schemaVersion?: unknown; sourceKey?: unknown };
-    return value?.schemaVersion === "agentlas.one-memory-cutover.v1" && value.sourceKey === sourceKey;
-  } catch { return false; }
+    return value?.schemaVersion === "agentlas.one-memory-cutover.v1" && typeof value.sourceKey === "string"
+      && /^[0-9a-f]{64}$/.test(value.sourceKey) ? value.sourceKey : null;
+  } catch { return null; }
 }
 const mapKey = (sourceKey: string, id: string) => `one-legacy-asset:${sourceKey}:${id}`;
 const sourceId = (sourceKey: string, id: string) => `one-legacy:${sourceKey}:${id}`;
@@ -104,11 +105,13 @@ export function readLegacyOneState(parse: (raw: string) => OneMemoryState, initi
     if (!row) {
       const shadow = binding.product.prepare("SELECT value FROM meta WHERE key=?").get(binding.legacyKey) as { value: string } | undefined;
       // A cutover pointer says the state already moved to a central store; it is not a state. This store having no row
-      // (another memory root or owner namespace: a fresh ~/.agentlas, a regenerated registry, a copied app database)
-      // means this store has no legacy state. Parsing the pointer failed every read for good — dev 2026-10-17: 1326
-      // oneMemory:getState errors in one hour, production 2026-10-14 for 8 minutes.
-      const old = shadow && !isCutoverPointer(shadow.value, binding.sourceKey) ? shadow : undefined;
-      if (shadow && !old) console.warn("[one-memory] one_memory_cutover_central_missing: this store starts empty");
+      // for this source (another memory root or owner namespace: a fresh ~/.agentlas, a regenerated registry; or the app
+      // database at another path, whose pointer names the old path's source) means this source has no legacy state here.
+      // The pointer's own source row, if this store has one, is left as it is. Parsing the pointer failed every read for
+      // good — dev 2026-10-17: 1326 oneMemory:getState errors in one hour, production 2026-10-14 for 8 minutes.
+      const pointerSource = shadow ? cutoverPointerSource(shadow.value) : null;
+      const old = pointerSource ? undefined : shadow;
+      if (pointerSource) console.warn(`[one-memory] one_memory_cutover_central_missing: this source starts empty (pointer ${pointerSource === binding.sourceKey ? "same" : "other"} source)`);
       const state = old ? parse(old.value) : initial();
       const raw = old?.value ?? JSON.stringify(state);
       for (const asset of state.memories) admitAsset(binding.sourceKey, asset);
@@ -134,7 +137,9 @@ export function readLegacyOneState(parse: (raw: string) => OneMemoryState, initi
     const literal = binding.legacyKey.replace(/'/g, "''");
     const pointer = JSON.stringify({ schemaVersion: "agentlas.one-memory-cutover.v1", sourceKey: binding.sourceKey });
     const shadow = binding.product.prepare("SELECT value FROM meta WHERE key=?").get(binding.legacyKey) as { value: string } | undefined;
-    if (shadow?.value !== pointer) {
+    // A pointer already there (the app database's old path named its own source) is already fenced by that path's
+    // triggers, and it already keeps an older app from reading a stale state: rewriting it aborted every read.
+    if (shadow?.value !== pointer && !(shadow && cutoverPointerSource(shadow.value))) {
       binding.product.prepare("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
         .run(binding.legacyKey, pointer);
     }
