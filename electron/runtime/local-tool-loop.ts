@@ -29,6 +29,7 @@ import { mcpToolIsMutating, planMcpToolIsMutating } from "../mcp-tools/proxy-ser
 import { oneGraphToolTimeoutMs } from "../../shared/one-graph-tool-permission";
 import { readOnlyBrowserToolIsMutating } from "../../shared/read-only-browser-tools";
 import { mcpToolSchemaDigest } from "../mcp-tools/tool-schema";
+import { mcpToolSurfaceHides } from "../mcp-tools/hephaestus-tool-surface";
 import { installLazyToolMenu, invalidateToolMenu, resolveToolMenu } from "./tool-menu";
 import { CODE_MODE_TOOL, installMainCodeMode, runMainCodeMode } from "./code-mode";
 import { TOOL_RESULT_READ, foldRetainedToolResult, hasToolResultContext, installToolResultContext, projectToolResult, readToolResult, toolResultReadRequest } from "./tool-result-context";
@@ -338,6 +339,9 @@ export async function loadMainToolInventory(
     if (new Set(status.tools.map(tool => tool.name)).size !== status.tools.length) throw new Error("mcp_tool_inventory_duplicate_name");
     for (const tool of status.tools) {
       if (collectionBinding && !SCIENCE_COLLECTION_TOOLS.includes(tool.name)) continue;
+      // The same ordinary-Work surface Codex, Claude Code and the proxied runtimes carry (hephaestus-tool-surface.ts):
+      // this loop connects to the server itself, so it narrows the inventory instead of a proxy list.
+      if (mcpToolSurfaceHides(mcpConfigPath, key, tool.name)) continue;
       const safeKey = key.replace(/[^a-zA-Z0-9_-]/g, "_");
       const safeTool = tool.name.replace(/[^a-zA-Z0-9_-]/g, "_");
       let name = `mcp__${safeKey}__${safeTool}`.slice(0, 128);

@@ -30,6 +30,12 @@ export type McpProxyGate = {
   readOnlyBrowser?: true;
   /** Stable Main-owned identity for an Antigravity browser resident scope. */
   residentKey?: string;
+  /**
+   * Raw server tool names this wire may list and call (hephaestus-tool-surface.ts). Main-minted at config build; a
+   * tools/list reply is trimmed to it and a call to anything else is refused. The host's own inventory queries
+   * (schema digests) still see the full upstream list.
+   */
+  toolSurface?: readonly string[];
 };
 type Registration = {
   cwd: Readonly<{ path: string; dev: number; ino: number }>;
@@ -724,6 +730,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       const tool = frame.params?.name, args = frame.params?.arguments ?? {};
       if (!initialized || typeof tool !== "string" || !tool || !args || typeof args !== "object" || Array.isArray(args)) throw new Error("mcp_proxy_call_invalid");
       if(gate.historyRuntimeFence){assertHistoryRuntimeFence(gate.historyRuntimeFence);gate.historyRuntimeFence.assertTool(historyToolInput(frame));}
+      if (gate.toolSurface && !gate.toolSurface.includes(tool)) { deny(wireId, "tool_surface_denied"); return; }
       if (!graphAllows(gate, tool)) { deny(wireId, "plan_denied"); return; }
       const mutating = policy.mutating({ catalogId: gate.catalogId, toolName: tool, args });
       if ((gate.simulation && mutating) || (gate.planMode && policy.planMutating({ authority: gate.planReadAuthority, toolName: tool, args }))) { deny(wireId, "plan_denied"); return; }
@@ -849,6 +856,12 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     if (controller) { void toolCall(wireId, frame, controller.signal); return; }
     await up({ ...frame, id: wireId });
   }
+  /** The model-facing tools/list reply, trimmed to the wire's tool surface; every other wire is untouched. */
+  function surfaceToolList(frame: Frame): Frame {
+    const surface = gate.toolSurface;
+    if (!surface || frame.error || !Array.isArray(frame.result?.tools)) return frame;
+    return { ...frame, result: { ...frame.result, tools: frame.result.tools.filter((tool: { name?: unknown }) => typeof tool?.name === "string" && surface.includes(tool.name)) } };
+  }
   function attachUpstream(upstream: Transport): void {
     upstream.onclose = () => { if (transport === upstream) close("upstream_transport_closed", "upstream"); };
     upstream.onerror = (error) => { if (transport === upstream) close(error instanceof Error ? `upstream_transport_error:${error.message}` : "upstream_transport_error", "upstream"); };
@@ -891,7 +904,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
         if (upstreamInit || !pending.initParamsKey) reusable = false;
         else upstreamInit = { paramsKey: pending.initParamsKey, result: frame.result };
       }
-      finish(String(frame.id), frame);
+      finish(String(frame.id), pending.method === "tools/list" ? surfaceToolList(frame) : frame);
     };
   }
   async function spawnUpstream(): Promise<void> {

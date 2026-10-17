@@ -73,7 +73,7 @@ import {
 } from "./proxy-channel";
 import { mcpProxyApprovalPort, READ_ONLY_BROWSER_TOOLS } from "./proxy-server";
 import { userDataPath } from "../runtime-paths";
-import { HEPHAESTUS_NETWORK_WORK_CORE_TOOLS, hephaestusClaudeDeniedTools, registerMcpToolSurfaceDenial, type HephaestusToolSurface } from "./hephaestus-tool-surface";
+import { HEPHAESTUS_NETWORK_WORK_CORE_TOOLS, registerMcpToolSurface, type HephaestusToolSurface, type McpToolSurface } from "./hephaestus-tool-surface";
 import { agentRunCwd } from "../runtime/exec";
 import {
   BROWSER_CDP_LAUNCHER_BASENAME,
@@ -324,6 +324,7 @@ function mcpProxySpec(
   residentHandles: string[],
   planReadAuthority?: "agentlas-browser" | "cua-driver",
   readOnlyBrowser?: boolean,
+  toolSurface?: McpToolSurface | null,
 ): { command: string; args: string[]; env: Record<string, string> } | null {
   const toolGate = opts?.toolGate;
   if (!toolGate) return null;
@@ -344,7 +345,8 @@ function mcpProxySpec(
   // 2026-09-24, Threads automation publish node). agentRunCwd() is the runners' cwd.
   const handle = prepareMcpProxyLaunch({ serverKey, ...gate,
     cwd: gate.cwd === undefined ? (opts?.workingFolder ?? agentRunCwd()) : gate.cwd, catalogId, planReadAuthority,
-    ...(readOnlyBrowser ? { readOnlyBrowser: true as const } : {}) });
+    ...(readOnlyBrowser ? { readOnlyBrowser: true as const } : {}),
+    ...(toolSurface ? { toolSurface: Object.freeze([...toolSurface.allow]) } : {}) });
   if (isPersistentMcpProxyLaunch(handle)) residentHandles.push(handle);
   else ownedHandles.push(handle);
   return {
@@ -427,7 +429,7 @@ const PROXY_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
 // (isolated live run 2026-09-25: every hephaestus-network bridge "upstream_transport_closed",
 // so host-loop runtimes never had Workforce tools). Forwarded only for that launch.
 const HEPHAESTUS_LAUNCH_KEYS = ["HEPHAESTUS_RUNTIME_ROOT", "PYTHONPATH", "PYTHONUTF8", "PYTHONIOENCODING",
-  "PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX", "AGENTLAS_JUDGE_RUNTIME",
+  "PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX", "AGENTLAS_JUDGE_RUNTIME", "HEPHAESTUS_AUTO_AUTH",
   "AGENTLAS_MEMORY_ROOT", "AGENTLAS_MEMORY_OWNER_NAMESPACE", "AGENTLAS_MEMORY_BINDING_FILE", "AGENTLAS_MEMORY_BINDING_REVISION"];
 let mapping;
 try {
@@ -781,7 +783,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   const mcpServers: Record<string, unknown> = {};
   const allowedTools: string[] = [];
   const codexConfigArgs: string[] = [];
-  const toolSurfaceDenied: string[] = [];
+  let toolSurface: McpToolSurface | null = null;
   const runtimeEnv: Record<string, string> = {};
   const mainOnlyRemoteAliases = new Set<string>();
   let nativeBrowserBound = false;
@@ -1159,6 +1161,9 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         builtInEnv = Object.fromEntries(
           Object.entries(launch.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
         );
+        // Nobody can finish a browser sign-in during an unattended run: with an expired or revoked OS token the
+        // engine otherwise opens one per call and waits up to 180 s. "0" makes it fail fast as source_unauthorized.
+        if (opts?.toolGate?.unattended === true) builtInEnv.HEPHAESTUS_AUTO_AUTH = "0";
       }
       if (command === "uv" || command === "uvx") {
         // Preserve the existing managed-uv bootstrap, before its PATH is sealed.
@@ -1271,8 +1276,14 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         };
         consentTransport = actual;
         const browserReadOnly = s.catalogId === "agentlas-browser" && agentlasBrowserReadOnlyProfile(opts?.toolGate);
+        // An ordinary Work turn's hephaestus-network surface (hephaestus-tool-surface.ts). Codex binds it below as
+        // enabled_tools, Claude Code as --disallowedTools; every runtime that reaches the server through Main's proxy
+        // (antigravity, grok, kimi, cursor, copilot, and Claude Code too) gets the same list as the proxy's allow list,
+        // which trims tools/list and refuses a call to anything outside it.
+        const hephaestusSurface: McpToolSurface | null = s.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID && opts?.hephaestusToolSurface === "work-core"
+          ? { serverKey: key, allow: HEPHAESTUS_NETWORK_WORK_CORE_TOOLS } : null;
         const proxied = mcpProxySpec(key, opts, s.catalogId, proxyHandles, residentProxyHandles,
-          s.catalogId === "cua-driver" ? "cua-driver" : browserRuntime && opts?.nativeBrowser ? "agentlas-browser" : undefined, browserReadOnly);
+          s.catalogId === "cua-driver" ? "cua-driver" : browserRuntime && opts?.nativeBrowser ? "agentlas-browser" : undefined, browserReadOnly, hephaestusSurface);
         if (s.catalogId === "cua-driver" && opts?.toolGate && !proxied) throw new Error("computer-use-tool-gate-unavailable");
         if (browserReadOnly && !proxied) throw new Error("browser-read-only-gate-unavailable");
         const browserCodexMainGated = s.catalogId === "agentlas-browser" && agentlasBrowserCodexMainGated(opts?.toolGate);
@@ -1297,11 +1308,11 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         if (aliases.length > 0) {
           pushCodexConfig(codexConfigArgs, key, "env_vars", tomlStringArray(aliases));
         }
-        if (s.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID && opts?.hephaestusToolSurface === "work-core") {
+        if (hephaestusSurface) {
           // Fixed for every ordinary turn of a conversation: the thread's MCP table digest (codexMcpThreadConfig)
           // covers this list, so a list that flipped per turn would rebind the thread and break the cached prefix.
           pushCodexConfig(codexConfigArgs, key, "enabled_tools", tomlStringArray([...HEPHAESTUS_NETWORK_WORK_CORE_TOOLS]));
-          toolSurfaceDenied.push(...hephaestusClaudeDeniedTools(key));
+          toolSurface = hephaestusSurface;
         }
         if (browserReadOnly && codexLaunch) {
           // Codex's own gate stays "never" for everything else. Only the read-only
@@ -1503,7 +1514,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     endpoint: opts.nativeBrowser.endpoint, token: opts.nativeBrowser.token,
     ...(opts.nativeBrowser.nativeComputerUse ? { nativeComputerUse: opts.nativeBrowser.nativeComputerUse } : {}),
   };
-  releaseToolSurfaceDenial = registerMcpToolSurfaceDenial(configPath, toolSurfaceDenied);
+  releaseToolSurfaceDenial = registerMcpToolSurface(configPath, toolSurface);
   releasePrepared = registerPreparedMcpConfig({ path: configPath, servers: preparedRows, runtimeEnv,
     buildOptions: delegationBuildOptions, isCurrent: () => {
     if (opts?.admissionCurrent && !opts.admissionCurrent()) return false;

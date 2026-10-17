@@ -5,7 +5,8 @@
  * An ordinary turn's calls (7,879 product Codex rollouts) were workforce continuity, the Context Map gate and the
  * plugin resolver; staffing (preflight/search/prepare ...), the legacy Hub router, memory/auth/admin tools are called
  * by the host orchestrator or by an explicit owner request. The surface is one declaration here; each runtime binds it
- * with its own knob (Codex `enabled_tools`, Claude Code `--disallowedTools`). No other executor has such a filter.
+ * with its own knob (Codex `enabled_tools`, Claude Code `--disallowedTools`, the proxied runtimes a Main proxy allow list,
+ * the in-process tool loop its inventory filter).
  *
  * No Electron import: the daemon and the terminal engine load this too.
  */
@@ -54,27 +55,42 @@ export function claudeMcpToolName(serverKey: string, rawName: string): string {
   return `mcp__${serverKey}__${rawName.replace(/[^A-Za-z0-9_-]/g, "_")}`;
 }
 
-/** The `--disallowedTools` entries that leave only the work-core tools of `serverKey` visible to Claude Code. */
-export function hephaestusClaudeDeniedTools(serverKey: string): string[] {
-  const core = new Set(HEPHAESTUS_NETWORK_WORK_CORE_TOOLS);
-  return HEPHAESTUS_NETWORK_KNOWN_TOOLS.filter((name) => !core.has(name)).map((name) => claudeMcpToolName(serverKey, name));
-}
-
 /*
- * The deny list travels from the config builder to the Claude launcher by the config file's path, like the prepared
- * transport registry (prepared-transport.ts): the path is the one thing both already hold and it is unique per
+ * The surface travels from the config builder to its consumers by the config file's path, like the prepared
+ * transport registry (prepared-transport.ts): the path is the one thing they already hold and it is unique per
  * invocation. An entry lives exactly as long as the config file does (the config's cleanup removes it).
+ * Consumers: Claude Code (`--disallowedTools`), the in-process tool loop of the API and local-model runtimes
+ * (loadMainToolInventory). Codex binds `enabled_tools` and the proxied runtimes (antigravity, grok, kimi, cursor,
+ * copilot) a proxy-gate allow list at build time, so they never read this registry.
  */
-const deniedByConfigPath = new Map<string, readonly string[]>();
+export interface McpToolSurface {
+  /** The MCP config key the surface narrows (`hephaestus-network`). */
+  readonly serverKey: string;
+  /** Raw tool names that stay visible and callable. */
+  readonly allow: readonly string[];
+}
+const surfaceByConfigPath = new Map<string, McpToolSurface>();
 
-export function registerMcpToolSurfaceDenial(configPath: string, denied: readonly string[]): () => void {
-  if (denied.length === 0) return () => {};
-  const frozen = Object.freeze([...denied]);
-  deniedByConfigPath.set(configPath, frozen);
-  return () => { if (deniedByConfigPath.get(configPath) === frozen) deniedByConfigPath.delete(configPath); };
+export function registerMcpToolSurface(configPath: string, surface: McpToolSurface | null): () => void {
+  if (!surface) return () => {};
+  const frozen = Object.freeze({ serverKey: surface.serverKey, allow: Object.freeze([...surface.allow]) });
+  surfaceByConfigPath.set(configPath, frozen);
+  return () => { if (surfaceByConfigPath.get(configPath) === frozen) surfaceByConfigPath.delete(configPath); };
 }
 
-/** Tools the config at `configPath` keeps out of the model's view; empty for any config that declared no surface. */
+/** Claude Code's `--disallowedTools` entries for the config at `configPath`; empty for any config that declared no surface. */
 export function mcpToolSurfaceDenial(configPath: string | undefined): readonly string[] {
-  return configPath ? deniedByConfigPath.get(configPath) ?? [] : [];
+  const surface = configPath ? surfaceByConfigPath.get(configPath) : undefined;
+  if (!surface) return [];
+  const allow = new Set(surface.allow);
+  return HEPHAESTUS_NETWORK_KNOWN_TOOLS.filter((name) => !allow.has(name)).map((name) => claudeMcpToolName(surface.serverKey, name));
+}
+
+/**
+ * Whether the config at `configPath` keeps `rawToolName` of server `serverKey` out of the model's view. Fail-closed:
+ * once a surface is declared for the server, a tool outside its allow list is hidden, a newer engine's included.
+ */
+export function mcpToolSurfaceHides(configPath: string | undefined, serverKey: string, rawToolName: string): boolean {
+  const surface = configPath ? surfaceByConfigPath.get(configPath) : undefined;
+  return !!surface && surface.serverKey === serverKey && !surface.allow.includes(rawToolName);
 }
