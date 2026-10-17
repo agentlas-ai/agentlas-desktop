@@ -97,8 +97,8 @@ const HOST_ARGUMENT_SCHEMAS: Record<string, Record<string, unknown>> = {
 // when a call is authorized. The output schema rides only on an exact lookup, like input_schema: a search result list
 // stays small for the model.
 // The canonical output schema describes handler data. app.call preserves that data only when JSON fits;
-// its existing fulfilled reply may instead contain a clipped preview or the legacy serialization fallback.
-// Keep the wire unchanged and describe it separately. Window operations already return their flat ACK.
+// over RESULT_LIMIT its fulfilled reply carries the same shape cut down (truncated + truncation), a clipped preview when no
+// cut fits, or the legacy serialization fallback. Window operations already return their flat ACK.
 function appCallReplySchema(operation: Operation, descriptor: OperationDescriptor): Record<string, unknown> {
   if (!operation.entry) return descriptor.outputSchema;
   const { $defs, ...handlerOutput } = descriptor.outputSchema;
@@ -106,14 +106,18 @@ function appCallReplySchema(operation: Operation, descriptor: OperationDescripto
     ok: { type: "boolean" }, operation: { const: operation.path }, effect: { const: operation.effect },
     code: { type: "string" }, receipt_id: { type: "string" }, receipt_recorded: { type: "boolean" },
   };
-  const reply = (result: Record<string, unknown>, truncated: boolean) => ({
-    type: "object", properties: { ...properties, result, ...(truncated ? { truncated: { const: true } } : {}) },
-    required: ["ok", "operation", "effect", "result", ...(truncated ? ["truncated"] : [])], additionalProperties: false,
+  const truncation = { type: "array", items: { type: "object", properties: {
+    path: { type: "string" }, kind: { type: "string", enum: ["array", "string"] }, total: { type: "integer" }, returned: { type: "integer" },
+  }, required: ["path", "kind", "total", "returned"], additionalProperties: false } };
+  const reply = (result: Record<string, unknown>, truncated: boolean, cut = false) => ({
+    type: "object", properties: { ...properties, result, ...(truncated ? { truncated: { const: true } } : {}), ...(cut ? { truncation } : {}) },
+    required: ["ok", "operation", "effect", "result", ...(truncated ? ["truncated"] : []), ...(cut ? ["truncation"] : [])], additionalProperties: false,
   });
   return {
     ...($defs ? { $defs } : {}),
     anyOf: [
       reply({ anyOf: [handlerOutput, { type: "null" }] }, false),
+      reply(handlerOutput, true, true),
       reply({ type: "string", maxLength: RESULT_LIMIT + 1 }, true),
       // clipResult's JSON serialization failure has always returned a string without a truncated flag.
       reply({ type: "string", maxLength: RESULT_LIMIT }, false),
@@ -304,12 +308,68 @@ function build(arg: AppControlInvokeArg, named: Record<string, unknown>): unknow
 
 const OWNER_LOCAL_MAP_OPERATIONS: ReadonlySet<string> = new Set(["experience.ontologyGraph", "agents.borrowedOntologyGraph"]);
 
-function clipResult(value: unknown): { result: unknown; truncated?: true } {
+type ResultCut = { path: string; kind: "array" | "string"; total: number; returned: number };
+const LONG_TEXT = 2_000;
+
+// A result over RESULT_LIMIT keeps its JSON shape. Dev 2026-10-17 run8 (Haiku automation): automations.listRuns came back
+// as a cut JSON string over the limit, so the same `result` was an array for a small history and a string for a large one,
+// and every JSON.parse of it in code mode failed. Arrays are cut to the prefix that fits (one item kept while long text can
+// still shrink), then long free text, and `truncation` names each cut. Only a result none of that brings under the limit
+// keeps the string preview.
+function clipResult(value: unknown): { result: unknown; truncated?: true; truncation?: ResultCut[] } {
   if (value === undefined) return { result: null };
   let text: string;
   try { text = JSON.stringify(value) ?? "null"; } catch { return { result: String(value).slice(0, RESULT_LIMIT) }; }
   if (text.length <= RESULT_LIMIT) return { result: JSON.parse(text) };
-  return { result: `${text.slice(0, RESULT_LIMIT)}…`, truncated: true };
+  type Holder = Record<string | number, unknown>;
+  const box: Holder = { $: JSON.parse(text) };
+  const cuts = new Map<string, ResultCut>();
+  let size = text.length;
+  const visit = (onNode: (holder: Holder, key: string | number, at: string) => void) => {
+    const walk = (holder: Holder, key: string | number, at: string) => {
+      onNode(holder, key, at);
+      const node = holder[key];
+      if (Array.isArray(node)) node.forEach((_, index) => walk(node as unknown as Holder, index, `${at}[${index}]`));
+      else if (node && typeof node === "object") {
+        for (const child of Object.keys(node)) walk(node as Holder, child, /^[A-Za-z_$][\w$]*$/.test(child) ? `${at}.${child}` : `${at}[${JSON.stringify(child)}]`);
+      }
+    };
+    walk(box, "$", "$");
+  };
+  const cutArrays = (floor: number) => {
+    while (size > RESULT_LIMIT) {
+      const arrays: Array<{ path: string; array: unknown[]; sizes: number[]; total: number }> = [];
+      visit((holder, key, at) => {
+        const node = holder[key];
+        if (!Array.isArray(node) || node.length <= floor) return;
+        const sizes = node.map((item) => JSON.stringify(item ?? null).length);
+        arrays.push({ path: at, array: node, sizes, total: sizes.reduce((sum, item) => sum + item, 0) });
+      });
+      const largest = arrays.sort((a, b) => b.total - a.total)[0];
+      if (!largest) return;
+      let keep = largest.array.length, removed = 0;
+      while (keep > floor && removed < size - RESULT_LIMIT) removed += largest.sizes[--keep] + (keep > 0 ? 1 : 0);
+      cuts.set(largest.path, { path: largest.path, kind: "array", total: cuts.get(largest.path)?.total ?? largest.array.length, returned: keep });
+      largest.array.length = keep;
+      size = JSON.stringify(box.$).length;
+    }
+  };
+  cutArrays(1);
+  if (size > RESULT_LIMIT) {
+    const strings: Array<{ path: string; holder: Holder; key: string | number; full: string }> = [];
+    visit((holder, key, at) => { const node = holder[key]; if (typeof node === "string" && node.length > LONG_TEXT) strings.push({ path: at, holder, key, full: node }); });
+    for (const { path, holder, key, full } of strings.sort((a, b) => b.full.length - a.full.length)) {
+      if (size <= RESULT_LIMIT) break;
+      let returned = Math.max(LONG_TEXT, full.length - (size - RESULT_LIMIT) - 1);
+      if (/[\uD800-\uDBFF]/.test(full[returned - 1] ?? "")) returned -= 1;
+      holder[key] = `${full.slice(0, returned)}…`;
+      cuts.set(path, { path, kind: "string", total: full.length, returned });
+      size = JSON.stringify(box.$).length;
+    }
+  }
+  cutArrays(0);
+  if (size > RESULT_LIMIT) return { result: `${text.slice(0, RESULT_LIMIT)}…`, truncated: true };
+  return { result: box.$, truncated: true, truncation: [...cuts.values()] };
 }
 
 function canonicalJson(value: unknown): string {
