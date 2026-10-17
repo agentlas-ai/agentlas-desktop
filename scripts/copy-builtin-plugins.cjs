@@ -38,6 +38,7 @@ const RELEASE_TOP_LEVEL = Object.freeze({
   "agentlas-turn": ["plugin.json"],
   design: ["README.md", "assets", "plugin.json", "references", "skills"],
   "flint-chart": ["plugin.json", "skills"],
+  "office": ["plugin.json", "skills"],
   "plugin-make": ["README.md", "assets", "plugin.json", "skills"],
 });
 

@@ -1,0 +1,50 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "office",
+  "name": "Agentlas Office",
+  "version": "0.1.0",
+  "builtin": true,
+  "publisher": {
+    "name": "Agentlas",
+    "url": "https://agentlas.cloud"
+  },
+  "surface": {
+    "displayName": "Office",
+    "displayNameKo": "오피스",
+    "tagline": "Edit Word, Excel, PowerPoint and Hangul files live in the Document tab",
+    "taglineKo": "워드·엑셀·파워포인트·한글 파일을 문서 탭에서 실시간으로 편집합니다",
+    "description": "Opens a local docx, hwp, hwpx, xlsx or pptx in the owner's Document tab and edits it there in front of the owner: text, cells, slides and formatting, saved back in the original format.",
+    "descriptionKo": "로컬 docx·hwp·hwpx·xlsx·pptx 파일을 오너의 문서 탭에서 열고, 오너가 보는 앞에서 글·셀·슬라이드·서식을 고친 뒤 원래 형식 그대로 저장합니다.",
+    "category": "productivity",
+    "brandColor": "#D24726",
+    "defaultPrompts": [
+      "@office 이 보고서의 2번째 문단을 다듬고 저장해줘",
+      "@office 이 엑셀 매출 시트에 합계 행을 추가해줘",
+      "@office 이 발표자료에 시장 개요 슬라이드를 한 장 추가해줘"
+    ]
+  },
+  "invocation": {
+    "mention": "@office",
+    "implicit": "router",
+    "standalone": true
+  },
+  "provides": {
+    "skills": {
+      "router": "skills/index/SKILL.md",
+      "workflows": ["document", "sheet", "slides"]
+    }
+  },
+  "requires": {
+    "prereq": [],
+    "os": ["darwin", "win32", "linux"]
+  },
+  "permissions": {
+    "fileWrite": "none",
+    "network": "none",
+    "shell": "deny"
+  },
+  "state": {
+    "files": [],
+    "assets": false
+  }
+}
