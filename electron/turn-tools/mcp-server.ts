@@ -578,6 +578,15 @@ export const AGENTLAS_TURN_TOOLS = ([
 ]) };
 });
 
+// MCP server instructions: Claude Code defers MCP tool definitions (ToolSearch), so a teammate sees only the names
+// harness_search/harness_describe/harness_call, never the harness_call menu. Dev replay r08 (2026-10-17): Film Production
+// Director (claude-code) wrote "I cannot listen to the audio", recorded its QA as FAIL and the run uploaded nothing, with
+// media.listen unused. Claude Code shows server instructions in its system prompt even when tools are deferred. Real-model
+// A/B in that channel (claude sonnet low, product Claude home, ENABLE_TOOL_SEARCH=true; /tmp/prompt-audit/listen-ab2):
+// media.listen was called in 0/6 runs without this line and 5/6 with it. Sent only while harness_call is one of this run's tools.
+const AGENTLAS_TURN_INSTRUCTIONS = purposePrompt([{ id: "tool.agentlas-turn.server-instructions", revision: 1, stability: "fixed-policy",
+  changeTriggers: ["release"], text: "harness_call media.listen hears a local audio or video file for you." }]);
+
 const SOURCE_HEAD = String.raw`"use strict";
 const fs = require("node:fs");
 const http = require("node:http");
@@ -617,7 +626,7 @@ function request(operation, args) {
 const text = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] });
 const error = (message) => ({ content: [{ type: "text", text: message }], isError: true });
 function handle(requestValue) {
-  if (requestValue.method === "initialize") return { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "agentlas-turn", version: "1.0.0" } };
+  if (requestValue.method === "initialize") return { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "agentlas-turn", version: "1.0.0" }, ...(allowedTools().includes("harness_call") ? { instructions } : {}) };
   if (requestValue.method === "notifications/initialized") return undefined;
   if (requestValue.method === "ping") return {};
   if (requestValue.method === "tools/list") return { tools: tools.filter((tool) => allowedTools().includes(tool.name)) };
@@ -641,7 +650,7 @@ process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => { input += chunk; if (Buffer.byteLength(input, "utf8") > MAX_REQUEST_BYTES) process.exit(78); let end; while ((end = input.indexOf("\n")) >= 0) { line(input.slice(0, end).replace(/\r$/, "")); input = input.slice(end + 1); } });
 `;
 
-const SOURCE = `${SOURCE_HEAD}const tools = ${JSON.stringify(AGENTLAS_TURN_TOOLS)};\n${SOURCE_TAIL}`;
+const SOURCE = `${SOURCE_HEAD}const tools = ${JSON.stringify(AGENTLAS_TURN_TOOLS)};\nconst instructions = ${JSON.stringify(AGENTLAS_TURN_INSTRUCTIONS)};\n${SOURCE_TAIL}`;
 // The source is a file the child verifies before running it (mcp-tools/builtin-mcp-launch.ts); argv stays short.
 const LAUNCH = defineBuiltinMcpLaunch("agentlas-turn", SOURCE);
 
