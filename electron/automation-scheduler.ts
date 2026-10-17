@@ -1946,9 +1946,9 @@ async function runOne(
       // replan 은 계획 캡슐의 호스트 지시로, switch_runtime 은 실행 계획의 1회 핸드오프로(저장된 핀은 그대로).
       // 실측 f7a61706: 19회 중 15회가 스스로 고른 무변경 보류였고 판정은 이를 수용·판정 불가로 받았다.
       // 판정이 뒤에서 도는 완료 실행은 여기서 "unjudged"(판정 대기)일 뿐 "판정기에 닿지 못함"이 아니다. 그 실행의
-      // 보류 판단은 판정이 끝난 뒤 그 결과로 한다. 운영 2026-10-17: 읽기 전용 감시 자동화 2ce66bb9 의 정상 회차
-      // 962번이 전부 self_hold 로 잡혀 replan → 오너 핀(Sonnet) 밖 런타임 전환(Light) → 휴식을 10분마다 돌았고,
-      // 판정은 매번 ok 였다.
+      // 보류 판단은 판정이 끝난 뒤 그 결과로 한다. 운영 2026-10-17: 읽기 전용 감시 자동화 2ce66bb9(에이전트가 만든
+      // 자동화라 워커 풀 1순위를 따른다)의 정상 회차 962번이 전부 self_hold 로 잡혀 replan → 오너가 정한 워커 풀
+      // 1순위(agentlas-light) 밖으로 런타임 전환(Sonnet) → 휴식을 10분마다 돌았고, 판정은 매번 ok 였다.
       let holdGateOpen = false;
       if (!graphLoginWait && !workspaceFailure && !shutdownDispatchClosed && runLedgerRecorded && !parentMissing && !leaseOwnershipLost && !opts?.dryRun && currentRunId
         && !controller.signal.aborted) {
