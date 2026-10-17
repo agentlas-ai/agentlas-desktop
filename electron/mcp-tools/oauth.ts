@@ -22,6 +22,7 @@
 // 설정 파일에도 값이 아니라 런타임 alias 참조만 나간다(mcp-config.ts).
 
 import crypto from "node:crypto";
+import { promises as fsp } from "node:fs";
 import { AUTOMATION_PROFILE_FLAGS } from "../browser/automation-profile-flags";
 import http from "node:http";
 import { spawn } from "node:child_process";
@@ -32,6 +33,7 @@ import {
 } from "@modelcontextprotocol/client";
 
 import { deleteSecret, readSecret, setSecret } from "../secrets/vault";
+import { userDataPath } from "../runtime-paths";
 import {
   browserCdpPort,
   browserCdpPortReady,
@@ -894,6 +896,120 @@ export async function hasUsableMcpOAuthCredential(serverId: string, serverUrl: s
   } catch { return false; }
 }
 
+/*
+ * Refresh is single-flight per server, in this process and across Main and the daemon. Two runs that hit expiry
+ * together (team workers, or an automation in the daemon plus a chat in Main) both sent the same refresh token; an
+ * authorization server that rotates refresh tokens answers the loser invalid_grant (its run starts without the
+ * connector), and one with reuse detection revokes the whole grant, so a working connector has to be reconnected.
+ */
+const refreshInFlight = new Map<string, Promise<string | null>>();
+const REFRESH_LOCK_STALE_MS = 60_000;
+const REFRESH_LOCK_WAIT_MS = TOKEN_TIMEOUT_MS + 5_000;
+
+/** The stored access token when another caller already refreshed since `first` was read; undefined if not. */
+async function refreshedMeanwhile(serverId: string, first: StoredTokens): Promise<string | null | undefined> {
+  const session = await readMcpOAuthSession(serverId);
+  const raw = await readSecret(tokenSecretKey(serverId));
+  if (!session || !raw) return null;
+  let tokens: StoredTokens;
+  try { tokens = JSON.parse(raw) as StoredTokens; } catch { return null; }
+  if (!tokens || typeof tokens.accessToken !== "string" || !tokens.accessToken.trim()) return null;
+  // Tokens are written after the session, so a new refresh token (or a new access token beside a fresh expiry)
+  // proves the other refresh finished both writes.
+  if (tokens.refreshToken !== first.refreshToken) return tokens.accessToken;
+  const fresh = !session.expiresAt || session.expiresAt - REFRESH_SKEW_MS > Date.now();
+  if (fresh && tokens.accessToken !== first.accessToken) return tokens.accessToken;
+  return undefined;
+}
+
+function pidAlive(pid: unknown): boolean {
+  if (!Number.isSafeInteger(pid) || Number(pid) <= 0) return false;
+  try { process.kill(Number(pid), 0); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
+}
+
+/** Cross-process lock file (O_EXCL). Null when another holder kept it past the wait. */
+async function acquireRefreshLock(serverId: string): Promise<(() => Promise<void>) | null> {
+  await fsp.mkdir(userDataPath("mcp-oauth-locks"), { recursive: true, mode: 0o700 });
+  const file = userDataPath("mcp-oauth-locks", `${crypto.createHash("sha256").update(serverId).digest("hex")}.lock`);
+  const id = crypto.randomUUID();
+  const deadline = Date.now() + REFRESH_LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      const handle = await fsp.open(file, "wx", 0o600);
+      try { await handle.writeFile(JSON.stringify({ pid: process.pid, at: Date.now(), id }), "utf8"); }
+      finally { await handle.close(); }
+      return async () => {
+        try { if ((JSON.parse(await fsp.readFile(file, "utf8")) as { id?: string }).id === id) await fsp.unlink(file); }
+        catch { /* already reclaimed or gone */ }
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    // A dead holder never releases; a live one that held it past the stale age is stuck (or its pid was reused).
+    try {
+      const stat = await fsp.stat(file);
+      let holder: { pid?: unknown } = {};
+      try { holder = JSON.parse(await fsp.readFile(file, "utf8")) as { pid?: unknown }; } catch { /* being written */ }
+      const age = Date.now() - stat.mtimeMs;
+      if ((holder.pid !== undefined && !pidAlive(holder.pid)) || age > REFRESH_LOCK_STALE_MS) {
+        await fsp.unlink(file).catch(() => {});
+        continue;
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    if (Date.now() >= deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+async function refreshMcpOAuthAccessToken(serverId: string, first: StoredTokens): Promise<string | null> {
+  try {
+    const meanwhile = await refreshedMeanwhile(serverId, first);
+    if (meanwhile !== undefined) return meanwhile;
+    const release = await acquireRefreshLock(serverId);
+    // Sending the same refresh token beside a live holder is what revokes grants; report "reconnect" instead.
+    if (!release) return (await refreshedMeanwhile(serverId, first)) ?? null;
+    try {
+      const settled = await refreshedMeanwhile(serverId, first);
+      if (settled !== undefined) return settled;
+      const session = await readMcpOAuthSession(serverId);
+      if (!session || !first.refreshToken) return null;
+      const body = new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: first.refreshToken,
+        client_id: session.clientId,
+        resource: session.resource,
+      });
+      if (session.clientSecret) body.set("client_secret", session.clientSecret);
+      if (session.scope) body.set("scope", session.scope);
+      const rawResponse = await fetchJson(session.tokenEndpoint, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+        body: body.toString(),
+      }, TOKEN_TIMEOUT_MS) as Record<string, unknown>;
+      const next = readTokenResponse(rawResponse);
+      await persist(serverId, {
+        ...session,
+        expiresAt: next.expiresAt,
+        ...(next.scope !== undefined ? { scope: next.scope } : {}),
+        obtainedAt: Date.now(),
+      }, {
+        accessToken: next.tokens.accessToken,
+        // 회전하지 않는 AS도 있다 — 새 refresh가 없으면 기존 것을 유지한다.
+        ...(next.tokens.refreshToken ?? first.refreshToken
+          ? { refreshToken: next.tokens.refreshToken ?? first.refreshToken }
+          : {}),
+      });
+      return next.tokens.accessToken;
+    } finally { await release(); }
+  } catch {
+    return null;
+  }
+}
+
 /**
  * 이 서버에 붙일 access token. 만료가 가까우면 먼저 갱신한다.
  *
@@ -929,35 +1045,11 @@ export async function resolveMcpOAuthAccessToken(serverId: string, serverUrl?: s
   // Explicit source preparation observes only original credentials; it never refreshes.
   if (options?.passiveOnly || !tokens.refreshToken) return null;
 
-  try {
-    const body = new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: tokens.refreshToken,
-      client_id: session.clientId,
-      resource: session.resource,
-    });
-    if (session.clientSecret) body.set("client_secret", session.clientSecret);
-    if (session.scope) body.set("scope", session.scope);
-    const rawResponse = await fetchJson(session.tokenEndpoint, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
-      body: body.toString(),
-    }, TOKEN_TIMEOUT_MS) as Record<string, unknown>;
-    const next = readTokenResponse(rawResponse);
-    await persist(serverId, {
-      ...session,
-      expiresAt: next.expiresAt,
-      ...(next.scope !== undefined ? { scope: next.scope } : {}),
-      obtainedAt: Date.now(),
-    }, {
-      accessToken: next.tokens.accessToken,
-      // 회전하지 않는 AS도 있다 — 새 refresh가 없으면 기존 것을 유지한다.
-      ...(next.tokens.refreshToken ?? tokens.refreshToken
-        ? { refreshToken: next.tokens.refreshToken ?? tokens.refreshToken }
-        : {}),
-    });
-    return next.tokens.accessToken;
-  } catch {
-    return null;
-  }
+  const pending = refreshInFlight.get(serverId);
+  if (pending) return pending;
+  const flight = refreshMcpOAuthAccessToken(serverId, tokens).finally(() => {
+    if (refreshInFlight.get(serverId) === flight) refreshInFlight.delete(serverId);
+  });
+  refreshInFlight.set(serverId, flight);
+  return flight;
 }
