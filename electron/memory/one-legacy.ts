@@ -22,6 +22,13 @@ function source() {
   const sourceKey = digest(JSON.stringify([product.name, legacyKey]));
   return { product, legacyKey, sourceKey, stateKey: `one-legacy-state:${sourceKey}` };
 }
+/** The product shadow this module writes after the central commit (never a state). */
+function isCutoverPointer(raw: string, sourceKey: string): boolean {
+  try {
+    const value = JSON.parse(raw) as { schemaVersion?: unknown; sourceKey?: unknown };
+    return value?.schemaVersion === "agentlas.one-memory-cutover.v1" && value.sourceKey === sourceKey;
+  } catch { return false; }
+}
 const mapKey = (sourceKey: string, id: string) => `one-legacy-asset:${sourceKey}:${id}`;
 const sourceId = (sourceKey: string, id: string) => `one-legacy:${sourceKey}:${id}`;
 
@@ -95,7 +102,13 @@ export function readLegacyOneState(parse: (raw: string) => OneMemoryState, initi
   const load = db.transaction(() => {
     let row = db.prepare("SELECT value FROM memory_store_meta WHERE key=?").get(binding.stateKey) as { value: string } | undefined;
     if (!row) {
-      const old = binding.product.prepare("SELECT value FROM meta WHERE key=?").get(binding.legacyKey) as { value: string } | undefined;
+      const shadow = binding.product.prepare("SELECT value FROM meta WHERE key=?").get(binding.legacyKey) as { value: string } | undefined;
+      // A cutover pointer says the state already moved to a central store; it is not a state. This store having no row
+      // (another memory root or owner namespace: a fresh ~/.agentlas, a regenerated registry, a copied app database)
+      // means this store has no legacy state. Parsing the pointer failed every read for good — dev 2026-10-17: 1326
+      // oneMemory:getState errors in one hour, production 2026-10-14 for 8 minutes.
+      const old = shadow && !isCutoverPointer(shadow.value, binding.sourceKey) ? shadow : undefined;
+      if (shadow && !old) console.warn("[one-memory] one_memory_cutover_central_missing: this store starts empty");
       const state = old ? parse(old.value) : initial();
       const raw = old?.value ?? JSON.stringify(state);
       for (const asset of state.memories) admitAsset(binding.sourceKey, asset);
