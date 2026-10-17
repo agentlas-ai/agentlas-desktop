@@ -11,6 +11,7 @@ import { browserAnnotationDraftText } from "@shared/browser-annotation";
 import { selectionForRuntime } from "@shared/runtime-selection";
 import { isInterruptedPartial, isLivePartialCommitBoundary, markInterruptedPartial } from "@shared/interrupted-partial";
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
+import { seedWorkRunProjections, syncWorkRunProjections, workRunTimelineRequest, WORK_TIMELINE_EVENTS_PER_RUN, WORK_TIMELINE_RUNS, type WorkRunProjectionCache } from "@/lib/work-run-timeline-sync";
 import { mergeAutomationHostNotices } from "@/lib/chat-host-notice-refresh";
 
 import { AutomationMonitorStrip } from "./AutomationMonitorStrip";
@@ -1951,27 +1952,62 @@ interface HydratedWorkActivities {
   unbound: UnboundHydratedWorkActivity[];
 }
 
+/**
+ * One durable run projected once. A settle keeps it while the run's receipt is unchanged
+ * (renderer/lib/work-run-timeline-sync.ts) instead of re-reading and re-projecting the whole window.
+ */
+interface ProjectedWorkRun {
+  receipt: InvocationRunReceipt;
+  state: OneActivityState;
+  steps: StreamStep[];
+  durableAssistantId?: string;
+  promptMessageId?: string;
+}
+
+function projectWorkRun(run: { receipt: InvocationRunReceipt; events: RunEventUi[] }): ProjectedWorkRun {
+  // 복원은 자르지 않는다. 창은 원장 조회(eventsPerRun)가 이미 정한다 —
+  // 여기서 한 번 더 자르면 그만큼이 산출물에서 사라진다.
+  const state = projectOneActivityFromLedger(run.events, run.receipt);
+  const steps = mcpStepsFromLedger(run.events, 0);
+  const durableAssistantId = durableAssistantMessageIdFromRun(run.events);
+  // Main may provide the exact prompt row that started this run; it places a run without an answer anchor.
+  const promptMessageIdValue = [...run.events]
+    .reverse()
+    .find((event) => event.kind === "invoke_prompt_bound" && typeof event.payload?.promptMessageId === "string")
+    ?.payload?.promptMessageId
+    ?? [...run.events]
+      .reverse()
+      .find((event) => event.kind === "invoke_started" && typeof event.payload?.promptMessageId === "string")
+      ?.payload?.promptMessageId;
+  const promptMessageId = typeof promptMessageIdValue === "string" && promptMessageIdValue.trim()
+    ? promptMessageIdValue.trim()
+    : undefined;
+  return {
+    receipt: run.receipt,
+    state,
+    steps,
+    ...(durableAssistantId ? { durableAssistantId } : {}),
+    ...(promptMessageId ? { promptMessageId } : {}),
+  };
+}
+
 /** Project every durable run through One's reducer before attaching it to its answer row. */
-function workActivitiesByMessageFromTimeline(
+function workActivitiesByMessageFromProjections(
   history: readonly { id: string; role: string; createdAt?: string; durableMessageId?: string }[],
-  timeline: readonly { receipt: InvocationRunReceipt; events: RunEventUi[] }[],
+  projected: readonly ProjectedWorkRun[],
 ): HydratedWorkActivities {
   const byMessage = new Map<string, HydratedWorkActivity>();
   const unbound: UnboundHydratedWorkActivity[] = [];
   const answers = history.filter((entry) => entry.role === "assistant");
-  const runs = [...timeline]
+  const runs = [...projected]
     .filter((entry) => entry.receipt?.runId && entry.receipt.startedAt)
     .sort((a, b) => (
       a.receipt.startedAt.localeCompare(b.receipt.startedAt)
       || a.receipt.runId.localeCompare(b.receipt.runId)
     ));
   for (const run of runs) {
-    // 복원은 자르지 않는다. 창은 원장 조회(eventsPerRun)가 이미 정한다 —
-    // 여기서 한 번 더 자르면 그만큼이 산출물에서 사라진다.
-    const state = projectOneActivityFromLedger(run.events, run.receipt);
-    const steps = mcpStepsFromLedger(run.events, 0);
+    const { state, steps, durableAssistantId, promptMessageId } = run;
     if (!hasOneActivityEvidence(state) && steps.length === 0) continue;
-    const durableAssistantId = durableAssistantMessageIdFromRun(run.events);
     const target = durableAssistantId
       ? answers.find((entry) => entry.id === durableAssistantId || entry.durableMessageId === durableAssistantId)
       : undefined;
@@ -1983,20 +2019,10 @@ function workActivitiesByMessageFromTimeline(
       // may still provide the exact prompt row that started this run.
       const startedAt = Date.parse(run.receipt.startedAt);
       const finishedAt = run.receipt.finishedAt ? Date.parse(run.receipt.finishedAt) : NaN;
-      const promptMessageIdValue = [...run.events]
-        .reverse()
-        .find((event) => event.kind === "invoke_prompt_bound" && typeof event.payload?.promptMessageId === "string")
-        ?.payload?.promptMessageId
-        ?? [...run.events]
-          .reverse()
-          .find((event) => event.kind === "invoke_started" && typeof event.payload?.promptMessageId === "string")
-          ?.payload?.promptMessageId;
-      const promptMessageId = typeof promptMessageIdValue === "string" && promptMessageIdValue.trim()
-        ? promptMessageIdValue.trim()
-        : undefined;
       unbound.push({
         run: activityRun,
-        steps,
+        // A kept projection is shared across settles: every row gets its own array.
+        steps: [...steps],
         startedAt: Number.isFinite(startedAt) ? startedAt : Date.now(),
         ...(Number.isFinite(finishedAt) ? { finishedAt } : {}),
         busy: run.receipt.status === "running" || run.receipt.status === "cancelling",
@@ -2012,12 +2038,12 @@ function workActivitiesByMessageFromTimeline(
   return { byMessage, unbound };
 }
 
-function attachHydratedWorkActivities(
+function attachHydratedWorkProjections(
   messages: StreamMessage[],
   history: readonly { id: string; role: string; createdAt?: string; durableMessageId?: string }[],
-  timeline: readonly { receipt: InvocationRunReceipt; events: RunEventUi[] }[],
+  projected: readonly ProjectedWorkRun[],
 ): StreamMessage[] {
-  const hydrated = workActivitiesByMessageFromTimeline(history, timeline);
+  const hydrated = workActivitiesByMessageFromProjections(history, projected);
   if (hydrated.byMessage.size === 0 && hydrated.unbound.length === 0) return messages;
   const attached = messages.map((message) => {
     const activity = hydrated.byMessage.get(message.id);
@@ -2337,6 +2363,8 @@ function ChatPage() {
   // history Promise that started before `final` could resolve after `final`
   // and erase the answer the user had already seen.
   const transcriptRevisionRef = useRef(0);
+  // Per-run Work projections of this chat, kept with the receipt each came from: a settle re-reads only changed runs.
+  const workRunProjectionsRef = useRef<WorkRunProjectionCache<ProjectedWorkRun> | null>(null);
 
   useEffect(() => {
     const api = ipc();
@@ -4222,7 +4250,7 @@ function ChatPage() {
         fetchCommittedReplies(api, chatId),
         api.invoke.latestReceipt(chatId).catch(() => null),
         typeof api.runLedger?.chatTimeline === "function"
-          ? api.runLedger.chatTimeline(chatId, { maxRuns: 40, eventsPerRun: 400 }).catch(() => [])
+          ? api.runLedger.chatTimeline(chatId, { maxRuns: WORK_TIMELINE_RUNS, eventsPerRun: WORK_TIMELINE_EVENTS_PER_RUN }).catch(() => [])
           : Promise.resolve([]),
       ])
         .then(async ([history, committedReplies, receipt, chatTimeline]) => {
@@ -4250,7 +4278,9 @@ function ChatPage() {
           // identity and One reducer state on the assistant row it produced. Fall
           // back to the legacy step-only projection only when this older/partial
           // database has no projectable run events.
-          const hydratedHistory = attachHydratedWorkActivities(historyMessages, history, chatTimeline);
+          const seeded = seedWorkRunProjections(chatId, chatTimeline, projectWorkRun);
+          workRunProjectionsRef.current = seeded.cache;
+          const hydratedHistory = attachHydratedWorkProjections(historyMessages, history, seeded.projections);
           const historyWithMcp = hasHydratedWorkActivities(hydratedHistory)
             ? hydratedHistory
             : attachMcpStepsToLatestAgent(historyMessages, mcpSteps);
@@ -4589,18 +4619,26 @@ function ChatPage() {
           ? api.invoke.receipt(endedRunId).catch(() => null)
           : Promise.resolve(null);
       const historyRevision = transcriptRevisionRef.current;
+      // Only the runs whose receipt changed are re-read (normally the one that ended), never the whole window again.
+      const projectionCache = workRunProjectionsRef.current?.chatId === chatId ? workRunProjectionsRef.current : null;
       void Promise.all([
         api.invoke.history(chatId),
         receiptPromise,
         fetchCommittedReplies(api, chatId),
-        api.runLedger.chatTimeline(chatId, { maxRuns: 40, eventsPerRun: 400 }).catch(() => []),
+        api.runLedger.chatTimeline(chatId, workRunTimelineRequest(projectionCache, chatId)).catch(() => []),
       ]).then(async ([h, receipt, committedReplies, chatTimeline]) => {
         const ledgerEvents = receipt && receipt.status !== "running" && receipt.status !== "cancelling"
           ? await api.runLedger.events(receipt.runId, 500).catch(() => [])
           : [];
+        const synced = await syncWorkRunProjections({ chatId, cache: projectionCache, timeline: chatTimeline,
+          events: (runId) => api.runLedger.events(runId, WORK_TIMELINE_EVENTS_PER_RUN),
+          full: () => api.runLedger.chatTimeline(chatId, { maxRuns: WORK_TIMELINE_RUNS, eventsPerRun: WORK_TIMELINE_EVENTS_PER_RUN }),
+          project: projectWorkRun,
+          settled: receipt && ledgerEvents.length > 0 ? { runId: receipt.runId, events: ledgerEvents } : null });
         if (!isCurrentChat() || (runIdRef.current && runIdRef.current !== endedRunId)) return;
+        workRunProjectionsRef.current = synced.cache;
         const historyMessages = restoreAnsweredQuestions(withoutInterruptedAnswers(h).map(historyEntryToStreamMessage), committedReplies);
-        const hydrated = attachHydratedWorkActivities(historyMessages, h, chatTimeline);
+        const hydrated = attachHydratedWorkProjections(historyMessages, h, synced.projections);
         const next = hasHydratedWorkActivities(hydrated)
           ? hydrated
           : attachMcpStepsToLatestAgent(historyMessages, mcpStepsFromLedger(ledgerEvents));
@@ -4655,13 +4693,20 @@ function ChatPage() {
             : Promise.resolve(null),
           fetchCommittedReplies(api, chatId),
         ]);
-        const chatTimeline = await api.runLedger.chatTimeline(chatId, { maxRuns: 40, eventsPerRun: 400 }).catch(() => []);
+        const projectionCache = workRunProjectionsRef.current?.chatId === chatId ? workRunProjectionsRef.current : null;
+        const chatTimeline = await api.runLedger.chatTimeline(chatId, workRunTimelineRequest(projectionCache, chatId)).catch(() => []);
         const ledgerEvents = receipt && receipt.status !== "running" && receipt.status !== "cancelling"
           ? await api.runLedger.events(receipt.runId, 500).catch(() => [])
           : [];
+        const synced = await syncWorkRunProjections({ chatId, cache: projectionCache, timeline: chatTimeline,
+          events: (runId) => api.runLedger.events(runId, WORK_TIMELINE_EVENTS_PER_RUN),
+          full: () => api.runLedger.chatTimeline(chatId, { maxRuns: WORK_TIMELINE_RUNS, eventsPerRun: WORK_TIMELINE_EVENTS_PER_RUN }),
+          project: projectWorkRun,
+          settled: receipt && ledgerEvents.length > 0 ? { runId: receipt.runId, events: ledgerEvents } : null });
         if (!stopped && isCurrentChat() && (!runIdRef.current || runIdRef.current === endedRunId)) {
+          workRunProjectionsRef.current = synced.cache;
           const historyMessages = restoreAnsweredQuestions(withoutInterruptedAnswers(h).map(historyEntryToStreamMessage), committedReplies);
-          const hydrated = attachHydratedWorkActivities(historyMessages, h, chatTimeline);
+          const hydrated = attachHydratedWorkProjections(historyMessages, h, synced.projections);
           const next = hasHydratedWorkActivities(hydrated)
             ? hydrated
             : attachMcpStepsToLatestAgent(historyMessages, mcpStepsFromLedger(ledgerEvents));
