@@ -1009,8 +1009,10 @@ function migrationBackupFingerprint(file: string): MigrationBackupFingerprint {
 }
 
 /** Only future, explicitly managed copies participate. Legacy .bak files are
- * recovery evidence, not candidates inferred from their age or filename. */
-function pruneManagedMigrationBackups(db: Database.Database, currentBackup: string): void {
+ * recovery evidence, not candidates inferred from their age or filename.
+ * `currentBackup` is the copy a migration just took (its rollback material), or
+ * null after open, when the newest copy simply counts toward the cap. */
+function pruneManagedMigrationBackups(db: Database.Database, currentBackup: string | null): void {
   try {
     const source = db.name;
     const directory = path.dirname(source);
@@ -1060,10 +1062,13 @@ function pruneManagedMigrationBackups(db: Database.Database, currentBackup: stri
     }
     const candidates = copies.filter((copy) => copy.file !== currentBackup)
       .sort((a, b) => b.createdAt - a.createdAt || b.file.localeCompare(a.file))
-      .slice(MAX_MANAGED_MIGRATION_BACKUPS - 1);
+      .slice(currentBackup ? MAX_MANAGED_MIGRATION_BACKUPS - 1 : MAX_MANAGED_MIGRATION_BACKUPS);
     if (candidates.length === 0) return;
-    // Complete preflight before deleting anything. Read failures, corruption,
-    // or any actual ledger reference preserve the whole set, even above cap.
+    // Complete preflight before deleting anything. Read failures or corruption
+    // preserve the whole set, even above cap. A copy's file name appearing in
+    // free text (an agent's `ls` of userData in run_events) is not a reference:
+    // that scan pinned every copy forever (7 copies, 8.3 GB on 2026-10-16), and
+    // backup paths are persisted nowhere in typed form.
     // The integrity checks are read-only and run before the write lock: each
     // takes ~4 s per 1.6 GB copy (measured 2026-10-16), so inside .immediate()
     // the first real prune would have blocked every other writer for ~40 s.
@@ -1079,17 +1084,6 @@ function pruneManagedMigrationBackups(db: Database.Database, currentBackup: stri
       } finally { backup?.close(); }
     }
     db.transaction(() => {
-      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
-        .all() as Array<{ name: string }>;
-      for (const candidate of candidates) {
-        for (const table of tables) {
-          const columns = schemaColumns(db, table.name);
-          if (!columns.length) continue;
-          const where = columns.map((column) => `instr(CAST(${quoteSqlIdentifier(column.name)} AS TEXT), ?) > 0`).join(" OR ");
-          if (db.prepare(`SELECT 1 FROM ${quoteSqlIdentifier(table.name)} WHERE ${where} LIMIT 1`)
-            .get(...columns.map(() => path.basename(candidate.file)))) return;
-        }
-      }
       for (const copy of copies) {
         if (!sameMigrationBackupFile(copy.fingerprint, migrationBackupFingerprint(copy.file))) return;
       }
@@ -7072,6 +7066,8 @@ export function initStore(options: StoreInitOptions = {}): void {
   if (userVersion < SCHEMA_VERSION) _db.pragma(`user_version = ${SCHEMA_VERSION}`);
   _openedStoreMigrationRole = migrationRole;
   pruneLegacyDatabaseBackups({ db: _db, schemaVersion: SCHEMA_VERSION, recoveryProfilePaths: [userDataPath()] });
+  // Copies already above the cap shrink now, not at the next schema bump. Owner only (followers returned above).
+  pruneManagedMigrationBackups(_db, null);
   } catch (error) {
     try { _db?.close(); } catch {}
     _db = null;
