@@ -261,6 +261,7 @@ import {
   type OutputPresentationKind,
 } from "@/lib/output-presentation";
 import { planOneThreadWork, projectThreadRuns, settledRunMayPaintScreen, type OneThreadRunBlock } from "@/lib/one-thread-work";
+import { mergeSettledThreadRun, THREAD_RUN_EVENTS_PER_RUN, THREAD_RUN_WINDOW } from "@/lib/one-thread-run-merge";
 import { seatDisplayName, turnAgentsDifferFromRoster } from "@/lib/one-seat-label";
 import { memberUnavailable, speakableCountIncludingOne } from "@/lib/one-team-availability";
 import { ToolApprovalInline } from "@/components/ToolApprovalInline";
@@ -1576,6 +1577,8 @@ function OneSessionsShell() {
    * `activity` until it settles and the ledger is re-read.
    */
   const [threadRuns, setThreadRuns] = useState<OneThreadRunBlock[]>([]);
+  const threadRunsRef = useRef(threadRuns);
+  threadRunsRef.current = threadRuns;
   const threadRunsChatIdRef = useRef<string | null>(null);
   // The output props and their owner must commit together. Selection changes
   // render before the thread effect clears the previous room's activity.
@@ -3579,13 +3582,21 @@ function OneSessionsShell() {
     // older timeline during the async refresh.
     const latestReceipt = await api.invoke.latestReceipt(chatId).catch(() => null);
     if (supersededByNewerRun() || !latestReceipt || (settledRunId && latestReceipt.runId !== settledRunId)) return;
-    const [ledgerEvents, chatTimeline] = await Promise.all([
+    // Only the settled run changed: read the window's receipts (one event each) and that run's events, and merge it
+    // when that is exactly what the full 40 x 400 re-read gives; otherwise re-read as before (perf review R-02).
+    const [ledgerEvents, timelineHead] = await Promise.all([
       api.runLedger.events(latestReceipt.runId, 500).catch(() => []),
-      api.runLedger.chatTimeline(chatId, { maxRuns: 40, eventsPerRun: 400 }).catch(() => []),
+      api.runLedger.chatTimeline(chatId, { maxRuns: THREAD_RUN_WINDOW, eventsPerRun: 1 }).catch(() => []),
     ]);
     if (supersededByNewerRun()) return;
-    if (threadRunsChatIdRef.current === chatId && chatTimeline.length > 0) {
-      setThreadRuns(projectThreadRuns(chatTimeline));
+    if (threadRunsChatIdRef.current === chatId && timelineHead.length > 0) {
+      const merged = mergeSettledThreadRun(threadRunsRef.current, timelineHead, latestReceipt.runId, ledgerEvents, projectThreadRuns);
+      if (merged) setThreadRuns(merged);
+      else {
+        const chatTimeline = await api.runLedger.chatTimeline(chatId, { maxRuns: THREAD_RUN_WINDOW, eventsPerRun: THREAD_RUN_EVENTS_PER_RUN }).catch(() => []);
+        if (supersededByNewerRun()) return;
+        if (threadRunsChatIdRef.current === chatId && chatTimeline.length > 0) setThreadRuns(projectThreadRuns(chatTimeline));
+      }
     }
     if (ledgerEvents.length === 0) return;
     const restoredActivity = projectOneActivityFromLedger(ledgerEvents, latestReceipt);
