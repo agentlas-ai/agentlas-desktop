@@ -9,6 +9,7 @@ import { browserAnnotationDraftText } from "@shared/browser-annotation";
 import { runtimeMatchesSelection, selectionForRuntime } from "@shared/runtime-selection";
 import { createOneScrollFollow, oneRunReceiptIsTerminal } from "@/lib/one-scroll-follow";
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
+import { createFrameBatcher, isLiveStreamTick, type FrameBatcher } from "@/lib/frame-coalescer";
 import { mergeAutomationHostNotices, mergeRoomWorkRows } from "@/lib/chat-host-notice-refresh";
 import { readOneChatHistory, readOneChatHistoryPage, mergeOneChatHistory, oneChatHistoryCursor } from "@/lib/one-chat-history";
 import { OneComposerInput, type OneComposerInputHandle } from "./OneComposerInput";
@@ -2717,6 +2718,10 @@ function OneSessionsShell() {
    */
   const oneTranscriptRevisionRef = useRef(0);
   const streamTextRef = useRef("");
+  // Streamed text, teammate text and thought deltas commit together once per frame (at most every 50 ms) instead of
+  // re-rendering the shell per chunk. Anything that resets the live answer or ownership flushes it first.
+  const streamFrameRef = useRef<FrameBatcher | null>(null);
+  useEffect(() => () => { streamFrameRef.current?.cancel(); }, []);
   const unsubscribeRunRef = useRef<(() => void) | null>(null);
   const selectedTaskIdRef = useRef(selectedTaskId);
   const selectedConversationIdRef = useRef(selectedConversationId);
@@ -3595,7 +3600,7 @@ function OneSessionsShell() {
     setRunStartedAt(latestReceipt.startedAt ? Date.parse(latestReceipt.startedAt) : null);
   }, [reconcileConversationTask, refreshAll, taskforces]);
 
-  const consumeRunEvent = useCallback((event: McpInvocationEvent, sourceRunId?: string) => {
+  const applyRunEvent = useCallback((event: McpInvocationEvent, sourceRunId?: string) => {
     const chatId = runChatIdRef.current;
     const taskId = runTaskIdRef.current;
     // IPC delivery can lag after unsubscribe. A terminal event from run N must
@@ -3770,6 +3775,12 @@ function OneSessionsShell() {
       void settleRun(chatId, taskId, settledRunId);
     }
   }, [reconcileConversationTask, scrollToLatest, settleRun, followStreamToLatest]);
+  // Same events, same order: stream ticks wait for the frame; any other event lands after the queued ticks.
+  const consumeRunEvent = useCallback((event: McpInvocationEvent, sourceRunId?: string) => {
+    const frame = streamFrameRef.current ??= createFrameBatcher({ minIntervalMs: 50 });
+    if (isLiveStreamTick(event)) { frame.enqueue(() => applyRunEvent(event, sourceRunId)); return; }
+    try { frame.flush(); } finally { applyRunEvent(event, sourceRunId); }
+  }, [applyRunEvent]);
 
   const consumeRunEventRef = useRef(consumeRunEvent);
   const settleOrderedRunRef = useRef(settleRun);
@@ -3803,6 +3814,7 @@ function OneSessionsShell() {
         if (snapshot.receipt.status !== "running" && snapshot.receipt.status !== "cancelling") {
           if (uncertainAdmissionRef.current.get(chatId) === runId) uncertainAdmissionRef.current.delete(chatId);
           clearOneUncertainAdmission(chatId, runId);
+          streamFrameRef.current?.flush();
           runIdRef.current = null; streamTextRef.current = "";
           unsubscribeRunRef.current?.(); unsubscribeRunRef.current = null;
           setBusy(false); setKeyRequestSheet(null);
@@ -3812,6 +3824,7 @@ function OneSessionsShell() {
         const ledger = await api.runLedger.events(runId, 500);
         if (!owns() || !checkpoint.isCurrent()) return false;
         const state = { ...projectOneActivityFromLedger(ledger, snapshot.receipt), lastSequence: checkpoint.throughOrdinal };
+        streamFrameRef.current?.flush();
         activityEventRunIdRef.current = runId;
         setActivityStateRunId(current => owns() ? runId : current); setActivity(current => owns() ? state : current); cacheOneActivity(chatId, state);
         if (snapshot.partialText !== undefined) {
@@ -3900,6 +3913,7 @@ function OneSessionsShell() {
       cancelNoticeTextRef.current = null;
       setActionNotice((current) => current === notice ? null : current);
     }
+    streamFrameRef.current?.flush();
     runIdRef.current = null;
     activityRunIdRef.current = null;
     activityEventRunIdRef.current = null;
@@ -5130,6 +5144,7 @@ function OneSessionsShell() {
               cancelNoticeTextRef.current = null;
               setActionNotice((current) => current === notice ? null : current);
             }
+            streamFrameRef.current?.flush();
             runIdRef.current = null;
             setBusy(false);
             unsubscribeRunRef.current?.();
@@ -5238,6 +5253,7 @@ function OneSessionsShell() {
           || admittingRunIdsRef.current.has(expectedRunId)) return;
         // Only an exact terminal receipt settles this renderer projection.
         // Missing or unreadable evidence retains custody and the subscription.
+        streamFrameRef.current?.flush();
         runIdRef.current = null;
         streamTextRef.current = "";
         unsubscribeRunRef.current?.();
@@ -5794,6 +5810,7 @@ function OneSessionsShell() {
             .map((agentId) => orchestrationTargetForAgentId(agentId));
         })();
     const runId = options?.runId ?? uid();
+    streamFrameRef.current?.flush();
     runIdRef.current = runId;
     activityRunIdRef.current = runId;
     // Do not mark the optimistic row as an observed runtime event. Until this
@@ -7953,6 +7970,7 @@ function OneSessionsShell() {
       cancelNoticeTextRef.current = null;
       setActionNotice((current) => current === notice ? null : current);
     }
+    streamFrameRef.current?.flush();
     runIdRef.current = null;
     runChatIdRef.current = null;
     runTaskIdRef.current = null;
