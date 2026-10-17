@@ -452,6 +452,21 @@ function canonicalInferenceSourceId(input: Record<string, unknown>, context?: Sa
   return undefined;
 }
 
+/** A graph occurrence id the host mints (run-graph.ts sealCheckpoint, automation-scheduler.ts scheduledOccurrenceIdForDueRun):
+ * "<occurrence|schedule>:<automation id>:<UUID>". Readers match it exactly (graph-terminal-close.ts, automation-workspace.ts,
+ * strategy-episode.ts, automations.ts attempt counts); masked, every run of an automation whose id ends in twelve digits (about
+ * 1 automation in 280) would miss its own close, workspace and attempt records. Production: 736 graph runs used this shape. */
+const OCCURRENCE_ID_RE = /^(?:occurrence|schedule):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/** Host-minted identities kept exactly at every ledger boundary: write (safePayload), read (parsePayload), startup scrub. */
+function exactHostIdentityFields(input: Record<string, unknown>, context?: SafePayloadContext): Record<string, string> {
+  const out: Record<string, string> = {};
+  const sourceId = canonicalInferenceSourceId(input, context);
+  if (sourceId !== undefined) out.sourceId = sourceId;
+  if (typeof input.occurrenceId === "string" && OCCURRENCE_ID_RE.test(input.occurrenceId)) out.occurrenceId = input.occurrenceId;
+  return out;
+}
+
 function admittedAdapterScope(scopeId: string, context: SafePayloadContext): Record<string, unknown> | undefined {
   try {
     const rows = getDb().prepare(`SELECT payload_json FROM run_events
@@ -663,7 +678,7 @@ function safePayload(
     ? canonicalQuestionContinuationReply(input, context)
     : undefined;
   const canonicalToolId = input ? canonicalAdapterToolId(input, context) : undefined;
-  const canonicalSourceId = input ? canonicalInferenceSourceId(input, context) : undefined;
+  const exactIds = input ? exactHostIdentityFields(input, context) : {};
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(input ?? {})) {
     if (value == null) continue;
@@ -679,8 +694,8 @@ function safePayload(
       out[key] = canonicalToolId;
       continue;
     }
-    if (key === "sourceId" && canonicalSourceId !== undefined) {
-      out[key] = canonicalSourceId;
+    if (Object.hasOwn(exactIds, key)) {
+      out[key] = exactIds[key];
       continue;
     }
     if (key === "runtimeEvidence") {
@@ -871,6 +886,8 @@ export function scrubLegacyRunEventSecrets(): number {
           scrubbed.toolId = canonicalToolId;
           next = JSON.stringify(scrubbed);
         }
+        const exactIds = exactHostIdentityFields(parsed, context);
+        if (Object.keys(exactIds).length > 0) next = JSON.stringify({ ...JSON.parse(next) as Record<string, unknown>, ...exactIds });
         if (typeof parsed.agentMessageId === "string" && /^task-force-handoff:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:result$/.test(parsed.agentMessageId)) {
           const scrubbed = JSON.parse(next) as Record<string, unknown>;
           scrubbed.agentMessageId = parsed.agentMessageId;
@@ -948,6 +965,7 @@ function parsePayload(json: string, context?: SafePayloadContext): Record<string
     const canonicalToolId = parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? canonicalAdapterToolId(parsed, context) : undefined;
     if (canonicalToolId !== undefined) result.toolId = canonicalToolId;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) Object.assign(result, exactHostIdentityFields(parsed, context));
     return result;
   } catch {
     return {};
