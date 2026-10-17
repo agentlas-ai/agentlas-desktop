@@ -265,6 +265,32 @@ export const READ_ONLY_DENIED_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEd
 /** write 모드에서 acceptEdits 가 여전히 묻는 내장 도구 — 헤드리스는 답할 수 없으니 미리 허용. */
 export const WRITE_MODE_PRE_ALLOWED_TOOLS = ["Bash", "BashOutput", "KillShell", "WebFetch", "WebSearch"];
 /** Read permits public web retrieval; headless CLI cannot answer its own permission prompt. */
+/**
+ * A read rule for the running agent's own package: its AGENTS.md, docs and references, i.e. the files its instructions
+ * point to. A write (acceptEdits) or read run reads only inside its working folders, and nobody answers a headless
+ * prompt. Production 2026-10-17, Yotube room: Motion Explainer Video Producer ran as a task-force write worker, and its
+ * Reads of ~/.agentlas/agentlas-agent/motion-explainer-video-producer/docs/stage-guide.md and AGENTS.md came back
+ * "requested permissions to read … but you haven't granted it yet". A codex worker at write reads them through its
+ * sandbox. The rule is read only: the package is never added as a working folder, so the run cannot edit it.
+ * POSIX absolute paths only (Claude's `//` rule form); a Windows run gets no rule (a remaining gap).
+ */
+export function claudeAgentPackageReadRules(agentId: string | null | undefined): string[] {
+  if (!agentId) return [];
+  let dir: string | null = null;
+  try {
+    dir = (require("../agents/routes") as typeof import("../agents/routes")).getRoute(agentId)?.path ?? null;
+    if (!dir) {
+      const row = (require("../store/db") as typeof import("../store/db")).getDb()
+        .prepare("SELECT slug FROM installed_agents WHERE id = ?").get(agentId) as { slug?: unknown } | undefined;
+      if (typeof row?.slug === "string" && row.slug) dir = (require("../agents/files") as typeof import("../agents/files")).agentFolderPath(row.slug);
+    }
+  } catch {
+    dir = null;
+  }
+  if (!dir || !path.isAbsolute(dir) || !dir.startsWith("/") || /[(),]/.test(dir) || !(require("node:fs") as typeof import("node:fs")).existsSync(dir)) return [];
+  return [`Read(//${dir.replace(/^\/+/, "").replace(/\/+$/, "")}/**)`];
+}
+
 export function claudeBuiltinPreAllowedTools(
   permission: RunnerRequest["permission"],
   opts: { browserOnly?: boolean; untrustedNoTools?: boolean } = {},
@@ -1266,7 +1292,9 @@ const runClaudeTurn = async (
   const builtinPreAllowed = claudeBuiltinPreAllowedTools(req.permission, {
     browserOnly: runReq.browserOnly, untrustedNoTools: runReq.untrustedNoTools,
   });
-  const preAllowedTools = [...builtinPreAllowed, ...mcpPreAllowed];
+  // A full run bypasses permissions anyway; browser-only and untrusted runs get no file tools at all.
+  const packageReadRules = req.permission === "full" || runReq.browserOnly || runReq.untrustedNoTools ? [] : claudeAgentPackageReadRules(runReq.agentId);
+  const preAllowedTools = [...builtinPreAllowed, ...mcpPreAllowed, ...packageReadRules];
   recordClaudeCapabilityRequest({ permission: req.permission, browserOnly: Boolean(runReq.browserOnly),
     untrustedNoTools: Boolean(runReq.untrustedNoTools), allowedBuiltins: builtinPreAllowed });
   const allowedToolArgs = preAllowedTools.length > 0 ? ["--allowedTools", preAllowedTools.join(",")] : [];
