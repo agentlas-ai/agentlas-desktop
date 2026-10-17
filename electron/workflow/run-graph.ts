@@ -47,6 +47,8 @@ import {
 import { runMcpInvocation } from "../mcp/client";
 import { mintGraphTeamGrant, revokeGraphTeamGrant, type GraphTeamGrant } from "../one/graph-team-grant";
 import { graphTeamStepHold, runGraphTeamStep } from "../one/graph-team-step";
+import { createNodeLiveness, type NodeLiveness } from "./node-liveness";
+import { createDegenerateOutputDetector, degenerateOutputReceipt, WORKER_OUTPUT_DEGENERATE_CODE, WorkerOutputDegenerateError } from "../runtime/degenerate-output";
 import { graphEffectItemsHeldSummary, graphEffectItemsPromptBlock } from "../one/graph-effect-items";
 import { claimInvocationRunOwner, invocationRunOwners } from "../store/invocation-run-owners";
 import { sameMethodAttemptLimit, MAX_SAME_METHOD_STARTS, type WorkUnit } from "../../shared/work-recovery";
@@ -3277,6 +3279,9 @@ export async function runGraph(
   const isRuntimeKind = (value: string): value is RuntimeKind => isSharedRuntimeKind(value);
 
   const quotaRuntimeOverrides = new Map<string, RuntimeSelection>();
+  // Per node: until when it may not be cut for silence (node-liveness.ts). Read by the invocation timer, the node timer
+  // and the worker owner check, so the three never disagree about a node that is still working.
+  const nodeLiveness = new Map<string, NodeLiveness>();
   const workerFallbackState = new Map<string, { pool: GraphWorkerPool | null; attempted: Set<string>; notInvoked: Set<string>; deadline: number; original: RuntimeSelection; predecessor?: Readonly<{ receipt: GraphWorkerFailureReceipt; attempt: GraphWorkerAttempt }> }>();
   const observedRuntimeByNode = new Map<string, RuntimeSelection>();
   const runtimeSelectionForNode = (node: WorkflowNode): RuntimeSelection | undefined => {
@@ -5005,6 +5010,11 @@ export async function runGraph(
         // 못 잡는다. 토큰을 계속 뱉으면서 영원히 도는 노드가 실제로 가능했다.
         const nodeDeadlineMs = nodeTimeoutMs(node);
         const nodeStartedAt = Date.now();
+        // Progress, not elapsed time, decides whether this node may still run past its deadline (node-liveness.ts), and a
+        // turn whose own text has become a loop is ended by that signal (runtime/degenerate-output.ts).
+        const liveness = createNodeLiveness(nodeStartedAt);
+        nodeLiveness.set(node.id, liveness);
+        const nodeLoop = createDegenerateOutputDetector();
         const workerDeadline = workerFallbackState.get(node.id)?.deadline ?? nodeStartedAt + nodeDeadlineMs;
         const nodeAbort = new AbortController();
         let nodeTimedOut = false;
@@ -5014,7 +5024,8 @@ export async function runGraph(
         // A team step's budget bounds its own turns, not the teammates' work it waits for (graph-team-step.ts).
         const armNodeTimer = (ms: number): ReturnType<typeof setTimeout> => setTimeout(() => {
           const hold = graphTeamStepHold(runId, node.id);
-          if (hold !== null && hold > Date.now()) { nodeTimer = armNodeTimer(hold - Date.now()); return; }
+          const until = Math.max(hold ?? 0, liveness.liveUntil());
+          if (until > Date.now()) { nodeTimer = armNodeTimer(until - Date.now()); return; }
           nodeTimedOut = true;
           nodeAbort.abort(new Error("automation_node_timeout"));
         }, Math.max(1, ms));
@@ -5077,7 +5088,7 @@ export async function runGraph(
                   }
                 }
                 assertFiniteCurrent();
-                if (runSignal.aborted || nodeAbort.signal.aborted || Date.now() >= Math.max(captured.deadline, graphTeamStepHold(runId, node.id) ?? 0)) throw new Error("graph_worker_owner_stopped");
+                if (runSignal.aborted || nodeAbort.signal.aborted || Date.now() >= Math.max(captured.deadline, graphTeamStepHold(runId, node.id) ?? 0, liveness.liveUntil())) throw new Error("graph_worker_owner_stopped");
                 if (getAutomationDefinitionDigest(automation.id) !== definitionDigest) throw new Error("graph_worker_definition_changed");
                 revalidateAutomationWorkspace(automationWorkspace);
                 if (captured.pool && readGraphWorkerPool()?.fingerprint !== captured.pool.fingerprint) throw new Error("graph_worker_pool_changed");
@@ -5312,7 +5323,14 @@ export async function runGraph(
                 // partial은 같은 본문의 누적/증분이다 — 둘 다 다룬다.
                 if (typeof ev.text === "string") accumulatedText = ev.text;
                 else if (typeof ev.delta === "string") accumulatedText += ev.delta;
+                const loop = nodeLoop.observe(accumulatedText);
+                if (loop && !nodeAbort.signal.aborted) {
+                  tryRecordRunEvent({ runId, kind: WORKER_OUTPUT_DEGENERATE_CODE, chatId: nodeChat.id, automationId: automation.id,
+                    nodeId: node.id, payload: degenerateOutputReceipt(loop) });
+                  nodeAbort.abort(new WorkerOutputDegenerateError(loop));
+                }
               }
+              liveness.note(ev, isHostPreflightTool);
               // Model text or a non-host tool frame proves a provider answered; host status (thinking/status lines,
               // Agentlas Plugins preflight) does not.
               if ((ev.kind === "partial" && ((typeof ev.text === "string" && ev.text.length > 0) || (typeof ev.delta === "string" && ev.delta.length > 0)))
@@ -6287,7 +6305,8 @@ export async function runGraph(
       // A team step waiting on its teammates is not timed out here either (graph-team-step.ts graphTeamStepHold).
       const armTimer = (ms: number): ReturnType<typeof setTimeout> => setTimeout(() => {
         const hold = graphTeamStepHold(runId, node.id);
-        if (hold !== null && hold > Date.now()) { timer = armTimer(hold - Date.now()); return; }
+        const until = Math.max(hold ?? 0, nodeLiveness.get(node.id)?.liveUntil() ?? 0);
+        if (until > Date.now()) { timer = armTimer(until - Date.now()); return; }
         timedOut = true;
         nodeController.abort(new Error("automation_node_timeout"));
       }, Math.max(1, ms));
