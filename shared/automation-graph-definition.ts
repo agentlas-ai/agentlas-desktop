@@ -46,11 +46,14 @@ export function resolveAutomationGraph(automation: AutomationGraphSource): Workf
   return automation.graph?.nodes.length ? automation.graph : synthesizeLegacyGraph(automation);
 }
 
-/** A routine tool-only success returns data to One; it does not need a second
- * hidden model to reflect on the same successful collection. Failures retain
- * the existing repair path, and reasoning/evaluation/subgraphs opt out. */
+/** A routine deterministic success (tool calls, code, transforms, read output)
+ * returns data to One; it does not need a second hidden model to reflect on the
+ * same successful collection. Failures retain the existing repair path, and
+ * reasoning/evaluation/subgraphs opt out. A graph with no mcpCall node is held
+ * to the same test: measured 2026-10-17, a 10-minute trigger+code watcher woke a
+ * high-effort reflection after every run (813 in 9 days, all rejected). */
 export function nativeGraphSuccessNeedsReflection(graph: WorkflowGraph | null | undefined, successful: boolean): boolean {
-  if (!successful || !graph?.nodes.some(node => Boolean(node.config?.mcpCall))) return true;
+  if (!successful || !graph?.nodes.length) return true;
   return !graph.nodes.every(node => ["trigger", "condition", "transform", "code", "tool"].includes(node.type)
     || (["agent", "action"].includes(node.type) && Boolean(node.config?.mcpCall))
     || (node.type === "output" && node.config?.effect === "read"));
