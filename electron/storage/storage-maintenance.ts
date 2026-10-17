@@ -8,6 +8,7 @@ import { clearRuntimeSession } from "../store/runtime-sessions";
 import { compactDeliveredTriggerEvents } from "../store/trigger-events";
 import { userDataPath } from "../runtime-paths";
 import { retireIdleCliTranscripts } from "./cli-transcript-retention";
+import { retireCloudAgentPackages } from "./cloud-package-retention";
 import { sweepAgentIntermediates } from "./intermediate-sweep";
 import { retireRunDetailSlice, type RunDetailWatermark } from "./run-detail-retention";
 import { DAY_MS, STORAGE_POLICY } from "./storage-policy";
@@ -48,6 +49,7 @@ export interface StorageMaintenanceReport {
   runDetail: { runs: number; deleted: number; compacted: number; complete: boolean; watermarkTs: string | null };
   triggerEvents: { compacted: number; complete: boolean };
   telegramAttachments: { folders: number; bytes: number };
+  cloudPackages: { dirs: number; bytes: number };
   /** Managed DB-upgrade copies above the cap of three (store/migration-backup-retention.ts). */
   migrationBackups: MigrationBackupRetention;
 }
@@ -208,17 +210,22 @@ export async function runStorageMaintenance(now = Date.now()): Promise<StorageMa
       keepDays: STORAGE_POLICY.telegramAttachmentDays,
       now,
     });
+    const cloudPackages = await retireCloudAgentPackages(
+      process.env.AGENTLAS_CLOUD_PACKAGE_DIR || userDataPath("cloud-agent-packages"),
+      { keepDays: STORAGE_POLICY.cloudPackageDays, now },
+    );
     // DB-upgrade copies: checked in a child process, never on this thread.
     const migrationBackups = await retireManagedMigrationBackups({ storePath: db.name });
     return {
       lowDisk,
       freeBytes: space?.freeBytes ?? null,
-      freedBytes: sweep.removedBytes + transcripts.bytes + telegramAttachments.bytes + migrationBackups.bytes,
+      freedBytes: sweep.removedBytes + transcripts.bytes + telegramAttachments.bytes + cloudPackages.bytes + migrationBackups.bytes,
       intermediates: { files: sweep.removedFiles, bytes: sweep.removedBytes },
       transcripts: { sessions: transcripts.sessions, orphans: transcripts.orphans, bytes: transcripts.bytes },
       runDetail,
       triggerEvents,
       telegramAttachments,
+      cloudPackages,
       migrationBackups,
     };
   } finally {
@@ -265,6 +272,7 @@ export function startStorageMaintenance(options: {
         + `(deleted ${report.runDetail.deleted}, compacted ${report.runDetail.compacted}, complete ${report.runDetail.complete}, `
         + `watermark ${report.runDetail.watermarkTs ?? "none"}); `
         + `trigger events compacted ${report.triggerEvents.compacted}; telegram copies ${report.telegramAttachments.folders}; `
+        + `cloud packages ${report.cloudPackages.dirs}; `
         + `migration backups removed ${report.migrationBackups.removed} (${report.migrationBackups.bytes} bytes, skipped ${report.migrationBackups.skipped})`);
     }
     if (!report.lowDisk || report.freeBytes === null) return;

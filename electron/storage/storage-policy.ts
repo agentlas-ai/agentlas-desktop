@@ -17,6 +17,9 @@
  * - Telegram attachment copies: removed 7 days after their run is over, since
  *   Telegram keeps the original (owner decision OD-4). Desktop chat images are
  *   conversation content and are never removed.
+ * - cloud agent package folders (cloud-agent-packages/<slug>-<stamp>/, the
+ *   JSON bundle written for each Cloud save or publish and read only during
+ *   it): removed after 7 days; the newest folder of each agent always stays
  * - managed DB-upgrade copies (agentlas.sqlite.migration-backup.v1.*): the
  *   newest three stay (store/db.ts MAX_MANAGED_MIGRATION_BACKUPS); older ones
  *   go after integrity checks of the live store and of the three that stay.
@@ -27,6 +30,7 @@ export const STORAGE_POLICY = {
   cliTranscriptIdleDays: 30,
   triggerEventDeliveredDays: 30,
   telegramAttachmentDays: 7,
+  cloudPackageDays: 7,
   /** "Done" for a project whose agent recorded a verified finish (verification.json or .agentlas-complete). */
   intermediateIdleMinutes: 10,
   /**
