@@ -243,6 +243,21 @@ function clampText(value: string, previewChars: number): string {
   return `${value.slice(0, head)}…(중략 ${omitted}자)…${value.slice(-tail)}`;
 }
 
+// `startsWith(`${root}/`)` never matched a Windows path (C:\…\proj\src), so every in-folder write was reported as
+// outside. path.relative is separator- and (on Windows) case-aware.
+function isInside(child: string, root: string): boolean {
+  const rel = path.relative(root, child);
+  return rel === "" || (!!rel && !rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+// Drive (C:\x, C:/x) and UNC (\\server\share) paths. JSON text doubles every backslash, so runs of separators are
+// collapsed to one; the UNC prefix keeps its two.
+function windowsPathCandidate(raw: string): string {
+  const unc = /^[\\/]{2}/.test(raw);
+  const body = raw.replace(/[\\/]+/g, "\\");
+  return unc ? `\\${body}` : body;
+}
+
 /**
  * 폴더 경계를 **호스트가 사실로 적는다.** 판정자가 추론하게 두지 않는다.
  *
@@ -263,12 +278,17 @@ function outsideAbsolutePaths(value: unknown, root: string): string[] {
   } catch {
     return [];
   }
-  const absolutePath = /(?:^|[\s"'`=(])(\/(?:[^\s"'`)]|\\ )+)/g;
+  const windows = process.platform === "win32";
+  const absolutePath = windows
+    ? /(?:^|[\s"'`=(])([A-Za-z]:[\\/](?:[^\s"'`)]|\\ )*|\\{2,}[^\s"'`)\\/]+[\\/]+[^\s"'`)\\/]+(?:[^\s"'`)]|\\ )*|\/(?:[^\s"'`)]|\\ )+)/g
+    : /(?:^|[\s"'`=(])(\/(?:[^\s"'`)]|\\ )+)/g;
   const outside = new Set<string>();
   for (const match of text.matchAll(absolutePath)) {
-    const candidate = match[1].replace(/\\+$/, "");
-    if (candidate === root || candidate.startsWith(`${root}/`)) continue;
+    const raw = match[1];
+    const candidate = windows && !raw.startsWith("/") ? windowsPathCandidate(raw).replace(/(?<![A-Za-z]:)\\+$/, "") : raw.replace(/\\+$/, "");
+    if (isInside(candidate, root)) continue;
     if (/^\/(usr|bin|sbin|opt|etc|System|Library|private\/var|var|tmp|dev|Applications)\//.test(candidate)) continue;
+    if (/^[A-Za-z]:\\(?:Windows|Program(?: Files(?: \(x86\))?)?|ProgramData)(?:\\|$)/i.test(candidate)) continue;
     outside.add(candidate.slice(0, 200));
   }
   return [...outside];
@@ -456,7 +476,7 @@ export function auditWriteBoundary(
       : [];
     confirmedWriteTargetsChecked += resolvedTargets.length;
     for (const candidate of resolvedTargets) {
-      if (candidate !== root && !candidate.startsWith(`${root}/`)) confirmedOutsideWrites.add(candidate.slice(0, 200));
+      if (!isInside(candidate, root)) confirmedOutsideWrites.add(candidate.slice(0, 200));
     }
     const resolvedSet = new Set(resolvedTargets);
     const ambiguous = outsideReferences.filter((candidate) => !resolvedSet.has(path.normalize(candidate)));
