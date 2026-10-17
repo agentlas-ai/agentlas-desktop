@@ -76,8 +76,28 @@ function fileIdentity(file: string): FileIdentity | null {
   };
 }
 
-/** Deterministic lstat digest of the whole bundle; never follows links. */
+/**
+ * Deterministic lstat digest of the whole bundle; never follows links.
+ *
+ * The walk sees the real file system, so app.asar is one file. Inside Electron
+ * the asar shim presents app.asar as a directory and gives each virtual entry a
+ * new inode on every lstat. Two digests of the same bundle then never matched,
+ * and the PASS was never recorded. Measured 2026-10-17 on 1.3.58: 0 cached
+ * PASS in 12 launches, about 4.5 s of full gate before the store opened each
+ * time. The plain-Node gate could not see this.
+ */
 export function macBundleTreeDigest(bundleRoot: string): { entries: number; sha256: string } | null {
+  const proc = process as NodeJS.Process & { noAsar?: boolean };
+  const previousNoAsar = proc.noAsar;
+  proc.noAsar = true;
+  try {
+    return walkBundleTree(bundleRoot);
+  } finally {
+    proc.noAsar = previousNoAsar;
+  }
+}
+
+function walkBundleTree(bundleRoot: string): { entries: number; sha256: string } | null {
   const hash = createHash("sha256");
   let entries = 0;
   const visit = (absolute: string, relative: string): boolean => {
