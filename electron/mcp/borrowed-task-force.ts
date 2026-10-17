@@ -2710,6 +2710,62 @@ export interface TaskForcePacketMergeResult {
 }
 
 /**
+ * The planner's own "review, then repair" loop that the one-packet merge folded into a unit: the unit's packet and the
+ * review that judged the unit's earlier output (the merge's subsumedReviewEdges). The merge relied on the unit's
+ * internal review instead, but an outer review's findings then had no step to fix them (dev A/B4/A/B5 2026-10-17, both
+ * rooms: the review named fixable defects and the room ended "not complete"). The host runs that repair once.
+ */
+export interface TaskForceReviewRepairEdge { agent: string; unitStepId: string; reviewStepId: string }
+
+export function taskForceReviewRepairEdges(merge: Pick<TaskForcePacketMergeResult, "merges">): TaskForceReviewRepairEdge[] {
+  const edges: TaskForceReviewRepairEdge[] = [];
+  for (const unit of merge.merges) {
+    for (const edge of unit.subsumedReviewEdges) {
+      if (edges.some((known) => known.unitStepId === unit.keptStepId && known.reviewStepId === edge.reviewStepId)) continue;
+      edges.push({ agent: unit.agent, unitStepId: unit.keptStepId, reviewStepId: edge.reviewStepId });
+    }
+  }
+  return edges;
+}
+
+/** Observed tools whose call commits an effect outside the workspace by name alone (an upload, a recorded publish, a sent
+ * mail). A unit that used one is never re-dispatched by the host: its repair goes to the owner (P23-F1). */
+const TASK_FORCE_OUTWARD_COMMIT_TOOL_LEAVES = new Set(["browser_file_upload", "effect_item_record", "agent_mail_send", "agent_mail_reply"]);
+
+export type TaskForceReviewRepairSkip = "step_missing" | "unit_not_completed" | "review_not_completed"
+  | "no_repairable_findings" | "unit_requires_approval" | "unit_not_producer" | "unit_acted_outward";
+
+/** Typed inputs only: the review's own completion and blockers, the unit's packet phase/approval and observed tools. */
+export function taskForceReviewRepairDecision(input: {
+  unitPacket?: BorrowedInputPacket; unitResult?: Pick<BorrowedAgentResult, "ok" | "usedTools">;
+  reviewResult?: Pick<BorrowedAgentResult, "ok" | "reviewComplete" | "blockingRemaining">;
+}): { repair: true; findings: string[] } | { repair: false; reason: TaskForceReviewRepairSkip } {
+  const { unitPacket, unitResult, reviewResult } = input;
+  if (!unitPacket || !unitResult || !reviewResult) return { repair: false, reason: "step_missing" };
+  if (!unitResult.ok) return { repair: false, reason: "unit_not_completed" };
+  if (!reviewResult.ok || reviewResult.reviewComplete !== true) return { repair: false, reason: "review_not_completed" };
+  if (unitPacket.requiresApproval) return { repair: false, reason: "unit_requires_approval" };
+  if (taskForcePacketPhase(unitPacket) !== "produce") return { repair: false, reason: "unit_not_producer" };
+  if ((unitResult.usedTools ?? []).some((name) => TASK_FORCE_OUTWARD_COMMIT_TOOL_LEAVES.has(name.split(/__|·|\/|\./).pop()?.trim().toLowerCase() ?? ""))) {
+    return { repair: false, reason: "unit_acted_outward" };
+  }
+  const findings = (reviewResult.blockingRemaining ?? []).map((item) => item.trim())
+    .filter((item) => item && !item.startsWith(TASK_FORCE_OWNER_DECISION_PREFIX) && item !== "handoff_format_invalid");
+  return findings.length ? { repair: true, findings } : { repair: false, reason: "no_repairable_findings" };
+}
+
+/** The unit's one repair packet: its own brief stays above the review's findings (task-context above turn-context). */
+export function taskForceReviewRepairPacket(unitPacket: BorrowedInputPacket, findings: readonly string[]): BorrowedInputPacket {
+  return { ...unitPacket, brief: composeDeclaredPrompt([
+    { id: "taskforce.repair.original-brief", revision: 1, stability: "task-context", changeTriggers: ["plan-revision"], order: 0,
+      text: `${unitPacket.brief}\n\n` },
+    { id: "taskforce.repair.review-findings", revision: 1, stability: "turn-context", changeTriggers: ["plan-revision"], order: 0,
+      text: "[Repair after the room's independent review]\nfix every blocking defect named below in the existing deliverable; reuse files, no restart; re-run your own checks; report what changed; an item that needs the owner or an outside effect: leave it and name it\n"
+        + findings.map((item) => `- ${item}`).join("\n") },
+  ], "") };
+}
+
+/**
  * Production 2026-10-09..16: the room planner's first attempt gave a one-packet unit several packets (build, then a
  * repair after an outer review) in 4 of 5 attempts on gpt-6.1-sol and agentlas-light, and each duplicate_team
  * rejection cost a whole same-model repair round (127 s of planning in one room). The unit already reviews and repairs
@@ -6014,6 +6070,8 @@ async function runPlanner(
   capabilityBinding?: FinalizedWorkforceCapabilityBinding;
   /** Controller runtime that actually completed planning after fallback, if any. */
   controllerRuntime?: RuntimeStatus;
+  /** The planner's own "review, then repair" loops the one-packet merge folded into the unit (typed merge receipt). */
+  reviewRepairs: TaskForceReviewRepairEdge[];
 }> {
   const orchestratorId = `${p.chat.id}:borrow-orchestrator`;
   // A long-run checkpoint lets the planner select only the roles needed
@@ -6224,6 +6282,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
   let fallbackUsed = false;
   let result: RunnerResult | undefined;
   let capabilityBinding: FinalizedWorkforceCapabilityBinding | undefined;
+  let reviewRepairs: TaskForceReviewRepairEdge[] = [];
 
   if (strictWorkforcePlanner) {
     let previousError = "";
@@ -6428,8 +6487,10 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
     const parsedPlan = parseBorrowedWorkloadPlan(plannerText);
     // A one-packet unit (Team/Firm) reviews and repairs itself: merge the passes a plan split it into before
     // validation, so that alone never costs a repair round. Typed receipt, no prose.
+    const reviewRepairsByAttempt = new Map<1 | 2, TaskForceReviewRepairEdge[]>();
     const mergeUnitPackets = (planned: BorrowedInputPacket[], attempt: 1 | 2): BorrowedInputPacket[] => {
       const merge = mergeOnePacketUnitDuplicates(planned, specs);
+      reviewRepairsByAttempt.set(attempt, taskForceReviewRepairEdges(merge));
       if (merge.merges.length > 0 || merge.fallbacks.length > 0) {
         tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id,
           nodeId: orchestratorId, agentId: p.orchestratorAgent.id, kind: "task_force_planner_packets_merged",
@@ -6442,6 +6503,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
     };
     const firstPlannedPackets = mergeUnitPackets(parsedPlan.packets, 1);
     let selectedPlannerPackets = firstPlannedPackets;
+    reviewRepairs = reviewRepairsByAttempt.get(1) ?? [];
     let normalized = normalizePacketsForRoster(firstPlannedPackets, specs, taskForceOwnerRequest(p.req), p.locale, !p.benchmarkMode && !p.req.agentAppMode, semanticSubset);
     synthesisAllocation = parsedPlan.synthesisAllocation ?? defaultWorkloadAllocation("synthesize");
     approvalStop = parsedPlan.approvalStop;
@@ -6521,6 +6583,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         selectedPlanRuntime = plannerRuntime;
         normalized = repairedNormalized;
         selectedPlannerPackets = repairedPlannedPackets;
+        reviewRepairs = reviewRepairsByAttempt.get(2) ?? [];
         plannerText = repairedText;
         synthesisAllocation = repairedPlan.synthesisAllocation ?? synthesisAllocation;
         approvalStop = repairedPlan.approvalStop;
@@ -6629,6 +6692,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
     result,
     capabilityBinding,
     controllerRuntime: plannerRuntime,
+    reviewRepairs,
   };
 }
 
@@ -7349,6 +7413,52 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       emitOneReplyMessage(packet, resultMessageId);
     });
     for (const index of ready) pending.delete(index);
+  }
+  // The planner's "review, then repair" loops the merge folded into a unit: when that review completed and named
+  // repairable defects, the unit runs once more with the findings and the review checks once more (typed receipt).
+  for (const edge of plan.reviewRepairs) {
+    if (p.signal?.aborted) break;
+    const unitIndex = stepIds.indexOf(edge.unitStepId), reviewIndex = stepIds.indexOf(edge.reviewStepId);
+    const unitPacket = unitIndex >= 0 ? executionPackets[unitIndex] : undefined;
+    const decision = taskForceReviewRepairDecision({ unitPacket, unitResult: unitIndex >= 0 ? results[unitIndex] : undefined,
+      reviewResult: reviewIndex >= 0 ? results[reviewIndex] : undefined });
+    const receipt = { schemaVersion: "agentlas.task-force-review-repair.v1", agent: edge.agent, unitStepId: edge.unitStepId,
+      reviewStepId: edge.reviewStepId };
+    if (!decision.repair || !unitPacket) {
+      tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id, nodeId: orchestratorId,
+        agentId: p.orchestratorAgent.id, kind: "task_force_review_repair_round",
+        payload: { ...receipt, action: "skipped", reason: decision.repair ? "step_missing" : decision.reason } });
+      continue;
+    }
+    const repairPacket = taskForceReviewRepairPacket(unitPacket, decision.findings);
+    const unitName = specBySlug.get(unitPacket.agent)?.name ?? unitPacket.agent;
+    p.sink({ kind: "tool-use", status: p.locale === "ko"
+      ? `검토에서 나온 문제 ${decision.findings.length}건을 고치는 중… (${unitName})`
+      : `Fixing ${decision.findings.length} issue(s) the review found… (${unitName})` });
+    const repaired = await runPacketWithRetry(repairPacket, [results[reviewIndex]]);
+    const repairMessageId = emitWorkerResultMessage(repaired, resultMessageByStepId.get(edge.reviewStepId));
+    if (repaired.ok) {
+      results[unitIndex] = repaired;
+      resultByStepId.set(edge.unitStepId, repaired);
+      if (repairMessageId) resultMessageByStepId.set(edge.unitStepId, repairMessageId);
+    }
+    let recheck: BorrowedAgentResult | null = null;
+    if (repaired.ok && !p.signal?.aborted) {
+      const reviewPacket = executionPackets[reviewIndex];
+      const peers = (reviewPacket.dependsOn ?? []).map((dependency) => resultByStepId.get(dependency))
+        .filter((result): result is BorrowedAgentResult => Boolean(result));
+      p.sink({ kind: "tool-use", status: p.locale === "ko" ? "고친 결과를 다시 검토하는 중…" : "Reviewing the repair again…" });
+      recheck = await runPacketWithRetry(reviewPacket, peers);
+      results[reviewIndex] = recheck;
+      resultByStepId.set(edge.reviewStepId, recheck);
+      const recheckMessageId = emitWorkerResultMessage(recheck, repairMessageId ?? undefined);
+      if (recheckMessageId) resultMessageByStepId.set(edge.reviewStepId, recheckMessageId);
+    }
+    tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id, nodeId: orchestratorId,
+      agentId: p.orchestratorAgent.id, kind: "task_force_review_repair_round",
+      payload: { ...receipt, action: "repaired", findingsCount: decision.findings.length, repairedOk: repaired.ok,
+        ...(recheck ? { recheckOk: recheck.ok, recheckReviewComplete: recheck.reviewComplete === true,
+          recheckBlockingRemainingCount: (recheck.blockingRemaining ?? []).length } : {}) } });
   }
   // 종합은 오케스트레이터 자리다 — 사람이 그 자리에 앉힌 것 안에서만 고른다.
   const synthesisCandidateRuntimes = runtimesAssignedToRole(taskForceCandidateRuntimes(p), "orchestrator");
