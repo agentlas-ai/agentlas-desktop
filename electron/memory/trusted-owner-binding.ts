@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { getAuthenticatedSessionBinding, onAuthSessionOwnershipChanged } from "../auth";
+import { fetchAccountContext } from "../account-context";
 import { userDataPath } from "../runtime-paths";
 import { deviceMemoryCustodyId, getMemoryStoreInfo, memoryRoot } from "./database";
 
@@ -11,8 +12,30 @@ const TTL = 30_000;
 type Binding = { schema_version: typeof SCHEMA; source_id: string; binding_revision: string;
   state: "active" | "revoked" | "unavailable"; memory_root: string; owner_namespace: string;
   device_custody_id: string; revocation_epoch: number; auth_binding_id: string | null;
-  user_id: string | null; workspace_id: string | null; expires_at: number; reason?: string };
+  user_id: string | null; workspace_id: string | null; expires_at: number; reason?: string;
+  /**
+   * The account's opaque subject (sha256:…), the value the web's agentlas.account_context returns. Core's memory curation
+   * verifies the bound owner with it (independent review wave 2, engine-w2-03 / handoff H2): without it a bound curation
+   * fails memory_web_owner_unverifiable. It is derived from the session, so it is not part of the identity comparison:
+   * it is written once known, and it never revokes a binding whose session is unchanged.
+   */
+  account_subject?: string | null };
 let current: { file: string; value: Binding } | null = null;
+let accountSubject: { authBindingId: string; value: string } | null = null;
+let accountSubjectFetch: Promise<void> | null = null;
+
+/** The known subject of this session, or null while it is unknown (one fetch in flight; a failure retries on a later write). */
+function accountSubjectFor(authBindingId: string | null): string | null {
+  if (!authBindingId) return null;
+  if (accountSubject?.authBindingId === authBindingId) return accountSubject.value;
+  if (!accountSubjectFetch) {
+    accountSubjectFetch = fetchAccountContext().then((context) => {
+      if (getAuthenticatedSessionBinding()?.sessionId === authBindingId) accountSubject = { authBindingId, value: context.accountSubject };
+    }, () => { /* unknown stays null; Core refuses typed (memory_web_owner_unverifiable) until a later write has it */ })
+      .finally(() => { accountSubjectFetch = null; });
+  }
+  return null;
+}
 const curatorOwners = new Set<AbortController>();
 
 function atomic(file: string, value: Binding): void {
@@ -31,6 +54,8 @@ function atomic(file: string, value: Binding): void {
 
 /** Synchronous value-free invalidation; cookie deletion and another launch are irrelevant. */
 export function revokeTrustedMemoryOwnerBinding(): void {
+  try { if (accountSubject && accountSubject.authBindingId !== (getAuthenticatedSessionBinding()?.sessionId ?? null)) accountSubject = null; }
+  catch { accountSubject = null; }
   for (const owner of curatorOwners) owner.abort(new Error("os_curator_owner_revoked"));
   curatorOwners.clear();
   if (current) {
@@ -56,7 +81,7 @@ function snapshot(): Omit<Binding, "binding_revision" | "expires_at"> {
     workspace_id: session?.workspaceId ?? null };
 }
 function same(left: Binding, right: ReturnType<typeof snapshot>): boolean {
-  const { binding_revision: _revision, expires_at: _expires, ...identity } = left;
+  const { binding_revision: _revision, expires_at: _expires, account_subject: _subject, ...identity } = left;
   return JSON.stringify(identity) === JSON.stringify(right);
 }
 
@@ -74,7 +99,7 @@ const renewal = setInterval(() => {
     if (current.value.expires_at <= now || !same(current.value, snapshot())) {
       revokeTrustedMemoryOwnerBinding(); return;
     }
-    current.value = { ...current.value, expires_at: now + TTL };
+    current.value = { ...current.value, account_subject: accountSubjectFor(current.value.auth_binding_id), expires_at: now + TTL };
     atomic(current.file, current.value);
   } catch { revokeTrustedMemoryOwnerBinding(); }
 }, 5_000);
@@ -97,7 +122,8 @@ export function trustedMemoryOwnerEnvironment(): Record<string, string> {
   if (!current || current.value.expires_at <= Date.now() || !same(current.value, identity)) {
     revokeTrustedMemoryOwnerBinding();
     const file = path.join(identity.memory_root, "runtime-bindings", `desktop-${bootId}.json`);
-    const value: Binding = { ...identity, binding_revision: randomUUID(), expires_at: Date.now() + TTL };
+    const value: Binding = { ...identity, account_subject: accountSubjectFor(identity.auth_binding_id),
+      binding_revision: randomUUID(), expires_at: Date.now() + TTL };
     atomic(file, value); current = { file, value };
   }
   return { AGENTLAS_MEMORY_ROOT: current.value.memory_root,
