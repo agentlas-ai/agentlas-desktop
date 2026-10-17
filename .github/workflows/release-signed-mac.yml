@@ -283,7 +283,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '26f7da7a18e0343011356afeada67d4b35142e8ed175bf77dd3cf8fce5460d23') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '1c973cc6c7b3ac80122b971e7cd128ef195f7daf45732bea0fc63ece6418ed47') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -292,7 +292,7 @@ jobs:
             "scripts/fixtures/portable-experience-bundle-v1-golden.json": "95af4082e530bf1503a95e09d4743a87a7a7129f9b6911da525263313270d3a6",
             "scripts/lib/agent-workspace-test-harness.cjs": "7ade73d07a3eace4f88fec27c10c8befc005cb8c3ab0e87b7423deeabafc4174",
             "scripts/lib/agent-workspace-ui-contract.cjs": "679265dbe07d0fc074ed8c6f12451650eef52adf63e04f74294c7f627323253d",
-            "scripts/lib/one-live-contract-harness.cjs": "fc42109eef01aeb4a6677900fe11e1aae1c2fcf4557ac7f7390882533e3b0a95",
+            "scripts/lib/one-live-contract-harness.cjs": "faf658d01a8c1175872bf8ee577c0ef7697fdf1b2e68e3baa1fd604498ec1073",
             "scripts/lib/science-release-archive-validator.cjs": "34c4505e114a405c24dceeef1832afd084db00b9a8176bd397a8021b96520824",
             "scripts/lib/staged-gate-compile.cjs": "c4787def017bc136d7c5a6557a2773b26e6424f14e7c8133f202fd54098d863b",
             "scripts/loadout-editor-contract.cjs": "74780e20e9ebef4092d118c2b6ece4e968cf45cd925931392eff70e474696ada",
@@ -709,7 +709,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '26f7da7a18e0343011356afeada67d4b35142e8ed175bf77dd3cf8fce5460d23') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '1c973cc6c7b3ac80122b971e7cd128ef195f7daf45732bea0fc63ece6418ed47') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -718,7 +718,7 @@ jobs:
             "scripts/fixtures/portable-experience-bundle-v1-golden.json": "95af4082e530bf1503a95e09d4743a87a7a7129f9b6911da525263313270d3a6",
             "scripts/lib/agent-workspace-test-harness.cjs": "7ade73d07a3eace4f88fec27c10c8befc005cb8c3ab0e87b7423deeabafc4174",
             "scripts/lib/agent-workspace-ui-contract.cjs": "679265dbe07d0fc074ed8c6f12451650eef52adf63e04f74294c7f627323253d",
-            "scripts/lib/one-live-contract-harness.cjs": "fc42109eef01aeb4a6677900fe11e1aae1c2fcf4557ac7f7390882533e3b0a95",
+            "scripts/lib/one-live-contract-harness.cjs": "faf658d01a8c1175872bf8ee577c0ef7697fdf1b2e68e3baa1fd604498ec1073",
             "scripts/lib/science-release-archive-validator.cjs": "34c4505e114a405c24dceeef1832afd084db00b9a8176bd397a8021b96520824",
             "scripts/lib/staged-gate-compile.cjs": "c4787def017bc136d7c5a6557a2773b26e6424f14e7c8133f202fd54098d863b",
             "scripts/loadout-editor-contract.cjs": "74780e20e9ebef4092d118c2b6ece4e968cf45cd925931392eff70e474696ada",
@@ -1087,7 +1087,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '26f7da7a18e0343011356afeada67d4b35142e8ed175bf77dd3cf8fce5460d23') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '1c973cc6c7b3ac80122b971e7cd128ef195f7daf45732bea0fc63ece6418ed47') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -1096,7 +1096,7 @@ jobs:
             "scripts/fixtures/portable-experience-bundle-v1-golden.json": "95af4082e530bf1503a95e09d4743a87a7a7129f9b6911da525263313270d3a6",
             "scripts/lib/agent-workspace-test-harness.cjs": "7ade73d07a3eace4f88fec27c10c8befc005cb8c3ab0e87b7423deeabafc4174",
             "scripts/lib/agent-workspace-ui-contract.cjs": "679265dbe07d0fc074ed8c6f12451650eef52adf63e04f74294c7f627323253d",
-            "scripts/lib/one-live-contract-harness.cjs": "fc42109eef01aeb4a6677900fe11e1aae1c2fcf4557ac7f7390882533e3b0a95",
+            "scripts/lib/one-live-contract-harness.cjs": "faf658d01a8c1175872bf8ee577c0ef7697fdf1b2e68e3baa1fd604498ec1073",
             "scripts/lib/science-release-archive-validator.cjs": "34c4505e114a405c24dceeef1832afd084db00b9a8176bd397a8021b96520824",
             "scripts/lib/staged-gate-compile.cjs": "c4787def017bc136d7c5a6557a2773b26e6424f14e7c8133f202fd54098d863b",
             "scripts/loadout-editor-contract.cjs": "74780e20e9ebef4092d118c2b6ece4e968cf45cd925931392eff70e474696ada",
