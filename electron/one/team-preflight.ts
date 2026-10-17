@@ -688,8 +688,12 @@ export function resolveQueuedOneRoomRoster(
   if (rooms.length !== 1) throw new Error("one_queued_room_binding_ambiguous");
   const room = rooms[0];
   if (!room.memberAgentIds.length) return null;
+  // A member whose last task failed still takes new work in a room the owner composed, as on the preflight path
+  // (ensureOneTaskforceForPreflight, 2026-10-11): refusing it here made every queued owner direction in that room fail to
+  // start ("…이 팀원의 이전 작업이 실패한 상태로 남아 있습니다") right after a team run with one failed member (W7 2026-10-17,
+  // S-followup-during-team: the carried follow-up of the Yotube room). The failure stays on record.
   if (deps.validateQueuedRoomMembers) deps.validateQueuedRoomMembers(room.memberAgentIds);
-  else getDb().transaction(() => ensureOneGroupLocalStaff(room.memberAgentIds, false))();
+  else getDb().transaction(() => ensureOneGroupLocalStaff(room.memberAgentIds, false, { allowPriorTaskFailure: true }))();
   const roster = exactInstalledRoster(chat, deps, undefined, false, room.memberAgentIds);
   if (roster.unresolvedMembers.length || roster.unresolvedExternal || !roster.targets.length) {
     throw new Error("one_queued_room_member_unavailable");
