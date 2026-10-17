@@ -4,7 +4,8 @@ import { useEffect, useState } from "react";
 import type { ChatHostNotice } from "@shared/types";
 import { stripAgentControlBlocks } from "@shared/agent-control-blocks";
 import { flattenAskFences } from "@shared/ask-fence-flatten";
-import { ipc } from "@/lib/ipc";
+import { ipc, ipcEvents } from "@/lib/ipc";
+import { createDirtyGate } from "@/lib/store-change-policy";
 import { readOneChatHistory } from "@/lib/one-chat-history";
 import { markChatVisible } from "@/lib/tool-approvals";
 import { Markdown } from "../Markdown";
@@ -35,8 +36,16 @@ export function OneDispatchNotice({ notice, locale }: { notice: Notice; locale: 
     if (!api?.invoke?.history) return;
     let cancelled = false;
     let busy = false;
+    // The notice is projected from the parent chat (its link/result rows) and the member's own chat (its question).
+    // Re-read the parent history (up to about 1 MB) only after a change to either, or every 15 s as a safety net for
+    // a status write that announces nothing (perf review R-09).
+    const childChatId = current.chatId;
+    const gate = createDirtyGate({ maxAgeMs: 15_000 });
+    const stopWatching = ipcEvents()?.onStoreChanged?.((change) => {
+      if (change.entity === "chat" && (!change.id || change.id === dispatch.parentChatId || change.id === childChatId)) gate.mark();
+    });
     const timer = setInterval(async () => {
-      if (busy || document.visibilityState === "hidden") return;
+      if (busy || document.visibilityState === "hidden" || !gate.shouldRead()) return;
       busy = true;
       try {
         const history = await readOneChatHistory(api, dispatch.parentChatId);
@@ -47,8 +56,8 @@ export function OneDispatchNotice({ notice, locale }: { notice: Notice; locale: 
       } catch { /* A failed read does not change the observed execution state. */ }
       finally { busy = false; }
     }, 3000);
-    return () => { cancelled = true; clearInterval(timer); };
-  }, [dispatch?.dispatchId, dispatch?.parentChatId, dispatch?.status, current.purpose, current.runId]);
+    return () => { cancelled = true; clearInterval(timer); stopWatching?.(); };
+  }, [dispatch?.dispatchId, dispatch?.parentChatId, dispatch?.status, current.purpose, current.runId, current.chatId]);
   const ko = locale === "ko";
   const labels = {
     running: ko ? "작업 중" : "Working", waiting_input: ko ? "응답 대기" : "Waiting for input",

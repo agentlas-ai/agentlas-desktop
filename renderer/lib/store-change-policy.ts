@@ -120,3 +120,23 @@ export function createKeyedThrottle(options: {
     dispose() { disposed = true; for (const handle of trailing.values()) clearTimer(handle); trailing.clear(); },
   };
 }
+
+/**
+ * Read-when-dirty with a safety age: shouldRead() answers true after mark() or once maxAgeMs passed since the last
+ * read, and records that a read starts (so a mark during the read asks again on the next tick).
+ */
+export function createDirtyGate(options: { maxAgeMs: number; now?: () => number }): { mark(): void; shouldRead(): boolean } {
+  const now = options.now ?? Date.now;
+  let dirty = false;
+  let lastReadAt = now();
+  return {
+    mark() { dirty = true; },
+    shouldRead() {
+      const at = now();
+      if (!dirty && at - lastReadAt < options.maxAgeMs) return false;
+      dirty = false;
+      lastReadAt = at;
+      return true;
+    },
+  };
+}
