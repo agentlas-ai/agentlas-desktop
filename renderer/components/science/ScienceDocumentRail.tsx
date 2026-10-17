@@ -2,13 +2,16 @@
 
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import type { ScienceDocumentBridge, ScienceDocumentPanelState } from "@shared/science-document-panel";
-import { IconClose, IconFileText } from "@/components/Icon";
+import type { SciencePreviewBridge, SciencePreviewPanelState } from "@shared/science-preview-panel";
+import { IconClose, IconFileText, IconLayers } from "@/components/Icon";
 import { LiveDocumentRailPanel, useLiveDocuments } from "@/components/live-document/LiveDocumentRailPanel";
+import { SciencePreviewPane } from "./SciencePreviewPane";
 import styles from "./ScienceDocumentRail.module.css";
 
 declare global {
   interface Window {
     agentlasScienceDocument?: ScienceDocumentBridge;
+    agentlasSciencePreview?: SciencePreviewBridge;
   }
 }
 
@@ -20,6 +23,10 @@ declare global {
  *
  * Edits here change the office file only. A Science manuscript's source of truth is its Markdown and bindings; the
  * exported docx/hwpx is derived from it, so nothing typed here flows back, and the panel says so.
+ *
+ * The column has a second tab, Preview: the Universal File Viewer (read-only, faithful docx/pdf/spreadsheet pages) for
+ * bytes the Science view hands to Main with `shell.previewFile` (electron/science-host/preview-panel.ts). It exists
+ * only while something is open there, and it does not need a conversation, so it works where the Document tab is idle.
  */
 
 const OPEN_KEY = "agentlas.science.documentRail.open.v1";
@@ -59,6 +66,9 @@ export function ScienceDocumentRail({ locale }: { locale: "ko" | "en" }) {
   const [focusSessionId, setFocusSessionId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busyToken, setBusyToken] = useState<string | null>(null);
+  const [preview, setPreview] = useState<SciencePreviewPanelState>({ items: [] });
+  const [tab, setTab] = useState<"document" | "preview">("document");
+  const [previewToken, setPreviewToken] = useState<string | null>(null);
   const chatId = state.context?.chatId ?? null;
   const { sessions, refresh } = useLiveDocuments(chatId);
 
@@ -76,6 +86,31 @@ export function ScienceDocumentRail({ locale }: { locale: "ko" | "en" }) {
     const off = bridge.onChanged((next) => { if (alive) setState(next); });
     return () => { alive = false; off(); };
   }, []);
+
+  // A preview the Science view just handed over opens the column on the Preview tab, like a session the AI just opened
+  // opens the Document tab; previews already there when this page mounts are listed but do not steal the screen.
+  const previewSeen = useRef<Set<string> | null>(null);
+  const applyPreview = useCallback((next: SciencePreviewPanelState, announce: boolean) => {
+    setPreview(next);
+    const tokens = next.items.map((item) => item.token);
+    const known = previewSeen.current;
+    const fresh = known === null || !announce ? [] : tokens.filter((token) => !known.has(token));
+    previewSeen.current = new Set(tokens);
+    setPreviewToken((current) => {
+      if (fresh.length) return fresh[fresh.length - 1];
+      if (current && tokens.includes(current)) return current;
+      return tokens[tokens.length - 1] ?? null;
+    });
+    if (fresh.length) { setTab("preview"); setOpen(true); writeStored(OPEN_KEY, "1"); }
+  }, []);
+  useEffect(() => {
+    const bridge = window.agentlasSciencePreview;
+    if (!bridge) return;
+    let alive = true;
+    void bridge.state().then((next) => { if (alive && next) applyPreview(next, false); }).catch(() => undefined);
+    const off = bridge.onChanged((next) => { if (alive) applyPreview(next, true); });
+    return () => { alive = false; off(); };
+  }, [applyPreview]);
 
   const setOpenStored = useCallback((next: boolean) => {
     setOpen(next);
@@ -132,18 +167,24 @@ export function ScienceDocumentRail({ locale }: { locale: "ko" | "en" }) {
     writeStored(WIDTH_KEY, String(next));
   };
 
-  if (!state.context || !chatId) return null;
+  const documentAvailable = Boolean(state.context && chatId);
+  const previewAvailable = preview.items.length > 0;
+  if (!documentAvailable && !previewAvailable) return null;
+  const shownTab = tab === "preview" ? (previewAvailable ? "preview" : "document") : (documentAvailable ? "document" : "preview");
   const waiting = state.offers.length;
   const label = ko ? "문서" : "Document";
+  const previewLabel = ko ? "미리보기" : "Preview";
+  const count = (documentAvailable ? sessions.length + waiting : 0) + preview.items.length;
 
   if (!open) {
+    const openLabel = documentAvailable ? (ko ? "문서 탭 열기" : "Open the Document tab") : (ko ? "미리보기 탭 열기" : "Open the Preview tab");
     return (
       <aside className={styles.tabRail} style={{ width: TAB_WIDTH }} data-science-document-rail="closed">
-        <button type="button" className={styles.tabButton} onClick={() => setOpenStored(true)}
-          aria-label={ko ? "문서 탭 열기" : "Open the Document tab"} title={ko ? "문서 탭 열기" : "Open the Document tab"}>
+        <button type="button" className={styles.tabButton} onClick={() => { setTab(documentAvailable ? "document" : "preview"); setOpenStored(true); }}
+          aria-label={openLabel} title={openLabel}>
           <IconFileText size={15} />
-          <span className={styles.tabLabel}>{label}</span>
-          {sessions.length + waiting > 0 && <span className={styles.badge} data-offer={waiting > 0 ? "true" : "false"}>{sessions.length + waiting}</span>}
+          <span className={styles.tabLabel}>{documentAvailable ? label : previewLabel}</span>
+          {count > 0 && <span className={styles.badge} data-offer={documentAvailable && waiting > 0 ? "true" : "false"}>{count}</span>}
         </button>
       </aside>
     );
@@ -155,28 +196,48 @@ export function ScienceDocumentRail({ locale }: { locale: "ko" | "en" }) {
         aria-label={ko ? "문서 탭 너비 조절" : "Resize the Document tab"} aria-valuemin={MIN_WIDTH} aria-valuemax={MAX_WIDTH} aria-valuenow={clampWidth(width)}
         onPointerDown={onResizeDown} onPointerMove={onResizeMove} onPointerUp={onResizeUp} onPointerCancel={onResizeUp} onKeyDown={onResizeKey} />
       <header className={styles.header}>
-        <span className={styles.tab} role="tab" aria-selected="true"><IconFileText size={13} />{label}</span>
-        <button type="button" className={styles.close} onClick={() => setOpenStored(false)} aria-label={ko ? "문서 탭 닫기" : "Close the Document tab"} title={ko ? "닫기" : "Close"}><IconClose size={13} /></button>
-      </header>
-      <p className={styles.note} data-science-document-note="true">
-        {ko
-          ? "여기서 고친 내용은 이 파일에만 반영됩니다. Science의 원고(마크다운 원본)는 바뀌지 않으며, 다시 내보내면 파일이 새로 만들어집니다."
-          : "Edits here change this file only. The manuscript in Science (its Markdown source) is not updated; exporting again builds a new file."}
-      </p>
-      {state.offers.map((offer) => (
-        <div key={offer.token} className={styles.offer} data-science-document-offer="true">
-          <span className={styles.offerText}><strong>{offer.name}</strong>{ko ? " 내보내기를 마쳤습니다" : " was exported"}</span>
-          <button type="button" className={styles.offerOpen} disabled={busyToken !== null} onClick={() => void openOffer(offer.token)}>
-            {ko ? "문서 탭에서 열기" : "Open in the Document tab"}
-          </button>
-          <button type="button" className={styles.offerDismiss} onClick={() => void window.agentlasScienceDocument?.dismissExport(offer.token)}
-            aria-label={ko ? "닫기" : "Dismiss"} title={ko ? "닫기" : "Dismiss"}><IconClose size={11} /></button>
+        <div className={styles.tabs} role="tablist" aria-label={ko ? "Science 오른쪽 패널" : "Science right panel"}>
+          {documentAvailable && (
+            <button type="button" role="tab" className={styles.tab} aria-selected={shownTab === "document"} data-active={shownTab === "document" ? "true" : "false"}
+              data-science-rail-tab="document" onClick={() => setTab("document")}><IconFileText size={13} />{label}</button>
+          )}
+          {previewAvailable && (
+            <button type="button" role="tab" className={styles.tab} aria-selected={shownTab === "preview"} data-active={shownTab === "preview" ? "true" : "false"}
+              data-science-rail-tab="preview" onClick={() => setTab("preview")}><IconLayers size={13} />{previewLabel}</button>
+          )}
         </div>
-      ))}
-      {notice && <p className={styles.notice} role="status">{notice}</p>}
-      <div className={styles.body}>
-        <LiveDocumentRailPanel chatId={chatId} locale={locale} focusSessionId={focusSessionId} />
-      </div>
+        <button type="button" className={styles.close} onClick={() => setOpenStored(false)} aria-label={ko ? "패널 닫기" : "Close the panel"} title={ko ? "닫기" : "Close"}><IconClose size={13} /></button>
+      </header>
+      {/* Both bodies stay mounted: switching tabs must not drop an open document's cursor, history or a preview's page. */}
+      {documentAvailable && (
+        <div className={styles.pane} hidden={shownTab !== "document"} data-science-rail-pane="document">
+          <p className={styles.note} data-science-document-note="true">
+            {ko
+              ? "여기서 고친 내용은 이 파일에만 반영됩니다. Science의 원고(마크다운 원본)는 바뀌지 않으며, 다시 내보내면 파일이 새로 만들어집니다."
+              : "Edits here change this file only. The manuscript in Science (its Markdown source) is not updated; exporting again builds a new file."}
+          </p>
+          {state.offers.map((offer) => (
+            <div key={offer.token} className={styles.offer} data-science-document-offer="true">
+              <span className={styles.offerText}><strong>{offer.name}</strong>{ko ? " 내보내기를 마쳤습니다" : " was exported"}</span>
+              <button type="button" className={styles.offerOpen} disabled={busyToken !== null} onClick={() => void openOffer(offer.token)}>
+                {ko ? "문서 탭에서 열기" : "Open in the Document tab"}
+              </button>
+              <button type="button" className={styles.offerDismiss} onClick={() => void window.agentlasScienceDocument?.dismissExport(offer.token)}
+                aria-label={ko ? "닫기" : "Dismiss"} title={ko ? "닫기" : "Dismiss"}><IconClose size={11} /></button>
+            </div>
+          ))}
+          {notice && <p className={styles.notice} role="status">{notice}</p>}
+          <div className={styles.body}>
+            <LiveDocumentRailPanel chatId={chatId} locale={locale} focusSessionId={focusSessionId} />
+          </div>
+        </div>
+      )}
+      {previewAvailable && (
+        <div className={styles.pane} hidden={shownTab !== "preview"} data-science-rail-pane="preview">
+          <SciencePreviewPane items={preview.items} activeToken={previewToken} locale={locale}
+            onSelect={setPreviewToken} onClose={(token) => void window.agentlasSciencePreview?.close(token)} />
+        </div>
+      )}
     </aside>
   );
 }

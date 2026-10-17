@@ -90,6 +90,12 @@ export const scienceViewHooks: {
   closed?: (ownerId: number) => void;
   download?: (ownerId: number, item: Electron.DownloadItem) => void;
 } = {};
+/** Further owners of per-view state (the Preview tab) release it here; `closed` above is the Document panel's single slot. */
+const scienceViewClosedListeners = new Set<(ownerId: number) => void>();
+export function onScienceViewClosed(listener: (ownerId: number) => void): () => void {
+  scienceViewClosedListeners.add(listener);
+  return () => { scienceViewClosedListeners.delete(listener); };
+}
 const scienceToolApprovalChatByRequestId = new Map<string, string>();
 const scienceCaptureTails = new WeakMap<Electron.WebContents, Promise<void>>();
 
@@ -228,6 +234,9 @@ function closeActive(active: ActiveScienceView, notify = true): void {
   closeScienceQuestionSurface(active);
   closeRenderer(active);
   try { scienceViewHooks.closed?.(active.ownerId); } catch { /* the panel never keeps a view open */ }
+  for (const listener of scienceViewClosedListeners) {
+    try { listener(active.ownerId); } catch { /* a listener never keeps a view open */ }
+  }
   try { active.window.contentView.removeChildView(active.view); } catch {}
   try { active.view.webContents.close(); } catch {}
   if (notify) active.send({ id: SCIENCE_EXTENSION_ID, leaseId: active.leaseId, state: "closed" });

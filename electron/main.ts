@@ -81,6 +81,9 @@ import { installDesktopScienceHost } from "./science-host";
 import { createScienceDaemonClient, type ScienceDaemonClientOptions } from "./science-host/daemon-client";
 import { registerScienceDaemonExecutionIpc } from "./science-host/daemon-ipc";
 import { scienceDocumentPanel } from "./science-host/document-panel-main";
+import { filePreviewRegistry, sciencePreviewPanel } from "./science-host/preview-panel-main";
+import { FILE_PREVIEW_HOST } from "../shared/file-preview";
+import type { SciencePreviewOfferResult } from "../shared/science-preview-panel";
 import { isScienceStoreFormatRefusal, scienceBootstrapFailure } from "./science-host/bootstrap-failure";
 import { createAgentlasWindowVisualSessionControl } from "./mobile-bridge/visual-session";
 import { listPendingAskUserRequests, submitAskUserAnswer } from "./confirm/ask-user";
@@ -1187,6 +1190,11 @@ function registerRendererProtocol(): void {
             "X-Content-Type-Options": "nosniff",
           },
         });
+      }
+      // Read-only previews of bytes a trusted caller gave Main (Science's Preview tab): an unguessable token, memory only.
+      if (url.hostname === FILE_PREVIEW_HOST) {
+        const served = filePreviewRegistry().serve(request.url, request.headers.get("range"));
+        return new Response(served.body as unknown as BodyInit | null, { status: served.status, headers: served.headers });
       }
       if (url.hostname === "localfile") {
         const p = url.searchParams.get("p");
@@ -2817,6 +2825,15 @@ app.whenReady().then(async () => {
     mainWindow.show();
     mainWindow.focus();
     return { ok: true, route: "/dashboard" };
+  });
+  // Optional host item (agentlas-science HOST-REQUIREMENTS.md): the view hands over bytes it holds and has verified
+  // (a manuscript render output, a table as csv); the owner window shows them read-only in the Preview tab. The view
+  // names no path and learns no token; an old Science never calls this.
+  ipcMain.handle("science:shell:previewFile", (event, input: unknown): SciencePreviewOfferResult => {
+    assertScienceSender(event, input);
+    const ownerId = scienceViewOwnerId(event.sender.id);
+    if (ownerId === null) return { ok: false, reason: "preview_unavailable" };
+    return sciencePreviewPanel().offer(ownerId, input && typeof input === "object" ? (input as { input?: unknown }).input : undefined);
   });
   ipcMain.handle("science:bootstrap", async (event, input: unknown) => {
     const status = assertScienceSender(event, input);

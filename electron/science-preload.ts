@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { UpdateScienceProjectDeliverableInput, UpdateScienceProjectDeliverableResult } from "agentlas-science";
 import type { ScienceCapabilityCatalogInput, ScienceCapabilityManagerInput } from "../shared/science-capability-catalog";
+import type { SciencePreviewFileInput, SciencePreviewOfferResult } from "../shared/science-preview-panel";
 
 const extensionId = process.argv
   .find((argument) => argument.startsWith("--agentlas-extension-id="))
@@ -12,6 +13,8 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
   shell: Object.freeze({
     backToWork: () => ipcRenderer.invoke("science:shell:backToWork", { extensionId }),
     openCapabilityManager: (input: ScienceCapabilityManagerInput) => ipcRenderer.invoke("science:shell:openCapabilityManager", { extensionId, input }),
+    // Optional: a host without this method simply has no Preview tab, and the view keeps its own screens.
+    previewFile: (input: SciencePreviewFileInput): Promise<SciencePreviewOfferResult> => ipcRenderer.invoke("science:shell:previewFile", { extensionId, input }),
   }),
   math: Object.freeze({
     command: (input: unknown) => ipcRenderer.invoke("science:math:command", { extensionId, input }),

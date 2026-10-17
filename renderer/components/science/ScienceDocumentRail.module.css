@@ -12,7 +12,10 @@
 .resizer:hover, .resizer:focus-visible { background: var(--paper-edge-strong); outline: none; }
 
 .header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px 0; flex: none; }
-.tab { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 8px 8px 0 0; background: var(--paper-3); color: var(--ink); font-size: 12.5px; font-weight: 600; }
+.tabs { display: flex; align-items: flex-end; gap: 2px; min-width: 0; }
+.tab { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 0; border-radius: 8px 8px 0 0; background: var(--paper-3); color: var(--ink); font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.tab[data-active="false"] { background: transparent; color: var(--ink-soft); }
+.tab[data-active="false"]:hover { background: var(--paper-3); color: var(--ink); }
 .close { display: inline-grid; place-items: center; width: 26px; height: 26px; border: 0; border-radius: 7px; background: transparent; color: var(--ink-soft); cursor: pointer; }
 .close:hover { background: var(--paper-3); color: var(--ink); }
 
@@ -29,3 +32,7 @@
 .notice { margin: 6px 10px 0; padding: 6px 10px; flex: none; border-radius: var(--rd-r-xs); background: var(--warn-soft); color: var(--warn); font-size: 12px; }
 
 .body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+/* A tab's body: shown or hidden, never unmounted. [hidden] is restated because display below would otherwise win over it. */
+.pane { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.pane[hidden] { display: none; }
