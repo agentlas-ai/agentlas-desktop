@@ -52,24 +52,36 @@ import { currentRunPriority, slotPriorityForCall } from "./run-priority";
 import { withRemoteCurationRuntime } from "./remote-curation-binding";
 import { withMemorySourceRunner } from "../memory/source-custody";
 
+/**
+ * The auth probe is an observation: its result is logged (and refreshes the connect chips' cache), and nothing decides on
+ * it. The provider stays authoritative for an auth failure. It used to be awaited before every turn while holding the run
+ * slot: `agy models` and `grok models` are network calls, about 3.1 s on average and up to 7.7 s per agy turn
+ * (independent review wave 2, desktop-w2-05). It now runs beside the turn, at most once a minute per runtime and source.
+ */
+const RUNTIME_AUTH_PROBE_INTERVAL_MS = 60_000;
+const runtimeAuthProbeStartedAt = new Map<string, number>();
+
 /** Per-turn, before the provider or its reusable session is used. Unknown probes are not authentication. */
 function withRuntimeAuthProbe(runner: Runner, runtimeKind: string): Runner {
   if (!CONNECTABLE_RUNTIMES.includes(runtimeKind as ConnectableRuntime)) return runner;
   const kind = runtimeKind as ConnectableRuntime;
   return async (req, events) => {
     if (req.signal?.aborted) throw abortReasonError(req);
-    events.onStatus(req.locale === "ko" ? "AI 연결을 다시 확인하는 중..." : "Checking the AI connection...");
-    try {
-      const probe = await probeRuntimeAuthForRun(kind, { runtimeSource: req.runtimeSource, env: req.env, cwd: req.cwd, signal: req.signal });
+    const probeKey = `${kind}\0${req.runtimeSource ?? ""}\0${req.cwd ?? ""}`;
+    const now = Date.now();
+    if ((runtimeAuthProbeStartedAt.get(probeKey) ?? -Infinity) + RUNTIME_AUTH_PROBE_INTERVAL_MS <= now) {
+      runtimeAuthProbeStartedAt.set(probeKey, now);
       // Only measured codes and command evidence: no credential values, stdout, account, source path or env.
-      console.info("[runtime-auth-probe]", JSON.stringify({ schemaVersion: "agentlas.runtime-auth-before-run.v1", kind,
-        state: probe.state, reason: probe.reason ?? probe.state, checkedAt: probe.checkedAt, latencyMs: probe.latencyMs, evidence: probe.evidence }));
-    } catch {
-      console.info("[runtime-auth-probe]", JSON.stringify({ schemaVersion: "agentlas.runtime-auth-before-run.v1", kind,
-        state: "unknown", reason: "probe-failed" }));
+      void probeRuntimeAuthForRun(kind, { runtimeSource: req.runtimeSource, env: req.env, cwd: req.cwd }).then((probe) => {
+        console.info("[runtime-auth-probe]", JSON.stringify({ schemaVersion: "agentlas.runtime-auth-before-run.v1", kind,
+          state: probe.state, reason: probe.reason ?? probe.state, checkedAt: probe.checkedAt, latencyMs: probe.latencyMs, evidence: probe.evidence }));
+      }, () => {
+        console.info("[runtime-auth-probe]", JSON.stringify({ schemaVersion: "agentlas.runtime-auth-before-run.v1", kind,
+          state: "unknown", reason: "probe-failed" }));
+      });
     }
-    // Stop/cancel wins even when a probe just failed or completed. The provider remains authoritative for
-    // auth failure and runtime fallback; absent status commands (Kimi) and timeouts never block a valid run.
+    // The provider remains authoritative for auth failure and runtime fallback; absent status commands (Kimi) and
+    // timeouts never block a valid run.
     if (req.signal?.aborted) throw abortReasonError(req);
     // Re-read after slot/auth waits: the owner may have turned spending off
     // since selection. Unknown observations do not manufacture exhaustion.
