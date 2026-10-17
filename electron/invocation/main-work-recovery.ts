@@ -103,7 +103,9 @@ export class MainWorkRecoveryContext {
       if (action && (input.reference?.step_id && action.stepId!==stepId || action.methodId!==input.methodId
         || action.inputDigest!==digest(input.arguments))) throw new Error("main_work_action_input_conflict");
       if (!action) {
-        const unresolved=actions.filter(item=>item.stepId===stepId && !["succeeded","cancelled"].includes(this.journal.read(scope.runId,item.actionId)?.state ?? "held"));
+        // Only an action whose outcome never came back (started across a restart, held after a lost call) blocks the
+        // next one. A returned error (failed) or a call that never left Main (cancelled) has a known end.
+        const unresolved=actions.filter(item=>item.stepId===stepId && !["succeeded","cancelled","failed"].includes(this.journal.read(scope.runId,item.actionId)?.state ?? "held"));
         if (!input.observational && unresolved.length) throw new Error(`main_work_read_original_outcome:${unresolved.map(item=>item.actionId).join(",")}`);
         const ordinal=Number((getDb().prepare("SELECT count(*) n FROM run_events WHERE run_id=? AND kind='main_work_action'").get(scope.runId) as {n:number}).n)+1;
         const actionId=workUnitId({runId:scope.runId,taskId:scope.taskId,stepId:`${stepId}:action:${ordinal}`,revision:scope.revision});
@@ -208,13 +210,28 @@ export class MainWorkRecoveryContext {
     }
   }
 
-  finish(admission:{unit:WorkUnit;action:Action},result:Result):void {
+  /** The admitted call never left Main (a pre-dispatch refusal): no effect exists, so it closes as cancelled. */
+  release(admission:{unit:WorkUnit;action:Action}):void {
+    this.assertCurrent();const scope=this.scope();
+    if(scope.runId!==admission.unit.runId || scope.revision!==admission.unit.revision)throw new Error("main_work_completion_scope_changed");
+    this.journal.transition(admission.unit,"cancelled",{reason:"main_tool_not_dispatched"});
+  }
+
+  /** `returned`: the tool's own result came back (a builtin ended, an MCP server answered), so an error is a known
+   * end (failed). `unconfirmed`: the call was lost before its result (thrown transport error), so the outcome is held.
+   * Measured 2026-10-17 (dev A/B4, BYOK Haiku): every error was held, and a held action blocks every later non-read
+   * action of its step with no way to clear it, so one non-zero shell exit ended all writes for the task revision. */
+  finish(admission:{unit:WorkUnit;action:Action},result:Result,outcome:"returned"|"unconfirmed"="returned"):void {
     this.assertCurrent();const scope=this.scope();
     if(scope.runId!==admission.unit.runId || scope.revision!==admission.unit.revision)throw new Error("main_work_completion_scope_changed");
     const stored={content:result.content,isError:result.isError,visionMessage:result.visionMessage,
       ...(result.artifactPaths ? {artifactPaths:result.artifactPaths} : {}),...(result.rawMcpResult ? {rawMcpResult:result.rawMcpResult} : {})};
     const serialized=JSON.stringify(stored);
-    if(result.isError) {this.journal.transition(admission.unit,"held",{reason:"original_tool_outcome_unconfirmed"});return;}
+    if(result.isError) {
+      this.journal.transition(admission.unit,outcome==="returned" ? "failed" : "held",
+        {reason:outcome==="returned" ? "main_tool_error_returned" : "original_tool_outcome_unconfirmed"});
+      return;
+    }
     const bytes=Buffer.from(serialized,"utf8");
     if(bytes.length>MAX_RESULT_BYTES)throw new Error("main_work_result_too_large");
     getDb().transaction(()=>{

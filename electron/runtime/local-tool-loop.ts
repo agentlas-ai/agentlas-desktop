@@ -985,6 +985,8 @@ async function dispatchMainToolRawUnchecked(
           if (approvalDecision === null) throw new Error("workforce_broker_approval_missing");
           broker?.finishAction(actionId, "failed");
         }
+        // The shell never started, so the admitted canonical action closes instead of staying "started" and blocking its step.
+        if (work && "unit" in work) approval.canonicalWorkRecovery!.release(work);
         return { content: `Error: ${content}`, visionMessage: null, isError: true };
       }
     }
@@ -1061,6 +1063,8 @@ async function dispatchMainToolRawUnchecked(
     return dispatched;
   }
   let mcpOutcome: MainToolDispatchResult;
+  // True once the server's own answer came back; a throw before that leaves the outcome unconfirmed (held).
+  let mcpReturned = false;
   try {
     const [{ callServerToolContent }, { saveBrowserCaptureArtifact }] = await Promise.all([
       import("../mcp-tools/client"),
@@ -1081,6 +1085,7 @@ async function dispatchMainToolRawUnchecked(
       session: mcpToolCallSessions.get(byName),
     });
     if (!result) throw new Error("mcp_tool_result_unavailable");
+    mcpReturned = true;
     const text = result?.text ?? "";
     const images = result.isError || approval.scienceCollectionCapability ? [] : result.images;
     // ★도구가 돌려준 이미지는 모델만 보고 끝나면 안 된다 — 디스크에 정본을 남기고
@@ -1138,7 +1143,7 @@ async function dispatchMainToolRawUnchecked(
   await awaitMcpResultDelivery(approval, { catalogId: resolved.server.catalogId ?? null,
     toolName: resolved.serverToolName, isError: mcpOutcome.isError });
   if(work && "unit" in work) {
-    approval.canonicalWorkRecovery!.finish(work,mcpOutcome);
+    approval.canonicalWorkRecovery!.finish(work,mcpOutcome,mcpReturned ? "returned" : "unconfirmed");
     mcpOutcome.canonicalWorkAction={action_id:work.action.actionId,step_id:work.action.stepId};
   }
   return mcpOutcome;
