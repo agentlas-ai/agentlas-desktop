@@ -131,16 +131,58 @@ function load(): void {
   } catch { /* no durable download history yet, or unreadable state remains untouched */ }
 }
 
+/*
+ * A progress tick schedules one write a second instead of rewriting up to 1,000 records synchronously on Main for
+ * every tick (the history-registry sibling was fixed the same way). Start, done, remove and clear still write at
+ * once. A scheduled write that fails runs the failure handlers of the downloads that were waiting on it, so a
+ * ticketed (agent) download is cancelled with browser_download_receipt_failed exactly as before.
+ */
+const PERSIST_DEBOUNCE_MS = 1_000;
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+const persistFailures = new Map<string, () => void>();
+
+function schedulePersist(id: string, onFailure: () => void): void {
+  persistFailures.set(id, onFailure);
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    try { persist(); } catch { /* the waiting downloads' failure handlers ran; the next write retries */ }
+  }, PERSIST_DEBOUNCE_MS);
+  persistTimer.unref?.();
+}
+
+/** A record's files live only in downloads/<id>/; once the record is gone nothing can open them. An active item is
+ * cancelled by its caller and Chromium removes its partial file. */
+function removeDownloadFiles(ids: Iterable<string>): void {
+  for (const id of ids) {
+    if (activeItems.has(id) || !/^[A-Za-z0-9_-]{8,80}$/u.test(id)) continue;
+    void fs.promises.rm(path.join(downloadsRoot(), id), { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 function persist(): void {
+  if (persistTimer) { clearTimeout(persistTimer); persistTimer = null; }
+  const failures = [...persistFailures.values()];
+  persistFailures.clear();
+  try { writeState(); }
+  catch (error) { for (const fail of failures) { try { fail(); } catch { /* one handler never blocks another */ } } throw error; }
+}
+
+function writeState(): void {
   const file = statePath();
   const dir = path.dirname(file);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const all = [...records.values()].sort((a, b) => a.startedAt.localeCompare(b.startedAt)).slice(-MAX_RECORDS);
+  const sorted = [...records.values()].sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+  const all = sorted.slice(-MAX_RECORDS);
   const bytes = Buffer.from(`${JSON.stringify({ schemaVersion: DOWNLOAD_SCHEMA_VERSION, records: all } satisfies DownloadStateFile)}\n`, "utf8");
   if (bytes.byteLength > MAX_STATE_BYTES) throw new Error("browser_download_state_too_large");
   const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
   fs.writeFileSync(temp, bytes, { mode: 0o600, flag: "wx" });
   fs.renameSync(temp, file);
+  // Records past the 1,000 kept are gone from the file; their downloaded files go with them.
+  const dropped = sorted.slice(0, Math.max(0, sorted.length - MAX_RECORDS)).map((record) => record.id).filter((id) => !activeItems.has(id));
+  for (const id of dropped) records.delete(id);
+  removeDownloadFiles(dropped);
 }
 
 function safeOrigin(value: string): string | null {
@@ -239,11 +281,13 @@ export function ensureBrowserDownloadRegistry(resolveOwner: (webContentsId: numb
       current.receivedBytes = Math.max(0, item.getReceivedBytes());
       ticket?.progress?.("transfer",current.receivedBytes);
       current.updatedAt = new Date().toISOString();
-      try { persist(); } catch {
+      schedulePersist(id, () => {
         if (ticket) { ticket.cancelled = true; item.cancel(); ticket.finish(null,"browser_download_receipt_failed"); }
-      }
+      });
     });
     item.once("done", (_downloadEvent, state) => {
+      // done writes at once and handles its own write failure below.
+      persistFailures.delete(id);
       activeItems.delete(id);
       const current = records.get(id);
       if (!current) return;
@@ -366,10 +410,13 @@ export async function browserDownloadAction(ownerId: number, taskScopeId: string
     return { ok: true };
   }
   if (action === "remove") {
+    const wasActive = activeItems.has(id);
     activeItems.get(id)?.cancel();
     activeItems.delete(id);
+    persistFailures.delete(id);
     records.delete(id);
     persist();
+    if (!wasActive) removeDownloadFiles([id]);
     return { ok: true };
   }
   if (record.state !== "completed" || !record.savePath || !fs.existsSync(record.savePath)) {
@@ -385,13 +432,17 @@ export async function browserDownloadAction(ownerId: number, taskScopeId: string
 export function clearBrowserDownloadHistory(ownerId: number, taskScopeId: string): number {
   load();
   let removed = 0;
+  const finished: string[] = [];
   for (const [id, record] of records) {
     if (record.taskScopeId !== taskScopeId || (record.ownerId !== ownerId && activeItems.has(id))) continue;
+    if (!activeItems.has(id)) finished.push(id);
     activeItems.get(id)?.cancel();
     activeItems.delete(id);
+    persistFailures.delete(id);
     records.delete(id);
     removed += 1;
   }
   if (removed) persist();
+  removeDownloadFiles(finished);
   return removed;
 }
