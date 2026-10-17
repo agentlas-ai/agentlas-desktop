@@ -235,6 +235,8 @@ import {
   type MobileBridgeVisualSessionRefusalDto,
   ONE_SUPERVISOR_PARAM_KEYS,
   MOBILE_SCIENCE_CHAT_PARAM_KEYS,
+  MOBILE_CLIENT_CAPABILITIES,
+  type MobileClientCapability,
 } from "../../shared/mobile-bridge";
 import { buildToolCallDisplay, normalizeToolCall } from "../../shared/tool-call-detail";
 import type { MobileBridgeHostIdentity } from "./pairing";
@@ -2136,6 +2138,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   private readonly goalControl: MobileGoalControl | null;
   private readonly scienceChat: MobileScienceChat;
   private readonly mailAccountVerdicts = new Map<string, "ok" | "mismatch" | "signed-out" | "unknown">();
+  /** What each paired device reported it can decode (device.capabilities); absent means an older phone. */
+  private readonly clientCapabilities = new Map<string, ReadonlySet<MobileClientCapability>>();
   private readonly projectFilePreviews = new MobileProjectFilePreviewRegistry();
   /**
    * Mobile terminal ownership is kept in the Desktop authority, not in the
@@ -4727,6 +4731,15 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         // device may have won the race, but the credential is revoked either way.
         this.options.revokeDevice(context.deviceId, "device_requested");
         return { revoked: true };
+      }
+      case "device.capabilities": {
+        const params = guardedParams(request, ["capabilities"]);
+        const known = new Set<string>(MOBILE_CLIENT_CAPABILITIES);
+        const reported = Array.isArray(params.capabilities) ? params.capabilities : [];
+        const accepted = [...new Set(reported.filter((item): item is MobileClientCapability =>
+          typeof item === "string" && known.has(item)))];
+        this.clientCapabilities.set(context.deviceId, new Set(accepted));
+        return asJsonValue({ accepted }, request.method);
       }
       case "mail.status": {
         noParams(request);

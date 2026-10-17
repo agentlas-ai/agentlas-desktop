@@ -242,7 +242,20 @@ export const MOBILE_BRIDGE_METHODS = [
   "connectors.setEnabled",
   "connectors.install",
   "connectors.test",
+  // The phone tells this connection what it can decode (2026-10-17). Appended: older apps never call it.
+  "device.capabilities",
 ] as const;
+
+/**
+ * Decoder capabilities a phone may report with device.capabilities. Closed: an unknown name is ignored.
+ * - "decision.rowSkip.v1": a Decision row that fails the phone's text or Task check costs only that row
+ *   (mobile 3ed08e1), not the whole list.
+ * - "text.sanitize.v3": the phone ports mobile-text-sanitize-parity fixture version 3 (relative paths, the
+ *   unified credential-assignment rule). With both, the LEGACY_DECISION guard
+ *   (mobileBridgeDecisionTextUnchanged) is no longer needed for that phone.
+ */
+export const MOBILE_CLIENT_CAPABILITIES = ["decision.rowSkip.v1", "text.sanitize.v3"] as const;
+export type MobileClientCapability = (typeof MOBILE_CLIENT_CAPABILITIES)[number];
 
 /** Accepted only to give installed Mobile clients a terminal retirement response. */
 const MOBILE_BRIDGE_RETIRED_METHODS = ["hub.leasePreview", "cloud.setHubPrices"] as const;
@@ -3848,6 +3861,14 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
         : "connectors.install accepts only catalogId";
     case "connectors.test":
       return hasOnlyKeys(params, ["id"]) ? requiredString(params, "id") : "connectors.test accepts only id";
+    case "device.capabilities": {
+      if (!hasOnlyKeys(params, ["capabilities"])) return "device.capabilities accepts only capabilities";
+      const list = params.capabilities;
+      return Array.isArray(list) && list.length <= 16
+        && list.every((item) => typeof item === "string" && /^[a-z][A-Za-z0-9.-]{0,63}$/.test(item))
+        ? null
+        : "capabilities must be up to 16 short names";
+    }
     case "automations.toggle":
       return hasOnlyKeys(params, ["id", "enabled"])
         ? firstError(requiredString(params, "id"), params.enabled === true || params.enabled === false ? null : "enabled must be a boolean")
