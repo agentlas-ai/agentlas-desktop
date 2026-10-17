@@ -7,7 +7,7 @@ import net from "node:net";
 import { TextDecoder } from "node:util";
 import { createHash, randomBytes } from "node:crypto";
 import type { Readable, Writable } from "node:stream";
-import { defaultControlSocketPath, type ControlSocketPeer } from "./control-socket";
+import { defaultControlSocketPath, sweepStalePrivateSocketDirs, type ControlSocketPeer } from "./control-socket";
 import { canonicalDaemonPath } from "./service-identity";
 import { assertNativeAuthBinding, nativeAuthCanonical, nativeAuthError, nativeDaemonEnrollment, acceptNativeDaemonEnrollment, type NativeAuthBinding, type NativeCredential, type NativeIngressNoStartObservation, type NativeServiceObservation, validateNativeServiceObservationRequest, validateNativeIngressNoStartRequest, validateNativeTerminalPreparationRequest } from "./native-auth-credentials";
 import { createNativeDaemonAuthenticator, createNativeGuiAuthenticator, decodeNativeAuthLine, type NativeAuthenticatedIdentity, type NativeTerminalCheckpointCapability, type NativeIngressNoStartConsumer, type NativeServiceObservationConsumer } from "./native-session-auth";
@@ -152,6 +152,8 @@ export async function startNativeAuthChannel(options: { address: string; binding
     });
   });
   try { await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(bindAddress, resolve); }); if (privateDir) { fs.chmodSync(bindAddress, 0o600); const s = fs.lstatSync(bindAddress); identity = { dev: s.dev, ino: s.ino }; fs.linkSync(bindAddress, options.address); } } catch (e) { for (const s of sockets) s.destroy(); await new Promise<void>(r => server.close(() => r())); if (privateDir) { try { fs.rmdirSync(privateDir); } catch {} } throw e; }
+  // A crashed daemon leaves its ".n-XXXXXX/s" behind; once this address is ours, sweep dead ones in the background (perf MP-07).
+  if (privateDir) void sweepStalePrivateSocketDirs(path.dirname(options.address), ".n-", privateDir).catch(() => 0);
   let closing: Promise<void> | null = null;
   return { address: options.address, request: (peer: ControlSocketPeer, method: "native.checkpoint", params: unknown) => requestCheckpoint(peer, method, params),
     createServiceObservationPort(peer: ControlSocketPeer, value: NativeStartDescriptor): NativeServiceObservationPort {
