@@ -240,6 +240,8 @@ interface FirmStageResult {
   result: string;
   ok: boolean;
   evidence: FirmExecutionEvidence;
+  /** Verification stage only: the typed <verification_verdict> the verifier wrote (read before the tag is stripped). */
+  verdict?: FirmVerificationVerdict;
 }
 
 function restrictedFirmText(
@@ -1895,6 +1897,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
             ? verificationResultOk(r.text, r.ok) && Boolean(verificationEvidence?.ok)
             : r.ok,
           evidence: finalEvidence,
+          ...(stageKind === "verification" ? { verdict: verificationVerdictOf(r.text) } : {}),
         };
       });
     }
@@ -1930,6 +1933,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
           ? verificationResultOk(result.result, result.ok) && Boolean(verificationEvidence?.ok)
           : result.ok,
         evidence: finalEvidence,
+        ...(stageKind === "verification" ? { verdict: verificationVerdictOf(result.result) } : {}),
       };
     });
   };
@@ -1953,6 +1957,69 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
   if (p.handoffGuard?.blocked) return handoffFailure(p);
   const usedDivisionIds = new Set(matched.map((item) => item.node.id));
   const divisionAttempts = new Map(matched.map((item) => [item.node.id, 1]));
+
+  /*
+   * ★ A4-D3 (dev A/B4 2026-10-17, room fc53939f, codex gpt-6.1-sol): this firm's own independent QA returned a typed
+   *   FAIL with three fixable defects (non-ASCII ids and CSRF values -> HTTP 500, an array key -> 500). The CEO
+   *   synthesized "not complete" and delegated nothing, and the room above trusts an installed team to repair its own
+   *   work (TaskForceExecutionUnit.selfReviewing), so nobody fixed them. A typed FAIL is therefore repaired here by the
+   *   host, once, inside the division attempt budget: the stage that made the checked deliverable (integration when
+   *   there is one, else production) runs again with the verifier's findings, then only the failed verifier checks
+   *   again. An unknown verdict is not a FAIL, and a read-only grant cannot repair. The CEO still writes the answer.
+   */
+  const failedVerifications = teamResults.filter((result) => isVerificationResult(result) && result.verdict === "fail");
+  const repairStage: "production" | "integration" = initialStages.integration.length > 0 ? "integration" : "production";
+  const repairCandidates = (repairStage === "integration" ? initialStages.integration : initialStages.production)
+    .filter((item) => (divisionAttempts.get(item.node.id) ?? 0) < 2);
+  if (failedVerifications.length > 0 && repairCandidates.length > 0 && !p.signal?.aborted
+    && firmNodePermission(p, { tier: 2, phase: "delegate" }) !== "read") {
+    const findings = failedVerifications.map((result) => `## ${result.node.name}\n${result.result.slice(0, 4000)}`).join("\n\n");
+    const repairItems = repairCandidates.map((item) => ({
+      ...item,
+      brief: composeDeclaredPrompt([
+        { id: "firm.repair.original-brief", revision: 1, stability: "task-context", changeTriggers: ["plan-revision"], order: 0,
+          text: `${item.brief}\n\n` },
+        { id: "firm.repair.verification-findings", revision: 1, stability: "turn-context", changeTriggers: ["plan-revision"], order: 0,
+          text: "[Repair after independent verification FAIL]\nfix every blocking defect named below in the existing deliverable; reuse files, no restart; re-run your own checks; report what changed; an item that needs the owner or an outside effect: leave it and name it\n"
+            + findings },
+      ], ""),
+    }));
+    for (const item of repairItems) {
+      usedDivisionIds.add(item.node.id);
+      divisionAttempts.set(item.node.id, (divisionAttempts.get(item.node.id) ?? 0) + 1);
+    }
+    if (!emitDelegationMessages(p, org.ceo, 1, repairItems)) return handoffFailure(p);
+    mainStatus(ko ? "독립 검수에서 나온 결함을 고치는 중…" : "Fixing the defects the independent check found…");
+    const repaired = await runMatched(repairItems, repairStage === "integration" ? resultStatusContext(productionResults) : "", repairStage);
+    for (const result of repaired) {
+      const index = teamResults.findIndex((prior) => prior.node.id === result.node.id);
+      if (index >= 0) teamResults[index] = result;
+      else teamResults.push(result);
+    }
+    const failedVerifierIds = new Set(failedVerifications.map((result) => result.node.id));
+    const rechecks = initialStages.verification
+      .filter((item) => failedVerifierIds.has(item.node.id) && (divisionAttempts.get(item.node.id) ?? 0) < 2);
+    let recheckVerdicts: FirmVerificationVerdict[] = [];
+    if (rechecks.length > 0 && !p.signal?.aborted && !p.handoffGuard?.blocked) {
+      for (const item of rechecks) divisionAttempts.set(item.node.id, (divisionAttempts.get(item.node.id) ?? 0) + 1);
+      if (!emitDelegationMessages(p, org.ceo, 1, rechecks)) return handoffFailure(p);
+      mainStatus(ko ? "고친 결과만 다시 독립 검수 중…" : "Rechecking only the repaired result…");
+      const rechecked = await runMatched(rechecks, resultStatusContext(teamResults.filter((result) => !isVerificationResult(result))), "verification");
+      for (const verification of rechecked) {
+        const index = teamResults.findIndex((prior) => prior.node.id === verification.node.id);
+        if (index >= 0) teamResults[index] = verification;
+        else teamResults.push(verification);
+      }
+      recheckVerdicts = rechecked.map((result) => result.verdict ?? "unknown");
+    }
+    tryRecordRunEvent({
+      runId: p.req.runId ?? `firm:${chat.id}`, chatId: chat.id, nodeId: org.ceo.id, agentId: org.ceo.agentId ?? null,
+      kind: "firm_verification_repair_round",
+      payload: { schemaVersion: "agentlas.firm-verification-repair.v1", repairStage, failedVerifierIds: [...failedVerifierIds],
+        repairedNodeIds: repairItems.map((item) => item.node.id), recheckVerdicts },
+    });
+    if (p.handoffGuard?.blocked) return handoffFailure(p);
+  }
 
   // 3) CEO SYNTHESIZE — 팀 결과 종합 → 최종 답 (메인 버블)
   mainStatus(ko ? "팀 결과를 종합하는 중…" : "Synthesizing team results…");
