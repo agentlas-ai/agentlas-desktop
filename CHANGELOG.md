@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.64 — 2026-10-17
+
+- A Goal you start with /goal in a busy room keeps going after it stops. Before, a room with many earlier turns could leave it waiting with a message that no model could be started.
+- A message you send while a team is working is never dropped. If the running work cannot take it, it becomes the next turn.
+- A message that asks for something unrelated no longer joins the Goal already running in that chat.
+- When a room's reviewer names fixable problems, the team fixes them once and the review runs again before the room reports.
+- npm install works for workers in every write sandbox, through a cache folder that belongs to Agentlas.
+- A Claude Code worker can read its own agent package, and Work streams text more smoothly.
+- This release binds Agentlas OS v1.2.66 at c0acd99be22114569e20bca94bed4540ba046eb4; public runtime asset `hephaestus-runtime-v1.2.66.tar.gz` is pinned at SHA-256 `20019d3ba4df1c540d0ef549c07a82188bd40fe12dafb2f8a6c75cc4bdcc89f7`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.63 — 2026-10-17
 
 - A new Document tab shows the AI editing xlsx, docx, pptx, hwpx and hwp files live and saves them in their original format, with Undo and Redo. It can also create a blank A4 document.
