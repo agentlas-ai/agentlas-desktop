@@ -15,7 +15,7 @@ interface Occurrence { occurrenceId: string; category: Category; tokens: number 
 interface Snapshot {
   status: "observed" | "no_request";
   requestId?: string;
-  request?: { ts: string };
+  request?: { ts: string; mode?: string };
   capacity: { tokens: number | null; source?: "runtime-reported" | "model-catalog" | "unavailable" };
   input: { tokens: number | null; measurement: Measurement; cachedTokens?: number };
   rotationAtTokens: number | null;
@@ -45,6 +45,12 @@ const LABEL: Record<Category | "unattributed" | "overAttributed", { ko: string; 
   unattributed: { ko: "실행기 내장", en: "Runtime built-in", color: "var(--paper-edge-strong)" },
   overAttributed: { ko: "추정 차이", en: "Estimate gap", color: "transparent" },
 };
+/**
+ * A continued CLI session (ledger mode resume/reopen) keeps the earlier conversation and tool results inside the
+ * provider, and Agentlas sends only the new input. Its residual is then mostly that held history, not runtime defaults.
+ * Yotube 2026-10-17: 236k of a 241k codex request; a fresh codex thread starts at 15-24k.
+ */
+const HELD_SESSION_LABEL = { ko: "세션에 쌓인 기록·실행기 기본", en: "Session history + runtime base" };
 
 const clock = (iso: string | undefined, locale: Locale): string => {
   if (!iso) return "";
@@ -116,6 +122,7 @@ export function ContextBreakdown({ chatId, locale, fallbackLabel, fallbackNote }
     ? (fallbackNote ?? (ko ? "기록 추정" : "History estimate"))
     : `${which}${at ? ` ${at}` : ""} · ${snap!.input.measurement === "provider_reported" ? (ko ? "공급자 집계" : "provider") : (ko ? "추정" : "estimate")}`
       + (snap!.capacity.source === "runtime-reported" ? (ko ? " · 보고된 창" : " · reported window") : "");
+  const heldSession = snap?.request?.mode === "resume" || snap?.request?.mode === "reopen";
   const occurrenceOf = (key: string) => snap?.occurrences?.find((item) => item.category === key);
   const session = snap?.views?.sessionCumulative;
   const nextEstimate = snap?.views?.nextRequestEstimate;
@@ -159,7 +166,10 @@ export function ContextBreakdown({ chatId, locale, fallbackLabel, fallbackNote }
                     style={{ display: "grid", gridTemplateColumns: "8px 1fr auto", alignItems: "center", gap: 6, fontSize: 10.5, padding: "2px 4px",
                       border: 0, borderRadius: 4, background: open ? "var(--fill-1)" : "transparent", cursor: occurrence ? "pointer" : "default", textAlign: "left", color: "inherit" }}>
                     <span aria-hidden style={{ width: 8, height: 8, borderRadius: 2, background: LABEL[row.key].color, border: row.sign ? "1px solid var(--paper-edge-strong)" : 0 }} />
-                    <span style={{ color: "var(--ink-soft)" }}>{ko ? LABEL[row.key].ko : LABEL[row.key].en}</span>
+                    <span style={{ color: "var(--ink-soft)" }}>{(() => {
+                      const label = row.key === "unattributed" && heldSession ? HELD_SESSION_LABEL : LABEL[row.key];
+                      return ko ? label.ko : label.en;
+                    })()}</span>
                     <span style={{ color: row.tokens === null ? "var(--muted)" : "var(--ink)", fontVariantNumeric: "tabular-nums" }}>
                       {row.tokens === null ? "—" : `${row.sign ?? ""}${formatTokens(row.tokens)}`}
                     </span>
