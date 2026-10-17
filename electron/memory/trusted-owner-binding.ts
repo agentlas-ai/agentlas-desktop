@@ -254,6 +254,9 @@ function scheduleSweep(directory: string): void {
 onAuthSessionOwnershipChanged(revokeTrustedMemoryOwnerBinding);
 // Main (will-quit) and the daemon (SIGTERM/SIGINT) both run the host shutdown hooks; only Electron Main has before-quit.
 onHostShutdown(revokeTrustedMemoryOwnerBinding);
+// Any other ordinary exit (a helper process, a dev or test host that never runs the hooks) removes its file too, instead
+// of leaving it for the next sweep. Only a kill or crash still leaves one.
+process.once("exit", revokeTrustedMemoryOwnerBinding);
 try {
   const app = (require("electron") as typeof import("electron")).app;
   app?.on("before-quit", revokeTrustedMemoryOwnerBinding);
