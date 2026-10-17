@@ -66,3 +66,19 @@ function stripTopLevel(value: object, ignored: Set<string>): Record<string, unkn
   for (const [key, entry] of Object.entries(value)) if (!ignored.has(key)) out[key] = entry;
   return out;
 }
+
+/**
+ * Two message lists show the same thing: same length, and each row has the same id and the same content. Exact
+ * (a mid-list edit is caught), and cheap next to re-rendering every row.
+ */
+export function sameMessageList<T extends { id: string; text?: string }>(previous: readonly T[], next: readonly T[]): boolean {
+  if (previous === next) return true;
+  if (previous.length !== next.length) return false;
+  for (let index = 0; index < next.length; index++) {
+    const a = previous[index], b = next[index];
+    if (a === b) continue;
+    if (a.id !== b.id || a.text !== b.text) return false;
+    try { if (JSON.stringify(a) !== JSON.stringify(b)) return false; } catch { return false; }
+  }
+  return true;
+}

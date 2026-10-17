@@ -9,6 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { grantForDroppedFile, grantForPastedAttachment, grantForPastedImage, ipc, ipcEvents } from "@/lib/ipc";
 import { extractQuestions } from "@/lib/ask-question";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
+import { sameMessageList, sameSnapshotIgnoring } from "@/lib/store-change-policy";
 import { IconArrowLeft, IconClose, IconRefresh } from "@/components/Icon";
 import { AutomationStrategyPanel } from "./AutomationStrategyPanel";
 import type { PreparedOneAttachments } from "@shared/one-attachments";
@@ -97,6 +98,12 @@ interface AutomationSessionPanelProps {
   embedded?: boolean;
   /** 바깥 공용 입력이 세션 전송을 부를 수 있는 손잡이. */
   sendHandleRef?: React.MutableRefObject<((text: string, files?: File[], onAccepted?: () => void) => void) | null>;
+  /**
+   * Whether the panel is on screen. A parent that keeps it mounted under display:none passes false: the 5 s poll
+   * (200 messages, up to 1.9 MB) pauses and one read runs when it is shown again. display:none leaves
+   * document.visibilityState "visible", so the interval cannot see it by itself (perf review 2026-10-17, R-06).
+   */
+  active?: boolean;
 }
 
 /**
@@ -126,6 +133,7 @@ export function AutomationSessionPanel({
   onCollapse,
   embedded = false,
   sendHandleRef,
+  active = true,
 }: AutomationSessionPanelProps) {
   const ko = locale === "ko";
   const [messages, setMessages] = useState<ChatHistoryEntry[]>([]);
@@ -154,11 +162,14 @@ export function AutomationSessionPanel({
     if (!api) return;
     try {
       const session = await api.automations.getSession(automationId);
-      setMessages(session.messages.filter((message) => (
+      const visible = session.messages.filter((message) => (
         message.role !== "system" || isVisibleAutomationSystemNotice(message)
-      )));
+      ));
+      // An unchanged session keeps the same objects, so the 200 rows do not re-render every poll.
+      setMessages((current) => sameMessageList(current, visible) ? current : visible);
       setChatId(session.chatId ?? null);
-      setRuntimeSelection(session.runtimeSelection ?? null);
+      const selection = session.runtimeSelection ?? null;
+      setRuntimeSelection((current) => selection && sameSnapshotIgnoring(current, selection, []) ? current : selection);
       setUnavailable(false);
     } catch {
       setUnavailable(true);
@@ -168,8 +179,14 @@ export function AutomationSessionPanel({
   useEffect(() => {
     void load();
   }, [load]);
+  const activeRef = useRef(active);
+  useEffect(() => {
+    const wasActive = activeRef.current;
+    activeRef.current = active;
+    if (active && !wasActive) void load();
+  }, [active, load]);
   useVisibleInterval(() => {
-    if (busyRef.current) return;
+    if (busyRef.current || !activeRef.current) return;
     void load();
   }, 5_000);
 

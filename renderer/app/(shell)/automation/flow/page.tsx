@@ -2474,6 +2474,7 @@ return (
                     executionPermission={automation.executionPermission}
                     embedded
                     sendHandleRef={sessionSendRef}
+                    active={logOpen && bottomTab === "session"}
                   />
                 </div>
               ) : null}
