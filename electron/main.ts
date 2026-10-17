@@ -215,6 +215,7 @@ import { classifyStartupNavigationFailure } from "./startup-navigation";
 import {
   recoverAgentlasBrowserRuntimeAtStartup,
   sweepAgentlasBrowserOrphans,
+  browserCdpOrphanSweepArmed,
   closeBrowserCdpIfIdle,
 } from "./mcp-tools/browser-cdp-launcher";
 import {
@@ -1515,6 +1516,8 @@ function startBrowserOrphanSweep(): void {
   if (browserOrphanSweepTimer) return;
   browserOrphanSweepTimer = setInterval(() => {
     if (browserOrphanSweepRunning || quitCleanupPromise) return;
+    // No process inventory unless the dedicated profile shows a browser could be running (perf MP-05).
+    if (!browserCdpOrphanSweepArmed()) return;
     browserOrphanSweepRunning = true;
     void sweepAgentlasBrowserOrphans()
       .then((result) => {

@@ -1291,6 +1291,34 @@ export async function browserCdpHasLiveClient(port = browserCdpPort()): Promise<
   return !!lsof && lsof.split("\n").some((line) => line.startsWith("n") && line.endsWith(`->127.0.0.1:${port}`));
 }
 
+/** Lease activity this recent keeps the orphan sweep armed: the launcher's idle reaper waits at most 300 s (idleDelayMs). */
+export const BROWSER_CDP_ORPHAN_SWEEP_RECENT_MS = 5 * 60_000;
+
+/**
+ * Whether an Agentlas browser root can exist, read from the dedicated profile alone (nothing is spawned). Perf review
+ * MP-05 (2026-10-17): Main's 30 s sweep ran a process inventory for the life of the app even when the browser was never
+ * started (Windows: PowerShell + WMI per tick; macOS: ps, plus ps/lsof for the user's own Chrome; Linux: a sync /proc
+ * walk). Every launch path takes a lease and the launch lock before spawning and writes the owner marker once verified,
+ * and a running root holds the profile's SingletonLock (macOS/Linux) or lockfile (Windows). So the sweep stays armed
+ * while any of those exist, while lease activity is recent, or while a root is already under observation.
+ */
+export function browserCdpOrphanSweepArmed(now = Date.now()): boolean {
+  if (orphanCandidate) return true;
+  let profile: string;
+  try { profile = browserCdpProfilePath(); } catch { return true; }
+  const present = (name: string) => { try { fs.lstatSync(path.join(profile, name)); return true; } catch { return false; } };
+  if (present(path.basename(browserCdpOwnerPath())) || present(BROWSER_CDP_LAUNCH_LOCK_BASENAME) || present("lockfile")) return true;
+  try {
+    const leases = browserCdpLeaseDirectory();
+    if (fs.readdirSync(leases).some((entry) => entry.endsWith(".json"))) return true;
+    if (now - fs.statSync(leases).mtimeMs < BROWSER_CDP_ORPHAN_SWEEP_RECENT_MS) return true;
+  } catch { /* never leased */ }
+  let holder = "";
+  try { holder = fs.readlinkSync(path.join(profile, "SingletonLock")); } catch { return false; }
+  const pid = Number(holder.split("-").pop());
+  return !Number.isInteger(pid) || pid <= 0 || browserCdpProcessIsLive(pid);
+}
+
 /**
  * Desktop's always-on safety net. A browser with no live lease is observed for
  * a grace period before cleanup, so a just-spawned login/automation process is
