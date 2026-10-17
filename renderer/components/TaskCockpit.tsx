@@ -251,7 +251,7 @@ import {
   reduceOneActivity,
   type OneActivityState,
 } from "@/lib/one-activity";
-import { inferOwnerLocale, ownerActivityText, ownerAgentLabel, ownerAgentLabelOrNull } from "@shared/owner-visible-activity-text";
+import { inferOwnerLocale, ownerActivityText, ownerAgentLabel, ownerAgentLabelOrNull, ownerFailureReasonOrNull } from "@shared/owner-visible-activity-text";
 import { CodeIdeViewer, isCodeArtifactName } from "@/components/CodeIdeViewer";
 import { LiveOutputViewer, type LiveOutputKind } from "@/components/LiveOutputViewer";
 import { agentScreenModeForTool } from "@/lib/agent-screen-mode";
@@ -4902,7 +4902,9 @@ function ChatPage() {
           const detail = cause instanceof Error ? cause.message : String(cause);
           setComposerPrefill(userPrompt);
           settleWorkFirstSend();
-          setSessionNotice(locale === "ko" ? `첨부를 보내지 않았습니다: ${detail}` : `The attachment was not sent: ${detail}`);
+          const reason = ownerFailureReasonOrNull(detail, locale === "ko" ? "ko" : "en");
+          if (!reason) console.warn("[work-send] attachment not sent:", detail);
+          setSessionNotice(locale === "ko" ? `첨부를 보내지 않았습니다${reason ? `: ${reason}` : "."}` : `The attachment was not sent${reason ? `: ${reason}` : "."}`);
           return false;
         }
       }

@@ -243,6 +243,41 @@ const KNOWN_FAILURES: readonly KnownFailure[] = [
     action: FAILURE_RETRY,
   },
   {
+    // Send-time refusals the composer used to print raw (W7 ca1724ea, 2026-10-17: "보내지 못했습니다:
+    // native_gui_activation_prerequisites_missing" while the background service re-attached).
+    match: /native_gui_activation_prerequisites_missing|native_gui_daemon_discovery_unavailable|supervisor_native_channel_unavailable/i,
+    reason: {
+      ko: "백그라운드 서비스와 다시 연결하는 중이었어요.",
+      en: "The background service was reconnecting.",
+    },
+    action: {
+      ko: "잠시 뒤 다시 시도해 주세요.",
+      en: "Try again in a moment.",
+    },
+  },
+  {
+    match: /one_preflight_chat_pending/i,
+    reason: {
+      ko: "이 대화에서 앞 메시지가 아직 시작되는 중이었어요.",
+      en: "An earlier message in this chat was still starting.",
+    },
+    action: {
+      ko: "앞 메시지가 시작된 뒤 다시 시도해 주세요.",
+      en: "Try again once the earlier message has started.",
+    },
+  },
+  {
+    match: /\bstore_busy\b|database is locked/i,
+    reason: {
+      ko: "앱 저장소가 잠시 바빴어요.",
+      en: "The app's storage was briefly busy.",
+    },
+    action: {
+      ko: "잠시 뒤 다시 시도해 주세요.",
+      en: "Try again in a moment.",
+    },
+  },
+  {
     match: /parent execution permission|permission_ceiling|read_only_ceiling/i,
     reason: {
       ko: "이 실행은 읽기만 허용돼 있어서, 무언가를 바꾸는 이 단계는 실행하지 않았어요.",

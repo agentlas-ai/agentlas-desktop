@@ -308,6 +308,7 @@ import styles from "./OneShell.module.css";
 import roomWorkStyles from "./SeatRoomWork.module.css";
 import { PersonalOneWorkspace } from "./PersonalOneWorkspace";
 import panelMenu from "@/components/PanelPopover.module.css";
+import { ownerFailureReasonOrNull } from "@shared/owner-visible-activity-text";
 
 // IPC 결과는 호출마다 새 객체다. 내용이 같으면 이전 상태 참조를 돌려줘 React가
 // 리렌더를 생략하게 한다(모든 IPC 페이로드는 구조상 JSON 직렬화 가능).
@@ -7310,9 +7311,15 @@ function OneSessionsShell() {
         controlFailure?.message ?? (isChatBusyFailure(cause)
           // 엔진이 이미 "무엇을 하면 되는지"까지 담아 보낸 문장이다. 덮어쓰지 않는다.
           ? raw
-          : appLocale === "ko"
-            ? `보내지 못했습니다${raw ? `: ${raw}` : " (이유가 오지 않았습니다)"}. 글과 첨부는 작성창에 그대로 있습니다 — 다시 보내 주세요.`
-            : `The message was not sent${raw ? `: ${raw}` : " (no reason came back)"}. Your text and attachments are still in the composer; send it again.`),
+          : (() => {
+            // Owner text only (shared/owner-visible-activity-text.ts): a typed code never reaches the composer; it stays in
+            // the log. W7 ca1724ea showed "보내지 못했습니다: native_gui_activation_prerequisites_missing" here.
+            const reason = raw ? ownerFailureReasonOrNull(raw, appLocale === "ko" ? "ko" : "en") : null;
+            if (raw && !reason) console.warn("[one-send] not sent:", raw);
+            return appLocale === "ko"
+              ? `보내지 못했습니다${reason ? `: ${reason}` : "."} 글과 첨부는 작성창에 그대로 있습니다 — 다시 보내 주세요.`
+              : `The message was not sent${reason ? `: ${reason}` : "."} Your text and attachments are still in the composer; send it again.`;
+          })()),
       );
       /*
        * ★No operational recovery turn for a request refused before it started (release peer 2026-10-16; production
