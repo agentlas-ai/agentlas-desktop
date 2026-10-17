@@ -17,6 +17,10 @@
  * - Telegram attachment copies: removed 7 days after their run is over, since
  *   Telegram keeps the original (owner decision OD-4). Desktop chat images are
  *   conversation content and are never removed.
+ * - managed DB-upgrade copies (agentlas.sqlite.migration-backup.v1.*): the
+ *   newest three stay (store/db.ts MAX_MANAGED_MIGRATION_BACKUPS); older ones
+ *   go after integrity checks of the live store and of the three that stay.
+ *   Updater recovery copies and other ad-hoc DB copies are never touched.
  */
 export const STORAGE_POLICY = {
   runDetailDays: 3,

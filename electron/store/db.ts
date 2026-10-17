@@ -1008,37 +1008,90 @@ function migrationBackupFingerprint(file: string): MigrationBackupFingerprint {
     mtime: String(stat.mtimeNs), ctime: String(stat.ctimeNs) };
 }
 
+/**
+ * One non-blocking attempt at the store migration lock. Returns null while
+ * another process holds it (an owner running the ladder). Unlike
+ * acquireStoreMigrationLock it never waits, so a maintenance step skips
+ * instead of stalling its host.
+ */
+function tryAcquireStoreMigrationLock(dbPath: string): (() => void) | null {
+  const lockPath = `${dbPath}.migration.lock`;
+  let handle: number;
+  try {
+    handle = fs.openSync(lockPath, "wx", 0o600);
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "EEXIST") return null;
+    throw error;
+  }
+  try {
+    fs.writeSync(handle, JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString(), nonce: randomUUID() }), 0, "utf8");
+  } catch (error) {
+    try { fs.closeSync(handle); } catch { /* best effort */ }
+    try { fs.rmSync(lockPath, { force: true }); } catch { /* best effort */ }
+    throw error;
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    try { fs.closeSync(handle); } catch { /* best effort */ }
+    try { fs.rmSync(lockPath, { force: true }); } catch { /* best effort */ }
+  };
+}
+
+/** Why a managed-backup pass removed nothing (or stopped early). "none" = nothing above the cap. */
+export type ManagedMigrationBackupSkip = "none" | "unverified" | "integrity" | "migration-lock" | "changed" | "busy" | "error";
+export interface ManagedMigrationBackupPruneOutcome { removed: number; bytes: number; skipped: ManagedMigrationBackupSkip }
+
+/**
+ * Cheap preflight for the storage pass: one readdir, no file opened. True when
+ * more managed copies sit next to `source` than the cap keeps. The steady state
+ * (three copies or fewer) therefore costs the pass nothing.
+ */
+export function managedMigrationBackupsOverCap(source: string): boolean {
+  const prefix = `${path.basename(source)}.migration-backup.v1.`;
+  return fs.readdirSync(path.dirname(source))
+    .filter((name) => name.startsWith(prefix) && name.endsWith(".bak")).length > MAX_MANAGED_MIGRATION_BACKUPS;
+}
+
 /** Only future, explicitly managed copies participate. Legacy .bak files are
  * recovery evidence, not candidates inferred from their age or filename.
  * `currentBackup` is the copy a migration just took (its rollback material), or
- * null after open, when the newest copy simply counts toward the cap. */
-function pruneManagedMigrationBackups(db: Database.Database, currentBackup: string | null): void {
+ * null after open, when the newest copy simply counts toward the cap.
+ *
+ * Never call this on the Main thread or during store open. Its integrity checks
+ * are proportional to the database size (about 29 s on a 1.9 GB store with
+ * seven copies, measured 2026-10-17). The storage pass runs it in a short-lived
+ * child process (migration-backup-check.ts, started by
+ * migration-backup-retention.ts). It used to run inside initStore, where an
+ * update launch's install journal or a follower open always stopped it, so the
+ * cap of three never held (7 copies, 8.3 GB). The install journal is not a
+ * reason to keep these copies: the updater restores from updater/recovery and
+ * never reads them, and the newest three always stay. */
+export function pruneManagedMigrationBackups(db: Database.Database, currentBackup: string | null): ManagedMigrationBackupPruneOutcome {
+  const result: ManagedMigrationBackupPruneOutcome = { removed: 0, bytes: 0, skipped: "none" };
+  const skip = (skipped: ManagedMigrationBackupSkip): ManagedMigrationBackupPruneOutcome => ({ ...result, skipped });
   try {
     const source = db.name;
     const directory = path.dirname(source);
-    for (const profile of new Set([directory, userDataPath()])) {
-      for (const marker of ["install-journal.v1.json", "install-journal-corrupt.v1.json"]) {
-        if (fs.existsSync(path.join(profile, "updater", marker))) return;
-      }
-    }
     const prefix = `${path.basename(source)}.migration-backup.v1.`;
     const names = fs.readdirSync(directory).filter((name) => name.startsWith(prefix));
     const backupNames = names.filter((name) => name.endsWith(".bak"));
-    if (backupNames.length <= MAX_MANAGED_MIGRATION_BACKUPS) return;
+    if (backupNames.length <= MAX_MANAGED_MIGRATION_BACKUPS) return result;
     const sourceIdentity = migrationBackupFingerprint(source);
     const liveVersion = Number(db.pragma("user_version", { simple: true }));
-    if (!Number.isSafeInteger(liveVersion) || liveVersion < 0) return;
+    if (!Number.isSafeInteger(liveVersion) || liveVersion < 0) return skip("unverified");
     const copies: Array<{ file: string; metadataFile: string; createdAt: number; sourceVersion: number; fingerprint: MigrationBackupFingerprint }> = [];
     for (const name of names) {
-      if (name.endsWith(".bak.retention.json") && !backupNames.includes(name.slice(0, -".retention.json".length))) return;
+      if (name.endsWith(".bak.retention.json") && !backupNames.includes(name.slice(0, -".retention.json".length))) return skip("unverified");
     }
     for (const name of backupNames) {
       const suffix = name.slice(prefix.length);
-      if (!/^(?:pre-upgrade-v[1-9]\d*|v102-seats|v103-seat-session)\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.bak$/.test(suffix)) return;
+      if (!/^(?:pre-upgrade-v[1-9]\d*|v102-seats|v103-seat-session)\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.bak$/.test(suffix)) return skip("unverified");
       const file = path.join(directory, name);
       const metadataFile = `${file}.retention.json`;
       const metadataStat = fs.lstatSync(metadataFile);
-      if (!metadataStat.isFile() || metadataStat.isSymbolicLink() || metadataStat.size > 8 * 1024) return;
+      if (!metadataStat.isFile() || metadataStat.isSymbolicLink() || metadataStat.size > 8 * 1024) return skip("unverified");
       const meta = JSON.parse(fs.readFileSync(metadataFile, "utf8")) as Record<string, unknown>;
       const identity = meta.sourceIdentity as Record<string, unknown> | null;
       const targetVersion = Number(meta.targetSchemaVersion);
@@ -1052,18 +1105,19 @@ function pruneManagedMigrationBackups(db: Database.Database, currentBackup: stri
         || (meta.tag.startsWith("pre-upgrade-v") && Number(meta.tag.slice("pre-upgrade-v".length)) !== meta.sourceSchemaVersion)
         || !sameMigrationBackupFile(meta.fingerprint, fingerprint)
         || typeof meta.createdAt !== "string" || !Number.isFinite(Date.parse(meta.createdAt))
-        || new Date(meta.createdAt).toISOString() !== meta.createdAt) return;
-      for (const sidecar of ["-wal", "-shm", "-journal"]) if (fs.existsSync(`${file}${sidecar}`)) return;
+        || new Date(meta.createdAt).toISOString() !== meta.createdAt) return skip("unverified");
+      for (const sidecar of ["-wal", "-shm", "-journal"]) if (fs.existsSync(`${file}${sidecar}`)) return skip("unverified");
       // The newest copy is the active migration's rollback material. Earlier
       // copies become eligible only after their target schema actually exists
       // in the same source inode; a failed migration cannot age them out.
-      if (file !== currentBackup && targetVersion > liveVersion) return;
+      if (file !== currentBackup && targetVersion > liveVersion) return skip("unverified");
       copies.push({ file, metadataFile, createdAt: Date.parse(meta.createdAt), sourceVersion: Number(meta.sourceSchemaVersion), fingerprint });
     }
     const candidates = copies.filter((copy) => copy.file !== currentBackup)
       .sort((a, b) => b.createdAt - a.createdAt || b.file.localeCompare(a.file))
       .slice(currentBackup ? MAX_MANAGED_MIGRATION_BACKUPS - 1 : MAX_MANAGED_MIGRATION_BACKUPS);
-    if (candidates.length === 0) return;
+    if (candidates.length === 0) return result;
+    const kept = copies.filter((copy) => !candidates.includes(copy));
     // Complete preflight before deleting anything. Read failures or corruption
     // preserve the whole set, even above cap. A copy's file name appearing in
     // free text (an agent's `ls` of userData in run_events) is not a reference:
@@ -1072,28 +1126,49 @@ function pruneManagedMigrationBackups(db: Database.Database, currentBackup: stri
     // The integrity checks are read-only and run before the write lock: each
     // takes ~4 s per 1.6 GB copy (measured 2026-10-16), so inside .immediate()
     // the first real prune would have blocked every other writer for ~40 s.
+    // Only the copies that stay are checked: they are the rollback material
+    // that remains, and checking copies about to go only cost time.
     // The fingerprint re-check under the lock still catches a copy that changed.
-    if (String(db.pragma("quick_check", { simple: true })) !== "ok") return;
-    if ((db.pragma("foreign_key_check") as unknown[]).length > 0) return;
-    for (const copy of copies) {
+    if (String(db.pragma("quick_check", { simple: true })) !== "ok") return skip("integrity");
+    if ((db.pragma("foreign_key_check") as unknown[]).length > 0) return skip("integrity");
+    for (const copy of kept) {
       let backup: Database.Database | null = null;
       try {
         backup = new Database(copy.file, { readonly: true, fileMustExist: true });
         if (String(backup.pragma("quick_check", { simple: true })) !== "ok"
-          || Number(backup.pragma("user_version", { simple: true })) !== copy.sourceVersion) return;
+          || Number(backup.pragma("user_version", { simple: true })) !== copy.sourceVersion) return skip("integrity");
       } finally { backup?.close(); }
     }
-    db.transaction(() => {
-      for (const copy of copies) {
-        if (!sameMigrationBackupFile(copy.fingerprint, migrationBackupFingerprint(copy.file))) return;
-      }
-      for (const candidate of candidates) {
-        fs.unlinkSync(candidate.file);
-        fs.unlinkSync(candidate.metadataFile);
-      }
-    }).immediate();
+    // An owner running the migration ladder holds this lock; never race it.
+    const releaseMigrationLock = tryAcquireStoreMigrationLock(source);
+    if (!releaseMigrationLock) return skip("migration-lock");
+    try {
+      return db.transaction((): ManagedMigrationBackupPruneOutcome => {
+        if (Number(db.pragma("user_version", { simple: true })) !== liveVersion) return skip("changed");
+        for (const copy of copies) {
+          if (!sameMigrationBackupFile(copy.fingerprint, migrationBackupFingerprint(copy.file))) return skip("changed");
+        }
+        for (const candidate of candidates) {
+          try {
+            fs.unlinkSync(candidate.file);
+          } catch (error) {
+            // Windows refuses to unlink a file another process holds open.
+            const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : "";
+            if (code === "EBUSY" || code === "EPERM" || code === "EACCES") return skip("busy");
+            throw error;
+          }
+          result.removed += 1;
+          result.bytes += Number(candidate.fingerprint.size);
+          fs.unlinkSync(candidate.metadataFile);
+        }
+        return result;
+      }).immediate();
+    } finally {
+      releaseMigrationLock();
+    }
   } catch {
     // Retention failure never weakens recovery or prevents an upgrade.
+    return skip("error");
   }
 }
 
@@ -1132,7 +1207,8 @@ function backupDatabaseFile(db: Database.Database, tag: string): string | null {
           sourceSchemaVersion: Number(db.pragma("user_version", { simple: true })), targetSchemaVersion: SCHEMA_VERSION,
           createdAt: stamp, fingerprint: migrationBackupFingerprint(target),
         }), { mode: 0o600, flag: "wx" });
-        pruneManagedMigrationBackups(db, target);
+        // The cap is enforced later by the storage pass, off the startup path
+        // (pruneManagedMigrationBackups).
       } catch { /* Unclassified copies remain intact and never enter retention. */ }
     }
     return target;
@@ -7066,8 +7142,9 @@ export function initStore(options: StoreInitOptions = {}): void {
   if (userVersion < SCHEMA_VERSION) _db.pragma(`user_version = ${SCHEMA_VERSION}`);
   _openedStoreMigrationRole = migrationRole;
   pruneLegacyDatabaseBackups({ db: _db, schemaVersion: SCHEMA_VERSION, recoveryProfilePaths: [userDataPath()] });
-  // Copies already above the cap shrink now, not at the next schema bump. Owner only (followers returned above).
-  pruneManagedMigrationBackups(_db, null);
+  // Managed migration copies are capped by the storage pass, never here: its
+  // integrity checks scale with the database and would hold the window before
+  // store-ready (storage/storage-maintenance.ts → store/migration-backup-retention.ts).
   } catch (error) {
     try { _db?.close(); } catch {}
     _db = null;

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { getDb } from "../store/db";
 import { getMeta, setMeta } from "../store/meta";
+import { retireManagedMigrationBackups, type MigrationBackupRetention } from "../store/migration-backup-retention";
 import { clearRuntimeSession } from "../store/runtime-sessions";
 import { compactDeliveredTriggerEvents } from "../store/trigger-events";
 import { userDataPath } from "../runtime-paths";
@@ -44,9 +45,11 @@ export interface StorageMaintenanceReport {
   freedBytes: number;
   intermediates: { files: number; bytes: number };
   transcripts: { sessions: number; orphans: number; bytes: number };
-  runDetail: { runs: number; deleted: number; compacted: number; complete: boolean };
+  runDetail: { runs: number; deleted: number; compacted: number; complete: boolean; watermarkTs: string | null };
   triggerEvents: { compacted: number; complete: boolean };
   telegramAttachments: { folders: number; bytes: number };
+  /** Managed DB-upgrade copies above the cap of three (store/migration-backup-retention.ts). */
+  migrationBackups: MigrationBackupRetention;
 }
 
 const LOCK_FILE = "storage-maintenance.lock";
@@ -177,7 +180,7 @@ export async function runStorageMaintenance(now = Date.now()): Promise<StorageMa
       now,
       clearSession: (chatId, kind, agentId) => clearRuntimeSession(chatId, kind, agentId, { isolateOwner: true }),
     });
-    const runDetail = { runs: 0, deleted: 0, compacted: 0, complete: false };
+    const runDetail = { runs: 0, deleted: 0, compacted: 0, complete: false, watermarkTs: null as string | null };
     let watermark = readWatermark();
     for (let slice = 0; slice < RUN_DETAIL_SLICES_PER_PASS; slice += 1) {
       await yieldToLoop();
@@ -188,6 +191,7 @@ export async function runStorageMaintenance(now = Date.now()): Promise<StorageMa
       runDetail.deleted += step.deleted;
       runDetail.compacted += step.compacted;
       watermark = step.watermark;
+      runDetail.watermarkTs = watermark.ts || null;
       setMeta(WATERMARK_KEY, JSON.stringify(watermark));
       if (step.done) { runDetail.complete = true; break; }
     }
@@ -204,15 +208,18 @@ export async function runStorageMaintenance(now = Date.now()): Promise<StorageMa
       keepDays: STORAGE_POLICY.telegramAttachmentDays,
       now,
     });
+    // DB-upgrade copies: checked in a child process, never on this thread.
+    const migrationBackups = await retireManagedMigrationBackups({ storePath: db.name });
     return {
       lowDisk,
       freeBytes: space?.freeBytes ?? null,
-      freedBytes: sweep.removedBytes + transcripts.bytes + telegramAttachments.bytes,
+      freedBytes: sweep.removedBytes + transcripts.bytes + telegramAttachments.bytes + migrationBackups.bytes,
       intermediates: { files: sweep.removedFiles, bytes: sweep.removedBytes },
       transcripts: { sessions: transcripts.sessions, orphans: transcripts.orphans, bytes: transcripts.bytes },
       runDetail,
       triggerEvents,
       telegramAttachments,
+      migrationBackups,
     };
   } finally {
     release();
@@ -250,11 +257,15 @@ export function startStorageMaintenance(options: {
       running = false;
     }
     if (!report) return;
-    if (report.freedBytes > 0 || report.runDetail.runs > 0 || report.triggerEvents.compacted > 0) {
+    // A blocked backup cap is printed too, so "nothing freed" is never silent about why.
+    if (report.freedBytes > 0 || report.runDetail.runs > 0 || report.triggerEvents.compacted > 0
+      || report.migrationBackups.skipped !== "none") {
       console.info(`[storage] freed ${report.freedBytes} bytes; intermediates ${report.intermediates.files} files; `
         + `transcripts ${report.transcripts.sessions}+${report.transcripts.orphans}; run detail ${report.runDetail.runs} runs `
-        + `(deleted ${report.runDetail.deleted}, compacted ${report.runDetail.compacted}, complete ${report.runDetail.complete}); `
-        + `trigger events compacted ${report.triggerEvents.compacted}; telegram copies ${report.telegramAttachments.folders}`);
+        + `(deleted ${report.runDetail.deleted}, compacted ${report.runDetail.compacted}, complete ${report.runDetail.complete}, `
+        + `watermark ${report.runDetail.watermarkTs ?? "none"}); `
+        + `trigger events compacted ${report.triggerEvents.compacted}; telegram copies ${report.telegramAttachments.folders}; `
+        + `migration backups removed ${report.migrationBackups.removed} (${report.migrationBackups.bytes} bytes, skipped ${report.migrationBackups.skipped})`);
     }
     if (!report.lowDisk || report.freeBytes === null) return;
     const last = Number(getMeta(NOTICE_KEY) ?? 0);
