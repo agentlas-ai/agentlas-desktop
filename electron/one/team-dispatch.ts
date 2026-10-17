@@ -703,6 +703,18 @@ function reportToOne(dispatch: OneDispatchRow, userPrompt?: string | null, markR
     // The durable result receipt already exposes the actual member output in the room, so no second assistant relay is
     // made up here. But a report that never started is not delivered (22 O6): keep why, count the attempt, retry later.
     const message = error instanceof Error ? error.message : String(error);
+    /*
+     * A waiting Goal refuses the report turn and parks the report (deferred-system-relays): the room's next turn that runs
+     * carries it, exactly once. That is delivery, not a failed report. Counted as one, one_team_list showed the Goal's own
+     * model `report: failed` for work it was about to read, and the retries re-parked the same text (Yotube 2026-10-17
+     * 17:41Z, t3 dispatch: report_error goal_waiting_system_start_refused, report_attempts 1).
+     */
+    if (message === "goal_waiting_system_start_refused" && reportParkedForGoal(dispatch.parent_chat_id, request.userPrompt)) {
+      console.info("[one-team] report parked for the Goal's next turn:", dispatch.id);
+      if (markReported) getDb().prepare("UPDATE one_team_dispatches SET reported_at = ?, report_error = NULL WHERE id = ? AND reported_at IS NULL")
+        .run(new Date().toISOString(), dispatch.id);
+      return;
+    }
     console.warn("[one-team] report turn not started:", message);
     if (markReported) getDb().prepare("UPDATE one_team_dispatches SET report_error = ?, report_attempts = report_attempts + 1 WHERE id = ? AND reported_at IS NULL")
       .run(message.slice(0, 240), dispatch.id);
@@ -750,6 +762,17 @@ export function graphTeamStepContinuationPrompt(owner: string, events: readonly 
     ].join("\n") },
     { id: "one.graph-team-step.continuation.update", revision: 1, stability: "turn-context", changeTriggers: ["child-result"], order: 0, text: lines.join("\n") },
   ], "\n");
+}
+
+/** The refused report is parked and undelivered: invocation/deferred-system-relays.ts keys a parked relay by the sha256 of
+ * its trimmed text per chat (same rule as deferSystemRelay). Read directly so this module keeps its import set. */
+function reportParkedForGoal(chatId: string, text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  try {
+    return Boolean(getDb().prepare("SELECT 1 FROM deferred_system_relays WHERE chat_id = ? AND text_hash = ? AND delivered_at IS NULL LIMIT 1")
+      .get(chatId, createHash("sha256").update(trimmed).digest("hex")));
+  } catch { return false; }
 }
 
 /** Reports that could not start are retried when the room is idle again, at most three attempts in all (22 O6). */
