@@ -3814,7 +3814,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
             after = Number(decoded.after); cursorSource = decoded.source;
           } catch { throw new TypeError("Invalid tool activity cursor"); }
         }
-        const replay = invocationService.replay({ chatId, runId, afterOrdinal: 0 });
+        // Main's own runs only. A daemon-hosted run keeps the durable history preview: its mirrored journal holds every
+        // reasoning delta, which this reader would draw as one row each.
+        const replay = invocationService.replay({ chatId, runId, afterOrdinal: 0 }, { includeHostedElsewhere: false });
         const retained = attached?.runId === runId ? attached.events : replay.status === "complete" ? replay.events : null;
         // A retained-source cursor must not silently switch indexes to durable
         // sequences after eviction. The client can reload with no cursor.

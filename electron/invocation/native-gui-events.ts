@@ -1,5 +1,7 @@
 import type { McpInvocationEvent } from "../../shared/types";
+import type { RunEventReplay, RunEventReplayInput } from "../../shared/run-event-delivery";
 import { reassembleAgentLivePartial } from "../../shared/interrupted-partial";
+import { RunEventDeliveryJournal } from "./event-delivery";
 
 /**
  * Live invocation events of runs hosted by the background service (daemon), for Main-side consumers other than the
@@ -33,6 +35,7 @@ export function nativeGuiActiveChatIds(): readonly string[] {
 }
 
 export function publishNativeGuiInvocationEvent(envelope: NativeGuiInvocationEvent): void {
+  hostedElsewhere.observe(envelope.runId, envelope.chatId, envelope.event);
   // Main-side readers get a daemon-hosted teammate's partial whole, as they always read it (createNativeTeammatePartialRelay).
   const event = teammatePartials.relay(envelope.runId, envelope.event);
   const delivered = event === envelope.event ? envelope : { ...envelope, event };
@@ -75,7 +78,79 @@ export function createNativeTeammatePartialRelay(maxStreams = MAX_RELAYED_TEAMMA
     if (!event.agentId && (event.kind === "final" || event.kind === "error")) forgetRun(runId);
     return event;
   };
-  return { relay, forgetRun, get size() { return texts.size; } };
+  const textsOf = (runId: string): Record<string, string> => {
+    const prefix = `${runId}\u0000`, out: Record<string, string> = {};
+    for (const [key, text] of texts) if (key.startsWith(prefix)) out[key.slice(prefix.length)] = text;
+    return out;
+  };
+  return { relay, forgetRun, textsOf, get size() { return texts.size; } };
 }
 /** Main's one relay for daemon events (native-gui-public.ts publishes every daemon event here). */
 const teammatePartials = createNativeTeammatePartialRelay();
+
+/** A replay answer for a daemon-hosted run, with the live texts a hydrating viewer needs while the run is live. */
+export interface HostedElsewhereReplay {
+  replay: Omit<RunEventReplay, "receipt">;
+  live?: { partialText: string; agentPartialTexts: Record<string, string> };
+}
+
+/**
+ * Main's replay for runs the background service hosts (perf review 2026-10-17, R-04b / H2).
+ *
+ * The windows replay through Main, and Main had no journal for a daemon-hosted run: every replay answered
+ * "unavailable" with no cursor. A view that subscribed after the run's first event (a reload, opening the chat mid-run,
+ * the dispatch race) then held every pushed event above a hole it could never fill. Measured on the real ordered gate:
+ * 0 of 46 pushed events shown, and replay plus a canonical recovery (a 500-event ledger read) 67 times in one second.
+ *
+ * Main already receives every event of those runs, in order, on the daemon's live channel. It mirrors them into its own
+ * journal with their daemon delivery ordinals, and tracks the run's own live text from the same frames. It answers
+ * only for a run it holds whole: first seen at ordinal 1, no ordinal skipped, every root delta proved by its textLen.
+ * Anything else is forgotten, and replay keeps its old answer ("unavailable") for that run.
+ */
+export function createHostedElsewhereReplay(teammateTexts: (runId: string) => Record<string, string>) {
+  const journal = new RunEventDeliveryJournal();
+  const runs = new Map<string, { chatId: string; ordinal: number; root: string; settled: boolean }>();
+  const forget = (runId: string): void => { runs.delete(runId); journal.forget(runId); };
+  const observe = (runId: string, chatId: string, event: McpInvocationEvent): void => {
+    // The mirror never fails the live channel that feeds it (a throw here would close the daemon projection).
+    try { observeFrame(runId, chatId, event); } catch { forget(runId); }
+  };
+  const observeFrame = (runId: string, chatId: string, event: McpInvocationEvent): void => {
+    const delivery = event.delivery;
+    if (!delivery || delivery.runId !== runId || delivery.chatId !== chatId || !Number.isSafeInteger(delivery.ordinal)) return;
+    let run = runs.get(runId);
+    if (!run) {
+      if (delivery.ordinal !== 1) return;
+      run = { chatId, ordinal: 0, root: "", settled: false };
+      runs.set(runId, run);
+      // Runs whose journal the cap already dropped have nothing left to answer for.
+      if (runs.size > 64) for (const [id, held] of runs) if (held.settled && id !== runId) runs.delete(id);
+    }
+    if (run.chatId !== chatId || delivery.ordinal !== run.ordinal + 1) { forget(runId); return; }
+    if (event.kind === "partial" && !event.agentId) {
+      if (typeof event.text === "string") run.root = event.text;
+      else if (typeof event.delta === "string") {
+        const next = run.root + event.delta;
+        if (typeof event.textLen === "number" && next.length !== event.textLen) { forget(runId); return; }
+        run.root = next;
+      }
+    }
+    journal.publish(runId, chatId, event, delivery.ordinal);
+    run.ordinal = delivery.ordinal;
+    if (!event.agentId && (event.kind === "final" || event.kind === "error")) { run.settled = true; run.root = ""; }
+  };
+  const replay = (input: RunEventReplayInput): HostedElsewhereReplay | null => {
+    const run = runs.get(input.runId);
+    if (!run || run.chatId !== input.chatId || input.afterOrdinal > run.ordinal) return null;
+    const answer = journal.replay(input);
+    if (answer.status === "unavailable") { runs.delete(input.runId); return null; }
+    return { replay: answer, ...(run.settled ? {} : { live: { partialText: run.root, agentPartialTexts: teammateTexts(input.runId) } }) };
+  };
+  return { observe, replay, get runCount() { return runs.size; } };
+}
+/** Main's one mirror of daemon-hosted runs, fed from publishNativeGuiInvocationEvent. */
+const hostedElsewhere = createHostedElsewhereReplay((runId) => teammatePartials.textsOf(runId));
+/** Replay for a run the background service hosts, or null when Main does not hold its whole stream. */
+export function replayHostedElsewhere(input: RunEventReplayInput): HostedElsewhereReplay | null {
+  return hostedElsewhere.replay(input);
+}

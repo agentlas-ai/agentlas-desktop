@@ -8,7 +8,15 @@ export interface RunEventDelivery {
   ordinal: number;
   sourceSequence?: number;
 }
-export interface RunEventReplayInput { runId: string; chatId: string; afterOrdinal: number }
+export interface RunEventReplayInput {
+  runId: string; chatId: string; afterOrdinal: number;
+  /**
+   * The viewer will rebuild from this answer (it dropped events it held), so the live texts must ride along. Main also
+   * attaches them for afterOrdinal 0 and for a replay that is not a complete tail; a complete tail applied event by
+   * event never needs them (perf review 2026-10-17, R-04 / H2).
+   */
+  hydrate?: true;
+}
 export interface RunEventReplay {
   schemaVersion: "agentlas.run-event-replay.v1";
   runId: string;
@@ -30,9 +38,10 @@ export interface RunEventReplay {
 export function parseRunEventReplayInput(value: unknown): RunEventReplayInput {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("run-event-replay-input-invalid");
   const v = value as Record<string, unknown>;
-  if (Object.keys(v).some(key => !["runId", "chatId", "afterOrdinal"].includes(key))
+  if (Object.keys(v).some(key => !["runId", "chatId", "afterOrdinal", "hydrate"].includes(key))
     || typeof v.runId !== "string" || !v.runId || v.runId.length > 256
     || typeof v.chatId !== "string" || !v.chatId || v.chatId.length > 256
-    || !Number.isSafeInteger(v.afterOrdinal) || Number(v.afterOrdinal) < 0) throw new TypeError("run-event-replay-input-invalid");
-  return { runId: v.runId, chatId: v.chatId, afterOrdinal: Number(v.afterOrdinal) };
+    || !Number.isSafeInteger(v.afterOrdinal) || Number(v.afterOrdinal) < 0
+    || (v.hydrate !== undefined && v.hydrate !== true)) throw new TypeError("run-event-replay-input-invalid");
+  return { runId: v.runId, chatId: v.chatId, afterOrdinal: Number(v.afterOrdinal), ...(v.hydrate === true ? { hydrate: true as const } : {}) };
 }

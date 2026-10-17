@@ -83,6 +83,8 @@ export class RunEventDeliveryJournal {
       events: events.length ? structuredClone(events) : [],
       terminalEvent: structuredClone(journal.terminalEvent) };
   }
+  /** Drops one run's journal: a mirror that can no longer prove it holds the run's whole stream (native-gui-events.ts). */
+  forget(runId: string): void { this.runs.delete(runId); }
   private prune(): void {
     const now = this.now();
     let terminal = 0;

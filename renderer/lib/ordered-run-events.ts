@@ -170,7 +170,10 @@ export function subscribeOrderedRunEvents(options: Options): () => void {
       // asking from the painted cursor made Main re-send the whole retained backlog every poll. These ordinals came
       // from Main, so the request is never ahead of its journal; recovery below still checkpoints on `cursor`.
       const afterOrdinal = receivedThroughOrdinal(queryCursor, pending);
-      const snapshot = await options.replay({ runId: options.runId, chatId: options.chatId, afterOrdinal });
+      // Main attaches the live texts only to an answer the view rebuilds from (perf review 2026-10-17, H2): this one is,
+      // when held events were dropped or a rebuild is owed; a complete tail from a later cursor is not.
+      const snapshot = await options.replay({ runId: options.runId, chatId: options.chatId, afterOrdinal,
+        ...(forceHydration || needsHydration ? { hydrate: true as const } : {}) });
       retryDue = false;
       if (disposed || snapshot.runId !== options.runId || snapshot.chatId !== options.chatId) return;
       if (snapshot.status === "complete" && !forceHydration && !needsHydration) {

@@ -22,6 +22,7 @@ import { withBuiltinFileProofContext } from "../long-run/file-proof";
 import { goalVerificationReasonCode, TRANSIENT_GOAL_VERIFICATION_REASON_CODES } from "../long-run/verification-effects";
 import { withAdapterEffectContext, mainToolStartRequiresDurability } from "./adapter-effect-context";
 import { RunEventDeliveryJournal } from "./event-delivery";
+import { replayHostedElsewhere } from "./native-gui-events";
 import { SemanticRunStepProjector } from "../one/semantic-run-step";
 import { MainWorkRecoveryContext } from "./main-work-recovery";
 import { parseRunEventReplayInput, type RunEventReplay } from "../../shared/run-event-delivery";
@@ -482,10 +483,12 @@ function liveWirePartial(record: Pick<RunRecord, "partialText" | "agentPartialTe
 
 /** Teammate bases for a hydrating viewer, bounded like the root `partialText` (8 MB in all). */
 function replayAgentPartialTexts(texts: ReadonlyMap<string, string>): Record<string, string> | undefined {
-  if (!texts.size) return undefined;
+  return texts.size ? boundedPartialTexts(Object.fromEntries(texts)) : undefined;
+}
+function boundedPartialTexts(texts: Record<string, string>): Record<string, string> | undefined {
   let length = 0;
-  for (const text of texts.values()) length += text.length;
-  return length <= 8 * 1024 * 1024 ? Object.fromEntries(texts) : undefined;
+  for (const text of Object.values(texts)) length += text.length;
+  return length <= 8 * 1024 * 1024 ? texts : undefined;
 }
 
 /**
@@ -7001,17 +7004,29 @@ export class InvocationService {
     return found;
   }
 
-  replay(value: unknown): RunEventReplay {
+  /**
+   * Wire replay for a viewer (perf review 2026-10-17, R-04 / H2).
+   *
+   * The live texts (the run's answer so far, each teammate's) ride only on an answer the viewer rebuilds from: the first
+   * replay (afterOrdinal 0), one it asks to hydrate from (`hydrate`), or one that is not a complete tail. A complete
+   * tail is applied event by event and its deltas already carry the text; attaching the whole answer-so-far to every
+   * safety poll re-sent it each time. A run the background service hosts is answered from Main's mirror of its stream
+   * (native-gui-events.ts) instead of "unavailable"; `includeHostedElsewhere: false` keeps a reader on Main's own runs.
+   */
+  replay(value: unknown, options: { includeHostedElsewhere?: boolean } = {}): RunEventReplay {
     const input = parseRunEventReplayInput(value);
     const receipt = this.receipt(input.runId);
     if (receipt && receipt.chatId !== input.chatId) throw new Error("run-event-replay-owner-mismatch");
-    const replay = this.deliveryJournal.replay(input);
+    const own = this.deliveryJournal.replay(input);
     const record = this.activeRuns.get(input.runId) ?? this.pendingGoalVerifications.get(input.runId) ?? this.settlingRuns.get(input.runId);
     if (record && record.chatId !== input.chatId) throw new Error("run-event-replay-owner-mismatch");
-    // A viewer that must hydrate (the journal no longer holds its cursor) also loses the bases its teammate deltas
-    // extend; a complete tail never needs them.
-    const agentPartialTexts = record && replay.status !== "complete" ? replayAgentPartialTexts(record.agentPartialTexts) : undefined;
-    return { ...replay, receipt, ...(record && record.partialText.length <= 8 * 1024 * 1024 ? { partialText: record.partialText } : {}),
+    const elsewhere = !record && own.status === "unavailable" && options.includeHostedElsewhere !== false ? replayHostedElsewhere(input) : null;
+    const replay = elsewhere?.replay ?? own;
+    if (!(input.afterOrdinal === 0 || input.hydrate === true || replay.status !== "complete")) return { ...replay, receipt };
+    const live = record ? { partialText: record.partialText, agentPartialTexts: replayAgentPartialTexts(record.agentPartialTexts) } : elsewhere?.live;
+    if (!live) return { ...replay, receipt };
+    const agentPartialTexts = live.agentPartialTexts && Object.keys(live.agentPartialTexts).length ? boundedPartialTexts(live.agentPartialTexts) : undefined;
+    return { ...replay, receipt, ...(live.partialText.length <= 8 * 1024 * 1024 ? { partialText: live.partialText } : {}),
       ...(agentPartialTexts ? { agentPartialTexts } : {}) };
   }
 
