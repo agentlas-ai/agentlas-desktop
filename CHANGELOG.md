@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.3.63 — 2026-10-17
+
+- A new Document tab shows the AI editing xlsx, docx, pptx, hwpx and hwp files live and saves them in their original format, with Undo and Redo. It can also create a blank A4 document.
+- API-key and local-model workers get a shell at write permission, confined to the working folder, as subscription CLI workers already do.
+- On API-key and local-model runs, one failed tool call (a command that exits non-zero, or a call refused before it starts) no longer blocks every later write in the same task.
+- The first launch after an install starts the background service once, so personal messages work without a restart.
+- Asking One for a recurring automation inside a Goal that has no deadline now creates it. A registration the app refuses now tells you why instead of staying at "setting up".
+- A team whose own independent check fails repairs the named problems once before it reports.
+- A teammate's live answer streams as it is written, and old storage (unused judgment verdicts, idle mirrored CLI folders) is cleaned up after 30 days.
+- This release binds Agentlas OS v1.2.66 at c0acd99be22114569e20bca94bed4540ba046eb4; public runtime asset `hephaestus-runtime-v1.2.66.tar.gz` is pinned at SHA-256 `20019d3ba4df1c540d0ef549c07a82188bd40fe12dafb2f8a6c75cc4bdcc89f7`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.62 — 2026-10-17
 
 - Hope's first personal message after launch no longer fails while the background service is still attaching.
