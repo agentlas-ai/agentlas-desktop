@@ -4,7 +4,7 @@ import path from "node:path";
 import { getDb } from "../store/db";
 import { getMeta, setMeta } from "../store/meta";
 import { clearRuntimeSession } from "../store/runtime-sessions";
-import { pruneDeliveredTriggerEvents } from "../store/trigger-events";
+import { compactDeliveredTriggerEvents } from "../store/trigger-events";
 import { userDataPath } from "../runtime-paths";
 import { retireIdleCliTranscripts } from "./cli-transcript-retention";
 import { sweepAgentIntermediates } from "./intermediate-sweep";
@@ -45,7 +45,7 @@ export interface StorageMaintenanceReport {
   intermediates: { files: number; bytes: number };
   transcripts: { sessions: number; orphans: number; bytes: number };
   runDetail: { runs: number; deleted: number; compacted: number; complete: boolean };
-  triggerEvents: { deleted: number; complete: boolean };
+  triggerEvents: { compacted: number; complete: boolean };
   telegramAttachments: { folders: number; bytes: number };
 }
 
@@ -188,13 +188,13 @@ export async function runStorageMaintenance(now = Date.now()): Promise<StorageMa
       setMeta(WATERMARK_KEY, JSON.stringify(watermark));
       if (step.done) { runDetail.complete = true; break; }
     }
-    const triggerEvents = { deleted: 0, complete: false };
+    const triggerEvents = { compacted: 0, complete: false };
     const deliveredCutoff = new Date(now - STORAGE_POLICY.triggerEventDeliveredDays * DAY_MS).toISOString();
     for (let batch = 0; batch < TRIGGER_EVENT_BATCHES_PER_PASS; batch += 1) {
       await yieldToLoop();
-      const removed = withShortBusyWait(db, () => pruneDeliveredTriggerEvents(deliveredCutoff, TRIGGER_EVENT_BATCH));
+      const removed = withShortBusyWait(db, () => compactDeliveredTriggerEvents(deliveredCutoff, TRIGGER_EVENT_BATCH));
       if (removed === null) break;
-      triggerEvents.deleted += removed;
+      triggerEvents.compacted += removed;
       if (removed < TRIGGER_EVENT_BATCH) { triggerEvents.complete = true; break; }
     }
     const telegramAttachments = await pruneTelegramAttachmentCopies(userDataPath("agent-cwd"), {
@@ -247,10 +247,10 @@ export function startStorageMaintenance(options: {
       running = false;
     }
     if (!report) return;
-    if (report.freedBytes > 0 || report.runDetail.runs > 0 || report.triggerEvents.deleted > 0) {
+    if (report.freedBytes > 0 || report.runDetail.runs > 0 || report.triggerEvents.compacted > 0) {
       console.info(`[storage] freed ${report.freedBytes} bytes; intermediates ${report.intermediates.files} files; `
         + `transcripts ${report.transcripts.sessions}+${report.transcripts.orphans}; run detail ${report.runDetail.runs} runs; `
-        + `trigger events ${report.triggerEvents.deleted}; telegram copies ${report.telegramAttachments.folders}`);
+        + `trigger events compacted ${report.triggerEvents.compacted}; telegram copies ${report.telegramAttachments.folders}`);
     }
     if (!report.lowDisk || report.freeBytes === null) return;
     const last = Number(getMeta(NOTICE_KEY) ?? 0);

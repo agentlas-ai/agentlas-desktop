@@ -587,24 +587,33 @@ export function listTriggerEventAttention(automationId: string): AutomationTrigg
 }
 
 /**
- * Storage budget (storage/storage-maintenance.ts): deletes up to `limit`
- * delivered rows delivered before `cutoffIso`, in one statement.
+ * Storage budget (storage/storage-maintenance.ts): up to `limit` delivered rows
+ * delivered before `cutoffIso` give up their payload (an upstream run's output,
+ * up to 256 KB) and keep the row, in one statement.
+ * - The row itself is the dedupe record: UNIQUE(automation_id, trigger_kind,
+ *   dedupe_key) is what stops a chain-receipt reconcile, a poll, a folder
+ *   rescan or a webhook replay from delivering the same event again. Deleting
+ *   it made the every-minute chain reconciler re-enqueue month-old deliveries
+ *   (desktop-w2-01, 2026-10-17), so rows are never deleted here.
  * - Pending, claimed and parked rows are never touched: they are work or attention.
- * - A row whose bound run is still `running` keeps its receipt.
- * - Command rows started by One or a Toolchain caller stay. The Toolchain
- *   history (toolchains/history.ts) reads their `source` and `ownerChatId` to
- *   say who ran each run.
+ * - A row whose bound run is still `running` keeps its payload.
+ * - `source` and `ownerChatId` survive compaction: the Toolchain history
+ *   (toolchains/history.ts) reads them to say who ran each command run.
  */
-export function pruneDeliveredTriggerEvents(cutoffIso: string, limit = 500): number {
+export function compactDeliveredTriggerEvents(cutoffIso: string, limit = 500, nowIso = new Date().toISOString()): number {
   return getDb().prepare(
-    `DELETE FROM automation_trigger_events WHERE id IN (
+    `UPDATE automation_trigger_events
+        SET payload_json = CASE WHEN json_valid(payload_json)
+              THEN json_object('compacted', 1, 'source', json_extract(payload_json, '$.source'),
+                               'ownerChatId', json_extract(payload_json, '$.ownerChatId'))
+              ELSE json_object('compacted', 1) END,
+            updated_at = ?
+      WHERE id IN (
        SELECT e.id FROM automation_trigger_events e
-       WHERE e.status = 'delivered' AND e.delivered_at < ?
+       WHERE e.status = 'delivered' AND e.delivered_at < ? AND length(e.payload_json) > 256
          AND NOT EXISTS (SELECT 1 FROM automation_runs r WHERE r.id = e.run_id AND r.status = 'running')
-         AND COALESCE(CASE WHEN e.trigger_kind = 'command' AND json_valid(e.payload_json)
-           THEN json_extract(e.payload_json, '$.source') END, '') NOT IN ('one-mcp', 'toolchain')
        LIMIT ?)`,
-  ).run(cutoffIso, Math.max(1, Math.floor(limit))).changes;
+  ).run(nowIso, cutoffIso, Math.max(1, Math.floor(limit))).changes;
 }
 
 export function getTriggerEvent(id: string): TriggerEventRecord | null {
