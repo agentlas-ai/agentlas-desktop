@@ -488,6 +488,51 @@ function writeRecoveryCleanLedger(ledgerPath: string, entries: RecoveryCleanLedg
   }
 }
 
+/**
+ * The scrubber's own "nothing to do" test (scrubRecoveryDatabase returns changed: false): no legacy OpenCrab row and no
+ * OpenCrab credential bytes anywhere in the file, free pages included. The live store's startup scrub rewrites rows
+ * but cannot VACUUM a shared WAL store, so a fresh copy is checked, not assumed clean. The copy keeps the live store's
+ * WAL header, and the read-only opens during capture leave -wal/-shm behind; one read-write open, closed as the last
+ * connection, checkpoints and removes them, exactly as the scrubber's own open does.
+ */
+function recoveryCopyIsCredentialFree(databasePath: string): boolean {
+  let db: Database.Database | null = null;
+  try {
+    db = new Database(databasePath, { fileMustExist: true });
+    if (tableHasColumns(db, "mcp_servers", ["url"])) {
+      const rows = db.prepare("SELECT url FROM mcp_servers WHERE url IS NOT NULL").all() as Array<{ url: string }>;
+      if (rows.some((row) => row.url !== OPENCRAB_MCP_URL_SENTINEL && isOpenCrabCredentialUrl(row.url))) return false;
+    }
+  } catch {
+    return false;
+  } finally {
+    db?.close();
+  }
+  if ([`${databasePath}-wal`, `${databasePath}-shm`, `${databasePath}-journal`].some((file) => fs.existsSync(file))) return false;
+  try { return !fileContainsPattern(databasePath, OPENCRAB_CREDENTIAL_PATTERN); }
+  catch { return false; }
+}
+
+/**
+ * A copy captured at install is recorded clean for this scrubber version when it is, so the first launch after the
+ * update skips re-reading it (quick_check of a 2 GB copy took 9.6 s on Main). The ledger is keyed by
+ * RECOVERY_SANITIZATION_VERSION: a scrubber change discards it and every copy is scanned again.
+ */
+function recordCapturedRecoveryCopyClean(updaterRoot: string, databasePath: string): void {
+  try {
+    const realDatabasePath = fs.realpathSync(databasePath);
+    if (!recoveryCopyIsCredentialFree(realDatabasePath)) return;
+    const fingerprint = recoveryCleanFingerprint(realDatabasePath);
+    if (!fingerprint) return;
+    const ledgerPath = path.join(updaterRoot, RECOVERY_SCRUB_CLEAN_LEDGER);
+    const entries = readRecoveryCleanLedger(ledgerPath);
+    entries[realDatabasePath] = fingerprint;
+    writeRecoveryCleanLedger(ledgerPath, entries);
+  } catch {
+    // Not recorded means the next launch scans the copy, as before.
+  }
+}
+
 export interface InactiveRecoveryOpenCrabScrubResult {
   scanned: number;
   scrubbedDatabases: number;
@@ -946,6 +991,8 @@ export async function captureUpdaterContinuity(input: {
       mode: 0o600,
     });
     pruneOldRecoveryCopies(recoveryRoot, recoveryDir);
+    // After every write to the copy (chmod changes ctime): the fingerprint must be the one the next launch sees.
+    recordCapturedRecoveryCopyClean(path.join(input.userDataPath, "updater"), backupPath);
     return snapshot;
   } catch (error) {
     fs.rmSync(recoveryDir, { recursive: true, force: true });
