@@ -847,6 +847,8 @@ export type TaskSidePanelProps = {
   onRestorePreferredWidth?: () => void;
   /** Reports an open panel that has nothing to show (no view, file or worker), so the page frees its column. */
   onEmptyChange?: (empty: boolean) => void;
+  /** Bumped when the person opens the panel on purpose: an empty panel then shows its activity view instead of nothing. */
+  openRequest?: number;
   minWidth?: number;
   maxWidth?: number;
   defaultWidth?: number;
@@ -900,6 +902,7 @@ function TaskSidePanelContent({
   onRequestReadableWidth,
   onRestorePreferredWidth,
   onEmptyChange,
+  openRequest,
   minWidth = 200,
   maxWidth = 720,
   defaultWidth = 324,
@@ -1558,6 +1561,16 @@ function TaskSidePanelContent({
   // chat. With nothing to show it takes no space; it reappears as soon as a view, file or worker opens.
   const empty = openTabs.length === 0 && chatFileTabs.length === 0 && !workerSelection && !result;
   useEffect(() => { onEmptyChange?.(Boolean(visible) && empty); }, [visible, empty, onEmptyChange]);
+  // Owner 2026-10-17 (Yotube teammate seat): the panel toggle did nothing while no view was open, and the "+" that adds
+  // a view lives inside the panel. A deliberate open shows the activity view; a restored or automatic open of an empty
+  // panel still takes no space (the 2026-10-13 rule above).
+  const handledOpenRequestRef = useRef(openRequest ?? 0);
+  useEffect(() => {
+    const request = openRequest ?? 0;
+    if (request === handledOpenRequestRef.current) return;
+    handledOpenRequestRef.current = request;
+    if (visible && empty) openRailTab("activity");
+  }, [openRequest, visible, empty, openRailTab]);
   if (!visible || empty) return null;
   return (
     <aside

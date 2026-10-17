@@ -4804,6 +4804,8 @@ function OneSessionsShell() {
   const outputRailVisible = outputStateIsCurrent && contextRailOpen;
   // The panel reports when it is open but has nothing to show; the layout then keeps the full chat width.
   const [outputRailEmpty, setOutputRailEmpty] = useState(false);
+  // Counts deliberate opens from the toolbar toggle; an empty rail answers with its activity view (TaskSidePanel).
+  const [outputRailOpenRequest, setOutputRailOpenRequest] = useState(0);
   const outputRailTakesSpace = outputRailVisible && !outputRailEmpty;
   // The open bit is persisted for convenience, but it is not conversation
   // state. Reset it at each thread boundary so an empty mobile conversation
@@ -9635,6 +9637,7 @@ function OneSessionsShell() {
                       return;
                     }
                     presentRichOutputRail();
+                    setOutputRailOpenRequest((request) => request + 1);
                   }}
                 ><IconPanelRight size={16} /></button>
                 <div className={styles.taskToolbarMenu} data-one-task-menu="true">
@@ -11157,6 +11160,7 @@ function OneSessionsShell() {
           locale={appLocale}
           visible={outputRailVisible}
           onEmptyChange={setOutputRailEmpty}
+          openRequest={outputRailOpenRequest}
           workerSelection={outputStateIsCurrent ? workerSelection : null}
           workerRun={outputStateIsCurrent ? workerRun : null}
           onCloseWorker={() => setWorkerSelection(null)}
