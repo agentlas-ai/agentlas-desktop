@@ -24,6 +24,7 @@ import {
   IconClose,
   IconCode,
   IconFileUp,
+  IconFileText,
   IconExpand,
   IconMoreHorizontal,
   IconNetwork,
@@ -78,13 +79,14 @@ import styles from "./TaskSidePanel.module.css";
 import { AUTOMATION_TAB_OPEN_EVENT, AutomationRailPanel, AutomationTabLiveDot, automationTabRunning, useAutomationChatActivity } from "../automation/AutomationChatActivity";
 import { GOAL_PANEL_OPEN_EVENT, GoalRailPanel, useGoalPanel } from "../goal/GoalPanel";
 import { ArtifactsRailPanel, artifactsRailCount, useArtifactsRail } from "./ArtifactsRailPanel";
+import { LiveDocumentRailPanel, useLiveDocuments } from "../live-document/LiveDocumentRailPanel";
 import { WorkbookView } from "./WorkbookView";
 
 type OutputSectionKey = AppOutputSection;
-type OutputRailView = "worker" | "result" | "activity" | "terminal" | "browser" | "screen" | "automation" | "goal" | "artifacts";
+type OutputRailView = "worker" | "result" | "activity" | "terminal" | "browser" | "screen" | "automation" | "goal" | "artifacts" | "document";
 
 const RAIL_DISMISSALS_KEY = "agentlas.output.dismissed-tabs.v1";
-const RAIL_VIEWS: readonly OutputRailView[] = ["worker", "result", "activity", "terminal", "browser", "screen", "automation", "goal", "artifacts"];
+const RAIL_VIEWS: readonly OutputRailView[] = ["worker", "result", "activity", "terminal", "browser", "screen", "automation", "goal", "artifacts", "document"];
 
 /** Retain explicit dismissals across task switches without an unbounded room registry. */
 function readRailDismissals(): Array<[string, OutputRailView[]]> {
@@ -114,6 +116,7 @@ function RailTabIcon({ view }: { view: OutputRailView }) {
   if (view === "automation") return <IconClock size={12} />;
   if (view === "goal") return <IconTarget size={12} />;
   if (view === "artifacts") return <IconFileUp size={12} />;
+  if (view === "document") return <IconFileText size={12} />;
   return <IconSparkles size={12} />;
 }
 
@@ -126,6 +129,7 @@ function railTabLabel(view: OutputRailView, locale: "ko" | "en"): string {
   if (view === "automation") return locale === "ko" ? "자동화" : "Automations";
   if (view === "goal") return locale === "ko" ? "목표" : "Goal";
   if (view === "artifacts") return locale === "ko" ? "산출물" : "Artifacts";
+  if (view === "document") return locale === "ko" ? "문서" : "Document";
   return locale === "ko" ? "브라우저" : "Browser";
 }
 function readCollapsedOutputSections(): Set<OutputSectionKey> {
@@ -1105,6 +1109,29 @@ function TaskSidePanelContent({
     onRequestOpen?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [artifactsRail.openRequest]);
+  // 실시간 문서(AI가 커서로 편집하는 xlsx·docx·pptx·hwpx·hwp) — 세션이 있으면 "문서" 탭이 서고, 새 세션이 열리면 탭을 연다.
+  const liveDocuments = useLiveDocuments(screenChatId ?? null);
+  const liveDocumentSeen = useRef<Set<string> | null>(null);
+  const [liveDocumentFocus, setLiveDocumentFocus] = useState<string | null>(null);
+  useEffect(() => { liveDocumentSeen.current = null; }, [screenChatId]);
+  useEffect(() => {
+    const ids = liveDocuments.sessions.map((session) => session.sessionId);
+    if (liveDocumentSeen.current === null) {
+      liveDocumentSeen.current = new Set(ids);
+      if (ids.length) observeRailTab("document");
+      return;
+    }
+    const fresh = ids.filter((id) => !liveDocumentSeen.current!.has(id));
+    for (const id of ids) liveDocumentSeen.current.add(id);
+    if (fresh.length) {
+      setLiveDocumentFocus(fresh[fresh.length - 1]);
+      reopenRailTab("document");
+      selectRailView("document");
+      (onRequestReadableWidth ?? onResize)?.(Math.min(maxWidth, 640));
+      onRequestOpen?.();
+    } else if (ids.length) observeRailTab("document");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveDocuments.sessions]);
   const closeRailTab = useCallback((view: OutputRailView, manual = true) => {
     if (manual) {
       dismissedTabsRef.current.add(view);
@@ -1652,7 +1679,7 @@ function TaskSidePanelContent({
                     : event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : null;
                   if (next !== null) { event.preventDefault(); buttons[next]?.focus(); }
                 }}>
-                {([...(hasGoal ? ["goal"] as const : []), ...(hasAutomations ? ["automation"] as const : []), ...(hasArtifacts ? ["artifacts"] as const : []), ...(result || items.length ? ["result"] as const : []), "activity", "terminal", "browser", "screen"] as const).map((view) => (
+                {([...(hasGoal ? ["goal"] as const : []), ...(hasAutomations ? ["automation"] as const : []), ...(hasArtifacts ? ["artifacts"] as const : []), ...(result || items.length ? ["result"] as const : []), "document", "activity", "terminal", "browser", "screen"] as const).map((view) => (
                   <button
                     key={view}
                     type="button"
@@ -1661,7 +1688,7 @@ function TaskSidePanelContent({
                     disabled={view !== "browser" && openTabs.includes(view)}
                     onClick={() => { setAddMenuOpen(false); if (view === "browser" && (openTabs.includes("browser") || (!preferredBrowserUrl && !presentedBrowser))) { setBrowserNewTabUrl(undefined); setBrowserNewTabRequest((value) => value + 1); } openRailTab(view); }}
                   >
-                    <span className={panelMenu.panelMenuIcon} aria-hidden="true">{view === "terminal" ? <IconCode size={16} /> : view === "browser" ? <IconNetwork size={16} /> : view === "goal" ? <IconTarget size={16} /> : view === "automation" ? <IconRefresh size={16} /> : view === "artifacts" || view === "result" ? <IconFileUp size={16} /> : view === "screen" ? <IconExpand size={16} /> : <IconClock size={16} />}</span>
+                    <span className={panelMenu.panelMenuIcon} aria-hidden="true">{view === "terminal" ? <IconCode size={16} /> : view === "browser" ? <IconNetwork size={16} /> : view === "goal" ? <IconTarget size={16} /> : view === "automation" ? <IconRefresh size={16} /> : view === "artifacts" || view === "result" ? <IconFileUp size={16} /> : view === "document" ? <IconFileText size={16} /> : view === "screen" ? <IconExpand size={16} /> : <IconClock size={16} />}</span>
                     {railTabLabel(view, locale)}
                   </button>
                 ))}
@@ -1800,6 +1827,7 @@ function TaskSidePanelContent({
         </>}
         {railView === "automation" && <AutomationRailPanel snapshot={automationSnapshot} locale={locale} />}
         {railView === "goal" && <GoalRailPanel view={goalPanel.view} locale={locale} onView={goalPanel.replace} />}
+        {railView === "document" && <LiveDocumentRailPanel chatId={screenChatId ?? null} locale={locale} focusSessionId={liveDocumentFocus} />}
         {railView === "artifacts" && <ArtifactsRailPanel chatId={screenChatId ?? null} locale={locale} items={items} files={artifactsRail.files} visuals={artifactsRail.visuals}
           opened={artifactsRail.opened} onOpenVisual={artifactsRail.setOpened} onBack={() => artifactsRail.setOpened(null)} />}
         {railView === "screen" && (

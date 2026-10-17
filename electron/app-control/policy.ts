@@ -41,6 +41,9 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   [/^(browser\.(startLiveView|stopLiveView|captureLiveFrame|captureTaskFrame|dispatchLiveInput|focusLiveTarget)|fs\.(watchFile|unwatchFile))$/, "belongs to a screen's live view", "write"],
   [/^(marketplace\.(openProfileView|closeProfileView|setProfileViewBounds)|productExtensions\.(openScienceView|closeScienceView|setScienceViewBounds)|appFactory\.(startLivePreview|stopLivePreview|releaseLivePreview))$/, "belongs to a screen's live view", "write"],
   [/^science\.(renderers\.|researcherQuestions\.register$|shell\.(?:backToWork|openCapabilityManager)$|researchCapabilities\.catalog$|artifacts\.capture$)/, "belongs to the Science view on screen", "write"],
+  // The Document tab is the owner's own hand: an app.call here would journal an AI edit as the owner's. The AI edits,
+  // saves and opens live documents through the harness document.* ports (actor ai, run permission checked).
+  [/^liveDocument\.(apply|save|close|pickAndOpen|reveal)$/, "the Document tab is the owner's hand; edit, open and save through harness document.*", "write"],
   // App lifecycle: it would end this very turn.
   [/^updater\.install$/, "installing an update restarts the app and ends this turn; ask the owner to press Install", "write"],
   [/^menu\.setLocale$/, "use app.setLanguage", "write"],
@@ -198,7 +201,7 @@ const DENIED_READ_PATHS: ReadonlySet<string> = new Set([
   "oneWindow.getState", "workStart.get", "science.researchCapabilities.catalog",
 ]);
 const DENIED_DESTRUCTIVE_PATHS: ReadonlySet<string> = new Set([
-  "oneMemory.inspector.forget",
+  "oneMemory.inspector.forget", "liveDocument.close",
   "browser.revokeCredentialConsent", "browserAutofill.removeContact", "browserAutofill.removeCredential", "businessNative.revoke",
   "businessWork.cancel", "businessWork.revoke", "env.remove", "mcpTools.oauthDisconnect", "oneContext.revoke", "oneDiscussion.stop",
   "onePersonalData.cancelInference", "onePersonalData.cancelProposal", "onePersonalData.gmailRevoke", "onePersonalData.gmailRevokeSource",

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { LIVE_DOCUMENT_PORT_SCHEMAS as LIVE_DOCUMENT_SCHEMAS } from "../live-document/ports";
 
 /*
  * Agentlas harness capability ports (docs/2026-10-13-native-harness/15 §8, contracts/harness-capability-ports.json).
@@ -1057,6 +1058,17 @@ const PORTS: PortDefinition[] = [
       return item ? ok(item) : refused("item_unknown", "module ids come from context.items.list modules; others: harness_describe");
     },
   },
+  // Live documents (live-document/ports.ts): the owner watches these edits typed into the Document tab.
+  { operationId: "document.list", kind: "query", purpose: "Office documents (xlsx docx pptx hwpx hwp) open for live editing in this conversation.", required: [],
+    handler: async (args, ctx) => (await import("../live-document/ports")).documentList(args, ctx) },
+  { operationId: "document.open", kind: "command", purpose: "Open a local xlsx/docx/pptx/hwpx/hwp file for live editing in the owner's Document tab; returns sessionId, addressable outline and the ops its format supports.", required: ["path"],
+    inputSchema: LIVE_DOCUMENT_SCHEMAS.open, handler: async (args, ctx) => (await import("../live-document/ports")).documentOpen(args, ctx) },
+  { operationId: "document.read", kind: "query", purpose: "Current outline of a live document with the ids its ops address (cells A1, block, table-cell and slide-shape ids) and its revision.", required: ["sessionId"],
+    inputSchema: LIVE_DOCUMENT_SCHEMAS.read, handler: async (args, ctx) => (await import("../live-document/ports")).documentRead(args, ctx) },
+  { operationId: "document.apply", kind: "command", purpose: "Edit a live document in its original format, all-or-nothing: set_cell, add_sheet, set_text, insert_text, insert_paragraph, insert_table, delete_block, add_slide, delete_slide, set_format (bold/italic/underline/size/color/align, heading); the owner sees each edit typed.", required: ["sessionId", "ops"],
+    inputSchema: LIVE_DOCUMENT_SCHEMAS.apply, handler: async (args, ctx) => (await import("../live-document/ports")).documentApply(args, ctx) },
+  { operationId: "document.save", kind: "command", purpose: "Write a live document back to its file in the original format (refused if the file changed on disk meanwhile).", required: ["sessionId"],
+    inputSchema: LIVE_DOCUMENT_SCHEMAS.save, handler: async (args, ctx) => (await import("../live-document/ports")).documentSave(args, ctx) },
 ];
 
 const PORT_BY_ID = new Map(PORTS.map((port) => [port.operationId, port]));

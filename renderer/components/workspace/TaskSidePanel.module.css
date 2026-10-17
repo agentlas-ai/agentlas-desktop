@@ -389,6 +389,14 @@
   align-content: stretch;
 }
 
+/* 실시간 문서 탭: 편집기가 패널 높이를 다 쓰고, 스크롤은 편집기 안(종이·시트 격자)에서만 일어난다. */
+.artifactRail[data-rail-view="document"] .artifactList {
+  padding: 0;
+  grid-template-rows: minmax(0, 1fr);
+  align-content: stretch;
+  overflow: hidden;
+}
+
 /*
  * 라이브 화면(브라우저·앱)은 [미리보기 | 분할선 | 아래 섹션] 을 세로로 쌓고,
  * 그 합이 항상 패널 높이와 같아야 한다.

@@ -8762,6 +8762,8 @@ export interface AgentlasIpc {
     getMode: () => Promise<"smart" | "build-only" | "off">;
     setMode: (mode: "smart" | "build-only" | "off") => Promise<"smart" | "build-only" | "off">;
   };
+  /** Live office documents edited by the AI and the owner in the Document rail tab. */
+  liveDocument: import("./live-document").LiveDocumentAPI;
   officeTaskContext: import("./office-task-context").OfficeTaskContextAPI;
   /** invoke:run의 chatId가 firm 채팅인지 일반 채팅인지로 자동 라우팅 */
   invoke: {

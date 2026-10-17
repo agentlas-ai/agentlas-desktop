@@ -1489,6 +1489,21 @@ const api: AgentlasIpc = {
     getMode: () => ipcRenderer.invoke("interview:getMode"),
     setMode: (mode: "smart" | "build-only" | "off") => ipcRenderer.invoke("interview:setMode", mode),
   },
+  liveDocument: {
+    list: (chatId: string) => ipcRenderer.invoke("liveDocument:list", chatId),
+    pickAndOpen: (chatId: string) => ipcRenderer.invoke("liveDocument:pickAndOpen", chatId),
+    snapshot: (sessionId: string) => ipcRenderer.invoke("liveDocument:snapshot", sessionId),
+    entries: (sessionId: string, sinceRevision: number) => ipcRenderer.invoke("liveDocument:entries", sessionId, sinceRevision),
+    apply: (input) => ipcRenderer.invoke("liveDocument:apply", input),
+    save: (sessionId: string) => ipcRenderer.invoke("liveDocument:save", sessionId),
+    close: (sessionId: string) => ipcRenderer.invoke("liveDocument:close", sessionId),
+    reveal: (sessionId: string) => ipcRenderer.invoke("liveDocument:reveal", sessionId),
+    onChanged: (callback) => {
+      const listener = (_event: unknown, value: { sessionId: string; chatId: string }) => callback(value);
+      ipcRenderer.on("liveDocument:changed", listener);
+      return () => ipcRenderer.removeListener("liveDocument:changed", listener);
+    },
+  },
   officeTaskContext: {
     get: (chatId: string) => ipcRenderer.invoke("officeTaskContext:get", chatId),
     submit: (input) => ipcRenderer.invoke("officeTaskContext:submit", input),
