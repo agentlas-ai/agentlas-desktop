@@ -157,7 +157,11 @@ function formatArgument(value: unknown): string {
 }
 
 function safeDiagnosticText(value: string): string {
-  return redactOperationalSecrets(value).replace(/\/(?:Users|home)\/[^/\s"']+/g, "~");
+  return redactOperationalSecrets(value)
+    // Windows profiles (C:\Users\<name>, c:/Users/<name>, JSON-doubled backslashes) carry the user name too. Before
+    // the POSIX rule, which would otherwise turn c:/Users/<name> into c:~.
+    .replace(/[A-Za-z]:[\\/]+(?:Users|Documents and Settings)[\\/]+[^\\/\s"']+/gi, "~")
+    .replace(/\/(?:Users|home)\/[^/\s"']+/g, "~");
 }
 
 function safeLaunchArgs(): string[] {
