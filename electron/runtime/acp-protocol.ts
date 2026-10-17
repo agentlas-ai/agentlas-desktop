@@ -106,6 +106,11 @@ export class AcpConnection {
     child.on("close", (code,signal) => {try{this.transportDiagnostics.childClosed(code,signal);}catch{/* Observation must not block closure. */}finish(code);});
     child.on("error", (error) => {try{const code=error&&typeof error==="object"&&!types.isProxy(error)?Object.getOwnPropertyDescriptor(error,"code")?.value:undefined;this.transportDiagnostics.childError(nativeSpawnErrorCode(code));}catch{/* Observation must not block closure. */}finish(null);});
     child.stdout.on("end", () => {try{this.transportDiagnostics.transportEnded("stdout-end");}catch{/* Observation must not block closure. */}finish(child.exitCode);});
+    // A write to an agent that has already exited fails asynchronously with EPIPE on stdin. With no listener that error was
+    // uncaught and took the host process down: W7 ca1724ea (2026-10-17), the daemon exited reason=error during the copilot
+    // ACP model probe, and every GUI turn then failed native_gui_activation_prerequisites_missing until it re-attached.
+    // ACP lanes, codex app-server (codex-session.ts) and the codex alive session all use this connection. Closed transport.
+    child.stdin.on("error", () => {try{this.transportDiagnostics.transportEnded("child-error");}catch{/* Observation must not block closure. */}finish(child.exitCode);});
   }
 
   diagnosticSnapshot():{transport:NativeTransportSnapshot;protocol:NativeProtocolCounters} {return Object.freeze({transport:this.transportDiagnostics.snapshot(),protocol:this.protocolDiagnostics.snapshot()});}

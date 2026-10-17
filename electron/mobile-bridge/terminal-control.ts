@@ -340,7 +340,11 @@ class PtyTerminalHandle implements TerminalProcessHandle {
 class PipeTerminalHandle implements TerminalProcessHandle {
   readonly pty = false;
 
-  constructor(readonly child: ChildProcess) {}
+  constructor(readonly child: ChildProcess) {
+    // A write racing the shell's exit fails asynchronously with EPIPE; unhandled, it is an uncaught exception in the host
+    // (the try/catch in writeToPipe only sees synchronous throws). The exit path already reports the closed terminal.
+    child.stdin?.on("error", () => { /* closed pipe: reported by the child's exit */ });
+  }
 
   get pid(): number | undefined {
     return this.child.pid;

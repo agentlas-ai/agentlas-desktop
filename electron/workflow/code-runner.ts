@@ -515,6 +515,9 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
       child.stdout.on("data", (d: Buffer) => { stdout += d.toString("utf8"); });
       child.stderr.on("data", (d: Buffer) => { stderr += d.toString("utf8"); });
       // 앞 단계 값을 stdin으로 넘긴다 — argv에 실으면 크기·따옴표에서 깨진다.
+      // A child that exits before reading its input fails the write asynchronously with EPIPE, which the try/catch cannot
+      // see; unhandled, it was an uncaught exception in the host. The exit code below reports the failed step.
+      child.stdin.on("error", () => { /* closed pipe: reported by the exit code */ });
       try { child.stdin.write(JSON.stringify({ vars: input.vars })); child.stdin.end(); } catch { /* 프로세스가 이미 죽었을 수 있다 */ }
       const timer = setTimeout(() => { killCodeTree(child); }, timeoutMs);
       const onAbort = () => killCodeTree(child);
