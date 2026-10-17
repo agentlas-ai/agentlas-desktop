@@ -11,6 +11,7 @@ import { browserAnnotationDraftText } from "@shared/browser-annotation";
 import { selectionForRuntime } from "@shared/runtime-selection";
 import { isInterruptedPartial, isLivePartialCommitBoundary, markInterruptedPartial } from "@shared/interrupted-partial";
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
+import { createFrameBatcher, isLiveStreamTick, type FrameBatcher } from "@/lib/frame-coalescer";
 import { seedWorkRunProjections, syncWorkRunProjections, workRunTimelineRequest, WORK_TIMELINE_EVENTS_PER_RUN, WORK_TIMELINE_RUNS, type WorkRunProjectionCache } from "@/lib/work-run-timeline-sync";
 import { mergeAutomationHostNotices } from "@/lib/chat-host-notice-refresh";
 
@@ -3142,7 +3143,11 @@ function ChatPage() {
   }, []);
   // 한 실행의 이벤트(라이브 스트림 OR 재접속 리플레이)를 메인 버블 + 네트워크 패널에 반영.
   // send()의 인라인 핸들러를 추출해 재접속 경로와 공유 — lastStatusRef는 중복 status 억제용(공유).
-  const consumeEvent = useCallback(
+  // Streamed text, teammate text and thought deltas commit together once per frame (at most every 50 ms) instead of
+  // re-rendering Work per chunk (perf H7; One: 9071760e). Anything that resets the live answer flushes them first.
+  const streamTicksRef = useRef<FrameBatcher | null>(null);
+  useEffect(() => () => { streamTicksRef.current?.cancel(); }, []);
+  const applyEvent = useCallback(
     (
       rawEv: McpInvocationEvent,
       placeholderId: string,
@@ -3913,6 +3918,13 @@ function ChatPage() {
 
   // consumeEvent를 ref로 미러 — subscribeRun/메타데이터 effect가 consumeEvent identity 변화(agent·
   // agentGroup 세팅 등)에 재구독/재실행되던 churn을 없앤다. 리스너는 항상 최신 consumeEvent를 호출한다.
+  // Same events, same order: stream ticks wait for the frame; any other event lands after the queued ticks.
+  const consumeEvent = useCallback((rawEv: McpInvocationEvent, placeholderId: string, lastStatusRef: { text: string }, sourceRunId?: string) => {
+    const frame = streamTicksRef.current ??= createFrameBatcher({ minIntervalMs: 50 });
+    if (isLiveStreamTick(rawEv)) { frame.enqueue(() => applyEvent(rawEv, placeholderId, lastStatusRef, sourceRunId)); return; }
+    try { frame.flush(); } finally { applyEvent(rawEv, placeholderId, lastStatusRef, sourceRunId); }
+  }, [applyEvent]);
+
   const consumeEventRef = useRef(consumeEvent);
   useEffect(() => {
     consumeEventRef.current = consumeEvent;
@@ -3944,6 +3956,8 @@ function ChatPage() {
             terminal ? api.invoke.history(chatId) : Promise.resolve(null),
           ]);
           if (!owns() || !checkpoint.isCurrent()) return false;
+          // The snapshot covers every event delivered so far: queued ticks must land before it, not on top of it.
+          streamTicksRef.current?.flush();
           const state = { ...projectOneActivityFromLedger(ledger, snapshot.receipt), lastSequence: checkpoint.throughOrdinal };
           if (terminal && history) {
             const next = attachMcpStepsToLatestAgent(withoutInterruptedAnswers(history).map(historyEntryToStreamMessage), mcpStepsFromLedger(ledger));
@@ -4022,6 +4036,7 @@ function ChatPage() {
     setQuestionCommitPending(false);
     continuationTransportRetryableRef.current.clear();
     setCancelPending(false);
+    streamTicksRef.current?.flush();
     runIdRef.current = null;
     lastRunIdRef.current = null;
     lastFinalRunIdRef.current = null;
@@ -4441,6 +4456,7 @@ function ChatPage() {
           }));
         setBusy(true);
         setCancelPending(false);
+        streamTicksRef.current?.flush();
         runIdRef.current = attached.runId;
         lastRunIdRef.current = attached.runId;
         const lastStatusRef = { text: "" };
@@ -4584,6 +4600,7 @@ function ChatPage() {
           restoreWorkFollowupQueue(attached);
           setBusy(true);
           setCancelPending(false);
+          streamTicksRef.current?.flush();
           runIdRef.current = attached.runId;
           lastRunIdRef.current = attached.runId;
           partialTextRef.current = "";
@@ -4603,6 +4620,7 @@ function ChatPage() {
       // back. Owner-reported 2026-08-03, across every session.
       if (!runIdRef.current && !wasActive) return;
       const endedRunId = runIdRef.current;
+      streamTicksRef.current?.flush();
       runIdRef.current = null;
       subRef.current?.();
       subRef.current = null;
@@ -4676,6 +4694,7 @@ function ChatPage() {
         if (stopped || !runIdRef.current || ids.includes(chatId)) return;
         // main은 이 실행을 끝냈는데 UI는 여전히 진행중 → final/activeChats를 놓친 것. 화해.
         const endedRunId = runIdRef.current;
+        streamTicksRef.current?.flush();
         runIdRef.current = null;
         lastRunIdRef.current = null;
         subRef.current?.();
@@ -5125,6 +5144,7 @@ function ChatPage() {
 
       // runId를 렌더러가 먼저 생성하고 invoke 왕복 전에 구독한다(subscribe-before-trigger) —
       // 런타임이 즉시 emit하는 초기 이벤트도 절대 놓치지 않아 스트리밍/최종 답변이 라이브로 뜬다.
+      streamTicksRef.current?.flush();
       runIdRef.current = runId;
       lastRunIdRef.current = runId;
       partialTextRef.current = "";
@@ -5170,6 +5190,7 @@ function ChatPage() {
             )));
             setBusy(false);
             setCancelPending(false);
+            streamTicksRef.current?.flush();
             runIdRef.current = null;
             lastRunIdRef.current = runId;
             setSessionNotice(locale === "ko"
@@ -5228,6 +5249,7 @@ function ChatPage() {
           )));
           setBusy(false);
           setCancelPending(false);
+          streamTicksRef.current?.flush();
           runIdRef.current = null;
           lastRunIdRef.current = runId;
           return false;
@@ -5274,6 +5296,8 @@ function ChatPage() {
             const attached = await api.invoke.attach(chat.id).catch(() => null);
             if (!isCurrentChat()) return false;
             const liveRunId = attached?.runId ?? steered.activeRunId ?? steered.runId ?? null;
+            // Ticks still queued for the steered run land before the placeholder moves to the live run.
+            streamTicksRef.current?.flush();
             transcriptRevisionRef.current += 1;
             if (liveRunId) {
               setMessages((m) => m.map((msg) => msg.id === placeholderId ? { ...msg, runId: liveRunId } : msg));
@@ -5287,6 +5311,7 @@ function ChatPage() {
             } else {
               setMessages((m) => m.filter((msg) => msg.id !== placeholderId));
               setBusy(false);
+              streamTicksRef.current?.flush();
               runIdRef.current = null;
             }
             setSessionNotice(locale === "ko"
@@ -5334,6 +5359,7 @@ function ChatPage() {
         setLiveAgents((prev) =>
           Object.fromEntries(Object.entries(prev).map(([k, v]) => [k, { ...v, active: false }])),
         );
+        streamTicksRef.current?.flush();
         runIdRef.current = null;
         lastRunIdRef.current = null;
         cancelRequestedRef.current = false;
