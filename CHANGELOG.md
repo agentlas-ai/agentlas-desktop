@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.65 — 2026-10-17
+
+- A finished app is no longer reported "not complete" only because a check that only you can do in person (on your own phone or account) is left. It is listed as something for you to check.
+- Your message in a Goal chat resumes a paused Goal, or takes over one the app has just queued, instead of failing.
+- A direction you queue in a room starts even when a teammate's last task failed.
+- A scheduled step whose chat is busy with another run waits for the chat instead of failing.
+- A room's final answer no longer mistakes an earlier request in the conversation for the one it is answering.
+- Spreadsheet formulas compute in the Document tab and are saved with their results, and Science can edit office files there.
+- This release binds Agentlas OS v1.2.66 at c0acd99be22114569e20bca94bed4540ba046eb4; public runtime asset `hephaestus-runtime-v1.2.66.tar.gz` is pinned at SHA-256 `20019d3ba4df1c540d0ef549c07a82188bd40fe12dafb2f8a6c75cc4bdcc89f7`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.64 — 2026-10-17
 
 - A Goal you start with /goal in a busy room keeps going after it stops. Before, a room with many earlier turns could leave it waiting with a message that no model could be started.
