@@ -129,9 +129,15 @@ const LEGACY_DECISION_ASSIGNMENT_RE =
 
 /** True when Decision text is safe for every phone decoder in the field: the current rule and the previous one. */
 export function mobileBridgeDecisionTextUnchanged(value: string): boolean {
-  if (sanitizeMobileBridgeText(value, Buffer.byteLength(value, "utf8") + 64) !== value) return false;
+  if (!mobileBridgeDecisionTextCurrent(value)) return false;
   return !LEGACY_DECISION_POSIX_ABSOLUTE_RE.test(value) && !LEGACY_DECISION_POSIX_ROOT_RE.test(value)
     && !LEGACY_DECISION_ASSIGNMENT_RE.test(value);
+}
+
+/** True when the current rule leaves Decision text unchanged: enough for a phone that reported decision.rowSkip.v1
+ * and text.sanitize.v3 (shared/mobile-bridge.ts MOBILE_CLIENT_CAPABILITIES). */
+export function mobileBridgeDecisionTextCurrent(value: string): boolean {
+  return sanitizeMobileBridgeText(value, Buffer.byteLength(value, "utf8") + 64) === value;
 }
 
 export function sanitizeMobileBridgeText(value: string, maxBytes: number): string {

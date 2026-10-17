@@ -156,6 +156,7 @@ import {
   MOBILE_BRIDGE_DISPLAY_TEXT_BYTES,
   MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES,
   MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES,
+  mobileBridgeDecisionTextCurrent,
   mobileBridgeDecisionTextUnchanged,
   mobileBridgeJsonBytes,
   sanitizeMobileBridgeText,
@@ -291,6 +292,9 @@ export interface MobileBridgeProjectionOptions {
   /** Explicit client refreshes bypass the shared usage cache, subject to the provider cooldown. */
   forceUsageRefresh?: boolean;
   now?: Date;
+  /** Also project the Decision fields for a phone that reported decision.rowSkip.v1 + text.sanitize.v3
+   * (projectMobileBridgeSnapshotVariants). The default snapshot is always the one every phone in the field decodes. */
+  rowSkipVariant?: boolean;
 }
 
 function displayText(value: string, maxBytes = MOBILE_BRIDGE_DISPLAY_TEXT_BYTES): string {
@@ -348,15 +352,17 @@ export function isMobileBridgeOneDecisionDto(
     && new Set(row.view.evidence.map((item) => item.kind)).size === expectedEvidence.size;
 }
 
-function deviceSafeOneDecision(value: MobileBridgeOneDecisionDto): boolean {
+function deviceSafeOneDecision(value: MobileBridgeOneDecisionDto, rowSkip = false): boolean {
+  const textSafe = rowSkip ? mobileBridgeDecisionTextCurrent : mobileBridgeDecisionTextUnchanged;
   const stack: unknown[] = [value];
   while (stack.length > 0) {
     const current = stack.pop();
     if (typeof current === "string") {
       // Rewriting a field would no longer be the exact Main Decision. Omit the
       // entire row instead of sending a sanitized-but-semantically-different approval.
-      // Also omit a row an older phone decoder would reject: it decodes the list atomically (sanitize.ts).
-      if (!mobileBridgeDecisionTextUnchanged(current)) return false;
+      // Also omit a row an older phone decoder would reject: it decodes the list atomically (sanitize.ts). A phone
+      // that skips a bad row and carries the current patterns needs only the current rule (rowSkip).
+      if (!textSafe(current)) return false;
       continue;
     }
     if (Array.isArray(current)) {
@@ -1143,6 +1149,8 @@ interface MobileBridgeOneDecisionProjectionOptions {
   now?: Date;
   /** Test-only budget override. Production uses the closed 128 KiB aggregate cap. */
   maxBytes?: number;
+  /** Text rule for a phone that reported decision.rowSkip.v1 + text.sanitize.v3: the current rule only. */
+  rowSkip?: boolean;
 }
 
 /**
@@ -1220,7 +1228,7 @@ export function projectMobileBridgeOneDecisionsFromCurrent(
       || row.view.chatId !== confirmation.chatId
       || row.view.decisionId !== confirmation.sourceMessageId
       || row.view.createdAt !== confirmation.createdAt
-      || !deviceSafeOneDecision(row)
+      || !deviceSafeOneDecision(row, options.rowSkip === true)
     ) {
       continue;
     }
@@ -2069,6 +2077,39 @@ export function projectMobileBridgeUsage(
 export async function projectMobileBridgeSnapshot(
   options: MobileBridgeProjectionOptions,
 ): Promise<MobileBridgeSnapshot> {
+  return (await projectMobileBridgeSnapshotVariants(options)).snapshot;
+}
+
+/** Decision fields of one snapshot, projected from one read of pending confirmations for one phone text rule. */
+function projectSnapshotDecisionFields(
+  hostIdentity: MobileBridgeHostIdentity,
+  pendingConfirmations: readonly PendingConfirmation[],
+  now: Date | undefined,
+  rowSkip: boolean,
+) {
+  const projected = projectMobileBridgeOneDecisionsFromCurrent(hostIdentity, pendingConfirmations, { now, rowSkip });
+  const { oneDecisions, oneDecisionOwnerAnswersV4, omittedDecisions } = projectMobileBridgeOneDecisionOwnerPairsFromCurrent(
+    projected, pendingConfirmations,
+  );
+  return {
+    oneDecisions,
+    oneDecisionMultiSelectionsV2: projectMobileBridgeOneDecisionMultiSelectionsV2FromCurrent(oneDecisions, pendingConfirmations),
+    oneDecisionAnswersV3: projectMobileBridgeOneDecisionAnswersV3FromCurrent(oneDecisions, pendingConfirmations),
+    oneDecisionOwnerAnswersV4,
+    pendingConfirmations: projectMobileBridgeConfirmations(pendingConfirmations.filter((pending) =>
+      !omittedDecisions.some((decision) => decision.view.chatId === pending.chatId
+        && decision.view.decisionId === pending.sourceMessageId && decision.view.createdAt === pending.createdAt))),
+  };
+}
+
+/**
+ * `snapshot` is what every phone in the field decodes. `rowSkip` exists only when options.rowSkipVariant is set and the
+ * Decision fields differ under the current text rule alone (sanitize.ts LEGACY_DECISION): the same snapshot with those
+ * fields, for a phone that reported decision.rowSkip.v1 + text.sanitize.v3. Both come from one store read.
+ */
+export async function projectMobileBridgeSnapshotVariants(
+  options: MobileBridgeProjectionOptions,
+): Promise<{ snapshot: MobileBridgeSnapshot; rowSkip: MobileBridgeSnapshot | null }> {
   if (
     options.hostIdentity.version !== MOBILE_BRIDGE_PROTOCOL_VERSION ||
     !/^host_[a-f0-9]{32}$/.test(options.hostIdentity.hostId) ||
@@ -2128,22 +2169,9 @@ export async function projectMobileBridgeSnapshot(
   deferPrejudgeOneDecisions(
     pendingConfirmations.slice(0, MOBILE_BRIDGE_ONE_DECISION_LIMIT),
   );
-  const projectedOneDecisions = projectMobileBridgeOneDecisionsFromCurrent(
-    options.hostIdentity,
-    pendingConfirmations,
-    { now: options.now },
-  );
-  const { oneDecisions, oneDecisionOwnerAnswersV4, omittedDecisions } = projectMobileBridgeOneDecisionOwnerPairsFromCurrent(
-    projectedOneDecisions, pendingConfirmations,
-  );
-  const oneDecisionMultiSelectionsV2 = projectMobileBridgeOneDecisionMultiSelectionsV2FromCurrent(
-    oneDecisions,
-    pendingConfirmations,
-  );
-  const oneDecisionAnswersV3 = projectMobileBridgeOneDecisionAnswersV3FromCurrent(
-    oneDecisions,
-    pendingConfirmations,
-  );
+  const decisions = projectSnapshotDecisionFields(options.hostIdentity, pendingConfirmations, options.now, false);
+  const rowSkipDecisions = options.rowSkipVariant
+    ? projectSnapshotDecisionFields(options.hostIdentity, pendingConfirmations, options.now, true) : null;
   const boundOneEvidence = bindOneEvidenceToSnapshotTasks(taskProjections, {
     valueClosures: projectMobileBridgeOneValueClosures(options.hostIdentity),
     experienceReuseReceipts: projectMobileBridgeOneExperienceReuse(options.hostIdentity),
@@ -2177,9 +2205,7 @@ export async function projectMobileBridgeSnapshot(
     projects: projectsDto(),
     chats: chatsDto(activeSet),
     messages: {},
-    pendingConfirmations: projectMobileBridgeConfirmations(pendingConfirmations.filter((pending) =>
-      !omittedDecisions.some((decision) => decision.view.chatId === pending.chatId
-        && decision.view.decisionId === pending.sourceMessageId && decision.view.createdAt === pending.createdAt))),
+    pendingConfirmations: decisions.pendingConfirmations,
     pendingBrowserApprovals: [...(options.pendingBrowserApprovals ?? [])],
     pendingToolApprovals: [...(options.pendingToolApprovals ?? [])],
     pendingUserInputs: [...(options.pendingUserInputs ?? [])],
@@ -2187,10 +2213,10 @@ export async function projectMobileBridgeSnapshot(
     usage: projectMobileBridgeUsage(usage),
     activeChatIds,
     taskProjections,
-    oneDecisions,
-    oneDecisionMultiSelectionsV2,
-    oneDecisionAnswersV3,
-    oneDecisionOwnerAnswersV4,
+    oneDecisions: decisions.oneDecisions,
+    oneDecisionMultiSelectionsV2: decisions.oneDecisionMultiSelectionsV2,
+    oneDecisionAnswersV3: decisions.oneDecisionAnswersV3,
+    oneDecisionOwnerAnswersV4: decisions.oneDecisionOwnerAnswersV4,
     oneValueClosures: boundOneEvidence.valueClosures,
     oneExperienceReuseReceipts: boundOneEvidence.experienceReuseReceipts,
     oneImprovementProofs: boundOneEvidence.improvementProofs,
@@ -2238,5 +2264,9 @@ export async function projectMobileBridgeSnapshot(
   if (mobileBridgeJsonBytes(snapshot) > MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES) {
     throw new Error("Mobile Bridge snapshot exceeds the safe wire budget");
   }
-  return snapshot;
+  if (!rowSkipDecisions || JSON.stringify(rowSkipDecisions) === JSON.stringify(decisions)) return { snapshot, rowSkip: null };
+  const rowSkip: MobileBridgeSnapshot = { ...snapshot, ...rowSkipDecisions };
+  // Over the wire budget even after trimming its own Decision pairs: that phone keeps the snapshot everyone decodes.
+  if (trimMobileBridgeDecisionMetadata(rowSkip) > MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES) return { snapshot, rowSkip: null };
+  return { snapshot, rowSkip };
 }

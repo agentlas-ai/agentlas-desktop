@@ -130,6 +130,10 @@ export interface MobileBridgeAuthorityEvent {
   occurredAt?: string;
   /** Delivered only to connections whose device reported this decoder capability (device.capabilities). */
   requiresClientCapability?: MobileClientCapability;
+  /** Delivered only to connections whose device reported every one of these. */
+  requiresClientCapabilities?: readonly MobileClientCapability[];
+  /** Withheld from connections whose device reported every one of these: they receive a twin event instead. */
+  withheldForClientCapabilities?: readonly MobileClientCapability[];
 }
 
 /**
@@ -1437,10 +1441,11 @@ export class AgentlasMobileBridgeServer {
     const queuedBytes = Buffer.byteLength(JSON.stringify(event), "utf8");
     for (const state of this.clients) {
       if (state.revoked || state.revocationPending) continue;
-      if (
-        event.requiresClientCapability
-        && !this.authority.clientHasCapability?.(state.context.deviceId, event.requiresClientCapability)
-      ) continue;
+      const has = (capability: MobileClientCapability) =>
+        this.authority.clientHasCapability?.(state.context.deviceId, capability) === true;
+      if (event.requiresClientCapability && !has(event.requiresClientCapability)) continue;
+      if (event.requiresClientCapabilities && !event.requiresClientCapabilities.every(has)) continue;
+      if (event.withheldForClientCapabilities?.length && event.withheldForClientCapabilities.every(has)) continue;
       if (!state.initialized) {
         if (
           state.pendingAuthorityEvents.length >= MAX_INITIAL_EVENT_QUEUE ||

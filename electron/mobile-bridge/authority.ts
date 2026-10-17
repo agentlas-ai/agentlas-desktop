@@ -254,7 +254,7 @@ import {
   projectMobileBridgeRuntimeRolePool,
   projectMobileBridgeRuntimeSelection,
   projectMobileBridgeRuntimes,
-  projectMobileBridgeSnapshot,
+  projectMobileBridgeSnapshotVariants,
   projectMobileBridgeUsage,
 } from "./projector";
 import { MobileProjectFilePreviewRegistry } from "./project-file-preview";
@@ -299,6 +299,8 @@ import {
 } from "./visual-session";
 
 const REQUEST_ID_RE = /^[^\u0000-\u001f]{1,128}$/;
+/** Both together retire the LEGACY_DECISION text guard for that phone (shared/mobile-bridge.ts MOBILE_CLIENT_CAPABILITIES). */
+const ROW_SKIP_DECISION_CAPABILITIES: readonly MobileClientCapability[] = ["decision.rowSkip.v1", "text.sanitize.v3"];
 const IDENTIFIER_RE = /^[^\u0000-\u001f]{1,256}$/;
 const RUN_ID_RE = /^[^\u0000-\u001f]{1,160}$/;
 const MOBILE_ONE_ARTIFACT_CURSOR_RE = /^[A-Za-z0-9_-]{1,512}$/;
@@ -2160,6 +2162,11 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   clientHasCapability(deviceId: string, capability: MobileClientCapability): boolean {
     return this.clientCapabilities.get(deviceId)?.has(capability) === true;
   }
+
+  /** A phone that skips a bad Decision row and carries the current text patterns (sanitize.ts LEGACY_DECISION). */
+  private rowSkipDevice(deviceId: string): boolean {
+    return ROW_SKIP_DECISION_CAPABILITIES.every((capability) => this.clientHasCapability(deviceId, capability));
+  }
   private readonly projectFilePreviews = new MobileProjectFilePreviewRegistry();
   /**
    * Mobile terminal ownership is kept in the Desktop authority, not in the
@@ -2303,6 +2310,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   }
 
   connectionOpened(context: MobileBridgeConnectionContext, lease?: MobileBridgeConnectionLease): void {
+    // What a phone can decode is reported again after every bridge.ready; an app replaced since its last connection
+    // (a downgrade or a reinstall) must not inherit what the previous app reported.
+    this.clientCapabilities.delete(context.deviceId);
     this.options.nativeToolApprovals?.connectionOpened(context, lease);
     this.options.oneSecure?.()?.connectionOpened(context);
   }
@@ -2741,7 +2751,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         // A foreground/resume refresh must not keep showing the provider
         // values captured by an older Mobile session. Provider-side cooldowns
         // still coalesce reconnect bursts to one request per 10 seconds.
-        return asJsonValue(await this.projectSnapshot(true), request.method);
+        const rowSkip = this.rowSkipDevice(context.deviceId);
+        const variants = await this.projectSnapshotVariants(true, rowSkip);
+        return asJsonValue(rowSkip && variants.rowSkip ? variants.rowSkip : variants.snapshot, request.method);
       }
       case "host.status": {
         noParams(request);
@@ -4762,6 +4774,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const accepted = [...new Set(reported.filter((item): item is MobileClientCapability =>
           typeof item === "string" && known.has(item)))];
         this.clientCapabilities.set(context.deviceId, new Set(accepted));
+        // Its baseline (bridge.ready) was the snapshot every phone decodes; send the fuller Decision list now.
+        if (this.rowSkipDevice(context.deviceId)) this.scheduleSnapshotUpdated();
         return asJsonValue({ accepted }, request.method);
       }
       case "mail.status": {
@@ -5451,6 +5465,13 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   }
 
   private async projectSnapshot(forceUsageRefresh = false): Promise<MobileBridgeSnapshot> {
+    return (await this.projectSnapshotVariants(forceUsageRefresh, false)).snapshot;
+  }
+
+  private async projectSnapshotVariants(
+    forceUsageRefresh: boolean,
+    rowSkipVariant: boolean,
+  ): Promise<{ snapshot: MobileBridgeSnapshot; rowSkip: MobileBridgeSnapshot | null }> {
     const activeChatIds = invocationService.activeChatIds();
     const pendingBrowserApprovals = listPendingBrowserApprovals().map((approval) =>
       this.projectBrowserApproval(approval));
@@ -5510,7 +5531,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           expiresAt: new Date(request.expiresAt).toISOString(),
         }];
       });
-    return projectMobileBridgeSnapshot({
+    return projectMobileBridgeSnapshotVariants({
       hostIdentity: this.options.hostIdentity,
       displayName: this.options.displayName,
       appVersion: this.options.appVersion,
@@ -5520,6 +5541,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       pendingToolApprovals,
       pendingUserInputs,
       forceUsageRefresh,
+      rowSkipVariant,
     });
   }
 
@@ -5675,20 +5697,17 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         this.refreshRequested = false;
         const automationIds = [...this.pendingAutomationIds];
         this.pendingAutomationIds.clear();
-        const snapshot = await this.projectSnapshot();
+        const { snapshot, rowSkip } = await this.projectSnapshotVariants(false,
+          [...this.clientCapabilities.keys()].some((deviceId) => this.rowSkipDevice(deviceId)));
         const previousConfirmations = this.lastConfirmationFingerprint;
-        const nextConfirmations = this.confirmationFingerprint(snapshot);
+        const nextConfirmations = this.confirmationFingerprint(snapshot)
+          + (rowSkip ? this.confirmationFingerprint(rowSkip) : "");
         this.lastConfirmationFingerprint = nextConfirmations;
 
-        this.emit({
-          event: "snapshot.updated",
-          payload: asJsonValue(snapshot, "snapshot.updated"),
-        });
+        // A row-skip phone gets the twin built from the same store read; every other phone gets the snapshot it decodes.
+        this.emitForDecisionRule("snapshot.updated", snapshot, rowSkip);
         if (previousConfirmations !== null && previousConfirmations !== nextConfirmations) {
-          this.emit({
-            event: "confirm.updated",
-            payload: asJsonValue(snapshot.pendingConfirmations, "confirm.updated"),
-          });
+          this.emitForDecisionRule("confirm.updated", snapshot.pendingConfirmations, rowSkip?.pendingConfirmations);
         }
         for (const automationId of automationIds) {
           this.emit({
@@ -5706,6 +5725,20 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       this.refreshRunning = false;
       if (this.refreshRequested && this.listeners.size > 0) this.scheduleSnapshotUpdated();
     }
+  }
+
+  private emitForDecisionRule(
+    event: "snapshot.updated" | "confirm.updated",
+    payload: unknown,
+    rowSkipPayload: unknown,
+  ): void {
+    const json = asJsonValue(payload, event);
+    if (rowSkipPayload === undefined || rowSkipPayload === null) {
+      this.emit({ event, payload: json });
+      return;
+    }
+    this.emit({ event, payload: json, withheldForClientCapabilities: ROW_SKIP_DECISION_CAPABILITIES });
+    this.emit({ event, payload: asJsonValue(rowSkipPayload, event), requiresClientCapabilities: ROW_SKIP_DECISION_CAPABILITIES });
   }
 
   private confirmationFingerprint(snapshot: MobileBridgeSnapshot): string {
