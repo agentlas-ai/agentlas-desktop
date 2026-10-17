@@ -358,6 +358,11 @@ export async function appControlCallLocal(caller: AppControlCaller, input: { ope
   }
   const unknown = Object.keys(named).filter((key) => !operation.params.includes(key));
   if (unknown.length) throw new AppControlError("invalid-arguments", `Unknown argument ${unknown.join(", ")}; ${path} takes ${operation.params.length ? operation.params.join(", ") : "no arguments"}.`);
+  // A required argument that is missing is refused, never sent as undefined: automations.listRuns without its id answered
+  // 0 runs as if that were the history (dev 2026-10-17 run8), and the agent reported "no runs last week".
+  const requiredKeys = APP_CONTROL_ARGUMENT_SCHEMAS[path]?.required;
+  const missing = Array.isArray(requiredKeys) ? requiredKeys.filter((key) => typeof key === "string" && named[key] === undefined) : [];
+  if (missing.length) throw new AppControlError("invalid-arguments", `${path} needs ${missing.join(", ")}; pass them in args.`);
   const window = host?.interactionWindow?.() ?? host?.mainWindow() ?? null;
 
   if (operation.surface === "app") {
