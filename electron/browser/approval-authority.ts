@@ -68,6 +68,11 @@ export function registerBrowserApprovalAuthority(
   const now = Date.now();
   const db = store();
   try {
+    // A process that exited without revoking (a crash) left its rows open; they are dead either way, so close them here.
+    const open = db?.prepare(`SELECT DISTINCT minted_pid FROM ${TABLE} WHERE revoked_at IS NULL AND minted_pid != ?`).all(process.pid) as Array<{ minted_pid: number }> | undefined;
+    for (const { minted_pid } of open ?? []) {
+      if (!processAlive(minted_pid)) db?.prepare(`UPDATE ${TABLE} SET revoked_at = ? WHERE minted_pid = ? AND revoked_at IS NULL`).run(now, minted_pid);
+    }
     db?.prepare(`DELETE FROM ${TABLE} WHERE revoked_at IS NOT NULL AND revoked_at < ?`).run(now - RETAIN_REVOKED_MS);
     db?.prepare(`INSERT INTO ${TABLE} (token_hash, owner_json, permission, unattended, minted_pid, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
       .run(hash, JSON.stringify(owner), permission, unattended ? 1 : 0, process.pid, now);
