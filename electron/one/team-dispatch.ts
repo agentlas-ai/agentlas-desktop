@@ -807,11 +807,20 @@ export function oneTeamList(caller: OneTeamCaller) {
       is_group: group !== null,
       group: group ? { id: group.id, revision: group.revision, member_agent_ids: [...group.memberAgentIds] } : null,
     },
+    // Availability, not the owner's status line. "Failed · review needed" is the owner's call to action; a One that read it
+    // never started that teammate again (dev replay r08, 2026-10-17: motion grap and Blender Animator skipped because the
+    // list said so), and a failure stays on the seat until that teammate's next run, so one failure idled it for good.
+    // start_session never refused such a teammate. A typed `last_run: "failed"` still kept it idle in most real-model runs,
+    // so the seat's last outcome is not listed; sessions this conversation started carry their own outcome below.
     teammates: activeMembers().map((member) => ({
       member_id: member.id,
       name: member.displayName,
       name_en: member.nameEn,
-      status: member.statusLineEn || member.statusLine,
+      now: member.statusKind === "working" ? "working" : member.statusKind === "waiting" ? "waiting_for_owner"
+        : member.statusKind === "locked" ? "locked" : "idle",
+      last_activity_at: member.lastActivityAt,
+      can_start: !member.unavailable && member.statusKind !== "locked",
+      ...(member.unavailable ? { unavailable: member.unavailable.code } : {}),
       installed_agent_id: member.installedAgentId,
       source: member.source,
       in_current_group: group?.memberAgentIds.includes(member.installedAgentId) ?? false,
