@@ -75,7 +75,22 @@ export interface EnsureDaemonOptions extends DaemonServiceOptions {
   expectedStoreIdentity?: string | null;
   /** Main-only capability delivered via the fenced attach socket, never env/argv. */
   browserCapability?: (binding: NativeBrowserDaemonBinding) => Promise<NativeBrowserMainCapability>;
+  /** The registered starter's own launch (main.ts ensureDesktopDaemon): the only caller that may spawn while one is registered. */
+  daemonStarter?: boolean;
 }
+
+/**
+ * The one starter that hands a new daemon this Desktop's protected native enrollment (main.ts ensureDesktopDaemon).
+ * The daemon reads its native credential once, when it boots. On a first launch (no registry yet) a daemon that another
+ * caller started first booted with native_auth_not_provisioned. Those callers are Science, local models, and their
+ * self-heal after a daemon exit. Every GUI attach then failed with native_auth_channel_lost until the app restarted
+ * (A/B4 dev 2026-10-17 09:03Z; the acceptance kit's warm-up launch existed only to step around it). While a starter is
+ * registered, other callers never stop, spawn or replace a daemon. They attach to the running one; when none answers
+ * for this app version, they ask the starter to launch it, then attach.
+ */
+let desktopDaemonStarter: (() => Promise<unknown>) | null = null;
+export function setDesktopDaemonStarter(starter: (() => Promise<unknown>) | null): void { desktopDaemonStarter = starter; }
+const DAEMON_STARTER_LAUNCH_REQUIRED = "daemon_starter_launch_required";
 
 type DaemonEnsurePhase = "identity" | "ping" | "owner-probe" | "shutdown"
   | "spawn" | "readiness" | "cleanup" | "verify" | "browser-capability" | "attach";
@@ -89,6 +104,8 @@ export type EnsureDaemonStatus =
 
 interface DaemonPing {
   ok?: boolean;
+  /** daemon/main.ts ping: the native endpoint's address once configured, else why it is not (yet) available. */
+  nativeInvocation?: { address?: string | null; unavailableCode?: string | null } | null;
   version?: string;
   pid?: number;
   storePath?: string;
@@ -450,14 +467,24 @@ function ensureAuthorityKey(opts: EnsureDaemonOptions & DaemonServiceIdentity, s
 
 export function ensureDaemonRunning(options: EnsureDaemonOptions): Promise<EnsureDaemonStatus> {
   if (process.env.AGENTLAS_DISABLE_DAEMON === "1") return Promise.resolve({ status: "disabled" });
+  const starter = desktopDaemonStarter;
+  if (!starter || options.daemonStarter) return ensureDaemonFlight(options, false);
+  return ensureDaemonFlight(options, true).then(async (attached) => {
+    if (attached.status !== "failed" || attached.reason !== DAEMON_STARTER_LAUNCH_REQUIRED) return attached;
+    await starter().catch(() => undefined);
+    return ensureDaemonFlight(options, true);
+  });
+}
+
+function ensureDaemonFlight(options: EnsureDaemonOptions, attachOnly: boolean): Promise<EnsureDaemonStatus> {
   try {
     const opts = { ...options, ...resolveDaemonServiceIdentity(options) };
     const socketPath = daemonControlSocketPath(opts.userDataDir);
-    const key = ensureAuthorityKey(opts, socketPath);
+    const key = `${ensureAuthorityKey(opts, socketPath)}:${attachOnly ? "attach" : "start"}`;
     const existing = daemonEnsureInFlight.get(key);
     if (existing) return existing;
     // Publish before invoking bootstrap, including synchronous/reentrant callers.
-    const flight = Promise.resolve().then(() => ensureDaemonRunningOnce(opts, socketPath)).finally(() => {
+    const flight = Promise.resolve().then(() => ensureDaemonRunningOnce(opts, socketPath, attachOnly)).finally(() => {
       if (daemonEnsureInFlight.get(key) === flight) daemonEnsureInFlight.delete(key);
     });
     daemonEnsureInFlight.set(key, flight);
@@ -470,7 +497,7 @@ export function ensureDaemonRunning(options: EnsureDaemonOptions): Promise<Ensur
 /** Attach to the same service across GUI restarts, or start its follower after
  * the GUI has completed migration. Version replacement drains the old process. */
 async function ensureDaemonRunningOnce(
-  opts: EnsureDaemonOptions & DaemonServiceIdentity, socketPath: string,
+  opts: EnsureDaemonOptions & DaemonServiceIdentity, socketPath: string, attachOnly = false,
 ): Promise<EnsureDaemonStatus> {
   const log = opts.log ?? console.log;
   const diagnostics = diagnosticLog(opts.userDataDir);
@@ -488,6 +515,7 @@ async function ensureDaemonRunningOnce(
         logDaemonIdentity(log, ping);
         return { status: "already-running", pid: ping.pid ?? -1, version: ping.version };
       }
+      if (attachOnly) return { status: "failed", reason: DAEMON_STARTER_LAUNCH_REQUIRED, phase };
       if (anotherDesktopIsAttached(ping, opts.parentPid ?? process.pid)) {
         return { status: "failed", reason: "daemon_attached_desktop_alive" };
       }
@@ -499,6 +527,7 @@ async function ensureDaemonRunningOnce(
       }
       lastExitReason = "version_skew";
     } else {
+      if (attachOnly) return { status: "failed", reason: DAEMON_STARTER_LAUNCH_REQUIRED, phase };
       phase = "owner-probe";
       if (!await controlSocketIsAbsent(socketPath)) {
         return { status: "failed", reason: "daemon_control_owner_unconfirmed", phase };
@@ -541,6 +570,17 @@ async function ensureDaemonRunningOnce(
     // Only fixed phase names cross the diagnostic boundary, never raw errors.
     try { log(`[daemon] launcher failed phase=${phase}`); } catch { /* logging is supplementary */ }
     return { status: "failed", reason: `daemon_launcher_${phase.replaceAll("-", "_")}_failed`, phase };
+  }
+}
+
+/** A daemon of this service and app version answers its control socket (main.ts starter: launch again only when none does). */
+export async function desktopDaemonAnswers(options: EnsureDaemonOptions): Promise<boolean> {
+  try {
+    const opts = { ...options, ...resolveDaemonServiceIdentity(options) };
+    const ping = await pingDaemon(daemonControlSocketPath(opts.userDataDir));
+    return Boolean(ping?.ok && matchesService(ping, opts) && ping.version === opts.appVersion && ping.serviceProtocolVersion === 2);
+  } catch {
+    return false;
   }
 }
 
@@ -755,11 +795,23 @@ export function suspendDaemonAutostart(command: AutostartCommand, runtime?: Auto
  * boot on the separately enrolled channel before consuming any native reply. */
 export async function discoverNativeDaemonBoot(options: EnsureDaemonOptions): Promise<string> {
   const identity = resolveDaemonServiceIdentity(options);
-  const ping = await pingDaemon(daemonControlSocketPath(identity.userDataDir));
-  if (!ping?.ok || ping.serviceIdentity !== identity.serviceIdentity || ping.version !== options.appVersion
-    || ping.serviceProtocolVersion !== 2 || typeof ping.bootId !== "string"
-    || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(ping.bootId)) {
-    throw new Error("native_gui_daemon_discovery_unavailable");
+  const socketPath = daemonControlSocketPath(identity.userDataDir);
+  // A daemon that just spawned answers its control socket before its native endpoint exists (daemon/main.ts ping:
+  // nativeInvocation.unavailableCode "native_invocation_not_configured" until it is set up). An attach in that window
+  // closed the channel: first launch 2026-10-17, the initial attach failed with native_auth_channel_lost and the re-attach
+  // one second later succeeded. Wait until the endpoint has settled, either configured or with a final unavailable code,
+  // within the daemon's own startup bound. After that the attach (and the re-attacher) decide as before.
+  const settleBy = Date.now() + (options.startupTimeoutMs ?? 30_000);
+  for (;;) {
+    const ping = await pingDaemon(socketPath);
+    if (!ping?.ok || ping.serviceIdentity !== identity.serviceIdentity || ping.version !== options.appVersion
+      || ping.serviceProtocolVersion !== 2 || typeof ping.bootId !== "string"
+      || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(ping.bootId)) {
+      throw new Error("native_gui_daemon_discovery_unavailable");
+    }
+    const native = ping.nativeInvocation;
+    const configuring = !native?.address && native?.unavailableCode === "native_invocation_not_configured";
+    if (!configuring || Date.now() >= settleBy) return ping.bootId;
+    await sleep(150);
   }
-  return ping.bootId;
 }

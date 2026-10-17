@@ -2366,6 +2366,15 @@ app.whenReady().then(async () => {
   });
   let releaseLocalModelDaemonStartup!: () => void;
   const localModelDaemonStartupReady = new Promise<void>((resolve) => { releaseLocalModelDaemonStartup = resolve; });
+  // The daemon has one starter: the protected launch below (ensureDesktopDaemon), the only one that hands it the native
+  // enrollment it reads at boot. Science and local models (and their self-heal) attach and never spawn one of their own.
+  let desktopDaemonLaunch: (() => Promise<unknown>) | null = null;
+  let releaseDesktopDaemonLaunch!: () => void;
+  const desktopDaemonLaunchReady = new Promise<void>((resolve) => { releaseDesktopDaemonLaunch = resolve; });
+  // Effect-suppressed QA creates neither client and returns before the launch, so it registers no starter.
+  if (!developmentEffectsSuppressed()) {
+    (await import("./daemon/app-launcher")).setDesktopDaemonStarter(async () => { await desktopDaemonLaunchReady; await desktopDaemonLaunch?.(); });
+  }
   let localModelControl: import("./local-model-hub/ports").LocalModelHubControlPort;
   if (developmentEffectsSuppressed()) {
     // Explicitly isolated, effect-suppressed QA never starts an external daemon.
@@ -4782,7 +4791,7 @@ app.whenReady().then(async () => {
         catch (error) { console.warn("[native-invocation] protected enrollment unavailable", error); }
       }
       const options = desktopDaemonClientOptions();
-      const outcome = await module.ensureDaemonRunning({ ...options, nativeInvocationResources: policy.NATIVE_DAEMON_INVOCATION_POLICY, ...(enrollment ? { nativeEnrollment: enrollment } : {}) });
+      const outcome = await module.ensureDaemonRunning({ ...options, daemonStarter: true, nativeInvocationResources: policy.NATIVE_DAEMON_INVOCATION_POLICY, ...(enrollment ? { nativeEnrollment: enrollment } : {}) });
       if (outcome.status === "failed") console.error("[daemon] ensure failed:", outcome.reason);
       else console.info(`[daemon] ${outcome.status}`);
       let nativeAttachment: Awaited<ReturnType<typeof native.attachNativeGuiDaemon>> | undefined;
@@ -4855,6 +4864,18 @@ app.whenReady().then(async () => {
       return null;
     });
   let daemonStartupPromise = ensureDesktopDaemon();
+  // Another caller found no daemon: wait for the current launch, and when none answers after it (the daemon exited
+  // later), launch again here, with the enrollment. Never while quitting.
+  let daemonRelaunch: Promise<unknown> | null = null;
+  desktopDaemonLaunch = async () => {
+    await daemonStartupPromise;
+    if (quitPlanCommitted || quitRelaunching || quitCleanupDone) return;
+    if (await (await import("./daemon/app-launcher")).desktopDaemonAnswers(desktopDaemonClientOptions())) return;
+    daemonRelaunch ??= (async () => { daemonStartupPromise = ensureDesktopDaemon(); await daemonStartupPromise; })()
+      .finally(() => { daemonRelaunch = null; });
+    await daemonRelaunch;
+  };
+  releaseDesktopDaemonLaunch();
   if (invocationOwnerClient) void daemonStartupPromise.then(daemon => {
     if (daemon && daemon.outcome.status !== "failed" && daemon.outcome.status !== "disabled") return invocationOwnerClient.connect();
   }).catch(error => console.warn("[invocation-owner] broker attach unavailable:", error));
