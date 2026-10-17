@@ -1026,12 +1026,17 @@ export const BLOCKED_GOAL_STARTUP_RETRY_MS = 30_000;
  * has had since its last success (a settled completed turn or an owner control) within 24 h. A resume that
  * worked is not a failure: counting it made every healthy Goal that resumes every few minutes sit at the 6 h
  * cap after a single restart (measured 2026-10-03: retryIndex 70 on a 37-cycle Goal, 751 on a spinning one).
- * Carried copies of an existing retry never count either — they re-write the same schedule. */
+ * Carried copies of an existing retry never count either — they re-write the same schedule.
+ * The owner's authority being (re)established also starts a fresh count: an adopted grant (run.goal_revision_bound) or
+ * a status change the owner made (Resume/Start). Retries before it stood on a host cause that is now gone; counting them
+ * put the Yotube Goal's next retry 5 h 20 min out right after 1.3.64 resumed it (2026-10-17: six goal_owner_grant_unrecorded
+ * retries before the grant was adopted at 14:39Z; a W7 copy then failed once and was scheduled at retryIndex 6). */
 export function nextBlockedGoalRetrySlot(runId: string, now = Date.now(),
   options: { startup?: boolean } = {}): { retryIndex: number; nextAt: string } {
   const since = new Date(now - 24 * 60 * 60_000).toISOString();
   const success = getDb().prepare(`SELECT COALESCE(MAX(seq), 0) AS seq FROM long_run_events WHERE run_id = ? AND (
-      (kind = 'worker.attempt_settled' AND json_extract(payload_json, '$.state') = 'completed') OR kind = 'run.user_control')`)
+      (kind = 'worker.attempt_settled' AND json_extract(payload_json, '$.state') = 'completed') OR kind = 'run.user_control'
+      OR kind = 'run.goal_revision_bound' OR (kind = 'run.status_changed' AND actor_kind = 'user'))`)
     .get(runId) as { seq: number };
   const prior = getDb().prepare(`SELECT COUNT(*) AS n FROM long_run_events WHERE run_id = ? AND kind = ? AND seq > ? AND occurred_at > ?
     AND json_extract(payload_json, '$.action') = 'retry_scheduled'
