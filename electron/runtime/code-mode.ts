@@ -14,6 +14,17 @@ export function installMainCodeMode(tools: OpenAiToolDef[], byName: Map<string, 
     description: "JS: await tools.call(name,args) | tools.list(o) | tools.prepare(name) | tools.callPrepared(token,args); Promise.all ok; store/load(key) this run only; no Node/imports/network; nested calls keep approval; return compact JSON.",
     parameters: {type: "object", properties: {code: {type: "string"}, timeoutMs: {type: "integer", minimum: 10, maximum: 30000}}, required: ["code"], additionalProperties: false}}}];
 }
+/**
+ * Whether a nested tool result says it was cut (an app operation over the reply limit: `truncated: true` with its
+ * `truncation` facts, possibly inside a harness envelope). Arrays are not entered: a record in a listed result that has
+ * its own `truncated` field is data, not a cut.
+ */
+function resultWasTruncated(value: unknown, depth = 3): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value) || depth < 0) return false;
+  const record = value as Record<string, unknown>;
+  if (record.truncated === true) return true;
+  return Object.values(record).some(child => resultWasTruncated(child, depth - 1));
+}
 type Dispatch = (byName: Map<string, ResolvedTool>, call: MainToolDispatchCall, events: RunnerEvents, approval: LocalToolApprovalContext) => Promise<MainToolDispatchResult>;
 const bootstrap = `
 const memory = new Map();
@@ -48,7 +59,7 @@ export async function runMainCodeMode(byName: Map<string, ResolvedTool>, input: 
   approval.signal?.addEventListener("abort", abort, {once: true});
   const pending = new Set<Promise<unknown>>();
   const waiters: Array<() => void> = [];
-  let active = 0, peakConcurrency = 0, operationCount = 0, failed = 0;
+  let active = 0, peakConcurrency = 0, operationCount = 0, failed = 0, truncatedResults = 0;
   const acquire = async () => { if (active >= MAX_PARALLEL_CALLS) await new Promise<void>(resolve => waiters.push(resolve)); else active++; };
   const release = () => { const next = waiters.shift(); if (next) next(); else active--; };
   let engine: import("../computer-use/unified/quickjs-engine").QuickJsEngine | null = null;
@@ -77,7 +88,10 @@ export async function runMainCodeMode(byName: Map<string, ResolvedTool>, input: 
           if (outcome.isError) throw new Error(outcome.content);
           // Tool output remains data. JSON results (including prepared tokens)
           // can be composed directly; ordinary text remains an ordinary string.
-          try { return JSON.parse(outcome.content) as unknown; } catch { return outcome.content; }
+          let parsed: unknown;
+          try { parsed = JSON.parse(outcome.content) as unknown; } catch { return outcome.content; }
+          if (resultWasTruncated(parsed)) truncatedResults++;
+          return parsed;
         } catch (error) {
           if (!resultObserved) events.onTool?.(callArgs.name, encoded, error instanceof Error ? error.message : String(error), operationId, true);
           throw error;
@@ -103,7 +117,9 @@ export async function runMainCodeMode(byName: Map<string, ResolvedTool>, input: 
     }
   }
   const result = {schemaVersion: "agentlas.code-mode-result.v1", value, error: failure,
-    operations: {observed: operationCount, failed, pending: pending.size, peakConcurrency},
+    // A cut nested result is a host fact on the envelope: code that read only `result` (dev 2026-10-18 run10, Haiku counted
+    // 2 of 48 automations from a cut automations.list) is answered with the count of results it may have under-read.
+    operations: {observed: operationCount, failed, pending: pending.size, peakConcurrency, ...(truncatedResults ? {truncatedResults} : {})},
     memory: {scope: "evaluation", durable: false, restartState: "unknown"}};
   const content = JSON.stringify(result);
   if (content.length > 18000) return {content: "Error: code_mode_result_too_large; return a smaller summary.", isError: true, visionMessage: null};
