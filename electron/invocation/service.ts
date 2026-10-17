@@ -4846,16 +4846,22 @@ export class InvocationService {
           // Preserve a machine-coded refusal when another action changes the
           // exact Goal while this turn is preparing. No provider dispatch may
           // follow a failed resume transaction.
-          const stall: { reason: "state-changed" | "revision" | "attempt-live" | "budget" | "contract" | "not-ready" | "claimed-wait" | "effect-boundary-uncertain" } = { reason: "state-changed" };
+          // `detail` names the check that failed (or the thrown error): the refusal used to keep only the coarse reason,
+          // and the owner's message after a restart failed "목표 상태가 방금 바뀌어" with no recorded cause (W7 2026-10-17).
+          const stall: { reason: "state-changed" | "revision" | "attempt-live" | "budget" | "contract" | "not-ready" | "claimed-wait" | "effect-boundary-uncertain"; detail?: string } = { reason: "state-changed" };
+          const refuse = (detail: string) => { stall.detail = detail; return null; };
           try {
             resumed = getDb().transaction(() => {
               const current = getLongRun(stoppedGoalReactivation!.runId);
               const source = getDb().prepare("SELECT chat_id, role, text FROM chat_messages WHERE id = ?")
                 .get(sourceMessageId) as { chat_id: string; role: string; text: string } | undefined;
-              if (controller.signal.aborted || !current
-                || current.status !== stoppedGoalReactivation!.status || current.version !== stoppedGoalReactivation!.version
-                || getChat(chat.id)?.goalId !== current.goalId || current.rootChatId !== chat.id
-                || source?.chat_id !== chat.id || source.role !== "user" || source.text !== ownerVisiblePrompt(runReq)) return null;
+              if (controller.signal.aborted) return refuse("aborted");
+              if (!current) return refuse("goal_run_missing");
+              if (current.status !== stoppedGoalReactivation!.status) return refuse(`status:${stoppedGoalReactivation!.status}>${current.status}`);
+              if (current.version !== stoppedGoalReactivation!.version) return refuse(`version:${stoppedGoalReactivation!.version}>${current.version}`);
+              if (getChat(chat.id)?.goalId !== current.goalId || current.rootChatId !== chat.id) return refuse("chat_goal_binding_changed");
+              if (source?.chat_id !== chat.id || source.role !== "user") return refuse("source_message_missing");
+              if (source.text !== ownerVisiblePrompt(runReq)) return refuse("source_text_differs");
               const revision = getChatGoalRevision(current.goalId);
               const revisionBinding = getLongRunGoalRevisionBinding(current.id);
               stall.reason = "revision";
@@ -4864,10 +4870,10 @@ export class InvocationService {
               // a partial revision binding must still fail closed.
               if (revision
                 ? revision.chatId !== chat.id || revisionBinding?.revision !== revision.revision
-                : revisionBinding !== null || current.goalId.startsWith("goal:auto-message:")) return null;
+                : revisionBinding !== null || current.goalId.startsWith("goal:auto-message:")) return refuse("revision_binding_mismatch");
               if (legacyLifecycle && (getLegacyGoalLifecycleSnapshot(current.goalId)?.payloadJson !== legacyLifecycle.snapshot.payloadJson
-                || JSON.stringify(runReq.runtimeSelection) !== JSON.stringify(legacyRuntime))) return null;
-              if (legacyLifecycle?.verdict === "ongoing" && !lifetime.ownsActiveRoot()) return null;
+                || JSON.stringify(runReq.runtimeSelection) !== JSON.stringify(legacyRuntime))) return refuse("legacy_lifecycle_changed");
+              if (legacyLifecycle?.verdict === "ongoing" && !lifetime.ownsActiveRoot()) return refuse("legacy_root_not_owned");
               // Never replay an old attempt; the new message owns a new turn.
               // Live controller concurrency is owned by the chat registry.
               // Old uncertain effects and Goal budgets do not gate this turn.
@@ -4923,9 +4929,15 @@ export class InvocationService {
           } catch (error) {
             if (error instanceof Error && error.message === "goal_wait_claimed_reconciliation_required") stall.reason = "claimed-wait";
             if (error instanceof Error && error.message === GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN) stall.reason = "effect-boundary-uncertain";
+            stall.detail = `thrown:${(error instanceof Error ? error.message : String(error)).slice(0, 160)}`;
             resumed = null;
           }
           if (!resumed) {
+            const now = getLongRun(stoppedGoalReactivation.runId);
+            tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_reactivation_refused", payload: {
+              goalRunId: stoppedGoalReactivation.runId, reason: stall.reason, detail: stall.detail ?? null,
+              captured: { status: stoppedGoalReactivation.status, version: stoppedGoalReactivation.version },
+              current: now ? { status: now.status, version: now.version } : null } });
             stoppedGoalReactivation = null;
             record.automaticGoalId = undefined;
             record.longRunProjection = undefined;
