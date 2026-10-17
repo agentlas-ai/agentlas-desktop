@@ -19,6 +19,7 @@ import {
   getRuntimeToolPermissionArbiter,
   type RuntimeToolPermissionAsk,
 } from "../runtime/tool-approval";
+import { secretEquals } from "../security/secret-equals";
 
 let server: http.Server | null = null;
 let boundPort = 0;
@@ -231,7 +232,7 @@ export function startMcpProxyApprovalServer(): Promise<number> {
         res.writeHead(404).end("not found");
         return;
       }
-      if ((req.headers["authorization"] ?? "") !== `Bearer ${capabilityToken}`) {
+      if (!secretEquals(req.headers["authorization"] ?? "", `Bearer ${capabilityToken}`)) {
         res.writeHead(401).end("unauthorized");
         return;
       }

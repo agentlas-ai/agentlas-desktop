@@ -16,6 +16,7 @@ import { readAppArtifactSource, buildAppArtifact, loadReadyArtifact, publishRead
 import { observeArtifactRender, ARTIFACT_PREVIEW_CSP } from "./artifact-render";
 import { readArtifactPresentation, writeArtifactPresentation } from "../store/artifact-presentation";
 import { artifactPresentationClient } from "./presentation-client";
+import { secretEquals } from "../security/secret-equals";
 
 type ActivePreview = {
   appId: string;
@@ -335,7 +336,7 @@ async function handleRequest(preview: ActivePreview, request: IncomingMessage, r
     }
     try {
       const input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-      if (!input || input.token !== preview.presentationToken || !preview.issuedBundles.has(input.bundleDigest)) {
+      if (!input || !secretEquals(input.token, preview.presentationToken) || !preview.issuedBundles.has(input.bundleDigest)) {
         sendJson(response, 403, { error: "artifact_presentation_capability_refused" }); return;
       }
       const result = writeArtifactPresentation(target, {

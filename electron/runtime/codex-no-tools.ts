@@ -12,6 +12,7 @@ import { aliveDecisionProfileForRequest, type AliveDecisionProfile } from "./ali
 import { agentContextNoToolsPacketForRequest, agentContextSessionKey } from "./agent-context";
 import { createCodexNoToolsProviderSession, CodexNoToolsSessionError,
   type CodexNoToolsProviderSession, type CodexNoToolsProviderSessionOptions } from "./codex-no-tools-session";
+import { secretEquals } from "../security/secret-equals";
 
 /** Opaque complete host payload only; no inner producer lifetime or permission is inferred here. */
 export function composeCodexHostInstructions(req: Pick<RunnerRequest, "systemPrompt" | "outputSchema">): string {
@@ -460,7 +461,7 @@ function createAliveGateway(profile: Readonly<AliveDecisionProfile>, bindingKey:
         const metadata = payload.client_metadata?.["x-codex-turn-metadata"];
         let tagged: Record<string, unknown> | null = null;
         try { tagged = typeof metadata === "string" ? object(JSON.parse(metadata)) : null; } catch {}
-        if (!tagged || tagged.agentlas_turn_nonce !== turn.nonce) { outgoing.writeHead(403); outgoing.end(); return; }
+        if (!tagged || !secretEquals(tagged.agentlas_turn_nonce, turn.nonce)) { outgoing.writeHead(403); outgoing.end(); return; }
         // stdio ACK and HTTP are different channels. Wait only within the
         // current admitted turn; HTTP-provided IDs cannot establish authority.
         if (!turn.nativeIds) await Promise.race([turn.nativeStarted, new Promise<void>((_resolve, reject) => {
