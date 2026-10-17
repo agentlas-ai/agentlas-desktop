@@ -1337,6 +1337,8 @@ export interface MobileBridgeChatDto {
   id: string;
   /** Main-owned origin marker. Titles or coordinator names are never used to infer this. */
   oneOrigin: boolean;
+  /** The personal One's own conversation (one_supervisor_conversations binding); absent otherwise. */
+  personalOneConversation?: true;
   /** Null only for a general One conversation that has not become a Task. */
   taskId: string | null;
   taskVersion: number | null;

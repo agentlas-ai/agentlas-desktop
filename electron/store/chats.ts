@@ -264,6 +264,13 @@ export function listRecentOneChats(limit = 50): Chat[] {
  * (owner 2026-10-16: "supervisor one은 따로 one 세션에 표기하지마"). It opens from the personal One entry; work it hands
  * off runs in a task chat of its own, which stays listed. Decided by the binding row only, never by title or text.
  */
+/** Whether this chat is the personal One's own conversation, by the same binding row as the One session list. */
+export function isPersonalSupervisorConversation(chatId: string): boolean {
+  const db = getDb();
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='one_supervisor_conversations'").get()) return false;
+  return Boolean(db.prepare("SELECT 1 FROM one_supervisor_conversations WHERE chat_id = ? LIMIT 1").get(chatId));
+}
+
 function personalSupervisorConversationPredicate(): string {
   return getDb().prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='one_supervisor_conversations'").get()
     ? "AND NOT EXISTS (SELECT 1 FROM one_supervisor_conversations p WHERE p.chat_id = chats.id)" : "";

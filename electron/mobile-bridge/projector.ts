@@ -23,6 +23,7 @@ import {
   getChat,
   getChatWorkingFolder,
   listChatMessages,
+  isPersonalSupervisorConversation,
   listRecentChats,
 } from "../store/chats";
 import { listChatFileSnapshot } from "../store/chat-message-attachments";
@@ -903,6 +904,9 @@ export function projectMobileBridgeChat(
   return {
     id: chat.id,
     oneOrigin: isMobileBridgeOneChat(chat),
+    // The phone keeps this row (its personal One reads approvals through it) but leaves it out of the One
+    // session list, as Desktop's listRecentOneChats does (c210538f). Additive: older apps ignore it.
+    ...(isPersonalSupervisorConversation(chat.id) ? { personalOneConversation: true as const } : {}),
     taskId: task?.id ?? chat.taskId ?? null,
     taskVersion: task?.version ?? null,
     taskStatus: task?.status ?? null,
