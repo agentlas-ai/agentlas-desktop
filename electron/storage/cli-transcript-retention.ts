@@ -62,7 +62,15 @@ export const CLI_TRANSCRIPT_STORES: TranscriptStore[] = [
   },
 ];
 
-interface TranscriptEntry { paths: string[]; newestMs: number; bytes: number }
+/**
+ * `topMs` is the newest mtime of the entry's own paths. Their trees are walked
+ * (`tree`) only for an entry that is otherwise eligible and whose own paths are
+ * already older than the window: a tree's newest mtime is never older than its
+ * root's, so a newer root rules the entry out exactly. Before, every pass walked
+ * every entry (owner Mac 2026-10-17: about 400k lstat/readdir calls and 7.4 s of
+ * thread-pool time per pass, for zero removals).
+ */
+interface TranscriptEntry { paths: string[]; topMs: number; tree?: { newestMs: number; bytes: number } }
 
 // Asynchronous file access: this runs in the Desktop main process.
 async function treeStat(target: string): Promise<{ newestMs: number; bytes: number }> {
@@ -81,6 +89,19 @@ async function treeStat(target: string): Promise<{ newestMs: number; bytes: numb
   return { newestMs, bytes };
 }
 
+async function entryTree(entry: TranscriptEntry): Promise<{ newestMs: number; bytes: number }> {
+  if (!entry.tree) {
+    const tree = { newestMs: 0, bytes: 0 };
+    for (const target of entry.paths) {
+      const stat = await treeStat(target);
+      tree.newestMs = Math.max(tree.newestMs, stat.newestMs);
+      tree.bytes += stat.bytes;
+    }
+    entry.tree = tree;
+  }
+  return entry.tree;
+}
+
 async function indexStore(userDataRoot: string, store: TranscriptStore): Promise<Map<string, TranscriptEntry>> {
   const index = new Map<string, TranscriptEntry>();
   const visit = async (dir: string, depth: number): Promise<void> => {
@@ -91,11 +112,11 @@ async function indexStore(userDataRoot: string, store: TranscriptStore): Promise
       const full = path.join(dir, entry.name);
       const id = store.sessionIdOf(entry.name);
       if (id && (entry.isFile() || (entry.isDirectory() && store.dirEntries))) {
-        const stat = await treeStat(full);
-        const current = index.get(id) ?? { paths: [], newestMs: 0, bytes: 0 };
+        let topMs: number;
+        try { topMs = (await fs.promises.lstat(full)).mtimeMs; } catch { continue; }
+        const current = index.get(id) ?? { paths: [], topMs: 0 };
         current.paths.push(full);
-        current.newestMs = Math.max(current.newestMs, stat.newestMs);
-        current.bytes += stat.bytes;
+        current.topMs = Math.max(current.topMs, topMs);
         index.set(id, current);
       } else if (entry.isDirectory() && depth < store.maxDepth) {
         await visit(full, depth + 1);
@@ -146,11 +167,12 @@ export async function retireIdleCliTranscripts(input: {
         }
         result.files += 1;
       }
-      result.bytes += entry.bytes;
+      result.bytes += (await entryTree(entry)).bytes;
     };
 
     // The index was read asynchronously: right before removing, confirm that no binding
-    // used the session since and that its files were not written since.
+    // used the session since and that nothing in its trees was written since (nested
+    // files too: a folder's own mtime does not change when a file inside is rewritten).
     const latestUse = input.db.prepare(
       "SELECT max(updated_at) AS used FROM chat_runtime_sessions WHERE kind = ? AND lower(session_id) = ?",
     );
@@ -158,7 +180,7 @@ export async function retireIdleCliTranscripts(input: {
       const used = (latestUse.get(store.kind, id) as { used: string | null } | undefined)?.used ?? null;
       if (used !== null && used >= cutoffIso) return false;
       for (const target of entry.paths) {
-        try { if ((await fs.promises.lstat(target)).mtimeMs >= cutoffMs) return false; } catch { /* gone */ }
+        if ((await treeStat(target)).newestMs >= cutoffMs) return false;
       }
       return true;
     };
@@ -167,7 +189,7 @@ export async function retireIdleCliTranscripts(input: {
       const id = row.session_id.toLowerCase();
       if (live.has(id)) continue;
       const entry = index.get(id);
-      if (entry && entry.newestMs < cutoffMs && await stillIdle(id, entry)) {
+      if (entry && entry.topMs < cutoffMs && (await entryTree(entry)).newestMs < cutoffMs && await stillIdle(id, entry)) {
         await removeEntry(entry);
         index.delete(id);
         retired.add(id);
@@ -184,7 +206,7 @@ export async function retireIdleCliTranscripts(input: {
       if (retired.has(id) && !input.dryRun) input.clearSession(row.chat_id, row.kind, row.agent_id ?? "");
     }
     for (const [id, entry] of index) {
-      if (bound.has(id) || entry.newestMs >= cutoffMs) continue;
+      if (bound.has(id) || entry.topMs >= cutoffMs || (await entryTree(entry)).newestMs >= cutoffMs) continue;
       const nowBound = latestUse.get(store.kind, id) as { used: string | null } | undefined;
       if (nowBound?.used || !(await stillIdle(id, entry))) continue;
       await removeEntry(entry);
