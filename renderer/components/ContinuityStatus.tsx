@@ -151,7 +151,7 @@ export function ContinuityStatus({ chatId, locale, detail = false, embedded = fa
       {activeSchedules.length > 0 && ` · ${ko ? "실행 기록상 활성" : "ledger-active"} ${activeSchedules.length}`}
       {enabledWithoutNextTime.length > 0 && ` · ${ko ? "최근 오류·다음 시각 없음" : "recent error·no next time"} ${enabledWithoutNextTime.length}`}
       {nextSchedule && ` · ${ko ? "다음 예정" : "next expected"} ${when(nextSchedule.nextRunAt, locale)}`}</span>,
-    unverifiedSchedules.length > 0 && <span key="unverified">{ko ? "Goal 연결 확인 필요" : "Goal link unverified"} {unverifiedSchedules.length}</span>,
+    unverifiedSchedules.length > 0 && <span key="unverified">{ko ? "자동화 연결 확인 필요" : "Goal link unverified"} {unverifiedSchedules.length}</span>,
     surface && surface.automation.held > 0 && <span key="held">{ko ? "보류된 자동화" : "Held automations"} {surface.automation.held}</span>,
     surface && surface.automation.reconciliationHold > 0 && <span key="reconcile">{ko ? "자동화 조정 보류" : "Automation reconciliation hold"} {surface.automation.reconciliationHold}</span>,
     modelStatus && <span key="model">{modelStatus} · {model?.requested.model ?? model?.requested.kind}</span>,
@@ -190,7 +190,7 @@ export function ContinuityStatus({ chatId, locale, detail = false, embedded = fa
         {activeSchedules.length > 0 && ` · ${ko ? "실행 기록상 활성" : "ledger-active"} ${activeSchedules.length}`}
         {enabledWithoutNextTime.length > 0 && ` · ${ko ? "최근 오류·다음 시각 없음" : "recent error·no next time"} ${enabledWithoutNextTime.length}`}
         {nextSchedule && ` · ${ko ? "다음 예정" : "next expected"} ${when(nextSchedule.nextRunAt, locale)}`}</span>}
-      {unverifiedSchedules.length > 0 && <span>{ko ? "Goal 연결 확인 필요" : "Goal link unverified"} {unverifiedSchedules.length}</span>}
+      {unverifiedSchedules.length > 0 && <span>{ko ? "자동화 연결 확인 필요" : "Goal link unverified"} {unverifiedSchedules.length}</span>}
       {surface && surface.automation.held > 0 && <span>{ko ? "보류된 자동화" : "Held automations"} {surface.automation.held}</span>}
       {surface && surface.automation.reconciliationHold > 0 && <span>{ko ? "자동화 조정 보류" : "Automation reconciliation hold"} {surface.automation.reconciliationHold}</span>}
       {modelStatus && <span>{modelStatus} · {model?.requested.model ?? model?.requested.kind}</span>}
@@ -211,7 +211,7 @@ export function ContinuityStatus({ chatId, locale, detail = false, embedded = fa
         {when(snapshot.invocation.phaseAt, locale) && ` · ${when(snapshot.invocation.phaseAt, locale)}`}</p>}
       {snapshot.automations.map((row) => <p key={row.automationId} data-automation-id={row.automationId}>
         {row.relationship === "goal-bound" ? (ko ? "Goal 연계 예약" : "Goal-linked schedule")
-          : row.relationship === "unverified" ? (ko ? "Goal 연결 확인 필요" : "Goal link unverified")
+          : row.relationship === "unverified" ? (ko ? "자동화 연결 확인 필요" : "Goal link unverified")
             : (ko ? "Goal과 별도 예약" : "Separate from Goal")}
         {!row.enabled && ` · ${ko ? "예약 꺼짐" : "Schedule off"}`}
         {row.liveState && ` · ${row.liveState === "running" ? (ko ? "최근 원장 기록상 진행" : "Recent ledger reports running") : (ko ? "스케줄러 요청됨" : "Scheduler queued")}`}

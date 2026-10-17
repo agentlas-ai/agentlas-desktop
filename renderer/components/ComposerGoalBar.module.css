@@ -1,55 +1,142 @@
-/* Work's one Goal surface above the conversation (owner 2026-10-04 "골 하나만 해라"): a card of its own, not a tab on the composer. */
-/* Width comes from the screen's composer stack, so its sides line up with the composer. */
-.top[data-goal-bar-placement] { width: 100%; margin: 0 0 6px; box-sizing: border-box; overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--ink) 12%, var(--paper-edge)); border-radius: 12px;
-  background: color-mix(in srgb, var(--paper-2) 72%, var(--paper)); }
-.top > :global(.chat-composer-goal) { margin: 0; border: 0; border-radius: 0; box-shadow: none; }
+/* The Goal as one quiet row attached above the composer (owner 2026-10-17, after Claude Code / Codex plan strips):
+   objective, status dot and criteria count; the row opens for the criteria, plan, next check and automation links.
+   Width comes from the screen's composer stack, so its sides line up with the composer. */
+.top[data-goal-bar-placement] {
+  width: 100%;
+  margin: 0 0 6px;
+  box-sizing: border-box;
+  overflow: hidden;
+  border: 1px solid var(--paper-edge);
+  border-radius: 12px;
+  background: var(--popup-card-bg, var(--paper));
+  color: var(--ink);
+  container-type: inline-size;
+}
+.top > :global(.chat-composer-goal) { margin: 0; border: 0; border-radius: 0; box-shadow: none; background: transparent; }
 
-/* Keep the action hit areas separate from the objective, even with both Work panels open. */
 .card:global(.chat-composer-goal) {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px 12px;
-  padding: 8px 10px;
-}
-.heading { display: flex; align-items: center; gap: 7px; flex: 1 0 auto; }
-.actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; margin-left: auto; max-width: 100%; }
-.card .objective {
-  flex: 1 0 100%;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  font-size: 12px;
-  line-height: 1.5;
-}
-.card .actions button {
-  width: 28px;
-  height: 28px;
-  border-radius: 7px;
-  transition: background-color 120ms ease, color 120ms ease;
-}
-.card .actions button[data-chat-goal-resume] {
-  width: auto;
-  min-width: 28px;
-  max-width: 100%;
-  height: auto;
-  min-height: 28px;
-  padding: 4px 10px;
-  background: var(--fill-1);
-  color: var(--ink-soft);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 20px;
-  overflow-wrap: anywhere;
-}
-.card .actions button:hover:not(:disabled) { color: var(--ink); }
-.card .actions button:active:not(:disabled) { background: color-mix(in srgb, var(--ink) 22%, transparent); color: var(--ink); }
-.card .actions button:focus-visible { outline-offset: -2px; }
-@media (prefers-reduced-motion: reduce) {
-  .card .actions button { transition: none; }
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 6px 0 4px;
 }
 
-/* The plan line starts under the objective text (10px padding + 18px icon + 7px gap), like the next-check line. */
-.top > [data-goal-plan] { margin: 0; border: 0; padding-left: 35px; }
-.nextWake { margin: 0; padding: 0 10px 6px 35px; color: var(--muted-deep); font-size: 10.5px; line-height: 1.4; }
-.details { padding: 0 10px 0 35px; }
-.details:has(> *) { padding-bottom: 8px; }
+/* The whole left part is the open/close control: icon, "목표", the objective on one line, a chevron. */
+.card .summary {
+  width: auto;
+  justify-content: flex-start;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 30px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.card .summary:disabled { cursor: default; }
+.card .summary:hover:not(:disabled) { background: var(--fill-1, color-mix(in srgb, var(--ink) 5%, transparent)); }
+.card .summary:focus-visible { outline: 2px solid var(--info); outline-offset: -2px; }
+.icon { display: inline-flex; color: var(--muted-deep); flex: none; }
+.kicker { flex: none; color: var(--muted-deep); font-size: 11.5px; font-weight: 600; }
+.card .objective {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.chevron { flex: none; color: var(--muted); transition: transform 140ms ease; }
+.top[data-goal-expanded="true"] .chevron { transform: rotate(180deg); }
+
+/* Status: a dot and one word. Colour only marks what needs the owner (stopped) or is live (running). */
+.card .status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  color: var(--muted-deep);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.status i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+.status[data-tone="running"] i,
+.status[data-tone="verifying"] i { background: var(--green, #2f9e62); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green, #2f9e62) 18%, transparent); }
+.status[data-tone="blocked"] i,
+.status[data-tone="paused"] i { background: var(--amber-deep, #b7791f); }
+.card .criteria { padding: 0; background: none; flex: none; color: var(--muted); font-size: 11px; white-space: nowrap; }
+
+.actions { display: flex; align-items: center; gap: 2px; flex: none; }
+.card .actions button {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted-deep);
+  opacity: .72;
+  transition: background-color 120ms ease, color 120ms ease, opacity 120ms ease;
+}
+.top:hover .actions button,
+.top:focus-within .actions button { opacity: 1; }
+.card .actions button:hover:not(:disabled) { background: var(--fill-1, color-mix(in srgb, var(--ink) 6%, transparent)); color: var(--ink); }
+.card .actions button:focus-visible { outline: 2px solid var(--info); outline-offset: -2px; opacity: 1; }
+.card .actions button[data-chat-goal-resume] {
+  width: auto;
+  padding: 0 10px;
+  border: 1px solid var(--paper-edge);
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 11.5px;
+  font-weight: 600;
+  opacity: 1;
+}
+
+/* A stop reason asks the owner to act, so it stays visible while folded. */
+.notice {
+  margin: 0;
+  padding: 0 12px 8px 36px;
+  color: var(--muted-deep);
+  font-size: 11.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.notice[data-tone="blocked"],
+.notice[data-tone="paused"] { color: var(--amber-deep, #8a5a12); }
+
+.more {
+  display: grid;
+  gap: 8px;
+  padding: 8px 12px 10px 36px;
+  border-top: 1px solid var(--paper-edge);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.fullObjective { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+.criteriaList { margin: 0; padding: 0 0 0 16px; color: var(--ink-soft); display: grid; gap: 2px; }
+.more > [data-goal-plan] { margin: 0; border: 0; padding: 0; }
+.nextWake { margin: 0; color: var(--muted-deep); font-size: 11px; line-height: 1.4; }
+.details:empty { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .chevron, .card .actions button { transition: none; }
+}
+
+/* A narrow column keeps the objective readable: the word "목표", the criteria count and the status word give way first. */
+@container (max-width: 460px) {
+  .kicker, .card .criteria { display: none; }
+  .card .status { font-size: 0; gap: 0; }
+}

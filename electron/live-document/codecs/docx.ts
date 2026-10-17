@@ -1,7 +1,7 @@
-import type { LiveFlowBlock, LiveFormat, LiveFormatPatch, LiveTableCell } from "../../../shared/live-document";
+import type { LiveFlowBlock, LiveFormat, LiveFormatPatch, LivePage, LiveTableCell } from "../../../shared/live-document";
 import { ZipPackage } from "../zip";
 import {
-  attr, createElement, elements, escapeXmlText, firstElement, localName, markDirty, markPath, parseXml,
+  attr, cloneElement, createElement, elements, escapeXmlText, firstElement, localName, markDirty, markPath, parseXml,
   serializeNode, serializeXml, type XmlDocument, type XmlElement, type XmlNode,
 } from "../xml-lite";
 import { blockChanged, flowBlocks, LiveDocumentCodecError, planFlowInsertions, type LiveDocumentCodec } from "./common";
@@ -10,6 +10,8 @@ import { el, formatDelta, hex6, insertOrdered, isEmptyFormat, normColor, removeC
 // CT_RPr / CT_PPr child sequences (ECMA-376 §17.3.2.28 / §17.3.1.26): Word rejects children out of order.
 const RPR_ORDER = ["rStyle", "rFonts", "b", "bCs", "i", "iCs", "caps", "smallCaps", "strike", "dstrike", "outline", "shadow", "emboss", "imprint", "noProof", "snapToGrid", "vanish", "webHidden", "color", "spacing", "w", "kern", "position", "sz", "szCs", "highlight", "u", "effect", "bdr", "shd", "fitText", "vertAlign", "rtl", "cs", "em", "lang", "eastAsianLayout", "specVanish", "oMath"];
 const PPR_ORDER = ["pStyle", "keepNext", "keepLines", "pageBreakBefore", "framePr", "widowControl", "numPr", "suppressLineNumbers", "pBdr", "shd", "tabs", "suppressAutoHyphens", "kinsoku", "wordWrap", "overflowPunct", "topLinePunct", "autoSpaceDE", "autoSpaceDN", "bidi", "adjustRightInd", "snapToGrid", "spacing", "ind", "contextualSpacing", "mirrorIndents", "suppressOverlap", "jc", "textDirection", "textAlignment", "textboxTightWrap", "outlineLvl", "divId", "cnfStyle", "rPr", "sectPr", "pPrChange"];
+const TCPR_ORDER = ["cnfStyle", "tcW", "gridSpan", "hMerge", "vMerge", "tcBorders", "shd", "noWrap", "tcMar", "textDirection", "tcFitText", "vAlign", "hideMark", "headers", "cellIns", "cellDel", "cellMerge", "tcPrChange"];
+const TWIP_MM = 25.4 / 1440;
 const JC_IN: Record<string, LiveFormat["align"]> = { left: "left", start: "left", center: "center", right: "right", end: "right", both: "justify", distribute: "justify" };
 const JC_OUT: Record<NonNullable<LiveFormat["align"]>, string> = { left: "left", center: "center", right: "right", justify: "both" };
 
@@ -33,7 +35,51 @@ export function docxParagraphFormat(paragraph: XmlElement): LiveFormat | undefin
   const pPr = firstElement(paragraph, "w:pPr");
   const jc = pPr ? JC_IN[attr(firstElement(pPr, "w:jc") ?? pPr, "w:val") ?? ""] : undefined;
   if (jc && jc !== "left") format.align = jc;
+  const shading = pPr ? shadeColor(firstElement(pPr, "w:shd")) : undefined;
+  if (shading) format.fill = shading;
   return isEmptyFormat(format) ? undefined : format;
+}
+
+/** Background of a w:shd (clear pattern fill); auto/none is no fill. */
+function shadeColor(shd: XmlElement | undefined): string | undefined {
+  if (!shd) return undefined;
+  const value = attr(shd, "w:fill");
+  return value && value !== "auto" ? normColor(value) : undefined;
+}
+
+function setShade(container: XmlElement, order: readonly string[], fill: string | null): void {
+  removeChildren(container, "shd");
+  if (fill) insertOrdered(container, el(`<w:shd w:val="clear" w:color="auto" w:fill="${hex6(fill)}"/>`), order);
+  markDirty(container);
+}
+
+function cellFill(tc: XmlElement): string | undefined {
+  const tcPr = firstElement(tc, "w:tcPr");
+  return tcPr ? shadeColor(firstElement(tcPr, "w:shd")) : undefined;
+}
+
+function setCellFill(tc: XmlElement, fill: string | null): void {
+  let tcPr = firstElement(tc, "w:tcPr");
+  if (!tcPr) { tcPr = el("<w:tcPr/>"); tc.children.unshift(tcPr); }
+  setShade(tcPr, TCPR_ORDER, fill);
+  markDirty(tc);
+}
+
+function pageOf(body: XmlElement): LivePage | undefined {
+  const sectPr = firstElement(body, "w:sectPr");
+  const size = sectPr ? firstElement(sectPr, "w:pgSz") : undefined;
+  if (!size) return undefined;
+  const margin = sectPr ? firstElement(sectPr, "w:pgMar") : undefined;
+  const mm = (node: XmlElement | undefined, key: string, fallback: number) => Math.round((Number(node ? attr(node, key) : NaN) || fallback) * TWIP_MM * 10) / 10;
+  return {
+    width: mm(size, "w:w", 11906), height: mm(size, "w:h", 16838),
+    margin: { top: mm(margin, "w:top", 1440), right: mm(margin, "w:right", 1440), bottom: mm(margin, "w:bottom", 1440), left: mm(margin, "w:left", 1440) },
+  };
+}
+
+function hasPageBreak(paragraph: XmlElement): boolean {
+  const walk = (node: XmlElement): boolean => elements(node).some((child) => (localName(child) === "br" && attr(child, "w:type") === "page") || (localName(child) !== "pPr" && walk(child)));
+  return walk(paragraph);
 }
 
 function setRunFormat(run: XmlElement, delta: LiveFormatPatch): void {
@@ -62,10 +108,11 @@ function setRunFormat(run: XmlElement, delta: LiveFormatPatch): void {
 /** Applies a format change to every text run of a paragraph (and its justification); heading sets/removes the style. */
 function setParagraphFormat(ctx: Pick<DocxContext, "styleForHeading" | "headingByStyle">, root: XmlElement | null, paragraph: XmlElement, delta: LiveFormatPatch, heading?: number): void {
   for (const { run } of textRuns(paragraph)) setRunFormat(run, delta);
-  if (delta.align !== undefined || heading !== undefined) {
+  if (delta.align !== undefined || heading !== undefined || delta.fill !== undefined) {
     let pPr = firstElement(paragraph, "w:pPr");
     if (!pPr) { pPr = el("<w:pPr/>"); paragraph.children.unshift(pPr); }
     if (delta.align !== undefined) { removeChildren(pPr, "jc"); if (delta.align !== null) insertOrdered(pPr, el(`<w:jc w:val="${JC_OUT[delta.align]}"/>`), PPR_ORDER); }
+    if (delta.fill !== undefined) setShade(pPr, PPR_ORDER, delta.fill);
     if (heading !== undefined) {
       removeChildren(pPr, "pStyle");
       if (heading > 0) insertOrdered(pPr, el(`<w:pStyle w:val="${escapeXmlText(ctx.styleForHeading.get(heading) ?? `Heading${heading}`)}"/>`), PPR_ORDER);
@@ -96,6 +143,8 @@ interface DocxContext {
   /** block id -> body child element */
   blocks: Map<string, XmlElement>;
   model: LiveFlowBlock[];
+  page?: LivePage;
+  defaultSize?: number;
 }
 
 function hasDescendant(element: XmlElement, names: Set<string>, skip: Set<string> = new Set()): boolean {
@@ -175,6 +224,7 @@ function paragraphHeading(paragraph: XmlElement, headingByStyle: Map<string, num
 interface TableLayout {
   cells: Array<{ cell: LiveTableCell; tc: XmlElement; row: number; col: number }>;
   rows: Array<Array<LiveTableCell | null>>;
+  colWidths?: number[];
 }
 
 function tableLayout(tbl: XmlElement, tableId: string): TableLayout {
@@ -200,7 +250,11 @@ function tableLayout(tbl: XmlElement, tableId: string): TableLayout {
       } else {
         const text = elements(tc, "w:p").map(docxParagraphText).join("\n");
         const first = elements(tc, "w:p")[0];
-        const format = first ? docxParagraphFormat(first) : undefined;
+        const paragraphFormat = first ? docxParagraphFormat(first) : undefined;
+        const fill = cellFill(tc);
+        const merged: LiveFormat = { ...(paragraphFormat ?? {}), ...(fill ? { fill } : {}) };
+        if (!fill) delete merged.fill;
+        const format = isEmptyFormat(merged) ? undefined : merged;
         const cell: LiveTableCell = { id: `${tableId}.r${rowIndex + 1}c${col + 1}`, text, ...(span > 1 ? { colSpan: span } : {}), ...(format ? { format } : {}) };
         if (vMerge) open.set(col, cell); else open.delete(col);
         cells.push({ cell, tc, row: rowIndex, col });
@@ -213,7 +267,11 @@ function tableLayout(tbl: XmlElement, tableId: string): TableLayout {
   });
   const width = Math.max(0, ...rows.map((row) => row.length));
   for (const row of rows) while (row.length < width) row.push(null);
-  return { cells, rows };
+  const grid = firstElement(tbl, "w:tblGrid");
+  const cols = grid ? elements(grid, "w:gridCol").map((col) => Number(attr(col, "w:w")) || 0) : [];
+  const total = cols.reduce((sum, w) => sum + w, 0);
+  const colWidths = total > 0 && cols.length === width ? cols.map((w) => Math.round((w / total) * 10000) / 10000) : undefined;
+  return { cells, rows, colWidths };
 }
 
 function load(bytes: Uint8Array): DocxContext {
@@ -238,17 +296,26 @@ function load(bytes: Uint8Array): DocxContext {
       else {
         const heading = paragraphHeading(child, headingByStyle);
         const format = docxParagraphFormat(child);
-        model.push({ id, type: "paragraph", text, ...(heading ? { heading } : {}), ...(format ? { format } : {}) });
+        const pPr = firstElement(child, "w:pPr");
+        const pageBreak = pPr && onOff(firstElement(pPr, "w:pageBreakBefore")) ? "before" as const : hasPageBreak(child) ? "after" as const : undefined;
+        model.push({ id, type: "paragraph", text, ...(heading ? { heading } : {}), ...(format ? { format } : {}), ...(pageBreak ? { pageBreak } : {}) });
       }
     } else if (name === "tbl") {
-      model.push({ id, type: "table", rows: tableLayout(child, id).rows });
+      const layout = tableLayout(child, id);
+      model.push({ id, type: "table", rows: layout.rows, ...(layout.colWidths ? { colWidths: layout.colWidths } : {}) });
     } else {
       const preview = elements(child).length ? collectText(child).slice(0, 80) : "";
       model.push({ id, type: "object", label: preview ? `${name}: ${preview}` : name });
     }
     blocks.set(id, child);
   }
-  return { pkg, doc, body, headingByStyle, styleForHeading, blocks, model };
+  return { pkg, doc, body, headingByStyle, styleForHeading, blocks, model, page: pageOf(body), defaultSize: defaultSize(pkg) };
+}
+
+function defaultSize(pkg: ZipPackage): number | undefined {
+  const xml = pkg.text("word/styles.xml");
+  const match = xml ? /<w:docDefaults>[\s\S]*?<w:sz w:val="(\d+)"/.exec(xml) : null;
+  return match ? Number(match[1]) / 2 : undefined;
 }
 
 function collectText(element: XmlElement): string {
@@ -317,13 +384,17 @@ function newParagraph(ctx: DocxContext, template: XmlElement | undefined, text: 
     if (name === "sectPr") return false;
     if (name === "pStyle") return !heading && !isHeadingStyle(ctx, node);
     if (name === "numPr") return !heading;
-    return true;
+    // Alignment, shading and page breaks are in the model: the new paragraph carries only what its own block says.
+    return name !== "jc" && name !== "shd" && name !== "pageBreakBefore";
   }).map(serializeNode);
   if (heading) kept.unshift(`<w:pStyle w:val="${escapeXmlText(ctx.styleForHeading.get(heading) ?? `Heading${heading}`)}"/>`);
   const pPr = kept.length ? `<w:pPr>${kept.join("")}</w:pPr>` : "";
   const runs = template && !heading ? textRuns(template) : [];
   const rPrSource = runs.length ? firstElement(runs[0].run, "w:rPr") : undefined;
-  return createElement(`<w:p>${pPr}${runMarkup(text, rPrSource ? serializeNode(rPrSource) : "")}</w:p>`);
+  // Keep the template's fonts and language; drop what LiveFormat models so the saved paragraph matches the model.
+  const rPr = rPrSource ? cloneElement(rPrSource) : undefined;
+  if (rPr) removeChildren(rPr, "b", "bCs", "i", "iCs", "u", "sz", "szCs", "color", "shd", "highlight");
+  return createElement(`<w:p>${pPr}${runMarkup(text, rPr ? serializeNode(rPr) : "")}</w:p>`);
 }
 
 function isHeadingStyle(ctx: DocxContext, pStyle: XmlNode): boolean {
@@ -332,13 +403,41 @@ function isHeadingStyle(ctx: DocxContext, pStyle: XmlNode): boolean {
   return ctx.headingByStyle.has(value) || /^heading[1-6]$/i.test(value);
 }
 
-function newTable(rows: string[][]): XmlElement {
-  const columns = Math.max(...rows.map((row) => row.length));
-  const width = Math.floor(9000 / columns);
+/** A new table with thin borders, column widths across the text width and the model's merged ranges. */
+function newTable(block: Extract<LiveFlowBlock, { type: "table" }>, page?: LivePage): { table: XmlElement; cells: Map<string, XmlElement> } {
+  const columns = Math.max(...block.rows.map((row) => row.length));
+  // Text width of the page in twips (A4 with 1-inch margins = 9026).
+  const usable = page ? Math.round((page.width - page.margin.left - page.margin.right) / TWIP_MM) : 9026;
+  const twips = Array.from({ length: columns }, (_, c) => Math.max(200, Math.round(usable * (block.colWidths?.[c] ?? 1 / columns))));
+  const span = (from: number, count: number) => twips.slice(from, from + count).reduce((sum, w) => sum + w, 0);
+  // Which anchor covers each null position.
+  const anchorAt = new Map<string, { r: number; c: number; cell: LiveTableCell }>();
+  block.rows.forEach((row, r) => row.forEach((cell, c) => {
+    if (!cell) return;
+    for (let y = r; y < r + (cell.rowSpan ?? 1); y++) for (let x = c; x < c + (cell.colSpan ?? 1); x++) anchorAt.set(`${y}:${x}`, { r, c, cell });
+  }));
   const border = (side: string) => `<w:${side} w:val="single" w:sz="4" w:space="0" w:color="auto"/>`;
-  const grid = Array.from({ length: columns }, () => `<w:gridCol w:w="${width}"/>`).join("");
-  const body = rows.map((row) => `<w:tr>${row.map((text) => `<w:tc><w:tcPr><w:tcW w:w="${width}" w:type="dxa"/></w:tcPr><w:p>${runMarkup(text, "")}</w:p></w:tc>`).join("")}</w:tr>`).join("");
-  return createElement(`<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders>${["top", "left", "bottom", "right", "insideH", "insideV"].map(border).join("")}</w:tblBorders><w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/></w:tblPr><w:tblGrid>${grid}</w:tblGrid>${body}</w:tbl>`);
+  const grid = twips.map((w) => `<w:gridCol w:w="${w}"/>`).join("");
+  const order: Array<string | null> = [];
+  const body = block.rows.map((row, r) => {
+    const tcs: string[] = [];
+    for (let c = 0; c < columns; c++) {
+      const cell = row[c];
+      const owner = anchorAt.get(`${r}:${c}`);
+      if (!cell && (!owner || owner.c !== c || owner.r === r)) continue; // covered by a column span
+      const anchor = cell ?? owner!.cell;
+      const cols = anchor.colSpan ?? 1;
+      const vMerge = (anchor.rowSpan ?? 1) > 1 ? (cell ? '<w:vMerge w:val="restart"/>' : "<w:vMerge/>") : "";
+      tcs.push(`<w:tc><w:tcPr><w:tcW w:w="${span(c, cols)}" w:type="dxa"/>${cols > 1 ? `<w:gridSpan w:val="${cols}"/>` : ""}${vMerge}</w:tcPr><w:p>${cell ? runMarkup(cell.text, "") : ""}</w:p></w:tc>`);
+      order.push(cell ? cell.id : null);
+    }
+    return `<w:tr>${tcs.join("")}</w:tr>`;
+  }).join("");
+  const table = createElement(`<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders>${["top", "left", "bottom", "right", "insideH", "insideV"].map(border).join("")}</w:tblBorders><w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/></w:tblPr><w:tblGrid>${grid}</w:tblGrid>${body}</w:tbl>`);
+  const tcs = elements(table, "w:tr").flatMap((tr) => elements(tr, "w:tc"));
+  const cells = new Map<string, XmlElement>();
+  order.forEach((id, index) => { if (id) cells.set(id, tcs[index]); });
+  return { table, cells };
 }
 
 function setCellText(root: XmlElement, tc: XmlElement, text: string): void {
@@ -363,7 +462,8 @@ function setCellText(root: XmlElement, tc: XmlElement, text: string): void {
 
 export const docxCodec: LiveDocumentCodec = {
   parse(bytes) {
-    return { kind: "flow", blocks: load(bytes).model };
+    const ctx = load(bytes);
+    return { kind: "flow", blocks: ctx.model, ...(ctx.page ? { page: ctx.page } : {}), ...(ctx.defaultSize ? { defaultSize: ctx.defaultSize } : {}) };
   },
   write(bytes, original, final) {
     const ctx = load(bytes);
@@ -391,8 +491,10 @@ export const docxCodec: LiveDocumentCodec = {
           const target = layout.cells.find((item) => item.cell.id === cell.id);
           if (!target) continue;
           if (old?.text !== cell.text) setCellText(root, target.tc, cell.text);
-          const delta = formatDelta(old?.format, cell.format);
-          if (!isEmptyFormat(delta)) { for (const p of elements(target.tc, "w:p")) setParagraphFormat(ctx, null, p, delta); markPath(root, target.tc); }
+          const { fill, ...delta } = formatDelta(old?.format, cell.format);
+          if (fill !== undefined) setCellFill(target.tc, fill);
+          if (!isEmptyFormat(delta)) for (const p of elements(target.tc, "w:p")) setParagraphFormat(ctx, null, p, delta);
+          if (fill !== undefined || !isEmptyFormat(delta)) markPath(root, target.tc);
         }
       }
     }
@@ -402,20 +504,34 @@ export const docxCodec: LiveDocumentCodec = {
     const templateFor = (anchorId: string): XmlElement | undefined => {
       const ids = [...ctx.blocks.keys()];
       const start = anchorId === "^" ? -1 : ids.indexOf(anchorId);
-      for (let i = start; i >= 0; i--) { const block = before.get(ids[i]); if (block?.type === "paragraph" && !block.heading) return ctx.blocks.get(ids[i]); }
-      for (const id of ids) { const block = before.get(id); if (block?.type === "paragraph" && !block.heading) return ctx.blocks.get(id); }
+      // The template is the paragraph as it was in the file, not as this save already rewrote it.
+      const pristine = (id: string) => { const element = ctx.blocks.get(id)!; return createElement(element.src.slice(element.start, element.end)); };
+      for (let i = start; i >= 0; i--) { const block = before.get(ids[i]); if (block?.type === "paragraph" && !block.heading) return pristine(ids[i]); }
+      for (const id of ids) { const block = before.get(id); if (block?.type === "paragraph" && !block.heading) return pristine(id); }
       return undefined;
     };
     const build = (block: LiveFlowBlock, anchorId: string): XmlElement | null => {
       if (block.type === "paragraph") {
         const built = newParagraph(ctx, templateFor(anchorId), block.text, block.heading);
         if (block.format) setParagraphFormat(ctx, null, built, block.format);
+        if (block.pageBreak === "before") {
+          let pPr = firstElement(built, "w:pPr");
+          if (!pPr) { pPr = el("<w:pPr/>"); built.children.unshift(pPr); }
+          insertOrdered(pPr, el("<w:pageBreakBefore/>"), PPR_ORDER);
+          markDirty(built);
+        }
         return built;
       }
       if (block.type === "table") {
-        const built = newTable(block.rows.map((row) => row.map((cell) => cell?.text ?? "")));
-        const cells = elements(built, "w:tr").flatMap((tr) => elements(tr, "w:tc"));
-        block.rows.flat().forEach((cell, index) => { if (cell?.format && cells[index]) for (const p of elements(cells[index], "w:p")) setParagraphFormat(ctx, null, p, cell.format); });
+        const { table: built, cells } = newTable(block, ctx.page);
+        for (const cell of block.rows.flat()) {
+          const tc = cell ? cells.get(cell.id) : undefined;
+          if (!cell?.format || !tc) continue;
+          const { fill, ...rest } = cell.format;
+          if (fill) setCellFill(tc, fill);
+          if (!isEmptyFormat(rest)) for (const p of elements(tc, "w:p")) setParagraphFormat(ctx, null, p, rest);
+          markPath(built, tc); // the fresh table re-renders down to every formatted cell
+        }
         return built;
       }
       return null;

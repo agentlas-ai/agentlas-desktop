@@ -1,6 +1,6 @@
 import zlib from "node:zlib";
 import * as CFB from "cfb";
-import type { LiveFlowBlock, LiveFormat, LiveFormatPatch, LiveTableCell } from "../../../shared/live-document";
+import type { LiveFlowBlock, LiveFormat, LiveFormatPatch, LivePage, LiveTableCell } from "../../../shared/live-document";
 import { blockChanged, flowBlocks, LiveDocumentCodecError, planFlowInsertions, spreadLines, type LiveDocumentCodec } from "./common";
 import { formatDelta, isEmptyFormat } from "./format";
 
@@ -27,6 +27,9 @@ const TAG_LIST_HEADER = 72;
 const TAG_TABLE = 77;
 
 const TAG_ID_MAPPINGS = 17;
+const TAG_BORDER_FILL = 20;
+const TAG_PAGE_DEF = 73;
+const HWPUNIT_MM = 25.4 / 7200;
 const TAG_CHAR_SHAPE = 21;
 const TAG_PARA_SHAPE = 25;
 /** ID_MAPPINGS slots (HWP 5.0 spec §4.2.2): character shapes and paragraph shapes. */
@@ -148,7 +151,7 @@ function controlIds(records: HwpRecord[], index: number): string[] {
   return out;
 }
 
-interface CellRef { row: number; col: number; colSpan: number; rowSpan: number; paragraphs: number[] }
+interface CellRef { row: number; col: number; colSpan: number; rowSpan: number; paragraphs: number[]; width: number; borderFill: number }
 
 function tableCells(records: HwpRecord[], ctrlIndex: number): { rows: number; cols: number; cells: CellRef[] } {
   const end = groupEnd(records, ctrlIndex);
@@ -165,7 +168,8 @@ function tableCells(records: HwpRecord[], ctrlIndex: number): { rows: number; co
       if ((cols && col >= cols) || (rows && row >= rows)) {
         col = record.data.readUInt16LE(6); row = record.data.readUInt16LE(8); colSpan = record.data.readUInt16LE(10); rowSpan = record.data.readUInt16LE(12);
       }
-      current = { row, col, colSpan: Math.max(1, colSpan), rowSpan: Math.max(1, rowSpan), paragraphs: [] };
+      current = { row, col, colSpan: Math.max(1, colSpan), rowSpan: Math.max(1, rowSpan), paragraphs: [],
+        width: record.data.length >= 20 ? record.data.readUInt32LE(16) : 0, borderFill: record.data.length >= 34 ? record.data.readUInt16LE(32) : 0 };
       cells.push(current);
     } else if (record.tag === TAG_PARA_HEADER && current) current.paragraphs.push(i);
   }
@@ -179,6 +183,18 @@ class HwpDocInfo {
   private readonly cache = new Map<string, number>();
   constructor(data: Buffer, readonly compressed: boolean) { this.records = readRecords(data); }
   private list(tag: number): number[] { return this.records.flatMap((record, index) => record.tag === tag ? [index] : []); }
+  /** Solid background of a BORDER_FILL entry (ids are 1-based); undefined when it has no solid fill. */
+  fillOf(id: number): string | undefined {
+    const index = this.list(TAG_BORDER_FILL)[id - 1];
+    const data = index === undefined ? undefined : this.records[index].data;
+    if (!data || data.length < 40) return undefined;
+    const type = data.readUInt32LE(32);
+    if (!(type & 1)) return undefined;
+    const color = data.readUInt32LE(36);
+    if (color === 0xffffffff || (color >>> 24) !== 0) return undefined;
+    const hex = `#${[color & 255, (color >>> 8) & 255, (color >>> 16) & 255].map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+    return hex === "#ffffff" ? undefined : hex;
+  }
   charShape(id: number): Buffer | undefined { const index = this.list(TAG_CHAR_SHAPE)[id]; return index === undefined ? undefined : this.records[index].data; }
   paraShape(id: number): Buffer | undefined { const index = this.list(TAG_PARA_SHAPE)[id]; return index === undefined ? undefined : this.records[index].data; }
   format(charId: number | undefined, paraId: number | undefined): LiveFormat | undefined {
@@ -253,6 +269,17 @@ class HwpDocInfo {
   }
 }
 
+/** Paper of the first section (PAGE_DEF under the section definition control). Landscape swaps width and height. */
+function pageOf(records: HwpRecord[]): LivePage | undefined {
+  const def = records.find((record) => record.tag === TAG_PAGE_DEF);
+  if (!def || def.data.length < 36) return undefined;
+  const u = (offset: number) => def.data.readUInt32LE(offset);
+  const mm = (value: number) => Math.round(value * HWPUNIT_MM * 10) / 10;
+  let width = u(0), height = u(4);
+  if (def.data.length >= 40 && (u(36) & 1)) [width, height] = [height, width];
+  return { width: mm(width), height: mm(height), margin: { left: mm(u(8) + u(32)), right: mm(u(12)), top: mm(u(16) + u(24)), bottom: mm(u(20) + u(28)) } };
+}
+
 /** Character shape at the start of a paragraph's text and its paragraph shape. */
 function paragraphShapes(records: HwpRecord[], index: number): { char?: number; para: number } {
   const textIndex = childOf(records, index, TAG_PARA_TEXT);
@@ -286,6 +313,7 @@ interface HwpSection { path: string; compressed: boolean; records: HwpRecord[]; 
 interface HwpContext {
   cfb: CFB.CFB$Container;
   docInfo: HwpDocInfo;
+  page?: LivePage;
   compressed: boolean;
   sections: HwpSection[];
   blocks: Map<string, { section: number; record: number; table?: number }>;
@@ -341,14 +369,20 @@ function load(bytes: Uint8Array): HwpContext {
         const rows: Array<Array<LiveTableCell | null>> = Array.from({ length: rowCount }, () => Array(colCount).fill(null));
         for (const cell of layout.cells) {
           if (!rows[cell.row]) continue;
+          const paragraphFmt = cell.paragraphs[0] !== undefined ? formatOf(records, cell.paragraphs[0]) : undefined;
+          const cellFill = docInfo.fillOf(cell.borderFill);
+          const format: LiveFormat = { ...(paragraphFmt ?? {}), ...(cellFill ? { fill: cellFill } : {}) };
           rows[cell.row][cell.col] = {
             id: `${id}.r${cell.row + 1}c${cell.col + 1}`,
             text: cell.paragraphs.map((p) => hwpParagraphText(records, p)).join("\n"),
-            ...(cell.paragraphs[0] !== undefined && formatOf(records, cell.paragraphs[0]) ? { format: formatOf(records, cell.paragraphs[0]) } : {}),
+            ...(isEmptyFormat(format) ? {} : { format }),
             ...(cell.colSpan > 1 ? { colSpan: cell.colSpan } : {}), ...(cell.rowSpan > 1 ? { rowSpan: cell.rowSpan } : {}),
           };
         }
-        model.push({ id, type: "table", rows, ...(controls.includes("secd") ? { fixed: true } : {}) });
+        const widths = Array.from({ length: colCount }, (_, col) => layout.cells.find((cell) => cell.col === col && cell.colSpan === 1 && cell.width > 0)?.width ?? 0);
+        const total = widths.reduce((sum, w) => sum + w, 0);
+        const colWidths = widths.every((w) => w > 0) && total > 0 ? widths.map((w) => Math.round((w / total) * 10000) / 10000) : undefined;
+        model.push({ id, type: "table", rows, ...(colWidths ? { colWidths } : {}), ...(controls.includes("secd") ? { fixed: true } : {}) });
       } else if (!text.trim() && controls.some((control) => OBJECT_CONTROLS.has(control))) {
         model.push({ id, type: "object", label: controls.includes("eqed") ? "equation" : "image" });
       } else {
@@ -357,7 +391,7 @@ function load(bytes: Uint8Array): HwpContext {
       }
     }
   });
-  return { cfb, compressed, sections, blocks, model, docInfo };
+  return { cfb, compressed, sections, blocks, model, docInfo, page: pageOf(sections[0].records) };
 }
 
 /** Rewrites one paragraph group in place (records array is mutated; returns the index delta). */
@@ -463,7 +497,10 @@ function previewText(blocks: LiveFlowBlock[]): Buffer {
 
 export const hwpCodec: LiveDocumentCodec = {
   parse(bytes) {
-    return { kind: "flow", blocks: load(bytes).model };
+    const ctx = load(bytes);
+    const base = ctx.docInfo.charShape(0);
+    const defaultSize = base && base.length >= 46 && base.readInt32LE(42) > 0 ? base.readInt32LE(42) / 100 : undefined;
+    return { kind: "flow", blocks: ctx.model, ...(ctx.page ? { page: ctx.page } : {}), ...(defaultSize ? { defaultSize } : {}) };
   },
   write(bytes, original, final) {
     const ctx = load(bytes);
@@ -532,7 +569,10 @@ export const hwpCodec: LiveDocumentCodec = {
           const template = templateIndex(anchorOrdinal);
           if (template === undefined) throw new LiveDocumentCodecError("hwp_no_plain_paragraph", "no paragraph to copy the shape from");
           const group = newParagraphGroup(records, template, block.text);
-          if (block.format) setParagraphFormat(ctx.docInfo, group, 0, block.format);
+          // The new paragraph reads back with exactly its model format, not the template's (HWP writes no fill).
+          const shapes = paragraphShapes(group, 0);
+          const { fill: _fill, ...delta } = formatDelta(ctx.docInfo.format(shapes.char, shapes.para), block.format);
+          if (!isEmptyFormat(delta)) setParagraphFormat(ctx.docInfo, group, 0, delta);
           rebuilt.push(...group);
           structural = true;
         }

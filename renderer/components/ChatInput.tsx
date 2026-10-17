@@ -1964,10 +1964,10 @@ function ChatInputComponent({
                     onClick={() => setPlanMode(false)}
                     title={t("chatinput.plan_mode")}
                     aria-label={t("chatinput.plan_mode")}
-                    style={{ ...toolBtnStyle(true), width: "auto", padding: "0 8px", gap: 4, fontSize: 10.5, fontWeight: 600, color: "var(--accent)" }}
+                    style={activeModeChipStyle}
                   >
                     <IconRoute size={12} />
-                    <span className="chat-input-chip-label">{t("chatinput.plan_mode")}</span> ✕
+                    <span className="chat-input-chip-label">{t("chatinput.plan_mode")}</span><IconClose size={10} />
                   </button>
                 )}
                 {effectiveGoalMode && (
@@ -1977,10 +1977,10 @@ function ChatInputComponent({
                     onClick={() => toggleGoalMode(false)}
                     title={t("chatinput.goal_mode")}
                     aria-label={t("chatinput.goal_mode")}
-                    style={{ ...toolBtnStyle(true), width: "auto", padding: "0 8px", gap: 4, fontSize: 10.5, fontWeight: 600, color: "var(--accent)" }}
+                    style={activeModeChipStyle}
                   >
                     <IconTarget size={12} />
-                    <span className="chat-input-chip-label">{t("chatinput.goal_mode")}</span> ✕
+                    <span className="chat-input-chip-label">{t("chatinput.goal_mode")}</span><IconClose size={10} />
                   </button>
                 )}
               </div>
@@ -2209,25 +2209,50 @@ export function ComposerGoalBar({
       : "Your next request will define the goal and its acceptance criteria");
   const criteriaTitle = (criteria ?? []).join("\n");
   const editable = observed && Boolean(onEdit && label && ["paused", "blocked", "queued", "waiting_user", "draft"].includes(runStatus ?? ""));
+  /*
+   * Owner 2026-10-17 ("칩과 목표 디자인 너무 이상해"): the Goal sat as a tall box of icons, codes and status lines above
+   * the composer. Like the plan/todo strip of Claude Code and Codex it is now one quiet row — objective, a status dot,
+   * the criteria count — and opens for the criteria, plan, next check and automation links. Only a stop reason stays
+   * visible while folded, because it asks the owner to act.
+   */
+  const objective = goalObjectiveText(label ?? "").replace(/\s+/g, " ").trim();
+  const tone = pausing ? "pausing" : blocked ? "blocked" : paused ? "paused" : runStatus === "verifying" ? "verifying"
+    : runStatus === "running" || runStatus === "queued" ? "running" : "idle";
+  const toneLabel: Record<string, [string, string]> = {
+    running: ["진행 중", "Running"], verifying: ["확인 중", "Checking"], paused: ["일시정지", "Paused"],
+    pausing: ["멈추는 중", "Stopping"], blocked: ["멈춤", "Stopped"], idle: ["대기", "Waiting"],
+  };
+  const notice = (paused || blocked || pausing || runStatus === "verifying") ? title : null;
+  const hasMore = Boolean((criteria?.length ?? 0) > 0 || plan || nextWake || details || objective.length > 60);
+  const [expanded, setExpanded] = useState(false);
   return (
-    <div className={placement === "top" ? `chat-composer-goal-stack ${goalBarStyles.top}` : "chat-composer-goal-stack"}
-      data-chat-goal-bar="true" data-goal-bar-placement={placement}>
+    <div className={`chat-composer-goal-stack ${goalBarStyles.top}`}
+      data-chat-goal-bar="true" data-goal-bar-placement={placement} data-goal-expanded={expanded ? "true" : "false"}>
     <div className={`chat-composer-progress chat-composer-goal ${goalBarStyles.card}`} role="status" aria-live="polite">
-      <div className={goalBarStyles.heading}>
-      <span className="chat-composer-progress-icon" aria-hidden><IconTarget size={13} /></span>
-      <strong>{locale === "ko" ? "목표" : "Goal"}</strong>
-      </div>
-      <div className={goalBarStyles.actions}>
+      <button type="button" className={goalBarStyles.summary} data-hover="own" disabled={!hasMore}
+        aria-expanded={hasMore ? expanded : undefined} onClick={() => setExpanded((open) => !open)}
+        title={hasMore ? (expanded ? (locale === "ko" ? "접기" : "Collapse") : (locale === "ko" ? "목표 자세히 보기" : "Show goal details")) : objective}>
+        <span className={goalBarStyles.icon} aria-hidden><IconTarget size={13} /></span>
+        <span className={goalBarStyles.kicker}>{locale === "ko" ? "목표" : "Goal"}</span>
+        <span className={`chat-composer-progress-label ${goalBarStyles.objective}`}>
+          {objective || (locale === "ko" ? "다음 요청으로 목표와 성공 기준을 확정합니다" : "Your next request will define the goal and its acceptance criteria")}
+        </span>
+        {hasMore && <svg className={goalBarStyles.chevron} width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg>}
+      </button>
+      {observed && objective && (
+        <span className={goalBarStyles.status} data-tone={tone}><i aria-hidden />{toneLabel[tone][locale === "ko" ? 0 : 1]}</span>
+      )}
       {(criteria?.length ?? 0) > 0 && (
-        <span className="chat-composer-goal-criteria" title={criteriaTitle}>
-          {locale === "ko" ? `성공 기준 ${criteria?.length}개` : `${criteria?.length} criteria`}
+        <span className={`chat-composer-goal-criteria ${goalBarStyles.criteria}`} title={criteriaTitle}>
+          {locale === "ko" ? `기준 ${criteria?.length}` : `${criteria?.length} criteria`}
         </span>
       )}
+      <div className={goalBarStyles.actions}>
       {observed && onPause && runStatus && !["paused", "pausing", "blocked", "failed", "completed", "cancelled", "cancelling"].includes(runStatus) && (
         <button type="button" onClick={onPause} data-chat-goal-pause="true" data-hover="own"
           aria-label={locale === "ko" ? "목표 일시정지" : "Pause goal"}
           title={locale === "ko" ? "실행과 자동 이어가기를 멈추고 목표를 보존합니다" : "Stop execution and automatic continuation; keep the goal"}>
-          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 3h3v10H4zM9 3h3v10H9z" /></svg>
+          <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 3h3v10H4zM9 3h3v10H9z" /></svg>
         </button>
       )}
       {/* A budget pause cannot be resumed (Main refuses long_run_budget_exhausted; before that the
@@ -2268,13 +2293,23 @@ export function ComposerGoalBar({
         <IconTrash size={12} />
       </button>
       </div>
-      <span className={`chat-composer-progress-label ${goalBarStyles.objective}`}
-        title={(paused || blocked) ? [title, blockedReason ?? pauseReason].filter(Boolean).join("\n") : title}>{title}</span>
     </div>
-    {plan && <GoalPlanSummary plan={plan} locale={locale === "ko" ? "ko" : "en"} variant="composer-tab" />}
-    {nextWake && <p className={goalBarStyles.nextWake} data-goal-next-wake={nextWake.requestedBy}>
-      {goalNextWakeLabel(nextWake, locale === "ko" ? "ko" : "en")}</p>}
-    {details && <div className={goalBarStyles.details}>{details}</div>}
+    {notice && <p className={goalBarStyles.notice} data-tone={tone}
+      title={[title, blockedReason ?? pauseReason].filter(Boolean).join("\n")}>{notice}</p>}
+    {expanded && hasMore && (
+      <div className={goalBarStyles.more} data-goal-details="true">
+        {objective.length > 60 && <p className={goalBarStyles.fullObjective}>{objective}</p>}
+        {(criteria?.length ?? 0) > 0 && (
+          <ul className={goalBarStyles.criteriaList} aria-label={locale === "ko" ? "성공 기준" : "Acceptance criteria"}>
+            {criteria!.map((item, index) => <li key={index}>{item}</li>)}
+          </ul>
+        )}
+        {plan && <GoalPlanSummary plan={plan} locale={locale === "ko" ? "ko" : "en"} variant="composer-tab" />}
+        {nextWake && <p className={goalBarStyles.nextWake} data-goal-next-wake={nextWake.requestedBy}>
+          {goalNextWakeLabel(nextWake, locale === "ko" ? "ko" : "en")}</p>}
+        {details && <div className={goalBarStyles.details}>{details}</div>}
+      </div>
+    )}
     {editing && <form className="chat-composer-goal-editor" onSubmit={(event) => {
       event.preventDefault();
       if (!editable || saving || !draft.trim() || !onEdit) return;
@@ -3542,6 +3577,20 @@ function ToggleRow({
 }
 
 // 도구 버튼 공통 스타일
+/** An active mode (plan, goal) in the composer toolbar: a quiet outlined pill like the other toolbar chips; × turns it off. */
+const activeModeChipStyle: React.CSSProperties = {
+  ...toolBtnStyle(false),
+  width: "auto",
+  height: 26,
+  padding: "0 7px 0 8px",
+  gap: 5,
+  border: "1px solid var(--paper-edge)",
+  borderRadius: 999,
+  color: "var(--ink-soft)",
+  fontSize: 11,
+  fontWeight: 600,
+};
+
 function toolBtnStyle(active: boolean): React.CSSProperties {
   return {
     width: 30,

@@ -38,8 +38,9 @@ interface WorkbookInfo {
 
 interface StyleInfo {
   fonts: LiveFormat[];
-  /** Per cellXfs index: font index and horizontal alignment. */
-  xfs: Array<{ fontId: number; align?: LiveFormat["align"] }>;
+  fills: Array<string | undefined>;
+  /** Per cellXfs index: font, fill and horizontal alignment. */
+  xfs: Array<{ fontId: number; fillId: number; align?: LiveFormat["align"] }>;
 }
 
 function readWorkbook(bytes: Uint8Array): WorkbookInfo {
@@ -121,17 +122,24 @@ function fontFormat(font: XmlElement): LiveFormat {
 
 function readStyleInfo(pkg: ZipPackage): StyleInfo {
   const xml = pkg.text("xl/styles.xml");
-  if (!xml) return { fonts: [], xfs: [] };
+  if (!xml) return { fonts: [], fills: [], xfs: [] };
   const root = parseXml(xml).root;
   const fontsEl = elements(root).find((node) => localName(node) === "fonts");
   const fonts = (fontsEl ? elements(fontsEl) : []).map(fontFormat);
+  const fillsEl = elements(root).find((node) => localName(node) === "fills");
+  const fills = (fillsEl ? elements(fillsEl) : []).map((fill) => {
+    const pattern = elements(fill).find((node) => localName(node) === "patternFill");
+    if (!pattern || attr(pattern, "patternType") !== "solid") return undefined;
+    const fg = elements(pattern).find((node) => localName(node) === "fgColor");
+    return normColor(fg ? attr(fg, "rgb") : undefined);
+  });
   const cellXfs = elements(root).find((node) => localName(node) === "cellXfs");
   const xfs = (cellXfs ? elements(cellXfs) : []).map((xf) => {
     const alignment = elements(xf).find((node) => localName(node) === "alignment");
     const align = alignment ? ALIGN_IN[attr(alignment, "horizontal") ?? ""] : undefined;
-    return { fontId: Number(attr(xf, "fontId") ?? 0) || 0, ...(align ? { align } : {}) };
+    return { fontId: Number(attr(xf, "fontId") ?? 0) || 0, fillId: Number(attr(xf, "fillId") ?? 0) || 0, ...(align ? { align } : {}) };
   });
-  return { fonts, xfs };
+  return { fonts, fills, xfs };
 }
 
 /** A cell's visible format relative to the workbook default font (font 0), so plain cells carry no format. */
@@ -143,6 +151,8 @@ function cellFormat(styles: StyleInfo, styleIndex: number): LiveFormat | undefin
   const format: LiveFormat = { ...font };
   if (format.size === base.size) delete format.size;
   if (xf.align) format.align = xf.align;
+  const fill = styles.fills[xf.fillId];
+  if (fill) format.fill = fill;
   return isEmptyFormat(format) ? undefined : format;
 }
 
@@ -357,6 +367,17 @@ class StyleWriter {
       if (existing) setAttr(existing, "horizontal", format.align);
       else insertOrdered(xf, el(`<alignment horizontal="${format.align}"/>`), XF_ORDER);
       setAttr(xf, "applyAlignment", "1");
+    }
+    if (format.fill !== undefined || removed.has("fill")) {
+      let fillsEl = elements(root).find((node) => localName(node) === "fills");
+      if (format.fill) {
+        if (!fillsEl) { fillsEl = el('<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>'); root.children.splice(root.children.indexOf(fontsEl) + 1, 0, fillsEl); }
+        fillsEl.children.push(el(`<fill><patternFill patternType="solid"><fgColor rgb="FF${hex6(format.fill)}"/><bgColor indexed="64"/></patternFill></fill>`));
+        setAttr(fillsEl, "count", String(elements(fillsEl).length));
+        markDirty(fillsEl);
+        setAttr(xf, "fillId", String(elements(fillsEl).length - 1));
+      } else setAttr(xf, "fillId", "0");
+      setAttr(xf, "applyFill", "1");
     }
     xfsEl.children.push(xf);
     setAttr(xfsEl, "count", String(elements(xfsEl).length));

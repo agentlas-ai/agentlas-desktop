@@ -170,6 +170,23 @@ export async function openLiveDocument(input: { chatId: string; path: string }):
   return meta;
 }
 
+/** Writes a blank document at a path that does not exist yet and opens it. A Hangul document is created as .hwpx. */
+export async function createLiveDocument(input: { chatId: string; path: string; title?: string }): Promise<LiveDocumentMeta> {
+  if (!path.isAbsolute(input.path)) throw new LiveDocumentError("path_not_absolute");
+  const target = path.resolve(input.path);
+  const format = inferLiveDocumentFormat(target);
+  if (format === "hwp") throw new LiveDocumentError("format_not_creatable", "HWP binary cannot be created; create the same name with .hwpx instead — it is a Hangul document that Hancom Office opens and can save as .hwp, so it fulfils a request for a Hangul/hwp file");
+  const { blankDocument, CREATABLE_FORMATS } = await import("./templates");
+  if (!format || !(CREATABLE_FORMATS as readonly string[]).includes(format)) throw new LiveDocumentError("format_unsupported", "docx, xlsx, pptx or hwpx");
+  if (fs.existsSync(target)) throw new LiveDocumentError("file_exists", "document.open edits an existing file; pick a new name to create one");
+  const parent = path.dirname(target);
+  if (!fs.existsSync(parent) || !fs.statSync(parent).isDirectory()) throw new LiveDocumentError("folder_missing", parent);
+  const title = (input.title ?? "").trim() || path.basename(target, path.extname(target));
+  const bytes = blankDocument(format as "docx" | "xlsx" | "pptx" | "hwpx", title.slice(0, 200));
+  fs.writeFileSync(target, bytes, { flag: "wx", mode: 0o644 });
+  return openLiveDocument({ chatId: input.chatId, path: target });
+}
+
 export async function liveDocumentSnapshot(sessionId: string): Promise<LiveDocumentSnapshot> {
   const dir = await sessionDir(sessionId);
   const state = fold(sessionId, dir);
@@ -187,6 +204,18 @@ export async function liveDocumentDelta(sessionId: string, sinceRevision: number
   return { sessionId, revision, entries: state.entries.slice(sinceRevision) };
 }
 
+/** A slide body placeholder draws its own bullets; a typed "• " in front of each line would show two (real run 2026-10-17). */
+function withoutTypedBullets(model: LiveDocumentModel, ops: LiveDocumentOp[]): LiveDocumentOp[] {
+  if (model.kind !== "slides") return ops;
+  const bodies = new Set(model.slides.flatMap((slide) => slide.shapes.filter((shape) => shape.role === "body").map((shape) => shape.id)));
+  const strip = (text: string) => text.split("\n").map((line) => line.replace(/^\s*[•·▪‣◦\-*]\s+/, "")).join("\n");
+  return ops.map((op) => {
+    if (op.op === "add_slide" && op.body !== undefined) return { ...op, body: strip(op.body) };
+    if (op.op === "set_text" && bodies.has(op.target)) return { ...op, text: strip(op.text) };
+    return op;
+  });
+}
+
 export async function applyLiveDocument(input: { sessionId: string; chatId?: string; baseRevision?: number; ops: unknown; actor: LiveDocumentActor }): Promise<LiveDocumentApplyResult> {
   let dir: string;
   try { dir = await sessionDir(input.sessionId); } catch { return { ok: false, reason: "session_unknown" }; }
@@ -199,7 +228,13 @@ export async function applyLiveDocument(input: { sessionId: string; chatId?: str
     // HWP binary keeps the template paragraph's shape: a heading cannot be expressed, so the model never claims one.
     const ops: LiveDocumentOp[] = state.meta.format === "hwp"
       ? checked.ops.map((op) => op.op === "insert_paragraph" || op.op === "set_format" ? (({ heading: _heading, ...rest }) => rest)(op) as LiveDocumentOp : op)
-      : checked.ops;
+      : state.meta.format === "pptx" ? withoutTypedBullets(state.model, checked.ops) : checked.ops;
+    if (state.meta.format === "hwp" && ops.some((op) => op.op === "set_format" && op.format.fill !== undefined)) {
+      return { ok: false, reason: "op_unsupported_for_format", detail: "background colours are not written to HWP binary; create an .hwpx copy with document.create for that", revision: state.entries.length };
+    }
+    if (state.meta.format === "hwp" && ops.some((op) => op.op === "insert_paragraph" && op.pageBreak)) {
+      return { ok: false, reason: "op_unsupported_for_format", detail: "page breaks are not written to HWP binary; create an .hwpx copy with document.create for that", revision: state.entries.length };
+    }
     if (ops.some((op) => op.op === "set_format" && !Object.keys(op.format).length && op.heading === undefined)) {
       return { ok: false, reason: "op_unsupported_for_format", detail: "headings are not available in HWP binary; set size/bold instead", revision: state.entries.length };
     }

@@ -24,6 +24,15 @@ export interface LiveFormat {
   /** #rrggbb */
   color?: string;
   align?: "left" | "center" | "right" | "justify";
+  /** Background (#rrggbb): table cells, paragraphs, sheet cells, slide shapes. */
+  fill?: string;
+}
+
+/** Paper of a flow document, in millimetres (A4 = 210 × 297). */
+export interface LivePage {
+  width: number;
+  height: number;
+  margin: { top: number; right: number; bottom: number; left: number };
 }
 
 /** A format change: a value sets it, null removes the explicit value (the paragraph/cell/shape inherits again). */
@@ -53,8 +62,10 @@ export interface LiveTableCell {
 
 export type LiveFlowBlock =
   /** `fixed`: carries the section definition (HWP/HWPX first paragraph); its text is editable, the block is not deletable. */
-  | { id: string; type: "paragraph"; text: string; heading?: number; fixed?: boolean; format?: LiveFormat }
-  | { id: string; type: "table"; rows: Array<Array<LiveTableCell | null>>; fixed?: boolean }
+  /** `pageBreak`: the paragraph starts a new page ("before") or ends its page ("after"). */
+  | { id: string; type: "paragraph"; text: string; heading?: number; fixed?: boolean; format?: LiveFormat; pageBreak?: "before" | "after" }
+  /** `colWidths`: relative column widths (sum 1) read from the file or given at insert. */
+  | { id: string; type: "table"; rows: Array<Array<LiveTableCell | null>>; fixed?: boolean; colWidths?: number[] }
   /** Images, charts, section breaks: kept byte-for-byte, shown as a labelled placeholder, never edited. */
   | { id: string; type: "object"; label: string };
 
@@ -82,15 +93,18 @@ export interface LiveSlide {
 
 export type LiveDocumentModel =
   | { kind: "sheet"; sheets: LiveSheet[] }
-  | { kind: "flow"; blocks: LiveFlowBlock[] }
+  | { kind: "flow"; blocks: LiveFlowBlock[]; page?: LivePage; defaultSize?: number }
   | { kind: "slides"; aspect: number; slides: LiveSlide[] };
+
+/** A merged range in a new table: the anchor cell ("r2c1", 1-based like the outline ids) spans the given rows/columns. */
+export interface LiveTableMerge { cell: string; rowSpan?: number; colSpan?: number }
 
 export type LiveDocumentOp =
   | { op: "set_cell"; sheet: string; cell: string; value: string }
   | { op: "set_text"; target: string; text: string }
   | { op: "insert_text"; target: string; text: string; at?: number }
-  | { op: "insert_paragraph"; after?: string; text: string; heading?: number; id?: string }
-  | { op: "insert_table"; after?: string; rows: string[][]; id?: string }
+  | { op: "insert_paragraph"; after?: string; text: string; heading?: number; pageBreak?: boolean; id?: string }
+  | { op: "insert_table"; after?: string; rows: string[][]; widths?: number[]; merges?: LiveTableMerge[]; id?: string }
   | { op: "delete_block"; target: string }
   | { op: "add_slide"; after?: string; title?: string; body?: string; id?: string }
   | { op: "delete_slide"; target: string }
@@ -104,7 +118,7 @@ export type LiveDocumentOpName = LiveDocumentOp["op"];
 export const LIVE_DOCUMENT_OPS_BY_FORMAT: Record<LiveDocumentFormat, readonly LiveDocumentOpName[]> = {
   xlsx: ["set_cell", "add_sheet", "set_format"],
   docx: ["set_text", "insert_text", "insert_paragraph", "insert_table", "delete_block", "set_format"],
-  hwpx: ["set_text", "insert_text", "insert_paragraph", "delete_block", "set_format"],
+  hwpx: ["set_text", "insert_text", "insert_paragraph", "insert_table", "delete_block", "set_format"],
   hwp: ["set_text", "insert_text", "insert_paragraph", "delete_block", "set_format"],
   pptx: ["set_text", "insert_text", "add_slide", "delete_slide", "set_format"],
 };
@@ -209,6 +223,30 @@ const str = (value: unknown, max = MAX_TEXT): value is string => typeof value ==
 const id = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_.:-]{1,120}$/.test(value);
 const optionalId = (value: unknown) => value === undefined || id(value);
 
+/** Normalised merges of a rows x cols table, or null when one is malformed, out of range or overlaps another. */
+function validMerges(value: unknown, rows: number, cols: number): LiveTableMerge[] | null {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 400) return null;
+  const taken = new Set<string>();
+  const out: LiveTableMerge[] = [];
+  for (const item of value) {
+    const record = item as Record<string, unknown>;
+    const match = typeof record?.cell === "string" ? /^r(\d+)c(\d+)$/.exec(record.cell) : null;
+    const rowSpan = record?.rowSpan === undefined ? 1 : record.rowSpan;
+    const colSpan = record?.colSpan === undefined ? 1 : record.colSpan;
+    if (!match || !Number.isSafeInteger(rowSpan) || !Number.isSafeInteger(colSpan) || Number(rowSpan) < 1 || Number(colSpan) < 1) return null;
+    const r = Number(match[1]) - 1, c = Number(match[2]) - 1;
+    if (r < 0 || c < 0 || r + Number(rowSpan) > rows || c + Number(colSpan) > cols) return null;
+    if (Number(rowSpan) === 1 && Number(colSpan) === 1) continue;
+    for (let y = r; y < r + Number(rowSpan); y++) for (let x = c; x < c + Number(colSpan); x++) {
+      if (taken.has(`${y}:${x}`)) return null;
+      taken.add(`${y}:${x}`);
+    }
+    out.push({ cell: `r${r + 1}c${c + 1}`, ...(Number(rowSpan) > 1 ? { rowSpan: Number(rowSpan) } : {}), ...(Number(colSpan) > 1 ? { colSpan: Number(colSpan) } : {}) });
+  }
+  return out;
+}
+
 /** Shape check only; whether targets exist is decided against the model in applyLiveDocumentOps. */
 export function validateLiveDocumentOps(value: unknown, format: LiveDocumentFormat): { ok: true; ops: LiveDocumentOp[] } | { ok: false; reason: string; detail?: string } {
   if (!Array.isArray(value) || value.length === 0) return { ok: false, reason: "ops_required" };
@@ -235,15 +273,21 @@ export function validateLiveDocumentOps(value: unknown, format: LiveDocumentForm
         ops.push({ op: "insert_text", target: op.target, text: op.text, ...(op.at !== undefined ? { at: Number(op.at) } : {}) });
         break;
       case "insert_paragraph":
-        if (!optionalId(op.after) || !str(op.text) || (op.heading !== undefined && (!Number.isSafeInteger(op.heading) || Number(op.heading) < 1 || Number(op.heading) > 6)) || !optionalId(op.id)) return bad("insert_paragraph needs text, optional after and heading 1-6");
-        ops.push({ op: "insert_paragraph", text: op.text, ...(op.after !== undefined ? { after: op.after as string } : {}), ...(op.heading !== undefined ? { heading: Number(op.heading) } : {}), ...(op.id !== undefined ? { id: op.id as string } : {}) });
+        if (!optionalId(op.after) || !str(op.text) || (op.heading !== undefined && (!Number.isSafeInteger(op.heading) || Number(op.heading) < 1 || Number(op.heading) > 6)) || !optionalId(op.id)
+          || (op.pageBreak !== undefined && typeof op.pageBreak !== "boolean")) return bad("insert_paragraph needs text, optional after, heading 1-6 and pageBreak true/false");
+        ops.push({ op: "insert_paragraph", text: op.text, ...(op.after !== undefined ? { after: op.after as string } : {}), ...(op.heading !== undefined ? { heading: Number(op.heading) } : {}), ...(op.pageBreak === true ? { pageBreak: true } : {}), ...(op.id !== undefined ? { id: op.id as string } : {}) });
         break;
       case "insert_table": {
         const rows = op.rows;
         if (!optionalId(op.after) || !Array.isArray(rows) || rows.length === 0 || rows.length > 200
           || !rows.every((row) => Array.isArray(row) && row.length > 0 && row.length <= 40 && row.every((cell) => str(cell, 10_000)))) return bad("insert_table needs rows: string[][] (<=200x40)");
         const width = Math.max(...rows.map((row) => (row as string[]).length));
-        ops.push({ op: "insert_table", rows: (rows as string[][]).map((row) => [...row, ...Array(width - row.length).fill("")]), ...(op.after !== undefined ? { after: op.after as string } : {}), ...(op.id !== undefined && id(op.id) ? { id: op.id } : {}) });
+        const widths = op.widths;
+        if (widths !== undefined && (!Array.isArray(widths) || widths.length !== width || !widths.every((w) => typeof w === "number" && w > 0 && Number.isFinite(w)))) return bad("insert_table widths: one positive number per column");
+        const total = Array.isArray(widths) ? (widths as number[]).reduce((sum, w) => sum + w, 0) : 0;
+        const merges = validMerges(op.merges, rows.length, width);
+        if (merges === null) return bad("insert_table merges: [{cell:\"r1c2\", rowSpan?, colSpan?}] inside the table, spans >= 1, not overlapping");
+        ops.push({ op: "insert_table", rows: (rows as string[][]).map((row) => [...row, ...Array(width - row.length).fill("")]), ...(Array.isArray(widths) ? { widths: (widths as number[]).map((w) => Math.round((w / total) * 10000) / 10000) } : {}), ...(merges.length ? { merges } : {}), ...(op.after !== undefined ? { after: op.after as string } : {}), ...(op.id !== undefined && id(op.id) ? { id: op.id } : {}) });
         break;
       }
       case "delete_block":
@@ -281,10 +325,10 @@ function validFormat(value: unknown): LiveFormatPatch | null {
   const raw = value as Record<string, unknown>;
   const out: LiveFormatPatch = {};
   for (const [key, field] of Object.entries(raw)) {
-    if (field === null && ["bold", "italic", "underline", "size", "color", "align"].includes(key)) { (out as Record<string, null>)[key] = null; continue; }
+    if (field === null && ["bold", "italic", "underline", "size", "color", "align", "fill"].includes(key)) { (out as Record<string, null>)[key] = null; continue; }
     if (key === "bold" || key === "italic" || key === "underline") { if (typeof field !== "boolean") return null; out[key] = field; }
     else if (key === "size") { if (typeof field !== "number" || !(field >= 1 && field <= 400)) return null; out.size = Math.round(field * 2) / 2; }
-    else if (key === "color") { if (typeof field !== "string" || !/^#[0-9a-fA-F]{6}$/.test(field)) return null; out.color = field.toLowerCase(); }
+    else if (key === "color" || key === "fill") { if (typeof field !== "string" || !/^#[0-9a-fA-F]{6}$/.test(field)) return null; out[key] = field.toLowerCase(); }
     else if (key === "align") { if (!["left", "center", "right", "justify"].includes(String(field))) return null; out.align = field as LiveFormat["align"]; }
     else return null;
   }
@@ -427,8 +471,17 @@ export function applyLiveDocumentOps(model: LiveDocumentModel, ops: LiveDocument
       // Nothing goes before the paragraph that defines the section (HWP/HWPX): "start" means right after it.
       const first = next.blocks[0];
       if (index === 0 && first && first.type !== "object" && first.fixed) index = 1;
-      if (op.op === "insert_paragraph") next.blocks.splice(index, 0, { id: op.id, type: "paragraph", text: op.text, ...(op.heading ? { heading: op.heading } : {}) });
-      else next.blocks.splice(index, 0, { id: op.id, type: "table", rows: op.rows.map((row, r) => row.map((text, c) => ({ id: `${op.id}.r${r + 1}c${c + 1}`, text }))) });
+      if (op.op === "insert_paragraph") next.blocks.splice(index, 0, { id: op.id, type: "paragraph", text: op.text, ...(op.heading ? { heading: op.heading } : {}), ...(op.pageBreak ? { pageBreak: "before" as const } : {}) });
+      else {
+        const rows: Array<Array<LiveTableCell | null>> = op.rows.map((row, r) => row.map((text, c) => ({ id: `${op.id}.r${r + 1}c${c + 1}`, text })));
+        // A merged range keeps its anchor cell (with the spans); the cells it covers are null, as when reading a file.
+        for (const merge of op.merges ?? []) {
+          const [, r, c] = /^r(\d+)c(\d+)$/.exec(merge.cell)!.map(Number);
+          for (let y = r - 1; y < r - 1 + (merge.rowSpan ?? 1); y++) for (let x = c - 1; x < c - 1 + (merge.colSpan ?? 1); x++) if (y !== r - 1 || x !== c - 1) rows[y][x] = null;
+          rows[r - 1][c - 1] = { ...rows[r - 1][c - 1]!, ...(merge.rowSpan ? { rowSpan: merge.rowSpan } : {}), ...(merge.colSpan ? { colSpan: merge.colSpan } : {}) };
+        }
+        next.blocks.splice(index, 0, { id: op.id, type: "table", rows, ...(op.widths ? { colWidths: op.widths } : {}) });
+      }
       continue;
     }
     if (op.op === "add_slide" || op.op === "delete_slide") {
@@ -481,7 +534,7 @@ export function liveDocumentOpTargets(op: LiveDocumentOp): string[] {
 /** Compact format marker for the outline, e.g. ` {bold 14pt center #c00000}`; empty when unformatted. */
 export function liveFormatTag(format: LiveFormat | undefined): string {
   if (!format) return "";
-  const parts = [format.bold ? "bold" : "", format.italic ? "italic" : "", format.underline ? "underline" : "", format.size ? `${format.size}pt` : "", format.align && format.align !== "left" ? format.align : "", format.color && format.color !== "#000000" ? format.color : ""].filter(Boolean);
+  const parts = [format.bold ? "bold" : "", format.italic ? "italic" : "", format.underline ? "underline" : "", format.size ? `${format.size}pt` : "", format.align && format.align !== "left" && format.align !== "justify" ? format.align : "", format.color && format.color !== "#000000" ? format.color : "", format.fill ? `fill ${format.fill}` : ""].filter(Boolean);
   return parts.length ? ` {${parts.join(" ")}}` : "";
 }
 
@@ -502,12 +555,13 @@ export function liveDocumentOutline(model: LiveDocumentModel, options: { maxChar
       }
     }
   } else if (model.kind === "flow") {
+    if (model.page) lines.push(`# page ${model.page.width}x${model.page.height}mm${model.defaultSize ? `, body ${model.defaultSize}pt` : ""}`);
     for (const block of model.blocks) {
-      if (block.type === "paragraph") lines.push(`[${block.id}]${block.heading ? ` h${block.heading}` : ""}${liveFormatTag(block.format)} ${block.text.replace(/\n/g, "\\n")}`);
+      if (block.type === "paragraph") lines.push(`[${block.id}]${block.heading ? ` h${block.heading}` : ""}${block.pageBreak ? ` (page break ${block.pageBreak})` : ""}${liveFormatTag(block.format)} ${block.text.replace(/\n/g, "\\n")}`);
       else if (block.type === "object") lines.push(`[${block.id}] (${block.label})`);
       else {
-        lines.push(`[${block.id}] table`);
-        for (const row of block.rows) lines.push(`  | ${row.map((cell) => cell ? `${cell.id}: ${cell.text.replace(/\n/g, "\\n")}` : "~").join(" | ")}`);
+        lines.push(`[${block.id}] table${block.colWidths ? ` widths ${block.colWidths.map((w) => Math.round(w * 100)).join("/")}` : ""}`);
+        for (const row of block.rows) lines.push(`  | ${row.map((cell) => cell ? `${cell.id}${liveFormatTag(cell.format)}: ${cell.text.replace(/\n/g, "\\n")}` : "~").join(" | ")}`);
       }
     }
   } else {

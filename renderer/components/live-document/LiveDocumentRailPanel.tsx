@@ -66,8 +66,40 @@ function formatCss(format: LiveFormat | undefined, pt = true): CSSProperties {
     ...(format.underline ? { textDecoration: "underline" } : {}),
     ...(format.color ? { color: format.color } : {}),
     ...(format.align ? { textAlign: format.align } : {}),
-    ...(pt && format.size ? { fontSize: `${(format.size * 4) / 3}px` } : {}),
+    ...(pt && format.size ? { fontSize: `${format.size}pt` } : {}),
+    ...(format.fill ? { backgroundColor: format.fill } : {}),
   };
+}
+
+const MM = 96 / 25.4;
+const A4: NonNullable<Extract<LiveDocumentModel, { kind: "flow" }>["page"]> = { width: 210, height: 297, margin: { top: 25.4, right: 25.4, bottom: 25.4, left: 25.4 } };
+
+/** Splits blocks into sheets at explicit page breaks (a sheet still grows when its content overflows the paper). */
+function sheetsOf(blocks: LiveFlowBlock[]): LiveFlowBlock[][] {
+  const sheets: LiveFlowBlock[][] = [[]];
+  for (const block of blocks) {
+    if (block.type === "paragraph" && block.pageBreak === "before" && sheets[sheets.length - 1].length) sheets.push([]);
+    sheets[sheets.length - 1].push(block);
+    if (block.type === "paragraph" && block.pageBreak === "after") sheets.push([]);
+  }
+  if (sheets.length > 1 && !sheets[sheets.length - 1].length) sheets.pop();
+  return sheets;
+}
+
+/** Scales its child (a sheet of real paper size) down to the panel width, like a word processor's fit-width zoom. */
+function FitWidth({ width, children }: { width: number; children: ReactNode }) {
+  const host = useRef<HTMLDivElement>(null);
+  const [zoom, setZoom] = useState(1);
+  useLayoutEffect(() => {
+    const el = host.current;
+    if (!el) return;
+    const measure = () => setZoom(Math.min(1.25, Math.max(0.3, (el.clientWidth - 32) / width)));
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [width]);
+  return <div ref={host} className={styles.fitHost}><div style={{ zoom } as CSSProperties}>{children}</div></div>;
 }
 
 interface HistoryStep { forward: LiveDocumentOp[]; inverse: LiveDocumentOp[] }
@@ -348,10 +380,21 @@ function FlowView({ model, cursor, typing, locale, selected, onSelect, editable,
   selected: string | null; onSelect: (id: string | null) => void; editable: boolean; onCommit: (target: string, text: string) => void;
 }) {
   const ko = locale === "ko";
-  return <div className={styles.page}>
-    {model.blocks.map((block) => <FlowBlock key={block.id} block={block} cursor={cursor} typing={typing} ko={ko} selected={selected === block.id} selectedId={selected}
-      onSelect={(id) => onSelect(id ?? block.id)} editable={editable} onCommit={onCommit} />)}
-  </div>;
+  const page = model.page ?? A4;
+  const width = page.width * MM;
+  const height = page.height * MM;
+  const sheet: CSSProperties = {
+    width, minHeight: height, padding: `${page.margin.top * MM}px ${page.margin.right * MM}px ${page.margin.bottom * MM}px ${page.margin.left * MM}px`,
+    fontSize: `${model.defaultSize ?? 10.5}pt`,
+    // A sheet whose content runs past the paper shows where each further page would start.
+    backgroundImage: `repeating-linear-gradient(to bottom, transparent 0, transparent ${height - 1}px, #c9c9c9 ${height - 1}px, #c9c9c9 ${height}px)`,
+  };
+  return <FitWidth width={width}>
+    {sheetsOf(model.blocks).map((blocks, index) => <div key={index} className={styles.page} style={sheet} data-page={index + 1}>
+      {blocks.map((block) => <FlowBlock key={block.id} block={block} cursor={cursor} typing={typing} ko={ko} selected={selected === block.id} selectedId={selected}
+        onSelect={(id) => onSelect(id ?? block.id)} editable={editable} onCommit={onCommit} />)}
+    </div>)}
+  </FitWidth>;
 }
 
 function FlowBlock({ block, cursor, typing, ko, selected, selectedId, onSelect, editable, onCommit }: {
@@ -365,9 +408,11 @@ function FlowBlock({ block, cursor, typing, ko, selected, selectedId, onSelect, 
   }
   if (block.type === "table") {
     return <div className={styles.tableWrap} data-live-id={block.id} data-selected={selected ? "true" : "false"} {...activeAttrs(block.id, cursor)} style={cursorStyle(block.id, cursor)}>
-      <table className={styles.docTable}><tbody>
+      <table className={styles.docTable} style={block.colWidths ? { tableLayout: "fixed" } : undefined}>
+        {block.colWidths && <colgroup>{block.colWidths.map((w, i) => <col key={i} style={{ width: `${w * 100}%` }} />)}</colgroup>}
+        <tbody>
         {block.rows.map((row, r) => <tr key={r}>{row.map((cell, c) => cell
-          ? <td key={c} colSpan={cell.colSpan} rowSpan={cell.rowSpan} data-selected={selectedId === cell.id ? "true" : "false"}>
+          ? <td key={c} colSpan={cell.colSpan} rowSpan={cell.rowSpan} data-selected={selectedId === cell.id ? "true" : "false"} style={cell.format?.fill ? { backgroundColor: cell.format.fill } : undefined}>
             <EditableText id={cell.id} text={cell.text} typing={typing} cursor={cursor} editable={editable} className={styles.cellText} style={formatCss(cell.format)}
               onSelect={() => onSelect(cell.id)} onCommit={(text) => onCommit(cell.id, text)} />
           </td>
@@ -492,10 +537,11 @@ function SlideCanvas({ slide, aspect, cursor, typing, interactive, ko, selected,
   const dark = isDark(slide.background);
   return <div className={styles.slide} style={{ aspectRatio: String(aspect), background: slide.background ?? "#ffffff" }} {...(interactive ? { "data-live-id": slide.id, ...activeAttrs(slide.id, cursor) } : {})}>
     {slide.shapes.map((shape) => {
-      const box: CSSProperties = { left: `${shape.x * 100}%`, top: `${shape.y * 100}%`, width: `${shape.w * 100}%`, height: `${shape.h * 100}%`, background: shape.fill };
+      const background = shape.format?.fill ?? shape.fill;
+      const box: CSSProperties = { left: `${shape.x * 100}%`, top: `${shape.y * 100}%`, width: `${shape.w * 100}%`, height: `${shape.h * 100}%`, background };
       if (shape.role === "object") return <div key={shape.id} className={styles.slideObject} style={box}>{shape.label ? <span>{shape.label}</span> : null}</div>;
       const size = shape.format?.size ?? (shape.role === "title" ? 40 : shape.role === "body" ? 24 : 18);
-      const color = shape.format?.color ?? (dark || isDark(shape.fill) ? "#ffffff" : "#1b1b1b");
+      const color = shape.format?.color ?? (dark || isDark(background) ? "#ffffff" : "#1b1b1b");
       const text: CSSProperties = {
         ...box, ...formatCss(shape.format, false), color, fontSize: `calc(${(size / widthPt).toFixed(5)} * 100cqw)`,
         fontWeight: shape.format?.bold ?? shape.role === "title" ? 700 : 400,

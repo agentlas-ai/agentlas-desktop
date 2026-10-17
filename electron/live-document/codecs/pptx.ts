@@ -163,6 +163,19 @@ function shapeFormat(txBody: XmlElement | undefined, theme: Map<string, string>)
 
 /** Writes a format change into every paragraph and run of a text body (run properties are attributes + solidFill). */
 function setShapeFormat(root: XmlElement, sp: XmlElement, delta: LiveFormatPatch): void {
+  if (delta.fill !== undefined) {
+    // spPr sequence: xfrm, geometry, fill, ln, effects…
+    let spPr = firstElement(sp, "p:spPr");
+    if (!spPr) { spPr = el("<p:spPr/>"); sp.children.splice(1, 0, spPr); }
+    removeChildren(spPr, "solidFill", "noFill", "gradFill", "blipFill", "pattFill", "grpFill");
+    if (delta.fill) {
+      const after = [...spPr.children].reverse().find((node) => node.type === "el" && ["xfrm", "custGeom", "prstGeom"].includes(localName(node)));
+      spPr.children.splice(after ? spPr.children.indexOf(after) + 1 : 0, 0, el(`<a:solidFill><a:srgbClr val="${hex6(delta.fill)}"/></a:solidFill>`));
+      spPr.selfClosing = false;
+    }
+    markDirty(spPr);
+    markPath(root, spPr);
+  }
   const txBody = firstElement(sp, "p:txBody");
   if (!txBody) return;
   const runProps = (rPr: XmlElement) => {
@@ -230,8 +243,10 @@ function collectShapes(info: { pkg: ZipPackage; cx: number; cy: number; theme: M
         const type = ph ? normType(ph.type) : "";
         const role: LiveShape["role"] = type === "title" ? "title" : ph && ["body", ""].includes(type) ? "body" : ph && ["dt", "ftr", "sldNum"].includes(type) ? "object" : "text";
         if (role === "object") continue;
-        const format = shapeFormat(txBody, info.theme);
-        out.push({ element: child, shape: { id, role, text: pptxShapeText(txBody), ...frac, ...(solidColor(spPr, info.theme) ? { fill: solidColor(spPr, info.theme) } : {}), ...(format ? { format } : {}) } });
+        const textFormat = shapeFormat(txBody, info.theme);
+        const shapeFill = solidColor(spPr, info.theme);
+        const format = shapeFill ? { ...(textFormat ?? {}), fill: shapeFill } : textFormat;
+        out.push({ element: child, shape: { id, role, text: pptxShapeText(txBody), ...frac, ...(format ? { format } : {}) } });
       } else {
         const label = name === "pic" ? "image" : name === "graphicFrame" ? (findDeep(child, "tbl") ? "table" : findDeep(child, "chart") ? "chart" : "object") : undefined;
         const fill = solidColor(spPr, info.theme);

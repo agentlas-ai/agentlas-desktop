@@ -306,12 +306,17 @@ export function ToolApprovalCard({
         data-ask-card="true"
         data-testid="tool-approval-card"
       >
-        <div className="tool-approval-chip-copy">
-          <strong>{askTitle}</strong>
-          <small title={chipDetail}>{chipDetail}</small>
+        {/* Owner 2026-10-17: like Claude Code / Codex, the question and what it allows sit on top and the choices
+            stack as numbered rows (docs/DESIGN-ASK-CARD.md: choices stack vertically), the first one marked. */}
+        <div className="tool-approval-chip-head">
+          <span className="tool-approval-chip-icon" aria-hidden><IconShield size={14} /></span>
+          <div className="tool-approval-chip-copy">
+            <strong>{askTitle}</strong>
+            <small title={chipDetail}>{chipDetail}</small>
+          </div>
         </div>
         <div className="tool-approval-chip-actions" role="group" aria-label={ko ? "승인 선택" : "Approval choices"}>
-          {askOptions.map((option) => (
+          {askOptions.map((option, index) => (
             <button
               key={option.id}
               type="button"
@@ -323,8 +328,10 @@ export function ToolApprovalCard({
               disabled={locked}
               onClick={() => choose(option.id)}
             >
-              {option.id === "deny" ? <IconClose size={14} /> : <IconCheck size={14} />}
-              {option.title}
+              <span className="tool-approval-chip-key" aria-hidden>{index + 1}</span>
+              <span className="tool-approval-chip-action-title">{option.title}</span>
+              <span className="tool-approval-chip-action-note">{option.note}</span>
+              {option.id === "deny" ? <IconClose size={13} /> : option.active ? <IconCheck size={13} /> : null}
             </button>
           ))}
         </div>

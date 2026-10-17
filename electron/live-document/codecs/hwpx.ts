@@ -1,4 +1,4 @@
-import type { LiveFlowBlock, LiveFormat, LiveFormatPatch, LiveTableCell } from "../../../shared/live-document";
+import type { LiveFlowBlock, LiveFormat, LiveFormatPatch, LivePage, LiveTableCell } from "../../../shared/live-document";
 import { ZipPackage } from "../zip";
 import {
   attr, createElement, elements, escapeXmlAttr, escapeXmlText, localName, markDirty, markPath, parseXml, serializeNode, serializeXml,
@@ -6,6 +6,30 @@ import {
 } from "../xml-lite";
 import { blockChanged, flowBlocks, LiveDocumentCodecError, planFlowInsertions, type LiveDocumentCodec } from "./common";
 import { el, formatDelta, isEmptyFormat, normColor, removeChildren } from "./format";
+
+const HWPUNIT_MM = 25.4 / 7200;
+
+function findDeep(element: XmlElement, local: string): XmlElement | undefined {
+  for (const child of elements(element)) {
+    if (localName(child) === local) return child;
+    const found = findDeep(child, local);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** Paper of the first section (secPr/pagePr); the body starts below the header area and ends above the footer. */
+function pageOf(doc: XmlDocument): LivePage | undefined {
+  const pagePr = findDeep(doc.root, "pagePr");
+  if (!pagePr) return undefined;
+  const margin = elements(pagePr).find((node) => localName(node) === "margin");
+  const n = (node: XmlElement | undefined, key: string) => Number(node ? attr(node, key) : NaN) || 0;
+  const mm = (value: number) => Math.round(value * HWPUNIT_MM * 10) / 10;
+  return {
+    width: mm(n(pagePr, "width") || 59528), height: mm(n(pagePr, "height") || 84188),
+    margin: { top: mm(n(margin, "top") + n(margin, "header")), right: mm(n(margin, "right")), bottom: mm(n(margin, "bottom") + n(margin, "footer")), left: mm(n(margin, "left") + n(margin, "gutter")) },
+  };
+}
 
 const ALIGN_IN: Record<string, LiveFormat["align"]> = { LEFT: "left", CENTER: "center", RIGHT: "right", JUSTIFY: "justify", DISTRIBUTE: "justify", DISTRIBUTE_SPACE: "justify" };
 const ALIGN_OUT: Record<NonNullable<LiveFormat["align"]>, string> = { left: "LEFT", center: "CENTER", right: "RIGHT", justify: "JUSTIFY" };
@@ -19,6 +43,8 @@ class HwpxHeader {
   private readonly paraPr = new Map<string, XmlElement>();
   private charList: XmlElement | undefined;
   private paraList: XmlElement | undefined;
+  private readonly borderFill = new Map<string, XmlElement>();
+  private borderList: XmlElement | undefined;
   private readonly cache = new Map<string, string>();
   changed = false;
   constructor(xml: string | undefined) {
@@ -29,12 +55,83 @@ class HwpxHeader {
         const name = localName(child);
         if (name === "charProperties") this.charList = child;
         else if (name === "paraProperties") this.paraList = child;
+        else if (name === "borderFills") this.borderList = child;
+        else if (name === "borderFill" && attr(child, "id") !== undefined) this.borderFill.set(attr(child, "id")!, child);
         else if (name === "charPr" && attr(child, "id") !== undefined) this.charPr.set(attr(child, "id")!, child);
         else if (name === "paraPr" && attr(child, "id") !== undefined) this.paraPr.set(attr(child, "id")!, child);
-        if (!["charPr", "paraPr"].includes(name)) walk(child);
+        if (!["charPr", "paraPr", "borderFill"].includes(name)) walk(child);
       }
     };
     walk(this.doc.root);
+  }
+  /** Face colour of a border/fill entry (cell or paragraph background); none/transparent is no fill. */
+  fillOf(borderFillId: string | undefined): string | undefined {
+    const entry = borderFillId !== undefined ? this.borderFill.get(borderFillId) : undefined;
+    const brush = entry ? findDeep(entry, "winBrush") : undefined;
+    const face = brush ? attr(brush, "faceColor") : undefined;
+    const color = face && face !== "none" ? normColor(face) : undefined;
+    return color === "#ffffff" ? undefined : color;
+  }
+  /** Body text size: the character shape of style 0 (바탕글/Normal). */
+  defaultSize(styleCharPr: string | undefined): number | undefined {
+    const char = this.charPr.get(styleCharPr ?? "0");
+    const height = char ? Number(attr(char, "height")) : NaN;
+    return Number.isFinite(height) && height > 0 ? height / 100 : undefined;
+  }
+  /** A border/fill like `base` with the given background (null removes it). */
+  borderFillFor(base: string, fill: string | null): string {
+    if (!this.borderList) return base;
+    const key = `b${base}|${fill}`;
+    const hit = this.cache.get(key);
+    if (hit) return hit;
+    const source = this.borderFill.get(base) ?? [...this.borderFill.values()][0];
+    if (!source) return base;
+    const clone = el(serializeNode(source));
+    const prefixOf = (name: string) => (name.includes(":") ? `${name.split(":")[0]}:` : "");
+    removeChildren(clone, "fillBrush");
+    if (fill) { clone.children.push(el(`<hc:fillBrush xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core"><hc:winBrush faceColor="${fill.toUpperCase()}" hatchColor="#000000" alpha="0"/></hc:fillBrush>`)); markDirty(clone); }
+    void prefixOf;
+    const id = this.append(this.borderList, this.borderFill, clone);
+    this.cache.set(key, id);
+    return id;
+  }
+  /** A border/fill with thin solid borders on all four sides and no fill, for new tables. */
+  solidBorderFill(): string {
+    for (const [id, entry] of this.borderFill) {
+      const sides = ["leftBorder", "rightBorder", "topBorder", "bottomBorder"].map((side) => elements(entry).find((node) => localName(node) === side));
+      if (sides.every((side) => side && attr(side, "type") === "SOLID") && !this.fillOf(id)) return id;
+    }
+    const source = [...this.borderFill.values()][0];
+    if (!this.borderList || !source) return "1";
+    const clone = el(serializeNode(source));
+    for (const node of elements(clone)) {
+      if (["leftBorder", "rightBorder", "topBorder", "bottomBorder"].includes(localName(node))) { setAttr(node, "type", "SOLID"); setAttr(node, "width", "0.12 mm"); setAttr(node, "color", "#000000"); }
+    }
+    removeChildren(clone, "fillBrush");
+    markDirty(clone);
+    return this.append(this.borderList, this.borderFill, clone);
+  }
+  /** Paragraph shape with a background (paraPr border → border/fill entry). */
+  paraFillFor(base: string, fill: string | null): string {
+    if (!this.paraList) return base;
+    const key = `pf${base}|${fill}`;
+    const hit = this.cache.get(key);
+    if (hit) return hit;
+    const source = this.paraPr.get(base) ?? [...this.paraPr.values()][0];
+    if (!source) return base;
+    const clone = el(serializeNode(source));
+    const border = findDeep(clone, "border");
+    const fillId = this.borderFillFor(border ? attr(border, "borderFillIDRef") ?? "1" : "1", fill);
+    if (border) setAttr(border, "borderFillIDRef", fillId);
+    else { clone.children.push(el(`<hh:border xmlns:hh="http://www.hancom.co.kr/hwpml/2011/head" borderFillIDRef="${fillId}" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/>`)); markDirty(clone); }
+    const id = this.append(this.paraList, this.paraPr, clone);
+    this.cache.set(key, id);
+    return id;
+  }
+  paraFillOf(paraPrId: string | undefined): string | undefined {
+    const para = paraPrId !== undefined ? this.paraPr.get(paraPrId) : undefined;
+    const border = para ? findDeep(para, "border") : undefined;
+    return border ? this.fillOf(attr(border, "borderFillIDRef")) : undefined;
   }
   format(charPrId: string | undefined, paraPrId: string | undefined): LiveFormat | undefined {
     const format: LiveFormat = {};
@@ -54,6 +151,8 @@ class HwpxHeader {
     const align = para ? elements(para).find((node) => localName(node) === "align") : undefined;
     const horizontal = align ? ALIGN_IN[attr(align, "horizontal") ?? ""] : undefined;
     if (horizontal && horizontal !== "justify") format.align = horizontal;
+    const fill = this.paraFillOf(paraPrId);
+    if (fill) format.fill = fill;
     return isEmptyFormat(format) ? undefined : format;
   }
   private append(list: XmlElement, map: Map<string, XmlElement>, clone: XmlElement): string {
@@ -136,6 +235,7 @@ function setParagraphFormat(header: HwpxHeader, root: XmlElement | null, paragra
     if (next !== base) setAttr(run, "charPrIDRef", next);
   }
   if (delta.align !== undefined) setAttr(paragraph, "paraPrIDRef", header.paraFor(attr(paragraph, "paraPrIDRef") ?? "0", delta.align ?? "justify"));
+  if (delta.fill !== undefined) setAttr(paragraph, "paraPrIDRef", header.paraFillFor(attr(paragraph, "paraPrIDRef") ?? "0", delta.fill));
   dropLineSegments(paragraph);
   markDirty(paragraph);
   if (root) markPath(root, paragraph);
@@ -159,6 +259,8 @@ interface HwpxContext {
   outline: Map<string, number>;
   outlineStyle: Map<number, { id: string; paraPr: string; charPr: string }>;
   header: HwpxHeader;
+  page?: LivePage;
+  defaultSize?: number;
 }
 
 function sectionParts(pkg: ZipPackage): string[] {
@@ -224,10 +326,10 @@ function cellParagraphs(tc: XmlElement): { subList: XmlElement | undefined; para
   return { subList, paragraphs: subList ? elements(subList).filter((el) => localName(el) === "p") : [] };
 }
 
-interface TableLayout { rows: Array<Array<LiveTableCell | null>>; cells: Map<string, XmlElement> }
+interface TableLayout { rows: Array<Array<LiveTableCell | null>>; cells: Map<string, XmlElement>; colWidths?: number[] }
 
 function tableLayout(tbl: XmlElement, tableId: string, header?: HwpxHeader): TableLayout {
-  const cellsByPos: Array<{ row: number; col: number; colSpan: number; rowSpan: number; tc: XmlElement }> = [];
+  const cellsByPos: Array<{ row: number; col: number; colSpan: number; rowSpan: number; tc: XmlElement; width: number }> = [];
   for (const tr of elements(tbl).filter((el) => localName(el) === "tr")) {
     for (const tc of elements(tr).filter((el) => localName(el) === "tc")) {
       const address = elements(tc).find((el) => localName(el) === "cellAddr");
@@ -238,6 +340,7 @@ function tableLayout(tbl: XmlElement, tableId: string, header?: HwpxHeader): Tab
         colSpan: Math.max(1, Number(span ? attr(span, "colSpan") : 1) || 1),
         rowSpan: Math.max(1, Number(span ? attr(span, "rowSpan") : 1) || 1),
         tc,
+        width: Number(attr(elements(tc).find((el) => localName(el) === "cellSz") ?? tc, "width")) || 0,
       });
     }
   }
@@ -249,11 +352,19 @@ function tableLayout(tbl: XmlElement, tableId: string, header?: HwpxHeader): Tab
     const id = `${tableId}.r${item.row + 1}c${item.col + 1}`;
     const paragraphs = cellParagraphs(item.tc).paragraphs;
     const text = paragraphs.map(hwpxParagraphText).join("\n");
-    const format = header && paragraphs[0] ? paragraphFormat(header, paragraphs[0]) : undefined;
+    const paragraphFmt = header && paragraphs[0] ? paragraphFormat(header, paragraphs[0]) : undefined;
+    const cellFill = header?.fillOf(attr(item.tc, "borderFillIDRef"));
+    const merged: LiveFormat = { ...(paragraphFmt ?? {}) };
+    delete merged.fill;
+    if (cellFill) merged.fill = cellFill;
+    const format = isEmptyFormat(merged) ? undefined : merged;
     if (rows[item.row]) rows[item.row][item.col] = { id, text, ...(item.colSpan > 1 ? { colSpan: item.colSpan } : {}), ...(item.rowSpan > 1 ? { rowSpan: item.rowSpan } : {}), ...(format ? { format } : {}) };
     cells.set(id, item.tc);
   }
-  return { rows, cells };
+  const widths = Array.from({ length: colCount }, (_, col) => cellsByPos.find((cell) => cell.col === col && cell.colSpan === 1 && cell.width > 0)?.width ?? 0);
+  const total = widths.reduce((sum, w) => sum + w, 0);
+  const colWidths = widths.every((w) => w > 0) && total > 0 ? widths.map((w) => Math.round((w / total) * 10000) / 10000) : undefined;
+  return { rows, cells, colWidths };
 }
 
 function load(bytes: Uint8Array): HwpxContext {
@@ -272,16 +383,21 @@ function load(bytes: Uint8Array): HwpxContext {
       blocks.set(id, { section, element: paragraph });
       const table = firstTable(paragraph);
       const text = hwpxParagraphText(paragraph);
-      if (table) model.push({ id, type: "table", rows: tableLayout(table, id, header).rows, ...(hasSection(paragraph) ? { fixed: true } : {}) });
+      if (table) {
+        const layout = tableLayout(table, id, header);
+        model.push({ id, type: "table", rows: layout.rows, ...(layout.colWidths ? { colWidths: layout.colWidths } : {}), ...(hasSection(paragraph) ? { fixed: true } : {}) });
+      }
       else if (!text.trim() && hasObject(paragraph)) model.push({ id, type: "object", label: "image" });
       else {
         const heading = styles.outline.get(attr(paragraph, "styleIDRef") ?? "");
         const format = paragraphFormat(header, paragraph);
-        model.push({ id, type: "paragraph", text, ...(heading ? { heading } : {}), ...(hasSection(paragraph) ? { fixed: true } : {}), ...(format ? { format } : {}) });
+        const pageBreak = attr(paragraph, "pageBreak") === "1" ? "before" as const : undefined;
+        model.push({ id, type: "paragraph", text, ...(heading ? { heading } : {}), ...(hasSection(paragraph) ? { fixed: true } : {}), ...(format ? { format } : {}), ...(pageBreak ? { pageBreak } : {}) });
       }
     }
   });
-  return { pkg, sections, blocks, model, ...styles, header };
+  const normal = /<(?:\w+:)?style\s[^>]*\bid="0"[^>]*\bcharPrIDRef="(\d+)"/.exec(pkg.text("Contents/header.xml") ?? "")?.[1];
+  return { pkg, sections, blocks, model, ...styles, header, page: pageOf(sections[0].doc), defaultSize: header.defaultSize(normal) };
 }
 
 function prefixOf(element: XmlElement): string {
@@ -341,6 +457,61 @@ function newParagraph(ctx: HwpxContext, template: XmlElement | undefined, prefix
   return createElement(`<${prefix}p id="0" paraPrIDRef="${escapeXmlAttr(paraPr)}" styleIDRef="${escapeXmlAttr(styleId)}" pageBreak="0" columnBreak="0" merged="0"><${prefix}run charPrIDRef="${escapeXmlAttr(charPr)}">${textMarkup(prefix, text)}</${prefix}run></${prefix}p>`);
 }
 
+let tableSerial = 0;
+
+/** A new table paragraph: thin solid borders, column widths across the text width, one paragraph per cell. */
+function newTable(ctx: HwpxContext, template: XmlElement | undefined, prefix: string, block: Extract<LiveFlowBlock, { type: "table" }>): XmlElement {
+  const page = ctx.page ?? { width: 210, height: 297, margin: { top: 20, right: 20, bottom: 15, left: 20 } };
+  const textWidth = Math.round((page.width - page.margin.left - page.margin.right) / HWPUNIT_MM);
+  const rows = block.rows.length;
+  const cols = Math.max(...block.rows.map((row) => row.length));
+  const widths = Array.from({ length: cols }, (_, c) => Math.round(textWidth * (block.colWidths?.[c] ?? 1 / cols)));
+  const rowHeight = 1800;
+  const border = ctx.header.solidBorderFill();
+  const paraPr = template ? attr(template, "paraPrIDRef") ?? "0" : "0";
+  const styleId = template ? attr(template, "styleIDRef") ?? "0" : "0";
+  const templateRun = template ? runs(template)[0] : undefined;
+  const charPr = templateRun ? attr(templateRun, "charPrIDRef") ?? "0" : "0";
+  // A merged range is one tc at its anchor with cellSpan; the positions it covers have no tc (null in the model).
+  const cells = block.rows.map((row, r) => `<${prefix}tr>${Array.from({ length: cols }, (_, c) => {
+    const cell = row[c];
+    if (!cell) return "";
+    const text = cell.text;
+    const colSpan = cell.colSpan ?? 1, rowSpan = cell.rowSpan ?? 1;
+    const width = widths.slice(c, c + colSpan).reduce((sum, w) => sum + w, 0);
+    const fill = cell.format?.fill ? ctx.header.borderFillFor(border, cell.format.fill) : border;
+    return `<${prefix}tc name="" header="0" hasMargin="0" protect="0" editable="0" dirty="0" borderFillIDRef="${fill}">`
+      + `<${prefix}subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">`
+      + `<${prefix}p id="0" paraPrIDRef="${escapeXmlAttr(paraPr)}" styleIDRef="${escapeXmlAttr(styleId)}" pageBreak="0" columnBreak="0" merged="0"><${prefix}run charPrIDRef="${escapeXmlAttr(charPr)}">${textMarkup(prefix, text)}</${prefix}run></${prefix}p>`
+      + `</${prefix}subList><${prefix}cellAddr colAddr="${c}" rowAddr="${r}"/><${prefix}cellSpan colSpan="${colSpan}" rowSpan="${rowSpan}"/><${prefix}cellSz width="${width}" height="${rowHeight * rowSpan}"/><${prefix}cellMargin left="510" right="510" top="141" bottom="141"/></${prefix}tc>`;
+  }).join("")}</${prefix}tr>`).join("");
+  const id = 1_900_000_000 + (++tableSerial);
+  const markup = `<${prefix}p id="0" paraPrIDRef="${escapeXmlAttr(paraPr)}" styleIDRef="${escapeXmlAttr(styleId)}" pageBreak="0" columnBreak="0" merged="0"><${prefix}run charPrIDRef="${escapeXmlAttr(charPr)}">`
+    + `<${prefix}tbl id="${id}" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" repeatHeader="1" rowCnt="${rows}" colCnt="${cols}" cellSpacing="0" borderFillIDRef="${border}" noAdjust="0">`
+    + `<${prefix}sz width="${widths.reduce((a, b) => a + b, 0)}" widthRelTo="ABSOLUTE" height="${rowHeight * rows}" heightRelTo="ABSOLUTE" protect="0"/>`
+    + `<${prefix}pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>`
+    + `<${prefix}outMargin left="0" right="0" top="0" bottom="0"/><${prefix}inMargin left="510" right="510" top="141" bottom="141"/>${cells}</${prefix}tbl><${prefix}t/></${prefix}run></${prefix}p>`;
+  const built = createElement(markup);
+  // Character/paragraph formats of the new cells (bold header row etc.): each cell reads back with exactly its model
+  // format, not the template paragraph's.
+  const table = firstTable(built)!;
+  const trs = elements(table).filter((node) => localName(node) === "tr");
+  block.rows.forEach((row, r) => row.forEach((cell, c) => {
+    if (!cell) return;
+    const { fill: _fill, ...wanted } = cell.format ?? {};
+    // Index among this row's tcs: covered positions before c have no tc.
+    const tc = elements(trs[r]).filter((node) => localName(node) === "tc")[row.slice(0, c).filter(Boolean).length];
+    for (const p of cellParagraphs(tc).paragraphs) {
+      const { fill: _has, ...current } = paragraphFormat(ctx.header, p) ?? {};
+      const delta = formatDelta(current, wanted);
+      if (isEmptyFormat(delta)) continue;
+      setParagraphFormat(ctx.header, null, p, delta);
+      markPath(built, p);
+    }
+  }));
+  return built;
+}
+
 /** Heading: the Outline N style with its paragraph/character shapes; 0 returns to the body style (id 0). */
 function setHeading(ctx: HwpxContext, root: XmlElement, paragraph: XmlElement, level: number): void {
   const style = level > 0 ? ctx.outlineStyle.get(level) : undefined;
@@ -383,7 +554,8 @@ function previewText(blocks: LiveFlowBlock[]): string {
 
 export const hwpxCodec: LiveDocumentCodec = {
   parse(bytes) {
-    return { kind: "flow", blocks: load(bytes).model };
+    const ctx = load(bytes);
+    return { kind: "flow", blocks: ctx.model, ...(ctx.page ? { page: ctx.page } : {}), ...(ctx.defaultSize ? { defaultSize: ctx.defaultSize } : {}) };
   },
   write(bytes, original, final) {
     const ctx = load(bytes);
@@ -416,7 +588,8 @@ export const hwpxCodec: LiveDocumentCodec = {
           const tc = layout.cells.get(cell.id);
           if (!tc) continue;
           if (old?.text !== cell.text) { setCellText(root, tc, cell.text); touched.add(where.section); }
-          const delta = formatDelta(old?.format, cell.format);
+          const { fill, ...delta } = formatDelta(old?.format, cell.format);
+          if (fill !== undefined) { setAttr(tc, "borderFillIDRef", ctx.header.borderFillFor(attr(tc, "borderFillIDRef") ?? "1", fill)); markPath(root, tc); touched.add(where.section); }
           if (!isEmptyFormat(delta)) { for (const p of cellParagraphs(tc).paragraphs) setParagraphFormat(ctx.header, root, p, delta); touched.add(where.section); }
         }
       }
@@ -430,9 +603,11 @@ export const hwpxCodec: LiveDocumentCodec = {
     const templateFor = (anchorId: string): XmlElement | undefined => {
       const start = anchorId === "^" ? -1 : ids.indexOf(anchorId);
       const plain = (id: string) => { const block = before.get(id); return block?.type === "paragraph" && !block.heading && !block.fixed; };
-      for (let i = start; i >= 0; i--) if (plain(ids[i])) return ctx.blocks.get(ids[i])!.element;
+      // The template is the paragraph as it was in the file, not as this save already rewrote it.
+      const pristine = (id: string) => { const element = ctx.blocks.get(id)!.element; return createElement(element.src.slice(element.start, element.end)); };
+      for (let i = start; i >= 0; i--) if (plain(ids[i])) return pristine(ids[i]);
       const any = ids.find(plain);
-      return any ? ctx.blocks.get(any)!.element : undefined;
+      return any ? pristine(any) : undefined;
     };
     const elementToId = new Map([...ctx.blocks].map(([id, where]) => [where.element, id]));
     for (const index of touched) {
@@ -442,9 +617,13 @@ export const hwpxCodec: LiveDocumentCodec = {
       const children: XmlNode[] = [];
       let leading = index === 0 ? plan.get("^") ?? [] : [];
       const build = (block: LiveFlowBlock, anchor: string): XmlElement | null => {
+        if (block.type === "table") return newTable(ctx, templateFor(anchor), prefix, block);
         if (block.type !== "paragraph") return null;
         const built = newParagraph(ctx, templateFor(anchor), prefix, block.text, block.heading);
-        if (block.format) setParagraphFormat(ctx.header, null, built, block.format);
+        if (block.pageBreak === "before") setAttr(built, "pageBreak", "1");
+        // A body paragraph reads back with exactly its model format, not the template's; a heading keeps its style.
+        const delta = block.heading ? block.format ?? {} : formatDelta(paragraphFormat(ctx.header, built), block.format);
+        if (!isEmptyFormat(delta)) setParagraphFormat(ctx.header, null, built, delta);
         return built;
       };
       for (const node of root.children) {

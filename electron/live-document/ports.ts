@@ -31,13 +31,18 @@ const OP_SCHEMA = {
     format: {
       type: "object", additionalProperties: false, description: "set_format: whole paragraph, table cell, slide shape or sheet cell (target <sheet>!A1)",
       properties: { bold: { type: "boolean" }, italic: { type: "boolean" }, underline: { type: "boolean" }, size: { type: "number", minimum: 1, maximum: 400 },
-        color: { type: "string", pattern: "^#[0-9a-fA-F]{6}$" }, align: { type: "string", enum: ["left", "center", "right", "justify"] } },
+        color: { type: "string", pattern: "^#[0-9a-fA-F]{6}$" }, align: { type: "string", enum: ["left", "center", "right", "justify"] },
+        fill: { type: "string", pattern: "^#[0-9a-fA-F]{6}$", description: "background (cell shading)" } },
     },
+    widths: { type: "array", items: { type: "number", exclusiveMinimum: 0 }, description: "insert_table column width ratios" },
+    merges: { type: "array", items: { type: "object", required: ["cell"], properties: { cell: { type: "string", description: "anchor r1c2" }, rowSpan: { type: "integer", minimum: 1 }, colSpan: { type: "integer", minimum: 1 } } }, description: "insert_table merged ranges" },
+    pageBreak: { type: "boolean", description: "insert_paragraph starts a new page" },
   },
 };
 
 export const LIVE_DOCUMENT_PORT_SCHEMAS = {
   open: { type: "object", required: ["path"], properties: { path: { type: "string", description: "absolute path of a .xlsx .docx .pptx .hwpx .hwp file" } } },
+  create: { type: "object", required: ["path"], properties: { path: { type: "string", description: "absolute path of a new .docx .xlsx .pptx .hwpx file (must not exist; Hangul = .hwpx)" }, title: { type: "string" } } },
   read: { type: "object", required: ["sessionId"], properties: { sessionId: { type: "string" }, maxChars: { type: "integer", minimum: 1000, maximum: 200000 } } },
   apply: { type: "object", required: ["sessionId", "ops"], properties: { sessionId: { type: "string" }, baseRevision: { type: "integer", minimum: 0 }, ops: { type: "array", minItems: 1, maxItems: 400, items: OP_SCHEMA } } },
   save: { type: "object", required: ["sessionId"], properties: { sessionId: { type: "string" } } },
@@ -68,6 +73,23 @@ export async function documentOpen(args: Record<string, unknown>, ctx: Ctx): Pro
       sessionId: meta.sessionId, name: meta.name, format: meta.format, revision: snapshot.revision,
       ops: LIVE_DOCUMENT_OPS_BY_FORMAT[meta.format], outline: outline.text, truncated: outline.truncated,
       next: "edit with document.apply (ids from the outline); the owner watches it in the Document tab; document.save writes the file",
+    } };
+  } catch (error) { return errorOutcome(error); }
+}
+
+export async function documentCreate(args: Record<string, unknown>, ctx: Ctx): Promise<Outcome> {
+  if (ctx.dryRun) return refused("dry_run");
+  if (!writable(ctx)) return refused("permission_read_only", "creating writes a new file; this run may not write");
+  try {
+    const live = await store();
+    const meta = await live.createLiveDocument({ chatId: ctx.chatId, path: str(args.path), title: str(args.title) });
+    const snapshot = await live.liveDocumentSnapshot(meta.sessionId);
+    const outline = liveDocumentOutline(snapshot.model, { maxChars: 20_000 });
+    return { status: "ok", data: {
+      sessionId: meta.sessionId, name: meta.name, path: meta.path, format: meta.format, revision: snapshot.revision,
+      ops: LIVE_DOCUMENT_OPS_BY_FORMAT[meta.format], outline: outline.text,
+      next: "blank A4 document is open in the Document tab; fill it with document.apply, then document.save",
+      ...(meta.format === "hwpx" ? { note: "a .hwpx file is a Hangul (한글) document: Hancom Office opens it and can save it as .hwp, so a request for a Hangul/hwp file is complete with this file" } : {}),
     } };
   } catch (error) { return errorOutcome(error); }
 }
