@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.3.55 — 2026-10-17
+
+- A saved automation's team step waits for the team's results before moving on; before, daily team automations finished without the work they started.
+- Services that need a stored key, such as ElevenLabs voices, are called by Agentlas itself, so the key never reaches a model; teammates can also listen to audio when they review it.
+- Every video upload is recorded per video, and a second upload of the same video is refused.
+- Automations no longer ask you to pick a project, and a run cut off by the app closing resumes only the steps that are safe to repeat, never an upload.
+- Finished work no longer ends as "not complete" over a minor choice: choices with no outside effect take their safe default, and only real owner decisions are left for you.
+- "database is locked" errors during long runs are fixed at their cause, and Codex turns on Windows no longer fail to start because of a command line that was too long.
+- Screen assets download only from public https addresses, autofill checks the page it writes into, and built-in connectors start from a verified file.
+- A strategy change that would alter an agent's instructions waits for your approval; schedule-only changes apply on their own.
+- Telegram pairs with a t.me start link, Windows previews and background tasks work, model downloads stop cleanly when the disk is full, long Korean documents export to PDF without extra tools, and old trigger records and Telegram attachment copies are cleaned up.
+- This release binds Agentlas OS v1.2.65 at 8b303608eea746e7ea8d7560890816784bdaa86c; public runtime asset `hephaestus-runtime-v1.2.65.tar.gz` is pinned at SHA-256 `7dae16f12a78515dfa7adbc732197e26aa06a2cd413452e81b2675450caba7de`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.54 — 2026-10-17
 
 - A teammate that stops mid-reply no longer throws away the room's finished work; the room continues once and reports what the team did.
