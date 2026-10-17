@@ -9,7 +9,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 
-export function pluginTreeSignature(root: string, skipTopLevel?: (name: string) => boolean): string | null {
+/**
+ * `changeTime` 는 ctime 도 넣는다 — 실행을 넘어 저장해 두는 서명(시작 시 내장 플러그인 재해시 생략, perf MP-04)에 쓴다.
+ * mtime 은 utimes 로 되돌릴 수 있지만 ctime 은 내용·모드·utimes 어느 변경에도 바뀐다.
+ */
+export function pluginTreeSignature(root: string, skipTopLevel?: (name: string) => boolean, options?: { changeTime?: boolean }): string | null {
   try {
     const hash = createHash("sha256");
     const visit = (dir: string, relativeDir: string, topLevel: boolean): void => {
@@ -19,7 +23,7 @@ export function pluginTreeSignature(root: string, skipTopLevel?: (name: string) 
         const absolute = path.join(dir, entry.name);
         const relative = path.posix.join(relativeDir, entry.name);
         const stat = fs.lstatSync(absolute);
-        hash.update(`${stat.isDirectory() ? "D" : stat.isFile() ? "F" : stat.isSymbolicLink() ? "L" : "?"}\0${relative}\0${stat.size}\0${Math.floor(stat.mtimeMs)}\0${stat.mode & 0o777}\0`);
+        hash.update(`${stat.isDirectory() ? "D" : stat.isFile() ? "F" : stat.isSymbolicLink() ? "L" : "?"}\0${relative}\0${stat.size}\0${Math.floor(stat.mtimeMs)}\0${stat.mode & 0o777}\0${options?.changeTime ? `${stat.ctimeMs}\0` : ""}`);
         if (stat.isDirectory()) visit(absolute, relative, false);
       }
     };

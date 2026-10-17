@@ -8,7 +8,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { pluginTreeSignature } from "./tree-signature";
 import type Database from "better-sqlite3";
-import { isPackagedRuntime, optionalElectronAppPath, userDataPath } from "../runtime-paths";
+import { electronAppVersion, isPackagedRuntime, optionalElectronAppPath, userDataPath } from "../runtime-paths";
 import { configuredIdentity } from "../install-identity";
 
 function bundledPluginsRoot(): string {
@@ -585,6 +585,66 @@ export function materializePluginRelease(input: {
   }
 }
 
+/**
+ * Startup verification record for a bundled release (perf MP-04). Every launch hashed both the bundled
+ * and the installed tree of every built-in plugin (about 2,100 files, 30 MB, ~1 s on Main before the
+ * window) only to report `unchanged`. After an exact verification we record the app version, the
+ * bundled tree stamp, the installed tree stamp (sizes, mtimes, modes and ctimes, so content edits and
+ * forged mtimes still differ) and the installed generation. A later launch of the same app version
+ * skips the two full digests only while all of them still match; anything else takes the full path.
+ */
+type BuiltinVerifiedRecord = {
+  schema: "agentlas.plugin-builtin-verified/v1";
+  slug: string; appVersion: string; sourceDir: string; sourceStamp: string;
+  version: string; digest: string; installationId: string; installedStamp: string;
+};
+const builtinRecordPath = (slug: string, destinationDir: string) => path.join(path.dirname(destinationDir), `.${slug}.verified.json`);
+
+function unchangedSinceVerified(slug: string, sourceDir: string, destinationDir: string): MaterializeReceipt | null {
+  try {
+    const file = builtinRecordPath(slug, destinationDir);
+    const stat = lstatIfPresent(file);
+    if (!stat || stat.isSymbolicLink() || !stat.isFile() || stat.size > 8192) return null;
+    const record = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<BuiltinVerifiedRecord>;
+    if (record.schema !== "agentlas.plugin-builtin-verified/v1" || record.slug !== slug || !record.version || !record.digest
+      || !record.installationId || record.appVersion !== electronAppVersion() || record.sourceDir !== path.resolve(sourceDir)) return null;
+    if (!record.sourceStamp || pluginTreeSignature(sourceDir, undefined, { changeTime: true }) !== record.sourceStamp) return null;
+    const destination = lstatIfPresent(destinationDir);
+    if (!destination || destination.isSymbolicLink() || !destination.isDirectory()) return null;
+    if (!record.installedStamp || pluginTreeSignature(destinationDir, isHostOwned, { changeTime: true }) !== record.installedStamp) return null;
+    if (installationToken(destinationDir) !== record.installationId
+      || !exactInstalledMetadata(destinationDir, slug, record.version, record.digest)
+      || readManifestIdentity(sourceDir).version !== record.version || readManifestIdentity(destinationDir).version !== record.version) return null;
+    return { slug, action: "unchanged", version: record.version, digest: record.digest };
+  } catch {
+    return null;
+  }
+}
+
+function rememberVerified(receipt: MaterializeReceipt, sourceDir: string, destinationDir: string, sourceStampBefore: string | null): void {
+  const file = builtinRecordPath(receipt.slug, destinationDir);
+  try {
+    // Only the bundled release verified exactly in this pass is recorded; a failure or a preserved newer release is not.
+    const recordable = receipt.action !== "failed" && receipt.version && receipt.digest && sourceStampBefore
+      && readManifestIdentity(sourceDir).version === receipt.version
+      && pluginTreeSignature(sourceDir, undefined, { changeTime: true }) === sourceStampBefore;
+    const installedStamp = recordable ? pluginTreeSignature(destinationDir, isHostOwned, { changeTime: true }) : null;
+    const installationId = installedStamp ? installationToken(destinationDir) : null;
+    if (!installedStamp || !installationId || !exactInstalledMetadata(destinationDir, receipt.slug, receipt.version!, receipt.digest!)) {
+      if (lstatIfPresent(file)?.isFile()) fs.unlinkSync(file);
+      return;
+    }
+    const record: BuiltinVerifiedRecord = { schema: "agentlas.plugin-builtin-verified/v1", slug: receipt.slug,
+      appVersion: electronAppVersion(), sourceDir: path.resolve(sourceDir), sourceStamp: sourceStampBefore!,
+      version: receipt.version!, digest: receipt.digest!, installationId, installedStamp };
+    const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+    fs.writeFileSync(temp, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
+    fs.renameSync(temp, file);
+  } catch {
+    // A missing record only costs the full verification on the next launch.
+  }
+}
+
 export function materializeBuiltinPlugins(): MaterializeReceipt[] {
   const source = bundledPluginsRoot();
   let slugs: string[];
@@ -601,11 +661,16 @@ export function materializeBuiltinPlugins(): MaterializeReceipt[] {
     return [{ slug: "*", action: "failed", reason }];
   }
 
-  const receipts = slugs.map((slug) => materializePluginRelease({
-    slug,
-    sourceDir: path.join(source, slug),
-    destinationDir: path.join(installedPluginsRoot(), slug),
-  }));
+  const receipts = slugs.map((slug) => {
+    const sourceDir = path.join(source, slug);
+    const destinationDir = path.join(installedPluginsRoot(), slug);
+    const recorded = unchangedSinceVerified(slug, sourceDir, destinationDir);
+    if (recorded) return recorded;
+    const sourceStamp = pluginTreeSignature(sourceDir, undefined, { changeTime: true });
+    const receipt = materializePluginRelease({ slug, sourceDir, destinationDir });
+    rememberVerified(receipt, sourceDir, destinationDir, sourceStamp);
+    return receipt;
+  });
   for (const receipt of receipts) {
     if (receipt.action === "failed") console.error(`[plugins] ${receipt.slug} materialize failed:`, receipt.reason);
   }
