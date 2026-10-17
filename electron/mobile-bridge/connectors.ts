@@ -71,6 +71,20 @@ function text(value: string | null | undefined, maxBytes: number): string {
   return sanitizeMobileBridgeText(value ?? "", maxBytes);
 }
 
+const SLUG = /^[a-z0-9][a-z0-9._-]{0,127}$/i;
+
+/** The Hub plugin that installed this row (renderer toolsModel.ts pluginSlugOfServer, mirrored). */
+export function pluginSlugOfConnector(server: InstalledMcpServer): string | null {
+  if (server.catalogId) {
+    const hub = server.catalogId.startsWith("hub:") ? server.catalogId.slice(4) : null;
+    return hub && SLUG.test(hub) ? hub : null;
+  }
+  const index = server.name.indexOf(":");
+  if (index <= 0) return null;
+  const slug = server.name.slice(0, index);
+  return SLUG.test(slug) ? slug : null;
+}
+
 function requiresKeys(entry: McpToolCatalogEntry): boolean {
   return entry.envRequirements.some((requirement) => requirement.required !== false);
 }
@@ -78,6 +92,8 @@ function requiresKeys(entry: McpToolCatalogEntry): boolean {
 export interface MobileConnectorRow {
   id: string;
   catalogId: string | null;
+  /** Hub plugin slug when a plugin installed this connector; the phone groups by it. */
+  pluginSlug: string | null;
   name: string;
   nameEn: string;
   description: string;
@@ -108,11 +124,16 @@ export interface MobileConnectorList {
 
 function projectInstalled(server: InstalledMcpServer, catalogById: Map<string, McpToolCatalogEntry>): MobileConnectorRow {
   const entry = server.catalogId ? catalogById.get(server.catalogId) : undefined;
+  const pluginSlug = pluginSlugOfConnector(server);
+  // `github-mcp:github` shows as `github` under its plugin, as on Desktop (connectorDisplayName).
+  const bare = (name: string) => pluginSlug && !server.catalogId && name.startsWith(`${pluginSlug}:`)
+    ? name.slice(pluginSlug.length + 1) || name : name;
   return {
     id: text(server.id, 256),
     catalogId: server.catalogId ? text(server.catalogId, 256) : null,
-    name: text(server.name || server.nameEn, 256),
-    nameEn: text(server.nameEn || server.name, 256),
+    pluginSlug: pluginSlug ? text(pluginSlug, 128) : null,
+    name: text(bare(server.name || server.nameEn), 256),
+    nameEn: text(bare(server.nameEn || server.name), 256),
     description: text(entry?.description ?? "", 1_000),
     descriptionEn: text(entry?.descriptionEn ?? "", 1_000),
     category: entry?.category ?? "custom",
