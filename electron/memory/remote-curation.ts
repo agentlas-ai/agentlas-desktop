@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { getAuthenticatedSessionBinding, getSessionCookieHeader, webBaseUrl } from "../auth";
 import { getServer } from "../mcp-tools/registry";
 import { mcpServerConfigurationDigest, preparedMcpTargetTransport, type PreparedMcpBinding, type PreparedMcpTransport } from "../mcp-tools/prepared-transport";
@@ -16,6 +16,13 @@ type RemoteTransport = Exclude<PreparedMcpTransport, { kind: "stdio" }>;
 const seen = new Map<string, number>();
 let pending = 0;
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+/** Constant-time compare of a credential-bearing header with the expected value, as computer-use/control-server.ts
+ * bearerMatches does: length check first, an empty expected value never matches. */
+function credentialMatches(actual: string | null, expected: string): boolean {
+  if (actual === null || !expected) return false;
+  const a = Buffer.from(actual), b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
@@ -114,7 +121,8 @@ export function captureRemoteCurationConsumer(binding: PreparedMcpBinding | unde
     const headers = new Headers(target.headers), authorization = headers.get("authorization");
     // A different bearer overrides cookies at the Web server. Its actor is
     // unknown locally, even if the response happens to name our signed-in user.
-    if (authorization ? authorization !== `Bearer ${cookie.slice("agentlas_session=".length)}` : headers.get("cookie") !== cookie) return null;
+    if (!(authorization ? credentialMatches(authorization, `Bearer ${cookie.slice("agentlas_session=".length)}`)
+      : credentialMatches(headers.get("cookie"), cookie))) return null;
     const account = hash(actor), configuration = mcpServerConfigurationDigest(binding.server);
     const credentialRevision = getCredentialStateRevision(), envRevision = getEnvConfigurationRevision();
     const captured: RemoteTransport = { ...target, headers: { ...target.headers } };
