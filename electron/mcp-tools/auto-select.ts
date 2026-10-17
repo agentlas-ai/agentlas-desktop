@@ -503,6 +503,34 @@ export async function fetchHubPluginInventory(hubAllowed: boolean): Promise<{
   }
 }
 
+/** A selection can outlive its Goal by seconds: the resident judgment alone takes ~8s. */
+export const GOAL_SCOPE_RESELECTION_LIMIT = 2;
+
+/**
+ * Run a selection until the Goal binding it was made under is still the Goal binding.
+ *
+ * A selection reads the chat's active Goal first and judges tool needs afterwards (seconds). The Goal can end or be
+ * revised in that window without anything being wrong: the previous turn's background verifier settles the Goal
+ * `verifying -> completed` while the owner's next message is already preparing, or an owner amendment lands as a new
+ * revision. The selection's own `goalSelectionIsCurrent` then turns false, and the dispatch guard used to fail the
+ * whole turn (`mcp_goal_tool_scope_changed`, 2026-10-17: a second message after a finished task never ran, while the same
+ * request in a fresh chat did). The Goal's authority is read again instead: an ended Goal no longer scopes the turn
+ * (a plain selection), a revised one scopes it under its new revision. A binding that keeps moving through every
+ * allowed re-read is real churn, and that last context is returned as is so the dispatch guard still stops the run.
+ */
+export async function selectUntilGoalScopeSettled(
+  select: () => Promise<AutoSelectedMcpContext>,
+  opts: { limit?: number; onReselect?: (attempt: number) => void } = {},
+): Promise<AutoSelectedMcpContext> {
+  const limit = opts.limit ?? GOAL_SCOPE_RESELECTION_LIMIT;
+  let context = await select();
+  for (let attempt = 1; attempt <= limit && context.goalSelectionIsCurrent && !context.goalSelectionIsCurrent(); attempt += 1) {
+    opts.onReselect?.(attempt);
+    context = await select();
+  }
+  return context;
+}
+
 export async function autoSelectMcpTools(input: {
   userPrompt: string;
   systemPrompt: string;

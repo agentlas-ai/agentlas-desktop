@@ -263,7 +263,7 @@ import {
 } from "../site/agent-app-mcp-config-policy";
 import { listInstalledServers as listInstalledMcpServers } from "../mcp-tools/registry";
 import { getAgentApp } from "../store/agent-apps";
-import { autoSelectMcpTools, buildMcpAutoSelectionPrompt, describeScopedMcpOutcome, type GoalToolSelectionReceipt } from "../mcp-tools/auto-select";
+import { autoSelectMcpTools, buildMcpAutoSelectionPrompt, describeScopedMcpOutcome, selectUntilGoalScopeSettled, type GoalToolSelectionReceipt } from "../mcp-tools/auto-select";
 import { runMcpKeyElicitationGate } from "./run-key-elicitation";
 import { getEnvConfigurationRevision } from "../secrets/vault";
 import { bridgeHubPluginCandidates } from "../mcp-tools/hub-plugin-bridge";
@@ -3769,7 +3769,14 @@ async function runMcpInvocationInContext(
         },
       });
       const scopedSelectionDeps = { probeScopedServer: scopedMcpPreflight.probe };
-      let selectedContext = await autoSelectMcpTools(autoSelectInput, scopedSelectionDeps);
+      // The Goal can end or be revised while tool needs are judged (the previous turn's background verifier settling it);
+      // the selection is made again under the Goal's present state rather than failing this turn.
+      const selectUnderCurrentGoal = (stage: "tool-selection" | "key-gate") => selectUntilGoalScopeSettled(
+        () => autoSelectMcpTools(autoSelectInput, scopedSelectionDeps),
+        { onReselect: (attempt) => tryRecordRunEvent({ runId: req.runId!, chatId: chat.id, kind: "mcp_goal_scope_reselected",
+          payload: { schemaVersion: 1, stage, attempt, reasonCode: "goal-scope-moved-during-selection" } }) },
+      );
+      let selectedContext = await selectUnderCurrentGoal("tool-selection");
       const keyConfigurationRevision = getEnvConfigurationRevision();
       const keyUserMessageId = persistedUserMessageId
         ?? [...priorHistory].reverse().find((message) => message.role === "user")?.id;
@@ -3810,6 +3817,8 @@ async function runMcpInvocationInContext(
         }, scopedSelectionDeps),
       });
       selectedContext = keyGate.context;
+      // The key sheet can wait for the owner far longer than a selection: the Goal may have ended meanwhile.
+      if (selectedContext.goalSelectionIsCurrent?.() === false) selectedContext = await selectUnderCurrentGoal("key-gate");
       mcpGoalSelectionIsCurrent = selectedContext.goalSelectionIsCurrent;
       assertMcpGoalSelectionCurrent();
       // A selection failure does not establish that a provider is disconnected
