@@ -41,6 +41,7 @@ import { readableActiveHubMemoryNestRoots } from "../agents/hub-memory-nest";
 import { couldHaveChangedTheOutsideWorld, isHostPreflightTool } from "../../shared/tool-activity";
 import { redactSecrets } from "../../shared/secret-patterns";
 import { getAgentRuntimeOverride, removeAgentRuntimeOverride, setAgentRuntimeOverride } from "../store/agent-runtime-overrides";
+import { seatFailureVerdictInDb } from "../store/seat-failure-evidence";
 
 type Row = {
   id: string;
@@ -89,7 +90,7 @@ const STATUS_TEMPLATES = {
   input: { ko: "입력 {count}건 대기", en: "{count} input(s) pending" },
   unconfirmed: { ko: "완료 결과 확인 필요", en: "Result needs review" },
   quiet: { ko: "{time}", en: "{time}" },
-  produced: { ko: "{label} {count}건", en: "{label} ({count})" },
+  produced: { ko: "{time} · {label} {count}건", en: "{time} · {label} ({count})" },
   failed: { ko: "실패 · 확인 필요", en: "Failed · review needed" },
   expired: { ko: "리스 만료 · 갱신 필요", en: "Lease expired · renew needed" },
   archived: { ko: "보관됨", en: "Archived" },
@@ -219,14 +220,36 @@ function normalizeCompletionSummary(value: unknown): OneOrgCompletionSummary {
   return { produced, pending };
 }
 
+/** A settlement writes the seat row right after its cache row; a later write means later activity. */
+const COMPLETION_CACHE_SETTLE_SLACK_MS = 10_000;
+
+/**
+ * The cache holds the seat's last settled run of its own, which can be days older than the seat's latest
+ * activity (a teammate that since worked inside a room never re-caches). A count from an older run, shown
+ * without a date, read as the seat's current output (Yotube room 2026-10-17: "도구 활동 26건" from a 10-14 run
+ * of another chat, while the seat last worked 10-17). Only the run that is the seat's latest activity counts.
+ */
+function completionCacheIsLatestActivity(cachedAt: string | undefined, lastActivityAt: string | null): boolean {
+  if (!lastActivityAt) return true;
+  const cachedMs = cachedAt ? Date.parse(cachedAt) : Number.NaN;
+  const activityMs = Date.parse(lastActivityAt);
+  if (!Number.isFinite(cachedMs)) return false;
+  return !Number.isFinite(activityMs) || activityMs <= cachedMs + COMPLETION_CACHE_SETTLE_SLACK_MS;
+}
+
+/** The latest durable run state decides a failure, not the mark alone (store/seat-failure-evidence.ts). */
+function seatFailureStands(row: Pick<Row, "installed_agent_id" | "last_activity_at">): boolean {
+  return seatFailureVerdictInDb(getDb(), { installedAgentId: row.installed_agent_id, failedAt: row.last_activity_at }).stands;
+}
+
 function completionSummaryFor(agentId: string, row: Row): OneOrgCompletionSummary {
   const pending = row.pending_count > 0
     ? [{ kind: row.pending_kind ?? "approval", count: Math.max(0, Math.floor(row.pending_count)) }]
     : [];
   const cached = getDb().prepare(
-    "SELECT summary_json FROM one_org_completion_cache WHERE installed_agent_id = ?",
-  ).get(agentId) as { summary_json?: string } | undefined;
-  if (!cached?.summary_json) return { produced: [], pending };
+    "SELECT summary_json, updated_at FROM one_org_completion_cache WHERE installed_agent_id = ?",
+  ).get(agentId) as { summary_json?: string; updated_at?: string } | undefined;
+  if (!cached?.summary_json || !completionCacheIsLatestActivity(cached.updated_at, row.last_activity_at)) return { produced: [], pending };
   try {
     const stored = normalizeCompletionSummary(JSON.parse(cached.summary_json));
     return { produced: stored.produced, pending };
@@ -545,8 +568,9 @@ function liveStatus(row: Row, now = Date.now(), completion: OneOrgCompletionSumm
   const hostStop = cachedHostStopStatus(row);
   // Failure is sticky until a new run/retry explicitly changes the row. This
   // keeps an actionable failure from being hidden behind a stale pending or
-  // residency hint.
-  if (row.status_kind === "failed" && !hostStop) {
+  // residency hint. A mark the run ledger disproves (a close right after a
+  // completed turn, or a later completed turn) is not a failure.
+  if (row.status_kind === "failed" && !hostStop && seatFailureStands(row)) {
     return {
       kind: "failed",
       ko: STATUS_TEMPLATES.failed.ko,
@@ -570,13 +594,16 @@ function liveStatus(row: Row, now = Date.now(), completion: OneOrgCompletionSumm
   if (hostStop) return hostStop;
   const produced = completion.produced[0];
   if (produced) {
-    const producedKo = STATUS_TEMPLATES.produced.ko.replace("{label}", produced.label).replace("{count}", String(produced.count));
+    // The count belongs to the seat's latest activity (completionSummaryFor) and carries that activity's date.
+    const time = lastActivityLabel(row.last_activity_at, now);
+    const line = (locale: "ko" | "en", label: string) => STATUS_TEMPLATES.produced[locale]
+      .replace("{time}", time[locale]).replace("{label}", label).replace("{count}", String(produced.count));
     // 캐시에 남은 기본 라벨 "도구 활동" 은 영어 줄에서 영어로(2026-09-14: 영어 줄에 한국어가 섞였다).
-    const producedEn = STATUS_TEMPLATES.produced.en.replace("{label}", produced.label === "도구 활동" ? "Tool activity" : produced.label).replace("{count}", String(produced.count));
+    const producedEn = line("en", produced.label === "도구 활동" ? "Tool activity" : produced.label);
     return {
       kind: "quiet",
-      ko: boundedLine(producedKo, `${STATUS_TEMPLATES.produced.ko.replace("{label}", "도구 활동").replace("{count}", String(produced.count))}`),
-      en: boundedLine(producedEn, `${STATUS_TEMPLATES.produced.en.replace("{label}", "External activity").replace("{count}", String(produced.count))}`),
+      ko: boundedLine(line("ko", produced.label), boundedLine(line("ko", "도구 활동"), time.ko)),
+      en: boundedLine(producedEn, boundedLine(line("en", "Tool activity"), time.en)),
     };
   }
   if (row.last_activity_at) {
@@ -742,7 +769,7 @@ export function ensureOneGroupLocalStaff(agentIds: string[], seatMissing = true,
       // Explicit room composition can reuse a valid identity after a failed task;
       // it does not clear the failure or relax package, lock or lease checks.
       if (prior.archived_at) refuse("seat_archived");
-      if (prior.status_kind === "failed" && !options.allowPriorTaskFailure) refuse("seat_task_failed");
+      if (prior.status_kind === "failed" && !options.allowPriorTaskFailure && seatFailureStands(prior)) refuse("seat_task_failed");
       if (prior.status_kind === "locked" && prior.source !== "hub") refuse("seat_locked");
       if (prior.source !== "hub" && (isExpired(prior.lease_expires_at)
         || (prior.lease_expires_at !== null && !Number.isFinite(Date.parse(prior.lease_expires_at))))) refuse("seat_lease_invalid");

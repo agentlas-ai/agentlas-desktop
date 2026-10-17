@@ -13,6 +13,7 @@ import { publicAgentVisibility } from "../agents/policy";
 import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 import { materializeTeamMemberCells, type MaterializableFirmNode } from "./team-member-cells";
 import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-projection";
+import { repairDisprovedSeatFailuresInDb } from "./seat-failure-evidence";
 import { currentUiLocale } from "../ui-locale";
 import { pruneLegacyDatabaseBackups } from "./backup-retention";
 import { sameMigrationBackupFile, sameMigrationBackupSource, type MigrationBackupFingerprint } from "./migration-backup-identity";
@@ -1509,6 +1510,19 @@ function runStoreRepairProjections(db: Database.Database): void {
     console.warn(
       `[task] runtime participant repair deferred: ${error instanceof Error ? error.message : "unknown"}`,
     );
+  }
+
+  // A seat marked failed by a CLI close that came right after the teammate's completed turn (healthy closes
+  // logged as `error` before 2f77db63) stayed failed until its next run. Clear only marks the run ledger
+  // disproves; idempotent, and the org read path applies the same verdict (store/seat-failure-evidence.ts).
+  try {
+    const cleared = db.transaction(() => repairDisprovedSeatFailuresInDb(db))();
+    if (cleared.length > 0) {
+      console.warn(`[one-org] cleared ${cleared.length} seat failure mark(s) disproved by the run ledger: ${
+        cleared.map((seat) => `${seat.installedAgentId.slice(0, 8)}:${seat.evidence}`).join(", ")}`);
+    }
+  } catch (error) {
+    console.warn(`[one-org] seat failure repair deferred: ${error instanceof Error ? error.message : "unknown"}`);
   }
 
   // Run on every ordinary boot as well as the v52 upgrade. During a pending
