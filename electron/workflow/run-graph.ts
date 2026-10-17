@@ -5507,13 +5507,18 @@ export async function runGraph(
               ...(result.goalCompletionClaim ? { goalCompletionClaim: result.goalCompletionClaim } : {}),
             });
           } catch { /* an observer must not change the node's result */ }
+          // An output step's result is its declared content (outputs below) and its mutating tool calls are its proof.
+          // When it sent that content through its tools and wrote no line of its own (a tool-only turn the runner
+          // completed, R-065), the declared content is the result: NODE_NO_RESULT is for a step whose text is its output.
+          const outwardToolOnly = isOutwardOutput && !noAction && !(result.finalText ?? "").trim() && !accumulatedText.trim()
+            && (externalToolCallsByNode.get(node.id) ?? 0) > 0;
           const envelope = nativeMcpCall
             ? { ...declaredEnvelope(node.id, node.label || node.id,
               typeof nativeOutput === "string" ? nativeOutput : { json: nativeOutput }), notes }
             : makeNodeEnvelope({
             nodeId: node.id,
             nodeLabel: node.label || node.id,
-            finalText: result.finalText,
+            finalText: outwardToolOnly ? substitute(declaredOutputText, vars).text : result.finalText,
             ...(noAction ? { structured: noAction } : {}),
             accumulatedText,
             notes,

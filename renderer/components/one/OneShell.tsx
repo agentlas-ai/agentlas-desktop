@@ -946,6 +946,9 @@ function toUiMessages(history: ChatHistoryEntry[]): UiMessage[] {
       userTurnAwaitingAnswer = true;
     }
     if (entry.role === "assistant") userTurnAwaitingAnswer = false;
+    // A completed turn that worked only through its tools has no text (R-065): its work block is the record, never a
+    // blank bubble.
+    if (entry.role === "assistant" && !entry.text.trim() && !entry.imageDataUrls?.length && !entry.goalResult && !entry.hostNotice) continue;
     const parsedFiles = parseChatFileMessage(entry.text);
     visible.push({
       hostNotice: normalizeChatHostNotice(entry.role, entry.hostNotice),
@@ -3706,7 +3709,10 @@ function OneSessionsShell() {
       // (measured 2026-08-15: the previous answer vanished while a queued
       // instruction ran, until the history reload brought it back).
       oneTranscriptRevisionRef.current += 1;
-      setMessages((current) => ownsQueuedUpdate() ? upsertLiveMessage(current, text, false, eventRunId).map((message) => (
+      // A tool-only turn completes with no text (R-065): its work block shows what it did; no blank answer bubble.
+      if (!text.trim() && !event.goalResult) {
+        setMessages((current) => ownsQueuedUpdate() ? current.filter((message) => message.id !== "one-live-response") : current);
+      } else setMessages((current) => ownsQueuedUpdate() ? upsertLiveMessage(current, text, false, eventRunId).map((message) => (
         message.id === "one-live-response"
           ? { ...message, ...(event.goalResult ? { goalResult: event.goalResult } : {}), id: `one-answer:${settledRunId ?? uid()}`, createdAt: message.createdAt ?? new Date().toISOString(), ...(event.durableMessageId ? { durableMessageId: event.durableMessageId } : {}) }
           : message

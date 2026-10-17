@@ -197,6 +197,55 @@ export function decideTurnSettlement(input: TurnSettlementInput): TurnSettlement
   return { action: "recover", reason: noModelWork ? "no_model_work" : "provider_capability" };
 }
 
+/**
+ * A turn the runtime itself ended normally (its own terminal: codex turn/completed status completed, Claude's success
+ * result, ACP end_turn, a provider's stop/end_turn, agy SUCCESS), told apart by what it left (plan R-065, docs 31 W1):
+ *  - "completed" with a final text;
+ *  - "completed" with no final text and at least one tool call: the work happened through its tools (a tool-only turn);
+ *  - "empty": no final text and no tool call, a turn that produced nothing at all (a typed "empty" failure).
+ * Whether an empty final text is acceptable belongs to the caller that reads it, never to the runner: a typed-output
+ * caller (team worker handoff, planner, judgment, structured output, a graph step's result) fails with its own typed
+ * reason, while a chat or automation turn whose effect is in its tools is complete. Before this rule each runner had its
+ * own "non-empty text" check, so every tool-only turn was reported as failed or unsettled in rooms, graphs and 1:1.
+ * Only a normal end reaches this rule: cancellation, output-limit cuts, Kimi's unattested end_turn and missing terminals
+ * keep their own outcomes.
+ */
+export type NormalEndSettlement =
+  | { outcome: "completed"; finalText: "present" | "empty"; toolCalls: number }
+  | { outcome: "empty" };
+
+/** The one rule for a normally ended turn (R-065). `toolCalls` counts this turn's tool calls only; never prose. */
+export function settleNormalEnd(facts: { text: string; toolCalls: number }): NormalEndSettlement {
+  const toolCalls = Number.isSafeInteger(facts.toolCalls) && facts.toolCalls > 0 ? facts.toolCalls : 0;
+  if (facts.text.trim()) return { outcome: "completed", finalText: "present", toolCalls };
+  return toolCalls > 0 ? { outcome: "completed", finalText: "empty", toolCalls } : { outcome: "empty" };
+}
+
+/** The `toolCalls` evidence a completed result carries when its final text is empty (RunnerResult.toolCalls). */
+export function normalEndToolEvidence(settlement: NormalEndSettlement): { toolCalls?: number } {
+  return settlement.outcome === "completed" && settlement.finalText === "empty" ? { toolCalls: settlement.toolCalls } : {};
+}
+
+/**
+ * Counts the distinct tool calls a runner reports through `onTool` during one turn: the evidence settleNormalEnd reads.
+ * A start and its completion share an id and count once; a report without an id counts once per report. Every argument
+ * is forwarded unchanged.
+ */
+export function trackReportedToolCalls<E extends { onTool?: (...args: never[]) => void }>(events: E): { events: E; count: () => number } {
+  const ids = new Set<string>();
+  let anonymous = 0;
+  const onTool = events.onTool as ((...args: unknown[]) => void) | undefined;
+  const wrapped = {
+    ...events,
+    onTool: (...args: unknown[]): void => {
+      const id = args[3];
+      if (typeof id === "string" && id) ids.add(id); else anonymous += 1;
+      onTool?.(...args);
+    },
+  } as unknown as E;
+  return { events: wrapped, count: () => ids.size + anonymous };
+}
+
 /** A retry hint (ISO time) as milliseconds from `now`; undefined when absent or already past. */
 export function retryAfterMs(hintIso: string | null | undefined, now = Date.now()): number | undefined {
   const at = typeof hintIso === "string" ? Date.parse(hintIso) : NaN;

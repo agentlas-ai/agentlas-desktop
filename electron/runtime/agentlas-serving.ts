@@ -22,6 +22,7 @@ import { GENERATION_CONTEXT_RATIO } from "./session-generation";
 import { foldRetainedToolResult } from "./tool-result-context";
 import { cacheCapabilityFor, planCache, segmentOf, type CachePlan, type CacheSegment } from "./cache-planner";
 import { assertCurrentHistoryRunnerResult } from "./observed-runner";
+import { normalEndToolEvidence, settleNormalEnd } from "../../shared/turn-settlement";
 import { currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { getSessionCookieHeader, webBaseUrl } from "../auth";
 import { createHash } from "node:crypto";
@@ -535,11 +536,19 @@ async function runAgentlasServingWithTools(
         throw new Error("invalid_serving_stop_reason");
       if (Array.isArray(done.toolUses) && done.toolUses.length > 0) throw new Error("invalid_serving_tool_frame");
       accumulatedText += text;
-      if (!accumulatedText.trim()) throw new Error("agentlas_serving_empty_answer");
+      // The model's own end_turn is a normal end, settled by the shared rule (R-065): a tool-only turn completed with an
+      // empty text; one with neither text nor a tool call is the typed "empty" failure (it used to throw after dispatch,
+      // which every host then reported as "may have acted").
+      const normalEnd = settleNormalEnd({ text: accumulatedText, toolCalls: seenCallIds.size });
+      if (normalEnd.outcome === "empty") {
+        return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain", ...usage.settle(),
+          failure: { kind: "empty", runtime: "agentlas", source: "marker", providerCode: "agentlas_serving_empty_answer",
+            message: req.locale === "ko" ? "Agentlas 서버의 모델이 빈 답을 반환했습니다." : "The Agentlas serving model returned an empty answer." } });
+      }
       // Only a complete, valid final response acknowledges the generation it used (never max_tokens or a broken frame).
       if (!req.signal?.aborted) generations?.completed(round, observedInput);
       (currentHistoryRuntimeFence()?.assertCurrent(), events.onPartial(accumulatedText));
-      return assertCurrentHistoryRunnerResult({ text: accumulatedText, ...usage.settle(),
+      return assertCurrentHistoryRunnerResult({ text: accumulatedText, ...usage.settle(), ...normalEndToolEvidence(normalEnd),
         ownerControlTerminal: !req.signal?.aborted && (done.toolUses === undefined || (Array.isArray(done.toolUses) && done.toolUses.length === 0))
           ? "completed" : "uncertain" });
     }
@@ -665,8 +674,9 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
     break;
   }
   text = joined + text;
-  if (!text.trim()) {
-    return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain", failure: { kind: "exit", runtime: "agentlas", source: "marker", providerCode: "empty_answer",
+  // No tool was offered on this path: a reply with no text is the shared rule's typed "empty" (R-065), never completed.
+  if (settleNormalEnd({ text, toolCalls: 0 }).outcome === "empty") {
+    return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain", failure: { kind: "empty", runtime: "agentlas", source: "marker", providerCode: "empty_answer",
       message: req.locale === "ko"
         ? "Agentlas 모델이 빈 답을 돌려주었습니다. 다시 시도해 주세요."
         : "The Agentlas model returned an empty answer. Try again." } });

@@ -36,7 +36,7 @@ import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import { codexShellEnvironmentArgs } from "./env-key-reach";
 import { imageOutputContract } from "./prompt-sections";
 import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliSilenceWindowMs, cliToolSilenceWindowMs, type CliSilenceGuard, childExitReason, RUNTIME_SILENT_TIMEOUT_CODE, runtimeProtocolUnrecognizedFailure, wrapSystemPrompt, workforceObservedHostAuthorityEnforcement, RuntimeTurnUnsettledError, markRefusedBeforeDispatch, preDispatchRefusal } from "./runner";
-import { decideTurnSettlement } from "../../shared/turn-settlement";
+import { decideTurnSettlement, normalEndToolEvidence, settleNormalEnd, trackReportedToolCalls } from "../../shared/turn-settlement";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { abortReasonError } from "./abort-reason";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
@@ -631,6 +631,8 @@ interface CodexRunResult {
   turnStarted: boolean;
   turnCompleted: boolean;
   terminalObserved: boolean;
+  /** Distinct tool calls this exec turn reported (settleNormalEnd evidence, R-065). */
+  toolCalls: number;
 }
 
 /**
@@ -640,6 +642,23 @@ interface CodexRunResult {
  * continuation re-sends it and a graph step fails typed instead of being held as a possible side effect (docs 31 W1;
  * W7 acceptance S-graph-two-steps, 2026-10-16: a refused turn/start, then a refused exec, ended MUTATION_UNVERIFIED).
  */
+/**
+ * The settlement of an exec turn that exited 0 with a completed turn and no failure: the shared normal-end rule (R-065,
+ * shared/turn-settlement.ts). With text or a tool call it completed (a tool-only turn carries its tool count); with
+ * neither it is the typed "empty" failure. Any other exec end stays uncertain with its own failure.
+ */
+function codexExecSettlement(run: CodexRunResult): Pick<RunnerResult, "ownerControlTerminal" | "failure" | "toolCalls"> {
+  if (run.code !== 0 || !run.turnCompleted || run.failure) {
+    return { ownerControlTerminal: "uncertain", ...(run.failure ? { failure: run.failure } : {}) };
+  }
+  const end = settleNormalEnd({ text: run.text, toolCalls: run.toolCalls });
+  if (end.outcome === "empty") {
+    return { ownerControlTerminal: "uncertain",
+      failure: { kind: "empty", message: run.stderr.slice(-500) || "codex exec returned no message", runtime: KIND, source: "marker" } };
+  }
+  return { ownerControlTerminal: "completed", ...normalEndToolEvidence(end) };
+}
+
 function codexExecRefusedBeforeTurn(run: CodexRunResult): RunnerResult | null {
   if (run.terminalObserved || run.turnStarted || run.threadId !== null || run.text.trim()
     || typeof run.code !== "number" || run.code === 0) return null;
@@ -762,9 +781,15 @@ export function resolveCodexRunFailure(input: {
   turnCompleted: boolean;
   terminalFailure: RunnerFailure | null;
   itemFailure: RunnerFailure | null;
+  /** Tool calls this turn reported: a completed tool-only turn is a completed answer too (R-065). */
+  toolCalls?: number;
 }): RunnerFailure | null {
   if (input.terminalFailure) return input.terminalFailure;
   if (input.code === 0 && input.turnCompleted && input.text.trim()) return null;
+  // The text is empty here. A completed turn that worked through its tools is complete (shared settleNormalEnd, R-065): a
+  // recoverable item diagnostic is not its failure. A typed item cause (codexExecTypedFailure: the output cap, the context
+  // window, an incomplete response) is never swallowed. Self-contained: gates extract this function on its own.
+  if (input.code === 0 && input.turnCompleted && (input.toolCalls ?? 0) > 0 && !input.itemFailure?.providerCode) return null;
   if (!input.itemFailure) return null;
   // The process ended before its turn completed: the item diagnostic is the last thing it
   // said, not why it stopped. Owner Threads automation 2026-09-28 13:12Z (app quit for an
@@ -816,7 +841,9 @@ function runCodexProcess(
 ): Promise<CodexRunResult> {
   const diagnose = bindCodexRuntimeDiagnostics(req, "exec");
   const effects = createAdapterEffectLedger({ adapterKind: KIND, chatId: req.chatId, agentId: req.agentId }, events);
-  events = effects.events;
+  // Tool-call evidence of this exec turn for the shared normal-end rule (R-065).
+  const toolEvidence = trackReportedToolCalls(effects.events);
+  events = toolEvidence.events;
   const observeScienceTool = bindScienceNativeToolObserver(req, effects.qualify);
   const observeScienceFailure = bindScienceNativeFailureObserver(req, effects.qualify);
   const reportedOutputTokenBaseline = usageBaseline.output;
@@ -1401,6 +1428,7 @@ function runCodexProcess(
         turnCompleted,
         terminalFailure,
         itemFailure,
+        toolCalls: toolEvidence.count(),
       });
       /*
        * ★표식 없이 완주(exit 0)했는데 산출물이 거절 고지문인 경우 — 실측: codex 한도는
@@ -1442,6 +1470,7 @@ function runCodexProcess(
         turnStarted,
         turnCompleted,
         terminalObserved,
+        toolCalls: toolEvidence.count(),
       });
     });
   }));
@@ -3023,7 +3052,11 @@ async function runCodexResidentTurn(input: {
       if (refusal) failure = { kind: refusal.kind, message: refusal.message, runtime: KIND, source: "heuristic" };
     }
     persistTurnCounters();
-    if (!text && !failure) {
+    // A turn Codex itself completed is settled by the shared rule (R-065): a tool-only turn is complete with an empty
+    // text; only one that left neither text nor a tool call is the typed "empty" failure. Any other end keeps its own.
+    const normalEnd = terminalSucceeded && !failure && !interrupted && !req.signal?.aborted
+      ? settleNormalEnd({ text, toolCalls: startedTools.size }) : null;
+    if (!text && !failure && (!normalEnd || normalEnd.outcome === "empty")) {
       // 빈 답은 실패다 — 표식으로 말한다(텍스트 길이로 판정하는 소비자를 만들지 않는다).
       return {
         result: {
@@ -3049,6 +3082,7 @@ async function runCodexResidentTurn(input: {
         // The window Codex reported for this session: the 80% rule reads it before any catalog number (NH14).
         ...(health.contextWindowTokens ? { contextWindowTokens: health.contextWindowTokens } : {}),
         ...(workforcePermissionEnforcement ? { workforcePermissionEnforcement } : {}),
+        ...(normalEnd ? normalEndToolEvidence(normalEnd) : {}),
         appliedEffort,
         // Reached only after the turn/start receipt: an uncertain result here is a turn the session holds.
         turnDelivery: "accepted",
@@ -3178,9 +3212,7 @@ async function runCodexMinimalObservation(bin: string, req: RunnerRequest, event
     }
     if (!run.terminalObserved) throw new RuntimeTurnUnsettledError(KIND, req.locale, undefined, childExitReason(run.code, run.stderr));
     if (run.code !== 0 && !run.text.trim()) throw new Error(`codex CLI exit ${run.code}${run.stderr ? `\n${run.stderr.slice(0, 500)}` : ""}`);
-    return { text: run.text.trim(), ...(run.failure ? { failure: run.failure } : {}), tokens: run.tokens,
-      ownerControlTerminal: run.code === 0 && run.turnCompleted && !run.failure && run.text.trim()
-        ? "completed" : "uncertain",
+    return { text: run.text.trim(), tokens: run.tokens, ...codexExecSettlement(run),
       ...(run.observedUsage ? { observedUsage: run.observedUsage } : {}) };
   } finally {
     await fs.rm(home, { recursive: true, force: true }).catch(() => {});
@@ -3637,7 +3669,7 @@ export const runCodex: Runner = async (
           ? { cachedInputTokens: (merged.observedUsage.cachedInputTokens ?? 0) + (next.observedUsage.cachedInputTokens ?? 0) } : {}),
       } : undefined;
       const { observedUsage: _dropped, ...rest } = next;
-      merged = { ...rest, text, threadId: next.threadId ?? threadId,
+      merged = { ...rest, text, threadId: next.threadId ?? threadId, toolCalls: merged.toolCalls + next.toolCalls,
         tokens: (merged.tokens ?? 0) + (next.tokens ?? 0) || undefined, ...(usage ? { observedUsage: usage } : {}) };
       last = next;
     }
@@ -3755,9 +3787,7 @@ export const runCodex: Runner = async (
       events.onStatus(`[runtime-session] resumed kind=${KIND}`);
       return {
         text: r.text.trim(),
-        ownerControlTerminal: r.turnCompleted && !r.failure && r.text.trim()
-          ? "completed" : "uncertain",
-        ...(r.failure ? { failure: r.failure } : {}),
+        ...codexExecSettlement(r),
         sessionId: r.threadId ?? resumeSessionId,
         tokens: r.tokens,
         ...(r.observedUsage ? { observedUsage: r.observedUsage } : {}),
@@ -3841,9 +3871,7 @@ export const runCodex: Runner = async (
     events.onStatus(`[runtime-session] created kind=${KIND}`);
     return {
       text: created.text.trim(),
-      ownerControlTerminal: created.turnCompleted && !created.failure && created.text.trim()
-          ? "completed" : "uncertain",
-      ...(created.failure ? { failure: created.failure } : {}),
+      ...codexExecSettlement(created),
       sessionId: created.threadId ?? undefined,
       tokens: created.tokens,
       ...(created.observedUsage ? { observedUsage: created.observedUsage } : {}),

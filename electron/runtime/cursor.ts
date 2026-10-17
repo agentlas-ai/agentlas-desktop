@@ -29,6 +29,7 @@ import { selectionFor } from "../capabilities/one-capabilities";
 import { abortReasonError } from "./abort-reason";
 import { CURSOR_MODEL_RE, parseCursorModels, type DiscoveryOutcome } from "../../shared/model-discovery";
 import { settleDiscovery } from "./model-discovery-store";
+import { normalEndToolEvidence, settleNormalEnd } from "../../shared/turn-settlement";
 
 /**
  * 중지 사유를 그대로 전한다. 중지는 사람이 누른 것 외에도 무활동 워치독·단계 시간 초과·
@@ -310,6 +311,8 @@ async function runCursorTurn(req: RunnerRequest, events: RunnerEvents, dispatch:
     let terminalCompleted = false;
     let terminalError = false;
     let recognizedEvents = 0;
+    /** This turn's tool calls by call_id (stream-json `tool_call`): settleNormalEnd evidence (R-065). Not shown as rows. */
+    const toolCallIds = new Set<string>();
     let settled = false;
     const finishReject = (error: Error) => {
       if (settled) return;
@@ -321,9 +324,11 @@ async function runCursorTurn(req: RunnerRequest, events: RunnerEvents, dispatch:
       try {
         const event = JSON.parse(line);
         if (cursorEventRecognized(event)) recognizedEvents += 1;
+        if (event?.type === "tool_call" && typeof event.call_id === "string" && event.call_id && toolCallIds.size < 4096) toolCallIds.add(event.call_id);
         if (event?.type === "result") {
+          // Cursor's own success result is the terminal; whether its text may be empty is the shared rule's (R-065).
           terminalCompleted = !terminalError && event.subtype === "success" && event.is_error === false
-            && typeof event.result === "string" && Boolean(event.result.trim());
+            && typeof event.result === "string";
         } else if (event?.type === "error") {
           terminalError = true;
           terminalCompleted = false;
@@ -363,7 +368,16 @@ async function runCursorTurn(req: RunnerRequest, events: RunnerEvents, dispatch:
         const failure = runtimeProtocolUnrecognizedFailure("cursor", stderr);
         return resolve({ text: failure.message, ownerControlTerminal: "uncertain", failure });
       }
-      resolve({ text: text.trim() || stderr.trim() || "(Cursor Agent returned no text)",
+      // Cursor's own completed terminal is a normal end, settled by the shared rule (R-065): a tool-only turn completed
+      // with an empty text, one with neither text nor a tool call is the typed "empty" failure. A placeholder sentence
+      // used to stand in for the answer, so a typed-output caller parsed that placeholder as the worker's output.
+      const normalEnd = terminalCompleted ? settleNormalEnd({ text, toolCalls: toolCallIds.size }) : null;
+      if (normalEnd?.outcome === "empty") {
+        return resolve({ text: "", ownerControlTerminal: "uncertain",
+          failure: { kind: "empty", runtime: "cursor", source: "marker", message: stderr.trim().slice(-500) || "Cursor Agent returned no text" } });
+      }
+      resolve({ text: text.trim() || (normalEnd ? "" : stderr.trim()),
+        ...(normalEnd ? normalEndToolEvidence(normalEnd) : {}),
         ownerControlTerminal: terminalCompleted ? "completed" : "uncertain" });
     });
   });

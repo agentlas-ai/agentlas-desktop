@@ -38,6 +38,7 @@ import {
 import { randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult, RunnerFailure, RunnerFailureKind } from "./runner";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
+import { normalEndToolEvidence, settleNormalEnd } from "../../shared/turn-settlement";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { cumulativeSurfaceGateText, childExitReason, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliToolSilenceWindowMs, wrapSystemPrompt, markRefusedBeforeDispatch, preDispatchRefusal, runnerRefusedBeforeDispatch } from "./runner";
 import { announceToolDenied } from "./tool-approval";
@@ -3061,6 +3062,9 @@ async function runPreparedAntigravityAttempt(
          * 막혔을 뿐인데 "auto-denied for missing approval" 로 실행 전체가 refused 로 죽었다.
          * 계약(scripts/test-runtime-failure-contract.cjs)이 이 함수를 직접 부른다.
          */
+        // agy's own SUCCESS result is a normal end, settled by the shared rule (R-065): a tool-only run completed with an
+        // empty text; only one with neither text nor a reported tool is the empty failure below.
+        const agyEnd = settleNormalEnd({ text: trimmed, toolCalls: new Set([...reportedAgyTools].map((key) => key.replace(/:(?:active|done)$/u, ""))).size });
         const deniedOutcome = antigravityEmptyRunOutcome({
           answered: Boolean(trimmed),
           toolsAllowed: !structural,
@@ -3089,7 +3093,7 @@ async function runPreparedAntigravityAttempt(
            * 빈 답은 `empty` 로 표식을 단다: 실패한 턴은 저장되지 않고, 연속 실행은 이 종류를
            * 일시적 실패로 보고 같은 턴을 다시 시도한다.
            */
-          ?? (!trimmed && reportedAgyTools.size === 0
+          ?? (agyEnd.outcome === "empty"
             ? {
               kind: "empty" as const,
               message: runReq.locale === "ko"
@@ -3108,7 +3112,7 @@ async function runPreparedAntigravityAttempt(
         if (runReq.chatId && agyFingerprint && agyState.conversationId && !failure) {
           saveRuntimeSession(runReq.chatId, ANTIGRAVITY_KIND, agyState.conversationId, agyFingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner });
         }
-        const completed = Boolean(resultSeen && agyState.resultStatus === "SUCCESS" && !failure && trimmed
+        const completed = Boolean(resultSeen && agyState.resultStatus === "SUCCESS" && !failure && agyEnd.outcome === "completed"
           && Boolean(agyState.conversationId?.trim())
           && (!agyResumeId || agyState.conversationId === agyResumeId)
           && (!agyState.resultConversationId || agyState.resultConversationId === agyState.conversationId));
@@ -3119,6 +3123,7 @@ async function runPreparedAntigravityAttempt(
           text: trimmed,
           ownerControlTerminal: completed ? "completed" : "uncertain",
           ...(failure ? { failure } : {}),
+          ...(completed ? normalEndToolEvidence(agyEnd) : {}),
           // The conversation this turn ran on: the common journal acknowledges it as the binding's native handle (NH11).
           ...(!failure && agyState.conversationId?.trim() ? { sessionId: agyState.conversationId } : {}),
           ...(resultSeen && agyState.usagePairObserved

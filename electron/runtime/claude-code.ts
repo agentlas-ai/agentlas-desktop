@@ -95,6 +95,7 @@ import { isAuthenticSystemTimeMcpLaunch } from "../mcp-tools/system-time-server"
 import { createClaudeWorkforceObservation } from "./claude-workforce-observation";
 import { adoptClaudeSessionIntoProductHome, claudeProductHomeDir, withClaudeMirrorExcludes, withClaudeProductHome } from "./claude-product-home";
 import { bindNativeFileProofObserver, mcpFileProofCandidate } from "../long-run/file-proof";
+import { normalEndToolEvidence, settleNormalEnd, trackReportedToolCalls } from "../../shared/turn-settlement";
 
 /** Claude exposes file mutations as a typed tool_use input followed by a
  * tool_result. Admit only exact paths from known mutation tools; Main still
@@ -973,6 +974,9 @@ const runClaudeTurn = async (
   observeNativeFile: NativeFileProofObserver,
 ): Promise<RunnerResult> => {
   assertScienceRecoveryRequest(req, "claude-code");
+  // Tool-call evidence of this attempt for the shared normal-end rule (R-065).
+  const toolEvidence = trackReportedToolCalls(events);
+  events = toolEvidence.events;
   const aliveProfile = aliveDecisionProfileForRequest(req);
   const alivePacket = aliveProfile ? agentContextNoToolsPacketForRequest(req) : null;
   if (aliveProfile && !alivePacket) throw markRefusedBeforeDispatch(new Error("alive_claude_packet_required"));
@@ -2823,13 +2827,20 @@ const runClaudeTurn = async (
         }
         if (modelHandoff) events.onStatus(`[runtime-session] model_handoff kind=${KIND}`);
         events.onStatus(`[runtime-session] ${resumeSessionId ? "resumed" : "created"} kind=${KIND}`);
+        // Claude's own success result is a normal end: the shared rule settles it (R-065). A tool-only turn completed
+        // with an empty text; one with neither text nor a tool call is the typed "empty" failure.
+        const normalEnd = terminalSucceeded && !runnerFailure && !structuredRuntimeError
+          ? settleNormalEnd({ text: display, toolCalls: toolEvidence.count() }) : null;
+        const emptyFailure: RunnerFailure | undefined = normalEnd?.outcome === "empty"
+          ? { kind: "empty", message: (stderr || session?.stderrTail || "").slice(-500) || "claude returned no message", runtime: KIND, source: "marker" }
+          : undefined;
         resolve({
           text: display.trim(),
-          ownerControlTerminal: terminalSucceeded && !runnerFailure && !structuredRuntimeError && display.trim()
-            ? "completed" : "uncertain",
+          ownerControlTerminal: normalEnd?.outcome === "completed" ? "completed" : "uncertain",
           // ★exit 0이어도 표식이 실패를 말했으면 그대로 싣는다 — 소비자는 이 칸으로 판정한다.
           //   (실측: 한도 거절은 exit 1이었지만 종료코드는 버전·경로 따라 가변 — 이벤트가 진실.)
-          ...(runnerFailure ? { failure: runnerFailure } : {}),
+          ...(runnerFailure ? { failure: runnerFailure } : emptyFailure ? { failure: emptyFailure } : {}),
+          ...(normalEnd ? normalEndToolEvidence(normalEnd) : {}),
           sessionId,
           tokens,
           observedUsage,

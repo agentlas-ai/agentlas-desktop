@@ -820,6 +820,14 @@ export interface RunnerResult {
   observedModel?: string;
   /** Present only when a Workforce runtime has verified and enforced its main-minted grant. */
   workforcePermissionEnforcement?: WorkforcePermissionEnforcementReceipt;
+  /**
+   * The distinct tool calls this turn reported, set on a completed result whose final text is empty: the turn did its
+   * work through its tools (shared/turn-settlement.ts settleNormalEnd, plan R-065). An empty `text` with
+   * ownerControlTerminal "completed" and no failure is such a tool-only turn. Whether an empty final text is acceptable
+   * is the caller's decision: a typed-output caller (handoff, planner, judgment, structured output, graph step result)
+   * fails with its own typed reason; a chat or automation turn is complete.
+   */
+  toolCalls?: number;
 }
 
 /** No terminal receipt after dispatch is uncertainty, not permission to replay. */

@@ -54,6 +54,7 @@ import { cliHistoryContextTokens, composeResumeTurnPrompt, renderConversationCon
   invalidateStableTurnContext, type StableTurnContextDelivery } from "./continuity";
 import { stageCliImageAttachments } from "./image-attachments";
 import { createRuntimePlanEmitter, CursorTodoPlanTracker, planFromAcpPlanUpdate } from "./runtime-plan";
+import { normalEndToolEvidence, settleNormalEnd } from "../../shared/turn-settlement";
 import type { InvocationPlan } from "../../shared/invocation-plan";
 import { agentContextColdBootstrapForRequest, agentContextDeliveryForRequest, agentContextSessionKey } from "./agent-context";
 import { clearRuntimeSession, getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
@@ -237,6 +238,9 @@ export class AcpSessionClient {
     const tracker = this.cursorTodos ??= new CursorTodoPlanTracker();
     this.emitPlan(tracker.update(replace && params && typeof params === "object" ? { ...(params as object), merge: false } : params));
   }
+
+  /** Tool calls this turn reported (started or finished; replayed history excluded): settleNormalEnd evidence (R-065). */
+  get turnToolCalls(): number { return this.tools.size; }
 
   /** Everything between these two calls is history replay, not this turn. */
   beginReplay(): void { this.replaying = true; }
@@ -1693,7 +1697,10 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         return { text, sessionId, ownerControlTerminal: "uncertain", turnDelivery,
           failure: runnerFailureFromError(new RuntimeTurnUnsettledError(spec.id, locale), spec.id) };
       }
-      if (!text) {
+      // An ordinary end_turn (for Kimi: one its journal shows completed) is settled by the shared rule (R-065): a
+      // tool-only turn completed with an empty text. max_tokens / max_turn_requests keep their own uncertain outcome.
+      const normalEnd = stopReason === "end_turn" ? settleNormalEnd({ text, toolCalls: client.turnToolCalls }) : null;
+      if (!text && (!normalEnd || normalEnd.outcome === "empty")) {
         return { text: "", failure: { kind: "empty", message: session.conn.lastStderr.slice(-500) || `ACP stopReason=${stopReason || "unknown"}`, runtime: spec.id, source: "marker" }, sessionId, turnDelivery };
       }
       if (client.contextUsed !== undefined && client.contextSize) {
@@ -1703,6 +1710,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       // observedUsage intentionally absent: ACP v1 gives context occupancy, not tokens. The occupancy IS the size of the
       // context the next request starts from, so it feeds the common 80% generation rule with the agent's own window.
       return { text, sessionId, ownerControlTerminal: stopReason === "end_turn" ? "completed" : "uncertain", turnDelivery,
+        ...(normalEnd ? normalEndToolEvidence(normalEnd) : {}),
         ...(client.contextUsed !== undefined && client.contextUsed > 0 ? { contextInputTokens: client.contextUsed } : {}),
         ...(client.contextSize ? { contextWindowTokens: client.contextSize } : {}) };
     } catch (err) {

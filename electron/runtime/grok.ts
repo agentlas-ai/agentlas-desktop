@@ -25,6 +25,7 @@ import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions
 import { StringDecoder } from "node:string_decoder";
 import { parseGrokModels, type DiscoveryOutcome } from "../../shared/model-discovery";
 import { settleDiscovery } from "./model-discovery-store";
+import { normalEndToolEvidence, settleNormalEnd, trackReportedToolCalls } from "../../shared/turn-settlement";
 
 /**
  * 중지 사유를 그대로 전한다. 중지는 사람이 누른 것 외에도 무활동 워치독·단계 시간 초과·
@@ -486,6 +487,9 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
 };
 
 async function runGrokTurn(req: RunnerRequest, events: RunnerEvents, dispatch: { started: boolean }): Promise<RunnerResult> {
+  // Tool-call evidence of this turn for the shared normal-end rule (R-065).
+  const toolEvidence = trackReportedToolCalls(events);
+  events = toolEvidence.events;
   if (assertScienceRecoveryRequest(req, "grok"))
     throw new Error("science_recovery_acp_transport_required");
   if (req.env?.AGENTLAS_NATIVE_BROWSER_SCOPE === "task") {
@@ -861,10 +865,16 @@ async function runGrokTurn(req: RunnerRequest, events: RunnerEvents, dispatch: {
         clearProviderHealth("grok");
         invalidateUsage("grok");
         if (req.chatId && fingerprint && sessionId) saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner });
+        // Grok's own completed terminal is a normal end, settled by the shared rule (R-065): a tool-only turn completed.
+        const normalEnd = terminalCompleted && terminalStopReason !== "refusal"
+          ? settleNormalEnd({ text, toolCalls: toolEvidence.count() }) : null;
         resolve({ text: text.trim(), tokens, sessionId,
           ...(terminalStopReason === "refusal" ? { failure: { kind: "refused" as const, runtime: KIND,
-            source: "marker" as const, providerCode: "refusal", message: "Grok stopReason=refusal" } } : {}),
-          ownerControlTerminal: terminalCompleted && text.trim() ? "completed" : "uncertain" });
+            source: "marker" as const, providerCode: "refusal", message: "Grok stopReason=refusal" } }
+            : normalEnd?.outcome === "empty" ? { failure: { kind: "empty" as const, runtime: KIND, source: "marker" as const,
+              message: stderr.trim().slice(-500) || "grok returned no message" } } : {}),
+          ...(normalEnd ? normalEndToolEvidence(normalEnd) : {}),
+          ownerControlTerminal: normalEnd?.outcome === "completed" ? "completed" : "uncertain" });
         return;
       }
       // Partial output is evidence, not a successful terminal receipt. Keep it

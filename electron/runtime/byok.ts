@@ -46,6 +46,7 @@ import { OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS, outputLimitContinuationTurn } fro
 import { schemaFallbackInstruction, schemaFallbackPromptPart, observationSystemWithSchema } from "../../shared/runtime-capabilities";
 import { compactHistoryToBudget, estimateTransportTokens } from "./compact";
 import { detectRuntimeRefusal } from "./runtime-refusal";
+import { normalEndToolEvidence, settleNormalEnd } from "../../shared/turn-settlement";
 import {
   serverFailure, serverFailureCodeForStatus, serverFailureResendable, serverFailureResendDelayMs, SERVER_FAILURE_RESENDS,
   waitForServerResend,
@@ -570,6 +571,8 @@ async function runAnthropicMessagesInner(
   // ★도구 왕복. 모델이 tool_use 로 멈추면 실행하고 tool_result 로 답한 뒤 다시 부른다.
   // 상한을 두는 이유는 로컬/저가 모델이 같은 도구를 무한 반복하는 실측 때문이다.
   let toolTurnsTaken = 0;
+  /** Tool calls the host ran in this turn: settleNormalEnd evidence (R-065). */
+  let toolCallsRun = 0;
   /** G24: resends spent on an overloaded endpoint before anything streamed or ran in this invocation (provider-overload.ts). */
   let serverResends = 0;
   const ownerControl = createOwnerControlBoundary(req);
@@ -844,6 +847,7 @@ async function runAnthropicMessagesInner(
       }
     }
     toolTurnsTaken += 1;
+    toolCallsRun += orderedToolUse.length;
     // 어시스턴트 턴을 그대로 되돌려 넣는다(텍스트 + tool_use). 그래야 다음 호출에서
     // tool_result 가 짝을 찾는다.
     const assistantContent: AnthropicContent[] = [];
@@ -898,11 +902,13 @@ async function runAnthropicMessagesInner(
   }
   const answer = acc.trim();
   let failure: RunnerFailure | null = null;
+  // The model's own final stop is a normal end, settled by the shared rule (R-065): a tool-only turn completed.
+  const normalEnd = reachedAnswer ? settleNormalEnd({ text: answer, toolCalls: toolCallsRun }) : null;
   if (!reachedAnswer) {
     failure = byokFailure("exit", `BYOK tool loop did not reach a final answer after ${toolTurnsTaken} tool turns.`);
-  } else if (!answer) {
+  } else if (normalEnd?.outcome === "empty") {
     failure = byokFailure("empty", `BYOK returned an empty answer for ${model}.`);
-  } else {
+  } else if (answer) {
     const refusal = detectRuntimeRefusal(answer);
     if (refusal) failure = { ...refusal, runtime: "byok", source: "heuristic" };
   }
@@ -911,6 +917,7 @@ async function runAnthropicMessagesInner(
     text: answer || (failure ? failure.message : ""),
     ownerControlTerminal: failure ? "uncertain" : "completed",
     ...(failure ? { failure } : {}),
+    ...(!failure && normalEnd ? normalEndToolEvidence(normalEnd) : {}),
     ...(observedUsage ? { observedUsage } : {}),
     ...(outputTokens > 0 ? { tokens: outputTokens } : {}),
     /*
@@ -1250,6 +1257,8 @@ export const runGoogleByok: Runner = async (
   /** Consecutive replies cut by the output cap (continued on the same conversation, never a failed turn). */
   let outputCuts = 0;
   let reachedAnswer = false;
+  /** Function calls the host ran in this turn: settleNormalEnd evidence (R-065). */
+  let googleToolCallsRun = 0;
   let includeTools = functionDeclarations.length > 0;
   // Effort (A4 C6.3): generationConfig.thinkingConfig.thinkingLevel. The API reference says it is for Gemini 3 or later and
   // "use with earlier models results in an error": a structured field violation on the thinking config drops it for the
@@ -1560,6 +1569,7 @@ export const runGoogleByok: Runner = async (
     }
     contents.push({ role: "model", parts: modelParts });
     const resultParts: GooglePart[] = [];
+    googleToolCallsRun += functionCalls.length;
     for (const call of functionCalls) {
       assertScienceRecoveryRequest(req, "byok", "google");
       const outcome = await runMainToolDispatch(
@@ -1593,11 +1603,13 @@ export const runGoogleByok: Runner = async (
   }
   const answer = acc.trim();
   let failure: RunnerFailure | null = null;
+  // Google's own STOP is a normal end, settled by the shared rule (R-065): a tool-only turn completed.
+  const normalEnd = reachedAnswer ? settleNormalEnd({ text: answer, toolCalls: googleToolCallsRun }) : null;
   if (!reachedAnswer) {
     failure = byokFailure("exit", `Google BYOK tool loop did not reach a final answer after ${MAX_BYOK_TOOL_TURNS} turns.`);
-  } else if (!answer) {
+  } else if (normalEnd?.outcome === "empty") {
     failure = byokFailure("empty", `Google returned an empty answer for ${model}.`);
-  } else {
+  } else if (answer) {
     const refusal = detectRuntimeRefusal(answer);
     if (refusal) failure = { ...refusal, runtime: "byok", source: "heuristic" };
   }
@@ -1606,6 +1618,7 @@ export const runGoogleByok: Runner = async (
     text: answer || (failure ? failure.message : ""),
     ownerControlTerminal: failure ? "uncertain" : "completed",
     ...(failure ? { failure } : {}),
+    ...(!failure && normalEnd ? normalEndToolEvidence(normalEnd) : {}),
     ...(observedUsage ? { observedUsage } : {}),
     workforcePermissionEnforcement: failure
       ? broker?.finish(false)

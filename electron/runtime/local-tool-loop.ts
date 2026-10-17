@@ -69,6 +69,7 @@ import {
 import type { ToolPermission } from "../../shared/builtin-tools";
 import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
 import type { ToolResultTrust } from "../../shared/types";
+import { normalEndToolEvidence, settleNormalEnd } from "../../shared/turn-settlement";
 
 function agentlasDispatchedOrigin(toolName: string): ToolInvocationOrigin {
   return { kind: "agentlas", providerName: "Agentlas", toolName };
@@ -1641,6 +1642,8 @@ async function runLocalOpenAiChatInner(
   let reachedAnswer = false;
   /** 실제로 돈 도구 왕복 횟수 — 실패 문구에는 상한이 아니라 이 사실이 실린다. */
   let toolTurnsTaken = 0;
+  /** Tool calls the host ran in this turn: settleNormalEnd evidence (R-065). */
+  let toolCallsRun = 0;
   const progress = createToolLoopProgress(runtimeKind, req, events);
   const usage = createToolLoopUsage(events);
   /** The optional Surface fallback is a one-time swap, never a per-turn oscillation. */
@@ -2200,6 +2203,7 @@ async function runLocalOpenAiChatInner(
     sawAnyToolCall = true;
     continuedText = "";
     toolTurnsTaken += 1;
+    toolCallsRun += result.toolCalls.length;
     if (result.thinking && result.toolCalls[0]) thinkingByCallId.set(result.toolCalls[0].id, result.thinking);
     messages.push({ role: "assistant", content: result.text, tool_calls: result.toolCalls });
     const visionMessages: ChatMessage[] = [];
@@ -2224,6 +2228,8 @@ async function runLocalOpenAiChatInner(
   // ★여기서부터가 실패 판정 — 텍스트 "모양"이 아니라 이 런의 사실로만 판단한다.
   const answer = finalText.trim();
   let failure: RunnerFailure | null = null;
+  // The model's own stop is a normal end, settled by the shared rule (R-065): a tool-only turn completed.
+  const normalEnd = reachedAnswer ? settleNormalEnd({ text: answer, toolCalls: toolCallsRun }) : null;
   if (!reachedAnswer) {
     // 도구만 왕복하다 상한에 닿았다. 마지막 중간 텍스트는 답이 아니다.
     failure = localFailure(
@@ -2231,9 +2237,9 @@ async function runLocalOpenAiChatInner(
       tStatus(req.locale, "errLocalToolLoopStuck", { model, turns: toolTurnsTaken }),
       runtimeKind,
     );
-  } else if (!answer) {
+  } else if (normalEnd?.outcome === "empty") {
     failure = localFailure("empty", tStatus(req.locale, "errLocalEmptyAnswer", { model }), runtimeKind);
-  } else {
+  } else if (answer) {
     // 표식 없이 완주했는데 산출물이 거절/한도 고지문인 경우 — 판별 규칙은
     // runtime-refusal.ts 한 곳에만 살고, 출처는 heuristic으로 남긴다.
     const refusal = detectRuntimeRefusal(answer);
@@ -2262,6 +2268,7 @@ async function runLocalOpenAiChatInner(
     text: answer || (failure ? failure.message : ""),
     ownerControlTerminal: failure ? "uncertain" : ownerControlTerminal,
     ...(failure ? { failure } : {}),
+    ...(!failure && normalEnd ? normalEndToolEvidence(normalEnd) : {}),
     ...(observedUsage ? { observedUsage } : {}),
     ...(admittedWindow ? { contextWindowTokens: admittedWindow } : {}),
     workforcePermissionEnforcement: enforcement,
