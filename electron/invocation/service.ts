@@ -1237,6 +1237,17 @@ function closeGoalOnModelJudgment(goalId: string, reason: string): boolean {
   return true;
 }
 
+/**
+ * The chat is still held by earlier work. The outward code stays invocation_cleanup_pending (the send queue and the
+ * renderer key on it); the cause names the holder, and recordStartRefusalCause stores it as causeCode. Nine different
+ * checks used to throw the same bare error, and one swallowed the fence's own error: the owner's message after a restart
+ * was refused with no recorded reason (W7 2026-10-17, copy taken while the Yotube Goal turn was running).
+ */
+function cleanupPending(holder: string, cause?: unknown): Error {
+  return Object.assign(new Error("invocation_cleanup_pending"),
+    { cause: Object.assign(new Error(holder), { code: holder }, cause === undefined ? {} : { cause }) });
+}
+
 export class InvocationService {
   private readonly deliveryJournal = new RunEventDeliveryJournal();
   private readonly activeRuns = new InvocationLifecycleRegistry<RunRecord>();
@@ -1941,7 +1952,7 @@ export class InvocationService {
   async startNativeIngress(source: NativeInvocationIngressSource): Promise<InvocationStartResult> {
     const owned = takeNativeInvocationIngressSource(source), binding = owned.binding;
     const backgroundObservation=Boolean(effectObservationTicket(binding.runId));
-    if (this.nativeIngress.has(binding.runId) || this.nativePreparing.has(binding.runId)) throw new Error("invocation_cleanup_pending");
+    if (this.nativeIngress.has(binding.runId) || this.nativePreparing.has(binding.runId)) throw cleanupPending("cleanup_same_run_in_flight");
     const chatBusy = !backgroundObservation && ([...this.nativeIngress.values()].some(p=>p.source.binding.chatId===binding.chatId && !effectObservationTicket(p.source.binding.runId))
       || [...this.nativePreparing.values()].some(p=>p.binding.chatId===binding.chatId && !effectObservationTicket(p.binding.runId))
       || this.activeChatIds().includes(binding.chatId));
@@ -2063,8 +2074,8 @@ export class InvocationService {
     if (!reservation || reservation.chatId !== req.chatId || reservation.ownerProcessEpoch !== durableAdmission.ownerProcessEpoch || reservation.status !== "pending"
       || reservation.inputDigest !== createHash("sha256").update(INVOCATION_ADMISSION_DIGEST_VERSION + "\0").update(durableAdmission.canonicalRequestJson).digest("hex")) throw new Error("native_one_input_reservation_required");
     const ingress=this.nativeIngress.get(nativeRunId);
-    if (ingress && (!ingress.handedOff || ingress.port!==port)) throw new Error("invocation_cleanup_pending");
-    if (this.nativePreparing.has(nativeRunId) || (!effectObservationTicket(nativeRunId) && [...this.nativePreparing.values()].some(p => p.binding.chatId === req.chatId && !effectObservationTicket(p.binding.runId)))) throw new Error("invocation_cleanup_pending");
+    if (ingress && (!ingress.handedOff || ingress.port!==port)) throw cleanupPending("cleanup_ingress_not_handed_off");
+    if (this.nativePreparing.has(nativeRunId) || (!effectObservationTicket(nativeRunId) && [...this.nativePreparing.values()].some(p => p.binding.chatId === req.chatId && !effectObservationTicket(p.binding.runId)))) throw cleanupPending("cleanup_chat_preparing");
     const binding = Object.freeze({ chatId: req.chatId, runId: nativeRunId, admission: Object.freeze({ ...durableAdmission }) });
     port.assertCurrent(binding);
     const controller = ingress?.controller ?? new AbortController(), retained = ingress?.retained ?? new Set<Promise<unknown>>();
@@ -2687,13 +2698,13 @@ export class InvocationService {
       if (foreignOwner && (foreignOwner.ownerId !== localOwner.ownerId || foreignOwner.ownerKind !== localOwner.ownerKind)) {
         // A live turn of this chat in the OTHER process (Desktop <-> background service) is a definite refusal (1.3.0 A2).
         if (otherHostOwnsChat(foreignOwner, localOwner)) throw Object.assign(new Error(CHAT_BUSY_OTHER_HOST_CODE), { code: CHAT_BUSY_OTHER_HOST_CODE });
-        throw new Error("invocation_cleanup_pending");
+        throw cleanupPending("cleanup_foreign_owner_lease");
       }
       if (this.foreignNativeStartFence) {
         let blocked: unknown;
         try { blocked = this.foreignNativeStartFence(req.chatId); }
-        catch { throw new Error("invocation_cleanup_pending"); }
-        if (blocked !== false) throw new Error("invocation_cleanup_pending");
+        catch (error) { throw cleanupPending("cleanup_foreign_fence_failed", error); }
+        if (blocked !== false) throw cleanupPending("cleanup_foreign_native_fence");
       }
     }
     // The shared pending reservation fences every ingress, including Mobile and
@@ -2701,10 +2712,10 @@ export class InvocationService {
     const pendingAdmission = !backgroundObservation ? getPendingInvocationAdmissionForChat(req.chatId) : null;
     if (pendingAdmission && (!durableAdmission || pendingAdmission.runId !== req.runId
       || pendingAdmission.ownerProcessEpoch !== durableAdmission.ownerProcessEpoch
-      || pendingAdmission.inputDigest !== createHash("sha256").update(INVOCATION_ADMISSION_DIGEST_VERSION + "\0").update(durableAdmission.canonicalRequestJson).digest("hex"))) throw new Error("invocation_cleanup_pending");
-    if (!backgroundObservation && [...this.nativeIngress.values()].some(pending => pending.source.binding.chatId === req.chatId && pending.controller !== nativeController && !effectObservationTicket(pending.source.binding.runId))) throw new Error("invocation_cleanup_pending");
-    if (!backgroundObservation && [...this.nativePreparing.values()].some(pending => pending.binding.chatId === req.chatId && pending.controller !== nativeController)) throw new Error("invocation_cleanup_pending");
-    if (!backgroundObservation && [...this.settlingRuns.values()].some((record) => !record.background && record.chatId === req.chatId)) throw new Error("invocation_cleanup_pending");
+      || pendingAdmission.inputDigest !== createHash("sha256").update(INVOCATION_ADMISSION_DIGEST_VERSION + "\0").update(durableAdmission.canonicalRequestJson).digest("hex"))) throw cleanupPending("cleanup_other_admission_pending");
+    if (!backgroundObservation && [...this.nativeIngress.values()].some(pending => pending.source.binding.chatId === req.chatId && pending.controller !== nativeController && !effectObservationTicket(pending.source.binding.runId))) throw cleanupPending("cleanup_chat_ingress");
+    if (!backgroundObservation && [...this.nativePreparing.values()].some(pending => pending.binding.chatId === req.chatId && pending.controller !== nativeController)) throw cleanupPending("cleanup_chat_preparing");
+    if (!backgroundObservation && [...this.settlingRuns.values()].some((record) => !record.background && record.chatId === req.chatId)) throw cleanupPending("cleanup_chat_settling");
     if (nativeController) yield oneStartCheckpoint("judge", { request: req, workspaceBinding, executionContext }, () => undefined);
     nativeController?.signal.throwIfAborted();
     const incoming = req as OneInvocationRequest;
