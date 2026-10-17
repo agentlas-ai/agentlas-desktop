@@ -89,14 +89,19 @@ function classifyInBackground(input: {
   automation: Automation; runId: string | null; phase: "outcome" | "failure" | "reflection";
   sourceSignal: AbortSignal; assertCurrent: () => void;
   classify: (signal: AbortSignal, isCurrent: () => boolean) => Promise<AutomationResultClassification | void>;
+  /** The settled run-history outcome once this judgment ends ("unjudged" when it could not judge). */
+  afterJudged?: (final: { outcome: string; reasonCode: string | null }) => void;
 }): void {
   let ownedKey: string | undefined;
   let ownedEntry: { automationId: string; controller: AbortController } | undefined;
+  const judged = (outcome: string, reasonCode: string | null): void => {
+    try { input.afterJudged?.({ outcome, reasonCode }); } catch { /* advisory */ }
+  };
   try {
   if (!input.runId || input.sourceSignal.aborted || shutdownDispatchClosed) return;
   const { automation, runId, phase } = input;
   const key = `${automation.id}:${phase}`;
-  if (backgroundClassifications.has(key)) return;
+  if (backgroundClassifications.has(key)) { judged("unjudged", null); return; }
   const db = getDb();
   const source = db.prepare(`SELECT occurrence_id, graph_digest, checkpoint_json, status
     FROM automation_runs WHERE id = ? AND automation_id = ?`).get(runId, automation.id) as {
@@ -155,8 +160,10 @@ function classifyInBackground(input: {
       // All freshness reads and the fact receipt share one transaction. A late
       // answer cannot revive an edited occurrence or a stopped owner Goal.
       let historyChanged = false;
+      let final: { outcome: string; reasonCode: string | null } | null = null;
       db.transaction(() => {
         if (!isCurrent()) return;
+        final = { outcome: "unjudged", reasonCode: classified ? classified.reasonCode ?? null : null };
         if (classified && phase !== "reflection" && !isJudgmentUnavailable(classified)
           && classified.reasonCode !== "automation_failure_unclassified") {
           const verdict = classified.outcome;
@@ -165,6 +172,7 @@ function classifyInBackground(input: {
           historyChanged = db.prepare(`UPDATE run_history SET outcome = ?, outcome_reason = ?
             WHERE id = ? AND automation_id = ? AND outcome = 'unjudged'`)
             .run(outcome, classified.reason == null ? null : redactOperationalSecrets(classified.reason), runId, automation.id).changes === 1;
+          final = { outcome, reasonCode: classified.reasonCode ?? null };
         }
         if (classified && phase !== "reflection") recordAutomationJudgeReceipt(runId, automation.id, phase, classified);
         recordRunEvent({ runId, automationId: automation.id, kind: phase === "reflection" ? "automation_background_reflection_completed" : "automation_background_judgment_completed",
@@ -176,9 +184,12 @@ function classifyInBackground(input: {
           } });
       }).immediate();
       if (historyChanged) emitDesktopStoreChange({ entity: "automation", id: automation.id });
+      const settled = final as { outcome: string; reasonCode: string | null } | null;
+      if (settled) judged(settled.outcome, settled.reasonCode);
     } catch (error) {
       tryRecordRunEvent({ runId, automationId: automation.id, kind: phase === "reflection" ? "automation_background_reflection_unavailable" : "automation_background_judgment_unavailable",
         payload: { phase, reasonCode: controller.signal.aborted ? "judgment_cancelled_or_timeout" : "judgment_failed_or_stale", pending: true } });
+      if (!input.sourceSignal.aborted && !shutdownDispatchClosed) judged("unjudged", null);
     } finally {
       if (timer) clearTimeout(timer);
       if (abortListener) controller.signal.removeEventListener("abort", abortListener);
@@ -405,6 +416,43 @@ function withAutomationJudgmentSignal<T>(signal: AbortSignal, action: () => T): 
 function throwIfAutomationAborted(controller: AbortController): void {
   if (controller.signal.aborted) throw controller.signal.reason instanceof Error
     ? controller.signal.reason : new Error("automation_stopped_by_user");
+}
+
+/**
+ * 지속 정책(P0-2): 끝까지 돌았는데 바깥 효과가 0이고 판정이 목표 미충족(또는 판정 불가)으로 본 실행(자기 보류), 또는
+ * 도구 없이 했다고 주장한 실행은 호스트 사실로 원인을 걸고 다음 수를 원장에 남긴다. 다음 실행이 그 수를 소비하므로
+ * 이 자동화의 가장 최근 실행일 때만 남긴다(늦게 끝난 판정이 다음 회차를 덮지 않는다).
+ */
+async function recordAutomationHoldDecision(
+  a: Automation,
+  runId: string,
+  facts: { completed: boolean; outcome: string | null; reasonCode: string | null },
+  assertLive?: () => void,
+): Promise<void> {
+  // 바깥 효과(게시·전송·외부 쓰기·산출물 파일)만 진전이다 — 자기 메모 수정·셸·탐색은 활동일 뿐.
+  const outwardEffects = automationRunOutwardEffects(runId);
+  const cause = outwardEffects === null ? null : automationRunSettlementCause({
+    ...facts, outwardEffects, ongoingGoal: automationServesOngoingGoal(a),
+  });
+  if (!cause) return;
+  const ranOn = a.runtimeSelection;
+  const pool = rolePriorityRuntimes(await detectRuntimes(), "worker");
+  const switchableRuntimes = pool.filter((runtime) =>
+    (runtime.backend ?? null) !== (ranOn?.backend ?? null)
+    && !runtimeCooldownForSelection(selectionForRuntime(runtime))).length;
+  assertLive?.();
+  if (shutdownDispatchClosed) throw new Error("app_closed");
+  const latestRun = getDb().prepare(
+    "SELECT id FROM run_history WHERE automation_id = ? ORDER BY ran_at DESC, rowid DESC LIMIT 1",
+  ).get(a.id) as { id: string } | undefined;
+  if (latestRun?.id !== runId) return;
+  const latest = getAutomation(a.id);
+  decideAndRecordAutomationPersistence({
+    automation: { id: a.id, enabled: latest?.enabled ?? a.enabled },
+    runId,
+    cause,
+    switchableRuntimes,
+  });
 }
 
 function dispatchPaused(): boolean {
@@ -1210,6 +1258,11 @@ async function runOne(
   let scheduledAttemptRecorded = false;
   let runLedgerRecorded = false;
   const pendingClassifications: Array<() => void> = [];
+  // A completed run's outcome is judged in the background, so at settlement it is still "unjudged" (pending), not
+  // "the judge could not be reached". The hold decision waits for that judgment; the settlement opens this gate.
+  let outcomeJudgmentQueued = false;
+  let openHoldGate: (open: boolean) => void = () => {};
+  const holdGate = new Promise<boolean>((resolve) => { openHoldGate = resolve; });
   // 이번 실행 "이전"의 실패 스트릭 — 성공 시 복구 학습(recordAutomationRecovery) 판정에 쓴다.
   // markAutomationRun 이후에는 이번 결과가 이력에 섞여 사전 상태를 복원할 수 없다.
   let priorFailureContext: AutomationFailureContext = { streak: 0, recentErrors: [] };
@@ -1678,11 +1731,19 @@ async function runOne(
             ? structuredClone(observedToolActivity(currentRunId)) : undefined;
           const evidenceRecord = structuredClone(runRecord);
           const evidenceGoal = structuredClone(declaredGoalForAutomation(a));
+          const judgedRunId = currentRunId;
           pendingClassifications.push(() => classifyInBackground({ automation: a, runId: currentRunId, phase: "outcome", sourceSignal: controller.signal,
             assertCurrent: assertGoalCurrent, classify: signal => classifyAutomationOutcome(evidenceOutput, {
               runtimeSelection: a.runtimeSelection, signal, toolActivity: evidenceActivity, hostComputedGraph,
               ...(evidenceRecord.steps.length > 0 ? { runRecord: evidenceRecord } : {}), declaredGoal: evidenceGoal,
-            }) }));
+            }),
+            afterJudged: (final) => {
+              if (!judgedRunId) return;
+              void holdGate.then((open) => open ? recordAutomationHoldDecision(a, judgedRunId, {
+                completed: true, outcome: final.outcome, reasonCode: final.reasonCode,
+              }) : undefined).catch((error) => console.warn("[automation] persistence decision unavailable:", error));
+            } }));
+          outcomeJudgmentQueued = true;
         } catch {
           tryRecordRunEvent({ runId: currentRunId ?? `automation-check-capture:${a.id}:${randomUUID()}`,
             automationId: a.id, kind: "automation_background_judgment_capture_pending",
@@ -1884,42 +1945,32 @@ async function runOne(
       // 했다고 주장한 실행은 호스트 사실로 원인을 걸고 다음 수를 원장에 남긴다. 다음 실행이 그 수를 소비한다:
       // replan 은 계획 캡슐의 호스트 지시로, switch_runtime 은 실행 계획의 1회 핸드오프로(저장된 핀은 그대로).
       // 실측 f7a61706: 19회 중 15회가 스스로 고른 무변경 보류였고 판정은 이를 수용·판정 불가로 받았다.
+      // 판정이 뒤에서 도는 완료 실행은 여기서 "unjudged"(판정 대기)일 뿐 "판정기에 닿지 못함"이 아니다. 그 실행의
+      // 보류 판단은 판정이 끝난 뒤 그 결과로 한다. 운영 2026-10-17: 읽기 전용 감시 자동화 2ce66bb9 의 정상 회차
+      // 962번이 전부 self_hold 로 잡혀 replan → 오너 핀(Sonnet) 밖 런타임 전환(Light) → 휴식을 10분마다 돌았고,
+      // 판정은 매번 ok 였다.
+      let holdGateOpen = false;
       if (!graphLoginWait && !workspaceFailure && !shutdownDispatchClosed && runLedgerRecorded && !parentMissing && !leaseOwnershipLost && !opts?.dryRun && currentRunId
         && !controller.signal.aborted) {
         try {
-          // 바깥 효과(게시·전송·외부 쓰기·산출물 파일)만 진전이다 — 자기 메모 수정·셸·탐색은 활동일 뿐.
-          const outwardEffects = automationRunOutwardEffects(currentRunId);
           // 둘 다 호스트가 쓴 표식이다: 판정 reasonCode, 또는 그래프 커널의 노드 실패 코드.
           const claimedWithoutTools = runReasonCode === "claimed_without_tools"
             || (machineError ?? "").startsWith("[claimed_without_tools]")
             || (machineError ?? "").includes("NODE_CLAIMED_WITHOUT_TOOLS");
-          const cause = outwardEffects === null ? null : automationRunSettlementCause({
-            completed: runCompleted,
-            outcome: runOutcome,
-            reasonCode: claimedWithoutTools ? "claimed_without_tools" : runReasonCode,
-            outwardEffects,
-            ongoingGoal: automationServesOngoingGoal(a),
-          });
-          if (cause) {
-            const ranOn = a.runtimeSelection;
-            const pool = rolePriorityRuntimes(await detectRuntimes(), "worker");
-            const switchableRuntimes = pool.filter((runtime) =>
-              (runtime.backend ?? null) !== (ranOn?.backend ?? null)
-              && !runtimeCooldownForSelection(selectionForRuntime(runtime))).length;
-            const latest = getAutomation(a.id);
-            throwIfAutomationAborted(controller);
-            if (shutdownDispatchClosed) throw new Error("app_closed");
-            decideAndRecordAutomationPersistence({
-              automation: { id: a.id, enabled: latest?.enabled ?? a.enabled },
-              runId: currentRunId,
-              cause,
-              switchableRuntimes,
-            });
+          if (outcomeJudgmentQueued && runOutcome === "unjudged" && runReasonCode === "automation_judgment_pending" && !claimedWithoutTools) {
+            holdGateOpen = true;
+          } else {
+            await recordAutomationHoldDecision(a, currentRunId, {
+              completed: runCompleted,
+              outcome: runOutcome,
+              reasonCode: claimedWithoutTools ? "claimed_without_tools" : runReasonCode,
+            }, () => throwIfAutomationAborted(controller));
           }
         } catch (persistenceError) {
           console.warn("[automation] persistence decision unavailable:", persistenceError);
         }
       }
+      openHoldGate(holdGateOpen);
       // 재실행 정지는 커널이 남긴 결정론적 신호(부수효과가 반영됐는지 알 수 없음)만 보고 정한다.
       // 예전에는 여기에 runStatus(=LLM 판정 결과)까지 걸려 있었다. 판정 모델에 닿지 못하면
       // 상태가 error로 떨어져 조건이 어긋났고, 게시가 나갔는지 모르는 자동화가 다음 슬롯에
