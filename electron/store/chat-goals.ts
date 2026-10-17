@@ -182,6 +182,22 @@ export function getChatGoalRevision(goalId: string, revision?: number): GoalRevi
   return row ? parseGoalRevision((row as { payload_json: string }).payload_json) : null;
 }
 
+/**
+ * Revision 1 of a Goal adopted from the owner's /goal turn stores lifecycle "finite" as an unjudged default
+ * (explicit-goal-authority.ts). Once the intake judgment says the owner asked for ongoing work, that default is
+ * corrected in place — only while it is still the first, unrevised, explicit revision (explicit-goal-lifecycle.ts).
+ */
+export function correctExplicitGoalLifecycle(goalId: string): boolean {
+  const corrected = getDb().prepare(`UPDATE chat_goal_revisions SET payload_json = json_set(payload_json, '$.lifecycle', 'ongoing')
+    WHERE goal_id = ? AND revision = 1 AND json_extract(payload_json, '$.reason') = 'explicit_goal_turn'
+      AND COALESCE(json_extract(payload_json, '$.lifecycle'), 'finite') = 'finite'
+      AND NOT EXISTS (SELECT 1 FROM chat_goal_revisions later WHERE later.goal_id = ? AND later.revision > 1)`).run(goalId, goalId);
+  if (corrected.changes !== 1) return false;
+  const chatId = readRow(goalId)?.chat_id;
+  if (chatId) emitDesktopStoreChange({ entity: "chat", id: chatId });
+  return true;
+}
+
 function parseGoalRevision(payload: string): GoalRevision {
   const revision = JSON.parse(payload) as GoalRevision;
   return { ...revision, lifecycle: resolveGoalLifecycle(revision.lifecycle) };

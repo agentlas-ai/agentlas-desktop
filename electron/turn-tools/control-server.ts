@@ -48,7 +48,12 @@ const defaultGoalResolver: TurnGoalResolver = async (chatId, nowMs) => {
   const goalId = getChatGoalId(chatId);
   if (!goalId) return null;
   const { timerWaitAuthority } = await import("../long-run/goal-deadline");
-  const authority = timerWaitAuthority(goalId, nowMs);
+  let authority = timerWaitAuthority(goalId, nowMs);
+  if (!authority.ok && authority.reason === "goal_wait_ongoing_authority_required") {
+    // A /goal-adopted Goal's "finite" may be an unjudged default: judge the owner's request once before refusing.
+    const { settleExplicitGoalLifecycle } = await import("../long-run/explicit-goal-lifecycle");
+    if (await settleExplicitGoalLifecycle(goalId).catch(() => null) === "ongoing") authority = timerWaitAuthority(goalId, nowMs);
+  }
   return { goalId, timer: authority.ok ? { ok: true } : { ok: false, reason: authority.reason } };
 };
 let goalResolver: TurnGoalResolver = defaultGoalResolver;
