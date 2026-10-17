@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { inspectPackagedMacSigningPolicy, verifyMacAppBundle } from "./lib/mac-app-signature.mjs";
+import { decideStapledNotarization } from "./lib/stapled-ticket.mjs";
 
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const args = new Map(
@@ -24,25 +25,14 @@ const tag = String(args.get("--tag") || process.env.AGENTLAS_DESKTOP_RELEASE_TAG
 const arches = ["arm64", "x64"];
 const signingPolicyPath = join(desktopRoot, "build-resources", "macos-release-signing-policy.json");
 
-// Apple's ticket lookup (CloudKit) drops connections ("Error 68", 10-12 releases 1.3.15-1.3.17): a stapler
-// validate that fails is retried a few times before it counts. Any other command runs once.
-const STAPLER_RETRY_DELAYS_MS = [20_000, 40_000, 60_000, 90_000, 120_000];
-function isStaplerValidate(command, args) {
-  return command === "xcrun" && args[0] === "stapler" && args[1] === "validate";
-}
-function sleepMs(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
-
+// Every command runs once. A stapler validate that lost its online ticket lookup (Error 68) is decided offline by
+// decideStapledNotarization (scripts/lib/stapled-ticket.mjs) instead of being retried.
 function run(command, commandArgs) {
-  let result;
-  for (let attempt = 0; ; attempt += 1) {
-    result = spawnSync(command, commandArgs, {
-      cwd: desktopRoot,
-      encoding: "utf8",
-      maxBuffer: 1024 * 1024 * 8,
-    });
-    if (result.status === 0 || !isStaplerValidate(command, commandArgs) || attempt >= STAPLER_RETRY_DELAYS_MS.length) break;
-    sleepMs(STAPLER_RETRY_DELAYS_MS[attempt]);
-  }
+  const result = spawnSync(command, commandArgs, {
+    cwd: desktopRoot,
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024 * 8,
+  });
   const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
   return {
     ok: result.status === 0,
@@ -192,6 +182,7 @@ const artifacts = arches.map((arch) => {
     ? run("spctl", ["-a", "-t", "open", "--context", "context:primary-signature", "-v", file])
     : null;
   const inner = exists ? inspectInnerApps({ file, arch }) : null;
+  const stapledNotarization = exists ? decideStapledNotarization({ path: file, kind: "dmg", stapler, spctl }) : null;
   return {
     arch,
     fileName,
@@ -203,7 +194,8 @@ const artifacts = arches.map((arch) => {
     hdiutil,
     stapler,
     spctl,
-    notarized: Boolean(stapler?.ok),
+    stapledNotarization,
+    notarized: Boolean(stapledNotarization?.ok),
     gatekeeperAccepted: Boolean(spctl?.ok),
     inner,
   };
@@ -213,7 +205,7 @@ const failures = [];
 for (const artifact of artifacts) {
   if (!artifact.exists) failures.push(`${artifact.fileName}: missing`);
   if (artifact.hdiutil && !artifact.hdiutil.ok) failures.push(`${artifact.fileName}: hdiutil verify failed`);
-  if (artifact.stapler && !artifact.stapler.ok) failures.push(`${artifact.fileName}: notarization ticket missing`);
+  if (artifact.stapledNotarization && !artifact.stapledNotarization.ok) failures.push(`${artifact.fileName}: notarization ticket not verified (${artifact.stapledNotarization.cause})`);
   if (artifact.spctl && !artifact.spctl.ok) failures.push(`${artifact.fileName}: Gatekeeper rejected`);
   if (artifact.inner) {
     if (!artifact.inner.attach?.ok) failures.push(`${artifact.fileName}: could not mount for inner-app verification`);

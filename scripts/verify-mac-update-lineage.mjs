@@ -16,6 +16,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { decideStapledNotarization } from "./lib/stapled-ticket.mjs";
 
 const require = createRequire(import.meta.url);
 const {
@@ -397,13 +398,21 @@ function readOfficialBundleVersion(appPath, subject) {
 function verifyOuterDmg(dmgPath, subject) {
   run("hdiutil", ["verify", dmgPath], { code: "dmg-integrity-rejected", subject });
   run("codesign", ["--verify", "--strict", dmgPath], { code: "dmg-signature-rejected", subject });
-  // Apple ticket lookup drops connections (Error 68): retry before it counts.
-  run("xcrun", ["stapler", "validate", dmgPath], { code: "dmg-notarization-rejected", subject, retries: 5, retryDelayMs: 20_000 });
-  run(
+  const gatekeeper = run(
     "spctl",
     ["-a", "-t", "open", "--context", "context:primary-signature", "-vv", dmgPath],
-    { code: "dmg-gatekeeper-rejected", subject },
+    { captureCombined: true, code: "dmg-gatekeeper-rejected", subject },
   );
+  // The ticket lookup behind `stapler validate` drops connections from CI runners (Error 68), and waiting does not
+  // outlast it. That verdict alone is decided offline from the stapled ticket and Gatekeeper's verdict above.
+  const stapler = spawnSync("xcrun", ["stapler", "validate", dmgPath], { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
+  const decision = decideStapledNotarization({
+    path: dmgPath,
+    kind: "dmg",
+    stapler: { ok: stapler.status === 0, output: [stapler.stdout, stapler.stderr].filter(Boolean).join("\n") },
+    spctl: { ok: true, output: gatekeeper },
+  });
+  if (!decision.ok) fail("dmg-notarization-rejected", subject);
 }
 
 function safeArtifact({ source, container, architecture, updaterTrustPolicyResource = null }) {

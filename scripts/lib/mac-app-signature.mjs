@@ -2,25 +2,15 @@ import { createHash } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { decideStapledNotarization } from "./stapled-ticket.mjs";
 
-// Apple's ticket lookup (CloudKit) drops connections ("Error 68", 10-12 releases 1.3.15-1.3.17): a stapler
-// validate that fails is retried a few times before it counts. Any other command runs once.
-const STAPLER_RETRY_DELAYS_MS = [20_000, 40_000, 60_000, 90_000, 120_000];
-function isStaplerValidate(command, args) {
-  return command === "xcrun" && args[0] === "stapler" && args[1] === "validate";
-}
-function sleepMs(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
-
+// Every command runs once. A stapler validate that lost its online ticket lookup (Error 68) is decided offline by
+// decideStapledNotarization (stapled-ticket.mjs) instead of being retried.
 function run(command, args) {
-  let result;
-  for (let attempt = 0; ; attempt += 1) {
-    result = spawnSync(command, args, {
-      encoding: "utf8",
-      maxBuffer: 8 * 1024 * 1024,
-    });
-    if (result.status === 0 || !isStaplerValidate(command, args) || attempt >= STAPLER_RETRY_DELAYS_MS.length) break;
-    sleepMs(STAPLER_RETRY_DELAYS_MS[attempt]);
-  }
+  const result = spawnSync(command, args, {
+    encoding: "utf8",
+    maxBuffer: 8 * 1024 * 1024,
+  });
   return {
     ok: result.status === 0,
     status: result.status,
@@ -181,20 +171,21 @@ export function verifyMacAppBundle({
     ])
     : { ok: false, status: null, output: "" };
   const gatekeeperNotarized = Boolean(spctl.ok && /source=Notarized Developer ID/i.test(spctl.output));
-  const notarized = stapler.ok || gatekeeperNotarized;
+  const stapled = codesign.ok ? decideStapledNotarization({ path: appPath, kind: "app", stapler, spctl }).ok : false;
+  const notarized = stapled || gatekeeperNotarized;
 
   let category = "accepted";
   if (!display.ok || !developerId) category = "not-developer-id";
   else if (!codesign.ok) category = "designated-requirement-rejected";
   else if (!spctl.ok) category = "gatekeeper-rejected";
-  else if (!notarized || (requireStapledNotarization && !stapler.ok)) category = "notarization-rejected";
+  else if (!notarized || (requireStapledNotarization && !stapled)) category = "notarization-rejected";
 
   return {
-    ok: developerId && codesign.ok && spctl.ok && notarized && (!requireStapledNotarization || stapler.ok),
+    ok: developerId && codesign.ok && spctl.ok && notarized && (!requireStapledNotarization || stapled),
     category,
     developerId,
     notarized,
-    stapledNotarization: stapler.ok,
+    stapledNotarization: stapled,
     gatekeeperAccepted: spctl.ok,
     bundleIdentifier: identifier,
     teamIdentifier,
