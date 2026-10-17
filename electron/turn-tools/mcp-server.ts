@@ -584,8 +584,17 @@ export const AGENTLAS_TURN_TOOLS = ([
 // media.listen unused. Claude Code shows server instructions in its system prompt even when tools are deferred. Real-model
 // A/B in that channel (claude sonnet low, product Claude home, ENABLE_TOOL_SEARCH=true; /tmp/prompt-audit/listen-ab2):
 // media.listen was called in 0/6 runs without this line and 5/6 with it. Sent only while harness_call is one of this run's tools.
-const AGENTLAS_TURN_INSTRUCTIONS = purposePrompt([{ id: "tool.agentlas-turn.server-instructions", revision: 1, stability: "fixed-policy",
-  changeTriggers: ["release"], text: "harness_call media.listen hears a local audio or video file for you." }]);
+// Second line (2026-10-17): the live document ports (document.open/apply/save, live-document/ports.ts). Same channel, same A/B
+// method, task "change paragraph 2 of report.docx and save" (/tmp/prompt-audit/doc-ab): without the line a script rewrote the file
+// in 8/8 runs and document.* was never called; a descriptive line ("document.open edits ... live in the Document tab") changed
+// nothing (0/8); this imperative line called document.open/apply/save in 8/8 and no run rewrote the file by script. Control task
+// (summarise report.docx into summary.txt, no edit): document.* called 0/4 with and 0/4 without the line.
+const AGENTLAS_TURN_INSTRUCTIONS = purposePrompt([
+  { id: "tool.agentlas-turn.server-instructions", revision: 1, stability: "fixed-policy",
+    changeTriggers: ["release"], text: "harness_call media.listen hears a local audio or video file for you." },
+  { id: "tool.agentlas-turn.server-instructions.document", revision: 1, stability: "fixed-policy",
+    changeTriggers: ["release"], text: "When asked to change a local xlsx/docx/pptx/hwpx/hwp file, use harness_call document.open, then document.apply and document.save: the owner watches the edit in the Document tab. Do not rewrite the file with a script." },
+]);
 
 const SOURCE_HEAD = String.raw`"use strict";
 const fs = require("node:fs");
