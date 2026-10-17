@@ -3858,25 +3858,30 @@ export class InvocationService {
     };
     /** Preserve the root runtime's typed cause in the durable controller attempt. */
     let observedRuntimeErrorCode: string | null = null;
+    /*
+     * A fresh explicit Goal (goal chip or goalMode turn) had no revision until a later sweep adopted the owner's
+     * recorded turn, so its first controller attempt carried no revision and the first verification always ended
+     * verification_goal_revision_unbound (live 2026-09-25). Adopt the same recorded grant — this turn's
+     * invoke_started + invoke_prompt_bound are durable by now — before the producer admission is captured and before the
+     * attempt is stamped. Adopting after the capture made a LATER owner turn on a Goal without a revision (a paused
+     * explicit Goal from before da35c424, resumed by the owner's message) fail goal_episode_admission_stale, then
+     * goal_episode_admission_missing: the adoption moved the run version under the captured custody, and only the Goal's
+     * own first turn is exempt from that (W7 2026-10-17, YouTube room, on 1.3.63 and 1.3.64 alike).
+     */
+    const adoptRecordedExplicitGrant = (): void => {
+      if (!goalLongRun || executionContext || goalLongRun.surface === "science" || getChatGoalRevision(goalLongRun.goalId)) return;
+      try {
+        if (adoptExplicitGoalGrant(goalLongRun.goalId)) {
+          goalLongRun = getLongRunByGoalId(goalLongRun.goalId);
+          goalLongRunTask = goalLongRun ? listLongRunTasks(goalLongRun.id, true)[0] ?? null : null;
+        }
+      } catch (error) {
+        console.warn("[long-run] explicit goal grant adoption at first turn failed:", error);
+      }
+    };
     const bindGoalControllerAttempt = (selection: RuntimeSelection): void => {
       if (!goalLongRun || !goalLongRunTask || goalControllerAttemptId || goalControllerAttemptSettled) return;
-      /*
-       * A fresh explicit Goal (goal chip or goalMode turn) had no revision until a later sweep adopted the owner's
-       * recorded turn, so its first controller attempt carried no revision and the first verification always ended
-       * verification_goal_revision_unbound (live 2026-09-25). Adopt the same recorded grant here — this turn's
-       * invoke_started + invoke_prompt_bound are durable by now — before the attempt is stamped.
-       */
-      if (!executionContext && goalLongRun.surface !== "science" && !getChatGoalRevision(goalLongRun.goalId)) {
-        try {
-          if (adoptExplicitGoalGrant(goalLongRun.goalId)) {
-            goalLongRun = getLongRunByGoalId(goalLongRun.goalId);
-            goalLongRunTask = goalLongRun ? listLongRunTasks(goalLongRun.id, true)[0] ?? null : null;
-            if (!goalLongRun || !goalLongRunTask) return;
-          }
-        } catch (error) {
-          console.warn("[long-run] explicit goal grant adoption at first turn failed:", error);
-        }
-      }
+      adoptRecordedExplicitGrant();
       if (!goalLongRun || !goalLongRunTask) return;
       // A Goal revision owns a new durable task. Reusing one controller worker
       // across revisions makes the immutable task binding conflict on resume.
@@ -4085,6 +4090,7 @@ export class InvocationService {
           // This token survives delayed automatic admission/ledger creation. A later selection or final cannot refresh it.
           if (desktopProducerAdmission && producerAdmission === undefined
             && event.kind === "notice" && event.notice?.code === "runtime-selected") {
+            if (!goalControllerAttemptId && !goalControllerAttemptSettled) adoptRecordedExplicitGrant();
             try {
               producerAdmission = captureGoalProducerAdmission({ invocationId: runId, chatId: chat.id,
                 goalId: projectionGoalId ?? getChat(chat.id)?.goalId ?? null }, assertProducerServiceLifetime);
