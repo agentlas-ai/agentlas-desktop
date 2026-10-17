@@ -457,9 +457,35 @@ function defaultNodeLabel(type: WorkflowNodeType, step: EmittedStep): string {
  */
 export { synthesizeLegacyGraph } from "../shared/automation-graph-definition";
 
-export function parseAutomations(text: string): ParseAutomationsResult {
+/**
+ * `headlessFence`: the host observed this turn read the registration spec (read_automation_protocol). Then a final ```json
+ * block without the heading is a registration only if every entry passes the same validation as a headed block and
+ * names a schedule or monitor; anything else stays ordinary text (an example, a draft). Measured 2026-10-17 (dev A/B4):
+ * BYOK Haiku read the spec twice and emitted the array without the heading, and the host dropped it in silence.
+ */
+export function parseAutomations(text: string, options: { headlessFence?: boolean } = {}): ParseAutomationsResult {
   const idx = text.lastIndexOf(AUTOMATION_HEADING);
-  if (idx < 0) return { automations: [], cleanedText: text.trim(), errors: [] };
+  if (idx < 0) {
+    const none = { automations: [], cleanedText: text.trim(), errors: [] };
+    if (!options.headlessFence) return none;
+    const fence = [...text.matchAll(/```json\s*([\s\S]*?)```/g)].at(-1);
+    if (!fence || fence.index == null) return none;
+    let raw: unknown;
+    try { raw = JSON.parse(fence[1].trim()); } catch { return none; }
+    const entries = Array.isArray(raw) ? raw : [raw];
+    const registrationShaped = entries.length > 0 && entries.every((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+      const o = entry as Record<string, unknown>;
+      return o.action === undefined && typeof o.name === "string"
+        && (typeof o.prompt === "string" || o.graph !== undefined || Array.isArray(o.steps))
+        && (o.schedule !== undefined || o.monitor !== undefined);
+    });
+    if (!registrationShaped) return none;
+    const parsed = parseAutomations(`${AUTOMATION_HEADING}\n${fence[0]}`);
+    if (parsed.errors.length > 0 || parsed.automations.length !== entries.length) return none;
+    return { automations: parsed.automations, errors: [],
+      cleanedText: (text.slice(0, fence.index) + text.slice(fence.index + fence[0].length)).trim() };
+  }
 
   const after = text.slice(idx + AUTOMATION_HEADING.length);
   const fence = after.match(/```(?:json)?\s*([\s\S]*?)```/);

@@ -53,9 +53,9 @@ export function automationRegistrationMonitoring(input: {
 /** A parsed proposal needs the host consumer before another inference pass.
  * This is admission to registration/permission validation, never completion. */
 export function hasAutomationRegistrationHandoff(text: string, input: {
-  agentAppMode: boolean; division: boolean; sessionAutomationId?: string; backgroundAutomation: boolean;
+  agentAppMode: boolean; division: boolean; sessionAutomationId?: string; backgroundAutomation: boolean; headlessFence?: boolean;
 }): boolean {
   if (input.agentAppMode || input.backgroundAutomation || (input.division && !input.sessionAutomationId)) return false;
-  const parsed = parseAutomations(text);
+  const parsed = parseAutomations(text, { headlessFence: input.headlessFence === true });
   return parsed.automations.length > 0 || parsed.errors.length > 0;
 }

@@ -87,7 +87,6 @@ export function automationRegistrationReasonCode(error: unknown): string {
 
 export function automationRegistrationRefusalText(reason: string, locale: "ko"|"en"): string {
   const copy: Record<string, [string,string]> = {
-    goal_automation_finite_deadline_missing:["이 대화에서 진행 중인 목표에 마감 시각이 없어, 그 목표 안에서 만든 자동화를 언제 끝낼지 정할 수 없습니다. 목표가 끝난 뒤나 목표를 멈춘 뒤 다시 요청해 주세요.","This chat's active Goal has no deadline, so an automation made inside it would have no end. Ask again after the Goal ends or is stopped."],
     goal_automation_finite_deadline_passed:["진행 중인 목표의 마감 시각이 지나 자동화를 만들지 않았습니다.","The active Goal's deadline has passed, so no automation was created."],
     goal_automation_binding_source_unverified:["진행 중인 목표가 이 요청을 확인하지 못해 자동화를 만들지 않았습니다. 다시 요청해 주세요.","The active Goal could not confirm this request, so no automation was created. Ask again."],
   };

@@ -2270,6 +2270,9 @@ async function runMcpInvocationInContext(
    * observed, and an isolated 1.2.58 app opened a reCAPTCHA page on Claude with no card and no report to One.
    */
   let browserObservedAtBoundary = false;
+  // The turn read the automation registration spec (agentlas-ui read_automation_protocol): a host-observed fact that lets a
+  // headless registration block be validated as one (automation-emitter.ts parseAutomations headlessFence).
+  let automationProtocolRead = false;
   const observeBrowserCall = (leaf: string, notify: (notice: NonNullable<McpInvocationEvent["notice"]>) => void): void => {
     const browserTool = `agentlas-browser.${leaf}`;
     // A native grant's login walls are recovered, awaited, inside beforeMcpToolResult.
@@ -2347,6 +2350,8 @@ async function runMcpInvocationInContext(
     if (browserLeaf) {
       observeBrowserCall(browserLeaf, (notice) => { try { emit({ kind: "notice", notice }); } catch { /* run ended */ } });
     }
+    if (ev.kind === "tool-use" && ev.tool?.result !== undefined && !ev.tool.isError
+      && /^(?:agentlas-ui\.|mcp__agentlas-ui__)read_automation_protocol$/.test(ev.tool.name)) automationProtocolRead = true;
     emit(ev);
   };
   const earlyResult = () => ({
@@ -2358,6 +2363,7 @@ async function runMcpInvocationInContext(
   });
   const beforeMcpToolResult = async (input: { catalogId: string | null; toolName: string; isError: boolean }): Promise<void> => {
     login?.assertRunnable();
+    if (input.catalogId === "agentlas-ui" && input.toolName === "read_automation_protocol" && !input.isError) automationProtocolRead = true;
     if (input.catalogId === "agentlas-browser") {
       browserObservedAtBoundary = true;
       if (!input.isError && /^browser_[a-z_]+$/.test(input.toolName)) {
@@ -7368,6 +7374,7 @@ async function runMcpInvocationInContext(
     const needsAutomationRegistration = (text: string): boolean => hasAutomationRegistrationHandoff(text, {
       agentAppMode: req.agentAppMode === true, division: chat.kind === "division",
       sessionAutomationId: req.automationId, backgroundAutomation: executionContext?.source === "automation",
+      headlessFence: automationProtocolRead,
     });
     for (let pass = 2; pass <= maxPasses; pass += 1) {
       // The host must consume a schedule proposal before the Goal can judge its
@@ -8005,7 +8012,7 @@ async function runMcpInvocationInContext(
       (req.automationId && executionContext?.source !== "automation")
     ) {
       try {
-        const { automations: autos, cleanedText, errors } = parseAutomations(displayText);
+        const { automations: autos, cleanedText, errors } = parseAutomations(displayText, { headlessFence: automationProtocolRead });
         if (errors.length > 0) {
           // 조용히 드롭하지 않고 표면화(설계 §2.5) — 로그로 남겨 진단 가능하게.
           console.warn("[automation] parse warnings:", errors.join("; "));
@@ -8172,15 +8179,18 @@ async function runMcpInvocationInContext(
               const creationRevision = activeGoalId ? getChatGoalRevision(activeGoalId) : null;
               const finiteCreation = creationRevision?.lifecycle === "finite";
               // A failed finite binding must roll back creation, never leave an independent automation behind.
-              const created = desktopStoreTransaction(getDb(), () => {
+              const { created, unboundReason } = desktopStoreTransaction(getDb(), () => {
                 const finiteDeadline = finiteCreation && activeGoalId ? goalDeadlineAt(activeGoalId) : null;
-                // A Goal-made automation ends with its finite Goal, so a Goal without a host-resolved deadline cannot
-                // carry one (a single-tactic shape has none). Each cause keeps its own code for the owner's refusal text.
-                if (finiteCreation && !finiteDeadline) throw new Error("goal_automation_finite_deadline_missing");
-                if (finiteCreation && Date.parse(finiteDeadline!) <= Date.now()) throw new Error("goal_automation_finite_deadline_passed");
-                if (finiteCreation && (creationRevision.chatId !== chat.id || typeof req.runId !== "string"))
+                // A Goal-made automation ends at its finite Goal's deadline. A finite Goal with no host-resolved deadline
+                // (a single-tactic shape has none) was asked for standing work that outlives it, so that automation is
+                // created unbound (harness decision 2026-10-17; dev A/B4 O2 was refused here). Each refusal cause keeps
+                // its own code for the owner's refusal text.
+                const boundFinite = finiteCreation && finiteDeadline !== null;
+                const unboundReason = finiteCreation && !boundFinite ? "goal_automation_unbound_no_deadline" as const : null;
+                if (boundFinite && Date.parse(finiteDeadline!) <= Date.now()) throw new Error("goal_automation_finite_deadline_passed");
+                if (boundFinite && (creationRevision.chatId !== chat.id || typeof req.runId !== "string"))
                   throw new Error("goal_automation_binding_source_unverified");
-                if (finiteCreation) assertFiniteGoalLifecycleCurrent({ goalId: activeGoalId!,
+                if (boundFinite) assertFiniteGoalLifecycleCurrent({ goalId: activeGoalId!,
                   rootChatId: chat.id, expectedRevision: creationRevision.revision });
                 const created = createAutomation({
                 ...monitoring,
@@ -8206,7 +8216,7 @@ async function runMcpInvocationInContext(
                 if (req.runtimeSelection) recordAutomationPinProvenance(created.id, "agent_copy", "chat_registration");
                 // Only this newly created row and its genuine invocation may acquire a bridge.
                 if (activeGoalId && typeof req.runId === "string" && creationRevision?.chatId === chat.id) {
-                  if (finiteCreation) {
+                  if (boundFinite) {
                     bindCreatedAutomationToGoal({ goalId: activeGoalId, expectedGoalRevision: creationRevision.revision,
                       chatId: chat.id, invocationRunId: req.runId, automationId: created.id });
                   } else if (creationRevision.lifecycle === "ongoing") {
@@ -8215,8 +8225,10 @@ async function runMcpInvocationInContext(
                     catch (error) { console.warn("[goal-automation-provenance] created automation remains independent:", error); }
                   }
                 }
-                return created;
+                return { created, unboundReason };
               }).immediate();
+              if (unboundReason && typeof req.runId === "string") tryRecordRunEvent({ runId: req.runId, chatId: chat.id, kind: "goal_automation_unbound",
+                payload: { schemaVersion: "agentlas.goal-automation-unbound.v1", goalId: activeGoalId, automationId: created.id, reasonCode: unboundReason } });
               const registration: AutomationRegistrationResult = {
                 action: "created",
                 enabled: created.enabled,
@@ -8251,6 +8263,7 @@ async function runMcpInvocationInContext(
                     targetType: registration.targetType,
                     targetId: registration.targetId,
                     graph: registration.graph,
+                    ...(unboundReason ? { goalBindingReasonCode: unboundReason } : {}),
                   }),
                   result: automationRegistrationResultText(registration, locale),
                 },
