@@ -9,6 +9,7 @@ import { scienceEvidenceCollectionHost } from "./runtime/science-collection-boun
 import { desktopAliveRuntime } from "./alive-runtime";
 import { desktopAliveClock } from "./alive-clock";
 import { projectResearchState } from "./science-host/research-state-projection";
+import { scienceCodexProductConfig } from "./science-host/codex-product-config";
 /*
  * 사이언스가 이 앱에게 요구하는 것을 한 벌로 채워 준다.
  *
@@ -236,6 +237,7 @@ export function installDesktopScienceHost(): void {
     capabilities: SCIENCE_HOST_REQUIRED_CAPABILITIES,
     execution: {
       ...{ projectResearchState },
+      ...{ codexProductConfig: scienceCodexProductConfig },
       ...{ mintForwardSteeringRecoveryCapability },
       ...{ evidenceCollection: scienceEvidenceCollectionHost },
       criterionReview: scienceCriterionReviewHost,

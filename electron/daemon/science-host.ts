@@ -14,6 +14,7 @@ import { scienceEvidenceCollectionHost } from "../runtime/science-collection-bou
 import { inspectLegacyForwardRecoveryBoundary, reconcileScienceBoundary, type ScienceRuntimeBoundaryInput } from "../long-run/science-boundary";
 import { projectScienceLoopLongRun } from "../long-run/science-projection";
 import { projectResearchState } from "../science-host/research-state-projection";
+import { scienceCodexProductConfig } from "../science-host/codex-product-config";
 import { detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, withCliPath } from "../runtime/exec";
 import { resolveManagedNodeRuntime } from "../runtime/managed-node";
 import { isPackagedRuntime, runtimeResourcesPath, userDataPath } from "../runtime-paths";
@@ -159,6 +160,7 @@ export function installDaemonScienceHost(input: {
   } as never, {
     contractVersion: SCIENCE_HOST_CONTRACT_VERSION, capabilities: SCIENCE_HOST_REQUIRED_CAPABILITIES,
     execution: {
+      ...{ codexProductConfig: scienceCodexProductConfig },
       ...{ projectResearchState: async (projectionInput: Parameters<typeof projectResearchState>[0]) => {
         try {
           input.assertExecution();

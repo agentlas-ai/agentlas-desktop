@@ -71,6 +71,11 @@ export async function dispatchSciencePublicationCommand(
       ...(input.previewReferencePdf === true ? { previewReferencePdf: true } : {}),
       metadata: input.metadata && typeof input.metadata === "object" ? input.metadata as NonNullable<RenderOptions>["metadata"] : null,
     };
+    // The export schema the person picked (Basic/My schema) for this one export; the renderer resolves and pins it and it never
+    // changes the project's saved style. Without it a draft export with a schema came back unpinned and the UI refused it
+    // ("science-export-schema-pin-..."). A plain assignment, not a typed field, so a Science build that predates the option
+    // (the pinned one) simply ignores it.
+    if (input.exportSchema !== undefined) (options as Record<string, unknown>).exportSchema = input.exportSchema;
     const projectId = typeof input.projectId === "string" ? input.projectId : "";
     const service = api.scienceManuscriptRenderService();
     if (typeof input.manuscriptId === "string") return service.renderStored(projectId, input.manuscriptId, options);
