@@ -34,6 +34,7 @@ function recordSocialEngage(body: string, res: http.ServerResponse): void {
   try { parsed = JSON.parse(body) as Record<string, unknown>; } catch { res.writeHead(400).end("bad json"); return; }
   const authority = parsed && typeof parsed === "object" ? resolveBrowserApprovalAuthority(parsed.authority) : null;
   if (!authority) { res.writeHead(403).end(JSON.stringify({ ok: false, error: "browser_authority_unavailable" })); return; }
+  authority.release?.();
   const intent = typeof parsed.intent === "string" ? parsed.intent.slice(0, 40) : "";
   if (!intent) { res.writeHead(400).end(JSON.stringify({ ok: false, error: "intent_required" })); return; }
   const verified = parsed.verified === true;
@@ -120,8 +121,9 @@ export function startBrowserApprovalServer(): Promise<number> {
           res.writeHead(400).end(JSON.stringify({ decision: "unavailable", error: "browser_approval_request_invalid" }));
           return;
         }
+        let authority: ReturnType<typeof resolveBrowserApprovalAuthority> = null;
         try {
-          const authority = resolveBrowserApprovalAuthority(parsed.authority);
+          authority = resolveBrowserApprovalAuthority(parsed.authority);
           if (!authority) {
             res.writeHead(403).end(JSON.stringify({
               decision: typeof parsed.authority === "string" && parsed.authority ? "cancelled" : "unavailable",
@@ -157,6 +159,8 @@ export function startBrowserApprovalServer(): Promise<number> {
           res
             .writeHead(500, { "content-type": "application/json" })
             .end(JSON.stringify({ decision: "denied", error: String(err) }));
+        } finally {
+          authority?.release?.();
         }
       });
     });
