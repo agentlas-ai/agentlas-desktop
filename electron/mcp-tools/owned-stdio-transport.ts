@@ -25,6 +25,11 @@ interface OwnedStdioParameters {
   /** Prepared authority already captured the complete environment. */
   environmentResolved?: boolean;
   validatePrepared?: () => void;
+  /**
+   * Host-owned environment held for exactly this child's lifetime: taken when the child is spawned (layered over
+   * `env`) and released once, when the transport finishes closing. A transport that never starts holds nothing.
+   */
+  environmentLease?: () => { env: Record<string, string>; release(): void };
 }
 
 /** SDK framing with host-owned process groups: npm/uv wrappers may leave
@@ -39,6 +44,7 @@ export class OwnedStdioClientTransport implements Transport {
   private closing: Promise<void> | null = null;
   private readonly buffer = new ReadBuffer();
   private resolveClosed: (() => void) | null = null;
+  private releaseEnvironment: (() => void) | null = null;
   private readonly didClose = new Promise<void>((resolve) => { this.resolveClosed = resolve; });
 
   constructor(private readonly parameters: OwnedStdioParameters) {}
@@ -49,14 +55,26 @@ export class OwnedStdioClientTransport implements Transport {
     if (this.started || this.closed) throw new Error("Owned stdio transport already started or closed");
     this.parameters.validatePrepared?.();
     this.started = true;
-    const child = this.child = spawnCli(this.parameters.command, this.parameters.args ?? [], {
-      env: this.parameters.environmentResolved ? { ...this.parameters.env }
-        : ownedStdioEnvironment(this.parameters.command, this.parameters.env),
-      stdio: ["pipe", "pipe", this.parameters.stderr ?? "inherit"],
-      cwd: this.parameters.cwd,
-      windowsHide: true,
-      ...detachedSpawnOpts(),
-    });
+    const lease = this.parameters.environmentLease?.() ?? null;
+    if (lease) {
+      let released = false;
+      this.releaseEnvironment = () => { if (!released) { released = true; lease.release(); } };
+    }
+    const env = lease ? { ...this.parameters.env, ...lease.env } : this.parameters.env;
+    let child: ChildProcess;
+    try {
+      child = this.child = spawnCli(this.parameters.command, this.parameters.args ?? [], {
+        env: this.parameters.environmentResolved ? { ...env }
+          : ownedStdioEnvironment(this.parameters.command, env),
+        stdio: ["pipe", "pipe", this.parameters.stderr ?? "inherit"],
+        cwd: this.parameters.cwd,
+        windowsHide: true,
+        ...detachedSpawnOpts(),
+      });
+    } catch (error) {
+      this.releaseEnvironment?.();
+      throw error;
+    }
     trackRunChild(child);
     child.once("close", () => this.finishClose());
     child.stdin?.on("error", (error) => this.onerror?.(error));
@@ -121,6 +139,7 @@ export class OwnedStdioClientTransport implements Transport {
   private finishClose(): void {
     if (this.closed) return;
     this.closed = true;
+    this.releaseEnvironment?.();
     this.buffer.clear();
     this.resolveClosed?.();
     this.onclose?.();

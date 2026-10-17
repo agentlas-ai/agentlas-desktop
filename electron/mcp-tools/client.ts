@@ -45,6 +45,7 @@ import {
   startHephaestusRuntimeAutoUpdate,
 } from "../hephaestus/engine";
 import { rejectHephaestusRuntimeRoot } from "../hephaestus/root";
+import { retainTrustedMemoryOwnerEnvironment } from "../memory/trusted-owner-binding";
 import workforceProtocolContract from "./workforce-protocol-contract.json";
 import { electronAppVersion } from "../runtime-paths";
 
@@ -657,7 +658,8 @@ async function createTransport(
         "agentlas_cloud",
         ["mcp", "serve"],
         runtimeRootOverride ?? undefined,
-        { excludeRejected: true },
+        // The transport below leases the memory owner binding for exactly its child's lifetime.
+        { excludeRejected: true, leaseMemoryBinding: false },
       );
       if (!launch) throw new Error("Agentlas OS runtime or Python 3.9+ is unavailable");
       command = launch.command;
@@ -677,6 +679,8 @@ async function createTransport(
       // a missing/overridden flag cannot start another Desktop application.
       env: stdioEnvironmentForCommand(command, { ...stdioEnv, ...resolved, ...browserRuntime?.env }),
       stderr: "ignore",
+      // The Core child's trusted memory owner binding stays renewed from its spawn until it closes.
+      ...(server.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID ? { environmentLease: retainTrustedMemoryOwnerEnvironment } : {}),
     }) as unknown as Transport;
     return { transport, runtimeRoot };
   }

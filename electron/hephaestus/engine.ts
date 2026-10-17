@@ -21,7 +21,7 @@ import { currentUiLocale } from "../ui-locale";
 import { hephaestusRoot, hephaestusRootDetail, readHephaestusVersion, resetHephaestusRootCache } from "./root";
 import type { HephaestusStatus, HephaestusUpdateJournal } from "../../shared/types";
 import { classifyHephaestusUpdateJournal, parseHephaestusUpdateJournal } from "../../shared/hephaestus-update-contract";
-import { trustedMemoryOwnerEnvironment } from "../memory/trusted-owner-binding";
+import { retainTrustedMemoryOwnerEnvironment, trustedMemoryOwnerEnvironment } from "../memory/trusted-owner-binding";
 
 export { hephaestusRoot, hephaestusRootDetail, readHephaestusVersion } from "./root";
 
@@ -204,6 +204,12 @@ export interface HephaestusStdioLaunch {
   args: string[];
   env: NodeJS.ProcessEnv;
   runtimeRoot: string;
+  /**
+   * Only for the Core MCP server (`agentlas_cloud mcp serve`): `env` carries the trusted memory owner binding, which
+   * stays renewed until this is called. Call it once when the launched child's authority ends (its prepared config is
+   * cleaned up). Absent when the caller leases per spawn instead (`leaseMemoryBinding: false`).
+   */
+  releaseMemoryBinding?: () => void;
 }
 
 function pythonInvocation(candidate: string): { command: string; prefix: string[] } {
@@ -301,6 +307,11 @@ export async function resolveHephaestusStdioLaunch(
     includeJudgeRuntime?: boolean;
     signal?: AbortSignal;
     cachePythonResult?: boolean;
+    /**
+     * false: the caller's transport takes its own lease for exactly its child's lifetime (taken at spawn), so this
+     * launch holds none. Default: the launch holds a lease until `releaseMemoryBinding`.
+     */
+    leaseMemoryBinding?: boolean;
   },
 ): Promise<HephaestusStdioLaunch | null> {
   if (options?.signal?.aborted) return null;
@@ -336,20 +347,28 @@ export async function resolveHephaestusStdioLaunch(
       judgeRuntime = undefined;
     }
   }
-  return {
-    command: py.python,
-    args: pythonArgs,
-    runtimeRoot,
-    env: withPythonCacheBoundary({
-      HEPHAESTUS_RUNTIME_ROOT: runtimeRoot,
-      PYTHONPATH: runtimeRoot,
-      PYTHONUTF8: "1",
-      PYTHONIOENCODING: "utf-8",
-      ...(judgeRuntime ? { AGENTLAS_JUDGE_RUNTIME: judgeRuntime } : {}),
-      ...(module === "agentlas_cloud" && args[0] === "mcp" && args[1] === "serve"
-        ? trustedMemoryOwnerEnvironment() : {}),
-    }),
-  };
+  const memoryBinding = module === "agentlas_cloud" && args[0] === "mcp" && args[1] === "serve"
+    ? options?.leaseMemoryBinding === false ? { env: trustedMemoryOwnerEnvironment() } : retainTrustedMemoryOwnerEnvironment()
+    : null;
+  try {
+    return {
+      command: py.python,
+      args: pythonArgs,
+      runtimeRoot,
+      env: withPythonCacheBoundary({
+        HEPHAESTUS_RUNTIME_ROOT: runtimeRoot,
+        PYTHONPATH: runtimeRoot,
+        PYTHONUTF8: "1",
+        PYTHONIOENCODING: "utf-8",
+        ...(judgeRuntime ? { AGENTLAS_JUDGE_RUNTIME: judgeRuntime } : {}),
+        ...(memoryBinding?.env ?? {}),
+      }),
+      ...(memoryBinding && "release" in memoryBinding ? { releaseMemoryBinding: memoryBinding.release } : {}),
+    };
+  } catch (error) {
+    if (memoryBinding && "release" in memoryBinding) memoryBinding.release();
+    throw error;
+  }
 }
 
 /**

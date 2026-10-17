@@ -800,6 +800,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   const activatedResidentProxyHandles = new Set<string>();
   const browserAuthorityCleanup: Array<() => void> = [];
   const osCuratorCleanup: Array<() => void> = [];
+  // Core MCP children's trusted memory owner binding stays renewed until this preparation's authority ends.
+  const memoryBindingLeases: Array<() => void> = [];
   let osExecution:SupervisorOsExecutionOutcome|null|undefined;
   let releasePrepared: (() => boolean) | undefined;
   let released = false;
@@ -819,6 +821,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     }
     for (const revoke of browserAuthorityCleanup) revoke();
     for (const revoke of osCuratorCleanup) revoke();
+    for (const release of memoryBindingLeases) release();
     if(osExecution?.kind==="scoped")osExecution.dispose();
     for (const revoke of agentMailCapabilityCleanup) revoke();
     for (const revoke of turnToolsCapabilityCleanup) revoke();
@@ -1155,6 +1158,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       if (s.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID) {
         const launch = await resolveHephaestusStdioLaunch("agentlas_cloud", ["mcp", "serve"]);
         if (!launch) continue;
+        if (launch.releaseMemoryBinding) memoryBindingLeases.push(launch.releaseMemoryBinding);
         command = launch.command;
         args = launch.args;
         preparedRuntimeRoot = launch.runtimeRoot;
