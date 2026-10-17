@@ -2822,7 +2822,9 @@ async function runMcpInvocationInContext(
     ];
     effectiveUserPrompt = addEffectiveUserParts(automationBoundary);
   }
-  if (req.sessionRouting) {
+  // Science is its own product with its own roster (Research Director, assistants, specialists): the Work "recruit via
+  // Workforce" policy sent Haiku to workforce_goal_context and the Hub in a research run (live run r1, 2026-10-17).
+  if (req.sessionRouting && executionContext?.source !== "science") {
     const incumbentRoster = [agent.nameEn || agent.name || agent.slug].filter(Boolean);
     // Hub 자동 보강은 프로젝트에서 허용한 slug 로만 제한한다.
     const rentAllowed = invocationProjectId
