@@ -2055,7 +2055,11 @@ export type ChatHostNotice =
   | { purpose: "one-delegation-review"; runId: string }
   /** One ran a check-in the owner asked for. Never saved as a row: only One's own message, if any, appears. */
   | { purpose: "one-checkin"; runId: string }
-  | { purpose: "automation-report"; runId: string; automationId: string }
+  /**
+   * `withdrawn` is never stored: Main's history read sets it on an AGI owner ask whose incident has closed (the restart
+   * it asked for is no longer needed), and every surface then draws the row nowhere.
+   */
+  | { purpose: "automation-report"; runId: string; automationId: string; withdrawn?: true }
   /** Teammate session: the brief One handed over (shown as coming from One, not the owner). */
   | { purpose: "one-dispatch-brief"; runId: string }
   /** One's conversation: compact "handed to teammate · open session" / "result arrived" link. */
@@ -2085,7 +2089,11 @@ export type HostStatusKind =
   | "goal-paused"
   | "goal-closed"
   | "runtime-kept"
-  | "needs-owner";
+  | "needs-owner"
+  /** A run failed for a cause inside the app (shared/run-failure-cause.ts): reported, but not the owner's to act on. */
+  | "app-failed"
+  /** A failed run whose request a later run took over (receipt supersededByRunId). Quiet: drawn nowhere. */
+  | "recovered";
 
 export interface ChatMessagesCursor {
   id: string;
@@ -6757,6 +6765,12 @@ export interface InvocationRunReceipt {
   interruptionCause?: "steering";
   /** Main itself stopped this run (app closing, owner paused/deleted the Goal); it is not a run error. */
   hostStopCause?: InvocationHostStopCause;
+  /**
+   * Failed/interrupted run whose request a later run of the same chat took over, read from the ledger: the later run
+   * started from this run's prompt row as the newest owner message, or ran the same prompt row again. Its failure is
+   * recovered history, not the room's current state (Yotube 2026-10-17: d85e262f → bb73a150).
+   */
+  supersededByRunId?: string;
 }
 
 /** Closed vocabulary of Main-owned abort markers (shared/invocation-host-stop.ts). */

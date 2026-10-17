@@ -3,13 +3,15 @@ import { normalizeOneDispatchPresentation } from "./one-dispatch-presentation";
 
 const HOST_STATUS_KINDS: readonly HostStatusKind[] = [
   "effect-checking", "effect-continuing", "wait-registered", "wait-not-scheduled", "cycle-verified", "goal-resuming",
-  "effect-retrying", "goal-paused", "goal-closed", "runtime-kept", "needs-owner",
+  "effect-retrying", "goal-paused", "goal-closed", "runtime-kept", "needs-owner", "app-failed", "recovered",
 ];
 /** Host status lines that need nothing from the owner: housekeeping, drawn on no surface (isHousekeepingHostNotice). */
 const QUIET_HOST_STATUSES: ReadonlySet<HostStatusKind> = new Set([
   "effect-checking", "effect-continuing", "wait-registered", "wait-not-scheduled", "cycle-verified", "goal-resuming",
   // Retry/pause lines the app resolves on its own: nothing for the owner to do, so never an ordinary chat bubble.
   "effect-retrying", "goal-paused",
+  // A failed run whose request a later run took over (Main's history read sets it from the ledger): history, not news.
+  "recovered",
 ]);
 
 export function isQuietHostStatus(notice: ChatHostNotice | undefined): notice is Extract<ChatHostNotice, { purpose: "host-status" }> {
@@ -27,6 +29,8 @@ export function isQuietHostStatus(notice: ChatHostNotice | undefined): notice is
 export function isHousekeepingHostNotice(notice: ChatHostNotice | undefined): boolean {
   if (!notice) return false;
   if (notice.purpose === "host-status") return QUIET_HOST_STATUSES.has(notice.status);
+  // An AGI owner ask whose incident has closed (Main's history read marks it): the ask is no longer current.
+  if (notice.purpose === "automation-report") return notice.withdrawn === true;
   return notice.purpose === "goal-continuation" || notice.purpose === "update-resume"
     || notice.purpose === "one-delegation-review" || notice.purpose === "one-checkin";
 }
@@ -49,6 +53,8 @@ export function hostStatusLabel(notice: Extract<ChatHostNotice, { purpose: "host
     case "runtime-kept": return ko ? "시작한 모델로 이어감" : "Kept the starting model";
     case "effect-retrying": return ko ? "확인 못 함 → 다시 확인" : "Could not check → will retry";
     case "needs-owner": return ko ? "확인 필요" : "Needs you";
+    case "app-failed": return ko ? "앱 문제" : "App problem";
+    case "recovered": return ko ? "다음 실행이 이어받음" : "Taken over by the next run";
     default: return "";
   }
 }
@@ -72,8 +78,9 @@ export function normalizeChatHostNotice(role: string, value: unknown): ChatHostN
   }
   if (role !== "system") return undefined;
   if (item.purpose === "automation-report") {
-    if (Object.keys(item).some(key => !["purpose", "runId", "automationId"].includes(key)) || !validId(item.runId) || !validId(item.automationId)) return undefined;
-    return { purpose: "automation-report", runId: item.runId, automationId: item.automationId };
+    if (Object.keys(item).some(key => !["purpose", "runId", "automationId", "withdrawn"].includes(key)) || !validId(item.runId) || !validId(item.automationId)
+      || (item.withdrawn !== undefined && item.withdrawn !== true)) return undefined;
+    return { purpose: "automation-report", runId: item.runId, automationId: item.automationId, ...(item.withdrawn === true ? { withdrawn: true as const } : {}) };
   }
   if (item.purpose === "one-dispatch-link" || item.purpose === "one-dispatch-result") {
     const name = typeof item.memberName === "string" ? item.memberName.replace(/\s+/g, " ").trim() : "";

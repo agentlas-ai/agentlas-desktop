@@ -633,6 +633,7 @@ export function OneTurnWork({
   runStatus,
   interruptionCause,
   hostStopCause,
+  supersededByRunId,
   onRetry,
   retryDisabled = false,
   onInspectWorker,
@@ -664,6 +665,11 @@ export function OneTurnWork({
    * 무엇 때문에 멈췄는지를 중립 톤으로 적는다(오너 2026-09-26 "붉은 칩 뭐지").
    */
   hostStopCause?: OneThreadRunBlock["hostStopCause"];
+  /**
+   * A later run took this run's request over (receipt, from the ledger). Its failure is recovered history: one quiet line,
+   * not a red failure, and its failure rows fold away with the rest (owner Yotube 2026-10-17: a recovered failure stayed red).
+   */
+  supersededByRunId?: string;
   /** 낸 오류에는 푸는 길이 있어야 한다 — 중단된 턴의 질문을 다시 보낸다. */
   onRetry?: () => void;
   retryDisabled?: boolean;
@@ -676,7 +682,10 @@ export function OneTurnWork({
   const presentation = useMemo(() => buildOneWorkPresentation(state, locale, workspacePath), [state, locale, workspacePath]);
   const automationRegistrations = useMemo(() => extractAutomationRegistrations(state), [state]);
   const toolchainSources = useMemo(() => toolchainSourcesOf(presentation.cells), [presentation.cells]);
-  const active = busy || preparing;
+  // A run Main still executes is live even when this screen did not start or attach to it: its durable receipt says so
+  // (production Yotube 2026-10-17: a Goal turn the update restart resumed was drawn as a finished, frozen block).
+  const receiptLive = !busy && !preparing && (runStatus === "running" || runStatus === "cancelling");
+  const active = busy || preparing || receiptLive;
   const loginWaiting = !active && (runStatus === "waiting_input"
     || state.items.some(item => item.kind === "run" && item.status === "waiting_input"));
   // The process rows (thoughts, tool calls, notes) start folded, while the run works and after it settles; the live
@@ -691,6 +700,8 @@ export function OneTurnWork({
   // 답 없이 끊긴 실행. 종료 이벤트가 아니라 원장 판정을 근거로 삼는다 — 앱이 죽으면
   // 종료 줄을 쓸 주체가 없으므로, "종료 이벤트가 없다"는 사실 자체가 유일한 증거다.
   const steeringInterrupted = !active && runStatus === "interrupted" && interruptionCause === "steering";
+  const recovered = !active && !steeringInterrupted && Boolean(supersededByRunId)
+    && (runStatus === "failed" || runStatus === "interrupted");
   const interrupted = !active && runStatus === "interrupted" && !steeringInterrupted;
   // Only active runs use a wall clock. Settled rows require a measured,
   // immutable lifecycle duration; revisiting a task must not add idle time.
@@ -732,10 +743,11 @@ export function OneTurnWork({
   // The runtime's own checklist, when it keeps one (typed plan event only).
   const planEntries = state.plan?.entries ?? [];
   const hasPlan = planEntries.length > 0;
-  // Failures and owner waits are never folded away; everything else opens from the one line.
-  const ownerEyeCells = useMemo(() => inlineCells.filter(needsOwnerEye), [inlineCells]);
+  // Failures and owner waits are never folded away; everything else opens from the one line. A recovered run's failure is
+  // history: its rows open from the line like the rest.
+  const ownerEyeCells = useMemo(() => recovered ? [] : inlineCells.filter(needsOwnerEye), [inlineCells, recovered]);
   // Failed steps not already drawn as their own row stay countable on the folded line.
-  const failedStepCount = visibleCells.filter((cell) => cell.kind !== "notice" && !needsOwnerEye(cell)
+  const failedStepCount = recovered ? 0 : visibleCells.filter((cell) => cell.kind !== "notice" && !needsOwnerEye(cell)
     && (cell.status === "failed" || (cell.kind === "run" && cell.exitCode != null && cell.exitCode !== 0))).length;
 
   if (!active && !loginWaiting && !hasRows && !hasPlan && !presentation.terminalMessage && !interrupted && !steeringInterrupted && !state.artifacts.length) {
@@ -746,7 +758,7 @@ export function OneTurnWork({
 
   const terminal = presentation.terminal;
   const hostStop = !active && !steeringInterrupted && hostStopCause ? invocationHostStopCopy(hostStopCause, locale) : null;
-  const failed = !active && !steeringInterrupted && !hostStop && (terminal === "failed" || terminal === "cancelled");
+  const failed = !active && !steeringInterrupted && !hostStop && !recovered && (terminal === "failed" || terminal === "cancelled");
   // Claude 처럼 접힌 줄이 "무엇을" 했는지 먼저 말한다(레퍼런스 "명령 2개 실행함 ›") — 명령이 있던 턴은
   // 명령 개수 + 걸린 시간, 없으면 지금처럼 걸린 시간만. 개수는 실제로 돈 명령 행(run 칸)만 센다.
   const commandCount = visibleCells.filter((cell) => cell.kind === "run").length;
@@ -763,7 +775,7 @@ export function OneTurnWork({
   const summaryElapsed = active ? formatWorkElapsed(liveElapsedMs, locale)
     : loginWaiting || (!hasPlan && commandCount === 0) ? null : elapsedLabel;
   const expandable = hasRows || (hasPlan && !active);
-  const terminalState = loginWaiting ? "waiting_input" : steeringInterrupted ? "steered" : terminal ?? "completed";
+  const terminalState = loginWaiting ? "waiting_input" : steeringInterrupted ? "steered" : recovered ? "recovered" : terminal ?? "completed";
   const summaryContent = (
     <>
       <span className={styles.summaryMark} data-state={active ? "running" : terminalState} aria-hidden="true">
@@ -788,6 +800,9 @@ export function OneTurnWork({
       {failed && terminal === "failed" && (
         <span className={styles.headerTerminal}>{ko ? "실패" : "failed"}</span>
       )}
+      {recovered && (
+        <span className={styles.summaryModel} data-superseded-by={supersededByRunId}>{ko ? "다음 실행이 이어받음" : "Taken over by the next run"}</span>
+      )}
       {summaryElapsed && <span className={styles.summaryElapsed} data-elapsed="true">{summaryElapsed}</span>}
       {expandable && <span className={styles.summaryChevron} aria-hidden="true"><IconChevronDown size={12} /></span>}
     </>
@@ -798,6 +813,8 @@ export function OneTurnWork({
       className={styles.work}
       data-one-turn-work="true"
       data-state={preparing ? "preparing" : active ? "running" : loginWaiting ? "waiting_input" : "settled"}
+      data-receipt-live={receiptLive ? "true" : undefined}
+      data-recovered={recovered ? "true" : undefined}
       data-has-plan={hasPlan ? "true" : undefined}
       aria-busy={active}
     >
@@ -844,7 +861,7 @@ export function OneTurnWork({
         </div>
       )}
       {/* Keep an actionable summary visible while diagnostic payloads stay in a disclosure. */}
-      {!steeringInterrupted && !hostStop && terminal === "failed" && presentation.terminalMessage && !presentation.cells.some((cell) => cell.kind === "notice" && cell.message === presentation.terminalMessage) && (
+      {!steeringInterrupted && !hostStop && !recovered && terminal === "failed" && presentation.terminalMessage && !presentation.cells.some((cell) => cell.kind === "notice" && cell.message === presentation.terminalMessage) && (
         <div className={styles.rows}>
           <details className={styles.row} data-kind="notice" data-status="failed" data-terminal-error={presentation.terminalErrorCode ?? "unknown"}>
             <summary className={styles.rowHead} style={{ cursor: "pointer", listStyle: "none" }}>

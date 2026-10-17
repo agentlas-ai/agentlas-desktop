@@ -2,7 +2,8 @@
 // 사이드바 "최근 채팅" 섹션은 listRecent로 채운다.
 // 프로젝트 페이지는 listByProject로, 회사 페이지는 listByFirm으로 채운다.
 import { createHash, randomUUID } from "node:crypto";
-import { normalizeChatHostNotice, parseChatHostNotice } from "../../shared/chat-host-notice";
+import { AGI_ACTION_NOTICE_AUTOMATION_ID, normalizeChatHostNotice, parseChatHostNotice } from "../../shared/chat-host-notice";
+import { invocationFailureNoticeStatuses } from "./run-events";
 import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import { RUNTIME_BACKENDS } from "../../shared/runtime-backends";
 import { getDb } from "./db";
@@ -1484,13 +1485,59 @@ export function listAgentRoomWorkMessages(agentId: string, limit: number): Array
   });
 }
 
+const AGI_ACTION_RUN_PREFIX = "agi-action:";
+
+/** AGI restart asks (action ids) whose incident has closed. Stores without the AGI tables withdraw nothing. */
+function closedAgiRestartAskIds(actionIds: readonly string[]): ReadonlySet<string> {
+  const ids = [...new Set(actionIds)].slice(0, 200);
+  if (!ids.length) return new Set();
+  try {
+    const rows = getDb().prepare(`SELECT r.action_id FROM agi_action_receipts r JOIN agi_incidents i ON i.id = r.incident_id
+      WHERE r.action = 'request_app_restart' AND r.ok = 1 AND i.status = 'resolved'
+        AND r.action_id IN (${ids.map(() => "?").join(",")})`).all(...ids) as Array<{ action_id: string }>;
+    return new Set(rows.map((row) => row.action_id));
+  } catch { return new Set(); }
+}
+
+/**
+ * Host lines whose truth moved after they were written, read from durable state (owner Yotube 2026-10-17). The stored row
+ * is never rewritten; every history reader (One, Work, split pane, phone, thread read) gets the same projection:
+ *  - a run failure line whose request a later run took over reads "recovered" (quiet on every surface);
+ *  - a "needs-owner" run failure whose code is inside the app reads "app-failed" (shared/run-failure-cause.ts);
+ *  - an AGI "restart the app" ask whose incident has closed is withdrawn (drawn nowhere).
+ */
+function createSettledHostNoticeProjector(chatId: string, notices: ReadonlyArray<ChatHostNotice | undefined>): (notice: ChatHostNotice | undefined) => ChatHostNotice | undefined {
+  const failureRunIds: string[] = [], askIds: string[] = [];
+  for (const notice of notices) {
+    if (notice?.purpose === "host-status" && (notice.status === "needs-owner" || notice.status === "app-failed")) failureRunIds.push(notice.runId);
+    if (notice?.purpose === "automation-report" && notice.automationId === AGI_ACTION_NOTICE_AUTOMATION_ID
+      && notice.runId.startsWith(AGI_ACTION_RUN_PREFIX)) askIds.push(notice.runId.slice(AGI_ACTION_RUN_PREFIX.length));
+  }
+  if (!failureRunIds.length && !askIds.length) return (notice) => notice;
+  let statuses: ReadonlyMap<string, "recovered" | "app-failed"> = new Map();
+  try { statuses = failureRunIds.length ? invocationFailureNoticeStatuses(chatId, failureRunIds) : statuses; } catch { /* written status stands */ }
+  const withdrawn = closedAgiRestartAskIds(askIds);
+  return (notice) => {
+    if (notice?.purpose === "host-status") {
+      const next = statuses.get(notice.runId);
+      if (next && (notice.status === "needs-owner" || (notice.status === "app-failed" && next === "recovered"))) return { ...notice, status: next };
+      return notice;
+    }
+    if (notice?.purpose === "automation-report" && notice.runId.startsWith(AGI_ACTION_RUN_PREFIX)
+      && withdrawn.has(notice.runId.slice(AGI_ACTION_RUN_PREFIX.length))) return { ...notice, withdrawn: true };
+    return notice;
+  };
+}
+
 function projectChatMessageRows(chatId: string, rows: MessageRow[]): ChatHistoryEntry[] {
   const imageUrls = listChatMessageImageUrls(rows.map((row) => row.id));
   const goalResults = storedGoalResults(chatId, rows.filter((row) => row.role === "assistant").map((row) => row.id));
   const legacyResults = legacyGoalResults(chatId, rows.filter((row) => row.role === "assistant" && !goalResults.has(row.id)).map((row) => row.id));
   const projectDispatchNotice = createOneDispatchNoticeProjector(chatId);
-  return rows.map((r) => {
-    const hostNotice = projectDispatchNotice(parseChatHostNotice(r.role, r.host_notice_json));
+  const parsedNotices = rows.map((r) => parseChatHostNotice(r.role, r.host_notice_json));
+  const projectSettledNotice = createSettledHostNoticeProjector(chatId, parsedNotices);
+  return rows.map((r, index) => {
+    const hostNotice = projectSettledNotice(projectDispatchNotice(parsedNotices[index]));
     return {
       id: r.id,
       durableMessageId: r.id,

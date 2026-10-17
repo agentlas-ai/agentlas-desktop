@@ -32,6 +32,7 @@ import {
   type PersistenceDecisionPayload,
 } from "../../shared/persistence-policy";
 import { classifyToolFailure } from "../../shared/tool-failure";
+import { appSideRunFailure } from "../../shared/run-failure-cause";
 import { boundInvocationPlan } from "../../shared/invocation-plan";
 import type { ObservedToolActivity } from "../automation-result";
 import { decodeToolInvocationOrigin } from "../../shared/tool-invocation-origin";
@@ -2358,6 +2359,62 @@ function daemonOwnsLiveRun(runId: string, chatId: string): boolean {
       && (!chatId || row.chat_id === chatId);
   } catch { return false; } // stores without the owner table keep the ledger-only reading
 }
+/** One JSON object column of an aliased run_events row, read the same fail-closed way as INVOCATION_OBJECT_JSON. */
+const supersessionObject = (alias: string) =>
+  `CASE WHEN json_valid(${alias}.payload_json) THEN CASE WHEN json_type(${alias}.payload_json) = 'object' THEN ${alias}.payload_json ELSE '{}' END ELSE '{}' END`;
+/**
+ * The later run of this chat that took this run's request over, from durable rows only (no prose, no clock):
+ *  - a host-started run (no prompt row bound to it) whose newest owner message at start (`latestUserMessageRowId`) is this
+ *    run's own prompt row (or, for a host-started failed run, the same newest owner message), or
+ *  - a run bound to the same prompt row again.
+ * A run the owner started with a NEW message binds that message instead and never supersedes. Background observations
+ * never count. Production Yotube 2026-10-17: d85e262f bound row 19140 and failed; bb73a150 (Goal resume after the
+ * 1.3.64 restart) started with latestUserMessageRowId 19140 — the room kept the old red failure and a needs-owner line.
+ */
+function invocationSupersedingRunId(runId: string, chatId: string, startTs: string, startPayload: Record<string, unknown>): string | undefined {
+  if (!chatId) return undefined;
+  const bound = invocationReceiptStatement(`SELECT json_extract(${INVOCATION_OBJECT_JSON}, '$.promptMessageId') AS message_id
+    FROM run_events WHERE run_id = ? AND kind = 'invoke_prompt_bound' ORDER BY seq ASC LIMIT 1`).get(runId) as { message_id: unknown } | undefined;
+  const promptMessageId = typeof bound?.message_id === "string" && bound.message_id ? bound.message_id : null;
+  let cursor: number | null = null;
+  if (promptMessageId) {
+    const row = invocationReceiptStatement("SELECT rowid AS cursor FROM chat_messages WHERE id = ? AND chat_id = ?")
+      .get(promptMessageId, chatId) as { cursor: number } | undefined;
+    cursor = typeof row?.cursor === "number" ? row.cursor : null;
+  } else if (typeof startPayload.latestUserMessageRowId === "number" && Number.isSafeInteger(startPayload.latestUserMessageRowId)) {
+    cursor = startPayload.latestUserMessageRowId;
+  }
+  if (cursor === null && !promptMessageId) return undefined;
+  const s = supersessionObject("s"), b = supersessionObject("b");
+  const later = invocationReceiptStatement(`SELECT s.run_id FROM run_events s
+    WHERE s.chat_id = ? AND s.kind = 'invoke_started' AND s.run_id <> ? AND s.ts > ?
+      AND COALESCE(json_extract(${s}, '$.background'), 0) != 1
+      AND ((? IS NOT NULL AND json_extract(${s}, '$.latestUserMessageRowId') = ?
+            AND NOT EXISTS (SELECT 1 FROM run_events b WHERE b.run_id = s.run_id AND b.kind = 'invoke_prompt_bound'))
+        OR (? IS NOT NULL AND EXISTS (SELECT 1 FROM run_events b WHERE b.run_id = s.run_id AND b.kind = 'invoke_prompt_bound'
+            AND json_extract(${b}, '$.promptMessageId') = ?)))
+    ORDER BY s.ts ASC, s.rowid ASC LIMIT 1`).get(chatId, runId, startTs, cursor, cursor, promptMessageId, promptMessageId) as { run_id: string } | undefined;
+  return later?.run_id && boundedReceiptIdentifier(later.run_id) ? later.run_id : undefined;
+}
+
+/**
+ * What Main's history read shows for a host-status line about a run (shared/chat-host-notice.ts): a failure whose
+ * request a later run took over is "recovered" (quiet everywhere), and a failure whose code is inside the app
+ * (shared/run-failure-cause.ts) is "app-failed" (reported, never an owner ask). Other runs are left as written.
+ */
+export function invocationFailureNoticeStatuses(chatId: string, runIds: readonly string[]): ReadonlyMap<string, "recovered" | "app-failed"> {
+  const out = new Map<string, "recovered" | "app-failed">();
+  for (const runId of new Set(runIds)) {
+    if (!boundedReceiptIdentifier(runId) || runId.length > 160) continue;
+    let receipt: InvocationRunReceipt | null = null;
+    try { receipt = getInvocationRunReceipt(runId); } catch { continue; }
+    if (!receipt || receipt.chatId !== chatId || (receipt.status !== "failed" && receipt.status !== "interrupted")) continue;
+    if (receipt.supersededByRunId) out.set(runId, "recovered");
+    else if (receipt.status === "failed" && appSideRunFailure(receipt.errorCode)) out.set(runId, "app-failed");
+  }
+  return out;
+}
+
 /**
  * Rebuild a terminal/recovery receipt from the append-only run ledger.
  * A started row without a terminal row is `interrupted` here: only main's
@@ -2489,6 +2546,12 @@ function invocationRunReceiptSnapshot(runId: string): InvocationRunReceipt | nul
     // Stores predating the artifact table retain the invocation-input value.
   }
   const hasImages = startPayload.hasImages === true || hasBoundImage;
+  // A deliberate direction change is already neutral; every other failed or interrupted run may have been taken over.
+  let supersededByRunId: string | undefined;
+  if ((status === "failed" || status === "interrupted") && interruptionCause !== "steering") {
+    try { supersededByRunId = invocationSupersedingRunId(runId, receiptChatId, start.ts, startPayload); }
+    catch { supersededByRunId = undefined; } // stores without chat_messages keep the plain reading
+  }
 
   return {
     runId,
@@ -2521,6 +2584,7 @@ function invocationRunReceiptSnapshot(runId: string): InvocationRunReceipt | nul
     ...(status === "failed" && runtimeFailure ? { runtimeFailure } : {}),
     ...(interruptionCause ? { interruptionCause } : {}),
     ...(hostStopCause ? { hostStopCause } : {}),
+    ...(supersededByRunId ? { supersededByRunId } : {}),
   };
 }
 

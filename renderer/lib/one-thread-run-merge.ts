@@ -20,6 +20,7 @@ export interface ThreadRunBlockLike {
   finishedAt?: string;
   status: InvocationRunReceipt["status"];
   hostStopCause?: InvocationRunReceipt["hostStopCause"];
+  supersededByRunId?: string;
 }
 
 type TimelineEntry = { receipt: InvocationRunReceipt; events: RunEventUi[] };
@@ -30,7 +31,9 @@ function sameReceiptFacts(block: ThreadRunBlockLike, receipt: InvocationRunRecei
   return block.startedAt === receipt.startedAt
     && block.status === receipt.status
     && (block.finishedAt ?? null) === (receipt.finishedAt ?? null)
-    && (block.hostStopCause ?? null) === (receipt.hostStopCause ?? null);
+    && (block.hostStopCause ?? null) === (receipt.hostStopCause ?? null)
+    // A later run taking a failed run's request over changes that older block: only a full re-read is exact.
+    && (block.supersededByRunId ?? null) === (receipt.supersededByRunId ?? null);
 }
 
 export function mergeSettledThreadRun<B extends ThreadRunBlockLike>(

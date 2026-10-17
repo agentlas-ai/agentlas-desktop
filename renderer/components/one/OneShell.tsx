@@ -262,7 +262,7 @@ import {
   outputPresentationKindForName,
   type OutputPresentationKind,
 } from "@/lib/output-presentation";
-import { planOneThreadWork, projectThreadRuns, settledRunMayPaintScreen, type OneThreadRunBlock } from "@/lib/one-thread-work";
+import { planOneThreadWork, projectThreadRuns, reconcileOpenThreadRuns, replaceThreadRunBlocks, settledRunMayPaintScreen, unattachedOpenThreadRuns, type OneThreadRunBlock } from "@/lib/one-thread-work";
 import { mergeSettledThreadRun, THREAD_RUN_EVENTS_PER_RUN, THREAD_RUN_WINDOW } from "@/lib/one-thread-run-merge";
 import { seatDisplayName, turnAgentsDifferFromRoster } from "@/lib/one-seat-label";
 import { memberUnavailable, speakableCountIncludingOne } from "@/lib/one-team-availability";
@@ -2571,6 +2571,74 @@ function OneSessionsShell() {
   const housekeepingMessageIds = useMemo(() => new Set(visibleMessages
     .filter((message) => isHousekeepingHostNotice(normalizeChatHostNotice(message.role, message.hostNotice)))
     .map((message) => message.id)), [visibleMessages]);
+  /*
+   * One failure surface per run (owner Yotube 2026-10-17: run d85e262f drew a red failure block AND a Hope bubble "the run
+   * failed …", both still up after a later run took the request over). By the durable marker (runId + status), never by
+   * wording, and without a fold or a quiet line in One (NH26): a failure line about a run whose request a later run took
+   * over (block supersededByRunId) is history; an app-side failure line ("app-failed") about a run this thread draws is
+   * already said by that run's block. Neither is drawn as a bubble. Main's history read marks the first one "recovered"
+   * too; this covers rows already on screen when the takeover happened.
+   */
+  const settledFailureLineIds = useMemo(() => {
+    const drawn = new Set(threadRuns.map((run) => run.runId));
+    const superseded = new Set(threadRuns.filter((run) => run.supersededByRunId).map((run) => run.runId));
+    const ids = new Set<string>();
+    for (const message of visibleMessages) {
+      const notice = normalizeChatHostNotice(message.role, message.hostNotice);
+      if (notice?.purpose !== "host-status" || (notice.status !== "needs-owner" && notice.status !== "app-failed")) continue;
+      if (superseded.has(notice.runId) || (notice.status === "app-failed" && drawn.has(notice.runId))) ids.add(message.continuationSourceId ?? message.id);
+    }
+    return ids;
+  }, [threadRuns, visibleMessages]);
+  /*
+   * ★ A run Main executes that this screen never attached to must read as live and finish only when Main settles it
+   * (production Yotube 2026-10-17: Goal turn bb73a150, resumed by the 1.3.64 update restart's sweep, worked for 12+ minutes
+   * while the room drew it as a finished "명령 22개 실행함" block with no time and a still dot). The chat timeline is a
+   * ledger read and calls such a run "interrupted"; Main's receipt (invoke:receipt) is the authority. Ask Main about those
+   * blocks, follow a live one like any run this screen did not start, keep its rows fresh while it stays unattached, and
+   * re-read it once its receipt settles.
+   */
+  const openRunCheckedRef = useRef<Set<string>>(new Set());
+  const unattachedOpenRunKey = useMemo(() => unattachedOpenThreadRuns(threadRuns, workBusy ? activeActivityRunId : null, openRunCheckedRef.current)
+    .map((run) => `${run.runId}:${run.status}`).join("|"), [activeActivityRunId, threadRuns, workBusy]);
+  useEffect(() => {
+    if (!unattachedOpenRunKey) return;
+    const api = ipc();
+    const chatId = threadRunsChatIdRef.current;
+    if (!api || !chatId) return;
+    let cancelled = false;
+    let inFlight = false;
+    const check = async () => {
+      if (cancelled || inFlight || (typeof document !== "undefined" && document.hidden)) return;
+      const blocks = unattachedOpenThreadRuns(threadRunsRef.current, runIdRef.current, openRunCheckedRef.current);
+      if (!blocks.length || threadRunsChatIdRef.current !== chatId) return;
+      inFlight = true;
+      try {
+        const receipts = await Promise.all(blocks.map((block) => api.invoke.receipt(block.runId).catch(() => null)));
+        if (cancelled || threadRunsChatIdRef.current !== chatId) return;
+        const plan = reconcileOpenThreadRuns(blocks, receipts);
+        if (openRunCheckedRef.current.size > 512) openRunCheckedRef.current.clear();
+        for (const key of plan.confirmed) openRunCheckedRef.current.add(key);
+        if (plan.live.length && !runIdRef.current && runChatIdRef.current === chatId) followActiveRunRef.current(chatId);
+        const reread = [...plan.live, ...plan.settled];
+        if (!reread.length) return;
+        const fresh = (await Promise.all(reread.map(async (receipt) => {
+          const events = await api.runLedger.events(receipt.runId, THREAD_RUN_EVENTS_PER_RUN).catch(() => null);
+          return events ? projectThreadRuns([{ receipt, events }])[0] ?? null : null;
+        }))).filter((block): block is OneThreadRunBlock => Boolean(block));
+        if (cancelled || threadRunsChatIdRef.current !== chatId || !fresh.length) return;
+        setThreadRuns((current) => threadRunsChatIdRef.current === chatId ? replaceThreadRunBlocks(current, fresh) : current);
+      } finally {
+        inFlight = false;
+      }
+    };
+    void check();
+    const interval = window.setInterval(() => { void check(); }, 5_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [unattachedOpenRunKey]);
   const durableThreadBrowserUrl = useMemo(() => {
     for (let index = threadRuns.length - 1; index >= 0; index -= 1) {
       const url = taskBrowserUrl(threadRuns[index].state.items);
@@ -9789,6 +9857,7 @@ function OneSessionsShell() {
                         runStatus={block.status}
                         interruptionCause={block.interruptionCause}
                         hostStopCause={block.hostStopCause}
+                        supersededByRunId={block.supersededByRunId}
                         startedAt={Date.parse(block.startedAt)}
                         locale={appLocale}
                         workspacePath={workspacePath}
@@ -9819,7 +9888,7 @@ function OneSessionsShell() {
                     const ownedUi = firstSourceSegment ? inlineUiForReply(inlineUi, uiTurnId, message.text) : [];
                     const hasVisibleContent = Boolean(markdownText) || ownedUi.length > 0;
                     // A housekeeping host row draws nothing here.
-                    const foldedIntoWork = housekeepingMessageIds.has(sourceMessageId);
+                    const foldedIntoWork = housekeepingMessageIds.has(sourceMessageId) || settledFailureLineIds.has(sourceMessageId);
                     const messageHostNotice = normalizeChatHostNotice(message.role, message.hostNotice);
                     // Host status lines that report a failure or need the owner stay ordinary bubbles.
                     const drawsAsHostNotice = Boolean(messageHostNotice)
@@ -10046,6 +10115,7 @@ function OneSessionsShell() {
                               runStatus={block.status}
                               interruptionCause={block.interruptionCause}
                               hostStopCause={block.hostStopCause}
+                              supersededByRunId={block.supersededByRunId}
                               {...(message.role === "user" && message.text.trim()
                                 ? { onRetry: () => retryUnansweredTurn(message.text, block.state.model), retryDisabled: busy }
                                 : {})}

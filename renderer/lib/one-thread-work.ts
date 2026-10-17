@@ -25,6 +25,8 @@ export interface OneThreadRunBlock {
   interruptionCause?: "steering";
   /** Main stopped this run itself (app closed, Goal paused/deleted) — not a run error. */
   hostStopCause?: InvocationHostStopCause;
+  /** A later run took this failed run's request over (receipt, from the ledger): recovered history, drawn quiet. */
+  supersededByRunId?: string;
   state: OneActivityState;
 }
 
@@ -57,10 +59,62 @@ export function projectThreadRuns(
         status: entry.receipt.status,
         ...(interruptionCause ? { interruptionCause } : {}),
         ...(entry.receipt.hostStopCause ? { hostStopCause: entry.receipt.hostStopCause } : {}),
+        ...(entry.receipt.supersededByRunId ? { supersededByRunId: entry.receipt.supersededByRunId } : {}),
         state: projectOneActivityFromLedger(entry.events, entry.receipt),
       };
     })
     .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+}
+
+/** Receipt statuses Main owns while the run is still executing. */
+export function isLiveRunStatus(status: InvocationRunReceipt["status"] | undefined): boolean {
+  return status === "running" || status === "cancelling";
+}
+
+/**
+ * Thread blocks whose durable reading may be stale because no live projection on this screen owns them.
+ *
+ * The chat timeline is a ledger read: a run with a start row and no terminal row reads `interrupted` there, and only Main's
+ * live registry (invoke:receipt) can say it is still running. Production Yotube 2026-10-17: Goal turn bb73a150 (started by
+ * the update restart's sweep, never by this screen) was working, yet the room drew it as a finished "명령 22개 실행함"
+ * block with no time and a still dot, and the owner concluded the room was dead. These are the blocks to ask Main about:
+ * a live receipt, or an interruption the ledger cannot explain (no terminal row, no steering, no host stop).
+ * `checked` holds `${runId}:${status}` pairs Main already confirmed, so a genuinely dead run is asked once.
+ */
+export function unattachedOpenThreadRuns(
+  runs: readonly OneThreadRunBlock[],
+  liveRunId: string | null,
+  checked: ReadonlySet<string>,
+): OneThreadRunBlock[] {
+  return runs.filter((run) => run.runId !== liveRunId && !checked.has(`${run.runId}:${run.status}`)
+    && (isLiveRunStatus(run.status)
+      || (run.status === "interrupted" && !run.finishedAt && !run.interruptionCause && !run.hostStopCause)));
+}
+
+/**
+ * Main's answer for those blocks: `live` runs are still executing (keep them live, follow them), `settled` runs reached a
+ * receipt that differs from the block (re-read them so the block finishes), `confirmed` pairs need no further question.
+ */
+export function reconcileOpenThreadRuns(
+  blocks: readonly OneThreadRunBlock[],
+  receipts: ReadonlyArray<InvocationRunReceipt | null | undefined>,
+): { live: InvocationRunReceipt[]; settled: InvocationRunReceipt[]; confirmed: string[] } {
+  const live: InvocationRunReceipt[] = [], settled: InvocationRunReceipt[] = [], confirmed: string[] = [];
+  blocks.forEach((block, index) => {
+    const receipt = receipts[index];
+    if (!receipt || receipt.runId !== block.runId) return;
+    if (isLiveRunStatus(receipt.status)) live.push(receipt);
+    else if (receipt.status === block.status && (receipt.finishedAt ?? null) === (block.finishedAt ?? null)) confirmed.push(`${block.runId}:${block.status}`);
+    else settled.push(receipt);
+  });
+  return { live, settled, confirmed };
+}
+
+/** Replace the blocks Main re-read, by run id; every other block stays as it was. */
+export function replaceThreadRunBlocks(runs: readonly OneThreadRunBlock[], fresh: readonly OneThreadRunBlock[]): OneThreadRunBlock[] {
+  if (!fresh.length) return [...runs];
+  const byId = new Map(fresh.map((block) => [block.runId, block]));
+  return runs.map((run) => byId.get(run.runId) ?? run);
 }
 
 export interface OneThreadPlanMessage {

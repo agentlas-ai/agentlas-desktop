@@ -64,6 +64,7 @@ import {
   STOPPED_BY_USER,
 } from "../runtime/invocation-lifecycle";
 import { invocationHostStopCause, invocationHostStopCopy, isOwnerGoalStopCause, isNonFailureInvocationStop } from "../../shared/invocation-host-stop";
+import { isAppSideRunFailureCode } from "../../shared/run-failure-cause";
 import {
   appendLongRunEvent,
   bindCurrentGoalRevisionToLongRun,
@@ -3337,7 +3338,9 @@ export class InvocationService {
     // append a second, false "failed before it could finish a reply" notice under it
     // (2026-10-04, verify-one-improvement-proof-producer failed-worker scenario).
     let durableAssistantReplyBound = false;
-    const persistEmptyFailureNotice = (terminalKind: string): void => {
+    // `errorCode` is the run's own terminal code. A cause inside the app (shared/run-failure-cause.ts) is reported as
+    // "app-failed", never as a needs-owner ask: the owner has nothing to do (Yotube 2026-10-17, goal_episode_admission_missing).
+    const persistEmptyFailureNotice = (terminalKind: string, errorCode?: string | null): void => {
       const abortReason = controller.signal.reason instanceof Error ? controller.signal.reason.message : null;
       if (record.background || emptyFailureNoticePersisted || durableAssistantReplyBound || record.partialText.trim() || runReq.agentAppMode || remoteWorkspaceBinding
         || runReq.promptOrigin === "system" || terminalKind === "invoke_cancelled"
@@ -3352,7 +3355,7 @@ export class InvocationService {
             : locale === "ko" ? "실행이 실패해 답변을 완료하지 못했습니다. 요청은 저장되어 있습니다. 실행 기록에서 실패 원인과 복구 상태를 확인할 수 있습니다."
               : "The run failed before it could finish a reply. Your request is saved; run history shows the failure and recovery status.";
         appendChatMessage(chat.id, "assistant", message,
-        { hostNotice: { purpose: "host-status", runId, status: hostCause ? "goal-paused" : "needs-owner" } });
+        { hostNotice: { purpose: "host-status", runId, status: hostCause ? "goal-paused" : isAppSideRunFailureCode(errorCode) ? "app-failed" : "needs-owner" } });
         emptyFailureNoticePersisted = true;
       } catch { /* The failure ledger remains authoritative if the transcript write fails. */ }
     };
@@ -4632,7 +4635,7 @@ export class InvocationService {
           // bounded remote workspaces retain their stricter isolation rules.
           if (event.kind === "error") persistRecoverableAssistantPartial();
           const terminalKind = terminalDisposition!.terminalKind;
-          if (event.kind === "error" && !event.agentId) persistEmptyFailureNotice(terminalKind);
+          if (event.kind === "error" && !event.agentId) persistEmptyFailureNotice(terminalKind, event.error?.code);
           settleGoalControllerAttempt(terminalKind === "invoke_completed");
           canonicalTask = projectTaskStatus(
             runReq.chatId,
@@ -5752,7 +5755,7 @@ export class InvocationService {
           );
           taskMaterialized = Boolean(canonicalTask);
           persistRecoverableAssistantPartial();
-          persistEmptyFailureNotice(terminalDisposition.terminalKind);
+          persistEmptyFailureNotice(terminalDisposition.terminalKind, safeFailure.code);
           const observableStepSequence = nextObservableSequence(record);
           const event: McpInvocationEvent = {
             kind: "error",
@@ -5814,7 +5817,7 @@ export class InvocationService {
           );
           taskMaterialized = Boolean(canonicalTask);
           const terminalKind = terminalDisposition.terminalKind;
-          persistEmptyFailureNotice(terminalKind);
+          persistEmptyFailureNotice(terminalKind, terminalDisposition.errorCode);
           tryRecordRunEvent({
             runId,
             kind: terminalKind,
