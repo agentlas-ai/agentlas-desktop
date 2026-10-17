@@ -178,6 +178,88 @@ function testCollectionMissing(output: string | undefined): boolean {
   return typeof output === "string" && /(?:no\s+test\s+files?\s+found|no\s+tests?\s+(?:found|collected)|collected\s+0\s+items?|0\s+tests?\s+(?:run|collected))/iu.test(output);
 }
 
+/**
+ * How the host reads one shell command as a test run. Dev 2026-10-17 run7 and the receipt A/B: verifiers wrap the runner
+ * (`cd <project> && npm test 2>&1 | tail -30`, `ls data; npm test 2>&1 | tail -30`, `npm test; echo "EXIT=$?"`,
+ * `timeout 120 node --test <file> > /tmp/qa.log`), and Codex reports every command inside its login shell
+ * (`/bin/zsh -lc '<command>'`, real run events) — before this none of them left a receipt, so a verifier that ran the
+ * tests failed for want of one.
+ * - One segment, no pipe: the exit status is the runner's (a `timeout <duration>` prefix keeps it, output redirects to a
+ *   literal file or `2>&1` do not touch it) -> judged by the exit status, as before.
+ * - A pipe into `tail`/`head`, or harmless sibling segments (`cd <literal path>`, `echo`/`printf` without substitution
+ *   other than `$?`, `ls`, `pwd`, `true`, a `node -v`-style version check) joined by `;`/`&&`: the status is another
+ *   command's -> judged only by the runner's own tally in the output (runnerTally); no tally, no receipt.
+ * Exactly one runner segment; anything else (another command, `$(…)`, a second pipe) is no test run.
+ */
+function parseTestInvocation(command: string): { command: string; cd: string | null; byTally: boolean } | null {
+  let rest = command.trim();
+  const shell = /^(?:\/(?:usr\/)?bin\/)?(?:zsh|bash|sh)\s+-l?c\s+(?:'((?:[^']|'\\'')*)'|"((?:[^"\\]|\\.)*)")\s*$/su.exec(rest);
+  if (shell) rest = (shell[1] !== undefined ? shell[1].replace(/'\\''/g, "'") : shell[2].replace(/\\(["\\$`])/g, "$1")).trim();
+  if (/[\r\n`]/u.test(rest) || rest.includes("$(")) return null;
+  const segments = rest.split(/\s*(?:;|&&)\s*/u).map((segment) => segment.trim()).filter(Boolean);
+  let cd: string | null = null;
+  let sibling = false;
+  let runner: { command: string; cd: string | null; filtered: boolean } | null = null;
+  for (const segment of segments) {
+    const cdMatch = /^cd\s+(?:"([^"$\\]+)"|'([^']+)'|([^\s;&|<>"'$\\]+))$/u.exec(segment);
+    if (cdMatch) {
+      if (runner) return null;
+      cd = cdMatch[1] ?? cdMatch[2] ?? cdMatch[3] ?? null;
+      continue;
+    }
+    if ((/^(?:echo|printf)\b[^|<>]*$/u.test(segment) && !/\$(?!\?)/u.test(segment))
+      || /^(?:ls(?:\s+[^;&|<>$]+)?(?:\s+2>&1)?|pwd|true)$/u.test(segment)
+      || /^(?:node|npm|npx|pnpm|yarn|bun|python3?)\s+(?:-v|-V|--version)(?:\s+2>&1)?$/u.test(segment)) {
+      sibling = true;
+      continue;
+    }
+    if (runner) return null;
+    let body = segment.replace(/^timeout\s+(?:--?[a-z][a-z-]*(?:[=\s][^\s;&|<>$]+)?\s+)*\d+(?:\.\d+)?[smhd]?\s+/u, "");
+    const filter = /\s*\|\s*(?:tail|head)(?:\s+-n)?\s+[-+]?\d+\s*$/u;
+    const filtered = filter.test(body);
+    if (filtered) body = body.replace(filter, "");
+    const redirect = /\s+(?:\d?>>?|&>>?)\s*(?:&\d|"[^"$]+"|'[^']+'|[^\s;&|<>"'$]+)\s*$/u;
+    for (let i = 0; i < 3 && redirect.test(body); i += 1) body = body.replace(redirect, "");
+    runner = { command: body, cd, filtered };
+  }
+  if (!runner) return null;
+  return { command: runner.command, cd: runner.cd, byTally: runner.filtered || sibling };
+}
+
+/**
+ * The runner's own final tally in the output the host captured: node --test (spec `ℹ fail N`, TAP `# fail N`), pytest
+ * (`=== N passed in 0.6s ===`), vitest (`Tests  N passed (N)`), jest (`Tests: N passed, N total`). Null when the output
+ * holds no tally (cut by `head`, another runner): then there is no receipt.
+ */
+function runnerTally(output: string | undefined): "passed" | "failed" | null {
+  if (typeof output !== "string") return null;
+  const node = [...output.matchAll(/^\s*(?:ℹ|#)\s+fail\s+(\d+)\s*$/gmu)].at(-1);
+  if (node) return Number(node[1]) === 0 ? "passed" : "failed";
+  const pytest = [...output.matchAll(/^=+\s+(.+?)\s+in\s+[\d.]+s\b.*=+\s*$/gmu)].at(-1);
+  if (pytest && /\b\d+\s+passed\b/u.test(pytest[1])) return /\b\d+\s+(?:failed|errors?)\b/u.test(pytest[1]) ? "failed" : "passed";
+  const jsRunner = [...output.matchAll(/^\s*Tests:?\s+(.+)$/gmu)].at(-1);
+  if (jsRunner && /\b\d+\s+passed\b/u.test(jsRunner[1])) return /\b\d+\s+failed\b/u.test(jsRunner[1]) ? "failed" : "passed";
+  return null;
+}
+
+/**
+ * `npm test` (or pnpm/yarn/bun, optionally `run test`, no arguments) runs the package's own test script. When that
+ * script is itself one exact runner command, it is the command the receipt is about.
+ */
+function packageTestScript(identity: RootIdentity, command: string, cwd: string): string | null {
+  if (!/^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test$/u.test(command.trim())) return null;
+  const relative = relativeCandidate(identity, path.join(cwd, "package.json"));
+  if (!relative || !safeRegularProjectFile(identity, relative)) return null;
+  try {
+    const raw = fs.readFileSync(path.resolve(identity.root, relative), "utf8");
+    if (raw.length > 1_000_000) return null;
+    const script = (JSON.parse(raw) as { scripts?: { test?: unknown } })?.scripts?.test;
+    return typeof script === "string" && script.length <= 4096 ? script : null;
+  } catch {
+    return null;
+  }
+}
+
 function relativeCandidate(identity: RootIdentity, raw: string): string | null {
   const absolute = path.isAbsolute(raw) ? path.normalize(raw) : path.resolve(identity.root, raw);
   if (!inside(identity.root, absolute)) return null;
@@ -253,11 +335,28 @@ export class FirmExecutionEvidenceCollector {
       this.invalidCodes.add("command-cwd-outside-project");
       return;
     }
-    const rawTests = testPathsFromText(command.command);
+    const invocation = parseTestInvocation(command.command);
+    if (!invocation) {
+      // Not a test run, but a test target outside the project stays an evidence issue, as before.
+      if (this.rootIdentity) {
+        for (const candidate of testPathsFromText(command.command)) {
+          if (!relativeCandidate(this.rootIdentity, candidate)) this.invalidCodes.add("test-target-outside-project");
+        }
+      }
+      return;
+    }
+    let testCwd = command.cwd ? path.resolve(command.cwd) : this.rootIdentity?.root ?? null;
+    if (invocation.cd) {
+      testCwd = path.resolve(testCwd ?? this.rootIdentity?.root ?? "/", invocation.cd);
+      if (!this.rootIdentity || !this.commandCwdInsideProject(testCwd)) return;
+    }
+    const runnerCommand = (this.rootIdentity && testCwd ? packageTestScript(this.rootIdentity, invocation.command, testCwd) : null)
+      ?? invocation.command;
+    const rawTests = testPathsFromText(runnerCommand);
     const tests: string[] = [];
     if (this.rootIdentity) {
       for (const candidate of rawTests) {
-        const relative = relativeCandidate(this.rootIdentity, candidate);
+        const relative = relativeCandidate(this.rootIdentity, path.isAbsolute(candidate) ? candidate : path.resolve(testCwd ?? this.rootIdentity.root, candidate));
         if (!relative) this.invalidCodes.add("test-target-outside-project");
         else tests.push(relative);
       }
@@ -267,8 +366,16 @@ export class FirmExecutionEvidenceCollector {
     // file. Admit only one exact named target passed to a known test runner;
     // machine/JUnit multi-target receipts can be added later as a separate
     // typed source without weakening this boundary.
-    const exactTestRun = exactSingleTestRunnerCommand(command.command) && rawTests.length === 1 && tests.length === 1;
+    const exactTestRun = exactSingleTestRunnerCommand(runnerCommand) && rawTests.length === 1 && tests.length === 1;
     if (!exactTestRun) return;
+    if (invocation.byTally) {
+      const tally = runnerTally(result);
+      if (tally === "failed") for (const test of tests) this.failedTests.add(test);
+      if (tally !== "passed") return;
+      this.successfulCommandCount += 1;
+      for (const test of tests) this.executedTests.add(test);
+      return;
+    }
     if (isError || testCollectionMissing(result)) {
       for (const test of tests) this.failedTests.add(test);
       if (!isError) this.invalidCodes.add("test-target-not-collected");

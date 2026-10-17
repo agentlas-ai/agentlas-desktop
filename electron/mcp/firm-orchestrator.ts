@@ -437,6 +437,20 @@ function stripVerificationVerdict(text: string): string {
   return text.replace(/<verification_verdict>\s*(?:PASS|FAIL)\s*<\/verification_verdict>/gi, "").trim();
 }
 
+/**
+ * The status the CEO reads for one result. A verifier that wrote PASS but left the host no run receipt for a named
+ * test is unproven, not failed: dev 2026-10-17 run7, the firm QA recheck passed 10/10 but the host had no receipt for
+ * its piped `npm test`, the CEO read `status: failed` and held the whole room "not complete" (that run form is now
+ * recorded, firm-execution-evidence.ts). The team still is not done (latestTeamResultsAllOk) — the CEO sees which it is.
+ */
+export function firmResultStatus(result: Pick<FirmStageResult, "ok" | "evidence" | "verdict">): string {
+  if (result.ok) return "ok";
+  const issues = result.evidence.invalidEvidenceCodes;
+  const receiptOnly = result.verdict === "pass" && result.evidence.failedTestPaths.length === 0 && issues.length > 0
+    && issues.every((code) => code.startsWith("named-test-not-executed:") || code === "verification-tool-receipt-missing");
+  return receiptOnly ? "unproven (verifier wrote PASS; the host has no run receipt: host_evidence_issues)" : "failed";
+}
+
 const AGENT_MESSAGE_MAX_CHARS = 720;
 
 const MAX_HANDOFF_DEPTH = 3;
@@ -2029,7 +2043,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
     { id: "firm.ceo-synthesis.owner-request", revision: 1, stability: "task-context", changeTriggers: ["task", "owner-input"], order: 0,
       text: `${req.userPrompt}\n\n[Results from your team — synthesize into one final answer for the user]\n` },
     { id: "firm.ceo-synthesis.results", revision: 1, stability: "turn-context", changeTriggers: ["plan-revision"], order: 0,
-      text: teamResults.map((r) => `## ${r.node.name} (${r.node.role})\nstatus: ${r.ok ? "ok" : "failed"}\n${firmEvidencePromptSummary(r.evidence)}\n${r.result}`).join("\n\n") },
+      text: teamResults.map((r) => `## ${r.node.name} (${r.node.role})\nstatus: ${firmResultStatus(r)}\n${firmEvidencePromptSummary(r.evidence)}\n${r.result}`).join("\n\n") },
   ], "");
   // The team has already paid for and completed its production and verification
   // turns.  A controller-only synthesis failure must not make the parent task
@@ -2174,7 +2188,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
         { id: "firm.ceo-resynthesis.owner-request", revision: 1, stability: "task-context", changeTriggers: ["task", "owner-input"], order: 0,
           text: `${req.userPrompt}\n\n[Updated team results] task: delegate again only if a required unused role is missing, else return final user result\n` },
         { id: "firm.ceo-resynthesis.results", revision: 1, stability: "turn-context", changeTriggers: ["plan-revision"], order: 0,
-          text: teamResults.map((result) => `## ${result.node.name} (${result.node.role})\nstatus: ${result.ok ? "ok" : "failed"}\n${firmEvidencePromptSummary(result.evidence)}\n${result.result}`).join("\n\n") },
+          text: teamResults.map((result) => `## ${result.node.name} (${result.node.role})\nstatus: ${firmResultStatus(result)}\n${firmEvidencePromptSummary(result.evidence)}\n${result.result}`).join("\n\n") },
       ], ""),
       finalTurn.synthesisAllocation ?? plan.synthesisAllocation ?? defaultWorkloadAllocation("synthesize"),
     );
