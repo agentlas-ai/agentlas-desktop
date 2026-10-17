@@ -157,3 +157,37 @@ export function stableTurnIds(turnId: string | null | undefined): readonly strin
   }
   return list;
 }
+
+/**
+ * Trailing debounce with a ceiling: run waitMs after the last call, and never later than maxWaitMs after the first
+ * call of a burst, so a steady stream of notices still converges. cancel() drops a pending run (effect cleanup).
+ */
+export function createTrailingDebounce(options: {
+  waitMs: number;
+  maxWaitMs?: number;
+  run: () => void;
+  now?: () => number;
+  setTimer?: (callback: () => void, ms: number) => TimerHandle;
+  clearTimer?: (handle: TimerHandle) => void;
+}): { call(): void; cancel(): void } {
+  const now = options.now ?? Date.now;
+  const setTimer = options.setTimer ?? ((callback: () => void, ms: number) => setTimeout(callback, ms));
+  const clearTimer = options.clearTimer ?? ((handle: TimerHandle) => clearTimeout(handle));
+  const maxWaitMs = options.maxWaitMs ?? Number.POSITIVE_INFINITY;
+  let timer: TimerHandle | null = null;
+  let burstStartedAt: number | null = null;
+  const fire = () => { timer = null; burstStartedAt = null; options.run(); };
+  return {
+    call() {
+      const at = now();
+      if (burstStartedAt === null) burstStartedAt = at;
+      if (timer !== null) clearTimer(timer);
+      timer = setTimer(fire, Math.max(0, Math.min(options.waitMs, burstStartedAt + maxWaitMs - at)));
+    },
+    cancel() {
+      if (timer !== null) clearTimer(timer);
+      timer = null;
+      burstStartedAt = null;
+    },
+  };
+}

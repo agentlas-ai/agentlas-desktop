@@ -3,6 +3,7 @@ import { writeAppUiPreference, subscribeAppUiPreference } from "@/lib/app-ui-pre
 import { MessageReplyPreview } from "./MessageActions";
 import { alertPopup, confirmPopup } from "@/lib/popup";
 import { composeMessageReply, type MessageReply } from "@/lib/message-reply";
+import { createTrailingDebounce } from "@/lib/store-change-policy";
 
 import { goalPlanOf } from "@/components/goal/GoalPlanSummary";
 import { useWorkStartHandoff } from "@/lib/work-start-intent";
@@ -4089,6 +4090,21 @@ function ChatPage() {
         );
       }).catch(() => undefined);
     };
+    /*
+     * Re-read the chat record itself, not only the message history. The Goal
+     * chip and the "목표 추진" toggle render from `chat.goalId`, which Main owns;
+     * refreshing messages alone left a closed Goal drawn as still running until
+     * the user navigated away and back.
+     * A burst of changes to the open chat (each read is up to 1.9 MB of history) collapses into one read 250 ms
+     * after the last, at most 1 s after the first (perf review R-10).
+     */
+    const refreshOpenChat = createTrailingDebounce({ waitMs: 250, maxWaitMs: 1_000, run: () => {
+      if (disposed) return;
+      void api.chats.get(chatId).then((next) => {
+        if (!disposed && next?.id === currentChatIdRef.current && isCurrentChat()) setChat(next);
+      }).catch(() => undefined);
+      refreshHistory();
+    } });
     const unsubscribe = events.onStoreChanged((change) => {
       if (change.entity === "runtime") { refresh(); return; }
       /*
@@ -4103,22 +4119,11 @@ function ChatPage() {
        * 이 대화가 바뀌었다고 알려 오면 대화를 다시 읽는다. 목표 결속·제목처럼 Main 이
        * 소유한 값은 이 경로로만 화면에 도착한다.
        */
-      if (change.entity === "chat" && change.id === chatId) {
-        /*
-         * Re-read the chat record itself, not only the message history. The Goal
-         * chip and the "목표 추진" toggle render from `chat.goalId`, which Main owns;
-         * refreshing messages alone left a closed Goal drawn as still running until
-         * the user navigated away and back.
-         */
-        void api.chats.get(chatId).then((next) => {
-          if (!disposed && next?.id === currentChatIdRef.current && isCurrentChat()) setChat(next);
-        }).catch(() => undefined);
-        refreshHistory();
-      }
+      if (change.entity === "chat" && change.id === chatId) refreshOpenChat.call();
     });
     // Subscribe before catch-up so an append during initial hydration is read.
     refreshHistory();
-    return () => { disposed = true; unsubscribe(); };
+    return () => { disposed = true; unsubscribe(); refreshOpenChat.cancel(); };
   }, [chat?.runtimeSelection, chatId, hydratedChatId, isCurrentChat]);
 
   // The transcript is durable, so the Agent work panel must be durable too.
