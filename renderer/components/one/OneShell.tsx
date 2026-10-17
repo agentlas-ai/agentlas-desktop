@@ -11,6 +11,7 @@ import { createOneScrollFollow, oneRunReceiptIsTerminal } from "@/lib/one-scroll
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
 import { createFrameBatcher, isLiveStreamTick, type FrameBatcher } from "@/lib/frame-coalescer";
 import { createKeyedThrottle } from "@/lib/store-change-policy";
+import { needsProjectionRefresh, PROJECTION_DIRTY_ENTITIES } from "@/lib/one-projection-refresh";
 import { mergeAutomationHostNotices, mergeRoomWorkRows } from "@/lib/chat-host-notice-refresh";
 import { readOneChatHistory, readOneChatHistoryPage, mergeOneChatHistory, oneChatHistoryCursor } from "@/lib/one-chat-history";
 import { OneComposerInput, type OneComposerInputHandle } from "./OneComposerInput";
@@ -3054,7 +3055,10 @@ function OneSessionsShell() {
     return () => window.clearTimeout(timer);
   }, [query, requestOneSearch, searchIncludeArchived, searchOpen]);
 
-  const refreshAllRead = useCallback(async (options: { includeOrg?: boolean } = {}) => {
+  // The 5 s poll reuses the last task projections unless something that feeds them moved (perf review R-05).
+  const projectionReadRef = useRef<{ dirty: boolean; at: number | null; items: OneTaskProjection[]; active: string; pending: string; context: string }>(
+    { dirty: true, at: null, items: [], active: "", pending: "", context: "" });
+  const refreshAllRead = useCallback(async (options: { includeOrg?: boolean; poll?: boolean } = {}) => {
     const includeOrg = options.includeOrg !== false;
     const api = ipc();
     if (!api) {
@@ -3136,7 +3140,21 @@ function OneSessionsShell() {
           // Renderer storage is legacy-only and never gates presentation.
         }
       }
-      const items = await listOneTaskProjections(api, active, pending, profile, appLocale);
+      const projectionRead = projectionReadRef.current;
+      const activeKey = JSON.stringify(active), pendingKey = JSON.stringify(pending), contextKey = JSON.stringify([profile, appLocale]);
+      const rereadProjections = options.poll !== true || needsProjectionRefresh({
+        dirty: projectionRead.dirty, lastAt: projectionRead.at, now: Date.now(),
+        activeChanged: activeKey !== projectionRead.active, pendingChanged: pendingKey !== projectionRead.pending,
+        contextChanged: contextKey !== projectionRead.context,
+      });
+      const readProjections = async () => {
+        // Cleared before the read, so a change that lands while it runs marks the next tick again.
+        projectionRead.dirty = false;
+        const items = await listOneTaskProjections(api, active, pending, profile, appLocale);
+        Object.assign(projectionRead, { at: Date.now(), items, active: activeKey, pending: pendingKey, context: contextKey });
+        return items;
+      };
+      const items = rereadProjections ? await readProjections() : projectionRead.items;
       // 5초 리프레시가 IPC마다 새 객체를 돌려주므로, 내용이 같으면 이전 참조를
       // 유지한다 — 그래야 무변경 틱에 이 셸 전체가 리렌더되지 않는다.
       setActiveChatIds(keepPrevIfDeepEqual(active));
@@ -3280,14 +3298,16 @@ function OneSessionsShell() {
     refreshAllMountedRef.current = true;
     return () => { refreshAllMountedRef.current = false; };
   }, []);
-  const refreshAllCoordinatorRef = useRef<ReturnType<typeof createCoalescedRefresh<{ includeOrg?: boolean }>> | null>(null);
+  const refreshAllCoordinatorRef = useRef<ReturnType<typeof createCoalescedRefresh<{ includeOrg?: boolean; poll?: boolean }>> | null>(null);
   if (!refreshAllCoordinatorRef.current) {
     refreshAllCoordinatorRef.current = createCoalescedRefresh(
       (options) => refreshAllMountedRef.current ? refreshAllReadRef.current(options) : Promise.resolve(),
-      (previous, incoming) => ({ includeOrg: previous.includeOrg !== false || incoming.includeOrg !== false }),
+      // A merged read is a poll only when every request in it was one; any other caller re-reads projections.
+      (previous, incoming) => ({ includeOrg: previous.includeOrg !== false || incoming.includeOrg !== false,
+        poll: previous.poll === true && incoming.poll === true }),
     );
   }
-  const refreshAll = useCallback((options: { includeOrg?: boolean } = {}) => (
+  const refreshAll = useCallback((options: { includeOrg?: boolean; poll?: boolean } = {}) => (
     refreshAllCoordinatorRef.current!.request(options)
   ), [appLocale]);
 
@@ -3425,7 +3445,7 @@ function OneSessionsShell() {
     const timer = window.setInterval(() => {
       // One Team is event-driven. The general shell refresh remains for
       // conversations/receipts, but it must not poll the org ledger.
-      if (document.visibilityState === "visible") void refreshAll({ includeOrg: false });
+      if (document.visibilityState === "visible") void refreshAll({ includeOrg: false, poll: true });
     }, 5_000);
     window.addEventListener("focus", onVisibility);
     document.addEventListener("visibilitychange", onVisibility);
@@ -3441,6 +3461,7 @@ function OneSessionsShell() {
     if (!events?.onStoreChanged) return;
     let sessionListRefreshTimer: ReturnType<typeof setTimeout> | null = null;
     const unsubscribe = events.onStoreChanged((change) => {
+      if (PROJECTION_DIRTY_ENTITIES.has(change.entity)) projectionReadRef.current.dirty = true;
       const api = ipc();
       if (!api) return;
       if (change.entity === "one-org") {
