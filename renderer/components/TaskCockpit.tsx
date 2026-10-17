@@ -7411,8 +7411,6 @@ function ChatPage() {
           workspaceRoot={restoredFolder ?? defaultRunFolder ?? undefined}
           focusMessageId={requestedFocusMessageId}
         />
-        {/* 도구 승인은 이 대화 안에서, 묻는 순간에(오너 결정 2026-08-15) */}
-        <ToolApprovalInline chatId={chat?.id ?? null} compact chip composerWidth={WORK_COMPOSER_WIDTH_PX} composerInset={WORK_COMPOSER_INSET_PX} />
       </div>
       {/* 실행 전 API 키 요청 바텀 시트 — 값은 vault(env.set)로만, IPC는 완료 신호만 */}
       {keyRequestSheet && (
@@ -7484,6 +7482,8 @@ function ChatPage() {
         width: `min(calc(100% - 32px), ${WORK_COMPOSER_WIDTH_PX}px)`, margin: "0 auto", display: "flex",
         flexDirection: "column", alignItems: "stretch", ["--one-composer-width" as string]: `${WORK_COMPOSER_WIDTH_PX}px`,
       }}>
+      {/* 도구 승인은 이 대화 안에서, 묻는 순간에(오너 결정 2026-08-15) — 컴포저 스택의 첫 칸이라 Goal 줄·컴포저와 좌우가 같다 */}
+      <ToolApprovalInline chatId={chat?.id ?? null} compact chip composerWidth={WORK_COMPOSER_WIDTH_PX} composerInset={WORK_COMPOSER_INSET_PX} />
       <AutomationMonitorStrip key={chatId} chatId={chatId || null} locale={locale} />
       {/* One Goal surface (owner 2026-10-04 "골 하나만 해라"): with a Goal, the bar above the conversation holds the
           objective, its controls and next check, and folds the continuity detail; nothing is attached to the composer. */}
