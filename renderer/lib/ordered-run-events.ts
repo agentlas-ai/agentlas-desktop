@@ -110,6 +110,9 @@ export function subscribeOrderedRunEvents(options: Options): () => void {
   const pollMs = options.pollMs ?? 1000, quietMs = options.quietMs ?? RUN_EVENT_QUIET_MS;
   const maxBackoffMs = options.maxBackoffMs ?? RUN_EVENT_MAX_BACKOFF_MS;
   let lastPushAt = Date.now(), lastQueryAt = 0, backoffMs = pollMs, queries = 0, retryDue = false;
+  // The "unavailable" answer (run status included) under which this view already ran its one canonical recovery and
+  // took the events it holds from there. Main has no journal to fill a later hole with while the answer stays the same.
+  let acceptedUnavailable: string | null = null;
   const hidden = () => typeof document !== "undefined" && document.visibilityState === "hidden";
   const gapNow = () => hasDeliveryGap(cursor, receivedThroughOrdinal(cursor, pending), pending.size);
   const schedule = options.schedule ?? (callback => { const id = requestAnimationFrame(callback); return () => cancelAnimationFrame(id); });
@@ -182,18 +185,34 @@ export function subscribeOrderedRunEvents(options: Options): () => void {
         if (pending.size > before) backoffMs = pollMs;
         else if (Date.now() - lastPushAt >= quietMs) backoffMs = nextQuietBackoff(backoffMs, pollMs, maxBackoffMs);
       } else if (snapshot.receipt) {
+        const quiet = Date.now() - lastPushAt >= quietMs;
+        const unavailableAnswer = snapshot.status === "unavailable" ? `unavailable:${snapshot.receipt.status}` : null;
+        if (unavailableAnswer !== acceptedUnavailable) acceptedUnavailable = null;
+        // A later hole under the same "unavailable" answer cannot be filled by Main and was already recovered once:
+        // take the held events from the first one on, instead of one 500-event ledger read per push (perf review D12).
+        if (unavailableAnswer && unavailableAnswer === acceptedUnavailable && !forceHydration && !needsHydration && !quiet
+          && (snapshot.receipt.status === "running" || snapshot.receipt.status === "cancelling")) {
+          if (isCurrent() && pending.size) cursor = Math.min(...pending.keys()) - 1;
+          return;
+        }
         // A live run Main does not host answers "unavailable" on every poll. With push healthy and nothing missing,
         // re-reading its ledger each second recovered nothing (and cost a 500-event read and a re-projection).
         if (!forceHydration && !shouldRecoverReplay({ status: snapshot.status, receiptStatus: snapshot.receipt.status,
-          gap: gapNow(), needsHydration, initial, quiet: Date.now() - lastPushAt >= quietMs })) return;
+          gap: gapNow(), needsHydration, initial, quiet })) return;
         if (Date.now() - lastPushAt >= quietMs) backoffMs = nextQuietBackoff(backoffMs, pollMs, maxBackoffMs);
         // An unavailable journal has no known wire cursor. Its canonical recovery
         // must retain our cursor, and no recovery may overwrite newer live/legacy UI.
         if (!isCurrent() || (snapshot.status !== "unavailable" && snapshot.latestOrdinal < cursor)) return;
-        const throughOrdinal = Math.max(cursor, snapshot.latestOrdinal);
+        // "unavailable" has no wire cursor; its recovery covers what precedes the first held event, so the held events
+        // apply on top of it instead of waiting forever for a hole no journal can fill.
+        const firstHeld = snapshot.status === "unavailable" && pending.size ? Math.min(...pending.keys()) - 1 : 0;
+        const throughOrdinal = Math.max(cursor, snapshot.latestOrdinal, firstHeld);
         const applied = await options.recover(snapshot, { throughOrdinal, isCurrent });
         if (!applied || !isCurrent()) return;
         needsHydration = false;
+        // This was the one canonical recovery under this answer (the attach hydration counts): later holes take the
+        // held events instead of recovering again.
+        if (unavailableAnswer) acceptedUnavailable = unavailableAnswer;
         cursor = throughOrdinal;
         // Teammate deltas after the hydrated cursor extend Main's bases at that cursor. Without them (a replay that
         // only says "unavailable" keeps what this view holds) a teammate shows no new words until its next whole frame.
