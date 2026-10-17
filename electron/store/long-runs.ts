@@ -2132,11 +2132,20 @@ export function recordLongRunInferenceStarted(input: {
       AND json_extract(payload_json,'$.runtimeEvidence.sourceEventId')=? LIMIT 1`)
       .get(input.invocationRunId, `${input.sourceId}:started`) as { ts: string; payload_json: string } | undefined;
     const payload = source ? JSON.parse(source.payload_json) : null;
-    if (!run || !payload || payload.schemaVersion !== "agentlas.inference-accounting.v1"
-      || payload.attribution !== "goal" || payload.goalId !== input.goalId || payload.sourceId !== input.sourceId
-      || payload.scopeAnchorId !== input.scopeAnchorId || (payload.attemptId ?? null) !== input.attemptId
-      || !db.prepare("SELECT 1 FROM run_events WHERE id=? AND run_id=?")
-        .get(input.scopeAnchorId,input.invocationRunId)) throw new Error("long_run_usage_start_source_mismatch");
+    // Which check failed, so the next occurrence names its cause (production 1.3.57, 2026-10-17 05:40:15: one goal-wake
+    // tool selection threw this once, then the next wake passed; every identity field comes from one owner/scope object).
+    const failed = !run ? "long_run_missing" : !payload ? "usage_start_row_missing"
+      : payload.schemaVersion !== "agentlas.inference-accounting.v1" || payload.attribution !== "goal" ? "usage_start_shape"
+      : payload.goalId !== input.goalId || payload.sourceId !== input.sourceId || payload.scopeAnchorId !== input.scopeAnchorId
+        || (payload.attemptId ?? null) !== input.attemptId ? "usage_start_identity"
+      : !db.prepare("SELECT 1 FROM run_events WHERE id=? AND run_id=?").get(input.scopeAnchorId,input.invocationRunId) ? "scope_anchor_missing"
+      : null;
+    if (failed || !run) {
+      console.warn("[long-run] usage start source mismatch", { check: failed, goalId: input.goalId,
+        invocationRunId: input.invocationRunId, scopeAnchorId: input.scopeAnchorId, attemptId: input.attemptId,
+        runStatus: run?.status ?? null, sourceFound: Boolean(source) });
+      throw new Error("long_run_usage_start_source_mismatch");
+    }
     appendEventInDb({ runId: run.id, kind: "run.usage_started", actorKind: "host", at: source!.ts,
       sourceEventId: `${input.sourceId}:started`, payload: { sourceId: input.sourceId,
         invocationRunId: input.invocationRunId, attemptId: input.attemptId } }, "inference_accounting");
