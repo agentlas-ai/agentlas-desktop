@@ -274,6 +274,16 @@ async function connectorAuth(row: Awaited<ReturnType<typeof connectorRows>>[numb
   return { missingEnv, oauth, credentialState, sessionState, state };
 }
 
+/** The owner's saved key serving this connector's provider through a keyed host route (connector-keyed-route.ts). */
+async function keyedRouteForConnector(row: Awaited<ReturnType<typeof connectorRows>>[number]): Promise<string | null> {
+  if (row.transport === "stdio") return null;
+  const { listInstalledServers } = await import("../mcp-tools/registry");
+  const server = listInstalledServers().find((item) => item.id === row.serverId);
+  const { keyedRouteForConnectorUrl } = await import("./connector-keyed-route");
+  const { hasEnvVarAliased } = await import("../secrets/env-alias");
+  return keyedRouteForConnectorUrl(server?.url, hasEnvVarAliased).catch(() => null);
+}
+
 /** Readiness from the stored observation only (no probe): configuration, credential and the last exact handshake (C05). */
 async function storedConnectionReadiness(row: Awaited<ReturnType<typeof connectorRows>>[number]) {
   const observations = await import("./readiness-observations");
@@ -682,6 +692,9 @@ const PORTS: PortDefinition[] = [
       const auth = await connectorAuth(row);
       if (auth.sessionState !== "enabled") return ok({ connectionId: row.id, state: auth.state, credentialState: auth.credentialState, sessionState: auth.sessionState, next: "connector.connect explicitly reconnects this exact connection" });
       if (auth.state === "ready") return ok({ connectionId: row.id, state: "ready", reused: auth.oauth === "usable" ? "oauth_session" : row.envKeys.length ? "vault_keys" : "none_needed" });
+      const keyedRoute = await keyedRouteForConnector(row);
+      if (keyedRoute) return ok({ connectionId: row.id, state: "ready_via_key", reused: "vault_key_route", routeId: keyedRoute,
+        next: `the owner's saved key already serves this provider: use speech.synthesize or provider.request with routeId ${keyedRoute} (Main applies the key); no sign-in needed` });
       if (browser?.status === "valid") return ok({ connectionId: row.id, state: "ready_in_browser", reused: "browser_session", site: browser.site, missingEnv: auth.missingEnv,
         next: "the connector still lacks its own sign-in; for this task use agentlas-browser on the site (signed in)" });
       return ok({ connectionId: row.id, state: auth.state, missingEnv: auth.missingEnv, next: auth.missingEnv.length ? "the owner types the key in the Vault input (never in chat)" : "auth.login opens the provider sign-in" });
@@ -694,6 +707,8 @@ const PORTS: PortDefinition[] = [
       if (!row) return refused("connector_not_installed");
       const auth = await connectorAuth(row);
       if (auth.credentialState === "ready") return ok({ connectionId: row.id, state: auth.state, credentialState: auth.credentialState, sessionState: auth.sessionState, note: "usable credentials already exist; no login opened", ...(auth.sessionState !== "enabled" ? { next: "connector.connect explicitly reconnects this exact connection" } : {}) });
+      const keyedRoute = await keyedRouteForConnector(row);
+      if (keyedRoute) return ok({ connectionId: row.id, state: "ready_via_key", routeId: keyedRoute, note: `the owner's saved key already serves this provider through routeId ${keyedRoute}; no sign-in opened` });
       const browser = await browserSessionFor(str(args.site));
       if (browser?.status === "valid") return ok({ connectionId: row.id, state: "ready_in_browser", site: browser.site, note: "signed in in agentlas-browser; no login opened" });
       if (row.transport === "stdio" || !row.url) return refused("vault_input_required", `the owner saves ${auth.missingEnv.join(", ") || "the key"} in the Vault input`);
