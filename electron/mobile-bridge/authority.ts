@@ -2255,6 +2255,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       currentTurnSteeringV1: true,
       // Additive: apps that do not know the key ignore it; they keep the existing token summary.
       contextInspectV1: true,
+      // Additive: the phone may report its decoder with device.capabilities (MOBILE_CLIENT_CAPABILITIES).
+      clientCapabilitiesV1: true,
       // Read-only question representation; not permission to answer or start a child.
       oneDispatchQuestionBankV1: { schemaVersion: 1, maxQuestions: 64 },
       // Additive: the harness operations this phone may call (harness.call); older apps ignore the key.
