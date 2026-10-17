@@ -7812,10 +7812,13 @@ function OneSessionsShell() {
     manualAlwaysApprovalRef.current.add(confirmation.sourceMessageId);
     try {
       await grantAlwaysApproval(confirmation.chatId);
-      await answerConfirmation(
-        confirmation,
-        firstApprovalLabel(confirmation) ?? "Approve. Proceed with the proposed action.",
-      );
+      // A grant never picks between real alternatives for the owner; the auto-approval loop has the same rule.
+      if (isPermissionOnlyConfirmation(confirmation)) {
+        await answerConfirmation(
+          confirmation,
+          firstApprovalLabel(confirmation) ?? "Approve. Proceed with the proposed action.",
+        );
+      }
     } finally {
       manualAlwaysApprovalRef.current.delete(confirmation.sourceMessageId);
     }
@@ -11830,12 +11833,15 @@ function DecisionCard({ confirmation, taskId, locale, disabled, block = "none", 
           disabled: disabled || approvalReply === null,
           active: true,
         },
-        {
+        // "Always approve" answers this card too, so it is offered only for a yes/no permission. A question whose
+        // other option is a real alternative ("편집 준비만 계속") is never answered by a grant (Yotube 2026-10-17:
+        // the grant chose "재인증 진행" for the owner). The chat-wide switch stays in the composer menu.
+        ...(isPermissionOnlyConfirmation(confirmation) ? [{
           id: "always",
           title: tFor(locale, "one.shell.decision.always_approve"),
           note: tFor(locale, "one.shell.decision.always_approve_hint"),
           disabled: disabled || approvalReply === null,
-        },
+        }] : []),
         { id: "reject", title: rejectLabel, disabled },
       ];
 
@@ -12026,6 +12032,7 @@ function DecisionCard({ confirmation, taskId, locale, disabled, block = "none", 
               {tFor(locale, "one.shell.decision.remind_24h")}
             </button>
           )}
+          {isPermissionOnlyConfirmation(confirmation) && (
           <button
             type="button"
             className={styles.decisionButton}
@@ -12040,6 +12047,7 @@ function DecisionCard({ confirmation, taskId, locale, disabled, block = "none", 
             <span>{tFor(locale, "one.shell.decision.always_approve")}</span>
             <small>{tFor(locale, "one.shell.decision.always_approve_hint")}</small>
           </button>
+          )}
           <button type="button" className={styles.decisionRejectButton} disabled={disabled} onClick={() => onAnswer(confirmation, rejectReply, false)}>
             <span>{rejectLabel}</span>
             {rejectOption?.description && <small>{rejectOption.description}</small>}
