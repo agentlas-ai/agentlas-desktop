@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { ipc, ipcEvents, grantForDroppedFile, grantForPastedAttachment, grantForPastedImage } from "@/lib/ipc";
 import { fitImageUnder } from "@/lib/attachment-image-fit";
 import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
+import { createStoreChangeThrottle, sameSnapshotIgnoring } from "@/lib/store-change-policy";
 import { ChatContinuationProjector } from "@/lib/chat-continuations";
 import { useT } from "@/lib/i18n";
 import { Markdown, StreamingMarkdown, type LinkedFileArtifact } from "@/components/Markdown";
@@ -202,12 +203,14 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const outbox=useRef<SupervisorOutbox|null>(null); const outboxOneId=useRef<string|null>(null); const inFlight=useRef(new Set<string>());
   const mounted=useRef(true); const generation=useRef(0); const transcript=useRef<HTMLDivElement>(null); const nearBottom=useRef(true);
   const refreshCoordinator=useRef<ReturnType<typeof createCoalescedRefresh<void>>|null>(null);
+  const conversationChatIdRef=useRef<string|null>(null);conversationChatIdRef.current=snapshot?.conversationChatId ?? null;
   const readSnapshot=useCallback(async()=>{
     const current=++generation.current;
     try {
       const api=ipc()?.oneSupervisor;if(!api)throw new Error("desktop_unavailable");
       const value=await api.snapshot();if(!mounted.current || current!==generation.current)return;
-      setSnapshot(value);setError(false);
+      // A read that found nothing new keeps the same object, so the whole workspace does not re-render.
+      setSnapshot(prior=>sameSnapshotIgnoring(prior,value,["observedAt"])?prior:value);setError(false);
       try{if(outboxOneId.current!==value.oneId){outbox.current=new SupervisorOutbox(value.oneId,window.localStorage);outboxOneId.current=value.oneId;setOptimistic([]);}
         outbox.current!.reconcile(value.requests);setSavedRequests(outbox.current!.list());setSavedRequestError(false);
       }catch{outbox.current=null;outboxOneId.current=null;setSavedRequestError(true);}
@@ -233,10 +236,13 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   },[sync]);
   useEffect(()=>{
     const coordinator=createCoalescedRefresh<void>(readSnapshot,()=>undefined);refreshCoordinator.current=coordinator;
-    mounted.current=true;void sync();const off=ipcEvents()?.onStoreChanged?.(()=>{void sync();});
+    // Its own conversation refreshes at once; any other store change at most once per 2 s (perf review R-01).
+    const storeChanges=createStoreChangeThrottle({throttleMs:2000,run:()=>{void sync();},
+      immediate:change=>change.entity==="chat"&&(!change.id||change.id===conversationChatIdRef.current)});
+    mounted.current=true;void sync();const off=ipcEvents()?.onStoreChanged?.(change=>storeChanges.notify(change));
     const timer=window.setInterval(()=>{if(document.visibilityState!=="hidden"){void sync();redeliverSaved();}},5000);const focus=()=>{void sync();};window.addEventListener("focus",focus);
     const storage=(event:StorageEvent)=>{if(event.key?.startsWith("agentlas.one.supervisor.outbox.")){setSavedRequests(outbox.current?.list() ?? []);void sync();}};window.addEventListener("storage",storage);
-    return()=>{coordinator.dispose();if(refreshCoordinator.current===coordinator)refreshCoordinator.current=null;mounted.current=false;++generation.current;window.clearInterval(timer);off?.();window.removeEventListener("focus",focus);window.removeEventListener("storage",storage);};
+    return()=>{coordinator.dispose();if(refreshCoordinator.current===coordinator)refreshCoordinator.current=null;mounted.current=false;++generation.current;window.clearInterval(timer);off?.();storeChanges.dispose();window.removeEventListener("focus",focus);window.removeEventListener("storage",storage);};
   },[sync,readSnapshot,redeliverSaved]);
   const observedCommands=useMemo(()=>{
     const messageIds=new Set(snapshot?.messages.map(message=>message.id));
