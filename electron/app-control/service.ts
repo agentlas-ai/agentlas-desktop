@@ -97,7 +97,7 @@ const HOST_ARGUMENT_SCHEMAS: Record<string, Record<string, unknown>> = {
 // when a call is authorized. The output schema rides only on an exact lookup, like input_schema: a search result list
 // stays small for the model.
 // The canonical output schema describes handler data. app.call preserves that data only when JSON fits;
-// over RESULT_LIMIT its fulfilled reply carries the same shape cut down (truncated + truncation), a clipped preview when no
+// over RESULT_LIMIT its fulfilled reply carries the same shape cut down (truncated + cuts), a clipped preview when no
 // cut fits, or the legacy serialization fallback. Window operations already return their flat ACK.
 function appCallReplySchema(operation: Operation, descriptor: OperationDescriptor): Record<string, unknown> {
   if (!operation.entry) return descriptor.outputSchema;
@@ -106,20 +106,21 @@ function appCallReplySchema(operation: Operation, descriptor: OperationDescripto
     ok: { type: "boolean" }, operation: { const: operation.path }, effect: { const: operation.effect },
     code: { type: "string" }, receipt_id: { type: "string" }, receipt_recorded: { type: "boolean" },
   };
-  const truncation = { type: "array", items: { type: "object", properties: {
+  const cuts = { type: "array", items: { type: "object", properties: {
     path: { type: "string" }, kind: { type: "string", enum: ["array", "string"] }, total: { type: "integer" }, returned: { type: "integer" },
-    omitted: { type: "array", items: { type: "object", properties: { id: { anyOf: [{ type: "string" }, { type: "number" }] }, name: { type: "string" } },
-      required: ["id"], additionalProperties: false } },
+    stubbed: { type: "integer" },
   }, required: ["path", "kind", "total", "returned"], additionalProperties: false } };
   const reply = (result: Record<string, unknown>, truncated: boolean, cut = false) => ({
-    type: "object", properties: { ...properties, result, ...(truncated ? { truncated: { const: true } } : {}), ...(cut ? { truncation } : {}) },
-    required: ["ok", "operation", "effect", "result", ...(truncated ? ["truncated"] : []), ...(cut ? ["truncation"] : [])], additionalProperties: false,
+    type: "object", properties: { ...properties, result, ...(truncated ? { truncated: { const: true } } : {}), ...(cut ? { cuts } : {}) },
+    required: ["ok", "operation", "effect", "result", ...(truncated ? ["truncated"] : []), ...(cut ? ["cuts"] : [])], additionalProperties: false,
   });
   return {
     ...($defs ? { $defs } : {}),
     anyOf: [
       reply({ anyOf: [handlerOutput, { type: "null" }] }, false),
-      reply(handlerOutput, true, true),
+      // The handler's data cut down: each cut array keeps its first `returned` items, then `stubbed` stubs
+      // { id, name?, truncated: true } for the records it left out; a cut string ends with "…".
+      reply({ description: "handler output cut down; see cuts" }, true, true),
       reply({ type: "string", maxLength: RESULT_LIMIT + 1 }, true),
       // clipResult's JSON serialization failure has always returned a string without a truncated flag.
       reply({ type: "string", maxLength: RESULT_LIMIT }, false),
@@ -310,18 +311,21 @@ function build(arg: AppControlInvokeArg, named: Record<string, unknown>): unknow
 
 const OWNER_LOCAL_MAP_OPERATIONS: ReadonlySet<string> = new Set(["experience.ontologyGraph", "agents.borrowedOntologyGraph"]);
 
-type ResultCut = { path: string; kind: "array" | "string"; total: number; returned: number; omitted?: Array<{ id: string | number; name?: string }> };
+type ResultCut = { path: string; kind: "array" | "string"; total: number; returned: number; stubbed?: number };
 const LONG_TEXT = 2_000;
-const OMITTED_BUDGET = 6_000;
+const STUB_BUDGET = 6_000;
 
 // A result over RESULT_LIMIT keeps its JSON shape. Dev 2026-10-17 run8 (Haiku automation): automations.listRuns came back
 // as a cut JSON string over the limit, so the same `result` was an array for a small history and a string for a large one,
 // and every JSON.parse of it in code mode failed. Arrays are cut to the prefix that fits (one item kept while long text can
-// still shrink), then long free text, and `truncation` names each cut. Only a result none of that brings under the limit
-// keeps the string preview. A cut list of records also names what it left out (`omitted`: id and name, within a budget):
-// dev 2026-10-18 run10, automations.list kept 2 of 48 automations and Haiku summarized "자동화 2개" as the whole week,
-// with no way to reach the other 46 (the operation has no paging; automations.get and listRuns take an id).
-function clipResult(value: unknown): { result: unknown; truncated?: true; truncation?: ResultCut[] } {
+// still shrink), then long free text, and `cuts` names each cut. Only a result none of that brings under the limit keeps
+// the string preview.
+// A cut list of records keeps the left-out records in place as stubs { id, name?, truncated: true } (within a budget), so
+// the list's length and its ids stay whole for code that reads only `result`. Dev 2026-10-18 run10 and run13:
+// automations.list kept 2 of 48 automations; Haiku's code read data.result, counted 2 and reported the week of
+// "자동화 2개" twice, once with the left-out names beside the result and the cut facts ahead of it, because the daemon's
+// canonical channel sorts keys (truncated/truncation came after result again) and the code never looked at them.
+function clipResult(value: unknown): { result: unknown; truncated?: true; cuts?: ResultCut[] } {
   if (value === undefined) return { result: null };
   let text: string;
   try { text = JSON.stringify(value) ?? "null"; } catch { return { result: String(value).slice(0, RESULT_LIMIT) }; }
@@ -329,13 +333,13 @@ function clipResult(value: unknown): { result: unknown; truncated?: true; trunca
   type Holder = Record<string | number, unknown>;
   const box: Holder = { $: JSON.parse(text) };
   const cuts = new Map<string, ResultCut>();
-  let size = text.length, omittedChars = 0;
-  const identity = (item: unknown): { id: string | number; name?: string } | null => {
+  let size = text.length, stubChars = 0;
+  const stubOf = (item: unknown): { id: string | number; name?: string; truncated: true } | null => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return null;
     const { id, name, title } = item as Record<string, unknown>;
     if (typeof id !== "string" && typeof id !== "number") return null;
     const label = typeof name === "string" ? name : typeof title === "string" ? title : undefined;
-    return { id, ...(label !== undefined ? { name: label.slice(0, 80) } : {}) };
+    return { id, ...(label !== undefined ? { name: label.slice(0, 80) } : {}), truncated: true };
   };
   const visit = (onNode: (holder: Holder, key: string | number, at: string) => void) => {
     const walk = (holder: Holder, key: string | number, at: string) => {
@@ -353,28 +357,33 @@ function clipResult(value: unknown): { result: unknown; truncated?: true; trunca
       const arrays: Array<{ path: string; array: unknown[]; sizes: number[]; total: number }> = [];
       visit((holder, key, at) => {
         const node = holder[key];
-        if (!Array.isArray(node) || node.length <= floor) return;
+        // While long text can still shrink (floor 1), a list already cut keeps its prefix and stubs.
+        if (!Array.isArray(node) || node.length <= floor || floor > 0 && cuts.has(at)) return;
         const sizes = node.map((item) => JSON.stringify(item ?? null).length);
         arrays.push({ path: at, array: node, sizes, total: sizes.reduce((sum, item) => sum + item, 0) });
       });
       const largest = arrays.sort((a, b) => b.total - a.total)[0];
       if (!largest) return;
-      let keep = largest.array.length, removed = 0;
-      while (keep > floor && removed < size - RESULT_LIMIT) removed += largest.sizes[--keep] + (keep > 0 ? 1 : 0);
       const previous = cuts.get(largest.path);
-      // The items right after the kept prefix come first (the next page of a newest-first list).
-      const dropped: Array<{ id: string | number; name?: string }> = [];
-      for (const item of largest.array.slice(keep)) {
-        const named = identity(item);
-        if (!named) continue;
-        const cost = JSON.stringify(named).length + 1;
-        if (omittedChars + cost > OMITTED_BUDGET) break;
-        omittedChars += cost;
-        dropped.push(named);
+      // A first cut of a list of records reserves room for the stubs of what it leaves out; a later cut drops from the end
+      // (stubs first) without new stubs.
+      const records = !previous && largest.array.every((item) => stubOf(item) !== null);
+      const target = records ? RESULT_LIMIT - Math.min(STUB_BUDGET - stubChars, STUB_BUDGET) : RESULT_LIMIT;
+      let keep = largest.array.length, removed = 0;
+      while (keep > floor && removed < size - target) removed += largest.sizes[--keep] + (keep > 0 ? 1 : 0);
+      const stubs: unknown[] = [];
+      if (records) for (const item of largest.array.slice(keep)) {
+        const stub = stubOf(item)!;
+        const cost = JSON.stringify(stub).length + 1;
+        if (stubChars + cost > STUB_BUDGET) break;
+        stubChars += cost;
+        stubs.push(stub);
       }
-      const omitted = [...dropped, ...(previous?.omitted ?? [])];
-      cuts.set(largest.path, { path: largest.path, kind: "array", total: previous?.total ?? largest.array.length, returned: keep, ...(omitted.length ? { omitted } : {}) });
+      const full = previous ? Math.min(keep, previous.returned) : keep;
       largest.array.length = keep;
+      largest.array.push(...stubs);
+      const stubbed = previous ? keep - full : stubs.length;
+      cuts.set(largest.path, { path: largest.path, kind: "array", total: previous?.total ?? largest.sizes.length, returned: full, ...(stubbed ? { stubbed } : {}) });
       size = JSON.stringify(box.$).length;
     }
   };
@@ -393,7 +402,7 @@ function clipResult(value: unknown): { result: unknown; truncated?: true; trunca
   }
   cutArrays(0);
   if (size > RESULT_LIMIT) return { result: `${text.slice(0, RESULT_LIMIT)}…`, truncated: true };
-  return { result: box.$, truncated: true, truncation: [...cuts.values()] };
+  return { result: box.$, truncated: true, cuts: [...cuts.values()] };
 }
 
 function canonicalJson(value: unknown): string {
@@ -505,7 +514,8 @@ export async function appControlCallLocal(caller: AppControlCaller, input: { ope
   const refused = record?.ok === false || record?.success === false || record?.accepted === false
     || operation.effect !== "read" && (record?.state === "failed" || record?.status === "rejected");
   const code = refused ? typeof record?.code === "string" ? record.code : typeof record?.reasonCode === "string" ? record.reasonCode : "operation-refused" : undefined;
-  // The cut facts come before the result, so a reader of the reply's head sees them before the (long) data.
+  // The cut facts come before the result, so a reader of the reply's head sees them before the (long) data ("cuts" also
+  // sorts first where the reply is canonically encoded, as on the daemon's channel).
   const { result, ...cut } = clipResult(value);
   return { ok: !refused, operation: path, effect: operation.effect, ...cut, result, ...(code ? { code } : {}),
     ...await recordAppCallReceipt({ operation: path, effect: operation.effect, named: decoded, status: refused ? "refused" : "ok", ...(code ? { code } : {}), ownerTurn: caller.ownerTurn }) };
