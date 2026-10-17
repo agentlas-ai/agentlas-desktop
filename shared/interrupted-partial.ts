@@ -93,3 +93,41 @@ export function advanceMainLivePartial(previous: string, full: string): {
   }
   return { partialText: full, delta: null, drop: false };
 }
+
+/**
+ * ★팀원 partial도 델타로 보낸다 (perf review 2026-10-17, R-03).
+ *
+ * 팀원(agentId) partial의 `text`도 누적 전문이다. Main은 그것을 조각마다 통째로 실어 IPC·전달 일지·데몬 채널로
+ * 보냈다: 10 KB 답 하나가 조각 40자 기준 약 1.25 MB, 30 KB 답은 약 11 MB로 실행당 8 MB 일지 상한을 넘겨 같은
+ * 실행의 도구 이벤트를 다시 보기에서 밀어냈다. 이제 Main은 본 답과 같은 걸음(advanceMainLivePartial)으로 팀원마다
+ * 델타와 길이(`textLen`)만 보낸다. 팀원 흐름의 첫 조각과 이어지지 않는 다시 시작은 전문으로 간다.
+ *
+ * 읽는 쪽이 아는 모양은 그대로다: 아래 함수가 델타를 팀원의 누적 전문(`text`)으로 되돌린다. `texts`는 팀원 흐름마다
+ * 하나의 키(여러 실행을 받는 쪽은 실행 id를 키에 넣는다)로 누적 전문을 든다. `text`가 있으면 그 키를 바꾸고,
+ * `delta`는 `textLen`이 앞부분을 증명할 때만 잇는다. 본 적 없는 앞부분 위의 델타는 되살릴 수 없다: 길이(`textLen`)만
+ * 남겨 돌려준다 — 모든 소비자가 이미 "새 글자 없음"으로 읽는 모양이다 — 그리고 다음 전문까지 그 키를 버린다.
+ */
+export function reassembleAgentLivePartial<E extends {
+  kind?: string;
+  agentId?: string;
+  text?: string;
+  delta?: string;
+  textLen?: number;
+}>(texts: Map<string, string>, key: string, event: E): E {
+  if (event.kind !== "partial" || !event.agentId) return event;
+  if (typeof event.text === "string") {
+    texts.set(key, event.text);
+    return event;
+  }
+  if (typeof event.delta !== "string") return event;
+  const { delta, text: _text, ...rest } = event;
+  const known = texts.get(key);
+  const base = known ?? (event.textLen === delta.length ? "" : undefined);
+  const full = base === undefined ? undefined : base + delta;
+  if (full === undefined || (typeof event.textLen === "number" && full.length !== event.textLen)) {
+    texts.delete(key);
+    return rest as E;
+  }
+  texts.set(key, full);
+  return { ...rest, text: full, textLen: full.length } as E;
+}

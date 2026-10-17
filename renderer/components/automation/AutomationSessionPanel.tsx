@@ -13,6 +13,7 @@ import { sameMessageList, sameSnapshotIgnoring } from "@/lib/store-change-policy
 import { IconArrowLeft, IconClose, IconRefresh } from "@/components/Icon";
 import { AutomationStrategyPanel } from "./AutomationStrategyPanel";
 import type { PreparedOneAttachments } from "@shared/one-attachments";
+import { reassembleAgentLivePartial } from "@shared/interrupted-partial";
 import { useComposerEnter } from "@/lib/use-composer-enter";
 import type {
   AutomationExecutionPermission,
@@ -231,8 +232,15 @@ export function AutomationSessionPanel({
       busyRef.current = true;
       setStatus(ko ? "자동화가 실행 중이에요…" : "The automation is running…");
       let accumulated = "";
+      // Main sends a teammate's partial as a delta (perf review 2026-10-17, R-03); this view read its whole text.
+      // The attach buffer holds each teammate's latest whole text: the base for the deltas that follow.
+      const teammateTexts = new Map<string, string>();
+      for (const event of attached.events) {
+        if (event.kind === "partial" && event.agentId && typeof event.text === "string") teammateTexts.set(event.agentId, event.text);
+      }
       unsubRef.current?.();
-      unsubRef.current = events.on(api.invoke.eventChannel(attached.runId), (ev: McpInvocationEvent) => {
+      unsubRef.current = events.on(api.invoke.eventChannel(attached.runId), (delivered: McpInvocationEvent) => {
+        const ev = reassembleAgentLivePartial(teammateTexts, delivered.agentId ?? "", delivered);
         if (ev.kind === "partial") {
           accumulated = typeof ev.delta === "string" ? accumulated + ev.delta : ev.text ?? accumulated;
           setStreamText(accumulated);
@@ -356,7 +364,10 @@ export function AutomationSessionPanel({
       function subscribeToRun(targetRunId: string) {
         if (!events) return;
         unsubRef.current?.();
-        unsubRef.current = events.on(api!.invoke.eventChannel(targetRunId), (ev: McpInvocationEvent) => {
+        // Main sends a teammate's partial as a delta (perf review 2026-10-17, R-03); this view read its whole text.
+        const teammateTexts = new Map<string, string>();
+        unsubRef.current = events.on(api!.invoke.eventChannel(targetRunId), (delivered: McpInvocationEvent) => {
+          const ev = reassembleAgentLivePartial(teammateTexts, delivered.agentId ?? "", delivered);
           if (ev.kind === "partial") {
             accumulated = typeof ev.delta === "string" ? accumulated + ev.delta : ev.text ?? accumulated;
             setStreamText(accumulated);

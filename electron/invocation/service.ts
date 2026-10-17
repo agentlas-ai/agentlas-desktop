@@ -406,6 +406,8 @@ interface RunRecord {
   steeringInterruptRequested: boolean;
   events: McpInvocationEvent[];
   partialText: string;
+  /** Each teammate's (agentId) accumulated live text: the base its wire deltas extend (liveWirePartial). */
+  agentPartialTexts: Map<string, string>;
   resultFolder?: string;
   actualAgentId?: string;
   workspaceBinding?: InvocationWorkspaceBinding;
@@ -440,6 +442,67 @@ interface RunRecord {
 function nextObservableSequence(record: RunRecord): number {
   record.observableStepSequence += 1;
   return record.observableStepSequence;
+}
+
+/**
+ * The wire form of one live partial, or null when it brings nothing new (perf review 2026-10-17, R-03).
+ *
+ * A partial's `text` is the accumulated answer of its stream. The run's own answer already went out as `delta` +
+ * `textLen`; a teammate's (agentId) went out whole on every frame, so a 10 KB answer cost about 1.25 MB of IPC and
+ * delivery-journal JSON per teammate and a 30 KB one overran the run's 8 MB journal, evicting its tool events from
+ * replay. Each teammate now has its own base (`agentPartialTexts`) and the same step. A teammate stream's first frame
+ * and any reset that does not extend the base still carry the whole text, so a viewer re-syncs there. Readers rebuild
+ * the text with reassembleAgentLivePartial (renderer gate, phone bridge, daemon relay).
+ */
+function liveWirePartial(record: Pick<RunRecord, "partialText" | "agentPartialTexts">, event: McpInvocationEvent): McpInvocationEvent | null {
+  if (event.kind !== "partial" || typeof event.text !== "string") return event;
+  const full = event.text;
+  if (!event.agentId) {
+    // 턴 확정 경계(빈 전문 + durableMessageId)도 여기서 버퍼를 비운다 — 이미 저장한
+    // 본문이 중단 시 "중단된 답변"으로 또 저장되지 않게(shared/interrupted-partial.ts).
+    const step = advanceMainLivePartial(record.partialText, full);
+    if (step.drop) return null;
+    record.partialText = step.partialText;
+    return step.delta !== null
+      ? { ...event, text: undefined, delta: step.delta, textLen: full.length }
+      : { ...event, textLen: full.length };
+  }
+  const previous = record.agentPartialTexts.get(event.agentId);
+  if (previous === undefined) {
+    record.agentPartialTexts.set(event.agentId, full);
+    return { ...event, textLen: full.length };
+  }
+  const step = advanceMainLivePartial(previous, full);
+  if (step.drop) return null;
+  record.agentPartialTexts.set(event.agentId, full);
+  return step.delta !== null
+    ? { ...event, text: undefined, delta: step.delta, textLen: full.length }
+    : { ...event, textLen: full.length };
+}
+
+/** Teammate bases for a hydrating viewer, bounded like the root `partialText` (8 MB in all). */
+function replayAgentPartialTexts(texts: ReadonlyMap<string, string>): Record<string, string> | undefined {
+  if (!texts.size) return undefined;
+  let length = 0;
+  for (const text of texts.values()) length += text.length;
+  return length <= 8 * 1024 * 1024 ? Object.fromEntries(texts) : undefined;
+}
+
+/**
+ * The attach buffer keeps one partial per teammate: its latest accumulated text, placed at its latest frame. Pushing
+ * every frame let one long teammate answer (thousands of frames) evict the run's tool rows from the 4,000-event buffer.
+ */
+function replaceTeammatePartial(events: McpInvocationEvent[], event: McpInvocationEvent): boolean {
+  if (event.kind !== "partial" || !event.agentId || typeof event.text !== "string") return false;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const prior = events[index];
+    if (prior.kind === "partial" && prior.agentId === event.agentId && typeof prior.text === "string") {
+      events.splice(index, 1);
+      break;
+    }
+  }
+  events.push(event);
+  return true;
 }
 
 interface QueuedSteer {
@@ -3199,6 +3262,7 @@ export class InvocationService {
       steeringInterruptRequested: false,
       events: [],
       partialText: "",
+      agentPartialTexts: new Map(),
       resultFolder,
       oneMode: requestedOneMode,
       goal: invocationRequest.userPrompt.slice(0, 4_000),
@@ -4464,24 +4528,16 @@ export class InvocationService {
         }
         recordObservableRunStep(canonicalTask, runId, event, observableStepSequence, record.semanticSteps);
 
-        let wireEvent = event;
-        if (event.kind === "partial" && !event.agentId && typeof event.text === "string") {
-          const full = event.text;
-          // 턴 확정 경계(빈 전문 + durableMessageId)도 여기서 버퍼를 비운다 — 이미 저장한
-          // 본문이 중단 시 "중단된 답변"으로 또 저장되지 않게(shared/interrupted-partial.ts).
-          const step = advanceMainLivePartial(record.partialText, full);
-          if (step.drop) return;
-          wireEvent = step.delta !== null
-            ? { ...event, text: undefined, delta: step.delta, textLen: full.length }
-            : { ...event, textLen: full.length };
-          record.partialText = step.partialText;
-        }
+        const wireEvent = liveWirePartial(record, event);
+        if (!wireEvent) return;
 
         const last = record.events[record.events.length - 1];
         // partial(누적 전문)과 usage(단조 카운터)는 마지막 값만 의미 있다 — 연속이 아니어도
         // 같은 kind의 직전 버퍼 항목을 교체해 버퍼가 고빈도 신호로 밀려나지 않게 한다.
         if (event.kind === "partial" && !event.agentId && last?.kind === "partial" && !last.agentId) {
           record.events[record.events.length - 1] = event;
+        } else if (replaceTeammatePartial(record.events, event)) {
+          // One partial per teammate (its text is cumulative); see replaceTeammatePartial.
         } else if (
           event.kind === "reasoning" && event.reasoning?.phase === "delta"
           && last?.kind === "reasoning" && last.reasoning?.phase === "delta"
@@ -6952,7 +7008,17 @@ export class InvocationService {
     const replay = this.deliveryJournal.replay(input);
     const record = this.activeRuns.get(input.runId) ?? this.pendingGoalVerifications.get(input.runId) ?? this.settlingRuns.get(input.runId);
     if (record && record.chatId !== input.chatId) throw new Error("run-event-replay-owner-mismatch");
-    return { ...replay, receipt, ...(record && record.partialText.length <= 8 * 1024 * 1024 ? { partialText: record.partialText } : {}) };
+    // A viewer that must hydrate (the journal no longer holds its cursor) also loses the bases its teammate deltas
+    // extend; a complete tail never needs them.
+    const agentPartialTexts = record && replay.status !== "complete" ? replayAgentPartialTexts(record.agentPartialTexts) : undefined;
+    return { ...replay, receipt, ...(record && record.partialText.length <= 8 * 1024 * 1024 ? { partialText: record.partialText } : {}),
+      ...(agentPartialTexts ? { agentPartialTexts } : {}) };
+  }
+
+  /** A teammate's accumulated live text in a run this service hosts, for readers that must project it whole (phone). */
+  liveAgentPartialText(runId: string, agentId: string): string | undefined {
+    const record = this.activeRuns.get(runId) ?? this.pendingGoalVerifications.get(runId) ?? this.settlingRuns.get(runId);
+    return record?.agentPartialTexts.get(agentId);
   }
 
   /** Main-owned recovery receipt; held directions are never replay permission. */
@@ -7119,10 +7185,12 @@ export class InvocationService {
             ? { hostStopCause: invocationHostStopCause(record.controller.signal.reason.message) } : {}) },
       });
     }
-    if (event.kind === "partial" && !event.agentId && typeof event.text === "string") record.partialText = event.text;
-    record.events.push(event);
+    // A background run gets no push: replay of its journal is its only live channel, so its partials (its own answer
+    // and each teammate's) go there as deltas too, never as the whole text on every frame.
+    const wireEvent = liveWirePartial(record, event);
+    if (!replaceTeammatePartial(record.events, event)) record.events.push(event);
     if (record.events.length > MAX_BUFFERED_EVENTS) record.events.splice(0, record.events.length - MAX_BUFFERED_EVENTS);
-    this.publishRunEvent(record, { runId, chatId: record.chatId, event });
+    if (wireEvent) this.publishRunEvent(record, { runId, chatId: record.chatId, event: wireEvent });
     return terminal;
   }
 

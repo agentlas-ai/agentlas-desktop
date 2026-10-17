@@ -1,6 +1,6 @@
 import type { McpInvocationEvent } from "@shared/types";
 import type { RunEventReplay, RunEventReplayInput } from "@shared/run-event-delivery";
-import { isLivePartialCommitBoundary } from "@shared/interrupted-partial";
+import { isLivePartialCommitBoundary, reassembleAgentLivePartial } from "@shared/interrupted-partial";
 
 /*
  * When the subscriber asks Main to replay (perf review 2026-10-17, R-04). Push is the live channel; replay is the
@@ -102,6 +102,9 @@ export function subscribeOrderedRunEvents(options: Options): () => void {
   let projectionRevision = 0;
   const pending = new Map<number, McpInvocationEvent>();
   const sizes = new Map<number, number>();
+  // Each teammate's accumulated live text. Main sends teammate partials as deltas (perf review 2026-10-17, R-03);
+  // every projection below still receives the teammate's whole `text`, in delivery order.
+  const teammateTexts = new Map<string, string>();
   let pendingBytes = 0, needsHydration = false;
   // Safety-poll state: push health, the last replay request, and the current quiet backoff.
   const pollMs = options.pollMs ?? 1000, quietMs = options.quietMs ?? RUN_EVENT_QUIET_MS;
@@ -131,8 +134,10 @@ export function subscribeOrderedRunEvents(options: Options): () => void {
     let count = 0;
     const deadline = performance.now() + 8;
     while (!disposed && pending.has(cursor + 1) && count++ < 20_000 && performance.now() < deadline) {
-      const event = pending.get(++cursor)!; pending.delete(cursor);
+      const delivered = pending.get(++cursor)!; pending.delete(cursor);
       pendingBytes -= sizes.get(cursor) ?? 0; sizes.delete(cursor);
+      const event = delivered.kind === "partial" && delivered.agentId
+        ? reassembleAgentLivePartial(teammateTexts, delivered.agentId, delivered) : delivered;
       // Keep provider sequence in delivery.sourceSequence. UI sequence cannot collide
       // with unsequenced host notices or intentional provider-side gaps.
       const projected = { ...event, sequence: cursor };
@@ -187,6 +192,12 @@ export function subscribeOrderedRunEvents(options: Options): () => void {
         if (!applied || !isCurrent()) return;
         needsHydration = false;
         cursor = throughOrdinal;
+        // Teammate deltas after the hydrated cursor extend Main's bases at that cursor. Without them (a replay that
+        // only says "unavailable" keeps what this view holds) a teammate shows no new words until its next whole frame.
+        if (snapshot.agentPartialTexts || snapshot.status !== "unavailable") {
+          teammateTexts.clear();
+          for (const [agentId, text] of Object.entries(snapshot.agentPartialTexts ?? {})) teammateTexts.set(agentId, text);
+        }
         for (const ordinal of pending.keys()) if (ordinal <= cursor) {
           pending.delete(ordinal); pendingBytes -= sizes.get(ordinal) ?? 0; sizes.delete(ordinal);
         }

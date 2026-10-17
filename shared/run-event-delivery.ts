@@ -20,6 +20,11 @@ export interface RunEventReplay {
   terminalEvent: McpInvocationEvent | null;
   /** Cumulative root text captured at latestOrdinal, only while the run is live. */
   partialText?: string;
+  /**
+   * Each teammate's (agentId) cumulative live text at latestOrdinal, only on a replay that is not a complete tail and
+   * only while the run is live: the bases a hydrating viewer's teammate deltas extend (reassembleAgentLivePartial).
+   */
+  agentPartialTexts?: Record<string, string>;
   receipt: InvocationRunReceipt | null;
 }
 export function parseRunEventReplayInput(value: unknown): RunEventReplayInput {

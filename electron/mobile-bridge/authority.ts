@@ -1774,6 +1774,25 @@ export function projectOneMessageForPhone(
   return { messageId: boundedRedactedText(event.durableMessageId, 256), preview: boundedRedactedText(text, 600) };
 }
 
+/**
+ * A teammate's live partial as phones read it: its accumulated `text` (perf review 2026-10-17, R-03).
+ *
+ * Old and current phone apps rebuild only the run's own answer from deltas; a teammate row (agentId) shows the event's
+ * `text`. Main now sends teammate partials as `delta` + `textLen`, so a partial of a run this process hosts is
+ * projected whole from the host's base for that teammate. The listener runs synchronously inside the publish that
+ * advanced the base, and `textLen` proves the match; otherwise the length alone goes (the phone's "N characters").
+ */
+export function hostedTeammatePartialForPhone(
+  runId: string,
+  event: McpInvocationEvent,
+  liveText: (runId: string, agentId: string) => string | undefined,
+): McpInvocationEvent {
+  if (event.kind !== "partial" || !event.agentId || typeof event.text === "string" || typeof event.delta !== "string") return event;
+  const { delta: _delta, text: _text, ...rest } = event;
+  const full = liveText(runId, event.agentId);
+  return typeof full === "string" && full.length === event.textLen ? { ...rest, text: full, textLen: full.length } : rest;
+}
+
 /** Lightweight saved-answer observer, independent of expensive phone snapshots. */
 export function durableMobileApprovalPending(id: string, chatId: string): boolean {
   try {
@@ -5549,6 +5568,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     if (this.upstreamUnsubscribers.length > 0) return;
     // One handler for Main-hosted and daemon-hosted runs (personal One runs in the daemon since 2026-10-12).
     const forwardInvocationEvent = ({ runId, chatId, event }: { runId: string; chatId: string; event: McpInvocationEvent }) => {
+      // A teammate's partial goes to the phone whole. Main-hosted: from this host's base (a daemon-hosted one already
+      // arrives whole from native-gui-events.ts, and is returned unchanged).
+      event = hostedTeammatePartialForPhone(runId, event, (hostedRunId, agentId) => invocationService.liveAgentPartialText(hostedRunId, agentId));
       // Live events arrive per token; the folder and Task lookups are per
       // RUN, not per event. The cache is dropped when the run terminates.
       const { cwd, taskId, personalOne } = cachedRunContext(runId, chatId);

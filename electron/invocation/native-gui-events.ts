@@ -1,4 +1,5 @@
 import type { McpInvocationEvent } from "../../shared/types";
+import { reassembleAgentLivePartial } from "../../shared/interrupted-partial";
 
 /**
  * Live invocation events of runs hosted by the background service (daemon), for Main-side consumers other than the
@@ -32,8 +33,11 @@ export function nativeGuiActiveChatIds(): readonly string[] {
 }
 
 export function publishNativeGuiInvocationEvent(envelope: NativeGuiInvocationEvent): void {
+  // Main-side readers get a daemon-hosted teammate's partial whole, as they always read it (createNativeTeammatePartialRelay).
+  const event = teammatePartials.relay(envelope.runId, envelope.event);
+  const delivered = event === envelope.event ? envelope : { ...envelope, event };
   for (const listener of eventListeners) {
-    try { listener(envelope); } catch (error) { console.warn("[native-invocation] event listener failed", error); }
+    try { listener(delivered); } catch (error) { console.warn("[native-invocation] event listener failed", error); }
   }
 }
 
@@ -43,3 +47,35 @@ export function publishNativeGuiActiveChats(chatIds: readonly string[]): void {
     try { listener(observedActiveChatIds); } catch (error) { console.warn("[native-invocation] active-chat listener failed", error); }
   }
 }
+
+/** Concurrent daemon-hosted teammate streams whose text Main rebuilds; a run's own end frees its own. */
+const MAX_RELAYED_TEAMMATE_STREAMS = 256;
+
+/**
+ * Rebuilds daemon-hosted teammate partials for Main-side readers (perf review 2026-10-17, R-03). The daemon sends a
+ * teammate's partial as `delta` + `textLen` (the windows rebuild it in their ordered gate); the phone bridge, like
+ * every phone app, reads a teammate row's `text`. Keyed by run and teammate. A run's entries go with its own final or
+ * error; past the cap the least recently streamed go (that stream then shows its length until its next whole frame).
+ */
+export function createNativeTeammatePartialRelay(maxStreams = MAX_RELAYED_TEAMMATE_STREAMS) {
+  const texts = new Map<string, string>();
+  const forgetRun = (runId: string): void => {
+    for (const key of texts.keys()) if (key.startsWith(`${runId}\u0000`)) texts.delete(key);
+  };
+  const relay = (runId: string, event: McpInvocationEvent): McpInvocationEvent => {
+    if (event.kind === "partial" && event.agentId) {
+      const key = `${runId}\u0000${event.agentId}`;
+      const known = texts.get(key);
+      // Re-insert so the Map's order is least recently streamed first.
+      if (known !== undefined) { texts.delete(key); texts.set(key, known); }
+      const rebuilt = reassembleAgentLivePartial(texts, key, event);
+      while (texts.size > maxStreams) texts.delete(texts.keys().next().value!);
+      return rebuilt;
+    }
+    if (!event.agentId && (event.kind === "final" || event.kind === "error")) forgetRun(runId);
+    return event;
+  };
+  return { relay, forgetRun, get size() { return texts.size; } };
+}
+/** Main's one relay for daemon events (native-gui-public.ts publishes every daemon event here). */
+const teammatePartials = createNativeTeammatePartialRelay();
