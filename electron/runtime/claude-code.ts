@@ -94,6 +94,7 @@ import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import { isAuthenticSystemTimeMcpLaunch } from "../mcp-tools/system-time-server";
 import { createClaudeWorkforceObservation } from "./claude-workforce-observation";
 import { adoptClaudeSessionIntoProductHome, claudeProductHomeDir, withClaudeMirrorExcludes, withClaudeProductHome } from "./claude-product-home";
+import { claudeSandboxEnvFile, ensureSandboxNpmCacheDir, sandboxNpmCacheDir } from "./sandbox-tool-cache";
 import { bindNativeFileProofObserver, mcpFileProofCandidate } from "../long-run/file-proof";
 import { normalEndToolEvidence, settleNormalEnd, trackReportedToolCalls } from "../../shared/turn-settlement";
 
@@ -368,7 +369,8 @@ export class ClaudeTurnModelTracker {
 /** 헤드리스 쓰기 실행에 허용하는 임시 폴더 — OS 임시 폴더와 Claude CLI 자체 스크래치(/tmp). */
 export function claudeScratchDirArgs(): string[] {
   const dirs = new Set<string>();
-  for (const candidate of [os.tmpdir(), "/tmp"]) {
+  // Plus the product's sandbox npm cache, so `npm install` works in the project (sandbox-tool-cache.ts).
+  for (const candidate of [os.tmpdir(), "/tmp", sandboxNpmCacheDir()]) {
     if (candidate && path.isAbsolute(candidate)) dirs.add(candidate);
   }
   return [...dirs].flatMap((dir) => ["--add-dir", dir]);
@@ -1488,6 +1490,13 @@ const runClaudeTurn = async (
     MAX_STRUCTURED_OUTPUT_RETRIES: "1", CLAUDE_CODE_MAX_TURNS: "1", CLAUDE_CODE_MAX_RETRIES: "0" } : req.env ?? process.env, {
     keepMcpServers: (selectionFor(runReq.agentId, undefined, runReq.chatId)?.items ?? []).filter((item) => item.source === "claude" && item.kind === "connector" && item.enabled).map((item) => item.name),
   });
+  // A write run's Bash points npm at the cache its sandbox may write (sandbox-tool-cache.ts). CLAUDE_ENV_FILE is sourced
+  // before each Bash command only, so MCP servers keep the person's cache.
+  if (req.permission === "write" && !runReq.browserOnly && !runReq.untrustedNoTools) {
+    const npmCache = ensureSandboxNpmCacheDir();
+    const envFile = npmCache ? claudeSandboxEnvFile(npmCache, runEnv.CLAUDE_ENV_FILE) : null;
+    if (envFile) runEnv.CLAUDE_ENV_FILE = envFile;
+  }
   // A product session an older install wrote into ~/.claude/projects moves into the mirror before it is resumed.
   if (resumeSessionId) { try { adoptClaudeSessionIntoProductHome(runEnv, resumeSessionId, runCwd); } catch { /* resume falls back below */ } }
   const residencyEligible =

@@ -34,6 +34,7 @@ import { codexOutputSchemaFallbackBlock, openAiStrictSchemaOrNull } from "./stri
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult , RunnerFailure } from "./runner";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import { codexShellEnvironmentArgs } from "./env-key-reach";
+import { ensureSandboxNpmCacheDir, sandboxNpmCacheDir } from "./sandbox-tool-cache";
 import { imageOutputContract } from "./prompt-sections";
 import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliSilenceWindowMs, cliToolSilenceWindowMs, type CliSilenceGuard, childExitReason, RUNTIME_SILENT_TIMEOUT_CODE, runtimeProtocolUnrecognizedFailure, wrapSystemPrompt, workforceObservedHostAuthorityEnforcement, RuntimeTurnUnsettledError, markRefusedBeforeDispatch, preDispatchRefusal } from "./runner";
 import { decideTurnSettlement, normalEndToolEvidence, settleNormalEnd, trackReportedToolCalls } from "../../shared/turn-settlement";
@@ -441,6 +442,8 @@ const CODEX_WORKSPACE_WRITE_CONFIG_ARGS = [
   "-c", "sandbox_workspace_write.network_access=true",
   "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
   "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
+  // The working folder is always writable; this adds only the product's sandbox npm cache (sandbox-tool-cache.ts).
+  "-c", `sandbox_workspace_write.writable_roots=${JSON.stringify([sandboxNpmCacheDir()])}`,
 ] as const;
 
 /**
@@ -1515,7 +1518,8 @@ export function codexThreadPolicy(
       approvalPolicy: "on-request",
       sandboxPolicy: {
         type: "workspaceWrite",
-        writableRoots: [writableRoot],
+        // Plus the product's sandbox npm cache, so `npm install` works in the project (sandbox-tool-cache.ts).
+        writableRoots: [writableRoot, sandboxNpmCacheDir()],
         networkAccess: true,
         // A selected project may itself live below TMPDIR, but Codex's default
         // temp grants must stay disabled. `writableRoots` re-adds only this
@@ -2677,7 +2681,7 @@ async function runCodexResidentTurn(input: {
         // workspace-write values that turn/start will use before admitting a
         // Workforce model turn; a requested turn override alone is no proof.
         ...(workforceObservation && req.permission === "write" ? {
-          "sandbox_workspace_write.writable_roots": [path.resolve(cwd)],
+          "sandbox_workspace_write.writable_roots": [path.resolve(cwd), sandboxNpmCacheDir()],
           "sandbox_workspace_write.network_access": true,
           "sandbox_workspace_write.exclude_tmpdir_env_var": true,
           "sandbox_workspace_write.exclude_slash_tmp": true,
@@ -3407,7 +3411,10 @@ export const runCodex: Runner = async (
     cwd: runReq.cwd ?? agentRunCwd(),
   });
   events.onStatus(personalContext.receipt);
-  const browserOnlyConfigArgs: string[] = [...desktopSurface.args, ...personalContext.args, ...codexShellEnvironmentArgs()];
+  // Shell commands (never MCP servers) write npm's cache where the write sandbox allows it (sandbox-tool-cache.ts).
+  const sandboxNpmCache = ensureSandboxNpmCacheDir();
+  const browserOnlyConfigArgs: string[] = [...desktopSurface.args, ...personalContext.args, ...codexShellEnvironmentArgs(),
+    ...(sandboxNpmCache ? ["-c", `shell_environment_policy.set.NPM_CONFIG_CACHE=${JSON.stringify(sandboxNpmCache)}`] : [])];
   // 모델/effort를 CLI에 명시 전달 — 예전엔 세션 지문에만 쓰고 인자로는 안 넘겨서, 앱이
   // 뭘 선택했든 기기의 ~/.codex/config.toml(또는 codex 업데이트가 바꾼 내장 기본값)이
   // 이겼다(2026-07-08: 다른 기기에서 지정한 적 없는 Spark 모델로 조용히 실행된 사고).
