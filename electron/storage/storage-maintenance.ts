@@ -138,8 +138,11 @@ export async function pruneTelegramAttachmentCopies(
 
 function readWatermark(): RunDetailWatermark | null {
   try {
+    // run_events.id is TEXT. A number check rejected every stored watermark,
+    // so each pass restarted at the oldest marker and stopped at the same place
+    // (owner Mac 2026-10-17: "run detail 1034 runs" every pass, 0 rows removed).
     const parsed = JSON.parse(getMeta(WATERMARK_KEY) ?? "null") as RunDetailWatermark | null;
-    return parsed && typeof parsed.ts === "string" && Number.isFinite(parsed.id) ? parsed : null;
+    return parsed && typeof parsed.ts === "string" && typeof parsed.id === "string" ? parsed : null;
   } catch { return null; }
 }
 
@@ -249,7 +252,8 @@ export function startStorageMaintenance(options: {
     if (!report) return;
     if (report.freedBytes > 0 || report.runDetail.runs > 0 || report.triggerEvents.compacted > 0) {
       console.info(`[storage] freed ${report.freedBytes} bytes; intermediates ${report.intermediates.files} files; `
-        + `transcripts ${report.transcripts.sessions}+${report.transcripts.orphans}; run detail ${report.runDetail.runs} runs; `
+        + `transcripts ${report.transcripts.sessions}+${report.transcripts.orphans}; run detail ${report.runDetail.runs} runs `
+        + `(deleted ${report.runDetail.deleted}, compacted ${report.runDetail.compacted}, complete ${report.runDetail.complete}); `
         + `trigger events compacted ${report.triggerEvents.compacted}; telegram copies ${report.telegramAttachments.folders}`);
     }
     if (!report.lowDisk || report.freeBytes === null) return;

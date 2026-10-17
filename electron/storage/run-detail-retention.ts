@@ -49,7 +49,8 @@ export function compactAutomationDetail(payloadJson: string | null): string {
   return JSON.stringify(payload);
 }
 
-export interface RunDetailWatermark { ts: string; id: number }
+/** `id` is the run_events TEXT primary key (`evt_…`), not a number. */
+export interface RunDetailWatermark { ts: string; id: string }
 
 export interface RunDetailSlice {
   runs: number;
@@ -78,7 +79,7 @@ export function retireRunDetailSlice(
   options: { days: number; now?: number; watermark?: RunDetailWatermark | null; maxRuns?: number; maxRows?: number; maxMs?: number },
 ): RunDetailSlice {
   const cutoff = new Date((options.now ?? Date.now()) - options.days * 86_400_000).toISOString();
-  let watermark: RunDetailWatermark = options.watermark ?? { ts: "", id: 0 };
+  let watermark: RunDetailWatermark = options.watermark ?? { ts: "", id: "" };
   const slice: RunDetailSlice = { runs: 0, deleted: 0, compacted: 0, watermark, done: false };
   // A blocked Goal resumes into active, so it is protected too (statuses: active, blocked, completed, cancelled).
   const activeGoalChats = `SELECT chat_id FROM chat_goal_contracts WHERE status IN ('active', 'blocked')`;
@@ -89,7 +90,7 @@ export function retireRunDetailSlice(
   const markers = db.prepare(`SELECT id, run_id, ts FROM run_events
     WHERE kind IN (${list(RUN_TERMINAL_KINDS)}) AND ts < ? AND (ts > ? OR (ts = ? AND id > ?))
     ORDER BY ts, id LIMIT ?`).all(cutoff, watermark.ts, watermark.ts, watermark.id, options.maxRuns ?? 50) as
-    Array<{ id: number; run_id: string; ts: string }>;
+    Array<{ id: string; run_id: string; ts: string }>;
   // The run's last event by sequence: one index step, where a ts filter would read every row of a long run.
   const lastEventTs = db.prepare("SELECT ts FROM run_events WHERE run_id = ? ORDER BY seq DESC LIMIT 1");
   const startedAt = Date.now();
@@ -108,7 +109,7 @@ export function retireRunDetailSlice(
     budget -= removedCalls;
     slice.deleted += removedText + removedCalls;
     if (budget > 0) {
-      for (const row of automationCallRows.all(runId, budget) as Array<{ id: number; payload_json: string | null }>) {
+      for (const row of automationCallRows.all(runId, budget) as Array<{ id: string; payload_json: string | null }>) {
         updatePayload.run(compactAutomationDetail(row.payload_json), row.id);
         slice.compacted += 1;
         budget -= 1;
