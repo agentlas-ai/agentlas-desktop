@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 
@@ -172,7 +173,26 @@ export interface Transcript { routeId: string; modelId: string; text: string; wo
  * socket and every timer froze for the whole run (a 7 min 1080p cut: 5.2 s per call, 8+ calls per film). Same timeout,
  * kill signal, maxBuffer and closed stdin as spawnSync; a missing tool or a kill gives status null as before.
  */
+/**
+ * ffmpeg/ffprobe the way media-quality and output-verification find them: PATH, then the usual install folders. The
+ * Dock-launched app's PATH is /usr/bin:/bin:/usr/sbin:/sbin, so a bare "ffmpeg" never ran there and every media.listen
+ * in the production app failed (reported as audio_track_unavailable, Yotube 2026-10-17: three refusals in one turn).
+ */
+export function mediaEngineBin(name: "ffmpeg" | "ffprobe"): string | null {
+  const dirs = [...(process.env.PATH ?? "").split(path.delimiter).filter(Boolean), path.join(os.homedir(), ".local", "bin"), "/opt/homebrew/bin", "/usr/local/bin"];
+  for (const dir of new Set(dirs)) {
+    const candidate = path.join(dir, process.platform === "win32" ? `${name}.exe` : name);
+    try { fs.accessSync(candidate, fs.constants.X_OK); if (fs.statSync(candidate).isFile()) return candidate; } catch { /* next */ }
+  }
+  return null;
+}
+
 export function runTool(bin: string, args: string[], timeoutMs: number): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  if (bin === "ffmpeg" || bin === "ffprobe") {
+    const resolved = mediaEngineBin(bin);
+    if (!resolved) return Promise.resolve({ status: null, stdout: "", stderr: "media_engine_missing" });
+    bin = resolved;
+  }
   return new Promise((resolve) => {
     const child = execFile(bin, args, { encoding: "utf8", timeout: timeoutMs, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
       const code: unknown = error ? (error as { code?: unknown }).code : 0;

@@ -109,6 +109,7 @@ export async function mediaListen(args: Record<string, unknown>, ctx: { chatId: 
   return kp.answerWithinWindow(key, async () => {
     const work = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-listen-"));
     try {
+      if (!kp.mediaEngineBin("ffmpeg")) return refused("media_engine_missing", "ffmpeg is not installed on this computer");
       const track = await kp.speechTrack(file, work);
       if (!track) return refused("audio_track_unavailable", "ffmpeg could not read an audio track from this file");
       const heard = await kp.transcribeFile(routeId, track, ctx, str(args.languageCode) || undefined);
@@ -179,6 +180,7 @@ export async function speechTranscribePort(args: Record<string, unknown>, ctx: {
   return kp.answerWithinWindow(`transcribe:${fileSha}:${routeId}`, async () => {
     const work = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-transcribe-"));
     try {
+      if (!kp.mediaEngineBin("ffmpeg")) return refused("media_engine_missing", "ffmpeg is not installed on this computer");
       const track = await kp.speechTrack(file, work);
       if (!track) return refused("audio_track_unavailable", "ffmpeg could not read an audio track from this file");
       const heard = await kp.transcribeFile(routeId, track, ctx, str(args.languageCode) || undefined);
