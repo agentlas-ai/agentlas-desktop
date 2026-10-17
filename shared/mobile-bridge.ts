@@ -237,6 +237,11 @@ export const MOBILE_BRIDGE_METHODS = [
   // desktop_transport.dart / 웹 PIN 사본(src/one/shared/mobile-bridge.ts + 패치).
   ...MOBILE_BRIDGE_MAIL_METHODS,
   "device.revokeSelf",
+  // 폰 "도구" 화면의 커넥터(electron/mobile-bridge/connectors.ts, 2026-10-17). Appended: older apps never call them.
+  "connectors.list",
+  "connectors.setEnabled",
+  "connectors.install",
+  "connectors.test",
 ] as const;
 
 /** Accepted only to give installed Mobile clients a terminal retirement response. */
@@ -391,6 +396,8 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "science.chat.send", "science.chat.cancel",
   ...MOBILE_GOAL_CONTROL_WRITE_METHODS,
   "device.revokeSelf",
+  "connectors.setEnabled",
+  "connectors.install",
   "hub.invoke",
   "harness.command",
   "hub.install",
@@ -2725,6 +2732,7 @@ const EMPTY_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
   "mail.identity",
   "one.profile.get",
   "device.revokeSelf",
+  "connectors.list",
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -3828,6 +3836,16 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
               : validateRuntimeSelectionValue(params.runtimeSelection, "orchestrator"),
           )
         : "automations.setRuntime accepts only id and runtimeSelection";
+    case "connectors.setEnabled":
+      return hasOnlyKeys(params, ["id", "enabled"])
+        ? firstError(requiredString(params, "id"), params.enabled === true || params.enabled === false ? null : "enabled must be a boolean")
+        : "connectors.setEnabled accepts only id and enabled";
+    case "connectors.install":
+      return hasOnlyKeys(params, ["catalogId"])
+        ? requiredString(params, "catalogId")
+        : "connectors.install accepts only catalogId";
+    case "connectors.test":
+      return hasOnlyKeys(params, ["id"]) ? requiredString(params, "id") : "connectors.test accepts only id";
     case "automations.toggle":
       return hasOnlyKeys(params, ["id", "enabled"])
         ? firstError(requiredString(params, "id"), params.enabled === true || params.enabled === false ? null : "enabled must be a boolean")

@@ -119,6 +119,7 @@ import { addOneOrgMember, getOneOrgState, markOneOrgMemberRead, openOneOrgMember
 import { readMobileOneAvatar } from "./one-avatar-preview";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import { listInstalledServers } from "../mcp-tools/registry";
+import { installMobileConnector, listMobileConnectors, setMobileConnectorEnabled, testMobileConnector } from "./connectors";
 import { routeOnly } from "../hephaestus/commands";
 import { normalizeRecommendation } from "../hephaestus/recommendation";
 import { getEngineToggles } from "../hephaestus/supervisor";
@@ -3405,6 +3406,26 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           })),
           plugins: (agent?.mcpServers ?? []).slice(0, 100).map((plugin) => boundedRedactedText(plugin, 256)),
         }, request.method);
+      }
+      // 폰 "도구" 화면 — Desktop 도구 라이브러리와 같은 함수와 같은 숨김 규칙(connectors.ts).
+      case "connectors.list": {
+        noParams(request);
+        return asJsonValue(listMobileConnectors(), request.method);
+      }
+      case "connectors.setEnabled": {
+        const params = guardedParams(request, ["id", "enabled"]);
+        return asJsonValue(
+          setMobileConnectorEnabled(requiredIdentifier(params, "id"), requiredBoolean(params, "enabled")),
+          request.method,
+        );
+      }
+      case "connectors.install": {
+        const params = guardedParams(request, ["catalogId"]);
+        return asJsonValue(installMobileConnector(requiredIdentifier(params, "catalogId")), request.method);
+      }
+      case "connectors.test": {
+        const params = guardedParams(request, ["id"]);
+        return asJsonValue(await testMobileConnector(requiredIdentifier(params, "id")), request.method);
       }
       case "plugins.list": {
         noParams(request);
