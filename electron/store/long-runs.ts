@@ -2133,7 +2133,8 @@ export function recordLongRunInferenceStarted(input: {
       .get(input.invocationRunId, `${input.sourceId}:started`) as { ts: string; payload_json: string } | undefined;
     const payload = source ? JSON.parse(source.payload_json) : null;
     // Which check failed, so the next occurrence names its cause (production 1.3.57, 2026-10-17 05:40:15: one goal-wake
-    // tool selection threw this once, then the next wake passed; every identity field comes from one owner/scope object).
+    // tool selection threw this once; the stored copy of its source id had been masked as a Telegram token, now kept exact
+    // by run-events.ts canonicalInferenceSourceId).
     const failed = !run ? "long_run_missing" : !payload ? "usage_start_row_missing"
       : payload.schemaVersion !== "agentlas.inference-accounting.v1" || payload.attribution !== "goal" ? "usage_start_shape"
       : payload.goalId !== input.goalId || payload.sourceId !== input.sourceId || payload.scopeAnchorId !== input.scopeAnchorId

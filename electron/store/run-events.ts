@@ -434,6 +434,24 @@ function canonicalAdapterToolId(input: Record<string, unknown>, context?: SafePa
   return admittedAdapterScope(scopeId, context) ? input.toolId : undefined;
 }
 
+/** The host-minted inference-accounting source id (long-run/accounting-context.ts beginAccountedInference):
+ * "<judgment|automation>:<this row's run id>:<UUID>", written by Main, never model text. The same Telegram-shaped false
+ * positive masked it whenever the run id ends in digits only (a UUID's last group, about 1 run in 280; an automation run's
+ * 8-hex suffix, about 1 in 43), and recordLongRunInferenceStarted could no longer match its own row. Production 1.3.57,
+ * 2026-10-17 05:40:15: goal wake a126635e-…-512552977274 failed at tool selection; 606 of 6,690 stored usage rows were masked.
+ * Only the two accounting kinds, their schema and an id bound to this row's own run qualify. */
+const INFERENCE_ACCOUNTING_KINDS = new Set(["runtime_usage_started", "runtime_usage_recorded"]);
+const MINTED_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+function canonicalInferenceSourceId(input: Record<string, unknown>, context?: SafePayloadContext): string | undefined {
+  if (!context || !INFERENCE_ACCOUNTING_KINDS.has(context.kind) || input.schemaVersion !== "agentlas.inference-accounting.v1"
+    || typeof input.sourceId !== "string") return undefined;
+  for (const prefix of ["judgment", "automation"]) {
+    const head = `${prefix}:${context.runId}:`;
+    if (input.sourceId.startsWith(head) && MINTED_UUID_RE.test(input.sourceId.slice(head.length))) return input.sourceId;
+  }
+  return undefined;
+}
+
 function admittedAdapterScope(scopeId: string, context: SafePayloadContext): Record<string, unknown> | undefined {
   try {
     const rows = getDb().prepare(`SELECT payload_json FROM run_events
@@ -645,6 +663,7 @@ function safePayload(
     ? canonicalQuestionContinuationReply(input, context)
     : undefined;
   const canonicalToolId = input ? canonicalAdapterToolId(input, context) : undefined;
+  const canonicalSourceId = input ? canonicalInferenceSourceId(input, context) : undefined;
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(input ?? {})) {
     if (value == null) continue;
@@ -658,6 +677,10 @@ function safePayload(
     }
     if (key === "toolId" && canonicalToolId !== undefined) {
       out[key] = canonicalToolId;
+      continue;
+    }
+    if (key === "sourceId" && canonicalSourceId !== undefined) {
+      out[key] = canonicalSourceId;
       continue;
     }
     if (key === "runtimeEvidence") {
