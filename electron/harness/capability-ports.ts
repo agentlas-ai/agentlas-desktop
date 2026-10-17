@@ -1128,7 +1128,9 @@ export async function searchHarness(query: string, kind?: HarnessItemKind): Prom
     for (const feature of FEATURE_MODULES) if (matches(query, feature.featureId, ...feature.surfaces)) out.push({ id: `feature:${feature.featureId}`, kind: "feature", name: feature.featureId, description: `surfaces: ${feature.surfaces.join(", ") || "-"}` });
   }
   if (want("operation")) for (const port of PORTS) if (matches(query, port.operationId, port.purpose)) out.push({ id: port.operationId, kind: "operation", name: port.operationId, description: `${port.purpose}${port.handler ? "" : " (unavailable)"}` });
-  return out.slice(0, 60);
+  // Best match first across every kind (search-rank.ts); the fixed kind order cut the answering operation off (r07).
+  const { rankHarnessItems } = await import("./search-rank");
+  return rankHarnessItems(query, out, 60);
 }
 
 /** Exact detail for one id from harness_search; an operation id returns its required fields and status. */
