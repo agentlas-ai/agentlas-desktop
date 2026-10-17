@@ -26,6 +26,7 @@ import {
   type OneTrustedImprovementMeasurementEvidence,
   type OneTrustedImprovementRubricEvidence,
   type OneTrustedImprovementTaskEvidence,
+  retainOneImprovementProofState,
 } from "../../shared/one-improvement-proof";
 import { ONE_DOMAIN_EVENT_RULES } from "../../shared/one-domain-events";
 import type { CanonicalTask } from "../../shared/types";
@@ -658,9 +659,9 @@ function mergeEvidence(
     byReceipt.set(candidate.receiptRef, candidate);
     appended.push(candidate);
   }
-  // PRD §5.23 — 상한이 없어 이 배열이 무한히 커졌고, 그 전체가 매 저장의 CAS 비교 대상이자
-  // 5초 폴링의 운반 대상이었다. 옆 모듈(experience-reuse)과 같은 상한을 쓴다.
-  return [...current.evidence, ...appended].slice(-4_096);
+  // PRD §5.23 — 상한이 없어 이 배열이 무한히 커졌다. 상한은 retainOneImprovementProofState 가
+  // 증명과 함께 맞춘다: 위치로만 자르면 남은 증명이 가리키는 증거가 지워진다(clients-w2-07).
+  return [...current.evidence, ...appended];
 }
 
 function baselineTasksFor(comparisons: OneImprovementComparisonRecord[]) {
@@ -826,13 +827,13 @@ export function createOneImprovementProof(
       createdAt: tick.iso,
       updatedAt: tick.iso,
     };
-    const next: OneImprovementProofState = {
+    const next: OneImprovementProofState = retainOneImprovementProofState({
       ...current.state,
       version: tick.version,
       evidence: mergeEvidence(current.state, evidence),
-      proofs: [...current.state.proofs, record].slice(-2_048),
+      proofs: [...current.state.proofs, record],
       updatedAt: tick.iso,
-    };
+    });
     if (!isOneImprovementProofState(next)) throw new Error("Improvement Proof mutation violated the closed storage contract");
     const result = db.prepare("UPDATE meta SET value = ? WHERE key = ? AND value = ?")
       .run(JSON.stringify(next), ONE_IMPROVEMENT_PROOF_META_KEY, current.raw);

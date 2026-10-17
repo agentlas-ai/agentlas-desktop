@@ -784,6 +784,78 @@ function isTaskArbitration(value: unknown): value is OneSuggestionTaskArbitratio
     && isTimestamp(value.arbitratedAt);
 }
 
+/** The bounds isOneSuggestionState enforces; retainOneSuggestionStateWithinCaps keeps a write under them. */
+export const ONE_SUGGESTION_STATE_CAPS = {
+  suggestions: 512,
+  suppressions: 1_024,
+  patternFeedback: 512,
+  taskArbitrations: 512,
+} as const;
+
+const ACTIVE_SUGGESTION_STATUSES: ReadonlySet<OneSuggestionStatus> = new Set(["open", "accepted_for_review"]);
+
+function newestByTime<T>(rows: readonly T[], cap: number, time: (row: T) => string): T[] {
+  if (rows.length <= cap) return rows as T[];
+  const kept = new Set([...rows].sort((left, right) => Date.parse(time(right)) - Date.parse(time(left))).slice(0, cap));
+  return rows.filter((row) => kept.has(row));
+}
+
+/**
+ * Retention for a write that would cross a closed bound. Every list was append-only, so the 513th
+ * suggestion or the 1,025th snooze threw forever after (clients-w2-07). Only an over-cap list is
+ * touched, oldest first, and never a row that another kept row references:
+ * - suppressions: expired timed ones go first, then repeated permanent ones for the same pattern or
+ *   type (the newest stays), then the oldest timed ones; a permanent "never ask" is dropped last.
+ * - task arbitrations and pattern feedback: the newest are kept.
+ * - suggestions: finished ones (not open, not under review) that no kept suppression, review or
+ *   arbitration references, oldest first.
+ */
+export function retainOneSuggestionStateWithinCaps(state: OneSuggestionState, nowMs: number): OneSuggestionState {
+  const caps = ONE_SUGGESTION_STATE_CAPS;
+  let suppressions = state.suppressions;
+  if (suppressions.length > caps.suppressions) {
+    suppressions = suppressions.filter((item) => item.until === null || Date.parse(item.until) > nowMs);
+  }
+  if (suppressions.length > caps.suppressions) {
+    const seen = new Set<string>();
+    const repeated = new Set<OneSuggestionSuppression>();
+    for (const item of [...suppressions].sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))) {
+      if (item.until !== null) continue;
+      const key = `${item.scope}:${item.mode}:${item.scope === "pattern" ? item.patternKey : item.type}`;
+      if (seen.has(key)) repeated.add(item);
+      seen.add(key);
+    }
+    suppressions = suppressions.filter((item) => !repeated.has(item));
+  }
+  if (suppressions.length > caps.suppressions) {
+    const timed = suppressions.filter((item) => item.until !== null)
+      .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
+    const drop = new Set(timed.slice(0, suppressions.length - caps.suppressions));
+    suppressions = suppressions.filter((item) => !drop.has(item));
+  }
+  suppressions = newestByTime(suppressions, caps.suppressions, (item) => item.createdAt);
+  const taskArbitrations = newestByTime(state.taskArbitrations, caps.taskArbitrations, (item) => item.arbitratedAt);
+  const patternFeedback = newestByTime(state.patternFeedback, caps.patternFeedback, (item) => item.lastShownAt);
+  let suggestions = state.suggestions;
+  if (suggestions.length > caps.suggestions) {
+    const referenced = new Set([
+      ...suppressions.map((item) => item.suggestionId),
+      ...state.reviewRequests.map((item) => item.suggestionId),
+      ...taskArbitrations.map((item) => item.suggestionId),
+    ]);
+    const removable = suggestions
+      .filter((item) => !ACTIVE_SUGGESTION_STATUSES.has(item.status) && !referenced.has(item.id))
+      .sort((left, right) => Date.parse(left.updatedAt) - Date.parse(right.updatedAt));
+    const drop = new Set(removable.slice(0, suggestions.length - caps.suggestions).map((item) => item.id));
+    suggestions = suggestions.filter((item) => !drop.has(item.id));
+  }
+  if (
+    suggestions === state.suggestions && suppressions === state.suppressions
+    && taskArbitrations === state.taskArbitrations && patternFeedback === state.patternFeedback
+  ) return state;
+  return { ...state, suggestions, suppressions, taskArbitrations, patternFeedback };
+}
+
 export function isOneSuggestionState(value: unknown): value is OneSuggestionState {
   if (!isRecord(value) || !exactKeys(value, [
     "contractVersion", "version", "suggestions", "reviewRequests", "suppressions",

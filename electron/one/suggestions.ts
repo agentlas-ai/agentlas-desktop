@@ -5,6 +5,7 @@ import {
   ONE_SUGGESTION_PRIORITY,
   ONE_SUGGESTION_REVIEW_HANDOFF_CONTRACT_VERSION,
   isOneSuggestionState,
+  retainOneSuggestionStateWithinCaps,
   unsafeOneSuggestionTextReason,
   type AcceptOneSuggestionForReviewInput,
   type ArbitrateOneSuggestionInput,
@@ -207,6 +208,7 @@ function mutateState<T>(
   let mutation: Mutation<T> | null = null;
   try {
     mutation = update(state, timestamp);
+    mutation = { ...mutation, state: retainOneSuggestionStateWithinCaps(mutation.state, timestamp.version) };
     if (!isOneSuggestionState(mutation.state)) throw new Error("Refused to persist invalid One suggestion state");
     if (mutation.state.version !== timestamp.version || mutation.state.updatedAt !== timestamp.iso) {
       throw new Error("One suggestion mutation did not advance its exact version");

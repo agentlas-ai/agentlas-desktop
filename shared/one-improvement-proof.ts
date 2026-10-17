@@ -745,6 +745,34 @@ function isImprovementProofRecord(value: unknown, evidenceByRef: Map<string, One
   return recordCrossLinksAreValid(value as unknown as OneImprovementProofRecord, evidenceByRef);
 }
 
+/** Retention caps the store keeps (the validator's hard bounds are 4,096 proofs and 8,192 evidence). */
+export const ONE_IMPROVEMENT_PROOF_RETAINED_PROOFS = 2_048;
+export const ONE_IMPROVEMENT_PROOF_RETAINED_EVIDENCE = 4_096;
+
+/**
+ * Keeps the newest proofs, then every evidence entry a kept proof references, then the newest
+ * unreferenced evidence up to the cap. Trimming evidence by position alone dropped entries that an
+ * old proof still referenced, after which every later write failed the closed contract
+ * (clients-w2-07).
+ */
+export function retainOneImprovementProofState(state: OneImprovementProofState): OneImprovementProofState {
+  const proofs = state.proofs.slice(-ONE_IMPROVEMENT_PROOF_RETAINED_PROOFS);
+  const referenced = new Set(proofs.flatMap((record) => record.trustedEvidenceRefs));
+  let budget = ONE_IMPROVEMENT_PROOF_RETAINED_EVIDENCE
+    - state.evidence.filter((item) => referenced.has(item.evidenceRef)).length;
+  const unreferencedKept = new Set<string>();
+  for (let index = state.evidence.length - 1; index >= 0 && budget > 0; index -= 1) {
+    const item = state.evidence[index];
+    if (referenced.has(item.evidenceRef)) continue;
+    unreferencedKept.add(item.evidenceRef);
+    budget -= 1;
+  }
+  const evidence = state.evidence.filter((item) => referenced.has(item.evidenceRef) || unreferencedKept.has(item.evidenceRef));
+  return evidence.length === state.evidence.length && proofs.length === state.proofs.length
+    ? state
+    : { ...state, evidence, proofs };
+}
+
 export function isOneImprovementProofState(value: unknown): value is OneImprovementProofState {
   if (!isRecord(value) || !exactKeys(value, ["contractVersion", "version", "evidence", "proofs", "createdAt", "updatedAt"])) return false;
   if (value.contractVersion !== ONE_IMPROVEMENT_PROOF_CONTRACT_VERSION || !isPositiveVersion(value.version)) return false;
