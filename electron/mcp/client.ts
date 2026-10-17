@@ -30,7 +30,7 @@ import { runtimeQuotaFailureMessage } from "../../shared/runtime-quota";
 import { getBillingCredits } from "../billing";
 import { peekProviderQuotaExhausted } from "../usage";
 import { getOneProfile } from "../store/one-profile";
-import { applyAutomationLifecycle, automationLifecycleContext, automationLifecycleRefusalText } from "../automation-lifecycle";
+import { applyAutomationLifecycle, automationLifecycleContext, automationLifecycleRefusalText, automationRegistrationReasonCode, automationRegistrationRefusalText } from "../automation-lifecycle";
 import { recordAutomationPinProvenance } from "../automation-runtime-provenance";
 import { AutomationWorkspaceError, bindCreatedGoalContinuationWorkspace } from "../automation-workspace";
 import { assertFiniteGoalLifecycleCurrent, isGoalDispatchRefusal } from "../automation-execution-control";
@@ -8088,163 +8088,181 @@ async function runMcpInvocationInContext(
           }
           const monitoring = automationRegistrationMonitoring({parsed:a,chatId:chat.id,messageId:persistedUserMessageId,existing:dup});
           const registrationOperationId = `host-automation:${randomUUID()}`;
-          if (dup) {
-            sink({kind:"tool-use",tool:{id:registrationOperationId,name:"automation.update",args:JSON.stringify({automationId:dup.id,name:a.name})}});
-            const updated = updateAutomation(dup.id, {
-              ...monitoring,
-              ...(a.monitor ? {endAt:a.monitor.deadline}:{}),
-              // schedule 은 방출됐을 때만 — 미방출(graph-only 세션 편집)의 schedule 은
-              // resolveSchedule 폴백("daily-09:00")이라, 그대로 쓰면 진짜 스케줄을 지워버린다.
-              ...(a.scheduleEmitted
-                ? {
-                    scheduleHuman: a.schedule,
-                    // schedule_json은 항상 방출값으로 — stale spec이 새 토큰을 덮는 것 방지.
-                    scheduleJson: a.scheduleSpec ? JSON.stringify(a.scheduleSpec) : null,
+          // A refused or failed registration answers its own started tool row and is said to the owner (refusal notice below).
+          // Measured 2026-10-17 (dev A/B4): a finite-Goal refusal threw out of this loop into a log-only catch, leaving
+          // "자동화 1개 설정 중" open, the reply's "등록 결과 대기" unanswered, and every later entry in the block unregistered.
+          let startedTool: "automation.create" | "automation.update" | null = null;
+          try {
+            if (dup) {
+              startedTool = "automation.update";
+              sink({kind:"tool-use",tool:{id:registrationOperationId,name:"automation.update",args:JSON.stringify({automationId:dup.id,name:a.name})}});
+              const updated = updateAutomation(dup.id, {
+                ...monitoring,
+                ...(a.monitor ? {endAt:a.monitor.deadline}:{}),
+                // schedule 은 방출됐을 때만 — 미방출(graph-only 세션 편집)의 schedule 은
+                // resolveSchedule 폴백("daily-09:00")이라, 그대로 쓰면 진짜 스케줄을 지워버린다.
+                ...(a.scheduleEmitted
+                  ? {
+                      scheduleHuman: a.schedule,
+                      // schedule_json은 항상 방출값으로 — stale spec이 새 토큰을 덮는 것 방지.
+                      scheduleJson: a.scheduleSpec ? JSON.stringify(a.scheduleSpec) : null,
+                    }
+                  : {}),
+                // 타깃은 방출이 실행 주체를 실었을 때만 재계산 — graph-only 편집이 기존 타깃을
+                // 현재 챗 타깃으로 몰래 바꾸면 안 된다.
+                ...(a.agent || a.hubAgent || a.prompt ? { targetType, targetId } : {}),
+                ...(a.prompt ? { promptTemplate: a.prompt } : {}),
+                // tz는 방출됐을 때만 갱신(미방출 재방출이 기존 tz를 시스템 tz로 되돌리지 않게).
+                ...(a.tz && a.tz.trim() ? { timezone: a.tz } : {}),
+              });
+              // 그래프는 방출됐을 때만 교체 — 사용자가 캔버스에서 편집한 그래프를 지우지 않는다.
+              const updatedWithGraph = a.graph ? updateAutomationGraph(dup.id, a.graph) : updated;
+              const registration: AutomationRegistrationResult = {
+                action: "updated",
+                enabled: updatedWithGraph.enabled,
+                automationId: updatedWithGraph.id,
+                timezone: updatedWithGraph.timezone ?? null,
+                notificationPolicy: updatedWithGraph.monitor?.notificationPolicy ?? "every_run",
+                executionAvailability: "app-running",
+                name: updatedWithGraph.name,
+                schedule: updatedWithGraph.triggerType === "poll" ? (locale === "ko" ? "조건 변화 확인" : "Check for condition changes") : updatedWithGraph.scheduleHuman,
+                targetType: updatedWithGraph.targetType,
+                targetId: updatedWithGraph.targetId,
+                nextRunAt: updatedWithGraph.nextRunAt,
+                graph: Boolean(updatedWithGraph.graph),
+              };
+              automationRegistrations.push(registration);
+              sink({
+                kind: "tool-use",
+                tool: {
+                  id: registrationOperationId,
+                  isError: false,
+                  name: automationRegistrationToolName(registration.action),
+                  args: JSON.stringify({
+                    automationId: registration.automationId,
+                    action: registration.action,
+                    enabled: registration.enabled,
+                    nextRunAt: registration.nextRunAt,
+                    timezone: registration.timezone,
+                    notificationPolicy: registration.notificationPolicy,
+                    executionAvailability: registration.executionAvailability,
+                    name: registration.name,
+                    schedule: registration.schedule,
+                    targetType: registration.targetType,
+                    targetId: registration.targetId,
+                    graph: registration.graph,
+                  }),
+                  result: automationRegistrationResultText(registration, locale),
+                },
+              });
+            } else if (!a.prompt.trim() && a.graph) {
+              // graph-only 방출(세션 편집 계약)이 이름 불일치로 여기 떨어지면, 빈 프롬프트·폴백
+              // 스케줄의 반쪽 자동화가 생긴다. 만들지 말고 이름이 틀렸다고 말한다.
+              sink({
+                kind: "tool-use",
+                tool: {
+                  name: "automation-registration-refused",
+                  isError: true,
+                  result: `No automation named "${a.name}" exists to update — a graph-only block must keep the session automation's exact name.`,
+                },
+              });
+            } else {
+              startedTool = "automation.create";
+              sink({kind:"tool-use",tool:{id:registrationOperationId,name:"automation.create",args:JSON.stringify({name:a.name})}});
+              const creationRevision = activeGoalId ? getChatGoalRevision(activeGoalId) : null;
+              const finiteCreation = creationRevision?.lifecycle === "finite";
+              // A failed finite binding must roll back creation, never leave an independent automation behind.
+              const created = desktopStoreTransaction(getDb(), () => {
+                const finiteDeadline = finiteCreation && activeGoalId ? goalDeadlineAt(activeGoalId) : null;
+                // A Goal-made automation ends with its finite Goal, so a Goal without a host-resolved deadline cannot
+                // carry one (a single-tactic shape has none). Each cause keeps its own code for the owner's refusal text.
+                if (finiteCreation && !finiteDeadline) throw new Error("goal_automation_finite_deadline_missing");
+                if (finiteCreation && Date.parse(finiteDeadline!) <= Date.now()) throw new Error("goal_automation_finite_deadline_passed");
+                if (finiteCreation && (creationRevision.chatId !== chat.id || typeof req.runId !== "string"))
+                  throw new Error("goal_automation_binding_source_unverified");
+                if (finiteCreation) assertFiniteGoalLifecycleCurrent({ goalId: activeGoalId!,
+                  rootChatId: chat.id, expectedRevision: creationRevision.revision });
+                const created = createAutomation({
+                ...monitoring,
+                ...(a.monitor ? {endAt:a.monitor.deadline}:{}),
+                ...(finiteDeadline ? { endAt: a.monitor?.deadline && Date.parse(a.monitor.deadline) < Date.parse(finiteDeadline)
+                  ? a.monitor.deadline : finiteDeadline } : {}),
+                name: a.name,
+                // The chat's runtime at this moment is copied as the job's pin. It is a
+                // copy, not a separate owner choice: unattended runs follow the owner's
+                // *current* chat/worker configuration (automation-runtime-plan.ts) until
+                // the owner edits the pin itself. Recorded below as agent_copy.
+                ...(req.runtimeSelection ? { runtimeSelection: req.runtimeSelection } : {}),
+                scheduleHuman: a.schedule,
+                targetType,
+                targetId,
+                promptTemplate: a.prompt,
+                createdBy: "agent",
+                // 구조화 스케줄 + steps→그래프를 통과시켜 챗 생성 자동화가 graph_json/schedule_json을 저장.
+                scheduleJson: a.scheduleSpec ? JSON.stringify(a.scheduleSpec) : null,
+                timezone: a.tz && a.tz.trim() ? a.tz : null,
+                graphJson: a.graph ?? null,
+              });
+                if (req.runtimeSelection) recordAutomationPinProvenance(created.id, "agent_copy", "chat_registration");
+                // Only this newly created row and its genuine invocation may acquire a bridge.
+                if (activeGoalId && typeof req.runId === "string" && creationRevision?.chatId === chat.id) {
+                  if (finiteCreation) {
+                    bindCreatedAutomationToGoal({ goalId: activeGoalId, expectedGoalRevision: creationRevision.revision,
+                      chatId: chat.id, invocationRunId: req.runId, automationId: created.id });
+                  } else if (creationRevision.lifecycle === "ongoing") {
+                    try { bindCreatedAutomationToGoal({ goalId: activeGoalId, expectedGoalRevision: creationRevision.revision,
+                      chatId: chat.id, invocationRunId: req.runId, automationId: created.id }); }
+                    catch (error) { console.warn("[goal-automation-provenance] created automation remains independent:", error); }
                   }
-                : {}),
-              // 타깃은 방출이 실행 주체를 실었을 때만 재계산 — graph-only 편집이 기존 타깃을
-              // 현재 챗 타깃으로 몰래 바꾸면 안 된다.
-              ...(a.agent || a.hubAgent || a.prompt ? { targetType, targetId } : {}),
-              ...(a.prompt ? { promptTemplate: a.prompt } : {}),
-              // tz는 방출됐을 때만 갱신(미방출 재방출이 기존 tz를 시스템 tz로 되돌리지 않게).
-              ...(a.tz && a.tz.trim() ? { timezone: a.tz } : {}),
-            });
-            // 그래프는 방출됐을 때만 교체 — 사용자가 캔버스에서 편집한 그래프를 지우지 않는다.
-            const updatedWithGraph = a.graph ? updateAutomationGraph(dup.id, a.graph) : updated;
-            const registration: AutomationRegistrationResult = {
-              action: "updated",
-              enabled: updatedWithGraph.enabled,
-              automationId: updatedWithGraph.id,
-              timezone: updatedWithGraph.timezone ?? null,
-              notificationPolicy: updatedWithGraph.monitor?.notificationPolicy ?? "every_run",
-              executionAvailability: "app-running",
-              name: updatedWithGraph.name,
-              schedule: updatedWithGraph.triggerType === "poll" ? (locale === "ko" ? "조건 변화 확인" : "Check for condition changes") : updatedWithGraph.scheduleHuman,
-              targetType: updatedWithGraph.targetType,
-              targetId: updatedWithGraph.targetId,
-              nextRunAt: updatedWithGraph.nextRunAt,
-              graph: Boolean(updatedWithGraph.graph),
-            };
-            automationRegistrations.push(registration);
-            sink({
-              kind: "tool-use",
-              tool: {
-                id: registrationOperationId,
-                isError: false,
-                name: automationRegistrationToolName(registration.action),
-                args: JSON.stringify({
-                  automationId: registration.automationId,
-                  action: registration.action,
-                  enabled: registration.enabled,
-                  nextRunAt: registration.nextRunAt,
-                  timezone: registration.timezone,
-                  notificationPolicy: registration.notificationPolicy,
-                  executionAvailability: registration.executionAvailability,
-                  name: registration.name,
-                  schedule: registration.schedule,
-                  targetType: registration.targetType,
-                  targetId: registration.targetId,
-                  graph: registration.graph,
-                }),
-                result: automationRegistrationResultText(registration, locale),
-              },
-            });
-          } else if (!a.prompt.trim() && a.graph) {
-            // graph-only 방출(세션 편집 계약)이 이름 불일치로 여기 떨어지면, 빈 프롬프트·폴백
-            // 스케줄의 반쪽 자동화가 생긴다. 만들지 말고 이름이 틀렸다고 말한다.
-            sink({
-              kind: "tool-use",
-              tool: {
-                name: "automation-registration-refused",
-                isError: true,
-                result: `No automation named "${a.name}" exists to update — a graph-only block must keep the session automation's exact name.`,
-              },
-            });
-          } else {
-            sink({kind:"tool-use",tool:{id:registrationOperationId,name:"automation.create",args:JSON.stringify({name:a.name})}});
-            const creationRevision = activeGoalId ? getChatGoalRevision(activeGoalId) : null;
-            const finiteCreation = creationRevision?.lifecycle === "finite";
-            // A failed finite binding must roll back creation, never leave an independent automation behind.
-            const created = desktopStoreTransaction(getDb(), () => {
-              const finiteDeadline = finiteCreation && activeGoalId ? goalDeadlineAt(activeGoalId) : null;
-              if (finiteCreation && (!finiteDeadline || Date.parse(finiteDeadline) <= Date.now()
-                || creationRevision.chatId !== chat.id || typeof req.runId !== "string"))
-                throw new Error("goal_automation_binding_source_unverified");
-              if (finiteCreation) assertFiniteGoalLifecycleCurrent({ goalId: activeGoalId!,
-                rootChatId: chat.id, expectedRevision: creationRevision.revision });
-              const created = createAutomation({
-              ...monitoring,
-              ...(a.monitor ? {endAt:a.monitor.deadline}:{}),
-              ...(finiteDeadline ? { endAt: a.monitor?.deadline && Date.parse(a.monitor.deadline) < Date.parse(finiteDeadline)
-                ? a.monitor.deadline : finiteDeadline } : {}),
-              name: a.name,
-              // The chat's runtime at this moment is copied as the job's pin. It is a
-              // copy, not a separate owner choice: unattended runs follow the owner's
-              // *current* chat/worker configuration (automation-runtime-plan.ts) until
-              // the owner edits the pin itself. Recorded below as agent_copy.
-              ...(req.runtimeSelection ? { runtimeSelection: req.runtimeSelection } : {}),
-              scheduleHuman: a.schedule,
-              targetType,
-              targetId,
-              promptTemplate: a.prompt,
-              createdBy: "agent",
-              // 구조화 스케줄 + steps→그래프를 통과시켜 챗 생성 자동화가 graph_json/schedule_json을 저장.
-              scheduleJson: a.scheduleSpec ? JSON.stringify(a.scheduleSpec) : null,
-              timezone: a.tz && a.tz.trim() ? a.tz : null,
-              graphJson: a.graph ?? null,
-            });
-              if (req.runtimeSelection) recordAutomationPinProvenance(created.id, "agent_copy", "chat_registration");
-              // Only this newly created row and its genuine invocation may acquire a bridge.
-              if (activeGoalId && typeof req.runId === "string" && creationRevision?.chatId === chat.id) {
-                if (finiteCreation) {
-                  bindCreatedAutomationToGoal({ goalId: activeGoalId, expectedGoalRevision: creationRevision.revision,
-                    chatId: chat.id, invocationRunId: req.runId, automationId: created.id });
-                } else if (creationRevision.lifecycle === "ongoing") {
-                  try { bindCreatedAutomationToGoal({ goalId: activeGoalId, expectedGoalRevision: creationRevision.revision,
-                    chatId: chat.id, invocationRunId: req.runId, automationId: created.id }); }
-                  catch (error) { console.warn("[goal-automation-provenance] created automation remains independent:", error); }
                 }
-              }
-              return created;
-            }).immediate();
-            const registration: AutomationRegistrationResult = {
-              action: "created",
-              enabled: created.enabled,
-              automationId: created.id,
-              timezone: created.timezone ?? null,
-              notificationPolicy: created.monitor?.notificationPolicy ?? "every_run",
-              executionAvailability: "app-running",
-              name: created.name,
-              schedule: created.triggerType === "poll" ? (locale === "ko" ? "조건 변화 확인" : "Check for condition changes") : created.scheduleHuman,
-              targetType: created.targetType,
-              targetId: created.targetId,
-              nextRunAt: created.nextRunAt,
-              graph: Boolean(created.graph),
-            };
-            automationRegistrations.push(registration);
-            sink({
-              kind: "tool-use",
-              tool: {
-                id: registrationOperationId,
-                isError: false,
-                name: automationRegistrationToolName(registration.action),
-                args: JSON.stringify({
-                  automationId: registration.automationId,
-                  action: registration.action,
-                  enabled: registration.enabled,
-                  nextRunAt: registration.nextRunAt,
-                  timezone: registration.timezone,
-                  notificationPolicy: registration.notificationPolicy,
-                  executionAvailability: registration.executionAvailability,
-                  name: registration.name,
-                  schedule: registration.schedule,
-                  targetType: registration.targetType,
-                  targetId: registration.targetId,
-                  graph: registration.graph,
-                }),
-                result: automationRegistrationResultText(registration, locale),
-              },
-            });
+                return created;
+              }).immediate();
+              const registration: AutomationRegistrationResult = {
+                action: "created",
+                enabled: created.enabled,
+                automationId: created.id,
+                timezone: created.timezone ?? null,
+                notificationPolicy: created.monitor?.notificationPolicy ?? "every_run",
+                executionAvailability: "app-running",
+                name: created.name,
+                schedule: created.triggerType === "poll" ? (locale === "ko" ? "조건 변화 확인" : "Check for condition changes") : created.scheduleHuman,
+                targetType: created.targetType,
+                targetId: created.targetId,
+                nextRunAt: created.nextRunAt,
+                graph: Boolean(created.graph),
+              };
+              automationRegistrations.push(registration);
+              sink({
+                kind: "tool-use",
+                tool: {
+                  id: registrationOperationId,
+                  isError: false,
+                  name: automationRegistrationToolName(registration.action),
+                  args: JSON.stringify({
+                    automationId: registration.automationId,
+                    action: registration.action,
+                    enabled: registration.enabled,
+                    nextRunAt: registration.nextRunAt,
+                    timezone: registration.timezone,
+                    notificationPolicy: registration.notificationPolicy,
+                    executionAvailability: registration.executionAvailability,
+                    name: registration.name,
+                    schedule: registration.schedule,
+                    targetType: registration.targetType,
+                    targetId: registration.targetId,
+                    graph: registration.graph,
+                  }),
+                  result: automationRegistrationResultText(registration, locale),
+                },
+              });
+            }
+          } catch (error) {
+            const reason = automationRegistrationReasonCode(error);
+            if (reason === "automation_registration_failed") console.error("[automation] registration failed:", error);
+            const message = automationRegistrationRefusalText(reason, locale);
+            automationRefusals.push(`${a.name}: ${message}`);
+            sink({kind:"tool-use",tool:{...(startedTool ? {id:registrationOperationId,name:startedTool} : {name:"automation-registration-refused"}),
+              isError:true,args:JSON.stringify({name:a.name,reasonCode:reason}),result:message}});
           }
         }
         displayText = cleanedText;
