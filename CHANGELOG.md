@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.58 — 2026-10-17
+
+- Writing to an agent that has already exited no longer takes down the app or its background service.
+- Sending a turn no longer waits for the runtime sign-in check; it runs beside the turn, at most once a minute.
+- Connector sign-in opens your own browser and waits up to ten minutes for you to finish.
+- When a message cannot be sent, the app says why in plain words instead of showing an internal code.
+- Every change to a chat's model chip is recorded: who changed it, from what, to what.
+- Connector sign-ins refresh one at a time across the app and its background service, so two refreshes no longer collide.
+- Desktop answers the phone's connector screen (list, switch, add, test), and the phone can see which chat is your personal One.
+- Full One suggestion and improvement stores retire old rows instead of refusing new ones.
+- On Windows, the background service, keychain recovery and Goal verification handle Windows paths correctly.
+- Chrome import no longer freezes on a macOS Keychain prompt, and removing downloads also deletes their files.
+- Local control servers compare secrets in constant time and refuse requests addressed to another host.
+- Database upgrade backups stay capped at three, and logs hide Windows profile paths as well.
+- This release binds Agentlas OS v1.2.65 at 8b303608eea746e7ea8d7560890816784bdaa86c; public runtime asset `hephaestus-runtime-v1.2.65.tar.gz` is pinned at SHA-256 `7dae16f12a78515dfa7adbc732197e26aa06a2cd413452e81b2675450caba7de`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.57 — 2026-10-17
 
 - A step that keeps working past an hour is no longer cut off; only a step that has stopped making progress is ended.
