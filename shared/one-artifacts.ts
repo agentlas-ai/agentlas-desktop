@@ -23,6 +23,56 @@ export interface OneArtifactPreviewRevokeV1 extends OneArtifactBindingRequestV1 
   capabilityUrl: string;
 }
 
+/**
+ * Why Main would not preview an exact artifact binding. Each code names the one check that refused: issuing a
+ * capability (the binding, its Task, its path, the file's identity) or serving one (the capability itself).
+ * Codes are machine values; the card maps them to words and shows the code beside them.
+ */
+export const ONE_ARTIFACT_PREVIEW_REFUSAL_CODES = [
+  "request_invalid",
+  "task_missing",
+  "task_chat_mismatch",
+  "task_archived",
+  "task_version_ahead",
+  "task_version_mismatch",
+  "manifest_missing",
+  "binding_missing",
+  "binding_version_mismatch",
+  "lifecycle_unverified",
+  "path_archived",
+  "type_mismatch",
+  "file_missing",
+  "path_out_of_scope",
+  "path_changed",
+  "file_unreadable",
+  "file_not_bounded",
+  "identity_changed",
+  "content_changed",
+  "capability_malformed",
+  "capability_unknown",
+  "capability_expired",
+  "capability_evicted",
+  "range_invalid",
+] as const;
+export type OneArtifactPreviewRefusalCode = (typeof ONE_ARTIFACT_PREVIEW_REFUSAL_CODES)[number];
+
+export interface OneArtifactPreviewRefusalV1 {
+  refused: true;
+  code: OneArtifactPreviewRefusalCode;
+}
+
+/** Response header that carries the refusal code when Main will not serve a capability URL. */
+export const ONE_ARTIFACT_PREVIEW_REFUSAL_HEADER = "X-Agentlas-Preview-Refusal";
+
+export function isOneArtifactPreviewRefusalCode(value: unknown): value is OneArtifactPreviewRefusalCode {
+  return typeof value === "string" && (ONE_ARTIFACT_PREVIEW_REFUSAL_CODES as readonly string[]).includes(value);
+}
+
+export function isOneArtifactPreviewRefusalV1(value: unknown): value is OneArtifactPreviewRefusalV1 {
+  return isRecord(value) && onlyKeys(value, ["refused", "code"]) && value.refused === true
+    && isOneArtifactPreviewRefusalCode(value.code);
+}
+
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/;
 const CAPABILITY_URL_RE = /^agentlas:\/\/one-artifact\/[a-f0-9]{64}$/;
 

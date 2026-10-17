@@ -6,8 +6,11 @@ import { fileURLToPath } from "node:url";
 import {
   isOneArtifactBindingRequestV1,
   isOneArtifactPreviewRevokeV1,
+  ONE_ARTIFACT_PREVIEW_REFUSAL_HEADER,
   type OneArtifactBindingRequestV1,
   type OneArtifactPreviewCapabilityV1,
+  type OneArtifactPreviewRefusalCode,
+  type OneArtifactPreviewRefusalV1,
 } from "../../shared/one-artifacts";
 import { isDurableOneSurfaceManifestV1 } from "../../shared/one-surface-durable";
 import type { OneSurfaceBlock, OneSurfaceManifestV1 } from "../../shared/one-surface";
@@ -41,7 +44,9 @@ const MAX_VIDEO_BYTES = 192 * 1_024 * 1_024;
 const MAX_AUDIO_BYTES = 96 * 1_024 * 1_024;
 const MAX_DOCUMENT_BYTES = 64 * 1_024 * 1_024;
 const MAX_DATA_BYTES = 64 * 1_024 * 1_024;
-const MAX_ACTIVE_TOKENS = 256;
+// One token per mounted preview (each settled run block's images, result cards, the output rail). A long room
+// holds more than 256 bindings (Yotube 2026-10-17: 382), and the cap dropped live previews without a trace.
+const MAX_ACTIVE_TOKENS = 2_048;
 const TOKEN_RE = /^[a-f0-9]{64}$/;
 // A Surface is emitted after the run begins, on the same host clock. Keep a
 // small allowance for filesystem timestamp rounding, but never let a file
@@ -168,6 +173,10 @@ interface VerifiedFile {
   row: BindingRow;
 }
 
+/** Each refusal names the one check that failed (shared/one-artifacts.ts ONE_ARTIFACT_PREVIEW_REFUSAL_CODES). */
+type Verdict<T> = { ok: true; value: T } | { ok: false; code: OneArtifactPreviewRefusalCode };
+const refuse = (code: OneArtifactPreviewRefusalCode): { ok: false; code: OneArtifactPreviewRefusalCode } => ({ ok: false, code });
+
 export interface OneVerifiedBoundArtifactSet {
   taskId: string;
   taskVersion: number;
@@ -184,6 +193,9 @@ export interface OneVerifiedBoundArtifactSet {
 }
 
 const tokens = new Map<string, TokenRecord>();
+/** Tokens dropped by the active-token cap, so a later read says "evicted" instead of "unknown" (bounded). */
+const evictedTokens = new Map<string, number>();
+const MAX_EVICTED_TOKEN_MEMORY = 1_024;
 
 /**
  * PRD §5.25 — 이 표는 이제 마이그레이션 사다리(electron/store/db.ts)가 만든다. 여기서는
@@ -703,8 +715,8 @@ function exactLifecycleTransition(row: BindingRow, input: OneArtifactBindingRequ
   });
 }
 
-function exactBinding(input: unknown): BindingRow | null {
-  if (!isOneArtifactBindingRequestV1(input)) return null;
+function bindingVerdict(input: unknown): Verdict<BindingRow> {
+  if (!isOneArtifactBindingRequestV1(input)) return refuse("request_invalid");
   const task = getCanonicalTask(input.taskId);
   const runtimeBinding = input.manifestId === runtimeManifestId(input.runId) && input.artifactRef.startsWith("runtime:");
   // Runtime tool artifacts are emitted while the run is active. The terminal
@@ -712,15 +724,15 @@ function exactBinding(input: unknown): BindingRow | null {
   // the opaque row remains pinned to its creation version, so a later version
   // of the same non-archived Task must not invalidate that exact run binding.
   // Durable surface artifacts retain the stricter exact-version/lifecycle gate.
-  if (
-    !task
-    || task.originChatId !== input.chatId
-    || task.status === "archived"
-    || (runtimeBinding ? task.version < input.taskVersion : task.version !== input.taskVersion)
-  ) return null;
+  if (!task) return refuse("task_missing");
+  if (task.originChatId !== input.chatId) return refuse("task_chat_mismatch");
+  if (task.status === "archived") return refuse("task_archived");
+  if (runtimeBinding ? task.version < input.taskVersion : task.version !== input.taskVersion) {
+    return refuse(runtimeBinding ? "task_version_ahead" : "task_version_mismatch");
+  }
   if (!runtimeBinding) {
     const durable = getDurableOneSurfaceResult({ runId: input.runId, chatId: input.chatId, taskId: input.taskId });
-    if (!durable || durable.manifest.manifestId !== input.manifestId || !manifestContainsArtifact(durable.manifest, input.artifactRef)) return null;
+    if (!durable || durable.manifest.manifestId !== input.manifestId || !manifestContainsArtifact(durable.manifest, input.artifactRef)) return refuse("manifest_missing");
   }
   ensureBindingTable();
   const row = getDb().prepare(
@@ -728,42 +740,74 @@ function exactBinding(input: unknown): BindingRow | null {
      WHERE task_id = ? AND chat_id = ? AND run_id = ? AND manifest_id = ? AND artifact_ref = ?
      LIMIT 1`,
   ).get(input.taskId, input.chatId, input.runId, input.manifestId, input.artifactRef) as BindingRow | undefined;
-  if (!row) return null;
-  if (runtimeBinding) return input.taskVersion === row.bound_task_version ? row : null;
-  if (input.taskVersion !== row.bound_task_version && !exactLifecycleTransition(row, input)) return null;
-  return row;
+  if (!row) return refuse("binding_missing");
+  if (runtimeBinding) return input.taskVersion === row.bound_task_version ? { ok: true, value: row } : refuse("binding_version_mismatch");
+  if (input.taskVersion !== row.bound_task_version && !exactLifecycleTransition(row, input)) return refuse("lifecycle_unverified");
+  return { ok: true, value: row };
 }
 
-function verifiedFile(input: unknown): VerifiedFile | null {
-  const row = exactBinding(input);
-  if (!row || pathIsArchived(row.source_path)) return null;
+function fileVerdict(input: unknown): Verdict<VerifiedFile> {
+  const binding = bindingVerdict(input);
+  if (!binding.ok) return binding;
+  const row = binding.value;
+  if (pathIsArchived(row.source_path)) return refuse("path_archived");
   const spec = ARTIFACT_BY_EXTENSION[path.extname(row.source_path).toLowerCase()];
-  if (!spec || spec.kind !== row.kind || spec.mimeType !== row.mime_type) return null;
+  if (!spec || spec.kind !== row.kind || spec.mimeType !== row.mime_type) return refuse("type_mismatch");
+  try {
+    fs.lstatSync(row.source_path);
+  } catch {
+    return refuse("file_missing");
+  }
   let resolved: string;
   try {
     resolved = resolveFsReadPath(row.source_path, { kind: "chat-assets", chatId: row.chat_id });
   } catch {
-    return null;
+    return refuse("path_out_of_scope");
   }
-  if (resolved !== row.source_path || pathIsArchived(resolved)) return null;
+  if (resolved !== row.source_path) return refuse("path_changed");
+  if (pathIsArchived(resolved)) return refuse("path_archived");
+  let opened: ReturnType<typeof safeOpen>;
   try {
-    const opened = safeOpen(resolved, spec);
-    // file_dev is recorded but not compared: the binding row outlives a reboot and macOS renumbers the volume at every
-    // boot, which made every accepted One deliverable unviewable after one. Inode, timestamps, size and the full SHA-256
-    // still bind the reopened bytes to the bound file.
-    const same = opened.size === row.size_bytes
-      && opened.ino === row.file_ino
-      && opened.mtimeNs === row.file_mtime_ns
-      && opened.ctimeNs === row.file_ctime_ns
-      && opened.sha256 === row.sha256;
-    if (!same) {
-      fs.closeSync(opened.fd);
-      return null;
-    }
-    return { fd: opened.fd, row };
-  } catch {
-    return null;
+    opened = safeOpen(resolved, spec);
+  } catch (error) {
+    return refuse(error instanceof Error && error.message.startsWith("One artifact file is not a supported bounded")
+      ? "file_not_bounded" : "file_unreadable");
   }
+  // file_dev is recorded but not compared: the binding row outlives a reboot and macOS renumbers the volume at every
+  // boot, which made every accepted One deliverable unviewable after one. Inode, timestamps, size and the full SHA-256
+  // still bind the reopened bytes to the bound file.
+  if (opened.size !== row.size_bytes || opened.ino !== row.file_ino
+    || opened.mtimeNs !== row.file_mtime_ns || opened.ctimeNs !== row.file_ctime_ns) {
+    fs.closeSync(opened.fd);
+    return refuse("identity_changed");
+  }
+  if (opened.sha256 !== row.sha256) {
+    fs.closeSync(opened.fd);
+    return refuse("content_changed");
+  }
+  return { ok: true, value: { fd: opened.fd, row } };
+}
+
+function verifiedFile(input: unknown): VerifiedFile | null {
+  const verdict = fileVerdict(input);
+  return verdict.ok ? verdict.value : null;
+}
+
+/** A short, value-free handle for a binding in logs: never a path, a title, or a token. */
+function bindingLogRef(input: unknown): string {
+  if (!isOneArtifactBindingRequestV1(input)) return "invalid";
+  return createHash("sha256").update(`${input.runId}:${input.artifactRef}`, "utf8").digest("hex").slice(0, 12);
+}
+
+const loggedRefusals = new Map<string, number>();
+/** Every refusal reaches main.log with its code, once a minute per binding and code (a card retries three times). */
+function logPreviewRefusal(stage: "issue" | "serve", code: OneArtifactPreviewRefusalCode, ref: string, nowMs: number): void {
+  const key = `${stage}:${code}:${ref}`;
+  const last = loggedRefusals.get(key);
+  if (last !== undefined && nowMs - last < 60_000) return;
+  loggedRefusals.set(key, nowMs);
+  if (loggedRefusals.size > 512) loggedRefusals.delete(loggedRefusals.keys().next().value as string);
+  console.warn(`[one-artifacts] preview refused stage=${stage} code=${code} binding=${ref}`);
 }
 
 /**
@@ -870,20 +914,37 @@ export function verifyOneAcceptedSurfaceArtifactSet(input: {
 
 function pruneTokens(nowMs: number): void {
   for (const [token, record] of tokens) if (record.expiresAtMs <= nowMs) tokens.delete(token);
+  for (const [token, at] of evictedTokens) if (at + ONE_ARTIFACT_PREVIEW_TTL_MS <= nowMs) evictedTokens.delete(token);
+  let evicted = 0;
   while (tokens.size >= MAX_ACTIVE_TOKENS) {
     const oldest = tokens.keys().next().value as string | undefined;
     if (!oldest) break;
     tokens.delete(oldest);
+    evictedTokens.set(oldest, nowMs);
+    evicted += 1;
   }
+  while (evictedTokens.size > MAX_EVICTED_TOKEN_MEMORY) evictedTokens.delete(evictedTokens.keys().next().value as string);
+  if (evicted > 0) logPreviewRefusal("issue", "capability_evicted", `${evicted}x`, nowMs);
 }
 
+function refusal(code: OneArtifactPreviewRefusalCode): OneArtifactPreviewRefusalV1 {
+  return { refused: true, code };
+}
+
+/** Desktop preview capability, or the code of the one check that refused it (never a silent null). */
 export function issueOneArtifactPreviewCapability(
   input: unknown,
   nowMs = Date.now(),
-): OneArtifactPreviewCapabilityV1 | null {
-  if (!Number.isFinite(nowMs)) return null;
-  const verified = verifiedFile(input);
-  if (!verified || !isOneArtifactBindingRequestV1(input)) return null;
+): OneArtifactPreviewCapabilityV1 | OneArtifactPreviewRefusalV1 {
+  if (!Number.isFinite(nowMs)) return refusal("request_invalid");
+  const verdict = fileVerdict(input);
+  if (!verdict.ok || !isOneArtifactBindingRequestV1(input)) {
+    const code = verdict.ok ? "request_invalid" : verdict.code;
+    if (verdict.ok) fs.closeSync(verdict.value.fd);
+    logPreviewRefusal("issue", code, bindingLogRef(input), nowMs);
+    return refusal(code);
+  }
+  const verified = verdict.value;
   fs.closeSync(verified.fd);
   pruneTokens(nowMs);
   let token = "";
@@ -1184,13 +1245,18 @@ function parseRange(raw: string | null, size: number): { start: number; end: num
   return { start, end, partial: true };
 }
 
-function safeError(status: 404 | 416, size?: number): Response {
+function safeError(status: 404 | 416, code: OneArtifactPreviewRefusalCode, size?: number): Response {
   return new Response(status === 404 ? "Not found" : "Range not satisfiable", {
     status,
     headers: {
       "Content-Type": "text/plain; charset=utf-8",
       "Cache-Control": "no-store",
       "X-Content-Type-Options": "nosniff",
+      // The refusal carries no bytes, so its code is readable by the card that asked (a HEAD probe from the
+      // renderer origin is cross-origin to agentlas://one-artifact).
+      [ONE_ARTIFACT_PREVIEW_REFUSAL_HEADER]: code,
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Expose-Headers": ONE_ARTIFACT_PREVIEW_REFUSAL_HEADER,
       ...(status === 416 && size != null ? { "Content-Range": `bytes */${size}` } : {}),
     },
   });
@@ -1203,19 +1269,30 @@ export function serveOneArtifactProtocolRequest(
   nowMs = Date.now(),
 ): Response {
   const token = tokenFromUrl(rawUrl);
-  if (!token) return safeError(404);
-  pruneTokens(nowMs);
-  const record = tokens.get(token);
-  if (!record || record.expiresAtMs <= nowMs) return safeError(404);
-  const verified = verifiedFile(record.request);
-  if (!verified) {
-    tokens.delete(token);
-    return safeError(404);
+  if (!token) {
+    logPreviewRefusal("serve", "capability_malformed", "url", nowMs);
+    return safeError(404, "capability_malformed");
   }
+  // Read the record before pruning, so an expired capability is told apart from one that never existed.
+  const record = tokens.get(token);
+  pruneTokens(nowMs);
+  if (!record || record.expiresAtMs <= nowMs) {
+    const code = record ? "capability_expired" : evictedTokens.has(token) ? "capability_evicted" : "capability_unknown";
+    logPreviewRefusal("serve", code, record ? bindingLogRef(record.request) : "token", nowMs);
+    return safeError(404, code);
+  }
+  const verdict = fileVerdict(record.request);
+  if (!verdict.ok) {
+    tokens.delete(token);
+    logPreviewRefusal("serve", verdict.code, bindingLogRef(record.request), nowMs);
+    return safeError(404, verdict.code);
+  }
+  const verified = verdict.value;
   const range = parseRange(rangeHeader, verified.row.size_bytes);
   if (!range) {
     fs.closeSync(verified.fd);
-    return safeError(416, verified.row.size_bytes);
+    logPreviewRefusal("serve", "range_invalid", bindingLogRef(record.request), nowMs);
+    return safeError(416, "range_invalid", verified.row.size_bytes);
   }
   const stream = fs.createReadStream(verified.row.source_path, {
     fd: verified.fd,

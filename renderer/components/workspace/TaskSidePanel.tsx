@@ -3,7 +3,7 @@ import { readAppUiPreference, writeAppUiPreference, subscribeAppUiPreference } f
 import type { AppOutputSection } from "@shared/app-ui-preferences";
 
 import { BoundImageArtifacts } from "./BoundImageArtifacts";
-import { scopedBoundImages } from "@/lib/bound-image-artifacts";
+import { boundArtifactKey, scopedBoundImages } from "@/lib/bound-image-artifacts";
 import { filePreviewEmptyMessage } from "@/lib/file-preview-reason";
 import type { OfficeEditIntent, OfficeTaskSelection } from "@shared/office-document";
 import { useOfficeTaskContext } from "@/lib/use-office-task-context";
@@ -52,7 +52,7 @@ import {
 } from "@/lib/output-presentation";
 import { designOutputSurfaceProps, designSurfaceKindForOutput } from "@/lib/design-output-tokens";
 import { isOneArtifactOpenRequest, ONE_ARTIFACT_OPEN_EVENT, requestOneArtifactOpen, type OneArtifactOpenRequest } from "@/lib/one-artifact-open";
-import type { OneArtifactPreviewCapabilityV1 } from "@shared/one-artifacts";
+import { isOneArtifactPreviewCapabilityV1, type OneArtifactPreviewCapabilityV1 } from "@shared/one-artifacts";
 import type { ComputerHistoryEntry, ComputerHistoryState } from "@shared/computer-history";
 import type {
   OneActivityCode,
@@ -545,6 +545,7 @@ function liveKindForCapability(capability: OneArtifactPreviewCapabilityV1): Live
 function ArtifactPreviewCard({ item, locale, wide = false }: { item: OneActivityArtifact; locale: "ko" | "en"; wide?: boolean }) {
   const [preview, setPreview] = useState<OneArtifactPreviewCapabilityV1 | null>(null);
   const [settled, setSettled] = useState(false);
+  const bindingKey = boundArtifactKey(item);
   useEffect(() => {
     const bridge = ipc();
     if (!bridge?.oneArtifacts?.issuePreview) {
@@ -556,7 +557,9 @@ function ArtifactPreviewCard({ item, locale, wide = false }: { item: OneActivity
     setPreview(null);
     setSettled(false);
     void bridge.oneArtifacts.issuePreview(item.binding)
-      .then((capability) => {
+      .then((value) => {
+        // Main answers a refusal with its code (shared/one-artifacts.ts); only a capability is drawn.
+        const capability = isOneArtifactPreviewCapabilityV1(value) ? value : null;
         if (disposed) {
           if (capability) void bridge.oneArtifacts.revokePreview({ ...item.binding, capabilityUrl: capability.capabilityUrl }).catch(() => ({ revoked: false }));
           return;
@@ -570,7 +573,10 @@ function ArtifactPreviewCard({ item, locale, wide = false }: { item: OneActivity
       disposed = true;
       if (issued) void bridge.oneArtifacts.revokePreview({ ...item.binding, capabilityUrl: issued.capabilityUrl }).catch(() => ({ revoked: false }));
     };
-  }, [item.binding, item.id]);
+  // The binding's fields, not its object identity: every re-projection of the activity rows builds new binding objects,
+  // and keying on identity minted and revoked a capability per card on each one.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bindingKey, item.id]);
 
   return <article className={styles.artifactPreviewCard} data-preview-kind={preview?.kind ?? "file"}>
     {preview && <div className={`${styles.artifactVisual} ${preview.kind === "audio" ? styles.artifactAudio : ""}`}>
@@ -611,7 +617,8 @@ function ArtifactOpenViewer({ target, locale, wide, onOfficeSelection, onOfficeE
     setLoading(true);
     setFailed(false);
     void bridge.oneArtifacts.issuePreview(binding)
-      .then((next) => {
+      .then((value) => {
+        const next = isOneArtifactPreviewCapabilityV1(value) ? value : null;
         setCapability(next);
         setLoading(false);
         setFailed(!next);
@@ -629,7 +636,8 @@ function ArtifactOpenViewer({ target, locale, wide, onOfficeSelection, onOfficeE
       setLoading(true);
       setFailed(false);
       void bridge.oneArtifacts.issuePreview(binding)
-        .then((next) => {
+        .then((value) => {
+          const next = isOneArtifactPreviewCapabilityV1(value) ? value : null;
           issued = next;
           setCapability(next);
           setLoading(false);

@@ -96,6 +96,7 @@ import type { OneRecurrenceSelectionV1 } from "./one-recurrence";
 import type {
   OneArtifactBindingRequestV1,
   OneArtifactPreviewCapabilityV1,
+  OneArtifactPreviewRefusalV1,
   OneArtifactPreviewRevokeV1,
 } from "./one-artifacts";
 import type {
@@ -294,6 +295,8 @@ export type {
 export type {
   OneArtifactBindingRequestV1,
   OneArtifactPreviewCapabilityV1,
+  OneArtifactPreviewRefusalCode,
+  OneArtifactPreviewRefusalV1,
   OneArtifactPreviewRevokeV1,
 } from "./one-artifacts";
 export type {
@@ -8194,7 +8197,8 @@ export interface AgentlasIpc {
   };
   /** Desktop-only opaque previews for exact Main-bound One result artifacts. */
   oneArtifacts: {
-    issuePreview: (input: OneArtifactBindingRequestV1) => Promise<OneArtifactPreviewCapabilityV1 | null>;
+    /** A capability, or the code of the one check that refused it (shared/one-artifacts.ts). */
+    issuePreview: (input: OneArtifactBindingRequestV1) => Promise<OneArtifactPreviewCapabilityV1 | OneArtifactPreviewRefusalV1>;
     revokePreview: (input: OneArtifactPreviewRevokeV1) => Promise<{ revoked: boolean }>;
   };
   /** Persistent One identity and user-approved operating principles. */
