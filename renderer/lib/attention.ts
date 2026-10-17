@@ -50,6 +50,12 @@ export interface AttentionItem {
 const POLL_MS = 3_000;
 const POLL_HIDDEN_MS = 15_000;
 const SLOW_POLL_MS = 15_000;
+const SLOW_POLL_HIDDEN_MS = 60_000;
+/** The dock badge count is sent when it changes, and re-sent this often so a reloaded window stays right. */
+const BADGE_HEARTBEAT_MS = 60_000;
+let badgeSent: { count: number; at: number } | null = null;
+/** Snoozed confirmations the last rebuild hid; a snooze that ran out since then must rebuild (it is time-based). */
+let snoozedAtRebuild = 0;
 
 let confirmations: PendingConfirmation[] = [];
 let browserApprovals = new Map<string, BrowserApprovalRequestEvent>();
@@ -86,7 +92,11 @@ function rebuild(): void {
     else if (owner?.surface === "science") pushChat(`browser:${request.requestId}`, "approval", null, "science", "/science", request.summary);
     else pushChat(`browser:${request.requestId}`, "approval", owner?.chatId ?? null, owner?.surface ?? null, null, request.summary);
   }
-  for (const item of confirmations) if (!isPendingConfirmationSnoozed(item)) pushChat(`confirm:${item.sourceMessageId}`, "approval", item.chatId, null, null, item.chatTitle ?? null);
+  snoozedAtRebuild = 0;
+  for (const item of confirmations) {
+    if (!isPendingConfirmationSnoozed(item)) pushChat(`confirm:${item.sourceMessageId}`, "approval", item.chatId, null, null, item.chatTitle ?? null);
+    else snoozedAtRebuild += 1;
+  }
   for (const chatId of finishedUnseen) pushChat(`done:${chatId}`, "result", chatId);
   for (const member of orgUnread) {
     items.push({ key: `org:${member.id}`, kind: "result", chatId: null, surface: "one", href: "/one", label: member.displayName });
@@ -123,7 +133,11 @@ async function pollConfirmations(): Promise<void> {
     const same = list.length === confirmations.length && list.every((item, index) => item.sourceMessageId === confirmations[index]?.sourceMessageId && item.snoozedUntil === confirmations[index]?.snoozedUntil);
     confirmations = list;
     // 독 배지·독 튕김·"승인 대기" OS 알림. 예전엔 AppShell 폴링에만 물려 One 에선 멈췄다.
-    await api.attention?.setPendingConfirmations(list.length);
+    // Unchanged counts are not re-sent every 3 s; Main only acts on a change (perf review R-15).
+    if (!badgeSent || badgeSent.count !== list.length || Date.now() - badgeSent.at >= BADGE_HEARTBEAT_MS) {
+      await api.attention?.setPendingConfirmations(list.length);
+      badgeSent = { count: list.length, at: Date.now() };
+    }
     if (!same) rebuild();
   } catch {
     // Transient IPC errors keep the last known list instead of clearing the dot.
@@ -138,13 +152,18 @@ function mergeBrowser(incoming: BrowserApprovalRequestEvent[], replace: boolean)
     else next.set(item.requestId, item);
   }
   for (const [id, item] of next) if (item.expiresAt <= now) next.delete(id);
+  // The 15 s poll usually returns the same requests: then nothing is rebuilt and no subscriber re-renders.
+  const same = next.size === browserApprovals.size && [...next].every(([id, item]) => {
+    const previous = browserApprovals.get(id);
+    return previous === item || (previous !== undefined && JSON.stringify(previous) === JSON.stringify(item));
+  });
   browserApprovals = next;
   // 메인이 정한 만료 시각에 점에서도 빠지게 — 다음 폴링까지 남아 있지 않게 한다.
   if (browserExpiryTimer !== null) window.clearTimeout(browserExpiryTimer);
   browserExpiryTimer = null;
   const soonest = Math.min(...[...next.values()].map((item) => item.expiresAt));
   if (Number.isFinite(soonest)) browserExpiryTimer = window.setTimeout(() => mergeBrowser([], false), Math.max(0, soonest - now) + 50);
-  rebuild();
+  if (!same || confirmations.filter((item) => isPendingConfirmationSnoozed(item)).length !== snoozedAtRebuild) rebuild();
 }
 let browserExpiryTimer: number | null = null;
 
@@ -186,12 +205,14 @@ function start(): void {
   void pollConfirmations();
   void pollSlow();
   let fast = window.setInterval(() => void pollConfirmations(), POLL_MS);
-  window.setInterval(() => void pollSlow(), SLOW_POLL_MS);
+  let slow = window.setInterval(() => void pollSlow(), SLOW_POLL_MS);
   // 승인 대기(독 배지)는 앱을 내려놓은 사이에도 떠야 하므로 숨김 중에도 돈다 — 간격만 늘린다.
   document.addEventListener("visibilitychange", () => {
     window.clearInterval(fast);
+    window.clearInterval(slow);
     const hidden = document.visibilityState === "hidden";
     fast = window.setInterval(() => void pollConfirmations(), hidden ? POLL_HIDDEN_MS : POLL_MS);
+    slow = window.setInterval(() => void pollSlow(), hidden ? SLOW_POLL_HIDDEN_MS : SLOW_POLL_MS);
     if (!hidden) { void pollConfirmations(); void pollSlow(); }
   });
   window.addEventListener("agentlas:attention-refresh", () => { void pollConfirmations(); void pollSlow(); });
