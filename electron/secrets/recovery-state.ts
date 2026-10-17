@@ -46,6 +46,22 @@ function location(resource: CredentialRecoveryResource): string {
   return userDataPath("credential-recovery-v1", hash(resource.service), key);
 }
 
+const DIRECTORY_SYNC_UNSUPPORTED = new Set(["EPERM", "EISDIR", "EINVAL", "ENOTSUP"]);
+
+/** Windows cannot open a directory for fsync (libuv answers EPERM), and some
+ * filesystems refuse directory fsync. The same-directory rename already makes
+ * readers see the whole old or the whole new record, so this is best-effort.
+ */
+async function syncDirectoryBestEffort(directory: string): Promise<void> {
+  if (process.platform === "win32") return;
+  try {
+    const handle = await fs.open(directory, "r");
+    try { await handle.sync(); } finally { await handle.close(); }
+  } catch (error) {
+    if (!DIRECTORY_SYNC_UNSUPPORTED.has((error as { code?: string })?.code ?? "")) throw error;
+  }
+}
+
 async function atomicJson(file: string, value: unknown): Promise<void> {
   const temporary = `${file}.${randomUUID()}.tmp`;
   const handle = await fs.open(temporary, "wx", 0o600);
@@ -53,8 +69,7 @@ async function atomicJson(file: string, value: unknown): Promise<void> {
   finally { await handle.close(); }
   try {
     await fs.rename(temporary, file);
-    const directory = await fs.open(path.dirname(file), "r");
-    try { await directory.sync(); } finally { await directory.close(); }
+    await syncDirectoryBestEffort(path.dirname(file));
   } finally { await fs.unlink(temporary).catch((error) => { if (!isMissing(error)) throw error; }); }
 }
 

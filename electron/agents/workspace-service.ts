@@ -36,11 +36,19 @@ const semanticPreparations = new WeakSet<object>();
 function iso(): string { return new Date().toISOString(); }
 function objectId(): string { return randomUUID(); }
 function readJson<T>(file: string): T { return JSON.parse(fs.readFileSync(file, "utf8")) as T; }
+const DIRECTORY_SYNC_UNSUPPORTED = new Set(["EPERM", "EISDIR", "EINVAL", "ENOTSUP"]);
+// Windows cannot open a directory for fsync (libuv answers EPERM), and some filesystems refuse it. The same-directory
+// rename already makes readers see the whole old or new file, so the directory fsync is best-effort; the file fsync stays strict.
+function syncDirectoryBestEffort(directory: string): void {
+  if (process.platform === "win32") return;
+  try { const dir = fs.openSync(directory, "r"); try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); } }
+  catch (error) { if (!DIRECTORY_SYNC_UNSUPPORTED.has((error as { code?: string })?.code ?? "")) throw error; }
+}
 export function writeAgentWorkspaceRecord(file: string, value: unknown): void {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const tmp = `${file}.${objectId()}.tmp`; const fd = fs.openSync(tmp, "wx", 0o600);
   try { fs.writeFileSync(fd, JSON.stringify(value) + "\n"); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-  try { fs.renameSync(tmp, file); const dir = fs.openSync(path.dirname(file), "r"); try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); } }
+  try { fs.renameSync(tmp, file); syncDirectoryBestEffort(path.dirname(file)); }
   finally { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); }
 }
 const atomicJson = writeAgentWorkspaceRecord;
@@ -695,7 +703,7 @@ function writeAsset(root: string, asset: WorkspaceAsset | undefined, relative: s
   const tmp = path.join(path.dirname(target), `.agent-revision-${objectId()}.tmp`); const fd = fs.openSync(tmp, "wx", asset.executable ? 0o700 : 0o600);
   try { fs.writeFileSync(fd, Buffer.from(asset.contentBase64, "base64")); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   try { workspaceTarget(root, relative); assertPreimage(); fs.renameSync(tmp, target);
-    const dir = fs.openSync(path.dirname(target), "r"); try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
+    syncDirectoryBestEffort(path.dirname(target));
   } finally { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); }
 }
 function finalizeApply(p: StoredProposal, approval: ApprovalReceipt): AgentWorkspaceProposal {
