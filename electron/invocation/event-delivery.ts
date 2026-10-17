@@ -6,10 +6,21 @@ interface Journal {
   entries: Map<number, { event: McpInvocationEvent; bytes: number }>;
   terminalEvent: McpInvocationEvent | null;
 }
-/** Session-local wire replay. Durable receipts/history own recovery after eviction/restart. */
+/**
+ * Session-local wire replay. Durable receipts/history own recovery after eviction/restart.
+ *
+ * Retention (perf review 2026-10-17, R-11). Up to 32 journals of up to 8 MB were kept with no regard to whether their
+ * run was still live: finished runs (their history is durable) sat beside live ones for the 10-minute TTL, and a live
+ * run that went quiet was the "least recently touched" one evicted when finished runs piled up, sending its viewers
+ * to a ledger hydration. Finished journals now go first: at most `terminalRuns` of them stay. A live journal is never
+ * dropped for a finished one; background runs keep theirs (they get no push, so replay is their only live channel),
+ * and `runs` in all bounds only a host with that many live runs at once. (Holding each event as its JSON string
+ * instead of a parsed copy was measured and rejected: it saved nothing for code and English, and a JSON string with
+ * any Korean in it is stored two bytes per character, keys included, where a parsed copy keeps its keys one-byte.)
+ */
 export class RunEventDeliveryJournal {
   private readonly runs = new Map<string, Journal>();
-  constructor(private readonly limits = { events: 20_000, bytes: 8 * 1024 * 1024, runs: 32, ttlMs: 10 * 60_000 }, private readonly now = Date.now) {}
+  constructor(private readonly limits = { events: 20_000, bytes: 8 * 1024 * 1024, runs: 32, terminalRuns: 8, ttlMs: 10 * 60_000 }, private readonly now = Date.now) {}
   publish(runId: string, chatId: string, event: McpInvocationEvent, ordinal: number): McpInvocationEvent {
     let journal = this.runs.get(runId);
     if (journal && journal.chatId !== chatId) throw new Error("run-event-delivery-owner-mismatch");
@@ -74,11 +85,31 @@ export class RunEventDeliveryJournal {
   }
   private prune(): void {
     const now = this.now();
-    for (const [id, run] of this.runs) if (run.terminalAt !== null && now - run.touchedAt > this.limits.ttlMs) this.runs.delete(id);
-    while (this.runs.size > this.limits.runs) {
-      const oldest = [...this.runs.entries()].sort((a, b) => a[1].touchedAt - b[1].touchedAt)[0];
-      if (!oldest) break;
-      this.runs.delete(oldest[0]);
+    let terminal = 0;
+    for (const [id, run] of this.runs) {
+      if (run.terminalAt === null) continue;
+      if (now - run.touchedAt > this.limits.ttlMs) this.runs.delete(id);
+      else terminal++;
     }
+    // Finished runs first (least recently touched), then, only past the total bound, the least recently touched run.
+    while (terminal > this.limits.terminalRuns) {
+      const oldest = this.leastRecentlyTouched(true);
+      if (!oldest) break;
+      this.runs.delete(oldest); terminal--;
+    }
+    while (this.runs.size > this.limits.runs) {
+      const oldest = this.leastRecentlyTouched(terminal > 0);
+      if (!oldest) break;
+      if (this.runs.get(oldest)!.terminalAt !== null) terminal--;
+      this.runs.delete(oldest);
+    }
+  }
+  private leastRecentlyTouched(terminalOnly: boolean): string | undefined {
+    let oldest: [string, Journal] | undefined;
+    for (const entry of this.runs) {
+      if (terminalOnly && entry[1].terminalAt === null) continue;
+      if (!oldest || entry[1].touchedAt < oldest[1].touchedAt) oldest = entry;
+    }
+    return oldest?.[0];
   }
 }
