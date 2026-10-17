@@ -255,17 +255,54 @@ notarize_dmg() {
   local dmg_path="$1"
   local profile="${AGENTLAS_NOTARY_PROFILE:-agentlas-notary}"
 
+  local notary_auth=()
   if xcrun notarytool history --keychain-profile "$profile" >/dev/null 2>&1; then
-    xcrun notarytool submit "$dmg_path" --keychain-profile "$profile" --wait
+    notary_auth=(--keychain-profile "$profile")
   elif [[ -n "${APPLE_ID:-}" && -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then
-    xcrun notarytool submit "$dmg_path" \
-      --apple-id "$APPLE_ID" \
-      --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-      --team-id "$APPLE_TEAM_ID" \
-      --wait
+    notary_auth=(--apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID")
   else
     echo "Missing notarization credentials for $dmg_path." >&2
     echo "Set AGENTLAS_NOTARY_PROFILE or APPLE_ID/APPLE_APP_SPECIFIC_PASSWORD/APPLE_TEAM_ID." >&2
+    return 1
+  fi
+
+  # The submission is Apple's, not this connection's. 1.3.59 uploaded its arm64 DMG, then one status poll of
+  # `submit --wait` hit "The Internet connection appears to be offline" (-1009) and notarytool exited 1 while Apple
+  # kept processing. So the upload and the wait are separate: a failed upload is retried, and waiting re-reads the same
+  # submission id until Apple answers Accepted, Invalid or Rejected. A lost poll is never read as a verdict.
+  local retry_seconds="${AGENTLAS_NOTARY_RETRY_SECONDS:-20}"
+  local submit_json="" submission_id="" submit_attempt
+  for submit_attempt in 1 2 3; do
+    if submit_json="$(xcrun notarytool submit "$dmg_path" "${notary_auth[@]}" --output-format json)"; then
+      submission_id="$(node -e 'try { process.stdout.write(String(JSON.parse(process.argv[1]).id || "")) } catch {}' "$submit_json")"
+      [[ "$submission_id" =~ ^[0-9A-Fa-f-]{36}$ ]] && break
+    fi
+    submission_id=""
+    echo "Notarization upload of $dmg_path failed (attempt $submit_attempt of 3); retrying in $((submit_attempt * retry_seconds))s." >&2
+    sleep $((submit_attempt * retry_seconds))
+  done
+  if [[ -z "$submission_id" ]]; then
+    echo "Notarization upload of $dmg_path failed after 3 attempts." >&2
+    return 1
+  fi
+  local notary_status="" wait_attempt info_json
+  for wait_attempt in 1 2 3 4 5 6; do
+    xcrun notarytool wait "$submission_id" "${notary_auth[@]}" --timeout 30m >&2 || true
+    info_json="$(xcrun notarytool info "$submission_id" "${notary_auth[@]}" --output-format json 2>/dev/null)" || info_json=""
+    notary_status="$(node -e 'try { process.stdout.write(String(JSON.parse(process.argv[1]).status || "")) } catch {}' "$info_json")"
+    case "$notary_status" in
+      Accepted) break ;;
+      Invalid|Rejected)
+        echo "Notarization of $dmg_path ended $notary_status (submission $submission_id)." >&2
+        xcrun notarytool log "$submission_id" "${notary_auth[@]}" >&2 || true
+        return 1
+        ;;
+    esac
+    echo "Notarization of $submission_id is '${notary_status:-unreadable}' (poll $wait_attempt of 6); waiting again in $((wait_attempt * retry_seconds))s." >&2
+    sleep $((wait_attempt * retry_seconds))
+  done
+  if [[ "$notary_status" != "Accepted" ]]; then
+    echo "Notarization of $submission_id never reached Accepted." >&2
     return 1
   fi
 
