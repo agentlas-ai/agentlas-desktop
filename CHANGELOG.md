@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.61 — 2026-10-17
+
+- A teammate's tool call is accepted whichever field names it uses for the operation and its arguments, so a found tool is no longer refused as unknown.
+- Includes the 1.3.60 changes, which were not published separately: relevance-ranked tool search, a team list that says whether each teammate can start, the listening tool for Claude Code teammates, and the phone's full decision list.
+- This release binds Agentlas OS v1.2.66 at c0acd99be22114569e20bca94bed4540ba046eb4; public runtime asset `hephaestus-runtime-v1.2.66.tar.gz` is pinned at SHA-256 `20019d3ba4df1c540d0ef549c07a82188bd40fe12dafb2f8a6c75cc4bdcc89f7`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.60 — 2026-10-17
 
 - Tool search ranks results by relevance, so the operation that answers the request comes first.
