@@ -96,7 +96,12 @@ function scheduleRetry(run: LongRunRecord, kind: "observe" | "resume", detail: s
     retryIndex: slot.retryIndex, nextAt: slot.nextAt, detail,
     trigger: options.dispatchFailed ? `dispatch-failed:${trigger}` : trigger,
     appInstanceId: desktopAppInstanceId() });
-  if (slot.retryIndex === 0) {
+  if (slot.retryIndex === 0 && detail === "goal_owner_grant_unrecorded") {
+    // No model was tried: the host found no recorded owner grant to continue on, and the owner's next message is one.
+    notify(run, "effect-retrying",
+      "이 목표를 이어갈 오너 지시 기록을 찾지 못해 멈춰 있어요. 이 방에 한 번 더 말씀해 주시면 그 메시지로 이어갑니다.",
+      "This goal is waiting because no recorded instruction from you was found to continue on. Send one more message here and it continues from it.");
+  } else if (slot.retryIndex === 0) {
     const minutes = Math.max(1, Math.round((Date.parse(slot.nextAt) - Date.now()) / 60_000));
     notify(run, "effect-retrying", kind === "observe"
       ? `이전 작업이 반영됐는지 지금은 확인하지 못했어요. ${minutes}분 뒤 앱이 스스로 다시 확인하고 이어갑니다.`

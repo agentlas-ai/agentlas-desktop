@@ -28,8 +28,13 @@ export function findExplicitGoalGrant(db: Database.Database, goalId: string): Go
   // prompt is the Goal's objective (checked below). No time bound against the ledger row: a Goal bound by the chip
   // gets its row a few ms BEFORE its first turn records invoke_started (measured 2026-09-25 on the owner's copy:
   // row 01:40:56.399Z, turn 01:40:56.409Z), so "started at/before the run" never matched a real chip Goal.
+  // Only turns from the Goal's own creation onward (a minute of slack for the chip's row-before-turn order). Reading the
+  // chat's 50 oldest turns instead never reached a Goal started in a busy room: production 2026-10-17, the YouTube room
+  // had 320 turns, the owner's /goal turn was not among the first 50, and the sweep deferred goal_owner_grant_unrecorded
+  // every 10 minutes with 15 videos made and none uploaded.
+  const since = new Date(Date.parse(run.created_at) - 60_000).toISOString();
   const starts = db.prepare(`SELECT run_id, payload_json FROM run_events WHERE chat_id = ? AND kind = 'invoke_started'
-    ORDER BY ts ASC LIMIT 50`).all(run.root_chat_id) as Array<{ run_id: string; payload_json: string }>;
+    AND ts >= ? ORDER BY ts ASC LIMIT 50`).all(run.root_chat_id, since) as Array<{ run_id: string; payload_json: string }>;
   for (const start of starts) {
     let payload: Record<string, unknown>;
     try { payload = JSON.parse(start.payload_json) as Record<string, unknown>; } catch { continue; }
