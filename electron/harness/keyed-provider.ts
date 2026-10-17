@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 
 /*
  * Keyed providers through the host: the owner's saved key is read in Main and sent only to that provider's own API host;
@@ -166,11 +166,27 @@ async function sendBody(adapter: KeyedAdapter, key: string, input: { pathAndQuer
 export interface TranscriptWord { text: string; start: number; end: number }
 export interface Transcript { routeId: string; modelId: string; text: string; words: TranscriptWord[]; language: string | null; requestId: string | null }
 
+/*
+ * A local media tool (ffmpeg, ffprobe) with spawnSync's { status, stdout, stderr } but without blocking the host's event
+ * loop. Perf review MP-02 (2026-10-17): media.listen ran ffmpeg with spawnSync in Main or the daemon, so IPC, the control
+ * socket and every timer froze for the whole run (a 7 min 1080p cut: 5.2 s per call, 8+ calls per film). Same timeout,
+ * kill signal, maxBuffer and closed stdin as spawnSync; a missing tool or a kill gives status null as before.
+ */
+export function runTool(bin: string, args: string[], timeoutMs: number): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = execFile(bin, args, { encoding: "utf8", timeout: timeoutMs, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+      const code: unknown = error ? (error as { code?: unknown }).code : 0;
+      resolve({ status: typeof code === "number" ? code : null, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+    });
+    child.stdin?.end();
+  });
+}
+
 /** A compact mono speech track of any local audio/video file (ffmpeg); null when ffmpeg is missing or fails. */
-export function speechTrack(input: string, workDir: string): string | null {
+export async function speechTrack(input: string, workDir: string): Promise<string | null> {
   const out = path.join(workDir, `speech-${sha(input + fs.statSync(input).mtimeMs).slice(0, 12)}.mp3`);
   try {
-    const r = spawnSync("ffmpeg", ["-v", "error", "-y", "-protocol_whitelist", "file", "-i", input, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", out], { encoding: "utf8", timeout: 180_000 });
+    const r = await runTool("ffmpeg", ["-v", "error", "-y", "-protocol_whitelist", "file", "-i", input, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", out], 180_000);
     return r.status === 0 && fs.existsSync(out) ? out : null;
   } catch { return null; }
 }
@@ -316,9 +332,9 @@ async function keyedProviderRequestNow(adapter: KeyedAdapter, key: string, input
   return ok({ routeId, requestId, receiptId, ...data });
 }
 
-function probeDurationSeconds(file: string): number | null {
+async function probeDurationSeconds(file: string): Promise<number | null> {
   try {
-    const r = spawnSync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", file], { encoding: "utf8", timeout: 15_000 });
+    const r = await runTool("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", file], 15_000);
     const n = Number(String(r.stdout ?? "").trim());
     return r.status === 0 && Number.isFinite(n) && n > 0 ? n : null;
   } catch { return null; }
@@ -407,9 +423,10 @@ async function speechSynthesizeNow(adapter: KeyedAdapter, key: string, input: { 
   if (audio.length === 0) return refused("provider_answer_without_audio");
   fs.mkdirSync(path.dirname(outputFile), { recursive: true });
   fs.writeFileSync(outputFile, audio);
+  const probedSeconds = await probeDurationSeconds(outputFile);
   const record = {
     schemaVersion: "agentlas.speech-receipt.v1", routeId, path: outputFile, alignmentPath, sha256: sha(audio), bytes: audio.length,
-    durationSeconds: probeDurationSeconds(outputFile) ?? alignmentEnd, characters: text.length, textSha256: sha(text), voiceId, modelId,
+    durationSeconds: probedSeconds ?? alignmentEnd, characters: text.length, textSha256: sha(text), voiceId, modelId,
     requestId, requestDigest: digest, createdAt: new Date().toISOString(),
   };
   fs.writeFileSync(receiptFile, JSON.stringify(record, null, 1));

@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 
 /*
  * media.listen — the host listens to a local audio/video file for a run whose model cannot take audio.
@@ -60,9 +59,12 @@ export function compareWords(expected: string[], heard: string[]): { wer: number
   return { wer: n === 0 ? (m === 0 ? 0 : 1) : (subs + dels + ins) / n, substitutions: subs, deletions: dels, insertions: ins, runs };
 }
 
-export function silences(file: string): Array<{ start: number; end: number; duration: number }> {
+export async function silences(file: string): Promise<Array<{ start: number; end: number; duration: number }>> {
   try {
-    const r = spawnSync("ffmpeg", ["-v", "info", "-protocol_whitelist", "file", "-i", file, "-af", "silencedetect=noise=-35dB:d=1.5", "-f", "null", "-"], { encoding: "utf8", timeout: 180_000 });
+    // Without blocking the host (keyed-provider.ts runTool); -vn: only the audio is measured, so no video frame is decoded
+    // (perf MP-02: the full decode cost 31 s CPU on a 7 min 1080p cut).
+    const { runTool } = await import("./keyed-provider");
+    const r = await runTool("ffmpeg", ["-v", "info", "-protocol_whitelist", "file", "-i", file, "-vn", "-af", "silencedetect=noise=-35dB:d=1.5", "-f", "null", "-"], 180_000);
     const out: Array<{ start: number; end: number; duration: number }> = []; let start: number | null = null;
     for (const line of String(r.stderr ?? "").split("\n")) {
       const s = line.match(/silence_start: (-?[\d.]+)/); if (s) start = Number(s[1]);
@@ -107,7 +109,7 @@ export async function mediaListen(args: Record<string, unknown>, ctx: { chatId: 
   return kp.answerWithinWindow(key, async () => {
     const work = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-listen-"));
     try {
-      const track = kp.speechTrack(file, work);
+      const track = await kp.speechTrack(file, work);
       if (!track) return refused("audio_track_unavailable", "ffmpeg could not read an audio track from this file");
       const heard = await kp.transcribeFile(routeId, track, ctx, str(args.languageCode) || undefined);
       if (!heard.ok) return heard.outcome;
@@ -119,7 +121,7 @@ export async function mediaListen(args: Record<string, unknown>, ctx: { chatId: 
       const comparison = script ? compareWords(normalizeWords(script), heardWords) : null;
       const at = (index: number) => timed[Math.min(Math.max(index, 0), timed.length - 1)]?.start ?? null;
       const speechStart = timed[0]?.start ?? null, speechEnd = timed.at(-1)?.end ?? null;
-      const gaps = silences(file).filter((g) => speechStart !== null && speechEnd !== null && g.start > speechStart && g.end < speechEnd);
+      const gaps = (await silences(file)).filter((g) => speechStart !== null && speechEnd !== null && g.start > speechStart && g.end < speechEnd);
       let subtitle: { cues: number; checked: number; maxOffsetSec: number | null; worst: Array<{ cue: string; offsetSec: number }> } | null = null;
       if (subtitlePath) {
         const cues = parseCues(fs.readFileSync(subtitlePath, "utf8"));
@@ -177,7 +179,7 @@ export async function speechTranscribePort(args: Record<string, unknown>, ctx: {
   return kp.answerWithinWindow(`transcribe:${fileSha}:${routeId}`, async () => {
     const work = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-transcribe-"));
     try {
-      const track = kp.speechTrack(file, work);
+      const track = await kp.speechTrack(file, work);
       if (!track) return refused("audio_track_unavailable", "ffmpeg could not read an audio track from this file");
       const heard = await kp.transcribeFile(routeId, track, ctx, str(args.languageCode) || undefined);
       if (!heard.ok) return heard.outcome;
