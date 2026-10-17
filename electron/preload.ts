@@ -1795,19 +1795,6 @@ contextBridge.exposeInMainWorld("agentlasMenu", {
   },
 });
 
-// Science screen: the Document panel's state (the conversation Science shows, finished manuscript exports). A token
-// stands for an export; the renderer never names a path (electron/science-host/document-panel.ts).
-contextBridge.exposeInMainWorld("agentlasScienceDocument", {
-  state: () => ipcRenderer.invoke("scienceDocument:state"),
-  openExport: (token: string) => ipcRenderer.invoke("scienceDocument:openExport", token),
-  dismissExport: (token: string) => ipcRenderer.invoke("scienceDocument:dismissExport", token),
-  onChanged: (handler: (state: import("../shared/science-document-panel").ScienceDocumentPanelState) => void) => {
-    const wrapped = (_e: Electron.IpcRendererEvent, state: import("../shared/science-document-panel").ScienceDocumentPanelState) => handler(state);
-    ipcRenderer.on("scienceDocument:changed", wrapped);
-    return () => ipcRenderer.removeListener("scienceDocument:changed", wrapped);
-  },
-});
-
 // Science screen: the Preview tab (read-only viewer) lists the files the Science view handed over. A token stands for
 // bytes Main holds; the renderer builds the viewer URL from it and never names a path.
 contextBridge.exposeInMainWorld("agentlasSciencePreview", {

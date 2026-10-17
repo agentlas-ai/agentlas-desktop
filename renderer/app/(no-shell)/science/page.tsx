@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ProductExtensionStatus, ProductExtensionViewBounds, ProductExtensionViewStatus } from "@shared/product-extension";
 import { BrowserActionApprovalSheet } from "@/components/BrowserActionApprovalSheet";
-import { ScienceDocumentRail } from "@/components/science/ScienceDocumentRail";
+import { SciencePreviewRail } from "@/components/science/SciencePreviewRail";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
@@ -137,8 +137,8 @@ export default function ScienceHostPage() {
             </div>
           )}
         </div>
-        {/* The Document tab: a page-owned column beside the native Science view, which shrinks when it opens. */}
-        <ScienceDocumentRail locale={ko ? "ko" : "en"} />
+        {/* The Preview: a page-owned column beside the native Science view, which shrinks when it opens. */}
+        <SciencePreviewRail locale={ko ? "ko" : "en"} />
         </div>
       </div>
       <BrowserActionApprovalSheet onStandaloneHeightChange={setApprovalHeight} />

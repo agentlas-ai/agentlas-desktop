@@ -102,8 +102,6 @@ export function registerScienceDaemonExecutionIpc(options: {
   assertHumanComputeSender?(event: IpcMainInvokeEvent, envelope: unknown): { releaseId: string };
   client: ScienceDaemonClient;
   onConnectionState?(state: ScienceDaemonObservation): void;
-  /** The view says it now shows this conversation (it asks for that conversation's approvals); never blocks the call. */
-  onConversationWatched?(senderId: number, scope: { projectId: string; conversationId: string }): void;
 }): ScienceDaemonExecutionIpc {
   const { ipcMain, client } = options;
   const handOverSession = () => {
@@ -656,7 +654,6 @@ export function registerScienceDaemonExecutionIpc(options: {
     const viewer = viewerFor(event), watched = { projectId, conversationId: chatId };
     if (!matches(viewer.approvals, watched)) viewer.approvalIds.clear();
     viewer.approvals = watched;
-    try { options.onConversationWatched?.(event.sender.id, watched); } catch { /* an observer never fails the approvals call */ }
     await connectForIntent(event, envelope);
     const state = await dispatch(`toolApprovals.${action}`, { projectId, chatId, ...(action === "setAlwaysApproved" ? { enabled: payload.enabled === true } : {}) }, true);
     const pending = row(state)?.pending;

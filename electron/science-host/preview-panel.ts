@@ -2,9 +2,9 @@ import type { FilePreviewEntryInfo, FilePreviewRefusal } from "../document/file-
 import type { SciencePreviewOfferResult, SciencePreviewPanelState } from "../../shared/science-preview-panel";
 
 /*
- * Science's Preview tab (state side). The tab is the Universal File Viewer, the viewer Work's right rail uses for
- * files, hosted in the same page-owned column as the Document tab. It is read-only and faithful where the Document
- * tab is an editor: docx and pdf pages, a spreadsheet's sheets and formats, hwpx, pptx.
+ * Science's Preview (state side). It is the Universal File Viewer, the viewer Work's right rail uses for files, hosted
+ * in a page-owned column beside the Science view. It is read-only and faithful: docx and pdf pages, a spreadsheet's
+ * sheets and formats, hwpx, pptx.
  *
  * The Science view hands over bytes it already holds and has verified (a manuscript render output, a table as csv)
  * through `shell.previewFile`; Main keeps them in memory behind a token (document/file-preview.ts) and tells the owner

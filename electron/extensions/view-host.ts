@@ -85,12 +85,7 @@ interface ActiveScienceView {
 }
 
 const activeViews = new Map<number, ActiveScienceView>();
-/** Seams for the Science Document panel (science-host/document-panel-main.ts); view-host imports nothing from it. */
-export const scienceViewHooks: {
-  closed?: (ownerId: number) => void;
-  download?: (ownerId: number, item: Electron.DownloadItem) => void;
-} = {};
-/** Further owners of per-view state (the Preview tab) release it here; `closed` above is the Document panel's single slot. */
+/** Owners of per-view state (the Preview) release it here when a Science view closes; view-host imports nothing from them. */
 const scienceViewClosedListeners = new Set<(ownerId: number) => void>();
 export function onScienceViewClosed(listener: (ownerId: number) => void): () => void {
   scienceViewClosedListeners.add(listener);
@@ -233,7 +228,6 @@ function closeActive(active: ActiveScienceView, notify = true): void {
   activeViews.delete(active.ownerId);
   closeScienceQuestionSurface(active);
   closeRenderer(active);
-  try { scienceViewHooks.closed?.(active.ownerId); } catch { /* the panel never keeps a view open */ }
   for (const listener of scienceViewClosedListeners) {
     try { listener(active.ownerId); } catch { /* a listener never keeps a view open */ }
   }
@@ -981,10 +975,6 @@ export async function openScienceExtensionView(input: {
     event.preventDefault();
   });
   view.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  // The view saves exports as Blob downloads through the native save dialog; observing one never changes it.
-  view.webContents.session.on("will-download", (_event, item) => {
-    try { scienceViewHooks.download?.(active.ownerId, item); } catch { /* an observer cannot cancel a download */ }
-  });
   view.webContents.on("render-process-gone", (_event, details) => {
     active.send({ id: SCIENCE_EXTENSION_ID, leaseId: active.leaseId, state: "error", errorCode: "science-renderer-stopped", errorMessage: details.reason });
   });

@@ -8,10 +8,10 @@ import type { SciencePreviewItem } from "@shared/science-preview-panel";
 import styles from "./SciencePreviewPane.module.css";
 
 /*
- * The Preview tab body: the Universal File Viewer Work's right rail uses for files, fed by agentlas://file-preview/<token>
- * (electron/document/file-preview.ts). Read-only on purpose. The Document tab is the editor and replays the AI's edits;
- * this shows a docx, pdf, spreadsheet or deck the way it renders, page by page and sheet by sheet, so the owner can
- * look at a manuscript draft or a data table before deciding to save or edit it.
+ * The Preview body: the Universal File Viewer Work's right rail uses for files, fed by agentlas://file-preview/<token>
+ * (electron/document/file-preview.ts). Read-only on purpose: it shows a docx, pdf, spreadsheet or deck the way it
+ * renders, page by page and sheet by sheet, so the owner can look at a manuscript draft or a data table before deciding
+ * to save it.
  */
 
 // The workbook view (Data, Charts, Table tools) reads the xlsx itself, so it loads only when an xlsx is previewed.
@@ -63,8 +63,8 @@ export function SciencePreviewPane({ items, activeToken, locale, onSelect, onClo
     <div className={styles.pane} data-science-preview-pane="true">
       <p className={styles.note} data-science-preview-note="true">
         {ko
-          ? "읽기 전용 미리보기입니다. 저장한 파일이 아니라 지금 Science가 만든 내용을 그대로 보여 줍니다. 원고를 고치려면 내보낸 docx·hwpx 파일을 문서 탭에서 여세요."
-          : "Read-only preview of what Science just built, not a saved file. To edit a manuscript, export it and open the docx or hwpx in the Document tab."}
+          ? "읽기 전용 미리보기입니다. 저장한 파일이 아니라 지금 Science가 만든 내용을 그대로 보여 줍니다."
+          : "Read-only preview of what Science just built, not a saved file."}
       </p>
       <div className={styles.chips} role="tablist" aria-label={ko ? "열린 미리보기" : "Open previews"}>
         {items.map((item) => (
