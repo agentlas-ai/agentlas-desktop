@@ -57,6 +57,9 @@ import { withMemorySourceRunner } from "../memory/source-custody";
  * it. The provider stays authoritative for an auth failure. It used to be awaited before every turn while holding the run
  * slot: `agy models` and `grok models` are network calls, about 3.1 s on average and up to 7.7 s per agy turn
  * (independent review wave 2, desktop-w2-05). It now runs beside the turn, at most once a minute per runtime and source.
+ * Not per working folder: a run in another folder or product home never refreshes the chips' cache (probeRuntimeAuthForRun),
+ * so its probe only wrote a log line. Production 1.3.57 ran `codex login status` 349 times, 200–1,425 ms each, because every
+ * folder had its own minute (performance review 2026-10-17, H6).
  */
 const RUNTIME_AUTH_PROBE_INTERVAL_MS = 60_000;
 const runtimeAuthProbeStartedAt = new Map<string, number>();
@@ -67,7 +70,7 @@ function withRuntimeAuthProbe(runner: Runner, runtimeKind: string): Runner {
   const kind = runtimeKind as ConnectableRuntime;
   return async (req, events) => {
     if (req.signal?.aborted) throw abortReasonError(req);
-    const probeKey = `${kind}\0${req.runtimeSource ?? ""}\0${req.cwd ?? ""}`;
+    const probeKey = `${kind}\0${req.runtimeSource ?? ""}`;
     const now = Date.now();
     if ((runtimeAuthProbeStartedAt.get(probeKey) ?? -Infinity) + RUNTIME_AUTH_PROBE_INTERVAL_MS <= now) {
       runtimeAuthProbeStartedAt.set(probeKey, now);
