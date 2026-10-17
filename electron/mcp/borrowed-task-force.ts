@@ -143,6 +143,7 @@ import {
   recordBorrowedAgentCareer,
 } from "../agents/borrowed-profiles";
 import { parseWholeOrTrailingTypedJson } from "../../shared/typed-json-tail";
+import { stripStrayProtocolTokens } from "../../shared/protocol-token-strip";
 import { maskPrivateKeyBlocks } from "../../shared/secret-patterns";
 import { linkAbort } from "../runtime/linked-abort";
 import os from "node:os";
@@ -8228,6 +8229,11 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
   // Main-only receipt so InvocationService verifies the same bytes instead of
   // incorrectly replacing a successful, reopenable team result with
   // result-not-durable.
+  // The ordinary final path strips the escalation marker line and stray protocol blocks before its durable copy
+  // (client.ts) and carries the marker as a fact; this path persisted the synthesis raw — dev 2026-10-17 run8: the
+  // owner's room message ended with "[[NEEDS-FULL-ACCESS]]" and a whole memory-ticket JSON block.
+  const synthesisEscalationMarker = hasPermissionEscalationMarker(displayText);
+  displayText = stripStrayProtocolTokens(stripPermissionEscalationMarker(displayText));
   const durableAssistantEntry = emitFinal && !p.req.agentAppMode
     ? appendChatMessage(p.chat.id, "assistant", redactWorkAttachmentText(p.req, displayText))
     : undefined;
@@ -8252,6 +8258,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
     p.sink({
       kind: "final",
       text: displayText,
+      ...(synthesisEscalationMarker ? { permissionEscalationMarkerForVerification: true } : {}),
       ...(durableTextForVerification ? { durableTextForVerification } : {}),
       ...(durableAssistantEntry
         ? { durableAssistantMessageIdForVerification: durableAssistantEntry.id }
