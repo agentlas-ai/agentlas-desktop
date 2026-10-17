@@ -5,7 +5,7 @@ import {
   serializeNode, serializeXml, type XmlDocument, type XmlElement, type XmlNode,
 } from "../xml-lite";
 import { blockChanged, flowBlocks, LiveDocumentCodecError, planFlowInsertions, type LiveDocumentCodec } from "./common";
-import { el, firstChild, formatDelta, hex6, insertOrdered, isEmptyFormat, normColor, removeChildren } from "./format";
+import { el, formatDelta, hex6, insertOrdered, isEmptyFormat, normColor, removeChildren } from "./format";
 
 // CT_RPr / CT_PPr child sequences (ECMA-376 §17.3.2.28 / §17.3.1.26): Word rejects children out of order.
 const RPR_ORDER = ["rStyle", "rFonts", "b", "bCs", "i", "iCs", "caps", "smallCaps", "strike", "dstrike", "outline", "shadow", "emboss", "imprint", "noProof", "snapToGrid", "vanish", "webHidden", "color", "spacing", "w", "kern", "position", "sz", "szCs", "highlight", "u", "effect", "bdr", "shd", "fitText", "vertAlign", "rtl", "cs", "em", "lang", "eastAsianLayout", "specVanish", "oMath"];

@@ -166,11 +166,11 @@ function LiveDocumentEditor({ sessionId, locale, onClosed }: { sessionId: string
   const history = useRef<{ undo: HistoryStep[]; redo: HistoryStep[] }>({ undo: [], redo: [] });
   const [, setHistoryTick] = useState(0);
   const [activeSlide, setActiveSlide] = useState<string | null>(null);
-  const run = useCallback(async (ops: LiveDocumentOp[], mode: "record" | "undo" | "redo" = "record") => {
+  const run = useCallback(async (ops: LiveDocumentOp[], mode: "record" | "undo" | "redo" = "record"): Promise<boolean> => {
     const model = session.displayRef.current;
     const textual = model ? inverseOps(model, ops.filter((op) => !["insert_paragraph", "insert_table", "add_slide", "add_sheet", "delete_block", "delete_slide"].includes(op.op))) : null;
     const result = await apply(ops);
-    if (!result.ok) { setStatus({ tone: "error", text: reasonText(result.reason, locale) }); return; }
+    if (!result.ok) { setStatus({ tone: "error", text: reasonText(result.reason, locale) }); return false; }
     setStatus(null);
     // Undo: text/cell/format edits restore their previous values; inserts are undone by deleting what they created.
     const deletes: LiveDocumentOp[] = [];
@@ -181,17 +181,22 @@ function LiveDocumentEditor({ sessionId, locale, onClosed }: { sessionId: string
       if (op.op === "add_slide") { const id = created.shift(); if (id) deletes.unshift({ op: "delete_slide", target: id }); else undoable = false; }
     }
     const step: HistoryStep = { forward: ops, inverse: [...deletes, ...(textual ?? [])] };
-    if (mode === "undo") history.current.redo.push(step);
+    // An undo is not itself recorded: the caller moves the original step to the redo stack.
+    if (mode === "undo") { /* nothing */ }
     else if (undoable && step.inverse.length) {
       history.current.undo.push(step);
       if (history.current.undo.length > 100) history.current.undo.shift();
       if (mode === "record") history.current.redo = [];
     } else if (mode === "record") history.current = { undo: [], redo: [] };
     setHistoryTick((tick) => tick + 1);
+    return true;
   }, [apply, locale, session.displayRef]);
-  const undo = useCallback(() => {
+  const undo = useCallback(async () => {
     const step = history.current.undo.pop();
-    if (step) void run(step.inverse, "undo");
+    if (!step) return;
+    if (await run(step.inverse, "undo")) history.current.redo.push(step);
+    else history.current = { undo: [], redo: [] };
+    setHistoryTick((tick) => tick + 1);
   }, [run]);
   const redo = useCallback(() => {
     const step = history.current.redo.pop();
@@ -208,7 +213,7 @@ function LiveDocumentEditor({ sessionId, locale, onClosed }: { sessionId: string
     if (tag === "TEXTAREA" || tag === "INPUT" || tag === "SELECT") return;
     if (!(event.metaKey || event.ctrlKey)) return;
     const key = event.key.toLowerCase();
-    if (key === "z") { event.preventDefault(); if (event.shiftKey) redo(); else undo(); }
+    if (key === "z") { event.preventDefault(); if (event.shiftKey) redo(); else void undo(); }
     else if (key === "y") { event.preventDefault(); redo(); }
     else if (selected && supports("set_format") && (key === "b" || key === "i" || key === "u")) {
       event.preventDefault();
@@ -252,7 +257,7 @@ function LiveDocumentEditor({ sessionId, locale, onClosed }: { sessionId: string
         </div>
       </header>
       <LiveDocumentRibbon locale={locale} kind={display.kind} target={selected} format={selectedFormat} heading={selectedHeading} supports={(op) => supports(op as LiveDocumentOpName)}
-        canUndo={history.current.undo.length > 0} canRedo={history.current.redo.length > 0} onUndo={undo} onRedo={redo}
+        canUndo={history.current.undo.length > 0} canRedo={history.current.redo.length > 0} onUndo={() => void undo()} onRedo={redo}
         onFormat={(format) => { if (selected) void run([{ op: "set_format", target: selected, format }]); }}
         onHeading={(level) => { if (selected) void run([{ op: "set_format", target: selected, format: {}, heading: level }]); }}
         onInsertParagraph={() => void run([{ op: "insert_paragraph", ...(selectedBlock ? { after: selectedBlock } : {}), text: "" }])}
