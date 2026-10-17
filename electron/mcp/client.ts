@@ -60,6 +60,7 @@ import { parseHubReleasePin, assertHubReleasePin } from "../../shared/hub-releas
 import { isCallOnlyHubAgent } from "../../shared/call-only-agent";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { createToolObservationNovelty } from "./tool-observation-novelty";
 import { bindInvocationAgentContext } from "../runtime/agent-context-admission";
 import { invokeWithUnsettledContinuation, unsettledContinuationCarriesRequest, unsettledContinuationPrompt } from "../runtime/unsettled-continuation";
 import { agentContextHostBinding, agentContextUnsettledTurn, markAgentContextContinuationHandle, type AgentContextCapability } from "../runtime/agent-context";
@@ -2253,6 +2254,9 @@ async function runMcpInvocationInContext(
   const callerSink = sink;
   // Tool calls that completed in this invocation: host-observed work, read at each continuous Goal pass boundary.
   let completedToolCalls = 0;
+  // Of those, the ones that observed something this invocation had not observed yet (createToolObservationNovelty).
+  let novelToolObservations = 0;
+  const toolObservationNovelty = createToolObservationNovelty();
   let runtimeAgentId: string | undefined;
   let finalTextFromSink = "";
   let resolvedResultFolder: string | undefined;
@@ -2343,6 +2347,7 @@ async function runMcpInvocationInContext(
       finalTextFromSink = ev.text.trim();
     }
     if (isCompletedToolEvent(ev)) completedToolCalls += 1;
+    if (ev.kind === "tool-use" && ev.tool && toolObservationNovelty.note(ev.tool) && isCompletedToolEvent(ev)) novelToolObservations += 1;
     // Backstop for a run whose browser calls never reached the result boundary (beforeMcpToolResult below):
     // recognise the call by its runtime's name. Codex says `agentlas-browser.browser_x`; Claude, Antigravity
     // and the local loop say `mcp__agentlas-browser__browser_x`.
@@ -7384,6 +7389,7 @@ async function runMcpInvocationInContext(
     let lastPassFingerprint = "";
     let identicalPassStreak = 0;
     let lastPassToolCalls: number | null = null;
+    let lastPassNovelObservations: number | null = null;
     let idleGoalPasses = 0;
     let passRecoveryNote: string | null = null;
     /**
@@ -7468,7 +7474,7 @@ async function runMcpInvocationInContext(
       // task" every time, 17.5k fresh input tokens a pass. Paraphrase defeats the identical-output guard below, so
       // the measure is the host's own count of completed tool calls. After GOAL_IDLE_PASS_LIMIT idle passes the
       // invocation ends; Main's verification and wake schedule decide when the Goal is looked at again.
-      const idleStep = idleGoalPassStep({ continuousMode, goalDrivenPass, passShouldContinue, lastPassToolCalls, idlePasses: idleGoalPasses });
+      const idleStep = idleGoalPassStep({ continuousMode, goalDrivenPass, passShouldContinue, lastPassToolCalls, lastPassNovelObservations, idlePasses: idleGoalPasses });
       idleGoalPasses = idleStep.idlePasses;
       if (idleStep.yieldNow) {
         passShouldContinue = false;
@@ -7595,6 +7601,7 @@ async function runMcpInvocationInContext(
       activeRunnerReq = replaceRunnerUserPrompt(nextRunnerReq, explicitBorrowUserPreamble
         ? `${explicitBorrowUserPreamble}\n\nContinuation request:\n${continuationPrompt}`
         : continuationPrompt, { images: undefined });
+      const novelObservationsBeforePass = novelToolObservations;
       const toolCallsBeforePass = completedToolCalls;
       result = await invokeCurrentRuntime(activeRunnerReq, "goal-continuation");
       if (result.ownerControlTerminal !== "completed" && !runtimeTerminalEvidence.closedHttpRefusal && !runtimeTerminalEvidence.locallyRejected) {
@@ -7603,6 +7610,7 @@ async function runMcpInvocationInContext(
       }
       // A failed pass is retried or handed on below; it is not an idle pass.
       lastPassToolCalls = result.failure ? null : completedToolCalls - toolCallsBeforePass;
+      lastPassNovelObservations = result.failure ? null : novelToolObservations - novelObservationsBeforePass;
       if (result.failure) {
         /*
          * A failed pass is not the end of the goal.

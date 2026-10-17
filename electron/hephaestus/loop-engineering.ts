@@ -32,21 +32,26 @@ export const GOAL_IDLE_PASS_LIMIT = 2;
 
 /**
  * One continuous-Goal pass boundary. `lastPassToolCalls` is the host's count of tool calls the previous pass
- * completed (null: not measured, e.g. the first pass or a failed one). Only a pass the Goal ledger alone keeps
- * alive (`goalDrivenPass`) counts as idle; a working pass or an unmeasured one starts the count again.
+ * completed (null: not measured, e.g. the first pass or a failed one). `lastPassNovelObservations` is how many of
+ * them observed something this invocation had not observed yet (same tool, same arguments, same result up to
+ * numbers counts as seen). A pass with no tool call, or whose calls only reproduced earlier observations, found
+ * nothing new. Only a pass the Goal ledger alone keeps alive (`goalDrivenPass`) counts as idle; a working pass or an
+ * unmeasured one starts the count again.
  */
 export function idleGoalPassStep(input: {
   continuousMode: boolean;
   goalDrivenPass: boolean;
   passShouldContinue: boolean;
   lastPassToolCalls: number | null;
+  lastPassNovelObservations?: number | null;
   idlePasses: number;
 }): { idlePasses: number; yieldNow: boolean } {
-  if (input.continuousMode && input.goalDrivenPass && input.passShouldContinue && input.lastPassToolCalls === 0) {
+  const idle = input.lastPassToolCalls === 0 || (input.lastPassToolCalls !== null && input.lastPassNovelObservations === 0);
+  if (input.continuousMode && input.goalDrivenPass && input.passShouldContinue && idle) {
     const idlePasses = input.idlePasses + 1;
     return { idlePasses, yieldNow: idlePasses >= GOAL_IDLE_PASS_LIMIT };
   }
-  return { idlePasses: input.lastPassToolCalls === 0 ? input.idlePasses : 0, yieldNow: false };
+  return { idlePasses: idle ? input.idlePasses : 0, yieldNow: false };
 }
 export const STORMBREAKER_CONTINUE_MARKER = "<<stormbreaker-continue>>";
 export const STORMBREAKER_LONG_RUN_MARKER = "<<stormbreaker-long-run>>";
