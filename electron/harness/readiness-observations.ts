@@ -73,6 +73,17 @@ export async function readReadinessObservation(subject: ReadinessSubject, id: st
   }
 }
 
+/** The same record, read synchronously for a synchronous probe (canonical-server-state.ts). Null when absent or unreadable. */
+export function readReadinessObservationSync(subject: ReadinessSubject, id: string): ReadinessObservation | null {
+  try {
+    const { userDataPath } = require("../runtime-paths") as typeof import("../runtime-paths");
+    const parsed = JSON.parse(fs.readFileSync(path.join(userDataPath(path.join("harness", "observations", subject)), fileName(id)), "utf8")) as ReadinessObservation;
+    return parsed && parsed.schemaVersion === "agentlas.readiness-observation.v1" && parsed.id === id && OUTCOMES.has(parsed.outcome) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 export function toolNamesDigest(names: readonly string[]): string {
   return createHash("sha256").update(JSON.stringify([...names].sort())).digest("hex");
 }

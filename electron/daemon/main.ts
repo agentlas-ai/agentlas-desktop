@@ -973,6 +973,9 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
   ]);
   console.log("[agentlasd] store ready");
   recordServicePhase("store_ready");
+  // Canonical registry readiness for this process's own registry (Main installs the same): installed rows, value-free
+  // credential presence, the last exact connection observation; no network, no secret read.
+  void import("../harness/canonical-server-state").then((m) => m.installCanonicalServerStateReader()).catch(() => undefined);
   try {
     backgroundTasks = new BackgroundTaskRegistry(path.join(userDataDir(), "background-tasks"), { serviceInstance: bootId });
     const lost = backgroundTasks.recoverOrphans();

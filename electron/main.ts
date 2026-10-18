@@ -4546,8 +4546,9 @@ app.whenReady().then(async () => {
   const savedUiLocale = readUiLocaleCore();
   if (!savedUiLocale) setCurrentUiLocale(resolveMenuLocale(), "system");
   applyAppMenu(savedUiLocale?.locale ?? resolveMenuLocale());
-  // Registry readiness (local state only, no network); unknown is reported available.
-  void import("./harness/canonical-readiness").then((m) => m.installCanonicalReadinessProbe()).catch(() => undefined);
+  // Registry readiness (local state only: installed rows, value-free credential presence, the last exact connection
+  // observation; no network, no secret read); unknown is reported available. The background service installs the same.
+  void import("./harness/canonical-server-state").then((m) => m.installCanonicalServerStateReader()).catch(() => undefined);
   void import("./harness/settings-agent-ops").then((ops) => {
     ops.attachLanguageProjectors(() => BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed()).map((w) => `window:${w.webContents.id}`));
     // Port (SDK / model / app control / daemon) changes reach every window and the native menu, even with no window open.

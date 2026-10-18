@@ -7,11 +7,10 @@
  *   offline        -> installed and authorised but its process is known down    -> provider_offline
  * Anything else, and every entry with no signal, is "available": unknown is not unavailable.
  *
- * Today the host holds NO synchronous reader for MCP connector / plugin install or auth state. Every `tool` backing in
- * the registry points at a first-party in-process server (agentlas-browser, agentlas-turn, agentlas-ui, one-team,
- * hephaestus-network, builtin) that ships with the app, so there is nothing that can be "not installed". The default
- * state reader therefore returns no signal and the probe reports available for all entries; the mapping is in place
- * for readers that appear later (register one with registerCanonicalServerState).
+ * Every `tool` backing points at a first-party server (agentlas-browser, agentlas-turn, agentlas-ui, one-team,
+ * hephaestus-network) launched from an installed MCP row, or the in-process "builtin". Main and the background service
+ * each register canonical-server-state.ts (installed rows, value-free credential presence, the last exact connection
+ * observation); a host that registered nothing keeps the default reader, which reports no signal (available).
  */
 import { setCanonicalReadinessProbe, type CanonicalEntry, type CanonicalReadinessProbe } from "./canonical-registry";
 
