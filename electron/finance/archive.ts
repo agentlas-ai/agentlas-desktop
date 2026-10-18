@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { FINANCE_WORKSPACE_LIMITS, validateFinanceWorkspace, type FinanceArchiveItem, type FinanceArchiveRequest, type FinanceReport, type FinanceWorkspace } from '../../shared/finance';
+import { FINANCE_WORKSPACE_LIMITS, parseFinanceEvidenceMetric, validateFinanceWorkspace, type FinanceArchiveItem, type FinanceArchiveRequest, type FinanceReport, type FinanceWorkspace } from '../../shared/finance';
 import type { FinanceScope } from './store';
 
 const id=z.string().min(1).max(200),archiveId=z.string().regex(/^[a-f0-9]{64}$/),revision=z.number().int().nonnegative();
@@ -43,6 +43,7 @@ const MAX_EDITION=52*1024*1024,PAGE_SIZE=50;
 
 export function financeArchivePlan(workspace:FinanceWorkspace,selected:string[]):{workspace:FinanceWorkspace;reclaimed:{reports:number;sources:number}} {
   const ids=new Set(selected);if(ids.size!==selected.length||selected.some(id=>!workspace.reports.some(report=>report.id===id)))throw new Error('finance_report_not_found');
+  for(const dashboard of workspace.dashboards)for(const widget of dashboard.widgets){const ref=parseFinanceEvidenceMetric(widget.metric);if(ref&&ids.has(ref.reportId))throw new Error('finance_evidence_is_referenced');}
   const reports=workspace.reports.filter(report=>!ids.has(report.id));
   const referenced=new Set([...workspace.holdings.map(row=>row.sourceId),...workspace.quotes.map(row=>row.sourceId),...reports.flatMap(report=>report.sections.flatMap(section=>section.projection?.sourceIds??[]))]);
   const sources=workspace.sources.filter(source=>referenced.has(source.id));

@@ -9,6 +9,7 @@ import { findIsharesFund } from "./providers/ishares-catalog";
 import { FINANCE_MONITOR_RUN_TIMEOUT_MS } from "../../shared/finance";
 import { FinanceArchives, FinanceArchiveRequestSchema, financeArchivePlan } from './archive';
 import { FinanceRunHistory } from './run-history';
+import { financeReportDashboardActions } from './evidence-actions';
 import { interpretFinance } from "./model";
 import { writeFinanceBriefing } from "./briefing";
 import { pauseFinanceMonitor, readFinanceMonitor, rollbackFinanceMonitor, scheduleFinanceMonitor } from "./monitor";
@@ -99,9 +100,9 @@ export class FinanceService {
     });
     return {action:'restore',archiveId:input.archiveId,workspace,restored,warnings:[]};
   }
-  async readReport(scope:FinanceScope,input:{reportId:string}):Promise<{report:FinanceReport;workspaceRevision:number;archiveId?:string}>{
+  async readReport(scope:FinanceScope,input:{reportId:string}):Promise<{dashboardActions?:FinanceDataSaveResult['dashboardActions'];report:FinanceReport;workspaceRevision:number;archiveId?:string}>{
     const workspace=await this.store.load(scope),active=workspace.reports.find(report=>report.id===input.reportId);scope.assertCurrent();
-    if(active)return {report:active,workspaceRevision:workspace.revision};
+    if(active)return {dashboardActions:financeReportDashboardActions(workspace,active.id),report:active,workspaceRevision:workspace.revision};
     const archived=await this.archiveStore.read(scope,input),report=archived.workspaceSnapshot.reports.find(item=>item.id===input.reportId);
     if(!report)throw new Error('finance_report_not_found');return {report,workspaceRevision:workspace.revision,archiveId:archived.archiveId};
   }
@@ -136,7 +137,8 @@ export class FinanceService {
     const result=await queryFinanceData(input,before.watchlist);scope.assertCurrent();
     const batch=dataOperations(result,before,input.title||input.query||"Finance 자료",input.mode==="report");
     const workspace=await this.apply(scope,{operations:batch.operations,expectedRevision:before.revision});
-    return {workspace,sourceIds:batch.sourceIds,...(batch.reportId?{reportId:batch.reportId}:{}),message:`조회 자료와 출처를 판본 ${workspace.revision}에 저장했습니다.`};
+    scope.assertCurrent();
+    return {...(batch.reportId?{dashboardActions:financeReportDashboardActions(workspace,batch.reportId)}:{}),workspace,sourceIds:batch.sourceIds,...(batch.reportId?{reportId:batch.reportId}:{}),message:`조회 자료와 출처를 판본 ${workspace.revision}에 저장했습니다.`};
   }
   async addAsset(scope:FinanceScope,input:{query:string;symbol?:string}) {
     const found=await this.search(scope,input);const matches=found.assets.filter(asset=>!input.symbol||asset.symbol.toLowerCase()===input.symbol.toLowerCase());

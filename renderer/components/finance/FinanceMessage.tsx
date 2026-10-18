@@ -1,6 +1,9 @@
 import styles from "./FinanceWorkspace.module.css";
 
 const hostMessages: Record<string, [string, string]> = {
+  finance_evidence_metric_invalid: ["저장 자료 연결 형식이 유효하지 않습니다. 원본 보고서에서 다시 고정하세요.", "The saved-data reference is invalid. Pin it again from the original report."],
+  finance_evidence_reference_invalid: ["블록에 연결된 보고서 자료를 찾지 못했습니다. 활성 보고서와 자료 섹션을 확인하세요.", "The report data linked to this block could not be found. Check the active report and data section."],
+  finance_evidence_is_referenced: ["대시보드가 이 자료를 사용 중입니다. 연결된 블록을 먼저 제거한 뒤 보고서나 섹션을 보관·제거하세요.", "A dashboard is using this data. Remove its linked blocks before archiving or removing the report or section."],
   finance_source_rate_limited: ["공급자가 호출을 잠시 제한했습니다. 호출 간격과 이용 한도를 확인한 뒤 다시 조회하세요.", "The provider temporarily limited requests. Check request frequency and quota before retrying."],
   finance_source_busy: ["다른 자료를 조회 중입니다. 진행 중인 조회가 끝난 뒤 다시 시도하세요.", "Other source requests are running. Retry after they finish."],
   finance_provider_not_configured: ["가격 공급자 키가 연결되지 않았습니다. 공급자 키를 저장한 뒤 접속 검사를 실행하세요.", "No price-provider key is configured. Save a key, then run the access test."],
@@ -92,6 +95,9 @@ const messages: Record<string, string> = {
 const statuses: Record<string, string> = { running:"실행 중", succeeded:"완료", failed:"실패", cancelled:"취소됨", unavailable:"실행 불가", invalid_output:"결과 형식 확인 필요", conflict:"변경 충돌", nav:"공식 펀드 NAV", price_history:"과거 가격 · 원시 종가", price:"가격", news:"뉴스", filings:"공시", social:"공식 계정 글", social_search:"SNS 검색", company_facts:"기업 재무 원자료", macro_news:"거시 뉴스", treasury_yields:"국채 수익률", etf_holdings:"ETF 편입", "dashboard.add":"대시보드 추가", "dashboard.update":"대시보드 조건 변경", "dashboard.rename":"대시보드 이름 변경", "dashboard.select":"대시보드 선택", "widget.add":"블록 추가", "widget.update":"블록 설정 변경", "widget.move":"블록 순서 변경", "widget.remove":"블록 제거", "report.add":"보고서 생성", "report.refresh":"새 자료 보고서 버전", "report.update":"보고서 변경", "report.section.update":"보고서 문장·제목 변경", "report.section.move":"보고서 순서 변경", "report.section.remove":"보고서 섹션 제거", "watchlist.add":"관심 자산 추가", "watchlist.remove":"관심 자산 제거", "source.upsert":"출처 기록", "holdings.import":"보유 자료 가져오기", "quotes.import":"가격 관측 추가", "monitor.upsert":"모니터링 조건 저장", "Summary": "핵심 판단", "Sources and limitations": "출처와 한계", ready: "자료 있음", partial: "일부 자료", empty: "자료 없음", unsupported: "미지원", connected: "연결됨", imported: "가져옴", unconnected: "연결 안 됨", error: "오류", draft: "초안", active: "예약 활성", paused: "일시정지", ok: "조회 완료", csv: "CSV 파일", manual: "직접 입력", provider: "공급자 연결", dashboard: "대시보드", watchlist: "자산 찾기", reports: "보고서", sources: "자료와 근거", monitors: "모니터링", "CSV import": "CSV 가져오기" };
 export function financeStatus(value: string, ko: boolean): string { return ko ? statuses[value] ?? value : value; }
 export function financeMessage(value: string, ko: boolean): string {
+  // Electron's fixed IPC envelope wraps the host's stable machine code.
+  const remote = /^Error invoking remote method 'finance:[A-Za-z]+': Error: (finance_[a-z0-9_]+)$/.exec(value);
+  if (remote && hostMessages[remote[1]]) return hostMessages[remote[1]][ko ? 0 : 1];
   if (hostMessages[value]) return hostMessages[value][ko ? 0 : 1];
   if (!ko) return value;
   if (messages[value]) return messages[value];

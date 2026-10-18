@@ -93,7 +93,10 @@ export interface FinanceMonitorRun {
   summary: string; warnings: string[]; error: string | null; sourceRevision: number;
 }
 export interface FinanceDataSaveRequest extends FinanceDataRequest { expectedRevision?: number; mode: "sources" | "report"; title?: string }
-export interface FinanceDataSaveResult { workspace: FinanceWorkspace; reportId?: string; sourceIds: string[]; message: string }
+export interface FinanceDataSaveResult {
+  workspace: FinanceWorkspace; reportId?: string; sourceIds: string[]; message: string;
+  dashboardActions?: { expectedRevision: number; sections: { sectionId: string; operations: FinanceOperation[] }[] };
+}
 export type FinanceArchiveRequest =
   | { action: "create"; expectedRevision: number; reportIds: string[] }
   | { action: "list"; cursor?: string; limit?: number }
@@ -151,6 +154,31 @@ export function createFinanceDashboard(name = "My dashboard", widgets: FinanceWi
 function unique(values: string[], label: string): void {
   if (new Set(values).size !== values.length) throw new Error(`finance_duplicate_id:${label}`);
 }
+/** Reserved metric encoding; only an existing saved projection can resolve its evidence. */
+export function financeEvidenceMetric(reportId: string, sectionId: string): string {
+  try {
+    for (const value of [reportId, sectionId]) {
+      id.parse(value);
+      if (!value.trim() || /[\u0000-\u001f\u007f]/.test(value)) throw new Error();
+    }
+    const metric = `saved:${encodeURIComponent(reportId)}:${encodeURIComponent(sectionId)}`;
+    if (metric.length > 200) throw new Error();
+    return metric;
+  } catch { throw new Error("finance_evidence_metric_invalid"); }
+}
+export function parseFinanceEvidenceMetric(metric: string): { reportId: string; sectionId: string } | null {
+  if (!metric.startsWith("saved:")) return null;
+  try {
+    const parts = metric.slice(6).split(":");
+    if (parts.length !== 2) throw new Error();
+    const reportId = decodeURIComponent(parts[0]), sectionId = decodeURIComponent(parts[1]);
+    if (financeEvidenceMetric(reportId, sectionId) !== metric) throw new Error();
+    return { reportId, sectionId };
+  } catch { throw new Error("finance_evidence_metric_invalid"); }
+}
+function evidenceProjection(ws: FinanceWorkspace, ref: { reportId: string; sectionId: string }): FinanceWidgetProjection | null {
+  return ws.reports.find(report => report.id === ref.reportId)?.sections.find(section => section.id === ref.sectionId)?.projection ?? null;
+}
 export function validateFinanceWorkspace(value: unknown): FinanceWorkspace {
   const ws = WorkspaceSchema.parse(value);
   unique(ws.watchlist.map(x => x.id), "asset"); unique(ws.holdings.map(x => x.id), "holding");
@@ -164,6 +192,8 @@ export function validateFinanceWorkspace(value: unknown): FinanceWorkspace {
     for (const widget of dashboard.widgets) {
       unique(widget.assetIds, "widget_asset");
       if (widget.assetIds.some(assetId => !assets.has(assetId))) throw new Error("finance_widget_asset_reference");
+      const ref = parseFinanceEvidenceMetric(widget.metric);
+      if (ref && !evidenceProjection(ws, ref)) throw new Error("finance_evidence_reference_invalid");
     }
   }
   for (const monitor of ws.monitors) {
@@ -294,8 +324,12 @@ export function applyFinanceOperations(workspace: FinanceWorkspace, operations: 
         const refreshed = ReportSchema.parse(previous);
         refreshed.id = financeId("report"); refreshed.parentReportId = previous.id;
         refreshed.createdAt = new Date().toISOString(); refreshed.sourceRevision = workspace.revision; refreshed.reviewPending = true;
-        // Recalculate the saved configuration, never replace user titles, narratives, order, or pinned periods.
-        refreshed.sections = refreshed.sections.map(section => ({ ...section, projection: section.widget ? projectFinanceWidget(next, section.widget) : section.kind === "sources" ? projectFinanceWidget(next, createFinanceWidget("sources")) : section.projection }));
+        // Saved evidence is already literal; its source report need not remain active.
+        // Other widgets recalculate without replacing titles, narratives, order, or pinned periods.
+        refreshed.sections = refreshed.sections.map(section => {
+          if (section.widget && parseFinanceEvidenceMetric(section.widget.metric)) return section;
+          return { ...section, projection: section.widget ? projectFinanceWidget(next, section.widget) : section.kind === "sources" ? projectFinanceWidget(next, createFinanceWidget("sources")) : section.projection };
+        });
         next.reports.push(refreshed); break;
       }
       case "report.section.update": Object.assign(requireItem(requireItem(next.reports, op.reportId).sections, op.sectionId), op.patch); break;
@@ -307,6 +341,15 @@ export function applyFinanceOperations(workspace: FinanceWorkspace, operations: 
       case "monitor.upsert":
         if (op.monitor.status === "active") throw new Error("finance_monitor_scheduler_unavailable"); upsert(next.monitors, op.monitor); break;
       case "monitor.remove": requireItem(next.monitors, op.monitorId); next.monitors = next.monitors.filter(x => x.id !== op.monitorId); break;
+    }
+  }
+  // Check the final batch state: removing the referencing widget in the same batch is safe.
+  for (const dashboard of next.dashboards) for (const widget of dashboard.widgets) {
+    const ref = parseFinanceEvidenceMetric(widget.metric);
+    if (ref && !evidenceProjection(next, ref) && operations.some(op =>
+      op.type === "report.remove" && op.reportId === ref.reportId ||
+      op.type === "report.section.remove" && op.reportId === ref.reportId && op.sectionId === ref.sectionId)) {
+      throw new Error("finance_evidence_is_referenced");
     }
   }
   next.revision = workspace.revision + 1;
@@ -321,6 +364,13 @@ export function effectiveFinanceWidget(dashboard: FinanceDashboard, widget: Fina
   return { ...widget, assetIds: [...widget.assetIds], period: widget.periodMode === "pinned" ? widget.period : dashboard.period };
 }
 export function projectFinanceWidget(ws: FinanceWorkspace, widget: FinanceWidget): FinanceWidgetProjection {
+  const ref = parseFinanceEvidenceMetric(widget.metric);
+  if (ref) {
+    const saved = evidenceProjection(ws, ref);
+    if (!saved) throw new Error("finance_evidence_reference_invalid");
+    // Parse creates a detached literal copy, preserving every recorded date, warning, and source ID.
+    return ProjectionSchema.parse(saved);
+  }
   const projection: FinanceWidgetProjection = { columns: [], rows: [], status: "empty", warnings: [], asOf: null, sourceIds: [] };
   const selected = ws.watchlist.filter(x => !widget.assetIds.length || widget.assetIds.includes(x.id));
   const quotes = selected.map(x => latestFinanceQuote(ws, x.id, widget.priceBasis)).filter((x): x is FinanceQuote => !!x);

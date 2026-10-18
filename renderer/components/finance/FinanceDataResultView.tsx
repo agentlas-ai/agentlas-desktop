@@ -11,6 +11,8 @@ export interface FinanceDataResultViewProps {
   metric?: string;
   locale?: "ko" | "en";
   title?: string;
+  compact?: boolean;
+  showVisual?: boolean;
 }
 type Observation = { date: string; value: number };
 export interface FinanceDataVisual {
@@ -69,7 +71,7 @@ export function financeDataVisual(result:FinanceDataResult, metric?:string, sele
   return {kind:treasury?"treasury":"history",series,points,unit,label,missing};
 }
 const PAGE_SIZE=50;
-export function FinanceDataResultView({result,metric:requestedMetric,locale,title}:FinanceDataResultViewProps) {
+export function FinanceDataResultView({result,metric:requestedMetric,locale,title,compact=false,showVisual=true}:FinanceDataResultViewProps) {
   const metric=requestedMetric??financeMetricForColumns(result.columns);
   const i18n=useT();const ko=(locale??i18n.locale)==="ko";const t=(a:string,b:string)=>ko?a:b;
   const metricTitle=metric==="price_history"?t("원종가 관측","Raw closing observations"):metric==="treasury_yields"?t("국채 만기별 수익률","Treasury yields by maturity"):metric==="nav"?t("공식 펀드 NAV","Official fund NAV"):financeStatus(metric??"",ko)||t("조회 자료","Retrieved data");
@@ -88,8 +90,8 @@ export function FinanceDataResultView({result,metric:requestedMetric,locale,titl
     <header className={styles.header}><h3>{title??metricTitle}</h3><span className={styles.badge}>{financeStatus(result.status,ko)} · {result.rows.length.toLocaleString()} {t("행","rows")}</span></header>
     <dl className={styles.meta}><div><dt>{t("관측 기준","As of")}</dt><dd>{when(result.asOf)}</dd></div><div><dt>{t("가져온 시각","Retrieved at")}</dt><dd>{when(result.retrievedAt)}</dd></div></dl>
     {result.status!=="ok"&&<p className={styles.notice} role={result.status==="error"?"alert":"status"}>{result.status==="partial"?t("일부 범위만 확인된 자료입니다. 아래 원자료와 범위 안내를 함께 확인하세요.","Coverage is partial. Read the source rows and limitations below."):t("자료를 확인하지 못했습니다. 이전 값이나 0으로 대체하지 않습니다.","Data is unavailable. No previous value or zero is substituted.")}</p>}
-    {visual.nav&&<div className={styles.nav}><div>{visual.nav.fund}</div><strong>{String(visual.nav.value)} <small>{visual.nav.currency??t("통화 미확인","Currency unknown")}</small></strong><p>{visual.nav.date} · {visual.nav.basis}</p><p className={styles.muted}>{t("공식 펀드 순자산가치 1개 관측입니다. 거래가격·실시간 시세·수익률 또는 시계열로 해석하지 않습니다.","One official fund NAV observation. It is not a market quote, real-time price, return or historical series.")}</p></div>}
-    {(visual.kind==="history"||visual.kind==="treasury")&&<div className={styles.visual}>
+    {showVisual&&visual.nav&&<div className={styles.nav}><div>{visual.nav.fund}</div><strong>{String(visual.nav.value)} <small>{visual.nav.currency??t("통화 미확인","Currency unknown")}</small></strong><p>{visual.nav.date} · {visual.nav.basis}</p><p className={styles.muted}>{t("공식 펀드 순자산가치 1개 관측입니다. 거래가격·실시간 시세·수익률 또는 시계열로 해석하지 않습니다.","One official fund NAV observation. It is not a market quote, real-time price, return or historical series.")}</p></div>}
+    {showVisual&&(visual.kind==="history"||visual.kind==="treasury")&&<div className={styles.visual}>
       {visual.kind==="treasury"&&<label className={styles.label} htmlFor={`${id}-tenor`}>{t("표시할 만기","Maturity to display")}<select id={`${id}-tenor`} value={visual.label} onChange={event=>setSelectedSeries(event.target.value)}>{visual.series.map(series=><option key={series} value={series}>{series}</option>)}</select></label>}
       <p className={styles.muted}>{visual.label} · {visual.unit??t("통화 미확인","Currency unverified")} · {visual.points[0]?.date} — {visual.points.at(-1)?.date} · {visual.points.length} {t("확인 관측","verified observations")}</p>
       <ChartBlock code={JSON.stringify(chartSpec)} presetSpec={chartSpec} blockId={`finance-data:${id}`} size="panel" fallback={<p className={styles.notice}>{t("차트를 표시하지 못했습니다. 아래 원자료 표를 확인하세요.","Chart unavailable. Use the source table below.")}</p>}/>
@@ -98,11 +100,13 @@ export function FinanceDataResultView({result,metric:requestedMetric,locale,titl
       {visual.points.length>2000&&<p className={styles.notice}>{t("차트는 날짜순 처음 2,000개 관측만 표시합니다. 전체 행은 아래 표에서 확인하세요.","Chart shows the first 2,000 observations in date order. All rows remain in the table below.")}</p>}
     </div>}
     {visual.reason&&<p className={styles.notice}>{reasons[visual.reason]}</p>}
+    <details open={!compact}><summary className={styles.muted}>{t("전체 원자료 보기","View complete source data")} · {result.rows.length}</summary>
     <div className={styles.tableHeader}><h4 id={`${id}-table`}>{t("전체 원자료","Complete source data")}</h4><span className={styles.muted}>{result.rows.length?current*PAGE_SIZE+1:0}–{Math.min((current+1)*PAGE_SIZE,result.rows.length)} / {result.rows.length}</span></div>
     {result.columns.length>0?<div className={styles.scroll} tabIndex={0} role="region" aria-labelledby={`${id}-table`}><table><caption className={styles.srOnly}>{t("조회 결과 원자료 · 페이지당 50행","Raw query result · 50 rows per page")}</caption><thead><tr>{visibleColumns.map((name,index)=><th key={index} scope="col">{column(name)}</th>)}</tr></thead><tbody>{rows.map((row,index)=><tr key={current*PAGE_SIZE+index}>{visibleColumns.map((column,index)=>{const columnIndex=currentColumn*50+index;const value=row[columnIndex];return <td key={columnIndex} className={typeof value==="number"?styles.number:undefined}>{typeof value==="string"&&/^https?:\/\//i.test(value)?<a href={value} target="_blank" rel="noopener noreferrer" title={value}>{t("원문 열기","Open source")}</a>:typeof value==="number"?String(value):financeCell(value??null,column,ko)}</td>;})}</tr>)}</tbody></table></div>:<p className={styles.notice}>{t("표시할 열이 없습니다.","No columns are available.")}</p>}
     {columnPages>1&&<nav className={styles.paging} aria-label={t("원자료 열 페이지","Source column pages")}><button type="button" disabled={currentColumn===0} onClick={()=>setColumnPage(currentColumn-1)}>{t("이전 열","Previous columns")}</button><span>{t("열","Columns")} {currentColumn*50+1}–{Math.min((currentColumn+1)*50,result.columns.length)} / {result.columns.length}</span><button type="button" disabled={currentColumn===columnPages-1} onClick={()=>setColumnPage(currentColumn+1)}>{t("다음 열","Next columns")}</button></nav>}
     {!result.rows.length&&<p className={styles.muted}>{t("확인된 결과 행이 없습니다.","No verified result rows.")}</p>}
     {pages>1&&<nav className={styles.paging} aria-label={t("원자료 페이지","Source data pages")}><button disabled={current===0} onClick={()=>setPage(current-1)} type="button">{t("이전","Previous")}</button><span aria-live="polite">{current+1} / {pages}</span><button disabled={current===pages-1} onClick={()=>setPage(current+1)} type="button">{t("다음","Next")}</button></nav>}
+    </details>
     {!!result.warnings.length&&<details className={styles.evidence}><summary>{t("자료 범위와 한계","Coverage and limitations")} · {result.warnings.length}</summary>{<EvidencePages items={result.warnings} ko={ko} render={warning=><FinanceMessage value={warning} ko={ko}/>}/>}</details>}
     {!!result.providers?.length&&<EvidencePages items={result.providers} ko={ko} render={provider=><details key={provider.id} className={styles.evidence}><summary>{provider.label} · {financeStatus(provider.status,ko)}</summary><h4>{t("지원 범위","Coverage")}</h4><FinanceMessage value={provider.coverage} ko={ko}/><h4>{t("이용·재배포 조건","Usage and redistribution")}</h4><FinanceMessage value={provider.rights} ko={ko}/>{<EvidencePages items={provider.sourceUrls} ko={ko} render={url=><SourceLink url={url}/>}/>}</details>}/>}
     <details className={styles.evidence}><summary>{t("원문 출처","Original source URLs")} · {result.sourceUrls.length}</summary>{<EvidencePages items={result.sourceUrls} ko={ko} render={url=><SourceLink url={url}/>}/>}</details>
