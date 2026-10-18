@@ -36,6 +36,7 @@ export interface OneNativeStartupOwners {
  readonly toolchains?:Omit<OneToolchainNativeOwnerPorts,'business'>|null;
 }
 let installed:{input:OneNativeStartupOwners;handle:ReturnType<typeof bind>;state:'installed'|'failed'}|null=null;
+const retiredReportStartups=new WeakMap<object,()=>boolean>();
 function deny(code:string):never{throw Error(code)}
 function requireFunction(owner:unknown,name:string,code:string):void{if(!owner||typeof (owner as Record<string,unknown>)[name]!=='function')deny(code)}
 function installation(value:unknown):value is BusinessNativeInstallationIdentity {
@@ -118,9 +119,20 @@ export function installOneNativeStartup(input:OneNativeStartupOwners){
   handle.activate();installed.state='installed';return handle;
  }catch(error){try{handle.invalidate('shutdown')}catch{}throw error;}
 }
+/** Main calls this only after its original drain and generation ticket complete.
+ * Releasing a clean report-only installation grants nothing and never resumes
+ * old approvals, pending deliveries, Vault policy, providers or toolchains. */
+export function retireOneNativeReportStartup(previous:object):void {
+ if(!installed||installed.handle!==previous||installed.state!=='installed'||retiredReportStartups.get(previous)?.()!==true)
+  deny('one_native_startup_retirement_unconfirmed');
+ retiredReportStartups.delete(previous);installed=null;
+}
 function bind(input:OneNativeStartupOwners,business:ReturnType<typeof createBusinessNativeStartupBindings>|null,association:ReturnType<typeof captureAssociation>){
  let active=false,closed=false,generation=0,cleanupUnknown=false;
+ const originalSignal=input.signal;
+ const reportOnly=input.nativeCustodyReports!=null&&[input.business,input.employeeReports,input.personalVault,input.pendingConsent,input.credentialConsumer,input.provider,input.toolchains].every(value=>value==null);
  let employeeReports:ReturnType<typeof createBusinessEmployeeAgentReportProducer>|ReturnType<typeof createNativeEmployeeCustodyProducer>|null=null;
+ let reportCleanup:(()=>boolean)|null=null;
  const lifetimeObservers=new Set<(reason:'session'|'shutdown')=>void>();
  const references=()=>[input.assertMainOwner,input.signal,input.business,input.business?.shared.sessions,input.business?.shared.identity,input.business?.shared.authority,input.business?.shared.registry,input.business?.vault?.intents,input.business?.vault?.admission,input.business?.data?.contexts,input.business?.data?.admission,input.business?.data?.documents,input.business?.toolchains?.contexts,input.business?.toolchains?.admission,input.business?.toolchains?.effects,input.personalVault,input.personalVault?.personal,input.pendingConsent,input.credentialConsumer,input.provider,input.toolchains?.owners,input.toolchains?.preparation,input.toolchains?.execution,input.employeeReports,input.employeeReports?.projection,input.employeeReports?.source,input.employeeReports?.journal,input.employeeReports?.publisher,input.organizationIdentity,input.organizationIdentity?.current,input.nativeCustodyReports];
  const originalReferences=references();
@@ -156,12 +168,13 @@ function bind(input:OneNativeStartupOwners,business:ReturnType<typeof createBusi
   const blocker=employeeReports.blocker();if(blocker){employeeReports.close();business?.invalidate();deny(blocker);}
  }
  if(input.nativeCustodyReports){
-  employeeReports=createNativeEmployeeCustodyProducer(input.nativeCustodyReports,{signal:input.signal,current:()=>{try{check();return true}catch{return false}}});
+  const producer=createNativeEmployeeCustodyProducer(input.nativeCustodyReports,{signal:input.signal,current:()=>{try{check();return true}catch{return false}}});
+  employeeReports=producer;reportCleanup=()=>producer.cleanlyClosed();
   const blocker=employeeReports.blocker();if(blocker){employeeReports.close();business?.invalidate();deny(blocker);}
  }
  const abort=()=>{try{invalidate('shutdown')}catch{/* sticky uncertainty remains observable through invalidate() */}};
  input.signal.addEventListener('abort',abort,{once:true});
- return Object.freeze({personalPolicy,pendingConsent,provider,toolchains,consumer,
+ const handle=Object.freeze({personalPolicy,pendingConsent,provider,toolchains,consumer,
   signal:input.signal,
   currentEpoch(){check();return generation;},
   onInvalidated(listener:(reason:'session'|'shutdown')=>void){check();lifetimeObservers.add(listener);return()=>{lifetimeObservers.delete(listener);};},
@@ -171,4 +184,6 @@ function bind(input:OneNativeStartupOwners,business:ReturnType<typeof createBusi
   /** Never replaces owners or resumes an uncertain native effect. */
   originalBusiness:business,
  });
+ retiredReportStartups.set(handle,()=>reportOnly&&closed&&!active&&!cleanupUnknown&&originalSignal.aborted&&reportCleanup?.()===true);
+ return handle;
 }

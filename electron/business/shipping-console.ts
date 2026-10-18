@@ -43,6 +43,11 @@ function mutationReceipt(raw: unknown): raw is { ok: true; value: unknown; revis
   return isBusinessConsoleMetadata(raw) && businessOnlyKeys(raw, ['ok', 'value', 'revision', 'receiptId', 'replayed'])
     && raw.ok === true && isBusinessRevision(raw.revision) && isBusinessId(raw.receiptId) && typeof raw.replayed === 'boolean';
 }
+function rejectedMutation(response: BrowserResponse | null): boolean {
+  return !!response && response.status >= 400 && response.status < 500
+    && isBusinessConsoleMetadata(response.body) && businessOnlyKeys(response.body, ['ok', 'reason'])
+    && response.body.ok === false && isBusinessId(response.body.reason) && response.body.reason !== 'effect_unknown';
+}
 function sessionKey(session: BusinessSession): string {
   return JSON.stringify([session.deploymentId, session.identityAuthorityId, session.organizationId, session.principalId,
     session.hostId, session.sessionId, session.sessionRevision, session.authEpoch, session.expiresAt]);
@@ -223,7 +228,9 @@ export function createBusinessShippingConsole(): BusinessShippingConsole {
     const window = await ensureBrowser();
     if (!window || !origin) throw Error('business_browser_unavailable');
     const url = new URL(window.webContents.getURL());
-    if (url.searchParams.get('section') !== view) await window.loadURL(`${origin}/business?section=${encodeURIComponent(view)}`);
+    const dashboardView = view === 'history' || view === 'learning' ? 'personal' : 'organization';
+    if (url.searchParams.get('section') !== view || url.searchParams.get('view') !== dashboardView)
+      await window.loadURL(`${origin}/business?view=${dashboardView}&section=${encodeURIComponent(view)}`);
     if (!exactPage(window)) throw Error('business_browser_unavailable');
     window.show(); window.focus();
   };
@@ -275,7 +282,10 @@ export function createBusinessShippingConsole(): BusinessShippingConsole {
       heldMutations.set(key, original); invalidate();
       const response = await send(`/api/business/organizations/${encodeURIComponent(original.organizationId)}/select`, {
         expectedSessionId: original.session.sessionId, expectedSessionRevision: original.session.sessionRevision, idempotencyKey: original.idempotencyKey });
-      if (response?.status !== 200 || !mutationReceipt(response.body) || !isBusinessSession(response.body.value)) throw Error('business_original_mutation_unknown');
+      if (response?.status !== 200 || !mutationReceipt(response.body) || !isBusinessSession(response.body.value)) {
+        if (rejectedMutation(response)) { heldMutations.delete(key); throw Error('business_original_mutation_rejected'); }
+        throw Error('business_original_mutation_unknown');
+      }
       const selected = response.body.value;
       if (selected.organizationId !== original.organizationId || selected.principalId !== original.session.principalId
         || selected.deploymentId !== original.session.deploymentId || selected.hostId !== original.session.hostId
@@ -295,10 +305,10 @@ export function createBusinessShippingConsole(): BusinessShippingConsole {
       if (!originalSession || originalSession.sessionId !== input.sessionId || originalSession.sessionRevision !== input.expectedSessionRevision)
         return { snapshot: emptyAccount(), remote: 'unknown' as const };
       const key = mutationKey('logout', originalSession, originalSession.organizationId);
-      if (heldMutations.has(key) || heldSession(originalSession) || heldMutations.size >= 256) return { snapshot: emptyAccount(), remote: 'unknown' as const };
-      const current = await readAccount();
-      if (!current.session || !sameBusinessSession(current.session, originalSession) || heldSession(originalSession))
-        return { snapshot: emptyAccount(), remote: 'unknown' as const };
+      // An unrelated pending selection cannot prevent exact terminal logout.
+      // Its original request remains held; the server fences this original
+      // session/revision independently and never replays the uncertain selection.
+      if (heldMutations.has(key)) return { snapshot: emptyAccount(), remote: 'unknown' as const };
       const original = freezeBusinessConsoleMetadata({ kind: 'logout' as const, session: originalSession,
         organizationId: originalSession.organizationId, idempotencyKey: randomUUID() });
       heldMutations.set(key, original); closedSessions.add(sessionKey(original.session)); invalidate();

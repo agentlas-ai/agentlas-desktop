@@ -11,6 +11,7 @@ import { BusinessOrganizationExecutionPanel } from './admin/BusinessOrganization
 import { IconArrowLeft, IconBuilding, IconUsers, IconShield, IconKey, IconLibrary, IconBrain, IconClock, IconBolt, IconLayers, IconRefresh, IconExpand } from '../components/Icon';
 import type { BusinessDashboardView } from './renderer-bridge';
 import styles from './BusinessConsole.module.css';
+import { useBusinessCopy } from './use-business-copy';
 
 interface DisplayFence { closed: boolean; listeners: Set<() => void> }
 async function displayRead<T>(fence: DisplayFence, read: () => Promise<T>): Promise<T> {
@@ -69,6 +70,7 @@ export interface BusinessConsoleProps {
    * After account changes, the owner supplies a different current session key. */
   organizationExecutionSession?: BusinessSession | null;
   onClose?(): void;
+  onSelectPersonal?(): void;
   /** Account transitions request an owner reload; they never manufacture history authority. */
   onSessionChanged?(session: BusinessSession | null): void;
   onOpenDashboard?(input: { view: BusinessDashboardView }): Promise<void>;
@@ -80,8 +82,9 @@ export interface BusinessConsoleProps {
 }
 /** One's existing owner mounts this surface and supplies actual current callbacks.
  * This component creates no transport, registrar, collector, account or queue. */
-export function BusinessConsole({ context, account, history, learning, organizationExecution = null, organizationExecutionSession, onClose, onSessionChanged,
+export function BusinessConsole({ context, account, history, learning, organizationExecution = null, organizationExecutionSession, onClose, onSelectPersonal, onSessionChanged,
   onOpenDashboard, onReload, notice = null, displayClosed = false, initialTab = 'history' }: BusinessConsoleProps) {
+  const { copy } = useBusinessCopy();
   const [tab, setTab] = useState(initialTab);
   const [opening, setOpening] = useState(false), [navigationNotice, setNavigationNotice] = useState<string | null>(null);
   const contextKey = JSON.stringify(context);
@@ -109,52 +112,54 @@ export function BusinessConsole({ context, account, history, learning, organizat
     return () => clearTimeout(timer);
   }, [contextKey]);
   const visibleContext = !displayClosed && !fence.closed && !expired && context && context.expiresAt > Date.now() && Date.parse(context.session.expiresAt) > Date.now() ? context : null;
-  const scope = visibleContext?.scope.kind === 'personal' ? '개인 공간' : visibleContext?.scope.kind === 'organization' ? `조직 ${visibleContext.scope.organizationId}` : '현재 범위 연결 필요';
+  const scope = visibleContext?.scope.kind === 'personal' ? copy("개인 공간", "Personal space") : visibleContext?.scope.kind === 'organization' ? copy(`조직 ${visibleContext.scope.organizationId}`, `Organization ${visibleContext.scope.organizationId}`) : copy("현재 범위 연결 필요", "Connect the current scope");
   async function openDashboard(view: BusinessDashboardView) {
     if (!onOpenDashboard || opening) return;
     setOpening(true); setNavigationNotice(null);
-    try { await onOpenDashboard({ view }); setNavigationNotice('웹 관리 열기를 요청했습니다.'); }
-    catch { setNavigationNotice('웹 관리 연결 확인 필요'); }
+    try { await onOpenDashboard({ view }); setNavigationNotice(copy("웹 관리 열기를 요청했습니다.", "Requested Web management.")); }
+    catch { setNavigationNotice(copy("웹 관리 연결 확인 필요", "Check the Web management connection")); }
     finally { setOpening(false); }
   }
   const nativeLinks = [
-    { id: 'account' as const, label: '계정과 조직', icon: IconBuilding },
-    { id: 'history' as const, label: '컴퓨터 기록', icon: IconClock },
-    { id: 'learning' as const, label: '학습과 개선', icon: IconBrain },
-    { id: 'organization-execution' as const, label: '조직 실행 관리', icon: IconBolt },
+    { id: 'account' as const, label: copy("계정과 조직", "Account and organization"), icon: IconBuilding },
+    { id: 'history' as const, label: copy("컴퓨터 기록", "Computer history"), icon: IconClock },
+    { id: 'learning' as const, label: copy("학습과 개선", "Learning and improvements"), icon: IconBrain },
+    { id: 'organization-execution' as const, label: copy("조직 실행 관리", "Organization execution"), icon: IconBolt },
   ];
   const webLinks = [
-    { id: 'overview' as const, label: '분석', icon: IconLayers, group: '조직' },
-    { id: 'members' as const, label: '멤버', icon: IconUsers, group: '조직' },
-    { id: 'roles' as const, label: '역할', icon: IconShield, group: '조직' },
-    { id: 'grants' as const, label: '접근 권한', icon: IconKey, group: '조직' },
-    { id: 'providers' as const, label: '제공자', icon: IconBolt, group: '연결' },
-    { id: 'catalog' as const, label: '공유 자산', icon: IconLibrary, group: '연결' },
-    { id: 'audit' as const, label: '관리 기록', icon: IconShield, group: '조직' },
+    { id: 'overview' as const, label: copy("분석", "Analysis"), icon: IconLayers, group: copy("조직", "Organization") },
+    { id: 'members' as const, label: copy("멤버", "Members"), icon: IconUsers, group: copy("조직", "Organization") },
+    { id: 'roles' as const, label: copy("역할", "Roles"), icon: IconShield, group: copy("조직", "Organization") },
+    { id: 'grants' as const, label: copy("접근 권한", "Access permissions"), icon: IconKey, group: copy("조직", "Organization") },
+    { id: 'providers' as const, label: copy("제공자", "Providers"), icon: IconBolt, group: copy("연결", "Connections") },
+    { id: 'catalog' as const, label: copy("공유 자산", "Shared assets"), icon: IconLibrary, group: copy("연결", "Connections") },
+    { id: 'audit' as const, label: copy("관리 기록", "Management activity"), icon: IconShield, group: copy("조직", "Organization") },
   ];
+  const nativeAvailable = { account: !!account, history: !!history, learning: !!learning, 'organization-execution': !!organizationExecution };
   return <section className={styles.console} aria-labelledby="business-console-heading">
-    <a className={styles.skip} href="#business-desktop-content">본문으로 이동</a>
+    <a className={styles.skip} href="#business-desktop-content">{copy("본문으로 이동", "Skip to content")}</a>
     <header className={styles.header}>
-      {onClose ? <button type="button" className={styles.back} onClick={onClose}><IconArrowLeft size={16} /><span>앱으로 돌아가기</span></button> : <small>Agentlas Business</small>}
-      <h1 id="business-console-heading">조직 설정</h1><div className={styles.headerActions}>
-        {onReload && <button type="button" className={styles.iconButton} title="연결 새로 확인" aria-label="연결 새로 확인" onClick={onReload}><IconRefresh size={17} /></button>}
-        <button type="button" disabled={!onOpenDashboard || opening} title="웹 관리 열기" aria-label="웹 관리 열기" onClick={() => void openDashboard('overview')}><IconExpand size={15} /><span>웹 관리</span></button>
+      {onClose ? <button type="button" className={styles.back} onClick={onClose}><IconArrowLeft size={16} /><span>{copy("앱으로 돌아가기", "Back to the app")}</span></button> : <small>Agentlas Business</small>}
+      <h1 id="business-console-heading">{copy("조직 설정", "Organization settings")}</h1><div className={styles.headerActions}>
+        {onReload && <button type="button" className={styles.iconButton} title={copy("연결 새로 확인", "Refresh connection")} aria-label={copy("연결 새로 확인", "Refresh connection")} onClick={onReload}><IconRefresh size={17} /></button>}
+        <button type="button" disabled={!onOpenDashboard || opening} title={copy("웹 관리 열기", "Open Web management")} aria-label={copy("웹 관리 열기", "Open Web management")} onClick={() => void openDashboard('overview')}><IconExpand size={15} /><span>{copy("웹 관리", "Web management")}</span></button>
       </div></header>
     {(notice || navigationNotice) && <p className={styles.message} role="status">{notice ?? navigationNotice}</p>}
     <div className={styles.layout}><aside className={styles.sidebar}>
-      <BusinessAccountPanel port={account} variant="selector" displayClosed={displayClosed} expectedSession={context?.session ?? organizationExecutionSession} onSessionChanged={sessionChanged} />
-      <nav className={styles.tabs} aria-label="Business 관리"><div className={styles.navGroup}><small>내 작업 · Desktop</small>
-        {nativeLinks.map(item => <button key={item.id} type="button" aria-pressed={tab === item.id} aria-current={tab === item.id ? 'page' : undefined} onClick={() => setTab(item.id)}>
-          <item.icon size={17} /><span>{item.label}</span></button>)}</div>
-        {['조직', '연결'].map(group => <div className={styles.navGroup} key={group}><small>{group} · 웹 관리</small>
+      <BusinessAccountPanel port={account} variant="selector" displayClosed={displayClosed} expectedSession={context?.session ?? organizationExecutionSession} onSessionChanged={sessionChanged} onSelectPersonal={onSelectPersonal} />
+      <nav className={styles.tabs} aria-label={copy("Business 관리", "Business management")}><div className={styles.navGroup}><small>{copy("내 작업 · Desktop", "My work · Desktop")}</small>
+        {nativeLinks.map(item => <button key={item.id} type="button" aria-pressed={tab === item.id} aria-current={tab === item.id ? 'page' : undefined} disabled={item.id !== 'account' && !nativeAvailable[item.id] && (!onOpenDashboard || opening)}
+          onClick={() => { if (item.id === 'account' || nativeAvailable[item.id]) setTab(item.id); else void openDashboard(item.id); }}>
+          <item.icon size={17} /><span>{item.label}</span>{item.id !== 'account' && !nativeAvailable[item.id] && <IconExpand size={12} />}</button>)}</div>
+        {[copy("조직", "Organization"), copy("연결", "Connections")].map(group => <div className={styles.navGroup} key={group}><small>{group}{copy(" · 웹 관리", " · Web management")}</small>
           {webLinks.filter(item => item.group === group).map(item => <button key={item.id} type="button" disabled={!onOpenDashboard || opening} onClick={() => void openDashboard(item.id)}>
             <item.icon size={17} /><span>{item.label}</span><IconExpand size={12} /></button>)}</div>)}
       </nav>
       <span className={styles.scope} title={scope}><IconShield size={14} />{scope}</span>
-      {visibleContext && <details className={styles.identity}><summary>현재 범위</summary><dl><dt>계정</dt><dd>{visibleContext.session.principalId}</dd><dt>Desktop</dt><dd>{visibleContext.session.hostId}</dd>
-        <dt>세션 revision</dt><dd>{visibleContext.session.sessionRevision}</dd><dt>기록 revision</dt><dd>{visibleContext.revision}</dd></dl></details>}
+      {visibleContext && <details className={styles.identity}><summary>{copy("현재 범위", "Current scope")}</summary><dl><dt>{copy("계정", "Account")}</dt><dd>{visibleContext.session.principalId}</dd><dt>Desktop</dt><dd>{visibleContext.session.hostId}</dd>
+        <dt>{copy("세션 revision", "Session revision")}</dt><dd>{visibleContext.session.sessionRevision}</dd><dt>{copy("기록 revision", "History revision")}</dt><dd>{visibleContext.revision}</dd></dl></details>}
     </aside><div id="business-desktop-content" className={styles.content} key={contextKey} tabIndex={-1}>
-      {tab === 'account' && <BusinessAccountPanel port={account} displayClosed={displayClosed} expectedSession={context?.session ?? organizationExecutionSession} onSessionChanged={sessionChanged} />}
+      {tab === 'account' && <BusinessAccountPanel port={account} displayClosed={displayClosed} expectedSession={context?.session ?? organizationExecutionSession} onSessionChanged={sessionChanged} onSelectPersonal={onSelectPersonal} />}
       {tab === 'history' && <BusinessHistoryPanel port={currentHistory} displayClosed={displayClosed} expectedContext={context} />}
       {tab === 'learning' && <BusinessLearningPanel port={currentLearning} displayClosed={displayClosed} expectedContext={context} />}
       {tab === 'organization-execution' && <BusinessOrganizationExecutionPanel port={currentOrganizationExecution} displayClosed={displayClosed} expectedSession={organizationExecutionSession} />}

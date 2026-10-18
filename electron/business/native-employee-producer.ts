@@ -54,6 +54,7 @@ export function createNativeEmployeeCustodyProducer(owners:NativeEmployeeCustody
  }
  function receive(capability:object){if(!capability||typeof capability!=='object')return Promise.resolve('denied' as const);const prior=active.get(capability);if(prior)return prior;const pending=receiveOriginal(capability).catch(()=> 'unknown' as const).finally(()=>active.delete(capability));active.set(capability,pending);return pending;}
  function close(){closed=true;if(release){const stop=release;release=null;try{stop()}catch{unknown=true}}}
- return Object.freeze({blocker,receive,attach(){if(attached)return !blocker();if(blocker())return false;try{release=owners.subscribeAccepted(cap=>{void receive(cap)});if(typeof release!=='function'){unknown=true;return false}attached=true;lifetime.signal.addEventListener('abort',close,{once:true});return true}catch{unknown=true;return false}},close});
+ return Object.freeze({blocker,receive,attach(){if(attached)return !blocker();if(blocker())return false;try{release=owners.subscribeAccepted(cap=>{void receive(cap)});if(typeof release!=='function'){unknown=true;return false}attached=true;lifetime.signal.addEventListener('abort',close,{once:true});return true}catch{unknown=true;return false}},close,
+  cleanlyClosed:()=>closed&&!unknown&&release===null});
 }
 export function sameNativeEmployeeAssociation(a:BusinessNativeAssociation,packet:NativeEmployeeCustodyPacket){return a.associationId===packet.associationId&&a.associationRevision===packet.associationRevision&&a.sourceRevision===packet.sourceRevision&&a.consentRevision===packet.consentRevision&&a.state==='active';}

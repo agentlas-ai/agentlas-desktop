@@ -7,7 +7,7 @@ import type {OneVaultRuntime,OneVaultRuntimePolicy} from '../secrets/one-vault-r
 import type {OneProviderDomainPorts} from '../secrets/one-provider-main';
 import {createOneMobileMainProducer,type OneMobileMainLifetime,type OneMobileMainProducerPorts} from '../secrets/one-mobile-main-producer';
 import {createOneMobileSocketOwner,configureOneMobileSocketOwner,currentOneMobileSocketOwner,type OneMobileSocketPorts} from '../secrets/one-mobile-socket';
-import {installOneNativeStartup,type OneNativeStartupOwners} from './native-startup-installer';
+import {installOneNativeStartup,retireOneNativeReportStartup,type OneNativeStartupOwners} from './native-startup-installer';
 
 export interface OneNativePersonalOwners {
  readonly policy:OneVaultRuntimePolicy;
@@ -192,6 +192,7 @@ export function createOneNativeMainComposition(){
   listeners.clear();if(cleanupUnknown)reason='one_native_main_cleanup_unknown';
  }
  function resetGeneration(){
+  if(startup)retireOneNativeReportStartup(startup);
   epoch++;closed=false;started=false;reason=null;reauthorizationAllowed=false;shutdown=new AbortController();lifetime=makeLifetime();
   runtime=null;owners=null;identity='';originalReferences=[];mobile=null;socket=null;startup=null;personalFamily=null;organizationFamily=null;personalReferences=[];organizationReferences=[];
  }
