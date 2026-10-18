@@ -3,7 +3,7 @@ import { getDb } from "./store/db";
 import { appendChatMessage, clearChatGoalBindingByGoalId, getChat } from "./store/chats";
 import { emitDesktopStoreChange } from "./store/change-bus";
 import { completeChatGoalContract } from "./store/chat-goals";
-import { getAutomation, toggleAutomation, updateAutomation } from "./store/automations";
+import { computeNextRun, getAutomation, toggleAutomation } from "./store/automations";
 import {
   closeOpenGoalLedgerTasks,
   completeGoalLedgerGoal,
@@ -136,6 +136,29 @@ function scheduleAdvisoryContinuation(a: {
   }).immediate();
 }
 
+/**
+ * The ledger's cadence moves only the next run, never the schedule (W1 sibling, 2026-10-18). Writing the cadence into
+ * the schedule changed the definition, so the Goal provenance check refused every later run of the continuation
+ * (automation_workspace_goal_authority_changed) — the same break as the old advisory rewrite. A continuation created
+ * on the backoff cadence (the ledger said "not now" at the turn end) met it on its first good pass.
+ */
+function armContinuationCadence(a: { id: string; goalId?: string | null; promptTemplate: string; scheduleHuman: string },
+  runId: string, cadence: string): void {
+  const nextAt = computeNextRun(cadence, new Date());
+  if (!nextAt || !a.goalId) return;
+  getDb().transaction(() => {
+    const updated = getDb().prepare(`UPDATE automations SET next_run_at=?
+      WHERE id=? AND enabled=1 AND goal_id=? AND prompt_template=? AND schedule=?`)
+      .run(nextAt, a.id, a.goalId, a.promptTemplate, a.scheduleHuman);
+    if (updated.changes !== 1) return;
+    // graph-reconciliation.ts reads this receipt: the next run is its own episode (occurrence), not the finished one.
+    tryRecordRunEvent({ runId, automationId: a.id, kind: "goal_continuation_cadence_armed",
+      sourceEventId: `goal_continuation_cadence_armed:${runId}`,
+      payload: { cadence, nextAt, definitionDigest: getAutomationDefinitionDigest(a.id) } });
+    emitDesktopStoreChange({ entity: "automation", id: a.id });
+  }).immediate();
+}
+
 async function boundedLedgerRead<T>(operation: () => Promise<T>): Promise<T | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -226,7 +249,7 @@ export async function settleGoalContinuationRun(input: {
   if (!decision.continue) return advisoryRetry("goal_continuation_internal_diagnostic");
   if (decision.continue || continueRequested) {
     const cadence = goalContinuationSchedule(decision);
-    if (a.scheduleHuman !== cadence) updateAutomation(a.id, { scheduleHuman: cadence });
+    if (a.scheduleHuman !== cadence) armContinuationCadence(a, input.runId, cadence);
     return "continue";
   }
   return advisoryRetry("goal_continuation_basis_pending");

@@ -1181,35 +1181,44 @@ export function graphCheckpointRunnableNodes(graph: WorkflowGraph, checkpoint: G
 }
 
 const SCHEDULE_RECOVERY_EVENT = "workflow_schedule_recovery";
-/** Written by goal-continuation-hold.ts scheduleAdvisoryContinuation (the host's bounded fresh Goal continuation). */
-const GOAL_CONTINUATION_ADVISORY_EVENT = "goal_continuation_advisory_retry";
+/**
+ * Host re-arms of a Goal continuation's cursor, written by goal-continuation-hold.ts: the bounded fresh retry after a
+ * failed or unfinished pass, and the ledger cadence after a good pass. Neither changes the definition.
+ */
+const GOAL_CONTINUATION_ARM_EVENTS = ["goal_continuation_advisory_retry", "goal_continuation_cadence_armed"] as const;
 const ADVISORY_RECEIPT_LIMIT = 200;
 
 type FailedScheduleRun = LatestRunRow & { checkpoint_json: string; occurrence_id: string };
 
-/** The latest failed live scheduled occurrence of this automation, or null. */
-function latestFailedScheduleRun(automation: Automation): FailedScheduleRun | null {
+/** The latest live scheduled occurrence of this automation, whatever its status, or null. */
+function latestScheduleRun(automation: Automation): LatestRunRow | null {
   const run = getDb().prepare(`SELECT id, automation_id, started_at, last_activity_at, status, node_states_json,
       occurrence_id, graph_digest, checkpoint_json, dry_run FROM automation_runs
       WHERE automation_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1`).get(automation.id) as LatestRunRow | undefined;
-  if (!run || run.status !== "error" || run.dry_run === 1 || !run.checkpoint_json
-      || !run.occurrence_id?.startsWith(`schedule:${automation.id}:`)) return null;
+  return run && run.dry_run !== 1 && run.occurrence_id?.startsWith(`schedule:${automation.id}:`) ? run : null;
+}
+
+/** The latest failed live scheduled occurrence of this automation, or null. */
+function latestFailedScheduleRun(automation: Automation): FailedScheduleRun | null {
+  const run = latestScheduleRun(automation);
+  if (!run || run.status !== "error" || !run.checkpoint_json) return null;
   return run as FailedScheduleRun;
 }
 
 /**
- * The cursor is the host's own fresh Goal continuation (W1, 2026-10-18). A Goal continuation that failed is re-armed by
- * scheduleAdvisoryContinuation (goal-continuation-hold.ts) as a fresh episode: "fresh-independent-context", earlier
- * effects unverified. The cursor recovery read that retry as a held occurrence (and, while the advisory still rewrote
- * the prompt and schedule, as an owner graph revision) and quarantined the continuation for good: production 834c86d9
- * "Goal continuation · Yotube" 2026-10-11 20:50:45 advisory -> 21:06:23 observe_quarantined_effects
- * (graph_definition_reconciliation_pending), next_run_at NULL ever since; fc4396e6, c5ae5890, 444d94f0 the same, 4 of 4.
- * Proof from typed receipts only: the definition the failed run started with (workflow_graph_started.definitionDigest)
- * is the one every advisory since then recorded and the one stored now, and the latest advisory wrote this exact cursor.
+ * The cursor is the host's own re-arm of a Goal continuation (W1, 2026-10-18). A failed pass is re-armed by
+ * scheduleAdvisoryContinuation (goal-continuation-hold.ts) as a fresh episode ("fresh-independent-context", earlier
+ * effects unverified); a good pass moves to the ledger's cadence (armContinuationCadence). The cursor recovery read the
+ * retry as a held occurrence (and, while the advisory still rewrote the prompt and schedule, as an owner graph revision)
+ * and quarantined the continuation for good: production 834c86d9 "Goal continuation · Yotube" 2026-10-11 20:50:45
+ * advisory -> 21:06:23 observe_quarantined_effects (graph_definition_reconciliation_pending), next_run_at NULL ever
+ * since; fc4396e6, c5ae5890, 444d94f0 the same, 4 of 4.
+ * Proof from typed receipts only: the definition the latest run started with (workflow_graph_started.definitionDigest)
+ * is the one every re-arm since then recorded and the one stored now, and the latest re-arm wrote this exact cursor.
  * Any other change (an owner edit, a receipt without a definition digest such as the production 10-11 rows) keeps the
- * existing hold.
+ * existing behaviour.
  */
-function hostAdvisoryArmedCursor(automation: Automation, run: LatestRunRow): boolean {
+function hostArmedGoalContinuationCursor(automation: Automation, run: LatestRunRow): boolean {
   if (!automation.nextRunAt || !automation.goalId || !run.started_at) return false;
   try {
     const db = getDb();
@@ -1217,12 +1226,13 @@ function hostAdvisoryArmedCursor(automation: Automation, run: LatestRunRow): boo
       ORDER BY seq ASC LIMIT 1`).get(run.id) as { payload_json: string } | undefined;
     const ran = started ? (JSON.parse(started.payload_json) as Record<string, unknown>).definitionDigest : null;
     if (typeof ran !== "string" || !ran || getAutomationDefinitionDigest(automation.id) !== ran) return false;
-    const rows = db.prepare(`SELECT payload_json FROM run_events WHERE automation_id = ? AND kind = ? AND ts >= ?
-      ORDER BY ts ASC, rowid ASC LIMIT ?`).all(automation.id, GOAL_CONTINUATION_ADVISORY_EVENT, run.started_at,
-      ADVISORY_RECEIPT_LIMIT) as Array<{ payload_json: string }>;
+    const rows = db.prepare(`SELECT kind, payload_json FROM run_events WHERE automation_id = ? AND kind IN (${
+      GOAL_CONTINUATION_ARM_EVENTS.map(() => "?").join(", ")}) AND ts >= ?
+      ORDER BY ts ASC, rowid ASC LIMIT ?`).all(automation.id, ...GOAL_CONTINUATION_ARM_EVENTS, run.started_at,
+      ADVISORY_RECEIPT_LIMIT) as Array<{ kind: string; payload_json: string }>;
     if (rows.length === 0 || rows.length >= ADVISORY_RECEIPT_LIMIT) return false;
     const receipts = rows.map((row) => JSON.parse(row.payload_json) as Record<string, unknown>);
-    return receipts.every((receipt) => receipt.continuation === "fresh-independent-context" && receipt.definitionDigest === ran)
+    return receipts.every((receipt) => receipt.definitionDigest === ran)
       && receipts[receipts.length - 1]!.nextAt === automation.nextRunAt;
   } catch {
     return false;
@@ -1250,14 +1260,14 @@ function scheduleCheckpoint(automation: Automation, allowRevisedHold = false): {
 }
 
 /**
- * A cursor repair is bound to the saved occurrence even across a missed cron slot. A cursor the host's own Goal
- * continuation advisory armed is that advisory's fresh episode, its own occurrence: resuming the failed occurrence
- * would hold its uncertain step again (run-graph admits a held view of the current occurrence as MUTATION_UNVERIFIED)
- * and the continuation would never take a step. The failed occurrence keeps its record and its own reconciliation.
+ * A cursor repair is bound to the saved occurrence even across a missed cron slot. A cursor the host re-armed for a
+ * Goal continuation is that next episode's own occurrence. Inside the latest occurrence it would do nothing useful:
+ * after a failed pass the uncertain step is held again (run-graph admits a held view of the current occurrence as
+ * MUTATION_UNVERIFIED), after a good pass the completed step is not run again. The earlier occurrence keeps its record.
  */
 export function recoveredGraphScheduleOccurrence(automation: Automation): string | null {
-  const failed = automation.nextRunAt ? latestFailedScheduleRun(automation) : null;
-  if (failed && hostAdvisoryArmedCursor(automation, failed)) return `schedule:${automation.id}:${automation.nextRunAt}`;
+  const latest = automation.nextRunAt ? latestScheduleRun(automation) : null;
+  if (latest && hostArmedGoalContinuationCursor(automation, latest)) return `schedule:${automation.id}:${automation.nextRunAt}`;
   const saved = scheduleCheckpoint(automation);
   if (!saved || !automation.nextRunAt) return null;
   const row = getDb().prepare(`SELECT payload_json FROM run_events WHERE run_id = ? AND kind = ?
@@ -1287,9 +1297,9 @@ function scheduleCursorHold(automation: Automation): ScheduleCursorHold | null {
   const db = getDb();
   const saved = scheduleCheckpoint(automation, true);
   if (!saved) return null;
-  // The host re-armed this exact cursor for a fresh Goal continuation: neither its own rewrite nor the earlier
-  // uncertain step is a reason to stop the clock (the failed occurrence keeps its record and reconciliation).
-  if (hostAdvisoryArmedCursor(automation, saved.run)) return null;
+  // The host re-armed this exact cursor for the next Goal continuation episode: the earlier uncertain step is no
+  // reason to stop the clock (the failed occurrence keeps its record and reconciliation).
+  if (hostArmedGoalContinuationCursor(automation, saved.run)) return null;
   const graphRevised = saved.revisedGraph === true;
   const { run, graph, checkpoint } = saved;
   const heldNodeIds = [...new Set([...checkpoint.inFlightNodeIds, ...checkpoint.ambiguousNodeIds])].sort();
