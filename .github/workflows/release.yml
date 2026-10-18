@@ -129,7 +129,11 @@ jobs:
 
       # Clone the git-ignored Hephaestus engine so extraResources can embed it.
       - name: Ensure embedded engine (Hephaestus)
-        run: npm run ensure:engine
+        shell: bash
+        run: |
+          node scripts/run-private-release-gate.cjs PORTABLE_ENGINE -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
+          npm run ensure:engine
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Checkout pinned private release verification
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -144,6 +148,7 @@ jobs:
       - name: Install hash-bound private verification files
         shell: bash
         run: |
+          node scripts/run-private-release-gate.cjs PORTABLE_VERIFIER_MATERIALIZE -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           test "$(git -C .release-private-verification rev-parse HEAD)" = "f8e84b57e7e8d383dacf7bddad12db05ad52eecd"
           node <<'NODE'
           const fs = require('node:fs');
@@ -172,6 +177,7 @@ jobs:
           }
           console.log(`Installed ${seen.size} private verification files from the pinned release`);
           NODE
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Install dependencies
         shell: bash
@@ -191,13 +197,19 @@ jobs:
           GIT_CONFIG_GLOBAL="$git_config" npm ci --no-audit
 
       - name: Fetch SHA-256-pinned standalone Python for the package
-        run: npm run fetch:python
+        shell: bash
+        run: |
+          node scripts/run-private-release-gate.cjs PORTABLE_PYTHON -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
+          npm run fetch:python
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Verify portable Linux updater contracts
         if: runner.os == 'Linux'
         env:
           AGENTLAS_E2E: "1"
+        shell: bash
         run: |
+          node scripts/run-private-release-gate.cjs LINUX_UPDATER_CONTRACTS -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           node node_modules/electron/install.js
           sandbox_path="$(find node_modules/electron -maxdepth 4 -name chrome-sandbox -print -quit)"
           if [ -z "$sandbox_path" ]; then
@@ -210,49 +222,78 @@ jobs:
           xvfb-run -a dbus-run-session -- bash -eo pipefail -c '
             npm run build:electron
           '
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Build renderer + electron
-        run: npm run build
+        shell: bash
+        run: |
+          node scripts/run-private-release-gate.cjs PORTABLE_BUILD -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
+          npm run build
+          AGENTLAS_PRIVATE_STAGE
 
       # Tests run after the initial clone. Recheck the immutable commit and the
       # ignored-file boundary immediately before electron-builder sees Core.
       - name: Reverify embedded engine release boundary
-        run: npm run ensure:engine
+        shell: bash
+        run: |
+          node scripts/run-private-release-gate.cjs PORTABLE_ENGINE_BOUNDARY -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
+          npm run ensure:engine
+          AGENTLAS_PRIVATE_STAGE
 
       # Tests and native rebuilds run for several minutes after the first
       # fetch. Re-materialize the immutable platform asset at the final package
       # boundary so no stale/cross-arch directory can reach electron-builder.
       - name: Reverify pinned standalone Python at package boundary
-        run: npm run fetch:python
+        shell: bash
+        run: |
+          node scripts/run-private-release-gate.cjs PORTABLE_PYTHON_BOUNDARY -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
+          npm run fetch:python
+          AGENTLAS_PRIVATE_STAGE
 
       # electron-builder's afterPack gate requires the same checksum-pinned
       # Chrome for Testing tree that ships in the app. Materialize it at the
       # final package boundary on each native runner so Windows/Linux cannot
       # reach packaging with only the repository .gitkeep placeholder.
       - name: Materialize pinned browser runtime for package boundary
-        run: npm run fetch:browser
+        shell: bash
+        run: |
+          node scripts/run-private-release-gate.cjs PORTABLE_BROWSER -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
+          npm run fetch:browser
+          AGENTLAS_PRIVATE_STAGE
 
       # 맥도 받아야 한다. 예전에는 이 단계가 `runner.os == 'Windows'` 였고, 그래서 맥
       # 배포판에는 앱이 들고 다닐 Node 가 아예 실리지 않았다 — Node 가 없는 맥 사용자에게
       # CLI 설치 버튼이 "npm 을 찾을 수 없습니다"로 끝나던 원인이다.
       - name: Materialize pinned private Node runtime for CLI bootstrap
-        run: npm run fetch:node
+        shell: bash
+        run: |
+          node scripts/run-private-release-gate.cjs PORTABLE_NODE -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
+          npm run fetch:node
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Package verified Actions artifacts only
         shell: bash
         run: |
+          node scripts/run-private-release-gate.cjs PORTABLE_PACKAGE -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           npx electron-builder ${{ matrix.builder_args }} --publish never
           node scripts/stamp-update-feeds.mjs --release-dir=release --require
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Verify packaged Windows Python and Workforce MCP
         if: runner.os == 'Windows'
         shell: bash
-        run: node scripts/fetch-release-verification.mjs --run verify-packaged-workforce-runtime.cjs --resources=release/win-unpacked/resources
+        run: |
+          node scripts/run-private-release-gate.cjs WINDOWS_PACKAGE -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
+          node scripts/fetch-release-verification.mjs --run verify-packaged-workforce-runtime.cjs --resources=release/win-unpacked/resources
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Verify packaged Linux Python and Workforce MCP
         if: runner.os == 'Linux'
         shell: bash
-        run: node scripts/fetch-release-verification.mjs --run verify-packaged-workforce-runtime.cjs --resources=release/linux-unpacked/resources
+        run: |
+          node scripts/run-private-release-gate.cjs LINUX_PACKAGE -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
+          node scripts/fetch-release-verification.mjs --run verify-packaged-workforce-runtime.cjs --resources=release/linux-unpacked/resources
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Upload Windows/Linux package set for the release barrier
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -324,6 +365,7 @@ jobs:
       - name: Install hash-bound private verification files
         shell: bash
         run: |
+          node scripts/run-private-release-gate.cjs PORTABLE_VERIFIER_MATERIALIZE -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           test "$(git -C .release-private-verification rev-parse HEAD)" = "f8e84b57e7e8d383dacf7bddad12db05ad52eecd"
           node <<'NODE'
           const fs = require('node:fs');
@@ -352,6 +394,7 @@ jobs:
           }
           console.log(`Installed ${seen.size} private verification files from the pinned release`);
           NODE
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Install updater E2E dependencies
         shell: bash
@@ -424,11 +467,13 @@ jobs:
         env:
           EXPECTED_HARNESS_REF: ${{ inputs.harness_ref }}
         run: |
+          node scripts/run-private-release-gate.cjs UPDATER_HARNESS -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           if [[ ! "$EXPECTED_HARNESS_REF" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::Release harness must identify an immutable workflow commit."
             exit 1
           fi
           git cat-file -e "${EXPECTED_HARNESS_REF}^{commit}"
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Run v0.8.32 to target native updater lifecycle
         shell: bash
@@ -437,6 +482,7 @@ jobs:
           # the disposable native execution boundary for this destructive test.
           CI: "true"
         run: |
+          node scripts/run-private-release-gate.cjs NATIVE_UPDATER_LIFECYCLE -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           args=(
             scripts/fetch-release-verification.mjs
             --run verify-packaged-updater-install-e2e.cjs
@@ -453,3 +499,4 @@ jobs:
           else
             node "${args[@]}"
           fi
+          AGENTLAS_PRIVATE_STAGE

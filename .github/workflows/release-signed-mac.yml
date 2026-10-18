@@ -114,7 +114,9 @@ jobs:
           persist-credentials: false
 
       - name: Verify and install immutable Mac release tooling
+        shell: bash
         run: |
+          node scripts/run-private-release-gate.cjs MAC_TOOLING -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           tooling_commit="$(git -C .release-tooling rev-parse HEAD)"
           if [ "$tooling_commit" != "$AGENTLAS_RELEASE_SOURCE_REF" ]; then
             echo "::error::Mac release tooling checkout does not match immutable product source commit."
@@ -123,6 +125,7 @@ jobs:
           cp .release-tooling/scripts/package-mac.sh scripts/package-mac.sh
           cp .release-tooling/scripts/verify-mac-update-lineage.mjs scripts/verify-mac-update-lineage.mjs
           chmod +x scripts/package-mac.sh scripts/verify-mac-update-lineage.mjs
+          AGENTLAS_PRIVATE_STAGE
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -247,15 +250,22 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
           RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+        shell: bash
         run: |
+          node scripts/run-private-release-gate.cjs RAILWAY_PREFLIGHT -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           test -n "$RAILWAY_TOKEN" || { echo "::error::RAILWAY_TOKEN is required when apply_web_env=true."; exit 1; }
           test -n "$RAILWAY_PROJECT_ID" || { echo "::error::RAILWAY_PROJECT_ID is required when apply_web_env=true."; exit 1; }
           npm run release:railway:check -- --project="$RAILWAY_PROJECT_ID" --environment=production --service=agentlas-web
           echo "AGENTLAS_RAILWAY_RELEASE_READY=1" >> "$GITHUB_ENV"
+          AGENTLAS_PRIVATE_STAGE
 
       # Clone the git-ignored Hephaestus engine so the signed .app embeds it.
       - name: Ensure embedded engine (Hephaestus)
-        run: npm run ensure:engine
+        shell: bash
+        run: |
+          node scripts/run-private-release-gate.cjs MAC_ENGINE -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
+          npm run ensure:engine
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Checkout pinned private release verification
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -270,6 +280,7 @@ jobs:
       - name: Install hash-bound private verification files
         shell: bash
         run: |
+          node scripts/run-private-release-gate.cjs MAC_VERIFIER_MATERIALIZE -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           if [[ ! "$AGENTLAS_MAC_PRIVATE_VERIFICATION_REF" =~ ^[0-9a-f]{40}$ ]] || [[ ! "$AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
             echo "::error::Private Mac verification requires an immutable commit and manifest digest."
             exit 1
@@ -357,6 +368,7 @@ jobs:
           }
           console.log(`Installed ${seen.size} private verification files from the pinned release`);
           NODE
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Install dependencies
         shell: bash
@@ -380,12 +392,17 @@ jobs:
       - name: Verify deterministic release contracts
         env:
           GITHUB_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
+          node scripts/run-private-release-gate.cjs MAC_PREFLIGHT -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           npm run release:preflight
           npm run build:electron
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Build production updater surfaces and reject forced reinstall copy
+        shell: bash
         run: |
+          node scripts/run-private-release-gate.cjs MAC_UPDATER_BUILD -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           npm run build:renderer
           node <<'NODE'
           const fs = require('node:fs');
@@ -413,6 +430,7 @@ jobs:
           if (rejected) process.exit(1);
           console.log(`Updater source copy guard checked ${paths.length} UTF-8 files.`);
           NODE
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Prepare pinned browser runtime for private contracts
         run: npm run fetch:browser
@@ -421,6 +439,7 @@ jobs:
         timeout-minutes: 60
         shell: bash
         run: |
+          node scripts/run-private-release-gate.cjs MAC_PRIVATE_CONTRACTS -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           node <<'NODE'
           const cp = require('node:child_process');
           if (Number(process.versions.node.split('.')[0]) !== 22) throw new Error('Node22 required');
@@ -515,9 +534,10 @@ jobs:
             if (result.error || result.status !== 0) throw new Error(`Required private gate failed: ${gate.path}; code=${result.status}; signal=${result.signal}; error=${result.error?.code || ''}`);
           }
           NODE
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Record successful macOS release preflight
-        run: echo "macOS release tests completed without publishing any release assets"
+        run: echo "RELEASE_STAGE_OK MAC_PREFLIGHT_COMPLETE exit=0"
 
   release-artifact-barrier:
     name: All OS release gate barrier
@@ -534,7 +554,7 @@ jobs:
         run: |
           test "$CROSS_PLATFORM_RESULT" = "success"
           test "$MAC_PREFLIGHT_RESULT" = "success"
-          echo "All Windows, Linux, and macOS release gates passed; the single release writer is now unlocked."
+          echo "RELEASE_STAGE_OK OS_BARRIER exit=0"
 
   build-signed-mac-artifacts:
     # 맥은 윈도우·리눅스 빌드와 그 설치 검사가 끝날 때까지 28분을 그냥 기다리고 있었다.
@@ -586,7 +606,9 @@ jobs:
           persist-credentials: false
 
       - name: Verify and install immutable Mac release tooling
+        shell: bash
         run: |
+          node scripts/run-private-release-gate.cjs MAC_TOOLING -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           tooling_commit="$(git -C .release-tooling rev-parse HEAD)"
           if [ "$tooling_commit" != "$AGENTLAS_RELEASE_SOURCE_REF" ]; then
             echo "::error::Mac release tooling checkout does not match immutable product source commit."
@@ -595,6 +617,7 @@ jobs:
           cp .release-tooling/scripts/package-mac.sh scripts/package-mac.sh
           cp .release-tooling/scripts/verify-mac-update-lineage.mjs scripts/verify-mac-update-lineage.mjs
           chmod +x scripts/package-mac.sh scripts/verify-mac-update-lineage.mjs
+          AGENTLAS_PRIVATE_STAGE
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -696,6 +719,7 @@ jobs:
       - name: Install hash-bound private verification files
         shell: bash
         run: |
+          node scripts/run-private-release-gate.cjs MAC_VERIFIER_MATERIALIZE -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           if [[ ! "$AGENTLAS_MAC_PRIVATE_VERIFICATION_REF" =~ ^[0-9a-f]{40}$ ]] || [[ ! "$AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
             echo "::error::Private Mac verification requires an immutable commit and manifest digest."
             exit 1
@@ -783,12 +807,14 @@ jobs:
           }
           console.log(`Installed ${seen.size} private verification files from the pinned release`);
           NODE
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Ensure embedded engine and dependencies
         shell: bash
         env:
           AGENTLAS_SCIENCE_GITHUB_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
         run: |
+          node scripts/run-private-release-gate.cjs MAC_ENGINE_DEPENDENCIES -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           npm run ensure:engine
           git_config="$RUNNER_TEMP/agentlas-science-gitconfig"
           trap 'rm -f "$git_config"' EXIT
@@ -801,6 +827,7 @@ jobs:
               insteadOf = git@github.com:agentlas-ai/agentlas-science.git
           EOF
           GIT_CONFIG_GLOBAL="$git_config" npm ci --no-audit
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Restore mac signing certificate
         env:
@@ -817,7 +844,11 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           CSC_KEY_PASSWORD: ${{ secrets.MAC_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
-        run: npm run package:mac
+        shell: bash
+        run: |
+          node scripts/run-private-release-gate.cjs MAC_PACKAGE -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
+          npm run package:mac
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Upload this architecture's signed Mac packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -862,7 +893,9 @@ jobs:
           persist-credentials: false
 
       - name: Verify and install immutable Mac release tooling
+        shell: bash
         run: |
+          node scripts/run-private-release-gate.cjs MAC_TOOLING -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           tooling_commit="$(git -C .release-tooling rev-parse HEAD)"
           if [ "$tooling_commit" != "$AGENTLAS_RELEASE_SOURCE_REF" ]; then
             echo "::error::Mac release tooling checkout does not match immutable product source commit."
@@ -870,6 +903,7 @@ jobs:
           fi
           cp .release-tooling/scripts/verify-mac-update-lineage.mjs scripts/verify-mac-update-lineage.mjs
           chmod +x scripts/verify-mac-update-lineage.mjs
+          AGENTLAS_PRIVATE_STAGE
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -940,20 +974,21 @@ jobs:
           merge-multiple: true
 
       - name: Verify the signed set and write the macOS update feed
+        shell: bash
         run: |
+          node scripts/run-private-release-gate.cjs MAC_SIGNED_SET -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           node scripts/verify-mac-release.mjs "--repo=$AGENTLAS_DESKTOP_GITHUB_REPO"
           node scripts/fix-mac-latest-zip.mjs
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Verify local signed-artifact update lineage
         env:
           GH_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
-        run: >-
-          npm run release:mac:lineage --
-          --repo="$AGENTLAS_DESKTOP_GITHUB_REPO"
-          --tag="$RESOLVED_TAG"
-          --version="$RESOLVED_VERSION"
-          --history-count=2
-          --skip-remote-candidate
+        shell: bash
+        run: |
+          node scripts/run-private-release-gate.cjs MAC_UPDATE_LINEAGE -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
+          npm run release:mac:lineage -- --repo="$AGENTLAS_DESKTOP_GITHUB_REPO" --tag="$RESOLVED_TAG" --version="$RESOLVED_VERSION" --history-count=2 --skip-remote-candidate
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Upload the assembled Mac release metadata
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -1002,7 +1037,9 @@ jobs:
           persist-credentials: false
 
       - name: Verify and install immutable Mac release tooling
+        shell: bash
         run: |
+          node scripts/run-private-release-gate.cjs MAC_TOOLING -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           tooling_commit="$(git -C .release-tooling rev-parse HEAD)"
           if [ "$tooling_commit" != "$AGENTLAS_RELEASE_SOURCE_REF" ]; then
             echo "::error::Mac release tooling checkout does not match immutable product source commit."
@@ -1011,6 +1048,7 @@ jobs:
           cp .release-tooling/scripts/package-mac.sh scripts/package-mac.sh
           cp .release-tooling/scripts/verify-mac-update-lineage.mjs scripts/verify-mac-update-lineage.mjs
           chmod +x scripts/package-mac.sh scripts/verify-mac-update-lineage.mjs
+          AGENTLAS_PRIVATE_STAGE
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -1074,6 +1112,7 @@ jobs:
       - name: Install hash-bound private verification files
         shell: bash
         run: |
+          node scripts/run-private-release-gate.cjs MAC_VERIFIER_MATERIALIZE -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           if [[ ! "$AGENTLAS_MAC_PRIVATE_VERIFICATION_REF" =~ ^[0-9a-f]{40}$ ]] || [[ ! "$AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
             echo "::error::Private Mac verification requires an immutable commit and manifest digest."
             exit 1
@@ -1161,6 +1200,7 @@ jobs:
           }
           console.log(`Installed ${seen.size} private verification files from the pinned release`);
           NODE
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Install publisher dependencies
         shell: bash
@@ -1187,13 +1227,11 @@ jobs:
           merge-multiple: true
 
       - name: Verify local required manifest and hashes before first public write
-        run: >-
-          npm run release:assets:verify --
-          --release-dir=release
-          --tag="$RESOLVED_TAG"
-          --version="$RESOLVED_VERSION"
-          --public-allowlist
-          --build-outputs-only
+        shell: bash
+        run: |
+          node scripts/run-private-release-gate.cjs RELEASE_MANIFEST -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
+          npm run release:assets:verify -- --release-dir=release --tag="$RESOLVED_TAG" --version="$RESOLVED_VERSION" --public-allowlist --build-outputs-only
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Install pinned Railway CLI before stable publication
         if: env.RESOLVED_DRAFT != 'true'
@@ -1204,32 +1242,41 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
           RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+        shell: bash
         run: |
+          node scripts/run-private-release-gate.cjs RAILWAY_PUBLISH_GATE -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           test -n "$RAILWAY_TOKEN"
           test -n "$RAILWAY_PROJECT_ID"
           npm run release:railway:check -- --project="$RAILWAY_PROJECT_ID" --environment=production --service=agentlas-web
           echo "AGENTLAS_RAILWAY_RELEASE_READY=1" >> "$GITHUB_ENV"
           echo "AGENTLAS_RAILWAY_PROJECT_VERIFIED=$RAILWAY_PROJECT_ID" >> "$GITHUB_ENV"
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Single releases-repository writer and stable promotion
         env:
           GH_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
+        shell: bash
         run: |
+          node scripts/run-private-release-gate.cjs RELEASE_PUBLISH -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           args=(--tag="$RESOLVED_TAG" --version="$RESOLVED_VERSION")
           if [ "$RESOLVED_DRAFT" = "true" ]; then args+=(--draft); fi
           npm run release:mac:publish -- "${args[@]}"
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Apply and verify production desktop release metadata
         if: env.RESOLVED_APPLY_WEB_ENV == 'true' && env.RESOLVED_DRAFT != 'true'
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
           RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+        shell: bash
         run: |
+          node scripts/run-private-release-gate.cjs RAILWAY_RELEASE_METADATA -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           test -n "$RAILWAY_TOKEN"
           test -n "$RAILWAY_PROJECT_ID"
           npm run release:railway:check -- --project="$RAILWAY_PROJECT_ID" --environment=production --service=agentlas-web
           npm run release:web-env -- --apply --redeploy --verification-file=release/desktop-release-verification.json --expected-version="$RESOLVED_VERSION" --expected-tag="$RESOLVED_TAG" --environment=production --service=agentlas-web --verify-url=https://agentlas.cloud/api/desktop/latest
+          AGENTLAS_PRIVATE_STAGE
 
       - name: Upload complete release evidence
         if: always()
