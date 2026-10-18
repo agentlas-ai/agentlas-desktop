@@ -7861,6 +7861,10 @@ function OneSessionsShell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appLocale, busy, conversation?.id, conversation?.title, receipt, selected, startRun]);
 
+  // Read through a ref so answerConfirmation keeps its dependency list (notices only; nothing re-runs on a locale change).
+  const answerNoticeLocaleRef = useRef(appLocale);
+  answerNoticeLocaleRef.current = appLocale;
+
   const answerConfirmation = useCallback(async (
     confirmation: PendingConfirmation,
     label: string,
@@ -7911,6 +7915,23 @@ function OneSessionsShell() {
      */
     if (!answeredConfirmationsRef.current.claim(confirmation)) return;
     setConfirmations((items) => items.filter((item) => item.sourceMessageId !== confirmation.sourceMessageId));
+    /*
+     * 답은 저장됐는데 그 답을 실은 턴이 시작되지 않으면 답을 조용히 버리지 않는다. 예전에는 아래 catch 가
+     * 대기 목록을 다시 읽고(이미 답한 질문이라 없음) 아무 말 없이 끝나, 카드도 답도 사라졌다.
+     * 답은 작성창으로 돌아가고(이미 쓰고 있던 글은 건드리지 않는다) 그렇다고 말한다.
+     */
+    let answerSaved = false;
+    const keepSavedAnswer = () => {
+      const here = activeThreadChatIdRef.current === confirmation.chatId;
+      if (here) setComposer((current) => current.trim() ? current : label);
+      setActionNotice(answerNoticeLocaleRef.current === "ko"
+        ? here
+          ? "답은 저장됐지만 이어서 실행하지 못했어요. 답을 작성창에 다시 넣어 두었으니 보내면 이어서 진행해요."
+          : `답은 저장됐지만 이어서 실행하지 못했어요. 그 대화에서 이 답을 다시 보내 주세요: ${label}`
+        : here
+          ? "Your answer was saved, but the follow-up did not start. It is back in the message box; send it to continue."
+          : `Your answer was saved, but the follow-up did not start. Send it again in that conversation: ${label}`);
+    };
     try {
       // 두 호출은 서로 기다릴 이유가 없다 — 동시에 보낸다.
       const [sourceReceipt] = await Promise.all([
@@ -7926,13 +7947,16 @@ function OneSessionsShell() {
       // though the preceding conversation was read-only.
       // The answer continues the source run's authority, never more than the owner's chip now.
       const continuationPermission: OnePermissionMode = narrowerOnePermission(onePermission, sourceReceipt?.executionPermission ?? "read");
+      answerSaved = true;
       window.dispatchEvent(new Event("agentlas:attention-refresh"));
       // 영수증 목록 갱신은 이어지는 실행을 막지 않는다.
       void api.confirm.committedAnswers(confirmation.chatId).then(setCommittedAnswers, () => undefined);
       setConfirmations((items) => items.filter((item) => item.sourceMessageId !== confirmation.sourceMessageId));
       if (shouldStart) {
+        const continuationStartedAt = Date.now();
+        let outcome: OneRunStartOutcome;
         if (projectedTask) {
-          await startRun(
+          outcome = await startRun(
             confirmation.chatId,
             projectedTask.taskId,
             projectedTask.canonicalVersion,
@@ -7942,7 +7966,7 @@ function OneSessionsShell() {
           );
         } else {
           const task = await api.tasks.findForChat(confirmation.chatId);
-          await startRun(
+          outcome = await startRun(
             confirmation.chatId,
             task?.id ?? null,
             task?.version ?? null,
@@ -7951,8 +7975,17 @@ function OneSessionsShell() {
             { permissionMode: continuationPermission },
           );
         }
+        // A refused start that Main did not keep in the transcript carried the answer nowhere.
+        if (outcome.status === "rejected" && !(await ownerRequestInTranscript(confirmation.chatId, label, continuationStartedAt))) {
+          keepSavedAnswer();
+        }
       }
     } catch (cause) {
+      if (answerSaved) {
+        keepSavedAnswer();
+        setError(null);
+        return;
+      }
       // The question can be replaced between render and click. Re-read Main's
       // exact pending identities before treating the rejection as an outage:
       // starting an operational-recovery turn in that case would append a new
@@ -7968,6 +8001,8 @@ function OneSessionsShell() {
       requestOneOperationalRecovery("one-decision-answer", cause);
       setError(null);
     }
+    // ownerRequestInTranscript is a stable callback ([] deps); the notice locale is read through answerNoticeLocaleRef.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy, conversation?.id, conversation?.originSurface, onePermission, projections, startRun, submit]);
 
   /*
