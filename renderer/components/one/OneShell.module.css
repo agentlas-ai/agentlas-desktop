@@ -4213,6 +4213,10 @@
   overflow: hidden;
 }
 
+.splitPaneRail:empty {
+  width: 0;
+}
+
 /* 산출물 패널은 화면 오른쪽에 떠 있도록 만들어졌다. 칸 안에서는 그 칸의
    한 칸을 차지하는 평범한 요소여야 한다. */
 .splitPaneRail [data-one-runtime-artifacts="true"] {
