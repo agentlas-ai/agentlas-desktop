@@ -5653,8 +5653,18 @@ function ChatPage() {
             || typeof receipt.continuationRunId !== "string" || !receipt.continuationRunId.trim()) {
             throw new Error("question_commit_receipt_mismatch");
           }
-        } catch {
+        } catch (cause) {
           if (!isCurrentChat()) return;
+          // A newer question replaced this one: Main refused the answer on purpose. The old sheet passes ("—") and
+          // the notice says why; retrying would be refused again.
+          if (failureCode(cause) === "question_superseded") {
+            setOptimisticAnsweredQuestionId((current) => current === messageId ? null : current);
+            dismissQuestionBatch(messageId);
+            setSessionNotice(locale === "ko"
+              ? "이 질문은 새 질문으로 바뀌어 지나갔습니다. 답은 보내지 않았습니다. 새 질문에 답해 주세요."
+              : "This question was replaced by a newer one, so your answer was not sent. Answer the new question.");
+            return;
+          }
           // IPC can lose its response after Main commits. Recover only the
           // exact same source+reply+Main run binding; never infer acceptance.
           let rows: Awaited<ReturnType<typeof api.confirm.committedAnswers>> = [];

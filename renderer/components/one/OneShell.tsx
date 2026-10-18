@@ -590,6 +590,15 @@ function firstApprovalLabel(confirmation: PendingConfirmation): string | null {
   return option?.label ?? null;
 }
 
+/** Main's typed refusal for an answer to a replaced question (electron/confirm QUESTION_SUPERSEDED_CODE). */
+const QUESTION_SUPERSEDED_CODE = "question_superseded";
+
+function questionReplacedNotice(locale: "ko" | "en"): string {
+  return locale === "ko"
+    ? "이 질문은 새 질문으로 바뀌어 지나갔어요. 답은 보내지 않았어요. 새 질문에 답해 주세요."
+    : "This question was replaced by a newer one, so your answer was not sent. Answer the new question.";
+}
+
 /**
  * 질문을 낸 실행의 영수증 — 답은 이 실행의 권한을 잇는다. 대화의 최신 실행을 읽으면 그 사이에 돈
  * 읽기 전용 팀 보고 턴의 권한으로 오너의 답이 실행됐다(운영 2026-10-18 01:49Z: "Bash가 비활성화").
@@ -7874,6 +7883,9 @@ function OneSessionsShell() {
     const projectedTask = projections.find((item) => item.chatId === confirmation.chatId);
     const isActiveOneConversation = conversation?.id === confirmation.chatId
       && conversation.originSurface === "one";
+    const noteReplacedQuestion = (cause: unknown) => {
+      if (ipcErrorCode(cause) === QUESTION_SUPERSEDED_CODE) setActionNotice(questionReplacedNotice(answerNoticeLocaleRef.current));
+    };
     // Main refused the answer: show its current questions. If Main still waits on this exact question the answer did
     // not land, so its card may come back (lib/confirmation-answer-fence).
     const showPendingAfterRefusal = (pending: PendingConfirmation[] | null): boolean => {
@@ -7891,7 +7903,8 @@ function OneSessionsShell() {
       if (!answeredConfirmationsRef.current.claim(confirmation)) return;
       setConfirmations((items) => items.filter((item) => item.sourceMessageId !== confirmation.sourceMessageId));
       try {
-        await api.confirm.commitAnswer({ chatId: confirmation.chatId, sourceMessageId: confirmation.sourceMessageId, reply: label });
+        await api.confirm.commitAnswer({ chatId: confirmation.chatId, sourceMessageId: confirmation.sourceMessageId, reply: label })
+          .catch((cause: unknown) => { noteReplacedQuestion(cause); throw cause; });
       } catch {
         // Replaced or already answered: show Main's current questions instead of sending a stale answer.
         showPendingAfterRefusal(await api.confirm.listPending().catch(() => null));
@@ -7986,6 +7999,8 @@ function OneSessionsShell() {
         setError(null);
         return;
       }
+      // Main refused an answer to a question a newer question replaced: say so; the newer card shows below.
+      noteReplacedQuestion(cause);
       // The question can be replaced between render and click. Re-read Main's
       // exact pending identities before treating the rejection as an outage:
       // starting an operational-recovery turn in that case would append a new

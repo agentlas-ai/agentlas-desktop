@@ -279,6 +279,39 @@ export function recordCommittedAnswerReceipt(
  * 라운드 3 실측(2026-09-14): 목표 연속 실행이 질문 뒤에 말풍선을 붙여 질문이 마지막이 아니게 되자 세 자리(확정·미루기·모바일
  * 접수)가 모두 "만료"로 버렸다. 세 자리가 같은 규칙을 써야 한 창에서는 받고 다른 창에서는 버리는 일이 없다.
  */
+/** Typed refusal for an answer to a question a newer question replaced. The renderer shows "this question was replaced". */
+export const QUESTION_SUPERSEDED_CODE = "question_superseded";
+
+/**
+ * 같은 대화에 이 질문보다 새 질문이 있다 — 모델은 이미 다음 결정으로 넘어갔다.
+ * 실측(2026-10-18, 읽기 전용): 최근 질문 61개 중 26개가 답 없이 새 질문으로 대체됐는데, Main 은 그 옛 질문의 답도
+ * 받아, 아무도 기다리지 않는 결정을 실행할 수 있었다. 질문 뒤 호스트 말풍선은 질문을 대체하지 않는다
+ * (scripts/test-question-pending-past-host-bubble.cjs) — 새 "질문"이나 새 오너 메시지만 대체한다.
+ */
+function newerQuestionExists(chatId: string, source: { id: string; createdAt: string }): boolean {
+  const rows = getDb()
+    .prepare(`SELECT text FROM chat_messages
+      WHERE chat_id = ? AND role = 'assistant' AND id <> ? AND instr(text, ?) > 0
+        AND (created_at > ? OR (created_at = ? AND rowid > (SELECT rowid FROM chat_messages WHERE id = ?)))
+      ORDER BY created_at ASC, rowid ASC LIMIT 50`)
+    .all(chatId, source.id, OPEN, source.createdAt, source.createdAt, source.id) as Array<{ text: string }>;
+  return rows.some((row) => Boolean(firstQuestion(row.text)));
+}
+
+function questionNotPendingError(chatId: string, sourceMessageId?: string): Error {
+  const source = sourceMessageId
+    ? getDb().prepare("SELECT id, created_at FROM chat_messages WHERE chat_id = ? AND id = ? AND role = 'assistant'")
+      .get(chatId, sourceMessageId) as { id: string; created_at: string } | undefined
+    : undefined;
+  if (source && newerQuestionExists(chatId, { id: source.id, createdAt: source.created_at })) {
+    // Keeps the old words so readers that match them (older phones) still see "not pending".
+    return Object.assign(new Error("Question is stale or no longer pending: a newer question replaced it"), {
+      code: QUESTION_SUPERSEDED_CODE,
+    });
+  }
+  return new Error("Question is stale or no longer pending");
+}
+
 function pendingQuestionMessage(chatId: string, sourceMessageId?: string): { id: string; role: string; text: string; createdAt: string } | null {
   const last = getLastChatMessage(chatId);
   const source: { id: string; role: string; text: string; createdAt: string } | null = sourceMessageId && last?.id !== sourceMessageId
@@ -292,6 +325,7 @@ function pendingQuestionMessage(chatId: string, sourceMessageId?: string): { id:
   if (last?.id !== source.id) {
     const userLater = getDb().prepare("SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'user' AND created_at > ? LIMIT 1").get(chatId, source.createdAt);
     if (userLater) return null;
+    if (newerQuestionExists(chatId, source)) return null;
   }
   return source;
 }
@@ -348,7 +382,7 @@ export function commitPendingConfirmationAnswer(
     }
   }
   const source = pendingQuestionMessage(chatId, sourceMessageId);
-  if (!source) throw new Error("Question is stale or no longer pending");
+  if (!source) throw questionNotPendingError(chatId, sourceMessageId);
   const normalizedReply = reply.trim();
   if (!normalizedReply) throw new Error("Decision response is empty");
   if (normalizedReply.length > QUESTION_CONTINUATION_REPLY_MAX_LENGTH) {
@@ -684,7 +718,7 @@ export function claimPendingConfirmationAnswer(
     throw new Error("This question answer was already accepted");
   }
   if (!pendingQuestionMessage(chatId, sourceMessageId)) {
-    throw new Error("Question is stale or no longer pending");
+    throw questionNotPendingError(chatId, sourceMessageId);
   }
   // A successful Mobile admission seals a digest-only receipt after claiming.
   // On process restart the in-memory claim set is empty, so consult that
