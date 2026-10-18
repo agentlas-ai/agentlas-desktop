@@ -89,7 +89,7 @@ export function FinanceMonitorReceipts({ monitor, ko, onRun, onLoad, onOpenRepor
       <div><dt>{t("최근 실행 결과","Latest run result")}</dt><dd>{latest?financeStatus(latest.status,ko):t("아직 실행 기록 없음","No run recorded")}</dd></div>
       <div><dt>{t("실행 가능 범위","Execution availability")}</dt><dd>{monitor.executionAvailability==="app-running"?t("Agentlas 앱이 실행 중일 때","While Agentlas is running"):t("실행 주체 미확인","Executor unconfirmed")}</dd></div>
     </dl>
-    {monitor.nextCheckAt && new Date(monitor.nextCheckAt).getTime()<Date.now() && monitor.status==="active" && <p className={styles.muted}>{t("예정 시간이 지났습니다. 다음 실행 영수증이 도착하기 전에는 최신 확인으로 보지 않습니다.","The scheduled time has passed. A fresh check is unconfirmed until a run receipt arrives.")}</p>}
+    {monitor.nextCheckAt && new Date(monitor.nextCheckAt).getTime()<Date.now() && monitor.status==="active" && <p className={styles.muted}>{t("예정 시간이 지났습니다. 다음 실행 기록을 확인하기 전에는 최신 확인으로 보지 않습니다.","The scheduled time has passed. A fresh check is unconfirmed until a run record is available.")}</p>}
     {error && <div className={`${styles.notice} ${styles.error}`} role="alert"><FinanceMessage value={error} ko={ko} error/></div>}
     {latest?.summary && <FinanceBriefText value={latest.summary} ko={ko}/>}
     {latest?.error && <div className={`${styles.notice} ${styles.error}`} role="alert"><FinanceMessage value={latest.error} ko={ko} error/></div>}

@@ -1,7 +1,7 @@
 {
   "schema": "agentlas.plugin/v2",
   "slug": "finance",
-  "name": "Agentlas Finance",
+  "name": "Agentlas Fiance",
   "version": "0.1.0",
   "builtin": true,
   "publisher": {
@@ -9,8 +9,8 @@
     "url": "https://agentlas.cloud"
   },
   "surface": {
-    "displayName": "Finance",
-    "displayNameKo": "파이낸스",
+    "displayName": "Agentlas Fiance",
+    "displayNameKo": "Agentlas Fiance",
     "tagline": "Research assets and edit Finance dashboards, reports and monitors",
     "taglineKo": "종목을 조사하고 Finance 화면·보고서·모니터를 관리합니다",
     "description": "Search actual provider sources, save evidence, edit the authenticated Finance workspace and run research monitors from One or Work. Coverage and host availability are returned with each result.",
