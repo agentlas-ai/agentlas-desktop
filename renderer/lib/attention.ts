@@ -125,11 +125,19 @@ function lookupChat(chatId: string): void {
   });
 }
 
+/** Polls overlap (3 s timer, focus, attention-refresh after an answer); only the newest read may land. */
+let confirmationPollStarted = 0;
+let confirmationPollApplied = 0;
+
 async function pollConfirmations(): Promise<void> {
   const api = ipc();
   if (!api?.confirm?.listPending) return;
+  const poll = ++confirmationPollStarted;
   try {
     const list = await api.confirm.listPending();
+    // A read that started before an answer resolving after the post-answer read would put the answered question back.
+    if (poll < confirmationPollApplied) return;
+    confirmationPollApplied = poll;
     const same = list.length === confirmations.length && list.every((item, index) => item.sourceMessageId === confirmations[index]?.sourceMessageId && item.snoozedUntil === confirmations[index]?.snoozedUntil);
     confirmations = list;
     // 독 배지·독 튕김·"승인 대기" OS 알림. 예전엔 AppShell 폴링에만 물려 One 에선 멈췄다.

@@ -290,6 +290,7 @@ import {
   type ChatFileItem,
 } from "@/lib/chat-files";
 import { isPromptOnScreen, promptBubbleContent } from "@/lib/one-prompt-bubble";
+import { createConfirmationAnswerFence } from "@/lib/confirmation-answer-fence";
 import {
   OneComposerControls,
   type OneComposerMenuKey,
@@ -1466,6 +1467,8 @@ function OneSessionsShell() {
   const [activeThreadChat, setActiveThreadChat] = useState<Chat | null>(null);
   const [activeChatIds, setActiveChatIds] = useState<string[]>([]);
   const [confirmations, setConfirmations] = useState<PendingConfirmation[]>([]);
+  // A list read that started before an answer must not bring that answered card back (lib/confirmation-answer-fence).
+  const answeredConfirmationsRef = useRef(createConfirmationAnswerFence());
   // 사이드바 실행 신호(실시간 방송, 오너 대기 제외): 작은 점 = 지금 실행, 혜성 = 실행 + 살아 있는 목표.
   const { running: liveRunningChatIds, spinning: spinningChatIds } = useOneRunSignals(activeChatIds, confirmations);
   const [keyRequestSheet, setKeyRequestSheet] = useState<McpRunKeyRequest | null>(null);
@@ -3167,7 +3170,7 @@ function OneSessionsShell() {
       return;
     }
     try {
-      const [active, pending, update, mobile, recentChats, profile, org, taskforceRows, history, memory, memoryMap, suggestions, valueClosures, weeklyReflection, experienceReuse, improvementProofs, proactiveBriefing, intro, activation] = await Promise.all([
+      const [active, pendingRead, update, mobile, recentChats, profile, org, taskforceRows, history, memory, memoryMap, suggestions, valueClosures, weeklyReflection, experienceReuse, improvementProofs, proactiveBriefing, intro, activation] = await Promise.all([
         api.invoke.activeChats().catch(() => []),
         api.confirm.listPending().catch(() => []),
         api.updater.getState().catch(() => null),
@@ -3197,6 +3200,8 @@ function OneSessionsShell() {
         api.oneFeatureIntro.getState().catch(() => null),
         api.oneActivation.getState({ platform: "desktop", locale: appLocale }).catch(() => null),
       ]);
+      // Read at the start of this tick: an answer sent while the reads ran must not come back from it.
+      const pending = answeredConfirmationsRef.current.apply(pendingRead);
       let resolvedIntro = intro;
       if (resolvedIntro && resolvedIntro.acknowledgedIntroVersion < resolvedIntro.currentIntroVersion) {
         let legacyVersion = 0;
@@ -3639,7 +3644,7 @@ function OneSessionsShell() {
     if (supersededByNewerRun()) return;
     const pending = await api.confirm.listPending().catch(() => []);
     if (supersededByNewerRun()) return;
-    setConfirmations(pending);
+    setConfirmations(answeredConfirmationsRef.current.apply(pending));
     if (supersededByNewerRun()) return;
     await refreshAll();
     if (supersededByNewerRun()) return;
@@ -7865,19 +7870,29 @@ function OneSessionsShell() {
     const projectedTask = projections.find((item) => item.chatId === confirmation.chatId);
     const isActiveOneConversation = conversation?.id === confirmation.chatId
       && conversation.originSurface === "one";
+    // Main refused the answer: show its current questions. If Main still waits on this exact question the answer did
+    // not land, so its card may come back (lib/confirmation-answer-fence).
+    const showPendingAfterRefusal = (pending: PendingConfirmation[] | null): boolean => {
+      if (!pending) return false;
+      const stillPending = pending.some((item) => item.chatId === confirmation.chatId && item.sourceMessageId === confirmation.sourceMessageId);
+      if (stillPending) answeredConfirmationsRef.current.release(confirmation);
+      setConfirmations(answeredConfirmationsRef.current.apply(pending));
+      return stillPending;
+    };
     // While a run is going the answer goes to that run, like a typed message (steer or queue). A continuous Goal room is
     // always running, so "press again when it finishes" left its cards greyed out forever (owner 2026-10-14, X Marketing).
     if (api && busy) {
       if (!projectedTask && !isActiveOneConversation) return;
+      answeredConfirmationsRef.current.claim(confirmation);
       setConfirmations((items) => items.filter((item) => item.sourceMessageId !== confirmation.sourceMessageId));
       try {
         await api.confirm.commitAnswer({ chatId: confirmation.chatId, sourceMessageId: confirmation.sourceMessageId, reply: label });
       } catch {
         // Replaced or already answered: show Main's current questions instead of sending a stale answer.
-        const pending = await api.confirm.listPending().catch(() => null);
-        if (pending) setConfirmations(pending);
+        showPendingAfterRefusal(await api.confirm.listPending().catch(() => null));
         return;
       }
+      window.dispatchEvent(new Event("agentlas:attention-refresh"));
       void api.confirm.committedAnswers(confirmation.chatId).then(setCommittedAnswers, () => undefined);
       void submit(label);
       return;
@@ -7893,6 +7908,7 @@ function OneSessionsShell() {
      * 예전에는 영수증 조회 → 확정 IPC 두 번을 기다린 뒤에야 카드가 사라져 눌렀는지 알 수 없었다.
      * 확정이 거절되면 아래 catch 가 Main 의 대기 목록을 다시 읽어 카드를 되살린다.
      */
+    answeredConfirmationsRef.current.claim(confirmation);
     setConfirmations((items) => items.filter((item) => item.sourceMessageId !== confirmation.sourceMessageId));
     try {
       // 두 호출은 서로 기다릴 이유가 없다 — 동시에 보낸다.
@@ -7909,6 +7925,7 @@ function OneSessionsShell() {
       // though the preceding conversation was read-only.
       // The answer continues the source run's authority, never more than the owner's chip now.
       const continuationPermission: OnePermissionMode = narrowerOnePermission(onePermission, sourceReceipt?.executionPermission ?? "read");
+      window.dispatchEvent(new Event("agentlas:attention-refresh"));
       // 영수증 목록 갱신은 이어지는 실행을 막지 않는다.
       void api.confirm.committedAnswers(confirmation.chatId).then(setCommittedAnswers, () => undefined);
       setConfirmations((items) => items.filter((item) => item.sourceMessageId !== confirmation.sourceMessageId));
@@ -7941,11 +7958,7 @@ function OneSessionsShell() {
       // system turn to this chat and hide the replacement question itself.
       const pending = await api.confirm.listPending().catch(() => null);
       if (pending) {
-        setConfirmations(pending);
-        const exactQuestionStillPending = pending.some((item) => (
-          item.chatId === confirmation.chatId
-          && item.sourceMessageId === confirmation.sourceMessageId
-        ));
+        const exactQuestionStillPending = showPendingAfterRefusal(pending);
         if (!exactQuestionStillPending) {
           setError(null);
           return;
