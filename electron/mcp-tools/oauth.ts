@@ -22,7 +22,7 @@
 // 설정 파일에도 값이 아니라 런타임 alias 참조만 나간다(mcp-config.ts).
 
 import crypto from "node:crypto";
-import { promises as fsp } from "node:fs";
+import { promises as fsp, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { execFile } from "node:child_process";
 import { AddressInfo } from "node:net";
@@ -498,7 +498,75 @@ const authorizationAttempts = new Map<string, AuthorizationAttempt>();
 const activeAuthorizations = new Map<string, AuthorizationAttempt>();
 const startingAuthorizations = new Set<string>();
 
+/**
+ * Sign-in attempt status shared between the window and the background service (flow audit 2026-10-18, I-D7).
+ *
+ * An attempt lived only in the memory of the process that started it. A daemon turn's harness auth.login opened the
+ * sign-in, and Main's poll (mcpTools:oauthPoll) answered "unknown" for it; a sign-in opened from Main's settings could
+ * not be cancelled by a daemon turn's auth.cancel. The owning process now publishes each status change to a small
+ * value-free file (server id, attempt id, status, a fixed error sentence, owner pid, times; never a code, token or
+ * URL), and another process reads it when the attempt is not its own. A cancel from another process is a marker file
+ * the owner picks up within a second. A record whose owner process is gone, or that stopped moving past the consent
+ * window, reads as "unknown" again (the answer before this change).
+ */
+const SHARED_ATTEMPT_DIR = "mcp-oauth-attempts";
+const SHARED_ATTEMPT_ID = /^[a-f0-9]{48}$/;
+const SHARED_ATTEMPT_STALE_MS = 6 * 60_000; // the consent callback itself expires after five minutes
+const SHARED_ATTEMPT_RETAIN_MS = 10 * 60_000;
+type SharedAttemptRecord = {
+  schema: "agentlas.mcp-oauth-attempt.v1"; serverId: string; attemptId: string; status: McpOAuthAuthorizationStatus["status"];
+  error?: string; ownerPid: number; updatedAt: number; finishedAt?: number;
+};
+function sharedAttemptPath(attemptId: string, suffix: ".json" | ".cancel"): string | null {
+  if (!SHARED_ATTEMPT_ID.test(attemptId)) return null;
+  try { return userDataPath(SHARED_ATTEMPT_DIR, `${attemptId}${suffix}`); } catch { return null; }
+}
+function publishSharedAttempt(attempt: AuthorizationAttempt): void {
+  const file = sharedAttemptPath(attempt.attemptId, ".json");
+  if (!file) return;
+  const record: SharedAttemptRecord = { schema: "agentlas.mcp-oauth-attempt.v1", serverId: attempt.serverId, attemptId: attempt.attemptId,
+    status: attempt.status, ...(attempt.error ? { error: attempt.error } : {}), ownerPid: process.pid, updatedAt: Date.now(),
+    ...(attempt.finishedAt ? { finishedAt: attempt.finishedAt } : {}) };
+  try {
+    mkdirSync(userDataPath(SHARED_ATTEMPT_DIR), { recursive: true, mode: 0o700 });
+    const temp = `${file}.${process.pid}.tmp`;
+    writeFileSync(temp, JSON.stringify(record), { mode: 0o600 });
+    renameSync(temp, file);
+  } catch { /* Sharing is an addition: the owning process still answers for its own attempt. */ }
+}
+function processAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException)?.code === "EPERM"; }
+}
+function readSharedAttempt(serverId: string, attemptId: string): SharedAttemptRecord | null {
+  const file = sharedAttemptPath(attemptId, ".json");
+  if (!file) return null;
+  let record: SharedAttemptRecord;
+  try { record = JSON.parse(readFileSync(file, "utf8")) as SharedAttemptRecord; } catch { return null; }
+  if (record?.schema !== "agentlas.mcp-oauth-attempt.v1" || record.attemptId !== attemptId || record.serverId !== serverId
+    || !["waiting", "exchanging", "connected", "failed", "cancelled"].includes(record.status) || !Number.isSafeInteger(record.ownerPid)
+    || !Number.isSafeInteger(record.updatedAt) || record.ownerPid === process.pid) return null;
+  const now = Date.now();
+  if (record.finishedAt) return now - record.finishedAt <= SHARED_ATTEMPT_RETAIN_MS ? record : null;
+  return now - record.updatedAt <= SHARED_ATTEMPT_STALE_MS && processAlive(record.ownerPid) ? record : null;
+}
+let sharedSweepAt = 0;
+function sweepSharedAttempts(): void {
+  const now = Date.now();
+  if (now - sharedSweepAt < 60_000) return;
+  sharedSweepAt = now;
+  let names: string[];
+  try { names = readdirSync(userDataPath(SHARED_ATTEMPT_DIR)); } catch { return; }
+  for (const name of names) {
+    if (!/^[a-f0-9]{48}\.(?:json|cancel)$|\.tmp$/.test(name)) continue;
+    try {
+      const file = userDataPath(SHARED_ATTEMPT_DIR, name);
+      if (now - statSync(file).mtimeMs > SHARED_ATTEMPT_RETAIN_MS) unlinkSync(file);
+    } catch { /* another process removed it */ }
+  }
+}
+
 function pruneAuthorizationAttempts(): void {
+  sweepSharedAttempts();
   for (const [id, attempt] of authorizationAttempts) {
     if (attempt.finishedAt && Date.now() - attempt.finishedAt > 10 * 60_000) authorizationAttempts.delete(id);
   }
@@ -631,6 +699,14 @@ async function beginMcpOAuthAuthorization(input: McpOAuthAuthorizationInput): Pr
     };
     authorizationAttempts.set(attempt.attemptId, attempt);
     activeAuthorizations.set(input.serverId, attempt);
+    publishSharedAttempt(attempt);
+    // A cancel requested by the other process (Main settings vs a daemon turn) arrives as a marker file.
+    const cancelMarker = sharedAttemptPath(attempt.attemptId, ".cancel");
+    const cancelWatch = cancelMarker ? setInterval(() => {
+      try { unlinkSync(cancelMarker); } catch { return; }
+      void cancelMcpOAuthAuthorization(attempt.serverId, attempt.attemptId);
+    }, 1_000) : null;
+    cancelWatch?.unref?.();
     const codePromise = waitForAuthorizationCode(callbackServer, state, discovery.issuer, discovery.authorizationResponseIssuerSupported);
     void codePromise.catch(() => {});
     const browserOpened = openInDefaultBrowser(authorizeUrl.toString());
@@ -640,6 +716,7 @@ async function beginMcpOAuthAuthorization(input: McpOAuthAuthorizationInput): Pr
         const code = await codePromise;
         controller.signal.throwIfAborted();
         attempt.status = "exchanging";
+        publishSharedAttempt(attempt);
         const tokens = await exchangeAuthorizationCode({ tokenEndpoint: discovery.tokenEndpoint, code, codeVerifier,
           clientId, clientSecret, redirectUri, resource: discovery.resource, scope, signal: controller.signal });
         controller.signal.throwIfAborted();
@@ -664,9 +741,11 @@ async function beginMcpOAuthAuthorization(input: McpOAuthAuthorizationInput): Pr
         }
         throw error;
       } finally {
+        if (cancelWatch) clearInterval(cancelWatch);
         controller.abort();
         await closeAuthorizationCallback(callbackServer);
         attempt.finishedAt = Date.now();
+        publishSharedAttempt(attempt);
         // An approval that never reached Agentlas left nothing to read (owner 2026-10-17); say what happened.
         console.info(`[mcp-oauth] ${input.serverId.slice(0, 8)} ${attempt.status}${attempt.status === "connected" ? "" : ` (${oauthFailureReason(attempt.status, failure)})`}`);
         if (activeAuthorizations.get(input.serverId) === attempt) activeAuthorizations.delete(input.serverId);
@@ -691,13 +770,38 @@ export async function startMcpOAuthAuthorization(input: McpOAuthAuthorizationInp
 export function getMcpOAuthAuthorizationStatus(serverId: string, attemptId: string): McpOAuthAuthorizationStatus {
   pruneAuthorizationAttempts();
   const attempt = authorizationAttempts.get(attemptId);
-  if (!attempt || attempt.serverId !== serverId) return { status: "unknown" };
+  if (!attempt) {
+    // Another process's attempt (a daemon turn's auth.login seen from Main's poll, or the reverse).
+    const shared = readSharedAttempt(serverId, attemptId);
+    return shared ? { status: shared.status, ...(shared.error ? { error: shared.error } : {}) } : { status: "unknown" };
+  }
+  if (attempt.serverId !== serverId) return { status: "unknown" };
   return { status: attempt.status, ...(attempt.error ? { error: attempt.error } : {}) };
+}
+
+/** Cancel another process's live attempt: leave the marker its owner watches, then read its outcome (bounded). */
+async function cancelSharedAttempt(serverId: string, attemptId: string): Promise<{ ok: boolean }> {
+  const shared = readSharedAttempt(serverId, attemptId);
+  if (!shared) return { ok: false };
+  if (shared.finishedAt) return { ok: shared.status === "cancelled" };
+  if (shared.status === "connected") return { ok: false };
+  const marker = sharedAttemptPath(attemptId, ".cancel");
+  if (!marker) return { ok: false };
+  try { writeFileSync(marker, "", { mode: 0o600 }); } catch { return { ok: false }; }
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const now = readSharedAttempt(serverId, attemptId);
+    if (!now) return { ok: false };
+    if (now.finishedAt) return { ok: now.status === "cancelled" };
+  }
+  return { ok: false };
 }
 
 export async function cancelMcpOAuthAuthorization(serverId: string, attemptId: string): Promise<{ ok: boolean }> {
   const attempt = authorizationAttempts.get(attemptId);
-  if (!attempt || attempt.serverId !== serverId) return { ok: false };
+  if (!attempt) return cancelSharedAttempt(serverId, attemptId);
+  if (attempt.serverId !== serverId) return { ok: false };
   if (attempt.finishedAt) return { ok: attempt.status === "cancelled" };
   if (attempt.status === "connected") return { ok: false };
   attempt.status = "cancelled";
