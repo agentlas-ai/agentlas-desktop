@@ -1206,13 +1206,6 @@ function parsePermission(raw: string | null): PermissionLevel | undefined {
   return raw === "read" || raw === "write" || raw === "full" ? raw : undefined;
 }
 
-function inferPermissionFromAnswer(answers: string[]): PermissionLevel | undefined {
-  const joined = answers.join(" ").toLowerCase();
-  if (/\bwrite\b|쓰기|편집/.test(joined)) return "write";
-  if (/\bread\b|읽기만/.test(joined)) return "read";
-  return undefined;
-}
-
 async function confirmFullPermissionFromUrl(locale: string): Promise<boolean> {
   const ko = locale === "ko";
   return confirmPopup(ko
@@ -5631,7 +5624,10 @@ function ChatPage() {
        * (확정 → 전송은 전송이 확정 영수증의 continuationRunId 를 써야 해서 동시에 보낼 수 없다.)
        */
       setOptimisticAnsweredQuestionId(messageId);
-      const perms = perQuestion.map((p) => inferPermissionFromAnswer(p.answers)).find(Boolean);
+      // The answer's turn takes the same permission as any Work message. It used to be guessed from the answer's
+      // words ("read"/"읽기만" → read, "write"/"편집" → write), so "이미 read 했어" ran the follow-up read-only
+      // (2026-10-18). No question carries a typed permission choice, so nothing here may infer one from prose.
+      const perms: PermissionLevel = DEFAULT_PERMISSION;
       try {
         let receipt: { chatId: string; sourceMessageId: string; continuationRunId: string } | null = null;
         try {
@@ -5644,7 +5640,7 @@ function ChatPage() {
             sourceMessageId,
             continuation: {
               locale,
-              permissions: perms ?? DEFAULT_PERMISSION,
+              permissions: perms,
               sessionRouting: project ? true : undefined,
               runtimeSelection: chat?.runtimeSelection ?? undefined,
             },
@@ -5692,7 +5688,7 @@ function ChatPage() {
         window.dispatchEvent(new Event("agentlas:attention-refresh"));
         // 답은 저장됐다 — 오너가 곧바로 다른 메뉴로 가도 후속 실행은 시작한다(send 의 detached 경로).
         const sent = await send(reply, {
-          permissions: perms ?? DEFAULT_PERMISSION,
+          permissions: perms,
           decisionContinuation: {
             sourceMessageId,
             runId: receipt.continuationRunId,
