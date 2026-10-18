@@ -7124,6 +7124,25 @@ export class InvocationService {
     return this.withSteeringRecovery(row ? getInvocationRunReceipt(row.run_id) : null);
   }
 
+  /**
+   * The chat's latest run started from the owner's own message (it recorded `origin_user_message`): "the execution
+   * choices the chat last ran with" for the owner's next text. latestReceipt can be a host-written turn (a teammate's
+   * report turn runs read-only, a Goal continuation), and taking its permission ran the owner's next message read-only:
+   * production 2026-10-18, Yotube room, the 01:45:27Z report turn was read-only and the owner's 01:49:46Z answer to a
+   * question card ran with "Bash is disabled for this session", although the Goal it resumed holds full access.
+   */
+  latestOwnerReceipt(chatId: string): InvocationRunReceipt | null {
+    for (const [runId, record] of new Map([...this.activeRuns.entries(), ...this.settlingRuns, ...this.browserLoginWaitingRuns])) {
+      if (!record.background && record.chatId === chatId && record.request.promptOrigin !== "system") return this.receipt(runId);
+    }
+    const row = getDb().prepare(`SELECT started.run_id FROM run_events started
+      WHERE started.chat_id = ? AND started.kind = 'invoke_started'
+        AND COALESCE(json_extract(started.payload_json, '$.background'), 0) != 1
+        AND EXISTS (SELECT 1 FROM run_events origin WHERE origin.run_id = started.run_id AND origin.kind = 'origin_user_message')
+      ORDER BY started.ts DESC, started.rowid DESC LIMIT 1`).get(chatId) as { run_id: string } | undefined;
+    return this.withSteeringRecovery(row ? getInvocationRunReceipt(row.run_id) : null);
+  }
+
   latestOneSurface(input: { runId: string; chatId: string; taskId: string }) {
     return getDurableOneSurfaceResult(input);
   }

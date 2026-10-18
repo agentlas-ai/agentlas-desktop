@@ -7325,9 +7325,9 @@ export function registerIpcHandlers(): void {
     catch (cause) {
       if (!isTransientSendRefusal(cause) || typeof input?.text !== "string") throw cause;
       // The turn the text was addressed to is gone or not reachable: it goes as the next message, with the same
-      // execution choices the chat last ran with.
+      // execution choices the owner's last turn ran with (a host-written turn, e.g. a read-only teammate report, is not one).
       let permissions: McpInvocationRequest["permissions"] = "read";
-      try { permissions = invocationService.latestReceipt(input.chatId)?.executionPermission ?? "read"; } catch { /* read-only is the safe default */ }
+      try { permissions = invocationService.latestOwnerReceipt(input.chatId)?.executionPermission ?? "read"; } catch { /* read-only is the safe default */ }
       const accepted = queued.acceptRefusedSteer(_event, {
         chatId: input.chatId, userPrompt: input.text, oneMode: true, taskIntent: "conversation",
         locale: currentUiLocale(), onePermissionMode: "auto", permissions, sessionRouting: false,

@@ -19,7 +19,7 @@ type Outcome = { status: "ok"; data: unknown } | { status: "refused" | "unavaila
 
 const TEXT_LIMIT = 4000;
 
-async function invocation(): Promise<{ activeChatIds(): string[]; latestReceipt(chatId: string): unknown; cancel(runId: string): string;
+async function invocation(): Promise<{ activeChatIds(): string[]; latestReceipt(chatId: string): unknown; latestOwnerReceipt(chatId: string): unknown; cancel(runId: string): string;
   start(req: unknown, binding?: unknown, context?: unknown, question?: unknown, purpose?: unknown, admission?: unknown): { runId: string } } | null> {
   try { return (await import("../invocation/service")).invocationService as never; } catch { return null; }
 }
@@ -144,7 +144,8 @@ export async function turnStart(args: Record<string, unknown>, ctx: Ctx): Promis
   const service = await invocation();
   if (!service) return { status: "unavailable", reason: "invocation_service_unavailable", next: "turns start in the app's main process" };
   if (service.activeChatIds().includes(threadId)) return { status: "refused", reason: "turn_running", next: "wait, or Stop it with turn.interrupt" };
-  const latest = service.latestReceipt(threadId) as { executionPermission?: string } | null;
+  // The owner's last turn, not a host-written one (a read-only teammate report or a Goal continuation).
+  const latest = service.latestOwnerReceipt(threadId) as { executionPermission?: string } | null;
   const permissions = args.permissions === "read" || args.permissions === "write" || args.permissions === "full"
     ? args.permissions : latest?.executionPermission === "write" || latest?.executionPermission === "full" ? latest.executionPermission : "read";
   const [{ currentUiLocale }, { admitMainInvocation }, { randomUUID }] = await Promise.all([
