@@ -357,6 +357,7 @@ export const APP_CONTROL_CATALOG: readonly AppControlCatalogEntry[] = [
   {"path":"experience.ontologySummary","surface":"desktop","channel":"experience:ontologySummary","params":["agentId"],"invokeArgs":[{"param":"agentId"}],"signature":"(agentId: string)","doc":""},
   {"path":"externalCliSessions.importToProject","surface":"desktop","channel":"externalCliSessions:importToProject","params":["input"],"invokeArgs":[{"param":"input"}],"keywords":["sourceKey","projectId","originSurface","taskId","chatId","title"],"signature":"(input: ExternalCliSessionImportInput)","doc":""},
   {"path":"externalCliSessions.list","surface":"desktop","channel":"externalCliSessions:list","params":["input"],"invokeArgs":[{"param":"input"}],"keywords":["sourceKey","provider","title","preview","projectLabel","updatedAt","messageCount","truncated"],"signature":"(input: { projectId: string; query?: string; limit?: number })","doc":""},
+  {"path":"finance.archives","surface":"desktop","channel":"finance:archives","params":["input"],"invokeArgs":[{"param":"input"}],"signature":"(input)","doc":""},
   {"path":"finance.ask","surface":"desktop","channel":"finance:ask","params":["input"],"invokeArgs":[{"param":"input"}],"signature":"(input)","doc":""},
   {"path":"finance.cancelAsk","surface":"desktop","channel":"finance:cancelAsk","params":["input"],"invokeArgs":[{"param":"input"}],"signature":"(input)","doc":""},
   {"path":"finance.exportFile","surface":"desktop","channel":"finance:exportFile","params":["input"],"invokeArgs":[{"param":"input"}],"signature":"(input)","doc":""},
