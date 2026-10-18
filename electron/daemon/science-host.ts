@@ -27,6 +27,7 @@ import { listPendingScienceRuntimeOutboxEvents, markScienceRuntimeOutboxDelivere
 import { agentFolderPath, buildEffectiveAgentSystemPrompt, materializeAgentFiles } from "../agents/files";
 import { invocationService } from "../invocation/service";
 import { captureScienceInvocationBinding } from "../invocation/workspace-binding";
+import { installScienceStoreSchemaRejectionReader } from "../invocation/science-schema-rejection";
 import { RUNTIME_BACKEND_SET } from "../../shared/runtime-backends";
 import { RUNTIME_KIND_SET } from "../../shared/runtime-kinds";
 import { productExtensionSignedPayload } from "../../shared/product-extension";
@@ -204,6 +205,8 @@ export function installDaemonScienceHost(input: {
     projection: { project },
   });
   if (compatibility.status !== "compatible") throw new Error(compatibility.code);
+  // Science turns run here, so the pre-dispatch schema-rejection proof is read here too (Main installs the same reader).
+  installScienceStoreSchemaRejectionReader(scienceStore);
   return {
     project,
     registerQuestionUi() {

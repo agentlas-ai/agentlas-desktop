@@ -9,6 +9,19 @@ type ReceiptReader = (invocationRunId: string, attemptId: string) => unknown;
 let readReceipt: ReceiptReader | undefined;
 /** Main installs a direct Science store reader, never an MCP-supplied producer. */
 export function installScienceSchemaRejectionReader(reader: ReceiptReader): void { readReceipt = reader; }
+/**
+ * The one reader both hosts install once their Science host contract is accepted: Main (data-client, science-host.ts)
+ * and the background service (Science execution owner, daemon/science-host.ts). The verifier runs in the process that
+ * runs the Science turn (effect-boundary.ts), which is the service; with the reader only in Main, a pre-dispatch schema
+ * rejection there could never be proven and stayed "effect uncertain". Older pinned Science packages have no reader
+ * and remain uncertain.
+ */
+export function installScienceStoreSchemaRejectionReader(store: () => unknown): void {
+  installScienceSchemaRejectionReader((invocationRunId, attemptId) => {
+    const current = store() as { readSchemaPreDispatchRejection?: (runId: string, attemptId: string) => unknown };
+    return current.readSchemaPreDispatchRejection?.(invocationRunId, attemptId) ?? null;
+  });
+}
 const fail = (): never => { throw new Error("science-schema-rejection-settlement-invalid"); };
 const sha = (v: unknown): v is string => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
 export function parseScienceSchemaRejectionSettlement(value: unknown): ScienceSchemaRejectionSettlement {
