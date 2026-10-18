@@ -322,8 +322,13 @@ export async function openToolchainAssetReports(input: { callerChatId: string; t
   }) as AssetReport[];
   // Each retained report has its own source call, report resource and current
   // reader admission. Never substitute the maker's new run for the source run.
+  // With no open report the read is scoped by a caller's own call. A publication's validation runs have no caller run
+  // (parentRunId null) and cannot scope it: right after publishing they are the newest calls, and include_reports
+  // refused toolchain_native_caller_call_binding_changed. No caller call at all means nothing was ever reported.
+  const callerCall = listToolchainCalls(input.toolchainId).find(call => call.version === input.version && call.contentHash === input.contentHash && call.parentRunId);
+  if (!selected.length && !callerCall) return [];
   const sources = selected.length ? selected.map(row => ({ row, call: getToolchainCall(row.eventId) }))
-    : [{ row: null, call: listToolchainCalls(input.toolchainId).find(call => call.version === input.version && call.contentHash === input.contentHash) ?? null }];
+    : [{ row: null, call: callerCall ?? null }];
   const result: ToolchainReport[] = [];
   for (const source of sources) {
     const call = source.call;
