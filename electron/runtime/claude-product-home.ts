@@ -118,6 +118,11 @@ export function productClaudeSettings(settingsText: string | null, localText: st
 export interface ClaudeProductHomeOptions {
   /** User-scope MCP servers (~/.claude.json mcpServers) the run may keep: One's switched-on connectors. */
   keepMcpServers?: readonly string[];
+  /**
+   * The run's model window and native compaction limit (session-generation.ts). Present: the two compaction variables are
+   * the product's (claudeNativeCompactionEnv), or absent when they cannot be derived, whatever the inherited env carried.
+   */
+  nativeCompaction?: ClaudeNativeCompaction;
 }
 
 export function claudeProductHomeDir(): string {
@@ -261,6 +266,54 @@ export const CLAUDE_PRODUCT_RUN_ENV: Readonly<Record<string, string>> = Object.f
   CLAUDE_CODE_STARTUP_FAILURE_RESULTS: "1",
 });
 
+/*
+ * Claude Code's own autocompact at the same 80% of the model's OWN window as the host's generation switch and Codex's
+ * model_auto_compact_token_limit (session-generation.ts nativeCompactionLimit). The CLI 2.1.302 contract is:
+ * - window: min(model window, CLAUDE_CODE_AUTO_COMPACT_WINDOW). The value is an integer, raised to 100,000 and capped at
+ *   1,000,000, and it outranks the autoCompactWindow setting and the server's and the model's defaults.
+ * - point: min(floor((window - R) x CLAUDE_AUTOCOMPACT_PCT_OVERRIDE / 100), window - R - 13,000), R = min(the model's max
+ *   output tokens, 20,000); without the percentage, window - R - 13,000. The percentage is of window - R, not of the window.
+ * - a local run defers to the API's prompt-too-long (reactive compact) whenever the window's source is "auto" (a 200k model
+ *   with no server or model default), so a percentage alone never fires there; a window from the env always does.
+ * So the window is the model's own (it changes nothing else about the window) and the percentage moves the point onto the
+ * limit. No known window, or one outside the variable's range: neither is set and the CLI's own compaction stays, as Codex
+ * keeps its own without a limit.
+ */
+export const CLAUDE_NATIVE_COMPACTION_ENV_KEYS = ["CLAUDE_CODE_AUTO_COMPACT_WINDOW", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] as const;
+const CLAUDE_AUTO_COMPACT_WINDOW_MIN = 100_000;
+const CLAUDE_AUTO_COMPACT_WINDOW_MAX = 1_000_000;
+const CLAUDE_AUTO_COMPACT_OUTPUT_RESERVE = 20_000;
+
+export interface ClaudeNativeCompaction {
+  /** The model's own context window (runtimeContextWindow); null when unknown. */
+  windowTokens: number | null | undefined;
+  /** The compaction limit, 80% of that window (nativeCompactionLimit); null when unknown. */
+  limitTokens: number | null | undefined;
+}
+
+/** The two variables that put Claude Code's autocompact on `limitTokens`; null when they cannot (CLI default then). */
+export function claudeNativeCompactionEnv(compaction: ClaudeNativeCompaction, env: NodeJS.ProcessEnv = {}):
+  Record<(typeof CLAUDE_NATIVE_COMPACTION_ENV_KEYS)[number], string> | null {
+  const { windowTokens: window, limitTokens: limit } = compaction;
+  if (typeof window !== "number" || typeof limit !== "number" || !Number.isSafeInteger(window) || !Number.isSafeInteger(limit)) return null;
+  if (window < CLAUDE_AUTO_COMPACT_WINDOW_MIN || window > CLAUDE_AUTO_COMPACT_WINDOW_MAX || limit <= 0 || limit >= window) return null;
+  // An Alive run caps max output tokens (CLAUDE_CODE_MAX_OUTPUT_TOKENS): the CLI then holds back that much, not 20,000.
+  const maxOutput = Number(env.CLAUDE_CODE_MAX_OUTPUT_TOKENS);
+  const reserve = Number.isSafeInteger(maxOutput) && maxOutput > 0 ? Math.min(maxOutput, CLAUDE_AUTO_COMPACT_OUTPUT_RESERVE) : CLAUDE_AUTO_COMPACT_OUTPUT_RESERVE;
+  // Rounded up at the sixth decimal: the CLI floors (window - R) x pct / 100, which then lands on the limit, not under it.
+  const pct = Math.ceil((limit * 100 / (window - reserve)) * 1e6) / 1e6;
+  if (!(pct > 0 && pct <= 100)) return null;
+  return { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(window), CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: String(pct) };
+}
+
+/** A copy of `env` whose compaction variables are the run's own: set when derivable, otherwise removed. */
+function withClaudeNativeCompaction(env: NodeJS.ProcessEnv, compaction: ClaudeNativeCompaction): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = { ...env };
+  for (const key of CLAUDE_NATIVE_COMPACTION_ENV_KEYS) delete out[key];
+  const variables = claudeNativeCompactionEnv(compaction, out);
+  return variables ? Object.assign(out, variables) : out;
+}
+
 /** `env` itself when it already carries CLAUDE_PRODUCT_RUN_ENV (idempotent), else a copy that does. */
 function withClaudeProductRunEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return Object.entries(CLAUDE_PRODUCT_RUN_ENV).every(([key, value]) => env[key] === value) ? env : { ...env, ...CLAUDE_PRODUCT_RUN_ENV };
@@ -268,6 +321,11 @@ function withClaudeProductRunEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 
 /** The product run's env: the mirror as config dir, the person's own sign-in. Only CLAUDE_PRODUCT_RUN_ENV when the mirror cannot hold. */
 export function withClaudeProductHome(env: NodeJS.ProcessEnv = process.env, options: ClaudeProductHomeOptions = {}, mirror?: string): NodeJS.ProcessEnv {
+  const runEnv = claudeProductHomeEnv(env, options, mirror);
+  return options.nativeCompaction ? withClaudeNativeCompaction(runEnv, options.nativeCompaction) : runEnv;
+}
+
+function claudeProductHomeEnv(env: NodeJS.ProcessEnv, options: ClaudeProductHomeOptions, mirror?: string): NodeJS.ProcessEnv {
   // already a product env (or the caller chose); a product env merely inherited by this process is not the run's choice
   if (env.CLAUDE_SECURESTORAGE_CONFIG_DIR !== undefined && !inheritedProductHome(env, "CLAUDE_CONFIG_DIR")) return withClaudeProductRunEnv(env);
   const real = realClaudeConfigDir(env);

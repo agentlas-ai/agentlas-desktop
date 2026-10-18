@@ -2,7 +2,7 @@ import { selectionFor } from "../capabilities/one-capabilities";
 import type { ChildProcess } from "node:child_process";
 import { reportModelPayload, ledgerFromCliSent } from "./model-call-ledger";
 import { recordNativeCompaction } from "./native-compaction-event";
-import { recordObservedContextWindow } from "./session-generation";
+import { nativeCompactionLimit, recordObservedContextWindow, runtimeContextWindow } from "./session-generation";
 import { ClaudeTaskPlanTracker, createRuntimePlanEmitter } from "./runtime-plan";
 import { claudeMcpIsolation, withClaudePersonalContext, withDisallowedTools } from "./claude-personal-context";
 import { mcpToolSurfaceDenial } from "../mcp-tools/hephaestus-tool-surface";
@@ -1589,9 +1589,13 @@ const runClaudeTurn = async (
   const runCwd = req.cwd ?? agentRunCwd();
   // Product sessions live in Agentlas's own Claude config dir, never in the person's ~/.claude; the
   // person's keychain sign-in is reused unchanged (claude-product-home.ts). One keeps the user MCP servers it switched on.
+  // Claude Code compacts at 80% of the model's own window, as Codex does with model_auto_compact_token_limit:
+  // the window the CLI reported for this model (or the table's), translated into its two variables there.
+  const compactionModel = runReq.model?.trim() || null;
   const runEnv = withClaudeProductHome(aliveProfile ? { ...process.env, CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(req.maxOutputTokens),
     MAX_STRUCTURED_OUTPUT_RETRIES: "1", CLAUDE_CODE_MAX_TURNS: "1", CLAUDE_CODE_MAX_RETRIES: "0" } : req.env ?? process.env, {
     keepMcpServers: (selectionFor(runReq.agentId, undefined, runReq.chatId)?.items ?? []).filter((item) => item.source === "claude" && item.kind === "connector" && item.enabled).map((item) => item.name),
+    nativeCompaction: { windowTokens: runtimeContextWindow(KIND, compactionModel), limitTokens: nativeCompactionLimit(KIND, compactionModel) },
   });
   // A write run's Bash points npm at the cache its sandbox may write (sandbox-tool-cache.ts). CLAUDE_ENV_FILE is sourced
   // before each Bash command only, so MCP servers keep the person's cache.
