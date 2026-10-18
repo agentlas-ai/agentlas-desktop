@@ -14,6 +14,18 @@ import { resolveEffectiveContextWindow } from "../../shared/models";
 
 export const GENERATION_CONTEXT_RATIO = 0.8;
 
+/*
+ * Hysteresis between generations. A new native session starts from replayed host history, and a fresh provider session has
+ * no prompt cache: a seed that sat near the 80% point would make the new generation's first turns rotate again, each time
+ * resending a large uncached prefix. Once the claude-code window became known (1M), the CLI seed bound reached it: 80% of
+ * W minus the reserve (767,232 tokens) handed to compactHistory, whose 60% share let 460,339 tokens of raw history in (the
+ * session checkpoint rarely summarizes: its compactor refuses inputs over 96 KB, and production holds 2,375 verbatim
+ * checkpoints against 4 semantic ones, so the seed is the journal itself). A fresh CLI seed now admits at most half the
+ * rotation point (continuity.ts): about 22% of W after compactHistory's share, beside the API and local loops, which fold
+ * a new generation's history to W x (1 - GENERATION_CONTEXT_RATIO) (stateless-generation.ts).
+ */
+export const GENERATION_SEED_RATIO = GENERATION_CONTEXT_RATIO / 2;
+
 export interface GenerationInput {
   kind: string;
   /** The model's own context window in tokens; null when the runtime does not know it. */

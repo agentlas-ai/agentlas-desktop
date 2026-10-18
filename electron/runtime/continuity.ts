@@ -9,7 +9,7 @@ import type { ChatHistoryEntry } from "../../shared/types";
 import { tStatus, type RuntimeLocale } from "./status-i18n";
 import { compactHistory } from "./compact";
 import { createHash } from "node:crypto";
-import { GENERATION_CONTEXT_RATIO, runtimeContextWindow } from "./session-generation";
+import { GENERATION_SEED_RATIO, runtimeContextWindow } from "./session-generation";
 
 /**
  * DEGRADED VALUE — used ONLY when the selected model's verified window W is unknown. It is the former fixed constant,
@@ -27,7 +27,7 @@ export interface CliHistoryBudget {
   windowTokens: number | null;
   /** Tokens set aside for the model's answer and framing — NOT available to replayed history. */
   outputReserveTokens: number;
-  /** Admission budget for the replayed-history seed (input side only): below the 80% rotation point, minus the reserve. */
+  /** Admission budget for the replayed-history seed (input side only): half the 80% rotation point, minus the reserve. */
   admissionTokens: number;
   source: "verified-window" | "unknown-window-degraded";
 }
@@ -40,8 +40,9 @@ export function cliHistoryBudgetForWindow(windowTokens: number | null | undefine
   const w = Math.floor(windowTokens);
   const outputReserveTokens = Math.min(w, Math.min(CLI_HISTORY_OUTPUT_RESERVE_MAX_TOKENS,
     Math.max(CLI_HISTORY_OUTPUT_RESERVE_MIN_TOKENS, Math.floor(w * CLI_HISTORY_OUTPUT_RESERVE_RATIO))));
-  // A fresh seed must start below the rotation point (GENERATION_CONTEXT_RATIO of W), or the next turn rotates again.
-  const admissionTokens = Math.max(0, Math.floor(w * GENERATION_CONTEXT_RATIO) - outputReserveTokens);
+  // A fresh seed starts well below the rotation point (GENERATION_CONTEXT_RATIO of W): at most half of it
+  // (GENERATION_SEED_RATIO), or the new generation's first turns rotate again and resend an uncached prefix each time.
+  const admissionTokens = Math.max(0, Math.floor(w * GENERATION_SEED_RATIO) - outputReserveTokens);
   return { windowTokens: w, outputReserveTokens, admissionTokens, source: "verified-window" };
 }
 
