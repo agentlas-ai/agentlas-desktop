@@ -40,7 +40,7 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   [/^(workLiveView|browserUi|browserAnnotation)\./, "operates a browser view on the owner's screen", "write"],
   [/^(browser\.(startLiveView|stopLiveView|captureLiveFrame|captureTaskFrame|dispatchLiveInput|focusLiveTarget)|fs\.(watchFile|unwatchFile))$/, "belongs to a screen's live view", "write"],
   [/^(marketplace\.(openProfileView|closeProfileView|setProfileViewBounds)|productExtensions\.(openScienceView|closeScienceView|setScienceViewBounds)|appFactory\.(startLivePreview|stopLivePreview|releaseLivePreview))$/, "belongs to a screen's live view", "write"],
-  [/^science\.(renderers\.|researcherQuestions\.register$|shell\.(?:backToWork|openCapabilityManager|previewFile)$|researchCapabilities\.catalog$|artifacts\.capture$)/, "belongs to the Science view on screen", "write"],
+  [/^science\.(renderers\.|researcherQuestions\.register$|shell\.(?:backToWork|openCapabilityManager)$|researchCapabilities\.catalog$|artifacts\.capture$)/, "belongs to the Science view on screen", "write"],
   // The Document tab is the owner's own hand: an app.call here would journal an AI edit as the owner's. The AI edits,
   // saves and opens live documents through the harness document.* ports (actor ai, run permission checked).
   [/^liveDocument\.(apply|save|close|pickAndOpen|reveal)$/, "the Document tab is the owner's hand; edit, open and save through harness document.*", "write"],

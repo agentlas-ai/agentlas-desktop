@@ -85,12 +85,6 @@ interface ActiveScienceView {
 }
 
 const activeViews = new Map<number, ActiveScienceView>();
-/** Owners of per-view state (the Preview) release it here when a Science view closes; view-host imports nothing from them. */
-const scienceViewClosedListeners = new Set<(ownerId: number) => void>();
-export function onScienceViewClosed(listener: (ownerId: number) => void): () => void {
-  scienceViewClosedListeners.add(listener);
-  return () => { scienceViewClosedListeners.delete(listener); };
-}
 const scienceToolApprovalChatByRequestId = new Map<string, string>();
 const scienceCaptureTails = new WeakMap<Electron.WebContents, Promise<void>>();
 
@@ -228,9 +222,6 @@ function closeActive(active: ActiveScienceView, notify = true): void {
   activeViews.delete(active.ownerId);
   closeScienceQuestionSurface(active);
   closeRenderer(active);
-  for (const listener of scienceViewClosedListeners) {
-    try { listener(active.ownerId); } catch { /* a listener never keeps a view open */ }
-  }
   try { active.window.contentView.removeChildView(active.view); } catch {}
   try { active.view.webContents.close(); } catch {}
   if (notify) active.send({ id: SCIENCE_EXTENSION_ID, leaseId: active.leaseId, state: "closed" });
@@ -249,11 +240,6 @@ export function closeAllScienceExtensionViews(): void {
 
 export function isScienceExtensionViewSender(senderId: number): boolean {
   return [...activeViews.values()].some((active) => !active.view.webContents.isDestroyed() && active.view.webContents.id === senderId);
-}
-
-/** The owner window (the Desktop page hosting the view) of a Science view's webContents, or null. */
-export function scienceViewOwnerId(senderId: number): number | null {
-  return activeViewForSender(senderId)?.ownerId ?? null;
 }
 
 export function sendScienceTurnEventToView(senderId: number, event: unknown): boolean {

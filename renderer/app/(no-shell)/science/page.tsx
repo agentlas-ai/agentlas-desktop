@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ProductExtensionStatus, ProductExtensionViewBounds, ProductExtensionViewStatus } from "@shared/product-extension";
 import { BrowserActionApprovalSheet } from "@/components/BrowserActionApprovalSheet";
-import { SciencePreviewRail } from "@/components/science/SciencePreviewRail";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
@@ -125,7 +124,6 @@ export default function ScienceHostPage() {
         // actual host-owned area; the surface observer updates native bounds.
         gridTemplateRows: `minmax(0, 1fr) ${approvalHeight}px`,
       } : undefined}>
-        <div className={styles.body}>
         <div ref={surfaceRef} className={styles.surface}>
           {(unavailable || failed) && (
             <div className={styles.fallback}>
@@ -136,9 +134,6 @@ export default function ScienceHostPage() {
               </div>
             </div>
           )}
-        </div>
-        {/* The Preview: a page-owned column beside the native Science view, which shrinks when it opens. */}
-        <SciencePreviewRail locale={ko ? "ko" : "en"} />
         </div>
       </div>
       <BrowserActionApprovalSheet onStandaloneHeightChange={setApprovalHeight} />

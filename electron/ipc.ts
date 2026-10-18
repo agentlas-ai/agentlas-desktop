@@ -14,7 +14,6 @@ import { answerOneDispatchQuestion } from "./one/team-dispatch";
 import { registerOneSupervisorIpc } from "./one/supervisor-ipc";
 import { registerOneHarnessIpc } from "./one/harness-ipc";
 import { registerLiveDocumentIpc } from "./live-document/ipc";
-import { registerSciencePreviewPanelIpc } from "./science-host/preview-panel-main";
 import { registerOneContextIpc } from "./one/context-ipc";
 import { openOneContextPermissions } from "./one/context-platform";
 import { configureOneHarnessRuntimeClient } from "./one/harness";
@@ -1782,7 +1781,6 @@ export function registerIpcHandlers(): void {
   registerBusinessShippingIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerOneHarnessIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerLiveDocumentIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
-  registerSciencePreviewPanelIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerOneContextIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender, openPermissions: openOneContextPermissions });
   registerSystemPermissionIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerBrowserUiIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });

@@ -110,7 +110,7 @@ export function assertDevelopmentEffectAllowed(operation: string): void {
 export function developmentRendererRequestAllowed(rawUrl: string, devStartUrl?: string): boolean {
   try {
     const url = new URL(rawUrl);
-    if (url.protocol === "agentlas:") return ["app", "one-artifact", "one-avatar", "chat-attachment", "file-preview", "localfile"].includes(url.hostname);
+    if (url.protocol === "agentlas:") return ["app", "one-artifact", "one-avatar", "chat-attachment", "localfile"].includes(url.hostname);
     if (url.protocol === "file:") return url.hostname === "";
     if (["data:", "blob:"].includes(url.protocol)) return true;
     if (!devStartUrl || configured?.packaged) return false;

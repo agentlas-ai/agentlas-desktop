@@ -1795,16 +1795,4 @@ contextBridge.exposeInMainWorld("agentlasMenu", {
     return () => ipcRenderer.removeListener("menu:navigate", wrapped);
   },
 });
-
-// Science screen: the Preview tab (read-only viewer) lists the files the Science view handed over. A token stands for
-// bytes Main holds; the renderer builds the viewer URL from it and never names a path.
-contextBridge.exposeInMainWorld("agentlasSciencePreview", {
-  state: () => ipcRenderer.invoke("sciencePreview:state"),
-  close: (token: string) => ipcRenderer.invoke("sciencePreview:close", token),
-  onChanged: (handler: (state: import("../shared/science-preview-panel").SciencePreviewPanelState) => void) => {
-    const wrapped = (_e: Electron.IpcRendererEvent, state: import("../shared/science-preview-panel").SciencePreviewPanelState) => handler(state);
-    ipcRenderer.on("sciencePreview:changed", wrapped);
-    return () => ipcRenderer.removeListener("sciencePreview:changed", wrapped);
-  },
-});
 }
