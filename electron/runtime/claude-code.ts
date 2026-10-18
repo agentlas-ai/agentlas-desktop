@@ -1518,12 +1518,29 @@ const runClaudeTurn = async (
     !hostAuthorityWorkforce &&
     Boolean(aliveProfile || runReq.chatId) &&
     Boolean(fingerprint);
+  /*
+   * Per-turn authority (a browser grant, an isolated MCP config, a per-run tool grant) keeps a process from being REUSED,
+   * not from taking the owner's directions mid-turn. Such a turn used to run one-shot `-p`, which has no input channel
+   * once started, so native steering never applied: production 1.3.67, Yotube room (every daily-production turn binds the
+   * Agentlas Browser, so isolatedMcpConfig): 0 of 6 claude-code steers applied while codex app-server applied 25 of 25;
+   * on 2026-10-18 the owner's 02:45Z/02:46Z directions waited for the 43-minute turn to end. An attended chat turn of
+   * that kind now opens a stream-json process of its own under a pool key no other turn can match, and the process is
+   * discarded when the turn ends (finally below), so the grant still dies with its turn.
+   */
+  const turnScopedResidency = !residencyEligible &&
+    allowResidency &&
+    executableState.residencySupported &&
+    !residencyDisabledFor(KIND, runEnv) &&
+    Boolean(runReq.browserOnly || runReq.isolatedMcpConfig || runReq.ephemeralToolGrant) &&
+    !aliveProfile && !runReq.untrustedNoTools && !runReq.singleUse && !runReq.minimalObservation && !runReq.judgmentOnly &&
+    !hostAuthorityWorkforce && !req.unattended && Boolean(events.onNativeTurnController) &&
+    Boolean(runReq.chatId) && Boolean(fingerprint);
   // The invocation's MCP servers, when a reused resident can take them by an acknowledged mcp_set_servers: the pool key
   // then holds the grant (server names) instead of this invocation's file path (claude-session.ts claudePoolKey).
   const mcpSwap = residencyEligible && !aliveProfile && mcpArgs.length > 0 && agentAppMcpConfigArg && !executableState.mcpSwapUnsupported
     ? await readClaudeMcpServers(agentAppMcpConfigArg) : null;
-  const poolKey =
-    residencyEligible && contextChatId && fingerprint
+  const sharedPoolKey =
+    (residencyEligible || turnScopedResidency) && contextChatId && fingerprint
       ? claudePoolKey({
           chatId: contextChatId!,
           sessionOwnerId: runtimeSessionOwnerId ?? null,
@@ -1538,6 +1555,7 @@ const runClaudeTurn = async (
           env: runEnv,
         })
       : null;
+  const poolKey = sharedPoolKey && turnScopedResidency ? `${sharedPoolKey}:turn:${crypto.randomUUID()}` : sharedPoolKey;
   const pool = claudeSessionPool();
   if (aliveProfile) {
     aliveProfile.assertCurrent();
@@ -1618,7 +1636,8 @@ const runClaudeTurn = async (
       }
     } catch (error) {
       if (aliveProfile) { cleanupSysFile(); cleanupAgentAppMcpConfig(); throw error; }
-      if (error && typeof error === "object" && "code" in error && error.code === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
+      // A turn-scoped process only adds steering to a turn that ran one-shot before: a busy project residency keeps it one-shot.
+      if (!turnScopedResidency && error && typeof error === "object" && "code" in error && error.code === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
         throw error;
       }
       // 상주 세션을 못 열었으면 조용히 1회성 경로로 — 사용자에게 차이가 없어야 한다.
@@ -3166,7 +3185,7 @@ const runClaudeTurn = async (
     }
     if (lease) {
       // 취소·오류면 버리고, 아니면 반납한다(다음 턴이 이어 쓴다).
-      if (broken || req.signal?.aborted || runReq.ephemeralToolGrant || runReq.singleUse) {
+      if (broken || req.signal?.aborted || runReq.ephemeralToolGrant || runReq.singleUse || turnScopedResidency) {
         pool.discard(lease);
         if (aliveProfile) aliveClaudeResources.get(aliveProfile.resourceOwnerKey)?.close();
       }
