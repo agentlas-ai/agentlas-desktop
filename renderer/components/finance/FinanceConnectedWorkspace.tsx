@@ -52,7 +52,7 @@ export function FinanceConnectedWorkspace() {
     if (!api?.dataConnection) throw new Error('finance_connection_unavailable');
     return api.dataConnection(request);
   }, [api]);
-  if (!ready) return <main role="status" style={{ padding: 32 }}>{locale === "ko" ? "Agentlas Fiance를 여는 중…" : "Opening Agentlas Fiance…"}</main>;
+  if (!ready) return <main role="status" style={{ padding: 32 }}>{locale === "ko" ? "Agentlas Finance를 여는 중…" : "Opening Agentlas Finance…"}</main>;
 
   return <FinanceWorkspace
     onInspectData={api?.dataConnection ? inspectData : undefined}
