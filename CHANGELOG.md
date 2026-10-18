@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.74 — 2026-10-18
+
+- Organization accounts use a clearer workspace layout, with a charcoal navigation column, readable organization rows and selected-organization details.
+- Organization settings remain scrollable in a small Desktop window, so account actions and organization sign-out stay reachable.
+- The organization entry and account screens share the same typography, spacing and language support while keeping the existing permission and session boundaries.
+- This release binds Agentlas OS v1.2.66 at c0acd99be22114569e20bca94bed4540ba046eb4; public runtime asset `hephaestus-runtime-v1.2.66.tar.gz` is pinned at SHA-256 `20019d3ba4df1c540d0ef549c07a82188bd40fe12dafb2f8a6c75cc4bdcc89f7`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.73 — 2026-10-18
 
 - Agentlas Finance is a new workspace in the side navigation: collect the assets you follow and your own data, check the sources behind each figure, and build analyses, dashboards and reports with AI edits you can review and undo.

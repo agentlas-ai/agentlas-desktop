@@ -5,7 +5,7 @@ import { ipc } from '../lib/ipc';
 import { BusinessConsole } from './BusinessConsole';
 import { useBusinessEligibility } from './use-business-eligibility';
 import { isBusinessEligibility, type BusinessEligibility } from '../../shared/business/eligibility';
-import { IconBuilding, IconRefresh } from '../components/Icon';
+import { IconBuilding, IconRefresh, IconArrowLeft } from '../components/Icon';
 import styles from './BusinessConsole.module.css';
 import { useBusinessCopy } from './use-business-copy';
 import { captureBusinessRendererBridge, currentBusinessRendererBridge, isBusinessRendererSnapshot, openBusinessCloudDashboard,
@@ -86,12 +86,22 @@ export function BusinessDesktopEntry({ suppliedBridge }: { suppliedBridge?: Busi
     finally { setSigningIn(false); }
   }
   if (!access.eligible) return <section className={styles.console} aria-label={copy("회사 계정 로그인", "Company account sign-in")}>
-    <header className={styles.header}><h1>{copy("회사 계정 로그인", "Company account sign-in")}</h1></header>
-    <div className={styles.content}>
-      <button type="button" disabled={signingIn} onClick={() => void companySignIn()}><IconBuilding size={16} />{copy("회사 계정으로 로그인", "Sign in with a company account")}</button>
-      <button type="button" className="business-icon-button" disabled={signingIn} aria-label={copy("회사 계정 이용 자격 다시 확인", "Check company account access again")} onClick={() => void access.refresh()}><IconRefresh size={16} /></button>
-      <button type="button" onClick={() => router.push('/one')}>{copy("앱으로 돌아가기", "Back to the app")}</button>
-      {notice && <p role="status">{notice}</p>}
+    <aside className={styles.sidebar}>
+      <div className={styles.brand}><strong>Agentlas</strong><span>Business</span></div>
+      <span className={styles.entryNavigation}><IconBuilding size={18} />{copy("회사 계정", "Company account")}</span>
+      <button type="button" className={styles.sidebarBack} onClick={() => router.push('/one')}><IconArrowLeft size={16} />{copy("앱으로 돌아가기", "Back to the app")}</button>
+    </aside>
+    <div className={styles.layout}>
+      <header className={styles.header}><span className={styles.breadcrumb}>Business <span>/</span> {copy("회사 계정", "Company account")}</span></header>
+      <div className={`${styles.content} ${styles.entryContent}`}>
+        <div className={styles.pageHeading}><span className={styles.eyebrow}>Business</span><h1>{copy("회사 계정 로그인", "Company account sign-in")}</h1></div>
+        <p className={styles.entryDescription}>{copy("조직 계정과 초대를 웹에서 연결하세요.", "Connect your organization account and invitations on the Web.")}</p>
+        <div className={styles.entryActions}>
+          <button type="button" className={styles.primaryAction} disabled={signingIn} onClick={() => void companySignIn()}><IconBuilding size={16} />{copy("회사 계정으로 로그인", "Sign in with a company account")}</button>
+          <button type="button" className="business-icon-button" disabled={signingIn} aria-label={copy("회사 계정 이용 자격 다시 확인", "Check company account access again")} onClick={() => void access.refresh()}><IconRefresh size={16} /></button>
+        </div>
+        {notice && <p role="status">{notice}</p>}
+      </div>
     </div>
   </section>;
   const matchesEligibility = !binding?.organizationSession || !!access.eligibility
@@ -99,10 +109,19 @@ export function BusinessDesktopEntry({ suppliedBridge }: { suppliedBridge?: Busi
     && access.eligibility.organizations.some(row => row.organizationId === binding.organizationSession!.organizationId)
     && access.eligibility.activeOrganizationId === binding.organizationSession.organizationId;
   if (!matchesEligibility) return <section className={styles.console} aria-label={copy('현재 조직 확인 중', 'Checking organization')}>
-    <header className={styles.header}><h1>{copy('현재 조직 확인 중', 'Checking organization')}</h1></header>
-    <p role="status">{copy('현재 계정과 조직을 다시 확인하고 있습니다.', 'Checking the current account and organization.')}</p>
-    <button type="button" onClick={() => void access.refresh()}>{copy('현재 상태 확인', 'Check current status')}</button>
-    <button type="button" onClick={() => router.push('/one')}>{copy('앱으로 돌아가기', 'Back to the app')}</button>
+    <aside className={styles.sidebar}>
+      <div className={styles.brand}><strong>Agentlas</strong><span>Business</span></div>
+      <span className={styles.entryNavigation}><IconBuilding size={18} />{copy("회사 계정", "Company account")}</span>
+      <button type="button" className={styles.sidebarBack} onClick={() => router.push('/one')}><IconArrowLeft size={16} />{copy('앱으로 돌아가기', 'Back to the app')}</button>
+    </aside>
+    <div className={styles.layout}>
+      <header className={styles.header}><span className={styles.breadcrumb}>Business <span>/</span> {copy("회사 계정", "Company account")}</span></header>
+      <div className={`${styles.content} ${styles.entryContent}`}>
+        <div className={styles.pageHeading}><h1>{copy('현재 조직 확인 중', 'Checking organization')}</h1></div>
+        <p role="status" className={styles.entryDescription}>{copy('현재 계정과 조직을 다시 확인하고 있습니다.', 'Checking the current account and organization.')}</p>
+        <button type="button" onClick={() => void access.refresh()}>{copy('현재 상태 확인', 'Check current status')}</button>
+      </div>
+    </div>
   </section>;
   return <BusinessConsole context={binding?.context ?? null}
     displayClosed={displayClosed || !matchesEligibility}

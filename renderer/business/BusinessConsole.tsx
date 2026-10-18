@@ -138,14 +138,8 @@ export function BusinessConsole({ context, account, history, learning, organizat
   const nativeAvailable = { account: !!account, history: !!history, learning: !!learning, 'organization-execution': !!organizationExecution };
   return <section className={styles.console} aria-labelledby="business-console-heading">
     <a className={styles.skip} href="#business-desktop-content">{copy("본문으로 이동", "Skip to content")}</a>
-    <header className={styles.header}>
-      {onClose ? <button type="button" className={styles.back} onClick={onClose}><IconArrowLeft size={16} /><span>{copy("앱으로 돌아가기", "Back to the app")}</span></button> : <small>Agentlas Business</small>}
-      <h1 id="business-console-heading">{copy("조직 설정", "Organization settings")}</h1><div className={styles.headerActions}>
-        {onReload && <button type="button" className={styles.iconButton} title={copy("연결 새로 확인", "Refresh connection")} aria-label={copy("연결 새로 확인", "Refresh connection")} onClick={onReload}><IconRefresh size={17} /></button>}
-        <button type="button" disabled={!onOpenDashboard || opening} title={copy("웹 관리 열기", "Open Web management")} aria-label={copy("웹 관리 열기", "Open Web management")} onClick={() => void openDashboard('overview')}><IconExpand size={15} /><span>{copy("웹 관리", "Web management")}</span></button>
-      </div></header>
-    {(notice || navigationNotice) && <p className={styles.message} role="status">{notice ?? navigationNotice}</p>}
-    <div className={styles.layout}><aside className={styles.sidebar}>
+    <aside className={styles.sidebar}>
+      <div className={styles.brand}><strong>Agentlas</strong><span>Business</span></div>
       <BusinessAccountPanel port={account} variant="selector" displayClosed={displayClosed} expectedSession={context?.session ?? organizationExecutionSession} onSessionChanged={sessionChanged} onSelectPersonal={onSelectPersonal} />
       <nav className={styles.tabs} aria-label={copy("Business 관리", "Business management")}><div className={styles.navGroup}><small>{copy("내 작업 · Desktop", "My work · Desktop")}</small>
         {nativeLinks.map(item => <button key={item.id} type="button" aria-pressed={tab === item.id} aria-current={tab === item.id ? 'page' : undefined} disabled={item.id !== 'account' && !nativeAvailable[item.id] && (!onOpenDashboard || opening)}
@@ -158,11 +152,24 @@ export function BusinessConsole({ context, account, history, learning, organizat
       <span className={styles.scope} title={scope}><IconShield size={14} />{scope}</span>
       {visibleContext && <details className={styles.identity}><summary>{copy("현재 범위", "Current scope")}</summary><dl><dt>{copy("계정", "Account")}</dt><dd>{visibleContext.session.principalId}</dd><dt>Desktop</dt><dd>{visibleContext.session.hostId}</dd>
         <dt>{copy("세션 revision", "Session revision")}</dt><dd>{visibleContext.session.sessionRevision}</dd><dt>{copy("기록 revision", "History revision")}</dt><dd>{visibleContext.revision}</dd></dl></details>}
-    </aside><div id="business-desktop-content" className={styles.content} key={contextKey} tabIndex={-1}>
-      {tab === 'account' && <BusinessAccountPanel port={account} displayClosed={displayClosed} expectedSession={context?.session ?? organizationExecutionSession} onSessionChanged={sessionChanged} onSelectPersonal={onSelectPersonal} />}
-      {tab === 'history' && <BusinessHistoryPanel port={currentHistory} displayClosed={displayClosed} expectedContext={context} />}
-      {tab === 'learning' && <BusinessLearningPanel port={currentLearning} displayClosed={displayClosed} expectedContext={context} />}
-      {tab === 'organization-execution' && <BusinessOrganizationExecutionPanel port={currentOrganizationExecution} displayClosed={displayClosed} expectedSession={organizationExecutionSession} />}
-    </div></div>
+    </aside>
+    <div className={styles.layout}>
+      <header className={styles.header}>
+        {onClose && <button type="button" className={styles.back} onClick={onClose} title={copy("앱으로 돌아가기", "Back to the app")}><IconArrowLeft size={16} /><span>{copy("앱으로 돌아가기", "Back to the app")}</span></button>}
+        <span className={styles.breadcrumb}>Business <span>/</span> {copy("조직", "Organization")}</span>
+        <div className={styles.headerActions}>
+          {onReload && <button type="button" className={styles.iconButton} title={copy("연결 새로 확인", "Refresh connection")} aria-label={copy("연결 새로 확인", "Refresh connection")} onClick={onReload}><IconRefresh size={17} /></button>}
+          <button type="button" className={styles.primaryAction} disabled={!onOpenDashboard || opening} title={copy("웹 관리 열기", "Open Web management")} aria-label={copy("웹 관리 열기", "Open Web management")} onClick={() => void openDashboard('overview')}><IconExpand size={15} /><span>{copy("웹 관리", "Web management")}</span></button>
+        </div>
+      </header>
+      {(notice || navigationNotice) && <p className={styles.message} role="status">{notice ?? navigationNotice}</p>}
+      <div id="business-desktop-content" className={styles.content} key={contextKey} tabIndex={-1}>
+        <div className={styles.pageHeading}><span className={styles.eyebrow}>Business</span><h1 id="business-console-heading">{copy("조직 설정", "Organization settings")}</h1></div>
+        {tab === 'account' && <BusinessAccountPanel port={account} displayClosed={displayClosed} expectedSession={context?.session ?? organizationExecutionSession} onSessionChanged={sessionChanged} onSelectPersonal={onSelectPersonal} />}
+        {tab === 'history' && <BusinessHistoryPanel port={currentHistory} displayClosed={displayClosed} expectedContext={context} />}
+        {tab === 'learning' && <BusinessLearningPanel port={currentLearning} displayClosed={displayClosed} expectedContext={context} />}
+        {tab === 'organization-execution' && <BusinessOrganizationExecutionPanel port={currentOrganizationExecution} displayClosed={displayClosed} expectedSession={organizationExecutionSession} />}
+      </div>
+    </div>
   </section>;
 }

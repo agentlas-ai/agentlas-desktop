@@ -141,29 +141,49 @@ export function BusinessAccountPanel({ port, expectedSession, initialSnapshot = 
   if (variant === 'selector') return <div className="business-organization-selector"><IconBuilding size={16} />{selector}
     <button type="button" className="business-icon-button" title={copy("조직 상태 확인", "Check organization status")} aria-label={copy("조직 상태 확인", "Check organization status")} disabled={displayClosed || busy || !port} onClick={() => { if (port) void act(() => port.read()); }}><IconRefresh size={14} /></button>
   </div>;
+  const selectedOrganization = session && visible?.organizations.find(org => org.id === session.organizationId);
   return (
     <section aria-labelledby="business-account-heading" className="business-account-panel">
       <h2 id="business-account-heading">{copy("계정과 조직", "Account and organization")}</h2>
       {!port && <span role="status" className="business-status" data-state="unknown">{copy("계정 연결 필요", "Account connection required")}</span>}
       {port && !visible && <span role="status" className="business-status" data-state="unknown">{copy("현재 계정 확인 필요", "Check the current account")}</span>}
-      <label className="business-field">{copy("조직", "Organization")}{selector}</label>
-      <div className="business-actions">
-        {!session && <button type="button" disabled={busy || !port} onClick={() => { if (port) void act(() => port.signIn(), undefined, true); }}>{copy("회사 계정으로 로그인", "Sign in with a company account")}</button>}
+      <div className="business-account-layout" data-inspector={!!(session && visible)}>
+        <div className="business-account-main">
+          <label className="business-field">{copy("조직", "Organization")}{selector}</label>
+          {visible && visible.organizations.length > 0 && <ul className="business-organization-rows" aria-label={copy("연결된 조직", "Connected organizations")}>
+            {visible.organizations.map(org => <li key={org.id} data-current={session?.organizationId === org.id}>
+              <IconBuilding size={20} /><div><strong>{org.label}</strong><span>{org.membership === 'active' ? copy("사용 중", "Active") : org.membership === 'invited' ? copy("가입 필요", "Join required") : copy("사용 중지", "Disabled")}</span></div>
+              {session?.organizationId === org.id && <span className="business-status" data-state="active">{copy("현재 조직", "Current organization")}</span>}
+            </li>)}
+          </ul>}
+          {!session && <div className="business-actions"><button type="button" disabled={busy || !port} onClick={() => { if (port) void act(() => port.signIn(), undefined, true); }}>{copy("회사 계정으로 로그인", "Sign in with a company account")}</button></div>}
+          {session && visible?.organizations.filter(org => org.membership === 'invited').map(org => <button key={org.id} type="button" disabled={busy || !current}
+            onClick={() => { if (port && current) void act(() => port.joinOrganization({ organizationId: org.id, expectedSessionId: session.sessionId, expectedSessionRevision: session.sessionRevision }), undefined, true); }}>{org.label}{copy(" 가입", " Join")}</button>)}
+          {session && visible && visible.providers.length > 0 && <section className="business-account-section"><h3>{copy("조직 공용 연결", "Shared organization connections")}</h3>
+            <ul aria-label={copy("조직 공용 연결", "Shared organization connections")}>
+              {visible.providers.map(provider => <li className="business-setting-row" key={provider.id}><span>{provider.label}</span><span className="business-status" data-state={provider.state}>{providerLabels[provider.state]}</span><small title="credential generation">v{provider.generation}</small></li>)}
+            </ul>
+          </section>}
+          {session && visible && visible.adminViews.length > 0 && <section className="business-account-section"><h3>{copy("조직 관리", "Organization management")}</h3>
+            <nav aria-label={copy("조직 관리", "Organization management")}>
+              {visible.adminViews.map(view => <button key={view} type="button" disabled={busy || !current} onClick={() => { if (port && current) void act(() => port.openAdmin({ organizationId: session.organizationId, view, expectedSessionId: session.sessionId, expectedSessionRevision: session.sessionRevision })); }}><IconShield size={15} />{viewLabels[view]}</button>)}
+            </nav>
+          </section>}
+        </div>
+        {session && visible && <aside className="business-account-inspector" aria-label={copy("현재 조직", "Current organization")}>
+          <div className="business-inspector-icon"><IconBuilding size={28} /></div>
+          <h3>{selectedOrganization?.label ?? copy("현재 조직", "Current organization")}</h3>
+          <dl className="business-account-facts"><div><dt>{copy("연결 상태", "Connection status")}</dt><dd>{copy("현재 연결", "Current connection")}</dd></div>
+            {selectedOrganization && selectedOrganization.roles.length > 0 && <div><dt>{copy("내 역할", "My roles")}</dt><dd>{selectedOrganization.roles.map(role => role === 'admin' ? copy("관리자", "Administrator") : role === 'member' ? copy("멤버", "Member") : role).join(', ')}</dd></div>}
+          </dl>
+          <details className="business-details"><summary>{copy("연결 정보", "Connection details")}</summary><dl><dt>{copy("계정 연결", "Account connection")}</dt><dd>{session.hostId}</dd><dt>{copy("세션 버전", "Session version")}</dt><dd>{session.sessionRevision}</dd></dl></details>
+        </aside>}
+      </div>
+      <div className="business-actions business-account-actions">
         <button type="button" onClick={() => { if (port) void act(async () => { await port.selectPersonal(); onSelectPersonal?.(); }, undefined, true); }} disabled={busy || !port}>{copy("개인 공간으로 이동", "Go to personal space")}</button>
         <button type="button" title={copy("현재 상태 확인", "Check current status")} aria-label={copy("현재 상태 확인", "Check current status")} onClick={() => { if (port) void act(() => port.read()); }} disabled={displayClosed || busy || !port}><IconRefresh size={16} /></button>
         <button type="button" disabled={!logoutTarget.current || !port || logoutPending.current} onClick={() => void logout()}><IconLogOut size={16} />{copy("조직 로그아웃", "Sign out of organization")}</button>
       </div>
-      {session && visible?.organizations.filter(org => org.membership === 'invited').map(org => <button key={org.id} type="button" disabled={busy || !current}
-        onClick={() => { if (port && current) void act(() => port.joinOrganization({ organizationId: org.id, expectedSessionId: session.sessionId, expectedSessionRevision: session.sessionRevision }), undefined, true); }}>{org.label}{copy(" 가입", " Join")}</button>)}
-      {session && visible && visible.providers.length > 0 && (
-        <ul aria-label={copy("조직 공용 연결", "Shared organization connections")}>
-          {visible.providers.map(provider => <li className="business-setting-row" key={provider.id}><span>{provider.label}</span><span className="business-status" data-state={provider.state}>{providerLabels[provider.state]}</span><small title="credential generation">v{provider.generation}</small></li>)}
-        </ul>
-      )}
-      {session && visible && <nav aria-label={copy("조직 관리", "Organization management")}>
-        {visible.adminViews.map(view => <button key={view} type="button" disabled={busy || !current} onClick={() => { if (port && current) void act(() => port.openAdmin({ organizationId: session.organizationId, view, expectedSessionId: session.sessionId, expectedSessionRevision: session.sessionRevision })); }}><IconShield size={15} />{viewLabels[view]}</button>)}
-      </nav>}
-      {session && <details className="business-details"><summary>{copy("연결 정보", "Connection details")}</summary><dl><dt>{copy("계정 연결", "Account connection")}</dt><dd>{session.hostId}</dd><dt>{copy("세션 버전", "Session version")}</dt><dd>{session.sessionRevision}</dd></dl></details>}
       {notice && <p role="status">{notice}</p>}
     </section>
   );

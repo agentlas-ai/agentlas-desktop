@@ -1587,7 +1587,7 @@ const runClaudeTurn = async (
    * 떨어지고, 사용자 화면에는 아무 차이도 남지 않는다.
    */
   const runCwd = req.cwd ?? agentRunCwd();
-  // Product sessions live in Agentlas's own Claude config dir, never in the person's ~/.claude (owner 2026-10-13); the
+  // Product sessions live in Agentlas's own Claude config dir, never in the person's ~/.claude; the
   // person's keychain sign-in is reused unchanged (claude-product-home.ts). One keeps the user MCP servers it switched on.
   const runEnv = withClaudeProductHome(aliveProfile ? { ...process.env, CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(req.maxOutputTokens),
     MAX_STRUCTURED_OUTPUT_RETRIES: "1", CLAUDE_CODE_MAX_TURNS: "1", CLAUDE_CODE_MAX_RETRIES: "0" } : req.env ?? process.env, {
