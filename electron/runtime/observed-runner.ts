@@ -38,6 +38,11 @@ function typedProviderFailure(failure: RunnerFailure | undefined, toolActivity: 
   return TYPED_PROVIDER_FAILURE_KINDS.has(failure.kind) && (!toolActivity || toolless);
 }
 
+/** The same rule for a host that calls a runner without this wrapper (alive-organisms/light-wake.ts). */
+export function runnerFailureKeepsOwnCode(failure: RunnerFailure | undefined, toolActivity: boolean, request: RunnerRequest): boolean {
+  return typedProviderFailure(failure, toolActivity, request);
+}
+
 const usageOnError = new WeakMap<object, ReturnType<typeof createRuntimeUsageCollector>>();
 const nativeReceipts = new WeakMap<object, Map<string, ReturnType<typeof createRuntimeUsageCollector>>>();
 const returnedResultsOnError = new WeakMap<object, RunnerResult>();

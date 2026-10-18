@@ -17,8 +17,10 @@
  */
 import type Database from "better-sqlite3";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
-import type { Runner, RunnerFailure } from "../runtime/runner";
-import { RuntimeTurnUnsettledError, runnerFailureFromError, runtimeFailureIsClosedHttpRefusal } from "../runtime/runner";
+import type { Runner, RunnerFailure, RunnerRequest } from "../runtime/runner";
+import { RuntimeTurnUnsettledError, outwardFailureCode, runnerFailureFromError, runnerRefusedBeforeDispatch,
+  runnerResultRefusedBeforeDispatch, runtimeFailureIsClosedHttpRefusal } from "../runtime/runner";
+import { runnerFailureKeepsOwnCode } from "../runtime/observed-runner";
 import { runtimeFailureBlocksReplay } from "../runtime/selection";
 import { isJudgmentRefusal } from "../runtime/judgment-refusal";
 import { createRuntimeUsageCollector } from "../../shared/observed-usage";
@@ -35,6 +37,18 @@ import type { AliveDecisionBinding, AliveDecisionTransport } from "../daemon/ali
 export type AliveRuntimeFact = "cannot-judge" | "usage-unmeasured";
 export function aliveRuntimeFactKey(status: Pick<RuntimeStatus, "kind" | "source" | "version">): string {
   return JSON.stringify([status.kind, status.source ?? null, status.version ?? null]);
+}
+
+/** alive-core/lifetime-store.ts keeps a receipt errorCode only in this shape (else it records null). */
+const WAKE_ERROR_CODE = /^[a-z][a-z0-9._-]{2,119}$/;
+/**
+ * A wake's own typed cause, as observed-runner.ts keeps it for every other caller: a provider's or host's typed marker
+ * refusal (a no-tools wake has no tool that could have acted), a refusal proven before dispatch, or a typed code thrown
+ * before any native activity. Everything else stays runtime_turn_unsettled. Production 2026-10-16..17: three codex
+ * wakes settled runtime_turn_unsettled with 0 tokens in 9-24 ms, so the refusal that ended them was never recorded.
+ */
+function ownWakeFailureCode(code: string | undefined): string | null {
+  return code && WAKE_ERROR_CODE.test(code) ? code : null;
 }
 
 export interface LightWakeRow {
@@ -142,7 +156,7 @@ export class LightWakeRunner {
     const runner: Runner = this.deps.decisionTransport
       ? (request, events) => this.deps.decisionTransport!.run(input.decisionBinding!, input.status, input.selection, request, events)
       : picked.runner;
-    void Promise.resolve().then(() => runner({
+    const request: RunnerRequest = {
       systemPrompt: input.systemPrompt, history: [], userPrompt: input.userPrompt, backendLabel: picked.label,
       runtimeSource: input.status.source, model: input.selection.model, effort: "low",
       longContext: false, permission: "read", untrustedNoTools: true, judgmentOnly: true, surfaceGate: "exclude",
@@ -151,7 +165,8 @@ export class LightWakeRunner {
       // Codex keeps provider-global config (plugins, MCP servers) unless told to ignore it: 29.5k → 22.6k input
       // tokens per wake measured 2026-09-24. Other runners already exclude user config on this path.
       ...(input.status.kind === "codex" ? { isolatedMcpConfig: true as const } : {}),
-    }, {
+    };
+    void Promise.resolve().then(() => runner(request, {
       onPartial: (text) => {
         if (!settled && text) { nativeEvidence = true; partialText = (partialText + text).slice(0, 4_096); }
       }, onStatus: () => {},
@@ -182,8 +197,10 @@ export class LightWakeRunner {
         text: result.text, nativeActivity: nativeEvidence, aborted: false, observedUsage: result.observedUsage,
       })) {
         const failure = runnerFailureFromError(new RuntimeTurnUnsettledError(input.status.kind, "en"), input.status.kind);
+        const own = runnerResultRefusedBeforeDispatch(result) || runnerFailureKeepsOwnCode(result.failure, toolIds.size > 0, request)
+          ? ownWakeFailureCode(result.failure?.providerCode) : null;
         try { this.deps.noteFailure(input.status, result.failure ?? failure); } catch { /* telemetry cannot prevent settlement */ }
-        this.settle(input.wakeId, "failed", observed, result.text || partialText || null, failure.providerCode!);
+        this.settle(input.wakeId, "failed", observed, result.text || partialText || null, own ?? failure.providerCode!);
         return;
       }
       if (result.failure) {
@@ -205,10 +222,11 @@ export class LightWakeRunner {
       const reason = controller.signal.aborted ? String((controller.signal.reason as Error)?.message ?? "") : "";
       const cancelled = reason === "alive-wake-cancelled" || reason === "alive-wake-shutdown";
       const failure = runnerFailureFromError(error, input.status.kind);
+      const own = !nativeEvidence || runnerRefusedBeforeDispatch(error) ? ownWakeFailureCode(outwardFailureCode(error)) : null;
       this.settle(input.wakeId, cancelled ? "cancelled" : "failed", usage.total() ?? null, partialText || null,
         cancelled ? reason
           : runtimeFailureBlocksReplay(failure) ? failure.providerCode!
-            : new RuntimeTurnUnsettledError(input.status.kind, "en").code);
+            : own ?? new RuntimeTurnUnsettledError(input.status.kind, "en").code);
     }).finally(() => { clearTimeout(timer); this.active.delete(input.wakeId); });
     const toolCallsOf = () => [...toolIds.values()].filter((name) => !ANSWER_CHANNEL_TOOLS.has(name)).length;
     const toolNames = () => [...new Set(toolIds.values())];
