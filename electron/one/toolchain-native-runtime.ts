@@ -5,7 +5,7 @@ import type { BusinessOpaqueSource } from "../../shared/business/native-registry
 import type { ToolchainPreparationProducer, ToolchainPreparationPurpose } from "../toolchains/preparation";
 import type { ToolchainPreparedProposal } from "../toolchains/generalizer";
 import { configureNativeToolchainReportPorts } from "../toolchains/reports";
-import { createDefaultOneToolchainNativeRegistration, type OneToolchainResourceOwnerPort,
+import { createDefaultOneToolchainNativeRegistration, type OneToolchainResourceOwnerPort, type OneToolchainPersonalTurnPorts,
   type OneToolchainBusinessFacade, type OneToolchainOriginalWork, type OneToolchainOriginalWorkToken } from "./toolchain-native-registration";
 
 type Registration = Awaited<ReturnType<typeof createDefaultOneToolchainNativeRegistration>>;
@@ -34,6 +34,8 @@ export interface OneToolchainNativeOwnerPorts {
   business: OneToolchainBusinessFacade;
   preparation: OneToolchainPreparationOwnerPort | null;
   execution?: OneToolchainExecutionOwnerPort | null;
+  /** Personal installation only (toolchain-personal-owner.ts). Absent: a Supervisor command is the only original work. */
+  turns?: OneToolchainPersonalTurnPorts | null;
 }
 interface NativeBinding { chatId?: string | null; supervisorReplyRunId?: string; historySource?: { runId: string }; personalSource?: { runId: string } }
 interface Capability {
@@ -81,10 +83,15 @@ async function original(capability: Capability): Promise<OneToolchainOriginalWor
       ?? capability.binding.historySource?.runId ?? capability.binding.personalSource?.runId;
     if (!chatId || !runId) unavailable("toolchain_native_original_command_required");
     const { getDb } = await import("../store/db"); assertCapability(capability);
-    const rows = getDb().prepare("SELECT command_id FROM one_supervisor_requests WHERE run_id=? AND kind IN ('work','reply') AND state IN ('dispatching','accepted')")
-      .all(runId) as Array<{ command_id: string }>;
-    if (rows.length !== 1) unavailable("toolchain_native_original_command_required");
-    const token = registered.bindRun({ commandId: rows[0].command_id, runId, chatId });
+    const db = getDb();
+    const rows = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='one_supervisor_requests'").get()
+      ? db.prepare("SELECT command_id FROM one_supervisor_requests WHERE run_id=? AND kind IN ('work','reply') AND state IN ('dispatching','accepted')")
+        .all(runId) as Array<{ command_id: string }> : [];
+    if (rows.length > 1) unavailable("toolchain_native_original_command_required");
+    // A Supervisor command keeps its own path. Every other run is a personal turn (room, Goal, Work task); the
+    // registration refuses it unless the personal composition bound its turn ports (D3: 209 of 210 production runs).
+    const token = rows.length === 1 ? registered.bindRun({ commandId: rows[0].command_id, runId, chatId })
+      : registered.bindTurn({ runId, chatId });
     capability.registration = registered; capability.token = token;
     try { assertCapability(capability); } catch (error) { registered.forget(token); throw error; }
     return token;

@@ -15,8 +15,10 @@ export type OneToolchainPhase='report'|'notice'|'read-reports'|'repair';
 export interface OneToolchainNativeActor {principalId:string;sessionId:string;workspaceId:string;oneId:string;hostId:string}
 /** This token is usable only by the issuing instance; copying JSON never creates custody. */
 export interface OneToolchainOriginalWorkToken {readonly oneToolchainOriginalWork:true}
+/** 'turn' is personal-scope only: an ordinary admitted invocation turn (room, Goal, Work task, One chat) that carries no
+ * Supervisor command row. Its custody is the live invocation record and its active lease in this process (D3). */
 export interface OneToolchainOriginalWork {
-  readonly actor:OneToolchainNativeActor;readonly kind:'task'|'reply';readonly commandId:string;readonly taskId:string|null;readonly runId:string;
+  readonly actor:OneToolchainNativeActor;readonly kind:'task'|'reply'|'turn';readonly commandId:string;readonly taskId:string|null;readonly runId:string;
   readonly controlVersion:string|null;readonly replyAuthorityRevision:string|null;readonly chatId:string;readonly originChatId:string;readonly leaseId:string;
   readonly payloadHash:string;readonly nativeInputDigest:string;readonly budgetId:string|null;readonly budgetRevision:number|null;
 }
@@ -96,6 +98,19 @@ export interface OneToolchainOriginalWorkPorts {
   commandBudget(row:Readonly<SupervisorRequestRow>):string|null;
   owners:OneToolchainResourceOwnerPort|null;
   business?:OneToolchainBusinessFacade|null;
+  /** Personal installation only; absent (organization) means only a Supervisor command is original work. */
+  turns?:OneToolchainPersonalTurnPorts|null;
+}
+/** Personal-scope original work without a Supervisor command row (production 2026-10-08..18: 209 of the 210 runs that
+ * called toolchain_* had none). The personal composition supplies these; they mint no command, queue or grant. */
+export interface OneToolchainPersonalTurnPorts {
+  /** The live invocation record THIS process holds for the run (InvocationService.liveRunOwner), never a stored row. */
+  liveRunOwner(runId:string):InvocationRunOwner|null;
+  /** The conversation exists and is not archived. */
+  assertChat(chatId:string):void;
+  /** Personal budget authority. Null while a One budget policy is configured: then only a budgeted Supervisor command prepares. */
+  turnBudget(input:{oneId:string;runId:string;chatId:string}):{budgetId:string;revision:number}|null;
+  currentTurnBudget(input:{oneId:string;runId:string;budgetId:string}):{admitted:boolean;revision:number|null}|null;
 }
 function fail(reason:string):never {throw new Error(reason);}
 const digest=(value:unknown)=>sha256Value(value);
@@ -163,9 +178,34 @@ export function createOneToolchainNativeRegistration(ports:OneToolchainOriginalW
       originChatId:row.origin_chat_id,leaseId:lease.leaseId,payloadHash:row.payload_hash,nativeInputDigest:admission.inputDigest,budgetId,budgetRevision});
     return {original,rowDigest:digest([row.command_id,row.kind,row.one_id,row.task_id,row.run_id,row.origin_chat_id,row.payload_json,row.payload_hash]),lease};
   };
+  const hasCommandTable=()=>Boolean(ports.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='one_supervisor_requests'").get());
+  /** Personal turn: no command row may exist for the run (a command keeps its stricter path), the live invocation
+   * record and the stored lease agree in this process, and a stored admission, when the turn has one, is admitted. */
+  const lookupTurn=(selector:{runId:string;chatId:string})=>{
+    const turns=ports.turns??fail('toolchain_native_original_command_required');
+    const actor=ports.actor();
+    if(!Object.values(actor).every(id)||![selector.runId,selector.chatId].every(id))fail('toolchain_native_original_work_required');
+    turns.assertChat(selector.chatId);
+    if(hasCommandTable()&&ports.db.prepare("SELECT 1 FROM one_supervisor_requests WHERE run_id=? AND kind IN ('work','reply') AND state IN ('dispatching','accepted') LIMIT 1").get(selector.runId))
+      fail('toolchain_native_original_command_required');
+    const lease=ports.getRunOwner(selector.chatId,selector.runId),process=ports.processOwner(),live=turns.liveRunOwner(selector.runId);
+    if(!lease||lease.state!=='active'||lease.chatId!==selector.chatId||lease.runId!==selector.runId||lease.ownerId!==process.ownerId||lease.ownerKind!==process.ownerKind
+      ||!live||live.leaseId!==lease.leaseId||live.ownerId!==lease.ownerId||live.chatId!==selector.chatId||live.runId!==selector.runId)fail('toolchain_native_invocation_custody_required');
+    // Owner-started turns carry a stored admission; host-started turns (Goal continuation, team report) do not.
+    const admission=ports.getAdmission(selector.runId);
+    if(admission&&(admission.status!=='admitted'||admission.runId!==selector.runId||admission.chatId!==selector.chatId
+      ||admission.digestVersion!=='main-canonical-json-v1'||!id(admission.inputDigest)))fail('toolchain_native_actual_admission_required');
+    const authority=digest(['native-turn-authority.v1',selector.runId,selector.chatId,lease.leaseId,lease.ownerId,lease.ownerKind,admission?.inputDigest??null]);
+    const budget=turns.turnBudget({oneId:actor.oneId,runId:selector.runId,chatId:selector.chatId});
+    if(budget&&(!id(budget.budgetId)||!Number.isSafeInteger(budget.revision)))fail('toolchain_native_admitted_control_budget_required');
+    const original:OneToolchainOriginalWork=freeze({actor:{...actor},kind:'turn',commandId:`turn:${selector.runId}`,taskId:null,runId:selector.runId,controlVersion:null,
+      replyAuthorityRevision:authority,chatId:selector.chatId,originChatId:selector.chatId,leaseId:lease.leaseId,payloadHash:authority,
+      nativeInputDigest:admission?.inputDigest??authority,budgetId:budget?.budgetId??null,budgetRevision:budget?.revision??null});
+    return {original,rowDigest:authority,lease};
+  };
   const assertToken=(token:OneToolchainOriginalWorkToken):OneToolchainOriginalWork=>{
     const w=tokens.get(token);if(!w)fail('toolchain_native_original_work_capability_required');
-    const fresh=lookup(w.original);if(digest(fresh.original)!==digest(w.original)||fresh.rowDigest!==w.rowDigest||fresh.lease.leaseId!==w.lease.leaseId)fail('toolchain_native_original_work_changed');
+    const fresh=w.original.kind==='turn'?lookupTurn(w.original):lookup(w.original);if(digest(fresh.original)!==digest(w.original)||fresh.rowDigest!==w.rowDigest||fresh.lease.leaseId!==w.lease.leaseId)fail('toolchain_native_original_work_changed');
     return w.original;
   };
   const release=(ref:OneToolchainReleaseRef):ToolchainAssetVersion=>{
@@ -186,6 +226,10 @@ export function createOneToolchainNativeRegistration(ports:OneToolchainOriginalW
   const bindRun=(selector:{commandId:string;runId:string;chatId:string}):OneToolchainOriginalWorkToken=>{
     if(ports.db.inTransaction)fail('toolchain_native_uncommitted_original_work');
     const w=lookup(selector),token=Object.freeze({oneToolchainOriginalWork:true as const});tokens.set(token,w);return token;
+  };
+  const bindTurn=(selector:{runId:string;chatId:string}):OneToolchainOriginalWorkToken=>{
+    if(ports.db.inTransaction)fail('toolchain_native_uncommitted_original_work');
+    const w=lookupTurn(selector),token=Object.freeze({oneToolchainOriginalWork:true as const});tokens.set(token,w);return token;
   };
   /** Caller passes the genuine source manifest captured by its authenticated producer,
    * never source refs parsed out of an asset description or renderer/model JSON. */
@@ -388,7 +432,7 @@ export function createOneToolchainNativeRegistration(ports:OneToolchainOriginalW
       }
     },
   };
-  return {bindRun,assertToken,registerProduced,resolveRelease,registerCall,reportAdmissionPort,
+  return {bindRun,bindTurn,assertToken,registerProduced,resolveRelease,registerCall,reportAdmissionPort,
     /** Only the native capability WeakMap may call this with its original token. It
      * accepts no serialized actor/context flag and preserves token custody across await. */
     withOriginalWork<T>(token:OneToolchainOriginalWorkToken,body:()=>Promise<T>|T):Promise<T>{assertToken(token);return currentOriginal.run(Object.freeze({token,identity:Symbol('native-toolchain-caller')}),async()=>{const value=await body();assertToken(token);return value;});},
@@ -397,15 +441,25 @@ export function createOneToolchainNativeRegistration(ports:OneToolchainOriginalW
 
 /** Actual existing native dependencies, loaded only on explicit native owner composition.
  * Missing current owner/phase/budget bindings refuse BEFORE any DB/profile import. */
-export async function createDefaultOneToolchainNativeRegistration(input:{owners:OneToolchainResourceOwnerPort|null;business:OneToolchainBusinessFacade|null}) {
+export async function createDefaultOneToolchainNativeRegistration(input:{owners:OneToolchainResourceOwnerPort|null;business:OneToolchainBusinessFacade|null;turns?:OneToolchainPersonalTurnPorts|null}) {
   if(!input.owners||!input.business)fail('toolchain_native_shipping_owner_ports_unbound');
   const [db,auth,profile,host,tasks,owners,supervisor,admissions]=await Promise.all([import('../store/db'),import('../auth'),import('../store/one-profile'),import('./host-identity'),import('../store/tasks'),import('../store/invocation-run-owners'),import('./supervisor'),import('../store/invocation-admissions')]);
-  return createOneToolchainNativeRegistration({...input,db:db.getDb(),
+  const turns=input.turns??null;
+  // A personal installation has no budget policy (production one_budget_policies: 0 rows) and its reservations carry
+  // budget_id NULL. There the command's own run is the budget authority, exactly as for a personal turn; a configured
+  // policy keeps the reservation path and turnBudget answers null.
+  const personalBudget=(row:Readonly<SupervisorRequestRow>)=>turns&&row.run_id?turns.turnBudget({oneId:row.one_id,runId:row.run_id,chatId:row.origin_chat_id}):null;
+  return createOneToolchainNativeRegistration({owners:input.owners,business:input.business,turns,db:db.getDb(),
     actor:()=>{const s=auth.getAuthenticatedSessionBinding();if(!s||s.expiresAt!==null&&s.expiresAt<=Date.now())fail('toolchain_native_session_required');return {principalId:s.userId,sessionId:s.sessionId,workspaceId:s.workspaceId,oneId:profile.getOneProfile().oneId,hostId:host.oneNativeHostIdentity().hostId};},
     assertOwner:()=>supervisor.oneSupervisor().assertHostWriteAuthority(profile.getOneProfile().oneId),canonicalTask:tasks.getCanonicalTask,
     processOwner:owners.invocationProcessOwner,getRunOwner:owners.invocationRunOwners.getRunOwner,
     getAdmission:admissions.getInvocationAdmission,
-    commandBudget:row=>{const reserved=db.getDb().prepare('SELECT budget_id FROM one_budget_reservations WHERE command_id=? AND one_id=? AND task_id IS ? AND run_id=?').get(row.command_id,row.one_id,row.task_id,row.run_id) as {budget_id:string|null}|undefined;return reserved?.budget_id??null;},
+    commandBudget:row=>{const reserved=db.getDb().prepare('SELECT budget_id FROM one_budget_reservations WHERE command_id=? AND one_id=? AND task_id IS ? AND run_id=?').get(row.command_id,row.one_id,row.task_id,row.run_id) as {budget_id:string|null}|undefined;return reserved?.budget_id??personalBudget(row)?.budgetId??null;},
     currentReply:createOneToolchainNativeReplyAuthority({db:db.getDb(),getAdmission:admissions.getInvocationAdmission,getRunOwner:owners.invocationRunOwners.getRunOwner}),
-    currentControl:row=>supervisor.currentOneNativeWorkControl(row),currentBudget:supervisor.currentOneNativeWorkBudget});
+    currentControl:row=>supervisor.currentOneNativeWorkControl(row),
+    currentBudget:(commandId,budgetId)=>{
+      const row=turns?db.getDb().prepare('SELECT * FROM one_supervisor_requests WHERE command_id=?').get(commandId) as SupervisorRequestRow|undefined:undefined;
+      const personal=row?.run_id&&turns?turns.currentTurnBudget({oneId:row.one_id,runId:row.run_id,budgetId}):null;
+      return personal??supervisor.currentOneNativeWorkBudget(commandId,budgetId);
+    }});
 }
