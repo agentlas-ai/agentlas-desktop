@@ -1175,8 +1175,17 @@ export async function callHarnessPort(operationId: string, rawArgs: Record<strin
 export type HarnessItemKind = "plugin" | "skill" | "connector" | "tool" | "operation" | "feature";
 
 /** Unified inert discovery across plugins, skills, connectors, catalog tools and the port operations themselves. */
+/** App catalog paths (automations.listRuns, …) that answer a query; empty when none or the catalog is unreachable. */
+async function appOperationPaths(query: string): Promise<string[]> {
+  if (!query.trim()) return [];
+  try {
+    const found = await (await import("../app-control/service")).appControlOperations({ query, limit: 8 }) as { operations?: Array<{ operation?: unknown }> };
+    return (found.operations ?? []).flatMap((row) => typeof row.operation === "string" ? [row.operation] : []);
+  } catch { return []; }
+}
+
 export async function searchHarness(query: string, kind?: HarnessItemKind): Promise<Array<{ id: string; kind: HarnessItemKind; name: string; description: string }>> {
-  const out: Array<{ id: string; kind: HarnessItemKind; name: string; description: string }> = [];
+  const out: Array<{ id: string; kind: HarnessItemKind; name: string; description: string; rankTerms?: string[] }> = [];
   const want = (k: HarnessItemKind) => !kind || kind === k;
   if (want("plugin")) for (const row of await pluginRows()) if (matches(query, row.slug, row.name, row.description)) out.push({ id: row.id, kind: "plugin", name: row.mention, description: row.description });
   if (want("skill")) for (const row of await skillRows()) if (matches(query, row.id, row.name, row.description)) out.push({ id: row.id, kind: "skill", name: row.name, description: row.description });
@@ -1187,6 +1196,18 @@ export async function searchHarness(query: string, kind?: HarnessItemKind): Prom
     for (const feature of FEATURE_MODULES) if (matches(query, feature.featureId, ...feature.surfaces)) out.push({ id: `feature:${feature.featureId}`, kind: "feature", name: feature.featureId, description: `surfaces: ${feature.surfaces.join(", ") || "-"}` });
   }
   if (want("operation")) for (const port of PORTS) if (matches(query, port.operationId, port.purpose)) out.push({ id: port.operationId, kind: "operation", name: port.operationId, description: `${port.purpose}${port.handler ? "" : " (unavailable)"}` });
+  // The app's own operations answer through app.operations / app.call, whose purpose names no domain. The catalog paths
+  // that answer the query rank those two entries, and they lead the candidates so a tie goes to the app; nothing new is
+  // shown (dev 2026-10-18 O6: "automation run log schedule" returned skills and science tools, never automations.*, and
+  // the Light-lane worker gave up "no registration tool").
+  const appPaths = want("operation") ? await appOperationPaths(query) : [];
+  if (appPaths.length) for (const id of ["app.call", "app.operations"]) {
+    const port = PORT_BY_ID.get(id);
+    if (!port) continue;
+    const at = out.findIndex((item) => item.id === id);
+    if (at >= 0) out.splice(at, 1);
+    out.unshift({ id: port.operationId, kind: "operation", name: port.operationId, description: `${port.purpose}${port.handler ? "" : " (unavailable)"}`, rankTerms: appPaths });
+  }
   // Best match first across every kind (search-rank.ts); the fixed kind order cut the answering operation off (r07).
   const { rankHarnessItems } = await import("./search-rank");
   return rankHarnessItems(query, out, 60);

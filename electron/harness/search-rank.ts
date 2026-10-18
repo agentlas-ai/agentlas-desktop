@@ -9,7 +9,11 @@
  * characters ("to", "a") carry no signal and are ignored. Entries are ordered by score, and ties keep their original
  * order. An empty query keeps the original order.
  */
-export interface RankableHarnessItem { id: string; name: string; description: string }
+export interface RankableHarnessItem {
+  id: string; name: string; description: string;
+  /** Extra id-like words an entry answers to; used for ranking only and removed from the result. */
+  rankTerms?: readonly string[];
+}
 
 export function harnessRelevance(query: string, primary: readonly string[], secondary: readonly string[]): number {
   const terms = [...new Set(query.toLowerCase().split(/[^\p{L}\p{N}._-]+/u).filter((term) => term.length >= 3))];
@@ -24,11 +28,17 @@ export function harnessRelevance(query: string, primary: readonly string[], seco
 /** Keep matching entries (score > 0 when the query has words), best first; a stable sort keeps ties in order. */
 export function rankHarnessItems<T extends RankableHarnessItem>(query: string, items: ReadonlyArray<T>, limit = 60): T[] {
   const hasTerms = query.toLowerCase().split(/[^\p{L}\p{N}._-]+/u).some((term) => term.length >= 3);
-  if (!hasTerms) return items.slice(0, limit);
+  if (!hasTerms) return items.slice(0, limit).map(withoutRankTerms);
   return items
-    .map((item, index) => ({ item, index, score: harnessRelevance(query, [item.id, item.name], [item.description]) }))
+    .map((item, index) => ({ item, index, score: harnessRelevance(query, [item.id, item.name, ...(item.rankTerms ?? [])], [item.description]) }))
     .filter((row) => row.score > 0)
     .sort((a, b) => b.score - a.score || a.index - b.index)
     .slice(0, limit)
-    .map((row) => row.item);
+    .map(({ item }) => withoutRankTerms(item));
+}
+
+function withoutRankTerms<T extends RankableHarnessItem>(item: T): T {
+  if (!item.rankTerms) return item;
+  const { rankTerms: _rankTerms, ...shown } = item;
+  return shown as T;
 }
