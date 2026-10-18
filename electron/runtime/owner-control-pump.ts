@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { createObservedUsageAccumulator } from "../../shared/observed-usage";
 import type { ChatHistoryEntry, ImageAttachment } from "../../shared/types";
-import { runnerRefusedBeforeDispatch, runnerResultRefusedBeforeDispatch, type RunnerRequest, type RunnerResult } from "./runner";
+import type { RunnerRequest, RunnerResult } from "./runner";
+import { runnerRefusedBeforeDispatch, runnerResultRefusedBeforeDispatch } from "./runner-pre-dispatch";
 
 /** Original user attachments remain with their user history row. Only inline
  * formats admitted by the existing attachment pipeline cross the API wire;

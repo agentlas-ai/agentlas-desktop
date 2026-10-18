@@ -5,6 +5,7 @@ import { LIVE_DOCUMENT_PORT_SCHEMAS as LIVE_DOCUMENT_SCHEMAS } from "../live-doc
 import { recordRunProducedFiles } from "./run-produced-files";
 import { composeFinanceSkillContent, FINANCE_PORTS } from "../finance/tools";
 import type { FinanceReceiptReference } from "../finance/receipts";
+import { composeDeclaredPrompt, registerDeclaredPromptModule } from "../runtime/prompt-order";
 
 /*
  * Agentlas harness capability ports (docs/2026-10-13-native-harness/15 §8, contracts/harness-capability-ports.json).
@@ -232,6 +233,18 @@ async function skillRows(): Promise<SkillRow[]> {
 
 const MAX_SKILL_READ_BYTES = 512 * 1024;
 
+for (const workflow of ["document", "sheet", "slides"]) registerDeclaredPromptModule({
+  id: `plugin.office.skill.${workflow}`, revision: 1, stability: "versioned-content", changeTriggers: ["release", "skill-package"], order: 0,
+});
+
+function composeInstalledSkillContent(skillId: string, content: string): string {
+  const workflow = ["document", "sheet", "slides"].find((name) => skillId === `plugin:office/${name}`);
+  if (!workflow) return composeFinanceSkillContent(skillId, content);
+  if (!content.trim()) return content;
+  return composeDeclaredPrompt([{ id: `plugin.office.skill.${workflow}`, revision: 1,
+    stability: "versioned-content", changeTriggers: ["release", "skill-package"], order: 0, text: content }]);
+}
+
 async function readSkill(skillId: string): Promise<{ content: string; revision: string; path: string } | null> {
   if (skillId.startsWith("catalog:")) {
     const { readSkillCatalogAsset } = await import("../hephaestus/skill-catalog");
@@ -248,7 +261,7 @@ async function readSkill(skillId: string): Promise<{ content: string; revision: 
     const stat = fs.lstatSync(row.path);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_SKILL_READ_BYTES) return null;
     const bytes = fs.readFileSync(row.path);
-    return { content: composeFinanceSkillContent(skillId, bytes.toString("utf8")), revision: sha(bytes), path: row.path };
+    return { content: composeInstalledSkillContent(skillId, bytes.toString("utf8")), revision: sha(bytes), path: row.path };
   } catch {
     return null;
   }

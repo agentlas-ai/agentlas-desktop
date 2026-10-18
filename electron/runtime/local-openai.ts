@@ -211,7 +211,7 @@ export function makeLocalOpenAiRunner(
           } } : {}),
           ...(capacity ? { capacitySource: capacity.source } : {}),
         } : {}),
-        ...(options.acceptsImageResults === false ? { acceptsImageResults: false } : {}),
+        ...(options.acceptsImageResults !== undefined ? { acceptsImageResults: options.acceptsImageResults } : {}),
         ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
         ...(systemPromptFallback ? { systemPromptFallback } : {}),
         renderOutputSchemaSystem: () => ({

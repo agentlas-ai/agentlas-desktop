@@ -13,7 +13,8 @@ import {
 } from "./agent-residency";
 import type { AgentProcessLifecycleReason } from "../../shared/types";
 
-export const WORK_PROJECT_RESIDENCY_BUSY_CODE = "work_project_residency_busy";
+import { WORK_PROJECT_RESIDENCY_BUSY_CODE as PRE_DISPATCH_WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./runner-pre-dispatch";
+export const WORK_PROJECT_RESIDENCY_BUSY_CODE = PRE_DISPATCH_WORK_PROJECT_RESIDENCY_BUSY_CODE;
 
 export interface ProjectResidencyBusyBlocker {
   chatId: string | null;

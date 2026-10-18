@@ -20,7 +20,11 @@ import { installedAgentlasCapabilityProviders } from "../plugins/plugin-candidat
 import { preferredProviderPairs } from "../../shared/capability-priority";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import { isJudgmentRefusal } from "./judgment-refusal";
-import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
+import {
+  WORK_PROJECT_RESIDENCY_BUSY_CODE,
+  runnerRefusedBeforeDispatch as preDispatchRunnerRefused,
+  runnerResultRefusedBeforeDispatch as preDispatchRunnerResultRefused,
+} from "./runner-pre-dispatch";
 import { innermostTypedCode, isTypedCode } from "../../shared/turn-settlement";
 
 /** Main-only delivery boundary; never serialized into a provider request. */
@@ -879,16 +883,10 @@ export class RuntimeTurnUnsettledError extends Error {
  * unsettled turn: nothing reached a model, so there is nothing to continue, and the caller's handling (busy Goal sweep,
  * firm/swarm stop, provider fallback) must see the typed code.
  */
-export function runnerRefusedBeforeDispatch(error: unknown): boolean {
-  if (!error || typeof error !== "object") return false;
-  if ("code" in error && error.code === WORK_PROJECT_RESIDENCY_BUSY_CODE) return true;
-  return (error as { turnDelivery?: unknown }).turnDelivery === "not-dispatched";
-}
+export const runnerRefusedBeforeDispatch = preDispatchRunnerRefused;
 
 /** A returned failure the runner proved pre-dispatch (RuntimeTurnDelivery "not-dispatched"): keep it, never unsettled. */
-export function runnerResultRefusedBeforeDispatch(result: Pick<RunnerResult, "failure" | "turnDelivery"> | null | undefined): boolean {
-  return !!result?.failure && result.turnDelivery === "not-dispatched";
-}
+export const runnerResultRefusedBeforeDispatch = preDispatchRunnerResultRefused;
 
 /**
  * Puts RuntimeTurnDelivery "not-dispatched" on a refusal a runner or host wrapper throws before anything was sent (a

@@ -12,6 +12,7 @@
     "resolveJsonModule": true,
     "declaration": false,
     "sourceMap": true,
+    "removeComments": true,
     "lib": ["ES2022", "DOM"],
     "types": ["node"],
     "baseUrl": "..",
