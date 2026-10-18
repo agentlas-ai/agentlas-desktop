@@ -327,7 +327,7 @@ import {
   UNATTENDED_NO_ASK_DIRECTIVE,
   MOBILE_DURABLE_ASK_DIRECTIVE,
 } from "../runtime/runner";
-import { markRefusedBeforeDispatch, outwardFailureCode, unsettledTurnError, validatedRunnerNativeControlState } from "../runtime/runner";
+import { markRefusedBeforeDispatch, outwardFailureCode, refusalCode, unsettledTurnError, validatedRunnerNativeControlState } from "../runtime/runner";
 import { decideTurnSettlement, innermostTypedCode, isTypedCode, STORE_BUSY_CODE } from "../../shared/turn-settlement";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import {
@@ -7257,7 +7257,8 @@ async function runMcpInvocationInContext(
           ? "요청한 이미지를 전용 멀티모달 엔진으로 생성하는 중…"
           : "Generating the requested image with the configured multimodal engine…",
       });
-      const generated = await generateImage(imageSlot.model, req.userPrompt);
+      // The run's permission reaches the image route's own CLI (multimodal/image.ts ImageAdmission, R-078).
+      const generated = await generateImage(imageSlot.model, req.userPrompt, { permission: req.permissions });
       if (!generated.ok || !generated.artifactPath || !generated.src) {
         throw new Error(`image_tool_unavailable: ${generated.reason ?? "no image was produced"}`);
       }
@@ -7348,8 +7349,11 @@ async function runMcpInvocationInContext(
       ? captureNativeGoalEpisode(activeGoalId, chat.id, req.runId) : null;
     let goalEpisodeYield: NativeGoalEpisodeBinding | null = null;
     const passLoopStartedAtMs = Date.now();
+    // A refusal before dispatch (turnDelivery "not-dispatched") reached no model: it is the typed failure below, never
+    // "unsettled" (an unknown effect).
     let result = await invokeCurrentRuntime(activeRunnerReq, hostNoticePurpose);
-    if (result.ownerControlTerminal !== "completed" && !runtimeTerminalEvidence.closedHttpRefusal && !runtimeTerminalEvidence.locallyRejected) {
+    if (result.ownerControlTerminal !== "completed" && !runtimeTerminalEvidence.closedHttpRefusal && !runtimeTerminalEvidence.locallyRejected
+      && result.turnDelivery !== "not-dispatched") {
       // The result (typed failure, session, delivery) is the cause; the provider's words lead the message (audit A7 M5).
       throw unsettledTurnError({ runtimeKind: active.kind, locale, cause: result, turnDelivery: result.turnDelivery });
     }
@@ -7617,10 +7621,26 @@ async function runMcpInvocationInContext(
       activeRunnerReq = replaceRunnerUserPrompt(nextRunnerReq, explicitBorrowUserPreamble
         ? `${explicitBorrowUserPreamble}\n\nContinuation request:\n${continuationPrompt}`
         : continuationPrompt, { images: undefined });
+      /*
+       * The previous pass completed. A next pass that never reached the model (refused before dispatch: a locked store, a
+       * session its previous process still held, a missing executable) does not turn the whole Goal turn into a failure:
+       * the turn ends with the completed pass (`result` keeps it) and the Goal continues on its own schedule. Production
+       * 2026-10-18 (Yotube Goal turn fd5f52e7): a turn whose earlier pass had completed ended red. What may have reached
+       * the model surfaces.
+       */
       const novelObservationsBeforePass = novelToolObservations;
       const toolCallsBeforePass = completedToolCalls;
-      result = await invokeCurrentRuntime(activeRunnerReq, "goal-continuation");
-      if (result.ownerControlTerminal !== "completed" && !runtimeTerminalEvidence.closedHttpRefusal && !runtimeTerminalEvidence.locallyRejected) {
+      try {
+        result = await invokeCurrentRuntime(activeRunnerReq, "goal-continuation");
+      } catch (error) {
+        if (signal?.aborted || !runnerRefusedBeforeDispatch(error)) throw error;
+        tryRecordRunEvent({ runId: req.runId ?? "", chatId: req.chatId ?? "", kind: "goal_pass_not_started",
+          payload: { pass, code: refusalCode(error) ?? null, turnDelivery: "not-dispatched" } });
+        break;
+      }
+      // A returned refusal before dispatch is a typed pass failure (retried or handed on below), never "unsettled".
+      if (result.ownerControlTerminal !== "completed" && !runtimeTerminalEvidence.closedHttpRefusal && !runtimeTerminalEvidence.locallyRejected
+        && result.turnDelivery !== "not-dispatched") {
         const error = unsettledTurnError({ runtimeKind: active.kind, locale, cause: result, turnDelivery: result.turnDelivery });
         throw error;
       }

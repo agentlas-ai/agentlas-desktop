@@ -1,4 +1,5 @@
 import { selectionFor } from "../capabilities/one-capabilities";
+import type { ChildProcess } from "node:child_process";
 import { reportModelPayload, ledgerFromCliSent } from "./model-call-ledger";
 import { recordNativeCompaction } from "./native-compaction-event";
 import { recordObservedContextWindow } from "./session-generation";
@@ -1012,6 +1013,11 @@ function looksLikeUnknownInputFormat(stderr: string): boolean {
 
 /** Result origins (SDKMessageOrigin kinds) raised by work that is not the owner's turn. */
 const CLAUDE_BACKGROUND_ORIGINS = new Set(["task-notification", "observer", "observer-activity", "coordinator"]);
+/** A result or frame the CLI attributes to background work (its origin kind), read from a data property only. */
+function claudeBackgroundOrigin(ev: ClaudeStreamEvent): boolean {
+  const origin = ev.origin && typeof ev.origin === "object" ? (ev.origin as { kind?: unknown }).kind : undefined;
+  return typeof origin === "string" && CLAUDE_BACKGROUND_ORIGINS.has(origin);
+}
 
 /** Resident processes seen stamping a turn's system/init with the client uuids it answers (2.1.301 does). */
 const initEchoSessions = new WeakSet<ClaudeResidentSession>();
@@ -1764,6 +1770,20 @@ const runClaudeTurn = async (
     }
   }
 
+  /*
+   * A one-shot turn speaks the same uuid'd stream-json input as a resident one whenever this executable reads it.
+   * Measured offline on the installed 2.1.302: a uuid'd stream-json message is queued, run and answered before the CLI
+   * exits on stdin EOF, and that turn's init, assistant and result frames carry the uuid as user_message_uuid(s); the
+   * result of a plain-text prompt carries none. Production 2026-10-18 (Yotube Goal turn fd5f52e7, 1.3.67): a resumed
+   * one-shot first ran the task notifications the session had queued for its earlier background tasks, and the CLI joined
+   * the prompt into that turn, so the turn's result was attributed to the task notification. With no uuid to tell it was
+   * ours, the root result read as background work: the 5 s exit grace never started, the process lived until every
+   * background subagent finished (28 and 39 minutes), and the last result, a background one, left the pass "uncertain".
+   * Both passes went unsettled and the Goal turn failed red with runtime_turn_unsettled.
+   */
+  const oneShotJson = !session && executableState.residencySupported;
+  /** A process of this turn that may outlive its settlement (background work): ended and awaited in finally. */
+  let lingeringChild: ChildProcess | null = null;
   try {
     return await new Promise<RunnerResult>((resolve, reject) => {
     const rejectRuntime = (error: unknown) => {
@@ -1784,7 +1804,7 @@ const runClaudeTurn = async (
      * on that turn's init, assistant and result frames. It binds settlement to this turn (a result raised by background
      * work carries none of our uuids) and gives native steering a confirmed turn to target.
      */
-    const turnUuid = session ? crypto.randomUUID() : null;
+    const turnUuid = session || oneShotJson ? crypto.randomUUID() : null;
     /** Client uuids this runner turn owns: the turn message and every direction steered into it. */
     const ownUuids = new Set<string>(turnUuid ? [turnUuid] : []);
     /** Owned uuids a result of ours answered (its user_message_uuids). */
@@ -1822,7 +1842,7 @@ const runClaudeTurn = async (
       child = session.child;
     } else {
       try {
-        child = spawnCli(bin, args, {
+        child = spawnCli(bin, oneShotJson ? [...args, "--input-format", "stream-json"] : args, {
           stdio: ["pipe", "pipe", "pipe"],
           env: runEnv,
           cwd: runCwd,
@@ -1836,13 +1856,17 @@ const runClaudeTurn = async (
         return;
       }
       trackRunChild(child);
+      lingeringChild = child;
       turnDispatchAttempted = true;
       // Context-reduction C01: a one-shot spawn seeds history+context (fresh) or sends a delta onto a resumed session (--resume).
       reportModelPayload(() => ledgerFromCliSent({ mode: resumeSessionId ? "reopen" : "fresh", sentText: flatUser, req: runReq,
         systemText: !resumeSessionId || resumeAppendArgs.length > 0 ? seededSystemPrompt : null,
         historyInSentText: !resumeSessionId, hostContextInSystem: !resumeSessionId, hostContextText: runReq.turnContext }));
       events.onRuntimeAttemptStarted?.(runtimeAttemptId);
-      writeStdin(child, flatUser);
+      // The same message shape as writeClaudeResidentTurn; stdin then ends (the CLI runs what it read, then exits).
+      writeStdin(child, oneShotJson
+        ? `${JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: flatUser }] }, parent_tool_use_id: null, uuid: turnUuid })}\n`
+        : flatUser);
     }
     // ★호스트 소유 생존 신호 — 러너 공통 규칙(runner.ts startCliHeartbeat 주석 참고).
     //   stream-json이라도 긴 생각/도구 구간은 수 분 침묵할 수 있고, 그 침묵은
@@ -2600,9 +2624,12 @@ const runClaudeTurn = async (
         // distinguish completed from interrupted/deferred runs in terminal_reason.
         // The root result's native UUID, positive turn count and exact session
         // bind delivery to this prompt. system/init, stdin writes and host status do not.
+        // A result naming one of our client uuids answers our turn whatever its origin: the CLI joins queued task
+        // notifications into the turn that carries our message and attributes that turn to the notification.
+        const answersOwnUuid = echoedUuids(ev as unknown as ClaudeStreamEvent).some((uuid) => ownUuids.has(uuid));
         const rootResult = ev.is_error === false && !runnerFailure && !structuredRuntimeError && !broken
           && !ev.parent_tool_use_id && ev.isSidechain !== true
-          && (ev.origin == null || ev.origin.kind === "human")
+          && (answersOwnUuid || ev.origin == null || ev.origin.kind === "human")
           && typeof ev.session_id === "string" && Boolean(ev.session_id.trim())
           && (!terminalSessionId || ev.session_id === terminalSessionId)
           && typeof ev.uuid === "string" && Boolean(ev.uuid.trim())
@@ -2705,7 +2732,7 @@ const runClaudeTurn = async (
     /** RuntimeTurnDelivery from protocol facts: this turn's lifecycle/echo or its own result; null when the CLI cannot tell. */
     const turnDeliveryFact = (): "accepted" | "not-accepted" | undefined => {
       if (turnAcknowledged || sawResult) return "accepted";
-      return session && (lifecycleObserved || session.capabilities?.has("msg_lifecycle_v1")) ? "not-accepted" : undefined;
+      return session && (lifecycleObserved || session.capabilities?.has("msg_lifecycle_v1")) || oneShotJson && lifecycleObserved ? "not-accepted" : undefined;
     };
     const appliedEffort = effortArgs.length === 2 ? effortArgs[1]! : null;
     const detachTurn = () => {
@@ -2754,7 +2781,15 @@ const runClaudeTurn = async (
         }, CLAUDE_ONESHOT_EXIT_GRACE_MS);
         oneShotExitTimer.unref?.();
       };
-      const readNdjsonLines = createNdjsonLineReader((ev) => { dispatchEvent(ev); noteOneShotResult(ev); });
+      const readNdjsonLines = createNdjsonLineReader((ev) => {
+        // A uuid'd one-shot turn is owned like a resident one: frames of a turn naming none of our uuids are held, the
+        // result naming ours settles this turn whatever its origin, and finally ends the process (background work).
+        if (oneShotJson) { turnSink.onEvent(ev); return; }
+        // Without uuids, a background result after our root result is never this turn's terminal (it used to overwrite it).
+        if (ev.type === "result" && terminalSucceeded && claudeBackgroundOrigin(ev)) return;
+        dispatchEvent(ev);
+        noteOneShotResult(ev);
+      });
       child.stdout?.on("data", (chunk: Buffer) => { silence.touch(); readNdjsonLines(chunk); });
       const stderrDecoder = new StringDecoder("utf8");
       child.stderr?.on("data", (chunk: Buffer) => {
@@ -2810,11 +2845,11 @@ const runClaudeTurn = async (
       // turn from stdin: arg parsing precedes any model or tool work, so degrading to the one-shot path cannot act
       // twice. This must run BEFORE the dispatched-without-result rule below, which would otherwise make a renamed or
       // removed flag a permanent runtime_turn_unsettled for every turn (G35).
-      if (session && !sawResult && !combined() && !finalText && session.completedTurns === 0
-        && looksLikeUnknownInputFormat((stderr || session.stderrTail).slice(-500))) {
+      if ((session || oneShotJson) && !sawResult && !combined() && !finalText && (!session || session.completedTurns === 0)
+        && looksLikeUnknownInputFormat((stderr || session?.stderrTail || "").slice(-500))) {
         broken = true;
         executableState.residencySupported = false;
-        console.warn(`[residency] claude-code degraded to one-shot: ${(stderr || session.stderrTail).slice(-500).trim().slice(0, 200)}`);
+        console.warn(`[residency] claude-code degraded to one-shot: ${(stderr || session?.stderrTail || "").slice(-500).trim().slice(0, 200)}`);
         events.onStatus(`[residency] disabled kind=${KIND} reason=input-format-unsupported`);
         void runClaudeTurn(req, events, false, observeNativeFile).then(resolve, reject);
         return;
@@ -3224,10 +3259,20 @@ const runClaudeTurn = async (
     if (lease) {
       // 취소·오류면 버리고, 아니면 반납한다(다음 턴이 이어 쓴다).
       if (broken || req.signal?.aborted || runReq.ephemeralToolGrant || runReq.singleUse || turnScopedResidency) {
+        lingeringChild = lease.session.child;
         pool.discard(lease);
         if (aliveProfile) aliveClaudeResources.get(aliveProfile.resourceOwnerKey)?.close();
       }
       else pool.release(lease);
+    }
+    /*
+     * A settled turn's process may still run background work (a `-p` run stays open for its background tasks; a discarded
+     * resident keeps its subagents). It is ended here and the runner returns only once it has exited, so the next pass
+     * resumes the session in a process of its own and never races this one for it.
+     */
+    if (lingeringChild && lingeringChild.exitCode === null && lingeringChild.signalCode === null) {
+      try { await waitForRetiredCliExit(lingeringChild); }
+      catch { events.onStatus(`[runtime-session] previous_process_exit_unconfirmed kind=${KIND}`); }
     }
   }
 };

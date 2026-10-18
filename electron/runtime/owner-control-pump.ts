@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createObservedUsageAccumulator } from "../../shared/observed-usage";
 import type { ChatHistoryEntry, ImageAttachment } from "../../shared/types";
-import type { RunnerRequest, RunnerResult } from "./runner";
+import { runnerRefusedBeforeDispatch, runnerResultRefusedBeforeDispatch, type RunnerRequest, type RunnerResult } from "./runner";
 
 /** Original user attachments remain with their user history row. Only inline
  * formats admitted by the existing attachment pipeline cross the API wire;
@@ -101,12 +101,28 @@ export async function runWithOwnerControl(
     history.push({ id: randomUUID(), role: "assistant", text: result.text, createdAt: new Date().toISOString() });
     current = { ...current, history, userPrompt: batch.map((entry) => entry.text).join("\n\n"),
       images: undefined, runtimeSessionId: result.sessionId ?? current.runtimeSessionId };
+    /*
+     * The previous episode completed. An episode that never reached the model (refused before dispatch: a locked store,
+     * the previous process still holding the session) leaves these directions undelivered and carryable to the chat's
+     * next turn (owner_control_not_dispatched), and the turn keeps the completed episode instead of failing.
+     */
+    const completed = result;
     try {
       result = await runOnce(current);
       record();
     } catch (error) {
+      if (!request.signal?.aborted && runnerRefusedBeforeDispatch(error)) {
+        inbox.settle(ids, "rejected", "owner_control_not_dispatched");
+        result = completed;
+        break;
+      }
       inbox.settle(ids, "uncertain", "owner_control_episode_reply_lost");
       throw error;
+    }
+    if (!request.signal?.aborted && runnerResultRefusedBeforeDispatch(result)) {
+      inbox.settle(ids, "rejected", "owner_control_not_dispatched");
+      result = completed;
+      break;
     }
     if (request.signal?.aborted || result.failure || result.ownerControlTerminal !== "completed") {
       inbox.settle(ids, "uncertain", "owner_control_episode_unsettled");

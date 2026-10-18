@@ -46,16 +46,17 @@ export function carryUndeliveredOwnerFollowups(input: {
 }, db: Database.Database = getDb()): DurableQueuedSteer | null {
   return db.transaction(() => {
     // A receipt read that ran between the run's end and this carry refuses a queued row owner_control_run_settled
-    // (invocation-owner-router.ts, InvocationService.currentTurnSteerReceipt): never dispatched either, so carried too.
+    // (invocation-owner-router.ts, InvocationService.currentTurnSteerReceipt), and an episode or loop boundary that
+    // never dispatched its batch settles it owner_control_not_dispatched (owner-control-pump.ts): never sent, so carried.
     const rows = db.prepare(`SELECT intent_id, prompt_text FROM invocation_current_turn_steers
-      WHERE chat_id = ? AND run_id = ? AND (status = 'queued' OR (status = 'rejected' AND code = 'owner_control_run_settled'))
+      WHERE chat_id = ? AND run_id = ? AND (status = 'queued' OR (status = 'rejected' AND code IN ('owner_control_run_settled','owner_control_not_dispatched')))
       ORDER BY created_at, rowid`).all(input.chatId, input.runId) as Array<{ intent_id: string; prompt_text: string }>;
     const texts = rows.map((row) => row.prompt_text).filter((text) => typeof text === "string" && text.trim());
     if (!rows.length || !texts.length) return null;
     const now = new Date().toISOString();
     const settle = db.prepare(`UPDATE invocation_current_turn_steers SET status = 'rejected', code = ?, updated_at = ?
       WHERE intent_id = ? AND chat_id = ? AND run_id = ?
-        AND (status = 'queued' OR (status = 'rejected' AND code = 'owner_control_run_settled'))`);
+        AND (status = 'queued' OR (status = 'rejected' AND code IN ('owner_control_run_settled','owner_control_not_dispatched')))`);
     for (const row of rows) {
       if (settle.run(CARRIED_FOLLOWUP_CODE, now, row.intent_id, input.chatId, input.runId).changes !== 1) {
         throw new Error("carried_followup_claim_lost");
