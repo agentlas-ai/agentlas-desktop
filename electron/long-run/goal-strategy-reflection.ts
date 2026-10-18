@@ -35,6 +35,7 @@ import { getDb } from "../store/db";
 import { getChatGoalContract, getChatGoalRevision } from "../store/chat-goals";
 import { appendLongRunEvent, getLongRunByGoalId, getLongRunGoalRevisionBinding } from "../store/long-runs";
 import { latestTaskCheckpoint } from "./checkpoint";
+import type { GoalWaitSubscription } from "./wait-subscriptions";
 import { getAutomation } from "../store/automations";
 import { getAutomationDefinitionDigest, readCurrentGoalAutomationBinding } from "./automation-provenance";
 import { runAutomationStrategyCycle } from "../automation-strategy-cycle";
@@ -62,6 +63,19 @@ export type GoalStrategyReflectionUnavailableReason =
   | "goal_strategy_invalid_output"
   | "goal_strategy_stale_after_reflection"
   | "goal_strategy_failed";
+
+const KNOWN_UNAVAILABLE_REASONS: ReadonlySet<string> = new Set<GoalStrategyReflectionUnavailableReason>([
+  "goal_strategy_goal_missing", "goal_strategy_goal_not_ongoing", "goal_strategy_goal_revision_stale",
+  "goal_strategy_checkpoint_missing", "goal_strategy_effect_unsettled", "goal_strategy_input_too_large",
+  "goal_strategy_judgment_pool_unavailable", "goal_strategy_runtime_unavailable", "goal_strategy_invalid_output",
+  "goal_strategy_stale_after_reflection", "goal_strategy_failed",
+]);
+
+/** Keep the machine code a host check threw; only an unknown error becomes goal_strategy_failed. */
+function unavailableReason(error: unknown): GoalStrategyReflectionUnavailableReason {
+  return error instanceof Error && KNOWN_UNAVAILABLE_REASONS.has(error.message)
+    ? error.message as GoalStrategyReflectionUnavailableReason : "goal_strategy_failed";
+}
 
 export interface GoalStrategyReflectionInput {
   runId: string;
@@ -155,6 +169,104 @@ export function evaluateGoalStrategySettlementGate(
     return { eligible: false, reason: "goal_strategy_effect_unsettled" };
   }
   return { eligible: true };
+}
+
+const MAX_SAME_EPISODE_CHECKPOINTS = 16;
+
+type EpisodeCheckpoint = Pick<LongRunTaskCheckpoint, "checkpointId" | "goalId" | "goalRevision" | "invocationRunId" | "sideEffects"> & {
+  capsule: Pick<LongRunTaskCheckpoint["capsule"], "runId" | "plan" | "instructionSnapshot">;
+};
+
+export interface GoalStrategyEpisodeContinuityInput {
+  sourceInvocationRunId: string;
+  expectedGoalRevision: number;
+  /** The verifier checkpoint the request receipt names. */
+  requested: EpisodeCheckpoint | null;
+  /** Every task checkpoint appended after `requested`, oldest first. */
+  later: Array<EpisodeCheckpoint | null>;
+  /** The validated current checkpoint (latestTaskCheckpoint). */
+  latest: EpisodeCheckpoint | null;
+  /** The latest wait subscription of this run. */
+  wait: Pick<GoalWaitSubscription, "checkpointId" | "sourceInvocationId" | "goalRevision" | "state" | "successorInvocationId"> | null;
+}
+
+/**
+ * One/Work native episodes are verified in the background and then settled by
+ * settleNativeGoalEpisode (native-goal-pass.ts), whose timer wait records its
+ * own checkpoint for the same producer invocation (wait-subscriptions.ts
+ * registerGoalWaitSubscription). That wait checkpoint does not start a new
+ * episode: it carries the same invocation, Goal revision, plan revision and
+ * settled effect boundary.
+ *
+ * True only when every later checkpoint is that same episode and the latest
+ * one is the still-pending wait's checkpoint. A different invocation, Goal or
+ * plan revision, effect boundary, or a claimed successor is a newer episode.
+ */
+export function isSameGoalStrategyEpisode(input: GoalStrategyEpisodeContinuityInput): boolean {
+  const { requested, latest, later, wait } = input;
+  const anchor = requested?.sideEffects?.boundary;
+  const planRevision = requested?.capsule?.plan?.revision;
+  if (!requested || !latest || !anchor || typeof planRevision !== "number"
+    || !Array.isArray(later) || later.length < 1 || later.length > MAX_SAME_EPISODE_CHECKPOINTS
+    || requested.checkpointId === latest.checkpointId
+    || later[later.length - 1]?.checkpointId !== latest.checkpointId) return false;
+  const sameEpisode = (checkpoint: EpisodeCheckpoint | null | undefined): boolean => {
+    const boundary = checkpoint?.sideEffects?.boundary;
+    return Boolean(checkpoint && boundary
+      && checkpoint.goalId === requested.goalId
+      && checkpoint.capsule?.runId === requested.capsule.runId
+      && checkpoint.invocationRunId === input.sourceInvocationRunId
+      && checkpoint.goalRevision === input.expectedGoalRevision
+      && checkpoint.sideEffects.state === "settled"
+      && boundary.invocationRunId === anchor.invocationRunId
+      && boundary.terminalEventId === anchor.terminalEventId
+      && boundary.receiptEventId === anchor.receiptEventId
+      && boundary.snapshotDigest === anchor.snapshotDigest
+      && checkpoint.capsule.plan?.revision === planRevision
+      && checkpoint.capsule.instructionSnapshot?.revision === requested.capsule.instructionSnapshot?.revision
+      && checkpoint.capsule.instructionSnapshot?.environmentId === requested.capsule.instructionSnapshot?.environmentId);
+  };
+  return sameEpisode(requested) && later.every(sameEpisode) && sameEpisode(latest)
+    && wait?.checkpointId === latest.checkpointId
+    && wait.sourceInvocationId === input.sourceInvocationRunId
+    && wait.goalRevision === input.expectedGoalRevision
+    && wait.state === "pending" && !wait.successorInvocationId;
+}
+
+/** The requested checkpoint, when only its own episode's wait checkpoint follows it. */
+function sameEpisodeRequestedCheckpoint(
+  runId: string,
+  input: GoalStrategyReflectionInput,
+  latest: LongRunTaskCheckpoint,
+): LongRunTaskCheckpoint | null {
+  const requestedRow = getDb().prepare(`SELECT seq, payload_json FROM long_run_events
+      WHERE run_id = ? AND kind = 'run.task_checkpoint'
+        AND json_extract(payload_json, '$.checkpoint.checkpointId') = ? ORDER BY seq DESC LIMIT 1`)
+    .get(runId, input.checkpointId) as { seq: number; payload_json: string } | undefined;
+  if (!requestedRow) return null;
+  const laterRows = getDb().prepare(`SELECT payload_json FROM long_run_events
+      WHERE run_id = ? AND kind = 'run.task_checkpoint' AND seq > ? ORDER BY seq ASC LIMIT ?`)
+    .all(runId, requestedRow.seq, MAX_SAME_EPISODE_CHECKPOINTS + 1) as Array<{ payload_json: string }>;
+  const waitRow = getDb().prepare(`SELECT payload_json FROM long_run_events
+      WHERE run_id = ? AND kind = 'run.wait_subscription' ORDER BY seq DESC LIMIT 1`)
+    .get(runId) as { payload_json: string } | undefined;
+  let requested: LongRunTaskCheckpoint | null;
+  let later: Array<LongRunTaskCheckpoint | null>;
+  let wait: GoalWaitSubscription | null;
+  try {
+    requested = JSON.parse(requestedRow.payload_json)?.checkpoint ?? null;
+    later = laterRows.map((row) => JSON.parse(row.payload_json)?.checkpoint ?? null);
+    wait = waitRow ? JSON.parse(waitRow.payload_json)?.subscription ?? null : null;
+  } catch {
+    return null;
+  }
+  if (wait && (wait.schemaVersion !== "agentlas.goal-wait-subscription.v1"
+    || wait.runId !== runId || wait.goalId !== input.goalId)) wait = null;
+  return requested && isSameGoalStrategyEpisode({
+    sourceInvocationRunId: input.sourceInvocationRunId,
+    expectedGoalRevision: input.expectedGoalRevision,
+    requested, later, latest, wait,
+  }) ? requested : null;
 }
 
 function boundedText(value: unknown, field: string, limit = MAX_TEXT_CHARS): string {
@@ -434,10 +546,10 @@ function readSettledEpisode(input: GoalStrategyReflectionInput): SettledEpisodeE
     || binding?.revision !== input.expectedGoalRevision) {
     throw new Error("goal_strategy_goal_revision_stale");
   }
-  const checkpoint = latestTaskCheckpoint(input.goalId);
-  if (!checkpoint || (input.checkpointId && checkpoint.checkpointId !== input.checkpointId)) {
-    throw new Error("goal_strategy_checkpoint_missing");
-  }
+  const latest = latestTaskCheckpoint(input.goalId);
+  const checkpoint = !latest || !input.checkpointId || latest.checkpointId === input.checkpointId
+    ? latest : sameEpisodeRequestedCheckpoint(run.id, input, latest);
+  if (!checkpoint) throw new Error("goal_strategy_checkpoint_missing");
   let boundary: InvocationEffectBoundary;
   try {
     boundary = readInvocationEffectBoundary({ invocationRunId: input.sourceInvocationRunId, expectedChatId: goal.chatId });
@@ -886,6 +998,7 @@ function persistProposal(receipt: GoalStrategyProposalReceiptV1, input: GoalStra
   return getDb().transaction(() => {
     // Re-read every CAS input immediately before the append. A Goal revision
     // move during model reflection must leave only a stale/unavailable result.
+    // The same episode's host wait checkpoint does not move it (isSameGoalStrategyEpisode).
     const current = readSettledEpisode(input);
     if (current.goal.revision !== receipt.goal.revision
       || current.checkpoint.checkpointId !== receipt.source.checkpointId
@@ -925,15 +1038,7 @@ export async function reflectGoalStrategyProposal(
   try {
     evidence = readSettledEpisode(input);
   } catch (error) {
-    const knownReasons = new Set<GoalStrategyReflectionUnavailableReason>([
-      "goal_strategy_goal_missing", "goal_strategy_goal_not_ongoing", "goal_strategy_goal_revision_stale",
-      "goal_strategy_checkpoint_missing", "goal_strategy_effect_unsettled", "goal_strategy_input_too_large",
-      "goal_strategy_judgment_pool_unavailable", "goal_strategy_runtime_unavailable", "goal_strategy_invalid_output",
-      "goal_strategy_stale_after_reflection", "goal_strategy_failed",
-    ]);
-    const reason = error instanceof Error && knownReasons.has(error.message as GoalStrategyReflectionUnavailableReason)
-      ? error.message as GoalStrategyReflectionUnavailableReason : "goal_strategy_failed";
-    return { status: "unavailable", reason };
+    return { status: "unavailable", reason: unavailableReason(error) };
   }
   let serialized: string;
   try { serialized = reflectionEvidence(evidence); }
@@ -987,8 +1092,9 @@ export async function reflectGoalStrategyProposal(
   try {
     receipt = persistProposal(proposalFrom(evidence, draft, policy, now), input);
   } catch (error) {
-    return { status: "unavailable", reason: error instanceof Error && error.message === "goal_strategy_stale_after_reflection"
-      ? "goal_strategy_stale_after_reflection" : "goal_strategy_failed" };
+    // The re-read CAS names its own cause (revision moved, checkpoint of a newer
+    // episode, unsettled effects); keep that code instead of a generic failure.
+    return { status: "unavailable", reason: unavailableReason(error) };
   }
   return {
     status: "proposal",
