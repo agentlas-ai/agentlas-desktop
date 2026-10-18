@@ -2329,6 +2329,17 @@ async function runCodexResidentTurn(input: {
         if (message) events.onStatus(`codex: ${message.slice(0, 400)}`);
         break;
       }
+      case "mcpServer/startupStatus/updated": {
+        // An MCP server Codex could not start leaves this turn without its tools. Say which one and the typed reason (no
+        // provider prose): before, the turn only failed later as a run failure (production audit 2026-10-18, M2).
+        if (fromOtherThread(params)) break;
+        const name = typeof params?.name === "string" && /^[A-Za-z0-9_.@-]{1,80}$/.test(params.name) ? params.name : "";
+        if (name && (params?.status === "failed" || params?.status === "cancelled")) {
+          const reason = params?.failureReason === "reauthenticationRequired" ? "reauthentication_required" : params.status;
+          events.onStatus(`[codex-mcp] ${name} ${reason}`);
+        }
+        break;
+      }
       case "error": {
         // A sub-agent's non-retry error (its own turn failed or was interrupted)
         // is reported to the parent through the collab/subAgentActivity item, not

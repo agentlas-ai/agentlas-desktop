@@ -117,6 +117,7 @@ export const CODEX_SERVER_NOTIFICATIONS = [
   "item/agentMessage/delta",
   "item/completed",
   "item/started",
+  "mcpServer/startupStatus/updated",
   "model/rerouted",
   "thread/started",
   "thread/tokenUsage/updated",
