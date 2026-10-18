@@ -5,7 +5,7 @@ import { createNativeInvocationPublicReceiver, nativePublicAckOperation, nativeP
 import { configuredNativeGuiOwner } from "./native-gui-startup";
 import { dispatchOnePreflightSteers } from "./preflight-steer-admission";
 import { notifyDaemonRunSettled } from "./daemon-run-alerts";
-import { publishNativeGuiActiveChats, publishNativeGuiInvocationEvent } from "./native-gui-events";
+import { publishNativeGuiActiveChats, publishNativeGuiInvocationEvent, publishNativeGuiSettled } from "./native-gui-events";
 
 type Channel = object & { dispatch(method: string, params: unknown): Promise<unknown>; onClose(listener: () => void): () => void };
 let legacyChatIds: string[] = [], nativeChatIds: string[] = [], recoveredChatIds: string[] = [];
@@ -59,6 +59,8 @@ export function createNativeGuiPublicBridge(policy: Readonly<{ maxRetainedBytes:
         // A run hosted by the background service never settles in Main's own invocation service, so the OS notification
         // Main shows for its own runs is raised here from the service's settlement (same settings, same foreground rule).
         notifyDaemonRunSettled(settlement);
+        // The phone bridge's failure push, too (it listens to Main's own service, which never settles this run).
+        publishNativeGuiSettled(settlement);
         // Root sends the authentic final private finish callback before this
         // event. Retire tests that already-released state; no second finish RPC.
         const owner = configuredNativeGuiOwner();

@@ -11,6 +11,7 @@ import { BrowserWindow } from "electron";
 import type { ToolApprovalDecision, ToolApprovalRequestEvent, ToolApprovalResolutionReceipt } from "../../shared/types";
 import { toolApprovalActionId } from "../../shared/tool-approval-action";
 import { importNativeJsonValue } from "../daemon/native-json-transfer";
+import { publishNativeGuiApprovalRequested } from "./native-gui-events";
 import { nativeGuiChannelIdentity } from "../daemon/native-auth-channel";
 import type { NativeAuthenticatedIdentity } from "../daemon/native-session-auth";
 import { NATIVE_MAIN_PREPARATION_POLICY, NATIVE_DAEMON_INVOCATION_POLICY, NATIVE_APPROVAL_OBSERVATION_POLICY } from "../daemon/native-invocation-policy";
@@ -197,7 +198,13 @@ export function createNativeGuiControls(ports: { authorizeRenderer(event: object
       return request;
     };
     record.hydrate = hydrate;
-    const run = async () => { const request = await hydrate(); if (!record.receipt || record.receipt.pending) broadcast("runtime:toolApprovalRequest", request); };
+    const run = async () => {
+      const request = await hydrate();
+      if (record.receipt && !record.receipt.pending) return;
+      broadcast("runtime:toolApprovalRequest", request);
+      // The phone bridge's approval push, too: Main's own onToolApprovalRequested never sees a daemon-hosted card (I-D4).
+      if (request.mode === "live") publishNativeGuiApprovalRequested(request);
+    };
     // At most one historical transport read is outstanding; fresh live reads
     // bypass that queue. Reset never opens another read behind a held old one.
     const read = sourceMode === "post-denial" ? historicalReads.then(run) : run();

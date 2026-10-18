@@ -70,7 +70,7 @@ import { MobileChatAttachmentUploads } from "./chat-attachment-upload";
 import { chatFilePrompt, chatFileImages, validateChatAttachmentSelection, readBoundChatMessageAttachment } from "../store/chat-message-attachments";
 import { performOneMobileSuggestionAction } from "../one/mobile-suggestions";
 import { invocationService } from "../invocation/service";
-import { nativeGuiActiveChatIds, onNativeGuiActiveChats, onNativeGuiInvocationEvent } from "../invocation/native-gui-events";
+import { nativeGuiActiveChatIds, onNativeGuiActiveChats, onNativeGuiApprovalRequested, onNativeGuiInvocationEvent, onNativeGuiSettled } from "../invocation/native-gui-events";
 import type { InvocationCurrentTurnPort } from "../runtime/invocation-owner-router";
 import { readMobileBridgeHistoryPage } from "./history-page";
 import { projectMobileBridgeContext } from "./context-snapshot";
@@ -1824,22 +1824,33 @@ export function observeMobilePushNotices(hostId: string, listener: (notice: Mobi
   const stopMessages = () => { stopMainMessages(); stopNativeMessages(); };
   // A raw error can precede a successful provider fallback. Only the durable
   // terminal receipt can establish failure; input/approval/cancel waits cannot.
-  const stopFailures = invocationService.onSettled(({ runId, chatId, agentId, receipt, pendingQuestion, browserLoginWaiting, userDecisionRequest }) => {
+  // Runs the background service hosts settle on the native stream, not in Main's own service (flow audit
+  // 2026-10-18, I-D4): both feed the same rule and the same dedupe key, so the phone hears a daemon run's failure
+  // while the window holds the bridge. A replayed settlement repeats the key and is dropped by the push sender.
+  const onSettledFailure = ({ runId, chatId, agentId, receipt, pendingQuestion, browserLoginWaiting, userDecisionRequest }:
+    { runId: string; chatId: string; agentId?: string; receipt: { status: string }; pendingQuestion?: boolean; browserLoginWaiting?: boolean; userDecisionRequest?: unknown }) => {
     if (agentId || receipt.status !== "failed" || pendingQuestion || browserLoginWaiting || userDecisionRequest ||
         isPersonalOneConversation(chatId) || !getChat(chatId)) return;
     listener({ category: "failure", destination: "thread", hostId,
       entityId: chatId, dedupeKey: `run-failed:${hostId}:${runId}`,
       subject: "Agentlas", occurredAt: new Date().toISOString() });
-  });
-  const stopApprovals = onToolApprovalRequested(request => {
+  };
+  const stopMainFailures = invocationService.onSettled(onSettledFailure);
+  const stopNativeFailures = onNativeGuiSettled(onSettledFailure);
+  const stopFailures = () => { stopMainFailures(); stopNativeFailures(); };
+  const onApprovalRequested = (request: Pick<ToolApprovalRequestEvent, "id" | "chatId" | "mode" | "agentId" | "requestedAt">) => {
     const chatId = request.chatId;
     if (request.mode !== "live" || request.agentId || !chatId || !getChat(chatId) || isPersonalOneConversation(chatId)) return;
+    // The durable row is shared: a daemon-hosted card is sealed by the daemon's ledger in the same table.
     const stillCurrent = () => durableMobileApprovalPending(request.id, chatId);
     if (!stillCurrent()) return;
     listener({ category: "approval", destination: "approvals", hostId,
       entityId: chatId, dedupeKey: `tool-approval:${hostId}:${request.id}`,
       subject: "Agentlas", occurredAt: request.requestedAt }, stillCurrent);
-  });
+  };
+  const stopMainApprovals = onToolApprovalRequested(onApprovalRequested);
+  const stopNativeApprovals = onNativeGuiApprovalRequested(onApprovalRequested);
+  const stopApprovals = () => { stopMainApprovals(); stopNativeApprovals(); };
   return () => { stopMessages(); stopFailures(); stopApprovals(); };
 }
 

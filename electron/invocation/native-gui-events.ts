@@ -1,4 +1,5 @@
-import type { McpInvocationEvent } from "../../shared/types";
+import type { McpInvocationEvent, ToolApprovalRequestEvent } from "../../shared/types";
+import type { NativePublicSettlement } from "./native-public-events";
 import type { RunEventReplay, RunEventReplayInput } from "../../shared/run-event-delivery";
 import { reassembleAgentLivePartial } from "../../shared/interrupted-partial";
 import { RunEventDeliveryJournal } from "./event-delivery";
@@ -41,6 +42,38 @@ export function publishNativeGuiInvocationEvent(envelope: NativeGuiInvocationEve
   const delivered = event === envelope.event ? envelope : { ...envelope, event };
   for (const listener of eventListeners) {
     try { listener(delivered); } catch (error) { console.warn("[native-invocation] event listener failed", error); }
+  }
+}
+
+/**
+ * Settlements and live approval cards of daemon-hosted runs, for the same Main-side readers (flow audit 2026-10-18,
+ * I-D4). Only the live text reached the phone bridge: its failure and approval pushes listened to Main's own
+ * invocationService.onSettled and onToolApprovalRequested, which never see a run the background service hosts, so a
+ * daemon run's failure or approval wait sent no push while the window held the bridge. native-gui-public.ts publishes
+ * each settlement the service streams; native-gui-controls.ts publishes each approval card once it is hydrated.
+ */
+const settledListeners = new Set<(settlement: NativePublicSettlement) => void>();
+const approvalListeners = new Set<(request: ToolApprovalRequestEvent) => void>();
+
+export function onNativeGuiSettled(listener: (settlement: NativePublicSettlement) => void): () => void {
+  settledListeners.add(listener);
+  return () => { settledListeners.delete(listener); };
+}
+
+export function publishNativeGuiSettled(settlement: NativePublicSettlement): void {
+  for (const listener of settledListeners) {
+    try { listener(settlement); } catch (error) { console.warn("[native-invocation] settled listener failed", error); }
+  }
+}
+
+export function onNativeGuiApprovalRequested(listener: (request: ToolApprovalRequestEvent) => void): () => void {
+  approvalListeners.add(listener);
+  return () => { approvalListeners.delete(listener); };
+}
+
+export function publishNativeGuiApprovalRequested(request: ToolApprovalRequestEvent): void {
+  for (const listener of approvalListeners) {
+    try { listener(request); } catch (error) { console.warn("[native-invocation] approval listener failed", error); }
   }
 }
 
