@@ -13,8 +13,55 @@ import { detachedSpawnOpts, killCliTree, trackRunChild } from "../runtime/exec";
 import { withCodexProductHome } from "../runtime/codex-product-home";
 import { withAgyProductHome } from "../runtime/antigravity-personal-context";
 import { findExecutableSync } from "../runtime/path-lookup";
+import { antigravityPermissionArgs } from "../runtime/antigravity";
+import { invocationBreaker, invocationBreakerKey } from "../runtime/invocation-breaker";
+import { withModelCallLedger, withModelCallScope } from "../runtime/model-call-ledger";
+import type { Runner, RunnerResult } from "../runtime/runner";
 
 export type ImageModel = "codex" | "gemini" | "grok" | "auto";
+
+/**
+ * The calling run's admission (R-078, 2026-10-18): the room/run permission the tool call was approved under. A route
+ * spawns its CLI with that permission's flags, never broader (agy: write = --dangerously-skip-permissions --sandbox,
+ * full = without --sandbox; antigravity.ts antigravityPermissionArgs). "read" generates nothing (image generation
+ * writes a file; generate_image is an edit-level tool). Absent = a caller with no room (the slide studio, Toolchain
+ * icons): the route's own flags as before.
+ */
+export interface ImageAdmission {
+  permission?: "read" | "write" | "full";
+}
+
+type ImageEngine = "codex" | "gemini" | "grok";
+
+/**
+ * Every engine run goes through the same model-call ledger and invocation breaker as a runtime turn (R-078). Production
+ * 2026-10-13..17: nine generate_image runs (five for the Yotube room on 10-17) spawned `agy --dangerously-skip-permissions
+ * --print` directly; none was in the ledger (the last antigravity row was 10-16 08:02Z), none counted by the breaker,
+ * and the room's write permission was not applied.
+ */
+const IMAGE_ENGINE_RUNTIME: Record<ImageEngine, { kind: string; backend: string; source: string; label: string }> = {
+  codex: { kind: "codex", backend: "openai", source: "codex", label: "Codex image" },
+  gemini: { kind: "antigravity", backend: "google", source: "agy", label: "Antigravity image" },
+  grok: { kind: "grok", backend: "xai", source: "grok", label: "Grok Imagine" },
+};
+
+async function runImageEngine(engine: ImageEngine, phase: "multimodal-image" | "multimodal-image-edit", instruction: string,
+  permission: "write" | "full" | undefined, produce: () => Promise<boolean>): Promise<boolean> {
+  const runtime = IMAGE_ENGINE_RUNTIME[engine];
+  const adapter: Runner = async (): Promise<RunnerResult> => (await produce())
+    ? { text: "", ownerControlTerminal: "completed" }
+    : { text: "", ownerControlTerminal: "completed", failure: { kind: "exit", runtime: runtime.kind, source: "marker",
+      providerCode: "image_not_produced", message: `${runtime.label} produced no image.` } };
+  const runner = invocationBreaker.wrap(withModelCallLedger(adapter, { kind: runtime.kind, backend: runtime.backend, model: null, effort: null }),
+    invocationBreakerKey(runtime), runtime.label);
+  try {
+    const result = await withModelCallScope({ role: "worker", phase }, () => runner({ systemPrompt: "", history: [], userPrompt: instruction,
+      backendLabel: runtime.label, locale: "en", ...(permission ? { permission } : {}), singleUse: true }, { onPartial: () => {}, onStatus: () => {} }));
+    return !result.failure;
+  } catch {
+    return false;
+  }
+}
 export interface ImageResult {
   ok: boolean;
   src?: string;
@@ -59,7 +106,7 @@ function newestPngSince(dir: string, since: number): string | null {
   return out[0]?.p ?? null;
 }
 
-async function runCodexImage(prompt: string, target: string, cwd: string, inputImage?: string): Promise<boolean> {
+async function runCodexImage(prompt: string, target: string, cwd: string, inputImage?: string, permission?: "write" | "full"): Promise<boolean> {
   const bin = resolveBin("codex", [
     path.join(os.homedir(), ".local/bin/codex"),
     "/opt/homebrew/bin/codex",
@@ -75,6 +122,8 @@ async function runCodexImage(prompt: string, target: string, cwd: string, inputI
       `Absolutely no text, no words, no letters, no numbers, no logo, no watermark. ` +
       `If you cannot generate images print exactly NO_IMAGE_GEN.`;
   const since = Date.now() - 3000;
+  // workspace-write is already below every permission that may generate an image (write and full).
+  return runImageEngine("codex", inputImage ? "multimodal-image-edit" : "multimodal-image", instruction, permission, async () => {
   await new Promise<void>((resolve) => {
     let done = false;
     const finish = () => {
@@ -127,6 +176,7 @@ async function runCodexImage(prompt: string, target: string, cwd: string, inputI
     }
   }
   return false;
+  });
 }
 
 async function runGeminiImage(prompt: string, target: string, apiKey: string): Promise<boolean> {
@@ -153,7 +203,7 @@ async function runGeminiImage(prompt: string, target: string, apiKey: string): P
  * ~/.gemini/antigravity-cli/scratch 에 저장하므로, --add-dir로 출력폴더 권한을 주고, 실패 시 scratch의
  * 최신 PNG를 target으로 복사한다.
  */
-async function runAgyNanoBanana(prompt: string, target: string, inputImage?: string): Promise<boolean> {
+async function runAgyNanoBanana(prompt: string, target: string, inputImage?: string, permission?: "write" | "full"): Promise<boolean> {
   const bin = resolveBin("agy", [
     path.join(os.homedir(), ".local/bin/agy"),
     "/opt/homebrew/bin/agy",
@@ -173,6 +223,9 @@ async function runAgyNanoBanana(prompt: string, target: string, inputImage?: str
   const env = withAgyProductHome({ ...process.env, GEMINI_CLI_TRUST_WORKSPACE: "true" }, undefined, undefined);
   // The selected route uses subscription OAuth, regardless of ambient API keys.
   for (const key of ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_APPLICATION_CREDENTIALS"]) delete env[key];
+  // The room's permission, as for every agy run: write is sandboxed, full is not. A caller with no room keeps full.
+  const permissionArgs = antigravityPermissionArgs(permission ?? "full");
+  return runImageEngine("gemini", inputImage ? "multimodal-image-edit" : "multimodal-image", instruction, permission, async () => {
   await new Promise<void>((resolve) => {
     let done = false;
     const finish = () => {
@@ -183,7 +236,7 @@ async function runAgyNanoBanana(prompt: string, target: string, inputImage?: str
     let child;
     try {
       // stdin ignore — codex와 동일한 stdin-EOF 대기 블록 방지.
-      child = spawn(bin, ["--dangerously-skip-permissions", "--add-dir", outDir, ...(inputImage ? ["--add-dir", path.dirname(inputImage)] : []), "--print", instruction], {
+      child = spawn(bin, [...permissionArgs, "--add-dir", outDir, ...(inputImage ? ["--add-dir", path.dirname(inputImage)] : []), "--print", instruction], {
         cwd: outDir,
         env,
         stdio: ["ignore", "ignore", "ignore"],
@@ -221,11 +274,12 @@ async function runAgyNanoBanana(prompt: string, target: string, inputImage?: str
     }
   }
   return fs.existsSync(target);
+  });
 }
 
 /** The subscription route never falls through to a paid API transport. */
-async function tryGemini(clean: string, target: string): Promise<boolean> {
-  return runAgyNanoBanana(clean, target);
+async function tryGemini(clean: string, target: string, permission?: "write" | "full"): Promise<boolean> {
+  return runAgyNanoBanana(clean, target, undefined, permission);
 }
 
 // auto 페일오버 상태 — 한 엔진이 실패(쿼터 소진/미설치)하면 세션 내 잠시 뒤로 미룬다(15분).
@@ -239,17 +293,22 @@ const COOLDOWN_MS = 15 * 60 * 1000;
  * 슬롯에서 온 선택을 몰래 다른 공급자로 바꾸면 저장된 선택과 실제 영수증이 달라진다.
  */
 /** Grok Imagine (official CLI, OAuth subscription only — runGrokImagine refuses an API key) into the exact target. */
-async function tryGrok(prompt: string, target: string, dir: string): Promise<boolean> {
+async function tryGrok(prompt: string, target: string, dir: string, permission?: "write" | "full"): Promise<boolean> {
   const { runGrokImagine } = await import("./grok-imagine");
-  const produced = await runGrokImagine({ prompt, cwd: dir, kind: "image", targetPath: target });
-  return Boolean(produced) && fs.existsSync(target);
+  // Grok Imagine keeps its own media-only boundary (--sandbox strict, shell/edit denied) for every permission.
+  return runImageEngine("grok", "multimodal-image", prompt, permission, async () => {
+    const produced = await runGrokImagine({ prompt, cwd: dir, kind: "image", targetPath: target });
+    return Boolean(produced) && fs.existsSync(target);
+  });
 }
 
-export async function generateImage(model: ImageModel, prompt: string): Promise<ImageResult> {
+export async function generateImage(model: ImageModel, prompt: string, admission?: ImageAdmission): Promise<ImageResult> {
   let target: string | undefined;
   try {
     const clean = (prompt || "").trim().slice(0, 1200);
     if (!clean) return { ok: false, reason: "empty-prompt" };
+    if (admission?.permission === "read") return { ok: false, reason: "image-permission-read" };
+    const permission = admission?.permission;
     const dir = userDataPath("multimodal-images");
     fs.mkdirSync(dir, { recursive: true });
     target = path.join(dir, `trex_${Date.now()}_${Math.floor(Math.random() * 1e6)}.png`);
@@ -274,10 +333,10 @@ export async function generateImage(model: ImageModel, prompt: string): Promise<
     for (const e of order) {
       const ok =
         e === "codex"
-          ? await runCodexImage(clean, target, dir)
+          ? await runCodexImage(clean, target, dir, undefined, permission)
           : e === "grok"
-            ? await tryGrok(clean, target, dir)
-            : await tryGemini(clean, target);
+            ? await tryGrok(clean, target, dir, permission)
+            : await tryGemini(clean, target, permission);
       if (ok) {
         engine = e;
         engineCooldown[e] = 0;
@@ -312,10 +371,12 @@ const EDIT_INPUT_MAX_BYTES = 20 * 1024 * 1024;
  * an explicit route never falls through to another. The input is read, never changed; the output is a new file with
  * the input and output digests as lineage.
  */
-export async function editImage(model: Exclude<ImageModel, "grok">, imagePath: string, instruction: string): Promise<ImageResult> {
+export async function editImage(model: Exclude<ImageModel, "grok">, imagePath: string, instruction: string, admission?: ImageAdmission): Promise<ImageResult> {
   try {
     const clean = (instruction || "").trim().slice(0, 1200);
     if (!clean) return { ok: false, reason: "empty-instruction" };
+    if (admission?.permission === "read") return { ok: false, reason: "image-permission-read" };
+    const permission = admission?.permission;
     const stat = fs.statSync(imagePath);
     if (!stat.isFile() || stat.size === 0 || stat.size > EDIT_INPUT_MAX_BYTES) return { ok: false, reason: "edit-input-invalid" };
     const source = fs.readFileSync(imagePath);
@@ -330,7 +391,7 @@ export async function editImage(model: Exclude<ImageModel, "grok">, imagePath: s
     const target = path.join(dir, `edit_${Date.now()}_${Math.floor(Math.random() * 1e6)}.png`);
     const order: Array<"codex" | "gemini"> = model === "codex" ? ["codex"] : model === "gemini" ? ["gemini"] : ["codex", "gemini"];
     for (const engine of order) {
-      const ok = engine === "codex" ? await runCodexImage(clean, target, dir, imagePath) : await runAgyNanoBanana(clean, target, imagePath);
+      const ok = engine === "codex" ? await runCodexImage(clean, target, dir, imagePath, permission) : await runAgyNanoBanana(clean, target, imagePath, permission);
       if (!ok || !fs.existsSync(target)) continue;
       const output = fs.readFileSync(target);
       const outputSha256 = createHash("sha256").update(output).digest("hex");

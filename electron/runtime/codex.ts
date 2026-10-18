@@ -2474,7 +2474,8 @@ async function runCodexResidentTurn(input: {
           };
         }
         events.onStatus(`[tool-approval] runtime=${KIND} capability=other tool=${CODEX_IMAGE_TOOL_NAME} decision=${decision}`);
-        const generated = await generateImage(imageToolSlot.model, prompt);
+        // The room's permission reaches the image route's own CLI (multimodal/image.ts ImageAdmission, R-078).
+        const generated = await generateImage(imageToolSlot.model, prompt, { permission: req.permission });
         if (!generated.ok || !generated.src || !generated.artifactPath) {
           return {
             success: false,

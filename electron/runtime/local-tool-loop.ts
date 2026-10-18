@@ -1017,7 +1017,8 @@ async function dispatchMainToolRawUnchecked(
             generateImage: async ({ prompt }: { prompt: string }) => {
               const slot = multimodalImageSlot();
               if (!slot) return { ok: false, message: "The multimodal slot became empty mid-run." };
-              return generateImage(slot.model, prompt);
+              // The run's permission reaches the image route's own CLI (multimodal/image.ts ImageAdmission, R-078).
+              return generateImage(slot.model, prompt, { permission: approval.permission });
             },
           }
         : {}),
