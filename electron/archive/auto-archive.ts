@@ -31,7 +31,7 @@ export interface ArchiveCandidate {
   /** Last run participation from agent_usage; null when the agent never ran. */
   lastUsedAt: string | null;
   builtin: boolean;
-  /** Exempt: bookmarked by the owner, or part of a running job. */
+  /** Exempt: bookmarked by the owner, part of a running job, or the target of an enabled automation. */
   protected: boolean;
 }
 
@@ -117,13 +117,16 @@ function defaultCandidates(): ArchiveCandidate[] {
     `SELECT a.id, a.installed_at AS installedAt, a.builtin, a.bookmarked_at AS bookmarkedAt, a.visibility,
             (SELECT u.last_used_at FROM agent_usage u WHERE u.agent_key = a.id) AS lastUsedAt,
             EXISTS(SELECT 1 FROM one_org_members m WHERE m.installed_agent_id = a.id AND m.archived_at IS NULL
-                   AND m.status_kind IN ('working','running','waiting')) AS busy
+                   AND m.status_kind IN ('working','running','waiting')) AS busy,
+            -- An enabled automation that targets the agent is its next use, however far away the schedule puts it.
+            EXISTS(SELECT 1 FROM automations au WHERE au.enabled = 1 AND au.target_type = 'agent'
+                   AND au.target_id = a.id) AS scheduled
        FROM installed_agents a
       WHERE a.id NOT LIKE 'builtin-%'`,
-  ).all() as Array<{ id: string; installedAt: string; builtin: number | null; bookmarkedAt: string | null; lastUsedAt: string | null; busy: number }>;
+  ).all() as Array<{ id: string; installedAt: string; builtin: number | null; bookmarkedAt: string | null; lastUsedAt: string | null; busy: number; scheduled: number }>;
   return rows.map((row) => ({
     id: row.id, installedAt: row.installedAt, lastUsedAt: row.lastUsedAt, builtin: row.builtin === 1,
-    protected: row.bookmarkedAt !== null || row.busy === 1,
+    protected: row.bookmarkedAt !== null || row.busy === 1 || row.scheduled === 1,
   }));
 }
 

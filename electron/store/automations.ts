@@ -17,6 +17,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { GraphJournalKindGenerated } from "../../shared/graph-vocabulary.generated";
 import { hostname } from "node:os";
 import { emitDesktopStoreChange, desktopStoreTransaction } from "./change-bus";
+import { restoreAgentForUse } from "../archive/auto-archive";
 import { AUTOMATION_RUN_STALE_AFTER_MS, getDb } from "./db";
 import { nextRun, specFromStored, defaultTz } from "./schedule";
 import { resolveAutomationToolMode } from "../../shared/automation-tool-policy";
@@ -548,8 +549,19 @@ export function createAutomation(input: {
     getDb().prepare("UPDATE automations SET goal_id = ? WHERE id = ?").run(input.goalId.trim(), id);
   }
   bumpAutomationGraphEditEpoch(id);
-  const automation = getAutomation(id) as Automation;
+  const automation = restoreAutomationTarget(getAutomation(id) as Automation);
   emitDesktopStoreChange({ entity: "automation", id });
+  return automation;
+}
+
+/**
+ * An enabled automation's agent target is an explicit pick (archive/auto-archive.ts restoreAgentForUse): creating,
+ * retargeting or enabling it brings an archived agent back. Otherwise every run is refused errAgentArchived (dev
+ * 2026-10-18 O6: a weekly report automation targeting an auto-archived team member failed its first run
+ * "보관된 에이전트입니다"), and the sweep keeps it from being archived again while the automation stays on.
+ */
+function restoreAutomationTarget(automation: Automation): Automation {
+  if (automation.enabled && automation.targetType === "agent") restoreAgentForUse(automation.targetId);
   return automation;
 }
 
@@ -658,6 +670,7 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
   }
   bumpAutomationGraphEditEpoch(id);
   const automation = getAutomation(id) as Automation;
+  if (patch.targetType !== undefined || patch.targetId !== undefined) restoreAutomationTarget(automation);
   emitDesktopStoreChange({ entity: "automation", id });
   return automation;
 }
@@ -708,7 +721,7 @@ export function toggleAutomation(id: string, enabled: boolean): Automation {
     .prepare("UPDATE automations SET enabled = ?, next_run_at = ? WHERE id = ?")
     .run(enabled ? 1 : 0, nextRunAt, id);
   bumpAutomationGraphEditEpoch(id);
-  const automation = getAutomation(id) as Automation;
+  const automation = restoreAutomationTarget(getAutomation(id) as Automation);
   emitDesktopStoreChange({ entity: "automation", id });
   return automation;
 }
