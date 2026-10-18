@@ -1,11 +1,11 @@
 import type { HarnessPortResultView } from '@shared/types';
 export interface SkillPluginMention {id:string;slug:string;mention:string;name:string;description:string}
-type Reader={call:(operation:string,args?:Record<string,unknown>)=>Promise<HarnessPortResultView>};
+type Reader={search:(query:string,kind:'plugin')=>Promise<Array<{id:string}>>;call:(operation:string,args?:Record<string,unknown>)=>Promise<HarnessPortResultView>};
 const record=(value:unknown):Record<string,unknown>|null=>value!==null&&typeof value==='object'&&!Array.isArray(value)?value as Record<string,unknown>:null;
 /** Discovery never enables a plugin or changes MCP selection. Verify installed state and readable router bytes. */
 export async function loadSkillPluginMentions(reader:Reader):Promise<SkillPluginMention[]> {
- const found=await reader.call('plugin.search',{query:''});if(found.status!=='ok'||!Array.isArray(found.data))return [];
- const rows=found.data.slice(0,100).map(record).filter((row):row is Record<string,unknown>=>!!row&&typeof row.id==='string'&&/^plugin:[a-z0-9][a-z0-9_-]{0,127}$/.test(row.id));
+ const found=await reader.search('','plugin');if(!Array.isArray(found))return [];
+ const rows=found.slice(0,100).map(record).filter((row):row is Record<string,unknown>=>!!row&&typeof row.id==='string'&&/^plugin:[a-z0-9][a-z0-9_-]{0,127}$/.test(row.id));
  const result:SkillPluginMention[]=[];let next=0;
  await Promise.all(Array.from({length:Math.min(4,rows.length)},async()=>{while(next<rows.length){const candidate=rows[next++];try{
   const described=await reader.call('plugin.describe',{packageId:candidate.id});const data=record(described.data);if(described.status!=='ok'||!data||data.installed!==true||data.enabled!==true||data.hasSkills!==true||data.id!==candidate.id||typeof data.slug!=='string'||data.id!==`plugin:${data.slug}`||typeof data.mention!=='string'||!/^@[a-z0-9][a-z0-9_-]{0,127}$/i.test(data.mention)||typeof data.name!=='string'||!data.name.trim()||!Array.isArray(data.skills))continue;
