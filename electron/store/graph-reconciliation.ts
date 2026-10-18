@@ -27,6 +27,7 @@ import { computeNextRun, getAutomation, hasDurableActiveAutomationExecution } fr
 import { getDb } from "./db";
 import { recordRunEvent, tryRecordRunEvent } from "./run-events";
 import { resolveAutomationGraph } from "../../shared/automation-graph-definition";
+import { getAutomationDefinitionDigest } from "../long-run/automation-provenance";
 
 const GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v4";
 const SHA256_RE = /^sha256:[0-9a-f]{64}$/;
@@ -1180,13 +1181,57 @@ export function graphCheckpointRunnableNodes(graph: WorkflowGraph, checkpoint: G
 }
 
 const SCHEDULE_RECOVERY_EVENT = "workflow_schedule_recovery";
+/** Written by goal-continuation-hold.ts scheduleAdvisoryContinuation (the host's bounded fresh Goal continuation). */
+const GOAL_CONTINUATION_ADVISORY_EVENT = "goal_continuation_advisory_retry";
+const ADVISORY_RECEIPT_LIMIT = 200;
 
-function scheduleCheckpoint(automation: Automation, allowRevisedHold = false): { run: LatestRunRow; graph: WorkflowGraph; checkpoint: GraphCheckpoint; revisedGraph?: boolean } | null {
+type FailedScheduleRun = LatestRunRow & { checkpoint_json: string; occurrence_id: string };
+
+/** The latest failed live scheduled occurrence of this automation, or null. */
+function latestFailedScheduleRun(automation: Automation): FailedScheduleRun | null {
   const run = getDb().prepare(`SELECT id, automation_id, started_at, last_activity_at, status, node_states_json,
       occurrence_id, graph_digest, checkpoint_json, dry_run FROM automation_runs
       WHERE automation_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1`).get(automation.id) as LatestRunRow | undefined;
   if (!run || run.status !== "error" || run.dry_run === 1 || !run.checkpoint_json
       || !run.occurrence_id?.startsWith(`schedule:${automation.id}:`)) return null;
+  return run as FailedScheduleRun;
+}
+
+/**
+ * The cursor is the host's own fresh Goal continuation (W1, 2026-10-18). A Goal continuation that failed is re-armed by
+ * scheduleAdvisoryContinuation (goal-continuation-hold.ts) as a fresh episode: "fresh-independent-context", earlier
+ * effects unverified. The cursor recovery read that retry as a held occurrence (and, while the advisory still rewrote
+ * the prompt and schedule, as an owner graph revision) and quarantined the continuation for good: production 834c86d9
+ * "Goal continuation · Yotube" 2026-10-11 20:50:45 advisory -> 21:06:23 observe_quarantined_effects
+ * (graph_definition_reconciliation_pending), next_run_at NULL ever since; fc4396e6, c5ae5890, 444d94f0 the same, 4 of 4.
+ * Proof from typed receipts only: the definition the failed run started with (workflow_graph_started.definitionDigest)
+ * is the one every advisory since then recorded and the one stored now, and the latest advisory wrote this exact cursor.
+ * Any other change (an owner edit, a receipt without a definition digest such as the production 10-11 rows) keeps the
+ * existing hold.
+ */
+function hostAdvisoryArmedCursor(automation: Automation, run: LatestRunRow): boolean {
+  if (!automation.nextRunAt || !automation.goalId || !run.started_at) return false;
+  try {
+    const db = getDb();
+    const started = db.prepare(`SELECT payload_json FROM run_events WHERE run_id = ? AND kind = 'workflow_graph_started'
+      ORDER BY seq ASC LIMIT 1`).get(run.id) as { payload_json: string } | undefined;
+    const ran = started ? (JSON.parse(started.payload_json) as Record<string, unknown>).definitionDigest : null;
+    if (typeof ran !== "string" || !ran || getAutomationDefinitionDigest(automation.id) !== ran) return false;
+    const rows = db.prepare(`SELECT payload_json FROM run_events WHERE automation_id = ? AND kind = ? AND ts >= ?
+      ORDER BY ts ASC, rowid ASC LIMIT ?`).all(automation.id, GOAL_CONTINUATION_ADVISORY_EVENT, run.started_at,
+      ADVISORY_RECEIPT_LIMIT) as Array<{ payload_json: string }>;
+    if (rows.length === 0 || rows.length >= ADVISORY_RECEIPT_LIMIT) return false;
+    const receipts = rows.map((row) => JSON.parse(row.payload_json) as Record<string, unknown>);
+    return receipts.every((receipt) => receipt.continuation === "fresh-independent-context" && receipt.definitionDigest === ran)
+      && receipts[receipts.length - 1]!.nextAt === automation.nextRunAt;
+  } catch {
+    return false;
+  }
+}
+
+function scheduleCheckpoint(automation: Automation, allowRevisedHold = false): { run: LatestRunRow; graph: WorkflowGraph; checkpoint: GraphCheckpoint; revisedGraph?: boolean } | null {
+  const run = latestFailedScheduleRun(automation);
+  if (!run) return null;
   if (Buffer.byteLength(run.checkpoint_json, "utf8") > MAX_CHECKPOINT_BYTES) return null;
   const graph = strictGraph(executionGraphAutomation(automation));
   const digest = graphExecutionDigest(automation, graph);
@@ -1204,8 +1249,15 @@ function scheduleCheckpoint(automation: Automation, allowRevisedHold = false): {
   return { run, graph, checkpoint };
 }
 
-/** A cursor repair is bound to the saved occurrence even across a missed cron slot. */
+/**
+ * A cursor repair is bound to the saved occurrence even across a missed cron slot. A cursor the host's own Goal
+ * continuation advisory armed is that advisory's fresh episode, its own occurrence: resuming the failed occurrence
+ * would hold its uncertain step again (run-graph admits a held view of the current occurrence as MUTATION_UNVERIFIED)
+ * and the continuation would never take a step. The failed occurrence keeps its record and its own reconciliation.
+ */
 export function recoveredGraphScheduleOccurrence(automation: Automation): string | null {
+  const failed = automation.nextRunAt ? latestFailedScheduleRun(automation) : null;
+  if (failed && hostAdvisoryArmedCursor(automation, failed)) return `schedule:${automation.id}:${automation.nextRunAt}`;
   const saved = scheduleCheckpoint(automation);
   if (!saved || !automation.nextRunAt) return null;
   const row = getDb().prepare(`SELECT payload_json FROM run_events WHERE run_id = ? AND kind = ?
@@ -1218,6 +1270,59 @@ export function recoveredGraphScheduleOccurrence(automation: Automation): string
       && receipt.graphDigest === saved.run.graph_digest && receipt.occurrenceId === saved.run.occurrence_id
       ? saved.run.occurrence_id : null;
   } catch { return null; }
+}
+
+interface ScheduleCursorHold {
+  run: LatestRunRow;
+  checkpoint: GraphCheckpoint;
+  graphRevised: boolean;
+  heldNodeIds: string[];
+  replaySafeNodeIds: string[];
+  runnableNodeIds: string[];
+  observationOnly: boolean;
+}
+
+/** The hold the cursor recovery derives from the latest failed scheduled occurrence; null when it has none to apply. */
+function scheduleCursorHold(automation: Automation): ScheduleCursorHold | null {
+  const db = getDb();
+  const saved = scheduleCheckpoint(automation, true);
+  if (!saved) return null;
+  // The host re-armed this exact cursor for a fresh Goal continuation: neither its own rewrite nor the earlier
+  // uncertain step is a reason to stop the clock (the failed occurrence keeps its record and reconciliation).
+  if (hostAdvisoryArmedCursor(automation, saved.run)) return null;
+  const graphRevised = saved.revisedGraph === true;
+  const { run, graph, checkpoint } = saved;
+  const heldNodeIds = [...new Set([...checkpoint.inFlightNodeIds, ...checkpoint.ambiguousNodeIds])].sort();
+  // Project only replay safety already proved by the same kernel helper.
+  // Do not turn missing history into permission to retry a held effect.
+  const projection = structuredClone(checkpoint);
+  const replaySafeNodeIds = (graphRevised ? [] : reconcileReadOnlyInterruptedAgentNodes(projection, run.id, graph))
+    .filter((nodeId) => (checkpoint.toolReceipts[nodeId]?.length ?? 0) > 0
+      && Boolean(db.prepare("SELECT 1 FROM run_events WHERE run_id = ? AND node_id = ? AND kind = 'mcp_tool-use' LIMIT 1")
+        .get(run.id, nodeId)));
+  const replaySafe = new Set(replaySafeNodeIds);
+  projection.ambiguousNodeIds = checkpoint.ambiguousNodeIds.filter((id) => !replaySafe.has(id));
+  projection.inFlightNodeIds = checkpoint.inFlightNodeIds.filter((id) => !replaySafe.has(id));
+  const runnableNodeIds = graphRevised ? [] : graphCheckpointRunnableNodes(graph, projection);
+  const observationOnly = heldNodeIds.length > 0 && runnableNodeIds.length === 0;
+  return { run, checkpoint, graphRevised, heldNodeIds, replaySafeNodeIds, runnableNodeIds, observationOnly };
+}
+
+/**
+ * Whether this schedule can wake by itself (W1, 2026-10-18): "held" when the cursor recovery quarantines it on its
+ * uncertain effects (it clears next_run_at before any dispatch), "unarmed" when it is enabled with no cursor and nothing
+ * held, else "ok" (armed, or disabled — enabling computes a cursor). Production: "Goal continuation · Yotube" sat
+ * enabled with next_run_at NULL under such a hold and was re-bound to the next /goal Goal, so every turn end of that
+ * Goal fell to goal_continuation_unarmed (Yotube 95 + 19 times, 2026-10-12..18).
+ */
+export function graphScheduleWakeState(automation: Automation): "ok" | "unarmed" | "held" {
+  try {
+    if (scheduleCursorHold(automation)?.observationOnly) return "held";
+  } catch {
+    // An unreadable historical occurrence is skipped by the recovery too; it does not hold the cursor.
+  }
+  return automation.enabled && (automation.triggerType ?? "schedule") === "schedule" && !automation.nextRunAt
+    ? "unarmed" : "ok";
 }
 
 /**
@@ -1243,23 +1348,9 @@ export function recoverGraphScheduleCursors(now = new Date()): Array<{ automatio
           .get(automation.id) as { end_at: string | null; max_runs: number | null; run_count: number } | undefined;
         if (!policy || (policy.end_at && Date.parse(policy.end_at) <= now.getTime())
             || (policy.max_runs != null && policy.run_count >= policy.max_runs)) return;
-        const saved = scheduleCheckpoint(automation, true);
-        if (!saved) return;
-        const graphRevised = saved.revisedGraph === true;
-        const { run, graph, checkpoint } = saved;
-        const heldNodeIds = [...new Set([...checkpoint.inFlightNodeIds, ...checkpoint.ambiguousNodeIds])].sort();
-        // Project only replay safety already proved by the same kernel helper.
-        // Do not turn missing history into permission to retry a held effect.
-        const projection = structuredClone(checkpoint);
-        const replaySafeNodeIds = (graphRevised ? [] : reconcileReadOnlyInterruptedAgentNodes(projection, run.id, graph))
-          .filter((nodeId) => (checkpoint.toolReceipts[nodeId]?.length ?? 0) > 0
-            && Boolean(db.prepare("SELECT 1 FROM run_events WHERE run_id = ? AND node_id = ? AND kind = 'mcp_tool-use' LIMIT 1")
-              .get(run.id, nodeId)));
-        const replaySafe = new Set(replaySafeNodeIds);
-        projection.ambiguousNodeIds = checkpoint.ambiguousNodeIds.filter((id) => !replaySafe.has(id));
-        projection.inFlightNodeIds = checkpoint.inFlightNodeIds.filter((id) => !replaySafe.has(id));
-        const runnableNodeIds = graphRevised ? [] : graphCheckpointRunnableNodes(graph, projection);
-        const observationOnly = heldNodeIds.length > 0 && runnableNodeIds.length === 0;
+        const hold = scheduleCursorHold(automation);
+        if (!hold) return;
+        const { run, checkpoint, graphRevised, heldNodeIds, replaySafeNodeIds, runnableNodeIds, observationOnly } = hold;
         // Empty completed occurrences and ordinary future schedules have no repair
         // authority here. A ready cursor is never advanced or fired twice.
         if (!observationOnly && (automation.nextRunAt !== null || !runnableNodeIds.length)) return;

@@ -11,13 +11,13 @@ import {
   recordGoalLedgerCycle,
 } from "./mcp/goal-ledger";
 import {
-  GOAL_RUN_SCHEDULE_BACKOFF,
   goalContinuationSchedule,
   isStormbreakerLongRunPrompt,
 } from "./hephaestus/loop-engineering";
 import { getLongRunByGoalId, longRunOwnerHold } from "./store/long-runs";
 import { tryRecordRunEvent } from "./store/run-events";
 import { goalStopReasonText } from "../shared/goal-stop-reason-text";
+import { getAutomationDefinitionDigest } from "./long-run/automation-provenance";
 
 /* Goal continuation diagnostics never disable an authorized mandate. Independent
  * work resumes from current state on a bounded cadence while checks remain in
@@ -93,14 +93,21 @@ export function surfaceGoalContinuationNotice(input: {
 }
 
 const DIAGNOSTIC_EVENT = "goal_continuation_advisory_retry";
-const FRESH_CONTEXT_MARKER = "\n\n[Agentlas continuation advisory]\n";
 
 function ownerStoppedOrGoalEnded(goalId: string): boolean {
   const run = getLongRunByGoalId(goalId);
   return Boolean(run && (longRunOwnerHold(run.id) || ["completed", "cancelled", "cancelling"].includes(run.status)));
 }
 
-/** This CAS changes only retry timing/context, never enabled, grants, pins or the Goal binding. */
+/**
+ * This CAS changes only the retry time, never the definition, enabled, grants, pins or the Goal binding (W1,
+ * 2026-10-18). It used to rewrite the continuation's prompt (an appended advisory paragraph) and schedule (every-2h).
+ * Both are part of the definition: the execution digest changed, so the schedule cursor recovery quarantined the
+ * continuation as an owner graph revision (production 834c86d9 "Goal continuation · Yotube", 10-11 20:50:45 -> 21:06:23,
+ * next_run_at NULL ever since; fc4396e6, c5ae5890, 444d94f0 the same, 4 of 4, the paragraph never reached a model), and
+ * the Goal provenance digest changed, so even an armed run was refused (automation_workspace_goal_authority_changed).
+ * The receipt names the definition it left in place; graph-reconciliation.ts reads it as the host's fresh episode.
+ */
 function scheduleAdvisoryContinuation(a: {
   id: string; goalId?: string | null; promptTemplate: string; scheduleHuman?: string;
 }, runId: string, reasonCode: string, progressKey: string): void {
@@ -117,20 +124,14 @@ function scheduleAdvisoryContinuation(a: {
     const retryIndex = Math.min(10, Math.max(0, Number(prior?.n ?? 0)));
     const delayMs = Math.min(6*60*60_000, 15*60_000*2**retryIndex);
     const nextAt = new Date(Date.now()+delayMs).toISOString();
-    const basePrompt = current.promptTemplate.split(FRESH_CONTEXT_MARKER)[0]!;
-    const prompt = basePrompt + FRESH_CONTEXT_MARKER +
-      "Start a fresh episode from the current authorized Goal, owner instructions and exact durable receipts. " +
-      "Keep the current runtime and action permissions. Check the current state of earlier actions yourself and decide what still needs doing. " +
-      "Do not invent an owner answer. " +
-      "Choose the next independent useful task; delegate observation and repair in the background. " +
-      "If no independent step is due, record the limitation once and keep the bounded host retry. Honor explicit owner Stop.";
-    const updated = getDb().prepare(`UPDATE automations SET schedule=?, next_run_at=?, prompt_template=?
+    const updated = getDb().prepare(`UPDATE automations SET next_run_at=?
       WHERE id=? AND enabled=1 AND goal_id=? AND prompt_template=? AND schedule=?`)
-      .run(GOAL_RUN_SCHEDULE_BACKOFF, nextAt, prompt, a.id, a.goalId, current.promptTemplate, current.scheduleHuman);
+      .run(nextAt, a.id, a.goalId, current.promptTemplate, current.scheduleHuman);
     if (updated.changes !== 1) return;
     tryRecordRunEvent({ runId, automationId: a.id, kind: DIAGNOSTIC_EVENT,
       sourceEventId: `${DIAGNOSTIC_EVENT}:${runId}`, payload: { reasonCode, fingerprint, retryIndex,
-        nextAt, continuation: "fresh-independent-context", predecessorEffects: "unverified" } });
+        nextAt, continuation: "fresh-independent-context", predecessorEffects: "unverified",
+        definitionDigest: getAutomationDefinitionDigest(a.id) } });
     emitDesktopStoreChange({ entity: "automation", id: a.id });
   }).immediate();
 }
