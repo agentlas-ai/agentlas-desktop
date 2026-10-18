@@ -1053,6 +1053,8 @@ async function runOpenAiCompletionWithMainToolLoop(
       runtimeKind: "byok",
       renderOutputSchemaSystem: () => ({ system: prepareContext(backend, req, events, true).system }),
       recoveryBackend: backend,
+      // OpenAI's chat models read images; the other OpenAI-compatible providers may serve a text-only model.
+      ...(backend === "openai" ? { acceptsImageResults: true } : {}),
       ...(wire === "responses" ? { responsesWire: "deepseek" as const } : {}),
       host: baseUrl.replace(/\/$/, ""),
       chatEndpoint: endpoint,

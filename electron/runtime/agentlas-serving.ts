@@ -571,7 +571,9 @@ async function runAgentlasServingWithTools(
         progress.events, approval, broker);
       progress.assertProgress();
       results.push({ id: call.id, text: result.content, isError: result.isError });
-      if (!result.isError) images.push(...servingToolImages(result.visionMessage));
+      const toolImages = result.isError ? [] : servingToolImages(result.visionMessage);
+      // A harness capture is an observation whose path is in the result: it is left out rather than end the turn on capacity.
+      if (!result.visionFromHarness || images.length + toolImages.length + (req.images?.length ?? 0) <= 8) images.push(...toolImages);
       if (images.length + (req.images?.length ?? 0) > 8) throw new Error("serving_tool_image_capacity_exceeded");
     }
     toolExchanges.push({ text, calls, results, ...(images.length ? { images } : {}) });

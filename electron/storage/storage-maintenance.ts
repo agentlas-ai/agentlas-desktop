@@ -14,6 +14,7 @@ import { retireNestedProductHomeMirrors } from "./product-home-retention";
 import { sweepAgentIntermediates } from "./intermediate-sweep";
 import { retireRunDetailSlice, type RunDetailWatermark } from "./run-detail-retention";
 import { DAY_MS, STORAGE_POLICY } from "./storage-policy";
+import { observationCaptureDir } from "../media/capture-artifacts";
 
 /**
  * Runs the storage budget (storage-policy.ts) shortly after start and then
@@ -57,6 +58,8 @@ export interface StorageMaintenanceReport {
   nestedProductHomes: { dirs: number; bytes: number };
   /** Managed DB-upgrade copies above the cap of three (store/migration-backup-retention.ts). */
   migrationBackups: MigrationBackupRetention;
+  /** App-call image observations past the settled-run detail window (pruneObservationCaptures). */
+  observationCaptures: { files: number; bytes: number };
 }
 
 const LOCK_FILE = "storage-maintenance.lock";
@@ -148,6 +151,37 @@ export async function pruneTelegramAttachmentCopies(
   return result;
 }
 
+/**
+ * Images an app operation answered (app-control/service.ts saveResultImages) are saved to captures/observations so a model
+ * can see them whole. They are what a model looked at, like a tool call's detail, never a run output or a chat image, so
+ * they go after the same window (owner decision 2026-10-16: settled-run tool detail after 3 days). Only regular files named
+ * observation-*.png|jpg directly in that folder are removed; a symlinked folder or anything else is left alone.
+ */
+const OBSERVATION_CAPTURE = /^observation-[0-9TZ-]+-[0-9a-f]{8}\.(?:png|jpg)$/;
+
+export async function pruneObservationCaptures(
+  folder: string,
+  options: { keepDays: number; now?: number },
+): Promise<{ files: number; bytes: number }> {
+  const result = { files: 0, bytes: 0 };
+  const now = options.now ?? Date.now();
+  // lstat: a symlinked observations folder is not ours to empty.
+  try { if (!(await fs.promises.lstat(folder)).isDirectory()) return result; } catch { return result; }
+  let entries: fs.Dirent[] = [];
+  try { entries = await fs.promises.readdir(folder, { withFileTypes: true }); } catch { return result; }
+  for (const entry of entries) {
+    if (!entry.isFile() || !OBSERVATION_CAPTURE.test(entry.name)) continue;
+    const file = path.join(folder, entry.name);
+    let stat: fs.Stats;
+    try { stat = await fs.promises.lstat(file); } catch { continue; }
+    if (!stat.isFile() || now - stat.mtimeMs < options.keepDays * DAY_MS) continue;
+    try { await fs.promises.unlink(file); } catch { continue; }
+    result.files += 1;
+    result.bytes += stat.size;
+  }
+  return result;
+}
+
 function readWatermark(): RunDetailWatermark | null {
   try {
     // run_events.id is TEXT. A number check rejected every stored watermark,
@@ -231,12 +265,13 @@ export async function runStorageMaintenance(now = Date.now()): Promise<StorageMa
       { keepDays: STORAGE_POLICY.cloudPackageDays, now },
     );
     const nestedProductHomes = await retireNestedProductHomeMirrors(userDataPath(), { keepDays: STORAGE_POLICY.cliTranscriptIdleDays, now });
+    const observationCaptures = await pruneObservationCaptures(observationCaptureDir(), { keepDays: STORAGE_POLICY.runDetailDays, now });
     // DB-upgrade copies: checked in a child process, never on this thread.
     const migrationBackups = await retireManagedMigrationBackups({ storePath: db.name });
     return {
       lowDisk,
       freeBytes: space?.freeBytes ?? null,
-      freedBytes: sweep.removedBytes + transcripts.bytes + telegramAttachments.bytes + cloudPackages.bytes + nestedProductHomes.bytes + migrationBackups.bytes,
+      freedBytes: sweep.removedBytes + transcripts.bytes + telegramAttachments.bytes + cloudPackages.bytes + nestedProductHomes.bytes + migrationBackups.bytes + observationCaptures.bytes,
       intermediates: { files: sweep.removedFiles, bytes: sweep.removedBytes },
       transcripts: { sessions: transcripts.sessions, orphans: transcripts.orphans, bytes: transcripts.bytes },
       runDetail,
@@ -246,6 +281,7 @@ export async function runStorageMaintenance(now = Date.now()): Promise<StorageMa
       cloudPackages,
       nestedProductHomes,
       migrationBackups,
+      observationCaptures,
     };
   } finally {
     release();
@@ -292,7 +328,7 @@ export function startStorageMaintenance(options: {
         + `watermark ${report.runDetail.watermarkTs ?? "none"}); `
         + `trigger events compacted ${report.triggerEvents.compacted}; telegram copies ${report.telegramAttachments.folders}; `
         + `judgment verdicts deleted ${report.judgmentVerdicts.deleted}; cloud packages ${report.cloudPackages.dirs}; `
-        + `nested product homes ${report.nestedProductHomes.dirs}; `
+        + `nested product homes ${report.nestedProductHomes.dirs}; observation captures ${report.observationCaptures.files}; `
         + `migration backups removed ${report.migrationBackups.removed} (${report.migrationBackups.bytes} bytes, skipped ${report.migrationBackups.skipped})`);
     }
     if (!report.lowDisk || report.freeBytes === null) return;

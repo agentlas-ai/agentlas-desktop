@@ -143,6 +143,9 @@ export interface MainToolDispatchResult {
   trust?: ToolResultTrust;
   /** The effect already ran before a crash; this is its recorded result, not a new execution (effect ledger G12). */
   replayed?: true;
+  /** `visionMessage` holds a harness result's host capture (turn-tools/control-server.ts harnessResultWithImages), not a
+   * screenshot tool's own answer: it goes only to a model declared to read images, the JSON keeps its path for the rest. */
+  visionFromHarness?: true;
 }
 
 /**
@@ -1138,6 +1141,7 @@ async function dispatchMainToolRawUnchecked(
       content: text,
       ...(result.rawResult ? { rawMcpResult: result.rawResult } : {}),
       ...(capturePaths.length ? { artifactPaths: capturePaths } : {}),
+      ...(images.length > 0 && isDirectEntryTool(resolved) ? { visionFromHarness: true as const } : {}),
       visionMessage: images.length > 0
         ? {
             role: "user",
@@ -1187,7 +1191,7 @@ export async function runOneToolCall(
   /** Set when the host synthesized `call.id` for a local server that sent none: the broker gets the measured location,
    * never a made-up provider correlation id (MainToolDispatchCall contract). The wire message still pairs by `call.id`. */
   synthesizedLocation?: WorkforceBrokerProviderCallLocation,
-): Promise<{ toolMessage: Extract<ChatMessage, { role: "tool" }>; visionMessage: ChatMessage | null; isError: boolean }> {
+): Promise<{ toolMessage: Extract<ChatMessage, { role: "tool" }>; visionMessage: ChatMessage | null; isError: boolean; visionFromHarness?: true }> {
   const outcome = await runMainToolDispatch(
     byName,
     synthesizedLocation
@@ -1201,6 +1205,7 @@ export async function runOneToolCall(
     toolMessage: { role: "tool", tool_call_id: call.id, content: outcome.content },
     visionMessage: outcome.visionMessage,
     isError: outcome.isError,
+    ...(outcome.visionFromHarness ? { visionFromHarness: true as const } : {}),
   };
 }
 
@@ -2256,7 +2261,9 @@ async function runLocalOpenAiChatInner(
         result.synthesizedCallIds?.has(call.id) ? { responseIndex: turn, partIndex } : undefined);
       progress.assertProgress();
       messages.push(outcome.toolMessage);
-      if (outcome.visionMessage && opts.acceptsImageResults !== false) {
+      // A harness capture goes only where reading images is declared: an OpenAI-compatible BYOK provider, Ollama, LM Studio
+      // and MLX may serve a text-only model, which can refuse the whole request; its path stays in the tool JSON.
+      if (outcome.visionMessage && opts.acceptsImageResults !== false && (!outcome.visionFromHarness || opts.acceptsImageResults === true)) {
         toolVisionMessages.add(outcome.visionMessage);
         visionMessages.push(outcome.visionMessage);
       }

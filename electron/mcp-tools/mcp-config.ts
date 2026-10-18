@@ -692,6 +692,13 @@ function argsWithToolGateWorkingFolder(
  * opts.catalogIds가 있으면 자동 선택된 도구만 직렬화한다. 예: computer-use 모드에서는
  * Playwright가 설치돼 있어도 config/allowedTools에 싣지 않아 브라우저 우회를 막는다.
  */
+/**
+ * Runtimes whose MCP client takes an image in a tool result (turn-tools/control-server.ts harnessResultWithImages): Claude
+ * Code and codex 0.163 read it (probe 2026-10-18); the API-class lanes pass it on only to a model declared to read images
+ * (local-tool-loop.ts visionFromHarness). grok 1.0.62 stops answering after one; antigravity and the ACP agents are unmeasured.
+ */
+const TURN_TOOL_IMAGE_RUNTIMES: ReadonlySet<string> = new Set(["claude-code", "codex", "byok", "agentlas", "agentlas-local", "ollama", "lmstudio", "mlx"]);
+
 export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<McpConfigResult | null> {
   const historyFence=currentHistoryRuntimeFence();if(historyFence){if(!opts?.toolGate)throw new Error("history_native_mcp_gate_required");opts={...opts,toolGate:{...opts.toolGate,historyRuntimeFence:historyFence}};}
   // Automation must start the canonical Agentlas Browser wrapper itself. A
@@ -1123,7 +1130,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
               admissionCurrent: opts?.admissionCurrent,
               graphAuthoring: serializedServers.some((server) => server.catalogId === "one-team") && !toolchainConsumer && !roomMember && !graphTeamGrant,
               // Harness tool ports reach this run's host-channel built-ins only through this sealed file.
-              mcpConfigPath: configPath },
+              mcpConfigPath: configPath,
+              ...(TURN_TOOL_IMAGE_RUNTIMES.has(opts?.toolGate?.runtime ?? "") ? { imageResults: true } : {}) },
             capabilityConfigKey,
           );
           turnToolsCapabilityCleanup.push(() => removeTurnToolsCapability(capabilityConfigKey, capability.binding.capabilityId));

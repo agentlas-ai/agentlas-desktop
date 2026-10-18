@@ -10,7 +10,7 @@ import type { AppControlRendererOperation, AppControlRendererReply } from "../..
 import { appUiPreferenceDefinitions, isAppUiPreferenceName, normalizeAppUiPreference } from "../../shared/app-ui-preferences";
 import { decodeAppControlArguments } from "./argument-codec";
 import { remoteAppControlCall, remoteAppControlOperations } from "./daemon-remote";
-import { saveScreenCaptureArtifact } from "../media/capture-artifacts";
+import { saveObservationCaptureArtifact } from "../media/capture-artifacts";
 
 // One's app-control route: find an operation, then call it as the owner's own screens would. The catalog is generated
 // from the preload bridges; ./policy decides what One may call and on which turns.
@@ -326,7 +326,8 @@ const IMAGE_DATA_URL = /^data:image\/(png|jpeg);base64,/;
 // An operation that answers an image as a data URL (computerUse.capturePreview, browser.captureLiveFrame, site.captureRect,
 // workLiveView.capture, ...) left it to clipResult, which cut the base64 like any long text. Dev 2026-10-18 run30 O8 (GPT
 // firm QA checking a saved docx): capturePreview's 313,674-char data URL came back as 22,569 chars, no model could read it,
-// and the QA closed inconclusive. Each image is saved as a host capture (an observation, never a run output) and the result
+// and the QA closed inconclusive. Each image is saved as a host observation capture (captures/observations, removed after the
+// settled-run detail window; never a run output) and the result
 // holds its absolute path; `images` names where each was and its file, and the harness channel hands those files to the model
 // as images (turn-tools/control-server.ts).
 function saveResultImages(value: unknown): { value: unknown; images?: AppResultImage[] } {
@@ -340,7 +341,7 @@ function saveResultImages(value: unknown): { value: unknown; images?: AppResultI
     if (typeof node === "string") {
       const match = IMAGE_DATA_URL.exec(node);
       if (!match || images.length >= MAX_RESULT_IMAGES) return;
-      const file = saveScreenCaptureArtifact(node);
+      const file = saveObservationCaptureArtifact(node);
       if (!file) return;
       holder[key] = file;
       images.push({ path: at, file, mediaType: match[1] === "png" ? "image/png" : "image/jpeg", bytes: fs.statSync(file).size });

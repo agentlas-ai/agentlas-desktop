@@ -45,6 +45,32 @@ export function savedBrowserCaptureDir(): string {
 const DATA_URL_RE = /^data:image\/(png|jpeg);base64,([A-Za-z0-9+/=]+)$/;
 
 /**
+ * 앱 기능(app.call)이 답한 이미지의 관측 폴더(app-control/service.ts saveResultImages). 모델이 본 관측일 뿐 실행 산출물도
+ * 채팅 이미지도 아니다 — 정산된 실행의 도구 호출 상세와 같은 기간(오너 결정 2026-10-16, 3일) 뒤 저장 공간 패스가 지운다
+ * (storage-maintenance.ts pruneObservationCaptures). 위의 정본 폴더(screen·browser-saved)와 섞지 않는다.
+ */
+export function observationCaptureDir(): string {
+  return path.join(captureArtifactsRoot(), "observations");
+}
+
+/** 관측 이미지 dataUrl 을 관측 폴더에 저장하고 절대경로를 반환한다. 실패는 null(호출자는 잘린 문자열 대신 원래 값을 둔다). */
+export function saveObservationCaptureArtifact(dataUrl: string | null | undefined): string | null {
+  if (typeof dataUrl !== "string") return null;
+  const match = DATA_URL_RE.exec(dataUrl);
+  if (!match) return null;
+  try {
+    const dir = observationCaptureDir();
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const filePath = path.join(dir, `observation-${stamp}-${randomUUID().slice(0, 8)}${match[1] === "png" ? ".png" : ".jpg"}`);
+    fs.writeFileSync(filePath, Buffer.from(match[2], "base64"), { mode: 0o600 });
+    return filePath;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 화면 캡처 dataUrl을 정본 PNG/JPG로 저장하고 절대경로를 반환한다.
  * 저장 실패는 캡처 자체를 막지 않는다(경로 없이 base64 인라인만 반환) — null.
  */

@@ -5,7 +5,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { onHostShutdown } from "../host-lifecycle";
 import { userDataPath } from "../runtime-paths";
-import { screenCaptureDir } from "../media/capture-artifacts";
+import { observationCaptureDir } from "../media/capture-artifacts";
 import { outsideInvocationJudgmentContext } from "../runtime/judgment-context";
 import { memoryNoteToEvent } from "../memory/events";
 import { recordTurnAsk, recordTurnMemoryNote, turnNotesKey, TURN_ASK_LIMIT, TURN_MEMORY_NOTE_LIMIT } from "./notes";
@@ -49,6 +49,9 @@ export interface TurnToolsCapabilityBinding {
   /** Main-only: the sealed MCP config this capability was minted in. Harness ports dispatch the run's host-channel
    * built-ins through it (harness/tool-dispatch.ts runScopedBinding). Never written to the capability file. */
   mcpConfigPath?: string;
+  /** Main-only: the run's MCP client reads image content in a tool result (harnessResultWithImages). Measured 2026-10-18:
+   * codex 0.163 reads one; grok 1.0.62 stops answering after one (a text result in the same probe finishes). */
+  imageResults?: boolean;
 }
 
 export type TurnGoalTimerAuthority =
@@ -170,8 +173,9 @@ const RESULT_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
  * A harness_call whose app.call answer held images (app-control/service.ts saveResultImages saved each as a host capture
  * and listed it under `images`) reaches the model as the same JSON plus each capture as an MCP image, so every runtime sees
  * it the way it sees a tool's screenshot. Dev 2026-10-18 run30 O8: the firm QA's capturePreview image arrived as cut
- * base64 text and the QA closed inconclusive. Only regular files directly in the host's screen-capture folder are read (at
+ * base64 text and the QA closed inconclusive. Only regular files directly in the host's observation-capture folder are read (at
  * most four, each under 5 MB); the runtimes keep these as observations, not run outputs (codex.ts, local-tool-loop.ts).
+ * Only a run whose MCP client reads images gets them (TurnToolsCapabilityBinding.imageResults); the others keep the paths.
  */
 export function harnessResultWithImages(operation: unknown, result: unknown): unknown {
   if (operation !== "harness_call" || !result || typeof result !== "object") return result;
@@ -179,7 +183,7 @@ export function harnessResultWithImages(operation: unknown, result: unknown): un
   const listed = r.status === "ok" && r.data && typeof r.data === "object" ? (r.data as { images?: unknown }).images : undefined;
   if (!Array.isArray(listed) || listed.length === 0) return result;
   let root: string;
-  try { root = fs.realpathSync.native(screenCaptureDir()); } catch { return result; }
+  try { root = fs.realpathSync.native(observationCaptureDir()); } catch { return result; }
   const blocks: Array<{ type: "image"; data: string; mimeType: string }> = [];
   for (const image of listed.slice(0, RESULT_IMAGE_LIMIT)) {
     const { file, mediaType } = (image && typeof image === "object" ? image : {}) as { file?: unknown; mediaType?: unknown };
@@ -377,7 +381,8 @@ export function startTurnToolsControlServer(): Promise<number> {
           const result = await outsideInvocationJudgmentContext(() => handleTurnToolsControlRequest(body, requestLifetime.signal));
           // A failed harness call reaches the model and every receipt as an MCP tool error with its typed code.
           const errorCode = harnessCallFailureCode(body.operation, result);
-          const wire = errorCode ? result : harnessResultWithImages(body.operation, result);
+          const imageResults = typeof body.capabilityId === "string" && capabilities.get(body.capabilityId)?.imageResults === true;
+          const wire = errorCode || !imageResults ? result : harnessResultWithImages(body.operation, result);
           if (!res.destroyed) writeJson(res, 200, { ok: true, result: wire, ...(errorCode ? { isError: true, errorCode } : {}) });
         } catch (error) {
           if (!res.destroyed) writeJson(res, 409, { ok: false, error: error instanceof Error ? error.message : "turn-tool-failed" });
