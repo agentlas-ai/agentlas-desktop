@@ -84,9 +84,92 @@ let credentialStateRevision = 0;
 export function getCredentialStateRevision(): number { return credentialStateRevision; }
 
 function rememberAccounts(service: string, accounts: string[]): void {
+  const previous = knownAccounts?.service === service ? knownAccounts.accounts : null;
   knownAccounts = { service, accounts: new Set(accounts) };
   credentialStateRevision += 1;
+  for (const account of accounts) notePresence(service, account, true);
+  if (previous) for (const account of previous) if (!knownAccounts.accounts.has(account)) notePresence(service, account, false);
 }
+
+/*
+ * Value-free presence (R-024). Discovery (harness describe / search / status, canonical readiness) must not read,
+ * list or prompt for a secret: production 2026-10-16..17 `harness_describe connector:*` read keychain values four times
+ * inside unattended runs (daily graph, Yotube room), where a keychain prompt has nobody to answer it. Presence is
+ * answered from what this process already observed (its cache, its last listing) and from a durable ledger that every
+ * process writes after its OWN successful native read, write, delete or listing: one small file per account, named by a
+ * digest of service and account, holding only present/absent and a time. It never holds a value or a name, and an
+ * account nobody observed yet is "unknown", never "missing".
+ */
+export type CredentialPresence = "present" | "missing" | "unknown";
+const presenceWritten = new Map<string, boolean>();
+function presenceFile(service: string, account: string): string | null {
+  try {
+    const { userDataPath } = require("../runtime-paths") as typeof import("../runtime-paths");
+    return userDataPath("credential-presence", `${createHash("sha256").update(`${service}\0${account}`).digest("hex").slice(0, 32)}.json`);
+  } catch { return null; }
+}
+function notePresence(service: string, account: string, present: boolean): void {
+  const key = passwordKey(service, account);
+  // Another process may have recorded the opposite since this one wrote: skip only when the file still agrees.
+  if (presenceWritten.get(key) === present && ledgerPresence(service, account) === (present ? "present" : "missing")) return;
+  const file = presenceFile(service, account);
+  if (!file) return;
+  try {
+    const fs = require("node:fs") as typeof import("node:fs");
+    const path = require("node:path") as typeof import("node:path");
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ schemaVersion: "agentlas.credential-presence.v1", present, observedAt: new Date().toISOString() }), { mode: 0o600 });
+    fs.renameSync(tmp, file);
+    presenceWritten.set(key, present);
+  } catch { /* a presence hint is never required for correctness */ }
+}
+function ledgerPresence(service: string, account: string): CredentialPresence {
+  const file = presenceFile(service, account);
+  if (!file) return "unknown";
+  try {
+    const fs = require("node:fs") as typeof import("node:fs");
+    const record = JSON.parse(fs.readFileSync(file, "utf8")) as { schemaVersion?: unknown; present?: unknown };
+    return record?.schemaVersion === "agentlas.credential-presence.v1" && typeof record.present === "boolean"
+      ? (record.present ? "present" : "missing") : "unknown";
+  } catch { return "unknown"; }
+}
+/** Presence of one account without touching the native backend (no read, no listing, no prompt). */
+function accountPresence(account: string): CredentialPresence {
+  if (developmentEffectsSuppressed() || USE_MEMORY_VAULT) {
+    const value = memoryVault.get(account);
+    return typeof value === "string" && value.length > 0 ? "present" : "missing";
+  }
+  let service: string;
+  try { service = keychainService(); } catch { return "unknown"; }
+  const key = passwordKey(service, account);
+  if (!passwordOperations.has(key) && keychainCache.has(key) && cachedCredentialIsFresh(key)) {
+    const value = keychainCache.get(key);
+    return typeof value === "string" && value.length > 0 ? "present" : "missing";
+  }
+  if (account.startsWith(ENV_PREFIX) && envKeyCacheService === service && envKeyCache
+    && (keychainPromptsAreAnswerable() || Date.now() - envKeyCacheAt <= headlessCredentialCacheTtlMs())) {
+    return envKeyCache.includes(account.slice(ENV_PREFIX.length)) ? "present" : "missing";
+  }
+  if (keychainPromptsAreAnswerable() && knownAccounts?.service === service && !passwordOperations.has(key)) {
+    return knownAccounts.accounts.has(account) ? "present" : "missing";
+  }
+  return ledgerPresence(service, account);
+}
+/** The Vault env key names this process already listed and still trusts (no native call), or null when it has none. */
+export function envKeyNamesHint(): readonly string[] | null {
+  if (developmentEffectsSuppressed() || USE_MEMORY_VAULT) {
+    return [...memoryVault.keys()].filter((a) => a.startsWith(ENV_PREFIX)).map((a) => a.slice(ENV_PREFIX.length));
+  }
+  let service: string;
+  try { service = keychainService(); } catch { return null; }
+  return envKeyCacheService === service && envKeyCache
+    && (keychainPromptsAreAnswerable() || Date.now() - envKeyCacheAt <= headlessCredentialCacheTtlMs()) ? envKeyCache : null;
+}
+/** Value-free presence of a Vault env key (discovery only; a run that needs the value still reads it). */
+export function envVarPresence(key: string): CredentialPresence { return accountPresence(`${ENV_PREFIX}${key}`); }
+/** Value-free presence of a stored secret (e.g. an MCP OAuth session or token). */
+export function secretPresence(key: string): CredentialPresence { return accountPresence(`${SECRET_PREFIX}${key}`); }
 
 function keychainService(): string {
   // An unconfigured test, plugin, or temporary Electron host must never inherit
@@ -130,6 +213,7 @@ async function getPassword(account: string): Promise<string | null> {
     keychainCache.set(key, value);
     noteCredentialCached(key);
     credentialStateRevision += 1;
+    notePresence(service, account, typeof value === "string" && value.length > 0);
     return value;
   });
   passwordReads.set(key, started);
@@ -155,6 +239,7 @@ async function setPassword(account: string, value: string): Promise<void> {
       noteCredentialCached(key);
       if (knownAccounts?.service === service) knownAccounts.accounts.add(account);
       credentialStateRevision += 1;
+      notePresence(service, account, value.length > 0);
     });
   }
 }
@@ -173,6 +258,7 @@ async function deletePassword(account: string): Promise<void> {
       noteCredentialCached(key);
       if (knownAccounts?.service === service) knownAccounts.accounts.delete(account);
       credentialStateRevision += 1;
+      notePresence(service, account, false);
     });
   }
 }
@@ -201,6 +287,7 @@ function retryAccountFromUser(service: string, account: string): Promise<string 
     keychainCache.set(key, value);
     noteCredentialCached(key);
     credentialStateRevision += 1;
+    notePresence(service, account, typeof value === "string" && value.length > 0);
     return value;
   });
   userPasswordRetries.set(key, started);

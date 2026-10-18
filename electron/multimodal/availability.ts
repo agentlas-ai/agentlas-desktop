@@ -13,7 +13,7 @@ import {
   type MultimodalProvider,
   type MultimodalSettings,
 } from "../../shared/multimodal";
-import { hasEnvVar, listEnvKeys } from "../secrets/vault";
+import { envKeyNamesHint, envVarPresence, hasEnvVar, listEnvKeys } from "../secrets/vault";
 import { RUNTIME_AUTH_ENV_KEYS, isPlainMisnaming } from "../runtime/env-key-reach";
 import { multimodalImageSlot } from "./slot";
 import { findExecutableSync } from "../runtime/path-lookup";
@@ -162,6 +162,33 @@ export async function isProviderReady(provider: MultimodalProvider): Promise<boo
     // conversations and local subscription runtimes can continue.
     return false;
   }
+}
+
+/**
+ * The same readiness for discovery (harness media.routes), from value-free presence only (R-024): no Vault read, no
+ * listing, no keychain prompt. "unverified" when a key was not observed yet. Starting a job still uses isProviderReady.
+ * The grok CLI rows accept only the subscription sign-in, which grokAuthSource reports as "oauth" exactly when
+ * grokOAuthReady() holds, so its API-key reads are skipped here.
+ */
+export function providerReadinessPresence(provider: MultimodalProvider): "ready" | "missing" | "unverified" {
+  const cli = CLI_BINS[provider.id];
+  if (cli) {
+    if (!resolveBin(cli.name, cli.extra)) return "missing";
+    if (provider.id === "grok-cli-image" || provider.id === "grok-cli-video") return grokOAuthReady() ? "ready" : "missing";
+    return "ready";
+  }
+  if (provider.envKeys.length === 0) return "ready";
+  const names = envKeyNamesHint();
+  let unverified = false;
+  for (const key of provider.envKeys) {
+    if (envVarPresence(key) === "present") continue;
+    if (!names) { unverified = true; continue; } // nothing listed: neither the key nor a plain alias can be ruled out
+    if (names.includes(key)) { unverified = true; continue; }
+    // The same plain-alias rule as hasPlainAlias, on the names already listed.
+    if (!RUNTIME_AUTH_ENV_KEYS.has(key) && names.filter((name) => isPlainMisnaming(name, key)).length === 1) continue;
+    return "missing";
+  }
+  return unverified ? "unverified" : "ready";
 }
 
 export interface ResolvedProvider {

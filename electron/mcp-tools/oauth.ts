@@ -31,7 +31,7 @@ import {
   METHOD_NOT_FOUND, PROTOCOL_VERSION_META_KEY,
 } from "@modelcontextprotocol/client";
 
-import { deleteSecret, readSecret, setSecret } from "../secrets/vault";
+import { deleteSecret, readSecret, secretPresence, setSecret, type CredentialPresence } from "../secrets/vault";
 import { userDataPath } from "../runtime-paths";
 
 /** 발견·등록·토큰의 만료 없는 부분. 값(토큰)은 별도 시크릿에 둔다. */
@@ -852,6 +852,16 @@ export async function forgetMcpOAuth(serverId: string): Promise<void> {
   if (pending) await cancelMcpOAuthAuthorization(serverId, pending.attemptId);
   await deleteSecret(sessionSecretKey(serverId));
   await deleteSecret(tokenSecretKey(serverId));
+}
+
+/**
+ * Discovery-only OAuth presence (R-024): whether this server's stored session and token exist, from value-free presence
+ * metadata. It reads no secret, so it cannot see expiry or the bound resource; a run that uses the connection still goes
+ * through hasUsableMcpOAuthCredential / resolveMcpOAuthAccessToken.
+ */
+export function mcpOAuthCredentialPresence(serverId: string): CredentialPresence {
+  const session = secretPresence(sessionSecretKey(serverId)), token = secretPresence(tokenSecretKey(serverId));
+  return session === "missing" || token === "missing" ? "missing" : session === "present" && token === "present" ? "present" : "unknown";
 }
 
 /** Passive readiness only: never refresh, contact a provider, or write credentials. */

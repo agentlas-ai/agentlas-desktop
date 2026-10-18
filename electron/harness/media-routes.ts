@@ -78,15 +78,20 @@ export async function mediaRoutes(): Promise<MediaRoute[]> {
   });
 }
 
-/** Readiness with a reason code; never "ready" for a route whose product caller is missing. */
-export async function routeReadiness(route: MediaRoute): Promise<RouteReadiness> {
+/** Readiness with a reason code; never "ready" for a route whose product caller is missing. Discovery (media.routes)
+ * passes presenceOnly: value-free presence, no Vault read or keychain prompt (R-024); a job choosing a route reads. */
+export async function routeReadiness(route: MediaRoute, options: { presenceOnly?: boolean } = {}): Promise<RouteReadiness> {
   if (route.adapterRequired) return "adapter-required";
   const { MULTIMODAL_PROVIDERS } = await import("../../shared/multimodal");
   const provider = MULTIMODAL_PROVIDERS.find((row) => row.id === route.routeId);
   if (!provider) return "unverified";
   try {
-    const { isProviderReady } = await import("../multimodal/availability");
-    if (await isProviderReady(provider)) return "ready";
+    const availability = await import("../multimodal/availability");
+    if (options.presenceOnly) {
+      const presence = availability.providerReadinessPresence(provider);
+      if (presence === "ready") return "ready";
+      if (presence === "unverified") return "unverified";
+    } else if (await availability.isProviderReady(provider)) return "ready";
   } catch {
     return "unverified";
   }
@@ -108,7 +113,7 @@ export interface RouteReadinessDetail {
 
 /** Image routes record their outcomes in readiness-observations; video routes in the durable media operation store. */
 export async function routeReadinessDetail(route: MediaRoute): Promise<RouteReadinessDetail> {
-  const state = await routeReadiness(route);
+  const state = await routeReadiness(route, { presenceOnly: true });
   let observed: RouteReadinessDetail["observed"] = null;
   const videoProvider = VIDEO_JOB_PROVIDER[route.routeId];
   try {

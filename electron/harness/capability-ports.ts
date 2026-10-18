@@ -253,29 +253,47 @@ async function connectorRows() {
   }));
 }
 
-async function connectorAuth(row: Awaited<ReturnType<typeof connectorRows>>[number]) {
-  const { hasEnvVar } = await import("../secrets/vault");
-  const { credentialVaultKey } = await import("../mcp-tools/credential-refs");
-  const missingEnv: string[] = [];
-  for (const key of row.envKeys) if (!(await hasEnvVar(credentialVaultKey(row, key)).catch(() => false))) missingEnv.push(key);
-  let oauth: "usable" | "absent" | "not_applicable" = "not_applicable";
-  if (row.transport !== "stdio") {
-    try {
-      const { listInstalledServers } = await import("../mcp-tools/registry");
-      const server = listInstalledServers().find((item) => item.id === row.serverId);
-      const { hasUsableMcpOAuthCredential } = await import("../mcp-tools/oauth");
-      oauth = server?.url && (await hasUsableMcpOAuthCredential(server.id, server.url)) ? "usable" : "absent";
-    } catch {
-      oauth = "absent";
+/**
+ * Credential state of one connection. "discovery" (connector.search / describe / status, auth.status) answers from
+ * value-free presence only: no secret read, no keychain listing or prompt (R-024, connector-presence.ts); production
+ * 10-16..17 `harness_describe connector:*` read keychain values four times inside unattended runs. "use" (the jobs that
+ * act on the connection: connector.connect, auth.ensure, auth.login) reads what it would use.
+ */
+async function connectorAuth(row: Awaited<ReturnType<typeof connectorRows>>[number], mode: "discovery" | "use") {
+  let missingEnv: string[];
+  let oauth: "usable" | "absent" | "unknown" | "not_applicable" = "not_applicable";
+  let credentialState: "credential_missing" | "login_may_be_required" | "unverified" | "ready";
+  if (mode === "discovery") {
+    const { connectorCredentialPresence } = await import("./connector-presence");
+    ({ missingEnv, oauth, credentialState } = connectorCredentialPresence(row));
+  } else {
+    const { hasEnvVar } = await import("../secrets/vault");
+    const { credentialVaultKey } = await import("../mcp-tools/credential-refs");
+    missingEnv = [];
+    for (const key of row.envKeys) if (!(await hasEnvVar(credentialVaultKey(row, key)).catch(() => false))) missingEnv.push(key);
+    if (row.transport !== "stdio") {
+      try {
+        const { listInstalledServers } = await import("../mcp-tools/registry");
+        const server = listInstalledServers().find((item) => item.id === row.serverId);
+        const { hasUsableMcpOAuthCredential } = await import("../mcp-tools/oauth");
+        oauth = server?.url && (await hasUsableMcpOAuthCredential(server.id, server.url)) ? "usable" : "absent";
+      } catch {
+        oauth = "absent";
+      }
     }
+    credentialState = missingEnv.length > 0 ? "credential_missing" : row.transport !== "stdio" && oauth === "absent" && row.envKeys.length === 0 ? "login_may_be_required" : "ready";
   }
-  const credentialState: "credential_missing" | "login_may_be_required" | "ready" = missingEnv.length > 0 ? "credential_missing" : row.transport !== "stdio" && oauth === "absent" && row.envKeys.length === 0 ? "login_may_be_required" : "ready";
   const sessionState = row.enabled ? "enabled" as const : row.connectionEpoch ? "revoked" as const : "disabled" as const;
   // Every switch-off now moves the epoch (NH29), so a revoked session reads as signed out only when its credentials are
   // gone too (auth.logout); a connection the owner merely switched off, with its credentials kept, reads as disabled.
-  const state = sessionState === "revoked" && credentialState !== "ready" ? "signed_out" as const
+  const state = sessionState === "revoked" && (credentialState === "credential_missing" || credentialState === "login_may_be_required") ? "signed_out" as const
     : sessionState !== "enabled" ? "disabled" as const : credentialState;
   return { missingEnv, oauth, credentialState, sessionState, state };
+}
+
+/** connectionReadiness's auth axis: an unverified credential is decided by the observed handshake, like a present one. */
+function readinessAuth(state: Awaited<ReturnType<typeof connectorAuth>>["credentialState"]): "ready" | "credential_missing" | "login_may_be_required" {
+  return state === "unverified" ? "ready" : state;
 }
 
 /** The owner's saved key serving this connector's provider through a keyed host route (connector-keyed-route.ts). */
@@ -294,8 +312,8 @@ async function storedConnectionReadiness(row: Awaited<ReturnType<typeof connecto
   const { getServer } = await import("../mcp-tools/registry");
   const { mcpServerConfigurationDigest } = await import("../mcp-tools/prepared-transport");
   const server = getServer(row.serverId);
-  const auth = await connectorAuth(row);
-  return observations.connectionReadiness({ enabled: row.enabled, auth: auth.credentialState, configurationDigest: server ? mcpServerConfigurationDigest(server) : "",
+  const auth = await connectorAuth(row, "discovery");
+  return observations.connectionReadiness({ enabled: row.enabled, auth: readinessAuth(auth.credentialState), configurationDigest: server ? mcpServerConfigurationDigest(server) : "",
     observation: await observations.readReadinessObservation("connection", row.serverId) });
 }
 
@@ -434,11 +452,11 @@ const PORTS: PortDefinition[] = [
   },
   {
     operationId: "connector.describe", kind: "query", purpose: "Read MCP definition or stored connection observation; no live probe.", required: ["connectorId"],
-    handler: async (args) => { const row = await findConnector(args); return row ? ok({ ...row, auth: await connectorAuth(row) }) : refused("connector_not_installed", "tool.search lists catalog connectors"); },
+    handler: async (args) => { const row = await findConnector(args); return row ? ok({ ...row, auth: await connectorAuth(row, "discovery") }) : refused("connector_not_installed", "tool.search lists catalog connectors"); },
   },
   {
     operationId: "connector.status", kind: "query", purpose: "Read MCP definition or stored connection observation; no live probe.", required: ["connectionId"],
-    handler: async (args) => { const row = await findConnector(args); return row ? ok({ id: row.id, enabled: row.enabled, ...(await connectorAuth(row)) }) : refused("connector_not_installed"); },
+    handler: async (args) => { const row = await findConnector(args); return row ? ok({ id: row.id, enabled: row.enabled, ...(await connectorAuth(row, "discovery")) }) : refused("connector_not_installed"); },
   },
   {
     operationId: "connector.connect", kind: "job", purpose: "Prepare exact connection, negotiate MCP and observe actual inventory.", required: ["connectorId"],
@@ -453,7 +471,7 @@ const PORTS: PortDefinition[] = [
       }
       if (!server.enabled) server = registry.setServerEnabled(server.id, true);
       const row = (await connectorRows()).find((item) => item.serverId === server!.id)!;
-      const auth = await connectorAuth(row);
+      const auth = await connectorAuth(row, "use");
       const observations = await import("./readiness-observations");
       const { mcpServerConfigurationDigest } = await import("../mcp-tools/prepared-transport");
       const configurationDigest = mcpServerConfigurationDigest(server);
@@ -464,7 +482,7 @@ const PORTS: PortDefinition[] = [
         await observations.recordReadinessObservation({ subject: "connection", id: server.id, outcome: observations.outcomeFromProbe(status), configurationDigest,
           toolCount: status.tools.length, toolNamesDigest: observations.toolNamesDigest(status.tools.map((tool) => tool.name)), via: "connector.connect" });
       }
-      const readiness = observations.connectionReadiness({ enabled: true, auth: auth.credentialState, configurationDigest, observation: await observations.readReadinessObservation("connection", server.id) });
+      const readiness = observations.connectionReadiness({ enabled: true, auth: readinessAuth(auth.credentialState), configurationDigest, observation: await observations.readReadinessObservation("connection", server.id) });
       await appendReceipt({ operationId: "connector.connect", connectorId: row.id, chatId: ctx.chatId, runId: ctx.runId, state: readiness.state, ...(readiness.negotiated ? { toolCount: readiness.negotiated.toolCount } : {}) });
       return ok({ connectionId: row.id, enabled: true, auth, readiness,
         note: readiness.ready ? "its tools attach on the next turn" : ["credential_missing", "login_may_be_required", "authentication_required"].includes(readiness.state) ? "auth.ensure / auth.login next" : `not ready: ${readiness.state}` });
@@ -681,7 +699,7 @@ const PORTS: PortDefinition[] = [
   },
   {
     operationId: "auth.status", kind: "query", purpose: "Read redacted stored auth metadata; do not refresh, probe, or open browser.", required: ["connectionId"],
-    handler: async (args) => { const row = await findConnector(args); return row ? ok({ connectionId: row.id, ...(await connectorAuth(row)), readiness: await storedConnectionReadiness(row) }) : refused("connector_not_installed"); },
+    handler: async (args) => { const row = await findConnector(args); return row ? ok({ connectionId: row.id, ...(await connectorAuth(row, "discovery")), readiness: await storedConnectionReadiness(row) }) : refused("connector_not_installed"); },
   },
   {
     operationId: "auth.ensure", kind: "job", purpose: "Reuse matching connector OAuth, Vault keys or a signed-in Agentlas browser session (site); report login need.", required: [],
@@ -693,7 +711,7 @@ const PORTS: PortDefinition[] = [
         return ok({ site: browser.site, state: browser.status === "valid" ? "ready" : "login_may_be_required", reused: browser.status === "valid" ? "browser_session" : "none",
           next: browser.status === "valid" ? "use agentlas-browser on this site (signed in)" : "open the site in agentlas-browser; the owner signs in there" });
       }
-      const auth = await connectorAuth(row);
+      const auth = await connectorAuth(row, "use");
       if (auth.sessionState !== "enabled") return ok({ connectionId: row.id, state: auth.state, credentialState: auth.credentialState, sessionState: auth.sessionState, next: "connector.connect explicitly reconnects this exact connection" });
       if (auth.state === "ready") return ok({ connectionId: row.id, state: "ready", reused: auth.oauth === "usable" ? "oauth_session" : row.envKeys.length ? "vault_keys" : "none_needed" });
       const keyedRoute = await keyedRouteForConnector(row);
@@ -709,7 +727,7 @@ const PORTS: PortDefinition[] = [
     handler: async (args, ctx) => {
       const row = await findConnector(args);
       if (!row) return refused("connector_not_installed");
-      const auth = await connectorAuth(row);
+      const auth = await connectorAuth(row, "use");
       if (auth.credentialState === "ready") return ok({ connectionId: row.id, state: auth.state, credentialState: auth.credentialState, sessionState: auth.sessionState, note: "usable credentials already exist; no login opened", ...(auth.sessionState !== "enabled" ? { next: "connector.connect explicitly reconnects this exact connection" } : {}) });
       const keyedRoute = await keyedRouteForConnector(row);
       if (keyedRoute) return ok({ connectionId: row.id, state: "ready_via_key", routeId: keyedRoute, note: `the owner's saved key already serves this provider through routeId ${keyedRoute}; no sign-in opened` });
