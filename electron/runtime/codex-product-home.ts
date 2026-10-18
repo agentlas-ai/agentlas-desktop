@@ -37,7 +37,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { userDataPath } from "../runtime-paths";
-import { inheritedProductHome, personalHomeDir, personalHomeOverride } from "./product-home-identity";
+import { inheritedProductHome, personalHomeDir, personalHomeOverride, productHomeRefusedOnThisHost } from "./product-home-identity";
 
 /** Read by Codex as global user instructions; never mirrored. */
 export const CODEX_PERSONAL_INSTRUCTION_FILES: ReadonlySet<string> = new Set(["AGENTS.md", "AGENTS.override.md"]);
@@ -361,7 +361,7 @@ function writeProductConfig(realHome: string, home: string, isolated = false): v
  */
 const CODEX_SHARED_STORES = ["generated_images"] as const;
 
-export type CodexProductHomeSkip = "no-real-home" | "no-file-sign-in" | "keyring-sign-in" | "links-unavailable";
+export type CodexProductHomeSkip = "no-real-home" | "no-file-sign-in" | "keyring-sign-in" | "links-unavailable" | "unconfigured-host";
 
 export function realCodexHome(env: NodeJS.ProcessEnv = process.env): string {
   // An inherited product mirror is never the person's folder (product-home-identity.ts): mirroring it nested 1.48 GB.
@@ -379,6 +379,8 @@ function keyringOnly(realHome: string): boolean {
 
 /** Brings the mirror in line with the real home. Returns the mirror, or why the real home must be used. */
 export function syncCodexProductHome(realHome: string, mirrorRoot = userDataPath("codex-product-home"), options: CodexProductHomeOptions = {}): { home: string } | { skip: CodexProductHomeSkip } {
+  // A gate or script (no install identity) never mirrors the account's own ~/.codex (product-home-identity.ts).
+  if (productHomeRefusedOnThisHost(realHome)) return { skip: "unconfigured-host" };
   const isolated = options.isolated === true;
   const personal = isolated ? undefined : options.personal;
   let entries: string[];

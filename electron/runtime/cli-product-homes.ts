@@ -32,7 +32,7 @@ import { userDataPath } from "../runtime-paths";
 import { isMirrorLink, syncConfigHomeMirror } from "./config-home-mirror";
 import { scanTomlStatements, tomlKey, type TomlStatement } from "./codex-product-home";
 import type { CapabilitySelection } from "../capabilities/one-capabilities";
-import { personalHomeDir, personalHomeOverride } from "./product-home-identity";
+import { personalHomeDir, personalHomeOverride, productHomeRefusedOnThisHost } from "./product-home-identity";
 
 export type ProductHomeKind = "kimi" | "cursor" | "github-copilot-cli";
 
@@ -136,7 +136,7 @@ const SPECS: Record<ProductHomeKind, HomeSpec> = {
   },
 };
 
-export type CliProductHomeSkip = "keep-home" | "links-unavailable" | "unsupported-kind";
+export type CliProductHomeSkip = "keep-home" | "links-unavailable" | "unsupported-kind" | "unconfigured-host";
 
 export function realCliHome(kind: ProductHomeKind, env: NodeJS.ProcessEnv = process.env): string {
   const spec = SPECS[kind];
@@ -165,6 +165,8 @@ function copilotMcpConfig(realHome: string, selection: CapabilitySelection | und
 export function syncCliProductHome(kind: ProductHomeKind, realHome: string, selection?: CapabilitySelection, mirrorRoot?: string): { home: string } | { skip: CliProductHomeSkip } {
   const spec = SPECS[kind];
   if (!spec) return { skip: "unsupported-kind" };
+  // A gate or script (no install identity) never mirrors the account's own CLI folder (product-home-identity.ts).
+  if (productHomeRefusedOnThisHost(realHome)) return { skip: "unconfigured-host" };
   const isOne = selection?.isOne === true;
   const home = cliProductHomePath(kind, realHome, isOne, mirrorRoot);
   try {

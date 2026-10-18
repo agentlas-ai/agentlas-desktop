@@ -46,7 +46,7 @@ import { isMirrorLink, syncConfigHomeMirror } from "./config-home-mirror";
 import { allowlistedToml, withCliProductHome } from "./cli-product-homes";
 import { productClaudeGlobalConfig } from "./claude-product-home";
 import type { CapabilityItem, CapabilityKind, CapabilitySelection } from "../capabilities/one-capabilities";
-import { inheritedProductHome, personalHomeDir, personalHomeOverride } from "./product-home-identity";
+import { inheritedProductHome, personalHomeDir, personalHomeOverride, productHomeRefusedOnThisHost } from "./product-home-identity";
 
 const GROK_CELLS: ReadonlyArray<{ cell: string; kind: CapabilityKind }> = [
   { cell: "SKILLS", kind: "skill" },
@@ -157,7 +157,7 @@ const GROK_LINKED_ENTRIES: ReadonlySet<string> = new Set(["auth.json", "auth.jso
   "models_cache.json", "settings_cache.json", "managed_config.toml", "managed_config.lock", "requirements.toml",
   "trusted_folders.toml", "trusted_folders.toml.lock", "workspace-trust.json"]);
 
-export type GrokProductHomeSkip = "no-real-home" | "no-file-sign-in" | "links-unavailable";
+export type GrokProductHomeSkip = "no-real-home" | "no-file-sign-in" | "links-unavailable" | "unconfigured-host";
 
 /** Beside the mirror's config.toml: the MCP keys running legacy grok runs added there (grok.ts reconcileGrokMcpServers). */
 export const GROK_RUN_MCP_REGISTRY = "agentlas-run-mcp.json";
@@ -177,6 +177,8 @@ function grokRunServerTables(home: string): string {
 }
 
 export function syncGrokProductHome(realHome: string, selection: CapabilitySelection | undefined, mirrorRoot = userDataPath("grok-product-home")): { home: string } | { skip: GrokProductHomeSkip } {
+  // A gate or script (no install identity) never mirrors the account's own ~/.grok (product-home-identity.ts).
+  if (productHomeRefusedOnThisHost(realHome)) return { skip: "unconfigured-host" };
   let entries: string[];
   try { entries = fs.readdirSync(realHome); } catch { return { skip: "no-real-home" }; }
   if (!entries.includes("auth.json")) return { skip: "no-file-sign-in" };
@@ -259,7 +261,7 @@ function syncOwnFile(at: string, text: string | null): void {
  */
 const GROK_USER_HOME_OWN: ReadonlySet<string> = new Set([".claude", ".claude.json", ".agents", ".grok"]);
 
-export type GrokUserHomeSkip = "unsupported-platform" | "no-real-home" | "links-unavailable";
+export type GrokUserHomeSkip = "unsupported-platform" | "no-real-home" | "links-unavailable" | "unconfigured-host";
 
 /** Where the product HOME of `realHome` lives (the One variant carries "-one"); syncGrokProductUserHome builds it there. */
 export function grokProductUserHomePath(realHome: string, isOne: boolean, mirrorRoot = userDataPath("grok-product-user-home")): string {
@@ -273,6 +275,7 @@ export function grokProductUserHomePath(realHome: string, isOne: boolean, mirror
  */
 export function syncGrokProductUserHome(realHome: string, selection: CapabilitySelection | undefined, mirrorRoot?: string): { home: string } | { skip: GrokUserHomeSkip } {
   if (process.platform !== "darwin" && process.platform !== "linux") return { skip: "unsupported-platform" };
+  if (productHomeRefusedOnThisHost(realHome)) return { skip: "unconfigured-host" };
   try { if (!fs.statSync(realHome).isDirectory()) return { skip: "no-real-home" }; } catch { return { skip: "no-real-home" }; }
   const isOne = selection?.isOne === true;
   const realClaude = path.join(realHome, ".claude");

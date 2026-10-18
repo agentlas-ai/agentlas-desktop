@@ -13,6 +13,7 @@
  */
 import os from "node:os";
 import path from "node:path";
+import { configuredIdentity } from "../install-identity";
 
 export const PRODUCT_HOME_ROOTS: readonly string[] = Object.freeze([
   "codex-product-home", "claude-product-home", "copilot-product-home", "kimi-product-home", "cursor-product-home",
@@ -24,6 +25,24 @@ export function isAgentlasProductHome(candidate: string | null | undefined): boo
   if (!candidate) return false;
   const resolved = path.resolve(candidate);
   return ROOTS.has(path.basename(resolved)) || ROOTS.has(path.basename(path.dirname(resolved)));
+}
+
+/**
+ * A product home mirrors a person's own config only inside a configured install: Main and the daemon of an official,
+ * local-candidate, QA or dev install configure their identity at startup (install-identity.ts). A host with none (a gate,
+ * a script) never mirrors the ACCOUNT's own home or a config folder directly in it (~/.codex, ~/.grok, ~/.claude, ...).
+ * Owner Mac, 2026-10-18: ~/Library/Application Support/Electron, the unnamed userData of test hosts, held mirrors of the
+ * owner's ~/.codex (8.8 MB, written 10-18 11:29), ~/.grok (10-13), ~/.copilot (10-17) and links to their Claude skills
+ * and commands, and a test host ran the agy cleanup on the owner's ~/.gemini file (04:09Z). A temporary HOME is still
+ * mirrored, so a gate that names its own HOME keeps working.
+ */
+export function productHomeRefusedOnThisHost(realDir: string): boolean {
+  if (configuredIdentity() !== null) return false;
+  let account: string;
+  try { account = os.userInfo().homedir; } catch { account = os.homedir(); }
+  const resolved = path.resolve(realDir);
+  const home = path.resolve(account);
+  return resolved === home || path.dirname(resolved) === home;
 }
 
 const reported = new Set<string>();

@@ -22,7 +22,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { userDataPath } from "../runtime-paths";
-import { inheritedProductHome, personalHomeDir, personalHomeOverride } from "./product-home-identity";
+import { inheritedProductHome, personalHomeDir, personalHomeOverride, productHomeRefusedOnThisHost } from "./product-home-identity";
 
 /**
  * Entries of ~/.claude a product run reads as configuration; only these are linked into the mirror. Everything else —
@@ -133,7 +133,7 @@ export function withClaudeMirrorExcludes(settings: string, realDir: string, mirr
   return JSON.stringify({ ...base, claudeMdExcludes: [...new Set([...list, ...mapped])] });
 }
 
-export type ClaudeProductHomeSkip = "no-real-dir" | "links-unavailable";
+export type ClaudeProductHomeSkip = "no-real-dir" | "links-unavailable" | "unconfigured-host";
 
 export function realClaudeConfigDir(env: NodeJS.ProcessEnv = process.env): string {
   return path.resolve(personalHomeOverride(env, "CLAUDE_CONFIG_DIR") || path.join(personalHomeDir(env), ".claude"));
@@ -184,6 +184,8 @@ export function personalClaudeGlobalConfigPath(env: NodeJS.ProcessEnv = process.
 
 export function syncClaudeProductHome(realDir: string, mirror = claudeProductHomeDir(), options: ClaudeProductHomeOptions = {},
   personalGlobal = path.join(os.homedir(), ".claude.json")): { dir: string } | { skip: ClaudeProductHomeSkip } {
+  // A gate or script (no install identity) never mirrors the account's own ~/.claude (product-home-identity.ts).
+  if (productHomeRefusedOnThisHost(realDir)) return { skip: "unconfigured-host" };
   if (!fs.existsSync(realDir)) return { skip: "no-real-dir" };
   fs.mkdirSync(mirror, { recursive: true, mode: 0o700 });
   const wanted = new Set(fs.readdirSync(realDir).filter((name) => !isClaudePersonalSessionEntry(name)));

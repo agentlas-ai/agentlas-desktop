@@ -57,6 +57,7 @@ import { selectionFor } from "../capabilities/one-capabilities";
 import { agyProductHomePath, agySpawnHome, agySpawnsInPersonalHome, withAgyProductHome } from "./antigravity-personal-context";
 import { runtimeRequestRefusal } from "../../shared/runtime-capabilities";
 import { configuredIdentity, type InstallChannel } from "../install-identity";
+import { isAgentlasProductHome, productHomeRefusedOnThisHost } from "./product-home-identity";
 import { abortReasonError } from "./abort-reason";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, standardAntigravityBinDirs, windowsCliCommandBudget } from "./exec";
 import { stageCliImageAttachments } from "./image-attachments";
@@ -2387,10 +2388,18 @@ async function runPreparedAntigravityAttempt(
   const agyRunEnv = agyProductEnv({ ...(req.env ?? process.env) });
   const agyRunHome = agySpawnHome(agyRunEnv);
   if (agySpawnsInPersonalHome(agyRunEnv)) {
+    // A gate or script (no install identity) on the account's own HOME gets no mirror (product-home-identity.ts), so
+    // this run would write the person's ~/.gemini (MCP config, conversations): it is refused before anything is written.
+    if (productHomeRefusedOnThisHost(agyRunHome)) {
+      return { text: "", ownerControlTerminal: "uncertain", turnDelivery: "not-dispatched", failure: { kind: "unavailable",
+        runtime: "antigravity", source: "marker", providerCode: "agy_unconfigured_host_personal_home",
+        message: "Antigravity would run in the person's own home from a host with no install identity; nothing was started." } };
+    }
     if (agyToolsAllowed) events.onStatus("[agy-mcp-scope] target=personal-home reason=product-home-unavailable");
-  } else {
-    // One-time, gated cleanup of entries older builds wrote into the person's file (migrateAgyPersonalMcpConfig).
-    void migrateAgyPersonalMcpConfig({ realHome: agyRunEnv.AGENTLAS_AGY_REAL_HOME || os.homedir() }).catch(() => undefined);
+  } else if (agyRunEnv.AGENTLAS_AGY_REAL_HOME && isAgentlasProductHome(agyRunHome)) {
+    // One-time, gated cleanup of entries older builds wrote into the person's file (migrateAgyPersonalMcpConfig), only for
+    // the home this run's product mirror was made from (2026-10-18: a run spawned in some other HOME took os.homedir()).
+    void migrateAgyPersonalMcpConfig({ realHome: agyRunEnv.AGENTLAS_AGY_REAL_HOME }).catch(() => undefined);
   }
   /*
    * Browser-only profile (see ensureAntigravityBrowserReadProjectPolicy): scoped-read on an agy measured to honor
@@ -3414,6 +3423,13 @@ export const runAntigravity: Runner = async (
   }
   const readToolFailure = antigravityReadToolFailure(req);
   if (readToolFailure) return { text: "", ownerControlTerminal: "uncertain", turnDelivery: "not-dispatched", failure: readToolFailure };
+  // A gate or script (no install identity) in the account's own HOME: no product mirror can exist (product-home-identity.ts),
+  // so the person's CLI is not even probed.
+  if (productHomeRefusedOnThisHost(agySpawnHome(req.env ?? process.env))) {
+    return { text: "", ownerControlTerminal: "uncertain", turnDelivery: "not-dispatched", failure: { kind: "unavailable",
+      runtime: "antigravity", source: "marker", providerCode: "agy_unconfigured_host_personal_home",
+      message: "Antigravity would run in the person's own home from a host with no install identity; nothing was started." } };
+  }
   const bin = await getBin({ source: req.runtimeSource });
   if (!bin) throw markRefusedBeforeDispatch(new Error(tStatus(req.locale, "errCliMissingAntigravity")));
   const executableIdentity = observeCliExecutableIdentity({

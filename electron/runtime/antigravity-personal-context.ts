@@ -30,13 +30,13 @@ import path from "node:path";
 import { userDataPath } from "../runtime-paths";
 import { isMirrorLink, syncConfigHomeMirror } from "./config-home-mirror";
 import type { CapabilityItem, CapabilityKind, CapabilitySelection } from "../capabilities/one-capabilities";
-import { inheritedProductHome, personalHomeDir } from "./product-home-identity";
+import { inheritedProductHome, personalHomeDir, productHomeRefusedOnThisHost } from "./product-home-identity";
 
 /** Antigravity's conversation stores (per-conversation brain, annotations, recordings). Never linked into a product mirror. */
 const AGY_PERSONAL_SESSION_ENTRIES = new Set(["conversations", "brain", "annotations", "implicit", "html_artifacts",
   "browser_recordings", "code_tracker", "context_state"]);
 
-export type AgyProductHomeSkip = "unsupported-platform" | "no-real-gemini" | "no-sign-in-files" | "links-unavailable";
+export type AgyProductHomeSkip = "unsupported-platform" | "no-real-gemini" | "no-sign-in-files" | "links-unavailable" | "unconfigured-host";
 
 function oneGemini(selection: CapabilitySelection | undefined, kind: CapabilityKind): CapabilityItem[] {
   if (selection?.isOne !== true) return [];
@@ -220,6 +220,8 @@ export function agyProductHomePath(realHome: string, isOne: boolean, mirrorRoot?
 export function syncAgyProductHome(input: AgyProductHomeInput): { home: string } | { skip: AgyProductHomeSkip } {
   if (process.platform !== "darwin" && process.platform !== "linux") return { skip: "unsupported-platform" };
   const { realHome, selection } = input;
+  // A gate or script (no install identity) never mirrors the account's own home (product-home-identity.ts).
+  if (productHomeRefusedOnThisHost(realHome)) return { skip: "unconfigured-host" };
   const realGemini = path.join(realHome, ".gemini");
   if (!fs.existsSync(realGemini)) return { skip: "no-real-gemini" };
   // Without a sign-in file there is nothing proving the CLI's sign-in survives a mirror: keep the real HOME.
