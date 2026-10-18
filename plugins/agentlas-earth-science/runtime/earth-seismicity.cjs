@@ -33,7 +33,12 @@ function binIndex(magnitude, binWidth) {
   return Math.round(magnitude / binWidth);
 }
 
+function occupiedMagnitudeBins(magnitudes, binWidth) {
+  return new Set(magnitudes.map((magnitude) => binIndex(magnitude, binWidth))).size;
+}
+
 function akiB(magnitudes, completenessMagnitude, binWidth) {
+  if (occupiedMagnitudeBins(magnitudes, binWidth) < 3) return null;
   const n = magnitudes.length;
   const meanMagnitude = N.mean(magnitudes);
   const effectiveThreshold = completenessMagnitude - binWidth / 2;
@@ -120,7 +125,7 @@ function analyzeSeismicityBValue(value) {
   const magnitudes = included.map((event) => event.magnitude);
   const minIndex = Math.min(...magnitudes.map((m) => binIndex(m, binWidthValue)));
   const maxIndex = Math.max(...magnitudes.map((m) => binIndex(m, binWidthValue)));
-  if (maxIndex - minIndex + 1 < 3) throw N.fail("earth-seismicity-magnitude-range-inadequate", "At least three occupied magnitude bins are required");
+  if (occupiedMagnitudeBins(magnitudes, binWidthValue) < 3) throw N.fail("earth-seismicity-magnitude-range-inadequate", "At least three occupied magnitude bins are required");
   const fmdRows = [];
   for (let index = minIndex; index <= maxIndex; index += 1) {
     const magnitude = N.rounded(index * binWidthValue, 10);
@@ -135,11 +140,15 @@ function analyzeSeismicityBValue(value) {
   const maximumCurvatureCorrected = N.rounded(maxcRow.magnitude + input.maximumCurvatureCorrection, 10);
   // Goodness of fit (Wiemer & Wyss 2000): R = 100 − 100·Σ|B_i − S_i| / Σ B_i over cumulative bins ≥ Mc.
   const candidateRows = [];
+  const omittedCandidates = [];
   for (const row of fmdRows) {
     const subset = magnitudes.filter((m) => binIndex(m, binWidthValue) >= binIndex(row.magnitude, binWidthValue));
     if (subset.length < MIN_B_STABILITY_SAMPLE) break;
     const fit = akiB(subset, row.magnitude, binWidthValue);
-    if (!fit) break;
+    if (!fit) {
+      omittedCandidates.push({ magnitude: row.magnitude, sampleSize: subset.length, reason: "earth-seismicity-magnitude-range-inadequate" });
+      continue;
+    }
     const bins = fmdRows.filter((item) => binIndex(item.magnitude, binWidthValue) >= binIndex(row.magnitude, binWidthValue));
     const absoluteResidual = bins.reduce((sum, item) => sum + Math.abs(item.cumulativeCount - 10 ** (fit.aValue - fit.bValue * item.magnitude)), 0);
     const observedTotal = bins.reduce((sum, item) => sum + item.cumulativeCount, 0);
@@ -177,6 +186,9 @@ function analyzeSeismicityBValue(value) {
   if (complete.length < C.MIN_GUTENBERG_RICHTER_EVENTS) {
     throw N.fail("earth-seismicity-sample-inadequate", `At least ${C.MIN_GUTENBERG_RICHTER_EVENTS} magnitudes at or above the selected Mc are required`, { includedCount: complete.length, minimum: C.MIN_GUTENBERG_RICHTER_EVENTS, selectedMc });
   }
+  if (occupiedMagnitudeBins(complete.map((event) => event.magnitude), binWidthValue) < 3) {
+    throw N.fail("earth-seismicity-magnitude-range-inadequate", "At least three occupied magnitude bins at or above the selected Mc are required", { selectedMc });
+  }
   const fit = akiB(complete.map((event) => event.magnitude), selectedMc, binWidthValue);
   if (!fit) throw N.fail("earth-seismicity-mle-denominator-invalid");
   const z = C.NORMAL_CRITICAL_VALUES[String(input.confidenceLevel)];
@@ -210,13 +222,21 @@ function analyzeSeismicityBValue(value) {
   for (let start = 0; start + input.windowEvents <= chronological.length; start += input.stepEvents) {
     const window = chronological.slice(start, start + input.windowEvents);
     const windowFit = akiB(window.map((event) => event.magnitude), selectedMc, binWidthValue);
-    if (!windowFit) continue;
     const centerMillis = (window[0].millis + window[window.length - 1].millis) / 2;
     seriesRows.push({
       windowIndex: seriesRows.length, startTime: window[0].time, endTime: window[window.length - 1].time, centerTime: new Date(Math.round(centerMillis)).toISOString(),
-      eventCount: window.length, bValue: N.rounded(windowFit.bValue), shiBoltStandardError: N.rounded(windowFit.shiBoltStandardError),
-      lower: N.rounded(Math.max(0, windowFit.bValue - z * windowFit.shiBoltStandardError)), upper: N.rounded(windowFit.bValue + z * windowFit.shiBoltStandardError),
+      eventCount: window.length, bValue: windowFit ? N.rounded(windowFit.bValue) : null, shiBoltStandardError: windowFit ? N.rounded(windowFit.shiBoltStandardError) : null,
+      lower: windowFit ? N.rounded(Math.max(0, windowFit.bValue - z * windowFit.shiBoltStandardError)) : null, upper: windowFit ? N.rounded(windowFit.bValue + z * windowFit.shiBoltStandardError) : null,
+      ...(!windowFit ? { status: "unavailable", unavailableReason: "earth-seismicity-magnitude-range-inadequate" } : {}),
     });
+  }
+  const hasUnsupportedWindows = seriesRows.some((row) => row.bValue === null);
+  if (hasUnsupportedWindows) {
+    let supportSegment = 0;
+    for (const row of seriesRows) {
+      if (row.bValue === null) supportSegment += 1;
+      else row.supportSegment = supportSegment;
+    }
   }
   const publicationTable = {
     schema: "agentlas.science-table/v1",
@@ -275,17 +295,25 @@ function analyzeSeismicityBValue(value) {
     ],
     rows: auditRows,
   };
-  const vegaLite = {
+  const vegaLite = seriesRows.some((row) => row.bValue !== null) ? {
     $schema: "https://vega.github.io/schema/vega-lite/v5.json",
     title: `Sliding-window b-value (${input.windowEvents} events, step ${input.stepEvents}) with ${input.confidenceLevel * 100}% Shi–Bolt band`,
     background: "white", width: 600, height: 340,
     data: { values: seriesRows },
     layer: [
-      { mark: { type: "area", opacity: 0.25, color: "#2E6F62" }, encoding: { x: { field: "centerTime", type: "temporal", title: "Window centre (UTC)" }, y: { field: "lower", type: "quantitative", title: "b-value" }, y2: { field: "upper" } } },
-      { mark: { type: "line", color: "#2E6F62", strokeWidth: 2, point: true }, encoding: { x: { field: "centerTime", type: "temporal" }, y: { field: "bValue", type: "quantitative", scale: { zero: false } }, tooltip: [{ field: "centerTime", type: "temporal" }, { field: "bValue", type: "quantitative", format: ".3f" }, { field: "shiBoltStandardError", type: "quantitative", format: ".3f" }, { field: "eventCount", type: "quantitative" }] } },
+      { mark: { type: "area", opacity: 0.25, color: "#2E6F62" }, encoding: { x: { field: "centerTime", type: "temporal", title: "Window centre (UTC)" }, y: { field: "lower", type: "quantitative", title: "b-value" }, y2: { field: "upper" }, ...(hasUnsupportedWindows ? { detail: { field: "supportSegment", type: "nominal" } } : {}) } },
+      { mark: { type: "line", color: "#2E6F62", strokeWidth: 2, point: true }, encoding: { x: { field: "centerTime", type: "temporal" }, y: { field: "bValue", type: "quantitative", scale: { zero: false } }, tooltip: [{ field: "centerTime", type: "temporal" }, { field: "bValue", type: "quantitative", format: ".3f" }, { field: "shiBoltStandardError", type: "quantitative", format: ".3f" }, { field: "eventCount", type: "quantitative" }], ...(hasUnsupportedWindows ? { detail: { field: "supportSegment", type: "nominal" } } : {}) } },
       { mark: { type: "rule", color: "#B85C38", strokeDash: [6, 4] }, encoding: { y: { datum: N.rounded(fit.bValue) } } },
     ],
     config: { axis: { labelFontSize: 11, titleFontSize: 12 }, view: { stroke: "#D8D5D0" } },
+  } : {
+    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    title: "Global b-value only; sliding-window estimates unavailable",
+    background: "white", width: 600, height: 340,
+    data: { values: [{ startTime: chronological[0].time, endTime: chronological[chronological.length - 1].time, globalBValue: N.rounded(fit.bValue) }] },
+    mark: { type: "rule", color: "#B85C38", strokeDash: [6, 4] },
+    encoding: { x: { field: "startTime", type: "temporal", title: "Observed origin times (UTC)" }, x2: { field: "endTime" },
+      y: { field: "globalBValue", type: "quantitative", title: "Global b-value (not a window estimate)", scale: { zero: false } } },
   };
   const fmdVegaLite = {
     $schema: "https://vega.github.io/schema/vega-lite/v5.json",
@@ -306,6 +334,8 @@ function analyzeSeismicityBValue(value) {
     maximumCurvatureCorrection: input.maximumCurvatureCorrection, stabilityWindowBins: input.stabilityWindowBins,
     catalogDurationYears: N.rounded(durationYears), includedEventIdsSha256: N.sha256Json(complete.map((event) => event.id).sort()),
   };
+  const omittedWindows = seriesRows.filter((row) => row.bValue === null).map(({ windowIndex, startTime, endTime, centerTime, eventCount, unavailableReason }) =>
+    ({ windowIndex, startTime, endTime, centerTime, eventCount, reason: unavailableReason }));
   const estimates = {
     estimator: "Aki (1965) maximum likelihood with Utsu (1966) binning correction Mc − ΔM/2",
     uncertainty: "Shi & Bolt (1982) standard deviation 2.30·b²·sqrt(Σ(Mi−M̄)²/(n(n−1))); Aki b/sqrt(n) reported for comparison",
@@ -314,7 +344,10 @@ function analyzeSeismicityBValue(value) {
     aValue: N.rounded(fit.aValue), annualAValue: N.rounded(Math.log10(10 ** fit.aValue / durationYears)),
     confidenceLevel: input.confidenceLevel, bConfidenceInterval: { lower: N.rounded(bLower), upper: N.rounded(bUpper) },
     maximumObservedMagnitude: maximumMagnitude,
-    bValueSeries: { windowEvents: input.windowEvents, stepEvents: input.stepEvents, windowCount: seriesRows.length, status: seriesRows.length ? "complete" : "insufficient-events-for-one-window" },
+    bValueSeries: { windowEvents: input.windowEvents, stepEvents: input.stepEvents, windowCount: seriesRows.length,
+      status: !seriesRows.length ? "insufficient-events-for-one-window" : omittedWindows.length === seriesRows.length ? "unavailable" : omittedWindows.length ? "partial" : "complete",
+      ...(omittedWindows.length ? { estimatedWindowCount: seriesRows.length - omittedWindows.length, omittedWindowCount: omittedWindows.length, omittedWindows } : {}),
+    },
   };
   const contentReceipts = {
     publicationTable: C.contentReceipt("seismicity-return-period-table", "application/vnd.agentlas.science-table+json", publicationTable),
@@ -333,6 +366,7 @@ function analyzeSeismicityBValue(value) {
       timeWindow: { startTime: input.start.iso, endTime: input.end.iso, inclusive: true },
     },
     selection, completenessEstimates, estimates,
+    ...(omittedCandidates.length ? { completenessDiagnostics: { omittedCandidateCount: omittedCandidates.length, omittedCandidates } } : {}),
     frequencyMagnitudeDistribution: fmdRows,
     publicationTable, completenessTable, bValueSeriesTable, eventAuditTable, vegaLite, fmdVegaLite, contentReceipts,
     assumptions: [
@@ -390,6 +424,7 @@ function analyzeAftershockProductivity(value) {
   let bSource = "explicit";
   let bValue = input.explicitB;
   let bStandardError = null;
+  let bUnavailableReason = null;
   if (bValue === null) {
     bSource = "aftershock-sequence-aki-mle";
     if (included.length < MIN_AFTERSHOCK_B_SAMPLE) {
@@ -400,9 +435,14 @@ function analyzeAftershockProductivity(value) {
         if (Math.abs(event.magnitude / input.binWidth - Math.round(event.magnitude / input.binWidth)) > 1e-8) throw N.fail("earth-aftershock-magnitude-bin-alignment-invalid", "Included magnitudes must align to the declared bin width", { eventId: event.id });
       }
       const fit = akiB(included.map((event) => event.magnitude), Mc, input.binWidth);
-      if (!fit) throw N.fail("earth-aftershock-mle-denominator-invalid");
-      bValue = fit.bValue;
-      bStandardError = fit.shiBoltStandardError;
+      if (!fit) {
+        bSource = "unavailable";
+        bUnavailableReason = "earth-aftershock-magnitude-range-inadequate";
+        warnings.push("Fewer than three occupied magnitude bins among complete aftershocks: b-value, modified Båth difference, and magnitude-scaled forecasts are not computed.");
+      } else {
+        bValue = fit.bValue;
+        bStandardError = fit.shiBoltStandardError;
+      }
     }
   }
   const aValue = bValue === null || !included.length ? null : Math.log10(included.length) + bValue * Mc;
@@ -509,7 +549,7 @@ function analyzeAftershockProductivity(value) {
       differenceMinusReference: bathDifference === null ? null : N.rounded(bathDifference - input.bathReferenceDifference),
       modified: { aValue: aValue === null ? null : N.rounded(aValue), inferredMaximumMagnitude: modifiedBathInferredMaximum === null ? null : N.rounded(modifiedBathInferredMaximum), difference: modifiedBathDifference === null ? null : N.rounded(modifiedBathDifference) },
     },
-    bValue: { source: bSource, value: bValue === null ? null : N.rounded(bValue), shiBoltStandardError: bStandardError === null ? null : N.rounded(bStandardError), sampleSize: included.length, binWidth: input.binWidth },
+    bValue: { source: bSource, value: bValue === null ? null : N.rounded(bValue), shiBoltStandardError: bStandardError === null ? null : N.rounded(bStandardError), sampleSize: included.length, binWidth: input.binWidth, ...(bUnavailableReason ? { unavailableReason: bUnavailableReason } : {}) },
     duration,
     forecast: {
       horizonDays: input.forecastHorizonDays, startSecondsSinceMainshock: N.rounded(forecastStartSeconds, 6), endSecondsSinceMainshock: N.rounded(forecastEndSeconds, 6),

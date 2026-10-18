@@ -2,7 +2,7 @@
   "schema": "agentlas.plugin/v2",
   "slug": "agentlas-earth-science",
   "name": "Agentlas Earth Science",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "builtin": false,
   "publisher": {
     "name": "Agentlas",
@@ -123,13 +123,13 @@
       },
       {
         "path": "runtime/earth-science.cjs",
-        "sha256": "8b8a7c97a5aed5e6d8b4f9b53107961a1882f4cb21f276b3aa008e3790d328e2",
-        "bytes": 99146
+        "sha256": "679d3f71fdc49fe9f7ee612d26f793fa3f0b17a5cb42f1b0035817c0e8b09ff0",
+        "bytes": 99497
       },
       {
         "path": "runtime/earth-seismicity.cjs",
-        "sha256": "ebe3d64426bcaa3cd6a0dff298c5a71be95936e9894d00c2060599681d10da45",
-        "bytes": 42875
+        "sha256": "21b048459b4708ffa09aa20f2b264c17e9aab77603e2396a911c62e196900375",
+        "bytes": 45961
       },
       {
         "path": "runtime/earth-spatial.cjs",

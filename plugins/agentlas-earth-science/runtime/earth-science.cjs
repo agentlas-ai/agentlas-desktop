@@ -2,7 +2,7 @@
 
 const { createHash } = require("node:crypto");
 
-const PLUGIN_VERSION = "0.6.0";
+const PLUGIN_VERSION = "0.6.1";
 const USGS_ORIGIN = "https://earthquake.usgs.gov";
 const USGS_QUERY_PATH = "/fdsnws/event/1/query";
 const USGS_ENDPOINT = `${USGS_ORIGIN}${USGS_QUERY_PATH}`;
@@ -605,12 +605,15 @@ function validateGutenbergRichterCatalog(value) {
   const rawResponseSha256 = assertSha256(receipt.rawResponseSha256, "earth-gr-raw-response-sha256");
   const requestSha256 = assertSha256(receipt.requestSha256, "earth-gr-request-sha256");
   const expectedRequestUrl = buildUsgsUrl(exactQuery).url;
-  const expectedRequestSha256 = sha256(stableStringify({ method: "GET", url: expectedRequestUrl, accept: "application/json", userAgent: USER_AGENT }));
+  const network = exactObject(receipt.network, ["method", "requestUrl", "accept", "userAgent", "responseUrl", "httpStatus", "responseContentType", "rawResponseBytes", "rawResponseSha256", "redirects", "attempts"], "earth-gr-network");
+  // A patch release must validate saved requests against the exact header they used.
+  const legacyUserAgent = "Agentlas-Earth-Science/0.6.0 (official Earth observations; https://agentlas.cloud)";
+  if (network.userAgent !== USER_AGENT && network.userAgent !== legacyUserAgent) throw new EarthScienceError("earth-gr-request-receipt-invalid");
+  const expectedRequestSha256 = sha256(stableStringify({ method: "GET", url: expectedRequestUrl, accept: "application/json", userAgent: network.userAgent }));
   if (receipt.requestUrl !== expectedRequestUrl || receipt.responseUrl !== expectedRequestUrl || requestSha256 !== expectedRequestSha256
     || receipt.httpStatus !== 200 || !CONTENT_TYPES.has(receipt.responseContentType)) {
     throw new EarthScienceError("earth-gr-request-receipt-invalid");
   }
-  const network = exactObject(receipt.network, ["method", "requestUrl", "accept", "userAgent", "responseUrl", "httpStatus", "responseContentType", "rawResponseBytes", "rawResponseSha256", "redirects", "attempts"], "earth-gr-network");
   if (network.rawResponseSha256 !== rawResponseSha256 || network.rawResponseBytes !== receipt.rawResponseBytes
     || network.requestUrl !== receipt.requestUrl || network.responseUrl !== receipt.responseUrl || network.redirects !== "denied") {
     throw new EarthScienceError("earth-gr-network-receipt-invalid");
