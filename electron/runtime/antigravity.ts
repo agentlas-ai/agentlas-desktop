@@ -56,6 +56,7 @@ import { tStatus } from "./status-i18n";
 import { selectionFor } from "../capabilities/one-capabilities";
 import { agyProductHomePath, agySpawnHome, agySpawnsInPersonalHome, withAgyProductHome } from "./antigravity-personal-context";
 import { runtimeRequestRefusal } from "../../shared/runtime-capabilities";
+import { configuredIdentity, type InstallChannel } from "../install-identity";
 import { abortReasonError } from "./abort-reason";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, standardAntigravityBinDirs, windowsCliCommandBudget } from "./exec";
 import { stageCliImageAttachments } from "./image-attachments";
@@ -2103,15 +2104,22 @@ export type AgyPersonalMcpMigration =
  * personal agy then started them in every session of their own (2026-10-18: agentlas-browser, agentlas-science,
  * agentlas-time, filesystem, shadcn, all with Agentlas's own env markers).
  *
- * Gates, all required: this process spawns agy in a product mirror (the caller's branch), the kill switch
+ * Gates, all required: this process is a packaged install (configured install channel official or local-candidate;
+ * 2026-10-18 04:09Z a test host with the person's real HOME and the unnamed "Electron" userData ran it on the owner's file
+ * while the change was uncommitted: dev, QA and unconfigured hosts never run it), it spawns agy in a product mirror (the
+ * caller's branch), the kill switch
  * AGENTLAS_AGY_PERSONAL_MCP_MIGRATION=0 is not set, no marker for this HOME exists yet (once per HOME), the person's
  * file's cross-install lease is free within 2 s (an older Desktop staging into it holds that lease for its whole run),
  * no run of this process stages into that file right now, and the file parses. Only entries isAgentlasWrittenMcpEntry
  * recognises (Agentlas's own env marker keys, which a server the person registered never carries) are removed; the
  * exact original bytes are first written to a private backup beside the file; every other entry and key is kept.
  */
-export async function migrateAgyPersonalMcpConfig(input: { realHome: string; markerDir?: string }): Promise<AgyPersonalMcpMigration> {
+export async function migrateAgyPersonalMcpConfig(input: { realHome: string; markerDir?: string;
+  /** Tests name the channel; production reads the configured install identity (Main and daemon configure it). */
+  installChannel?: InstallChannel | null; }): Promise<AgyPersonalMcpMigration> {
   if (process.env.AGENTLAS_AGY_PERSONAL_MCP_MIGRATION === "0") return { status: "disabled" };
+  const channel = input.installChannel !== undefined ? input.installChannel : configuredIdentity()?.channel ?? null;
+  if (channel !== "official" && channel !== "local-candidate") return { status: "disabled" };
   const configPath = agyMcpConfigPath(input.realHome);
   const markerDir = input.markerDir ?? userDataPath("agy-product-home");
   const marker = path.join(markerDir, `personal-mcp-migration-v1-${createHash("sha256").update(path.resolve(input.realHome)).digest("hex").slice(0, 12)}.json`);
