@@ -2,6 +2,11 @@
 
 ## 1.3.75 — 2026-10-18
 
+- Includes the organization account improvements prepared for 1.3.74, which was not published.
+- Agentlas Finance adds modular analysis and HTML reports in the selected language.
+- The Document tab can render slides, pages and sheets as images for review, and PowerPoint files support tables and speaker notes.
+- Claude Code compacts at 80% of the selected model's context window, including when a smaller context limit is selected.
+- A Goal strategy review remains valid when the same run enters a waiting checkpoint; failures retain their cause.
 - Science sends a smaller research notebook context while preserving saved records and access to the complete notebook.
 - Completed kernel analyses with retained code and input/output bytes receive separate reproduction and methods review assignments, including analyses without an artifact copy. Review completion and scientific status remain explicit.
 - Earthquake b-value analyses reject magnitude samples with too little variation instead of reporting a misleading precise fit. Moving windows and aftershock analyses preserve supported results and identify estimates that cannot be made.
