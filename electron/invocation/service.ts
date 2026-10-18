@@ -2625,7 +2625,7 @@ export class InvocationService {
       // crossed beginQueuedSteerDrain. Rehydrate it exactly once and let the
       // normal Main-owned drain create the next run.
       const queue = this.steerQueues.get(row.chatId) ?? [];
-      if (!queue.some((queued) => queued.id === row.id)) queue.push(queuedSteerFromDurable(row));
+      if (!queue.some((queued) => queued.id === row.id)) this.enqueueSteer(row.chatId, queue, queuedSteerFromDurable(row));
       this.steerQueues.set(row.chatId, queue);
       resumed += 1;
     }
@@ -6743,6 +6743,20 @@ export class InvocationService {
   }
 
   /**
+   * Where a queued turn waits: an owner turn goes ahead of host-written (system) turns already queued in the same chat,
+   * keeping the order among owner turns and among system turns. Production 2026-10-18, Yotube room 8f3e09ee: the owner's
+   * 04:37Z direction was carried at 05:34Z behind a teammate relay queued at 04:44Z; the relay ran first as a read-only
+   * turn for 13 minutes and the direction started only at 05:47Z. A head a drain may already have taken is never
+   * displaced: only while the chat's run is active (no drain can be pending) may the new turn take the head.
+   */
+  private enqueueSteer(chatId: string, queue: QueuedSteer[], item: QueuedSteer): void {
+    if (item.request.promptOrigin === "system") { queue.push(item); return; }
+    const from = this.activeChatIds().includes(chatId) ? 0 : 1;
+    const at = queue.findIndex((queued, index) => index >= from && queued.request.promptOrigin === "system");
+    if (at < 0) queue.push(item); else queue.splice(at, 0, item);
+  }
+
+  /**
    * When a run ends without the owner stopping it, the owner directions it never dispatched become the chat's next turn
    * (carried-owner-followups.ts: production 2026-10-17, a team run left the owner's style direction queued for 81
    * minutes and then refused it, so it was lost). A stopped run keeps them refused: the stop withdrew the turn.
@@ -6754,7 +6768,7 @@ export class InvocationService {
       const carried = carryOwnerFollowupsToNextTurn({ chatId: record.chatId, runId, request: record.request });
       if (!carried) return;
       const queue = this.steerQueues.get(record.chatId) ?? [];
-      if (!queue.some((queued) => queued.id === carried.id)) queue.push(queuedSteerFromDurable(carried));
+      if (!queue.some((queued) => queued.id === carried.id)) this.enqueueSteer(record.chatId, queue, queuedSteerFromDurable(carried));
       this.steerQueues.set(record.chatId, queue);
       tryRecordRunEvent({ runId, chatId: record.chatId, agentId: record.actualAgentId, kind: "owner_followup_carried",
         payload: { queuedSteerId: carried.id } });
@@ -7000,7 +7014,7 @@ export class InvocationService {
         queuedRequestId: durable.id, promptHash: durable.promptHash,
       };
     }
-    queue.push({
+    this.enqueueSteer(req.chatId, queue, {
       mainAdmission,
       ...(durable.oneTeamReportCustodyJson!==undefined ? {oneTeamReportCustodyJson:durable.oneTeamReportCustodyJson} : {}),
       ...(durable.oneTeamReportCustody ? {oneTeamReportCustody:durable.oneTeamReportCustody} : {}),

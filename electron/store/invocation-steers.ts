@@ -270,7 +270,9 @@ export function listRecoverableQueuedSteers(chatId?: string): DurableQueuedSteer
         .run("row-undecodable" satisfies DurableQueuedSteerTerminalCause, new Date().toISOString(), row.id);
     }
   }
-  return out;
+  // After a restart an owner turn waits ahead of host-written (system) turns, as in the live queue (service.ts
+  // enqueueSteer); each kind keeps its rowid order.
+  return [...out.filter((row) => row.request?.promptOrigin !== "system"), ...out.filter((row) => row.request?.promptOrigin === "system")];
 }
 
 /**
