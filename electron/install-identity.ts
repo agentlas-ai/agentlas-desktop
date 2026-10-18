@@ -7,7 +7,7 @@
  * a local/QA candidate.
  */
 export type PackagedInstallChannel = "official" | "local-candidate";
-export type InstallChannel = PackagedInstallChannel | "qa" | "dev";
+export type InstallChannel = PackagedInstallChannel | "qa" | "dev" | "managed-cloud";
 
 export type BuildInstallIdentityMarker = Readonly<{
   schemaVersion: 1;
@@ -169,7 +169,13 @@ export function resolveInstallIdentity(input: ResolveInstallIdentityInput): Inst
   return Object.freeze({ ...QA_INSTALL_IDENTITY, userDataOverride: qaUserDataDir });
 }
 
+export function managedCloudInstallIdentity(userDataDir: string): InstallIdentity {
+  if (!/^(?:\/|[A-Za-z]:[\\/])/.test(userDataDir) || userDataDir.includes("\0")) throw new InstallIdentityError("managed cloud directory must be absolute");
+  return Object.freeze({ channel:"managed-cloud", appName:"Agentlas-Managed-One", userDataNamespace:"Agentlas-Managed-One", keychainService:"com.agentlas.managed-one", updatesEnabled:false, userDataOverride:userDataDir });
+}
+
 function isValidRuntimeIdentity(identity: InstallIdentity): boolean {
+  if (identity.channel === "managed-cloud") return identity.appName === "Agentlas-Managed-One" && identity.userDataNamespace === "Agentlas-Managed-One" && identity.keychainService === "com.agentlas.managed-one" && !identity.updatesEnabled && typeof identity.userDataOverride === "string" && /^(?:\/|[A-Za-z]:[\\/])/.test(identity.userDataOverride);
   if (identity.channel === "dev") {
     return identity.appName === DEV_INSTALL_IDENTITY.appName
       && identity.userDataNamespace === DEV_INSTALL_IDENTITY.userDataNamespace

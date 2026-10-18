@@ -9,6 +9,14 @@ import {supervisorError} from "../../shared/one-supervisor";
 import type {SupervisorRequestRow} from "./supervisor-store";
 import {daemonDeviceBridge,DeviceBridgeError,type DaemonDeviceBridge,type DeviceBridgeErrorCode} from "../daemon/device-bridge";
 
+/** Host-only monotonic screen restriction; model requests cannot enable it again. */
+let screenExecutionDenied: string | undefined;
+export function configureSupervisorScreenPolicy(policy: Readonly<{ computerUse: false; reason: "managed_one_computer_use_unavailable" }>): void {
+  if (policy.computerUse !== false || policy.reason !== "managed_one_computer_use_unavailable") throw new Error("supervisor_screen_policy_invalid");
+  if (screenExecutionDenied && screenExecutionDenied !== policy.reason) throw new Error("supervisor_screen_policy_immutable");
+  screenExecutionDenied = policy.reason;
+}
+
 /** A run that executes in the background service while the window process holds the screen. Main validates the daemon's
  * request against the durable rows (owner row ownerKind "daemon" for the attached boot, admission digest, supervisor
  * domain generation); nothing in this record is trusted on its own. */
@@ -22,6 +30,7 @@ function supervisorRequestRows(runId:string):SupervisorRequestRow[] {
   return db.prepare("SELECT * FROM one_supervisor_requests WHERE run_id=? AND kind IN ('reply','work','follow-up','chat-send')").all(runId) as SupervisorRequestRow[];
 }
 export function prepareSupervisorOsExecution(input:{runId?:string;chatId?:string;permission?:"read"|"write"|"full";admissionCurrent?:()=>boolean;remoteDaemon?:RemoteDaemonSource}) {
+  if (screenExecutionDenied) throw new Error(screenExecutionDenied);
   if(!input.runId || !input.chatId)return null;
   const db=getDb();
   const rows=supervisorRequestRows(input.runId);
@@ -93,6 +102,7 @@ export type SupervisorOsExecutionOutcome =
  *    "unavailable" and the computer-use child fails each tool call with that reason. The whole run does not fail.
  *  - Anything else (no supervisor request for this run, or a process that is neither): null, as before. */
 export async function prepareSupervisorOsExecutionAsync(input:{runId?:string;chatId?:string;permission?:"read"|"write"|"full";admissionCurrent?:()=>boolean;deviceBridge?:DaemonDeviceBridge}):Promise<SupervisorOsExecutionOutcome|null> {
+  if (screenExecutionDenied) return { kind:"unavailable", reason:screenExecutionDenied };
   if(!input.runId || !input.chatId)return null;
   if(configuredOneOsLeaseBroker()){
     const local=prepareSupervisorOsExecution(input);

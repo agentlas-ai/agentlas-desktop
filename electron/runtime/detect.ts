@@ -1,3 +1,4 @@
+import { managedOneConfigured, managedOneAuthentication } from "../managed-one/auth";
 // CLI 자동 감지 통합 + 활성 백엔드 선택 상태 관리.
 // PRD 3.1 FRE 6단계 — 사용자가 입력 안 해도 한 번 클릭으로 연결되도록.
 import { probeClaudeCode, probeClaudeEfforts } from "./claude-code";
@@ -325,7 +326,13 @@ function hydrateResolvedAliasesOnce(): void {
   }
 }
 
+function managedServingRuntimes(): RuntimeStatus[] {
+  if (!managedOneAuthentication()) return [];
+  return [{ kind:"agentlas", backend:"agentlas", source:"agentlas:serving", version:null, active:true, label:"Agentlas", model:AGENTLAS_SERVING_DEFAULT_MODEL, availableModels:AGENTLAS_SERVING_MODELS.map(model=>model.id) }];
+}
+
 export async function detectRuntimes(force = false): Promise<RuntimeStatus[]> {
+  if (managedOneConfigured()) return managedServingRuntimes();
   if (process.env.AGENTLAS_DISABLE_RUNTIME_PROBES === "1") return [];
   hydrateResolvedAliasesOnce();
   if (force) {
@@ -388,6 +395,7 @@ export async function detectRuntimes(force = false): Promise<RuntimeStatus[]> {
 
 /** UI inventory has its own flight; it never joins local execution admission. */
 export async function observeRuntimes(force = false): Promise<RuntimeStatus[]> {
+  if (managedOneConfigured()) return managedServingRuntimes();
   if (process.env.AGENTLAS_DISABLE_RUNTIME_PROBES === "1") return [];
   hydrateResolvedAliasesOnce();
   if (force) clearDetectCache();
@@ -480,7 +488,7 @@ function hasAgentlasServingAccess(): boolean {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const auth = require("../auth") as { getSessionCookieHeader?: () => string | null };
-    return Boolean(auth.getSessionCookieHeader?.());
+    return Boolean(auth.getSessionCookieHeader?.() || require("../managed-one/auth").managedOneAuthentication());
   } catch {
     return false;
   }

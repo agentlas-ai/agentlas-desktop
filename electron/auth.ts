@@ -20,6 +20,7 @@
 //   - 사용자 메타(email, name) 조회 endpoint: /api/account/me (없으면 cookie payload만 표시)
  import { app, BrowserWindow, safeStorage, session as electronSession, shell } from "electron";
  import { createHash } from "node:crypto";
+import { managedOneAuthentication, managedOneConfigured } from "./managed-one/auth";
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
@@ -52,6 +53,8 @@ function rendererAccountFingerprint(userId: string | undefined): string | undefi
 }
 
 export function webBaseUrl(): string {
+  const managed = managedOneAuthentication(); if (managed) return managed.webBaseUrl;
+  if (managedOneConfigured()) throw new Error("managed_one_credential_expired");
   const fromEnv = process.env.AGENTLAS_WEB_BASE_URL?.trim();
   if (fromEnv) return fromEnv.replace(/\/$/, "");
   return "https://agentlas.cloud";
@@ -808,6 +811,9 @@ export async function retryTemporaryAuthRestore(options: {
 }
 
 export function getAuthSession(): AuthSession {
+  const managed = managedOneAuthentication();
+  if (managed) return { signedIn: true, workspaceId: managed.workspaceId, expiresAt: managed.expiresAt, accountFingerprint: rendererAccountFingerprint(managed.userId) };
+  if (managedOneConfigured()) return { signedIn: false };
   if (developmentEffectsSuppressed()) return { signedIn: false };
   if (USE_E2E_SESSION && !_cache) {
     return {
@@ -913,6 +919,9 @@ export function getSessionCookieHeader(): string | null {
 
 /** Main-only authority for signed Hub mutations. Never expose userId to renderer IPC. */
 export function getAuthenticatedActorIds(): { workspaceId: string; userId: string } | null {
+  const managed = managedOneAuthentication();
+  if (managed) return { userId: managed.userId, workspaceId: managed.workspaceId };
+  if (managedOneConfigured()) return null;
   if (developmentEffectsSuppressed()) return null;
   if (USE_E2E_SESSION && !_cache) return { workspaceId: "e2e", userId: "e2e-user" };
   if (!getSessionCookieHeader() || !_cache?.workspaceId || !_cache.userId) return null;
@@ -923,6 +932,8 @@ export function getAuthenticatedActorIds(): { workspaceId: string; userId: strin
 export function getAuthenticatedSessionBinding(): { workspaceId: string; userId: string; sessionId: string; expiresAt: number | null } | null {
   const actor = getAuthenticatedActorIds();
   if (!actor) return null;
+  const managed = managedOneAuthentication();
+  if (managed) return { ...actor, sessionId: `managed-one:${managed.hostId}:${managed.generation}`, expiresAt: managed.expiresAt };
   return { ...actor, sessionId: `native-session:${_sessionGeneration}`, expiresAt: _cache?.expiresAt ?? null };
 }
 

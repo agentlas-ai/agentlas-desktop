@@ -30,7 +30,7 @@ import {
 import { MobileBridgeRequestReplayStore } from "./replay";
 import { AgentlasMobileBridgeServer } from "./server";
 import { MobileBridgeAccountPairingClient } from "./account-pairing";
-import { MobileBridgeCloudRelay } from "./relay";
+import { MobileBridgeCloudRelay, type MobileBridgeRelayAuthentication } from "./relay";
 import { loadOrCreateMobileBridgeTls, preferredMobileBridgeHost } from "./tls";
 import { getAuthSession, getSessionCookieHeader, getAuthenticatedSessionBinding } from "../auth";
 import { toolApprovalConsentActorBinding } from "../runtime/host-tool-permission-policy";
@@ -46,6 +46,14 @@ import {
 import type { MobileVisualSessionControl } from "./visual-session";
 
 export interface MobileBridgeRuntimeOptions {
+  /** Native host authority; omitted by Desktop, exclusive when supplied by a service. */
+  hostAuthority?: Readonly<{
+    sessionActive(): boolean;
+    workspaceId(): string | null;
+    relayAuthentication: MobileBridgeRelayAuthentication;
+    relayEndpoint?: string;
+    goalControl: false;
+  }>;
   userDataPath: string;
   appVersion: string;
   displayName?: string;
@@ -271,6 +279,7 @@ async function startBridgeInternal(
     consumePairingAssertion: (input) => accountPairing.consumePairingAssertion(input),
     desktopSessionActive: () => Boolean(getSessionCookieHeader()),
     desktopWorkspaceId: () => getAuthSession().workspaceId ?? null,
+    ...(options.hostAuthority ? { desktopSessionActive:options.hostAuthority.sessionActive, desktopWorkspaceId:options.hostAuthority.workspaceId } : {}),
     validateAccountAuthority: async (input) => {
       // A credential bound to a different authority origin is a definitive
       // mismatch. Everything else defers to the authority's own tri-state, so
@@ -291,7 +300,7 @@ async function startBridgeInternal(
   const terminalControl = createDesktopMobileTerminalControl();
   try {
     push = new MobilePushService({ userDataPath: options.userDataPath, hostId: identity.hostId,
-      currentWorkspaceId: () => getSessionCookieHeader() ? getAuthSession().workspaceId ?? null : null,
+      currentWorkspaceId: () => options.hostAuthority ? (options.hostAuthority.sessionActive() ? options.hostAuthority.workspaceId() : null) : getSessionCookieHeader() ? getAuthSession().workspaceId ?? null : null,
       deviceWorkspaceId: (deviceId) => pairing.deviceWorkspaceId(deviceId),
       supportsPlatform: (platform) => relay?.supportsPush(platform) ?? false,
       publish: (payload) => relay?.publishPush(payload) ?? Promise.resolve("unavailable"),
@@ -308,7 +317,7 @@ async function startBridgeInternal(
     currentTurnControl: invocationCurrentTurnControl,
     cancelInvocationRun: cancelInvocationOwnerRun,
     ...(push ? { mobilePush: push } : {}),
-    goalControl: desktopGoalControlServices(),
+    goalControl: options.hostAuthority?.goalControl === false ? undefined : desktopGoalControlServices(),
     hostIdentity: identity,
     displayName,
     appVersion: options.appVersion,
@@ -316,8 +325,8 @@ async function startBridgeInternal(
     // Mail/profile reads and writes are for the account the phone was paired
     // under only (EDGE-CASES S8/M6).
     mailAccountGuard: (deviceId) => {
-      if (!getSessionCookieHeader()) return "signed-out";
-      const active = getAuthSession().workspaceId ?? null;
+      if (options.hostAuthority ? !options.hostAuthority.sessionActive() : !getSessionCookieHeader()) return "signed-out";
+      const active = options.hostAuthority ? options.hostAuthority.workspaceId() : getAuthSession().workspaceId ?? null;
       const paired = pairing.deviceWorkspaceId(deviceId);
       if (!active || !paired) return "unknown";
       return active === paired ? "ok" : "mismatch";
@@ -371,6 +380,7 @@ async function startBridgeInternal(
     };
     writeMobileBridgeEndpointManifest(options.userDataPath, manifest);
     relay = new MobileBridgeCloudRelay({
+      ...(options.hostAuthority ? { authentication:options.hostAuthority.relayAuthentication, relayEndpoint:options.hostAuthority.relayEndpoint } : {}),
       userDataPath: options.userDataPath,
       hostId: identity.hostId,
       localEndpoint: manifest.url,
@@ -492,6 +502,9 @@ async function rebindAgentlasMobileBridge(
 export function retryAgentlasMobileBridge(): Promise<MobileBridgeRuntimeStatus> {
   return rebindAgentlasMobileBridge("runtime-retried");
 }
+
+export function mobileBridgeRelayReady(): boolean { return running?.relay.ready() ?? false; }
+export function refreshMobileBridgeRelayAuthentication(): void { running?.relay.refreshAuthentication(); }
 
 export function mobileBridgeRuntimeStatus(): MobileBridgeRuntimeStatus {
   const state = running;

@@ -25,6 +25,7 @@ import { assertCurrentHistoryRunnerResult } from "./observed-runner";
 import { normalEndToolEvidence, settleNormalEnd } from "../../shared/turn-settlement";
 import { currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { getSessionCookieHeader, webBaseUrl } from "../auth";
+import { managedOneHeaders, managedOneConfigured, managedOneAuthenticationEpoch } from "../managed-one/auth";
 import { createHash } from "node:crypto";
 import {
   AGENTLAS_SERVING_CONTEXT_WINDOW,
@@ -360,11 +361,13 @@ function reportDeliveredCapabilities(req: RunnerRequest, events: RunnerEvents, d
 }
 
 async function postServing(body: string, cookie: string, req: RunnerRequest): Promise<Response> {
+  const managed = managedOneHeaders("serving");
+  if (managedOneConfigured() && !managed) throw new Error("managed_one_credential_expired");
   return withCurrentHistoryProvider(()=>fetch(`${webBaseUrl()}/api/one/serving/chat`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      cookie,
+      ...(managed ?? { cookie }),
       // 브라우저는 이 헤더를 preflight 없이 붙일 수 없다. 서버의 교차출처 관문이
       // 이 헤더 하나로 "앱이 보낸 요청"과 "남의 사이트가 시킨 요청"을 가른다.
       "x-agentlas-client": "desktop",
@@ -580,7 +583,7 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
   // A recovery grant must still match the exact fresh request at the provider
   // boundary, before authentication, prompt construction or a charged call.
   assertScienceRecoveryRequest(req, "agentlas");
-  const cookie = getSessionCookieHeader();
+  const cookie = getSessionCookieHeader() ?? managedOneAuthenticationEpoch("serving");
   if (!cookie) return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain", turnDelivery: "not-dispatched", failure: { kind: "auth", runtime: "agentlas", source: "marker",
     providerCode: "sign_in_required", message: signInRequired(req.locale).message } });
 

@@ -1,3 +1,4 @@
+import { managedOneConfigured } from "../managed-one/auth";
 import { ownsHostGoalLoop } from "../long-run/host-goal-surface";
 import { normalizeLongRunUsage, readLongRunCostAccounting, type LongRunUsageInput, type LongRunCostAccounting } from "../long-run/budget";
 import { decodeRuntimeEvidence, runtimeEvidencePhase, type RuntimeCorrelation, type RuntimeEvidencePhase } from "../../shared/runtime-evidence";
@@ -378,6 +379,7 @@ export function createLongRun(input: {
   stallWindow?: number;
   appInstanceId?: string | null;
 }): LongRunRecord {
+  if (managedOneConfigured()) throw new Error("managed_one_goal_unavailable");
   const goalId = requiredText(input.goalId, "long_run_goal_id_required", 240);
   const objective = requiredContent(input.objective, "long_run_objective_required");
   const criteria = normalizeLongRunCriteria(input.acceptanceCriteria);

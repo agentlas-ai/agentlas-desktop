@@ -3,7 +3,6 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { getSessionCookieHeader, webBaseUrl } from "../auth";
-
 import type { MobilePushRelayPayload, MobilePushOutcome } from "./push";
 
 const WS_OPEN = 1;
@@ -149,7 +148,13 @@ interface RelayStateFile {
   secret: string;
 }
 
+/** Host-supplied authority is exclusive: null means unavailable, never cookie fallback. */
+export interface MobileBridgeRelayAuthentication {
+  current(): Readonly<{ epoch: string; headers: Readonly<Record<string,string>> }> | null;
+}
 export interface MobileBridgeCloudRelayOptions {
+  authentication?: MobileBridgeRelayAuthentication;
+  relayEndpoint?: string;
   userDataPath: string;
   hostId: string;
   localEndpoint: string;
@@ -211,8 +216,8 @@ function readOrCreateSecret(userDataPath: string): string {
  *
  *   값을 안 주면 지금과 **완전히 같게** 동작한다 — 이 변경만으로는 아무것도 바뀌지 않는다.
  */
-function relayEndpoint(): string {
-  const explicit = process.env.AGENTLAS_RELAY_URL?.trim();
+function relayEndpoint(override?: string): string {
+  const explicit = override ?? process.env.AGENTLAS_RELAY_URL?.trim();
   if (explicit) {
     try {
       const url = new URL(explicit);
@@ -226,6 +231,7 @@ function relayEndpoint(): string {
     } catch {
       // 주소가 잘못돼 있으면 조용히 무시하고 예전 경로로 간다 — 오타 하나로 원격 접속이
       // 통째로 죽는 것보다, 예전처럼 도는 편이 낫다.
+      if (override) throw new Error("mobile_relay_host_endpoint_invalid");
       console.warn("[mobile-bridge-relay] AGENTLAS_RELAY_URL is not a valid URL; falling back to the web address");
     }
   }
@@ -300,9 +306,9 @@ function rawBytes(data: unknown): number {
 
 export class MobileBridgeCloudRelay {
   // 서버가 알려주면 갱신된다. 못 받으면 여기 있는 값(환경변수 또는 웹 주소)을 계속 쓴다.
-  private endpoint = relayEndpoint();
+  private endpoint: string;
   // 환경변수로 못 박아 둔 경우에는 서버에 묻지 않는다 — 명시적 지정이 항상 이긴다.
-  private readonly endpointIsPinned = Boolean(process.env.AGENTLAS_RELAY_URL?.trim());
+  private readonly endpointIsPinned: boolean;
   private endpointCheckedAt = 0;
   private readonly secret: string;
   private control: RelaySocket | null = null;
@@ -323,7 +329,25 @@ export class MobileBridgeCloudRelay {
   private readonly tunnels = new Set<RelaySocket>();
 
   constructor(private readonly options: MobileBridgeCloudRelayOptions) {
+    this.endpoint = relayEndpoint(options.relayEndpoint);
+    this.endpointIsPinned = Boolean(options.relayEndpoint || process.env.AGENTLAS_RELAY_URL?.trim());
     this.secret = readOrCreateSecret(options.userDataPath);
+  }
+
+  private authentication(): Readonly<{epoch:string;headers:Readonly<Record<string,string>>}> | null {
+    if (this.options.authentication) return this.options.authentication.current();
+    const cookie = getSessionCookieHeader();
+    return cookie ? { epoch:cookie, headers:{Cookie:cookie} } : null;
+  }
+  private authenticationEpoch(): string | null { return this.authentication()?.epoch ?? null; }
+  ready(): boolean { return !this.stopped && this.control?.readyState === WS_OPEN && this.controlCookie === this.authenticationEpoch(); }
+
+  /** Host-only credential rotation. Pairing records/TLS pins are unchanged. */
+  refreshAuthentication(): void {
+    if (this.stopped) return;
+    this.stop();
+    this.clearAuthRefusal();
+    this.start();
   }
 
   pairingInfo(): { endpoint: string; secret: string } {
@@ -332,14 +356,14 @@ export class MobileBridgeCloudRelay {
 
   supportsPush(platform: "ios" | "android"): boolean {
     return !this.stopped && this.control?.readyState === WS_OPEN &&
-      this.controlCookie === getSessionCookieHeader() && this.pushPlatforms.includes(platform);
+      this.controlCookie === this.authenticationEpoch() && this.pushPlatforms.includes(platform);
   }
 
   /** Control is authenticated independently of phone tunnels. No token/body is logged. */
   publishPush(payload: MobilePushRelayPayload): Promise<MobilePushOutcome> {
     const control = this.control;
     if (!this.supportsPush(payload.platform) || !control || control.readyState !== WS_OPEN ||
-        this.controlCookie !== getSessionCookieHeader() || this.pushPending.size >= 32 ||
+        this.controlCookie !== this.authenticationEpoch() || this.pushPending.size >= 32 ||
         payload.notification.hostId !== this.options.hostId) return Promise.resolve("unavailable");
     const requestId = randomUUID();
     return new Promise(resolve => {
@@ -423,7 +447,8 @@ export class MobileBridgeCloudRelay {
 
   private openControl(): void {
     if (this.stopped || this.control) return;
-    const cookie = getSessionCookieHeader();
+    const authentication = this.authentication();
+    const cookie = authentication?.epoch;
     if (!cookie) {
       // The single most common reason remote access silently never works: the
       // relay tunnel requires this Desktop to be signed in to Agentlas.
@@ -445,7 +470,7 @@ export class MobileBridgeCloudRelay {
       role: "desktop",
       hostId: this.options.hostId,
     }), {
-      headers: { Cookie: cookie, "x-agentlas-relay-secret": this.secret },
+      headers: { ...authentication!.headers, "x-agentlas-relay-secret": this.secret },
       handshakeTimeout: 8_000,
       perMessageDeflate: false,
     });
@@ -595,14 +620,15 @@ export class MobileBridgeCloudRelay {
    */
   private openPairTunnel(channelId: string): void {
     const onPairFrame = this.options.onPairFrame;
-    const cookie = getSessionCookieHeader();
+    const authentication = this.authentication();
+    const cookie = authentication?.epoch;
     if (!onPairFrame || !cookie || this.stopped) return;
     const cloud = new RelayWebSocket(relayUrl(this.endpoint, {
       role: "tunnel",
       hostId: this.options.hostId,
       channelId,
     }), {
-      headers: { Cookie: cookie, "x-agentlas-relay-secret": this.secret },
+      headers: { ...authentication!.headers, "x-agentlas-relay-secret": this.secret },
       handshakeTimeout: 8_000,
       perMessageDeflate: false,
     });
@@ -644,7 +670,8 @@ export class MobileBridgeCloudRelay {
   }
 
   private openTunnel(channelId: string, deviceToken: string): void {
-    const cookie = getSessionCookieHeader();
+    const authentication = this.authentication();
+    const cookie = authentication?.epoch;
     if (!cookie || this.stopped) return;
     if (this.repairRequiredRefusal) {
       console.warn(
@@ -657,7 +684,7 @@ export class MobileBridgeCloudRelay {
       hostId: this.options.hostId,
       channelId,
     }), {
-      headers: { Cookie: cookie, "x-agentlas-relay-secret": this.secret },
+      headers: { ...authentication!.headers, "x-agentlas-relay-secret": this.secret },
       handshakeTimeout: 8_000,
       perMessageDeflate: false,
     });

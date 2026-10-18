@@ -39,7 +39,7 @@ import { assertDesktopLongRunAdmissionOpen, desktopAppInstanceId, registerAppRun
 import { assertOnePersonalDataInvocationCurrent, collectOnePersonalDataResult, recoverOnePersonalDataResults } from './personal-data-runtime';
 import { assertOneHistoryCommandCurrent, wakeOnePersonalIntegrationsFromExistingCheckin, closeOnePersonalIntegrations } from './personal-integrations-runtime';
 
-interface SupervisorHostOptions { ownerKind:'desktop-main'|'work-daemon';ownerEpoch:string;assertAuthority():void }
+interface SupervisorHostOptions { executor?:"desktop-local"|"agentlas-cloud"; ownerKind:'desktop-main'|'work-daemon';ownerEpoch:string;assertAuthority():void }
 let hostOptions:SupervisorHostOptions|undefined;
 let hostOwner:OneSupervisorOwner|null=null;
 let stopProactiveHost:(()=>void)|undefined;
@@ -185,6 +185,7 @@ export function oneSupervisor():OneSupervisorService {
   nativeBudget=budget;
   const budgetRuntime=new OneBudgetRuntime({budget,store,oneId:()=>getOneProfile().oneId,assertOwner:()=>assertBudgetOwner(getOneProfile().oneId),receipt});
   const startNative = (req: Parameters<typeof invocationService.start>[0], hostNoticePurpose?: SupervisorHostNoticePurpose) => {
+    if (hostOptions?.executor === "agentlas-cloud" && (req.goalMode || getChat(req.chatId)?.goalId)) throw supervisorError("managed_one_goal_unavailable");
     if (getDb().inTransaction) throw supervisorError('supervisor_native_uncommitted_request');
     hostOptions?.assertAuthority();owner.assert(getOneProfile().oneId);
     if (req.runId) {
@@ -232,7 +233,7 @@ export function oneSupervisor():OneSupervisorService {
     });
   };
   supervisor=new OneSupervisorService({
-    store,owner,budget,identity:getOneProfile,assertAuthority:()=>hostOptions?.assertAuthority(),workQueue,workIdentityMutable:hostsWork,wakeWorkQueue:()=>queueMicrotask(()=>workExecutor?.kick()),
+    store,owner,budget,executor:hostOptions?.executor,identity:getOneProfile,assertAuthority:()=>hostOptions?.assertAuthority(),workQueue,workIdentityMutable:hostsWork,wakeWorkQueue:()=>queueMicrotask(()=>workExecutor?.kick()),
     createConversation:()=>{const id=createChat({originSurface:"one",taskMode:"conversation",title:getOneProfile().displayName}).id;bindPersonalFolder(id);return id;},
     history:chatId=>listChatMessages(chatId,100),appendUser:(chatId,text,images)=>{
       const groupId=/<!-- agentlas-chat-files:v1:([0-9a-f-]{36}) -->/i.exec(text)?.[1];
@@ -243,6 +244,7 @@ export function oneSupervisor():OneSupervisorService {
     createWork:input=>{
       if (input.projectId && !getProject(input.projectId)) throw supervisorError('supervisor_work_project_missing');
       const chat=createChat({originSurface:"work",taskMode:"task",projectId:input.projectId,title:input.text.split(/\r?\n/,1)[0].slice(0,120)});
+      if (hostOptions?.executor === "agentlas-cloud") bindPersonalFolder(chat.id);
       const task=ensureCanonicalTaskForChat(chat.id);
       if (!task) throw supervisorError('supervisor_work_task_missing');
       // The native Work invocation persists its own human input once. The

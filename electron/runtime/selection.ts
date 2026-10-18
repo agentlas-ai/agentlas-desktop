@@ -287,7 +287,20 @@ export function effortForSelectedModel(
   return below.at(-1) ?? defaultEffort ?? (providerDefault ? null : supported[0] ?? null);
 }
 
+/** Bootstrap-only monotonic provider restriction. A missing/expired host lease never falls back. */
+let servingOnlyHostCurrent: (() => boolean) | undefined;
+export function configureServingOnlyHostPolicy(current: () => boolean): void {
+  if (typeof current !== "function") throw new Error("runtime_host_policy_invalid");
+  if (servingOnlyHostCurrent) throw new Error("runtime_host_policy_immutable");
+  servingOnlyHostCurrent = current;
+}
+function hostRuntimeAllowed(kind: string): boolean {
+  if (!servingOnlyHostCurrent) return true;
+  try { return kind === "agentlas" && servingOnlyHostCurrent() === true; } catch { return false; }
+}
+
 export function pickRunner(active: RuntimeStatus): { runner: Runner; label: string } | null {
+  if (!hostRuntimeAllowed(active.kind)) return null;
   const resolvedSpec = active.kind === "acp" ? resolveAcpAgentSpec(active.acpAgentId) : null;
   // One immutable selected spec supplies both the spawned runner and its
   // portable/native binding; a shared executable must not merge ACP profiles.
@@ -425,6 +438,7 @@ export function pickRecoveryRunner(selection: Pick<RuntimeStatus, "kind"> & { so
   runner: Runner;
   label: string;
 } | null {
+  if (!hostRuntimeAllowed(selection.kind)) return null;
   if (selection.kind === "claude-code") return { runner: bindRuntimeSource(withRuntimeAuthProbe(runClaudeCode, "claude-code"), selection.source), label: RUNNER_LABEL["claude-code"] };
   if (selection.kind === "codex") return { runner: bindRuntimeSource(withRuntimeAuthProbe(runCodex, "codex"), selection.source), label: RUNNER_LABEL.codex };
   if (selection.kind === "antigravity") {

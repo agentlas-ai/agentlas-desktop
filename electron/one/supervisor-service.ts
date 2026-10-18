@@ -39,6 +39,7 @@ export interface SupervisorDependencies {
   store: OneSupervisorStore;
   owner?: Pick<OneSupervisorOwner,"assert"|"assertToken"|"current">;
   assertAuthority?(): void;
+  executor?: "desktop-local" | "agentlas-cloud";
   identity(): {oneId: string; displayName: string; avatarIcon?:string; bubbleColor?:OneBubbleColor;version?:number};
   createConversation(): string;
   history(chatId: string): ChatHistoryEntry[];
@@ -1125,7 +1126,7 @@ export class OneSupervisorService {
       if (cancel && !["completed","failed","cancelled","interrupted"].includes(task.state)) {task.state="cancelling"; task.controls=[]; task.controlVersion=supervisorHash([task.controlVersion,cancel.command_id]);}
     }
     return {schema:ONE_SUPERVISOR_SCHEMA,oneId:binding.oneId,displayName:binding.displayName,avatarIcon:binding.avatarIcon ?? 'character:orange-dino',bubbleColor:binding.bubbleColor ?? 'blue',profileVersion:binding.version ?? 1,conversationChatId:binding.chatId,
-      observedAt:new Date().toISOString(),executor:"desktop-local",workOwner:"desktop-main",scienceAvailable:!!this.deps.science && !scienceError,scienceError,
+      observedAt:new Date().toISOString(),executor:this.deps.executor ?? "desktop-local",workOwner:this.deps.executor === "agentlas-cloud" ? "work-daemon" : "desktop-main",scienceAvailable:!!this.deps.science && !scienceError,scienceError,
       journalCursor:this.deps.store.cursor(binding.oneId),runtimeOwner:this.deps.owner?.current() ?? null,checkins:this.deps.store.checkins(binding.oneId),
       scienceProjects:scienceError ? [] : this.deps.science?.projects?.() ?? [],
       tasks,messages:this.deps.history(binding.chatId),requests:this.deps.store.list(binding.oneId).map(row=>JSON.parse(row.receipt_json)),notices:this.deps.store.notices(binding.oneId),

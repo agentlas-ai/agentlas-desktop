@@ -93,8 +93,8 @@ export interface OneSupervisorSnapshot {
   /** Cursor for command receipt transitions, separate from per-run token ordinals. */
   journalCursor?: number;
   runtimeOwner?: SupervisorRuntimeOwner | null;
-  executor: "desktop-local";
-  workOwner: "desktop-main";
+  executor: "desktop-local" | "agentlas-cloud";
+  workOwner: "desktop-main" | "work-daemon";
   scienceAvailable: boolean;
   scienceError: string | null;
   scienceProjects: Array<{projectId:string;title:string}>;

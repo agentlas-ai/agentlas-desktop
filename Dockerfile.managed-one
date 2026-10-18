@@ -1,0 +1,49 @@
+# syntax=docker/dockerfile:1.7
+# Build the service host without a renderer or a local Desktop installation.
+# The existing embedded-core preparation step produces the allowlisted core below.
+FROM node:22-bookworm-slim AS build
+WORKDIR /opt/agentlas
+ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates git openssh-client python3 make g++ pkg-config libsecret-1-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY package.json package-lock.json ./
+# The pinned Science package uses SSH. Forward build credentials; never copy keys into a layer.
+RUN --mount=type=ssh,required=true \
+    --mount=type=secret,id=github_known_hosts,target=/root/.ssh/known_hosts,required=true \
+    npm ci --ignore-scripts --no-audit --no-fund
+RUN npm rebuild better-sqlite3 keytar node-pty
+COPY electron ./electron
+COPY shared ./shared
+COPY plugins ./plugins
+COPY scripts/copy-builtin-plugins.cjs ./scripts/copy-builtin-plugins.cjs
+COPY scripts/prepare-embedded-core.mjs ./scripts/prepare-embedded-core.mjs
+COPY build-resources/embedded-core-contract.cjs ./build-resources/embedded-core-contract.cjs
+COPY dist/embedded-core ./Hephaestus
+RUN node -e "require('./build-resources/embedded-core-contract.cjs').verifyReceipt('./Hephaestus',require('./package.json'))"
+RUN node node_modules/typescript/bin/tsc -p electron/tsconfig.json --sourceMap false --removeComments true \
+    && node scripts/copy-builtin-plugins.cjs \
+    && cp electron/memory/code-map-gen.mjs dist/electron/memory/code-map-gen.mjs \
+    && cp electron/memory/curator-ruleset.json dist/electron/memory/curator-ruleset.json \
+    && cp electron/mcp-tools/proxy-child.cjs dist/electron/mcp-tools/proxy-child.cjs \
+    && npm prune --omit=dev --ignore-scripts --no-audit --no-fund
+
+FROM node:22-bookworm-slim AS managed-one
+WORKDIR /opt/agentlas
+ENV NODE_ENV=production
+ENV PATH="/usr/local/bin:/usr/bin:/bin"
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates python3 python3-pip libsecret-1-0 fonts-noto-cjk \
+    && pip3 install --no-cache-dir --break-system-packages pandas openpyxl python-docx python-pptx matplotlib pillow reportlab \
+    && rm -rf /var/lib/apt/lists/* /root/.cache \
+    && useradd --create-home --uid 1001 --shell /bin/bash user
+COPY --from=build /opt/agentlas/package.json ./package.json
+COPY --from=build /opt/agentlas/node_modules ./node_modules
+COPY --from=build /opt/agentlas/dist ./dist
+COPY --from=build /opt/agentlas/Hephaestus ./Hephaestus
+RUN test -f dist/electron/managed-one/main.js \
+    && test -f Hephaestus/agentlas-embedded-core.json \
+    && node -e "require('better-sqlite3')(':memory:').close()"
+USER user
+# A provisioner writes a one-use, private bootstrap file before starting the host.
+CMD ["node", "/opt/agentlas/dist/electron/managed-one/main.js", "--bootstrap", "/home/user/.agentlas-managed/bootstrap.json"]

@@ -49,7 +49,8 @@ const RESEARCH_DIRECTOR_PLUGIN_SLUG = "agentlas-science-research-director";
  */
 export function installedPluginsRoot(): string {
   if (!isPackagedRuntime() || process.env.AGENTLAS_QA_USER_DATA_DIR
-    || configuredIdentity()?.channel === "local-candidate") {
+    || configuredIdentity()?.channel === "local-candidate"
+    || configuredIdentity()?.channel === "managed-cloud") {
     const root = userDataPath("plugins");
     if (!process.env.AGENTLAS_SCIENCE_RESEARCH_DIRECTOR_PLUGIN_ROOT) {
       process.env.AGENTLAS_SCIENCE_RESEARCH_DIRECTOR_PLUGIN_ROOT = path.join(root, RESEARCH_DIRECTOR_PLUGIN_SLUG);

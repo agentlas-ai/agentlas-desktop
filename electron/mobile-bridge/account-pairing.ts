@@ -1,4 +1,5 @@
 import { getSessionCookieHeader, invalidateAuthSessionFromServer, webBaseUrl } from "../auth";
+import { managedOneHeaders } from "../managed-one/auth";
 import { MOBILE_BRIDGE_PAIR_ASSERTION_AUDIENCE } from "../../shared/mobile-bridge";
 
 const DESKTOP_PROOF_PATH = "/api/mobile-pair/v1/desktop-proof";
@@ -190,7 +191,7 @@ export class MobileBridgeAccountPairingClient {
       throw new MobileBridgeAccountPairingError("invalid_request", "Desktop pairing identity is invalid.");
     }
     const cookie = this.cookieProvider();
-    if (!validCookie(cookie)) {
+    if (!validCookie(cookie) && !managedOneHeaders("pairing")) {
       throw new MobileBridgeAccountPairingError(
         "unauthenticated",
         "Sign in to Agentlas on this Desktop before pairing a mobile device.",
@@ -199,17 +200,17 @@ export class MobileBridgeAccountPairingClient {
     const response = await this.post(DESKTOP_PROOF_PATH, {
       host_id: input.hostId,
       pairing_attempt_id: input.pairingAttemptId,
-    }, cookie);
+    }, cookie ?? undefined);
     let raw: unknown;
     try {
       raw = await boundedJson(response);
     } catch (error) {
-      if (response.status === 401) invalidateAuthSessionFromServer(cookie);
+      if (response.status === 401) invalidateAuthSessionFromServer(cookie ?? undefined);
       throw error;
     }
     if (!response.ok) {
       const code = responseFailure(raw) ?? "account_authority_unavailable";
-      if (response.status === 401 || code === "unauthenticated") invalidateAuthSessionFromServer(cookie);
+      if (response.status === 401 || code === "unauthenticated") invalidateAuthSessionFromServer(cookie ?? undefined);
       throw new MobileBridgeAccountPairingError(
         code,
         code === "unauthenticated"
@@ -341,7 +342,7 @@ export class MobileBridgeAccountPairingClient {
           accept: "application/json",
           "content-type": "application/json",
           origin: this.origin,
-          ...(cookie ? { cookie } : {}),
+          ...(pathname === DESKTOP_PROOF_PATH ? managedOneHeaders("pairing") ?? (cookie ? { cookie } : {}) : (cookie ? { cookie } : {})),
         },
         body: encoded,
         signal: controller.signal,

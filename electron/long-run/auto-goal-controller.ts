@@ -1,3 +1,4 @@
+import { managedOneConfigured } from "../managed-one/auth";
 /** Main-owned bridge from a judged user request to the existing durable ledger.
  * This module does not dispatch a provider, schedule work or grant permissions.
  */
@@ -48,6 +49,7 @@ export function admitJudgedAutomaticGoal(input: {
   authorityRefs: readonly string[];
   budget: LongRunBudget;
 }): LongRunRecord | null {
+  if (managedOneConfigured()) throw new Error("managed_one_goal_unavailable");
   const source = userSource(input.chatId, input.sourceMessageId);
   if (!admitsAutomaticGoal(source, input.decision)) return null;
   finiteBudget(input.budget);
