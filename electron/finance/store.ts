@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { createFinanceWorkspace, validateFinanceWorkspace, type FinanceWorkspace } from '../../shared/finance';
+import { createFinanceWorkspace, normalizeFinanceDashboard, validateFinanceWorkspace, type FinanceWorkspace } from '../../shared/finance';
 import { publishFinanceWorkspaceChange } from './events';
 
 export interface FinanceScope { workspaceId: string; userId: string; assertCurrent(): void }
@@ -28,10 +28,17 @@ export class FinanceStore {
   }
   async load(scope: FinanceScope): Promise<FinanceWorkspace> {
     const directory = this.directory(scope), ownerScope = path.basename(directory);
-    const result = this.read(directory); scope.assertCurrent();
-    if (result.ownerScope && result.ownerScope !== ownerScope) throw new Error('finance_owner_scope_mismatch');
-    return { ...result, ownerScope };
+    for(let attempt=0;attempt<3;attempt++){
+      const result=this.read(directory);scope.assertCurrent();
+      if(result.ownerScope&&result.ownerScope!==ownerScope)throw new Error('finance_owner_scope_mismatch');
+      const normalized=normalizeFinanceDashboard({...result,ownerScope});
+      if(result.dashboards.length===1&&result.activeDashboardId===normalized.activeDashboardId)return normalized;
+      try{return await this.transaction(scope,result.revision,current=>normalizeFinanceDashboard(current));}
+      catch(error){if((error as Error).message!=='finance_revision_conflict'||attempt===2)throw error;}
+    }
+    throw new Error('finance_revision_conflict');
   }
+
   async save(scope: FinanceScope, input: { workspace: FinanceWorkspace; expectedRevision: number }): Promise<FinanceWorkspace> {
     const proposed = validateFinanceWorkspace(input.workspace);
     return this.transaction(scope,input.expectedRevision,()=>proposed);
@@ -48,7 +55,7 @@ export class FinanceStore {
       const current = this.read(directory);
       if (current.revision !== expectedRevision) throw new Error('finance_revision_conflict');
       if(current.ownerScope&&current.ownerScope!==path.basename(directory))throw new Error('finance_owner_scope_mismatch');
-      const proposed=validateFinanceWorkspace(await update({...current,ownerScope:path.basename(directory)}));
+      const proposed=normalizeFinanceDashboard(validateFinanceWorkspace(await update({...current,ownerScope:path.basename(directory)})),current.activeDashboardId);
       scope.assertCurrent();
       if (proposed.ownerScope !== path.basename(directory)) throw new Error('finance_owner_scope_mismatch');
       const next = validateFinanceWorkspace({ ...proposed, revision: current.revision + 1 });

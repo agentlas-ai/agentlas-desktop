@@ -184,9 +184,21 @@ export function oneSupervisor():OneSupervisorService {
   const budget=new OneBudgetStore(getDb(),assertBudgetOwner);
   nativeBudget=budget;
   const budgetRuntime=new OneBudgetRuntime({budget,store,oneId:()=>getOneProfile().oneId,assertOwner:()=>assertBudgetOwner(getOneProfile().oneId),receipt});
-  const startNative = (req: Parameters<typeof invocationService.start>[0], hostNoticePurpose?: SupervisorHostNoticePurpose) => {
+  const startNative = async (req: Parameters<typeof invocationService.start>[0], hostNoticePurpose?: SupervisorHostNoticePurpose) => {
     if (hostOptions?.executor === "agentlas-cloud" && (req.goalMode || getChat(req.chatId)?.goalId)) throw supervisorError("managed_one_goal_unavailable");
     if (getDb().inTransaction) throw supervisorError('supervisor_native_uncommitted_request');
+    hostOptions?.assertAuthority();owner.assert(getOneProfile().oneId);
+    if(req.runId)try { await (await import('../finance/daily-briefing')).assertFinanceDailyReview(req.runId); }
+    catch(error) {
+      if(error instanceof Error && error.message==='finance_daily_review_denied') {
+        // This rejection is before budget/native admission: retry only the other notices in a mixed review.
+        store.db.transaction(()=>{
+          const row=store.db.prepare("SELECT * FROM one_supervisor_requests WHERE one_id=? AND run_id=? AND state='dispatching'").get(getOneProfile().oneId,req.runId) as SupervisorRequestRow|undefined;
+          if(row){store.retryReview(req.runId!,'finance_daily_review_denied');store.update(row,{state:'failed',acknowledgement:'settled',reason:'finance_daily_review_denied'});}
+        }).immediate();
+      }
+      throw error;
+    }
     hostOptions?.assertAuthority();owner.assert(getOneProfile().oneId);
     if (req.runId) {
       const command = store.db.prepare('SELECT command_id FROM one_supervisor_requests WHERE run_id=?').get(req.runId) as {command_id:string}|undefined;
@@ -297,7 +309,12 @@ export function oneSupervisor():OneSupervisorService {
   });
   // Dots parity (owner 2026-10-04): One speaks first on a check-in it was asked to run, or when a worker it
   // delegated to is waiting for the owner. The listener is not an answer surface (it returns false).
-  const fireCheckins=()=>{try{supervisor?.fireDueCheckins();recoverOnePersonalDataResults();wakeOnePersonalIntegrationsFromExistingCheckin();}catch(error){console.warn("[one-supervisor] check-ins deferred",error instanceof Error ? error.message : "unknown");}};
+  let checkinBusy=false;
+  const fireCheckins=async()=>{if(checkinBusy)return;checkinBusy=true;try{
+    // Finance permission/consent is rechecked before the existing One scheduler admits a due briefing.
+    await (await import('../finance/daily-briefing')).wakeFinanceDailyBriefing();
+    supervisor?.fireDueCheckins();recoverOnePersonalDataResults();wakeOnePersonalIntegrationsFromExistingCheckin();
+  }catch(error){console.warn("[one-supervisor] check-ins deferred",error instanceof Error ? error.message : "unknown");}finally{checkinBusy=false;}};
   const checkinTimer=setInterval(fireCheckins,30_000);checkinTimer.unref?.();
   const stopQuestions=onAskUserLifecycle(event=>{
     if (event.chatId && event.expiresAt > Date.now()) {

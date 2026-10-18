@@ -5,12 +5,16 @@ import { applyFinanceOperations, createFinanceReport, financeId, FINANCE_WORKSPA
 import { userDataPath } from "../runtime-paths";
 import { FinanceStore, type FinanceScope } from "./store";
 import { queryFinanceData, refreshFinanceQuotes, searchFinanceAssets } from "./data";
+import { FinanceExperience } from './experience';
 import { findIsharesFund } from "./providers/ishares-catalog";
 import { FINANCE_MONITOR_RUN_TIMEOUT_MS } from "../../shared/finance";
 import { FinanceArchives, FinanceArchiveRequestSchema, financeArchivePlan } from './archive';
 import { FinanceRunHistory } from './run-history';
 import { financeReportDashboardActions } from './evidence-actions';
 import { interpretFinance } from "./model";
+import { converseFinance } from './conversation';
+import { calculateFromFinanceSources } from './calculation-service';
+import { financeCalculationArtifact } from './artifacts';
 import { writeFinanceBriefing } from "./briefing";
 import { pauseFinanceMonitor, readFinanceMonitor, rollbackFinanceMonitor, scheduleFinanceMonitor } from "./monitor";
 
@@ -73,9 +77,10 @@ function dataOperations(result: FinanceDataResult, workspace: FinanceWorkspace, 
 }
 export class FinanceService {
   readonly store: FinanceStore;
+  private readonly experience:FinanceExperience;
   private readonly archiveStore:FinanceArchives;
   private readonly histories=new Map<string,FinanceRunHistory>();
-  constructor(private readonly root: string) { this.store = new FinanceStore(path.join(root,"workspaces"));this.archiveStore=new FinanceArchives(path.join(root,"archives")); }
+  constructor(private readonly root: string) { this.experience=new FinanceExperience(path.join(root,"experience"));this.store = new FinanceStore(path.join(root,"workspaces"));this.archiveStore=new FinanceArchives(path.join(root,"archives")); }
   async archives(scope:FinanceScope,raw:FinanceArchiveRequest):Promise<FinanceArchiveResult>{
     const input=FinanceArchiveRequestSchema.parse(raw);
     if(input.action==='list')return {action:'list',...await this.archiveStore.list(scope,input)};
@@ -130,11 +135,11 @@ export class FinanceService {
     assertWorkspaceCapacity(current,input.operations);
     return this.save(scope,{workspace:applyFinanceOperations(current,input.operations),expectedRevision:current.revision});
   }
-  async search(scope: FinanceScope,input:{query:string}) { const result=await searchFinanceAssets(input.query);scope.assertCurrent();return result; }
-  async query(scope: FinanceScope,input:FinanceDataRequest) { const workspace=await this.store.load(scope);const result=await queryFinanceData(input,workspace.watchlist);scope.assertCurrent();return result; }
+  async search(scope: FinanceScope,input:{query:string}) { const route={...await this.experience.consent(scope),assertCurrent:()=>scope.assertCurrent()};scope.assertCurrent();const result=await searchFinanceAssets(input.query,route);scope.assertCurrent();return result; }
+  async query(scope: FinanceScope,input:FinanceDataRequest) { const workspace=await this.store.load(scope);const route={...await this.experience.consent(scope),assertCurrent:()=>scope.assertCurrent()};scope.assertCurrent();const result=await queryFinanceData(input,workspace.watchlist,route);scope.assertCurrent();return result; }
   async queryAndSave(scope:FinanceScope,input:FinanceDataSaveRequest):Promise<FinanceDataSaveResult> {
     const before=await this.store.load(scope);if(input.expectedRevision!==undefined && before.revision!==input.expectedRevision)throw new Error("finance_revision_conflict");
-    const result=await queryFinanceData(input,before.watchlist);scope.assertCurrent();
+    const route={...await this.experience.consent(scope),assertCurrent:()=>scope.assertCurrent()};scope.assertCurrent();const result=await queryFinanceData(input,before.watchlist,route);scope.assertCurrent();
     const batch=dataOperations(result,before,input.title||input.query||"Finance 자료",input.mode==="report");
     const workspace=await this.apply(scope,{operations:batch.operations,expectedRevision:before.revision});
     scope.assertCurrent();
@@ -154,11 +159,32 @@ export class FinanceService {
     return {workspace:await this.apply(scope,{operations:[{type:"report.add",report}],expectedRevision:workspace.revision}),reportId:report.id};
   }
   async ask(scope:FinanceScope,input:{request:string;screenContext:string;baseRevision:number;requestId?:string},signal:AbortSignal):Promise<FinanceAIResult> {
-    const workspace=await this.store.load(scope);const result=await interpretFinance(input,workspace,signal);scope.assertCurrent();
+    const route={...await this.experience.consent(scope),signal,assertCurrent:()=>scope.assertCurrent()};scope.assertCurrent();
+    const workspace=await this.store.load(scope);const result=await converseFinance(input,workspace,signal,{
+      assertCurrent:()=>scope.assertCurrent(),
+      search:async(query)=>{scope.assertCurrent();const result=await searchFinanceAssets(query,route);scope.assertCurrent();return result;},
+      query:async(request,assets)=>{scope.assertCurrent();const result=await queryFinanceData(request,assets,route);scope.assertCurrent();return result;},
+      feeds:()=>this.dashboardFeeds(scope,signal),
+    });scope.assertCurrent();
     if((await this.store.load(scope)).revision!==input.baseRevision)return {baseRevision:input.baseRevision,status:"conflict",message:"화면이 변경되어 AI 결과를 적용하지 않았습니다."};
     return result;
   }
-  async refreshQuotes(scope:FinanceScope) {const workspace=await this.store.load(scope);const result=await refreshFinanceQuotes(workspace);scope.assertCurrent();return result;}
+  async calculate(scope:FinanceScope,input:{request:import('../../shared/finance-compute').FinanceComputeRequest;period?:string;title?:string},signal:AbortSignal=AbortSignal.timeout(180000)){
+    const route={...await this.experience.consent(scope),signal,assertCurrent:()=>scope.assertCurrent()};scope.assertCurrent();
+    const before=await this.store.load(scope);scope.assertCurrent();
+    const period=input.period??'1Y';if(!['1M','3M','1Y','5Y','all'].includes(period))throw new Error('finance_compute_period_invalid');
+    const artifact=await calculateFromFinanceSources(input.request,before.watchlist,asset=>queryFinanceData({query:asset.symbol,assetIds:[asset.id],metrics:['price_history'],period},before.watchlist,route),signal);scope.assertCurrent();signal.throwIfAborted();
+    const draft=financeCalculationArtifact(artifact,before,input.title);
+    const workspace=await this.apply({...scope,assertCurrent(){scope.assertCurrent();signal.throwIfAborted();}},{operations:draft.operations,expectedRevision:before.revision});
+    return {workspace,reportId:draft.reportId,artifact};
+  }
+  async dashboardFeeds(scope:FinanceScope,signal?:AbortSignal):Promise<import('../../shared/finance-feeds').FinanceDashboardFeedsResult>{
+    const enabledFeedIds=await this.experience.feeds(scope);scope.assertCurrent();
+    const workspace=await this.store.load(scope);scope.assertCurrent();
+    const {getFinanceDashboardFeeds}=await import('./dashboard-feeds');
+    return getFinanceDashboardFeeds({scope,watchlist:workspace.watchlist,enabledFeedIds,signal});
+  }
+  async refreshQuotes(scope:FinanceScope) {const workspace=await this.store.load(scope);const route={...await this.experience.consent(scope),assertCurrent:()=>scope.assertCurrent()};scope.assertCurrent();const result=await refreshFinanceQuotes(workspace,route);scope.assertCurrent();return result;}
   async schedule(scope:FinanceScope,input:{monitorId:string;scheduleHuman:string}) {
     const workspace=await this.store.load(scope);const monitor=workspace.monitors.find(item=>item.id===input.monitorId);if(!monitor)throw new Error("finance_monitor_not_found");
     const updated=await scheduleFinanceMonitor({scope,monitor,assets:workspace.watchlist,scheduleHuman:input.scheduleHuman});
@@ -218,7 +244,8 @@ export class FinanceService {
         return metrics.map(metric=>({query:monitor.query,assetIds:[assetId],metrics:[metric],period:"1M"}));
       }),
         ...["social","macro_news"].map(metric=>({query:monitor.query,assetIds:[],metrics:[metric],period:"1M"}))];
-      for(const request of requests){signal.throwIfAborted();scope.assertCurrent();results.push(await queryFinanceData(request,before.watchlist));}
+      const route={...await this.experience.consent(scope),signal,assertCurrent:()=>scope.assertCurrent()};
+      for(const request of requests){signal.throwIfAborted();scope.assertCurrent();results.push(await queryFinanceData(request,before.watchlist,route));}
       const usable=results.filter(result=>["ok","partial"].includes(result.status)&&result.rows.length);
       if(!usable.length)throw new Error("finance_monitor_no_evidence");
       const briefing=await writeFinanceBriefing(monitor.query,usable,signal);scope.assertCurrent();signal.throwIfAborted();

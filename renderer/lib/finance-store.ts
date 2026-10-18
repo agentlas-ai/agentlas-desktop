@@ -2,7 +2,7 @@
 
 import { useEffect, useSyncExternalStore } from "react";
 import { ipc } from "./ipc";
-import { applyFinanceOperations, createFinanceWorkspace, validateFinanceWorkspace, type FinanceOperation, type FinanceWorkspace } from "@shared/finance";
+import { applyFinanceOperations, createFinanceWorkspace, normalizeFinanceDashboard, validateFinanceWorkspace, type FinanceOperation, type FinanceWorkspace } from "@shared/finance";
 
 const STORAGE_KEY = "agentlas.finance.workspace.v1";
 const MAX_HISTORY = 30;
@@ -77,7 +77,7 @@ export function createFinanceStore(providedPersistence?: FinancePersistence) {
     publish({ loading: !initialized, error: null });
     loadPromise = (async () => {
       try {
-        const storage = persistence(); const workspace = validateFinanceWorkspace(await storage.load());
+        const storage = persistence(); const workspace = normalizeFinanceDashboard(validateFinanceWorkspace(await storage.load()));
         if (epoch !== generation) throw new Error("finance_scope_changed");
         undoStack = []; redoStack = []; initialized = true;
         publish({ workspace, loading: false, persistence: storage.kind, error: null });

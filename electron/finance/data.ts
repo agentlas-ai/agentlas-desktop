@@ -6,6 +6,10 @@ import { queryBluesky, queryFedNews, queryIsharesHoldings, queryIsharesNav, quer
 
 import { ISHARES_FUNDS, findIsharesFund, searchIsharesCatalog } from './providers/ishares-catalog';
 import { financeProviderKey as providerKey } from './provider-credentials';
+import { searchYahooFinanceAssets, queryYahooFinanceData, refreshYahooFinanceQuotes } from './providers/yahoo-market';
+
+/** Host-selected owner preference, not accepted as a caller URL, credential or executable. */
+export interface FinanceDataRoute { sourceId: string; signal?: AbortSignal; assertCurrent?:()=>void }
 
 const AV_DOC = 'https://www.alphavantage.co/documentation/';
 const SEC_INDEX = 'https://www.sec.gov/files/company_tickers_exchange.json';
@@ -52,8 +56,14 @@ async function secAssets(): Promise<FinanceAsset[]> {
   }
   secCache = { at: Date.now(), assets }; return assets;
 }
-export async function searchFinanceAssets(query: string): Promise<FinanceSearchResult> {
+export async function searchFinanceAssets(query: string, route?: FinanceDataRoute): Promise<FinanceSearchResult> {
   const normalized = query.trim(); if (!normalized || normalized.length > 200) throw new Error('finance_query_invalid');
+  if(route?.sourceId.startsWith('toolchain:')){const {searchFinanceAdapter}=await import('./source-adapters');return searchFinanceAdapter(route.sourceId,normalized,route.signal,route.assertCurrent);}
+  if(route?.sourceId==='finance-yfinance'){
+    const result=await searchYahooFinanceAssets(normalized,{signal:route.signal}),issuer=searchIsharesCatalog(normalized);
+    return issuer.length?{...result,assets:[...issuer,...result.assets.filter(asset=>!issuer.some(fund=>fund.symbol===asset.symbol))].slice(0,30),provider:'Free market data · Yahoo chart + verified issuer catalog',warnings:[...result.warnings,'Issuer catalog entries identify supported iShares funds; their metadata is not a live quote or a complete ETF directory.']}:result;
+  }
+  if(route&&route.sourceId!=='alpha-vantage')return{assets:[],provider:'Selected data source',asOf:null,warnings:['finance_data_source_unsupported']};
   const catalog=searchIsharesCatalog(normalized),catalogWarnings=catalog.length?[
     `Issuer catalog verified 2026-10-18: ${ISHARES_FUNDS.map(fund=>fund.asset.symbol).join(', ')} only. Fund identity, listing and currency metadata are not live quotes or a complete ETF directory.`,
     ...catalog.map(asset=>{const fund=findIsharesFund(asset.id)!;return `${asset.symbol}: NAV supported; ${fund.holdingsUrl?'issuer holdings CSV supported':'no supported holdings CSV observed'}; source ${fund.pageUrl}`;}),
@@ -82,7 +92,7 @@ export async function searchFinanceAssets(query: string): Promise<FinanceSearchR
     return { assets, provider: catalog.length ? 'iShares official product catalog + SEC EDGAR issuer directory' : 'SEC EDGAR issuer directory', asOf: null, warnings: [...warnings,...catalogWarnings, 'SEC records identify US issuers; their security type and currency (XXX) are unknown. Separate issuer catalog entries are verified against issuer pages. No price data or ETF completeness is implied.'] };
   } catch (error) { return { assets: catalog, provider: catalog.length?'iShares official product catalog':'SEC EDGAR', asOf: null, warnings: [...warnings,...catalogWarnings,safeError(error)] }; }
 }
-async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAsset[]): Promise<FinanceDataResult> {
+async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAsset[], route?: FinanceDataRoute): Promise<FinanceDataResult> {
   const result: FinanceDataResult = { status: 'unconnected', sourceUrls: [], asOf: null, retrievedAt: new Date().toISOString(), columns: [], rows: [], warnings: [] };
   const metric = input.metrics[0];
   if (input.metrics.length !== 1) return { ...result, warnings: ['Choose exactly one metric per source query; results are not silently combined.'] };
@@ -101,15 +111,18 @@ async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAss
     if(metric==='nav')return {...result,warnings:['Keyless issuer NAV coverage is limited to issuer-resolved IVV, IEF, TLT, IWM and IAU catalog entries. No NAV was inferred from market price.']};
     if (metric === 'filings' || metric === 'company_facts') {
       let cik = /^sec:(\d{10}):/.exec(asset.id)?.[1];
-      if (!cik && asset.id === `av:${asset.symbol}` && asset.exchange === 'United States') {
+      if (!cik && (asset.id === `av:${asset.symbol}` && asset.exchange === 'United States' || asset.id === `yahoo:${encodeURIComponent(asset.symbol)}`)) {
         const matches = (await secAssets()).filter(item => item.symbol === asset.symbol);
         if (matches.length === 1) cik = /^sec:(\d{10}):/.exec(matches[0].id)?.[1];
+        else return {...result,warnings:['No sole exact SEC directory ticker match is available. No issuer CIK was inferred from country, currency, name or a similar ticker.']};
       }
       if (!cik) return { ...result, warnings: ['No unambiguous SEC issuer mapping is available.'] };
       if (metric === 'company_facts') return parseCompanyFacts(await fetchFinanceJson(new URL(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`)), cik);
       const url = `https://data.sec.gov/submissions/CIK${cik}.json`;
       result.sourceUrls = [url];
-      const recent = object(object(object(await fetchFinanceJson(new URL(url))).filings).recent);
+      const submission=object(await fetchFinanceJson(new URL(url)));
+      if(String(submission.cik).padStart(10,'0')!==cik)throw new Error('finance_source_identity_mismatch');
+      const recent = object(object(submission.filings).recent);
       if (!Array.isArray(recent.accessionNumber) || !Array.isArray(recent.form) || !Array.isArray(recent.filingDate)) throw new Error('finance_source_shape');
       result.columns = ['Form', 'Filed', 'Accession', 'Document'];
       result.rows = recent.accessionNumber.slice(0, 40).map((accession, i) => {
@@ -117,8 +130,9 @@ async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAss
         const link = financeSecDocumentUrl(cik!, string(accession), document);
         return [string((recent.form as unknown[])[i]), string((recent.filingDate as unknown[])[i]), string(accession), link];
       });
-      result.status = 'partial'; result.warnings = ['Latest 40 recent SEC filing records only; older filing archive pages are not exhausted. Filing date is day precision, not a market-price or availability timestamp. Current feed is not a historical point-in-time vintage.', 'SEC public API access is subject to fair-access policy. No blanket redistribution right to third-party filing exhibits is implied.']; return result;
+      result.status = 'partial'; result.warnings = [`SEC issuer CIK ${cik}; exact directory ticker mapping where the selected listing was not already SEC-resolved. This is an issuer mapping, not a corporate-action or security-lineage guarantee.`, 'Latest 40 recent SEC filing records only; older filing archive pages are not exhausted. Filing date is day precision, not a market-price or availability timestamp. Current feed is not a historical point-in-time vintage.', 'SEC public API access is subject to fair-access policy. No blanket redistribution right to third-party filing exhibits is implied.']; return result;
     }
+    if(route?.sourceId==='finance-yfinance')return{...result,warnings:['The selected free market engine does not supply this metric for this listing. No Alpha Vantage request or macro-news substitution was made.']};
     const functions: Record<string, string> = { price: 'GLOBAL_QUOTE', price_history: 'TIME_SERIES_DAILY', news: 'NEWS_SENTIMENT', etf_holdings: 'ETF_PROFILE' };
     if (!functions[metric] || input.metrics.length !== 1) return { ...result, warnings: ['Supported source metrics: price, price_history, nav, news, filings, company_facts, etf_holdings, social, social_search, macro_news, treasury_yields. Unsupported data is never synthesized.'] };
     if (!/^[A-Za-z0-9.^_-]{1,80}$/.test(asset.symbol)) throw new Error('finance_symbol_invalid');
@@ -157,8 +171,13 @@ async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAss
 }
 
 /** Every result carries an explicit provider/coverage/rights status, including failures. */
-export async function queryFinanceData(input: FinanceDataRequest, assets: FinanceAsset[]): Promise<FinanceDataResult> {
-  const result = await queryFinanceDataRaw(input, assets), metric = input.metrics[0];
+export async function queryFinanceData(input: FinanceDataRequest, assets: FinanceAsset[], route?: FinanceDataRoute): Promise<FinanceDataResult> {
+  if(route?.sourceId.startsWith('toolchain:')){const {queryFinanceAdapter}=await import('./source-adapters');return queryFinanceAdapter(route.sourceId,input,assets,route.signal,route.assertCurrent);}
+  if(route?.signal?.aborted)throw new Error('finance_yahoo_cancelled');
+  if(route?.sourceId==='finance-yfinance'&&['price','price_history'].includes(input.metrics[0]))return queryYahooFinanceData(input,assets,{signal:route.signal});
+  if(route&& !['finance-yfinance','alpha-vantage'].includes(route.sourceId))return{status:'unconnected',sourceUrls:[],asOf:null,retrievedAt:new Date().toISOString(),columns:[],rows:[],warnings:['finance_data_source_unsupported']};
+  const result = await queryFinanceDataRaw(input, assets, route), metric = input.metrics[0];
+  if(route?.signal?.aborted)throw new Error('finance_yahoo_cancelled');
   const issuer=input.assetIds.length===1?findIsharesFund(input.assetIds[0]):undefined;
   let id = '', label = '', coverage = '', rights = '';
   if (result.sourceUrls.some(url => url === 'https://www.federalreserve.gov/feeds/press_all.xml') || metric === 'macro_news') {
@@ -180,6 +199,8 @@ export async function queryFinanceData(input: FinanceDataRequest, assets: Financ
     id = 'us-treasury'; label = 'U.S. Treasury daily par curve'; coverage = 'Latest 22 observed days in one requested month; not an individual bond price or YTM.';
     rights = 'Official Treasury public data with attribution; third-party materials may have separate rights.';
     if (!result.sourceUrls.length) result.sourceUrls = ['https://home.treasury.gov/treasury-daily-interest-rate-xml-feed'];
+  } else if(route?.sourceId==='finance-yfinance'){
+    id='finance-yfinance';label='Free market data · Yahoo chart';coverage='Search, regular-market snapshots and bounded daily price history. Unsupported metrics remain unavailable for the selected source.';rights='Yahoo personal-use data terms apply; public access is not exchange real-time or redistribution entitlement.';
   } else if (['price','price_history','news','etf_holdings'].includes(metric)) {
     id = 'alpha-vantage'; label = 'Alpha Vantage'; coverage = 'Provider-resolved selected security only; daily quote, compact raw history, selected news, or reported ETF profile according to metric and entitlement.';
     rights = 'A configured key does not establish entitlement to every endpoint or external redistribution. Provider terms and account license apply.';
@@ -190,7 +211,19 @@ export async function queryFinanceData(input: FinanceDataRequest, assets: Financ
 }
 
 /** Source-derived proposals share the same renderer CAS path; no AI supplies these numbers. */
-export async function refreshFinanceQuotes(workspace: FinanceWorkspace): Promise<FinanceAIResult> {
+export async function refreshFinanceQuotes(workspace: FinanceWorkspace, route?: FinanceDataRoute): Promise<FinanceAIResult> {
+  if(route?.sourceId==='finance-yfinance')return refreshYahooFinanceQuotes(workspace,{signal:route.signal});
+  if(route?.sourceId.startsWith('toolchain:')){
+    const operations:FinanceOperation[]=[],warnings:string[]=[];
+    for(const asset of workspace.watchlist.slice(0,5)){
+      route.signal?.throwIfAborted();const result=await queryFinanceData({query:asset.symbol,assetIds:[asset.id],metrics:['price'],period:'1M'},workspace.watchlist,route);
+      const row=result.rows[0],column=(name:string)=>result.columns.indexOf(name),price=row?.[column('Price')],currency=row?.[column('Currency')],asOf=row?.[column('Observed at')];
+      if(!['ok','partial'].includes(result.status)||result.rows.length!==1||row?.[column('Symbol')]!==asset.symbol||typeof price!=='number'||price<0||currency!==asset.currency||typeof asOf!=='string'||!/^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d\d:\d\d)$/.test(asOf)||!Number.isFinite(Date.parse(asOf))||!result.sourceUrls.length){warnings.push(`${asset.symbol}: finance_adapter_quote_schema_unsupported`);continue;}
+      const sourceId=`adapter-quote:${encodeURIComponent(asset.id)}`.slice(0,200);operations.push({type:'source.upsert',source:{id:sourceId,name:'선택한 데이터 도구',kind:'provider',status:'connected',asOf,retrievedAt:result.retrievedAt,url:result.sourceUrls[0],note:result.sourceUrls.join('\n')}},{type:'quotes.import',quotes:[{assetId:asset.id,price,currency:asset.currency,asOf,sourceId,priceBasis:'price'}]});
+    }
+    return{baseRevision:workspace.revision,status:operations.length?'ok':'unavailable',operations,message:`${operations.length/2}개 시세를 조회했습니다. ${warnings.join(' ')}`.trim()};
+  }
+  if(route&&route.sourceId!=='alpha-vantage')return{baseRevision:workspace.revision,status:'unavailable',operations:[],message:'finance_data_source_unsupported'};
   const base = { baseRevision: workspace.revision };
   try {
     if (!await providerKey()) return { ...base, status: 'unavailable', message: 'Alpha Vantage connection is not configured. Connect your data provider. No quotes were imported.', operations: [] };

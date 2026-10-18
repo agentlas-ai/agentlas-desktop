@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "agentlas.finance-data-source.v1",
+  "id": "finance-yfinance",
+  "name": "Free market data",
+  "version": "1.0.0",
+  "kind": "builtin",
+  "availabilityMeaning": "The bundled local HTTPS engine is present; successful provider access is verified only by a fetch result.",
+  "capabilities": ["world_markets", "asset_search", "price", "price_history", "quote_refresh"],
+  "engines": [
+    {"id": "yfinance", "library": "yfinance", "testedVersion": "1.2.0", "script": "scripts/finance-yfinance.py", "runtime": "host-resolved Python 3.9+", "installation": "never automatic"},
+    {"id": "yahoo-chart", "runtime": "host HTTPS fetch", "worldMapFallbackWhen": "Python, yfinance or usable yfinance observations are unavailable", "selectedSecurityQueries": "Explicit finance-yfinance source uses this engine for search, snapshot, daily history and quote-refresh proposals.", "endpoints": ["https://query1.finance.yahoo.com/v8/finance/chart/{validated-symbol}?range={bounded-range}&interval=1d", "https://query1.finance.yahoo.com/v1/finance/search?q={bounded-query}&quotesCount=5&newsCount=0&enableFuzzyQuery=false"]}
+  ],
+  "permissions": {
+    "readOnly": true,
+    "networkHosts": ["query1.finance.yahoo.com", "query2.finance.yahoo.com", "fc.yahoo.com", "guce.yahoo.com", "consent.yahoo.com", "finance.yahoo.com", "home.treasury.gov"],
+    "networkEnforcement": "The owned HTTPS engine enforces exact endpoints and refuses redirects. The optional yfinance library performs its own anonymous Yahoo cookie negotiation; this declaration is not a process network sandbox.",
+    "networkPurpose": "Retrieve public index observations, selected-security search/price/history and one official US Treasury par-yield observation directly from the local host after owner consent. Only explicit public symbols/search terms are sent, no workspace document or account identity.",
+    "shell": "deny",
+    "process": "fixed owned Python script with JSON symbols from the finite registry; no caller command or code",
+    "credentials": "none",
+    "fileWrite": "No quote/history persistence or Python bytecode. Transient local yfinance cookie/timezone cache uses an OS temporary directory, removed on normal exit; abnormal termination may leave OS temporary cache files.",
+    "serverStorage": "none",
+    "serverUpload": "none"
+  },
+  "cache": {"scope": "world-map observations in account-specific local host memory; security query data is not persisted by the adapter", "ttlSeconds": 300, "maxAccounts": 8, "clearOnAccountChange": true},
+  "coverage": {
+    "regions": 25,
+    "indices": "One registered major local equity index per ISO2 region; unsupported/failed observations remain null. Not a complete worldwide securities catalog.",
+    "value": "Latest available unadjusted daily Close, not guaranteed live or exchange-entitled real-time data.",
+    "comparability": "Index methodologies differ. South Africa uses the observed Top 40 USD Net TRI series and New Zealand uses the NZX 50 Gross series. Their return basis and currency are not normalized to other countries' price indices.",
+    "changePercent": "Percent change from the two latest valid daily Close observations; null if a valid nonzero prior observation is absent.",
+    "date": "Exchange-local daily observation date, no invented intraday timestamp.",
+    "currency": "Provider metadata only; unknown or non-ISO3 units remain null, never guessed from country.",
+    "rates": "Only US Treasury BC_10YEAR nominal daily par yield in percent per annum when the official current-month feed has a valid row. Other regions have no rate observation; no ^TNX scaling or policy-rate substitution."
+  },
+  "rights": {
+    "yfinance": "Open-source library, not affiliated with or endorsed by Yahoo. Library license does not license downloaded market data.",
+    "marketData": "Yahoo public data is intended for personal use. Research/personal access is not a blanket redistribution entitlement; Yahoo and exchange terms apply.",
+    "treasury": "Official Treasury public data with attribution; no third-party rights are inferred."
+  },
+  "sources": [
+    "https://ranaroussi.github.io/yfinance/",
+    "https://github.com/ranaroussi/yfinance/blob/main/yfinance/scrapers/history.py",
+    "https://finance.yahoo.com/world-indices/",
+    "https://home.treasury.gov/treasury-daily-interest-rate-xml-feed",
+    "https://home.treasury.gov/resource-center-data-chart-center/interest-rates/TextView?type=daily_treasury_yield_curve"
+  ]
+}

@@ -3,6 +3,7 @@ import { FINANCE_WIDGET_TYPES, FINANCE_MONITOR_RUN_TIMEOUT_MS, financeId, valida
 import type { HarnessCallContext } from '../harness/capability-ports';
 import { FinanceReceiptReadSchema, FINANCE_RECEIPT_GROUPS, financeReceiptStore, type FinanceReceiptReference } from './receipts';
 import { composeDeclaredPrompt, registerDeclaredPromptModule } from '../runtime/prompt-order';
+import { FinanceComputeRequestSchema } from '../../shared/finance-compute';
 
 type Outcome = { status: 'ok'; financeReceipt?: FinanceReceiptReference; data: unknown } | { status: 'refused' | 'unavailable'; reason: string; next?: string; data?: unknown };
 type ToolContext = Pick<HarnessCallContext, 'chatId' | 'runId' | 'permission' | 'dryRun' | 'hostAccountBinding' | 'signal'>;
@@ -13,6 +14,8 @@ const inputSchemas = {
   load: z.object({}).strict(),
   'receipt.read': FinanceReceiptReadSchema,
   search: z.object({ query: z.string().min(1).max(200) }).strict(),
+  'dashboard.feeds':z.object({}).strict(),
+  calculate:z.object({request:FinanceComputeRequestSchema,period:z.enum(['1M','3M','1Y','5Y','all']).optional(),title:z.string().min(1).max(300).optional()}).strict(),
   'asset.add': z.object({ query: z.string().min(1).max(200), symbol: z.string().min(1).max(80).optional() }).strict(),
   query: z.object(queryShape).strict(),
   'query.save': z.object({ ...queryShape, mode: z.enum(['sources', 'report']), title: z.string().min(1).max(300).optional(), expectedRevision: revision.optional() }).strict(),
@@ -30,7 +33,7 @@ const inputSchemas = {
   'monitor.pause': z.object({ monitorId: id }).strict(),
 };
 type Action = keyof typeof inputSchemas;
-const writes = new Set<Action>(['asset.add', 'query.save', 'apply', 'report.create', 'archives.create', 'archives.restore', 'monitor.create', 'monitor.run', 'monitor.schedule', 'monitor.pause']);
+const writes = new Set<Action>(['calculate','asset.add', 'query.save', 'apply', 'report.create', 'archives.create', 'archives.restore', 'monitor.create', 'monitor.run', 'monitor.schedule', 'monitor.pause']);
 const editTypes = new Set<FinanceOperation['type']>(['watchlist.remove', 'dashboard.add', 'dashboard.rename', 'dashboard.update', 'dashboard.remove', 'dashboard.select', 'widget.add', 'widget.update', 'widget.remove', 'widget.move', 'report.update', 'report.remove', 'report.refresh', 'report.section.update', 'report.section.remove', 'report.section.move']);
 
 /** Models edit presentation and draft prose; data import and source provenance stay with the provider service. */
@@ -61,6 +64,8 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
     switch (action) {
       case 'load': inputSchemas.load.parse(raw); data = await finance.load(scope); break;
       case 'search': data = await finance.search(scope, inputSchemas.search.parse(raw)); break;
+      case 'dashboard.feeds':inputSchemas['dashboard.feeds'].parse(raw);data=await finance.dashboardFeeds(scope,ctx.signal);break;
+      case 'calculate':data=await finance.calculate(scope,inputSchemas.calculate.parse(raw),ctx.signal);break;
       case 'asset.add': data = await finance.addAsset(scope, inputSchemas['asset.add'].parse(raw)); break;
       case 'query': data = await finance.query(scope, inputSchemas.query.parse(raw)); break;
       case 'query.save': data = await finance.queryAndSave(scope, inputSchemas['query.save'].parse(raw)); break;
@@ -133,6 +138,12 @@ const editSchema = { oneOf: [
   opSchema('report.section.move',['reportId','sectionId','index'],{reportId:key,sectionId:key,index:rev}),
 ] };
 const descriptors: { action: Action; purpose: string; required: string[]; inputSchema: Record<string, unknown> }[] = [
+  {action:'dashboard.feeds',purpose:'Retrieve enabled current Finance news, company filings, earnings and official economic calendar. Per-source coverage and failures remain explicit.',required:[],inputSchema:schema([],{})},
+  {action:'calculate',purpose:'Fetch actual compatible price histories for saved assets, calculate historical minimum-variance or risk-parity allocation or bootstrap price scenarios, and save a chart artifact. European option inputs are an explicit assumption scenario, never observed option-market quotes. Rates, volatility and weights are fractions.',required:['request'],inputSchema:schema(['request'],{request:{oneOf:[
+    schema(['kind','method','assetIds'],{kind:{const:'allocation'},method:{enum:['min_variance','risk_parity']},assetIds:list,minWeight:{type:'number',minimum:0,maximum:1},maxWeight:{type:'number',minimum:0,maximum:1},shrinkage:{type:'number',minimum:.01,maximum:1},periodsPerYear:{type:'integer',minimum:1,maximum:366}}),
+    schema(['kind','assetIds'],{kind:{const:'forecast'},assetIds:{type:'array',items:key,minItems:1,maxItems:1},horizon:{type:'integer',minimum:1,maximum:252},paths:{type:'integer',minimum:200,maximum:2000},seed:{type:'integer',minimum:0,maximum:4294967295}}),
+    schema(['kind','optionType','symbol','currency','spot','strike','rate','volatility','years'],{kind:{const:'option'},optionType:{enum:['call','put']},symbol:text,currency:{type:'string',pattern:'^[A-Z]{3}$'},spot:{type:'number',exclusiveMinimum:0},strike:{type:'number',exclusiveMinimum:0},rate:{type:'number',minimum:-.5,maximum:1},dividendYield:{type:'number',minimum:0,maximum:1},volatility:{type:'number',exclusiveMinimum:0,maximum:5},years:{type:'number',exclusiveMinimum:0,maximum:30}}),
+  ]},period,title:text})},
   { action: 'receipt.read', purpose: 'Read a bounded field page from an immutable Finance observation in this authenticated chat. A prior snapshot is not current state or Goal verification. Continue with nextCursor index and offset; offsets count Unicode code points.', required: ['receiptId'], inputSchema: schema(['receiptId'], { receiptId: { type: 'string', format: 'uuid' }, group: { enum: [...FINANCE_RECEIPT_GROUPS] }, index: rev, offset: rev }) },
   { action: 'load', purpose: 'Read the authenticated Finance workspace, revision, dashboards, reports, sources and monitor state.', required: [], inputSchema: schema([], {}) },
   { action: 'search', purpose: 'Search actual provider asset metadata; returns coverage and connection warnings.', required: ['query'], inputSchema: schema(['query'], { query: text }) },

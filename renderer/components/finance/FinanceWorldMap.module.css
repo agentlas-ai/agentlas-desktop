@@ -1,0 +1,38 @@
+.root { --map-unknown:var(--paper-3,#e6e9eb); background:var(--paper);border:1px solid var(--paper-edge);border-radius:16px;min-width:0;overflow:hidden; }
+.header { padding:24px 28px 0;display:flex;align-items:center;justify-content:space-between;gap:16px; }
+.header h2 { font-size:18px;font-weight:600;line-height:1.4;margin:0 0 4px; }
+.header span { font-size:12px;color:var(--ink-soft); }
+.header button { height:36px;width:36px;display:grid;place-items:center;border:1px solid var(--paper-edge);background:var(--paper);color:var(--ink);border-radius:8px;flex-shrink:0;cursor:pointer; }
+.header button:disabled { opacity:.5;cursor:wait; }
+.map { position:relative;margin:8px 16px 0;min-height:240px; }
+.map svg { display:block;width:100%;height:auto;min-height:240px; }
+.country { stroke:var(--paper);stroke-width:.8;vector-effect:non-scaling-stroke;transition:fill .25s; }
+.country[role=button] { cursor:pointer; }
+.country.active,.country:focus-visible { stroke:var(--ink);stroke-width:1.4;outline:none; }
+.floating { position:absolute;z-index:2;width:230px;max-width:calc(100% - 16px);padding:16px;max-height:calc(100% - 16px);overflow:auto;background:var(--paper);border:1px solid var(--paper-edge);border-radius:12px;box-shadow:0 8px 32px #0002;pointer-events:none; }
+.floating>strong { display:block;font-size:14px;line-height:1.4;margin-bottom:12px; }
+.quote { display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 12px; }
+.quote>span { grid-column:1/-1;color:var(--ink-soft);font-size:12px; }
+.quote>b { font-size:20px;font-variant-numeric:tabular-nums;letter-spacing:-.5px;white-space:nowrap; }
+.floating em,.strip em { font-style:normal;font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap;align-self:center; }
+.up { color:#118558; }.down { color:#cf3545; }
+.rate { display:flex;flex-wrap:wrap;justify-content:space-between;gap:12px;font-size:12px;margin-top:12px; }.rate b { font-variant-numeric:tabular-nums;white-space:nowrap; }
+.floating time { display:block;color:var(--ink-soft);font-size:10px;margin-top:12px; }
+.legend { display:flex;align-items:center;justify-content:center;gap:8px;font-size:10px;color:var(--ink-soft);padding:0 16px 20px; }
+.legend i { width:140px;height:5px;border-radius:5px;background:linear-gradient(90deg,rgb(215,57,67),rgb(228,232,231),rgb(17,150,103)); }
+.strip { display:flex;overflow-x:auto;border-top:1px solid var(--paper-edge);padding:16px 12px;gap:0; }
+.strip button { min-width:125px;flex:1;border:0;border-right:1px solid var(--paper-edge);background:transparent;padding:0 16px;text-align:left;cursor:pointer;color:var(--ink);display:flex;flex-direction:column;gap:6px; }
+.strip button:last-child { border-right:0; }.strip span { color:var(--ink-soft);font-size:11px;white-space:nowrap; }.strip b { font-size:14px;font-weight:600;white-space:nowrap;font-variant-numeric:tabular-nums; }
+.message { position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:var(--paper);border:1px solid var(--paper-edge);border-radius:10px;padding:16px 20px;display:flex;gap:12px;align-items:center;font-size:13px;max-width:90%; }
+.message button { border:0;background:transparent;color:var(--ink);font-weight:600;white-space:nowrap;cursor:pointer; }
+@media(max-width:650px) { .header { padding:20px 20px 0; }.map { margin:12px 4px 0; }.floating { width:190px;padding:12px; }.quote>b { font-size:17px; }.strip button { min-width:115px;padding:0 12px; } }
+@media(prefers-reduced-motion:reduce) { .country { transition:none; } }
+
+/* The market strip follows its card width, including a narrow dashboard column. */
+.root{container-type:inline-size}
+.strip{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));overflow-x:visible;row-gap:16px}
+.strip button{min-width:0;width:100%;padding:0 12px}
+.strip span{max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.strip b{font-size:13px}
+@container(max-width:620px){.strip{grid-template-columns:repeat(3,minmax(0,1fr))}.strip button:nth-child(3n){border-right:0}}
+@container(max-width:360px){.strip{grid-template-columns:repeat(2,minmax(0,1fr))}.strip button:nth-child(3n){border-right:1px solid var(--paper-edge)}.strip button:nth-child(2n){border-right:0}}

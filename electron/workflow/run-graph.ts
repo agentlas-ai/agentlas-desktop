@@ -5963,6 +5963,7 @@ export async function runGraph(
             requestId: `graph-toolchain:${sha256Value({ automationId: automation.id,
               occurrenceId: checkpoint!.occurrenceId, nodeId: node.id, loops: commonScope(node, "").loops })}`,
             callerChatId: chat.id, parentRunId: runId, permission, signal: scopedSignal,
+            assertCurrent: assertFiniteCurrent,
             depth: opts.depth ?? 0, callChain: opts.callChain ?? [automation.id],
             dryRun, ...(opts.sink ? { sink: opts.sink } : {}),
           }));

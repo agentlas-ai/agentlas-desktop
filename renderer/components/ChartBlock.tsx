@@ -79,6 +79,8 @@ export function ChartBlock({
   fallback,
   size = "inline",
   presetSpec,
+  showMenu = true,
+  showDiagnostics = true,
 }: {
   code: string;
   blockId: string;
@@ -86,6 +88,8 @@ export function ChartBlock({
   size?: "inline" | "panel" | "thumb";
   /** 패널이 이미 관문을 통과한 스펙으로 다시 그릴 때. */
   presetSpec?: Record<string, unknown>;
+  showMenu?: boolean;
+  showDiagnostics?: boolean;
 }) {
   const chatId = useVisualChatScope();
   const ko = documentIsKorean();
@@ -197,13 +201,13 @@ export function ChartBlock({
     const quiet = checked.code === "invalid-json" || checked.code === "empty";
     return <>
       {fallback}
-      {!quiet && <p className={styles.refusal} data-chart-refusal={checked.code}>{chartRejectMessage(checked.code, ko)}</p>}
+      {showDiagnostics && !quiet && <p className={styles.refusal} data-chart-refusal={checked.code}>{chartRejectMessage(checked.code, ko)}</p>}
     </>;
   }
   if (state === "error") {
     return <>
       {fallback}
-      <p className={styles.refusal} data-chart-refusal="render-failed">{ko ? "이 차트를 그리지 못했어요. 원문을 그대로 보여 드려요." : "This chart could not be drawn; showing the source."}</p>
+      {showDiagnostics && <p className={styles.refusal} data-chart-refusal="render-failed">{ko ? "이 차트를 그리지 못했어요. 원문을 그대로 보여 드려요." : "This chart could not be drawn; showing the source."}</p>}
     </>;
   }
   const save = async (type: "png" | "svg") => {
@@ -218,7 +222,7 @@ export function ChartBlock({
   };
   return (
     <figure className={styles.visual} data-size={size} data-visual-kind="chart" data-render-status={state} aria-label={title}>
-      {state === "ready" && size !== "thumb" && <VisualMenu ko={ko} label={ko ? "차트 메뉴" : "Chart menu"} items={[
+      {showMenu && state === "ready" && size !== "thumb" && <VisualMenu ko={ko} label={ko ? "차트 메뉴" : "Chart menu"} items={[
         { key: "copy", label: ko ? "클립보드에 복사" : "Copy to clipboard", run: async () => {
           const view = viewRef.current;
           if (!view) return false;

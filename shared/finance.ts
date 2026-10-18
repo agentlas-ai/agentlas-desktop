@@ -37,7 +37,7 @@ const WidgetSchema = z.object({
   priceBasis: z.enum(["price", "total_return"]), cashFlowMethod: z.enum(["none", "twr", "mwr"]),
 }).strict();
 export type FinanceWidget = z.infer<typeof WidgetSchema>;
-const DashboardSchema = z.object({ id, name: z.string().min(1).max(300), period: z.enum(["1M", "3M", "1Y", "5Y", "all"]).default("1Y"), widgets: z.array(WidgetSchema).max(80) }).strict();
+const DashboardSchema = z.object({ id, name: z.string().min(1).max(300), period: z.enum(["1M", "3M", "1Y", "5Y", "all"]).default("1Y"), widgets: z.array(WidgetSchema).max(8000) }).strict();
 export type FinanceDashboard = z.infer<typeof DashboardSchema>;
 const ProjectionSchema = z.object({
   columns: z.array(z.string().max(300)).max(100),
@@ -46,9 +46,11 @@ const ProjectionSchema = z.object({
   asOf: observationDate.nullable(), sourceIds: z.array(id).max(10000),
 }).strict();
 export type FinanceWidgetProjection = z.infer<typeof ProjectionSchema>;
-const SectionSchema = z.object({ id, title: z.string().min(1).max(300), kind: z.enum(["summary", "widget", "narrative", "sources"]), narrative: text, widget: WidgetSchema.nullable(), projection: ProjectionSchema.nullable() }).strict();
+export const FinanceReportLanguageSchema = z.string().min(2).max(80).regex(/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/).refine(value=>{try{return Intl.getCanonicalLocales(value).length===1;}catch{return false;}}, "Invalid report language");
+const ReportPresentationSchema = z.enum(["narrative", "chart", "comparison", "supporting"]);
+const SectionSchema = z.object({ id, title: z.string().min(1).max(300), kind: z.enum(["summary", "widget", "narrative", "sources"]), presentation: ReportPresentationSchema.optional(), narrative: text, widget: WidgetSchema.nullable(), projection: ProjectionSchema.nullable() }).strict();
 export type FinanceReportSection = z.infer<typeof SectionSchema>;
-const ReportSchema = z.object({ id, title: z.string().min(1).max(300), createdAt: date, sourceRevision: z.number().int().nonnegative(), reviewPending: z.boolean(), sections: z.array(SectionSchema).max(100), dashboardSnapshot: DashboardSchema.nullable().default(null), parentReportId: id.nullable().default(null) }).strict();
+const ReportSchema = z.object({ id, language: FinanceReportLanguageSchema.optional(), title: z.string().min(1).max(300), createdAt: date, sourceRevision: z.number().int().nonnegative(), reviewPending: z.boolean(), sections: z.array(SectionSchema).max(100), dashboardSnapshot: DashboardSchema.nullable().default(null), parentReportId: id.nullable().default(null) }).strict();
 export type FinanceReport = z.infer<typeof ReportSchema>;
 const MonitorSchema = z.object({
   id, name: z.string().min(1).max(300), query: text, assetIds: z.array(id).max(10000),
@@ -69,7 +71,7 @@ const WorkspaceSchema = z.object({
 export type FinanceWorkspace = z.infer<typeof WorkspaceSchema>;
 
 export interface FinanceSearchResult { assets: FinanceAsset[]; provider: string; asOf: string | null; warnings: string[] }
-export interface FinanceAIResult { message: string; operations?: FinanceOperation[]; baseRevision: number; status?: "ok" | "unavailable" | "invalid_output" | "cancelled" | "conflict"; requestId?: string; runtime?: { kind: string; model?: string; execution: string } }
+export interface FinanceAIResult { message: string; operations?: FinanceOperation[]; baseRevision: number; status?: "ok" | "unavailable" | "invalid_output" | "cancelled" | "conflict"; requestId?: string; runtime?: { kind: string; model?: string; execution: string }; artifacts?:{reportId:string;title:string;kind:'chart'|'report'|'newsletter'}[];toolRuns?:{tool:string;status:'ok'|'failed';startedAt:string;errorCode?:string}[] }
 export interface FinanceExportResult { ok: boolean; path?: string; error?: string; sha256?: string; bytes?: number; savedAt?: string; cancelled?: boolean }
 export interface FinanceDataRequest { query: string; assetIds: string[]; metrics: string[]; period: string }
 export interface FinanceDataConnectionRequest { action: "status" | "test" }
@@ -118,6 +120,9 @@ export interface FinanceMonitorRunsResult {
   indexStatus?: "ready" | "building"; indexedCount?: number;
 }
 export interface FinanceAPI {
+  experience?(input: import('./finance-experience').FinanceExperienceRequest): Promise<import('./finance-experience').FinanceExperienceState>;
+  worldMarkets?(): Promise<import('./finance-experience').FinanceWorldMarketsResult>;
+  dashboardFeeds?(): Promise<import('./finance-feeds').FinanceDashboardFeedsResult>;
   load(): Promise<FinanceWorkspace>;
   save(input: { workspace: FinanceWorkspace; expectedRevision: number }): Promise<FinanceWorkspace>;
   search?(input: { query: string }): Promise<FinanceSearchResult>;
@@ -142,7 +147,7 @@ export function financeId(prefix = "finance"): string {
   return `${prefix}-${uuid ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`}`;
 }
 export function createFinanceWorkspace(): FinanceWorkspace {
-  return { schemaVersion: 1, ownerScope: null, revision: 0, activeDashboardId: null, watchlist: [], holdings: [], quotes: [], dashboards: [], reports: [], sources: [], monitors: [] };
+  return { schemaVersion: 1, ownerScope: null, revision: 0, activeDashboardId: "finance-dashboard", watchlist: [], holdings: [], quotes: [], dashboards: [DashboardSchema.parse({id:"finance-dashboard",name:"Agentlas Finance",widgets:[]})], reports: [], sources: [], monitors: [] };
 }
 const widgetTitles: Record<FinanceWidgetType, string> = { watchlist: "Watchlist", holdings: "Holdings", comparison: "Compare", chart: "Chart", allocation: "Allocation", notes: "Notes", sources: "Sources", events: "Events" };
 export function createFinanceWidget(type: FinanceWidgetType, title = widgetTitles[type]): FinanceWidget {
@@ -214,6 +219,29 @@ export function validateFinanceWorkspace(value: unknown): FinanceWorkspace {
   return ws;
 }
 
+/** One live canvas; historical report and archive snapshots stay literal. */
+export function normalizeFinanceDashboard(value: FinanceWorkspace, preferredId?: string | null): FinanceWorkspace {
+  const ws = validateFinanceWorkspace(value);
+  if (!ws.dashboards.length) {
+    const dashboard = createFinanceWorkspace().dashboards[0];
+    return { ...ws, dashboards: [dashboard], activeDashboardId: dashboard.id };
+  }
+  const preferred=ws.dashboards.find(d=>d.id===(preferredId??ws.activeDashboardId))??ws.dashboards[0];
+  const primary=preferred.widgets.length?preferred:ws.dashboards.find(d=>d.widgets.length)??preferred;
+  if(ws.dashboards.length===1)return {...ws,activeDashboardId:primary.id};
+  const widgets:FinanceWidget[]=[];const used=new Map<string,FinanceWidget>();
+  for(const dashboard of [primary,...ws.dashboards.filter(d=>d.id!==primary.id)]) for(const original of dashboard.widgets) {
+    const widget={...original,assetIds:[...original.assetIds]};
+    if(dashboard.id!==primary.id&&widget.type==="chart"&&widget.periodMode!=="pinned"&&dashboard.period!==primary.period){widget.period=dashboard.period;widget.periodMode="pinned";}
+    const collision=used.get(widget.id);
+    if(collision&&JSON.stringify(collision)===JSON.stringify(widget))continue;
+    if(collision){const base=widget.id.slice(0,160);let suffix=widgets.length;do{widget.id=`${base}-merged-${suffix++}`;}while(used.has(widget.id));}
+    used.set(widget.id,widget);widgets.push(widget);
+  }
+  if(widgets.length>8000)throw new Error("finance_widget_capacity");
+  return {...ws,dashboards:[{...primary,widgets}],activeDashboardId:primary.id};
+}
+
 export type FinanceOperation =
   | { type: "watchlist.add"; asset: FinanceAsset }
   | { type: "watchlist.remove"; assetId: string }
@@ -228,10 +256,10 @@ export type FinanceOperation =
   | { type: "widget.remove"; dashboardId: string; widgetId: string }
   | { type: "widget.move"; dashboardId: string; widgetId: string; index: number }
   | { type: "report.add"; report: FinanceReport }
-  | { type: "report.update"; reportId: string; patch: { title?: string; reviewPending?: boolean } }
+  | { type: "report.update"; reportId: string; patch: { title?: string; reviewPending?: boolean; language?: string } }
   | { type: "report.remove"; reportId: string }
   | { type: "report.refresh"; reportId: string }
-  | { type: "report.section.update"; reportId: string; sectionId: string; patch: { title?: string; narrative?: string } }
+  | { type: "report.section.update"; reportId: string; sectionId: string; patch: { title?: string; narrative?: string; presentation?: FinanceReportSection["presentation"] } }
   | { type: "report.section.remove"; reportId: string; sectionId: string }
   | { type: "report.section.move"; reportId: string; sectionId: string; index: number }
   | { type: "source.upsert"; source: FinanceSource }
@@ -253,10 +281,10 @@ const operationSchemas: Record<FinanceOperation["type"], z.ZodTypeAny> = {
   "widget.remove": z.object({ type: z.literal("widget.remove"), dashboardId: id, widgetId: id }).strict(),
   "widget.move": z.object({ type: z.literal("widget.move"), dashboardId: id, widgetId: id, index: z.number().int().nonnegative() }).strict(),
   "report.add": z.object({ type: z.literal("report.add"), report: ReportSchema }).strict(),
-  "report.update": z.object({ type: z.literal("report.update"), reportId: id, patch: z.object({ title: z.string().min(1).max(300).optional(), reviewPending: z.boolean().optional() }).strict() }).strict(),
+  "report.update": z.object({ type: z.literal("report.update"), reportId: id, patch: z.object({ title: z.string().min(1).max(300).optional(), reviewPending: z.boolean().optional(), language: FinanceReportLanguageSchema.optional() }).strict() }).strict(),
   "report.remove": z.object({ type: z.literal("report.remove"), reportId: id }).strict(),
   "report.refresh": z.object({ type: z.literal("report.refresh"), reportId: id }).strict(),
-  "report.section.update": z.object({ type: z.literal("report.section.update"), reportId: id, sectionId: id, patch: z.object({ title: z.string().min(1).max(300).optional(), narrative: text.optional() }).strict() }).strict(),
+  "report.section.update": z.object({ type: z.literal("report.section.update"), reportId: id, sectionId: id, patch: z.object({ title: z.string().min(1).max(300).optional(), narrative: text.optional(), presentation: ReportPresentationSchema.optional() }).strict() }).strict(),
   "report.section.remove": z.object({ type: z.literal("report.section.remove"), reportId: id, sectionId: id }).strict(),
   "report.section.move": z.object({ type: z.literal("report.section.move"), reportId: id, sectionId: id, index: z.number().int().nonnegative() }).strict(),
   "source.upsert": z.object({ type: z.literal("source.upsert"), source: SourceSchema }).strict(),
@@ -353,7 +381,7 @@ export function applyFinanceOperations(workspace: FinanceWorkspace, operations: 
     }
   }
   next.revision = workspace.revision + 1;
-  return validateFinanceWorkspace(next);
+  return normalizeFinanceDashboard(validateFinanceWorkspace(next), workspace.activeDashboardId);
 }
 export function applyFinanceOperation(workspace: FinanceWorkspace, operation: FinanceOperation): FinanceWorkspace { return applyFinanceOperations(workspace, [operation]); }
 

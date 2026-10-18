@@ -5,11 +5,22 @@ import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { financeStore } from "@/lib/finance-store";
 import { useT } from "@/lib/i18n";
-import { FinanceWorkspace } from "./FinanceWorkspace";
+import { FinanceWorkspace, type FinanceAIContext } from "./FinanceWorkspace";
 import type { FinanceAPI } from "@shared/finance";
+import type { FinanceExperienceRequest } from "@shared/finance-experience";
 
 function assertNotCancelled(signal: AbortSignal): void {
   if (signal.aborted) throw new DOMException("Cancelled", "AbortError");
+}
+export function financeScreenContext(context:FinanceAIContext):string {
+  const selection={dashboardId:context.dashboardId,selectedWidgetId:context.selectedWidgetId,
+    reportId:context.reportId??null,selectedSectionId:context.selectedSectionId??null,
+    history:context.history?.slice(-6).map(item=>({role:item.role,content:item.content.slice(0,180)}))??[]};
+  // Bound the serialized packet, including JSON escapes, to the host's exact IPC limit.
+  while(JSON.stringify(selection).length>2000&&selection.history.length)selection.history.shift();
+  const serialized=JSON.stringify(selection);
+  if(serialized.length>2000)throw new Error('finance_screen_context_too_large');
+  return serialized;
 }
 
 /** Native account custody is re-established before any saved financial state is displayed. */
@@ -52,9 +63,24 @@ export function FinanceConnectedWorkspace() {
     if (!api?.dataConnection) throw new Error('finance_connection_unavailable');
     return api.dataConnection(request);
   }, [api]);
+  const experience = useCallback(async (request: FinanceExperienceRequest) => {
+    if (!api?.experience) throw new Error('finance_experience_unavailable');
+    return api.experience(request);
+  }, [api]);
+  const worldMarkets = useCallback(async () => {
+    if (!api?.worldMarkets) throw new Error('finance_world_source_unavailable');
+    return api.worldMarkets();
+  }, [api]);
+  const dashboardFeeds = useCallback(async () => {
+    if (!api?.dashboardFeeds) throw new Error('finance_dashboard_feeds_unavailable');
+    return api.dashboardFeeds();
+  }, [api]);
   if (!ready) return <main role="status" style={{ padding: 32 }}>{locale === "ko" ? "Agentlas Finance를 여는 중…" : "Opening Agentlas Finance…"}</main>;
 
   return <FinanceWorkspace
+    onExperience={api?.experience ? experience : undefined}
+    onWorldMarkets={api?.worldMarkets ? worldMarkets : undefined}
+    onDashboardFeeds={api?.dashboardFeeds ? dashboardFeeds : undefined}
     onInspectData={api?.dataConnection ? inspectData : undefined}
     onRunMonitor={api?.runMonitor ? async monitor => {
       await financeStore.flush();
@@ -93,8 +119,7 @@ export function FinanceConnectedWorkspace() {
       context.signal.addEventListener("abort", cancel, { once: true });
       try {
         const response = await api.ask!({ request, baseRevision: context.revision, requestId: context.requestId,
-          screenContext: JSON.stringify({ dashboardId: context.dashboardId, selectedWidgetId: context.selectedWidgetId,
-            reportId: context.reportId ?? null, selectedSectionId: context.selectedSectionId ?? null }) });
+          screenContext: financeScreenContext(context) });
         assertNotCancelled(context.signal);
         return response;
       } finally { context.signal.removeEventListener("abort", cancel); }

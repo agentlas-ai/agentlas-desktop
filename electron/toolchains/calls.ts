@@ -17,6 +17,8 @@ export interface ToolchainCallOptions {
   callerChatId?: string | null;
   parentRunId?: string | null;
   signal?: AbortSignal;
+  /** Host-only owner/session fence; never accepted from an IPC/MCP DTO. */
+  assertCurrent?: () => void;
   depth?: number;
   callChain?: string[];
   dryRun?: boolean;
@@ -49,6 +51,7 @@ export function runToolchainValidation(input: ToolchainCallInput, options: Toolc
 }
 async function invoke(input: ToolchainCallInput, options: ToolchainCallOptions, validation: boolean): Promise<ToolchainCallReceipt> {
   if (!options.requestId?.trim() || options.requestId.length > 500 || !["read", "write"].includes(options.permission)) throw new Error("toolchain_request_invalid");
+  options.assertCurrent?.();
   const publication = validation ? currentAssetPublicationValidation({ id: input.toolchainId, version: input.version,
     args: input.args, callerChatId: options.callerChatId ?? null, permission: options.permission, requestId: options.requestId }) : null;
   // A resumed parent changes physical runId; requestId carries its stable occurrence.
@@ -59,6 +62,7 @@ async function invoke(input: ToolchainCallInput, options: ToolchainCallOptions, 
   // Claim the occurrence before any asynchronous work. A persisted running row after a
   // restart is returned as unresolved; it is never permission to replay external effects.
   const claim = getDb().transaction(() => {
+    options.assertCurrent?.();
     publication?.check();
     const prior = getDb().prepare("SELECT value FROM meta WHERE key=?").get(key) as { value: string } | undefined;
     if (prior) {
@@ -96,15 +100,19 @@ async function invoke(input: ToolchainCallInput, options: ToolchainCallOptions, 
     let unconfirmedEffect = false;
     const effectful = requiredExecutionPermission(release.implementation.snapshot.graph) === "write";
     try {
+      options.assertCurrent?.();
       if (options.signal?.aborted) throw new Error("toolchain_call_aborted");
       publication?.check();
       await options.beforeExecution?.(Object.freeze(structuredClone(receipt)));
+      options.assertCurrent?.();
       options.signal?.throwIfAborted();
       const { runGraph } = await import("../workflow/run-graph");
+      options.assertCurrent?.();
       publication?.check();
       const occurrenceId = `toolchain:${receipt.id}`;
       const graphDigest = graphExecutionDigest(release.implementation.snapshot, release.implementation.snapshot.graph!);
       const assertOccurrenceCurrent = () => {
+        options.assertCurrent?.();
         options.signal?.throwIfAborted();
         publication?.check();
         const row = getDb().prepare("SELECT value FROM meta WHERE key=?").get(key) as { value: string } | undefined;

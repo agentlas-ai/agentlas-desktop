@@ -138,6 +138,8 @@ electronFuses:
 # This file is a standalone (non-`extends`) duplicate, so without this block the
 # signed/notarized mac release would ship WITHOUT the embedded engine.
 extraResources:
+  - from: scripts/finance-yfinance.py
+    to: finance/finance-yfinance.py
   # 앱이 들고 다니는 Node+npm — 모든 플랫폼 공통.
   #
   # ★ 왜 여기(최상위)인가 (2026-08-24 실측):

@@ -122,6 +122,9 @@ contextBridge.exposeInMainWorld("agentlasSystemPermissions", {
 
 const api: AgentlasIpc = {
   finance: {
+    experience: input => ipcRenderer.invoke("finance:experience", input),
+    worldMarkets: () => ipcRenderer.invoke("finance:worldMarkets"),
+    dashboardFeeds: () => ipcRenderer.invoke("finance:dashboardFeeds"),
     load: () => ipcRenderer.invoke("finance:load"),
     save: input => ipcRenderer.invoke("finance:save", input),
     search: input => ipcRenderer.invoke("finance:search", input),

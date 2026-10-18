@@ -16,6 +16,9 @@ import { getFinanceService } from './service';
 import { onFinanceWorkspaceChange } from './events';
 import { FinanceArchiveRequestSchema } from './archive';
 import { financeDataConnection } from './connections';
+import { financeExperience, requireFinanceConsent } from './experience';
+import { clearFinanceWorldMarketsCache, getFinanceWorldMarkets } from './world-markets';
+import { clearFinanceDashboardFeedCache } from './dashboard-feeds';
 import { pauseFinanceMonitor, readFinanceMonitor, rollbackFinanceMonitor, scheduleFinanceMonitor } from './monitor';
 
 const boundedId = z.string().min(1).max(200);
@@ -31,31 +34,45 @@ export function registerFinanceIpc(input: { ipc: Pick<IpcMain, 'handle'>; assert
   const service = getFinanceService();
   const store = service.store;
   const running = new Map<string, { controller: AbortController; senderId: number }>();
-  onAuthSessionOwnershipChanged(() => { for (const item of running.values()) item.controller.abort(); running.clear(); });
+  onAuthSessionOwnershipChanged(() => { for (const item of running.values()) item.controller.abort(); running.clear(); clearFinanceWorldMarketsCache(); clearFinanceDashboardFeedCache(); });
   const load = (scope: FinanceScope) => service.load(scope);
   const handle = (name: string, fn: (event: IpcMainInvokeEvent, raw: unknown, scope: FinanceScope) => unknown) => input.ipc.handle(`finance:${name}`, (event, raw) => { input.assertTrustedSender(event); return fn(event, raw, captureScope()); });
   handle('load', (_event, _raw, scope) => load(scope));
-  handle('dataConnection', (_event, raw, scope) => financeDataConnection(z.object({ action: z.enum(['status', 'test']) }).strict().parse(raw), { assertCurrent: scope.assertCurrent }));
+  handle('experience', (_event, raw, scope) => financeExperience(scope, raw as import('../../shared/finance-experience').FinanceExperienceRequest));
+  handle('worldMarkets', async (_event, _raw, scope) => {
+    const {sourceId} = await requireFinanceConsent(scope); scope.assertCurrent();
+    return getFinanceWorldMarkets({scope,sourceId});
+  });
+  handle('dashboardFeeds', (_event, _raw, scope) => service.dashboardFeeds(scope));
+  handle('dataConnection', async (_event, raw, scope) => {
+    const request=z.object({ action: z.enum(['status', 'test']) }).strict().parse(raw);
+    if(request.action==='test')await requireFinanceConsent(scope);
+    return financeDataConnection(request, { assertCurrent: scope.assertCurrent });
+  });
   handle('save', async(_event, raw, scope) => {
     const arg = z.object({ workspace: z.unknown(), expectedRevision: z.number().int().nonnegative() }).strict().parse(raw);
     return service.save(scope,{ workspace: validateFinanceWorkspace(arg.workspace), expectedRevision: arg.expectedRevision });
   });
   handle('search', async(_event, raw, scope) => {
+    const route={...await requireFinanceConsent(scope),assertCurrent:()=>scope.assertCurrent()};
     const arg = z.object({ query: z.string().min(1).max(200) }).strict().parse(raw);
-    const result = await searchFinanceAssets(arg.query); scope.assertCurrent(); return result;
+    const result = await searchFinanceAssets(arg.query,route); scope.assertCurrent(); return result;
   });
   handle('queryData', async(_event, raw, scope) => {
+    const route={...await requireFinanceConsent(scope),assertCurrent:()=>scope.assertCurrent()};
     const arg = z.object({ query: z.string().max(2000), assetIds: z.array(boundedId).max(10), metrics: z.array(z.string().max(80)).max(10), period: z.string().max(80) }).strict().parse(raw);
     const workspace = await store.load(scope); scope.assertCurrent();
-    const result = await queryFinanceData(arg, workspace.watchlist); scope.assertCurrent(); return result;
+    const result = await queryFinanceData(arg, workspace.watchlist,route); scope.assertCurrent(); return result;
   });
   handle('refreshQuotes', async(_event, _raw, scope) => {
+    const route={...await requireFinanceConsent(scope),assertCurrent:()=>scope.assertCurrent()};
     const workspace = await store.load(scope); scope.assertCurrent();
-    const result = await refreshFinanceQuotes(workspace); scope.assertCurrent();
+    const result = await refreshFinanceQuotes(workspace,route); scope.assertCurrent();
     if ((await store.load(scope)).revision !== workspace.revision) return { baseRevision: workspace.revision, status: 'conflict', message: 'The workspace changed while quotes were loading. Refresh again.', operations: [] };
     return result;
   });
   handle('ask', async(event, raw, scope) => {
+    await requireFinanceConsent(scope);
     const arg = z.object({ request: z.string().min(1).max(20000), screenContext: z.string().max(2000), baseRevision: z.number().int().nonnegative(), requestId: boundedId.optional() }).strict().parse(raw);
     const requestId = arg.requestId ?? randomUUID(); const key = `${event.sender.id}:${requestId}`;
     if (running.has(key) || [...running.values()].filter(item => item.senderId === event.sender.id).length >= 2) throw new Error('finance_request_busy');
@@ -63,7 +80,7 @@ export function registerFinanceIpc(input: { ipc: Pick<IpcMain, 'handle'>; assert
     const onDestroyed = () => controller.abort(); event.sender.once('destroyed', onDestroyed);
     try {
       const workspace = await store.load(scope); scope.assertCurrent();
-      const result = await interpretFinance({ ...arg, requestId }, workspace, controller.signal);
+      const result = await service.ask(scope, { ...arg, requestId }, controller.signal);
       scope.assertCurrent();
       if (controller.signal.aborted) return { baseRevision: arg.baseRevision, requestId, status: 'cancelled', message: 'Request cancelled.' };
       if ((await store.load(scope)).revision !== arg.baseRevision) return { baseRevision: arg.baseRevision, requestId, status: 'conflict', message: 'The workspace changed while the model was responding. Nothing was applied.' };
@@ -76,6 +93,7 @@ export function registerFinanceIpc(input: { ipc: Pick<IpcMain, 'handle'>; assert
     const item = running.get(`${event.sender.id}:${arg.requestId}`); item?.controller.abort(); return { cancelled: Boolean(item) };
   });
   handle('startResearch', async(_event, raw, scope) => {
+    await requireFinanceConsent(scope);
     const arg = z.object({ assetId: boundedId, question: z.string().max(20000).optional() }).strict().parse(raw);
     const workspace = await store.load(scope); scope.assertCurrent(); const asset = workspace.watchlist.find(item => item.id === arg.assetId);
     if (!asset) throw new Error('finance_asset_not_found');
@@ -86,7 +104,7 @@ export function registerFinanceIpc(input: { ipc: Pick<IpcMain, 'handle'>; assert
     if(action==='scheduleMonitor')return service.schedule(scope,z.object({monitorId:boundedId,scheduleHuman:z.enum(['daily-09:00','weekday-09:00','hourly','every-5m'])}).strict().parse(raw));
     return service.pause(scope,z.object({monitorId:boundedId}).strict().parse(raw));
   });
-  handle('queryAndSave',async(_event,raw,scope)=>service.queryAndSave(scope,z.object({query:z.string().max(2000),assetIds:z.array(boundedId).max(10),metrics:z.array(z.string().max(80)).max(10),period:z.string().max(80),expectedRevision:z.number().int().nonnegative().optional(),mode:z.enum(['sources','report']),title:z.string().min(1).max(300).optional()}).strict().parse(raw)));
+  handle('queryAndSave',async(_event,raw,scope)=>{await requireFinanceConsent(scope);return service.queryAndSave(scope,z.object({query:z.string().max(2000),assetIds:z.array(boundedId).max(10),metrics:z.array(z.string().max(80)).max(10),period:z.string().max(80),expectedRevision:z.number().int().nonnegative().optional(),mode:z.enum(['sources','report']),title:z.string().min(1).max(300).optional()}).strict().parse(raw));});
   handle('runMonitor',async(_event,raw,scope)=>service.runMonitor(scope,z.object({monitorId:boundedId}).strict().parse(raw)));
   handle('monitorRuns',async(_event,raw,scope)=>service.monitorRuns(scope,z.object({monitorId:boundedId,cursor:z.string().min(1).max(2000).optional(),limit:z.number().int().min(1).max(50).optional()}).strict().parse(raw)));
   handle('archives',async(_event,raw,scope)=>service.archives(scope,FinanceArchiveRequestSchema.parse(raw)));
