@@ -26,6 +26,7 @@ import { spawn } from "node:child_process";
 import { inflateSync } from "node:zlib";
 import { classifyLaunchEscape, launchEscapeDenialReason } from "./write-sandbox-launch-guard";
 import { PERMISSION_ESCALATION_MARKER } from "./permission-escalation";
+import type { RuntimeToolKind } from "./runtime-tool-kind";
 
 export type ToolPermission = "read" | "write" | "full";
 
@@ -815,6 +816,18 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
 ];
 
 const BY_NAME = new Map(BUILTIN_TOOLS.map((tool) => [tool.name, tool]));
+
+/**
+ * What each built-in tool does, in the RuntimeToolKind words other runtimes report (ACP tool kinds), so host evidence reads a
+ * built-in call by its kind instead of matching one runtime's tool names. Dev 2026-10-18 run15: an API-path firm worker
+ * wrote ledger.py and test_ledger.py with write_file/edit_file and the verifier saw host_project_artifacts: none (the
+ * collector's name rule knew Write/Edit/apply_patch only), so the room ended "아직 완료되지 않았습니다".
+ */
+export const BUILTIN_TOOL_KINDS: Readonly<Record<string, RuntimeToolKind>> = Object.freeze({
+  history_work_draft: "other", history_work_apply: "edit",
+  list_dir: "read", read_file: "read", read_image: "read", write_file: "edit", edit_file: "edit", ask_user: "other",
+  browser_download: "fetch", generate_image: "edit", bash: "execute",
+});
 
 /** `bash` at write permission, inside the working-folder sandbox (BuiltinToolContext.confineShell). */
 function confinedShellAllowed(name: string, permission: ToolPermission, confined: boolean): boolean {

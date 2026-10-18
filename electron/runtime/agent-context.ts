@@ -851,12 +851,12 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
     };
     const wrapped:RunnerEvents={...events,onPartial(text) {
       partialTail = `${partialTail}${text}`.slice(-4096); events.onPartial?.(text);
-    },onTool(name,args,result,id,isError,artifactPaths,imageDataUrl,origin){
+    },onTool(name,args,result,id,isError,artifactPaths,imageDataUrl,origin,toolKind){
       // Actual adapter emissions, retained as context data with canonical host
       // references when supplied. Tool effect authority remains in its ledger.
       appendAgentContextEvent(capability,{eventId:`turn:${turnId}:tool:${toolIndex++}`,kind:"tool",producerBinding:delivery.bindingKey,
         payload:{name,createdAt:new Date().toISOString(),...(args!==undefined?{arguments:args}:{}),...(result!==undefined?{result}:{}),...(id?{callId:id}:{}),...(isError!==undefined?{isError}:{}),...(artifactPaths?{artifactPaths:[...artifactPaths]}:{}),...(imageDataUrl?{imageDataUrl}:{}),...(origin?{origin}:{})}});
-      events.onTool?.(name,args,result,id,isError,artifactPaths,imageDataUrl,origin);
+      events.onTool?.(name,args,result,id,isError,artifactPaths,imageDataUrl,origin,toolKind);
       if (result !== undefined) {
         toolBoundaryTokens += estimateTransportTokens(typeof result === "string" ? result : JSON.stringify(result));
         // The size trigger needs a known window; an unknown one never checkpoints on a guessed number (G08).

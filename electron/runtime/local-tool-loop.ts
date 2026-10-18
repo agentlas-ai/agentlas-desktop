@@ -214,13 +214,13 @@ export function createToolLoopProgress(runtimeKind: string, req: RunnerRequest, 
 } {
   const guard = createNoProgressGuard({ observationMode: "completed" });
   return {
-    events: { ...target, onTool: (name, args, result, id, isError, artifactPaths, imageDataUrl, origin) => {
+    events: { ...target, onTool: (name, args, result, id, isError, artifactPaths, imageDataUrl, origin, toolKind) => {
       const observedResult = imageDataUrl || artifactPaths?.length
         ? JSON.stringify({ result, artifactPaths,
             imageDigest: imageDataUrl ? createHash("sha256").update(imageDataUrl).digest("hex") : undefined })
         : result;
       noteNoProgressEvent(guard, { kind: "tool-use", tool: { name, args, result: observedResult, id, isError } });
-      (currentHistoryRuntimeFence()?.assertCurrent(), target.onTool?.(name, args, result, id, isError, artifactPaths, imageDataUrl, origin));
+      (currentHistoryRuntimeFence()?.assertCurrent(), target.onTool?.(name, args, result, id, isError, artifactPaths, imageDataUrl, origin, toolKind));
     } },
     assertProgress(): void {
       if (guard.tripped) throw new RuntimeNoProgressError(runtimeKind, req.locale);
@@ -958,7 +958,7 @@ async function dispatchMainToolRawUnchecked(
   }
   withDurableMainToolStart(() => (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, undefined, eventCallId, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName))));
   if (resolved.kind === "builtin") {
-    const [{ runBuiltinTool }, { askUser }, { multimodalImageSlot }, { generateImage }] = await Promise.all([
+    const [{ runBuiltinTool, BUILTIN_TOOL_KINDS }, { askUser }, { multimodalImageSlot }, { generateImage }] = await Promise.all([
       import("../../shared/builtin-tools"),
       import("../confirm/ask-user"),
       import("../multimodal/slot"),
@@ -1031,6 +1031,7 @@ async function dispatchMainToolRawUnchecked(
       outcome.artifactPaths,
       outcome.imageDataUrl,
       agentlasDispatchedOrigin(call.toolName),
+      BUILTIN_TOOL_KINDS[resolved.builtinName],
     ));
     if (outcome.ok && outcome.downloadId) {
       try { await downloadProof?.complete(outcome.downloadId); } catch { /* Missing durable proof is never completion evidence. */ }
