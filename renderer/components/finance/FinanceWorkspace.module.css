@@ -137,3 +137,5 @@
 @container(max-width:650px) { .root { padding:16px; }.header { flex-direction:row;align-items:center; }.title { font-size:20px; }.tabs { gap:16px; }.composer { top:8px; }.monitorOverview { flex-direction:column;gap:4px; }.report { padding:16px; } }
 @media(pointer:coarse) { .iconButton,.button,.select { min-height:44px; }.iconButton { width:44px;flex-basis:44px; }.composerForm>button { min-height:44px;width:44px; } }
 .dataStatus { display:inline-flex;align-items:center;color:var(--attention);min-height:24px; }
+/* Own vertical scrolling inside AppShell's clipped flex pane. */
+.root { flex:1;min-height:0;overflow-y:auto;scroll-padding-top:80px; }
