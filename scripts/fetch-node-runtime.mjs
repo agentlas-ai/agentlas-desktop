@@ -47,6 +47,19 @@ function fail(message) {
   process.exit(1);
 }
 
+function overlayTarCommand() {
+  if (process.platform !== "win32") return "tar";
+  const root = process.env.SystemRoot || process.env.SYSTEMROOT;
+  if (typeof root !== "string" || !path.win32.isAbsolute(root) || !/^[A-Za-z]:[\\/]/.test(root)) {
+    fail("Windows SystemRoot must be an absolute drive path for npm overlays");
+  }
+  const tar = path.win32.join(root, "System32", "tar.exe");
+  if (!lstatSync(tar, { throwIfNoEntry: false })?.isFile()) {
+    fail("Windows system tar was not found for npm overlays");
+  }
+  return tar;
+}
+
 async function sha256File(file) {
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(file)) hash.update(chunk);
@@ -202,7 +215,7 @@ try {
     if (await sha256File(overlayArchive) !== overlay.sha256) fail(`npm overlay integrity mismatch: ${overlay.name}`);
     const overlayExtract = path.join(tempRoot, `overlay-${overlay.name}`);
     mkdirSync(overlayExtract, { recursive: true });
-    execFileSync("tar", ["-xzf", overlayArchive, "-C", overlayExtract], { stdio: "inherit", windowsHide: true });
+    execFileSync(overlayTarCommand(), ["-xzf", overlayArchive, "-C", overlayExtract], { stdio: "inherit", windowsHide: true });
     const entries = readdirSync(overlayExtract);
     if (entries.length !== 1 || entries[0] !== "package") fail(`unexpected npm overlay layout: ${overlay.name}`);
     const destination = overlay.name === "npm" ? npmRoot : path.join(npmRoot, "node_modules", overlay.name);

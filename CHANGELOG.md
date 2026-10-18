@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.77 — 2026-10-19
+
+- Carries forward the Finance, document, Goal, Science and empty-panel improvements from the 1.3.75 and 1.3.76 source releases. Neither version published installers.
+- Windows package preparation uses the built-in archive extractor for the private Node and npm runtime, avoiding Git Bash archive path interpretation.
+- Node and npm archive, executable and complete-tree integrity checks remain pinned.
+- This release binds Agentlas OS v1.2.66 at c0acd99be22114569e20bca94bed4540ba046eb4; public runtime asset `hephaestus-runtime-v1.2.66.tar.gz` is pinned at SHA-256 `20019d3ba4df1c540d0ef549c07a82188bd40fe12dafb2f8a6c75cc4bdcc89f7`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.76 — 2026-10-19
 
 - Carries forward the Finance, document, Goal and Science improvements from the 1.3.75 source. No 1.3.75 installers were published.
