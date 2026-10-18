@@ -3,7 +3,7 @@ import { Fragment, type ReactNode } from "react";
 import type { FinanceDataResult, FinanceReport, FinanceReportSection } from "@shared/finance";
 import { financeComputeSpec } from "./FinanceComputeView";
 import { financeDataVisual, financeMetricForColumns } from "./FinanceDataResultView";
-import { financeReportLocale, financeReportDirection, financeReportSectionTitle, financeReportTitle, selectFinanceReportSections, financeReportHtml, financeReportNumber, financeReportIsMetadataLine, financeReportReadingProse } from "@shared/finance-report-presentation";
+import { financeReportLocale, financeReportDirection, financeReportSectionTitle, financeReportTitle, selectFinanceReportSections, financeReportHtml, financeReportNumber, financeReportProseBlocks, financeReportSectionHeading } from "@shared/finance-report-presentation";
 import { sanitizeChartSpec } from "@/lib/chart-spec";
 import { ChartBlock } from "@/components/ChartBlock";
 import styles from "./FinanceReportView.module.css";
@@ -20,17 +20,7 @@ function inline(value:string):ReactNode[] {
 }
 /** Preserve requested-language text; remove list syntax and evidence dumps, without creating numeric outlines. */
 export function FinanceReportProse({value}:{value:string}) {
- const blocks:ReactNode[]=[];let paragraph:string[]=[],fenced=false;
- const flush=()=>{if(paragraph.length){blocks.push(<p key={blocks.length}>{inline(paragraph.join(" "))}</p>);paragraph=[];}};
- for(const line of financeReportReadingProse(value).split(/\r?\n/)){
-  if(/^\s*```/.test(line)){flush();fenced=!fenced;continue;}if(fenced)continue;
-  if(/^\s*(?:\[row\s+\d+\]\s*)+$/i.test(line)){flush();continue;}
-  if(/^\s*\|.*\|\s*$/.test(line)||financeReportIsMetadataLine(line))continue;
-  const heading=/^\s{0,3}#{1,6}\s+(.+)$/.exec(line);if(heading){flush();blocks.push(<h3 key={blocks.length}>{inline(heading[1])}</h3>);continue;}
-  if(!line.trim()){flush();continue;}
-  const item=/^\s*(?:[-*•]\s+|\d+[.)]\s+)(.+)$/.exec(line);if(item){flush();blocks.push(<p key={blocks.length}>{inline(item[1])}</p>);}else paragraph.push(line.trim().replace(/^>\s?/,""));
- }
- flush();return <div className={styles.prose}>{blocks}</div>;
+ return <div className={styles.prose}>{financeReportProseBlocks(value).map((block,index)=>block.kind==="heading"?<h3 key={index}>{inline(block.text)}</h3>:block.kind==="quote"?<blockquote key={index}>{inline(block.text)}</blockquote>:<p key={index}>{inline(block.text)}</p>)}</div>;
 }
 function data(section:FinanceReportSection):FinanceDataResult|null {const p=section.projection;return p?{status:p.status==="ready"?"ok":p.status==="partial"?"partial":"unconnected",columns:p.columns,rows:p.rows,warnings:p.warnings,asOf:p.asOf,retrievedAt:"",sourceUrls:[]}:null;}
 export function financeReportChartSpec(section:FinanceReportSection):Record<string,unknown>|null {
@@ -44,7 +34,6 @@ export function financeReportChartSpec(section:FinanceReportSection):Record<stri
  if(w.chartType==="line"&&new Set(values.map(row=>row.date)).size<2)return null;
  return {data:{values},mark:{type:w.chartType,tooltip:true},encoding:{x:{field:w.chartType==="bar"?"symbol":"date",type:w.chartType==="bar"?"nominal":"temporal",title:null},y:{field:"value",type:"quantitative",title:currency,scale:{zero:false}},color:{field:"symbol",type:"nominal",title:null},tooltip:[{field:"symbol",type:"nominal",title:null},{field:"date",type:"nominal",title:null},{field:"value",type:"quantitative",title:currency,format:".2f"}]}};
 }
-const genericTitle=/^(Summary|Sources and limitations|Sources|요약|계산 요약|가정과 방법)$/i;
 const labels:Record<string,[string,string,string,string]>={
  "Median":["중앙값","Median","中央値","中位数"],
  "Chart unavailable":["차트를 표시하지 못했습니다.","Chart unavailable.","チャートを表示できません。","图表不可用。"],
@@ -84,8 +73,8 @@ export function FinanceReportView({report,locale="en",explicitTableSectionIds=[]
  });
  const lead=sections.filter(item=>!item.chart&&item.section.kind==="summary");
  const ordered=[...lead,...sections.filter(item=>item.chart),...sections.filter(item=>!item.chart&&item.section.kind!=="summary")];
- return <article className={styles.report} lang={language} dir={financeReportDirection(report,locale)} aria-labelledby={`finance-reader-${report.id}`}><header className={styles.header}><h1 id={`finance-reader-${report.id}`}>{financeReportTitle(report,locale)}</h1></header><div className={styles.body}>{ordered.map(({section,chart,spec,table})=><section key={section.id} className={chart?styles.chartSection:styles.section} id={`finance-report-section-${section.id}`}>
-  {!genericTitle.test(section.title)&&section.title!==report.title&&<h2>{financeReportSectionTitle(section,language)}</h2>}
+ return <article className={styles.report} lang={language} dir={financeReportDirection(report,locale)} aria-labelledby={`finance-reader-${report.id}`}><header className={styles.header}><h1 id={`finance-reader-${report.id}`}>{financeReportTitle(report,locale)}</h1></header><div className={styles.body}>{ordered.map(({section,chart,spec,table})=><section key={section.id} className={[chart?styles.chartSection:styles.section,...(!chart&&!table&&section.kind==="summary"?[styles.lead]:[])].join(" ")} id={`finance-report-section-${section.id}`}>
+  {financeReportSectionHeading(section,report,language)&&<h2>{financeReportSectionHeading(section,report,language)}</h2>}
   {section.narrative.trim()&&<FinanceReportProse value={section.narrative}/>}
   {chart&&spec?<><ChartBlock code={JSON.stringify(localizedSpec(spec,language))} blockId={`finance-report-chart-${section.id}`} size="panel" showMenu={false} showDiagnostics={false} fallback={<p>{financeReportLabel("Chart unavailable",language)||"Chart unavailable."}</p>}/>{section.widget?.metric==="compute:forecast:fan"&&<div className={styles.fanLegend}><span>5–95%</span><span>25–75%</span><span>{financeReportLabel("Median",language)||"Median"}</span></div>}</>:table?<FinanceReportComparison section={section} language={language}/>:null}
  </section>)}</div></article>;
