@@ -5,6 +5,7 @@ import {
   applyLiveDocument, closeLiveDocument, listLiveDocuments, liveDocumentDelta, liveDocumentRoot, liveDocumentSnapshot,
   LiveDocumentError, openLiveDocument, saveLiveDocument,
 } from "./store";
+import { renderLiveDocument } from "./render";
 
 /*
  * Main-side bridge for the Document rail tab. The renderer never names a path: a file reaches a session only through
@@ -72,6 +73,10 @@ export function registerLiveDocumentIpc(input: { ipc: Pick<IpcMain, "handle">; a
       if (error instanceof LiveDocumentError) return { ok: false, reason: error.reason };
       throw error;
     }
+  });
+  ipc.handle("liveDocument:render", async (event, sessionId: unknown) => {
+    assertTrustedSender(event);
+    return renderLiveDocument(id(sessionId));
   });
   ipc.handle("liveDocument:snapshot", async (event, sessionId: unknown) => {
     assertTrustedSender(event);

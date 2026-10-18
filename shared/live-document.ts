@@ -213,6 +213,13 @@ export type LiveDocumentApplyResult =
   | { ok: true; revision: number; created: string[] }
   | { ok: false; reason: string; detail?: string; revision?: number };
 
+/** document.render's photographs (electron/live-document/render.ts): one PNG per slide, page or sheet, and the boxes that overflow. */
+export type LiveDocumentRenderReply =
+  | { ok: true; format: string; renderer: "agentlas-layout"; note: string;
+      pages: Array<{ index: number; label: string; width: number; height: number; dataUrl: string }>;
+      overflow: Array<{ page: number; box: string; kind: "text_overflows_box" | "outside_page" }>; truncated?: string }
+  | { ok: false; code: string; message?: string };
+
 export interface LiveDocumentAPI {
   list: (chatId: string) => Promise<LiveDocumentMeta[]>;
   /** Owner picks a file in the native dialog; the session binds to chatId. */
@@ -224,6 +231,8 @@ export interface LiveDocumentAPI {
   save: (sessionId: string) => Promise<{ ok: true; revision: number; sha256: string } | { ok: false; reason: string }>;
   close: (sessionId: string) => Promise<boolean>;
   reveal: (sessionId: string) => Promise<boolean>;
+  /** Photographs each slide, page or sheet (document.render). */
+  render: (sessionId: string) => Promise<LiveDocumentRenderReply>;
   onChanged: (callback: (event: { sessionId: string; chatId: string }) => void) => () => void;
 }
 

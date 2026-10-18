@@ -9,6 +9,7 @@ description: Edit a docx, hwp or hwpx file live in the Document tab and save it 
 2. Read the returned `outline`. The first line gives the paper and body size (`# page 210x297mm, body 11pt`). Each line starts with the id that ops address: `[b3]` is a paragraph, and `b5.r2c1` is a table cell (row 2, column 1). `{bold 14pt center}` shows the current format. For a fresh outline, use `document.read` with `sessionId`.
 3. Edit with `harness_call {"operation":"document.apply","args":{"sessionId":"…","ops":[…]}}`. Send a few ops per call so the owner can follow along.
 4. When the work is done, or when the owner asks, save with `harness_call {"operation":"document.save","args":{"sessionId":"…"}}`.
+5. To check the layout, call `harness_call {"operation":"document.render","args":{"sessionId":"…"}}`. It returns each page as an image and lists the blocks that run off the page.
 
 # Ops
 

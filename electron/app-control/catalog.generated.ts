@@ -467,6 +467,7 @@ export const APP_CONTROL_CATALOG: readonly AppControlCatalogEntry[] = [
   {"path":"liveDocument.entries","surface":"desktop","channel":"liveDocument:entries","params":["sessionId","sinceRevision"],"invokeArgs":[{"param":"sessionId"},{"param":"sinceRevision"}],"signature":"(sessionId: string, sinceRevision: number)","doc":""},
   {"path":"liveDocument.list","surface":"desktop","channel":"liveDocument:list","params":["chatId"],"invokeArgs":[{"param":"chatId"}],"signature":"(chatId: string)","doc":""},
   {"path":"liveDocument.pickAndOpen","surface":"desktop","channel":"liveDocument:pickAndOpen","params":["chatId"],"invokeArgs":[{"param":"chatId"}],"signature":"(chatId: string)","doc":""},
+  {"path":"liveDocument.render","surface":"desktop","channel":"liveDocument:render","params":["sessionId"],"invokeArgs":[{"param":"sessionId"}],"signature":"(sessionId: string)","doc":""},
   {"path":"liveDocument.reveal","surface":"desktop","channel":"liveDocument:reveal","params":["sessionId"],"invokeArgs":[{"param":"sessionId"}],"signature":"(sessionId: string)","doc":""},
   {"path":"liveDocument.save","surface":"desktop","channel":"liveDocument:save","params":["sessionId"],"invokeArgs":[{"param":"sessionId"}],"signature":"(sessionId: string)","doc":""},
   {"path":"liveDocument.snapshot","surface":"desktop","channel":"liveDocument:snapshot","params":["sessionId"],"invokeArgs":[{"param":"sessionId"}],"signature":"(sessionId: string)","doc":""},

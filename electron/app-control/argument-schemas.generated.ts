@@ -1,5 +1,5 @@
 // Generated from the app's TypeScript bridges by scripts/generate-app-control-catalog.cjs.
-// Read with typescript 5.9.3 and agentlas-science 0.1.62 at lock 987a313d8119 (334 declaration files, sha256:eb230c27806e619b).
+// Read with typescript 5.9.3 and agentlas-science 0.1.62 at lock b42acf98aaba (335 declaration files, sha256:7cae101b5b1c6b10).
 export const APP_CONTROL_ARGUMENT_SCHEMAS: Readonly<Record<string, Record<string, unknown>>> = {"agentEvolution.approveAndApply":{"type":"object","properties":{"proposalId":{"type":"string"},"note":{"type":"string"}},"required":["proposalId"],"additionalProperties":false},
 "agentEvolution.createProposal":{"type":"object","properties":{"input":{"type":"object","properties":{"agentId":{"type":"string"},"targetPath":{"type":"string"},"currentContent":{"type":"string"},"proposedContent":{"type":"string"},"proposalType":{"enum":["playbook","plugin","rule","setup_doc","skill"]},"summary":{"type":"string"},"risk":{"enum":["high","low","medium"]},
 "source":{"type":"object","properties":{},"additionalProperties":{"description":"Host validates this JSON value."}},"decisionNote":{"type":"string"}},"required":["agentId","targetPath","currentContent","proposedContent"],"additionalProperties":false}},"required":["input"],"additionalProperties":false},
@@ -601,6 +601,7 @@ export const APP_CONTROL_ARGUMENT_SCHEMAS: Readonly<Record<string, Record<string
 "liveDocument.entries":{"type":"object","properties":{"sessionId":{"type":"string"},"sinceRevision":{"type":"number"}},"required":["sessionId","sinceRevision"],"additionalProperties":false},
 "liveDocument.list":{"type":"object","properties":{"chatId":{"type":"string"}},"required":["chatId"],"additionalProperties":false},
 "liveDocument.pickAndOpen":{"type":"object","properties":{"chatId":{"type":"string"}},"required":["chatId"],"additionalProperties":false},
+"liveDocument.render":{"type":"object","properties":{"sessionId":{"type":"string"}},"required":["sessionId"],"additionalProperties":false},
 "liveDocument.reveal":{"type":"object","properties":{"sessionId":{"type":"string"}},"required":["sessionId"],"additionalProperties":false},
 "liveDocument.save":{"type":"object","properties":{"sessionId":{"type":"string"}},"required":["sessionId"],"additionalProperties":false},
 "liveDocument.snapshot":{"type":"object","properties":{"sessionId":{"type":"string"}},"required":["sessionId"],"additionalProperties":false},

@@ -1518,6 +1518,7 @@ const api: AgentlasIpc = {
     save: (sessionId: string) => ipcRenderer.invoke("liveDocument:save", sessionId),
     close: (sessionId: string) => ipcRenderer.invoke("liveDocument:close", sessionId),
     reveal: (sessionId: string) => ipcRenderer.invoke("liveDocument:reveal", sessionId),
+    render: (sessionId: string) => ipcRenderer.invoke("liveDocument:render", sessionId),
     onChanged: (callback) => {
       const listener = (_event: unknown, value: { sessionId: string; chatId: string }) => callback(value);
       ipcRenderer.on("liveDocument:changed", listener);

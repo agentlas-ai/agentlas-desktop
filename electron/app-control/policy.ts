@@ -252,6 +252,9 @@ export function classifyAppControlPolicy(entry: Pick<AppControlCatalogEntry, "pa
   if (entry.path === "env.inventory") return explicit("read");
   // One SELECT … GROUP BY over the run history (store countRunHistory); added after the policy baseline.
   if (entry.path === "automations.runCounts") return explicit("read");
+  // Photographs an open live document (live-document/render.ts); the harness document.render port checks the chat first and
+  // reaches it through app.call, because only Main can open the window. It changes nothing.
+  if (entry.path === "liveDocument.render") return explicit("read");
   if (entry.path === "env.rename") return explicit("consent");
   // The screen's own ownership checks still bind these operations to a real task and view. One can observe or
   // control an existing view without manufacturing the screen's leases or approving itself.

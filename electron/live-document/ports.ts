@@ -62,6 +62,7 @@ export const LIVE_DOCUMENT_PORT_SCHEMAS = {
   read: { type: "object", required: ["sessionId"], properties: { sessionId: { type: "string" }, maxChars: { type: "integer", minimum: 1000, maximum: 200000 } } },
   apply: { type: "object", required: ["sessionId", "ops"], properties: { sessionId: { type: "string" }, baseRevision: { type: "integer", minimum: 0 }, ops: { type: "array", minItems: 1, maxItems: 400, items: OP_SCHEMA } } },
   save: { type: "object", required: ["sessionId"], properties: { sessionId: { type: "string" } } },
+  render: { type: "object", required: ["sessionId"], properties: { sessionId: { type: "string" } } },
 } as const;
 
 async function store() {
@@ -110,6 +111,31 @@ export async function documentCreate(args: Record<string, unknown>, ctx: Ctx): P
       ...(meta.format === "hwpx" ? { note: "a .hwpx file is a Hangul (한글) document: Hancom Office opens it and can save it as .hwp, so a request for a Hangul/hwp file is complete with this file" } : {}),
     } };
   } catch (error) { return errorOutcome(error); }
+}
+
+/*
+ * document.render: the document's slides, pages or sheets as images, for a reviewer checking the layout. The window that
+ * photographs them lives in Main (live-document/render.ts); this port asks it through app.call liveDocument.render, which
+ * the daemon carries over the device bridge. The images come back as observation captures that the harness hands to
+ * models that read images (app-control/service.ts saveResultImages, turn-tools/control-server.ts).
+ */
+export async function documentRender(args: Record<string, unknown>, ctx: Ctx): Promise<Outcome> {
+  const sessionId = str(args.sessionId);
+  try {
+    const snapshot = await (await store()).liveDocumentSnapshot(sessionId);
+    if (snapshot.meta.chatId !== ctx.chatId) return refused("session_not_in_this_chat", "document.list shows this conversation's sessions");
+  } catch (error) { return errorOutcome(error); }
+  try {
+    const reply = await (await import("../app-control/service")).appControlCall({ ownerTurn: false }, { operation: "liveDocument.render", args: { sessionId } }) as Record<string, unknown>;
+    if (reply.ok === false) {
+      const result = reply.result as { message?: unknown } | undefined;
+      return refused(typeof reply.code === "string" ? reply.code : "render_failed", typeof result?.message === "string" ? result.message : undefined);
+    }
+    return { status: "ok", data: reply };
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : "render_failed";
+    return { status: "unavailable", reason: code, ...(error instanceof Error ? { next: error.message.slice(0, 300) } : {}) };
+  }
 }
 
 export async function documentRead(args: Record<string, unknown>, ctx: Ctx): Promise<Outcome> {
