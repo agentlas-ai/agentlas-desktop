@@ -4900,6 +4900,8 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       };
       const teamResult = await runFirmInvocation({
         prepareWorkerCapabilities: p.prepareWorkerCapabilities,
+        // The team's stage workers bind outputs through this room's binder (observed artifacts included).
+        bindOneRuntimeToolArtifacts: p.bindOneRuntimeToolArtifacts,
         workerCapabilityTask: capabilityTask,
         workerCapabilityCeiling: capabilityCeiling,
         req: {

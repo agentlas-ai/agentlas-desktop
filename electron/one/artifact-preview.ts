@@ -623,6 +623,26 @@ export function bindOneRuntimeToolArtifacts(input: {
   return bound;
 }
 
+/**
+ * The bytes at `candidate` are already a bound output of this chat (same canonical path, size, inode and mtime). A later
+ * run that only hands over the same finished file again (a reused narration, a polled video job) binds nothing new; a
+ * rewritten file has another identity and binds.
+ */
+export function oneArtifactAlreadyBoundInChat(input: { chatId: string; candidate: string }): boolean {
+  try {
+    const resolved = fs.realpathSync(path.resolve(input.candidate));
+    const stat = fs.statSync(resolved, { bigint: true });
+    ensureBindingTable();
+    return Boolean(getDb().prepare(
+      `SELECT 1 FROM one_artifact_bindings
+       WHERE chat_id = ? AND source_path = ? AND size_bytes = ? AND file_ino = ? AND file_mtime_ns = ?
+       LIMIT 1`,
+    ).get(input.chatId, resolved, Number(stat.size), String(stat.ino), String(stat.mtimeNs)));
+  } catch {
+    return false;
+  }
+}
+
 function manifestContainsArtifact(manifest: OneSurfaceManifestV1, artifactRef: string): boolean {
   const inBlock = manifest.blocks.some((block) => {
     if (block.type === "Gallery") return block.items.some((item) => item.artifactRef === artifactRef);

@@ -124,6 +124,21 @@ async function readReceipts(filter: (row: Record<string, unknown>) => boolean): 
   }
 }
 
+/*
+ * A media job (media.video.animate-image / .generate / .extend) has no chat of its own; its start receipt names the chat
+ * that started it. Only that chat's runs take its finished files as outputs. A job that finishes after its run ended is
+ * linked by the next run of that chat that reads it (media.job.status), never written into the ended run.
+ */
+const mediaJobChat = new Map<string, string | null>();
+async function mediaJobStartedInChat(jobId: string, chatId: string): Promise<boolean> {
+  if (!mediaJobChat.has(jobId)) {
+    const started = await readReceipts((row) => row.jobId === jobId && typeof row.chatId === "string" && String(row.operationId ?? "").startsWith("media.video."));
+    mediaJobChat.set(jobId, started.length ? started[0].chatId as string : null);
+    if (mediaJobChat.size > 512) mediaJobChat.delete(mediaJobChat.keys().next().value as string);
+  }
+  return mediaJobChat.get(jobId) === chatId;
+}
+
 // ── plugins ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
 async function pluginRows() {
@@ -644,7 +659,14 @@ const PORTS: PortDefinition[] = [
   },
   {
     operationId: "media.job.status", kind: "query", purpose: "Read one media job's state and output.", required: ["jobId"],
-    handler: async (args) => { const { getVideoJob } = await import("../multimodal/video"); const job = getVideoJob(str(args.jobId)); return job ? ok(job) : refused("media_job_unknown"); },
+    handler: async (args, ctx) => {
+      const { getVideoJob } = await import("../multimodal/video");
+      const job = getVideoJob(str(args.jobId));
+      if (!job) return refused("media_job_unknown");
+      // The finished video is handed over by the read that reports it, to a run of the chat that started the job.
+      const files = job.status === "succeeded" ? job.files.map((file) => file.absPath).filter((file) => typeof file === "string" && file) : [];
+      return { ...ok(job), ...(files.length && await mediaJobStartedInChat(job.id, ctx.chatId) ? { produced: files } : {}) };
+    },
   },
   {
     operationId: "media.job.cancel", kind: "command", terminalTargetKeys: ["jobId"], purpose: "Cancel one media job (provider cancel where it exists, else local stop).", required: ["jobId"],

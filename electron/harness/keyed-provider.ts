@@ -45,7 +45,8 @@ export const SPEECH_ROUTES = Object.freeze(["elevenlabs-audio", "openai-audio"] 
 /** Routes with a typed speech.transcribe adapter (word timings): ElevenLabs Scribe, OpenAI Whisper, Deepgram. */
 export const TRANSCRIBE_ROUTES = Object.freeze(["elevenlabs-audio", "openai-audio", "deepgram-audio"] as const);
 
-type Outcome = { status: "ok"; data: unknown } | { status: "refused" | "unavailable"; reason: string; next?: string; data?: unknown };
+/** produced: the file this answer hands over (harness/run-produced-files.ts binds it as the run's output); never in the result. */
+type Outcome = { status: "ok"; data: unknown; produced?: readonly string[] } | { status: "refused" | "unavailable"; reason: string; next?: string; data?: unknown };
 const ok = (data: unknown): Outcome => ({ status: "ok", data });
 const refused = (reason: string, next?: string): Outcome => ({ status: "refused", reason, ...(next ? { next } : {}) });
 const str = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
@@ -349,7 +350,8 @@ async function keyedProviderRequestNow(adapter: KeyedAdapter, key: string, input
   await observe(routeId, "ok", "provider.request");
   const receiptId = await receipt({ operationId: "provider.request", routeId, method, path: apiPath.split("?")[0], status: res.status, requestId,
     ...(outputFile ? { file: outputFile, sha256: data.sha256, bytes: data.bytes } : {}), chatId: ctx.chatId, runId: ctx.runId });
-  return ok({ routeId, requestId, receiptId, ...data });
+  // A binary answer written to a file is that file; a later identical call returns this same outcome (answerWithin).
+  return { status: "ok", data: { routeId, requestId, receiptId, ...data }, ...(typeof data.path === "string" ? { produced: [data.path] } : {}) };
 }
 
 async function probeDurationSeconds(file: string): Promise<number | null> {
@@ -403,7 +405,8 @@ export async function speechSynthesize(args: Record<string, unknown>, ctx: Keyed
   const receiptFile = `${outputFile}.speech-receipt.json`;
   try {
     const prior = JSON.parse(fs.readFileSync(receiptFile, "utf8")) as Record<string, unknown>;
-    if (prior.requestDigest === digest && fs.existsSync(outputFile) && sha(fs.readFileSync(outputFile)) === prior.sha256) return ok({ ...prior, reused: true });
+    // The narration made earlier (also one finished in the background after its run ended) is handed over again.
+    if (prior.requestDigest === digest && fs.existsSync(outputFile) && sha(fs.readFileSync(outputFile)) === prior.sha256) return { status: "ok", data: { ...prior, reused: true }, produced: [outputFile] };
   } catch { /* no prior receipt */ }
   if (fs.existsSync(outputFile)) return refused("output_exists", "the file exists from another request; choose another fileName");
   return answerWithin(`speech:${digest}:${outputFile}`, () => speechSynthesizeNow(adapter, key, { routeId, text, voiceId, modelId, digest, outputFile, receiptFile }, ctx),
@@ -452,5 +455,6 @@ async function speechSynthesizeNow(adapter: KeyedAdapter, key: string, input: { 
   fs.writeFileSync(receiptFile, JSON.stringify(record, null, 1));
   await observe(routeId, "ok", "speech.synthesize");
   const receiptId = await receipt({ operationId: "speech.synthesize", ...record, chatId: ctx.chatId, runId: ctx.runId });
-  return ok({ ...record, receiptId, reused: false });
+  // Kept by answerWithin: the same request after a "running" answer gets this outcome, file included.
+  return { status: "ok", data: { ...record, receiptId, reused: false }, produced: [outputFile] };
 }

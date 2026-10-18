@@ -10,10 +10,16 @@ import path from "node:path";
  * mcp/client.ts bindInvocationOneArtifacts -> one/artifact-preview.ts bindOneRuntimeToolArtifacts), and a harness result
  * reaches every adapter as MCP text (only cua captures are read from such text).
  *
- * The port that wrote a file names it (PortOutcome.produced; capability-ports.ts callHarnessPort records it under the run
- * of the capability it was called with). The run's invocation takes the list at its next successful tool completion and
- * seals each file through the same bindOneRuntimeToolArtifacts boundary (canonical folders, O_NOFOLLOW, Task/run/version).
- * Nothing here comes from model text or tool arguments, and a path here grants nothing: the seal decides.
+ * The port that wrote a file, or hands over one it finished earlier (speech.synthesize after a "running" answer or reused,
+ * provider.request's binary answer, a succeeded media job read through media.job.status), names it (PortOutcome.produced;
+ * capability-ports.ts callHarnessPort records it under the run of the capability it was called with). The run's
+ * invocation takes the list at its next successful tool completion and seals each file through the same
+ * bindOneRuntimeToolArtifacts boundary (canonical folders, O_NOFOLLOW, Task/run/version); a file the chat already holds
+ * byte for byte binds nothing new. Nothing here comes from model text or tool arguments, and a path here grants nothing.
+ *
+ * A file that finishes after the run's last invocation ended (a narration or a video job in the background) is not
+ * written into that run: there is no live event channel for it any more, and its receipt and verified result set are
+ * settled. The next run of the same chat that asks for it (the same speech.synthesize call, media.job.status) takes it.
  *
  * In-process on purpose. A run's harness_call is answered by the turn-tools control server of the process that minted the
  * run's agentlas-turn capability (turn-tools/control-server.ts keeps capabilities in process memory), and that is the

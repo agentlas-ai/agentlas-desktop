@@ -248,7 +248,7 @@ import {
   type OneFriendlyFollowupPlanV1,
 } from "../../shared/one-friendly-followups";
 import { buildOneSurfaceFromMarkdown, chooseOneSurfaceForDisplay, resolveOneMarkdownSurfaceIntent } from "../one/markdown-surface";
-import { bindOneRuntimeToolArtifacts, promoteBoundOneMarkdownImages } from "../one/artifact-preview";
+import { bindOneRuntimeToolArtifacts, oneArtifactAlreadyBoundInChat, promoteBoundOneMarkdownImages } from "../one/artifact-preview";
 import { hasRunProducedFiles, openRunProducedFiles, takeRunProducedFiles } from "../harness/run-produced-files";
 import { classifyToolFailure, toolFailureCopy } from "../../shared/tool-failure";
 import { resolveToolInvocationOrigin } from "../invocation/tool-origin";
@@ -4578,7 +4578,9 @@ async function runMcpInvocationInContext(
       })));
     paths = paths.filter(target => !isWorkAttachmentInput(runId, chat.id, resolvedResultFolder, path.resolve(resolvedResultFolder, target)));
     // An input copy staged for this run (even one a port rewrote) is not an output; its folder goes when the run ends.
+    // A file this chat already holds as an output, byte for byte, is not bound again (a reused narration, a job read twice).
     const produced = takeRunProducedFiles(runId).filter((file) => {
+      if (oneArtifactAlreadyBoundInChat({ chatId: chat.id, candidate: file.path })) return false;
       if (!resolvedResultFolder) return true;
       try { return !isWorkAttachmentInput(runId, chat.id, resolvedResultFolder, file.path); } catch { return false; }
     });
@@ -5440,6 +5442,7 @@ async function runMcpInvocationInContext(
         mcpConfigPath,
         mcpAllowedTools,
         mcpCodexConfigArgs,
+        bindOneRuntimeToolArtifacts: bindInvocationOneArtifacts,
         runnerEnv: orchestrationRunnerEnv,
         locale,
         sink,
@@ -5486,6 +5489,7 @@ async function runMcpInvocationInContext(
             ...(browserOnly ? { browserOnly: true as const } : {}),
             agentAppMcpRuntimeEnv: mcpRuntimeEnv,
             prepareWorkerCapabilities,
+            bindOneRuntimeToolArtifacts: bindInvocationOneArtifacts,
             onAgentAppMcpRuntimeUnavailable: markAgentAppMcpRuntimeUnavailable,
             onControllerRuntimeFallback: emitControllerRuntimeFallback,
             runtimePinHonored: runtimeResolution.pinHonored,
