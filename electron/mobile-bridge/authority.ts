@@ -3207,9 +3207,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         if (expectedVersion === undefined) throw new TypeError("expectedVersion is required");
         const expectedRunId = requiredIdentifier(params, "expectedRunId", RUN_ID_RE);
         const current = getCanonicalTask(taskId);
-        const receipt = current?.originChatId
-          ? invocationService.latestReceipt(current.originChatId)
-          : null;
+        // The exact run the owner is accepting, as on the desktop (ipc.ts): a later host turn is not a newer request.
+        const receipt = current?.originChatId ? invocationService.receipt(expectedRunId) : null;
         const accepted = acceptCanonicalTaskResult(
           { taskId, expectedVersion, expectedRunId },
           receipt,
