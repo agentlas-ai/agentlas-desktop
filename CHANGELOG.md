@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.3.71 — 2026-10-18
+## 1.3.72 — 2026-10-18
 
 - Organization settings refresh their current access while open, preserve drafts within the same organization, and close the previous display as soon as the account or organization changes.
 - Returning to personal space opens One. An uncertain organization selection no longer prevents signing out of its original session, and requests with an unknown outcome are not automatically repeated.
