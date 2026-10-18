@@ -57,6 +57,7 @@ export function ChatQuestionSheet({
   onDismiss,
   block = "none",
   onResend,
+  onKeepQueuedAnswer,
 }: {
   /** 현재 답변 대기 중인(unanswered) 질문들 — 최신 어시스턴트 메시지 기준. */
   questions: ChatQuestion[];
@@ -73,6 +74,11 @@ export function ChatQuestionSheet({
   block?: AskActionBlock;
   /** 막힌 질문의 답을 새 메시지로 보낸다(작성창과 같은 전송 경로). */
   onResend?: (text: string) => void;
+  /**
+   * 실행 중에 낸(대기 중인) 답의 질문을 새 질문이 대체했다 — 그 답을 넘겨받는다. 이 시트는 답을 버리지 않는다.
+   * 받는 쪽은 지금 시트(새 질문)를 접지 말아야 한다.
+   */
+  onKeepQueuedAnswer?: (text: string) => void;
 }) {
   const { locale } = useT();
   const ko = locale === "ko";
@@ -87,9 +93,15 @@ export function ChatQuestionSheet({
   // 한 번도 불리지 않았다 — 새로 뜬 시트에서 숫자 배지도 Enter 도 무반응이었다(2026-09-03 실측).
   const keyHandlerRef = useRef<(event: KeyboardEvent) => void>(() => {});
   const key = `${questions.map((q) => q.id).join("|")}\0${initialReply ?? ""}`;
+  // 실행 중에 제출해 "실행이 정리되면 전송"을 기다리던 답(직전 렌더 기준). 새 질문 묶음이 와도 버리지 않는다.
+  const queuedAnswerRef = useRef<string | null>(null);
 
   // 새 질문 묶음이 오면 로컬 상태 초기화.
   useEffect(() => {
+    // 예전에는 여기서 대기 중인 답까지 지웠다 — 실행 중에 고른 답이 새 질문이 오는 순간 사라졌다.
+    const queued = queuedAnswerRef.current;
+    queuedAnswerRef.current = null;
+    if (queued) onKeepQueuedAnswer?.(queued);
     setSelected({});
     setNotes({});
     setActive(0);
@@ -108,6 +120,12 @@ export function ChatQuestionSheet({
     () => composeQuestionReply(questions, selected, notes, ko),
     [questions, selected, notes, ko],
   );
+  // 위 초기화 효과보다 뒤에 둔다: 묶음이 바뀌는 커밋에서 초기화는 직전 묶음의 대기 답을 읽는다.
+  useEffect(() => {
+    queuedAnswerRef.current = pendingSubmit && !initialReply?.trim() && composed.reply.trim()
+      ? askResendMessage(ko ? "ko" : "en", questions.map((item) => item.question).join(" / "), composed.reply)
+      : null;
+  });
   const q = questions[Math.min(active, questions.length - 1)];
   const isLast = active >= questions.length - 1;
   const currentAnswered = q ? (selected[q.id]?.length ?? 0) > 0 || Boolean((notes[q.id] ?? "").trim()) : false;

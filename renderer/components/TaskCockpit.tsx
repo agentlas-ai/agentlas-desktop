@@ -7460,6 +7460,14 @@ function ChatPage() {
             }
             void send(text);
           }}
+          onKeepQueuedAnswer={(text) => {
+            // 실행 중에 낸 답의 질문을 새 질문이 대체했다. 답은 버리지 않고(예전엔 새 질문이 오는 순간 사라졌다)
+            // 실행이 끝나면 새 메시지로 보낸다. 새 질문 시트는 그대로 둔다.
+            setPendingResendText({ chatId, text });
+            setSessionNotice(locale === "ko"
+              ? "실행 중에 낸 답의 질문이 새 질문으로 바뀌었습니다. 그 답은 버리지 않고 실행이 끝나면 새 메시지로 보냅니다."
+              : "A newer question replaced the one your queued answer was for. The answer is kept and sent as a new message when the run finishes.");
+          }}
         />
       )}
       {/* Codex식: 이 대화가 폴더(프로젝트)에서 작업하는지 / 전역 대화인지 선택 */}
