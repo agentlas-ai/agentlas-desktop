@@ -303,8 +303,12 @@ export function setServerEnabled(id: string, enabled: boolean): InstalledMcpServ
 }
 
 /** Revoke only this connection. The registry transaction is the durable authority; enablement may later be restored
- * by connector.connect, but no old preparation can regain its previous epoch. No shared credential is changed here. */
-export function revokeServerConnectionSession(id: string): InstalledMcpServer {
+ * by connector.connect, but no old preparation can regain its previous epoch. No shared credential is changed here.
+ * Every revoke goes through here (NH29): the model's auth.logout, and through setServerConnectionEnabled the owner's
+ * switch on the desktop and the phone and the model's connector.disconnect; the owner's OAuth disconnect keeps the row
+ * enabled (keepEnabled) so its switch does not move, but its prepared sessions end the same way. A configuration digest
+ * includes the epoch (prepared-transport.ts), so client.ts refuses a preparation made before the move. */
+export function revokeServerConnectionSession(id: string, options: { keepEnabled?: boolean } = {}): InstalledMcpServer {
   const db = getDb();
   return db.transaction(() => {
     const row = db.prepare("SELECT * FROM mcp_servers WHERE id = ?").get(id) as ServerRow | undefined;
@@ -313,9 +317,27 @@ export function revokeServerConnectionSession(id: string): InstalledMcpServer {
     if (!Number.isSafeInteger(row.connection_epoch) || row.connection_epoch < 0 || row.connection_epoch >= Number.MAX_SAFE_INTEGER) {
       throw Object.assign(new Error("connection_epoch_invalid"), { code: "connection_epoch_invalid" });
     }
-    const changed = db.prepare("UPDATE mcp_servers SET enabled = 0, connection_epoch = connection_epoch + 1 WHERE id = ? AND connection_epoch = ?")
+    const changed = (options.keepEnabled
+      ? db.prepare("UPDATE mcp_servers SET connection_epoch = connection_epoch + 1 WHERE id = ? AND connection_epoch = ?")
+      : db.prepare("UPDATE mcp_servers SET enabled = 0, connection_epoch = connection_epoch + 1 WHERE id = ? AND connection_epoch = ?"))
       .run(id, row.connection_epoch);
     if (changed.changes !== 1) throw Object.assign(new Error("connection_epoch_conflict"), { code: "connection_epoch_conflict" });
     return getServer(id)!;
   })();
+}
+
+/** A connection's on/off switch (desktop, phone, the model's connector.disconnect): on enables; off is a revoke
+ * (revokeServerConnectionSession), so a session prepared before the switch went off cannot come back with it.
+ * Turning off a row that is already off changes nothing. */
+export function setServerConnectionEnabled(id: string, enabled: boolean): InstalledMcpServer {
+  if (enabled) return setServerEnabled(id, true);
+  const current = getServer(id);
+  if (!current) throw new Error(`MCP server not found: ${id}`);
+  if (!current.enabled) return current;
+  try { return revokeServerConnectionSession(id); }
+  catch (error) {
+    // A store from before the epoch column (no migration yet) can still be switched off.
+    if ((error as { code?: unknown })?.code === "connection_epoch_unsupported") return setServerEnabled(id, false);
+    throw error;
+  }
 }

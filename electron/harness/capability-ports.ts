@@ -271,7 +271,10 @@ async function connectorAuth(row: Awaited<ReturnType<typeof connectorRows>>[numb
   }
   const credentialState: "credential_missing" | "login_may_be_required" | "ready" = missingEnv.length > 0 ? "credential_missing" : row.transport !== "stdio" && oauth === "absent" && row.envKeys.length === 0 ? "login_may_be_required" : "ready";
   const sessionState = row.enabled ? "enabled" as const : row.connectionEpoch ? "revoked" as const : "disabled" as const;
-  const state = sessionState === "revoked" ? "signed_out" as const : sessionState === "disabled" ? "disabled" as const : credentialState;
+  // Every switch-off now moves the epoch (NH29), so a revoked session reads as signed out only when its credentials are
+  // gone too (auth.logout); a connection the owner merely switched off, with its credentials kept, reads as disabled.
+  const state = sessionState === "revoked" && credentialState !== "ready" ? "signed_out" as const
+    : sessionState !== "enabled" ? "disabled" as const : credentialState;
   return { missingEnv, oauth, credentialState, sessionState, state };
 }
 
@@ -473,8 +476,8 @@ const PORTS: PortDefinition[] = [
       const row = await findConnector(args);
       if (!row) return refused("connector_not_installed");
       if (ctx.dryRun) return refused("dry_run");
-      const { setServerEnabled } = await import("../mcp-tools/registry");
-      setServerEnabled(row.serverId, false);
+      const { setServerConnectionEnabled } = await import("../mcp-tools/registry");
+      setServerConnectionEnabled(row.serverId, false);
       await appendReceipt({ operationId: "connector.disconnect", connectorId: row.id, chatId: ctx.chatId, runId: ctx.runId });
       return ok({ connectionId: row.id, enabled: false, note: "credentials and results are kept" });
     },

@@ -171,6 +171,8 @@ import {
   installFromCatalog,
   listInstalledServers,
   removeServer,
+  revokeServerConnectionSession,
+  setServerConnectionEnabled,
   setServerEnabled,
 } from "./mcp-tools/registry";
 import { credentialVaultKey } from "./mcp-tools/credential-refs";
@@ -3700,8 +3702,9 @@ export function registerIpcHandlers(): void {
     ) => installCustomServer(def),
   );
   registerAppControlDomainIpc(ipcMain, "mcpTools:remove", (id: string) => removeServer(id));
+  // Off is a revoke (NH29): a session prepared before the switch went off cannot come back when it is switched on.
   registerAppControlDomainIpc(ipcMain, "mcpTools:setEnabled", (id: string, enabled: boolean) =>
-    setServerEnabled(id, enabled),
+    setServerConnectionEnabled(id, enabled),
   );
   // Hub 플러그인 설치 — 미리보기와 설치를 반드시 나눈다. stdio 행은 그 명령을 이 기계에서
   // 실행한다는 뜻이므로, 사람이 명령 원문을 보지 못한 채 누르는 승인은 승인이 아니다.
@@ -3845,7 +3848,11 @@ export function registerIpcHandlers(): void {
     }
   });
   ipcMain.handle("mcpTools:oauthDisconnect", async (_e, serverId: string) => {
-    await forgetMcpOAuth(String(serverId ?? ""));
+    const id = String(serverId ?? "");
+    // The owner's disconnect ends live prepared sessions before the tokens go, the same revoke as auth.logout (NH29).
+    // The row stays on, so the switch on the screen does not move; a removed row has no session left to revoke.
+    if (getServer(id)) revokeServerConnectionSession(id, { keepEnabled: true });
+    await forgetMcpOAuth(id);
     return { ok: true as const };
   });
   registerAppControlDomainIpc(ipcMain, "mcpTools:test", (id: string) => testServerById(id));

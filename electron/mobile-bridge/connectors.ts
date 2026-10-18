@@ -15,7 +15,7 @@
 //   - command/args/url 은 투영하지 않는다(로컬 경로·토큰 URL 이 섞일 수 있다).
 import type { InstalledMcpServer, McpServerStatus, McpToolCatalogEntry } from "../../shared/types";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
-import { getServer, installFromCatalog, listInstalledServers, setServerEnabled } from "../mcp-tools/registry";
+import { getServer, installFromCatalog, listInstalledServers, setServerConnectionEnabled } from "../mcp-tools/registry";
 import { testServerById } from "../mcp-tools/client";
 import { sanitizeMobileBridgeText } from "./sanitize";
 
@@ -185,7 +185,8 @@ function userConnector(id: string, facts: ConnectorHostFacts): InstalledMcpServe
 
 export function setMobileConnectorEnabled(id: string, enabled: boolean, facts: ConnectorHostFacts = hostFacts()): MobileConnectorRow {
   userConnector(id, facts);
-  const server = setServerEnabled(id, enabled);
+  // Off is a revoke, as on the desktop switch (NH29): a session prepared before cannot return when it is switched on.
+  const server = setServerConnectionEnabled(id, enabled);
   return projectInstalled(server, new Map(facts.catalog.map((entry) => [entry.id, entry])));
 }
 
