@@ -30,6 +30,8 @@ const MAX_REQUEST_BYTES = 768 * 1024;
 const hostRootContext = AsyncLocalStorage.snapshot();
 
 export interface TurnToolsCapabilityBinding {
+  /** Host-only account captured at mint time; never serialized into the child capability file. */
+  hostAccountBinding?: { workspaceId: string; userId: string; sessionId: string; expiresAt: number | null } | null;
   capabilityId: string;
   chatId: string;
   runId: string;
@@ -280,6 +282,7 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       const a = request.args && typeof request.args === "object" && !Array.isArray(request.args) ? request.args as Record<string, unknown> : {};
       const harness = await import("../harness/capability-ports");
       const ctx = { chatId: binding.chatId, runId: binding.runId, dryRun: binding.dryRun === true,
+        hostAccountBinding: binding.hostAccountBinding ?? null,
         ...(binding.permission ? { permission: binding.permission } : {}), ...(binding.graphAuthoring === true ? { graphAuthoring: true } : {}),
         ...(binding.mcpConfigPath ? { mcpConfigPath: binding.mcpConfigPath } : {}) };
       if (operation === "harness_search") {
@@ -345,12 +348,15 @@ export function startTurnToolsControlServer(): Promise<number> {
 
 /** Mint a per-config capability file (0600) that the MCP child reads. */
 export async function createTurnToolsCapability(
-  input: Omit<TurnToolsCapabilityBinding, "capabilityId">,
+  input: Omit<TurnToolsCapabilityBinding, "capabilityId" | "hostAccountBinding">,
   configKey: string,
 ): Promise<{ path: string; binding: TurnToolsCapabilityBinding }> {
+  let hostAccountBinding: TurnToolsCapabilityBinding['hostAccountBinding'] = null;
+  try { const auth = await import('../auth'); const current = auth.getAuthenticatedSessionBinding(); hostAccountBinding = current ? Object.freeze({ ...current }) : null; }
+  catch { /* Other harness domains remain available; Finance refuses an unbound account. */ }
   const port = await startTurnToolsControlServer();
   if (!port) throw new Error("turn-tools-control-unavailable");
-  const binding: TurnToolsCapabilityBinding = { ...input, capabilityId: randomUUID() };
+  const binding: TurnToolsCapabilityBinding = { ...input, hostAccountBinding, capabilityId: randomUUID() };
   capabilities.set(binding.capabilityId, binding);
   const directory = controlDir();
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });

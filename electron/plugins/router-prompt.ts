@@ -15,7 +15,7 @@ import { composeDeclaredPrompt } from "../runtime/prompt-order";
 // 모델이 스킬을 여는 방법은 "파일을 읽는 것"이다. 그래서 경로 규칙을 명시한다 —
 // 도구가 없어 못 읽는 표면에서는 라우터가 스스로 그렇게 말하도록 규격이 요구한다(§3.1).
 import * as fs from "node:fs";
-import * as os from "node:os";
+import { installedPluginsRoot } from "./materialize";
 import * as path from "node:path";
 import { renderPluginCatalog, type PluginCatalog } from "../runtime/prompt-modules";
 
@@ -33,7 +33,7 @@ interface InstalledPlugin {
 }
 
 function pluginsRoot(): string {
-  return path.join(os.homedir(), ".agentlas", "plugins");
+  return installedPluginsRoot();
 }
 
 function frontmatterDescription(text: string): string {

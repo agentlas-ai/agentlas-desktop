@@ -2,18 +2,26 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { FinanceAsset, FinanceMonitor } from "../../shared/finance";
-import type { Automation } from "../../shared/types";
+import type { Automation, WorkflowGraph } from "../../shared/types";
 import type { FinanceScope } from "./store";
 import { composeDeclaredPrompt } from "../runtime/prompt-order";
 import { userDataPath } from "../runtime-paths";
 import { detectRuntimes } from "../runtime/detect";
 import { workStartRuntimePin } from "../work-start";
 import { listInstalledAgentsReadOnly } from "../mcp/registry";
-import { createAutomation, getAutomation, updateAutomation, toggleAutomation } from "../store/automations";
+import { createAutomation, getAutomation, updateAutomation, updateAutomationGraph, toggleAutomation } from "../store/automations";
 import { defaultTz, nextRun, parseLegacyToken } from "../store/schedule";
 
 const lockfile = require("proper-lockfile") as { lock(target: string, options: unknown): Promise<() => Promise<void>> };
-export const FINANCE_MONITOR_SCHEDULES = ["daily-09:00", "weekday-09:00", "hourly"] as const;
+export const FINANCE_MONITOR_SCHEDULES = ["daily-09:00", "weekday-09:00", "hourly", "every-5m"] as const;
+
+/** The existing graph kernel owns leases, due occurrences, cancellation and run history. */
+export function financeMonitorGraph(monitor: FinanceMonitor): WorkflowGraph {
+  return {version:1,nodes:[{id:"finance-briefing",type:"action",label:"Finance 자료 조회와 브리핑 저장",position:{x:120,y:100},config:{
+    effect:"mutation",mcpCall:{catalogId:"agentlas-turn",toolName:"harness_call",arguments:{operation:"finance.monitor.run",args:{monitorId:monitor.id}}},
+    produces:"financeBriefing",maxDurationSeconds:240,
+  }}],edges:[]};
+}
 
 export function financeMonitorPrompt(monitor: FinanceMonitor, assets: FinanceAsset[]): string {
   return composeDeclaredPrompt([
@@ -55,7 +63,7 @@ function writeBinding(file: string, value: Binding): void {
 function projected(monitor: FinanceMonitor, job: Automation): FinanceMonitor {
   return { ...monitor, automationId: job.id, executionAvailability: "app-running", scheduleHuman: job.scheduleHuman,
     status: job.enabled ? "active" : "paused", lastCheckedAt: job.lastRunAt, nextCheckAt: job.enabled ? job.nextRunAt : null,
-    note: "Scheduled research runs while Agentlas is running. Briefings and execution outcomes are available in Automations. Pausing prevents future starts; a run already in progress may finish." };
+    note: "Agentlas 실행 중 실제 자료를 조회하고 Finance 보고서에 브리핑을 저장합니다. 실행 이력은 Finance와 자동화에서 확인하세요. 일시정지는 다음 실행을 막으며 진행 중인 실행은 마무리될 수 있습니다." };
 }
 export function readFinanceMonitor(input: Pick<FinanceMonitorInput, "scope" | "monitor">): FinanceMonitor {
   const link = binding(fileFor(registry(input.scope), input.monitor.id));
@@ -81,14 +89,15 @@ export async function scheduleFinanceMonitor(input: FinanceMonitorInput): Promis
       job = getAutomation(prior.automationId);
       if (!job) throw new Error("finance_monitor_automation_missing");
       toggleAutomation(job.id, false);
-      job = updateAutomation(job.id, { name: input.monitor.name, scheduleHuman: schedule, timezone, promptTemplate: prompt });
+      job = updateAutomation(job.id, { name: input.monitor.name, scheduleHuman: schedule, timezone, promptTemplate: prompt,executionPermission:"write",toolMode:"auto" });
+      job = updateAutomationGraph(job.id,financeMonitorGraph(input.monitor));
     } else {
       const runtimes = await detectRuntimes(); input.scope.assertCurrent();
       const runtime = runtimes.find(item => item.active && !item.signInRequired && item.credentialAccess?.status !== "unavailable");
       const agent = listInstalledAgentsReadOnly().find(item => item.slug === "agentlas-orchestrator");
       if (!runtime || !agent) throw new Error("finance_monitor_runtime_unavailable");
       job = createAutomation({ name: input.monitor.name, scheduleHuman: schedule, timezone, targetType: "agent", targetId: agent.id,
-        promptTemplate: prompt, enabled: false, createdBy: "user", executionPermission: "read", toolMode: "browser", hubMode: "local-only",
+        promptTemplate: prompt, enabled: false, createdBy: "user", executionPermission: "write", toolMode: "auto", hubMode: "local-only",graphJson:financeMonitorGraph(input.monitor),
         runtimeSelection: workStartRuntimePin(runtime) });
     }
     input.scope.assertCurrent();

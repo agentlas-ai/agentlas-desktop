@@ -12,6 +12,8 @@ import { FinanceStore, type FinanceScope } from './store';
 import { interpretFinance } from './model';
 import { queryFinanceData, refreshFinanceQuotes, searchFinanceAssets } from './data';
 import { financeResearchPrompt } from './prompts';
+import { getFinanceService } from './service';
+import { onFinanceWorkspaceChange } from './events';
 import { pauseFinanceMonitor, readFinanceMonitor, rollbackFinanceMonitor, scheduleFinanceMonitor } from './monitor';
 
 const boundedId = z.string().min(1).max(200);
@@ -24,31 +26,16 @@ function captureScope(): FinanceScope {
   } };
 }
 export function registerFinanceIpc(input: { ipc: Pick<IpcMain, 'handle'>; assertTrustedSender(event: IpcMainInvokeEvent): void }): void {
-  const store = new FinanceStore(userDataPath('finance', 'workspaces'));
+  const service = getFinanceService();
+  const store = service.store;
   const running = new Map<string, { controller: AbortController; senderId: number }>();
   onAuthSessionOwnershipChanged(() => { for (const item of running.values()) item.controller.abort(); running.clear(); });
-  const load = async(scope: FinanceScope) => {
-    const workspace = await store.load(scope); scope.assertCurrent();
-    return { ...workspace, monitors: workspace.monitors.map(monitor => readFinanceMonitor({ scope, monitor })) };
-  };
+  const load = (scope: FinanceScope) => service.load(scope);
   const handle = (name: string, fn: (event: IpcMainInvokeEvent, raw: unknown, scope: FinanceScope) => unknown) => input.ipc.handle(`finance:${name}`, (event, raw) => { input.assertTrustedSender(event); return fn(event, raw, captureScope()); });
   handle('load', (_event, _raw, scope) => load(scope));
   handle('save', async(_event, raw, scope) => {
     const arg = z.object({ workspace: z.unknown(), expectedRevision: z.number().int().nonnegative() }).strict().parse(raw);
-    const workspace = validateFinanceWorkspace(arg.workspace), current = await store.load(scope); scope.assertCurrent();
-    for (const monitor of workspace.monitors) {
-      const previous = current.monitors.find(item => item.id === monitor.id);
-      if (previous?.automationId) {
-        const live = readFinanceMonitor({ scope, monitor: previous });
-        const protectedKeys = ['automationId', 'executionAvailability', 'scheduleHuman', 'status', 'lastCheckedAt', 'nextCheckAt', 'note'] as const;
-        const metadataMatches = [previous, live].some(snapshot => protectedKeys.every(key => JSON.stringify(monitor[key]) === JSON.stringify(snapshot[key])));
-        if (!metadataMatches) throw new Error('finance_monitor_host_owned');
-        if (live.status !== 'paused' && JSON.stringify(monitor) !== JSON.stringify(previous) && JSON.stringify(monitor) !== JSON.stringify(live)) throw new Error('finance_monitor_pause_before_edit');
-        if (live.status === 'paused' && monitor.status !== 'paused') throw new Error('finance_monitor_host_owned');
-      } else if (monitor.automationId || monitor.executionAvailability || monitor.status === 'active' || monitor.lastCheckedAt || monitor.nextCheckAt) throw new Error('finance_monitor_host_owned');
-    }
-    for (const previous of current.monitors) if (previous.automationId && !workspace.monitors.some(item => item.id === previous.id) && readFinanceMonitor({ scope, monitor: previous }).status !== 'paused') throw new Error('finance_monitor_pause_before_remove');
-    return store.save(scope, { workspace, expectedRevision: arg.expectedRevision });
+    return service.save(scope,{ workspace: validateFinanceWorkspace(arg.workspace), expectedRevision: arg.expectedRevision });
   });
   handle('search', async(_event, raw, scope) => {
     const arg = z.object({ query: z.string().min(1).max(200) }).strict().parse(raw);
@@ -92,19 +79,24 @@ export function registerFinanceIpc(input: { ipc: Pick<IpcMain, 'handle'>; assert
     const receipt = await createWorkStart({ intentId: randomUUID(), prompt: financeResearchPrompt(asset, arg.question ?? ''), options: { permissions: 'read' } }, async() => { const runtimes = await detectRuntimes(); scope.assertCurrent(); return runtimes; });
     scope.assertCurrent(); return { chatId: receipt.chatId, intentId: receipt.intentId, status: receipt.status };
   });
-  for (const action of ['scheduleMonitor', 'pauseMonitor'] as const) handle(action, async(_event, raw, scope) => {
-    const arg = action === 'scheduleMonitor' ? z.object({ monitorId: boundedId, scheduleHuman: z.enum(['daily-09:00', 'weekday-09:00', 'hourly']) }).strict().parse(raw) : z.object({ monitorId: boundedId }).strict().parse(raw);
-    const workspace = await store.load(scope); scope.assertCurrent(); const monitor = workspace.monitors.find(item => item.id === arg.monitorId);
-    if (!monitor) throw new Error('finance_monitor_not_found');
-    const updated = action === 'scheduleMonitor' ? await scheduleFinanceMonitor({ scope, monitor, assets: workspace.watchlist, scheduleHuman: 'scheduleHuman' in arg ? String(arg.scheduleHuman) : undefined }) : await pauseFinanceMonitor({ scope, monitor });
-    try { await store.save(scope, { workspace: { ...workspace, monitors: workspace.monitors.map(item => item.id === updated.id ? updated : item) }, expectedRevision: workspace.revision }); }
-    catch (error) {
-      if (action === 'scheduleMonitor') { await rollbackFinanceMonitor({ scope, monitor: updated }); throw error; }
-      if (!(error instanceof Error) || error.message !== 'finance_revision_conflict') throw error;
-      // The scheduler confirmed Pause. A newer workspace edit must not turn that revocation into a false failure.
-    }
-    scope.assertCurrent(); return { automationId: updated.automationId!, executionAvailability: 'app-running', status: updated.status };
+  for (const action of ['scheduleMonitor','pauseMonitor'] as const) handle(action,async(_event,raw,scope)=>{
+    if(action==='scheduleMonitor')return service.schedule(scope,z.object({monitorId:boundedId,scheduleHuman:z.enum(['daily-09:00','weekday-09:00','hourly','every-5m'])}).strict().parse(raw));
+    return service.pause(scope,z.object({monitorId:boundedId}).strict().parse(raw));
   });
+  handle('queryAndSave',async(_event,raw,scope)=>service.queryAndSave(scope,z.object({query:z.string().max(2000),assetIds:z.array(boundedId).max(10),metrics:z.array(z.string().max(80)).max(10),period:z.string().max(80),expectedRevision:z.number().int().nonnegative().optional(),mode:z.enum(['sources','report']),title:z.string().min(1).max(300).optional()}).strict().parse(raw)));
+  handle('runMonitor',async(_event,raw,scope)=>service.runMonitor(scope,z.object({monitorId:boundedId}).strict().parse(raw)));
+  handle('monitorRuns',async(_event,raw,scope)=>service.monitorRuns(scope,z.object({monitorId:boundedId}).strict().parse(raw)));
+  const broadcast=(change:{ownerScope:string;revision:number})=>{
+    let current:FinanceScope;try{current=captureScope();}catch{return;}
+    const ownerScope=createHash('sha256').update(JSON.stringify([current.workspaceId,current.userId])).digest('hex');
+    if(change.ownerScope!==ownerScope)return;
+    for(const window of BrowserWindow.getAllWindows())if(!window.isDestroyed())window.webContents.send('finance:changed',change);
+  };
+  onFinanceWorkspaceChange(broadcast);
+  // A daemon's @finance tool writes the same atomic store; a Main observer forwards the committed revision.
+  const workspaceRoot=userDataPath('finance','workspaces');fs.mkdirSync(workspaceRoot,{recursive:true,mode:0o700});
+  let refreshTimer:ReturnType<typeof setTimeout>|undefined;
+  try{const watcher=fs.watch(workspaceRoot,{recursive:true},(_event,name)=>{if(!name?.toString().endsWith('workspace.json'))return;if(refreshTimer)clearTimeout(refreshTimer);refreshTimer=setTimeout(()=>{let scope:FinanceScope;try{scope=captureScope();}catch{return;}void store.load(scope).then(workspace=>{scope.assertCurrent();if(workspace.ownerScope)broadcast({ownerScope:workspace.ownerScope,revision:workspace.revision});}).catch(()=>undefined);},80);});watcher.unref();}catch{ /* Same-host events remain available; polling/reopening reads canonical state. */ }
   handle('exportFile', async(event, raw, scope) => {
     const arg = z.object({ filename: z.string().min(1).max(200), content: z.string().max(16000000), mimeType: z.enum(['text/markdown', 'text/plain', 'text/csv', 'application/json', 'text/html']), ownerScope: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(raw);
     if ((await store.load(scope)).ownerScope !== arg.ownerScope) throw new Error('finance_owner_scope_mismatch');

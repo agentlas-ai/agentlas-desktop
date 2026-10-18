@@ -57,11 +57,12 @@ const MonitorSchema = z.object({
   executionAvailability: z.literal("app-running").optional(), scheduleHuman: z.string().max(300).optional(),
 }).strict();
 export type FinanceMonitor = z.infer<typeof MonitorSchema>;
+export const FINANCE_WORKSPACE_LIMITS = { reports: 200, sources: 1000 } as const;
 const WorkspaceSchema = z.object({
   schemaVersion: z.literal(1), ownerScope: id.nullable().default(null), revision: z.number().int().nonnegative(), activeDashboardId: id.nullable(),
   watchlist: z.array(AssetSchema).max(10000), holdings: z.array(HoldingSchema).max(10000),
   quotes: z.array(QuoteSchema).max(20000), dashboards: z.array(DashboardSchema).max(100),
-  reports: z.array(ReportSchema).max(200), sources: z.array(SourceSchema).max(1000), monitors: z.array(MonitorSchema).max(1000),
+  reports: z.array(ReportSchema).max(FINANCE_WORKSPACE_LIMITS.reports), sources: z.array(SourceSchema).max(FINANCE_WORKSPACE_LIMITS.sources), monitors: z.array(MonitorSchema).max(1000),
 }).strict();
 export type FinanceWorkspace = z.infer<typeof WorkspaceSchema>;
 
@@ -73,7 +74,15 @@ export interface FinanceDataResult {
   status: "ok" | "partial" | "unconnected" | "error";
   sourceUrls: string[]; asOf: string | null; retrievedAt: string;
   columns: string[]; rows: (string | number | null)[][]; warnings: string[];
+  providers?: { id: string; label: string; status: "ok" | "partial" | "unavailable" | "error"; coverage: string; rights: string; sourceUrls: string[] }[];
 }
+export interface FinanceMonitorRun {
+  id: string; monitorId: string; status: "running" | "succeeded" | "partial" | "failed" | "cancelled";
+  startedAt: string; finishedAt: string | null; reportId: string | null;
+  summary: string; warnings: string[]; error: string | null; sourceRevision: number;
+}
+export interface FinanceDataSaveRequest extends FinanceDataRequest { expectedRevision?: number; mode: "sources" | "report"; title?: string }
+export interface FinanceDataSaveResult { workspace: FinanceWorkspace; reportId?: string; sourceIds: string[]; message: string }
 export interface FinanceAPI {
   load(): Promise<FinanceWorkspace>;
   save(input: { workspace: FinanceWorkspace; expectedRevision: number }): Promise<FinanceWorkspace>;
@@ -81,6 +90,10 @@ export interface FinanceAPI {
   ask?(input: { request: string; screenContext: string; baseRevision: number; requestId?: string }): Promise<FinanceAIResult>;
   cancelAsk?(input: { requestId: string }): Promise<{ cancelled: boolean }>;
   queryData?(input: FinanceDataRequest): Promise<FinanceDataResult>;
+  queryAndSave?(input: FinanceDataSaveRequest): Promise<FinanceDataSaveResult>;
+  runMonitor?(input: { monitorId: string }): Promise<FinanceMonitorRun>;
+  monitorRuns?(input: { monitorId: string }): Promise<{ runs: FinanceMonitorRun[] }>;
+  onChanged?(listener: (change: { ownerScope: string; revision: number }) => void): () => void;
   refreshQuotes?(): Promise<FinanceAIResult>;
   startResearch?(input: { assetId: string; question?: string }): Promise<{ chatId: string; intentId: string; status: string }>;
   scheduleMonitor?(input: { monitorId: string; scheduleHuman: string }): Promise<{ automationId: string; executionAvailability: "app-running"; status: "active" | "paused" }>;

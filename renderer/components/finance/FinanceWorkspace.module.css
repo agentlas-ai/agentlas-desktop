@@ -90,3 +90,8 @@
 @media(prefers-reduced-motion:reduce) { .root * { scroll-behavior:auto!important; } }
 
 .composerForm > button { flex-shrink:0;white-space:nowrap; }
+.runPanel { margin-top:20px;padding-top:18px;border-top:1px solid var(--paper-edge); }
+.runRow { display:flex;justify-content:space-between;align-items:center;gap:16px;padding:12px 0;border-bottom:1px solid var(--paper-edge);font-size:12px; }
+.receipt { margin-top:16px;padding:16px;border:1px solid var(--paper-edge);border-radius:var(--radius-sm);background:var(--paper-2); }
+.receipt h3 { margin:0 0 10px;font-size:13px; }
+.evidenceChips { display:flex;gap:6px;flex-wrap:wrap;margin:12px 0; }

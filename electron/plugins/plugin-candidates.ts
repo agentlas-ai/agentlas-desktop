@@ -11,7 +11,7 @@
 // keywords/capabilities). There is no per-plugin table: a new plugin becomes
 // routable the moment it is installed.
 import * as fs from "node:fs";
-import * as os from "node:os";
+import { installedPluginsRoot } from "./materialize";
 import * as path from "node:path";
 import {
   autoLocalEmbedding,
@@ -46,9 +46,9 @@ export interface InstalledPluginCandidate {
 const SLUG = /^[a-z0-9][a-z0-9-]{1,63}$/u;
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 
-/** Same root the plugin router prompt reads (HOME-relative, so an isolated HOME isolates it). */
+/** The same install-owned root used by materialization and the plugin router. */
 export function pluginCandidatesRoot(): string {
-  return path.join(os.homedir(), ".agentlas", "plugins");
+  return installedPluginsRoot();
 }
 
 function str(value: unknown, max = 600): string {

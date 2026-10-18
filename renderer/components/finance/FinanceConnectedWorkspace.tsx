@@ -32,9 +32,38 @@ export function FinanceConnectedWorkspace() {
     reconnect();
     return () => { mounted = false; generation += 1; unsubscribe?.(); };
   }, []);
+  useEffect(() => {
+    if (!api?.onChanged) return;
+    let active=true;
+    const unsubscribe=api.onChanged(event=>{
+      if(!active)return;
+      const current=financeStore.getSnapshot().workspace;
+      if(event.ownerScope!==current.ownerScope || event.revision<=current.revision)return;
+      void financeStore.reloadIfNewer(event.ownerScope,event.revision).catch(()=>undefined);
+    });
+    return ()=>{active=false;unsubscribe();};
+  },[api]);
   if (!ready) return <main role="status" style={{ padding: 32 }}>{locale === "ko" ? "Finance 작업 공간을 여는 중…" : "Opening Finance…"}</main>;
 
   return <FinanceWorkspace
+    onRunMonitor={api?.runMonitor ? async monitor => {
+      await financeStore.flush();
+      const result = await api.runMonitor!({monitorId:monitor.id});
+      await financeStore.reload();
+      return result;
+    } : undefined}
+    onMonitorRuns={api?.monitorRuns ? async monitorId => {
+      await financeStore.refreshHostState();
+      return (await api.monitorRuns!({monitorId})).runs;
+    } : undefined}
+    onQueryAndSave={api?.queryAndSave ? async (request,signal) => {
+      assertNotCancelled(signal);
+      const result=await api.queryAndSave!(request);
+      // A completed host save remains committed even if the view was closed meanwhile.
+      await financeStore.reload();
+      assertNotCancelled(signal);
+      return result;
+    } : undefined}
     onConnectData={api && ipc()?.env?.set ? async key => {
       const value = key.trim();
       if (!value || value.length > 512) throw new Error("finance_provider_key_invalid");

@@ -39,6 +39,7 @@ const RELEASE_TOP_LEVEL = Object.freeze({
   design: ["README.md", "assets", "plugin.json", "references", "skills"],
   "flint-chart": ["plugin.json", "skills"],
   "office": ["plugin.json", "skills"],
+  "finance": ["plugin.json", "skills"],
   "plugin-make": ["README.md", "assets", "plugin.json", "skills"],
 });
 

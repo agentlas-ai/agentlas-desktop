@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { LIVE_DOCUMENT_PORT_SCHEMAS as LIVE_DOCUMENT_SCHEMAS } from "../live-document/ports";
+import { composeFinanceSkillContent, FINANCE_PORTS } from "../finance/tools";
 
 /*
  * Agentlas harness capability ports (docs/2026-10-13-native-harness/15 §8, contracts/harness-capability-ports.json).
@@ -19,6 +20,8 @@ export type HarnessPortKind = "query" | "command" | "job" | "subscription";
 export type HarnessPortStatus = "implemented" | "unavailable";
 
 export interface HarnessCallContext {
+  /** Main-owned capability snapshot, absent on callers without authenticated Finance authority. */
+  hostAccountBinding?: { workspaceId: string; userId: string; sessionId: string; expiresAt: number | null } | null;
   chatId: string;
   runId: string;
   /** Graph dry run or plan mode: commands are validated and refused with dry_run, nothing changes. */
@@ -224,7 +227,7 @@ async function readSkill(skillId: string): Promise<{ content: string; revision: 
     const stat = fs.lstatSync(row.path);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_SKILL_READ_BYTES) return null;
     const bytes = fs.readFileSync(row.path);
-    return { content: bytes.toString("utf8"), revision: sha(bytes), path: row.path };
+    return { content: composeFinanceSkillContent(skillId, bytes.toString("utf8")), revision: sha(bytes), path: row.path };
   } catch {
     return null;
   }
@@ -1083,6 +1086,7 @@ const PORTS: PortDefinition[] = [
       return item ? ok(item) : refused("item_unknown", "module ids come from context.items.list modules; others: harness_describe");
     },
   },
+  ...FINANCE_PORTS,
   // Live documents (live-document/ports.ts): the owner watches these edits typed into the Document tab.
   { operationId: "document.list", kind: "query", purpose: "Office documents (xlsx docx pptx hwpx hwp) open for live editing in this conversation.", required: [],
     handler: async (args, ctx) => (await import("../live-document/ports")).documentList(args, ctx) },

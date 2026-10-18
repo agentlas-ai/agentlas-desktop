@@ -897,11 +897,24 @@ export function sessionForDaemonHandoff(): HostSessionHandoff | null {
 /** Daemon only: adopt (or clear, with null) the session Main handed over. */
 export function adoptHostSessionHandoff(session: HostSessionHandoff | null): boolean {
   if (process.env.ELECTRON_RUN_AS_NODE !== "1") throw new Error("auth-session-handoff-daemon-only");
-  if (session === null) { _cache = null; emitAuthSessionOwnershipChanged(); return false; }
-  if (typeof session.cookieValue !== "string" || !session.cookieValue || session.cookieValue.length > 16_384 || /[\s;]/.test(session.cookieValue)) {
+  const clearSession = (): false => {
+    if (_cache !== null) _sessionGeneration += 1;
+    _cache = null;
+    emitAuthSessionOwnershipChanged();
+    return false;
+  };
+  if (session === null) return clearSession();
+  if (!session || typeof session !== "object" || Array.isArray(session)
+    || typeof session.cookieValue !== "string" || !session.cookieValue || session.cookieValue.length > 16_384 || /[\s;]/.test(session.cookieValue)
+    || [session.userId, session.workspaceId].some(value => value !== undefined && (typeof value !== "string" || value.length > 16_384))
+    || (session.expiresAt !== undefined && !Number.isFinite(session.expiresAt))) {
     throw new Error("auth-session-handoff-invalid");
   }
-  if (session.expiresAt !== undefined && (!Number.isFinite(session.expiresAt) || session.expiresAt < Date.now())) { _cache = null; emitAuthSessionOwnershipChanged(); return false; }
+  if (session.expiresAt !== undefined && session.expiresAt < Date.now()) return clearSession();
+  // A value-free epoch prevents a former A capability reviving after A → B → A.
+  // Reattaching the identical session must not invalidate its ongoing daemon turns.
+  if (!_cache || _cache.cookieValue !== session.cookieValue || _cache.userId !== session.userId
+    || _cache.workspaceId !== session.workspaceId || _cache.expiresAt !== session.expiresAt) _sessionGeneration += 1;
   _cache = { cookieValue: session.cookieValue, userId: session.userId, workspaceId: session.workspaceId, expiresAt: session.expiresAt };
   emitAuthSessionOwnershipChanged();
   return true;

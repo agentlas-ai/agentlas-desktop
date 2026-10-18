@@ -74,7 +74,7 @@ export function createFinanceStore(providedPersistence?: FinancePersistence) {
     if (loadPromise) return loadPromise;
     if (initialized && !force) return;
     const epoch = generation;
-    publish({ loading: true, error: null });
+    publish({ loading: !initialized, error: null });
     loadPromise = (async () => {
       try {
         const storage = persistence(); const workspace = validateFinanceWorkspace(await storage.load());
@@ -148,7 +148,47 @@ export function createFinanceStore(providedPersistence?: FinancePersistence) {
   return {
     getSnapshot: () => state,
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
-    load, reload: () => enqueue(() => load(true)), dispatch, undo, redo,
+    load, reload: () => enqueue(() => load(true)),
+    reloadIfNewer: (ownerScope: string, revision: number) => enqueue(async () => {
+      // Own save events can arrive before the save receipt; recheck inside the queue.
+      if (ownerScope !== state.workspace.ownerScope || revision <= state.workspace.revision) return;
+      await load(true);
+    }), dispatch, undo, redo,
+    refreshHostState: () => enqueue(async () => {
+      const epoch = generation;
+      await load();
+      if (epoch !== generation) throw new Error("finance_scope_changed");
+      const before = state.workspace;
+      const host = validateFinanceWorkspace(await persistence().load());
+      if (epoch !== generation) throw new Error("finance_scope_changed");
+      // Scheduler metadata can advance without changing the saved document revision.
+      // Ignore stale/foreign reads and never replace local document content at the same revision.
+      if (host.ownerScope !== before.ownerScope || host.revision < before.revision) return state.workspace;
+      if (host.revision > before.revision) {
+        undoStack = []; redoStack = [];
+        publish({ workspace: host, loading: false, error: null });
+        return state.workspace;
+      }
+      const metadata = (monitor: FinanceWorkspace["monitors"][number]) => {
+        const { status, lastCheckedAt, nextCheckAt, note, automationId, executionAvailability, scheduleHuman } = monitor;
+        return { status, lastCheckedAt, nextCheckAt, note, automationId, executionAvailability, scheduleHuman };
+      };
+      const byId = new Map(host.monitors.map(monitor => [monitor.id, monitor]));
+      const mergeMetadata = (workspace: FinanceWorkspace): FinanceWorkspace => validateFinanceWorkspace({
+        ...workspace,
+        monitors: workspace.monitors.map(monitor => {
+          const fresh = byId.get(monitor.id);
+          return fresh ? { ...monitor, ...metadata(fresh) } : monitor;
+        }),
+      });
+      const next = mergeMetadata(before);
+      if (JSON.stringify(next) !== JSON.stringify(before)) {
+        // Undo restores authored content, never obsolete host execution metadata.
+        undoStack = undoStack.map(mergeMetadata); redoStack = redoStack.map(mergeMetadata);
+        publish({ workspace: next });
+      }
+      return state.workspace;
+    }),
     flush: () => enqueue(async () => {
       await load();
       if (state.error) throw new Error(state.error);

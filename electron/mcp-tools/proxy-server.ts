@@ -111,7 +111,15 @@ export function mcpToolIsMutating(input: {
   const turnNoteRead = input.catalogId === "agentlas-turn" && (input.toolName === "memory_note" || input.toolName === "ask_form");
   // harness_search / harness_describe are inert discovery (no install, login or run); harness_call stays gated.
   const harnessRead = input.catalogId === "agentlas-turn" && (input.toolName === "harness_search" || input.toolName === "harness_describe");
-  return !(browserRead || nativeRead || uiSchemaRead || turnNoteRead || harnessRead || oneGraphReadPermissionCall(input));
+  // Stopping an exact Finance monitor remains reachable after permission drops. The sealed
+  // Finance handler still checks the captured owner and refuses dry runs; no enable/edit alias is admitted.
+  const harnessArgs = input.args && typeof input.args === "object" && !Array.isArray(input.args) ? input.args as Record<string, unknown> : null;
+  const monitorArgs = harnessArgs?.args && typeof harnessArgs.args === "object" && !Array.isArray(harnessArgs.args) ? harnessArgs.args as Record<string, unknown> : null;
+  const financeStop = input.catalogId === "agentlas-turn" && input.toolName === "harness_call"
+    && harnessArgs?.operation === "finance.monitor.pause" && Object.keys(harnessArgs).length === 2 && Object.keys(harnessArgs).every(key => key === "operation" || key === "args")
+    && monitorArgs !== null && Object.keys(monitorArgs).length === 1 && Object.hasOwn(monitorArgs, "monitorId")
+    && typeof monitorArgs.monitorId === "string" && monitorArgs.monitorId.trim().length > 0 && monitorArgs.monitorId.length <= 200;
+  return !(browserRead || nativeRead || uiSchemaRead || turnNoteRead || harnessRead || financeStop || oneGraphReadPermissionCall(input));
 }
 
 /** Plan observation authority is minted from the actual host launcher, not a

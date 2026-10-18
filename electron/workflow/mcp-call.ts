@@ -203,7 +203,7 @@ export async function runGraphMcpCall(input: GraphMcpCallOptions): Promise<Graph
   const cwd = workingFolder ?? agentRunCwd();
   const permission = input.dryRun || input.effect !== "mutation" ? "read" : input.permission;
   const sessionKey = `graph-mcp:${input.runId}:${input.nodeId}:${randomUUID()}`;
-  const config = await buildMcpConfigFile({ catalogIds: [raw.catalogId], requiredToolCatalogIds: [raw.catalogId],
+  const config = await buildMcpConfigFile({ catalogIds: [raw.catalogId], requiredToolCatalogIds: [raw.catalogId], turnRunId: input.runId,
     skipDefaultSeed: true, configKey: sessionKey, admissionCurrent: () => {
       try { assertCurrent(); return true; } catch { return false; }
     }, ...(workingFolder ? { workingFolder } : {}), browserProfileKey: `automation-${input.automationId}`,

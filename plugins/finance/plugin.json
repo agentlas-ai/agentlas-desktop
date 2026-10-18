@@ -1,0 +1,58 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "finance",
+  "name": "Agentlas Finance",
+  "version": "0.1.0",
+  "builtin": true,
+  "publisher": {
+    "name": "Agentlas",
+    "url": "https://agentlas.cloud"
+  },
+  "surface": {
+    "displayName": "Finance",
+    "displayNameKo": "파이낸스",
+    "tagline": "Research assets and edit Finance dashboards, reports and monitors",
+    "taglineKo": "종목을 조사하고 Finance 화면·보고서·모니터를 관리합니다",
+    "description": "Search actual provider sources, save evidence, edit the authenticated Finance workspace and run research monitors from One or Work. Coverage and host availability are returned with each result.",
+    "descriptionKo": "One·Work에서 실제 제공자 자료를 검색하고 근거를 저장하며 Finance 화면과 조사 모니터를 관리합니다. 자료 범위와 실행 호스트 상태를 결과와 함께 확인합니다.",
+    "category": "data",
+    "brandColor": "#0F766E",
+    "defaultPrompts": [
+      "@finance 애플 공시를 찾아 근거가 있는 보고서로 저장해줘",
+      "@finance 내 대시보드에서 위험 표를 맨 위로 옮겨줘",
+      "@finance 관심 종목 조사 모니터를 만들고 지금 실행해줘"
+    ]
+  },
+  "invocation": {
+    "mention": "@finance",
+    "implicit": "router",
+    "standalone": true
+  },
+  "provides": {
+    "skills": {
+      "router": "skills/index/SKILL.md",
+      "workflows": [
+        "research",
+        "workspace",
+        "monitor"
+      ]
+    }
+  },
+  "requires": {
+    "prereq": [],
+    "os": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
+  },
+  "permissions": {
+    "fileWrite": "none",
+    "network": "none",
+    "shell": "deny"
+  },
+  "state": {
+    "files": [],
+    "assets": false
+  }
+}

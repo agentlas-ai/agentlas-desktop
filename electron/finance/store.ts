@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { createFinanceWorkspace, validateFinanceWorkspace, type FinanceWorkspace } from '../../shared/finance';
+import { publishFinanceWorkspaceChange } from './events';
 
 export interface FinanceScope { workspaceId: string; userId: string; assertCurrent(): void }
 const lockfile = require('proper-lockfile') as { lock(path: string, options: unknown): Promise<() => Promise<void>> };
@@ -52,6 +53,7 @@ export class FinanceStore {
         fs.writeFileSync(temporary, bytes, { mode: 0o600, flag: 'wx' });
         fs.renameSync(temporary, path.join(directory, 'workspace.json'));
       } finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
+      publishFinanceWorkspaceChange({ownerScope:path.basename(directory),revision:next.revision});
       return next;
     } finally { await release(); }
   }
