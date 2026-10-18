@@ -234,6 +234,10 @@ function productionPorts(): RoomChatPorts {
   const chats = () => require("../store/chats") as typeof import("../store/chats");
   const invocation = () => (require("../invocation/service") as typeof import("../invocation/service")).invocationService;
   const locale = () => (require("../ui-locale") as typeof import("../ui-locale")).currentUiLocale();
+  const queuedSteerState = (id: string) => (require("../store/invocation-steers") as typeof import("../store/invocation-steers")).queuedSteerState(id);
+  const deferSystemRelay = (input: import("../invocation/deferred-system-relays").DeferredRelayInput) =>
+    (require("../invocation/deferred-system-relays") as typeof import("../invocation/deferred-system-relays")).deferSystemRelay(input);
+  const refusalCode = (error: unknown) => (require("../runtime/runner") as typeof import("../runtime/runner")).refusalCode(error);
   const pendingWake = new Map<string, { queuedRequestId: string; notes: RoomNoteForOne[] }>();
 
   function wakePrompt(notes: readonly RoomNoteForOne[]): string {
@@ -274,14 +278,34 @@ function productionPorts(): RoomChatPorts {
     wakeOne({ roomChatId, notes }) {
       const service = invocation();
       const earlier = pendingWake.get(roomChatId);
-      pendingWake.delete(roomChatId);
-      // One has not read the earlier follow-up yet: replace it with one that holds everything, so a burst is one turn.
-      const merged = earlier && service.unsteerQueuedById(roomChatId, earlier.queuedRequestId) ? [...earlier.notes, ...notes] : notes;
-      const steered = service.steer({
-        chatId: roomChatId, userPrompt: wakePrompt(merged), promptOrigin: "system", locale: locale(), permissions: "read",
-        taskIntent: "conversation", oneMode: true, runId: undefined,
-      } as never);
+      // One has not read the earlier follow-up yet: the new one holds everything, so a burst is one turn. The earlier one is
+      // withdrawn only after the new one is accepted. Withdrawing it first lost both when the steer was refused (an app
+      // closing, the other host holding the room, a locked store), and recorded the earlier one as superseded by nothing
+      // (D8, flow audit 2026-10-18). Its durable row says whether it still waits (a held row is not merged).
+      const state = earlier ? queuedSteerState(earlier.queuedRequestId) : null;
+      const waiting = earlier && state?.status === "queued" && !state.recoveryReason ? earlier : null;
+      const merged = waiting ? [...waiting.notes, ...notes] : notes;
+      let steered: { queued: boolean; queuedRequestId?: string };
+      try {
+        steered = service.steer({
+          chatId: roomChatId, userPrompt: wakePrompt(merged), promptOrigin: "system", locale: locale(), permissions: "read",
+          taskIntent: "conversation", oneMode: true, runId: undefined,
+        } as never);
+      } catch (error) {
+        // The earlier follow-up keeps its place and its own notes; these notes wait for the room's next turn that runs
+        // (deferred-system-relays.ts), with the refusal as the cause. A start that parked the same text itself is not doubled.
+        if (!waiting) pendingWake.delete(roomChatId);
+        const cause = `room_note_${refusalCode(error) ?? "steer_error"}`;
+        const parked = deferSystemRelay({ chatId: roomChatId, text: wakePrompt(notes), cause });
+        console.warn(`[room-chat] One follow-up not queued; notes kept for the room's next turn chat=${roomChatId} cause=${cause} `
+          + `parked=${parked ? "new" : "already"}${waiting ? ` earlier=${waiting.queuedRequestId} kept` : ""}`);
+        return;
+      }
+      if (waiting && !service.unsteerQueuedById(roomChatId, waiting.queuedRequestId)) {
+        console.warn(`[room-chat] earlier One follow-up was taken before it could be replaced steer=${waiting.queuedRequestId} chat=${roomChatId}`);
+      }
       if (steered.queued && steered.queuedRequestId) pendingWake.set(roomChatId, { queuedRequestId: steered.queuedRequestId, notes: merged });
+      else pendingWake.delete(roomChatId);
     },
   };
 }

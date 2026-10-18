@@ -18,6 +18,7 @@ import { buildTeamSessionHandoff } from "./session-handoff";
 import { ONE_BUBBLE_COLORS, type OneBubbleColor } from '../../shared/one-profile';
 import type { OneSupervisorWorkQueue } from "./supervisor-work-queue";
 import { runtimeFailureBlocksNextAutomaticTurn } from "../../shared/runtime-turn-admission";
+import { isTypedCode } from "../../shared/turn-settlement";
 import type { OneSupervisorOwner } from "./supervisor-owner";
 import type { SupervisorJournalInput, SupervisorJournalPage, SupervisorStopInput } from "../../shared/one-supervisor-runtime";
 import {OneBudgetAdmissionDenied,type OneBudgetStore} from "./budget-store";
@@ -72,6 +73,13 @@ export interface SupervisorDependencies {
 }
 
 const settled = (receipt: InvocationRunReceipt | null) => !!receipt && ["completed","failed","cancelled","interrupted"].includes(receipt.status);
+/**
+ * A failed run's request names the run's own machine cause (receipt.errorCode), never NULL: production 2026-10-10..17,
+ * 22 failed One replies and chat sends carried reason NULL while their runs had task-force-verification-failed,
+ * mcp-runtime-config-unavailable, runtime_turn_unsettled or runner-failed (D10, flow audit 2026-10-18). A receipt without
+ * a typed code is "unattributed", like a steer row's terminal cause.
+ */
+const failedRunReason = (receipt: InvocationRunReceipt): string => isTypedCode(receipt.errorCode) ? receipt.errorCode : "unattributed";
 const clip = (value: unknown, max: number) => {
   const text = typeof value === "string" ? value.trim() : "";
   return text.length > max ? `${text.slice(0, max)}…` : text;
@@ -358,7 +366,7 @@ export class OneSupervisorService {
       const cancelRequested = row.kind === "cancel" || row.kind === "stop-reply";
       this.deps.store.update(row, {
         state: receipt.status === "completed" ? "completed" : receipt.status === "cancelled" ? "cancelled" : "failed",
-        acknowledgement: "settled", reason: receipt.status === "interrupted" ? "interrupted_requires_review" : cancelRequested && receipt.status !== "cancelled" ? "cancel_raced_terminal_outcome" : row.kind==='steer' ? "applied_in_next_run" : null,
+        acknowledgement: "settled", reason: receipt.status === "interrupted" ? "interrupted_requires_review" : cancelRequested && receipt.status !== "cancelled" ? "cancel_raced_terminal_outcome" : row.kind==='steer' ? "applied_in_next_run" : receipt.status === "failed" ? failedRunReason(receipt) : null,
       });
       // Every hand-off One made comes back for review: Work, a follow-up, a message into another conversation and a Science
       // turn (docs native-harness 22 O1/O2; before, only Work and follow-ups did, so a group room or a Science turn finished

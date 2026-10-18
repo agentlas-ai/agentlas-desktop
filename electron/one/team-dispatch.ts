@@ -588,9 +588,11 @@ function view(dispatch: OneDispatchRow) {
     brief: dispatch.brief,
     ...(running ? {} : { result: dispatch.result_text ?? null }),
     ...(wait ? { waiting_for_owner: wait } : {}),
-    // A report held for the room (busy in the other process, or cut by a restart) is pending delivery, not a failed one.
+    // A report held for the room (busy in the other process, or cut by a restart) is pending delivery, not a failed one. A
+    // report the owner's stop withdrew is "withdrawn": a "failed" state kept the model from starting that teammate again
+    // (365aa37f, one_team_list), and the owner's stop is not the teammate's failure.
     ...(!running && !dispatch.reported_at && dispatch.report_error ? { report: { state: (HELD_REPORT_CODES as readonly string[]).includes(dispatch.report_error)
-      ? "pending" : "failed", error: dispatch.report_error, attempts: dispatch.report_attempts ?? 0 } } : {}),
+      ? "pending" : dispatch.report_error === ONE_TEAM_REPORT_OWNER_STOPPED ? "withdrawn" : "failed", error: dispatch.report_error, attempts: dispatch.report_attempts ?? 0 } } : {}),
     started_at: dispatch.created_at,
     updated_at: dispatch.updated_at,
   };
