@@ -33,17 +33,24 @@ export class FinanceStore {
     return { ...result, ownerScope };
   }
   async save(scope: FinanceScope, input: { workspace: FinanceWorkspace; expectedRevision: number }): Promise<FinanceWorkspace> {
-    if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0) throw new Error('finance_revision_invalid');
     const proposed = validateFinanceWorkspace(input.workspace);
+    return this.transaction(scope,input.expectedRevision,()=>proposed);
+  }
+  /** Archive verification and active membership changes share the canonical workspace lease and CAS. */
+  async transaction(scope:FinanceScope,expectedRevision:number,update:(current:FinanceWorkspace)=>Promise<FinanceWorkspace>|FinanceWorkspace):Promise<FinanceWorkspace> {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) throw new Error('finance_revision_invalid');
     const directory = this.directory(scope);
-    if (proposed.ownerScope !== path.basename(directory)) throw new Error('finance_owner_scope_mismatch');
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
     if (fs.lstatSync(directory).isSymbolicLink()) throw new Error('finance_store_invalid');
     const release = await lockfile.lock(directory, { realpath: false, stale: 15000, retries: { retries: 40, minTimeout: 20, maxTimeout: 250 } });
     try {
       scope.assertCurrent();
       const current = this.read(directory);
-      if (current.revision !== input.expectedRevision) throw new Error('finance_revision_conflict');
+      if (current.revision !== expectedRevision) throw new Error('finance_revision_conflict');
+      if(current.ownerScope&&current.ownerScope!==path.basename(directory))throw new Error('finance_owner_scope_mismatch');
+      const proposed=validateFinanceWorkspace(await update({...current,ownerScope:path.basename(directory)}));
+      scope.assertCurrent();
+      if (proposed.ownerScope !== path.basename(directory)) throw new Error('finance_owner_scope_mismatch');
       const next = validateFinanceWorkspace({ ...proposed, revision: current.revision + 1 });
       const bytes = Buffer.from(JSON.stringify(next), 'utf8');
       if (bytes.length > MAX_BYTES) throw new Error('finance_workspace_too_large');

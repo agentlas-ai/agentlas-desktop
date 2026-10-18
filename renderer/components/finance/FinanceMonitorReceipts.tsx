@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { FinanceMonitor, FinanceMonitorRun } from "@shared/finance";
+import type { FinanceMonitor, FinanceMonitorRun, FinanceMonitorRunsResult } from "@shared/finance";
 import { FinanceMessage, financeStatus, financeMessage } from "./FinanceMessage";
 import styles from "./FinanceWorkspace.module.css";
 
@@ -8,7 +8,7 @@ export interface FinanceMonitorReceiptsProps {
   monitor: FinanceMonitor;
   ko: boolean;
   onRun?: (monitor: FinanceMonitor) => Promise<FinanceMonitorRun>;
-  onLoad?: (monitorId: string) => Promise<FinanceMonitorRun[]>;
+  onLoad?: (monitorId: string, page?: {cursor?:string;limit?:number}) => Promise<FinanceMonitorRunsResult>;
   onOpenReport: (reportId: string) => void;
 }
 /** Readable text only: React escapes every value; HTML, embeds and code never execute. */
@@ -28,19 +28,23 @@ export function FinanceBriefText({value,ko=true}:{value:string;ko?:boolean}) {
 export function FinanceMonitorReceipts({ monitor, ko, onRun, onLoad, onOpenReport }: FinanceMonitorReceiptsProps) {
   const [runs, setRuns] = useState<FinanceMonitorRun[]>([]);
   const [loading, setLoading] = useState(false);
+  const [nextCursor,setNextCursor]=useState<string|undefined>();
+  const [indexStatus,setIndexStatus]=useState<string>();
+  const [loadingMore,setLoadingMore]=useState(false);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
   const alive = useRef(true);
   const generation = useRef(0);
+  const snapshotSequence=useRef<number|undefined>();
   const t = (a: string, b: string) => ko ? a : b;
   const when = (date: string | null) => date ? new Date(date).toLocaleString(ko ? "ko-KR" : "en-US") : t("미확인", "Unknown");
   const refresh = useCallback(async () => {
     if (!onLoad) return;
     const epoch = ++generation.current;
-    setLoading(true);
+    setLoading(true);setLoadingMore(false);
     try {
-      const rows = await onLoad(monitor.id);
-      if (alive.current && generation.current === epoch) { setRuns(rows); setError(""); }
+      const page = await onLoad(monitor.id);
+      if (alive.current && generation.current === epoch) { snapshotSequence.current=page.snapshotSequence; setRuns(page.runs); setNextCursor(page.nextCursor??undefined); setIndexStatus(page.indexStatus); setLoadingMore(false); setError(""); }
     } catch { if (alive.current && generation.current === epoch) setError(ko ? "실행 이력을 불러오지 못했습니다. 실행 성공을 확인할 수 없습니다." : "Could not load the run ledger. Execution success is unconfirmed."); }
     finally { if (alive.current && generation.current === epoch) setLoading(false); }
   }, [onLoad, monitor.id, ko]);
@@ -52,6 +56,14 @@ export function FinanceMonitorReceipts({ monitor, ko, onRun, onLoad, onOpenRepor
     document.addEventListener("visibilitychange", tick);
     return () => { alive.current = false; generation.current++; window.clearInterval(timer); document.removeEventListener("visibilitychange", tick); };
   }, [refresh,monitor.status]);
+  const loadMore = async () => {
+    if(!onLoad || !nextCursor || loading || loadingMore)return;
+    const epoch=generation.current;const cursor=nextCursor;setLoadingMore(true);
+    try {const page=await onLoad(monitor.id,{cursor,limit:10});
+      if(alive.current&&generation.current===epoch){if(snapshotSequence.current!==undefined&&page.snapshotSequence!==snapshotSequence.current)throw new Error("finance_ledger_snapshot_changed");setRuns(previous=>[...previous,...page.runs.filter(run=>!previous.some(existing=>existing.id===run.id))]);setNextCursor(page.nextCursor??undefined);setIndexStatus(page.indexStatus);}
+    }catch{if(alive.current&&generation.current===epoch)setError(t("이전 실행 이력을 불러오지 못했습니다. 현재 페이지는 유지됩니다.","Could not load older runs. The current page is preserved."));}
+    finally{if(alive.current&&generation.current===epoch)setLoadingMore(false);}
+  };
   const runNow = async () => {
     if(!onRun || running) return;
     setRunning(true); setError("");
@@ -82,7 +94,8 @@ export function FinanceMonitorReceipts({ monitor, ko, onRun, onLoad, onOpenRepor
     {latest?.summary && <FinanceBriefText value={latest.summary} ko={ko}/>}
     {latest?.error && <div className={`${styles.notice} ${styles.error}`} role="alert"><FinanceMessage value={latest.error} ko={ko} error/></div>}
     {!!latest?.warnings.length&&<details><summary className={styles.muted}>{t("자료 범위와 한계","Coverage and limitations")} · {latest.warnings.length}</summary><ol>{latest.warnings.map((warning,index)=><li key={index} className={styles.muted}><p>{financeMessage(warning,ko)}</p>{financeMessage(warning,ko)!==warning&&<p style={{whiteSpace:"pre-wrap",overflowWrap:"anywhere"}} lang="en">{warning}</p>}</li>)}</ol></details>}
-    {ordered.length>0 && <details><summary className={styles.muted}>{t("실행 이력과 이전 브리핑","Run history and previous briefings")} · {ordered.length}</summary><div className={styles.list}>{ordered.slice(0,10).map(run=><div key={run.id} className={styles.runRow}><div><strong>{financeStatus(run.status,ko)}</strong><div className={styles.muted}>{when(run.startedAt)} · {t("자료 판본","Revision")} {run.sourceRevision}</div></div>{run.reportId&&<button type="button" className={styles.button} onClick={()=>onOpenReport(run.reportId!)}>{t("브리핑","Briefing")}</button>}</div>)}</div></details>}
+    {ordered.length>0 && <details><summary className={styles.muted}>{t("실행 이력과 이전 브리핑","Run history and previous briefings")} · {ordered.length}</summary><div className={styles.list}>{ordered.map(run=><div key={run.id} className={styles.runRow}><div><strong>{financeStatus(run.status,ko)}</strong><div className={styles.muted}>{when(run.startedAt)} · {t("자료 판본","Revision")} {run.sourceRevision}</div></div>{run.reportId&&<button type="button" className={styles.button} onClick={()=>onOpenReport(run.reportId!)}>{t("브리핑","Briefing")}</button>}</div>)}</div>{nextCursor&&<button type="button" className={styles.button} disabled={loading||loadingMore} onClick={()=>{void loadMore();}}>{loadingMore?t("이전 이력 확인 중…","Loading older runs…"):t("이전 실행 더 보기","Load older runs")}</button>}<p className={styles.muted}>{t("새로고침하면 최신 첫 페이지부터 다시 표시합니다.","Refreshing starts again from the latest first page.")}</p></details>}
+    {indexStatus&&indexStatus!=="ready"&&<p role="status" className={styles.muted}>{indexStatus==="building"?t("이력 색인을 준비 중입니다. 잠시 후 새로고침하세요.","The history index is building. Refresh shortly."):t("이전 이력 색인 전환이 필요합니다. 현재 표시 범위만 확인할 수 있습니다.","The history index requires migration. Only the current coverage is confirmed.")}</p>}
     {!onLoad && <p className={styles.muted}>{t("실행 이력 API가 연결되지 않아 결과를 확인할 수 없습니다.","Run ledger API is not connected; results are unconfirmed.")}</p>}
   </section>;
 }

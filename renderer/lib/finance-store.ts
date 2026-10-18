@@ -154,6 +154,20 @@ export function createFinanceStore(providedPersistence?: FinancePersistence) {
       if (ownerScope !== state.workspace.ownerScope || revision <= state.workspace.revision) return;
       await load(true);
     }), dispatch, undo, redo,
+    runHostMutation: <T,>(operation:()=>Promise<T>):Promise<T> => {
+      const epoch=generation;
+      return enqueue(async()=>{
+        await load();
+        if(epoch!==generation)throw new Error("finance_scope_changed");
+        const result=await operation();
+        if(epoch!==generation)throw new Error("finance_scope_changed");
+        const host=validateFinanceWorkspace(await persistence().load());
+        if(epoch!==generation)throw new Error("finance_scope_changed");
+        if(host.ownerScope!==state.workspace.ownerScope)throw new Error("finance_scope_changed");
+        if(host.revision>state.workspace.revision){undoStack=[];redoStack=[];publish({workspace:host,loading:false,error:null});}
+        return result;
+      });
+    },
     refreshHostState: () => enqueue(async () => {
       const epoch = generation;
       await load();

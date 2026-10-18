@@ -1,7 +1,36 @@
 import styles from "./FinanceWorkspace.module.css";
 
+const hostMessages: Record<string, [string, string]> = {
+  finance_archive_read_only_snapshot: ["읽기 전용 보관 원본입니다. 복원하기 전에는 활성 자료가 바뀌지 않습니다.", "This is a read-only preserved snapshot. Active material changes only after restoration."],
+  finance_archive_integrity_failed: ["보관 원본의 무결성을 확인하지 못해 열거나 복원하지 않았습니다.", "The preserved snapshot failed its integrity check and was not opened or restored."],
+  finance_archive_not_found: ["연결된 보관 원본을 찾지 못했습니다. 현재 계정과 보관 목록을 확인하세요.", "The preserved snapshot was not found. Check the current account and archive list."],
+  finance_archive_report_conflict: ["같은 보고서 식별자에 다른 내용이 있어 복원하지 않았습니다. 현재 보고서를 확인하세요.", "An active report with the same ID has different content. Restoration was stopped."],
+  finance_archive_source_conflict: ["같은 출처 식별자의 내용이 달라 복원하지 않았습니다. 활성 출처는 유지됩니다.", "An active source with the same ID has different content. The active source is preserved."],
+  finance_archive_source_missing: ["보고서가 참조하는 보관 출처를 확인하지 못해 복원하지 않았습니다.", "A source required by the report could not be verified. Restoration was stopped."],
+  finance_archive_cursor_invalid: ["보관 목록의 조회 기준이 유효하지 않습니다. 보관함을 다시 여세요.", "The archive cursor is invalid. Reopen the archive list."],
+  finance_archive_conflict: ["보관 원본과 현재 자료가 충돌합니다. 현재 자료는 유지됩니다.", "The preserved snapshot conflicts with current material. Current material is retained."],
+  finance_archive_nothing_to_reclaim: ["보관할 보고서나 참조 없는 출처가 없습니다. 현재 참조 중인 자료는 그대로 유지됩니다.", "No selected reports or unused sources can be archived. Referenced material remains active."],
+  finance_archive_nothing_to_restore: ["선택한 자료가 이미 활성 목록에 있어 추가로 복원할 항목이 없습니다.", "The selected material is already active; there is nothing additional to restore."],
+  finance_archive_sources_still_referenced: ["보고서는 보관했으며, 다른 보고서·보유 자산·가격이 참조하는 출처는 활성 목록에 유지했습니다.", "Reports were archived. Sources referenced by other reports, holdings or prices remain active."],
+  finance_archive_catalog_pending: ["보관 목록의 이전 저장을 확인해야 합니다. 활성 자료를 유지했으니 보관함을 다시 열어주세요.", "A previous archive catalog write needs recovery. Active material is preserved; reopen the archive."],
+  finance_archive_catalog_invalid: ["보관 목록을 확인하지 못했습니다. 보관 원본은 유지되며 자동으로 지우지 않습니다.", "The archive catalog could not be verified. Preserved originals are retained."],
+  finance_history_index_building: ["이전 실행 이력을 준비 중입니다. 잠시 후 이력을 새로고침하세요.", "Previous run history is being indexed. Refresh the ledger shortly."],
+  finance_history_recovery_required: ["중단된 이력을 복구 중입니다. 다음 조회에서 진행 상태를 확인하세요.", "Interrupted history is being recovered. Check progress with the next ledger refresh."],
+  finance_history_busy: ["다른 작업이 이력을 저장 중입니다. 잠시 후 다시 확인하세요.", "Another operation is saving history. Try the ledger again shortly."],
+  finance_history_runtime_unavailable: ["이 앱에서 실행 이력 저장소를 열지 못했습니다. 기존 실행 원본은 유지됩니다.", "The run-history store could not be opened in this app. Original run records are retained."],
+  finance_history_cursor_invalid: ["이력 조회 기준이 유효하지 않습니다. 새로고침하여 최신 페이지부터 확인하세요.", "The history cursor is invalid. Refresh to start with the latest page."],
+  finance_history_index_invalid: ["실행 이력 색인을 확인하지 못했습니다. 기존 실행 원본을 유지하고 조회를 중단했습니다.", "The history index could not be verified. Original records are preserved and the read was stopped."],
+};
 const messages: Record<string, string> = {
-  "finance_workspace_capacity_reached": "보고서 또는 출처 저장 한도에 도달했습니다. 필요한 보고서를 먼저 내보내고 보관 자료를 정리한 뒤 다시 실행하세요. 기존 자료는 자동으로 지우지 않습니다.",
+  "finance_archive_read_only_snapshot": "원본 스냅샷을 읽기 전용으로 열었습니다. 활성 자료는 복원 전까지 바뀌지 않습니다.",
+  "finance_archive_integrity_failed": "보관 원본의 무결성을 확인하지 못해 열거나 복원하지 않았습니다.",
+  "finance_archive_not_found": "연결된 보관 원본을 찾지 못했습니다. 현재 계정과 보관 목록을 확인하세요.",
+  "finance_archive_report_conflict": "같은 보고서 식별자에 다른 활성 내용이 있어 복원하지 않았습니다. 활성 원본과 보관 원본을 확인하세요.",
+  "finance_archive_source_conflict": "같은 출처 식별자의 내용이 달라 복원하지 않았습니다. 활성 출처는 유지됩니다.",
+  "finance_archive_source_missing": "보고서가 참조하는 보관 출처를 확인하지 못해 복원하지 않았습니다.",
+  "finance_archive_cursor_invalid": "보관 목록의 조회 기준이 만료되었거나 유효하지 않습니다. 보관함을 다시 여세요.",
+  "finance_archive_conflict": "보관 원본과 현재 자료가 충돌합니다. 자동으로 덮어쓰지 않았습니다.",
+  "finance_workspace_capacity_reached": "보고서 또는 출처 저장 한도에 도달했습니다. 보고서나 참조없는 출처를 보관함에 보관한 뒤 다시 실행하세요. 기존 자료는 자동으로 지우지 않습니다.",
   "finance_workspace_too_large": "작업 공간의 저장 크기 한도에 도달했습니다. 필요한 보고서를 내보내고 보관 자료를 정리하세요.",
   "finance_monitor_definition_changed": "조회 중 모니터 질문이나 대상 자산이 바뀌어 이전 조건의 결과를 저장하지 않았습니다. 현재 조건을 확인하고 다시 실행하세요.",
   "finance_monitor_interrupted": "이전 실행이 중단되어 완료 여부를 확인할 수 없습니다. 저장된 자료와 실행 이력을 확인한 뒤 다시 실행하세요.",
@@ -53,6 +82,7 @@ const messages: Record<string, string> = {
 const statuses: Record<string, string> = { running:"실행 중", succeeded:"완료", failed:"실패", cancelled:"취소됨", unavailable:"실행 불가", invalid_output:"결과 형식 확인 필요", conflict:"변경 충돌", nav:"공식 펀드 NAV", price:"가격", news:"뉴스", filings:"공시", social:"공식 계정 글", social_search:"SNS 검색", company_facts:"기업 재무 원자료", macro_news:"거시 뉴스", treasury_yields:"국채 수익률", etf_holdings:"ETF 편입", "dashboard.add":"대시보드 추가", "dashboard.update":"대시보드 조건 변경", "dashboard.rename":"대시보드 이름 변경", "dashboard.select":"대시보드 선택", "widget.add":"블록 추가", "widget.update":"블록 설정 변경", "widget.move":"블록 순서 변경", "widget.remove":"블록 제거", "report.add":"보고서 생성", "report.refresh":"새 자료 보고서 버전", "report.update":"보고서 변경", "report.section.update":"보고서 문장·제목 변경", "report.section.move":"보고서 순서 변경", "report.section.remove":"보고서 섹션 제거", "watchlist.add":"관심 자산 추가", "watchlist.remove":"관심 자산 제거", "source.upsert":"출처 기록", "holdings.import":"보유 자료 가져오기", "quotes.import":"가격 관측 추가", "monitor.upsert":"모니터링 조건 저장", "Summary": "핵심 판단", "Sources and limitations": "출처와 한계", ready: "자료 있음", partial: "일부 자료", empty: "자료 없음", unsupported: "미지원", connected: "연결됨", imported: "가져옴", unconnected: "연결 안 됨", error: "오류", draft: "초안", active: "예약 활성", paused: "일시정지", ok: "조회 완료", csv: "CSV 파일", manual: "직접 입력", provider: "공급자 연결", dashboard: "대시보드", watchlist: "자산 찾기", reports: "보고서", sources: "자료와 근거", monitors: "모니터링", "CSV import": "CSV 가져오기" };
 export function financeStatus(value: string, ko: boolean): string { return ko ? statuses[value] ?? value : value; }
 export function financeMessage(value: string, ko: boolean): string {
+  if (hostMessages[value]) return hostMessages[value][ko ? 0 : 1];
   if (!ko) return value;
   if (messages[value]) return messages[value];
   const row = /^Row (\d+): ([\s\S]+)$/.exec(value);

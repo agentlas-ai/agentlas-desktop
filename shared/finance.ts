@@ -83,6 +83,26 @@ export interface FinanceMonitorRun {
 }
 export interface FinanceDataSaveRequest extends FinanceDataRequest { expectedRevision?: number; mode: "sources" | "report"; title?: string }
 export interface FinanceDataSaveResult { workspace: FinanceWorkspace; reportId?: string; sourceIds: string[]; message: string }
+export type FinanceArchiveRequest =
+  | { action: "create"; expectedRevision: number; reportIds: string[] }
+  | { action: "list"; cursor?: string; limit?: number }
+  | { action: "read"; archiveId: string }
+  | { action: "read"; reportId: string }
+  | { action: "restore"; archiveId: string; reportIds?: string[]; expectedRevision: number };
+export interface FinanceArchiveItem {
+  archiveId: string; createdAt: string; sourceRevision: number; sha256: string;
+  reportIds: string[]; reportTitles: string[]; reportCount: number; sourceCount: number;
+}
+export type FinanceArchiveResult =
+  | { action: "create"; archiveId: string; workspace: FinanceWorkspace; reclaimed: { reports: number; sources: number }; sha256: string; warnings: string[] }
+  | { action: "list"; items: FinanceArchiveItem[]; nextCursor: string | null }
+  | { action: "read"; archiveId: string; workspaceSnapshot: FinanceWorkspace; reportIds: string[]; sha256: string; warnings: string[] }
+  | { action: "restore"; archiveId: string; workspace: FinanceWorkspace; restored: { reports: number; sources: number }; warnings: string[] };
+export interface FinanceMonitorRunsRequest { monitorId: string; cursor?: string; limit?: number }
+export interface FinanceMonitorRunsResult {
+  runs: FinanceMonitorRun[]; nextCursor?: string | null; snapshotSequence?: number;
+  indexStatus?: "ready" | "building"; indexedCount?: number;
+}
 export interface FinanceAPI {
   load(): Promise<FinanceWorkspace>;
   save(input: { workspace: FinanceWorkspace; expectedRevision: number }): Promise<FinanceWorkspace>;
@@ -92,7 +112,8 @@ export interface FinanceAPI {
   queryData?(input: FinanceDataRequest): Promise<FinanceDataResult>;
   queryAndSave?(input: FinanceDataSaveRequest): Promise<FinanceDataSaveResult>;
   runMonitor?(input: { monitorId: string }): Promise<FinanceMonitorRun>;
-  monitorRuns?(input: { monitorId: string }): Promise<{ runs: FinanceMonitorRun[] }>;
+  monitorRuns?(input: FinanceMonitorRunsRequest): Promise<FinanceMonitorRunsResult>;
+  archives?(input: FinanceArchiveRequest): Promise<FinanceArchiveResult>;
   onChanged?(listener: (change: { ownerScope: string; revision: number }) => void): () => void;
   refreshQuotes?(): Promise<FinanceAIResult>;
   startResearch?(input: { assetId: string; question?: string }): Promise<{ chatId: string; intentId: string; status: string }>;

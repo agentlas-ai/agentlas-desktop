@@ -1,10 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { applyFinanceOperations, createFinanceReport, financeId, FINANCE_WORKSPACE_LIMITS, validateFinanceOperation, validateFinanceWorkspace, type FinanceAIResult, type FinanceDataRequest, type FinanceDataResult, type FinanceDataSaveRequest, type FinanceDataSaveResult, type FinanceMonitor, type FinanceMonitorRun, type FinanceOperation, type FinanceReport, type FinanceSource, type FinanceWorkspace } from "../../shared/finance";
+import { applyFinanceOperations, createFinanceReport, financeId, FINANCE_WORKSPACE_LIMITS, validateFinanceOperation, validateFinanceWorkspace, type FinanceAIResult, type FinanceDataRequest, type FinanceDataResult, type FinanceDataSaveRequest, type FinanceDataSaveResult, type FinanceMonitor, type FinanceMonitorRun, type FinanceOperation, type FinanceReport, type FinanceSource, type FinanceWorkspace, type FinanceArchiveRequest, type FinanceArchiveResult, type FinanceArchiveItem, type FinanceMonitorRunsRequest, type FinanceMonitorRunsResult } from "../../shared/finance";
 import { userDataPath } from "../runtime-paths";
 import { FinanceStore, type FinanceScope } from "./store";
 import { queryFinanceData, refreshFinanceQuotes, searchFinanceAssets } from "./data";
+import { FinanceArchives, FinanceArchiveRequestSchema, financeArchivePlan } from './archive';
+import { FinanceRunHistory } from './run-history';
 import { interpretFinance } from "./model";
 import { writeFinanceBriefing } from "./briefing";
 import { pauseFinanceMonitor, readFinanceMonitor, rollbackFinanceMonitor, scheduleFinanceMonitor } from "./monitor";
@@ -16,10 +18,6 @@ function monitorDefinition(monitor: FinanceMonitor, workspace: FinanceWorkspace)
   const selected = monitor.assetIds.length ? monitor.assetIds : workspace.watchlist.slice(0, 3).map(asset => asset.id);
   return JSON.stringify({ name: monitor.name, query: monitor.query, assetIds: monitor.assetIds,
     assets: selected.map(id => workspace.watchlist.find(asset => asset.id === id) ?? null) });
-}
-function writeMonitorRun(file: string, run: FinanceMonitorRun): void {
-  const temporary = `${file}.${randomUUID()}.tmp`;
-  fs.writeFileSync(temporary, JSON.stringify(run), { mode: 0o600, flag: "wx" }); fs.renameSync(temporary, file);
 }
 function assertWorkspaceCapacity(workspace:FinanceWorkspace,operations:FinanceOperation[]):void {
   const reports=new Map(workspace.reports.map(report=>[report.id,report]));
@@ -72,7 +70,39 @@ function dataOperations(result: FinanceDataResult, workspace: FinanceWorkspace, 
 }
 export class FinanceService {
   readonly store: FinanceStore;
-  constructor(private readonly root: string) { this.store = new FinanceStore(path.join(root,"workspaces")); }
+  private readonly archiveStore:FinanceArchives;
+  private readonly histories=new Map<string,FinanceRunHistory>();
+  constructor(private readonly root: string) { this.store = new FinanceStore(path.join(root,"workspaces"));this.archiveStore=new FinanceArchives(path.join(root,"archives")); }
+  async archives(scope:FinanceScope,raw:FinanceArchiveRequest):Promise<FinanceArchiveResult>{
+    const input=FinanceArchiveRequestSchema.parse(raw);
+    if(input.action==='list')return {action:'list',...await this.archiveStore.list(scope,input)};
+    if(input.action==='read')return {action:'read',...await this.archiveStore.read(scope,input)};
+    if(input.action==='create'){
+      let item:FinanceArchiveItem|undefined,reclaimed={reports:0,sources:0};
+      const workspace=await this.store.transaction(scope,input.expectedRevision,async current=>{
+        const plan=financeArchivePlan(current,input.reportIds);reclaimed=plan.reclaimed;
+        if(!reclaimed.reports&&!reclaimed.sources)throw new Error('finance_archive_nothing_to_reclaim');
+        item=await this.archiveStore.create(scope,current,input.reportIds);return plan.workspace;
+      });
+      if(!item)throw new Error('finance_archive_not_found');
+      return {action:'create',archiveId:item.archiveId,sha256:item.sha256,workspace,reclaimed,warnings:reclaimed.sources?[]:['finance_archive_sources_still_referenced']};
+    }
+    const archived=await this.archiveStore.read(scope,{archiveId:input.archiveId});let restored={reports:0,sources:0};
+    const workspace=await this.store.transaction(scope,input.expectedRevision,current=>{
+      const selected=input.reportIds??archived.reportIds;
+      const remaining=new Set(financeArchivePlan(archived.workspaceSnapshot,archived.reportIds).workspace.sources.map(source=>source.id));
+      const additional=input.reportIds===undefined?archived.workspaceSnapshot.sources.filter(source=>!remaining.has(source.id)).map(source=>source.id):[];
+      const plan=this.archiveStore.restore(current,archived.workspaceSnapshot,selected,additional);restored=plan.restored;
+      if(!restored.reports&&!restored.sources)throw new Error('finance_archive_nothing_to_restore');return plan.workspace;
+    });
+    return {action:'restore',archiveId:input.archiveId,workspace,restored,warnings:[]};
+  }
+  async readReport(scope:FinanceScope,input:{reportId:string}):Promise<{report:FinanceReport;workspaceRevision:number;archiveId?:string}>{
+    const workspace=await this.store.load(scope),active=workspace.reports.find(report=>report.id===input.reportId);scope.assertCurrent();
+    if(active)return {report:active,workspaceRevision:workspace.revision};
+    const archived=await this.archiveStore.read(scope,input),report=archived.workspaceSnapshot.reports.find(item=>item.id===input.reportId);
+    if(!report)throw new Error('finance_report_not_found');return {report,workspaceRevision:workspace.revision,archiveId:archived.archiveId};
+  }
   async load(scope: FinanceScope): Promise<FinanceWorkspace> {
     const workspace = await this.store.load(scope); scope.assertCurrent();
     return { ...workspace, monitors: workspace.monitors.map(monitor => readFinanceMonitor({ scope, monitor })) };
@@ -142,35 +172,21 @@ export class FinanceService {
     scope.assertCurrent();const directory=path.join(this.root,"runs",partition(scope),createHash("sha256").update(monitorId).digest("hex"));
     fs.mkdirSync(directory,{recursive:true,mode:0o700});if(fs.lstatSync(directory).isSymbolicLink())throw new Error("finance_monitor_store_invalid");return directory;
   }
-  private readMonitorRuns(directory:string):FinanceMonitorRun[] {
-    return fs.readdirSync(directory).filter(name=>/^[a-f0-9-]{36}\.json$/.test(name)).map(name=>{
-      const file=path.join(directory,name),stat=fs.lstatSync(file);
-      if(!stat.isFile()||stat.isSymbolicLink()||stat.size>1000000)throw new Error("finance_monitor_run_invalid");
-      const run=JSON.parse(fs.readFileSync(file,"utf8")) as FinanceMonitorRun;
-      if(!run||run.id!==name.slice(0,-5)||!["running","succeeded","partial","failed","cancelled"].includes(run.status))throw new Error("finance_monitor_run_invalid");
-      return run;
-    });
+  private history(scope:FinanceScope,monitorId:string):FinanceRunHistory {
+    const directory=this.runDirectory(scope,monitorId);let history=this.histories.get(directory);
+    if(!history){history=new FinanceRunHistory(directory,monitorId);this.histories.set(directory,history);}return history;
   }
-  /** Caller must hold this monitor's exclusive lease. A timestamp alone never proves interruption. */
-  private reconcileInterruptedRuns(scope:FinanceScope,directory:string):void {
-    for(const run of this.readMonitorRuns(directory))if(run.status==="running"){
-      scope.assertCurrent();
-      if(!/^[a-f0-9-]{36}$/.test(run.id))throw new Error("finance_monitor_run_invalid");
-      writeMonitorRun(path.join(directory,`${run.id}.json`),{...run,status:"failed",finishedAt:new Date().toISOString(),error:"finance_monitor_interrupted",
-        summary:"이전 실행의 잠금이 유지되지 않아 완료 여부를 확인할 수 없습니다. 자료를 다시 조회하세요."});
-    }
-  }
-  async monitorRuns(scope:FinanceScope,input:{monitorId:string}):Promise<{runs:FinanceMonitorRun[]}> {
+  async monitorRuns(scope:FinanceScope,input:FinanceMonitorRunsRequest):Promise<FinanceMonitorRunsResult> {
     const workspace=await this.store.load(scope);if(!workspace.monitors.some(item=>item.id===input.monitorId))throw new Error("finance_monitor_not_found");
-    const directory=this.runDirectory(scope,input.monitorId);
-    if(this.readMonitorRuns(directory).some(run=>run.status==="running")){
+    const history=this.history(scope,input.monitorId),prepared=await history.prepare(scope);
+    if(!prepared.ready)return {runs:[],nextCursor:null,indexStatus:'building',indexedCount:prepared.indexedCount};
+    if(await history.hasRunning()){
       let release:(()=>Promise<void>)|undefined;
-      try{release=await lockfile.lock(directory,MONITOR_LOCK_OPTIONS);this.reconcileInterruptedRuns(scope,directory);}
+      try{release=await lockfile.lock(this.runDirectory(scope,input.monitorId),MONITOR_LOCK_OPTIONS);if(!await history.recover(scope))return {runs:[],nextCursor:null,indexStatus:'building',indexedCount:prepared.indexedCount};}
       catch(error){if((error as NodeJS.ErrnoException).code!=="ELOCKED")throw error;}
       finally{await release?.();}
     }
-    const runs=this.readMonitorRuns(directory);
-    scope.assertCurrent();return {runs:runs.sort((a,b)=>b.startedAt.localeCompare(a.startedAt)).slice(0,50)};
+    return history.page(scope,input);
   }
   async runMonitor(scope:FinanceScope,input:{monitorId:string;callerRunId?:string;callerChatId?:string},signal=AbortSignal.timeout(180000)):Promise<FinanceMonitorRun> {
     const before=await this.store.load(scope);const monitor=before.monitors.find(item=>item.id===input.monitorId);if(!monitor||!monitor.query.trim())throw new Error("finance_monitor_not_found");
@@ -180,11 +196,13 @@ export class FinanceService {
       if(row && readFinanceMonitor({scope,monitor}).automationId!==row.automation_id)throw new Error("finance_monitor_automation_binding_mismatch");
     }
     const definition=monitorDefinition(monitor,before);
+    const history=this.history(scope,monitor.id),prepared=await history.prepare(scope);
+    if(!prepared.ready)throw new Error('finance_history_index_building');
     const directory=this.runDirectory(scope,monitor.id);const release=await lockfile.lock(directory,MONITOR_LOCK_OPTIONS);
     let run:FinanceMonitorRun={id:randomUUID(),monitorId:monitor.id,status:"running",startedAt:new Date().toISOString(),finishedAt:null,reportId:null,summary:"자료 조회 중",warnings:[],error:null,sourceRevision:before.revision};
-    const file=path.join(directory,`${run.id}.json`);const write=()=>writeMonitorRun(file,run);
+    const write=()=>history.write(run);
     try{
-      this.reconcileInterruptedRuns(scope,directory);write();
+      if(!await history.recover(scope))throw new Error('finance_history_recovery_required');await write();
       const results:FinanceDataResult[]=[];
       const assets=monitor.assetIds.length?monitor.assetIds:before.watchlist.slice(0,3).map(asset=>asset.id);
       const requests:FinanceDataRequest[]=[...assets.slice(0,3).flatMap(assetId=>["filings","company_facts"].map(metric=>({query:monitor.query,assetIds:[assetId],metrics:[metric],period:"1M"}))),
@@ -203,7 +221,7 @@ export class FinanceService {
       if(!saved)throw new Error("finance_revision_conflict");
       run={...run,status:usable.length<results.length||warnings.length?"partial":"succeeded",reportId:report.id,summary:briefing.summary.slice(0,4000),warnings,finishedAt:new Date().toISOString()};
     }catch(error){run={...run,status:signal.aborted?"cancelled":"failed",finishedAt:new Date().toISOString(),error:error instanceof Error?error.message:"finance_monitor_failed",summary:"브리핑을 완료하지 못했습니다. 저장된 실행 오류와 자료 연결 상태를 확인하세요."};}
-    finally{try{write();}finally{await release();}}
+    finally{try{await write();}finally{await release();}}
     scope.assertCurrent();return run;
   }
 }

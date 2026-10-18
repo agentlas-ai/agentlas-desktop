@@ -4,6 +4,7 @@ import path from "node:path";
 import { LIVE_DOCUMENT_PORT_SCHEMAS as LIVE_DOCUMENT_SCHEMAS } from "../live-document/ports";
 import { recordRunProducedFiles } from "./run-produced-files";
 import { composeFinanceSkillContent, FINANCE_PORTS } from "../finance/tools";
+import type { FinanceReceiptReference } from "../finance/receipts";
 
 /*
  * Agentlas harness capability ports (docs/2026-10-13-native-harness/15 §8, contracts/harness-capability-ports.json).
@@ -42,6 +43,7 @@ export interface HarnessPortResult {
   schemaVersion: "agentlas.harness-result.v1";
   operationId: string;
   status: "ok" | "refused" | "unavailable";
+  financeReceipt?: FinanceReceiptReference;
   data?: unknown;
   /** Machine-readable cause for refused/unavailable. */
   reason?: string;
@@ -66,7 +68,7 @@ interface PortDefinition {
 
 type PortOutcome =
   /** produced: absolute paths of files this call wrote. Host-only (harness/run-produced-files.ts); never in the result. */
-  | { status: "ok"; data: unknown; produced?: readonly string[] }
+  | { status: "ok"; data: unknown; financeReceipt?: FinanceReceiptReference; produced?: readonly string[] }
   | { status: "refused" | "unavailable"; reason: string; next?: string; data?: unknown };
 
 const ok = (data: unknown): PortOutcome => ({ status: "ok", data });
@@ -1178,7 +1180,7 @@ export async function callHarnessPort(operationId: string, rawArgs: Record<strin
   // (A/B 2026-10-18: document.save and media.image.generate paths never reached the rail). The result keeps its shape.
   if (outcome.status === "ok" && outcome.produced?.length && !ctx.dryRun) recordRunProducedFiles(ctx.runId, operationId, outcome.produced);
   return outcome.status === "ok"
-    ? { ...base, status: "ok", data: outcome.data, receiptId }
+    ? { ...base, status: "ok", ...(outcome.financeReceipt ? { financeReceipt: outcome.financeReceipt } : {}), data: outcome.data, receiptId }
     : { ...base, status: outcome.status, reason: outcome.reason, ...(outcome.next ? { next: outcome.next } : {}), ...(outcome.data !== undefined ? { data: outcome.data } : {}), receiptId };
 }
 

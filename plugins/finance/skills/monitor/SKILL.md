@@ -14,3 +14,5 @@ These monitors retrieve evidence and produce research briefings. They do not pro
 # Verification
 
 After a run, inspect its status, warnings and report ID, then read the report when present. After schedule or pause, reload the monitor's host-projected status. Do not claim a future run has happened merely because a schedule was created.
+
+`finance.monitor.runs` supports bounded pages. Continue with its returned cursor to retain the same history snapshot; a fresh first-page query starts a new snapshot. An index-building or migration status means older coverage is not yet confirmed. A linked report remains readable after owner-requested archiving.

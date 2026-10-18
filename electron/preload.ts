@@ -131,6 +131,7 @@ const api: AgentlasIpc = {
     queryAndSave: input => ipcRenderer.invoke("finance:queryAndSave", input),
     runMonitor: input => ipcRenderer.invoke("finance:runMonitor", input),
     monitorRuns: input => ipcRenderer.invoke("finance:monitorRuns", input),
+    archives: input => ipcRenderer.invoke("finance:archives", input),
     onChanged: listener => { const handler = (_event: Electron.IpcRendererEvent, change: {ownerScope:string;revision:number}) => listener(change); ipcRenderer.on("finance:changed",handler); return () => { ipcRenderer.removeListener("finance:changed",handler); }; },
     refreshQuotes: () => ipcRenderer.invoke("finance:refreshQuotes"),
     startResearch: input => ipcRenderer.invoke("finance:startResearch", input),

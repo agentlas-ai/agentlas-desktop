@@ -14,3 +14,9 @@ Widget period can inherit the dashboard period or remain pinned; preserve that d
 # Verification
 
 Read the resulting workspace and report. Confirm the requested layout or text and its saved revision. An export or external sharing request requires a separately available export/sharing tool and the owner's authorization; a Finance report ID alone is not an exported file or a delivery receipt.
+
+# Saved material
+
+Use `finance.archives.list` and `finance.archives.read` to inspect preserved editions. `finance.report.read` can resolve a saved report from the active workspace or its archive. For an owner-requested archive, describe `finance.archives.create` and pass the selected report IDs and current revision. An empty selection archives only unused sources. The host preserves the full edition before removing selected active entries; sources referenced by positions, prices or remaining reports stay active. A reclaimed count of zero means capacity was not freed.
+
+`finance.archives.restore` restores selected reports and their source objects into the active workspace at an expected revision. Capacity or conflicting IDs can prevent restoration. Reading or exporting the preserved snapshot does not require restoring it. Archiving is an explicit owner action and is not automatic deletion.

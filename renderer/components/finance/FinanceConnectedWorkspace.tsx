@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { financeStore } from "@/lib/finance-store";
@@ -43,6 +43,11 @@ export function FinanceConnectedWorkspace() {
     });
     return ()=>{active=false;unsubscribe();};
   },[api]);
+  const monitorRuns = useCallback(async (monitorId:string,page?:{cursor?:string;limit?:number}) => {
+    await financeStore.refreshHostState();
+    if(!api?.monitorRuns)throw new Error("finance_monitor_ledger_unavailable");
+    return api.monitorRuns({monitorId,...page});
+  },[api]);
   if (!ready) return <main role="status" style={{ padding: 32 }}>{locale === "ko" ? "Finance 작업 공간을 여는 중…" : "Opening Finance…"}</main>;
 
   return <FinanceWorkspace
@@ -52,9 +57,11 @@ export function FinanceConnectedWorkspace() {
       await financeStore.reload();
       return result;
     } : undefined}
-    onMonitorRuns={api?.monitorRuns ? async monitorId => {
-      await financeStore.refreshHostState();
-      return (await api.monitorRuns!({monitorId})).runs;
+    onMonitorRuns={api?.monitorRuns ? monitorRuns : undefined}
+    onArchives={api?.archives ? async request => {
+      if(request.action==="create"||request.action==="restore")
+        return financeStore.runHostMutation(()=>api.archives!(request));
+      return api.archives!(request);
     } : undefined}
     onQueryAndSave={api?.queryAndSave ? async (request,signal) => {
       assertNotCancelled(signal);

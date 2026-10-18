@@ -1,15 +1,17 @@
 import { z } from 'zod';
 import { FINANCE_WIDGET_TYPES, financeId, validateFinanceOperation, type FinanceOperation } from '../../shared/finance';
 import type { HarnessCallContext } from '../harness/capability-ports';
+import { FinanceReceiptReadSchema, FINANCE_RECEIPT_GROUPS, financeReceiptStore, type FinanceReceiptReference } from './receipts';
 import { composeDeclaredPrompt, registerDeclaredPromptModule } from '../runtime/prompt-order';
 
-type Outcome = { status: 'ok'; data: unknown } | { status: 'refused' | 'unavailable'; reason: string; next?: string; data?: unknown };
+type Outcome = { status: 'ok'; financeReceipt?: FinanceReceiptReference; data: unknown } | { status: 'refused' | 'unavailable'; reason: string; next?: string; data?: unknown };
 type ToolContext = Pick<HarnessCallContext, 'chatId' | 'runId' | 'permission' | 'dryRun' | 'hostAccountBinding'>;
 const id = z.string().min(1).max(200);
 const revision = z.number().int().nonnegative();
 const queryShape = { query: z.string().max(2000), assetIds: z.array(id).max(10), metrics: z.array(z.string().min(1).max(80)).min(1).max(10), period: z.string().min(1).max(80) };
 const inputSchemas = {
   load: z.object({}).strict(),
+  'receipt.read': FinanceReceiptReadSchema,
   search: z.object({ query: z.string().min(1).max(200) }).strict(),
   'asset.add': z.object({ query: z.string().min(1).max(200), symbol: z.string().min(1).max(80).optional() }).strict(),
   query: z.object(queryShape).strict(),
@@ -17,14 +19,18 @@ const inputSchemas = {
   apply: z.object({ operations: z.array(z.unknown()).min(1).max(40), expectedRevision: revision }).strict(),
   'report.create': z.object({ dashboardId: id.optional(), title: z.string().min(1).max(300).optional() }).strict(),
   'report.read': z.object({ reportId: id }).strict(),
+  'archives.create': z.object({ expectedRevision: revision, reportIds: z.array(id).max(200) }).strict(),
+  'archives.list': z.object({ cursor: z.string().max(2000).optional(), limit: z.number().int().min(1).max(50).optional() }).strict(),
+  'archives.read': z.union([z.object({ archiveId: z.string().regex(/^[a-f0-9]{64}$/) }).strict(), z.object({ reportId: id }).strict()]),
+  'archives.restore': z.object({ archiveId: z.string().regex(/^[a-f0-9]{64}$/), expectedRevision: revision, reportIds: z.array(id).max(200).optional() }).strict(),
   'monitor.create': z.object({ name: z.string().min(1).max(300), query: z.string().min(1).max(2000), assetIds: z.array(id).min(1).max(10), expectedRevision: revision }).strict(),
   'monitor.run': z.object({ monitorId: id }).strict(),
-  'monitor.runs': z.object({ monitorId: id }).strict(),
+  'monitor.runs': z.object({ monitorId: id, cursor: z.string().min(1).max(2000).optional(), limit: z.number().int().min(1).max(50).optional() }).strict(),
   'monitor.schedule': z.object({ monitorId: id, scheduleHuman: z.enum(['daily-09:00', 'weekday-09:00', 'hourly', 'every-5m']) }).strict(),
   'monitor.pause': z.object({ monitorId: id }).strict(),
 };
 type Action = keyof typeof inputSchemas;
-const writes = new Set<Action>(['asset.add', 'query.save', 'apply', 'report.create', 'monitor.create', 'monitor.run', 'monitor.schedule', 'monitor.pause']);
+const writes = new Set<Action>(['asset.add', 'query.save', 'apply', 'report.create', 'archives.create', 'archives.restore', 'monitor.create', 'monitor.run', 'monitor.schedule', 'monitor.pause']);
 const editTypes = new Set<FinanceOperation['type']>(['watchlist.remove', 'dashboard.add', 'dashboard.rename', 'dashboard.update', 'dashboard.remove', 'dashboard.select', 'widget.add', 'widget.update', 'widget.remove', 'widget.move', 'report.update', 'report.remove', 'report.refresh', 'report.section.update', 'report.section.remove', 'report.section.move']);
 
 /** Models edit presentation and draft prose; data import and source provenance stay with the provider service. */
@@ -50,6 +56,7 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
     const finance = service.getFinanceService();
     const scope = await service.captureFinanceScope(ctx.hostAccountBinding);
     scope.assertCurrent();
+    if (action === 'receipt.read') return { status: 'ok', data: financeReceiptStore().read(scope, ctx, FinanceReceiptReadSchema.parse(raw)) };
     let data: unknown;
     switch (action) {
       case 'load': inputSchemas.load.parse(raw); data = await finance.load(scope); break;
@@ -64,11 +71,12 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
       case 'report.create': data = await finance.createReport(scope, inputSchemas['report.create'].parse(raw)); break;
       case 'report.read': {
         const args = inputSchemas['report.read'].parse(raw);
-        const workspace = await finance.load(scope);
-        const report = workspace.reports.find(item => item.id === args.reportId);
-        if (!report) throw new Error('finance_report_not_found');
-        data = { report, workspaceRevision: workspace.revision }; break;
+        data = await finance.readReport(scope, args); break;
       }
+      case 'archives.create': data = await finance.archives(scope, { action: 'create', ...inputSchemas['archives.create'].parse(raw) }); break;
+      case 'archives.list': data = await finance.archives(scope, { action: 'list', ...inputSchemas['archives.list'].parse(raw) }); break;
+      case 'archives.read': data = await finance.archives(scope, { action: 'read', ...inputSchemas['archives.read'].parse(raw) }); break;
+      case 'archives.restore': data = await finance.archives(scope, { action: 'restore', ...inputSchemas['archives.restore'].parse(raw) }); break;
       case 'monitor.create': {
         const args = inputSchemas['monitor.create'].parse(raw);
         data = await finance.apply(scope, { expectedRevision: args.expectedRevision, operations: [{ type: 'monitor.upsert', monitor: { id: financeId('monitor'), name: args.name, query: args.query, assetIds: args.assetIds, status: 'draft', lastCheckedAt: null, nextCheckAt: null, note: '' } }] }); break;
@@ -85,7 +93,11 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
       case 'monitor.pause': data = await finance.pause(scope, inputSchemas['monitor.pause'].parse(raw)); break;
     }
     scope.assertCurrent();
-    return { status: 'ok', data };
+    let financeReceipt: FinanceReceiptReference;
+    try { financeReceipt = financeReceiptStore().record(scope, ctx, `finance.${action}`, data, writes.has(action) ? 'saved-result' : ['load', 'report.read', 'monitor.runs', 'archives.read', 'archives.list'].includes(action) ? 'read-snapshot' : 'service-result'); }
+    catch { scope.assertCurrent(); financeReceipt = { status: 'unavailable', reason: 'finance_receipt_not_recorded', operationOutcome: 'succeeded' }; }
+    scope.assertCurrent();
+    return { status: 'ok', financeReceipt, data };
   } catch (error) {
     if (error instanceof z.ZodError) return { status: 'refused', reason: 'finance_arguments_invalid', next: 'Read the operation schema and supply its exact fields.' };
     const message = error instanceof Error ? error.message : '';
@@ -121,6 +133,7 @@ const editSchema = { oneOf: [
   opSchema('report.section.move',['reportId','sectionId','index'],{reportId:key,sectionId:key,index:rev}),
 ] };
 const descriptors: { action: Action; purpose: string; required: string[]; inputSchema: Record<string, unknown> }[] = [
+  { action: 'receipt.read', purpose: 'Read a bounded field page from an immutable Finance observation in this authenticated chat. A prior snapshot is not current state or Goal verification. Continue with nextCursor index and offset; offsets count Unicode code points.', required: ['receiptId'], inputSchema: schema(['receiptId'], { receiptId: { type: 'string', format: 'uuid' }, group: { enum: [...FINANCE_RECEIPT_GROUPS] }, index: rev, offset: rev }) },
   { action: 'load', purpose: 'Read the authenticated Finance workspace, revision, dashboards, reports, sources and monitor state.', required: [], inputSchema: schema([], {}) },
   { action: 'search', purpose: 'Search actual provider asset metadata; returns coverage and connection warnings.', required: ['query'], inputSchema: schema(['query'], { query: text }) },
   { action: 'asset.add', purpose: 'Resolve one asset against the provider and persist it in the Finance watchlist.', required: ['query'], inputSchema: schema(['query'], { query: text, symbol: text }) },
@@ -129,9 +142,13 @@ const descriptors: { action: Action; purpose: string; required: string[]; inputS
   { action: 'apply', purpose: 'Apply canonical dashboard/widget edits or draft report text at an expected Finance revision; provider data and reviewed status are host-owned.', required: ['operations', 'expectedRevision'], inputSchema: schema(['operations', 'expectedRevision'], { expectedRevision: rev, operations: { type: 'array', minItems: 1, maxItems: 40, items: editSchema } }) },
   { action: 'report.create', purpose: 'Freeze an existing Finance dashboard into a host-generated report snapshot.', required: [], inputSchema: schema([], { dashboardId: key, title: text }) },
   { action: 'report.read', purpose: 'Read a saved Finance report and its evidence without refreshing its snapshot.', required: ['reportId'], inputSchema: schema(['reportId'], { reportId: key }) },
+  { action: 'archives.create', purpose: 'Preserve a verified full edition, then remove selected active reports and unreferenced sources at an expected revision. An empty selection archives only unused sources.', required: ['expectedRevision', 'reportIds'], inputSchema: schema(['expectedRevision', 'reportIds'], { expectedRevision: rev, reportIds: { type: 'array', items: key, maxItems: 200, uniqueItems: true } }) },
+  { action: 'archives.list', purpose: 'Read a bounded page of preserved Finance editions without changing active material.', required: [], inputSchema: schema([], { cursor: text, limit: { type: 'integer', minimum: 1, maximum: 50 } }) },
+  { action: 'archives.read', purpose: 'Read a preserved Finance edition by archive ID or archived report ID without restoring it.', required: [], inputSchema: { oneOf: [schema(['archiveId'], { archiveId: { type: 'string', pattern: '^[a-f0-9]{64}$' } }), schema(['reportId'], { reportId: key })] } },
+  { action: 'archives.restore', purpose: 'Restore selected preserved reports and required sources at an expected revision. Omitting report IDs also restores sources removed by that edition; conflicting contents and capacity are refused.', required: ['archiveId', 'expectedRevision'], inputSchema: schema(['archiveId', 'expectedRevision'], { archiveId: { type: 'string', pattern: '^[a-f0-9]{64}$' }, expectedRevision: rev, reportIds: { type: 'array', items: key, maxItems: 200, uniqueItems: true } }) },
   { action: 'monitor.create', purpose: 'Create a draft research monitor for saved assets; creation does not enable a schedule.', required: ['name', 'query', 'assetIds', 'expectedRevision'], inputSchema: schema(['name', 'query', 'assetIds', 'expectedRevision'], { name: text, query: text, assetIds: list, expectedRevision: rev }) },
   { action: 'monitor.run', purpose: 'Run an existing Finance monitor and persist its actual result, evidence and briefing report.', required: ['monitorId'], inputSchema: schema(['monitorId'], { monitorId: key }) },
-  { action: 'monitor.runs', purpose: 'Read actual Finance monitor runs and their report references.', required: ['monitorId'], inputSchema: schema(['monitorId'], { monitorId: key }) },
+  { action: 'monitor.runs', purpose: 'Read a bounded snapshot page of actual Finance monitor runs and their report references, or explicit index-building progress.', required: ['monitorId'], inputSchema: schema(['monitorId'], { monitorId: key, cursor: text, limit: { type: 'integer', minimum: 1, maximum: 50 } }) },
   { action: 'monitor.schedule', purpose: 'Enable an existing Finance monitor through the host scheduler.', required: ['monitorId', 'scheduleHuman'], inputSchema: schema(['monitorId', 'scheduleHuman'], { monitorId: key, scheduleHuman: { enum: ['daily-09:00', 'weekday-09:00', 'hourly', 'every-5m'] } }) },
   { action: 'monitor.pause', purpose: 'Pause future executions of the bound Finance monitor without requiring a view revision.', required: ['monitorId'], inputSchema: schema(['monitorId'], { monitorId: key }) },
 ];

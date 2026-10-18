@@ -14,6 +14,7 @@ import { queryFinanceData, refreshFinanceQuotes, searchFinanceAssets } from './d
 import { financeResearchPrompt } from './prompts';
 import { getFinanceService } from './service';
 import { onFinanceWorkspaceChange } from './events';
+import { FinanceArchiveRequestSchema } from './archive';
 import { pauseFinanceMonitor, readFinanceMonitor, rollbackFinanceMonitor, scheduleFinanceMonitor } from './monitor';
 
 const boundedId = z.string().min(1).max(200);
@@ -85,7 +86,8 @@ export function registerFinanceIpc(input: { ipc: Pick<IpcMain, 'handle'>; assert
   });
   handle('queryAndSave',async(_event,raw,scope)=>service.queryAndSave(scope,z.object({query:z.string().max(2000),assetIds:z.array(boundedId).max(10),metrics:z.array(z.string().max(80)).max(10),period:z.string().max(80),expectedRevision:z.number().int().nonnegative().optional(),mode:z.enum(['sources','report']),title:z.string().min(1).max(300).optional()}).strict().parse(raw)));
   handle('runMonitor',async(_event,raw,scope)=>service.runMonitor(scope,z.object({monitorId:boundedId}).strict().parse(raw)));
-  handle('monitorRuns',async(_event,raw,scope)=>service.monitorRuns(scope,z.object({monitorId:boundedId}).strict().parse(raw)));
+  handle('monitorRuns',async(_event,raw,scope)=>service.monitorRuns(scope,z.object({monitorId:boundedId,cursor:z.string().min(1).max(2000).optional(),limit:z.number().int().min(1).max(50).optional()}).strict().parse(raw)));
+  handle('archives',async(_event,raw,scope)=>service.archives(scope,FinanceArchiveRequestSchema.parse(raw)));
   const broadcast=(change:{ownerScope:string;revision:number})=>{
     let current:FinanceScope;try{current=captureScope();}catch{return;}
     const ownerScope=createHash('sha256').update(JSON.stringify([current.workspaceId,current.userId])).digest('hex');
