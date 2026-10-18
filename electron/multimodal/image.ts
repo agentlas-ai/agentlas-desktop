@@ -13,10 +13,9 @@ import { detachedSpawnOpts, killCliTree, trackRunChild } from "../runtime/exec";
 import { withCodexProductHome } from "../runtime/codex-product-home";
 import { withAgyProductHome } from "../runtime/antigravity-personal-context";
 import { findExecutableSync } from "../runtime/path-lookup";
-import { antigravityPermissionArgs } from "../runtime/antigravity";
-import { invocationBreaker, invocationBreakerKey } from "../runtime/invocation-breaker";
-import { withModelCallLedger, withModelCallScope } from "../runtime/model-call-ledger";
-import type { Runner, RunnerResult } from "../runtime/runner";
+import { antigravityPermissionArgs, reduceAgyLine, stageFreshAgyGeneratedImage } from "../runtime/antigravity";
+import { DIRECT_CLI_RUNTIMES, runLedgeredCliCall, type DirectCliRuntime } from "../runtime/direct-cli-ledger";
+import { productHomeRefusedOnThisHost } from "../runtime/product-home-identity";
 
 export type ImageModel = "codex" | "gemini" | "grok" | "auto";
 
@@ -34,34 +33,36 @@ export interface ImageAdmission {
 type ImageEngine = "codex" | "gemini" | "grok";
 
 /**
- * Every engine run goes through the same model-call ledger and invocation breaker as a runtime turn (R-078). Production
- * 2026-10-13..17: nine generate_image runs (five for the Yotube room on 10-17) spawned `agy --dangerously-skip-permissions
- * --print` directly; none was in the ledger (the last antigravity row was 10-16 08:02Z), none counted by the breaker,
- * and the room's write permission was not applied.
+ * Every engine run goes through the same model-call ledger and invocation breaker as a runtime turn (R-078,
+ * runtime/direct-cli-ledger.ts). Production 2026-10-13..17: nine generate_image runs (five for the Yotube room on 10-17)
+ * spawned `agy --dangerously-skip-permissions --print` directly; none was in the ledger, none counted by the breaker.
  */
-const IMAGE_ENGINE_RUNTIME: Record<ImageEngine, { kind: string; backend: string; source: string; label: string }> = {
-  codex: { kind: "codex", backend: "openai", source: "codex", label: "Codex image" },
-  gemini: { kind: "antigravity", backend: "google", source: "agy", label: "Antigravity image" },
-  grok: { kind: "grok", backend: "xai", source: "grok", label: "Grok Imagine" },
+const IMAGE_ENGINE_RUNTIME: Record<ImageEngine, DirectCliRuntime> = {
+  codex: { ...DIRECT_CLI_RUNTIMES.codex, label: "Codex image" },
+  gemini: { ...DIRECT_CLI_RUNTIMES.antigravity, label: "Antigravity image" },
+  grok: { ...DIRECT_CLI_RUNTIMES.grok, label: "Grok Imagine" },
 };
 
-async function runImageEngine(engine: ImageEngine, phase: "multimodal-image" | "multimodal-image-edit", instruction: string,
-  permission: "write" | "full" | undefined, produce: () => Promise<boolean>): Promise<boolean> {
-  const runtime = IMAGE_ENGINE_RUNTIME[engine];
-  const adapter: Runner = async (): Promise<RunnerResult> => (await produce())
-    ? { text: "", ownerControlTerminal: "completed" }
-    : { text: "", ownerControlTerminal: "completed", failure: { kind: "exit", runtime: runtime.kind, source: "marker",
-      providerCode: "image_not_produced", message: `${runtime.label} produced no image.` } };
-  const runner = invocationBreaker.wrap(withModelCallLedger(adapter, { kind: runtime.kind, backend: runtime.backend, model: null, effort: null }),
-    invocationBreakerKey(runtime), runtime.label);
-  try {
-    const result = await withModelCallScope({ role: "worker", phase }, () => runner({ systemPrompt: "", history: [], userPrompt: instruction,
-      backendLabel: runtime.label, locale: "en", ...(permission ? { permission } : {}), singleUse: true }, { onPartial: () => {}, onStatus: () => {} }));
-    return !result.failure;
-  } catch {
-    return false;
-  }
+function runImageEngine(engine: ImageEngine, phase: "multimodal-image" | "multimodal-image-edit", instruction: string,
+  permission: "write" | "full" | undefined, produce: () => Promise<string | null>): Promise<string | null> {
+  return runLedgeredCliCall({ runtime: IMAGE_ENGINE_RUNTIME[engine], phase, request: instruction, permission,
+    failureCode: "image_not_produced", produce });
 }
+
+/**
+ * One exclusive folder per engine attempt (2026-10-18): the CLI works in it and its target lives in it. An image is taken
+ * only from that folder or from the exact file the runtime names (agy: its generate_image output in this run's own
+ * conversation; codex: this exec thread's generated_images folder). Before, a missing target was replaced by the newest
+ * PNG of the last 3 s in the shared multimodal-images folder, ~/.gemini/antigravity-cli/scratch or ~/.codex/generated_images,
+ * so two concurrent jobs could take each other's image (or a personal session's).
+ */
+function newAttemptDir(root: string): string {
+  return fs.mkdtempSync(path.join(root, "job-"));
+}
+function dropEmptyAttemptDir(dir: string): void {
+  try { fs.rmdirSync(dir); } catch { /* not empty (partial media kept for recovery) or already gone */ }
+}
+
 export interface ImageResult {
   ok: boolean;
   src?: string;
@@ -79,52 +80,12 @@ function resolveBin(name: string, extra: string[]): string | null {
   return findExecutableSync(name, extra);
 }
 
-function newestPngSince(dir: string, since: number): string | null {
-  const out: Array<{ p: string; m: number }> = [];
-  const walk = (d: string) => {
-    let entries: fs.Dirent[] = [];
-    try {
-      entries = fs.readdirSync(d, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries) {
-      const p = path.join(d, e.name);
-      if (e.isDirectory()) walk(p);
-      else if (/\.png$/i.test(e.name)) {
-        try {
-          const m = fs.statSync(p).mtimeMs;
-          if (m >= since) out.push({ p, m });
-        } catch {
-          /* ignore */
-        }
-      }
-    }
-  };
-  walk(dir);
-  out.sort((a, b) => b.m - a.m);
-  return out[0]?.p ?? null;
-}
+const IMAGE_FILE = /\.(?:png|jpe?g|webp)$/i;
 
-async function runCodexImage(prompt: string, target: string, cwd: string, inputImage?: string, permission?: "write" | "full"): Promise<boolean> {
-  const bin = resolveBin("codex", [
-    path.join(os.homedir(), ".local/bin/codex"),
-    "/opt/homebrew/bin/codex",
-    "/usr/local/bin/codex",
-  ]);
-  if (!bin) return false;
-  const instruction = inputImage
-    // Edit: the attached image is the source; the instruction says what changes (NH34).
-    ? `Use your built-in image_gen tool to edit the attached image and save exactly ONE resulting PNG to ${target}. ` +
-      `EDIT: ${prompt}. Keep everything the edit does not mention. If you cannot edit images print exactly NO_IMAGE_GEN.`
-    : `Use your built-in image_gen tool to generate exactly ONE image and save the PNG to ${target} ` +
-      `(largest landscape size, e.g. 1536x1024). IMAGE PROMPT: ${prompt}. ` +
-      `Absolutely no text, no words, no letters, no numbers, no logo, no watermark. ` +
-      `If you cannot generate images print exactly NO_IMAGE_GEN.`;
-  const since = Date.now() - 3000;
-  // workspace-write is already below every permission that may generate an image (write and full).
-  return runImageEngine("codex", inputImage ? "multimodal-image-edit" : "multimodal-image", instruction, permission, async () => {
-  await new Promise<void>((resolve) => {
+/** Spawns a CLI with stdin closed and stdout read line by line; resolves when it exits or after `timeoutMs`. */
+function runCliLines(bin: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number },
+  onLine: (line: string) => void): Promise<void> {
+  return new Promise<void>((resolve) => {
     let done = false;
     const finish = () => {
       if (done) return;
@@ -135,19 +96,22 @@ async function runCodexImage(prompt: string, target: string, cwd: string, inputI
     try {
       // stdin은 반드시 닫는다(ignore) — 파이프로 열려 있으면 codex가
       // "Reading additional input from stdin..."으로 EOF를 기다리며 영원히 블록된다.
-      child = spawn(bin, ["exec", "-s", "workspace-write", "--skip-git-repo-check", ...(inputImage ? ["-i", inputImage] : []), instruction], {
-        cwd,
-        // The user's Codex home without their personal AGENTS.md, like every product run.
-        env: withCodexProductHome(process.env),
-        stdio: ["ignore", "ignore", "ignore"],
-        ...detachedSpawnOpts(),
-      });
+      child = spawn(bin, args, { cwd: options.cwd, env: options.env, stdio: ["ignore", "pipe", "ignore"], ...detachedSpawnOpts() });
       trackRunChild(child);
     } catch {
       finish();
       return;
     }
-    // 실측: codex image_gen은 콜드 스타트 시 2~4분 — 150s는 완성 직전에 죽인다(all-engines 오탐 원인).
+    let pending = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      pending += chunk.toString("utf8");
+      let at: number;
+      while ((at = pending.indexOf("\n")) >= 0) {
+        const line = pending.slice(0, at).trim();
+        pending = pending.slice(at + 1);
+        if (line) { try { onLine(line); } catch { /* a malformed line is not the image */ } }
+      }
+    });
     const timer = setTimeout(() => {
       try {
         if (child) killCliTree(child, 250);
@@ -155,9 +119,10 @@ async function runCodexImage(prompt: string, target: string, cwd: string, inputI
         /* ignore */
       }
       finish();
-    }, 300_000);
+    }, options.timeoutMs);
     child.on("close", () => {
       clearTimeout(timer);
+      if (pending.trim()) { try { onLine(pending.trim()); } catch { /* ignore */ } }
       finish();
     });
     child.on("error", () => {
@@ -165,17 +130,71 @@ async function runCodexImage(prompt: string, target: string, cwd: string, inputI
       finish();
     });
   });
-  if (fs.existsSync(target)) return true;
-  const found = newestPngSince(path.join(os.homedir(), ".codex", "generated_images"), since);
-  if (found) {
+}
+
+/** The newest image file directly in `dir` (an exclusive folder of this attempt, never a shared one). */
+function newestImageIn(dir: string): string | null {
+  let best: { file: string; mtime: number } | null = null;
+  let names: string[] = [];
+  try { names = fs.readdirSync(dir); } catch { return null; }
+  for (const name of names) {
+    if (!IMAGE_FILE.test(name)) continue;
+    const file = path.join(dir, name);
     try {
-      fs.copyFileSync(found, target);
-      return true;
-    } catch {
-      /* ignore */
-    }
+      const stat = fs.lstatSync(file);
+      if (!stat.isFile() || stat.size === 0) continue;
+      if (!best || stat.mtimeMs > best.mtime) best = { file, mtime: stat.mtimeMs };
+    } catch { /* gone */ }
   }
-  return false;
+  return best?.file ?? null;
+}
+
+/** Puts `found` at `target` (copy; the source stays where its runtime keeps it). */
+function placeAt(found: string | null, target: string): string | null {
+  if (fs.existsSync(target)) return target;
+  if (!found || found === target) return null;
+  try {
+    fs.copyFileSync(found, target);
+    return target;
+  } catch {
+    return null;
+  }
+}
+
+async function runCodexImage(prompt: string, target: string, inputImage?: string, permission?: "write" | "full"): Promise<string | null> {
+  // A gate or script (no install identity) in the account's own HOME would run the person's codex and sign-in.
+  if (productHomeRefusedOnThisHost(os.homedir())) return null;
+  const bin = resolveBin("codex", [
+    path.join(os.homedir(), ".local/bin/codex"),
+    "/opt/homebrew/bin/codex",
+    "/usr/local/bin/codex",
+  ]);
+  if (!bin) return null;
+  const cwd = path.dirname(target);
+  const instruction = inputImage
+    // Edit: the attached image is the source; the instruction says what changes (NH34).
+    ? `Use your built-in image_gen tool to edit the attached image and save exactly ONE resulting PNG to ${target}. ` +
+      `EDIT: ${prompt}. Keep everything the edit does not mention. If you cannot edit images print exactly NO_IMAGE_GEN.`
+    : `Use your built-in image_gen tool to generate exactly ONE image and save the PNG to ${target} ` +
+      `(largest landscape size, e.g. 1536x1024). IMAGE PROMPT: ${prompt}. ` +
+      `Absolutely no text, no words, no letters, no numbers, no logo, no watermark. ` +
+      `If you cannot generate images print exactly NO_IMAGE_GEN.`;
+  // The user's Codex home without their personal AGENTS.md, like every product run.
+  const env = withCodexProductHome(process.env);
+  // workspace-write is already below every permission that may generate an image (write and full).
+  return runImageEngine("codex", inputImage ? "multimodal-image-edit" : "multimodal-image", instruction, permission, async () => {
+    // `--json` names this exec's thread; codex keeps that thread's images in <CODEX_HOME>/generated_images/<thread id>/.
+    let threadId: string | null = null;
+    // 실측: codex image_gen은 콜드 스타트 시 2~4분 — 150s는 완성 직전에 죽인다(all-engines 오탐 원인).
+    await runCliLines(bin, ["exec", "--json", "-s", "workspace-write", "--skip-git-repo-check", ...(inputImage ? ["-i", inputImage] : []), instruction],
+      { cwd, env, timeoutMs: 300_000 }, (line) => {
+        const event = JSON.parse(line) as { type?: unknown; thread_id?: unknown };
+        if (event?.type === "thread.started" && typeof event.thread_id === "string" && /^[A-Za-z0-9-]{8,64}$/.test(event.thread_id)) threadId ??= event.thread_id;
+      });
+    if (fs.existsSync(target)) return target;
+    const codexHome = env.CODEX_HOME || path.join(os.homedir(), ".codex");
+    // What the model saved in this attempt's folder, else this thread's own image copied in.
+    return newestImageIn(cwd) ?? placeAt(threadId ? newestImageIn(path.join(codexHome, "generated_images", threadId)) : null, target);
   });
 }
 
@@ -199,17 +218,19 @@ async function runGeminiImage(prompt: string, target: string, apiKey: string): P
 
 /**
  * Antigravity CLI(agy) 나노바나나(Nano Banana / Gemini image) — 키리스(Google OAuth).
- * 앱에 Antigravity를 연결한 사용자면 누구나 키 없이 이미지 생성. agy는 활성 워크스페이스가 없으면
- * ~/.gemini/antigravity-cli/scratch 에 저장하므로, --add-dir로 출력폴더 권한을 주고, 실패 시 scratch의
- * 최신 PNG를 target으로 복사한다.
+ * 앱에 Antigravity를 연결한 사용자면 누구나 키 없이 이미지 생성. 이 시도의 전용 폴더를 --add-dir 작업 공간으로 주고,
+ * 모델이 target에 저장하지 않았으면 이 실행 자신의 대화(stream-json 의 conversation_id)에서 generate_image 가 만든
+ * 바로 그 파일(stageFreshAgyGeneratedImage)을 가져온다. 공유 폴더(scratch 등)를 시간 창으로 뒤지지 않는다.
  */
-async function runAgyNanoBanana(prompt: string, target: string, inputImage?: string, permission?: "write" | "full"): Promise<boolean> {
+async function runAgyNanoBanana(prompt: string, target: string, inputImage?: string, permission?: "write" | "full"): Promise<string | null> {
+  // A gate or script (no install identity) in the account's own HOME would run the person's agy in their own ~/.gemini.
+  if (productHomeRefusedOnThisHost(os.homedir())) return null;
   const bin = resolveBin("agy", [
     path.join(os.homedir(), ".local/bin/agy"),
     "/opt/homebrew/bin/agy",
     "/usr/local/bin/agy",
   ]);
-  if (!bin) return false;
+  if (!bin) return null;
   const outDir = path.dirname(target);
   const instruction = inputImage
     ? `Use your image generation capability (Nano Banana / Gemini image) to edit the image at the absolute path ${inputImage}: ${prompt}. ` +
@@ -217,68 +238,37 @@ async function runAgyNanoBanana(prompt: string, target: string, inputImage?: str
     : `Use your image generation capability (Nano Banana / Gemini image) to generate exactly ONE image: ${prompt}. ` +
       `Save the resulting PNG file to the absolute path ${target}. ` +
       `No text, no words, no letters, no numbers, no logo, no watermark. If you cannot generate images, reply exactly NO_IMAGE_GEN.`;
-  const scratch = path.join(os.homedir(), ".gemini", "antigravity-cli", "scratch");
-  const since = Date.now() - 3000;
-  // HOME mirror: the conversation stays in the product store; scratch/ is linked, so the image is still found there.
+  // HOME mirror: the conversation (and its generated image) stays in the product store.
   const env = withAgyProductHome({ ...process.env, GEMINI_CLI_TRUST_WORKSPACE: "true" }, undefined, undefined);
   // The selected route uses subscription OAuth, regardless of ambient API keys.
   for (const key of ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_APPLICATION_CREDENTIALS"]) delete env[key];
   // The room's permission, as for every agy run: write is sandboxed, full is not. A caller with no room keeps full.
   const permissionArgs = antigravityPermissionArgs(permission ?? "full");
   return runImageEngine("gemini", inputImage ? "multimodal-image-edit" : "multimodal-image", instruction, permission, async () => {
-  await new Promise<void>((resolve) => {
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      resolve();
-    };
-    let child;
-    try {
-      // stdin ignore — codex와 동일한 stdin-EOF 대기 블록 방지.
-      child = spawn(bin, [...permissionArgs, "--add-dir", outDir, ...(inputImage ? ["--add-dir", path.dirname(inputImage)] : []), "--print", instruction], {
-        cwd: outDir,
-        env,
-        stdio: ["ignore", "ignore", "ignore"],
-        ...detachedSpawnOpts(),
-      });
-      trackRunChild(child);
-    } catch {
-      finish();
-      return;
-    }
-    const timer = setTimeout(() => {
-      try {
-        if (child) killCliTree(child, 250);
-      } catch {
-        /* ignore */
+    const startedAt = Date.now();
+    const state: Parameters<typeof reduceAgyLine>[1] = { text: "", inputTokens: 0, outputTokens: 0 };
+    let imageName: string | undefined;
+    // stdin ignore — codex와 동일한 stdin-EOF 대기 블록 방지. stream-json names the conversation and the tool's image.
+    await runCliLines(bin, [...permissionArgs, "--output-format", "stream-json", "--add-dir", outDir,
+      ...(inputImage ? ["--add-dir", path.dirname(inputImage)] : []), "--print", instruction], { cwd: outDir, env, timeoutMs: 300_000 }, (line) => {
+      const step = reduceAgyLine(line, state);
+      if (step.tool?.done && !step.tool.failed && step.tool.name === "generate_image" && step.tool.args) {
+        const args = JSON.parse(step.tool.args) as { ImageName?: unknown } | null;
+        if (typeof args?.ImageName === "string") imageName = args.ImageName;
       }
-      finish();
-    }, 300_000);
-    child.on("close", () => {
-      clearTimeout(timer);
-      finish();
     });
-    child.on("error", () => {
-      clearTimeout(timer);
-      finish();
-    });
-  });
-  if (fs.existsSync(target)) return true;
-  const found = newestPngSince(scratch, since) || newestPngSince(outDir, since);
-  if (found && found !== target) {
-    try {
-      fs.copyFileSync(found, target);
-    } catch {
-      /* ignore */
-    }
-  }
-  return fs.existsSync(target);
+    if (fs.existsSync(target)) return target;
+    const staged = state.conversationId && imageName
+      ? stageFreshAgyGeneratedImage({ conversationId: state.conversationId, imageName, invocationStartedAtMs: startedAt,
+        destinationRoot: outDir, home: env.HOME })
+      : null;
+    // Both live in this attempt's own folder: the staged copy of the exact generated file, or what the model saved there.
+    return staged?.artifactPath ?? newestImageIn(outDir);
   });
 }
 
 /** The subscription route never falls through to a paid API transport. */
-async function tryGemini(clean: string, target: string, permission?: "write" | "full"): Promise<boolean> {
+async function tryGemini(clean: string, target: string, permission?: "write" | "full"): Promise<string | null> {
   return runAgyNanoBanana(clean, target, undefined, permission);
 }
 
@@ -293,12 +283,13 @@ const COOLDOWN_MS = 15 * 60 * 1000;
  * 슬롯에서 온 선택을 몰래 다른 공급자로 바꾸면 저장된 선택과 실제 영수증이 달라진다.
  */
 /** Grok Imagine (official CLI, OAuth subscription only — runGrokImagine refuses an API key) into the exact target. */
-async function tryGrok(prompt: string, target: string, dir: string, permission?: "write" | "full"): Promise<boolean> {
+async function tryGrok(prompt: string, target: string, permission?: "write" | "full"): Promise<string | null> {
   const { runGrokImagine } = await import("./grok-imagine");
-  // Grok Imagine keeps its own media-only boundary (--sandbox strict, shell/edit denied) for every permission.
+  // Grok Imagine keeps its own media-only boundary (--sandbox strict, shell/edit denied) for every permission; it
+  // harvests by its own session id, in this attempt's folder.
   return runImageEngine("grok", "multimodal-image", prompt, permission, async () => {
-    const produced = await runGrokImagine({ prompt, cwd: dir, kind: "image", targetPath: target });
-    return Boolean(produced) && fs.existsSync(target);
+    const produced = await runGrokImagine({ prompt, cwd: path.dirname(target), kind: "image", targetPath: target });
+    return produced && fs.existsSync(target) ? target : null;
   });
 }
 
@@ -311,7 +302,7 @@ export async function generateImage(model: ImageModel, prompt: string, admission
     const permission = admission?.permission;
     const dir = userDataPath("multimodal-images");
     fs.mkdirSync(dir, { recursive: true });
-    target = path.join(dir, `trex_${Date.now()}_${Math.floor(Math.random() * 1e6)}.png`);
+    const fileName = `trex_${Date.now()}_${Math.floor(Math.random() * 1e6)}.png`;
 
     const now = Date.now();
     // Grok (Imagine through the official CLI, subscription OAuth only) is used only when chosen: auto keeps codex → gemini.
@@ -331,21 +322,25 @@ export async function generateImage(model: ImageModel, prompt: string, admission
 
     let engine: "codex" | "gemini" | "grok" | null = null;
     for (const e of order) {
-      const ok =
+      const attemptDir = newAttemptDir(dir);
+      const attemptTarget = path.join(attemptDir, fileName);
+      const produced =
         e === "codex"
-          ? await runCodexImage(clean, target, dir, undefined, permission)
+          ? await runCodexImage(clean, attemptTarget, undefined, permission)
           : e === "grok"
-            ? await tryGrok(clean, target, dir, permission)
-            : await tryGemini(clean, target, permission);
-      if (ok) {
+            ? await tryGrok(clean, attemptTarget, permission)
+            : await tryGemini(clean, attemptTarget, permission);
+      if (produced) {
+        target = produced;
         engine = e;
         engineCooldown[e] = 0;
         break;
       }
+      dropEmptyAttemptDir(attemptDir);
       engineCooldown[e] = now + COOLDOWN_MS;
     }
-    if (!engine) {
-      // Retain partial media at its durable target for inspection and recovery.
+    if (!engine || !target) {
+      // Retain partial media in its attempt folder for inspection and recovery.
       return { ok: false, reason: "all-engines-unavailable" };
     }
 
@@ -388,16 +383,18 @@ export async function editImage(model: Exclude<ImageModel, "grok">, imagePath: s
     const sourceSha256 = createHash("sha256").update(source).digest("hex");
     const dir = userDataPath("multimodal-images");
     fs.mkdirSync(dir, { recursive: true });
-    const target = path.join(dir, `edit_${Date.now()}_${Math.floor(Math.random() * 1e6)}.png`);
+    const fileName = `edit_${Date.now()}_${Math.floor(Math.random() * 1e6)}.png`;
     const order: Array<"codex" | "gemini"> = model === "codex" ? ["codex"] : model === "gemini" ? ["gemini"] : ["codex", "gemini"];
     for (const engine of order) {
-      const ok = engine === "codex" ? await runCodexImage(clean, target, dir, imagePath, permission) : await runAgyNanoBanana(clean, target, imagePath, permission);
-      if (!ok || !fs.existsSync(target)) continue;
-      const output = fs.readFileSync(target);
+      const attemptDir = newAttemptDir(dir);
+      const target = path.join(attemptDir, fileName);
+      const produced = engine === "codex" ? await runCodexImage(clean, target, imagePath, permission) : await runAgyNanoBanana(clean, target, imagePath, permission);
+      if (!produced || !fs.existsSync(produced)) { dropEmptyAttemptDir(attemptDir); continue; }
+      const output = fs.readFileSync(produced);
       const outputSha256 = createHash("sha256").update(output).digest("hex");
       // A route that copied the input back unchanged did not edit anything.
-      if (outputSha256 === sourceSha256) { fs.rmSync(target, { force: true }); continue; }
-      return { ok: true, engine, artifactPath: target, src: `data:${sniffImageMime(output)};base64,${output.toString("base64")}`, lineage: { sourceSha256, outputSha256 } };
+      if (outputSha256 === sourceSha256) { fs.rmSync(produced, { force: true }); dropEmptyAttemptDir(attemptDir); continue; }
+      return { ok: true, engine, artifactPath: produced, src: `data:${sniffImageMime(output)};base64,${output.toString("base64")}`, lineage: { sourceSha256, outputSha256 } };
     }
     return { ok: false, reason: "all-engines-unavailable" };
   } catch (e) {
@@ -419,6 +416,9 @@ export function removeGeneratedImageArtifact(filePath: string): boolean {
     const stat = fs.lstatSync(candidate, { bigint: true });
     if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1n) return false;
     fs.unlinkSync(candidate);
+    // Its attempt folder (job-*) goes too once nothing else is left in it.
+    const parent = path.dirname(candidate);
+    if (parent !== root && path.dirname(parent) === root && path.basename(parent).startsWith("job-")) dropEmptyAttemptDir(parent);
     return true;
   } catch {
     return false;

@@ -10,6 +10,8 @@ import { detachedSpawnOpts, killCliTree, trackRunChild, writeStdin } from "../ru
 import { withAgyProductHome } from "../runtime/antigravity-personal-context";
 import { withCodexProductHome } from "../runtime/codex-product-home";
 import { findExecutableSync } from "../runtime/path-lookup";
+import { DIRECT_CLI_RUNTIMES, runLedgeredCliCall } from "../runtime/direct-cli-ledger";
+import { productHomeRefusedOnThisHost } from "../runtime/product-home-identity";
 
 export type DocumentMode = "report" | "paper" | "brief";
 export type ReviseAction = "expand" | "rewrite" | "shorten" | "improve" | "formal" | "casual";
@@ -201,18 +203,28 @@ export async function reviseDocumentText(
 }
 
 // agy → codex 공통 실행. 성공 시 {text, engine}, 실패 시 {reason}.
-export async function runLlm(prompt: string): Promise<{ text?: string; engine?: "agy" | "codex"; reason?: string }> {
+// Each engine call goes through the model-call ledger and the invocation breaker like a runtime turn (R-078 sibling,
+// runtime/direct-cli-ledger.ts). Both run with no tool authority: agy gets no permission flag (headless agy denies every
+// tool), codex runs -s read-only. `phase` names the caller in the ledger (document studio, chat recap).
+export async function runLlm(prompt: string, phase = "document-llm"): Promise<{ text?: string; engine?: "agy" | "codex"; reason?: string }> {
+  // A gate or script (no install identity) in the account's own HOME would run the person's CLIs and sign-in.
+  if (productHomeRefusedOnThisHost(os.homedir())) return { reason: "unconfigured-host-personal-home" };
   const agy = resolveBin("agy", AGY_PATHS);
   if (agy) {
     // Product sessions stay out of the person's own Antigravity history (HOME mirror, like every product run).
     const env = withAgyProductHome({ ...process.env, GEMINI_CLI_TRUST_WORKSPACE: "true" }, undefined, undefined);
-    const out = await runViaStdin(agy, ["--print", ""], prompt, env, 140_000);
-    if (out && out.trim()) return { text: out, engine: "agy" };
+    const out = await runLedgeredCliCall({ runtime: DIRECT_CLI_RUNTIMES.antigravity, phase, request: prompt, permission: "read",
+      produce: async () => { const text = await runViaStdin(agy, ["--print", ""], prompt, env, 140_000); return text && text.trim() ? text : null; } });
+    if (out) return { text: out, engine: "agy" };
   }
   const codex = resolveBin("codex", CODEX_PATHS);
   if (codex) {
-    const out = await runViaStdin(codex, ["exec", "-s", "read-only", "--skip-git-repo-check", "-"], prompt, withCodexProductHome(process.env), 140_000);
-    if (out && out.trim()) return { text: out, engine: "codex" };
+    const out = await runLedgeredCliCall({ runtime: DIRECT_CLI_RUNTIMES.codex, phase, request: prompt, permission: "read",
+      produce: async () => {
+        const text = await runViaStdin(codex, ["exec", "-s", "read-only", "--skip-git-repo-check", "-"], prompt, withCodexProductHome(process.env), 140_000);
+        return text && text.trim() ? text : null;
+      } });
+    if (out) return { text: out, engine: "codex" };
   }
   return { reason: "no-llm-runtime" };
 }

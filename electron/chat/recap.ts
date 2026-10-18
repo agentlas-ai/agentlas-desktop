@@ -158,7 +158,7 @@ async function summarize(messages: ChatHistoryEntry[], locale: "ko" | "en"): Pro
           transcript,
         ].join("\n");
 
-  const out = await runLlm(prompt);
+  const out = await runLlm(prompt, "chat-recap");
   if (!out.text) return null;
   return cleanLine(out.text);
 }
