@@ -573,6 +573,35 @@ function isQuestionFromRecoveryAfterOwnerGoalStop(
   return false;
 }
 
+/**
+ * 이 질문을 낸 실행. 답은 그 실행의 권한을 잇는다 — 대화의 "가장 최근" 실행이 아니다.
+ * 실측(운영 2026-10-18 01:49Z): 질문은 전체 권한 실행이 냈는데 그 뒤 읽기 전용 팀 보고 턴이
+ * 돌았고, 화면이 그 최신 실행의 권한을 이어 오너의 답이 "Bash 비활성화"로 실행됐다.
+ * 정본은 이 메시지를 확정한 최종 이벤트(durableMessageId)다. 그 결속이 없는 질문만, 질문보다
+ * 먼저 시작한 가장 최근 전경 실행으로 대신한다 — 질문 뒤에 시작한 실행은 절대 고르지 않는다.
+ */
+function questionSourceRunId(chatId: string, question: { id: string; createdAt: string }): string | undefined {
+  try {
+    const db = getDb();
+    const createdMs = Date.parse(question.createdAt);
+    const notBefore = Number.isFinite(createdMs) ? new Date(createdMs - 60_000).toISOString() : "";
+    const bound = db.prepare(`SELECT DISTINCT run_id FROM run_events
+      WHERE chat_id = ? AND kind = 'mcp_final' AND ts >= ?
+        AND json_extract(payload_json, '$.durableMessageId') = ?
+      LIMIT 2`).all(chatId, notBefore, question.id) as Array<{ run_id: string }>;
+    if (bound.length === 1) return bound[0].run_id;
+    if (bound.length > 1) return undefined;
+    const started = db.prepare(`SELECT run_id FROM run_events
+      WHERE chat_id = ? AND kind = 'invoke_started' AND ts <= ?
+        AND COALESCE(json_extract(payload_json, '$.background'), 0) != 1
+      ORDER BY ts DESC, rowid DESC LIMIT 1`).get(chatId, question.createdAt) as { run_id: string } | undefined;
+    return started?.run_id;
+  } catch {
+    // Unknown source fails closed in the renderer (read), never to the newest run.
+    return undefined;
+  }
+}
+
 /** 지금 사용자 확인을 기다리는 채팅들. 최신순. */
 export function listPendingConfirmations(): PendingConfirmation[] {
   const cached = pendingConfirmationsCache;
@@ -601,6 +630,7 @@ export function listPendingConfirmations(): PendingConfirmation[] {
     const agent = getAgentById(c.agentId);
     const requesterLabel = firm?.name || agent?.name || c.title;
     const requesterKind = firm ? "firm" : "agent";
+    const sourceRunId = questionSourceRunId(c.id, last);
     out.push({
       chatId: c.id,
       sourceMessageId: last.id,
@@ -615,6 +645,7 @@ export function listPendingConfirmations(): PendingConfirmation[] {
       requesterLabel,
       requesterKind,
       createdAt: last.createdAt,
+      ...(sourceRunId ? { sourceRunId } : {}),
       ...(snoozedUntil && Date.parse(snoozedUntil) > Date.now() ? { snoozedUntil } : {}),
     });
   }

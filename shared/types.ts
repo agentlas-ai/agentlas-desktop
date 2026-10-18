@@ -5515,6 +5515,8 @@ export interface PendingConfirmation {
   requesterKind: "agent" | "firm";
   /** 질문 메시지 시각(ISO) */
   createdAt: string;
+  /** 이 질문을 낸 실행. 답은 이 실행의 권한을 잇는다(대화의 최신 실행이 아니다). 모르면 없다. */
+  sourceRunId?: string;
   /** One에서 사용자가 미룬 시각. 질문은 Work의 정본 승인 목록에서는 계속 pending이다. */
   snoozedUntil?: string;
 }

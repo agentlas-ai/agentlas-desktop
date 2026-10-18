@@ -589,6 +589,19 @@ function firstApprovalLabel(confirmation: PendingConfirmation): string | null {
   return option?.label ?? null;
 }
 
+/**
+ * 질문을 낸 실행의 영수증 — 답은 이 실행의 권한을 잇는다. 대화의 최신 실행을 읽으면 그 사이에 돈
+ * 읽기 전용 팀 보고 턴의 권한으로 오너의 답이 실행됐다(운영 2026-10-18 01:49Z: "Bash가 비활성화").
+ * 질문의 실행을 모르거나 다른 대화의 영수증이면 null — 호출자가 읽기로 닫는다.
+ */
+async function questionSourceReceipt(confirmation: PendingConfirmation): Promise<InvocationRunReceipt | null> {
+  const api = ipc();
+  const runId = confirmation.sourceRunId;
+  if (!api || !runId) return null;
+  const receipt = await api.invoke.receipt(runId).catch(() => null);
+  return receipt?.runId === runId && receipt.chatId === confirmation.chatId ? receipt : null;
+}
+
 function decisionRejectCopy(locale: "ko" | "en"): string {
   const key = "one.shell.decision.reject_hint" as const;
   const value = tFor(locale, key);
@@ -7884,8 +7897,7 @@ function OneSessionsShell() {
     try {
       // 두 호출은 서로 기다릴 이유가 없다 — 동시에 보낸다.
       const [sourceReceipt] = await Promise.all([
-        api.invoke.latestReceipt(confirmation.chatId)
-          .catch(() => projectedTask?.latestReceipt ?? null),
+        questionSourceReceipt(confirmation),
         api.confirm.commitAnswer({
           chatId: confirmation.chatId,
           sourceMessageId: confirmation.sourceMessageId,
@@ -8033,6 +8045,8 @@ function OneSessionsShell() {
       return;
     }
     setConfirmations((items) => items.filter((item) => item.sourceMessageId !== confirmation.sourceMessageId));
+    // Like an answer, a clarification continues the run that asked, not the chat's newest run.
+    const sourceReceipt = await questionSourceReceipt(confirmation);
     await startRun(
       confirmation.chatId,
       projectedTask?.taskId ?? null,
@@ -8042,9 +8056,13 @@ function OneSessionsShell() {
         options: confirmation.options.map((option) => option.label).join(" · "),
       }),
       "conversation",
-      { displayUserMessage: false, promptOrigin: "system" },
+      {
+        displayUserMessage: false,
+        promptOrigin: "system",
+        permissionMode: narrowerOnePermission(onePermission, sourceReceipt?.executionPermission ?? "read"),
+      },
     );
-  }, [appLocale, busy, conversation?.id, conversation?.originSurface, projections, startRun]);
+  }, [appLocale, busy, conversation?.id, conversation?.originSurface, onePermission, projections, startRun]);
 
   const startNewConversation = useCallback(() => {
     // Clear the renderer's active-thread identity synchronously, before the
