@@ -5836,6 +5836,21 @@ export async function runGraph(
             tryRecordRunEvent({ runId, automationId: automation.id, nodeId: node.id, kind: "workflow_common_recovery",
               payload: { unitId: failedUnit.unitId, attemptId: failedUnit.attemptId, methodStarts: failedUnit.methodStarts,
                 action: verdict.action, reason: verdict.reason, attention: verdict.attention, delivery: "not-dispatched" } });
+          } else if (retryAdmitted && !dryRun && claimedWithoutTools && !workerReceiptRecorded && failedUnit?.state === "failed") {
+            /*
+             * A mutation step that answered without calling a tool proved the same two facts: its invocation returned its
+             * final answer (the worker ended) and no external call was observed (the retry lane admits it only when not
+             * ambiguous). Without this record the retry it was granted was refused at begin() as
+             * work_recovery_worker_liveness_unknown, and every resume of the occurrence stopped there (dev 2026-10-18 run21:
+             * a weekly report automation blocked four times in two minutes).
+             */
+            const verdict = commonRecovery.retry(failedUnit, { checkpointMatches: true, completed: false,
+              evidenceRef: `graph-attempt:${runId}:${node.id}:${attempts}:claimed-without-tools`, effectSafe: true, workerEnded: true }, {
+              userStopped: runSignal.aborted, scopeCurrent: true, authorized: true, budgetAvailable: budgetGuard(node) === null });
+            notDispatchedRecoveryAdmitted = verdict.action === "retry";
+            tryRecordRunEvent({ runId, automationId: automation.id, nodeId: node.id, kind: "workflow_common_recovery",
+              payload: { unitId: failedUnit.unitId, attemptId: failedUnit.attemptId, methodStarts: failedUnit.methodStarts,
+                action: verdict.action, reason: verdict.reason, attention: verdict.attention, delivery: "claimed-without-tools" } });
           }
           if (retryAdmitted && notDispatchedRecoveryAdmitted) {
             checkpoint!.inFlightNodeIds = checkpoint!.inFlightNodeIds.filter((id) => id !== node.id);
