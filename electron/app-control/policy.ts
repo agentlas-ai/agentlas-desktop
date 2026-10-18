@@ -46,6 +46,10 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   // The Document tab is the owner's own hand: an app.call here would journal an AI edit as the owner's. The AI edits,
   // saves and opens live documents through the harness document.* ports (actor ai, run permission checked).
   [/^liveDocument\.(apply|save|close|pickAndOpen|reveal)$/, "the Document tab is the owner's hand; edit, open and save through harness document.*", "write"],
+  // The Finance workspace's bridges (f8c5c351, aba1eea1) are its screen's own calls. One reaches Finance through the harness
+  // finance.* ports (finance/tools.ts FINANCE_PORTS, writes are harness commands under the run's permission); an app.call here
+  // would act as the owner's screen. Whether any of these is exposed as well is the Finance owner's decision.
+  [/^finance\./, "the Finance workspace is the owner's screen; work with Finance through harness finance.*", "write"],
   // App lifecycle: it would end this very turn.
   [/^updater\.install$/, "installing an update restarts the app and ends this turn; ask the owner to press Install", "write"],
   [/^menu\.setLocale$/, "use app.setLanguage", "write"],
