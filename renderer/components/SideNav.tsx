@@ -43,6 +43,7 @@ import {
   IconChevronDown,
   IconSidebar,
   IconCpu,
+  IconCircleDollar,
 } from "./Icon";
 import type { MarketplaceListing } from "@/lib/types";
 import type { ComponentType } from "react";
@@ -182,6 +183,7 @@ export function SideNav({
     () => [
       { label: t("nav.dashboard"), href: "/dashboard", icon: IconHome },
       { label: t("nav.workspace"), href: "/workspace", icon: IconChat },
+      { label: t("nav.finance"), href: "/finance", icon: IconCircleDollar },
       { label: t("nav.localModels"), href: "/local-models", icon: IconCpu },
       /*
        * 프롬프트 스토어는 화면도 번역 문구도 다 있는데 들어가는 문이 없었다

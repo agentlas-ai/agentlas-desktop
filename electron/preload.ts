@@ -121,6 +121,19 @@ contextBridge.exposeInMainWorld("agentlasSystemPermissions", {
 });
 
 const api: AgentlasIpc = {
+  finance: {
+    load: () => ipcRenderer.invoke("finance:load"),
+    save: input => ipcRenderer.invoke("finance:save", input),
+    search: input => ipcRenderer.invoke("finance:search", input),
+    ask: input => ipcRenderer.invoke("finance:ask", input),
+    cancelAsk: input => ipcRenderer.invoke("finance:cancelAsk", input),
+    queryData: input => ipcRenderer.invoke("finance:queryData", input),
+    refreshQuotes: () => ipcRenderer.invoke("finance:refreshQuotes"),
+    startResearch: input => ipcRenderer.invoke("finance:startResearch", input),
+    scheduleMonitor: input => ipcRenderer.invoke("finance:scheduleMonitor", input),
+    pauseMonitor: input => ipcRenderer.invoke("finance:pauseMonitor", input),
+    exportFile: input => ipcRenderer.invoke("finance:exportFile", input),
+  },
   business: {
     snapshot: () => ipcRenderer.invoke("business:snapshot"),
     readEligibility: () => ipcRenderer.invoke("business:eligibility:read"),

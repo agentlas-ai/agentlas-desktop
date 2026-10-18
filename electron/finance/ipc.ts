@@ -1,0 +1,131 @@
+import { BrowserWindow, dialog, type IpcMain, type IpcMainInvokeEvent } from 'electron';
+import fs from 'node:fs';
+import path from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import { z } from 'zod';
+import { validateFinanceWorkspace, type FinanceWorkspace } from '../../shared/finance';
+import { getAuthenticatedSessionBinding, onAuthSessionOwnershipChanged } from '../auth';
+import { userDataPath } from '../runtime-paths';
+import { createWorkStart } from '../work-start';
+import { detectRuntimes } from '../runtime/detect';
+import { FinanceStore, type FinanceScope } from './store';
+import { interpretFinance } from './model';
+import { queryFinanceData, refreshFinanceQuotes, searchFinanceAssets } from './data';
+import { financeResearchPrompt } from './prompts';
+import { pauseFinanceMonitor, readFinanceMonitor, rollbackFinanceMonitor, scheduleFinanceMonitor } from './monitor';
+
+const boundedId = z.string().min(1).max(200);
+function captureScope(): FinanceScope {
+  const captured = getAuthenticatedSessionBinding();
+  if (!captured) throw new Error('finance_sign_in_required');
+  return { workspaceId: captured.workspaceId, userId: captured.userId, assertCurrent() {
+    const current = getAuthenticatedSessionBinding();
+    if (!current || current.sessionId !== captured.sessionId || current.workspaceId !== captured.workspaceId || current.userId !== captured.userId) throw new Error('finance_account_changed');
+  } };
+}
+export function registerFinanceIpc(input: { ipc: Pick<IpcMain, 'handle'>; assertTrustedSender(event: IpcMainInvokeEvent): void }): void {
+  const store = new FinanceStore(userDataPath('finance', 'workspaces'));
+  const running = new Map<string, { controller: AbortController; senderId: number }>();
+  onAuthSessionOwnershipChanged(() => { for (const item of running.values()) item.controller.abort(); running.clear(); });
+  const load = async(scope: FinanceScope) => {
+    const workspace = await store.load(scope); scope.assertCurrent();
+    return { ...workspace, monitors: workspace.monitors.map(monitor => readFinanceMonitor({ scope, monitor })) };
+  };
+  const handle = (name: string, fn: (event: IpcMainInvokeEvent, raw: unknown, scope: FinanceScope) => unknown) => input.ipc.handle(`finance:${name}`, (event, raw) => { input.assertTrustedSender(event); return fn(event, raw, captureScope()); });
+  handle('load', (_event, _raw, scope) => load(scope));
+  handle('save', async(_event, raw, scope) => {
+    const arg = z.object({ workspace: z.unknown(), expectedRevision: z.number().int().nonnegative() }).strict().parse(raw);
+    const workspace = validateFinanceWorkspace(arg.workspace), current = await store.load(scope); scope.assertCurrent();
+    for (const monitor of workspace.monitors) {
+      const previous = current.monitors.find(item => item.id === monitor.id);
+      if (previous?.automationId) {
+        const live = readFinanceMonitor({ scope, monitor: previous });
+        const protectedKeys = ['automationId', 'executionAvailability', 'scheduleHuman', 'status', 'lastCheckedAt', 'nextCheckAt', 'note'] as const;
+        const metadataMatches = [previous, live].some(snapshot => protectedKeys.every(key => JSON.stringify(monitor[key]) === JSON.stringify(snapshot[key])));
+        if (!metadataMatches) throw new Error('finance_monitor_host_owned');
+        if (live.status !== 'paused' && JSON.stringify(monitor) !== JSON.stringify(previous) && JSON.stringify(monitor) !== JSON.stringify(live)) throw new Error('finance_monitor_pause_before_edit');
+        if (live.status === 'paused' && monitor.status !== 'paused') throw new Error('finance_monitor_host_owned');
+      } else if (monitor.automationId || monitor.executionAvailability || monitor.status === 'active' || monitor.lastCheckedAt || monitor.nextCheckAt) throw new Error('finance_monitor_host_owned');
+    }
+    for (const previous of current.monitors) if (previous.automationId && !workspace.monitors.some(item => item.id === previous.id) && readFinanceMonitor({ scope, monitor: previous }).status !== 'paused') throw new Error('finance_monitor_pause_before_remove');
+    return store.save(scope, { workspace, expectedRevision: arg.expectedRevision });
+  });
+  handle('search', async(_event, raw, scope) => {
+    const arg = z.object({ query: z.string().min(1).max(200) }).strict().parse(raw);
+    const result = await searchFinanceAssets(arg.query); scope.assertCurrent(); return result;
+  });
+  handle('queryData', async(_event, raw, scope) => {
+    const arg = z.object({ query: z.string().max(2000), assetIds: z.array(boundedId).max(10), metrics: z.array(z.string().max(80)).max(10), period: z.string().max(80) }).strict().parse(raw);
+    const workspace = await store.load(scope); scope.assertCurrent();
+    const result = await queryFinanceData(arg, workspace.watchlist); scope.assertCurrent(); return result;
+  });
+  handle('refreshQuotes', async(_event, _raw, scope) => {
+    const workspace = await store.load(scope); scope.assertCurrent();
+    const result = await refreshFinanceQuotes(workspace); scope.assertCurrent();
+    if ((await store.load(scope)).revision !== workspace.revision) return { baseRevision: workspace.revision, status: 'conflict', message: 'The workspace changed while quotes were loading. Refresh again.', operations: [] };
+    return result;
+  });
+  handle('ask', async(event, raw, scope) => {
+    const arg = z.object({ request: z.string().min(1).max(20000), screenContext: z.string().max(2000), baseRevision: z.number().int().nonnegative(), requestId: boundedId.optional() }).strict().parse(raw);
+    const requestId = arg.requestId ?? randomUUID(); const key = `${event.sender.id}:${requestId}`;
+    if (running.has(key) || [...running.values()].filter(item => item.senderId === event.sender.id).length >= 2) throw new Error('finance_request_busy');
+    const controller = new AbortController(); running.set(key, { controller, senderId: event.sender.id });
+    const onDestroyed = () => controller.abort(); event.sender.once('destroyed', onDestroyed);
+    try {
+      const workspace = await store.load(scope); scope.assertCurrent();
+      const result = await interpretFinance({ ...arg, requestId }, workspace, controller.signal);
+      scope.assertCurrent();
+      if (controller.signal.aborted) return { baseRevision: arg.baseRevision, requestId, status: 'cancelled', message: 'Request cancelled.' };
+      if ((await store.load(scope)).revision !== arg.baseRevision) return { baseRevision: arg.baseRevision, requestId, status: 'conflict', message: 'The workspace changed while the model was responding. Nothing was applied.' };
+      scope.assertCurrent(); return result;
+    } finally { event.sender.removeListener('destroyed', onDestroyed); running.delete(key); }
+  });
+  // Cancellation is unconditional with respect to auth, revisions and request completion.
+  input.ipc.handle('finance:cancelAsk', (event, raw) => {
+    input.assertTrustedSender(event); const arg = z.object({ requestId: boundedId }).strict().parse(raw);
+    const item = running.get(`${event.sender.id}:${arg.requestId}`); item?.controller.abort(); return { cancelled: Boolean(item) };
+  });
+  handle('startResearch', async(_event, raw, scope) => {
+    const arg = z.object({ assetId: boundedId, question: z.string().max(20000).optional() }).strict().parse(raw);
+    const workspace = await store.load(scope); scope.assertCurrent(); const asset = workspace.watchlist.find(item => item.id === arg.assetId);
+    if (!asset) throw new Error('finance_asset_not_found');
+    const receipt = await createWorkStart({ intentId: randomUUID(), prompt: financeResearchPrompt(asset, arg.question ?? ''), options: { permissions: 'read' } }, async() => { const runtimes = await detectRuntimes(); scope.assertCurrent(); return runtimes; });
+    scope.assertCurrent(); return { chatId: receipt.chatId, intentId: receipt.intentId, status: receipt.status };
+  });
+  for (const action of ['scheduleMonitor', 'pauseMonitor'] as const) handle(action, async(_event, raw, scope) => {
+    const arg = action === 'scheduleMonitor' ? z.object({ monitorId: boundedId, scheduleHuman: z.enum(['daily-09:00', 'weekday-09:00', 'hourly']) }).strict().parse(raw) : z.object({ monitorId: boundedId }).strict().parse(raw);
+    const workspace = await store.load(scope); scope.assertCurrent(); const monitor = workspace.monitors.find(item => item.id === arg.monitorId);
+    if (!monitor) throw new Error('finance_monitor_not_found');
+    const updated = action === 'scheduleMonitor' ? await scheduleFinanceMonitor({ scope, monitor, assets: workspace.watchlist, scheduleHuman: 'scheduleHuman' in arg ? String(arg.scheduleHuman) : undefined }) : await pauseFinanceMonitor({ scope, monitor });
+    try { await store.save(scope, { workspace: { ...workspace, monitors: workspace.monitors.map(item => item.id === updated.id ? updated : item) }, expectedRevision: workspace.revision }); }
+    catch (error) {
+      if (action === 'scheduleMonitor') { await rollbackFinanceMonitor({ scope, monitor: updated }); throw error; }
+      if (!(error instanceof Error) || error.message !== 'finance_revision_conflict') throw error;
+      // The scheduler confirmed Pause. A newer workspace edit must not turn that revocation into a false failure.
+    }
+    scope.assertCurrent(); return { automationId: updated.automationId!, executionAvailability: 'app-running', status: updated.status };
+  });
+  handle('exportFile', async(event, raw, scope) => {
+    const arg = z.object({ filename: z.string().min(1).max(200), content: z.string().max(16000000), mimeType: z.enum(['text/markdown', 'text/plain', 'text/csv', 'application/json', 'text/html']), ownerScope: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(raw);
+    if ((await store.load(scope)).ownerScope !== arg.ownerScope) throw new Error('finance_owner_scope_mismatch');
+    scope.assertCurrent();
+    const extensions: Record<string, string[]> = { 'text/markdown': ['md'], 'text/plain': ['txt'], 'text/csv': ['csv'], 'application/json': ['json'], 'text/html': ['html'] };
+    const ext = extensions[arg.mimeType];
+    const filename = path.basename(arg.filename).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
+    const options = { title: 'Export Finance file', defaultPath: ext.some(extension => filename.endsWith(`.${extension}`)) ? filename : `${filename}.${ext[0]}`, filters: [{ name: 'Finance document', extensions: ext }] };
+    const owner = BrowserWindow.fromWebContents(event.sender); const chosen = owner ? await dialog.showSaveDialog(owner, options) : await dialog.showSaveDialog(options);
+    scope.assertCurrent(); if (chosen.canceled || !chosen.filePath) return { ok: false, cancelled: true };
+    const bytes = Buffer.from(arg.content, 'utf8'); if (bytes.length > 24 * 1024 * 1024) throw new Error('finance_export_too_large');
+    const temporary = path.join(path.dirname(chosen.filePath), `.finance-export-${randomUUID()}.tmp`);
+    try { fs.writeFileSync(temporary, bytes, { flag: 'wx', mode: 0o600 }); scope.assertCurrent(); fs.renameSync(temporary, chosen.filePath); }
+    finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
+    const sha256 = createHash('sha256').update(fs.readFileSync(chosen.filePath)).digest('hex');
+    if (sha256 !== createHash('sha256').update(bytes).digest('hex')) throw new Error('finance_export_readback_mismatch');
+    const receipt = { ok: true, path: chosen.filePath, sha256, bytes: bytes.length, savedAt: new Date().toISOString() };
+    const partition = createHash('sha256').update(JSON.stringify([scope.workspaceId, scope.userId])).digest('hex');
+    const receiptDir = userDataPath('finance', 'exports', partition);
+    try { fs.mkdirSync(receiptDir, { recursive: true, mode: 0o700 }); fs.writeFileSync(path.join(receiptDir, `${randomUUID()}.json`), JSON.stringify(receipt), { flag: 'wx', mode: 0o600 }); }
+    catch { return { ...receipt, error: 'The file was saved, but its local export receipt could not be retained.' }; }
+    return receipt;
+  });
+}

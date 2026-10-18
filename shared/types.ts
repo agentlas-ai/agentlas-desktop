@@ -7129,6 +7129,8 @@ export interface RunAlertSettings {
 }
 
 export interface AgentlasIpc {
+  /** Optional so Finance can explain an older preload without breaking other surfaces. */
+  finance?: import("./finance").FinanceAPI;
   /** Agent mail (One's own address) — server-owned entitlement and mailbox. */
   agentMail: import("./agent-mail").AgentMailIpc;
   browserUi: import("./browser-ui").BrowserUiAPI;
