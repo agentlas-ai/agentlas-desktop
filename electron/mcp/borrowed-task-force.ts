@@ -4546,6 +4546,11 @@ interface BorrowedAgentResult {
   failedRuntime?: RuntimeStatus;
   /** Typed cause of a step the room marked FAILED (team-step-settlement.ts); the synthesis reads it instead of prose. */
   stepFailure?: TeamStepFailureNote;
+  /**
+   * Typed: this step never ran — these earlier steps did not complete, so it was withheld (W6, 2026-10-18). It is not a
+   * failed attempt of its worker: the verifier names it child_withheld with the blocking steps, never child_failed.
+   */
+  withheldBy?: string[];
   workforceResponsibility?: WorkforceResponsibility;
   invocationEvidence?: WorkforceInvocationEvidence;
   nestedExecutionEvidence?: WorkforceNestedExecutionEvidence;
@@ -7380,15 +7385,17 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   // teammate speaks in the room immediately instead of waiting behind the
   // slowest sibling. Strict Workforce packets have no local dependency fields
   // and therefore retain their existing parallel execution behavior.
+  const blockedPending = (): number[] => [...pending].filter((index) => {
+    const dependencies = (executionPackets[index].dependsOn ?? [])
+      .filter((dependency) => knownStepIds.has(dependency));
+    return dependencies.length > 0
+      && dependencies.every((dependency) => resultByStepId.has(dependency))
+      && dependencies.some((dependency) => resultByStepId.get(dependency)?.ok === false);
+  });
   while (pending.size > 0) {
-    const blocked = [...pending].filter((index) => {
-      const dependencies = (executionPackets[index].dependsOn ?? [])
-        .filter((dependency) => knownStepIds.has(dependency));
-      return dependencies.length > 0
-        && dependencies.every((dependency) => resultByStepId.has(dependency))
-        && dependencies.some((dependency) => resultByStepId.get(dependency)?.ok === false);
-    });
-    for (const index of blocked) {
+    // Withholding is transitive within the wave (W6, 2026-10-18): a step after a withheld one is withheld too, before the
+    // no-ready guard below could dispatch it as the only pending step without the input it depends on.
+    for (let blocked = blockedPending(); blocked.length > 0; blocked = blockedPending()) for (const index of blocked) {
       const packet = executionPackets[index];
       const spec = specBySlug.get(packet.agent) ?? specs[0];
       const blockedDependencies = (packet.dependsOn ?? [])
@@ -7406,6 +7413,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         handoffId: skippedId,
         model: "not-run",
         provider: "agentlas-desktop",
+        withheldBy: blockedDependencies,
       };
       results[index] = skipped;
       resultByStepId.set(stepIds[index], skipped);
@@ -7914,9 +7922,15 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
   const unclearedBlockers: Array<{ result: BorrowedAgentResult; items: string[] }> = [];
   if (!plan.parseSuccess) verifierIssues.push("planner_parse_failed");
   if (plan.fallbackUsed) verifierIssues.push("planner_fallback_used");
-  for (const result of results) {
-    if (!result.ok) verifierIssues.push(`child_failed:${result.spec.agentReleaseId ?? result.spec.slug}`);
-  }
+  // A withheld step never ran: it is named with the step that blocked it, so the failure ledger points at the root step
+  // (production ea52dcd9, Yotube 2026-10-18 05:58: 5 of 9 "child_failed" never ran). The run stays unverified either way.
+  results.forEach((result, index) => {
+    if (result.ok) return;
+    const release = result.spec.agentReleaseId ?? result.spec.slug;
+    verifierIssues.push(result.withheldBy
+      ? `child_withheld:${release}:${stepIds[index]}:blocked_by:${result.withheldBy.join(",")}`
+      : `child_failed:${release}`);
+  });
   // A step with nothing produced and nothing delegated is named, never folded into a pass (D1, A/B3 room fc53939f).
   results.forEach((result, index) => { if (result?.nothingProduced) verifierIssues.push(`nothing_produced:${stepIds[index]}`); });
   // A completed review is allowed to find blockers so repair packets can run.
@@ -8078,7 +8092,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         bundleDigest: prepared.bundleDigest,
         permissionPolicyDigest: prepared.permissionPolicyDigest,
         executionGraphDigest: prepared.executionGraphDigest,
-        status: result.ok ? "completed" : "failed",
+        status: result.ok ? "completed" : result.withheldBy ? "blocked" : "failed",
         handoffArtifactRefs: [result.handoffId],
         capabilityBindingPlanDigest: binding.capabilityBindingPlan.bindingPlanDigest,
         capabilityBindings: grant.capabilityBindings,
