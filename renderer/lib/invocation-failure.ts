@@ -168,7 +168,7 @@ export function goalAdmissionControlFailureForCode(code: string | null | undefin
         : "The goal is confirming whether the signal it was waiting for is already being handled, so this did not start. The check continues automatically and the goal status will update; your input is preserved.";
       break;
     case "goal_resume_effect_boundary_uncertain":
-      message = ko ? "이전 실행의 외부 결과가 확인되지 않아 목표를 이어가지 않았습니다. 목표의 재개에서 결과를 검토하면 이어집니다. 목표와 입력은 보존되어 있습니다."
+      message = ko ? "이전 실행이 실제로 무엇을 했는지 확인되지 않아 목표를 이어가지 않았습니다. 목표의 ‘재개’에서 결과를 확인하면 이어집니다. 목표와 입력은 그대로 있습니다."
         : "The previous run's external outcome is unconfirmed, so the goal did not continue. Review it from the goal's Resume to continue; your goal and input are preserved.";
       break;
     case "desktop_execution_admission_closed":

@@ -86,7 +86,7 @@ function runtimeSelectionPresentation(selection: RuntimeSelection | null | undef
   const effort = selection.effort?.trim() || (locale === "en" ? "Default effort" : "기본 작업량");
   return {
     label: locale === "en" ? "Automation pin · overrides role default" : "자동화별 고정 · 역할 기본보다 우선",
-    detail: `${provider} · ${engine} · ${model ?? (locale === "en" ? "model unknown" : "모델 미확인")} · ${locale === "en" ? "effort" : "작업량"} ${effort} · ${locale === "en" ? "Worker if unavailable · review uncertain execution" : "불가 시 Worker · 실행 불확실 시 확인"}`,
+    detail: `${provider} · ${engine} · ${model ?? (locale === "en" ? "model unknown" : "모델 알 수 없음")} · ${locale === "en" ? "effort" : "작업량"} ${effort} · ${locale === "en" ? "Worker if unavailable · review uncertain execution" : "불가 시 Worker · 실행 불확실 시 확인"}`,
   };
 }
 
@@ -1622,8 +1622,8 @@ function AutomationFlowPage() {
         return false;
       }
       const confirmed = await confirmPopup(locale === "en"
-        ? `Review run ${currentRun.runId} and confirm its external result before starting a separate run? Any action that already completed may happen again. The old run will remain in history.`
-        : `${currentRun.runId} 실행의 외부 결과를 확인했습니까? 이미 완료된 동작은 새 실행에서 다시 일어날 수 있습니다. 이전 실행 기록은 남겨 둔 채 별도 실행을 시작합니다.`, { locale, tone: "warning", confirmLabel: locale === "ko" ? "검토 완료 · 새 실행" : "Reviewed · New run" });
+        ? `Have you checked what run ${currentRun.runId} actually did? Anything it already finished may happen again in the new run. The old run stays in history.`
+        : `${currentRun.runId} 실행이 실제로 무엇을 했는지 확인했나요? 이미 끝난 동작은 새 실행에서 한 번 더 일어날 수 있습니다. 이전 실행 기록은 그대로 두고 새 실행을 따로 시작합니다.`, { locale, tone: "warning", confirmLabel: locale === "ko" ? "검토 완료 · 새 실행" : "Reviewed · New run" });
       if (!confirmed) return false;
       try {
         const terminalCloseApi = api.automations as unknown as {
@@ -1644,14 +1644,14 @@ function AutomationFlowPage() {
         ) throw new Error("automation_graph_terminal_close_receipt_mismatch");
         setInputPrompt(null);
         setMessage(locale === "en"
-          ? "The previous run was reviewed. Starting a separate occurrence…"
-          : "이전 실행을 확인했습니다. 별도 발생을 새로 시작합니다…");
+          ? "The previous run was reviewed. Starting a new run…"
+          : "이전 실행을 확인했습니다. 새 실행을 따로 시작합니다…");
         await runNow(dryRun, inputValue, fresh, true);
         return true;
       } catch {
         setMessage(locale === "en"
-          ? "The exact terminal-close receipt could not be verified. No separate run was started. Refresh the history; if the graph drifted, restore the old graph to reconcile it."
-          : "해당 실행의 종결 영수증을 저장·검증하지 못해 별도 실행을 시작하지 않았습니다. 기록을 새로고침하고 그래프가 바뀌었다면 이전 그래프로 복원해 재조정해 주세요.");
+          ? "Could not confirm that the previous run was closed, so no new run was started. Refresh the history and try again. If you changed the graph since that run, restore the previous graph first."
+          : "이전 실행을 마무리했다는 기록을 확인하지 못해 새 실행을 시작하지 않았습니다. 기록을 새로고침한 뒤 다시 시도해 주세요. 그 사이 그래프를 고쳤다면 이전 그래프로 되돌린 뒤 시도해 주세요.");
         return true;
       }
     };
@@ -1696,8 +1696,8 @@ function AutomationFlowPage() {
             : "실행 기록에는 요청 전과 같은 실행만 보입니다. 새 실행은 확인되지 않았으니 다시 시도하기 전에 기록을 확인하세요.");
         } else {
           setMessage(locale === "en"
-            ? "The run request may have started, but the returned receipt could not be matched to this action. Inspect run history and do not repeat it until you know the outcome."
-            : "실행 요청이 시작됐을 수 있으나 반환 영수증을 이 작업과 일치시킬 수 없습니다. 결과를 알기 전에는 반복하지 말고 실행 기록을 확인하세요.");
+            ? "The run may have started, but it could not be matched to this request. To avoid running it twice, check the run history before trying again."
+            : "실행이 시작됐을 수 있지만, 이 요청의 실행인지 확인하지 못했습니다. 같은 실행이 두 번 돌지 않도록 실행 기록에서 결과를 확인한 뒤 다시 시도하세요.");
         }
       } catch {
         setMessage(locale === "en"
@@ -1943,8 +1943,8 @@ function AutomationFlowPage() {
                       if (!api || !automation) return;
                       await api.automations.recordEvalCorrection(automation.id, failedNodeId, "pass");
                       setMessage(locale === "en"
-                        ? "Recorded. Future judgments on this step will learn from this ruling."
-                        : "기록했습니다. 이 단계의 다음 판정부터 이 교정을 배웁니다.");
+                        ? "Recorded. This step's next checks will take this correction into account."
+                        : "기록했습니다. 이 단계는 다음 검증부터 이 수정을 반영합니다.");
                     })();
                   }}
                   style={pillBtn(false)}

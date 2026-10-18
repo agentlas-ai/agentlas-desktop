@@ -18,7 +18,7 @@ export function toolchainCopy(locale: string) {
     stateFile: (target: string, lines: number | null) => ko ? `상태 파일 미리 읽기 · ${target} (마지막 ${lines ?? 10}줄)` : `Pre-read state file · ${target} (last ${lines ?? 10} lines)`,
     pageRead: (target: string) => ko ? `페이지 읽기 · ${target}` : `Page read · ${target}`,
     evidence: (share: number, runs: number, weak: boolean) => ko
-      ? `성공한 실행 ${runs}회 중 ${Math.round(share * 100)}%에서 반복${weak ? " · 판정 없이 완료만 확인됨" : ""}`
+      ? `성공한 실행 ${runs}회 중 ${Math.round(share * 100)}%에서 반복${weak ? " · 결과 평가 없이 완료만 확인됨" : ""}`
       : `Repeated in ${Math.round(share * 100)}% of ${runs} successful runs${weak ? " · completion only, not judged" : ""}`,
     shadow: (matches: number, need: number, mismatches: number) => ko
       ? `실제 실행과 비교 중 ${matches}/${need} 일치${mismatches ? ` · 불일치 ${mismatches}` : ""}`

@@ -609,8 +609,8 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
           : null;
         if ((!reconciliationRead || !reconciliation) && terminalCloseInput) {
           const confirmed = await confirmPopup(ko
-            ? `${currentRun.runId} 실행의 외부 결과를 확인했습니까? 이미 완료된 동작은 새 실행에서 다시 일어날 수 있습니다. 이전 실행 기록은 남겨 둔 채 별도 실행을 시작합니다.`
-            : `Review run ${currentRun.runId} and confirm its external result before starting a separate run? Any action that already completed may happen again. The old run will remain in history.`, { locale: ko ? "ko" : "en", tone: "warning" });
+            ? `${currentRun.runId} 실행이 실제로 무엇을 했는지 확인했나요? 이미 끝난 동작은 새 실행에서 한 번 더 일어날 수 있습니다. 이전 실행 기록은 그대로 두고 새 실행을 따로 시작합니다.`
+            : `Have you checked what run ${currentRun.runId} actually did? Anything it already finished may happen again in the new run. The old run stays in history.`, { locale: ko ? "ko" : "en", tone: "warning" });
           if (confirmed) {
             try {
               const terminalCloseApi = api.automations as unknown as {
@@ -630,15 +630,15 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
                 || (receipt.status !== "closed" && receipt.status !== "already-closed")
               ) throw new Error("automation_graph_terminal_close_receipt_mismatch");
               setMessage(ko
-                ? "이전 실행을 확인했습니다. 별도 발생을 새로 시작합니다…"
-                : "The previous run was reviewed. Starting a separate occurrence…");
+                ? "이전 실행을 확인했습니다. 새 실행을 따로 시작합니다…"
+                : "The previous run was reviewed. Starting a new run…");
               setFreshRerunning(false);
               await startFresh(true);
               return;
             } catch {
               setMessage(ko
-                ? "해당 실행의 종결 영수증을 저장·검증하지 못해 별도 실행을 시작하지 않았습니다. 기록을 새로고침하고 그래프가 바뀌었다면 이전 그래프로 복원해 재조정해 주세요."
-                : "The exact terminal-close receipt could not be verified. No separate run was started. Refresh the history; if the graph drifted, restore the old graph to reconcile it.");
+                ? "이전 실행을 마무리했다는 기록을 확인하지 못해 새 실행을 시작하지 않았습니다. 기록을 새로고침한 뒤 다시 시도해 주세요. 그 사이 그래프를 고쳤다면 이전 그래프로 되돌린 뒤 시도해 주세요."
+                : "Could not confirm that the previous run was closed, so no new run was started. Refresh the history and try again. If you changed the graph since that run, restore the previous graph first.");
               return;
             }
           }
@@ -1361,7 +1361,7 @@ function outcomeChip(run: AutomationRunRecord, ko: boolean): string | null {
     case "rejected":
       return ko ? "결과가 기준에 못 미침" : "Result fell short";
     case "unjudged":
-      return ko ? "결과 판정 못 함" : "Result not judged";
+      return ko ? "결과 확인 못 함" : "Result not judged";
     default:
       return null;
   }
@@ -1390,7 +1390,7 @@ function plainRun(run: AutomationRunRecord, ko: boolean): { title: string; body:
       return {
         title: ko ? "끝까지 돌았어요(결과는 확인 못 함)" : "It ran through (result not judged)",
         body: ko
-          ? "자동화는 끝까지 돌았어요. 결과가 쓸 만한지는 이번엔 판정하지 못했어요 — 실패라는 뜻은 아닙니다."
+          ? "자동화는 끝까지 돌았어요. 결과가 쓸 만한지는 이번엔 확인하지 못했어요 — 실패라는 뜻은 아닙니다."
           : "It ran to the end. Whether the result is good could not be judged this time — that is not a failure.",
       };
     }
@@ -1425,7 +1425,7 @@ function outcomeFirstLabel(run: AutomationRunRecord, ko: boolean): string {
   if (run.outcome === "needs_input") return ko ? "내 확인 필요" : "Needs your decision";
   if (run.outcome === "blocked") return ko ? "바깥에서 막힘" : "Blocked outside";
   if (automationRunPresentation(run).result === "unmet") return ko ? "기준 미달" : "Below target";
-  if (run.outcome === "unjudged") return ko ? "결과 판정 못 함" : "Result not judged";
+  if (run.outcome === "unjudged") return ko ? "결과 확인 못 함" : "Result not judged";
   return statusLabel(run.status, ko);
 }
 
@@ -1461,12 +1461,12 @@ function runtimeFactLabel(fact: WorkflowRunRuntimeFact, ko: boolean): string {
   const engine = runtimeEngineLabel(runtimeIdentity);
   const model = selection.model?.trim();
   const effort = selection.effort?.trim() || (ko ? "기본 작업량" : "Default effort");
-  const runtime = `${provider} · ${engine} · ${model ?? (ko ? "모델 미확인" : "model unknown")} · ${ko ? "작업량" : "effort"} ${effort}`;
+  const runtime = `${provider} · ${engine} · ${model ?? (ko ? "모델 알 수 없음" : "model unknown")} · ${ko ? "작업량" : "effort"} ${effort}`;
   if (!fact.role) return runtime;
   const roleLabels: Record<string, string> = {
     worker: ko ? "워커" : "worker",
     orchestrator: ko ? "오케스트레이터" : "orchestrator",
-    judgment: ko ? "판정" : "judgment",
+    judgment: ko ? "결과 평가" : "judgment",
   };
   return `${roleLabels[fact.role] ?? fact.role}: ${runtime}`;
 }
