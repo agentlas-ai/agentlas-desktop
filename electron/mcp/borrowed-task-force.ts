@@ -5,6 +5,7 @@ import { runObservedRunner, observedRunnerUsage, observedRunnerUsageEvidence, Ob
 import { mainWorkAttachmentContext, redactWorkAttachmentText } from "../invocation/work-attachments";
 import { effectiveInvocationPermission } from "../../shared/invocation-permission";
 import { withRuntimeCapabilityReceipt } from "../runtime/capability-receipt";
+import { detectSandboxDeath, type SandboxDeathSignal } from "../runtime/sandbox-death";
 import { currentModelCallScope, withModelCallScope, roleForTaskForcePhase } from "../runtime/model-call-ledger";
 import { workerCapabilityRunner, type PrepareWorkerCapabilities, type WorkerCapabilityInput } from "./worker-capabilities";
 // Borrowed Hub task-force orchestration.
@@ -602,6 +603,29 @@ function taskForceOneArtifacts(
   if (isError || !toolId || !artifactPaths?.length || !p.bindOneRuntimeToolArtifacts) return undefined;
   const bound = p.bindOneRuntimeToolArtifacts(toolId, artifactPaths, toolName ? { name: toolName } : undefined);
   return bound.length > 0 ? bound : undefined;
+}
+
+/**
+ * A host fact about one worker run: a command it ran died inside its sandbox (runtime/sandbox-death.ts). The worker
+ * cannot tell this permission boundary from a broken machine, so the room lifts it from this fact the same way as from
+ * the worker's own `accessNeeded` (liftTaskForceWorkerAccess; only to what the owner's chip already covers).
+ * Production 2026-10-07 and 10-12: teammates' Blender died with exit 139 at start in Codex's workspace-write sandbox
+ * (Metal refused), the room never lifted them, and they noted "Metal crash, do not retry".
+ */
+function workerSandboxDeathWatch(p: BorrowedTaskForceParams, permission: RunnerRequest["permission"], agent: string, stepId: string) {
+  let seen: SandboxDeathSignal | null = null;
+  return {
+    note(tool: string | undefined, result: string | undefined): void {
+      if (seen || permission === "full" || typeof result !== "string" || !result) return;
+      const signal = detectSandboxDeath(result);
+      if (!signal || typeof signal.kind !== "string") return;
+      seen = signal;
+      tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id, kind: "task_force_worker_sandbox_death",
+        payload: { schemaVersion: "agentlas.task-force-worker-sandbox-death.v1", stepId, agent, ranWith: permission ?? null,
+          tool: tool ?? null, signal: signal.kind, exitCode: signal.exitCode, evidence: signal.evidence } });
+    },
+    observed: (): boolean => seen !== null,
+  };
 }
 
 export interface WorkforceLeaderRunnerEvidence {
@@ -5167,6 +5191,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       }
       const workerResults = await parallelCap(graph.workers, getAgentConcurrency(), async (worker) => {
         const workerInvocationId = `${nestedExecutionId}:worker:${worker.id}`;
+        const teamSandboxDeath = workerSandboxDeathWatch(p, workerPermission, worker.id, id);
         const workerSpec = {
           ...spec,
           entityKind: "agent" as const,
@@ -5249,6 +5274,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
                 onStatus: (status) => p.sink(teamEvent(worker.id, worker.id, { kind: "tool-use", status: redactSensitiveText(status) })),
                 onPartial: () => {},
                 onTool: (name, args, toolResult, toolId, isError, artifactPaths, imageDataUrl) => {
+                  if (role === "worker") teamSandboxDeath.note(name, toolResult);
                   const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths, name);
                   p.sink(teamEvent(worker.id, worker.id, {
                     kind: "tool-use",
@@ -5355,12 +5381,13 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
             observedModel: taskForceObservedModel(result) ?? undefined,
             tokens: result.tokens,
           }));
+          const workerAccessNeeded = workerOutcome.accessNeeded || teamSandboxDeath.observed();
           return {
             worker,
-            ok: ownerDecisions.length === 0 && !workerOutcome.accessNeeded,
+            ok: ownerDecisions.length === 0 && !workerAccessNeeded,
             ownerDecisions,
             appliedOwnerChoices: workerAppliedChoices,
-            accessNeeded: workerOutcome.accessNeeded,
+            accessNeeded: workerAccessNeeded,
             text: stripPermissionEscalationMarker(workerText),
             tokens: result.tokens ?? 0,
             invocationEvidence: {
@@ -5691,6 +5718,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       };
     }
     if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
+    const directSandboxDeath = workerSandboxDeathWatch(p, workerPermission, spec.name, id);
     const outcome = await runWorkerHandoffWithEscalation(async (role, attempt, directive) => {
       observedDirectRole = role;
       observedDirectRuntime = role === "worker" ? active : orchestratorDefault;
@@ -5755,6 +5783,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
           onPartial: () => {},
           onTool: (name, args, result, toolId, isError, artifactPaths, imageDataUrl) => {
             if (typeof name === "string" && name && !observedTools.includes(name)) observedTools.push(name);
+            if (role === "worker") directSandboxDeath.note(name, result);
             const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths, name);
             p.sink(tag({
               kind: "tool-use",
@@ -5795,7 +5824,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       runtimeOutcome.completionStatus !== "missing" ? runtimeOutcome : curatedOutcome,
     );
     // The access request is typed state for the room (liftTaskForceWorkerAccess); its marker line is not room prose.
-    const accessNeeded = runtimeOutcome.accessNeeded || curatedOutcome.accessNeeded;
+    const accessNeeded = runtimeOutcome.accessNeeded || curatedOutcome.accessNeeded || directSandboxDeath.observed();
     const visibleWorkerText = stripPermissionEscalationMarker(workerText);
     const completionStatus = packetOutcome.completionStatus;
     const workerAccepted = completionStatus === "completed" || packetOutcome.reviewComplete;

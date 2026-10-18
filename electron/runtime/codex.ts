@@ -1227,10 +1227,14 @@ function runCodexProcess(
         // 어떤 형태로든 result를 채워 completed임을 보장한다.
         const resultPayload = item.output ?? item.result ?? item.aggregated_output ?? item.error;
         const argsText = argPayload == null ? undefined : stringifyPayload(argPayload);
+        // A failed command keeps its exit code after the output, in Claude Code's form, so the code is a fact the host
+        // (sandbox-death.ts) and the model can read: a Blender that crashed with 139 inside the workspace-write sandbox
+        // printed output, and the output alone hid the exit status.
+        const failedExit = typeof item.exit_code === "number" && item.exit_code !== 0 ? `\n[exited with code ${item.exit_code}]` : "";
         const resultText =
           ev.type === "item.completed"
             ? resultPayload != null
-              ? truncateUi(stringifyPayload(resultPayload))
+              ? `${truncateUi(stringifyPayload(resultPayload))}${failedExit}`
               : typeof item.exit_code === "number"
                 ? `exit ${item.exit_code}`
                 : (item.status ?? "completed")
@@ -1613,7 +1617,9 @@ export function codexToolEventFromItem(item: any, completed: boolean): {
         name: browserUrl ? "browser_navigate" : "bash",
         args: browserUrl ? asText({ url: browserUrl }) : asText({ command: item.command, cwd: item.cwd }),
         result: completed
-          ? (asText(item.aggregatedOutput) ?? (typeof item.exitCode === "number" ? `exit ${item.exitCode}` : String(item.status ?? "completed")))
+          ? (asText(item.aggregatedOutput) !== undefined
+            ? `${asText(item.aggregatedOutput)}${typeof item.exitCode === "number" && item.exitCode !== 0 ? `\n[exited with code ${item.exitCode}]` : ""}`
+            : (typeof item.exitCode === "number" ? `exit ${item.exitCode}` : String(item.status ?? "completed")))
           : undefined,
         isError: completed && failed,
         ...(artifactPaths.length > 0 ? { artifactPaths } : {}),
