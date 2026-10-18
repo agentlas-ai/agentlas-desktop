@@ -132,7 +132,7 @@ export function classifyGoalSurfaceStatus(input: GoalSurfaceStatusInput): GoalSu
 export function goalSurfaceStatusLabel(state: GoalSurfaceState, locale: "ko" | "en"): string {
   const ko = locale === "ko";
   switch (state) {
-    case "active_run": return ko ? "이 Goal 실행 중 · Main에서 확인됨" : "This Goal is running · confirmed by Main";
+    case "active_run": return ko ? "이 Goal 실행 중 · 실행 확인됨" : "This Goal is running · confirmed";
     case "active_unconfirmed": return ko ? "Goal 실행 기록 있음 · 실제 실행을 재확인하는 중" : "Goal run recorded · rechecking the live invocation";
     case "active_idle": return ko ? "이 Goal 작동 중 · 다음 실행에서 이어집니다" : "This Goal is running · it continues on its next run";
     case "needs_owner": return ko ? "이 Goal이 답변이나 승인을 기다려요" : "This Goal needs your answer or approval";

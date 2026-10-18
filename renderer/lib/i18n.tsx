@@ -879,7 +879,7 @@ const dict = {
     "auto.trigger.chain.after": "이 자동화 완료 후 실행",
     // Desktop 로컬 런타임 수명
     "settings.launchd.title": "로컬 작업 실행 범위",
-    "settings.launchd.note": "One, Work, Science의 로컬 작업은 앱이 열려 있을 때만 실행됩니다. 앱을 종료하면 실행 프로세스가 멈춥니다. 다시 열면 One·Work는 안전하게 확정된 체크포인트에서 자동으로 이어지고, 외부 결과가 불확실한 작업은 확인을 기다립니다. Science는 프로젝트 상태를 확인하세요.",
+    "settings.launchd.note": "One, Work, Science의 로컬 작업은 앱이 열려 있을 때만 실행됩니다. 앱을 종료하면 실행 프로세스가 멈춥니다. 다시 열면 One·Work는 안전하게 확정된 체크포인트에서 자동으로 이어지고, 실제로 무엇을 했는지 확실하지 않은 작업은 확인을 기다립니다. Science는 프로젝트 상태를 확인하세요.",
     "settings.launchd.on": "앱과 함께 실행",
     "settings.launchd.off": "꺼짐",
     "settings.launchd.enable": "켜기",
@@ -2135,7 +2135,7 @@ const dict = {
     "one.growth.apply": "반영하기",
     "one.growth.later": "나중에",
     "one.growth.delete_session": "세션 삭제",
-    "one.growth.confirm_delete_session": "이 성장 제안 세션을 삭제할까요?\n\n성장 제안 카드와 인박스 표시만 숨깁니다. 이미 적용된 에이전트 변경과 감사 원장은 유지됩니다.",
+    "one.growth.confirm_delete_session": "이 성장 제안 세션을 삭제할까요?\n\n성장 제안 카드와 인박스 표시만 숨깁니다. 이미 적용된 에이전트 변경과 감사 기록은 유지됩니다.",
     "one.autosheet.title": "자동화 만들기",
     "one.autosheet.body": "이름과 주기, 할 일만 정하면 One이 바로 등록해요.",
     "one.autosheet.name": "이름",

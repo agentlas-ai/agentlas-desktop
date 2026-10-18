@@ -746,11 +746,11 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
     const confirmed = await confirmPopup(
       resolution === "completed"
         ? ko
-          ? "외부 동작이 실제로 완료된 것을 확인했습니까? 이 발생은 다시 실행하지 않습니다."
-          : "Did you verify that the external action completed? This occurrence will not run again."
+          ? "바깥으로 나가는 동작(올리기·보내기 등)이 실제로 끝난 것을 확인했나요? 이 실행은 다시 하지 않습니다."
+          : "Did you check that the outgoing action (posting, sending) actually finished? This run will not be repeated."
         : ko
-          ? "외부 동작이 실행되지 않은 것을 확인했습니까? 이 발생을 다시 시도합니다."
-          : "Did you verify that the external action did not run? This occurrence will be retried.",
+          ? "바깥으로 나가는 동작(올리기·보내기 등)이 실행되지 않은 것을 확인했나요? 이 실행을 다시 시도합니다."
+          : "Did you check that the outgoing action (posting, sending) did not run? This run will be retried.",
       { locale: ko ? "ko" : "en", tone: "warning" },
     );
     if (!confirmed) return;
@@ -775,11 +775,11 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
       const terminalMessage =
         resolution === "completed"
           ? ko
-            ? "발생을 완료 처리했습니다."
-            : "Marked the occurrence complete."
+            ? "이 실행을 완료로 처리했습니다."
+            : "Marked this run complete."
           : ko
-            ? "발생을 다시 대기열에 넣었습니다."
-            : "Queued the occurrence for retry.";
+            ? "이 실행을 다시 대기열에 넣었습니다."
+            : "Queued this run for retry.";
       setMessage(terminalMessage);
       if (!await load({ reportFailure: false, forceReconciliation: true })) {
         setMessage(`${terminalMessage} ${ko
@@ -819,12 +819,12 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
             data-testid="run-runtime-fact"
             data-runtime-fact-state={runtimeFactLabels.length > 0 ? "recorded" : "unrecorded"}
             title={runtimeFactLabels.length > 0
-              ? (ko ? "실행 원장에 기록된 실제 연결" : "Actual connection recorded in the run ledger")
-              : (ko ? "이전 실행에는 실제 연결 원장이 없습니다" : "This run has no recorded actual connection")}
+              ? (ko ? "실행 기록에 남은 실제 연결" : "Actual connection recorded in the run history")
+              : (ko ? "이전 실행에는 실제 연결 기록이 없습니다" : "This run has no recorded actual connection")}
           >
             {runtimeFactLabels.length > 0
               ? (ko ? `실제 연결 ${runtimeFactLabels.join(" · ")}` : `Actual connection ${runtimeFactLabels.join(" · ")}`)
-              : (ko ? "실제 연결 원장 없음(이전 실행)" : "Actual connection not recorded (legacy run)")}
+              : (ko ? "실제 연결 기록 없음(이전 실행)" : "Actual connection not recorded (legacy run)")}
           </span>
           {/* ★이 실행이 쓴 토큰. 커널은 처음부터 세고 있었는데 읽는 곳이 없어 화면이 몰랐다 —
               매일 도는 자동화가 얼마를 쓰는지 모른 채 켜 두게 된다. 금액은 모델마다 달라
@@ -1201,7 +1201,7 @@ function reconciliationErrorMessage(error: unknown, ko: boolean, reloaded = fals
       : (ko ? "상태가 다른 실행에서 변경되었지만 최신 상태를 불러오지 못했습니다. 같은 조정을 반복하지 말고 화면을 다시 여세요." : "Another runner changed this state, but the latest state could not be loaded. Do not repeat the reconciliation; reopen this page.");
   }
   if (/bound_event_active/.test(raw)) {
-    return ko ? "다른 실행기가 이 발생을 처리 중입니다. 잠시 후 다시 확인해 주세요." : "Another runner is processing this occurrence. Try again shortly.";
+    return ko ? "다른 곳에서 이 실행을 처리하고 있습니다. 잠시 후 다시 확인해 주세요." : "This run is being handled elsewhere. Try again shortly.";
   }
   if (/checkpoint_(?:malformed|not_v3)|node_states_malformed/.test(raw)) {
     return ko

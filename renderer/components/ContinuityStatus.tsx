@@ -214,7 +214,7 @@ export function ContinuityStatus({ chatId, locale, detail = false, embedded = fa
           : row.relationship === "unverified" ? (ko ? "자동화 연결 확인 필요" : "Goal link unverified")
             : (ko ? "Goal과 별도 예약" : "Separate from Goal")}
         {!row.enabled && ` · ${ko ? "예약 꺼짐" : "Schedule off"}`}
-        {row.liveState && ` · ${row.liveState === "running" ? (ko ? "최근 원장 기록상 진행" : "Recent ledger reports running") : (ko ? "스케줄러 요청됨" : "Scheduler queued")}`}
+        {row.liveState && ` · ${row.liveState === "running" ? (ko ? "최근 기록상 진행 중" : "Recently recorded as running") : (ko ? "스케줄러 요청됨" : "Scheduler queued")}`}
         {row.lastActivityAt && ` · ${ko ? "최근 활동" : "Last activity"} ${when(row.lastActivityAt, locale)}`}
         {row.nextRunAt && ` · ${ko ? "다음 예정" : "Next expected"} ${when(row.nextRunAt, locale)}`}
         {row.enabled && !row.nextRunAt && row.lastRunStatus === "error" && ` · ${ko ? "최근 오류 후 다음 시각 없음 · 실행 내역 확인" : "No next time after recent error · check run history"}`}
@@ -224,7 +224,7 @@ export function ContinuityStatus({ chatId, locale, detail = false, embedded = fa
         ? (ko ? "다음 행동 변경" : "next action changed") : strategy.state === "unknown" ? (ko ? "증거 미확정 · 자동 변경 없음" : "evidence inconclusive · no automatic change") : (ko ? "기존 행동 유지" : "existing action retained")}
         {` · ${nextActionLabel(strategy.nextAction, ko)} · ${ko ? "통과" : "passed"} ${strategy.metrics.passed}, ${ko ? "증거 미확정" : "inconclusive"} ${strategy.metrics.inconclusive}`}
         {strategy.nextWakeAt && ` · ${ko ? "다음 확인" : "next check"} ${when(strategy.nextWakeAt, locale)}`}</p>}
-      {latestProgress && <p>{ko ? "마지막 원장 활동" : "Last durable activity"} · {latestProgress}</p>}
+      {latestProgress && <p>{ko ? "마지막으로 기록된 활동" : "Last durable activity"} · {latestProgress}</p>}
     </div>}
     {snapshot.automations.map((row) => <AutomationStrategyPanel key={row.automationId} automationId={row.automationId} locale={locale} />)}
     {/* A "checked at" timestamp is noise in One's compact bubble; keep it only when stale or in the detail view. */}

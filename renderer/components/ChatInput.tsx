@@ -2267,7 +2267,7 @@ export function ComposerGoalBar({
             ? (locale === "ko" ? "지속 목표 확인" : "Confirm ongoing goal")
             : (locale === "ko" ? "목표 수동 재개" : "Resume goal manually")}
           title={blockedReason === "goal_wait_ongoing_authority_required"
-            ? (locale === "ko" ? "저장된 목표 범위와 권한을 Main에서 확인한 뒤 지속 실행을 요청합니다" : "Ask Main to verify the saved scope and authority before ongoing execution")
+            ? (locale === "ko" ? "저장된 목표 범위와 권한을 앱이 확인한 뒤 계속 실행을 요청합니다" : "Ask the app to verify the saved scope and permissions before it keeps running")
             : (locale === "ko" ? "이 앱에서 목표를 다시 실행합니다" : "Resume this goal in the app")}
         >
           {blockedReason === "goal_wait_ongoing_authority_required"
