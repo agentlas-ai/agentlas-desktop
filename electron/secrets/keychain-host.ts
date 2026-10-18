@@ -241,6 +241,10 @@ process.stdin.on("end", () => { stdin = Buffer.concat(stdinChunks).toString("utf
         }
       },
     );
+    // A helper that dies before reading its stdin turns this write into an async EPIPE on the pipe. With no listener
+    // that is an uncaught 'error' and ended the host; the background service reads the keychain only through this
+    // helper (flow audit 2026-10-18, I-D1). The exit is already reported by execFile's callback above.
+    child.stdin?.on("error", () => { /* reported by the callback; never a host failure */ });
     child.stdin?.end(stdinValue ?? "");
   });
 }

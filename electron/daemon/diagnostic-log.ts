@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import type { Readable } from "node:stream";
+import { safeDiagnosticCode, safeDiagnosticErrorName, safeDiagnosticFrame, safeDiagnosticTag, type DaemonConsoleLevel } from "./process-diagnostics";
 
 // This is intentionally not a transcript log. A helper can print prompts,
 // credentials and private paths in an exception, so child output is counted
@@ -37,7 +38,9 @@ function classifyDaemonLine(line: string): string | null {
 export type DaemonDiagnosticEvent =
   | "spawn_requested" | "spawn_ready" | "spawn_unready" | "spawn_exit"
   | "spawn_error" | "already_running" | "version_skew" | "owner_mismatch" | "shutdown_requested"
-  | "shutdown_timeout" | "stdout_redacted" | "stderr_redacted" | "child_report";
+  | "shutdown_timeout" | "stdout_redacted" | "stderr_redacted" | "child_report"
+  // The service's own runtime log (agentlasd-runtime.log, process-diagnostics.ts): typed codes, never raw text.
+  | "console_line" | "uncaught_exception" | "unhandled_rejection";
 
 export interface DaemonDiagnosticFields {
   appInstanceId?: string | null;
@@ -52,6 +55,24 @@ export interface DaemonDiagnosticFields {
   signal?: NodeJS.Signals | null;
   heartbeatAgeMs?: number;
   phase?: string;
+  level?: DaemonConsoleLevel;
+  tag?: string | null;
+  codes?: readonly string[];
+  errorCode?: string | null;
+  errorName?: string | null;
+  frames?: readonly string[];
+  suppressed?: number;
+}
+
+const SAFE_LEVELS = new Set(["log", "info", "warn", "error"]);
+/** Lifecycle records go to agentlasd.log (Desktop and the service both append); the service's own runtime lines go
+ * to their own file so chatter can never rotate a spawn/exit record away. */
+const SAFE_LOG_FILES = new Set(["agentlasd.log", "agentlasd-runtime.log"]);
+function safeList(values: unknown, pick: (value: unknown) => string | null, max: number): string[] {
+  if (!Array.isArray(values)) return [];
+  const out: string[] = [];
+  for (const value of values.slice(0, max)) { const safe = pick(value); if (safe && !out.includes(safe)) out.push(safe); }
+  return out;
 }
 
 const SAFE_INSTANCE_ID = /^desktop_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -77,12 +98,13 @@ function safeInteger(value: unknown): number | null {
 export class DaemonDiagnosticLog {
   readonly filePath: string;
 
-  constructor(userDataDir: string) {
+  constructor(userDataDir: string, fileName = "agentlasd.log") {
+    if (!SAFE_LOG_FILES.has(fileName)) throw new Error("daemon_diagnostics_file_invalid");
     const directory = path.join(userDataDir, "diagnostics");
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
     if (!fs.lstatSync(directory).isDirectory()) throw new Error("daemon_diagnostics_directory_invalid");
     fs.chmodSync(directory, 0o700);
-    this.filePath = path.join(directory, "agentlasd.log");
+    this.filePath = path.join(directory, fileName);
   }
 
   private rotateIfNeeded(incomingBytes: number): void {
@@ -138,6 +160,13 @@ export class DaemonDiagnosticLog {
       ...(fields.reason && SAFE_REASONS.has(fields.reason) ? { reason: fields.reason } : {}),
       ...(fields.signal && SAFE_SIGNALS.has(fields.signal) ? { signal: fields.signal } : {}),
       ...(fields.phase && SAFE_PHASES.has(fields.phase) ? { phase: fields.phase } : {}),
+      ...(fields.level && SAFE_LEVELS.has(fields.level) ? { level: fields.level } : {}),
+      ...(safeDiagnosticTag(fields.tag) ? { tag: fields.tag } : {}),
+      ...(safeList(fields.codes, safeDiagnosticCode, 8).length ? { codes: safeList(fields.codes, safeDiagnosticCode, 8) } : {}),
+      ...(safeDiagnosticCode(fields.errorCode) ? { errorCode: fields.errorCode } : {}),
+      ...(safeDiagnosticErrorName(fields.errorName) ? { errorName: fields.errorName } : {}),
+      ...(safeList(fields.frames, safeDiagnosticFrame, 8).length ? { frames: safeList(fields.frames, safeDiagnosticFrame, 8) } : {}),
+      ...(safeInteger(fields.suppressed) !== null && fields.suppressed! > 0 ? { suppressed: fields.suppressed } : {}),
     };
     const line = `${JSON.stringify(payload)}\n`;
     this.rotateIfNeeded(Buffer.byteLength(line));

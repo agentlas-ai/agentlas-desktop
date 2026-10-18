@@ -254,7 +254,9 @@ async function spawnDaemonForDesktop(
     // Windows: a detached child gets its own console unless hidden.
     windowsHide: true,
     // Raw runtime output can contain private tool arguments. The service writes
-    // structured lifecycle diagnostics itself; no pipe depends on the GUI.
+    // structured lifecycle diagnostics itself; no pipe depends on the GUI. Its own
+    // console lines and uncaught errors go, as typed codes only, to
+    // diagnostics/agentlasd-runtime.log (process-diagnostics.ts).
     stdio: opts.nativeEnrollment ? ["ignore", "ignore", "ignore", "pipe"] : "ignore",
     env: {
       ...process.env,

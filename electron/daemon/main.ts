@@ -45,6 +45,7 @@ import {
 import { startControlSocket, type ControlSocketHandle, type ControlSocketPeer } from "./control-socket";
 import { WarmProcessPool } from "./process-pool";
 import { DaemonDiagnosticLog, storeIdentityDigest, validAppInstanceId } from "./diagnostic-log";
+import { installDaemonProcessDiagnostics } from "./process-diagnostics";
 import { captureDaemonSocketFence, canonicalDaemonPath, resolveDaemonServiceIdentity } from "./service-identity";
 import { createInvocationOwnerBroker } from "./invocation-owner-broker";
 import { validateMobileCurrentTurnParams, type MobileBridgeCurrentTurnMethod } from "../../shared/mobile-bridge";
@@ -179,6 +180,8 @@ let attachedExpectedStoreIdentity = process.env.AGENTLAS_EXPECTED_STORE_IDENTITY
 let serviceIdentity: string | null = null;
 let socketFence: (() => void) | null = null;
 let selfDiagnostics: DaemonDiagnosticLog | null = null;
+/** The service's own runtime log (agentlasd-runtime.log): console lines and uncaught errors as typed codes (I-D1). */
+let runtimeDiagnostics: DaemonDiagnosticLog | null = null;
 let scienceService: ReturnType<typeof import("./science-service")["createDaemonScienceService"]> | null = null;
 type ScienceAskScope = { projectId: string; conversationId: string };
 const scienceSubscribers = new Map<ControlSocketPeer, readonly ScienceAskScope[]>();
@@ -838,7 +841,9 @@ function performShutdown(reason: string): Promise<void> {
       } catch (error) { console.error("[agentlasd] local model shutdown failed:", error); }
       finally { if (localTimeout) clearTimeout(localTimeout); }
     }
-    stopMcpProxyApprovalServer();
+    // The MCP approval proxy stays up until the owned runs have drained (flow audit 2026-10-18, I-D8): stopping it here
+    // cut the wire under a draining run's MCP calls and made any config build in that window mcp_proxy_gate_unavailable.
+    // It now stops in the finally below, beside the native socket, after the drain or its deadline.
     const childrenDrained = drainRunChildrenForHostShutdown(processPool.shutdownChildren());
     try { runHostShutdownHooks(); }
     catch (error) { console.error("[agentlasd] shutdown hooks failed:", error); }
@@ -868,6 +873,8 @@ function performShutdown(reason: string): Promise<void> {
       // A deadline is an unsettled exit, never permission to release its lease.
       // Native callbacks stay available throughout actual invocation drain.
       // Only full service shutdown closes this signed transport.
+      try { stopMcpProxyApprovalServer(); }
+      catch (error) { console.error("[agentlasd] mcp proxy approval server shutdown failed:", error); }
       try { await daemonNativeInvocation?.close(); }
       catch (error) { console.error("[agentlasd] native invocation socket shutdown failed:", error); }
       daemonNativeInvocation = null;
@@ -897,10 +904,17 @@ export interface DaemonStartupOptions {
 }
 
 export async function startDaemon(options: DaemonStartupOptions = {}): Promise<void> {
+  // First, before anything can throw on a later tick: an uncaught exception or unhandled rejection is recorded and the
+  // service keeps running, as Main does (logging.ts installMainProcessErrorSink). Without it Node ended the process on
+  // the first one and took every daemon-owned run with it, with no trace (flow audit 2026-10-18, I-D1).
+  installDaemonProcessDiagnostics((event, fields) => {
+    runtimeDiagnostics?.record(event, { ...fields, pid: process.pid, bootId, appInstanceId });
+  });
   const requestedDir = resolveDaemonUserDataDir();
   fs.mkdirSync(requestedDir, { recursive: true, mode: 0o700 });
   const dir = canonicalDaemonPath(requestedDir);
   setUserDataDir(dir);
+  try { runtimeDiagnostics = new DaemonDiagnosticLog(dir, "agentlasd-runtime.log"); } catch { /* supplementary */ }
   const rawParentPid = Number(process.env.AGENTLAS_DESKTOP_PARENT_PID);
   desktopParentPid = Number.isSafeInteger(rawParentPid) && rawParentPid > 1 && processIsAlive(rawParentPid) ? rawParentPid : null;
 
@@ -953,8 +967,17 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
   // 마이그레이션 권위는 Phase 0 에서 이미 하나로 정리했고, 스키마가 낮으면 이 경로는
   // 조용히 승급하지 않고 **거절한다**(store/db.ts). 데몬이 앱보다 먼저 떠서 사다리를
   // 돌리면 앱이 자기 DB 를 못 알아본다.
-  const { initStore } = await import("../store/db");
+  const { initStore, getDb } = await import("../store/db");
   initStore({ migrationRole: "follower" });
+  // The same store-backed ACP profile reader Main installs (ipc.ts setAcpProfileReader). Without it a daemon-owned run
+  // that picked a user's ACP terminal profile got no runner: pickRunner read no profiles here (flow audit 2026-10-18, I-D6).
+  (await import("../runtime/acp-agents")).setAcpProfileReader(() => {
+    try {
+      const row = getDb().prepare("SELECT value FROM meta WHERE key = 'terminal_profiles'").get() as { value: string } | undefined;
+      const parsed = row?.value ? JSON.parse(row.value) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch { return []; }
+  });
   const runOwners = await import("../store/invocation-run-owners");
   runOwners.configureInvocationProcessOwner("daemon", bootId);
   invocationOwners = runOwners.invocationRunOwners;
