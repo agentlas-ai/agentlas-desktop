@@ -81,20 +81,23 @@ export function FinanceMonitorReceipts({ monitor, ko, onRun, onLoad, onOpenRepor
   return <section className={styles.runPanel} aria-label={t("실제 실행과 브리핑","Actual runs and briefings")}>
     <div className={styles.actions}>
       <button type="button" className={`${styles.button} ${styles.primary}`} disabled={!onRun || running || !monitor.query.trim()} onClick={()=>{void runNow();}}>{running?t("확인 중…","Checking…"):t("지금 확인","Run now")}</button>
-      {lastBriefing?.reportId && <button type="button" className={styles.button} onClick={()=>onOpenReport(lastBriefing.reportId!)}>{t("최신 브리핑 열기","Open latest briefing")}</button>}
-      <button type="button" className={styles.button} disabled={!onLoad || loading} onClick={()=>{void refresh();}}>{loading?t("이력 확인 중…","Loading ledger…"):t("이력 새로고침","Refresh ledger")}</button>
+      {lastBriefing?.reportId && <button type="button" className={styles.button} onClick={()=>onOpenReport(lastBriefing.reportId!)}>{t("최신 브리핑","Latest briefing")}</button>}
     </div>
-    <dl className={styles.metaGrid}>
-      <div><dt>{t("마지막 성공·부분 성공","Last successful / partial check")}</dt><dd>{when(success?.finishedAt??null)}</dd></div>
-      <div><dt>{t("최근 실행 결과","Latest run result")}</dt><dd>{latest?financeStatus(latest.status,ko):t("아직 실행 기록 없음","No run recorded")}</dd></div>
-      <div><dt>{t("실행 가능 범위","Execution availability")}</dt><dd>{monitor.executionAvailability==="app-running"?t("Agentlas 앱이 실행 중일 때","While Agentlas is running"):t("실행 주체 미확인","Executor unconfirmed")}</dd></div>
-    </dl>
-    {monitor.nextCheckAt && new Date(monitor.nextCheckAt).getTime()<Date.now() && monitor.status==="active" && <p className={styles.muted}>{t("예정 시간이 지났습니다. 다음 실행 기록을 확인하기 전에는 최신 확인으로 보지 않습니다.","The scheduled time has passed. A fresh check is unconfirmed until a run record is available.")}</p>}
+    <p className={styles.muted}>{latest?<><strong>{financeStatus(latest.status,ko)}</strong> · {when(latest.finishedAt)}</>:t("실행 전","Not run yet")}</p>
+    {monitor.nextCheckAt && new Date(monitor.nextCheckAt).getTime()<Date.now() && monitor.status==="active" && <p className={styles.muted}>{t("예정 시간이 지났습니다. 최신 확인은 미확인입니다.","The scheduled time has passed. A fresh check is unconfirmed.")}</p>}
     {error && <div className={`${styles.notice} ${styles.error}`} role="alert"><FinanceMessage value={error} ko={ko} error/></div>}
     {latest?.summary && <FinanceBriefText value={latest.summary} ko={ko}/>}
     {latest?.error && <div className={`${styles.notice} ${styles.error}`} role="alert"><FinanceMessage value={latest.error} ko={ko} error/></div>}
-    {!!latest?.warnings.length&&<details><summary className={styles.muted}>{t("자료 범위와 한계","Coverage and limitations")} · {latest.warnings.length}</summary><ol>{latest.warnings.map((warning,index)=><li key={index} className={styles.muted}><p>{financeMessage(warning,ko)}</p>{financeMessage(warning,ko)!==warning&&<p style={{whiteSpace:"pre-wrap",overflowWrap:"anywhere"}} lang="en">{warning}</p>}</li>)}</ol></details>}
-    {ordered.length>0 && <details><summary className={styles.muted}>{t("실행 이력과 이전 브리핑","Run history and previous briefings")} · {ordered.length}</summary><div className={styles.list}>{ordered.map(run=><div key={run.id} className={styles.runRow}><div><strong>{financeStatus(run.status,ko)}</strong><div className={styles.muted}>{when(run.startedAt)} · {t("자료 판본","Revision")} {run.sourceRevision}</div></div>{run.reportId&&<button type="button" className={styles.button} onClick={()=>onOpenReport(run.reportId!)}>{t("브리핑","Briefing")}</button>}</div>)}</div>{nextCursor&&<button type="button" className={styles.button} disabled={loading||loadingMore} onClick={()=>{void loadMore();}}>{loadingMore?t("이전 이력 확인 중…","Loading older runs…"):t("이전 실행 더 보기","Load older runs")}</button>}<p className={styles.muted}>{t("새로고침하면 최신 첫 페이지부터 다시 표시합니다.","Refreshing starts again from the latest first page.")}</p></details>}
+    {!!latest?.warnings.length&&<p className={styles.muted}>{t("자료 한계","Coverage limits")} {latest.warnings.length} · {t("실행 이력에서 확인","See run history")}</p>}
+    <details><summary className={styles.muted}>{t("실행 이력","Run history")}{ordered.length>0?` · ${ordered.length}`:""}</summary>
+      <div className={styles.actions}><button type="button" className={styles.button} disabled={!onLoad || loading} onClick={()=>{void refresh();}}>{loading?t("이력 확인 중…","Loading ledger…"):t("이력 새로고침","Refresh ledger")}</button></div>
+      <dl className={styles.metaGrid}>
+        <div><dt>{t("마지막 성공·부분 성공","Last successful / partial check")}</dt><dd>{when(success?.finishedAt??null)}</dd></div>
+        <div><dt>{t("실행 가능 범위","Execution availability")}</dt><dd>{monitor.executionAvailability==="app-running"?t("Agentlas 앱이 실행 중일 때","While Agentlas is running"):t("실행 주체 미확인","Executor unconfirmed")}</dd></div>
+      </dl>
+      {!!latest?.warnings.length&&<details><summary className={styles.muted}>{t("자료 범위와 한계","Coverage and limitations")} · {latest.warnings.length}</summary><ol>{latest.warnings.map((warning,index)=><li key={index} className={styles.muted}><p>{financeMessage(warning,ko)}</p>{financeMessage(warning,ko)!==warning&&<p style={{whiteSpace:"pre-wrap",overflowWrap:"anywhere"}} lang="en">{warning}</p>}</li>)}</ol></details>}
+      {ordered.length>0&&<><div className={styles.list}>{ordered.map(run=><div key={run.id} className={styles.runRow}><div><strong>{financeStatus(run.status,ko)}</strong><div className={styles.muted}>{when(run.startedAt)} · {t("자료 판본","Revision")} {run.sourceRevision}</div></div>{run.reportId&&<button type="button" className={styles.button} onClick={()=>onOpenReport(run.reportId!)}>{t("브리핑","Briefing")}</button>}</div>)}</div>{nextCursor&&<button type="button" className={styles.button} disabled={loading||loadingMore} onClick={()=>{void loadMore();}}>{loadingMore?t("이전 이력 확인 중…","Loading older runs…"):t("이전 실행 더 보기","Load older runs")}</button>}<p className={styles.muted}>{t("새로고침하면 최신 첫 페이지부터 다시 표시합니다.","Refreshing starts again from the latest first page.")}</p></>}
+    </details>
     {indexStatus&&indexStatus!=="ready"&&<p role="status" className={styles.muted}>{indexStatus==="building"?t("이력 색인을 준비 중입니다. 잠시 후 새로고침하세요.","The history index is building. Refresh shortly."):t("이전 이력 색인 전환이 필요합니다. 현재 표시 범위만 확인할 수 있습니다.","The history index requires migration. Only the current coverage is confirmed.")}</p>}
     {!onLoad && <p className={styles.muted}>{t("실행 이력 API가 연결되지 않아 결과를 확인할 수 없습니다.","Run ledger API is not connected; results are unconfirmed.")}</p>}
   </section>;
