@@ -1217,7 +1217,9 @@ export type HarnessItemKind = "plugin" | "skill" | "connector" | "tool" | "opera
 async function appOperationPaths(query: string): Promise<string[]> {
   if (!query.trim()) return [];
   try {
-    const found = await (await import("../app-control/service")).appControlOperations({ query, limit: 8 }) as { operations?: Array<{ operation?: unknown }> };
+    // A Korean query also asks with the English catalog words for its nouns (search-rank.ts englishAppTerms).
+    const english = (await import("./search-rank")).englishAppTerms(query);
+    const found = await (await import("../app-control/service")).appControlOperations({ query: english ? `${query} ${english}`.slice(0, 200) : query, limit: 8 }) as { operations?: Array<{ operation?: unknown }> };
     return (found.operations ?? []).flatMap((row) => typeof row.operation === "string" ? [row.operation] : []);
   } catch { return []; }
 }
@@ -1244,7 +1246,8 @@ export async function searchHarness(query: string, kind?: HarnessItemKind): Prom
     if (!port) continue;
     const at = out.findIndex((item) => item.id === id);
     if (at >= 0) out.splice(at, 1);
-    out.unshift({ id: port.operationId, kind: "operation", name: port.operationId, description: `${port.purpose}${port.handler ? "" : " (unavailable)"}`, rankTerms: appPaths });
+    // A Korean query shares no word with the English port text and would drop the entry: its own words rank it (English queries unchanged).
+    out.unshift({ id: port.operationId, kind: "operation", name: port.operationId, description: `${port.purpose}${port.handler ? "" : " (unavailable)"}`, rankTerms: /[^\x00-\x7f]/.test(query) ? [...appPaths, query.toLowerCase()] : appPaths });
   }
   // Best match first across every kind (search-rank.ts); the fixed kind order cut the answering operation off (r07).
   const { rankHarnessItems } = await import("./search-rank");
