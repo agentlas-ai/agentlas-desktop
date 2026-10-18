@@ -1,6 +1,8 @@
 import styles from "./FinanceWorkspace.module.css";
 
 const hostMessages: Record<string, [string, string]> = {
+  finance_monitoring_pro_required: ["예약 모니터링은 Pro 이상에서 사용할 수 있습니다.", "Scheduled monitoring is available on Pro and above."],
+  finance_monitoring_access_unavailable: ["이용 권한을 확인하지 못했습니다. 계정 연결을 확인한 뒤 다시 시도하세요.", "Access could not be verified. Check the account connection and try again."],
   finance_evidence_metric_invalid: ["저장 자료 연결 형식이 유효하지 않습니다. 원본 보고서에서 다시 고정하세요.", "The saved-data reference is invalid. Pin it again from the original report."],
   finance_evidence_reference_invalid: ["블록에 연결된 보고서 자료를 찾지 못했습니다. 활성 보고서와 자료 섹션을 확인하세요.", "The report data linked to this block could not be found. Check the active report and data section."],
   finance_evidence_is_referenced: ["대시보드가 이 자료를 사용 중입니다. 연결된 블록을 먼저 제거한 뒤 보고서나 섹션을 보관·제거하세요.", "A dashboard is using this data. Remove its linked blocks before archiving or removing the report or section."],

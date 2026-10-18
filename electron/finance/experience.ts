@@ -41,6 +41,11 @@ export async function financeMonitoringAccess(scope:FinanceScope):Promise<Access
   if(balance.error||typeof balance.plan!=='string')return {plan:null,monitoringAllowed:false,status:'unavailable'};
   return {plan:balance.plan,monitoringAllowed:['pro','max','wow'].includes(balance.plan),status:'verified'};
 }
+/** Fresh server-backed admission for recurring Finance monitoring; terminal actions never call this. */
+export async function requireFinanceMonitoringAccess(scope:FinanceScope):Promise<void>{
+  scope.assertCurrent();const access=await financeMonitoringAccess(scope);scope.assertCurrent();
+  if(access.status!=="verified"||!access.monitoringAllowed)throw new Error(access.status==="verified"?"finance_monitoring_pro_required":"finance_monitoring_access_unavailable");
+}
 const defaultPorts:Ports={
   sources:async()=>{const [{financeWorldDataSources},{financeToolchainSources}]=await Promise.all([import('./world-markets'),import('./source-adapters')]);return [...financeWorldDataSources(),...await financeToolchainSources()];},access:financeMonitoringAccess,
   prepare:prepareFinanceDailyCheckin,register:registerFinanceDailyCheckin,revoke:revokeFinanceDailyCheckin,observe:observeFinanceDailyCheckin,
@@ -49,7 +54,7 @@ const defaultPorts:Ports={
 /** Local settings only; no holdings, quotes, market data or credentials are persisted here. */
 export class FinanceExperience {
   constructor(private readonly root:string,private readonly ports:Ports=defaultPorts){}
-  private initial(scope:FinanceScope,sources:FinanceDataSourceOption[]):Preferences{return {schemaVersion:1,ownerScope:financeScopeHash(scope),revision:0,consent:null,sourceId:sources.find(source=>source.available)?.id??sources[0]?.id??'',dashboardCustomized:false,enabledFeedIds:[...defaultFeeds],monitoring:{enabled:false,localTime:'09:00',timezone:this.ports.timezone(),lastSentAt:null,nextRunAt:null,generation:0,oneId:null,checkinId:null,commandId:null,admissionDay:null,admissionRunId:null}};}
+  private initial(scope:FinanceScope,sources:FinanceDataSourceOption[]):Preferences{return {schemaVersion:1,ownerScope:financeScopeHash(scope),revision:0,consent:null,sourceId:sources.find(source=>source.available)?.id??sources[0]?.id??'finance-yfinance',dashboardCustomized:false,enabledFeedIds:[...defaultFeeds],monitoring:{enabled:false,localTime:'09:00',timezone:this.ports.timezone(),lastSentAt:null,nextRunAt:null,generation:0,oneId:null,checkinId:null,commandId:null,admissionDay:null,admissionRunId:null}};}
   private read(scope:FinanceScope,directory:string,sources:FinanceDataSourceOption[]):Preferences {
     scope.assertCurrent();try{const file=path.join(directory,'settings.json'),stat=fs.lstatSync(file);if(!stat.isFile()||stat.isSymbolicLink()||stat.size>65536)throw new Error('finance_settings_invalid');
       const value=storedSchema.parse(JSON.parse(fs.readFileSync(file,'utf8')));if(value.ownerScope!==financeScopeHash(scope))throw new Error('finance_owner_scope_mismatch');return value;
@@ -113,6 +118,10 @@ export class FinanceExperience {
       if(current.admissionDay===day&&current.admissionRunId!==runId)throw new Error('finance_daily_already_admitted');
       current.admissionDay=day;current.admissionRunId=id.parse(runId);save();
     });scope.assertCurrent();
+  }
+  /** Record a committed host layout edit without contacting billing or source discovery. */
+  async markDashboardCustomized(scope:FinanceScope):Promise<void>{
+    await this.locked(scope,async(value,save)=>{if(!value.dashboardCustomized){value.dashboardCustomized=true;save();}},false);
   }
   async selectedSource(scope:FinanceScope):Promise<{sourceId:string}>{
     return this.locked(scope,async(value,_save,sources)=>{if(!sources.some(source=>source.id===value.sourceId&&source.available))throw new Error('finance_source_unavailable');return {sourceId:value.sourceId};});

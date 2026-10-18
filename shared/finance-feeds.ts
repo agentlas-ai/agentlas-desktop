@@ -6,6 +6,8 @@ export interface FinanceDashboardFeedItem {
   publishedAt:string|null; startsAt:string|null; assetSymbol:string|null; sourceId:FinanceFeedId;
   session?:'before-market'|'after-market'|'during-market'|'unknown';
   datePrecision?:'instant'|'day'; publisher?:string;
+  /** Provider estimate only; never an issuer confirmation or inferred market session. */
+  scheduleStatus?:'estimated';
 }
 export interface FinanceDashboardFeedSection {
   id:FinanceFeedId; status:'ok'|'partial'|'unavailable'|'disabled'|'error';

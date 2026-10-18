@@ -1,7 +1,7 @@
 "use client";
 import { useId, useMemo, useState } from "react";
 import { IconArrowUp, IconChevronLeft, IconChevronRight } from "@/components/Icon";
-import type { FinanceDataResult } from "@shared/finance";
+import type { FinanceDataResult, FinanceWidget } from "@shared/finance";
 import { useT } from "@/lib/i18n";
 import { ChartBlock } from "@/components/ChartBlock";
 import { financeCell, financeColumn } from "./FinanceMessage";
@@ -14,6 +14,7 @@ export interface FinanceDataResultViewProps {
   title?: string;
   compact?: boolean;
   showVisual?: boolean;
+  chartType?: FinanceWidget["chartType"];
   selectedSeries?: string;
   onSeriesChange?: (series:string)=>void;
 }
@@ -85,7 +86,7 @@ export function financeDataVisual(result:FinanceDataResult, metric?:string, sele
   return {kind:treasury?"treasury":"history",series,points,unit,label,missing};
 }
 const PAGE_SIZE=50;
-export function FinanceDataResultView({result,metric:requestedMetric,locale,title,compact=false,showVisual=true,selectedSeries:controlledSeries,onSeriesChange}:FinanceDataResultViewProps) {
+export function FinanceDataResultView({result,metric:requestedMetric,locale,title,compact=false,showVisual=true,chartType,selectedSeries:controlledSeries,onSeriesChange}:FinanceDataResultViewProps) {
   const metric=requestedMetric??financeMetricForColumns(result.columns);
   const i18n=useT();const ko=(locale??i18n.locale)==="ko";const t=(a:string,b:string)=>ko?a:b;
   const column=(value:string)=>ko?({"Observation date":"관측일","Close (raw)":"원종가","Maturity":"만기","Par curve yield":"액면 수익률","Unit":"단위","Fund":"펀드","NAV per share":"주당 NAV","NAV date":"NAV 기준일","Price basis":"가격 기준","Open":"시가","High":"고가","Low":"저가"} as Record<string,string>)[value]??financeColumn(value,true):value;
@@ -97,8 +98,9 @@ export function FinanceDataResultView({result,metric:requestedMetric,locale,titl
   const rows=result.rows.slice(current*PAGE_SIZE,(current+1)*PAGE_SIZE);
   const displayNumber=(value:number)=>new Intl.NumberFormat(ko?"ko-KR":"en-US",value!==0&&Math.abs(value)<.005?{maximumSignificantDigits:2}:{maximumFractionDigits:2}).format(value);
   const chartPoints=visual.points.slice(0,2000);
-  const chartSpec={data:{values:chartPoints},mark:{type:"point",filled:true},encoding:{tooltip:[{field:"date",type:"ordinal",title:t("날짜","Date")},{field:"value",type:"quantitative",title:visual.unit??t("값","Value"),format:chartPoints.some(point=>point.value!==0&&Math.abs(point.value)<.01)?".3~g":",.2f"}],x:{field:"date",type:"ordinal",sort:"ascending",title:t("관측일","Observation date"),axis:{labelOverlap:true}},y:{field:"value",type:"quantitative",scale:{zero:false},title:visual.kind==="treasury"?t("연율 수익률 (%)","Yield (% per annum)"):`${t("종가","Close")} · ${visual.unit??t("통화 미확인","currency unverified")}`}}};
-  const financeVisual=showVisual&&visual.nav?<div className={styles.nav}><strong>{displayNumber(visual.nav.value)} <small>{visual.nav.currency??t("통화 미확인","Currency unknown")}</small></strong></div>:showVisual&&(visual.kind==="history"||visual.kind==="treasury")?<div className={styles.visual}>
+  const chartSpec={data:{values:chartPoints},mark:{type:chartType==="line"||chartType==="bar"?chartType:"point",filled:chartType!=="line",...(chartType==="line"?{interpolate:"linear"}:{})},encoding:{...(chartType==="line"?{order:{field:"date",type:"ordinal",sort:"ascending"}}:{}),tooltip:[{field:"date",type:"ordinal",title:t("날짜","Date")},{field:"value",type:"quantitative",title:visual.unit??t("값","Value"),format:chartPoints.some(point=>point.value!==0&&Math.abs(point.value)<.01)?".3~g":",.2f"}],x:{field:"date",type:"ordinal",sort:"ascending",title:t("관측일","Observation date"),axis:{labelOverlap:true}},y:{field:"value",type:"quantitative",scale:{zero:false},title:visual.kind==="treasury"?t("연율 수익률 (%)","Yield (% per annum)"):`${t("종가","Close")} · ${visual.unit??t("통화 미확인","currency unverified")}`}}};
+  const displayVisual=showVisual&&chartType!=="table";
+  const financeVisual=displayVisual&&visual.nav?<div className={styles.nav}><strong>{displayNumber(visual.nav.value)} <small>{visual.nav.currency??t("통화 미확인","Currency unknown")}</small></strong></div>:displayVisual&&(visual.kind==="history"||visual.kind==="treasury")?<div className={styles.visual}>
     {visual.kind==="treasury"&&<div className={styles.toolbar}><label className={styles.label} htmlFor={`${id}-tenor`}><span className={styles.srOnly}>{t("만기","Maturity")}</span><select id={`${id}-tenor`} value={visual.label} onChange={event=>{setSelectedSeries(event.target.value);onSeriesChange?.(event.target.value);}}>{visual.series.map(series=><option key={series} value={series}>{financeTenorLabel(series)}</option>)}</select></label></div>}
     <div className={styles.chartViewport}><ChartBlock code={JSON.stringify(chartSpec)} presetSpec={chartSpec} blockId={`finance-data:${id}`} size="panel" showMenu={false} showDiagnostics={false} fallback={<p className={styles.notice} role="status">{t("차트를 표시하지 못했습니다.","Chart unavailable.")}</p>}/></div>
   </div>:null;

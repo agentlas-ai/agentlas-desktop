@@ -6,6 +6,7 @@ import type { Automation, WorkflowGraph } from "../../shared/types";
 import type { FinanceScope } from "./store";
 import { composeDeclaredPrompt } from "../runtime/prompt-order";
 import { userDataPath } from "../runtime-paths";
+import { requireFinanceMonitoringAccess } from "./experience";
 import { detectRuntimes } from "../runtime/detect";
 import { workStartRuntimePin } from "../work-start";
 import { listInstalledAgentsReadOnly } from "../mcp/registry";
@@ -75,6 +76,7 @@ export function readFinanceMonitor(input: Pick<FinanceMonitorInput, "scope" | "m
 export async function scheduleFinanceMonitor(input: FinanceMonitorInput): Promise<FinanceMonitor> {
   const schedule = input.scheduleHuman ?? "daily-09:00";
   if (!FINANCE_MONITOR_SCHEDULES.includes(schedule as typeof FINANCE_MONITOR_SCHEDULES[number]) || !input.monitor.query.trim()) throw new Error("finance_monitor_schedule_invalid");
+  await requireFinanceMonitoringAccess(input.scope); input.scope.assertCurrent();
   const timezone = defaultTz();
   const spec = parseLegacyToken(schedule, timezone);
   if (!spec || !nextRun(spec)) throw new Error("finance_monitor_schedule_invalid");
@@ -101,6 +103,8 @@ export async function scheduleFinanceMonitor(input: FinanceMonitorInput): Promis
         runtimeSelection: workStartRuntimePin(runtime) });
     }
     input.scope.assertCurrent();
+    // Runtime detection and the scheduler lease may outlive the first plan observation.
+    await requireFinanceMonitoringAccess(input.scope); input.scope.assertCurrent();
     writeBinding(file, { automationId: job.id, scheduleHuman: schedule });
     job = toggleAutomation(job.id, true);
     input.scope.assertCurrent();

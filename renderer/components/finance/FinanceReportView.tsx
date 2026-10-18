@@ -35,8 +35,9 @@ export function FinanceReportProse({value}:{value:string}) {
 function data(section:FinanceReportSection):FinanceDataResult|null {const p=section.projection;return p?{status:p.status==="ready"?"ok":p.status==="partial"?"partial":"unconnected",columns:p.columns,rows:p.rows,warnings:p.warnings,asOf:p.asOf,retrievedAt:"",sourceUrls:[]}:null;}
 export function financeReportChartSpec(section:FinanceReportSection):Record<string,unknown>|null {
  const computed=financeComputeSpec(section,false);if(computed)return computed;
+ if(section.widget?.chartType==="table")return null;
  const result=data(section),metric=result?financeMetricForColumns(result.columns):undefined,visual=result&&metric?financeDataVisual(result,metric):null;
- if(visual&&(visual.kind==="history"||visual.kind==="treasury")&&visual.points.length){const unit=visual.kind==="treasury"?"%":visual.unit;return {data:{values:visual.points},mark:{type:"point",filled:true,tooltip:true},encoding:{x:{field:"date",type:"ordinal",sort:null,title:null},y:{field:"value",type:"quantitative",title:unit,scale:{zero:false}},tooltip:[{field:"date",type:"ordinal",title:null},{field:"value",type:"quantitative",title:unit,format:".2f"}]}};}
+ if(visual&&(visual.kind==="history"||visual.kind==="treasury")&&visual.points.length){const unit=visual.kind==="treasury"?"%":visual.unit,dates=visual.points.map(point=>point.date),ticks=[...new Set([dates[0],dates[Math.floor((dates.length-1)/2)],dates[dates.length-1]])];return {data:{values:visual.points},mark:{type:section.widget?.chartType==="line"||section.widget?.chartType==="bar"?section.widget.chartType:"point",filled:section.widget?.chartType!=="line",...(section.widget?.chartType==="line"?{interpolate:"linear"}:{}),tooltip:true},encoding:{...(section.widget?.chartType==="line"?{order:{field:"date",type:"ordinal",sort:"ascending"}}:{}),x:{field:"date",type:"ordinal",sort:"ascending",title:null,axis:{labelAngle:0,labelOverlap:true,labelFontSize:11,values:ticks}},y:{field:"value",type:"quantitative",title:unit,scale:{zero:false}},tooltip:[{field:"date",type:"ordinal",title:null},{field:"value",type:"quantitative",title:unit,format:".2f"}]}};}
  const p=section.projection,w=section.widget;if(!p||!w||w.chartType==="table"||!["chart","comparison"].includes(w.type)||!p.rows.length||p.rows.length>5000||!['ready','partial'].includes(p.status)||!["Observed at","Symbol","Currency","Price"].every(name=>p.columns.includes(name)))return null;
  const at=(name:string)=>p.columns.indexOf(name),currencies=new Set(p.rows.map(row=>row[at("Currency")]));if(currencies.size!==1)return null;const currency=p.rows[0][at("Currency")];if(typeof currency!=="string"||!(/^[A-Z]{3}$/).test(currency)||currency==="XXX")return null;
  const seen=new Set<string>();const values=p.rows.map(row=>({date:row[at("Observed at")],symbol:row[at("Symbol")],value:row[at("Price")]}));if(values.some(row=>{const key=`${row.date}:${row.symbol}`;if(typeof row.date!=="string"||!Number.isFinite(Date.parse(row.date))||typeof row.symbol!=="string"||typeof row.value!=="number"||!Number.isFinite(row.value)||seen.has(key))return true;seen.add(key);return false;}))return null;
@@ -75,7 +76,7 @@ export function FinanceReportView({report,locale="en",explicitTableSectionIds=[]
   const result=data(section),metric=result?financeMetricForColumns(result.columns):undefined;
   const spec=financeReportChartSpec(section),computation=!!spec;
   const visual=result&&metric?financeDataVisual(result,metric):null;
-  const chart=!tables.has(section.id)&&section.presentation!=="narrative"&&(computation||!!visual&&visual.kind!=="table");
+  const chart=!tables.has(section.id)&&section.presentation!=="narrative"&&section.widget?.chartType!=="table"&&(computation||!!visual&&visual.kind!=="table");
   if(section.presentation==="supporting")return [];
   if(section.kind==="sources"&&section.presentation!=="narrative"&&!chart&&!tables.has(section.id))return [];
   if(!section.narrative.trim()&&!chart&&!tables.has(section.id))return [];
@@ -93,16 +94,18 @@ export function FinanceReportView({report,locale="en",explicitTableSectionIds=[]
 /** Standalone local chart export: deny every loader route and always release each Vega view. */
 export async function financeReportExportHtml(report:FinanceReport,locale?:string,explicitTableSectionIds:readonly string[]=[]):Promise<string> {
  if(explicitTableSectionIds.length){const tables=new Set(explicitTableSectionIds);report={...report,sections:report.sections.map(section=>tables.has(section.id)&&section.presentation!=="supporting"&&section.presentation!=="narrative"?{...section,presentation:"comparison"}:section)};}
- const language=financeReportLocale(report,locale),charts:Record<string,string>={};
+ const language=financeReportLocale(report,locale),charts:Record<string,string>={},mobileCharts:Record<string,string>={};
  const candidates=selectFinanceReportSections(report).filter(section=>section.presentation!=="narrative"&&section.presentation!=="comparison").map(section=>({section,spec:financeReportChartSpec(section)})).filter(item=>!!item.spec);
  if(candidates.length){const [vl,vega,interpreter]=await Promise.all([import("vega-lite"),import("vega"),import("vega-interpreter")]);
  const deny=()=>Promise.reject(new Error("network disabled")),loader={load:deny,sanitize:deny,http:deny,file:deny};
  for(const {section,spec} of candidates){const checked=sanitizeChartSpec(localizedSpec(spec,language));if(!checked.ok)continue;
+ for(const variant of [{width:860,height:300,target:charts},{width:340,height:240,target:mobileCharts}]){
  let view:{runAsync:()=>Promise<unknown>;toSVG:()=>Promise<string>;finalize:()=>void}|undefined;
- try {const compiled=vl.compile({...checked.spec,width:860,height:300,autosize:{type:"fit-x",contains:"padding"}} as never).spec;
+ try {const originalConfig=(checked.spec.config??{}) as Record<string,unknown>,axis=(originalConfig.axis??{}) as Record<string,unknown>,axisX=(originalConfig.axisX??{}) as Record<string,unknown>,axisY=(originalConfig.axisY??{}) as Record<string,unknown>;
+ const compiled=vl.compile({...checked.spec,width:variant.width,height:variant.height,autosize:{type:"fit-x",contains:"padding"},config:{...originalConfig,axis:{...axis,labelFontSize:11,titleFontSize:11},axisX:{...axisX,labelAngle:0,labelOverlap:true,tickCount:variant.width<600?3:6},axisY:{...axisY,tickCount:variant.width<600?4:6}}} as never).spec;
  view=new vega.View(vega.parse(compiled as never,undefined,{ast:true}),{renderer:"none",expr:interpreter.expressionInterpreter,loader:loader as never}) as unknown as typeof view;
  await view!.runAsync();const svg=await view!.toSVG();const bytes=new TextEncoder().encode(svg);if(bytes.length>4*1024*1024)continue;
- let binary="";for(let i=0;i<bytes.length;i+=8192)binary+=String.fromCharCode(...bytes.subarray(i,i+8192));charts[section.id]=`data:image/svg+xml;base64,${btoa(binary)}`;
+ let binary="";for(let i=0;i<bytes.length;i+=8192)binary+=String.fromCharCode(...bytes.subarray(i,i+8192));variant.target[section.id]=`data:image/svg+xml;base64,${btoa(binary)}`;
  }finally {view?.finalize();}
- }}return financeReportHtml({report,locale:language,charts});
+ }}}return financeReportHtml({report,locale:language,charts,mobileCharts});
 }

@@ -28,6 +28,7 @@ export function FinanceConnectedWorkspace() {
   const { locale } = useT();
   const [api, setApi] = useState<FinanceAPI | null>(null);
   const [ready, setReady] = useState(false);
+  const [experienceRefreshVersion,setExperienceRefreshVersion]=useState(0);
   useEffect(() => {
     let mounted = true, generation = 0;
     const bridge = ipc();
@@ -50,7 +51,12 @@ export function FinanceConnectedWorkspace() {
       if(!active)return;
       const current=financeStore.getSnapshot().workspace;
       if(event.ownerScope!==current.ownerScope || event.revision<=current.revision)return;
-      void financeStore.reloadIfNewer(event.ownerScope,event.revision).catch(()=>undefined);
+      void financeStore.reloadIfNewer(event.ownerScope,event.revision).then(()=>{
+        if(!active)return;
+        const latest=financeStore.getSnapshot().workspace;
+        if(latest.ownerScope===event.ownerScope&&latest.revision>=event.revision)
+          setExperienceRefreshVersion(version=>version+1);
+      }).catch(()=>undefined);
     });
     return ()=>{active=false;unsubscribe();};
   },[api]);
@@ -78,6 +84,7 @@ export function FinanceConnectedWorkspace() {
   if (!ready) return <main role="status" style={{ padding: 32 }}>{locale === "ko" ? "Agentlas Finance를 여는 중…" : "Opening Agentlas Finance…"}</main>;
 
   return <FinanceWorkspace
+    experienceRefreshVersion={experienceRefreshVersion}
     onExperience={api?.experience ? experience : undefined}
     onWorldMarkets={api?.worldMarkets ? worldMarkets : undefined}
     onDashboardFeeds={api?.dashboardFeeds ? dashboardFeeds : undefined}

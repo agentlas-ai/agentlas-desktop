@@ -5,7 +5,7 @@ import { applyFinanceOperations, FinanceDataSaveRequestSchema, createFinanceRepo
 import { userDataPath } from "../runtime-paths";
 import { FinanceStore, type FinanceScope } from "./store";
 import { queryFinanceData, refreshFinanceQuotes, searchFinanceAssets } from "./data";
-import { FinanceExperience } from './experience';
+import { FinanceExperience, requireFinanceMonitoringAccess } from './experience';
 import { findIsharesFund } from "./providers/ishares-catalog";
 import { FINANCE_MONITOR_RUN_TIMEOUT_MS } from "../../shared/finance";
 import { FinanceArchives, FinanceArchiveRequestSchema, financeArchivePlan } from './archive';
@@ -116,7 +116,7 @@ export class FinanceService {
     return { ...workspace, monitors: workspace.monitors.map(monitor => readFinanceMonitor({ scope, monitor })) };
   }
   async save(scope: FinanceScope, input: { workspace: FinanceWorkspace; expectedRevision: number }): Promise<FinanceWorkspace> {
-    const proposed = validateFinanceWorkspace(input.workspace), current = await this.store.load(scope); scope.assertCurrent();
+    const proposed = validateFinanceWorkspace(input.workspace), expectedRevision=input.expectedRevision, current = await this.store.load(scope); scope.assertCurrent();
     for (const monitor of proposed.monitors) {
       const previous = current.monitors.find(item => item.id === monitor.id);
       if (previous?.automationId) {
@@ -128,7 +128,13 @@ export class FinanceService {
       } else if (monitor.automationId || monitor.executionAvailability || monitor.status === "active" || monitor.lastCheckedAt || monitor.nextCheckAt) throw new Error("finance_monitor_host_owned");
     }
     for (const previous of current.monitors) if (previous.automationId && !proposed.monitors.some(item => item.id === previous.id) && readFinanceMonitor({ scope, monitor: previous }).status !== "paused") throw new Error("finance_monitor_pause_before_remove");
-    return this.store.save(scope,input);
+    const workspace=await this.store.save(scope,{workspace:proposed,expectedRevision});
+    const layoutChanged=(current.dashboards.some(d=>d.widgets.length>0)||workspace.dashboards.some(d=>d.widgets.length>0))&&JSON.stringify(current.dashboards.map(({id,widgets})=>({id,widgets})))!==JSON.stringify(workspace.dashboards.map(({id,widgets})=>({id,widgets})));
+    if(layoutChanged){
+      try{await this.experience.markDashboardCustomized(scope);}
+      catch{scope.assertCurrent();console.warn("finance_dashboard_preference_pending");}
+    }
+    return workspace;
   }
   async apply(scope: FinanceScope, input: { operations: FinanceOperation[]; expectedRevision: number }): Promise<FinanceWorkspace> {
     const current = await this.store.load(scope); if(current.revision !== input.expectedRevision) throw new Error("finance_revision_conflict");
@@ -202,10 +208,10 @@ export class FinanceService {
     return {workspace,reportId:draft.reportId,artifact};
   }
   async dashboardFeeds(scope:FinanceScope,signal?:AbortSignal):Promise<import('../../shared/finance-feeds').FinanceDashboardFeedsResult>{
-    const enabledFeedIds=await this.experience.feeds(scope);scope.assertCurrent();
+    const enabledFeedIds=await this.experience.feeds(scope);const {sourceId}=await this.experience.consent(scope);scope.assertCurrent();
     const workspace=await this.store.load(scope);scope.assertCurrent();
     const {getFinanceDashboardFeeds}=await import('./dashboard-feeds');
-    return getFinanceDashboardFeeds({scope,watchlist:workspace.watchlist,enabledFeedIds,signal});
+    return getFinanceDashboardFeeds({scope,watchlist:workspace.watchlist,enabledFeedIds,sourceId,signal});
   }
   async refreshQuotes(scope:FinanceScope) {const workspace=await this.store.load(scope);const route={...await this.experience.consent(scope),assertCurrent:()=>scope.assertCurrent()};scope.assertCurrent();const result=await refreshFinanceQuotes(workspace,route);scope.assertCurrent();return result;}
   /** Definition edits share the execution lease; history and scheduler metadata are never model patches. */
@@ -279,6 +285,15 @@ export class FinanceService {
       const {getDb}=await import("../store/db");
       const row=getDb().prepare("SELECT automation_id FROM automation_runs WHERE id=?").get(input.callerRunId) as {automation_id:string}|undefined;
       if(row && readFinanceMonitor({scope,monitor}).automationId!==row.automation_id)throw new Error("finance_monitor_automation_binding_mismatch");
+      if(row){
+        try{await requireFinanceMonitoringAccess(scope);}
+        catch(error){
+          try{await this.pause(scope,{monitorId:monitor.id});}
+          catch{scope.assertCurrent();console.warn("finance_monitor_pause_pending");}
+          throw error;
+        }
+        scope.assertCurrent();signal.throwIfAborted();
+      }
     }
     const definition=monitorDefinition(monitor,before);
     const history=this.history(scope,monitor.id),prepared=await history.prepare(scope);
