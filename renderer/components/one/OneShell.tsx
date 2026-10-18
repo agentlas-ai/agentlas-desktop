@@ -7883,7 +7883,8 @@ function OneSessionsShell() {
     // always running, so "press again when it finishes" left its cards greyed out forever (owner 2026-10-14, X Marketing).
     if (api && busy) {
       if (!projectedTask && !isActiveOneConversation) return;
-      answeredConfirmationsRef.current.claim(confirmation);
+      // One answer per question: "항상 승인" answers through two handlers, and a second commit was refused as stale.
+      if (!answeredConfirmationsRef.current.claim(confirmation)) return;
       setConfirmations((items) => items.filter((item) => item.sourceMessageId !== confirmation.sourceMessageId));
       try {
         await api.confirm.commitAnswer({ chatId: confirmation.chatId, sourceMessageId: confirmation.sourceMessageId, reply: label });
@@ -7908,7 +7909,7 @@ function OneSessionsShell() {
      * 예전에는 영수증 조회 → 확정 IPC 두 번을 기다린 뒤에야 카드가 사라져 눌렀는지 알 수 없었다.
      * 확정이 거절되면 아래 catch 가 Main 의 대기 목록을 다시 읽어 카드를 되살린다.
      */
-    answeredConfirmationsRef.current.claim(confirmation);
+    if (!answeredConfirmationsRef.current.claim(confirmation)) return;
     setConfirmations((items) => items.filter((item) => item.sourceMessageId !== confirmation.sourceMessageId));
     try {
       // 두 호출은 서로 기다릴 이유가 없다 — 동시에 보낸다.

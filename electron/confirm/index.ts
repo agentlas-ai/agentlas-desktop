@@ -336,6 +336,17 @@ export function commitPendingConfirmationAnswer(
    * "아직 답을 기다린다"는 말풍선을 붙이면 질문은 더 이상 마지막이 아니었고, 사람이 고른 답은 만료로 버려졌다.
    * 질문은 그 뒤에 **사용자** 메시지가 없고 아직 확정 답이 없는 한 살아 있다.
    */
+  // The same answer to the same question again is acknowledgement, not a second decision — also after the
+  // continuation's user turn made the question non-pending. One "항상 승인" click committed twice and the second
+  // was refused as stale (main.log 2026-10-17 00:23:05Z), surfacing a refusal for an answer that had landed.
+  if (sourceMessageId) {
+    const prior = listCommittedQuestionAnswers(chatId)
+      .filter((receipt) => receipt.sourceMessageId === sourceMessageId)
+      .at(-1);
+    if (prior?.continuationRunId && prior.reply && prior.reply === reply.trim()) {
+      return { chatId, sourceMessageId, continuationRunId: prior.continuationRunId };
+    }
+  }
   const source = pendingQuestionMessage(chatId, sourceMessageId);
   if (!source) throw new Error("Question is stale or no longer pending");
   const normalizedReply = reply.trim();
