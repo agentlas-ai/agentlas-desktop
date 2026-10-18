@@ -45,12 +45,6 @@ const { WebSocket } = require("ws") as { WebSocket: new (url: string, options?: 
 const NATIVE_PARTITION = "persist:agentlas-browser-default";
 const WATCH_LIMIT_MS = 6 * 60 * 60 * 1000;
 
-/** 목표 재개 — main 이 invocation 서비스를 알 때 한 번 등록한다. */
-let resumeHandler: ((reason: "login-restored", prerequisite?: LoginPrerequisiteRef) => void) | null = null;
-export function setLoginRecoveryResumeHandler(handler: ((reason: "login-restored", prerequisite?: LoginPrerequisiteRef) => void) | null): void {
-  resumeHandler = handler;
-}
-
 function consentDomains(domains: readonly string[]): Promise<{ profileId: string; domains: string[] } | null> {
   return import("./credential-sync").then(({ getBrowserCredentialConsent }) => {
     const consent = getBrowserCredentialConsent();
@@ -626,11 +620,6 @@ export function observeBrowserToolForLoginWall(input: {
   });
 }
 
-/** Ask Main's resume path (blocked-goal sweep) to continue goals after a recovery. Best effort. */
-export function triggerBrowserRecoveryResume(prerequisite?: LoginPrerequisiteRef): void {
-  try { resumeHandler?.("login-restored", prerequisite); } catch { /* resume is best effort */ }
-}
-
 /**
  * The same ladder, awaited: the browser fallback ladder's login rung (fallback-ladder-runtime.ts) needs the
  * outcome. Reads the pages of the surface the run is actually on (a failed-over grant is on the dedicated Chrome).
@@ -645,7 +634,8 @@ export async function recoverLoginWallsNow(input: {
   nativeGrant?: RecoveryBrowserGrant;
   notify?: (card: OwnerLoginCard) => void;
 }): Promise<LoginRecoveryOutcome[]> {
-  const resume = triggerBrowserRecoveryResume;
+  // Restoration reaches the waiting run only through its exact handle (onPrerequisiteRestored). The global
+  // "resume goals" handler this used to pass was removed in 1.2.53 (3a60b734) and had done nothing since.
   const verificationSignal = input.signal ?? new AbortController().signal;
   const outcomes: LoginRecoveryOutcome[] = [];
   if (input.signal?.aborted) return outcomes;
@@ -690,7 +680,7 @@ export async function recoverLoginWallsNow(input: {
         isPendingCurrent: consentCurrent,
         canonicalSession: true,
         ...(page.retainLoginVerification ? { retainVerification: () => page.retainLoginVerification!(verificationSignal) } : {}),
-        notify: input.notify, resume, openSignIn: (card) => page.navigate(card.signInUrl),
+        notify: input.notify, openSignIn: (card) => page.navigate(card.signInUrl),
         ...(evaluate ? { vaultFill: () => vaultFillSignIn({ url: async () => String(await evaluate("location.href") || "") || null, evaluate,
           settled: async () => { await new Promise((r) => setTimeout(r, 1_500)); return String(await evaluate("location.href").catch(() => "") || "") || null; } },
         productionVaultSource()) } : {}),
@@ -711,7 +701,7 @@ export async function recoverLoginWallsNow(input: {
       nodeId: input.nodeId, signal: input.signal, slotId: page.id, profileId,
       onPendingScopeReleased: batch.callback(page.id), onPrerequisiteRestored: input.onPrerequisiteRestored,
       consentGeneration, isCurrent: consentCurrent,
-      notify: input.notify, resume,
+      notify: input.notify,
       vaultFill: () => vaultFillSignIn({ url: async () => String(await evaluateCdpPage(page, "location.href") || "") || null, evaluate: (expression) => evaluateCdpPage(page, expression),
         settled: () => settledCdpPage(page) }, productionVaultSource()),
     });

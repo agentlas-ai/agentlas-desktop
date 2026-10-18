@@ -346,10 +346,9 @@ async function humanCheckWait(scope: LadderScope, ladderId: string): Promise<Run
       recordEvent({ schemaVersion: BROWSER_LADDER_SCHEMA, ladderId, code: "human-check-required", step: "final", rung: "human-check-wait",
         result: cleared ? "recovered" : "timeout", surface: page.surface, final: cleared ? "recovered" : "stopped",
         reasonCode: cleared ? "human_check_cleared" : "human_check_timeout", site: scope.site, elapsedMs: Date.now() - startedAt }, binding);
-      if (cleared) {
-        const { triggerBrowserRecoveryResume } = await import("./login-recovery-runtime");
-        triggerBrowserRecoveryResume();
-      }
+      // The recorded clear is the fact; no global "resume goals" call follows it. That handler was removed in 1.2.53
+      // (3a60b734: a browser event must not wake every Goal; an exact invocation/node wait handle consumes restoration),
+      // and the call left behind did nothing. A blocked Goal continues through its own sweep (blocked-goal-sweep.ts).
     })().catch(() => undefined);
   }, HUMAN_CHECK_POLL_MS);
   timer.unref?.();
@@ -618,9 +617,9 @@ export async function browserLadderOwnerAction(input: {
   for (const key of stopped.keys()) if (key.startsWith("dedicated:")) stopped.delete(key);
   const { agiRestartAgentlasBrowser } = await import("../agi/browser-seams");
   const ready = await agiRestartAgentlasBrowser().catch(() => false);
-  const { triggerBrowserRecoveryResume } = await import("./login-recovery-runtime");
-  triggerBrowserRecoveryResume();
-  return { ok: ready, code: ready ? "browser-ready-goals-resumed" : "browser-not-ready-goals-resumed" };
+  // A restart proves a ready browser, not a resumed Goal (as the native path above says): the code reports only that.
+  // It used to report resumed Goals after a resume call that has done nothing since 3a60b734 removed its handler.
+  return { ok: ready, code: ready ? "browser-ready" : "browser-not-ready" };
 }
 
 export { ladderOwnerCard };
