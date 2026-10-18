@@ -43,9 +43,9 @@ function invocationStatus(snapshot: ChatContinuitySnapshot, ko: boolean, observa
   if (!run) return null;
   const relation = run.relationship === "goal-bound"
     ? (ko ? "Goal 실행" : "Goal run")
-    : (ko ? "Goal 연결 미확인 실행" : "Goal link unverified");
+    : (ko ? "Goal 연결 확인 안 된 실행" : "Goal link unverified");
   const state = run.state === "active" && !observationStale
-    ? (ko ? "Main에서 실행 확인" : "Active in Main")
+    ? (ko ? "실행 중 확인됨" : "Confirmed running")
     : run.state === "unconfirmed"
       ? (ko ? "실행 여부 재확인 필요" : "Run status needs recheck")
       : (ko ? "모델 호출 종료" : "Model call ended");

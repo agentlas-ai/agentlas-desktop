@@ -19,7 +19,7 @@ export function GoalResultReport({ result, locale, children }: {
     : result.verificationState === "inconclusive"
       ? locale === "ko" ? "작업 보고 · 검증 근거 부족" : "Report · verification inconclusive"
       : locale === "ko"
-    ? result.status === "legacy" ? "이전 작업 보고 · 검증 미확인" : result.status === "pending" ? "검증 전 작업 보고" : "검증 미통과 · 결과 확인 필요"
+    ? result.status === "legacy" ? "이전 작업 보고 · 검증 여부 알 수 없음" : result.status === "pending" ? "검증 전 작업 보고" : "검증 미통과 · 결과 확인 필요"
     : result.status === "legacy" ? "Previous report · verification unknown" : result.status === "pending" ? "Verification pending" : "Verification not passed · review required";
   // Keep the content parent stable when verification arrives during interaction.
   return <div data-goal-result={showReport ? result?.status : undefined} style={{ marginTop: showReport ? 10 : undefined, minWidth: 0 }}>

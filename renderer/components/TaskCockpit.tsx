@@ -2566,11 +2566,11 @@ function ChatPage() {
     const accepted = applyWorkFollowupReceipt(intent, receipt);
     if (isCurrentChat() && intent.chatId === chatId && !accepted) setSessionNotice(
       receipt && ["held", "failed", "cancelled"].includes(receipt.status ?? "")
-        ? (locale === "ko" ? "추가 지시 원문을 보관했습니다. Main에서 보류·실패·취소 상태를 확인하여 다시 실행하지 않았습니다."
-          : "The original follow-up is retained. Main reports it held, failed or cancelled, so it was not replayed.")
+        ? (locale === "ko" ? "추가 지시가 실행되지 않았습니다(보류·실패·취소). 작성한 글은 입력창 위에 보관해 두었습니다."
+          : "The follow-up did not run (held, failed or cancelled). Your text is kept above the composer.")
         : (locale === "ko"
-          ? "추가 지시를 로컬에 보관했습니다. Main 접수는 아직 확인되지 않았습니다. 보관한 글에서 같은 요청의 상태를 확인할 수 있습니다."
-          : "The follow-up is saved locally. Main acceptance is unconfirmed. Check the same request from its saved text."));
+          ? "추가 지시가 전달됐는지 아직 확인하지 못했습니다. 글은 입력창 위에 보관해 두었으니 ‘같은 요청 확인·전달’로 다시 확인할 수 있습니다."
+          : "Delivery of the follow-up is not confirmed yet. It is kept above the composer; use “Check or deliver this request” to check again."));
     return receipt;
   }, [applyWorkFollowupReceipt, chatId, isCurrentChat, locale]);
   const pumpWorkFollowups = useCallback(async () => {
@@ -5219,8 +5219,8 @@ function ChatPage() {
                 clearWorkUncertainAdmission(chat.id, runId);
                 settleWorkFirstSend();
                 setSessionNotice(locale === "ko"
-                  ? "이 요청 ID의 실행 기록을 확인했습니다. 지시를 재전송하지 않았습니다."
-                  : "This request ID has a run record. The instruction was not resent.");
+                  ? "이 요청은 이미 실행된 것을 확인했습니다. 다시 보내지 않았습니다."
+                  : "This request had already run. It was not sent again.");
                 return true;
               }
             }
@@ -5341,8 +5341,8 @@ function ChatPage() {
                   text: admissionStatus === "rejected" || !requestDispatched
                     ? startFailureText(cause, locale, hadImages)
                     : locale === "ko"
-                      ? "요청의 실행 여부를 아직 확인할 수 없습니다. 중복 실행을 막기 위해 재전송하지 않았습니다."
-                      : "The request's execution is unresolved. It was not resent to avoid a duplicate run.",
+                      ? "요청이 실행됐는지 아직 확인하지 못했습니다. 같은 작업이 두 번 실행되지 않도록 다시 보내지 않았습니다. 다음에 보내면 앱이 이 요청부터 확인합니다."
+                      : "Could not confirm whether the request ran. It was not sent again, to avoid running it twice. Your next send checks this request first.",
                 }
               : msg,
           ),
@@ -7604,8 +7604,8 @@ function ChatPage() {
             <small>{intent.autoDeliveryPaused || ["held", "failed", "cancelled"].includes(workFollowupStates[intent.intentId] ?? "")
               ? (locale === "ko" ? "보관한 지시 · 검토 필요" : "Saved follow-up · review needed")
               : ["queued", "draining", "started"].includes(workFollowupStates[intent.intentId] ?? "")
-                ? (locale === "ko" ? "Main 접수 확인 · 로컬 보관" : "Main acceptance confirmed · local copy retained")
-                : (locale === "ko" ? "보관한 지시 · Main 접수 미확인" : "Saved follow-up · Main acceptance unconfirmed")}</small>
+                ? (locale === "ko" ? "전달됨 · 사본 보관 중" : "Delivered · copy kept")
+                : (locale === "ko" ? "보관한 지시 · 전달 확인 안 됨" : "Saved follow-up · delivery not confirmed")}</small>
             <p style={{ margin: "4px 0", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{parseChatFileMessage(intent.userPrompt).visibleText}</p>
             {!!intent.request.images?.length && <small>{locale === "ko" ? `이미지 ${intent.request.images.length}개 보관` : `${intent.request.images.length} saved image(s)`}</small>}
             <button type="button" className="btn" onClick={() => {

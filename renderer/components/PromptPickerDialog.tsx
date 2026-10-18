@@ -621,8 +621,8 @@ export function PromptPickerDialog({
                         <>
                           <span>
                             {ko
-                              ? "같은 열람 요청의 소유권과 본문을 아직 확인하지 못했습니다. 새 요청을 만들지 말고 같은 요청을 이어서 확인하세요."
-                              : "Ownership and the body for this open request are not confirmed yet. Resume the same request instead of creating another one."}
+                              ? "열람이 처리됐는지, 본문을 받았는지 아직 확인하지 못했습니다. 새로 열지 말고 ‘같은 요청 이어가기’를 눌러 주세요."
+                              : "Whether this open went through and its body arrived is not confirmed yet. Use “Resume same request” instead of opening it again."}
                           </span>
                           <button
                             type="button"

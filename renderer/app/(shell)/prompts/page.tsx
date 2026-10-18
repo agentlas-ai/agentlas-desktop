@@ -1052,7 +1052,7 @@ function PromptDetailDialog({
               <div style={{ display: "grid", gap: 8 }} role="alert">
                 <span style={{ fontSize: 12.5, color: "var(--rd-warn)", lineHeight: 1.5 }}>
                   {ko
-                    ? "맛보기 결과 미확인 · 저장된 요청 이어가기"
+                    ? "맛보기 결과를 아직 받지 못했습니다. 새로 요청하지 말고 같은 요청을 이어가세요."
                     : "The same taste request is saved, but its completed body is not confirmed yet. Resume this request; do not create another one."}
                 </span>
                 <button
@@ -1069,8 +1069,8 @@ function PromptDetailDialog({
               <div style={{ display: "grid", gap: 8 }} role="alert">
                 <span style={{ fontSize: 12.5, color: "var(--rd-warn)", lineHeight: 1.5 }}>
                   {ko
-                    ? "소유권·본문 미확인 · 저장된 요청 확인"
-                    : "Ownership and body unconfirmed · Check the saved request."}
+                    ? "열람 결과와 본문을 아직 받지 못했습니다. 새로 열지 말고 같은 요청을 이어가세요."
+                    : "The open result and body have not arrived yet. Resume the same request instead of opening it again."}
                 </span>
                 <button
                   type="button"

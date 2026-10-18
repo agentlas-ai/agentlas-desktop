@@ -1806,8 +1806,8 @@ function OneSessionsShell() {
         clearOneUncertainPreflightSteer(fence);
         setPreflightFenceStatus(null);
         setActionNotice(receipt.status === "held"
-          ? (appLocale === "ko" ? "추가 지시가 보류되었습니다. 작성한 글은 그대로이며 자동 재전송하지 않습니다."
-            : "The follow-up is held. Your draft remains and will not be resent automatically.")
+          ? (appLocale === "ko" ? "추가 지시를 전달하지 못했습니다. 작성한 글은 그대로이니 필요하면 다시 보내 주세요."
+            : "The follow-up was not delivered. Your draft is unchanged; send it again if you still need it.")
           : (appLocale === "ko" ? "추가 지시가 취소되었습니다. 작성한 글은 그대로입니다."
             : "The follow-up was cancelled. Your draft remains."));
       } else {
@@ -5930,8 +5930,8 @@ function OneSessionsShell() {
         });
       }
       setActionNotice(runLocale === "ko"
-        ? "이 요청 ID의 실행 기록을 확인했습니다. 지시를 재전송하지 않고 기록을 복원합니다."
-        : "A run with this request ID was found. Its record is being restored without resending the instruction.");
+        ? "이 요청은 이미 실행된 것을 확인했습니다. 다시 보내지 않고 그 기록을 불러옵니다."
+        : "This request had already run. Loading its record instead of sending it again.");
       return { status: "reconciled", runId: candidateRunId };
     };
     const unresolvedRunId = uncertainAdmissionRef.current.get(chatId) ?? readOneUncertainAdmission(chatId)?.runId;

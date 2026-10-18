@@ -540,7 +540,7 @@ export function ProjectAgentPicker({
                 >
                   <span aria-hidden="true">{sourceOpen ? "▾" : "›"}</span>
                   <strong>{ko ? section.labelKo : section.labelEn}</strong>
-                  <small aria-label={sourceFailed ? (ko ? "소스 목록 수 미확인" : "Source count unknown") : undefined}>{sourceFailed ? "—" : sectionCount}</small>
+                  <small aria-label={sourceFailed ? (ko ? "목록 개수를 불러오지 못함" : "Source count unknown") : undefined}>{sourceFailed ? "—" : sectionCount}</small>
                 </button>
                 {sourceOpen ? (
                   <div id={sourcePanelId}>

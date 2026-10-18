@@ -80,7 +80,7 @@ export function McpKeyRequestSheet({
       const result=await ipc()?.oneVault.runKeyStatus({runId:request.runId});
       if(captured!==generation.current)return;
       if(result?.state==='saved')onResolved('provided');
-      else setError(result?.state==='store_unknown'?(ko?'저장 결과가 미확인입니다. 같은 작업 상태를 확인해 주세요.':'The save result is unknown. Reconcile the same operation.'):(ko?'현재 요청의 저장 receipt를 확인하지 못했습니다.':'A saved receipt for this request was not verified.'));
+      else setError(result?.state==='store_unknown'?(ko?'저장됐는지 아직 확인하지 못했습니다. 잠시 뒤 ‘저장 결과 확인’을 다시 눌러 주세요.':'Not confirmed as saved yet. Press “Check save result” again in a moment.'):(ko?'이 요청으로 저장된 키를 아직 찾지 못했습니다.':'No saved key was found for this request yet.'));
     } catch {if(captured!==generation.current)return;setError(ko?'현재 저장 상태를 확인할 수 없습니다.':'Current save status is unavailable.');}
     finally {if(captured===generation.current)setBusy(false);}
   };
@@ -163,7 +163,7 @@ export function McpKeyRequestSheet({
             data-testid="mcp-key-save"
           >
             <IconLock size={15} />
-            {ko ? "저장 결과 확인" : "Check save receipt"}
+            {ko ? "저장 결과 확인" : "Check save result"}
           </button>
         </div>
       </div>

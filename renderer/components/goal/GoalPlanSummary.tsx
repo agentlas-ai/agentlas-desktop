@@ -51,7 +51,7 @@ export function GoalPlanSummary({ plan, locale, variant = "inline" }: {
     if (branch.reasonCodes.includes("deferred")) return ko ? "예정 시각까지 실행 대기 · 관찰 가능" : "Execution deferred · inspection available";
     if (branch.reasonCodes.includes("boundary_hold")) return ko ? "경계 판단 대기 · 관찰 가능" : "Boundary hold · inspection available";
     if (branch.prerequisiteState === "unmet") return ko ? "선행조건 미충족" : "Prerequisite unmet";
-    if (branch.prerequisiteState === "unknown") return ko ? "선행조건 미확인" : "Prerequisites unknown";
+    if (branch.prerequisiteState === "unknown") return ko ? "선행조건 확인 안 됨" : "Prerequisites unknown";
     return ko ? "계획 선행조건 충족" : "Plan prerequisites met";
   };
   const current = plan.currentTactic
