@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { applyFinanceOperations, createFinanceReport, financeId, FINANCE_WORKSPACE_LIMITS, validateFinanceOperation, validateFinanceWorkspace, type FinanceAIResult, type FinanceDataRequest, type FinanceDataResult, type FinanceDataSaveRequest, type FinanceDataSaveResult, type FinanceMonitor, type FinanceMonitorRun, type FinanceOperation, type FinanceReport, type FinanceSource, type FinanceWorkspace, type FinanceArchiveRequest, type FinanceArchiveResult, type FinanceArchiveItem, type FinanceMonitorRunsRequest, type FinanceMonitorRunsResult } from "../../shared/finance";
+import { applyFinanceOperations, FinanceDataSaveRequestSchema, createFinanceReport, financeId, FINANCE_WORKSPACE_LIMITS, validateFinanceOperation, validateFinanceWorkspace, type FinanceAIResult, type FinanceDataRequest, type FinanceDataResult, type FinanceDataSaveRequest, type FinanceDataSaveResult, type FinanceMonitor, type FinanceMonitorRun, type FinanceOperation, type FinanceReport, type FinanceSource, type FinanceWorkspace, type FinanceArchiveRequest, type FinanceArchiveResult, type FinanceArchiveItem, type FinanceMonitorRunsRequest, type FinanceMonitorRunsResult } from "../../shared/finance";
 import { userDataPath } from "../runtime-paths";
 import { FinanceStore, type FinanceScope } from "./store";
 import { queryFinanceData, refreshFinanceQuotes, searchFinanceAssets } from "./data";
@@ -137,12 +137,33 @@ export class FinanceService {
   }
   async search(scope: FinanceScope,input:{query:string}) { const route={...await this.experience.consent(scope),assertCurrent:()=>scope.assertCurrent()};scope.assertCurrent();const result=await searchFinanceAssets(input.query,route);scope.assertCurrent();return result; }
   async query(scope: FinanceScope,input:FinanceDataRequest) { const workspace=await this.store.load(scope);const route={...await this.experience.consent(scope),assertCurrent:()=>scope.assertCurrent()};scope.assertCurrent();const result=await queryFinanceData(input,workspace.watchlist,route);scope.assertCurrent();return result; }
-  async queryAndSave(scope:FinanceScope,input:FinanceDataSaveRequest):Promise<FinanceDataSaveResult> {
-    const before=await this.store.load(scope);if(input.expectedRevision!==undefined && before.revision!==input.expectedRevision)throw new Error("finance_revision_conflict");
-    const route={...await this.experience.consent(scope),assertCurrent:()=>scope.assertCurrent()};scope.assertCurrent();const result=await queryFinanceData(input,before.watchlist,route);scope.assertCurrent();
-    const batch=dataOperations(result,before,input.title||input.query||"Finance 자료",input.mode==="report");
+  async queryAndSave(scope:FinanceScope,input:FinanceDataSaveRequest,signal?:AbortSignal):Promise<FinanceDataSaveResult> {
+    const parsed=FinanceDataSaveRequestSchema.safeParse(input);if(!parsed.success)throw new Error("finance_arguments_invalid");input=parsed.data;
+    const savingScope:FinanceScope={...scope,assertCurrent(){scope.assertCurrent();if(signal?.aborted)throw new Error("finance_query_cancelled");}};
+    savingScope.assertCurrent();const before=await this.store.load(savingScope);savingScope.assertCurrent();
+    if(input.expectedRevision!==undefined&&before.revision!==input.expectedRevision)throw new Error("finance_revision_conflict");
+    const target=input.reportId===undefined?undefined:before.reports.find(report=>report.id===input.reportId);
+    if(input.reportId!==undefined&&!target)throw new Error("finance_report_not_found");
+    const route={...await this.experience.consent(savingScope),signal,assertCurrent:()=>savingScope.assertCurrent()};savingScope.assertCurrent();
+    const request:FinanceDataRequest={query:input.query,assetIds:input.assetIds,metrics:input.metrics,period:input.period};
+    const result=await queryFinanceData(request,before.watchlist,route);savingScope.assertCurrent();
+    const batch=dataOperations(result,before,target?.title||input.title||input.query||"Finance 자료",input.mode==="report");
+    if(target){
+      const observed=batch.operations.find(operation=>operation.type==="report.add");if(observed?.type!=="report.add")throw new Error("finance_data_not_available");
+      const sections=structuredClone(observed.report.sections).map(section=>({...section,presentation:"supporting" as const}));
+      const operations=batch.operations.filter(operation=>operation.type!=="report.add");
+      const workspace=await this.store.transaction(savingScope,before.revision,current=>{
+        savingScope.assertCurrent();const report=current.reports.find(item=>item.id===target.id);if(!report)throw new Error("finance_report_not_found");
+        assertWorkspaceCapacity(current,operations);
+        const next=applyFinanceOperations(current,operations),updated=next.reports.find(item=>item.id===target.id)!;
+        updated.sections.push(...sections);updated.reviewPending=true;
+        return validateFinanceWorkspace(next);
+      });
+      // The evidence is committed; a subsequent abort must not invite a duplicate append.
+      scope.assertCurrent();return {dashboardActions:financeReportDashboardActions(workspace,target.id),workspace,sourceIds:batch.sourceIds,reportId:target.id,message:`조회 자료와 출처를 기존 보고서의 판본 ${workspace.revision}에 추가했습니다. 본문은 유지되며 새 근거 검토가 필요합니다.`};
+    }
     if(batch.reportId){const added=batch.operations.find(operation=>operation.type==="report.add");if(added?.type==="report.add")added.report.sections.unshift({id:financeId("section"),title:added.report.title,kind:"summary",presentation:"narrative",narrative:"",widget:null,projection:null});}
-    const workspace=await this.apply(scope,{operations:batch.operations,expectedRevision:before.revision});
+    const workspace=await this.apply(savingScope,{operations:batch.operations,expectedRevision:before.revision});
     scope.assertCurrent();
     return {...(batch.reportId?{dashboardActions:financeReportDashboardActions(workspace,batch.reportId)}:{}),workspace,sourceIds:batch.sourceIds,...(batch.reportId?{reportId:batch.reportId}:{}),message:batch.reportId?`조회 자료와 출처를 판본 ${workspace.revision}의 보고서 초안에 저장했습니다. 요약은 아직 작성되지 않았습니다.`:`조회 자료와 출처를 판본 ${workspace.revision}에 저장했습니다.`};
   }

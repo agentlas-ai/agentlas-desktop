@@ -39,7 +39,7 @@ export function financeReportHasChart(section:FinanceReportSection):boolean {
 }
 export function selectFinanceReportSections(report:FinanceReport):FinanceReportSection[] {
  const hasComputeMain=report.sections.some(section=>section.kind!=='sources'&&section.presentation!=='supporting'&&/^compute:(allocation:weights|forecast:fan|option:value)$/.test(section.widget?.metric??'')&&financeReportHasChart(section));
- return report.sections.filter(raw=>{const section=raw as PresentedSection;if(section.presentation==='supporting')return false;if(section.presentation)return section.kind!=='sources'&&['narrative','chart','comparison'].includes(section.presentation);if(hasComputeMain&&section.kind==='sources')return false;if(section.kind==='sources'&&['계산 입력','원출처와 조회 시각','가정과 방법','Calculation inputs','Source URLs and retrieval time','Assumptions and method'].includes(section.title))return false;if(financeReportHasChart(section))return true;if(section.kind==='sources')return false;return !!section.narrative.trim();});}
+ return report.sections.filter(raw=>{const section=raw as PresentedSection;if(section.presentation==='supporting')return false;if(section.presentation==='narrative')return !!section.narrative.trim();if(section.presentation)return section.kind!=='sources'&&['chart','comparison'].includes(section.presentation);if(hasComputeMain&&section.kind==='sources')return false;if(section.kind==='sources'&&['계산 입력','원출처와 조회 시각','가정과 방법','Calculation inputs','Source URLs and retrieval time','Assumptions and method'].includes(section.title))return false;if(financeReportHasChart(section))return true;if(section.kind==='sources')return false;return !!section.narrative.trim();});}
 export function financeReportNumber(value:number,locale='en'):string {if(!Number.isFinite(value))return '—';return new Intl.NumberFormat(canonical(locale)??'en',Math.abs(value)>=10000?{notation:'compact',maximumFractionDigits:2}:value!==0&&Math.abs(value)<.01?{maximumSignificantDigits:2}:{maximumFractionDigits:2}).format(value);}
 function escape(value:unknown):string {return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]!));}
 function link(value:string):string|null {try{const url=new URL(value);return url.protocol==='https:'&&!url.username&&!url.password&&value.length<=2000?url.href:null;}catch{return null;}}
@@ -56,8 +56,12 @@ export function financeReportIsMetadataLine(value:string):boolean {
  if(match[1]==='sourceRevision')return /^\d+$/.test(match[2]);
  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(match[2])&&Number.isFinite(Date.parse(match[2]));
 }
+/** Reading copy only: the exact app document wrapper and empty comments carry no prose. */
+export function financeReportReadingProse(value:string):string {
+ return value.replace(/<!--\s*-->/g,'').replace(/^\uFEFF?[ \t]*(?:\r?\n[ \t]*)*---[ \t]*\r?\n[ \t]*document:[ \t]*([^\r\n]+)\r?\n[ \t]*---[ \t]*(?:\r?\n|$)/,(wrapper,title:string)=>title.trim()?'':wrapper);
+}
 export function financeReportProseHtml(value:string):string {
- const lines=value.slice(0,20000).replace(/\r\n?/g,'\n').split('\n');let html='',paragraph:string[]=[],list:'ul'|'ol'|null=null,fenced=false;
+ const lines=financeReportReadingProse(value).slice(0,20000).replace(/\r\n?/g,'\n').split('\n');let html='',paragraph:string[]=[],list:'ul'|'ol'|null=null,fenced=false;
  const flush=()=>{if(paragraph.length){html+='<p>'+inline(paragraph.join(' '))+'</p>';paragraph=[];}};
  const close=()=>{if(list){html+='</'+list+'>';list=null;}};
  for(const line of lines){if(/^\s*```/.test(line)){flush();close();fenced=!fenced;continue;}if(fenced||/^\s*(?:\[row\s+\d+\]\s*)+$/i.test(line)||/^\s*\|.*\|\s*$/.test(line)||financeReportIsMetadataLine(line))continue;const heading=/^\s{0,3}(#{1,3})\s+(.+)$/.exec(line),bullet=/^\s*([-*+]|\d+\.)\s+(.+)$/.exec(line);

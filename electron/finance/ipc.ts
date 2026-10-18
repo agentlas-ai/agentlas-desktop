@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { validateFinanceWorkspace, type FinanceWorkspace } from '../../shared/finance';
+import { validateFinanceWorkspace, FinanceDataSaveRequestSchema, type FinanceWorkspace } from '../../shared/finance';
 import { getAuthenticatedSessionBinding, onAuthSessionOwnershipChanged } from '../auth';
 import { userDataPath } from '../runtime-paths';
 import { createWorkStart } from '../work-start';
@@ -104,7 +104,7 @@ export function registerFinanceIpc(input: { ipc: Pick<IpcMain, 'handle'>; assert
     if(action==='scheduleMonitor')return service.schedule(scope,z.object({monitorId:boundedId,scheduleHuman:z.enum(['daily-09:00','weekday-09:00','hourly','every-5m'])}).strict().parse(raw));
     return service.pause(scope,z.object({monitorId:boundedId}).strict().parse(raw));
   });
-  handle('queryAndSave',async(_event,raw,scope)=>{await requireFinanceConsent(scope);return service.queryAndSave(scope,z.object({query:z.string().max(2000),assetIds:z.array(boundedId).max(10),metrics:z.array(z.string().max(80)).max(10),period:z.string().max(80),expectedRevision:z.number().int().nonnegative().optional(),mode:z.enum(['sources','report']),title:z.string().min(1).max(300).optional()}).strict().parse(raw));});
+  handle('queryAndSave',async(_event,raw,scope)=>{await requireFinanceConsent(scope);return service.queryAndSave(scope,FinanceDataSaveRequestSchema.parse(raw));});
   handle('runMonitor',async(_event,raw,scope)=>service.runMonitor(scope,z.object({monitorId:boundedId}).strict().parse(raw)));
   handle('monitorRuns',async(_event,raw,scope)=>service.monitorRuns(scope,z.object({monitorId:boundedId,cursor:z.string().min(1).max(2000).optional(),limit:z.number().int().min(1).max(50).optional()}).strict().parse(raw)));
   handle('archives',async(_event,raw,scope)=>service.archives(scope,FinanceArchiveRequestSchema.parse(raw)));

@@ -94,7 +94,12 @@ export interface FinanceMonitorRun {
   startedAt: string; finishedAt: string | null; reportId: string | null;
   summary: string; warnings: string[]; error: string | null; sourceRevision: number;
 }
-export interface FinanceDataSaveRequest extends FinanceDataRequest { expectedRevision?: number; mode: "sources" | "report"; title?: string }
+export interface FinanceDataSaveRequest extends FinanceDataRequest { expectedRevision?: number; mode: "sources" | "report"; title?: string; reportId?: string }
+/** An existing report is an explicit CAS append target, never an implicit new report. */
+export const FinanceDataSaveRequestSchema = z.object({
+  query: z.string().max(2000), assetIds: z.array(id).max(10), metrics: z.array(z.string().min(1).max(80)).min(1).max(10), period: z.string().min(1).max(80),
+  expectedRevision: z.number().int().nonnegative().optional(), mode: z.enum(["sources", "report"]), title: z.string().min(1).max(300).optional(), reportId: id.refine(value=>!!value.trim()).optional(),
+}).strict().refine(value=>value.reportId===undefined||(value.mode==="report"&&value.expectedRevision!==undefined), "An existing report requires report mode and expectedRevision");
 export interface FinanceDataSaveResult {
   workspace: FinanceWorkspace; reportId?: string; sourceIds: string[]; message: string;
   dashboardActions?: { expectedRevision: number; sections: { sectionId: string; operations: FinanceOperation[] }[] };

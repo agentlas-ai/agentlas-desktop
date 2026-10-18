@@ -3,7 +3,7 @@ import { Fragment, type ReactNode } from "react";
 import type { FinanceDataResult, FinanceReport, FinanceReportSection } from "@shared/finance";
 import { financeComputeSpec } from "./FinanceComputeView";
 import { financeDataVisual, financeMetricForColumns } from "./FinanceDataResultView";
-import { financeReportLocale, financeReportDirection, financeReportSectionTitle, financeReportTitle, selectFinanceReportSections, financeReportHtml, financeReportNumber, financeReportIsMetadataLine } from "@shared/finance-report-presentation";
+import { financeReportLocale, financeReportDirection, financeReportSectionTitle, financeReportTitle, selectFinanceReportSections, financeReportHtml, financeReportNumber, financeReportIsMetadataLine, financeReportReadingProse } from "@shared/finance-report-presentation";
 import { sanitizeChartSpec } from "@/lib/chart-spec";
 import { ChartBlock } from "@/components/ChartBlock";
 import styles from "./FinanceReportView.module.css";
@@ -22,7 +22,7 @@ function inline(value:string):ReactNode[] {
 export function FinanceReportProse({value}:{value:string}) {
  const blocks:ReactNode[]=[];let paragraph:string[]=[],fenced=false;
  const flush=()=>{if(paragraph.length){blocks.push(<p key={blocks.length}>{inline(paragraph.join(" "))}</p>);paragraph=[];}};
- for(const line of value.split(/\r?\n/)){
+ for(const line of financeReportReadingProse(value).split(/\r?\n/)){
   if(/^\s*```/.test(line)){flush();fenced=!fenced;continue;}if(fenced)continue;
   if(/^\s*(?:\[row\s+\d+\]\s*)+$/i.test(line)){flush();continue;}
   if(/^\s*\|.*\|\s*$/.test(line)||financeReportIsMetadataLine(line))continue;
@@ -77,9 +77,9 @@ export function FinanceReportView({report,locale="en",explicitTableSectionIds=[]
   const visual=result&&metric?financeDataVisual(result,metric):null;
   const chart=!tables.has(section.id)&&section.presentation!=="narrative"&&(computation||!!visual&&visual.kind!=="table");
   if(section.presentation==="supporting")return [];
-  if(section.kind==="sources"&&!chart&&!tables.has(section.id))return [];
+  if(section.kind==="sources"&&section.presentation!=="narrative"&&!chart&&!tables.has(section.id))return [];
   if(!section.narrative.trim()&&!chart&&!tables.has(section.id))return [];
-  return [{section,result,chart,spec,table:tables.has(section.id)}];
+  return [{section,result,chart,spec,table:tables.has(section.id)&&section.presentation!=="narrative"}];
  });
  const lead=sections.filter(item=>!item.chart&&item.section.kind==="summary");
  const ordered=[...lead,...sections.filter(item=>item.chart),...sections.filter(item=>!item.chart&&item.section.kind!=="summary")];
@@ -92,7 +92,7 @@ export function FinanceReportView({report,locale="en",explicitTableSectionIds=[]
 
 /** Standalone local chart export: deny every loader route and always release each Vega view. */
 export async function financeReportExportHtml(report:FinanceReport,locale?:string,explicitTableSectionIds:readonly string[]=[]):Promise<string> {
- if(explicitTableSectionIds.length){const tables=new Set(explicitTableSectionIds);report={...report,sections:report.sections.map(section=>tables.has(section.id)&&section.presentation!=="supporting"?{...section,presentation:"comparison"}:section)};}
+ if(explicitTableSectionIds.length){const tables=new Set(explicitTableSectionIds);report={...report,sections:report.sections.map(section=>tables.has(section.id)&&section.presentation!=="supporting"&&section.presentation!=="narrative"?{...section,presentation:"comparison"}:section)};}
  const language=financeReportLocale(report,locale),charts:Record<string,string>={};
  const candidates=selectFinanceReportSections(report).filter(section=>section.presentation!=="narrative"&&section.presentation!=="comparison").map(section=>({section,spec:financeReportChartSpec(section)})).filter(item=>!!item.spec);
  if(candidates.length){const [vl,vega,interpreter]=await Promise.all([import("vega-lite"),import("vega"),import("vega-interpreter")]);

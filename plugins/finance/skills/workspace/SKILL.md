@@ -11,6 +11,8 @@ Widget period can inherit the dashboard period or remain pinned; preserve that d
 
 `finance.report.create` freezes an existing dashboard using the host snapshot. `finance.report.read` inspects that saved snapshot. `finance.apply` can change report titles or section prose, reorder/remove sections, or explicitly refresh a report using its saved widget configuration and current stored data. Refresh creates a new report revision rather than silently changing evidence in the old report. Prose edits stay pending owner review. Explain any gap between a saved narrative and newer source observations.
 
+To ground an existing report in another dataset, use `finance.query.save` with its active `reportId`, `mode: "report"` and current `expectedRevision` before revising the summary. This appends host-retrieved supporting sections while preserving existing sections, numerical projections and source bindings. Attach every dataset used in the prose to the report; a standalone source record does not freeze its data inside that report.
+
 Set the requested BCP47 `language` when creating a report, or in a `report.update` patch when rewriting one. Write titles, headings and prose naturally in that language. Section `presentation` selects `narrative`, `chart`, an explicitly requested `comparison`, or `supporting` material. Keep original numerical projections intact. Favor a short conclusion and a relevant chart; a chart does not need its raw table repeated underneath. Use `finance.calculate` for validated allocation, historical scenarios and option calculations, with localized titles and interpretation in its optional presentation fields.
 
 # Verification

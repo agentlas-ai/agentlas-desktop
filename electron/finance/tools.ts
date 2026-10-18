@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { FINANCE_WIDGET_TYPES, FINANCE_MONITOR_RUN_TIMEOUT_MS, FinanceReportLanguageSchema, financeId, validateFinanceOperation, type FinanceOperation } from '../../shared/finance';
+import { FINANCE_WIDGET_TYPES, FINANCE_MONITOR_RUN_TIMEOUT_MS, FinanceReportLanguageSchema, FinanceDataSaveRequestSchema, financeId, validateFinanceOperation, type FinanceOperation } from '../../shared/finance';
 import type { HarnessCallContext } from '../harness/capability-ports';
 import { FinanceReceiptReadSchema, FINANCE_RECEIPT_GROUPS, financeReceiptStore, type FinanceReceiptReference } from './receipts';
 import { composeDeclaredPrompt, registerDeclaredPromptModule } from '../runtime/prompt-order';
@@ -18,7 +18,7 @@ const inputSchemas = {
   calculate:z.object({request:FinanceComputeRequestSchema,period:z.enum(['1M','3M','1Y','5Y','all']).optional(),title:z.string().min(1).max(300).optional(),language:FinanceReportLanguageSchema.optional(),narrative:z.string().max(6000).optional(),chartTitle:z.string().min(1).max(300).optional(),metricsTitle:z.string().min(1).max(300).optional(),metricLabels:z.record(z.string().max(80),z.string().min(1).max(120)).refine(value=>Object.keys(value).length<=16).optional(),highlightMetricIds:z.array(z.string().min(1).max(80)).max(8).optional()}).strict(),
   'asset.add': z.object({ query: z.string().min(1).max(200), symbol: z.string().min(1).max(80).optional() }).strict(),
   query: z.object(queryShape).strict(),
-  'query.save': z.object({ ...queryShape, mode: z.enum(['sources', 'report']), title: z.string().min(1).max(300).optional(), expectedRevision: revision.optional() }).strict(),
+  'query.save': FinanceDataSaveRequestSchema,
   apply: z.object({ operations: z.array(z.unknown()).min(1).max(40), expectedRevision: revision }).strict(),
   'report.create': z.object({ dashboardId: id.optional(), title: z.string().min(1).max(300).optional(), language: FinanceReportLanguageSchema.optional() }).strict(),
   'report.read': z.object({ reportId: id }).strict(),
@@ -69,7 +69,7 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
       case 'calculate':data=await finance.calculate(scope,inputSchemas.calculate.parse(raw),ctx.signal);break;
       case 'asset.add': data = await finance.addAsset(scope, inputSchemas['asset.add'].parse(raw)); break;
       case 'query': data = await finance.query(scope, inputSchemas.query.parse(raw)); break;
-      case 'query.save': data = await finance.queryAndSave(scope, inputSchemas['query.save'].parse(raw)); break;
+      case 'query.save': data = await finance.queryAndSave(scope, inputSchemas['query.save'].parse(raw), ctx.signal); break;
       case 'apply': {
         const args = inputSchemas.apply.parse(raw);
         data = await finance.apply(scope, { operations: financePluginOperations(args.operations), expectedRevision: args.expectedRevision }); break;
@@ -152,7 +152,7 @@ const descriptors: { action: Action; purpose: string; required: string[]; inputS
   { action: 'search', purpose: 'Search actual provider asset metadata; returns coverage and connection warnings.', required: ['query'], inputSchema: schema(['query'], { query: text }) },
   { action: 'asset.add', purpose: 'Resolve one asset against the provider and persist it in the Finance watchlist.', required: ['query'], inputSchema: schema(['query'], { query: text, symbol: text }) },
   { action: 'query', purpose: 'Retrieve source data for saved assets, with observation times, provenance and coverage gaps.', required: ['query', 'assetIds', 'metrics', 'period'], inputSchema: schema(['query', 'assetIds', 'metrics', 'period'], queryProperties) },
-  { action: 'query.save', purpose: 'Retrieve source data and save evidence or a frozen report in Finance.', required: ['query', 'assetIds', 'metrics', 'period', 'mode'], inputSchema: schema(['query', 'assetIds', 'metrics', 'period', 'mode'], { ...queryProperties, mode: { enum: ['sources', 'report'] }, title: text, expectedRevision: rev }) },
+  { action: 'query.save', purpose: 'Retrieve source data and save evidence or a frozen report in Finance. With reportId, append host-retrieved supporting evidence to that active report while preserving its existing prose and data; report mode and the current expectedRevision are required.', required: ['query', 'assetIds', 'metrics', 'period', 'mode'], inputSchema: { ...schema(['query', 'assetIds', 'metrics', 'period', 'mode'], { ...queryProperties, mode: { enum: ['sources', 'report'] }, title: text, expectedRevision: rev, reportId: { ...key, pattern: '\\S' } }), allOf: [{ if: { required: ['reportId'] }, then: { required: ['expectedRevision'], properties: { mode: { const: 'report' } } } }] } },
   { action: 'apply', purpose: 'Apply canonical dashboard/widget edits or draft report text at an expected Finance revision; provider data and reviewed status are host-owned.', required: ['operations', 'expectedRevision'], inputSchema: schema(['operations', 'expectedRevision'], { expectedRevision: rev, operations: { type: 'array', minItems: 1, maxItems: 40, items: editSchema } }) },
   { action: 'report.create', purpose: 'Freeze an existing Finance dashboard into a host-generated report snapshot.', required: [], inputSchema: schema([], { dashboardId: key, title: text, language:reportLanguage }) },
   { action: 'report.read', purpose: 'Read a saved Finance report and its evidence without refreshing its snapshot.', required: ['reportId'], inputSchema: schema(['reportId'], { reportId: key }) },
@@ -168,16 +168,16 @@ const descriptors: { action: Action; purpose: string; required: string[]; inputS
   { action: 'monitor.pause', purpose: 'Pause future executions of the bound Finance monitor without requiring a view revision.', required: ['monitorId'], inputSchema: schema(['monitorId'], { monitorId: key }) },
 ];
 export const FINANCE_PORTS = descriptors.map(({ action, purpose, required, inputSchema }) => {
-  composeDeclaredPrompt([{ id: `tool.finance.${action}.schema`, revision: ['calculate','apply','report.create'].includes(action)?2:1, stability: 'versioned-content', changeTriggers: ['release', 'output-schema'], text: JSON.stringify(inputSchema) }]);
+  composeDeclaredPrompt([{ id: `tool.finance.${action}.schema`, revision: ['calculate','apply','report.create','query.save'].includes(action)?2:1, stability: 'versioned-content', changeTriggers: ['release', 'output-schema'], text: JSON.stringify(inputSchema) }]);
   return { operationId: `finance.${action}`, kind: writes.has(action) ? 'command' as const : 'query' as const, required, inputSchema,
     ...(action === 'monitor.pause' ? { terminalTargetKeys: ['monitorId'] as const } : {}),
-    purpose: composeDeclaredPrompt([{ id: `tool.finance.${action}.description`, revision: 1, stability: 'fixed-policy', changeTriggers: ['release'], text: purpose }]),
+    purpose: composeDeclaredPrompt([{ id: `tool.finance.${action}.description`, revision: action === 'query.save' ? 2 : 1, stability: 'fixed-policy', changeTriggers: ['release'], text: purpose }]),
     handler: (args: Record<string, unknown>, ctx: HarnessCallContext) => callFinanceTool(action, args, ctx) };
 });
-for (const workflow of ['index', 'research', 'workspace', 'monitor']) registerDeclaredPromptModule({ id: `plugin.finance.skill.${workflow}`, revision: workflow === 'monitor' ? 3 : 2, stability: 'versioned-content', changeTriggers: ['release', 'skill-package'] });
+for (const workflow of ['index', 'research', 'workspace', 'monitor']) registerDeclaredPromptModule({ id: `plugin.finance.skill.${workflow}`, revision: ['research','workspace','monitor'].includes(workflow) ? 3 : 2, stability: 'versioned-content', changeTriggers: ['release', 'skill-package'] });
 
 /** Preserve the installed bytes and their hash while declaring the actual skill tool-result channel. */
 export function composeFinanceSkillContent(skillId: string, content: string): string {
   const workflow = ['index', 'research', 'workspace', 'monitor'].find(name => skillId === `plugin:finance/${name}`);
-  return workflow ? composeDeclaredPrompt([{ id: `plugin.finance.skill.${workflow}`, revision: workflow === 'monitor' ? 3 : 2, stability: 'versioned-content', changeTriggers: ['release', 'skill-package'], text: content }]) : content;
+  return workflow ? composeDeclaredPrompt([{ id: `plugin.finance.skill.${workflow}`, revision: ['research','workspace','monitor'].includes(workflow) ? 3 : 2, stability: 'versioned-content', changeTriggers: ['release', 'skill-package'], text: content }]) : content;
 }
