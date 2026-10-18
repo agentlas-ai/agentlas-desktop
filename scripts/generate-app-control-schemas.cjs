@@ -135,6 +135,12 @@ function generateAppControlSchemas({ root, operations, check, outputDirectory = 
   };
   const host = ts.createCompilerHost(options);
   host.getCurrentDirectory = () => root;
+  const scienceDeclarationPaths = new Set((pinned.science?.files ?? []).flatMap(name => {
+    const file = path.resolve(pinned.science.packageDir, name);
+    return [file, fs.realpathSync(file)].map(value => host.getCanonicalFileName(slash(value)));
+  }));
+  const isScienceDeclaration = file => typeof file === "string"
+    && scienceDeclarationPaths.has(host.getCanonicalFileName(slash(path.resolve(file))));
   if (pinned.rebuilt) {
     // "agentlas-science" resolves to the rebuilt package; its own bare imports (better-sqlite3, node:*) resolve as they
     // would from node_modules/agentlas-science, so the pinned declarations see the same dependencies as in a clean clone.
@@ -179,10 +185,49 @@ function generateAppControlSchemas({ root, operations, check, outputDirectory = 
     const members = next.types.map(member => [printed(member), member]).sort((a, b) => byText(a[0], b[0])).map(([, member]) => member);
     return ts.factory.updateUnionTypeNode(next, ts.factory.createNodeArray(members));
   };
+  function sourceOrderedDescription(type, node) {
+    if (!type || !node) return node;
+    if (ts.isTypeReferenceNode(node) && node.typeArguments?.length) {
+      const arguments_ = type.aliasTypeArguments ?? (type.objectFlags & ts.ObjectFlags.Reference ? checker.getTypeArguments(type) : []);
+      if (arguments_.length === node.typeArguments.length) {
+        return ts.factory.updateTypeReferenceNode(node, node.typeName,
+          node.typeArguments.map((argument, index) => sourceOrderedDescription(arguments_[index], argument)));
+      }
+    }
+    if (ts.isArrayTypeNode(node) && checker.isArrayType(type)) {
+      return ts.factory.updateArrayTypeNode(node, sourceOrderedDescription(checker.getTypeArguments(type)[0], node.elementType));
+    }
+    if (ts.isUnionTypeNode(node) && type.isUnion()) {
+      const parts = new Map(type.types.map(part => {
+        const value = checker.typeToTypeNode(part, undefined, ts.NodeBuilderFlags.AllowUniqueESSymbolType | ts.NodeBuilderFlags.UseAliasDefinedOutsideCurrentScope
+          | ts.NodeBuilderFlags.IgnoreErrors | ts.NodeBuilderFlags.NoTruncation);
+        return [value && printed(value), part];
+      }));
+      return ts.factory.updateUnionTypeNode(node, node.types.map(part => sourceOrderedDescription(parts.get(printed(part)), part)));
+    }
+    if (!ts.isTypeLiteralNode(node) || !node.members.every(ts.isPropertySignature)) return node;
+    const fields = checker.getPropertiesOfType(type), byName = new Map(fields.map(field => [fieldName(field), field]));
+    const nameOf = member => ts.isIdentifier(member.name) || ts.isStringLiteral(member.name) || ts.isNumericLiteral(member.name) ? member.name.text : null;
+    if (node.members.some(member => !byName.has(nameOf(member)))) return node;
+    let members = node.members.map(member => {
+      const field = byName.get(nameOf(member)), declaration = field.valueDeclaration ?? field.declarations?.[0] ?? ipc;
+      return ts.factory.updatePropertySignature(member, member.modifiers, member.name, member.questionToken,
+        sourceOrderedDescription(checker.getTypeOfSymbolAtLocation(field, declaration), member.type));
+    });
+    const mappedFromObject = fields.length === members.length && fields.every(field => {
+      const declaration = field.valueDeclaration ?? field.declarations?.[0];
+      return declaration && (ts.isPropertyAssignment(declaration) || ts.isShorthandPropertyAssignment(declaration));
+    });
+    if (mappedFromObject) {
+      const order = new Map(sourceOrdered(fields).map((field, index) => [fieldName(field), index]));
+      members = members.sort((a, b) => order.get(nameOf(a)) - order.get(nameOf(b)));
+    }
+    return ts.factory.updateTypeLiteralNode(node, ts.factory.createNodeArray(members));
+  }
   const describe = type => {
     const node = checker.typeToTypeNode(type, undefined, ts.NodeBuilderFlags.AllowUniqueESSymbolType | ts.NodeBuilderFlags.UseAliasDefinedOutsideCurrentScope
       | ts.NodeBuilderFlags.IgnoreErrors | ts.NodeBuilderFlags.NoTruncation);
-    const text = node ? printed(ts.transform(node, [sortUnions]).transformed[0]) : checker.typeToString(type);
+    const text = node ? printed(ts.transform(sourceOrderedDescription(type, node), [sortUnions]).transformed[0]) : checker.typeToString(type);
     return text.replace(/import\("[^\"]*"\)\./g, "").slice(0, 160);
   };
   // A symbol-keyed member's checker name embeds the symbol's id (__@iterator@97); its source name is stable.
@@ -411,11 +456,12 @@ function generateAppControlSchemas({ root, operations, check, outputDirectory = 
           argument = unwrap(argument);
           // Prefer the SDK's accepted parameter over a widened untrusted cast.
           const predicate = signature && checker.getTypePredicateOfSignature(signature);
-          if (raw(argument) && predicate?.type && /\/(?:electron|shared)\/|\/node_modules\/agentlas-science\//.test(signature.declaration?.getSourceFile().fileName ?? "")) candidates.push(predicate.type);
+          if (raw(argument) && predicate?.type && (/\/(?:electron|shared)\//.test(signature.declaration?.getSourceFile().fileName ?? "")
+            || isScienceDeclaration(signature.declaration?.getSourceFile().fileName))) candidates.push(predicate.type);
           const parameter = signature?.parameters[index];
           const declaration = parameter?.valueDeclaration ?? parameter?.declarations?.[0];
           const source = declaration?.getSourceFile().fileName ?? "";
-          if (source.includes("/node_modules/agentlas-science/") && raw(argument)) {
+          if (isScienceDeclaration(source) && raw(argument)) {
             const parameterType = checker.getTypeOfSymbolAtLocation(parameter, declaration);
             const returned = checker.getReturnTypeOfSignature(signature);
             if (parameterType.flags & (flags.Any | flags.Unknown) && checker.getPropertiesOfType(returned).length) candidates.push(returned);
@@ -424,7 +470,7 @@ function generateAppControlSchemas({ root, operations, check, outputDirectory = 
           const daemonClientInput = source.endsWith("/electron/science-host/daemon-client.ts")
             && argument && ts.isObjectLiteralExpression(argument) && acceptedType && !fieldType(acceptedType, "op");
           if (!daemonClientInput && (!argument || !ts.isIdentifier(argument) || !raw(argument))) return;
-          if (source.includes("/node_modules/agentlas-science/") || daemonClientInput) {
+          if (isScienceDeclaration(source) || daemonClientInput) {
             const type = checker.getTypeOfSymbolAtLocation(parameter, declaration);
             if (checker.getPropertiesOfType(type).length) candidates.push(type);
           }
@@ -576,7 +622,7 @@ function generateAppControlSchemas({ root, operations, check, outputDirectory = 
               // SDK validators may return an exact typed version of an unknown
               // incoming value under the same field name (e.g. rendered bytes).
               if (parameterType?.flags & (flags.Any | flags.Unknown)
-                && parameterDeclaration?.getSourceFile().fileName.includes("/node_modules/agentlas-science/")) {
+                && isScienceDeclaration(parameterDeclaration?.getSourceFile().fileName)) {
                 const awaited = checker.getAwaitedType(returnType) ?? returnType;
                 const output = fieldType(awaited, names[0]);
                 if (output) add(names[0], schema(output));
