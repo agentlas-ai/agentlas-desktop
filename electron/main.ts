@@ -68,6 +68,7 @@ import {getServer as getInstalledMcpServer} from './mcp-tools/registry';
 import {mcpServerConfigurationDigest} from './mcp-tools/prepared-transport';
 import { registerOneNativeMainComposition, currentOneNativeMainComposition, configureOneNativeMainOwnerFactory } from './one/native-main-composition';
 import { createOneNativeMainFamilyRouter } from './one/native-family-router';
+import { installPersonalToolchainNativeOwner } from './one/toolchain-personal-owner';
 import { registerNativeEmployeeMain } from './business/native-employee-main';
 import { registerEmployeeAgentWorkMain } from './business/employee-agent-work-main';
 import {createNativeHistorySourceOwner,type HistorySourceOwner} from './one/history-source-owner';
@@ -2574,6 +2575,14 @@ app.whenReady().then(async () => {
   nativeHistoryWorkOwner=await createNativeHistoryWorkOwner({source:nativeHistorySourceOwner,locale:()=>currentUiLocale()==='ko'?'ko':'en'});
   if(nativePersonalShutdown.signal.aborted||nativePersonalCleanupUnknown){nativeHistoryWorkOwner.close();throw Error('history_work_owner_changed')}
   configureOnePersonalIntegrationPolicy({gmail:nativeGmailPolicy,history:nativeHistoryWorkOwner.history,historyToolReference:nativeHistoryWorkOwner.toolReference,historyToolResources:nativeHistoryWorkOwner.toolResources,historyWorkTools:nativeHistoryWorkOwner.tools});
+  // Adaptive Toolchain native owner of this personal install (toolchain-personal-owner.ts). Its only binder was the
+  // organization startup, which a personal install never runs (production 10-08..18: 0 assets, create refused with
+  // toolchain_native_shipping_owner_ports_unbound). agentlasd binds its own copy for daemon-owned turns.
+  try {
+    installPersonalToolchainNativeOwner({host:"main",isOwnerIpcSender:event=>{
+      try{const window=assertTrustedSitePublishIpcSender(event as Electron.IpcMainInvokeEvent);return window===mainWindow||window===getOneWindow();}catch{return false;}
+    }});
+  } catch (error) { console.error("[toolchain] personal native owner unavailable:", error instanceof Error ? error.message : error); }
   registerIpcHandlers();
   registerOnePersonalIntegrationMainIpc({ipc:ipcMain,assertTrustedSender:assertTrustedSitePublishIpcSender,isOwnerWindow:window=>window===mainWindow||window===getOneWindow(),gmailSourceOwner:nativeGmailSourceOwner,historyWorkOwner:nativeHistoryWorkOwner,lifetime:{ready:()=>!nativePersonalCleanupUnknown&&!nativePersonalShutdown.signal.aborted,currentEpoch:()=>nativePersonalEpoch}});
   registerRoomDiscussionIpc({ipc:ipcMain,assertTrustedSender:assertTrustedSitePublishIpcSender,isOwnerWindow:window=>window===mainWindow||window===getOneWindow()});

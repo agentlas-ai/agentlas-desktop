@@ -1027,6 +1027,13 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
     }
     recordServicePhase("control_socket_ready");
     console.log(`[agentlasd] control socket: ${socket.address}`);
+    // Adaptive Toolchain native owner for turns this service runs (toolchain-personal-owner.ts). The run's lease lives
+    // in this process, so its toolchain_* calls are checked here; Main binds its own copy for Main-owned turns.
+    try {
+      (await import("../one/toolchain-personal-owner")).installPersonalToolchainNativeOwner({ host: "daemon" });
+    } catch (error) {
+      console.error("[agentlasd] personal toolchain native owner unavailable:", error instanceof Error ? error.message : error);
+    }
   } catch (error) {
     // A duplicate helper must not continue and compete for the bridge or
     // shared lifecycle state after losing the control-socket ownership race.
