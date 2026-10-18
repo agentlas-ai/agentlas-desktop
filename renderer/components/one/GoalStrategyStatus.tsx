@@ -46,10 +46,10 @@ function automationLabel(
   ko: boolean,
 ): string {
   if (!row.enabled) return ko ? "꺼짐" : "off";
-  if (row.liveState === "running") return ko ? "최근 원장에 실행 기록" : "recent run recorded";
+  if (row.liveState === "running") return ko ? "최근 실행 기록 있음" : "recent run recorded";
   if (row.liveState === "queued") return ko ? "스케줄러 대기" : "queued by scheduler";
   if (row.nextRunAt) return ko ? "다음 실행 예약" : "next run scheduled";
-  return ko ? "현재 실행 상태 미확인" : "live state not confirmed";
+  return ko ? "지금 실행 중인지 알 수 없음" : "live state not confirmed";
 }
 
 /**
@@ -108,23 +108,23 @@ export function GoalStrategyStatus({ continuity, surface, locale }: Props) {
           {` · ${ko ? "수리 가능 실패" : "repairable failures"} ${strategy.metrics.repairableFailed}`}
           {` · ${ko ? "증거 미확정" : "inconclusive"} ${strategy.metrics.inconclusive}`}
         </p>
-      </> : <p>{ko ? "아직 정착된 주기 평가가 없습니다. 다음 실행 결과가 확인되면 표시됩니다." : "No settled cycle evaluation is available yet. It will appear after the next result is verified."}</p>}
+      </> : <p>{ko ? "아직 확정된 주기 평가가 없습니다. 다음 실행 결과가 확인되면 표시됩니다." : "No settled cycle evaluation is available yet. It will appear after the next result is verified."}</p>}
       <p className={styles.next}>
         <strong>{ko ? "다음 주기" : "Next cycle"}</strong> · {nextWake
           ? (ko ? `${nextWake}에 확인 예정` : `check expected ${nextWake}`)
-          : (ko ? "예약 시각 미확인" : "no confirmed time")}
+          : (ko ? "예약 시각 알 수 없음" : "no confirmed time")}
         {goal.wait?.state === "pending" && ` · ${ko ? "앱 실행 중" : "while the app is running"}`}
       </p>
       <div className={styles.automations}>
         <strong>{ko ? "현재 자동화" : "Current automations"}</strong>
         <span>{ko ? `Goal 연결 확인 ${goalBound.length}` : `${goalBound.length} Goal-linked and verified`}</span>
-        {unverified.length > 0 && <span>{ko ? `연결 미확인 ${unverified.length}` : `${unverified.length} link unverified`}</span>}
+        {unverified.length > 0 && <span>{ko ? `연결 확인 안 됨 ${unverified.length}` : `${unverified.length} link unverified`}</span>}
         {independent.length > 0 && <span>{ko ? `독립 예약 ${independent.length}` : `${independent.length} independent schedule(s)`}</span>}
         {rows.length === 0 && <span>{ko ? "등록된 자동화 없음" : "No automation recorded"}</span>}
         {rows.length > 0 && <ul>
           {rows.slice(0, 4).map((row) => <li key={row.automationId} data-automation-id={row.automationId}>
             <span>{row.relationship === "goal-bound" ? (ko ? "Goal 연계" : "Goal-linked")
-              : row.relationship === "unverified" ? (ko ? "연결 미확인" : "link unverified")
+              : row.relationship === "unverified" ? (ko ? "연결 확인 안 됨" : "link unverified")
                 : (ko ? "독립" : "independent")}</span>
             <span>{automationLabel(row, ko)}</span>
             {row.nextRunAt && <time dateTime={row.nextRunAt}>{formatWhen(row.nextRunAt, locale)}</time>}

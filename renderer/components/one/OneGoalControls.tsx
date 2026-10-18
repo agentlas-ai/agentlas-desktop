@@ -327,7 +327,7 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, onStoppe
     ? new Date(nextCheckAt).toLocaleString(ko ? "ko-KR" : "en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : null;
   const label = view.pending === "delete" ? (ko ? "목표를 삭제하는 중" : "Deleting goal")
     : view.pending === "pause" ? (ko ? "멈추는 중 · 목표는 보존됩니다" : "Stopping · goal preserved")
-    : !observationFresh ? (ko ? "Goal 상태 재확인 중 · 실행 여부 미확인" : "Rechecking Goal state · run status unconfirmed")
+    : !observationFresh ? (ko ? "Goal 상태를 다시 확인하는 중" : "Rechecking Goal state")
     : status === "pausing" ? (ko ? "멈추는 중 · 목표는 보존됩니다" : "Stopping · goal preserved")
     : status === "blocked" && verificationUnavailable
       ? (ko ? "앱이 결과를 확인하지 못해 다음 작업을 멈췄어요. 작업이 실패했다는 뜻은 아니에요."

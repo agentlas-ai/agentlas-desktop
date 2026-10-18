@@ -96,7 +96,7 @@ export function PersonalOneCapabilities({ open, locale, chatId, oneId, onClose, 
         {installed.length === 0 && <p>{copy("연결한 도구가 없습니다. 아래에서 필요한 도구를 찾아보세요.", "No tools are connected. Find a tool below.")}</p>}
         {installed.map(server => {
           const status = readiness.find(item => item.installedServerId === server.id);
-          const label = ({ready:copy("사용 준비 확인됨","Readiness verified"),disabled:copy("꺼짐","Off"),"needs-auth":copy("로그인 필요","Sign-in required"),"needs-configuration":copy("설정 필요","Configuration required"),offline:copy("연결 안 됨","Offline"),unknown:copy("관측 미확인","Observation unconfirmed"),"not-installed":copy("설치 필요","Installation required")} as const)[status?.state ?? "unknown"];
+          const label = ({ready:copy("사용 준비 확인됨","Readiness verified"),disabled:copy("꺼짐","Off"),"needs-auth":copy("로그인 필요","Sign-in required"),"needs-configuration":copy("설정 필요","Configuration required"),offline:copy("연결 안 됨","Offline"),unknown:copy("상태 확인 안 됨","Status unknown"),"not-installed":copy("설치 필요","Installation required")} as const)[status?.state ?? "unknown"];
           return <article className={styles.card} key={server.id} data-one-connection={server.id}>
             <header><strong>{ko ? server.name : server.nameEn || server.name}</strong><span>{label}</span></header>
             {status?.observedAt && <small>{copy("관측","Observed")}: {new Date(status.observedAt).toLocaleTimeString()}</small>}
@@ -131,7 +131,7 @@ export function PersonalOneCapabilities({ open, locale, chatId, oneId, onClose, 
         {repeatItems.length === 0 && <p>{copy("이 대화에 연결된 반복 업무가 없습니다.", "No recurring work is bound to this conversation.")}</p>}
         {repeatItems.map(item => <article className={styles.card} key={item.id} data-one-repeat={item.id}>
           <header><strong>{item.name}</strong><span>{item.enabled ? copy("예약 켜짐", "Scheduled") : copy("일시 중지", "Paused")}</span></header>
-          <p>{humanSchedule(item.scheduleHuman, locale)}</p><small>{item.nextRunAt ? `${copy("다음", "Next")}: ${new Date(item.nextRunAt).toLocaleString()}` : copy("다음 실행 미확인", "Next run not confirmed")}</small>
+          <p>{humanSchedule(item.scheduleHuman, locale)}</p><small>{item.nextRunAt ? `${copy("다음", "Next")}: ${new Date(item.nextRunAt).toLocaleString()}` : copy("다음 실행 시각 알 수 없음", "Next run not confirmed")}</small>
           <div className={styles.actions}>
             <button type="button" disabled={!!busy} onClick={() => void perform(item.id, () => ipc()!.automations.toggle(item.id, !item.enabled))}>{item.enabled ? copy("중지", "Pause") : copy("다시 켜기", "Resume")}</button>
             <button type="button" disabled={!!busy} onClick={() => void perform(item.id, () => ipc()!.automations.runNow(item.id))}>{copy("지금 실행", "Run now")}</button>
