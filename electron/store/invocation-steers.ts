@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { McpInvocationRequest } from "../../shared/types";
+import type { InvocationSteerRecoveryOutcome, McpInvocationRequest } from "../../shared/types";
 import type { InvocationExecutionContext } from "../mcp/client";
 import type { InvocationWorkspaceBinding } from "../invocation/workspace-binding";
 import { getDb } from "./db";
@@ -40,6 +40,8 @@ export interface DurableQueuedSteer {
   status: "queued" | "draining" | "started" | "cancelled" | "failed";
   recoveryState: DurableQueuedSteerRecoveryState;
   recoveryReason?: DurableQueuedSteerRecoveryReason;
+  /** Why a cancelled/failed row ended (the same column as recoveryReason, read only on a terminal row). */
+  terminalCause?: DurableQueuedSteerTerminalCause;
 }
 
 /** A held steer is never dispatched automatically after a restart. */
@@ -53,6 +55,54 @@ export type DurableQueuedSteerRecoveryReason =
   | "drained-run-receipt-missing"
   | "draining-run-id-missing"
   | "one-team-report-owner-unbound";
+const RECOVERY_REASONS: readonly DurableQueuedSteerRecoveryReason[] = [
+  "original-run-start-uncertain",
+  "original-run-effect-boundary-unconfirmed",
+  "drained-run-start-uncertain",
+  "drained-run-receipt-missing",
+  "draining-run-id-missing",
+  "one-team-report-owner-unbound",
+];
+
+/**
+ * The machine cause of every transition to `cancelled` or `failed`, written to recovery_reason in the same UPDATE.
+ * Production 1.3.67 (2026-10-18): 69 failed and 116 cancelled rows, every failed one with recovery_reason NULL; a
+ * teammate report that died on "database is locked" could not be told apart from one parked for a waiting Goal.
+ * A cause is a marker, never prose; the typed refusal code of a failed start goes to the log line next to it.
+ */
+export type DurableQueuedSteerTerminalCause =
+  /** The owner pulled it back from the queue strip (unsteer). */
+  | "owner-withdrawn"
+  /** A host report whose content went stale before it ran (unsteerQueuedById). */
+  | "host-report-superseded"
+  /** The run it waited behind was stopped; the stop withdraws what was queued behind it. */
+  | "run-stopped"
+  /** The chat's Goal was paused or deleted. */
+  | "goal-stopped"
+  /** A held host-written direction whose original run ended without a receipt, closed at restart recovery. */
+  | "held-system-retired"
+  /** A held owner direction handed back to the owner's composer (returnHeldOwnerSteer). */
+  | "held-returned-to-owner"
+  /** A waiting Goal refused the system turn and parked the relay (deferred_system_relays); its next turn carries it. */
+  | "parked-for-waiting-goal"
+  /** The start kept hitting a locked store through the whole bounded retry. */
+  | "drain-store-busy-exhausted"
+  /** The start was refused with a typed code (logged with the cause). */
+  | "drain-start-refused"
+  /** The start threw without a typed code. */
+  | "drain-start-error"
+  /** The stored row could not be decoded. */
+  | "row-undecodable"
+  /** A JavaScript caller that named no cause (TypeScript callers must). */
+  | "unattributed";
+const TERMINAL_CAUSES: readonly DurableQueuedSteerTerminalCause[] = [
+  "owner-withdrawn", "host-report-superseded", "run-stopped", "goal-stopped", "held-system-retired",
+  "held-returned-to-owner", "parked-for-waiting-goal", "drain-store-busy-exhausted", "drain-start-refused",
+  "drain-start-error", "row-undecodable", "unattributed",
+];
+function terminalCause(cause: unknown): DurableQueuedSteerTerminalCause {
+  return TERMINAL_CAUSES.includes(cause as DurableQueuedSteerTerminalCause) ? cause as DurableQueuedSteerTerminalCause : "unattributed";
+}
 
 type Row = {
   id: string;
@@ -68,7 +118,8 @@ type Row = {
   status: DurableQueuedSteer["status"];
   one_team_report_custody_json?: string | null;
   recovery_state?: DurableQueuedSteerRecoveryState;
-  recovery_reason?: DurableQueuedSteerRecoveryReason | null;
+  /** A hold reason on a held row, a terminal cause on a cancelled/failed one. */
+  recovery_reason?: string | null;
 };
 
 function decode(row: Row): DurableQueuedSteer {
@@ -76,15 +127,14 @@ function decode(row: Row): DurableQueuedSteer {
   if (recoveryState !== "ready" && recoveryState !== "held") {
     throw new Error("invocation_steer_invalid_recovery_state");
   }
-  const recoveryReason = row.recovery_reason ?? undefined;
-  if (recoveryReason && ![
-    "original-run-start-uncertain",
-    "original-run-effect-boundary-unconfirmed",
-    "drained-run-start-uncertain",
-    "drained-run-receipt-missing",
-    "draining-run-id-missing",
-    "one-team-report-owner-unbound",
-  ].includes(recoveryReason)) {
+  const storedReason = (row.recovery_reason ?? undefined) as string | undefined;
+  const terminal = row.status === "cancelled" || row.status === "failed";
+  // A terminal row's column holds its terminal cause (or the hold reason it ended with, for rows written before causes).
+  const recoveryReason = storedReason && RECOVERY_REASONS.includes(storedReason as DurableQueuedSteerRecoveryReason)
+    ? storedReason as DurableQueuedSteerRecoveryReason : undefined;
+  const endedBy = terminal && storedReason && TERMINAL_CAUSES.includes(storedReason as DurableQueuedSteerTerminalCause)
+    ? storedReason as DurableQueuedSteerTerminalCause : undefined;
+  if (storedReason && !recoveryReason && !endedBy) {
     throw new Error("invocation_steer_invalid_recovery_reason");
   }
   const request = JSON.parse(row.request_json) as McpInvocationRequest;
@@ -112,6 +162,7 @@ function decode(row: Row): DurableQueuedSteer {
     status: row.status,
     recoveryState,
     ...(recoveryReason ? { recoveryReason } : {}),
+    ...(endedBy ? { terminalCause: endedBy } : {}),
   };
 }
 
@@ -215,8 +266,8 @@ export function listRecoverableQueuedSteers(chatId?: string): DurableQueuedSteer
   const out: DurableQueuedSteer[] = [];
   for (const row of rows) {
     try { out.push(decode(row)); } catch {
-      getDb().prepare("UPDATE invocation_steers SET status = 'failed', updated_at = ? WHERE id = ?")
-        .run(new Date().toISOString(), row.id);
+      getDb().prepare("UPDATE invocation_steers SET status = 'failed', recovery_reason = ?, updated_at = ? WHERE id = ?")
+        .run("row-undecodable" satisfies DurableQueuedSteerTerminalCause, new Date().toISOString(), row.id);
     }
   }
   return out;
@@ -263,20 +314,41 @@ export function queuedSteerState(id: string): { status: DurableQueuedSteer["stat
   return row ? { status: row.status, drainedRunId: row.drained_run_id } : null;
 }
 
-export function settleQueuedSteer(id: string, status: "started" | "cancelled" | "failed"): boolean {
+/** Delivery ("started") keeps the row's column; every cancelled/failed transition writes its cause in the same UPDATE. */
+export function settleQueuedSteer(id: string, status: "started"): boolean;
+export function settleQueuedSteer(id: string, status: "cancelled" | "failed", cause: DurableQueuedSteerTerminalCause): boolean;
+export function settleQueuedSteer(id: string, status: "started" | "cancelled" | "failed", cause?: DurableQueuedSteerTerminalCause): boolean {
+  const now = new Date().toISOString();
+  // A trusted terminal withdrawal must win even when recovery is held.
+  // Delivery/failure still requires the existing ready-state decision.
+  const ready = status === "cancelled" ? "" : " AND recovery_state = 'ready'";
+  if (status === "started") {
+    return getDb().prepare(
+      "UPDATE invocation_steers SET status = ?, updated_at = ? WHERE id = ? AND status IN ('queued','draining')" + ready,
+    ).run(status, now, id).changes === 1;
+  }
   return getDb().prepare(
-    // A trusted terminal withdrawal must win even when recovery is held.
-    // Delivery/failure still requires the existing ready-state decision.
-    "UPDATE invocation_steers SET status = ?, updated_at = ? WHERE id = ? AND status IN ('queued','draining')"
-      + (status === "cancelled" ? "" : " AND recovery_state = 'ready'"),
-  ).run(status, new Date().toISOString(), id).changes === 1;
+    "UPDATE invocation_steers SET status = ?, recovery_reason = ?, updated_at = ? WHERE id = ? AND status IN ('queued','draining')" + ready,
+  ).run(status, terminalCause(cause), now, id).changes === 1;
 }
 
-export function cancelQueuedSteersForChat(chatId: string, preserveTeamReports = false): void {
+export function cancelQueuedSteersForChat(chatId: string, preserveTeamReports: boolean, cause: DurableQueuedSteerTerminalCause): void {
   getDb().prepare(
-    "UPDATE invocation_steers SET status = 'cancelled', updated_at = ? WHERE chat_id = ? AND status = 'queued'"
+    "UPDATE invocation_steers SET status = 'cancelled', recovery_reason = ?, updated_at = ? WHERE chat_id = ? AND status = 'queued'"
       + (preserveTeamReports ? " AND CASE WHEN json_valid(request_json) THEN COALESCE(json_type(request_json,'$.oneTeamReportTurn'),'')<>'true' ELSE 1 END" : ""),
-  ).run(new Date().toISOString(), chatId);
+  ).run(terminalCause(cause), new Date().toISOString(), chatId);
+}
+
+/**
+ * A start that a locked store refused before anything was dispatched, after its drain claim had recorded the planned
+ * run (invoke_started, then the undispatched failure): that run id is spent. Put the row back in the queue with no run
+ * id so the retry starts a new run; only the exact draining claim is reopened.
+ */
+export function requeueUndispatchedQueuedSteer(id: string, spentRunId: string): boolean {
+  return getDb().prepare(
+    `UPDATE invocation_steers SET status = 'queued', drained_run_id = NULL, updated_at = ?
+      WHERE id = ? AND status = 'draining' AND drained_run_id = ? AND recovery_state = 'ready'`,
+  ).run(new Date().toISOString(), id, spentRunId).changes === 1;
 }
 
 /**
@@ -295,12 +367,45 @@ export function holdQueuedSteerForRecovery(
   ).run(reason, new Date().toISOString(), id).changes === 1;
 }
 
-/** Close a held host-written direction that can no longer be delivered (its original run ended without a receipt). */
-export function retireHeldQueuedSteer(id: string): boolean {
+/**
+ * Close a held direction that is not going to be dispatched: a host-written one whose original run ended without a
+ * receipt ("held-system-retired"), or an owner-written one handed back to the owner ("held-returned-to-owner").
+ */
+export function retireHeldQueuedSteer(id: string, cause: "held-system-retired" | "held-returned-to-owner"): boolean {
   return getDb().prepare(
-    `UPDATE invocation_steers SET status = 'cancelled', updated_at = ?
+    `UPDATE invocation_steers SET status = 'cancelled', recovery_reason = ?, updated_at = ?
       WHERE id = ? AND status IN ('queued','draining') AND recovery_state = 'held'`,
-  ).run(new Date().toISOString(), id).changes === 1;
+  ).run(terminalCause(cause), new Date().toISOString(), id).changes === 1;
+}
+
+/** What handing a held direction back to its owner did. `promptText` is present for "returned" / "already-returned". */
+export type HeldOwnerSteerReturn = InvocationSteerRecoveryOutcome;
+
+/**
+ * The owner's text of a held direction goes back to the owner, and the row is retired in the SAME transaction, so the
+ * text exists in exactly one place: the composer, never also a queued turn. Owner 2026-10-18: a held follow-up was a
+ * card nothing could resolve, and Main listed the row forever (only host-written held rows were ever retired).
+ * Idempotent: a repeated call for a row this route already retired answers "already-returned" with the same text and
+ * writes nothing. A host-written row (a teammate report, a relay) is not owner text and is refused; so is a row that is
+ * no longer held (released for delivery, delivered, withdrawn). Never starts a turn.
+ */
+export function returnHeldOwnerSteer(id: string, expectedChatId?: string): HeldOwnerSteerReturn {
+  const db = getDb();
+  return db.transaction((): HeldOwnerSteerReturn => {
+    const raw = db.prepare("SELECT * FROM invocation_steers WHERE id = ?").get(id) as Row | undefined;
+    if (!raw) return { status: "refused", code: "steer_recovery_not_found" };
+    if (expectedChatId !== undefined && raw.chat_id !== expectedChatId) return { status: "refused", code: "steer_recovery_chat_mismatch" };
+    let request: Partial<McpInvocationRequest> | null = null;
+    try { request = JSON.parse(raw.request_json) as Partial<McpInvocationRequest>; } catch { request = null; }
+    if (!request || request.promptOrigin === "system" || request.oneTeamReportTurn === true || request.agentAppMode === true) {
+      return { status: "refused", code: "steer_recovery_not_owner_text" };
+    }
+    if (raw.status === "cancelled" && raw.recovery_reason === "held-returned-to-owner") {
+      return { status: "already-returned", chatId: raw.chat_id, promptText: raw.prompt_text };
+    }
+    if (!retireHeldQueuedSteer(id, "held-returned-to-owner")) return { status: "refused", code: "steer_recovery_not_held" };
+    return { status: "returned", chatId: raw.chat_id, promptText: raw.prompt_text };
+  }).immediate();
 }
 
 /** Explicit recovery route hook; callers must make the replay decision first. */

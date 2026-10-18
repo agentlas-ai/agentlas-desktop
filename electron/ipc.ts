@@ -7509,6 +7509,14 @@ export function registerIpcHandlers(): void {
     try { return await steeringRecoveryFromRenderer(_event, chatId); }
     catch (cause) { if (isTransientSendRefusal(cause)) return []; throw cause; }
   });
+  // The owner takes a held direction back into the composer: the text is returned and the held row retired in one
+  // transaction on the shared store (also for a daemon-owned run). The owner's renderer only, never app.call.
+  ipcMain.handle("invoke:returnSteeringRecovery", async (_event, id: unknown, chatId?: unknown) => {
+    assertTrustedSitePublishIpcSender(_event);
+    if (isAppControlEvent(_event)) throw new Error("steer_recovery_owner_renderer_required");
+    if (typeof id !== "string" || (chatId !== undefined && chatId !== null && typeof chatId !== "string")) throw new Error("steer_recovery_invalid_id");
+    return invocationService.returnSteeringRecovery(id, typeof chatId === "string" ? chatId : undefined);
+  });
   registerAppControlDomainIpc(ipcMain, "invoke:latestOneSurface", (input: unknown) => {
     if (
       !input ||

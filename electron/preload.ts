@@ -1537,6 +1537,7 @@ const api: AgentlasIpc = {
     workerReport: (scope) => ipcRenderer.invoke("invoke:workerReport", scope),
     latestReceipt: (chatId: string) => ipcRenderer.invoke("invoke:latestReceipt", chatId),
     steeringRecovery: (chatId: string) => ipcRenderer.invoke("invoke:steeringRecovery", chatId),
+    returnSteeringRecovery: (id: string, chatId?: string) => ipcRenderer.invoke("invoke:returnSteeringRecovery", id, chatId),
     latestOneSurface: (input) => ipcRenderer.invoke("invoke:latestOneSurface", input),
   },
   hephaestus: {

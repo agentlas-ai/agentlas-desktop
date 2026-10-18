@@ -6739,6 +6739,25 @@ export interface InvocationSteerRecovery {
     | "draining-run-id-missing";
 }
 
+/** Typed refusals of invoke:returnSteeringRecovery (a marker, never prose). */
+export type InvocationSteerRecoveryRefusal =
+  | "steer_recovery_not_found"
+  | "steer_recovery_chat_mismatch"
+  /** A host-written direction (a teammate report, a relay) is not the owner's text to take back. */
+  | "steer_recovery_not_owner_text"
+  /** No longer held: released for delivery, delivered or withdrawn. */
+  | "steer_recovery_not_held";
+
+/**
+ * invoke:returnSteeringRecovery — the owner takes a held direction (an InvocationSteerRecovery id) back into the
+ * composer. "returned": the row was retired in the same transaction that read this text; "already-returned": an earlier
+ * call did that (same text, nothing written). The text is never also queued.
+ */
+export type InvocationSteerRecoveryOutcome =
+  | { status: "returned" | "already-returned"; chatId: string; promptText: string }
+  | { status: "refused"; code: InvocationSteerRecoveryRefusal };
+export type InvocationSteerRecoveryReturn = { id: string } & InvocationSteerRecoveryOutcome;
+
 export interface InvocationSteerRecoveryReport {
   examined: number;
   resumed: number;
@@ -8856,6 +8875,8 @@ export interface AgentlasIpc {
     latestReceipt: (chatId: string) => Promise<InvocationRunReceipt | null>;
     /** Restart-held steering directions; informational only, never replay permission. */
     steeringRecovery: (chatId: string) => Promise<InvocationSteerRecovery[]>;
+    /** The owner takes a held direction back into the composer: returns its text and retires it (idempotent). */
+    returnSteeringRecovery: (id: string, chatId?: string) => Promise<InvocationSteerRecoveryReturn>;
     workerReport: (scope: import("./worker-report").WorkerReportScope) => Promise<import("./worker-report").WorkerReport | null>;
     /** Exact Main-projected surface for one canonical Task/run binding. */
     latestOneSurface: (input: {

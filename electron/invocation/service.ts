@@ -131,7 +131,7 @@ import {
 import { stripStrayProtocolTokens } from "../../shared/protocol-token-strip";
 import { advanceMainLivePartial, markInterruptedPartial } from "./interrupted-partial";
 import { untrustedRuntimeFailurePayload } from "../runtime/untrusted-error";
-import { validatedRunnerNativeControlState, markRefusedBeforeDispatch, outwardFailureCode, preDispatchRefusal, RuntimeTurnUnsettledError } from "../runtime/runner";
+import { validatedRunnerNativeControlState, markRefusedBeforeDispatch, outwardFailureCode, preDispatchRefusal, RuntimeTurnUnsettledError, refusalCode, runnerRefusedBeforeDispatch } from "../runtime/runner";
 import { innermostTypedCode, STORE_BUSY_CODE } from "../../shared/turn-settlement";
 import {
   getInvocationRunReceipt,
@@ -180,10 +180,13 @@ import {
   holdQueuedSteerForRecovery,
   listRecoverableQueuedSteers,
   persistQueuedSteer,
+  requeueUndispatchedQueuedSteer,
   retireHeldQueuedSteer,
+  returnHeldOwnerSteer,
   settleQueuedSteer,
   type DurableQueuedSteer,
   type DurableQueuedSteerRecoveryReason,
+  type DurableQueuedSteerTerminalCause,
 } from "../store/invocation-steers";
 import {
   appendChatMessage,
@@ -286,6 +289,8 @@ import type {
   InvocationRunReceipt,
   InvocationSteerRecovery,
   InvocationSteerRecoveryReport,
+  InvocationSteerRecoveryOutcome,
+  InvocationSteerRecoveryReturn,
   InvocationSteerResult,
   AgentlasUserDecisionRequest,
   McpInvocationEvent,
@@ -522,6 +527,8 @@ interface QueuedSteer {
   workspaceBinding?: InvocationWorkspaceBinding;
   executionContext?: InvocationExecutionContext;
   drainedRunId?: string;
+  /** A planned run of this direction whose start a locked store refused after recording it: retried under a new id. */
+  spentRunId?: string;
   recoveryState?: "ready" | "held";
   recoveryReason?: DurableQueuedSteerRecoveryReason;
 }
@@ -588,6 +595,50 @@ const MAX_BUFFERED_EVENTS = 4_000;
 const MAX_PARTIAL_CHARS = 2 * 1024 * 1024;
 const MAX_STEER_QUEUE_DEPTH = 8;
 const HELD_SYSTEM_STEER_RETIRE_MS = 60 * 60_000;
+/**
+ * Waits between start attempts of a queued direction whose start hit a locked store (R-067); each attempt first waits
+ * out the store's own busy_timeout. Bounded: after the last one the row fails with drain-store-busy-exhausted.
+ * AGENTLAS_TEST_STEER_DRAIN_FAST=1 shortens the schedule for gates only.
+ */
+const STEER_DRAIN_STORE_BUSY_DELAYS_MS: readonly number[] = process.env.AGENTLAS_TEST_STEER_DRAIN_FAST === "1"
+  ? [20, 40, 80, 160]
+  : [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000];
+/** The id form One lists for an owner text a native turn could not confirm (nativeOwnerTextRecovery). */
+const NATIVE_OWNER_RECOVERY_PREFIX = "native-owner:";
+/** invocation_current_turn_steers code of an uncertain owner text the owner took back into the composer. */
+const OWNER_RECOVERY_RETURNED_CODE = "owner_recovery_returned";
+
+/** A waiting Goal refused this run and parked its relay (start(): deferSystemRelay with originRunId = the run id). */
+function relayParkedForRun(runId: string): boolean {
+  try {
+    return Boolean(getDb().prepare("SELECT 1 FROM deferred_system_relays WHERE origin_run_id = ? LIMIT 1").get(runId));
+  } catch {
+    return false; // No parking table yet: nothing was parked.
+  }
+}
+
+/**
+ * The owner takes back an owner text a native turn could not confirm (`native-owner:<intent>`, status uncertain): the
+ * text is returned and the row settled rejected/owner_recovery_returned in one transaction. Current-turn rows are the
+ * owner's own text by construction (claimCurrentTurnSteer writes the owner's message). Idempotent.
+ */
+function returnUncertainOwnerText(intentId: string, expectedChatId?: string): InvocationSteerRecoveryOutcome {
+  const db = getDb();
+  return db.transaction((): InvocationSteerRecoveryOutcome => {
+    const row = db.prepare("SELECT chat_id, prompt_text, status, code FROM invocation_current_turn_steers WHERE intent_id = ?")
+      .get(intentId) as { chat_id: string; prompt_text: string; status: string; code: string | null } | undefined;
+    if (!row) return { status: "refused", code: "steer_recovery_not_found" };
+    if (expectedChatId !== undefined && row.chat_id !== expectedChatId) return { status: "refused", code: "steer_recovery_chat_mismatch" };
+    if (row.status === "rejected" && row.code === OWNER_RECOVERY_RETURNED_CODE) {
+      return { status: "already-returned", chatId: row.chat_id, promptText: row.prompt_text };
+    }
+    if (row.status !== "uncertain" || db.prepare(`UPDATE invocation_current_turn_steers SET status = 'rejected', code = ?, updated_at = ?
+      WHERE intent_id = ? AND chat_id = ? AND status = 'uncertain'`).run(OWNER_RECOVERY_RETURNED_CODE, new Date().toISOString(), intentId, row.chat_id).changes !== 1) {
+      return { status: "refused", code: "steer_recovery_not_held" };
+    }
+    return { status: "returned", chatId: row.chat_id, promptText: row.prompt_text };
+  }).immediate();
+}
 const VERIFICATION_TRANSIENT_RETRY_DELAYS_MS = [5_000, 30_000, 120_000, 480_000] as const;
 const ONE_TASK_KIND_MEDIA_TYPE_RE = /^[a-z0-9][a-z0-9.+-]{0,63}\/[a-z0-9][a-z0-9.+-]{0,127}$/;
 const ONE_TASK_KIND_DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
@@ -1265,6 +1316,8 @@ export class InvocationService {
   private readonly nativeCleanupQuarantine = new Map<string, { completion: WeakRef<Promise<void>>; outcome: "pending" | "failed" }>();
   private readonly browserLoginWaitingRuns = new Map<string, RunRecord>();
   private readonly steerQueues = new Map<string, QueuedSteer[]>();
+  /** Queued directions waiting out a locked store before their next start attempt (drainSteerQueue, R-067). */
+  private readonly steerDrainBackoff = new Map<string, { chatId: string; attempt: number; notBefore: number }>();
   private readonly nativePreparing = new Map<string, NativePreparingPending>();
   private ordinaryOneTurnObserver?: (source: OrdinaryOneTurnSource) => OrdinaryOneTurnObservation | undefined;
   private readonly nativeIngress = new Map<string, NativeIngressPending>();
@@ -2505,7 +2558,7 @@ export class InvocationService {
         // and an hour has passed, close it; the Goal re-derives what still needs saying. Owner-written ones stay held.
         if (row.request.promptOrigin === "system" && originalOwner?.state === "released"
           && row.recoveryReason !== "one-team-report-owner-unbound"
-          && Date.now() - Date.parse(row.queuedAt) > HELD_SYSTEM_STEER_RETIRE_MS && retireHeldQueuedSteer(row.id)) {
+          && Date.now() - Date.parse(row.queuedAt) > HELD_SYSTEM_STEER_RETIRE_MS && retireHeldQueuedSteer(row.id, "held-system-retired")) {
           settled += 1;
           continue;
         }
@@ -6295,7 +6348,7 @@ export class InvocationService {
             toggleAutomation(owned.automationId, false);
           }
         }
-        cancelQueuedSteersForChat(chatId);
+        cancelQueuedSteersForChat(chatId, false, "goal-stopped");
         cancelQueuedOnePreflightSteersForChat(chatId);
         if (action === "delete") {
           completeChatGoalContract(expectedGoalId, "cancelled");
@@ -6435,7 +6488,7 @@ export class InvocationService {
           holdQueuedSteerForRecovery(row.id,"one-team-report-owner-unbound");
         }
       }
-      cancelQueuedSteersForChat(record.chatId,preserveReports);
+      cancelQueuedSteersForChat(record.chatId,preserveReports,"run-stopped");
       cancelQueuedOnePreflightSteersForChat(record.chatId);
     })();}catch{ /* Store refusal must never keep the original run alive. */ }
   }
@@ -6990,7 +7043,7 @@ export class InvocationService {
     // pointed it at a teammate report whenever one was queued first, and the owner's removal silently failed.
     const target = ownerWrittenSteers(queue)[position - 1];
     if (!target || target.request.userPrompt !== text) return false;
-    settleQueuedSteer(target.id, "cancelled");
+    settleQueuedSteer(target.id, "cancelled", "owner-withdrawn");
     queue.splice(queue.indexOf(target), 1);
     if (!queue.length) this.steerQueues.delete(chatId);
     else this.drainSteerQueue(chatId);
@@ -7008,7 +7061,7 @@ export class InvocationService {
     if (!queue || index < 0) return false;
     const queued = queue[index];
     const withdrawn = getDb().transaction(() => {
-      if (!settleQueuedSteer(queued.id, "cancelled")) return false;
+      if (!settleQueuedSteer(queued.id, "cancelled", "host-report-superseded")) return false;
       recordRunEvent({ runId: queued.originalRunId, chatId,
         kind: "invocation_host_steer_withdrawn", sourceEventId: `host-steer-withdrawn:${queued.id}`,
         payload: { queuedRequestId: queued.id, reason: "host_report_superseded" } });
@@ -7350,6 +7403,8 @@ export class InvocationService {
     if (!queue?.length) return;
     const next = queue[0];
     if (!next) return;
+    // A direction waiting out a locked store keeps its place at the head; its own timer drains it.
+    if ((this.steerDrainBackoff.get(next.id)?.notBefore ?? 0) > Date.now()) return;
     queueMicrotask(() => {
       // Keep the exact row cancellable until dispatch, including this microtask
       // gap. An unsteer/stop or competing drain must win before the durable CAS.
@@ -7357,57 +7412,171 @@ export class InvocationService {
       queue.shift();
       if (!queue.length) this.steerQueues.delete(chatId);
       const drainedRunId = next.drainedRunId ?? randomUUID();
+      let phase: "claim" | "start" = "claim";
+      let started = false;
       try {
-        if (!beginQueuedSteerDrain(next.id, drainedRunId, row=>queuedTeamReportCurrent(row.oneTeamReportCustody,row.request)
-          && canonicalQueuedSteerRequest(row.request)===canonicalQueuedSteerRequest(next.request)
-          && row.oneTeamReportCustodyJson===next.oneTeamReportCustodyJson)) return;
-        if (!hasInvocationRunReceipt(drainedRunId)) {
-          // Started from the settling run's own stack: it must not inherit that run's personal-native original.
-          withoutOnePersonalNativeOriginal(() => this.start(
-            { ...next.request, runId: drainedRunId },
-            next.workspaceBinding,
-            next.executionContext,
-            undefined, undefined, next.mainAdmission, undefined,
-            next.request.oneMode && next.request.promptOrigin !== "system" ? QUEUED_ONE_ROOM_INHERITANCE : undefined,
-            next.oneTeamReportCustody,
-          ));
-        }
-        settleQueuedSteer(next.id, "started");
-      } catch (error) {
-        settleQueuedSteer(next.id, "failed");
-        const message = error instanceof Error ? error.message : String(error);
-        // The queued direction was never a chat message (start() persists it), so a failed start used
-        // to erase the owner's sentence and leave no trace of why (Youtube room, 2026-10-10 08:55).
-        // Log the real cause, keep the sentence as the owner's own turn, and say so briefly. Never re-run it.
-        console.warn(`[invocation] queued steer failed to start steer=${next.id} chat=${chatId} cause=${redactSecrets(message).replace(/\s+/g, " ").slice(0, 400)}`);
         try {
-          const request = next.request;
-          const text = typeof request.userPrompt === "string" ? request.userPrompt : "";
-          // A carried direction's own rows are already in the chat (carried-owner-followups.ts): never a second copy.
-          if (text.trim() && request.promptOrigin !== "system" && !request.agentAppMode && !next.id.startsWith(CARRIED_FOLLOWUP_STEER_PREFIX)) {
-            // A preflight copy of the same direction may already have been delivered as a user turn.
-            const delivered = getDb().prepare(
-              "SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'user' AND text = ? AND created_at >= ? LIMIT 1",
-            ).get(chatId, text, next.queuedAt);
-            if (!delivered) {
-              appendChatMessage(chatId, "user", text, request.images?.length ? { images: request.images } : undefined);
-              // No synthetic "could not hand over" reply: the message is shown once, the cause is in the log above.
-            }
+          // The planned run of an earlier attempt was refused by a locked store after it was recorded: reopen the claim.
+          if (next.spentRunId) requeueUndispatchedQueuedSteer(next.id, next.spentRunId);
+          if (!beginQueuedSteerDrain(next.id, drainedRunId, row=>queuedTeamReportCurrent(row.oneTeamReportCustody,row.request)
+            && canonicalQueuedSteerRequest(row.request)===canonicalQueuedSteerRequest(next.request)
+            && row.oneTeamReportCustodyJson===next.oneTeamReportCustodyJson)) { this.steerDrainBackoff.delete(next.id); return; }
+          phase = "start";
+          if (!hasInvocationRunReceipt(drainedRunId)) {
+            // Started from the settling run's own stack: it must not inherit that run's personal-native original.
+            withoutOnePersonalNativeOriginal(() => this.start(
+              { ...next.request, runId: drainedRunId },
+              next.workspaceBinding,
+              next.executionContext,
+              undefined, undefined, next.mainAdmission, undefined,
+              next.request.oneMode && next.request.promptOrigin !== "system" ? QUEUED_ONE_ROOM_INHERITANCE : undefined,
+              next.oneTeamReportCustody,
+            ));
           }
-        } catch (persistError) {
-          console.warn("[invocation] failed queued steer could not be preserved in the chat:", persistError);
+          started = true;
+        } catch (error) {
+          const retry = this.retryQueuedSteerOnLockedStore(chatId, next, drainedRunId, phase, error);
+          if (retry !== "scheduled") this.failQueuedSteerStart(chatId, next, drainedRunId, error, retry === "exhausted");
         }
-        this.publishEvent({
-          runId: "steer",
-          chatId,
-          event: { kind: "error", error: { code: "steer-start-failed", message } },
-        });
+        if (started) {
+          this.steerDrainBackoff.delete(next.id);
+          // The run is started: a lock on this settlement retries it and never turns the started run into a failure.
+          this.settleQueuedSteerDurably(next.id, "started");
+        }
       } finally {
         // A rejected/CAS-lost row must not strand a second queued direction.
         this.publishSteerQueueCapacity(chatId);
         this.drainSteerQueue(chatId);
       }
     });
+  }
+
+  /**
+   * A queued direction whose start hit a locked store is started again with backoff instead of failing (R-067).
+   * Production 1.3.67, 2026-10-18T02:44:23Z, Yotube room: the Film Production Director's completion report
+   * (dispatch-1f9ca888) waited behind the leader's run; when the run ended its start threw "database is locked", the drain
+   * marked it failed and never ran it, and the leader never read the report. The 1.3.54 store_busy retry covers only the
+   * model-call path. A lock is transient, and this start is retried only while it provably sent nothing: a lock in the
+   * drain claim (the CAS rolled back), or a start that refused before dispatch (start() marks it). A start that had
+   * already recorded its planned run leaves that id spent and the retry starts a new run. Bounded by
+   * STEER_DRAIN_STORE_BUSY_DELAYS_MS; the head keeps its place in the queue meanwhile.
+   */
+  private retryQueuedSteerOnLockedStore(chatId: string, next: QueuedSteer, drainedRunId: string,
+    phase: "claim" | "start", error: unknown): "scheduled" | "exhausted" | "not-retryable" {
+    if (innermostTypedCode(error) !== STORE_BUSY_CODE) return "not-retryable";
+    if (phase === "start" && !runnerRefusedBeforeDispatch(error)) return "not-retryable";
+    const attempt = (this.steerDrainBackoff.get(next.id)?.attempt ?? 0) + 1;
+    if (attempt > STEER_DRAIN_STORE_BUSY_DELAYS_MS.length) return "exhausted";
+    let retry = next;
+    if (phase === "start") {
+      // The admission was consumed by the refused start; a recovered direction starts without one, like this retry.
+      const { drainedRunId: _spent, mainAdmission: _consumed, ...rest } = next;
+      retry = { ...rest, spentRunId: drainedRunId };
+    }
+    for (const [id, waiting] of this.steerDrainBackoff) {
+      if (id !== next.id && !this.steerQueues.get(waiting.chatId)?.some((queued) => queued.id === id)) this.steerDrainBackoff.delete(id);
+    }
+    const delayMs = STEER_DRAIN_STORE_BUSY_DELAYS_MS[attempt - 1]!;
+    this.steerDrainBackoff.set(next.id, { chatId, attempt, notBefore: Date.now() + delayMs });
+    const queue = this.steerQueues.get(chatId) ?? [];
+    if (!queue.some((queued) => queued.id === next.id)) queue.unshift(retry);
+    this.steerQueues.set(chatId, queue);
+    const timer = setTimeout(() => this.drainSteerQueue(chatId), delayMs + 5);
+    timer.unref?.();
+    console.warn(`[invocation] queued steer start hit a locked store; retrying steer=${next.id} chat=${chatId} code=${STORE_BUSY_CODE} `
+      + `phase=${phase} attempt=${attempt}/${STEER_DRAIN_STORE_BUSY_DELAYS_MS.length} delayMs=${delayMs}`);
+    return "scheduled";
+  }
+
+  /** Every failed/cancelled settlement names its cause; a lock on the settlement itself is retried, never dropped. */
+  private settleQueuedSteerDurably(id: string, status: "started"): void;
+  private settleQueuedSteerDurably(id: string, status: "cancelled" | "failed", cause: DurableQueuedSteerTerminalCause): void;
+  private settleQueuedSteerDurably(id: string, status: "started" | "cancelled" | "failed", cause?: DurableQueuedSteerTerminalCause): void {
+    this.settleQueuedSteerAttempt(id, status, cause, 0);
+  }
+
+  private settleQueuedSteerAttempt(id: string, status: "started" | "cancelled" | "failed",
+    cause: DurableQueuedSteerTerminalCause | undefined, attempt: number): void {
+    try {
+      if (status === "started") settleQueuedSteer(id, "started");
+      else settleQueuedSteer(id, status, cause ?? "unattributed");
+    } catch (error) {
+      if (innermostTypedCode(error) === STORE_BUSY_CODE && attempt < STEER_DRAIN_STORE_BUSY_DELAYS_MS.length) {
+        const timer = setTimeout(() => this.settleQueuedSteerAttempt(id, status, cause, attempt + 1), STEER_DRAIN_STORE_BUSY_DELAYS_MS[attempt]!);
+        timer.unref?.();
+        return;
+      }
+      // The row stays draining with its planned run; restart recovery settles or holds it from that run's receipt.
+      console.warn(`[invocation] queued steer settlement could not be written steer=${id} status=${status}`
+        + `${cause ? ` cause=${cause}` : ""} code=${innermostTypedCode(error) ?? "none"}`);
+    }
+  }
+
+  /** A start that will not be retried ends with its machine cause (never NULL), and the owner's own text is kept. */
+  private failQueuedSteerStart(chatId: string, next: QueuedSteer, drainedRunId: string, error: unknown, storeBusyExhausted: boolean): void {
+    this.steerDrainBackoff.delete(next.id);
+    const code = refusalCode(error);
+    // A waiting Goal refuses a system turn and parks its relay with this run id; the Goal's next turn carries it as
+    // context. That is a hand-off, not a lost report (Yotube 2026-10-17T17:36:21Z steer c9bd1c58: "failed", yet its
+    // relay was parked and delivered at 19:44).
+    if (code === "goal_waiting_system_start_refused" && relayParkedForRun(drainedRunId)) {
+      this.settleQueuedSteerDurably(next.id, "cancelled", "parked-for-waiting-goal");
+      console.info(`[invocation] queued steer parked for the waiting Goal steer=${next.id} chat=${chatId} cause=parked-for-waiting-goal code=${code}`);
+      return;
+    }
+    const cause: DurableQueuedSteerTerminalCause = storeBusyExhausted ? "drain-store-busy-exhausted" : code ? "drain-start-refused" : "drain-start-error";
+    this.settleQueuedSteerDurably(next.id, "failed", cause);
+    const message = error instanceof Error ? error.message : String(error);
+    // The queued direction was never a chat message (start() persists it), so a failed start used
+    // to erase the owner's sentence and leave no trace of why (Youtube room, 2026-10-10 08:55).
+    // Log the cause marker with the typed code, keep the sentence as the owner's own turn, and say so briefly.
+    console.warn(`[invocation] queued steer failed to start steer=${next.id} chat=${chatId} cause=${cause} code=${code ?? "none"} `
+      + `detail=${redactSecrets(message).replace(/\s+/g, " ").slice(0, 400)}`);
+    try {
+      const request = next.request;
+      const text = typeof request.userPrompt === "string" ? request.userPrompt : "";
+      // A carried direction's own rows are already in the chat (carried-owner-followups.ts): never a second copy.
+      if (text.trim() && request.promptOrigin !== "system" && !request.agentAppMode && !next.id.startsWith(CARRIED_FOLLOWUP_STEER_PREFIX)) {
+        // A preflight copy of the same direction may already have been delivered as a user turn.
+        const delivered = getDb().prepare(
+          "SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'user' AND text = ? AND created_at >= ? LIMIT 1",
+        ).get(chatId, text, next.queuedAt);
+        if (!delivered) {
+          appendChatMessage(chatId, "user", text, request.images?.length ? { images: request.images } : undefined);
+          // No synthetic "could not hand over" reply: the message is shown once, the cause is in the log above.
+        }
+      }
+    } catch (persistError) {
+      console.warn("[invocation] failed queued steer could not be preserved in the chat:", persistError);
+    }
+    this.publishEvent({
+      runId: "steer",
+      chatId,
+      event: { kind: "error", error: { code: "steer-start-failed", message } },
+    });
+  }
+
+  /**
+   * The owner takes a held direction back into the composer (invoke:returnSteeringRecovery). Its text is returned and
+   * the held row retired in ONE transaction, so the composer holds the only copy. Owner 2026-10-18: a held follow-up
+   * stayed listed forever because only host-written held rows were ever retired; One now puts the text back once
+   * (renderer 38f5892d) and this retires the row. Both held forms One lists are accepted: a queued direction held at
+   * restart (invocation_steers) and an owner text a native turn could not confirm (`native-owner:<intent>`). It runs on
+   * the shared store whichever process owns the chat's run: a held row is in no process's live queue
+   * (recoverQueuedSteers never queues one, the drain CAS refuses it) and an uncertain current-turn row is never
+   * dispatched again. Owner text only, idempotent, never starts a turn.
+   */
+  returnSteeringRecovery(id: string, expectedChatId?: string): InvocationSteerRecoveryReturn {
+    if (typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(id)) throw new Error("steer_recovery_invalid_id");
+    if (expectedChatId !== undefined && (typeof expectedChatId !== "string" || !expectedChatId)) throw new Error("steer_recovery_invalid_chat_id");
+    const result = id.startsWith(NATIVE_OWNER_RECOVERY_PREFIX)
+      ? returnUncertainOwnerText(id.slice(NATIVE_OWNER_RECOVERY_PREFIX.length), expectedChatId)
+      : returnHeldOwnerSteer(id, expectedChatId);
+    if (result.status === "returned") {
+      console.info(`[invocation] held direction returned to the owner steer=${id} chat=${result.chatId} cause=held-returned-to-owner`);
+      try { emitDesktopStoreChange({ entity: "chat", id: result.chatId }); } catch { /* the retirement is durable */ }
+    }
+    return { id, ...result } as InvocationSteerRecoveryReturn;
   }
 }
 
