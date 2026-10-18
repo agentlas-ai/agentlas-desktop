@@ -40,6 +40,7 @@ import type { RunnerFailure, RunnerFailureKind, RunnerRequest } from "../runtime
 import { decideTurnSettlement, RATE_LIMIT_MAX_RETRIES } from "../../shared/turn-settlement";
 import { looksSecret, redactSecrets } from "../../shared/secret-patterns";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
+import { runtimeRequestRefusal } from "../../shared/runtime-capabilities";
 
 /** Keep output/authority rules fixed; task contracts and owner observations stay in system. */
 export function composeJudgmentSystemPrompt(id: string, fixed: string[], contract: string[] = [], context: string[] = []): string {
@@ -1007,6 +1008,19 @@ async function callJudgmentModelDetailed(opts: {
         skippedAttempt(lastFailure, "refused");
         continue;
       }
+      // R-090: the exact request shape this attempt sends, against the runtime's declared adapter limits
+      // (shared/runtime-capabilities.ts). A runtime that would refuse it is skipped without a spawn.
+      const declaredRefusal = runtimeRequestRefusal(runtime.kind, { permission: "read", untrustedNoTools: requiresNoTools,
+        judgmentOnly: !opts.authoring });
+      if (declaredRefusal) {
+        runtimeReceipt = { route, fingerprint: candidateFingerprint, execution: "not_invoked",
+          ...(opts.selectionPolicy ? { selectionPolicy: opts.selectionPolicy } : {}),
+          selection: { ...workerIdentity, kind: runtime.kind, backend: runtime.backend, source: runtime.source, model: runtime.model ?? undefined } };
+        lastFailure = { kind: "unsupported", runtime: runtime.kind, source: "marker",
+          providerCode: `judgment_${declaredRefusal}`, message: `judgment_${declaredRefusal}` };
+        skippedAttempt(lastFailure, "refused");
+        continue;
+      }
       if (workerFallback && pinnedRuntimeCredentialOrModelUnavailable(runtime)) {
         const credentialUnavailable = isRuntimeCredentialUnavailable(runtime);
         runtimeReceipt = { route, fingerprint: candidateFingerprint, execution: "not_invoked", selection: {
@@ -1153,7 +1167,9 @@ async function callJudgmentModelDetailed(opts: {
     if (!opts.runtimeSelection && pool?.state === "unconfigured" && operationalStoreUnavailable) {
       const selection = readRuntimeSelectionMirror();
       const recovery = selection ? pickRecoveryRunner(selection) : null;
-      if (requiresNoTools && selection?.kind === "antigravity") return { text: null, failure: {
+      // The recovery runtime's declared limits for the request below (R-090; was an Antigravity-only special case).
+      if (selection && runtimeRequestRefusal(selection.kind, { permission: "read", untrustedNoTools: requiresNoTools,
+        judgmentOnly: !opts.authoring })) return { text: null, failure: {
         kind: "unsupported", runtime: selection.kind, source: "marker",
         providerCode: "judgment_preparation_isolation_unavailable",
         message: "judgment_preparation_isolation_unavailable",

@@ -37,7 +37,7 @@ import { agentActivityKey, registerAgentResidency, touchAgentResidency } from ".
 import { acpOrLegacyRunner, acpSessionKind, createAcpRunner, type AcpAgentSpec } from "./acp";
 import { resolveAcpAgentSpec } from "./acp-agents";
 import { acquireLocalInferenceSlot } from "./local-inference-run-slots";
-import { withNativeBrowserGuidance, type Runner, type RunnerFailure } from "./runner";
+import { tagPickedRunnerKind, withNativeBrowserGuidance, type Runner, type RunnerFailure } from "./runner";
 import { getSubscriptionCreditUse, peekProviderQuotaExhausted } from "../usage";
 import { peekAgentlasCreditsAvailable } from "../billing";
 import { listModelRoleMembers } from "../store/model-roles";
@@ -304,13 +304,14 @@ export function pickRunner(active: RuntimeStatus): { runner: Runner; label: stri
   };
   const selected = pickRunnerWithoutHostGuidance(active, spec);
   // 모든 제품 경로가 여기를 지난다 — 어느 루프에 버그가 있어도 실패하는 런타임을 분당 수만 번 띄우지 못한다(invocation-breaker).
+  // The kind tag lets an inheriting caller (the memory curator) read this runtime's declared request limits.
   return selected
-    ? { ...selected, runner: invocationBreaker.wrap(withNativeBrowserGuidance(withDaemonAgentContext(withAgentContext(
+    ? { ...selected, runner: tagPickedRunnerKind(invocationBreaker.wrap(withNativeBrowserGuidance(withDaemonAgentContext(withAgentContext(
       // Innermost: the ledger sees the request after every host wrapper, exactly as the adapter does (context-reduction C01).
       withMemorySourceRunner(withRemoteCurationRuntime(withModelCallLedger(async(req,events)=>{if(!configurationCurrent())throw new Error("runtime_selected_configuration_changed");return selected.runner(req,events);}, { kind: active.kind, backend: active.backend ?? null, model: active.model ?? null, effort: null }), active, configurationCurrent)),
       { kind: active.kind, ...(active.backend ? { backend: active.backend } : {}) },
       { configurationSource:active.source,configurationIdentity }),
-      { kind: active.kind,configurationIdentity,...(active.backend ? { backend: active.backend } : {}) }), active.kind), invocationBreakerKey(active), selected.label) }
+      { kind: active.kind,configurationIdentity,...(active.backend ? { backend: active.backend } : {}) }), active.kind), invocationBreakerKey(active), selected.label), active.kind) }
     : null;
 }
 

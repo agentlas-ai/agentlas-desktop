@@ -5,7 +5,8 @@ import { parseMemoryEvents, type RawMemoryEvent } from "./events";
 import { curateEvents, type CurationContext, type CurationReport } from "./curator";
 import { listMemoryForContext } from "./store";
 import { looksSecret } from "../../shared/secret-patterns";
-import { withoutMcpTransportEnv, type Runner } from "../runtime/runner";
+import { pickedRunnerKind, withoutMcpTransportEnv, type Runner } from "../runtime/runner";
+import { runtimeRequestRefusal } from "../../shared/runtime-capabilities";
 import { runObservedRunnerAs } from "../runtime/observed-runner";
 import { callConnectedModel, connectedModelTimeoutMs } from "../system-agents/judgment";
 import { MEMORY_KINDS, MEMORY_SCOPES } from "../architecture/manifest";
@@ -217,7 +218,12 @@ async function runModel(request: AutomaticMemoryModelInput, runtime: AutomaticMe
   const execute = async (): Promise<string | null> => {
     if (controller.signal.aborted) return null;
     if (runtime?.judge) return runtime.judge({ ...request, timeoutMs, signal: controller.signal });
-    if (runtime?.runner && runtime.backendLabel) {
+    // R-090: an inherited turn runtime whose declared limits refuse this request is never called (production
+    // 2026-10-14..16: Antigravity refused all 69 calls, 2.7 s each); the judgment pool below takes it directly.
+    const inheritedKind = pickedRunnerKind(runtime?.runner);
+    const inheritedRefuses = Boolean(inheritedKind && runtimeRequestRefusal(inheritedKind,
+      { untrustedNoTools: true, judgmentOnly: true, permission: "read" }));
+    if (runtime?.runner && runtime.backendLabel && !inheritedRefuses) {
       try {
         const result = await runObservedRunnerAs("curator", "automatic-memory-curator", runtime.runner, {
           systemPrompt: request.systemPrompt, history: [], userPrompt: request.input,

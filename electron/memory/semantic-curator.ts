@@ -5,7 +5,8 @@ import { runObservedRunner, runObservedRunnerAs, ObservedRunnerFailureError } fr
 import { looksSecret } from "../../shared/secret-patterns";
 import { MEMORY_SCOPES, type MemoryScope } from "../architecture/manifest";
 import { randomUUID } from "node:crypto";
-import { withoutMcpTransportEnv, type Runner } from "../runtime/runner";
+import { pickedRunnerKind, withoutMcpTransportEnv, type Runner } from "../runtime/runner";
+import { runtimeRequestRefusal } from "../../shared/runtime-capabilities";
 import type { RawMemoryEvent } from "./events";
 import { parseMemoryEvents } from "./events";
 import { callConnectedModel } from "../system-agents/judgment";
@@ -185,6 +186,30 @@ export async function runSemanticMemoryReview(input: {
   try { assertMemorySourceCustody(sourceCustody); }
   catch { return { ...binding, semanticAttempted: true, semanticFailed: true }; }
   if (request.reviewableIndices.length === 0) return binding;
+  // The configured no-tools judgment pool, the same lane a refusing runtime falls back to below.
+  const judgmentPoolDecisions = async (): Promise<SemanticMemoryDecision[] | null> => {
+    const text = await callConnectedModel({
+      systemPrompt: SEMANTIC_MEMORY_CURATOR_PROMPT,
+      input: request.prompt,
+      locale: input.locale,
+      signal: input.signal,
+      requireNoTools: true,
+    });
+    const decisions = text ? parseSemanticCurationResponse(text, request.reviewableIndices) : [];
+    return decisions.length === request.reviewableIndices.length ? decisions : null;
+  };
+  // R-090: a turn runtime whose declared limits refuse this no-tools request is never called (production 2026-10-14..16:
+  // the curator inherited Antigravity and every call was a refusal). The judgment pool takes it directly.
+  const inheritedKind = pickedRunnerKind(input.runner);
+  if (inheritedKind && runtimeRequestRefusal(inheritedKind, { untrustedNoTools: true, permission: "read" })) {
+    if (input.signal?.aborted) return { ...binding, semanticAttempted: true, semanticFailed: true };
+    try {
+      const decisions = await judgmentPoolDecisions();
+      if (decisions) return { ...binding, semanticDecisions: decisions, semanticAttempted: true, semanticFailed: false };
+    } catch { /* the policy path below takes it */ }
+    console.warn(`[memory] semantic curator fell back to policy: ${inheritedKind}_declared_no_tools_unsupported`);
+    return { ...binding, semanticAttempted: true, semanticFailed: true };
+  }
   try {
     const result = await runObservedRunnerAs("curator", "semantic-curator", input.runner, {
       systemPrompt: SEMANTIC_MEMORY_CURATOR_PROMPT,
@@ -231,17 +256,8 @@ export async function runSemanticMemoryReview(input: {
     const refused = isJudgmentRefusal(error);
     if (refused && !input.signal?.aborted) {
       try {
-        const text = await callConnectedModel({
-          systemPrompt: SEMANTIC_MEMORY_CURATOR_PROMPT,
-          input: request.prompt,
-          locale: input.locale,
-          signal: input.signal,
-          requireNoTools: true,
-        });
-        const decisions = text ? parseSemanticCurationResponse(text, request.reviewableIndices) : [];
-        if (decisions.length === request.reviewableIndices.length) {
-          return { ...binding, semanticDecisions: decisions, semanticAttempted: true, semanticFailed: false };
-        }
+        const decisions = await judgmentPoolDecisions();
+        if (decisions) return { ...binding, semanticDecisions: decisions, semanticAttempted: true, semanticFailed: false };
       } catch { /* 폴백의 폴백은 없다 — 아래 정책 경로가 받는다. */ }
     }
     console.warn(`[memory] semantic curator fell back to policy: ${error instanceof Error ? error.message : "unknown"}`);

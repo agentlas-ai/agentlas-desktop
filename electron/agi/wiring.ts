@@ -38,6 +38,7 @@ import { callAgiReadTool } from "./read-tools";
 import { AgiModelAttempt, type AgiModelCandidate } from "./model-attempt";
 import { agiRestartAgentlasBrowser, agiRunLoginRecovery } from "./browser-seams";
 import type { RuntimeSelection } from "../../shared/types";
+import { runtimeRequestRefusal } from "../../shared/runtime-capabilities";
 import { currentUiLocale } from "../ui-locale";
 import { PERSISTENCE_DECISION_SCHEMA, type FailureCauseKind } from "../../shared/persistence-policy";
 import { AgiActionExecutor, type AgiExecutorDeps, type AgiGoalView, type AgiLoginRecoveryOutcome, type AgiLoginRecoveryControl, type AgiLoginRecoveryResult, type AgiPlanView, type AgiStrategyBatch } from "./actions";
@@ -259,7 +260,10 @@ async function agiModelCandidates(goalId: string): Promise<AgiModelCandidate[]> 
     if (out.some((candidate) => candidate.status.kind === entry.status!.kind && candidate.selection.model === entry.selection!.model)) continue;
     out.push({ selection: entry.selection, status: entry.status, label: entry.label, source: "pool" });
   }
-  return out.slice(0, 3);
+  // R-090: AGI asks read-only, no-tools judgment calls (model-attempt.ts); a runtime whose declared limits refuse that
+  // request (the Goal's own controller included) would only spend one of the three slots on a refusal.
+  return out.filter((candidate) => !runtimeRequestRefusal(candidate.status.kind,
+    { permission: "read", untrustedNoTools: true, judgmentOnly: true })).slice(0, 3);
 }
 
 function mainLogPath(): string | null {

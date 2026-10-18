@@ -55,6 +55,7 @@ import { waitForRetiredCliExit } from "./retired-cli-exit";
 import { tStatus } from "./status-i18n";
 import { selectionFor } from "../capabilities/one-capabilities";
 import { agyProductHomePath, agySpawnHome, agySpawnsInPersonalHome, withAgyProductHome } from "./antigravity-personal-context";
+import { runtimeRequestRefusal } from "../../shared/runtime-capabilities";
 import { abortReasonError } from "./abort-reason";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, standardAntigravityBinDirs, windowsCliCommandBudget } from "./exec";
 import { stageCliImageAttachments } from "./image-attachments";
@@ -3354,10 +3355,13 @@ async function runPreparedAntigravityAttempt(
   }
 };
 
-/** A configured tool surface must not silently become an answer-only read run. */
+/**
+ * A configured tool surface must not silently become an answer-only read run. The condition is the declared
+ * readWithTools limit (shared/runtime-capabilities.ts RUNTIME_REQUEST_LIMITS), the row selectors filter on.
+ */
 export function antigravityReadToolFailure(req: RunnerRequest): RunnerFailure | undefined {
-  if (req.permission !== "read" || req.browserOnly
-    || (!req.mcpConfigPath && !req.mcpAllowedTools?.length)) return undefined;
+  if (runtimeRequestRefusal(ANTIGRAVITY_KIND, { permission: req.permission, browserOnly: req.browserOnly,
+    mcpConfigPath: req.mcpConfigPath, mcpAllowedTools: req.mcpAllowedTools }) !== "read_tools_unsupported") return undefined;
   return {
     kind: "refused", runtime: "antigravity", source: "marker",
     providerCode: "agy_read_tools_unsupported",
@@ -3384,7 +3388,10 @@ export const runAntigravity: Runner = async (
   // read permission without auto-approval is not a verified no-tools envelope.
   // Refuse before discovery, attachment staging, MCP reconciliation or spawn;
   // trusted invocations retain their existing permission and session contracts.
-  if (req.untrustedNoTools) {
+  // Both refusals are the declared limits selectors filter on (shared/runtime-capabilities.ts RUNTIME_REQUEST_LIMITS).
+  const declaredRefusal = runtimeRequestRefusal(ANTIGRAVITY_KIND, { untrustedNoTools: req.untrustedNoTools,
+    judgmentOnly: req.judgmentOnly, restrictedReadBoundary: req.restrictedReadBoundary });
+  if (req.untrustedNoTools && declaredRefusal === "untrusted_no_tools_unsupported") {
     throw new RuntimeJudgmentRefusal(
       "antigravity",
       req.locale === "ko"
@@ -3392,7 +3399,7 @@ export const runAntigravity: Runner = async (
         : "Antigravity CLI has no verified isolation that disables all built-in tools and inherited MCP servers. This untrusted run cannot start; use a runtime with verified isolation.",
     );
   }
-  if (req.restrictedReadBoundary) {
+  if (declaredRefusal === "restricted_read_unsupported") {
     throw markRefusedBeforeDispatch(new Error(
       "Antigravity is not enabled for restricted read-only execution because its host filesystem boundary is not release-verified.",
     ));

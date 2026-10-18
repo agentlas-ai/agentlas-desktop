@@ -1326,6 +1326,20 @@ export type Runner = (
 ) => Promise<RunnerResult>;
 
 /**
+ * The runtime kind selection.ts pickRunner chose for this exact runner function. A caller that inherits a runner (the
+ * memory curator inherits the turn runner) reads it to skip a runtime whose declared request limits refuse the request
+ * it is about to send (shared/runtime-capabilities.ts runtimeRequestRefusal). undefined for any other runner.
+ */
+const PICKED_RUNNER_KINDS = new WeakMap<Runner, string>();
+export function tagPickedRunnerKind<T extends Runner>(runner: T, kind: string): T {
+  PICKED_RUNNER_KINDS.set(runner, kind);
+  return runner;
+}
+export function pickedRunnerKind(runner: Runner | undefined): string | undefined {
+  return runner ? PICKED_RUNNER_KINDS.get(runner) : undefined;
+}
+
+/**
  * MCP-less orchestration turns must not inherit transport-only environment.
  *
  * A parent run can own the native Agentlas Browser while its planner or
