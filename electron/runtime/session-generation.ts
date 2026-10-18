@@ -42,20 +42,27 @@ const RUNTIME_PROVIDER: Readonly<Record<string, string>> = {
 
 /**
  * Windows a runtime itself reported for a model the product's table does not know (Codex app-server
- * `thread/tokenUsage/updated` → tokenUsage.modelContextWindow, codex 0.162.1 schema). Kept in memory and in the meta store,
- * so a restart keeps the observed number. Never a guess: only a positive integer the runtime sent.
+ * `thread/tokenUsage/updated` → tokenUsage.modelContextWindow, codex 0.162.1 schema; Claude Code stream-json
+ * `result.modelUsage[<model>].contextWindow`, SDK ModelUsage, CLI 2.1.x). Kept in memory and in the meta store, so a
+ * restart keeps the observed number. Never a guess: only a positive integer the runtime sent. `evidence` names the field
+ * it came from, kept beside the number in the meta store.
+ *
+ * Claude Code takes only the aliases opus|sonnet|haiku|fable, which no catalog row matches: before this, the 80% rotation
+ * of every claude-code conversation ran on an unknown window and never fired (production 2026-10-17: native autocompact at
+ * 967,014 and 968,073 tokens of a 1M window, windowProvenance "unknown"; 100/100 bindings still generation 1).
  */
 const observedWindows = new Map<string, number>();
 const observedKey = (kind: string, model: string): string => `runtime-observed-window:${kind}:${model}`;
 type MetaApi = { getMeta(key: string): string | null; setMeta(key: string, value: string): void };
 function meta(): MetaApi | null { try { return require("../store/meta") as MetaApi; } catch { return null; } }
 
-export function recordObservedContextWindow(kind: string, model: string | null | undefined, tokens: unknown): boolean {
+export function recordObservedContextWindow(kind: string, model: string | null | undefined, tokens: unknown, evidence?: string): boolean {
   if (!model || typeof tokens !== "number" || !Number.isSafeInteger(tokens) || tokens <= 0) return false;
   const key = observedKey(kind, model);
   if (observedWindows.get(key) === tokens) return true;
   observedWindows.set(key, tokens);
-  try { meta()?.setMeta(key, JSON.stringify({ tokens, observedAt: new Date().toISOString() })); } catch { /* this process keeps it */ }
+  try { meta()?.setMeta(key, JSON.stringify({ tokens, observedAt: new Date().toISOString(), ...(evidence ? { evidence } : {}) })); }
+  catch { /* this process keeps it */ }
   return true;
 }
 

@@ -39,6 +39,17 @@ export interface AgentContextDelivery {
   entries: AgentContextEntry[];
 }
 export interface AgentContextPendingDelivery extends AgentContextDelivery { status: "pending" | "uncertain" }
+/**
+ * What adoption did for one identity, as a typed outcome (G09). `retainedKeys` are other heads of the same owner, agent
+ * and visibility domain under an earlier service identity that stay where they are: the adopted (newest) head was
+ * bootstrapped from the conversation's chat rows when it started, so it already carries what those older journals said
+ * (production 2026-10-12: chat 7a252a26's new head opens with the 16 messages the old head held as turns); moving them in
+ * as well would replay that conversation twice. Their tool and turn-context rows remain readable under their own key.
+ */
+export type AgentContextAdoption =
+  | { outcome: "none" }
+  | { outcome: "current"; retainedKeys: string[] }
+  | { outcome: "adopted"; fromKey: string; fromRevision: number; fromThroughSeq: number; retainedKeys: string[] };
 function fail(code: string): never { throw Object.assign(new Error(code), { code }); }
 function nonempty(value: unknown): asserts value is string {
   if (typeof value !== "string" || !value.trim()) fail("agent_context_identity_invalid");
@@ -136,27 +147,40 @@ export function createAgentContextStore(getDb: () => Database.Database) {
    * mount: after the 2026-10-12 reboot all 19 heads stopped and 6 new ones started, every agent re-bootstrapped its whole
    * history and opened new native sessions). The newest head with the same owner, agent and visibility domain is moved
    * under the current key, with its entries, provider bindings (native handles), deliveries and acknowledged blocks.
+   *
+   * The common turn finds its head already under the current key: that is read without a write lock (every turn used to
+   * take one here). Only a missing head with an earlier one to move takes the immediate transaction, which re-checks both.
    */
-  function adoptPriorHead(identity: AgentContextIdentity): boolean {
+  function priorHeadKeys(identity: AgentContextIdentity, key: string): string[] {
+    return (getDb().prepare(`SELECT context_key FROM agent_context_heads
+      WHERE json_extract(identity_json,'$.ownerScope')=? AND json_extract(identity_json,'$.agentId')=?
+        AND json_extract(identity_json,'$.visibilityDomain')=? AND context_key<>?
+      ORDER BY updated_at DESC`).all(identity.ownerScope, identity.agentId, identity.visibilityDomain, key) as Array<{ context_key: string }>)
+      .map(row => row.context_key);
+  }
+  function adoptPriorHeadReport(identity: AgentContextIdentity): AgentContextAdoption {
     const key = agentContextKey(identity), db = getDb();
-    const adopted = db.transaction(() => {
-      if (db.prepare("SELECT 1 FROM agent_context_heads WHERE context_key=?").get(key)) return false;
-      const prior = db.prepare(`SELECT * FROM agent_context_heads
-        WHERE json_extract(identity_json,'$.ownerScope')=? AND json_extract(identity_json,'$.agentId')=?
-          AND json_extract(identity_json,'$.visibilityDomain')=?
-        ORDER BY updated_at DESC LIMIT 1`).get(identity.ownerScope, identity.agentId, identity.visibilityDomain) as (Head & { updated_at: string }) | undefined;
-      if (!prior) return false;
+    const present = () => !!db.prepare("SELECT 1 FROM agent_context_heads WHERE context_key=?").get(key);
+    if (present()) return { outcome: "current", retainedKeys: priorHeadKeys(identity, key) };
+    if (!priorHeadKeys(identity, key).length) return { outcome: "none" };
+    const result = db.transaction((): AgentContextAdoption => {
+      if (present()) return { outcome: "current", retainedKeys: priorHeadKeys(identity, key) };
+      const priors = priorHeadKeys(identity, key);
+      const prior = priors.length ? db.prepare("SELECT * FROM agent_context_heads WHERE context_key=?").get(priors[0]) as (Head & { updated_at: string }) | undefined : undefined;
+      if (!prior) return { outcome: "none" };
       db.prepare("INSERT INTO agent_context_heads(context_key,identity_json,revision,through_seq,open_delivery_id,updated_at) VALUES (?,?,?,?,?,?)")
         .run(key, JSON.stringify(identity), prior.revision, prior.through_seq, prior.open_delivery_id, prior.updated_at);
       for (const table of ["agent_context_entries", "agent_context_bindings", "agent_context_deliveries", "agent_context_stable_blocks"]) {
         db.prepare(`UPDATE ${table} SET context_key=? WHERE context_key=?`).run(key, prior.context_key);
       }
       db.prepare("DELETE FROM agent_context_heads WHERE context_key=?").run(prior.context_key);
-      return true;
+      return { outcome: "adopted", fromKey: prior.context_key, fromRevision: prior.revision, fromThroughSeq: prior.through_seq,
+        retainedKeys: priors.slice(1) };
     }).immediate();
-    if (adopted) observe(identity, head(identity, false), true);
-    return adopted;
+    if (result.outcome === "adopted") observe(identity, head(identity, false), true);
+    return result;
   }
+  function adoptPriorHead(identity: AgentContextIdentity): boolean { return adoptPriorHeadReport(identity).outcome === "adopted"; }
   function readRange(identity: AgentContextIdentity, range: {after?:number;through?:number} = {}): AgentContextSnapshot {
     const after=range.after??0,through=range.through??Number.MAX_SAFE_INTEGER;
     if(!Number.isSafeInteger(after)||after<0||!Number.isSafeInteger(through)||through<after)fail("agent_context_read_range_invalid");
@@ -338,5 +362,5 @@ export function createAgentContextStore(getDb: () => Database.Database) {
     }
     return max;
   }
-  return {adoptPriorHead,read,readRange,readSource,readHead,acknowledgedStableBlockHashes,append,beginDelivery,readPendingDelivery,readOpenPendingDelivery,acknowledgeDelivery,markDeliveryUncertain,invalidateProvider,maxTurnOrdinal};
+  return {adoptPriorHead,adoptPriorHeadReport,read,readRange,readSource,readHead,acknowledgedStableBlockHashes,append,beginDelivery,readPendingDelivery,readOpenPendingDelivery,acknowledgeDelivery,markDeliveryUncertain,invalidateProvider,maxTurnOrdinal};
 }

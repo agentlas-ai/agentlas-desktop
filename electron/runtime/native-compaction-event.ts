@@ -12,6 +12,7 @@
 import { resolveEffectiveContextWindow } from "../../shared/models";
 import { tryRecordRunEvent } from "../store/run-events";
 import { currentModelCallScope } from "./model-call-ledger";
+import { observedContextWindow } from "./session-generation";
 
 export const NATIVE_COMPACTION_SCHEMA = "agentlas.native-compaction.v1";
 export const NATIVE_COMPACTION_EVENT_KIND = "native_compaction";
@@ -21,9 +22,18 @@ export type WindowProvenance = "verified" | "assumed" | "unknown";
 /** Backend names the model catalog knows each subscription runtime by (mirrors session-generation.ts). */
 const RUNTIME_PROVIDER: Readonly<Record<string, string>> = { "claude-code": "anthropic", codex: "openai" };
 
-/** The window W a compaction is judged against, with where it came from. `assumed` = a host-configured limit. */
+/**
+ * The window W a compaction is judged against, with where it came from. `assumed` = a host-configured limit. What the
+ * runtime itself reported for the model wins (source "observed"), the catalog after it: production 2026-10-17 judged Codex
+ * compactions against the catalog's 1,050,000 while Codex reported 258,400 / 475,000 for those models (read as compaction at
+ * 16-34% of W), and Claude Code's alias ("sonnet") matched no catalog row at all (W unknown at 967k tokens of a 1M window).
+ */
 export function windowWithProvenance(runtime: string, model: string | null | undefined, configuredLimit?: number | null):
   { tokens?: number; provenance: WindowProvenance; source: string } {
+  try {
+    const observed = observedContextWindow(runtime, model);
+    if (observed) return { tokens: observed, provenance: "verified", source: "observed" };
+  } catch { /* the catalog below */ }
   for (const backend of [runtime, RUNTIME_PROVIDER[runtime]].filter((value): value is string => Boolean(value))) {
     try {
       const found = resolveEffectiveContextWindow(backend, model, false);

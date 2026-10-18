@@ -6,7 +6,7 @@ import { getDb } from "../store/db";
 import {
   createAgentContextStore, agentContextKey, agentContextProviderKey,
   type AgentContextIdentity, type AgentContextProvider, type AgentContextEvent,
-  type AgentContextSnapshot, type AgentContextDelivery, type AgentContextPendingDelivery,
+  type AgentContextSnapshot, type AgentContextDelivery, type AgentContextPendingDelivery, type AgentContextAdoption,
 } from "../store/agent-context";
 import type { Runner, RunnerRequest, RunnerEvents, RunnerResult } from "./runner";
 import { markRefusedBeforeDispatch, runnerRefusedBeforeDispatch } from "./runner";
@@ -15,7 +15,7 @@ import { redactOperationalSecrets } from "../invocation/event-secret-redaction";
 import { redactSecrets } from "../../shared/secret-patterns";
 import { composeResumeTurnPrompt } from "./continuity";
 import { parseMemoryEvents, stripAllMemoryEventBlocks } from "../memory/events";
-import { decideGeneration, runtimeContextWindow } from "./session-generation";
+import { decideGeneration, runtimeContextWindow, runtimeContextWindowProvenance } from "./session-generation";
 import { stripGoalWaitDisplayText } from "../long-run/wait-emitter";
 import { stripGoalCompleteMarker, stripStormbreakerContinueMarker } from "../hephaestus/loop-engineering";
 import { stripStaffGuidance } from "../one/owner-prompt";
@@ -84,6 +84,86 @@ function current(capability: AgentContextCapability) {
   value.binding.assertCurrent();
   return value;
 }
+/** The chat and run of a host-built turn id `agent-context-turn:[chatId, runId, ordinal]` (agent-context-admission.ts). */
+function turnRunRef(turnId: string): { chatId: string; runId: string } | null {
+  if (!turnId.startsWith("agent-context-turn:")) return null;
+  try {
+    const source: unknown = JSON.parse(turnId.slice("agent-context-turn:".length));
+    return Array.isArray(source) && typeof source[0] === "string" && source[0] && typeof source[1] === "string" && source[1]
+      ? { chatId: source[0], runId: source[1] } : null;
+  } catch { return null; }
+}
+/** One structured run event of this layer: ids, enums and counts only (no text, no path); evidence, never a control. */
+function recordAgentContextRunEvent(turnId: string, agentId: string, kind: string, payload: Record<string, unknown>, sourceEventId?: string): void {
+  try {
+    const ref = turnRunRef(turnId);
+    const { tryRecordRunEvent } = require("../store/run-events") as typeof import("../store/run-events");
+    tryRecordRunEvent({ runId: ref?.runId ?? "agent-context-unscoped", ...(ref ? { chatId: ref.chatId } : {}), agentId, kind, payload,
+      ...(sourceEventId ? { sourceEventId } : {}) });
+  } catch { /* The journal and the binding row stay the record. */ }
+}
+export const AGENT_CONTEXT_ADOPTION_EVENT_KIND = "agent_context_adoption";
+export const AGENT_CONTEXT_GENERATION_EVENT_KIND = "agent_context_generation";
+const contextRef = (key: string): string => key.slice(0, 16);
+/** The machine-readable cause of an adoption failure, from the error's own code (SQLite or this layer's), never its words. */
+export function agentContextAdoptionCause(error: unknown): string {
+  const code = error && typeof error === "object" && "code" in error && typeof (error as { code: unknown }).code === "string"
+    ? (error as { code: string }).code : "";
+  if (/^SQLITE_(?:BUSY|LOCKED)/.test(code)) return "agent_context_adoption_busy";
+  if (/^SQLITE_CONSTRAINT/.test(code)) return "agent_context_adoption_conflict";
+  if (/^agent_context_[a-z0-9_]+$/.test(code)) return code;
+  return "agent_context_adoption_failed";
+}
+/** Outcomes already reported by this process (one event per conversation, head and cause, not one per Goal pass). */
+const reportedAdoptions = new Set<string>();
+/** The cause of this process's last failed adoption per conversation; the adoption that later succeeds names it. */
+const failedAdoptions = new Map<string, string>();
+function firstReport(mark: string): boolean {
+  if (reportedAdoptions.has(mark)) return false;
+  reportedAdoptions.add(mark);
+  if (reportedAdoptions.size > 4096) reportedAdoptions.delete(reportedAdoptions.values().next().value!);
+  return true;
+}
+/*
+ * G09: adoption is a typed outcome, never a silent catch. Production 2026-10-12..18 kept five pairs of heads of one agent in
+ * one conversation (Yotube One chat 8f3e09ee: old rev 1,598 beside the live rev 23,981); a failure here was swallowed, so
+ * nobody could tell a failed move from a kept older journal. Each outcome other than an unchanged head is one run event:
+ *  - adopted: the newest earlier head moved under this identity (native handles, cursors and deliveries with it), naming
+ *    the cause of a failed attempt before it when there was one;
+ *  - retained: older heads of the same conversation that stay where they are;
+ *  - failed: the cause code. A busy store refuses this turn before dispatch: the next turn adopts the same journal, where
+ *    starting another head would fork the conversation for good. Any other cause keeps the turn going on this identity's
+ *    own head (no dead end), loudly.
+ */
+function adoptPriorJournal(identity: AgentContextIdentity, turnId: string): void {
+  const key = agentContextKey(identity), event = (payload: Record<string, unknown>) => recordAgentContextRunEvent(turnId, identity.agentId,
+    AGENT_CONTEXT_ADOPTION_EVENT_KIND, { schemaVersion: "agentlas.agent-context-adoption.v1", contextRef: contextRef(key), ...payload });
+  let adoption: AgentContextAdoption;
+  try { adoption = store.adoptPriorHeadReport(identity); }
+  catch (error) {
+    const causeCode = agentContextAdoptionCause(error);
+    const sqliteCode = error && typeof error === "object" && "code" in error && typeof (error as { code: unknown }).code === "string"
+      && /^SQLITE_[A-Z_]+$/.test((error as { code: string }).code) ? (error as { code: string }).code : undefined;
+    console.warn(`[agent-context] adoption outcome=failed cause=${causeCode}${sqliteCode ? ` sqlite=${sqliteCode}` : ""} context=${contextRef(key)}`);
+    failedAdoptions.set(key, causeCode);
+    if (failedAdoptions.size > 1024) failedAdoptions.delete(failedAdoptions.keys().next().value!);
+    if (firstReport(`failed\0${key}\0${causeCode}`)) event({ outcome: "failed", causeCode, ...(sqliteCode ? { sqliteCode } : {}) });
+    if (causeCode === "agent_context_adoption_busy") refuseBeforeDispatch(causeCode);
+    return;
+  }
+  const recoveredFrom = failedAdoptions.get(key);
+  if (adoption.outcome === "adopted") {
+    failedAdoptions.delete(key);
+    console.info(`[agent-context] adoption outcome=adopted context=${contextRef(key)} from=${contextRef(adoption.fromKey)} retained=${adoption.retainedKeys.length}`);
+    for (const retained of adoption.retainedKeys) firstReport(`retained\0${key}\0${retained}`);
+    event({ outcome: "adopted", fromRef: contextRef(adoption.fromKey), fromRevision: adoption.fromRevision, fromThroughSeq: adoption.fromThroughSeq,
+      retainedRefs: adoption.retainedKeys.map(contextRef), ...(recoveredFrom ? { recoveredFromCause: recoveredFrom } : {}) });
+    return;
+  }
+  if (adoption.outcome !== "current" || !adoption.retainedKeys.length) return;
+  if (!adoption.retainedKeys.map(retained => firstReport(`retained\0${key}\0${retained}`)).includes(true)) return;
+  event({ outcome: "retained", retainedRefs: adoption.retainedKeys.map(contextRef) });
+}
 /** Called only from the authenticated host's original invocation preparation.
  * Account/install identity and visibility domain must already be authorized.
  * Do not expose this constructor in renderer IPC, MCP or a control API. */
@@ -93,7 +173,7 @@ export function createAgentContextCapability(identity: AgentContextIdentity, bin
   // Validation does not create a context row or copy legacy chat transcripts. An existing journal of the same agent in the
   // same conversation is moved under this identity's key when only its service-instance part changed (a reboot).
   agentContextKey(identity);
-  try { store.adoptPriorHead(identity); } catch { /* A failed adoption leaves the journal where it is; this identity starts its own. */ }
+  adoptPriorJournal(identity, binding.turnId);
   const capability = Object.freeze({}) as AgentContextCapability;
   capabilities.set(capability, {identity:{...identity},binding:{...binding}});
   return capability;
@@ -463,11 +543,20 @@ const rotationMetaKey = (contextKey: string, bindingKey: string) => `agent-conte
 const hostFactsMetaKey = (contextKey: string, bindingKey: string) => `agent-context-host-facts:${contextKey}:${bindingKey}`;
 interface AgentContextRotationRecord { fromGeneration: number; toGeneration: number; reason: "context_ratio" | "resume_failed";
   reportedInputTokens: number | null; contextWindowTokens: number | null; rotatedAt: string }
-function recordRotation(delivery: AgentContextDelivery, record: Omit<AgentContextRotationRecord, "fromGeneration" | "toGeneration" | "rotatedAt">): void {
+function recordRotation(delivery: AgentContextDelivery, record: Omit<AgentContextRotationRecord, "fromGeneration" | "toGeneration" | "rotatedAt">,
+  origin?: { runtime: string; agentId: string; windowSource: string }): void {
   try {
     metaStore()?.setMeta(rotationMetaKey(delivery.contextKey, delivery.bindingKey), JSON.stringify({ fromGeneration: delivery.generation,
       toGeneration: delivery.generation + 1, rotatedAt: new Date().toISOString(), ...record } satisfies AgentContextRotationRecord));
   } catch { /* The rotation itself is in the binding row; a lost reason renders as "none". */ }
+  // One run event per generation switch (none existed: production 2026-10-18 showed 0 rotations and nothing to count them by).
+  if (origin) recordAgentContextRunEvent(delivery.turnId, origin.agentId, AGENT_CONTEXT_GENERATION_EVENT_KIND, {
+    schemaVersion: "agentlas.agent-context-generation.v1", runtime: origin.runtime, reason: record.reason,
+    fromGeneration: delivery.generation, toGeneration: delivery.generation + 1,
+    ...(record.reportedInputTokens !== null ? { reportedInputTokens: record.reportedInputTokens } : {}),
+    ...(record.contextWindowTokens !== null ? { contextWindowTokens: record.contextWindowTokens } : {}),
+    windowSource: origin.windowSource, contextRef: contextRef(delivery.contextKey), bindingRef: contextRef(delivery.bindingKey),
+  }, `agent-context-generation:${delivery.contextKey}:${delivery.bindingKey}:${delivery.generation + 1}`);
 }
 function readRotation(delivery: AgentContextDelivery): AgentContextRotationRecord | null {
   try {
@@ -697,6 +786,10 @@ function checkpointRuntimeSelection(req: RunnerRequest, provider: Omit<AgentCont
  * system prompt has it; a resumed one gets the current version as one stable turn-context block when it changed (the
  * runners' dedupeStableTurnContext sends an identical block once per session). Unknown after a restart: sent once.
  */
+/** The native-session seed suffix of a binding generation: none for the first (existing sessions keep their fingerprint). */
+export function nativeGenerationSeed(generation: number): string {
+  return Number.isSafeInteger(generation) && generation > 1 ? `:g${generation}` : "";
+}
 const deliveredInstructions=new Map<string,string>();
 const MAX_DELIVERED_INSTRUCTIONS=512;
 /** Short ACK key for one instructions version: it rides the turn's stable-block list, so the store's stable-block ACK index
@@ -793,7 +886,8 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
         // The same rule as a completed turn's rotation (session-generation.ts), with the symptom the host observed.
         if(decideGeneration({kind:provider.kind,contextWindowTokens:null,lastInputTokens:null,symptom:"resume_failed"}).action!=="new_generation")return;
         try{store.invalidateProvider(value.identity,adapter,delivery.generation);
-          recordRotation(delivery,{reason:"resume_failed",reportedInputTokens:null,contextWindowTokens:null});}catch{/* a concurrent delivery or generation owns the binding */}
+          recordRotation(delivery,{reason:"resume_failed",reportedInputTokens:null,contextWindowTokens:null},
+            {runtime:provider.kind,agentId:value.identity.agentId,windowSource:"none"});}catch{/* a concurrent delivery or generation owns the binding */}
       }});
     };
     if(policy && packet)activeTransports.set(capability,Object.freeze({policy:Object.freeze({...policy}),packet}));
@@ -977,7 +1071,11 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
         runtimeSessionId:nativeHandle??undefined,
         runtimeSessionOwnerId:`agent-context:${delivery.contextKey}:${delivery.bindingKey}`,
         // A native session outlives a locale change (the instructions carry the language); others keep it in the seed.
-        sessionFingerprintSeed:nativeSessionKey?`agent-context.v1:${delivery.contextKey}:${delivery.bindingKey}`
+        // A retired generation (80% rotation, resume_failed) is another native session: the runners' own stores find a
+        // saved session or a live resident by this seed's fingerprint (claude-code getRuntimeSession + claudePoolKey, codex
+        // matchedSessionId + codexPoolKey, ACP storedSessionId), and without the generation they resumed the very session
+        // the rotation retired, recording its handle on the new generation. Generation 1 keeps the seed it always had.
+        sessionFingerprintSeed:nativeSessionKey?`agent-context.v1:${delivery.contextKey}:${delivery.bindingKey}${nativeGenerationSeed(delivery.generation)}`
           :`agent-context.v1:${delivery.contextKey}:${delivery.bindingKey}:${req.locale}`,
         // Stateless API/local adapters do not inspect turnContext. Keep their
         // stable system prefix intact while delivering dynamic host background
@@ -1031,12 +1129,15 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
       // A native session whose last request reached 80% of the model's own window gives way to a new generation for the
       // NEXT turn, seeded from this journal (session-generation.ts, owner 2026-10-13). Background only: nothing on screen.
       if (!decision && stateful && acknowledged === true) {
-        // The runtime's own window when it reports one (ACP usage_update size), else the model catalog's.
+        // The runtime's own window when it reports one (ACP usage_update size, Claude result.modelUsage contextWindow, Codex
+        // tokenUsage modelContextWindow), else what that runtime reported for this model earlier (observed), else the catalog's.
         const contextWindowTokens = result.contextWindowTokens ?? runtimeContextWindow(provider.kind, req.model);
         const generation = decideGeneration({ kind: provider.kind, contextWindowTokens, lastInputTokens: result.contextInputTokens ?? null });
         if (generation.action === "new_generation") {
           try { store.invalidateProvider(current(capability).identity,adapter,delivery.generation);
-            recordRotation(delivery, { reason: "context_ratio", reportedInputTokens: result.contextInputTokens ?? null, contextWindowTokens }); }
+            recordRotation(delivery, { reason: "context_ratio", reportedInputTokens: result.contextInputTokens ?? null, contextWindowTokens },
+              { runtime: provider.kind, agentId: value.identity.agentId, windowSource: result.contextWindowTokens ? "runtime-result"
+                : runtimeContextWindowProvenance(provider.kind, req.model)?.source ?? "unknown" }); }
           catch { /* a concurrent delivery owns the binding; the next completed turn decides again */ }
           // Same rotation receipt as CLI threads and stateless loops, with host facts (docs native-harness 07 G07, G11).
           if (req.chatId) {

@@ -1,6 +1,7 @@
 import { selectionFor } from "../capabilities/one-capabilities";
 import { reportModelPayload, ledgerFromCliSent } from "./model-call-ledger";
 import { recordNativeCompaction } from "./native-compaction-event";
+import { recordObservedContextWindow } from "./session-generation";
 import { ClaudeTaskPlanTracker, createRuntimePlanEmitter } from "./runtime-plan";
 import { claudeMcpIsolation, withClaudePersonalContext, withDisallowedTools } from "./claude-personal-context";
 import { mcpToolSurfaceDenial } from "../mcp-tools/hephaestus-tool-surface";
@@ -338,6 +339,29 @@ export function observedClaudeModelId(modelUsage: unknown): string | null {
     if (!best || tokens > best.tokens) best = { id, tokens };
   }
   return best ? best.id : null;
+}
+
+/**
+ * The context window Claude Code reported for this turn's model: `result.modelUsage[<model>].contextWindow`.
+ *
+ * Shape (SDK `ModelUsage`, embedded in the installed CLI 2.1.302 and claude-agent-sdk 0.3.293 sdk.d.ts):
+ *   { inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, webSearchRequests, costUSD,
+ *     contextWindow, maxOutputTokens, canonicalModel? } keyed by the model string the CLI used ("claude-opus-5[1m]").
+ * The CLI fills contextWindow per request from its own model table and the account's opt-ins, so it is the window that
+ * actually admits this session's requests (production 2026-10-17: autocompact at 967,014 tokens on "sonnet" = 1M).
+ * Only the turn's root model counts (subagent models share the map; the map also carries earlier models after --resume).
+ * null when the root model is unknown, not in the map, reported with two different windows, or 0 (crash/startup results
+ * carry zeroed values): never a guess.
+ */
+export function claudeReportedContextWindow(modelUsage: unknown, turnModel: string | null): number | null {
+  if (!turnModel || !modelUsage || typeof modelUsage !== "object" || Array.isArray(modelUsage)) return null;
+  const windows = new Set<number>();
+  for (const [rawKey, value] of Object.entries(modelUsage as Record<string, unknown>)) {
+    if (String(rawKey).replace(/\[[^\]]*\]\s*$/, "").trim() !== turnModel) continue;
+    const window = value && typeof value === "object" ? (value as { contextWindow?: unknown }).contextWindow : undefined;
+    if (typeof window === "number" && Number.isSafeInteger(window) && window > 0) windows.add(window);
+  }
+  return windows.size === 1 ? windows.values().next().value ?? null : null;
 }
 
 /** Only root assistant messages emitted in this turn identify its actual model. */
@@ -1883,6 +1907,8 @@ const runClaudeTurn = async (
     /** Input of the turn's last root model request (fresh + cache read + cache write): what the next request starts from. */
     let contextInputTokens: number | undefined;
     let contextCachedInputTokens: number | undefined;
+    /** The window the CLI reported for the turn's root model (claudeReportedContextWindow): the 80% rotation's W. */
+    let contextWindowTokens: number | undefined;
     /** Root assistant messages only; result.modelUsage may include resumed turns. */
     const turnModel = new ClaudeTurnModelTracker();
     let stderr = "";
@@ -2610,6 +2636,17 @@ const runClaudeTurn = async (
         if (resumeSessionId && ev.is_error === true && resultShape.subtype === "error_during_execution"
           && resultShape.num_turns === 0) resumedConversationMissing = true;
         if (typeof ev.result === "string") finalText = ev.result;
+        // The window the CLI reported for this turn's root model, recorded under the alias the turn asked for (what the
+        // agent-context rotation and the replay budget look up) and the concrete model it ran.
+        if (!ev.parent_tool_use_id && ev.isSidechain !== true) {
+          const reportedWindow = claudeReportedContextWindow(ev.modelUsage, turnModel.observedModel);
+          if (reportedWindow) {
+            contextWindowTokens = reportedWindow;
+            for (const model of new Set([runReq.model?.trim(), turnModel.observedModel])) {
+              if (model) recordObservedContextWindow(KIND, model, reportedWindow, "claude-code:result.modelUsage.contextWindow");
+            }
+          }
+        }
         // A direction that ran as its own CLI turn ends with a second result of this runner turn: its usage adds up.
         ownResultCount += 1;
         const priorUsage = ownResultCount > 1 ? observedUsage : undefined;
@@ -2901,6 +2938,7 @@ const runClaudeTurn = async (
           tokens,
           observedUsage,
           ...(contextInputTokens ? { contextInputTokens, ...(contextCachedInputTokens !== undefined && contextCachedInputTokens <= contextInputTokens ? { contextCachedInputTokens } : {}) } : {}),
+          ...(contextWindowTokens ? { contextWindowTokens } : {}),
           ...(observedModel ? { observedModel } : {}),
           ...(turnDeliveryFact() ? { turnDelivery: turnDeliveryFact() } : {}),
           appliedEffort,
