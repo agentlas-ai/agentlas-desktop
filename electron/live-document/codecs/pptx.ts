@@ -22,6 +22,15 @@ const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships
 const REL_SLIDE = `${REL}/slide`;
 const REL_LAYOUT = `${REL}/slideLayout`;
 const CT_SLIDE = "application/vnd.openxmlformats-officedocument.presentationml.slide+xml";
+const REL_NOTES = `${REL}/notesSlide`;
+const REL_NOTES_MASTER = `${REL}/notesMaster`;
+const REL_THEME = `${REL}/theme`;
+const CT_NOTES = "application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml";
+const CT_NOTES_MASTER = "application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml";
+const CT_THEME = "application/vnd.openxmlformats-officedocument.theme+xml";
+const URI_TABLE = "http://schemas.openxmlformats.org/drawingml/2006/table";
+/** PowerPoint's built-in "Medium Style 2 - Accent 1": header row and banded rows in the deck's accent colour. */
+const TABLE_STYLE = "{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}";
 const NS_A = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const NS_P = "http://schemas.openxmlformats.org/presentationml/2006/main";
 const NS_PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships";
@@ -29,6 +38,18 @@ const NS_PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships
 interface Box { x: number; y: number; w: number; h: number }
 interface ShapeRef { shape: LiveShape; element: XmlElement }
 interface SlideInfo { id: string; part: string; doc: XmlDocument; sldId: XmlElement; rid: string; shapes: ShapeRef[]; slide: LiveSlide }
+
+/** A table's cell text, row by row (merged-away cells read as ""). */
+function tableRows(tbl: XmlElement): string[][] {
+  return elements(tbl).filter((tr) => localName(tr) === "tr")
+    .map((tr) => elements(tr).filter((tc) => localName(tc) === "tc").map((tc) => pptxShapeText(elements(tc).find((el) => localName(el) === "txBody"))));
+}
+
+/** The body placeholder of a notes page. */
+function notesBody(root: XmlElement): XmlElement | undefined {
+  const tree = findDeep(root, "spTree");
+  return tree ? elements(tree).find((sp) => localName(sp) === "sp" && placeholder(sp)?.type === "body") : undefined;
+}
 
 interface PresentationInfo {
   pkg: ZipPackage;
@@ -248,10 +269,11 @@ function collectShapes(info: { pkg: ZipPackage; cx: number; cy: number; theme: M
         const format = shapeFill ? { ...(textFormat ?? {}), fill: shapeFill } : textFormat;
         out.push({ element: child, shape: { id, role, text: pptxShapeText(txBody), ...frac, ...(format ? { format } : {}) } });
       } else {
-        const label = name === "pic" ? "image" : name === "graphicFrame" ? (findDeep(child, "tbl") ? "table" : findDeep(child, "chart") ? "chart" : "object") : undefined;
+        const tbl = name === "graphicFrame" ? findDeep(child, "tbl") : undefined;
+        const label = name === "pic" ? "image" : name === "graphicFrame" ? (tbl ? "table" : findDeep(child, "chart") ? "chart" : "object") : undefined;
         const fill = solidColor(spPr, info.theme);
         if (!label && !fill) continue;
-        out.push({ element: child, shape: { id, role: "object", text: "", ...frac, ...(label ? { label } : {}), ...(fill ? { fill } : {}) } });
+        out.push({ element: child, shape: { id, role: "object", text: "", ...frac, ...(label ? { label } : {}), ...(fill ? { fill } : {}), ...(tbl ? { rows: tableRows(tbl) } : {}) } });
       }
     }
   };
@@ -288,7 +310,11 @@ function load(bytes: Uint8Array): PresentationInfo {
     const tree = findDeep(doc.root, "spTree");
     const shapes = tree ? collectShapes({ pkg, cx, cy, theme }, part, tree, id) : [];
     const background = inheritedBackground(pkg, part, doc, theme);
-    slides.push({ id, part, doc, sldId, rid, shapes, slide: { id, ...(background ? { background } : {}), shapes: shapes.map((ref) => ref.shape) } });
+    const notesPart = rels(pkg, part).find((rel) => rel.type === REL_NOTES)?.target;
+    const notesXml = notesPart ? pkg.text(notesPart) : undefined;
+    const notesShape = notesXml ? notesBody(parseXml(notesXml).root) : undefined;
+    const notes = notesShape ? pptxShapeText(firstElement(notesShape, "p:txBody")) : "";
+    slides.push({ id, part, doc, sldId, rid, shapes, slide: { id, ...(background ? { background } : {}), shapes: shapes.map((ref) => ref.shape), ...(notes ? { notes } : {}) } });
   });
   return { pkg, presentation, rels: relDoc, cx, cy, theme, slides };
 }
@@ -354,12 +380,153 @@ function paragraphsMarkup(text: string, format: LiveFormat | undefined): string 
   return text.split("\n").map((line) => line ? `<a:p>${pPr}<a:r>${rPr("rPr")}<a:t>${escapeXmlText(line)}</a:t></a:r></a:p>` : `<a:p>${pPr}${rPr("endParaRPr")}</a:p>`).join("");
 }
 
+function tableFrameXml(shape: LiveShape, info: PresentationInfo, cNvPrId: number): string {
+  const r = (value: number) => Math.round(value);
+  const rows = shape.rows ?? [[""]];
+  const cols = Math.max(...rows.map((row) => row.length));
+  const widths = shape.colWidths?.length === cols ? shape.colWidths : Array<number>(cols).fill(1 / cols);
+  const total = r(shape.w * info.cx);
+  const rowH = r(Math.min((shape.h * info.cy) / rows.length, 0.09 * info.cy));
+  const size = rows.length > 8 || cols > 5 ? 1100 : 1400;
+  const cell = (text: string) => `<a:tc><a:txBody><a:bodyPr/><a:lstStyle/>${(text ?? "").split("\n").map((line) => line
+    ? `<a:p><a:r><a:rPr lang="ko-KR" altLang="en-US" sz="${size}" dirty="0"/><a:t>${escapeXmlText(line)}</a:t></a:r></a:p>`
+    : `<a:p><a:endParaRPr lang="ko-KR" altLang="en-US" sz="${size}" dirty="0"/></a:p>`).join("")}</a:txBody><a:tcPr/></a:tc>`;
+  return `<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="${cNvPrId}" name="Table ${cNvPrId}"/><p:cNvGraphicFramePr><a:graphicFrameLocks noGrp="1"/></p:cNvGraphicFramePr><p:nvPr/></p:nvGraphicFramePr>`
+    + `<p:xfrm><a:off x="${r(shape.x * info.cx)}" y="${r(shape.y * info.cy)}"/><a:ext cx="${total}" cy="${rowH * rows.length}"/></p:xfrm>`
+    + `<a:graphic><a:graphicData uri="${URI_TABLE}"><a:tbl><a:tblPr firstRow="1" bandRow="1"><a:tableStyleId>${TABLE_STYLE}</a:tableStyleId></a:tblPr>`
+    + `<a:tblGrid>${widths.map((w) => `<a:gridCol w="${r(w * total)}"/>`).join("")}</a:tblGrid>`
+    + rows.map((row) => `<a:tr h="${rowH}">${Array.from({ length: cols }, (_, c) => cell(row[c] ?? "")).join("")}</a:tr>`).join("")
+    + `</a:tbl></a:graphicData></a:graphic></p:graphicFrame>`;
+}
+
+/** Next free shape id in a slide (cNvPr ids are unique per slide). */
+function nextShapeId(root: XmlElement): number {
+  let max = 1;
+  const walk = (element: XmlElement) => {
+    for (const child of elements(element)) {
+      if (localName(child) === "cNvPr") max = Math.max(max, Number(attr(child, "id")) || 0);
+      walk(child);
+    }
+  };
+  walk(root);
+  return max + 1;
+}
+
+function removeElement(root: XmlElement, target: XmlElement): void {
+  const walk = (parent: XmlElement): boolean => {
+    const index = parent.children.indexOf(target);
+    if (index >= 0) { parent.children.splice(index, 1); markDirty(parent); markPath(root, parent); return true; }
+    return elements(parent).some(walk);
+  };
+  walk(root);
+}
+
+function addRelationship(pkg: ZipPackage, part: string, type: string, target: string): string {
+  const relsPart = relsPathFor(part);
+  const doc = parseXml(pkg.text(relsPart) ?? `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="${NS_PKG_REL}"></Relationships>`);
+  const used = new Set(elements(doc.root).map((rel) => attr(rel, "Id")));
+  let n = 1;
+  while (used.has(`rId${n}`)) n++;
+  doc.root.children.push(createElement(`<Relationship Id="rId${n}" Type="${type}" Target="${escapeXmlAttr(target)}"/>`));
+  markDirty(doc.root);
+  pkg.setText(relsPart, serializeXml(doc));
+  return `rId${n}`;
+}
+
+function addOverride(pkg: ZipPackage, part: string, contentType: string): void {
+  const ct = pkg.text("[Content_Types].xml") ?? "";
+  if (ct.includes(`PartName="/${part}"`)) return;
+  pkg.setText("[Content_Types].xml", ct.replace("</Types>", `<Override PartName="/${part}" ContentType="${contentType}"/></Types>`));
+}
+
+function freePart(pkg: ZipPackage, pattern: (n: number) => string): string {
+  let n = 1;
+  while (pkg.text(pattern(n)) !== undefined) n++;
+  return pattern(n);
+}
+
+const GROUP_PROPS = `<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>`;
+const NOTES_IMAGE_XFRM = `<a:xfrm><a:off x="1143000" y="685800"/><a:ext cx="4572000" cy="3429000"/></a:xfrm>`;
+const NOTES_BODY_XFRM = `<a:xfrm><a:off x="685800" y="4343400"/><a:ext cx="5486400" cy="4114800"/></a:xfrm>`;
+
+/** The deck's notes master, created (with a copy of the slide master's theme) when the deck has none. */
+function ensureNotesMaster(info: PresentationInfo): string {
+  const list = findDeep(info.presentation.root, "notesMasterIdLst");
+  const existing = list ? elements(list).find((el) => localName(el) === "notesMasterId") : undefined;
+  if (existing) {
+    const rid = attr(existing, "r:id");
+    const rel = elements(info.rels.root).find((item) => attr(item, "Id") === rid);
+    if (rel) return resolvePartPath(PRESENTATION, attr(rel, "Target") ?? "");
+  }
+  const slideMaster = elements(info.rels.root).find((rel) => (attr(rel, "Type") ?? "").endsWith("/slideMaster"));
+  const masterPart = slideMaster ? resolvePartPath(PRESENTATION, attr(slideMaster, "Target") ?? "") : undefined;
+  const themePart = masterPart ? rels(info.pkg, masterPart).find((rel) => rel.type === REL_THEME)?.target : undefined;
+  const themeXml = themePart ? info.pkg.text(themePart) : undefined;
+  if (!themeXml) throw new LiveDocumentCodecError("pptx_theme_missing");
+  const theme = freePart(info.pkg, (n) => `ppt/theme/theme${n}.xml`);
+  info.pkg.setText(theme, themeXml);
+  addOverride(info.pkg, theme, CT_THEME);
+  const notesMaster = freePart(info.pkg, (n) => `ppt/notesMasters/notesMaster${n}.xml`);
+  info.pkg.setText(notesMaster, `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<p:notesMaster xmlns:a="${NS_A}" xmlns:r="${REL}" xmlns:p="${NS_P}"><p:cSld><p:bg><p:bgRef idx="1001"><a:schemeClr val="bg1"/></p:bgRef></p:bg><p:spTree>${GROUP_PROPS}`
+    + `<p:sp><p:nvSpPr><p:cNvPr id="2" name="Slide Image Placeholder 1"/><p:cNvSpPr><a:spLocks noGrp="1" noRot="1" noChangeAspect="1"/></p:cNvSpPr><p:nvPr><p:ph type="sldImg" idx="2"/></p:nvPr></p:nvSpPr><p:spPr>${NOTES_IMAGE_XFRM}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln w="12700"><a:solidFill><a:prstClr val="black"/></a:solidFill></a:ln></p:spPr></p:sp>`
+    + `<p:sp><p:nvSpPr><p:cNvPr id="3" name="Notes Placeholder 2"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="body" sz="quarter" idx="1"/></p:nvPr></p:nvSpPr><p:spPr>${NOTES_BODY_XFRM}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr lang="ko-KR" altLang="en-US"/></a:p></p:txBody></p:sp>`
+    + `</p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>`
+    + `<p:notesStyle><a:lvl1pPr marL="0" algn="l" defTabSz="914400" rtl="0" eaLnBrk="1" latinLnBrk="0" hangingPunct="1"><a:defRPr sz="1200" kern="1200"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="+mn-lt"/><a:ea typeface="+mn-ea"/><a:cs typeface="+mn-cs"/></a:defRPr></a:lvl1pPr></p:notesStyle></p:notesMaster>`);
+  addRelationship(info.pkg, notesMaster, REL_THEME, relativeTarget(notesMaster, theme));
+  addOverride(info.pkg, notesMaster, CT_NOTES_MASTER);
+  const used = new Set(elements(info.rels.root).map((rel) => attr(rel, "Id")));
+  let n = 1;
+  while (used.has(`rId${n}`)) n++;
+  info.rels.root.children.push(createElement(`<Relationship Id="rId${n}" Type="${REL_NOTES_MASTER}" Target="${escapeXmlAttr(relativeTarget(PRESENTATION, notesMaster))}"/>`));
+  markDirty(info.rels.root);
+  // notesMasterIdLst follows sldMasterIdLst (CT_Presentation order).
+  const root = info.presentation.root;
+  const prefix = root.name.includes(":") ? `${root.name.split(":")[0]}:` : "";
+  const declareR = /\sxmlns:r=/.test(root.attrs) ? "" : ` xmlns:r="${REL}"`;
+  const masters = elements(root).find((el) => localName(el) === "sldMasterIdLst");
+  const entry = createElement(`<${prefix}notesMasterIdLst${declareR}><${prefix}notesMasterId r:id="rId${n}"/></${prefix}notesMasterIdLst>`);
+  root.children.splice(masters ? root.children.indexOf(masters) + 1 : 0, 0, entry);
+  markDirty(root);
+  return notesMaster;
+}
+
+/** Writes a slide's speaker notes: its notes page's body text, the page (and the deck's notes master) made when missing. */
+function writeNotes(info: PresentationInfo, slidePart: string, text: string): void {
+  const existing = rels(info.pkg, slidePart).find((rel) => rel.type === REL_NOTES)?.target;
+  const existingXml = existing ? info.pkg.text(existing) : undefined;
+  if (existing && existingXml) {
+    const doc = parseXml(existingXml);
+    let body = notesBody(doc.root);
+    if (!body) {
+      const tree = findDeep(doc.root, "spTree");
+      if (!tree) throw new LiveDocumentCodecError("pptx_notes_tree_missing");
+      body = createElement(`<p:sp><p:nvSpPr><p:cNvPr id="${nextShapeId(doc.root)}" name="Notes Placeholder"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr>${NOTES_BODY_XFRM}</p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>`);
+      tree.children.push(body);
+      markDirty(tree);
+      markPath(doc.root, tree);
+    }
+    setShapeText(doc.root, body, text);
+    info.pkg.setText(existing, serializeXml(doc));
+    return;
+  }
+  if (!text) return;
+  const master = ensureNotesMaster(info);
+  const part = freePart(info.pkg, (n) => `ppt/notesSlides/notesSlide${n}.xml`);
+  info.pkg.setText(part, `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<p:notes xmlns:a="${NS_A}" xmlns:r="${REL}" xmlns:p="${NS_P}"><p:cSld><p:spTree>${GROUP_PROPS}`
+    + `<p:sp><p:nvSpPr><p:cNvPr id="2" name="Slide Image Placeholder 1"/><p:cNvSpPr><a:spLocks noGrp="1" noRot="1" noChangeAspect="1"/></p:cNvSpPr><p:nvPr><p:ph type="sldImg"/></p:nvPr></p:nvSpPr><p:spPr>${NOTES_IMAGE_XFRM}</p:spPr></p:sp>`
+    + `<p:sp><p:nvSpPr><p:cNvPr id="3" name="Notes Placeholder 2"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr>${NOTES_BODY_XFRM}</p:spPr><p:txBody><a:bodyPr/><a:lstStyle/>${paragraphsMarkup(text, undefined)}</p:txBody></p:sp>`
+    + `</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:notes>`);
+  info.pkg.setText(relsPathFor(part), `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="${NS_PKG_REL}"><Relationship Id="rId1" Type="${REL_NOTES_MASTER}" Target="${escapeXmlAttr(relativeTarget(part, master))}"/><Relationship Id="rId2" Type="${REL_SLIDE}" Target="${escapeXmlAttr(relativeTarget(part, slidePart))}"/></Relationships>`);
+  addRelationship(info.pkg, slidePart, REL_NOTES, relativeTarget(slidePart, part));
+  addOverride(info.pkg, part, CT_NOTES);
+}
+
 function newSlideXml(slide: LiveSlide, info: PresentationInfo): string {
   const shapes = slide.shapes.filter((shape) => shape.role !== "object").map((shape, index) => {
     const ph = shape.role === "title" ? `<p:ph type="title"/>` : shape.role === "body" ? `<p:ph idx="1"/>` : "";
     const name = shape.role === "title" ? `Title ${index + 1}` : shape.role === "body" ? `Content Placeholder ${index + 1}` : `TextBox ${index + 1}`;
     return `<p:sp><p:nvSpPr><p:cNvPr id="${index + 2}" name="${escapeXmlAttr(name)}"/><p:cNvSpPr>${ph ? `<a:spLocks noGrp="1"/>` : ""}</p:cNvSpPr><p:nvPr>${ph}</p:nvPr></p:nvSpPr><p:spPr>${boxXfrm(shape, info)}</p:spPr><p:txBody><a:bodyPr/><a:lstStyle/>${paragraphsMarkup(shape.text, shape.format)}</p:txBody></p:sp>`;
-  }).join("");
+  }).join("") + slide.shapes.filter((shape) => shape.rows).map((shape, index) => tableFrameXml(shape, info, 100 + index)).join("");
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<p:sld xmlns:a="${NS_A}" xmlns:r="${REL}" xmlns:p="${NS_P}"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>${shapes}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>`;
 }
 
@@ -385,12 +552,32 @@ export const pptxCodec: LiveDocumentCodec = {
     const info = load(bytes);
     const byId = new Map(info.slides.map((slide) => [slide.id, slide]));
     const priorShapes = new Map(original.slides.flatMap((slide) => slide.shapes).map((shape) => [shape.id, shape]));
+    const priorSlides = new Map(original.slides.map((slide) => [slide.id, slide]));
     const touched = new Set<SlideInfo>();
+    const notesWork: Array<{ slidePart: string; text: string }> = [];
     for (const slide of final.slides) {
       const source = byId.get(slide.id);
       if (!source) continue;
+      const before = priorSlides.get(slide.id);
+      if ((before?.notes ?? "") !== (slide.notes ?? "")) notesWork.push({ slidePart: source.part, text: slide.notes ?? "" });
+      // A placeholder a table replaced (insert_table on an empty body) leaves the slide.
+      const kept = new Set(slide.shapes.map((shape) => shape.id));
+      for (const ref of source.shapes) {
+        if (kept.has(ref.shape.id) || !before?.shapes.some((shape) => shape.id === ref.shape.id)) continue;
+        removeElement(source.doc.root, ref.element);
+        touched.add(source);
+      }
       for (const shape of slide.shapes) {
-        if (shape.role === "object") continue;
+        if (shape.role === "object") {
+          if (!shape.rows || priorShapes.has(shape.id)) continue;
+          const tree = findDeep(source.doc.root, "spTree");
+          if (!tree) throw new LiveDocumentCodecError("pptx_shape_tree_missing");
+          tree.children.push(createElement(tableFrameXml(shape, info, nextShapeId(source.doc.root))));
+          markDirty(tree);
+          markPath(source.doc.root, tree);
+          touched.add(source);
+          continue;
+        }
         const prior = priorShapes.get(shape.id);
         const delta = formatDelta(prior?.format, shape.format);
         if (prior?.text === shape.text && isEmptyFormat(delta)) continue;
@@ -405,7 +592,13 @@ export const pptxCodec: LiveDocumentCodec = {
 
     const finalIds = new Set(final.slides.map((slide) => slide.id));
     const structural = final.slides.some((slide) => !byId.has(slide.id)) || info.slides.some((slide) => !finalIds.has(slide.id));
-    if (!structural) return touched.size ? info.pkg.toBytes() : bytes;
+    if (!structural) {
+      if (!notesWork.length) return touched.size ? info.pkg.toBytes() : bytes;
+      for (const work of notesWork) writeNotes(info, work.slidePart, work.text);
+      info.pkg.setText(PRESENTATION, serializeXml(info.presentation));
+      info.pkg.setText(relsPathFor(PRESENTATION), serializeXml(info.rels));
+      return info.pkg.toBytes();
+    }
 
     const list = findDeep(info.presentation.root, "sldIdLst");
     if (!list) throw new LiveDocumentCodecError("pptx_slide_list_missing");
@@ -422,6 +615,7 @@ export const pptxCodec: LiveDocumentCodec = {
       const layout = chooseLayout(info, previous);
       const part = `ppt/slides/slide${nextPart++}.xml`;
       info.pkg.setText(part, newSlideXml(slide, info));
+      if (slide.notes) notesWork.push({ slidePart: part, text: slide.notes });
       info.pkg.setText(relsPathFor(part), `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="${NS_PKG_REL}">${layout ? `<Relationship Id="rId1" Type="${REL_LAYOUT}" Target="${escapeXmlAttr(relativeTarget(part, layout))}"/>` : ""}</Relationships>`);
       ct = ct.replace("</Types>", `<Override PartName="/${part}" ContentType="${CT_SLIDE}"/></Types>`);
       let r = 1;
@@ -441,6 +635,7 @@ export const pptxCodec: LiveDocumentCodec = {
     list.children = entries;
     markDirty(list, info.rels.root);
     markPath(info.presentation.root, list);
+    for (const work of notesWork) writeNotes(info, work.slidePart, work.text);
     info.pkg.setText(PRESENTATION, serializeXml(info.presentation));
     info.pkg.setText(relsPathFor(PRESENTATION), serializeXml(info.rels));
     return info.pkg.toBytes();

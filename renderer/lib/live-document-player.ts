@@ -186,7 +186,11 @@ export function useLiveDocumentSession(sessionId: string | null) {
         const sheet = model.kind === "sheet" ? model.sheets.find((item) => item.id === ref || item.name.toLowerCase() === ref.toLowerCase()) : undefined;
         if (sheet) setFocus({ sheet: sheet.id });
         await sleep(260);
+      } else if (op.op === "set_notes") {
+        if (model.kind === "slides") setFocus({ slide: op.target });
+        await sleep(260);
       } else if (op.op === "insert_table" && op.after) {
+        if (model.kind === "slides") setFocus({ slide: op.after });
         setCursor({ target: op.after, label, color, phase: "type" });
         await sleep(260);
       }

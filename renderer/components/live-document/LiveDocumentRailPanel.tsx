@@ -599,6 +599,13 @@ function SlideCanvas({ slide, aspect, cursor, typing, interactive, ko, selected,
     {slide.shapes.map((shape) => {
       const background = shape.format?.fill ?? shape.fill;
       const box: CSSProperties = { left: `${shape.x * 100}%`, top: `${shape.y * 100}%`, width: `${shape.w * 100}%`, height: `${shape.h * 100}%`, background };
+      if (shape.role === "object" && shape.rows) {
+        const cols = Math.max(...shape.rows.map((row) => row.length));
+        return <table key={shape.id} className={styles.slideTable} style={{ ...box, height: "auto", maxHeight: box.height }}>
+          <colgroup>{Array.from({ length: cols }, (_, c) => <col key={c} style={shape.colWidths?.length === cols ? { width: `${shape.colWidths[c] * 100}%` } : undefined} />)}</colgroup>
+          <tbody>{shape.rows.map((row, r) => <tr key={r}>{Array.from({ length: cols }, (_, c) => r === 0 ? <th key={c}>{row[c] ?? ""}</th> : <td key={c}>{row[c] ?? ""}</td>)}</tr>)}</tbody>
+        </table>;
+      }
       if (shape.role === "object") return <div key={shape.id} className={styles.slideObject} style={box}>{shape.label ? <span>{shape.label}</span> : null}</div>;
       const size = shape.format?.size ?? (shape.role === "title" ? 40 : shape.role === "body" ? 24 : 18);
       const color = shape.format?.color ?? (dark || isDark(background) ? "#ffffff" : "#1b1b1b");
@@ -645,6 +652,7 @@ function SlidesView({ model, cursor, typing, locale, focusSlide, focusSeq, selec
         {model.slides.length > 1 && <button type="button" onClick={() => onDeleteSlide(slide.id)}><IconTrash size={12} />{ko ? "삭제" : "Delete"}</button>}
       </div>
       <SlideCanvas slide={slide} aspect={model.aspect} cursor={cursor} typing={typing} interactive ko={ko} selected={selected} onSelectTarget={onSelectTarget} onCommit={onCommit} />
+      {slide.notes ? <p className={styles.slideNotes}><strong>{ko ? "발표자 노트" : "Speaker notes"}</strong>{slide.notes}</p> : null}
     </div>
   </div>;
 }

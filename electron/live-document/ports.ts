@@ -34,10 +34,10 @@ const OP_SCHEMA = {
   type: "object",
   required: ["op"],
   properties: {
-    op: { type: "string", enum: ["set_cell", "set_text", "insert_text", "insert_paragraph", "insert_table", "delete_block", "add_slide", "delete_slide", "add_sheet", "rename_sheet", "delete_sheet", "set_format", "set_number_format", "add_chart"] },
+    op: { type: "string", enum: ["set_cell", "set_text", "insert_text", "insert_paragraph", "insert_table", "delete_block", "add_slide", "delete_slide", "set_notes", "add_sheet", "rename_sheet", "delete_sheet", "set_format", "set_number_format", "add_chart"] },
     sheet: { type: "string" }, cell: { type: "string", description: "A1" }, value: { type: "string", description: "leading = makes a formula" },
-    target: { type: "string", description: "id from document.read" }, text: { type: "string" }, at: { type: "integer", minimum: 0 },
-    after: { type: "string", description: "block/slide id, or start" }, heading: { type: "integer", minimum: 0, maximum: 6 },
+    target: { type: "string", description: "id from document.read (set_notes: a slide id)" }, text: { type: "string" }, at: { type: "integer", minimum: 0 },
+    after: { type: "string", description: "block/slide id, or start; insert_table on a pptx: the slide it goes on" }, heading: { type: "integer", minimum: 0, maximum: 6 },
     rows: { type: "array", items: { type: "array", items: { type: "string" } } }, title: { type: "string" }, body: { type: "string" }, name: { type: "string" },
     format: {
       type: "object", additionalProperties: false, description: "set_format: whole paragraph, table cell, slide shape or sheet cell (target <sheet>!A1)",

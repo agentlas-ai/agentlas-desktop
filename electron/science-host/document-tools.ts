@@ -52,7 +52,7 @@ const TOOLS: ReadonlyArray<ScienceDocumentToolDescriptor & { port: Port; fenced?
     inputSchema: withProjectPath(LIVE_DOCUMENT_PORT_SCHEMAS.create) },
   { name: "document_read", port: documentRead, description: "Current outline of an open document with the ids edits address, and its revision.",
     inputSchema: { ...LIVE_DOCUMENT_PORT_SCHEMAS.read } },
-  { name: "document_apply", port: documentApply, description: "Edit an open document, all-or-nothing (set_cell, add_sheet, rename_sheet, delete_sheet, set_number_format, add_chart, set_text, insert_text, insert_paragraph, insert_table, delete_block, add_slide, delete_slide, set_format). Needs write permission; pass baseRevision from document_read or document_apply.",
+  { name: "document_apply", port: documentApply, description: "Edit an open document, all-or-nothing (set_cell, add_sheet, rename_sheet, delete_sheet, set_number_format, add_chart, set_text, insert_text, insert_paragraph, insert_table (a pptx slide too: after = the slide id), delete_block, add_slide, delete_slide, set_notes (pptx speaker notes), set_format). Needs write permission; pass baseRevision from document_read or document_apply.",
     inputSchema: { ...LIVE_DOCUMENT_PORT_SCHEMAS.apply } },
   { name: "document_save", port: documentSave, description: "Write an open document back to its file in the original format; refused if the file changed on disk meanwhile. Needs write permission.",
     inputSchema: { ...LIVE_DOCUMENT_PORT_SCHEMAS.save } },

@@ -107,12 +107,18 @@ export interface LiveShape {
   /** Shape fill read from the file (#rrggbb); display only. */
   fill?: string;
   format?: LiveFormat;
+  /** A table (role object, label "table"): its cells' text, read from the file or written by insert_table. */
+  rows?: string[][];
+  /** insert_table column width ratios (sum 1); absent = equal columns. */
+  colWidths?: number[];
 }
 
 export interface LiveSlide {
   id: string;
   background?: string;
   shapes: LiveShape[];
+  /** Speaker notes (the notes page's body text). */
+  notes?: string;
 }
 
 export type LiveDocumentModel =
@@ -132,6 +138,8 @@ export type LiveDocumentOp =
   | { op: "delete_block"; target: string }
   | { op: "add_slide"; after?: string; title?: string; body?: string; id?: string }
   | { op: "delete_slide"; target: string }
+  /** target: slide id; the slide's speaker notes, "" clears them. */
+  | { op: "set_notes"; target: string; text: string }
   | { op: "add_sheet"; name: string; id?: string }
   | { op: "rename_sheet"; sheet: string; name: string }
   | { op: "delete_sheet"; sheet: string }
@@ -149,7 +157,9 @@ export const LIVE_DOCUMENT_OPS_BY_FORMAT: Record<LiveDocumentFormat, readonly Li
   docx: ["set_text", "insert_text", "insert_paragraph", "insert_table", "delete_block", "set_format"],
   hwpx: ["set_text", "insert_text", "insert_paragraph", "insert_table", "delete_block", "set_format"],
   hwp: ["set_text", "insert_text", "insert_paragraph", "delete_block", "set_format"],
-  pptx: ["set_text", "insert_text", "add_slide", "delete_slide", "set_format"],
+  // insert_table on a slide: `after` is the slide; set_notes writes its speaker notes. Dev 2026-10-18 run30 O9: a deck's
+  // "지표 변화" table became divider text and its notes were missing, because slides took neither.
+  pptx: ["set_text", "insert_text", "add_slide", "delete_slide", "insert_table", "set_notes", "set_format"],
 };
 
 export interface LiveDocumentActor {
@@ -390,6 +400,10 @@ export function validateLiveDocumentOps(value: unknown, format: LiveDocumentForm
         ops.push({ op: "insert_table", rows: (rows as string[][]).map((row) => [...row, ...Array(width - row.length).fill("")]), ...(Array.isArray(widths) ? { widths: (widths as number[]).map((w) => Math.round((w / total) * 10000) / 10000) } : {}), ...(merges.length ? { merges } : {}), ...(op.after !== undefined ? { after: op.after as string } : {}), ...(op.id !== undefined && id(op.id) ? { id: op.id } : {}) });
         break;
       }
+      case "set_notes":
+        if (!id(op.target) || !str(op.text)) return bad("set_notes needs target (a slide id) and text");
+        ops.push({ op: "set_notes", target: op.target, text: op.text });
+        break;
       case "delete_block":
       case "delete_slide":
         if (!id(op.target)) return bad(`${op.op} needs target`);
@@ -653,6 +667,32 @@ export function applyLiveDocumentOps(model: LiveDocumentModel, ops: LiveDocument
       }
       continue;
     }
+    if (op.op === "insert_table" && next.kind === "slides") {
+      if (!op.id) throw new LiveDocumentOpError("id_unassigned", op.op);
+      const slide = next.slides.find((item) => item.id === op.after);
+      if (!slide) throw new LiveDocumentOpError("target_unknown", op.after ? `${op.after} is not a slide` : "after: the slide id the table goes on");
+      if (op.merges?.length) throw new LiveDocumentOpError("op_unsupported_for_format", "merges on a slide table");
+      // The table takes the slide's empty body placeholder; otherwise the space under its text.
+      const body = slide.shapes.find((shape) => shape.role === "body" && !shape.text.trim());
+      let box: { x: number; y: number; w: number; h: number };
+      if (body) {
+        box = { x: body.x, y: body.y, w: body.w, h: body.h };
+        slide.shapes.splice(slide.shapes.indexOf(body), 1);
+      } else {
+        const top = Math.max(0.06, ...slide.shapes.map((shape) => shape.y + shape.h)) + 0.02;
+        if (top > 0.78) throw new LiveDocumentOpError("slide_full", `${slide.id} has no room under its text; add a slide or clear its body first`);
+        box = { x: 0.06, y: top, w: 0.88, h: 0.94 - top };
+      }
+      slide.shapes.push({ id: op.id, role: "object", label: "table", text: "", ...box, rows: op.rows.map((row) => [...row]), ...(op.widths ? { colWidths: [...op.widths] } : {}) });
+      continue;
+    }
+    if (op.op === "set_notes") {
+      if (next.kind !== "slides") throw new LiveDocumentOpError("op_unsupported_for_format", op.op);
+      const slide = next.slides.find((item) => item.id === op.target);
+      if (!slide) throw new LiveDocumentOpError("target_unknown", op.target);
+      if (op.text) slide.notes = op.text; else delete slide.notes;
+      continue;
+    }
     if (op.op === "insert_paragraph" || op.op === "insert_table" || op.op === "delete_block") {
       if (next.kind !== "flow") throw new LiveDocumentOpError("op_unsupported_for_format", op.op);
       const ids = next.blocks.map((block) => block.id);
@@ -727,6 +767,7 @@ export function assignLiveDocumentIds(ops: LiveDocumentOp[], seq: number): { ops
 /** Ids an op touches; used for conflict checks against entries newer than the caller's base revision. */
 export function liveDocumentOpTargets(op: LiveDocumentOp): string[] {
   if (op.op === "set_cell") return [`${op.sheet}!${op.cell}`];
+  if (op.op === "set_notes") return [`notes:${op.target}`];
   if (op.op === "set_text" || op.op === "insert_text" || op.op === "delete_block" || op.op === "delete_slide") return [op.target];
   if (op.op === "set_format" || op.op === "set_number_format") return [`format:${op.target}`];
   if (op.op === "rename_sheet" || op.op === "delete_sheet") return [`sheet:${op.sheet}`];
@@ -773,9 +814,16 @@ export function liveDocumentOutline(model: LiveDocumentModel, options: { maxChar
     for (const [index, slide] of model.slides.entries()) {
       lines.push(`# slide ${index + 1} (id ${slide.id})`);
       for (const shape of slide.shapes) {
-        if (shape.role === "object") { if (shape.label) lines.push(`  [${shape.id}] (${shape.label})`); continue; }
+        if (shape.role === "object") {
+          if (shape.rows) {
+            lines.push(`  [${shape.id}] (table ${shape.rows.length}x${Math.max(...shape.rows.map((row) => row.length))})`);
+            for (const row of shape.rows) lines.push(`    | ${row.map((cell) => cell.replace(/\n/g, "\\n")).join(" | ")} |`);
+          } else if (shape.label) lines.push(`  [${shape.id}] (${shape.label})`);
+          continue;
+        }
         lines.push(`  [${shape.id}] ${shape.role}${liveFormatTag(shape.format)}: ${shape.text.replace(/\n/g, "\\n")}`);
       }
+      if (slide.notes) lines.push(`  notes: ${slide.notes.replace(/\n/g, "\\n")}`);
     }
   }
   let text = "";

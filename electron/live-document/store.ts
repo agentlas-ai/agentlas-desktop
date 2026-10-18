@@ -269,7 +269,9 @@ export function liveDocumentFingerprint(model: LiveDocumentModel): string {
   if (model.kind === "sheet") return JSON.stringify(model.sheets.map((sheet) => [sheet.name, Object.entries(sheet.cells)
     .filter(([, cell]) => cell.v !== "" || cell.f)
     .map(([address, cell]) => [address, cell.f !== undefined ? `=${cell.f}` : cell.n !== undefined || /^[-+]?[\d.,]+%?$|^\d{4}-\d{2}-\d{2}/.test(cell.v.trim()) ? "#" : cell.v]).sort()]));
-  if (model.kind === "slides") return JSON.stringify(model.slides.map((slide) => slide.shapes.filter((shape) => shape.role !== "object").map((shape) => shape.text)));
+  // Tables and speaker notes are saved content too (insert_table, set_notes): a save that lost them is a failed save.
+  if (model.kind === "slides") return JSON.stringify(model.slides.map((slide) => [slide.shapes.filter((shape) => shape.role !== "object").map((shape) => shape.text),
+    slide.shapes.filter((shape) => shape.rows).map((shape) => shape.rows), slide.notes ?? ""]));
   // Empty paragraphs are layout (Word needs one after a table that ends the body), not content.
   return JSON.stringify(model.blocks.filter((block) => block.type !== "paragraph" || block.text !== "").map((block) => block.type === "paragraph" ? block.text : block.type === "table" ? block.rows.map((row) => row.map((cell) => cell?.text ?? null)) : block.type));
 }

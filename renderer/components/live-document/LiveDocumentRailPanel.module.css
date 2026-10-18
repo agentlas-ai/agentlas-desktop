@@ -113,6 +113,12 @@
 .slideText:hover { outline: 1px dashed rgba(127,127,127,.6); }
 .slideObject { position: absolute; display: grid; place-items: center; color: rgba(0,0,0,.35); font-size: 1.4cqw; }
 .slideObject span { padding: 0.3cqw 0.8cqw; border: 1px dashed rgba(0,0,0,.25); border-radius: 3px; }
+.slideTable { position: absolute; border-collapse: collapse; table-layout: fixed; font-size: 1.5cqw; color: #1b1b1b; background: #ffffff; overflow: hidden; }
+.slideTable th, .slideTable td { border: 1px solid rgba(68,114,196,.45); padding: 0.4cqw 0.6cqw; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+.slideTable th { background: #4472c4; color: #ffffff; font-weight: 700; }
+.slideTable tr:nth-child(odd) td { background: rgba(68,114,196,.12); }
+.slideNotes { margin: 8px 0 0; padding: 8px 10px; border-radius: 6px; background: rgba(0,0,0,.04); font-size: 12px; line-height: 1.5; white-space: pre-wrap; color: inherit; }
+.slideNotes strong { display: block; margin-bottom: 2px; font-size: 11px; opacity: .7; }
 .slide .inlineEditor { position: absolute; margin: 0; z-index: 3; background: rgba(255,255,255,.96); color: #111; }
 .docTable td[data-selected="true"] { outline: 2px solid var(--attention); outline-offset: -2px; }
 .editor:focus { outline: none; }
