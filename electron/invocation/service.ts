@@ -617,6 +617,16 @@ function relayParkedForRun(runId: string): boolean {
   }
 }
 
+/** An undelivered parked copy of exactly this text waits for the chat's next turn (deferSystemRelay's duplicate rule). */
+function relayCopyParked(chatId: string, text: string): boolean {
+  try {
+    return Boolean(getDb().prepare("SELECT 1 FROM deferred_system_relays WHERE chat_id = ? AND text_hash = ? AND delivered_at IS NULL LIMIT 1")
+      .get(chatId, createHash("sha256").update(text.trim()).digest("hex")));
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The owner takes back an owner text a native turn could not confirm (`native-owner:<intent>`, status uncertain): the
  * text is returned and the row settled rejected/owner_recovery_returned in one transaction. Current-turn rows are the
@@ -7519,7 +7529,7 @@ export class InvocationService {
     // A waiting Goal refuses a system turn and parks its relay with this run id; the Goal's next turn carries it as
     // context. That is a hand-off, not a lost report (Yotube 2026-10-17T17:36:21Z steer c9bd1c58: "failed", yet its
     // relay was parked and delivered at 19:44).
-    if (code === "goal_waiting_system_start_refused" && relayParkedForRun(drainedRunId)) {
+    if (code === "goal_waiting_system_start_refused" && (relayParkedForRun(drainedRunId) || this.parkRefusedQueuedRelay(chatId, next, drainedRunId))) {
       this.settleQueuedSteerDurably(next.id, "cancelled", "parked-for-waiting-goal");
       console.info(`[invocation] queued steer parked for the waiting Goal steer=${next.id} chat=${chatId} cause=parked-for-waiting-goal code=${code}`);
       return;
@@ -7554,6 +7564,29 @@ export class InvocationService {
       chatId,
       event: { kind: "error", error: { code: "steer-start-failed", message } },
     });
+  }
+
+  /**
+   * start() parks only One conversation relays (a teammate report, a room follow-up) when a waiting Goal refuses them. A
+   * queued host direction of another shape was refused the same way and then dropped: the One supervisor's direction into
+   * a room (taskIntent "task", steerFromSupervisor) or a relay into a chat that is not a One chat. It goes to the same
+   * deferred store (deferred-system-relays.ts), so the chat's next turn that runs carries it exactly once. Returns true
+   * only when a parked copy really waits: newly written, or an undelivered copy of the same text already there. The
+   * owner's own text is never parked here (the failure path keeps it in the chat as the owner's turn).
+   */
+  private parkRefusedQueuedRelay(chatId: string, next: QueuedSteer, drainedRunId: string): boolean {
+    const request = next.request;
+    const text = typeof request.userPrompt === "string" ? request.userPrompt.trim() : "";
+    if (request.promptOrigin !== "system" || request.agentAppMode === true || !text) return false;
+    try {
+      const goalId = getChat(chatId)?.goalId;
+      const status = goalId ? getLongRunByGoalId(goalId)?.status : undefined;
+      return deferSystemRelay({ chatId, text, cause: status ? `goal_${status}` : "goal_waiting", goalStatus: status ?? null,
+        originRunId: drainedRunId }) || relayCopyParked(chatId, text);
+    } catch (error) {
+      console.warn(`[invocation] refused queued relay could not be parked steer=${next.id} chat=${chatId} code=${innermostTypedCode(error) ?? "none"}`);
+      return false;
+    }
   }
 
   /**
