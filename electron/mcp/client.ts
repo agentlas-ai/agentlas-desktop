@@ -249,6 +249,7 @@ import {
 } from "../../shared/one-friendly-followups";
 import { buildOneSurfaceFromMarkdown, chooseOneSurfaceForDisplay, resolveOneMarkdownSurfaceIntent } from "../one/markdown-surface";
 import { bindOneRuntimeToolArtifacts, promoteBoundOneMarkdownImages } from "../one/artifact-preview";
+import { hasRunProducedFiles, openRunProducedFiles, takeRunProducedFiles } from "../harness/run-produced-files";
 import { classifyToolFailure, toolFailureCopy } from "../../shared/tool-failure";
 import { resolveToolInvocationOrigin } from "../invocation/tool-origin";
 import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
@@ -2097,12 +2098,15 @@ export function runMcpInvocation(
     login.cancel();
     throw error;
   }), () => bindDispatchedGoal(getChatGoalId(req.chatId) ?? null))));
+  // Files a harness port writes for this run wait until a tool completion of this invocation seals them into One
+  // Outputs (bindInvocationOneArtifacts in runMcpInvocationInContext; harness/run-produced-files.ts).
+  const releaseProducedFiles = openRunProducedFiles(req.runId);
   const owned = graphAttempt ? withAdapterEffectObserver({ runId: req.runId!, chatId: req.chatId, rootAgentId: null, source: "automation" }, {
     begin: admission => noteGraphWorkerAdapterStart(graphAttempt, admission),
     finish: (scopeId, report) => noteGraphWorkerAdapterFinish(graphAttempt, scopeId, report),
     recordingFailed: () => noteGraphWorkerCoverageUnknown(graphAttempt),
   }, runOwnedInvocation) : runOwnedInvocation();
-  return owned.finally(() => { directWorkOwnerCurrent = false; });
+  return owned.finally(() => { directWorkOwnerCurrent = false; releaseProducedFiles(); });
 }
 
 async function runMcpInvocationInContext(
@@ -4523,17 +4527,27 @@ async function runMcpInvocationInContext(
   let observedImageArtifactEvidence = false;
   const pendingWorkToolImages: Array<{ sourcePath: string; image: ImageAttachment }> = [];
   const generatedImageSourcePaths = new Set<string>();
+  // One seal for both sources of this run's outputs: the paths a runtime adapter structured for a tool event, and the
+  // files a harness port wrote for this run (harness/run-produced-files.ts). A/B 2026-10-18 (Haiku, GPT): document.save
+  // and media.image.generate answered a path, Outputs stayed empty and both answers said no file was linked. A port's
+  // file is this run's output whichever tool event carries it, so the read-observation rule covers the adapter's paths.
   const bindInvocationOneArtifacts = (
     toolId: string,
     paths: readonly string[],
     observedBy?: { name: string; kind?: RuntimeToolKind },
+    /** Receives the paths of the port files this call took (the main runner attaches their images to the answer too). */
+    onProducedPaths?: (taken: string[]) => void,
   ): NonNullable<McpInvocationEvent["oneArtifacts"]> => {
     const runId = req.runId;
     // Only files the run produced are outputs. A file the model only read (Claude `Read` of an image, any typed
     // `read` tool) is an observation: the Yotube QA contact sheets it inspected were bound as 15 "results"
     // (2026-10-17) while the rendered videos were not.
     if (observedBy && (observedBy.kind === "read"
-      || (!observedBy.kind && /^(?:Read|view_image|read_image|read_file|view_file)$/u.test(observedBy.name.trim())))) return [];
+      || (!observedBy.kind && /^(?:Read|view_image|read_image|read_file|view_file)$/u.test(observedBy.name.trim())))) paths = [];
+    // An adapter path binds under its tool's id; a port's file binds under its own record id, so a completion whose local
+    // server sent no call id still carries it (local-tool-loop.ts synthesizes the wire id and reports none).
+    if (!toolId) paths = [];
+    if (req.agentAppMode || !runId || (paths.length === 0 && !hasRunProducedFiles(runId))) return [];
     // A conversational One run can become a canonical Task on its first tool
     // event. The Task did not exist when this invocation was prepared, but it
     // is already durable by the successful completion event that carries the
@@ -4542,27 +4556,35 @@ async function runMcpInvocationInContext(
     const artifactTask = findCanonicalTaskForChat(chat.id) ?? canonicalTask;
     // Work and One use the same canonical Task output rail. Admission depends
     // on that exact Task/run binding, not on which product opened the chat.
-    if (req.agentAppMode || !artifactTask || !runId || !toolId || paths.length === 0) return [];
+    if (!artifactTask) return [];
+    const bind = (bindToolId: string, candidates: readonly string[]): NonNullable<McpInvocationEvent["oneArtifacts"]> => (
+      candidates.length === 0 ? [] : bindOneRuntimeToolArtifacts({
+        taskId: artifactTask.id,
+        taskVersion: artifactTask.version,
+        chatId: chat.id,
+        runId,
+        toolId: bindToolId,
+        paths: candidates,
+      }).map((artifact) => ({
+        taskId: artifactTask.id,
+        taskVersion: artifactTask.version,
+        chatId: chat.id,
+        runId,
+        manifestId: artifact.manifestId,
+        artifactRef: artifact.artifactRef,
+        label: artifact.label,
+        type: artifact.type,
+        sizeBytes: artifact.sizeBytes,
+      })));
     paths = paths.filter(target => !isWorkAttachmentInput(runId, chat.id, resolvedResultFolder, path.resolve(resolvedResultFolder, target)));
-    if (!paths.length) return [];
-    return bindOneRuntimeToolArtifacts({
-      taskId: artifactTask.id,
-      taskVersion: artifactTask.version,
-      chatId: chat.id,
-      runId,
-      toolId,
-      paths,
-    }).map((artifact) => ({
-      taskId: artifactTask.id,
-      taskVersion: artifactTask.version,
-      chatId: chat.id,
-      runId,
-      manifestId: artifact.manifestId,
-      artifactRef: artifact.artifactRef,
-      label: artifact.label,
-      type: artifact.type,
-      sizeBytes: artifact.sizeBytes,
-    }));
+    // An input copy staged for this run (even one a port rewrote) is not an output; its folder goes when the run ends.
+    const produced = takeRunProducedFiles(runId).filter((file) => {
+      if (!resolvedResultFolder) return true;
+      try { return !isWorkAttachmentInput(runId, chat.id, resolvedResultFolder, file.path); } catch { return false; }
+    });
+    if (produced.length) onProducedPaths?.(produced.map((file) => file.path));
+    // Each write binds under its own host record id, so the same file saved twice is two exact bindings, never one reused.
+    return [...bind(toolId, paths), ...produced.flatMap((file) => bind(`harness-output:${file.recordId}`, [file.path]))];
   };
   const runBoundTaskForceInvocation = async (
     params: Parameters<typeof runBorrowedTaskForceInvocation>[0],
@@ -6570,15 +6592,18 @@ async function runMcpInvocationInContext(
         // 못했다(2026-09-03 실측: 산출물 0 · 레일 이미지 0 · 채팅 이미지 0).
         // 도구 이름을 추측하는 대신 **우리 정본 폴더 안에 있는가**로 판정한다 —
         // 아래 봉인이 fail-closed 라 남의 경로는 어차피 통과하지 못한다.
-        const oneArtifacts = !isError && id && artifactPaths?.length
-          ? bindInvocationOneArtifacts(id, artifactPaths, { name, ...(_toolKind ? { kind: _toolKind } : {}) })
+        // A successful completion also carries the files a harness port wrote for this run (bindInvocationOneArtifacts).
+        let producedPaths: string[] = [];
+        const oneArtifacts = !isError && (result !== undefined || (id && artifactPaths?.length))
+          ? bindInvocationOneArtifacts(id ?? "", artifactPaths ?? [], { name, ...(_toolKind ? { kind: _toolKind } : {}) }, (taken) => { producedPaths = taken; })
           : undefined;
-        if (!isError && artifactPaths?.length) {
+        const outputPaths = isError ? [] : [...(artifactPaths ?? []), ...producedPaths];
+        if (outputPaths.length) {
           const boundImageLabels = new Set((oneArtifacts ?? [])
             .filter((artifact) => artifact.type === "image")
             .map((artifact) => artifact.label));
-          const boundImagePaths = artifactPaths.filter((candidate) => boundImageLabels.has(path.basename(candidate)));
-          collectToolImages(artifactPaths);
+          const boundImagePaths = outputPaths.filter((candidate) => boundImageLabels.has(path.basename(candidate)));
+          collectToolImages(outputPaths);
           if (boundImagePaths.length > 0) collectToolImages(boundImagePaths, true);
         }
         sink({

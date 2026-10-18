@@ -273,6 +273,14 @@ export function liveDocumentFingerprint(model: LiveDocumentModel): string {
 }
 
 export async function saveLiveDocument(input: { sessionId: string; chatId?: string }): Promise<{ ok: true; revision: number; sha256: string; path: string } | { ok: false; reason: string; detail?: string }> {
+  const result = await saveLiveDocumentReportingWrite(input);
+  if (!result.ok) return result;
+  const { written: _written, ...saved } = result;
+  return saved;
+}
+
+/** saveLiveDocument, also saying whether this call put bytes on disk (false: nothing new since the last save, file present). */
+export async function saveLiveDocumentReportingWrite(input: { sessionId: string; chatId?: string }): Promise<{ ok: true; revision: number; sha256: string; path: string; written: boolean } | { ok: false; reason: string; detail?: string }> {
   let dir: string;
   try { dir = await sessionDir(input.sessionId); } catch { return { ok: false, reason: "session_unknown" }; }
   return withLock(dir, () => {
@@ -283,7 +291,7 @@ export async function saveLiveDocument(input: { sessionId: string; chatId?: stri
     let onDisk: Buffer | null = null;
     try { onDisk = fs.readFileSync(meta.path); } catch { /* deleted: writing recreates it */ }
     if (onDisk && sha256(onDisk) !== meta.savedSha256) return { ok: false, reason: "file_changed_on_disk", detail: "the file was changed outside this session since it was opened or last saved" };
-    if (revision === meta.savedRevision && onDisk) return { ok: true, revision, sha256: meta.savedSha256, path: meta.path };
+    if (revision === meta.savedRevision && onDisk) return { ok: true, revision, sha256: meta.savedSha256, path: meta.path, written: false };
     const codec = LIVE_DOCUMENT_CODECS[meta.format];
     const source = fs.readFileSync(path.join(dir, "source.bin"));
     let output: Uint8Array;
@@ -308,7 +316,7 @@ export async function saveLiveDocument(input: { sessionId: string; chatId?: stri
     }
     const digest = sha256(output);
     writeMeta(dir, { ...meta, savedRevision: revision, savedSha256: digest });
-    return { ok: true, revision, sha256: digest, path: meta.path };
+    return { ok: true, revision, sha256: digest, path: meta.path, written: true };
   });
 }
 

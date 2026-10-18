@@ -600,8 +600,11 @@ function taskForceOneArtifacts(
   artifactPaths: readonly string[] | undefined,
   toolName?: string,
 ): NonNullable<McpInvocationEvent["oneArtifacts"]> | undefined {
-  if (isError || !toolId || !artifactPaths?.length || !p.bindOneRuntimeToolArtifacts) return undefined;
-  const bound = p.bindOneRuntimeToolArtifacts(toolId, artifactPaths, toolName ? { name: toolName } : undefined);
+  // Called without paths too: the binder also seals the files a harness port wrote for this run (mcp/client.ts
+  // bindInvocationOneArtifacts), so a worker's harness_call reaches the room's Outputs and this team's observed
+  // artifacts. Without a tool id only the port's files bind (they carry their own record id); adapter paths need the id.
+  if (isError || !p.bindOneRuntimeToolArtifacts) return undefined;
+  const bound = p.bindOneRuntimeToolArtifacts(toolId ?? "", artifactPaths ?? [], toolName ? { name: toolName } : undefined);
   return bound.length > 0 ? bound : undefined;
 }
 

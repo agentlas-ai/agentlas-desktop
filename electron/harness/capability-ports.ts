@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { LIVE_DOCUMENT_PORT_SCHEMAS as LIVE_DOCUMENT_SCHEMAS } from "../live-document/ports";
+import { recordRunProducedFiles } from "./run-produced-files";
 import { composeFinanceSkillContent, FINANCE_PORTS } from "../finance/tools";
 
 /*
@@ -64,7 +65,8 @@ interface PortDefinition {
 }
 
 type PortOutcome =
-  | { status: "ok"; data: unknown }
+  /** produced: absolute paths of files this call wrote. Host-only (harness/run-produced-files.ts); never in the result. */
+  | { status: "ok"; data: unknown; produced?: readonly string[] }
   | { status: "refused" | "unavailable"; reason: string; next?: string; data?: unknown };
 
 const ok = (data: unknown): PortOutcome => ({ status: "ok", data });
@@ -610,7 +612,7 @@ const PORTS: PortDefinition[] = [
         copied = copyGeneratedImageIntoWorkspace({ cwd: outputDir, permission: "write", sourcePath: result.artifactPath, label: "image" });
       }
       await appendReceipt({ operationId: "media.image.generate", engine: result.engine, chatId: ctx.chatId, runId: ctx.runId, copied: Boolean(copied) });
-      return ok({ engine: result.engine, path: copied ?? result.artifactPath, copiedIntoAssets: Boolean(copied) });
+      return { ...ok({ engine: result.engine, path: copied ?? result.artifactPath, copiedIntoAssets: Boolean(copied) }), produced: [copied ?? result.artifactPath] };
     },
   },
   {
@@ -674,7 +676,7 @@ const PORTS: PortDefinition[] = [
         copied = copyGeneratedImageIntoWorkspace({ cwd: str(args.outputDir), permission: "write", sourcePath: result.artifactPath, label: "image" });
       }
       await appendReceipt({ operationId: "media.image.edit", engine: result.engine, chatId: ctx.chatId, runId: ctx.runId, lineage: result.lineage, copied: Boolean(copied) });
-      return ok({ engine: result.engine, path: copied ?? result.artifactPath, lineage: result.lineage, copiedIntoAssets: Boolean(copied) });
+      return { ...ok({ engine: result.engine, path: copied ?? result.artifactPath, lineage: result.lineage, copiedIntoAssets: Boolean(copied) }), produced: [copied ?? result.artifactPath] };
     },
   },
   {
@@ -1172,6 +1174,9 @@ export async function callHarnessPort(operationId: string, rawArgs: Record<strin
     outcome = refused("operation_failed", error instanceof Error ? error.message.slice(0, 200) : "unknown error");
   }
   const receiptId = port.kind === "query" ? `hr_${randomUUID()}` : await appendReceipt({ operationId, status: outcome.status, chatId: ctx.chatId, runId: ctx.runId });
+  // A file this call wrote waits for the run's invocation, which seals it into One Outputs at its next tool completion
+  // (A/B 2026-10-18: document.save and media.image.generate paths never reached the rail). The result keeps its shape.
+  if (outcome.status === "ok" && outcome.produced?.length && !ctx.dryRun) recordRunProducedFiles(ctx.runId, operationId, outcome.produced);
   return outcome.status === "ok"
     ? { ...base, status: "ok", data: outcome.data, receiptId }
     : { ...base, status: outcome.status, reason: outcome.reason, ...(outcome.next ? { next: outcome.next } : {}), ...(outcome.data !== undefined ? { data: outcome.data } : {}), receiptId };

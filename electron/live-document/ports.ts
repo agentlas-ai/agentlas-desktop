@@ -10,7 +10,8 @@ import { LIVE_DOCUMENT_OPS_BY_FORMAT, liveDocumentOutline } from "../../shared/l
  */
 
 type Outcome =
-  | { status: "ok"; data: unknown }
+  /** produced: the file this call made a run output (harness/run-produced-files.ts binds it); never in the result. */
+  | { status: "ok"; data: unknown; produced?: readonly string[] }
   | { status: "refused" | "unavailable"; reason: string; next?: string; data?: unknown };
 
 interface Ctx { chatId: string; runId: string; dryRun?: boolean; permission?: "read" | "write" | "full" }
@@ -18,6 +19,16 @@ interface Ctx { chatId: string; runId: string; dryRun?: boolean; permission?: "r
 const str = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
 const refused = (reason: string, next?: string, data?: unknown): Outcome => ({ status: "refused", reason, ...(next ? { next } : {}), ...(data !== undefined ? { data } : {}) });
 const writable = (ctx: Ctx) => ctx.permission === "write" || ctx.permission === "full";
+
+/*
+ * A document is a run's output once it is saved (produced -> harness/run-produced-files.ts). The blank file
+ * document.create writes is not: a binding taken then goes stale at the save (the save rewrites it), and the phone lists
+ * every binding of a run as its own entry (mobile agentlas_screen.dart keys by run and artifact ref), so it showed a
+ * second, unopenable copy. The first save of a document this run created is its output even with nothing new to write.
+ * Per process, like the run's capability: create and save of one run reach the same turn-tools control server.
+ */
+const createdInRun = new Map<string, string>();
+const CREATED_IN_RUN_LIMIT = 256;
 
 const OP_SCHEMA = {
   type: "object",
@@ -88,6 +99,8 @@ export async function documentCreate(args: Record<string, unknown>, ctx: Ctx): P
   try {
     const live = await store();
     const meta = await live.createLiveDocument({ chatId: ctx.chatId, path: str(args.path), title: str(args.title) });
+    createdInRun.set(meta.sessionId, ctx.runId);
+    if (createdInRun.size > CREATED_IN_RUN_LIMIT) createdInRun.delete(createdInRun.keys().next().value as string);
     const snapshot = await live.liveDocumentSnapshot(meta.sessionId);
     const outline = liveDocumentOutline(snapshot.model, { maxChars: 20_000 });
     return { status: "ok", data: {
@@ -128,7 +141,13 @@ export async function documentApply(args: Record<string, unknown>, ctx: Ctx): Pr
 export async function documentSave(args: Record<string, unknown>, ctx: Ctx): Promise<Outcome> {
   if (ctx.dryRun) return refused("dry_run");
   if (!writable(ctx)) return refused("permission_read_only", "saving overwrites the file; this run may not write");
-  const result = await (await store()).saveLiveDocument({ sessionId: str(args.sessionId), chatId: ctx.chatId });
+  const result = await (await store()).saveLiveDocumentReportingWrite({ sessionId: str(args.sessionId), chatId: ctx.chatId });
   if (!result.ok) return refused(result.reason, result.detail);
-  return { status: "ok", data: result };
+  // A save with nothing new to write leaves the file as it was opened: not an output of this run, unless this run
+  // created it (its first save makes the created file the output).
+  const sessionId = str(args.sessionId);
+  const createdHere = createdInRun.get(sessionId) === ctx.runId;
+  if (createdHere) createdInRun.delete(sessionId);
+  const { written, ...saved } = result;
+  return { status: "ok", data: saved, ...(written || createdHere ? { produced: [saved.path] } : {}) };
 }
