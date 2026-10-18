@@ -231,9 +231,12 @@ export function appControlOperationsLocal(input: OperationsInput): AppControlOpe
     const scored = matched.map((operation) => {
       const haystack = new Set([...words(operation.path), ...words(operation.doc), ...words(operation.signature), ...(operation.keywords ?? []).flatMap(words)]);
       const pathText = operation.path.toLowerCase();
+      const pathWords = new Set(words(operation.path));
       let score = 0;
       for (const term of terms) {
+        // A plural guess names the singular path token (dev 2026-10-18: "automations.runs" did not reach runCounts' "run").
         if (pathText.includes(term)) score += 3;
+        else if (term.length > 3 && term.endsWith("s") && pathWords.has(term.slice(0, -1))) score += 2;
         else if ([...haystack].some((word) => word.startsWith(term) || term.startsWith(word) && word.length >= 4)) score += 1;
       }
       return { operation, score };
@@ -447,7 +450,7 @@ export async function appControlCallLocal(caller: AppControlCaller, input: { ope
     // The refusal names the closest catalog operations (the same deterministic search). Dev 2026-10-18 run11: Haiku guessed
     // automations.runs.list, automations.history and automations.executions for automations.listRuns, and the hint named
     // one_app_operations, a tool the harness path does not have (it was tried as an operation name).
-    const closest = path ? (appControlOperationsLocal({ query: path, limit: 5 }).operations ?? []).map((item) => String(item.operation)) : [];
+    const closest = path ? (appControlOperationsLocal({ query: path, limit: 8 }).operations ?? []).map((item) => String(item.operation)) : [];
     throw new AppControlError("operation-unknown", `Unknown operation ${path || "(empty)"}.${closest.length ? ` Closest: ${closest.join(", ")}.` : ""} Search the catalog with one_app_operations (in harness_call: app.operations).`);
   }
   if (appControlEffectNeedsOwnerTurn(operation.effect) && !caller.ownerTurn) {
