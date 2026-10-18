@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import fs from "node:fs";
 import type { BrowserWindow } from "electron";
 import { APP_CONTROL_CATALOG, type AppControlCatalogEntry, type AppControlInvokeArg } from "./catalog.generated";
 import { AppControlError, appControlDomainHandlerRegistered, appControlHandlerRegistered, appControlInteractionWindowAvailable, invokeAppControlIpc } from "./ipc-registry";
@@ -9,6 +10,7 @@ import type { AppControlRendererOperation, AppControlRendererReply } from "../..
 import { appUiPreferenceDefinitions, isAppUiPreferenceName, normalizeAppUiPreference } from "../../shared/app-ui-preferences";
 import { decodeAppControlArguments } from "./argument-codec";
 import { remoteAppControlCall, remoteAppControlOperations } from "./daemon-remote";
+import { saveScreenCaptureArtifact } from "../media/capture-artifacts";
 
 // One's app-control route: find an operation, then call it as the owner's own screens would. The catalog is generated
 // from the preload bridges; ./policy decides what One may call and on which turns.
@@ -105,6 +107,9 @@ function appCallReplySchema(operation: Operation, descriptor: OperationDescripto
   const properties = {
     ok: { type: "boolean" }, operation: { const: operation.path }, effect: { const: operation.effect },
     code: { type: "string" }, receipt_id: { type: "string" }, receipt_recorded: { type: "boolean" },
+    images: { type: "array", description: "each image the handler answered as a data URL, saved as a host capture file; the result holds the file's absolute path in its place",
+      items: { type: "object", properties: { path: { type: "string" }, file: { type: "string" }, mediaType: { type: "string", enum: ["image/png", "image/jpeg"] }, bytes: { type: "integer" } },
+        required: ["path", "file", "mediaType", "bytes"], additionalProperties: false } },
   };
   const cuts = { type: "array", items: { type: "object", properties: {
     path: { type: "string" }, kind: { type: "string", enum: ["array", "string"] }, total: { type: "integer" }, returned: { type: "integer" },
@@ -314,6 +319,40 @@ function build(arg: AppControlInvokeArg, named: Record<string, unknown>): unknow
 
 const OWNER_LOCAL_MAP_OPERATIONS: ReadonlySet<string> = new Set(["experience.ontologyGraph", "agents.borrowedOntologyGraph"]);
 
+export type AppResultImage = { path: string; file: string; mediaType: "image/png" | "image/jpeg"; bytes: number };
+const MAX_RESULT_IMAGES = 8;
+const IMAGE_DATA_URL = /^data:image\/(png|jpeg);base64,/;
+
+// An operation that answers an image as a data URL (computerUse.capturePreview, browser.captureLiveFrame, site.captureRect,
+// workLiveView.capture, ...) left it to clipResult, which cut the base64 like any long text. Dev 2026-10-18 run30 O8 (GPT
+// firm QA checking a saved docx): capturePreview's 313,674-char data URL came back as 22,569 chars, no model could read it,
+// and the QA closed inconclusive. Each image is saved as a host capture (an observation, never a run output) and the result
+// holds its absolute path; `images` names where each was and its file, and the harness channel hands those files to the model
+// as images (turn-tools/control-server.ts).
+function saveResultImages(value: unknown): { value: unknown; images?: AppResultImage[] } {
+  let text: string;
+  try { text = JSON.stringify(value) ?? "null"; } catch { return { value }; }
+  if (!text.includes("data:image/")) return { value };
+  const box: Record<string, unknown> = { $: JSON.parse(text) };
+  const images: AppResultImage[] = [];
+  const walk = (holder: Record<string | number, unknown>, key: string | number, at: string) => {
+    const node = holder[key];
+    if (typeof node === "string") {
+      const match = IMAGE_DATA_URL.exec(node);
+      if (!match || images.length >= MAX_RESULT_IMAGES) return;
+      const file = saveScreenCaptureArtifact(node);
+      if (!file) return;
+      holder[key] = file;
+      images.push({ path: at, file, mediaType: match[1] === "png" ? "image/png" : "image/jpeg", bytes: fs.statSync(file).size });
+    } else if (Array.isArray(node)) node.forEach((_, index) => walk(node as unknown as Record<number, unknown>, index, `${at}[${index}]`));
+    else if (node && typeof node === "object") {
+      for (const child of Object.keys(node)) walk(node as Record<string, unknown>, child, /^[A-Za-z_$][\w$]*$/.test(child) ? `${at}.${child}` : `${at}[${JSON.stringify(child)}]`);
+    }
+  };
+  walk(box, "$", "$");
+  return images.length ? { value: box.$, images: images.map((image) => ({ ...image, path: image.path.replace(/^\$/, "$.result") })) } : { value };
+}
+
 type ResultCut = { path: string; kind: "array" | "string"; total: number; returned: number; stubbed?: number };
 const LONG_TEXT = 2_000;
 const STUB_BUDGET = 6_000;
@@ -519,7 +558,8 @@ export async function appControlCallLocal(caller: AppControlCaller, input: { ope
   const code = refused ? typeof record?.code === "string" ? record.code : typeof record?.reasonCode === "string" ? record.reasonCode : "operation-refused" : undefined;
   // The cut facts come before the result, so a reader of the reply's head sees them before the (long) data ("cuts" also
   // sorts first where the reply is canonically encoded, as on the daemon's channel).
-  const { result, ...cut } = clipResult(value);
-  return { ok: !refused, operation: path, effect: operation.effect, ...cut, result, ...(code ? { code } : {}),
+  const saved = saveResultImages(value);
+  const { result, ...cut } = clipResult(saved.value);
+  return { ok: !refused, operation: path, effect: operation.effect, ...(saved.images ? { images: saved.images } : {}), ...cut, result, ...(code ? { code } : {}),
     ...await recordAppCallReceipt({ operation: path, effect: operation.effect, named: decoded, status: refused ? "refused" : "ok", ...(code ? { code } : {}), ownerTurn: caller.ownerTurn }) };
 }

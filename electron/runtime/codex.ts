@@ -4006,7 +4006,10 @@ export const runCodex: Runner = async (
  * the existing PNG/JPEG artifact store. Tool prose and paths are never
  * inspected for this purpose.
  */
-function codexInlineCapturePaths(toolName: string, output: unknown): string[] {
+export function codexInlineCapturePaths(toolName: string, output: unknown): string[] {
+  // A harness call's image is a host capture the host already saved and named (turn-tools/control-server.ts
+  // harnessResultWithImages): an observation for the model, never a second copy bound as a run output.
+  if (/^(?:mcp__)?agentlas[-_]turn(?:\.|__)/u.test(toolName)) return [];
   let raw: string;
   if (typeof output === "string") raw = output;
   else {

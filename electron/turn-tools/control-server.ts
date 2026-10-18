@@ -5,6 +5,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { onHostShutdown } from "../host-lifecycle";
 import { userDataPath } from "../runtime-paths";
+import { screenCaptureDir } from "../media/capture-artifacts";
 import { outsideInvocationJudgmentContext } from "../runtime/judgment-context";
 import { memoryNoteToEvent } from "../memory/events";
 import { recordTurnAsk, recordTurnMemoryNote, turnNotesKey, TURN_ASK_LIMIT, TURN_MEMORY_NOTE_LIMIT } from "./notes";
@@ -160,6 +161,37 @@ export function harnessCallFailureCode(operation: unknown, result: unknown): str
   const call = r.data as { state?: unknown; error?: { code?: unknown } | null };
   if (call.state !== "tool-error" && call.state !== "failed" && call.state !== "cancelled") return null;
   return typeof call.error?.code === "string" && call.error.code ? call.error.code : call.state;
+}
+
+const RESULT_IMAGE_LIMIT = 4;
+const RESULT_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+
+/**
+ * A harness_call whose app.call answer held images (app-control/service.ts saveResultImages saved each as a host capture
+ * and listed it under `images`) reaches the model as the same JSON plus each capture as an MCP image, so every runtime sees
+ * it the way it sees a tool's screenshot. Dev 2026-10-18 run30 O8: the firm QA's capturePreview image arrived as cut
+ * base64 text and the QA closed inconclusive. Only regular files directly in the host's screen-capture folder are read (at
+ * most four, each under 5 MB); the runtimes keep these as observations, not run outputs (codex.ts, local-tool-loop.ts).
+ */
+export function harnessResultWithImages(operation: unknown, result: unknown): unknown {
+  if (operation !== "harness_call" || !result || typeof result !== "object") return result;
+  const r = result as { status?: unknown; data?: unknown };
+  const listed = r.status === "ok" && r.data && typeof r.data === "object" ? (r.data as { images?: unknown }).images : undefined;
+  if (!Array.isArray(listed) || listed.length === 0) return result;
+  let root: string;
+  try { root = fs.realpathSync.native(screenCaptureDir()); } catch { return result; }
+  const blocks: Array<{ type: "image"; data: string; mimeType: string }> = [];
+  for (const image of listed.slice(0, RESULT_IMAGE_LIMIT)) {
+    const { file, mediaType } = (image && typeof image === "object" ? image : {}) as { file?: unknown; mediaType?: unknown };
+    if (typeof file !== "string" || (mediaType !== "image/png" && mediaType !== "image/jpeg")) continue;
+    try {
+      const real = fs.realpathSync.native(file);
+      const stat = fs.statSync(real);
+      if (path.dirname(real) !== root || !stat.isFile() || stat.size === 0 || stat.size > RESULT_IMAGE_MAX_BYTES) continue;
+      blocks.push({ type: "image", data: fs.readFileSync(real).toString("base64"), mimeType: mediaType });
+    } catch { /* a capture that is gone is still named in the JSON */ }
+  }
+  return blocks.length ? { content: [{ type: "text", text: JSON.stringify(result) }, ...blocks] } : result;
 }
 
 // Constant-time, like the computer-use and workspace-preview control servers: a local process (or a DNS-rebound page)
@@ -345,7 +377,8 @@ export function startTurnToolsControlServer(): Promise<number> {
           const result = await outsideInvocationJudgmentContext(() => handleTurnToolsControlRequest(body, requestLifetime.signal));
           // A failed harness call reaches the model and every receipt as an MCP tool error with its typed code.
           const errorCode = harnessCallFailureCode(body.operation, result);
-          if (!res.destroyed) writeJson(res, 200, { ok: true, result, ...(errorCode ? { isError: true, errorCode } : {}) });
+          const wire = errorCode ? result : harnessResultWithImages(body.operation, result);
+          if (!res.destroyed) writeJson(res, 200, { ok: true, result: wire, ...(errorCode ? { isError: true, errorCode } : {}) });
         } catch (error) {
           if (!res.destroyed) writeJson(res, 409, { ok: false, error: error instanceof Error ? error.message : "turn-tool-failed" });
         }

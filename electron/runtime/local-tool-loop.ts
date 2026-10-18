@@ -30,7 +30,7 @@ import { oneGraphToolTimeoutMs } from "../../shared/one-graph-tool-permission";
 import { readOnlyBrowserToolIsMutating } from "../../shared/read-only-browser-tools";
 import { mcpToolSchemaDigest } from "../mcp-tools/tool-schema";
 import { mcpToolSurfaceHides } from "../mcp-tools/hephaestus-tool-surface";
-import { installLazyToolMenu, invalidateToolMenu, isToolMenuTool, resolveToolMenu } from "./tool-menu";
+import { installLazyToolMenu, invalidateToolMenu, isDirectEntryTool, isToolMenuTool, resolveToolMenu } from "./tool-menu";
 import { CODE_MODE_TOOL, installMainCodeMode, runMainCodeMode } from "./code-mode";
 import { TOOL_RESULT_READ, foldRetainedToolResult, hasToolResultContext, installToolResultContext, projectToolResult, readToolResult, toolResultReadRequest } from "./tool-result-context";
 import { createHash, randomUUID } from "node:crypto";
@@ -1116,7 +1116,9 @@ async function dispatchMainToolRawUnchecked(
     // ★도구가 돌려준 이미지는 모델만 보고 끝나면 안 된다 — 디스크에 정본을 남기고
     // 산출물 경로로 알려야 사용자의 결과 레일과 채팅에 실물로 뜬다.
     // (2026-09-03 실측: 저장하는 곳이 없어 스크린샷 요청이 산출물 0건으로 끝났다.)
-    const capturePaths = images
+    // A harness call's image is a host capture already saved and named in its JSON (turn-tools/control-server.ts
+    // harnessResultWithImages): the model sees it, and it is an observation, not a run output.
+    const capturePaths = isDirectEntryTool(resolved) ? [] : images
       .map((image) => saveBrowserCaptureArtifact(image.mediaType, image.data))
       .filter((filePath): filePath is string => filePath !== null);
     (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(
