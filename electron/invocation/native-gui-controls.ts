@@ -331,6 +331,14 @@ export function createNativeGuiControls(ports: { authorizeRenderer(event: object
     } catch (error) { reject(error); }
     void pending.catch(() => {}); return pending;
   }
+  /** The window's answer to a daemon-hosted run's API-key request (I-D2): true when the service settled that exact request. */
+  async function runKeyOutcome(chatId: string, runId: string, request: Readonly<{ requestId: string; expiresAt: number }>, outcome: "declined" | "provided"): Promise<boolean> {
+    if (!id(chatId) || !id(runId) || (outcome !== "declined" && outcome !== "provided")) fail("native_gui_run_key_outcome_invalid");
+    const raw = await call("invoke.runKeyOutcome", { version: "agentlas.native-run-key-outcome.v1", chatId, runId, requestId: request.requestId, expiresAt: request.expiresAt, outcome });
+    if (!exact(raw, ["version", "chatId", "runId", "settled"]) || raw.version !== "agentlas.native-run-key-outcome.v1" || raw.chatId !== chatId || raw.runId !== runId
+      || typeof raw.settled !== "boolean") fail("native_gui_run_key_outcome_invalid");
+    return raw.settled;
+  }
   function textReceipt(raw: unknown, binding: NativeOwnerTextBinding, intentId: string, expected?: {text:string;kind:NativeOwnerTextKind}): NativeOwnerTextReceipt | null {
     if (raw === null) return null;
     if (!exact(raw, ["version", "chatId", "runId", "inputDigest", "intentId", "deliveryKind", "promptHash", "messageId", "sourceStatus", "result"], ["code"])
@@ -431,7 +439,7 @@ export function createNativeGuiControls(ports: { authorizeRenderer(event: object
     const value=await importNativeJsonValue(wire.transfer,{kind:"checkpoint-value",maxBytes:NATIVE_MAIN_PREPARATION_POLICY.maxCheckpointBytes,signal:controller.signal,assertCurrent:()=>{current()},read:(transferId,offset)=>call("native.attach",{version:"agentlas.native-recovery-read.v1",read:{transferId,offset}})});
     const d=wire.transfer as {transferId:unknown;digest:unknown};if(await call("native.attach",{version:"agentlas.native-recovery-ack.v1",ack:{transferId:d.transferId,digest:d.digest}})!==null)fail("native_gui_recovery_ack_invalid");return value;
   }
-  const control = Object.freeze({ bind, resetObservation, refresh, accept, cancel, resolveApproval, approvalReceipt, mobileApprovalPort, ownerText, ownerTextReceipt, observedTextBinding, recoveredTextBinding, ownerTextUnsteer, durableDaemonTextBinding, durableDaemonTextBindingForRequest, durableCurrentTurn, durableReceipt,
+  const control = Object.freeze({ bind, resetObservation, refresh, accept, cancel, runKeyOutcome, resolveApproval, approvalReceipt, mobileApprovalPort, ownerText, ownerTextReceipt, observedTextBinding, recoveredTextBinding, ownerTextUnsteer, durableDaemonTextBinding, durableDaemonTextBindingForRequest, durableCurrentTurn, durableReceipt,
     ownerTextAttach:(event:object,binding:NativeOwnerTextBinding,includeEvents:boolean)=>recoveryValue(event,binding,"agentlas.native-owner-text-attach.v1",{includeEvents}),
     ownerTextRecovery:(event:object,binding:NativeOwnerTextBinding)=>recoveryValue(event,binding,"agentlas.native-owner-text-recovery.v1"),
     hasRun: (runId: string) => captures.has(runId), hasChat: (chatId: string) => [...captures.values()].some(r => r.chatId === chatId && activeCustody(r)), hasApproval: (requestId: string) => approvals.has(requestId),

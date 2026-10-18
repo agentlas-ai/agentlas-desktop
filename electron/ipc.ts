@@ -271,7 +271,8 @@ import {
   freshGoalIdForChat,
   loadDesktopWorkforceGoal,
 } from "./mcp/workforce-goal-continuity";
-import { resolveRunKeyElicitation, resolveRunKeyWithStoredName } from "./mcp/run-key-elicitation";
+import { configureRunKeyOwnerHost, observeHostedRunKeyEvent, resolveRunKeyElicitationAnywhere, resolveRunKeyWithStoredName } from "./mcp/run-key-elicitation";
+import { onNativeGuiInvocationEvent } from "./invocation/native-gui-events";
 import { invocationService } from "./invocation/service";
 import { createRendererSendQueue } from "./invocation/renderer-send-queue";
 import { canQueuePendingSend } from "./invocation/pending-chat-sends";
@@ -3862,8 +3863,16 @@ export function registerIpcHandlers(): void {
   registerAppControlDomainIpc(ipcMain, "mcpTools:recommendForBuild", (input) => recommendMcpBuildPlan(input));
   // 실행 전 키 요청 시트의 완료 신호 — 비밀 값은 절대 이 채널로 오지 않는다(값은 env:set).
   // 만료/미지의 runId는 { ok:false } 멱등 무시라 렌더러 재시도가 안전하다.
+  // A run the background service hosts keeps its key request there; its answers go to that service over the signed
+  // channel (flow audit 2026-10-18, I-D2). Main mirrors the request from the service's own mcp-key-request event.
+  configureRunKeyOwnerHost({ deliver: async ({ chatId, runId, request }, outcome) => {
+    const controls = configuredNativeGuiControls();
+    if (!controls) throw new Error("native_gui_controls_unavailable");
+    return controls.runKeyOutcome(chatId, runId, request, outcome);
+  } });
+  onNativeGuiInvocationEvent(({ runId, chatId, event }) => observeHostedRunKeyEvent(runId, chatId, event));
   registerAppControlDomainIpc(ipcMain, "mcp:supplyRunKeys", (runId: string, outcome: unknown) =>
-    resolveRunKeyElicitation(String(runId), outcome),
+    resolveRunKeyElicitationAnywhere(String(runId), outcome),
   );
   // The owner's click on "use the saved key X for this tool". Deliberately not an app-control operation: One may
   // propose it but only this sheet, on an owner click, can confirm it. Main re-checks the offer; names only.

@@ -57,7 +57,9 @@ const NATIVE_SILENT_PEER_TIMEOUTS = 3;
 const MAX_LATE_REPLIES = 256;
 /** Only invoke.nativeStart (whole start) and native.attach (adoptSession + supervisor.recover) wait long; every other request keeps 10 s. */
 export function nativeGuiReplyTimeoutMs(method: string): number { return method === "invoke.nativeStart" || method === "native.attach" ? NATIVE_START_REPLY_TIMEOUT_MS : 10000; }
-const methods = new Set(["invoke.nativeStart", "invoke.admission", "invoke.receipt", "invoke.currentTurn", "invoke.steerCurrentTurn", "invoke.currentTurnSteerReceipt", "invoke.cancel", "native.approvalReply", "native.attach", "native.detach"]);
+// invoke.runKeyOutcome: the window's answer to a daemon-hosted run's API-key request (flow audit 2026-10-18, I-D2). An older
+// service does not list it and answers native_auth_dispatch_denied (a signed reply; the channel stays up).
+const methods = new Set(["invoke.nativeStart", "invoke.admission", "invoke.receipt", "invoke.currentTurn", "invoke.steerCurrentTurn", "invoke.currentTurnSteerReceipt", "invoke.cancel", "invoke.runKeyOutcome", "native.approvalReply", "native.attach", "native.detach"]);
 const errorCode = (e: unknown): string => {
   if (e && (typeof e === "object" || typeof e === "function")) {
     try {

@@ -28,6 +28,7 @@ import { createNativeInvocationPublicPublisher, nativePublicAttachmentOperation,
 import { createNativeInvocationApprovalChannel } from "./native-invocation-approvals";
 import { getInvocationAdmission } from "../store/invocation-admissions";
 import { getCurrentTurnSteer } from "../store/current-turn-steers";
+import { settleRunKeyElicitationFromWindow } from "../mcp/run-key-elicitation";
 import type { NativeInvocationResources } from "./native-invocation-config";
 
 export interface NativeInvocationCapabilities { start: boolean; stop: boolean; events: boolean; approvals: boolean; recovery: boolean }
@@ -367,6 +368,16 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
       if (!record || record.peer !== peer || record.identity !== attachment.identity
         || JSON.stringify(record.start) !== JSON.stringify(start)) fail("native_invocation_control_binding_changed");
       return host.cancelCaptured(peer, start);
+    }
+    if (method === "invoke.runKeyOutcome") {
+      // The window's answer to an API-key request of a run this service hosts (I-D2). Value-free: "provided" is Main's
+      // receipt-gate verdict; only the exact pending request (requestId + expiry) of a run this service hosts settles.
+      if (!exact(params, ["version", "chatId", "runId", "requestId", "expiresAt", "outcome"]) || params.version !== "agentlas.native-run-key-outcome.v1"
+        || typeof params.requestId !== "string" || !Number.isSafeInteger(params.expiresAt) || (params.outcome !== "declined" && params.outcome !== "provided")) fail("native_invocation_control_invalid");
+      const record = observeCapture(params.chatId, params.runId);
+      const settled = settleRunKeyElicitationFromWindow(record.runId, { requestId: params.requestId as string, expiresAt: params.expiresAt as number },
+        params.outcome as "declined" | "provided");
+      return { version: "agentlas.native-run-key-outcome.v1", chatId: record.chatId, runId: record.runId, settled };
     }
     if (method === "invoke.steerCurrentTurn") {
       if (!exact(params, ["chatId", "intentId", "expectedRunId", "text"])) fail("native_invocation_control_invalid");

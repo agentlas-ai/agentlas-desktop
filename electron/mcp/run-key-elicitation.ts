@@ -45,6 +45,77 @@ interface PendingElicitation {
 
 const pendingByRunId = new Map<string, PendingElicitation>();
 
+/**
+ * Key requests of runs the background service hosts, as Main saw them (flow audit 2026-10-18, I-D2).
+ *
+ * A daemon-hosted interactive run keeps its pending request in the daemon's memory and sends its mcp-key-request
+ * event to the window over the native stream. Every answer path (mcp:supplyRunKeys, mcp:useStoredRunKey,
+ * oneVault:openRunKeyRequest / runKeyStatus) looked only in Main's memory, so a decline, a saved key or a renamed
+ * stored key never reached the run: it waited out its 120 s window and continued without the tool, "not provided in
+ * time" (the add14fc8 class: state held by the process that hosts the run, answers looked up in Main).
+ * Main now mirrors that request from the service's own event (value-free, the exact object the service holds) and
+ * hands each answer to the hosting service over the signed channel; the service settles only its exact pending
+ * request. Secret values never travel: "provided" is Main's receipt-gate verdict, and the service re-reads its own
+ * vault when it reselects the tools.
+ */
+interface HostedElicitation { chatId: string; request: McpRunKeyRequest }
+const hostedByRunId = new Map<string, HostedElicitation>();
+const MAX_HOSTED_ELICITATIONS = 64;
+export interface RunKeyOwnerHost {
+  /** True when the hosting service settled that exact pending request, false when it had none; throws when the answer
+   * could not be delivered (the mirror is kept for a retry). */
+  deliver(target: Readonly<{ chatId: string; runId: string; request: Readonly<McpRunKeyRequest> }>, outcome: "declined" | "provided"): Promise<boolean>;
+}
+let ownerHost: RunKeyOwnerHost | null = null;
+/** Main only (its IPC registration): the route to the service that hosts a run. A re-registration replaces it. */
+export function configureRunKeyOwnerHost(host: RunKeyOwnerHost): void {
+  if (typeof host?.deliver !== "function") throw new Error("mcp_key_owner_host_invalid");
+  ownerHost = host;
+}
+function hostedElicitation(runId: string): HostedElicitation | null {
+  const entry = hostedByRunId.get(runId);
+  if (!entry) return null;
+  if (entry.request.expiresAt <= Date.now()) { hostedByRunId.delete(runId); return null; }
+  return entry;
+}
+/** Main: one event of a run the background service hosts (native-gui-events). A key request is mirrored; the run's own
+ * final or error retires it. A run this process hosts never takes this path. */
+export function observeHostedRunKeyEvent(runId: string, chatId: string, event: Pick<McpInvocationEvent, "kind" | "agentId" | "keyRequest">): void {
+  if (event.kind === "mcp-key-request") {
+    const request = event.keyRequest;
+    if (!request || request.runId !== runId || pendingByRunId.has(runId) || !(request.expiresAt > Date.now())) return;
+    hostedByRunId.delete(runId);
+    hostedByRunId.set(runId, { chatId, request: structuredClone(request) });
+    for (const [id, entry] of hostedByRunId) if (entry.request.expiresAt <= Date.now()) hostedByRunId.delete(id);
+    while (hostedByRunId.size > MAX_HOSTED_ELICITATIONS) hostedByRunId.delete(hostedByRunId.keys().next().value!);
+    return;
+  }
+  if (!event.agentId && (event.kind === "final" || event.kind === "error")) hostedByRunId.delete(runId);
+}
+async function deliverHosted(runId: string, entry: HostedElicitation, outcome: "declined" | "provided"): Promise<boolean> {
+  const host = ownerHost;
+  if (!host) return false;
+  let settled: boolean;
+  try { settled = await host.deliver({ chatId: entry.chatId, runId, request: entry.request }, outcome) === true; }
+  catch { return false; }
+  // Answered either way: settled now, or the service no longer holds it (timed out, aborted, answered elsewhere).
+  if (hostedByRunId.get(runId) === entry) hostedByRunId.delete(runId);
+  return settled;
+}
+/** Service side: the window's answer for a run this process hosts, over the signed native channel. Only the exact
+ * pending request (same requestId and expiry) settles. */
+export function settleRunKeyElicitationFromWindow(
+  runId: string,
+  expected: Readonly<{ requestId: string; expiresAt: number }>,
+  outcome: "declined" | "provided",
+): boolean {
+  const entry = pendingByRunId.get(runId);
+  if (!entry || entry.settled || entry.request.requestId !== expected.requestId || entry.request.expiresAt !== expected.expiresAt
+    || entry.request.expiresAt <= Date.now() || (outcome !== "declined" && outcome !== "provided")) return false;
+  entry.settle(outcome);
+  return true;
+}
+
 /** Main-authored, value-free identity; never accept this scope from model text. */
 export interface GoalKeyElicitationScope {
   goalId: string;
@@ -186,10 +257,22 @@ export function resolveRunKeyElicitation(runId: string, outcome: unknown): { ok:
   entry.settle("declined");
   return { ok: true };
 }
-/** Main-only read of the original pending intent; no secret values or caller-built scope. */
+/** IPC entry for a decline from any window: a run this process hosts settles here, a daemon-hosted run's decline goes
+ *  to its service (I-D2). Same answer shape as resolveRunKeyElicitation. */
+export async function resolveRunKeyElicitationAnywhere(runId: string, outcome: unknown): Promise<{ ok: boolean }> {
+  const id = String(runId);
+  if (pendingByRunId.has(id)) return resolveRunKeyElicitation(id, outcome);
+  const hosted = hostedElicitation(id);
+  if (!hosted || outcome !== "declined") return { ok: false };
+  return { ok: await deliverHosted(id, hosted, "declined") };
+}
+/** Main-only read of the original pending intent; no secret values or caller-built scope. A daemon-hosted run's
+ *  request is the one its service sent (I-D2). */
 export function pendingRunKeyElicitation(runId:string):McpRunKeyRequest|null {
   const entry=pendingByRunId.get(runId);
-  return entry&&!entry.settled&&entry.request.expiresAt>Date.now()?structuredClone(entry.request):null;
+  if(entry)return !entry.settled&&entry.request.expiresAt>Date.now()?structuredClone(entry.request):null;
+  const hosted=hostedElicitation(runId);
+  return hosted?structuredClone(hosted.request):null;
 }
 let nativeSavedGate:((request:Readonly<McpRunKeyRequest>)=>boolean|Promise<boolean>)|null=null;
 export function configureRunKeySavedReceiptGate(gate:(request:Readonly<McpRunKeyRequest>)=>boolean|Promise<boolean>):void {
@@ -197,6 +280,14 @@ export function configureRunKeySavedReceiptGate(gate:(request:Readonly<McpRunKey
 }
 export async function resolveRunKeysFromNativeReceipt(runId:string):Promise<{ok:boolean}> {
   const entry=pendingByRunId.get(runId);
+  if(!entry){
+    // A daemon-hosted run: Main's receipt gate decides, the hosting service settles (I-D2).
+    const hosted=hostedElicitation(runId),gate=nativeSavedGate;
+    if(!hosted||!gate)return{ok:false};
+    try{if(await gate(Object.freeze(structuredClone(hosted.request)))!==true)return{ok:false};}catch{return{ok:false};}
+    if(hostedElicitation(runId)!==hosted||nativeSavedGate!==gate)return{ok:false};
+    return{ok:await deliverHosted(runId,hosted,'provided')};
+  }
   if(!entry||entry.settled||entry.request.expiresAt<=Date.now()||!nativeSavedGate)return{ok:false};
   const gate=nativeSavedGate;
   try{if(await gate(Object.freeze(structuredClone(entry.request)))!==true)return{ok:false};}catch{return{ok:false};}
@@ -216,7 +307,8 @@ export async function resolveRunKeyWithStoredName(
   storedName: string,
 ): Promise<{ ok: boolean; resolved: boolean }> {
   const entry = pendingByRunId.get(runId);
-  if (!entry || entry.settled || entry.request.expiresAt <= Date.now()) return { ok: false, resolved: false };
+  if (!entry) return resolveHostedRunKeyWithStoredName(runId, toolId, keyName, storedName);
+  if (entry.settled || entry.request.expiresAt <= Date.now()) return { ok: false, resolved: false };
   const offered = entry.request.tools.find((tool) => tool.id === toolId)?.envKeys.find((key) => key.key === keyName);
   if (!offered || offered.storedMatch !== storedName) return { ok: false, resolved: false };
   const renamed = await renameEnvVar(storedName, keyName);
@@ -227,6 +319,22 @@ export async function resolveRunKeyWithStoredName(
   if (!saved.every(Boolean) || entry.settled) return { ok: true, resolved: false };
   entry.settle("provided");
   return { ok: true, resolved: true };
+}
+
+/** The same yes for a daemon-hosted run (I-D2): the rename happens in Main's vault as above, and the hosting service is
+ *  released only when every requested key is saved; it re-reads its own vault when it reselects. */
+async function resolveHostedRunKeyWithStoredName(runId: string, toolId: string, keyName: string, storedName: string): Promise<{ ok: boolean; resolved: boolean }> {
+  const hosted = hostedElicitation(runId);
+  if (!hosted) return { ok: false, resolved: false };
+  const offered = hosted.request.tools.find((tool) => tool.id === toolId)?.envKeys.find((key) => key.key === keyName);
+  if (!offered || offered.storedMatch !== storedName) return { ok: false, resolved: false };
+  const renamed = await renameEnvVar(storedName, keyName);
+  if (!renamed.ok) return { ok: false, resolved: false };
+  if (hostedElicitation(runId) !== hosted) return { ok: true, resolved: false };
+  const wanted = hosted.request.tools.flatMap((tool) => tool.envKeys.map((key) => key.key));
+  const saved = await Promise.all(wanted.map((key) => hasEnvVar(key).catch(() => false)));
+  if (!saved.every(Boolean) || hostedElicitation(runId) !== hosted) return { ok: true, resolved: false };
+  return { ok: true, resolved: await deliverHosted(runId, hosted, "provided") };
 }
 
 /** Test/diagnostic surface: is a key window pending for this run? */
