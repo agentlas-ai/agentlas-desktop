@@ -4195,7 +4195,13 @@ async function runMcpInvocationInContext(
                   presentation: executionContext ? "background" : browserPresentation,
                   onScreenshot: (capture) => publishNativeCapture(capture) });
               }
+              // agentlas-turn (harness_search/describe/call) binds to a chat and a run: without the run it is never written
+              // into the worker's config, and a worker whose selection includes it fails before it starts. Production
+              // 2026-10-18 05:48-05:57Z, Yotube room run ea52dcd9: 14 of 14 task-force and firm workers refused
+              // materialization-unavailable ["agentlas-turn"] on the first production run of this path. The worker's turn
+              // tools belong to the run that started it.
               childConfig = await buildMcpConfigFile({ configKey: `worker-${generation}-${randomUUID()}`,
+                ...(req.runId ? { turnRunId: req.runId } : {}),
                 skipDefaultSeed: true, catalogIds: ids, ...(grant ? { nativeBrowser: grant } : {}),
                 ...(workspacePreviewOwnerGrant ? { workspacePreviewOwnerGrant } : {}),
                 toolGate: { ...(planReadOnly ? { planMode: true as const } : {}), runtime: input.runtime.kind, sessionKey: `${input.runtime.kind}:${chat.id}`,
