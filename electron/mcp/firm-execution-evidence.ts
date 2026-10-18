@@ -3,6 +3,9 @@ import path from "node:path";
 import type { RuntimeToolKind } from "../../shared/runtime-tool-kind";
 
 const TEST_PATH_RE = /(?:^|[\s"'`=(,])((?:(?:[A-Za-z]:|\.{0,2})[\\/]|[A-Za-z0-9_@-])[A-Za-z0-9_@.:\\/-]*\.(?:test|spec)\.[cm]?[jt]sx?)(?=$|[\s"'`),:;.])/giu;
+// Python's own conventions (unittest/pytest discovery): test_*.py and *_test.py. Dev 2026-10-18 run16: the worker and QA ran
+// `python3 -m unittest -v test_budget_ledger.py` (18 tests OK) and the evidence still read host_executed_tests: none.
+const PY_TEST_PATH_RE = /(?:^|[\s"'`=(,])((?:(?:[A-Za-z]:|\.{0,2})[\\/]|[A-Za-z0-9_@-])?(?:[A-Za-z0-9_@.:\\/-]*[\\/])?(?:test_[A-Za-z0-9_]+|[A-Za-z0-9_]+_test)\.py)(?=$|[\s"'`),:;.])/giu;
 // A tool is classified by its typed kind when the runner reports one: ACP agents (copilot, cursor, grok, kimi) send
 // `ToolCall.kind`, and Antigravity's native tool maps to the same kinds (shared/runtime-tool-kind.ts, review 2026-10-16
 // H1). Their display names ("execute: <title>") are never read. Runtimes with fixed native names and no kind (Claude
@@ -151,7 +154,7 @@ function changeKindFor(raw: string | undefined, candidate: string): string | nul
 
 function testPathsFromText(value: string): string[] {
   const found = new Set<string>();
-  for (const match of value.matchAll(TEST_PATH_RE)) {
+  for (const match of [...value.matchAll(TEST_PATH_RE), ...value.matchAll(PY_TEST_PATH_RE)]) {
     const raw = match[1]?.trim();
     if (!raw || raw.includes("\0")) continue;
     found.add(raw.replaceAll("\\", path.sep));
@@ -170,12 +173,12 @@ function exactSingleTestRunnerCommand(command: string): boolean {
   const envPrefix = String.raw`(?:(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s]+))\s+)*`;
   const directRunner = String.raw`(?:(?:npx|bunx)\s+|npm\s+exec\s+(?:--\s+)?|pnpm\s+(?:exec\s+)?|yarn\s+)?(?:\.\/node_modules\/\.bin\/)?(?:vitest|jest|mocha|ava|pytest|phpunit|rspec)`;
   const scriptRunner = String.raw`(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test`;
-  const nativeRunner = String.raw`(?:python3?\s+-m\s+pytest|node\s+--test|go\s+test|cargo\s+test)`;
+  const nativeRunner = String.raw`(?:python3?\s+-m\s+(?:pytest|unittest)|node\s+--test|go\s+test|cargo\s+test)`;
   return new RegExp(`^${envPrefix}(?:${directRunner}|${scriptRunner}|${nativeRunner})(?:\\s|$)`, "iu").test(trimmed);
 }
 
 function testCollectionMissing(output: string | undefined): boolean {
-  return typeof output === "string" && /(?:no\s+test\s+files?\s+found|no\s+tests?\s+(?:found|collected)|collected\s+0\s+items?|0\s+tests?\s+(?:run|collected))/iu.test(output);
+  return typeof output === "string" && /(?:no\s+test\s+files?\s+found|no\s+tests?\s+(?:found|collected|ran)|collected\s+0\s+items?|0\s+tests?\s+(?:run|collected)|^Ran\s+0\s+tests?\b)/imu.test(output);
 }
 
 /**
@@ -189,22 +192,24 @@ function testCollectionMissing(output: string | undefined): boolean {
  * - A pipe into `tail`/`head`, or harmless sibling segments (`cd <literal path>`, `echo`/`printf` without substitution
  *   other than `$?`, `ls`, `pwd`, `true`, a `node -v`-style version check) joined by `;`/`&&`: the status is another
  *   command's -> judged only by the runner's own tally in the output (runnerTally); no tally, no receipt.
- * Exactly one runner segment; anything else (another command, `$(…)`, a second pipe) is no test run.
+ * - Other commands around the runner (dev 2026-10-18 run16: `…unittest -v test_x.py 2>&1; echo "EXIT=$?"; python3 app.py
+ *   sample.csv`, `… | tail -n 6; echo "EXIT=${PIPESTATUS[0]}"`): judged by the tally too, and only when the output holds
+ *   exactly one tally, so another command's output (an old log) cannot stand in for the run.
+ * Exactly one runner segment (two are ambiguous); a substitution `$(…)` or a backtick is no test run.
  */
-function parseTestInvocation(command: string): { command: string; cd: string | null; byTally: boolean } | null {
+function parseTestInvocation(command: string): { command: string; cd: string | null; byTally: boolean; uniqueTally: boolean } | null {
   let rest = command.trim();
   const shell = /^(?:\/(?:usr\/)?bin\/)?(?:zsh|bash|sh)\s+-l?c\s+(?:'((?:[^']|'\\'')*)'|"((?:[^"\\]|\\.)*)")\s*$/su.exec(rest);
   if (shell) rest = (shell[1] !== undefined ? shell[1].replace(/'\\''/g, "'") : shell[2].replace(/\\(["\\$`])/g, "$1")).trim();
   if (/[\r\n`]/u.test(rest) || rest.includes("$(")) return null;
   const segments = rest.split(/\s*(?:;|&&)\s*/u).map((segment) => segment.trim()).filter(Boolean);
   let cd: string | null = null;
-  let sibling = false;
+  let sibling = false, other = false;
   let runner: { command: string; cd: string | null; filtered: boolean } | null = null;
   for (const segment of segments) {
     const cdMatch = /^cd\s+(?:"([^"$\\]+)"|'([^']+)'|([^\s;&|<>"'$\\]+))$/u.exec(segment);
     if (cdMatch) {
-      if (runner) return null;
-      cd = cdMatch[1] ?? cdMatch[2] ?? cdMatch[3] ?? null;
+      if (!runner) cd = cdMatch[1] ?? cdMatch[2] ?? cdMatch[3] ?? null;
       continue;
     }
     if ((/^(?:echo|printf)\b[^|<>]*$/u.test(segment) && !/\$(?!\?)/u.test(segment))
@@ -213,32 +218,45 @@ function parseTestInvocation(command: string): { command: string; cd: string | n
       sibling = true;
       continue;
     }
-    if (runner) return null;
     let body = segment.replace(/^timeout\s+(?:--?[a-z][a-z-]*(?:[=\s][^\s;&|<>$]+)?\s+)*\d+(?:\.\d+)?[smhd]?\s+/u, "");
     const filter = /\s*\|\s*(?:tail|head)(?:\s+-n)?\s+[-+]?\d+\s*$/u;
     const filtered = filter.test(body);
     if (filtered) body = body.replace(filter, "");
     const redirect = /\s+(?:\d?>>?|&>>?)\s*(?:&\d|"[^"$]+"|'[^']+'|[^\s;&|<>"'$]+)\s*$/u;
     for (let i = 0; i < 3 && redirect.test(body); i += 1) body = body.replace(redirect, "");
+    const runnerShaped = exactSingleTestRunnerCommand(body) || /^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test$/u.test(body.trim());
+    if (!runnerShaped) { other = true; continue; }
+    if (runner) return null;
     runner = { command: body, cd, filtered };
   }
   if (!runner) return null;
-  return { command: runner.command, cd: runner.cd, byTally: runner.filtered || sibling };
+  return { command: runner.command, cd: runner.cd, byTally: runner.filtered || sibling || other, uniqueTally: other };
 }
 
 /**
  * The runner's own final tally in the output the host captured: node --test (spec `ℹ fail N`, TAP `# fail N`), pytest
- * (`=== N passed in 0.6s ===`), vitest (`Tests  N passed (N)`), jest (`Tests: N passed, N total`). Null when the output
- * holds no tally (cut by `head`, another runner): then there is no receipt.
+ * (`=== N passed in 0.6s ===`), vitest (`Tests  N passed (N)`), jest (`Tests: N passed, N total`), unittest
+ * (`Ran N tests in 0.010s` then `OK` / `FAILED (…)`). Null when the output holds no tally (cut by `head`, another runner),
+ * and, when `unique`, when it holds more than one.
  */
-function runnerTally(output: string | undefined): "passed" | "failed" | null {
+function runnerTally(output: string | undefined, unique = false): "passed" | "failed" | null {
   if (typeof output !== "string") return null;
-  const node = [...output.matchAll(/^\s*(?:ℹ|#)\s+fail\s+(\d+)\s*$/gmu)].at(-1);
-  if (node) return Number(node[1]) === 0 ? "passed" : "failed";
-  const pytest = [...output.matchAll(/^=+\s+(.+?)\s+in\s+[\d.]+s\b.*=+\s*$/gmu)].at(-1);
-  if (pytest && /\b\d+\s+passed\b/u.test(pytest[1])) return /\b\d+\s+(?:failed|errors?)\b/u.test(pytest[1]) ? "failed" : "passed";
-  const jsRunner = [...output.matchAll(/^\s*Tests:?\s+(.+)$/gmu)].at(-1);
-  if (jsRunner && /\b\d+\s+passed\b/u.test(jsRunner[1])) return /\b\d+\s+failed\b/u.test(jsRunner[1]) ? "failed" : "passed";
+  const node = [...output.matchAll(/^\s*(?:ℹ|#)\s+fail\s+(\d+)\s*$/gmu)];
+  const pytest = [...output.matchAll(/^=+\s+(.+?)\s+in\s+[\d.]+s\b.*=+\s*$/gmu)].filter((match) => /\b\d+\s+(?:passed|failed)\b/u.test(match[1]));
+  const jsRunner = [...output.matchAll(/^\s*Tests:?\s+(.+)$/gmu)].filter((match) => /\b\d+\s+(?:passed|failed)\b/u.test(match[1]));
+  const unittest = [...output.matchAll(/^Ran\s+(\d+)\s+tests?\s+in\s+[\d.]+s\s*$/gmu)];
+  if (unique && node.length + pytest.length + jsRunner.length + unittest.length !== 1) return null;
+  if (node.length) return Number(node.at(-1)![1]) === 0 ? "passed" : "failed";
+  const lastPytest = pytest.at(-1);
+  if (lastPytest && /\b\d+\s+passed\b/u.test(lastPytest[1])) return /\b\d+\s+(?:failed|errors?)\b/u.test(lastPytest[1]) ? "failed" : "passed";
+  const lastJs = jsRunner.at(-1);
+  if (lastJs && /\b\d+\s+passed\b/u.test(lastJs[1])) return /\b\d+\s+failed\b/u.test(lastJs[1]) ? "failed" : "passed";
+  const lastUnittest = unittest.at(-1);
+  if (lastUnittest) {
+    const status = /^\s*(OK|FAILED)\b/mu.exec(output.slice(lastUnittest.index! + lastUnittest[0].length))?.[1];
+    if (status === "FAILED") return "failed";
+    if (status === "OK" && Number(lastUnittest[1]) > 0) return "passed";
+  }
   return null;
 }
 
@@ -369,7 +387,7 @@ export class FirmExecutionEvidenceCollector {
     const exactTestRun = exactSingleTestRunnerCommand(runnerCommand) && rawTests.length === 1 && tests.length === 1;
     if (!exactTestRun) return;
     if (invocation.byTally) {
-      const tally = runnerTally(result);
+      const tally = runnerTally(result, invocation.uniqueTally);
       if (tally === "failed") for (const test of tests) this.failedTests.add(test);
       if (tally !== "passed") return;
       this.successfulCommandCount += 1;
