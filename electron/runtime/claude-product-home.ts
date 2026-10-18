@@ -247,11 +247,18 @@ export function syncClaudeProductHome(realDir: string, mirror = claudeProductHom
  * never fires after the host ends the process, so the model would believe a schedule exists that does not; scheduling
  * stays with Agentlas (goal_wait, automations). Measured in the installed CLI 2.1.302: both names read from the env.
  * This changes the tool surface, not any prompt text.
+ *
+ * A start the CLI refuses ends with a typed result: CLI 2.1.302 writes the zeroed error_during_execution result naming
+ * startup_failure_reason ("Failures that used to end with stderr alone write that result only when the host sets
+ * CLAUDE_CODE_STARTUP_FAILURE_RESULTS"). Without it a --resume of a session held by another process
+ * (session_held_by_background), a missing working folder or an unusable temp dir exits 1 with stderr only, and a pass that
+ * never started read as an unsettled turn. claude-code.ts claudeStartupRefusal returns it typed and pre-dispatch.
  */
 export const CLAUDE_PRODUCT_RUN_ENV: Readonly<Record<string, string>> = Object.freeze({
   CLAUDE_CODE_ENABLE_TODO_TOOLS: "1",
   CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
   CLAUDE_CODE_DISABLE_CRON: "1",
+  CLAUDE_CODE_STARTUP_FAILURE_RESULTS: "1",
 });
 
 /** `env` itself when it already carries CLAUDE_PRODUCT_RUN_ENV (idempotent), else a copy that does. */

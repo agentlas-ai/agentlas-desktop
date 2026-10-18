@@ -933,7 +933,8 @@ function claudeErrorLead(code: string | undefined, locale: string | undefined): 
 
 export function claudeFailureFromEvent(
   ev: { type?: string; subtype?: string; error?: unknown; is_error?: boolean; result?: unknown; terminal_reason?: string;
-        errors?: unknown; api_error_status?: number | null; rate_limit_info?: { status?: string; resetsAt?: number } },
+        errors?: unknown; api_error_status?: number | null; rate_limit_info?: { status?: string; resetsAt?: number };
+        startup_failure_reason?: unknown },
   finalText: string,
   prior: RunnerFailure | null,
   locale?: string,
@@ -980,11 +981,15 @@ export function claudeFailureFromEvent(
     const providerText = typeof ev.result === "string" && ev.result.trim() ? ev.result.trim()
       : Array.isArray(ev.errors) ? ev.errors.filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
         .map((item) => item.trim()).join("; ") : "";
-    const code = claudeProviderCode(ev.terminal_reason && ev.terminal_reason !== "completed" ? ev.terminal_reason : undefined)
+    // A known startup refusal names its own cause (CLI 2.1.302 startup_failure_reason: session_held_by_background,
+    // cwd_unavailable, ...): that typed reason is the provider code, never the generic error_during_execution envelope.
+    const startupReason = claudeProviderCode(ev.startup_failure_reason);
+    const code = startupReason
+      ?? claudeProviderCode(ev.terminal_reason && ev.terminal_reason !== "completed" ? ev.terminal_reason : undefined)
       ?? claudeProviderCode(ev.subtype && ev.subtype !== "success" ? ev.subtype : undefined)
       ?? (typeof ev.api_error_status === "number" ? `api_error_${ev.api_error_status}` : undefined)
       ?? prior?.providerCode;
-    const lead = claudeErrorLead(code, locale);
+    const lead = claudeErrorLead(startupReason ? "turn_setup_failed" : code, locale);
     const message = `${lead}${code ? ` (${code})` : ""}${providerText ? `: ${providerText}` : ""}`.slice(0, 2000);
     return {
       // A bare 429 with no window rejection before it is request throttling (rate_limit), retried after its reset hint.
@@ -1017,6 +1022,74 @@ const CLAUDE_BACKGROUND_ORIGINS = new Set(["task-notification", "observer", "obs
 function claudeBackgroundOrigin(ev: ClaudeStreamEvent): boolean {
   const origin = ev.origin && typeof ev.origin === "object" ? (ev.origin as { kind?: unknown }).kind : undefined;
   return typeof origin === "string" && CLAUDE_BACKGROUND_ORIGINS.has(origin);
+}
+
+/**
+ * The typed cause of a zeroed startup-refusal result, else undefined. CLI 2.1.302 writes startup_failure_reason on "the
+ * zeroed error_during_execution result a stream-json run writes before exiting on a known startup failure" (enum:
+ * session_held_by_background, cwd_unavailable, temp_dir_unusable, worktree_resume_refused, org_*, proxy_invalid,
+ * cli_version_too_old, ...). Nothing ran: num_turns is 0 and no model request was made.
+ */
+export function claudeStartupRefusal(ev: Record<string, unknown>): string | undefined {
+  if (ev.type !== "result" || ev.is_error !== true || ev.num_turns !== 0 || ev.parent_tool_use_id || ev.isSidechain === true) return undefined;
+  return claudeProviderCode(ev.startup_failure_reason);
+}
+
+/**
+ * The machine facts of a root result that did not settle this pass completed, as one status line (a run event): only
+ * fields the CLI types as codes, each validated, never the provider's words. It tells an uncertain pass from a refused
+ * start, an interrupted turn or a background-attributed result.
+ */
+export function claudeResultFactsStatus(ev: Record<string, unknown>, facts: { rootAccepted: boolean; own: boolean; backgroundLive: number }): string {
+  const code = (value: unknown): string => claudeProviderCode(value) ?? "none";
+  const origin = ev.origin && typeof ev.origin === "object" ? (ev.origin as { kind?: unknown }).kind : undefined;
+  return `[runtime-session] result_facts kind=${KIND} subtype=${code(ev.subtype)}`
+    + ` is_error=${typeof ev.is_error === "boolean" ? String(ev.is_error) : "none"}`
+    + ` terminal_reason=${code(ev.terminal_reason)} stop_reason=${code(ev.stop_reason)}`
+    + ` startup_failure_reason=${code(ev.startup_failure_reason)} origin=${code(origin)}`
+    + ` num_turns=${Number.isSafeInteger(ev.num_turns) && (ev.num_turns as number) >= 0 ? String(ev.num_turns) : "none"}`
+    + ` root_accepted=${facts.rootAccepted} own=${facts.own} background_live=${facts.backgroundLive}`;
+}
+
+/**
+ * Live background tasks of one Claude process, from the CLI's own task lifecycle frames (2.1.302): system/task_started
+ * (is_backgrounded), task_updated (patch.is_backgrounded / a terminal patch.status), task_notification (the task ended),
+ * and background_tasks_changed, the level signal that replaces the whole set. Ambient (housekeeping) tasks are not work
+ * of the turn. Product runs set CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1, so this stays 0 unless a CLI starts one anyway.
+ */
+export class ClaudeBackgroundTasks {
+  private readonly live = new Set<string>();
+  observe(ev: Record<string, unknown>): void {
+    if (ev.type !== "system") return;
+    const id = typeof ev.task_id === "string" && ev.task_id ? ev.task_id : null;
+    switch (ev.subtype) {
+      case "background_tasks_changed": {
+        if (!Array.isArray(ev.tasks)) return;
+        this.live.clear();
+        for (const task of ev.tasks.slice(0, 1024)) {
+          if (task && typeof task === "object" && typeof (task as { task_id?: unknown }).task_id === "string"
+            && (task as { ambient?: unknown }).ambient !== true) this.live.add((task as { task_id: string }).task_id);
+        }
+        return;
+      }
+      case "task_started":
+        if (id && ev.is_backgrounded === true && ev.ambient !== true && this.live.size < 1024) this.live.add(id);
+        return;
+      case "task_updated": {
+        const patch = ev.patch && typeof ev.patch === "object" ? ev.patch as { is_backgrounded?: unknown; status?: unknown } : null;
+        if (!id || !patch) return;
+        if (patch.status === "completed" || patch.status === "failed" || patch.status === "killed") this.live.delete(id);
+        else if (patch.is_backgrounded === true && this.live.size < 1024) this.live.add(id);
+        return;
+      }
+      case "task_notification":
+        if (id) this.live.delete(id);
+        return;
+      default:
+        return;
+    }
+  }
+  get count(): number { return this.live.size; }
 }
 
 /** Resident processes seen stamping a turn's system/init with the client uuids it answers (2.1.301 does). */
@@ -1595,16 +1668,41 @@ const runClaudeTurn = async (
   let modelHandoff: { retired: number; pending: number } | null = null;
   /** 이 세션을 풀에 되돌리면 안 되는가(취소·오류·프로토콜 파손). */
   let broken = false;
+  /*
+   * Another process of this chat owner that holds the native session this turn resumes. Codex (claimCodexThreadWriter)
+   * and ACP (retireSupersededAcpSessions) hand a session over only after its previous process has exited and refuse
+   * while that process runs a turn; Claude marked a busy sibling "retire on release" and resumed the same session at
+   * once, and closed an idle one without waiting (flow audit 2026-10-18 AD-5). Both now follow the same contract: a
+   * sibling running a turn is a typed pre-dispatch refusal (runtime_session_owner_busy), and every retired one has
+   * exited before this turn spawns or reuses a process (runtime_retired_cli_exit_timeout otherwise).
+   */
+  const handOverNativeSession = async (handoff: { busy: boolean; retired: ClaudeResidentSession[] }): Promise<number> => {
+    if (handoff.busy) {
+      cleanupSysFile();
+      cleanupAgentAppMcpConfig();
+      events.onStatus(`[runtime-session] owner_busy kind=${KIND}`);
+      throw markRefusedBeforeDispatch(Object.assign(new Error("runtime_session_owner_busy"), { code: "runtime_session_owner_busy" }));
+    }
+    try {
+      await Promise.all(handoff.retired.map((retired) => waitForRetiredCliExit(retired.child)));
+    } catch (error) {
+      cleanupSysFile();
+      cleanupAgentAppMcpConfig();
+      throw markRefusedBeforeDispatch(Object.assign(new Error("runtime_retired_cli_exit_timeout"),
+        { code: "runtime_retired_cli_exit_timeout", cause: error }));
+    }
+    return handoff.retired.length;
+  };
   if (resumeSessionId && executableOwner) {
-    const handoff = retireClaudeModelSiblings(pool, {
+    const retired = await handOverNativeSession(retireClaudeModelSiblings(pool, {
       owner: executableOwner,
       nativeSessionId: resumeSessionId,
       model: runReq.model,
       poolKey,
       allowModelSwitch: Boolean(poolKey),
       retireSameModel: !poolKey,
-    });
-    if (handoff.retired > 0 || handoff.pending > 0) modelHandoff = handoff;
+    }));
+    if (retired > 0) modelHandoff = { retired, pending: 0 };
   }
   if (poolKey && executableOwner) {
     try {
@@ -1651,6 +1749,9 @@ const runClaudeTurn = async (
           }),
         retainAliveExecutableOwner,
       );
+      // A process opened with --resume holds that native session from its spawn, before its first init names it: a
+      // sibling handoff (retireClaudeModelSiblings) must see the holder in that window too.
+      if (lease.fresh && resumeSessionId && !lease.session.nativeSessionId) lease.session.nativeSessionId = resumeSessionId;
       if (aliveProfile && lease.fresh) {
         const captured = lease.session;
         let detach = () => {};
@@ -1675,19 +1776,14 @@ const runClaudeTurn = async (
       if (resumeSessionId && executableOwner) {
         // A one-shot fallback can still mutate the provider's native session. Do not leave an
         // idle resident with the same native id behind to replay stale local transcript state.
-        const fallbackHandoff = retireClaudeModelSiblings(pool, {
+        const fallbackRetired = await handOverNativeSession(retireClaudeModelSiblings(pool, {
           owner: executableOwner,
           nativeSessionId: resumeSessionId,
           model: runReq.model,
           poolKey,
           retireSameModel: true,
-        });
-        if (fallbackHandoff.retired > 0 || fallbackHandoff.pending > 0) {
-          modelHandoff = {
-            retired: (modelHandoff?.retired ?? 0) + fallbackHandoff.retired,
-            pending: (modelHandoff?.pending ?? 0) + fallbackHandoff.pending,
-          };
-        }
+        }));
+        if (fallbackRetired > 0) modelHandoff = { retired: (modelHandoff?.retired ?? 0) + fallbackRetired, pending: 0 };
       }
     }
   }
@@ -1784,6 +1880,8 @@ const runClaudeTurn = async (
   const oneShotJson = !session && executableState.residencySupported;
   /** A process of this turn that may outlive its settlement (background work): ended and awaited in finally. */
   let lingeringChild: ChildProcess | null = null;
+  /** Background tasks this turn's process still runs (AD-3): visible at the root result, ended with the process. */
+  const backgroundTasks = new ClaudeBackgroundTasks();
   try {
     return await new Promise<RunnerResult>((resolve, reject) => {
     const rejectRuntime = (error: unknown) => {
@@ -1944,6 +2042,10 @@ const runClaudeTurn = async (
      * failed at once as "claude error", and the Goal blocked on checkpoint_producer_no_effects.
      */
     let resumedConversationMissing = false;
+    /** The typed cause of a zeroed startup-refusal result (claudeStartupRefusal): nothing ran and the binding stays. */
+    let startupFailureReason: string | undefined;
+    /** result_facts status lines this runner turn wrote (bounded). */
+    let resultFactsEmitted = 0;
     /** 스트림 표식이 말한 실패 — 있으면 종료코드와 무관하게 이 턴은 답이 아니다. */
     let runnerFailure: import("./runner").RunnerFailure | null = null;
     /** Stream events of a shape this adapter understands (assistant/user content, stream_event, typed result, ...). Zero + exit 0 = runtime_protocol_unrecognized. */
@@ -2300,6 +2402,8 @@ const runClaudeTurn = async (
       terminal_reason?: string;
       origin?: { kind?: unknown } | null;
       deferred_tool_use?: unknown;
+      stop_reason?: unknown;
+      startup_failure_reason?: unknown;
       api_error_status?: number;
       rate_limit_info?: { status?: string; resetsAt?: number };
       event?: {
@@ -2355,7 +2459,10 @@ const runClaudeTurn = async (
         hasExactUntrustedMcpGrant &&
         !runReq.agentAppMcpFallbackAttempted &&
         !agentAppMcpInitConnected &&
-        !isAgentAppMcpInit
+        !isAgentAppMcpInit &&
+        // A typed startup refusal carries no model output and says why the CLI never reached init: it is that refusal,
+        // not an unavailable MCP inventory (claudeStartupRefusal).
+        !claudeStartupRefusal(ev as unknown as Record<string, unknown>)
       ) {
         // No model/tool/result event is trusted before Claude proves the exact
         // MCP inventory in system/init. Otherwise an init-less success could
@@ -2660,8 +2767,19 @@ const runClaudeTurn = async (
         // this exact native terminal. Neither receipt asserts external quiescence.
         terminalSucceeded = completedResult;
         const resultShape = ev as { subtype?: unknown; num_turns?: unknown };
-        if (resumeSessionId && ev.is_error === true && resultShape.subtype === "error_during_execution"
+        // A zeroed result that names a typed startup refusal (session_held_by_background, cwd_unavailable, ...) is that
+        // refusal, never a missing conversation: the stored binding stays (flow audit AD-2). Only a zero-turn error with
+        // no typed cause keeps the measured "No conversation found" meaning.
+        const startupRefusal = claudeStartupRefusal(ev as unknown as Record<string, unknown>);
+        if (startupRefusal) startupFailureReason = startupRefusal;
+        else if (resumeSessionId && ev.is_error === true && resultShape.subtype === "error_during_execution"
           && resultShape.num_turns === 0) resumedConversationMissing = true;
+        if (!ev.parent_tool_use_id && ev.isSidechain !== true && !completedResult && resultFactsEmitted < 8) {
+          resultFactsEmitted += 1;
+          events.onStatus(claudeResultFactsStatus(ev as unknown as Record<string, unknown>,
+            { rootAccepted: rootResult, own: answersOwnUuid, backgroundLive: backgroundTasks.count }));
+        }
+        if (rootResult && backgroundTasks.count > 0) events.onStatus(`[runtime-session] background_live kind=${KIND} count=${backgroundTasks.count}`);
         if (typeof ev.result === "string") finalText = ev.result;
         // The window the CLI reported for this turn's root model, recorded under the alias the turn asked for (what the
         // agent-context rotation and the replay budget look up) and the concrete model it ran.
@@ -2785,6 +2903,7 @@ const runClaudeTurn = async (
         // A uuid'd one-shot turn is owned like a resident one: frames of a turn naming none of our uuids are held, the
         // result naming ours settles this turn whatever its origin, and finally ends the process (background work).
         if (oneShotJson) { turnSink.onEvent(ev); return; }
+        backgroundTasks.observe(ev);
         // Without uuids, a background result after our root result is never this turn's terminal (it used to overwrite it).
         if (ev.type === "result" && terminalSucceeded && claudeBackgroundOrigin(ev)) return;
         dispatchEvent(ev);
@@ -2875,6 +2994,28 @@ const runClaudeTurn = async (
           events.onStatus(`[residency] disabled kind=${KIND} reason=input-format-unsupported`);
         }
         void runClaudeTurn(req, events, false, observeNativeFile).then(resolve, reject);
+        return;
+      }
+      if (startupFailureReason && !combined()) {
+        /*
+         * The CLI refused to start and named why (claudeStartupRefusal): nothing ran, no model request was made, and the
+         * stored session is not missing. It used to read as "conversation missing" (any zero-turn resume error): the binding
+         * was deleted and a fresh session started, so a session still held by its previous process
+         * (session_held_by_background) split into two conversations (flow audit 2026-10-18 AD-2). The binding stays and the
+         * refusal is returned typed, pre-dispatch, with the CLI's reason as its provider code.
+         */
+        broken = true;
+        events.onStatus(`[runtime-session] startup_refused kind=${KIND} reason=${startupFailureReason}`);
+        const failure: RunnerFailure = { ...(runnerFailure ?? { kind: "exit", message: startupFailureReason, runtime: "claude", source: "marker" }),
+          providerCode: startupFailureReason };
+        resolve({
+          text: failure.message,
+          ownerControlTerminal: "uncertain",
+          failure,
+          turnDelivery: "not-dispatched",
+          ...(resumeSessionId ? { sessionId: resumeSessionId } : {}),
+          appliedEffort,
+        });
         return;
       }
       if (
@@ -3177,6 +3318,8 @@ const runClaudeTurn = async (
     const turnSink: ClaudeTurnSink = {
       onEvent: (ev) => {
         silence.touch();
+        // Task lifecycle frames count whichever CLI turn carries them (a background turn's frames are held or dropped below).
+        backgroundTasks.observe(ev);
         if (ev.type === "command_lifecycle") { observeLifecycle(ev); return; }
         const echoed = echoedUuids(ev);
         if (echoed.length > 0) {
@@ -3258,7 +3401,9 @@ const runClaudeTurn = async (
     }
     if (lease) {
       // 취소·오류면 버리고, 아니면 반납한다(다음 턴이 이어 쓴다).
-      if (broken || req.signal?.aborted || runReq.ephemeralToolGrant || runReq.singleUse || turnScopedResidency) {
+      // A resident still running background tasks is not returned idle: its notification turns would run with no listener
+      // and interleave with the next turn (AD-3). It ends with this turn like a one-shot process does.
+      if (broken || req.signal?.aborted || runReq.ephemeralToolGrant || runReq.singleUse || turnScopedResidency || backgroundTasks.count > 0) {
         lingeringChild = lease.session.child;
         pool.discard(lease);
         if (aliveProfile) aliveClaudeResources.get(aliveProfile.resourceOwnerKey)?.close();
@@ -3271,6 +3416,7 @@ const runClaudeTurn = async (
      * resumes the session in a process of its own and never races this one for it.
      */
     if (lingeringChild && lingeringChild.exitCode === null && lingeringChild.signalCode === null) {
+      if (backgroundTasks.count > 0) events.onStatus(`[runtime-session] background_cut kind=${KIND} count=${backgroundTasks.count}`);
       try { await waitForRetiredCliExit(lingeringChild); }
       catch { events.onStatus(`[runtime-session] previous_process_exit_unconfirmed kind=${KIND}`); }
     }

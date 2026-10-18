@@ -426,8 +426,10 @@ export function retireSupersededClaudeSessions(
  * turn updates it out of process, an older process with the same id can keep a stale local
  * transcript. Retire those siblings before the new turn is admitted so a later resident turn
  * cannot silently reuse stale state.
- * Checked-out siblings are marked for retirement when the current turn releases them; the pool
- * never interrupts an active turn here.
+ * The pool never interrupts an active turn here: a sibling holding this native session that is running a turn (checked
+ * out, or its sink attached, including a same-key resident the pool would otherwise open a second writer beside) makes
+ * the whole handoff busy and retires nothing. Otherwise the matching idle and closing siblings are retired and returned,
+ * so the caller waits for each to exit before the session is resumed (the codex/ACP contract; flow audit AD-5).
  */
 export function retireClaudeModelSiblings(
   pool: AcpSessionPool<ClaudeResidentSession>,
@@ -441,14 +443,14 @@ export function retireClaudeModelSiblings(
     /** One-shot turns must retire even same-model siblings because they update native state out-of-process. */
     retireSameModel?: boolean;
   },
-): { retired: number; pending: number } {
+): { busy: boolean; retired: ClaudeResidentSession[] } {
   const targetModel = input.model?.trim() ?? "";
-  return pool.retireMatching((session) => (
+  return pool.retireIdleMatching((session) => (
     session.executableOwner.chatId === input.owner.chatId &&
     session.executableOwner.sessionOwnerId === input.owner.sessionOwnerId &&
     session.executableOwner.isolateOwner === input.owner.isolateOwner &&
     session.nativeSessionId === input.nativeSessionId &&
-    (input.retireSameModel === true || session.poolKey !== (input.poolKey ?? null)
+    (session.active !== null || input.retireSameModel === true || session.poolKey !== (input.poolKey ?? null)
       || (!input.allowModelSwitch && session.model !== targetModel))
   ));
 }
