@@ -4915,8 +4915,24 @@ function OneSessionsShell() {
     const held = [...heldFollowupRecovery, ...(receipt?.steeringRecovery ?? [])].filter((item) => item.chatId === chatId);
     const fresh = takeUnreturnedHeldFollowups(Array.from(new Map(held.map((item) => [item.id, item])).values()));
     if (!fresh.length) return;
-    setComposer((current) => [current, ...fresh.map((item) => item.promptText.trim())
-      .filter((text) => text && !current.includes(text))].filter(Boolean).join("\n"));
+    // Main takes each held text back and closes its row in one step (invoke:returnSteeringRecovery), so it is not held
+    // forever. A refusal means the row was already decided elsewhere; an older Main or a failed call keeps the text.
+    const returnRoute = ipc()?.invoke?.returnSteeringRecovery;
+    void Promise.all(fresh.map(async (item) => {
+      if (!returnRoute) return item.promptText;
+      try {
+        const result = await returnRoute(item.id, item.chatId);
+        return result.status === "refused" ? null : result.promptText;
+      } catch {
+        return item.promptText;
+      }
+    })).then((texts) => {
+      const returned = texts.map((text) => text?.trim() ?? "").filter(Boolean);
+      if (!returned.length) return;
+      const merge = (current: string) => [current, ...returned.filter((text) => !current.includes(text))].filter(Boolean).join("\n");
+      if (activeThreadChatIdRef.current === chatId) setComposer(merge);
+      else writeOneComposerDraft(`chat:${chatId}`, { composer: merge(readOneComposerDraft(`chat:${chatId}`).composer) });
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeThreadChatId, heldFollowupRecovery, receipt?.steeringRecovery]);
   const runtimeArtifacts = activity.artifacts;
