@@ -2177,6 +2177,21 @@ function projectMobileBridgeOneArtifacts(
   return artifacts;
 }
 
+/**
+ * A recent-output row in the shape every shipped phone accepts: the keys its live One output rows carry (binding
+ * identity, label, type, sizeBytes). The phone's row decoder admits only those plus contentSha256 and drops a page with
+ * any other key (mobile web_socket_desktop_transport.dart _safeOneArtifacts and _decodeRecentOneArtifacts). Since 1.2.50
+ * the index added occurredAt, so every shipped phone refused the whole page (invalid_authority_response) and restored no
+ * output after a reconnect. contentSha256 is left out as well: live events carry none, so the phone keys a restored row
+ * by runId+artifactRef like its live row and merges the two; with a hash it keyed them apart and showed both
+ * (agentlas_screen.dart: the sha256 key wins when present). No phone reports a capability for either field (the closed
+ * list is shared/mobile-bridge.ts MOBILE_CLIENT_CAPABILITIES); a phone that admits them reports one there first.
+ */
+function mobileRecentOneArtifactRow(item: MobileBridgeInvocationArtifactDto): MobileBridgeInvocationArtifactDto {
+  const { occurredAt: _occurredAt, contentSha256: _contentSha256, ...row } = item;
+  return row;
+}
+
 export function projectMobileBridgeRecentOneArtifacts(
   chatId: string,
   limit = RECENT_ONE_ARTIFACT_LIMIT,
@@ -3435,10 +3450,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const cursor = params.cursor === undefined
           ? undefined
           : requiredIdentifier(params, "cursor", MOBILE_ONE_ARTIFACT_CURSOR_RE);
-        return asJsonValue(
-          listRecentOneArtifactsForMobile({ chatId, limit, cursor }),
-          request.method,
-        );
+        const page = listRecentOneArtifactsForMobile({ chatId, limit, cursor });
+        return asJsonValue({ ...page, items: page.items.map(mobileRecentOneArtifactRow) }, request.method);
       }
       case "chat.attachments.begin": {
         const params=guardedParams(request,["chatId","files"]);
