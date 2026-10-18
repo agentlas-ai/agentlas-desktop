@@ -22,6 +22,8 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   // The owner's consent boundary. One granting itself (or a worker) permission would be self-escalation.
   [/^(resolveToolApproval|grantChatAlwaysApproval|revokeChatAlwaysApproval|revokeCapabilityGrant)$/, "approvals and grants are the owner's decision", "consent"],
   [/^confirm\./, "the owner answers questions agents ask", "consent"],
+  // The handler already refuses app.call (ipc.ts invoke:returnSteeringRecovery); the policy says so before the call.
+  [/^invoke\.returnSteeringRecovery$/, "taking a held owner direction back into the composer is the owner's own act", "write"],
   [/^(surfaces\.(approve|revokeApproval)|automations\.decideNodeApproval|browser\.resolveApproval)$/, "approvals are the owner's decision", "consent"],
   [/^(computerHistory\.setConsent|browser\.(credentialConsent|revokeCredentialConsent))$/, "consent is the owner's own act", "consent"],
   [/^science\.(toolApprovals\.(resolve|setAlwaysApproved)|approvalPolicy\.set|questions\.answer|journals\.(confirmHumanAttestation|confirmIdentity))$/, "Science approvals, attestations and answers are the owner's own act", "consent"],
