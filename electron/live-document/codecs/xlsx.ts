@@ -724,7 +724,7 @@ const BEFORE_DRAWING = ["sheetPr", "dimension", "sheetViews", "sheetFormatPr", "
   "cellWatches", "ignoredErrors", "smartTags"];
 
 /** Cells of a one-row or one-column range on a sheet of the final model, with the reference written into the chart. */
-function chartRange(ref: string, chartSheet: LiveSheet, sheets: LiveSheet[]): { formula: string; labels: string[]; numbers: Array<number | null> } {
+function chartRange(ref: string, chartSheet: LiveSheet, sheets: LiveSheet[]): { formula: string; labels: string[]; numbers: Array<number | null>; header?: { formula: string; text: string } } {
   const split = splitSheetRange(ref)!;
   const sheet = split.sheet === undefined ? chartSheet
     : sheets.find((item) => item.name === split.sheet) ?? sheets.find((item) => item.name.toLowerCase() === split.sheet!.toLowerCase()) ?? chartSheet;
@@ -738,7 +738,13 @@ function chartRange(ref: string, chartSheet: LiveSheet, sheets: LiveSheet[]): { 
   }
   const abs = (address: string) => address.replace(/^([A-Z]+)(\d+)$/, "$$$1$$$2");
   const [a, b] = split.range.split(":");
-  return { formula: `${sheetRefName(sheet.name)}!${abs(a)}${b ? `:${abs(b)}` : ""}`, labels, numbers };
+  // The series name is the text heading the range (the cell above a column, left of a row), as Excel picks it.
+  const column = bounds.from.col === bounds.to.col;
+  const headAt = column ? (bounds.from.row > 1 ? cellAddress(bounds.from.col, bounds.from.row - 1) : null) : (bounds.from.col > 1 ? cellAddress(bounds.from.col - 1, bounds.from.row) : null);
+  const headCell = headAt ? sheet.cells[headAt] : undefined;
+  const header = headAt && headCell && headCell.f === undefined && headCell.n === undefined && headCell.v.trim() && !/^[-+]?[\d.,]+%?$/.test(headCell.v.trim())
+    ? { formula: `${sheetRefName(sheet.name)}!${abs(headAt)}`, text: headCell.v.trim() } : undefined;
+  return { formula: `${sheetRefName(sheet.name)}!${abs(a)}${b ? `:${abs(b)}` : ""}`, labels, numbers, ...(header ? { header } : {}) };
 }
 
 function chartXml(chart: LiveChart, sheet: LiveSheet, sheets: LiveSheet[]): string {
@@ -747,7 +753,9 @@ function chartXml(chart: LiveChart, sheet: LiveSheet, sheets: LiveSheet[]): stri
   const series = chart.values.map((ref, index) => {
     const values = chartRange(ref, sheet, sheets);
     const numCache = `<c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="${values.numbers.length}"/>${values.numbers.map((n, i) => n === null ? "" : `<c:pt idx="${i}"><c:v>${n}</c:v></c:pt>`).join("")}</c:numCache>`;
-    return `<c:ser><c:idx val="${index}"/><c:order val="${index}"/>${chart.type === "line" ? '<c:marker><c:symbol val="circle"/><c:size val="5"/></c:marker>' : ""}`
+    const name = values.header
+      ? `<c:tx><c:strRef><c:f>${escapeXmlText(values.header.formula)}</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>${escapeXmlText(values.header.text)}</c:v></c:pt></c:strCache></c:strRef></c:tx>` : "";
+    return `<c:ser><c:idx val="${index}"/><c:order val="${index}"/>${name}${chart.type === "line" ? '<c:marker><c:symbol val="circle"/><c:size val="5"/></c:marker>' : ""}`
       + `<c:cat><c:strRef><c:f>${escapeXmlText(categories.formula)}</c:f>${strCache}</c:strRef></c:cat>`
       + `<c:val><c:numRef><c:f>${escapeXmlText(values.formula)}</c:f>${numCache}</c:numRef></c:val>${chart.type === "line" ? '<c:smooth val="0"/>' : ""}</c:ser>`;
   }).join("");
