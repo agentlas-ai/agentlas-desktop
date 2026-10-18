@@ -16,7 +16,7 @@ export function installMainCodeMode(tools: OpenAiToolDef[], byName: Map<string, 
 }
 /**
  * Whether a nested tool result says it was cut (an app operation over the reply limit: `truncated: true` with its
- * `truncation` facts, possibly inside a harness envelope). Arrays are not entered: a record in a listed result that has
+ * `cuts` facts, possibly inside a harness envelope). Arrays are not entered: a record in a listed result that has
  * its own `truncated` field is data, not a cut.
  */
 function resultWasTruncated(value: unknown, depth = 3): boolean {
