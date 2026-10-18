@@ -244,7 +244,7 @@ export class FinanceService {
         const verified=fund&&asset&&asset.symbol===fund.asset.symbol&&asset.currency===fund.asset.currency&&asset.kind===fund.asset.kind&&asset.exchange===fund.asset.exchange;
         const metrics=[...(verified?["nav",...(fund.holdingsUrl?["etf_holdings"]:[])]:["filings","company_facts"]),"news","price"];
         return [...metrics.map(metric=>({query:monitor.query,assetIds:[assetId],metrics:[metric],period:"1M"})),
-          {query:asset?`${asset.symbol} ${asset.name}`:monitor.query,assetIds:[],metrics:["social_search"],period:"1M"}];
+          {query:asset?asset.symbol:monitor.query,assetIds:[],metrics:["social_search"],period:"1M"}];
       }),
         {query:monitor.query,assetIds:[],metrics:["macro_news"],period:"1M"}];
       const route={...await this.experience.consent(scope),signal,assertCurrent:()=>scope.assertCurrent()};
