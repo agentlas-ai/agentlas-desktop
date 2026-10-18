@@ -3,7 +3,7 @@
 // source tree or installer. These pins attest to the last immutable predecessor.
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, copyFileSync, symlinkSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, copyFileSync, symlinkSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,6 +27,47 @@ const pins = {
   "lib/science-release-archive-validator.cjs": "34c4505e114a405c24dceeef1832afd084db00b9a8176bd397a8021b96520824"
 };
 let harness;
+let currentHarness;
+// These are the current private checks authenticated by release-signed-mac.yml.
+// An exact source archive has no ignored scripts; its original repository may
+// supply only these hash-bound bytes, never an arbitrary replacement verifier.
+const currentPins = {
+  "verify-updater-withdrawn-release-guard.mjs": "71eb64235395257297ee37ddc26d3cee486c9b5bb355310d52fcfd7b6d716861",
+  "verify-unanswerable-questions-hidden.mjs": "9fb5dbc618cf61511c52b171273939ab6d024bf152039ccf2c8c949c70d8b554",
+};
+
+function currentReleaseVerificationFile(name) {
+  if (!currentHarness) {
+    const files = Object.entries(currentPins).map(([file, digest]) => {
+      const candidates = [join(root, "scripts", file), join(verificationRepository, "scripts", file)];
+      const source = candidates.find(candidate => existsSync(candidate));
+      if (!source) throw new Error(`Current private release verifier is missing: ${file}`);
+      const bytes = readFileSync(source);
+      if (createHash("sha256").update(bytes).digest("hex") !== digest) {
+        throw new Error(`Current private release verifier SHA-256 mismatch: ${file}`);
+      }
+      return [file, bytes];
+    });
+    const target = mkdtempSync(join(tmpdir(), "agentlas-current-release-verification-"));
+    try {
+      for (const directory of ["electron", "renderer", "dist", "build-resources", "node_modules"]) {
+        symlinkSync(join(root, directory), join(target, directory), process.platform === "win32" ? "junction" : "dir");
+      }
+      for (const file of ["package.json", "package-lock.json"]) {
+        if (existsSync(join(root, file))) copyFileSync(join(root, file), join(target, file));
+      }
+      for (const [file, bytes] of files) {
+        mkdirSync(join(target, "scripts"), { recursive: true });
+        writeFileSync(join(target, "scripts", file), bytes, { flag: "wx", mode: 0o600 });
+      }
+      currentHarness = target;
+    } catch (error) {
+      rmSync(target, { recursive: true, force: true });
+      throw error;
+    }
+  }
+  return join(currentHarness, "scripts", name);
+}
 
 export function prepareReleaseVerification() {
   if (harness) return harness;
@@ -64,13 +105,16 @@ export function prepareReleaseVerification() {
 }
 
 export function releaseVerificationFile(name) {
+  if (Object.hasOwn(currentPins, name)) return currentReleaseVerificationFile(name);
   if (!Object.hasOwn(pins, name)) throw new Error(`Release verifier is not allowlisted: ${name}`);
   return join(prepareReleaseVerification(), "scripts", name);
 }
 
 export function cleanupReleaseVerification() {
   if (harness) rmSync(harness, { recursive: true, force: true });
+  if (currentHarness) rmSync(currentHarness, { recursive: true, force: true });
   harness = undefined;
+  currentHarness = undefined;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
