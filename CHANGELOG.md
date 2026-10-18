@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.68 — 2026-10-18
+
+- A teammate that works through Agentlas Light, an API key or a local model gets credit for the files it writes and the Python tests it runs. Before, such a team could finish the work and still end "not complete".
+- When One or an automation asks the app for a long list, such as every automation or a long run history, it sees the whole list: the items that do not fit stay in place by name instead of being cut off, so a weekly summary no longer covers only the first few. One can also count an automation's runs over a period.
+- Asking the app for an operation that does not exist suggests the closest real ones.
+- An app request made without arguments from a background turn works, and no longer drops the background connection for a moment.
+- Science no longer shows a right panel. The Preview tab added in 1.3.67 is removed; Science turns can still edit office documents.
+- Other fixes: reading a chat's Alive state during startup no longer fails; a Science run no longer receives Work's team policy; a teammate report held while a Goal waited is settled instead of staying failed.
+- This release binds Agentlas OS v1.2.66 at c0acd99be22114569e20bca94bed4540ba046eb4; public runtime asset `hephaestus-runtime-v1.2.66.tar.gz` is pinned at SHA-256 `20019d3ba4df1c540d0ef549c07a82188bd40fe12dafb2f8a6c75cc4bdcc89f7`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.67 — 2026-10-18
 
 - A daily Goal you start with /goal can wait for its next day. Before, its wait was refused, so it kept checking the same state and posting the same report in the room all night.
