@@ -1,5 +1,6 @@
 import { selectionFor } from "../capabilities/one-capabilities";
-import { withForeignCliContext } from "./foreign-cli-context";
+import { GROK_RUN_MCP_REGISTRY, withForeignCliContext } from "./foreign-cli-context";
+import { isAgentlasProductHome } from "./product-home-identity";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 // Grok CLI text runtime — official xAI CLI (`x.ai/cli`, verified with grok 0.2.x).
 // Headless contract: --prompt-file + --cwd + --output-format streaming-json.
@@ -10,7 +11,7 @@ import { detectApprovalRequired } from "./runtime-refusal";
 import os from "node:os";
 import fs from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
-import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
+import type { Runner, RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
 import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, runtimeProtocolUnrecognizedFailure, cliToolSilenceWindowMs, RuntimeTurnUnsettledError, preDispatchRefusal, runnerRefusedBeforeDispatch } from "./runner";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { cliHistoryContextTokens, composeResumeTurnPrompt, renderConversationContext } from "./continuity";
@@ -183,18 +184,47 @@ async function runGrokMcpCli(
 }
 
 /**
- * Claude Code의 `--mcp-config <path>`와 달리 grok CLI는 MCP 서버를
- * `~/.grok/config.toml` 또는 `./.grok/config.toml`에 등록하는 방식이다
- * (`grok mcp add/remove`, 확인됨: stdio/http/sse 전부 지원). 이 실행 한 번만을 위해
- * 승인된 서버를 프로젝트 스코프(cwd 기준 `./.grok/config.toml`)에 등록하고, 실행이
- * 끝나면 반드시 제거한다 — 다른 빌드/채팅의 grok 실행에 남아있지 않도록.
+ * Claude Code의 `--mcp-config <path>`와 달리 grok CLI는 MCP 서버를 `$GROK_HOME/config.toml`(user) 또는
+ * `./.grok/config.toml`(project)에 등록하는 방식이다(`grok mcp add/remove`). Legacy driver only: the default grok path is
+ * ACP (acp.ts ACP_PREFERRED_KINDS), which hands the servers over session/new and writes no file.
+ *
+ * The run's servers go into the product GROK_HOME mirror (foreign-cli-context.ts), user scope, never the run's working
+ * folder (2026-10-18: project scope wrote `<cwd>/.grok/config.toml`, i.e. into the owner's project, server env included,
+ * for the length of every legacy run). Measured grok 1.0.62 with a scratch GROK_HOME: `mcp add --scope user` writes only
+ * `$GROK_HOME/config.toml`, `mcp remove --scope user` takes it out, the working folder is untouched. Without a product
+ * mirror (no file sign-in, links refused) the person's ~/.grok would be the target, so the run is refused before spawn.
+ * Runs sharing the mirror share an exact entry (a registry beside config.toml counts them and the mirror sync keeps the
+ * registered tables); a different entry under a busy key is refused, never swapped under the other run.
  */
-async function reconcileGrokMcpServers(
+interface GrokRunMcpRegistry { [key: string]: { runs: number; digest: string } }
+let grokMcpMutationTail: Promise<void> = Promise.resolve();
+async function withGrokMcpLock<T>(action: () => Promise<T>): Promise<T> {
+  let release!: () => void;
+  const previous = grokMcpMutationTail;
+  grokMcpMutationTail = new Promise<void>((resolve) => { release = resolve; });
+  await previous;
+  try { return await action(); } finally { release(); }
+}
+async function readGrokRunMcpRegistry(home: string): Promise<GrokRunMcpRegistry> {
+  try {
+    const value = JSON.parse(await fs.readFile(path.join(home, GROK_RUN_MCP_REGISTRY), "utf8")) as unknown;
+    return value && typeof value === "object" && !Array.isArray(value) ? value as GrokRunMcpRegistry : {};
+  } catch { return {}; }
+}
+async function writeGrokRunMcpRegistry(home: string, registry: GrokRunMcpRegistry): Promise<void> {
+  const at = path.join(home, GROK_RUN_MCP_REGISTRY);
+  const tmp = `${at}.${process.pid}.${randomUUID()}.tmp`;
+  await fs.writeFile(tmp, `${JSON.stringify(registry)}\n`, { mode: 0o600 });
+  await fs.rename(tmp, at);
+}
+
+export async function reconcileGrokMcpServers(
   bin: string,
-  cwd: string,
+  _cwd: string,
   env: NodeJS.ProcessEnv,
   mcpConfigPath: string | undefined,
-): Promise<{ cleanup: () => Promise<void> }> {
+  onStatus: (message: string) => void = () => {},
+): Promise<{ cleanup: () => Promise<void>; failure?: RunnerFailure }> {
   const noop = { cleanup: async () => {} };
   if (!mcpConfigPath) return noop;
   let parsed: { mcpServers?: Record<string, GrokMcpServerConfigEntry> };
@@ -203,41 +233,63 @@ async function reconcileGrokMcpServers(
   } catch {
     return noop;
   }
-  const entries = Object.entries(parsed.mcpServers ?? {});
+  const entries = Object.entries(parsed.mcpServers ?? {}).filter(([, server]) => server.command || server.url);
   if (entries.length === 0) return noop;
-
-  const added: string[] = [];
-  for (const [key, server] of entries) {
-    try {
-      if (server.command) {
-        const args = ["mcp", "add", "--scope", "project"];
-        for (const [k, v] of Object.entries(server.env ?? {})) args.push("-e", `${k}=${v}`);
-        args.push(key, "--", server.command, ...(server.args ?? []));
-        await runGrokMcpCli(bin, args, cwd, env);
-      } else if (server.url) {
-        const transport = server.url.startsWith("http://") || server.url.startsWith("https://") ? "http" : "sse";
-        const args = ["mcp", "add", "--scope", "project", "--transport", transport, key, server.url];
-        for (const [h, v] of Object.entries(server.headers ?? {})) args.push("--header", `${h}: ${v}`);
-        await runGrokMcpCli(bin, args, cwd, env);
-      } else {
-        continue;
-      }
-      added.push(key);
-    } catch (err) {
-      console.error(`[grok] mcp add failed for "${key}":`, err);
-    }
+  const home = env.GROK_HOME;
+  if (!home || !isAgentlasProductHome(home)) {
+    onStatus("[grok-mcp] refused: no product GROK_HOME; the run's MCP servers are never written into the project or ~/.grok");
+    return { ...noop, failure: { kind: "unavailable", runtime: "grok", source: "marker", providerCode: "grok_mcp_product_home_unavailable",
+      message: "Grok's MCP servers need its product home, which is unavailable here; the run was not started." } };
   }
-  return {
-    cleanup: async () => {
-      for (const key of added) {
-        try {
-          await runGrokMcpCli(bin, ["mcp", "remove", "--scope", "project", key], cwd, env);
-        } catch (err) {
-          console.error(`[grok] mcp remove failed for "${key}":`, err);
+  // `mcp add/remove` run in the mirror itself, so even a CLI that ignored --scope could not write the work folder.
+  const cli = (args: string[]) => runGrokMcpCli(bin, args, home, env);
+  const digestOf = (server: GrokMcpServerConfigEntry) => createHash("sha256").update(JSON.stringify(server)).digest("hex");
+  const claimed: string[] = [];
+  const release = async () => withGrokMcpLock(async () => {
+    const registry = await readGrokRunMcpRegistry(home);
+    for (const key of claimed.splice(0)) {
+      const row = registry[key];
+      if (!row) continue;
+      if (row.runs > 1) { row.runs -= 1; continue; }
+      try { await cli(["mcp", "remove", "--scope", "user", key]); }
+      catch (err) { console.error(`[grok] mcp remove failed for "${key}":`, err); }
+      delete registry[key];
+    }
+    await writeGrokRunMcpRegistry(home, registry);
+  });
+  const busy = await withGrokMcpLock(async (): Promise<string | null> => {
+    const registry = await readGrokRunMcpRegistry(home);
+    for (const [key] of entries) if (registry[key] && registry[key].digest !== digestOf(parsed.mcpServers![key]!)) return key;
+    for (const [key, server] of entries) {
+      const digest = digestOf(server);
+      if (registry[key]) { registry[key].runs += 1; claimed.push(key); continue; }
+      try {
+        if (server.command) {
+          const args = ["mcp", "add", "--scope", "user"];
+          for (const [k, v] of Object.entries(server.env ?? {})) args.push("-e", `${k}=${v}`);
+          args.push(key, "--", server.command, ...(server.args ?? []));
+          await cli(args);
+        } else if (server.url) {
+          const transport = server.url.startsWith("http://") || server.url.startsWith("https://") ? "http" : "sse";
+          const args = ["mcp", "add", "--scope", "user", "--transport", transport, key, server.url];
+          for (const [h, v] of Object.entries(server.headers ?? {})) args.push("--header", `${h}: ${v}`);
+          await cli(args);
         }
+        registry[key] = { runs: 1, digest };
+        claimed.push(key);
+      } catch (err) {
+        console.error(`[grok] mcp add failed for "${key}":`, err);
       }
-    },
-  };
+    }
+    await writeGrokRunMcpRegistry(home, registry);
+    return null;
+  });
+  if (busy) {
+    onStatus(`[grok-mcp] refused: ${busy} is held by another run with a different entry`);
+    return { ...noop, failure: { kind: "refused", runtime: "grok", source: "marker", providerCode: "grok_mcp_scope_busy",
+      message: "Another Grok run holds the same MCP server key with a different entry; this run was not started." } };
+  }
+  return { cleanup: release };
 }
 
 // grok-cli는 GROK_API_KEY를 읽는다. 앱은 같은 키를 XAI_API_KEY로 저장하므로 둘 다 채워준다.
@@ -604,7 +656,11 @@ async function runGrokTurn(req: RunnerRequest, events: RunnerEvents, dispatch: {
     }
   };
 
-  const mcpReconcile = await reconcileGrokMcpServers(bin, cwd, env, req.mcpConfigPath);
+  const mcpReconcile = await reconcileGrokMcpServers(bin, cwd, env, req.mcpConfigPath, events.onStatus);
+  if (mcpReconcile.failure) {
+    void fs.rm(promptFile, { force: true });
+    return { text: "", ownerControlTerminal: "uncertain", turnDelivery: "not-dispatched", failure: mcpReconcile.failure };
+  }
   try {
     dispatch.started = true;
     return await runGrokProcess();

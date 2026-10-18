@@ -120,11 +120,14 @@ const GROK_OPT_OUTS: Readonly<Record<string, ReadonlySet<string>>> = {
 };
 
 /** The mirror's own config.toml: the allowlisted parts of the person's, One's MCP servers and the skills ignore. */
-export function productGrokConfig(text: string, keepServers: ReadonlySet<string>, skillsIgnore: readonly string[]): string {
-  const out = allowlistedToml(text, ({ path: [head, second, ...rest], value }) => GROK_KEEP_TABLES.has(head)
+export function productGrokConfig(text: string, keepServers: ReadonlySet<string>, skillsIgnore: readonly string[],
+  /** The mirror's own servers a running legacy grok run added (grok.ts reconcileGrokMcpServers), kept as they are. */
+  runServers: string = ""): string {
+  const personal = allowlistedToml(text, ({ path: [head, second, ...rest], value }) => GROK_KEEP_TABLES.has(head)
     || (second !== undefined && GROK_KEEP_KEYS[head]?.has(second) === true)
     || (head === "mcp_servers" && second !== undefined && keepServers.has(second))
     || (second !== undefined && rest.length === 0 && GROK_OPT_OUTS[`${head}.${second}`]?.has(value.trim()) === true));
+  const out = personal && runServers ? `${personal}${runServers}` : personal || runServers;
   const ignore = skillsIgnore.length > 0 ? `[skills]\nignore = [${skillsIgnore.map((p) => JSON.stringify(p)).join(", ")}]\n` : "";
   return out && ignore ? `${out}\n${ignore}` : out || ignore;
 }
@@ -156,6 +159,23 @@ const GROK_LINKED_ENTRIES: ReadonlySet<string> = new Set(["auth.json", "auth.jso
 
 export type GrokProductHomeSkip = "no-real-home" | "no-file-sign-in" | "links-unavailable";
 
+/** Beside the mirror's config.toml: the MCP keys running legacy grok runs added there (grok.ts reconcileGrokMcpServers). */
+export const GROK_RUN_MCP_REGISTRY = "agentlas-run-mcp.json";
+
+/** The `mcp_servers.<key>` tables of the mirror's current config.toml whose keys a running run registered. */
+function grokRunServerTables(home: string): string {
+  let keys: string[] = [];
+  try {
+    const registry = JSON.parse(fs.readFileSync(path.join(home, GROK_RUN_MCP_REGISTRY), "utf8")) as Record<string, unknown>;
+    keys = registry && typeof registry === "object" && !Array.isArray(registry) ? Object.keys(registry) : [];
+  } catch { return ""; }
+  if (keys.length === 0) return "";
+  let current = "";
+  try { current = fs.readFileSync(path.join(home, "config.toml"), "utf8"); } catch { return ""; }
+  const wanted = new Set(keys);
+  return allowlistedToml(current, ({ path: [head, second] }) => head === "mcp_servers" && second !== undefined && wanted.has(second));
+}
+
 export function syncGrokProductHome(realHome: string, selection: CapabilitySelection | undefined, mirrorRoot = userDataPath("grok-product-home")): { home: string } | { skip: GrokProductHomeSkip } {
   let entries: string[];
   try { entries = fs.readdirSync(realHome); } catch { return { skip: "no-real-home" }; }
@@ -178,7 +198,7 @@ export function syncGrokProductHome(realHome: string, selection: CapabilitySelec
       hide: (name) => !GROK_LINKED_ENTRIES.has(name) && !(name === instructions?.name) && !(name === "memory-v2" && wantMemoryV2),
       folders: ["hooks", "skills"],
       own: {
-        "config.toml": productGrokConfig(config, keepServers, codexSkillsOn ? [] : [path.join(os.homedir(), ".agents", "skills")]),
+        "config.toml": productGrokConfig(config, keepServers, codexSkillsOn ? [] : [path.join(os.homedir(), ".agents", "skills")], grokRunServerTables(home)),
         "user-settings.json": productGrokUserSettings(userSettings),
       },
     });
