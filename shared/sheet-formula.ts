@@ -145,8 +145,11 @@ export function formatNumberCode(value: number, rawCode: string): string {
     ? abs.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals })
     : abs.toFixed(decimals);
   const prefix = /^[^#0]*/.exec(code.replace(/"([^"]*)"/g, "$1").replace(/\\(.)/g, "$1"))?.[0].replace(/[_*].?/g, "").replace(/[()]/g, "") ?? "";
+  // Literal text after the last digit placeholder ('#,##0"원"' shows 45,000원).
+  const suffix = /[#0?]([^#0?]*)$/.exec(code.replace(/\[[^\]]*\]/g, "").replace(/"([^"]*)"/g, "$1").replace(/\\(.)/g, "$1"))?.[1]
+    .replace(/[_*]./g, "").replace(/[%()]/g, "") ?? "";
   if (value < 0 && !rawCode.includes(";")) body = `-${body}`;
-  return `${prefix}${body}${percent ? "%" : ""}`;
+  return `${prefix}${body}${percent ? "%" : ""}${suffix}`;
 }
 
 function displayOf(result: Scalar, nf: string | undefined): string {

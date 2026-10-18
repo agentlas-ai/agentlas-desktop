@@ -23,7 +23,7 @@ const OP_SCHEMA = {
   type: "object",
   required: ["op"],
   properties: {
-    op: { type: "string", enum: ["set_cell", "set_text", "insert_text", "insert_paragraph", "insert_table", "delete_block", "add_slide", "delete_slide", "add_sheet", "set_format"] },
+    op: { type: "string", enum: ["set_cell", "set_text", "insert_text", "insert_paragraph", "insert_table", "delete_block", "add_slide", "delete_slide", "add_sheet", "rename_sheet", "delete_sheet", "set_format", "set_number_format", "add_chart"] },
     sheet: { type: "string" }, cell: { type: "string", description: "A1" }, value: { type: "string", description: "leading = makes a formula" },
     target: { type: "string", description: "id from document.read" }, text: { type: "string" }, at: { type: "integer", minimum: 0 },
     after: { type: "string", description: "block/slide id, or start" }, heading: { type: "integer", minimum: 0, maximum: 6 },
@@ -37,6 +37,11 @@ const OP_SCHEMA = {
     widths: { type: "array", items: { type: "number", exclusiveMinimum: 0 }, description: "insert_table column width ratios" },
     merges: { type: "array", items: { type: "object", required: ["cell"], properties: { cell: { type: "string", description: "anchor r1c2" }, rowSpan: { type: "integer", minimum: 1 }, colSpan: { type: "integer", minimum: 1 } } }, description: "insert_table merged ranges" },
     pageBreak: { type: "boolean", description: "insert_paragraph starts a new page" },
+    numberFormat: { type: "string", description: "set_number_format: Excel code (#,##0 / 0.0% / #,##0\"원\" / yyyy-mm-dd), \"\" = General; target <sheet>!A1 or <sheet>!B2:B9" },
+    type: { type: "string", enum: ["bar", "line", "pie"], description: "add_chart kind" },
+    categories: { type: "string", description: "add_chart: label range, one row or column (A2:A4 or 'Sheet'!A2:A4)" },
+    values: { type: "array", items: { type: "string" }, maxItems: 8, description: "add_chart: one range per series, same shape as categories (pie: 1)" },
+    anchor: { type: "string", description: "add_chart: top-left cell of the chart (default: right of the data)" },
   },
 };
 

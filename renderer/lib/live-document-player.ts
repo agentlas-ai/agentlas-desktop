@@ -181,6 +181,11 @@ export function useLiveDocumentSession(sessionId: string | null) {
       } else if (op.op === "add_sheet") {
         setFocus({ sheet: op.id });
         await sleep(200);
+      } else if (op.op === "rename_sheet" || op.op === "add_chart" || op.op === "set_number_format") {
+        const ref = op.op === "set_number_format" ? op.target.slice(0, op.target.lastIndexOf("!")) : op.sheet;
+        const sheet = model.kind === "sheet" ? model.sheets.find((item) => item.id === ref || item.name.toLowerCase() === ref.toLowerCase()) : undefined;
+        if (sheet) setFocus({ sheet: sheet.id });
+        await sleep(260);
       } else if (op.op === "insert_table" && op.after) {
         setCursor({ target: op.after, label, color, phase: "type" });
         await sleep(260);

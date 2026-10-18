@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react";
 import {
-  cellAddress, findFormatHolder, findLiveTextTarget, LIVE_DOCUMENT_OPS_BY_FORMAT, parseCellAddress,
-  type LiveDocumentMeta, type LiveDocumentModel, type LiveDocumentOp, type LiveDocumentOpName, type LiveFlowBlock, type LiveFormat, type LiveFormatPatch, type LiveSheet, type LiveSlide,
+  cellAddress, findFormatHolder, findLiveTextTarget, LIVE_DOCUMENT_OPS_BY_FORMAT, parseCellAddress, parseCellRange, splitSheetRange,
+  type LiveChart, type LiveDocumentMeta, type LiveDocumentModel, type LiveDocumentOp, type LiveDocumentOpName, type LiveFlowBlock, type LiveFormat, type LiveFormatPatch, type LiveSheet, type LiveSlide,
 } from "@shared/live-document";
 import { IconCheck, IconClose, IconFileText, IconFolder, IconPlus, IconSparkles, IconTrash } from "@/components/Icon";
 import { LiveDocumentRibbon } from "./LiveDocumentRibbon";
@@ -509,6 +509,9 @@ function SheetView({ model, cursor, typing, locale, focusSheet, focusSeq, onSele
         })}</tr>)}</tbody>
       </table>
       {bounds.truncated && <p className={styles.truncated}>{ko ? `처음 ${MAX_ROWS}행 · ${MAX_COLS}열만 표시합니다.` : `Showing the first ${MAX_ROWS} rows and ${MAX_COLS} columns.`}</p>}
+      {(sheet.charts?.length ?? 0) > 0 && <div className={styles.charts}>
+        {sheet.charts!.map((chart) => <SheetChart key={chart.id} chart={chart} sheet={sheet} sheets={model.sheets} ko={ko} />)}
+      </div>}
     </div>
     <div className={styles.sheetTabs}>
       {model.sheets.map((item) => <button key={item.id} type="button" data-active={item.id === sheet.id ? "true" : "false"} onClick={() => setSheetId(item.id)}>{item.name}</button>)}
@@ -519,6 +522,63 @@ function SheetView({ model, cursor, typing, locale, focusSheet, focusSeq, onSele
       }}><IconPlus size={12} /></button>}
     </div>
   </div>;
+}
+
+/** Values of a one-row or one-column range (labels as shown, numbers where the cell holds one). */
+function chartSeries(ref: string, sheet: LiveSheet, sheets: LiveSheet[]): Array<{ label: string; n: number | null }> {
+  const split = splitSheetRange(ref);
+  const bounds = split ? parseCellRange(split.range, 2000) : null;
+  if (!split || !bounds) return [];
+  const source = split.sheet === undefined ? sheet : sheets.find((item) => item.name.toLowerCase() === split.sheet!.toLowerCase()) ?? sheet;
+  const out: Array<{ label: string; n: number | null }> = [];
+  for (let row = bounds.from.row; row <= bounds.to.row; row++) for (let col = bounds.from.col; col <= bounds.to.col; col++) {
+    const cell = source.cells[cellAddress(col, row)];
+    const n = cell?.n ?? (cell && /^-?[\d,]+(?:\.\d+)?$/.test(cell.v.trim()) ? Number(cell.v.replace(/,/g, "")) : NaN);
+    out.push({ label: cell?.v ?? "", n: Number.isFinite(n) ? n : null });
+  }
+  return out;
+}
+
+const CHART_COLORS = ["#4472c4", "#ed7d31", "#a5a5a5", "#ffc000", "#5b9bd5", "#70ad47", "#264478", "#9e480e"];
+
+/** A small drawing of a sheet chart: bars, a line or a pie from the model's current values. */
+function SheetChart({ chart, sheet, sheets, ko }: { chart: LiveChart; sheet: LiveSheet; sheets: LiveSheet[]; ko: boolean }) {
+  const labels = chartSeries(chart.categories, sheet, sheets).map((point) => point.label);
+  const series = chart.values.map((ref) => chartSeries(ref, sheet, sheets).map((point) => point.n ?? 0));
+  const kindLabel = { bar: ko ? "막대 차트" : "Bar chart", line: ko ? "선 차트" : "Line chart", pie: ko ? "원 차트" : "Pie chart", other: ko ? "차트" : "Chart" }[chart.type];
+  const W = 320, H = 180, pad = 24;
+  const max = Math.max(1, ...series.flat().map((n) => Math.abs(n)));
+  const count = Math.max(1, labels.length || series[0]?.length || 1);
+  let body: ReactNode = null;
+  if (chart.type === "bar") {
+    const slot = (W - pad * 2) / count, bar = slot / (series.length + 1);
+    body = series.flatMap((values, s) => values.map((n, i) => {
+      const h = (Math.max(0, n) / max) * (H - pad * 2);
+      return <rect key={`${s}-${i}`} x={pad + i * slot + bar * (s + 0.5)} y={H - pad - h} width={bar} height={h} fill={CHART_COLORS[s % CHART_COLORS.length]} />;
+    }));
+  } else if (chart.type === "line") {
+    body = series.map((values, s) => <polyline key={s} fill="none" stroke={CHART_COLORS[s % CHART_COLORS.length]} strokeWidth={2}
+      points={values.map((n, i) => `${pad + (i + 0.5) * ((W - pad * 2) / count)},${H - pad - (Math.max(0, n) / max) * (H - pad * 2)}`).join(" ")} />);
+  } else if (chart.type === "pie") {
+    const values = series[0] ?? [];
+    const total = values.reduce((sum, n) => sum + Math.max(0, n), 0) || 1;
+    let angle = -Math.PI / 2;
+    body = values.map((n, i) => {
+      const share = Math.max(0, n) / total, next = angle + share * Math.PI * 2, r = (H - pad) / 2, cx = W / 2, cy = H / 2;
+      const d = share >= 1 ? `M ${cx - r} ${cy} a ${r} ${r} 0 1 0 ${r * 2} 0 a ${r} ${r} 0 1 0 ${-r * 2} 0`
+        : `M ${cx} ${cy} L ${cx + r * Math.cos(angle)} ${cy + r * Math.sin(angle)} A ${r} ${r} 0 ${share > 0.5 ? 1 : 0} 1 ${cx + r * Math.cos(next)} ${cy + r * Math.sin(next)} Z`;
+      angle = next;
+      return <path key={i} d={d} fill={CHART_COLORS[i % CHART_COLORS.length]} />;
+    });
+  }
+  return <figure className={styles.chart} data-live-id={`${sheet.id}!chart:${chart.id}`}>
+    <figcaption>{chart.title || kindLabel} <span>· {chart.anchor}</span></figcaption>
+    {chart.type === "other" ? <p className={styles.truncated}>{kindLabel}</p> : <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`${kindLabel}: ${chart.title ?? ""}`}>
+      {chart.type !== "pie" && <line x1={pad} y1={H - pad} x2={W - pad} y2={H - pad} stroke="#bbb" />}
+      {body}
+      {chart.type !== "pie" && labels.slice(0, 24).map((label, i) => <text key={i} x={pad + (i + 0.5) * ((W - pad * 2) / count)} y={H - 8} fontSize={9} textAnchor="middle" fill="#666">{label.slice(0, 8)}</text>)}
+    </svg>}
+  </figure>;
 }
 
 // ── slides (pptx) ───────────────────────────────────────────────────────────────────────────────────────────────

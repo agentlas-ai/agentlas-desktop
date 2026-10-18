@@ -10,7 +10,7 @@
  * Pure: no node or DOM imports (Main, daemon and renderer all load it).
  */
 
-import { recalculateSheets } from "./sheet-formula";
+import { formatNumberCode, generalNumber, recalculateSheets } from "./sheet-formula";
 
 export const LIVE_DOCUMENT_VERSION = "agentlas.live-document.v1" as const;
 export const LIVE_DOCUMENT_FORMATS = ["xlsx", "docx", "pptx", "hwpx", "hwp"] as const;
@@ -52,10 +52,28 @@ export interface LiveCell {
   format?: LiveFormat;
 }
 
+/**
+ * A chart on a sheet. `categories` and each `values` entry are one-row or one-column A1 ranges, optionally
+ * sheet-qualified ('월별 합계'!B2:B4); unqualified ranges are on the chart's own sheet.
+ */
+export interface LiveChart {
+  id: string;
+  /** `other`: a chart read from the file whose kind the editor does not draw (area, scatter, …). */
+  type: "bar" | "line" | "pie" | "other";
+  title?: string;
+  categories: string;
+  values: string[];
+  /** Top-left cell of the chart frame. */
+  anchor: string;
+  /** Read from the file: listed so it can be checked, written back byte-for-byte, never edited. */
+  fromFile?: boolean;
+}
+
 export interface LiveSheet {
   id: string;
   name: string;
   cells: Record<string, LiveCell>;
+  charts?: LiveChart[];
 }
 
 export interface LiveTableCell {
@@ -115,14 +133,19 @@ export type LiveDocumentOp =
   | { op: "add_slide"; after?: string; title?: string; body?: string; id?: string }
   | { op: "delete_slide"; target: string }
   | { op: "add_sheet"; name: string; id?: string }
+  | { op: "rename_sheet"; sheet: string; name: string }
+  | { op: "delete_sheet"; sheet: string }
   /** target: block, table-cell or shape id, or `<sheet>!A1`; heading (flow paragraphs) 0 = body text. */
-  | { op: "set_format"; target: string; format: LiveFormatPatch; heading?: number };
+  | { op: "set_format"; target: string; format: LiveFormatPatch; heading?: number }
+  /** target `<sheet>!A1` or `<sheet>!B2:B73`; an Excel number-format code ("#,##0", "0.0%", '#,##0"원"'), "" = General. */
+  | { op: "set_number_format"; target: string; numberFormat: string }
+  | { op: "add_chart"; sheet: string; type: "bar" | "line" | "pie"; categories: string; values: string[]; title?: string; anchor?: string; id?: string };
 
 export type LiveDocumentOpName = LiveDocumentOp["op"];
 
 /** What each format's codec can write back. Anything else is refused before it reaches the journal. */
 export const LIVE_DOCUMENT_OPS_BY_FORMAT: Record<LiveDocumentFormat, readonly LiveDocumentOpName[]> = {
-  xlsx: ["set_cell", "add_sheet", "set_format"],
+  xlsx: ["set_cell", "add_sheet", "rename_sheet", "delete_sheet", "set_format", "set_number_format", "add_chart"],
   docx: ["set_text", "insert_text", "insert_paragraph", "insert_table", "delete_block", "set_format"],
   hwpx: ["set_text", "insert_text", "insert_paragraph", "insert_table", "delete_block", "set_format"],
   hwp: ["set_text", "insert_text", "insert_paragraph", "delete_block", "set_format"],
@@ -214,6 +237,77 @@ export function columnName(col: number): string {
 
 export function cellAddress(col: number, row: number): string {
   return `${columnName(col)}${row}`;
+}
+
+/** Excel's sheet-name rule: 1-31 characters, none of \\ / ? * [ ] :, not starting or ending with an apostrophe. */
+export function validSheetName(name: string): boolean {
+  return name.trim().length > 0 && name.length <= 31 && !/[\\/?*[\]:]/.test(name) && !name.startsWith("'") && !name.endsWith("'");
+}
+
+/** "B2:B9" or "B2" as normalised bounds; null when malformed or larger than `maxCells`. */
+export function parseCellRange(range: string, maxCells = 100_000): { from: { col: number; row: number }; to: { col: number; row: number } } | null {
+  const [a, b, extra] = range.replace(/\$/g, "").split(":");
+  if (extra !== undefined) return null;
+  const p = parseCellAddress(a ?? ""); const q = b === undefined ? p : parseCellAddress(b);
+  if (!p || !q) return null;
+  const from = { col: Math.min(p.col, q.col), row: Math.min(p.row, q.row) };
+  const to = { col: Math.max(p.col, q.col), row: Math.max(p.row, q.row) };
+  return (to.col - from.col + 1) * (to.row - from.row + 1) <= maxCells ? { from, to } : null;
+}
+
+/** "'월별 합계'!B2:B4" → { sheet: "월별 합계", range: "B2:B4" }; an unqualified range has no sheet. */
+export function splitSheetRange(ref: string): { sheet?: string; range: string } | null {
+  const bang = ref.lastIndexOf("!");
+  if (bang < 0) return parseCellRange(ref) ? { range: ref.replace(/\$/g, "").toUpperCase() } : null;
+  let sheet = ref.slice(0, bang).trim();
+  if (sheet.length >= 2 && sheet.startsWith("'") && sheet.endsWith("'")) sheet = sheet.slice(1, -1).replace(/''/g, "'");
+  const range = ref.slice(bang + 1).replace(/\$/g, "").toUpperCase();
+  return sheet && parseCellRange(range) ? { sheet, range } : null;
+}
+
+/** A sheet name as a formula prefix: quoted unless it is a plain ASCII identifier that is not also a cell address. */
+export function sheetRefName(name: string): string {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !parseCellAddress(name) ? name : `'${name.replace(/'/g, "''")}'`;
+}
+
+/** Rewrites `Old!A1` / `'Old name'!A1` references in a formula (outside string literals) to the new sheet name. */
+export function renameSheetInFormula(formula: string, oldName: string, newName: string): string {
+  const target = oldName.toLowerCase();
+  let out = "";
+  let i = 0;
+  while (i < formula.length) {
+    const ch = formula[i];
+    if (ch === "\"") {
+      const end = formula.indexOf("\"", i + 1);
+      const stop = end < 0 ? formula.length : end + 1;
+      out += formula.slice(i, stop);
+      i = stop;
+      continue;
+    }
+    if (ch === "'") {
+      let j = i + 1, name = "";
+      while (j < formula.length) {
+        if (formula[j] === "'") { if (formula[j + 1] === "'") { name += "'"; j += 2; continue; } break; }
+        name += formula[j++];
+      }
+      if (formula[j] === "'" && formula[j + 1] === "!") {
+        out += `${name.toLowerCase() === target ? sheetRefName(newName) : formula.slice(i, j + 1)}!`;
+        i = j + 2;
+        continue;
+      }
+    }
+    if (!/[\p{L}\p{N}_.$]/u.test(i > 0 ? formula[i - 1] : "")) {
+      const plain = /^([\p{L}_][\p{L}\p{N}_.]*)!/u.exec(formula.slice(i));
+      if (plain) {
+        out += `${plain[1].toLowerCase() === target ? sheetRefName(newName) : plain[1]}!`;
+        i += plain[0].length;
+        continue;
+      }
+    }
+    out += ch;
+    i++;
+  }
+  return out;
 }
 
 export function inferLiveDocumentFormat(name: string): LiveDocumentFormat | null {
@@ -318,6 +412,40 @@ export function validateLiveDocumentOps(value: unknown, format: LiveDocumentForm
         if (!str(op.name, 31) || !op.name.trim() || /[\\/?*[\]:]/.test(op.name)) return bad("add_sheet needs a name (<=31 chars, no \\ / ? * [ ] :)");
         ops.push({ op: "add_sheet", name: op.name.trim(), ...(op.id !== undefined && id(op.id) ? { id: op.id } : {}) });
         break;
+      case "rename_sheet":
+        if (!str(op.sheet, 200) || !op.sheet || !str(op.name, 31) || !validSheetName(op.name)) return bad("rename_sheet needs sheet and a new name (<=31 chars, no \\ / ? * [ ] :)");
+        ops.push({ op: "rename_sheet", sheet: op.sheet, name: op.name.trim() });
+        break;
+      case "delete_sheet":
+        if (!str(op.sheet, 200) || !op.sheet) return bad("delete_sheet needs sheet");
+        ops.push({ op: "delete_sheet", sheet: op.sheet });
+        break;
+      case "set_number_format": {
+        const bang = typeof op.target === "string" ? op.target.lastIndexOf("!") : -1;
+        if (!str(op.target, 300) || bang <= 0 || !parseCellRange(op.target.slice(bang + 1)) || !str(op.numberFormat, 100)) {
+          return bad("set_number_format needs target <sheet>!A1 or <sheet>!B2:B9 and numberFormat (Excel code such as #,##0 or 0.0%; \"\" = General)");
+        }
+        ops.push({ op: "set_number_format", target: op.target, numberFormat: op.numberFormat });
+        break;
+      }
+      case "add_chart": {
+        const oneD = (ref: unknown) => {
+          const split = typeof ref === "string" && str(ref, 300) ? splitSheetRange(ref) : null;
+          const bounds = split ? parseCellRange(split.range) : null;
+          return !!bounds && (bounds.from.col === bounds.to.col || bounds.from.row === bounds.to.row);
+        };
+        const values = op.values;
+        if (!str(op.sheet, 200) || !op.sheet || !["bar", "line", "pie"].includes(String(op.type)) || !oneD(op.categories)
+          || !Array.isArray(values) || values.length === 0 || values.length > 8 || !values.every(oneD)
+          || (op.title !== undefined && !str(op.title, 200)) || (op.anchor !== undefined && (typeof op.anchor !== "string" || !parseCellAddress(op.anchor)))
+          || (op.type === "pie" && values.length !== 1)) {
+          return bad("add_chart needs sheet, type bar|line|pie, categories (one row or column, e.g. A2:A4) and values: 1-8 ranges of the same shape (pie: exactly 1); optional title, anchor (top-left cell)");
+        }
+        ops.push({ op: "add_chart", sheet: op.sheet, type: op.type as "bar" | "line" | "pie", categories: op.categories as string, values: values as string[],
+          ...(op.title !== undefined ? { title: op.title as string } : {}), ...(op.anchor !== undefined ? { anchor: (op.anchor as string).trim().toUpperCase() } : {}),
+          ...(op.id !== undefined && id(op.id) ? { id: op.id } : {}) });
+        break;
+      }
       default:
         return bad("unknown op");
     }
@@ -438,8 +566,68 @@ export function applyLiveDocumentOps(model: LiveDocumentModel, ops: LiveDocument
       const keep = { ...(prior?.format ? { format: prior.format } : {}), ...(prior?.nf ? { nf: prior.nf } : {}) };
       if (value === "") delete sheet.cells[op.cell];
       else if (value.startsWith("=") && value.length > 1) sheet.cells[op.cell] = { v: "", f: value.slice(1), ...keep };
+      else if (keep.nf && /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value.trim())) sheet.cells[op.cell] = { v: formatNumberCode(Number(value.trim()), keep.nf), n: Number(value.trim()), ...keep };
       else sheet.cells[op.cell] = { v: value, ...keep };
       recalc = true;
+      continue;
+    }
+    if (op.op === "rename_sheet" || op.op === "delete_sheet" || op.op === "set_number_format" || op.op === "add_chart") {
+      if (next.kind !== "sheet") throw new LiveDocumentOpError("op_unsupported_for_format", op.op);
+      if (op.op === "set_number_format") {
+        const bang = op.target.lastIndexOf("!");
+        const sheet = findSheet(next, op.target.slice(0, bang));
+        const bounds = parseCellRange(op.target.slice(bang + 1));
+        if (!sheet || !bounds) throw new LiveDocumentOpError("target_unknown", op.target);
+        let touched = 0;
+        for (const [address, cell] of Object.entries(sheet.cells)) {
+          const p = parseCellAddress(address);
+          if (!p || p.col < bounds.from.col || p.col > bounds.to.col || p.row < bounds.from.row || p.row > bounds.to.row) continue;
+          if (op.numberFormat) cell.nf = op.numberFormat; else delete cell.nf;
+          // A plain number shows through its format at once; the number behind it stays exact (formulas re-display below).
+          if (cell.f === undefined) {
+            const n = cell.n ?? (/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(cell.v.trim()) ? Number(cell.v.trim()) : undefined);
+            if (n !== undefined) { cell.n = n; cell.v = cell.nf ? formatNumberCode(n, cell.nf) : generalNumber(n); }
+          }
+          touched += 1;
+        }
+        if (!touched) throw new LiveDocumentOpError("range_empty", `${op.target}: fill the cells first, then set their number format`);
+        recalc = true;
+        continue;
+      }
+      const sheet = findSheet(next, op.sheet);
+      if (!sheet) throw new LiveDocumentOpError("target_unknown", `sheet ${op.sheet}`);
+      if (op.op === "rename_sheet") {
+        if (next.sheets.some((other) => other !== sheet && other.name.toLowerCase() === op.name.toLowerCase())) throw new LiveDocumentOpError("sheet_exists", op.name);
+        const old = sheet.name;
+        sheet.name = op.name;
+        // References to the sheet follow its new name, in formulas and in chart ranges alike.
+        for (const each of next.sheets) {
+          for (const cell of Object.values(each.cells)) if (cell.f !== undefined) cell.f = renameSheetInFormula(cell.f, old, op.name);
+          for (const chart of each.charts ?? []) {
+            if (chart.fromFile) continue;
+            chart.categories = renameSheetInFormula(chart.categories, old, op.name);
+            chart.values = chart.values.map((ref) => renameSheetInFormula(ref, old, op.name));
+          }
+        }
+        recalc = true;
+        continue;
+      }
+      if (op.op === "delete_sheet") {
+        if (next.sheets.length <= 1) throw new LiveDocumentOpError("last_sheet", op.sheet);
+        next.sheets.splice(next.sheets.indexOf(sheet), 1);
+        recalc = true;
+        continue;
+      }
+      if (!op.id) throw new LiveDocumentOpError("id_unassigned", op.op);
+      for (const ref of [op.categories, ...op.values]) {
+        const split = splitSheetRange(ref);
+        if (!split || (split.sheet !== undefined && !findSheet(next, split.sheet))) throw new LiveDocumentOpError("target_unknown", ref);
+      }
+      if ((sheet.charts?.length ?? 0) >= 20) throw new LiveDocumentOpError("op_invalid", "at most 20 charts per sheet");
+      // Default frame: two columns right of the sheet's last used column, on row 2.
+      const lastCol = Math.max(0, ...Object.keys(sheet.cells).map((address) => parseCellAddress(address)?.col ?? 0));
+      const anchor = op.anchor ?? cellAddress(lastCol + 2, 2);
+      (sheet.charts ??= []).push({ id: op.id, type: op.type, ...(op.title ? { title: op.title } : {}), categories: op.categories, values: [...op.values], anchor });
       continue;
     }
     if (op.op === "set_format") {
@@ -526,7 +714,7 @@ export function applyLiveDocumentOps(model: LiveDocumentModel, ops: LiveDocument
 export function assignLiveDocumentIds(ops: LiveDocumentOp[], seq: number): { ops: LiveDocumentOp[]; created: string[] } {
   const created: string[] = [];
   const out = ops.map((op, index) => {
-    if (op.op === "insert_paragraph" || op.op === "insert_table" || op.op === "add_slide" || op.op === "add_sheet") {
+    if (op.op === "insert_paragraph" || op.op === "insert_table" || op.op === "add_slide" || op.op === "add_sheet" || op.op === "add_chart") {
       const assigned = `n${seq}x${index + 1}`;
       created.push(assigned);
       return { ...op, id: assigned };
@@ -540,7 +728,8 @@ export function assignLiveDocumentIds(ops: LiveDocumentOp[], seq: number): { ops
 export function liveDocumentOpTargets(op: LiveDocumentOp): string[] {
   if (op.op === "set_cell") return [`${op.sheet}!${op.cell}`];
   if (op.op === "set_text" || op.op === "insert_text" || op.op === "delete_block" || op.op === "delete_slide") return [op.target];
-  if (op.op === "set_format") return [`format:${op.target}`];
+  if (op.op === "set_format" || op.op === "set_number_format") return [`format:${op.target}`];
+  if (op.op === "rename_sheet" || op.op === "delete_sheet") return [`sheet:${op.sheet}`];
   return [];
 }
 
@@ -564,7 +753,10 @@ export function liveDocumentOutline(model: LiveDocumentModel, options: { maxChar
       });
       for (const address of addresses) {
         const cell = sheet.cells[address];
-        lines.push(`${address}\t${cell.f ? `=${cell.f}\t(${cell.v})` : cell.v}${liveFormatTag(cell.format)}`);
+        lines.push(`${address}\t${cell.f ? `=${cell.f}\t(${cell.v})` : cell.v}${liveFormatTag(cell.format)}${cell.nf ? ` [${cell.nf}]` : ""}`);
+      }
+      for (const chart of sheet.charts ?? []) {
+        lines.push(`chart [${chart.id}] ${chart.type}${chart.title ? ` "${chart.title}"` : ""}: categories ${chart.categories}, values ${chart.values.join(", ")}, at ${chart.anchor}${chart.fromFile ? " (in file)" : ""}`);
       }
     }
   } else if (model.kind === "flow") {
