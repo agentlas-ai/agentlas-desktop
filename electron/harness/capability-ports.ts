@@ -593,7 +593,8 @@ const PORTS: PortDefinition[] = [
       if (!model) return refused("route_not_image_capable", "media.routes lists image routes; use codex-cli-image, nanobanana-image, grok-cli-image or auto");
       if (ctx.dryRun) return refused("dry_run");
       const { generateImage } = await import("../multimodal/image");
-      const result = await generateImage(model, str(args.prompt));
+      // The run's permission reaches the image route's own CLI (multimodal/image.ts ImageAdmission, R-078).
+      const result = await generateImage(model, str(args.prompt), { permission: ctx.permission });
       const { IMAGE_ENGINE_ROUTE } = await import("./media-routes");
       const { recordReadinessObservation } = await import("./readiness-observations");
       const observedRoute = (result.engine && IMAGE_ENGINE_ROUTE[result.engine]) || (route !== "auto" ? route : null);
@@ -658,7 +659,7 @@ const PORTS: PortDefinition[] = [
       if (!path.isAbsolute(imagePath)) return refused("image_path_absolute_required");
       if (ctx.dryRun) return refused("dry_run");
       const { editImage } = await import("../multimodal/image");
-      const result = await editImage(model, imagePath, str(args.instruction));
+      const result = await editImage(model, imagePath, str(args.instruction), { permission: ctx.permission });
       const { IMAGE_ENGINE_ROUTE } = await import("./media-routes");
       const { recordReadinessObservation } = await import("./readiness-observations");
       const observedRoute = (result.engine && IMAGE_ENGINE_ROUTE[result.engine]) || (route !== "auto" ? route : null);
