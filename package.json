@@ -412,7 +412,7 @@
     "@playwright/mcp": "0.0.78",
     "@rive-app/canvas": "^2.40.1",
     "@xyflow/react": "^12.11.1",
-    "agentlas-science": "git+ssh://git@github.com/agentlas-ai/agentlas-science.git#fcb2224053629017a66a9027a3d123787b84f899",
+    "agentlas-science": "git+ssh://git@github.com/agentlas-ai/agentlas-science.git#b42acf98aaba93e8a41b28e361f7050d40f91112",
     "ajv": "8.20.0",
     "beautiful-mermaid": "^1.1.3",
     "better-sqlite3": "^12.11.1",
