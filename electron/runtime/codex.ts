@@ -1710,6 +1710,42 @@ export function codexNativeItemMayOutliveTurn(item: any): boolean {
     || (typeof item.command === "string" && /(^|[^&])&([^&]|$)/.test(item.command));
 }
 
+/**
+ * Native turns and child threads that earlier runner turns of one resident app-server owned (flow audit 2026-10-18 AD-10).
+ * A reused process can still stream an earlier turn's late frames (its background terminal's output, a sub-agent thread it
+ * spawned); they used to make the next turn's effect boundary uncertain (native-child-or-other-turn-uncovered with
+ * native-frame-uncovered, about 75 boundaries 10-02..10-10). Such a frame belongs to the earlier turn, whose boundary has
+ * already closed. Only a frame proven to be that residue is set aside; an unknown thread or turn stays uncovered.
+ */
+export interface CodexPriorTurnOwnership { turnIds: Set<string>; threadIds: Set<string>; }
+const codexPriorTurnOwnership = new WeakMap<object, CodexPriorTurnOwnership>();
+const CODEX_PRIOR_OWNERSHIP_LIMIT = 256;
+function rememberCodexOwnership(set: Set<string>, id: string): void {
+  if (!id || id.length > 256) return;
+  set.delete(id);
+  set.add(id);
+  while (set.size > CODEX_PRIOR_OWNERSHIP_LIMIT) set.delete(set.values().next().value!);
+}
+/** Child thread ids an item names: codex 0.163 collabAgentToolCall.receiverThreadIds (spawn: the new agent) and subAgentActivity.agentThreadId. */
+export function codexChildThreadIds(item: any): string[] {
+  if (!item || typeof item !== "object") return [];
+  const valid = (id: unknown): id is string => typeof id === "string" && id.length > 0 && id.length <= 256;
+  if (item.type === "collabAgentToolCall" && Array.isArray(item.receiverThreadIds)) return item.receiverThreadIds.filter(valid).slice(0, 64);
+  if (item.type === "subAgentActivity" && valid(item.agentThreadId)) return [item.agentThreadId];
+  return [];
+}
+/**
+ * A frame an earlier runner turn on this reused process owns: on this turn's thread, a turn id an earlier runner turn
+ * owned; on another thread, a child (or former) thread an earlier turn owned that this turn has not itself addressed.
+ */
+export function codexPriorTurnResidue(params: any, threadId: string | null | undefined, prior: CodexPriorTurnOwnership | undefined,
+  currentChildren: ReadonlySet<string>): boolean {
+  // Without this turn's own thread there is nothing to attribute against: every frame keeps its present handling.
+  if (!prior || !threadId || typeof params?.threadId !== "string" || !params.threadId) return false;
+  if (params.threadId === threadId) return typeof params.turnId === "string" && prior.turnIds.has(params.turnId);
+  return prior.threadIds.has(params.threadId) && !currentChildren.has(params.threadId);
+}
+
 interface ResidentTurnOutcome {
   /** 완주했다 — 이 결과를 그대로 돌려준다(성공이든 표식 실패든). */
   result?: RunnerResult;
@@ -1920,6 +1956,11 @@ async function runCodexResidentTurn(input: {
   events = effects.events;
   const observeScienceTool = bindScienceNativeToolObserver(req, effects.qualify);
   const observeScienceFailure = bindScienceNativeFailureObserver(req, effects.qualify);
+  // AD-10: what earlier runner turns on this process owned, and what this turn owns (recorded for the next one in finally).
+  const priorOwnership = codexPriorTurnOwnership.get(session);
+  const turnChildThreads = new Set<string>();
+  const ownedTurnIds = new Set<string>();
+  let priorTurnFrames = 0;
   const reusing = !lease.fresh && Boolean(session.threadId);
   const explicitResume = Boolean(req.runtimeSessionId);
   const modelChanged = Boolean(req.model && session.modelAcknowledgement?.requestedModel !== req.model);
@@ -2144,6 +2185,25 @@ async function runCodexResidentTurn(input: {
         configuredWindowLimit: compactLimit,
         compactionsThisTurn: Math.max(health.compactionItems.size, health.compactedNotices) });
     }
+    // AD-10: child threads join the turn that addressed them (its collab item or sub-agent activity, or the child's own
+    // thread/started naming its parent); a child of an earlier turn's child stays with that earlier turn.
+    const priorResidue = codexPriorTurnResidue(params, session.threadId, priorOwnership, turnChildThreads);
+    if (method === "thread/started" && typeof params?.thread?.id === "string" && typeof params.thread.parentThreadId === "string") {
+      const parent = params.thread.parentThreadId;
+      if (parent === session.threadId || turnChildThreads.has(parent)) rememberCodexOwnership(turnChildThreads, params.thread.id);
+      else if (priorOwnership?.threadIds.has(parent)) rememberCodexOwnership(priorOwnership.threadIds, params.thread.id);
+    }
+    if ((method === "item/started" || method === "item/completed") && typeof params?.threadId === "string") {
+      const children = codexChildThreadIds(params.item);
+      const lineage = !priorResidue && (params.threadId === session.threadId || turnChildThreads.has(params.threadId)) ? turnChildThreads
+        : priorResidue ? priorOwnership?.threadIds : undefined;
+      if (lineage) for (const child of children) rememberCodexOwnership(lineage, child);
+    }
+    if (priorResidue && method.startsWith("item/")) {
+      // An earlier runner turn's late frame on this reused process: counted (prior_turn_frames), never this turn's effect.
+      priorTurnFrames = Math.min(Number.MAX_SAFE_INTEGER, priorTurnFrames + 1);
+      return;
+    }
     if (method === "item/started" || method === "item/completed") {
       if (fromOtherThread(params) || (confirmedTurnId && params?.turnId && params.turnId !== confirmedTurnId)) {
         effects.uncertain("native-child-or-other-turn-uncovered"); return;
@@ -2186,10 +2246,12 @@ async function runCodexResidentTurn(input: {
         break;
       case "turn/started":
         // 이 자리는 exec 경로와 같은 의미다 — 모델이 생각을 시작했다는 가장 이른 신호.
-        if (typeof params?.turn?.id === "string" && params?.threadId === session.threadId
+        // An earlier runner turn's id (AD-10) is never this turn's, however late its turn/started arrives.
+        if (typeof params?.turn?.id === "string" && params?.threadId === session.threadId && !priorOwnership?.turnIds.has(params.turn.id)
           && ((confirmedTurnId && params.turn.id === confirmedTurnId) || (!confirmedTurnId && turnRequestInFlight))) {
           turnId = params.turn.id;
           confirmedTurnId = params.turn.id;
+          rememberCodexOwnership(ownedTurnIds, params.turn.id);
           openThinking();
         }
         break;
@@ -2941,6 +3003,7 @@ async function runCodexResidentTurn(input: {
       turnId = started.turn.id;
       confirmedTurnId = started.turn.id;
       acknowledgedTurnId = started.turn.id;
+      rememberCodexOwnership(ownedTurnIds, started.turn.id);
       if (!req.signal?.aborted) acknowledgeStableTurnContext(stableContextDelivery,
         { sessionId: session.threadId, acknowledgementId: started.turn.id });
     } else {
@@ -3154,6 +3217,15 @@ async function runCodexResidentTurn(input: {
     }
     // 수신자를 먼저 뗀다 — 유휴 세션이 지난 턴의 events 로 상태를 흘리면 안 된다.
     session.active = null;
+    try {
+      // AD-10: hand this turn's turns, child threads and thread to the next runner turn on this process as earlier-turn residue.
+      const ownership = priorOwnership ?? { turnIds: new Set<string>(), threadIds: new Set<string>() };
+      for (const id of ownedTurnIds) rememberCodexOwnership(ownership.turnIds, id);
+      for (const id of turnChildThreads) rememberCodexOwnership(ownership.threadIds, id);
+      if (session.threadId) rememberCodexOwnership(ownership.threadIds, session.threadId);
+      codexPriorTurnOwnership.set(session, ownership);
+      if (priorTurnFrames > 0) events.onStatus(`[runtime-session] prior_turn_frames kind=${KIND} count=${priorTurnFrames}`);
+    } catch { /* a diagnostic receipt never blocks the pool disposition below */ }
     if (terminalObservationFailed && !diagnosticFailure) diagnosticFailure = codexDiagnosticFailure(terminalObservationError);
     emitResidentDiagnostic("turn-terminal");
     if (broken || req.signal?.aborted || failure || interrupted || (turnDispatchAttempted && !terminalObserved)) {
