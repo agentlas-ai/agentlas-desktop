@@ -33,7 +33,7 @@ import { getOneProfile } from "../store/one-profile";
 import { applyAutomationLifecycle, automationLifecycleContext, automationLifecycleRefusalText, automationRegistrationReasonCode, automationRegistrationRefusalText } from "../automation-lifecycle";
 import { recordAutomationPinProvenance } from "../automation-runtime-provenance";
 import { AutomationWorkspaceError, bindCreatedGoalContinuationWorkspace } from "../automation-workspace";
-import { assertFiniteGoalLifecycleCurrent, isGoalDispatchRefusal } from "../automation-execution-control";
+import { assertFiniteGoalLifecycleCurrent, currentAutomationGoalExecutionOwnerMatches, isGoalDispatchRefusal } from "../automation-execution-control";
 import { selectionForRuntime } from "../../shared/runtime-selection";
 import { roomChipRuntimeSelection } from "../runtime/room-chip-runtime";
 import { officeTaskContextForInvocation } from "../office-task-context";
@@ -7954,10 +7954,32 @@ async function runMcpInvocationInContext(
         // goal_id 1급 조회가 먼저다 — 프롬프트 마커 문자열 검색은 goal_id 없는 레거시
         // 연속실행의 폴백으로만 남는다. goal당 연속실행은 정확히 한 행이다.
         const goalContinuation = activeGoalId ? findAutomationByGoalId(activeGoalId) : null;
-        const existingContinuation = goalContinuation
+        const foundContinuation = goalContinuation
           ?? listAutomations().find(
             (automation) => automation.enabled && automation.promptTemplate.includes(marker),
           );
+        // W1 (2026-10-18): a Goal is bound only to a continuation that can wake under it. Production: "Goal continuation ·
+        // Yotube" (834c86d9) was held by the schedule quarantine (enabled, next_run_at NULL) and this lookup re-bound it
+        // to the next /goal Goal, so every turn end of that Goal fell to goal_continuation_unarmed. A re-bound row can
+        // never run anyway: its creation receipt names the old Goal and definition (automation-provenance.ts), so the
+        // Goal owner check refuses it. Another Goal's or a legacy row is therefore left as it is and a new continuation is
+        // created. This Goal's row is reused only when its receipt names this Goal and the schedule quarantine does not
+        // hold it, otherwise a new one replaces it; one that only lost its cursor is armed again, as a disabled one always
+        // was.
+        const sameGoalContinuation = activeGoalId && foundContinuation?.goalId === activeGoalId ? foundContinuation : undefined;
+        const ownedByThisGoal = (automation: { id: string }): boolean => {
+          try {
+            const goalRun = getLongRunByGoalId(activeGoalId!);
+            return Boolean(goalRun && currentAutomationGoalExecutionOwnerMatches(automation.id, activeGoalId!, chat.id, goalRun.id));
+          } catch { return false; }
+        };
+        const continuationWake = !sameGoalContinuation ? "ok"
+          : !ownedByThisGoal(sameGoalContinuation) ? "unowned"
+            : (await import("../store/graph-reconciliation")).graphScheduleWakeState(sameGoalContinuation);
+        const existingContinuation = !activeGoalId ? foundContinuation
+          : continuationWake === "ok" || continuationWake === "unarmed" ? sameGoalContinuation : undefined;
+        const replacedContinuation = continuationWake === "held" || continuationWake === "unowned"
+          ? sameGoalContinuation ?? null : null;
         // A hidden continuation is a new invocation, not a trusted continuation
         // of the current process. Pin an explicit single Hub hire as a Hub target
         // so the scheduler performs a fresh authoritative hepCall on every run.
@@ -7984,11 +8006,8 @@ async function runMcpInvocationInContext(
                 ...(continuationHubVersion ? { targetVersion: continuationHubVersion } : {}),
               });
             }
-            if (activeGoalId) {
-              if (existingContinuation.goalId !== activeGoalId) {
-                updateAutomation(existingContinuation.id, { goalId: activeGoalId });
-              }
-              if (!existingContinuation.enabled) toggleAutomation(existingContinuation.id, true);
+            if (activeGoalId && (!existingContinuation.enabled || continuationWake === "unarmed")) {
+              toggleAutomation(existingContinuation.id, true);
             }
           })();
         }
@@ -8029,6 +8048,17 @@ async function runMcpInvocationInContext(
               sourceChatId: chat.id,
               invocationRunId: req.runId!,
             });
+            if (replacedContinuation) {
+              // A held row this Goal owns could wake beside the new one once its effects are reconciled: only its clock
+              // stops (history and uncertain-effect record stay). A row whose receipt names another Goal can never run
+              // under this one and is left exactly as it is (its cleanup is the owner's call).
+              const retired = continuationWake === "held" && replacedContinuation.enabled;
+              if (retired) toggleAutomation(replacedContinuation.id, false);
+              tryRecordRunEvent({ runId: req.runId!, chatId: chat.id, automationId: replacedContinuation.id,
+                kind: "goal_continuation_replaced", payload: { goalId: activeGoalId,
+                  reasonCode: continuationWake === "held" ? "goal_continuation_schedule_held" : "goal_continuation_owner_unverified",
+                  replacementAutomationId: continuation.id, retired } });
+            }
           })();
           sink({
             kind: "tool-use",
@@ -8047,8 +8077,11 @@ async function runMcpInvocationInContext(
          * turn's answer is already complete. Throwing here failed the finished turn, so it was saved
          * as an interrupted answer. Withhold the continuation (the transactions above rolled back,
          * nothing was created or re-enabled) and finish the turn; every other error still throws.
+         * A creation receipt that cannot be sealed (AutomationWorkspaceError: this turn is not bound to the Goal's
+         * revision) is the same kind of refusal. Since W1 (2026-10-18) a held or foreign continuation is no longer
+         * silently re-bound, so creation is reached more often, and it must not fail a complete answer either.
          */
-        if (!isGoalDispatchRefusal(error)) throw error;
+        if (!isGoalDispatchRefusal(error) && !(error instanceof AutomationWorkspaceError)) throw error;
         sink({
           kind: "tool-use",
           tool: {
