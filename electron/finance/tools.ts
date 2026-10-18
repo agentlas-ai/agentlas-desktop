@@ -27,13 +27,14 @@ const inputSchemas = {
   'archives.read': z.union([z.object({ archiveId: z.string().regex(/^[a-f0-9]{64}$/) }).strict(), z.object({ reportId: id }).strict()]),
   'archives.restore': z.object({ archiveId: z.string().regex(/^[a-f0-9]{64}$/), expectedRevision: revision, reportIds: z.array(id).max(200).optional() }).strict(),
   'monitor.create': z.object({ name: z.string().min(1).max(300), query: z.string().min(1).max(2000), assetIds: z.array(id).min(1).max(10), expectedRevision: revision }).strict(),
+  'monitor.update': z.object({ monitorId: id.refine(value=>!!value.trim()), expectedRevision: revision, patch: z.object({ name: z.string().min(1).max(300).refine(value=>!!value.trim()).optional(), query: z.string().min(1).max(2000).refine(value=>!!value.trim()).optional(), assetIds: z.array(id.refine(value=>!!value.trim())).min(1).max(10).refine(values=>new Set(values).size===values.length).optional() }).strict().refine(value=>Object.keys(value).length>0) }).strict(),
   'monitor.run': z.object({ monitorId: id }).strict(),
   'monitor.runs': z.object({ monitorId: id, cursor: z.string().min(1).max(2000).optional(), limit: z.number().int().min(1).max(50).optional() }).strict(),
   'monitor.schedule': z.object({ monitorId: id, scheduleHuman: z.enum(['daily-09:00', 'weekday-09:00', 'hourly', 'every-5m']) }).strict(),
   'monitor.pause': z.object({ monitorId: id }).strict(),
 };
 type Action = keyof typeof inputSchemas;
-const writes = new Set<Action>(['calculate','asset.add', 'query.save', 'apply', 'report.create', 'archives.create', 'archives.restore', 'monitor.create', 'monitor.run', 'monitor.schedule', 'monitor.pause']);
+const writes = new Set<Action>(['calculate','asset.add', 'query.save', 'apply', 'report.create', 'archives.create', 'archives.restore', 'monitor.create', 'monitor.update', 'monitor.run', 'monitor.schedule', 'monitor.pause']);
 const editTypes = new Set<FinanceOperation['type']>(['watchlist.remove', 'dashboard.add', 'dashboard.rename', 'dashboard.update', 'dashboard.remove', 'dashboard.select', 'widget.add', 'widget.update', 'widget.remove', 'widget.move', 'report.update', 'report.remove', 'report.refresh', 'report.section.update', 'report.section.remove', 'report.section.move']);
 
 /** Models edit presentation and draft prose; data import and source provenance stay with the provider service. */
@@ -86,6 +87,7 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
         const args = inputSchemas['monitor.create'].parse(raw);
         data = await finance.apply(scope, { expectedRevision: args.expectedRevision, operations: [{ type: 'monitor.upsert', monitor: { id: financeId('monitor'), name: args.name, query: args.query, assetIds: args.assetIds, status: 'draft', lastCheckedAt: null, nextCheckAt: null, note: '' } }] }); break;
       }
+      case 'monitor.update': data = await finance.updateMonitor(scope, inputSchemas['monitor.update'].parse(raw), ctx.signal); break;
       case 'monitor.run': {
         const run = await finance.runMonitor(scope, { ...inputSchemas['monitor.run'].parse(raw), callerRunId: ctx.runId, callerChatId: ctx.chatId }, ctx.signal ? AbortSignal.any([ctx.signal, AbortSignal.timeout(FINANCE_MONITOR_RUN_TIMEOUT_MS)]) : undefined);
         scope.assertCurrent();
@@ -159,6 +161,7 @@ const descriptors: { action: Action; purpose: string; required: string[]; inputS
   { action: 'archives.read', purpose: 'Read a preserved Finance edition by archive ID or archived report ID without restoring it.', required: [], inputSchema: { oneOf: [schema(['archiveId'], { archiveId: { type: 'string', pattern: '^[a-f0-9]{64}$' } }), schema(['reportId'], { reportId: key })] } },
   { action: 'archives.restore', purpose: 'Restore selected preserved reports and required sources at an expected revision. Omitting report IDs also restores sources removed by that edition; conflicting contents and capacity are refused.', required: ['archiveId', 'expectedRevision'], inputSchema: schema(['archiveId', 'expectedRevision'], { archiveId: { type: 'string', pattern: '^[a-f0-9]{64}$' }, expectedRevision: rev, reportIds: { type: 'array', items: key, maxItems: 200, uniqueItems: true } }) },
   { action: 'monitor.create', purpose: 'Create a draft research monitor for saved assets; creation does not enable a schedule.', required: ['name', 'query', 'assetIds', 'expectedRevision'], inputSchema: schema(['name', 'query', 'assetIds', 'expectedRevision'], { name: text, query: text, assetIds: list, expectedRevision: rev }) },
+  { action: 'monitor.update', purpose: 'Edit an existing draft or paused research monitor by ID, preserving its history and schedule metadata. Pause active schedules and wait for running checks before editing.', required: ['monitorId', 'expectedRevision', 'patch'], inputSchema: schema(['monitorId', 'expectedRevision', 'patch'], { monitorId: { ...key, pattern: '\\S' }, expectedRevision: rev, patch: { ...schema([], { name: { type: 'string', minLength: 1, maxLength: 300, pattern: '\\S' }, query: { type: 'string', minLength: 1, maxLength: 2000, pattern: '\\S' }, assetIds: { ...list, minItems: 1, uniqueItems: true, items: { ...key, pattern: '\\S' } } }), minProperties: 1 } }) },
   { action: 'monitor.run', purpose: 'Run an existing Finance monitor and persist its actual result, evidence and briefing report.', required: ['monitorId'], inputSchema: schema(['monitorId'], { monitorId: key }) },
   { action: 'monitor.runs', purpose: 'Read a bounded snapshot page of actual Finance monitor runs and their report references, or explicit index-building progress.', required: ['monitorId'], inputSchema: schema(['monitorId'], { monitorId: key, cursor: text, limit: { type: 'integer', minimum: 1, maximum: 50 } }) },
   { action: 'monitor.schedule', purpose: 'Enable an existing Finance monitor through the host scheduler.', required: ['monitorId', 'scheduleHuman'], inputSchema: schema(['monitorId', 'scheduleHuman'], { monitorId: key, scheduleHuman: { enum: ['daily-09:00', 'weekday-09:00', 'hourly', 'every-5m'] } }) },
@@ -171,10 +174,10 @@ export const FINANCE_PORTS = descriptors.map(({ action, purpose, required, input
     purpose: composeDeclaredPrompt([{ id: `tool.finance.${action}.description`, revision: 1, stability: 'fixed-policy', changeTriggers: ['release'], text: purpose }]),
     handler: (args: Record<string, unknown>, ctx: HarnessCallContext) => callFinanceTool(action, args, ctx) };
 });
-for (const workflow of ['index', 'research', 'workspace', 'monitor']) registerDeclaredPromptModule({ id: `plugin.finance.skill.${workflow}`, revision: 2, stability: 'versioned-content', changeTriggers: ['release', 'skill-package'] });
+for (const workflow of ['index', 'research', 'workspace', 'monitor']) registerDeclaredPromptModule({ id: `plugin.finance.skill.${workflow}`, revision: workflow === 'monitor' ? 3 : 2, stability: 'versioned-content', changeTriggers: ['release', 'skill-package'] });
 
 /** Preserve the installed bytes and their hash while declaring the actual skill tool-result channel. */
 export function composeFinanceSkillContent(skillId: string, content: string): string {
   const workflow = ['index', 'research', 'workspace', 'monitor'].find(name => skillId === `plugin:finance/${name}`);
-  return workflow ? composeDeclaredPrompt([{ id: `plugin.finance.skill.${workflow}`, revision: 2, stability: 'versioned-content', changeTriggers: ['release', 'skill-package'], text: content }]) : content;
+  return workflow ? composeDeclaredPrompt([{ id: `plugin.finance.skill.${workflow}`, revision: workflow === 'monitor' ? 3 : 2, stability: 'versioned-content', changeTriggers: ['release', 'skill-package'], text: content }]) : content;
 }

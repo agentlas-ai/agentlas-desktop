@@ -50,11 +50,17 @@ function inline(value:string):string {
  return html+escape(value.slice(last));
 }
 /** Small non-HTML Markdown subset. Escaping always happens before emitting any trusted tags. */
+export function financeReportIsMetadataLine(value:string):boolean {
+ const match=/^\s*(input sha256|sourceRevision|retrievedAt):\s*(.*?)\s*$/.exec(value);if(!match)return false;
+ if(match[1]==='input sha256')return /^[a-f0-9]{64}$/i.test(match[2]);
+ if(match[1]==='sourceRevision')return /^\d+$/.test(match[2]);
+ return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(match[2])&&Number.isFinite(Date.parse(match[2]));
+}
 export function financeReportProseHtml(value:string):string {
  const lines=value.slice(0,20000).replace(/\r\n?/g,'\n').split('\n');let html='',paragraph:string[]=[],list:'ul'|'ol'|null=null,fenced=false;
  const flush=()=>{if(paragraph.length){html+='<p>'+inline(paragraph.join(' '))+'</p>';paragraph=[];}};
  const close=()=>{if(list){html+='</'+list+'>';list=null;}};
- for(const line of lines){if(/^\s*```/.test(line)){flush();close();fenced=!fenced;continue;}if(fenced||/^\s*\[row\s+\d+\]/i.test(line)||/^\s*\|.*\|\s*$/.test(line))continue;const heading=/^\s{0,3}(#{1,3})\s+(.+)$/.exec(line),bullet=/^\s*([-*+]|\d+\.)\s+(.+)$/.exec(line);
+ for(const line of lines){if(/^\s*```/.test(line)){flush();close();fenced=!fenced;continue;}if(fenced||/^\s*(?:\[row\s+\d+\]\s*)+$/i.test(line)||/^\s*\|.*\|\s*$/.test(line)||financeReportIsMetadataLine(line))continue;const heading=/^\s{0,3}(#{1,3})\s+(.+)$/.exec(line),bullet=/^\s*([-*+]|\d+\.)\s+(.+)$/.exec(line);
   if(!line.trim()){flush();close();continue;}
   if(heading){flush();close();const level=Math.min(4,heading[1].length+2);html+='<h'+level+'>'+inline(heading[2])+'</h'+level+'>';continue;}
   if(bullet){flush();const next=/^\d/.test(bullet[1])?'ol':'ul';if(list!==next){close();list=next;html+='<'+list+'>';}html+='<li>'+inline(bullet[2])+'</li>';continue;}

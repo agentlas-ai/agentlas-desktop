@@ -187,6 +187,37 @@ export class FinanceService {
     return getFinanceDashboardFeeds({scope,watchlist:workspace.watchlist,enabledFeedIds,signal});
   }
   async refreshQuotes(scope:FinanceScope) {const workspace=await this.store.load(scope);const route={...await this.experience.consent(scope),assertCurrent:()=>scope.assertCurrent()};scope.assertCurrent();const result=await refreshFinanceQuotes(workspace,route);scope.assertCurrent();return result;}
+  /** Definition edits share the execution lease; history and scheduler metadata are never model patches. */
+  async updateMonitor(scope:FinanceScope,input:{monitorId:string;expectedRevision:number;patch:{name?:string;query?:string;assetIds?:string[]}},signal?:AbortSignal):Promise<FinanceWorkspace> {
+    const invalid=()=>{throw new Error("finance_arguments_invalid");};
+    if(!input||typeof input!=="object"||Array.isArray(input)||Object.keys(input).some(key=>!["monitorId","expectedRevision","patch"].includes(key)))invalid();
+    if(typeof input.monitorId!=="string"||!input.monitorId.trim()||input.monitorId.length>200||!Number.isSafeInteger(input.expectedRevision)||input.expectedRevision<0)invalid();
+    let patch=input.patch;
+    if(!patch||typeof patch!=="object"||Array.isArray(patch)||!Object.keys(patch).length||Object.keys(patch).some(key=>!["name","query","assetIds"].includes(key)))invalid();
+    for(const key of ["name","query"] as const)if(key in patch&&(typeof patch[key]!=="string"||!patch[key]!.trim()||patch[key]!.length>(key==="name"?300:2000)))invalid();
+    if("assetIds" in patch&&(!Array.isArray(patch.assetIds)||!patch.assetIds.length||patch.assetIds.length>10||patch.assetIds.some(id=>typeof id!=="string"||!id.trim()||id.length>200)||new Set(patch.assetIds).size!==patch.assetIds.length))invalid();
+    patch={...patch,...(patch.assetIds?{assetIds:[...patch.assetIds]}:{})};input={...input,patch};
+    const savingScope:FinanceScope={...scope,assertCurrent(){scope.assertCurrent();if(signal?.aborted)throw new Error("finance_monitor_cancelled");}};
+    savingScope.assertCurrent();const before=await this.store.load(savingScope);savingScope.assertCurrent();
+    if(before.revision!==input.expectedRevision)throw new Error("finance_revision_conflict");
+    if(!before.monitors.some(monitor=>monitor.id===input.monitorId))throw new Error("finance_monitor_not_found");
+    let release:()=>Promise<void>;
+    try{release=await lockfile.lock(this.runDirectory(savingScope,input.monitorId),MONITOR_LOCK_OPTIONS);}
+    catch(error){savingScope.assertCurrent();if((error as NodeJS.ErrnoException).code==="ELOCKED")throw new Error("finance_monitor_running");throw error;}
+    try{
+      savingScope.assertCurrent();
+      const workspace=await this.store.transaction(savingScope,input.expectedRevision,current=>{
+        savingScope.assertCurrent();const previous=current.monitors.find(monitor=>monitor.id===input.monitorId);if(!previous)throw new Error("finance_monitor_not_found");
+        if(previous.status==="active"||(previous.automationId&&readFinanceMonitor({scope:savingScope,monitor:previous}).status!=="paused"))throw new Error("finance_monitor_pause_before_edit");
+        const assetIds=patch.assetIds??previous.assetIds;
+        const selected=assetIds.length?assetIds:current.watchlist.slice(0,3).map(asset=>asset.id);
+        if(!selected.length||selected.some(id=>!current.watchlist.some(asset=>asset.id===id)))throw new Error("finance_monitor_asset_not_found");
+        return applyFinanceOperations(current,[{type:"monitor.upsert",monitor:{...previous,...patch,assetIds:[...assetIds]}}]);
+      });
+      // An abort after atomic persistence does not undo the saved definition.
+      scope.assertCurrent();return workspace;
+    }finally{await release();scope.assertCurrent();}
+  }
   async schedule(scope:FinanceScope,input:{monitorId:string;scheduleHuman:string}) {
     const workspace=await this.store.load(scope);const monitor=workspace.monitors.find(item=>item.id===input.monitorId);if(!monitor)throw new Error("finance_monitor_not_found");
     const updated=await scheduleFinanceMonitor({scope,monitor,assets:workspace.watchlist,scheduleHuman:input.scheduleHuman});
