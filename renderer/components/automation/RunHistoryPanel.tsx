@@ -723,8 +723,8 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
               ? "Saved the confirmation. Resuming the remaining nodes in simulation mode."
               : "Saved the confirmation. Safely resuming the remaining nodes."
           : ko
-            ? "확인 내용을 저장했습니다. 이 발생은 완료 처리됐습니다."
-            : "Saved the confirmation. This occurrence is complete.";
+            ? "확인 내용을 저장했습니다. 이 실행은 완료로 처리했습니다."
+            : "Saved the confirmation. This run is marked complete.";
       setMessage(terminalMessage);
       if (!await load({ reportFailure: false, forceReconciliation: true })) {
         setMessage(`${terminalMessage} ${ko

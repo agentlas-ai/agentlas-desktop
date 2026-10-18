@@ -134,8 +134,8 @@ export function GoalStrategyStatus({ continuity, surface, locale }: Props) {
       </div>
       <p className={styles.disclaimer}>
         {ko
-          ? "이 카드는 Main이 확인한 설명만 보여줍니다. 전략 변경 제안은 자동화나 Goal을 직접 수정하지 않으며, 적용은 별도의 명시적 검토·승인이 필요합니다."
-          : "This card shows Main-verified observations only. A strategy suggestion does not modify the automation or Goal; applying a change requires an explicit review and approval."}
+          ? "이 카드는 앱이 확인한 설명만 보여줍니다. 전략 변경 제안은 자동화나 Goal을 직접 바꾸지 않으며, 적용하려면 따로 검토하고 승인해야 합니다."
+          : "This card shows only observations the app has verified. A strategy suggestion does not modify the automation or Goal; applying a change requires an explicit review and approval."}
       </p>
     </div>
   </details>;
