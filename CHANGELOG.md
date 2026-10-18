@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.75 — 2026-10-18
+
+- Science sends a smaller research notebook context while preserving saved records and access to the complete notebook.
+- Earthquake b-value analyses reject magnitude samples with too little variation instead of reporting a misleading precise fit. Moving windows and aftershock analyses preserve supported results and identify estimates that cannot be made.
+- The updated Earth Science tools continue to read previously saved USGS catalogs and verify their original request receipts.
+- This release binds Agentlas OS v1.2.66 at c0acd99be22114569e20bca94bed4540ba046eb4; public runtime asset `hephaestus-runtime-v1.2.66.tar.gz` is pinned at SHA-256 `20019d3ba4df1c540d0ef549c07a82188bd40fe12dafb2f8a6c75cc4bdcc89f7`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.74 — 2026-10-18
 
 - Organization accounts use a clearer workspace layout, with a charcoal navigation column, readable organization rows and selected-organization details.
