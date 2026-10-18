@@ -11,6 +11,8 @@ For an explicitly requested recurring schedule, `finance.monitor.schedule` suppo
 
 These monitors retrieve evidence and produce research briefings. They do not promise tick-by-tick price alerts, exchange-session coverage, automatic trading or a fixed provider/LLM cost. Source outages and configured model limits can produce partial or failed runs. Distinguish draft, scheduled, running, partial, failed and succeeded from the actual receipts.
 
+Use a clear company/topic question in the requested report language. The monitor combines available asset news, prices, issuer evidence and relevant public discussion; unavailable sources remain coverage gaps. Its briefing should state the conclusion and material uncertainty without listing raw rows. The separate Finance settings toggle enables the Pro-or-higher daily holdings review through One Supervisor; a research monitor schedule is not proof that this daily review was enabled or delivered.
+
 # Verification
 
 After a run, inspect its status, warnings and report ID, then read the report when present. After schedule or pause, reload the monitor's host-projected status. Do not claim a future run has happened merely because a schedule was created.

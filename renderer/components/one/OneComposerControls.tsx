@@ -55,6 +55,8 @@ export type OneComposerPluginOption = {
   /** 로고 조회용 — 카탈로그 id와 서버 이름 둘 다 slug 후보다. */
   catalogId?: string | null;
   serverName?: string;
+  /** Skill selection inserts an explicit mention; it is not an MCP enable switch. */
+  mention?: string;
   brandColor?: string;
   mark?: string;
 };
@@ -280,8 +282,8 @@ export function OneComposerControls({
                 title={plugin.name}
                 subtitle={plugin.description}
                 status={!plugin.ready ? (locale === "ko" ? "설정 필요" : "Setup needed") : undefined}
-                checked={plugin.enabled && plugin.ready}
-                toggle
+                checked={plugin.mention?undefined:plugin.enabled && plugin.ready}
+                toggle={!plugin.mention}
                 compactDetails
                 onClick={() => onTogglePlugin(plugin.id)}
               />

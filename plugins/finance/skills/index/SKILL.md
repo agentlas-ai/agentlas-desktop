@@ -6,6 +6,7 @@ description: Route Finance research, dashboard edits, evidence reports and monit
 # Routing
 
 - Asset discovery, filings, financial facts, news and public discussion → $research (`../research/SKILL.md`).
+- Asset allocation, price scenarios and option calculations → $research and `finance.calculate`.
 - Dashboard layout, filters, widgets and report drafts → $workspace (`../workspace/SKILL.md`).
 - Recurring research, run history and pausing → $monitor (`../monitor/SKILL.md`).
 

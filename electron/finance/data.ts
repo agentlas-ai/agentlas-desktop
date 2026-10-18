@@ -2,10 +2,11 @@ import type { FinanceAIResult, FinanceAsset, FinanceDataRequest, FinanceDataResu
 
 import { fetchFinanceJson } from './providers/http';
 export { fetchFinanceJson } from './providers/http';
-import { queryBluesky, queryFedNews, queryIsharesHoldings, queryIsharesNav, queryTreasury, parseCompanyFacts } from './providers/public-data';
+import { queryPublicCommunity, queryFedNews, queryIsharesHoldings, queryIsharesNav, queryTreasury, parseCompanyFacts } from './providers/public-data';
 
 import { ISHARES_FUNDS, findIsharesFund, searchIsharesCatalog } from './providers/ishares-catalog';
 import { financeProviderKey as providerKey } from './provider-credentials';
+import { queryFinanceNews } from './dashboard-feeds';
 import { searchYahooFinanceAssets, queryYahooFinanceData, refreshYahooFinanceQuotes } from './providers/yahoo-market';
 
 /** Host-selected owner preference, not accepted as a caller URL, credential or executable. */
@@ -57,10 +58,10 @@ async function secAssets(): Promise<FinanceAsset[]> {
   secCache = { at: Date.now(), assets }; return assets;
 }
 export async function searchFinanceAssets(query: string, route?: FinanceDataRoute): Promise<FinanceSearchResult> {
-  const normalized = query.trim(); if (!normalized || normalized.length > 200) throw new Error('finance_query_invalid');
+  route?.assertCurrent?.();const normalized = query.trim(); if (!normalized || normalized.length > 200) throw new Error('finance_query_invalid');
   if(route?.sourceId.startsWith('toolchain:')){const {searchFinanceAdapter}=await import('./source-adapters');return searchFinanceAdapter(route.sourceId,normalized,route.signal,route.assertCurrent);}
   if(route?.sourceId==='finance-yfinance'){
-    const result=await searchYahooFinanceAssets(normalized,{signal:route.signal}),issuer=searchIsharesCatalog(normalized);
+    const result=await searchYahooFinanceAssets(normalized,{signal:route.signal});route.assertCurrent?.();const issuer=searchIsharesCatalog(normalized);
     return issuer.length?{...result,assets:[...issuer,...result.assets.filter(asset=>!issuer.some(fund=>fund.symbol===asset.symbol))].slice(0,30),provider:'Free market data · Yahoo chart + verified issuer catalog',warnings:[...result.warnings,'Issuer catalog entries identify supported iShares funds; their metadata is not a live quote or a complete ETF directory.']}:result;
   }
   if(route&&route.sourceId!=='alpha-vantage')return{assets:[],provider:'Selected data source',asOf:null,warnings:['finance_data_source_unsupported']};
@@ -98,7 +99,7 @@ async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAss
   if (input.metrics.length !== 1) return { ...result, warnings: ['Choose exactly one metric per source query; results are not silently combined.'] };
   try {
     // Global feeds are explicitly independent of a selected security.
-    if (metric === 'social' || metric === 'social_search') return await queryBluesky(input.query, metric === 'social_search');
+    if (metric === 'social' || metric === 'social_search') return await queryPublicCommunity(input.query, metric === 'social_search', input.period, route?.signal);
     if (metric === 'macro_news') return await queryFedNews();
     if (metric === 'treasury_yields') return await queryTreasury(input.period);
     if (input.assetIds.length !== 1) return { ...result, warnings: ['Select exactly one asset for this source query. Global social, macro_news and treasury_yields do not require an asset.'] };
@@ -106,6 +107,7 @@ async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAss
     if (!asset) throw new Error('finance_asset_not_found');
     const fund=findIsharesFund(asset.id);
     if(fund&&(asset.symbol!==fund.asset.symbol||asset.currency!==fund.asset.currency||asset.kind!==fund.asset.kind))throw new Error('finance_source_identity_mismatch');
+    if(metric==='news'&&route?.sourceId==='finance-yfinance')return await queryFinanceNews(asset,route.signal);
     if(metric==='nav'&&fund)return await queryIsharesNav(fund);
     if(metric==='etf_holdings'&&fund)return await queryIsharesHoldings(fund);
     if(metric==='nav')return {...result,warnings:['Keyless issuer NAV coverage is limited to issuer-resolved IVV, IEF, TLT, IWM and IAU catalog entries. No NAV was inferred from market price.']};
@@ -140,7 +142,7 @@ async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAss
     try { url = await avUrl(functions[metric], metric === 'news' ? { tickers: asset.symbol, limit: '30' } : metric === 'price_history' ? { symbol: asset.symbol, outputsize: 'compact' } : { symbol: asset.symbol }); } catch (error) { if (metric !== 'news') throw error; }
     result.sourceUrls = [AV_DOC];
     if (!url) {
-      if (metric === 'news') { const global = await queryFedNews(); global.warnings.unshift('Company news provider is unavailable. This fallback contains Federal Reserve macro announcements, not news about the selected company.'); return global; }
+      if (metric === 'news') return { ...result, warnings: ['finance_provider_connection_unavailable', 'Alpha Vantage company news is not connected. No other publisher, macro feed, or invented company headlines were substituted.'] };
       return { ...result, warnings: ['Alpha Vantage connection is not configured. Connect your licensed data provider. No quotes, history, or holdings were fabricated.'] };
     }
     const data = avResult(await fetchFinanceJson(url));
@@ -172,19 +174,22 @@ async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAss
 
 /** Every result carries an explicit provider/coverage/rights status, including failures. */
 export async function queryFinanceData(input: FinanceDataRequest, assets: FinanceAsset[], route?: FinanceDataRoute): Promise<FinanceDataResult> {
+  route?.assertCurrent?.();
   if(route?.sourceId.startsWith('toolchain:')){const {queryFinanceAdapter}=await import('./source-adapters');return queryFinanceAdapter(route.sourceId,input,assets,route.signal,route.assertCurrent);}
   if(route?.signal?.aborted)throw new Error('finance_yahoo_cancelled');
-  if(route?.sourceId==='finance-yfinance'&&['price','price_history'].includes(input.metrics[0]))return queryYahooFinanceData(input,assets,{signal:route.signal});
+  if(route?.sourceId==='finance-yfinance'&&['price','price_history'].includes(input.metrics[0])){const result=await queryYahooFinanceData(input,assets,{signal:route.signal});route.assertCurrent?.();return result;}
   if(route&& !['finance-yfinance','alpha-vantage'].includes(route.sourceId))return{status:'unconnected',sourceUrls:[],asOf:null,retrievedAt:new Date().toISOString(),columns:[],rows:[],warnings:['finance_data_source_unsupported']};
-  const result = await queryFinanceDataRaw(input, assets, route), metric = input.metrics[0];
+  const result = await queryFinanceDataRaw(input, assets, route), metric = input.metrics[0];route?.assertCurrent?.();
   if(route?.signal?.aborted)throw new Error('finance_yahoo_cancelled');
   const issuer=input.assetIds.length===1?findIsharesFund(input.assetIds[0]):undefined;
   let id = '', label = '', coverage = '', rights = '';
-  if (result.sourceUrls.some(url => url === 'https://www.federalreserve.gov/feeds/press_all.xml') || metric === 'macro_news') {
+  if(metric==='news'&&route?.sourceId==='finance-yfinance'){
+    id='yahoo-finance-rss';label='Yahoo Finance RSS';coverage='Selected-symbol headline/link metadata, latest 40 at most; provider-defined relevance, no period completeness or issuer-identity guarantee.';rights='Headline/link metadata only; publisher rights apply. Public read access is not a blanket article or redistribution license.';
+  } else if (result.sourceUrls.some(url => url === 'https://www.federalreserve.gov/feeds/press_all.xml') || metric === 'macro_news') {
     id = 'federal-reserve-rss'; label = 'Federal Reserve Board RSS'; coverage = 'Latest 40 official macro announcements; one publisher, independent of selected securities.';
     rights = 'RSS headline/link metadata. No license to republish third-party material or linked full articles is established.';
-  } else if (metric === 'social' || metric === 'social_search') {
-    id = 'bluesky-public'; label = 'Bluesky public API'; coverage = metric === 'social' ? 'One explicit author feed or the default official Federal Reserve account; latest 20 posts, not security-specific search.' : 'Latest 20 keyword search results if the public endpoint permits access; relevance and complete pagination are not verified.';
+  } else if ((metric === 'social' || metric === 'social_search') && !result.providers?.length) {
+    id = 'bluesky-public'; label = 'Bluesky public API'; coverage = result.sourceUrls.some(url=>url.includes('/app.bsky.feed.getAuthorFeed?')) ? 'One explicit @handle author feed, latest 20 posts; not a selected-company keyword search.' : 'Actual keyword search, latest 20 only if the public endpoint permits access; relevance/identity and complete pagination are not verified. No official-account substitution.';
     rights = 'Public read access is not a blanket redistribution license. Author attribution and original links retained; posts are unverified claims.';
     if (!result.sourceUrls.length) result.sourceUrls = [metric === 'social_search' ? 'https://docs.bsky.app/docs/api/app-bsky-feed-search-posts' : 'https://docs.bsky.app/docs/api/app-bsky-feed-get-author-feed'];
   } else if (metric === 'filings' || metric === 'company_facts') {
@@ -205,7 +210,7 @@ export async function queryFinanceData(input: FinanceDataRequest, assets: Financ
     id = 'alpha-vantage'; label = 'Alpha Vantage'; coverage = 'Provider-resolved selected security only; daily quote, compact raw history, selected news, or reported ETF profile according to metric and entitlement.';
     rights = 'A configured key does not establish entitlement to every endpoint or external redistribution. Provider terms and account license apply.';
   }
-  if (id) result.providers = [{ id, label, status: result.status === 'unconnected' ? 'unavailable' : result.status, coverage, rights, sourceUrls: [...result.sourceUrls] }];
+  if (id && !result.providers?.length) result.providers = [{ id, label, status: result.status === 'unconnected' ? 'unavailable' : result.status, coverage, rights, sourceUrls: [...result.sourceUrls] }];
   result.retrievedAt = new Date().toISOString();
   return result;
 }

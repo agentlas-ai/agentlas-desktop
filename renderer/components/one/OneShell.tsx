@@ -301,6 +301,7 @@ import {
 import { AliveComposerButton } from "@/components/alive/AliveComposerButton";
 import { OneVoiceInputHelp } from "./OneVoiceInputHelp";
 import { OneWeeklyReflectionCard } from "./OneWeeklyReflectionCard";
+import { loadSkillPluginMentions, appendSkillPluginMention, type SkillPluginMention } from "@/lib/skill-plugin-mentions";
 import { PluginPickerDialog } from "@/components/plugins/PluginPickerDialog";
 import {
   beginOneActivityState,
@@ -2392,9 +2393,11 @@ function OneSessionsShell() {
     });
     return () => { cancelled = true; unsubscribeLocal(); unsubscribeMain(); };
   }, []);
+  const [skillPluginMentions,setSkillPluginMentions]=useState<SkillPluginMention[]>([]);
+  useEffect(()=>{if(composerMenu!=="plus")return;let current=true;const api=ipc();setSkillPluginMentions([]);if(api)void loadSkillPluginMentions(api.harness).then(rows=>{if(current)setSkillPluginMentions(rows);}).catch(()=>{if(current)setSkillPluginMentions([]);});return()=>{current=false;};},[composerMenu,selected?.chatId,conversation?.id]);
   const onePluginOptions = useMemo<OneComposerPluginOption[]>(() => {
     const catalogById = new Map(pluginCatalog.map((item) => [item.id, item]));
-    return installedPlugins
+    return [...skillPluginMentions.map(plugin=>({id:`skill:${plugin.slug}`,name:plugin.name,description:plugin.mention,mention:plugin.mention,enabled:true,ready:true})),...installedPlugins
       .map((plugin) => {
         const catalog = plugin.catalogId ? catalogById.get(plugin.catalogId) : undefined;
         const name = appLocale === "ko"
@@ -2417,8 +2420,8 @@ function OneSessionsShell() {
           mark: catalog?.mark,
         };
       })
-      .sort((left, right) => Number(right.enabled && right.ready) - Number(left.enabled && left.ready) || left.name.localeCompare(right.name));
-  }, [appLocale, installedPlugins, pluginCatalog]);
+      .sort((left, right) => Number(right.enabled && right.ready) - Number(left.enabled && left.ready) || left.name.localeCompare(right.name))];
+  }, [appLocale, installedPlugins, pluginCatalog,skillPluginMentions]);
   const activeRunPrompt = busy
     ? (dispatchRunPrompt ?? liveRunPrompt ?? dispatchRunPromptRef.current)
     : liveRunPrompt;
@@ -10778,6 +10781,8 @@ function OneSessionsShell() {
                   setSettingsSheet("plugins");
                 }}
                 onTogglePlugin={(pluginId) => {
+                  const skill=skillPluginMentions.find(plugin=>`skill:${plugin.slug}`===pluginId);
+                  if(skill){setComposer(current=>appendSkillPluginMention(current,skill.mention));setComposerMenu(null);window.requestAnimationFrame(()=>composerInputRef.current?.focus());return;}
                   const target = installedPlugins.find((plugin) => plugin.id === pluginId);
                   if (!target) return;
                   // 설정이 덜 끝난 플러그인은 여기서 켜 봐야 동작하지 않는다 —

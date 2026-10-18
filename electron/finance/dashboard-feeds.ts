@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { FinanceAsset } from '../../shared/finance';
+import type { FinanceAsset, FinanceDataResult } from '../../shared/finance';
 import { FINANCE_FEED_IDS, type FinanceFeedId, type FinanceDashboardFeedItem, type FinanceDashboardFeedSection, type FinanceDashboardFeedsResult } from '../../shared/finance-feeds';
 import type { FinanceScope } from './store';
 
@@ -82,6 +82,17 @@ async function news(assets:FinanceAsset[],signal:AbortSignal):Promise<FinanceDas
   out.items=Array.from(new Map(out.items.map(i=>[i.url+'\0'+i.assetSymbol,i])).values()).sort((a,b)=>(b.publishedAt||'').localeCompare(a.publishedAt||'')).slice(0,40);
   out.status=out.items.length?'partial':failures?'error':'unavailable';if(!out.items.length)out.errorCode=failures?'finance_feed_source_unavailable':'finance_feed_no_headlines';
   if(assets.length>MAX_ASSETS)out.warnings.push('Coverage limited to the first five supported watchlist symbols.');return out;
+}
+/** Selected-symbol headline metadata using exactly the dashboard's bounded RSS path; never macro substitution. */
+export async function queryFinanceNews(asset:FinanceAsset,signal?:AbortSignal):Promise<FinanceDataResult> {
+ const result:FinanceDataResult={status:'unconnected',columns:[],rows:[],sourceUrls:[],asOf:null,retrievedAt:new Date().toISOString(),warnings:[]};
+ if(!asset||!/^[A-Za-z0-9^][A-Za-z0-9.^=\-]{0,79}$/.test(asset.symbol))throw new Error('finance_feed_symbol_invalid');
+ const controller=new AbortController(),cancel=()=>controller.abort();signal?.addEventListener('abort',cancel,{once:true});if(signal?.aborted)controller.abort();
+ try{check(controller.signal);const feed=await news([asset],controller.signal);check(controller.signal);
+  result.status=feed.status==='error'?'error':feed.items.length?'partial':'unconnected';result.columns=['Title','Publisher','Published','URL','Symbol','Evidence type'];
+  result.rows=feed.items.map(row=>[row.title,row.publisher??null,row.publishedAt,row.url,row.assetSymbol,'Publisher headline metadata; relevance is provider-defined']);result.sourceUrls=feed.sourceUrls;
+  result.retrievedAt=new Date().toISOString();result.asOf=feed.items.flatMap(row=>row.publishedAt?[row.publishedAt]:[]).sort().at(-1)??null;result.warnings=[...feed.warnings,'One selected symbol, latest 40 headline records at most; requested period is not guaranteed historical coverage. No article body is copied.',...(feed.errorCode?[feed.errorCode]:[])];return result;
+ }finally{signal?.removeEventListener('abort',cancel);}
 }
 async function filings(assets:FinanceAsset[],signal:AbortSignal):Promise<FinanceDashboardFeedSection> {
   const out=section('finance-sec');out.warnings=['SEC recent-submissions metadata only; first five watchlist assets, up to eight recent filings each. Historical submission files are not traversed. Exact ticker-to-CIK mapping identifies an issuer, not guaranteed security lineage. Fair-access rules apply; no blanket redistribution right to filing exhibits is implied.'];

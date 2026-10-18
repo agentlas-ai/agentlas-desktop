@@ -37,6 +37,7 @@ import { buildAppRoutePrompt, parseAppSlashRoute, type AgentlasAppDefinition } f
 import { callableHubBookmarks } from "@/lib/hub-bookmark-events";
 import { installedAgentMentionTarget } from "@/lib/mention-orchestration-target";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
+import { loadSkillPluginMentions, matchingSkillPluginMentions, type SkillPluginMention } from "@/lib/skill-plugin-mentions";
 import { ipc, grantForDroppedFile } from "@/lib/ipc";
 import { useChatAlwaysApproval, type ChatAlwaysApprovalControl } from "@/lib/use-chat-always-approval";
 import type { ChatFileDraft } from "@/lib/chat-files";
@@ -236,7 +237,7 @@ interface AutocompleteOption {
   title: string;
   subtitle?: string;
   /** 아이콘은 popover에서 일괄 매핑 (group으로 결정) */
-  kind: "app" | "agent" | "hub" | "firm" | "project" | "env";
+  kind: "app" | "agent" | "hub" | "firm" | "project" | "env" | "plugin";
   /** 선택 시 입력창에 치환할 토큰 */
   replacement: string;
   /** Explicit turn-only sub-agent target. It never changes the One/Task controller. */
@@ -703,11 +704,13 @@ function ChatInputComponent({
     }
   }
 
+  const [skillPluginMentions,setSkillPluginMentions]=useState<SkillPluginMention[]>([]);
+  useEffect(()=>{if(trigger?.kind!=="mention")return;let current=true;const api=ipc();setSkillPluginMentions([]);if(api)void loadSkillPluginMentions(api.harness).then(rows=>{if(current)setSkillPluginMentions(rows);}).catch(()=>{if(current)setSkillPluginMentions([]);});return()=>{current=false;};},[!!trigger,context]);
   // ── 자동완성 옵션 평탄화 — 키보드 네비용 ────────────────
   const autocompleteOptions = useMemo<AutocompleteOption[]>(() => {
-    if (!trigger || !context) return [];
-    return buildAutocompleteOptions(trigger, context, locale, t);
-  }, [trigger, context, locale, t]);
+    if (!trigger) return [];
+    return [...matchingSkillPluginMentions(skillPluginMentions,trigger.query).map(plugin=>({key:plugin.id,group:locale==="ko"?"스킬 플러그인":"Skill plugins",kind:"plugin" as const,title:plugin.name,subtitle:plugin.mention,replacement:plugin.mention})),...(context?buildAutocompleteOptions(trigger, context, locale, t):[])];
+  }, [trigger, context, locale, t,skillPluginMentions]);
 
   const autocompleteOptionKey = useMemo(
     () => autocompleteOptions.map((opt) => opt.key).join("\u001f"),
@@ -2918,6 +2921,8 @@ function AutocompletePopover({
 
 function kindIcon(kind: AutocompleteOption["kind"]) {
   switch (kind) {
+    case "plugin":
+      return <IconLayers size={13} style={{color:"var(--accent)"}}/>;
     case "app":
       return <IconApps size={13} style={{ color: "var(--accent)" }} />;
     case "agent":

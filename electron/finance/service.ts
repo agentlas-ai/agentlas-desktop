@@ -14,7 +14,7 @@ import { financeReportDashboardActions } from './evidence-actions';
 import { interpretFinance } from "./model";
 import { converseFinance } from './conversation';
 import { calculateFromFinanceSources } from './calculation-service';
-import { financeCalculationArtifact } from './artifacts';
+import { financeCalculationArtifact, type FinanceArtifactPresentation } from './artifacts';
 import { writeFinanceBriefing } from "./briefing";
 import { pauseFinanceMonitor, readFinanceMonitor, rollbackFinanceMonitor, scheduleFinanceMonitor } from "./monitor";
 
@@ -141,9 +141,10 @@ export class FinanceService {
     const before=await this.store.load(scope);if(input.expectedRevision!==undefined && before.revision!==input.expectedRevision)throw new Error("finance_revision_conflict");
     const route={...await this.experience.consent(scope),assertCurrent:()=>scope.assertCurrent()};scope.assertCurrent();const result=await queryFinanceData(input,before.watchlist,route);scope.assertCurrent();
     const batch=dataOperations(result,before,input.title||input.query||"Finance 자료",input.mode==="report");
+    if(batch.reportId){const added=batch.operations.find(operation=>operation.type==="report.add");if(added?.type==="report.add")added.report.sections.unshift({id:financeId("section"),title:added.report.title,kind:"summary",presentation:"narrative",narrative:"",widget:null,projection:null});}
     const workspace=await this.apply(scope,{operations:batch.operations,expectedRevision:before.revision});
     scope.assertCurrent();
-    return {...(batch.reportId?{dashboardActions:financeReportDashboardActions(workspace,batch.reportId)}:{}),workspace,sourceIds:batch.sourceIds,...(batch.reportId?{reportId:batch.reportId}:{}),message:`조회 자료와 출처를 판본 ${workspace.revision}에 저장했습니다.`};
+    return {...(batch.reportId?{dashboardActions:financeReportDashboardActions(workspace,batch.reportId)}:{}),workspace,sourceIds:batch.sourceIds,...(batch.reportId?{reportId:batch.reportId}:{}),message:batch.reportId?`조회 자료와 출처를 판본 ${workspace.revision}의 보고서 초안에 저장했습니다. 요약은 아직 작성되지 않았습니다.`:`조회 자료와 출처를 판본 ${workspace.revision}에 저장했습니다.`};
   }
   async addAsset(scope:FinanceScope,input:{query:string;symbol?:string}) {
     const found=await this.search(scope,input);const matches=found.assets.filter(asset=>!input.symbol||asset.symbol.toLowerCase()===input.symbol.toLowerCase());
@@ -152,10 +153,11 @@ export class FinanceService {
     if(current.watchlist.some(item=>item.id===asset.id))return {workspace:current,asset,warnings:found.warnings};
     return {workspace:await this.apply(scope,{operations:[{type:"watchlist.add",asset}],expectedRevision:current.revision}),asset,warnings:found.warnings};
   }
-  async createReport(scope:FinanceScope,input:{dashboardId?:string;title?:string}) {
+  async createReport(scope:FinanceScope,input:{dashboardId?:string;title?:string;language?:string}) {
     const workspace=await this.store.load(scope);const dashboard=workspace.dashboards.find(item=>item.id===(input.dashboardId??workspace.activeDashboardId));
     if(!dashboard)throw new Error("finance_dashboard_not_found");
     const report=createFinanceReport(workspace,dashboard,input.title||dashboard.name);
+    if(input.language!==undefined)report.language=input.language;
     return {workspace:await this.apply(scope,{operations:[{type:"report.add",report}],expectedRevision:workspace.revision}),reportId:report.id};
   }
   async ask(scope:FinanceScope,input:{request:string;screenContext:string;baseRevision:number;requestId?:string},signal:AbortSignal):Promise<FinanceAIResult> {
@@ -169,12 +171,12 @@ export class FinanceService {
     if((await this.store.load(scope)).revision!==input.baseRevision)return {baseRevision:input.baseRevision,status:"conflict",message:"화면이 변경되어 AI 결과를 적용하지 않았습니다."};
     return result;
   }
-  async calculate(scope:FinanceScope,input:{request:import('../../shared/finance-compute').FinanceComputeRequest;period?:string;title?:string},signal:AbortSignal=AbortSignal.timeout(180000)){
+  async calculate(scope:FinanceScope,input:{request:import('../../shared/finance-compute').FinanceComputeRequest;period?:string;title?:string} & FinanceArtifactPresentation,signal:AbortSignal=AbortSignal.timeout(180000)){
     const route={...await this.experience.consent(scope),signal,assertCurrent:()=>scope.assertCurrent()};scope.assertCurrent();
     const before=await this.store.load(scope);scope.assertCurrent();
     const period=input.period??'1Y';if(!['1M','3M','1Y','5Y','all'].includes(period))throw new Error('finance_compute_period_invalid');
     const artifact=await calculateFromFinanceSources(input.request,before.watchlist,asset=>queryFinanceData({query:asset.symbol,assetIds:[asset.id],metrics:['price_history'],period},before.watchlist,route),signal);scope.assertCurrent();signal.throwIfAborted();
-    const draft=financeCalculationArtifact(artifact,before,input.title);
+    const draft=financeCalculationArtifact(artifact,before,input.title,input);
     const workspace=await this.apply({...scope,assertCurrent(){scope.assertCurrent();signal.throwIfAborted();}},{operations:draft.operations,expectedRevision:before.revision});
     return {workspace,reportId:draft.reportId,artifact};
   }
@@ -240,26 +242,42 @@ export class FinanceService {
       const requests:FinanceDataRequest[]=[...assets.slice(0,3).flatMap(assetId=>{
         const asset=before.watchlist.find(item=>item.id===assetId),fund=findIsharesFund(assetId);
         const verified=fund&&asset&&asset.symbol===fund.asset.symbol&&asset.currency===fund.asset.currency&&asset.kind===fund.asset.kind&&asset.exchange===fund.asset.exchange;
-        const metrics=verified?["nav",...(fund.holdingsUrl?["etf_holdings"]:[])]:["filings","company_facts"];
-        return metrics.map(metric=>({query:monitor.query,assetIds:[assetId],metrics:[metric],period:"1M"}));
+        const metrics=[...(verified?["nav",...(fund.holdingsUrl?["etf_holdings"]:[])]:["filings","company_facts"]),"news","price"];
+        return [...metrics.map(metric=>({query:monitor.query,assetIds:[assetId],metrics:[metric],period:"1M"})),
+          {query:asset?`${asset.symbol} ${asset.name}`:monitor.query,assetIds:[],metrics:["social_search"],period:"1M"}];
       }),
-        ...["social","macro_news"].map(metric=>({query:monitor.query,assetIds:[],metrics:[metric],period:"1M"}))];
+        {query:monitor.query,assetIds:[],metrics:["macro_news"],period:"1M"}];
       const route={...await this.experience.consent(scope),signal,assertCurrent:()=>scope.assertCurrent()};
-      for(const request of requests){signal.throwIfAborted();scope.assertCurrent();results.push(await queryFinanceData(request,before.watchlist,route));}
+      // At most 16 queries. Topic searches use two community providers, so
+      // reserve both HTTP slots rather than racing another source alongside them.
+      // A failed source is a coverage gap;
+      // cancellation or a changed owner always aborts the whole run before saving.
+      for(let offset=0;offset<requests.length;){
+        const pending:FinanceDataRequest[]=[];let slots=0;
+        while(offset<requests.length){const request=requests[offset],weight=request.metrics.some(metric=>metric==="social"||metric==="social_search")?2:1;if(slots+weight>2)break;pending.push(request);slots+=weight;offset++;}
+        const batch=await Promise.all(pending.map(async request=>{
+          signal.throwIfAborted();scope.assertCurrent();
+          try{const result=await queryFinanceData(request,before.watchlist,route);scope.assertCurrent();signal.throwIfAborted();return result;}
+          catch{scope.assertCurrent();signal.throwIfAborted();return {status:"error" as const,sourceUrls:[],asOf:null,retrievedAt:new Date().toISOString(),columns:[],rows:[],warnings:[`finance_monitor_source_failed:${request.assetIds[0]??"context"}:${request.metrics[0]}`]};}
+        }));
+        scope.assertCurrent();signal.throwIfAborted();results.push(...batch);
+      }
       const usable=results.filter(result=>["ok","partial"].includes(result.status)&&result.rows.length);
       if(!usable.length)throw new Error("finance_monitor_no_evidence");
-      const briefing=await writeFinanceBriefing(monitor.query,usable,signal);scope.assertCurrent();signal.throwIfAborted();
+      const briefing=await writeFinanceBriefing(monitor.query,results,signal);scope.assertCurrent();signal.throwIfAborted();
       const warnings=[...new Set([...results.flatMap(result=>result.warnings),...briefing.warnings])];
-      const operations:FinanceOperation[]=[];const sections:FinanceReport["sections"]=[{id:financeId("section"),title:"AI 브리핑 · 검토용 초안",kind:"summary",narrative:briefing.summary,widget:null,projection:null}];
-      for(const result of usable){const batch=dataOperations(result,before,monitor.name,true);operations.push(...batch.operations.filter(op=>op.type!=="report.add"));const op=batch.operations.find(op=>op.type==="report.add");if(op?.type==="report.add")sections.push(...op.report.sections);}
-      const report:FinanceReport={id:financeId("report"),title:`${monitor.name} · ${new Date().toLocaleDateString("ko-KR")}`,createdAt:new Date().toISOString(),sourceRevision:before.revision,reviewPending:true,sections,dashboardSnapshot:null,parentReportId:null};
+      const operations:FinanceOperation[]=[];const sections:FinanceReport["sections"]=[{id:financeId("section"),title:briefing.title??monitor.name,kind:"summary",narrative:briefing.summary,widget:null,projection:null}];
+      const sourceByDataset=new Map<number,string[]>();
+      for(const [dataset,result] of results.entries()){if(!usable.includes(result))continue;const batch=dataOperations(result,before,monitor.name,true);sourceByDataset.set(dataset,batch.sourceIds);operations.push(...batch.operations.filter(op=>op.type!=="report.add"));const op=batch.operations.find(op=>op.type==="report.add");if(op?.type==="report.add")sections.push(...op.report.sections.map(section=>({...section,presentation:"supporting" as const})));}
+      if(briefing.citations?.length)sections.push({id:financeId("section"),title:"Evidence references",kind:"sources",presentation:"supporting",narrative:"Citation row and frozen dataset row indexes are zero-based.",widget:null,projection:{columns:["Citation","Source ID","Dataset row"],rows:briefing.citations.map(citation=>[citation.index,sourceByDataset.get(citation.dataset)?.[0]??null,citation.rowIndex]),status:"ready",warnings:[],asOf:null,sourceIds:[...sourceByDataset.values()].flat()}});
+      const report:FinanceReport={id:financeId("report"),...(briefing.language?{language:briefing.language}:{}),title:briefing.title??monitor.name,createdAt:new Date().toISOString(),sourceRevision:before.revision,reviewPending:true,sections,dashboardSnapshot:null,parentReportId:null};
       operations.push({type:"report.add",report});
       // The store checks this scope again immediately before its atomic rename. Once
       // that commit succeeds, a later cancellation cannot undo or misreport it.
       const savingScope:FinanceScope={...scope,assertCurrent(){scope.assertCurrent();signal.throwIfAborted();}};
       for(let attempt=0;attempt<4;attempt++){savingScope.assertCurrent();const current=await this.store.load(savingScope);savingScope.assertCurrent();const live=current.monitors.find(item=>item.id===monitor.id);if(!live)throw new Error("finance_monitor_removed");if(monitorDefinition(live,current)!==definition)throw new Error("finance_monitor_definition_changed");try{await this.apply(savingScope,{operations,expectedRevision:current.revision});reportSaved=true;break;}catch(error){if(!(error instanceof Error)||error.message!=="finance_revision_conflict")throw error;}}
       if(!reportSaved)throw new Error("finance_revision_conflict");
-      run={...run,status:usable.length<results.length||warnings.length?"partial":"succeeded",reportId:report.id,summary:briefing.summary.slice(0,4000),warnings,finishedAt:new Date().toISOString()};
+      run={...run,status:results.some(result=>result.status!=="ok")||warnings.length?"partial":"succeeded",reportId:report.id,summary:briefing.summary.slice(0,4000),warnings,finishedAt:new Date().toISOString()};
     }catch(error){run={...run,status:signal.aborted?"cancelled":"failed",finishedAt:new Date().toISOString(),error:error instanceof Error?error.message:"finance_monitor_failed",summary:"브리핑을 완료하지 못했습니다. 저장된 실행 오류와 자료 연결 상태를 확인하세요."};}
     finally{
       try{await write();}

@@ -11,6 +11,11 @@ export function isFinanceSourceUrlAllowed(url: URL): boolean {
   if (url.hostname === 'www.sec.gov') return url.pathname === '/files/company_tickers_exchange.json' && !url.search;
   if (url.hostname === 'data.sec.gov') return /^(?:\/submissions\/CIK\d{10}|\/api\/xbrl\/companyfacts\/CIK\d{10})\.json$/.test(url.pathname) && !url.search;
   if (url.hostname === 'www.alphavantage.co') return url.pathname === '/query' && keys.every(key => ['function','apikey','keywords','symbol','tickers','limit','outputsize'].includes(key)) && ['SYMBOL_SEARCH','GLOBAL_QUOTE','NEWS_SENTIMENT','ETF_PROFILE','TIME_SERIES_DAILY'].includes(url.searchParams.get('function') || '');
+  if (url.hostname === 'hn.algolia.com') {
+    const query=url.searchParams.get('query')||'',filter=url.searchParams.get('numericFilters')||'';
+    const range=/^(?:created_at_i>=(\d{1,10}),)?created_at_i<=(\d{1,10})$/.exec(filter);
+    return url.pathname==='/api/v1/search_by_date'&&keys.length===4&&keys.every(key=>['query','tags','hitsPerPage','numericFilters'].includes(key))&&!!query.trim()&&query.length<=300&&!/[\u0000-\u001f\u007f]/.test(query)&&url.searchParams.get('tags')==='story'&&url.searchParams.get('hitsPerPage')==='20'&&!!range&&Number(range[2])<=4102444800&&(!range[1]||Number(range[1])<=Number(range[2]));
+  }
   if (url.hostname === 'public.api.bsky.app') {
     if (url.pathname === '/xrpc/app.bsky.feed.getAuthorFeed') return keys.every(key => ['actor','limit','filter','includePins'].includes(key)) && /^(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,63}$/.test(url.searchParams.get('actor') || '') && /^([1-9]|[12]\d|30)$/.test(url.searchParams.get('limit') || '');
     return url.pathname === '/xrpc/app.bsky.feed.searchPosts' && keys.every(key => ['q','limit','sort'].includes(key)) && !!url.searchParams.get('q') && (url.searchParams.get('q') || '').length <= 300 && url.searchParams.get('limit') === '20' && url.searchParams.get('sort') === 'latest';
