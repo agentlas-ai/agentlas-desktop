@@ -2,6 +2,7 @@ import { fixedPurposePrompt, purposePrompt } from "../runtime/purpose-prompts";
 import path from "node:path";
 import { BUILTIN_MCP_LAUNCH_ARGV_MAX_CHARS, defineBuiltinMcpLaunch } from "../mcp-tools/builtin-mcp-launch";
 import { MEMORY_KINDS, MEMORY_SCOPES } from "../architecture/manifest";
+import { FINANCE_MONITOR_RUN_TIMEOUT_MS } from "../../shared/finance";
 
 /*
  * agentlas-turn: per-run built-in MCP server holding the typed replacements for the text control blocks a model used
@@ -618,10 +619,12 @@ function allowedTools() {
 }
 function request(operation, args) {
   const info = control();
+  const harnessOperation = operation === "harness_call" && args && typeof args === "object" ? [args.operation, args.operationId, args.id, args.name].find(value => typeof value === "string" && value.trim()) : null;
+  const timeout = harnessOperation === "finance.monitor.run" ? ${FINANCE_MONITOR_RUN_TIMEOUT_MS + 10000} : 30000;
   const body = JSON.stringify({ operation, args, token: info.token, capabilityId: info.capabilityId });
   if (Buffer.byteLength(body, "utf8") > MAX_REQUEST_BYTES) return Promise.reject(new Error("Turn tool request is too large."));
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: "127.0.0.1", port: info.port, path: "/turn", method: "POST", headers: { "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) }, timeout: 30000 }, (res) => {
+    const req = http.request({ host: "127.0.0.1", port: info.port, path: "/turn", method: "POST", headers: { "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) }, timeout }, (res) => {
       const chunks = [];
       let total = 0;
       res.on("data", (chunk) => { total += chunk.length; if (total <= MAX_REQUEST_BYTES) chunks.push(chunk); else req.destroy(new Error("Turn tool response is too large.")); });

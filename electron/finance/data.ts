@@ -2,7 +2,10 @@ import type { FinanceAIResult, FinanceAsset, FinanceDataRequest, FinanceDataResu
 
 import { fetchFinanceJson } from './providers/http';
 export { fetchFinanceJson } from './providers/http';
-import { PUBLIC_FUND, queryBluesky, queryFedNews, queryIvvHoldings, queryIvvNav, queryTreasury, parseCompanyFacts } from './providers/public-data';
+import { queryBluesky, queryFedNews, queryIsharesHoldings, queryIsharesNav, queryTreasury, parseCompanyFacts } from './providers/public-data';
+
+import { ISHARES_FUNDS, findIsharesFund, searchIsharesCatalog } from './providers/ishares-catalog';
+import { financeProviderKey as providerKey } from './provider-credentials';
 
 const AV_DOC = 'https://www.alphavantage.co/documentation/';
 const SEC_INDEX = 'https://www.sec.gov/files/company_tickers_exchange.json';
@@ -16,16 +19,6 @@ export function financeSecDocumentUrl(cik: string, accession: string, primaryDoc
   const segments = primaryDocument.split('/');
   if (segments.some(segment => segment === '.' || segment === '..' || !/^[A-Za-z0-9_.-]+$/.test(segment))) return null;
   return `https://www.sec.gov/Archives/edgar/data/${Number(cik)}/${accession.replace(/-/g, '')}/${segments.map(segment => encodeURIComponent(segment)).join('/')}`;
-}
-async function providerKey(): Promise<string | null> {
-  try {
-    const { readEnvVar } = await import('../secrets/vault');
-    return (await readEnvVar('ALPHAVANTAGE_API_KEY'))?.trim() || process.env.ALPHAVANTAGE_API_KEY?.trim() || null;
-  } catch {
-    const configured = process.env.ALPHAVANTAGE_API_KEY?.trim();
-    if (configured) return configured;
-    throw new Error('finance_provider_credentials_unavailable');
-  }
 }
 async function avUrl(fn: string, params: Record<string, string>): Promise<URL | null> {
   const key = await providerKey(); if (!key) return null;
@@ -61,8 +54,14 @@ async function secAssets(): Promise<FinanceAsset[]> {
 }
 export async function searchFinanceAssets(query: string): Promise<FinanceSearchResult> {
   const normalized = query.trim(); if (!normalized || normalized.length > 200) throw new Error('finance_query_invalid');
+  const catalog=searchIsharesCatalog(normalized),catalogWarnings=catalog.length?[
+    `Issuer catalog verified 2026-10-18: ${ISHARES_FUNDS.map(fund=>fund.asset.symbol).join(', ')} only. Fund identity, listing and currency metadata are not live quotes or a complete ETF directory.`,
+    ...catalog.map(asset=>{const fund=findIsharesFund(asset.id)!;return `${asset.symbol}: NAV supported; ${fund.holdingsUrl?'issuer holdings CSV supported':'no supported holdings CSV observed'}; source ${fund.pageUrl}`;}),
+    ...(catalog.some(asset=>asset.symbol==='IAU')?['IAU is a gold grantor trust and is cataloged as a fund, not a registered 1940 Act ETF or a direct gold position.']:[]),
+  ]:[];
   const warnings: string[] = [];
-  if (normalized.toUpperCase() === PUBLIC_FUND.symbol) return { assets: [{ ...PUBLIC_FUND }], provider: 'iShares official product catalog', asOf: null, warnings: ['Fund identity, listing and currency are issuer product metadata, not a live quote. Keyless issuer coverage is IVV only. Source: https://www.ishares.com/us/products/239726/ishares-core-sp-500-etf'] };
+  const exact=catalog.find(asset=>asset.symbol===normalized.toUpperCase());
+  if(exact)return {assets:[exact],provider:'iShares official product catalog',asOf:null,warnings:catalogWarnings};
   let url: URL | null = null;
   try { url = await avUrl('SYMBOL_SEARCH', { keywords: normalized }); }
   catch { warnings.push('Alpha Vantage credentials are unavailable. Searching the public SEC directory instead.'); }
@@ -75,13 +74,13 @@ export async function searchFinanceAssets(query: string): Promise<FinanceSearchR
         if (!/^[A-Z]{3}$/.test(currency) || !/^[A-Za-z0-9.^_-]{1,80}$/.test(symbol)) throw new Error('finance_source_shape');
         return { id: `av:${symbol}`, symbol, name: string(row['2. name']).slice(0, 300), currency, exchange: string(row['4. region']).slice(0, 80), kind: /ETF/i.test(string(row['3. type'])) ? 'etf' as const : /Equity/i.test(string(row['3. type'])) ? 'stock' as const : 'other' as const };
       });
-      return { assets, provider: 'Alpha Vantage', asOf: null, warnings: ['Search metadata has no market-price timestamp. Region is provider metadata, not a verified listing venue.'] };
+      return { assets: [...catalog,...assets.filter(asset=>!catalog.some(issuer=>issuer.symbol===asset.symbol))].slice(0,30), provider: catalog.length?'iShares official product catalog + Alpha Vantage':'Alpha Vantage', asOf: null, warnings: [...catalogWarnings,'Search metadata has no market-price timestamp. Region is provider metadata, not a verified listing venue.'] };
     } catch (error) { warnings.push(safeError(error)); }
   }
   try {
-    const q = normalized.toLocaleLowerCase(); const catalog = [PUBLIC_FUND].filter(asset => asset.symbol.toLowerCase().includes(q) || asset.name.toLowerCase().includes(q)); const assets = [...catalog, ...(await secAssets()).filter(asset => asset.symbol.toLowerCase().includes(q) || asset.name.toLowerCase().includes(q)).sort((a, b) => Number(b.symbol.toLowerCase() === q) - Number(a.symbol.toLowerCase() === q)).slice(0, 30)].slice(0, 30);
-    return { assets, provider: catalog.length ? 'iShares official product catalog + SEC EDGAR issuer directory' : 'SEC EDGAR issuer directory', asOf: null, warnings: [...warnings, 'SEC records identify US issuers; their security type and currency (XXX) are unknown. The separate IVV catalog entry is verified against its issuer page. No price data or ETF completeness is implied.'] };
-  } catch (error) { return { assets: [], provider: 'SEC EDGAR', asOf: null, warnings: [...warnings, safeError(error)] }; }
+    const q = normalized.toLocaleLowerCase(); const assets = [...catalog, ...(await secAssets()).filter(asset => asset.symbol.toLowerCase().includes(q) || asset.name.toLowerCase().includes(q)).sort((a, b) => Number(b.symbol.toLowerCase() === q) - Number(a.symbol.toLowerCase() === q)).slice(0, 30)].slice(0, 30);
+    return { assets, provider: catalog.length ? 'iShares official product catalog + SEC EDGAR issuer directory' : 'SEC EDGAR issuer directory', asOf: null, warnings: [...warnings,...catalogWarnings, 'SEC records identify US issuers; their security type and currency (XXX) are unknown. Separate issuer catalog entries are verified against issuer pages. No price data or ETF completeness is implied.'] };
+  } catch (error) { return { assets: catalog, provider: catalog.length?'iShares official product catalog':'SEC EDGAR', asOf: null, warnings: [...warnings,...catalogWarnings,safeError(error)] }; }
 }
 async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAsset[]): Promise<FinanceDataResult> {
   const result: FinanceDataResult = { status: 'unconnected', sourceUrls: [], asOf: null, retrievedAt: new Date().toISOString(), columns: [], rows: [], warnings: [] };
@@ -95,9 +94,11 @@ async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAss
     if (input.assetIds.length !== 1) return { ...result, warnings: ['Select exactly one asset for this source query. Global social, macro_news and treasury_yields do not require an asset.'] };
     const asset = assets.find(item => item.id === input.assetIds[0]);
     if (!asset) throw new Error('finance_asset_not_found');
-    if (metric === 'nav' && asset.id === PUBLIC_FUND.id && asset.symbol === PUBLIC_FUND.symbol) return await queryIvvNav();
-    if (metric === 'nav') return { ...result, warnings: ['Keyless issuer NAV coverage currently includes the issuer-resolved IVV catalog entry only; no NAV was inferred from market price.'] };
-    if (metric === 'etf_holdings' && asset.id === PUBLIC_FUND.id && asset.symbol === PUBLIC_FUND.symbol) return await queryIvvHoldings();
+    const fund=findIsharesFund(asset.id);
+    if(fund&&(asset.symbol!==fund.asset.symbol||asset.currency!==fund.asset.currency||asset.kind!==fund.asset.kind))throw new Error('finance_source_identity_mismatch');
+    if(metric==='nav'&&fund)return await queryIsharesNav(fund);
+    if(metric==='etf_holdings'&&fund)return await queryIsharesHoldings(fund);
+    if(metric==='nav')return {...result,warnings:['Keyless issuer NAV coverage is limited to issuer-resolved IVV, IEF, TLT, IWM and IAU catalog entries. No NAV was inferred from market price.']};
     if (metric === 'filings' || metric === 'company_facts') {
       let cik = /^sec:(\d{10}):/.exec(asset.id)?.[1];
       if (!cik && asset.id === `av:${asset.symbol}` && asset.exchange === 'United States') {
@@ -158,6 +159,7 @@ async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAss
 /** Every result carries an explicit provider/coverage/rights status, including failures. */
 export async function queryFinanceData(input: FinanceDataRequest, assets: FinanceAsset[]): Promise<FinanceDataResult> {
   const result = await queryFinanceDataRaw(input, assets), metric = input.metrics[0];
+  const issuer=input.assetIds.length===1?findIsharesFund(input.assetIds[0]):undefined;
   let id = '', label = '', coverage = '', rights = '';
   if (result.sourceUrls.some(url => url === 'https://www.federalreserve.gov/feeds/press_all.xml') || metric === 'macro_news') {
     id = 'federal-reserve-rss'; label = 'Federal Reserve Board RSS'; coverage = 'Latest 40 official macro announcements; one publisher, independent of selected securities.';
@@ -170,8 +172,9 @@ export async function queryFinanceData(input: FinanceDataRequest, assets: Financ
     id = 'sec-edgar'; label = 'SEC EDGAR'; coverage = metric === 'filings' ? 'Latest 40 recent issuer filing records; archive pages not exhausted.' : 'Selected standardized US-GAAP concepts with original units, periods and filed dates; current feed, not a historical vintage.';
     rights = 'SEC fair-access policy applies. Third-party filing exhibits and issuer materials may carry separate rights.';
     if (!result.sourceUrls.length) result.sourceUrls = ['https://www.sec.gov/search-filings/edgar-application-programming-interfaces'];
-  } else if (result.sourceUrls.some(url => url.includes('ishares.com')) || (metric === 'nav' || metric === 'etf_holdings') && input.assetIds.includes(PUBLIC_FUND.id)) {
-    id = 'ishares-ivv'; label = 'iShares IVV official issuer'; coverage = metric === 'nav' ? 'One IVV NAV observation; not market price or a historical series.' : 'One IVV issuer holdings file, including reported cash/derivative rows; weights preserved without normalization.';
+  } else if ((metric==='nav'||metric==='etf_holdings')&&!!issuer) {
+    id = `ishares-${issuer!.asset.symbol.toLowerCase()}`; label = `iShares ${issuer!.asset.symbol} official issuer`; coverage = metric === 'nav' ? `One ${issuer!.asset.symbol} NAV observation; not market price or a historical series.` : issuer!.holdingsUrl?`One ${issuer!.asset.symbol} issuer ${issuer!.holdingsSchema} holdings file; selected fields, at most 5000 recognized rows, weights preserved without normalization.`:`${issuer!.asset.symbol}: no supported holdings CSV observed; no inferred gold inventory or proxy holdings.`;
+    if(!result.sourceUrls.length)result.sourceUrls=[issuer!.pageUrl];
     rights = 'Public issuer download does not grant blanket redistribution rights. Issuer terms and current prospectus apply.';
   } else if (metric === 'treasury_yields') {
     id = 'us-treasury'; label = 'U.S. Treasury daily par curve'; coverage = 'Latest 22 observed days in one requested month; not an individual bond price or YTM.';

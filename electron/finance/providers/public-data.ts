@@ -1,5 +1,6 @@
 import type { FinanceAsset, FinanceDataResult } from '../../../shared/finance';
 import { fetchFinanceJson, fetchFinanceText } from './http';
+import { findIsharesFund, type IsharesFundDefinition } from './ishares-catalog';
 
 export const FED_RSS = 'https://www.federalreserve.gov/feeds/press_all.xml';
 export const IVV_PAGE = 'https://www.ishares.com/us/products/239726/ishares-core-sp-500-etf';
@@ -93,41 +94,73 @@ export function parseProviderCsv(text: string): string[][] {
   }
   if (quoted) throw new Error('finance_source_csv_invalid'); if (cell || row.length) { row.push(cell); rows.push(row); } return rows;
 }
-export function parseIvvHoldings(text: string): FinanceDataResult {
-  const csv = parseProviderCsv(text), header = csv.findIndex(row => row[0] === 'Ticker' && row.includes('Weight (%)'));
-  if (header < 0 || !csv[0]?.[0].includes('iShares Core S&P 500 ETF')) throw new Error('finance_source_shape');
-  const result = base([IVV_CSV, IVV_PAGE]), headings = csv[header], col = (s: string) => { const n = headings.indexOf(s); if (n < 0) throw new Error('finance_source_shape'); return n; };
-  const fields = ['Ticker','Name','Sector','Asset Class','Weight (%)','Market Value','Notional Value','Quantity','Currency','Market Currency']; const indices = fields.map(col);
-  const asOfRaw = csv.find(row => row[0] === 'Fund Holdings as of')?.[1];
-  if (asOfRaw && /^[A-Z][a-z]{2} \d{1,2}, \d{4}$/.test(asOfRaw) && Number.isFinite(Date.parse(`${asOfRaw} 00:00:00 GMT`))) result.asOf = new Date(`${asOfRaw} 00:00:00 GMT`).toISOString().slice(0,10);
-  result.columns = ['Symbol','Name','Sector','Asset class','Fund weight (%)','Market value (reported currency)','Notional value (reported currency)','Quantity / units / contracts','Reporting currency','Market currency'];
-  result.rows = csv.slice(header+1).filter(row => row.length === headings.length && !!row[0].trim() && !!row[1]?.trim()).slice(0, 2000).map(row => indices.map((idx, i) => i >= 4 && i <= 7 ? num(row[idx].replace(/,/g,'')) : row[idx] || null));
-  if (!result.rows.length) throw new Error('finance_source_shape');
-  result.warnings = ['Issuer-published IVV holdings only; no other ETF coverage is implied. Fund weights are percentage points, not fractions. Rows include cash and derivatives and are not renormalized; missing values remain null.', 'Holdings date is day precision. Vendor holding prices may differ from NAV valuation dates/prices. Quantity units vary by asset class; notional value and market value are different measures. This is not a stock quote feed or complete economic look-through.', 'Public issuer download does not establish redistribution rights. Retain issuer attribution and consult the current prospectus and issuer terms before external redistribution.'];
+const HOLDINGS_ROW_LIMIT = 5000;
+function requireIsharesFund(value:IsharesFundDefinition):IsharesFundDefinition {
+  const verified=findIsharesFund(value.asset.id);
+  if(!verified||verified.asset.symbol!==value.asset.symbol||verified.pageUrl!==value.pageUrl||verified.holdingsUrl!==value.holdingsUrl||verified.holdingsSchema!==value.holdingsSchema)throw new Error('finance_source_identity_mismatch');
+  return verified;
+}
+function sourceDay(raw:unknown):string|null {
+  const match=/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (\d{1,2}), (\d{4})$/.exec(str(raw));if(!match)return null;
+  const month=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'].indexOf(match[1]),day=Number(match[2]),year=Number(match[3]),value=new Date(Date.UTC(year,month,day));
+  return value.getUTCFullYear()===year&&value.getUTCMonth()===month&&value.getUTCDate()===day?value.toISOString().slice(0,10):null;
+}
+export function parseIsharesHoldings(text:string,definition:IsharesFundDefinition):FinanceDataResult {
+  const fund=requireIsharesFund(definition);if(!fund.holdingsUrl||!fund.holdingsSchema)throw new Error('finance_issuer_holdings_unavailable');
+  const csv=parseProviderCsv(text.replace(/^\uFEFF/,'')),header=csv.findIndex(row=>row.includes('Name')&&row.includes('Weight (%)')&&row.includes('Asset Class'));
+  if(header<0)throw new Error('finance_source_shape');
+  if(csv[0]?.[0]!==fund.asset.name)throw new Error('finance_source_identity_mismatch');
+  const result=base([fund.holdingsUrl,fund.pageUrl]),headings=csv[header];
+  if(new Set(headings).size!==headings.length)throw new Error('finance_source_shape');
+  const col=(name:string)=>{const index=headings.indexOf(name);if(index<0)throw new Error('finance_source_shape');return index;};
+  const fields=fund.holdingsSchema==='equity'?['Ticker','Name','Sector','Asset Class','Weight (%)','Market Value','Notional Value','Quantity','Currency','Market Currency']:['CUSIP','ISIN','Name','Sector','Asset Class','Weight (%)','Market Value','Notional Value','Par Value','Price','YTM (%)','Duration','Maturity','Coupon (%)','Currency','Market Currency'];
+  const indices=fields.map(col),nameIndex=col('Name'),assetClassIndex=col('Asset Class');
+  const candidates=csv.slice(header+1).filter(row=>row.length===headings.length&&!!row[nameIndex]?.trim()&&!!row[assetClassIndex]?.trim());
+  const malformed=csv.slice(header+1).filter(row=>row.length!==headings.length&&!!row[nameIndex]?.trim()&&!!row[assetClassIndex]?.trim()).length;
+  result.asOf=sourceDay(csv.find(row=>row[0]==='Fund Holdings as of')?.[1]);
+  result.columns=fund.holdingsSchema==='equity'?['Symbol','Name','Sector','Asset class','Fund weight (%)','Market value (reported currency)','Notional value (reported currency)','Quantity / units / contracts','Reporting currency','Market currency']:['CUSIP','ISIN','Name','Sector','Asset class','Fund weight (%)','Market value (reported currency)','Notional value (reported currency)','Par value (reported currency)','Holding price (issuer basis)','Holding YTM (%)','Duration (reported)','Maturity (issuer text)','Coupon (%)','Reporting currency','Market currency'];
+  const numericFields=new Set(fund.holdingsSchema==='equity'?['Weight (%)','Market Value','Notional Value','Quantity']:['Weight (%)','Market Value','Notional Value','Par Value','Price','YTM (%)','Duration','Coupon (%)']);
+  result.rows=candidates.slice(0,HOLDINGS_ROW_LIMIT).map(row=>indices.map((index,i)=>numericFields.has(fields[i])?num(row[index].replace(/,/g,'')):!row[index]||row[index]==='-'?null:row[index]));
+  if(!result.rows.length)throw new Error('finance_source_shape');
+  result.warnings=[`Issuer-published ${fund.asset.symbol} holdings snapshot only. ${result.rows.length} of ${candidates.length} structurally recognized rows are shown (maximum ${HOLDINGS_ROW_LIMIT}); selected fields, not all source columns. Fund weights are percentage points and are not renormalized. Cash/derivative rows and zero values are retained; missing values stay null.`,
+    'Holdings date is day precision. Vendor holding prices may differ from NAV valuation dates/prices. Notional value and market value are different measures; this is not an executable quote feed or complete economic look-through.',
+    'Public issuer download does not establish redistribution rights. Retain issuer attribution and consult the current prospectus and issuer terms before external redistribution.'];
+  if(fund.holdingsSchema==='bond')result.warnings.push('Bond identifiers are reported CUSIP/ISIN, not invented stock tickers. Par value is not share quantity. Holding price, YTM (%), coupon, duration and maturity are separate issuer fields; price basis is not independently verified. YTM is not an ETF total-return forecast, NAV return, or executable yield.');
+  else result.warnings.push('Quantity units vary by asset class and may represent shares, units or contracts. Holding vendor prices are not imported as security quotes.');
+  if(malformed)result.warnings.push(`${malformed} holdings-shaped rows have an unexpected field count and were not parsed; coverage is incomplete.`);
+  if(!result.asOf)result.warnings.push('The holdings effective day is unavailable; retrieval time is not substituted for the observation date.');
+  if(candidates.length>HOLDINGS_ROW_LIMIT)result.warnings.push('Coverage is truncated at the row limit; no missing weight is estimated or redistributed.');
   return result;
 }
-export async function queryIvvHoldings(): Promise<FinanceDataResult> { return parseIvvHoldings(await fetchFinanceText(new URL(IVV_CSV))); }
-
-export function parseIvvNav(html: string): FinanceDataResult {
-  const result = base([IVV_PAGE]); const properties: Obj[] = []; let verifiedFund = false;
-  for (const match of html.matchAll(/<script\b[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)) {
-    let data: Obj; try { data = obj(JSON.parse(match[1])); } catch { continue; }
-    if (!Array.isArray(data['@graph'])) continue;
-    for (const raw of data['@graph']) { const item = obj(raw);
-      if (item.alternateName === 'IVV' && item.name === PUBLIC_FUND.name) verifiedFund = true;
-      if (str(item['@id']).endsWith('#key-datapoints') && Array.isArray(item.additionalProperty)) properties.push(...item.additionalProperty.map(obj));
-    }
+export async function queryIsharesHoldings(definition:IsharesFundDefinition):Promise<FinanceDataResult> {
+  const fund=requireIsharesFund(definition);
+  if(!fund.holdingsUrl)return {...base([fund.pageUrl]),status:'unconnected',warnings:[`${fund.asset.symbol}: no supported issuer CSV holdings download was observed. NAV is supported; gold bar inventory, quantities, weights, and gold spot prices are not inferred.`, 'Public issuer access does not establish redistribution rights. See the issuer page and prospectus for this gold trust.']};
+  return parseIsharesHoldings(await fetchFinanceText(new URL(fund.holdingsUrl)),fund);
+}
+export function parseIsharesNav(html:string,definition:IsharesFundDefinition):FinanceDataResult {
+  const fund=requireIsharesFund(definition),result=base([fund.pageUrl]);const properties:Obj[]=[];let verifiedFundId:string|null=null;
+  const graph:Obj[]=[];
+  for(const match of html.matchAll(/<script\b[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)){
+    let data:Obj;try{data=obj(JSON.parse(match[1]));}catch{continue;}if(Array.isArray(data['@graph']))graph.push(...data['@graph'].map(obj));
   }
-  const nav = properties.find(item => item.name === 'NAV as of');
-  if (!verifiedFund || !nav || nav.unitText !== 'USD' || num(nav.value) === null || num(nav.value)! < 0) throw new Error('finance_source_shape');
-  const day = str(obj(nav.valueReference).value);
-  if (!/^[A-Z][a-z]{2} \d{1,2}, \d{4}$/.test(day) || !Number.isFinite(Date.parse(`${day} 00:00:00 GMT`))) throw new Error('finance_source_shape');
-  result.asOf = new Date(`${day} 00:00:00 GMT`).toISOString().slice(0,10); result.columns = ['Fund','NAV per share','Currency','NAV date','Price basis'];
-  result.rows = [['IVV',num(nav.value),'USD',result.asOf,'Issuer NAV, not exchange market price']];
-  result.warnings = ['One issuer-published IVV NAV observation with day precision. NAV is not an executable stock/ETF quote or a closing market price; it is never automatically imported into market-price history.', 'Public structured metadata can change and is not a promised API or complete historical series. Issuer terms and current prospectus apply; external redistribution rights are not established.'];
+  if(!graph.length)throw new Error('finance_source_shape');
+  for(const item of graph)if(item.alternateName===fund.asset.symbol&&item.name===fund.asset.name&&str(item['@id']).startsWith(`https://www.ishares.com/us/products/${new URL(fund.pageUrl).pathname.split('/')[3]}/`))verifiedFundId=str(item['@id']);
+  for(const item of graph)if(str(item['@id']).endsWith('#key-datapoints')&&obj(item.about)['@id']===verifiedFundId&&Array.isArray(item.additionalProperty))properties.push(...item.additionalProperty.map(obj));
+  const nav=properties.find(item=>item.name==='NAV as of');
+  if(!verifiedFundId||nav&&nav.unitText!==fund.asset.currency)throw new Error('finance_source_identity_mismatch');
+  if(!nav||num(nav.value)===null||num(nav.value)!<0)throw new Error('finance_source_shape');
+  result.asOf=sourceDay(obj(nav.valueReference).value);if(!result.asOf)throw new Error('finance_source_shape');
+  result.columns=['Fund','NAV per share','Currency','NAV date','Price basis'];result.rows=[[fund.asset.symbol,num(nav.value),fund.asset.currency,result.asOf,'Issuer NAV, not exchange market price']];
+  result.warnings=[`One issuer-published ${fund.asset.symbol} NAV observation with day precision. NAV is not an executable stock/ETF quote or a closing market price; it is never automatically imported into market-price history.`, 'Public structured metadata can change and is not a promised API or complete historical series. Issuer terms and current prospectus apply; external redistribution rights are not established.'];
+  if(fund.structure==='gold_trust')result.warnings.push('IAU is a gold grantor trust, not an investment company registered under the Investment Company Act of 1940. This is trust NAV per share, not gold spot price or gold bar inventory.');
   return result;
 }
-export async function queryIvvNav(): Promise<FinanceDataResult> { return parseIvvNav(await fetchFinanceText(new URL(IVV_PAGE))); }
+export async function queryIsharesNav(definition:IsharesFundDefinition):Promise<FinanceDataResult>{const fund=requireIsharesFund(definition);return parseIsharesNav(await fetchFinanceText(new URL(fund.pageUrl)),fund);}
+/** Backward-compatible IVV entry points; all verified funds use the same finite catalog and parsers. */
+export function parseIvvHoldings(text:string):FinanceDataResult{return parseIsharesHoldings(text,findIsharesFund('ishares:IVV')!);}
+export async function queryIvvHoldings():Promise<FinanceDataResult>{return queryIsharesHoldings(findIsharesFund('ishares:IVV')!);}
+export function parseIvvNav(html:string):FinanceDataResult{return parseIsharesNav(html,findIsharesFund('ishares:IVV')!);}
+export async function queryIvvNav():Promise<FinanceDataResult>{return queryIsharesNav(findIsharesFund('ishares:IVV')!);}
 
 export function parseTreasury(xml: string, url: string): FinanceDataResult {
   safeXml(xml); if (!/<feed[\s>]/i.test(xml)) throw new Error('finance_source_shape');

@@ -48,9 +48,14 @@ export function FinanceConnectedWorkspace() {
     if(!api?.monitorRuns)throw new Error("finance_monitor_ledger_unavailable");
     return api.monitorRuns({monitorId,...page});
   },[api]);
+  const inspectData = useCallback(async (request: import('@shared/finance').FinanceDataConnectionRequest) => {
+    if (!api?.dataConnection) throw new Error('finance_connection_unavailable');
+    return api.dataConnection(request);
+  }, [api]);
   if (!ready) return <main role="status" style={{ padding: 32 }}>{locale === "ko" ? "Finance 작업 공간을 여는 중…" : "Opening Finance…"}</main>;
 
   return <FinanceWorkspace
+    onInspectData={api?.dataConnection ? inspectData : undefined}
     onRunMonitor={api?.runMonitor ? async monitor => {
       await financeStore.flush();
       const result = await api.runMonitor!({monitorId:monitor.id});

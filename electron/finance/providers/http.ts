@@ -1,3 +1,4 @@
+import { isVerifiedIsharesUrl } from './ishares-catalog';
 /** Fixed public/provider endpoints only. Never accepts a renderer-chosen host or follows redirects. */
 const LIMIT = 8 * 1024 * 1024;
 let active = 0;
@@ -16,7 +17,7 @@ export function isFinanceSourceUrlAllowed(url: URL): boolean {
   }
   if (url.hostname === 'www.federalreserve.gov') return url.pathname === '/feeds/press_all.xml' && !url.search;
   if (url.hostname === 'home.treasury.gov') return url.pathname === '/resource-center/data-chart-center/interest-rates/pages/xml' && url.searchParams.get('data') === 'daily_treasury_yield_curve' && keys.length === 2 && keys.every(key => ['data','field_tdr_date_value','field_tdr_date_value_month'].includes(key)) && /^(?:19|20)\d{2}(?:0[1-9]|1[0-2])?$/.test(url.searchParams.get('field_tdr_date_value') || url.searchParams.get('field_tdr_date_value_month') || '');
-  return url.hostname === 'www.ishares.com' && ['/us/products/239726/ishares-core-s-p-500-etf/latest-holdings.csv','/us/products/239726/ishares-core-sp-500-etf'].includes(url.pathname) && !url.search;
+  return isVerifiedIsharesUrl(url);
 }
 export async function fetchFinanceText(url: URL, fetcher: typeof fetch = fetch): Promise<string> {
   if (!isFinanceSourceUrlAllowed(url)) throw new Error('finance_source_url_rejected');

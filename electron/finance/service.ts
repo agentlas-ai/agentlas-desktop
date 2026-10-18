@@ -5,6 +5,8 @@ import { applyFinanceOperations, createFinanceReport, financeId, FINANCE_WORKSPA
 import { userDataPath } from "../runtime-paths";
 import { FinanceStore, type FinanceScope } from "./store";
 import { queryFinanceData, refreshFinanceQuotes, searchFinanceAssets } from "./data";
+import { findIsharesFund } from "./providers/ishares-catalog";
+import { FINANCE_MONITOR_RUN_TIMEOUT_MS } from "../../shared/finance";
 import { FinanceArchives, FinanceArchiveRequestSchema, financeArchivePlan } from './archive';
 import { FinanceRunHistory } from './run-history';
 import { interpretFinance } from "./model";
@@ -188,7 +190,8 @@ export class FinanceService {
     }
     return history.page(scope,input);
   }
-  async runMonitor(scope:FinanceScope,input:{monitorId:string;callerRunId?:string;callerChatId?:string},signal=AbortSignal.timeout(180000)):Promise<FinanceMonitorRun> {
+  async runMonitor(scope:FinanceScope,input:{monitorId:string;callerRunId?:string;callerChatId?:string},signal=AbortSignal.timeout(FINANCE_MONITOR_RUN_TIMEOUT_MS)):Promise<FinanceMonitorRun> {
+    signal.throwIfAborted();scope.assertCurrent();
     const before=await this.store.load(scope);const monitor=before.monitors.find(item=>item.id===input.monitorId);if(!monitor||!monitor.query.trim())throw new Error("finance_monitor_not_found");
     if(input.callerRunId){
       const {getDb}=await import("../store/db");
@@ -201,11 +204,17 @@ export class FinanceService {
     const directory=this.runDirectory(scope,monitor.id);const release=await lockfile.lock(directory,MONITOR_LOCK_OPTIONS);
     let run:FinanceMonitorRun={id:randomUUID(),monitorId:monitor.id,status:"running",startedAt:new Date().toISOString(),finishedAt:null,reportId:null,summary:"자료 조회 중",warnings:[],error:null,sourceRevision:before.revision};
     const write=()=>history.write(run);
+    let reportSaved=false;
     try{
       if(!await history.recover(scope))throw new Error('finance_history_recovery_required');await write();
       const results:FinanceDataResult[]=[];
       const assets=monitor.assetIds.length?monitor.assetIds:before.watchlist.slice(0,3).map(asset=>asset.id);
-      const requests:FinanceDataRequest[]=[...assets.slice(0,3).flatMap(assetId=>["filings","company_facts"].map(metric=>({query:monitor.query,assetIds:[assetId],metrics:[metric],period:"1M"}))),
+      const requests:FinanceDataRequest[]=[...assets.slice(0,3).flatMap(assetId=>{
+        const asset=before.watchlist.find(item=>item.id===assetId),fund=findIsharesFund(assetId);
+        const verified=fund&&asset&&asset.symbol===fund.asset.symbol&&asset.currency===fund.asset.currency&&asset.kind===fund.asset.kind&&asset.exchange===fund.asset.exchange;
+        const metrics=verified?["nav",...(fund.holdingsUrl?["etf_holdings"]:[])]:["filings","company_facts"];
+        return metrics.map(metric=>({query:monitor.query,assetIds:[assetId],metrics:[metric],period:"1M"}));
+      }),
         ...["social","macro_news"].map(metric=>({query:monitor.query,assetIds:[],metrics:[metric],period:"1M"}))];
       for(const request of requests){signal.throwIfAborted();scope.assertCurrent();results.push(await queryFinanceData(request,before.watchlist));}
       const usable=results.filter(result=>["ok","partial"].includes(result.status)&&result.rows.length);
@@ -216,12 +225,24 @@ export class FinanceService {
       for(const result of usable){const batch=dataOperations(result,before,monitor.name,true);operations.push(...batch.operations.filter(op=>op.type!=="report.add"));const op=batch.operations.find(op=>op.type==="report.add");if(op?.type==="report.add")sections.push(...op.report.sections);}
       const report:FinanceReport={id:financeId("report"),title:`${monitor.name} · ${new Date().toLocaleDateString("ko-KR")}`,createdAt:new Date().toISOString(),sourceRevision:before.revision,reviewPending:true,sections,dashboardSnapshot:null,parentReportId:null};
       operations.push({type:"report.add",report});
-      let saved=false;
-      for(let attempt=0;attempt<4;attempt++){const current=await this.store.load(scope);const live=current.monitors.find(item=>item.id===monitor.id);if(!live)throw new Error("finance_monitor_removed");if(monitorDefinition(live,current)!==definition)throw new Error("finance_monitor_definition_changed");try{await this.apply(scope,{operations,expectedRevision:current.revision});saved=true;break;}catch(error){if(!(error instanceof Error)||error.message!=="finance_revision_conflict")throw error;}}
-      if(!saved)throw new Error("finance_revision_conflict");
+      // The store checks this scope again immediately before its atomic rename. Once
+      // that commit succeeds, a later cancellation cannot undo or misreport it.
+      const savingScope:FinanceScope={...scope,assertCurrent(){scope.assertCurrent();signal.throwIfAborted();}};
+      for(let attempt=0;attempt<4;attempt++){savingScope.assertCurrent();const current=await this.store.load(savingScope);savingScope.assertCurrent();const live=current.monitors.find(item=>item.id===monitor.id);if(!live)throw new Error("finance_monitor_removed");if(monitorDefinition(live,current)!==definition)throw new Error("finance_monitor_definition_changed");try{await this.apply(savingScope,{operations,expectedRevision:current.revision});reportSaved=true;break;}catch(error){if(!(error instanceof Error)||error.message!=="finance_revision_conflict")throw error;}}
+      if(!reportSaved)throw new Error("finance_revision_conflict");
       run={...run,status:usable.length<results.length||warnings.length?"partial":"succeeded",reportId:report.id,summary:briefing.summary.slice(0,4000),warnings,finishedAt:new Date().toISOString()};
     }catch(error){run={...run,status:signal.aborted?"cancelled":"failed",finishedAt:new Date().toISOString(),error:error instanceof Error?error.message:"finance_monitor_failed",summary:"브리핑을 완료하지 못했습니다. 저장된 실행 오류와 자료 연결 상태를 확인하세요."};}
-    finally{try{await write();}finally{await release();}}
+    finally{
+      try{await write();}
+      catch(error){
+        if(!reportSaved)throw error;
+        // The report is already durable. Preserve its identity so callers can read
+        // it without repeating the provider/model work after a ledger failure.
+        const fallback:FinanceMonitorRun={...run,status:"partial",warnings:[...new Set([...run.warnings,"finance_monitor_run_index_pending"])]};
+        try{await history.writeTerminalFallback(scope,fallback);run=fallback;}
+        catch{run={...run,status:"partial",warnings:[...new Set([...run.warnings,"finance_monitor_run_receipt_not_recorded"])]};}
+      }finally{await release();}
+    }
     scope.assertCurrent();return run;
   }
 }

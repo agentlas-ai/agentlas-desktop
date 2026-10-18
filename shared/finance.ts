@@ -1,4 +1,6 @@
 import { z } from "zod";
+/** Shared service and MCP transport bound; a transport must outlive the service's terminal receipt. */
+export const FINANCE_MONITOR_RUN_TIMEOUT_MS = 180000;
 
 /** Finance is a local document domain. Quotes enter only through explicit data import. */
 const id = z.string().min(1).max(200);
@@ -70,6 +72,15 @@ export interface FinanceSearchResult { assets: FinanceAsset[]; provider: string;
 export interface FinanceAIResult { message: string; operations?: FinanceOperation[]; baseRevision: number; status?: "ok" | "unavailable" | "invalid_output" | "cancelled" | "conflict"; requestId?: string; runtime?: { kind: string; model?: string; execution: string } }
 export interface FinanceExportResult { ok: boolean; path?: string; error?: string; sha256?: string; bytes?: number; savedAt?: string; cancelled?: boolean }
 export interface FinanceDataRequest { query: string; assetIds: string[]; metrics: string[]; period: string }
+export interface FinanceDataConnectionRequest { action: "status" | "test" }
+export interface FinanceDataConnectionResult {
+  providerId: "alpha-vantage";
+  credential: "present" | "missing" | "unknown";
+  access: "not-tested" | "available" | "unavailable" | "error";
+  checkedAt: string | null;
+  probe: { symbol: "IBM"; metric: "price"; asOf: string } | null;
+  errorCode?: string;
+}
 export interface FinanceDataResult {
   status: "ok" | "partial" | "unconnected" | "error";
   sourceUrls: string[]; asOf: string | null; retrievedAt: string;
@@ -110,6 +121,7 @@ export interface FinanceAPI {
   ask?(input: { request: string; screenContext: string; baseRevision: number; requestId?: string }): Promise<FinanceAIResult>;
   cancelAsk?(input: { requestId: string }): Promise<{ cancelled: boolean }>;
   queryData?(input: FinanceDataRequest): Promise<FinanceDataResult>;
+  dataConnection?(input: FinanceDataConnectionRequest): Promise<FinanceDataConnectionResult>;
   queryAndSave?(input: FinanceDataSaveRequest): Promise<FinanceDataSaveResult>;
   runMonitor?(input: { monitorId: string }): Promise<FinanceMonitorRun>;
   monitorRuns?(input: FinanceMonitorRunsRequest): Promise<FinanceMonitorRunsResult>;

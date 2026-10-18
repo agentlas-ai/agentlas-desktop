@@ -15,6 +15,7 @@ import { financeResearchPrompt } from './prompts';
 import { getFinanceService } from './service';
 import { onFinanceWorkspaceChange } from './events';
 import { FinanceArchiveRequestSchema } from './archive';
+import { financeDataConnection } from './connections';
 import { pauseFinanceMonitor, readFinanceMonitor, rollbackFinanceMonitor, scheduleFinanceMonitor } from './monitor';
 
 const boundedId = z.string().min(1).max(200);
@@ -34,6 +35,7 @@ export function registerFinanceIpc(input: { ipc: Pick<IpcMain, 'handle'>; assert
   const load = (scope: FinanceScope) => service.load(scope);
   const handle = (name: string, fn: (event: IpcMainInvokeEvent, raw: unknown, scope: FinanceScope) => unknown) => input.ipc.handle(`finance:${name}`, (event, raw) => { input.assertTrustedSender(event); return fn(event, raw, captureScope()); });
   handle('load', (_event, _raw, scope) => load(scope));
+  handle('dataConnection', (_event, raw, scope) => financeDataConnection(z.object({ action: z.enum(['status', 'test']) }).strict().parse(raw), { assertCurrent: scope.assertCurrent }));
   handle('save', async(_event, raw, scope) => {
     const arg = z.object({ workspace: z.unknown(), expectedRevision: z.number().int().nonnegative() }).strict().parse(raw);
     return service.save(scope,{ workspace: validateFinanceWorkspace(arg.workspace), expectedRevision: arg.expectedRevision });

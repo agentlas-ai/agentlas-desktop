@@ -54,8 +54,13 @@ export class FinanceRunHistory {
   async recover(scope:FinanceScope):Promise<boolean>{
     const db=await this.open();try{
       const pending=this.get(db,'pending');if(pending){scope.assertCurrent();if(Buffer.byteLength(pending)>MAX_RUN_BYTES)throw new Error('finance_monitor_run_invalid');const run=runSchema.parse(JSON.parse(pending));if(run.monitorId!==this.monitorId)throw new Error('finance_monitor_run_invalid');
-        // The journal describes an actual initiated write. Complete it before reconciling its outcome.
-        await writeFinanceJsonFile(path.join(this.directory,`${run.id}.json`),run);this.indexed(db,run);this.set(db,'pending','');}
+        // A terminal canonical fallback is newer than an abandoned running journal.
+        let canonical:FinanceMonitorRun|undefined;
+        try{canonical=await this.read(run.id);}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+        scope.assertCurrent();
+        if(run.status==='running'&&canonical&&canonical.status!=='running')this.indexed(db,canonical);
+        else{await writeFinanceJsonFile(path.join(this.directory,`${run.id}.json`),run);this.indexed(db,run);}
+        this.set(db,'pending','');}
       const live=db.prepare("SELECT id FROM runs WHERE status='running' LIMIT 101").all() as {id:string}[];
       for(const item of live.slice(0,100)){scope.assertCurrent();const current=await this.read(item.id);if(current.status==='running'){
         const interrupted:FinanceMonitorRun={...current,status:'failed',finishedAt:new Date().toISOString(),error:'finance_monitor_interrupted',summary:'이전 실행의 잠금이 유지되지 않아 완료 여부를 확인할 수 없습니다. 자료를 다시 조회하세요.'};
@@ -68,6 +73,12 @@ export class FinanceRunHistory {
   async write(run:FinanceMonitorRun):Promise<void>{
     runSchema.parse(run);if(run.monitorId!==this.monitorId)throw new Error('finance_monitor_run_invalid');const json=JSON.stringify(run);if(Buffer.byteLength(json)>MAX_RUN_BYTES)throw new Error('finance_monitor_run_invalid');
     const db=await this.open();try{this.set(db,'pending',json);await writeFinanceJsonFile(path.join(this.directory,`${run.id}.json`),run);this.indexed(db,run);this.set(db,'pending','');}catch(error){throw historyError(error);}finally{db.close();}
+  }
+  /** Caller holds the monitor lease. Preserve a saved report even when the derived index is unavailable. */
+  async writeTerminalFallback(scope:FinanceScope,run:FinanceMonitorRun):Promise<void>{
+    scope.assertCurrent();runSchema.parse(run);
+    if(run.monitorId!==this.monitorId||run.status==='running'||!run.finishedAt||!run.reportId||Buffer.byteLength(JSON.stringify(run))>MAX_RUN_BYTES)throw new Error('finance_monitor_run_invalid');
+    await writeFinanceJsonFile(path.join(this.directory,`${run.id}.json`),run);scope.assertCurrent();
   }
   async hasRunning():Promise<boolean>{const db=await this.open();try{return !!this.get(db,'pending')||!!db.prepare("SELECT id FROM runs WHERE status='running' LIMIT 1").get();}catch(error){throw historyError(error);}finally{db.close();}}
   async page(scope:FinanceScope,input:{cursor?:string;limit?:number}):Promise<FinanceMonitorRunsResult>{

@@ -128,6 +128,7 @@ const api: AgentlasIpc = {
     ask: input => ipcRenderer.invoke("finance:ask", input),
     cancelAsk: input => ipcRenderer.invoke("finance:cancelAsk", input),
     queryData: input => ipcRenderer.invoke("finance:queryData", input),
+    dataConnection: input => ipcRenderer.invoke("finance:dataConnection", input),
     queryAndSave: input => ipcRenderer.invoke("finance:queryAndSave", input),
     runMonitor: input => ipcRenderer.invoke("finance:runMonitor", input),
     monitorRuns: input => ipcRenderer.invoke("finance:monitorRuns", input),

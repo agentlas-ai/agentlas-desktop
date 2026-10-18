@@ -360,6 +360,7 @@ export const APP_CONTROL_CATALOG: readonly AppControlCatalogEntry[] = [
   {"path":"finance.archives","surface":"desktop","channel":"finance:archives","params":["input"],"invokeArgs":[{"param":"input"}],"signature":"(input)","doc":""},
   {"path":"finance.ask","surface":"desktop","channel":"finance:ask","params":["input"],"invokeArgs":[{"param":"input"}],"signature":"(input)","doc":""},
   {"path":"finance.cancelAsk","surface":"desktop","channel":"finance:cancelAsk","params":["input"],"invokeArgs":[{"param":"input"}],"signature":"(input)","doc":""},
+  {"path":"finance.dataConnection","surface":"desktop","channel":"finance:dataConnection","params":["input"],"invokeArgs":[{"param":"input"}],"signature":"(input)","doc":""},
   {"path":"finance.exportFile","surface":"desktop","channel":"finance:exportFile","params":["input"],"invokeArgs":[{"param":"input"}],"signature":"(input)","doc":""},
   {"path":"finance.load","surface":"desktop","channel":"finance:load","params":[],"invokeArgs":[],"signature":"()","doc":""},
   {"path":"finance.monitorRuns","surface":"desktop","channel":"finance:monitorRuns","params":["input"],"invokeArgs":[{"param":"input"}],"signature":"(input)","doc":""},

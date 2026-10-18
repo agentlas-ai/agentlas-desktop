@@ -22,6 +22,8 @@ export type HarnessPortKind = "query" | "command" | "job" | "subscription";
 export type HarnessPortStatus = "implemented" | "unavailable";
 
 export interface HarnessCallContext {
+  /** Host-only lifetime of the calling turn; never supplied by tool arguments or serialized to a child. */
+  signal?: AbortSignal;
   /** Main-owned capability snapshot, absent on callers without authenticated Finance authority. */
   hostAccountBinding?: { workspaceId: string; userId: string; sessionId: string; expiresAt: number | null } | null;
   chatId: string;

@@ -30,6 +30,8 @@ const MAX_REQUEST_BYTES = 768 * 1024;
 const hostRootContext = AsyncLocalStorage.snapshot();
 
 export interface TurnToolsCapabilityBinding {
+  /** Main-only admission check. Never written to the child capability file. */
+  admissionCurrent?: () => boolean;
   /** Host-only account captured at mint time; never serialized into the child capability file. */
   hostAccountBinding?: { workspaceId: string; userId: string; sessionId: string; expiresAt: number | null } | null;
   capabilityId: string;
@@ -87,6 +89,7 @@ let serverToken = "";
 let serverStarting: Promise<number> | null = null;
 let shutdownRegistered = false;
 const capabilities = new Map<string, TurnToolsCapabilityBinding>();
+const capabilityAborters = new Map<string, AbortController>();
 /** capabilityId → its file, so a withheld tool also leaves the list the child reads. */
 const capabilityFiles = new Map<string, string>();
 /** runId → open team dispatches holding ask_form back, and the capabilities' tool lists to restore. */
@@ -171,10 +174,12 @@ function loopbackHost(host: string | undefined, port: number): boolean {
   return port > 0 && (host === `127.0.0.1:${port}` || host === `localhost:${port}`);
 }
 
-export async function handleTurnToolsControlRequest(request: Record<string, unknown>): Promise<unknown> {
+export async function handleTurnToolsControlRequest(request: Record<string, unknown>, requestSignal?: AbortSignal): Promise<unknown> {
   if (!tokenMatches(request.token, serverToken)) throw new Error("turn-tools-capability-invalid");
   const binding = typeof request.capabilityId === "string" ? capabilities.get(request.capabilityId) : undefined;
   if (!binding) throw new Error("turn-tools-capability-invalid");
+  const lifetime = capabilityAborters.get(binding.capabilityId);
+  if (!lifetime) throw new Error("turn-tools-capability-invalid");
   switch (request.operation) {
     case "goal_wait": {
       if (!binding.tools?.includes("goal_wait")) throw new Error("turn-tools-operation-invalid");
@@ -281,7 +286,9 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       if (!binding.tools?.includes(operation)) throw new Error("turn-tools-operation-invalid");
       const a = request.args && typeof request.args === "object" && !Array.isArray(request.args) ? request.args as Record<string, unknown> : {};
       const harness = await import("../harness/capability-ports");
+      if (capabilities.get(binding.capabilityId) !== binding) throw new Error("turn-tools-capability-invalid");
       const ctx = { chatId: binding.chatId, runId: binding.runId, dryRun: binding.dryRun === true,
+        signal: requestSignal ? AbortSignal.any([lifetime.signal, requestSignal]) : lifetime.signal,
         hostAccountBinding: binding.hostAccountBinding ?? null,
         ...(binding.permission ? { permission: binding.permission } : {}), ...(binding.graphAuthoring === true ? { graphAuthoring: true } : {}),
         ...(binding.mcpConfigPath ? { mcpConfigPath: binding.mcpConfigPath } : {}) };
@@ -294,7 +301,16 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       // input:"{…}"} (harness_describe answers {operationId}); both were refused operation_unknown before it found
       // `operation`. The id is the same under any of these keys, and arguments may arrive as an object or a JSON string.
       if (operation === "harness_describe") return harness.describeHarness(harnessId(a, ["id", "operationId", "operation", "name"]), ctx);
-      return harness.callHarnessPort(harnessId(a, ["operation", "operationId", "id", "name"]), harnessArgs(a), ctx);
+      // Cancellation crosses the host boundary; no signal or authority comes from model JSON.
+      const checkAdmission = () => {
+        try { if (binding.admissionCurrent && !binding.admissionCurrent()) capabilityAborters.get(binding.capabilityId)?.abort(); }
+        catch { capabilityAborters.get(binding.capabilityId)?.abort(); }
+      };
+      checkAdmission();
+      const timer = binding.admissionCurrent ? setInterval(checkAdmission, 100) : undefined;
+      timer?.unref();
+      try { return await harness.callHarnessPort(harnessId(a, ["operation", "operationId", "id", "name"]), harnessArgs(a), ctx); }
+      finally { if (timer) clearInterval(timer); }
     }
     default:
       throw new Error("turn-tools-operation-invalid");
@@ -302,6 +318,8 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
 }
 
 function dispose(): void {
+  for (const controller of capabilityAborters.values()) controller.abort();
+  capabilityAborters.clear();
   capabilities.clear();
   capabilityFiles.clear();
   askWithheld.clear();
@@ -319,15 +337,17 @@ export function startTurnToolsControlServer(): Promise<number> {
     const srv = http.createServer((req, res) => {
       if (req.method !== "POST" || req.url !== "/turn") return writeJson(res, 404, { ok: false, error: "not-found" });
       if (!loopbackHost(req.headers.host, boundPort)) return writeJson(res, 403, { ok: false, error: "invalid-host" });
+      const requestLifetime = new AbortController();
+      res.once("close", () => { if (!res.writableFinished) requestLifetime.abort(); });
       void readJsonBody(req).then(async (body) => {
         if (!body) return writeJson(res, 400, { ok: false, error: "invalid-request" });
         try {
-          const result = await outsideInvocationJudgmentContext(() => handleTurnToolsControlRequest(body));
+          const result = await outsideInvocationJudgmentContext(() => handleTurnToolsControlRequest(body, requestLifetime.signal));
           // A failed harness call reaches the model and every receipt as an MCP tool error with its typed code.
           const errorCode = harnessCallFailureCode(body.operation, result);
-          writeJson(res, 200, { ok: true, result, ...(errorCode ? { isError: true, errorCode } : {}) });
+          if (!res.destroyed) writeJson(res, 200, { ok: true, result, ...(errorCode ? { isError: true, errorCode } : {}) });
         } catch (error) {
-          writeJson(res, 409, { ok: false, error: error instanceof Error ? error.message : "turn-tool-failed" });
+          if (!res.destroyed) writeJson(res, 409, { ok: false, error: error instanceof Error ? error.message : "turn-tool-failed" });
         }
       });
     });
@@ -358,6 +378,7 @@ export async function createTurnToolsCapability(
   if (!port) throw new Error("turn-tools-control-unavailable");
   const binding: TurnToolsCapabilityBinding = { ...input, hostAccountBinding, capabilityId: randomUUID() };
   capabilities.set(binding.capabilityId, binding);
+  capabilityAborters.set(binding.capabilityId, new AbortController());
   const directory = controlDir();
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   if (process.platform !== "win32") fs.chmodSync(directory, 0o700);
@@ -425,6 +446,8 @@ export function withholdTurnAskForRun(runId: string | undefined | null): () => v
 }
 
 export function removeTurnToolsCapability(configKey: string, capabilityId: string): void {
+  capabilityAborters.get(capabilityId)?.abort();
+  capabilityAborters.delete(capabilityId);
   capabilities.delete(capabilityId);
   capabilityFiles.delete(capabilityId);
   try { fs.rmSync(capabilityPath(configKey, capabilityId), { force: true }); } catch { /* best effort */ }

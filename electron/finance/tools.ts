@@ -1,11 +1,11 @@
 import { z } from 'zod';
-import { FINANCE_WIDGET_TYPES, financeId, validateFinanceOperation, type FinanceOperation } from '../../shared/finance';
+import { FINANCE_WIDGET_TYPES, FINANCE_MONITOR_RUN_TIMEOUT_MS, financeId, validateFinanceOperation, type FinanceOperation } from '../../shared/finance';
 import type { HarnessCallContext } from '../harness/capability-ports';
 import { FinanceReceiptReadSchema, FINANCE_RECEIPT_GROUPS, financeReceiptStore, type FinanceReceiptReference } from './receipts';
 import { composeDeclaredPrompt, registerDeclaredPromptModule } from '../runtime/prompt-order';
 
 type Outcome = { status: 'ok'; financeReceipt?: FinanceReceiptReference; data: unknown } | { status: 'refused' | 'unavailable'; reason: string; next?: string; data?: unknown };
-type ToolContext = Pick<HarnessCallContext, 'chatId' | 'runId' | 'permission' | 'dryRun' | 'hostAccountBinding'>;
+type ToolContext = Pick<HarnessCallContext, 'chatId' | 'runId' | 'permission' | 'dryRun' | 'hostAccountBinding' | 'signal'>;
 const id = z.string().min(1).max(200);
 const revision = z.number().int().nonnegative();
 const queryShape = { query: z.string().max(2000), assetIds: z.array(id).max(10), metrics: z.array(z.string().min(1).max(80)).min(1).max(10), period: z.string().min(1).max(80) };
@@ -82,7 +82,7 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
         data = await finance.apply(scope, { expectedRevision: args.expectedRevision, operations: [{ type: 'monitor.upsert', monitor: { id: financeId('monitor'), name: args.name, query: args.query, assetIds: args.assetIds, status: 'draft', lastCheckedAt: null, nextCheckAt: null, note: '' } }] }); break;
       }
       case 'monitor.run': {
-        const run = await finance.runMonitor(scope, { ...inputSchemas['monitor.run'].parse(raw), callerRunId: ctx.runId, callerChatId: ctx.chatId });
+        const run = await finance.runMonitor(scope, { ...inputSchemas['monitor.run'].parse(raw), callerRunId: ctx.runId, callerChatId: ctx.chatId }, ctx.signal ? AbortSignal.any([ctx.signal, AbortSignal.timeout(FINANCE_MONITOR_RUN_TIMEOUT_MS)]) : undefined);
         scope.assertCurrent();
         if (run.status === 'failed' || run.status === 'cancelled') return { status: 'refused', reason: run.status === 'cancelled' ? 'finance_monitor_cancelled' : 'finance_monitor_failed', data: run, next: 'Inspect the saved run and source connection status before starting another run.' };
         if (run.status === 'running') return { status: 'unavailable', reason: 'finance_monitor_running', data: run };
