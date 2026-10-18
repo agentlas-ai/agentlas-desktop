@@ -1,5 +1,6 @@
 import { composeDeclaredPrompt, registerDeclaredPromptModule, type DeclaredPromptPart } from "../runtime/prompt-order";
 import { toolObservationDigest } from "../automation-progress-guard";
+import type { RuntimeToolKind } from "../../shared/runtime-tool-kind";
 import { runObservedRunner, observedRunnerUsage, observedRunnerUsageEvidence, ObservedRunnerFailureError } from "../runtime/observed-runner";
 import { withModelCallScope } from "../runtime/model-call-ledger";
 import { ownerVisiblePrompt } from "../one/owner-prompt";
@@ -13,8 +14,8 @@ import { withoutMcpTransportEnv } from "../runtime/runner";
 //   본부(division)는 지속 세션(숨김 sub-chat, 히스토리·메모리 유지), 전문가는 1회성 worker.
 //   본부 1개면 CEO=본부로 보고 tier-2 skip. 각 노드는 자기 agentId로 메모리를 쓰고 읽는다.
 //   모든 이벤트는 agentId/role/tier/phase로 태깅 → 렌더러 네트워크 패널 실시간 텔레메트리.
-import { randomUUID } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type {
   AgentMessageDirection,
@@ -161,6 +162,17 @@ export interface FirmRunParams {
   /** Typed delivery plan from the model/Main; absent means full stage tools. */
   deliveryPlan?: FirmDeliveryPlan;
   prepareWorkerCapabilities?: PrepareWorkerCapabilities;
+  /**
+   * Main-owned bridge from a stage worker's tool completion to the room's One outputs: the paths its runtime structured
+   * and the files a harness port wrote for this run (mcp/client.ts bindInvocationOneArtifacts). Absent: nothing binds.
+   * Dev O9 2026-10-18 (snap 44b556cf, room fc53939f, daemon-owned task-force run 89896189): the borrowed Vibecoder team's
+   * publishing HQ saved the pptx twice through harness document.save (ok, revision 9) and the room got 0 bindings.
+   */
+  bindOneRuntimeToolArtifacts?: (
+    toolId: string,
+    paths: readonly string[],
+    observedBy?: { name: string; kind?: RuntimeToolKind },
+  ) => NonNullable<McpInvocationEvent["oneArtifacts"]>;
   workerCapabilityTask?: WorkerCapabilityInput["task"];
   workerCapabilityCeiling?: WorkerCapabilityInput["ceiling"];
   req: McpInvocationRequest;
@@ -394,6 +406,82 @@ function resultStatusContext(results: FirmStageResult[]): string {
       bounded || "(no deliverable returned)",
     ].join("\n");
   }).join("\n\n");
+}
+
+/*
+ * ★ F9 (dev O8 2026-10-18, snap 214d474d, room fc53939f, task-force run c1c2c806): a Taskforce worker seat handed this
+ *   firm a packet with the copywriter's finished draft in it (firm chat row, 5,383 chars). The CEO briefed the publishing
+ *   HQ in 1,010 chars, "use the supplied Copywriter draft as is", without the draft. A stage turn received only that
+ *   brief, so the HQ searched the project with rg for the draft, found nothing, described document.create without
+ *   calling it, and QA reported "no draft, no DOCX" twice. A CEO that copies the content into its brief works (Haiku);
+ *   one that summarises (GPT) loses it. The stage members doing the work therefore receive the request this team
+ *   received, verbatim, as its own declared module, whatever the CEO wrote. No instruction about it: the text itself.
+ *   The brief, the division's stored session row and the host's named-test evidence keep reading the brief alone.
+ * Stages: production and verification (real-model A/B, /tmp/prompt-audit/f9-ab). Integration is unchanged.
+ */
+export const FIRM_TEAM_REQUEST_STAGES: ReadonlySet<"production" | "integration" | "verification"> = new Set(["production", "verification"]);
+/**
+ * Inline bound. The largest request a firm received was 10,958 chars (production DB 2026-10-18, 22 firm requests,
+ * p50 5,446; dev run26 24 requests, same max); 16,000 keeps every observed request inline and keeps a verification stage
+ * (request + brief + up to 24,000 chars of upstream results) within the size it already accepts. Above it the full text
+ * goes to a file in this run's folder and the prompt keeps the head and that file's absolute path.
+ */
+export const FIRM_TEAM_REQUEST_INLINE_MAX_CHARS = 16_000;
+const FIRM_TEAM_REQUEST_DECLARATION = {
+  id: "firm.stage.user.team-request", revision: 1, stability: "task-context", changeTriggers: ["task", "owner-input"], order: -10,
+} as const satisfies Omit<DeclaredPromptPart, "text">;
+
+/** The request a firm received, as one declared stage module. Empty text when there is nothing to carry. */
+export function firmTeamRequestPromptPart(request: string, overflow?: { path: string } | null): DeclaredPromptPart {
+  const text = request.trim();
+  if (!text) return { ...FIRM_TEAM_REQUEST_DECLARATION, text: "" };
+  if (text.length <= FIRM_TEAM_REQUEST_INLINE_MAX_CHARS) {
+    return { ...FIRM_TEAM_REQUEST_DECLARATION, text: `[Request this team received — your assignment is the brief that follows]\n${text}` };
+  }
+  const head = text.slice(0, FIRM_TEAM_REQUEST_INLINE_MAX_CHARS);
+  return { ...FIRM_TEAM_REQUEST_DECLARATION, text: overflow
+    ? `[Request this team received — first ${head.length} of ${text.length} characters; full text: ${overflow.path}; your assignment is the brief that follows]\n${head}`
+    : `[Request this team received — first ${head.length} of ${text.length} characters; your assignment is the brief that follows]\n${head}` };
+}
+
+/**
+ * Writes an over-bound request once per run into `<project>/.agentlas/firm-requests/<run>/` (the members' working folder,
+ * readable by every runtime's file tools). Same content, same file. Null when there is no project folder or it fails.
+ */
+export function materializeFirmTeamRequest(request: string, projectRoot: string | null | undefined, runId: string | undefined): string | null {
+  if (!projectRoot) return null;
+  try {
+    const root = realpathSync(projectRoot);
+    const run = (runId ?? "direct").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120) || "direct";
+    let dir = root;
+    for (const part of [".agentlas", "firm-requests", run]) {
+      dir = path.join(dir, part);
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const stat = lstatSync(dir);
+      if (!stat.isDirectory() || stat.isSymbolicLink() || realpathSync(dir) !== dir) return null;
+    }
+    const text = request.trim();
+    const file = path.join(dir, `team-request-${createHash("sha256").update(text).digest("hex").slice(0, 16)}.md`);
+    try {
+      if (readFileSync(file, "utf8") === text) return file;
+    } catch { /* not written yet */ }
+    writeFileSync(file, text, { encoding: "utf8", mode: 0o600 });
+    return file;
+  } catch (error) {
+    console.error("[firm] team request file failed:", error);
+    return null;
+  }
+}
+
+/**
+ * A member that read a Taskforce packet in the team request can end its answer with that packet's outcome envelope. The
+ * firm's packet outcome is its CEO's: borrowed-task-force.ts taskForcePacketOutcome reads the first envelope of the firm's
+ * final text, so a member's copy never travels upward (results, CEO synthesis, QA inputs, the division session).
+ */
+export function withoutMemberPacketOutcome(text: string): string {
+  return text.includes("<<agentlas-packet-outcome>>")
+    ? text.replace(/<<agentlas-packet-outcome>>[\s\S]*?<<\/agentlas-packet-outcome>>\s*/giu, "").trim()
+    : text;
 }
 
 /*
@@ -1296,7 +1384,11 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
           onTool: (name, args, result, id, isError, artifactPaths, imageDataUrl, _origin, toolKind) => {
             executionEvidence.recordTool(name, args, result, id, isError, artifactPaths, toolKind);
             const tool = { name, args, result, id, isError, observationDigest: toolObservationDigest(artifactPaths, imageDataUrl) };
-            emit({ kind: "tool-use", tool });
+            // A successful completion seals what it produced into the room's Outputs, like a task-force worker's.
+            const oneArtifacts = !isError && (result !== undefined || (id && artifactPaths?.length)) && p.bindOneRuntimeToolArtifacts
+              ? p.bindOneRuntimeToolArtifacts(id ?? "", artifactPaths ?? [], { name, ...(toolKind ? { kind: toolKind } : {}) })
+              : undefined;
+            emit({ kind: "tool-use", tool, ...(oneArtifacts?.length ? { oneArtifacts } : {}) });
             if (turn.toMainBubble) p.sink({ kind: "tool-use", tool });
           },
         },
@@ -1496,6 +1588,8 @@ async function runDivision(
   stageKind: "production" | "integration" | "verification",
   runtimeToolsDisabled = false,
   briefParts?: readonly DeclaredPromptPart[],
+  /** F9: the request the firm received, for the turns that do this division's stage work (never the stored brief). */
+  teamRequest?: DeclaredPromptPart | null,
 ): Promise<FirmStageResult> {
   if (briefParts && composeDeclaredPrompt(briefParts) !== brief) throw new Error("firm_user_prompt_parts_mismatch");
   const fkAgentId = division.agentId || p.ceoAgent.id; // FK-safe (실 agent 없으면 CEO id)
@@ -1520,6 +1614,7 @@ async function runDivision(
     });
     const directParts: DeclaredPromptPart[] | undefined = briefParts ? [
       ...briefParts,
+      ...(teamRequest ? [teamRequest] : []),
       { id: "firm.direct-division.stage-marker", revision: 1, stability: "task-context", changeTriggers: ["release"], order: 10,
         text: "[Direct division execution]\n" },
       { id: "firm.direct-division.authority", revision: 1, stability: "final-boundary", changeTriggers: ["release"], order: 10,
@@ -1551,8 +1646,9 @@ async function runDivision(
   // single-division path.
   if (specialists.length === 0 && firmDivisionRequiresDirectExecution(stageKind, 0, runtimeToolsDisabled)) {
     const direct = await runDirectDivision();
-    if (!p.req.agentAppMode) appendChatMessage(divChatId, "assistant", redactWorkAttachmentText(p.req, direct.text));
-    return { node: division, result: direct.text, ok: direct.ok, evidence: direct.evidence };
+    const directText = withoutMemberPacketOutcome(direct.text);
+    if (!p.req.agentAppMode) appendChatMessage(divChatId, "assistant", redactWorkAttachmentText(p.req, directText));
+    return { node: division, result: directText, ok: direct.ok, evidence: direct.evidence };
   }
   const plan = await runNodeTurnSafe(p, {
     node: division,
@@ -1593,19 +1689,25 @@ async function runDivision(
       };
     }
     const specResults = await parallelCap(matched, getAgentConcurrency(), async (m) => {
+      const specialistParts: DeclaredPromptPart[] | undefined = teamRequest ? [
+        teamRequest,
+        { id: "firm.division-specialist.user.brief", revision: 1, stability: "task-context", changeTriggers: ["plan-revision"], order: 0, text: m.brief },
+      ] : undefined;
       const r = await runNodeTurnSafe(p, {
         node: m.node,
         tier: 3,
         phase: "delegate",
-        userPrompt: m.brief,
+        userPrompt: specialistParts ? composeDeclaredPrompt(specialistParts) : m.brief,
+        ...(specialistParts ? { userPromptParts: specialistParts } : {}),
         history: [],
         chatId: null, // ephemeral — 메모리는 node.id로 저장됨
         divisionId: division.id,
         allocation: m.allocation,
         runtimeToolsDisabled,
       });
-      emitAgentMessage(p, m.node, division, "worker-to-orchestrator", 3, r.text);
-      return { name: m.node.name, role: m.node.role, text: r.text, ok: r.ok, evidence: r.evidence };
+      const memberText = withoutMemberPacketOutcome(r.text);
+      emitAgentMessage(p, m.node, division, "worker-to-orchestrator", 3, memberText);
+      return { name: m.node.name, role: m.node.role, text: memberText, ok: r.ok, evidence: r.evidence };
     });
     if (p.handoffGuard?.blocked) {
       return {
@@ -1670,6 +1772,7 @@ async function runDivision(
     evidence = mergeFirmExecutionEvidence([plan.evidence, direct.evidence]);
   }
 
+  result = withoutMemberPacketOutcome(result);
   if (!p.req.agentAppMode) appendChatMessage(divChatId, "assistant", redactWorkAttachmentText(p.req, result));
   return { node: division, result, ok: divisionOk, evidence };
 }
@@ -1853,6 +1956,18 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
           : `Delegated to ${matched.length} — running in parallel…`),
   );
 
+  // The request this firm received (what its chat row stores), rendered once per run; an over-bound one is written once.
+  let teamRequestPart: DeclaredPromptPart | null | undefined;
+  const firmStageTeamRequest = (projectRoot: string | null | undefined): DeclaredPromptPart | null => {
+    if (teamRequestPart !== undefined) return teamRequestPart;
+    const request = ownerVisiblePrompt(req).trim();
+    const overflowPath = request.length > FIRM_TEAM_REQUEST_INLINE_MAX_CHARS && !req.agentAppMode
+      ? materializeFirmTeamRequest(request, projectRoot, req.runId)
+      : null;
+    teamRequestPart = request ? firmTeamRequestPromptPart(request, overflowPath ? { path: overflowPath } : null) : null;
+    return teamRequestPart;
+  };
+
   // 2) DELEGATE — 구현/디자인은 병렬, 검증은 결과가 실제 폴더에 반영된 뒤 실행한다.
   // QA를 구현과 동시에 시작하면 빈 폴더를 검사한 실패 영수증이 정상 구현 결과와 충돌한다.
   const runMatched = async (
@@ -1875,10 +1990,15 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
       { id: "firm.stage.user.completed-outputs", revision: 1, stability: "turn-context", changeTriggers: ["plan-revision"], order: 0, text: stageKind === "production" ? "" : stageContext },
       { id: "firm.stage.user.verdict", revision: 1, stability: "final-boundary", changeTriggers: ["release", "profile"], order: 0, text: stageKind === "verification" ? "explain remaining blockers first; end with <verification_verdict>PASS</verification_verdict> only if every acceptance condition passes after fixes; otherwise end with <verification_verdict>FAIL</verification_verdict>" : "" },
     ];
+    // F9: the request this team received reaches the members of these stages verbatim (firmTeamRequestPromptPart).
+    const teamRequest = FIRM_TEAM_REQUEST_STAGES.has(stageKind) ? firmStageTeamRequest(projectRoot) : null;
     if (singleDivision) {
       // tier-2 skip: matched는 전문가 — ephemeral 병렬
       return parallelCap(targets, getAgentConcurrency(), async (m) => {
-        const userPromptParts = stagedPromptParts(m.brief);
+        const stageParts = stagedPromptParts(m.brief);
+        // The host's named-test evidence keeps reading the stage brief alone, as before.
+        const stagePrompt = composeDeclaredPrompt(stageParts);
+        const userPromptParts = teamRequest ? [...stageParts, teamRequest] : stageParts;
         const userPrompt = composeDeclaredPrompt(userPromptParts);
         const r = await runNodeTurnSafe(p, {
           node: m.node,
@@ -1892,11 +2012,11 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
           allocation: m.allocation,
           runtimeToolsDisabled,
         });
-        emitAgentMessage(p, m.node, org.ceo, "worker-to-orchestrator", 3, r.text);
+        emitAgentMessage(p, m.node, org.ceo, "worker-to-orchestrator", 3, withoutMemberPacketOutcome(r.text));
         const verificationEvidence = stageKind === "verification"
           ? evaluateFirmVerificationEvidence({
               evidence: r.evidence,
-              prompt: userPrompt,
+              prompt: stagePrompt,
               projectRoot,
               inlineOnly: runtimeToolsDisabled,
             })
@@ -1906,7 +2026,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
           : r.evidence;
         return {
           node: m.node,
-          result: stripVerificationVerdict(r.text),
+          result: stripVerificationVerdict(withoutMemberPacketOutcome(r.text)),
           ok: stageKind === "verification"
             ? verificationResultOk(r.text, r.ok) && Boolean(verificationEvidence?.ok)
             : r.ok,
@@ -1927,8 +2047,9 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
         stageKind,
         runtimeToolsDisabled,
         briefParts,
+        teamRequest,
       );
-      emitAgentMessage(p, result.node, org.ceo, "worker-to-orchestrator", 2, result.result);
+      emitAgentMessage(p, result.node, org.ceo, "worker-to-orchestrator", 2, withoutMemberPacketOutcome(result.result));
       const verificationEvidence = stageKind === "verification"
         ? evaluateFirmVerificationEvidence({
             evidence: result.evidence,
@@ -1942,7 +2063,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
         : result.evidence;
       return {
         ...result,
-        result: stripVerificationVerdict(result.result),
+        result: stripVerificationVerdict(withoutMemberPacketOutcome(result.result)),
         ok: stageKind === "verification"
           ? verificationResultOk(result.result, result.ok) && Boolean(verificationEvidence?.ok)
           : result.ok,
