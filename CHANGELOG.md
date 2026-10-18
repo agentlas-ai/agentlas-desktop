@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.3.69 — 2026-10-18
+
+- Answering a question card runs with the permission of the run that asked it. Before, an answer given right after a teammate's report could run read-only and could not render or run commands.
+- Your next message runs with your own last turn's permission, not with a read-only background turn's, and a Work answer no longer takes a narrower permission because of words in it.
+- Question cards behave: an answered card does not come back, "항상 승인" answers once, a question replaced by a newer one says so, and an answer whose turn did not start returns to the message box instead of disappearing.
+- A message you sent during a run that was held after a restart returns to the message box, instead of a card you could not act on.
+- Old browser screenshots in One and Work no longer turn into empty boxes; the saved copies are kept out of the folder Playwright cleans up.
+- When the computer is busy, a slow check for the Codex command no longer counts as "not installed", so team work is not cut off.
+- A teammate whose command fails at its sandbox limit gets more access from the room instead of giving up, and a plural guess at an app operation finds the right one.
+- This release binds Agentlas OS v1.2.66 at c0acd99be22114569e20bca94bed4540ba046eb4; public runtime asset `hephaestus-runtime-v1.2.66.tar.gz` is pinned at SHA-256 `20019d3ba4df1c540d0ef549c07a82188bd40fe12dafb2f8a6c75cc4bdcc89f7`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.68 — 2026-10-18
 
 - A teammate that works through Agentlas Light, an API key or a local model gets credit for the files it writes and the Python tests it runs. Before, such a team could finish the work and still end "not complete".
