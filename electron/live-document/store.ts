@@ -262,11 +262,11 @@ export async function applyLiveDocument(input: { sessionId: string; chatId?: str
 
 /** Text fingerprint used to verify a save: the written file must read back as the model it was written from. */
 export function liveDocumentFingerprint(model: LiveDocumentModel): string {
-  // Numbers are compared by presence only: the file shows them through its number format (1,234 / 50%), the model
-  // holds what was typed.
+  // Numbers are compared by presence only: the file shows them through its number format (1,234 / 50% / 45,000원), the
+  // model holds what was typed. A cell that holds a number (n) is a number whatever its display.
   if (model.kind === "sheet") return JSON.stringify(model.sheets.map((sheet) => [sheet.name, Object.entries(sheet.cells)
     .filter(([, cell]) => cell.v !== "" || cell.f)
-    .map(([address, cell]) => [address, cell.f !== undefined ? `=${cell.f}` : /^[-+]?[\d.,]+%?$|^\d{4}-\d{2}-\d{2}/.test(cell.v.trim()) ? "#" : cell.v]).sort()]));
+    .map(([address, cell]) => [address, cell.f !== undefined ? `=${cell.f}` : cell.n !== undefined || /^[-+]?[\d.,]+%?$|^\d{4}-\d{2}-\d{2}/.test(cell.v.trim()) ? "#" : cell.v]).sort()]));
   if (model.kind === "slides") return JSON.stringify(model.slides.map((slide) => slide.shapes.filter((shape) => shape.role !== "object").map((shape) => shape.text)));
   // Empty paragraphs are layout (Word needs one after a table that ends the body), not content.
   return JSON.stringify(model.blocks.filter((block) => block.type !== "paragraph" || block.text !== "").map((block) => block.type === "paragraph" ? block.text : block.type === "table" ? block.rows.map((row) => row.map((cell) => cell?.text ?? null)) : block.type));
