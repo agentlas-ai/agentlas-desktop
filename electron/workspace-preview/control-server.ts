@@ -3,11 +3,13 @@ import https from "node:https";
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { onHostShutdown } from "../host-lifecycle";
 import { userDataPath } from "../runtime-paths";
 import { commandLineShellSpawn, killCliTree } from "../runtime/exec";
 import { redactSecrets } from "../../shared/secret-patterns";
+import { outsideInvocationJudgmentContext } from "../runtime/judgment-context";
 import {
   removeWorkspacePreviewCapability,
   writeWorkspacePreviewCapability,
@@ -15,6 +17,12 @@ import {
 } from "./channel";
 
 const MAX_REQUEST_BYTES = 64 * 1024;
+
+// The server outlives the turn that first starts it, and Node gives every later request the async context that was
+// live at listen() (one-team and turn-tools control servers, same defect: a later chat's request ran inside the first
+// turn's async scopes, its runtime pin and aborted signal included). So listen from the module-load context, and handle
+// each request outside any invocation's judgment context.
+const hostRootContext = AsyncLocalStorage.snapshot();
 const MAX_COMMAND_LENGTH = 4_000;
 const PREVIEW_RECEIPT_DIR = "receipts";
 const STDERR_TAIL_CHARS = 2_048;
@@ -419,7 +427,7 @@ export function startWorkspacePreviewControlServer(): Promise<number> {
   if (server && boundPort) return Promise.resolve(boundPort);
   if (serverStarting) return serverStarting;
   serverToken = randomUUID();
-  const startup = new Promise<number>((resolve) => {
+  const startup = hostRootContext(() => new Promise<number>((resolve) => {
     const srv = http.createServer((req, res) => {
       if (req.method !== "POST" || req.url !== "/preview") return writeJson(res, 404, { ok: false, error: "not-found" });
       const requestAbort = new AbortController();
@@ -428,7 +436,7 @@ export function startWorkspacePreviewControlServer(): Promise<number> {
       void readJsonBody(req).then(async (body) => {
         if (!body) return writeJson(res, 400, { ok: false, error: "invalid-request" });
         try {
-          const result = await handleRequest(body as ControlRequest, requestAbort.signal);
+          const result = await outsideInvocationJudgmentContext(() => handleRequest(body as ControlRequest, requestAbort.signal));
           writeJson(res, 200, { ok: true, result });
         } catch (error) {
           writeJson(res, 409, { ok: false, error: error instanceof Error ? error.message : "workspace-preview-failed" });
@@ -446,7 +454,7 @@ export function startWorkspacePreviewControlServer(): Promise<number> {
       }
       resolve(boundPort);
     });
-  });
+  }));
   serverStarting = startup;
   void startup.finally(() => { if (serverStarting === startup) serverStarting = null; });
   return startup;

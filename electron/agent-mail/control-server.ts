@@ -1,6 +1,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { onHostShutdown } from "../host-lifecycle";
 import { userDataPath } from "../runtime-paths";
@@ -35,6 +36,12 @@ import {
   type AgentMailThreadView,
 } from "../../shared/agent-mail";
 import { getCapabilityDecision } from "../store/capability-grants";
+
+// The server outlives the turn that first starts it, and Node gives every later request the async context that was
+// live at listen() (one-team and turn-tools control servers, same defect: a later chat's request ran inside the first
+// turn's async scopes, its runtime pin and aborted signal included). So listen from the module-load context: no
+// request starts inside any turn's scopes.
+const hostRootContext = AsyncLocalStorage.snapshot();
 
 // Main-side handler for the inline agent mail MCP child. Loopback only, one
 // random server token, one capability per run config.
@@ -631,7 +638,7 @@ export function startAgentMailControlServer(): Promise<number> {
   if (server && boundPort) return Promise.resolve(boundPort);
   if (serverStarting) return serverStarting;
   serverToken = randomUUID();
-  const startup = new Promise<number>((resolve) => {
+  const startup = hostRootContext(() => new Promise<number>((resolve) => {
     const srv = http.createServer((req, res) => {
       if (req.method !== "POST" || req.url !== "/agent-mail") return writeJson(res, 404, { ok: false, error: "not-found" });
       void readJsonBody(req).then(async (body) => {
@@ -655,7 +662,7 @@ export function startAgentMailControlServer(): Promise<number> {
       }
       resolve(boundPort);
     });
-  });
+  }));
   serverStarting = startup;
   void startup.finally(() => { if (serverStarting === startup) serverStarting = null; });
   return startup;

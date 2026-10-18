@@ -1,9 +1,11 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { onHostShutdown } from "../host-lifecycle";
 import { userDataPath } from "../runtime-paths";
+import { outsideInvocationJudgmentContext } from "../runtime/judgment-context";
 import { memoryNoteToEvent } from "../memory/events";
 import { recordTurnAsk, recordTurnMemoryNote, turnNotesKey, TURN_ASK_LIMIT, TURN_MEMORY_NOTE_LIMIT } from "./notes";
 import { parseAskFenceBody, type AgentlasAskQuestion } from "../../shared/ask-fence-flatten";
@@ -19,6 +21,13 @@ import { GOAL_PLAN_TOOL_MARKERS, TURN_TOOLS_BASE } from "./mcp-server";
 // that holds the capability.
 
 const MAX_REQUEST_BYTES = 768 * 1024;
+
+// The server outlives the turn that first starts it, and Node gives every later request the async context that was
+// live at listen() (one-team control server, same defect). Production 2026-10-18 (1.3.67, Yotube room): goal_wait's
+// lifecycle judgment ran with the first turn's runtime pin and its aborted signal, stopped before any model call, so
+// a daily /goal Goal stayed "finite" and its next-day wait was refused goal_wait_ongoing_authority_required.
+// So listen from the module-load context, and handle each request outside any invocation's judgment context.
+const hostRootContext = AsyncLocalStorage.snapshot();
 
 export interface TurnToolsCapabilityBinding {
   capabilityId: string;
@@ -303,14 +312,14 @@ export function startTurnToolsControlServer(): Promise<number> {
   if (server && boundPort) return Promise.resolve(boundPort);
   if (serverStarting) return serverStarting;
   serverToken = randomUUID();
-  const startup = new Promise<number>((resolve) => {
+  const startup = hostRootContext(() => new Promise<number>((resolve) => {
     const srv = http.createServer((req, res) => {
       if (req.method !== "POST" || req.url !== "/turn") return writeJson(res, 404, { ok: false, error: "not-found" });
       if (!loopbackHost(req.headers.host, boundPort)) return writeJson(res, 403, { ok: false, error: "invalid-host" });
       void readJsonBody(req).then(async (body) => {
         if (!body) return writeJson(res, 400, { ok: false, error: "invalid-request" });
         try {
-          const result = await handleTurnToolsControlRequest(body);
+          const result = await outsideInvocationJudgmentContext(() => handleTurnToolsControlRequest(body));
           // A failed harness call reaches the model and every receipt as an MCP tool error with its typed code.
           const errorCode = harnessCallFailureCode(body.operation, result);
           writeJson(res, 200, { ok: true, result, ...(errorCode ? { isError: true, errorCode } : {}) });
@@ -328,7 +337,7 @@ export function startTurnToolsControlServer(): Promise<number> {
       if (!shutdownRegistered) { shutdownRegistered = true; onHostShutdown(dispose); }
       resolve(boundPort);
     });
-  });
+  }));
   serverStarting = startup;
   void startup.finally(() => { if (serverStarting === startup) serverStarting = null; });
   return startup;
