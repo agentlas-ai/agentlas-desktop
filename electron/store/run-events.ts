@@ -1402,6 +1402,24 @@ function bumpAgentUsage(agentId: string, runId: string, ts: string): void {
   ).run(agentId, ts, ts, isFirstForRun);
 }
 
+/**
+ * The long-run attempt an invocation's events belong to. One invocation can carry several attempts: task-force
+ * specialists run under the controller's invocation id. A producer that names its own attempt gets it when that attempt
+ * is bound to this invocation; otherwise the controller attempt, newest first. `invocation_run_id = ? LIMIT 1` took
+ * whichever row the index returned first (flow audit ID-6, production Yotube ea52dcd9: one controller and two
+ * specialist attempts on one invocation).
+ */
+export function invocationAttemptBinding(invocationRunId: string, attemptId?: string | null):
+  { id: string; worker_id: string; task_id: string | null; run_id: string; goal_id: string } | undefined {
+  const explicit = typeof attemptId === "string" && attemptId ? attemptId : null;
+  return getDb().prepare(`SELECT a.id, a.worker_id, a.task_id, a.run_id, r.goal_id
+    FROM long_run_worker_attempts a JOIN long_runs r ON r.id = a.run_id
+    LEFT JOIN long_run_workers w ON w.id = a.worker_id
+    WHERE a.invocation_run_id = ?
+    ORDER BY (a.id = ?) DESC, (w.role = 'controller') DESC, a.started_at DESC, a.rowid DESC LIMIT 1`)
+    .get(invocationRunId, explicit) as { id: string; worker_id: string; task_id: string | null; run_id: string; goal_id: string } | undefined;
+}
+
 export function recordRunEvent(input: RecordRunEventInput): RunEventUi {
   let committedDiagnostic: { key: string; stats: FallbackDiagnosticStats } | undefined;
   const terminal = ["invoke_completed", "invoke_waiting", "invoke_failed", "invoke_cancelled", "invoke_interrupted", "mcp_final", "mcp_error"].includes(input.kind);
@@ -1420,10 +1438,7 @@ export function recordRunEvent(input: RecordRunEventInput): RunEventUi {
     }
     const seq = nextSeq(input.runId);
     // Link only an actual attempt binding, never infer identity from chat titles.
-    const attempt = getDb().prepare(`SELECT a.id, a.worker_id, a.task_id, a.run_id, r.goal_id
-      FROM long_run_worker_attempts a JOIN long_runs r ON r.id = a.run_id
-      WHERE a.invocation_run_id = ? LIMIT 1`).get(input.runId) as
-      { id: string; worker_id: string; task_id: string | null; run_id: string; goal_id: string } | undefined;
+    const attempt = invocationAttemptBinding(input.runId, input.correlation?.attemptId);
     const goalRevision = attempt ? getLongRunAttemptGoalRevision(attempt.run_id, attempt.id) : null;
     const boundCorrelation: RuntimeCorrelation = attempt ? { longRunId: attempt.run_id, goalId: attempt.goal_id,
       workerId: attempt.worker_id, attemptId: attempt.id, ...(attempt.task_id ? { taskId: attempt.task_id } : {}),
@@ -2602,6 +2617,39 @@ export function getLatestInvocationRunReceipt(chatId: string): InvocationRunRece
     )
     .get(chatId) as { run_id?: string } | undefined;
   return row?.run_id ? getInvocationRunReceipt(row.run_id) : null;
+}
+
+/**
+ * The owner wrote to the room after this run started: a person's message that is neither this run's own prompt nor a
+ * direction the run took in as its current-turn steer. Host-written turns (a teammate's report, a Goal continuation, a
+ * recovery) store their prompt as a system row and never count. An exact run id the caller holds is current until
+ * this is true; "is it still the room's newest run" refused it as soon as any host turn followed (flow audit ID-4,
+ * production Yotube 10-14..10-18: 86-94% of the room's foreground runs were host turns).
+ */
+export function ownerDirectionAfterInvocationRun(runId: string, chatId: string): boolean {
+  if (!runId || !chatId) return true;
+  const db = getDb();
+  const start = db.prepare("SELECT ts, payload_json FROM run_events WHERE run_id = ? AND chat_id = ? AND kind = 'invoke_started' ORDER BY seq ASC LIMIT 1")
+    .get(runId, chatId) as { ts: string; payload_json: string } | undefined;
+  if (!start) return true;
+  let cursor: unknown = null;
+  try { cursor = JSON.parse(start.payload_json)?.latestUserMessageRowId; } catch { cursor = null; }
+  const own = new Set<string>();
+  for (const row of db.prepare(`SELECT json_extract(${INVOCATION_OBJECT_JSON}, '$.messageId') AS origin,
+      json_extract(${INVOCATION_OBJECT_JSON}, '$.promptMessageId') AS prompt FROM run_events
+    WHERE run_id = ? AND kind IN ('origin_user_message', 'invoke_prompt_bound')`).all(runId) as Array<{ origin: unknown; prompt: unknown }>) {
+    for (const id of [row.origin, row.prompt]) if (typeof id === "string" && id) own.add(id);
+  }
+  if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'invocation_current_turn_steers'").get()) {
+    for (const row of db.prepare("SELECT message_id FROM invocation_current_turn_steers WHERE run_id = ? AND chat_id = ? AND status = 'applied'")
+      .all(runId, chatId) as Array<{ message_id: string }>) own.add(row.message_id);
+  }
+  // The admission cursor is the newest user row when the run started; a run recorded before the cursor existed
+  // falls back to its start time. Of any own.size + 1 later rows at least one is not this run's own.
+  const later = typeof cursor === "number" && Number.isSafeInteger(cursor)
+    ? db.prepare("SELECT id FROM chat_messages WHERE chat_id = ? AND role = 'user' AND rowid > ? ORDER BY rowid LIMIT ?").all(chatId, cursor, own.size + 1)
+    : db.prepare("SELECT id FROM chat_messages WHERE chat_id = ? AND role = 'user' AND created_at > ? ORDER BY rowid LIMIT ?").all(chatId, start.ts, own.size + 1);
+  return (later as Array<{ id: string }>).some((row) => !own.has(row.id));
 }
 
 /**

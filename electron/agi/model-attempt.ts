@@ -24,6 +24,7 @@ import type { Runner, RunnerFailure } from "../runtime/runner";
 import { RuntimeTurnUnsettledError, runnerFailureFromError, runtimeFailureIsClosedHttpRefusal } from "../runtime/runner";
 import { runtimeFailureBlocksReplay } from "../runtime/selection";
 import { RuntimeJudgmentRefusal } from "../runtime/judgment-refusal";
+import { withModelCallScope } from "../runtime/model-call-ledger";
 import { createObservedUsageAccumulator, createRuntimeUsageCollector } from "../../shared/observed-usage";
 import { AGI_ACTION_KINDS, AGI_NON_ALTERNATIVE_ACTIONS, type AgiActionKind } from "./blocker";
 import { AGI_ACTION_SCHEMA, type AgiActionExecutor, type AgiActionReceipt } from "./actions";
@@ -334,7 +335,9 @@ export class AgiModelAttempt {
         settle("refused", refusal, { rounds, input: inputTokens, output: outputTokens });
         return { attemptId, outcome: "failed", code: refusal, tokens: tokensUsed };
       }
-      const answer = await this.call(round === 1 ? candidates : [used!], userPrompt, controlRefusal, decisionSignal);
+      // The ledger row of this judgment names the durable AGI attempt (agi_model_attempts.id), not an unscoped bucket (ID-5).
+      const answer = await withModelCallScope({ runId: attemptId, role: "judgment", phase: "agi" },
+        () => this.call(round === 1 ? candidates : [used!], userPrompt, controlRefusal, decisionSignal));
       rounds = round;
       if (answer.usage) {
         inputTokens += answer.usage.inputTokens; outputTokens += answer.usage.outputTokens;

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { DesktopWorkRecoveryJournal, workUnitId } from "./work-recovery-store";
 import { getDb } from "../store/db";
-import { recordRunEvent } from "../store/run-events";
+import { invocationAttemptBinding, recordRunEvent } from "../store/run-events";
 import { ensureCanonicalTaskForChat, findCanonicalTaskForChat } from "../store/tasks";
 import { getChat } from "../store/chats";
 import { getChatGoalRevision } from "../store/chat-goals";
@@ -57,9 +57,8 @@ export class MainWorkRecoveryContext {
     const chat = getChat(this.chatId);
     const task = findCanonicalTaskForChat(this.chatId) ?? ensureCanonicalTaskForChat(this.chatId);
     if (!chat || chat.archivedAt || !task || task.archivedAt) throw new Error("main_work_scope_missing");
-    const worker = getDb().prepare(`SELECT a.task_id,r.goal_id FROM long_run_worker_attempts a
-      JOIN long_runs r ON r.id=a.run_id WHERE a.invocation_run_id=? LIMIT 1`).get(this.invocationRunId) as
-      {task_id:string|null;goal_id:string}|undefined;
+    // The controller attempt of this invocation, not whichever attempt row comes first (a specialist shares the id).
+    const worker = invocationAttemptBinding(this.invocationRunId);
     const goalId=chat.goalId ?? worker?.goal_id;
     const goal = goalId ? getChatGoalRevision(goalId) : null;
     const checkpoint = goalId ? latestTaskCheckpoint(goalId) : null;

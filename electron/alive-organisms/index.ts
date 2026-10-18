@@ -282,8 +282,9 @@ export function startAliveOrganisms(): AliveOrganismHost | null {
     listGoalIds: () => listAgiMonitoredGoalIds(getDb()),
     readFacts: (goalId) => readAgiBlockerFacts({
       db: getDb(), nowMs: Date.now,
-      latestReceipt: (chatId) => {
-        const receipt = invocationService.latestReceipt(chatId);
+      // The Goal's own controller turn by its exact invocation id, live (ID-2), never the room's newest run.
+      runReceipt: (runId) => {
+        const receipt = invocationService.receipt(runId);
         return receipt ? { status: receipt.status, errorCode: receipt.errorCode ?? null, runId: receipt.runId ?? null, errorMessage: receipt.errorMessage ?? null } : null;
       },
       chatBusy: (chatId) => invocationService.activeChatIds().includes(chatId),

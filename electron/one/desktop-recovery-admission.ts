@@ -5,7 +5,7 @@ import { getDb } from "../store/db";
 import { getChat } from "../store/chats";
 import { getChatGoalRevision } from "../store/chat-goals";
 import { getLongRunByGoalId, longRunOwnerHold } from "../store/long-runs";
-import { getInvocationRunReceipt, getLatestInvocationRunReceipt, getRunEventBySource, recordRunEvent } from "../store/run-events";
+import { getInvocationRunReceipt, getRunEventBySource, ownerDirectionAfterInvocationRun, recordRunEvent } from "../store/run-events";
 
 const REQUEST = "one_controller_recovery_requested";
 const LINK = "one_controller_recovery_link";
@@ -57,10 +57,14 @@ export function desktopOneRecoveryOriginalRunId(runId: string, chatId: string): 
   return desktopOneRecoveryContext(runId, chatId).originalRunId;
 }
 
-/** Capture existing host evidence. Auxiliary accounting/admission rows are not a new user direction. */
+/**
+ * Capture existing host evidence. Auxiliary accounting/admission rows are not a new user direction, and neither is a
+ * host-written turn after the run (a teammate's report, a Goal continuation): the exact run stays recoverable until the
+ * owner writes again, where "is it still the room's newest run" refused it behind any host turn (flow audit ID-4).
+ */
 export function desktopOneRecoveryScope(runId: string, chatId: string): string | null {
   const chat = getChat(chatId), receipt = getInvocationRunReceipt(runId);
-  if (!chat || !receipt || receipt.chatId !== chatId || getLatestInvocationRunReceipt(chatId)?.runId !== runId
+  if (!chat || !receipt || receipt.chatId !== chatId || ownerDirectionAfterInvocationRun(runId, chatId)
     || !receipt.finishedAt || oneAutoRecoveryTerminalStop(receipt)
     || !["failed", "interrupted", "completed"].includes(receipt.status)) return null;
   const start = getDb().prepare("SELECT id,payload_json FROM run_events WHERE run_id=? AND chat_id=? AND kind='invoke_started' LIMIT 1")
@@ -78,7 +82,7 @@ export function desktopOneRecoveryScope(runId: string, chatId: string): string |
   // fresh read cannot adopt a later user message as authority for an old run.
   if ((JSON.parse(start.payload_json).latestUserMessageRowId ?? null) !== user.cursor) return null;
   const evidence = getDb().prepare(`SELECT id FROM run_events WHERE run_id=?
-    AND kind NOT IN ('runtime_usage_started','runtime_usage_recorded','one_recovery_outcome_assessed',?,?) ORDER BY seq`).all(runId, REQUEST, LINK);
+    AND kind NOT IN ('runtime_usage_started','runtime_usage_recorded','model_call_ledger','one_recovery_outcome_assessed',?,?) ORDER BY seq`).all(runId, REQUEST, LINK);
   return digest([runId, chatId, start.id, evidence, user.cursor, chat.goalId, goal?.revision, goal?.lifecycle,
     longRun?.id, control?.seq, chat.runtimeSelection]);
 }

@@ -43,6 +43,7 @@ import { currentUiLocale } from "../ui-locale";
 import { PERSISTENCE_DECISION_SCHEMA, type FailureCauseKind } from "../../shared/persistence-policy";
 import { AgiActionExecutor, type AgiExecutorDeps, type AgiGoalView, type AgiLoginRecoveryOutcome, type AgiLoginRecoveryControl, type AgiLoginRecoveryResult, type AgiPlanView, type AgiStrategyBatch } from "./actions";
 import { createAgiDeterministicHandler, type AgiUnblockHandlerWithModel } from "./unblock-handler";
+import { goalControllerAttempt, type AgiTurnReceipt } from "./goal-facts";
 
 export { AGI_ACTION_NOTICE_AUTOMATION_ID } from "../../shared/chat-host-notice";
 import { AGI_ACTION_NOTICE_AUTOMATION_ID } from "../../shared/chat-host-notice";
@@ -66,6 +67,17 @@ function goalPermission(goalId: string): AgiGoalView["permission"] {
     if (match) return match[1] as AgiGoalView["permission"];
   }
   return "read";
+}
+
+/**
+ * The Goal's own controller turn, read live: the episode baseline an AGI rest or strategy captures must name the run
+ * the monitor reads later, never the room's newest run (a teammate's report turn, an owner side question; ID-2).
+ */
+function goalTurnReceipt(goalId: string): AgiTurnReceipt | null {
+  const run = getLongRunByGoalId(goalId);
+  const runId = run ? goalControllerAttempt(getDb(), run.id)?.invocationRunId : null;
+  const receipt = runId ? invocationService.receipt(runId) : null;
+  return receipt ? { runId: receipt.runId, status: receipt.status, errorCode: receipt.errorCode ?? null } : null;
 }
 
 function planView(goalId: string): AgiPlanView | null {
@@ -101,9 +113,7 @@ export function createAgiExecutor(): AgiActionExecutor {
     strategy: {
       prepare: (batch, decision) => prepareGoalStrategyEpisode(strategyBatchInput(batch),decision),
       commit: (batch, prepared, decision) => commitGoalStrategyEpisode({ ...strategyBatchInput(batch), requestId: batch.rest.actionId,
-        prepared: prepared as PreparedGoalStrategyEpisode,
-        latestReceipt: chatId => { const receipt = invocationService.latestReceipt(chatId);
-          return receipt ? { runId: receipt.runId, status: receipt.status, errorCode: receipt.errorCode ?? null } : null; } },decision),
+        prepared: prepared as PreparedGoalStrategyEpisode, latestReceipt: () => goalTurnReceipt(batch.rest.fence.goalId) },decision),
     },
     rest: request => {
       const until = request.args?.untilIso, reason = request.args?.reason;
@@ -112,8 +122,7 @@ export function createAgiExecutor(): AgiActionExecutor {
           condition: "due" as const, nextAction: reason.slice(0, 1000), deadline: null } : null;
       return applyGoalEpisodeRest({ requestId: request.actionId, captureId: request.episodeCaptureId ?? `unavailable:${request.actionId}`,
         goalId: request.fence.goalId, intent, refusal: request.episodeRefusal,
-        latestReceipt: chatId => { const receipt = invocationService.latestReceipt(chatId);
-          return receipt ? { runId: receipt.runId, status: receipt.status, errorCode: receipt.errorCode ?? null } : null; },
+        latestReceipt: () => goalTurnReceipt(request.fence.goalId),
       }, registerGoalWaitSubscription);
     },
     afterRest: drainGoalEpisodeNotices,

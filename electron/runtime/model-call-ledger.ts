@@ -30,6 +30,7 @@ import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner
 import { withMemorySourceScope } from "../memory/source-custody";
 import { RETAINED_CONTEXT_BLOCKS, retainContextOriginal } from "./context-originals";
 import { looksSecret } from "../../shared/secret-patterns";
+import { currentAccountedRun } from "../long-run/accounting-context";
 
 export const MODEL_CALL_LEDGER_SCHEMA = "agentlas.model-call-ledger.v1";
 export const MODEL_CALL_LEDGER_EVENT_KIND = "model_call_ledger";
@@ -113,6 +114,24 @@ export function withModelCallScope<T>(scope: ModelCallScope, fn: () => T): T {
   return withMemorySourceScope(scope, () => scopes.run(merged, fn));
 }
 export function currentModelCallScope(): ModelCallScope | undefined { return scopes.getStore(); }
+
+/**
+ * The run a ledger row (or a native-compaction row) belongs to: the model-call scope's run, else the run the inference
+ * is accounted to, else the unscoped bucket. Background judgments, AGI and scheduler classifications ran inside an
+ * accounting scope that names their run and were still written as `model-call-unscoped:none` (flow audit ID-5,
+ * production 10-12..10-18: 5,556 rows).
+ */
+export function modelCallRunIdentity(scope: ModelCallScope | undefined, requestChatId?: string | null): {
+  runId: string; chatId: string | null; nodeId: string | null; automationId: string | null; scoped: boolean } {
+  if (scope?.runId) return { runId: scope.runId, chatId: scope.chatId ?? requestChatId ?? null, nodeId: scope.nodeId ?? null,
+    automationId: null, scoped: true };
+  let accounted: ReturnType<typeof currentAccountedRun> = null;
+  try { accounted = currentAccountedRun(); } catch { accounted = null; }
+  if (accounted) return { runId: accounted.runId, chatId: scope?.chatId ?? accounted.chatId ?? requestChatId ?? null,
+    nodeId: scope?.nodeId ?? accounted.nodeId ?? null, automationId: accounted.automationId ?? null, scoped: true };
+  const chatId = scope?.chatId ?? requestChatId ?? null;
+  return { runId: `model-call-unscoped:${chatId ?? "none"}`, chatId, nodeId: scope?.nodeId ?? null, automationId: null, scoped: false };
+}
 
 /** Task-force phase names (observeTaskForceModelCall) to ledger roles. */
 export function roleForTaskForcePhase(phase: string): ModelCallRole {
@@ -360,6 +379,8 @@ export function ledgerFromRequest(req: RunnerRequest): PayloadLedger {
 interface AttemptRecord {
   id: string | null;
   startedAt: number;
+  /** When this native turn ended: its terminal usage arrived or the next attempt started. Absent: the call's end. */
+  endedAt?: number;
   payload: PayloadLedger | null;
   usage: { inputTokens: number; outputTokens: number; cachedInputTokens?: number } | null;
   detail: { cacheCreationInputTokens?: number; rawInputTokens?: number } | null;
@@ -616,7 +637,11 @@ export function withModelCallLedger(runner: Runner, identity: ModelCallIdentity)
         ...events,
         onRuntimeAttemptStarted: (id) => {
           try {
-            collector.attempts.push({ id, startedAt: Date.now(), payload: collector.pending, usage: null, detail: null,
+            const now = Date.now();
+            // A new native turn starts only after the previous one ended (its own usage, a retry or the next round).
+            const previous = collector.attempts.at(-1);
+            if (previous && previous.endedAt === undefined) previous.endedAt = now;
+            collector.attempts.push({ id, startedAt: now, payload: collector.pending, usage: null, detail: null,
               cachePlan: collector.pendingCachePlan ?? null });
             collector.pending = null;
             collector.pendingCachePlan = null;
@@ -633,7 +658,7 @@ export function withModelCallLedger(runner: Runner, identity: ModelCallIdentity)
         onTerminalObservedUsage: (usage, id) => {
           try {
             const attempt = (id ? collector.attempts.find((entry) => entry.id === id) : collector.attempts.at(-1));
-            if (attempt) attempt.usage = { ...usage };
+            if (attempt) { attempt.usage = { ...usage }; attempt.endedAt = Date.now(); }
           } catch { /* observability only */ }
           events.onTerminalObservedUsage?.(usage, id);
         },
@@ -679,8 +704,8 @@ function emit(collector: Collector, input: {
 }): void {
   const { req, identity, scope, callRef, result } = input;
   const { role, source } = inferRole(req, scope?.role);
-  const chatId = scope?.chatId ?? req.chatId ?? null;
-  const runId = scope?.runId ?? `model-call-unscoped:${chatId ?? "none"}`;
+  const identityOfRun = modelCallRunIdentity(scope, req.chatId);
+  const { runId, chatId, nodeId, automationId } = identityOfRun;
   const userTurnId = scope?.userTurnId ?? scope?.runId ?? runId;
   const aborted = req.signal?.aborted === true;
   const status = input.threw ? (aborted ? "cancelled" : "failed") : result?.failure ? "failed" : "completed";
@@ -710,27 +735,34 @@ function emit(collector: Collector, input: {
   const lastRequest = result as { contextInputTokens?: unknown; contextCachedInputTokens?: unknown } | undefined;
   const lastRequestInput = sanitizeCount(lastRequest?.contextInputTokens);
   const lastRequestCached = sanitizeCount(lastRequest?.contextCachedInputTokens);
+  const endedAt = Date.now();
   attempts.forEach((attempt, index) => {
     // Only the first attempt may fall back to the pre-adapter request view; later rounds (tool loops, retries)
     // carry state the request does not show, so an unreported payload stays unknown instead of being guessed.
     const payload = attempt.payload ?? (index === 0 ? fallbackPayload : null);
+    // AD-9: the call's outcome is the last attempt's. An earlier attempt that reported its provider usage finished its
+    // own request (a tool-loop round), so it is completed and its duration ends there; one that reported nothing keeps
+    // the call's outcome (no separate "unknown" status yet: owner decision O3).
+    const last = index === attempts.length - 1;
+    const roundFinished = !last && attempt.usage !== null;
+    const attemptStatus = roundFinished ? "completed" : status;
     tryRecordRunEvent({
-      runId, ...(chatId ? { chatId } : {}), ...(scope?.nodeId ? { nodeId: scope.nodeId } : {}),
+      runId, ...(chatId ? { chatId } : {}), ...(nodeId ? { nodeId } : {}), ...(automationId ? { automationId } : {}),
       ...(scope?.agentId ? { agentId: scope.agentId } : {}),
       kind: MODEL_CALL_LEDGER_EVENT_KIND,
       sourceEventId: `${MODEL_CALL_LEDGER_EVENT_KIND}:${callRef}:${index + 1}`,
       payload: ledgerEventPayload({
         callRef, ...(scope?.callRef ? { scopeCallRef: scope.callRef } : {}), attemptIndex: index + 1, attemptCount: attempts.length,
         attemptId: attempt.id, role, roleSource: source, ...(scope?.phase ? { phase: scope.phase } : {}),
-        userTurnId, scoped: Boolean(scope?.runId), identity, requestModel: req.model ?? identity.model ?? null, effort,
+        userTurnId, scoped: identityOfRun.scoped, identity, requestModel: req.model ?? identity.model ?? null, effort,
         ...(effortStatus ? { effortStatus } : {}), ...(effortRequested ? { effortRequested } : {}), ...(effortReason ? { effortReason } : {}),
-        payload, usage: attempt.usage, detail: attempt.detail, cachePlan: attempt.cachePlan ?? null, status, ...(failureKind ? { failureKind } : {}),
-        ...(failureCode ? { failureCode } : {}),
+        payload, usage: attempt.usage, detail: attempt.detail, cachePlan: attempt.cachePlan ?? null, status: attemptStatus,
+        ...(failureKind && !roundFinished ? { failureKind } : {}), ...(failureCode && !roundFinished ? { failureCode } : {}),
         ...(collector.meta ? { meta: collector.meta } : {}),
         ...(reportedWindow && index === attempts.length - 1 ? { contextWindowObserved: reportedWindow } : {}),
         ...(lastRequestInput !== undefined && index === attempts.length - 1
           ? { contextInput: { tokens: lastRequestInput, ...(lastRequestCached !== undefined ? { cached: lastRequestCached } : {}) } } : {}),
-        durationMs: Math.max(0, Date.now() - attempt.startedAt),
+        durationMs: Math.max(0, (attempt.endedAt ?? endedAt) - attempt.startedAt),
       }),
     });
   });

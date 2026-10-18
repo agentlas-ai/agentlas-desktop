@@ -159,6 +159,16 @@ export function withGoalWaitAccounting<T>(input: {
     anchorId: anchor.id, readOwner, allowHostPausedWait: true }, call);
 }
 
+/**
+ * The run the current inference is accounted to, read-only. The model-call ledger binds a call that has no model-call
+ * scope (a background judgment, a scheduler classification) to this run instead of a made-up unscoped id.
+ */
+export function currentAccountedRun(): { runId: string; chatId: string | null; automationId?: string; nodeId?: string } | null {
+  const scope = accountingContext.getStore();
+  return scope ? { runId: scope.invocationRunId, chatId: scope.chatId,
+    ...(scope.automationId ? { automationId: scope.automationId } : {}), ...(scope.nodeId ? { nodeId: scope.nodeId } : {}) } : null;
+}
+
 export interface AccountedInferenceAttempt {
   sourceId: string;
   complete(usage: LongRunUsageInput["observedUsage"], outcome: "returned" | "failed" | "timeout" | "cancelled"): void;

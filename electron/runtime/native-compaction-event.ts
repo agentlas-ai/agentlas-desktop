@@ -11,7 +11,7 @@
  */
 import { resolveEffectiveContextWindow } from "../../shared/models";
 import { tryRecordRunEvent } from "../store/run-events";
-import { currentModelCallScope } from "./model-call-ledger";
+import { currentModelCallScope, modelCallRunIdentity } from "./model-call-ledger";
 import { observedContextWindow } from "./session-generation";
 
 export const NATIVE_COMPACTION_SCHEMA = "agentlas.native-compaction.v1";
@@ -95,11 +95,11 @@ export function nativeCompactionPayload(input: NativeCompactionInput): Record<st
 export function recordNativeCompaction(input: NativeCompactionInput): void {
   try {
     const scope = currentModelCallScope();
-    const chatId = scope?.chatId ?? input.chatId ?? null;
-    const runId = scope?.runId ?? `model-call-unscoped:${chatId ?? "none"}`;
+    // The same run the call's ledger row names (ID-5): the model-call scope, else the accounted run.
+    const { runId, chatId, nodeId, automationId } = modelCallRunIdentity(scope, input.chatId);
     const ref = token(input.nativeRef);
     tryRecordRunEvent({
-      runId, ...(chatId ? { chatId } : {}), ...(scope?.nodeId ? { nodeId: scope.nodeId } : {}),
+      runId, ...(chatId ? { chatId } : {}), ...(nodeId ? { nodeId } : {}), ...(automationId ? { automationId } : {}),
       ...(scope?.agentId ? { agentId: scope.agentId } : {}),
       kind: NATIVE_COMPACTION_EVENT_KIND,
       ...(ref ? { sourceEventId: `${NATIVE_COMPACTION_EVENT_KIND}:${input.runtime}:${ref}` } : {}),

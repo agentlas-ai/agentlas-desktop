@@ -1,6 +1,7 @@
 import { getDb } from "./db";
 import { emitTaskStoreChange } from "./change-bus";
 import { tryRecordOneDomainEvent } from "../one/domain-events";
+import { ownerDirectionAfterInvocationRun } from "./run-events";
 import type {
   CanonicalTask,
   CanonicalTaskParticipant,
@@ -632,6 +633,11 @@ export function acceptCanonicalTaskResult(
       !hasPassedTaskForceExecutionVerification(input.expectedRunId)
     ) {
       throw new Error("A matching verified completed run receipt is required");
+    }
+    // The exact run stays acceptable while no owner direction followed it; a host turn after it (a teammate's
+    // report, a Goal continuation) is not a newer request (flow audit ID-4).
+    if (ownerDirectionAfterInvocationRun(input.expectedRunId, row.origin_chat_id)) {
+      throw new Error("A newer message was sent after this run; review it before accepting this result");
     }
     const nextUpdatedAt = monotonicUpdatedAt(row.updated_at, new Date().toISOString());
     const result = db.prepare(

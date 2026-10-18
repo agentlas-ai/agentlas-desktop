@@ -605,11 +605,19 @@ function questionReplacedNotice(locale: "ko" | "en"): string {
  * 질문의 실행을 모르거나 다른 대화의 영수증이면 null — 호출자가 읽기로 닫는다.
  */
 async function questionSourceReceipt(confirmation: PendingConfirmation): Promise<InvocationRunReceipt | null> {
+  return sourceRunReceipt(confirmation.chatId, confirmation.sourceRunId);
+}
+
+/**
+ * The receipt of the exact run a continuation descends from, or null when it is unknown or belongs to another
+ * conversation (the caller then closes to read). Never the conversation's newest run: a teammate's report turn there
+ * would lend its permission to a recovery of a different run (flow audit ID-7, sibling of the answer path above).
+ */
+async function sourceRunReceipt(chatId: string, runId: string | null | undefined): Promise<InvocationRunReceipt | null> {
   const api = ipc();
-  const runId = confirmation.sourceRunId;
   if (!api || !runId) return null;
   const receipt = await api.invoke.receipt(runId).catch(() => null);
-  return receipt?.runId === runId && receipt.chatId === confirmation.chatId ? receipt : null;
+  return receipt?.runId === runId && receipt.chatId === chatId ? receipt : null;
 }
 
 function decisionRejectCopy(locale: "ko" | "en"): string {
@@ -5796,6 +5804,10 @@ function OneSessionsShell() {
        * This prevents an Auto conversation from widening to write merely
        * because answering its question materializes a Task. */
       permissionMode?: OnePermissionMode;
+      /** The exact run a system continuation without permissionMode continues
+       * (the run automatic recovery judged, the focused failure). Its durable
+       * receipt caps the permission; without it the continuation runs read. */
+      sourceRunId?: string;
       /** Exact chat pin receipt for a freshly-created conversation. */
       runtimeSelection?: RuntimeSelection;
       /** Main-owned queued directions belong to this immutable submit. */
@@ -6028,11 +6040,12 @@ function OneSessionsShell() {
     let runPermissionMode = options?.permissionMode ?? onePermission;
     if (!options?.permissionMode && options?.promptOrigin === "system") {
       // Automatic retry, clarification, and recovery are continuations, not a
-      // fresh user grant. Re-read Main's durable receipt and fail closed if it
-      // is unavailable so Task promotion can never widen read to write. The
-      // owner's chip as it is now stays the ceiling: a chip lowered after the
-      // source run must bind the continuation too (P17: write under read-only).
-      const sourceReceipt = await api.invoke.latestReceipt(chatId).catch(() => null);
+      // fresh user grant. Re-read Main's durable receipt of the exact source
+      // run and fail closed if it is unavailable so Task promotion can never
+      // widen read to write. The owner's chip as it is now stays the ceiling:
+      // a chip lowered after the source run must bind the continuation too
+      // (P17: write under read-only).
+      const sourceReceipt = await sourceRunReceipt(chatId, options.sourceRunId);
       runPermissionMode = narrowerOnePermission(onePermission, sourceReceipt?.executionPermission ?? "read");
     }
     const executionPermission = runPermissionMode === "auto"
@@ -7819,7 +7832,7 @@ function OneSessionsShell() {
             reason: safeDiagnosis || tFor(appLocale, "one.res.fail.generic"),
           }),
           selected ? "task" : "conversation",
-          { runId: nextRecoveryRunId, displayUserMessage: false, promptOrigin: "system", automaticRecovery: true },
+          { runId: nextRecoveryRunId, displayUserMessage: false, promptOrigin: "system", automaticRecovery: true, sourceRunId: receipt.runId },
         );
       }).catch(() => {
         if (!cancelled) {
@@ -7892,7 +7905,7 @@ function OneSessionsShell() {
             reason: safeDiagnosis || tFor(appLocale, "one.res.fail.generic"),
           }),
           selected ? "task" : "conversation",
-          { runId: recoveryRunId, displayUserMessage: false, promptOrigin: "system", automaticRecovery: true },
+          { runId: recoveryRunId, displayUserMessage: false, promptOrigin: "system", automaticRecovery: true, sourceRunId: receipt.runId },
         );
       })
       .catch(() => {
@@ -8402,6 +8415,7 @@ function OneSessionsShell() {
     void startRun(chatId, null, null, prompt, "conversation", {
       displayUserMessage: false,
       promptOrigin: "system",
+      ...(failureFocus.runId ? { sourceRunId: failureFocus.runId } : {}),
     }).catch((cause) => requestOneOperationalRecovery("one-failure-review", cause));
   }, [appLocale, busy, conversation?.id, failureFocus, startRun]);
 

@@ -456,6 +456,7 @@ import {
   listFailureEvents,
   listRunEvents,
   listChatRunTimeline,
+  ownerDirectionAfterInvocationRun,
   recordRunEvent,
   recordMcpInvocationEvent,
   tryRecordFailureEvent,
@@ -4920,9 +4921,8 @@ export function registerIpcHandlers(): void {
     // Value Closure trust validator peeks. Miss = deterministic regex verdict.
     await prejudgeCompletionClaims(ACCEPTED_RESULT_CLOSURE_FACT_STATEMENTS, { timeoutMs: 6_000 }).catch(() => undefined);
     const task = getCanonicalTask(input.taskId);
-    const receipt = task?.originChatId
-      ? invocationService.latestReceipt(task.originChatId)
-      : null;
+    // The exact run the owner is accepting, not the room's newest run (a later host turn is not a newer request).
+    const receipt = task?.originChatId ? invocationService.receipt(input.expectedRunId) : null;
     if (task?.originChatId && getSessionCookieHeader()) {
       const projectDir = getChatWorkingFolder(task.originChatId) ?? process.cwd();
       const goalId = desktopWorkforceGoalId(task.id);
@@ -5164,12 +5164,14 @@ export function registerIpcHandlers(): void {
       const readScope = () => {
         const chat = getChat(chatId);
         const observedReceipt = invocationService.receipt(runId);
+        // The exact failed run stays judgeable until the owner writes again; a host turn after it does not count.
         if (!chat || !observedReceipt || observedReceipt.chatId !== chatId
-          || invocationService.latestReceipt(chatId)?.runId !== runId) return null;
+          || ownerDirectionAfterInvocationRun(runId, chatId)) return null;
         // Auxiliary bookkeeping is not new task evidence. Counting its own
-        // usage rows here would make every presentation invalidate itself.
+        // usage rows here would make every presentation invalidate itself
+        // (the judgment's ledger row is accounted to this run).
         const facts = getDb().prepare(`SELECT COUNT(*) AS event_count FROM run_events
-          WHERE run_id = ? AND kind NOT IN ('runtime_usage_started','runtime_usage_recorded',
+          WHERE run_id = ? AND kind NOT IN ('runtime_usage_started','runtime_usage_recorded','model_call_ledger',
             'one_controller_recovery_requested','one_controller_recovery_link')`)
           .get(runId) as { event_count: number };
         const receipt = { ...observedReceipt, eventCount: facts.event_count };
