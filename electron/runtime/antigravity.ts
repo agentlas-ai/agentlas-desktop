@@ -54,7 +54,7 @@ import { agentContextColdBootstrapForRequest, agentContextDeliveryForRequest } f
 import { waitForRetiredCliExit } from "./retired-cli-exit";
 import { tStatus } from "./status-i18n";
 import { selectionFor } from "../capabilities/one-capabilities";
-import { agyProductHomePath, withAgyProductHome } from "./antigravity-personal-context";
+import { agyProductHomePath, agySpawnHome, agySpawnsInPersonalHome, withAgyProductHome } from "./antigravity-personal-context";
 import { abortReasonError } from "./abort-reason";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, standardAntigravityBinDirs, windowsCliCommandBudget } from "./exec";
 import { stageCliImageAttachments } from "./image-attachments";
@@ -422,9 +422,12 @@ export interface AntigravityBrowserProjectPolicy {
  */
 export async function ensureAntigravityBrowserProjectPolicy(
   home = os.homedir(),
+  /** The HOME agy is spawned with (agySpawnHome): the project file goes into ITS projects folder, never the person's
+   * own one while a product mirror exists (R-101). The workspace stays under the person's HOME. */
+  configHome = home,
 ): Promise<AntigravityBrowserProjectPolicy> {
   const workspace = path.join(home, ".agentlas", "runtime-homes", "antigravity-browser-v1");
-  const configDir = path.join(home, ".gemini", "config", "projects");
+  const configDir = path.join(configHome, ".gemini", "config", "projects");
   const configPath = path.join(configDir, `${AGY_BROWSER_PROJECT_ID}.json`);
   await fs.mkdir(workspace, { recursive: true, mode: 0o700 });
   await fs.mkdir(configDir, { recursive: true, mode: 0o700 });
@@ -1295,15 +1298,30 @@ export function antigravityExitFailure(
  * 도구 목록에도 call_mcp_tool · list_resources · read_resource 가 실재한다.
  */
 /**
- * 우리가 전역 설정에 넣은 MCP 서버 키 → 지금 그 정확한 transport를 쓰는 실행 수.
+ * 우리가 agy 설정 파일에 넣은 MCP 서버 키 → 지금 그 정확한 transport를 쓰는 실행 수.
  *
- * agy 는 설정 파일이 하나뿐이라 동시 실행이 같은 파일을 공유한다. 계수 없이 정리하면
- * 먼저 끝난 실행이 아직 도는 실행의 도구를 지운다 — 그래프에서 노드 둘이 병렬로 도는
- * 흔한 경우가 정확히 그 모양이다. 모든 실행이 같은 메인 프로세스 안에 있으므로
- * 프로세스 안 계수는 동일 Main 공유만 담당하고, 별도 lifetime lease가 설치 간 충돌을 막는다.
+ * agy 는 HOME 마다 설정 파일이 하나뿐이라 그 HOME 으로 도는 동시 실행이 같은 파일을 공유한다. 계수 없이
+ * 정리하면 먼저 끝난 실행이 아직 도는 실행의 도구를 지운다 — 그래프에서 노드 둘이 병렬로 도는
+ * 흔한 경우가 정확히 그 모양이다. 프로세스 안 계수는 동일 프로세스 공유만 담당하고, 별도 lifetime
+ * lease가 설치 간 충돌을 막는다. 계수는 **설정 파일마다** 따로다: 제품 HOME(일반·One)과 개인 HOME
+ * 폴백은 서로 다른 파일이라, 한 파일의 계수가 다른 파일의 판단(공유·충돌)에 섞이면 안 된다.
  */
-const AGY_MCP_REFCOUNT = new Map<string, number>();
-const AGY_MCP_ACTIVE_ENTRIES = new Map<string, AgyMcpServerEntry>();
+interface AgyMcpFileState {
+  refcount: Map<string, number>;
+  active: Map<string, AgyMcpServerEntry>;
+  /** See AgyMcpReplacement. */
+  replacements: Map<string, AgyMcpReplacement>;
+}
+const AGY_MCP_FILE_STATE = new Map<string, AgyMcpFileState>();
+function agyMcpFileState(configPath: string): AgyMcpFileState {
+  const key = path.resolve(configPath);
+  let state = AGY_MCP_FILE_STATE.get(key);
+  if (!state) {
+    state = { refcount: new Map(), active: new Map(), replacements: new Map() };
+    AGY_MCP_FILE_STATE.set(key, state);
+  }
+  return state;
+}
 let agyMcpMutationTail: Promise<void> = Promise.resolve();
 
 async function withAgyMcpMutationLock<T>(action: () => Promise<T>): Promise<T> {
@@ -1318,6 +1336,7 @@ async function withAgyMcpMutationLock<T>(action: () => Promise<T>): Promise<T> {
   }
 }
 
+/** The agy MCP config of a HOME. Product runs pass the HOME agy is spawned with (agySpawnHome), never the default. */
 export function agyMcpConfigPath(home = os.homedir()): string {
   return path.join(home, ".gemini", "config", "mcp_config.json");
 }
@@ -1337,10 +1356,10 @@ interface AgyMcpReplacement {
   staged: AgyMcpServerEntry;
 }
 
-// The global agy config is shared by installed and source Desktop instances.
-// Keep the previous Agentlas-owned browser entry while a newer instance is
-// using the canonical key, then restore it when the last local reference ends.
-const AGY_MCP_REPLACEMENTS = new Map<string, AgyMcpReplacement>();
+// An agy config can be shared by installed and source Desktop instances (the
+// person's HOME fallback). Keep the previous Agentlas-owned browser entry while a
+// newer instance is using the canonical key, then restore it when the last local
+// reference ends (AgyMcpFileState.replacements).
 
 interface AgyGlobalMcpConfig {
   mcpServers?: Record<string, AgyMcpServerEntry>;
@@ -1363,9 +1382,9 @@ function parseAgyGlobalMcpConfig(raw: string): AgyGlobalMcpConfig {
   }
 }
 
-async function readAgyGlobalMcpConfig(): Promise<AgyGlobalMcpConfig> {
+async function readAgyGlobalMcpConfig(configPath: string): Promise<AgyGlobalMcpConfig> {
   let raw: string;
-  try { raw = await fs.readFile(agyMcpConfigPath(), "utf8"); }
+  try { raw = await fs.readFile(configPath, "utf8"); }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { mcpServers: {} };
     throw new Error("agy_mcp_global_config_unavailable");
@@ -1540,8 +1559,10 @@ export function isStaleAgentlasPlaywrightProxyEntry(entry: AgyMcpServerEntry): b
 }
 
 /**
- * 이 실행이 승인받은 MCP 서버들을 agy 전역 설정에 **더하고**, 실행이 끝나면 우리가
+ * 이 실행이 승인받은 MCP 서버들을 agy 설정 파일에 **더하고**, 실행이 끝나면 우리가
  * 더한 키만 되돌린다 — grok 러너의 `grok mcp add/remove` 리컨실과 같은 계약이다.
+ * 그 파일은 agy 가 실제로 읽는 HOME 의 것이다(R-101): 제품 HOME 미러의 자기 파일이고,
+ * 미러가 없을 때만(Windows·로그인 파일 없음·링크 불가·AGENTLAS_AGY_KEEP_HOME=1) 사람의 ~/.gemini 파일이다.
  *
  * 규칙:
  * - 이미 있는 사용자 키는 절대 건드리지 않는다. 단, 다른 Agentlas Desktop 인스턴스가
@@ -1602,6 +1623,11 @@ export async function reconcileAgyMcpServers(
   onStatus: (message: string) => void,
   runtimeEnv: NodeJS.ProcessEnv = {},
   signal?: AbortSignal,
+  /**
+   * The agy config file this run's servers are staged into: the one of the HOME agy is spawned with
+   * (agyMcpConfigPath(agySpawnHome(env))) — the product mirror's own file, the person's file only when no mirror exists.
+   */
+  configPath: string = agyMcpConfigPath(),
 ): Promise<{ cleanup: () => Promise<void>; assertReady?: () => Promise<void>; failure?: RunnerFailure }> {
   const deadline = new AbortController();
   const scheduledSignal = scheduledRootAgySignal(signal);
@@ -1614,7 +1640,7 @@ export async function reconcileAgyMcpServers(
   try {
     for (;;) {
       try {
-        return await reconcileAgyMcpServersAttempt(mcpConfigPath, onStatus, runtimeEnv, attemptSignal);
+        return await reconcileAgyMcpServersAttempt(mcpConfigPath, onStatus, runtimeEnv, attemptSignal, configPath);
       } catch (error) {
         if (callerSignal?.aborted) throw callerSignal.reason;
         if (deadline.signal.aborted) throw deadline.signal.reason;
@@ -1639,12 +1665,14 @@ export async function reconcileAgyMcpServers(
 async function reconcileAgyMcpServersAttempt(
   mcpConfigPath: string | undefined,
   onStatus: (message: string) => void,
-  runtimeEnv: NodeJS.ProcessEnv = {},
-  signal?: AbortSignal,
+  runtimeEnv: NodeJS.ProcessEnv,
+  signal: AbortSignal | undefined,
+  configPath: string,
 ): Promise<{ cleanup: () => Promise<void>; assertReady?: () => Promise<void>; failure?: RunnerFailure }> {
   const noop = { cleanup: async () => {} };
+  const fileState = agyMcpFileState(configPath);
   let lease: Awaited<ReturnType<typeof acquireAgyMcpLease>>;
-  try { lease = await acquireAgyMcpLease(agyMcpConfigPath(), { signal,
+  try { lease = await acquireAgyMcpLease(configPath, { signal,
     onWait: () => onStatus("[agy-mcp-scope] phase=waiting reason=lease-contention"),
   }); }
   catch (error) {
@@ -1656,7 +1684,7 @@ async function reconcileAgyMcpServersAttempt(
   let bound: Awaited<ReturnType<typeof reconcileAgyMcpServersUnderLease>> | undefined;
   try {
     signal?.throwIfAborted();
-    const global = await readAgyGlobalMcpConfig();
+    const global = await readAgyGlobalMcpConfig(configPath);
     const requested = mcpConfigPath ? JSON.parse(await fs.readFile(mcpConfigPath, "utf8")) : {};
     const browser = global.mcpServers?.["agentlas-browser"];
     if (browser && isAgentlasOwnedBrowserMcpEntry(browser)) {
@@ -1667,8 +1695,8 @@ async function reconcileAgyMcpServersAttempt(
         // A foreign extant channel is not proven stale. Old Desktop versions do
         // not know about this lease, so never overwrite their live/unknown grant.
         if (previousControl !== nextControl && typeof previousControl === "string") {
-          const knownLocal = (AGY_MCP_REFCOUNT.get("agentlas-browser") ?? 0) > 0
-            && isAgyMcpEntryEqual(browser, AGY_MCP_ACTIVE_ENTRIES.get("agentlas-browser"));
+          const knownLocal = (fileState.refcount.get("agentlas-browser") ?? 0) > 0
+            && isAgyMcpEntryEqual(browser, fileState.active.get("agentlas-browser"));
           // Do not classify Main's exact active entry as an unknown foreign
           // owner. The mutation-locked check below re-reads it and either
           // shares the exact requested binding or signals bounded contention.
@@ -1686,15 +1714,15 @@ async function reconcileAgyMcpServersAttempt(
       // 그 항목을 이 실행 동안만 격리하고 끝나면 되돌린다. 예전에는 여기서도 거절해서,
       // 브라우저를 한 번 쓴 기계에서는 Science 의 agy 실행이 영영 시작되지 못했다.
     }
-    bound = await reconcileAgyMcpServersUnderLease(mcpConfigPath, onStatus, runtimeEnv, lease.generation, signal);
+    bound = await reconcileAgyMcpServersUnderLease(mcpConfigPath, onStatus, runtimeEnv, lease.generation, signal, configPath);
     if (bound.failure) { await lease.release(); return bound; }
-    const stagedConfig = await readAgyGlobalMcpConfig();
+    const stagedConfig = await readAgyGlobalMcpConfig(configPath);
     signal?.throwIfAborted();
     const guardedKeys = Object.keys(stagedConfig.mcpServers ?? {}).filter((key) => stagedConfig.mcpServers?.[key]?.env?.AGENTLAS_AGY_MCP_GENERATION === lease.generation);
     const assertReady = async () => {
       signal?.throwIfAborted();
       await lease.assertOwned();
-      const current = await readAgyGlobalMcpConfig();
+      const current = await readAgyGlobalMcpConfig(configPath);
       for (const key of guardedKeys) {
         const entry = current.mcpServers?.[key];
         if (!isAgyMcpEntryEqual(entry, stagedConfig.mcpServers?.[key])) {
@@ -1720,11 +1748,14 @@ async function reconcileAgyMcpServersAttempt(
 async function reconcileAgyMcpServersUnderLease(
   mcpConfigPath: string | undefined,
   onStatus: (message: string) => void,
-  runtimeEnv: NodeJS.ProcessEnv = {},
-  generation?: string,
-  signal?: AbortSignal,
+  runtimeEnv: NodeJS.ProcessEnv,
+  generation: string | undefined,
+  signal: AbortSignal | undefined,
+  globalPath: string,
 ): Promise<{ cleanup: () => Promise<void>; failure?: RunnerFailure }> {
   const noop = { cleanup: async () => {} };
+  // In-process sharing of THIS config file (agyMcpFileState); another file's counts never decide here.
+  const { refcount: liveRefcount, active: liveEntries, replacements: liveReplacements } = agyMcpFileState(globalPath);
   if (!mcpConfigPath) return noop;
   let requested: { mcpServers?: Record<string, { command?: string; args?: string[]; env?: Record<string, string>; url?: string; headers?: Record<string, string> }> };
   try {
@@ -1739,7 +1770,7 @@ async function reconcileAgyMcpServersUnderLease(
     for (const server of Object.values(requested.mcpServers ?? {})) {
       const aliases = Object.keys(server.env ?? {}).filter((key) => /^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/.test(key)).sort();
       server.env = inheritAgyMcpSecretAliases(server.env, runtimeEnv);
-      if (generation) server.env = { ...server.env, AGENTLAS_AGY_MCP_CONFIG: agyMcpConfigPath(),
+      if (generation) server.env = { ...server.env, AGENTLAS_AGY_MCP_CONFIG: globalPath,
         AGENTLAS_AGY_MCP_GENERATION: generation, AGENTLAS_AGY_MCP_SERVER_KEY: Object.entries(requested.mcpServers ?? {}).find(([, value]) => value === server)?.[0] ?? "" };
       if (aliases.length) {
         // Removing overlays must not make different live grants appear equal
@@ -1772,7 +1803,6 @@ async function reconcileAgyMcpServersUnderLease(
 
   return withAgyMcpMutationLock(async () => {
     signal?.throwIfAborted();
-    const globalPath = agyMcpConfigPath();
     let parsed: AgyGlobalMcpConfig;
     let blankOriginal: { raw: string; mode: number } | undefined;
     try {
@@ -1805,7 +1835,7 @@ async function reconcileAgyMcpServersUnderLease(
     const collidedWithUserEntry: string[] = [];
     let localContention = false;
     for (const [key, server] of entries) {
-    const live = AGY_MCP_REFCOUNT.get(key);
+    const live = liveRefcount.get(key);
     const requestedEntry = requestedAgyMcpEntry(server);
     if (live === undefined) {
       // 우리가 지난 실행에 남긴 항목은 '다른 전송 범위'가 아니라 우리 것이다 —
@@ -1821,7 +1851,7 @@ async function reconcileAgyMcpServersUnderLease(
       collidedWithUserEntry.push(key);
       continue;
     }
-    const activeEntry = AGY_MCP_ACTIVE_ENTRIES.get(key);
+    const activeEntry = liveEntries.get(key);
     if (requestedEntry && isAgyMcpEntryEqual(activeEntry, requestedEntry)
       && isAgyMcpEntryEqual(parsed.mcpServers[key], activeEntry)) continue;
     if (live > 0 && requestedEntry && isAgyMcpEntryEqual(parsed.mcpServers[key], activeEntry)) {
@@ -1867,7 +1897,7 @@ async function reconcileAgyMcpServersUnderLease(
   let globalDirty = false;
   if (canonicalBrowserRequested) {
     for (const [key, server] of Object.entries(parsed.mcpServers)) {
-      if (requestedKeys.has(key) || AGY_MCP_REFCOUNT.has(key)) continue;
+      if (requestedKeys.has(key) || liveRefcount.has(key)) continue;
       if (!isStaleAgentlasPlaywrightProxyEntry(server)) continue;
       delete parsed.mcpServers[key];
       globalDirty = true;
@@ -1882,7 +1912,7 @@ async function reconcileAgyMcpServersUnderLease(
     owned: Boolean(parsed.mcpServers[BROWSER_KEY])
       && isAgentlasOwnedBrowserMcpEntry(parsed.mcpServers[BROWSER_KEY] ?? {}),
     requested: canonicalBrowserRequested,
-    heldByThisProcess: AGY_MCP_REFCOUNT.has(BROWSER_KEY),
+    heldByThisProcess: liveRefcount.has(BROWSER_KEY),
   }) === "quarantine") {
     quarantinedBrowser = parsed.mcpServers[BROWSER_KEY];
     delete parsed.mcpServers[BROWSER_KEY];
@@ -1900,9 +1930,9 @@ async function reconcileAgyMcpServersUnderLease(
   const previousReplacements = new Map<string, AgyMcpReplacement | undefined>();
   const rememberProcessState = (key: string) => {
     if (previousRefcounts.has(key)) return;
-    previousRefcounts.set(key, AGY_MCP_REFCOUNT.get(key));
-    previousActiveEntries.set(key, AGY_MCP_ACTIVE_ENTRIES.get(key));
-    previousReplacements.set(key, AGY_MCP_REPLACEMENTS.get(key));
+    previousRefcounts.set(key, liveRefcount.get(key));
+    previousActiveEntries.set(key, liveEntries.get(key));
+    previousReplacements.set(key, liveReplacements.get(key));
   };
   for (const [key, server] of entries) {
     if (parsed.mcpServers[key]) {
@@ -1919,7 +1949,7 @@ async function reconcileAgyMcpServersUnderLease(
        * 그래서 우리가 넣은 키는 참조 계수로 센다. 계수가 0이 될 때만 걷어낸다.
        */
       if (
-        !AGY_MCP_REFCOUNT.has(key)
+        !liveRefcount.has(key)
         && isAgentlasWrittenMcpEntry(parsed.mcpServers[key])
       ) {
         rememberProcessState(key);
@@ -1932,19 +1962,19 @@ async function reconcileAgyMcpServersUnderLease(
         };
         const previous = parsed.mcpServers[key];
         parsed.mcpServers[key] = staged;
-        AGY_MCP_REPLACEMENTS.set(key, { previous, staged });
+        liveReplacements.set(key, { previous, staged });
         stagedEntries.set(key, staged);
         added.push(key);
-        AGY_MCP_REFCOUNT.set(key, 1);
-        AGY_MCP_ACTIVE_ENTRIES.set(key, staged);
+        liveRefcount.set(key, 1);
+        liveEntries.set(key, staged);
         globalDirty = true;
         continue;
       }
-      const live = AGY_MCP_REFCOUNT.get(key);
+      const live = liveRefcount.get(key);
       if (live !== undefined) {
         rememberProcessState(key);
-        AGY_MCP_REFCOUNT.set(key, live + 1);
-        AGY_MCP_ACTIVE_ENTRIES.set(key, parsed.mcpServers[key]);
+        liveRefcount.set(key, live + 1);
+        liveEntries.set(key, parsed.mcpServers[key]);
         stagedEntries.set(key, parsed.mcpServers[key]);
         added.push(key);
       }
@@ -1958,8 +1988,8 @@ async function reconcileAgyMcpServersUnderLease(
     parsed.mcpServers[key] = staged;
     stagedEntries.set(key, staged);
     added.push(key);
-    AGY_MCP_REFCOUNT.set(key, (AGY_MCP_REFCOUNT.get(key) ?? 0) + 1);
-    AGY_MCP_ACTIVE_ENTRIES.set(key, staged);
+    liveRefcount.set(key, (liveRefcount.get(key) ?? 0) + 1);
+    liveEntries.set(key, staged);
   }
   if (added.length === 0 && !globalDirty) return noop;
   try {
@@ -1970,12 +2000,12 @@ async function reconcileAgyMcpServersUnderLease(
       const previousRefcount = previousRefcounts.get(key);
       const previousActive = previousActiveEntries.get(key);
       const previousReplacement = previousReplacements.get(key);
-      if (previousRefcount === undefined) AGY_MCP_REFCOUNT.delete(key);
-      else AGY_MCP_REFCOUNT.set(key, previousRefcount);
-      if (previousActive === undefined) AGY_MCP_ACTIVE_ENTRIES.delete(key);
-      else AGY_MCP_ACTIVE_ENTRIES.set(key, previousActive);
-      if (previousReplacement === undefined) AGY_MCP_REPLACEMENTS.delete(key);
-      else AGY_MCP_REPLACEMENTS.set(key, previousReplacement);
+      if (previousRefcount === undefined) liveRefcount.delete(key);
+      else liveRefcount.set(key, previousRefcount);
+      if (previousActive === undefined) liveEntries.delete(key);
+      else liveEntries.set(key, previousActive);
+      if (previousReplacement === undefined) liveReplacements.delete(key);
+      else liveReplacements.set(key, previousReplacement);
     }
     onStatus(`antigravity: could not stage MCP servers (${error instanceof Error ? error.message : String(error)}) — run stopped before model execution`);
     return {
@@ -2006,25 +2036,25 @@ async function reconcileAgyMcpServersUnderLease(
       try {
         let dirty = false;
         for (const key of added) {
-          const live = (AGY_MCP_REFCOUNT.get(key) ?? 1) - 1;
+          const live = (liveRefcount.get(key) ?? 1) - 1;
           if (live > 0) {
             // 다른 실행이 아직 이 서버를 쓰고 있다 — 계수만 내리고 남겨 둔다.
-            AGY_MCP_REFCOUNT.set(key, live);
+            liveRefcount.set(key, live);
             continue;
           }
-          AGY_MCP_REFCOUNT.delete(key);
-          AGY_MCP_ACTIVE_ENTRIES.delete(key);
+          liveRefcount.delete(key);
+          liveEntries.delete(key);
           const staged = stagedEntries.get(key);
-          const replacement = AGY_MCP_REPLACEMENTS.get(key);
+          const replacement = liveReplacements.get(key);
           if (!current || !isAgyMcpEntryEqual(current.mcpServers![key], staged)) {
             // Another Desktop instance changed the key after us. Never remove
             // or restore a value that this run can no longer identify.
-            if (replacement) AGY_MCP_REPLACEMENTS.delete(key);
+            if (replacement) liveReplacements.delete(key);
             continue;
           }
           if (replacement) {
             current.mcpServers![key] = replacement.previous;
-            AGY_MCP_REPLACEMENTS.delete(key);
+            liveReplacements.delete(key);
             dirty = true;
           } else if (current.mcpServers![key]) {
             delete current.mcpServers![key];
@@ -2038,7 +2068,7 @@ async function reconcileAgyMcpServersUnderLease(
           dirty = true;
         }
         const blank = AGY_MCP_BLANK_CONFIGS.get(globalPath);
-        if (blank && AGY_MCP_REFCOUNT.size === 0) {
+        if (blank && liveRefcount.size === 0) {
           // Restore only when removing our last exact entry leaves no foreign
           // servers or metadata. Drift must never authorize a blank overwrite.
           const empty = current && Object.keys(current).length === 1
@@ -2059,6 +2089,73 @@ async function reconcileAgyMcpServersUnderLease(
     }),
   };
   });
+}
+
+export type AgyPersonalMcpMigration =
+  | { status: "disabled" | "done" | "busy" | "unavailable" | "clean" }
+  | { status: "migrated"; removed: string[]; backupPath: string };
+
+/**
+ * One-time, gated cleanup of the MCP entries older builds wrote into the person's own ~/.gemini/config/mcp_config.json
+ * (R-101). Until the run's servers were staged into the product mirror's own file, every authorized agy run added its
+ * servers to the person's file and removed them when it ended; a run that never ended left them there, and the owner's
+ * personal agy then started them in every session of their own (2026-10-18: agentlas-browser, agentlas-science,
+ * agentlas-time, filesystem, shadcn, all with Agentlas's own env markers).
+ *
+ * Gates, all required: this process spawns agy in a product mirror (the caller's branch), the kill switch
+ * AGENTLAS_AGY_PERSONAL_MCP_MIGRATION=0 is not set, no marker for this HOME exists yet (once per HOME), the person's
+ * file's cross-install lease is free within 2 s (an older Desktop staging into it holds that lease for its whole run),
+ * no run of this process stages into that file right now, and the file parses. Only entries isAgentlasWrittenMcpEntry
+ * recognises (Agentlas's own env marker keys, which a server the person registered never carries) are removed; the
+ * exact original bytes are first written to a private backup beside the file; every other entry and key is kept.
+ */
+export async function migrateAgyPersonalMcpConfig(input: { realHome: string; markerDir?: string }): Promise<AgyPersonalMcpMigration> {
+  if (process.env.AGENTLAS_AGY_PERSONAL_MCP_MIGRATION === "0") return { status: "disabled" };
+  const configPath = agyMcpConfigPath(input.realHome);
+  const markerDir = input.markerDir ?? userDataPath("agy-product-home");
+  const marker = path.join(markerDir, `personal-mcp-migration-v1-${createHash("sha256").update(path.resolve(input.realHome)).digest("hex").slice(0, 12)}.json`);
+  const markerExists = () => fs.stat(marker).then(() => true, () => false);
+  const writeMarker = async (record: Record<string, unknown>) => {
+    await fs.mkdir(markerDir, { recursive: true, mode: 0o700 });
+    await fs.writeFile(marker, `${JSON.stringify({ schemaVersion: "agentlas.agy-personal-mcp-migration.v1", at: new Date().toISOString(), ...record })}\n`, { mode: 0o600 });
+  };
+  if (await markerExists()) return { status: "done" };
+  try { await fs.access(path.dirname(configPath)); }
+  catch { await writeMarker({ status: "clean" }); return { status: "clean" }; }
+  let lease: Awaited<ReturnType<typeof acquireAgyMcpLease>>;
+  try { lease = await acquireAgyMcpLease(configPath, { signal: AbortSignal.timeout(2_000) }); }
+  catch { return { status: "busy" }; }
+  try {
+    return await withAgyMcpMutationLock(async (): Promise<AgyPersonalMcpMigration> => {
+      if (await markerExists()) return { status: "done" };
+      if (agyMcpFileState(configPath).refcount.size > 0) return { status: "busy" };
+      let raw: string;
+      try { raw = await fs.readFile(configPath, "utf8"); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return { status: "unavailable" };
+        await writeMarker({ status: "clean" });
+        return { status: "clean" };
+      }
+      let parsed: AgyGlobalMcpConfig;
+      try { parsed = parseAgyGlobalMcpConfig(raw); } catch { return { status: "unavailable" }; }
+      const servers = parsed.mcpServers && typeof parsed.mcpServers === "object" && !Array.isArray(parsed.mcpServers) ? parsed.mcpServers : {};
+      const removed = Object.keys(servers).filter((key) => isAgentlasWrittenMcpEntry(servers[key] ?? {}));
+      if (removed.length === 0) { await writeMarker({ status: "clean" }); return { status: "clean" }; }
+      const mode = (await fs.stat(configPath)).mode & 0o777;
+      const backupPath = `${configPath}.agentlas-migration-${new Date().toISOString().replace(/[:.]/g, "")}.bak`;
+      await fs.writeFile(backupPath, raw, { encoding: "utf8", mode: 0o600, flag: "wx" });
+      const next = { ...parsed, mcpServers: Object.fromEntries(Object.entries(servers).filter(([key]) => !removed.includes(key))) };
+      const tmp = `${configPath}.agentlas-${process.pid}-${randomUUID()}.tmp`;
+      await fs.writeFile(tmp, `${JSON.stringify(next, null, 2)}\n`, { encoding: "utf8", mode });
+      await fs.chmod(tmp, mode);
+      await fs.rename(tmp, configPath);
+      await writeMarker({ status: "migrated", removed, backup: path.basename(backupPath) });
+      console.info(`[agy-mcp-scope] personal-config migration removed=${removed.join(",")} backup=${path.basename(backupPath)}`);
+      return { status: "migrated", removed, backupPath };
+    });
+  } finally {
+    await lease.release().catch(() => undefined);
+  }
 }
 
 /**
@@ -2270,6 +2367,22 @@ async function runPreparedAntigravityAttempt(
   const agyToolsAllowed = runReq.browserOnly
     || runReq.permission === "write"
     || runReq.permission === "full";
+  // agy reads the person's GEMINI.md, skills, plugins, hooks and MCP servers from HOME; a product run gets a mirrored HOME
+  // without them (only One gets back what the person switched on). The HOME it returns is also where this run's MCP
+  // servers and browser project are written (R-101): the mirror's own files, the person's ~/.gemini only when no mirror
+  // exists (Windows, no sign-in file, links refused, AGENTLAS_AGY_KEEP_HOME=1).
+  const agyProductEnv = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
+    try { return withAgyProductHome(env, selectionFor(runReq.agentId, undefined, runReq.chatId)); }
+    catch { return env; }
+  };
+  const agyRunEnv = agyProductEnv({ ...(req.env ?? process.env) });
+  const agyRunHome = agySpawnHome(agyRunEnv);
+  if (agySpawnsInPersonalHome(agyRunEnv)) {
+    if (agyToolsAllowed) events.onStatus("[agy-mcp-scope] target=personal-home reason=product-home-unavailable");
+  } else {
+    // One-time, gated cleanup of entries older builds wrote into the person's file (migrateAgyPersonalMcpConfig).
+    void migrateAgyPersonalMcpConfig({ realHome: agyRunEnv.AGENTLAS_AGY_REAL_HOME || os.homedir() }).catch(() => undefined);
+  }
   /*
    * Browser-only profile (see ensureAntigravityBrowserReadProjectPolicy): scoped-read on an agy measured to honor
    * project grants headlessly (the project file is written before each spawn, in the HOME agy gets); the legacy bypass
@@ -2281,7 +2394,7 @@ async function runPreparedAntigravityAttempt(
   const browserProject: { projectId: string; scopedRead: boolean } | null = browserProfile === "scoped-read"
     ? { projectId: AGY_BROWSER_READ_PROJECT_ID, scopedRead: true }
     : browserProfile === "legacy"
-      ? { projectId: (await ensureAntigravityBrowserProjectPolicy()).projectId, scopedRead: false }
+      ? { projectId: (await ensureAntigravityBrowserProjectPolicy(undefined, agyRunHome)).projectId, scopedRead: false }
       : null;
   const ensureBrowserReadPolicy = (env: NodeJS.ProcessEnv): void => {
     if (browserProject?.scopedRead) ensureAntigravityBrowserReadProjectPolicy(env.HOME || os.homedir(), env.AGENTLAS_AGY_REAL_HOME || os.homedir());
@@ -2389,12 +2502,6 @@ async function runPreparedAntigravityAttempt(
     req.model, spawnPrompt, agyReadDirs, agyToolsAllowed ? req.permission : undefined,
     req.outputSchema?.schema, agyResumeId ?? undefined, browserProject ?? undefined, undefined, effortPlan.args,
   );
-  // agy reads the person's GEMINI.md, skills, plugins, hooks and MCP servers from HOME; a product run gets a mirrored HOME
-  // without them (only One gets back what the person switched on). Must run after the run's MCP servers were reconciled.
-  const agyProductEnv = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
-    try { return withAgyProductHome(env, selectionFor(runReq.agentId, undefined, runReq.chatId), agyToolsAllowed ? runReq.mcpConfigPath : undefined); }
-    catch { return env; }
-  };
   const oneShotSpawnEnv = (): NodeJS.ProcessEnv => {
     const env: NodeJS.ProcessEnv = agyProductEnv({ ...(req.env ?? process.env), GEMINI_CLI_TRUST_WORKSPACE: "true" });
     if (!env.TERM || env.TERM === "dumb") env.TERM = "xterm-256color";
@@ -2467,7 +2574,7 @@ async function runPreparedAntigravityAttempt(
   let residentProtocolFallback = false;
   try {
     req.signal?.throwIfAborted();
-    if (agyToolsAllowed) mcpReconcile = await reconcileAgyMcpServers(req.mcpConfigPath, events.onStatus, req.env ?? process.env, req.signal);
+    if (agyToolsAllowed) mcpReconcile = await reconcileAgyMcpServers(req.mcpConfigPath, events.onStatus, req.env ?? process.env, req.signal, agyMcpConfigPath(agyRunHome));
     req.signal?.throwIfAborted();
     if (mcpReconcile.failure) return { text: "", ownerControlTerminal: "uncertain", turnDelivery: "not-dispatched", failure: mcpReconcile.failure };
     if (req.env?.AGENTLAS_NATIVE_BROWSER_SCOPE === "task") {

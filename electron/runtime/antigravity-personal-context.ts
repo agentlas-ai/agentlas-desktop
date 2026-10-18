@@ -11,8 +11,8 @@
 //
 // Left out of `.gemini` (the context agy would otherwise load): GEMINI.md (+ backups), commands/, extensions/,
 // config/{skills,plugins,sidecars,hooks.json,mcp_config.json}, the per-server MCP tool descriptors (mcp/), the
-// knowledge store, plugin data and global workflows. MCP servers are the ones this run's own authorized MCP config
-// asked for plus the ones One switched on.
+// knowledge store, plugin data and global workflows. MCP servers are the ones runs staged into the mirror's own
+// mcp_config.json (their authorized MCP config; never written into the person's file) plus the ones One switched on.
 //
 // The person's policy files are never linked either: config/config.json, antigravity-cli/settings.json and the
 // config/projects folder are the mirror's own, holding only an allowlist of the person's (productAgyConfig,
@@ -171,11 +171,41 @@ function syncLinkFolder(dir: string, wanted: ReadonlyMap<string, string>): void 
   }
 }
 
+/**
+ * An MCP entry Agentlas wrote (antigravity.ts reconcileAgyMcpServers): its env carries Agentlas's own marker keys, which a
+ * server the person registered never has. Same marker family as antigravity.ts isAgentlasWrittenMcpEntry.
+ */
+export function agentlasWrittenAgyMcpEntry(entry: unknown): boolean {
+  const env = objectOf(objectOf(entry).env);
+  return Object.keys(env).some((key) => key.startsWith("AGENTLAS_AGY_MCP_") || key.startsWith("AGENTLAS_MCP_PROXY_"));
+}
+
+/**
+ * The mirror's own config/mcp_config.json (R-101, 2026-10-18). The run's authorized servers are staged into THIS file by
+ * reconcileAgyMcpServers (antigravity.ts, under its lease) and never into the person's file: until 1.3.6x they were
+ * written into ~/.gemini/config/mcp_config.json and copied from there, and the owner's personal file still held five
+ * Agentlas entries (agentlas-browser, agentlas-science, agentlas-time, filesystem, shadcn) that every personal agy session
+ * started. Kept here: the entries a run staged (Agentlas-written, in this file's order; reconcile owns their lifetime)
+ * and the person's servers One switched on (read from the real file; never an Agentlas-written leftover of the old
+ * design). A staged entry wins a name both hold until the run that staged it removes it.
+ */
+export function productAgyMcpConfig(realMcp: Record<string, unknown> | null, mirrorMcp: Record<string, unknown> | null, oneServers: ReadonlySet<string>): string {
+  const personal = new Map(Object.entries(objectOf(realMcp?.mcpServers))
+    .filter(([name, entry]) => oneServers.has(name) && !agentlasWrittenAgyMcpEntry(entry)));
+  const out: Record<string, unknown> = {};
+  for (const [name, entry] of Object.entries(objectOf(mirrorMcp?.mcpServers))) {
+    if (agentlasWrittenAgyMcpEntry(entry)) out[name] = entry;
+    else if (personal.has(name)) out[name] = personal.get(name);
+  }
+  for (const [name, entry] of personal) if (!(name in out)) out[name] = entry;
+  return `${JSON.stringify({ mcpServers: out }, null, 2)}\n`;
+}
+
 export interface AgyProductHomeInput {
   /** The person's real HOME. */
   realHome: string;
   selection: CapabilitySelection | undefined;
-  /** MCP server keys this run's authorized MCP config asked for (their entries are read from the real mcp_config.json). */
+  /** Ignored (kept for older callers): a run's servers are staged into the mirror's own file, not read from the person's. */
   runMcpKeys?: readonly string[];
   mirrorRoot?: string;
 }
@@ -238,10 +268,8 @@ export function syncAgyProductHome(input: AgyProductHomeInput): { home: string }
     const servers = oneGemini(selection, "connector");
     const keepPlugins = new Set(plugins.map((item) => path.basename(item.path)));
     const own: Record<string, string> = { "config.json": productAgyConfig(readJsonObject(path.join(realConfig, "config.json")), keepPlugins) };
-    const realMcp = readJsonObject(path.join(realConfig, "mcp_config.json"));
-    const realServers = (realMcp?.mcpServers && typeof realMcp.mcpServers === "object" ? (realMcp.mcpServers as Record<string, unknown>) : {});
-    const wantedServers = new Set([...(input.runMcpKeys ?? []), ...servers.map((item) => item.name)]);
-    own["mcp_config.json"] = `${JSON.stringify({ ...(realMcp ?? {}), mcpServers: Object.fromEntries(Object.entries(realServers).filter(([name]) => wantedServers.has(name))) }, null, 2)}\n`;
+    own["mcp_config.json"] = productAgyMcpConfig(readJsonObject(path.join(realConfig, "mcp_config.json")),
+      readJsonObject(path.join(gemini, "config", "mcp_config.json")), new Set(servers.map((item) => item.name)));
     const realHooks = readJsonObject(path.join(realConfig, "hooks.json"));
     const keepHooks = new Set(hooks.map((item) => item.name));
     if (realHooks && keepHooks.size > 0) own["hooks.json"] = `${JSON.stringify(Object.fromEntries(Object.entries(realHooks).filter(([name]) => keepHooks.has(name))), null, 2)}\n`;
@@ -279,14 +307,27 @@ export function runMcpKeysOf(mcpConfigPath: string | undefined): string[] {
 
 /**
  * The run environment for agy: HOME points at the product mirror. `env.AGENTLAS_AGY_KEEP_HOME=1` or a missing safe
- * mirror keeps the real HOME. Callers must run this AFTER the run's MCP servers were written to the real config.
+ * mirror keeps the real HOME. The HOME this returns is the one whose config/mcp_config.json the run's MCP servers are
+ * staged into (antigravity.ts agyMcpConfigPath(agySpawnHome(env))), so it may be called before or after that staging; a
+ * re-sync keeps every staged entry. The third argument is ignored (kept for older callers).
  */
-export function withAgyProductHome(env: NodeJS.ProcessEnv, selection: CapabilitySelection | undefined, mcpConfigPath: string | undefined): NodeJS.ProcessEnv {
+export function withAgyProductHome(env: NodeJS.ProcessEnv, selection: CapabilitySelection | undefined, _mcpConfigPath?: string): NodeJS.ProcessEnv {
   if (env.AGENTLAS_AGY_KEEP_HOME === "1") return env;
   const realHome = personalHomeDir({ HOME: env.AGENTLAS_AGY_REAL_HOME || os.homedir() });
   // A HOME that is already a product mirror (resident re-entry) is kept; one merely inherited by this process is not.
   if (env.HOME && path.resolve(env.HOME) !== path.resolve(realHome) && !inheritedProductHome(env, "HOME")) return env;
-  const mirror = syncAgyProductHome({ realHome, selection, runMcpKeys: runMcpKeysOf(mcpConfigPath) });
+  const mirror = syncAgyProductHome({ realHome, selection });
   if (!("home" in mirror)) return env;
   return { ...env, HOME: mirror.home, AGENTLAS_AGY_REAL_HOME: realHome };
+}
+
+/** The HOME an agy process with this environment reads ~/.gemini from. */
+export function agySpawnHome(env: NodeJS.ProcessEnv): string {
+  return env.HOME || os.homedir();
+}
+
+/** True when an agy process with this environment reads the person's own ~/.gemini (no product mirror). */
+export function agySpawnsInPersonalHome(env: NodeJS.ProcessEnv): boolean {
+  const realHome = personalHomeDir({ HOME: env.AGENTLAS_AGY_REAL_HOME || os.homedir() });
+  return path.resolve(agySpawnHome(env)) === path.resolve(realHome);
 }
