@@ -236,7 +236,23 @@ export function syncClaudeProductHome(realDir: string, mirror = claudeProductHom
  * one typed plan. This changes the tool list Claude sees, not any prompt text; the task store stays in the mirror (the
  * `tasks` dir is not a linked config entry).
  */
-export const CLAUDE_PRODUCT_RUN_ENV: Readonly<Record<string, string>> = Object.freeze({ CLAUDE_CODE_ENABLE_TODO_TOOLS: "1" });
+/*
+ * Background tasks and the CLI's own cron are off on product runs: the host owns the process lifetime, so work that is
+ * meant to outlive the turn cannot. Production 2026-10-18 (Yotube orchestrator session 67fc032e, 1.3.67): 34 background
+ * Agents, 864 of 963 subagent minutes outside the root turn; the one-shot process lived 28 and 39 minutes waiting on them,
+ * the CLI's own ceiling killed five at once (06:43:54Z), and two Goal turns ended unsettled. With 0c261a38 each pass ends
+ * at its root result and the process is ended, which would cut every background subagent mid-work. With the env the
+ * Agent and Bash tools run in the foreground (several calls in one message still run in parallel) and finish inside the
+ * pass, as on 10-17 (15 foreground Agents, 0 unsettled passes) and as codex exec already does. A CronCreate inside a run
+ * never fires after the host ends the process, so the model would believe a schedule exists that does not; scheduling
+ * stays with Agentlas (goal_wait, automations). Measured in the installed CLI 2.1.302: both names read from the env.
+ * This changes the tool surface, not any prompt text.
+ */
+export const CLAUDE_PRODUCT_RUN_ENV: Readonly<Record<string, string>> = Object.freeze({
+  CLAUDE_CODE_ENABLE_TODO_TOOLS: "1",
+  CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
+  CLAUDE_CODE_DISABLE_CRON: "1",
+});
 
 /** `env` itself when it already carries CLAUDE_PRODUCT_RUN_ENV (idempotent), else a copy that does. */
 function withClaudeProductRunEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
