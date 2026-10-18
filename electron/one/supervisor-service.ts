@@ -33,7 +33,7 @@ export interface SupervisorRuntime {
   cancelGoal(chatId: string, goalId: string): void;
   onSettled(listener: (event: {runId: string; chatId: string; receipt: InvocationRunReceipt}) => void): () => void;
   /** Where a queued direction stands (invocation_steers): delivered into a run, withdrawn or failed. */
-  steerState?(queuedRequestId: string): {status: string; drainedRunId: string | null} | null;
+  steerState?(queuedRequestId: string): {status: string; drainedRunId: string | null; recoveryReason?: string | null} | null;
 }
 export interface SupervisorDependencies {
   store: OneSupervisorStore;
@@ -1011,7 +1011,11 @@ export class OneSupervisorService {
       if (!queued) continue;
       const state = this.deps.runtime.steerState(queued);
       if (row.kind === "chat-send" || row.kind === "steer") {
-        if (state?.status === "cancelled" || state?.status === "failed") {
+        if (state?.status === "cancelled" && state.recoveryReason === "parked-for-waiting-goal") {
+          // A waiting Goal refused the turn and the drain parked the direction for that conversation's next turn
+          // (deferred_system_relays, 4ec4f77c): delivered, not withdrawn.
+          this.deps.store.update(row,{state:"accepted",acknowledgement:"delivered",reason:"parked_for_waiting_goal"});
+        } else if (state?.status === "cancelled" || state?.status === "failed") {
           this.deps.store.update(row,{state:state.status === "cancelled" ? "cancelled" : "failed",acknowledgement:"settled",
             reason:state.status === "cancelled" ? "steer_withdrawn" : "steer_not_applied"});
         } else if (state?.status === "started" && state.drainedRunId) {

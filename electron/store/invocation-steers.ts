@@ -308,10 +308,10 @@ export function bindQueuedTeamReportCustody(id:string,custody:QueuedTeamReportCu
 }
 
 /** Where a queued direction stands: still waiting, delivered into a run ("started"), withdrawn or failed. */
-export function queuedSteerState(id: string): { status: DurableQueuedSteer["status"]; drainedRunId: string | null } | null {
-  const row = getDb().prepare("SELECT status, drained_run_id FROM invocation_steers WHERE id = ?").get(id) as
-    { status: DurableQueuedSteer["status"]; drained_run_id: string | null } | undefined;
-  return row ? { status: row.status, drainedRunId: row.drained_run_id } : null;
+export function queuedSteerState(id: string): { status: DurableQueuedSteer["status"]; drainedRunId: string | null; recoveryReason: string | null } | null {
+  const row = getDb().prepare("SELECT status, drained_run_id, recovery_reason FROM invocation_steers WHERE id = ?").get(id) as
+    { status: DurableQueuedSteer["status"]; drained_run_id: string | null; recovery_reason: string | null } | undefined;
+  return row ? { status: row.status, drainedRunId: row.drained_run_id, recoveryReason: row.recovery_reason } : null;
 }
 
 /** Delivery ("started") keeps the row's column; every cancelled/failed transition writes its cause in the same UPDATE. */
