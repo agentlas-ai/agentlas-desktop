@@ -519,13 +519,18 @@ export function getAgiTokenLimits(): AgiTokenLimitsView { return agiTokenLimitsV
 
 export async function readAliveState(input: unknown): Promise<AliveState> {
   const row = parseAliveSurfaceChat(input, ["surface", "chatId"]);
-  if (!host || !host.isRunning()) {
+  const notLocal = async (): Promise<AliveState> => {
     if (!remoteOwner()) return offState("alive-host-not-running");
     try { return await forwardAliveOp("getState", { surface: row.surface, chatId: row.chatId }); }
     catch (error) { return offState(errorCode(error)); }
-  }
-  await host.refreshPlanAccess();
-  return host.getState(row.surface as AliveSurface, row.chatId as string);
+  };
+  const local = host;
+  if (!local || !local.isRunning()) return notLocal();
+  await local.refreshPlanAccess();
+  // Startup hands the domain to the background service; when that lands during the await, the local host is gone
+  // (production 1.3.67 first launch, 2026-10-18 00:11:03Z: "Cannot read properties of null (reading 'getState')").
+  if (host !== local || !local.isRunning()) return notLocal();
+  return local.getState(row.surface as AliveSurface, row.chatId as string);
 }
 
 export async function setAliveEnabled(input: unknown, forwardedIntentId?: string): Promise<AliveState> {
