@@ -58,6 +58,7 @@ import type {
   AgentProcessState,
   ChatGoalContext,
   ComputerUsePreview,
+  InvocationAdmissionReceipt,
   InvocationRunReceipt,
   InvocationSteerResult,
   McpInvocationRequest,
@@ -91,33 +92,60 @@ import { ToolApprovalInline } from "@/components/ToolApprovalInline";
 const WORK_COMPOSER_WIDTH_PX = 740;
 const WORK_COMPOSER_INSET_PX = 0;
 const WORK_UNCERTAIN_ADMISSION_PREFIX = "agentlas.work-uncertain-admission.v1:";
-const workUncertainAdmissions = new Map<string, string>();
+/** A send whose admission is unknown. `recordedAt` (epoch ms) lets an "absent" answer prove no start; a marker
+ * written before it existed (a bare run ID) is legacy. */
+type WorkUncertainAdmission = { runId: string; recordedAt?: number; legacy?: true };
+const workUncertainAdmissions = new Map<string, WorkUncertainAdmission>();
+const RUN_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-function readWorkUncertainAdmission(chatId: string): string | null {
+function readWorkUncertainAdmissionRecord(chatId: string): WorkUncertainAdmission | null {
   const live = workUncertainAdmissions.get(chatId);
   if (live) return live;
   try {
-    const runId = window.localStorage.getItem(`${WORK_UNCERTAIN_ADMISSION_PREFIX}${chatId}`);
-    return runId && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(runId)
-      ? runId : null;
+    const raw = window.localStorage.getItem(`${WORK_UNCERTAIN_ADMISSION_PREFIX}${chatId}`);
+    if (!raw) return null;
+    if (RUN_ID_PATTERN.test(raw)) return { runId: raw, legacy: true };
+    const parsed = JSON.parse(raw) as { runId?: unknown; recordedAt?: unknown };
+    if (typeof parsed.runId !== "string" || !RUN_ID_PATTERN.test(parsed.runId)) return null;
+    return typeof parsed.recordedAt === "number" && Number.isFinite(parsed.recordedAt)
+      ? { runId: parsed.runId, recordedAt: parsed.recordedAt } : { runId: parsed.runId, legacy: true };
   } catch { return null; }
 }
 
+function readWorkUncertainAdmission(chatId: string): string | null {
+  return readWorkUncertainAdmissionRecord(chatId)?.runId ?? null;
+}
+
 function writeWorkUncertainAdmission(chatId: string, runId: string): boolean {
+  const record: WorkUncertainAdmission = { runId, recordedAt: Date.now() };
   try {
-    window.localStorage.setItem(`${WORK_UNCERTAIN_ADMISSION_PREFIX}${chatId}`, runId);
-    workUncertainAdmissions.set(chatId, runId);
+    window.localStorage.setItem(`${WORK_UNCERTAIN_ADMISSION_PREFIX}${chatId}`, JSON.stringify(record));
+    workUncertainAdmissions.set(chatId, record);
     return true;
   } catch { return false; }
 }
 
 function clearWorkUncertainAdmission(chatId: string, runId: string): void {
-  if (workUncertainAdmissions.get(chatId) === runId) workUncertainAdmissions.delete(chatId);
+  if (workUncertainAdmissions.get(chatId)?.runId === runId) workUncertainAdmissions.delete(chatId);
   try {
-    if (window.localStorage.getItem(`${WORK_UNCERTAIN_ADMISSION_PREFIX}${chatId}`) === runId) {
-      window.localStorage.removeItem(`${WORK_UNCERTAIN_ADMISSION_PREFIX}${chatId}`);
-    }
+    const key = `${WORK_UNCERTAIN_ADMISSION_PREFIX}${chatId}`;
+    const raw = window.localStorage.getItem(key);
+    if (raw === runId || (raw && raw.includes(`"runId":"${runId}"`))) window.localStorage.removeItem(key);
   } catch { /* The in-memory fence remains authoritative for this renderer. */ }
+}
+
+/**
+ * The same rule One uses (OneShell absentAdmissionProvesNoStart). Main answers "absent" for a run with no admission
+ * row. That proves no start only when Main received the request and refused it before reserving, or when the record
+ * predates the Main process that answers. Work used to treat every "absent" as unresolved, so one lost send blocked
+ * every later send in that chat with nothing on screen able to clear it (2026-10-18 sweep).
+ */
+function workAbsentAdmissionProvesNoStart(admission: InvocationAdmissionReceipt, pending: WorkUncertainAdmission): boolean {
+  if (admission.status !== "absent" || admission.runId !== pending.runId) return false;
+  if (admission.refusedBeforeReservation === true) return true;
+  const startedAt = admission.ownerProcessStartedAt;
+  if (typeof startedAt !== "number" || !Number.isFinite(startedAt)) return false;
+  return pending.legacy === true || (pending.recordedAt !== undefined && pending.recordedAt < startedAt);
 }
 
 async function workFollowupReceiptMatches(intent: OneFollowupIntent, receipt: InvocationSteerResult | null): Promise<boolean> {
@@ -4839,8 +4867,21 @@ function ChatPage() {
         (requestedTaskId && validatedTaskChatId !== chat.id)
       ) return false;
       const followupStopEpoch = workFollowupStopEpochs.get(chat.id) ?? 0;
-      const unresolvedRunId = !opts?.decisionContinuation ? readWorkUncertainAdmission(chat.id) : null;
-      if (unresolvedRunId) {
+      const unresolvedRecord = !opts?.decisionContinuation ? readWorkUncertainAdmissionRecord(chat.id) : null;
+      const unresolvedRunId = unresolvedRecord?.runId ?? null;
+      let unresolvedProvenNotStarted = false;
+      if (unresolvedRecord && unresolvedRunId) {
+        try {
+          const admission = await api.invoke.admission(unresolvedRunId);
+          if (workAbsentAdmissionProvesNoStart(admission, unresolvedRecord)
+            && !(await api.invoke.receipt(unresolvedRunId).catch(() => null))) {
+            // The earlier send never started: clear its fence and let this send go.
+            clearWorkUncertainAdmission(chat.id, unresolvedRunId);
+            unresolvedProvenNotStarted = true;
+          }
+        } catch { /* Unknown stays unknown: the reconciliation below keeps the fence. */ }
+      }
+      if (unresolvedRunId && !unresolvedProvenNotStarted) {
         // A response-loss retry may have started external work. Reconcile the
         // original Main identity; never turn the same composer text into a new
         // run ID in this send call, including after an app restart.
