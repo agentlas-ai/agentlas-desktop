@@ -884,6 +884,27 @@ function writeOneComposerDraft(key: string, patch: Partial<OneComposerDraftCache
 
 function readOneComposerInputDraft(key: string): string { return readOneComposerDraft(key).composer; }
 function writeOneComposerInputDraft(key: string, value: string): void { writeOneComposerDraft(key, { composer: value }); }
+/** Held follow-ups already returned to a composer. Main keeps listing an owner-written held direction until it is
+ * decided, so each is returned once. */
+const ONE_RETURNED_HELD_FOLLOWUPS_KEY = "agentlas.one.returned-held-followups.v1";
+function takeUnreturnedHeldFollowups<T extends { id: string }>(items: T[]): T[] {
+  if (typeof window === "undefined" || !items.length) return [];
+  let seen: string[] = [];
+  try {
+    const raw = JSON.parse(window.localStorage.getItem(ONE_RETURNED_HELD_FOLLOWUPS_KEY) ?? "[]") as unknown;
+    if (Array.isArray(raw)) seen = raw.filter((value): value is string => typeof value === "string");
+  } catch {
+    // Unreadable record: the composer's own includes-check still prevents a duplicate paste.
+  }
+  const fresh = items.filter((item) => !seen.includes(item.id));
+  if (!fresh.length) return [];
+  try {
+    window.localStorage.setItem(ONE_RETURNED_HELD_FOLLOWUPS_KEY, JSON.stringify([...seen, ...fresh.map((item) => item.id)].slice(-200)));
+  } catch {
+    // Best effort, as above.
+  }
+  return fresh;
+}
 
 function uid(): string {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -4245,11 +4266,6 @@ function OneSessionsShell() {
       if (!liveRunOwnsThread && !newerLiveRunOwnsThread) {
         setReceipt(receiptWithSteeringRecovery);
         setSurface(durableSurface?.manifest ?? null);
-        if (steeringRecovery.length > 0) {
-          setActionNotice(appLocale === "ko"
-            ? `재시작 뒤 외부 효과가 불확실한 추가 지시 ${steeringRecovery.length}개를 보류했습니다. 중복 실행하지 않았습니다.`
-            : `${steeringRecovery.length} follow-up instruction(s) were held after restart because an external effect is uncertain. Nothing was replayed.`);
-        }
       }
       const adoptAttachment = (live: NonNullable<typeof attachment>) => {
         runIdRef.current = live.runId;
@@ -4887,6 +4903,22 @@ function OneSessionsShell() {
     });
     return () => { cancelled = true; };
   }, [activeThreadChatId]);
+  /*
+   * Owner 2026-10-18: a held follow-up showed as a card of jargon ("재시작 뒤 외부 효과가 불확실해 보류했습니다 … 새 지시로
+   * 결정하세요") with no button to send or drop it. Main holds an owner-written direction whose delivery a restart made
+   * uncertain and never replays it. The owner's own text goes back into the composer once, like Stop does, and the
+   * owner sends or deletes it. No notice.
+   */
+  useEffect(() => {
+    const chatId = activeThreadChatId;
+    if (!chatId) return;
+    const held = [...heldFollowupRecovery, ...(receipt?.steeringRecovery ?? [])].filter((item) => item.chatId === chatId);
+    const fresh = takeUnreturnedHeldFollowups(Array.from(new Map(held.map((item) => [item.id, item])).values()));
+    if (!fresh.length) return;
+    setComposer((current) => [current, ...fresh.map((item) => item.promptText.trim())
+      .filter((text) => text && !current.includes(text))].filter(Boolean).join("\n"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeThreadChatId, heldFollowupRecovery, receipt?.steeringRecovery]);
   const runtimeArtifacts = activity.artifacts;
   // The route can move before its projection arrives. Hide the old panel in
   // that first commit, including its native guest, without changing run ownership.
@@ -10585,16 +10617,6 @@ function OneSessionsShell() {
               </div>
             )}
             {attachmentError && <p className={styles.attachmentError} role="alert">{attachmentError}</p>}
-            {Array.from(new Map([...heldFollowupRecovery, ...(receipt?.steeringRecovery ?? [])]
-              .filter(item => item.chatId === activeThreadChatId).map(item => [item.id, item])).values()).map(item => (
-              <div key={item.id} className={styles.steeringQueue} role="status" data-one-steering-recovery="held">
-                <span>{appLocale === "ko" ? "추가 지시 보류" : "Follow-up held"}</span>
-                <strong>{item.promptText}</strong>
-                <small>{appLocale === "ko"
-                  ? "재시작 뒤 외부 효과가 불확실해 보류했습니다. 자동 재전송하지 않습니다. 이 글을 검토한 뒤 새 지시로 결정하세요."
-                  : "Held after restart because an external effect is uncertain. Not replayed automatically; review this text before deciding on a new instruction."}</small>
-              </div>
-            ))}
             {actionNotice && <p className={styles.attachmentError} role="status" aria-live="polite" data-one-action-notice="true" data-tone="info">{actionNotice}</p>}
             {/* 좁은 대화 열(결과 패널을 연 440px)에서 단추 두 개가 1fr 칸에 0px 로 눌려 글자가
                 서로 겹쳐 그려졌다(오너 1.2.41). 문장 한 덩이 + 단추 묶음으로 두고, 자리가 모자라면
