@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.3.70 — 2026-10-18
+
+- Long Goal turns on Claude Code no longer end red as "uncertain": each pass settles at its own result, and the helpers it starts run to the end inside the pass instead of being cut off.
+- Team workers start with their tools. Before, a resumed Goal's task force could fail to start every worker.
+- Workers on Agentlas Light, your own API key or a local model can reach the app's own features (automations, documents, media): the entry is listed directly, and searching for an app feature finds it.
+- An automation you set up keeps working: its agent is brought back if it was archived, it is never auto-archived while the automation is on, and a step that answered without doing its work gets the retry it was promised.
+- A direction you send while a Goal is waiting is kept for its next turn and shows as delivered; a queued direction is never dropped without saying why, and a held one can be taken back.
+- In Work, sending is no longer blocked forever after an earlier request whose start was uncertain, and your message waits ahead of reports the app queued in the same chat.
+- When several images are made at once, each job gets its own image.
+- Claude Code conversations move to a fresh session before the window fills, and a new session does not immediately move again.
+- Turning a connector off or disconnecting it ends its sessions like a sign-out, and looking up connectors no longer asks for the keychain.
+- Toolchains work in a personal install, and Korean screens use plain words instead of internal terms.
+- This release binds Agentlas OS v1.2.66 at c0acd99be22114569e20bca94bed4540ba046eb4; public runtime asset `hephaestus-runtime-v1.2.66.tar.gz` is pinned at SHA-256 `20019d3ba4df1c540d0ef549c07a82188bd40fe12dafb2f8a6c75cc4bdcc89f7`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.69 — 2026-10-18
 
 - Answering a question card runs with the permission of the run that asked it. Before, an answer given right after a teammate's report could run read-only and could not render or run commands.

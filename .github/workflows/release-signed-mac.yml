@@ -283,7 +283,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '407a14ec70fd8bdd56980afba8ce05f09c5a0fb1d261306ac981bad76599c8fb') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '90d851771d919c6a2c213720504a2cafcde769dfd5b6addc8daf43e1b718b090') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -307,7 +307,7 @@ jobs:
             "scripts/test-agent-evolution-trust.cjs": "918e22c1945b8764daabaea8253a6667dd07685f064e64665765f9608be90b6e",
             "scripts/test-agent-hub-ontology-projection.cjs": "7ba9fb079da3e9491371d59ebffae1364f90baeefd78d93d6386d98b7d1f4cfd",
             "scripts/test-agent-toolbox-contract.cjs": "a9e948aa1ceac1282c44829cb1f4f02d5c5653d4a27cceeac2b1255f7236e2b0",
-            "scripts/test-automation-honesty-contract.cjs": "300e3a06fde5f7846310125c14d3c227ef61d59c2ddfaaa69ca57636da0bd1a8",
+            "scripts/test-automation-honesty-contract.cjs": "7d58d8e4ae05e94056c971566295ad76af918d4f5688d111dd16aff757351b2f",
             "scripts/test-build-session-contracts.cjs": "62b4b62a609647d43864e3b32d51cef0c7d1414711aacb941a6c021a43c146c8",
             "scripts/test-chat-ux-contracts.cjs": "d52c4fad3a3cee2e4de4290f34d8629403727d2b160cd8d5392843da9970c83c",
             "scripts/test-experience-i18n-contract.cjs": "b25f1d7740febc868cace13690e358e0e08ac764dddc325e27294827d0d32398",
@@ -709,7 +709,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '407a14ec70fd8bdd56980afba8ce05f09c5a0fb1d261306ac981bad76599c8fb') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '90d851771d919c6a2c213720504a2cafcde769dfd5b6addc8daf43e1b718b090') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -733,7 +733,7 @@ jobs:
             "scripts/test-agent-evolution-trust.cjs": "918e22c1945b8764daabaea8253a6667dd07685f064e64665765f9608be90b6e",
             "scripts/test-agent-hub-ontology-projection.cjs": "7ba9fb079da3e9491371d59ebffae1364f90baeefd78d93d6386d98b7d1f4cfd",
             "scripts/test-agent-toolbox-contract.cjs": "a9e948aa1ceac1282c44829cb1f4f02d5c5653d4a27cceeac2b1255f7236e2b0",
-            "scripts/test-automation-honesty-contract.cjs": "300e3a06fde5f7846310125c14d3c227ef61d59c2ddfaaa69ca57636da0bd1a8",
+            "scripts/test-automation-honesty-contract.cjs": "7d58d8e4ae05e94056c971566295ad76af918d4f5688d111dd16aff757351b2f",
             "scripts/test-build-session-contracts.cjs": "62b4b62a609647d43864e3b32d51cef0c7d1414711aacb941a6c021a43c146c8",
             "scripts/test-chat-ux-contracts.cjs": "d52c4fad3a3cee2e4de4290f34d8629403727d2b160cd8d5392843da9970c83c",
             "scripts/test-experience-i18n-contract.cjs": "b25f1d7740febc868cace13690e358e0e08ac764dddc325e27294827d0d32398",
@@ -1087,7 +1087,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '407a14ec70fd8bdd56980afba8ce05f09c5a0fb1d261306ac981bad76599c8fb') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '90d851771d919c6a2c213720504a2cafcde769dfd5b6addc8daf43e1b718b090') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -1111,7 +1111,7 @@ jobs:
             "scripts/test-agent-evolution-trust.cjs": "918e22c1945b8764daabaea8253a6667dd07685f064e64665765f9608be90b6e",
             "scripts/test-agent-hub-ontology-projection.cjs": "7ba9fb079da3e9491371d59ebffae1364f90baeefd78d93d6386d98b7d1f4cfd",
             "scripts/test-agent-toolbox-contract.cjs": "a9e948aa1ceac1282c44829cb1f4f02d5c5653d4a27cceeac2b1255f7236e2b0",
-            "scripts/test-automation-honesty-contract.cjs": "300e3a06fde5f7846310125c14d3c227ef61d59c2ddfaaa69ca57636da0bd1a8",
+            "scripts/test-automation-honesty-contract.cjs": "7d58d8e4ae05e94056c971566295ad76af918d4f5688d111dd16aff757351b2f",
             "scripts/test-build-session-contracts.cjs": "62b4b62a609647d43864e3b32d51cef0c7d1414711aacb941a6c021a43c146c8",
             "scripts/test-chat-ux-contracts.cjs": "d52c4fad3a3cee2e4de4290f34d8629403727d2b160cd8d5392843da9970c83c",
             "scripts/test-experience-i18n-contract.cjs": "b25f1d7740febc868cace13690e358e0e08ac764dddc325e27294827d0d32398",
