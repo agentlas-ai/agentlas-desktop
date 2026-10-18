@@ -301,7 +301,7 @@ import { copyGeneratedImageIntoWorkspace } from "../multimodal/workspace-image-c
 import { multimodalImageSlot } from "../multimodal/slot";
 import { chatImageAttachmentFromTrustedFile } from "../store/chat-message-attachments";
 import { ownerVisiblePrompt, stripStaffGuidance } from "../one/owner-prompt";
-import { browserCaptureDir, screenCaptureDir } from "../media/capture-artifacts";
+import { browserCaptureDir, savedBrowserCaptureDir, screenCaptureDir } from "../media/capture-artifacts";
 import { userDataPath } from "../runtime-paths";
 import { ONE_ATTACHMENT_LIMITS } from "../../shared/one-attachments";
 import { effectiveInvocationPermission } from "../../shared/invocation-permission";
@@ -6464,6 +6464,7 @@ async function runMcpInvocationInContext(
           const resolvedSource = fs.realpathSync.native(path.resolve(sourcePath));
           const candidateRoots = [
             browserCaptureDir(),
+            savedBrowserCaptureDir(),
             screenCaptureDir(),
             userDataPath("generated-assets", "native-browser"),
             userDataPath("generated-assets", "antigravity"),

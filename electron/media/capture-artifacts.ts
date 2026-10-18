@@ -7,11 +7,16 @@
 // 모델이 답변에 캡처 경로를 참조하는 순간 agentlas://localfile 이 404를 내고
 // 렌더러는 빈 박스를 그렸다.
 //
-// 이 모듈이 그 정본의 단일 홈이다: ~/.agentlas/captures/{screen,browser}.
+// 이 모듈이 그 정본의 단일 홈이다: ~/.agentlas/captures/{screen,browser-saved}.
 // agentlas://localfile 의 허용 루트(fs/access.ts)에 이 루트가 포함되어
 // One·Work 두 채팅 표면 모두 같은 절대경로로 렌더할 수 있다.
 // 정본은 자동으로 지우지 않는다(오너 D13 영구 보관, docs native-harness 21 G6): 예전의 300개 상한 삭제는
 // 대화에 붙은 옛 캡처를 빈 상자로 만들었다.
+//
+// captures/browser 는 정본 폴더가 아니다. @playwright/mcp 의 --output-dir 이고 --output-max-size
+// 예산이 걸려 Playwright 가 넘칠 때마다 그 폴더 전체(하위 포함)에서 오래된 파일부터 지운다.
+// 2026-10-18 운영에서 유튜브 업로드 하드링크(uploads/, 약 245MB)가 예산을 채워 그 안의
+// 정본 브라우저 캡처 112개가 모두 지워졌다(One 카드 file_missing). 정본은 그 폴더 밖에 둔다.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -27,9 +32,14 @@ export function screenCaptureDir(): string {
   return path.join(captureArtifactsRoot(), "screen");
 }
 
-/** playwright/agentlas-browser 스크린샷 출력 폴더(--output-dir 로 전달). */
+/** playwright/agentlas-browser 출력 폴더(--output-dir 로 전달). Playwright 가 예산을 넘으면 지운다. */
 export function browserCaptureDir(): string {
   return path.join(captureArtifactsRoot(), "browser");
+}
+
+/** 브라우저 도구가 인라인으로 돌려준 스크린샷의 정본 폴더 — Playwright 출력 예산 밖. */
+export function savedBrowserCaptureDir(): string {
+  return path.join(captureArtifactsRoot(), "browser-saved");
 }
 
 const DATA_URL_RE = /^data:image\/(png|jpeg);base64,([A-Za-z0-9+/=]+)$/;
@@ -71,7 +81,7 @@ export function saveBrowserCaptureArtifact(
 ): string | null {
   if (typeof base64Data !== "string" || !/^[A-Za-z0-9+/=]+$/.test(base64Data)) return null;
   try {
-    const dir = browserCaptureDir();
+    const dir = savedBrowserCaptureDir();
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const ext = mediaType === "image/png" ? ".png" : ".jpg";
