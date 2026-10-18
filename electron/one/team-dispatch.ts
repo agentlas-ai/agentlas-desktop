@@ -765,14 +765,33 @@ export function graphTeamStepContinuationPrompt(owner: string, events: readonly 
 }
 
 /** The refused report is parked and undelivered: invocation/deferred-system-relays.ts keys a parked relay by the sha256 of
- * its trimmed text per chat (same rule as deferSystemRelay). Read directly so this module keeps its import set. */
-function reportParkedForGoal(chatId: string, text: string): boolean {
+ * its trimmed text per chat (same rule as deferSystemRelay). Read directly so this module keeps its import set.
+ * `anyDelivery` also accepts a parked copy that a later turn already carried. */
+function reportParkedForGoal(chatId: string, text: string, anyDelivery = false): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;
   try {
-    return Boolean(getDb().prepare("SELECT 1 FROM deferred_system_relays WHERE chat_id = ? AND text_hash = ? AND delivered_at IS NULL LIMIT 1")
+    return Boolean(getDb().prepare(`SELECT 1 FROM deferred_system_relays WHERE chat_id = ? AND text_hash = ?${anyDelivery ? "" : " AND delivered_at IS NULL"} LIMIT 1`)
       .get(chatId, createHash("sha256").update(trimmed).digest("hex")));
   } catch { return false; }
+}
+
+/**
+ * A report a waiting Goal parked before the rule above counted the refusal as a failed start, retried it until the
+ * attempts ran out, and kept `report: failed` in one_team_list although its parked copy was carried into the Goal's next
+ * turn. Production 2026-10-17, Yotube room, dispatch-3b8d6b65: report_error goal_waiting_system_start_refused, 3 attempts,
+ * its relay delivered; the daily graph's check step on 10-18 still listed it as a failed report. Such a row is reported.
+ */
+function settleParkedReports(parentChatId?: string): void {
+  const rows = getDb().prepare(`SELECT * FROM one_team_dispatches WHERE status <> 'running' AND reported_at IS NULL
+    AND report_error = 'goal_waiting_system_start_refused' ${parentChatId ? "AND parent_chat_id = ?" : ""} ORDER BY updated_at LIMIT 20`)
+    .all(...(parentChatId ? [parentChatId] : [])) as OneDispatchRow[];
+  for (const dispatch of rows) {
+    const prompt = reportPrompt(dispatch);
+    if (prompt === null || !reportParkedForGoal(dispatch.parent_chat_id, prompt, true)) continue;
+    getDb().prepare("UPDATE one_team_dispatches SET reported_at = ?, report_error = NULL WHERE id = ? AND reported_at IS NULL")
+      .run(new Date().toISOString(), dispatch.id);
+  }
 }
 
 /** Reports that could not start are retried when the room is idle again, at most three attempts in all (22 O6). */
@@ -780,6 +799,7 @@ export const ONE_TEAM_REPORT_ATTEMPTS = 3;
 function retryFailedReports(parentChatId?: string): void {
   try {
     ensureTable();
+    settleParkedReports(parentChatId);
     const rows = getDb().prepare(`SELECT * FROM one_team_dispatches WHERE status <> 'running' AND reported_at IS NULL AND report_error IS NOT NULL
       AND report_attempts < ? ${parentChatId ? "AND parent_chat_id = ?" : ""} ORDER BY updated_at LIMIT 10`)
       .all(...(parentChatId ? [ONE_TEAM_REPORT_ATTEMPTS, parentChatId] : [ONE_TEAM_REPORT_ATTEMPTS])) as OneDispatchRow[];
