@@ -42,7 +42,7 @@ const UPLOAD_PHASES: { key: CloudAgentPublishStage; ko: string; en: string; publ
   { key: "packaging", ko: "패키지 생성", en: "Building the package" },
   { key: "reviewing", ko: "검토", en: "Reviewing" },
   { key: "uploading", ko: "업로드", en: "Uploading" },
-  { key: "receipt", ko: "영수증 저장", en: "Saving the receipt" },
+  { key: "receipt", ko: "저장 기록 남기기", en: "Saving the receipt" },
 ];
 
 /** Sub-phases that report inside another phase rather than advancing the list. */
@@ -905,8 +905,8 @@ function classifyUploadFailure(
       issue: {
         severity: "warning",
         message: ko
-          ? "이 폴더에는 안전한 업데이트에 필요한 Cloud revision 영수증이 없습니다."
-          : "This folder does not have the Cloud revision receipt required for a safe update.",
+          ? "이 폴더에는 안전하게 업데이트하는 데 필요한 Cloud 버전 기록이 없습니다."
+          : "This folder is missing the Cloud version record needed for a safe update.",
         remediation: ko
           ? "최신 사본을 복원한 뒤 편집하고 다시 저장하세요."
           : "Restore the latest copy, edit it, then save again.",

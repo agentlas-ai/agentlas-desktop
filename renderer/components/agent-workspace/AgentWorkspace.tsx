@@ -31,7 +31,7 @@ const KO_STATE: Record<string, string> = {
   eligible: "반영 가능", scope_review: "범위 확인 필요", needs_evidence: "근거 부족", proposed: "변경안 있음", applied: "반영됨",
   review_ready: "검토 대기", applying: "적용 중", rejected: "거절됨", stale: "원본 변경됨", recovery_required: "복구 필요",
   in_sync: "동일 리비전", content_equal: "내용 동일", local_ahead: "로컬 변경", cloud_ahead: "원격 변경",
-  diverged: "양쪽 변경", unrelated: "기준 없음", unknown: "미확인", unavailable: "연결 불가",
+  diverged: "양쪽 변경", unrelated: "기준 없음", unknown: "알 수 없음", unavailable: "연결 불가",
 };
 const EN_STATE: Record<string, string> = {
   eligible: "Ready for review", scope_review: "Check scope", needs_evidence: "Needs evidence", proposed: "Proposed", applied: "Applied",
@@ -55,7 +55,7 @@ function comparisonReason(reason: string, ko: boolean): string {
     hub_not_linked: ["연결된 Hub 릴리스가 없습니다.", "No Hub release is connected."],
     remote_unavailable: ["원격 상태를 확인하지 못했습니다. 연결을 확인한 뒤 다시 조회하세요.", "Remote state could not be checked. Verify the connection and refresh."],
     common_ancestor_unverified: ["공통 변경 이력을 확인하지 못했습니다. 파일 차이를 검토하세요.", "A shared history is unverified. Review the file differences."],
-    public_source_subset: ["Hub가 공개한 파일만 비교합니다. 나머지 파일의 상태는 미확인입니다.", "Only source files shared by Hub are compared. Other files remain unknown."],
+    public_source_subset: ["Hub가 공개한 파일만 비교했습니다. 나머지 파일은 비교할 수 없습니다.", "Only source files shared by Hub are compared. Other files remain unknown."],
     verified_sync_base: ["확인된 동기화 기준과 비교했습니다.", "Compared with the verified sync baseline."],
     same_tree_different_history: ["파일 내용은 같고 변경 이력은 다릅니다.", "File contents match; revision histories differ."],
     reviewed_public_projection: ["공개용 파일 사본을 검토합니다.", "Review the public file copy."],
@@ -65,7 +65,7 @@ function comparisonReason(reason: string, ko: boolean): string {
     source_not_licensed: ["게시자가 소스 공유를 허용하지 않았습니다. Hub 원본의 소스 공개 여부를 확인하세요.", "The publisher has not shared source files. Check source availability on the Hub release."],
     publisher_required: ["이 Hub 릴리스의 게시 권한이 없습니다. 게시 권한이 있는 에이전트를 선택하세요.", "You do not have publishing rights for this Hub release. Choose an agent you can publish."],
     sign_in_required: ["Agentlas에 로그인한 뒤 원격 상태를 다시 조회하세요.", "Sign in to Agentlas, then refresh the remote state."],
-    sync_outcome_pending: ["이전 동기화 결과가 아직 미확인입니다. 원격 상태를 먼저 다시 조회하세요.", "The previous sync outcome is unconfirmed. Refresh remote state first."],
+    sync_outcome_pending: ["이전 동기화가 끝났는지 아직 알 수 없습니다. 원격 상태를 먼저 다시 조회하세요.", "The previous sync outcome is unconfirmed. Refresh remote state first."],
   };
   return (copy[reason] ?? copy.remote_unavailable)[ko ? 0 : 1];
 }
@@ -444,7 +444,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
       </main>
       {inspector && <><button className={`${styles.scrim} ${styles.inspectorScrim}`} aria-label={ko ? "속성 닫기" : "Close inspector"} onClick={() => setInspector(false)} /><AgentWorkspaceInspector agent={agent} name={name} locale={locale} snapshot={snapshot} firm={firm} org={org} binding={binding} runtimes={runtimes} overrides={overrides} onClose={() => setInspector(false)} onRename={onRename} onRemove={onRemove} onOverridesChange={onOverridesChange} onNotice={setNotice} /></>}
     </div>
-    <footer className={styles.statusbar}><span>{busy ? (ko ? "처리 중…" : "Working…") : dirty ? (ko ? "저장 전 파일 초안" : "Unsaved file draft") : snapshot?.activation === "run_active" ? (ko ? "실행 중 · 새 변경은 다음 실행부터" : "Run active · Changes apply to the next run") : snapshot ? (ko ? "로컬 파일 확인됨" : "Local files read") : (ko ? "파일 상태 미확인" : "File state unknown")}</span><span>{path ? `${lineCount} ${ko ? "줄" : "lines"}` : ""}</span></footer>
+    <footer className={styles.statusbar}><span>{busy ? (ko ? "처리 중…" : "Working…") : dirty ? (ko ? "저장 전 파일 초안" : "Unsaved file draft") : snapshot?.activation === "run_active" ? (ko ? "실행 중 · 새 변경은 다음 실행부터" : "Run active · Changes apply to the next run") : snapshot ? (ko ? "로컬 파일 확인됨" : "Local files read") : (ko ? "파일 상태 알 수 없음" : "File state unknown")}</span><span>{path ? `${lineCount} ${ko ? "줄" : "lines"}` : ""}</span></footer>
     {quickOpen && <PopupFrame title={ko ? "파일 찾기" : "Find file"} icon={<IconSearch size={20} />} closeLabel={ko ? "닫기" : "Close"} onClose={() => setQuickOpen(false)} busy={Boolean(busy)}>
       <div className={styles.popupSearch}><IconSearch size={17} /><input autoFocus value={quickQuery} aria-label={ko ? "파일 이름" : "File name"} placeholder={ko ? "이름 또는 경로" : "Name or path"} onChange={(event) => setQuickQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { const first = files.find((file) => file.kind === "file" && file.path.toLowerCase().includes(quickQuery.toLowerCase())); if (first) void openFile(first.path).then((opened) => { if (opened) { setQuickOpen(false); setView("files"); } }); } }} /><kbd>↵</kbd></div>
       <div className={styles.popupFiles}>{files.filter((file) => file.kind === "file" && file.path.toLowerCase().includes(quickQuery.toLowerCase())).map((file) => <button className={styles.popupFile} key={file.path} onClick={() => void openFile(file.path).then((opened) => { if (opened) { setQuickOpen(false); setView("files"); } })}><IconFileText size={18} /><span><strong>{file.path.split("/").at(-1)}</strong><small>{file.path}</small></span></button>)}{!files.some((file) => file.kind === "file" && file.path.toLowerCase().includes(quickQuery.toLowerCase())) && <div className={styles.empty}><IconSearch size={24} />{ko ? "일치하는 파일 없음" : "No matching files"}</div>}</div>

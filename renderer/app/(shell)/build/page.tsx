@@ -194,7 +194,7 @@ function cloudUploadStageLabel(stage: CloudAgentPublishStage, detail: string, ko
     packaging: ["업로드 패키지 생성 중", "Building the upload package"],
     reviewing: ["비공개 저장 조건 확인 중", "Reviewing private-save requirements"],
     uploading: ["Agent Cloud에 업로드 중", "Uploading to Agent Cloud"],
-    receipt: ["저장 영수증 확인 중", "Verifying the save receipt"],
+    receipt: ["저장 결과 확인 중", "Verifying the save receipt"],
     done: ["Agent Cloud 저장 완료", "Saved to Agent Cloud"],
     error: ["Cloud 저장에 문제가 생겼습니다", "Cloud save needs attention"],
   };
@@ -584,7 +584,7 @@ export default function BuildPage() {
         setActionMsg(
           res.registration.localSyncStored === false
             ? ko
-              ? "Agent Cloud 저장은 완료됐지만 이 컴퓨터의 동기화 영수증을 저장하지 못했습니다. 수정 전 Cloud 최신본을 복원하세요."
+              ? "Agent Cloud에는 저장됐지만, 이 컴퓨터에 동기화 기록을 남기지 못했습니다. 수정하기 전에 Cloud 최신본을 복원하세요."
               : "Saved to Agent Cloud, but this computer could not store the sync receipt. Restore the latest Cloud copy before editing."
             : ko
               ? "내 Agent Cloud에 비공개 저장했습니다."
@@ -1161,7 +1161,7 @@ export default function BuildPage() {
               {resultHasSecurityAdvisory && (
                 <div role="status" className="build-action-msg">
                   {ko
-                    ? "안전 점검 결과는 참고용입니다. 항목과 영수증을 확인할 수 있으며 설치·Cloud 저장·Hub 공개는 계속 진행할 수 있습니다."
+                    ? "안전 점검 결과는 참고용입니다. 점검 항목은 계속 볼 수 있고, 설치·Cloud 저장·Hub 공개도 그대로 진행할 수 있습니다."
                     : "Safety findings are advisory. Findings and receipts remain visible, and install, Cloud save, and Hub publish can continue."}
                 </div>
               )}

@@ -80,7 +80,7 @@ const KO: Record<string, string> = {
   stored_tree_invalid: "저장된 파일 버전을 확인하지 못했습니다. 복구가 필요합니다.",
   sync_journal_invalid: "저장된 동기화 작업을 검토해야 합니다.",
   sync_outcome_pending: "이전 동기화 결과를 서버가 아직 확인하지 않았습니다. 새로고침해서 확인해 주세요.",
-  sync_receipt_invalid: "다른 작업의 동기화 영수증입니다.",
+  sync_receipt_invalid: "동기화 응답이 이 작업과 맞지 않습니다. 원격 상태를 새로고침해 확인해 주세요.",
   sync_receipt_mismatch: "원격에 올라간 파일이 승인한 버전과 다릅니다.",
   sync_review_stale: "계정이나 로컬 파일이 바뀌었습니다. 새 비교를 검토해 주세요.",
   target_required: "고칠 지침이나 스킬을 골라 주세요.",

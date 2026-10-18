@@ -109,7 +109,7 @@ export default function PluginBuilderPage() {
     installProof: "4. 설치와 실행 증명",
     installProofBody: "설치 후 라우터 주입을 확인하고 첫 워크플로를 실제 런타임에 호출합니다. 런타임이나 도구가 없으면 성공으로 포장하지 않고 설치됨·미검증으로 남깁니다.",
     installAction: "설치하고 실행 증명",
-    installReceipt: "설치 영수증",
+    installReceipt: "설치 기록",
     proof: "실행 증명",
     proofDone: (name: string) => `검증 완료: 라우터가 주입됐고 ${name} 워크플로가 실제 실행됐습니다.`,
     unproven: "설치됨 · 미검증",

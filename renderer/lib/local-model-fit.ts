@@ -61,7 +61,7 @@ export interface LocalModelFitEstimate {
 /** `exact` = 실제 파일 크기(팝업의 파일 행), 아니면 이름에서 추정한 크기. */
 export function estimateFit(hardware: LocalHardwareProfile | null | undefined, bytes: number | null, ko: boolean, exact = false): LocalModelFitEstimate {
   if (!hardware) return { level: "unknown", requiredBytes: null, memoryBytes: null, reason: ko ? "컴퓨터 사양을 아직 읽지 못했습니다" : "This computer's specs are not known yet" };
-  if (bytes === null) return { level: "unknown", requiredBytes: null, memoryBytes: null, reason: ko ? "이름에서 크기를 알 수 없습니다. 파일을 열어 보면 파일별로 판정합니다" : "Size is not in the name. Open the files to judge each one" };
+  if (bytes === null) return { level: "unknown", requiredBytes: null, memoryBytes: null, reason: ko ? "이름에서 크기를 알 수 없습니다. 파일 목록을 열면 파일마다 확인합니다" : "Size is not in the name. Open the files to judge each one" };
   const runtimeReserve = Math.max(GIB, Math.ceil(hardware.totalMemoryBytes * 0.15));
   const kvAndScratch = GIB;
   const requiredBytes = bytes + runtimeReserve + kvAndScratch;

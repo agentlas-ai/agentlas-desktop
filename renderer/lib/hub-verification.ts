@@ -12,7 +12,7 @@ export function hubSecurityGradeLabel(listing: Pick<MarketplaceListing, "trustGr
   if (listing.trustGrade === "A") return ko ? "보안 검사 A · 통과" : "Security scan A · passed";
   if (listing.trustGrade === "B") return ko ? "보안 검사 B · 경고 확인" : "Security scan B · review warnings";
   if (listing.trustGrade === "C") return ko ? "보안 검사 C · 차단" : "Security scan C · blocked";
-  return ko ? "보안 검사 미확인" : "Security scan unverified";
+  return ko ? "보안 검사 결과 없음" : "Security scan unverified";
 }
 
 export function hubSecurityGradeExplanation(locale: Locale): string {

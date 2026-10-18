@@ -25,7 +25,7 @@ export function AccelerationChip({ evidence, ko }: { evidence: LocalModelAcceler
   const state = !evidence ? "unknown" : evidence.gpu ? "gpu" : "cpu";
   const label = state === "gpu" ? `${ko ? "GPU 가속" : "GPU accelerated"} · ${gpu?.name ?? evidence!.backend}${layers ? ` · ${layers} ${ko ? "층 GPU 에 올림" : "layers on GPU"}` : ""}`
     : state === "cpu" ? (gpu ? (ko ? `CPU 실행 · ${gpu.name} 에 층이 올라가지 않음` : `Running on CPU · no layers placed on ${gpu.name}`) : (ko ? "CPU 실행 · 이 엔진이 GPU 장치를 찾지 못함" : "Running on CPU · the engine found no GPU device"))
-    : ko ? "가속 여부 미확인 · 모델을 다시 불러오면 확인됨" : "Acceleration unverified · reload the model to check";
+    : ko ? "가속 여부 아직 모름 · 모델을 다시 불러오면 확인됩니다" : "Acceleration unverified · reload the model to check";
   return <span role="img" data-acceleration={state} className={`${styles.chip} ${state === "gpu" ? styles.chipGpu : ""}`} title={label} aria-label={label}>
     {state === "gpu" ? <IconBolt size={12} /> : <IconCpu size={12} />}<span>{state === "gpu" ? "GPU" : state === "cpu" ? "CPU" : "?"}</span>
   </span>;

@@ -199,7 +199,7 @@ export function HuggingFaceModelBrowser({ ko, onInstalled, onOperationStarted }:
     return filtered;
   }, [evaluated, roleFilter, fitFilter, sort]);
   const hardwareLine = hardware
-    ? `${(hardware.totalMemoryBytes / 1024 ** 3).toFixed(0)} GiB · ${hardware.engineDevices?.find(device => device.gpu)?.name ?? (hardware.accelerator === "metal" ? "Metal" : (ko ? "GPU 미확인" : "GPU unverified"))}`
+    ? `${(hardware.totalMemoryBytes / 1024 ** 3).toFixed(0)} GiB · ${hardware.engineDevices?.find(device => device.gpu)?.name ?? (hardware.accelerator === "metal" ? "Metal" : (ko ? "GPU 확인 안 됨" : "GPU unverified"))}`
     : "";
   const fileFit = (file: HuggingFaceModelFile) => estimateFit(hardware, file.byteLength, ko, true);
 

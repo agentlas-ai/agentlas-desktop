@@ -110,11 +110,11 @@ export function AgentWorkspaceInspector({ agent, name, locale, snapshot, firm, o
       </> : <span className={styles.meta}>{ko ? "사용 가능한 런타임 없음" : "No available runtime"}</span>}
       <h3>{ko ? "권한 · 식별자" : "Permissions · Identity"}</h3>
       <dl className={styles.definition}>
-        <dt>{ko ? "파일 권한" : "Files"}</dt><dd>{snapshot ? (snapshot.writable ? (ko ? "변경 검토·승인" : "Review and approve") : (ko ? "읽기 전용" : "Read only")) : (ko ? "미확인" : "Unknown")}</dd>
+        <dt>{ko ? "파일 권한" : "Files"}</dt><dd>{snapshot ? (snapshot.writable ? (ko ? "변경 검토·승인" : "Review and approve") : (ko ? "읽기 전용" : "Read only")) : (ko ? "알 수 없음" : "Unknown")}</dd>
         <dt>{ko ? "위치" : "Root"}</dt><dd>{snapshot?.rootPath ?? agent.localPath ?? "—"}</dd>
         <dt>{ko ? "원본" : "Origin"}</dt><dd>{agent.assetSource ?? "local-import"}</dd>
         <dt>MCP</dt><dd>{agent.mcpServers.length ? agent.mcpServers.join(", ") : "—"}</dd>
-        <dt>{ko ? "신뢰 등급" : "Trust"}</dt><dd>{agent.trustGrade === "unknown" ? (ko ? "미확인" : "Unknown") : agent.trustGrade}</dd>
+        <dt>{ko ? "신뢰 등급" : "Trust"}</dt><dd>{agent.trustGrade === "unknown" ? (ko ? "알 수 없음" : "Unknown") : agent.trustGrade}</dd>
       </dl>
       <h3>{ko ? "관리" : "Manage"}</h3>
       <button className={`${styles.button} ${styles.danger}`} disabled={busy} onClick={() => void action(onRemove)}><IconTrash size={12} />{ko ? "에이전트 제거…" : "Remove agent…"}</button>

@@ -936,7 +936,7 @@ function finalizeBuild(pkgRoot: string, scan: unknown, readScope: FsReadScope, n
     pushLog(
       "log",
       ko
-        ? `안전 점검 참고 ${advisoryCount}건 (${scanDisposition}) — 결과와 영수증은 표시하며 빌드·등록·저장은 계속합니다.`
+        ? `안전 점검 참고 ${advisoryCount}건 (${scanDisposition}) — 점검 결과는 화면에 남겨 두고 빌드·등록·저장은 계속합니다.`
         : `Safety advisory: ${advisoryCount} finding(s) (${scanDisposition}) — findings and receipts remain visible while build, registration, and save continue.`,
     );
   }
