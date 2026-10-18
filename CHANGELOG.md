@@ -1,11 +1,22 @@
 # Changelog
 
-## 1.3.72 — 2026-10-18
+## 1.3.73 — 2026-10-18
 
+- Agentlas Finance is a new workspace in the side navigation: collect the assets you follow and your own data, check the sources behind each figure, and build analyses, dashboards and reports with AI edits you can review and undo.
+- Your direction starts ahead of teammate reports. Quitting the app or restarting for an update carries waiting directions over instead of cancelling them, and teammate work a restart cut off is reported.
+- A Goal continuation that failed is retried as a fresh run instead of being set aside.
+- Files that installed teams, firms and swarm workers make reach One's Outputs, including narrations, provider files and finished video jobs. A file saved twice in one run is one output.
+- A firm's production and review members read your actual request, not only the CEO's brief.
+- The phone gets failure and approval notices for background runs, accepts the exact run you are looking at, and shows recent outputs again.
+- In a Work room, Agentlas Light, your own API key and local models can use the tool menu and the browser behind it.
+- In the Document tab, spreadsheets can rename and delete sheets, set number formats (such as 45,000원) and add bar, line and pie charts. Asking to open a document that does not exist yet points to creating it.
+- A screen image an app feature returns reaches the model whole instead of as cut-off text, on runtimes that read images; the capture is cleared after three days.
+- A One room whose latest run made files no longer keeps a blank 300px column beside the conversation.
 - Organization settings refresh their current access while open, preserve drafts within the same organization, and close the previous display as soon as the account or organization changes.
 - Returning to personal space opens One. An uncertain organization selection no longer prevents signing out of its original session, and requests with an unknown outcome are not automatically repeated.
 - After the original report connection is fully closed, a new connection can start with fresh native approval. Previous approvals and unconfirmed deliveries remain closed.
 - Organization settings follow the app language. History, learning and organization execution open their existing Web page when their native view is unavailable.
+- 1.3.71 and 1.3.72 were not published; this release includes them.
 - This release binds Agentlas OS v1.2.66 at c0acd99be22114569e20bca94bed4540ba046eb4; public runtime asset `hephaestus-runtime-v1.2.66.tar.gz` is pinned at SHA-256 `20019d3ba4df1c540d0ef549c07a82188bd40fe12dafb2f8a6c75cc4bdcc89f7`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
 
 ## 1.3.70 — 2026-10-18
