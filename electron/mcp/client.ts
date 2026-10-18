@@ -2950,6 +2950,13 @@ async function runMcpInvocationInContext(
     runtimes = await detectRuntimes(true);
   }
   throwIfInvocationAborted(signal, locale);
+  // The same for the runtime a One team was confirmed on: a probe that ran out of time under load leaves the cached
+  // inventory with another spelling or an unknown version of the same executable (W7 2026-10-18, S-followup-during-team
+  // failed one-team-runtime-changed 6 s after the owner's message). Read the inventory again once before refusing.
+  if (boundOneTeamRuntime && !oneTeamRuntimeBindingMatches(boundOneTeamRuntime, runtimes)) {
+    runtimes = await detectRuntimes(true);
+    throwIfInvocationAborted(signal, locale);
+  }
   if (boundOneTeamRuntime && !oneTeamRuntimeBindingMatches(boundOneTeamRuntime, runtimes)) {
     sink({
       kind: "error",

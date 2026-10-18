@@ -368,7 +368,13 @@ export async function firstExistingCli(
   for (const candidate of paths) {
     if (!path.isAbsolute(candidate)) {
       // bare 커맨드명 — PATH(+Windows PATHEXT)로 해석. .cmd 심 포함.
-      if ((await probeCliVersion(candidate, timeout)) !== null) return candidate;
+      const probe = await probeCliVersionOutcome(candidate, timeout);
+      if (probe.version !== null) return candidate;
+      // A probe that ran out of time is not absence. Under load (W7 2026-10-18, load average 47) the bare name's
+      // `--version` took over 2 s, the next candidate (the absolute ~/.local/bin path) won, and the same executable got
+      // a second spelling: the team binding's source digest no longer matched (one-team-runtime-changed) and the
+      // judgment fingerprint changed. When the name is an executable on the CLI PATH, it is still this candidate.
+      if (probe.timedOut && bareCliOnPath(candidate)) return candidate;
       continue;
     }
     try {
@@ -386,6 +392,12 @@ export async function firstExistingCli(
 }
 
 export function probeCliVersion(command: string, timeoutMs = 3000): Promise<string | null> {
+  return probeCliVersionOutcome(command, timeoutMs).then((outcome) => outcome.version);
+}
+
+interface CliVersionProbeOutcome { version: string | null; timedOut: boolean }
+
+function probeCliVersionOutcome(command: string, timeoutMs: number): Promise<CliVersionProbeOutcome> {
   const cacheMs = Number(process.env.AGENTLAS_RUNTIME_PROBE_CACHE_MS ?? 30_000);
   const key = `${command}\0${timeoutMs}`;
   const now = Date.now();
@@ -393,11 +405,34 @@ export function probeCliVersion(command: string, timeoutMs = 3000): Promise<stri
   if (cached && now - cached.at < cacheMs) return cached.promise;
 
   const promise = runProbeCliVersion(command, timeoutMs);
-  versionProbeCache.set(key, { at: now, promise });
+  const entry = { at: now, promise };
+  versionProbeCache.set(key, entry);
+  // A timed-out probe answers this caller only: the next one probes again instead of reading "no version" for 30 s.
+  void promise.then((outcome) => {
+    if (outcome.timedOut && versionProbeCache.get(key) === entry) versionProbeCache.delete(key);
+  });
   return promise;
 }
 
-const versionProbeCache = new Map<string, { at: number; promise: Promise<string | null> }>();
+const versionProbeCache = new Map<string, { at: number; promise: Promise<CliVersionProbeOutcome> }>();
+
+/** Whether a bare command name is an executable file on the PATH its CLI child receives (found without starting it). */
+function bareCliOnPath(command: string): boolean {
+  const dirs = cliPathValue(envForCli(command)).split(path.delimiter).filter(Boolean);
+  const extensions = process.platform === "win32"
+    ? ["", ...(process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)]
+    : [""];
+  for (const dir of dirs) {
+    for (const extension of extensions) {
+      const file = path.join(dir, command + extension);
+      try {
+        fs.accessSync(file, process.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK);
+        if (fs.statSync(file).isFile()) return true;
+      } catch { /* not here */ }
+    }
+  }
+  return false;
+}
 
 /** 사용자가 명시적으로 전체 재확인을 요청했을 때 CLI 버전 증거도 새로 읽는다. */
 export function clearCliVersionProbeCache(): void {
@@ -418,15 +453,15 @@ export function parseCliVersionOutput(output: string): string | null {
   return match?.[1] ?? null;
 }
 
-function runProbeCliVersion(command: string, timeoutMs: number): Promise<string | null> {
+function runProbeCliVersion(command: string, timeoutMs: number): Promise<CliVersionProbeOutcome> {
   return new Promise((resolve) => {
     let settled = false;
     let timer: NodeJS.Timeout | undefined;
-    const finish = (v: string | null) => {
+    const finish = (v: string | null, timedOut = false) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
-      resolve(v);
+      resolve({ version: v, timedOut });
     };
 
     let child: ChildProcess;
@@ -443,7 +478,7 @@ function runProbeCliVersion(command: string, timeoutMs: number): Promise<string 
 
     timer = setTimeout(() => {
       terminateProbeProcess(child);
-      finish(null);
+      finish(null, true);
     }, timeoutMs);
 
     let out = "";
