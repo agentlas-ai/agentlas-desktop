@@ -361,36 +361,169 @@ function lastAssistantText(chatId: string, sinceIso: string): string | null {
 let recovered = false;
 /**
  * After a restart nothing settles dispatch rows that were running when the app
- * stopped (the settle listener is per process). Once per process: rows whose child
- * chat is not running now become "interrupted" with whatever answer exists;
- * rows whose child is running again get the listener back.
+ * stopped (the settle listener is per process). Once per process, every running row is
+ * read from the shared store (settleOrphanedDispatches): a child live in either process
+ * keeps its row (and gets this process's listener), a child whose run already ended is
+ * finalized and reported like any settle, and only a child no process holds and whose
+ * run never ended becomes "interrupted", reported through the retry ledger.
  */
 export function recoverOneTeamDispatches(): void {
   if (recovered) return;
   recovered = true;
   try {
     ensureTable();
+    settleOrphanedDispatches(0);
     retryFailedReports();
-    const running = getDb().prepare("SELECT * FROM one_team_dispatches WHERE status = 'running'").all() as OneDispatchRow[];
-    if (running.length === 0) { startQueuedDispatches(); return; }
-    const active = new Set(runtime().invocationService.activeChatIds());
-    const now = new Date().toISOString();
-    for (const dispatch of running) {
-      // A session parked on the owner (a sign-in it resumes from by itself) is not interrupted by a restart either.
-      if (active.has(dispatch.child_chat_id) || ownerWait(dispatch)) {
-        installSettleListener();
-        continue;
-      }
-      const interrupted = getDb().prepare(
-        "UPDATE one_team_dispatches SET status = 'interrupted', result_text = COALESCE(result_text, ?), updated_at = ? WHERE id = ? AND status = 'running'",
-      ).run(lastAssistantText(dispatch.child_chat_id, dispatch.updated_at), now, dispatch.id);
-      const after = interrupted.changes === 1 ? row(dispatch.id) : undefined;
-      if (after) reportTeamResult(after);
-    }
     startQueuedDispatches();
   } catch (error) {
     console.warn("[one-team] dispatch recovery skipped:", error instanceof Error ? error.message : error);
   }
+  armOrphanSweep();
+}
+
+/*
+ * Liveness from the shared store, not from this process's memory (D3/W3, flow audit 2026-10-18). Desktop Main and the
+ * background service (agentlasd) each run their own invocation service; activeChatIds() lists only this process's runs.
+ * Read alone, a teammate running in the other process looked stopped: a restart's recovery closed it as interrupted, and a
+ * report turn was started while the room's own turn ran over there (refused invocation_chat_busy_other_host, an attempt
+ * spent). Production Yotube dispatch-4e0b59a9: its child run 398a77af completed at 10-13 18:53:31Z, the row stayed running,
+ * and the 20:59 update restart closed it as interrupted with nothing reported (9 interrupted rows never reported).
+ */
+const RESTART_INTERRUPTED = "restart_interrupted";
+const PARENT_BUSY_OTHER_PROCESS = "one_team_parent_busy_other_host";
+/** Reports waiting for a room that is busy elsewhere or for a restart's report: retried by the sweep, never failures. */
+const HELD_REPORT_CODES = [RESTART_INTERRUPTED, PARENT_BUSY_OTHER_PROCESS] as const;
+const CHAT_BUSY_OTHER_HOST = "invocation_chat_busy_other_host";
+/** A child no process holds is settled by the periodic sweep only after this quiet time: the owner's own listener
+ * finalizes within 1.5 s, and a queued next run of the same chat claims it well inside it. Recovery uses 0. */
+const ORPHAN_GRACE_MS = 60_000;
+const ORPHAN_SWEEP_MS = 60_000;
+
+type ChatOwnerRow = { owner_id: string; owner_kind: string; state: string };
+
+/** This process's run-owner identity (store/invocation-run-owners.ts); null where the owner store is not loaded. */
+function localRunOwner(): { ownerId: string; ownerKind: string } | null {
+  try { return (require("../store/invocation-run-owners") as typeof import("../store/invocation-run-owners")).invocationProcessOwner(); }
+  catch { return null; }
+}
+
+/** The service boot Main is attached to over the authenticated channel (attached-daemon-boot.ts); undefined otherwise. */
+function attachedServiceBoot(): string | undefined {
+  try { return (require("../invocation/attached-daemon-boot") as typeof import("../invocation/attached-daemon-boot")).attachedDaemonBootId(); }
+  catch { return undefined; }
+}
+
+/** The chat's held run lease (invocation_run_owners: one active/settling row per chat), from any process. */
+function activeChatOwner(chatId: string): ChatOwnerRow | null {
+  try {
+    return (getDb().prepare("SELECT owner_id, owner_kind, state FROM invocation_run_owners WHERE chat_id = ? AND state IN ('active','settling') LIMIT 1")
+      .get(chatId) as ChatOwnerRow | undefined) ?? null;
+  } catch {
+    return null; // a store without the owner table keeps the process-local reading
+  }
+}
+
+/**
+ * Whether a held lease belongs to a process that is still alive. Desktop and the service are single-instance, so a row of
+ * this process's own kind under another owner id was left by an earlier process that died holding it (it is released at
+ * that kind's next startup). Main knows the exact service boot it is attached to. Any other holder counts as alive: its
+ * own process settles and releases it, the same rule every start already applies (invocation_chat_busy_other_host).
+ */
+function leaseHolderAlive(owner: ChatOwnerRow): boolean {
+  const me = localRunOwner();
+  if (!me) return true;
+  if (owner.owner_id === me.ownerId && owner.owner_kind === me.ownerKind) return true;
+  if (owner.owner_kind === me.ownerKind && (me.ownerKind === "desktop" || me.ownerKind === "daemon")) return false;
+  if (me.ownerKind === "desktop" && owner.owner_kind === "daemon") {
+    const boot = attachedServiceBoot();
+    if (boot) return owner.owner_id === boot;
+  }
+  return true;
+}
+
+function localChatActive(chatId: string): boolean {
+  try { return runtime().invocationService.activeChatIds().includes(chatId); } catch { return false; }
+}
+
+/** A run of this chat is live in this process or in the other one (Main ↔ service). */
+function chatLiveAnywhere(chatId: string): boolean {
+  if (localChatActive(chatId)) return true;
+  const owner = activeChatOwner(chatId);
+  return owner !== null && leaseHolderAlive(owner);
+}
+
+/** The chat's turn runs in the OTHER process: a turn started here would be refused, so a report waits instead. */
+function chatBusyInOtherProcess(chatId: string): boolean {
+  if (localChatActive(chatId)) return false;
+  const owner = activeChatOwner(chatId);
+  if (!owner || !leaseHolderAlive(owner)) return false;
+  const me = localRunOwner();
+  return !me || owner.owner_id !== me.ownerId || owner.owner_kind !== me.ownerKind;
+}
+
+/**
+ * The child chat's latest run for this dispatch: a run started after the recorded one (a queued steer that drained) wins,
+ * otherwise the recorded run. Its receipt is the durable ledger (store/run-events.ts), read the same in both processes.
+ */
+function latestChildRun(dispatch: OneDispatchRow): { runId: string; receipt: import("../../shared/types").InvocationRunReceipt | null } {
+  let runId = dispatch.child_run_id;
+  try {
+    const later = getDb().prepare(`SELECT run_id FROM run_events
+      WHERE chat_id = ? AND kind = 'invoke_started' AND run_id <> ?
+        AND COALESCE(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.background') END, 0) != 1
+        AND ts > COALESCE((SELECT MIN(ts) FROM run_events WHERE run_id = ? AND kind = 'invoke_started'), ?)
+      ORDER BY ts DESC, rowid DESC LIMIT 1`).get(dispatch.child_chat_id, dispatch.child_run_id, dispatch.child_run_id, dispatch.updated_at) as { run_id: string } | undefined;
+    if (later?.run_id) runId = later.run_id;
+  } catch { /* a store without the run ledger keeps the recorded run */ }
+  let receipt: import("../../shared/types").InvocationRunReceipt | null = null;
+  try { receipt = runtime().invocationService.receipt(runId); } catch { /* no receipt: read as never ended */ }
+  return { runId, receipt };
+}
+
+type OrphanState = { kind: "live" } | { kind: "quiet" } | { kind: "settled"; status: string; runId: string } | { kind: "interrupted"; runId: string };
+
+function orphanState(dispatch: OneDispatchRow, graceMs: number): OrphanState {
+  // A session parked on the owner (a sign-in it resumes from by itself) is not interrupted by a restart either.
+  if (ownerWait(dispatch) || chatLiveAnywhere(dispatch.child_chat_id)) return { kind: "live" };
+  const { runId, receipt } = latestChildRun(dispatch);
+  const status = receipt?.status;
+  if (status === "running" || status === "cancelling" || status === "waiting_input") return { kind: "live" };
+  const lastAt = Date.parse(receipt?.updatedAt ?? dispatch.updated_at);
+  if (graceMs > 0 && Number.isFinite(lastAt) && Date.now() - lastAt < graceMs) return { kind: "quiet" };
+  if (status === "completed" || status === "failed" || status === "cancelled") return { kind: "settled", status, runId };
+  return { kind: "interrupted", runId };
+}
+
+/** Running rows whose child no process holds any more: settled from the durable receipt, or closed as interrupted. */
+function settleOrphanedDispatches(graceMs: number): void {
+  try {
+    ensureTable();
+    const running = getDb().prepare("SELECT * FROM one_team_dispatches WHERE status = 'running'").all() as OneDispatchRow[];
+    for (const dispatch of running) {
+      const state = orphanState(dispatch, graceMs);
+      if (state.kind === "live") { installSettleListener(); continue; }
+      if (state.kind === "quiet") continue;
+      if (state.kind === "settled") finalizeDispatch(dispatch.id, state.status, state.runId);
+      else finalizeDispatch(dispatch.id, "interrupted", state.runId, true);
+    }
+  } catch (error) {
+    console.warn("[one-team] orphaned dispatch check skipped:", error instanceof Error ? error.message : error);
+  }
+}
+
+let orphanSweep: ReturnType<typeof setInterval> | null = null;
+/**
+ * A teammate whose run ended in the other process, or whose process died while this one lives, is never seen by this
+ * process's settle listener; a report held for a room busy elsewhere waits for that room. Both are read from the shared
+ * store once a minute in every process that recovered (cheap: running rows and held reports only).
+ */
+function armOrphanSweep(): void {
+  if (orphanSweep) return;
+  orphanSweep = setInterval(() => {
+    settleOrphanedDispatches(ORPHAN_GRACE_MS);
+    retryFailedReports(undefined, HELD_REPORT_CODES);
+  }, ORPHAN_SWEEP_MS);
+  orphanSweep.unref?.();
 }
 
 /**
@@ -455,7 +588,9 @@ function view(dispatch: OneDispatchRow) {
     brief: dispatch.brief,
     ...(running ? {} : { result: dispatch.result_text ?? null }),
     ...(wait ? { waiting_for_owner: wait } : {}),
-    ...(!running && !dispatch.reported_at && dispatch.report_error ? { report: { state: "failed", error: dispatch.report_error, attempts: dispatch.report_attempts ?? 0 } } : {}),
+    // A report held for the room (busy in the other process, or cut by a restart) is pending delivery, not a failed one.
+    ...(!running && !dispatch.reported_at && dispatch.report_error ? { report: { state: (HELD_REPORT_CODES as readonly string[]).includes(dispatch.report_error)
+      ? "pending" : "failed", error: dispatch.report_error, attempts: dispatch.report_attempts ?? 0 } } : {}),
     started_at: dispatch.created_at,
     updated_at: dispatch.updated_at,
   };
@@ -542,14 +677,17 @@ function finalStatus(receiptStatus: string): OneDispatchStatus {
   return "failed";
 }
 
-function finalizeDispatch(id: string, receiptStatus: string, runId: string): void {
+/** `restartInterrupted`: no process holds the child and its run never ended. The room gets the result notice now and its
+ * report goes through the retry ledger (report_error restart_interrupted, retryFailedReports), never dropped. */
+function finalizeDispatch(id: string, receiptStatus: string, runId: string, restartInterrupted = false): void {
   const current = row(id);
   if (!current || current.status !== "running") return;
   const status = finalStatus(receiptStatus);
   const result = lastAssistantText(current.child_chat_id, current.updated_at);
   const now = new Date().toISOString();
   const changed = getDb().prepare(
-    "UPDATE one_team_dispatches SET status = ?, result_text = ?, child_run_id = ?, updated_at = ? WHERE id = ? AND status = 'running'",
+    `UPDATE one_team_dispatches SET status = ?, result_text = ?, child_run_id = ?, updated_at = ?${restartInterrupted
+      ? `, report_error = '${RESTART_INTERRUPTED}', report_attempts = 0` : ""} WHERE id = ? AND status = 'running'`,
   ).run(status, result, runId, now, id);
   if (changed.changes !== 1) return;
   const settled = row(id)!;
@@ -572,7 +710,7 @@ function finalizeDispatch(id: string, receiptStatus: string, runId: string): voi
   }
   let parentActive = false;
   try { parentActive = dispatchReceiverCurrent(settled) && dispatchHandoff(settled).relayAllowed
-    && runtime().invocationService.activeChatIds().includes(settled.parent_chat_id); } catch { /* treat as idle */ }
+    && chatLiveAnywhere(settled.parent_chat_id); } catch { /* treat as idle */ }
   if (pending && pending.size > 0 && parentActive) {
     // One is waiting on one_team_session_status: the result goes back as that
     // tool's answer, so no second report turn is started.
@@ -586,6 +724,7 @@ function finalizeDispatch(id: string, receiptStatus: string, runId: string): voi
   // A waiter whose turn already ended (cancelled run) must not swallow the wake-up.
   if (pending) waiters.delete(id);
   appendParentNotice(settled, "result");
+  if (restartInterrupted) { retryFailedReports(settled.parent_chat_id); return; }
   reportToOne(settled);
 }
 
@@ -655,7 +794,7 @@ function tellOneOwnerWait(dispatch: OneDispatchRow, runId: string): void {
   }
   const pending = waiters.get(dispatch.id);
   let parentActive = false;
-  try { parentActive = runtime().invocationService.activeChatIds().includes(dispatch.parent_chat_id); } catch { /* treat as idle */ }
+  try { parentActive = chatLiveAnywhere(dispatch.parent_chat_id); } catch { /* treat as idle */ }
   if (pending && pending.size > 0 && parentActive) {
     // One is waiting on one_team_session_status: the wait goes back as that tool's answer.
     waiters.delete(dispatch.id);
@@ -663,20 +802,57 @@ function tellOneOwnerWait(dispatch: OneDispatchRow, runId: string): void {
     return;
   }
   if (pending) waiters.delete(dispatch.id);
-  reportToOne(dispatch, ownerWaitPrompt(dispatch, wait), false);
+  const text = ownerWaitPrompt(dispatch, wait);
+  const outcome = reportToOne(dispatch, text, false);
+  // D11: a notice whose turn could not start (the room busy in the other process, a refused start) is parked for the
+  // room's next turn instead of vanishing behind the once-only mark; if even that fails, the mark is lifted for a retry.
+  if ((outcome === "held" || outcome === "failed") && !parkOwnerWait(dispatch, runId, wait, text)) toldWaits.delete(key);
 }
 
-function reportToOne(dispatch: OneDispatchRow, userPrompt?: string | null, markReported = true): void {
+/** Parks an owner-wait notice in the room's deferred relays (deferred-system-relays.ts); true when it is kept there. */
+function parkOwnerWait(dispatch: OneDispatchRow, runId: string, wait: NonNullable<ReturnType<typeof ownerWait>>, text: string): boolean {
+  try {
+    const relays = require("../invocation/deferred-system-relays") as typeof import("../invocation/deferred-system-relays");
+    const code = (wait.notice_code ?? wait.reason).replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 80);
+    // false = the same text is already parked and undelivered: still kept.
+    relays.deferSystemRelay({ chatId: dispatch.parent_chat_id, text, cause: `owner_wait_${code}`, originRunId: runId });
+    return true;
+  } catch (error) {
+    console.warn("[one-team] owner-wait notice not parked:", error instanceof Error ? error.message : error);
+    return false;
+  }
+}
+
+/** A report held for later (the room busy in the other process): no attempt is spent; the sweep and the room's own settle retry it. */
+function holdReport(dispatch: OneDispatchRow, markReported: boolean): void {
+  withdrawQueuedOneTeamReport(dispatch.id);
+  if (markReported) getDb().prepare("UPDATE one_team_dispatches SET report_error = ? WHERE id = ? AND reported_at IS NULL")
+    .run(PARENT_BUSY_OTHER_PROCESS, dispatch.id);
+  armOrphanSweep();
+}
+
+/** "started": the report turn started or was queued (or parked for a waiting Goal); "held": the room runs in the other
+ * process; "failed": the start was refused; "skipped": nothing to report to. */
+type ReportOutcome = "started" | "held" | "failed" | "skipped";
+function reportToOne(dispatch: OneDispatchRow, userPrompt?: string | null, markReported = true): ReportOutcome {
   const { invocationService, chats } = runtime();
   const prompt = reportPrompt(dispatch);
   if (!dispatchReceiverCurrent(dispatch) || prompt === null) {
     if (markReported) getDb().prepare("UPDATE one_team_dispatches SET report_error = ? WHERE id = ? AND reported_at IS NULL")
       .run("one_team_report_owner_unbound",dispatch.id);
     withdrawQueuedOneTeamReport(dispatch.id);
-    return;
+    return "skipped";
   }
   const parent = chats.getChat(dispatch.parent_chat_id);
-  if (!parent) return;
+  if (!parent) {
+    // A deleted room has nobody to report to: the row leaves the held set instead of being retried every sweep.
+    if (markReported) getDb().prepare("UPDATE one_team_dispatches SET report_error = ? WHERE id = ? AND reported_at IS NULL")
+      .run("one_team_report_room_gone", dispatch.id);
+    return "skipped";
+  }
+  // The room's own turn runs in the other process (Main ↔ service): a report turn here is refused
+  // (invocation_chat_busy_other_host) and would spend an attempt. It waits for that room instead (D3).
+  if (chatBusyInOtherProcess(dispatch.parent_chat_id)) { holdReport(dispatch, markReported); return "held"; }
   const request = {
     chatId: dispatch.parent_chat_id,
     userPrompt:userPrompt ?? prompt,
@@ -699,6 +875,7 @@ function reportToOne(dispatch: OneDispatchRow, userPrompt?: string | null, markR
         queuedRequestId: steered.queuedRequestId });
     }
     if (markReported) getDb().prepare("UPDATE one_team_dispatches SET reported_at = ?, report_error = NULL WHERE id = ?").run(new Date().toISOString(), dispatch.id);
+    return "started";
   } catch (error) {
     // The durable result receipt already exposes the actual member output in the room, so no second assistant relay is
     // made up here. But a report that never started is not delivered (22 O6): keep why, count the attempt, retry later.
@@ -713,11 +890,14 @@ function reportToOne(dispatch: OneDispatchRow, userPrompt?: string | null, markR
       console.info("[one-team] report parked for the Goal's next turn:", dispatch.id);
       if (markReported) getDb().prepare("UPDATE one_team_dispatches SET reported_at = ?, report_error = NULL WHERE id = ? AND reported_at IS NULL")
         .run(new Date().toISOString(), dispatch.id);
-      return;
+      return "started";
     }
+    // The other process took the room between the check above and this start: same as busy there, no attempt spent.
+    if (message === CHAT_BUSY_OTHER_HOST) { holdReport(dispatch, markReported); return "held"; }
     console.warn("[one-team] report turn not started:", message);
     if (markReported) getDb().prepare("UPDATE one_team_dispatches SET report_error = ?, report_attempts = report_attempts + 1 WHERE id = ? AND reported_at IS NULL")
       .run(message.slice(0, 240), dispatch.id);
+    return "failed";
   }
 }
 
@@ -727,12 +907,10 @@ function reportToOne(dispatch: OneDispatchRow, userPrompt?: string | null, markR
 export function graphStepOwnedWork(owner: string): GraphTeamStepWork[] {
   ensureTable();
   const rows = getDb().prepare("SELECT * FROM one_team_dispatches WHERE graph_owner = ? ORDER BY created_at, rowid").all(owner) as OneDispatchRow[];
-  let active = new Set<string>();
-  try { active = new Set(runtime().invocationService.activeChatIds()); } catch { /* none known active */ }
   return rows.map((dispatch) => {
     const parked = dispatch.status === "running" && ownerWait(dispatch) !== null;
     return { dispatchId: dispatch.id, member: dispatch.member_name, status: parked ? "waiting_for_owner" : dispatch.status,
-      inFlight: isLive(dispatch) && !parked, active: active.has(dispatch.child_chat_id) };
+      inFlight: isLive(dispatch) && !parked, active: !dispatch.child_chat_id.startsWith(QUEUED_CHAT_PREFIX) && chatLiveAnywhere(dispatch.child_chat_id) };
   });
 }
 
@@ -796,15 +974,18 @@ function settleParkedReports(parentChatId?: string): void {
 
 /** Reports that could not start are retried when the room is idle again, at most three attempts in all (22 O6). */
 export const ONE_TEAM_REPORT_ATTEMPTS = 3;
-function retryFailedReports(parentChatId?: string): void {
+/** `codes`: only reports held under these report_error codes (the sweep: held, not failed, reports). */
+function retryFailedReports(parentChatId?: string, codes?: readonly string[]): void {
   try {
     ensureTable();
     settleParkedReports(parentChatId);
     const rows = getDb().prepare(`SELECT * FROM one_team_dispatches WHERE status <> 'running' AND reported_at IS NULL AND report_error IS NOT NULL
-      AND report_attempts < ? ${parentChatId ? "AND parent_chat_id = ?" : ""} ORDER BY updated_at LIMIT 10`)
-      .all(...(parentChatId ? [ONE_TEAM_REPORT_ATTEMPTS, parentChatId] : [ONE_TEAM_REPORT_ATTEMPTS])) as OneDispatchRow[];
+      AND report_attempts < ? ${parentChatId ? "AND parent_chat_id = ?" : ""} ${codes?.length ? `AND report_error IN (${codes.map(() => "?").join(",")})` : ""}
+      ORDER BY updated_at LIMIT 10`)
+      .all(ONE_TEAM_REPORT_ATTEMPTS, ...(parentChatId ? [parentChatId] : []), ...(codes ?? [])) as OneDispatchRow[];
     for (const dispatch of rows) {
-      if (runtime().invocationService.activeChatIds().includes(dispatch.parent_chat_id)) continue;
+      // A room whose turn runs in either process gets the report after it, never a second turn beside it.
+      if (chatLiveAnywhere(dispatch.parent_chat_id)) continue;
       reportToOne(dispatch);
     }
   } catch (error) {
@@ -820,12 +1001,26 @@ export interface OneTeamCaller {
   /** team-control-server binding scope; "graph-step" carries the Main-minted grant below. */
   scope?: string;
   graphTeamGrant?: { runId: string; nodeId: string } | null;
+  /** The exact invocation that holds this capability (team-control-server binding, mcp-config.ts); never from the model. */
+  supervisorReplyRunId?: string;
 }
 
 /** The graph step a capability acts for (graph-team-grant.ts grant on the binding), never read from model input. */
 function graphOwnerOf(caller: OneTeamCaller): string | null {
   const grant = caller.scope === "graph-step" ? caller.graphTeamGrant : null;
   return grant && grant.runId && grant.nodeId ? graphTeamStepOwner(grant.runId, grant.nodeId) : null;
+}
+
+/**
+ * The run that dispatched, exactly as the host bound it to the capability: the graph step's run for a graph-step grant,
+ * otherwise the calling invocation (supervisorReplyRunId). A caller with no run (an AGI action) records none. Never
+ * re-derived from the room's current state (ID-3, flow audit 2026-10-18: attach() gave 151 of 185 dispatches no parent and
+ * could hand a graph step's dispatch an unrelated room run).
+ */
+function dispatchParentRunId(caller: OneTeamCaller): string | null {
+  const grant = caller.scope === "graph-step" ? caller.graphTeamGrant : null;
+  if (grant) return typeof grant.runId === "string" && grant.runId ? grant.runId : null;
+  return typeof caller.supervisorReplyRunId === "string" && caller.supervisorReplyRunId ? caller.supervisorReplyRunId : null;
 }
 
 /** A graph step that steers or reuses a live session it did not start takes it over: its result wakes the step. */
@@ -838,8 +1033,6 @@ export function oneTeamList(caller: OneTeamCaller) {
   const ownerChatId = assertCaller(caller.chatId);
   const group = groupOf(ownerChatId);
   recoverOneTeamDispatches();
-  const { invocationService } = runtime();
-  const active = new Set(invocationService.activeChatIds());
   ensureTable();
   const open = getDb().prepare(
     "SELECT * FROM one_team_dispatches WHERE parent_chat_id = ? ORDER BY created_at DESC LIMIT 20",
@@ -871,7 +1064,7 @@ export function oneTeamList(caller: OneTeamCaller) {
     sessions_from_this_conversation: open.filter(dispatch=>dispatchReceiverCurrent(dispatch)
       && (isLive(dispatch) || dispatchHandoff(dispatch).relayAllowed)).map((dispatch) => ({
       ...view(dispatch),
-      running_now: active.has(dispatch.child_chat_id),
+      running_now: !dispatch.child_chat_id.startsWith(QUEUED_CHAT_PREFIX) && chatLiveAnywhere(dispatch.child_chat_id),
     })),
   };
 }
@@ -961,7 +1154,7 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
       ? `one-team-rate-limit: 이 대화에서 한 시간에 ${MAX_STARTS_PER_PARENT_PER_HOUR}개까지 맡길 수 있어요. 결과를 오너에게 먼저 보고하세요.`
       : `one-team-rate-limit: at most ${MAX_STARTS_PER_PARENT_PER_HOUR} teammate sessions per hour from one conversation. Report the results to the owner first.`);
   }
-  const { chats, invocationService } = runtime();
+  const { chats } = runtime();
   const title = brief.split(/\r?\n/, 1)[0]!.slice(0, 120);
   const fresh = input.newSession === true;
   // Continue this room's teammate context by default. An explicit new session
@@ -983,13 +1176,14 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
   // New work for that teammate gets its own session and the parked run stays as it is, so the resume still works.
   // Yotube room 2026-10-13: a caption fix was attached to a run waiting on a YouTube sign-in and never ran.
   const parked = Boolean(reused && settling && parkedOnOwner(reused.id));
-  const reusedBusy = Boolean(reused && !parked && (settling || invocationService.activeChatIds().includes(reused.id)));
+  const reusedBusy = Boolean(reused && !parked && (settling || chatLiveAnywhere(reused.id)));
   const graphOwner = graphOwnerOf(caller);
+  const parentRunId = dispatchParentRunId(caller);
   if (blocker || reusedBusy) {
-    return enqueueDispatch({ parentChatId, member, brief, hash, blocker, chatId: reused && !parked && !fresh ? reused.id : null, graphOwner });
+    return enqueueDispatch({ parentChatId, member, brief, hash, blocker, chatId: reused && !parked && !fresh ? reused.id : null, graphOwner, parentRunId });
   }
   const continuing = parked ? null : reused;
-  const { created, createdHere } = launchDispatch({ parentChatId, member, brief, hash, title, continuing, graphOwner });
+  const { created, createdHere } = launchDispatch({ parentChatId, member, brief, hash, title, continuing, graphOwner, parentRunId });
   return {
     ...view(created),
     confirmed: true,
@@ -1018,7 +1212,9 @@ function seatBlocker(parentChatId: string, member: OneOrgMember): OneDispatchRow
  * nothing left behind. `queuedId` turns an existing queued row into the running one instead of inserting a new row.
  */
 function launchDispatch(input: { parentChatId: string; member: OneOrgMember; brief: string; hash: string; title: string;
-  continuing: import("../../shared/types").Chat | null; queuedId?: string; graphOwner?: string | null }): { created: OneDispatchRow; createdHere: boolean } {
+  continuing: import("../../shared/types").Chat | null; queuedId?: string; graphOwner?: string | null;
+  /** dispatchParentRunId(caller); a queued row keeps the one it was accepted with. */
+  parentRunId?: string | null }): { created: OneDispatchRow; createdHere: boolean } {
   const { parentChatId, member, brief, hash, title, continuing } = input;
   const ownerScope = teamDispatchOwnerScope();
   if (input.queuedId) assertDispatchReceiver(row(input.queuedId)!);
@@ -1030,7 +1226,7 @@ function launchDispatch(input: { parentChatId: string; member: OneOrgMember; bri
   const id = input.queuedId ?? `dispatch-${randomUUID()}`;
   const runId = randomUUID();
   const now = new Date().toISOString();
-  const parentRunId = invocationService.attach(parentChatId)?.runId ?? null;
+  const parentRunId = input.parentRunId ?? null;
   if (input.queuedId) {
     getDb().prepare("UPDATE one_team_dispatches SET status = 'running', child_chat_id = ?, child_run_id = ?, updated_at = ? WHERE id = ? AND status = 'queued'")
       .run(chat.id, runId, now, id);
@@ -1091,12 +1287,11 @@ function launchDispatch(input: { parentChatId: string; member: OneOrgMember; bri
  * Accept work for a teammate whose seat is busy. Nothing runs yet; the row is `queued` and the model gets an immediate,
  * non-error "queued behind <session>" answer. `chatId` is the session to continue (null = a new session when it starts).
  */
-function enqueueDispatch(input: { parentChatId: string; member: OneOrgMember; brief: string; hash: string; blocker: OneDispatchRow | null; chatId: string | null; graphOwner?: string | null }) {
+function enqueueDispatch(input: { parentChatId: string; member: OneOrgMember; brief: string; hash: string; blocker: OneDispatchRow | null; chatId: string | null; graphOwner?: string | null; parentRunId?: string | null }) {
   const { parentChatId, member, brief, hash, blocker } = input;
-  const { invocationService } = runtime();
   const id = `dispatch-${randomUUID()}`;
   const now = new Date().toISOString();
-  const parentRunId = invocationService.attach(parentChatId)?.runId ?? null;
+  const parentRunId = input.parentRunId ?? null;
   const ownerScope = teamDispatchOwnerScope();
   getDb().prepare(`
     INSERT INTO one_team_dispatches (id, parent_chat_id, parent_run_id, member_id, member_agent_id, member_name,
@@ -1132,7 +1327,7 @@ export function startQueuedDispatches(): void {
     ensureTable();
     const queued = getDb().prepare("SELECT * FROM one_team_dispatches WHERE status = 'queued' ORDER BY created_at, rowid").all() as OneDispatchRow[];
     if (queued.length === 0) return;
-    const { chats, invocationService } = runtime();
+    const { chats } = runtime();
     const heldSeats = new Set<string>();
     for (const item of queued) {
       if (!dispatchReceiverCurrent(item)) continue;
@@ -1152,7 +1347,7 @@ export function startQueuedDispatches(): void {
           // A session parked on the owner keeps its wait: the job gets its own session. Otherwise the continued session
           // must be idle (a live turn, or a still-running row, keeps this job waiting).
           if (!parkedOnOwner(candidate.id)) {
-            if (invocationService.activeChatIds().includes(candidate.id)) continue;
+            if (chatLiveAnywhere(candidate.id)) continue;
             if (getDb().prepare("SELECT 1 FROM one_team_dispatches WHERE child_chat_id = ? AND status = 'running' LIMIT 1").get(candidate.id)) continue;
             continuing = candidate;
           }
