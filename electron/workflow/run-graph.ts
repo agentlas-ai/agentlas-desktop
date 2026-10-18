@@ -1,4 +1,5 @@
 import { claimGraphOccurrenceCustody, assertGraphOccurrenceCustody, withChildGraphOccurrenceCustody, type GraphOccurrenceCustody, type GraphOccurrenceBinding } from "../../shared/graph-occurrence-custody";
+import { registerApprovalLineageIfLive } from "../runtime/linked-abort";
 import { composeDeclaredPrompt, type DeclaredPromptPart } from "../runtime/prompt-order";
 import { createGraphWorkerAttempt, readGraphWorkerFailure, readGraphWorkerPool, chooseGraphWorker, graphPinUnavailable, graphWorkerIdentity,
   type GraphWorkerAttempt, type GraphWorkerFailureReceipt, type GraphWorkerPool } from "./graph-worker-fallback";
@@ -2738,6 +2739,10 @@ export async function runGraph(
   if (opts.signal?.aborted) {
     runController.abort(opts.signal.reason);
   } else if (opts.signal) {
+    // Native approval provenance follows signal lineage: a graph run started inside a turn (an app operation) asks
+    // for tool approval under this controller, and an unregistered child is refused native_approval_signal_unregistered
+    // (production 10-16 run 7b6303fa, the same gap in the room and firm paths; audit R-102).
+    registerApprovalLineageIfLive(opts.signal, runController.signal);
     const relayAbort = () => runController.abort(opts.signal?.reason);
     opts.signal.addEventListener("abort", relayAbort, { once: true });
     detachCallerAbort = () => opts.signal?.removeEventListener("abort", relayAbort);
@@ -5028,7 +5033,7 @@ export async function runGraph(
         let nodeTimedOut = false;
         const relayRunAbort = () => nodeAbort.abort(runSignal.reason);
         if (runSignal.aborted) relayRunAbort();
-        else runSignal.addEventListener("abort", relayRunAbort, { once: true });
+        else { registerApprovalLineageIfLive(runSignal, nodeAbort.signal); runSignal.addEventListener("abort", relayRunAbort, { once: true }); }
         // A team step's budget bounds its own turns, not the teammates' work it waits for (graph-team-step.ts).
         const armNodeTimer = (ms: number): ReturnType<typeof setTimeout> => setTimeout(() => {
           const hold = graphTeamStepHold(runId, node.id);
@@ -6321,7 +6326,7 @@ export async function runGraph(
       let timedOut = false;
       const relayAbort = () => nodeController.abort(runSignal.reason);
       if (runSignal.aborted) relayAbort();
-      else runSignal.addEventListener("abort", relayAbort, { once: true });
+      else { registerApprovalLineageIfLive(runSignal, nodeController.signal); runSignal.addEventListener("abort", relayAbort, { once: true }); }
       // A team step waiting on its teammates is not timed out here either (graph-team-step.ts graphTeamStepHold).
       const armTimer = (ms: number): ReturnType<typeof setTimeout> => setTimeout(() => {
         const hold = graphTeamStepHold(runId, node.id);

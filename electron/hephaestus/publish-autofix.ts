@@ -1,4 +1,5 @@
 import { runObservedRunner, ObservedRunnerFailureError } from "../runtime/observed-runner";
+import { registerApprovalLineageIfLive } from "../runtime/linked-abort";
 import { runnerFailureFromError } from "../runtime/runner";
 import { runtimeFailureBlocksReplay } from "../runtime/selection";
 // Publish auto-fix — before a Hub/Cloud publish, the user's strongest connected
@@ -241,7 +242,7 @@ async function runModelReview(
   const timer = setTimeout(() => timeout.abort(), 300_000);
   if (signal) {
     if (signal.aborted) timeout.abort();
-    else signal.addEventListener("abort", () => timeout.abort(), { once: true });
+    else { registerApprovalLineageIfLive(signal, timeout.signal); signal.addEventListener("abort", () => timeout.abort(), { once: true }); }
   }
   const req: RunnerRequest = {
     systemPrompt: system,
@@ -524,7 +525,7 @@ async function llmFixFile(
   const timer = setTimeout(() => timeout.abort(), 300_000);
   if (signal) {
     if (signal.aborted) timeout.abort();
-    else signal.addEventListener("abort", () => timeout.abort(), { once: true });
+    else { registerApprovalLineageIfLive(signal, timeout.signal); signal.addEventListener("abort", () => timeout.abort(), { once: true }); }
   }
   const req: RunnerRequest = {
     systemPrompt: system,
