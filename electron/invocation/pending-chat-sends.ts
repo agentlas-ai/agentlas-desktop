@@ -90,7 +90,9 @@ export interface PendingChatSendsDeps<Sender> {
    * The wait ended without a placed run: a permanent refusal, the deadline, a restart, or a run that ended with its
    * placement unconfirmed ("uncertain": never re-sent; `runId` names that run). Never called for a transient refusal.
    */
-  onEnded?(event: { chatId: string; request: McpInvocationRequest; reason: "permanent" | "deadline" | "closed" | "uncertain"; code?: string; runId?: string }): void;
+  onEnded?(event: { chatId: string; request: McpInvocationRequest; reason: "permanent" | "deadline" | "closed" | "uncertain"; code?: string; runId?: string;
+    /** The pending_chat_sends row id: the message's identity when no run ever took it (ID-8). */
+    sendId: string }): void;
   onChange?(chatId: string): void;
   /**
    * Called on every look while the head message waits for a busy chat (cheap, no writes expected). Lets the wiring
@@ -208,7 +210,7 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
     };
     if (!row.run_id) {
       finish("uncertain", "run_unknown");
-      deps.onEnded?.({ chatId, request, reason: "uncertain", code: "run_unknown" });
+      deps.onEnded?.({ chatId, request, reason: "uncertain", code: "run_unknown", sendId: row.id });
       return "done";
     }
     let runState: "running" | "settled";
@@ -227,13 +229,13 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
     if (placement === "not-dispatched") {
       const code = opts.restarted ? "process_restarted" : "not_dispatched";
       finish(opts.restarted ? "abandoned" : "failed", code);
-      deps.onEnded?.({ chatId, request, reason: opts.restarted ? "closed" : "permanent", code, runId: row.run_id });
+      deps.onEnded?.({ chatId, request, reason: opts.restarted ? "closed" : "permanent", code, runId: row.run_id, sendId: row.id });
       return "done";
     }
     // Sent without an acknowledgement we can prove, or by a path that leaves no placement fact: never re-sent.
     const code = opts.restarted ? "process_restarted" : "placement_unconfirmed";
     finish("uncertain", code);
-    deps.onEnded?.({ chatId, request, reason: "uncertain", code, runId: row.run_id });
+    deps.onEnded?.({ chatId, request, reason: "uncertain", code, runId: row.run_id, sendId: row.id });
     return "done";
   }
 
@@ -279,7 +281,7 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
           setState.run("gave_up", "deadline", deps.now(), row.id);
           senders.delete(row.id);
           deps.log?.("pending send gave up", { chatId, sendId: row.id, attempts: row.attempts, code: row.last_code });
-          deps.onEnded?.({ chatId, request, reason: "deadline", ...(row.last_code ? { code: row.last_code } : {}) });
+          deps.onEnded?.({ chatId, request, reason: "deadline", ...(row.last_code ? { code: row.last_code } : {}), sendId: row.id });
           deps.onChange?.(chatId);
           continue;
         }
@@ -323,7 +325,7 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
           setState.run("failed", code ?? "start_failed", deps.now(), row.id);
           senders.delete(row.id);
           deps.log?.("pending send ended", { chatId, sendId: row.id, code });
-          deps.onEnded?.({ chatId, request, reason: "permanent", ...(code ? { code } : {}) });
+          deps.onEnded?.({ chatId, request, reason: "permanent", ...(code ? { code } : {}), sendId: row.id });
           deps.onChange?.(chatId);
           continue;
         }

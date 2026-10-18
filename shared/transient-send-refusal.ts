@@ -22,6 +22,9 @@ const TRANSIENT_CODES: ReadonlySet<string> = new Set([
   "invocation_admission_chat_pending",
   "invocation_steer_parent_pending",
   "chat_invocation_active",
+  // Another run of this same process holds the chat's lease: a graph agent node or a doctor run on that chat (W5). It is
+  // busy, not broken; the start waits for the release like invocation_chat_busy (store/invocation-run-owners.ts).
+  "invocation_chat_owned_by_other_run",
   // Text addressed to a run that has just ended, or to the process that no longer owns it.
   "invocation_steer_stale_run",
   "invocation_steer_native_turn_required",

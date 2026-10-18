@@ -32,8 +32,19 @@ import { readRunTurnPlacement } from "./turn-placement";
 
 export type RendererStartNow = (event: IpcMainInvokeEvent, req: McpInvocationRequest) => Promise<{ runId: string }>;
 
-/** What invoke:run answers when the message was accepted but its run starts later. */
-export interface QueuedRunAnswer { runId: string; chatId: string; queued: true }
+/**
+ * What invoke:run answers when the message was accepted but its run starts later (ID-8). `runId` only echoes the
+ * request's own id as the acknowledgement identity the renderer checks (OneShell: invoke_start_ack_identity_mismatch);
+ * no run will carry it, and with no request id there is none ("") instead of a made-up one. The message's real identity
+ * is the queue row: `pendingSendId`, also as `queuedRequestId` ("pending-send:<id>", the form the steer receipts use);
+ * the run that later takes it is recorded on that row, and a notice about the message names it the same way.
+ */
+export interface QueuedRunAnswer { runId: string; chatId: string; queued: true; pendingSendId: string; queuedRequestId: string }
+
+/** The id a host notice about a queued message carries: the run that took it, else its queue row (never a random id). */
+export function queuedSendNoticeRunId(runId: string | null | undefined, sendId: string): string {
+  return runId || `pending-send:${sendId}`;
+}
 
 function chatIsFree(chatId: string): boolean {
   if (invocationService.activeChatIds().includes(chatId)) return false;
@@ -70,7 +81,8 @@ export function diagnoseBusyChat(chatId: string, waitedMs: number, now: number =
   if (now - last < BUSY_DIAGNOSIS_EVERY_MS) return;
   busyDiagnosisAt.set(chatId, now);
   let activeRun = false, admission = false;
-  try { activeRun = invocationService.activeChatIds().includes(chatId); } catch { /* diagnostic only */ }
+  // This process's own turns only: activeChatIds also lists the chats this process leases outside a turn (W5).
+  try { activeRun = invocationService.turnChatIds().includes(chatId); } catch { /* diagnostic only */ }
   try { admission = Boolean(getPendingInvocationAdmissionForChat(chatId)); } catch { /* diagnostic only */ }
   console.warn("[send-queue] message still waiting for a busy chat", {
     chatId, waitedSeconds: Math.round(waitedMs / 1000), activeRunInThisProcess: activeRun, pendingAdmission: admission,
@@ -149,7 +161,7 @@ export function createRendererSendQueue(startNow: RendererStartNow): {
         ? withPreparedUserRow<ChatHistoryEntry, { runId: string }>(request.chatId, request.userPrompt, userRow as ChatHistoryEntry, start)
         : start();
     },
-    onEnded: ({ chatId, request, reason, code, runId }) => {
+    onEnded: ({ chatId, request, reason, code, runId, sendId }) => {
       // The message stays in the transcript. A message that could not run because a restart happened is not announced;
       // one that hit a refusal the owner must fix gets one neutral line.
       if (reason === "closed") return;
@@ -161,13 +173,13 @@ export function createRendererSendQueue(startNow: RendererStartNow): {
         if (status === "failed" || status === "cancelled") return;
         try {
           appendChatMessage(chatId, "assistant", queuedSendUncertainNotice(pickLocale(request)),
-            { hostNotice: { purpose: "host-status", runId: runId ?? request.runId ?? randomUUID(), status: "needs-owner" } });
+            { hostNotice: { purpose: "host-status", runId: queuedSendNoticeRunId(runId, sendId), status: "needs-owner" } });
         } catch { /* the saved message and the log remain */ }
         return;
       }
       try {
         appendChatMessage(chatId, "assistant", queuedSendEndedNotice(pickLocale(request)),
-          { hostNotice: { purpose: "host-status", runId: request.runId ?? randomUUID(), status: "needs-owner" } });
+          { hostNotice: { purpose: "host-status", runId: queuedSendNoticeRunId(runId, sendId), status: "needs-owner" } });
       } catch { /* the saved message and the log remain */ }
     },
     onChange: (chatId) => { try { emitDesktopStoreChange({ entity: "chat", id: chatId }); } catch { /* cosmetic */ } },
@@ -183,17 +195,17 @@ export function createRendererSendQueue(startNow: RendererStartNow): {
   return {
     queue,
     async run(event, req) {
+      const queuedAnswer = (record: PendingSendRecord): QueuedRunAnswer => ({ runId: req.runId ?? "", chatId: req.chatId, queued: true,
+        pendingSendId: record.id, queuedRequestId: `pending-send:${record.id}` });
       if (canQueuePendingSend(req) && queue.hasQueued(req.chatId)) {
         // Earlier messages of this chat are still waiting: this one goes behind them, in the order it was typed.
-        accept(event, req, undefined);
-        return { runId: req.runId ?? randomUUID(), chatId: req.chatId, queued: true };
+        return queuedAnswer(accept(event, req, undefined));
       }
       try {
         return await startNow(event, req);
       } catch (cause) {
         if (canQueuePendingSend(req) && isTransientSendRefusal(cause)) {
-          accept(event, req, undefined, cause);
-          return { runId: req.runId ?? randomUUID(), chatId: req.chatId, queued: true };
+          return queuedAnswer(accept(event, req, undefined, cause));
         }
         throw cause;
       }

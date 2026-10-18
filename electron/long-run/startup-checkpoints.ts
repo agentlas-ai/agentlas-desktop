@@ -143,6 +143,32 @@ function startupReplayRefusal(reason: string): never {
   throw new StartupReplayPreflightError(reason);
 }
 
+/**
+ * The producer's user-message cursor including its own prompt row (ID-1): the value invoke_prompt_bound records
+ * (InvocationService promptBoundUserCursor), else, for a run recorded before that field, the same rule applied to its
+ * bound prompt row, else invoke_started's admission-time cursor. The admission-time cursor is read before the run writes
+ * the owner's own prompt, so an owner-started producer always looked older than its own prompt and every restart refused
+ * the resume as newer_user_direction (Yotube run_d627367a, 2026-10-14 00:25Z and 05:32Z).
+ */
+export function producerUserCursor(invocationRunId: string, chatId: string, startCursor: unknown): number | undefined {
+  const start = typeof startCursor === "number" && Number.isSafeInteger(startCursor) ? startCursor : null;
+  try {
+    const bound = getDb().prepare("SELECT payload_json FROM run_events WHERE run_id=? AND chat_id=? AND kind='invoke_prompt_bound' ORDER BY seq ASC LIMIT 1")
+      .get(invocationRunId, chatId) as { payload_json: string } | undefined;
+    const payload = bound ? JSON.parse(bound.payload_json) as { latestUserMessageRowId?: unknown; promptMessageId?: unknown } : null;
+    if (typeof payload?.latestUserMessageRowId === "number" && Number.isSafeInteger(payload.latestUserMessageRowId)) return payload.latestUserMessageRowId;
+    if (typeof payload?.promptMessageId === "string") {
+      const prompt = getDb().prepare("SELECT rowid AS cursor FROM chat_messages WHERE id=? AND chat_id=? AND role='user'")
+        .get(payload.promptMessageId, chatId) as { cursor: number } | undefined;
+      if (prompt && (start === null || prompt.cursor > start) && !getDb().prepare(
+        "SELECT 1 FROM chat_messages WHERE chat_id=? AND role='user' AND rowid > ? AND rowid < ? LIMIT 1").get(chatId, start ?? -1, prompt.cursor)) {
+        return prompt.cursor;
+      }
+    }
+  } catch { /* an unreadable binding keeps the admission-time cursor */ }
+  return start ?? undefined;
+}
+
 function sameJson(a: unknown, b: unknown): boolean {
   try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }
 }
@@ -248,8 +274,9 @@ function preflightMissingStartupCheckpoint(candidate: NonNullable<ReturnType<typ
       startupReplayRefusal("history_missing");
     const latestUser = getDb().prepare("SELECT rowid AS cursor, created_at FROM chat_messages WHERE id=? AND chat_id=? AND role='user'")
       .get(newestUser.id, chat.id) as { cursor: number; created_at: string } | undefined;
-    if (!latestUser || (typeof startPayload.latestUserMessageRowId === "number"
-      ? latestUser.cursor > startPayload.latestUserMessageRowId
+    const cursor = producerUserCursor(producer.invocation_run_id, chat.id, startPayload.latestUserMessageRowId);
+    if (!latestUser || (typeof cursor === "number"
+      ? latestUser.cursor > cursor
       : latestUser.created_at >= started.ts)) startupReplayRefusal("newer_user_direction");
   } else {
     if (!intakeSourceMessageId) startupReplayRefusal("history_missing");

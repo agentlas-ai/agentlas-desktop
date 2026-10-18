@@ -745,6 +745,49 @@ export function withdrawQueuedOneTeamReport(dispatchId: string): boolean {
   try { return runtime().invocationService.unsteerQueuedById(queued.chatId, queued.queuedRequestId); } catch { return false; }
 }
 
+/** report_error of a report whose queued turn the owner's stop (Stop, Goal pause or delete) withdrew: kept visible, never carried again. */
+export const ONE_TEAM_REPORT_OWNER_STOPPED = "owner_stopped";
+
+/**
+ * A queued report turn ended failed or cancelled (store/invocation-steers.ts calls this inside the transaction that
+ * settles the steer row): the ledger goes back to "not reported" with the cause. reportToOne writes reported_at when it
+ * QUEUES the report, so a report that never ran stayed "reported" and nothing re-sent it (production 2026-10-18,
+ * dispatch-1f9ca888: steer a4d7b864 failed 02:44:23Z, reported_at still 02:09:34.386Z). `retry`: one attempt is spent
+ * and retryFailedReports sends it again within ONE_TEAM_REPORT_ATTEMPTS; otherwise the attempts are spent (an owner
+ * stop: `owner_stopped`; a report turn that may already have run: its cause). Only the mark this report wrote is
+ * reverted: the same child run, marked at or after the report was queued, no later report turn of the same session.
+ * An owner-wait notice (markReported false) never marked the ledger and changes nothing.
+ */
+export function revertQueuedOneTeamReport(input: {
+  steerId: string; dispatchId: string | null; childRunId: string | null; queuedAt: string;
+  cause: string; ownerStopped: boolean; retry: boolean;
+}): boolean {
+  const mapped = [...queuedReports].find(([, queued]) => queued.queuedRequestId === input.steerId);
+  if (mapped) queuedReports.delete(mapped[0]);
+  if (mapped && !mapped[1].markReported) return false;
+  const dispatchId = input.dispatchId ?? mapped?.[0] ?? null;
+  const childRunId = input.childRunId ?? mapped?.[1].childRunId ?? null;
+  if (!dispatchId || !childRunId) return false;
+  const db = getDb();
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'one_team_dispatches'").get()) return false;
+  const later = db.prepare(`SELECT 1 FROM invocation_steers WHERE id <> ? AND queued_at >= ?
+    AND json_valid(one_team_report_custody_json) AND json_extract(one_team_report_custody_json, '$.dispatchId') = ?
+    AND rowid > COALESCE((SELECT rowid FROM invocation_steers WHERE id = ?), 0) LIMIT 1`).get(input.steerId, input.queuedAt, dispatchId, input.steerId);
+  if (later) return false;
+  const error = input.ownerStopped ? ONE_TEAM_REPORT_OWNER_STOPPED : input.cause;
+  const reverted = db.prepare(`UPDATE one_team_dispatches SET reported_at = NULL, report_error = ?,
+      report_attempts = CASE WHEN ? = 1 THEN report_attempts + 1 ELSE MAX(report_attempts, ?) END
+    WHERE id = ? AND child_run_id = ? AND status NOT IN ('running','queued') AND reported_at IS NOT NULL AND reported_at >= ?`)
+    .run(error.slice(0, 240), input.retry ? 1 : 0, ONE_TEAM_REPORT_ATTEMPTS, dispatchId, childRunId, input.queuedAt).changes === 1;
+  if (!reverted) return false;
+  console.info(`[one-team] report ledger reverted dispatch=${dispatchId} steer=${input.steerId} cause=${input.cause} report_error=${error} retry=${input.retry}`);
+  if (input.retry) {
+    const parent = (db.prepare("SELECT parent_chat_id FROM one_team_dispatches WHERE id = ?").get(dispatchId) as { parent_chat_id: string } | undefined)?.parent_chat_id;
+    if (parent) setTimeout(() => retryFailedReports(parent), 1_500).unref?.();
+  }
+  return true;
+}
+
 function reportPrompt(dispatch: OneDispatchRow): string | null {
   const outcome = dispatch.status === "completed" ? "finished" : `ended with status "${dispatch.status}"`;
   const handoff = dispatchHandoff(dispatch);

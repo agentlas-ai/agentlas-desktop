@@ -121,7 +121,7 @@ import { cancelQueuedOnePreflightSteersForChat } from "../store/one-preflight-st
 import type { RunnerNativeTurnController, RunnerOwnerControlInbox, RunnerNativeControlState } from "../runtime/runner";
 import type { InvocationCurrentTurnSteerRequest, InvocationCurrentTurnSteerReceipt } from "../../shared/types";
 import { claimCurrentTurnSteer, countPendingCurrentTurnSteers, existingCurrentTurnSteer, getCurrentTurnSteer,
-  settleCurrentTurnSteer, takeCurrentTurnSteers } from "../store/current-turn-steers";
+  listUncertainCurrentTurnSteers, rejectQueuedCurrentTurnSteersForStop, settleCurrentTurnSteer, takeCurrentTurnSteers } from "../store/current-turn-steers";
 import { getRuntimeToolPermissionArbiter } from "../runtime/tool-approval";
 import {
   PERMISSION_ESCALATION_TOOL,
@@ -595,6 +595,10 @@ const MAX_BUFFERED_EVENTS = 4_000;
 const MAX_PARTIAL_CHARS = 2 * 1024 * 1024;
 const MAX_STEER_QUEUE_DEPTH = 8;
 const HELD_SYSTEM_STEER_RETIRE_MS = 60 * 60_000;
+/** Abort causes of a host stop for closing the app or installing an update: never an owner's withdrawal of queued work. */
+const HOST_SHUTDOWN_ABORT_CAUSES: ReadonlySet<string> = new Set(["app_closed", "app_shutdown", "update_restart"]);
+/** How often a chat held by this process outside its own turns (a graph agent node, a doctor run) is looked at again. */
+const PROCESS_LEASE_POLL_MS = 2_000;
 /**
  * Waits between start attempts of a queued direction whose start hit a locked store (R-067); each attempt first waits
  * out the store's own busy_timeout. Bounded: after the last one the row fails with drain-store-busy-exhausted.
@@ -625,6 +629,88 @@ function relayCopyParked(chatId: string, text: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * The run's user-message cursor INCLUDING its own prompt row (ID-1). invoke_started.latestUserMessageRowId is read before
+ * the run writes the owner's prompt row (mcp/client.ts persistUserMessage runs after the durable start), so for 34 of 44
+ * owner-bound runs since 2026-10-14 the cursor was below the run's own prompt, and a Goal resume after a restart read the
+ * owner's own prompt as a newer direction (Yotube run_d627367a 10-14 00:25Z and 05:32Z: newer_user_direction, then a
+ * fresh-context retry). Recorded on invoke_prompt_bound once the row exists: the prompt row when no other owner message
+ * landed between the start cursor and it, else the start cursor unchanged. invoke_started keeps its admission-time value,
+ * so desktop-recovery-admission (owner-run automatic recovery) reads exactly what it read before.
+ */
+export function promptBoundUserCursor(chatId: string, runId: string, promptMessageId: string): { latestUserMessageRowId?: number } {
+  try {
+    const start = getDb().prepare(`SELECT json_extract(payload_json, '$.latestUserMessageRowId') AS cursor FROM run_events
+      WHERE run_id = ? AND chat_id = ? AND kind = 'invoke_started' ORDER BY seq ASC LIMIT 1`).get(runId, chatId) as { cursor: unknown } | undefined;
+    const prompt = getDb().prepare("SELECT rowid AS cursor FROM chat_messages WHERE id = ? AND chat_id = ? AND role = 'user'")
+      .get(promptMessageId, chatId) as { cursor: number } | undefined;
+    const startCursor = typeof start?.cursor === "number" && Number.isSafeInteger(start.cursor) ? start.cursor : null;
+    if (!prompt) return startCursor !== null ? { latestUserMessageRowId: startCursor } : {};
+    if (startCursor !== null && prompt.cursor <= startCursor) return { latestUserMessageRowId: startCursor };
+    const between = getDb().prepare("SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'user' AND rowid > ? AND rowid < ? LIMIT 1")
+      .get(chatId, startCursor ?? -1, prompt.cursor);
+    if (between) return startCursor !== null ? { latestUserMessageRowId: startCursor } : {};
+    return { latestUserMessageRowId: prompt.cursor };
+  } catch {
+    return {};
+  }
+}
+
+/** Why an owner message in this run context gets no Goal review (null: it is reviewed). The start path adds not_local_user_turn. */
+function ownerDirectionReviewSkip(request: Pick<McpInvocationRequest, "planMode" | "agentAppMode">,
+  workspaceBinding: InvocationWorkspaceBinding | undefined, executionContext: InvocationExecutionContext | undefined): string | null {
+  return request.planMode ? "plan_mode"
+    : request.agentAppMode ? "agent_app_mode"
+      : workspaceBinding ? "workspace_binding"
+        : executionContext ? "execution_context"
+          : null;
+}
+
+/**
+ * An owner message that changes an ongoing Goal's targets becomes a Goal revision (applied at the next stop).
+ * Asynchronous: never delays or refuses the turn. Every review — answered, unanswered or skipped — leaves a machine
+ * reasonCode in the run ledger; silence was how the owner's target restatements disappeared (2026-09-24).
+ * One review for every way an owner message enters (D2): a turn's own prompt (start), a direction typed into a running
+ * turn (steerCurrentTurn, nativeOwnerText: Desktop, the background service, the phone), and a queued direction whose
+ * start failed and was kept as the owner's message. Only the start path reviewed before: production Yotube 10-13..10-18,
+ * 22 directions applied to running turns ("묻지 말고 공개", "음성은 한 번만") had no review and were gone from the Goal
+ * the next day. reviewOwnerGoalMessage is idempotent per (Goal, message).
+ */
+function reviewOwnerDirectionForGoal(input: { runId: string; chatId: string; goalId: string; sourceMessageId: string;
+  notReviewed: string | null; via?: "current-turn" | "queued-start-failed" }): void {
+  const { runId, chatId, goalId, sourceMessageId } = input;
+  const via = input.via ? { via: input.via } : {};
+  if (input.notReviewed) {
+    tryRecordRunEvent({ runId, chatId, kind: "goal_owner_amendment_reviewed", payload: {
+      goalId, sourceMessageId, ...via, reasonCode: `skipped:${input.notReviewed}`, recorded: false, applied: false,
+    } });
+    return;
+  }
+  void reviewOwnerGoalMessage({ goalId, chatId, sourceMessageId }).then((review) => {
+    if (review.reasonCode.startsWith("judge_unavailable:")) {
+      console.warn(`[goal-amendment] review unanswered goal=${goalId} reason=${review.reasonCode}`);
+      // The message still steers this turn and the Goal stays unchanged. No room notice:
+      // the judge being down is an internal state the owner cannot act on (13 identical
+      // notices in the Youtube room, 2026-10-10). The coded review event below is the
+      // durable receipt; the Goal panel still shows the current conditions.
+    }
+    tryRecordRunEvent({ runId, chatId, kind: "goal_owner_amendment_reviewed", payload: {
+      goalId, sourceMessageId, ...via, label: review.label, reasonCode: review.reasonCode,
+      recorded: review.recorded,
+      applied: review.apply?.applied ?? false,
+      ...(review.apply?.applied ? { revision: review.apply.revision }
+        : review.apply ? { deferredReason: review.apply.reason } : {}),
+    } });
+  });
+}
+
+/** The chat's Goal, when its owner messages are reviewed against it (a One or Work room the owner talks in). */
+function reviewableChatGoalId(chatId: string, fallbackGoalId?: string | null): string | null {
+  const chat = getChat(chatId);
+  if (!chat || chat.kind !== "user" || !["one", "work"].includes(chat.originSurface ?? "")) return null;
+  return chat.goalId ?? fallbackGoalId ?? null;
 }
 
 /**
@@ -1350,6 +1436,7 @@ export class InvocationService {
   private readonly nativeIngressNoStartProofs = new WeakMap<object, { original: NativeInvocationIngressSource; pending: NativeIngressPending; controller: AbortController; lifetime: NativePreparationLifetime }>();
   private readonly nativePreparationListeners = new Set<(event: { runId: string; chatId: string; status: "handed-off" | "rejected" | "cancelled" | "uncertain" }) => void>();
   private acceptingStarts = true;
+  private readonly processLeaseWaits = new Map<string, ReturnType<typeof setTimeout>>();
   private foreignNativeStartFence?: (chatId: string) => boolean;
 
   /** Trusted host bootstrap only. A negative observer never grants execution
@@ -2305,10 +2392,46 @@ export class InvocationService {
     }
   }
 
+  /**
+   * Chats with a live turn here, plus chats this process holds through a run-owner lease outside its own turns (W5): a
+   * graph agent node (run-graph.ts claims the node chat) or a doctor run (automation-scheduler.ts). Both claim
+   * invocation_run_owners directly and were invisible here, so an owner message, a Goal resume or a team report started
+   * on such a chat was refused invocation_chat_owned_by_other_run (red, "could not start a model") instead of waiting.
+   */
   activeChatIds(): string[] {
+    return [...new Set([...this.turnChatIds(), ...this.processLeasedChatIds()])];
+  }
+
+  /** Chats of the turns this service itself runs (live, preparing, settling, an episode awaiting its Goal check). */
+  turnChatIds(): string[] {
     return [...new Set([...this.nativeIngress.values()].map(pending => pending.source.binding.chatId).concat([...this.nativePreparing.values()].map(pending => pending.binding.chatId)).concat([...this.activeRuns.activeChatIds(), ...[...this.settlingRuns.values(),
       ...[...this.pendingGoalVerifications.values()].filter(record => record.nativeGoalEpisodePending),
     ].filter((record) => !record.background).map((record) => record.chatId)]))];
+  }
+
+  /** Chats whose active or settling run-owner lease belongs to THIS process (never the other host's). */
+  private processLeasedChatIds(): string[] {
+    try {
+      const me = invocationProcessOwner();
+      return invocationRunOwners.listActiveOwners()
+        .filter((owner) => owner.ownerId === me.ownerId && owner.ownerKind === me.ownerKind)
+        .map((owner) => owner.chatId);
+    } catch { return []; } // a store without the owner table holds no lease
+  }
+
+  /**
+   * A queued direction waits behind a chat this process holds outside its own turns. Nothing here settles when that
+   * lease is released (the graph node or doctor run releases it itself), so look again on a short poll until it is.
+   */
+  private awaitProcessLease(chatId: string): void {
+    if (this.processLeaseWaits.has(chatId) || !this.steerQueues.get(chatId)?.length || this.turnChatIds().includes(chatId)) return;
+    const timer = setTimeout(() => {
+      this.processLeaseWaits.delete(chatId);
+      if (!this.activeChatIds().includes(chatId)) this.publishActiveChats();
+      this.drainSteerQueue(chatId);
+    }, PROCESS_LEASE_POLL_MS);
+    timer.unref?.();
+    this.processLeaseWaits.set(chatId, timer);
   }
 
   /** 오너가 보낸 요청이 이 대화에서 차례를 기다린다 — 자동 재개는 그 뒤로 미룬다. */
@@ -2460,6 +2583,8 @@ export class InvocationService {
 
   openAppAdmission(): void {
     this.acceptingStarts = true;
+    // Directions that waited while admission was closed start now, in queue order.
+    for (const chatId of [...this.steerQueues.keys()]) this.drainSteerQueue(chatId);
   }
 
   /** Close the Desktop execution gate and interrupt every live turn. */
@@ -2520,8 +2645,58 @@ export class InvocationService {
     }));
   }
 
+  /**
+   * Owner directions a turn never took (current-turn rows still `queued`) whose run is no longer live anywhere: the app
+   * closed or crashed before the run's own end could carry them, or an older version left them (D5). An owner stop ends
+   * them rejected owner_control_run_stopped (production chat 89bc5018: two rows queued since 2026-10-10, run cancelled by
+   * the owner at 23:54:22Z). Any other end (closing the app, an update restart, a crash, a failure) carries them as the
+   * chat's next turn (carried-owner-followups.ts), which the recovery below starts like any queued direction. A run
+   * whose lease is still held by a process is left to that process; a run with no receipt is left as it is.
+   */
+  private settleUntakenCurrentTurnDirections(chatId?: string): { carried: number; rejected: number } {
+    let carried = 0, rejected = 0;
+    let runs: Array<{ chatId: string; runId: string }> = [];
+    try {
+      runs = getDb().prepare(`SELECT DISTINCT chat_id AS chatId, run_id AS runId FROM invocation_current_turn_steers
+        WHERE status = 'queued'${chatId !== undefined ? " AND chat_id = ?" : ""}`).all(...(chatId !== undefined ? [chatId] : [])) as Array<{ chatId: string; runId: string }>;
+    } catch { return { carried, rejected }; }
+    for (const run of runs) {
+      try {
+        if (this.activeRuns.has(run.runId) || this.settlingRuns.has(run.runId) || this.nativeIngress.has(run.runId)
+          || this.nativePreparing.has(run.runId) || this.pendingGoalVerifications.has(run.runId) || this.browserLoginWaitingRuns.has(run.runId)) continue;
+        const owner = invocationRunOwners.getOwnerByRunId(run.runId);
+        if (owner && owner.state !== "released") continue;
+        const receipt = getInvocationRunReceipt(run.runId);
+        if (!receipt || receipt.chatId !== run.chatId || receipt.status === "running" || receipt.status === "cancelling") continue;
+        const ownerStopped = receipt.status === "cancelled" && receipt.interruptionCause !== "steering"
+          && receipt.hostStopCause !== "app_closed" && receipt.hostStopCause !== "update_restart";
+        if (ownerStopped) { rejected += rejectQueuedCurrentTurnSteersForStop(run.chatId, run.runId); continue; }
+        const started = getDb().prepare("SELECT payload_json FROM run_events WHERE run_id = ? AND kind = 'invoke_started' ORDER BY seq LIMIT 1")
+          .get(run.runId) as { payload_json: string } | undefined;
+        let start: Record<string, unknown> = {};
+        try { start = started ? JSON.parse(started.payload_json) as Record<string, unknown> : {}; } catch { start = {}; }
+        const source: McpInvocationRequest = { chatId: run.chatId, userPrompt: "",
+          ...(start.oneMode === true ? { oneMode: true } : {}),
+          ...(typeof start.onePermissionMode === "string" ? { onePermissionMode: start.onePermissionMode as McpInvocationRequest["onePermissionMode"] } : {}),
+          ...(start.permissions === "read" || start.permissions === "write" || start.permissions === "full" ? { permissions: start.permissions } : {}),
+          ...(start.planMode === true ? { planMode: true } : {}),
+          ...(start.locale === "ko" || start.locale === "en" ? { locale: start.locale } : {}) };
+        const carriedRow = carryOwnerFollowupsToNextTurn({ chatId: run.chatId, runId: run.runId, request: source });
+        if (!carriedRow) continue;
+        carried += 1;
+        tryRecordRunEvent({ runId: run.runId, chatId: run.chatId, kind: "owner_followup_carried",
+          payload: { queuedSteerId: carriedRow.id, recovery: "restart", runStatus: receipt.status } });
+      } catch (error) {
+        console.warn(`[invocation] untaken owner directions not settled run=${run.runId} code=${innermostTypedCode(error) ?? "none"}`);
+      }
+    }
+    if (carried || rejected) console.info("[invocation] untaken owner directions of ended runs", { carried, rejected });
+    return { carried, rejected };
+  }
+
   /** Rehydrate exact accepted directions after SQLite is initialized on boot. */
   recoverQueuedSteers(chatId?: string, ownerReportHoldsOnly = false): InvocationSteerRecoveryReport {
+    if (!ownerReportHoldsOnly) this.settleUntakenCurrentTurnDirections(chatId);
     const rows = listRecoverableQueuedSteers(chatId).filter(row=>!ownerReportHoldsOnly
       || row.request.oneTeamReportTurn===true && row.recoveryState==="held" && row.recoveryReason==="one-team-report-owner-unbound");
     let resumed = 0;
@@ -4810,7 +4985,7 @@ export class InvocationService {
           runId,
           chatId: chat.id,
           kind: "invoke_prompt_bound",
-          payload: { promptMessageId: sourceMessageId },
+          payload: { promptMessageId: sourceMessageId, ...promptBoundUserCursor(chat.id, runId, sourceMessageId) },
         });
         if (nativePreparation?.ordinaryTurn) {
           const turn = nativePreparation.ordinaryTurn;
@@ -4889,34 +5064,8 @@ export class InvocationService {
         const amendmentGoalId = projectionGoalId ?? boundGoal?.goalId ?? null;
         if (amendmentGoalId && chat.kind === "user" && ["one", "work"].includes(chat.originSurface ?? "")
           && runReq.promptOrigin !== "system") {
-          const notReviewed = !localUserTurn ? "not_local_user_turn"
-            : runReq.planMode ? "plan_mode"
-              : runReq.agentAppMode ? "agent_app_mode"
-                : runWorkspaceBinding ? "workspace_binding"
-                  : executionContext ? "execution_context"
-                    : null;
-          if (notReviewed) {
-            tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_owner_amendment_reviewed", payload: {
-              goalId: amendmentGoalId, sourceMessageId, reasonCode: `skipped:${notReviewed}`, recorded: false, applied: false,
-            } });
-          } else {
-            void reviewOwnerGoalMessage({ goalId: amendmentGoalId, chatId: chat.id, sourceMessageId }).then((review) => {
-              if (review.reasonCode.startsWith("judge_unavailable:")) {
-                console.warn(`[goal-amendment] review unanswered goal=${amendmentGoalId} reason=${review.reasonCode}`);
-                // The message still steers this turn and the Goal stays unchanged. No room notice:
-                // the judge being down is an internal state the owner cannot act on (13 identical
-                // notices in the Youtube room, 2026-10-10). The coded review event below is the
-                // durable receipt; the Goal panel still shows the current conditions.
-              }
-              tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_owner_amendment_reviewed", payload: {
-                goalId: amendmentGoalId, sourceMessageId, label: review.label, reasonCode: review.reasonCode,
-                recorded: review.recorded,
-                applied: review.apply?.applied ?? false,
-                ...(review.apply?.applied ? { revision: review.apply.revision }
-                  : review.apply ? { deferredReason: review.apply.reason } : {}),
-              } });
-            });
-          }
+          reviewOwnerDirectionForGoal({ runId, chatId: chat.id, goalId: amendmentGoalId, sourceMessageId,
+            notReviewed: !localUserTurn ? "not_local_user_turn" : ownerDirectionReviewSkip(runReq, runWorkspaceBinding, executionContext) });
         }
         if (stoppedGoalReactivation) {
           let resumed: ReturnType<typeof getLongRun> = null;
@@ -6448,7 +6597,7 @@ export class InvocationService {
     if (this.browserLoginWaitingRuns.has(runId)) {
       const preserveWaiting = reason.message === "app_closed" || reason.message === "app_shutdown" || reason.message === "update_restart";
       if (!preserveWaiting && record?.chatId) {
-        this.clearQueuedDirectionsForStop(record,reason);
+        this.clearQueuedDirectionsForStop(record,reason,runId);
       }
       this.cancelParkedBrowserLoginWait(runId, preserveWaiting ? "host_restart" : reason.message, !preserveWaiting);
       if (record?.automaticGoalId) this.settleAutomaticGoalInterruption(record);
@@ -6457,7 +6606,7 @@ export class InvocationService {
     // Stop is terminal for the visible work item: it also clears directions
     // queued behind the active turn. Steering itself never calls cancel.
     if (record?.chatId) {
-      this.clearQueuedDirectionsForStop(record,reason);
+      this.clearQueuedDirectionsForStop(record,reason,runId);
     }
     let result = this.activeRuns.requestCancelWithReason(runId, reason);
     if (result === "not-found" && record && (this.pendingGoalVerifications.has(runId) || this.settlingRuns.has(runId))) {
@@ -6487,7 +6636,18 @@ export class InvocationService {
     return result;
   }
 
-  private clearQueuedDirectionsForStop(record:RunRecord,reason:Error):void {
+  /**
+   * What a stop withdraws: the directions queued behind the stopped turn (next-turn queue, preflight) and the owner
+   * directions the stopped turn itself had not taken yet (current-turn rows, settled rejected owner_control_run_stopped),
+   * in one transaction. Two kinds of stop withdraw nothing (D5):
+   *  - closing the app or restarting for an update: the queued directions stay durable, restart recovery starts them
+   *    (recoverQueuedSteers), and the stopped turn's untaken directions are carried to the next turn
+   *    (carryUndeliveredOwnerFollowups). Before, every app exit cancelled them as run-stopped, then the drain of the
+   *    settling run would have refused them as desktop_execution_admission_closed.
+   *  - a background run (an effect observation reaching its time budget): it is not the chat's visible turn.
+   */
+  private clearQueuedDirectionsForStop(record:RunRecord,reason:Error,runId:string):void {
+    if (record.background || HOST_SHUTDOWN_ABORT_CAUSES.has(reason.message)) return;
     this.steerQueues.delete(record.chatId);
     const preserveReports=reason.message==="one_team_report_owner_changed" && Boolean(record.oneTeamReportCustody);
     try {getDb().transaction(()=>{
@@ -6500,6 +6660,7 @@ export class InvocationService {
       }
       cancelQueuedSteersForChat(record.chatId,preserveReports,"run-stopped");
       cancelQueuedOnePreflightSteersForChat(record.chatId);
+      rejectQueuedCurrentTurnSteersForStop(record.chatId, runId);
     })();}catch{ /* Store refusal must never keep the original run alive. */ }
   }
 
@@ -6682,8 +6843,9 @@ export class InvocationService {
     const controller = this.nativeOwnerTextTarget(input);
     if (!controller || controller.signal.aborted || this.pendingGoalVerifications.has(input.runId)) throw Object.assign(new Error("native_owner_text_parent_unavailable"),{code:"native_owner_text_parent_unavailable"});
     if (countPendingCurrentTurnSteers(input.chatId,input.runId) >= 64) throw Object.assign(new Error("invocation_current_turn_steer_limit"),{code:"invocation_current_turn_steer_limit"});
-    claimCurrentTurnSteer(request,{source:"native-owner-text",chatId:input.chatId,runId:input.runId,inputDigest:input.inputDigest,
+    const claimed = claimCurrentTurnSteer(request,{source:"native-owner-text",chatId:input.chatId,runId:input.runId,inputDigest:input.inputDigest,
       requestedMode:input.deliveryKind,deliveryKind:input.deliveryKind === "current" ? "current" : "queue"});
+    this.reviewCurrentTurnDirection(input.chatId, input.runId, claimed.messageId, this.activeRuns.get(input.runId) ?? this.settlingRuns.get(input.runId));
     if (input.deliveryKind === "current" && !this.activeRuns.get(input.runId)?.nativeTurnController) {
       // Stays queued: the episode end or the next turn delivers it (see the native control observer above).
     } else if (input.deliveryKind === "interrupt") {
@@ -6722,6 +6884,25 @@ export class InvocationService {
       originalRunId:binding.runId,promptText:row.prompt_text,promptHash:row.prompt_hash,queuedAt:row.created_at,reason:"original-run-effect-boundary-unconfirmed"}));
   }
 
+  /**
+   * A direction typed into a running turn is reviewed against the chat's Goal like a turn's own prompt (D2), in the
+   * process that owns the run (Desktop, the background service; the phone's text arrives through the same two). Never
+   * delays or refuses the direction.
+   */
+  private reviewCurrentTurnDirection(chatId: string, runId: string, messageId: string | undefined, record?: RunRecord): void {
+    try {
+      if (!messageId) return;
+      const goalId = reviewableChatGoalId(chatId, record?.automaticGoalId);
+      if (!goalId) return;
+      const preparing = record ? undefined : this.nativePreparing.get(runId);
+      const notReviewed = record ? ownerDirectionReviewSkip(record.request, record.workspaceBinding, record.executionContext)
+        : preparing ? ownerDirectionReviewSkip(preparing.request, undefined, undefined) : null;
+      reviewOwnerDirectionForGoal({ runId, chatId, goalId, sourceMessageId: messageId, notReviewed, via: "current-turn" });
+    } catch (error) {
+      console.warn(`[goal-amendment] current-turn direction not reviewed run=${runId} code=${innermostTypedCode(error) ?? "none"}`);
+    }
+  }
+
   /** Durable local intake returns promptly. Only the exact native ACK marks it applied. */
   steerCurrentTurn(input: InvocationCurrentTurnSteerRequest): InvocationCurrentTurnSteerReceipt {
     if (existingCurrentTurnSteer(input)) return this.currentTurnSteerReceipt(input.chatId, input.intentId)!;
@@ -6736,6 +6917,7 @@ export class InvocationService {
       ...(record.ownerLease ? { ownerId: record.ownerLease.ownerId, leaseId: record.ownerLease.leaseId } : {}),
       agentId: record.actualAgentId, workspaceBinding: record.workspaceBinding,
       permission: record.request.permissions, runtime: record.request.runtimeSelection });
+    this.reviewCurrentTurnDirection(input.chatId, input.expectedRunId, intake.messageId, record);
     this.deliverNativeOwnerControls(input.expectedRunId, record);
     this.publishQueuedNativeBoundaryNotice(input.expectedRunId, record, input.intentId);
     return intake.code || record.nativeTurnController ? intake : { ...intake,
@@ -6759,10 +6941,14 @@ export class InvocationService {
   /**
    * When a run ends without the owner stopping it, the owner directions it never dispatched become the chat's next turn
    * (carried-owner-followups.ts: production 2026-10-17, a team run left the owner's style direction queued for 81
-   * minutes and then refused it, so it was lost). A stopped run keeps them refused: the stop withdrew the turn.
+   * minutes and then refused it, so it was lost). A stopped run keeps them refused: the stop withdrew the turn
+   * (clearQueuedDirectionsForStop settles them owner_control_run_stopped). Closing the app or restarting for an update is
+   * not the owner's stop: those directions are carried too, and restart recovery starts the carried turn (D5).
    */
   private carryUndeliveredOwnerFollowups(runId: string, record: RunRecord): void {
-    if (record.background || (record.controller.signal.aborted && !record.steeringInterruptRequested)) return;
+    const reason = record.controller.signal.reason;
+    const hostShutdown = reason instanceof Error && HOST_SHUTDOWN_ABORT_CAUSES.has(reason.message);
+    if (record.background || (record.controller.signal.aborted && !record.steeringInterruptRequested && !hostShutdown)) return;
     try {
       // An ordinary owner turn: the room resolves its workspace and execution context afresh, as for a typed message.
       const carried = carryOwnerFollowupsToNextTurn({ chatId: record.chatId, runId, request: record.request });
@@ -7154,11 +7340,24 @@ export class InvocationService {
     return record?.agentPartialTexts.get(agentId);
   }
 
-  /** Main-owned recovery receipt; held directions are never replay permission. */
+  /**
+   * Main-owned recovery receipt; held directions are never replay permission. Lists the held next-turn directions and
+   * every uncertain owner text of the chat's running turns (`native-owner:<intent>`, the form returnSteeringRecovery
+   * takes), whichever host or source wrote it (D6). Only the daemon's native-owner-text rows used to be listed
+   * (nativeOwnerTextRecovery); a Desktop uncertain row had no exit: production a4f949a6 (Yotube, 2026-10-13 13:51Z,
+   * owner_control_episode_reply_lost) stayed uncertain for five days.
+   */
   steeringRecovery(chatId: string): InvocationSteerRecovery[] {
-    return listRecoverableQueuedSteers()
+    const held = listRecoverableQueuedSteers()
       .filter((row) => row.chatId === chatId && row.recoveryState === "held")
       .map(steeringRecoveryFromDurable);
+    let uncertain: InvocationSteerRecovery[] = [];
+    try {
+      uncertain = listUncertainCurrentTurnSteers(chatId).map((row) => ({ id: `${NATIVE_OWNER_RECOVERY_PREFIX}${row.intentId}`,
+        chatId: row.chatId, originalRunId: row.runId, promptText: row.promptText, promptHash: row.promptHash, queuedAt: row.createdAt,
+        reason: "original-run-effect-boundary-unconfirmed" as const }));
+    } catch { /* a store without the current-turn table has no uncertain owner text */ }
+    return [...held, ...uncertain];
   }
 
   private withSteeringRecovery(receipt: InvocationRunReceipt | null): InvocationRunReceipt | null {
@@ -7422,7 +7621,10 @@ export class InvocationService {
   }
 
   private drainSteerQueue(chatId: string): void {
-    if (this.activeChatIds().includes(chatId)) return;
+    // Closed admission (app closing, update restart, a suppressed dev copy): the queued rows stay durable for restart
+    // recovery instead of each failing as desktop_execution_admission_closed.
+    if (!this.acceptingStarts) return;
+    if (this.activeChatIds().includes(chatId)) { this.awaitProcessLease(chatId); return; }
     const queue = this.steerQueues.get(chatId);
     if (!queue?.length) return;
     const next = queue[0];
@@ -7432,7 +7634,8 @@ export class InvocationService {
     queueMicrotask(() => {
       // Keep the exact row cancellable until dispatch, including this microtask
       // gap. An unsteer/stop or competing drain must win before the durable CAS.
-      if (this.steerQueues.get(chatId)?.[0] !== next || this.activeChatIds().includes(chatId)) return;
+      if (this.steerQueues.get(chatId)?.[0] !== next) return;
+      if (this.activeChatIds().includes(chatId)) { this.awaitProcessLease(chatId); return; }
       queue.shift();
       if (!queue.length) this.steerQueues.delete(chatId);
       const drainedRunId = next.drainedRunId ?? randomUUID();
@@ -7566,8 +7769,12 @@ export class InvocationService {
           "SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'user' AND text = ? AND created_at >= ? LIMIT 1",
         ).get(chatId, text, next.queuedAt);
         if (!delivered) {
-          appendChatMessage(chatId, "user", text, request.images?.length ? { images: request.images } : undefined);
+          const kept = appendChatMessage(chatId, "user", text, request.images?.length ? { images: request.images } : undefined);
           // No synthetic "could not hand over" reply: the message is shown once, the cause is in the log above.
+          // The kept message is the owner's: the chat's Goal reviews it like any owner message (D2).
+          const goalId = reviewableChatGoalId(chatId);
+          if (goalId && kept?.id) reviewOwnerDirectionForGoal({ runId: drainedRunId, chatId, goalId, sourceMessageId: kept.id,
+            notReviewed: ownerDirectionReviewSkip(request, next.workspaceBinding, next.executionContext), via: "queued-start-failed" });
         }
       }
     } catch (persistError) {

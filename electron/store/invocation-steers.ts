@@ -266,8 +266,11 @@ export function listRecoverableQueuedSteers(chatId?: string): DurableQueuedSteer
   const out: DurableQueuedSteer[] = [];
   for (const row of rows) {
     try { out.push(decode(row)); } catch {
-      getDb().prepare("UPDATE invocation_steers SET status = 'failed', recovery_reason = ?, updated_at = ? WHERE id = ?")
-        .run("row-undecodable" satisfies DurableQueuedSteerTerminalCause, new Date().toISOString(), row.id);
+      getDb().transaction(() => {
+        getDb().prepare("UPDATE invocation_steers SET status = 'failed', recovery_reason = ?, updated_at = ? WHERE id = ?")
+          .run("row-undecodable" satisfies DurableQueuedSteerTerminalCause, new Date().toISOString(), row.id);
+        revertTeamReportLedger(row, "row-undecodable");
+      })();
     }
   }
   // After a restart an owner turn waits ahead of host-written (system) turns, as in the live queue (service.ts
@@ -316,6 +319,55 @@ export function queuedSteerState(id: string): { status: DurableQueuedSteer["stat
   return row ? { status: row.status, drainedRunId: row.drained_run_id, recoveryReason: row.recovery_reason } : null;
 }
 
+/** The columns the teammate-report ledger revert reads, taken before the settling UPDATE overwrites recovery_reason. */
+type ReportLedgerRow = Pick<Row, "id" | "queued_at" | "request_json" | "one_team_report_custody_json" | "recovery_reason">;
+const REPORT_LEDGER_COLUMNS = "id, queued_at, request_json, one_team_report_custody_json, recovery_reason";
+/** Causes that are the owner withdrawing the queued work (a stop, a Goal pause or delete): the report is not carried again. */
+const OWNER_STOP_CAUSES: ReadonlySet<DurableQueuedSteerTerminalCause> = new Set(["run-stopped", "goal-stopped", "owner-withdrawn"]);
+/**
+ * Causes that are not a lost report: the waiting Goal parked it (its next turn carries it), a newer report of the same
+ * session replaced it (that path writes the ledger itself), or an owner text handed back (never a report).
+ */
+const REPORT_DELIVERED_CAUSES: ReadonlySet<DurableQueuedSteerTerminalCause> = new Set(["parked-for-waiting-goal", "host-report-superseded", "held-returned-to-owner"]);
+
+/**
+ * A teammate report turn (oneTeamReportTurn) that ends failed or cancelled reverts the dispatch ledger in the SAME
+ * transaction (one/team-dispatch.ts revertQueuedOneTeamReport). The report's enqueue wrote reported_at, so before this a
+ * report that never ran stayed "reported": production 2026-10-18, Yotube room, steer a4d7b864 (Film Production Director,
+ * dispatch-1f9ca888) failed at 02:44:23Z ("database is locked") while the ledger kept reported_at 02:09:34.386Z, and
+ * nothing re-sent it. A failure cause is retried by the existing report retry; an owner stop is kept visible as
+ * `owner_stopped` and not carried again; a held report turn that may already have run (drained-*) is not re-sent.
+ * The revert never blocks the steer settlement: its error is logged with the steer id.
+ */
+function revertTeamReportLedger(row: ReportLedgerRow | undefined, cause: DurableQueuedSteerTerminalCause): void {
+  if (!row || REPORT_DELIVERED_CAUSES.has(cause)) return;
+  let report = false;
+  try { report = (JSON.parse(row.request_json) as { oneTeamReportTurn?: unknown })?.oneTeamReportTurn === true; }
+  catch { report = row.one_team_report_custody_json !== null && row.one_team_report_custody_json !== undefined; }
+  if (!report) return;
+  let custody: { dispatchId?: unknown; childRunId?: unknown } | null = null;
+  try { custody = row.one_team_report_custody_json ? JSON.parse(row.one_team_report_custody_json) as { dispatchId?: unknown; childRunId?: unknown } : null; }
+  catch { custody = null; }
+  const ownerStopped = OWNER_STOP_CAUSES.has(cause);
+  // A report turn the restart held after its run may have started is never sent twice; the ledger still says why.
+  const mayHaveRun = cause === "held-system-retired" && /^drain(?:ed|ing)-/.test(row.recovery_reason ?? "");
+  try {
+    const { revertQueuedOneTeamReport } = require("../one/team-dispatch") as typeof import("../one/team-dispatch");
+    revertQueuedOneTeamReport({
+      steerId: row.id,
+      dispatchId: typeof custody?.dispatchId === "string" ? custody.dispatchId : null,
+      childRunId: typeof custody?.childRunId === "string" ? custody.childRunId : null,
+      queuedAt: row.queued_at,
+      cause,
+      ownerStopped,
+      retry: !ownerStopped && !mayHaveRun,
+    });
+  } catch (error) {
+    console.warn(`[invocation] teammate report ledger not reverted steer=${row.id} cause=${cause} code=${
+      String((error as { code?: unknown })?.code ?? (error as Error)?.message ?? error).replace(/\s+/g, " ").slice(0, 80)}`);
+  }
+}
+
 /** Delivery ("started") keeps the row's column; every cancelled/failed transition writes its cause in the same UPDATE. */
 export function settleQueuedSteer(id: string, status: "started"): boolean;
 export function settleQueuedSteer(id: string, status: "cancelled" | "failed", cause: DurableQueuedSteerTerminalCause): boolean;
@@ -329,16 +381,28 @@ export function settleQueuedSteer(id: string, status: "started" | "cancelled" | 
       "UPDATE invocation_steers SET status = ?, updated_at = ? WHERE id = ? AND status IN ('queued','draining')" + ready,
     ).run(status, now, id).changes === 1;
   }
-  return getDb().prepare(
-    "UPDATE invocation_steers SET status = ?, recovery_reason = ?, updated_at = ? WHERE id = ? AND status IN ('queued','draining')" + ready,
-  ).run(status, terminalCause(cause), now, id).changes === 1;
+  const db = getDb();
+  return db.transaction(() => {
+    const before = db.prepare(`SELECT ${REPORT_LEDGER_COLUMNS} FROM invocation_steers WHERE id = ?`).get(id) as ReportLedgerRow | undefined;
+    const settled = db.prepare(
+      "UPDATE invocation_steers SET status = ?, recovery_reason = ?, updated_at = ? WHERE id = ? AND status IN ('queued','draining')" + ready,
+    ).run(status, terminalCause(cause), now, id).changes === 1;
+    if (settled) revertTeamReportLedger(before, terminalCause(cause));
+    return settled;
+  }).immediate();
 }
 
 export function cancelQueuedSteersForChat(chatId: string, preserveTeamReports: boolean, cause: DurableQueuedSteerTerminalCause): void {
-  getDb().prepare(
-    "UPDATE invocation_steers SET status = 'cancelled', recovery_reason = ?, updated_at = ? WHERE chat_id = ? AND status = 'queued'"
-      + (preserveTeamReports ? " AND CASE WHEN json_valid(request_json) THEN COALESCE(json_type(request_json,'$.oneTeamReportTurn'),'')<>'true' ELSE 1 END" : ""),
-  ).run(terminalCause(cause), new Date().toISOString(), chatId);
+  const preserve = preserveTeamReports ? " AND CASE WHEN json_valid(request_json) THEN COALESCE(json_type(request_json,'$.oneTeamReportTurn'),'')<>'true' ELSE 1 END" : "";
+  const db = getDb();
+  db.transaction(() => {
+    const rows = db.prepare(`SELECT ${REPORT_LEDGER_COLUMNS} FROM invocation_steers WHERE chat_id = ? AND status = 'queued'${preserve} ORDER BY rowid`)
+      .all(chatId) as ReportLedgerRow[];
+    db.prepare(
+      "UPDATE invocation_steers SET status = 'cancelled', recovery_reason = ?, updated_at = ? WHERE chat_id = ? AND status = 'queued'" + preserve,
+    ).run(terminalCause(cause), new Date().toISOString(), chatId);
+    for (const row of rows) revertTeamReportLedger(row, terminalCause(cause));
+  }).immediate();
 }
 
 /**
@@ -374,10 +438,16 @@ export function holdQueuedSteerForRecovery(
  * receipt ("held-system-retired"), or an owner-written one handed back to the owner ("held-returned-to-owner").
  */
 export function retireHeldQueuedSteer(id: string, cause: "held-system-retired" | "held-returned-to-owner"): boolean {
-  return getDb().prepare(
-    `UPDATE invocation_steers SET status = 'cancelled', recovery_reason = ?, updated_at = ?
+  const db = getDb();
+  return db.transaction(() => {
+    const before = db.prepare(`SELECT ${REPORT_LEDGER_COLUMNS} FROM invocation_steers WHERE id = ?`).get(id) as ReportLedgerRow | undefined;
+    const retired = db.prepare(
+      `UPDATE invocation_steers SET status = 'cancelled', recovery_reason = ?, updated_at = ?
       WHERE id = ? AND status IN ('queued','draining') AND recovery_state = 'held'`,
-  ).run(terminalCause(cause), new Date().toISOString(), id).changes === 1;
+    ).run(terminalCause(cause), new Date().toISOString(), id).changes === 1;
+    if (retired) revertTeamReportLedger(before, terminalCause(cause));
+    return retired;
+  }).immediate();
 }
 
 /** What handing a held direction back to its owner did. `promptText` is present for "returned" / "already-returned". */
