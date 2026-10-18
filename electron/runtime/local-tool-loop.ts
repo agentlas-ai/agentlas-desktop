@@ -30,7 +30,7 @@ import { oneGraphToolTimeoutMs } from "../../shared/one-graph-tool-permission";
 import { readOnlyBrowserToolIsMutating } from "../../shared/read-only-browser-tools";
 import { mcpToolSchemaDigest } from "../mcp-tools/tool-schema";
 import { mcpToolSurfaceHides } from "../mcp-tools/hephaestus-tool-surface";
-import { installLazyToolMenu, invalidateToolMenu, resolveToolMenu } from "./tool-menu";
+import { installLazyToolMenu, invalidateToolMenu, isToolMenuTool, resolveToolMenu } from "./tool-menu";
 import { CODE_MODE_TOOL, installMainCodeMode, runMainCodeMode } from "./code-mode";
 import { TOOL_RESULT_READ, foldRetainedToolResult, hasToolResultContext, installToolResultContext, projectToolResult, readToolResult, toolResultReadRequest } from "./tool-result-context";
 import { createHash, randomUUID } from "node:crypto";
@@ -744,11 +744,31 @@ async function settleMainEffect(ref: string, state: "settled" | "failed" | "unce
   try { await (await import("../harness/effect-ledger")).settleEffect(ref, state, state === "settled" && resultText !== undefined ? { result: resultText } : undefined); } catch { /* the ledger never fails a tool result */ }
 }
 
+/** Splits the optional Work reference off a call's JSON arguments; null when there is none (or the JSON is not an object). */
+function liftWorkReference(argumentsText: string | undefined): { reference: unknown; rest: string } | null {
+  if (!argumentsText) return null;
+  try {
+    const parsed = JSON.parse(argumentsText) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !Object.hasOwn(parsed, "_agentlas_work")) return null;
+    const { _agentlas_work: reference, ...rest } = parsed as Record<string, unknown>;
+    return { reference, rest: JSON.stringify(rest) };
+  } catch { return null; }
+}
+
 async function dispatchMainToolRawUnchecked(
   byName: Map<string, ResolvedTool>, call: MainToolDispatchCall, events: RunnerEvents,
   approval: LocalToolApprovalContext, broker?: MainWorkforceBroker, effectSlot?: MainEffectSlot,
 ): Promise<MainToolDispatchResult> {
   approval.signal?.throwIfAborted();
+  // A Work run gives every tool, the host's own wrappers included, the optional _agentlas_work reference
+  // (mainWorkToolSchema). The wrappers check their own fields, so the reference comes off first, and a menu call hands
+  // it to the prepared tool it resolves to, where the recovery below reads it (dev 2026-10-18 W5: every
+  // agentlas_tools_call in a Haiku Work room was refused tool_menu_arguments_invalid ["_agentlas_work"]).
+  let wrapperWork: { reference: unknown } | undefined;
+  if (approval.canonicalWorkRecovery && (call.toolName === TOOL_RESULT_READ || call.toolName === CODE_MODE_TOOL || isToolMenuTool(call.toolName))) {
+    const lifted = liftWorkReference(call.arguments);
+    if (lifted) { wrapperWork = { reference: lifted.reference }; call = { ...call, arguments: lifted.rest }; }
+  }
   try {
     if (call.toolName === TOOL_RESULT_READ && hasToolResultContext(byName)) {
       if (broker || approval.scienceCollectionCapability) throw new Error("tool_result_read_not_admitted");
@@ -791,7 +811,10 @@ async function dispatchMainToolRawUnchecked(
         onTool: (name, args, result, _providerId, ...rest) =>
           (currentHistoryRuntimeFence()?.assertCurrent(), providerEvents.onTool?.(name, args, result, providerCall.providerCallId ?? undefined, ...rest)),
       };
-      call = { ...call, toolName: menu.toolName, arguments: menu.arguments };
+      const inner = wrapperWork ? liftWorkReference(menu.arguments) ?? { rest: menu.arguments } : null;
+      call = { ...call, toolName: menu.toolName, arguments: inner
+        ? JSON.stringify({ ...(JSON.parse(inner.rest || "{}") as Record<string, unknown>), _agentlas_work: wrapperWork!.reference })
+        : menu.arguments };
     }
   } catch (error) {
     const content = `Error: ${error instanceof Error ? error.message : String(error)}`;

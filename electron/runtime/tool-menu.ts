@@ -11,6 +11,9 @@ const VARIANTS = "agentlas_tools_variants";
 const PREPARE_VARIANT = "agentlas_tools_prepare_variant";
 const CALL = "agentlas_tools_call";
 const NAMES = new Set([LIST, PREPARE, VARIANTS, PREPARE_VARIANT, CALL]);
+export function isToolMenuTool(name: string): boolean {
+  return NAMES.has(name);
+}
 // Match tool-result-context's inline UTF-8 byte limit so ordinary metadata
 // pages retain complete JSON instead of becoming text-result references.
 const MAX_MENU_RESPONSE_BYTES = 8_192;
