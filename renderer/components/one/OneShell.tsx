@@ -9730,7 +9730,6 @@ function OneSessionsShell() {
 
         <main
           className={styles.workspace}
-          data-runtime-artifacts={runtimeArtifacts.length > 0 ? "true" : "false"}
           data-context-rail={outputRailTakesSpace ? "true" : "false"}
           data-context-rail-kind={oneOutputKind}
           data-split-active={splitPanes.length > 0 ? "true" : "false"}
