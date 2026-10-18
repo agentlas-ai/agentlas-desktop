@@ -122,3 +122,19 @@ export function isOneArtifactPreviewCapabilityV1(value: unknown): value is OneAr
     && Number.isFinite(Date.parse(value.expiresAt))
     && (value.sha256 === undefined || (typeof value.sha256 === "string" && /^[a-f0-9]{64}$/.test(value.sha256)));
 }
+
+/**
+ * Which entry of the One output rail a bound output belongs to. The desktop rail shows one entry per output: a later
+ * binding with the same rail kind (image or file), Task, chat and name replaces the earlier entry in place and opens the
+ * newer bytes (renderer/lib/one-activity.ts mergeVerifiedSurfaceArtifacts, which keeps the same rule inline). The phone
+ * projection groups a run's bindings by this key (electron/store/run-events.ts readOneArtifactRunOutputs), so a file
+ * saved twice in one run is one entry on both screens.
+ */
+export function oneArtifactRailMergeKey(input: { taskId: string; chatId: string; type: string; label: string }): string {
+  return [
+    input.type === "image" ? "image" : "file",
+    input.taskId,
+    input.chatId,
+    input.label.trim().toLocaleLowerCase(),
+  ].join("\u0000");
+}

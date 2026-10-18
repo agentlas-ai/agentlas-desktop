@@ -43,6 +43,7 @@ import type {
   MobileBridgeOneArtifactsPageDto,
   MobileBridgeInvocationArtifactDto,
 } from "../../shared/mobile-bridge";
+import { oneArtifactRailMergeKey, type OneArtifactBindingRequestV1 } from "../../shared/one-artifacts";
 
 interface RunEventRow {
   id: string;
@@ -1086,6 +1087,170 @@ function decodeMobileOneArtifactCursor(chatId: string, value: string | null | un
   }
 }
 
+interface MobileOneArtifactBindingLookup {
+  get(taskId: string, chatId: string, runId: string, manifestId: string, artifactRef: string): unknown;
+}
+
+function mobileOneArtifactBindingLookup(): MobileOneArtifactBindingLookup {
+  return getDb().prepare(
+    `SELECT bound_task_version, kind, size_bytes, sha256
+       FROM one_artifact_bindings
+      WHERE task_id = ? AND chat_id = ? AND run_id = ? AND manifest_id = ? AND artifact_ref = ?
+      LIMIT 1`,
+  );
+}
+
+/** One bound output as a run's ledger carries it. */
+export interface OneArtifactRunOutput {
+  /** The phone's row for this binding, without the event time. */
+  artifact: MobileBridgeInvocationArtifactDto & { sizeBytes: number; contentSha256: string };
+  /** The name as the event carried it: the desktop rail merges on this, before any phone redaction. */
+  rawLabel: string;
+}
+
+/**
+ * A ledger oneArtifacts item the phone may be offered: exact opaque identifiers of this chat and a bound row that still
+ * matches its Task version, kind and size. The recent-output index and the run grouping both read items through this
+ * one check, so the first binding of an output is the same binding in both.
+ */
+function mobileOneArtifactLedgerItem(
+  value: unknown,
+  chatId: string,
+  bindingLookup: MobileOneArtifactBindingLookup,
+): OneArtifactRunOutput | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const artifact = value as Record<string, unknown>;
+  const identifier = (key: string): string | null => {
+    const candidate = artifact[key];
+    return typeof candidate === "string"
+      && candidate.length >= 1
+      && candidate.length <= 256
+      && !/[\u0000-\u001f]/.test(candidate)
+      ? candidate
+      : null;
+  };
+  const taskId = identifier("taskId");
+  const itemChatId = identifier("chatId");
+  const runId = identifier("runId");
+  const manifestId = identifier("manifestId");
+  const artifactRef = identifier("artifactRef");
+  const label = typeof artifact.label === "string"
+    ? truncate(redactOperationalSecrets(artifact.label), 512)
+    : "";
+  const type = artifact.type;
+  if (
+    !taskId || itemChatId !== chatId || !runId || !manifestId || !artifactRef
+    || !Number.isSafeInteger(artifact.taskVersion) || Number(artifact.taskVersion) < 1
+    || !label || /[\u0000-\u001f]/.test(label)
+    || typeof type !== "string" || !MOBILE_ONE_ARTIFACT_TYPES.has(type as MobileBridgeInvocationArtifactDto["type"])
+    || (artifact.sizeBytes !== undefined && (!Number.isSafeInteger(artifact.sizeBytes) || Number(artifact.sizeBytes) < 0))
+  ) return null;
+  const binding = bindingLookup.get(taskId, itemChatId, runId, manifestId, artifactRef) as {
+    bound_task_version?: number;
+    kind?: string;
+    size_bytes?: number;
+    sha256?: string;
+  } | undefined;
+  if (
+    !binding
+    || binding.bound_task_version !== artifact.taskVersion
+    || binding.kind !== type
+    || !Number.isSafeInteger(binding.size_bytes)
+    || Number(binding.size_bytes) < 0
+    || (artifact.sizeBytes !== undefined && binding.size_bytes !== artifact.sizeBytes)
+    || typeof binding.sha256 !== "string"
+    || !/^[a-f0-9]{64}$/.test(binding.sha256)
+  ) return null;
+  return {
+    artifact: {
+      taskId,
+      taskVersion: Number(artifact.taskVersion),
+      chatId: itemChatId,
+      runId,
+      manifestId,
+      artifactRef,
+      label,
+      type: type as MobileBridgeInvocationArtifactDto["type"],
+      sizeBytes: Number(binding.size_bytes),
+      contentSha256: binding.sha256,
+    },
+    rawLabel: artifact.label as string,
+  };
+}
+
+/** The exact binding identity (the six fields a preview request names). */
+export function oneArtifactIdentityKey(identity: OneArtifactBindingRequestV1): string {
+  return [
+    identity.taskId, String(identity.taskVersion), identity.chatId, identity.runId, identity.manifestId, identity.artifactRef,
+  ].join("\u0000");
+}
+
+/** A run's bound outputs grouped as the desktop output rail groups them (shared/one-artifacts.ts oneArtifactRailMergeKey). */
+export interface OneArtifactRunOutputs {
+  /** The first binding of this output in the run: the identity the phone was sent first and keeps as its one entry. */
+  first(output: { taskId: string; chatId: string; type: string; label: string }): OneArtifactRunOutput | null;
+  /** The newest binding of the output `identity` is a binding of: what the desktop rail opens for that entry. */
+  latest(identity: OneArtifactBindingRequestV1): OneArtifactRunOutput | null;
+}
+
+/**
+ * Dev O8/O9 2026-10-18: a run that saves the same file twice (a repair round) binds it twice, with different bytes and
+ * artifact refs. The desktop rail shows one entry that opens the newest bytes; the phone keyed its rows by binding and
+ * showed two, the first refusing to open (identity_changed / content_changed). Grouping is per run, as the rail is (the
+ * rail shows the latest run's outputs; each settled run block on both screens keeps its own). Read fresh on every call:
+ * the ledger row of an output is written before its event is published, its binding row before that.
+ */
+export function readOneArtifactRunOutputs(chatId: string, runId: string): OneArtifactRunOutputs {
+  const groups = new Map<string, OneArtifactRunOutput[]>();
+  const groupOf = new Map<string, string>();
+  try {
+    const bindingLookup = mobileOneArtifactBindingLookup();
+    const rows = getDb().prepare(
+      `SELECT payload_json
+         FROM run_events
+        WHERE run_id = ? AND chat_id = ? AND instr(payload_json, '"oneArtifacts"') > 0
+        ORDER BY rowid ASC`,
+    ).all(runId, chatId) as Array<{ payload_json: string }>;
+    for (const row of rows) {
+      const payload = parseMobileOneArtifactPayload(row.payload_json);
+      if (!Array.isArray(payload.oneArtifacts)) continue;
+      for (const value of payload.oneArtifacts) {
+        const item = mobileOneArtifactLedgerItem(value, chatId, bindingLookup);
+        if (!item || item.artifact.runId !== runId) continue;
+        const group = oneArtifactRailMergeKey({ ...item.artifact, label: item.rawLabel });
+        const identity = oneArtifactIdentityKey(item.artifact);
+        if (!groupOf.has(identity)) groupOf.set(identity, group);
+        const members = groups.get(group);
+        if (members) members.push(item);
+        else groups.set(group, [item]);
+      }
+    }
+  } catch {
+    // A store from before the binding table groups nothing: every binding stays its own entry.
+  }
+  return {
+    first: (output) => groups.get(oneArtifactRailMergeKey(output))?.[0] ?? null,
+    latest: (identity) => {
+      const group = groupOf.get(oneArtifactIdentityKey(identity));
+      const members = group ? groups.get(group) : undefined;
+      return members?.[members.length - 1] ?? null;
+    },
+  };
+}
+
+/**
+ * The binding the desktop rail opens for the entry `request` names: the newest save of the same output in the same run.
+ * Null when `request` is that binding or is not a bound output of its run (nothing to follow). The caller still
+ * verifies the returned binding in full before reading a byte (one/artifact-preview.ts fileVerdict: Task, chat, run,
+ * version, O_NOFOLLOW, size, inode and SHA-256), so a phone reaches only bytes of its own Task, chat and run.
+ */
+export function latestOneArtifactBindingInRun(request: OneArtifactBindingRequestV1): OneArtifactBindingRequestV1 | null {
+  const latest = readOneArtifactRunOutputs(request.chatId, request.runId).latest(request);
+  if (!latest || oneArtifactIdentityKey(latest.artifact) === oneArtifactIdentityKey(request)) return null;
+  const { taskId, taskVersion, chatId, runId, manifestId, artifactRef } = latest.artifact;
+  return { taskId, taskVersion, chatId, runId, manifestId, artifactRef };
+}
+
 /**
  * Conversation-wide, cursor-paged artifact identities for Mobile reconnect.
  * Each row is re-authorized against the exact Main binding table before it is
@@ -1111,12 +1276,8 @@ export function listRecentOneArtifactsForMobile(input: {
       ORDER BY rowid ASC
       LIMIT ?`,
   );
-  const bindingLookup = getDb().prepare(
-    `SELECT bound_task_version, kind, size_bytes, sha256
-       FROM one_artifact_bindings
-      WHERE task_id = ? AND chat_id = ? AND run_id = ? AND manifest_id = ? AND artifact_ref = ?
-      LIMIT 1`,
-  );
+  const bindingLookup = mobileOneArtifactBindingLookup();
+  const runOutputs = new Map<string, OneArtifactRunOutputs>();
   const candidates: Array<{
     artifact: MobileBridgeInvocationArtifactDto;
     cursor: MobileOneArtifactCursor;
@@ -1136,66 +1297,22 @@ export function listRecentOneArtifactsForMobile(input: {
       const artifacts = Array.isArray(payload.oneArtifacts) ? payload.oneArtifacts : [];
       const itemStart = row.event_rowid === start.rowId ? firstItemIndex : 0;
       for (let itemIndex = itemStart; itemIndex < artifacts.length; itemIndex += 1) {
-        const value = artifacts[itemIndex];
-        if (!value || typeof value !== "object" || Array.isArray(value)) continue;
-        const artifact = value as Record<string, unknown>;
-        const identifier = (key: string): string | null => {
-          const candidate = artifact[key];
-          return typeof candidate === "string"
-            && candidate.length >= 1
-            && candidate.length <= 256
-            && !/[\u0000-\u001f]/.test(candidate)
-            ? candidate
-            : null;
-        };
-        const taskId = identifier("taskId");
-        const chatId = identifier("chatId");
-        const runId = identifier("runId");
-        const manifestId = identifier("manifestId");
-        const artifactRef = identifier("artifactRef");
-        const label = typeof artifact.label === "string"
-          ? truncate(redactOperationalSecrets(artifact.label), 512)
-          : "";
-        const type = artifact.type;
-        if (
-          !taskId || chatId !== input.chatId || !runId || !manifestId || !artifactRef
-          || !Number.isSafeInteger(artifact.taskVersion) || Number(artifact.taskVersion) < 1
-          || !label || /[\u0000-\u001f]/.test(label)
-          || typeof type !== "string" || !MOBILE_ONE_ARTIFACT_TYPES.has(type as MobileBridgeInvocationArtifactDto["type"])
-          || (artifact.sizeBytes !== undefined && (!Number.isSafeInteger(artifact.sizeBytes) || Number(artifact.sizeBytes) < 0))
-        ) continue;
-        const binding = bindingLookup.get(taskId, chatId, runId, manifestId, artifactRef) as {
-          bound_task_version?: number;
-          kind?: string;
-          size_bytes?: number;
-          sha256?: string;
-        } | undefined;
-        if (
-          !binding
-          || binding.bound_task_version !== artifact.taskVersion
-          || binding.kind !== type
-          || !Number.isSafeInteger(binding.size_bytes)
-          || Number(binding.size_bytes) < 0
-          || (artifact.sizeBytes !== undefined && binding.size_bytes !== artifact.sizeBytes)
-          || typeof binding.sha256 !== "string"
-          || !/^[a-f0-9]{64}$/.test(binding.sha256)
-        ) continue;
-        const bindingKey = `${runId}\u0000${artifactRef}`;
+        const item = mobileOneArtifactLedgerItem(artifacts[itemIndex], input.chatId, bindingLookup);
+        if (!item) continue;
+        const { artifact } = item;
+        // A later save of the same output in the same run is the same rail entry. The phone keeps the first binding
+        // (live events project later saves onto it), and that entry's preview opens the newest bytes.
+        let outputs = runOutputs.get(artifact.runId);
+        if (!outputs) {
+          outputs = readOneArtifactRunOutputs(input.chatId, artifact.runId);
+          runOutputs.set(artifact.runId, outputs);
+        }
+        const first = outputs.first({ ...artifact, label: item.rawLabel });
+        if (first && oneArtifactIdentityKey(first.artifact) !== oneArtifactIdentityKey(artifact)) continue;
+        const bindingKey = `${artifact.runId}\u0000${artifact.artifactRef}`;
         if (!seen.add(bindingKey)) continue;
         candidates.push({
-          artifact: {
-            taskId,
-            taskVersion: Number(artifact.taskVersion),
-            chatId,
-            runId,
-            manifestId,
-            artifactRef,
-            label,
-            type: type as MobileBridgeInvocationArtifactDto["type"],
-            sizeBytes: Number(binding.size_bytes),
-            contentSha256: binding.sha256,
-            ...(occurredAt ? { occurredAt } : {}),
-          },
+          artifact: { ...artifact, ...(occurredAt ? { occurredAt } : {}) },
           cursor: { rowId: row.event_rowid, itemIndex },
         });
         if (candidates.length > limit) break;

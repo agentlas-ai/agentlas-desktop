@@ -159,7 +159,11 @@ import { resumeMobileOneAutoRecovery } from "../one/mobile-auto-recovery";
 import { autoResolveOneTeamPreflight, prepareOneTeamPreflight } from "../one/team-preflight";
 import {
   iterateRecentChatOneArtifactEvents,
+  latestOneArtifactBindingInRun,
   listRecentOneArtifactsForMobile,
+  oneArtifactIdentityKey,
+  readOneArtifactRunOutputs,
+  type OneArtifactRunOutputs,
   getInvocationRunReceipt,
   getRunEventBySource,
   recordRunEvent,
@@ -1915,7 +1919,9 @@ export function projectMobileBridgeInvocationEvent(
     /** Opt-in only after Main establishes this is not a personal One chat. */
     toolBodies?: boolean; toolBodyBytes?: number; historyPreview?: boolean;
     /** The receiving phone reported "plan.checklist.v1": a plan event keeps its kind and checklist. */
-    planChecklist?: boolean },
+    planChecklist?: boolean;
+    /** One read of each run's bound outputs for a batch of events (invoke.attach); omitted, each event reads its own. */
+    oneArtifactOutputs?: Map<string, OneArtifactRunOutputs> },
 ): MobileBridgeInvocationEventDto {
   // "mcp-key-request" is a desktop-renderer-only elicitation signal — the
   // mobile client has no key sheet and its DTO union stays closed. Project it
@@ -2062,6 +2068,7 @@ export function projectMobileBridgeInvocationEvent(
       chatId: context.chatId,
       runId: context.runId,
       limit: EVENT_ONE_ARTIFACT_LIMIT,
+      ...(context.oneArtifactOutputs ? { runOutputs: context.oneArtifactOutputs } : {}),
     });
     if (artifacts.length > 0) projected.oneArtifacts = artifacts;
   }
@@ -2082,9 +2089,21 @@ const MOBILE_ONE_ARTIFACT_TYPES = new Set([
 
 function projectMobileBridgeOneArtifacts(
   value: unknown,
-  context: { taskId?: string | null; chatId: string; runId?: string | null; limit: number },
+  context: {
+    taskId?: string | null; chatId: string; runId?: string | null; limit: number;
+    runOutputs?: Map<string, OneArtifactRunOutputs>;
+  },
 ): MobileBridgeInvocationArtifactDto[] {
   if (!Array.isArray(value) || !IDENTIFIER_RE.test(context.chatId)) return [];
+  const runOutputs = context.runOutputs ?? new Map<string, OneArtifactRunOutputs>();
+  const outputsOf = (runId: string): OneArtifactRunOutputs => {
+    let outputs = runOutputs.get(runId);
+    if (!outputs) {
+      outputs = readOneArtifactRunOutputs(context.chatId, runId);
+      runOutputs.set(runId, outputs);
+    }
+    return outputs;
+  };
   const seen = new Set<string>();
   const artifacts: MobileBridgeInvocationArtifactDto[] = [];
   for (const candidate of value) {
@@ -2111,25 +2130,48 @@ function projectMobileBridgeOneArtifacts(
       typeof label !== "string" || !label.trim() ||
       typeof type !== "string" || !MOBILE_ONE_ARTIFACT_TYPES.has(type)
     ) continue;
-    const key = `${runId}\u0000${artifactRef}`;
+    const projectedSha256 = typeof candidate.contentSha256 === "string" && /^[a-f0-9]{64}$/u.test(candidate.contentSha256)
+      ? candidate.contentSha256
+      : undefined;
+    // Dev O8/O9 2026-10-18: a run that saves the same file again binds it again (new ref, new bytes). The desktop rail
+    // merges both into one entry that opens the newest bytes; the phone keys rows by binding, keeps the first it gets and
+    // cannot drop a row it already holds. So a later save of an output is sent as that output's first binding in the run
+    // (the row the phone holds or gets once), and one.artifact.imagePreview follows that binding to the newest save.
+    const first = outputsOf(runId).first({ taskId, chatId, type, label });
+    const replaced = first && oneArtifactIdentityKey(first.artifact) !== oneArtifactIdentityKey({
+      taskId, taskVersion: Number(taskVersion), chatId, runId, manifestId, artifactRef,
+    }) ? first : null;
+    const projectedArtifact: MobileBridgeInvocationArtifactDto = replaced
+      ? {
+          taskId: replaced.artifact.taskId,
+          taskVersion: replaced.artifact.taskVersion,
+          chatId: replaced.artifact.chatId,
+          runId: replaced.artifact.runId,
+          manifestId: replaced.artifact.manifestId,
+          artifactRef: replaced.artifact.artifactRef,
+          label: boundedRedactedText(replaced.rawLabel, 512),
+          type: replaced.artifact.type,
+          sizeBytes: replaced.artifact.sizeBytes,
+          ...(projectedSha256 ? { contentSha256: replaced.artifact.contentSha256 } : {}),
+        }
+      : {
+          taskId,
+          taskVersion: Number(taskVersion),
+          chatId,
+          runId,
+          manifestId,
+          artifactRef,
+          label: boundedRedactedText(label, 512),
+          type: type as MobileBridgeInvocationArtifactDto["type"],
+          ...(Number.isSafeInteger(candidate.sizeBytes) && Number(candidate.sizeBytes) >= 0
+            ? { sizeBytes: Number(candidate.sizeBytes) }
+            : {}),
+          ...(projectedSha256 ? { contentSha256: projectedSha256 } : {}),
+        };
+    const key = `${projectedArtifact.runId}\u0000${projectedArtifact.artifactRef}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    artifacts.push({
-      taskId,
-      taskVersion: Number(taskVersion),
-      chatId,
-      runId,
-      manifestId,
-      artifactRef,
-      label: boundedRedactedText(label, 512),
-      type: type as MobileBridgeInvocationArtifactDto["type"],
-      ...(Number.isSafeInteger(candidate.sizeBytes) && Number(candidate.sizeBytes) >= 0
-        ? { sizeBytes: Number(candidate.sizeBytes) }
-        : {}),
-      ...(typeof candidate.contentSha256 === "string" && /^[a-f0-9]{64}$/u.test(candidate.contentSha256)
-        ? { contentSha256: candidate.contentSha256 }
-        : {}),
-    });
+    artifacts.push(projectedArtifact);
     if (artifacts.length >= context.limit) break;
   }
   return artifacts;
@@ -2142,12 +2184,14 @@ export function projectMobileBridgeRecentOneArtifacts(
   const boundedLimit = Math.max(1, Math.min(RECENT_ONE_ARTIFACT_LIMIT, Math.floor(limit)));
   const newestFirst: MobileBridgeInvocationArtifactDto[] = [];
   const seen = new Set<string>();
+  const runOutputs = new Map<string, OneArtifactRunOutputs>();
   artifactEvents:
   for (const event of iterateRecentChatOneArtifactEvents(chatId)) {
     const projected = projectMobileBridgeOneArtifacts(event.payload.oneArtifacts, {
       chatId,
       runId: event.runId,
       limit: EVENT_ONE_ARTIFACT_LIMIT,
+      runOutputs,
     });
     // The ledger event preserves creation order. Scan it backwards while the
     // outer iterator walks newest-to-oldest, then reverse the bounded answer so
@@ -3370,14 +3414,17 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         ]);
         const taskVersion = optionalInteger(params, "taskVersion", 1, Number.MAX_SAFE_INTEGER);
         if (taskVersion === undefined) throw new TypeError("taskVersion is required");
-        const preview = readOneArtifactImagePreview({
+        const requested = {
           taskId: requiredIdentifier(params, "taskId"),
           taskVersion,
           chatId: requiredIdentifier(params, "chatId"),
           runId: requiredIdentifier(params, "runId", RUN_ID_RE),
           manifestId: requiredIdentifier(params, "manifestId"),
           artifactRef: requiredIdentifier(params, "artifactRef"),
-        });
+        };
+        // The phone holds an output's first binding in the run (projectMobileBridgeOneArtifacts); the desktop rail opens
+        // its newest save. Follow to that binding, which readOneArtifactImagePreview verifies in full like any other.
+        const preview = readOneArtifactImagePreview(latestOneArtifactBindingInRun(requested) ?? requested);
         return preview ? asJsonValue(preview, request.method) : null;
       }
       case "one.artifacts.recent": {
@@ -3778,11 +3825,12 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         // A run may contain thousands of tool events. Bound the aggregate
         // payload below the relay budget; expanded complete bodies use chunks.
         const toolBodyBytes = Math.min(512 * 1024, Math.floor(2 * 1024 * 1024 / Math.max(1, attached.events.length)));
+        const oneArtifactOutputs = new Map<string, OneArtifactRunOutputs>();
         return asJsonValue(
           {
             runId: attached.runId,
             events: attached.events.filter((event) => event.kind !== "plan" || planChecklist)
-              .map((event) => projectMobileBridgeInvocationEvent(event, { taskId, chatId, runId: attached.runId, cwd, toolBodies, toolBodyBytes, planChecklist })),
+              .map((event) => projectMobileBridgeInvocationEvent(event, { taskId, chatId, runId: attached.runId, cwd, toolBodies, toolBodyBytes, planChecklist, oneArtifactOutputs })),
           },
           request.method,
         );
