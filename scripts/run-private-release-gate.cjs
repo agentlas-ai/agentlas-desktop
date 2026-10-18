@@ -21,6 +21,16 @@ function portableCommand(command, args, platform = process.platform, executable 
   return { command: executable, args: [script, ...args] };
 }
 
+function windowsSystemCommand(command, env = process.env) {
+  const root = env.SystemRoot || env.SYSTEMROOT;
+  if (typeof root !== "string" || !path.win32.isAbsolute(root)
+    || !/^[A-Za-z]:[\\/]/.test(root)
+    || !/^(?:whoami|icacls|taskkill)\.exe$/.test(command)) {
+    throw new Error("Windows system command unavailable");
+  }
+  return path.win32.join(root, "System32", command);
+}
+
 function privateLog() {
   const temporary = process.env.RUNNER_TEMP;
   if (!temporary || !path.isAbsolute(temporary)) throw new Error("runner temporary directory required");
@@ -35,11 +45,13 @@ function privateLog() {
     if (process.platform === "win32") {
       // Windows chmod does not enforce POSIX owner bits. Remove inherited ACLs
       // and grant only this runner identity access to the temporary directory/file.
-      const identity = execFileSync("whoami.exe", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8", stdio: ["ignore", "pipe", fd] });
+      const identity = execFileSync(windowsSystemCommand("whoami.exe"), ["/user", "/fo", "csv", "/nh"], { encoding: "utf8", stdio: ["ignore", "pipe", fd] });
       const sid = identity.match(/\bS-1-\d+(?:-\d+)+\b/)?.[0];
       if (!sid) throw new Error("runner identity unavailable");
-      execFileSync("icacls.exe", [directory, "/inheritance:r", "/grant:r", `*${sid}:(OI)(CI)F`], { stdio: ["ignore", fd, fd] });
-      execFileSync("icacls.exe", [file, "/inheritance:r", "/grant:r", `*${sid}:F`], { stdio: ["ignore", fd, fd] });
+      execFileSync(windowsSystemCommand("icacls.exe"), [directory, "/reset"], { stdio: ["ignore", fd, fd] });
+      execFileSync(windowsSystemCommand("icacls.exe"), [directory, "/inheritance:r", "/grant:r", `*${sid}:(OI)(CI)F`], { stdio: ["ignore", fd, fd] });
+      execFileSync(windowsSystemCommand("icacls.exe"), [file, "/reset"], { stdio: ["ignore", fd, fd] });
+      execFileSync(windowsSystemCommand("icacls.exe"), [file, "/inheritance:r", "/grant:r", `*${sid}:F`], { stdio: ["ignore", fd, fd] });
     } else if ((fs.fstatSync(fd).mode & 0o777) !== 0o600 || (fs.statSync(directory).mode & 0o777) !== 0o700) {
       throw new Error("private output permissions unavailable");
     }
@@ -78,7 +90,7 @@ async function stopProcessTree(child, signal, fd) {
   if (process.platform === "win32") {
     // /T terminates descendants too; a root-only kill cannot confirm cleanup.
     try {
-      execFileSync("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], {
+      execFileSync(windowsSystemCommand("taskkill.exe"), ["/pid", String(child.pid), "/t", "/f"], {
         stdio: ["ignore", fd, fd], windowsHide: true, timeout: 2000,
       });
       return await waitUntilGone(child.pid, 500);

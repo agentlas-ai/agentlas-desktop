@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.76 — 2026-10-19
+
+- Carries forward the Finance, document, Goal and Science improvements from the 1.3.75 source. No 1.3.75 installers were published.
+- Empty output panels release their unused space while pending file opens and the task drawer remain reachable.
+- Windows package preparation selects system commands explicitly and restricts temporary log directories and files to the runner identity.
+- This release binds Agentlas OS v1.2.66 at c0acd99be22114569e20bca94bed4540ba046eb4; public runtime asset `hephaestus-runtime-v1.2.66.tar.gz` is pinned at SHA-256 `20019d3ba4df1c540d0ef549c07a82188bd40fe12dafb2f8a6c75cc4bdcc89f7`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.75 — 2026-10-18
 
 - Includes the organization account improvements prepared for 1.3.74, which was not published.
