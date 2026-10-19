@@ -12,7 +12,10 @@ import { createAgentContextCapability, agentContextHostBinding, bootstrapAgentCo
   reconcileInterruptedAgentContext, nextAgentContextTurnOrdinal, openAgentContextTurnId, recordAgentContextScopeAdoption, importSharedChatHistory, type AgentContextCapability } from "./agent-context";
 import { markRefusedBeforeDispatch, type Runner, type RunnerEvents, type RunnerRequest } from "./runner";
 import { resolveSessionScope } from "./session-scope";
-import { acquireAgentContextTurnSlot, type AgentContextTurnSlot } from "./agent-context-turn-order";
+import { acquireAgentContextTurnSlot, AgentContextTurnWaitError, type AgentContextTurnSlot } from "./agent-context-turn-order";
+import { createTurnLine, type TurnLineDb } from "./agent-context-turn-line";
+import { listPendingToolApprovals } from "./tool-approval";
+import { listPendingAskUserRequests } from "../confirm/ask-user";
 import { CHAT_BUSY_OTHER_HOST_CODE, ensureChatHostHandover } from "./chat-host-handover";
 import { agentContextKey } from "../store/agent-context";
 import { tStatus } from "./status-i18n";
@@ -73,15 +76,14 @@ export function bindInvocationAgentContext(request: RunnerRequest, input: {
 /** Capabilities whose journal is shared by several conversations (a seat scope): their turns run one after the other. */
 const sharedSessionCapabilities = new WeakSet<object>();
 export function isSharedSessionCapability(value: unknown): boolean { return !!value && typeof value === "object" && sharedSessionCapabilities.has(value); }
-/** The open delivery's turn belongs to a run of ANOTHER conversation that is still going: its turn will settle by itself. */
-function otherConversationTurnIsLive(turnId: string, ownChatId: string): boolean {
+/** The open delivery's turn when it belongs to a run of ANOTHER conversation that is still going: its turn will settle by itself. */
+function otherConversationTurn(turnId: string, ownChatId: string): { chatId: string; runId: string } | null {
   try {
-    if (!turnId.startsWith("agent-context-turn:")) return false;
-    const source: unknown = JSON.parse(turnId.slice("agent-context-turn:".length));
-    if (!Array.isArray(source) || typeof source[0] !== "string" || typeof source[1] !== "string" || source[0] === ownChatId) return false;
-    const owner = invocationRunOwners.getRunOwner(source[0], source[1]);
-    return !!owner && owner.state !== "released";
-  } catch { return false; }
+    const ref = turnRunRef(turnId);
+    if (!ref || !ref.chatId || !ref.runId || ref.chatId === ownChatId) return null;
+    const owner = invocationRunOwners.getRunOwner(ref.chatId, ref.runId);
+    return owner && owner.state !== "released" ? ref : null;
+  } catch { return null; }
 }
 function assertPreviousTurnTerminal(turnId: string): void {
   if (!turnId.startsWith("agent-context-turn:")) fail("agent_context_prior_turn_unsettled");
@@ -209,16 +211,52 @@ async function handOverSharedSessionHost(request: RunnerRequest): Promise<void> 
     }
   } catch { /* nothing here may refuse a turn: the runner's own handling of a held thread stays as it was */ }
 }
+/** The durable line of turns on shared sessions (agent-context-turn-line.ts): the places live in the store both processes share. */
+let sharedTurnLine: ReturnType<typeof createTurnLine> | null = null;
+function turnLine(): ReturnType<typeof createTurnLine> {
+  return sharedTurnLine ??= createTurnLine({
+    db: () => getDb() as unknown as TurnLineDb,
+    who: () => { const owner = invocationProcessOwner(); return { ownerId: owner.ownerId, ownerKind: owner.ownerKind, pid: process.pid }; },
+    // The same evidence the run-owner code keeps: a turn whose run lease was released, or taken by a newer lease, is over.
+    runEnded: turn => {
+      const owner = invocationRunOwners.getRunOwner(turn.chatId, turn.runId);
+      return !!owner && (owner.state === "released" || (!!turn.leaseId && owner.leaseId !== turn.leaseId));
+    },
+    // What this process's turn of a chat waits on a person for. Only live asks count: they block the run, a notice of a denied call does not.
+    parkedOn: chatId => listPendingToolApprovals().some(request => request.chatId === chatId) ? "approval"
+      : listPendingAskUserRequests().some(request => request.chatId === chatId) ? "question" : null,
+  });
+}
+/** Test seam: limits shorter than the product's, to reach one through the real seam in seconds. null restores the product's. */
+let sharedTurnWaitLimits: { maxWaitMs?: number; parkGraceMs?: number; stuckGraceMs?: number } = {};
+export function setSharedTurnWaitLimitsForTest(limits: { maxWaitMs?: number; parkGraceMs?: number; stuckGraceMs?: number } | null): void { sharedTurnWaitLimits = limits ?? {}; }
+/** The refusal a wait that ended without the session becomes: a plain sentence in the owner's language, the machine code kept on `code`. */
+function turnWaitRefusal(error: AgentContextTurnWaitError, locale: "ko" | "en"): Error {
+  const key = error.reason === "parked" ? (error.parkedOn === "question" ? "agentContextTurnParkedQuestion" : "agentContextTurnParkedApproval")
+    : error.reason === "stuck" ? "agentContextTurnStuck" : "agentContextTurnWaitExpired";
+  return Object.defineProperty(Object.assign(new Error(tStatus(locale, key)), { code: error.code }), "cause", { value: error, configurable: true, writable: true });
+}
 async function waitForSharedSession(request: RunnerRequest, events: RunnerEvents): Promise<AgentContextTurnSlot> {
+  const locale = request.locale === "ko" ? "ko" : "en";
   try {
     const capability = request.agentContext as AgentContextCapability, held = agentContextHostBinding(capability);
-    const ownChatId = (() => { try { const ref: unknown = JSON.parse(held.turnId.slice("agent-context-turn:".length)); return Array.isArray(ref) && typeof ref[0] === "string" ? ref[0] : ""; } catch { return ""; } })();
-    return await acquireAgentContextTurnSlot(agentContextKey(held.identity), {
+    const own = turnRunRef(held.turnId), ownChatId = own?.chatId ?? "";
+    let leaseId: string | null = null;
+    if (own) { try { leaseId = invocationRunOwners.getRunOwner(own.chatId, own.runId)?.leaseId ?? null; } catch { leaseId = null; } }
+    const key = agentContextKey(held.identity);
+    const openHolder = (): { chatId: string; runId: string } | null => {
+      const open = openAgentContextTurnId(capability);
+      return open !== null && open !== held.turnId ? otherConversationTurn(open, ownChatId) : null;
+    };
+    return await acquireAgentContextTurnSlot(key, {
       signal: request.signal,
-      blocked() { const open = openAgentContextTurnId(capability); return open !== null && open !== held.turnId && otherConversationTurnIsLive(open, ownChatId); },
-      onWait() { events.onStatus?.(tStatus(request.locale === "ko" ? "ko" : "en", "agentContextTurnWait")); },
+      blocked: () => openHolder() !== null,
+      blockedTurn: openHolder,
+      line: own ? () => turnLine().enqueue(key, { chatId: own.chatId, runId: own.runId, leaseId }) : undefined,
+      onWait() { events.onStatus?.(tStatus(locale, "agentContextTurnWait")); },
+      ...sharedTurnWaitLimits,
     });
-  } catch (error) { throw markRefusedBeforeDispatch(error); }
+  } catch (error) { throw markRefusedBeforeDispatch(error instanceof AgentContextTurnWaitError ? turnWaitRefusal(error, locale) : error); }
 }
 function routeAgentContextRunner(runner: Runner, provider: { kind: string; backend?: string; configurationIdentity?: string }): Runner {
   return async (request, events) => {

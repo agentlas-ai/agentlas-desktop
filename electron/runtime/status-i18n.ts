@@ -27,7 +27,12 @@ const DICT = {
   ko: {
     thinking: "{agent}가 생각 중...",
     sending: "전송 중...",
-    agentContextTurnWait: "같은 에이전트가 다른 대화에서 일하는 중이라, 그 일이 끝나면 이어서 시작합니다...",
+    agentContextTurnWait: "같은 에이전트가 다른 대화에서 일하는 중이라, 그 일이 끝나면 이어서 시작합니다. 지금 시작하려면 그 대화에서 중지하세요...",
+    // The wait stopped without the session (agent-context-turn-order.ts): what is happening and what to do, in words the screen already uses.
+    agentContextTurnParkedApproval: "같은 에이전트가 다른 대화에서 승인을 기다리고 있어서 이어서 시작하지 못했어요. 그 대화에서 승인하거나 중지한 뒤 다시 보내 주세요.",
+    agentContextTurnParkedQuestion: "같은 에이전트가 다른 대화에서 답을 기다리고 있어서 이어서 시작하지 못했어요. 그 대화에서 답하거나 중지한 뒤 다시 보내 주세요.",
+    agentContextTurnStuck: "같은 에이전트가 다른 대화에서 일하다 멈춘 것 같아서 이어서 시작하지 못했어요. Agentlas를 다시 열어 정리한 뒤 다시 보내 주세요.",
+    agentContextTurnWaitExpired: "같은 에이전트가 다른 대화에서 오래 일하고 있어서 기다리다 멈췄어요. 그 일이 끝나거나 그 대화에서 중지한 뒤 다시 보내 주세요.",
     callingBackend: "{backend} 호출 중...",
     schemaInPromptOnly: "이 실행 경로는 출력 형식을 강제할 수 없어 지시문으로만 요청합니다.",
     cliImageReady: "첨부 이미지 {count}개를 파일로 준비했습니다 — {backend}가 해당 경로를 읽습니다",
@@ -89,7 +94,11 @@ const DICT = {
   en: {
     thinking: "{agent} is thinking...",
     sending: "Sending...",
-    agentContextTurnWait: "This agent is still working in another conversation; this turn starts when that one finishes...",
+    agentContextTurnWait: "This agent is still working in another conversation; this turn starts when that one finishes (stop it there to start now)...",
+    agentContextTurnParkedApproval: "This agent is waiting for your approval in another conversation, so this could not start. Approve or stop it there, then send again.",
+    agentContextTurnParkedQuestion: "This agent is waiting for your answer in another conversation, so this could not start. Answer or stop it there, then send again.",
+    agentContextTurnStuck: "This agent's work in another conversation seems to have stopped midway, so this could not start. Reopen Agentlas to clear it, then send again.",
+    agentContextTurnWaitExpired: "This agent has been busy in another conversation for a long time, so waiting stopped. Send again once it finishes, or stop it there.",
     callingBackend: "Calling {backend}...",
     schemaInPromptOnly: "This runtime path cannot enforce the output schema — asking for it in the prompt instead.",
     cliImageReady: "Prepared {count} attached image file(s) — {backend} will read those paths",
