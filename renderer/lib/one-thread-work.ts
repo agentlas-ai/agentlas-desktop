@@ -1,6 +1,6 @@
 import type { InvocationHostStopCause, InvocationRunReceipt, RunEventUi } from "@shared/types";
 import { isOneSteeringInterruption } from "@shared/one-auto-recovery";
-import { projectOneActivityFromLedger, type OneActivityState } from "./one-activity";
+import { ledgerWithSettleRows, projectOneActivityFromLedger, type OneActivityState } from "./one-activity";
 
 /**
  * Where each run's work block sits in the thread.
@@ -44,19 +44,22 @@ export function oneRunInterruptionCause(
 }
 
 /**
- * `outputRows` (optional, per run): the rows naming the outputs a run longer than its event window wrote past it
- * (lib/one-chat-outputs withLateRunOutputs). They add to the block's output list only; the work rows stay the window's.
+ * `lateRows` (optional, per run): the rows a run longer than its event window still owes its block (lib/one-chat-outputs
+ * withLateRunRows): the rows naming the outputs it wrote past the window, which add to the block's output list, and the rows
+ * that settle it, which the block reads like the rest of the run's ledger (its ending, its answer ids). The other work rows
+ * stay the window's.
  */
 export function projectThreadRuns(
-  timeline: Array<{ receipt: InvocationRunReceipt; events: RunEventUi[]; outputRows?: readonly RunEventUi[] }>,
+  timeline: Array<{ receipt: InvocationRunReceipt; events: RunEventUi[]; lateRows?: readonly RunEventUi[] }>,
 ): OneThreadRunBlock[] {
   return timeline
     .filter((entry) => entry.receipt && entry.receipt.runId)
     .map((entry) => {
-      const interruptionCause = oneRunInterruptionCause(entry.receipt, entry.events);
+      const ledger = ledgerWithSettleRows(entry.events, entry.lateRows);
+      const interruptionCause = oneRunInterruptionCause(entry.receipt, ledger);
       return {
         runId: entry.receipt.runId,
-        answerMessageIds: [...new Set(entry.events.filter(event => event.runId === entry.receipt.runId && (!event.chatId || event.chatId === entry.receipt.chatId) && !event.agentId && event.kind === "mcp_final")
+        answerMessageIds: [...new Set(ledger.filter(event => event.runId === entry.receipt.runId && (!event.chatId || event.chatId === entry.receipt.chatId) && !event.agentId && event.kind === "mcp_final")
           .map(event => event.payload.durableMessageId).filter((id): id is string => typeof id === "string" && Boolean(id.trim())))],
         startedAt: entry.receipt.startedAt,
         ...(entry.receipt.finishedAt ? { finishedAt: entry.receipt.finishedAt } : {}),
@@ -64,7 +67,7 @@ export function projectThreadRuns(
         ...(interruptionCause ? { interruptionCause } : {}),
         ...(entry.receipt.hostStopCause ? { hostStopCause: entry.receipt.hostStopCause } : {}),
         ...(entry.receipt.supersededByRunId ? { supersededByRunId: entry.receipt.supersededByRunId } : {}),
-        state: projectOneActivityFromLedger(entry.events, entry.receipt, entry.outputRows),
+        state: projectOneActivityFromLedger(entry.events, entry.receipt, entry.lateRows),
       };
     })
     .sort((a, b) => a.startedAt.localeCompare(b.startedAt));

@@ -1331,6 +1331,62 @@ export function listRunOutputEventsAfter(runId: string, afterSeq: number): RunEv
 }
 
 /**
+ * The ledger rows that settle a run: the terminal rows and the cancel request that comes before a stop. Exactly the kinds the
+ * activity reducer reads as a run ending (renderer/lib/one-activity.ts replayLedger) plus that cancel request; the reducer keeps
+ * the same list (RUN_SETTLE_ROW_KINDS there).
+ */
+const RUN_SETTLE_ROW_KINDS = [
+  "invoke_waiting",
+  "invoke_completed",
+  "mcp_final",
+  "invoke_failed",
+  "mcp_error",
+  "invoke_cancel_requested",
+  "invoke_cancelled",
+  "invoke_interrupted",
+] as const;
+/** Most settle rows one ask returns: the first half and the last half when a run holds more (a run has a handful). */
+const RUN_SETTLE_ROWS_MAX = 16;
+
+/**
+ * The rows that settle a run, after the event window the screen read.
+ *
+ * runLedger:events and runLedger:chatTimeline answer the first rows of a run (400 or 500), and the screens project a run from
+ * them. A run longer than the window has its terminal rows past it, so its projection never saw the run end. On a copy of a real
+ * profile every one of the 30 runs that filled the 400-row window had its ending past it: Work drew 23 of them as a row of
+ * its own instead of on their answer (the anchor, `mcp_final.durableMessageId`, is the ending), tool rows whose result lies
+ * past the window read as still running on finished runs, and the tokens and the failure reason were missing. These are the
+ * rows the activity reducer reads as a run ending, as ledger rows the same projector replays after the window
+ * (renderer/lib/one-activity.ts ledgerWithSettleRows).
+ *
+ * What it returns, and no more than runLedger:events already shows the renderer: only rows of this run after `afterSeq`
+ * whose kind is in RUN_SETTLE_ROW_KINDS, each row as runLedger:events builds it (same redaction, same fields), oldest first.
+ * A run has a handful of them; past RUN_SETTLE_ROWS_MAX the first half and the last half return (the first terminal row
+ * seals a replay, the last `mcp_final` names the answer). Read-only; nothing but ledger rows leaves here.
+ */
+export function listRunSettleRowsAfter(runId: string, afterSeq: number): RunEventUi[] {
+  if (typeof runId !== "string" || runId.length < 1 || runId.length > 256 || /[\u0000-\u001f]/.test(runId)) return [];
+  if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) return [];
+  try {
+    const db = getDb();
+    const marks = RUN_SETTLE_ROW_KINDS.map(() => "?").join(", ");
+    const seqs = (db.prepare(`SELECT seq FROM run_events WHERE run_id = ? AND seq > ? AND kind IN (${marks}) ORDER BY seq ASC`)
+      .all(runId, afterSeq, ...RUN_SETTLE_ROW_KINDS) as Array<{ seq: number }>).map((row) => row.seq);
+    const half = RUN_SETTLE_ROWS_MAX / 2;
+    const kept = seqs.length > RUN_SETTLE_ROWS_MAX ? [...seqs.slice(0, half), ...seqs.slice(-half)] : seqs;
+    const readRow = db.prepare("SELECT * FROM run_events WHERE run_id = ? AND seq = ?");
+    const out: RunEventUi[] = [];
+    for (const seq of kept) {
+      const row = readRow.get(runId, seq) as RunEventRow | undefined;
+      if (row) out.push(runRowToUi(row));
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Conversation-wide, cursor-paged artifact identities for Mobile reconnect.
  * Each row is re-authorized against the exact Main binding table before it is
  * projected; no filesystem path or preview capability is returned here.

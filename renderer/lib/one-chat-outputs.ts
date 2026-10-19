@@ -5,7 +5,10 @@ import { projectOneActivityFromLedger, type OneActivityArtifact } from "./one-ac
 export const ONE_RUN_EVENT_WINDOW = 500;
 
 interface RunLedgerOutputsApi {
-  runLedger?: { outputsAfter?: (runId: string, afterSeq: number) => Promise<unknown> } | null;
+  runLedger?: {
+    outputsAfter?: (runId: string, afterSeq: number) => Promise<unknown>;
+    settleRowsAfter?: (runId: string, afterSeq: number) => Promise<unknown>;
+  } | null;
 }
 
 /**
@@ -39,27 +42,81 @@ export async function readRunOutputsAfterWindow(
   }
 }
 
-/** Runs of one window asked about at once: each ask is one read in Main and a window holds at most 40 runs. */
-const LATE_OUTPUT_READS_AT_ONCE = 4;
-
-/** A `runLedger.chatTimeline` entry, plus the rows naming the outputs a run longer than its event window wrote past it. */
-export interface RunTimelineEntryWithOutputs {
-  receipt: InvocationRunReceipt;
-  events: RunEventUi[];
-  outputRows?: readonly RunEventUi[];
+/**
+ * The rows a run's ledger holds after the event window that settle it (`mcp_final`, `invoke_completed`, the failure and stop
+ * rows), to hand to the projectors together with the window.
+ *
+ * A run longer than the window has its ending past it. A projection that never reads the ending draws the run unsettled: Work
+ * could not tell which answer the run produced (the anchor `mcp_final.durableMessageId` lies past the 400th row of the long
+ * runs measured) and drew the run's work as a row of its own, tool rows whose result lies past the window read as still
+ * running, and the tokens and the failure reason were missing. Main answers these rows (electron/store/run-events.ts
+ * listRunSettleRowsAfter); the projectors replay them after the window.
+ *
+ * The same guards as `readRunOutputsAfterWindow`: a window that is not full held the whole run, and a bridge without the call
+ * (an older host), an answer that is not rows, or a failed call adds nothing: the run is then the window's, as before.
+ */
+export async function readRunSettleRowsAfterWindow(
+  api: RunLedgerOutputsApi | null | undefined,
+  runId: string | null | undefined,
+  events: readonly RunEventUi[],
+  window: number = ONE_RUN_EVENT_WINDOW,
+): Promise<RunEventUi[]> {
+  if (!runId || events.length < window) return [];
+  const afterSeq = events[events.length - 1]?.seq;
+  const runLedger = api?.runLedger;
+  if (typeof runLedger?.settleRowsAfter !== "function" || !Number.isSafeInteger(afterSeq) || afterSeq < 0) return [];
+  try {
+    const rows = await runLedger.settleRowsAfter(runId, afterSeq);
+    return Array.isArray(rows) ? (rows as RunEventUi[]) : [];
+  } catch {
+    return [];
+  }
 }
 
 /**
- * The same timeline, each run whose event window is full carrying the rows that name its later outputs (`outputRows`), which
- * the per-run projections (`projectOneActivityFromLedger(events, receipt, outputRows)`) add to the run's output list.
+ * Everything a run longer than the event window still owes its projection: the rows naming its later outputs and the rows
+ * that settle it, oldest first. Hand the result to `projectOneActivityFromLedger(events, receipt, lateRows)` (it replays the
+ * output rows into the output list and appends the settling rows to the window) and to the anchor reads that take the
+ * window's rows. Asks only when the window is full; never throws.
+ */
+export async function readRunLateRowsAfterWindow(
+  api: RunLedgerOutputsApi | null | undefined,
+  runId: string | null | undefined,
+  events: readonly RunEventUi[],
+  window: number = ONE_RUN_EVENT_WINDOW,
+): Promise<RunEventUi[]> {
+  // One ask after the other, so a window read four runs at a time never has more than four asks in flight.
+  const outputs = await readRunOutputsAfterWindow(api, runId, events, window);
+  const settle = await readRunSettleRowsAfterWindow(api, runId, events, window);
+  if (outputs.length === 0) return settle;
+  if (settle.length === 0) return outputs;
+  // A settling row that also names an output is one row.
+  const named = new Set(outputs.map((row) => row.id));
+  return [...outputs, ...settle.filter((row) => !named.has(row.id))].sort((a, b) => a.seq - b.seq);
+}
+
+/** Runs of one window asked about at once: each ask is one read in Main and a window holds at most 40 runs. */
+const LATE_OUTPUT_READS_AT_ONCE = 4;
+
+/** A `runLedger.chatTimeline` entry, plus the rows a run longer than its event window still owes its projection. */
+export interface RunTimelineEntryWithLateRows {
+  receipt: InvocationRunReceipt;
+  events: RunEventUi[];
+  lateRows?: readonly RunEventUi[];
+}
+
+/**
+ * The same timeline, each run whose event window is full carrying the rows it still owes its projection (`lateRows`: the rows
+ * naming its later outputs and the rows that settle it, `readRunLateRowsAfterWindow`), which the per-run projections
+ * (`projectOneActivityFromLedger(events, receipt, lateRows)`) add to the run.
  *
  * The thread's work blocks (a window of 40 runs x 400 events) and the Work screen's run projections (the same window) draw each
- * run's image outputs and the Work rail from the first 400 rows of the run, so an output a long run wrote after the 400th row
- * was missing from its block and from the Work rail. Only runs whose window is full are asked (a shorter one held the whole
- * run), at most a few at a time, and an entry with nothing to add is returned as it came. The window is the one the timeline
- * was read with; the asking itself is `readRunOutputsAfterWindow`, which never throws.
+ * run from the first 400 rows of the run, so a long run lost the outputs it wrote after the 400th row and its ending: the
+ * answer it produced (Work drew its work as a row of its own), the rows still open at the window's edge, its tokens. Only runs
+ * whose window is full are asked (a shorter one held the whole run), at most a few at a time, and an entry with nothing to add
+ * is returned as it came. The window is the one the timeline was read with; the asking itself never throws.
  */
-export async function withLateRunOutputs<T extends RunTimelineEntryWithOutputs>(
+export async function withLateRunRows<T extends RunTimelineEntryWithLateRows>(
   api: RunLedgerOutputsApi | null | undefined,
   timeline: readonly T[],
   eventWindow: number,
@@ -71,12 +128,12 @@ export async function withLateRunOutputs<T extends RunTimelineEntryWithOutputs>(
   const worker = async () => {
     while (next < full.length) {
       const entry = full[next++];
-      const late = await readRunOutputsAfterWindow(api, entry.receipt.runId, entry.events, eventWindow);
+      const late = await readRunLateRowsAfterWindow(api, entry.receipt.runId, entry.events, eventWindow);
       if (late.length > 0) rows.set(entry, late);
     }
   };
   await Promise.all(Array.from({ length: Math.min(LATE_OUTPUT_READS_AT_ONCE, full.length) }, worker));
-  return timeline.map((entry) => (rows.has(entry) ? { ...entry, outputRows: rows.get(entry)! } : entry));
+  return timeline.map((entry) => (rows.has(entry) ? { ...entry, lateRows: rows.get(entry)! } : entry));
 }
 
 /**

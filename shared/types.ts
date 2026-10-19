@@ -7504,6 +7504,11 @@ export interface AgentlasIpc {
      * run cannot hold. Per rail entry its first and newest save only, each row as `events` shows it; nothing else leaves.
      */
     outputsAfter: (runId: string, afterSeq: number) => Promise<RunEventUi[]>;
+    /**
+     * The rows of one run after `afterSeq` that settle it (the terminal rows and the cancel request before a stop): the part of
+     * a run's ending an `events` window of a long run cannot hold. Each row as `events` shows it; nothing else leaves.
+     */
+    settleRowsAfter: (runId: string, afterSeq: number) => Promise<RunEventUi[]>;
     failures: (input?: { runId?: string; automationId?: string; chatId?: string; agentId?: string; limit?: number }) => Promise<FailureEventUi[]>;
   };
   /** 에이전트 자가진화 proposal 원장 — 제안/승인/적용/측정/롤백 상태를 로컬 DB에 남긴다. */

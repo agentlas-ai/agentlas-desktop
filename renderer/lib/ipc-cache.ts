@@ -72,6 +72,7 @@ const READ_TTL_MS: Record<string, number> = {
   "runLedger.events": 0,
   "runLedger.chatTimeline": 0,
   "runLedger.outputsAfter": 0,
+  "runLedger.settleRowsAfter": 0,
   "automations.latestRun": 0,
   "automations.listStrategyProposals": 0,
   "automations.runDigest": 0,

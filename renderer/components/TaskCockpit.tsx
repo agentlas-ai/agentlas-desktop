@@ -14,7 +14,8 @@ import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
 import { createFrameBatcher, isLiveStreamTick, type FrameBatcher } from "@/lib/frame-coalescer";
 import { seedWorkRunProjections, syncWorkRunProjections, workRunTimelineRequest, WORK_TIMELINE_EVENTS_PER_RUN, WORK_TIMELINE_RUNS, type WorkRunProjectionCache } from "@/lib/work-run-timeline-sync";
 import { mergeAutomationHostNotices } from "@/lib/chat-host-notice-refresh";
-import { readRunOutputsAfterWindow, withLateRunOutputs } from "@/lib/one-chat-outputs";
+import { readRunLateRowsAfterWindow, withLateRunRows } from "@/lib/one-chat-outputs";
+import { outputsOldestToNewest, workRowRecencyMs } from "@/lib/work-latest-output";
 
 import { AutomationMonitorStrip } from "./AutomationMonitorStrip";
 import { ContinuityStatus } from "./ContinuityStatus";
@@ -279,6 +280,7 @@ import type { OneWorkerPanelSelection, OneWorkerPanelRun } from "@/lib/one-worke
 import oneActivityStyles from "@/components/workspace/TaskSidePanel.module.css";
 import {
   initialOneActivityState,
+  ledgerWithSettleRows,
   projectOneActivityFromLedger,
   reduceOneActivity,
   type OneActivityState,
@@ -1654,12 +1656,12 @@ function settleTranscriptRun(
   runId: string | null,
   chatId: string,
   ledger: Parameters<typeof projectOneActivityFromLedger>[0],
-  /** The rows naming the outputs a run longer than the 500-event window wrote past it (lib/one-chat-outputs). */
-  outputRows?: Parameters<typeof projectOneActivityFromLedger>[2],
+  /** The rows a run longer than the 500-event window still owes its projection: later outputs and settling rows (lib/one-chat-outputs). */
+  lateRows?: Parameters<typeof projectOneActivityFromLedger>[2],
 ): StreamMessage[] {
   if (!runId || receipt?.runId !== runId || receipt.chatId !== chatId
     || !["completed", "failed", "cancelled", "interrupted"].includes(receipt.status)) return current;
-  const activityState = projectOneActivityFromLedger(ledger, receipt, outputRows);
+  const activityState = projectOneActivityFromLedger(ledger, receipt, lateRows);
   const finishedAt = receipt.finishedAt ? Date.parse(receipt.finishedAt) : NaN;
   return current.map(message => message.role === "agent" && message.runId === runId
     ? { ...message, busy: false, streaming: false, activityState,
@@ -1989,13 +1991,14 @@ interface ProjectedWorkRun {
   promptMessageId?: string;
 }
 
-function projectWorkRun(run: { receipt: InvocationRunReceipt; events: RunEventUi[]; outputRows?: readonly RunEventUi[] }): ProjectedWorkRun {
+function projectWorkRun(run: { receipt: InvocationRunReceipt; events: RunEventUi[]; lateRows?: readonly RunEventUi[] }): ProjectedWorkRun {
   // 복원은 자르지 않는다. 창은 원장 조회(eventsPerRun)가 이미 정한다 —
   // 여기서 한 번 더 자르면 그만큼이 산출물에서 사라진다.
-  // A run longer than that window lists the outputs it wrote past it too (`outputRows`, lib/one-chat-outputs withLateRunOutputs).
-  const state = projectOneActivityFromLedger(run.events, run.receipt, run.outputRows);
+  // A run longer than that window still owes its projection the outputs it wrote past it and its ending (`lateRows`,
+  // lib/one-chat-outputs withLateRunRows): the answer anchor is the `mcp_final` row, which lies past the window of a long run.
+  const state = projectOneActivityFromLedger(run.events, run.receipt, run.lateRows);
   const steps = mcpStepsFromLedger(run.events, 0);
-  const durableAssistantId = durableAssistantMessageIdFromRun(run.events);
+  const durableAssistantId = durableAssistantMessageIdFromRun(ledgerWithSettleRows(run.events, run.lateRows));
   // Main may provide the exact prompt row that started this run; it places a run without an answer anchor.
   const promptMessageIdValue = [...run.events]
     .reverse()
@@ -2914,7 +2917,7 @@ function ChatPage() {
       outputPreviews: WorkspaceFilePreview[];
     }>(),
   );
-  const { files: linkedFiles, outputs: linkedOutputFiles } = useMemo(() => {
+  const { files: linkedFiles, outputs: linkedOutputFiles, latestOutputs: latestLinkedOutputs } = useMemo(() => {
     const baseKey = mediaBasePaths.join("\u0000");
     const cache = linkedFileScanCacheRef.current;
     const out: WorkspaceFilePreview[] = [];
@@ -2922,6 +2925,8 @@ function ChatPage() {
     const seen = new Set<string>();
     const outputSeen = new Set<string>();
     const liveIds = new Set<string>();
+    // The outputs of each agent row with when the row happened (lib/work-latest-output): the panel opens the newest one.
+    const outputsByRow: Array<{ at: number; previews: WorkspaceFilePreview[] }> = [];
     for (const message of messages) {
       if (message.role !== "agent") continue;
       const text = message.text ?? "";
@@ -2985,12 +2990,13 @@ function ChatPage() {
         outputSeen.add(key);
         outputOut.push(preview);
       }
+      outputsByRow.push({ at: workRowRecencyMs(message), previews: entry.outputPreviews });
     }
     // 채팅 전환·/clear로 사라진 메시지의 캐시는 함께 버린다.
     if (cache.size > liveIds.size) {
       for (const id of cache.keys()) if (!liveIds.has(id)) cache.delete(id);
     }
-    return { files: out, outputs: outputOut };
+    return { files: out, outputs: outputOut, latestOutputs: outputsOldestToNewest(outputsByRow) };
   }, [messages, mediaBasePaths]);
   const hasViewablePanelContent = Boolean(
     artifact
@@ -3120,8 +3126,8 @@ function ChatPage() {
   // output never overrides the person's explicit rail visibility choice.
   const autoPresentedWorkspaceOutputRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!chatId || hydratedChatId !== chatId || busy || linkedOutputFiles.length === 0) return;
-    const candidate = [...linkedOutputFiles].reverse().find((file) => (
+    if (!chatId || hydratedChatId !== chatId || busy || latestLinkedOutputs.length === 0) return;
+    const candidate = [...latestLinkedOutputs].reverse().find((file) => (
       ["markdown", "json", "text", "browser", "image", "video", "audio", "pdf", "document", "spreadsheet", "presentation", "archive", "binary"]
         .includes(file.viewerKind)
     ));
@@ -3130,7 +3136,7 @@ function ChatPage() {
     if (autoPresentedWorkspaceOutputRef.current === key) return;
     autoPresentedWorkspaceOutputRef.current = key;
     void openWorkspaceFilePreview(candidate, "observe");
-  }, [busy, chatId, hydratedChatId, linkedOutputFiles, openWorkspaceFilePreview]);
+  }, [busy, chatId, hydratedChatId, latestLinkedOutputs, openWorkspaceFilePreview]);
   const openLinkedFile = useCallback((file: LinkedFileArtifact) => {
     void openWorkspaceFilePreview(workspacePreviewFromLinkedFile(file));
   }, [openWorkspaceFilePreview]);
@@ -3983,12 +3989,13 @@ function ChatPage() {
             api.runLedger.events(runId, 500),
             terminal ? api.invoke.history(chatId) : Promise.resolve(null),
           ]);
-          // A run longer than the 500-event window keeps its later outputs on the rail (the rest of the run's sealed outputs).
-          const lateOutputs = await readRunOutputsAfterWindow(api, runId, ledger);
+          // A run longer than the 500-event window keeps its later outputs on the rail and reads settled (the rest of the run's
+          // sealed outputs and the rows that settle it).
+          const lateRows = await readRunLateRowsAfterWindow(api, runId, ledger);
           if (!owns() || !checkpoint.isCurrent()) return false;
           // The snapshot covers every event delivered so far: queued ticks must land before it, not on top of it.
           streamTicksRef.current?.flush();
-          const state = { ...projectOneActivityFromLedger(ledger, snapshot.receipt, lateOutputs), lastSequence: checkpoint.throughOrdinal };
+          const state = { ...projectOneActivityFromLedger(ledger, snapshot.receipt, lateRows), lastSequence: checkpoint.throughOrdinal };
           if (terminal && history) {
             const next = attachMcpStepsToLatestAgent(withoutInterruptedAnswers(history).map(historyEntryToStreamMessage), mcpStepsFromLedger(ledger));
             lastFinalRunIdRef.current = runId;
@@ -4303,8 +4310,9 @@ function ChatPage() {
           const ledgerEvents = receipt && receipt.status !== "running" && receipt.status !== "cancelling"
             ? await api.runLedger.events(receipt.runId, 500).catch(() => [])
             : [];
-          // A run longer than the 400-event window lists the outputs it wrote past it too (the rest of its sealed outputs).
-          const chatTimeline = await withLateRunOutputs(api, timelineWindow, WORK_TIMELINE_EVENTS_PER_RUN);
+          // A run longer than the 400-event window lists the outputs it wrote past it too and reads settled: its answer anchor
+          // is the `mcp_final` row past the window (the rest of its sealed outputs and the rows that settle it).
+          const chatTimeline = await withLateRunRows(api, timelineWindow, WORK_TIMELINE_EVENTS_PER_RUN);
           if (cancelled || !isCurrentChat()) return;
           const mcpSteps = mcpStepsFromLedger(ledgerEvents);
           if (
@@ -4684,9 +4692,9 @@ function ChatPage() {
           events: (runId) => api.runLedger.events(runId, WORK_TIMELINE_EVENTS_PER_RUN),
           full: () => api.runLedger.chatTimeline(chatId, { maxRuns: WORK_TIMELINE_RUNS, eventsPerRun: WORK_TIMELINE_EVENTS_PER_RUN }),
           project: projectWorkRun,
-          lateOutputs: (entries) => withLateRunOutputs(api, entries, WORK_TIMELINE_EVENTS_PER_RUN),
+          lateRows: (entries) => withLateRunRows(api, entries, WORK_TIMELINE_EVENTS_PER_RUN),
           settled: receipt && ledgerEvents.length > 0 ? { runId: receipt.runId, events: ledgerEvents } : null });
-        const lateOutputs = await readRunOutputsAfterWindow(api, receipt?.runId, ledgerEvents);
+        const lateRows = await readRunLateRowsAfterWindow(api, receipt?.runId, ledgerEvents);
         if (!isCurrentChat() || (runIdRef.current && runIdRef.current !== endedRunId)) return;
         workRunProjectionsRef.current = synced.cache;
         const historyMessages = restoreAnsweredQuestions(withoutInterruptedAnswers(h).map(historyEntryToStreamMessage), committedReplies);
@@ -4705,7 +4713,7 @@ function ChatPage() {
           // Active-chat removal can beat the frame that consumes the terminal
           // event. Settle only its canonical run before the live-draft guard;
           // a newer run still keeps that guard and its subscription intact.
-          return reconcileTranscriptSnapshot(settleTranscriptRun(current, receipt, endedRunId, chatId, ledgerEvents, lateOutputs), next, recovery, optimisticIds);
+          return reconcileTranscriptSnapshot(settleTranscriptRun(current, receipt, endedRunId, chatId, ledgerEvents, lateRows), next, recovery, optimisticIds);
         });
       });
     });
@@ -4755,9 +4763,9 @@ function ChatPage() {
           events: (runId) => api.runLedger.events(runId, WORK_TIMELINE_EVENTS_PER_RUN),
           full: () => api.runLedger.chatTimeline(chatId, { maxRuns: WORK_TIMELINE_RUNS, eventsPerRun: WORK_TIMELINE_EVENTS_PER_RUN }),
           project: projectWorkRun,
-          lateOutputs: (entries) => withLateRunOutputs(api, entries, WORK_TIMELINE_EVENTS_PER_RUN),
+          lateRows: (entries) => withLateRunRows(api, entries, WORK_TIMELINE_EVENTS_PER_RUN),
           settled: receipt && ledgerEvents.length > 0 ? { runId: receipt.runId, events: ledgerEvents } : null });
-        const lateOutputs = await readRunOutputsAfterWindow(api, receipt?.runId, ledgerEvents);
+        const lateRows = await readRunLateRowsAfterWindow(api, receipt?.runId, ledgerEvents);
         if (!stopped && isCurrentChat() && (!runIdRef.current || runIdRef.current === endedRunId)) {
           workRunProjectionsRef.current = synced.cache;
           const historyMessages = restoreAnsweredQuestions(withoutInterruptedAnswers(h).map(historyEntryToStreamMessage), committedReplies);
@@ -4773,7 +4781,7 @@ function ChatPage() {
           setMessages((current) => (
             transcriptRevisionRef.current === historyRevision
               ? reconcileTranscriptSnapshot(
-                  settleTranscriptRun(current, receipt, endedRunId, chatId, ledgerEvents, lateOutputs),
+                  settleTranscriptRun(current, receipt, endedRunId, chatId, ledgerEvents, lateRows),
                   next,
                   recovery,
                   workFollowupOptimisticIds(),

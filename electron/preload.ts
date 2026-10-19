@@ -694,6 +694,7 @@ const api: AgentlasIpc = {
     chatTimeline: (chatId: string, input?: { maxRuns?: number; eventsPerRun?: number }) =>
       ipcRenderer.invoke("runLedger:chatTimeline", chatId, input),
     outputsAfter: (runId: string, afterSeq: number) => ipcRenderer.invoke("runLedger:outputsAfter", runId, afterSeq),
+    settleRowsAfter: (runId: string, afterSeq: number) => ipcRenderer.invoke("runLedger:settleRowsAfter", runId, afterSeq),
     failures: (input?: { runId?: string; automationId?: string; chatId?: string; agentId?: string; limit?: number }) =>
       ipcRenderer.invoke("runLedger:failures", input),
   },

@@ -23,7 +23,7 @@ export interface ThreadRunBlockLike {
   supersededByRunId?: string;
 }
 
-type TimelineEntry = { receipt: InvocationRunReceipt; events: RunEventUi[]; outputRows?: readonly RunEventUi[] };
+type TimelineEntry = { receipt: InvocationRunReceipt; events: RunEventUi[]; lateRows?: readonly RunEventUi[] };
 
 const LIVE_STATUSES = new Set(["running", "cancelling"]);
 
@@ -43,8 +43,8 @@ export function mergeSettledThreadRun<B extends ThreadRunBlockLike>(
   /** The settled run's ledger events in seq order; only the first THREAD_RUN_EVENTS_PER_RUN are used. */
   settledEvents: readonly RunEventUi[],
   project: (timeline: TimelineEntry[]) => B[],
-  /** The rows naming the settled run's outputs past its first THREAD_RUN_EVENTS_PER_RUN events (lib/one-chat-outputs). */
-  settledOutputRows?: readonly RunEventUi[],
+  /** The rows the settled run still owes its block past its first THREAD_RUN_EVENTS_PER_RUN events: later outputs and settling rows (lib/one-chat-outputs). */
+  settledLateRows?: readonly RunEventUi[],
 ): B[] | null {
   const head = timelineHead.filter((entry) => entry.receipt && entry.receipt.runId);
   const settled = head.find((entry) => entry.receipt.runId === settledRunId);
@@ -59,7 +59,7 @@ export function mergeSettledThreadRun<B extends ThreadRunBlockLike>(
   const [settledBlock] = project([{
     receipt: settled.receipt,
     events: settledEvents.slice(0, THREAD_RUN_EVENTS_PER_RUN),
-    ...(settledOutputRows?.length ? { outputRows: settledOutputRows } : {}),
+    ...(settledLateRows?.length ? { lateRows: settledLateRows } : {}),
   }]);
   if (!settledBlock) return null;
   // The window is the head's runs: a block that slid out of the newest 40 leaves, as it would on a full re-read.

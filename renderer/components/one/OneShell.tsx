@@ -310,7 +310,7 @@ import {
   reduceOneActivity,
   type OneActivityState,
 } from "@/lib/one-activity";
-import { readRunOutputsAfterWindow, withLateRunOutputs } from "@/lib/one-chat-outputs";
+import { readRunLateRowsAfterWindow, withLateRunRows } from "@/lib/one-chat-outputs";
 import styles from "./OneShell.module.css";
 import roomWorkStyles from "./SeatRoomWork.module.css";
 import { PersonalOneWorkspace } from "./PersonalOneWorkspace";
@@ -2682,8 +2682,8 @@ function OneSessionsShell() {
         if (!reread.length) return;
         const fresh = (await Promise.all(reread.map(async (receipt) => {
           const events = await api.runLedger.events(receipt.runId, THREAD_RUN_EVENTS_PER_RUN).catch(() => null);
-          // A run longer than the block's event window lists the outputs it wrote past it too.
-          return events ? projectThreadRuns(await withLateRunOutputs(api, [{ receipt, events }], THREAD_RUN_EVENTS_PER_RUN))[0] ?? null : null;
+          // A run longer than the block's event window lists the outputs it wrote past it too and reads settled.
+          return events ? projectThreadRuns(await withLateRunRows(api, [{ receipt, events }], THREAD_RUN_EVENTS_PER_RUN))[0] ?? null : null;
         }))).filter((block): block is OneThreadRunBlock => Boolean(block));
         if (cancelled || threadRunsChatIdRef.current !== chatId || !fresh.length) return;
         setThreadRuns((current) => threadRunsChatIdRef.current === chatId ? replaceThreadRunBlocks(current, fresh) : current);
@@ -3754,23 +3754,25 @@ function OneSessionsShell() {
     ]);
     if (supersededByNewerRun()) return;
     if (threadRunsChatIdRef.current === chatId && timelineHead.length > 0) {
-      // The block draws the run's first THREAD_RUN_EVENTS_PER_RUN events; a longer run lists the outputs it wrote past them too.
-      const blockOutputs = await readRunOutputsAfterWindow(api, latestReceipt.runId, ledgerEvents.slice(0, THREAD_RUN_EVENTS_PER_RUN), THREAD_RUN_EVENTS_PER_RUN);
+      // The block draws the run's first THREAD_RUN_EVENTS_PER_RUN events; a longer run lists the outputs it wrote past them too
+      // and reads settled.
+      const blockLateRows = await readRunLateRowsAfterWindow(api, latestReceipt.runId, ledgerEvents.slice(0, THREAD_RUN_EVENTS_PER_RUN), THREAD_RUN_EVENTS_PER_RUN);
       if (supersededByNewerRun()) return;
-      const merged = mergeSettledThreadRun(threadRunsRef.current, timelineHead, latestReceipt.runId, ledgerEvents, projectThreadRuns, blockOutputs);
+      const merged = mergeSettledThreadRun(threadRunsRef.current, timelineHead, latestReceipt.runId, ledgerEvents, projectThreadRuns, blockLateRows);
       if (merged) setThreadRuns(merged);
       else {
         const chatTimeline = await api.runLedger.chatTimeline(chatId, { maxRuns: THREAD_RUN_WINDOW, eventsPerRun: THREAD_RUN_EVENTS_PER_RUN }).catch(() => []);
-        const windowedTimeline = await withLateRunOutputs(api, chatTimeline, THREAD_RUN_EVENTS_PER_RUN);
+        const windowedTimeline = await withLateRunRows(api, chatTimeline, THREAD_RUN_EVENTS_PER_RUN);
         if (supersededByNewerRun()) return;
         if (threadRunsChatIdRef.current === chatId && windowedTimeline.length > 0) setThreadRuns(projectThreadRuns(windowedTimeline));
       }
     }
     if (ledgerEvents.length === 0) return;
-    // A run longer than the 500-event window keeps its later outputs on the rail (the rest of the run's sealed outputs).
-    const lateOutputs = await readRunOutputsAfterWindow(api, latestReceipt.runId, ledgerEvents);
+    // A run longer than the 500-event window keeps its later outputs on the rail and reads settled (the rest of the run's sealed
+    // outputs and the rows that settle it).
+    const lateRows = await readRunLateRowsAfterWindow(api, latestReceipt.runId, ledgerEvents);
     if (supersededByNewerRun()) return;
-    const restoredActivity = projectOneActivityFromLedger(ledgerEvents, latestReceipt, lateOutputs);
+    const restoredActivity = projectOneActivityFromLedger(ledgerEvents, latestReceipt, lateRows);
     cacheOneActivity(chatId, restoredActivity);
     // The person may have opened another conversation while this settle awaited
     // Main. The screen's Activity is drawn as *that* conversation's last block, so
@@ -4004,9 +4006,9 @@ function OneSessionsShell() {
           return true;
         }
         const ledger = await api.runLedger.events(runId, 500);
-        const lateOutputs = await readRunOutputsAfterWindow(api, runId, ledger);
+        const lateRows = await readRunLateRowsAfterWindow(api, runId, ledger);
         if (!owns() || !checkpoint.isCurrent()) return false;
-        const state = { ...projectOneActivityFromLedger(ledger, snapshot.receipt, lateOutputs), lastSequence: checkpoint.throughOrdinal };
+        const state = { ...projectOneActivityFromLedger(ledger, snapshot.receipt, lateRows), lastSequence: checkpoint.throughOrdinal };
         streamFrameRef.current?.flush();
         activityEventRunIdRef.current = runId;
         setActivityStateRunId(current => owns() ? runId : current); setActivity(current => owns() ? state : current); cacheOneActivity(chatId, state);
@@ -4255,9 +4257,9 @@ function OneSessionsShell() {
       const ledgerEvents = !attachment && durableReceipt
         ? await api.runLedger.events(durableReceipt.runId, 500).catch(() => [])
         : [];
-      const lateOutputs = await readRunOutputsAfterWindow(api, durableReceipt?.runId, ledgerEvents);
-      // Each run's block draws its first 400 events; a longer run lists the outputs it wrote past them too.
-      const windowedTimeline = await withLateRunOutputs(api, chatTimeline, THREAD_RUN_EVENTS_PER_RUN);
+      const lateRows = await readRunLateRowsAfterWindow(api, durableReceipt?.runId, ledgerEvents);
+      // Each run's block draws its first 400 events; a longer run lists the outputs it wrote past them too and reads settled.
+      const windowedTimeline = await withLateRunRows(api, chatTimeline, THREAD_RUN_EVENTS_PER_RUN);
       const durableSurface = taskId && taskReceipt?.runId
         ? await api.invoke.latestOneSurface({
             runId: taskReceipt.runId,
@@ -4279,7 +4281,7 @@ function OneSessionsShell() {
       const durableActivityStillOwnsScreen = !activityRunIdRef.current
         || activityRunIdRef.current === durableReceipt?.runId;
       if (!liveRunOwnsThread && !newerLiveRunOwnsThread && !attachment && durableActivityStillOwnsScreen && ledgerEvents.length > 0) {
-        const restoredActivity = projectOneActivityFromLedger(ledgerEvents, durableReceipt, lateOutputs);
+        const restoredActivity = projectOneActivityFromLedger(ledgerEvents, durableReceipt, lateRows);
         activityEventRunIdRef.current = durableReceipt?.runId ?? null;
         setActivityStateRunId(durableReceipt?.runId ?? null);
         setActivity(restoredActivity);

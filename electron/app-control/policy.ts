@@ -54,6 +54,8 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   // The One Outputs rail's own ledger read (rows past the event window of a long run). One reads a run's ledger through
   // runLedger.events / runLedger.chatTimeline; this one has no use outside that screen.
   [/^runLedger\.outputsAfter$/, "the Outputs rail's own read of a long run's later outputs; read a run's ledger through runLedger.events", "write"],
+  // The screens' own read of the rows that settle a run longer than their event window (the answer anchor, the end of the run).
+  [/^runLedger\.settleRowsAfter$/, "the screens' own read of a long run's settling rows; read a run's ledger through runLedger.events", "write"],
   // App lifecycle: it would end this very turn.
   [/^updater\.install$/, "installing an update restarts the app and ends this turn; ask the owner to press Install", "write"],
   [/^menu\.setLocale$/, "use app.setLanguage", "write"],
@@ -208,7 +210,7 @@ const DENIED_READ_PATHS: ReadonlySet<string> = new Set([
   "onePersonalData.connectorCatalog", "onePersonalData.gmailCatalog", "onePersonalData.gmailSourceSettings", "onePersonalData.historySnapshot",
   "onePersonalData.historyWorkStatus", "onePersonalData.listTargets", "onePersonalData.snapshot", "oneProvider.bootstrap", "oneProvider.status",
   "oneSupervisor.budgets", "oneSupervisor.journal", "oneSupervisor.receipt", "oneSupervisor.snapshot", "oneVault.recoverableOperations",
-  "oneWindow.getState", "workStart.get", "science.researchCapabilities.catalog", "runLedger.outputsAfter",
+  "oneWindow.getState", "workStart.get", "science.researchCapabilities.catalog", "runLedger.outputsAfter", "runLedger.settleRowsAfter",
 ]);
 const DENIED_DESTRUCTIVE_PATHS: ReadonlySet<string> = new Set([
   "oneMemory.inspector.forget", "liveDocument.close",

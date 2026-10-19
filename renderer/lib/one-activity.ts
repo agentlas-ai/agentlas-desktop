@@ -1206,19 +1206,55 @@ function ledgerNoticeI18n(payload: Record<string, unknown>): { ko: string; en: s
 }
 
 /**
+ * The ledger rows that settle a run: the terminal rows and the cancel request that comes before a stop. Exactly the kinds
+ * replayLedger reads as a run ending plus that cancel request; Main's read answers the same list (electron/store/run-events.ts
+ * RUN_SETTLE_ROW_KINDS).
+ */
+const RUN_SETTLE_ROW_KINDS: ReadonlySet<string> = new Set([
+  "invoke_waiting",
+  "invoke_completed",
+  "mcp_final",
+  "invoke_failed",
+  "mcp_error",
+  "invoke_cancel_requested",
+  "invoke_cancelled",
+  "invoke_interrupted",
+]);
+
+/**
+ * A run's window and the rows that settle it past the window, in seq order.
+ *
+ * `lateRows` are the rows of a run longer than the event window the caller read that it still needs
+ * (lib/one-chat-outputs readRunLateRowsAfterWindow): the rows that name its later outputs and the rows that settle it
+ * (RUN_SETTLE_ROW_KINDS). The settling rows belong to the run's ledger: a projection or an anchor read that stops at the
+ * window never saw the run end. Rows already in the window are not added twice.
+ */
+export function ledgerWithSettleRows(events: RunEventUi[], lateRows?: readonly RunEventUi[]): RunEventUi[] {
+  if (!lateRows?.length) return events;
+  const held = new Set(events.map((row) => row.id));
+  const settle = lateRows.filter((row) => RUN_SETTLE_ROW_KINDS.has(row.kind) && !held.has(row.id));
+  if (settle.length === 0) return events;
+  return [...events, ...settle].sort((a, b) => a.seq - b.seq);
+}
+
+/**
  * Rebuild the latest Activity from Main's redacted append-only run ledger.
  *
- * `outputRows` are the rows of a run longer than the event window the caller read that name its later outputs
- * (runLedger.outputsAfter, read by lib/one-chat-outputs readRunOutputsAfterWindow). They add to the output list only,
- * through the same replay and the same merge as the window's own rows: an entry keeps the place where it first appeared and
- * holds its newest save, so the list is the one a window as long as the run would give. The Activity rows stay the window's.
+ * `lateRows` are the rows of a run longer than the event window the caller read (runLedger.outputsAfter and
+ * runLedger.settleRowsAfter, read by lib/one-chat-outputs readRunLateRowsAfterWindow). The rows that settle the run
+ * (`mcp_final`, `invoke_completed`, the failure and the stop rows) join the window and replay through the same reducer, so a
+ * run whose end lies past the window still reads settled: its running rows close, its tokens, executed model and failure reason
+ * arrive. The rows that name its later outputs replay through the same reducer and the same merge as the window's own, adding
+ * to the output list only: an entry keeps the place where it first appeared and holds its newest save, so the list is the one
+ * a window as long as the run would give. The other Activity rows stay the window's.
  */
 export function projectOneActivityFromLedger(
   events: RunEventUi[],
   receipt?: InvocationRunReceipt | null,
-  outputRows?: readonly RunEventUi[],
+  lateRows?: readonly RunEventUi[],
 ): OneActivityState {
-  const state = replayLedger(events, receipt, initialOneActivityState());
+  const state = replayLedger(ledgerWithSettleRows(events, lateRows), receipt, initialOneActivityState());
+  const outputRows = lateRows?.filter((row) => Array.isArray(row.payload?.oneArtifacts));
   if (!outputRows?.length) return state;
   const withOutputs = replayLedger([...outputRows], null, { ...initialOneActivityState(), artifacts: state.artifacts });
   return withOutputs.artifacts === state.artifacts ? state : { ...state, artifacts: withOutputs.artifacts };

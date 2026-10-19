@@ -456,6 +456,7 @@ import {
   listFailureEvents,
   listRunEvents,
   listRunOutputEventsAfter,
+  listRunSettleRowsAfter,
   listChatRunTimeline,
   ownerDirectionAfterInvocationRun,
   recordRunEvent,
@@ -3642,6 +3643,9 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
   );
   registerAppControlDomainIpc(ipcMain, "runLedger:outputsAfter", (runId: string, afterSeq: number) =>
     listRunOutputEventsAfter(runId, afterSeq),
+  );
+  registerAppControlDomainIpc(ipcMain, "runLedger:settleRowsAfter", (runId: string, afterSeq: number) =>
+    listRunSettleRowsAfter(runId, afterSeq),
   );
   registerAppControlDomainIpc(
     ipcMain, "runLedger:failures",

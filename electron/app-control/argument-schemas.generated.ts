@@ -1017,6 +1017,7 @@ export const APP_CONTROL_ARGUMENT_SCHEMAS: Readonly<Record<string, Record<string
 "runLedger.events":{"type":"object","properties":{"runId":{"type":"string"},"limit":{"type":"number"}},"required":["runId"],"additionalProperties":false},
 "runLedger.failures":{"type":"object","properties":{"input":{"type":"object","properties":{"runId":{"type":"string"},"automationId":{"type":"string"},"chatId":{"type":"string"},"agentId":{"type":"string"},"limit":{"type":"number"}},"additionalProperties":false}},"additionalProperties":false},
 "runLedger.outputsAfter":{"type":"object","properties":{"runId":{"type":"string"},"afterSeq":{"type":"number"}},"required":["runId","afterSeq"],"additionalProperties":false},
+"runLedger.settleRowsAfter":{"type":"object","properties":{"runId":{"type":"string"},"afterSeq":{"type":"number"}},"required":["runId","afterSeq"],"additionalProperties":false},
 "runtime.connectCancel":{"type":"object","properties":{"kind":{"enum":["antigravity","claude-code","codex","cursor","grok","kimi"]}},"required":["kind"],"additionalProperties":false},
 "runtime.connectGet":{"type":"object","properties":{"kind":{"enum":["antigravity","claude-code","codex","cursor","grok","kimi"]}},"required":["kind"],"additionalProperties":false},
 "runtime.connectStart":{"type":"object","properties":{"kind":{"enum":["antigravity","claude-code","codex","cursor","grok","kimi"]}},"required":["kind"],"additionalProperties":false},
