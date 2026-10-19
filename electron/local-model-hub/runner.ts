@@ -1,7 +1,8 @@
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { createHash } from "node:crypto";
 import type { Runner } from "../runtime/runner";
-import { makeLocalOpenAiRunner } from "../runtime/local-openai";
+import { localServerUnreachableMessage, makeLocalOpenAiRunner } from "../runtime/local-openai";
+import { isLocalEngineExited } from "./engine-exit";
 import type { LocalModelHubOwnerPort } from "./ports";
 
 /**
@@ -51,19 +52,26 @@ export function createManagedLocalModelRunner(manager: LocalModelHubOwnerPort): 
         },
       };
     }
-    return await manager.executeWithReceipt(
-      {
-        installationId: installation.installationId,
-        model: request.model,
-        userPrompt: request.userPrompt,
-        outputSchema: request.outputSchema ?? null,
-        imageDigests: request.images?.map((image) => ({
-          mediaType: image.mediaType,
-          sha256: createHash("sha256").update(image.data).digest("hex"),
-        })) ?? [],
-      },
-      request.signal,
-      (signal) => runner({ ...request, signal }, events),
-    );
+    try {
+      return await manager.executeWithReceipt(
+        {
+          installationId: installation.installationId,
+          model: request.model,
+          userPrompt: request.userPrompt,
+          outputSchema: request.outputSchema ?? null,
+          imageDigests: request.images?.map((image) => ({
+            mediaType: image.mediaType,
+            sha256: createHash("sha256").update(image.data).digest("hex"),
+          })) ?? [],
+        },
+        request.signal,
+        (signal) => runner({ ...request, signal }, events),
+      );
+    } catch (error) {
+      // The engine exited under this run and the hub ended the run with that as the reason. Say what the other order of the
+      // same race already says (the connection error: the server cannot be reached), in the owner's language, not "Aborted".
+      if (isLocalEngineExited(error)) throw new Error(localServerUnreachableMessage(request.locale, error.endpoint));
+      throw error;
+    }
   };
 }

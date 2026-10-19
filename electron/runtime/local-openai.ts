@@ -59,6 +59,11 @@ export async function probeOpenAiLocal(
   }
 }
 
+/** What the owner reads when the local server cannot be reached; the managed hub runner uses the same words when its engine exited under a run. */
+export function localServerUnreachableMessage(locale: unknown, host: string): string {
+  return locale === "ko" ? `로컬 서버에 연결할 수 없습니다: ${host}` : `Cannot reach local server: ${host}`;
+}
+
 /**
  * host를 바인딩해 OpenAI 호환 로컬 서버 채팅 Runner를 만든다.
  * hostFn은 호출 시점에 평가한다(env 재정의를 매 실행 반영).
@@ -183,10 +188,7 @@ export function makeLocalOpenAiRunner(
         runtimeKind,
         host,
         model,
-        unreachableMessage:
-          req.locale === "ko"
-            ? `로컬 서버에 연결할 수 없습니다: ${host}`
-            : `Cannot reach local server: ${host}`,
+        unreachableMessage: localServerUnreachableMessage(req.locale, host),
         chatTemplateKwargs: options.chatTemplateKwargs,
         headers: options.headersFn?.(),
         contextWindow,

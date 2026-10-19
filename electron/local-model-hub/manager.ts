@@ -31,6 +31,7 @@ import { observeLocalProcessIdentity, matchesLocalProcessIdentity, terminateMatc
 import { estimateLocalModelFit, observeLocalHardware } from "./hardware";
 import { parseEngineLoadLog } from "./acceleration";
 import { registerApprovalLineageIfLive } from "../runtime/linked-abort";
+import { LocalEngineExitedError, isLocalEngineExited } from "./engine-exit";
 
 interface PersistedHubState {
   schemaVersion: 1;
@@ -145,12 +146,17 @@ function aborted(error: unknown, signal?: AbortSignal): boolean {
   return signal?.aborted === true || (error instanceof Error && error.name === "AbortError");
 }
 
+/** An owner stop, a timeout or an unload ends a run as the AbortError it always was; an engine that exited under it says so. */
+function abortFailure(signal: AbortSignal): unknown {
+  return isLocalEngineExited(signal.reason) ? signal.reason : new DOMException("Aborted", "AbortError");
+}
+
 function awaitAbortableExecutor<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(new DOMException("Aborted", "AbortError"));
+  if (signal.aborted) return Promise.reject(abortFailure(signal));
   return new Promise<T>((resolveValue, rejectValue) => {
     const abort = () => {
       signal.removeEventListener("abort", abort);
-      rejectValue(new DOMException("Aborted", "AbortError"));
+      rejectValue(abortFailure(signal));
     };
     signal.addEventListener("abort", abort, { once: true });
     void operation.then(
@@ -952,7 +958,13 @@ export class LocalModelHubManager {
             this.unavailableReason = "local_model_crash_receipt_write_failed";
           });
           void this.removeProcessLease(receipt.processEpoch);
-          if (generation === this.loadGeneration) this.recoverAfterEngineExit(receipt.installationId, receipt.contextTokens);
+          // The restart repeats what the owner ASKED for (receiptBase.contextTokens; 0 = auto), never the n_ctx the engine
+          // measured and the receipt now carries: an auto load can measure above the 131072 loadModel accepts, and an explicit
+          // request the engine shrank to fit is still the owner's request.
+          if (generation === this.loadGeneration) {
+            this.recoverAfterEngineExit(receipt.installationId, receiptBase.contextTokens,
+              { endpoint: receipt.endpoint, reasonCode: `engine_exited_${code ?? exitSignal ?? "unknown"}` });
+          }
         }
       });
       this.state.loadReceipts = bounded([...this.state.loadReceipts, receipt]);
@@ -974,12 +986,13 @@ export class LocalModelHubManager {
   }
 
   /**
-
-
-
-
- */
-  private recoverAfterEngineExit(installationId: string, contextTokens: number): void {
+   * An engine that dies on its own (an unload, an idle reap and a shutdown clear ownership first, so they never get here) is started
+   * again with the same model and the context the owner asked for (`contextTokens` is the REQUEST, 0 = auto; never the n_ctx the
+   * engine measured). Runs in flight at the exit are aborted with LocalEngineExitedError as their reason. Without it a crash
+   * (llama-server SIGBUS in its output parser, measured 2026-10-19) left every later turn on "no model" until the owner reloaded it
+   * by hand. This never sets unavailableReason: that latch blocks every mutation, including the owner's own reload.
+   */
+  private recoverAfterEngineExit(installationId: string, contextTokens: number, exited?: { endpoint: string; reasonCode: string }): void {
     if (this.shutdownPromise) return;
     const generation = this.loadGeneration;
     const now = this.now();
@@ -992,10 +1005,16 @@ export class LocalModelHubManager {
     console.warn(`[local-model-hub] the engine exited on its own; restarting the same model (${this.engineRecoveryAt.length}/${ENGINE_RECOVERY_MAX})`);
     const restart = () => {
       if (this.shutdownPromise || this.loadGeneration !== generation) return;
-      void this.loadModel(installationId, contextTokens).catch((error) => console.error("[local-model-hub] automatic engine restart failed", error));
+      void this.loadModel(installationId, contextTokens).then((receipt) => {
+        // A load that ends in a failed receipt does not throw, and nothing else reports it: a restart the owner's own
+        // unload or load overtook (model_load_obsolete) is not a failure, any other reason stays in the log with its code.
+        if (receipt.state === "failed" && receipt.reasonCode !== "model_load_obsolete") {
+          console.warn(`[local-model-hub] the automatic restart did not bring the model back (${receipt.reasonCode ?? receipt.state})`);
+        }
+      }, (error) => console.error("[local-model-hub] automatic engine restart failed", error));
     };
     if (this.activeInference.size === 0) restart();
-    else void this.cancelActiveRuns().then(restart)
+    else void this.cancelActiveRuns(exited ? new LocalEngineExitedError(exited.endpoint, exited.reasonCode) : undefined).then(restart)
       .catch((error) => console.error("[local-model-hub] automatic engine restart failed", error));
   }
 
@@ -1043,9 +1062,10 @@ export class LocalModelHubManager {
     try { this.onResidentChanged(); } catch { /* Runtime projection listeners cannot own model lifecycle. */ }
   }
 
-  async cancelActiveRuns(): Promise<number> {
+  /** `reason` is what the aborted runs read as the cause (signal.reason); without one they read an owner/host cancellation. */
+  async cancelActiveRuns(reason?: unknown): Promise<number> {
     const active = [...this.activeInference.entries()];
-    for (const [, item] of active) item.controller.abort();
+    for (const [, item] of active) item.controller.abort(reason);
     if (active.length > 0) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
@@ -1138,8 +1158,10 @@ export class LocalModelHubManager {
       result = await awaitAbortableExecutor(operation, active.signal);
       return result;
     } catch (error) {
-      state = aborted(error, active.signal) ? "cancelled" : "failed";
-      reasonCode = aborted(error, active.signal) ? "run_cancelled" : (error instanceof Error ? error.message : "run_failed");
+      // A run ended because its engine exited is a failure with that cause, not an owner cancellation.
+      const engineExit = isLocalEngineExited(active.signal.reason) ? active.signal.reason : null;
+      state = engineExit ? "failed" : aborted(error, active.signal) ? "cancelled" : "failed";
+      reasonCode = engineExit ? engineExit.reasonCode : aborted(error, active.signal) ? "run_cancelled" : (error instanceof Error ? error.message : "run_failed");
       throw error;
     } finally {
       const receipt: LocalModelRunReceipt = {
