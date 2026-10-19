@@ -35,6 +35,13 @@ export interface RuntimeSession {
 const memSessions = new Map<string, RuntimeSession>();
 const memKey = (chatId: string, kind: string, agentId: string): string => `${chatId}\0${kind}\0${agentId}`;
 const normalizeAgentId = (agentId?: string | null): string => agentId ?? "";
+// A journal shared by several conversations (runtime/session-scope.ts) has one owner string, `agent-context:<context key>:<binding
+// key>`, and one native session: whichever conversation took the last turn holds the newest row for it. The runners look the
+// row up under the calling conversation, so that conversation reads the newest row of the owner (see sharedOwnerRow).
+const SHARED_OWNER_PREFIX = "agent-context:";
+// When a conversation cleared its own row of such an owner (its session is gone, or its fingerprint changed), only a row
+// written after that moment may bring a session back; another conversation's older row names the same lost session.
+const clearedAt = new Map<string, string>();
 
 type SessionRow = {
   session_id: string;
@@ -56,7 +63,45 @@ function toSession(row: SessionRow): RuntimeSession {
   };
 }
 
+/**
+ * The newest row of one shared owner on ANOTHER conversation, when it is newer than the calling conversation's own (or the
+ * calling conversation has none), copied onto the calling conversation. The antigravity runner only resumes a handle that its
+ * own row names, codex measures token usage from its row's counters, and claude/ACP compare its fingerprint: a row that is
+ * missing or older than the shared session's newest turn would make them start cold or count another turn's tokens twice.
+ * Only the calling conversation's row is written; no other row is changed or removed. An owner string that belongs to one
+ * conversation (every journal that is not shared) has no other conversation's row: nothing changes for it.
+ */
+function sharedOwnerRow(chatId: string, kind: string, agent: string, own: RuntimeSession | null): RuntimeSession | null {
+  const other = getDb().prepare(
+    "SELECT session_id, fingerprint, updated_at, reported_output_tokens, reported_input_tokens, reported_cached_input_tokens FROM chat_runtime_sessions WHERE kind = ? AND agent_id = ? AND chat_id <> ? ORDER BY COALESCE(updated_at, '') DESC LIMIT 1",
+  ).get(kind, agent, chatId) as SessionRow | undefined;
+  if (!other) return null;
+  const otherAt = other.updated_at ?? "";
+  if (otherAt <= (own?.updatedAt ?? "") || otherAt <= (clearedAt.get(memKey(chatId, kind, agent)) ?? "")) return null;
+  const copied = toSession(other);
+  try {
+    getDb().prepare(
+      `INSERT OR REPLACE INTO chat_runtime_sessions(chat_id, kind, agent_id, session_id, fingerprint, updated_at, reported_output_tokens, reported_input_tokens, reported_cached_input_tokens)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(chatId, kind, agent, copied.sessionId, copied.fingerprint, copied.updatedAt, copied.reportedOutputTokens, copied.reportedInputTokens, copied.reportedCachedInputTokens);
+  } catch { /* The copy only caches the newest row: this read still returns it. */ }
+  memSessions.set(memKey(chatId, kind, agent), copied);
+  return copied;
+}
+
 export function getRuntimeSession(
+  chatId: string,
+  kind: string,
+  agentId?: string | null,
+  options?: { isolateOwner?: boolean },
+): RuntimeSession | null {
+  const own = readOwnRuntimeSession(chatId, kind, agentId, options);
+  const agent = normalizeAgentId(agentId);
+  if (!agent.startsWith(SHARED_OWNER_PREFIX)) return own;
+  try { return sharedOwnerRow(chatId, kind, agent, own) ?? own; } catch { return own; }
+}
+
+function readOwnRuntimeSession(
   chatId: string,
   kind: string,
   agentId?: string | null,
@@ -175,6 +220,10 @@ export function clearRuntimeSession(
 ): void {
   const agent = normalizeAgentId(agentId);
   memSessions.delete(memKey(chatId, kind, agent));
+  if (agent.startsWith(SHARED_OWNER_PREFIX)) {
+    clearedAt.set(memKey(chatId, kind, agent), new Date().toISOString());
+    if (clearedAt.size > 512) clearedAt.delete(clearedAt.keys().next().value as string);
+  }
   try {
     // 정확한 키와 레거시 '' 행을 함께 지운다 — "이 chat×kind 세션을 버려라"는 의도다.
     if (options?.isolateOwner === true) {
