@@ -1,12 +1,12 @@
 /**
- * Composer rules that decide what typing means. Pure, so the behavior can be tested without a browser.
- *
- * Owner report 2026-10-11 (recording, room "Yotube"): while typing Korean, characters were cut off and Enter did not
- * send. Two ways the old composer could do that:
- *  - A background update (an outbox refresh, a receipt, a restore-if-empty) wrote the textarea value in the middle of an
- *    IME composition. Writing a textarea's value ends the composition in Chromium and drops the syllable being built.
- *  - "Composing" was a flag that a timer cleared after compositionend. If compositionend never reached the handler (the
- *    textarea was re-mounted mid-composition, focus moved), the flag stayed set and every later Enter was swallowed.
+
+
+
+
+
+
+
+
  */
 
 /** Chromium sends compositionend BEFORE the Enter keydown that committed the composition. */

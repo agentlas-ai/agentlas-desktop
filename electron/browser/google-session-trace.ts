@@ -1,16 +1,16 @@
 import { registrableDomain } from "../../shared/registrable-domain";
 
-/*
- * Owner 2026-10-13: "Agentlas browser keeps losing its Google sign-in". Before changing any import rule, record exactly
- * when the Agentlas browser's Google/YouTube sign-in cookies change and by which path. One log line per change of a
- * sign-in or rotation cookie: name, host, cause (Chromium's: explicit / overwrite / expired / evicted /
- * expired-overwrite), removed, expiry, and whether an Agentlas import was writing at that moment. Never the value.
- *
- * Reading the log: an `agentlasWrite:true` line is our import; `explicit` without it is the site's own Set-Cookie
- * (a sign-out sets an expired cookie → `expired-overwrite` / removed); `overwrite` + removed right before a new
- * value is rotation, which since 10-17 shows as an hourly `rotations` count line (createGoogleSessionTraceFilter).
- * A sign-in that stops working while no line appears means the server ended the session.
- */
+
+
+
+
+
+
+
+
+
+
+
 const TRACED_SITES = new Set(["google.com", "youtube.com"]);
 // Sign-in cookies plus the short-lived rotation cookies whose refresh keeps the sign-in alive.
 const TRACED_NAMES = new Set([
@@ -40,15 +40,15 @@ export function googleSessionTraceRecord(cookie: TracedCookie, cause: string, re
   };
 }
 
-/*
- * Perf review MP-09 (2026-10-17): 858 of 3,071 main.log lines (28%, ~48 an hour) were Google's routine rotation of
- * __Secure-1/3PSIDCC and __Secure-1/3PSIDTS: an `overwrite` removal followed at once by the insertion of the same cookie,
- * not an Agentlas write, the new one living as long as the old (within a second of clock skew). That pair is the refresh
- * that keeps the sign-in alive, not the loss being traced, and it pushed real diagnostics out of the 5 MB log. Such a pair
- * is now counted instead of logged, and the count is logged once an hour, so a stop in rotation stays visible. Every other
- * change is logged exactly as before: explicit / expired / evicted / expired-overwrite, a removal with no replacement, a
- * replacement that is session-only or expires more than ROTATION_EXPIRY_SLACK_MS earlier, and any Agentlas write.
- */
+
+
+
+
+
+
+
+
+
 const ROTATION_HOLD_MS = 1_000;
 const ROTATION_EXPIRY_SLACK_MS = 60 * 60_000;
 const ROTATION_SUMMARY_EVERY_MS = 60 * 60_000;

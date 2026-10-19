@@ -251,7 +251,7 @@ const dict = {
     "onb.highlight.team.title": "당신만의 팀",
     "onb.highlight.team.desc": "에이전트를 직접 골라 구성",
 
-    // Positioning (홈 + 온보딩 핵심 가치 — Mason 포지셔닝)
+    
     "pitch.threeInOne.title": "한 앱에 모든 LLM",
     "pitch.threeInOne.desc": "Claude · ChatGPT · Gemini 구독 + Agentlas 로컬 모델",
     "pitch.hermes.title": "헤르메스 메모리 기본 탑재",

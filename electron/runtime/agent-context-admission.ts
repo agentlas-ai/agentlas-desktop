@@ -16,9 +16,9 @@ const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(va
 function fail(code: string): never { throw Object.assign(new Error(code), { code }); }
 export function agentContextOwnerBinding() {
   const native = captureNativeAuthBinding(), actor = getAuthenticatedActorIds();
-  // Custody follows the store the journal lives in (install, user-data directory and store path: native.scope), not the
-  // store file's device number that the service identity hashes: macOS renumbers it at every mount, and after the
-  // 2026-10-12 reboot every agent's journal was started again.
+  
+
+
   return { serviceIdentity: digest(["agentlas.agent-context.custody.v1", native.scope]), ownerScope: digest([native.scope, actor?.userId ?? null, actor?.workspaceId ?? null]) };
 }
 /** Only the original host dispatch calls this function. A context is data

@@ -59,8 +59,8 @@ function rebalance(request:Extract<FinancePlanningRequest,{kind:'rebalance'}>,re
  const p=request.precision,fmt=(x:bigint)=>text(x,p),q=quantum(p);const reject=(code:string,field?:string)=>result.errors.push({code:`finance_planning_${code}`,...(field?{field}:{})});
  const unique=(values:string[],field:string)=>{if(new Set(values).size!==values.length)reject('duplicate_id',field);};
  unique(request.planMenu.map(x=>x.id),'planMenu');if(new Set(request.planMenu.map(x=>x.label)).size!==request.planMenu.length)reject('ambiguous_instrument_labels','planMenu');unique(request.positions.map(x=>x.instrumentId),'positions');unique(request.targetWeights.map(x=>x.instrumentId),'targetWeights');unique(request.constraints.lockedIds,'lockedIds');unique(request.constraints.excludedIds,'excludedIds');unique(request.constraints.bounds.map(x=>x.instrumentId),'bounds');
- if(request.planType!=='brokerage'&&(!request.menuConfirmed||!request.planMenu.length))reject('confirmed_plan_menu_required');
- if((request.planType==='kr_dc'||request.planType==='kr_irp')&&request.constraints.maxRiskWeight===undefined)reject('pension_risk_rule_required');
+ if(!request.menuConfirmed)result.warnings.push('The supplied instrument menu and trading permissions are unverified scenario inputs.');
+ if(request.constraints.maxRiskWeight===undefined)result.warnings.push('No risk cap was supplied; compliance with external account risk limits has not been checked.');
  const menu=new Map(request.planMenu.map(x=>[x.id,x])),current=new Map(request.positions.map(x=>[x.instrumentId,money(x.currentValue,p)])),targets=new Map(request.targetWeights.map(x=>[x.instrumentId,x.weight]));
  for(const id of [...current.keys(),...targets.keys(),...request.constraints.lockedIds,...request.constraints.excludedIds,...request.constraints.bounds.map(x=>x.instrumentId)])if(!menu.has(id))reject('instrument_not_in_plan_menu',id);
  for(const id of current.keys())if(!targets.has(id))reject('target_missing_for_position',id);

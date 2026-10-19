@@ -3,16 +3,16 @@ import os from "node:os";
 import path from "node:path";
 
 /**
- * The package cache a write-sandboxed shell may write: one product-owned folder for every runtime, never the person's
- * ~/.npm and never the cache install-cli.ts installs the vendor CLIs from (a worker that can write that cache could
- * plant code in the next CLI install).
- *
- * Measured 2026-10-17 (A/B W1, codex gpt-6.1-sol, room fc53939f): a codex write worker's
- * `npm install --save-dev @playwright/test` failed EPERM on ~/.npm/_cacache (npm then wrongly blames root-owned files),
- * because workspace-write grants only the working folder. Claude write runs (cwd + temp) and the API-lane confined shell
- * (cwd + temp) have the same wall. Each sandbox now also grants this folder, and each shell gets NPM_CONFIG_CACHE pointing
- * at it: codex through shell_environment_policy.set (shell commands only, never its MCP servers), Claude through
- * CLAUDE_ENV_FILE (sourced before each Bash command only; measured on 2.1.302), the confined shell in its command.
+ * @playwright
+
+
+
+
+
+
+
+
+
  */
 export function sandboxNpmCacheDir(home: string = os.homedir()): string {
   return path.join(home, ".agentlas", "cache", "sandbox-npm");

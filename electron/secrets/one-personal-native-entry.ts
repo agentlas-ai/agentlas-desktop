@@ -31,12 +31,12 @@ export function currentOnePersonalNativeOriginal(): Readonly<OnePersonalNativeOr
 }
 
 /**
- * Run `body` outside any personal-native original that is current on this async stack.
- *
- * A turn that is started from inside another turn's code (a queued follow-up drained when the previous run settles)
- * would otherwise inherit that turn's original through AsyncLocalStorage: the new run then read the OLD run's already
- * settled source and failed with ordinary_one_turn_source_changed (condition=settled_phase_mode), seen on production
- * 1.2.96 at 2026-10-11 10:26Z and reproduced in the isolated QA app. Each run captures its own original.
+
+
+
+
+
+
  */
 export function withoutOnePersonalNativeOriginal<T>(body: () => T): T {
   return originals.exit(body);

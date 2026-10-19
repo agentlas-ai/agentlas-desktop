@@ -153,3 +153,26 @@ export function isAuthenticAgentMailMcpLaunch(command: string | null, args: read
   if (!command || command !== process.execPath) return false;
   return LAUNCH.isAuthenticArgs(args);
 }
+
+const COMPANY_TOOL_NAMES = new Set(["agent_mail_read", "agent_mail_thread", "agent_mail_reply", "agent_mail_draft"]);
+const companyLaunches = new Map<string, ReturnType<typeof defineBuiltinMcpLaunch>>();
+function companyLaunch(allowedNames: readonly string[]) {
+  if (!Array.isArray(allowedNames) || allowedNames.length < 1 || allowedNames.length > 4
+    || new Set(allowedNames).size !== allowedNames.length || allowedNames.some(name => !COMPANY_TOOL_NAMES.has(name)))
+    throw Error("organization-mail-tools-denied");
+  const names = AGENTLAS_AGENT_MAIL_TOOL_NAMES.filter(name => allowedNames.includes(name)), key = JSON.stringify(names);
+  let launch = companyLaunches.get(key);
+  if (!launch) {
+    // Keep every original descriptor/schema byte. Only the finite inventory and
+    // dispatch allowlist differ; Main repeats its opaque effect gate for each call.
+    const source = SOURCE.replace("const tools = [", "const allTools = [")
+      .replace("function handle(requestValue) {", `const companyAllowedNames = new Set(${JSON.stringify(names)});\nconst tools = allTools.filter(tool => companyAllowedNames.has(tool.name));\nfunction handle(requestValue) {`)
+      .replace("const name = requestValue.params && requestValue.params.name;", "const name = requestValue.params && requestValue.params.name; if (!companyAllowedNames.has(name)) throw new Error('organization-mail-operation-denied');");
+    launch = defineBuiltinMcpLaunch("agentlas-company-agent-mail", source); companyLaunches.set(key, launch);
+  }
+  return launch;
+}
+export function companyAgentMailMcpLaunchArgs(allowedNames: readonly string[]): string[] { return companyLaunch(allowedNames).launchArgs(); }
+export function isAuthenticCompanyAgentMailMcpLaunch(command: string | null, args: readonly string[], allowedNames: readonly string[]): boolean {
+  return command === process.execPath && companyLaunch(allowedNames).isAuthenticArgs(args);
+}

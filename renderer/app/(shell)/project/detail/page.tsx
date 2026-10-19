@@ -251,8 +251,8 @@ function ProjectPage() {
   const [rosterQuery, setRosterQuery] = useState("");
   const [inspectorCollapsed, setInspectorCollapsed] = useAppUiPreference("projectInspectorCollapsed");
   const [loading, setLoading] = useState(true);
-  // Read by background refreshes without re-creating them: an open editor keeps its draft, and a task event from
-  // another project does not reload this one (review 2026-10-16, clients-05).
+  
+
   const editingNoteRef = useRef(false);
   const editingTeamRef = useRef(false);
   const taskIdsRef = useRef<ReadonlySet<string>>(new Set());
@@ -466,14 +466,14 @@ function ProjectPage() {
   }, [id, refresh]);
 
 
-  /*
-   * ★"새 채팅"이 실패하면 **만들기가 실패했다고 말해야 한다** (QA 실측 2026-09-08:
-   *   "새 채팅을 눌러도 채팅으로 안 넘어가고 작업 (0) 만 보인다").
-   *
-   *   예전에는 catch 가 setRecoveryPending(true) 만 했다. 그 깃발이 켜지면 화면에는
-   *   "프로젝트 정보 일부를 불러오지 못했습니다" 가 뜬다 — **읽기 실패 문구**다.
-   *   사람은 만들기를 눌렀는데 읽기가 안 됐다는 말을 듣는다. 이유도, 다시 할 방법도 없다.
-   */
+  
+
+
+
+
+
+
+
   async function startNewChat() {
     const api = ipc();
     if (!api) {

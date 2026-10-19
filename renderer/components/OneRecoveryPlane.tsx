@@ -40,8 +40,8 @@ const RECOVERY_MAX_ATTEMPTS = 3;
 /** PRD §5.28 — 큐에 길이 상한이 없었다. 오래된 것부터 버린다(가장 최근 실패가 더 유용하다). */
 const RECOVERY_QUEUE_MAX = 12;
 /**
- * The same failure code in the same chat and surface gets one recovery turn per window. Episode B (2026-10-14): three
- * recovery turns in a row ran into the same mcp_proxy_gate_unavailable and none answered the owner.
+
+
  */
 const RECOVERY_SAME_CAUSE_WINDOW_MS = 10 * 60_000;
 
@@ -143,8 +143,8 @@ export function OneRecoveryPlane() {
               taskIntent: "conversation",
               oneMode: true,
               locale,
-              // One Main reads the mode, not `permissions`; without it the turn was Auto and an
-              // intent promotion to "task" ran it with write (P17 replay, 2026-10-16).
+              
+
               onePermissionMode: "read",
               permissions: "read",
             });

@@ -1,15 +1,15 @@
 /**
- * Which renderer document drives each open One preflight submission.
- *
- * A submission is opened by a renderer (invoke:preflightSubmissionBegin) and finished by that same renderer: it runs
- * the team preflight, then invoke:run. When that document goes away while Main keeps its epoch (Cmd+R, a reload to
- * another room, an update restart of the window, a renderer crash, a closed window) the open row could never finish,
- * and as the chat's single open row it refused every later send (one_preflight_chat_pending) until the app restarted
- * (release peer, room fc53939f, 2026-10-16). This registry binds an open submission to its renderer document and, when
- * that document ends, hands the submission to `release` (which holds it by the same rule as a failed preparation).
- *
- * In memory on purpose: a new Main epoch already holds every open submission of the previous epoch at startup
- * (recoverOnePreflightSubmissionParents), so nothing here needs to survive a restart.
+
+
+
+
+
+
+
+
+
+
+
  */
 
 /** The parts of Electron's WebContents this registry reads. */

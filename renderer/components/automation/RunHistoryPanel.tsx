@@ -869,11 +869,11 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
                 {fixBusy === option.actionId ? (ko ? "진행 중…" : "Working…") : option.label}
               </button>
             ))}
-            {/* ★모델이 같은 동작을 이미 제안했으면 우리 버튼은 빼야 한다.
-                실측(2026-08-09 녹화): fixPlan 이 retry_run·ask_in_session 을 고르면
-                이 카드에 버튼이 5개가 뜨는데 그중 4개가 2쌍의 중복이었다.
-                힉의 법칙 — 선택지가 늘수록 결정 시간이 늘고, 같은 일을 하는 두 버튼은
-                선택지가 아니라 의심거리다. 문맥에 맞는 라벨을 가진 모델 옵션을 남긴다. */}
+            {
+
+
+
+}
             {!hasSessionOption ? (
               <button type="button" onClick={continueInSession}>
                 {ko ? "대화에서 이어서 해결" : "Continue in the session"}
@@ -1121,13 +1121,13 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
         <div className="automation-run-message" role="alert">
           <button type="button" className="automation-alert-close" aria-label={ko ? "오류 닫기" : "Dismiss error"} onClick={() => setRecoveryError("")}><IconClose size={14} /></button>
           {recoveryError}
-          {/*
-            ★거절에는 **푸는 길**이 함께 있어야 한다. 실측 2026-08-20 (캠페인 E3):
-              실행이 실패한 뒤 채팅으로 그래프를 고쳤더니 재조정이 거부됐고, 화면은
-              "이전 그래프를 복원하거나 새 자동화로 분리하라"고만 말했다. 커널에는
-              나갈 문이 있었는데 화면에 없어서, 고친 그래프로는 영원히 못 돌렸다.
-              그래프가 **실제로 바뀐 경우에만** 응하므로 이중 실행을 열지 않는다.
-          */}
+          {
+
+
+
+
+
+}
           {/graph_drift|워크플로우가 실패 후 변경|workflow changed after/.test(recoveryError) ? (
             <div style={{ marginTop: 8 }}>
               <button

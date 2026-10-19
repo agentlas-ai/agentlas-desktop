@@ -512,7 +512,8 @@ function durablePut(kind: string, signature: string, value: Verdict<string>): vo
 }
 
 // 캐시 키는 **한 곳에서만** 만든다.
-// 판정 기록과 동기 조회가 같은 서명·구분자를 사용하게 한다.
+// (전에는 judge()가 NUL 구분자로 쓰고 peekJudgment()가 공백으로 읽어, 동기 읽기 7곳이
+//  전부 영구 미스였다 — 워밍한 판정을 아무도 못 읽고 매번 보수적 기본값으로 떨어졌다.)
 function judgmentCacheKey(kind: string, input: string): string {
   return `${kind}\u0000${intentSignature(input)}`;
 }
@@ -640,7 +641,10 @@ export async function callConnectedModel(opts: {
   selectionPolicy?: JudgmentSelectionPolicy;
   /**
    * 모델이 답을 써 내려가는 동안 부분 텍스트를 흘려준다.
-   * 런타임의 onPartial 을 호출자에게 전달해 답이 끝나기 전에도 부분 결과를 표시한다.
+   *
+   * ★없던 통로가 아니다 — 런타임은 이미 `onPartial`을 주고 있었는데(runner.ts) 이
+   * 함수가 `() => {}`로 **버리고** 있었다. 그래서 그래프 인터뷰는 답이 다 끝난 뒤에야
+   * 화면에 무언가를 그릴 수 있었고, 사람은 몇 십 초를 빈 화면으로 기다렸다.
    */
   onPartial?: (text: string) => void;
   /** Structured reflection/metadata calls must use the runner's no-tools gate. */
@@ -679,7 +683,7 @@ export async function callConnectedModelDetailed(opts: {
   pinFallback?: JudgmentPinFallback;
   /**
    * Structured callers decide whether a text is a usable answer. A rejected text counts as that
-   * candidate's failure and the next pool member is tried.
+   * candidate's failure and the next pool member is tried (goal shape judgment, 2026-09-24).
    */
   accept?: (text: string) => boolean;
   /** Final-answer contract enforced by runtimes that can (CLI flags, response_format, serving text.format). */
@@ -1172,7 +1176,8 @@ async function callJudgmentModelDetailed(opts: {
           continue;
         }
         const text = result.text ?? "";
-        // 파싱 안 되는 출력은 답으로 채택하지 않고 다음 허용된 후보로 간다.
+
+
         if ((workerFallback && !text.trim()) || (opts.accept && !opts.accept(text))) {
           lastFailure = {
             kind: "exit",
@@ -1896,15 +1901,16 @@ export function peekSubsetJudgment<V extends string>(
   return hit as SubsetVerdict<V>;
 }
 
-// ── 채점표 판정 ────────────────────────────────────────────────────────────
-//
-// eval 노드의 항목별(yes/no) 판정. judgeRequired 와 별도인 이유:
-//   - judgeRequired 는 One·큐레이터·스케줄러 등 소비자가 많아 계약을 못 바꾼다.
-//   - 채점표는 항목마다 라벨이 필요하고, "추론 먼저, 마지막 줄에만 JSON"이라
-//     judgeRequired 와 출력 계약이 다르다.
-//
-// 합산은 코드가 한다. 모델은 항목별 라벨(yes/no/unknown)만 고른다 — 점수를 모델에게
-// 물어보는 것은 불안정하다(라벨→점수 매핑은 코드 소관, Braintrust choice_scores 방식).
+
+
+
+
+
+
+
+
+
+
 
 export interface ChecklistItemSpec {
   id: string;
@@ -1943,7 +1949,7 @@ interface ChecklistJudgeSpec {
   items: ChecklistItemSpec[];
   /** 판정 대상(앞 단계 산출물). */
   subjectText: string;
-  /** 재조회 스텝이 가져온 근거가 있으면 항목→근거→대상 순서로 함께 전달한다. */
+  /** */
   evidence?: string;
   guidance?: string;
   timeoutMs?: number;

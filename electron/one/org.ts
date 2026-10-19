@@ -224,10 +224,10 @@ function normalizeCompletionSummary(value: unknown): OneOrgCompletionSummary {
 const COMPLETION_CACHE_SETTLE_SLACK_MS = 10_000;
 
 /**
- * The cache holds the seat's last settled run of its own, which can be days older than the seat's latest
- * activity (a teammate that since worked inside a room never re-caches). A count from an older run, shown
- * without a date, read as the seat's current output (Yotube room 2026-10-17: "도구 활동 26건" from a 10-14 run
- * of another chat, while the seat last worked 10-17). Only the run that is the seat's latest activity counts.
+
+
+
+
  */
 function completionCacheIsLatestActivity(cachedAt: string | undefined, lastActivityAt: string | null): boolean {
   if (!lastActivityAt) return true;

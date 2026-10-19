@@ -151,10 +151,10 @@ function recordDreamingFailure(cause: DreamingFailureCause, stage: "consolidatio
   return record;
 }
 /**
- * Same route as the other background judgments (criterion-proof classificationRoute, strategy reflection): the
- * configured orchestrator judgment pool, else the active orchestrator runtime as an exact pin. Either way the call
- * carries the selection's model and effort. Production 1.3.43-1.3.48 (2026-10-15 23:05Z on): the raw active runner got
- * no model, so the Codex no-tools judgment lane refused it (codex_no_tools_model_required) before any process started.
+
+
+
+
  */
 async function dreamingJudgmentRoute(): Promise<{ selectionPolicy: JudgmentSelectionPolicy } | { runtimeSelection: RuntimeSelection } | null> {
   const selectionPolicy = configuredOrchestratorJudgmentPolicy();

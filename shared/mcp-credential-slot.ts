@@ -1,15 +1,15 @@
-/*
- * Where one MCP connection's key lives (native-harness NH29, review 2026-10-16 HD1).
- *
- * A connection that owns its credential records `credentialRefs[envKey] = AGENTLAS_CONN_<token>_<envKey>`; a key with
- * no reference reads the global Vault key of the same name. Every reader and every writer of a connection key must go
- * through this one rule. 30ef9c84 started minting references for Hub-sourced rows, and the readers that still used the
- * bare name (auto-select's presence checks) and the writer that still saved under it (the plugin key step) then
- * disagreed with the runtime about where the key is.
- *
- * Pure and dependency-free: Main (credential-refs.ts), the daemon and the renderer all import it. Values never pass
- * through this module; it only names where they live.
- */
+
+
+
+
+
+
+
+
+
+
+
+
 
 /** A valid environment-variable name (also the Vault key name space). */
 export const MCP_ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;

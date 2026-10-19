@@ -9,10 +9,10 @@ export function requiresAutomationStrategyReview(row: AutomationStrategyProposal
   // An episode preparation is an internal audit, never a submitted human decision.
   if (row.unavailableReason === "episode_reserved") return false;
   if (!(row.status === "pending" || row.status === "approved")) return false;
-  // A one-time origin adoption is a real human gate: Main refuses to apply
-  // until a person records it, so hiding it made the self-correction loop a
-  // silent dead end (measured 2026-09-24: 8 judged proposals pending, 0 shown).
-  // Owner-delegated Goals are adopted by Main itself and never reach here.
+  
+
+
+
   if (row.goalOwnershipUnverified && !row.originAdoptionRecorded
     && row.conflict === "needs_user_approval" && row.canApply) return true;
   // Strategy and cadence revisions are autonomous by default. Otherwise only a

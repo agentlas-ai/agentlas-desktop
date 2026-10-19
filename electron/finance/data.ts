@@ -44,6 +44,8 @@ function safeError(error: unknown): string {
   return /^finance_[a-z0-9_]+$/.test(message) ? message : 'finance_source_unavailable';
 }
 let secCache: { at: number; assets: FinanceAsset[] } | null = null;
+// Transient AV region evidence stays outside the persisted asset's venue field.
+const avUsRegionHints=new Map<string,{currency:string;expiresAt:number}>();
 async function secAssets(): Promise<FinanceAsset[]> {
   if (secCache && Date.now() - secCache.at < 3600000) return secCache.assets;
   const response = object(await fetchFinanceJson(new URL(SEC_INDEX)));
@@ -59,13 +61,30 @@ async function secAssets(): Promise<FinanceAsset[]> {
   }
   secCache = { at: Date.now(), assets }; return assets;
 }
+/** Join only an exact US listing and a sole SEC ticker/venue record; names never participate. */
+async function enrichSearchIssuers(result:FinanceSearchResult,route?:FinanceDataRoute):Promise<FinanceSearchResult>{
+  const venues:Record<string,string>={NMS:'nasdaq',NGM:'nasdaq',NCM:'nasdaq',NYQ:'nyse',ASE:'nyse american',PCX:'nyse arca'};
+  const candidates=result.assets.filter(asset=>asset.id===`yahoo:${encodeURIComponent(asset.symbol)}`&&asset.kind==='stock'&&asset.currency==='USD'&&Object.prototype.hasOwnProperty.call(venues,asset.exchange));
+  if(!candidates.length)return result;
+  route?.signal?.throwIfAborted();route?.assertCurrent?.();
+  try{
+    const directory=await secAssets();route?.signal?.throwIfAborted();route?.assertCurrent?.();
+    const identities=candidates.flatMap(asset=>{
+      const matches=directory.filter(item=>item.symbol===asset.symbol);
+      if(matches.length!==1||matches[0].exchange.toLowerCase()!==venues[asset.exchange])return [];
+      const cik=/^sec:(\d{10}):/.exec(matches[0].id)?.[1];if(!cik)return [];
+      return [{assetId:asset.id,issuer:{id:`sec:cik:${cik}`,name:matches[0].name,authority:'SEC EDGAR issuer directory',sourceUrl:SEC_INDEX},securityType:null,sourceUrls:[SEC_INDEX],warnings:['Exact ticker and compatible US listing venue match in the SEC issuer directory; security class and legal instrument type remain unknown.']}];
+    });
+    return identities.length?{...result,identities}:result;
+  }catch{route?.signal?.throwIfAborted();route?.assertCurrent?.();return {...result,warnings:[...result.warnings,'finance_issuer_identity_unavailable']};}
+}
 export async function searchFinanceAssets(query: string, route?: FinanceDataRoute): Promise<FinanceSearchResult> {
   if(route)route={...route,sourceId:resolveFinanceDataSource(route,'market')};
   route?.assertCurrent?.();const normalized = query.trim(); if (!normalized || normalized.length > 200) throw new Error('finance_query_invalid');
   if(route?.sourceId.startsWith('toolchain:')){const {searchFinanceAdapter}=await import('./source-adapters');return searchFinanceAdapter(route.sourceId,normalized,route.signal,route.assertCurrent);}
   if(route?.sourceId==='finance-yfinance'){
     const result=await searchYahooFinanceAssets(normalized,{signal:route.signal});route.assertCurrent?.();const issuer=searchIsharesCatalog(normalized);
-    return issuer.length?{...result,assets:[...issuer,...result.assets.filter(asset=>!issuer.some(fund=>fund.symbol===asset.symbol))].slice(0,30),provider:'Free market data · Yahoo chart + verified issuer catalog',warnings:[...result.warnings,'Issuer catalog entries identify supported iShares funds; their metadata is not a live quote or a complete ETF directory.']}:result;
+    return enrichSearchIssuers(issuer.length?{...result,assets:[...issuer,...result.assets.filter(asset=>!issuer.some(fund=>fund.symbol===asset.symbol))].slice(0,30),provider:'Free market data · Yahoo chart + verified issuer catalog',warnings:[...result.warnings,'Issuer catalog entries identify supported iShares funds; their metadata is not a live quote or a complete ETF directory.']}:result,route);
   }
   if(route&&route.sourceId!=='alpha-vantage')return{assets:[],provider:'Selected data source',asOf:null,warnings:['finance_data_source_unsupported']};
   const catalog=searchIsharesCatalog(normalized),catalogWarnings=catalog.length?[
@@ -86,7 +105,11 @@ export async function searchFinanceAssets(query: string, route?: FinanceDataRout
       const assets = result.bestMatches.slice(0, 30).map(raw => {
         const row = object(raw), symbol = string(row['1. symbol']), currency = string(row['8. currency']);
         if (!/^[A-Z]{3}$/.test(currency) || !/^[A-Za-z0-9.^_-]{1,80}$/.test(symbol)) throw new Error('finance_source_shape');
-        return { id: `av:${symbol}`, symbol, name: string(row['2. name']).slice(0, 300), currency, exchange: string(row['4. region']).slice(0, 80), kind: /ETF/i.test(string(row['3. type'])) ? 'etf' as const : /Equity/i.test(string(row['3. type'])) ? 'stock' as const : 'other' as const };
+        if(string(row['4. region'])==='United States'){
+          avUsRegionHints.delete(symbol);avUsRegionHints.set(symbol,{currency,expiresAt:Date.now()+15*60*1000});
+          while(avUsRegionHints.size>240)avUsRegionHints.delete(avUsRegionHints.keys().next().value!);
+        }else avUsRegionHints.delete(symbol);
+        return { id: `av:${symbol}`, symbol, name: string(row['2. name']).slice(0, 300), currency, exchange: '', kind: /ETF/i.test(string(row['3. type'])) ? 'etf' as const : /Equity/i.test(string(row['3. type'])) ? 'stock' as const : 'other' as const };
       });
       return { assets: [...catalog,...assets.filter(asset=>!catalog.some(issuer=>issuer.symbol===asset.symbol))].slice(0,30), provider: catalog.length?'iShares official product catalog + Alpha Vantage':'Alpha Vantage', asOf: null, warnings: [...catalogWarnings,'Search metadata has no market-price timestamp. Region is provider metadata, not a verified listing venue.'] };
     } catch (error) { warnings.push(safeError(error)); }
@@ -116,7 +139,9 @@ async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAss
     if(metric==='nav')return {...result,warnings:['Keyless issuer NAV coverage is limited to issuer-resolved IVV, IEF, TLT, IWM and IAU catalog entries. No NAV was inferred from market price.']};
     if (metric === 'filings' || metric === 'company_facts') {
       let cik = /^sec:(\d{10}):/.exec(asset.id)?.[1];
-      if (!cik && (asset.id === `av:${asset.symbol}` && asset.exchange === 'United States' || asset.id === `yahoo:${encodeURIComponent(asset.symbol)}`)) {
+      const regionHint=avUsRegionHints.get(asset.symbol);
+      const avUsIssuerLookup=asset.id===`av:${asset.symbol}`&&(asset.exchange==='United States'||asset.exchange===''&&regionHint?.currency===asset.currency&&regionHint.expiresAt>Date.now());
+      if (!cik && (avUsIssuerLookup || asset.id === `yahoo:${encodeURIComponent(asset.symbol)}`)) {
         const matches = (await secAssets()).filter(item => item.symbol === asset.symbol);
         if (matches.length === 1) cik = /^sec:(\d{10}):/.exec(matches[0].id)?.[1];
         else return {...result,warnings:['No sole exact SEC directory ticker match is available. No issuer CIK was inferred from country, currency, name or a similar ticker.']};

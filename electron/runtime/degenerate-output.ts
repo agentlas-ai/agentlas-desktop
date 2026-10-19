@@ -1,25 +1,25 @@
-/*
- * SAFETY NET, not the fix (owner order 2026-10-16, "ROOT CAUSE FIRST"). The production loop it would have stopped
- * (Yotube room 5d37e4cc, independent-review, gpt-6.1-sol xhigh: 56 minutes of the same closing sentences until codex's
- * 128k output cap) was caused upstream and is fixed there: the worker handoff schema capped handoffFacts at 8, and a
- * strict-schema decoder masks the item separator at the cap, so a model with more to report wrote it inside the last
- * string forever (mcp/borrowed-task-force.ts TASK_FORCE_WORKER_HANDOFF_SCHEMA).
- *
- * This net only ends a team step whose own output has become a loop, as a typed failure (worker_output_degenerate). It
- * never repairs, retries, continues or caps a healthy answer. The team's settlement makes the step FAILED and the room
- * answers over the rest (mcp/team-step-settlement.ts).
- *
- * Signal: prose sentences (a segment that ends with . ! ? 。 ！ ？ before whitespace, a quote or a line break) that the
- * same output already said. A loop of the incident's kind is 100% such repeats, each said many times; real answers are
- * not. Calibrated on the incident rollout and on every long assistant message on this machine (Codex product home,
- * personal Codex and Claude Code transcripts: 1,713 messages >= 4,000 chars, max windowed repeat rate 0.73, 0 flagged)
- * and 4,170 source/doc files (machine-generated JSON/d.ts with duplicated description sentences can trip it: 11; such a
- * dump is not a handoff). On the incident it fires ~7,500 chars after the loop began (~97 s at its 77 chars/s).
- *
- * Runners report partial output as the accumulated reply so far (codex bodyText, claude combined, ACP text, agy, byok,
- * local loops, grok, kimi, cursor): observe() reads only what was appended since the last call and starts over when the
- * text does not extend the previous one.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import type { RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { registerNativeApprovalChildSignal } from "./native-approval-provenance";
 

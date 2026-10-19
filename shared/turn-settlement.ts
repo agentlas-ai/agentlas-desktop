@@ -1,10 +1,10 @@
 /**
- * Turn settlement (docs/2026-10-13-native-harness/31 W1; audit A7 §6): one typed answer to "what happened to this
- * turn". Pure, with no Electron, Node or renderer imports, so Main, the daemon and the renderer read the same rules.
- *
- * The outward code of a failure is the innermost machine code in its cause chain. A wrapper adds a layer; it never
- * replaces the code, and prose is never classified into one (production 2026-10-14..16: the same daemon start refusal
- * reached the owner as `runtime_turn_unsettled` while Main kept its real code).
+
+
+
+
+
+
  */
 
 /** The same values as runtime/runner.ts RuntimeTurnDelivery. Absent means the runner could not tell. */

@@ -54,9 +54,9 @@ const INLINE_GRAPH_TOOLS = ONE_GRAPH_TOOLS.map((tool) => ({
   ...tool, description: INLINE_GRAPH_DESCRIPTIONS[tool.name] ?? tool.description,
 }));
 
-// control() bounds a capability's tool allow-list by this server's own catalog (`tools`), not a fixed count: a fixed
-// 16 rejected every room's list of 17 non-supervisor tools in 1.2.61-1.2.62, so every One team tool failed with
-// "One team capability is invalid." outside the personal One conversation (production 2026-10-05 16:39 UTC, Thread).
+
+
+
 const SOURCE = String.raw`"use strict";
 const fs = require("node:fs");
 const http = require("node:http");

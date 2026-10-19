@@ -17,11 +17,11 @@ import { classifyTool } from "./tool-taxonomy";
 const HOST_PREFLIGHT_PREFIX = "Agentlas Plugins";
 
 /**
- * Host supervisor notices (electron/hephaestus/stormbreaker-supervisor.ts) ride the tool-use
- * channel so the person sees them, but the host writes them itself: no provider operation id,
- * no arguments, nothing dispatched outside. Measured 2026-09-24: four of them per turn were
- * counted as "unidentified" operations with unknown outcome, so every supervised Goal turn —
- * a read-only One answer included — ended with effects "uncertain" and blocked.
+
+
+
+
+
  */
 export const HOST_SUPERVISOR_NOTICE_PREFIX = "Stormbreaker Loop ·";
 // Goal continuations use the same host-only tool-use channel as supervisor notices.

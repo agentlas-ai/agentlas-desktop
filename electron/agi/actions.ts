@@ -381,8 +381,8 @@ export class AgiActionExecutor {
         AND json_extract(result_json, '$.detail.repeatDigest') = ? LIMIT 1`).get(incident.id, request.attempt, repeatDigest)) {
       return refuse(AGI_REPEAT_IN_ATTEMPT_CODE);
     }
-    // Owner 2026-10-12: a repeat is not refused. It used to be (agi.action.circuit-open 2,376 times in production, almost
-    // all of them a rest), which left the goal where it was; the next deterministic move runs instead.
+    
+
     const repeated = history.filter((entry) => entry.action === request.action).length >= MAX_SAME_MOVE_PER_CAUSE;
     const failedHere = this.incidents.ruledOut(incident.id).has(request.action);
     if ((repeated || failedHere) && !NEVER_ESCALATED.has(request.action)) {
@@ -442,9 +442,9 @@ export class AgiActionExecutor {
       evidenceRefs: Array.isArray(settled.detail?.evidenceRefs) ? settled.detail!.evidenceRefs as string[] : [],
       // A failed effect is ruled out for this incident (R2); a refused precondition is not an attempt.
       ruledOut: !settled.ok && /\.failed$|-failed$|unavailable$/.test(settled.code) });
-    // The room is One's (owner 2026-10-12: "AGI · Motiondirector에게 t5 작업을 맡겼어요 같은 거 쓰지 마라"). AGI's own
-    // actions are host bookkeeping: they stay in the receipts and the Goal panel (goal-panel.ts) and never become room
-    // messages. Only an ask the owner must answer is posted.
+    
+
+
     const ownerAsk = request.action === "ask_owner_once" || request.action === "request_app_restart";
     if (settled.ok && goal.chatId && this.deps.announce && ownerAsk) {
       const line = noticeLine(request.action, settled);
@@ -666,8 +666,8 @@ export class AgiActionExecutor {
         return ok("agi.browser.restart-dispatched");
       }
       case "request_app_restart": {
-        // The owner pays for a restart; ask only when the incident's typed cause is one a restart clears
-        // (AGI_APP_RESTART_CAUSES). "Not tried yet" is not a basis (Yotube 2026-10-17: the restart changed nothing).
+        
+
         const indicated = this.incidents.get(incidentId)?.diagnosis.appRestart;
         if (!indicated) return no("agi.app-restart.not-indicated");
         const asked = this.deps.db.prepare("SELECT 1 FROM agi_action_receipts WHERE incident_id = ? AND action = 'request_app_restart' AND ok = 1").get(incidentId);
@@ -680,10 +680,10 @@ export class AgiActionExecutor {
         const evidenceRefs = Array.isArray(args.evidenceRefs) ? args.evidenceRefs.filter((ref): ref is string => typeof ref === "string").slice(0, 12) : [];
         if (!evidenceRefs.length) return no("agi.defect.evidence-required");
         const category = ["crash", "stall", "wrong-result", "ui", "login", "other"].includes(String(args.category)) ? String(args.category) : "other";
-        // A defect's identity is host-typed: one of the incident's own defect findings, or else the incident's reason code
-        // and category. A model names the same defect differently every time (production 2026-10-12: 65 reports with 65
-        // spellings from run_failed_unknown incidents, 44 from boundary_payment), so its name never matched
-        // UNIQUE(goal_id, code) and each attempt filed a new report. The incident and evidence refs carry the specifics.
+        
+
+
+
         const incident = this.incidents.get(incidentId);
         const typed = incident?.diagnosis.defects?.some((finding) => finding.code === named) === true;
         const code = typed || !incident ? named : `${incident.reasonCode}:${category}`;

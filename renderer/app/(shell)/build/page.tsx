@@ -158,8 +158,8 @@ function fmtLogTime(at: number): string {
 const BUILD_LOG_VISIBLE_ROWS = 400;
 
 /**
- * The log rows re-render only when the log itself changes. The liveness row beside them is replaced every 2 s, and
- * without this boundary each tick re-rendered every row of a long build (review 2026-10-16 clients-13 / H5).
+
+
  */
 const BuildLogRows = memo(function BuildLogRows({ log, ko }: { log: readonly LogLine[]; ko: boolean }) {
   const hidden = Math.max(0, log.length - BUILD_LOG_VISIBLE_ROWS);

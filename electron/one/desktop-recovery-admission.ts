@@ -58,9 +58,9 @@ export function desktopOneRecoveryOriginalRunId(runId: string, chatId: string): 
 }
 
 /**
- * Capture existing host evidence. Auxiliary accounting/admission rows are not a new user direction, and neither is a
- * host-written turn after the run (a teammate's report, a Goal continuation): the exact run stays recoverable until the
- * owner writes again, where "is it still the room's newest run" refused it behind any host turn (flow audit ID-4).
+
+
+
  */
 export function desktopOneRecoveryScope(runId: string, chatId: string): string | null {
   const chat = getChat(chatId), receipt = getInvocationRunReceipt(runId);

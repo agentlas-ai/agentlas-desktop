@@ -71,15 +71,15 @@ function isBundledInterpreter(pythonPath: string): boolean {
 }
 
 /**
- * Env for spawning a specific interpreter: the cache boundary, plus user-site
- * isolation when the interpreter is ours.
- *
- * Measured 2026-08-17: the bundled 3.12 runtime shipped no `jsonschema` of its
- * own and silently borrowed the user's `~/.local` copy. On this machine that
- * copy carried an x86_64 `rpds`, so `import jsonschema` died on an architecture
- * mismatch and every package build reported "schema validation unavailable"
- * blockers the user had no way to act on. The runtime now ships the dependency
- * and stops reading someone else's.
+
+
+
+
+
+
+
+
+
  */
 export function withPythonRuntimeBoundary(
   pythonPath: string,

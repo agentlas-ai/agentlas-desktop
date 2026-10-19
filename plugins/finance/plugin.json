@@ -116,8 +116,8 @@
       },
       {
         "path": "runtime/index.cjs",
-        "sha256": "d560f07d063a1adbaf21fd7bfb4d1ac80fa7ae6f34280ccb8b17ac091d44816d",
-        "bytes": 363198
+        "sha256": "c2c1b84a868cdb67596f616058fc54ca748a3a2e2d99bf25ff869dd704338dfa",
+        "bytes": 363541
       },
       {
         "path": "skills/analyst/SKILL.md",
@@ -136,8 +136,8 @@
       },
       {
         "path": "skills/planning/SKILL.md",
-        "sha256": "48c817a5ff9ad2389766f7df0bb5331006199281871bb5a23488ecd8f1556ff1",
-        "bytes": 772
+        "sha256": "07f3623470b897dea47b65f75d7134cf7d172e9fdad06055488dd792dee4b2db",
+        "bytes": 910
       },
       {
         "path": "skills/portfolio/SKILL.md",
@@ -151,8 +151,8 @@
       },
       {
         "path": "skills/research/SKILL.md",
-        "sha256": "7db8cac1b04d79d72a68874e64ebbd2ea06e4e05bfce7e6fa0dfdbde05dd212c",
-        "bytes": 3771
+        "sha256": "0f0906de52d9140d214e9f29db6b62435ea1561d4c58b2db1c3d6cfd5558219f",
+        "bytes": 4558
       },
       {
         "path": "skills/workspace/SKILL.md",

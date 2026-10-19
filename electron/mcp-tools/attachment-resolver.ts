@@ -34,13 +34,13 @@ export interface InternalMcpBuildCandidate {
    */
   hub?: { slug: string; manifestUrl: string };
   /**
-   * Hub plugin that ships skills instead of an MCP server
-   * (`packageShape.mcpReference === "none"`). There is nothing to connect, so the
-   * capability travels to the builder as a declared skill rather than being
-   * reported as a broken attachment — measured 2026-08-17: Documents,
-   * Presentations and Spreadsheets showed as "Failed · 3" while being perfectly
-   * healthy skill bundles.
-   */
+
+
+
+
+
+
+ */
   skillBundle?: { slug: string; name: string; intent: string; capabilities: string[] };
 }
 

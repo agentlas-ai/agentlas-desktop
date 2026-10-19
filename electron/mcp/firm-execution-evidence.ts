@@ -3,13 +3,13 @@ import path from "node:path";
 import type { RuntimeToolKind } from "../../shared/runtime-tool-kind";
 
 const TEST_PATH_RE = /(?:^|[\s"'`=(,])((?:(?:[A-Za-z]:|\.{0,2})[\\/]|[A-Za-z0-9_@-])[A-Za-z0-9_@.:\\/-]*\.(?:test|spec)\.[cm]?[jt]sx?)(?=$|[\s"'`),:;.])/giu;
-// Python's own conventions (unittest/pytest discovery): test_*.py and *_test.py. Dev 2026-10-18 run16: the worker and QA ran
-// `python3 -m unittest -v test_budget_ledger.py` (18 tests OK) and the evidence still read host_executed_tests: none.
+
+
 const PY_TEST_PATH_RE = /(?:^|[\s"'`=(,])((?:(?:[A-Za-z]:|\.{0,2})[\\/]|[A-Za-z0-9_@-])?(?:[A-Za-z0-9_@.:\\/-]*[\\/])?(?:test_[A-Za-z0-9_]+|[A-Za-z0-9_]+_test)\.py)(?=$|[\s"'`),:;.])/giu;
-// A tool is classified by its typed kind when the runner reports one: ACP agents (copilot, cursor, grok, kimi) send
-// `ToolCall.kind`, and Antigravity's native tool maps to the same kinds (shared/runtime-tool-kind.ts, review 2026-10-16
-// H1). Their display names ("execute: <title>") are never read. Runtimes with fixed native names and no kind (Claude
-// Code `Bash`/`Edit`, Codex `bash`/`apply_patch`, the legacy Kimi driver's `Shell`) keep their native-name rule.
+
+
+
+
 const NATIVE_MUTATION_TOOL_RE = /^(?:apply_patch|write|edit|multiedit|notebookedit|bash)$/iu;
 const NATIVE_SHELL_TOOL_RE = /^(?:bash|shell|terminal)$/iu;
 const isMutationTool = (name: string, kind: RuntimeToolKind | undefined): boolean =>
@@ -182,20 +182,20 @@ function testCollectionMissing(output: string | undefined): boolean {
 }
 
 /**
- * How the host reads one shell command as a test run. Dev 2026-10-17 run7 and the receipt A/B: verifiers wrap the runner
- * (`cd <project> && npm test 2>&1 | tail -30`, `ls data; npm test 2>&1 | tail -30`, `npm test; echo "EXIT=$?"`,
- * `timeout 120 node --test <file> > /tmp/qa.log`), and Codex reports every command inside its login shell
- * (`/bin/zsh -lc '<command>'`, real run events) — before this none of them left a receipt, so a verifier that ran the
- * tests failed for want of one.
- * - One segment, no pipe: the exit status is the runner's (a `timeout <duration>` prefix keeps it, output redirects to a
- *   literal file or `2>&1` do not touch it) -> judged by the exit status, as before.
- * - A pipe into `tail`/`head`, or harmless sibling segments (`cd <literal path>`, `echo`/`printf` without substitution
- *   other than `$?`, `ls`, `pwd`, `true`, a `node -v`-style version check) joined by `;`/`&&`: the status is another
- *   command's -> judged only by the runner's own tally in the output (runnerTally); no tally, no receipt.
- * - Other commands around the runner (dev 2026-10-18 run16: `…unittest -v test_x.py 2>&1; echo "EXIT=$?"; python3 app.py
- *   sample.csv`, `… | tail -n 6; echo "EXIT=${PIPESTATUS[0]}"`): judged by the tally too, and only when the output holds
- *   exactly one tally, so another command's output (an old log) cannot stand in for the run.
- * Exactly one runner segment (two are ambiguous); a substitution `$(…)` or a backtick is no test run.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
  */
 function parseTestInvocation(command: string): { command: string; cd: string | null; byTally: boolean; uniqueTally: boolean } | null {
   let rest = command.trim();

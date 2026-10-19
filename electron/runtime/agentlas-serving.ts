@@ -223,10 +223,10 @@ function servingToolCalls(value: unknown): ServingToolCall[] {
   return value.map((raw: unknown) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid_serving_tool_frame");
     const call = raw as Partial<ServingToolCall>;
-    // A name this request did not offer (copied from the conversation history: another runtime's tool name, or a tool the
-    // menu listed earlier) is not a broken frame. The dispatcher resolves it to the one tool it denotes or answers the
-    // model with the exact names, and never runs an unknown tool (tool-name-alias.ts). Refusing the reply ended the turn
-    // as "no completion receipt" (production 2026-10-16, Hope on Agentlas Light).
+    
+
+
+
     if (typeof call.id !== "string" || !/^[A-Za-z0-9_.:-]{1,64}$/.test(call.id) || ids.has(call.id)
       || typeof call.name !== "string" || !call.name || call.name.length > 256
       || !call.input || typeof call.input !== "object" || Array.isArray(call.input))
@@ -331,8 +331,8 @@ class ServingUsage {
   add(id: string, done: ServingDone): void {
     const input = done.usage?.inputTokens;
     const output = done.usage?.outputTokens;
-    // The server's inputTokens already include cache reads and writes; cacheReadInputTokens is the measured subset.
-    // Dropping it made every serving turn read as uncached (production 1.3.5: 27.6k/41.8k/45.2k input, cached blank).
+    
+
     const cached = done.usage?.cacheReadInputTokens;
     const cachedInputTokens = typeof cached === "number" && Number.isSafeInteger(cached) && cached >= 0
       && typeof input === "number" && cached <= input ? cached : undefined;

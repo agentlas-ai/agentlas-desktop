@@ -1,11 +1,11 @@
-/*
- * 로그인 자동 시작(LaunchAgent 등)은 설치된(패키징된) 제품만 만든다.
- *
- * 개발·QA 인스턴스(node_modules/electron 으로 띄운 앱, AGENTLAS_E2E, 격리 사용자 데이터)가
- * 설치별 라벨 `cloud.agentlas.daemon.<hash>` 로 영구 plist 를 깔면, 시험을 돌릴 때마다
- * 오너 Mac 에 로그인 항목이 쌓이고 지워진 경로를 60초마다 되살린다(2026-10-10: 57개).
- * 패키징된 제품의 동작은 바뀌지 않는다.
- */
+
+
+
+
+
+
+
+
 export interface AutostartEnvironment {
   env: Record<string, string | undefined>;
   execPath: string;

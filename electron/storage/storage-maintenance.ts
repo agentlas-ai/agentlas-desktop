@@ -184,9 +184,9 @@ export async function pruneObservationCaptures(
 
 function readWatermark(): RunDetailWatermark | null {
   try {
-    // run_events.id is TEXT. A number check rejected every stored watermark,
-    // so each pass restarted at the oldest marker and stopped at the same place
-    // (owner Mac 2026-10-17: "run detail 1034 runs" every pass, 0 rows removed).
+    
+
+
     const parsed = JSON.parse(getMeta(WATERMARK_KEY) ?? "null") as RunDetailWatermark | null;
     return parsed && typeof parsed.ts === "string" && typeof parsed.id === "string" ? parsed : null;
   } catch { return null; }

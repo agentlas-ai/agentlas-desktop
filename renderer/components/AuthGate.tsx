@@ -12,6 +12,7 @@ import { FirstRunLogin } from "./first-run/FirstRunLogin";
 import { FirstRunGate } from "./first-run/FirstRunOnboarding";
 import { useT } from "@/lib/i18n";
 import { LoadingEstimate } from "./LoadingEstimate";
+import { BusinessDesktopEntry } from "../business/BusinessDesktopEntry";
 
 // DEV 전용 QA 라우트 — 브라우저(Playwright) 렌더 회귀 검증용으로 게이트를 우회한다.
 // 프로덕션 빌드에선 절대 우회하지 않는다. /one 역시 production에서는 계속 인증을 요구한다.
@@ -105,6 +106,11 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     }
     return cleanup;
   }, [recheck, acceptSession]);
+
+  // Company SSO has its own authenticated owner and server authority. Render
+  // this exact entry without mounting the personal shell or its data readers.
+  // Every other route retains the original personal sign-in/onboarding gate.
+  if (pathname === "/business") return <BusinessDesktopEntry />;
 
   if (process.env.NODE_ENV !== "production" && DEV_QA_ROUTES.some((r) => pathname?.startsWith(r))) {
     return <>{children}</>;

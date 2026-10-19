@@ -14,6 +14,7 @@ import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
 import { createFrameBatcher, isLiveStreamTick, type FrameBatcher } from "@/lib/frame-coalescer";
 import { seedWorkRunProjections, syncWorkRunProjections, workRunTimelineRequest, WORK_TIMELINE_EVENTS_PER_RUN, WORK_TIMELINE_RUNS, type WorkRunProjectionCache } from "@/lib/work-run-timeline-sync";
 import { mergeAutomationHostNotices } from "@/lib/chat-host-notice-refresh";
+import { readRunOutputsAfterWindow, withLateRunOutputs } from "@/lib/one-chat-outputs";
 
 import { AutomationMonitorStrip } from "./AutomationMonitorStrip";
 import { ContinuityStatus } from "./ContinuityStatus";
@@ -135,10 +136,10 @@ function clearWorkUncertainAdmission(chatId: string, runId: string): void {
 }
 
 /**
- * The same rule One uses (OneShell absentAdmissionProvesNoStart). Main answers "absent" for a run with no admission
- * row. That proves no start only when Main received the request and refused it before reserving, or when the record
- * predates the Main process that answers. Work used to treat every "absent" as unresolved, so one lost send blocked
- * every later send in that chat with nothing on screen able to clear it (2026-10-18 sweep).
+
+
+
+
  */
 function workAbsentAdmissionProvesNoStart(admission: InvocationAdmissionReceipt, pending: WorkUncertainAdmission): boolean {
   if (admission.status !== "absent" || admission.runId !== pending.runId) return false;
@@ -843,7 +844,7 @@ const RIGHT_PANEL_RESULT_RATIO = 0.432;
 
  */
 const chatSidebarWidth = () => currentWorkSidebarWidth();
-/** 한국어 본문이 한 줄에 충분히 들어가는 최소 대화 열 폭(실측 기준). */
+/** */
 const MIN_READABLE_CHAT_COLUMN = 520;
 // 세로 높이는 폭과 달리 기본이 '전체'다 — null 이면 키를 지워 창 크기를 그대로 따라간다.
 
@@ -1653,10 +1654,12 @@ function settleTranscriptRun(
   runId: string | null,
   chatId: string,
   ledger: Parameters<typeof projectOneActivityFromLedger>[0],
+  /** The rows naming the outputs a run longer than the 500-event window wrote past it (lib/one-chat-outputs). */
+  outputRows?: Parameters<typeof projectOneActivityFromLedger>[2],
 ): StreamMessage[] {
   if (!runId || receipt?.runId !== runId || receipt.chatId !== chatId
     || !["completed", "failed", "cancelled", "interrupted"].includes(receipt.status)) return current;
-  const activityState = projectOneActivityFromLedger(ledger, receipt);
+  const activityState = projectOneActivityFromLedger(ledger, receipt, outputRows);
   const finishedAt = receipt.finishedAt ? Date.parse(receipt.finishedAt) : NaN;
   return current.map(message => message.role === "agent" && message.runId === runId
     ? { ...message, busy: false, streaming: false, activityState,
@@ -1986,10 +1989,11 @@ interface ProjectedWorkRun {
   promptMessageId?: string;
 }
 
-function projectWorkRun(run: { receipt: InvocationRunReceipt; events: RunEventUi[] }): ProjectedWorkRun {
+function projectWorkRun(run: { receipt: InvocationRunReceipt; events: RunEventUi[]; outputRows?: readonly RunEventUi[] }): ProjectedWorkRun {
   // 복원은 자르지 않는다. 창은 원장 조회(eventsPerRun)가 이미 정한다 —
   // 여기서 한 번 더 자르면 그만큼이 산출물에서 사라진다.
-  const state = projectOneActivityFromLedger(run.events, run.receipt);
+  // A run longer than that window lists the outputs it wrote past it too (`outputRows`, lib/one-chat-outputs withLateRunOutputs).
+  const state = projectOneActivityFromLedger(run.events, run.receipt, run.outputRows);
   const steps = mcpStepsFromLedger(run.events, 0);
   const durableAssistantId = durableAssistantMessageIdFromRun(run.events);
   // Main may provide the exact prompt row that started this run; it places a run without an answer anchor.
@@ -3250,7 +3254,7 @@ function ChatPage() {
       const pushWorkflow = (
         kind: NetTimelineItem["kind"],
         text: string,
-        // 영수증 실측 — 도구명/토큰. 단일 에이전트(fallback) 경로에서도 영수증을 채운다.
+
         receipt?: { toolName?: string; tokens?: number },
       ) => {
         const trimmed = text.trim();
@@ -3361,7 +3365,7 @@ function ChatPage() {
                 tier: ev.tier,
                 kind: ev.delegateTo ? "handoff" : ev.tool ? "tool" : "status",
                 text: ev.status?.trim() || label,
-                // 영수증 실측 — 이벤트가 줄 때만(없으면 undefined → 카드에서 생략)
+
                 toolName: ev.tool?.name,
                 tokens: ev.tokens,
                 delegateTo: ev.delegateTo,
@@ -3979,10 +3983,12 @@ function ChatPage() {
             api.runLedger.events(runId, 500),
             terminal ? api.invoke.history(chatId) : Promise.resolve(null),
           ]);
+          // A run longer than the 500-event window keeps its later outputs on the rail (the rest of the run's sealed outputs).
+          const lateOutputs = await readRunOutputsAfterWindow(api, runId, ledger);
           if (!owns() || !checkpoint.isCurrent()) return false;
           // The snapshot covers every event delivered so far: queued ticks must land before it, not on top of it.
           streamTicksRef.current?.flush();
-          const state = { ...projectOneActivityFromLedger(ledger, snapshot.receipt), lastSequence: checkpoint.throughOrdinal };
+          const state = { ...projectOneActivityFromLedger(ledger, snapshot.receipt, lateOutputs), lastSequence: checkpoint.throughOrdinal };
           if (terminal && history) {
             const next = attachMcpStepsToLatestAgent(withoutInterruptedAnswers(history).map(historyEntryToStreamMessage), mcpStepsFromLedger(ledger));
             lastFinalRunIdRef.current = runId;
@@ -4292,11 +4298,13 @@ function ChatPage() {
           ? api.runLedger.chatTimeline(chatId, { maxRuns: WORK_TIMELINE_RUNS, eventsPerRun: WORK_TIMELINE_EVENTS_PER_RUN }).catch(() => [])
           : Promise.resolve([]),
       ])
-        .then(async ([history, committedReplies, receipt, chatTimeline]) => {
+        .then(async ([history, committedReplies, receipt, timelineWindow]) => {
           if (cancelled || !isCurrentChat()) return;
           const ledgerEvents = receipt && receipt.status !== "running" && receipt.status !== "cancelling"
             ? await api.runLedger.events(receipt.runId, 500).catch(() => [])
             : [];
+          // A run longer than the 400-event window lists the outputs it wrote past it too (the rest of its sealed outputs).
+          const chatTimeline = await withLateRunOutputs(api, timelineWindow, WORK_TIMELINE_EVENTS_PER_RUN);
           if (cancelled || !isCurrentChat()) return;
           const mcpSteps = mcpStepsFromLedger(ledgerEvents);
           if (
@@ -4676,7 +4684,9 @@ function ChatPage() {
           events: (runId) => api.runLedger.events(runId, WORK_TIMELINE_EVENTS_PER_RUN),
           full: () => api.runLedger.chatTimeline(chatId, { maxRuns: WORK_TIMELINE_RUNS, eventsPerRun: WORK_TIMELINE_EVENTS_PER_RUN }),
           project: projectWorkRun,
+          lateOutputs: (entries) => withLateRunOutputs(api, entries, WORK_TIMELINE_EVENTS_PER_RUN),
           settled: receipt && ledgerEvents.length > 0 ? { runId: receipt.runId, events: ledgerEvents } : null });
+        const lateOutputs = await readRunOutputsAfterWindow(api, receipt?.runId, ledgerEvents);
         if (!isCurrentChat() || (runIdRef.current && runIdRef.current !== endedRunId)) return;
         workRunProjectionsRef.current = synced.cache;
         const historyMessages = restoreAnsweredQuestions(withoutInterruptedAnswers(h).map(historyEntryToStreamMessage), committedReplies);
@@ -4695,7 +4705,7 @@ function ChatPage() {
           // Active-chat removal can beat the frame that consumes the terminal
           // event. Settle only its canonical run before the live-draft guard;
           // a newer run still keeps that guard and its subscription intact.
-          return reconcileTranscriptSnapshot(settleTranscriptRun(current, receipt, endedRunId, chatId, ledgerEvents), next, recovery, optimisticIds);
+          return reconcileTranscriptSnapshot(settleTranscriptRun(current, receipt, endedRunId, chatId, ledgerEvents, lateOutputs), next, recovery, optimisticIds);
         });
       });
     });
@@ -4745,7 +4755,9 @@ function ChatPage() {
           events: (runId) => api.runLedger.events(runId, WORK_TIMELINE_EVENTS_PER_RUN),
           full: () => api.runLedger.chatTimeline(chatId, { maxRuns: WORK_TIMELINE_RUNS, eventsPerRun: WORK_TIMELINE_EVENTS_PER_RUN }),
           project: projectWorkRun,
+          lateOutputs: (entries) => withLateRunOutputs(api, entries, WORK_TIMELINE_EVENTS_PER_RUN),
           settled: receipt && ledgerEvents.length > 0 ? { runId: receipt.runId, events: ledgerEvents } : null });
+        const lateOutputs = await readRunOutputsAfterWindow(api, receipt?.runId, ledgerEvents);
         if (!stopped && isCurrentChat() && (!runIdRef.current || runIdRef.current === endedRunId)) {
           workRunProjectionsRef.current = synced.cache;
           const historyMessages = restoreAnsweredQuestions(withoutInterruptedAnswers(h).map(historyEntryToStreamMessage), committedReplies);
@@ -4761,7 +4773,7 @@ function ChatPage() {
           setMessages((current) => (
             transcriptRevisionRef.current === historyRevision
               ? reconcileTranscriptSnapshot(
-                  settleTranscriptRun(current, receipt, endedRunId, chatId, ledgerEvents),
+                  settleTranscriptRun(current, receipt, endedRunId, chatId, ledgerEvents, lateOutputs),
                   next,
                   recovery,
                   workFollowupOptimisticIds(),
@@ -5668,9 +5680,9 @@ function ChatPage() {
 
 
       setOptimisticAnsweredQuestionId(messageId);
-      // The answer's turn takes the same permission as any Work message. It used to be guessed from the answer's
-      // words ("read"/"읽기만" → read, "write"/"편집" → write), so "이미 read 했어" ran the follow-up read-only
-      // (2026-10-18). No question carries a typed permission choice, so nothing here may infer one from prose.
+      
+
+
       const perms: PermissionLevel = DEFAULT_PERMISSION;
       try {
         let receipt: { chatId: string; sourceMessageId: string; continuationRunId: string } | null = null;
@@ -7164,13 +7176,13 @@ function ChatPage() {
       <div style={{ display: "flex", flex: 1, height: "100%", width: "100%", alignItems: "center", justifyContent: "center", padding: 24 }}>
         <div style={{ textAlign: "center", maxWidth: 440 }}>
           <div style={{ fontSize: 17, fontWeight: 700, color: "var(--ink)", marginBottom: 8 }}>{t("chat.empty.title")}</div>
-          {/*
-            * ★안내가 **없는 단추**를 가리키고 있었다 (빈 상태 실측 2026-09-08):
-            *   "왼쪽 위 + 새 채팅 버튼" 이라고 했는데 이 상태의 화면에는 그 단추가 없다
-            *   (있는 것은 '대시보드로 돌아가기'와 '새 프로젝트' 둘뿐). 없는 것을 누르라고
-            *   하면 사용자는 자기가 못 찾는 줄 안다. 문구를 사실에 맞추고, 다음 걸음을
-            *   여기서 바로 누를 수 있게 둔다.
-            */}
+          {
+
+
+
+
+
+}
           <div style={{ fontSize: 14, lineHeight: 1.6, color: "var(--ink-soft)" }}>{t("chat.empty.hint")}</div>
           <button
             type="button"
@@ -7199,10 +7211,10 @@ function ChatPage() {
         "--task-cockpit-output-width": `${rightPanelWidth}px`,
       } as CSSProperties}
     >
-      {/* ★대화 영역은 One 과 같이 흰 면 위에 놓는다(2026-09-04 실측).
-          예전에는 이 열이 투명이라 페이지 배경(--paper-2)이 그대로 비쳤고, 작성창만 흰
-          카드로 떠 보였다. One 은 workspace 전체가 흰 면이라 대화가 한 장의 면 위에 앉는다.
-          같은 뜻의 토큰(--paper)을 쓴다 — 다크 테마에서도 함께 따라간다. */}
+      {
+
+
+}
       <div
         className="task-cockpit-main"
         style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, overflow: "hidden", boxSizing: "border-box", background: "var(--paper)",
@@ -7246,11 +7258,11 @@ function ChatPage() {
                 letterSpacing: 0.6,
               }}
             >
-              {/*
-                * ★마우스로만 되던 자리 (실측 2026-09-08). 프로젝트로 가는 유일한 길인데
-                *   <span onClick> 이라 Tab 으로 닿지도, Enter 로 눌리지도 않았다.
-                *   진짜 단추로 바꾼다 — 모양은 그대로 두고 기본 단추 스타일만 지운다.
-                */}
+              {
+
+
+
+}
               <button
                 type="button"
                 onClick={() => router.push(`/project/detail?id=${project.id}`)}
@@ -7534,17 +7546,17 @@ function ChatPage() {
           }}
         />
       </div>}
-      {/* Everything stacked on the composer shares its width and side margins (owner 2026-10-04: "챗창과 그 위 박스들
-          좌우 간격 동일하게") — the same box as the folder row above and the composer's own footer padding. */}
+      {
+}
       <div data-work-composer-stack="true" style={{
         width: `min(calc(100% - 32px), ${WORK_COMPOSER_WIDTH_PX}px)`, margin: "0 auto", display: "flex",
         flexDirection: "column", alignItems: "stretch", ["--one-composer-width" as string]: `${WORK_COMPOSER_WIDTH_PX}px`,
       }}>
-      {/* 도구 승인은 이 대화 안에서, 묻는 순간에(오너 결정 2026-08-15) — 컴포저 스택의 첫 칸이라 Goal 줄·컴포저와 좌우가 같다 */}
+      {}
       <ToolApprovalInline chatId={chat?.id ?? null} compact chip composerWidth={WORK_COMPOSER_WIDTH_PX} composerInset={WORK_COMPOSER_INSET_PX} />
       <AutomationMonitorStrip key={chatId} chatId={chatId || null} locale={locale} />
-      {/* One Goal surface (owner 2026-10-04 "골 하나만 해라"): with a Goal, the bar above the conversation holds the
-          objective, its controls and next check, and folds the continuity detail; nothing is attached to the composer. */}
+      {
+}
       {chat?.goalId
         ? <ComposerGoalBar placement="top" label={goalContext?.objective} criteria={goalContext?.acceptanceCriteria}
             plan={goalPlanOf(goalContext)} runStatus={goalContext?.runStatus} pauseReason={goalContext?.pauseReason}

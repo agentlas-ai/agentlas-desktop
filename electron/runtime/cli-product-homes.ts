@@ -1,29 +1,29 @@
-// Product homes for the subscription CLIs that keep their sessions in a config folder of the person's own: Kimi
-// (KIMI_CODE_HOME, default ~/.kimi-code), Cursor Agent (CURSOR_CONFIG_DIR, default ~/.cursor) and GitHub Copilot CLI
-// (COPILOT_HOME, default ~/.copilot). Owner order 2026-10-13: the product's sessions live only on the Agentlas side and
-// never show up in the person's own apps, without logging the person out. Same pattern as codex-product-home.ts and
-// the Grok / Antigravity mirrors (config-home-mirror.ts), with one difference: the mirror is an ALLOWLIST. Only the
-// entries below are linked from the real folder; everything else (sessions, chats, history, logs, instruction files,
-// skills, MCP lists, hooks, plugins) is the mirror's own, so a CLI that adds a new store never writes it into the
-// person's folder, and the person's personal context stays out of product runs (owner 2026-10-11).
-//
-// A config file that mixes sign-in with the person's policy is the mirror's own file holding only an allowlist of the
-// person's (owner 2026-10-06/10-11: the person's settings never drive product agents; 2026-10-17 the Codex and Claude
-// copies were found carrying personal MCP servers, hooks and auto-approved command rules into product runs): Kimi's
-// config.toml (productKimiConfig) and Cursor's cli-config.json (productCursorCliConfig). Linked whole, the person's
-// permission rules, default permission mode (`yolo`), hooks and extra skill folders reached every product turn.
-//
-// Sign-in: none of these relocations touch the OS keychain or the person's files. Only the environment variable of the
-// run changes (HOME is untouched, so the login keychain and its search list resolve exactly as for the person), and
-// file sign-ins (Kimi credentials/, the account record in config files) are symlinks to the real files, so a token
-// refresh lands in the person's file. A keychain item is keyed by service and account, not by the config folder
-// (Copilot: service "copilot-cli"; Cursor: "cursor-access-token"; Linux Cursor keeps auth.json under XDG, outside
-// CURSOR_CONFIG_DIR) - taken from the CLIs' docs and `copilot help environment`, NOT measured: only Copilot is
-// installed on the measuring machine and `copilot --version` is the only call made (no login, no keychain read).
-// `AGENTLAS_<KIND>_KEEP_HOME=1` keeps the real folder.
-//
-// Windows: symlinks to files need a privilege, so a failed link makes the run keep the real folder (a copy would fork
-// a refreshed token); directories are linked as junctions (config-home-mirror.ts).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -86,15 +86,15 @@ export function productKimiConfig(text: string): string {
 }
 
 /**
- * The mirror's own Cursor Agent cli-config.json. Kept from the person's, each for one reason: `version` (the file's
- * schema version), `authInfo` (the signed-in account's record; the tokens themselves are in the OS keychain, or under
- * XDG on Linux, outside CURSOR_CONFIG_DIR), `privacyCache` (the account's privacy mode as last fetched), `network` (the
- * transport to Cursor's backend, e.g. HTTP/1 behind a proxy), `model` and `hasChangedDefaultModel` (the model default
- * the CLI falls back to when the app passes no `--model`). `editor` and `permissions` are fields the CLI requires; they
- * are written with neutral values (no pre-approved command: Agentlas decides product approvals). Everything else of the
- * person's, above all `permissions.allow` (commands that run without asking), is left out by construction. A file that
- * is not JSON contributes only the neutral fields. Taken from Cursor's CLI documentation, NOT measured: Cursor Agent is
- * not installed on the measuring machine.
+
+
+
+
+
+
+
+
+
  */
 const CURSOR_PRODUCT_CONFIG_KEYS: readonly string[] = ["version", "authInfo", "privacyCache", "network", "model", "hasChangedDefaultModel"];
 

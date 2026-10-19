@@ -666,9 +666,9 @@ export function OneTurnWork({
    */
   hostStopCause?: OneThreadRunBlock["hostStopCause"];
   /**
-   * A later run took this run's request over (receipt, from the ledger). Its failure is recovered history: one quiet line,
-   * not a red failure, and its failure rows fold away with the rest (owner Yotube 2026-10-17: a recovered failure stayed red).
-   */
+
+
+ */
   supersededByRunId?: string;
   /** 낸 오류에는 푸는 길이 있어야 한다 — 중단된 턴의 질문을 다시 보낸다. */
   onRetry?: () => void;
@@ -682,8 +682,8 @@ export function OneTurnWork({
   const presentation = useMemo(() => buildOneWorkPresentation(state, locale, workspacePath), [state, locale, workspacePath]);
   const automationRegistrations = useMemo(() => extractAutomationRegistrations(state), [state]);
   const toolchainSources = useMemo(() => toolchainSourcesOf(presentation.cells), [presentation.cells]);
-  // A run Main still executes is live even when this screen did not start or attach to it: its durable receipt says so
-  // (production Yotube 2026-10-17: a Goal turn the update restart resumed was drawn as a finished, frozen block).
+  
+
   const receiptLive = !busy && !preparing && (runStatus === "running" || runStatus === "cancelling");
   const active = busy || preparing || receiptLive;
   const loginWaiting = !active && (runStatus === "waiting_input"

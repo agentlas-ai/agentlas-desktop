@@ -68,7 +68,13 @@ export function recordTaskCheckpoint(input: {
       sourceDigest: surface.artifactRef?.sourceDigest ?? null, dataDigest: surface.artifactRef?.dataDigest ?? null,
       stateRevision: surface.stateRevision ?? null, stateSchemaDigest: surface.artifactRef?.stateSchemaDigest ?? null,
     })) : [];
-    const attemptRows = getDb().prepare("SELECT id, invocation_run_id, native_coordinate_json FROM long_run_worker_attempts WHERE run_id = ? ORDER BY started_at, id")
+    // The native session coordinate is the Goal's controller attempt of this invocation. A task-force specialist shares
+    // its parent's invocation id (invocation-projection.ts) and settles without a coordinate, so "the first attempt that
+    // names this invocation" is only the controller by start order; the role is stated here, as it is for `producer` below.
+    const attemptRows = getDb().prepare(`SELECT a.id, a.invocation_run_id, a.native_coordinate_json
+      FROM long_run_worker_attempts AS a
+      JOIN long_run_workers AS w ON w.id = a.worker_id AND w.run_id = a.run_id
+      WHERE a.run_id = ? AND w.role = 'controller' ORDER BY a.started_at, a.id`)
       .all(run.id) as Array<{ id: string; invocation_run_id: string | null; native_coordinate_json: string | null }>;
     const nativeAttempt = attemptRows.find((attempt) => attempt.invocation_run_id === input.invocationRunId);
     const nativeCoordinate = nativeAttempt?.native_coordinate_json ? JSON.parse(nativeAttempt.native_coordinate_json) : null;
@@ -101,7 +107,7 @@ export function recordTaskCheckpoint(input: {
       && producer.invocation_run_id === input.invocationRunId
       && producer.state === "completed"
       && producerWorkspace !== undefined && producerWorkspace === workspacePath
-      // Finished is enough (owner 2026-10-05, 2026-10-12): the host does not judge outside effects; the next turn checks.
+
       && boundary?.terminal === true);
     const pathHash = createHash("sha256").update(workspacePath ?? "").digest("hex");
     const eventCursor = getLongRunByGoalId(input.goalId)!.lastEventSeq;

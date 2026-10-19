@@ -86,14 +86,14 @@ export interface CapabilityEquivalents {
 }
 
 /**
- * Known outside equivalents per capability. `browser` is the measured case
- * (da8cc6f0): user Playwright/DevTools/Puppeteer servers and the Playwright
- * plugin launch their own (usually the installed) Chrome with another login.
- *
- * Not listed here on purpose: Claude in Chrome and Codex's bundled
- * chrome@/browser@openai-bundled drive the owner's own signed-in browser and
- * desktop — the desktop-control class. They stay behind the explicit Computer
- * Use grant (the Threads doctor incident, 2026-09-24), not behind priority.
+
+
+
+
+
+
+
+
  */
 export const CAPABILITY_EQUIVALENTS: readonly CapabilityEquivalents[] = [
   {

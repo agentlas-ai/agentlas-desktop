@@ -48,7 +48,7 @@ import { invocationRunOwners } from "../store/invocation-run-owners";
 import { onHostShutdown } from "../host-lifecycle";
 import type { AliveChangedEvent, AliveState, AliveSurface, AliveResumeBarrier } from "../../shared/alive";
 import { AgiGoalMonitor } from "../agi/monitor";
-import { listAgiMonitoredGoalIds, readAgiBlockerFacts } from "../agi/goal-facts";
+import { goalControllerAttempt, listAgiMonitoredGoalIds, readAgiBlockerFacts } from "../agi/goal-facts";
 import { effectiveGoalIdForChat } from "../store/goal-binding-repair";
 import { createAgiHandler } from "../agi/wiring";
 import { AgiBugReports } from "../agi/bug-report";
@@ -131,6 +131,17 @@ function runView(goalId: string): GoalRunView | null {
     cycleCount: run.cycleCount, criteriaCount: run.acceptanceCriteria.length };
 }
 
+/**
+ * The Goal's own controller turn, read live by the exact invocation its newest controller attempt ran: what the
+ * controller model is shown as "the Goal's last run". The room's newest foreground run is not that (a teammate's report
+ * turn, an owner's side question, or a relay the waiting Goal refused).
+ */
+export function goalOwnTurnReceipt(run: GoalRunView): { status: string; errorCode: string | null; finishedAt: string | null } | null {
+  const runId = goalControllerAttempt(getDb(), run.id)?.invocationRunId;
+  const receipt = runId ? invocationService.receipt(runId) : null;
+  return receipt ? { status: receipt.status, errorCode: receipt.errorCode ?? null, finishedAt: receipt.finishedAt ?? null } : null;
+}
+
 const playgroundDeps: GoalPlaygroundDeps = {
   chat: (chatId) => {
     const chat = getChat(chatId);
@@ -151,10 +162,7 @@ const playgroundDeps: GoalPlaygroundDeps = {
     return wait && (wait.state === "pending" || wait.state === "claimed") ? wait.nextCheckAt : null;
   },
   hostRetryPending: (runId) => Boolean(pendingBlockedGoalRetry(runId)),
-  latestReceipt: (chatId) => {
-    const receipt = invocationService.latestReceipt(chatId);
-    return receipt ? { status: receipt.status, errorCode: receipt.errorCode ?? null, finishedAt: receipt.finishedAt ?? null } : null;
-  },
+  latestReceipt: (_chatId, run) => goalOwnTurnReceipt(run),
   continueGoal: (runId, expectedVersion) => continueGoalForAlive(runId, expectedVersion, invocationService),
   ownerHold: (runId) => longRunOwnerHold(runId),
   // goal-continuation-hold parks a needs_input continuation by turning its row off; the owner's next turn turns it on.
@@ -275,7 +283,7 @@ function hostHandle(created: AliveOrganismHost) {
  */
 export function startAliveOrganisms(): AliveOrganismHost | null {
   if (participant) return host;
-  // D3 (owner 2026-09-28): every One/Work goal is monitored, with or without an AGI life. No model calls.
+
   agiMonitor = new AgiGoalMonitor({
     db: getDb(),
     now: Date.now,
@@ -528,8 +536,8 @@ export async function readAliveState(input: unknown): Promise<AliveState> {
   const local = host;
   if (!local || !local.isRunning()) return notLocal();
   await local.refreshPlanAccess();
-  // Startup hands the domain to the background service; when that lands during the await, the local host is gone
-  // (production 1.3.67 first launch, 2026-10-18 00:11:03Z: "Cannot read properties of null (reading 'getState')").
+
+
   if (host !== local || !local.isRunning()) return notLocal();
   return local.getState(row.surface as AliveSurface, row.chatId as string);
 }

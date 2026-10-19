@@ -33,32 +33,32 @@ function exactKeys(value: Record<string, unknown>, fields: readonly string[]): b
 export interface NativeTerminalCheckpointPort { dispatch(request: NativePreparationWireRequest): Promise<unknown>; request(action: "cancel" | "quiesce" | "finish" | "ingress.reject", payload: Readonly<Record<string, unknown>>): Promise<unknown> }
 const MAX_BYTES = 1048576;
 /**
- * invoke.nativeStart answers only after the daemon's whole start (preparation judges, runtime checks, first provider
- * dispatch). A 10 s bound closed the channel on a slow start, and nothing re-attaches it, so every later One action
- * failed until a restart (production 1.2.92, 2026-10-11T01:53:28.9Z request, 01:53:38.98Z native_auth_channel_lost).
- * The start carries its own preparation deadlines; this bound only catches a daemon that never answers.
- * The daemon's checkpoint calls back into Main (judge, team/memory/briefing prepare) run model calls inside that start
- * (a One judge took 24 s on 1.2.89), so they get the same bound instead of 10 s.
+
+
+
+
+
+
  */
 const NATIVE_SEMANTIC_PREPARATION_BUDGET_MS = 300000;
 // Transport delivery is separate from the model budget and fixed when the request starts.
 const NATIVE_REPLY_DELIVERY_GRACE_MS = 10000;
 const NATIVE_START_REPLY_TIMEOUT_MS = NATIVE_SEMANTIC_PREPARATION_BUDGET_MS + NATIVE_REPLY_DELIVERY_GRACE_MS;
 /**
- * A reply that misses its bound fails that one request (native_auth_reply_timeout); the channel and every other request
- * in flight stay up (flow audit 2026-10-18, I-D5). Before, the per-request timer closed the whole channel: one slow
- * Main->daemon request (10 s) or daemon->Main callback (310 s) failed every steer, cancel, approval answer and device
- * request with it (the 3a807120 class at another spot). A late signed reply is verified, then dropped. The channel is
- * closed only when the peer looks wedged: this many requests in a row timed out with no frame of any kind from it in
- * between (any reply, event or callback proves it is alive), or, daemon side, every callback slot of a lane is held
- * by an unanswered request (Main counts those slots until it answers, so a new callback could not be admitted).
+
+
+
+
+
+
+
  */
 const NATIVE_SILENT_PEER_TIMEOUTS = 3;
 const MAX_LATE_REPLIES = 256;
 /** Only invoke.nativeStart (whole start) and native.attach (adoptSession + supervisor.recover) wait long; every other request keeps 10 s. */
 export function nativeGuiReplyTimeoutMs(method: string): number { return method === "invoke.nativeStart" || method === "native.attach" ? NATIVE_START_REPLY_TIMEOUT_MS : 10000; }
-// invoke.runKeyOutcome: the window's answer to a daemon-hosted run's API-key request (flow audit 2026-10-18, I-D2). An older
-// service does not list it and answers native_auth_dispatch_denied (a signed reply; the channel stays up).
+
+
 const methods = new Set(["invoke.nativeStart", "invoke.admission", "invoke.receipt", "invoke.currentTurn", "invoke.steerCurrentTurn", "invoke.currentTurnSteerReceipt", "invoke.cancel", "invoke.runKeyOutcome", "native.approvalReply", "native.attach", "native.detach"]);
 const errorCode = (e: unknown): string => {
   if (e && (typeof e === "object" || typeof e === "function")) {
@@ -124,9 +124,9 @@ export async function startNativeAuthChannel(options: { address: string; binding
     if (method !== "native.checkpoint" || !state || !identity) return Promise.reject(nativeAuthError("native_auth_checkpoint_unenrolled"));
     const lane = observation ? (validateNativeServiceObservationRequest(params).action === "finish" ? "terminal" : "ordinary") : capability ? "terminal" : "ordinary";
     if ([...state.pending.values()].filter(p => p.lane === lane).length >= (lane === "terminal" ? 2 : 8)) return Promise.reject(nativeAuthError("native_auth_checkpoint_busy"));
-    // Params the wire cannot carry (undefined, NaN, an instance) fail this request only: nothing is signed or sent and no
-    // sequence is used, so the channel and the other pending requests stay up. Dev 2026-10-18: an app.call with no
-    // arguments sent { args: undefined }, the frame build below threw, and its catch closed the whole channel.
+    
+
+
     try { nativeAuthCanonical(params); } catch (error) { return Promise.reject(error); }
     const requestId = randomBytes(32).toString("hex");
     return new Promise((resolve, reject) => {

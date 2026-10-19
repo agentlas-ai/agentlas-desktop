@@ -31,16 +31,16 @@ import { searchToolchains } from "./search";
 const MAX_TEXT = 600;
 
 /**
- * What a contract promises: the steps (graph), its purpose and name, who does the
- * work (target) and with which authority and tools. Rewording the purpose makes it
- * stale (the definition digest alone ignores the goal — caught by
- * test-toolchain-surfaces).
- *
- * Deliberately NOT included: the runtime pin, schedule, trigger timing, limits and
- * monitor. The host pins a runtime on the first run (automation_runtime_pinned), and
- * when that sat in this digest every callable graph went stale after one use —
- * measured in the isolated app: run ok, then "one_graph_target_not_in_context".
- * Execution freshness is still exact: one_graph_run checks expected_revision.
+
+
+
+
+
+
+
+
+
+
  */
 export function contractSourceDigest(automation: Automation): string {
   return sha256Value({
@@ -82,9 +82,9 @@ function pastInputs(automationId: string, varName: string): Array<Record<string,
 export function draftInterface(automation: Automation, now = new Date().toISOString()): ToolchainInterface {
   const graph = automation.graph;
   const requirement = graphInputRequirement(graph, "en");
-  // Pessimistic by default (MCP: readOnlyHint=false, destructiveHint=true). An agent
-  // node can call any attached tool, so "declared no effect" is not evidence of
-  // read-only — measured: the Threads and X posting automations declare none.
+  
+
+
   const DETERMINISTIC = new Set(["trigger", "condition", "transform", "eval", "code"]);
   const readOnly = (graph?.nodes ?? []).length > 0 && (graph?.nodes ?? []).every((node) =>
     DETERMINISTIC.has(node.type) && !nodeDeclaresOutwardEffect({ type: node.type, config: node.config }));
@@ -213,10 +213,10 @@ async function callIsolatedModel(systemPrompt: string, input: string, signal?: A
     if (pooled.text) return { text: pooled.text, reason: null,
       model: receipt?.selection ? `${[receipt.selection.kind, receipt.selection.model].filter(Boolean).join(":")} via ${receipt.route}` : "judgment-pool" };
   }
-  // Every verified tool-free runtime is a candidate, not just the first one. A runtime known to be in
-  // a quota/auth cooldown goes last (it is still tried — the cooldown may have just ended), and one
-  // that fails hands over to the next. Independent review 2026-10-04: the fallback used to pick one
-  // runtime and stop, so an exhausted first choice failed the test while another model was free.
+  
+
+
+
   const isolated = (await detectRuntimes()).filter((runtime) => !runtime.signInRequired && isVerifiedJudgmentCapability(runtime))
     .sort((left, right) => Number(Boolean(runtimeCooldown(left))) - Number(Boolean(runtimeCooldown(right)))
       || Number(right.active) - Number(left.active));
@@ -337,11 +337,11 @@ export function toolchainTestInProgress(automationId: string): boolean {
 }
 
 /**
- * Draft (or refresh) the contract and test it; callable only if the test passes.
- *
- * Independent review 2026-10-04: the test can outlive every caller's wait, so it is host-owned —
- * single-flight per automation, bounded by TOOLCHAIN_TEST_BUDGET_MS — and it never overwrites a
- * decision taken while it ran (an owner withdrawal used to be silently reverted to callable).
+
+
+
+
+
  */
 export function exposeAutomation(
   automationId: string,

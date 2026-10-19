@@ -1,21 +1,21 @@
-// Kimi Code's own session journal, read by the host: whether a stored session still exists, and how a turn ended.
-//
-// Measured 2026-10-16 on the installed Kimi Code 0.28.0 (`kimi acp`, a scratch KIMI_CODE_HOME, a fake OpenAI-compatible
-// provider; probes under /tmp/prompt-audit/w5dacp/probe):
-//   - Kimi keeps every session at <KIMI_CODE_HOME>/sessions/<workspace id>/<session id>/ with the turn journal
-//     agents/main/wire.jsonl. Its first line is {"type":"metadata","protocol_version":"1.4",…}.
-//   - The ACP bridge answers EVERY turn with stopReason "end_turn": a completed turn, a provider 400, a provider 500
-//     after 10 retries (155 s) and a reply cut at the output limit all look the same on the wire. The failure is only
-//     written to Kimi's log (the bridge's own comment: `failed` → `end_turn`, "the caller is expected to log the
-//     error payload separately"); a 400 or 500 turn sends no session/update at all.
-//   - The journal tells them apart with typed records. Every model step appends {"type":"context.append_loop_event",
-//     "event":{"type":"step.begin",…}} and, when the step finished, {"event":{"type":"step.end","finishReason":…}}:
-//     "end_turn" for a finished reply, "tool_use" before tool results and the next step, "max_tokens" for a cut reply.
-//     A failed step has its step.begin and llm.request records and never a step.end.
-//   - The journal is flushed asynchronously: at the moment the session/prompt response arrived only the turn's
-//     turn.prompt record was on disk; the rest landed within one second.
-//   - `kimi --session <missing id>` exits 1 ("Session … not found"), and ACP session/load of a missing id answers
-//     -32602 with data {sessionId}; the store folder simply has no such session directory.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import fs from "node:fs";
 import path from "node:path";
 

@@ -3940,12 +3940,14 @@ exports.__financeWorkspaceSchema = WorkspaceSchema;
 exports.FinanceAskRequestSchema = zod_1.z.object({
     request: zod_1.z.string().min(1).max(20000).refine(value => !!value.trim()), screenContext: zod_1.z.string().max(2000),
     baseRevision: zod_1.z.number().int().nonnegative(), requestId: id.optional(),
+    selectedAssetIds: zod_1.z.array(id).max(8).refine(items => new Set(items).size === items.length).optional(),
     analystRefs: zod_1.z.array(finance_analysts_1.FinanceAnalystRefSchema).max(3).refine(items => new Set(items.map(item => item.id)).size === items.length).optional(),
     analystAuthoring: zod_1.z.boolean().optional(), analystDraft: finance_analysts_1.FinanceAnalystDraftSchema.optional(),
     analystHistory: zod_1.z.array(zod_1.z.object({ role: zod_1.z.enum(['user', 'assistant']), content: zod_1.z.string().max(20000) }).strict()).max(6).optional(),
 }).strict().refine(value => !value.analystDraft || value.analystAuthoring === true)
     .refine(value => !value.analystHistory || value.analystAuthoring === true)
-    .refine(value => !value.analystAuthoring || !value.analystRefs?.length);
+    .refine(value => !value.analystAuthoring || !value.analystRefs?.length)
+    .refine(value => !value.analystAuthoring || !value.selectedAssetIds?.length);
 /** An existing report is an explicit CAS append target, never an implicit new report. */
 exports.FinanceDataSaveRequestSchema = zod_1.z.object({
     query: zod_1.z.string().max(2000), assetIds: zod_1.z.array(id).max(10), metrics: zod_1.z.array(zod_1.z.string().min(1).max(80)).min(1).max(10), period: zod_1.z.string().min(1).max(80),
@@ -3960,7 +3962,7 @@ function createFinanceWorkspace() {
 }
 const widgetTitles = { watchlist: "Watchlist", holdings: "Holdings", comparison: "Compare", chart: "Chart", allocation: "Allocation", notes: "Notes", sources: "Sources", events: "Events" };
 function createFinanceWidget(type, title = widgetTitles[type]) {
-    return WidgetSchema.parse({ id: financeId("widget"), type, title, assetIds: [], metric: "price", chartType: "table", width: "half", period: "1Y", notes: "", priceBasis: "price", cashFlowMethod: "none" });
+    return WidgetSchema.parse({ id: financeId("widget"), type, title, assetIds: [], metric: "price", chartType: type === "allocation" ? "bar" : "table", width: "half", period: "1Y", notes: "", priceBasis: "price", cashFlowMethod: "none" });
 }
 function createFinanceDashboard(name = "My dashboard", widgets = []) {
     return DashboardSchema.parse({ id: financeId("dashboard"), name, widgets });
@@ -6740,7 +6742,8 @@ function financeCalculationArtifact(artifact, workspace, title = artifact.title,
     const metricsTitle = presentation.metricsTitle ?? (language && !language.startsWith('ko') ? 'Key figures' : '계산 요약');
     const metricsWidget = (0, finance_1.createFinanceWidget)('chart', metricsTitle);
     metricsWidget.metric = `compute:${artifact.kind}:metrics`;
-    sections.splice(1, 0, { id: (0, finance_1.financeId)('section'), title: metricsTitle, kind: 'widget', narrative: '', widget: metricsWidget, projection: { columns: ['metric', 'value', 'unit'], rows: artifact.metrics.filter(metric => presentation.highlightMetricIds ? presentation.highlightMetricIds.includes(metric.id) : !["constraint_violation", "sample_volatility"].includes(metric.id)).map(metric => [presentation.metricLabels?.[metric.id] ?? metric.label, metric.value, metric.unit]), status: 'ready', warnings: [], asOf: artifact.input.endDate, sourceIds: [sourceId] } });
+    const selectedMetrics = presentation.highlightMetricIds?.length ? artifact.metrics.filter(metric => presentation.highlightMetricIds.includes(metric.id)) : artifact.metrics.filter(metric => !["constraint_violation", "sample_volatility"].includes(metric.id)).slice(0, 4);
+    sections.splice(1, 0, { id: (0, finance_1.financeId)('section'), title: metricsTitle, kind: 'widget', narrative: '', widget: metricsWidget, projection: { columns: ['metric', 'value', 'unit'], rows: selectedMetrics.map(metric => [presentation.metricLabels?.[metric.id] ?? metric.label, metric.value, metric.unit]), status: 'ready', warnings: [], asOf: artifact.input.endDate, sourceIds: [sourceId] } });
     sections.push({ id: (0, finance_1.financeId)('section'), title: '가정과 방법', kind: 'sources', narrative: [artifact.method, ...artifact.assumptions, ...artifact.warnings, ...artifact.citations.map(c => `${c.title}\n${c.url}`), `input sha256: ${artifact.input.inputSha256}`].join('\n\n').slice(0, 20000), widget: null, projection: null });
     for (const input of artifact.inputEvidence ?? [])
         sections.push({ id: (0, finance_1.financeId)('section'), title: '계산 입력', kind: 'sources', narrative: input.sourceUrls.join('\n'), widget: null, projection: { columns: input.columns, rows: input.rows, status: input.status === 'ok' ? 'ready' : 'partial', warnings: input.warnings, asOf: input.asOf, sourceIds: [sourceId] } });
@@ -7649,10 +7652,10 @@ function rebalance(request, result) {
     unique(request.constraints.lockedIds, 'lockedIds');
     unique(request.constraints.excludedIds, 'excludedIds');
     unique(request.constraints.bounds.map(x => x.instrumentId), 'bounds');
-    if (request.planType !== 'brokerage' && (!request.menuConfirmed || !request.planMenu.length))
-        reject('confirmed_plan_menu_required');
-    if ((request.planType === 'kr_dc' || request.planType === 'kr_irp') && request.constraints.maxRiskWeight === undefined)
-        reject('pension_risk_rule_required');
+    if (!request.menuConfirmed)
+        result.warnings.push('The supplied instrument menu and trading permissions are unverified scenario inputs.');
+    if (request.constraints.maxRiskWeight === undefined)
+        result.warnings.push('No risk cap was supplied; compliance with external account risk limits has not been checked.');
     const menu = new Map(request.planMenu.map(x => [x.id, x])), current = new Map(request.positions.map(x => [x.instrumentId, money(x.currentValue, p)])), targets = new Map(request.targetWeights.map(x => [x.instrumentId, x.weight]));
     for (const id of [...current.keys(), ...targets.keys(), ...request.constraints.lockedIds, ...request.constraints.excludedIds, ...request.constraints.bounds.map(x => x.instrumentId)])
         if (!menu.has(id))

@@ -7,7 +7,11 @@ import type { InvocationRunReceipt, RunEventUi } from "@shared/types";
 export const WORK_TIMELINE_RUNS = 40;
 export const WORK_TIMELINE_EVENTS_PER_RUN = 400;
 
-export interface WorkRunTimelineEntry { receipt: InvocationRunReceipt; events: RunEventUi[] }
+/**
+ * One run of the window. `outputRows` (optional) are the rows naming the outputs a run longer than its 400 events wrote past
+ * them (lib/one-chat-outputs withLateRunOutputs); the run's projection adds them to its output list.
+ */
+export interface WorkRunTimelineEntry { receipt: InvocationRunReceipt; events: RunEventUi[]; outputRows?: readonly RunEventUi[] }
 
 /** One chat's per-run projections, each kept with the exact receipt it was projected from. */
 export interface WorkRunProjectionCache<P> {
@@ -59,6 +63,10 @@ export function seedWorkRunProjections<P>(
  * projection came from keeps it, any other run is read alone (`events`) and projected. The run that just settled
  * reuses the events the caller already read for it (`settled`, ORDER BY seq ASC with at least the window's limit).
  * Measured before (perf R-02 / H4): each settle downloaded 40 runs x 400 events, 5.5-9.7 MB, although one run changed.
+ *
+ * `lateOutputs` (optional) adds to every run it reads or is handed here (the full window of a first read, a full re-read,
+ * each changed run read alone) the rows naming that run's outputs past its 400 events, so a long run's projection lists the
+ * outputs it wrote after the window. A kept projection already holds them: a run that wrote more changed its receipt.
  */
 export async function syncWorkRunProjections<P>(input: {
   chatId: string;
@@ -68,23 +76,31 @@ export async function syncWorkRunProjections<P>(input: {
   full: () => Promise<WorkRunTimelineEntry[]>;
   project: (entry: WorkRunTimelineEntry) => P;
   settled?: { runId: string; events: readonly RunEventUi[] } | null;
+  lateOutputs?: (entries: WorkRunTimelineEntry[]) => Promise<WorkRunTimelineEntry[]>;
 }): Promise<{ projections: P[]; cache: WorkRunProjectionCache<P> }> {
   const { chatId, cache, project } = input;
-  if (!cache || cache.chatId !== chatId) return seedWorkRunProjections(chatId, input.timeline, project);
-  const fullRead = async () => seedWorkRunProjections(chatId, await input.full().catch(() => []), project);
+  // A failed ask leaves the entries as the window gave them (the bridge helper never throws; this keeps that true here too).
+  const withOutputs = async (entries: WorkRunTimelineEntry[]): Promise<WorkRunTimelineEntry[]> => {
+    if (!input.lateOutputs) return entries;
+    try { return await input.lateOutputs(entries); } catch { return entries; }
+  };
+  if (!cache || cache.chatId !== chatId) return seedWorkRunProjections(chatId, await withOutputs([...input.timeline]), project);
+  const fullRead = async () => seedWorkRunProjections(chatId, await withOutputs(await input.full().catch(() => [])), project);
   const window = input.timeline.filter((entry) => entry?.receipt?.runId);
   const changed = [...new Set(window
     .filter((entry) => cache.runs.get(entry.receipt.runId)?.signature !== receiptSignature(entry.receipt))
     .map((entry) => entry.receipt.runId))];
   // Each changed run read alone moves up to 400 events; past half the window one full read moves no more.
   if (changed.length > WORK_TIMELINE_RUNS / 2) return fullRead();
-  let events: Map<string, RunEventUi[]>;
+  let reads: Map<string, WorkRunTimelineEntry>;
   try {
-    events = new Map(await Promise.all(changed.map(async (runId) => {
+    const receipts = new Map(window.map((entry) => [entry.receipt.runId, entry.receipt] as const));
+    const read = await Promise.all(changed.map(async (runId) => {
       const known = input.settled?.runId === runId && input.settled.events.length > 0
         ? input.settled.events.slice(0, WORK_TIMELINE_EVENTS_PER_RUN) : null;
-      return [runId, known ?? await input.events(runId)] as const;
-    })));
+      return { receipt: receipts.get(runId)!, events: known ?? await input.events(runId) };
+    }));
+    reads = new Map((await withOutputs(read)).map((entry) => [entry.receipt.runId, entry] as const));
   } catch {
     // A failed single-run read must not show a partial transcript: read the window whole, as before.
     return fullRead();
@@ -95,11 +111,12 @@ export async function syncWorkRunProjections<P>(input: {
     const runId = entry.receipt.runId;
     const signature = receiptSignature(entry.receipt);
     const kept = cache.runs.get(runId);
+    const read = reads.get(runId);
     const run = kept && kept.signature === signature
       ? kept
       : runs.get(runId)?.signature === signature
         ? runs.get(runId)!
-        : { signature, projection: project({ receipt: entry.receipt, events: events.get(runId) ?? [] }) };
+        : { signature, projection: project({ receipt: entry.receipt, events: read?.events ?? [], ...(read?.outputRows ? { outputRows: read.outputRows } : {}) }) };
     runs.set(runId, run);
     projections.push(run.projection);
   }

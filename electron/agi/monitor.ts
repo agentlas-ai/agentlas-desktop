@@ -1,17 +1,17 @@
 /**
- * AGI goal manager, P1 — the deterministic monitor (plan §3.1 "Monitor", R15 Kubernetes-style reconcile).
- *
- * Every beat it reads each goal's typed facts, classifies them (blocker.ts), keeps the incident record, and when an
- * incident is due it hands one claimed attempt to the installed handler, with durable backoff for unchanged state. It never
- * calls a model. Owner decisions 2026-09-28:
- *   D3 — it watches ALL One/Work goals, not only goals with AGI switched on (the YouTube goal never had a life);
- *   D7 (corrected) — no elapsed-time trigger at all; only typed signals open an incident.
- *
- * The Alive decision point unblock_attempt_due (commit 6fdcf31b) and this monitor converge on the same attempt
- * function, which dedupes by (goal, digest): whichever claims the due attempt first owns it, the other finds
- * the receipt. Blocked goals therefore never need a light (no-tools) model wake to be looked at.
- *
- * An attempt with no handler installed yet is recorded as no-handler and retried for the same state once one exists.
+
+
+
+
+
+
+
+
+
+
+
+
+
  */
 import type { AgiDecisionControl } from "./decision-control";
 import type Database from "better-sqlite3";

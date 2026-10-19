@@ -1,11 +1,11 @@
 /**
- * A model sometimes names a tool the way another runtime showed it earlier in the same conversation. Measured
- * 2026-10-16 (Hope 1:1, Codex turn then an Agentlas Light turn): Codex had called "codex_apps.google_calendar.search_events",
- * Light copied that name from the history, this host registered "mcp__codex_apps__google_calendar_search_events", and the
- * call failed "unknown tool" with no hint, so the turn ended without an answer.
- *
- * Only separators and the "mcp__" prefix are ignored, and only a single exact match resolves. Anything else stays unknown,
- * and the refusal names the closest exact tool names so the model can retry with one of them.
+
+
+
+
+
+
+
  */
 export function toolNameKey(name: string): string {
   return name.toLowerCase().replace(/^mcp__/, "").replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");

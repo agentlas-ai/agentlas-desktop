@@ -1,34 +1,34 @@
 /**
- * Unattended durable-session turns — who may resume a stored CLI session, and
- * what an unattended run does when it cannot.
- *
- * Production 1.2.40 (Threads automation f7a61706, run 02:00Z 2026-09-24): the
- * graph ran its `publish` and `measure` nodes in parallel. Both belong to the
- * same automation ledger chat and agent, so both read the same stored Codex
- * thread and both ran `codex exec resume <thread>`. Codex allows one writer per
- * thread; the second process exited 1 before any turn started with
- * "thread-store conflict: thread … already has an active writer" (reproduced on
- * codex-cli 0.156.1). The runner then refused to create a fresh session, so the
- * automation stopped with "restore the session before continuing" — a request
- * nobody can answer in an unattended run.
- *
- * Rules kept here, in one place, for every CLI runner:
- *   1. A stored session is resumed by at most one in-flight turn of this
- *      process. A parallel sibling does not attempt the conflicting resume; it
- *      runs in a fresh session and does not overwrite the durable one.
- *   2. A resume that failed before the runtime started a turn has done nothing
- *      external, so an unattended run continues in a fresh session. Continuity
- *      comes from the host-recorded capsule the automation prompt already
- *      carries (automation-progress-facts.ts), not from the provider thread.
- *   3. A resume whose turn already started may have acted; it is never replayed
- *      in a fresh session (that could repeat an external action).
- *   4. An attended (owner) turn whose stored session the runtime itself reports
- *      as gone also continues in a fresh session that replaces the binding
- *      (attendedTurnStartsFresh). Refusing it was a dead end: the owner got the
- *      same error on every later turn of that chat until something cleared the
- *      binding (2026-10-16: 275 Codex bindings on the owner's Mac named rollouts
- *      that no longer existed anywhere).
- * Every fresh-session decision emits one machine-readable status receipt.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
  */
 
 export type UnattendedFreshSessionReason =
@@ -92,11 +92,14 @@ export function classifyCodexResumeFailure(stderr: string): UnattendedFreshSessi
 }
 
 /**
- * Rule 4: an attended turn starts fresh only when the resume source is definitively gone (the runtime's own typed
- * not-found: Codex "no rollout found", Claude's zero-turn result, an ACP not-found marker or a missing session folder)
- * and the host can hand the new session the conversation: the chat's own history (a resume from the stored binding)
- * or the agent-context journal (a resume of its native handle). A caller-managed session id with neither keeps the
- * refusal, and so does every transient refusal (writer busy, an unclassified failure): those may succeed on retry.
+ * Rule 4: an attended turn starts fresh only when the resume source is definitively gone (the runtime's own not-found
+ * report: Codex "no rollout found", Claude's zero-turn error result that names no typed startup_failure_reason, an ACP
+ * not-found marker or a missing session folder) and the host can hand the new session the conversation: the chat's
+ * own history (a resume from the stored binding) or the agent-context journal (a resume of its native handle). A
+ * caller-managed session id with neither keeps the refusal, and so does every transient refusal (writer busy, an
+ * unclassified failure): those may succeed on retry. A Claude start the CLI refused and named (a zeroed result with
+ * a typed startup_failure_reason such as session_held_by_background) is such a refusal, not a missing session: the
+ * binding stays and the turn is returned typed and pre-dispatch (claude-code.ts claudeStartupRefusal, 756939df).
  */
 export function attendedTurnStartsFresh(reason: UnattendedFreshSessionReason, conversationCarried: boolean): boolean {
   return reason === "session_not_found" && conversationCarried;

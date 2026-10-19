@@ -324,13 +324,13 @@ export interface RunGraphResult {
   /** 상한이 선언됐는데 런타임이 사용량을 보고하지 않아 집행할 수 없었는가. */
   budgetUnmeasured?: boolean;
   /**
-   * Present when resuming cannot change this failure: a failed check whose judged steps cannot be re-run
-   * safely, already returned the same output with the same failing items, or used their rework budget.
-   * Schedulers and trigger outboxes do not retry it automatically (production 2026-10-16: three resumes
-   * re-judged one unchanged output). Typed; never derived from prose.
-   * `run_interrupted_effect`: the host died while a step that may have acted outside was running; that step waits
-   * for the owner's [Rerun from this node] / [Skip], so a retry could only hold it again.
-   */
+
+
+
+
+
+
+ */
   automaticRetry?: { allowed: false; reasonCode: GraphRetryStopReason; nodeId: string; fingerprint: string | null };
 }
 
@@ -1032,18 +1032,18 @@ export function hasReplaySafePreparedWorkforce(checkpoint: GraphCheckpoint, node
 }
 
 /**
- * An agent step that was still running when the app stopped (restart, crash,
- * update) is recorded as in-flight, and an in-flight step blocks the next run
- * as `automation_ambiguous_side_effect`. That is right when the step may have
- * acted outside - but measured 2026-09-23, the interrupted step had only looked
- * (0 acting tool calls) and the hold still cost the automation a whole cycle.
- *
- * Replay is allowed only when the host's own receipts prove the step never
- * requested anything but a read: every completed receipt is read-only, and every
- * tool request the host recorded for that step (run_events, written before the
- * call executes) passes the same argument-checked read-only classifier that
- * the live run uses. Anything unknown keeps the hold. Only `agent` steps
- * qualify - other step types act through the host, not through tool calls.
+
+
+
+
+
+
+
+
+
+
+
+
  */
 /**
  * Every tool request the host recorded for this step in this run (run_events, written before the call
@@ -1161,19 +1161,19 @@ export function reconcileReplaySafePreparedWorkforceNodes(checkpoint: GraphCheck
 }
 
 // ── A failed verification is reworked, never re-judged on the same output ────
-/*
- * A check that fails judges what earlier steps produced. Re-judging that same output gives the same
- * verdict. Production 2026-10-16 (TCIagent daily graph cdf732ca): after verify2 EVAL_FAILED the
- * scheduler resumed the occurrence at 00:55, 01:56 and 03:56; each checkpoint listed step2 as
- * completed, so only verify2 ran again, on the unchanged step2 output, with 0 tokens and the same
- * verdict. The owner saw only failures.
- *
- * A resume after such a failure re-runs the steps the check judges, with the check's reasons in the
- * node prompt's registered "[last attempt failed: fix these]" part, at most MAX_EVAL_REWORKS times
- * per occurrence. It stops once, with a typed reason and no automatic retry, when a judged step
- * may already have acted outside (no double publish), when the rework returned the input already
- * judged (it is not judged again), when the budget is used, or when the judged value is run input.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
 export const MAX_EVAL_REWORKS = 2;
 export const EVAL_FAILURE_EVENT_KIND = "workflow_eval_failure";
 export const EVAL_REWORK_EVENT_KIND = "workflow_eval_rework";
@@ -2428,16 +2428,16 @@ export async function runGraph(
       checkpointDigest: "sha256:" + "0".repeat(64),
     });
   }
-  /*
-   * ★An admission hold on an effect whose outcome is unknown must outlive this run.
-   *   Held nodes do not run here, but the hold used to live only in this run's nodeFailures.
-   *   This run then became the latest failed checkpoint: the next run resumed from it (the held
-   *   node neither completed nor ambiguous) and dispatched the external effect again, and the
-   *   reconciliation view had nothing to show (test-automation-trigger-safety, 2026-10-04: a
-   *   legacy "publish done, no receipt" run → held once → re-dispatched on the second run).
-   *   Recording the hold as ambiguous keeps it held (MUTATION_UNVERIFIED on resume) and visible
-   *   to reconciliation and background observation until someone settles it.
-   */
+  
+
+
+
+
+
+
+
+
+
   // Invocation-backed nodes can inspect the prior outcome with their existing
   // read tools. A direct transport cannot act on that instruction, so its hold
   // remains scoped to that node while independent branches continue.
@@ -2521,14 +2521,14 @@ export async function runGraph(
     );
     const revisedRequestVars = new Set(changedNames);
     requestInputsChanged = changedNames.length > 0;
-    /*
-     * A completed step that never produced the value it declares did not finish: every step that reads the value
-     * fails with NODE_INPUT_MISSING on each resume. Production 2026-10-05 (a Threads verification Toolchain):
-     * desktop 1.2.57's background effect look settled as completed, with no output, a read step whose model had
-     * been refused ("at capacity"); three resumes then failed at the next step within a second each. A read or pure
-     * step runs again and its readers with it (below). A mutation step stays completed, since running it again
-     * could repeat an outward effect; its reader still says which value is missing.
-     */
+    
+
+
+
+
+
+
+
     for (const node of graph.nodes) {
       const produced = str(node.config ?? {}, "produces");
       if (!produced || !completed.has(node.id) || Object.hasOwn(vars, produced) || nodeEffect(node) === "mutation") continue;
@@ -2739,9 +2739,9 @@ export async function runGraph(
   if (opts.signal?.aborted) {
     runController.abort(opts.signal.reason);
   } else if (opts.signal) {
-    // Native approval provenance follows signal lineage: a graph run started inside a turn (an app operation) asks
-    // for tool approval under this controller, and an unregistered child is refused native_approval_signal_unregistered
-    // (production 10-16 run 7b6303fa, the same gap in the room and firm paths; audit R-102).
+    
+
+
     registerApprovalLineageIfLive(opts.signal, runController.signal);
     const relayAbort = () => runController.abort(opts.signal?.reason);
     opts.signal.addEventListener("abort", relayAbort, { once: true });
@@ -5154,13 +5154,13 @@ export async function runGraph(
           let graphTeamContinuation = false;
           const invokeNode: typeof runMcpInvocation = async (...args) => {
             assertFiniteCurrent();
-            // An agent node's context is bound to its run owner lease. Without one every agent node refused before its
-            // runtime started (agent_context_original_invocation_owner_required; production 2026-10-12..14, earlier
-            // masked as "no completion receipt"), and each resume then stopped on worker_liveness_unknown. Claimed before
-            // the work unit begins, so a busy chat is a clean refusal, not an unconfirmed mutation. The next agent node (or
-            // attempt) on the same chat reopens this run's released lease instead of being refused as another run.
-            // A room busy with another run (the owner's Goal turn in the same room) is waited for, not a failure
-            // (graph-room-wait.ts); the node's deadline is held meanwhile.
+            
+
+
+
+
+
+
             const ownerLease = nativeMcpCall ? null : await claimRoomWhenFree({ runId, nodeId: node.id, signal: nodeAbort.signal,
               claim: () => claimInvocationRunOwner(nodeChat.id, runId, { reopenReleased: true }),
               onWait: ({ phase, code, waitedMs }) => {
@@ -5616,15 +5616,15 @@ export async function runGraph(
           if (currentCommonUnit?.state === "started") commonUnits.set(node.id, commonRecovery.fail(currentCommonUnit));
           const rawMessage = nodeErr instanceof Error ? nodeErr.message : String(nodeErr);
           const receipts = checkpoint!.toolReceipts[node.id] ?? [];
-          /*
-           * Typed dispatch evidence, never intent: the invocation's refusal carries RuntimeTurnDelivery "not-dispatched"
-           * (runtime/runner.ts: a runner's or host wrapper's refusal before any provider send; mcp/client.ts keeps it and
-           * puts it on the error event, or it is thrown as is), or the host failed a pre-runner stage with a typed
-           * pre-dispatch code (REPLAY_SAFE_PRE_DISPATCH_ERROR_CODES). With no provider output and no tool request observed in this attempt,
-           * the step did not run: a definite failure the normal retry/recovery handles, never an ambiguous side effect.
-           * Production 1.3.49 (2026-10-16 08:02:17Z, daily YouTube graph step2): a journal refusal before the antigravity
-           * process started became "may have committed an external action" and stopped the automation for review.
-           */
+          
+
+
+
+
+
+
+
+
           const providerNeverDispatched = (runnerRefusedBeforeDispatch(nodeErr) || preDispatchErrorCode !== null)
             && !providerOutputObserved && !unsafeToolRequested && !unsafeToolObserved && checkpointPersistenceError === null;
           const replaySafeObservedReceipts = receipts.length > 0 && receipts.every((receipt) => (
@@ -5818,13 +5818,13 @@ export async function runGraph(
           ) || retriesDeclared(node);
           const retryAdmitted = commonRetryAllowed && transientSignal && (!modelInvocationFailed || quotaHandoff || settlementRetry) && !ambiguous && !nodeTimedOut && !contractStop &&
             !runSignal.aborted && attempts < maxAttempts;
-          /*
-           * A step that provably never reached a provider (providerNeverDispatched) left no worker behind. Its work unit
-           * failed with no observation, and the next attempt's begin() then refused it as work_recovery_worker_liveness_unknown
-           * whenever no retryable Worker receipt had recorded one (measured: a store lock before dispatch, R-067; the
-           * settlement's not-dispatched rate-limit retry takes the same lane). Record the typed fact the step's own failure
-           * proved: nothing ran, nothing was produced, no effect to settle.
-           */
+          
+
+
+
+
+
+
           let notDispatchedRecoveryAdmitted = true;
           const workerReceiptRecorded = graphWorkerReceipt?.status === "retryable" && graphWorkerReceipt.runtimeQuiesced;
           const failedUnit = commonUnits.get(node.id);
@@ -5837,13 +5837,13 @@ export async function runGraph(
               payload: { unitId: failedUnit.unitId, attemptId: failedUnit.attemptId, methodStarts: failedUnit.methodStarts,
                 action: verdict.action, reason: verdict.reason, attention: verdict.attention, delivery: "not-dispatched" } });
           } else if (retryAdmitted && !dryRun && claimedWithoutTools && !workerReceiptRecorded && failedUnit?.state === "failed") {
-            /*
-             * A mutation step that answered without calling a tool proved the same two facts: its invocation returned its
-             * final answer (the worker ended) and no external call was observed (the retry lane admits it only when not
-             * ambiguous). Without this record the retry it was granted was refused at begin() as
-             * work_recovery_worker_liveness_unknown, and every resume of the occurrence stopped there (dev 2026-10-18 run21:
-             * a weekly report automation blocked four times in two minutes).
-             */
+            
+
+
+
+
+
+
             const verdict = commonRecovery.retry(failedUnit, { checkpointMatches: true, completed: false,
               evidenceRef: `graph-attempt:${runId}:${node.id}:${attempts}:claimed-without-tools`, effectSafe: true, workerEnded: true }, {
               userStopped: runSignal.aborted, scopeCurrent: true, authorized: true, budgetAvailable: budgetGuard(node) === null });

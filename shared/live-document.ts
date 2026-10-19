@@ -157,8 +157,8 @@ export const LIVE_DOCUMENT_OPS_BY_FORMAT: Record<LiveDocumentFormat, readonly Li
   docx: ["set_text", "insert_text", "insert_paragraph", "insert_table", "delete_block", "set_format"],
   hwpx: ["set_text", "insert_text", "insert_paragraph", "insert_table", "delete_block", "set_format"],
   hwp: ["set_text", "insert_text", "insert_paragraph", "delete_block", "set_format"],
-  // insert_table on a slide: `after` is the slide; set_notes writes its speaker notes. Dev 2026-10-18 run30 O9: a deck's
-  // "지표 변화" table became divider text and its notes were missing, because slides took neither.
+  
+
   pptx: ["set_text", "insert_text", "add_slide", "delete_slide", "insert_table", "set_notes", "set_format"],
 };
 

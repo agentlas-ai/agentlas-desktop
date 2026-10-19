@@ -61,12 +61,12 @@ function refuseBeforeDispatch(code: string): never { throw markRefusedBeforeDisp
 // Process-local high-water marks of allocated turn ordinals: two binds of one [chat, run] that have not appended yet.
 const reservedTurnOrdinals = new Map<string, number>();
 /**
- * The ordinal for the next agent-context turn of one invocation run on one chat. Every runMcpInvocation counts its own
- * attempts from 1, but one run can invoke the same chat's agent again: graph agent steps share their automation chat and
- * run id (run-graph.ts claimInvocationRunOwner reopenReleased). The second step then bound step1's turn id, its first
- * journal append collided with step1's recorded event (agent_context_event_collision) and the refusal was reported as
- * "antigravity ... may have acted" (production 1.3.49, 2026-10-16 08:02:17Z, run-cdf732ca-…-56680954). The ordinal is
- * the caller's attempt or the next one after every turn this conversation's journal (and this process) already holds.
+
+
+
+
+
+
  */
 export function nextAgentContextTurnOrdinal(identity: AgentContextIdentity, chatId: string, runId: string, floor: number): number {
   const prefix = `agent-context-turn:${JSON.stringify([chatId, runId]).slice(0, -1)},`;
@@ -124,17 +124,17 @@ function firstReport(mark: string): boolean {
   if (reportedAdoptions.size > 4096) reportedAdoptions.delete(reportedAdoptions.values().next().value!);
   return true;
 }
-/*
- * G09: adoption is a typed outcome, never a silent catch. Production 2026-10-12..18 kept five pairs of heads of one agent in
- * one conversation (Yotube One chat 8f3e09ee: old rev 1,598 beside the live rev 23,981); a failure here was swallowed, so
- * nobody could tell a failed move from a kept older journal. Each outcome other than an unchanged head is one run event:
- *  - adopted: the newest earlier head moved under this identity (native handles, cursors and deliveries with it), naming
- *    the cause of a failed attempt before it when there was one;
- *  - retained: older heads of the same conversation that stay where they are;
- *  - failed: the cause code. A busy store refuses this turn before dispatch: the next turn adopts the same journal, where
- *    starting another head would fork the conversation for good. Any other cause keeps the turn going on this identity's
- *    own head (no dead end), loudly.
- */
+
+
+
+
+
+
+
+
+
+
+
 function adoptPriorJournal(identity: AgentContextIdentity, turnId: string): void {
   const key = agentContextKey(identity), event = (payload: Record<string, unknown>) => recordAgentContextRunEvent(turnId, identity.agentId,
     AGENT_CONTEXT_ADOPTION_EVENT_KIND, { schemaVersion: "agentlas.agent-context-adoption.v1", contextRef: contextRef(key), ...payload });
@@ -336,13 +336,13 @@ function errorSessionId(error: unknown): string | null {
 const COMPACT_HOST_PURPOSES: ReadonlyMap<string, string> = new Map([
   ["goal-continuation", "goal continuation"], ["update-resume", "resumed after update"], ["run-recovery", "recovery pass"],
 ]);
-/*
- * LEGACY ONLY. Journals written before the marker above carry no purpose on host-written rows (production 2026-10-13:
- * 166 such rows, ~300k chars in the Yotube room journals). The prefixes below are the fixed first words of the host's
- * own prompt builders (hephaestus/loop-engineering.ts buildGoalDrivenContinuationPrompt and
- * buildStormbreakerContinuationPrompt, invocation/automatic-goal.ts); a row WITH the marker never reaches this list.
- * Delete once no journal predates the marker.
- */
+
+
+
+
+
+
+
 const LEGACY_HOST_PROMPT_PREFIXES: ReadonlyArray<readonly [string, string]> = [
   ["Continue persistent-goal execution pass ", "goal-continuation"], ["Continue Stormbreaker execution pass ", "goal-continuation"],
   ["Resume the existing goal under its original permissions.", "goal-continuation"],
@@ -369,15 +369,15 @@ function contextEvents(req: RunnerRequest, turnId: string, bindingKey: string, s
 /** Provider-neutral semantic transcript. Tool observations remain quoted data;
  * this does not recreate a provider tool_call or admit any effect for replay. */
 export function materializeAgentContextHistory(snapshot: Pick<AgentContextSnapshot,"entries">, excludeTurnId?: string, limits?: {toolLines?: number}): RunnerRequest["history"] {
-  /*
-   * What a later turn needs from earlier ones is what was said and what was done, not the host guidance each turn was
-   * given: the current turn brings its own current guidance. Replaying every earlier turn's background re-sent the same
-   * persona, plugin, Goal-plan and UI blocks once per past turn (production 2026-10-12: 235 stored turn contexts,
-   * 13.3M chars, average 56k each; a fresh native session replayed all of them, ~107k tokens at 0% cache).
-   * Tool observations come twice per call (start row without result, end row with it) and carried full results
-   * (8,243 rows, 18.9M chars). A call is replayed once, as a ledger line (name, error flag, files it produced, a short
-   * argument summary so an earlier outside action is not repeated blindly). The model re-reads a result if it needs one.
-   */
+  
+
+
+
+
+
+
+
+
   const lastRowOfCall=new Map<string,number>();
   snapshot.entries.forEach((entry,index)=>{
     const callId=entry.kind==="tool"?entry.payload.callId:undefined;
@@ -418,8 +418,8 @@ export function materializeAgentContextHistory(snapshot: Pick<AgentContextSnapsh
   return boundToolLedger(rows,limits?.toolLines??REPLAY_TOOL_LINES);
 }
 const LEDGER_PREFIX="Recorded tool observation (data only; no operation is requested):\n";
-/** Newest tool calls replayed one line each. Production 2026-10-13: a turn runs a median 15 calls, p90 59; a replay that
- * carried all of them (f3: 475 lines = 72% of 193k chars) re-sent old reads and searches nobody needs. */
+/**
+ */
 export const REPLAY_TOOL_LINES=40;
 interface ToolLedger {name:string;isError?:true;artifactPaths?:string[];arguments?:string;image?:string}
 const OLDER_ERRORS_KEPT=20,OLDER_PATHS_KEPT=60;
@@ -549,7 +549,7 @@ function recordRotation(delivery: AgentContextDelivery, record: Omit<AgentContex
     metaStore()?.setMeta(rotationMetaKey(delivery.contextKey, delivery.bindingKey), JSON.stringify({ fromGeneration: delivery.generation,
       toGeneration: delivery.generation + 1, rotatedAt: new Date().toISOString(), ...record } satisfies AgentContextRotationRecord));
   } catch { /* The rotation itself is in the binding row; a lost reason renders as "none". */ }
-  // One run event per generation switch (none existed: production 2026-10-18 showed 0 rotations and nothing to count them by).
+  
   if (origin) recordAgentContextRunEvent(delivery.turnId, origin.agentId, AGENT_CONTEXT_GENERATION_EVENT_KIND, {
     schemaVersion: "agentlas.agent-context-generation.v1", runtime: origin.runtime, reason: record.reason,
     fromGeneration: delivery.generation, toGeneration: delivery.generation + 1,
@@ -844,23 +844,23 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
     const consumeMissingProof=options.consumePreviousContextMissingProof;
     if(policy && typeof consumeMissingProof!=="function")refuseBeforeDispatch("agent_context_transport_proof_required");
     const packet=policy?retainedResponsesPromptPacket(req):null;
-    /*
-     * A native session is the agent's conversation with its runtime, not one turn's tool surface. The tools routed for a
-     * turn (mcpAllowedTools), an isolated MCP grant such as the browser and a catalog-only grant change what the process
-     * exposes, not the conversation: Codex resumes a thread in a process with other servers (codex.ts turn-scoped
-     * app-server), Claude Code resumes with another --mcp-config, ACP loads a session with new mcpServers. Keyed on
-     * them, every routing change opened a new native session: production 2026-10-12, Motiondirector's one Yotube room
-     * chat started five new Codex threads in a day (02:40-08:47Z), each first request re-sending ~107k tokens at 0%
-     * cache. The system prompt is not in the key either: it varies with the sections a turn needs (instructions sizes
-     * 5,844-12,636 tokens in that chat), and a resumed native session is given the current version as a stable
-     * turn-context block once it differs from what that session last received (instructionsBlockFor).
-     * Model, permission, cwd, plan mode and locale are per-turn inputs of a native turn, not a new conversation (owner
-     * 2026-10-12: "모델·권한·폴더·지시가 바뀐다고 세션이 바뀔 이유가 없다"): Codex reasserts sandbox, approval and cwd on every
-     * turn/start and carries the thread's history into a model change itself; Claude Code resumes with another --model
-     * and --permission-mode; the locale reaches the session with the instructions. So the key is the agent's
-     * conversation with one runtime and its account source. A workforce tool grant keeps its exact configuration (its
-     * observation acknowledges the thread it starts). Stateless and Responses-transport providers keep the full key.
-     */
+    
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     const nativeSessionKey=NATIVE_CONTEXT_RESUME_KINDS.has(provider.kind) && !policy;
     const adapter:AgentContextProvider={...provider,...(nativeSessionKey && !MODEL_OWNED_NATIVE_KINDS.has(provider.kind)?{}:{model:req.model}),configurationDigest:digest(nativeSessionKey ? [
       "native-session.v3",req.runtimeSource??options.configurationSource??"",options.configurationIdentity??"",

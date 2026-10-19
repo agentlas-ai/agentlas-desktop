@@ -156,19 +156,19 @@ export async function closeCodexAliveResidentOwner(ownerKey: string): Promise<vo
   pool.retireMatching(session => session.owner === ownerKey);
   await Promise.all(closing);
 }
-/*
- * What this lane needs from an app-server, read from its own answers instead of a version string. The lane used to
- * accept only a userAgent ending in 0.162.0; production moved to codex-cli 0.163.0 on 2026-10-16, and every codex Alive
- * wake after that ended in 9-24 ms (alive_light_wakes 10-16 03:42Z, 14:30Z, 10-17 08:17Z) while 0.163 still has every
- * method and field used here (`codex app-server generate-json-schema --experimental`, 0.163.0: config/read
- * includeLayers, configRequirements/read, thread/start dynamicTools/selectedCapabilityRoots/environments/
- * runtimeWorkspaceRoots/allowProviderModelFallback, turn/start responsesapiClientMetadata).
- *  - initialize: the InitializeResponse fields (userAgent, platformOs, codexHome) with macOS and our own private home;
- *  - a method or parameter the executable does not know: JSON-RPC -32601, or -32600 / -32602, which is what codex-cli
- *    0.163.0 answers for an unknown request variant or missing field (codex-session.ts codexRequestUnknown). That is
- *    this lane's typed refusal codex_alive_protocol_generation_unsupported, never a generic native failure.
- * Every acknowledgement shape below (config, thread, turn, item frames) stays checked field by field.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
 function assertAppServerGeneration(init: unknown, accountHome: string): void {
   const value = init as { userAgent?: unknown; platformOs?: unknown; codexHome?: unknown } | null;
   if (!value || typeof value !== "object" || typeof value.userAgent !== "string" || !value.userAgent.trim()

@@ -272,14 +272,14 @@ export interface McpConfigBuildOptions {
 }
 
 /**
- * Whether this run's agentlas-browser is bound in the Main-enforced read-only
- * profile (proxy-server.ts readOnlyBrowserToolIsMutating). Codex read runs have
- * approval_policy "never" and refused every non-readOnlyHint MCP call, including
- * browser_navigate and browser_tabs (production 2026-09-23, codex-cli 0.156.1:
- * "MCP tool call requires approval, but approval policy is never"), so an
- * observation could never refresh the page. Codex already refused every mutating
- * browser call there, so this profile removes no capability from codex read runs;
- * other runtimes get it only for Main-issued observation runs.
+
+
+
+
+
+
+
+
  */
 export function agentlasBrowserReadOnlyProfile(gate: McpConfigBuildOptions["toolGate"]): boolean {
   if (!gate || gate.planMode || gate.simulation === true) return false;
@@ -288,18 +288,18 @@ export function agentlasBrowserReadOnlyProfile(gate: McpConfigBuildOptions["tool
 }
 
 /**
- * Whether a codex write/full run binds agentlas-browser through the Main proxy
- * with the vendor approval layer pre-approved. `codex exec` has approval_policy
- * "never" and no interactive approval loop, so it refused every agentlas-browser
- * tool without readOnlyHint — browser_navigate, browser_tabs, browser_cua_repl —
- * with "MCP tool call requires approval, but approval policy is never", even for
- * an automation the owner configured as tool_mode=browser + write (production
- * 1.2.40, Threads automation f7a61706, runs 02:00Z/02:15Z 2026-09-24). Nobody can
- * answer that refusal. Main's proxy becomes the one gate instead: the runtime
- * tool arbiter (saved deny rules, permission level, simulation) and the browser
- * launcher's own always-ask actions (payment, unsafe code) still apply to every
- * call. Plan runs keep their stricter Plan policy; read runs keep the read-only
- * profile above.
+
+
+
+
+
+
+
+
+
+
+
+
  */
 export function agentlasBrowserCodexMainGated(gate: McpConfigBuildOptions["toolGate"]): boolean {
   if (!gate || gate.planMode || gate.runtime !== "codex") return false;
@@ -693,9 +693,9 @@ function argsWithToolGateWorkingFolder(
  * Playwright가 설치돼 있어도 config/allowedTools에 싣지 않아 브라우저 우회를 막는다.
  */
 /**
- * Runtimes whose MCP client takes an image in a tool result (turn-tools/control-server.ts harnessResultWithImages): Claude
- * Code and codex 0.163 read it (probe 2026-10-18); the API-class lanes pass it on only to a model declared to read images
- * (local-tool-loop.ts visionFromHarness). grok 1.0.62 stops answering after one; antigravity and the ACP agents are unmeasured.
+
+
+
  */
 const TURN_TOOL_IMAGE_RUNTIMES: ReadonlySet<string> = new Set(["claude-code", "codex", "byok", "agentlas", "agentlas-local", "ollama", "lmstudio", "mlx"]);
 

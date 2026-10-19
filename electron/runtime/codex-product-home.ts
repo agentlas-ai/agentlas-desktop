@@ -1,37 +1,37 @@
-// The Codex home a product run uses: the user's own home, minus their personal instruction files,
-// personal memories and personal skills.
-//
-// Codex always reads `$CODEX_HOME/AGENTS.override.md` or `$CODEX_HOME/AGENTS.md` as global user
-// instructions — there is no config key, flag or app-server parameter that turns it off (codex-rs
-// codex-home/src/instructions, agents_md.rs: unconditional). Those files are the person's rules for
-// their own coding sessions. In product runs they leaked: on 2026-10-05..06 room agents answered
-// 511 of 1,208 replies with a "**[Hope]**" prefix and 247 with a "## Memory Events" envelope, and ran
-// `git status` every turn in the non-git agent folder, all from the owner's ~/.codex/AGENTS.md.
-// Owner decision 2026-10-06: personal coding rules must not drive product agents, for every user.
-//
-// So a product run gets a mirror of the real home in which every entry is a symlink to the original
-// — sign-in (Codex writes auth.json in place, following the link), plugins, hooks and skills stay one and the
-// same — except the two instruction files and the person's command rules (rules/), which are simply absent, config.toml, which is the mirror's own file holding
-// only the allowlisted sign-in, provider and model-default keys of the person's (productCodexConfig), and the session store. Product sessions are Agentlas's own
-// (owner 2026-10-12: "agentlas 세션은 개인 세션과 분리"): the mirrors share one product store for rollouts
-// (codex-product-home/store), and the thread index, logs, prompt history and Codex app state are each mirror's own,
-// so nothing an agent runs appears in the person's Codex app. A thread an older install wrote into the person's home
-// is copied into the product store when it is next resumed (adoptCodexThreadIntoProductStore). Measured on codex-cli 0.160.1: sign-in, plugins and
-// hooks load, a session written through the mirror lands in the real sessions folder and resumes, the
-// mirror gains no files of its own, and the model reports no git rule and no Hope identity.
-//
-// Personal memories, skills and hooks are not mirrored either (owner decision 2026-10-11, all users); One alone
-// gets back the ones the person switched on (capabilities/one-capabilities.ts). Measured on
-// codex-cli 0.162.1 through the old mirror, every model request carried the person's Codex memory block
-// (~4,100 tokens of project notes and preferences) and a skills index of the person's own skills; both are the
-// same class of leak as AGENTS.md. A product agent gets Agentlas's own memory context and only the skills that
-// belong to it (its folder's skills, the plugins the host routed). Codex rebuilds `skills/.system` (its bundled
-// skills) in the mirror itself. Codex would also run a memory-consolidation model call over the shared state
-// database when the memory folder is absent, so product runs also pass `features.memories=false`
-// (codex-personal-context.ts).
-//
-// The mirror is skipped (the run keeps the real home) where it cannot hold: no auth.json to link
-// (keyring sign-in is keyed by the home's path), or links cannot be made (Windows without the right).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -42,12 +42,12 @@ import { inheritedProductHome, personalHomeDir, personalHomeOverride, productHom
 /** Read by Codex as global user instructions; never mirrored. */
 export const CODEX_PERSONAL_INSTRUCTION_FILES: ReadonlySet<string> = new Set(["AGENTS.md", "AGENTS.override.md"]);
 /**
- * The person's command rules ($CODEX_HOME/rules/*.rules); never mirrored, for One neither. Codex auto-approves a command
- * an `allow` rule matches and lists every approved prefix in the model's instructions whenever approval is on-request,
- * which is the policy of every product read/write turn. Measured 2026-10-17 (codex-cli 0.163.0, `codex debug
- * prompt-input`): through the mirror the owner's 13 rules (`railway up`, `flutter build`, ...) were the only
- * model-visible difference from a home holding nothing but the sign-in. Agentlas decides approvals for product runs; a
- * prefix a product turn approves stays in the mirror's own rules folder instead of being written into the person's.
+
+
+
+
+
+
  */
 const CODEX_PERSONAL_RULES_DIR = "rules";
 /** The person's Codex memory stores, skills and hooks; mirrored only for One, and only what it switched on. */
@@ -89,10 +89,10 @@ function mirrorExcludes(name: string, personal: CodexProductHomeOptions["persona
 /** Rollout folders the product mirrors share through codex-product-home/store (threads resume from any mirror). */
 const CODEX_PRODUCT_SESSION_DIRS = ["sessions", "archived_sessions"] as const;
 /**
- * Entries of the person's home that hold their own sessions, history or Codex app state. A product mirror never links
- * them: Codex creates its own thread index, logs and history in the mirror, and rollouts go to the product store.
- * Measured 2026-10-12 (codex-cli 0.162.1): a home with only auth.json linked starts, and a thread whose rollout file
- * alone was copied into its sessions folder resumes with its memory intact.
+
+
+
+
  */
 export function isCodexPersonalSessionEntry(name: string): boolean {
   return (CODEX_PRODUCT_SESSION_DIRS as readonly string[]).includes(name)
@@ -512,9 +512,9 @@ export function withCodexProductHome(env: NodeJS.ProcessEnv = process.env, optio
 
 const adoptedThreads = new Set<string>();
 /**
- * A thread an older install wrote into the person's own sessions folder, copied into the product store before it is
- * resumed from a product mirror (the rollout file alone is enough: measured 2026-10-12, the memory carried over). The
- * person's copy is left where it is. Nothing happens for a home that is not a product mirror or a thread already there.
+
+
+
  */
 export function adoptCodexThreadIntoProductStore(home: string | undefined, threadId: string, mirrorRoot = userDataPath("codex-product-home")): boolean {
   if (!home || !/^[0-9a-f-]{16,64}$/i.test(threadId) || adoptedThreads.has(threadId)) return false;

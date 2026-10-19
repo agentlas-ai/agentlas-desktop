@@ -572,24 +572,24 @@ export const AGENTLAS_TURN_TOOLS = ([
 ] as const).map(tool => {
   purposePrompt([{ id: `tool.agentlas-turn.${tool.name}.schema`, revision: 1, stability: "fixed-policy", changeTriggers: ["release"], text: JSON.stringify(tool.inputSchema) }]);
   return { ...tool, description: purposePrompt([
-  // revision 3 (2026-10-17): harness_call names media.listen. Dev replay r06 stopped before upload on the owner's "직접 청취"
-  // gate with the host listening port unused; real-model A/B (claude sonnet low, codex gpt-6.1-sol; 8 runs per arm) called it
-  // 8/8 with this line and 0/8 without (/tmp/prompt-audit/listen-ab).
+  
+
+
   { id: `tool.agentlas-turn.${tool.name}.description`, revision: tool.name === "harness_call" ? 3 : 2, stability: "fixed-policy", changeTriggers: ["release"], text: tool.description },
 ]) };
 });
 
-// MCP server instructions: Claude Code defers MCP tool definitions (ToolSearch), so a teammate sees only the names
-// harness_search/harness_describe/harness_call, never the harness_call menu. Dev replay r08 (2026-10-17): Film Production
-// Director (claude-code) wrote "I cannot listen to the audio", recorded its QA as FAIL and the run uploaded nothing, with
-// media.listen unused. Claude Code shows server instructions in its system prompt even when tools are deferred. Real-model
-// A/B in that channel (claude sonnet low, product Claude home, ENABLE_TOOL_SEARCH=true; /tmp/prompt-audit/listen-ab2):
-// media.listen was called in 0/6 runs without this line and 5/6 with it. Sent only while harness_call is one of this run's tools.
-// Second line (2026-10-17): the live document ports (document.open/apply/save, live-document/ports.ts). Same channel, same A/B
-// method, task "change paragraph 2 of report.docx and save" (/tmp/prompt-audit/doc-ab): without the line a script rewrote the file
-// in 8/8 runs and document.* was never called; a descriptive line ("document.open edits ... live in the Document tab") changed
-// nothing (0/8); this imperative line called document.open/apply/save in 8/8 and no run rewrote the file by script. Control task
-// (summarise report.docx into summary.txt, no edit): document.* called 0/4 with and 0/4 without the line.
+
+
+
+
+
+
+
+
+
+
+
 const AGENTLAS_TURN_INSTRUCTIONS = purposePrompt([
   { id: "tool.agentlas-turn.server-instructions", revision: 1, stability: "fixed-policy",
     changeTriggers: ["release"], text: "harness_call media.listen hears a local audio or video file for you." },

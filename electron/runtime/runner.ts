@@ -80,18 +80,18 @@ export interface RunnerRequest {
   /** Nested/control calls return data to their parent and never own a user Surface. */
   surfaceGate?: "auto" | "exclude";
   /**
-   * 최종 답의 형태를 **계약으로** 못박는다. 지원 런타임은 CLI 플래그로 강제하고
-   * (claude·grok·agy `--json-schema`, codex `--output-schema <FILE>`), OpenAI 호환
-   * 로컬 런타임은 `response_format`(json_schema)로 제약 디코딩을 건다.
-   *
-   * ★왜 필요한가. 판정·화면생성·진화제안은 답 안에서 구조를 **파싱**해 왔고, 자유
-   * 서술이라 형식이 깨지면 조용히 사라졌다 — 로컬 모델에서 "완료라는데 결과물이
-   * 없음"의 정체가 이것이다(실측 2026-08-08 붕괴 기록). 제약 디코딩은 모델이 문법상
-   * 틀린 토큰을 뱉을 수 없게 만들므로, 형식 붕괴는 능력 문제가 아니라 배선 문제가 된다.
-   *
-   * 지원하지 않는 런타임에서는 **조용히 무시하지 않는다** — 러너가 지시문 폴백을
-   * 쓰고, 그 사실이 실행 상태줄에 남는다(정직한 강등).
-   */
+
+
+
+
+
+
+
+
+
+
+
+ */
   outputSchema?: {
     /** 스키마 이름 — 일부 프로바이더가 요구한다(OpenAI response_format). */
     name: string;
@@ -133,11 +133,11 @@ export interface RunnerRequest {
   unattended?: true;
   /** Interactive remote surface can show durable Decisions but cannot answer a blocking host tool call. */
   noSynchronousAsk?: true;
-  /** Main-authored: nobody can answer a question in this run. Set by the same decision that adds
-   * UNATTENDED_NO_ASK_DIRECTIVE and withholds ask_form (mcp/client.ts), never from renderer/model input.
-   * The team orchestrators (borrowed-task-force, firm-orchestrator, swarm-run) set it on every worker turn too:
-   * a worker's questions belong to its orchestrator (owner 2026-10-16), and withholdTurnAskForRun takes ask_form away.
-   * wrapSystemPrompt then omits the system `ask:` module, so no channel offers an ask the run cannot use. */
+  /**
+
+
+
+ */
   unattendedNoAsk?: true;
   /** Stable configuration identity for durable unattended sessions. Mutable routing/tool
    * overlays stay in the prompt but do not force a new CLI conversation every run. */
@@ -150,10 +150,10 @@ export interface RunnerRequest {
    */
   turnContext?: string;
   /**
-   * turnContext 안에서 세션 동안 바뀌지 않는 블록들(기억 이벤트 규약·목표 계약·대기 규약·프로젝트 지침 등).
-   * 세션 지원 러너는 resume 턴에서 최근에 이미 보낸 같은 블록을 생략한다 — 대화 기록에 이미 있어 모델이 알고 있고,
-   * 매 턴 다시 실으면 세션이 길어질수록 같은 규약 사본이 기록에 쌓인다(2026-09-14 실측: 턴당 3~4KB).
-   */
+
+
+
+ */
   turnContextStable?: readonly string[];
   /**
    * Observability only: how the host split this request before placement folded the per-turn context into the
@@ -182,21 +182,21 @@ export interface RunnerRequest {
    */
   mcpGrantCatalogOnly?: true;
   /**
-   * Main-authored: this run's tool authority is a single-use, per-run grant (Science: a fresh token and config file per
-   * invocation, revoked when the turn settles). Such a process can never serve the next turn, so it is never pooled.
-   * Measured 2026-09-20: a Science loop left one resident CLI (~0.5 GB with its MCP child) per turn, each holding a dead token.
-   * Continuity is unaffected: it comes from --resume / history, not from residency.
-   * Since 2026-09-21 only plan-mode, criterion-review and pre-session Science grants are per-run; a normal Science turn
-   * carries a session grant (same token/config across turns) and is pooled like any chat.
-   */
+
+
+
+
+
+
+ */
   ephemeralToolGrant?: true;
   /** A root Science controller run: its Codex session compacts earlier (see scienceCompactionArgs in codex.ts). */
   scienceController?: true;
   /**
-   * Main-authored: this run has no next turn (a throwaway chat id, e.g. the post-turn memory review). Pooling it parks a
-   * CLI nobody can lease again until the 12h idle reap. Measured 2026-09-20: a Science loop left one resident claude
-   * (~0.2 GB plus its plugin MCP children) per reviewed turn -- 6 after 40 minutes.
-   */
+
+
+
+ */
   singleUse?: true;
   /** 위 구성의 MCP 툴 이름 prefix 목록(예: "mcp__playwright"). write/full 권한에서 자동 승인용. */
   mcpAllowedTools?: string[];
@@ -222,16 +222,16 @@ export interface RunnerRequest {
    */
   untrustedNoTools?: boolean;
   /**
-   * 이 무도구 실행이 **판정**인가(사용자가 이미 가진 텍스트를 라벨/채점표로 분류).
-   *
-   * untrustedNoTools 하나로는 두 가지가 구분되지 않아, 세션 영속을 이유로 Agent App 을
-   * 거절하던 런타임(grok)이 판정까지 함께 막았다. 그 결과 그 런타임만 쓰는 사용자는 제품의
-   * 모든 검증이 죽는다 — 자동화가 산출물을 정확히 만들어도 채점에서 EVAL_UNAVAILABLE 로
-   * 떨어져 실행 전체가 error 가 된다(agy 에서 실측, 2026-08-19).
-   *
-   * 판정은 브라우저 입력을 대신 실행하는 것이 아니라 분류 한 번이라, 세션 기록이 남는
-   * 런타임에도 허용된다. 도구 경계는 여전히 인자로 강제한다.
-   */
+
+
+
+
+
+
+
+
+
+ */
   judgmentOnly?: boolean;
   /** Exact main-minted read-only MCP tools allowed despite the zero-builtins boundary. */
   untrustedAllowedMcpTools?: string[];
@@ -281,11 +281,11 @@ export interface RunnerRequest {
   /** Opaque host-authorized persistent context; never accepted from IPC/JSON. */
   agentContext?: AgentContextCapability;
   /**
-   * Main-issued read-only effect observation (claude-code): one look, not a conversation turn. The
-   * runner replaces the system prompt instead of appending to the user's CLI setup, loads no user or
-   * project settings/plugins, keeps only the read built-ins, and does not persist a session.
-   * Measured 2026-09-24: 150-500k input tokens per look with the full One/Work context.
-   */
+
+
+
+
+ */
   minimalObservation?: boolean;
   /** Firm/resolved-org node identity used only to map runtime lifecycle events back to the UI tree. */
   orchestrationAgentId?: string;
@@ -711,7 +711,7 @@ export interface RunnerEvents {
    * classify a tool by its display name (shared/runtime-tool-kind.ts). Absent for runtimes with fixed native names.
    */
   onTool?: (name: string, args?: string, result?: string, id?: string, isError?: boolean, artifactPaths?: readonly string[], imageDataUrl?: string, origin?: ToolInvocationOrigin, toolKind?: RuntimeToolKind) => void;
-  /** 라이브 누적 출력 토큰 — 스트리밍 중 "N tokens" 실시간 표시용. 단조 증가 값(usage 실측 + 추정). 선택. */
+  /** */
   onUsage?: (tokens: number) => void;
   /** One host-minted id per native turn dispatched inside this runner, including retries. */
   onRuntimeAttemptStarted?: (attemptId: string) => void;
@@ -754,12 +754,12 @@ export interface RunnerEvents {
 }
 
 /**
- * ★런타임 실패의 종류 — 표식(marker) 기반. 텍스트 모양으로 성공을 판정하지 않기 위한 계약.
- *
- * 배경(2026-08-06 실측): claude CLI가 한도 소진을 스트림 표식(rate_limit_event →
- * is_error:true/429)으로 정확히 말했는데, 이 결과 계약에 실패 칸이 없어서 거절문
- * ("You've hit your weekly limit")이 text에 실려 정상 답 행세를 했다 — 판정 폴백이
- * 안 걸리고, 노드 산출물·챗 답변이 됐다. throw 아니면 텍스트, 두 상태뿐이었던 것이 뿌리다.
+
+
+
+
+
+
  */
 /*
  * "quota" is an exhausted plan, credit balance or usage window (it lifts at a reset the provider names, or never without
@@ -775,9 +775,9 @@ export interface RunnerFailure {
   message: string;
   runtime: string;
   /**
-   * 판정 출처. `heuristic`은 표식 없는 런타임(실측: codex 한도)용 최후 그물 —
-   * 화면은 단정 대신 완곡하게 말하고, 원문은 저널에 보존해야 한다.
-   */
+
+
+ */
   source: "marker" | "exit" | "heuristic";
   /** Provider-owned machine code, accepted only after a runner validates and bounds it. */
   providerCode?: string;
@@ -861,10 +861,10 @@ export class RuntimeTurnUnsettledError extends Error {
   /** RuntimeTurnDelivery, when the runner observed it (an unsettled turn was dispatched, so never "not-dispatched"). */
   readonly turnDelivery?: Exclude<RuntimeTurnDelivery, "not-dispatched">;
   /**
-   * `providerReason`: the provider's own final error for this turn when it sent one (e.g. "Selected model is at
-   * capacity"). The owner saw only "no terminal receipt" while the real cause was a provider capacity refusal
-   * (Yotube room, 2026-10-13 12:58Z), so the provider's words lead the message.
-   */
+
+
+
+ */
   constructor(readonly runtimeKind: string, locale?: string, sessionId?: string | null, providerReason?: string | null,
     turnDelivery?: Exclude<RuntimeTurnDelivery, "not-dispatched">) {
     const reason = typeof providerReason === "string" ? providerReason.trim().slice(0, 300) : "";
@@ -1098,19 +1098,19 @@ export function runnerOutcome(res: RunnerResult):
 }
 
 /**
- * ★호스트 소유 생존 신호 — 모든 CLI 스폰 공통(이 제품의 기결정: liveness를 모델에
- * 맡기지 않는다). 어떤 런타임이든 생각/도구 구간에서 수 분 침묵할 수 있고, 그 침묵은
- * 무활동 워치독(480s)에게 사망과 구별되지 않는다.
- *
- * 실측(2026-08-06): 이 신호를 agy에만 달았더니, 같은 그래프의 다음 노드가 공식
- * Antigravity로 해석되어 8분 침묵 → 스톨 워치독이 정당하게 끊었다. 특례는 특례가
- * 안 붙은 형제를 지뢰로 남긴다 — 그래서 이 헬퍼는 러너 공통이다.
- *
- * 자식 생존을 **확인하고** 뛴다: 확인 없는 심장박동은 죽은 자식을 영원히 "살아
- * 있다"고 보고해, close 이벤트가 유실되면 실행이 좀비가 된다(agy 자체 30m 타임아웃
- * 사후 33분+ running 실측). 죽었으면 박동을 멈춰 워치독이 제 일을 하게 둔다.
- *
- * 반환된 함수를 스폰 종료 경로(close/error/정상 반환)에서 반드시 호출할 것.
+
+
+
+
+
+
+
+
+
+
+
+
+
  */
 export function startCliHeartbeat(
   child: { killed: boolean; exitCode: number | null; signalCode: NodeJS.Signals | null },
@@ -1178,12 +1178,12 @@ export interface CliSilenceGuard {
 }
 
 /**
- * ★호스트 소유 침묵 한도 — 채팅·Goal 방 CLI 실행에는 무활동 워치독이 없어(automation 전용),
- * 살아 있지만 완전히 조용한 자식이 실행 전체를 무기한 붙들었다(Yotube Goal 방 61분, 2026-10-11).
- * 하트비트는 호스트가 내는 신호라 자식 침묵을 가리지 못한다 — 이 가드는 **자식이 낸** 것만 센다.
- *
- * 정산 경로는 늘 하나다: 가드는 자식 트리만 죽이고(`kill`), 러너의 close 핸들러가 `tripped`를
- * 보고 timeout 실패로 정산한다(ensureChildCloseAfterExit 주석의 단일 정산 설계).
+
+
+
+
+
+
  */
 export function startCliSilenceGuard(
   child: { killed: boolean; exitCode: number | null; signalCode: NodeJS.Signals | null },
@@ -1264,26 +1264,26 @@ export function runtimeProtocolUnrecognizedFailure(runtime: string, stderr?: str
 }
 
 /**
- * ★자식이 죽었는데 `close`가 오지 않는 경우를 끝낸다 — CLI 스폰 공통.
- *
- * Node 계약에서 `close`는 자식의 **stdio가 전부 닫혀야** 온다. `exit`은 프로세스가
- * 죽으면 즉시 오지만, CLI가 stdout/stderr를 상속한 손자(MCP 서버·language server 등)를
- * 남기고 죽으면 그 손자가 파이프를 붙들어 **`close`는 영영 오지 않는다.**
- * 세 러너(agy·claude·codex)가 전부 `close`에서만 정산하므로, 그 순간 실행 Promise는
- * 영구 pending이 되고 실행은 좀비가 된다.
- *
- * 실측 재현: `bash -c "sleep 30 & echo hi; exit 0"` → exit 2ms, close 없음(무한).
- * 같은 자식에서 exit 후 stdout/stderr를 destroy하면 close가 정상 발사된다(503ms).
- *
- * 이 결함의 증상은 "실패"가 아니라 "끝나지 않음"이다 — 채팅 실행이 한 시간 넘게
- * "진행 중"에 머무르고 사람이 손으로 중지할 때까지 정산되지 않는다. 심장박동은 자식
- * 사망을 알고 있지만(`exitCode !== null` → 박동 정지) 아무에게도 말하지 않고,
- * 채팅 실행 경로에는 그 침묵을 받는 워치독이 없다(무활동 워치독은 automation 전용).
- * 침묵이 아니라 **정산**이 있어야 한다.
- *
- * 그래서 `exit`을 함께 듣고, 유예 안에 `close`가 오지 않으면 남은 파이프를 끊어
- * **진짜 `close`를 발사시킨다.** 러너의 close 핸들러가 유일한 정산 경로로 남는다 —
- * 두 번째 정산 경로를 만들면 "어느 이벤트로 끝났는지"가 결과를 바꾸는 새 지뢰가 된다.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
  */
 export function ensureChildCloseAfterExit(
   child: {
@@ -1412,51 +1412,51 @@ export function withNativeBrowserGuidance(runner: Runner, runtimeKind?: string):
  *  토큰을 아끼기 위해 짧게. */
 const ASK_PROTOCOL = ASK_LINE;
 
-/** 무인 실행(스케줄 자동화·백그라운드 생성) 최종 지침. 같은 실행의 시스템 `ask:` 모듈은 렌더하지 않는다
- *  (RunnerRequest.unattendedNoAsk) — 2026-10-15 실측: 개발자 채널의 ask 줄이 남아 있으면 Codex가 이 사용자 채널
- *  경계보다 그 줄을 따라 질문 fence를 냈다(old/new 2/2 FAIL). 쓸 수 없는 질문 수단은 아예 주지 않는다.
- *  Main이 executionContext로만 붙인다(렌더러/모델 입력에서 파생 금지).
- *  automation-result.ts의 분류기가 이 계약(<<agentlas-ask>> 금지, "NEEDS-INPUT:" 접두)을 짝으로 감지해,
- *  무인 런의 질문이 조용한 가짜 성공으로 끝나는 것을 막는다. */
+/**
+
+
+
+
+ */
 export const UNATTENDED_NO_ASK_DIRECTIVE = "unattended (final): nobody can answer; never emit <<agentlas-ask>> or call ask_form; a safe default → take it and state it; none → reply one line starting \"NEEDS-INPUT:\" naming exactly what is missing; never guess.";
 
 /**
- * 사람이 보고 있는 Work 실행에서 **묻는 방법**을 알려 준다.
- *
- * 배경(2026-09-04 실측): Work 에는 질문 시트 UI 가 있고 렌더러는 `<<agentlas-ask>>` 를
- * 읽어 그 시트를 그린다. 그런데 **그 형식을 알려 주는 곳이 태스크포스 합성 프롬프트뿐**이었다.
- * 내장 `ask_user` 도구는 로컬 런타임(local-tool-loop·byok)에만 실리고 CLI 런타임
- * (claude-code·codex)에는 없다. 그래서 기본 경로인 CLI 실행은 구조화해서 물을 수단이
- * 하나도 없었고, 모델은 산문으로 되물었다("…새로 만들까요, 아니면 수정할까요?").
- * 그 물음은 시트로 뜨지 않으니 사용자는 고를 것이 없고 답을 타이핑해야 했다.
- *
- * 남용을 막기 위해 조건을 좁게 적는다 — 진짜로 막힌 갈림길에서 한 번만.
+
+
+
+
+
+
+
+
+
+
  */
 export const MOBILE_DURABLE_ASK_DIRECTIVE = "ask (mobile, final): ask_user and ask_form are unavailable; a required answer → the <<agentlas-ask>> block, then stop; it is answered from Mobile next turn; never guess.";
 
 const BUILD_PROMPT_SENTINEL = "<!-- agentlas-build-system-prompt/v1 -->";
-// Budget for the Build system prompt.
-//
-// Raised 2026-08-16 from 48,000. Owner rule: Desktop Build ships the canonical
-// /hep-build procedure, the interview gate, AGENTS.md and the active builder
-// VERBATIM — that bundle alone is ~73k characters. The old ceiling made the
-// canonical literally unshippable: `wrapBuildSystemPrompt` threw, the rejection
-// was never caught, and the build sat at "Starting the AI engine" forever with
-// no error shown (measured: 74,807 > 47,232, silent death).
-//
-// Raised again 2026-08-17, from 120,000. That number was mine and it was
-// arbitrary: it happened to clear the bundle of the day by ~45k, and once the
-// canonical bodies were merged from every runtime's copy the margin fell to
-// ~16k. At that point the ceiling had quietly turned back into a ration — the
-// next person adding a canonical rule would have been deciding between the
-// contract and a constant nobody had measured anything against.
-//
-// So size it against the only real limit. 400,000 chars is roughly 100k tokens;
-// the runtimes we dispatch to carry 200k (Claude, Codex) to 1M (Gemini). This
-// is a runaway guard — an attachment summary looping, a repair prompt appending
-// to itself — and nothing here should ever approach it. If a build legitimately
-// needs more than 100k tokens of contract, the contract is the thing to look
-// at, and the failure will say so instead of dying at "Starting the AI engine".
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 export const MAX_BUILD_SYSTEM_PROMPT_CHARS = 400_000;
 export const BUILD_MCP_DEGRADED_GUARD_RESERVE_CHARS = 768;
 
@@ -1561,10 +1561,13 @@ export function wrapSystemPrompt(
   /** RunnerRequest.unattendedNoAsk, forwarded unchanged by each adapter: the run has no question channel. */
   unattendedNoAsk?: boolean,
 ): string {
-  // Every line is a registered PromptModule (prompt-modules.ts): `key: value` one-liners, typed tools for anything
-  // a tool can do, name lists for catalogs (owner 2026-10-13). Profiles keep their boundaries; only the bytes shrink.
-  // Every runtime calls this function internally. A Main-authored Build prompt already passed the restricted Build
-  // wrapper, so it is not wrapped again with unrelated chat/surface/connection lines.
+  if (systemPromptComposition?.kind === "company-work") {
+    return composeDeclaredPrompt([...restoreTracedPrompt(agentSystemPrompt, systemPromptComposition), ...(supplements ?? [])], "\n\n");
+  }
+
+
+
+
   if (!untrustedNoTools && !restrictedReadBoundary && sciencePromptProfile !== true && systemPromptComposition?.kind !== "main-host" && agentSystemPrompt.startsWith(BUILD_PROMPT_SENTINEL)) {
     if (systemPromptComposition) {
       const systemPromptParts = restoreTracedPrompt(agentSystemPrompt, systemPromptComposition);
@@ -1610,12 +1613,12 @@ export function wrapSystemPrompt(
   }
   if (sciencePromptProfile === true) return composePrompt({ ...base, profile: "science" }).text;
   if (hostJudgmentProfile === "host-judgment") return composePrompt({ ...base, profile: "host-judgment" }).text;
-  // Agentlas plugins first, outside equivalents only as the fallback (shared/capability-priority.ts, owner 2026-09-24).
+
   let preferredProviders: string[] = [];
   try { preferredProviders = preferredProviderPairs(installedAgentlasCapabilityProviders()); } catch { preferredProviders = []; }
   let plugins: PluginCatalog | null = null;
   try { plugins = installedPluginCatalog(userPrompt); } catch { plugins = null; }
-  // Installed connectors as a list (owner 2026-10-13); the store is read lazily so a context without it lists none.
+
   let connectors: string[] = [];
   try {
     const registry = require("../mcp-tools/registry") as typeof import("../mcp-tools/registry");

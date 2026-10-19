@@ -34,13 +34,13 @@ const SIGNAL_TEXT: Array<{ re: RegExp; kind: SandboxDeathSignal["kind"] }> = [
   { re: /\b(?:AGXDeviceUserClient|IOSurfaceRootUserClient)\b|\bcom\.apple\.windowserver(?:\.active)?\b[^\n]{0,40}\b(?:denied|deny)\b|\bdeny\(\d+\)\s+(?:iokit-open|mach-lookup)\b[^\n]{0,80}\b(?:AGX|IOSurface|windowserver)/i, kind: "gpu" },
 ];
 
-/*
- * 139 (SIGSEGV) and 134 (SIGABRT) too: a GPU or window-server app started inside the write sandbox crashes this way as
- * soon as Metal is refused. Production 2026-10-07 and 10-12: teammates' Blender in Codex's workspace-write sandbox
- * died with exit 139 at start ("metal_is_supported", denied AGXDeviceUserClient / IOSurfaceRootUserClient /
- * com.apple.windowserver.active); nothing read it as the permission boundary, so the room never lifted the worker and
- * the worker noted "Metal crash, do not retry". The same Blender renders unsandboxed and in Agentlas's own seatbelt.
- */
+
+
+
+
+
+
+
 const SIGNAL_BY_EXIT: Record<number, SandboxDeathSignal["kind"]> = { 132: "SIGILL", 133: "SIGTRAP", 134: "SIGABRT", 139: "SIGSEGV" };
 
 export function detectSandboxDeath(toolResultText: string): SandboxDeathSignal | null {

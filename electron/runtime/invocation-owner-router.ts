@@ -71,10 +71,10 @@ export function createInvocationOwnerRouter(ports: InvocationOwnerRouterPorts): 
   async function pendingReceipt(row: InvocationCurrentTurnSteerReceipt): Promise<InvocationCurrentTurnSteerReceipt> {
     if (row.status === "applied" || row.status === "rejected" || row.status === "uncertain") return row;
     const runOwner = await ports.owners.getRunOwner(row.chatId, row.runId);
-    // Once the run's owner lease is released nobody can move this row any more. A queued item was never dispatched, so
-    // it is refused and its text stays with the owner; a dispatching one may have reached the model, so it is uncertain.
-    // Without this the row stayed queued forever and every read failed invocation_owner_unavailable, and "send again"
-    // never got past it (room "Youtube launch", 2026-10-11: two owner directions to a run the owner then paused).
+    
+
+
+
     if (runOwner && runOwner.chatId === row.chatId && runOwner.runId === row.runId && runOwner.state === "released"
       && ports.inbox.settleCurrentTurnSteer) {
       const settled = row.status === "queued"

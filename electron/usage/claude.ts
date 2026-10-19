@@ -18,12 +18,12 @@ import { isSupportedClaudeSubscriptionWindow } from "../../shared/runtime-quota"
 const execFileP = promisify(execFile);
 const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const CLAUDE_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile";
-/*
- * An E2E/QA app keeps its own credentials in memory (vault.ts USE_MEMORY_VAULT, same switch).
- * This adapter read the owner's login keychain item regardless, so an isolated QA desktop could
- * read — or raise the macOS access prompt for — the owner's Claude Code credential (independent
- * review 2026-10-04). AGENTLAS_E2E_KEYCHAIN=1 opts back in, exactly as it does for the vault.
- */
+
+
+
+
+
+
 const NATIVE_KEYCHAIN_READS = !(process.env.AGENTLAS_E2E === "1" && process.env.AGENTLAS_E2E_KEYCHAIN !== "1");
 
 function claudeConfigDir(): string {

@@ -250,17 +250,17 @@ export function filterSupersededProjectSoul(soul: string, projectId?: string | n
 }
 
 /**
- * Latest-wins for restated rules (2026-09-24).
- *
- * The owner's store held the same agent rule several times over (vector score
- * 1.0, all live) plus older and newer versions of one rule side by side, and
- * recall injected all of them - an older "hold" rule kept outvoting the newer
- * wording. When a new decision/procedure/fact is admitted, a live memory of the
- * same kind under the exact same owner boundary that it restates (vector score
- * at or above RESTATEMENT_MIN_SCORE, older than the new one) is superseded -
- * never deleted - and a `supersedes` edge records which memory replaced it and
- * with what score. The threshold is deliberately high: complementary rules in
- * one topic measured 0.74-0.82 and must both stay live.
+
+
+
+
+
+
+
+
+
+
+
  */
 const RESTATEMENT_MIN_SCORE = 0.9;
 const RESTATEMENT_KINDS = new Set(["decision", "procedure", "fact"]);

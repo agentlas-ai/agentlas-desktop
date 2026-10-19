@@ -1385,12 +1385,12 @@ function MobileBridgePanel() {
           </button>
         </div>
 
-        {/* The pairing QR carries app-only data, so a phone's default camera cannot
-            complete a pairing — it just dumps the text (measured: a user's scan
-            landed in a notes app). WhatsApp has the same constraint and solves it
-            the same way: state the exact in-app path before showing the code.
-            This gate also answers the prerequisite question — is the app even
-            installed — instead of leaving a person with an unusable QR. */}
+        {
+
+
+
+
+}
         {installGate !== "closed" && (
           <PopupFrame title={locale === "ko" ? "모바일 연결" : "Connect Mobile"} icon={<IconCheck size={20} />} closeLabel={locale === "ko" ? "닫기" : "Close"} onClose={() => setInstallGate("closed")}>
             <div data-testid="mobile-bridge-install-gate">
@@ -2305,16 +2305,16 @@ function UpdatePanel() {
   const [resumeBusy, setResumeBusy] = useState(false);
   const [laterChosen, setLaterChosen] = useState(false);
   const [state, setState] = useState<UpdaterState>({ status: "idle" });
-  /*
-   * Desktop's own version is not the whole answer. Build, upload, routing and
-   * the Workforce contract all belong to the attached Agentlas-OS Core, which
-   * updates on its own release train and is resolved at runtime — managed
-   * `~/.agentlas/runtime/current` when healthy, the bundled copy otherwise.
-   * Measured 2026-07-28: managed 1.1.73 vs bundled 1.1.62, and the bundled
-   * fallback is missing five workforce goal-continuity tools outright. Showing
-   * only the app version left no surface anywhere telling the user (or support)
-   * which Core they are actually on.
-   */
+  
+
+
+
+
+
+
+
+
+
   const [core, setCore] = useState<{
     version: string | null;
     root: string | null;

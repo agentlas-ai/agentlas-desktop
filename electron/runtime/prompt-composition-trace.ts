@@ -5,12 +5,12 @@ export interface PromptCompositionTrace {
   revision: 1;
   /** Omitted for the original Build trace contract. Main uses its existing double-newline transport. */
   separator?: "\n" | "\n\n";
-  kind?: "main-host";
+  kind?: "main-host" | "company-work";
   parts: readonly (Omit<DeclaredPromptPart, "text"> & { start: number; end: number })[];
 }
 
 /** Exact UTF-16 spans into the already transported string avoid duplicating large canonical sources. */
-export function composeTracedPrompt(parts: readonly DeclaredPromptPart[], options?: { separator: "\n" | "\n\n"; kind?: "main-host" }): { text: string; composition: PromptCompositionTrace } {
+export function composeTracedPrompt(parts: readonly DeclaredPromptPart[], options?: { separator: "\n" | "\n\n"; kind?: "main-host" | "company-work" }): { text: string; composition: PromptCompositionTrace } {
   const separator = options?.separator ?? "\n";
   const registeredText = composeDeclaredPrompt(parts, separator);
   const ordered = orderPromptParts(parts).filter(part => options?.kind === "main-host" && part.id === "main.system.host.agent-definition"
@@ -35,7 +35,7 @@ export function restoreTracedPrompt(text: string, trace: PromptCompositionTrace)
   const fail = (): never => { throw new Error("prompt_composition_trace_mismatch"); };
   if (trace?.revision !== 1 || !Array.isArray(trace.parts)) return fail();
   const separator = trace.separator ?? "\n";
-  if (!["\n", "\n\n"].includes(separator) || (trace.kind !== undefined && trace.kind !== "main-host")) return fail();
+  if (!["\n", "\n\n"].includes(separator) || (trace.kind !== undefined && trace.kind !== "main-host" && trace.kind !== "company-work")) return fail();
   let cursor = 0;
   const parts = trace.parts.map(span => {
     if (!span || !Number.isSafeInteger(span.start) || !Number.isSafeInteger(span.end)

@@ -56,11 +56,11 @@ export function closeOneSupervisorHostAdmission():void {
   hostOwner?.closeAdmission();workExecutor?.close();stopProactiveHost?.();stopBudgetHost?.();supervisor?.close();nativeRuntime?.close();
 }
 /**
- * True while the background daemon holds the personal One domain, whether this Main handed it over or lost the race
- * for it at start (the daemon adopted it first). Main must then neither build its own supervisor nor treat the
- * unconfirmed ownership as a failure of an owner action (production 1.3.5, 2026-10-12T22:15Z: a question-card answer
- * in a Goal room was refused supervisor_owner_unconfirmed). Only a live work-daemon row counts; a dead or released
- * owner is taken over by oneSupervisor() as before.
+
+
+
+
+
  */
 export function personalDomainHeldByDaemon():boolean {
   if(domainHandedToDaemon)return true;

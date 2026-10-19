@@ -85,10 +85,10 @@ export function createInvocationRunOwnerStore(ports: InvocationRunOwnerStorePort
     validate(input);
     return ports.getDb().transaction(() => {
       const prior = getOwnerByRunId(input.runId);
-      // A graph run invokes its agent nodes one after another under one run id, often on the same chat. The process that
-      // released the run's lease may open it again for the next node, with a new lease id, so whoever still holds the old
-      // lease stays refused. Without this, every second node on a chat failed with invocation_chat_owned_by_other_run
-      // (production 2026-10-15..16: the daily YouTube graph, step2, right after step1 released).
+      
+
+
+
       if (prior && input.reopenReleased && prior.state === "released" && prior.chatId === input.chatId
         && prior.ownerId === input.ownerId && prior.ownerKind === input.ownerKind) {
         const active = getActiveOwner(input.chatId);
@@ -120,11 +120,11 @@ export function createInvocationRunOwnerStore(ports: InvocationRunOwnerStorePort
       .run(state, now(), expected.chatId, expected.runId, expected.ownerId, expected.ownerKind, expected.leaseId).changes === 1;
   }
 
-  /** Leases a previous process of `ownerKind` left active or settling because it died without settling them (crash,
-   * forced reboot). Only a caller that has proven it is now the sole live process of that kind may release them:
-   * Desktop under Electron's single-instance lock, the daemon after it won the control socket. Measured 2026-10-12:
-   * after a forced reboot two rooms stayed refused with invocation_cleanup_pending on every resume, because nothing
-   * ever released the dead Desktop's rows and the chat's active-owner index stayed taken. */
+  /**
+
+
+
+ */
   function releaseAbandoned(ownerKind: InvocationRunOwner["ownerKind"], liveOwnerId: string): InvocationRunOwner[] {
     if (!validId(liveOwnerId) || !["desktop", "daemon", "terminal"].includes(ownerKind)) {
       throw new Error("invocation_owner_identity_invalid");

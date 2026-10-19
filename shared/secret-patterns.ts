@@ -10,6 +10,8 @@
 
 /** Live-credential shapes across the providers this product actually touches. */
 const SECRET_SHAPES: RegExp[] = [
+  // Company-only Native device credentials.
+  /agcni_v1_[A-Za-z0-9_-]{43}/,
   // GitHub: classic PAT (ghp_), OAuth/user/server tokens (gho_/ghu_/ghs_/ghr_), fine-grained PAT.
   /gh[pousr]_[A-Za-z0-9]{20,}/,
   /github_pat_[A-Za-z0-9_]{20,}/,
@@ -38,22 +40,22 @@ const SECRET_SHAPES: RegExp[] = [
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
 ];
 
-/*
- * Credential assignments (`password: hunter22`, `token=…`): ONE rule for every boundary (review 2026-10-16 H4). Before,
- * this list and the mobile bridge sanitizer each had their own: the sanitizer also caught bare token/session/cookie, so
- * `token=<value>` passed the suggestion validator while the phone redacted it, and the phone (which copies the bridge
- * sanitizer verbatim) disagreed with every Desktop write boundary. Measured on the owner's store before choosing the
- * value shape: a plain union of the two key lists newly flagged 3 of 4,571 memory entries, all prose ("session: <word>",
- * "token: <Korean word>") — each of those boundaries drops or rewrites the whole item. So:
- *   - a key that only ever names a credential (password, passwd, secret, api key, access/auth token) counts with any
- *     value of 4+ characters;
- *   - a key that is also an everyday word (token, session, cookie, pwd, bearer, authorization) counts in config syntax
- *     (`token=value`, no space before the value, 4+ characters), or with any separator when the value is
- *     credential-shaped: 6+ characters holding a digit, or a 16+ character run of key characters. Prose such as
- *     "session: Tuesday" stays. An `Authorization: Bearer …` header is still caught by the Bearer shape at the
- *     boundaries that have it.
- * Exported as a source string so the mobile bridge sanitizer builds its pattern from it; the phone ports it verbatim.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 const ASSIGNMENT_VALUE_CHAR = String.raw`[^,\s"'}\`\]]`;
 export const SECRET_ASSIGNMENT_SOURCE = String.raw`\b(?:(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token)\b\s*[:=]\s*["']?${ASSIGNMENT_VALUE_CHAR}{4,}|(?:token|session|cookie|pwd|bearer|authorization)\b(?:=["']?${ASSIGNMENT_VALUE_CHAR}{4,}|\s*[:=]\s*["']?(?:(?=${ASSIGNMENT_VALUE_CHAR}*[0-9])${ASSIGNMENT_VALUE_CHAR}{6,}|[A-Za-z0-9._~+=-]{16,})))`;
 const SECRET_ASSIGNMENT_RE = new RegExp(SECRET_ASSIGNMENT_SOURCE, "i");
@@ -69,20 +71,20 @@ export function looksSecret(content: string): boolean {
   return SECRET_PATTERNS.some((re) => re.test(content));
 }
 
-/*
- * Private-key blocks: ONE rule for every masking boundary (owner decision 2026-10-16, option B, "비밀키 안가려도됨":
- * do not over-mask the text around a key; this is not "stop masking keys").
- *   - A complete block (BEGIN header … END line) is masked whole, END line included. It never spans into another
- *     block's BEGIN, so prose between an unterminated header and a later block stays.
- *   - An unterminated header is masked with the body that follows it, and the mask stops at the first token that is
- *     not body. Body tokens: base64 runs of 16+ characters holding a digit, "+" or "/" (a wrapped PEM line), shorter
- *     "="-padded runs (a last line), and the RFC 1421 Proc-Type / DEK-Info lines of a legacy encrypted key. Tokens are
- *     separated by whitespace, CRLF or LF, or the escaped \n / \r of a JSON string. Prose words carry no digit, so a
- *     sentence after a truncated key stays readable.
- *   - Accepted by that decision: a truncated key may expose a short trailing fragment (an unpadded last line under 16
- *     characters, or one with no digit, "+" or "/").
- * Terminal keeps its own copy (agentlas_terminal engine/agentlas-secret-patterns.cjs); the owner is retiring it.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 const PRIVATE_KEY_HEADER = "-----BEGIN [A-Z ]*PRIVATE KEY-----";
 const PRIVATE_KEY_COMPLETE_RE = new RegExp(`${PRIVATE_KEY_HEADER}(?:(?!-----BEGIN )[\\s\\S])*?-----END [A-Z ]*PRIVATE KEY-----`, "gi");
 const PRIVATE_KEY_BODY_SEPARATOR = String.raw`(?:[ \t\r\n]|\\[rn])+`;

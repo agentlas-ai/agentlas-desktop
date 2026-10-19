@@ -37,7 +37,7 @@ async function checkUpdatesInteractive(parent: BrowserWindow | null, locale: Men
       detail = `v${state.version ?? "?"} — ${state.progress ?? 0}%`;
       break;
     case "downloaded":
-      // The install button is the download icon at the bottom of the sidebar (2026-10-12: this said "top-right", in English).
+      
       message = ko ? "업데이트 준비됨" : "Update ready";
       detail = ko
         ? `v${state.version}. 사이드바 아래 다운로드 아이콘을 누르면 설치하고 다시 시작합니다.`
@@ -68,16 +68,16 @@ async function checkUpdatesInteractive(parent: BrowserWindow | null, locale: Men
 }
 
 /**
- * Zoom is a property of the window as the person sees it, not of one web contents inside it.
- *
- * Product extensions (Science, the Hub profile, the Work live view) are child views of the same
- * window, each with its own zoom. Electron's built-in zoom roles act on the *focused* contents,
- * so zooming while the pointer sat over Science and then reaching for "Actual Size" reset the
- * shell and left Science enlarged -- and Chromium persists that factor per origin, so it came
- * back on the next launch with no way to undo it. Measured: shell 1.5 -> 1, Science stuck at 1.5.
- *
- * Applying every zoom command to the window and all of its child views keeps them in step, which
- * is what "the screen is too big" means to the person holding the mouse.
+
+
+
+
+
+
+
+
+
+
  */
 function everyContents(win: BrowserWindow | null) {
   if (!win) return [];

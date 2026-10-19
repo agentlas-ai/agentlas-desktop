@@ -1,14 +1,14 @@
 /**
- * Which refusals of an owner's message are TRANSIENT: nothing is wrong, the chat (or the channel to the process that
- * runs it) is simply not ready yet. The owner typed something; the message is accepted, shown once, and run as soon as
- * the chat is free. A transient refusal must never reach the screen as text, a red color, a card or a synthetic reply.
- * Main owns the retry; the renderer only reads this to know it does not have to react.
- *
- * Production 1.2.96, 2026-10-11 10:21-10:23Z (room "Yotube", chat 8f3e09ee): every code below was thrown to the
- * renderer within two minutes of a daemon-owned run settling, and each became a red banner, a "pending reception" card
- * or a synthetic assistant message.
- *
- * Codes are matched exactly (or by the one documented prefix). Localized prose is never inspected.
+
+
+
+
+
+
+
+
+
+
  */
 
 const TRANSIENT_CODES: ReadonlySet<string> = new Set([

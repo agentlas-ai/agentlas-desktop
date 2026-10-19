@@ -32,9 +32,9 @@ export function ProductModeMenu({
   compact?: boolean;
   darkText?: boolean;
   locale?: "ko" | "en";
-  /** Bottom edge of the open list in viewport pixels (0 when closed). A host that has a native view below the header
-   *  uses it to make room: native views paint above every renderer overlay, so a dropdown that reaches into the view's
-   *  area is invisible (Science, 2026-10-11). */
+  /**
+
+ */
   onMenuExtentChange?: (bottom: number) => void;
   /** Close when the window loses focus, because clicks inside a native view never reach the renderer's outside-click handler. */
   closeOnWindowBlur?: boolean;

@@ -255,15 +255,15 @@ export const RUNTIME_CAPABILITIES: Record<RuntimeKind, RuntimeCapabilityDescript
 };
 
 /**
- * Request shapes each runtime ADAPTER refuses before dispatch — the selectors' source of truth (R-090, 2026-10-18).
- *
- * This is what the Agentlas adapter accepts, not an isolation proof (that is system-agents/judgment-capability.ts
- * inspectJudgmentCapability, which every no-tools judgment candidate must also pass). A selector that INHERITS a runtime
- * (the memory curator inheriting the turn runner, AGI's candidate list, the judgment recovery lane) skips one whose row
- * refuses the request it is about to send; an explicit owner pin is not replaced, it gets the adapter's typed refusal.
- * Production 2026-10-14..16: the automatic memory curator inherited Antigravity and failed 69 of 69 calls
- * (untrustedNoTools refused, 2.7 s each including the sign-in probe) before falling back to the judgment pool.
- * Each row is read off its adapter's own refusal, cited in `evidence`; changing an adapter's refusal changes its row.
+
+
+
+
+
+
+
+
+
  */
 export interface RuntimeRequestLimits {
   /** `untrustedNoTools`: accepted, accepted only together with `judgmentOnly`, or refused. */

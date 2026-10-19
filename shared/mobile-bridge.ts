@@ -286,11 +286,11 @@ export function validateMobilePushParams(method: string, params: Record<string, 
 }
 
 /**
- * The fields each One supervisor method accepts from the phone. The request validator here and the Desktop authority
- * (electron/mobile-bridge/authority.ts) both read this one table. Two hand-kept lists drifted: the validator accepted
- * `permissions` (and `oneId`) on one.supervisor.send while the authority refused them, so every phone message to the
- * personal One stopped at "접수 확인 중" (production 2026-10-05 12:39 UTC, "one.supervisor.send contains unsupported
- * field: permissions"; found by the monitoring peer session).
+
+
+
+
+
  */
 export const ONE_SUPERVISOR_PARAM_KEYS = {
   "one.supervisor.send": ["commandId", "text", "runtimeSelection", "permissions", "oneId", "images", "fileGroupId"],
@@ -1204,14 +1204,14 @@ export interface MobileBridgeAgentDto {
   agentDefinitionId?: string;
   agentReleaseId?: string;
   /**
-   * Agent Cloud shelf identity — a DIFFERENT thing from the Hub binding above.
-   *
-   * `cargo.search_agents` returns cloudId/manifestId/revision and never a
-   * definition/release pair, so requiring a Hub binding to show a cloud row hid
-   * the owner's entire shelf (measured: 50 rows, 1 shown). Fabricating
-   * `agentDefinitionId` from these values would break the rule directly above,
-   * so cloud identity gets its own field instead.
-   */
+
+
+
+
+
+
+
+ */
   cloudEntity?: {
     cloudId?: string;
     manifestId?: string;
@@ -2006,9 +2006,9 @@ export interface MobileBridgeBrowserApprovalDto {
   status: "pending";
   requestId: string;
   /**
-   * The Desktop chat whose run asked (Main-minted owner), or null for a run without one. The phone answers a request
-   * in that conversation's sheet; without this field no browser approval could be found there (2026-10-05).
-   */
+
+
+ */
   chatId: string | null;
   site: string;
   actionType: string;

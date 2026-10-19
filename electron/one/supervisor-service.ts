@@ -74,10 +74,10 @@ export interface SupervisorDependencies {
 
 const settled = (receipt: InvocationRunReceipt | null) => !!receipt && ["completed","failed","cancelled","interrupted"].includes(receipt.status);
 /**
- * A failed run's request names the run's own machine cause (receipt.errorCode), never NULL: production 2026-10-10..17,
- * 22 failed One replies and chat sends carried reason NULL while their runs had task-force-verification-failed,
- * mcp-runtime-config-unavailable, runtime_turn_unsettled or runner-failed (D10, flow audit 2026-10-18). A receipt without
- * a typed code is "unattributed", like a steer row's terminal cause.
+
+
+
+
  */
 const failedRunReason = (receipt: InvocationRunReceipt): string => isTypedCode(receipt.errorCode) ? receipt.errorCode : "unattributed";
 const clip = (value: unknown, max: number) => {
@@ -105,9 +105,9 @@ const ordinaryNativeMarker = (row: SupervisorRequestRow): boolean => Object.prot
 export class OneSupervisorService {
   private readonly ordinaryNativeTurns = new Map<string, { source: OrdinaryOneTurnSource; observation: OrdinaryNativeTurnObservation }>();
   private draining = false;
-  /** Commands this process is dispatching now (command id -> start time). A dispatch whose start has not answered yet
-   * has no receipt, which recover() must not read as a lost start: the personal window reads a snapshot (and so runs
-   * recover) right after a send, which held every Hope message before its run began (production 1.2.93, 2026-10-11). */
+  /**
+
+ */
   private readonly dispatchInFlight = new Map<string, number>();
   private closed = false;
   private readonly unsubscribe: () => void;
@@ -606,8 +606,8 @@ export class OneSupervisorService {
       ...(checks.length ? [
         "- For a check-in: do the check now with your tools, then follow its \"tell the owner\" rule.",
       ] : []),
-      // Only a check-in the owner asked to hear about "only when it matters" may end silently. A finished delegation
-      // or a worker waiting for the owner is always reported (QA 2026-10-04: One went quiet on the very count the owner asked for).
+      
+
       ...(quietAllowed
         ? [`If the check finds nothing the owner should know, reply with exactly ${ONE_QUIET_REPLY} and nothing else: nothing is shown and no alert fires.`]
         : ["Always send the owner a message this turn."]),

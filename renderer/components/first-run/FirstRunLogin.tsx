@@ -10,6 +10,7 @@
  * runs the same flow — it is not a separate sign-up form we do not have.
  */
 import { useCallback, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import type { AuthSession } from "@/lib/types";
@@ -17,6 +18,7 @@ import styles from "./FirstRun.module.css";
 
 export function FirstRunLogin({ onSignedIn }: { onSignedIn: (session: AuthSession) => void }) {
   const { locale } = useT();
+  const router = useRouter();
   const ko = locale === "ko";
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -34,9 +36,10 @@ export function FirstRunLogin({ onSignedIn }: { onSignedIn: (session: AuthSessio
     cancelled.current = false;
     try {
       const next = await api.auth.signInWithBrowser();
-      if (next.signedIn) { onSignedIn(next); return; }
       if (cancelled.current) return;
+      if (next.signedIn) { onSignedIn(next); return; }
       const fallback = await api.auth.signInWithGoogle();
+      if (cancelled.current) return;
       if (fallback.signedIn) onSignedIn(fallback);
       else if (!cancelled.current) {
         setNotice(fallback.error || next.error || (ko ? "로그인이 끝나지 않았어요. 브라우저 창을 확인하고 다시 시도해 주세요." : "Sign-in did not finish. Check the browser window and try again."));
@@ -74,6 +77,9 @@ export function FirstRunLogin({ onSignedIn }: { onSignedIn: (session: AuthSessio
               {busy
                 ? <button type="button" className={styles.secondary} onClick={cancel}>{ko ? "로그인 취소" : "Cancel sign-in"}</button>
                 : <button type="button" className={styles.secondary} onClick={() => void signIn()}>{ko ? "계정 만들기" : "Create an account"}</button>}
+              <button type="button" className={styles.secondary} onClick={() => { cancel(); router.push("/business"); }}>
+                {ko ? "회사 계정으로 로그인" : "Sign in with a company account"}
+              </button>
             </div>
             {notice && <p className={styles.error} role="status">{notice}</p>}
             <p className={styles.hint}>{ko ? "브라우저에서 로그인하면 자동으로 이어져요." : "Signing in happens in your browser and continues here automatically."}</p>

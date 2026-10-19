@@ -283,10 +283,10 @@ export function recordCommittedAnswerReceipt(
 export const QUESTION_SUPERSEDED_CODE = "question_superseded";
 
 /**
- * 같은 대화에 이 질문보다 새 질문이 있다 — 모델은 이미 다음 결정으로 넘어갔다.
- * 실측(2026-10-18, 읽기 전용): 최근 질문 61개 중 26개가 답 없이 새 질문으로 대체됐는데, Main 은 그 옛 질문의 답도
- * 받아, 아무도 기다리지 않는 결정을 실행할 수 있었다. 질문 뒤 호스트 말풍선은 질문을 대체하지 않는다
- * (scripts/test-question-pending-past-host-bubble.cjs) — 새 "질문"이나 새 오너 메시지만 대체한다.
+
+
+
+
  */
 function newerQuestionExists(chatId: string, source: { id: string; createdAt: string }): boolean {
   const rows = getDb()
@@ -370,9 +370,9 @@ export function commitPendingConfirmationAnswer(
    * "아직 답을 기다린다"는 말풍선을 붙이면 질문은 더 이상 마지막이 아니었고, 사람이 고른 답은 만료로 버려졌다.
    * 질문은 그 뒤에 **사용자** 메시지가 없고 아직 확정 답이 없는 한 살아 있다.
    */
-  // The same answer to the same question again is acknowledgement, not a second decision — also after the
-  // continuation's user turn made the question non-pending. One "항상 승인" click committed twice and the second
-  // was refused as stale (main.log 2026-10-17 00:23:05Z), surfacing a refusal for an answer that had landed.
+  
+
+
   if (sourceMessageId) {
     const prior = listCommittedQuestionAnswers(chatId)
       .filter((receipt) => receipt.sourceMessageId === sourceMessageId)
@@ -619,11 +619,11 @@ function isQuestionFromRecoveryAfterOwnerGoalStop(
 }
 
 /**
- * 이 질문을 낸 실행. 답은 그 실행의 권한을 잇는다 — 대화의 "가장 최근" 실행이 아니다.
- * 실측(운영 2026-10-18 01:49Z): 질문은 전체 권한 실행이 냈는데 그 뒤 읽기 전용 팀 보고 턴이
- * 돌았고, 화면이 그 최신 실행의 권한을 이어 오너의 답이 "Bash 비활성화"로 실행됐다.
- * 정본은 이 메시지를 확정한 최종 이벤트(durableMessageId)다. 그 결속이 없는 질문만, 질문보다
- * 먼저 시작한 가장 최근 전경 실행으로 대신한다 — 질문 뒤에 시작한 실행은 절대 고르지 않는다.
+
+
+
+
+
  */
 function questionSourceRunId(chatId: string, question: { id: string; createdAt: string }): string | undefined {
   try {

@@ -1788,7 +1788,7 @@ function AutomationFlowPage() {
               ? locale === "en" ? "Loading automation…" : "자동화를 불러오는 중입니다…"
               : error || (locale === "en" ? "Automation could not be opened." : "자동화를 열 수 없습니다.")}</span>
             {loading && <LoadingEstimate locale={locale} operationKey="desktop-automation-flow" expectedSeconds={[1, 25]} />}
-            {/* ★열지 못했을 때 누를 것이 하나도 없었다 (빈 상태 실측 2026-09-08). 나가는 길을 준다. */}
+            {}
             {!loading && (
               <button
                 type="button"
@@ -2267,8 +2267,8 @@ return (
         </div>
       ) : null}
 
-      {/* ★상태 문구("저장했습니다" 등)는 더 이상 떠 있는 카드가 아니다 — 캔버스를 가려
-          클릭을 막았다(오너 실측 2026-08-08). 하단 통합 패널의 헤더 줄이 말한다. */}
+      {
+}
 
 
 
@@ -2312,8 +2312,8 @@ return (
           >
             <Background color="var(--paper-edge)" gap={24} size={1} />
             <Controls showInteractive={false} />
-            {/* 미니맵 삭제(실측 항목 6) — 자리만 차지하고 캔버스 우하단을 가렸다.
-                검증 결과는 아래 로그 패널이 담당한다. */}
+            {
+}
           </ReactFlow>
           {aiNote ? (
             <PopupFrame title={aiNote.label} closeLabel={locale === "en" ? "Close" : "닫기"} onClose={() => setAiNote(null)}>
@@ -2340,10 +2340,10 @@ return (
           ) : null}
           {/* ★검증 로그 패널 — 에러·경고를 상단 팝업이 아니라 VS Code 하단 패널처럼.
               위 팝업은 캔버스를 밀어내고, 읽기 전에 사라지고, 줄이 많으면 잘렸다. */}
-          {/* ★편집 중에도 이 패널이 있어야 한다 — 팔레트·노드 설정이 [상세] 탭에 살기
-              때문이다. 예전 조건(`!editing || logRows.length > 0`)이면 검증 이슈가 하나도
-              없는 정상 편집 상태에서 패널 자체가 렌더되지 않아, [노드 추가]를 눌러도
-              팔레트가 갈 곳이 없었다 — 눌러도 아무 일이 없는 버튼(게이트 실측 2026-08-09). */}
+          {
+
+
+}
           {(!editing || Boolean(message) || dirty || logRows.length > 0 || paletteOpen || selectedNodeId || selectedEdgeId) ? (
             /* ★터미널처럼 한 패널 — 로그가 위, 챗 입력이 아래 고정(오너 지시: 플로팅 금지·합치기). */
             <div className="automation-issue-log titlebar-nodrag" style={{ height: logOpen ? logHeight : 38, display: "flex", flexDirection: "column" }}>
@@ -2496,12 +2496,12 @@ return (
                     style={{ display: "none" }}
                     onChange={(event) => { if (event.target.files) addArchitectFiles(event.target.files); }}
                   />
-                  {/*
-                    * ★조용히 버리고 있었다 (실측 2026-09-08). 첨부가 8개를 넘으면
-                    *   앞 8개만 남기고 나머지를 버리면서 "파일은 최대 8개까지" 라는 문구를
-                    *   만들어 두는데, 그 값을 **읽는 곳이 한 곳도 없었다.**
-                    *   사용자는 12개를 붙였는데 8개만 남은 이유를 알 방법이 없다.
-                    */}
+                  {
+
+
+
+
+}
                   {architectAttachmentError && (
                     <div role="alert" style={{ color: "var(--danger)", fontSize: 11, lineHeight: 1.45, padding: "2px 0" }}>
                       {architectAttachmentError}
@@ -2739,8 +2739,8 @@ function LoopBoundPanel({
       ) : (
         <p className="automation-node-panel-hint">{L("앞에서 뒤로 가는 보통 연결입니다. 따로 정할 것이 없어요.", "An ordinary forward connection. Nothing to configure.")}</p>
       )}
-      {/* ★한 번 그린 선을 지울 방법이 없었다(오너 실측 2026-08-08) — 키보드(Delete)를
-          모르는 사람도 지울 수 있게 버튼으로. */}
+      {
+}
       {onDelete ? (
         <button type="button" className="automation-edge-delete" onClick={onDelete}>
           {L("이 연결 삭제", "Delete this connection")}
@@ -2772,7 +2772,7 @@ function NodeInspector({ node, onClose, t }: { node: WorkflowNode; onClose: () =
         >
           {node.type}
         </span>
-        {/* 피츠: 실측 18×18 이라 조준해야 눌렸다. 보이는 글리프는 그대로, 히트만 28×28. */}
+        {}
         <button
           onClick={onClose}
           aria-label={t("common.close")}

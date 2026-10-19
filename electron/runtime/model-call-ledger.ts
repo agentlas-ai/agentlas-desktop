@@ -39,11 +39,11 @@ export const MODEL_CALL_LEDGER_EVENT_KIND = "model_call_ledger";
 export const LEDGER_IMAGE_TOKEN_ESTIMATE = 2_000;
 
 /**
- * Runtimes whose one ledger row is a whole CLI turn: the usage they report adds up every internal model request of the
- * turn's tool loop (codex `turn.completed`, claude-code `result.usage`; measured 2026-10-16: main rows of 1.7M-132M input
- * against a 475k window). That sum is the turn's cost, not the window the next request starts from, so the row carries
- * `usageScope: "turn_aggregate"` and the window comes from `observedContextInput` (the LAST single request), never from
- * `observedInput`. API and local-loop runtimes record one row per HTTP dispatch, so their `observedInput` is one request.
+
+
+
+
+
  */
 export const TURN_AGGREGATE_USAGE_RUNTIMES: ReadonlySet<string> = new Set(["codex", "claude-code"]);
 
@@ -116,10 +116,10 @@ export function withModelCallScope<T>(scope: ModelCallScope, fn: () => T): T {
 export function currentModelCallScope(): ModelCallScope | undefined { return scopes.getStore(); }
 
 /**
- * The run a ledger row (or a native-compaction row) belongs to: the model-call scope's run, else the run the inference
- * is accounted to, else the unscoped bucket. Background judgments, AGI and scheduler classifications ran inside an
- * accounting scope that names their run and were still written as `model-call-unscoped:none` (flow audit ID-5,
- * production 10-12..10-18: 5,556 rows).
+
+
+
+
  */
 export function modelCallRunIdentity(scope: ModelCallScope | undefined, requestChatId?: string | null): {
   runId: string; chatId: string | null; nodeId: string | null; automationId: string | null; scoped: boolean } {
@@ -690,9 +690,9 @@ export function withModelCallLedger(runner: Runner, identity: ModelCallIdentity)
 }
 
 /**
- * The runner's own machine code for a failed call (a returned RunnerFailure.providerCode, or a thrown error's code).
- * Production 1.3.47/1.3.48 (2026-10-16): every dreaming pass failed with only failureKind "unsupported" on this row
- * while the cause, codex_no_tools_model_required, existed nowhere persisted. Identifier-shaped values only, no prose.
+
+
+
  */
 function ledgerFailureCode(value: unknown): string | undefined {
   return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$/.test(value) && !looksSecret(value) ? value : undefined;

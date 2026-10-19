@@ -100,13 +100,13 @@ function ownerStoppedOrGoalEnded(goalId: string): boolean {
 }
 
 /**
- * This CAS changes only the retry time, never the definition, enabled, grants, pins or the Goal binding (W1,
- * 2026-10-18). It used to rewrite the continuation's prompt (an appended advisory paragraph) and schedule (every-2h).
- * Both are part of the definition: the execution digest changed, so the schedule cursor recovery quarantined the
- * continuation as an owner graph revision (production 834c86d9 "Goal continuation · Yotube", 10-11 20:50:45 -> 21:06:23,
- * next_run_at NULL ever since; fc4396e6, c5ae5890, 444d94f0 the same, 4 of 4, the paragraph never reached a model), and
- * the Goal provenance digest changed, so even an armed run was refused (automation_workspace_goal_authority_changed).
- * The receipt names the definition it left in place; graph-reconciliation.ts reads it as the host's fresh episode.
+
+
+
+
+
+
+
  */
 function scheduleAdvisoryContinuation(a: {
   id: string; goalId?: string | null; promptTemplate: string; scheduleHuman?: string;

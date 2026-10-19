@@ -1,23 +1,23 @@
-/** An automatic Goal admitted for a turn the background service ran follows that turn.
- *
- * Goal custody is Desktop-only, so a goal-free One turn that runs in the service (team rooms included) finishes there as an
- * ordinary turn and only its intake moves to Main (goal-intake-forward.ts). Main then admitted the Goal as `queued` and nothing
- * ever moved it: production 2026-10-15T23:12Z, rooms fc53939f (AB-GPT) and a1ab9a72 (AB-Light). The team runs executed and
- * failed with task-force-verification-failed, yet both long_runs stayed queued with started_at empty, both contracts stayed
- * active, and the rooms stayed bound, so the next owner message was attached to a Goal whose run had long ended and the AGI
- * monitor reported a failed run for a Goal that "never started".
- *
- * The turn is the Goal's only run, so the Goal follows it, in the existing vocabulary and only for a finite Goal (a continuous
- * Goal keeps its own episode loop):
- *  - the turn is live  -> running (the run started)
- *  - invoke_completed (team run: verifier passed) -> verifying -> completed, contract completed, room unbound
- *  - invoke_failed / invoke_threw / a failed team verifier -> cancelling -> cancelled, contract cancelled, room unbound
- *    (the service has no controller that could retry it; the owner's next message starts a fresh Goal)
- *  - invoke_cancelled -> owner pause; invoke_interrupted -> host pause (app_closed); both resume on the owner's next message
- * Idempotent and fenced: it acts only on a Goal nothing else has taken over (no controller attempt, no newer live turn in the
- * chat, no owner hold), and a repeated call finds the Goal already settled.
- *
- * No electron import: the background service loads this without Electron (test-daemon-loads-without-electron). */
+/**
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ */
 import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
 import { completeChatGoalContract, getChatGoalRevision } from "../store/chat-goals";
 import { getChat, setChatGoalBinding } from "../store/chats";
@@ -51,6 +51,14 @@ function sourceDaemonRun(run: LongRunRecord): { runId: string; ended: boolean } 
     { owner_kind: string; chat_id: string; state: string } | undefined;
   if (!owner || owner.owner_kind !== "daemon" || owner.chat_id !== run.rootChatId) return null;
   return { runId: marker.run_id, ended: owner.state === "released" };
+}
+
+/** True when Main admitted `goalId` for the service run `runId`: the forwarded intake's completed marker names both. Such a
+ * Goal follows the run (followDaemonTurnGoal), so the run itself holds no producer custody and is never refused for lacking it. */
+export function goalAdmittedForServiceRun(runId: string, goalId: string): boolean {
+  return getDb().prepare(`SELECT 1 FROM run_events WHERE run_id = ? AND kind = 'automatic_goal_intake_completed'
+      AND json_extract(payload_json, '$.goalId') = ? AND json_extract(payload_json, '$.outcome') = 'admitted' LIMIT 1`)
+    .get(runId, goalId) !== undefined;
 }
 
 /** A turn of the same chat that started after the service run and is still live: it owns the room now. */

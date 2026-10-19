@@ -36,6 +36,7 @@ import {
   agentMailThreads,
   agentMailUnread,
   agentMailUpdateMailbox,
+  withAgentMailExecutionScope,
 } from "./client";
 import { saveAgentMailAttachment } from "./attachments";
 import { agentMailDelegate, agentMailSyncNow } from "./sync";
@@ -56,7 +57,12 @@ function afterChange<T extends { ok: boolean }>(result: T): T {
   return result;
 }
 
-export function registerAgentMailIpc(ipc: Pick<IpcMain, "handle">): void {
+export function registerAgentMailIpc(owner: Pick<IpcMain, "handle">): void {
+  // Legacy One Mail IPC always belongs to the personal surface. Company Mail
+  // uses its separate session-pinned Main API and cannot inherit these calls.
+  const ipc: Pick<IpcMain, "handle"> = { handle(channel, listener) {
+    owner.handle(channel, (event, ...args) => withAgentMailExecutionScope({ kind: "personal" }, () => listener(event, ...args)));
+  } };
   ipc.handle(CH.status, () => agentMailStatus());
   ipc.handle(CH.joinWaitlist, () => agentMailJoinWaitlist());
   ipc.handle(CH.issue, async (_e, input: unknown) => afterChange(await agentMailIssue(obj<{ displayName?: string; localPart?: string }>(input))));

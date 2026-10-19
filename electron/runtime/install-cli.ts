@@ -122,9 +122,9 @@ function shellQuote(value: string): string {
 }
 
 /**
- * PowerShell 작은따옴표 문자열. PowerShell 은 ASCII `'` 뿐 아니라 스마트 따옴표
- * U+2018·U+2019·U+201A·U+201B 도 같은 따옴표로 읽는다 — `Mason’s` 같은 폴더·안내문이
- * 문자열을 일찍 닫고 뒤를 명령으로 해석했다. 넷 모두 두 배로 쓴다.
+
+
+
  */
 export function powershellSingleQuote(value: string): string {
   return `'${value.replace(/['\u2018\u2019\u201A\u201B]/g, (quote) => quote + quote)}'`;

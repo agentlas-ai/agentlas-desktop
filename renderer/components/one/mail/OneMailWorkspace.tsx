@@ -91,11 +91,11 @@ function MessageBody({ message, locale }: { message: AgentMailMessage; locale: L
             ref={frame}
             className={styles.htmlFrame}
             title={tFor(locale, "one.mail.html_title")}
-            // Scripts stay blocked (no allow-scripts); same-origin only lets
-            // this screen read the laid-out height. CSP inside blocks remote loads.
-            // allow-popups: links carry <base target="_blank">; without it every
-            // link in an HTML mail was dead (QA 2026-09-27). Main's window-open
-            // handler denies the window and hands http(s) to the system browser.
+            
+
+
+
+
             sandbox="allow-same-origin allow-popups"
             referrerPolicy="no-referrer"
             srcDoc={sandboxedHtml(shown)}
@@ -389,8 +389,8 @@ function ThreadRow({ thread, mail, locale, onError }: {
         {agent && <AgentBadge locale={locale} />}
         {origin && <span className={thread.lastOrigin === "owner" ? styles.chipOwner : styles.chipOne} data-one-mail-origin={thread.lastOrigin ?? undefined}>{origin}</span>}
         {problem && <span className={styles.chipProblem}>{problem}</span>}
-        {/* Each piece keeps its own direction: an Arabic/Hebrew subject next to its
-            snippet in an LTR row otherwise reorders across the two (QA 2026-09-27). */}
+        {
+}
         <span className={styles.rowSubject} dir="auto">{thread.subject || tFor(locale, "one.mail.no_subject")}</span>
         <span className={styles.rowSnippet}>{thread.snippet ? <> — <bdi>{thread.snippet}</bdi></> : ""}</span>
       </span>

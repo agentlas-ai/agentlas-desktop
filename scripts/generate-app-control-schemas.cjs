@@ -284,6 +284,10 @@ function generateAppControlSchemas({ root, operations, check, outputDirectory = 
       ],
       "x-agentlas-binary": binaryName === "ArrayBuffer" ? "ArrayBuffer" : "Uint8Array",
     };
+    // These finite, source-backed records also occur inside FinanceAIResult.assetSearches[].result.
+    // Give their fields the same schema as a direct search response instead of truncating identity to prose.
+    // The seen guard still terminates cycles; unrelated operation depth limits remain unchanged.
+    if (binaryName === "FinanceSearchResult" || binaryName === "FinanceSecurityIdentity") depth = 0;
     if (depth >= 4 || seen.has(type)) return { description: describe(type) };
     const nextSeen = new Set(seen); nextSeen.add(type);
     if (checker.isTupleType(type)) {

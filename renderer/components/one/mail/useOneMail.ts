@@ -235,9 +235,9 @@ export function useOneMail(): OneMailState {
     setLimits(status.limits ?? null);
   }, [api]);
 
-  // One 503 while One opened used to hide the Mail tab until the app restarted —
-  // nothing asked for the status again (QA 2026-09-27: server back for 45s, tab still
-  // gone). Retry with backoff: 5s, 10s, 20s … up to 2 minutes.
+  
+
+
   useEffect(() => {
     if (statusFailures === 0) return;
     const delay = Math.min(5_000 * 2 ** Math.min(statusFailures - 1, 5), 120_000);
@@ -280,8 +280,8 @@ export function useOneMail(): OneMailState {
       setListNonce((n) => n + 1);
       const current = selectionRef.current;
       if (current?.kind === "thread" && event.deletedThreadIds.includes(current.id)) {
-        // Deleted on another device (or by One) while it was open: back to the list,
-        // not a stale copy that can still be replied to (QA 2026-09-27).
+        
+
         setSelection(null);
         setDetail(null);
       } else if (current?.kind === "thread" && event.threadIds.includes(current.id)) {

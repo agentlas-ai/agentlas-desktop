@@ -35,6 +35,7 @@ import type {
 type FullListing = SeedListingFull & MarketplaceListing;
 
 type AgentRow = CloudRegistryAgentRow;
+const isCompanyReferenceRow=(row:{entity_kind:unknown})=>row.entity_kind === "company-reference";
 function toAgent(row: AgentRow): InstalledAgent {
   let envReqs: AgentEnvRequirement[] = [];
   try {
@@ -155,7 +156,7 @@ export function backfillEntityKinds(): void {
 }
 
 export function listInstalledAgents(): InstalledAgent[] {
-  // A read never throws on one slug's unrecoverable journal (review 2026-10-16, desktop-b-01); writers stay strict.
+  
   recoverCloudRegistryTransactionsForRead();
   recoverRestoredTeamFirms();
   try {
@@ -178,7 +179,7 @@ export function listInstalledAgentsReadOnly(): InstalledAgent[] {
   const rows = getDb()
     .prepare("SELECT * FROM installed_agents ORDER BY installed_at DESC")
     .all() as AgentRow[];
-  return rows.filter((row) => !isPrivateWebOnlyAgent(row)).map(toAgent);
+  return rows.filter((row) => !isCompanyReferenceRow(row) && !isPrivateWebOnlyAgent(row)).map(toAgent);
 }
 
 export function getAgentById(id: string): InstalledAgent | null {
@@ -187,7 +188,7 @@ export function getAgentById(id: string): InstalledAgent | null {
   const row = getDb()
     .prepare("SELECT * FROM installed_agents WHERE id = ?")
     .get(id) as AgentRow | undefined;
-  if (!row || isPrivateWebOnlyAgent(row)) return null;
+  if (!row || isCompanyReferenceRow(row) || isPrivateWebOnlyAgent(row)) return null;
   return toAgent(row);
 }
 
@@ -251,19 +252,19 @@ export async function installAgent(slug: string): Promise<InstalledAgent> {
     throw new Error("This web-only agent is not available in Agentlas Desktop.");
   }
 
-  // Public call-only Hub cards deliberately omit source instructions. They must
-  // never fall through to local-prompt execution, but refusing them outright made
-  // it impossible to seat any public Hub agent in One Team (measured 2026-08-23:
-  // top live listings 6/6 refused). Instead we register a borrow seat: an empty
-  // prompt plus a hub route marker. Execution always goes through the Hub borrow
-  // path (OrchestrationTarget {source:"hub", slug} → borrowed task force) —
-  // discriminated by shared/call-only-agent.ts isCallOnlyHubAgent (hub asset with
-  // no local instructions). Owner package restore remains installMyAgent().
+
+
+
+
+
+
+
+
   if (typeof listing.systemPrompt !== "string" || !listing.systemPrompt.trim()) {
-    // The live manifest endpoint (marketplace.get_manifest) drops kind/callable
-    // (measured 2026-08-23: search row {kind:"cloud-callable", callable:true}
-    // vs manifest {} for the same slug), so the callable discrimination must
-    // fall back to the search row before concluding "corrupt package".
+
+
+
+
     let callableCard = listing.callable === true || listing.kind === "cloud-callable";
     if (!callableCard) {
       const rows = await getMarketSource().searchAgents(slug).catch(() => []);

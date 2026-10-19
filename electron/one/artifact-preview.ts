@@ -44,8 +44,8 @@ const MAX_VIDEO_BYTES = 192 * 1_024 * 1_024;
 const MAX_AUDIO_BYTES = 96 * 1_024 * 1_024;
 const MAX_DOCUMENT_BYTES = 64 * 1_024 * 1_024;
 const MAX_DATA_BYTES = 64 * 1_024 * 1_024;
-// One token per mounted preview (each settled run block's images, result cards, the output rail). A long room
-// holds more than 256 bindings (Yotube 2026-10-17: 382), and the cap dropped live previews without a trace.
+
+
 const MAX_ACTIVE_TOKENS = 2_048;
 const TOKEN_RE = /^[a-f0-9]{64}$/;
 // A Surface is emitted after the run begins, on the same host clock. Keep a

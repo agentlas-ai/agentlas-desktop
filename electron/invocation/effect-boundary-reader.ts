@@ -103,8 +103,8 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
     if (Array.isArray(boundary?.pendingEffectRefs)) for (const ref of boundary.pendingEffectRefs) if (typeof ref === "string") pending.add(ref);
     let toolEventCount = 0;
     const tools = new Map<string, { row: EventRow; started: boolean; result: boolean; outcome: "pending" | "succeeded" | "failed" | "unknown" }>();
-    // Every recorded row per tool id: runtimes reuse item ids inside one invocation (measured 2026-09-27, codex
-    // a5916446: item_289 was a failed python write and also a later read), so no single row speaks for the id.
+    
+
     const rowsByTool = new Map<string, Array<Record<string, unknown>>>();
     // A start row after that id's result row is a new call reusing the id (codex numbers items per provider turn;
     // a5916446 had two provider turns, so item_13 was a failed tool search and later a successful page load). Its
@@ -244,13 +244,13 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
       || (ref === "runtime-effect-operation-snapshot-incomplete" && snapshotOnlyFailed)
       || [...failedIds].some(id => ref === `tool:${id}:outcome-pending` || (ref.startsWith("operation:") && ref.endsWith(`:${id}:failed`)));
     const quiesced = runtimeQuiesced && failedIds.size > 0 && pendingEffectRefs.every(explainedByFailure);
-    // A failed call that provably could not change anything outside (read-only browser profile, read-only
-    // shell command, network query tool — judged from its recorded name and arguments, never its result text)
-    // is a settled effect. Measured 2026-09-27: failed `wc -l`, a failed Threads page load and failed
-    // context.verify calls each held a whole One goal episode "uncertain" (no-effect-failure.ts).
-    // Failed clicks, typing, page JavaScript and unknown tools stay open: that is the truly ambiguous case.
-    // Judge every failed/unknown result row recorded under the id (a reused id may also hold successful calls,
-    // whose own result is their receipt).
+    
+
+
+
+
+
+
     const noEffectFailedIds = runtimeQuiesced ? [...failedIds].filter((id) => {
       const failedResults = (rowsByTool.get(id) ?? []).filter((data) => typeof data.toolResultPreview === "string"
         && !(data.toolIsError === false && !data.toolFailureCode));

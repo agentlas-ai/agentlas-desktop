@@ -70,6 +70,9 @@ import { registerOneNativeMainComposition, currentOneNativeMainComposition, conf
 import { createOneNativeMainFamilyRouter } from './one/native-family-router';
 import { installPersonalToolchainNativeOwner } from './one/toolchain-personal-owner';
 import { registerNativeEmployeeMain } from './business/native-employee-main';
+import { registerCompanyNativeOwnerMain } from './business/company-native-owner';
+import { registerCompanyWorkMain } from './business/company-work-main';
+import { registerCompanyMailMain } from './business/company-mail-main';
 import { registerEmployeeAgentWorkMain } from './business/employee-agent-work-main';
 import {createNativeHistorySourceOwner,type HistorySourceOwner} from './one/history-source-owner';
 import { registerOnePersonalIntegrationMainIpc } from './one/personal-integrations-main';
@@ -747,6 +750,10 @@ const STARTUP_PLACEHOLDER_URL = `data:text/html;charset=utf-8,${encodeURICompone
 let mainWindow: BrowserWindow | null = null;
 let nativePersonalEntry:ReturnType<typeof createOnePersonalNativeMainEntry>|null=null;
 let nativeBusinessEntry:ReturnType<typeof registerNativeEmployeeMain>|null=null;
+let nativeCompanyEntry:ReturnType<typeof registerCompanyNativeOwnerMain>|null=null;
+let nativeCompanyWorkEntry:ReturnType<typeof registerCompanyWorkMain>|null=null;
+let businessShippingEntry:ReturnType<typeof registerIpcHandlers>['businessShipping']|null=null;
+const nativeCompanyShutdown=new AbortController();
 let nativeWorkEntry:ReturnType<typeof registerEmployeeAgentWorkMain>|null=null;
 let nativeMainFamilyRouter:ReturnType<typeof createOneNativeMainFamilyRouter>|null=null;
 let nativeGmailSourceOwner:GmailPersonalSourceOwner|null=null;
@@ -1558,8 +1565,8 @@ function stopQuitServices(): Promise<void> {
   try { closeAutomationDispatchForShutdown(); } catch {}
   try { stopOneBriefingScheduler(); } catch {}
   try { stopOneImport?.(); } catch {}
-  // Nothing stopped them before: their timers outlived closeStore, and the AGI bug-report flush threw "The database
-  // connection is not open" 11 s into a quit (2026-10-05 12:55 UTC; found by the monitoring peer session).
+
+
   try { stopAliveOrganismsOnQuit?.(); } catch {}
   try { stopBrowserOrphanSweep(); } catch {}
   try { stopBrowserApprovalServer(); } catch {}
@@ -1574,7 +1581,9 @@ function stopQuitServices(): Promise<void> {
   disposeAuthSessionRestoration = null;
   try { currentOneNativeMainComposition()?.invalidate('shutdown'); } catch {}
   nativePersonalShutdown.abort();
-  for(const cleanup of [()=>nativePersonalEntry?.close(),()=>nativeBusinessEntry?.close(),()=>nativeWorkEntry?.close(),()=>nativeMainFamilyRouter?.close(),()=>nativeGmailSourceOwner?.close(),()=>nativeHistorySourceOwner?.close(),()=>nativeHistoryWorkOwner?.close()])try{cleanup()}catch{nativePersonalCleanupUnknown=true}
+  nativeCompanyShutdown.abort();
+  for(const cleanup of [()=>nativeCompanyWorkEntry?.close(),()=>nativeCompanyEntry?.close(),()=>businessShippingEntry?.dispose()])try{cleanup()}catch{ /* Original company captures are already closed by shutdown. */ }
+  for(const cleanup of [()=>nativePersonalEntry?.close(),()=>nativeBusinessEntry?.closePersonal(),()=>nativeWorkEntry?.close(),()=>nativeMainFamilyRouter?.close(),()=>nativeGmailSourceOwner?.close(),()=>nativeHistorySourceOwner?.close(),()=>nativeHistoryWorkOwner?.close()])try{cleanup()}catch{nativePersonalCleanupUnknown=true}
   try { closeOneVaultMain(); } catch {}
   try { closeOnePersonalIntegrations(); } catch {}
   try { disposeMobileBridgeStateChange?.(); } catch {}
@@ -2583,7 +2592,15 @@ app.whenReady().then(async () => {
       try{const window=assertTrustedSitePublishIpcSender(event as Electron.IpcMainInvokeEvent);return window===mainWindow||window===getOneWindow();}catch{return false;}
     }});
   } catch (error) { console.error("[toolchain] personal native owner unavailable:", error instanceof Error ? error.message : error); }
-  registerIpcHandlers();
+  businessShippingEntry=registerIpcHandlers().businessShipping;
+  // This owner is independent of personal login/OneVault. Construction is inert;
+  // explicit focused company connect performs SSO/PKCE and OS-protected enrollment.
+  nativeCompanyEntry=registerCompanyNativeOwnerMain({ipc:ipcMain,browser:businessShippingEntry.console.companyNativeIdentity,
+    assertTrustedSender:assertTrustedSitePublishIpcSender,isOwnerWindow:window=>window===mainWindow||window===getOneWindow(),
+    locale:()=>currentUiLocale()==='ko'?'ko':'en',signal:nativeCompanyShutdown.signal});
+  registerCompanyMailMain({ipc:ipcMain,browser:businessShippingEntry.console.companyNativeIdentity,
+    companyOriginal:()=>nativeCompanyEntry?.original()??null,assertTrustedSender:assertTrustedSitePublishIpcSender,
+    isOwnerWindow:window=>window===mainWindow||window===getOneWindow()});
   registerOnePersonalIntegrationMainIpc({ipc:ipcMain,assertTrustedSender:assertTrustedSitePublishIpcSender,isOwnerWindow:window=>window===mainWindow||window===getOneWindow(),gmailSourceOwner:nativeGmailSourceOwner,historyWorkOwner:nativeHistoryWorkOwner,lifetime:{ready:()=>!nativePersonalCleanupUnknown&&!nativePersonalShutdown.signal.aborted,currentEpoch:()=>nativePersonalEpoch}});
   registerRoomDiscussionIpc({ipc:ipcMain,assertTrustedSender:assertTrustedSitePublishIpcSender,isOwnerWindow:window=>window===mainWindow||window===getOneWindow()});
   registerOneVaultMainIpc({ipc:ipcMain,host:{preloadPath:path.join(__dirname,'preload.js'),
@@ -2617,14 +2634,25 @@ app.whenReady().then(async () => {
       installationGeneration:nativeComposition.installationGeneration,
       prepareGeneration:event=>{if(nativePersonalCleanupUnknown)throw Error('one_native_main_cleanup_unknown');return nativeComposition.prepareEmployeeSharingGeneration(event)},
     });
-    nativeBusinessEntry=registerNativeEmployeeMain({ipc:ipcMain,assertTrustedSender:assertTrustedSitePublishIpcSender,
-      isOwnerWindow:window=>window===mainWindow||window===getOneWindow(),sources:nativeSources,
-      locale:()=>currentUiLocale()==='ko'?'ko':'en',
-      signal:nativePersonalShutdown.signal,installationGeneration:nativeComposition.installationGeneration,
-      prepareGeneration:event=>{if(nativePersonalCleanupUnknown)throw Error('one_native_main_cleanup_unknown');return nativeComposition.prepareEmployeeSharingGeneration(event)},
-      installStartup:startup=>{if(!nativeMainFamilyRouter||nativePersonalCleanupUnknown)throw Error('one_native_main_family_router_unavailable');nativeMainFamilyRouter.installReport(startup);if(nativeComposition.start().state!=='ready')throw Error('one_native_business_installation_unavailable')},
-    });
+
   }
+  // Company transfer enrollment has its own original identity and lifetime.
+  // Personal report methods still require their unchanged personal owner.
+  nativeBusinessEntry=registerNativeEmployeeMain({ipc:ipcMain,assertTrustedSender:assertTrustedSitePublishIpcSender,
+    isOwnerWindow:window=>window===mainWindow||window===getOneWindow(),sources:nativeSources,
+    isCompanyWindow:window=>{try{return new URL(window.webContents.getURL()).pathname==='/business';}catch{return false;}},
+    companyOriginal:()=>nativeCompanyEntry?.original()??null,hostSignal:nativeCompanyShutdown.signal,
+    locale:()=>currentUiLocale()==='ko'?'ko':'en',
+    signal:nativePersonalShutdown.signal,installationGeneration:nativeComposition.installationGeneration,
+    prepareGeneration:event=>{if(nativePersonalCleanupUnknown)throw Error('one_native_main_cleanup_unknown');return nativeComposition.prepareEmployeeSharingGeneration(event)},
+    installStartup:startup=>{if(!nativeMainFamilyRouter||nativePersonalCleanupUnknown)throw Error('one_native_main_family_router_unavailable');nativeMainFamilyRouter.installReport(startup);if(nativeComposition.start().state!=='ready')throw Error('one_native_business_installation_unavailable')},
+  });
+  nativeCompanyWorkEntry=registerCompanyWorkMain({ipc:ipcMain,assertTrustedSender:assertTrustedSitePublishIpcSender,
+    isOwnerWindow:window=>window===mainWindow||window===getOneWindow(),
+    companyAgents:()=>{if(!nativeBusinessEntry)throw Error('company_native_owner_unavailable');return nativeBusinessEntry.companyAgents;},
+    companyDb:()=>{const owner=nativeCompanyEntry?.original();if(!owner)throw Error('company_native_owner_unavailable');owner.assertCurrent();return owner.db;},
+    companyDataPath:(...segments)=>{const owner=nativeCompanyEntry?.original();if(!owner)throw Error('company_native_owner_unavailable');owner.assertCurrent();return owner.userDataPath(...segments);},
+    signal:nativeCompanyShutdown.signal});
   // Construction is inert; absent independently installed native owners remains unavailable.
   nativeComposition.start();
   // DESKTOP_MOBILE_BRIDGE: Desktop main is the sole authority. Renderer IPC
@@ -3147,16 +3175,16 @@ app.whenReady().then(async () => {
       String(record.sourceVersionId ?? ""),
     );
   });
-  /*
-   * 대화 하나를 여는 데 필요한 것을 **한 번에** 답한다: 말풍선마다의 블록·인용, 그리고 그
-   * 인용들이 가리키는 근거 구간.
-   *
-   * 예전에는 말풍선마다 블록 1회 + 인용 1회를 부르고, 그 안에서 인용 하나마다 근거를 또
-   * 불렀다. 85개짜리 대화에서 170회가 넘고 한 번이 약 180ms 다. 대화가 길수록 여는 시간이
-   * 길어져서, 오래 붙든 연구일수록 열기 힘들어지는 구조였다.
-   *
-   * 근거 구간은 중복을 제거해 담는다 -- 여러 인용이 같은 구간을 가리키는 일이 흔하다.
-   */
+  
+
+
+
+
+
+
+
+
+
   ipcMain.handle("science:messages:evidenceMany", (event, input: unknown) => {
     assertScienceSender(event, input);
     const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
@@ -3833,10 +3861,10 @@ app.whenReady().then(async () => {
       String(record.projectId ?? ""), String(record.conversationId ?? ""), String(record.messageId ?? ""),
     );
   });
-  /*
-   * 대화를 열 때 말풍선 하나마다 물어보던 자리. 85개짜리 대화에서 한 건 181ms × 85 = 15.4초다.
-   * 대화가 길수록 여는 시간이 그만큼 길어진다 -- 오래 한 연구일수록 열기 힘들어지는 셈이었다.
-   */
+  
+
+
+
   ipcMain.handle("science:artifacts:listForMessages", (event, input: unknown) => {
     assertScienceSender(event, input, "science:artifacts");
     const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
@@ -4843,9 +4871,9 @@ app.whenReady().then(async () => {
             async onObservationReady() { await bridge.quiesce(); await controls.refresh(); return bridge.available && controls.available; },
             onAuthenticated(channel: Parameters<typeof bridge.bind>[0], identity: Parameters<typeof bridge.bind>[1]) {
               bridge.bind(channel, identity); controls.bind(channel, identity);
-              // Once per process: this hook runs for every channel generation and the service refuses a second fence, which
-              // closed every re-attach (1.3.48, 2026-10-16: invocation_native_fence_already_configured until restart).
-              // The fence reads the live owner/controls/bridge, so the first installation stays current.
+              
+
+
               if (!foreignNativeStartFenceInstalled) {
                 invocationService.setForeignNativeStartFence(chatId => !!native.configuredNativeGuiOwner()?.activeAuthorityChatIds().includes(chatId)
                   || controls.activeAuthorityChatIds().includes(chatId) || (bridge.activeChatIds().includes(chatId)
@@ -5051,13 +5079,13 @@ app.whenReady().then(async () => {
     void started.then(() => { if (explicitBridgeRestore === started) explicitBridgeRestore = null; },
       () => { if (explicitBridgeRestore === started) explicitBridgeRestore = null; });
   });
-  /*
-   * A service that was not ready at boot is usually load, and nothing retried it: after an OS-update reboot on
-   * 2026-10-05 (load average 60) the service's ownership ping timed out (daemon_control_owner_unconfirmed), the
-   * bridge start failed once, and the phone had no listener until the owner pressed "연결 다시 열기" or relaunched.
-   * Take the same restore path as that button (it re-ensures the service first), a bounded number of times, and
-   * only while nothing listens and the last failure was the service not being ready.
-   */
+  
+
+
+
+
+
+
   const MOBILE_BRIDGE_BOOT_RETRY_MS = [15_000, 45_000, 120_000, 300_000, 600_000];
   const retryMobileBridgeAfterBoot = (attempt = 0): void => {
     if (attempt >= MOBILE_BRIDGE_BOOT_RETRY_MS.length) return;

@@ -65,6 +65,7 @@ function getRow(agentId: string): AgentRow | null {
   const row = getDb()
     .prepare("SELECT * FROM installed_agents WHERE id = ?")
     .get(agentId) as AgentRow | undefined;
+  if (row && (row as unknown as {entity_kind?:string}).entity_kind === "company-reference") throw Error("company_work_original_owner_required");
   return row ?? null;
 }
 
@@ -542,19 +543,19 @@ export function computeAgentPackageHash(agentId: string, requestedTarget: string
 }
 
 /**
- * Exact package-root skills appended by the main process to the next invocation.
- * The renderer never supplies these bytes. Only regular `<root>/<slug>/SKILL.md`
- * files owned by the selected agent package are loaded, with a bounded aggregate
- * size and no symbolic-link traversal.
- *
- * A skill's name IS its folder name. This read only `skills/<slug>/SKILL.md`,
- * which is the layout the desktop's own builder writes — but a package built by
- * Agentlas-OS or shipped from the Hub puts the same files under the host roots
- * (`.claude/skills/…`, `.codex/skills/…`, …) and has no top-level `skills/` at
- * all. Measured 2026-08-26: such a package returned "" here, so a borrowed
- * agent ran with none of its skills in the prompt. Scan every root the engine's
- * `discover_skill_manifests()` scans, first root wins for a duplicate slug
- * (the build mirrors the same bytes into all of them).
+
+
+
+
+
+
+
+
+
+
+
+
+
  */
 const AGENT_SKILL_ROOTS = ["skills", ".claude/skills", ".codex/skills", ".gemini/skills", ".agents/skills"];
 
@@ -610,9 +611,9 @@ export function buildAgentSkillsRuntimeContext(agentId: string): string {
 }
 
 /**
- * The `skills:` line for one agent package folder: names and where their SKILL.md lives, plus a revision digest of the
- * bodies. Owner 2026-10-13: installed skills are a list, not inlined bodies (that was up to 3 MiB per run).
- * Exported so a gate can exercise it without a database row.
+
+
+
  */
 export function agentSkillCatalogLine(dir: string, observedAssets?: AdmittedPackageAsset[], identities?: Array<{ path: string; stat: fs.Stats }>): string {
   const maxSkills = 128;
@@ -660,7 +661,7 @@ export function agentSkillCatalogLine(dir: string, observedAssets?: AdmittedPack
     }
   }
   if (loaded.length === 0) return "";
-  // Owner 2026-10-13: installed skills are a list; the agent opens the SKILL.md the work needs with its own file tools.
+
   const rev = revision.digest("hex").slice(0, 12);
   const roots = new Set(loaded.map((skill) => skill.root));
   if (roots.size === 1) {
@@ -683,10 +684,10 @@ export function buildEffectiveAgentSystemPrompt(agentId: string, fallback: strin
 }
 
 /**
- * The folder an agent's live entry file (AGENTS.md) is read from, when there is one. That file points at its own docs by
- * relative path ("read docs/route-selection.md") while the run's working directory is the owner's project, so the host
- * names the folder in the turn context. Kept out of the effective prompt, whose exact bytes are pinned and hashed.
- * Measured 2026-10-13 (Yotube Motiondirector, Codex rollout 01a1318b): five "No such file" reads of its own docs.
+
+
+
+
  */
 export function agentPromptFolder(agentId: string): string | null {
   const row = getRow(agentId);

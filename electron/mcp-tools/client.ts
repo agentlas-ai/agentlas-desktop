@@ -146,19 +146,19 @@ function workforceToolProtocolMetadata(
  * digest shipped with this Desktop generation.
  */
 /**
- * 워크포스 계약 대조 결과. **차단(blocking)과 경고(warning)를 가른다.**
- *
- * 오너 결정 2026-07-28: 예전에는 이 함수가 낸 항목이 **전부 차단**이었다. 그래서 Core 가
- * 프로토콜 값 하나(예: `ontologyVersion`)만 올려도 이미 배포된 모든 데스크탑에서
- * 워크포스가 멈췄다 — "엔진은 따로 오픈소스로 굴리고 셸은 최신을 문다"는 설계와 정면으로
- * 부딪치는 성질이었다.
- *
- * 이제 **능력(도구가 있는가)만 차단**하고, 값 드리프트(입력 필드 집합, enum, 메타데이터,
- * 다이제스트)는 경고로 내린다. 도구 이름도 **완전 일치가 아니라 부분집합**으로 본다 —
- * Core 가 도구를 추가하는 것은 미노출일 뿐 결함이 아니라는 오너 규칙과 일치한다.
- *
- * ★경고는 조용히 버리지 않는다. 값 계약이 실제로 달라졌으면 나중에 런타임 오류로
- *   나타나는데, 그때 이 경고가 로그에 없으면 원인을 찾을 수 없다.
+
+
+
+
+
+
+
+
+
+
+
+
+
  */
 export interface WorkforceContractVerdict {
   blocking: string[];
@@ -884,6 +884,8 @@ export function normalizeMcpToolContentResult(value: unknown, maxTextChars: numb
 }
 
 export interface McpToolCallOptions {
+  /** Main opaque exact company run; never accepted from MCP/model wire input. */
+  companyWorkCapability?: object;
   prepared?: PreparedMcpBinding;
   /** Exact descriptor observed by the Main-managed inventory, rechecked on
    * this connection before tools/call. Native/legacy callers may omit it. */
@@ -904,21 +906,21 @@ export interface McpToolCallOptions {
 }
 
 /**
- * One MCP connection per server for the whole run, like a CLI runtime keeps.
- *
- * Host-loop runtimes (Agentlas serving, BYOK, local models) used to spawn and
- * initialize a fresh stdio server for every tools/call and close it right after.
- * The MCP lifecycle scopes server state to the connection (initialize → operation
- * → shutdown; modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle),
- * so every stateful server lost its state between calls. Measured on serving
- * (parity QA 2026-09-25): browser_navigate https://example.com succeeded, the next
- * browser_snapshot saw "Page URL: about:blank", and an unsafe-code approval
- * failed as unverified-site — multi-step browsing was impossible on serving while
- * claude-code/codex (one server process per run) completed it.
- *
- * Calls to one server are serialized (one boundary state per connection); a
- * failed, timed-out or closed connection is evicted and the next call reconnects.
- * The session closes on the run's abort signal or after idleMs without a call.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
  */
 export interface McpToolCallSession {
   readonly closed: boolean;
@@ -1034,9 +1036,12 @@ async function callServerToolContentInternal(
   const sessionKey = server.id;
   let releaseSession: (() => void) | null = null;
   let sessionEntry: McpSessionEntry | null = null;
-  let registryBound = server.connectionEpoch !== undefined;
+  const companyWork = options?.companyWorkCapability;
+  if (companyWork && (!options?.prepared || require("../business/company-work-content").currentCompanyWorkContent()?.capability !== companyWork)) throw new Error("company_work_tool_grant_required");
+  let registryBound = !companyWork && server.connectionEpoch !== undefined;
   const expectedConfiguration = mcpServerConfigurationDigest(server);
   const assertCurrentConnection = () => {
+    if (companyWork) { require("../business/company-work-grant").assertCompanyWorkGrant(companyWork); preparedMcpTransport(options!.prepared!, server); return; }
     if (!registryBound) return; // Canonical ephemeral native tools have no registry connection session.
     const current = getServer(server.id);
     if (!current || !current.enabled || current.configurationValid === false || mcpServerConfigurationDigest(current) !== expectedConfiguration) {
@@ -1045,7 +1050,8 @@ async function callServerToolContentInternal(
     }
   };
   try {
-    registryBound ||= getServer(server.id) !== null;
+    if (!companyWork) registryBound ||= getServer(server.id) !== null;
+    else await require("../business/company-work-content").approveCompanyWorkTool({kind:"mcp",serverToolName:toolName,server});
     const workforceCall = server.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID &&
       toolName.startsWith("workforce.");
     const timeoutCeiling = workforceCall ? WORKFORCE_TOOL_TIMEOUT_MAX_MS : CONNECT_TIMEOUT_MS;
@@ -1219,12 +1225,13 @@ async function callServerToolContentInternal(
           if (modernInventory && !modernDefinition) throw new Error("mcp_tool_not_in_current_inventory");
           preparation.signal.throwIfAborted();
           if (options?.prepared) preparedMcpTransport(options.prepared, server);
-          const remoteCuration = captureRemoteCurationConsumer(options?.prepared, completeRemoteMemoryCuration);
-          const res = await withCurrentHistoryTool({kind:"mcp",serverId:server.id,catalogId:server.catalogId??null,toolName,args,schemaDigest:options?.expectedToolSchemaDigest??(modernDefinition?mcpToolSchemaDigest(modernDefinition):null)},()=>{
+          const remoteCuration = companyWork ? null : captureRemoteCurationConsumer(options?.prepared, completeRemoteMemoryCuration);
+          const callOriginal = ()=>{
             assertCurrentConnection();
             return activeClient.callTool({ name: toolName, arguments: args },
               modernDefinition ? { toolDefinition: modernDefinition } : undefined);
-          });
+          };
+          const res = companyWork ? await callOriginal() : await withCurrentHistoryTool({kind:"mcp",serverId:server.id,catalogId:server.catalogId??null,toolName,args,schemaDigest:options?.expectedToolSchemaDigest??(modernDefinition?mcpToolSchemaDigest(modernDefinition):null)},callOriginal);
           const projected = remoteCuration ? remoteCuration(res) : res;
           const normalized = normalizeMcpToolContentResult(projected, maxTextChars, options?.retainFullResult === true);
           if (session && sessionEntry) session.touch();

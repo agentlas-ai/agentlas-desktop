@@ -1,21 +1,21 @@
 /**
- * Native runtime plans → the one typed checklist (shared/invocation-plan.ts).
- *
- * Only structured protocol fields are read here. A runtime that has no plan
- * event (Antigravity, BYOK, Agentlas serving, local models) never reaches this
- * module, and nothing here asks a model to plan — that would be prompt text.
- *
- *   Codex app-server   turn/plan/updated { plan: [{ step, status: pending|inProgress|completed }] }
- *   codex exec --json  item.* { type: "todo_list", items: [{ text, completed }] }
- *   ACP                session/update { sessionUpdate: "plan", entries: [{ content, status }] }
- *   Cursor ACP         cursor/update_todos { toolCallId, todos: [{ id, content, status }], merge } (Cursor's documented
- *                      extension notification; cursor.com/docs/cli/acp, read 2026-10-17, not run: no cursor-agent here)
- *   Claude Code        TodoWrite { todos: [{ content, status, activeForm }] }
- *                      TaskCreate { subject, activeForm } + result { task: { id } }
- *                      TaskUpdate { taskId, status, subject, activeForm } + result { success }
- *                      TaskList {} + result { tasks: [{ id, subject, status }] }
- *                      TaskGet { taskId } + result { task: { id, subject, status } }
- *                      (Claude Code 2.1.301 / claude-haiku-5-5 stream-json, measured 2026-10-16)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
  */
 import {
   boundInvocationPlan,

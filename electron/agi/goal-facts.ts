@@ -60,11 +60,11 @@ function tableExists(db: Database.Database, name: string): boolean {
 }
 
 /**
- * The Goal's own turn: its newest controller attempt and the invocation that ran it. The room's newest run and the
- * newest attempt of any role are not: a teammate's report turn, an owner's side question and a relay the waiting Goal
- * refused are foreground runs of the same room, task-force specialists share the controller's invocation and a
- * verifier runs under its own id (flow audit ID-2, production Yotube 10-14..10-18: 73 of 108 foreground runs bound a
- * controller attempt; the incident `run:d85e262f` named an owner run that never became the Goal's turn).
+
+
+
+
+
  */
 export function goalControllerAttempt(db: Database.Database, longRunId: string): { id: string; invocationRunId: string | null } | null {
   if (!tableExists(db, "long_run_worker_attempts") || !tableExists(db, "long_run_workers")) return null;
@@ -122,9 +122,9 @@ function tactics(db: Database.Database, goalId: string, nowMs: number): { tactic
   const plan = readGoalPlan(goalId, undefined, db);
   if (!plan) return { tactics: [], blockedNodeId: null };
   const readiness = projectGoalPlanReadiness(plan, { nowMs });
-  // A tactic the agent reported blocked carries the persistence policy's guidance until it is done (goal-shaping
-  // applyTacticMarker). Nothing ever wrote payload.blocked, so this fact was always null (production 2026-10-12:
-  // 0 of 138 tactics, while 31 open tactics carried guidance) and the unblocker never knew which tactic was stuck.
+  
+
+
   const blocked = db.prepare(`SELECT node_id FROM goal_plan_nodes WHERE goal_id=? AND revision=? AND plan_seq=?
     AND kind='tactic' AND status IN ('active','proposed')
     AND CASE WHEN json_valid(payload_json) THEN json_type(payload_json,'$.guidance')='object' ELSE 0 END ORDER BY ord LIMIT 1`).get(goalId, plan.revision, plan.planSeq) as { node_id: string } | undefined;
@@ -177,10 +177,10 @@ export function browserLadderSignal(db: Database.Database, chatId: string, nowMs
 }
 
 /**
- * The start or the runner threw: the receipt's code is a generic wrapper and the typed cause is the message's leading
- * code (production 2026-10-12: invoke-start-failed with "goal_waiting_system_start_refused" 49 times, runner-failed with
- * "automation_goal_execution_owner_changed" or "goal_episode_admission_missing"). Without it every such run read as
- * run_failed_unknown. A host timeout message is kept as a timeout family.
+
+
+
+
  */
 const RECEIPT_WRAPPER_CODES = new Set(["invoke-start-failed", "runner-failed", "invoke-threw"]);
 function typedReceiptCode(receipt: { errorCode: string | null; errorMessage?: string | null }): string | null {
@@ -257,15 +257,15 @@ function wakeState(db: Database.Database, run: AgiGoalRow, nowMs: number): Pick<
   const boundaryEvent = db.prepare(`SELECT seq FROM long_run_events WHERE run_id=? AND NOT
     (kind='run.blocked_sweep' AND json_extract(payload_json,'$.action')='retry_scheduled')
     ORDER BY seq DESC LIMIT 1`).get(run.id) as { seq: number } | undefined;
-  /*
-   * The blocked condition, not the Goal's bookkeeping (plan R6: one attempt per blocked state; R14: progress is a changed
-   * key result or owner input, never a counter). Production 2026-10-12, Yotube room: the authority also hashed
-   * cycle_count, cost_used_usd and app_instance_id, the newest wait subscription id/due, every scheduler next_run_at, the
-   * due boundaries and the checkpoint seq (run.cycle_recorded fires every cycle). A Goal cycling every few minutes was a
-   * "new blocked state" each time: 62 model attempts over 60 distinct digests in a day, each a new Codex session. The
-   * wait, schedules and boundaries still set the next wake (nextWakeAtMs below); an unchanged condition retries on the
-   * incident's own backoff (agiRetryDelayMs).
-   */
+  
+
+
+
+
+
+
+
+
   const ownerPolicy = (owner as Array<Record<string, unknown>>).map(({ app_instance_id: _instance, cycle_count: _cycles,
     cost_used_usd: _cost, host_owner_kind: _host, ...policy }) => policy);
   const authority = createHash("sha256").update(JSON.stringify({ revision: revision?.payload_json ?? null, planHead, owner: ownerPolicy, chat, pool,

@@ -1,20 +1,20 @@
-// Model discovery contract shared by every runtime probe (PRD 2026-08-15 D-1..D-3).
-//
-// Why: on 2026-08-14 `agy models` changed its line format inside a minor
-// version, the parser returned [] (rc=0, no exception, no log), the model
-// picker showed 0 models, and the empty catalog even switched model validation
-// OFF. Eleven parsers shared no contract, so "unsupported", "failed", and
-// "genuinely empty" were the same value: [].
-//
-// The contract:
-//   ok           — a non-empty, validated list (may carry a yield warning)
-//   unsupported  — this runtime has no list concept / no discovery path yet
-//   failed       — discovery ran and produced nothing usable; MUST be loud
-//
-// Yield rule (Spidermon ItemCountMonitor lineage): non-empty stdout with zero
-// parsed rows is `failed` ("yield regression"), never an empty `ok`. Exit
-// codes are not trusted — `agy models --json`, `grok`, `opencode` return 0 on
-// usage output (measured 2026-08-14).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 export type DiscoveryStatus = "ok" | "unsupported" | "failed";
 export type DiscoverySource = "acp" | "cli" | "file" | "http" | "none";

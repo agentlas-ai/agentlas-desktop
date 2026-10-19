@@ -382,12 +382,12 @@ export function holdOnePreflightSubmission(submissionId: string): OnePreflightSu
 }
 
 /**
- * The renderer document that opened this submission is gone (reload, crash, closed window) while Main's epoch is the
- * same. An open submission is driven by that renderer (team preflight, then invoke:run); nothing else can finish it,
- * and as an open row it refused every later send of the chat with one_preflight_chat_pending until the app restarted
- * (release peer, room fc53939f, 2026-10-16). It is held by the same rule as holdOnePreflightSubmission: a reserved
- * parent that may have crossed the start boundary stays. A run Main's own send queue already accepted for it
- * (pending_chat_sends) owns the start, so it is not held under that queue.
+
+
+
+
+
+
  */
 export function releaseOnePreflightSubmissionOfGoneRenderer(submissionId: string): OnePreflightSubmissionReceipt | null {
   validId(submissionId, "submission_id");

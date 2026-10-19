@@ -796,13 +796,13 @@ export function workloadAllocationReceipt(
     observedUsage,
   });
   return {
-    // v2: `role` joined the receipt around 2026-07-28 and `resolved.effort` can
-    // now be null, both without a version bump — so the 46 receipts on this
-    // machine are three different shapes all stamped v1, and a reader has no way
-    // to tell which it holds. Measured: the 26 receipts written before
-    // 2026-07-27 have no `role` key at all, which reads as "role unknown" and is
-    // easy to mistake for "role was never assigned" (I made exactly that
-    // mistake). A shape change needs a version, or the version is decoration.
+    
+
+
+
+
+
+
     schemaVersion: "agentlas.model-allocation-receipt.v2",
     decisionId,
     packetId: null,

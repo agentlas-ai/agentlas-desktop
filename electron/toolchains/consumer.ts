@@ -1,10 +1,10 @@
-// Work tasks as Toolchain consumers.
-//
-// One's own conversations get the whole One Team surface (author, publish, run, delegate). A Work
-// task gets only what lets it find and use an independent Toolchain version that passed real
-// input/output validation: search, inspect, run, read its own result, and record a problem. Nothing
-// here authors, publishes, repairs or delegates. Measured 2026-10-04: before this, a Work
-// task had no path to any Toolchain at all (One Team attached to One's own conversations only).
+
+
+
+
+
+
+
 
 import { getChat } from "../store/chats";
 import { listToolchainAssets } from "./assets";

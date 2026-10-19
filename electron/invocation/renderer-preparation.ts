@@ -20,10 +20,10 @@ export function createRendererInvocationPreparation(admission: InvocationAdmissi
     async judge(request, signal) {
       // Work has its own execution contract; only One uses these semantic judges.
       if (request.oneMode !== true) return;
-      // Owner 2026-10-14: the host never blocks the next turn. These judges only refine routing; a judge that fails or
-      // times out leaves the request as typed. A 4 s timeout here refused the owner's Yotube message outright
-      // (14:16:48Z, codex judge "timeout" -> native-ingress -> runtime_turn_unsettled), and the screen then retried the
-      // refused start about five times a second. Up to 5 minutes, and never a refusal.
+      
+
+
+
       const results = await withInvocationPreflightAccounting({ runId: captured.runId, chatId: request.chatId }, () => Promise.allSettled([
         prejudgeOneRequestIntent(request, { timeoutMs: 300_000, signal }),
         prejudgeOneMemoryIntent(request, { timeoutMs: 300_000, signal }),

@@ -573,36 +573,80 @@ def build_production_prompt(stage: str, bundle: dict | None, request: dict | Non
     package_rule = (
         "You have the local full package contract in the runtime block above. Use it as the binding HQ contract.\n"
         if local_full_package
-        else "Do not depend on Mason's local Paid folder; public users do not have it.\n"
+        else "Use only the public assets shipped with Studio or explicitly supplied for this run; do not depend on unpublished local files.\n"
     )
     strict_rule = (
         "MECHANICAL CONTRACT GATE: do not register a production artifact unless it is a real HQ-quality artifact. "
         "If you cannot satisfy the exact file contract, write RUN_WITH_HEP_NETWORK.md in the target folder and leave "
         "artifacts[] unchanged. Thin generic HTML, tiny mockups, or hand-waved PPTX files are failures.\n"
     )
-    if hub_excerpt_only:
-        strict_rule += (
-            "IMPORTANT: the Hub returned only a short entry excerpt, not the full package/toolchain. That is enough "
-            "to explain the HQ, but not enough to impersonate its full production factory. Prefer a handoff prompt "
-            "over fake artifacts unless you can fully satisfy the gate.\n"
-        )
-    return (
-        _hub_header(STAGE_SLUG[stage], bundle)
-        + "TASK: This is a SPECIALIST PRODUCTION run, not a GUI preview. Use the Startup Studio planning packet "
-        "to create real external artifacts in the target folder, then update only the artifact links in the board.\n\n"
-        + f"STAGE: {stage}\n"
-        + f"TARGET FOLDER: {target_dir}\n\n"
-        + ("FOUNDER REQUEST:\n" + founder_prompt + "\n\n" if founder_prompt else "")
-        + "1. Read .studio-runtime/studio-data.json. Treat idea, market, business, and PRD stages as the source packet.\n"
-        + "2. Create the real production files in TARGET FOLDER. Do not make a generic mock. " + package_rule
-        + ("   BUILD OUTPUT: Web_master-grade runnable self-contained PROTOTYPE artifact: index.html, README.md, and qa-report.json. The visible UI must clearly label itself as 'Prototype' or '프로토타입' so founders do not mistake it for a shipped production app. It must pass anti-slop, responsive, state, flow, and no-SVG/no-emoji gates.\n" if stage == "build" else "")
-        + ("   DECK OUTPUT: Defect-Driven Slide Studio white-background investor deck files: deck.ir.json, index.html, defect-report.json, README.md, and pitch-deck.pptx if the renderer is available. Prefer the studio renderer/toolchain, not hand-written slide cards.\n" if stage == "deck" else "")
-        + strict_rule
-        + "3. Preserve every board field, but write .studio-runtime/studio-data.next.json with this stage's artifacts[] pointing to "
-        f"'/__studio/productions/{stage}/...' links for the files you created. If production fails, write no fake artifact.\n\n"
-        + ANTI_LEAK + "\n\n"
-        + "Output is files only. Stop after writing the production files and studio-data.next.json."
+    short_hub_rule = (
+        "IMPORTANT: the Hub returned only a short entry excerpt, not the full package/toolchain. That is enough "
+        "to explain the HQ, but not enough to impersonate its full production factory. Prefer a handoff prompt "
+        "over fake artifacts unless you can fully satisfy the gate.\n"
     )
+
+    # Standalone Studio Python registration mirrors the canonical prompt order.
+    # Text comes exclusively from named modules, including conditional branches.
+    modules = []
+
+    def register(module_id: str, stability: str, change_triggers: tuple[str, ...], order: int, text: str) -> None:
+        if not text:
+            return
+        modules.append({
+            "id": module_id,
+            "revision": 1,
+            "channel": "user",
+            "stability": stability,
+            "changeTriggers": change_triggers,
+            "order": order,
+            "text": text,
+        })
+
+    register("studio.production.task", "fixed-policy", ("release",), 10,
+             "TASK: This is a SPECIALIST PRODUCTION run, not a GUI preview. Use the Startup Studio planning packet "
+             "to create real external artifacts in the target folder, then update only the artifact links in the board.\n\n")
+    register("studio.production.read-and-create", "fixed-policy", ("release",), 20,
+             "1. Read .studio-runtime/studio-data.json. Treat idea, market, business, and PRD stages as the source packet.\n"
+             "2. Create the real production files in TARGET FOLDER. Do not make a generic mock. ")
+    if not local_full_package:
+        register("studio.production.public-assets", "fixed-policy", ("release",), 30, package_rule)
+    if stage == "build":
+        register("studio.production.build-output", "fixed-policy", ("release",), 40,
+                 "   BUILD OUTPUT: Web_master-grade runnable self-contained PROTOTYPE artifact: index.html, README.md, and qa-report.json. The visible UI must clearly label itself as 'Prototype' or '프로토타입' so founders do not mistake it for a shipped production app. It must pass anti-slop, responsive, state, flow, and no-SVG/no-emoji gates.\n")
+    if stage == "deck":
+        register("studio.production.deck-output", "fixed-policy", ("release",), 50,
+                 "   DECK OUTPUT: Defect-Driven Slide Studio white-background investor deck files: deck.ir.json, index.html, defect-report.json, README.md, and pitch-deck.pptx if the renderer is available. Prefer the studio renderer/toolchain, not hand-written slide cards.\n")
+    register("studio.production.contract-gate", "fixed-policy", ("release",), 60, strict_rule)
+    register("studio.production.sample-leak", "fixed-policy", ("release",), 70, ANTI_LEAK + "\n\n")
+
+    register("studio.production.hq-runtime", "versioned-content", ("agent-instructions", "skill-package"), 10,
+             _hub_header(STAGE_SLUG[stage], bundle))
+    if local_full_package:
+        register("studio.production.full-package", "versioned-content", ("skill-package",), 20, package_rule)
+    if hub_excerpt_only:
+        register("studio.production.short-hub", "versioned-content", ("skill-package",), 30, short_hub_rule)
+
+    register("studio.production.stage-target", "configuration", ("task",), 10,
+             f"STAGE: {stage}\n" + f"TARGET FOLDER: {target_dir}\n\n")
+    register("studio.production.artifact-links", "configuration", ("task",), 20,
+             "3. Preserve every board field, but write .studio-runtime/studio-data.next.json with this stage's artifacts[] pointing to "
+             f"'/__studio/productions/{stage}/...' links for the files you created. If production fails, write no fake artifact.\n\n")
+    if founder_prompt:
+        register("studio.production.founder-request", "turn-context", ("owner-input",), 10,
+                 "FOUNDER REQUEST:\n" + founder_prompt + "\n\n")
+    register("studio.production.files-only", "final-boundary", ("release",), 10,
+             "Output is files only. Stop after writing the production files and studio-data.next.json.")
+
+    rank = {"fixed-policy": 0, "versioned-content": 1, "configuration": 2,
+            "task-context": 3, "turn-context": 4, "final-boundary": 5}
+    ids = [module["id"] for module in modules]
+    if len(ids) != len(set(ids)) or any(module["stability"] not in rank for module in modules):
+        raise ValueError("invalid Studio production prompt module registration")
+    ordered = sorted(modules, key=lambda module: (rank[module["stability"]], module["order"]))
+    if ordered[-1]["stability"] != "final-boundary":
+        raise ValueError("Studio production prompt must end with the final boundary")
+    return "".join(module["text"] for module in ordered)
 
 
 def _artifact(stage: str, label: str, filename: str, kind: str, role: str) -> dict:

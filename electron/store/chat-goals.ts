@@ -418,15 +418,15 @@ const ABANDONED_GOAL_CONTRACT_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 export const GOAL_CONTRACT_RECONCILED_EVENT = "goal_contract_reconciled";
 
 /**
- * Startup: close Goal contracts that are active but were never backed by a run. Measured 2026-09-27:
- * goal:desktop:9535… (a pre-uuid derived id) active since 2026-08-12 with no long run and no revision.
- * No chip showed it (the goal context needs a run), the composer toggle read ON, and every new
- * automatic Goal in that chat was refused with auto_goal_chat_already_bound.
- *
- * Closing is what the user's toggle-off does (contract cancelled, chat binding and continuous mode
- * cleared) and nothing more: no run exists, so nothing is cancelled. Held back when a run, a revision,
- * a continuation automation or recent contract activity exists. Each close is written to run_events
- * with the previous status and binding so it can be read back and restored.
+
+
+
+
+
+
+
+
+
  */
 export function reconcileAbandonedGoalContracts(now = new Date()): string[] {
   const db = getDb();

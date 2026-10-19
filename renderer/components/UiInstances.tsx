@@ -23,7 +23,7 @@ type HarnessApi = {
   uiList: (chatId: string) => Promise<UiInstanceView[]>;
   onUiChanged: (handler: (event: { chatId: string }) => void) => () => void;
 };
-// preload exposes the bridge as window.agentlas (real-app check 2026-10-14: window.api never existed, so no card showed).
+
 const harnessApi = (): HarnessApi | null => (typeof window !== "undefined" ? ((window as unknown as { agentlas?: { harness?: HarnessApi } }).agentlas?.harness ?? null) : null);
 const newCommandId = (): string => (globalThis.crypto?.randomUUID?.() ?? `c_${Date.now()}_${Math.random().toString(36).slice(2)}`);
 

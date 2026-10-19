@@ -45,11 +45,11 @@ const keychainCache = new Map<string, string | null>();
 const keychainCacheAt = new Map<string, number>();
 let envKeyCacheAt = 0;
 /**
- * The background service is a different process from the window that edits the vault. Its read cache never learns
- * about a key the window saved, renamed or rotated afterwards: a name it once read as missing stayed missing, and a
- * rotated key stayed old, until the service restarted (production 2026-10-11: ELEVENLABS key stored under another
- * name, renamed later, still invisible to Hope's daemon turns). A host that cannot see the other process's writes must
- * not trust a cached answer for long, so its entries expire. The window sees its own writes and keeps its cache.
+
+
+
+
+
  */
 export function headlessCredentialCacheTtlMs(): number {
   const raw = Number(process.env.AGENTLAS_HEADLESS_CREDENTIAL_CACHE_MS);
@@ -91,15 +91,15 @@ function rememberAccounts(service: string, accounts: string[]): void {
   if (previous) for (const account of previous) if (!knownAccounts.accounts.has(account)) notePresence(service, account, false);
 }
 
-/*
- * Value-free presence (R-024). Discovery (harness describe / search / status, canonical readiness) must not read,
- * list or prompt for a secret: production 2026-10-16..17 `harness_describe connector:*` read keychain values four times
- * inside unattended runs (daily graph, Yotube room), where a keychain prompt has nobody to answer it. Presence is
- * answered from what this process already observed (its cache, its last listing) and from a durable ledger that every
- * process writes after its OWN successful native read, write, delete or listing: one small file per account, named by a
- * digest of service and account, holding only present/absent and a time. It never holds a value or a name, and an
- * account nobody observed yet is "unknown", never "missing".
- */
+
+
+
+
+
+
+
+
+
 export type CredentialPresence = "present" | "missing" | "unknown";
 const presenceWritten = new Map<string, boolean>();
 function presenceFile(service: string, account: string): string | null {
@@ -193,13 +193,13 @@ function queuePasswordOperation<T>(key: string, run: () => Promise<T>): Promise<
   return next;
 }
 
-/*
- * ★키체인 호출은 전부 keychain-host 를 지난다(그 파일에 사유가 적혀 있다).
- *   화면이 있는 호스트에서는 예전 그대로 직접 부르고, 화면이 없는 호스트
- *   (플러그인 CLI·hep-graph·cron)에서는 죽일 수 있는 자식 프로세스로 옮긴다.
- *   여기서 직접 `keytar.*` 를 부르는 새 코드를 만들지 말 것 — 그 한 줄이
- *   헤드리스 호스트에서 제품 전체를 멈춘다(2026-08-19 실측).
- */
+
+
+
+
+
+
+
 async function getPassword(account: string): Promise<string | null> {
   if (developmentEffectsSuppressed() || USE_MEMORY_VAULT) return memoryVault.get(account) ?? null;
   const service = keychainService();
@@ -458,6 +458,7 @@ export function apiKeyPresenceHint(backend: RuntimeBackend): "present" | "missin
 
 /** main 내부 사용 — MCP 호출 시 자식 env에 주입. renderer 노출 X */
 export async function readApiKey(backend: RuntimeBackend): Promise<string | null> {
+  await (await import("../business/company-work-provider")).assertCompanyProviderCredential(backend);
   return getPassword(byokAccount(backend));
 }
 
@@ -495,6 +496,13 @@ export async function ensureApiKeyDescriptor(
   const current = await describeApiKey(backend);
   if (current?.fingerprint === apiKeyFingerprint(key)) return current;
   return writeApiKeyDescriptor(backend, key);
+}
+
+/** Focused Main review only: backfill the existing key's descriptor inside its
+ * original credential owner without returning or copying the key. */
+export async function ensureExistingApiKeyDescriptor(backend: RuntimeBackend): Promise<ApiKeyDescriptor | null> {
+  const key = await getPassword(byokAccount(backend));
+  return key ? ensureApiKeyDescriptor(backend, key) : null;
 }
 
 // ── 글로벌 env (외부 통합 API 키) ───────────────────────────

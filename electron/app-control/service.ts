@@ -239,7 +239,7 @@ export function appControlOperationsLocal(input: OperationsInput): AppControlOpe
       const pathWords = new Set(words(operation.path));
       let score = 0;
       for (const term of terms) {
-        // A plural guess names the singular path token (dev 2026-10-18: "automations.runs" did not reach runCounts' "run").
+        
         if (pathText.includes(term)) score += 3;
         else if (term.length > 3 && term.endsWith("s") && pathWords.has(term.slice(0, -1))) score += 2;
         else if ([...haystack].some((word) => word.startsWith(term) || term.startsWith(word) && word.length >= 4)) score += 1;
@@ -323,13 +323,13 @@ export type AppResultImage = { path: string; file: string; mediaType: "image/png
 const MAX_RESULT_IMAGES = 8;
 const IMAGE_DATA_URL = /^data:image\/(png|jpeg);base64,/;
 
-// An operation that answers an image as a data URL (computerUse.capturePreview, browser.captureLiveFrame, site.captureRect,
-// workLiveView.capture, ...) left it to clipResult, which cut the base64 like any long text. Dev 2026-10-18 run30 O8 (GPT
-// firm QA checking a saved docx): capturePreview's 313,674-char data URL came back as 22,569 chars, no model could read it,
-// and the QA closed inconclusive. Each image is saved as a host observation capture (captures/observations, removed after the
-// settled-run detail window; never a run output) and the result
-// holds its absolute path; `images` names where each was and its file, and the harness channel hands those files to the model
-// as images (turn-tools/control-server.ts).
+
+
+
+
+
+
+
 function saveResultImages(value: unknown): { value: unknown; images?: AppResultImage[] } {
   let text: string;
   try { text = JSON.stringify(value) ?? "null"; } catch { return { value }; }
@@ -358,16 +358,16 @@ type ResultCut = { path: string; kind: "array" | "string"; total: number; return
 const LONG_TEXT = 2_000;
 const STUB_BUDGET = 6_000;
 
-// A result over RESULT_LIMIT keeps its JSON shape. Dev 2026-10-17 run8 (Haiku automation): automations.listRuns came back
-// as a cut JSON string over the limit, so the same `result` was an array for a small history and a string for a large one,
-// and every JSON.parse of it in code mode failed. Arrays are cut to the prefix that fits (one item kept while long text can
-// still shrink), then long free text, and `cuts` names each cut. Only a result none of that brings under the limit keeps
-// the string preview.
-// A cut list of records keeps the left-out records in place as stubs { id, name?, truncated: true } (within a budget), so
-// the list's length and its ids stay whole for code that reads only `result`. Dev 2026-10-18 run10 and run13:
-// automations.list kept 2 of 48 automations; Haiku's code read data.result, counted 2 and reported the week of
-// "자동화 2개" twice, once with the left-out names beside the result and the cut facts ahead of it, because the daemon's
-// canonical channel sorts keys (truncated/truncation came after result again) and the code never looked at them.
+
+
+
+
+
+
+
+
+
+
 function clipResult(value: unknown): { result: unknown; truncated?: true; cuts?: ResultCut[] } {
   if (value === undefined) return { result: null };
   let text: string;
@@ -487,9 +487,9 @@ export async function appControlCallLocal(caller: AppControlCaller, input: { ope
   const operation = operations().find((candidate) => candidate.path === path);
   if (!operation) {
     if (catalogEntry?.surface === "science") throw new AppControlError("science-not-installed", "Agentlas Science is not installed or not active.");
-    // The refusal names the closest catalog operations (the same deterministic search). Dev 2026-10-18 run11: Haiku guessed
-    // automations.runs.list, automations.history and automations.executions for automations.listRuns, and the hint named
-    // one_app_operations, a tool the harness path does not have (it was tried as an operation name).
+    
+
+
     const closest = path ? (appControlOperationsLocal({ query: path, limit: 8 }).operations ?? []).map((item) => String(item.operation)) : [];
     throw new AppControlError("operation-unknown", `Unknown operation ${path || "(empty)"}.${closest.length ? ` Closest: ${closest.join(", ")}.` : ""} Search the catalog with one_app_operations (in harness_call: app.operations).`);
   }
@@ -498,8 +498,8 @@ export async function appControlCallLocal(caller: AppControlCaller, input: { ope
   }
   const unknown = Object.keys(named).filter((key) => !operation.params.includes(key));
   if (unknown.length) throw new AppControlError("invalid-arguments", `Unknown argument ${unknown.join(", ")}; ${path} takes ${operation.params.length ? operation.params.join(", ") : "no arguments"}.`);
-  // A required argument that is missing is refused, never sent as undefined: automations.listRuns without its id answered
-  // 0 runs as if that were the history (dev 2026-10-17 run8), and the agent reported "no runs last week".
+  
+
   const requiredKeys = APP_CONTROL_ARGUMENT_SCHEMAS[path]?.required;
   const missing = Array.isArray(requiredKeys) ? requiredKeys.filter((key) => typeof key === "string" && named[key] === undefined) : [];
   if (missing.length) throw new AppControlError("invalid-arguments", `${path} needs ${missing.join(", ")}; pass them in args.`);

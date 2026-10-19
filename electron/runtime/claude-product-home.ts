@@ -42,13 +42,13 @@ export function isClaudePersonalSessionEntry(name: string): boolean {
 }
 
 /**
- * The person's user settings files. Never linked: the mirror's settings.json is its own file holding only
- * productClaudeSettings of them. Linked (until 2026-10-17), every product Claude run loaded the person's `hooks` (the
- * owner's: a PostToolUse gate runner and a SessionEnd/Stop `reap-dev-instances.sh` that ends dev app instances, run at
- * the end of every product session), their `env` (APP_STORE_CONNECT_*, GOOGLE_APPLICATION_CREDENTIALS and
- * GOOGLE_PLAY_KEY_FILE in every product shell: the class of leak Codex's shell environment was closed for on 2026-10-12),
- * `permissions` (pre-approved commands), `language`, `statusLine` and the rest. A `--settings` overlay cannot take hooks
- * or env back out (arrays and objects merge; `disableAllHooks` would also stop the product's own tool-broker hook).
+
+
+
+
+
+
+
  */
 export const CLAUDE_PERSONAL_SETTINGS_FILES: readonly string[] = ["settings.json", "settings.local.json"];
 /**
@@ -233,32 +233,32 @@ export function syncClaudeProductHome(realDir: string, mirror = claudeProductHom
 }
 
 /**
- * Env every product Claude Code run carries, on every path (one-shot, resident, Alive, judgment) and whether or not the
- * mirror below can hold. Owner decision 2026-10-16: the collapsed progress checklist Codex shows (turn/plan/updated).
- * Claude Code 2.1.268+ offers its todo tools (TaskCreate, TaskUpdate, TaskList, TaskGet; TodoWrite on older CLIs) only on
- * models up to Opus 4.7 / Sonnet 4.6 unless CLAUDE_CODE_ENABLE_TODO_TOOLS=1; on 2.1.301 with claude-opus-5-5 the
- * system/init tool list has none of them without it (measured 2026-10-16). runtime-plan.ts reads those tools into the
- * one typed plan. This changes the tool list Claude sees, not any prompt text; the task store stays in the mirror (the
- * `tasks` dir is not a linked config entry).
+
+
+
+
+
+
+
  */
-/*
- * Background tasks and the CLI's own cron are off on product runs: the host owns the process lifetime, so work that is
- * meant to outlive the turn cannot. Production 2026-10-18 (Yotube orchestrator session 67fc032e, 1.3.67): 34 background
- * Agents, 864 of 963 subagent minutes outside the root turn; the one-shot process lived 28 and 39 minutes waiting on them,
- * the CLI's own ceiling killed five at once (06:43:54Z), and two Goal turns ended unsettled. With 0c261a38 each pass ends
- * at its root result and the process is ended, which would cut every background subagent mid-work. With the env the
- * Agent and Bash tools run in the foreground (several calls in one message still run in parallel) and finish inside the
- * pass, as on 10-17 (15 foreground Agents, 0 unsettled passes) and as codex exec already does. A CronCreate inside a run
- * never fires after the host ends the process, so the model would believe a schedule exists that does not; scheduling
- * stays with Agentlas (goal_wait, automations). Measured in the installed CLI 2.1.302: both names read from the env.
- * This changes the tool surface, not any prompt text.
- *
- * A start the CLI refuses ends with a typed result: CLI 2.1.302 writes the zeroed error_during_execution result naming
- * startup_failure_reason ("Failures that used to end with stderr alone write that result only when the host sets
- * CLAUDE_CODE_STARTUP_FAILURE_RESULTS"). Without it a --resume of a session held by another process
- * (session_held_by_background), a missing working folder or an unusable temp dir exits 1 with stderr only, and a pass that
- * never started read as an unsettled turn. claude-code.ts claudeStartupRefusal returns it typed and pre-dispatch.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 export const CLAUDE_PRODUCT_RUN_ENV: Readonly<Record<string, string>> = Object.freeze({
   CLAUDE_CODE_ENABLE_TODO_TOOLS: "1",
   CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",

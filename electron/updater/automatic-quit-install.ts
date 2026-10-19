@@ -174,7 +174,7 @@ export function createAutomaticQuitInstaller(
             observeInstallState(deps.getState());
             return;
           }
-          // Say why: 2026-10-13 (1.3.18 -> 1.3.20) this refusal left no reason while the state had left "downloaded".
+          
           const refusedState = result.state as { status?: string; code?: string; version?: string | null } | undefined;
           logger.warn(`[updater] automatic install on quit was not accepted; continuing normal quit (state=${refusedState?.status ?? "?"}${refusedState?.code ? ` code=${refusedState.code}` : ""} version=${refusedState?.version ?? "?"})`);
           continueNormalQuit();

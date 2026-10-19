@@ -587,18 +587,18 @@ export function listTriggerEventAttention(automationId: string): AutomationTrigg
 }
 
 /**
- * Storage budget (storage/storage-maintenance.ts): up to `limit` delivered rows
- * delivered before `cutoffIso` give up their payload (an upstream run's output,
- * up to 256 KB) and keep the row, in one statement.
- * - The row itself is the dedupe record: UNIQUE(automation_id, trigger_kind,
- *   dedupe_key) is what stops a chain-receipt reconcile, a poll, a folder
- *   rescan or a webhook replay from delivering the same event again. Deleting
- *   it made the every-minute chain reconciler re-enqueue month-old deliveries
- *   (desktop-w2-01, 2026-10-17), so rows are never deleted here.
- * - Pending, claimed and parked rows are never touched: they are work or attention.
- * - A row whose bound run is still `running` keeps its payload.
- * - `source` and `ownerChatId` survive compaction: the Toolchain history
- *   (toolchains/history.ts) reads them to say who ran each command run.
+
+
+
+
+
+
+
+
+
+
+
+
  */
 export function compactDeliveredTriggerEvents(cutoffIso: string, limit = 500, nowIso = new Date().toISOString()): number {
   return getDb().prepare(

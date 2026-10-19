@@ -943,8 +943,8 @@ export function setChatSwarmMode(chatId: string, enabled: boolean): void {
 }
 
 /**
- * Who changed a chat's model chip. 2026-10-17: the production Yotube room's chip moved from codex gpt-6.1-sol xhigh to
- * claude-code sonnet low between 00:25Z and 01:05Z, and nothing recorded who did it (the release peer read every log).
+
+
  */
 export type ChatRuntimeSelectionActor =
   | "desktop-ui" | "mobile" | "work-start" | "external-cli-import" | "science" | "runtime-handoff" | "host";
@@ -1500,11 +1500,11 @@ function closedAgiRestartAskIds(actionIds: readonly string[]): ReadonlySet<strin
 }
 
 /**
- * Host lines whose truth moved after they were written, read from durable state (owner Yotube 2026-10-17). The stored row
- * is never rewritten; every history reader (One, Work, split pane, phone, thread read) gets the same projection:
- *  - a run failure line whose request a later run took over reads "recovered" (quiet on every surface);
- *  - a "needs-owner" run failure whose code is inside the app reads "app-failed" (shared/run-failure-cause.ts);
- *  - an AGI "restart the app" ask whose incident has closed is withdrawn (drawn nowhere).
+
+
+
+
+
  */
 function createSettledHostNoticeProjector(chatId: string, notices: ReadonlyArray<ChatHostNotice | undefined>): (notice: ChatHostNotice | undefined) => ChatHostNotice | undefined {
   const failureRunIds: string[] = [], askIds: string[] = [];

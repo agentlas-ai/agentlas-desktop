@@ -10,7 +10,7 @@ import { createWorkStart } from '../work-start';
 import { detectRuntimes } from '../runtime/detect';
 import { FinanceStore, type FinanceScope } from './store';
 import { interpretFinance } from './model';
-import { queryFinanceData, refreshFinanceQuotes, searchFinanceAssets } from './data';
+import { queryFinanceData, refreshFinanceQuotes } from './data';
 import { financeResearchPrompt } from './prompts';
 import { getFinanceService } from './service';
 import { onFinanceWorkspaceChange } from './events';
@@ -75,9 +75,8 @@ export function registerFinanceIpc(input: { ipc: Pick<IpcMain, 'handle'>; assert
     return service.save(scope,{ workspace: validateFinanceWorkspace(arg.workspace), expectedRevision: arg.expectedRevision });
   });
   handle('search', async(_event, raw, scope) => {
-    const route={...await requireFinanceConsent(scope),assertCurrent:()=>scope.assertCurrent()};
     const arg = z.object({ query: z.string().min(1).max(200) }).strict().parse(raw);
-    const result = await searchFinanceAssets(arg.query,route); scope.assertCurrent(); return result;
+    const result = await service.search(scope,arg); scope.assertCurrent(); return result;
   });
   handle('queryData', async(_event, raw, scope) => {
     const route={...await requireFinanceConsent(scope),assertCurrent:()=>scope.assertCurrent()};

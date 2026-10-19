@@ -106,10 +106,10 @@ export class AcpConnection {
     child.on("close", (code,signal) => {try{this.transportDiagnostics.childClosed(code,signal);}catch{/* Observation must not block closure. */}finish(code);});
     child.on("error", (error) => {try{const code=error&&typeof error==="object"&&!types.isProxy(error)?Object.getOwnPropertyDescriptor(error,"code")?.value:undefined;this.transportDiagnostics.childError(nativeSpawnErrorCode(code));}catch{/* Observation must not block closure. */}finish(null);});
     child.stdout.on("end", () => {try{this.transportDiagnostics.transportEnded("stdout-end");}catch{/* Observation must not block closure. */}finish(child.exitCode);});
-    // A write to an agent that has already exited fails asynchronously with EPIPE on stdin. With no listener that error was
-    // uncaught and took the host process down: W7 ca1724ea (2026-10-17), the daemon exited reason=error during the copilot
-    // ACP model probe, and every GUI turn then failed native_gui_activation_prerequisites_missing until it re-attached.
-    // ACP lanes, codex app-server (codex-session.ts) and the codex alive session all use this connection. Closed transport.
+    
+
+
+
     child.stdin.on("error", () => {try{this.transportDiagnostics.transportEnded("child-error");}catch{/* Observation must not block closure. */}finish(child.exitCode);});
   }
 
@@ -237,10 +237,10 @@ const SECRET_AUTH_ENV: Array<{ match: RegExp; envVars: string[] }> = [
 ];
 
 /**
- * `authMethods` is a menu, not a priority list (measured 2026-08-14: codex-acp
- * advertises [api-key, chat-gpt]; picking [0] fails when the user is logged in
- * via ChatGPT). Prefer methods that need no secret; take a secret-backed one
- * only when the secret is present. Never invent or ask for credentials.
+
+
+
+
  */
 export function chooseAuthMethod(
   methods: Array<Record<string, any>>,
@@ -260,11 +260,11 @@ export function chooseAuthMethod(
 }
 
 /**
- * Session modes from a session/new response. Two shapes are in the wild and both
- * are real: the spec's `modes: { currentModeId, availableModes }` and the
- * `configOptions[category=mode]` select (measured 2026-08-18: grok advertises
- * neither, gemini/cursor use one of the two). Parsing only — which mode a run
- * should pick is policy and lives in acp.ts.
+
+
+
+
+
  */
 export function modeOptionsFromNewSession(response: any): Array<{ id: string; name: string; description?: string; current?: boolean }> {
   const rows: Array<{ id: string; name: string; description?: string; current?: boolean }> = [];

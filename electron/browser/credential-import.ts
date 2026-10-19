@@ -582,8 +582,8 @@ function agentlasMacSafeStorageService(): string | null {
 }
 
 /**
- * A GUI app's first Keychain read shows the "allow" dialog, which asks for the login password. A 5 s synchronous read
- * froze Main and was killed before the owner could answer (usage/claude.ts learned the same and uses 20 s, async).
+
+
  */
 const KEYCHAIN_READ_TIMEOUT_MS = 30_000;
 type MacSafeStorageKeyRead = { key: Buffer } | { key: null; reason: "keychain_prompt_pending" | "keychain_unavailable" };

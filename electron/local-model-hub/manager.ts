@@ -85,6 +85,9 @@ export interface LocalModelHubManagerOptions {
 /** A managed llama-server is retained between turns, but never indefinitely. */
 export const LOCAL_MODEL_IDLE_REAP_MS = 12 * 60 * 60_000;
 const LOCAL_MODEL_IDLE_REAP_CHECK_MS = 10 * 60_000;
+/** An engine that exits on its own is restarted at most this many times per window; one that dies on every request must not loop. */
+const ENGINE_RECOVERY_MAX = 2;
+const ENGINE_RECOVERY_WINDOW_MS = 10 * 60_000;
 
 export interface LocalCapabilityTestSelection {
   strictJson?: boolean;
@@ -256,6 +259,7 @@ export class LocalModelHubManager {
   private readonly activeInference = new Map<string, { controller: AbortController; done: Promise<void> }>();
   private idleReaperTimer: ReturnType<typeof setInterval> | null = null;
   private idleReaperQueued = false;
+  private readonly engineRecoveryAt: number[] = [];
 
   constructor(readonly rootPath: string, options: LocalModelHubManagerOptions = {}) {
     this.packageRoot = join(rootPath, "packages");
@@ -948,6 +952,7 @@ export class LocalModelHubManager {
             this.unavailableReason = "local_model_crash_receipt_write_failed";
           });
           void this.removeProcessLease(receipt.processEpoch);
+          if (generation === this.loadGeneration) this.recoverAfterEngineExit(receipt.installationId, receipt.contextTokens);
         }
       });
       this.state.loadReceipts = bounded([...this.state.loadReceipts, receipt]);
@@ -966,6 +971,32 @@ export class LocalModelHubManager {
       await this.save();
       return receipt;
     }
+  }
+
+  /**
+
+
+
+
+ */
+  private recoverAfterEngineExit(installationId: string, contextTokens: number): void {
+    if (this.shutdownPromise) return;
+    const generation = this.loadGeneration;
+    const now = this.now();
+    while (this.engineRecoveryAt.length && now - this.engineRecoveryAt[0] > ENGINE_RECOVERY_WINDOW_MS) this.engineRecoveryAt.shift();
+    if (this.engineRecoveryAt.length >= ENGINE_RECOVERY_MAX) {
+      console.warn("[local-model-hub] the engine exited again; the automatic restart limit is reached, reload the model by hand");
+      return;
+    }
+    this.engineRecoveryAt.push(now);
+    console.warn(`[local-model-hub] the engine exited on its own; restarting the same model (${this.engineRecoveryAt.length}/${ENGINE_RECOVERY_MAX})`);
+    const restart = () => {
+      if (this.shutdownPromise || this.loadGeneration !== generation) return;
+      void this.loadModel(installationId, contextTokens).catch((error) => console.error("[local-model-hub] automatic engine restart failed", error));
+    };
+    if (this.activeInference.size === 0) restart();
+    else void this.cancelActiveRuns().then(restart)
+      .catch((error) => console.error("[local-model-hub] automatic engine restart failed", error));
   }
 
   endpoint(): string {

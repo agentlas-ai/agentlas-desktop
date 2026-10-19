@@ -65,7 +65,13 @@ export interface GoalPlaygroundDeps {
   nextSafeRunAt(run: GoalRunView): string | null;
   /** A blocked-goal sweep retry is scheduled for this run (its next step exists and may be brought forward). */
   hostRetryPending(runId: string): boolean;
-  latestReceipt(chatId: string): { status: string; errorCode: string | null; finishedAt: string | null } | null;
+  /**
+   * The receipt of the Goal's OWN controller turn: the invocation its newest controller attempt ran, read by that
+   * exact id. Never the room's newest foreground run: a teammate's report turn, an owner's side question or a relay the
+   * waiting Goal refused are runs of the same room, and the controller model reads this as "the Goal's last run".
+   * `chatId` is the room; `run` is the Goal's long run.
+   */
+  latestReceipt(chatId: string, run: GoalRunView): { status: string; errorCode: string | null; finishedAt: string | null } | null;
   continueGoal(runId: string, expectedVersion: number): GoalContinueOutcome;
   /** The owner's latest pause on this run is not yet released (long_run_owner_paused ledger hold). */
   ownerHold?(runId: string): boolean;
@@ -146,7 +152,7 @@ export class GoalAlivePlayground implements AlivePlaygroundPort {
     if (!run) return { work: "none", observation: { goalId }, salience: { goalId, run: null }, blockedBy: "goal.ledger-missing" };
     const revision = this.deps.goalRevision(goalId);
     const nextSafeRunAt = this.deps.nextSafeRunAt(run);
-    const receipt = this.deps.latestReceipt(chat.id);
+    const receipt = this.deps.latestReceipt(chat.id, run);
     let work: AlivePlaygroundObservation["work"];
     let blockedBy: string | null = null;
     let ownerWait: AliveOwnerWait | null = null;

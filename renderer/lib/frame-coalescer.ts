@@ -2,12 +2,12 @@ import type { McpInvocationEvent } from "@shared/types";
 import { isLivePartialCommitBoundary } from "@shared/interrupted-partial";
 
 /**
- * Batches high-frequency stream updates into one React commit per frame (perf review 2026-10-17, D11).
- *
- * Streamed text, a teammate's text and thought deltas each re-rendered the whole One shell, because every event
- * also advanced the activity reducer. Queued tasks run later, together, in the order they arrived; whoever handles a
- * non-stream event calls flush() first, so nothing ever overtakes the streamed text. A hidden document gets no frames,
- * so a timer flushes there (and backs up a frame that never comes).
+
+
+
+
+
+
  */
 
 export interface FrameBatcherOptions {

@@ -3,17 +3,17 @@ import path from "node:path";
 import { userDataDir } from "../runtime-paths";
 
 /**
- * Operator-readable record of abnormal MCP proxy bridge events.
- *
- * Why a file of its own. The bridge lives in the process that runs the model: Main for window-hosted runs, the background
- * service for the personal agent and group rooms. The service's console output is counted and dropped on purpose
- * (daemon/diagnostic-log.ts), so every "[mcp-proxy] bridge closed ... reason=..." warning it raised never reached any log.
- * Production 1.3.3, 2026-10-12: all 26 proxied browser / computer-use calls of service-owned runs failed with "agentlas proxy
- * reconnecting (bridge_response_error)" (the other 794 calls, owned by the window process, all worked) and nothing said why.
- *
- * What may be written: event kind, server key, an 8-character handle prefix, a machine reason token, the code location that
- * ended the wire, counts and ages. Never a prompt, tool argument or result, URL, path, header or token.
- * File: <userData>/diagnostics/mcp-proxy.log (0600, 256 KB, two archives, 7 days), beside agentlasd.log.
+
+
+
+
+
+
+
+
+
+
+
  */
 const MAX_BYTES = 256 * 1024;
 const ARCHIVES = 2;

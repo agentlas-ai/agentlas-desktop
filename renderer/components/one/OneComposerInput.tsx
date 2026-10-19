@@ -59,10 +59,10 @@ export const OneComposerInput = memo(forwardRef<OneComposerInputHandle, OneCompo
   const compositionText = useRef("");
   // An Enter pressed while a Hangul syllable was still composing: send as soon as the IME commits it.
   const sendAfterCommit = useRef<HTMLTextAreaElement | null>(null);
-  // That commit's send is scheduled. Chromium on macOS follows the composing Enter with a second, plain Enter keydown;
-  // sending on it too made one Enter two submits, and the second (the composer already cleared) read as "stop" while a
-  // run was active: the owner's message was applied and the run and its Goal were paused 20 ms later (owner 2026-10-14,
-  // room "X Marketing" 10:40:27Z: steer applied .089, turn-stop pause .094).
+  
+
+
+
   const commitSendScheduled = useRef(false);
 
   const getValue = useCallback(() => input.current?.value ?? value.current, []);

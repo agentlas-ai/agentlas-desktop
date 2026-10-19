@@ -1051,6 +1051,59 @@ export function claudeResultFactsStatus(ev: Record<string, unknown>, facts: { ro
     + ` root_accepted=${facts.rootAccepted} own=${facts.own} background_live=${facts.backgroundLive}`;
 }
 
+/** The `usage` block of one CLI result, as the stream writes it. */
+export interface ClaudeResultUsage {
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_read_input_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+}
+
+/**
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ */
+export function addClaudeResultUsage(prior: ClaudeUsageReceipt | undefined, usage: ClaudeResultUsage | null | undefined): ClaudeUsageReceipt | undefined {
+  if (!usage) return prior;
+  const inputParts = [usage.input_tokens, usage.cache_read_input_tokens, usage.cache_creation_input_tokens];
+  if (!inputParts.some((value) => value !== undefined && value !== null)
+    || !inputParts.every((value) => value == null || (Number.isSafeInteger(value) && value >= 0))
+    || !Number.isSafeInteger(usage.output_tokens) || usage.output_tokens! < 0) return prior;
+  const inputNow = inputParts.reduce<number>((total, value) => total + (value ?? 0), 0);
+  const inputTokens = (prior?.observed.inputTokens ?? 0) + inputNow;
+  const outputTokens = (prior?.observed.outputTokens ?? 0) + usage.output_tokens!;
+  if (!Number.isSafeInteger(inputTokens) || !Number.isSafeInteger(outputTokens) || !Number.isSafeInteger(inputTokens + outputTokens)) return prior;
+  const sum = (before: number | undefined, now: unknown): number | undefined =>
+    before !== undefined || Number.isSafeInteger(now) ? (before ?? 0) + (Number.isSafeInteger(now) ? now as number : 0) : undefined;
+  const cachedInputTokens = sum(prior?.observed.cachedInputTokens, usage.cache_read_input_tokens);
+  const rawInputTokens = sum(prior?.detail.rawInputTokens, usage.input_tokens);
+  const cacheCreationInputTokens = sum(prior?.detail.cacheCreationInputTokens, usage.cache_creation_input_tokens);
+  return {
+    observed: { inputTokens, outputTokens, ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}) },
+    detail: { ...(cacheCreationInputTokens !== undefined ? { cacheCreationInputTokens } : {}),
+      ...(rawInputTokens !== undefined ? { rawInputTokens } : {}) },
+  };
+}
+
+/** The receipt addClaudeResultUsage builds: the logical total, plus the provider's own split of its input. */
+export interface ClaudeUsageReceipt {
+  observed: { inputTokens: number; outputTokens: number; cachedInputTokens?: number };
+  detail: { rawInputTokens?: number; cacheCreationInputTokens?: number };
+}
+
 /**
  * Live background tasks of one Claude process, from the CLI's own task lifecycle frames (2.1.302): system/task_started
  * (is_backgrounded), task_updated (patch.is_backgrounded / a terminal patch.status), task_notification (the task ended),
@@ -1336,7 +1389,7 @@ const runClaudeTurn = async (
   const modelArgs = req.model && req.model.trim() ? ["--model", req.model.trim()] : [];
   // 작업량(reasoning effort) — installed CLI가 노출한 값을 그대로 전달. 미지정이면 CLI 기본.
   const effortArgs = req.effort && req.effort.trim() ? ["--effort", req.effort.trim()] : [];
-  // 출력 형태 계약 — 실측 claude 2.1.234 `--json-schema <schema>`.
+
   const schemaArgs = req.outputSchema ? ["--json-schema", JSON.stringify(req.outputSchema.schema)] : [];
 
   // MCP 서버 구성 주입 — mcp/client.ts가 설치·활성 서버를 .mcp.json으로 직렬화해 경로를 넘긴다.
@@ -1413,10 +1466,10 @@ const runClaudeTurn = async (
   recordClaudeCapabilityRequest({ permission: req.permission, browserOnly: Boolean(runReq.browserOnly),
     untrustedNoTools: Boolean(runReq.untrustedNoTools), allowedBuiltins: builtinPreAllowed });
   const allowedToolArgs = preAllowedTools.length > 0 ? ["--allowedTools", preAllowedTools.join(",")] : [];
-  // ★C38 — 도구 호출 직전 관문. 실측(2026-08-04, claude 2.1.220): PreToolUse deny가
-  // `--permission-mode bypassPermissions`를 이기고 Bash 호출을 실제로 막았다. 허용 깃발
-  // (`--allowedTools`)은 켜기만 하므로, 선언되지 않은 호출을 거절하는 곳은 여기뿐이다.
-  // Settings and the write-sandbox launch guard are checked before the CLI starts: their refusals precede dispatch.
+
+
+
+
   const executionSettings = await withProductReplyLanguage(await claudeExecutionSettings(runReq)
     .catch((error: unknown) => { throw markRefusedBeforeDispatch(error); }), runReq.locale);
   const productSettings = withoutPersonalClaudeInstructions(executionSettings, runReq.env ?? process.env);
@@ -2043,6 +2096,38 @@ const runClaudeTurn = async (
     let finalText = "";
     let tokens: number | undefined;
     let observedUsage: { inputTokens: number; outputTokens: number; cachedInputTokens?: number } | undefined;
+    /** The runner turn's usage receipt: the sum of its own CLI results (addClaudeResultUsage). observedUsage is its logical half. */
+    let usageReceipt: ClaudeUsageReceipt | undefined;
+    /** Usage of results this runner turn did not take as its own (background-attributed turns, sidechains): counted, never added. */
+    const unattributedUsage = { results: 0, inputTokens: 0, outputTokens: 0 };
+    const noteUnattributedResultUsage = (ev: Record<string, unknown>): void => {
+      const usage = addClaudeResultUsage(undefined, ev.usage as ClaudeResultUsage | undefined)?.observed;
+      if (!usage || !Number.isSafeInteger(unattributedUsage.inputTokens + usage.inputTokens)
+        || !Number.isSafeInteger(unattributedUsage.outputTokens + usage.outputTokens)) return;
+      unattributedUsage.results += 1;
+      unattributedUsage.inputTokens += usage.inputTokens;
+      unattributedUsage.outputTokens += usage.outputTokens;
+    };
+    let usageSettled = false;
+    /**
+     * The turn's usage, reported once when the turn ends: the receipt for the attempt (total, cached read) and its split
+     * (raw input, cache writes), both from the same sum. A receipt per result would give the collectors two different
+     * totals for one attempt, which they read as a conflict and drop. The stream reader swallowed a throwing observer
+     * when this ran inside the result handler; the turn's settlement still does not depend on one.
+     */
+    const settleUsage = (): void => {
+      if (usageSettled) return;
+      usageSettled = true;
+      try {
+        if (unattributedUsage.results > 0) {
+          events.onStatus(`[runtime-session] result_usage_unattributed kind=${KIND} results=${unattributedUsage.results}`
+            + ` input=${unattributedUsage.inputTokens} output=${unattributedUsage.outputTokens}`);
+        }
+        if (!usageReceipt) return;
+        events.onTerminalObservedUsage?.(usageReceipt.observed, runtimeAttemptId);
+        events.onModelUsageDetail?.(runtimeAttemptId, usageReceipt.detail);
+      } catch { /* accounting observers never decide the turn */ }
+    };
     /** Input of the turn's last root model request (fresh + cache read + cache write): what the next request starts from. */
     let contextInputTokens: number | undefined;
     let contextCachedInputTokens: number | undefined;
@@ -2053,11 +2138,11 @@ const runClaudeTurn = async (
     let stderr = "";
     let structuredRuntimeError: Error | null = null;
     /**
-     * `--resume` named a session the CLI never wrote to disk: an error result with zero turns
-     * ("No conversation found with session ID"). Measured 2026-09-25: an owner pause that stopped
-     * the first turn while the CLI was starting stored the init session id; the owner's Resume then
-     * failed at once as "claude error", and the Goal blocked on checkpoint_producer_no_effects.
-     */
+
+
+
+
+ */
     let resumedConversationMissing = false;
     /** The typed cause of a zeroed startup-refusal result (claudeStartupRefusal): nothing ran and the binding stays. */
     let startupFailureReason: string | undefined;
@@ -2068,8 +2153,6 @@ const runClaudeTurn = async (
     /** Stream events of a shape this adapter understands (assistant/user content, stream_event, typed result, ...). Zero + exit 0 = runtime_protocol_unrecognized. */
     let recognizedEventCount = 0;
     let lastEmit = 0;
-    /** Results of this runner turn handed to handleEvent (a steered direction may add a second one). */
-    let ownResultCount = 0;
     let sessionId: string | undefined;
     let terminalSessionId = contextSessionId ?? null;
     let aliveInventoryVerified = Boolean(aliveProfile && session?.nativeSessionId && !lease?.fresh);
@@ -2099,11 +2182,11 @@ const runClaudeTurn = async (
       lastEmit = now;
     };
 
-    // ── 라이브 토큰 카운트 — 상태줄 "{N}s · {tokens} tokens" 실시간 갱신용 ──
-    // message_delta의 usage.output_tokens(현재 메시지 누적 실측)를 우선하고, 실측이 아직
-    // 없는 스트리밍 구간은 델타 문자 수/4로 추정한다. 렌더러 표시는 단조 증가만 허용.
+
+
+
     let usageBase = 0; // 완결된 메시지들의 output_tokens 합
-    let curMsgUsage = 0; // 현재 메시지의 마지막 usage 실측
+    let curMsgUsage = 0; 
     let curMsgEstChars = 0; // 현재 메시지에서 스트리밍된 문자 수(텍스트+thinking) — 추정용
     let lastUsageEmit = 0;
     let lastUsageVal = 0;
@@ -2403,9 +2486,9 @@ const runClaudeTurn = async (
       parent_tool_use_id?: string | null;
       isSidechain?: boolean;
       result?: unknown;
-      // `result` 이벤트는 입력·출력·캐시 토큰을 **전부** 싣는다(실측 확인 2026-07-28).
-      // 예전에는 output 만 읽고 나머지를 버려서, 할당 영수증의 `usage` 를 채울 수
-      // 없었다 — 스키마가 non-null 일 때 입력·출력 둘 다를 요구하기 때문이다.
+
+
+
       usage?: {
         output_tokens?: number;
         input_tokens?: number;
@@ -2784,9 +2867,9 @@ const runClaudeTurn = async (
         // this exact native terminal. Neither receipt asserts external quiescence.
         terminalSucceeded = completedResult;
         const resultShape = ev as { subtype?: unknown; num_turns?: unknown };
-        // A zeroed result that names a typed startup refusal (session_held_by_background, cwd_unavailable, ...) is that
-        // refusal, never a missing conversation: the stored binding stays (flow audit AD-2). Only a zero-turn error with
-        // no typed cause keeps the measured "No conversation found" meaning.
+        
+
+
         const startupRefusal = claudeStartupRefusal(ev as unknown as Record<string, unknown>);
         if (startupRefusal) startupFailureReason = startupRefusal;
         else if (resumeSessionId && ev.is_error === true && resultShape.subtype === "error_during_execution"
@@ -2809,39 +2892,20 @@ const runClaudeTurn = async (
             }
           }
         }
-        // A direction that ran as its own CLI turn ends with a second result of this runner turn: its usage adds up.
-        ownResultCount += 1;
-        const priorUsage = ownResultCount > 1 ? observedUsage : undefined;
-        if (ev.usage?.output_tokens != null) tokens = (ownResultCount > 1 && tokens !== undefined ? tokens : 0) + ev.usage.output_tokens;
-        if (ev.usage) {
-          // `inputTokens` 는 **모델에 실제로 들어간 토큰 전부**로 센다:
-          // 새 입력 + 캐시에서 읽은 것 + 캐시에 쓴 것. 새 입력만 세면 실측상
-          // 2 vs 52,518 처럼 실제 문맥 크기를 크게 과소보고한다. 청구 단가는
-          // 셋이 다르지만 영수증 칸은 정수 하나뿐이므로, 과소보고보다 실제
-          // 문맥 크기를 싣는 쪽을 택했다.
-          const usage = ev.usage;
-          const inputParts = [usage.input_tokens, usage.cache_read_input_tokens, usage.cache_creation_input_tokens];
-          const inputTotal = inputParts.reduce<number>((total, value) => total + (value ?? 0), 0);
-          if (inputParts.some((value) => value !== undefined && value !== null)
-            && inputParts.every((value) => value == null || (Number.isSafeInteger(value) && value >= 0))
-            && Number.isSafeInteger(usage.output_tokens) && usage.output_tokens! >= 0
-            && Number.isSafeInteger(inputTotal)
-            && inputTotal + usage.output_tokens! <= Number.MAX_SAFE_INTEGER) {
-            const cachedNow = Number.isSafeInteger(usage.cache_read_input_tokens) && usage.cache_read_input_tokens! >= 0
-              ? usage.cache_read_input_tokens! : undefined;
-            const cached = priorUsage?.cachedInputTokens !== undefined || cachedNow !== undefined
-              ? (priorUsage?.cachedInputTokens ?? 0) + (cachedNow ?? 0) : undefined;
-            observedUsage = {
-              inputTokens: (priorUsage?.inputTokens ?? 0) + inputTotal,
-              outputTokens: (priorUsage?.outputTokens ?? 0) + usage.output_tokens!,
-              ...(cached !== undefined ? { cachedInputTokens: cached } : {}),
-            };
-            events.onTerminalObservedUsage?.(observedUsage, runtimeAttemptId);
-            events.onModelUsageDetail?.(runtimeAttemptId, {
-              ...(Number.isSafeInteger(usage.cache_creation_input_tokens) ? { cacheCreationInputTokens: usage.cache_creation_input_tokens! } : {}),
-              ...(Number.isSafeInteger(usage.input_tokens) ? { rawInputTokens: usage.input_tokens! } : {}) });
-          }
-        }
+        // A direction that ran as its own CLI turn ends with a second result of this runner turn: its usage adds up
+        // (addClaudeResultUsage states the contract). A subagent-tagged result is not the root's own usage: counted aside.
+        if (!ev.parent_tool_use_id && ev.isSidechain !== true) {
+          if (ev.usage?.output_tokens != null) tokens = (tokens ?? 0) + ev.usage.output_tokens;
+
+
+
+
+
+
+
+          usageReceipt = addClaudeResultUsage(usageReceipt, ev.usage);
+          observedUsage = usageReceipt?.observed;
+        } else noteUnattributedResultUsage(ev);
         // ★모든 is_error가 표식이다 — 예전에는 로그인 만료 한 케이스만 집고 나머지를
         //   버려서, 성공 분기(exit 0)가 거절문을 정상 답으로 내보냈다.
         runnerFailure = claudeFailureFromEvent(ev, finalText, runnerFailure, runReq.locale);
@@ -2871,6 +2935,7 @@ const runClaudeTurn = async (
     };
     const appliedEffort = effortArgs.length === 2 ? effortArgs[1]! : null;
     const detachTurn = () => {
+      settleUsage();
       stopHeartbeat();
       if (oneShotExitTimer) { clearTimeout(oneShotExitTimer); oneShotExitTimer = null; }
       if (nativeTurnController) {
@@ -2922,7 +2987,7 @@ const runClaudeTurn = async (
         if (oneShotJson) { turnSink.onEvent(ev); return; }
         backgroundTasks.observe(ev);
         // Without uuids, a background result after our root result is never this turn's terminal (it used to overwrite it).
-        if (ev.type === "result" && terminalSucceeded && claudeBackgroundOrigin(ev)) return;
+        if (ev.type === "result" && terminalSucceeded && claudeBackgroundOrigin(ev)) { noteUnattributedResultUsage(ev); return; }
         dispatchEvent(ev);
         noteOneShotResult(ev);
       });
@@ -3014,13 +3079,13 @@ const runClaudeTurn = async (
         return;
       }
       if (startupFailureReason && !combined()) {
-        /*
-         * The CLI refused to start and named why (claudeStartupRefusal): nothing ran, no model request was made, and the
-         * stored session is not missing. It used to read as "conversation missing" (any zero-turn resume error): the binding
-         * was deleted and a fresh session started, so a session still held by its previous process
-         * (session_held_by_background) split into two conversations (flow audit 2026-10-18 AD-2). The binding stays and the
-         * refusal is returned typed, pre-dispatch, with the CLI's reason as its provider code.
-         */
+        
+
+
+
+
+
+
         broken = true;
         events.onStatus(`[runtime-session] startup_refused kind=${KIND} reason=${startupFailureReason}`);
         const failure: RunnerFailure = { ...(runnerFailure ?? { kind: "exit", message: startupFailureReason, runtime: "claude", source: "marker" }),
@@ -3123,8 +3188,8 @@ const runClaudeTurn = async (
         resolve({
           text: display.trim(),
           ownerControlTerminal: normalEnd?.outcome === "completed" ? "completed" : "uncertain",
-          // ★exit 0이어도 표식이 실패를 말했으면 그대로 싣는다 — 소비자는 이 칸으로 판정한다.
-          //   (실측: 한도 거절은 exit 1이었지만 종료코드는 버전·경로 따라 가변 — 이벤트가 진실.)
+
+
           ...(runnerFailure ? { failure: runnerFailure } : emptyFailure ? { failure: emptyFailure } : {}),
           ...(normalEnd ? normalEndToolEvidence(normalEnd) : {}),
           sessionId,
@@ -3361,7 +3426,7 @@ const runClaudeTurn = async (
             : cliTurnOwned !== false && !(typeof origin === "string" && CLAUDE_BACKGROUND_ORIGINS.has(origin));
           cliTurnOwned = null;
           // A result raised by background work (a task notification) is not this turn's terminal: skip it and its frames.
-          if (!ours) { heldFrames.length = 0; return; }
+          if (!ours) { heldFrames.length = 0; noteUnattributedResultUsage(ev); return; }
           replayHeldFrames();
           for (const uuid of echoed) if (ownUuids.has(uuid)) answeredUuids.add(uuid);
           if (echoed.length === 0 && turnUuid) answeredUuids.add(turnUuid);

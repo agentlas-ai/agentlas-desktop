@@ -1,3 +1,4 @@
+import { currentCompanyWorkContent,companyOrOriginalEffectLedger,approveCompanyWorkTool } from '../business/company-work-content';
 import { cachedTokensFromOpenAiUsage } from "./prompt-cache";
 import { cacheCapabilityFor, planCache, planRequestFields, segmentOf, type CachePlan, type CacheSegment } from "./cache-planner";
 import { reportModelPayload, reportCachePlan, reportModelEffort, ledgerFromApiBody, type ModelEffortApplication } from "./model-call-ledger";
@@ -251,18 +252,18 @@ export function createToolLoopUsage(events: RunnerEvents) {
 }
 
 /**
- * ★로컬 런타임의 실패 표식 — CLI 러너와 같은 계약(RunnerResult.failure).
- *
- * 실측 사고(2026-08-08, ollama): 로컬 모델이 도구 왕복에서 무너진 뒤
- * "The system encountered a timeout error while processing a request. ..."
- * 같은 기계 문장을 최종 답으로 뱉었고, 이 루프에는 실패 칸이 아예 없어서
- * 그 문장이 정상 답으로 저장됐다(chat_messages 실물 확인). CLI 러너들은
- * 2026-08-06에 이 계약으로 전환됐는데 로컬 4종(ollama/lmstudio/mlx/
- * local-openai)이 공유하는 이 파일만 빠져 있었다 — 특례가 아니라 누락이다.
- *
- * 여기서 표식을 다는 경우는 "텍스트가 답이 아닌데 성공처럼 보이는" 것들뿐이다:
- * 빈 답, 거절 고지문, 도구 루프 미수렴. 전송/HTTP 실패는 지금처럼 throw로
- * 크게 실패한다(표식을 안 읽는 소비자에게도 확실히 전달되어야 한다).
+
+
+
+
+
+
+
+
+
+
+
+
  */
 function localFailure(
   kind: RunnerFailure["kind"],
@@ -323,14 +324,14 @@ export async function loadMainToolInventory(
     signal?.throwIfAborted();
     const key = prepared.configKey;
     const server = prepared.server;
-    // The identity comes from the Main-sealed binding, never a model tool name.
-    // A browser-only run connects exactly the servers Main sealed for it — the same
-    // set claude-code/codex receive in their MCP config. Main owns that decision; a
-    // second, stricter filter here left host-loop runtimes with the browser alone. Measured
-    // (parity QA 2026-09-25, a browser-mode automation asking for the Seoul time):
-    // codex and claude called agentlas-time.get_current_time; serving had 28 browser
-    // tools, answered "NEEDS-INPUT: get_current_time is not provided", three runs of
-    // three. Builtin file/shell tools stay off in browser-only runs (above), as for claude.
+
+
+
+
+
+
+
+
     let status;
     try {
       status = await testServerConnection(server, { timeoutMs: 8_000, signal, prepared });
@@ -489,6 +490,7 @@ export async function prepareMainToolLoop(
   }
   const { tools: eagerTools, byName } = req.untrustedNoTools
     ? { tools: [] as OpenAiToolDef[], byName: new Map<string, ResolvedTool>() }
+    : currentCompanyWorkContent() ? await loadMainToolInventory(req.mcpConfigPath, undefined, "read", false, false, req.signal, false, false)
     : collection ? await loadMainToolInventory(req.mcpConfigPath, undefined, "read", false, false, req.signal, false, false, collection)
     : await (async () => {
         // Tool-surface discovery lives inside this branch so the Main-authored
@@ -510,10 +512,10 @@ export async function prepareMainToolLoop(
       })();
   // ★ 로컬 소형 모델(agentlas-local)에는 도구를 그대로 준다. 코드 모드(agentlas_code)와 지연 메뉴
 
-  //   agentlas_code 만 5번 부르다 브라우저에 닿지 못하고 사용자에게 되물었다. 같은 모델에 도구를
-  //   직접 주면 브라우저·파일·셸 4/4 정확(엔진 직결 실측).
-  // A Main-issued effect observation looks only: read built-ins and Main's browser server, offered directly (no code
-  // mode or lazy menu). Every other server's schemas are context the look does not need (routed 2026-09-25).
+
+
+
+
   if (req.minimalObservation && !collection) {
     for (let index = eagerTools.length - 1; index >= 0; index -= 1) {
       const resolved = byName.get(eagerTools[index].function.name);
@@ -523,8 +525,8 @@ export async function prepareMainToolLoop(
       }
     }
   }
-  // Small local models (managed Local, Ollama, LM Studio, MLX) get their tools directly: behind agentlas_code they
-  // reached for it first and then flailed (gpt-oss on Ollama, 2026-10-11, measured in the captured requests).
+  
+
   const smallLocalModel = runtimeKind === "agentlas-local" || runtimeKind === "ollama" || runtimeKind === "lmstudio" || runtimeKind === "mlx";
   const indirectToolSurface = !collection && !catalogMcpOnly && !req.workforceRuntimeToolGrant && !req.untrustedNoTools && !smallLocalModel
     && !req.minimalObservation;
@@ -665,7 +667,7 @@ export async function runMainToolDispatch(
 const effectAckScope = new AsyncLocalStorage<string[]>();
 async function acknowledgeMainEffects(refs: readonly string[]): Promise<void> {
   if (!refs.length) return;
-  try { const ledger = await import("../harness/effect-ledger"); for (const ref of refs) await ledger.acknowledgeEffect(ref); } catch { /* never fails a tool result */ }
+  try { const ledger = await companyOrOriginalEffectLedger(); for (const ref of refs) await ledger.acknowledgeEffect(ref); } catch { /* never fails a tool result */ }
 }
 
 /** Nested code-mode calls consume actual values, not provider projections. */
@@ -744,7 +746,7 @@ async function awaitMcpResultDelivery(
 interface MainEffectSlot { ref?: string; replayedRef?: string }
 
 async function settleMainEffect(ref: string, state: "settled" | "failed" | "uncertain", resultText?: string): Promise<void> {
-  try { await (await import("../harness/effect-ledger")).settleEffect(ref, state, state === "settled" && resultText !== undefined ? { result: resultText } : undefined); } catch { /* the ledger never fails a tool result */ }
+  try { await (await companyOrOriginalEffectLedger()).settleEffect(ref, state, state === "settled" && resultText !== undefined ? { result: resultText } : undefined); } catch { /* the ledger never fails a tool result */ }
 }
 
 /** Splits the optional Work reference off a call's JSON arguments; null when there is none (or the JSON is not an object). */
@@ -763,10 +765,10 @@ async function dispatchMainToolRawUnchecked(
   approval: LocalToolApprovalContext, broker?: MainWorkforceBroker, effectSlot?: MainEffectSlot,
 ): Promise<MainToolDispatchResult> {
   approval.signal?.throwIfAborted();
-  // A Work run gives every tool, the host's own wrappers included, the optional _agentlas_work reference
-  // (mainWorkToolSchema). The wrappers check their own fields, so the reference comes off first, and a menu call hands
-  // it to the prepared tool it resolves to, where the recovery below reads it (dev 2026-10-18 W5: every
-  // agentlas_tools_call in a Haiku Work room was refused tool_menu_arguments_invalid ["_agentlas_work"]).
+  
+
+
+
   let wrapperWork: { reference: unknown } | undefined;
   if (approval.canonicalWorkRecovery && (call.toolName === TOOL_RESULT_READ || call.toolName === CODE_MODE_TOOL || isToolMenuTool(call.toolName))) {
     const lifted = liftWorkReference(call.arguments);
@@ -915,7 +917,7 @@ async function dispatchMainToolRawUnchecked(
     : { tool: call.toolName, builtin: resolved.builtinName, arguments: args };
   // The Main-issued collection grant is already exact, unattended consent for
   // these three Science actions, including the bounded source-record write.
-  const collectionDecision = approval.scienceCollectionCapability ? "allow_once" as const : null;
+  const collectionDecision = currentCompanyWorkContent() ? await approveCompanyWorkTool(resolved) : approval.scienceCollectionCapability ? "allow_once" as const : null;
   if (collectionDecision) actionApproval.onApprovalDecision?.(collectionDecision);
   const admittedMcpRead = resolved.kind === "mcp" && !mcpToolIsMutating({
     catalogId: resolved.server.catalogId, toolName: resolved.serverToolName, args,
@@ -963,7 +965,7 @@ async function dispatchMainToolRawUnchecked(
   // recovery already owns its own original-outcome custody, so it is not checkpointed twice.
   const mutatingEffect = resolved.kind === "builtin" ? planMutation : !admittedMcpRead;
   if (mutatingEffect && !work && effectSlot) {
-    const ledger = await import("../harness/effect-ledger");
+    const ledger = await companyOrOriginalEffectLedger();
     const effectTool = resolved.kind === "mcp" ? `mcp:${resolved.server.catalogId ?? resolved.server.id}:${resolved.serverToolName}` : `builtin:${resolved.builtinName}`;
     const begun = await ledger.beginEffect({ surface: "main-loop", chatId: approval.chatId ?? null, run: ledger.effectRunId(approval), tool: effectTool, args });
     if (begun.status === "uncertain_prior") {
@@ -1108,6 +1110,7 @@ async function dispatchMainToolRawUnchecked(
     const result = await callServerToolContent(resolved.server, resolved.serverToolName, args, {
       timeoutMs: oneGraphToolTimeoutMs({ catalogId: resolved.server.catalogId, toolName: resolved.serverToolName, args }),
       signal: approval.signal, prepared: resolved.prepared,
+      ...(currentCompanyWorkContent()?.capability ? {companyWorkCapability:currentCompanyWorkContent()!.capability} : {}),
       ...(approval.retainMcpToolResult ? { retainFullResult: true as const } : {}),
       expectedToolSchemaDigest: resolved.schemaDigest, onToolSchemaInvalidated: () => invalidateToolMenu(byName),
       session: mcpToolCallSessions.get(byName),
@@ -1116,11 +1119,11 @@ async function dispatchMainToolRawUnchecked(
     mcpReturned = true;
     const text = result?.text ?? "";
     const images = result.isError || approval.scienceCollectionCapability ? [] : result.images;
-    // ★도구가 돌려준 이미지는 모델만 보고 끝나면 안 된다 — 디스크에 정본을 남기고
-    // 산출물 경로로 알려야 사용자의 결과 레일과 채팅에 실물로 뜬다.
-    // (2026-09-03 실측: 저장하는 곳이 없어 스크린샷 요청이 산출물 0건으로 끝났다.)
-    // A harness call's image is a host capture already saved and named in its JSON (turn-tools/control-server.ts
-    // harnessResultWithImages): the model sees it, and it is an observation, not a run output.
+
+
+
+
+
     const capturePaths = isDirectEntryTool(resolved) ? [] : images
       .map((image) => saveBrowserCaptureArtifact(image.mediaType, image.data))
       .filter((filePath): filePath is string => filePath !== null);
@@ -1595,8 +1598,8 @@ async function runLocalOpenAiChatInner(
   if (opts.acceptsImageResults === false) {
     // 화면을 볼 수 없는 모델에게 컴퓨터 유즈를 주면 스크린샷 JSON 을 해석 못 해 같은 호출만 반복한다
 
-    // 브라우저 스크린샷도 같은 이유로 뺀다 — 3회 반복 실측(2026-09-13)에서 비전 없는 모델이
-    // browser_take_screenshot 을 8번 부르고 screen_capture_unavailable 로 실패했다.
+
+
     const isBlindTool = (name: string) => name === "read_image" || name.startsWith("mcp__cua-driver__") || /^mcp__agentlas-browser__browser_(?:take_)?screenshot$/.test(name);
     const blind = tools.filter((tool) => isBlindTool(tool.function.name));
     if (blind.length > 0) {
@@ -1646,7 +1649,7 @@ async function runLocalOpenAiChatInner(
     transmittedHistoryCount = compacted.recent.length + 1;
     return compacted.droppedCount;
   };
-  // Host-side history trimming is background work: nothing about it is shown to the user (owner 2026-10-13).
+
   const reportHistoryCompaction = (_droppedCount: number): void => { historyCompactionReported = true; };
   // The conversation's "session" for a runtime with no provider session (stateless-generation.ts, native-harness NH10):
   // the handoff it installed, a new one at a settled boundary when a request's input reaches 80% of the window that admits
@@ -1751,7 +1754,7 @@ async function runLocalOpenAiChatInner(
       if (reference) { messages[index] = { ...row, content: reference }; folded += 1; }
     }
     inTurnFolds += folded;
-    if (folded && process.env.AGENTLAS_LOCAL_TOOL_DEBUG === "1") console.log("[local-tool-loop] in-turn folds:", folded, "total:", inTurnFolds);
+    if (folded && !currentCompanyWorkContent() && process.env.AGENTLAS_LOCAL_TOOL_DEBUG === "1") console.log("[local-tool-loop] in-turn folds:", folded, "total:", inTurnFolds);
     return folded;
   };
   let ownerControlPending: string[] | null = null;
@@ -1866,15 +1869,15 @@ async function runLocalOpenAiChatInner(
               : {}),
             ...("send" in effortPlan && !effortRejected ? { reasoning_effort: effortPlan.send } : {}),
             ...(tools.length > 0 ? { tools } : {}),
-            /*
-             * ★제약 디코딩 — 형식 붕괴를 배선으로 없앤다.
-             *
-             * 판정·화면생성·진화제안은 답에서 구조를 파싱하는데, 자유 서술이면 작은
-             * 모델은 형식을 깨뜨리고 그 결과가 조용히 사라졌다("완료라는데 결과물이
-             * 없음", 실측 2026-08-08). json_schema 응답 형식은 모델이 문법상 틀린
-             * 토큰을 뱉을 수 없게 만든다 — 남는 것은 판단력 문제뿐이고, 그건 배선으로
-             * 고칠 수 없다는 것이 정직한 경계다.
-             */
+            
+
+
+
+
+
+
+
+
             ...(req.outputSchema && nativeOutputSchema
               ? {
                   response_format: {
@@ -2043,12 +2046,12 @@ async function runLocalOpenAiChatInner(
         return refusedBeforeDispatch({ kind: "unavailable", runtime: runtimeKind, source: "marker",
           providerCode: "endpoint_unreachable", message: opts.unreachableMessage.slice(0, 400) });
       }
-      // 사용자가 멈춘 것을 "서버에 연결 못 함"이라고 말하면 거짓말이 된다 —
-      // 취소는 취소로 올려보낸다. 다만 **원 에러를 그대로 던지면 안 된다**:
-      // AbortController 의 DOMException 문구("This operation was aborted")가 그대로
-      // 화면에 흘러 한국어 UI에 영어 기계 문장이 박혔다(실측 2026-08-09 녹화).
-      // 그렇다고 "사용자가 중지했습니다"로 덮어도 안 된다 — 워치독·시간 초과가
-      // 끊은 것까지 사람이 누른 것으로 만든다. 끊은 쪽이 실은 이유를 먼저 읽는다.
+
+
+
+
+
+
       if (req.signal?.aborted) throw abortReasonError(req);
       throw new Error(opts.unreachableMessage);
     }
@@ -2089,9 +2092,9 @@ async function runLocalOpenAiChatInner(
         }
       }
       if (!resp.ok) {
-        // The server could not parse the model's own tool-call text (gpt-oss on Ollama, measured 2026-10-11:
-        // HTTP 500 "error parsing tool call"). Nothing was executed, and sampling differs on the next
-        // request, so repeat the identical request a bounded number of times before failing.
+
+
+
         if (resp.status >= 500 && /error parsing tool call/i.test(errText) && toolParseRetries < 2 && !ownerControlPending && !req.signal?.aborted) {
           toolParseRetries += 1;
           events.onStatus(req.locale === "ko" ? "모델의 도구 호출 형식이 깨져 같은 요청을 다시 보냅니다…" : "The model's tool call was malformed; sending the same request again…");
@@ -2173,10 +2176,10 @@ async function runLocalOpenAiChatInner(
     const cutAtCap = result.finishReason === "length" && result.terminalObserved;
     // A text answer cut at the cap is kept and continued below; only an empty / tool-call cut may first earn a larger budget.
     const cutTextAnswer = cutAtCap && result.text.trim() !== "" && result.toolCalls.length === 0 && !result.incompleteToolCalls;
-    // A reply cut at the output cap carries no usable tool call. A reasoning model (qwen3 spent all 2000
-    // tokens thinking before its first call, measured 2026-10-11) used to surface here as "did not return
-    // a terminal receipt ... the request may have acted", which is false: nothing was dispatched. Give the
-    // model a larger budget once or twice when the caller did not pin one; otherwise say what happened.
+
+
+
+
     if (result.finishReason === "length" && result.terminalObserved && opts.contextWindow === undefined
       // Only a reply with nothing at all (a reasoning model spent the whole cap thinking) earns a larger budget; a cut
       // text answer or a cut tool call is continued below instead.
@@ -2234,8 +2237,8 @@ async function runLocalOpenAiChatInner(
     // terminal text response; never hand it to the local dispatcher.
     if (result.toolCalls.length === 0 || req.untrustedNoTools) {
 
-      // 화면엔 아무 말도 없음). CLI 래핑은 늘 말로 끝난다 — 한 번만 "사람에게 결과를 말하라" 고 다시 묻는다.
-      // 소형 모델은 답 대신 시스템 프롬프트의 "## Memory Events" 봉투만 따라 쓰기도 한다(같은 실측). 그것도 빈 답이다.
+
+
       const envelopeOnly = /^\s*#{1,6}\s*Memory Events/i.test(result.text) || /^\s*\{\s*"?schema_version"?\s*:\s*"?agentlas\.memory-ticket/i.test(result.text);
       if ((!(continuedText + result.text).trim() || envelopeOnly) && sawAnyToolCall && !req.untrustedNoTools && !summaryTurnRequested) {
         summaryTurnRequested = true;
@@ -2245,7 +2248,7 @@ async function runLocalOpenAiChatInner(
       }
       finalText = continuedText ? continuedText + (result.rawText ?? result.text) : result.text;
       reachedAnswer = true;
-      if (process.env.AGENTLAS_LOCAL_TOOL_DEBUG === "1") console.log("[local-tool-loop] final text:", JSON.stringify(result.text.slice(0, 400)), "summaryTurn:", summaryTurnRequested);
+      if (!currentCompanyWorkContent() && process.env.AGENTLAS_LOCAL_TOOL_DEBUG === "1") console.log("[local-tool-loop] final text:", JSON.stringify(result.text.slice(0, 400)), "summaryTurn:", summaryTurnRequested);
       break;
     }
     sawAnyToolCall = true;

@@ -263,18 +263,18 @@ export interface ResolvedHephaestusBuildRequest extends Omit<HephaestusBuildRequ
 }
 
 /**
- * Host-observed interview receipt.
- *
- * The model cannot be its own witness. Measured 2026-08-17: three packages carried
- * `source: "user"` assumption tags and a filled `docs/builder-interview.md`, and the
- * owner had never been interviewed for any of them — the same model that skipped the
- * interview also wrote the record saying it happened. Any gate that reads a
- * model-authored field is checking a claim, not a fact.
- *
- * Main is the only party that actually saw the exchange: it parsed the question
- * fences out of one turn and carried the human's reply into the next. So Main writes
- * this receipt, from the conversation it transported, and nothing the model emits
- * can change it.
+
+
+
+
+
+
+
+
+
+
+
+
  */
 /**
  * 이 앱이 켜져 있는 동안 계약 스캐폴드를 이미 돌린 워크스페이스.
@@ -380,35 +380,35 @@ function readIf(root: string, rel: string): string | null {
 
 
 /**
- * Ship the canonical AGENTS.md whole.
- *
- * This used to project only a handful of sections "for context economy". Measured
- * 2026-08-16: that kept 71 of 463 lines (15%) and threw away `Output Contract`
- * (the artifact contract itself, including `interview_research`), `Operating Loop`,
- * `Source Of Truth`, and `Third-Party Plugin Boundary`. A build cannot honour a
- * contract it was never shown.
- *
- * Owner decision 2026-08-16: Desktop Build IS terminal `/hep-build` with a GUI on
- * top — not one line may differ. Any future omission has to be argued here, in
- * public, with a measurement; silent projection is how the two surfaces drifted.
+
+
+
+
+
+
+
+
+
+
+
  */
 export function projectBuilderCanonicalCore(canonical: string): string {
   return canonical.replace(/\r\n/g, "\n").trimEnd();
 }
 
 /**
- * Ship the selected builder as-is.
- *
- * This used to strip `## Builder Interview and Research Gate`, which is the ONLY
- * place the canonical builder tells the model to run
- * `contracts/builder-interview-research-gate.md`. Removing it left the interview
- * as a Desktop-authored suggestion with nothing behind it — and the shipped gate
- * file, vendored right next to the builder, had ZERO references in Desktop code
- * (measured 2026-08-16). The engine and Desktop must run the same gate, so the
- * section stays and the gate contract is injected alongside it.
- *
- * Kept as a named projection (rather than deleting the call site) so a future
- * Desktop-only omission has one obvious place to live and to be justified.
+
+
+
+
+
+
+
+
+
+
+
+
  */
 /** 벤더된 정본 `/hep-build` 명령 정의의 경로. Claude 어댑터판이 정본 본문을 담는다. */
 const HEP_BUILD_COMMAND_PATH =
@@ -468,17 +468,17 @@ export function resolveBuilderPromptRoot(engineRoot: string | null): string | nu
 const EXISTING_PACKAGE_MARKERS = ["agentlas.json", "AGENTS.md", ".agentlas"] as const;
 
 /**
- * Does this folder already hold an Agentlas package — at its root OR one level down?
- *
- * The child check is not defensive padding. Measured 2026-08-16: `~/Desktop/agent`
- * held a package from a previous build in `sam/`, this root-only test said "clean",
- * so the host scaffolded a fresh package on top of a container folder. The contract
- * gate then graded the container and reported 46 blockers — including the unrelated
- * package's files — for a build whose real output (`sangnok-resort-strategy-team/`)
- * had exactly 1. The user was told a working build failed.
- *
- * Canonical `/hep-build` step 5 states the rule this enforces: resolve exactly one
- * package target, and never default to the working folder.
+
+
+
+
+
+
+
+
+
+
+
  */
 export function workspaceContainsExistingAgentlasPackage(workspace: string): boolean {
   if (EXISTING_PACKAGE_MARKERS.some((marker) => fs.existsSync(path.join(workspace, marker)))) return true;
@@ -783,11 +783,11 @@ export function composeBuilderReaderPrompt(root: string, mode: NonNullable<Hepha
 }
 
 /**
- * The stage line after `cards migrate`. A card on disk is not "registered for
- * local discovery": Workforce searches its own roster, and an engine without
- * the adoption step saved the card and never added the package to it — so a
- * freshly built agent was announced as registered and then could not be found
- * (measured 2026-10-11). Say only what the engine reported.
+
+
+
+
+
  */
 export function localRegistrationStageText(ko: boolean, migrateJson: unknown): string {
   const registration =
@@ -1073,12 +1073,12 @@ async function runHephaestusBuildInScope(
     });
     const created = (scaffolded.json as { created?: string[] } | null)?.created ?? [];
     if (created.length > 0) {
-      // The templates land in the working folder itself, so that folder IS the
-      // package. Without saying so, a builder sometimes creates a named
-      // subfolder and starts over there, leaving a half-scaffolded husk at the
-      // root — two packages in one tree, and the contract gate then has to
-      // guess which one it is grading (measured 2026-08-17 on the multi-omics
-      // build: root 19 blockers, real package 0).
+      
+
+
+
+
+
       userPrompt +=
         "\n\n[Package root]\n" +
         (ko
@@ -1237,10 +1237,10 @@ async function runHephaestusBuildInScope(
     if (typeof livenessTimer.unref === "function") livenessTimer.unref();
     stopBuildLiveness = () => clearInterval(livenessTimer);
 
-    // A long reasoning span is proven alive by the host liveness row above (activity "Thinking", elapsed and silent
-    // times every BUILD_LIVENESS_TICK_MS), never by Build log lines. A 20 s "Still thinking · Ns" log line used to be
-    // appended here for the whole span, so the log grew with time instead of with work and the page re-rendered a
-    // longer list on every tick (review 2026-10-16 clients-13 / H5). The log carries only the span's start and end.
+    
+
+
+
     let thinkingStartedAt: number | null = null;
     const runnerEvents: Parameters<typeof buildPicked.runner>[1] = {
         onPartial: (chunk) => {

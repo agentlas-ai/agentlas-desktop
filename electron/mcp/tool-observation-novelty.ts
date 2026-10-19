@@ -3,12 +3,12 @@ import { normalizeProgressText } from "../../shared/progress-key";
 import type { McpInvocationEvent } from "../../shared/types";
 
 /**
- * Observations this invocation already made. A continuous Goal pass whose completed tool calls only reproduced them
- * (same tool, same arguments, same result up to numbers: shared/progress-key) found nothing new, even though it
- * completed tool calls. Production 2026-10-17 19:45Z, Yotube room: one turn ran 15 passes in 7 minutes; the last 8
- * re-ran the same 68-character command against a publication scheduled for the next day and got
- * "<date> public now: 0 of 15" each time. Every pass posted a status message, and its completed tool call made it
- * count as work.
+
+
+
+
+
+
  */
 export function createToolObservationNovelty(): { note: (tool: NonNullable<McpInvocationEvent["tool"]>) => boolean } {
   const argsById = new Map<string, string>();

@@ -1,24 +1,24 @@
 // window.agentlas 관문에 얹는 얇은 읽기 캐시 계층.
 import { invalidateViewData, invalidateViewDataForStoreChange } from "./view-data-cache";
-//
-// 배경(2026-08-10 실측): 렌더러에는 데이터 캐시가 사실상 없어 모든 화면이 마운트마다
-// 0에서 다시 페치했다. 대시보드 한 번 진입에 team.list() 4회 등 30+ IPC가 중복
-// 발사되고, 화면을 오갈 때마다 방금 본 데이터가 스피너로 바뀐다(SWR 기준 위반).
-// ipc()는 모든 데이터의 유일한 관문이므로, 157개 호출부를 건드리지 않고 여기서
-// 해결한다.
-//
-// 동작 규칙 (보수적):
-// - 화이트리스트에 있는 순수 읽기 메서드만 캐시한다. TTL 안에서는 캐시 값을 즉시
-//   돌려주고(재방문 즉시 페인트), TTL이 지나면 실제 IPC를 다시 탄다.
-// - 진행 중(in-flight) 동일 호출은 promise를 공유한다 — 같은 틱의 중복 발사 제거.
-//   TTL이 0인 항목(휘발성)은 이 dedup만 적용한다.
-// - 화이트리스트에 없는 메서드 호출(잠재적 쓰기)은 같은 네임스페이스의 캐시를
-//   즉시 비운다. 교차 네임스페이스 변이는 기존 이벤트 버스(agent-roster,
-//   hub-bookmarks, agentlas:projects/tasks-changed)가 비우고, 나머지는 TTL이
-//   상한을 보장한다.
-// - 캐시 값은 호출자마다 structuredClone으로 복사해 준다 — 호출부가 받은 배열을
-//   제자리 정렬(.sort())해도 다른 화면이 오염되지 않는다(기존 계약과 동일).
-// - 실패는 캐시하지 않는다. 호출부의 .catch 계약은 그대로다.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 const READ_TTL_MS: Record<string, number> = {
   "team.list": 15_000,
@@ -71,15 +71,16 @@ const READ_TTL_MS: Record<string, number> = {
   "invoke.steerReceipt": 0,
   "runLedger.events": 0,
   "runLedger.chatTimeline": 0,
+  "runLedger.outputsAfter": 0,
   "automations.latestRun": 0,
   "automations.listStrategyProposals": 0,
   "automations.runDigest": 0,
   "automations.chatActivity": 0,
   "chats.getContinuitySnapshot": 0,
   "oneSupervisor.snapshot": 0,
-  // Pure reads (handlers checked in electron/ipc.ts, perf review 2026-10-17 R-08). Unlisted, each call wiped its
-  // namespace as if it wrote: tasks.findForChat, fired on One teammate/tool events, emptied tasks.list every time.
-  // chats.get is not here: its handler may repair the chat's controller row.
+  
+
+
   "chats.listRecentOne": 0,
   "tasks.findForChat": 0,
   "tasks.get": 0,

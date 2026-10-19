@@ -84,17 +84,6 @@ counts can hold or collapse depending on the locus. **Neither the score nor the
 count tells you the orientation was wrong**, and the obvious post-hoc check does
 not work either — get the orientation right on input.
 
-That check was measured (2026-08-20; HBB, SMN1 and BRCA1 exon 11, both
-orientations, threshold 0.5) and it does not discriminate. Canonical donor `GT`
-at the reported boundary holds well above chance in *both* orientations
-(12/14 gene-sense, 2/3 reverse complement, against a ~5% random null); the `AC`
-signature a mirrored call would leave never appears (0/14, 0/3). Acceptor `AG`
-inside the reported span is 100% in both orientations (13/13, 7/7, against a
-30–45% null) because the post-processor snaps the span onto an `AG`, so that
-test passes every input, including a deliberately wrong-strand one. The model
-does not mirror sites onto the other strand; it calls a different, usually
-smaller set, anchored on real `GT`s in whatever orientation it was given.
-
 **`start`/`end` are token spans, not junctions.** Each site's `start`/`end` is a
 variable-width BPE token span — 4 to 8 bp on the HBB fixture — with a
 `token_index` beside it, not a base-resolution exon/intron boundary. Anything

@@ -148,12 +148,12 @@ export function createHostToolPermissionPolicy(ports: HostToolPermissionPolicyPo
      * 현재의 명시적 선택을 우선해 모든 일반 도구 관문을 해제한다.
      */
     const capability = capabilityClassFor(ask.kind, ask.tool);
-    // Full access is the owner's explicit grant for this run, and it needs no
-    // stored rule, card or durable consent. The identity binding and the rule
-    // lookup below only serve those, so a failure in either (a busy store, an
-    // unrepresentable workspace path) must not turn the grant into a refusal.
-    // Measured 2026-10-12 (1.3.5, One chat, permission full): an MCP tool that
-    // auto-select had chosen for the run came back "not approved for this run".
+    
+
+
+
+
+
     const fullAccess = ask.permission === "full";
     let consentBinding: ToolApprovalConsentBinding;
     try {

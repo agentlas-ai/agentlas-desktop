@@ -3,16 +3,16 @@ import type Database from "better-sqlite3";
 import { getDb } from "../store/db";
 
 /**
- * Durable parking for a system relay that a waiting Goal refused (goal_waiting_system_start_refused).
- *
- * A Goal that waits for a tool, the owner or a scheduled retry admits no system-origin turn (a deliberate guard against
- * model calls that fail goal_episode_admission_missing, decided 2026-10-10). The relay it refused was a teammate's
- * report, a room follow-up or a One Team completion report, and the refusal dropped it: when the Goal ran again nobody
- * had ever read the work handed back (group room 8f3e09ee, production 1.3.4, 2026-10-12 20:40Z and 20:46Z).
- *
- * The refusal stays; the relay is kept here with its cause. The chat's next turn that actually runs (the owner's
- * message, a host continuation, a system turn once the Goal runs again) carries every parked relay as one coalesced
- * context block, exactly once. Nothing here starts a model turn or writes a chat message.
+
+
+
+
+
+
+
+
+
+
  */
 
 const MAX_PENDING_PER_CHAT = 40;

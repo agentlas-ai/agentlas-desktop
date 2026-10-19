@@ -1,30 +1,30 @@
-/*
- * A graph step that hands work to its room's teammates stays open until that work has settled, and it is the step —
- * with its own team tools — that is woken by each result.
- *
- * Production 2026-10-12..16 (daily "TCIagent YouTube" graph cdf732ca, step1 = the room's One with One Team tools): every
- * day step1 started teammate sessions, was told "background work started; the result wakes this conversation; end the
- * turn" (team-dispatch.ts oneTeamStartSession), and ended within 0-17 minutes. The result never woke the step: a graph
- * step acts for its room (graph-team-grant.ts), so the dispatch row named the ROOM as its parent, and a settled session
- * woke the room's One with a read-only report turn that may not hand work on (oneTeamReportTurn, X4). The step itself
- * had already ended, step2 checked a production that had not happened, and verify2 failed. No video was ever produced by
- * the graph; the 15 videos of 10-14 came from the room's Goal loop (419 cycles) that re-woke One with its tools.
- * Dev-instance replay r01 (2026-10-17 00:55 KST) reproduced it exactly: step1 ended after 7m46s with three teammates
- * running and "미완료".
- *
- * So the step owns what it dispatched (one_team_dispatches.graph_owner = "<runId>#<nodeId>", written by the host from the
- * Main-minted grant, never from model input), and runGraphTeamStep drives it:
- *   1. run the step's turn;
- *   2. while a session it owns is still working, wait (no model turn, no polling the model);
- *   3. when a session settles, stops on the owner, or posts a note, run ONE continuation turn of the same step, in the
- *      same conversation with the same grant, carrying those results as data;
- *   4. the step ends when it has nothing in flight and nothing unread: its last turn's answer is the step's output.
- * A session parked on an owner-only action is not "in flight" for the step: it cannot move without the owner, the step
- * hears about it once and decides (an unattended run never waits on an owner here).
- *
- * The wait lives only in this process. If the host dies while a step waits, the run is interrupted like any in-flight
- * step (the graph runner's interrupted semantics); nothing here restarts it.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 export type GraphTeamStepEvent =
   | { kind: "settled"; dispatchId: string }

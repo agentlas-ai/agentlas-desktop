@@ -15,6 +15,7 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   [/^oneMemory\.inspector\./, "private memory inspection and correction belong to the owner renderer", "write"],
   [/^businessWork\./, "WORK changes require the focused native employee owner", "write"],
   [/^businessNative\./, "organization sharing requires the focused native employee owner", "write"],
+  [/^(companyNative|companyMail|businessCompanyWork)\./, "company identity, mail and work require the focused native company owner", "consent"],
   [/^business\.account\.(joinOrganization|logout|selectOrganization|selectPersonal|signIn)$/, "account and organization selection belong to the owner", "consent"],
   [/^oneVault\./, "credential input belongs to the dedicated native owner surface", "consent"],
   [/^oneProvider\./, "provider effects require the original native owner request", "consent"],
@@ -50,6 +51,9 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   // finance.* ports (finance/tools.ts FINANCE_PORTS, writes are harness commands under the run's permission); an app.call here
   // would act as the owner's screen. Whether any of these is exposed as well is the Finance owner's decision.
   [/^finance\./, "the Finance workspace is the owner's screen; work with Finance through harness finance.*", "write"],
+  // The One Outputs rail's own ledger read (rows past the event window of a long run). One reads a run's ledger through
+  // runLedger.events / runLedger.chatTimeline; this one has no use outside that screen.
+  [/^runLedger\.outputsAfter$/, "the Outputs rail's own read of a long run's later outputs; read a run's ledger through runLedger.events", "write"],
   // App lifecycle: it would end this very turn.
   [/^updater\.install$/, "installing an update restarts the app and ends this turn; ask the owner to press Install", "write"],
   [/^menu\.setLocale$/, "use app.setLanguage", "write"],
@@ -204,7 +208,7 @@ const DENIED_READ_PATHS: ReadonlySet<string> = new Set([
   "onePersonalData.connectorCatalog", "onePersonalData.gmailCatalog", "onePersonalData.gmailSourceSettings", "onePersonalData.historySnapshot",
   "onePersonalData.historyWorkStatus", "onePersonalData.listTargets", "onePersonalData.snapshot", "oneProvider.bootstrap", "oneProvider.status",
   "oneSupervisor.budgets", "oneSupervisor.journal", "oneSupervisor.receipt", "oneSupervisor.snapshot", "oneVault.recoverableOperations",
-  "oneWindow.getState", "workStart.get", "science.researchCapabilities.catalog",
+  "oneWindow.getState", "workStart.get", "science.researchCapabilities.catalog", "runLedger.outputsAfter",
 ]);
 const DENIED_DESTRUCTIVE_PATHS: ReadonlySet<string> = new Set([
   "oneMemory.inspector.forget", "liveDocument.close",
@@ -246,9 +250,9 @@ export function classifyAppControlPolicy(entry: Pick<AppControlCatalogEntry, "pa
   if (/^science\.composer\.(attach|receipt|steering)$/.test(entry.path)) return explicit("read");
   // Connection state and key presence contain no credential material. They are necessary to operate Settings.
   if (/^(secrets\.hasApiKey|auth\.getSession|runtime\.connectGet|mcpTools\.oauthStatus)$/.test(entry.path)) return explicit("read");
-  // Owner 2026-10-11 ("볼트 입력이나 저장된 것 중 있는지 AI가 찾고 물어보면 되지"): One looks for a stored key a tool can use
-  // and asks before using it. env.inventory is names and presence only (no value, no masked preview); a rename runs only
-  // on a turn the owner wrote. Setting or deleting a key value stays the owner's own act (DENIED below).
+
+
+
   if (entry.path === "env.inventory") return explicit("read");
   // One SELECT … GROUP BY over the run history (store countRunHistory); added after the policy baseline.
   if (entry.path === "automations.runCounts") return explicit("read");

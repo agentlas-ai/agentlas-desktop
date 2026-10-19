@@ -1,3 +1,5 @@
+import {personalEmployeeAgentInstallation} from './employee-agent-personal-installation';
+import {registerEmployeeAgentTransferMain,type EmployeeAgentTransferOriginal} from './employee-agent-transfer-main';
 import type {BrowserWindow,IpcMain,IpcMainInvokeEvent} from 'electron';
 import {isAppControlEvent} from '../app-control/ipc-registry';
 import {createNativeEmployeeConnection} from './native-employee-connection';
@@ -11,8 +13,11 @@ import type {OneVaultRuntime} from '../secrets/one-vault-runtime';
 const electron=():typeof import('electron')=>require('electron') as typeof import('electron');
 export type NativeEmployeeReportStartup=Omit<OneNativeStartupOwners,'signal'|'assertMainOwner'|'currentNativeInstallation'>;
 export interface NativeEmployeeMainInput {
+ companyOriginal?():EmployeeAgentTransferOriginal|null;
+ isCompanyWindow?(window:BrowserWindow):boolean;
  ipc:Pick<IpcMain,'handle'>;assertTrustedSender(event:IpcMainInvokeEvent):void;isOwnerWindow(window:BrowserWindow):boolean;
- sources:NonNullable<ReturnType<typeof import('../secrets/one-vault-main').oneVaultMainMobileSources>>;
+ sources:NonNullable<ReturnType<typeof import('../secrets/one-vault-main').oneVaultMainMobileSources>>|null|undefined;
+ hostSignal?:AbortSignal;
  signal:AbortSignal;installationGeneration():number;locale?():'ko'|'en';
  /** Original Main lifecycle owner, not a renderer instruction or new grant. */
  prepareGeneration?(event:IpcMainInvokeEvent):Promise<void>;
@@ -22,18 +27,25 @@ export interface NativeEmployeeMainInput {
 /** Register concrete trusted native actions, with no startup observation, DB, key
  * read, login, HTTP, timer or task. Every effect starts in a focused owner action. */
 export function registerNativeEmployeeMain(input:NativeEmployeeMainInput){
- let closed=false,retiredGeneration:number|null=null,cleanupUnknown=false,runtime:OneVaultRuntime|null=null,connection:ReturnType<typeof createNativeEmployeeConnection>|null=null,
+ let closed=false,personalClosed=false,retiredGeneration:number|null=null,cleanupUnknown=false,runtime:OneVaultRuntime|null=null,connection:ReturnType<typeof createNativeEmployeeConnection>|null=null,
  source:ReturnType<typeof createNativeEmployeeResultSource>|null=null,journal:ReturnType<typeof createNativeEmployeeReportJournal>|null=null,startup:NativeEmployeeReportStartup|null=null;
  function deny():never{throw Error('business_native_focused_owner_required')}
  function owned(event:IpcMainInvokeEvent,retiredIdentity=false){input.assertTrustedSender(event);const window=electron().BrowserWindow.fromWebContents(event.sender);
-  if(closed||cleanupUnknown||retiredGeneration!==null&&!retiredIdentity||input.signal.aborted||isAppControlEvent(event)||!window||window.isDestroyed()||!window.isFocused()||!input.isOwnerWindow(window)||event.senderFrame!==event.sender.mainFrame)deny();
-  const frame=event.senderFrame,url=frame?.url,epoch=input.installationGeneration();return{window,check(){input.assertTrustedSender(event);if(closed||cleanupUnknown||retiredGeneration!==null&&!retiredIdentity||input.signal.aborted||window.isDestroyed()||!window.isFocused()||!input.isOwnerWindow(window)||electron().BrowserWindow.fromWebContents(event.sender)!==window||event.senderFrame!==frame||frame?.url!==url||input.installationGeneration()!==epoch||isAppControlEvent(event))deny()}};
+  if(closed||personalClosed||cleanupUnknown||retiredGeneration!==null&&!retiredIdentity||input.signal.aborted||isAppControlEvent(event)||!window||window.isDestroyed()||!window.isFocused()||!input.isOwnerWindow(window)||event.senderFrame!==event.sender.mainFrame)deny();
+  const frame=event.senderFrame,url=frame?.url,epoch=input.installationGeneration();return{window,check(){input.assertTrustedSender(event);if(closed||personalClosed||cleanupUnknown||retiredGeneration!==null&&!retiredIdentity||input.signal.aborted||window.isDestroyed()||!window.isFocused()||!input.isOwnerWindow(window)||electron().BrowserWindow.fromWebContents(event.sender)!==window||event.senderFrame!==frame||frame?.url!==url||input.installationGeneration()!==epoch||isAppControlEvent(event))deny()}};
  }
- function original(){if(closed||input.signal.aborted)deny();const current=input.sources.runtime()??input.sources.prepareRuntime();if(!current||runtime&&current!==runtime||!current.currentNativeOwner())deny();
+ function original(){if(closed||personalClosed||input.signal.aborted)deny();const current=input.sources?.runtime()??input.sources?.prepareRuntime();if(!current||runtime&&current!==runtime||!current.currentNativeOwner())deny();
   if(!runtime){runtime=current;connection=createNativeEmployeeConnection(current,input.installationGeneration);source=createNativeEmployeeResultSource(current);journal=createNativeEmployeeReportJournal(current,source,connection);}
   return{runtime:runtime!,connection:connection!,source:source!,journal:journal!};
  }
  function currentStartup(){return startup&&connection?.current()?startup:null}
+ let personalTransferOriginal:EmployeeAgentTransferOriginal|null=null;
+ const employeeTransfers=registerEmployeeAgentTransferMain({ipc:input.ipc,locale:()=>input.locale?.()??'en',original:event=>{const company=input.companyOriginal?.(),companyWindow=event&&electron().BrowserWindow.fromWebContents(event.sender);if(event&&companyWindow&&input.isCompanyWindow?.(companyWindow)){if(!company)deny();company.assertCurrent();return company;}if(!event&&company){company.assertCurrent();return company;}const o=original();if(personalTransferOriginal)return personalTransferOriginal;return personalTransferOriginal={identityOwner:o.runtime,db:o.runtime.sources.db,userDataPath:require('../runtime-paths').userDataPath,assertCurrent:()=>{if(original().runtime!==o.runtime)deny();},installation:personalEmployeeAgentInstallation(o.runtime,()=>{if(original().runtime!==o.runtime)deny();}),connection:{current:o.connection.current,refresh:o.connection.refresh,request:(operation:string,value:unknown)=>o.connection.request(operation as Parameters<typeof o.connection.request>[0],value)}};},focused:event=>{
+  const target=electron().BrowserWindow.fromWebContents(event.sender);if(!target||!input.isCompanyWindow?.(target))return owned(event);
+  if(!input.companyOriginal?.())deny();
+  input.assertTrustedSender(event);const window=electron().BrowserWindow.fromWebContents(event.sender),frame=event.senderFrame,url=frame?.url,identity=input.companyOriginal()!;
+  const check=()=>{input.assertTrustedSender(event);identity.assertCurrent();if(closed||(input.hostSignal??input.signal).aborted||isAppControlEvent(event)||!window||window.isDestroyed()||!window.isFocused()||!input.isOwnerWindow(window)||electron().BrowserWindow.fromWebContents(event.sender)!==window||frame!==event.sender.mainFrame||event.senderFrame!==frame||frame?.url!==url||input.companyOriginal?.()?.identityOwner!==identity.identityOwner)deny();};check();return{window:window!,check};
+ }});
  function attach(){const o=original();if(!startup)startup=Object.freeze({association:o.connection.association,organizationIdentity:Object.freeze({current:()=>o.connection.current()?.orgSession??null}),nativeCustodyReports:o.journal.owners});input.installStartup(startup);}
  async function review(window:BrowserWindow,check:()=>void,title:string,detail:string){check();const result=await electron().dialog.showMessageBox(window,{type:'question',title,message:title,detail,buttons:input.locale?.()==='ko'?['취소','이 내용만 조직에 공유']:['Cancel','Share only this with organization'],defaultId:0,cancelId:0,noLink:true});check();if(result.response!==1)throw Error('business_native_sharing_declined')}
  input.ipc.handle('businessNative:identity',(event:IpcMainInvokeEvent)=>{
@@ -91,9 +103,10 @@ export function registerNativeEmployeeMain(input:NativeEmployeeMainInput){
   finally{o.connection.invalidate();}
  });
  function retire(){retiredGeneration=input.installationGeneration();for(const cleanup of [()=>source?.close(),()=>connection?.close()])try{cleanup()}catch{cleanupUnknown=true}
-  if(cleanupUnknown){closed=true;throw Error('business_native_cleanup_unknown')}runtime=null;connection=null;source=null;journal=null;startup=null;
+  if(cleanupUnknown){personalClosed=true;throw Error('business_native_cleanup_unknown')}runtime=null;connection=null;source=null;journal=null;startup=null;
  }
- function close(){closed=true;retire()}
- input.signal.addEventListener('abort',close,{once:true});return Object.freeze({currentStartup,close,invalidate:retire});
+ function closePersonal(){personalClosed=true;retire()}
+ function close(){closed=true;closePersonal()}
+ input.signal.addEventListener('abort',closePersonal,{once:true});input.hostSignal?.addEventListener('abort',close,{once:true});return Object.freeze({currentStartup,companyAgents:employeeTransfers.companyAgents,closePersonal,close,invalidate:retire});
 }
 export type NativeEmployeeMainEntry=ReturnType<typeof registerNativeEmployeeMain>;

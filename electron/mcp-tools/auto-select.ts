@@ -507,16 +507,16 @@ export async function fetchHubPluginInventory(hubAllowed: boolean): Promise<{
 export const GOAL_SCOPE_RESELECTION_LIMIT = 2;
 
 /**
- * Run a selection until the Goal binding it was made under is still the Goal binding.
- *
- * A selection reads the chat's active Goal first and judges tool needs afterwards (seconds). The Goal can end or be
- * revised in that window without anything being wrong: the previous turn's background verifier settles the Goal
- * `verifying -> completed` while the owner's next message is already preparing, or an owner amendment lands as a new
- * revision. The selection's own `goalSelectionIsCurrent` then turns false, and the dispatch guard used to fail the
- * whole turn (`mcp_goal_tool_scope_changed`, 2026-10-17: a second message after a finished task never ran, while the same
- * request in a fresh chat did). The Goal's authority is read again instead: an ended Goal no longer scopes the turn
- * (a plain selection), a revised one scopes it under its new revision. A binding that keeps moving through every
- * allowed re-read is real churn, and that last context is returned as is so the dispatch guard still stops the run.
+
+
+
+
+
+
+
+
+
+
  */
 export async function selectUntilGoalScopeSettled(
   select: () => Promise<AutoSelectedMcpContext>,
@@ -562,12 +562,12 @@ export async function autoSelectMcpTools(input: {
   /** One Team per-member tool policy. Omitted means the normal automatic mode. */
   autoSelectTools?: boolean;
   /**
-   * The conversation is a One group room (a taskforce seat). A group room is a team by
-   * definition, so every turn, goal passes included, carries the One Team tool set without
-   * the model having to request it first (production 2026-10-10 04:57-07:00: goal passes only
-   * retained earlier requests and ran without it). Main-derived from the stored seat, never
-   * from renderer input; the control capability still enforces who may dispatch.
-   */
+
+
+
+
+
+ */
   groupRoom?: boolean;
   /**
    * The run is a teammate working on a hand-off from a group room (Main-derived from the dispatch row). It carries
@@ -943,12 +943,12 @@ export async function autoSelectMcpTools(input: {
       hostBindingPins.add("agentlas-browser");
     }
   }
-  // Capability priority (shared/capability-priority.ts): the runtime would otherwise hand
-  // this run an outside browser from the owner's own config (production 1.2.50: Codex
-  // drove the owner's `playwright` server after an undecided judgment, and every navigate
-  // raised an ungated MCP approval prompt). Attach the Agentlas browser as an ordinary
-  // selection — the host mode stays "auto", so a failed probe keeps the old fallback
-  // instead of blocking the run.
+  
+
+
+
+
+
   if (
     automaticHostDecision
     && effectiveToolMode === "auto"

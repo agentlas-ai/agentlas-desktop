@@ -693,6 +693,7 @@ const api: AgentlasIpc = {
     events: (runId: string, limit?: number) => ipcRenderer.invoke("runLedger:events", runId, limit),
     chatTimeline: (chatId: string, input?: { maxRuns?: number; eventsPerRun?: number }) =>
       ipcRenderer.invoke("runLedger:chatTimeline", chatId, input),
+    outputsAfter: (runId: string, afterSeq: number) => ipcRenderer.invoke("runLedger:outputsAfter", runId, afterSeq),
     failures: (input?: { runId?: string; automationId?: string; chatId?: string; agentId?: string; limit?: number }) =>
       ipcRenderer.invoke("runLedger:failures", input),
   },
@@ -1153,6 +1154,28 @@ const api: AgentlasIpc = {
     revoke: () => ipcRenderer.invoke('businessWork:revoke'),
     cancel: input => ipcRenderer.invoke('businessWork:cancel', input),
   },
+  companyMail: {
+    status: input => ipcRenderer.invoke('companyMail:status', input),
+    pending: input => ipcRenderer.invoke('companyMail:pending', input),
+    issue: input => ipcRenderer.invoke('companyMail:issue', input),
+    threads: input => ipcRenderer.invoke('companyMail:threads', input),
+    thread: input => ipcRenderer.invoke('companyMail:thread', input),
+    colleagues: input => ipcRenderer.invoke('companyMail:colleagues', input),
+    send: input => ipcRenderer.invoke('companyMail:send', input),
+    delegate: input => ipcRenderer.invoke('companyMail:delegate', input),
+  },
+  companyNative: {
+    status: () => ipcRenderer.invoke('companyNative:status'),
+    connect: () => ipcRenderer.invoke('companyNative:connect'),
+    disconnect: () => ipcRenderer.invoke('companyNative:disconnect'),
+  },
+  businessCompanyWork: {
+    review: input => ipcRenderer.invoke('businessCompanyWork:review', input),
+    choices: input => ipcRenderer.invoke('businessCompanyWork:choices', input),
+    activate: input => ipcRenderer.invoke('businessCompanyWork:activate', input),
+    stop: () => ipcRenderer.invoke('businessCompanyWork:stop'),
+    status: () => ipcRenderer.invoke('businessCompanyWork:status'),
+  },
   businessNative: {
     identity: () => ipcRenderer.invoke('businessNative:identity'),
     completedWork: () => ipcRenderer.invoke('businessNative:completedWork'),
@@ -1161,6 +1184,12 @@ const api: AgentlasIpc = {
     shareCompletedResult: input => ipcRenderer.invoke('businessNative:shareCompletedResult', input),
     receipt: input => ipcRenderer.invoke('businessNative:receipt', input),
     continuePublication: input => ipcRenderer.invoke('businessNative:continuePublication', input),
+    registerCompanyAgent: input => ipcRenderer.invoke('businessNative:registerCompanyAgent', input),
+    prepareAgentSnapshot: input => ipcRenderer.invoke('businessNative:prepareAgentSnapshot', input),
+    transferInbox: () => ipcRenderer.invoke('businessNative:transferInbox'),
+    exportAgent: input => ipcRenderer.invoke('businessNative:exportAgent', input),
+    transferReceipt: input => ipcRenderer.invoke('businessNative:transferReceipt', input),
+    importAgent: input => ipcRenderer.invoke('businessNative:importAgent', input),
     revoke: () => ipcRenderer.invoke('businessNative:revoke'),
   },
   onePersonalData: {

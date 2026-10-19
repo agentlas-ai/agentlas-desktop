@@ -17,7 +17,7 @@ export interface DiscoveredBrowserProfile {
   browser: string;
   /** 프로필 디렉터리명. 예: "Default", "Profile 2". */
   profileKey: string;
-  /** Chrome이 아는 프로필 표시 이름. 예: "Mason". */
+  /** */
   displayName: string;
   /** 그 프로필에 로그인된 계정 이메일(있을 때만). 표시용. */
   accountEmail: string | null;

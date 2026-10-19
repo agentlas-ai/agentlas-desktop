@@ -77,9 +77,9 @@ function errorCode(error: unknown, fallback: string): string {
 }
 
 /**
- * errorCode() collapses every exception without a machine code into one fallback, which is how an
- * 08:56 resume failure in the Youtube room (2026-10-10) left only `blocked_goal_resume_unavailable`
- * and no way to tell why. Keep the code, but log the real cause (redacted, bounded) to main.log.
+
+
+
  */
 function logSweepFailureCause(stage: string, runId: string, code: string, error: unknown): void {
   try {
@@ -114,9 +114,9 @@ function scheduleRetry(run: LongRunRecord, kind: "observe" | "resume", detail: s
 }
 
 /**
- * Another turn in the same Work project holds its provider (the admission that refused this Goal's turn
- * with work_project_residency_busy). Measured 2026-09-24: two Goals in one project made the sweep resume
- * the waiting one every 60 s, fail again, and post the same "continuing" notice each time.
+
+
+
  */
 export function projectHeldByAnotherTurn(run: LongRunRecord, dispatcher: EffectObservationDispatcher): boolean {
   const projectId = run.rootChatId ? getChat(run.rootChatId)?.projectId ?? null : null;
@@ -186,9 +186,9 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
   let current = run;
   for (let pass = 0; pass < 2 && !prepared; pass += 1) {
     try {
-      // IMMEDIATE: this reads before it writes. Deferred, a commit by the daemon (it writes about every second) between
-      // the read and the write failed the upgrade at once with SQLITE_BUSY_SNAPSHOT ("database is locked"), which
-      // busy_timeout never waits on. After the 1.3.27 restart the Yotube room Goal failed every pass (2026-10-13 16:44Z).
+      
+
+
       prepared = getDb().transaction(() => {
         const latest = getLongRun(current.id);
         if (!latest || latest.version !== current.version || !["blocked", "paused", "queued", "running", "waiting_tool"].includes(latest.status)) {
@@ -207,9 +207,9 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
       }).immediate();
     } catch (error) {
       const code = errorCode(error, "blocked_goal_resume_unavailable");
-      // The owner's own turn (or another live holder) owns the run right now: losing to it is not a failure.
-      // No retry slot, no notice, no log line; the next periodic pass looks again once that turn has settled.
-      // Measured 2026-10-12 group room 8f3e09ee: this was scheduled as a retry and announced as "could not start a model".
+      
+
+
       if (code === RESUME_LOST_TO_LIVE_OWNER_CODE) return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: "chat_busy" };
       if (code !== "blocked_goal_sweep_state_changed") logSweepFailureCause("resume-prepare", run.id, code, error);
       const latest = getLongRun(run.id);
@@ -230,8 +230,8 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
     }
   }
   if (!prepared) return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: "blocked_goal_resume_unavailable" };
-  // No chat line for a resume: the resumed run draws its own work line, and the ledger event above is the record.
-  // (2026-10-12: the line landed as noise right after the owner's one-line instruction.)
+  
+
   try {
     dispatcher.start(prepared.request, undefined, undefined, undefined, "goal-continuation");
     confirmDesktopLongRunResumeDispatched(prepared.queuedId);
@@ -268,10 +268,10 @@ function receiptOnlyRetry(runId: string, retry: BlockedGoalRetry): boolean {
 }
 
 /**
- * A Goal run whose chat the owner deleted. long_runs.root_chat_id is ON DELETE SET NULL, so the run outlives the
- * chat with nothing to resume into. The sweep used to read that as goal_chat_binding_missing and schedule a retry for
- * ever (index 60, next in 6 h, measured on the owner's DB 2026-10-05) while AGI filed 65 defect reports on it.
- * No chat holds the Goal any more, so the only honest end is closing it.
+
+
+
+
  */
 function goalOfDeletedChat(run: LongRunRecord): boolean {
   if (run.rootChatId || run.surface === "science") return false;
@@ -445,9 +445,9 @@ export function sweepBlockedGoals(dispatcher: EffectObservationDispatcher, trigg
   try { settleDaemonTurnGoals(); } catch (error) { console.warn("[blocked-goal-sweep] service-turn Goals could not be settled:", error); }
   const results: BlockedGoalSweepResult[] = [];
   const budget = { dispatches: 0 };
-  // The per-sweep dispatch budget is first come, first served, so the order is the fairness rule. Id order always
-  // put the same Goals first and starved the rest (a Work Goal sorted last behind four One Goals, measured on the
-  // owner's DB 2026-10-03). Longest-waiting first; the id breaks ties so the order stays deterministic.
+  
+
+
   const candidates: Array<{ id: string; updatedAt: string }> = [];
   let afterId = "";
   while (true) {

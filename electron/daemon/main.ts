@@ -841,9 +841,9 @@ function performShutdown(reason: string): Promise<void> {
       } catch (error) { console.error("[agentlasd] local model shutdown failed:", error); }
       finally { if (localTimeout) clearTimeout(localTimeout); }
     }
-    // The MCP approval proxy stays up until the owned runs have drained (flow audit 2026-10-18, I-D8): stopping it here
-    // cut the wire under a draining run's MCP calls and made any config build in that window mcp_proxy_gate_unavailable.
-    // It now stops in the finally below, beside the native socket, after the drain or its deadline.
+    
+
+
     const childrenDrained = drainRunChildrenForHostShutdown(processPool.shutdownChildren());
     try { runHostShutdownHooks(); }
     catch (error) { console.error("[agentlasd] shutdown hooks failed:", error); }
@@ -904,9 +904,9 @@ export interface DaemonStartupOptions {
 }
 
 export async function startDaemon(options: DaemonStartupOptions = {}): Promise<void> {
-  // First, before anything can throw on a later tick: an uncaught exception or unhandled rejection is recorded and the
-  // service keeps running, as Main does (logging.ts installMainProcessErrorSink). Without it Node ended the process on
-  // the first one and took every daemon-owned run with it, with no trace (flow audit 2026-10-18, I-D1).
+  
+
+
   installDaemonProcessDiagnostics((event, fields) => {
     runtimeDiagnostics?.record(event, { ...fields, pid: process.pid, bootId, appInstanceId });
   });
@@ -969,8 +969,8 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
   // 돌리면 앱이 자기 DB 를 못 알아본다.
   const { initStore, getDb } = await import("../store/db");
   initStore({ migrationRole: "follower" });
-  // The same store-backed ACP profile reader Main installs (ipc.ts setAcpProfileReader). Without it a daemon-owned run
-  // that picked a user's ACP terminal profile got no runner: pickRunner read no profiles here (flow audit 2026-10-18, I-D6).
+  
+
   (await import("../runtime/acp-agents")).setAcpProfileReader(() => {
     try {
       const row = getDb().prepare("SELECT value FROM meta WHERE key = 'terminal_profiles'").get() as { value: string } | undefined;

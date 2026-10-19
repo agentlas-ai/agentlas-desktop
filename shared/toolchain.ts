@@ -1,24 +1,24 @@
-// Adaptive Toolchain — pure learning core (no Electron, no store).
-//
-// Design: docs/2026-10-03-adaptive-toolchain/PLAN.md (local-only doc).
-//
-// What this file decides, and why each rule exists (all measured on the live
-// store, 2026-10-03):
-//
-//  · A case is "the same graph node", identified by a digest of the node's own
-//    definition (type + config), never by the graph digest and never by the node
-//    id alone. One automation changed its graph 30 times in 30 days and replaced
-//    18 node ids; a graph-level digest made 123 of 132 strategy proposals stale
-//    before any evidence could accumulate.
-//  · Host bookkeeping rows are not actions. `Agentlas Plugins · …` pseudo tool
-//    events were 7,560 rows in 30 days and were the ten most "repeated" patterns.
-//  · Tool names are runtime dialects. The same shell read is `bash` (codex),
-//    `run_command` (antigravity) and `Bash` (claude-code); the same browser call
-//    is `browser_navigate` or `mcp__agentlas-browser__browser_navigate`.
-//  · Only executed, judged evidence counts. A text summary is never promotion
-//    evidence (720 promoted "experiences" were copies of the request text).
-//
-// Nothing here writes anything. Callers own persistence and side effects.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 import { createHash } from "node:crypto";
 import type { ToolchainAssetsApi } from "./toolchain-asset";

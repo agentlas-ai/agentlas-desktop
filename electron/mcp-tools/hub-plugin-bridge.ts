@@ -75,12 +75,12 @@ export interface HubManifestMcpRow {
 }
 
 /**
- * Hub 매니페스트가 선언한 키는 이 연결만의 Vault 키를 가리킨다(credential-refs.ts, NH29).
- * 참조 없이 등록하면 credentialVaultKey 가 같은 이름의 **전역** 키를 돌려준다 — 매니페스트가
- * envKeys:["OPENAI_API_KEY"] 를 적으면 오너의 전역 키가 그 매니페스트의 URL로 헤더가 되어
- * 나갔다(리뷰 2026-10-16 engine-01). 그래서 행마다 토큰 하나를 새로 만들고 모든 키를 그
- * 연결 키로 묶는다. 값은 오너가 이 연결에 입력할 때까지 비어 있고, 행은 missing-key 로 남는다.
- * 환경변수 이름이 아닌 키는 연결 키를 만들 수 없으니 등록 자체를 거절한다(전역으로 읽히지 않게).
+
+
+
+
+
+
  */
 function hubConnectionCredentialRefs(envKeys: readonly string[]): Record<string, string> {
   const token = newConnectionCredentialToken();

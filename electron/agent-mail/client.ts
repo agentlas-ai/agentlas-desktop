@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 // Main-process client for /api/agent-mail/* with the owner's web session.
 // Every call re-reads the entitlement on the server; the Desktop never decides
 // eligibility, remaining allowance, unread counts or thread membership by
@@ -7,6 +8,7 @@ import { fetchWithHubSession, getSessionCookieHeader, webBaseUrl } from "../auth
 import {
   agentMailBareAddress,
   isAgentMailId,
+  type OrganizationMailTransport,
   type AgentMailAddressCheck,
   type AgentMailAddressSuggestion,
   type AgentMailAgentCard,
@@ -46,27 +48,95 @@ const TIMEOUT_MS = 15_000;
 const SEND_TIMEOUT_MS = 45_000;
 const ATTACHMENT_TIMEOUT_MS = 120_000;
 
+export type AgentMailExecutionScope = Readonly<{ kind: "personal" }> | Readonly<{ kind: "organization"; key: string }>;
+const executionScope = new AsyncLocalStorage<AgentMailExecutionScope>();
+export function withAgentMailExecutionScope<T>(scope: AgentMailExecutionScope, operation: () => Promise<T>): Promise<T> {
+  const pinned = Object.freeze({ ...scope });
+  return executionScope.run(pinned, operation);
+}
+/** Trusted Main captures this at explicit UI/WORK or inbound registration time. */
+export function captureAgentMailExecutionScope(): AgentMailExecutionScope {
+  const existing = executionScope.getStore(); if (existing) return existing;
+  return selectedAgentMailExecutionScope();
+}
+/** Current Main selection without ALS, for local sync state switch fencing. */
+export function selectedAgentMailExecutionScope(): AgentMailExecutionScope {
+  const current = organizationTransport?.current();
+  if (organizationTransport && (!current || Date.parse(current.expiresAt) <= Date.now())) return Object.freeze({ kind: "organization", key: "unavailable" });
+  return current ? Object.freeze({ kind: "organization", key: current.key }) : Object.freeze({ kind: "personal" });
+}
+export function currentAgentMailExecutionScope(): AgentMailExecutionScope | null { return executionScope.getStore() ?? null; }
+let organizationTransport: OrganizationMailTransport | null = null;
+/** Current explicit selection only. It issues no authority or transport and
+ * never changes an in-flight execution's captured scope. */
+export function currentOrganizationMailSelection() {
+  const current = organizationTransport?.current();
+  return current && Date.parse(current.expiresAt) > Date.now() ? Object.freeze({ ...current }) : null;
+}
+export async function agentMailColleagues(): Promise<import('../../shared/agent-mail').AgentMailResult<{ colleagues: import('../../shared/business/company-mail').BusinessCompanyMailColleague[] }>> {
+  if (captureAgentMailExecutionScope().kind !== 'organization') return err('organization_mail_required', 'Select company mail.', 403);
+  const response = await call<{ colleagues: import('../../shared/business/company-mail').BusinessCompanyMailColleague[] }>('GET', '/api/agent-mail/colleagues');
+  return response.ok ? { ok: true, colleagues: response.json.colleagues } : response;
+}
+let transportGeneration = 0;
+let knownScope = "personal";
+/** Main's explicit scope selection owns this binding. A selected but expired
+ * organization transport stays closed; it never falls back to personal Mail. */
+export function bindAgentMailOrganizationTransport(transport: OrganizationMailTransport | null): void {
+  organizationTransport = transport; transportGeneration++; knownScope = currentMailScope(); resetAgentMailLastKnown();
+}
+function selectedMailScope(): string {
+  if (!organizationTransport) return "personal";
+  const current = organizationTransport.current();
+  return current && Date.parse(current.expiresAt) > Date.now() ? `organization:${current.key}` : "organization:unavailable";
+}
+function currentMailScope(): string {
+  const pinned = executionScope.getStore();
+  if (pinned?.kind === "personal") return "personal";
+  const selected = selectedMailScope();
+  return pinned?.kind === "organization" && selected !== `organization:${pinned.key}` ? "organization:unavailable" : selected;
+}
+function refreshMailScope(): void {
+  const scope = selectedMailScope();
+  if (knownScope !== scope) { knownScope = scope; transportGeneration++; knownByScope.delete(scope); askedByScope.delete(scope); }
+}
+export function agentMailSessionAvailable(): boolean {
+  refreshMailScope();
+  return currentMailScope() === "personal" ? Boolean(getSessionCookieHeader()) : currentMailScope() !== "organization:unavailable";
+}
+
+
 /** Last server answer, so built-in One tools are offered only to owners who have a mailbox. */
-let lastKnown: { entitlement: AgentMailEntitlement | null; mailbox: AgentMailMailbox | null; limits: AgentMailLimits | null } = { entitlement: null, mailbox: null, limits: null };
-/** When the server was last asked (0 = never in this process). */
-let lastAskedAt = 0;
+type KnownMail = { entitlement: AgentMailEntitlement | null; mailbox: AgentMailMailbox | null; limits: AgentMailLimits | null };
+const knownByScope = new Map<string, KnownMail>();
+const askedByScope = new Map<string, number>();
+function known(): KnownMail {
+  const key = currentMailScope();
+  let value = knownByScope.get(key);
+  if (!value) { value = { entitlement: null, mailbox: null, limits: null }; knownByScope.set(key, value); }
+  return value;
+}
 const KNOWN_TTL_MS = 5 * 60_000;
 
 export function agentMailToolsOffered(): boolean {
-  return Boolean(lastKnown.entitlement?.available && lastKnown.mailbox?.status === "active");
+  refreshMailScope();
+  return Boolean(known().entitlement?.available && known().mailbox?.status === "active");
 }
 
 /** Last mailbox the server reported (may be stale by up to one status call). */
 export function agentMailLastKnownMailbox(): AgentMailMailbox | null {
-  return lastKnown.mailbox;
+  refreshMailScope();
+  return known().mailbox;
 }
 
 export function agentMailLastKnownLimits(): AgentMailLimits | null {
-  return lastKnown.limits;
+  refreshMailScope();
+  return known().limits;
 }
 
 export function agentMailLastKnownEntitlement(): AgentMailEntitlement | null {
-  return lastKnown.entitlement;
+  refreshMailScope();
+  return known().entitlement;
 }
 
 /**
@@ -75,7 +145,7 @@ export function agentMailLastKnownEntitlement(): AgentMailEntitlement | null {
  * loop compared B's feed against A's mailbox.
  */
 export function resetAgentMailLastKnown(): void {
-  lastAskedAt = 0;
+  askedByScope.clear(); knownByScope.clear();
   rememberMailbox(null, null, null);
 }
 
@@ -86,7 +156,7 @@ export function resetAgentMailLastKnown(): void {
  * server here when this process has never asked (or the answer is old).
  */
 export async function agentMailToolsOfferedForRun(): Promise<boolean> {
-  if (Date.now() - lastAskedAt > KNOWN_TTL_MS && getSessionCookieHeader()) {
+  if (Date.now() - (askedByScope.get(currentMailScope()) ?? 0) > KNOWN_TTL_MS && agentMailSessionAvailable()) {
     await agentMailStatus().catch(() => undefined);
   }
   return agentMailToolsOffered();
@@ -104,6 +174,31 @@ async function send(
   body: unknown,
   opts: { timeoutMs?: number; headers?: Record<string, string> },
 ): Promise<Response | AgentMailError> {
+  refreshMailScope();
+  const selectedScope = currentMailScope();
+  const transport = selectedScope === "personal" ? null : organizationTransport;
+  if (selectedScope === "organization:unavailable") return err("organization_mail_scope_changed", "Company mail context changed. Check the original request.", 409);
+  if (transport) {
+    const context = transport.current(), generation = transportGeneration;
+    if (!context || Date.parse(context.expiresAt) <= Date.now()) return err("organization_mail_session_required", "Reconnect company mail.", 401);
+    if (!path.startsWith("/api/agent-mail/") || path.includes("\\") || /[\u0000-\u001f]/.test(path))
+      return err("organization_mail_path_denied", "Company mail request is unavailable.", 403);
+    try {
+      const key = opts.headers?.["Idempotency-Key"];
+      const response = await transport.request({ method, path: path.replace(/^\/api\/agent-mail\//, '/api/organization-mail/'), ...(body === undefined ? {} : { body }), timeoutMs: opts.timeoutMs ?? SEND_TIMEOUT_MS,
+        ...(key ? { idempotencyKey: key } : {}) });
+      refreshMailScope();
+      if (!response || organizationTransport !== transport || transportGeneration !== generation || currentMailScope() !== `organization:${context.key}`)
+        return err("organization_mail_scope_changed", "Company mail context changed. Check the original request.", 409);
+      if (response.status >= 200 && response.status < 300) {
+        const value = response.body as { organizationMail?: { schema?: unknown; organizationId?: unknown; principalId?: unknown } } | null;
+        if (!value || value.organizationMail?.schema !== 'agentlas.organization-mail.v1'
+          || value.organizationMail.organizationId !== context.organizationId || value.organizationMail.principalId !== context.principalId)
+          return err('organization_mail_contract_required', 'Company Mail support could not be verified.', 409);
+      }
+      return new Response(JSON.stringify(response.body), { status: response.status, headers: { "Content-Type": "application/json" } });
+    } catch { return err("network", "Could not reach company mail."); }
+  }
   const cookie = getSessionCookieHeader();
   if (!cookie) return err("sign_in_required", "Sign in to Agentlas to use agent mail.");
   try {
@@ -156,13 +251,15 @@ async function call<T>(
 }
 
 function rememberMailbox(mailbox: AgentMailMailbox | null | undefined, entitlement?: AgentMailEntitlement | null, limits?: AgentMailLimits | null): void {
-  lastKnown = {
-    entitlement: entitlement === undefined ? lastKnown.entitlement : entitlement,
-    mailbox: mailbox === undefined ? lastKnown.mailbox : mailbox,
-    limits: limits === undefined ? lastKnown.limits : limits,
+  const value: KnownMail = {
+    entitlement: entitlement === undefined ? known().entitlement : entitlement,
+    mailbox: mailbox === undefined ? known().mailbox : mailbox,
+    limits: limits === undefined ? known().limits : limits,
   };
+  knownByScope.set(currentMailScope(), value);
+  if (currentMailScope() !== selectedMailScope()) return;
   for (const listener of mailboxListeners) {
-    try { listener(lastKnown.mailbox); } catch { /* listener errors never break a call */ }
+    try { listener(value.mailbox); } catch { /* listener errors never break a call */ }
   }
 }
 
@@ -174,11 +271,11 @@ export function onAgentMailMailboxKnown(listener: (mailbox: AgentMailMailbox | n
 }
 
 export async function agentMailStatus(): Promise<AgentMailStatus> {
-  if (!getSessionCookieHeader()) {
+  if (!agentMailSessionAvailable()) {
     rememberMailbox(null, null, null);
     return { ok: true, signedIn: false, entitlement: null, mailbox: null, limits: null };
   }
-  lastAskedAt = Date.now();
+  askedByScope.set(currentMailScope(), Date.now());
   const res = await call<{ mailbox: AgentMailMailbox | null; agentMail: AgentMailEntitlement; limits?: AgentMailLimits }>("GET", "/api/agent-mail/mailboxes");
   if (!res.ok) {
     if (res.code === "agent_mail_not_available") {
@@ -192,7 +289,7 @@ export async function agentMailStatus(): Promise<AgentMailStatus> {
     return res;
   }
   rememberMailbox(res.json.mailbox ?? null, res.json.agentMail ?? null, res.json.limits ?? null);
-  return { ok: true, signedIn: true, entitlement: lastKnown.entitlement, mailbox: lastKnown.mailbox, limits: lastKnown.limits };
+  return { ok: true, signedIn: true, entitlement: known().entitlement, mailbox: known().mailbox, limits: known().limits };
 }
 
 /** The account email and plan are resolved on the server, never passed by renderer. */
@@ -253,7 +350,7 @@ export async function agentMailUpdateMailbox(patch: AgentMailMailboxPatch): Prom
   const res = await call<{ mailbox: AgentMailMailbox; agentMail?: AgentMailEntitlement; limits?: AgentMailLimits }>("PATCH", "/api/agent-mail/mailboxes", body);
   if (!res.ok) return res;
   rememberMailbox(res.json.mailbox, res.json.agentMail ?? undefined, res.json.limits);
-  return { ok: true, mailbox: res.json.mailbox, entitlement: res.json.agentMail ?? lastKnown.entitlement };
+  return { ok: true, mailbox: res.json.mailbox, entitlement: res.json.agentMail ?? known().entitlement };
 }
 
 export async function agentMailCheckAddress(localPart: string): Promise<AgentMailResult<AgentMailAddressCheck>> {
@@ -364,7 +461,7 @@ function originBody(authority: AgentMailSendAuthority): Record<string, unknown> 
 function sendOutcome(res: { ok: true; status: number; json: AgentMailSendResult } | AgentMailError, idempotencyKey: string | null): AgentMailResult<AgentMailSendResult> {
   if (!res.ok) {
     // A timeout after the request left is not a refusal: the server may have sent it.
-    if (res.code === "timeout" || res.code === "network") {
+    if (res.code === "timeout" || res.code === "network" || res.code === "organization_mail_scope_changed") {
       return err("send_outcome_unknown", "The send result is unknown. Check Sent before sending again.", null, idempotencyKey ? { idempotencyKey } : undefined);
     }
     return res;
@@ -404,8 +501,8 @@ function outboundAttachments(input: unknown): { ok: true; list: AgentMailOutboun
     bytes += Math.floor((contentBase64.length * 3) / 4) - (contentBase64.endsWith("==") ? 2 : contentBase64.endsWith("=") ? 1 : 0);
     list.push({ filename, contentType, contentBase64 });
   }
-  const maxCount = lastKnown.limits?.maxAttachmentsPerMessage ?? null;
-  const maxBytes = lastKnown.limits?.maxAttachmentBytesTotal ?? null;
+  const maxCount = known().limits?.maxAttachmentsPerMessage ?? null;
+  const maxBytes = known().limits?.maxAttachmentBytesTotal ?? null;
   if ((maxCount !== null && list.length > maxCount) || (maxBytes !== null && bytes > maxBytes)) {
     return err("agent_mail_attachments_too_large", "The attachments are larger than this mailbox can send.", 413, { maxAttachmentBytesTotal: maxBytes, maxAttachmentsPerMessage: maxCount, requestedBytes: bytes });
   }
@@ -451,7 +548,7 @@ export async function agentMailThreads(input: AgentMailThreadsInput = {}): Promi
   query.set("view", view);
   if (typeof input.q === "string" && input.q.trim()) query.set("q", input.q.trim().slice(0, 500));
   if (input.cursor) query.set("cursor", String(input.cursor).slice(0, 512));
-  const max = lastKnown.limits?.pageSizeMax ?? 100;
+  const max = known().limits?.pageSizeMax ?? 100;
   if (input.limit !== undefined) query.set("limit", String(Math.min(Math.max(Number(input.limit) || 1, 1), max)));
   const res = await call<{ threads: AgentMailThreadSummary[]; nextCursor: string | null; unread?: AgentMailUnread }>("GET", `/api/agent-mail/threads?${query.toString()}`);
   if (!res.ok) return res;
@@ -642,7 +739,7 @@ export async function agentMailFetchAttachment(messageId: string, index: number)
     if (res.status === 401) return err("sign_in_required", "Sign in to Agentlas to use agent mail.", 401);
     return err(typeof json.code === "string" ? json.code : `http_${res.status}`, typeof json.error === "string" ? json.error : `Agentlas answered ${res.status}.`, res.status);
   }
-  const cap = lastKnown.limits?.maxAttachmentBytesTotal ?? null;
+  const cap = known().limits?.maxAttachmentBytesTotal ?? null;
   const declared = Number(res.headers.get("content-length") ?? "");
   if (cap && Number.isFinite(declared) && declared > cap * 2) return err("agent_mail_attachment_too_large", "The attachment is larger than this mailbox allows.");
   const bytes = Buffer.from(await res.arrayBuffer());
@@ -676,7 +773,7 @@ export async function agentMailContacts(input: AgentMailContactsInput = {}): Pro
   if (typeof input.q === "string" && input.q.trim()) query.set("q", input.q.trim().slice(0, 200));
   if (input.kind === "person" || input.kind === "agentlas_agent") query.set("kind", input.kind);
   if (input.cursor) query.set("cursor", String(input.cursor).slice(0, 512));
-  const max = lastKnown.limits?.pageSizeMax ?? 100;
+  const max = known().limits?.pageSizeMax ?? 100;
   if (input.limit !== undefined) query.set("limit", String(Math.min(Math.max(Number(input.limit) || 1, 1), max)));
   const res = await call<{ contacts?: AgentMailContact[]; nextCursor?: string | null }>("GET", `/api/agent-mail/contacts${query.size ? `?${query.toString()}` : ""}`);
   if (!res.ok) return res;
@@ -699,7 +796,7 @@ export async function agentMailSaveContact(
   input: AgentMailContactSaveInput & { oneNote?: string | null },
   actor: AgentMailActor = "owner",
 ): Promise<AgentMailResult<{ contact: AgentMailContact; created: boolean }>> {
-  const limits = lastKnown.limits;
+  const limits = known().limits;
   const body: Record<string, unknown> = { actor };
   if (input && "displayName" in input) body.displayName = input.displayName === null ? null : cleanText(input.displayName, limits?.displayNameMaxChars ?? 200);
   if (actor === "owner" && input && "ownerNote" in input) body.ownerNote = input.ownerNote === null ? null : cleanText(input.ownerNote, limits?.contactNoteMaxChars ?? 1000);
@@ -746,7 +843,7 @@ export async function agentMailSaveDirectoryMe(input: { listed?: boolean; card?:
   if (typeof input?.listed === "boolean") body.listed = input.listed;
   if (input?.card && typeof input.card === "object") {
     const card = input.card;
-    const limits = lastKnown.limits?.card;
+    const limits = known().limits?.card;
     const skills = Array.isArray(card.skills)
       ? card.skills
         .map((skill, index) => ({
@@ -777,7 +874,7 @@ export async function agentMailDirectorySearch(input: { q?: string; skill?: stri
   if (typeof input?.skill === "string" && input.skill.trim()) query.set("skill", input.skill.trim().slice(0, 80));
   if (typeof input?.lang === "string" && /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$/.test(input.lang)) query.set("lang", input.lang);
   if (input?.cursor) query.set("cursor", String(input.cursor).slice(0, 512));
-  if (input?.limit !== undefined) query.set("limit", String(Math.min(Math.max(Number(input.limit) || 1, 1), lastKnown.limits?.directoryPageMax ?? 20)));
+  if (input?.limit !== undefined) query.set("limit", String(Math.min(Math.max(Number(input.limit) || 1, 1), known().limits?.directoryPageMax ?? 20)));
   const res = await call<{ results?: AgentMailAgentCard[]; nextCursor?: string | null }>("GET", `/api/agent-mail/directory/search?${query.toString()}`);
   if (!res.ok) return res;
   return { ok: true, results: Array.isArray(res.json.results) ? res.json.results : [], nextCursor: res.json.nextCursor ?? null };
@@ -834,7 +931,7 @@ export async function agentMailSetDomainAddress(input: { id: string; localPart: 
   );
   if (!res.ok) return res;
   rememberMailbox(res.json.mailbox, res.json.agentMail ?? undefined, res.json.limits);
-  return { ok: true, mailbox: res.json.mailbox, created: res.json.created === true, entitlement: res.json.agentMail ?? lastKnown.entitlement };
+  return { ok: true, mailbox: res.json.mailbox, created: res.json.created === true, entitlement: res.json.agentMail ?? known().entitlement };
 }
 
 export async function agentMailRemoveDomain(id: string): Promise<AgentMailResult<{ deleted: true }>> {

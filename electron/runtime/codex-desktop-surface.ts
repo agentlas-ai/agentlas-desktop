@@ -1,63 +1,63 @@
 /**
- * Codex's own desktop-control surfaces — who may reach them.
- *
- * Production 1.2.40 (Runtime Doctor run for Threads automation f7a61706,
- * 2026-09-24 02:02Z): the recovery run used the resident Codex app-server with
- * the owner's ~/.codex/config.toml. That config enables the ChatGPT-bundled
- * `unified-computer-use@openai-bundled` plugin, whose `cua_repl` MCP server
- * drives native apps. The unattended run created a visible tab in the owner's
- * real Google Chrome, typed a URL and pressed Return — although the automation
- * was configured for the Agentlas browser only (tool_mode=browser).
- *
- * Rule: a run that no human is watching (unattended), or a run bounded to the
- * Agentlas browser (browserOnly), never reaches Codex's vendor desktop/browser
- * control surfaces unless Main granted desktop control for this run (the
- * automation/chat explicitly selected Computer Use). The Agentlas browser
- * (its own CDP profile) and Agentlas Computer Use (cua-driver, Main-gated)
- * are bound separately by the host and are not affected.
- *
- * Attended runs too (QA app, 2026-10-04): a One turn on codex with write permission,
- * blocked by a graph tool error, used the bundled `unified-computer-use` plugin to
- * click through Agentlas's own owner screens — it edited a graph in the automation
- * editor and re-registered a Toolchain as the owner. A lower layer acting with the
- * owner's controls is what the owner's layer rule forbids (owner 2026-10-04). So
- * the ChatGPT-bundled computer-use plugins are closed on every run without the
- * grant, exactly like the bundled browser plugins below. That needs no config
- * read (a plugin override for an absent plugin is harmless), so an attended turn
- * stays hermetic; user-declared desktop servers are still closed only where the
- * config was already read (unattended, browser-only).
- *
- * Measured on codex-cli 0.156.1 with `app-server` + `mcpServerStatus/list`:
- *   - `-c plugins.<id>.enabled=false` (UNQUOTED id) removes the plugin's MCP
- *     servers (cua_repl, computer-history). The quoted form
- *     `plugins."<id>".enabled=false` is silently ignored.
- *   - `--disable computer_use|browser_use|browser_use_external|in_app_browser`
- *     removes nothing, so features are not the switch.
- *   - An override for a plugin that is not installed is harmless.
- *   - `-c mcp_servers.<name>.enabled=false` for a server that the user config
- *     does NOT declare fails bootstrap ("invalid transport"), so user-level
- *     servers are disabled only when the user config actually declares them —
- *     and never under `--ignore-user-config` (isolated runs): there the user
- *     config is not loaded, so every such override is a transport-less server.
- *     Dev-app E2E 2026-09-24 (browser-mode Threads automation, isolated exec):
- *     "Error loading config.toml: invalid transport in `mcp_servers.computer-use`".
- *
- * Browser surfaces (2026-09-24, owner: "당근 내장브라우저에서 하겠지? 자꾸 외부크롬
- * 켜지는거 같아서", then "우선순위를 agentlas 플러그인을 우선으로 하자는거지"):
- *   - Bundled chrome@/browser@openai-bundled drive the owner's own browser —
- *     desktop-control class, closed on every run unless Main granted Computer Use.
- *   - User browser-automation servers (`@playwright/mcp` launches the installed
- *     Google Chrome channel) and the Playwright plugin are outside equivalents of
- *     the Agentlas browser (shared/capability-priority.ts): hidden while an
- *     Agentlas browser is reachable in this run (Main bound it, or the user
- *     config declares one / enables a plugin that ships one), kept as the
- *     fallback otherwise so a run that needs a browser never dead-ends.
- *   - An attended turn without a bound browser reads no config at all (hermetic
- *     residency gate test-codex-residency), so its Agentlas state is "unknown"
- *     and the outside browser stays as the fallback.
- * Owned references: OpenAI Atlas runs its agent in its own StoragePartition;
- * Playwright MCP's persistent profile launches the installed Chrome channel
- * (microsoft/playwright-mcp#1483).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -255,15 +255,15 @@ function enabledPluginShipsAgentlasBrowser(codexHome: string, texts: readonly st
 }
 
 /**
- * Whether the owner's Codex config would hand this run an outside browser
- * (a Playwright-style server or the Playwright plugin) while no Agentlas browser
- * is declared there. Production 1.2.50 (2026-09-29, One Team "Shorts Metrics
- * Operator", receipt `browser_surface=fallback agentlas_browser=unknown`): the
- * tool judge was undecided, Main bound no browser, and the model drove the
- * owner's `playwright` server — every navigate raised a Codex MCP elicitation
- * ("Allow the playwright MCP server to run tool …") because that server is not
- * behind Main's gate. The tool selector reads this to attach the Agentlas
- * browser instead, which then closes the outside one (`hostBound`).
+
+
+
+
+
+
+
+
+
  */
 export function codexUserConfigOutsideBrowser(input: { env?: NodeJS.ProcessEnv; cwd?: string }): boolean {
   // Asked before the run starts, about the config the run will read: a product run started from the person's own home

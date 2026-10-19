@@ -360,6 +360,7 @@ export function projectMobileBridgeMailStatus(value: unknown, unreadOverride?: n
   const result = value as Loose;
   const entitlement = isRecord(result.entitlement) ? result.entitlement : null;
   const mailbox = isRecord(result.mailbox) ? result.mailbox : null;
+  if (isRecord(mailbox?.scope) && mailbox.scope.kind === "organization") return refusal("mail_organization_unsupported", "Company mail is not available on this mobile connection.");
   const unread = isRecord(result.unread) ? result.unread : null;
   const mailboxStatus = mailbox?.status === "provisioning" || mailbox?.status === "active" || mailbox?.status === "deleted"
     ? mailbox.status
@@ -469,7 +470,7 @@ export function createMobileBridgeAgentMailService(
 ): MobileBridgeAgentMailService {
   const fn = (name: keyof MobileBridgeAgentMailClient): ClientFn | null => {
     const value = client[name];
-    return typeof value === "function" ? (value as ClientFn) : null;
+    return typeof value === "function" ? (...args: unknown[]) => agentMailClientModule.withAgentMailExecutionScope({ kind: "personal" }, () => (value as ClientFn)(...args)) : null;
   };
   const syncNow = () => {
     try {
@@ -861,6 +862,7 @@ export function createMobileBridgeAgentMailService(
       const on = client.onAgentMailChanged;
       if (typeof on === "function") {
         disposers.push(on((event) => {
+          if (event && typeof event === "object" && "scope" in event) return;
           const projected = projectMobileBridgeMailChangedEvent(event);
           if (projected) listener(projected);
         }));
@@ -873,6 +875,7 @@ export function createMobileBridgeAgentMailService(
       if (typeof known === "function") {
         let last: string | null = null;
         disposers.push(known((mailbox) => {
+          if (mailbox && typeof mailbox === "object" && "scope" in mailbox) return;
           const next = mailboxFingerprint(mailbox);
           const previous = last;
           last = next;

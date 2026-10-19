@@ -20,16 +20,16 @@ function observeRunnerSettlement<T>(provider: Promise<T>): Promise<T> {
   return provider;
 }
 
-/*
- * A provider's own typed refusal (quota/billing, sign-in, an unsupported request, unavailable or at capacity, a policy
- * refusal), reported as a marker with or without dispatch, is that failure: callers keep its kind and providerCode (a
- * judgment walks to its next candidate, system-agents/judgment.ts; the no-tools lane's own refusals such as
- * codex_no_tools_frame_unknown are "refused"). Only an unknown terminal stays unsettled: no typed cause, the unsettled
- * code itself, a silent timeout, an unrecognized stream, a bare exit; it keeps the result as its cause. A refusal that
- * follows observed tool activity in a run that had tools also stays unsettled: the tools may have acted before it.
- * Production 2026-10-15..16: 2,849 judgment calls reported runtime_turn_unsettled while the runner had returned
- * codex_no_tools_frame_unknown (audit A7 M1).
- */
+
+
+
+
+
+
+
+
+
+
 const TYPED_PROVIDER_FAILURE_KINDS: ReadonlySet<RunnerFailure["kind"]> = new Set(["quota", "rate_limit", "auth", "unsupported", "unavailable", "refused"]);
 const UNKNOWN_TERMINAL_CODES: ReadonlySet<string> = new Set([RUNTIME_TURN_UNSETTLED_CODE, RUNTIME_SILENT_TIMEOUT_CODE, RUNTIME_PROTOCOL_UNRECOGNIZED_CODE]);
 function typedProviderFailure(failure: RunnerFailure | undefined, toolActivity: boolean, request: RunnerRequest): boolean {

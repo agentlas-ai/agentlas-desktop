@@ -1439,12 +1439,12 @@ function TaskSidePanelContent({
     presentedResultKeyRef.current = resultKey;
     observeRailTab("result");
   }, [result, resultKey, observeRailTab]);
-  /*
-   * 폭을 저 혼자 넓히던 자리(제거, 오너 지시 2026-08-24 "디폴트로 접히고
-   * 켜져도 지금의 반만"). 넓은 산출물이 뜰 때마다 화면의 43% 로 벌어지고
-   * 그 값이 저장까지 돼서, 기본 폭을 아무리 줄여도 다음 실행이 다시
-   * 579px 로 되돌려 놓았다(실측). 폭은 이제 사람이 끌 때만 바뀐다.
-   */
+  
+
+
+
+
+
   useEffect(() => {
     if (!onResize) return;
     let resizeFrame = 0;
@@ -1565,13 +1565,13 @@ function TaskSidePanelContent({
     });
   };
   const sectionExpanded = (section: OutputSectionKey) => !collapsedSections.has(section);
-  // Owner 2026-10-13 (Yotube vs Thread Marketing): an open panel with no view drew a blank 300px column beside the
-  // chat. With nothing to show it takes no space; it reappears as soon as a view, file or worker opens.
+  
+
   const empty = openTabs.length === 0 && chatFileTabs.length === 0 && !workerSelection && !result;
   useEffect(() => { onEmptyChange?.(Boolean(visible) && empty); }, [visible, empty, onEmptyChange]);
-  // Owner 2026-10-17 (Yotube teammate seat): the panel toggle did nothing while no view was open, and the "+" that adds
-  // a view lives inside the panel. A deliberate open shows the activity view; a restored or automatic open of an empty
-  // panel still takes no space (the 2026-10-13 rule above).
+  
+
+
   const handledOpenRequestRef = useRef(openRequest ?? 0);
   useEffect(() => {
     const request = openRequest ?? 0;

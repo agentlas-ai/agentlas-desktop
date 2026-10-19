@@ -147,9 +147,9 @@ export function goalAdmissionControlFailureForCode(code: string | null | undefin
     return { code, message };
   }
   switch (code) {
-    // invoke:run throws these only before start: the submission check precedes the admission row, and a refused
-    // parent reservation records a rejected admission first. Shown as uncertain, the 1.2.89 refusal (Hope chat,
-    // 2026-10-10T21:05Z) left "admission unknown" in the chat with no way to clear it.
+    
+
+
     case "one_preflight_submission_changed":
     case "one_preflight_parent_not_pending":
       message = ko ? "보내는 사이 이 대화의 실행 설정이 바뀌어 요청을 시작하지 않았습니다. 아무것도 실행되지 않았고 입력은 보존되어 있습니다. 다시 보내 주세요."

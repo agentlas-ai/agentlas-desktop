@@ -395,11 +395,11 @@ export function antigravityPermissionArgs(
   /** The scoped-read browser profile (antigravityBrowserProfile): its project grants are the whole gate. */
   browserScopedRead = false,
 ): string[] {
-  // Legacy browser profile (agy before 1.4.0, measured 2026-09-03): the headless CLI did not honor project allow-rules
-  // for MCP calls, so browser-only runs needed the CLI bypass to get past its MCP gate; `--sandbox` and the project's
-  // deny list (command/read/write/url) stay. agy 1.4.0 honors project allow-rules headlessly (measured 2026-10-16:
-  // `mcp(<server>/*)` authorizes the call, without it the call is auto-denied), so the scoped-read profile drops the
-  // bypass: workspace reads are allowed, reads outside the workspace are auto-denied, and its grants decide the rest.
+  
+
+
+
+
   if (browserOnly) return browserScopedRead ? ["--sandbox"] : ["--dangerously-skip-permissions", "--sandbox"];
   if (permission === "full") return ["--dangerously-skip-permissions"];
   if (permission === "write") return ["--dangerously-skip-permissions", "--sandbox"];
@@ -474,30 +474,30 @@ export async function ensureAntigravityBrowserProjectPolicy(
   return { projectId: AGY_BROWSER_PROJECT_ID, workspace, configPath };
 }
 
-/*
- * Scoped-read browser profile: an Antigravity browser-only run works in the step's own working folder and may read it.
- *
- * Root cause it replaces (YouTube graph cdf732ca, 1.3.49, 07:57Z run): the legacy profile ran agy in a private runtime
- * home (~/.agentlas/runtime-homes/antigravity-browser-v1) and named that folder as the project's resource, while the
- * step's files live in the step's working folder (the room's or agent-cwd). agy resolves a relative path against the
- * project resource and its cwd (measured 1.4.0: with the resource elsewhere the model first stats
- * <runtime-home>/outputs/..., exactly the production failure), and the project denied read_file(*), so a browser step
- * could not read anything the room or an earlier step produced.
- *
- * Measured agy 1.4.0, 2026-10-16 (scratch HOME, tiny prompts, AGY2):
- *   - no `--dangerously-skip-permissions`: a relative read in the cwd workspace is allowed without any grant; a read
- *     outside the workspace is auto-denied (denied_actions read_file); `write_file(*)`/`command(*)`/`read_url(*)` deny
- *     rules hold (agy's own read_url_content browser fallback is denied).
- *   - MCP: `mcp(*)` authorizes call_mcp_tool for every configured server. The model reads the tool descriptor
- *     <appData>/mcp/<server>/<tool>.json first and big tool outputs spill to <appData>/brain/<conversation>/
- *     .system_generated/...; both are outside the workspace, so they need `read_file(<dir>)` grants. A grant is a
- *     resolved-path prefix (`read_file(/private/tmp/x)`); `/**` globs match nothing; a deny always beats an allow.
- *   - with the bypass flag every read is allowed (deny rules still hold), so the bypass profile cannot confine reads.
- * The project file carries no per-run content (the workspace comes from cwd/--add-dir), so one Agentlas-owned file
- * covers every run. `mcp(*)` keeps the MCP authority the bypass gave (the servers in the run's HOME config: the run's
- * authorized ones, e.g. the room's One Team for a graph step, cafffb4d). The person's own conversation spill files
- * (real HOME brain) are never granted.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 const AGY_BROWSER_READ_PROJECT_ID = "agentlas-browser-automation-v2";
 const AGY_BROWSER_READ_POLICY_MARKER = "agentlas.desktop.browser-read-policy.v2";
 /** agy versions measured to honor project allow-rules headlessly (scoped-read browser profile). */
@@ -836,9 +836,9 @@ export function antigravityEmptyRunOutcome(input: {
 }
 
 /**
- * agy reports `step_type:"tool"` with its native `tool_name`, a fixed tool identifier rather than a display title. Known
- * native tools map to the ACP tool kind (shared/runtime-tool-kind.ts); MCP calls, `finish`, image and browser tools are
- * "other". Consumers read this kind, never the name (review 2026-10-16 H1).
+
+
+
  */
 const AGY_TOOL_KINDS: Readonly<Record<string, RuntimeToolKind>> = {
   run_command: "execute", send_command_input: "execute",
@@ -881,13 +881,13 @@ export function reduceAgyLine(
     resultErrorCode?: string;
     resultRetryAfterHint?: string;
     /**
-     * The run passed `--json-schema`. agy 1.4.0 (measured 2026-10-16) enforces the schema through its built-in `finish`
-     * tool: the model writes a draft as an agent_response, submits it as `finish` arguments, and a schema-invalid
-     * submission comes back as a `finish` tool step in ERROR ("invalid arguments: ...") after which the model writes the
-     * next draft. The accepted submission closes as a `finish` step and is carried by `result.structured_output`.
-     * `result.response` is the concatenation of every agent_response of the turn, i.e. all drafts (4 in the measured
-     * run: 3644+4172+4068+4048 = 15932 characters = response length; only the last draft was valid).
-     */
+
+
+
+
+
+
+ */
     schemaBound?: boolean;
     /** JSON of `result.structured_output`: the schema-accepted answer of a `--json-schema` run. */
     structuredOutput?: string;
@@ -1845,12 +1845,12 @@ async function reconcileAgyMcpServersUnderLease(
       // 거절하지 말고 아래에서 이번 실행의 항목으로 갈아 끼운다.
       if (isAgentlasWrittenMcpEntry(parsed.mcpServers[key] ?? {})) continue;
       if (!parsed.mcpServers[key] || isAgyMcpEntryEqual(parsed.mcpServers[key], requestedEntry ?? undefined)) continue;
-      // A user's own Antigravity entry shares this key with a different
-      // transport. That entry is theirs; we neither overwrite nor borrow it.
-      // Refusing the whole run here made agy unusable for anyone whose global
-      // mcp_config.json had a same-named server (production, 2026-09-13:
-      // `opencrab` → every Work run fell back to another runtime). The run
-      // continues with the user's entry in place and without ours for that key.
+      
+
+
+
+
+
       collidedWithUserEntry.push(key);
       continue;
     }
@@ -2099,21 +2099,21 @@ export type AgyPersonalMcpMigration =
   | { status: "migrated"; removed: string[]; backupPath: string };
 
 /**
- * One-time, gated cleanup of the MCP entries older builds wrote into the person's own ~/.gemini/config/mcp_config.json
- * (R-101). Until the run's servers were staged into the product mirror's own file, every authorized agy run added its
- * servers to the person's file and removed them when it ended; a run that never ended left them there, and the owner's
- * personal agy then started them in every session of their own (2026-10-18: agentlas-browser, agentlas-science,
- * agentlas-time, filesystem, shadcn, all with Agentlas's own env markers).
- *
- * Gates, all required: this process is a packaged install (configured install channel official or local-candidate;
- * 2026-10-18 04:09Z a test host with the person's real HOME and the unnamed "Electron" userData ran it on the owner's file
- * while the change was uncommitted: dev, QA and unconfigured hosts never run it), it spawns agy in a product mirror (the
- * caller's branch), the kill switch
- * AGENTLAS_AGY_PERSONAL_MCP_MIGRATION=0 is not set, no marker for this HOME exists yet (once per HOME), the person's
- * file's cross-install lease is free within 2 s (an older Desktop staging into it holds that lease for its whole run),
- * no run of this process stages into that file right now, and the file parses. Only entries isAgentlasWrittenMcpEntry
- * recognises (Agentlas's own env marker keys, which a server the person registered never carries) are removed; the
- * exact original bytes are first written to a private backup beside the file; every other entry and key is kept.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
  */
 export async function migrateAgyPersonalMcpConfig(input: { realHome: string; markerDir?: string;
   /** Tests name the channel; production reads the configured install identity (Main and daemon configure it). */
@@ -2243,14 +2243,14 @@ function antigravityConversationLostFailure(locale: string | undefined): RunnerF
 }
 
 /**
- * A stored agy conversation can disappear (the owner's 30-day deletion of unused CLI originals, agy's own pruning). agy
- * then answers from a new, empty conversation (measured, antigravity-conversation-metadata.ts antigravityConversationGone);
- * saving that conversation and returning its answer made the turn, and every later one, run without the chat's history
- * (A3 live probe 2026-10-16: 33 of 49 agy bindings named missing conversations). The turn instead continues once in a
- * fresh conversation that carries the conversation (unattended-session-turns.ts rule 4): the chat's own history for a
- * per-chat binding, the agent-context journal for its native handle. The dead binding is replaced and one typed
- * receipt is emitted. A turn that cannot be handed the conversation, or whose lost run already produced text or a tool
- * step (rule 3), fails with the typed agy_conversation_lost and keeps nothing from that run.
+
+
+
+
+
+
+
+
  */
 async function runPreparedAntigravity(
   req: RunnerRequest,
@@ -2397,8 +2397,8 @@ async function runPreparedAntigravityAttempt(
     }
     if (agyToolsAllowed) events.onStatus("[agy-mcp-scope] target=personal-home reason=product-home-unavailable");
   } else if (agyRunEnv.AGENTLAS_AGY_REAL_HOME && isAgentlasProductHome(agyRunHome)) {
-    // One-time, gated cleanup of entries older builds wrote into the person's file (migrateAgyPersonalMcpConfig), only for
-    // the home this run's product mirror was made from (2026-10-18: a run spawned in some other HOME took os.homedir()).
+    
+
     void migrateAgyPersonalMcpConfig({ realHome: agyRunEnv.AGENTLAS_AGY_REAL_HOME }).catch(() => undefined);
   }
   /*
@@ -2478,7 +2478,7 @@ async function runPreparedAntigravityAttempt(
     ...(runReq.browserOnly
       ? [
           "- tools: only the Agentlas Browser MCP, pre-approved; use it directly",
-          // The scoped-read profile's grants allow reading the workspace and nothing else on disk (A/B 2026-10-17).
+          
           ...(browserProject?.scopedRead
             ? ["- files: read-only, this workspace only",
               "- never: run_command, file writes, provider-native browser tools, another Playwright runtime"]

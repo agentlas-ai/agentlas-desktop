@@ -62,11 +62,11 @@ export interface LongRunCostAccounting {
   unknownCount: number;
 }
 
-// rowToLongRun calls this for every long run the screen reads, and the room screen polls
-// several of those reads every few seconds. Recomputing from the event log each time parsed
-// every usage receipt of a months-long Goal (1.6k receipts, 6.5k events in the Youtube room,
-// 2026-10-10) and pinned Main at ~45% CPU. The event log is append-only per run, so its newest
-// seq is an exact version for the derived totals.
+
+
+
+
+
 const COST_ACCOUNTING_CACHE_LIMIT = 256;
 const costAccountingCache = new WeakMap<object, Map<string, { version: number; cycleCount: number; value: LongRunCostAccounting }>>();
 

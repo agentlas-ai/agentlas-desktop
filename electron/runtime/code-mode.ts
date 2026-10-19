@@ -117,8 +117,8 @@ export async function runMainCodeMode(byName: Map<string, ResolvedTool>, input: 
     }
   }
   const result = {schemaVersion: "agentlas.code-mode-result.v1", value, error: failure,
-    // A cut nested result is a host fact on the envelope: code that read only `result` (dev 2026-10-18 run10, Haiku counted
-    // 2 of 48 automations from a cut automations.list) is answered with the count of results it may have under-read.
+    
+
     operations: {observed: operationCount, failed, pending: pending.size, peakConcurrency, ...(truncatedResults ? {truncatedResults} : {})},
     memory: {scope: "evaluation", durable: false, restartState: "unknown"}};
   const content = JSON.stringify(result);

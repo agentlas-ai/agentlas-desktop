@@ -1,14 +1,14 @@
-// agentlasd idle exit — the safety net behind the GUI quit policy.
-//
-// A GUI quit with login continuity OFF asks the service to stop. This module
-// covers the paths where that request never arrives: the GUI crashed or was
-// killed (kill -9), or the owner chose "keep running in the background" and
-// the work has since finished. In those cases a detached service with nothing
-// to do must not live forever (measured 2026-09-30: seven QA daemons from the
-// night before, ppid 1, still alive).
-//
-// Pure logic only — no timers, no store, no Electron — so a plain-Node gate can
-// drive it (scripts/test-daemon-idle-exit.cjs).
+
+
+
+
+
+
+
+
+
+
+
 
 export interface DaemonResidencyInput {
   /** A live Desktop GUI is attached (daemon.attach, parent pid still alive). */

@@ -4,21 +4,21 @@ import { getDb } from "../store/db";
 import { persistQueuedSteer, type DurableQueuedSteer } from "../store/invocation-steers";
 
 /**
- * What the owner wrote into a running turn and the turn never took, carried to the chat's next turn.
- *
- * Production 2026-10-17 (1.3.61, YouTube room, run a992ca92): at 09:44:55 the owner sent a style direction for the Goal
- * that was making the day's videos. The run was a team run, which never reads the owner inbox, so the direction waited
- * 81 minutes as `queued` and was refused `owner_control_run_settled` when the run ended. Nothing re-sent it and no screen
- * showed the refusal: 15 videos were made in the old style and the direction was simply gone. A daemon-owned run lost
- * such a direction even sooner (a current-only row was refused at the episode end or as soon as the native handle was
- * unavailable), while the same message to a Desktop-owned run was delivered after the episode.
- *
- * Claude Code and Codex queue what is typed during a turn and send it when the turn ends. Here: when a run ends without
- * the owner stopping it, every direction it never dispatched (still `queued`) becomes ONE next turn, the texts in the
- * order they were written. Its rows are settled `rejected` / `owner_control_next_turn` in the same transaction that
- * persists the queued turn, so a direction is carried at most once and never also replayed into the ended run. The
- * owner's message rows already exist (the claim wrote them); the next turn reuses them instead of writing new bubbles
- * (carriedFollowupMessageIds). A `dispatching` or `uncertain` row may have reached the model and is never carried.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
  */
 export const CARRIED_FOLLOWUP_STEER_PREFIX = "owner-followup:";
 export const CARRIED_FOLLOWUP_CODE = "owner_control_next_turn";

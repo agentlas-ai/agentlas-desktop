@@ -123,7 +123,7 @@ export function BusinessDesktopEntry({ suppliedBridge }: { suppliedBridge?: Busi
       </div>
     </div>
   </section>;
-  return <BusinessConsole context={binding?.context ?? null}
+  return <BusinessConsole showCompanyAgents context={binding?.context ?? null}
     displayClosed={displayClosed || !matchesEligibility}
     account={binding?.availability.account ? bridge?.account ?? null : null}
     history={binding?.availability.history ? bridge?.history ?? null : null}

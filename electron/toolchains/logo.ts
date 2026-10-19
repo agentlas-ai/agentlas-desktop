@@ -1,10 +1,10 @@
-// Each Toolchain's app icon (owner 2026-10-05: "툴체인 만들때 가능한 모델은 툴체인별 로고 만들어서 … 앱 형태로").
-// Drawn once by an image model the owner already has (multimodal/image: Codex's keyless image tool, or Gemini with
-// a saved key) when the Toolchain gets its contract; the screen draws a monogram until then or when no model can.
-// One at a time, never twice for the same Toolchain, and a failure is not retried for a day.
-//
-// Off until the app itself turns it on (main.ts): drawing runs a real image model, so a read, a gate or a scripted
-// test must never start one. (2026-10-05: an overview read queued a drawing and a gate launched Codex's image tool.)
+
+
+
+
+
+
+
 
 import { createHash } from "node:crypto";
 import fs from "node:fs";

@@ -14,6 +14,7 @@ import { FinanceRunHistory } from './run-history';
 import { financeReportDashboardActions } from './evidence-actions';
 import { interpretFinance } from "./model";
 import { converseFinance } from './conversation';
+import { FinanceSearchCatalog, financeSearchResult, financeSearchRouteKey } from './search-catalog';
 import { FinancePlanningReviews } from './planning-review';
 import { financeBuiltinPlugin } from './builtin-plugin';
 import { FINANCE_NOTICE_VERSION } from '../../shared/finance-experience';
@@ -90,6 +91,7 @@ export class FinanceService {
   private readonly experience:FinanceExperience;
   private readonly archiveStore:FinanceArchives;
   private readonly histories=new Map<string,FinanceRunHistory>();
+  private readonly searchCatalog=new FinanceSearchCatalog();
   private readonly analystLibrary: FinanceAnalystLibrary;
   constructor(private readonly root: string) { this.experience=new FinanceExperience(path.join(root,"experience"));this.store = new FinanceStore(path.join(root,"workspaces"));this.archiveStore=new FinanceArchives(path.join(root,"archives"));this.analystLibrary=new FinanceAnalystLibrary(path.join(root,"analysts")); }
   async analysts(scope:FinanceScope,request:FinanceAnalystRequest) {
@@ -158,7 +160,13 @@ export class FinanceService {
     assertWorkspaceCapacity(current,input.operations);
     return this.save(scope,{workspace:applyFinanceOperations(current,input.operations),expectedRevision:current.revision});
   }
-  async search(scope: FinanceScope,input:{query:string}) { const route={...await this.experience.consent(scope),assertCurrent:()=>scope.assertCurrent()};scope.assertCurrent();const result=await searchFinanceAssets(input.query,route);scope.assertCurrent();return result; }
+  async search(scope: FinanceScope,input:{query:string}) {
+    const route={...await this.experience.consent(scope),assertCurrent:()=>scope.assertCurrent()};scope.assertCurrent();
+    const lease=this.searchCatalog.begin(scope,route),result=financeSearchResult(await searchFinanceAssets(input.query,route));scope.assertCurrent();
+    const current=await this.experience.consent(scope);scope.assertCurrent();this.searchCatalog.begin(scope,current);
+    if(financeSearchRouteKey(current)!==lease.route)throw new Error('finance_search_selection_stale');
+    this.searchCatalog.register(scope,lease,result);return result;
+  }
   async query(scope: FinanceScope,input:FinanceDataRequest) { const workspace=await this.store.load(scope);const route={...await this.experience.consent(scope),assertCurrent:()=>scope.assertCurrent()};scope.assertCurrent();const result=await queryFinanceData(input,workspace.watchlist,route);scope.assertCurrent();return result; }
   async queryAndSave(scope:FinanceScope,input:FinanceDataSaveRequest,signal?:AbortSignal):Promise<FinanceDataSaveResult> {
     const parsed=FinanceDataSaveRequestSchema.safeParse(input);if(!parsed.success)throw new Error("finance_arguments_invalid");input=parsed.data;
@@ -209,20 +217,25 @@ export class FinanceService {
     const selection=await this.experience.consent(scope);scope.assertCurrent();
     const plugin=await financeBuiltinPlugin().runtime(scope,FINANCE_NOTICE_VERSION);scope.assertCurrent();
     const route=selection?{...selection,signal,assertCurrent:()=>scope.assertCurrent()}:null;
+    const lease=this.searchCatalog.begin(scope,selection);
+    const assertRoute=async()=>{signal.throwIfAborted();scope.assertCurrent();const current=await this.experience.consent(scope);signal.throwIfAborted();scope.assertCurrent();this.searchCatalog.begin(scope,current);if(financeSearchRouteKey(current)!==lease.route)throw new Error('finance_search_selection_stale');};
     const analysts=await this.analystLibrary.resolve(scope,input.analystRefs??[]);scope.assertCurrent();signal.throwIfAborted();
-    const workspace=await this.store.load(scope);const result=await converseFinance(input,workspace,signal,{
-      analysts,
+    const workspace=await this.store.load(scope);scope.assertCurrent();signal.throwIfAborted();
+    const selected=this.searchCatalog.resolveSelection(scope,lease,input.selectedAssetIds??[],workspace.watchlist,signal);
+    const result=await converseFinance(input,workspace,signal,{
+      analysts,selectedAssets:selected.assets,selectedAssetIdentities:selected.identities,
       workflow:name=>financeBuiltinPlugin().workflow(scope,FINANCE_NOTICE_VERSION,name),
       pure:(action,payload)=>plugin.callPureTool(action,payload),
       plan:request=>new FinancePlanningReviews().calculate(scope,request,request=>plugin.callPureTool('planning',request) as FinancePlanningResult),
       portfolio:async()=>{if(!route)throw new Error('finance_analyst_authoring_tool_denied');scope.assertCurrent();const owned=new Set(workspace.holdings.map(holding=>holding.assetId));const refreshed=await refreshFinanceQuotes({...workspace,watchlist:workspace.watchlist.filter(asset=>owned.has(asset.id))},route);scope.assertCurrent();signal.throwIfAborted();return plugin.callPureTool('valuation',{workspace,refreshResult:refreshed}) as FinancePortfolioValuation;},
-      discover:async preset=>{if(!route)throw new Error('finance_analyst_authoring_tool_denied');const result=await discoverFinanceAssets(preset,route);scope.assertCurrent();signal.throwIfAborted();return result;},
+      discover:async preset=>{if(!route)throw new Error('finance_analyst_authoring_tool_denied');await assertRoute();const result=await discoverFinanceAssets(preset,route);await assertRoute();return result;},
       assertCurrent:()=>scope.assertCurrent(),
-      search:async(query)=>{scope.assertCurrent();if(!route)throw new Error('finance_analyst_authoring_tool_denied');const result=await searchFinanceAssets(query,route);scope.assertCurrent();return result;},
-      query:async(request,assets)=>{scope.assertCurrent();if(!route)throw new Error('finance_analyst_authoring_tool_denied');const result=await queryFinanceData(request,assets,route);scope.assertCurrent();return result;},
+      search:async(query)=>{scope.assertCurrent();if(!route)throw new Error('finance_analyst_authoring_tool_denied');await assertRoute();const result=financeSearchResult(await searchFinanceAssets(query,route));await assertRoute();return result;},
+      query:async(request,assets)=>{scope.assertCurrent();if(!route)throw new Error('finance_analyst_authoring_tool_denied');await assertRoute();const result=await queryFinanceData(request,assets,route);await assertRoute();return result;},
       feeds:()=>{if(!selection)throw new Error('finance_analyst_authoring_tool_denied');return this.feedsForSelection(scope,selection,signal);},
-    });scope.assertCurrent();
+    });scope.assertCurrent();signal.throwIfAborted();await assertRoute();
     if(!input.analystAuthoring&&(await this.store.load(scope)).revision!==input.baseRevision)return {baseRevision:input.baseRevision,status:"conflict",message:"화면이 변경되어 AI 결과를 적용하지 않았습니다."};
+    if(result.status==='ok')for(const search of result.assetSearches??[])this.searchCatalog.register(scope,lease,search.result,signal);
     return result;
   }
   async calculate(scope:FinanceScope,input:{request:import('../../shared/finance-compute').FinanceComputeRequest;period?:string;title?:string} & FinanceArtifactPresentation,signal:AbortSignal=AbortSignal.timeout(180000)){

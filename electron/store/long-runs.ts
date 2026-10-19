@@ -1920,9 +1920,9 @@ export function recordLongRunVerification(input: {
   const id = `verify_${randomUUID()}`;
   const now = new Date().toISOString();
   const db = getDb();
-  // IMMEDIATE: this reads (and resolves evidence refs) before it writes. Deferred, a daemon commit in between failed
-  // the insert with SQLITE_BUSY_SNAPSHOT, which busy_timeout never waits on ("terminal verification failed: database
-  // is locked", Yotube room 2026-10-13 18:57Z).
+  
+
+
   db.transaction(() => {
     const current = getLongRun(input.runId)!;
     const currentBinding = getLongRunGoalRevisionBinding(input.runId);

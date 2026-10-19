@@ -1,13 +1,13 @@
 import type { InvocationRunReceipt, RunEventUi } from "@shared/types";
 
 /**
- * When a One run settles, update only that run's work block instead of re-reading the conversation's last 40 runs ×
- * 400 ledger events (5.5-9.7 MB per settle, perf review 2026-10-17 R-02).
- *
- * The caller reads the timeline head (the same 40 runs, one event each: receipts and membership only) and the settled
- * run's events. The merge happens only when it gives exactly what the full re-read would: every other run in the window
- * is already a block, finished, with the same receipt facts. Anything else (a new run, a run still going, a changed
- * receipt) answers null and the caller does the full re-read as before.
+
+
+
+
+
+
+
  */
 
 /** Window and per-run event count of the full re-read this replaces (`listChatRunTimeline` defaults). */
@@ -23,7 +23,7 @@ export interface ThreadRunBlockLike {
   supersededByRunId?: string;
 }
 
-type TimelineEntry = { receipt: InvocationRunReceipt; events: RunEventUi[] };
+type TimelineEntry = { receipt: InvocationRunReceipt; events: RunEventUi[]; outputRows?: readonly RunEventUi[] };
 
 const LIVE_STATUSES = new Set(["running", "cancelling"]);
 
@@ -43,6 +43,8 @@ export function mergeSettledThreadRun<B extends ThreadRunBlockLike>(
   /** The settled run's ledger events in seq order; only the first THREAD_RUN_EVENTS_PER_RUN are used. */
   settledEvents: readonly RunEventUi[],
   project: (timeline: TimelineEntry[]) => B[],
+  /** The rows naming the settled run's outputs past its first THREAD_RUN_EVENTS_PER_RUN events (lib/one-chat-outputs). */
+  settledOutputRows?: readonly RunEventUi[],
 ): B[] | null {
   const head = timelineHead.filter((entry) => entry.receipt && entry.receipt.runId);
   const settled = head.find((entry) => entry.receipt.runId === settledRunId);
@@ -54,7 +56,11 @@ export function mergeSettledThreadRun<B extends ThreadRunBlockLike>(
     // A run this view never projected, one still going, or one whose receipt moved: only a full re-read is exact.
     if (!block || LIVE_STATUSES.has(entry.receipt.status) || !sameReceiptFacts(block, entry.receipt)) return null;
   }
-  const [settledBlock] = project([{ receipt: settled.receipt, events: settledEvents.slice(0, THREAD_RUN_EVENTS_PER_RUN) }]);
+  const [settledBlock] = project([{
+    receipt: settled.receipt,
+    events: settledEvents.slice(0, THREAD_RUN_EVENTS_PER_RUN),
+    ...(settledOutputRows?.length ? { outputRows: settledOutputRows } : {}),
+  }]);
   if (!settledBlock) return null;
   // The window is the head's runs: a block that slid out of the newest 40 leaves, as it would on a full re-read.
   const window = new Set(head.map((entry) => entry.receipt.runId));

@@ -1,24 +1,24 @@
 import type Database from "better-sqlite3";
 
 /**
- * Whether a teammate seat's "failed" mark is still backed by the run ledger.
- *
- * A seat is marked failed by two writers (electron/invocation/service.ts):
- * - the seat's own run settling failed or interrupted (publishSettled). That writer also caches the run in
- *   one_org_completion_cache at the same moment, so the failure has a run receipt.
- * - a CLI process of the teammate closing for a reason that is not a typed normal close
- *   (publishAgentResidencyChange). Until 2f77db63 a healthy turn-scoped close arrived as reason "error", so a
- *   teammate that had just delivered its result was marked failed at that instant and stayed failed until its
- *   next run (Yotube room, 2026-10-16: motion grap and Blender Animator, both after a 4/4 handoff).
- *
- * The ledger tells the two apart without reading prose. A residency close is recorded as an `mcp_tool-use`
- * event with `agentProcessSource: "cli-process"` right after the status write. If the lifecycle event just
- * before that close, for the same teammate in the same run, is `idle / turn-complete`, the process had
- * finished its turn and nothing was in flight: the close is not a task failure. A process that dies mid-turn
- * closes straight from `running`, and that failure stands. A failure whose run receipt is cached stands too.
- *
- * A later completed turn of the same teammate (its lifecycle `turn-complete`, or its result handed to the
- * orchestrator) also ends a failure: the seat shows its latest durable state, not an older mark.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
  */
 export type SeatFailureVerdict =
   | { stands: true }

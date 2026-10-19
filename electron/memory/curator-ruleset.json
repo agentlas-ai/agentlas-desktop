@@ -153,7 +153,7 @@
         "risk"
       ],
       "currentSlugBoost": 1.5,
-      "rationale": "Full durable dump measured ~10.8k tokens on 2026-08-11 — recall is a budget-and-ranking problem. Relevance owns the budget; the current-project fallback is capped so an unrelated question cannot spend it. Facts hold a separate small slot because the One drawer has no other recall path for them.",
+      "rationale": "Recall is a budget-and-ranking problem. Relevance owns the budget; the current-project fallback is capped so an unrelated question cannot spend it. Facts hold a separate small slot because the One drawer has no other recall path for them.",
       "factSlotMaxBlocks": 1,
       "offTopicMaxBlocks": 2,
       "minRelevanceScore": 0.35,

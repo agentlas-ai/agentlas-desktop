@@ -41,10 +41,10 @@ export const AGENT_ASK_CLOSE = "<</agentlas-ask>>";
 const ASK_CLOSE_VARIANTS = /<\/<agentlas-ask>>|(?<!<)<\/agentlas-ask>>|<<\/agentlas-ask>(?!>)/g;
 
 /**
- * Structural repair, not a word rule: a close marker met outside any open fence and followed by a JSON object is a
- * mistyped open marker (measured 2026-10-14: gpt-oss:20b wrote `<</agentlas-ask>>{…}<</agentlas-ask>>` in 2 of 6 runs),
- * and a misspelled close marker is the close marker (`</<agentlas-ask>>`, same model, same day).
- * Every ask consumer (extract, flatten, display strip) reads the repaired text, so no surface shows the raw JSON.
+
+
+
+
  */
 export function repairAskOpenMarkers(input: string): string {
   const text = input.includes("agentlas-ask>") ? input.replace(ASK_CLOSE_VARIANTS, AGENT_ASK_CLOSE) : input;
@@ -86,12 +86,12 @@ export const AGENT_SURFACE_INTENT_MARKER = "<<surface-intent>>";
 /** Host-only completion marker. It is control metadata, never answer content. */
 export const AGENT_GOAL_COMPLETE_PREFIX = "<<agentlas-goal-complete";
 /**
- * 한 줄 표식 — 표식 뒤에 JSON 하나가 오고 그 줄 끝까지가 표식이다. 표식 앞의 글은 남긴다.
- * 정본 파서: `<<agentlas-tactic>>`·`<<agentlas-plan-op>>` → shared/goal-shape.ts extractGoalPlanMarkers,
- * `<<agentlas-kpi>>`·`<<agentlas-strategy-shift>>` → shared/agent-strategy.ts extractAgentStrategyMarkers,
- * `<<agentlas-effect-observation>>` → shared/effect-observation.ts.
- * ★2026-09-26 QA 0b03862a: 목표 이어가기 답이 전술 표식을 원문 그대로 채팅에 남겼다(Main 은 목표 원장용으로만
- * 떼고, 대화 기록에는 원문이 저장된 경로가 있었다). 표시 층이 마지막 방어선이다.
+
+
+
+
+
+
  */
 export const AGENT_LINE_MARKERS = [
   "<<agentlas-tactic>>",
@@ -115,11 +115,11 @@ export function stripAgentIdentityBadges(value: string): string {
 }
 
 function stripProseIdentityBadges(value: string): string {
-  // Remove the badge and, when it sat between two blanks on a line, one of
-  // them — and nothing else. The old `[ \t]{2,} → " "` pass ran over the whole
-  // answer and dedented it: nested list items ("   - …") became paragraphs with
-  // a literal dash (measured 2026-08-16, gemini answer with 1./- structure).
-  // Whitespace elsewhere is markdown structure, not a badge artifact.
+  
+
+
+
+
   return value.replace(IDENTITY_BADGE, (match: string, prefix: string, offset: number, source: string) => {
     const after = source.charAt(offset + match.length);
     return (prefix === " " || prefix === "\t") && (after === " " || after === "\t") ? "" : prefix;
@@ -263,10 +263,10 @@ function stripProseControlBlocks(value: string, options?: { streaming?: boolean 
     .join("");
   visible = failClosedOnRemainingControlToken(visible);
   visible = stripTrailingMemoryTicketEnvelope(visible);
-  // Streaming: any half-typed control token at the tail is hidden. Settled: a
-  // run stopped mid-marker leaves "<<agentl" at the end of the persisted answer
-  // (measured 2026-08-16, cancelled gemini run) — a `<<…` marker prefix at the
-  // very end is never content, so it goes too. Headings are left alone here.
+  
+
+
+
   visible = options?.streaming
     ? trimIncompleteControlTail(trimPartialReversedHeadingFence(visible))
     : trimIncompleteMarkerTail(visible);
@@ -319,12 +319,12 @@ function trimPartialReversedHeadingFence(value: string): string {
 }
 
 /**
- * Models wrap control blocks in a code fence ("```\n<<agentlas-ask>>…\n```").
- * After the block is consumed the fence lines stay behind as an **empty code
- * block**, or — when the block ran to the end of the text — as a lone opening
- * fence at the tail, which the renderer draws as an empty box under the answer
- * (measured 2026-08-16: 12 persisted One answers ended in a bare "```").
- * Remove exactly those two shapes; a fenced block with content is untouched.
+
+
+
+
+
+
  */
 export function stripOrphanCodeFences(value: string): string {
   const lines = value.split("\n");

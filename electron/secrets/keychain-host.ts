@@ -33,19 +33,19 @@ const MAX_TIMEOUT_MS = 120_000;
 const nativeRequests = new Map<string, Promise<unknown>>();
 const failedRequests = new Set<string>();
 
-/*
- * ★In-process keytar calls run on libuv's thread pool (4 threads by default),
- *   the same pool that serves fs.promises, dns.lookup, zlib and crypto for all
- *   of Electron Main. Startup fires 11 BYOK presence reads (detect) plus env
- *   reads at once; while macOS holds those Security.framework calls (slow
- *   keychain, a pending access prompt) every pool thread is occupied and
- *   unrelated async I/O in Main queues behind them — including this layer's
- *   own recovery-state files. Measured with a thread-pool stand-in
- *   (2026-09-27): an fs.stat issued during 11 concurrent 1s native calls
- *   waited up to 936ms; with one slot it waited 0ms. A healthy lookup takes
- *   ~0.1ms (11 absent items: 0–6ms), so one native call at a time costs
- *   nothing normally and bounds the pool cost to one thread when macOS stalls.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
 let nativeSlot: Promise<unknown> = Promise.resolve();
 function inProcessNative<T>(direct: () => Promise<T>): Promise<T> {
   const run = nativeSlot.then(direct, direct);
@@ -241,9 +241,9 @@ process.stdin.on("end", () => { stdin = Buffer.concat(stdinChunks).toString("utf
         }
       },
     );
-    // A helper that dies before reading its stdin turns this write into an async EPIPE on the pipe. With no listener
-    // that is an uncaught 'error' and ended the host; the background service reads the keychain only through this
-    // helper (flow audit 2026-10-18, I-D1). The exit is already reported by execFile's callback above.
+    
+
+
     child.stdin?.on("error", () => { /* reported by the callback; never a host failure */ });
     child.stdin?.end(stdinValue ?? "");
   });

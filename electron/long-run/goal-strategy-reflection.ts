@@ -5,6 +5,7 @@ import {
   GOAL_STRATEGY_PROPOSAL_DRAFT_SCHEMA,
   GOAL_STRATEGY_PROPOSAL_SCHEMA,
   GOAL_STRATEGY_REFLECTION_DISPATCH_SCHEMA,
+  GOAL_STRATEGY_REFLECTION_REFUSAL_SCHEMA,
   type GoalStrategyCadenceDraftV1,
   type GoalStrategyConstraintAssessmentV1,
   type GoalStrategyConstraintDisposition,
@@ -17,6 +18,7 @@ import {
   type GoalStrategyAutomationHandoffStatus,
   type GoalStrategyAutomationHandoffV1,
   type GoalStrategyReflectionDispatchReceiptV1,
+  type GoalStrategyReflectionRefusalV1,
   type GoalStrategySettledBoundaryV1,
   type GoalStrategyStrategyDraftV1,
 } from "../../shared/goal-strategy";
@@ -574,6 +576,57 @@ function readSettledEpisode(input: GoalStrategyReflectionInput): SettledEpisodeE
 }
 
 /**
+ * Leave the cause of a reflection (or of its Graph handoff) that never started on the Goal's own ledger, as the
+ * machine code the host check threw (GoalStrategyReflectionUnavailableReason; no new vocabulary, no prose). Append-only
+ * and best effort: the verification or stored proposal it follows is already settled, so a ledger failure here is
+ * logged with the same code and never thrown into that path. Not refusals, so nothing is recorded: a Goal that is not
+ * ongoing (a finite Goal never reflects; a finished one has nothing left to reflect on), and a handoff of a proposal
+ * that observed no Graph automation (there was nothing to hand off).
+ */
+function recordGoalStrategyReflectionRefusal(input: {
+  stage: GoalStrategyReflectionRefusalV1["stage"];
+  reflection: Pick<GoalStrategyReflectionInput, "runId" | "goalId" | "expectedGoalRevision" | "sourceInvocationRunId" | "checkpointId">;
+  reason: GoalStrategyReflectionUnavailableReason;
+  proposalId?: string;
+  now: string;
+}): GoalStrategyReflectionRefusalV1 | null {
+  const { stage, reflection, reason, proposalId, now } = input;
+  try {
+    if (stage === "request") {
+      if (reason === "goal_strategy_goal_not_ongoing") return null;
+      const goal = getChatGoalRevision(reflection.goalId, reflection.expectedGoalRevision);
+      if (goal && goal.lifecycle !== "ongoing") return null;
+    }
+    const receipt: GoalStrategyReflectionRefusalV1 = {
+      schemaVersion: GOAL_STRATEGY_REFLECTION_REFUSAL_SCHEMA,
+      eventKind: "goal_strategy_reflection_refusal",
+      stage,
+      reason,
+      longRunId: reflection.runId,
+      goalId: reflection.goalId,
+      goalRevision: reflection.expectedGoalRevision,
+      source: { invocationRunId: reflection.sourceInvocationRunId, checkpointId: reflection.checkpointId ?? null },
+      ...(proposalId ? { proposalId } : {}),
+      authority: "observation-only",
+      createdAt: now,
+    };
+    appendLongRunEvent({
+      runId: reflection.runId,
+      kind: "goal.strategy_reflection_refusal",
+      actorKind: "host",
+      sourceEventId: `goal-strategy-refusal:${sha256Value({ stage, runId: reflection.runId, invocationRunId: reflection.sourceInvocationRunId,
+        checkpointId: reflection.checkpointId ?? null, proposalId: proposalId ?? null, reason })}`,
+      payload: receipt,
+    });
+    console.warn(`[goal-strategy] reflection refused stage=${stage} reason=${reason} run=${reflection.runId}`);
+    return receipt;
+  } catch (error) {
+    console.warn(`[goal-strategy] reflection refusal not recorded stage=${stage} reason=${reason}:`, error);
+    return null;
+  }
+}
+
+/**
  * Record the background handoff only after the same settled gate used by the
  * proposal path. The verifier can return immediately after this append; a
  * model outage therefore leaves a durable "requested" source event without
@@ -586,7 +639,10 @@ export function requestGoalStrategyReflection(
   let evidence: SettledEpisodeEvidence;
   try {
     evidence = readSettledEpisode(input);
-  } catch {
+  } catch (error) {
+    // No reflection starts, and the verification that asked for it is unchanged. The cause code the host check threw
+    // stays on the Goal's ledger instead of vanishing (it used to be a bare null).
+    recordGoalStrategyReflectionRefusal({ stage: "request", reflection: input, reason: unavailableReason(error), now });
     return null;
   }
   const sourceBoundary: GoalStrategySettledBoundaryV1 = {
@@ -796,22 +852,32 @@ export async function dispatchGoalStrategyAutomation(
   options?: { signal?: AbortSignal; now?: () => string },
 ): Promise<GoalStrategyAutomationHandoffV1[]> {
   if (proposal.recommendation.intent === "hold") return [];
+  const reflection: GoalStrategyReflectionInput = {
+    runId: proposal.longRunId,
+    goalId: proposal.goal.goalId,
+    expectedGoalRevision: proposal.goal.revision,
+    sourceInvocationRunId: proposal.source.invocationRunId,
+    checkpointId: proposal.source.checkpointId,
+    signal: options?.signal,
+  };
+  // A proposal that observed no Graph automation has nothing to hand off; one that did names the cause when the exact
+  // episode can no longer be read (it used to return an empty list with no trace of why the handoff never happened).
+  const refuse = (reason: GoalStrategyReflectionUnavailableReason): GoalStrategyAutomationHandoffV1[] => {
+    if (proposal.source.episode?.automationObservations?.length) {
+      recordGoalStrategyReflectionRefusal({ stage: "automation_handoff", reflection, reason,
+        proposalId: proposal.proposalId, now: options?.now?.() ?? new Date().toISOString() });
+    }
+    return [];
+  };
   let evidence: SettledEpisodeEvidence;
   try {
-    evidence = readSettledEpisode({
-      runId: proposal.longRunId,
-      goalId: proposal.goal.goalId,
-      expectedGoalRevision: proposal.goal.revision,
-      sourceInvocationRunId: proposal.source.invocationRunId,
-      checkpointId: proposal.source.checkpointId,
-      signal: options?.signal,
-    });
-  } catch {
-    return [];
+    evidence = readSettledEpisode(reflection);
+  } catch (error) {
+    return refuse(unavailableReason(error));
   }
   if (evidence.boundary.snapshotDigest !== proposal.source.boundary.snapshotDigest
     || evidence.boundary.receiptEventId !== proposal.source.boundary.receiptEventId
-    || evidence.checkpoint.checkpointId !== proposal.source.checkpointId) return [];
+    || evidence.checkpoint.checkpointId !== proposal.source.checkpointId) return refuse("goal_strategy_stale_after_reflection");
 
   const observations = evidence.episode.automationObservations;
   if (!observations.length) return [];

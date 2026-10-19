@@ -1,7 +1,7 @@
-// Runs the legacy product-session move once per install, in the background (legacy-product-sessions.ts).
-//
-// The marker is v2: the first pass (legacy-product-sessions.v1.json) decided Codex sessions by index rows and left the
-// files behind mirror paths in the person's ~/.codex (2026-10-17), so every install runs the file-evidence pass once more.
+
+
+
+
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

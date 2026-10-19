@@ -290,12 +290,12 @@ export class AliveLifetimeStore {
   }
   markRunning(wakeId: string): void { this.db.prepare("UPDATE alive_wakes SET status='running' WHERE wake_id=? AND status='reserved'").run(wakeId); }
   /**
-   * usageUnknown stays fail-closed: an unmeasured charge could overrun the grant. It was also permanent -- nothing ever
-   * cleared it -- so one wake whose runtime reported no usage ended a token-bounded agent for good (live QA 2026-09-24:
-   * a wake that failed before any provider call left the agent on grant.usage-unavailable forever). Ask the runtime
-   * again for exactly the settled wakes whose receipt carried no count. Only when every one of them now reports a
-   * measured count are those counts charged and the flag cleared; any still-unknown wake keeps the agent waiting.
-   */
+
+
+
+
+
+ */
   recoverUnknownUsage(agentId: string, readReceipt: (wakeId: string) => AliveRuntimeReceipt | null, nowMs: number): boolean {
     const agent = this.get(agentId);
     if (!agent || agent.state.usageUnknown !== true) return false;

@@ -71,17 +71,20 @@ const WorkspaceSchema = z.object({
 }).strict();
 export type FinanceWorkspace = z.infer<typeof WorkspaceSchema>;
 
-export interface FinanceSearchResult { assets: FinanceAsset[]; provider: string; asOf: string | null; warnings: string[] }
-export interface FinanceAIResult { message: string; operations?: FinanceOperation[]; baseRevision: number; status?: "ok" | "unavailable" | "invalid_output" | "cancelled" | "conflict"; requestId?: string; runtime?: { kind: string; model?: string; execution: string }; artifacts?:{reportId:string;title:string;kind:'chart'|'report'|'newsletter'}[];toolRuns?:{tool:string;status:'ok'|'failed';startedAt:string;errorCode?:string}[]; analystDraft?:import('./finance-analysts').FinanceAnalystDraft }
+export type { FinanceSecurityIdentity } from './finance-search';
+export interface FinanceSearchResult { assets: FinanceAsset[]; provider: string; asOf: string | null; warnings: string[]; identities?: import('./finance-search').FinanceSecurityIdentity[] }
+export interface FinanceAIResult { assetSearches?: { query: string; result: FinanceSearchResult }[]; message: string; operations?: FinanceOperation[]; baseRevision: number; status?: "ok" | "unavailable" | "invalid_output" | "cancelled" | "conflict"; requestId?: string; runtime?: { kind: string; model?: string; execution: string }; artifacts?:{reportId:string;title:string;kind:'chart'|'report'|'newsletter'}[];toolRuns?:{tool:string;status:'ok'|'failed';startedAt:string;errorCode?:string}[]; analystDraft?:import('./finance-analysts').FinanceAnalystDraft }
 export const FinanceAskRequestSchema = z.object({
   request: z.string().min(1).max(20000).refine(value => !!value.trim()), screenContext: z.string().max(2000),
   baseRevision: z.number().int().nonnegative(), requestId: id.optional(),
+  selectedAssetIds: z.array(id).max(8).refine(items => new Set(items).size === items.length).optional(),
   analystRefs: z.array(FinanceAnalystRefSchema).max(3).refine(items => new Set(items.map(item => item.id)).size === items.length).optional(),
   analystAuthoring: z.boolean().optional(), analystDraft: FinanceAnalystDraftSchema.optional(),
   analystHistory: z.array(z.object({role:z.enum(['user','assistant']),content:z.string().max(20000)}).strict()).max(6).optional(),
 }).strict().refine(value => !value.analystDraft || value.analystAuthoring === true)
   .refine(value => !value.analystHistory || value.analystAuthoring === true)
-  .refine(value => !value.analystAuthoring || !value.analystRefs?.length);
+  .refine(value => !value.analystAuthoring || !value.analystRefs?.length)
+  .refine(value => !value.analystAuthoring || !value.selectedAssetIds?.length);
 export type FinanceAskRequest = z.infer<typeof FinanceAskRequestSchema>;
 export interface FinanceExportResult { ok: boolean; path?: string; error?: string; sha256?: string; bytes?: number; savedAt?: string; cancelled?: boolean }
 export interface FinanceDataRequest { query: string; assetIds: string[]; metrics: string[]; period: string }
@@ -170,7 +173,7 @@ export function createFinanceWorkspace(): FinanceWorkspace {
 }
 const widgetTitles: Record<FinanceWidgetType, string> = { watchlist: "Watchlist", holdings: "Holdings", comparison: "Compare", chart: "Chart", allocation: "Allocation", notes: "Notes", sources: "Sources", events: "Events" };
 export function createFinanceWidget(type: FinanceWidgetType, title = widgetTitles[type]): FinanceWidget {
-  return WidgetSchema.parse({ id: financeId("widget"), type, title, assetIds: [], metric: "price", chartType: "table", width: "half", period: "1Y", notes: "", priceBasis: "price", cashFlowMethod: "none" });
+  return WidgetSchema.parse({ id: financeId("widget"), type, title, assetIds: [], metric: "price", chartType: type === "allocation" ? "bar" : "table", width: "half", period: "1Y", notes: "", priceBasis: "price", cashFlowMethod: "none" });
 }
 export function createFinanceDashboard(name = "My dashboard", widgets: FinanceWidget[] = []): FinanceDashboard {
   return DashboardSchema.parse({ id: financeId("dashboard"), name, widgets });

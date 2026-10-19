@@ -370,10 +370,10 @@ export async function firstExistingCli(
       // bare 커맨드명 — PATH(+Windows PATHEXT)로 해석. .cmd 심 포함.
       const probe = await probeCliVersionOutcome(candidate, timeout);
       if (probe.version !== null) return candidate;
-      // A probe that ran out of time is not absence. Under load (W7 2026-10-18, load average 47) the bare name's
-      // `--version` took over 2 s, the next candidate (the absolute ~/.local/bin path) won, and the same executable got
-      // a second spelling: the team binding's source digest no longer matched (one-team-runtime-changed) and the
-      // judgment fingerprint changed. When the name is an executable on the CLI PATH, it is still this candidate.
+      
+
+
+
       if (probe.timedOut && bareCliOnPath(candidate)) return candidate;
       continue;
     }
@@ -698,10 +698,10 @@ let quitHookInstalled = false;
 
 const idleResidentProbes = new WeakMap<ChildProcess, () => boolean>();
 /**
- * A pooled resident (the Codex app-server kept between turns) that is waiting for its next turn is not work.
- * Counting it made the daemon report "run-children" forever, so an automatic update on quit was refused
- * (automatic_update_active_work) and the install button looked dead (production 1.2.95, 2026-10-11).
- * A resident mid-turn answers false and still counts.
+
+
+
+
  */
 export function markRunChildResident(child: ChildProcess, isIdle: () => boolean): void {
   idleResidentProbes.set(child, isIdle);

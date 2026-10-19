@@ -393,33 +393,33 @@ function scienceTable(title, columns, rows) {
 }
 
 /**
- * Series colours as a LUMINANCE ladder, not a hue wheel.
- *
- * A paper figure is read in print, in a photocopy, and by readers who cannot separate two of its
- * hues, at least as often as it is read in full colour. Series separated only by hue merge in all
- * three cases. The original eight-colour categorical palette measured 1.24:1 between the second and
- * third series in greyscale and 1.06:1 beyond that -- three curves on one axis were, on paper, the
- * same curve drawn three times.
- *
- * Three constraints had to hold at once, and the first attempt at this ladder only held one of them:
- *
- *   1. every pair at least 1.4:1 apart in relative luminance, so they survive greyscale;
- *   2. the same under protanopia, deuteranopia and tritanopia -- and this is the one that was
- *      missed. Colour-vision simulation does NOT preserve luminance: it mixes the red and green
- *      channels and reshuffles which colour is lighter. A saturated teal and a saturated tan that
- *      sit 1.6:1 apart in greyscale close to 1.35:1 under protanopia. Low saturation is what fixes
- *      it, because a desaturated colour has less red and green to redistribute;
- *   3. every colour at least 2:1 against the white page, or a "light" series is a line nobody can
- *      see. That constraint rules out the top of the ladder and is easy to forget, because a colour
- *      picked for contrast against its neighbours can still vanish into the paper.
- *
- * Searched under all three: these five hold 1.66:1 at worst across normal vision and all three
- * colour-vision conditions, sit at least 2.03:1 against the page, and keep their hues 55 degrees
- * apart so colour still carries information for the readers who can use it.
- *
- * Five is the ceiling, from both ends: a sixth colour drops the worst pair below 1.4 no matter how
- * it is chosen. So a sixth series does not get a sixth colour -- it reuses the ladder and separates
- * by dash pattern, which survives every one of these conditions by construction.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
  */
 const PALETTE = Object.freeze({
   data: "#2E6F62",

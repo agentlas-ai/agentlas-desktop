@@ -1,3 +1,4 @@
+import { captureAgentMailExecutionScope, currentAgentMailExecutionScope, withAgentMailExecutionScope, type AgentMailExecutionScope } from "./client";
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
@@ -43,16 +44,16 @@ import { getCapabilityDecision } from "../store/capability-grants";
 // request starts inside any turn's scopes.
 const hostRootContext = AsyncLocalStorage.snapshot();
 
-// Main-side handler for the inline agent mail MCP child. Loopback only, one
-// random server token, one capability per run config.
-//
-// Sending: owner decision 2026-09-26 — a mail the owner asked One for goes out
-// in any permission mode (auto mode runs conversations as "read"; refusing
-// there made "send this mail" impossible without an extra step). The boundary
-// is the existing capability-grant model, not the run's permission tier: an
-// owner "deny" rule for the mail send tool stops it; nothing else asks again.
-// Dry-runs (graph simulation, plan mode) never send. Inbound-mail runs are
-// additionally held to the thread they were started for (see autoRuns).
+
+
+
+
+
+
+
+
+
+
 
 const MAX_REQUEST_BYTES = 512 * 1024;
 
@@ -76,6 +77,8 @@ export interface AgentMailAutoRunScope {
   threadId: string;
   messageId: string;
   used: boolean;
+  /** Captured by trusted Main when this inbound job was admitted. */
+  mailScope?: AgentMailExecutionScope;
   /** Server refusal that ended this run's one reply (kept in the handled record, never retried). */
   refusal?: string | null;
 }
@@ -86,11 +89,26 @@ let serverToken = "";
 let serverStarting: Promise<number> | null = null;
 let shutdownRegistered = false;
 const capabilities = new Map<string, AgentMailCapabilityBinding>();
+const capabilityMailScopes = new Map<string, AgentMailExecutionScope>();
+export interface CompanyAgentMailGate { assertCurrent(): Promise<void>; allowedOperations: readonly string[]; threadId: string }
+const companyGates = new Map<string, Readonly<{ assertCurrent: () => Promise<void>; allowed: ReadonlySet<string>; threadId: string }>>();
+const COMPANY_OPERATIONS = new Set(["thread", "read", "reply", "draft"]);
+async function assertCompanyMailEffect(binding: AgentMailCapabilityBinding): Promise<void> {
+  const scope = capabilityMailScopes.get(binding.capabilityId), gate = companyGates.get(binding.capabilityId);
+  if (scope?.kind !== "organization") return;
+  if (!gate) throw Error("organization-mail-work-gate-required");
+  await gate.assertCurrent();
+}
+function assertCompanyMailThread(binding: AgentMailCapabilityBinding, threadId: unknown): void {
+  if (capabilityMailScopes.get(binding.capabilityId)?.kind !== "organization") return;
+  const gate = companyGates.get(binding.capabilityId);
+  if (!gate || threadId !== gate.threadId) throw Error("organization-mail-thread-denied");
+}
 const autoRuns = new Map<string, AgentMailAutoRunScope>();
 
 /** Main-only (inbound loop). Registered before the run starts, removed when it settles. */
 export function registerAgentMailAutoRun(chatId: string, scope: Omit<AgentMailAutoRunScope, "used" | "refusal">): () => void {
-  const entry: AgentMailAutoRunScope = { ...scope, used: false };
+  const entry: AgentMailAutoRunScope = { ...scope, used: false, mailScope: captureAgentMailExecutionScope() };
   autoRuns.set(chatId, entry);
   return () => { if (autoRuns.get(chatId) === entry) autoRuns.delete(chatId); };
 }
@@ -392,9 +410,19 @@ function assertAutoThread(auto: AgentMailAutoRunScope | undefined, threadId: str
 const VIEWS: readonly AgentMailThreadView[] = ["inbox", "waiting", "sent", "archived", "all"];
 
 export async function handleAgentMailControlRequest(request: Record<string, unknown>): Promise<unknown> {
+  const scope = typeof request.capabilityId === "string" ? capabilityMailScopes.get(request.capabilityId) : undefined;
+  // A process/UI scope change can never move an already issued personal capability into company Mail.
+  return withAgentMailExecutionScope(scope ?? { kind: "personal" }, () => handleScopedAgentMailControlRequest(request));
+}
+async function handleScopedAgentMailControlRequest(request: Record<string, unknown>): Promise<unknown> {
   if (typeof request.token !== "string" || !serverToken || request.token !== serverToken) throw new Error("agent-mail-capability-invalid");
   const binding = typeof request.capabilityId === "string" ? capabilities.get(request.capabilityId) : undefined;
   if (!binding) throw new Error("agent-mail-capability-invalid");
+  const scope = capabilityMailScopes.get(binding.capabilityId), gate = companyGates.get(binding.capabilityId);
+  if (scope?.kind === "organization") {
+    if (!gate || typeof request.operation !== "string" || !gate.allowed.has(request.operation)) throw Error("organization-mail-operation-denied");
+    await gate.assertCurrent();
+  }
   const auto = autoScopeFor(binding);
   switch (request.operation) {
     case "status": {
@@ -436,13 +464,20 @@ export async function handleAgentMailControlRequest(request: Record<string, unkn
     }
     case "read": {
       const message = unwrap(await agentMailGet(String(request.messageId ?? ""))).message;
+      assertCompanyMailThread(binding, message.threadId);
       assertAutoThread(auto, message.threadId);
+      await assertCompanyMailEffect(binding);
       return withVerified([message], { message: forModel(message) });
     }
     case "thread": {
       const threadId = String(request.threadId ?? "");
+      assertCompanyMailThread(binding, threadId);
       assertAutoThread(auto, threadId);
       const detail = unwrap(await agentMailThread(threadId));
+      assertCompanyMailThread(binding, detail.thread.id);
+      for (const message of detail.messages) assertCompanyMailThread(binding, message.threadId);
+      for (const draft of detail.drafts) assertCompanyMailThread(binding, draft.threadId);
+      await assertCompanyMailEffect(binding);
       return withVerified(detail.messages, { thread: detail.thread, messages: detail.messages.map(forModel), drafts: detail.drafts });
     }
     case "send": {
@@ -460,7 +495,7 @@ export async function handleAgentMailControlRequest(request: Record<string, unkn
       };
       const intent = a2aIntent(request);
       const idempotencyKey = sendKey(binding, auto, [input.to, input.cc, input.bcc, input.subject, input.text, replyTo ?? null]);
-      const result = await autoSend(undefined, async () => unwrap(await agentMailSend({ ...input, ...intent, idempotencyKey }, authorityFor(binding, auto))));
+      const result = await autoSend(undefined, async () => { await assertCompanyMailEffect(binding); return unwrap(await agentMailSend({ ...input, ...intent, idempotencyKey }, authorityFor(binding, auto))); });
       return sendResultForModel(result);
     }
     case "reply": {
@@ -469,6 +504,7 @@ export async function handleAgentMailControlRequest(request: Record<string, unkn
       assertAutoSend(auto, messageId);
       assertAutoRecipients(auto, request);
       const original = unwrap(await agentMailGet(messageId)).message;
+      assertCompanyMailThread(binding, original.threadId);
       const recipients = await replyRecipients(original, request.replyAll === true);
       if (recipients.to.length === 0) throw new Error("agent-mail-reply-no-recipient: this message has no one to reply to except this mailbox.");
       const extraCc = list(request.cc);
@@ -484,12 +520,16 @@ export async function handleAgentMailControlRequest(request: Record<string, unkn
       };
       const intent = a2aIntent(request);
       const idempotencyKey = sendKey(binding, auto, [input.to, input.cc, input.subject, input.text, original.id]);
-      const result = await autoSend(auto, async () => unwrap(await agentMailSend({ ...input, ...intent, idempotencyKey }, authorityFor(binding, auto))));
+      const result = await autoSend(auto, async () => { await assertCompanyMailEffect(binding); return unwrap(await agentMailSend({ ...input, ...intent, idempotencyKey }, authorityFor(binding, auto))); });
       return sendResultForModel(result);
     }
     case "draft": {
       assertCanChange(binding, "no draft was saved");
       const replyTo = isAgentMailId(request.replyToMessageId) ? request.replyToMessageId : undefined;
+      if (capabilityMailScopes.get(binding.capabilityId)?.kind === "organization") {
+        if (!replyTo) throw Error("organization-mail-thread-denied");
+        assertCompanyMailThread(binding, unwrap(await agentMailGet(replyTo)).message.threadId);
+      }
       if (auto && replyTo !== auto.messageId) throw new Error("agent-mail-auto-reply-scope: in this run you may only draft a reply to the message you were started for.");
       if (auto?.used) throw new Error("agent-mail-auto-reply-done: the reply draft for this message is already saved.");
       assertAutoRecipients(auto, request);
@@ -503,6 +543,7 @@ export async function handleAgentMailControlRequest(request: Record<string, unkn
         cc = [...recipients.cc, ...cc];
         subject ??= /^re:/i.test(original.subject) ? original.subject : `Re: ${original.subject}`;
       }
+      await assertCompanyMailEffect(binding);
       const saved = unwrap(await agentMailSaveDraft({
         fields: {
           to,
@@ -625,6 +666,7 @@ export async function handleAgentMailControlRequest(request: Record<string, unkn
 
 function dispose(): void {
   capabilities.clear();
+  capabilityMailScopes.clear(); companyGates.clear();
   autoRuns.clear();
   if (server) {
     try { server.close(); } catch { /* best effort */ }
@@ -677,6 +719,8 @@ export async function createAgentMailCapability(
   if (!port) throw new Error("agent-mail-control-unavailable");
   const binding: AgentMailCapabilityBinding = { ...input, capabilityId: randomUUID() };
   capabilities.set(binding.capabilityId, binding);
+  const automatic = binding.chatId ? autoRuns.get(binding.chatId)?.mailScope : undefined;
+  capabilityMailScopes.set(binding.capabilityId, automatic ?? currentAgentMailExecutionScope() ?? { kind: "personal" });
   const directory = controlDir();
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   if (process.platform !== "win32") fs.chmodSync(directory, 0o700);
@@ -690,5 +734,23 @@ export async function createAgentMailCapability(
 
 export function removeAgentMailCapability(configKey: string, capabilityId: string): void {
   capabilities.delete(capabilityId);
+  capabilityMailScopes.delete(capabilityId);
+  companyGates.delete(capabilityId);
   try { fs.rmSync(capabilityPath(configKey, capabilityId), { force: true }); } catch { /* best effort */ }
+}
+
+/** Main-only company runner factory. Its original effect grant remains an opaque
+ * live callback; no role/body/serialized capability file can create this gate. */
+export async function createCompanyAgentMailCapability(input: Omit<AgentMailCapabilityBinding, "capabilityId">,
+  configKey: string, gate: CompanyAgentMailGate): Promise<{ path: string; binding: AgentMailCapabilityBinding }> {
+  const scope = currentAgentMailExecutionScope();
+  if (scope?.kind !== "organization" || !gate || typeof gate.assertCurrent !== "function" || !Array.isArray(gate.allowedOperations)
+    || !isAgentMailId(gate.threadId) || gate.allowedOperations.length < 1 || gate.allowedOperations.length > 4 || gate.allowedOperations.some(op => !COMPANY_OPERATIONS.has(op)))
+    throw Error("organization-mail-work-gate-required");
+  const assertCurrent = gate.assertCurrent.bind(gate), allowed = new Set(gate.allowedOperations), threadId = gate.threadId;
+  await assertCurrent();
+  const result = await createAgentMailCapability(input, configKey);
+  companyGates.set(result.binding.capabilityId, Object.freeze({ assertCurrent, allowed, threadId }));
+  try { await assertCurrent(); return result; }
+  catch (error) { removeAgentMailCapability(configKey, result.binding.capabilityId); throw error; }
 }

@@ -1,19 +1,19 @@
-/*
- * One team step that did not complete (a room teammate, a nested team's worker, a firm node, a swarm worker, the room's
- * synthesis) never discards the owner turn (owner rule 2026-10-13: no output-cap termination; production 1.3.49 run
- * 5d37e4cc, 2026-10-16: four teammates finished, the fifth hit codex `max_output_tokens` after acceptance, the whole
- * owner turn failed after 3h10m and the finished work never reached the owner).
- *
- * The decision is the shared one (docs 31 W1, shared/turn-settlement.ts decideTurnSettlement), fed from typed facts only
- * (RunnerResult.turnDelivery, the typed RunnerFailure, the session id, the RuntimeTurnUnsettledError identity; never
- * prose); a typed output-limit cut proves the model ran, so it enters as an acknowledged unsettled turn:
- *  - an unsettled turn with a resumable session continues ONCE in that session (the host's fixed continuation line; the
- *    step's request rides along only when the session never acknowledged it);
- *  - throttling that did no work retries the same request after the provider's wait, within the shared bound;
- *  - anything else surfaces unchanged ("recover" is the room's own runtime-pool recovery above this layer): the caller
- *    marks the step FAILED with its typed cause (teamStepFailureNote) and the room still synthesizes over the rest.
- * Pure apart from observed-runner's returned-result lookup; no Electron.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import {
   RuntimeTurnUnsettledError, RUNTIME_TURN_UNSETTLED_CODE, runnerRefusedBeforeDispatch,
   type RunnerFailure, type RunnerRequest, type RunnerResult, type RuntimeTurnDelivery,

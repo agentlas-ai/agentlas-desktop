@@ -40,11 +40,11 @@ export interface AgentContextDelivery {
 }
 export interface AgentContextPendingDelivery extends AgentContextDelivery { status: "pending" | "uncertain" }
 /**
- * What adoption did for one identity, as a typed outcome (G09). `retainedKeys` are other heads of the same owner, agent
- * and visibility domain under an earlier service identity that stay where they are: the adopted (newest) head was
- * bootstrapped from the conversation's chat rows when it started, so it already carries what those older journals said
- * (production 2026-10-12: chat 7a252a26's new head opens with the 16 messages the old head held as turns); moving them in
- * as well would replay that conversation twice. Their tool and turn-context rows remain readable under their own key.
+
+
+
+
+
  */
 export type AgentContextAdoption =
   | { outcome: "none" }
@@ -142,15 +142,15 @@ export function createAgentContextStore(getDb: () => Database.Database) {
       }));
   }
   /**
-   * One conversation of one agent keeps one journal. Only the service-instance part of its identity moved when a head is
-   * missing under the current key (the key used to hash the store file's device number, which macOS renumbers at every
-   * mount: after the 2026-10-12 reboot all 19 heads stopped and 6 new ones started, every agent re-bootstrapped its whole
-   * history and opened new native sessions). The newest head with the same owner, agent and visibility domain is moved
-   * under the current key, with its entries, provider bindings (native handles), deliveries and acknowledged blocks.
-   *
-   * The common turn finds its head already under the current key: that is read without a write lock (every turn used to
-   * take one here). Only a missing head with an earlier one to move takes the immediate transaction, which re-checks both.
-   */
+
+
+
+
+
+
+
+
+ */
   function priorHeadKeys(identity: AgentContextIdentity, key: string): string[] {
     return (getDb().prepare(`SELECT context_key FROM agent_context_heads
       WHERE json_extract(identity_json,'$.ownerScope')=? AND json_extract(identity_json,'$.agentId')=?

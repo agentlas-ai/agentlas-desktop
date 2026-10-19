@@ -67,10 +67,10 @@ function stored(runId: string, contractDigest: string): CriterionProofContract[]
   return value;
 }
 /**
- * Which model classifies proof kinds. The proof contract is an independent judgment about the request, not the turn's
- * work: it goes to the configured orchestrator judgment pool when one exists, and falls back to the turn's runtime only
- * when none is configured. Measured (1.2.43 dev E2E, serving goal run_edd3ab50): pinned to the turn's Agentlas Light,
- * every sub-goal came back "unknown" while codex runs classified the same conditions "file".
+
+
+
+
  */
 function classificationRoute(turnRuntime: RuntimeSelection): { selectionPolicy: NonNullable<ReturnType<typeof configuredOrchestratorJudgmentPolicy>> } | { runtimeSelection: RuntimeSelection } {
   const policy = configuredOrchestratorJudgmentPolicy();
@@ -180,7 +180,7 @@ export function admissibleCriterionProofRefs(contract:CriterionProofContract,ref
       const receipt = getInvocationRunReceipt(id);
       if (receipt?.status !== 'completed' || receipt.chatId !== captured.goal.chatId
         || !['read','write','full'].includes(receipt.executionPermission ?? '')) return false;
-      // Quiesced (only typed failed-but-finished calls open) is enough to audit permission and folder scope (e160c4c9/97d33c7e).
+      
       try { const read = readInvocationEffectBoundary({invocationRunId:id,expectedChatId:captured.goal.chatId}); return read.effects === 'settled' || read.quiesced === true; }
       catch { return false; }
     });

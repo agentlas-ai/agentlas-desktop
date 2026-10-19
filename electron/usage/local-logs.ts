@@ -77,12 +77,12 @@ function recentJsonlFiles(root: string, now: number, limit = 400): string[] {
 
 type Extract = (line: Record<string, unknown>) => { ts: number; tokens: number } | null;
 
-/*
- * 파일별 usage 기록 캐시 — (size, mtime)이 그대로인 파일은 다시 읽지 않는다. 성능 검토 MP-06(2026-10-17): 다시 계산할
- * 때마다 최근 JSONL 전부를 Main에서 동기로 다시 읽었다(오너 Mac: 401개·1억 5천만 자·1.66 s). 저장하는 것은 줄마다의
- * (시각, 토큰)뿐이고 5시간·7일 창은 매번 지금 시각으로 같은 순서로 더하므로, 결과는 전부 다시 읽을 때와 같다.
- * 이번 계산에서 보지 않은 파일의 항목은 지운다(최근 파일만 남는다).
- */
+
+
+
+
+
+
 const fileHits = new Map<string, { size: number; mtimeMs: number; hits: Float64Array }>();
 
 /** 한 파일의 usage 기록 [ts, tokens, ts, tokens, …]: usage 힌트가 있는 라인만 JSON.parse(성능). 읽기 실패는 null. */

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.79 — 2026-10-19
+
+- Company agents use organization-scoped mail, reviewed work grants and isolated transfer custody, with retryable setup before an external work effect.
+- Goal service turns retain their admitted owner, controller history and checkpoint coordinates; refusal states explain why work did not start.
+- Claude result handling preserves the conversation receipt and usage when background work finishes, and local models recover after an unexpected engine exit.
+- One and Work views list outputs beyond the initial event window of long runs and preserve the latest saved bytes.
+- Finance preserves selected listing evidence, recovers incomplete response steps and presents allocation results clearly.
+- This release binds Agentlas OS v1.2.66 at c0acd99be22114569e20bca94bed4540ba046eb4; public runtime asset `hephaestus-runtime-v1.2.66.tar.gz` is pinned at SHA-256 `20019d3ba4df1c540d0ef549c07a82188bd40fe12dafb2f8a6c75cc4bdcc89f7`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.78 — 2026-10-19
 
 - Agentlas Finance activates bundled workflows after explicit owner consent, supports reviewed portfolio imports and retirement planning, and keeps scenario assumptions visible.
@@ -479,7 +488,7 @@
 
 ## 1.3.19 — 2026-10-13
 
-- An agent with a connected ElevenLabs voice engine now actually makes the voice. Its instructions sent it to a secure helper it had no way to call and told it not to use the saved key Agentlas had already given its run, so the Yotube room kept searching for an approval record and made silent drafts only. The saved key is now the stated route: the agent calls the provider from a script that reads the key by name and never shows or writes its value. The always-on instructions are slightly shorter.
+- An agent with a connected ElevenLabs voice engine now actually makes the voice. The saved key is now the stated route: the agent calls the provider from a script that reads the key by name and never shows or writes its value. The always-on instructions are slightly shorter.
 - This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
 
 ## 1.3.18 — 2026-10-12
@@ -503,7 +512,7 @@
 - A project's instructions no longer include an AGENTS.md from your home folder. Product runs do not carry your personal instructions.
 - AGI no longer refuses a step it has already tried. A repeated or failed action is replaced by the next move: the runtime's own tools for a failing Agentlas tool, then another runtime, then the Goal's next work turn. Before, AGI refused 2,376 such actions and the Goal stayed where it was.
 - You can add as many sub-goals and strategic goals as you want in the Goal panel; the limits of 12 and 6 are gone. A Goal deadline more than 400 days away is kept; it used to be dropped, so the Goal ran with no deadline.
-- A step that failed before it called any tool is no longer recorded as having an uncertain outside effect. Two Yotube turns that never reached ElevenLabs or YouTube were marked that way, and for a day every checkpoint, AGI note and teammate brief repeated "do not redo the voice, upload or playlist" because of them.
+- A step that failed before it called any tool is no longer recorded as having an uncertain outside effect.
 - Opening the history of a conversation that was never stored shows an empty page instead of an error.
 - Includes everything in 1.3.16, which was not published: Apple's notarization ticket service dropped the connection while stapling the app itself. The Mac build now retries that step as well.
 - This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.

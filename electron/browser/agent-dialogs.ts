@@ -1,22 +1,22 @@
-/*
- * ★JavaScript dialogs for agent-driven native browser guests.
- *
- * Electron's own JavaScriptDialogManager shows alert/confirm/prompt as native
- * message boxes and does not implement DevTools' HandleJavaScriptDialog: CDP
- * Page.handleJavaScriptDialog answers "No dialog is showing" while the native
- * box stays up and the page's renderer waits on it (measured 2026-09-29 in an
- * isolated app). An agent can never close it, and the box blocks the owner too.
- *
- * While an agent's CDP client is attached, the relay therefore replaces the
- * three page functions in the page's main world with non-blocking versions
- * that report through a Runtime binding. The relay turns each report into the
- * Page.javascriptDialogOpening / Page.javascriptDialogClosed events a CDP
- * client expects, so Playwright's dialog flow (and browser_handle_dialog) keeps
- * working. The page cannot wait for the agent's answer (the calls are
- * synchronous), so it receives the answer a person proceeding would give:
- * confirm() is true and prompt() returns its default text. Detaching restores
- * the page's original functions.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 export const AGENT_DIALOG_BINDING = "__agentlasAgentDialog";
 
 export type AgentDialogType = "alert" | "confirm" | "prompt" | "beforeunload";

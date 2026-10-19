@@ -1,15 +1,15 @@
-// Ollama native chat transport for the shared local tool loop.
-//
-// Why: Ollama's OpenAI-compatible /v1/chat/completions ignores every way of asking for a context
-// window (measured 2026-10-11 on ollama 0.31.1: options.num_ctx, a top-level num_ctx and extra_body
-// all left /api/ps at the 32768 default, and a preloaded 8192 window was reloaded at 32768 by the
-// next /v1 request). On a small-VRAM machine that default is 4096, so a ~6k-token prompt is silently
-// truncated. Only the native /api/chat accepts options.num_ctx per request.
-//
-// The tool loop keeps speaking OpenAI Chat Completions; this module is a fetch-compatible adapter
-// that translates one request to /api/chat and the NDJSON reply back into the SSE chunks that
-// streamChatTurn parses, including the single terminal usage chunk (prompt_eval_count /
-// eval_count), which the /v1 route never reported for Ollama.
+
+
+
+
+
+
+
+
+
+
+
+
 import { estimateAdmissionTokens } from "./token-estimate";
 
 /** Context tiers a plan may pick; each step doubles the KV cache, so the smallest fitting tier wins. */

@@ -222,15 +222,15 @@ export function RuntimeControl() {
   const [localModelSnapshot, setLocalModelSnapshot] = useState<LocalModelHubSnapshot | null>(null);
   const [localModelBusy, setLocalModelBusy] = useState(false);
   /**
-   * ★실패는 화면에 도착해야 한다 (QA 실측 2026-09-08, 오너 2026-09-07 "안된다 금지").
-   *
-   * 이 화면의 쓰기 경로 세 곳이 전부 `catch { setMessage(""); }` 였다. 저장이 거절되면
-   * 문구가 **지워진다** — 즉 "아무 일도 안 일어난 화면"과 "거절당한 화면"이 픽셀 단위로
-   * 같았다. QA 가 오케스트레이터 행의 × 를 다섯 번 누르고도 이유를 못 본 것이 이것이고,
-   * 옛 저장소에서 멀티모달 저장이 CHECK 로 막히는 것도 같은 방식으로 안 보인다.
-   *
-   * 그래서 문구를 지우는 대신 **왜 거절됐는지와 푸는 길**을 적는다.
-   */
+
+
+
+
+
+
+
+
+ */
   const say = (text: string, tone: "info" | "error" = "info") => {
     setMessage(text);
     setMessageTone(tone);
@@ -1069,13 +1069,13 @@ export function RuntimeControl() {
                     </span>
                   )}
                   {role === "orchestrator" && members.length === 1 && (
-                    /*
-                     * ★못 지우는 이유는 화면에 있어야 한다 (QA 실측 2026-09-08).
-                     * 마지막 오케스트레이터 후보는 지울 수 없는 것이 맞다 — 하나는 남아야
-                     * 한다. 그런데 그 이유가 비활성 단추의 title 에만 있었다. 비활성 단추는
-                     * 포커스를 못 받아 툴팁도 스크린리더도 거기 닿지 않는다. QA 는 다섯 번
-                     * 누르고도 아무 설명을 못 봤다 — 화면이 "고장"과 구별되지 않았다.
-                     */
+                    
+
+
+
+
+
+
                     <span
                       className="dashboard-runtime-pool-note"
                       title={ko

@@ -1,27 +1,27 @@
 import type Database from "better-sqlite3";
 
 /**
- * Trims per-call run detail once a run is settled for `days` days. Owner
- * decision 2026-10-16: 3 days, after which a run keeps its result, cost and
- * error summary.
- *
- * Context: run_events was 750 MB, plus about 430 MB of indexes, of a 1.8 GB
- * DB. The tool-call rows alone were 267k.
- *
- * Settled means two things: the run has a terminal marker, and nothing was
- * written for it since the cutoff. A run with no terminal marker may still
- * resume, so it is left whole.
- *
- * - Model reasoning and thinking text is deleted. It is only ever displayed.
- * - Chat runs (no automation): tool-call and notice rows are deleted, unless
- *   the chat has an active or blocked Goal (Goal facts check for later tool
- *   activity).
- * - Automation runs: tool-call and notice rows stay. Only the large output
- *   fields go. toolArgs stays, because a graph resume compares a node's
- *   arguments with the previous run of the same occurrence before it
- *   re-sends an external action.
- *
- * Domain events, effects, results, accounting and errors are never touched.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
  */
 
 export const RUN_DETAIL_TEXT_KINDS = ["mcp_reasoning", "mcp_thinking"] as const;

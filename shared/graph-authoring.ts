@@ -37,8 +37,8 @@ export const GRAPH_BLUEPRINT_INPUT_SCHEMA = object({
     kind: { enum: ["agent", "code", "runGraph", "mcp_call", "toolchain_call"] }, graphRef: id,
     mcpCall: GRAPH_MCP_CALL_INPUT_SCHEMA,
     toolchainCall: GRAPH_TOOLCHAIN_CALL_INPUT_SCHEMA,
-    // The runner contract (electron/workflow/code-runner.ts). Without it a model saving a code step
-    // had to guess or read host source (measured 2026-10-04: five source reads before one save).
+    
+
     code: { ...string(24000), description: "Code step body. Earlier values arrive in `vars` (python dict: vars.get('text'); js object: vars.text) — list the names in consumes. Assign the output to `result`; it becomes this step's produces value. print/console output is a log only." },
     codeLang: { enum: ["python", "js"] }, packages: array(string(120)),
     role: string(200), roleEn: string(200),
@@ -107,9 +107,9 @@ export const ONE_GRAPH_TOOLS = [
 export const ONE_GRAPH_TOOL_NAMES = ONE_GRAPH_TOOLS.map(tool => tool.name);
 
 /**
- * A saved graph may not drive the graph/Toolchain control surface itself (save, patch, run,
- * publish, search …). Membership, not a name prefix: the old `one_graph_` prefix rule let a graph
- * step call toolchain_publish unattended (independent review 2026-10-04).
+
+
+
  */
 export function isGraphControlTool(catalogId: unknown, toolName: unknown): boolean {
   return catalogId === "one-team" && typeof toolName === "string" && (ONE_GRAPH_TOOL_NAMES as readonly string[]).includes(toolName);

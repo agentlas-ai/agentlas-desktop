@@ -76,7 +76,7 @@ export function createNativeEmployeeConnection(runtime:OneVaultRuntime,installat
    db.prepare("UPDATE one_business_native_association_attempts SET state='confirmed' WHERE approval_id=?").run(approvalReceiptId);
   }).immediate();active=structuredClone(value);return current()??deny();
  }
- async function request(operation:'association'|'prepare'|'packet'|'receipt'|'revoke'|'publish'|'report'|'publication-receipt'|'publish-continue',body:unknown=null,query?:Record<string,string>){
+ async function request(operation:'association'|'prepare'|'packet'|'receipt'|'revoke'|'publish'|'report'|'publication-receipt'|'publish-continue'|'transfers/prepare'|'transfers/commit'|'transfers/receipt'|'transfers/package'|'transfers/inbox'|'transfers/snapshot'|'transfers/install-ack'|'transfers/installation-receipt'|`company-work/${'admit'|'claim'|'refresh'|'settle'|'receipt'|'cancel'|'review'|'policies'}`,body:unknown=null,query?:Record<string,string>){
   const before=current();if(!before)deny();const method=operation==='association'||operation==='receipt'||operation==='report'?'GET':'POST',target=url(operation,query),bytes=method==='GET'?'':JSON.stringify(body);
   const sequence=db.transaction(()=>{if(digest(current())!==digest(before))deny();const row=db.prepare('SELECT sequence FROM one_business_native_associations WHERE association_id=?').get(before.associationId) as {sequence:number};
    if(!Number.isSafeInteger(row.sequence)||row.sequence>=Number.MAX_SAFE_INTEGER)deny();const next=row.sequence+1;const changed=db.prepare('UPDATE one_business_native_associations SET sequence=? WHERE association_id=? AND sequence=? AND state=\'active\'').run(next,before.associationId,row.sequence);if(Number(changed.changes)!==1)deny();return next;}).immediate();

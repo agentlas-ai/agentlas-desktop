@@ -634,8 +634,8 @@ export function acceptCanonicalTaskResult(
     ) {
       throw new Error("A matching verified completed run receipt is required");
     }
-    // The exact run stays acceptable while no owner direction followed it; a host turn after it (a teammate's
-    // report, a Goal continuation) is not a newer request (flow audit ID-4).
+    
+
     if (ownerDirectionAfterInvocationRun(input.expectedRunId, row.origin_chat_id)) {
       throw new Error("A newer message was sent after this run; review it before accepting this result");
     }

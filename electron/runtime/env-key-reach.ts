@@ -1,8 +1,8 @@
-// Which saved env keys a run's tool processes receive, and which saved names look like a key a tool wants.
-//
-// Production 2026-10-11: the owner's ElevenLabs key was saved as ELEVENLABS_1 while the product reads ELEVENLABS_API_KEY,
-// and even a correctly named key reached an agent only when the multimodal "auto" ladder happened to stop on ElevenLabs.
-// Pure and value-free: names in, names out. Nothing here reads the vault.
+
+
+
+
+
 import { MULTIMODAL_PROVIDERS } from "../../shared/multimodal";
 import { suggestEnvKeyRenames, type EnvKeyRenameSuggestion } from "../../shared/env-key-rename";
 
@@ -17,12 +17,12 @@ export const RUNTIME_AUTH_ENV_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Codex starts every command its shell tool runs from a cut-down environment: only a core set of variables, and anything
- * named like *KEY*, *SECRET* or *TOKEN* is dropped even when it is present. A saved ELEVENLABS_API_KEY that Main put in the
- * run's environment therefore never reached the model's own `bash` calls (production 2026-10-12: the Yotube room's agents
- * reported the key "unset" while Main logged it as aliased, and the voice step never ran). Main already decides which keys a
- * run's environment holds (runtime login keys only when declared), so Codex's own filter is lifted for everything else and
- * kept for exactly the runtime login keys.
+
+
+
+
+
+
  */
 export function codexShellEnvironmentArgs(): string[] {
   return [

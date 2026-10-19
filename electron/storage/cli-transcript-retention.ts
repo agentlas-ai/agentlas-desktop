@@ -3,23 +3,23 @@ import path from "node:path";
 import type Database from "better-sqlite3";
 
 /**
- * Removes CLI resume transcripts (Codex rollouts, Claude Code session files,
- * Copilot session-state folders)
- * that Agentlas product runs wrote, for chats unused for `idleDays`. Owner
- * decision 2026-10-16: on the owner's Mac the Codex product store alone held
- * 6.9 GB.
- *
- * The Agentlas conversation is untouched. The chat's runtime-session binding
- * is cleared together with its files: an attended Codex turn that fails to
- * resume a missing thread surfaces an error, so a binding must never outlive
- * its transcript. With no binding, the next turn starts a fresh CLI session.
- *
- * Kept:
- * - any session a binding used within the window
- * - any transcript written within the window (a file in use is newer than its
- *   binding)
- * Transcripts no binding names (archived and unbound threads) go once their
- * files are older than the window.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
  */
 
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
@@ -52,8 +52,8 @@ export const CLI_TRANSCRIPT_STORES: TranscriptStore[] = [
     dirEntries: true,
   },
   {
-    // copilot-product-home/<home hash>/session-state/<session id>/ (cli-product-homes.ts adoptCopilotSession).
-    // 40,465 session folders (316 MB) on the owner's Mac, 2026-10-16.
+    
+
     kind: "acp:github-copilot-cli",
     roots: [["copilot-product-home"]],
     sessionIdOf: (name) => new RegExp(`^(${UUID})$`, "i").exec(name)?.[1]?.toLowerCase() ?? null,
@@ -63,12 +63,12 @@ export const CLI_TRANSCRIPT_STORES: TranscriptStore[] = [
 ];
 
 /**
- * `topMs` is the newest mtime of the entry's own paths. Their trees are walked
- * (`tree`) only for an entry that is otherwise eligible and whose own paths are
- * already older than the window: a tree's newest mtime is never older than its
- * root's, so a newer root rules the entry out exactly. Before, every pass walked
- * every entry (owner Mac 2026-10-17: about 400k lstat/readdir calls and 7.4 s of
- * thread-pool time per pass, for zero removals).
+
+
+
+
+
+
  */
 interface TranscriptEntry { paths: string[]; topMs: number; tree?: { newestMs: number; bytes: number } }
 
@@ -196,8 +196,8 @@ export async function retireIdleCliTranscripts(input: {
         result.sessions += 1;
       }
       if (!entry && !retired.has(id)) {
-        // The transcript is already gone (measured 2026-10-16: 275 idle Codex bindings on the owner's
-        // Mac named rollouts that exist nowhere). An attended resume of one fails; the policy says start fresh.
+        
+
         if (!input.dryRun) input.clearSession(row.chat_id, row.kind, row.agent_id ?? "");
         result.staleBindings += 1;
         continue;

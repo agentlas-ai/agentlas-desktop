@@ -137,13 +137,13 @@ async function waitForStableNativeBrowserViewport(
   throw new Error("native-browser-screenshot-stale");
 }
 
-/*
- * Room for Playwright's own upload cap. A CDP client that is not marked local sends each file's bytes inline as
- * base64 in one CDP message, up to Playwright's 50 MB total (fileUploadSizeLimit; 4/3 larger as base64). The
- * leased Agentlas Browser MCP now connects with isLocal and passes paths instead (browser-cdp-launcher.ts). At 4 MiB a 3.4 MB YouTube banner (4.6 MB as base64) exceeded the frame limit, ws closed the
- * socket, and every later browser call in that turn failed with "socket hang up" (production 2026-10-06 00:03 UTC,
- * Youtube launch). Larger files are refused by Playwright itself before anything is sent.
- */
+
+
+
+
+
+
+
 const PLAYWRIGHT_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024;
 const MAX_MESSAGE_BYTES = Math.ceil(PLAYWRIGHT_UPLOAD_LIMIT_BYTES * 4 / 3) + 4 * 1024 * 1024;
 
@@ -300,10 +300,10 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
   const touch = () => { lastActivity = Date.now(); };
   // The page the agent acted on last: an owner card with several tabs open shows this one.
   let lastActedViewId: string | null = null;
-  // Fallback-ladder state. `issued` remembers every session id this grant handed out: a session that was
-  // dropped while the grant is still current is brought back under the same id instead of answering 410 for
-  // the rest of the run (production 2026-09-27..28: 45 calls in 17 runs failed on one dead session URL,
-  // because the launcher's lease URL is fixed for its life).
+  
+
+
+
   const issued = new Set<string>();
   let revived = 0;
   let lastRefusal: NativeBrowserRelayHealth["lastRefusal"] = null;
@@ -593,10 +593,10 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
     if (!current()) throw new Error("native-browser-grant-revoked");
     touch();
     if (!sessionId) {
-      // ★The real user agent. Playwright derives the platform from it and only
-      // on "Macintosh" sends the editing commands behind Cmd+A/C/V/X/Z; with
-      // "AgentlasNativeBrowser/…" an agent's select-all, copy and paste did
-      // nothing (measured 2026-09-29: pasted "" between two inputs).
+      
+
+
+
       if (method === "Browser.getVersion") {
         const guest = [...lease.guests.values()][0];
         let userAgent = "";
@@ -818,13 +818,13 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
       const step = lease.order.then(async () => {
         // The owner's element picker would swallow this agent's input (see annotation.ts).
         if (browserAnnotationActiveOn(guest.wc)) await endBrowserAnnotationsForAgent(guest.wc).catch(() => 0);
-        // ★Chromium's paint holding drops input for a moment after a
-        // cross-document navigation, until the page's first contentful paint
-        // (or a timeout). An agent's first click on a page it just opened was
-        // lost without a trace: no mousedown, while keys still arrived
-        // (measured 2026-09-29; gone with --disable-features=PaintHolding).
-        // Wait out that window before the press; a re-hosted or resized view
-        // gets the same short settle.
+        
+
+
+
+
+
+
         if (method === "Input.dispatchMouseEvent" && params.type === "mousePressed") {
           const deadline = Date.now() + 1_500;
           while (Date.now() < deadline) {
@@ -948,11 +948,11 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
       ws.once("close", () => { if (lease.socket === ws) resetLease(lease); });
       });
     }).catch((error: unknown) => {
-      // ★Keep the lease. Releasing it here turned one tab-limit refusal into
-      // every later connect answering 404 "does not look like a DevTools
-      // server" on the same session (production 2026-09-28 14:14Z, three calls
-      // in a row). The session stays; the next connect tries again once a tab
-      // is free, and each refusal says why.
+      
+
+
+
+
       resetLease(lease);
       if (!current()) releaseLease(lease);
       const message = error instanceof Error && error.message.startsWith("native-browser-tab-limit: ") ? error.message : "";

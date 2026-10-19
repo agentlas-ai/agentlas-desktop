@@ -294,7 +294,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '94a0a6a5abc3b34c519ef8bacf8739a18411a65ae7bf208dd737626f597eb524') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '6930d805e890372dda985d442c60330a414a96ea9858d3158611cc61a33a9849') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -335,7 +335,7 @@ jobs:
             "scripts/test-taste-runtime-application.cjs": "d8f0fbef5b47d44b7504b8c6eb10231d5edfc3bee094657f53433f951abcb667",
             "scripts/test-terminal-ontology-loadout-feed.cjs": "c157aab78946ae9ef98f6b9af04fe207919dcf7a18e21cc664ee32bb65420e46",
             "scripts/test-toolchain-apps.cjs": "ab8c4009fd12ee9efccbbc85487bb98ef0836469402147581bf0c06be1503574",
-            "scripts/verify-agentlas-one-ui.cjs": "5839102ccba184163455a5d0a6f5bb48044e8f9eb383a668e6087b8a81b0d7c1",
+            "scripts/verify-agentlas-one-ui.cjs": "0c4e5260fd8af704343c2c927413ac13945ae16f1920d792f2496f6dee6559c5",
             "scripts/verify-build-recovery.mjs": "aa62f09ba3511d75762393cb747bf6654ef666c91b0cb90ef6bde61ed037f7fe",
             "scripts/verify-builtin-plugins-degrade.mjs": "47801c16ef3dd39c0da35d56103f8ba3eca3d179f4ce5ca8b73a8f556324eaaf",
             "scripts/verify-one-composer-surface.mjs": "4dc0eec040819d5db15d1e0e48ee866a139e33d8f3ff525cb25b3c75e5445f08",
@@ -733,7 +733,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '94a0a6a5abc3b34c519ef8bacf8739a18411a65ae7bf208dd737626f597eb524') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '6930d805e890372dda985d442c60330a414a96ea9858d3158611cc61a33a9849') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -774,7 +774,7 @@ jobs:
             "scripts/test-taste-runtime-application.cjs": "d8f0fbef5b47d44b7504b8c6eb10231d5edfc3bee094657f53433f951abcb667",
             "scripts/test-terminal-ontology-loadout-feed.cjs": "c157aab78946ae9ef98f6b9af04fe207919dcf7a18e21cc664ee32bb65420e46",
             "scripts/test-toolchain-apps.cjs": "ab8c4009fd12ee9efccbbc85487bb98ef0836469402147581bf0c06be1503574",
-            "scripts/verify-agentlas-one-ui.cjs": "5839102ccba184163455a5d0a6f5bb48044e8f9eb383a668e6087b8a81b0d7c1",
+            "scripts/verify-agentlas-one-ui.cjs": "0c4e5260fd8af704343c2c927413ac13945ae16f1920d792f2496f6dee6559c5",
             "scripts/verify-build-recovery.mjs": "aa62f09ba3511d75762393cb747bf6654ef666c91b0cb90ef6bde61ed037f7fe",
             "scripts/verify-builtin-plugins-degrade.mjs": "47801c16ef3dd39c0da35d56103f8ba3eca3d179f4ce5ca8b73a8f556324eaaf",
             "scripts/verify-one-composer-surface.mjs": "4dc0eec040819d5db15d1e0e48ee866a139e33d8f3ff525cb25b3c75e5445f08",
@@ -1126,7 +1126,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '94a0a6a5abc3b34c519ef8bacf8739a18411a65ae7bf208dd737626f597eb524') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '6930d805e890372dda985d442c60330a414a96ea9858d3158611cc61a33a9849') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -1167,7 +1167,7 @@ jobs:
             "scripts/test-taste-runtime-application.cjs": "d8f0fbef5b47d44b7504b8c6eb10231d5edfc3bee094657f53433f951abcb667",
             "scripts/test-terminal-ontology-loadout-feed.cjs": "c157aab78946ae9ef98f6b9af04fe207919dcf7a18e21cc664ee32bb65420e46",
             "scripts/test-toolchain-apps.cjs": "ab8c4009fd12ee9efccbbc85487bb98ef0836469402147581bf0c06be1503574",
-            "scripts/verify-agentlas-one-ui.cjs": "5839102ccba184163455a5d0a6f5bb48044e8f9eb383a668e6087b8a81b0d7c1",
+            "scripts/verify-agentlas-one-ui.cjs": "0c4e5260fd8af704343c2c927413ac13945ae16f1920d792f2496f6dee6559c5",
             "scripts/verify-build-recovery.mjs": "aa62f09ba3511d75762393cb747bf6654ef666c91b0cb90ef6bde61ed037f7fe",
             "scripts/verify-builtin-plugins-degrade.mjs": "47801c16ef3dd39c0da35d56103f8ba3eca3d179f4ce5ca8b73a8f556324eaaf",
             "scripts/verify-one-composer-surface.mjs": "4dc0eec040819d5db15d1e0e48ee866a139e33d8f3ff525cb25b3c75e5445f08",

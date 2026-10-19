@@ -163,11 +163,11 @@ export interface FirmRunParams {
   deliveryPlan?: FirmDeliveryPlan;
   prepareWorkerCapabilities?: PrepareWorkerCapabilities;
   /**
-   * Main-owned bridge from a stage worker's tool completion to the room's One outputs: the paths its runtime structured
-   * and the files a harness port wrote for this run (mcp/client.ts bindInvocationOneArtifacts). Absent: nothing binds.
-   * Dev O9 2026-10-18 (snap 44b556cf, room fc53939f, daemon-owned task-force run 89896189): the borrowed Vibecoder team's
-   * publishing HQ saved the pptx twice through harness document.save (ok, revision 9) and the room got 0 bindings.
-   */
+
+
+
+
+ */
   bindOneRuntimeToolArtifacts?: (
     toolId: string,
     paths: readonly string[],
@@ -408,23 +408,23 @@ function resultStatusContext(results: FirmStageResult[]): string {
   }).join("\n\n");
 }
 
-/*
- * ★ F9 (dev O8 2026-10-18, snap 214d474d, room fc53939f, task-force run c1c2c806): a Taskforce worker seat handed this
- *   firm a packet with the copywriter's finished draft in it (firm chat row, 5,383 chars). The CEO briefed the publishing
- *   HQ in 1,010 chars, "use the supplied Copywriter draft as is", without the draft. A stage turn received only that
- *   brief, so the HQ searched the project with rg for the draft, found nothing, described document.create without
- *   calling it, and QA reported "no draft, no DOCX" twice. A CEO that copies the content into its brief works (Haiku);
- *   one that summarises (GPT) loses it. The stage members doing the work therefore receive the request this team
- *   received, verbatim, as its own declared module, whatever the CEO wrote. No instruction about it: the text itself.
- *   The brief, the division's stored session row and the host's named-test evidence keep reading the brief alone.
- * Stages: production and verification (real-model A/B, /tmp/prompt-audit/f9-ab). Integration is unchanged.
- */
+
+
+
+
+
+
+
+
+
+
+
 export const FIRM_TEAM_REQUEST_STAGES: ReadonlySet<"production" | "integration" | "verification"> = new Set(["production", "verification"]);
 /**
- * Inline bound. The largest request a firm received was 10,958 chars (production DB 2026-10-18, 22 firm requests,
- * p50 5,446; dev run26 24 requests, same max); 16,000 keeps every observed request inline and keeps a verification stage
- * (request + brief + up to 24,000 chars of upstream results) within the size it already accepts. Above it the full text
- * goes to a file in this run's folder and the prompt keeps the head and that file's absolute path.
+
+
+
+
  */
 export const FIRM_TEAM_REQUEST_INLINE_MAX_CHARS = 16_000;
 const FIRM_TEAM_REQUEST_DECLARATION = {
@@ -526,10 +526,10 @@ function stripVerificationVerdict(text: string): string {
 }
 
 /**
- * The status the CEO reads for one result. A verifier that wrote PASS but left the host no run receipt for a named
- * test is unproven, not failed: dev 2026-10-17 run7, the firm QA recheck passed 10/10 but the host had no receipt for
- * its piped `npm test`, the CEO read `status: failed` and held the whole room "not complete" (that run form is now
- * recorded, firm-execution-evidence.ts). The team still is not done (latestTeamResultsAllOk) — the CEO sees which it is.
+
+
+
+
  */
 export function firmResultStatus(result: Pick<FirmStageResult, "ok" | "evidence" | "verdict">): string {
   if (result.ok) return "ok";
@@ -1903,15 +1903,15 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
       : "The CEO plan asked for access; continuing directly under this team's grant…");
     return runCeoDirectExecution();
   }
-  /*
-   * ★ D1 (A/B3 room fc53939f, 2026-10-16, codex gpt-6.1-sol): a firm holding a Taskforce worker seat answered its write
-   *   packet with this read-only plan turn — a leaked monologue, no Delegate block — and that prose became the team's
-   *   completed packet: nothing built, nothing delegated, verifier pass. The protocol tells a CEO with no report to pick
-   *   "do it yourself" (delegate.ts), but the plan turn cannot write, and in a worker seat nobody answers after it. Under
-   *   a grant that can act, the CEO's own turn runs as a direct execution, as an unassigned division slot does
-   *   (firmDivisionRequiresDirectExecution). The owner's own firm keeps the plan answer (a conversational reply), and a
-   *   read-only seat settles "plan-only", which the parent reads as typed state.
-   */
+  
+
+
+
+
+
+
+
+
   if (matched.length === 0 && p.controllerRuntimeRole === "worker"
     && firmNodePermission(p, { tier: 1, phase: "synthesize" }) !== "read"
     && !firmTurnNeedsZeroAuthority(p, {})) {
@@ -2093,15 +2093,15 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
   const usedDivisionIds = new Set(matched.map((item) => item.node.id));
   const divisionAttempts = new Map(matched.map((item) => [item.node.id, 1]));
 
-  /*
-   * ★ A4-D3 (dev A/B4 2026-10-17, room fc53939f, codex gpt-6.1-sol): this firm's own independent QA returned a typed
-   *   FAIL with three fixable defects (non-ASCII ids and CSRF values -> HTTP 500, an array key -> 500). The CEO
-   *   synthesized "not complete" and delegated nothing, and the room above trusts an installed team to repair its own
-   *   work (TaskForceExecutionUnit.selfReviewing), so nobody fixed them. A typed FAIL is therefore repaired here by the
-   *   host, once, inside the division attempt budget: the stage that made the checked deliverable (integration when
-   *   there is one, else production) runs again with the verifier's findings, then only the failed verifier checks
-   *   again. An unknown verdict is not a FAIL, and a read-only grant cannot repair. The CEO still writes the answer.
-   */
+  
+
+
+
+
+
+
+
+
   const failedVerifications = teamResults.filter((result) => isVerificationResult(result) && result.verdict === "fail");
   const repairStage: "production" | "integration" = initialStages.integration.length > 0 ? "integration" : "production";
   const repairCandidates = (repairStage === "integration" ? initialStages.integration : initialStages.production)

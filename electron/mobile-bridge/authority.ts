@@ -1779,12 +1779,12 @@ export function projectOneMessageForPhone(
 }
 
 /**
- * A teammate's live partial as phones read it: its accumulated `text` (perf review 2026-10-17, R-03).
- *
- * Old and current phone apps rebuild only the run's own answer from deltas; a teammate row (agentId) shows the event's
- * `text`. Main now sends teammate partials as `delta` + `textLen`, so a partial of a run this process hosts is
- * projected whole from the host's base for that teammate. The listener runs synchronously inside the publish that
- * advanced the base, and `textLen` proves the match; otherwise the length alone goes (the phone's "N characters").
+
+
+
+
+
+
  */
 export function hostedTeammatePartialForPhone(
   runId: string,
@@ -1826,11 +1826,11 @@ export function observeMobilePushNotices(hostId: string, listener: (notice: Mobi
   const stopMainMessages = invocationService.onEvent(onMessage);
   const stopNativeMessages = onNativeGuiInvocationEvent(onMessage);
   const stopMessages = () => { stopMainMessages(); stopNativeMessages(); };
-  // A raw error can precede a successful provider fallback. Only the durable
-  // terminal receipt can establish failure; input/approval/cancel waits cannot.
-  // Runs the background service hosts settle on the native stream, not in Main's own service (flow audit
-  // 2026-10-18, I-D4): both feed the same rule and the same dedupe key, so the phone hears a daemon run's failure
-  // while the window holds the bridge. A replayed settlement repeats the key and is dropped by the push sender.
+  
+
+
+
+
   const onSettledFailure = ({ runId, chatId, agentId, receipt, pendingQuestion, browserLoginWaiting, userDecisionRequest }:
     { runId: string; chatId: string; agentId?: string; receipt: { status: string }; pendingQuestion?: boolean; browserLoginWaiting?: boolean; userDecisionRequest?: unknown }) => {
     if (agentId || receipt.status !== "failed" || pendingQuestion || browserLoginWaiting || userDecisionRequest ||

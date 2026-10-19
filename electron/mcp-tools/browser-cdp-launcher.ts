@@ -1269,15 +1269,15 @@ function execText(file: string, args: string[]): Promise<string | null> {
 }
 
 /**
- * ★A lease file is not the only proof that someone is using the browser.
- * Main's mcp-proxy spawns a fresh launcher per wire and parks or kills it
- * between wires, so an automation node can be mid-run with its Playwright
- * client connected while no lease row exists. The sweep closed exactly such a
- * browser (production 2026-09-28 15:04:55Z, "cleaned lease-less automation
- * browser" while the Threads audit node's bridge was open; its next
- * browser_navigate failed "Target page, context or browser has been closed").
- * Before closing, look for a live client: a Playwright MCP child bound to this
- * CDP port, or any process with an established connection to it.
+
+
+
+
+
+
+
+
+
  */
 export async function browserCdpHasLiveClient(port = browserCdpPort()): Promise<boolean> {
   if (process.platform === "win32") return false;
@@ -1295,12 +1295,12 @@ export async function browserCdpHasLiveClient(port = browserCdpPort()): Promise<
 export const BROWSER_CDP_ORPHAN_SWEEP_RECENT_MS = 5 * 60_000;
 
 /**
- * Whether an Agentlas browser root can exist, read from the dedicated profile alone (nothing is spawned). Perf review
- * MP-05 (2026-10-17): Main's 30 s sweep ran a process inventory for the life of the app even when the browser was never
- * started (Windows: PowerShell + WMI per tick; macOS: ps, plus ps/lsof for the user's own Chrome; Linux: a sync /proc
- * walk). Every launch path takes a lease and the launch lock before spawning and writes the owner marker once verified,
- * and a running root holds the profile's SingletonLock (macOS/Linux) or lockfile (Windows). So the sweep stays armed
- * while any of those exist, while lease activity is recent, or while a root is already under observation.
+
+
+
+
+
+
  */
 export function browserCdpOrphanSweepArmed(now = Date.now()): boolean {
   if (orphanCandidate) return true;
@@ -1838,17 +1838,17 @@ function approvalFor(name, args, currentUrl = '', structure = null) {
 `;
 
 /**
- * Companion to the approval classifier: one-click social engagement (follow, like, repost) — an
- * outward effect for growth goals that the approval gate deliberately does not gate (a like must
- * not open an approval sheet). It reads the click's declared effect (the classifier's typed
- * contract) and never changes classifyAction's answer.
- *
- * Intent alone is not an effect: the launcher stamps the clicked element, reads its
- * accessibility state (aria-pressed/checked, aria-label, descendant labels, visible text) before
- * and after the click, and reports the engagement only when that state actually changed
- * (Follow → Following, aria-pressed false → true, 좋아요 → 좋아요 취소). Measured 2026-09-24:
- * the automation ledger keeps no tool results for codex runs, so the launcher is the only place
- * that can see the post-click state.
+
+
+
+
+
+
+
+
+
+
+
  */
 export const BROWSER_SOCIAL_ENGAGE_SOURCE = String.raw`
 function socialEngageIntent(name, args) {
@@ -1913,17 +1913,17 @@ function approvalContextUrl(name, args, observedUrl) {
  * 모델은 같은 프로필을 다시 열어 처음부터 되풀이했다. 상위 Playwright MCP 설명엔 이 구분이 없다.
  * 설명(tools/list)에 한 줄을 붙이고, ref 모양의 text/regex 는 보내지 않고 바로 길을 알려 준다.
  */
-/*
- * Upload with no chooser open (production 2026-09-28 16:08Z and the Studio upload at 12:57Z: Playwright's
- * browser_file_upload refuses unless a file-chooser modal is open, and the agent had not clicked one).
- * When browser_file_upload comes back as an error, the files are set directly on the page's file input
- * (Playwright setInputFiles → CDP DOM.setFileInputFiles): the input the agent last clicked (the ref itself, a
- * label's control, its only contained input, or its explicit aria-controls target), else the page's only
- * file input. Shared ancestors do not establish an association. Ambiguous candidates are never guessed.
- * Paths are the staged copies
- * the upload-root check already approved. Idea: ego-lite (MIT) driver/files.ts + page-input.ts and paseo
- * (Apache-2.0) service.ts — resolve the input, then DOM.setFileInputFiles; reimplemented, no code copied.
- */
+
+
+
+
+
+
+
+
+
+
+
 export const BROWSER_UPLOAD_FALLBACK_SOURCE = String.raw`
 function uploadFallbackCode(paths, ref) {
   const safeRef = typeof ref === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(ref) ? ref : '';
@@ -3008,10 +3008,10 @@ function runNativeBrowserMcp() {
     if (digest === 'be2e09efef3017b4eaa76f0cb5289f66c4ea57833f94319b17c1c2f184987ad7') {
       const core = bundledRequire('playwright-core/lib/coreBundle');
       installed = installBrowserLeafHooks(core.tools);
-      // The leased guest runs on this machine, but a CDP endpoint is treated as remote, so
-      // setInputFiles sent files as base64 and refused anything over 50 MB. A 104 MB YouTube
-      // long-form failed in browser_file_upload (production 2026-10-13 16:28 UTC). Marking only
-      // this lease local makes Playwright pass paths through DOM.setFileInputFiles instead.
+      // Treat only this leased endpoint as local so Playwright passes file paths
+      // through DOM.setFileInputFiles rather than encoding them for a remote endpoint.
+      
+      
       const browserType = Object.getPrototypeOf(core.inprocess.playwright.chromium);
       const connectOverCDP = browserType.connectOverCDP;
       browserType.connectOverCDP = function (target, options) {
@@ -3433,9 +3433,9 @@ async function main() {
   let leaseFile = null;
   let closing = false;
   let browserReadyPromise = null;
-  // Resolves once the relay session DELETE is answered (bounded). Exiting before it is sent leaked one of the
-  // relay's 8 sessions per launcher; the 9th pass of a run then got 409 and the browser stayed unavailable until
-  // the run ended (Yotube room 2026-10-13 20:54Z: 8 wire_aborted, then upstream_transport_closed on every pass).
+  // Resolve the bounded relay session DELETE before exit so the lease releases
+  // its capacity even when the launcher closes.
+  
   let nativeRelease = Promise.resolve();
   const releaseLeaseOnce = () => {
     closing = true;

@@ -1,11 +1,11 @@
 /**
- * The screen the main window reopens after a restart (update relaunch, quit and relaunch).
- *
- * Production 1.3.48/1.3.49: every restart opened Work home (/dashboard), even when the owner was in a One conversation.
- * Only screens that are safe to open again without the action that led there are restored exactly: One's conversation
- * screens, Science, a Work conversation, and Work pages without a query. A route that carries a request (an install
- * link, a prompt, a start hand-off) is never replayed; its product's home opens instead. Anything else returns null
- * (not a product screen: keep what was remembered before).
+
+
+
+
+
+
+
  */
 const SAFE_ID = "[A-Za-z0-9._:%-]{1,200}";
 const ONE_SCREEN = new RegExp(`^/one(?:\\?(?:personal=1|(?:task|chat|conversation)=${SAFE_ID}))?$`);

@@ -1,10 +1,10 @@
-// 장기 방 런타임 스레드 회전(rotation) — 한 Codex 스레드가 무한히 자라 매 호출마다
-// 16만+ 토큰을 다시 읽는 것(2026-10-10 Youtube launch 방: 롤아웃 134MB, 자동 압축 22회,
-// 누적 입력 1.2억 토큰)을 끊는다. Codex 내장 압축은 앞부분을 손실 요약으로 바꿀 뿐
-// 스크린샷 같은 관측 덩어리를 그대로 들고 간다. 회전은 "턴 경계에서만" 이전 스레드를
-// 버리고 새 스레드를 호스트가 쓴 짧은 인수인계(목표 계약은 turnContext, 최근 대화 텍스트)로 시작한다.
-//
-// 이 모듈은 순수 결정/조립 함수 + 얇은 meta 영속화만 담는다. 스키마 변경 없음(meta 표 재사용).
+
+
+
+
+
+
+
 import type { ChatHistoryEntry } from "../../shared/types";
 import type { HostFacts } from "./handoff-facts";
 

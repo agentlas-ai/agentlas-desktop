@@ -1,7 +1,8 @@
+import type {EmployeeAgentTransferAPI} from './employee-agent-transfer';
 import type {BusinessNativeIdentity,BusinessNativeCustodyReceipt} from './native-sharing-wire';
 /** Selectors and bounded reviewed text only. Main retains authentication, keys,
  * original receipts, approval capabilities and all effect authority. */
-export interface BusinessNativeSharingAPI {
+export interface BusinessNativeSharingAPI extends EmployeeAgentTransferAPI {
  identity():Promise<BusinessNativeIdentity>;
  completedWork():Promise<readonly {commandId:string;taskId:string;runId:string;title:string|null}[]>;
  approveAssociation(input:{challengeId:string}):Promise<{state:'associated';associationId:string;associationRevision:number}|{state:'unknown';approvalReceiptId:string}>;

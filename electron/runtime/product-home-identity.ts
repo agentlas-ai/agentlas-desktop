@@ -1,15 +1,15 @@
 /**
- * Is this path one of Agentlas' own product homes? Product CLI runs get a mirror of the person's config folder
- * (codex/claude/kimi/cursor/copilot/grok/agy product homes), and their environment points at it (CODEX_HOME,
- * CLAUDE_CONFIG_DIR, HOME for grok/agy, ...).
- *
- * A process that inherits such an environment (Agentlas started again from inside a product run) used to take the mirror
- * for the person's real folder and mirror it once more. Owner Mac, 2026-10-14: codex-product-home/10161a503527{,-isolated}
- * is the mirror of the mirror c183d58fa429-isolated (sha256 of that path), with its own 609 MB state_5.sqlite and 75 MB
- * thread history, 1.48 GB in all (performance review C6, 2026-10-17).
- *
- * The check is structural: the folder itself, or its parent, is a product-home root. No userData comparison, so dev and
- * QA instances' homes count too. A person's own override elsewhere (CODEX_HOME=/opt/codex) is still honoured.
+
+
+
+
+
+
+
+
+
+
+
  */
 import os from "node:os";
 import path from "node:path";
@@ -28,13 +28,13 @@ export function isAgentlasProductHome(candidate: string | null | undefined): boo
 }
 
 /**
- * A product home mirrors a person's own config only inside a configured install: Main and the daemon of an official,
- * local-candidate, QA or dev install configure their identity at startup (install-identity.ts). A host with none (a gate,
- * a script) never mirrors the ACCOUNT's own home or a config folder directly in it (~/.codex, ~/.grok, ~/.claude, ...).
- * Owner Mac, 2026-10-18: ~/Library/Application Support/Electron, the unnamed userData of test hosts, held mirrors of the
- * owner's ~/.codex (8.8 MB, written 10-18 11:29), ~/.grok (10-13), ~/.copilot (10-17) and links to their Claude skills
- * and commands, and a test host ran the agy cleanup on the owner's ~/.gemini file (04:09Z). A temporary HOME is still
- * mirrored, so a gate that names its own HOME keeps working.
+
+
+
+
+
+
+
  */
 export function productHomeRefusedOnThisHost(realDir: string): boolean {
   if (configuredIdentity() !== null) return false;

@@ -104,11 +104,11 @@ export function readLegacyOneState(parse: (raw: string) => OneMemoryState, initi
     let row = db.prepare("SELECT value FROM memory_store_meta WHERE key=?").get(binding.stateKey) as { value: string } | undefined;
     if (!row) {
       const shadow = binding.product.prepare("SELECT value FROM meta WHERE key=?").get(binding.legacyKey) as { value: string } | undefined;
-      // A cutover pointer says the state already moved to a central store; it is not a state. This store having no row
-      // for this source (another memory root or owner namespace: a fresh ~/.agentlas, a regenerated registry; or the app
-      // database at another path, whose pointer names the old path's source) means this source has no legacy state here.
-      // The pointer's own source row, if this store has one, is left as it is. Parsing the pointer failed every read for
-      // good — dev 2026-10-17: 1326 oneMemory:getState errors in one hour, production 2026-10-14 for 8 minutes.
+      
+
+
+
+
       const pointerSource = shadow ? cutoverPointerSource(shadow.value) : null;
       const old = pointerSource ? undefined : shadow;
       if (pointerSource) console.warn(`[one-memory] one_memory_cutover_central_missing: this source starts empty (pointer ${pointerSource === binding.sourceKey ? "same" : "other"} source)`);

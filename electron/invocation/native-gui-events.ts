@@ -5,14 +5,14 @@ import { reassembleAgentLivePartial } from "../../shared/interrupted-partial";
 import { RunEventDeliveryJournal } from "./event-delivery";
 
 /**
- * Live invocation events of runs hosted by the background service (daemon), for Main-side consumers other than the
- * Desktop windows: the phone bridge (mobile-bridge/authority.ts).
- *
- * Since 2026-10-12 (c70be288) the daemon holds the personal One domain, and its events reached Main only through
- * native-gui-public.ts, which sent them to BrowserWindows. The phone bridge listens to Main's own invocation service,
- * so personal One turns produced no live text, no end-of-run snapshot refresh and no push on the phone: it waited on
- * its 5 s poll, kept "…" up and showed "Desktop 접수됨 · 대화 확인 필요" after 30 s (owner report 2026-10-14, "3일전에는
- * 됐다"). Kept free of `electron` so the daemon-loadable bridge can import it.
+
+
+
+
+
+
+
+
  */
 export type NativeGuiInvocationEvent = Readonly<{ runId: string; chatId: string; event: McpInvocationEvent }>;
 
@@ -46,11 +46,11 @@ export function publishNativeGuiInvocationEvent(envelope: NativeGuiInvocationEve
 }
 
 /**
- * Settlements and live approval cards of daemon-hosted runs, for the same Main-side readers (flow audit 2026-10-18,
- * I-D4). Only the live text reached the phone bridge: its failure and approval pushes listened to Main's own
- * invocationService.onSettled and onToolApprovalRequested, which never see a run the background service hosts, so a
- * daemon run's failure or approval wait sent no push while the window held the bridge. native-gui-public.ts publishes
- * each settlement the service streams; native-gui-controls.ts publishes each approval card once it is hydrated.
+
+
+
+
+
  */
 const settledListeners = new Set<(settlement: NativePublicSettlement) => void>();
 const approvalListeners = new Set<(request: ToolApprovalRequestEvent) => void>();
@@ -88,10 +88,10 @@ export function publishNativeGuiActiveChats(chatIds: readonly string[]): void {
 const MAX_RELAYED_TEAMMATE_STREAMS = 256;
 
 /**
- * Rebuilds daemon-hosted teammate partials for Main-side readers (perf review 2026-10-17, R-03). The daemon sends a
- * teammate's partial as `delta` + `textLen` (the windows rebuild it in their ordered gate); the phone bridge, like
- * every phone app, reads a teammate row's `text`. Keyed by run and teammate. A run's entries go with its own final or
- * error; past the cap the least recently streamed go (that stream then shows its length until its next whole frame).
+
+
+
+
  */
 export function createNativeTeammatePartialRelay(maxStreams = MAX_RELAYED_TEAMMATE_STREAMS) {
   const texts = new Map<string, string>();
@@ -128,17 +128,17 @@ export interface HostedElsewhereReplay {
 }
 
 /**
- * Main's replay for runs the background service hosts (perf review 2026-10-17, R-04b / H2).
- *
- * The windows replay through Main, and Main had no journal for a daemon-hosted run: every replay answered
- * "unavailable" with no cursor. A view that subscribed after the run's first event (a reload, opening the chat mid-run,
- * the dispatch race) then held every pushed event above a hole it could never fill. Measured on the real ordered gate:
- * 0 of 46 pushed events shown, and replay plus a canonical recovery (a 500-event ledger read) 67 times in one second.
- *
- * Main already receives every event of those runs, in order, on the daemon's live channel. It mirrors them into its own
- * journal with their daemon delivery ordinals, and tracks the run's own live text from the same frames. It answers
- * only for a run it holds whole: first seen at ordinal 1, no ordinal skipped, every root delta proved by its textLen.
- * Anything else is forgotten, and replay keeps its old answer ("unavailable") for that run.
+
+
+
+
+
+
+
+
+
+
+
  */
 export function createHostedElsewhereReplay(teammateTexts: (runId: string) => Record<string, string>) {
   const journal = new RunEventDeliveryJournal();

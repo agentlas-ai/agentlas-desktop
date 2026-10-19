@@ -7,18 +7,18 @@ import { resolveMainOwnedReadPath } from "../fs/access";
 const PACKAGE_MARKER = path.join(".agentlas", "routing-card.json");
 
 /**
- * Find the one real package directly under a workspace.
- *
- * Canonical `/hep-build` step 5: "Resolve exactly one package target before
- * writing anything… Never default to `.`, the cwd". Desktop had no equivalent —
- * it treated the chosen working folder AS the package. Measured 2026-08-16:
- * the model built `~/Desktop/agent/sangnok-resort-strategy-team` (1 blocker),
- * Desktop verified the parent `~/Desktop/agent` (46 blockers) because the parent
- * also held an unrelated package from a previous build plus loose scaffold files.
- * The build had effectively succeeded and the user was told it failed.
- *
- * Exactly one candidate is required. Two candidates is the ambiguity the canonical
- * says to stop on, and zero means the workspace itself is the package.
+
+
+
+
+
+
+
+
+
+
+
+
  */
 export function soleChildPackageRoot(workspace: string): string | null {
   let entries: fs.Dirent[];

@@ -944,12 +944,12 @@ function reduceOneActivityInternal(
   } else if (event.kind === "partial") {
     items = closeRunning(items, observedAt, "completed", true, replay);
     activeReasoningId = undefined;
-    // The answer is streaming. Without this the timeline sat on the run row's
-    // generic "Working" for the whole generation (measured: 45s of "Working"
-    // while 300 lines were visibly arriving underneath). Say what is happening
-    // and how far along, the way tool rows do; the row closes on final/error.
-    // Live partials are deltas: the size lives in `textLen`; replay/fallback
-    // partials still carry the accumulated `text`.
+    
+
+
+
+
+
     const answerLength = typeof event.textLen === "number" && Number.isFinite(event.textLen)
       ? event.textLen
       : typeof event.text === "string"
@@ -1205,9 +1205,31 @@ function ledgerNoticeI18n(payload: Record<string, unknown>): { ko: string; en: s
   return ko && en ? { ko, en } : undefined;
 }
 
-/** Rebuild the latest Activity from Main's redacted append-only run ledger. */
-export function projectOneActivityFromLedger(events: RunEventUi[], receipt?: InvocationRunReceipt | null): OneActivityState {
-  let state = initialOneActivityState();
+/**
+ * Rebuild the latest Activity from Main's redacted append-only run ledger.
+ *
+ * `outputRows` are the rows of a run longer than the event window the caller read that name its later outputs
+ * (runLedger.outputsAfter, read by lib/one-chat-outputs readRunOutputsAfterWindow). They add to the output list only,
+ * through the same replay and the same merge as the window's own rows: an entry keeps the place where it first appeared and
+ * holds its newest save, so the list is the one a window as long as the run would give. The Activity rows stay the window's.
+ */
+export function projectOneActivityFromLedger(
+  events: RunEventUi[],
+  receipt?: InvocationRunReceipt | null,
+  outputRows?: readonly RunEventUi[],
+): OneActivityState {
+  const state = replayLedger(events, receipt, initialOneActivityState());
+  if (!outputRows?.length) return state;
+  const withOutputs = replayLedger([...outputRows], null, { ...initialOneActivityState(), artifacts: state.artifacts });
+  return withOutputs.artifacts === state.artifacts ? state : { ...state, artifacts: withOutputs.artifacts };
+}
+
+function replayLedger(
+  events: RunEventUi[],
+  receipt: InvocationRunReceipt | null | undefined,
+  initial: OneActivityState,
+): OneActivityState {
+  let state = initial;
   // All rows are created inside this call. Own their array while replaying,
   // then discard the builder; later live reductions retain copy-on-write.
   const replay: ActivityReplayBuilder = {};

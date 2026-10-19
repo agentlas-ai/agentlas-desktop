@@ -1,11 +1,11 @@
 /**
- * Which of the defects AGI filed (agi_defect_reports) a commit has since fixed.
- *
- * The table had no state, so a defect stayed "open" for ever, and 134 of them (2026-09-29..2026-10-06, 65 on one
- * deleted chat's Goal alone) piled up with nobody able to tell which were still real. This audit sorted them by root
- * cause, checked each family against the code and against whether it kept coming after the fix, and records the fixing
- * commits here. applyDefectResolutions() stamps the matching rows at startup; it is idempotent and never touches a
- * report filed after the audit, so a new defect of the same family stays open.
+
+
+
+
+
+
+
  */
 import type Database from "better-sqlite3";
 

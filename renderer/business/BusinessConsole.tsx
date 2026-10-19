@@ -5,10 +5,12 @@ import type { BusinessSession } from '../../shared/business/context';
 import type { BusinessHistoryPanelPort, BusinessHistoryViewContext } from '../../shared/business/history-view';
 import type { BusinessOrganizationExecutionPanelPort } from '../../shared/business/organization-execution';
 import { BusinessAccountPanel, type BusinessAccountPanelPort } from './BusinessAccountPanel';
+import { CompanyAgentsPanel } from './CompanyAgentsPanel';
+import { BusinessCompanyMail } from './BusinessCompanyMail';
 import { BusinessLearningPanel, type BusinessLearningPanelPort } from './learning/BusinessLearningPanel';
 import { BusinessHistoryPanel } from './history/BusinessHistoryPanel';
 import { BusinessOrganizationExecutionPanel } from './admin/BusinessOrganizationExecutionPanel';
-import { IconArrowLeft, IconBuilding, IconUsers, IconShield, IconKey, IconLibrary, IconBrain, IconClock, IconBolt, IconLayers, IconRefresh, IconExpand } from '../components/Icon';
+import { IconMail, IconArrowLeft, IconBuilding, IconUsers, IconShield, IconKey, IconLibrary, IconBrain, IconClock, IconBolt, IconLayers, IconRefresh, IconExpand } from '../components/Icon';
 import type { BusinessDashboardView } from './renderer-bridge';
 import styles from './BusinessConsole.module.css';
 import { useBusinessCopy } from './use-business-copy';
@@ -78,12 +80,13 @@ export interface BusinessConsoleProps {
   notice?: string | null;
   /** Closes display/read only; retain the same original terminal owner and metadata. */
   displayClosed?: boolean;
-  initialTab?: 'account' | 'history' | 'learning' | 'organization-execution';
+  showCompanyAgents?: boolean;
+  initialTab?: 'account' | 'history' | 'learning' | 'organization-execution' | 'company-agents' | 'company-mail';
 }
 /** One's existing owner mounts this surface and supplies actual current callbacks.
  * This component creates no transport, registrar, collector, account or queue. */
 export function BusinessConsole({ context, account, history, learning, organizationExecution = null, organizationExecutionSession, onClose, onSelectPersonal, onSessionChanged,
-  onOpenDashboard, onReload, notice = null, displayClosed = false, initialTab = 'history' }: BusinessConsoleProps) {
+  onOpenDashboard, onReload, notice = null, displayClosed = false, showCompanyAgents = false, initialTab = 'history' }: BusinessConsoleProps) {
   const { copy } = useBusinessCopy();
   const [tab, setTab] = useState(initialTab);
   const [opening, setOpening] = useState(false), [navigationNotice, setNavigationNotice] = useState<string | null>(null);
@@ -122,6 +125,7 @@ export function BusinessConsole({ context, account, history, learning, organizat
   }
   const nativeLinks = [
     { id: 'account' as const, label: copy("계정과 조직", "Account and organization"), icon: IconBuilding },
+    ...(showCompanyAgents ? [{ id: 'company-agents' as const, label: copy("내 회사 에이전트", "My company agents"), icon: IconUsers }, { id: 'company-mail' as const, label: copy("내부메일", "Internal mail"), icon: IconMail }] : []),
     { id: 'history' as const, label: copy("컴퓨터 기록", "Computer history"), icon: IconClock },
     { id: 'learning' as const, label: copy("학습과 개선", "Learning and improvements"), icon: IconBrain },
     { id: 'organization-execution' as const, label: copy("조직 실행 관리", "Organization execution"), icon: IconBolt },
@@ -135,7 +139,7 @@ export function BusinessConsole({ context, account, history, learning, organizat
     { id: 'catalog' as const, label: copy("공유 자산", "Shared assets"), icon: IconLibrary, group: copy("연결", "Connections") },
     { id: 'audit' as const, label: copy("관리 기록", "Management activity"), icon: IconShield, group: copy("조직", "Organization") },
   ];
-  const nativeAvailable = { account: !!account, history: !!history, learning: !!learning, 'organization-execution': !!organizationExecution };
+  const nativeAvailable = { 'company-mail': showCompanyAgents, 'company-agents': showCompanyAgents, account: !!account, history: !!history, learning: !!learning, 'organization-execution': !!organizationExecution };
   return <section className={styles.console} aria-labelledby="business-console-heading">
     <a className={styles.skip} href="#business-desktop-content">{copy("본문으로 이동", "Skip to content")}</a>
     <aside className={styles.sidebar}>
@@ -143,7 +147,7 @@ export function BusinessConsole({ context, account, history, learning, organizat
       <BusinessAccountPanel port={account} variant="selector" displayClosed={displayClosed} expectedSession={context?.session ?? organizationExecutionSession} onSessionChanged={sessionChanged} onSelectPersonal={onSelectPersonal} />
       <nav className={styles.tabs} aria-label={copy("Business 관리", "Business management")}><div className={styles.navGroup}><small>{copy("내 작업 · Desktop", "My work · Desktop")}</small>
         {nativeLinks.map(item => <button key={item.id} type="button" aria-pressed={tab === item.id} aria-current={tab === item.id ? 'page' : undefined} disabled={item.id !== 'account' && !nativeAvailable[item.id] && (!onOpenDashboard || opening)}
-          onClick={() => { if (item.id === 'account' || nativeAvailable[item.id]) setTab(item.id); else void openDashboard(item.id); }}>
+          onClick={() => { if (item.id === 'account' || item.id === 'company-agents' || item.id === 'company-mail' || nativeAvailable[item.id]) setTab(item.id); else void openDashboard(item.id); }}>
           <item.icon size={17} /><span>{item.label}</span>{item.id !== 'account' && !nativeAvailable[item.id] && <IconExpand size={12} />}</button>)}</div>
         {[copy("조직", "Organization"), copy("연결", "Connections")].map(group => <div className={styles.navGroup} key={group}><small>{group}{copy(" · 웹 관리", " · Web management")}</small>
           {webLinks.filter(item => item.group === group).map(item => <button key={item.id} type="button" disabled={!onOpenDashboard || opening} onClick={() => void openDashboard(item.id)}>
@@ -166,6 +170,8 @@ export function BusinessConsole({ context, account, history, learning, organizat
       <div id="business-desktop-content" className={styles.content} key={contextKey} tabIndex={-1}>
         <div className={styles.pageHeading}><span className={styles.eyebrow}>Business</span><h1 id="business-console-heading">{copy("조직 설정", "Organization settings")}</h1></div>
         {tab === 'account' && <BusinessAccountPanel port={account} displayClosed={displayClosed} expectedSession={context?.session ?? organizationExecutionSession} onSessionChanged={sessionChanged} onSelectPersonal={onSelectPersonal} />}
+        {tab === 'company-mail' && showCompanyAgents && <BusinessCompanyMail key={organizationSessionKey} session={!displayClosed && !organizationFence.closed ? organizationExecutionSession ?? null : null} />}
+        {tab === 'company-agents' && showCompanyAgents && <CompanyAgentsPanel key={organizationSessionKey} session={!displayClosed && !organizationFence.closed ? organizationExecutionSession ?? null : null} />}
         {tab === 'history' && <BusinessHistoryPanel port={currentHistory} displayClosed={displayClosed} expectedContext={context} />}
         {tab === 'learning' && <BusinessLearningPanel port={currentLearning} displayClosed={displayClosed} expectedContext={context} />}
         {tab === 'organization-execution' && <BusinessOrganizationExecutionPanel port={currentOrganizationExecution} displayClosed={displayClosed} expectedSession={organizationExecutionSession} />}

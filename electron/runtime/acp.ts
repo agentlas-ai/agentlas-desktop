@@ -421,10 +421,10 @@ export class AcpSessionClient {
 }
 
 /**
- * Kimi Code's AskUserQuestion bridge (measured 2026-10-16, Kimi Code 0.28.0 over ACP): session/request_permission with
- * toolCall.title "AskUserQuestion", the question as the toolCall's text content, one allow_once option per answer
- * (`q0_opt_<n>`, named by the answer label) and one reject_once `q0_skip`. Selecting `q0_skip` dismisses it (the model
- * reads "User dismissed the question without answering"). Only that exact shape is read as a question.
+
+
+
+
  */
 function kimiPermissionQuestion(params: any, options: any[]): { skip: any; ask: AgentlasAskQuestion | null } | null {
   if (params?.toolCall?.title !== "AskUserQuestion" || options.length < 2) return null;
@@ -1840,15 +1840,15 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
  * disabled by env. The decision is per call so a setting change needs no restart.
  */
 /**
- * A session/load refusal that proves the session no longer exists, from a typed marker or a host check, never from message
- * text:
- *  - ACP's own resource_not_found, -32002 (the official SDK's RequestError.resourceNotFound). GitHub Copilot CLI 1.0.95
- *    answers session/load of a missing id with it (measured 2026-10-16: -32002, data {uri: "Session <id> not found"}).
- *  - Grok Build 1.0.51 (measured 2026-10-16 offline, scratch HOME): -32603 with data.code "FS_NOT_FOUND".
- *  - Kimi Code 0.28.0 (measured 2026-10-16, scratch KIMI_CODE_HOME): -32602 with data exactly {sessionId: <the id>}
- *    (its harness maps session.not_found there), or no session directory in its store (kimi-journal.ts).
- *  - GitHub Copilot CLI: no session-state/<id> folder in its product mirror or the account folder (copilotSessionGone).
- *  - Cursor has no measured marker (cursor-agent is not installed here); only -32002 would count.
+
+
+
+
+
+
+
+
+
  */
 export function acpLoadedSessionGone(specId: string, error: unknown, env: NodeJS.ProcessEnv, sessionId: string): boolean {
   if (error instanceof AcpRpcError && error.code === -32002) return true;

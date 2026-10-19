@@ -86,13 +86,13 @@ type ModelDescriptor = {
   modelPath: string;
   modelSha256: string;
   adapter: string;
-  // True when the vocabulary has whole Hangul syllables. potion-base-8M is
-  // distilled from an English BERT and has none — only Hangul Jamo — so its
-  // WordPiece shatters Korean into individual letters. Measured on this model:
-  // "배포 실패" tokenizes to ᄇ ᅢ ᄑ ᅩ ᄉ ᅵ ᆯ ᄑ ᅢ. Comparing those vectors measures
-  // letter frequency, not meaning, which is why unrelated Korean sentences
-  // scored HIGHER (0.86) than related ones (0.68). The semantic axis has to be
-  // withheld for Korean until the asset can actually read it.
+  
+
+
+
+
+
+
   supportsHangul: boolean;
   // WordPiece (potion-base-8M) or Unigram (potion-multilingual-128M). The two
   // segment text completely differently, so the asset declares which one it is

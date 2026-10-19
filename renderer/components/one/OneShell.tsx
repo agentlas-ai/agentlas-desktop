@@ -310,6 +310,7 @@ import {
   reduceOneActivity,
   type OneActivityState,
 } from "@/lib/one-activity";
+import { readRunOutputsAfterWindow, withLateRunOutputs } from "@/lib/one-chat-outputs";
 import styles from "./OneShell.module.css";
 import roomWorkStyles from "./SeatRoomWork.module.css";
 import { PersonalOneWorkspace } from "./PersonalOneWorkspace";
@@ -347,19 +348,19 @@ const ONE_LEFT_RAIL_COLLAPSED_STORAGE_KEY = "agentlas.one.left-rail-collapsed.v1
  * 이제 닫힌 채로 시작하고, 그 대화가 실제로 무언가를 만들면 한 번 열린다.
  */
 const ONE_CONTEXT_RAIL_OPEN_STORAGE_KEY = "agentlas.one.context-rail-open.v2";
-/** 홈 화면 기록 열의 펼침 상태. 기본 닫힘 — 오너 결정 2026-08-25 "다 접힌 상태". */
+/** */
 const ONE_HOME_HISTORY_OPEN_STORAGE_KEY = "agentlas.one.home-history-open.v1";
 /** The right rail is resizable (owner request 2026-08-16); the width persists like its open state. */
-/*
- * v2 로 올린 이유(오너 결정 2026-08-24 "디폴트 값 지금의 반으로 줄여라"):
- * 예전 키에는 화면 절반을 넘는 폭이 이미 저장돼 있어서, 기본값만 줄여도
- * 실제로 뜨는 폭은 그대로였다(실측 648px = 상한까지 벌어진 값).
- * 키를 올려 모두가 새 기본 폭에서 시작하고, 그 뒤 직접 끈 폭은 그대로 남는다.
- */
+
+
+
+
+
+
 const ONE_CONTEXT_RAIL_WIDTH_STORAGE_KEY = "agentlas.one.context-rail-width.v2";
-/* 처음 열릴 때 오른쪽 패널이 화면을 너무 많이 먹었다 — 기본을 절반으로 줄인다
-   (오너 결정 2026-08-24). 사용자가 넓히면 그 값이 기억되므로 기본만 낮춘다. */
-/* 실제로 뜨던 폭(실측 648px)의 절반 — 오너 결정 2026-08-24. */
+
+
+
 const ONE_CONTEXT_RAIL_WIDTH_DEFAULT = 324;
 /*
  * 하한은 기본값보다 커서는 안 된다. 340 이던 동안 기본값 210 은 clamp 에
@@ -370,7 +371,7 @@ const ONE_CONTEXT_RAIL_WIDTH_MIN = 200;
 const ONE_CONTEXT_RAIL_WIDTH_MAX = 1280;
 /** A file viewer needs enough room for document chrome and readable body text. */
 const ONE_CONTEXT_RAIL_FILE_READABLE_WIDTH = 560;
-/* 오너 지시 2026-08-24: "켜져도 지금의 반만". 0.432 -> 0.216. */
+
 const ONE_CONTEXT_RAIL_RESULT_RATIO = 0.216;
 
 type OnePaneCommitWaiter = Readonly<{
@@ -601,18 +602,18 @@ function questionReplacedNotice(locale: "ko" | "en"): string {
 }
 
 /**
- * 질문을 낸 실행의 영수증 — 답은 이 실행의 권한을 잇는다. 대화의 최신 실행을 읽으면 그 사이에 돈
- * 읽기 전용 팀 보고 턴의 권한으로 오너의 답이 실행됐다(운영 2026-10-18 01:49Z: "Bash가 비활성화").
- * 질문의 실행을 모르거나 다른 대화의 영수증이면 null — 호출자가 읽기로 닫는다.
+
+
+
  */
 async function questionSourceReceipt(confirmation: PendingConfirmation): Promise<InvocationRunReceipt | null> {
   return sourceRunReceipt(confirmation.chatId, confirmation.sourceRunId);
 }
 
 /**
- * The receipt of the exact run a continuation descends from, or null when it is unknown or belongs to another
- * conversation (the caller then closes to read). Never the conversation's newest run: a teammate's report turn there
- * would lend its permission to a recovery of a different run (flow audit ID-7, sibling of the answer path above).
+
+
+
  */
 async function sourceRunReceipt(chatId: string, runId: string | null | undefined): Promise<InvocationRunReceipt | null> {
   const api = ipc();
@@ -995,9 +996,9 @@ function toUiMessages(history: ChatHistoryEntry[]): UiMessage[] {
       suppressRecoveryReply = false;
       continue;
     }
-    // An interrupted answer (owner's new message, host stop, update, restart) is an internal state, not a reply: the
-    // turn that follows answers instead. Drawing it ("중단됨 · …") only read as a fault (owner 2026-10-14: "이거 다 UI에
-    // 안보이게 해"). The record keeps it with its banner, so history never mistakes it for a finished answer.
+
+
+
     if (entry.role === "assistant" && isInterruptedPartial(entry.text)) continue;
     if (entry.role === "user") {
       suppressRecoveryReply = false;
@@ -1079,9 +1080,9 @@ function stripGenericResultReadyCopy(value: string): string {
 const ONE_SYSTEM_PROMPTS = ["retry_unfinished", "runtime_recovered", "auto_recover"] as const;
 
 /**
- * An answer cut off before it finished is kept with its "interrupted" banner (shared/interrupted-partial.ts), but on
- * screen it reads like a step of the work, not an error: one quiet line with its first sentence (owner 2026-10-14:
- * "중단된 답변입니다 이런거 너무 많아서 오류같음 … 추론과정처럼 한줄로").
+
+
+
  */
 function interruptedPartialLine(text: string, locale: string): string {
   const body = text.split("\n").filter((line) => !line.startsWith(">")).map((line) => line.trim()).find(Boolean) ?? "";
@@ -1168,7 +1169,7 @@ function readableOneJson(text: string): string | null {
  * During streaming, hide an unfinished fence from its opening marker onward;
  * once closed, reuse the canonical parser so malformed JSON is still removed.
  */
-// 메시지 객체가 같으면 답도 같다 — 토큰마다 대화 전체를 다시 파싱하지 않는다(2026-09-14 실측: 스트리밍 델타마다 전 메시지 재계산).
+
 const visibleOneMessageTextCache = new WeakMap<UiMessage, string>();
 function visibleOneMessageText(message: UiMessage): string {
   const cached = visibleOneMessageTextCache.get(message);
@@ -1191,8 +1192,8 @@ function projectVisibleOneMessageText(message: UiMessage): string {
   if (message.role === "assistant" && /^(?:Your result and files are ready\. You can review them below\.|요청한 결과와 파일을 준비했어요\. 아래에서 바로 확인할 수 있어요\.)$/.test(message.text.trim())) {
     return "";
   }
-  // "One continued the remaining steps" and its siblings are the host continuing on its own: not conversation
-  // (owner 2026-10-14, "자동이어가기도 굳이 챗창에는 안나와도"). They stay in the record, not on screen.
+
+
   if (oneSystemPromptLabel(message)) return "";
   // 좌석 사건 줄(자리 담당이 바뀌었다·누가 맡았다)은 내부 프롬프트가 아니라 **대화에
   // 남는 사실**이다. 표식이 붙은 줄만 열어 준다 — 표식 없는 system 줄은 아래에서 그대로
@@ -1334,11 +1335,11 @@ function writeBriefingDismissal(signature: string): number {
 }
 
 /**
- * 마지막으로 열어 본 One 대화. 앱을 껐다 켜거나 다른 화면에 다녀와도 그 대화로 돌아온다.
- * "새 대화"를 누르면 지워져 홈에서 시작한다 — 사용자가 명시적으로 바꾼 것이기 때문이다.
- *
- * ★ 왜 필요한가 (오너 신고 2026-08-24): One 은 열 때마다 항상 홈(빈 대화)에서 시작했고,
- *   돌아갈 대화를 고르는 길도 없어서 "켤 때마다 기존 대화가 날아간다" 로 보였다.
+
+
+
+
+
  */
 const LAST_ONE_CONVERSATION_KEY = "agentlas.one.lastConversationId";
 
@@ -1372,15 +1373,15 @@ function rememberRailMode(mode: OneRailMode): void {
   try { writeAppUiPreference("oneRailMode", mode); } catch { /* 저장소를 못 써도 화면은 돈다 */ }
 }
 
-/*
- * 대화 줄에 붙는 이름 — **누구와 한 대화인지**다 (오너 결정 2026-08-24).
- * 상태 문구("결과 확인")가 아니라 이름을 쓴다: 단톡방이면 방 이름, 한 명이면 그 자리에
- * 앉은 에이전트의 **표시 이름**(고유 식별자가 아니라 사용자가 바꿀 수 있는 이름),
- * 그 밖에는 One.
- *
- * 자리가 비었거나 에이전트가 나갔어도 이름을 만든다 — 이름을 못 만든다고 세션을 못 열게
- * 하면 안 된다. 보관된 자리도 이름은 남는다.
- */
+
+
+
+
+
+
+
+
+
 /** 한 칸이 사라질 만큼 끌지는 못하게 한다. */
 function clampSplitRatio(value: number): number {
   if (!Number.isFinite(value)) return 50;
@@ -1496,8 +1497,8 @@ function OneSessionsShell() {
   const [loaded, setLoaded] = useState(false);
   const [projections, setProjections] = useState<OneTaskProjection[]>([]);
   const [conversations, setConversations] = useState<Chat[]>([]);
-  // 세션 목록 순서(오너 2026-09-28 "최근 대화가 가장 위로"): 보낸 순간 그 프레임에 올리는 로컬 표식과,
-  // 목록 위에 포인터가 있는 동안 잡아 두는 순서. 메신저처럼 누르려는 줄이 손 밑에서 도망가지 않는다.
+
+
   const [sessionActivityBumps, setSessionActivityBumps] = useState<Record<string, string>>({});
   const [sessionOrderHold, setSessionOrderHold] = useState<string[] | null>(null);
   const taskforcesForListRef = useRef<OneTaskforce[]>([]);
@@ -1540,7 +1541,7 @@ function OneSessionsShell() {
   // Org chart requests (staff sheet, add picker) take tokens from this counter. It never restarts, even after a request
   // is spent and cleared — a mounted chart compares against its last token.
   const orgSheetSerial = useRef(0);
-  /** One 자신을 고치는 창. 팀원 편집과 같은 창을 쓴다(오너 지시 2026-08-23). */
+  /** */
   const [editOneTarget, setEditOneTarget] = useState<OneEditSelfTarget | null>(null);
   const createAgentSeedTokenRef = useRef(0);
   const [agentPickerRequest, setAgentPickerRequest] = useState<{
@@ -1657,10 +1658,10 @@ function OneSessionsShell() {
   // event owner's run ID so a late durable receipt cannot make fresh events
   // look like duplicates of the previous run.
   const activityEventRunIdRef = useRef<string | null>(null);
-  // Each entry belongs to exactly one conversation (Main queues steers per chat). The strip and
-  // the "it started" hand-off read only the visible conversation's entries; a chat-less list let
-  // one room's "다음 지시" show in every room and be inserted as a user bubble wherever the next
-  // run attached (production X/Threads/YouTube rooms, 2026-10-04).
+  
+
+
+
   const [queuedSteers, setQueuedSteers] = useState<Array<{ id: string; text: string; chatId: string }>>([]);
   // Read by the active-chat listener, which must not re-subscribe on every queue change.
   const queuedSteersRef = useRef(queuedSteers);
@@ -1698,10 +1699,10 @@ function OneSessionsShell() {
   const currentTurnDeliveriesRef = useRef(new Map<string, Promise<void>>());
   const currentTurnBackoffRef = useRef(new Map<string, { failures: number; nextAt: number }>());
   const followupBridgesRef = useRef(new Map<string, ReturnType<typeof ipc>>());
-  // Instructions typed while the run is still being prepared (no runId yet).
-  // They join the queue strip at once and reach Main as steers the moment the
-  // run exists — Codex queues a message typed during the model's first
-  // processing the same way; dropping it (measured 2026-08-16) is not parity.
+
+
+
+
   const pendingSteersRef = useRef<Array<{ id: string; text: string }>>([]);
   // A running One turn accepts the next instruction directly; never revive an
   // obsolete two-step steering draft from an earlier app version.
@@ -1830,10 +1831,10 @@ function OneSessionsShell() {
   const deliverCurrentTurnFollowup = useCallback((intent: OneFollowupIntent, bridge: ReturnType<typeof ipc>) => {
     if (!bridge || !intent.currentTurnRunId || currentTurnDeliveriesRef.current.has(intent.intentId)) return;
     if (locallyStoppedFollowupIdsRef.current.has(intent.intentId) || intent.autoDeliveryPaused || intent.requiresReprepare) return;
-    // The room's 3 s outbox tick re-entered here for every failure. After an app restart the
-    // run stays owned by the previous process, so Main refused each attempt
-    // (`invocation_owner_unavailable`) — 1,260 refusals in one day in Youtube launch, 2026-10-10.
-    // Back off per intent and stop automatic delivery once the refusal is definitive.
+    
+
+
+
     const backoff = currentTurnBackoffRef.current.get(intent.intentId);
     if (backoff && Date.now() < backoff.nextAt) return;
     const task = (async () => {
@@ -1912,9 +1913,9 @@ function OneSessionsShell() {
                 if (!receipt) {
                   if (deliveryPaused(intent)) continue;
                   receipt = await waitForOneFollowupDelivery(bridge.invoke.preflightSteerEnqueue(input)).catch((error: unknown) => {
-                    // Main refuses for good once the submission takes no more directions (held, settled, cancelled).
-                    // Kept first in the FIFO it blocked every later message of the chat: production 1.3.9, Hope 1:1,
-                    // behind a follow-up bound to a submission held since 2026-10-10.
+
+
+
                     if (String(error).includes("one_preflight_submission_not_receiving")) return null;
                     throw error;
                   });
@@ -1966,8 +1967,8 @@ function OneSessionsShell() {
                     throw error;
                   });
                   if (!sent) {
-                    // The chat is idle and its turns start in the background service: the saved text goes as a new
-                    // message (Main refuses to start it as a Desktop turn, production 1.2.93, 2026-10-11).
+
+
                     if (activeThreadChatIdRef.current !== chatId || !submitTextRef.current
                       || (composerHandleRef.current?.getValue() ?? "").trim() || attachmentDraftsRef.current.length) {
                       showDeliveryNotice();
@@ -2028,8 +2029,8 @@ function OneSessionsShell() {
         && (item.receipt.status === "queued" || item.receipt.status === "dispatching"))) return;
     let disposed = false;
     let running = false;
-    // A read that keeps failing backs off instead of asking Main every second (442 refusals in 4 minutes after a
-    // paused Goal, room "Youtube launch", 2026-10-11).
+    
+
     let failures = 0;
     let quietUntil = 0;
     const refresh = async () => {
@@ -2071,8 +2072,8 @@ function OneSessionsShell() {
     const retryHead = localFollowupIntents.find(intent => intent.chatId === chatId && !intent.autoDeliveryPaused
       && !locallyStoppedFollowupIdsRef.current.has(intent.intentId) && !terminalFollowupIdsRef.current.has(intent.intentId));
     if (!chatId || !retryHead || retryHead.requiresReprepare) return;
-    // The same head still waiting means Main could not take it yet: wait 3 s, 6 s, 12 s ... up to 60 s between tries
-    // instead of every 3 s (native channel lost, production 1.2.92, 2026-10-11 01:57Z).
+
+
     let lastHead = "", skip = 0, span = 1, tries = 0;
     const timer = window.setInterval(() => {
       if (activeThreadChatIdRef.current !== chatId) return;
@@ -2199,12 +2200,12 @@ function OneSessionsShell() {
   const [settingsSheet, setSettingsSheet] = useState<OneSettingsKey | null>(null);
   const [pluginPickerOpen, setPluginPickerOpen] = useState(false);
   const [contextRailOpen, setContextRailOpenState] = useState(() => readStoredBoolean(ONE_CONTEXT_RAIL_OPEN_STORAGE_KEY, false));
-  /*
-   * 홈 화면 기록 열도 접힌 채로 시작한다 (오너 결정 2026-08-25: "다 접힌 상태").
-   * 첫 화면에서 오른쪽을 차지하던 패널은 둘이었다 — 결과 패널(위 v2)과 이 기록 열.
-   * 접되 **출구를 남긴다**: 접힘 폭은 0이 아니라 펴기 버튼 하나가 들어가는 띠이고,
-   * 사용자가 편 상태는 기존 계약대로 기억한다.
-   */
+  
+
+
+
+
+
   const [homeHistoryOpen, setHomeHistoryOpenState] = useState(() => readStoredBoolean(ONE_HOME_HISTORY_OPEN_STORAGE_KEY, false));
   const setHomeHistoryOpen = useCallback((next: boolean) => {
     setHomeHistoryOpenState(next);
@@ -2628,14 +2629,14 @@ function OneSessionsShell() {
   const housekeepingMessageIds = useMemo(() => new Set(visibleMessages
     .filter((message) => isHousekeepingHostNotice(normalizeChatHostNotice(message.role, message.hostNotice)))
     .map((message) => message.id)), [visibleMessages]);
-  /*
-   * One failure surface per run (owner Yotube 2026-10-17: run d85e262f drew a red failure block AND a Hope bubble "the run
-   * failed …", both still up after a later run took the request over). By the durable marker (runId + status), never by
-   * wording, and without a fold or a quiet line in One (NH26): a failure line about a run whose request a later run took
-   * over (block supersededByRunId) is history; an app-side failure line ("app-failed") about a run this thread draws is
-   * already said by that run's block. Neither is drawn as a bubble. Main's history read marks the first one "recovered"
-   * too; this covers rows already on screen when the takeover happened.
-   */
+  
+
+
+
+
+
+
+
   const settledFailureLineIds = useMemo(() => {
     const drawn = new Set(threadRuns.map((run) => run.runId));
     const superseded = new Set(threadRuns.filter((run) => run.supersededByRunId).map((run) => run.runId));
@@ -2647,14 +2648,14 @@ function OneSessionsShell() {
     }
     return ids;
   }, [threadRuns, visibleMessages]);
-  /*
-   * ★ A run Main executes that this screen never attached to must read as live and finish only when Main settles it
-   * (production Yotube 2026-10-17: Goal turn bb73a150, resumed by the 1.3.64 update restart's sweep, worked for 12+ minutes
-   * while the room drew it as a finished "명령 22개 실행함" block with no time and a still dot). The chat timeline is a
-   * ledger read and calls such a run "interrupted"; Main's receipt (invoke:receipt) is the authority. Ask Main about those
-   * blocks, follow a live one like any run this screen did not start, keep its rows fresh while it stays unattached, and
-   * re-read it once its receipt settles.
-   */
+  
+
+
+
+
+
+
+
   const openRunCheckedRef = useRef<Set<string>>(new Set());
   const unattachedOpenRunKey = useMemo(() => unattachedOpenThreadRuns(threadRuns, workBusy ? activeActivityRunId : null, openRunCheckedRef.current)
     .map((run) => `${run.runId}:${run.status}`).join("|"), [activeActivityRunId, threadRuns, workBusy]);
@@ -2681,7 +2682,8 @@ function OneSessionsShell() {
         if (!reread.length) return;
         const fresh = (await Promise.all(reread.map(async (receipt) => {
           const events = await api.runLedger.events(receipt.runId, THREAD_RUN_EVENTS_PER_RUN).catch(() => null);
-          return events ? projectThreadRuns([{ receipt, events }])[0] ?? null : null;
+          // A run longer than the block's event window lists the outputs it wrote past it too.
+          return events ? projectThreadRuns(await withLateRunOutputs(api, [{ receipt, events }], THREAD_RUN_EVENTS_PER_RUN))[0] ?? null : null;
         }))).filter((block): block is OneThreadRunBlock => Boolean(block));
         if (cancelled || threadRunsChatIdRef.current !== chatId || !fresh.length) return;
         setThreadRuns((current) => threadRunsChatIdRef.current === chatId ? replaceThreadRunBlocks(current, fresh) : current);
@@ -2703,11 +2705,11 @@ function OneSessionsShell() {
     }
     return undefined;
   }, [threadRuns]);
-  /*
-   * 브라우저를 쓴 적 있는 대화라는 이유로 오른쪽 패널을 저 혼자 열던 자리
-   * (제거, 오너 지시 2026-08-24 "우측사이드바 디폴트로 접히고"). 열림 상태가
-   * 저장까지 돼서, 한 번 열린 뒤로는 무엇을 지워도 다시 열린 채로 시작했다.
-   */
+  
+
+
+
+
   const searchTriggerRef = useRef<HTMLButtonElement>(null);
   const searchSheetRef = useRef<HTMLElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
@@ -2752,12 +2754,12 @@ function OneSessionsShell() {
   // reconciliation; unrelated action notices must survive.
   const cancelNoticeRunIdRef = useRef<string | null>(null);
   const cancelNoticeTextRef = useRef<string | null>(null);
-  /*
-   * Stop drops the work queued behind a run, never what the owner wrote: Main discards the chat's queued
-   * directions on stop/pause (InvocationService.cancel, stopGoal), so the strip's texts go back into that chat's
-   * composer to send again or edit, as Codex restores queued messages on interrupt. Production 2026-08-31 to
-   * 2026-10-04: 6 of 34 owner directions were discarded by a stop or Goal pause and reached no one.
-   */
+  
+
+
+
+
+
   const returnQueuedSteersToComposer = useCallback((chatId: string) => {
     const returned = queuedSteersRef.current.filter((item) => item.chatId === chatId).map((item) => item.text);
     setQueuedSteers((current) => current.filter((item) => item.chatId !== chatId));
@@ -2942,12 +2944,12 @@ function OneSessionsShell() {
     });
   }, [scrollFollow]);
 
-  /*
-   * ★위로 올린 사람은 흐름이 다시 끌어내리지 않는다 (실측 2026-09-28, X Marketing).
-   *   따라가기가 "맨 아래 160px 안" 만 봐서, 답이 흐르는 중에 휠 한 칸(100px)씩 올리면 다음 조각이
-   *   곧바로 맨 아래로 되돌렸다 — 800px 올려도 맨 아래에서 21px 에 머물렀다. 위로 움직인 것은 사람의 뜻이다.
-   *   맨 아래에 다시 닿으면 따라가기가 돌아온다(내용이 줄어 브라우저가 올린 것도 거기서 풀린다).
-   */
+  
+
+
+
+
+
   const readerLeftLatestRef = useRef(false);
   const lastScrollTopRef = useRef(0);
   const syncScrollToLatestButton = useCallback(() => {
@@ -3027,13 +3029,13 @@ function OneSessionsShell() {
   }, [composerDockEl]);
 
   /**
-   * 대화를 처음 그릴 때 맨 아래에 **붙여 둔다**.
-   *
-   * ★한 번만 내리면 안 된다 (실측 2026-09-08): 60개짜리 대화를 열면 1180px 창에서는
-   *   내려갔는데 1440px 창에서는 그대로 맨 위였다. 첫 프레임 뒤에도 폰트·이미지·코드
-   *   블록이 자리를 잡으며 전체 높이가 계속 늘기 때문이다. 몇 번 더 따라 내려간다.
-   *   ★사람이 손을 대면 즉시 멈춘다 — 읽던 자리를 뺏는 건 안 내려가는 것보다 나쁘다.
-   */
+
+
+
+
+
+
+ */
   const pinToLatest = useCallback(() => {
     const scroller = scrollRef.current;
     if (!scroller) return;
@@ -3180,7 +3182,7 @@ function OneSessionsShell() {
     return () => window.clearTimeout(timer);
   }, [query, requestOneSearch, searchIncludeArchived, searchOpen]);
 
-  // The 5 s poll reuses the last task projections unless something that feeds them moved (perf review R-05).
+
   const projectionReadRef = useRef<{ dirty: boolean; at: number | null; items: OneTaskProjection[]; active: string; pending: string; context: string }>(
     { dirty: true, at: null, items: [], active: "", pending: "", context: "" });
   const refreshAllRead = useCallback(async (options: { includeOrg?: boolean; poll?: boolean } = {}) => {
@@ -3216,11 +3218,11 @@ function OneSessionsShell() {
         api.confirm.listPending().catch(() => []),
         api.updater.getState().catch(() => null),
         api.mobileBridge.status().catch(() => null),
-        // ★ One 것만 데이터베이스에서 골라 받는다.
-        // 예전에는 `listRecent(40)` 로 **전체** 최근 40개를 받아 아래에서 One 것만 걸렀다.
-        // Work 를 많이 쓰면 그 40칸이 Work 대화로 차서, 멀쩡히 살아 있는 One 대화가
-        // 화면에서 사라진다 — 지워진 것처럼 보이지만 행은 그대로다. 실측: One 대화 20개 중
-        // 10개만 그 창에 들어왔다. 거르는 일을 DB 에 시키면 창이 One 것만으로 채워진다.
+
+
+
+
+
         api.chats.listRecentOne(40).catch(() => []),
         // PRD §4.27 — 홈 새로고침 19개 중 이것 하나만 안전망이 없었다. 프로필 조회가 한 번
         // 실패하면 Promise.all 전체가 거절돼 **모든 화면 갱신이 통째로 건너뛰어졌고**,
@@ -3308,21 +3310,21 @@ function OneSessionsShell() {
       // 목록은 이미 One 것만 온다(위 listRecentOne). 여기서는 Task/태스크포스로 따로
       // 그려지는 것만 뺀다 — origin 검사는 남겨 둔다. 계약이 깨지면 조용히 넘어가는 대신
       // 여기서 걸러지는 편이 낫다.
-      /*
-       * ★ 2026-08-24 (오너 신고: "One 킬 때마다 기존 대화 날아감"): 팀 대화를 이 목록에서
-       *   빼 두었는데, 팀 목록을 그리는 화면은 **끝내 만들어지지 않았다**(taskforces 상태를
-       *   렌더하는 곳이 저장소에 하나도 없다). 그래서 팀과 나눈 대화는 어디에도 나타나지
-       *   않아 돌아갈 길이 없었다 — 지워진 것이 아니라 닿을 수 없었던 것이다.
-       *   목록에 함께 싣는다. 어느 것이 팀인지는 아래에서 표시한다.
-       */
+      
+
+
+
+
+
+
       const taskforceChatIds = new Set(taskforceRows.map((taskforce) => taskforce.chatId));
-      /*
-       * ★ `!chat.taskId` 를 뺐다 (오너 결정 2026-08-24: "두 개 합치라").
-       *   작업이 붙은 대화는 이 목록에서 빠지고 아래 작업 목록으로만 떴다. 그래서 같은
-       *   일이 두 군데로 갈렸고, 작업 줄에는 이름 대신 "결과 확인" 같은 상태 문구가 붙었다.
-       *   목록은 하나이고 작업은 그 대화의 상태일 뿐이므로 전부 대화 줄로 세운다.
-       *   (이 줄을 되돌리면 대화 20개 중 19개가 목록에서 사라진다 — 실측.)
-       */
+      
+
+
+
+
+
+
       setConversations(keepPrevIfDeepEqual(
         recentChats
           .filter((chat) => chat.originSurface === "one")
@@ -3689,22 +3691,22 @@ function OneSessionsShell() {
     if (supersededByNewerRun()) return;
     await refreshAll();
     if (supersededByNewerRun()) return;
-    /*
-     * ★ 답 말풍선을 durable 기록에서 되살린다.
-     *
-     * 실행이 끝났다는 사실은 두 길로 온다: 라이브 이벤트(정상)와, 그것을 놓쳤을 때 도는
-     * activeChats 폴링 안전망(아래 useEffect). 그런데 이 settleRun 은 threadRuns 와
-     * Activity 만 복원하고 **대화 메시지는 다시 읽지 않았다.** 답은 messages 에 사는데
-     * 그것을 안 채우니, 라이브 이벤트를 놓친 실행은 서버가 답을 냈고 기록에도 남았는데
-     * 화면에는 내 말풍선만 남는다 — 새로고침해야 보인다.
-     *
-     * 웹 이식본에서 먼저 실측됐다(2026-08-24, 이벤트 스트림 미개설). 데스크탑은 IPC 라
-     * 놓칠 일이 드물지만 안전망이 존재한다는 것 자체가 "놓칠 수 있다"는 뜻이고, 나머지를
-     * 다 복원하면서 정작 답만 빼놓는 안전망은 반쪽이다. 새로고침이 하는 일을 그대로 한다.
-     *
-     * 지금 그 대화를 보고 있고 새 실행이 시작되지 않았을 때만. 서버 스냅샷이 비어 있으면
-     * 화면의 낙관 행을 지우지 않는다 — 없는 것을 사실로 만들지 않기 위해서다.
-     */
+    
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     if (shownThreadChatIdRef.current === chatId && runChatIdRef.current === chatId && !runIdRef.current) {
       const history = await readOneShellHistory(api, chatId).catch(() => null);
       if (!supersededByNewerRun() && history && shownThreadChatIdRef.current === chatId) {
@@ -3728,13 +3730,13 @@ function OneSessionsShell() {
       }
     }
     if (supersededByNewerRun()) return;
-    /*
-     * ★ Main may already be running this chat's next turn: an interrupting or queued
-     * direction starts as soon as this run settles, with no idle broadcast in
-     * between. Measured 2026-09-27: the direction's answer reached the transcript
-     * 14s later and never appeared (and no progress was shown) until the chat was
-     * reopened. Follow whatever Main runs now.
-     */
+    
+
+
+
+
+
+
     if (runChatIdRef.current === chatId && !runIdRef.current) followActiveRunRef.current(chatId);
     // A canonical Task projection can intentionally omit a receipt that has
     // not yet been bound into its immutable reference list. That must not
@@ -3752,16 +3754,23 @@ function OneSessionsShell() {
     ]);
     if (supersededByNewerRun()) return;
     if (threadRunsChatIdRef.current === chatId && timelineHead.length > 0) {
-      const merged = mergeSettledThreadRun(threadRunsRef.current, timelineHead, latestReceipt.runId, ledgerEvents, projectThreadRuns);
+      // The block draws the run's first THREAD_RUN_EVENTS_PER_RUN events; a longer run lists the outputs it wrote past them too.
+      const blockOutputs = await readRunOutputsAfterWindow(api, latestReceipt.runId, ledgerEvents.slice(0, THREAD_RUN_EVENTS_PER_RUN), THREAD_RUN_EVENTS_PER_RUN);
+      if (supersededByNewerRun()) return;
+      const merged = mergeSettledThreadRun(threadRunsRef.current, timelineHead, latestReceipt.runId, ledgerEvents, projectThreadRuns, blockOutputs);
       if (merged) setThreadRuns(merged);
       else {
         const chatTimeline = await api.runLedger.chatTimeline(chatId, { maxRuns: THREAD_RUN_WINDOW, eventsPerRun: THREAD_RUN_EVENTS_PER_RUN }).catch(() => []);
+        const windowedTimeline = await withLateRunOutputs(api, chatTimeline, THREAD_RUN_EVENTS_PER_RUN);
         if (supersededByNewerRun()) return;
-        if (threadRunsChatIdRef.current === chatId && chatTimeline.length > 0) setThreadRuns(projectThreadRuns(chatTimeline));
+        if (threadRunsChatIdRef.current === chatId && windowedTimeline.length > 0) setThreadRuns(projectThreadRuns(windowedTimeline));
       }
     }
     if (ledgerEvents.length === 0) return;
-    const restoredActivity = projectOneActivityFromLedger(ledgerEvents, latestReceipt);
+    // A run longer than the 500-event window keeps its later outputs on the rail (the rest of the run's sealed outputs).
+    const lateOutputs = await readRunOutputsAfterWindow(api, latestReceipt.runId, ledgerEvents);
+    if (supersededByNewerRun()) return;
+    const restoredActivity = projectOneActivityFromLedger(ledgerEvents, latestReceipt, lateOutputs);
     cacheOneActivity(chatId, restoredActivity);
     // The person may have opened another conversation while this settle awaited
     // Main. The screen's Activity is drawn as *that* conversation's last block, so
@@ -3800,22 +3809,22 @@ function OneSessionsShell() {
       return next;
     });
     if (event.kind === "notice" && event.notice?.code === "runtime-fallback" && event.runtimeSelection) {
-      /*
-       * ★폴백은 **이번 실행의 우회로**다. 사용자의 모델 선택을 바꾸는 신호가 아니다.
-       *
-       * 실사용 실측 2026-09-07. 여기서 셋을 했었다:
-       *   writeStoredOneRuntimeSelection(selection)  ← One 의 **전역** 핀(localStorage)
-       *   api.chats.setRuntimeSelection(chatId, ...) ← 대화 핀을 DB 에 영구 저장
-       *   setOneRuntime(...)                          ← 작성창 칩을 폴백 모델로 교체
-       * 제미나이가 한도(25분이면 풀린다)로 한 번 실패하면 그 순간 One 이 통째로 grok 으로
-       * 굳었다. 대화 하나가 아니라 **전역 핀**이라 새 대화도 grok 으로 시작했다.
-       * 사용자가 겪은 것이 정확히 그것이다 — "제미나이로 했는데", "One이 지혼자 막 모델이
-       * 바뀜", "자꾸 걍 그록만 호출된다".
-       *
-       * 이제 Main 도 저장하지 않는다(mcp/client.ts emitControllerRuntimeFallback).
-       * 양쪽 끝을 같이 바꿔야 한다 — 한쪽만 고치면 다른 쪽이 계속 덮어쓴다.
-       * 알림 자체는 활동 리듀서가 이미 그렸고, 거기에 무엇으로 이어갔는지 적혀 있다.
-       */
+      
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     }
     if (event.kind === "mcp-key-request") {
       if (event.keyRequest && event.keyRequest.expiresAt > Date.now()) {
@@ -3852,15 +3861,15 @@ function OneSessionsShell() {
       setMessages((current) => ownsQueuedUpdate()
         ? upsertLiveMessage(current, partialText, true, eventRunId).map((message) => message.id === "one-live-response" && event.goalResult ? { ...message, goalResult: event.goalResult } : message)
         : current);
-      /*
-       * ★ 답이 흘러나오는 동안에도 화면이 따라 내려간다 (오너 지적 2026-08-24).
-       *
-       * 예전에는 **다 끝났을 때만** 내려갔다. 긴 답은 아래로 계속 자라는데 화면은 그대로라,
-       * 답이 오고 있는데도 사용자는 빈 화면을 본다 — "답이 안 온다"로 읽힌다.
-       *
-       * 단, **사람이 위로 올려 읽고 있으면 끌어내리지 않는다.** 읽던 자리를 뺏는 것이
-       * 안 따라가는 것보다 나쁘다. 맨 아래 근처에 있을 때만 따라간다.
-       */
+      
+
+
+
+
+
+
+
+
       followStreamToLatest();
       return;
     }
@@ -3883,10 +3892,10 @@ function OneSessionsShell() {
       }
       setKeyRequestSheet(null);
       const text = event.text ?? streamTextRef.current;
-      // Commit the streamed answer under its own id. Leaving it as the shared
-      // "one-live-response" row meant the next turn's live row *replaced* it
-      // (measured 2026-08-15: the previous answer vanished while a queued
-      // instruction ran, until the history reload brought it back).
+
+
+
+
       oneTranscriptRevisionRef.current += 1;
       // A tool-only turn completes with no text (R-065): its work block shows what it did; no blank answer bubble.
       if (!text.trim() && !event.goalResult) {
@@ -3905,11 +3914,11 @@ function OneSessionsShell() {
       streamTextRef.current = "";
       unsubscribeRunRef.current?.();
       unsubscribeRunRef.current = null;
-      /*
-       * ★실행이 끝났다고 읽던 자리를 뺏지 않는다 (실측 2026-09-28, X Marketing).
-       *   목표 대화는 몇 분마다 실행이 끝나는데, 끝날 때마다 무조건 맨 아래로 부드럽게 끌어내려
-       *   위로 올려 읽던 사람이 4,000px → 21,617px 로 튕겼다. 맨 아래를 보고 있을 때만 따라간다.
-       */
+      
+
+
+
+
       followStreamToLatest();
       void settleRun(chatId, taskId, settledRunId);
       return;
@@ -3995,8 +4004,9 @@ function OneSessionsShell() {
           return true;
         }
         const ledger = await api.runLedger.events(runId, 500);
+        const lateOutputs = await readRunOutputsAfterWindow(api, runId, ledger);
         if (!owns() || !checkpoint.isCurrent()) return false;
-        const state = { ...projectOneActivityFromLedger(ledger, snapshot.receipt), lastSequence: checkpoint.throughOrdinal };
+        const state = { ...projectOneActivityFromLedger(ledger, snapshot.receipt, lateOutputs), lastSequence: checkpoint.throughOrdinal };
         streamFrameRef.current?.flush();
         activityEventRunIdRef.current = runId;
         setActivityStateRunId(current => owns() ? runId : current); setActivity(current => owns() ? state : current); cacheOneActivity(chatId, state);
@@ -4131,15 +4141,15 @@ function OneSessionsShell() {
       return;
     }
     const chatId = activeThreadChatId;
-    /*
-     * ★좌석을 옮기면 **앞 좌석의 대화를 먼저 치운다** (오너 녹화 2026-09-26).
-     *   레일에서 Marketing → Bitvoin → Vibe coder 로 옮겨도 머리말만 바뀌고 본문은
-     *   Marketing 의 "Task Progress" 가 그대로 남았다. 새 대화의 기록이 비어 있으면
-     *   아래 "빈 스냅샷은 지금 화면을 지우지 않는다" 규칙이 **남의 대화**를 지켜 줬기
-     *   때문이다(격리 앱 실측: 빈 좌석 3초 동안 113/113 표본이 앞 좌석 본문).
-     *   그 규칙은 같은 대화의 낙관적 첫 턴을 위한 것이다 — 다른 대화로 옮긴 순간에는
-     *   화면 소유를 풀고 비운 뒤, 새 대화의 기록이 도착하면 그것으로 채운다.
-     */
+    
+
+
+
+
+
+
+
+
     if (shownThreadChatIdRef.current !== null && shownThreadChatIdRef.current !== chatId) {
       oneTranscriptRevisionRef.current += 1;
       shownThreadChatIdRef.current = null;
@@ -4229,9 +4239,9 @@ function OneSessionsShell() {
         // Recovery is independent of a parent receipt; even an uncertain
         // start without a run receipt must keep each original held text visible.
         setHeldFollowupRecovery(steeringRecovery);
-        // Directions waiting behind the live run are kept in Main's queue; this strip is local and is dropped on a
-        // room switch, so coming back rebuilds it from Main (production 2026-10-05: an owner direction to the Thread
-        // room "disappeared" after visiting another room while it was still queued).
+
+
+
         const waiting = attachment?.queuedSteers ?? [];
         setQueuedSteers((current) => current.some((item) => item.chatId === chatId) || waiting.length
           ? [...current.filter((item) => item.chatId !== chatId), ...waiting.map((queued) => ({ id: queued.id, text: queued.text, chatId }))]
@@ -4245,6 +4255,9 @@ function OneSessionsShell() {
       const ledgerEvents = !attachment && durableReceipt
         ? await api.runLedger.events(durableReceipt.runId, 500).catch(() => [])
         : [];
+      const lateOutputs = await readRunOutputsAfterWindow(api, durableReceipt?.runId, ledgerEvents);
+      // Each run's block draws its first 400 events; a longer run lists the outputs it wrote past them too.
+      const windowedTimeline = await withLateRunOutputs(api, chatTimeline, THREAD_RUN_EVENTS_PER_RUN);
       const durableSurface = taskId && taskReceipt?.runId
         ? await api.invoke.latestOneSurface({
             runId: taskReceipt.runId,
@@ -4258,7 +4271,7 @@ function OneSessionsShell() {
       // Every settled run of this conversation becomes its own turn block. The
       // live run (attachment) is drawn from live state and excluded at render.
       if (threadRunsChatIdRef.current === chatId) {
-        setThreadRuns(projectThreadRuns(chatTimeline));
+        setThreadRuns(projectThreadRuns(windowedTimeline));
       }
       // This effect can finish after another turn has started. In that case its
       // receipt belongs to the prior run and may restore only transcript data,
@@ -4266,7 +4279,7 @@ function OneSessionsShell() {
       const durableActivityStillOwnsScreen = !activityRunIdRef.current
         || activityRunIdRef.current === durableReceipt?.runId;
       if (!liveRunOwnsThread && !newerLiveRunOwnsThread && !attachment && durableActivityStillOwnsScreen && ledgerEvents.length > 0) {
-        const restoredActivity = projectOneActivityFromLedger(ledgerEvents, durableReceipt);
+        const restoredActivity = projectOneActivityFromLedger(ledgerEvents, durableReceipt, lateOutputs);
         activityEventRunIdRef.current = durableReceipt?.runId ?? null;
         setActivityStateRunId(durableReceipt?.runId ?? null);
         setActivity(restoredActivity);
@@ -4334,11 +4347,11 @@ function OneSessionsShell() {
       if (!cancelled) {
         requestOneOperationalRecovery("one-refresh", cause);
         setError(null);
-        /*
-         * ★대화를 못 읽었는데 화면에는 "대화를 시작해 보세요" 빈 화면이 떴다
-         *   (실측 2026-09-08). 자기 대화가 지워진 것처럼 보인다.
-         *   복구는 뒤에서 돌더라도, 지금 보고 있는 사람에게는 사실을 말해야 한다.
-         */
+        
+
+
+
+
         setActionNotice(appLocale === "ko"
           ? "이 대화를 불러오지 못했습니다. 지워진 것이 아니라 읽지 못한 것입니다 — 다시 열어 보세요."
           : "This conversation could not be loaded. It was not deleted — the read failed. Try opening it again.");
@@ -4405,12 +4418,12 @@ function OneSessionsShell() {
   }, [activeThreadChatId, messages]);
   const composerAlwaysApproval = useChatAlwaysApproval(activeThreadChatId);
   const onePermissionLabel = `${onePermission === "auto" ? (appLocale === "ko" ? "자동 모드" : "Auto mode") : onePermission === "read" ? (appLocale === "ko" ? "읽기 전용" : "Read only") : onePermission === "write" ? (appLocale === "ko" ? "파일 편집" : "Accept file edits") : (appLocale === "ko" ? "전체 액세스" : "Full access")}${composerAlwaysApproval.enabled ? (appLocale === "ko" ? " · 항상 승인" : " · Always approve") : ""}`;
-  /*
-   * ★머리말·담당·작성창 문구는 **지금 연 대화**로 판정한다 (좌석 전환 실측 2026-09-26).
-   *   activeThreadChat 은 런타임 탐지와 함께 늦게 도착해, 그 사이(격리 앱에서 1.5~2.4초)
-   *   본문은 새 좌석인데 머리말·"…에게 메시지"·조직도 선택은 앞 좌석으로 남았다.
-   *   조회가 오기 전에는 방금 연 대화 객체(conversation)를 쓰고, 앞 대화의 것은 쓰지 않는다.
-   */
+  
+
+
+
+
+
   const activeThreadChatNow = activeThreadChat?.id === activeThreadChatId
     ? activeThreadChat
     : (conversation?.id === activeThreadChatId ? conversation : null);
@@ -4547,31 +4560,31 @@ function OneSessionsShell() {
     onePaneCommitWaiterRef.current.observe(selectedConversationId, activeThreadChatId);
   }, [activeThreadChatId, selectedConversationId]);
   useEffect(() => () => onePaneCommitWaiterRef.current.dispose(), []);
-  /*
-   * 세션 목록 — **하나의 목록**이다 (오너 결정 2026-08-24).
-   *
-   * 예전에는 시간으로 묶고 그 아래에 작업 목록을 따로 붙였다. 화면에서는 "지난 7일" 과
-   * "최근" 이 갈려 보였고, 같은 날 대화가 서로 다른 덩어리에 흩어졌다. 사람이 찾는 것은
-   * 날짜가 아니라 대화이므로, 최근 순으로 한 줄씩 세운다.
-   *
-   * 각 줄에 붙는 것은 상태 문구("결과 확인")가 아니라 **누구와 한 대화인지**다 — One,
-   * 단톡방 이름, 또는 그 에이전트의 표시 이름. 상태는 점 하나로 족하다.
-   *
-   * 30일 넘게 손대지 않은 것만 접어 둔다 — 사용자가 직접 정리하게 만들지 않는다.
-   */
+  
+
+
+
+
+
+
+
+
+
+
+
   /**
    * 옆에 세워 둘 칸. 지금 보고 있는 대화는 왼쪽 첫 칸이므로 목록에서 뺀다 —
    * 빼지 않으면 같은 대화가 두 칸에 떠서 어느 쪽이 진짜인지 알 수 없다.
    * 사라진 대화 id 는 조용히 버린다(세션이 지워져도 화면이 깨지지 않아야 한다).
    */
   /**
-   * 나간 팀원 표시.
-   *
-   * 자리를 뜬 팀원의 대화가 그냥 열리기만 하면, 사용자는 답이 왜 One 말투로
-   * 바뀌었는지 알 길이 없다. 나간 사실을 대화 안에 회색 줄로 남긴다
-   * (오너 결정 2026-08-24). 나간 시각 뒤의 첫 메시지 앞에 놓아, 언제부터
-   * One 이 대신 받고 있는지가 시간 순서로 드러나게 한다.
-   */
+
+
+
+
+
+
+ */
   const departureNotices = useMemo(() => {
     const chatId = activeThreadChatId;
     if (!chatId) return [] as Array<{ id: string; at: number; label: string }>;
@@ -4583,12 +4596,12 @@ function OneSessionsShell() {
     const notices: Array<{ id: string; at: number; label: string }> = [];
     for (const agentId of agentIds) {
       const member = memberByAgent.get(agentId);
-      /*
-       * 조직에 없는 id 를 "나갔다"로 읽으면 안 된다. 조직이 아직 안 실려 왔을
-       * 때도, 애초에 팀원 자리가 아닌 대화일 때도 같은 모양이라서 One 대화에
-       * "나간 팀원 나갔습니다" 가 떴다(실측 2026-08-24). 나간 시각이 실제로
-       * 적혀 있고 이름을 아는 경우에만 줄을 남긴다.
-       */
+      
+
+
+
+
+
       if (!member || !member.archivedAt) continue;
       const name = (appLocale === "ko" ? member.displayName : member.nameEn || member.displayName).trim();
       if (!name) continue;
@@ -4647,12 +4660,12 @@ function OneSessionsShell() {
       task: taskByChat.get(chat.id) ?? null,
       sortAt: latestIso(chat.lastActivityAt ?? chat.updatedAt, sessionActivityBumps[chat.id]),
     }));
-    /*
-     * 작업은 **줄을 따로 세우지 않는다** (오너 결정 2026-08-24: "두 개 합치라").
-     * 예전에는 대화 줄과 작업 줄이 각각 서서, 같은 일이 두 번 보이고 한쪽에는 이름 대신
-     * "결과 확인" 같은 상태 문구가 붙었다. 작업은 그 대화의 상태일 뿐이므로 점으로만 쓴다.
-     * 대화가 아직 없는 작업만(드물다) 한 줄을 얻는다.
-     */
+    
+
+
+
+
+
     for (const item of projections) {
       if (item.chatId) continue;
       rows.push({ kind: "task" as const, key: `task:${item.taskId}`, task: item, chat: null, sortAt: item.status.asOf });
@@ -4744,14 +4757,14 @@ function OneSessionsShell() {
   ])), [visibleMessages]);
   // 활성 세션의 좌석 1급 조회(SEAT-SESSION-PLAN-v2) — 해체(T7) 여부가 읽기 전용
   // 아카이브 배너·전송 대체 CTA 를 결정한다. 좌석이 없거나 조회가 실패하면 평소대로.
-  /*
-   * ★좌석 조회 결과는 **어느 대화의 것인지와 함께** 들고 있는다 (오너 녹화 2026-09-26).
-   *   예전에는 좌석만 담아 두어, 다른 좌석으로 옮긴 직후 새 조회가 오기 전까지 **앞 대화의
-   *   좌석**으로 새 대화를 판정했다. 새 대화의 담당(B)이 앞 좌석 점유자(A)에 없으니
-   *   "이 세션의 에이전트가 사라졌습니다" 빨간 띠와 "메시지를 입력할 수 없습니다"가
-   *   잠깐 떴다가 사라졌다(격리 앱 실측: 좌석 전환마다 띠 삽입 2회). 조회가 도착하기
-   *   전에는 좌석을 "모른다"로 두고, 모르는 것으로는 막지 않는다.
-   */
+  
+
+
+
+
+
+
+
   const [activeSeatRead, setActiveSeatRead] = useState<{ chatId: string; seat: OneSeatView | null } | null>(null);
   useEffect(() => {
     const chatId = activeThreadChatId;
@@ -4765,12 +4778,12 @@ function OneSessionsShell() {
   }, [activeThreadChatId, taskforces]);
   const activeSeat = activeSeatRead && activeSeatRead.chatId === activeThreadChatId ? activeSeatRead.seat : null;
   const activeSeatDissolved = Boolean(activeSeat?.dissolvedAt);
-  /*
-   * 빈 자리(§4-2·T10). 담당 봇이 삭제되면 좌석은 남고 점유만 닫힌다 — 그때 화면이
-   * 헤더를 "One"으로 그리면 **누구와 하는 대화인지 거짓말을 한다**(라이브 실측으로 잡음:
-   * 삭제된 팀원의 방에 보낸 말에 One 이 조용히 답했다). 빈 자리는 빈 자리로 말하고,
-   * 앉힐 사람을 그 자리에서 고르게 한다. 전송 자체는 막지 않는다(기획 §4-3).
-   */
+  
+
+
+
+
+
   const activeSeatEmpty = Boolean(activeSeat && !activeSeat.dissolvedAt && activeSeat.occupants.length === 0);
   const activeChatRecord = useMemo(
     () => conversations.find((chat) => chat.id === activeThreadChatId) ?? conversation ?? null,
@@ -4801,18 +4814,18 @@ function OneSessionsShell() {
   const activeTaskforceAgentIds = useMemo(() => {
     if (!activeTaskforce) return [];
     const members = oneOrgState?.members ?? [];
-    /*
-     * ★좌석을 **설치본 id 하나로만** 찾으면 빌려온 좌석이 사라진다.
-     *
-     * 웹 One 에는 "이 기계에 설치된 것"이라는 개념이 없어 Hub 대여 좌석의
-     * `installedAgentId` 가 방 명단의 값과 맞지 않는다. 그래서 그 좌석은 방에 멀쩡히
-     * 앉아 있고 목록도 정상으로 돌아오는데 **"이번 턴" 지목 후보에서만 통째로
-     * 빠졌다** — 돈 내고 빌린 자리에 부분 지목을 쓸 수 없었다(웹 실측 2026-08-26).
-     *
-     * 좌석의 정체는 하나가 아니다. 설치본 id · 좌석 id · 슬러그 중 무엇으로 불려도
-     * 같은 좌석이다. 걸러 내려던 것(보관됨·잠김·실패)은 그대로 걸러진다.
-     * 이 파일은 웹으로 그대로 복사되므로 수리는 여기(정본)에 둔다.
-     */
+    
+
+
+
+
+
+
+
+
+
+
+
     const byAnyId = new Map<string, typeof members[number]>();
     for (const member of members) {
       for (const key of [member.installedAgentId, member.id, member.agentSlug]) {
@@ -4845,8 +4858,8 @@ function OneSessionsShell() {
   // 좌석 에이전트가 패키지에 선언한 추천 작업(defaultPrompts). 어느 에이전트의 것인지와 함께 든다.
   const [seatSuggestionRead, setSeatSuggestionRead] = useState<{ agentId: string; items: OneSeatSuggestion[] } | null>(null);
   const activeSeatMemberAgentId = activeOneMember?.installedAgentId ?? null;
-  // Owner 2026-10-13: a teammate's 1:1 seat also shows what it did in group rooms, in time order, marked "@room".
-  // Room work runs in division sessions under each room, so it is read separately and never mixed into this chat's pages.
+
+
   const seatRoomWorkAgentId = activeOneMember && activeThreadChatNow?.kind !== "division" && !activeTaskforce ? activeOneMember.installedAgentId : null;
   const [seatRoomWork, setSeatRoomWork] = useState<{ agentId: string; rows: Array<UiMessage & { room: { chatId: string; title: string; sessionChatId: string } }> } | null>(null);
   useEffect(() => {
@@ -4914,12 +4927,12 @@ function OneSessionsShell() {
     });
     return () => { cancelled = true; };
   }, [activeThreadChatId]);
-  /*
-   * Owner 2026-10-18: a held follow-up showed as a card of jargon ("재시작 뒤 외부 효과가 불확실해 보류했습니다 … 새 지시로
-   * 결정하세요") with no button to send or drop it. Main holds an owner-written direction whose delivery a restart made
-   * uncertain and never replays it. The owner's own text goes back into the composer once, like Stop does, and the
-   * owner sends or deletes it. No notice.
-   */
+  
+
+
+
+
+
   useEffect(() => {
     const chatId = activeThreadChatId;
     if (!chatId) return;
@@ -5185,11 +5198,11 @@ function OneSessionsShell() {
 
   useEffect(() => {
     if (!composerMenu) return;
-    /*
-     * ★닫으면 초점이 body 로 떨어졌다 (대화상자 실측 2026-09-08: 모델·추론 강도·권한 3개).
-     *   작성창 바로 위의 메뉴라 닫은 뒤엔 원래 있던 자리로 돌아가야 한다 —
-     *   안 그러면 키보드로는 문서 맨 위부터 다시 Tab 해야 한다.
-     */
+    
+
+
+
+
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const dismiss = (event: PointerEvent) => {
       const target = event.target as HTMLElement | null;
@@ -5314,20 +5327,20 @@ function OneSessionsShell() {
       if (idleCheck) { clearTimeout(idleCheck); idleCheck = null; }
       if (handoffRetry) { clearTimeout(handoffRetry); handoffRetry = null; }
       if (!chatIds.includes(chatId)) {
-        /*
-         * ★ 실시간이 안 왔는데 서버는 끝났다고 한다 (2026-08-24 프로덕션 실측).
-         *
-         * 웹은 실행마다 새 실시간 연결을 연다. 그 연결이 안 열리면 답이 만들어지고
-         * 크레딧까지 나갔는데도 **화면에는 아무것도 안 온다** — 새로고침해야만 보였다.
-         * 데스크탑 앱은 항상 연결된 통로를 써서 이 일이 없다.
-         *
-         * 실시간을 고치는 것과 별개로, **답을 놓치는 길은 막아 둔다.** 서버가 그 대화에
-         * 도는 실행이 없다고 하면, 우리가 기다리던 실행은 이미 끝난 것이다. 그때 평소
-         * 완료 때와 같은 경로로 대화를 다시 받아 온다.
-         *
-         * 곧바로 하지 않고 잠깐 기다리는 이유: 진짜 완료 신호가 오는 중일 수 있다.
-         * 그 사이에 도착하면 이 자리는 아무것도 하지 않는다.
-         */
+        
+
+
+
+
+
+
+
+
+
+
+
+
+
         if (runIdRef.current) {
           const missedRunId = runIdRef.current;
           const missedTaskId = runTaskIdRef.current;
@@ -5366,10 +5379,10 @@ function OneSessionsShell() {
             if (runIdRef.current || runChatIdRef.current !== chatId) return;
             void api.invoke.activeChats().then((active) => {
               if (active.includes(chatId) || runIdRef.current) return;
-              // A queued direction whose run this screen never attached to (see
-              // the hand-off retry below) may already have answered. Its answer
-              // lives in the durable transcript: read it rather than leaving the
-              // conversation ending on the instruction (QA 2026-09-27).
+
+
+
+
               const unattachedQueue = queuedSteersRef.current.some((item) => item.chatId === chatId);
               setQueuedSteers((current) => current.filter((item) => item.chatId !== chatId));
               if (unattachedQueue) withdrawQueuedNotice();
@@ -5382,15 +5395,15 @@ function OneSessionsShell() {
         return;
       }
       if (runIdRef.current) {
-        /*
-         * ★ An interrupting direction starts its run while the interrupted run
-         * still owns this screen (QA 2026-09-27: "새 지시를 저장했습니다" stayed up,
-         * the answer landed in the transcript at +14s and never appeared). The
-         * chat never goes idle between the two runs, so this broadcast is the
-         * only one until the new run ends — returning here lost the hand-off.
-         * Wait for the old run's projection to clear, then attach to whatever
-         * Main is running now.
-         */
+        
+
+
+
+
+
+
+
+
         if (queuedSteersRef.current.length === 0) return;
         const waitingOn = runIdRef.current;
         let tries = 0;
@@ -5745,8 +5758,8 @@ function OneSessionsShell() {
 
   const submitTextRef = useRef<((text: string, resume?: FirstSendEntry) => Promise<void>) | null>(null);
   const resumePausedFollowup = useCallback(async (intent: OneFollowupIntent) => {
-    // "Send again" on a direction for a turn that has since ended cannot reach that turn any more; retrying it only
-    // re-paused the card (room "Youtube launch", 2026-10-11). The owner asked to send it, so it goes as a new message.
+    
+
     if (intent.currentTurnRunId && activeThreadChatIdRef.current === intent.chatId) {
       const api = ipc();
       const current = await api?.invoke.currentTurn(intent.chatId).catch(() => undefined);
@@ -6142,10 +6155,10 @@ function OneSessionsShell() {
         : "The request ID could not be preserved across a restart, so the run was not sent. Check Desktop storage.");
       return { status: "no-dispatch", runId };
     }
-    // Main may spend seconds admitting (preflight judges, runtime checks) before it
-    // lists this chat as active. Until invoke.run answers, "not active" means "not
-    // yet", never "already finished" (QA 2026-09-27: settled 0.7s after sending,
-    // the stream stayed blank and the answer appeared ~9s late).
+
+
+
+
     admittingRunIdsRef.current.add(runId);
     try {
       const startAnswer = await api.invoke.run({
@@ -6366,30 +6379,30 @@ function OneSessionsShell() {
       if (options?.attachments) {
         await api.oneAttachments.discard({ ref: options.attachments.ref }).catch(() => ({ discarded: false }));
       }
-      /*
-       * ★실행이 시작되지 않았는데 **쓴 글이 사라지고 아무 말도 없었다**
-       *   (보내기 실패 실측 2026-09-08). 화면은 처음 화면으로 돌아가 있어서
-       *   사용자는 자기 글이 어디로 갔는지 알 방법이 없었다.
-       *   Work 는 같은 상황에서 글을 작성창에 되돌리고 이유를 말한다. 맞춘다.
-       */
-      /*
-       * (2026-10-11) The text is no longer put back in the composer: the message is already in the transcript
-       *   (Main saves it when it is accepted), and a refusal that needs the owner is one neutral line.
-       * ★한 번만 되돌리면 지워진다: 실패 직후 화면이 방금 만든 대화(또는 홈)로
-       *   옮겨가고, 그 순간 초안 복원 효과가 **빈 초안**을 덮어쓴다(실측 2026-09-08:
-       *   되돌려 놓아도 입력창이 계속 비어 있었다). 자리 이동이 끝난 뒤 한 번 더 본다 —
-       *   그 사이 사용자가 새로 쓰기 시작했으면 건드리지 않는다.
-       */
+      
+
+
+
+
+
+      
+
+
+
+
+
+
+
       setActionNotice(controlFailure?.message ?? (options?.promptOrigin
         ? (normalizedLocale === "ko" ? "이 대화의 자동 이어가기를 시작하지 못했습니다." : "Automatic continuation could not start in this conversation.")
         : normalizedLocale === "ko"
         ? "이 메시지는 실행되지 못했어요. 모델 연결과 사용 한도를 확인한 뒤 다시 보내 주세요."
         : "This message could not run. Check the model connection and usage limits, then send it again."));
       await refreshAll();
-      // A recovery turn may only be about this request. The owner's own message qualifies only when Main kept it in
-      // the transcript (a refusal after reservation saves it); otherwise the recovery could only read the room's
-      // older request and answer that instead (production Yotube 8f3e09ee, run bc515c4b). The message itself stays
-      // visible as a saved send shown as not sent.
+      
+
+
+
       if (!options?.promptOrigin && !(await ownerRequestInTranscript(chatId, text, optimisticStartedAt))) return { status: "rejected", runId };
       if (!controlFailure && !isChatBusyFailure(cause)) requestOneOperationalRecovery("one-run-start", cause, { chatId });
       return { status: "rejected", runId };
@@ -6474,10 +6487,10 @@ function OneSessionsShell() {
     } catch (cause) {
       const failures = (autoResolveFailuresRef.current.get(proposal.proposalId) ?? 0) + 1;
       autoResolveFailuresRef.current.set(proposal.proposalId, failures);
-      // A proposal is bound to one exact Task version, roster and runtime. When Main says that binding is gone,
-      // asking again can never succeed — only a fresh proposal can. Stop on this one and hand the text back.
-      // Any run started in this room (a recovery turn too) moves that Task and ends the binding, so nothing may
-      // ask One to recover while an attempt is still to come (P17 replay 2026-10-16; production 1.3.47 Yotube).
+
+
+
+
       const step = oneTeamPreflightAutoStartStep({
         code: oneTeamPreflightFailureCode(cause),
         failures,
@@ -6520,8 +6533,8 @@ function OneSessionsShell() {
           : (ko
             ? "팀 확정을 마치지 못해 시작하지 않았어요. 보낸 글은 작성창에 되돌려 두었어요."
             : "The team could not be confirmed, so nothing started. Your message is back in the composer."));
-      // No recovery turn: the owner's exact request is back in the composer, not in Main's transcript, so a recovery
-      // turn could only answer the room's older request in its place (production Yotube 8f3e09ee, run bc515c4b).
+      
+
     } finally {
       if (autoResolvingProposalRef.current === proposal.proposalId) autoResolvingProposalRef.current = null;
       setTeamPreflightBusy(false);
@@ -6541,12 +6554,12 @@ function OneSessionsShell() {
   const answerWorkforceConsent = useCallback(async (accepted: boolean) => {
     const api = ipc();
     const proposal = teamPreflight;
-    /*
-     * 예전에는 세 조건 중 하나만 없어도 조용히 돌아갔다. 카드는 서버가 들고
-     * 있는 제안 상태로 뜨는데 누를 근거(pendingTeamPrompt)는 이 화면의 메모리에만
-     * 있어서, 새로고침하거나 다른 대화를 다녀오면 "아무리 눌러도 무반응" 이
-     * 됐다(오너 지적 2026-08-24). 낼 수 있는 카드에는 누를 길이 있어야 한다.
-     */
+    
+
+
+
+
+
     if (!proposal) return;
     if (runIdRef.current) {
       setError(appLocale === "ko"
@@ -6722,14 +6735,14 @@ function OneSessionsShell() {
     const rawReply = text.trim();
     const explicitValue = composeMessageReply(rawReply, submittedReply);
     if (!rawReply && attachmentSnapshot.length === 0) return;
-    /*
-     * Main refuses a turn over its byte budget (store/one-preflight-steers: 200KB for a
-     * request, 32KB for a follow-up queued before the first run starts). Measured
-     * 2026-09-27 with a 243k-character paste: the screen showed the machine code
-     * `one_preflight_invalid_prompt`, and the failure also raised an operational
-     * recovery turn that answered the *previous* message a second time. Say the limit
-     * here, keep the text, and start nothing.
-     */
+    
+
+
+
+
+
+
+
     const promptBytes = new TextEncoder().encode(explicitValue).length;
     const promptByteLimit = teamPreflightBusy ? 32_000 : 200_000;
     if (promptBytes > promptByteLimit) {
@@ -6885,12 +6898,12 @@ function OneSessionsShell() {
       }
       return;
     }
-    // 단톡방의 모든 오너 글은 One 의 방 경로(오케스트레이터 → Goal·전략·전술·타깃 → 팀 디스패치)로 간다.
-    // 방은 토론장이 아니라 One 이 진행하고 팀원이 일하는 곳이다(오너 2026-10-12). 토론 엔진으로 보내는 길은 닫았다 —
-    // 2026-10-11 Yotube 브리프가 토론으로 흡수돼 Goal 이 만들어지지 않았다.
-    // 화면은 한가해 보여도 Main 은 이 대화의 끝난 턴을 아직 정리·검증하는 중일 수 있다. 그때 새 실행을
-    // 시작하면 Main 이 거절해 요청이 사라졌다(2026-09-26 QA 0b03862a: invocation_cleanup_pending →
-    // 20초 뒤 옛 목표만 재개). 그 경우 새 요청은 줄에 세우고 정리가 끝나면 바로 돌린다.
+
+
+
+
+
+
     let settlingChatId: string | null = null;
     if (!resume && !busy && attachmentSnapshot.length === 0 && activeThreadChatIdRef.current) {
       const threadChatId = activeThreadChatIdRef.current;
@@ -7044,12 +7057,12 @@ function OneSessionsShell() {
           || classifyOneRequestIntent(runPrompt) === "task"
           ? "task"
           : "conversation";
-        /*
-         * 단톡방은 그 자체가 "여럿이 있는 자리"다. 그런데 편성 조건에 방의
-         * 존재가 없어서, 칩을 일일이 붙이지 않으면 3명짜리 방에서도 One 혼자
-         * 답했다(오너 지적 2026-08-24 "one만 일하냐?"). 방에 살아 있는 팀원이
-         * 있으면 그 방의 말은 팀의 일이다.
-         */
+        
+
+
+
+
+
         const taskforceForChat = taskforces.find((item) => item.chatId === chatId) ?? null;
         const taskforceMemberIds = taskforceForChat
           ? taskforceForChat.memberAgentIds.filter((agentId) => {
@@ -7438,10 +7451,10 @@ function OneSessionsShell() {
         return;
       }
       if (isPreviousOneSendPending(cause) && !runIdRef.current) {
-        // Main still prepares an earlier message of this room (another window, or one sent just before). That is a
-        // state, not a fault: the text stays in the conversation as not sent, with a one-tap resend, and no
-        // operational recovery turn starts (release peer 2026-10-16: the refusal became recovery run 14815f00 and
-        // the owner's resent text was never saved).
+        
+
+
+
         setMessages((current) => current.filter((item) => item.id !== preflightId));
         holdFirstSend(firstSend.chatId, preflightSubmissionId, "previous_pending");
         setActionNotice(appLocale === "ko"
@@ -7470,20 +7483,20 @@ function OneSessionsShell() {
         settleFirstSend(firstSend.chatId, preflightSubmissionId);
         return;
       }
-      /*
-       * ★여기까지 왔다는 것은 **실행이 시작되지 않았다**는 뜻이다. 그러면 사용자의
-       * 글과 사진은 어디에도 없다 — Main 은 실행에 들어가야 그 턴을 저장하고(
-       * mcp/client.ts persistUserMessage), 화면의 낙관적 줄은 메모리에만 있어서
-       * 다음 기록 새로고침에 사라진다.
-       *
-       * 오너 실사용 2026-09-07: "내가 보낸 메세지가 자꾸 없어진다 사진도 없어지고".
-       * 위 두 갈래(새 대화 실패·첨부 준비 실패)만 초안을 되돌려 주고, **그 외 전부**는
-       * 아무것도 되돌리지 않았다. 실행 전에 던지는 길은 그 둘 말고도 많다 —
-       * 팀 preflight, 워크스페이스 영수증, IPC, 그리고 Main 이 저장 전에 던지는 모든 것.
-       *
-       * 실패는 사용자가 쓴 것을 없앨 이유가 아니다. 되돌려 주고, 화면에서도 그 줄을
-       * 지운다 — 기록에 없는 줄을 남겨 두면 "보냈다"고 읽히고 새로고침 때 또 사라진다.
-       */
+      
+
+
+
+
+
+
+
+
+
+
+
+
+
       if (!runIdRef.current) {
         setMessages((current) => current.filter((item) => item.id !== preflightId));
         setComposer((current) => {
@@ -7500,17 +7513,17 @@ function OneSessionsShell() {
         setTurnAgentIds(turnAgentIds);
         settleFirstSend(firstSend.chatId, preflightSubmissionId);
       }
-      /*
-       * ★되돌려 주는 것만으로는 부족하다 — **왜 안 갔는지**도 말해야 한다 (2026-09-08).
-       *
-       *   위 두 갈래(새 대화 실패·첨부 준비 실패)만 문구를 냈고, **그 밖의 전부**는
-       *   글만 조용히 작성창으로 돌아왔다. 사용자 입장에서는 보낸 글이 되돌아온 것과
-       *   아무 일도 안 일어난 것이 구별되지 않는다.
-       *   오너 2026-09-07: "아무것도 안떠서 되는지 안 되는지 알 수 없잖아".
-       *
-       *   `setError` 는 이 화면에서 **한 번도 그려지지 않는 상태**였다(설정만 하고 읽는
-       *   자리가 없다). 그래서 이미 화면에 그려지는 actionNotice 로 낸다.
-       */
+      
+
+
+
+
+
+
+
+
+
+
       const raw = failureMessage(cause);
       const controlFailure = goalAdmissionControlFailure(cause, appLocale === "ko");
       if (unsupportedInputMessage) {
@@ -7545,12 +7558,12 @@ function OneSessionsShell() {
               : `The message was not sent${reason ? `: ${reason}` : "."} Your text and attachments are still in the composer; send it again.`;
           })()),
       );
-      /*
-       * ★No operational recovery turn for a request refused before it started (release peer 2026-10-16; production
-       *   Yotube 8f3e09ee 04:00Z, run bc515c4b). The refused request is not in Main's transcript — it is back in the
-       *   composer — so a recovery turn could only read the room's older task and answered "the original work is
-       *   done, nothing is left" in its place. The owner's exact request stays with the owner instead.
-       */
+      
+
+
+
+
+
       setError(null);
     } finally {
       releaseParentReadiness();
@@ -7820,8 +7833,8 @@ function OneSessionsShell() {
         state.attemptsSpent = verification.attempt ?? state.attemptsSpent + 1;
         const nextRecoveryRunId = verification.nextRecoveryRunId;
         if (!nextRecoveryRunId) { setAutoRecovery({ phase: "stopped", reason: "undecided", diagnosis: safeDiagnosis }); return; }
-        // One start per recovery id: a refused start (native_gui_original_start_replayed) asked again for the same id
-        // and restarted it about five times a second, flashing the room between busy and idle (Yotube, 2026-10-14).
+        
+
         if (attemptedRecoveryRunIdsRef.current.has(nextRecoveryRunId)) { setAutoRecovery({ phase: "stopped", reason: "undecided", diagnosis: safeDiagnosis }); return; }
         attemptedRecoveryRunIdsRef.current.add(nextRecoveryRunId);
         state.originalRunId = verification.originalRunId;
@@ -7959,8 +7972,8 @@ function OneSessionsShell() {
       setConfirmations(answeredConfirmationsRef.current.apply(pending));
       return stillPending;
     };
-    // While a run is going the answer goes to that run, like a typed message (steer or queue). A continuous Goal room is
-    // always running, so "press again when it finishes" left its cards greyed out forever (owner 2026-10-14, X Marketing).
+
+
     if (api && busy) {
       if (!projectedTask && !isActiveOneConversation) return;
       // One answer per question: "항상 승인" answers through two handlers, and a second commit was refused as stale.
@@ -7985,11 +7998,11 @@ function OneSessionsShell() {
       || (!projectedTask && !isActiveOneConversation)
       || (shouldStart && projectedTask && !projectedTask.truth.mayStartExecution)
     ) return;
-    /*
-     * 카드는 누른 순간 닫는다(오너 2026-09-27: "제출하면 바로 스무스하게 전달되야지").
-     * 예전에는 영수증 조회 → 확정 IPC 두 번을 기다린 뒤에야 카드가 사라져 눌렀는지 알 수 없었다.
-     * 확정이 거절되면 아래 catch 가 Main 의 대기 목록을 다시 읽어 카드를 되살린다.
-     */
+    
+
+
+
+
     if (!answeredConfirmationsRef.current.claim(confirmation)) return;
     setConfirmations((items) => items.filter((item) => item.sourceMessageId !== confirmation.sourceMessageId));
     /*
@@ -8084,16 +8097,16 @@ function OneSessionsShell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy, conversation?.id, conversation?.originSurface, onePermission, projections, startRun, submit]);
 
-  /*
-   * "항상 승인"은 그 대화 안에서만 산다.
-   *
-   * 승인 시트가 물어보는 것은 "이 대화에서 지금 하려는 일을 해도 되느냐"이므로, 한 번
-   * 준 허락도 그 대화를 넘지 않는다. 전역으로 두면 사용자가 다른 맥락에서 기억하지 못하는
-   * 허락이 남는다(오너 결정 2026-08-15: 승인은 묻는 순간, 그 대화 안에서만).
-   *
-   * 저장이 화면 상태가 아니라 localStorage 인 이유: 앱을 껐다 켜면 잊는 허락은 사용자
-   * 입장에서 "눌렀는데 또 묻는다"가 되고, 그러면 아무도 두 번째부터 신뢰하지 않는다.
-   */
+  
+
+
+
+
+
+
+
+
+
   const markChatAlwaysApproved = useCallback(async (confirmation: PendingConfirmation) => {
     manualAlwaysApprovalRef.current.add(confirmation.sourceMessageId);
     try {
@@ -8129,9 +8142,9 @@ function OneSessionsShell() {
         // Main's commitAnswer still validates the exact pending source ID.
         if (cancelled) return;
         if (!approved || manualAlwaysApprovalRef.current.has(auto.sourceMessageId)) continue;
-        // "Always approve" is a permission grant ("may I do this?"), like a CLI's bypass mode. A question with a real
-        // choice is never answered for the owner: the first option was posted as the owner's own message and acted on
-        // (X Marketing 2026-10-14 21:21 KST, "조회 자동화 생성" created and enabled an automation).
+        
+
+
         if (!isPermissionOnlyConfirmation(auto)) continue;
         const reply = firstApprovalLabel(auto) ?? "Approve. Proceed with the proposed action.";
         await answerConfirmation(auto, reply);
@@ -8272,11 +8285,11 @@ function OneSessionsShell() {
     }
     return (async () => {
       try {
-        /*
-         * 새 세션(오너 2026-09-26): 좌석을 누르면 늘 **마지막 대화**가 열려서, 좌석 에이전트와
-         * 처음부터 다시 시작할 길이 없었다. fresh 는 같은 좌석으로 빈 대화를 새로 만든다 —
-         * createChat 이 좌석을 붙이므로 담당·좌석 판정은 기존 대화와 같다.
-         */
+        
+
+
+
+
         // fresh reuses this teammate's still-empty chat (Main) so repeated clicks never stack empty chats.
         const chat = await api.chats.openOneMember({ agentId: member.installedAgentId, title: member.displayName, ...(options?.fresh ? { fresh: true } : {}) });
         const paneCommit = onePaneCommitWaiterRef.current.wait(chat.id);
@@ -8299,12 +8312,12 @@ function OneSessionsShell() {
           throw cause;
         }
         await paneCommit;
-        /*
-         * 좌석이 실패로 표시됐는데 그 실패는 다른 대화(예: 방)의 실행에서 났다면, 1:1 창은 비어 있어
-         * "실패"라는 말만 있고 이유가 없다(오너 2026-10-12, Motiondirector). 마지막 실패의 사유를 이
-         * 창에 카드로 보인다. chatId 를 떼서 다시 시도는 막고(다른 대화에서 몰래 돌지 않게), 'One에게
-         * 맡기기'는 지금 이 창에서 돌게 한다.
-         */
+        
+
+
+
+
+
         if (member.statusKind === "failed" && !options?.fresh) {
           const failure = await api.runLedger.failures({ agentId: member.installedAgentId, limit: 1 }).then((items) => items[0] ?? null).catch(() => null);
           if (failure && failure.chatId !== chat.id) {
@@ -8379,12 +8392,12 @@ function OneSessionsShell() {
    * 되살린 척하지 않고, 같은 질문을 다시 보내는 길만 정직하게 연다.
    */
   /**
-   * ★ 재시도는 원 실행의 모델로 간다 (UX-2, 2026-09-05).
-   * 실패·미응답 턴의 "다시 시도"가 컴포저의 *지금* 선택으로 나가, 사용자가 그 턴에 고른
-   * 모델이 재시도 한 번에 바뀌었다(실측: 원 실행 qwen3-32b → 재실행 qwen3-235b).
-   * 원장 final 이 남긴 실행 모델이 현재 런타임의 선택지 안에 있을 때만 그 모델을 싣는다 —
-   * 런타임이 바뀌어 그 모델을 고를 수 없으면 모르는 조합을 지어내지 않고 컴포저 선택을 쓴다.
-   */
+
+
+
+
+
+ */
   const runtimeSelectionForRetry = useCallback((originalModel: string | null | undefined): RuntimeSelection | undefined => {
     const model = originalModel?.trim();
     if (!model || !oneRuntimeSelection || oneRuntimeSelection.model === model) return oneRuntimeSelection;
@@ -8930,13 +8943,13 @@ function OneSessionsShell() {
     // A runtime navigation updates the available view; only an explicit
     // person action may reveal a closed panel.
   }, []);
-  /*
-   * 산출물이나 터미널 기록이 하나라도 있으면 오른쪽 패널을 저 혼자 열던 자리
-   * (제거, 오너 지시 2026-08-24 "우측사이드바 디폴트로 접히고"). 열림 상태가
-   * 저장까지 돼서, 한 번 무언가를 만든 뒤로는 모든 대화가 패널을 편 채로
-   * 시작했다(실측: 지운 직후에도 다시 true 로 저장됨). 결과는 이제 대화 안의
-   * 결과 카드로 알리고, 패널은 사람이 열 때 열린다.
-   */
+  
+
+
+
+
+
+
   const openCreateAgentDialog = useCallback((seed?: OneAgentDraftSeed) => {
     if (seed) {
       createAgentSeedTokenRef.current += 1;
@@ -9093,12 +9106,12 @@ function OneSessionsShell() {
     && !selectedCanSteerActiveRun
     && (!selected.chatId || (!selected.truth.mayStartExecution && !selectedCanContinueInPlace)),
   );
-  /*
-   * 이 질문에 지금 여기서 바로 답할 수 있나 — 못 한다면 왜인가(shared/ask-action-bar).
-   * 새 메시지를 이미 보냈거나(접수 준비 중 포함) 실행이 돌고 있으면 옛 질문의 답을 확정하면
-   * 안 된다. 실측(2026-09-27, 격리 앱): "Preparing" 중에 보기를 누르면 옛 질문 답이 확정돼
-   * 두 번째 실행이 겹치고 "이전 요청 접수 불명"이 떴다. 그때는 답을 새 메시지로 보낸다.
-   */
+  
+
+
+
+
+
   const visibleConfirmationBlock: AskActionBlock = !visibleSelectedConfirmation
     ? "none"
     : selectedReadOnly ? "read_only"
@@ -9119,9 +9132,9 @@ function OneSessionsShell() {
   // decision; settled read-only history locks both surfaces.
   const composerSettingsBlocked = !busy && !teamPreflightBusy && (selectedReadOnly || activeDirectSessionUnavailable);
   const composerInteractionBlocked = composerSettingsBlocked || teamDecisionPending || activeDirectSessionUnavailable;
-  // A running room is almost always busy: files picked while it runs go with the next direction (fileGroupId, queued),
-  // the same path addAttachmentFiles already accepts. Disabling the + button while busy left supervisor and Goal rooms
-  // with no way to attach at all (owner 2026-10-14).
+
+
+
   const composerAttachmentBlocked = teamPreflightBusy || selectedReadOnly || teamDecisionPending || activeDirectSessionUnavailable;
   const oneDisplayName = oneProfile?.displayName.trim() || "One";
   /*
@@ -9146,9 +9159,9 @@ function OneSessionsShell() {
     // Signed out or the plan no longer offers mail: leave the Mail tab.
     if (railMode === "mail" && mail.loaded && !mailTabVisible) setRailMode("sessions");
   }, [railMode, mail.loaded, mailTabVisible, setRailMode]);
-  // Arriving at a specific conversation (notification, Work, dashboard link) must show
-  // it. The rail mode is remembered across visits, so a last-used Mail tab covered the
-  // requested chat with the mailbox list (QA 2026-09-27).
+
+
+
   const arrivedChatIdRef = useRef<string | null | undefined>(undefined);
   useEffect(() => {
     const previous = arrivedChatIdRef.current;
@@ -9189,7 +9202,7 @@ function OneSessionsShell() {
     let totalBytes = current.reduce((sum, item) => sum + item.size, 0);
     const errors: string[] = [];
     for (const original of incoming) {
-      // A large photo or screenshot is shrunk to fit the image limit instead of refused (owner 2026-10-14).
+
       const file = await fitImageUnder(original, ONE_ATTACHMENT_LIMITS.maxImageBytes);
       let kind: OneAttachmentDraft["kind"] = attachmentKind(file);
       const perFileLimit = kind === "image" ? ONE_ATTACHMENT_LIMITS.maxImageBytes : ONE_ATTACHMENT_LIMITS.maxFileBytes;
@@ -9310,20 +9323,20 @@ function OneSessionsShell() {
     }
     focusOneOutput();
   }, [appLocale, focusOneOutput, router]);
-  /*
-   * 브리핑이 찾아낸 것을 One 이 **실제로 살펴보게** 한다.
-   *
-   * main 쪽에는 준비·예약·클레임·실패 라이프사이클이 완성돼 있었는데
-   * (`electron/one/briefing-actions.ts`), 그 파이프라인의 유일한 열쇠인
-   * `oneBriefingActionRef` 를 만드는 `oneBriefing:startAction` 을 렌더러가 **한 번도
-   * 부르지 않았다**(2026-07-28 실측: `startAction` 문자열이 렌더러에 0건). 그래서
-   * 브리핑 버튼은 항상 화면 이동만 했고, 800줄짜리 실행 경로는 어떤 조작으로도
-   * 도달할 수 없었다.
-   *
-   * 계약이 `confirmedByUser: true` 를 리터럴로 요구한다 — 준비된 것을 보여주고 사용자가
-   * 승낙해야 시작한다는 뜻이다. 그래서 준비(prepare) 와 시작(start) 을 두 단계로 둔다.
-   * 실행은 `permission: "read"` 로 고정돼 있어 살펴보기만 하고 아무것도 바꾸지 않는다.
-   */
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
   const [pendingBriefingAction, setPendingBriefingAction] = useState<OneBriefingActionPacket | null>(null);
   const pendingBriefingActionVisible = Boolean(
     pendingBriefingAction
@@ -9612,7 +9625,7 @@ function OneSessionsShell() {
                 setCreateAgentOpen(true);
               }}
               onEditIdentity={(member) => {
-                // 이름·캐릭터는 '에이전트 만들기'와 같은 창에서 고친다(오너 지적 2026-08-23).
+
                 setEditMemberTarget({
                   memberId: member.id,
                   displayName: member.displayName,
@@ -9803,9 +9816,9 @@ function OneSessionsShell() {
                     size="medium"
                   />}
                   <span>
-                    {/* 이름만 쓴다. "상주 동료 · 전용 터미널" 같은 설명 부제는 아무것도
-                        알려주지 않으면서 이름 아래 자리를 차지했다(오너 결정 2026-08-24).
-                        단톡방만 사람 수를 쓴다 — 그건 실제로 바뀌는 정보다. */}
+                    {
+
+}
                     <strong title={activeTaskforce?.title}>{activeTaskforce?.title
                       ?? ((activeSeatDissolved || activeSeatEmpty) && activeSeat?.title?.trim() ? activeSeat.title.trim() : null)
                       ?? activeOneMember?.displayName
@@ -9944,7 +9957,7 @@ function OneSessionsShell() {
                     <span className={styles.homeMessageAuthor}>{oneDisplayName}</span>
                     <strong id="one-home-message-title">{appLocale === "ko" ? "무엇을 맡길까요?" : "What should I take care of?"}</strong>
                   </section>
-                  {/* 추천 작업은 작성창 바로 위로 옮겼다(오너 2026-09-26). 좌석 붙이기만 여기 남는다. */}
+                  {}
                   {firstRequestEntry === "home" && <OneSeatAttachLink locale={appLocale} onAttachSeat={openSeatAttachFromHome} />}
                   {homeMemoryMapOpen && (
                     <section className={styles.homeMemoryMapPanel} aria-label={appLocale === "ko" ? "One 기억 지도" : "One memory map"}>
@@ -10018,15 +10031,15 @@ function OneSessionsShell() {
                       || seatThreadMessages.find(item => (item.continuationSourceId ?? item.id) === sourceMessageId)?.id === message.id;
                     const contentMessageId = message.continuationFirst && message.continuationUiMessageId
                       ? message.continuationUiMessageId : message.intellectUiMessageId ?? message.id;
-                    // Narrative output remains the primary final response.
-                    // Only a genuinely visual/interactive surface replaces its
-                    // duplicate Markdown payload.
-                    // Codex parity (owner decision 2026-08-15): the model's
-                    // answer is the answer, drawn as Markdown in the thread.
-                    // A structured result card below never replaces it, and a
-                    // Surface's flattened narrative never stands in for it
-                    // (measured: it dropped links/fences and rendered raw
-                    // "[hello.txt]([local path]" and a stray ``` ).
+
+
+
+
+
+
+
+
+
                     const visibleText = message.continuationText ?? visibleOneMessageText(message);
                     const displayedText = message.role === "user" ? displayMessageReply(visibleText, appLocale) : visibleText;
                     const markdownText = message.continuationMarkdownText ?? displayedText;
@@ -10089,7 +10102,7 @@ function OneSessionsShell() {
                         </>}
                         {(hasVisibleContent || hasAttachments) && !foldedIntoWork && (drawsAsHostNotice
                           ? (message.hostNotice?.purpose === "automation-report" && !agiActionNoticeLine(message.hostNotice, message.text)
-                            // 자동화 보고 = 원장이 센 행동 요약 + 로고, 원문은 펼침 안에(오너 2026-09-28).
+
                             ? <AutomationReportSummary runId={message.hostNotice.runId} text={message.text} locale={appLocale === "ko" ? "ko" : "en"}
                                 fallback={<HostContinuationNotice text={message.text} locale={appLocale === "ko" ? "ko" : "en"} notice={message.hostNotice} onOpenChat={openDispatchedSession} />} />
                             : <HostContinuationNotice text={message.text} locale={appLocale === "ko" ? "ko" : "en"} notice={message.hostNotice} onOpenChat={openDispatchedSession} />)
@@ -10175,13 +10188,13 @@ function OneSessionsShell() {
                                   ))}
                                 </div>
                               )}
-                              {/*
-                                * 에이전트가 앞머리에 보고서 표식을 남긴 글은 대화 거품이
-                                * 아니라 읽는 문서로 그린다(오너 지시 2026-08-24). 글의
-                                * 모양으로 추측하지 않는다 — 표식이 있을 때만이다.
-                                * 답이 자라는 중에는 평소대로 그린다: 표식만 있고 본문이
-                                * 아직 한 줄인 글을 문서 카드로 세우면 빈 액자가 된다.
-                                */}
+                              {
+
+
+
+
+
+}
                               <GoalResultReport result={message.goalResult} locale={appLocale}>
                               {markdownText && ((message.streaming || hasIntellectUiFence(markdownText) || hasInlineVisualBlock(markdownText))
                                 ? <StreamingMarkdown text={markdownText} messageId={contentMessageId} onOpenLinkedFile={openOneLinkedFile} chatId={activeThreadChatId} onUiFollowup={prepareUiFollowup} uiActionsDisabled={busy || activeSeatDissolved || activeDirectSessionUnavailable} />
@@ -10322,20 +10335,20 @@ function OneSessionsShell() {
                     </div>
                   </section>
                 )}
-                {/*
-                  ★"이 요청은 안전하게 이어갈 수 없어서 멈췄어요" 를 아무 때나 띄우지 않는다.
-                  (오너 2026-09-07: "이딴거 나오면 뒤진다", "이거 왜나옴?")
+                {
 
-                  이 줄은 팀을 꾸린 뒤 실행이 완료에 도달하지 못하면 떴다 — **이유와 무관하게.**
-                  오늘처럼 런타임 한도로 실패한 날에는 계속 뜨는데, 정작 원장에는 진짜 사유가
-                  적혀 있었다("Individual quota reached … Resets in 3m32s"). 사용자에게는
-                  아무 정보도 없는 문장과 "다시 보내세요"만 갔고, 다시 보내면 같은 이유로
-                  또 실패한다. 알 수 없는 말로 막다른 길을 만드는 자리였다.
 
-                  이제 순서가 반대다: 런타임이 말한 사유가 있으면 **그것을 보여 준다.**
-                  사유가 정말 없을 때만 일반 문구로 떨어진다.
-                */}
-                {/* 목표·자동화가 이 방에서 살아 있으면 실패한 턴은 턴의 실패일 뿐 — 방 전체를 멈춤처럼 말하지 않는다(오너 2026-09-28). */}
+
+
+
+
+
+
+
+
+
+}
+                {}
                 {teamPreflight && ["workforce_reserved", "recovery_required"].includes(teamPreflight.status) && receipt?.status !== "completed" && receipt?.interruptionCause !== "steering" && !teamPreflightBusy && !busy && !awaitingWorkforceConsent && !(activeThreadChatId && spinningChatIds.has(activeThreadChatId)) && (
                   <p className={styles.teamPreflightRecovery} role="status">
                     {receipt?.errorMessage?.trim()
@@ -10347,12 +10360,12 @@ function OneSessionsShell() {
                         : tFor(appLocale, "one.shell.thread.recovery")}
                   </p>
                 )}
-                {/*
-                  ★수리 2026-08-25 — 부를 수 없던 팀원을 화면이 말한다.
-                  원장에는 사유가 적혀 있었는데(좌석 2명 `call_only`) 화면은
-                  한 글자도 말하지 않아, 사람에게는 "왜 One 만 답하지"로만
-                  보였다(오너 지적). 사유는 닫힌 목록이므로 화면이 번역한다.
-                */}
+                {
+
+
+
+
+}
                 {teamPreflight
                   && (teamPreflight.unavailableMembers?.length ?? 0) > 0
                   && !busy
@@ -10650,9 +10663,9 @@ function OneSessionsShell() {
             )}
             {attachmentError && <p className={styles.attachmentError} role="alert">{attachmentError}</p>}
             {actionNotice && <p className={styles.attachmentError} role="status" aria-live="polite" data-one-action-notice="true" data-tone="info">{actionNotice}</p>}
-            {/* 좁은 대화 열(결과 패널을 연 440px)에서 단추 두 개가 1fr 칸에 0px 로 눌려 글자가
-                서로 겹쳐 그려졌다(오너 1.2.41). 문장 한 덩이 + 단추 묶음으로 두고, 자리가 모자라면
-                단추 묶음이 다음 줄로 내려간다 — 단추끼리는 절대 겹치지 않는다. */}
+            {
+
+}
             {/* No 'checking admission' card: a message is always accepted (Main queues it and starts it by itself). */}
             {unavailableRoomMembers.length > 0 && (
               <div className={styles.oneRoomMemberNotice} role="alert" data-one-room-unavailable-members="true">
@@ -10934,7 +10947,7 @@ function OneSessionsShell() {
                 disabled={taskforceBusy}
               >{appLocale === "ko" ? "같은 멤버로 새 단톡 만들기" : "Start a new group chat with the same members"}</button>
             </div>}
-            {/* 새 세션 추천 작업 — 작성창 바로 위(오너 2026-09-26, Codex 식). */}
+            {}
             {firstRequestEntry && !activeSeatDissolved && (
               <OneFirstRequestCards locale={appLocale} entry={firstRequestEntry} cards={firstRequestCards} onInsert={insertFirstRequestPrompt} hasDraft={composerHasText} />
             )}
@@ -10958,7 +10971,7 @@ function OneSessionsShell() {
               />
               {attachmentDrafts.length > 0 && (
                 <div className={styles.attachmentTray} aria-label={tFor(appLocale, "one.shell.composer.selected_attachments_aria")}>
-                  {/* Square tiles inside the composer, above the text (owner 2026-10-14, the Codex composer). */}
+                  {}
                   {attachmentDrafts.map((item) => (
                     <div key={item.id} className={styles.attachmentChip} data-kind={item.kind} title={item.name}>
                       {item.previewUrl
@@ -10983,8 +10996,8 @@ function OneSessionsShell() {
                 onValueChange={onComposerValueChange}
                 onSubmit={(submittedValue) => {
                   if (activeSeatDissolved || activeDirectSessionUnavailable) return;
-                  // Enter never stops a run: an empty Enter (a second keydown after an IME commit, a cleared composer)
-                  // paused the owner's Goal right after sending (2026-10-14). Stop is the button only.
+                  
+
                   if (busy && !submittedValue.trim()) return;
                   void submit(submittedValue);
                 }}
@@ -11006,8 +11019,8 @@ function OneSessionsShell() {
                    * 두 장이 된다.
                    */
                   const seen = new Set<string>();
-                  // lastModified 는 빼야 한다 — getAsFile() 이 만든 새 File 은 lastModified 가
-                  // 호출 시각이라 같은 스크린샷도 매번 다른 키가 되어 두 장이 붙었다(2026-09-27 오너 실측).
+
+
                   const identityOf = (file: File) => `${file.name}|${file.size}|${file.type}`;
                   const add = (file: File | null) => {
                     if (!file) return;
@@ -11902,8 +11915,8 @@ function DecisionCard({ confirmation, taskId, locale, disabled, block = "none", 
   const [chosenIndex, setChosenIndex] = useState<number | null>(null);
   const [answerText, setAnswerText] = useState("");
   useEffect(() => { setMultiSelection([]); setChosenIndex(null); setAnswerText(""); }, [confirmation.sourceMessageId]);
-  // 숫자·Enter·Esc 는 document 에서 받는다(포커스를 못 받는 카드 div 의 onKeyDown 은 불리지 않는다 —
-  // ChatQuestionSheet 2026-09-03 실측과 같은 이유). 핸들러는 렌더마다 최신 상태로 갈아 끼운다.
+
+
   const questionKeyRef = useRef<((event: KeyboardEvent) => void) | null>(null);
   const questionCardRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -11962,27 +11975,27 @@ function DecisionCard({ confirmation, taskId, locale, disabled, block = "none", 
     const compactSummary = decision.action.value
       || decision.target.value
       || confirmation.question;
-    /*
-     * 오너 지시 2026-08-24: 묻는 자리는 앱 어디서나 한 모양이다.
-     * 예전에는 제목·요약·선택지·승인·항상승인·거절이 한 줄에 가로로 늘어서서
-     * 무엇을 고르는지 읽을 수 없었다("승인 칩도 누가 저딴식으로 만드냐").
-     * 규격은 docs/DESIGN-ASK-CARD.md, 모양은 AskCard 하나가 정한다.
-     */
-    /*
-     * 고르는 질문과 승인은 같은 주제가 아니다(오너 지적 2026-08-24
-     * "넌 동작방식이랑 승인이 같은 주제냐?"). 한 카드에 "패널을 어떻게
-     * 나눌까" 세 갈래와 "항상 승인 / 거절" 을 함께 담으면, 무엇을 답하는
-     * 자리인지 알 수 없다. 고를 것이 있으면 고르는 것만 묻고, 승인·거절은
-     * 고를 것이 없을 때의 답이다.
-     */
-    /*
-     * ★고르는 질문은 아래 동작 줄이 있어야 끝난다 (오너 신고 2026-09-27, 1.2.44/45).
-     *   "추가 항목"처럼 여러 개 고르는 질문에서 보기를 누르면 강조만 토글됐고, 이 카드에는
-     *   제출도 건너뛰기도 직접 입력도 없었다 — 답이 화면을 떠날 길이 0개였다. 그리고 새 메시지를
-     *   보낸 뒤 "Preparing" 동안에도 카드는 그대로 눌려, 하나만 고르는 질문은 새 요청 옆에서
-     *   옛 질문의 답을 확정해 "이전 요청 접수 불명"을 만들었다.
-     *   판단은 shared/ask-action-bar.ts 한 곳이 하고(계약 test:one-question-action-bar), 여기는 그린다.
-     */
+    
+
+
+
+
+
+    
+
+
+
+
+
+
+    
+
+
+
+
+
+
+
     // Even one positive multi-select choice needs a checkbox and Submit when
     // the other option is rejection. Never turn a locked V1 row into authority.
     const questionOptions = confirmation.multiSelect
@@ -12127,9 +12140,9 @@ function DecisionCard({ confirmation, taskId, locale, disabled, block = "none", 
           disabled: disabled || approvalReply === null,
           active: true,
         },
-        // "Always approve" answers this card too, so it is offered only for a yes/no permission. A question whose
-        // other option is a real alternative ("편집 준비만 계속") is never answered by a grant (Yotube 2026-10-17:
-        // the grant chose "재인증 진행" for the owner). The chat-wide switch stays in the composer menu.
+        
+
+
         ...(isPermissionOnlyConfirmation(confirmation) ? [{
           id: "always",
           title: tFor(locale, "one.shell.decision.always_approve"),
@@ -12193,15 +12206,15 @@ function DecisionCard({ confirmation, taskId, locale, disabled, block = "none", 
               {option.label}
             </button>
           ))}
-          {/*
-            * ★단추만 없는 완성된 기능이었다 (실측 2026-09-08).
-            *   `clarifyConfirmation` 은 One 에게 "무엇이 빠졌는지 물어보고 선택지를 다시
-            *   정리해 달라"고 실제로 실행을 거는 완성된 경로이고, 라벨
-            *   `one.shell.decision.change_scope` 도 두 언어로 이미 있었다. 부모는 그 핸들러를
-            *   `onClarify` 로 내려보내고 있었다. **그런데 이 카드가 그 prop 을 한 번도 안
-            *   썼다** — 부르는 단추가 없어서 사람은 "왜 이걸 묻는지" 되물을 길이 없었다.
-            *   핸들러·라벨·배선이 다 살아 있는데 마지막 칸만 비어 있던 자리다.
-            */}
+          {
+
+
+
+
+
+
+
+}
           <button type="button" className={styles.decisionButton} disabled={disabled} onClick={() => onClarify(confirmation)}>
             {tFor(locale, "one.shell.decision.change_scope")}
           </button>
@@ -12296,15 +12309,15 @@ function DecisionCard({ confirmation, taskId, locale, disabled, block = "none", 
 
       <div className={styles.decisionActionGroup}>
         <p className={styles.decisionSectionLabel}>{tFor(locale, "one.shell.decision.choose_action")}</p>
-        {/*
-          ★버튼은 셋뿐이다 — 승인 · 항상 승인 · 거절 (오너 지시 2026-08-19).
+        {
 
-          이전에는 위험도가 높고 판정이 모호하면 승인 버튼이 통째로 사라지고 거절·되묻기·
-          미루기만 남았다. 즉 사용자가 하려던 일을 **승인할 방법이 화면에 없었다**(실측:
-          X 게시 승인 요청에서 Reject / Ask what is missing / Remind me in 24 hours 세 개만
-          렌더됨). 위험을 알리는 방법은 승인 경로를 지우는 것이 아니라 무엇을 승인하는지
-          똑똑히 보여주는 것이다 — 경고는 위 가드 배너가 계속 말한다.
-        */}
+
+
+
+
+
+
+}
         <div className={styles.decisionOptions}>
           <button
             type="button"
@@ -12380,25 +12393,25 @@ function ResolvedDecisionReceipt({ receipt, locale }: { receipt: CommittedQuesti
 }
 
 /**
- * 작성창의 Enter 처리 — **한글 조합 확정과 전송을 가르는 자리.**
- *
- * ★실사용 실측 2026-09-07 (오너): One 에서 한글을 치고 Enter 를 누르면 전송이 아니라
- *   **줄바꿈이 들어갔다.** "다시" 를 치면 "다\n시" 가 된다. 사용자는 문장을 못 쓴다.
- *
- * 원인은 브라우저마다 다른 이벤트 순서다. 크로미움은 조합 확정 Enter 에서
- * `compositionend` 를 **keydown 보다 먼저** 쏜다 — 그래서 그 keydown 은
- * `isComposing === false` 로 온다. 그걸 잡으려고 `onCompositionEnd` 에서
- * `setTimeout(…, 0)` 으로 ref 를 잠깐 더 켜 두는데(위 composerComposingRef),
- * 옛 코드는 그 ref 가 켜져 있으면 **아무것도 안 하고 return** 했다.
- * 전송은 막혔지만 `preventDefault()` 를 안 했으니 textarea 의 기본 동작
- * (줄바꿈 삽입)이 그대로 일어난다. 막은 것이 아니라 다른 일이 일어나게 둔 것이다.
- *
- * 규칙:
- *  - IME 가 아직 그 키를 쥐고 있으면(`isComposing`/229) 손대지 않는다. 그 Enter 는
- *    조합을 확정하는 데 쓰이고 브라우저가 줄바꿈을 넣지 않는다.
- *  - 조합이 방금 끝난 Enter(우리 ref 만 켜져 있는 상태)는 **전송도 줄바꿈도 아니다.**
- *    삼키되 반드시 기본 동작을 막는다 — 이 한 줄이 빠져 있었다.
- *  - 그 외 Enter 는 전송, Shift+Enter 는 평소대로 줄바꿈.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
  */
 function handleComposerKey(
   event: ReactKeyboardEvent<HTMLTextAreaElement>,

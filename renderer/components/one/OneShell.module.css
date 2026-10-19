@@ -1498,11 +1498,11 @@
   font-size: 11px;
 }
 
-/* The conversation and its composer always fill the workspace column. The
-   Outputs panel is a grid track of .body, present only while it has something
-   to show (data-context-rail). A rule here once kept 300px free for a fixed
-   artifact overlay that no longer exists, whenever the run had any artifact:
-   with the panel closed, rooms with images (Yotube) kept a blank 300px column. */
+
+
+
+
+
 
 .decisionCard {
   display: grid;

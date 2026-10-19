@@ -118,9 +118,9 @@ async function acquireLock(dir: string, owner: Owner, explicit: boolean): Promis
   }
   // Exclusive creation prevents a late initializer from replacing a new owner.
   try {
-    // Publish owner.json whole or not at all. open("wx")+writeFile exposed an empty/partial file to a concurrent inspect() in
-    // another process (Main and the daemon read the same keychain resource at start-up), which reported a healthy store as
-    // credential_recovery_state_invalid (production 2026-10-11 09:43Z). link() keeps the exclusive-create guarantee (EEXIST).
+    
+
+
     const stagedOwner = path.join(lock, `owner.json.${randomUUID()}.tmp`);
     const handle = await fs.open(stagedOwner, "wx", 0o600);
     try { await handle.writeFile(JSON.stringify(owner), "utf8"); await handle.sync(); } finally { await handle.close(); }

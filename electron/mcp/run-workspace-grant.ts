@@ -3,16 +3,16 @@ import fs from "node:fs";
 import path from "node:path";
 
 /**
- * A folder the owner named for one room run (owner 2026-10-16, A/B2 room fc53939f).
- *
- * The owner wrote "make it runnable in this folder: <absolute path>" in a room whose saved working folder was a
- * different path. Every teammate ran with the room folder as its cwd and write scope, so the named folder was outside
- * the sandbox; the lead reported "read-only" and the run ended with "say continue", which could never clear it.
- *
- * The planner now emits the named folder as a typed field (`requestedWorkspace`). This module is the host side of that
- * field: it validates the path, decides whether the room's permission chip already covers it, and creates the folder
- * when it is missing. It never parses prose, never changes the room's saved working folder, and never sends the raw path
- * into a receipt (only its digest).
+
+
+
+
+
+
+
+
+
+
  */
 
 export const RUN_WORKSPACE_GRANT_SCHEMA = "agentlas.run-workspace-grant.v1" as const;

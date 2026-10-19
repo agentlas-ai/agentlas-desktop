@@ -142,7 +142,7 @@ export function FinanceConnectedWorkspace() {
       context.signal.addEventListener("abort", cancel, { once: true });
       try {
         const response = await api.ask!({ request, baseRevision: context.revision, requestId: context.requestId,
-          screenContext: financeScreenContext(context), ...(api.analysts?{analystRefs:context.analystAuthoring?[]:context.analystRefs,
+          selectedAssetIds: context.analystAuthoring?[]:context.selectedAssetIds, screenContext: financeScreenContext(context), ...(api.analysts?{analystRefs:context.analystAuthoring?[]:context.analystRefs,
           analystAuthoring:context.analystAuthoring, ...(context.analystAuthoring?{analystHistory:context.history?.slice(-6)}:{}), ...(context.analystAuthoring&&context.analystDraft?{analystDraft:context.analystDraft}:{})}:{}) });
         assertNotCancelled(context.signal);
         return response;

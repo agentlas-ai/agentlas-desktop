@@ -223,13 +223,13 @@ export function recoverCloudRegistryTransactions(): void {
 }
 
 /**
- * The same recovery for read paths (installed-agent lists and lookups): it never throws.
- *
- * Review 2026-10-16 (desktop-b-01): every list and lookup ran the strict recovery first, so one journal that could not
- * be recovered (a failed Windows rename) made all of them throw until someone deleted the journal by hand. Here such a
- * journal is left in place for the strict path, reported once with the machine code
- * `agent_cloud_registry_recovery_blocked`, and skipped by reads for a minute while it is unchanged; the other slugs
- * carry on.
+
+
+
+
+
+
+
  */
 export function recoverCloudRegistryTransactionsForRead(): void {
   let files: string[];
@@ -457,8 +457,8 @@ function fsyncManagedTree(root: string): void {
         fs.closeSync(fd);
       }
     }
-    // File fsync stays strict. A directory fsync is best-effort: Windows cannot fsync a directory handle (EPERM), and
-    // failing here reverted every Windows install after SQLite had committed (review 2026-10-16, desktop-b-02).
+    
+
     fsyncDirectoryBestEffort(directory);
     const after = fs.lstatSync(directory);
     if (

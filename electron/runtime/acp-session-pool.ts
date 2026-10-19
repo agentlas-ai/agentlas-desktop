@@ -188,9 +188,9 @@ export class AcpSessionPool<S> {
         projectId,
         keepResidencyKey: reusable?.residencyKey ?? null,
       });
-      // Project admission starts idle retirement synchronously and every close is a measured, asynchronous process
-      // exit. Holding the admission, wait (bounded, Stop-aware) for those exits: one physical CLI per Work project, and a
-      // follow-up whose key changed no longer refuses itself on the sibling it just retired (production 2026-10-16).
+      
+
+
       if (projectId) {
         await awaitProjectResidencySiblingsExit(projectId, reusable?.residencyKey ?? null,
           { waitMs: this.opts.projectSiblingExitWaitMs, signal: meta.signal });

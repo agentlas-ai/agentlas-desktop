@@ -9,6 +9,7 @@ export const BUSINESS_ACTIONS = [
   'credential.store', 'credential.verify', 'credential.replace', 'credential.revoke',
   'audio.generate', 'work.execute', 'work.stop', 'history.observe', 'history.read',
   'agent.read', 'agent.report', 'agent.manage', 'agent.share',
+  'mail.read', 'mail.send',
   'history.manage', 'history.pause', 'history.delete', 'evolution.read', 'evolution.generate',
   'evolution.build', 'evolution.evaluate', 'evolution.review', 'evolution.promote',
   'evolution.execute', 'evolution.feedback', 'evolution.pause', 'evolution.stop',

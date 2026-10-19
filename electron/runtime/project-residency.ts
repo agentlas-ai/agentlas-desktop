@@ -99,13 +99,13 @@ export function beginProjectResidencyAdmission(input: ProjectResidencyAdmissionI
 export const PROJECT_SIBLING_EXIT_WAIT_MS = 15_000;
 
 /**
- * Called by the opener that holds the project admission, right after it: no new provider process starts in the project
- * while a retired one is still exiting (one physical CLI per Work project). The admission itself retires the idle
- * siblings, and every pool closes asynchronously (a measured process-tree exit), so refusing on "closing" made each
- * follow-up turn whose pool key changed (the per-invocation MCP launch handle is process identity) refuse ITSELF
- * before turn/start (production 2026-10-16, mobile Work chat on codex). The opener waits for those exits instead,
- * bounded by `waitMs` and the acquiring turn's own `signal`; a close that failed (quarantined) or did not finish in
- * time is still the typed busy refusal, naming the blockers as closing with their reason.
+
+
+
+
+
+
+
  */
 export async function awaitProjectResidencySiblingsExit(
   projectId: string | null | undefined,

@@ -1,22 +1,22 @@
 /**
- * Which earlier conversation a Taskforce planner or synthesizer may see.
- *
- * The owner's newest message is the task. Earlier turns are background. In
- * production (room "Yotube", 2026-10-11) the owner posted a long new channel
- * brief two and a half hours after a recovery exchange (the assistant asked for
- * permission, the owner answered "허용하고 복구", the host posted canned
- * "could not start" lines). The planner replayed that exchange as history, read
- * "approved recovery" as the pending work and briefed the first teammate to
- * "continue the approved recovery" instead of doing the brief.
- *
- * Rules (structure only, no wording heuristics beyond the ask fence):
- *  1. Host operational evidence never reaches the planner.
- *  2. The current request is never also replayed as history (rows echoing it are removed).
- *  3. An assistant ask (`<<agentlas-ask>>` fence) is only live while the current request is the
- *     reply to it (the request equals one of its option labels). Any ask followed by another owner
- *     message was answered or superseded: its whole assistant run is removed.
- *  4. The owner's reply to a settled ask, and the assistant run that acknowledged it, are removed
- *     with it: that thread is closed.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
  */
 import type { ChatHistoryEntry } from "../../shared/types";
 

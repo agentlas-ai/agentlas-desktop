@@ -153,9 +153,9 @@ export async function dispatchOneSupervisorTool(binding: Pick<OneTeamCapabilityB
 }
 
 /**
- * The code of a One team tool result that refused as data, or null. Graph and Toolchain dispatch return a refusal as
- * { ok: false, code, … } (one/graph-dispatch.ts: nothing saved or applied); answered as {ok:true} it reached the model
- * and the receipts as an MCP success (same defect as harness_call, production 2026-10-16).
+
+
+
  */
 export function oneTeamResultFailureCode(result: unknown): string | null {
   if (!result || typeof result !== "object" || Array.isArray(result)) return null;
@@ -374,10 +374,10 @@ export async function createOneTeamCapability(
     || input.graphTeamGrant.ownerChatId !== input.chatId || input.supervisorReplyRunId)) throw new Error("one-team-graph-step-grant-invalid");
   const port = await startOneTeamControlServer();
   if (!port) throw new Error("one-team-control-unavailable");
-  // The personal-supervisor tools answer only in the owner's personal One conversation (the request handler below
-  // refuses them anywhere else). Listing them in every conversation made room Ones call one_app_operations and get
-  // supervisor_personal_conversation_required (production 2026-10-05, Thread Marketing and Youtube launch), so a
-  // conversation that is not the personal one is not offered them.
+  
+
+
+
   let tools = input.tools ?? (personalSupervisorConversation(input.chatId) ? undefined
     : AGENTLAS_ONE_TEAM_TOOL_NAMES.filter((name) => !(ONE_SUPERVISOR_TOOL_NAMES as readonly string[]).includes(name)&&!(ONE_HISTORY_TOOL_NAMES as readonly string[]).includes(name)));
   let personalSource: OneTeamCapabilityBinding['personalSource'];

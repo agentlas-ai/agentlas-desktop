@@ -216,10 +216,10 @@ export class MainWorkRecoveryContext {
     this.journal.transition(admission.unit,"cancelled",{reason:"main_tool_not_dispatched"});
   }
 
-  /** `returned`: the tool's own result came back (a builtin ended, an MCP server answered), so an error is a known
-   * end (failed). `unconfirmed`: the call was lost before its result (thrown transport error), so the outcome is held.
-   * Measured 2026-10-17 (dev A/B4, BYOK Haiku): every error was held, and a held action blocks every later non-read
-   * action of its step with no way to clear it, so one non-zero shell exit ended all writes for the task revision. */
+  /**
+
+
+ */
   finish(admission:{unit:WorkUnit;action:Action},result:Result,outcome:"returned"|"unconfirmed"="returned"):void {
     this.assertCurrent();const scope=this.scope();
     if(scope.runId!==admission.unit.runId || scope.revision!==admission.unit.revision)throw new Error("main_work_completion_scope_changed");

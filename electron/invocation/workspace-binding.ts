@@ -8,7 +8,7 @@ import fs from "node:fs";
  * Desktop has already bound to that chat.
  */
 /** Science binds its own selected directory without becoming a remote surface. */
-export type InvocationWorkspaceBindingSource = "mobile" | "mobile-one" | "telegram-one" | "science" | "automation";
+export type InvocationWorkspaceBindingSource = "mobile" | "mobile-one" | "telegram-one" | "science" | "automation" | "company-work";
 
 const REMOTE_BINDING_SOURCES: readonly InvocationWorkspaceBindingSource[] = [
   "mobile",
@@ -21,7 +21,7 @@ export function isRemoteInvocationWorkspaceBindingSource(value: string): boolean
 }
 
 function isWorkspaceBindingSource(value: string): value is InvocationWorkspaceBindingSource {
-  return value === "science" || value === "automation" || isRemoteInvocationWorkspaceBindingSource(value);
+  return value === "science" || value === "automation" || value === "company-work" || isRemoteInvocationWorkspaceBindingSource(value);
 }
 
 export interface InvocationWorkspaceBinding {
@@ -55,6 +55,9 @@ export function assertInvocationWorkspaceSourceContext(
   binding: InvocationWorkspaceBinding | undefined,
   executionSource: string | undefined,
 ): void {
+  if (binding && (binding.source === "company-work") !== (executionSource === "company-work")) {
+    throw new Error("company-workspace-context-mismatch");
+  }
   if (binding && (binding.source === "science") !== (executionSource === "science")) {
     throw new Error("science-workspace-context-mismatch");
   }
@@ -154,6 +157,13 @@ export function captureMobileOneInvocationBinding(): InvocationWorkspaceBinding 
   });
 }
 
+/** Main-only company workspace, captured from the original installed clone custody. */
+export function captureCompanyInvocationBinding(canonicalPath: string): InvocationWorkspaceBinding {
+  const directory = canonicalDirectory(canonicalPath);
+  if (directory.canonicalPath !== canonicalPath) throw replacedWorkspaceError();
+  return Object.freeze({ source: "company-work", canonicalPath: directory.canonicalPath, directoryIdentity: directory.directoryIdentity });
+}
+
 /** Capture only the canonical directory already selected and validated by Science Main. */
 export function captureScienceInvocationBinding(canonicalPath: string): InvocationWorkspaceBinding & { readonly source: "science" } {
   const directory = canonicalDirectory(canonicalPath);
@@ -231,7 +241,7 @@ export function revalidateInvocationWorkspaceBinding(
     throw unavailableWorkspaceError();
   }
   if (binding.canonicalPath === null) {
-    if (binding.source === "science") throw unavailableWorkspaceError();
+    if (binding.source === "science" || binding.source === "company-work") throw unavailableWorkspaceError();
     if (binding.directoryIdentity !== null) throw unavailableWorkspaceError();
     return null;
   }

@@ -1,6 +1,6 @@
 import { managedOneConfigured, managedOneAuthentication } from "../managed-one/auth";
 // CLI 자동 감지 통합 + 활성 백엔드 선택 상태 관리.
-// 사용자가 입력 안 해도 한 번 클릭으로 연결되도록.
+// PRD 3.1 FRE 6단계 — 사용자가 입력 안 해도 한 번 클릭으로 연결되도록.
 import { probeClaudeCode, probeClaudeEfforts } from "./claude-code";
 import { canonicalRuntimeBackend } from "../../shared/runtime-backends";
 import { runtimeMatchesSelection as exactRuntimeMatchesSelection } from "../../shared/runtime-selection";
@@ -355,12 +355,14 @@ export async function detectRuntimes(force = false): Promise<RuntimeStatus[]> {
   }
 
   const requestGeneration = detectGeneration;
-  /*
-   * 모델 미지정("엔진 설정 사용") 실행에서 실제로 쓰인 모델을 각 런타임에 실어 보낸다.
-   * 레지스트리는 main 에만 있고 그 행은 렌더러가 만들기 때문에, 여기서 붙이지 않으면
-   * 기본값으로 쓰는 사람에게 실제 모델을 보여 준다.
-   * 장식은 비행(flight) 안에서 해 동시 호출자도 cliDefaultModel·observedDefaultModel 이 있는 목록을 받는다.
-   */
+  
+
+
+
+
+
+
+
   const flight = detectRuntimesUncached().then((raw) => markSignedOutRuntimes(raw).map((runtime) => {
     const observed = resolvedCliModelAlias(runtime.kind, "");
     const configured = cliConfiguredDefaultModel(runtime.kind);
@@ -589,8 +591,8 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
   const acpDiscovery = async (kind: "cursor" | "grok" | "kimi", command: string, current?: DiscoveryOutcome): Promise<DiscoveryOutcome> => {
     if (current && current.status === "ok") return current;
     if (acpDisabledFor(kind)) return current ?? unsupportedDiscovery("acp-disabled", "acp");
-    // The probe opens a real ACP session (session/new). It runs in the product's CLI home like every product run, so the
-    // empty probe session never lands in the person's own folder.
+    
+
     const viaAcp = await probeAcpModelsCached(ACP_AGENTS[kind], { command, env: withForeignCliContext(kind, process.env, undefined) });
     if (viaAcp.status === "ok") return viaAcp;
     return current ?? viaAcp;
@@ -627,8 +629,8 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
       model: selectedClaudeModel,
       availableModels: claudeHostCatalog.map((m) => m.id),
       modelDiscovery: discoveryOf("claude-code", unsupportedDiscovery("no-list-concept:cli-aliases")),
-      // 디스커버리 개념이 없는 CLI라 카탈로그 별칭이 곧 광고다 — 선택 모델 1개만 광고하면
-      // 부모 플래너가 워커 티어를 낮출 수 없다.
+
+
       ...allocationAdvertisement({
         catalogKind: "claude-code",
         selected: selectedClaudeModel,
@@ -816,7 +818,7 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
     });
   }
   if (managedLocal) list.push(managedLocal);
-  // kind "acp" — the open seat: built-in ACP agents without a
+  // kind "acp" — the open seat (PRD 2026-08-15 B-1): built-in ACP agents without a
   // dedicated kind (OpenCode, Goose, Copilot CLI) plus user profiles in ACP mode.
   // Presence = the command exists; models = ACP session/new (cached 10 min).
   // Detection is best-effort per spec: one broken agent never hides the others.
@@ -991,7 +993,8 @@ const LOCAL_MODEL_INVENTORY_KINDS = new Set(["lmstudio", "mlx", "agentlas-local"
  * 역할 풀 선택 게이트 — detect 본체와 UI 조회가 같은 규칙을 쓰게 한 곳에 둔다.
  * 두 벌로 두면 한쪽만 고쳐져 "설정 화면과 실제 실행이 다른 모델"이 된다.
  *
- * 감지와 실행 선택(runtime/selection.ts)은 shared/runtime-quota 의 같은 기준을 쓴다.
+ * 그 경고가 맞았는데 두 번째 벌이 다른 파일에 있었다: 여기는 90%, 실행 선택
+ * (runtime/selection.ts)은 100% 였다. 이제 둘 다 shared/runtime-quota 를 쓴다.
  */
 function rolePoolGates(list: RuntimeStatus[]): {
   isRuntimeAvailable: (selection: RuntimeSelection) => boolean;
@@ -1006,14 +1009,15 @@ function rolePoolGates(list: RuntimeStatus[]): {
       return Boolean(runtime) && runtime?.localObservation?.state !== "pending" && !isRuntimeCredentialUnavailable(runtime);
     },
     /**
-     * 이 런타임이 실제로 가진 모델인가. **런타임이 광고한 인벤토리가 있을 때만**
-     * 부재를 판정한다(로컬 inference의 설치 모델 조회 결과).
-     * CLI 목록은 숨김 모델이나 별칭을 생략할 수 있고, BYOK는 정적 호스트
-     * 카탈로그다. 둘 다 명시 모델의 부재를 증명하지 못한다.
-     * 하드코딩 폴백 카탈로그로는 판정하지 않는다 — 계정이 새 모델을 받으면
-     * 폴백이 곧바로 낡아 유효 모델을 차단할 수 있다. 증명 못 하면 통과시키고 실패는
-     * 호출 지점에서 정직하게 드러낸다. 모델 미지정(엔진 설정 사용)도 항상 통과.
-     */
+
+
+
+
+
+
+
+
+ */
     isModelUnavailable: (selection) => {
       const model = selection.model?.trim();
       if (!model) return false;

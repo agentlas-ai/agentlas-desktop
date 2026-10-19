@@ -112,14 +112,14 @@ async function probeSocketOwner(address: string): Promise<"live" | "stale" | "un
 const PRIVATE_SOCKET_DIR = /^\.[dn]-[A-Za-z0-9]{6}$/;
 
 /**
- * 비정상 종료한 데몬이 남긴 비공개 bind 폴더(".d-XXXXXX/s", ".n-XXXXXX/s")를 치운다.
- *
- * 정상 close 만 이 폴더를 지운다. 충돌·SIGKILL·listen 뒤 exit 는 폴더를 남기고, 시작 경로는
- * 공개 이름(daemon.sock)만 정리했다 — 2026-10-17 오너 앱 데이터 폴더에 376개가 쌓였다(perf MP-07).
- * 지우는 것은 자기 소유의 실제 폴더(심볼릭 링크 아님)이고, 1분 넘게 지났고, 안이 비었거나
- * 죽은 소켓 "s" 하나뿐일 때만이다. "s" 는 붙어 보고 거절/부재로 죽은 것이 확인되고 inode 가
- * 그대로일 때만 unlink 한 뒤 rmdir 한다. 살아 있거나 판단이 안 서는 소켓, 다른 내용물은 그대로 둔다.
- * 재귀 삭제는 하지 않는다.
+
+
+
+
+
+
+
+
  */
 export async function sweepStalePrivateSocketDirs(
   parent: string, prefix: ".d-" | ".n-", keep: string | null, minAgeMs = 60_000,

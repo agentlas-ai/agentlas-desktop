@@ -1269,18 +1269,18 @@ export interface AutomationStrategyProposalBacklogResult {
 }
 
 /**
- * One live proposal per automation (P0-5, A2).
- *
- * Measured on the owner's store (2026-09-24, Threads f7a61706): 21 proposals were `pending` — a draft per
- * run, never retired. 11 of them could not even be reviewed (`proposal_review_boundary_changed`: the
- * definition had moved since their run) and 9 waited on a person. Nothing ever closed a pending row except
- * an explicit decision, so the pile only grew and the owner's review surface filled with dead drafts.
- *
- * Rule: the newest pending proposal is the live one. Every older pending draft is closed as superseded
- * (a newer run's reflection saw the same automation later). A live draft that failed review because its
- * definition moved is closed as stale — the next run, under the current definition, produces a fresh draft
- * that is reviewed against the current definition. Applied/approved/rejected rows are never touched, and
- * nothing here changes the graph, schedule, Goal, or authority: it only retires receipts.
+
+
+
+
+
+
+
+
+
+
+
+
  */
 export function settleAutomationStrategyProposalBacklog(
   automationId: string,
@@ -1527,25 +1527,25 @@ function createOriginAdoptionReceipt(
 }
 
 /**
- * Owner-delegated adoption of an unverified monitor origin (2026-09-24).
- *
- * Measured on the owner's store: a Goal chat updated its own automation in
- * place (automation.update never binds a Goal), so every later strategy
- * proposal - 8 of 8 "change" drafts, each judged within_scope - stopped at
- * "automation origin is unverified; explicit user approval is required" and
- * stayed pending forever. No approval sheet surfaced (that sheet only opens
- * for payment), so the automation self-correction loop was silently shut
- * while the Goal revision already recorded the owner's full-permission grant.
- *
- * This returns the exact authority receipt only when every machine fact
- * lines up; it never reads prose:
- *  - the automation is agent-created, unbound, and its monitor origin is an
- *    owner (role=user) message inside the very Goal chat it points at - the
- *    Goal's opening request or a later owner message;
- *  - the Goal is active/blocked, ongoing, and its current revision was sourced
- *    from an owner message and carries an `invocation:*:permission:full` ref.
- * Payment, Goal-contract amendments, and schedule/permission scope outside the
- * allowlisted patch surface are handled before/after this and stay gated.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
  */
 function ownerDelegatedAuthorityRef(
   current: AutomationStrategyProposalReceipt,

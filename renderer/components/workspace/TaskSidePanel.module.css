@@ -397,18 +397,18 @@
   overflow: hidden;
 }
 
-/*
- * 라이브 화면(브라우저·앱)은 [미리보기 | 분할선 | 아래 섹션] 을 세로로 쌓고,
- * 그 합이 항상 패널 높이와 같아야 한다.
- *
- * 실측 2026-08-25 (창 1446×871, 레일 548×871, 목록 547×824):
- *   grid-template-rows: 447px 123px  → 행 합 570px
- *   align-content: start             → 남는 254px 을 아무 행도 안 먹음
- *   scrollHeight(824) == clientHeight(824)  → 넘치는 게 아니라 "남는" 것
- *   빈 띠 한가운데 elementFromPoint == 컨테이너 자신 (자식 없는 순수 여백)
- * 세로 flex 로 바꾸면 남는 높이가 반드시 어느 칸엔가 배정되므로 이 빈 띠가 생길 수 없다.
- * (아래 여백은 라이브 화면에서만 빼고 접이식 섹션엔 되돌린다 — 글자가 벽에 붙던 것.)
- */
+
+
+
+
+
+
+
+
+
+
+
+
 .artifactRail[data-rail-view="browser"] .artifactList,
 .artifactRail[data-rail-view="app"] .artifactList {
   display: flex;

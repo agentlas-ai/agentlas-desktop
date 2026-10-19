@@ -83,7 +83,7 @@ import {
 import { armChatGoalContract, completeChatGoalContract, defineChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapshot, migrateLegacyGoalLifecycle } from "../store/chat-goals";
 import { automaticGoalReplayBlockerCode, prepareInvocationAutomaticGoal } from "./automatic-goal";
 import { classifyAndHandGoalIntakeToMain } from "./goal-intake-forward";
-import { followDaemonTurnGoalOfChat } from "../long-run/daemon-turn-goal";
+import { followDaemonTurnGoalOfChat, goalAdmittedForServiceRun } from "../long-run/daemon-turn-goal";
 import { holdFiniteGoalForPendingAmendment, reviewOwnerGoalMessage } from "../long-run/goal-owner-amendment";
 import { prepareLegacyGoalLifecycle, type LegacyGoalLifecyclePreparation } from "./legacy-goal-lifecycle";
 import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
@@ -453,14 +453,14 @@ function nextObservableSequence(record: RunRecord): number {
 }
 
 /**
- * The wire form of one live partial, or null when it brings nothing new (perf review 2026-10-17, R-03).
- *
- * A partial's `text` is the accumulated answer of its stream. The run's own answer already went out as `delta` +
- * `textLen`; a teammate's (agentId) went out whole on every frame, so a 10 KB answer cost about 1.25 MB of IPC and
- * delivery-journal JSON per teammate and a 30 KB one overran the run's 8 MB journal, evicting its tool events from
- * replay. Each teammate now has its own base (`agentPartialTexts`) and the same step. A teammate stream's first frame
- * and any reset that does not extend the base still carry the whole text, so a viewer re-syncs there. Readers rebuild
- * the text with reassembleAgentLivePartial (renderer gate, phone bridge, daemon relay).
+
+
+
+
+
+
+
+
  */
 function liveWirePartial(record: Pick<RunRecord, "partialText" | "agentPartialTexts">, event: McpInvocationEvent): McpInvocationEvent | null {
   if (event.kind !== "partial" || typeof event.text !== "string") return event;
@@ -578,12 +578,12 @@ export function authoritativeOnePermission(
   if (mode === "full") return "full";
   const auto = taskIntent === "task" ? "write" : "read";
   if (mode === "auto") return auto;
-  // Missing legacy mode is treated as Auto, never as permission supplied by
-  // the renderer. Desktop One always sends the explicit chip value now.
-  // An explicit read is still honored: it can only narrow. The Desktop
-  // recovery turn, team reports and Agent Mail send read without a mode,
-  // and intent promotion to "task" turned each into write (P17 replay
-  // 2026-10-16: two recovery turns ran write under a read-only chip).
+  
+
+
+
+
+
   return requestedPermission === "read" ? "read" : auto;
 }
 
@@ -632,13 +632,13 @@ function relayCopyParked(chatId: string, text: string): boolean {
 }
 
 /**
- * The run's user-message cursor INCLUDING its own prompt row (ID-1). invoke_started.latestUserMessageRowId is read before
- * the run writes the owner's prompt row (mcp/client.ts persistUserMessage runs after the durable start), so for 34 of 44
- * owner-bound runs since 2026-10-14 the cursor was below the run's own prompt, and a Goal resume after a restart read the
- * owner's own prompt as a newer direction (Yotube run_d627367a 10-14 00:25Z and 05:32Z: newer_user_direction, then a
- * fresh-context retry). Recorded on invoke_prompt_bound once the row exists: the prompt row when no other owner message
- * landed between the start cursor and it, else the start cursor unchanged. invoke_started keeps its admission-time value,
- * so desktop-recovery-admission (owner-run automatic recovery) reads exactly what it read before.
+
+
+
+
+
+
+
  */
 export function promptBoundUserCursor(chatId: string, runId: string, promptMessageId: string): { latestUserMessageRowId?: number } {
   try {
@@ -669,14 +669,14 @@ function ownerDirectionReviewSkip(request: Pick<McpInvocationRequest, "planMode"
 }
 
 /**
- * An owner message that changes an ongoing Goal's targets becomes a Goal revision (applied at the next stop).
- * Asynchronous: never delays or refuses the turn. Every review — answered, unanswered or skipped — leaves a machine
- * reasonCode in the run ledger; silence was how the owner's target restatements disappeared (2026-09-24).
- * One review for every way an owner message enters (D2): a turn's own prompt (start), a direction typed into a running
- * turn (steerCurrentTurn, nativeOwnerText: Desktop, the background service, the phone), and a queued direction whose
- * start failed and was kept as the owner's message. Only the start path reviewed before: production Yotube 10-13..10-18,
- * 22 directions applied to running turns ("묻지 말고 공개", "음성은 한 번만") had no review and were gone from the Goal
- * the next day. reviewOwnerGoalMessage is idempotent per (Goal, message).
+
+
+
+
+
+
+
+
  */
 function reviewOwnerDirectionForGoal(input: { runId: string; chatId: string; goalId: string; sourceMessageId: string;
   notReviewed: string | null; via?: "current-turn" | "queued-start-failed" }): void {
@@ -911,15 +911,15 @@ function exactOneInvocationParticipants(
   preparedTeam: PreparedOneTeamPreflightClaim | null,
   queuedRoomTargets?: McpInvocationRequest["taskForceTargets"],
 ): InstalledAgent[] | null {
-  /*
-   * 명단을 만드는 판단은 shared/one-team-preflight.ts 에 있다 — 부수효과가 없어
-   * 게이트가 실제로 불러 볼 수 있고, "Hub 좌석이 섞여도 명단이 무효가 되지
-   * 않는다"는 계약을 동작으로 검사한다. 여기 인라인으로 있던 동안 그 계약이
-   * 깨졌고 문장 대조 게이트는 전부 초록이었다(인수 실측 2026-08-26).
-   *
-   * 팀과 Hub 좌석은 이 명단에 오르지 않는다: 못박을 로컬 설치본 버전이 없기
-   * 때문이며, 실행기에는 taskForceTargets / borrowAgents 로 따로 실린다.
-   */
+  
+
+
+
+
+
+
+
+
   const participantIds = oneVersionPinRosterIds(
     ownerAgentId,
     preparedTeam ? preparedTeam.mode : queuedRoomTargets?.length ? "team" : null,
@@ -1359,11 +1359,11 @@ function ownerStoppedGoalAfterAnswer(chatId: string, sourceMessageId: string): b
 }
 
 /**
- * Owner 2026-10-14: termination is the model's judgment on its goal tree ("종료를 모델이 직접판단하는거아님? 그게 골 트리
- * 구조인데"), and the host checks outcomes, not mid-run tool-call settlement ("작업마다 정산하지말고 … 업로드된걸 보면 되지").
- * A finite Goal whose model declared completion closes here unless the verifier returned a positive "failed" verdict:
- * verification that could not run, threw, or stayed inconclusive no longer loops the Goal. The Yotube Goal looped from
- * 2026-10-13 23:07Z (owner "현 상태 수용하고 종결") through 1.3.33 on verification_unavailable.
+
+
+
+
+
  */
 function closeGoalOnModelJudgment(goalId: string, reason: string): boolean {
   if (getChatGoalRevision(goalId)?.lifecycle !== "finite") return false;
@@ -1386,10 +1386,10 @@ function closeGoalOnModelJudgment(goalId: string, reason: string): boolean {
 }
 
 /**
- * The chat is still held by earlier work. The outward code stays invocation_cleanup_pending (the send queue and the
- * renderer key on it); the cause names the holder, and recordStartRefusalCause stores it as causeCode. Nine different
- * checks used to throw the same bare error, and one swallowed the fence's own error: the owner's message after a restart
- * was refused with no recorded reason (W7 2026-10-17, copy taken while the Yotube Goal turn was running).
+
+
+
+
  */
 function cleanupPending(holder: string, cause?: unknown): Error {
   return Object.assign(new Error("invocation_cleanup_pending"),
@@ -2083,9 +2083,9 @@ export class InvocationService {
     } catch { /* Diagnostics cannot replace the original error or prevent cleanup. */ }
   }
 
-  /** The no-start ledger keeps its outward code; this typed run event keeps the cause. Production 1.3.47 (2026-10-16):
-   * the daemon wrapped a Main checkpoint refusal as runtime_turn_unsettled and its console is not persisted.
-   * Machine identifiers only: phase, host kind, ledger code, checkpoint kind, cause codes. One event per error. */
+  /**
+
+ */
   private recordStartRefusalCause(runId: string, chatId: string, error: unknown, context: { phase: string; reasonCode?: string; startBoundaryCrossed?: boolean }): void {
     try {
       if (error && typeof error === "object") { if (this.startRefusalCausesRecorded.has(error)) return; this.startRefusalCausesRecorded.add(error); }
@@ -2437,10 +2437,10 @@ export class InvocationService {
   /** 오너가 보낸 요청이 이 대화에서 차례를 기다린다 — 자동 재개는 그 뒤로 미룬다. */
   hasQueuedOwnerRequest(chatId: string): boolean {
     if (this.steerQueues.get(chatId)?.length) return true;
-    // The owner's request is reserved (invoke:run) before One's preflight judges run. A host resume that started
-    // in that window took the chat and the owner's start was refused: Thread Marketing 2026-10-04, preflight at
-    // 05:00:15.5Z, sweep resume at 05:00:17.8Z, "could not start" at 05:00:20.5Z. Bounded in time so a pending
-    // row left by a crashed process cannot hold a Goal back.
+    
+
+
+
     try {
       const pending = getPendingInvocationAdmissionForChat(chatId);
       return Boolean(pending && Date.now() - Date.parse(pending.pendingAt) < 120_000);
@@ -2646,13 +2646,13 @@ export class InvocationService {
   }
 
   /**
-   * Owner directions a turn never took (current-turn rows still `queued`) whose run is no longer live anywhere: the app
-   * closed or crashed before the run's own end could carry them, or an older version left them (D5). An owner stop ends
-   * them rejected owner_control_run_stopped (production chat 89bc5018: two rows queued since 2026-10-10, run cancelled by
-   * the owner at 23:54:22Z). Any other end (closing the app, an update restart, a crash, a failure) carries them as the
-   * chat's next turn (carried-owner-followups.ts), which the recovery below starts like any queued direction. A run
-   * whose lease is still held by a process is left to that process; a run with no receipt is left as it is.
-   */
+
+
+
+
+
+
+ */
   private settleUntakenCurrentTurnDirections(chatId?: string): { carried: number; rejected: number } {
     let carried = 0, rejected = 0;
     let runs: Array<{ chatId: string; runId: string }> = [];
@@ -2738,9 +2738,9 @@ export class InvocationService {
         if (releaseQueuedSteerRecoveryHold(row.id, row.recoveryReason)) row = getDurableQueuedSteer(row.id)!;
       }
       if (row.recoveryState === "held") {
-        // A held relay One wrote to a teammate has no owner to decide on it: measured 2026-10-12, two such rows sat
-        // for days after their run ended in a browser-login wait without a receipt. Once that run's lease is released
-        // and an hour has passed, close it; the Goal re-derives what still needs saying. Owner-written ones stay held.
+
+
+
         if (row.request.promptOrigin === "system" && originalOwner?.state === "released"
           && row.recoveryReason !== "one-team-report-owner-unbound"
           && Date.now() - Date.parse(row.queuedAt) > HELD_SYSTEM_STEER_RETIRE_MS && retireHeldQueuedSteer(row.id, "held-system-retired")) {
@@ -2930,6 +2930,13 @@ export class InvocationService {
       throw new Error("invocation_admission_request_identity_mismatch");
     }
     assertInvocationWorkspaceSourceContext(workspaceBinding, executionContext?.source);
+    const companyWork = executionContext?.source === "company-work" ? executionContext.companyWork : undefined;
+    if (!companyWork && require("../business/company-work-reference").isCompanyWorkReference(getChat(req.chatId)?.agentId)) throw new Error("company_work_original_owner_required");
+    if (executionContext?.source === "company-work") {
+      if (!companyWork) throw new Error("company_work_grant_required");
+      const admitted = require("../business/company-work-grant").assertCompanyWorkGrant(companyWork, req);
+      if (workspaceBinding !== admitted.workspace || getChat(req.chatId)?.agentId !== admitted.asset.agentId || req.oneMode || req.agentAppMode || req.automationId || getChat(req.chatId)?.originSurface !== "work") throw new Error("company_work_invocation_changed");
+    }
     if (!this.acceptingStarts) throw new Error("desktop_execution_admission_closed");
     const backgroundObservation = Boolean(effectObservationTicket(req.runId));
     if ((!nativeController || !nativePreparation || isLocalInvocationPreparationPort(nativePreparation.port)) && !backgroundObservation) {
@@ -2975,14 +2982,15 @@ export class InvocationService {
       oneAttachmentRef: requestedOneAttachmentRef,
       ...requestWithoutMainContext
     } = incoming;
-    // A Goal Main admitted for an earlier background-service turn of this chat follows that turn; once it ended the room is
-    // not bound to it any more (2026-10-15: both team rooms stayed bound to Goals whose runs had failed).
-    if (!backgroundObservation && invocationProcessOwner().ownerKind !== "daemon") {
+    
+
+    if (!companyWork && !backgroundObservation && invocationProcessOwner().ownerKind !== "daemon") {
       try { followDaemonTurnGoalOfChat(req.chatId); } catch (error) { console.warn("[invocation] service-turn Goal could not be settled:", error); }
     }
     const storedChat = getChat(req.chatId);
+    if (!companyWork && require("../business/company-work-reference").isCompanyWorkReference(storedChat?.agentId)) throw new Error("company_work_original_owner_required");
     if (!storedChat) throw new Error("Chat not found");
-    const chat = backgroundObservation ? { ...storedChat } : repairRootChatSurfaceController(storedChat);
+    const chat = backgroundObservation || companyWork ? { ...storedChat } : repairRootChatSurfaceController(storedChat);
     let boundGoal = chat.goalId ? getLongRunByGoalId(chat.goalId) : null;
     if (!backgroundObservation && chat.goalId && boundGoal && LONG_RUN_TERMINAL_STATUSES.has(boundGoal.status)) {
       completeChatGoalContract(chat.goalId, boundGoal.status === "completed" ? "completed" : "cancelled");
@@ -3092,18 +3100,18 @@ export class InvocationService {
         : {}),
     };
     if (requestedOneMode) {
-      /*
-       * ★오너 결정 2026-08-20 — One 잠금해제. 예전에는 모든 일반 One 턴을
-       * solo_locked + local-only 로 강등해 One 이 Work 의 기능(라우팅·워크포스·
-       * 파이프라인)을 쓸 수 없었다. One 은 최고권한자다: Work 대화와 같은 실행
-       * 계약을 그대로 받는다. 경계는 정적 강등이 아니라 행동 시점 승인
-       * (tool-approval 중재자 + capability_grants)과 편성 동의 UI 가 지킨다.
-       *
-       * 유지되는 것: 렌더러가 지어낼 수 없는 Main 전용 값들은 여전히 폐기된다 —
-       * oneTeamExecutionPolicy / oneTeamRuntimeBinding 은 위 _untrusted 구조분해로
-       * 이미 벗겨졌고, 정확한 로스터 바인딩은 아래 Main 발행 preflight capability
-       * 로만 복원된다.
-       */
+      
+
+
+
+
+
+
+
+
+
+
+
       invocationRequest = {
         ...invocationRequest,
         oneTeamExecutionPolicy: undefined,
@@ -3135,18 +3143,18 @@ export class InvocationService {
       && isRemoteInvocationWorkspaceBindingSource(runWorkspaceBinding.source));
     const controller = nativeController ?? new AbortController();
     const startedAt = new Date().toISOString();
-    /*
-     * ★청구가 실패하면 **예약을 반드시 풀어 준다** (오너 기기 로그 실측 2026-09-07:
-     *   `Error: One team preflight Task binding changed`).
-     *
-     * 이 호출은 try/catch 없이 던지고 있었다. 그러면 실행은 시작도 못 했는데 제안은
-     * `workforce_reserved` 로 남고, 화면에는 이유 없는 "이어갈 수 없다" 배너만 계속
-     * 뜬다(One 화면의 recovery 줄이 그 상태를 본다). 사용자는 같은 요청을 다시 보내고,
-     * 바인딩은 여전히 어긋나 있으니 같은 자리에서 또 죽는다 — 빠져나갈 길이 없다.
-     *
-     * failOneTeamPreflightStart 는 예약을 놓고 제안을 recovery_required 로 옮긴다.
-     * 그래야 다음 전송이 팀을 새로 준비하는 정상 경로로 들어간다.
-     */
+    
+
+
+
+
+
+
+
+
+
+
+
     let preparedOneTeamPreflight: PreparedOneTeamPreflightClaim | null = null;
     if (requestedOneTeamPreflightRef) {
       try {
@@ -3167,15 +3175,15 @@ export class InvocationService {
       if (runId !== preparedOneTeamPreflight.ref.reservedRunId) {
         throw new Error("One team preflight run binding changed");
       }
-      /*
-       * ★수리 2026-08-25 — 화면이 보여준 팀이 실행에 실리게.
-       * 예전에는 `borrowAgents: []` 가 하드코딩이고 hubMode 가 workforce 가
-       * 아니면 무조건 local-only 였다. 그래서 사람이 단톡방에 앉힌 Hub 대여
-       * 좌석은 실행 페이로드에 실릴 통로 자체가 없었다(실측: 좌석 2명,
-       * 실행 0건, `borrowed_agent_career_runs` 인스턴스 전체 0건).
-       * 확정된 로스터가 Hub 좌석을 담고 있으면 그 slug 를 그대로 싣고,
-       * 허브 호출을 켠 모드로 시작한다.
-       */
+      
+
+
+
+
+
+
+
+
       const rosterHubBorrowSlugs = [...new Set(
         preparedOneTeamPreflight.taskForceTargets.flatMap((target) =>
           target.source === "hub" ? [target.slug] : []),
@@ -3277,9 +3285,9 @@ export class InvocationService {
     } | null = null;
     let oneProfileContext: string | undefined;
     let oneMachineTurnContext: string | undefined;
-    // A teammate in a One room does its piece and answers One. One's persona, the owner's One profile and the approved One
-    // memory are One's own; a teammate re-reading them every turn only costs input (production 2026-10-12: the Motiondirector
-    // room turns carried "You are One … Identity: Hope" and ended with the owner's progress-bar instruction).
+
+
+
     let roomTeammateTurn = false;
     if (requestedOneMode) {
       try { roomTeammateTurn = Boolean((require("../one/room-chat") as typeof import("../one/room-chat")).roomMemberContext(chat.id)); }
@@ -3420,9 +3428,9 @@ export class InvocationService {
       ingress.selectedCwd = executionCwd;
     }
     const resultFolder = executionCwd;
-    // The attachment grant is bound to the owner's exact text. A team run executes the proposal's prompt, which
-    // prepends standing-staff preferences when a member has a handover note or style (production 1.3.47,
-    // 2026-10-16: every room turn with a file was refused before start, runtime_turn_unsettled).
+
+
+
     const oneAttachmentPrompt = preparedOneTeamPreflight ? preparedOneTeamPreflight.userAuthoredPrompt : invocationRequest.userPrompt;
     const claimedOneAttachments = requestedOneAttachmentRef
       ? (yield oneStartCheckpoint("attachments.claim", { ref: requestedOneAttachmentRef, chatId: chat.id, userPrompt: oneAttachmentPrompt, runId, resultFolder, teamProposalId: preparedOneTeamPreflight?.proposalId ?? null }, () => claimOneAttachments({
@@ -3492,13 +3500,13 @@ export class InvocationService {
     // A host continuation or retry may wait between turns without a pending
     // wait subscription. The owner's task still needs the durable resume below
     // before a new controller can acquire this Goal's execution authority.
-    /*
-     * A Goal the sweep has just queued for its next continuation (retry due) has no turn running yet. The owner's task
-     * message takes that turn: it was refused goal_episode_admission_stale (the producer is admitted only while the Goal
-     * is running) and the owner's message failed in 3 s (W7 2026-10-17, YouTube room, the owner wrote while the sweep's
-     * retry had queued the Goal). The chat still runs one turn at a time; the sweep's continuation, if it comes later,
-     * finds the chat busy and schedules its next retry.
-     */
+    
+
+
+
+
+
+
     const queuedGoalTakeover = boundGoal?.status === "queued" && localUserTurn && runReq.taskIntent !== "conversation";
     if (boundGoal && (boundGoal.status === "blocked" || boundGoal.status === "paused" || boundGoal.status === "waiting_tool"
       || boundGoal.status === "queued") && localUserTurn && (reopen.reopens || queuedGoalTakeover)) {
@@ -3570,14 +3578,14 @@ export class InvocationService {
       }
     };
     let emptyFailureNoticePersisted = false;
-    // A failed team run first commits its own honest reply ("This task is not complete yet …")
-    // and only then turns the held final into an error. That reply arrives as a durable message
-    // identity, not as streamed partial text, so partialText stays empty — and the run used to
-    // append a second, false "failed before it could finish a reply" notice under it
-    // (2026-10-04, verify-one-improvement-proof-producer failed-worker scenario).
+    
+
+
+
+
     let durableAssistantReplyBound = false;
-    // `errorCode` is the run's own terminal code. A cause inside the app (shared/run-failure-cause.ts) is reported as
-    // "app-failed", never as a needs-owner ask: the owner has nothing to do (Yotube 2026-10-17, goal_episode_admission_missing).
+    
+
     const persistEmptyFailureNotice = (terminalKind: string, errorCode?: string | null): void => {
       const abortReason = controller.signal.reason instanceof Error ? controller.signal.reason.message : null;
       if (record.background || emptyFailureNoticePersisted || durableAssistantReplyBound || record.partialText.trim() || runReq.agentAppMode || remoteWorkspaceBinding
@@ -3999,21 +4007,21 @@ export class InvocationService {
           if (objective && getChat(chat.id)?.goalId === projectionGoalId) setChatGoalBinding(chat.id, null);
           projectionGoalId = null;
         } else {
-          /*
-           * ★대화에 목표 번호만 찍고 계약을 안 만들면, 그 목표는 영영 못 닫는다.
-           *
-           * 이 경로는 실행 원장(long_runs)만 만들고 chat_goal_contracts 는 안 만들었다.
-           * 그런데 화면의 목표 칩·완료 판정·"껐다 켜면 이어가기"는 **그 계약**을 본다.
-           * 그래서 칩은 뜨는데 닫을 대상도 이어갈 대상도 없었다.
-           *
-           * 실측(오너 설치본 v1.1.8, QA 격리 재현 둘 다 같은 모양):
-           *   goal:auto-message:…  계약 있음 · 실행 있음 → 33초 만에 completed 로 닫힘
-           *   goal:desktop:…       계약 **없음** · 실행 있음 → 영원히 안 닫힘
-           * 그 저장소에서 목표가 완료된 적은 한 번도 없었다(completed 0).
-           *
-           * 계약은 실행 원장과 같은 사실을 다른 각도로 적는 것이므로, 여기서 함께 적는다.
-           * 실패해도 실행은 계속 간다 — 계약이 없다고 실행을 죽이면 더 나쁘다.
-           */
+          
+
+
+
+
+
+
+
+
+
+
+
+
+
+
           try {
             armChatGoalContract({ goalId: projectionGoalId, chatId: chat.id });
             defineChatGoalContract({
@@ -4038,19 +4046,19 @@ export class InvocationService {
       if (superseded) startBoundary.cleanups?.push(() => { restoreGoalWaitAfterUndispatchedStart(superseded); });
       goalLongRun = getLongRunByGoalId(goalLongRun.goalId);
     }
-    // A Desktop Goal turn is admitted only while its Goal is running (admitGoalProducer). Host continuations make it
-    // running (or queued, confirmed right after start) before they start, and a pending wait was superseded above;
-    // only an owner message may resume a Goal that waits for the owner or a scheduled retry. A system turn arriving
-    // then (a One relay drained after the Goal's turn asked the owner a question: Youtube launch 2026-10-10 07:00Z,
-    // run 7f8c7a55) spent 37 s of model calls and failed goal_episode_admission_missing. Refuse it before any call.
+
+
+
+
+
     if (!localUserTurn && !record.background && !executionContext && !runReq.agentAppMode && !effectObservation
       && goalLongRun?.rootChatId === chat.id && goalLongRun.surface !== "science"
       && ["waiting_tool", "blocked", "waiting_user"].includes(goalLongRun.status)) {
-      /*
-       * The refusal stands, but a relay is a teammate's work handed back or a room follow-up for One: dropping it lost
-       * that work for good (group room 8f3e09ee, 1.3.4, 2026-10-12). Park it with the cause; the chat's next real turn
-       * carries it as context. Host continuations (task turns) are not relays and are not parked.
-       */
+      
+
+
+
+
       if (invocationRequest.oneMode && invocationRequest.taskIntent === "conversation") {
         try {
           deferSystemRelay({ chatId: chat.id, text: invocationRequest.userPrompt, cause: `goal_${goalLongRun.status}`,
@@ -4118,16 +4126,16 @@ export class InvocationService {
     };
     /** Preserve the root runtime's typed cause in the durable controller attempt. */
     let observedRuntimeErrorCode: string | null = null;
-    /*
-     * A fresh explicit Goal (goal chip or goalMode turn) had no revision until a later sweep adopted the owner's
-     * recorded turn, so its first controller attempt carried no revision and the first verification always ended
-     * verification_goal_revision_unbound (live 2026-09-25). Adopt the same recorded grant — this turn's
-     * invoke_started + invoke_prompt_bound are durable by now — before the producer admission is captured and before the
-     * attempt is stamped. Adopting after the capture made a LATER owner turn on a Goal without a revision (a paused
-     * explicit Goal from before da35c424, resumed by the owner's message) fail goal_episode_admission_stale, then
-     * goal_episode_admission_missing: the adoption moved the run version under the captured custody, and only the Goal's
-     * own first turn is exempt from that (W7 2026-10-17, YouTube room, on 1.3.63 and 1.3.64 alike).
-     */
+    
+
+
+
+
+
+
+
+
+
     const adoptRecordedExplicitGrant = (): void => {
       if (!goalLongRun || executionContext || goalLongRun.surface === "science" || getChatGoalRevision(goalLongRun.goalId)) return;
       try {
@@ -4206,24 +4214,24 @@ export class InvocationService {
       });
       goalInvocationProjection?.settleOpenWorkers(completed);
     };
-    /*
-     * 권한 승격 표식(오너 결정 2026-08-25) — 읽기 전용 실행이 쓰기를 만나 표식을 냈는가.
-     * 표식은 본문에서 지워지고, 완주한 뒤 그 대화 안 승인칩으로 "전체 액세스로
-     * 진행할까요?"를 묻는다. 대화가 붙은 사용자 실행에서만 — 사이트/모바일 경계와
-     * 헤드리스(사전 부여) 경로는 기존 결정 그대로 둔다.
-     */
+    
+
+
+
+
+
     let permissionEscalationRequested = false;
-    /*
-     * ★승격을 물을 수 있는 실행 — 읽기 전용만이 아니다.
-     *
-     * 조건이 `permissions === "read"` 였다. 그런데 사람이 실제로 막히는 자리는 그것만이
-     * 아니다: 쓰기 권한 실행에서도 작업 폴더 밖 경로는 거부되고, 그때 화면에는 "승인할 사람이
-     * 붙어 있지 않습니다"라는 문장과 기계 코드 한 줄만 남았다 — **채팅 앞에 사람이 앉아
-     * 있는데도**, 권한을 올릴 버튼 하나 없이(QA 실측 2026-09-07).
-     *
-     * 이미 full 인 실행은 더 올릴 것이 없으므로 제외한다. 승격 자체는 여전히 사람이 칩에
-     * 답해야 일어나고, 무응답은 기존 계약대로 거부로 닫힌다.
-     */
+    
+
+
+
+
+
+
+
+
+
+
     const permissionEscalationEligible =
       !effectObservation
       && !runReq.agentAppMode
@@ -4361,11 +4369,11 @@ export class InvocationService {
           }
           bindGoalControllerAttempt(event.runtimeSelection);
         }
-        /*
-         * A goal-chip Goal gets its ledger row from the client DURING its first turn (after runtime selection:
-         * live 2026-09-25, row 12 s after invoke_started), so that turn had no controller attempt and no revision and its
-         * first verification was always verification_goal_revision_unbound. Bind as soon as the row exists.
-         */
+        
+
+
+
+
         if (!goalLongRun && projectionGoalId && lastControllerSelection && !goalControllerAttemptId && !goalControllerAttemptSettled
           && !effectObservation && getLongRunByGoalId(projectionGoalId)) {
           refreshGoalProjection();
@@ -4391,8 +4399,8 @@ export class InvocationService {
           && (event.kind === "final" || event.kind === "partial")
           && typeof event.text === "string"
           && (hasPermissionEscalationMarker(event.text)
-            // Measured 2026-09-24: the model wrote the marker as its last line, but the final event text
-            // is built from the stripped durable copy — no chip was ever offered. The client carries the fact.
+
+
             || (event.kind === "final" && event.permissionEscalationMarkerForVerification === true))
         ) {
           if (event.kind === "final") permissionEscalationRequested = true;
@@ -4749,9 +4757,9 @@ export class InvocationService {
           && !remoteWorkspaceBinding
           && typeof event.text === "string"
           && event.text.trim()
-          // One's quiet reply on a host-started review or check-in is deliberately not saved (dots parity): its
-          // durable record is the one_quiet_reply run event, not a transcript row. Treating it as a lost result
-          // failed every quiet turn and retried the review until its attempts ran out (QA 2026-10-04).
+
+
+
           && !((hostNoticePurpose === "one-delegation-review" || hostNoticePurpose === "one-checkin") && isOneQuietReply(event.text))
           && !hasDurableAssistantMessage(
             runReq.chatId,
@@ -5069,11 +5077,11 @@ export class InvocationService {
         }
         if (stoppedGoalReactivation) {
           let resumed: ReturnType<typeof getLongRun> = null;
-          // Preserve a machine-coded refusal when another action changes the
-          // exact Goal while this turn is preparing. No provider dispatch may
-          // follow a failed resume transaction.
-          // `detail` names the check that failed (or the thrown error): the refusal used to keep only the coarse reason,
-          // and the owner's message after a restart failed "목표 상태가 방금 바뀌어" with no recorded cause (W7 2026-10-17).
+          
+
+
+
+
           const stall: { reason: "state-changed" | "revision" | "attempt-live" | "budget" | "contract" | "not-ready" | "claimed-wait" | "effect-boundary-uncertain"; detail?: string } = { reason: "state-changed" };
           const refuse = (detail: string) => { stall.detail = detail; return null; };
           try {
@@ -5207,13 +5215,13 @@ export class InvocationService {
         // Goal. Science and remote/automation authority keep their own adapters.
         if (projectionGoalId || runReq.agentAppMode || runWorkspaceBinding || executionContext ||
             runReq.promptOrigin === "system" || runReq.planMode || chat.kind === "division" || controller.signal.aborted) return;
-        // Goal custody is Desktop-only: this process cannot admit a Goal controller (producerAdmission stays
-        // null), so a Goal admitted mid-turn would have its first dispatch refused with goal_episode_admission_missing.
-        // The turn stays ordinary and finishes here, but its intake must not be dropped: production 2026-10-11 10:08Z (run
-        // 97164057-c169-4868-89c0-53ebd22e9c8f, room chat 8f3e09ee-0ab7-4d6b-aa0a-8ae7d5e96549, 1.2.96) lost a recurring
-        // "every day ... upload" brief here, so no One chat could ever become a continuous Goal. Classify off the critical path
-        // with Desktop's own resolver; a Goal-bound message goes to Main (which owns Goal custody), or leaves a durable marker
-        // when Main is away. Once the chat holds a live Goal, ownerTurnStartsOnDesktop routes its next turn to Desktop.
+
+
+
+
+
+
+
         if (record.ownerLease?.ownerKind === "daemon") {
           void classifyAndHandGoalIntakeToMain({ runId, chatId: chat.id, sourceMessageId, userPrompt: ownerVisiblePrompt(runReq),
             permission: runReq.permissions ?? "read", signal: controller.signal,
@@ -5287,13 +5295,13 @@ export class InvocationService {
           record.events.push(goalEvent);
           recordMcpInvocationEvent(runId, runReq, goalEvent);
           this.publishRunEvent(record, { runId, chatId: chat.id, event: goalEvent });
-          /*
-           * ★마감이 없으면(무제한) 타이머를 걸지 않는다.
-           *
-           * Date.parse(null) 은 NaN 이고 setTimeout(fn, NaN) 은 **즉시** 실행된다. 그래서
-           * 이 줄은 무제한 목표를 시작하자마자 취소해 버린다 — 상한을 푸는 변경에서 가장
-           * 조용히 반대로 도는 자리다(오너 지시 2026-09-08 주기·시간 무제한).
-           */
+          
+
+
+
+
+
+
         } catch {
           tryRecordRunEvent({ runId, chatId: chat.id, kind: "automatic_goal_binding_failed", payload: { sourceMessageId } });
           const failedGoalId = record.automaticGoalId;
@@ -5337,6 +5345,10 @@ export class InvocationService {
         if (producerWorkDispatchSealed) throw Object.assign(
           new Error("goal_episode_admission_lifetime_stale"), { code: "goal_episode_admission_lifetime_stale" });
         try {
+
+
+
+          if (goalId && record.ownerLease?.ownerKind === "daemon" && goalAdmittedForServiceRun(runId, goalId)) return;
           // Last synchronous pre-work opportunity: the client may have materialized the first Goal after selection.
           if (goalId && (!projectionGoalId || projectionGoalId === goalId)) {
             projectionGoalId = goalId;
@@ -5634,7 +5646,7 @@ export class InvocationService {
             if (!finiteTimerEndsTurn) {
               const latest = current ? getLongRun(current.id) : null;
               if (latest?.status === "running") transitionLongRun({ runId: latest.id, to: "blocked", actorKind: "host", reason });
-              // The generic code hides the cause (owner DB 2026-10-04: 39 refusals in an hour, all generic).
+              
               const cause = error instanceof Error ? error.message : String(error);
               tryRecordFailureEvent({ runId, chatId: chat.id, source: "invoke", errorCode: reason,
                 errorMessage: reason === "goal_wait_registration_failed" && cause !== reason ? `${reason}: ${cause.slice(0, 200)}` : reason });
@@ -5664,12 +5676,12 @@ export class InvocationService {
         let completionClaim = result.goalCompletionClaim ?? (record.automaticGoalId && !record.pendingQuestion && !controller.signal.aborted
           ? { claimed: true, goalId: record.automaticGoalId, evidence: "Automatic Goal: verify the durable terminal result against all criteria." }
           : undefined);
-        /*
-         * Every goal turn end verifies, continues or stops with a coded reason — never "running" with no attempt.
-         * Measured (1.2.43 dev E2E, One chip goal run_27355a43 on Agentlas Light): an explicit Goal whose turn ended without
-         * a completion claim (7 in-turn cycles, last one asking the owner a question) stayed status=running with no live
-         * attempt: the client queued a hidden every-10m continuation and nothing on the host side scheduled anything.
-         */
+        
+
+
+
+
+
         /*
          * Automatic Goals too (1.2.43 E2E, serving One automatic goal run_2e5f7bbd): a turn that ended on a typed
          * agentlas-ask question has no completion claim (pendingQuestion suppresses it) and stayed running with no attempt.
@@ -5693,11 +5705,11 @@ export class InvocationService {
               appendLongRunEvent({ runId: current.id, kind: "run.owner_answer_pending", actorKind: "host", payload: { reason: "goal_owner_answer_required" } });
               this.scheduleGoalContinuation(current.goalId, record, "goal_owner_answer_required");
             } else if (!result.goalEpisodeYield && findAutomationByGoalId(turnGoalId)?.enabled) {
-              // Its hidden continuation owns the next step: say so instead of looking like a live turn. Only a continuation
-              // that holds a next run can own it. One that is enabled with nothing scheduled (never armed, refused or lost
-              // at a restart) wakes nobody: production 1.3.11, Yotube room 2026-10-12 07:55Z, "Goal continuation · Yotube"
-              // had next_run_at empty and run_count 0, and the Goal sat in waiting_tool for 45 minutes while six
-              // teammate reports waited parked. Then the host's spaced follow-up takes the next step.
+
+
+
+
+
               const armed = Boolean(findAutomationByGoalId(turnGoalId)?.nextRunAt);
               transitionLongRun({ runId: current.id, to: "waiting_tool", actorKind: "host",
                 reason: armed ? "goal_continuation_scheduled" : "goal_continuation_unarmed" });
@@ -5931,7 +5943,7 @@ export class InvocationService {
               ...untrustedRuntimeFailurePayload(),
               ...(terminalDisposition.errorCode ? { code: terminalDisposition.errorCode } : {}),
             }
-          // The thrown failure's own machine code; the wrapper code only when it carries none (audit A7 M10).
+
           : { code: terminalDisposition.errorCode ?? outwardFailureCode(error) ?? "invoke-threw", message: rawMessage };
         const message = safeFailure.message;
         tryRecordRunEvent({
@@ -5986,8 +5998,8 @@ export class InvocationService {
             chatId: runReq.chatId,
             agentId: record.actualAgentId,
             payload: { resultFolder: record.resultFolder, errorCode: safeFailure.code, errorMessage: message,
-              // Measured 2026-09-28 (isolated app, before): a turn cut by app quit landed here as
-              // invoke-threw with no cause, so it read as a crash. Keep Main's own stop marker.
+
+
               ...(controller.signal.aborted && controller.signal.reason instanceof Error
                 && invocationHostStopCause(controller.signal.reason.message)
                 ? { hostStopCause: invocationHostStopCause(controller.signal.reason.message) } : {}) },
@@ -6063,9 +6075,9 @@ export class InvocationService {
         if (!nativeController || isLocalInvocationPreparationPort(nativePreparation!.port)) releaseOneAttachmentRun(requestedOneAttachmentRef);
       })))))).catch((error: unknown) => {
         console.warn("[invocation] execution cleanup failed:", error);
-        // The inner chain settles the slot in its own finally. Still registered here means a lifetime wrapper rejected
-        // before that chain was attached (or its finally threw first): start() already returned, so settle and
-        // publish here or the chat stays "running" and refuses every later start (independent review 2026-10-04).
+        
+
+
         if (this.activeRuns.has(runId)) this.releaseUndispatchedStart(runId, runReq.chatId, error, startBoundary.cleanups ?? [], record);
       }).finally(() => lifetime.afterSettled(async () => {
         if (record.ownerLease) {
@@ -6114,13 +6126,13 @@ export class InvocationService {
   }
 
   /**
-   * A failure after the durable start receipt that the runner's own terminal settlement will never see: a synchronous
-   * throw before the completion chain was assigned (the caller gets the error), or a lifetime wrapper rejecting before
-   * the inner chain was attached (start() already returned, so `settledRecord` is published). Live 2026-10-04 (TPA
-   * study, update-like restart): one "database is locked" here left the Science chat refusing every retry with
-   * chat_invocation_active until the app was reopened. Undo what the start acquired, record the terminal fact once,
-   * and release the slot.
-   */
+
+
+
+
+
+
+ */
   private releaseUndispatchedStart(runId: string, chatId: string, error: unknown, cleanups: Array<() => void>,
     settledRecord?: RunRecord, onCleanupLoopCompleted?: () => void): void {
     const diagnosticRecord = settledRecord ?? this.activeRuns.get(runId);
@@ -6160,7 +6172,7 @@ export class InvocationService {
         kind: "invoke_threw",
         chatId,
         agentId: this.activeRuns.get(runId)?.actualAgentId,
-        // The refusal's own machine code, not a wrapper the AGI monitor had to re-parse from the message (audit A7 M10).
+
         payload: { errorCode: outwardFailureCode(error) ?? "invoke-start-failed", errorMessage: message.slice(0, 500), providerDispatched: false,
           turnDelivery: "not-dispatched" },
       });
@@ -6299,24 +6311,24 @@ export class InvocationService {
       const wait = latestGoalWaitSubscription(goalId);
       if (wait && ["pending", "claimed"].includes(wait.state)) return;
       if (pendingBlockedGoalRetry(run.id)) return;
-      // Every follow-up of the same reason doubles its spacing (30 s, 1 min, 2 min … 6 h) until the owner speaks or
-      // uses a Goal control; a time the turn asked for is honoured. A turn that asked to wait and could not register
-      // it completes with nothing started, so it counts across completed turns (the 2026-10-04 Thread Marketing loop:
-      // 39 turns in an hour). Any other reason starts over after a completed turn, so a productive Goal keeps the 30 s
-      // step while a failing one backs off. Only the first case was spaced before, and the same loop came back with
-      // another reason: X Marketing 2026-10-05 failed runtime_turn_unsettled every minute for 25 minutes.
+      
+
+
+
+
+
       const nothingStarted = reason === "goal_wait_registration_failed";
-      // A turn that ended because its passes stopped doing anything (client goal_idle_pass_yield) completed, yet it
-      // is no progress either: its follow-ups count across completed turns too, so the Goal backs off instead of
-      // being woken again after 30 s. Production 2026-10-06, Youtube launch on 1.2.69: after the idle yield the sweep
-      // resumed the same blocked check 1.5 minutes later, every time.
+
+
+
+
       const turnRunId = record.request?.runId;
       const idleYield = !nothingStarted && Boolean(turnRunId && getDb().prepare(
         "SELECT 1 FROM run_events WHERE run_id = ? AND kind = 'goal_idle_pass_yield' LIMIT 1").get(turnRunId));
       const followUpReason = idleYield ? "goal_idle_pass_yield" : reason;
-      // A turn that ended on an owner question completed too, but until the owner answers nothing can move: count it
-      // across completed turns. Production 1.3.29, Yotube room 2026-10-13 21:09–21:53Z: every follow-up restarted at
-      // retryIndex 0, so the Goal woke about once a minute and asked the same phone-verification card 8 times.
+
+
+
       const ownerQuestion = followUpReason === "goal_owner_answer_required";
       const ownerSince = (getDb().prepare("SELECT MAX(created_at) AS at FROM chat_messages WHERE chat_id = ? AND role = 'user'")
         .get(record.chatId) as { at: string | null } | undefined)?.at ?? null;
@@ -6345,16 +6357,16 @@ export class InvocationService {
   }
 
   /**
-   * 읽기 전용 턴이 표식으로 요청한 권한 승격 — 오너 결정 2026-08-25.
-   *
-   * "권한이 모자라 실행 불가"는 거절이 아니라 행동 시점 승인칩으로 승격을 묻는다.
-   * 기존 승인 한 벌(중재자 → capability_grants 규칙 → 그 대화 안 live 칩)을 그대로
-   * 지난다 — 새 승인 채널은 없다. "항상 허용"은 tool:permission-escalation 영구
-   * 규칙으로 남고, 무응답은 기존 계약대로 5분 뒤 거부로 닫힌다(자동 승격 없음).
-   * 승인되면 같은 대화에 Main 발행(system) 연속 턴을 전체 액세스로 시작한다.
-   * 거부되면 아무것도 더 하지 않는다 — 모델이 남긴 "쓰기가 필요하다" 문장이 곧
-   * 정직한 거절 기록이고, 원 실행의 결과는 그대로 선다.
-   */
+
+
+
+
+
+
+
+
+
+ */
   private async offerPermissionEscalation(input: {
     record: RunRecord;
     chatId: string;
@@ -6925,12 +6937,12 @@ export class InvocationService {
   }
 
   /**
-   * Where a queued turn waits: an owner turn goes ahead of host-written (system) turns already queued in the same chat,
-   * keeping the order among owner turns and among system turns. Production 2026-10-18, Yotube room 8f3e09ee: the owner's
-   * 04:37Z direction was carried at 05:34Z behind a teammate relay queued at 04:44Z; the relay ran first as a read-only
-   * turn for 13 minutes and the direction started only at 05:47Z. A head a drain may already have taken is never
-   * displaced: only while the chat's run is active (no drain can be pending) may the new turn take the head.
-   */
+
+
+
+
+
+ */
   private enqueueSteer(chatId: string, queue: QueuedSteer[], item: QueuedSteer): void {
     if (item.request.promptOrigin === "system") { queue.push(item); return; }
     const from = this.activeChatIds().includes(chatId) ? 0 : 1;
@@ -6939,12 +6951,12 @@ export class InvocationService {
   }
 
   /**
-   * When a run ends without the owner stopping it, the owner directions it never dispatched become the chat's next turn
-   * (carried-owner-followups.ts: production 2026-10-17, a team run left the owner's style direction queued for 81
-   * minutes and then refused it, so it was lost). A stopped run keeps them refused: the stop withdrew the turn
-   * (clearQueuedDirectionsForStop settles them owner_control_run_stopped). Closing the app or restarting for an update is
-   * not the owner's stop: those directions are carried too, and restart recovery starts the carried turn (D5).
-   */
+
+
+
+
+
+ */
   private carryUndeliveredOwnerFollowups(runId: string, record: RunRecord): void {
     const reason = record.controller.signal.reason;
     const hostShutdown = reason instanceof Error && HOST_SHUTDOWN_ABORT_CAUSES.has(reason.message);
@@ -7136,6 +7148,7 @@ export class InvocationService {
     preflightSteerId?: string,
     oneTeamReportSource?: QueuedTeamReportSourceRef,
   ): InvocationSteerResult {
+    if (require("../business/company-work-reference").isCompanyWorkReference(getChat(req.chatId)?.agentId)) throw new Error("company_work_steering_denied");
     mainAdmission = takeMainInvocationAdmission(mainAdmission);
     if (req.oneAttachmentRef) {
       throw new Error("One attachments cannot be added through steering in v1; wait for the active run and send a new request");
@@ -7309,14 +7322,14 @@ export class InvocationService {
   }
 
   /**
-   * Wire replay for a viewer (perf review 2026-10-17, R-04 / H2).
-   *
-   * The live texts (the run's answer so far, each teammate's) ride only on an answer the viewer rebuilds from: the first
-   * replay (afterOrdinal 0), one it asks to hydrate from (`hydrate`), or one that is not a complete tail. A complete
-   * tail is applied event by event and its deltas already carry the text; attaching the whole answer-so-far to every
-   * safety poll re-sent it each time. A run the background service hosts is answered from Main's mirror of its stream
-   * (native-gui-events.ts) instead of "unavailable"; `includeHostedElsewhere: false` keeps a reader on Main's own runs.
-   */
+
+
+
+
+
+
+
+ */
   replay(value: unknown, options: { includeHostedElsewhere?: boolean } = {}): RunEventReplay {
     const input = parseRunEventReplayInput(value);
     const receipt = this.receipt(input.runId);
@@ -7341,12 +7354,12 @@ export class InvocationService {
   }
 
   /**
-   * Main-owned recovery receipt; held directions are never replay permission. Lists the held next-turn directions and
-   * every uncertain owner text of the chat's running turns (`native-owner:<intent>`, the form returnSteeringRecovery
-   * takes), whichever host or source wrote it (D6). Only the daemon's native-owner-text rows used to be listed
-   * (nativeOwnerTextRecovery); a Desktop uncertain row had no exit: production a4f949a6 (Yotube, 2026-10-13 13:51Z,
-   * owner_control_episode_reply_lost) stayed uncertain for five days.
-   */
+
+
+
+
+
+ */
   steeringRecovery(chatId: string): InvocationSteerRecovery[] {
     const held = listRecoverableQueuedSteers()
       .filter((row) => row.chatId === chatId && row.recoveryState === "held")
@@ -7401,12 +7414,12 @@ export class InvocationService {
   }
 
   /**
-   * The chat's latest run started from the owner's own message (it recorded `origin_user_message`): "the execution
-   * choices the chat last ran with" for the owner's next text. latestReceipt can be a host-written turn (a teammate's
-   * report turn runs read-only, a Goal continuation), and taking its permission ran the owner's next message read-only:
-   * production 2026-10-18, Yotube room, the 01:45:27Z report turn was read-only and the owner's 01:49:46Z answer to a
-   * question card ran with "Bash is disabled for this session", although the Goal it resumed holds full access.
-   */
+
+
+
+
+
+ */
   latestOwnerReceipt(chatId: string): InvocationRunReceipt | null {
     for (const [runId, record] of new Map([...this.activeRuns.entries(), ...this.settlingRuns, ...this.browserLoginWaitingRuns])) {
       if (!record.background && record.chatId === chatId && record.request.promptOrigin !== "system") return this.receipt(runId);
@@ -7424,6 +7437,7 @@ export class InvocationService {
   }
 
   history(chatId: string) {
+    if (require("../business/company-work-reference").isCompanyWorkReference(getChat(chatId)?.agentId)) throw new Error("company_work_history_owner_required");
     return listChatMessages(chatId);
   }
 
@@ -7584,8 +7598,8 @@ export class InvocationService {
       ...(record.workspaceBinding ? { workspaceBinding: record.workspaceBinding } : {}),
     };
     if (record.oneMode && record.actualAgentId) {
-      // 사람이 멈춘 실행(중지·Goal 일시정지/삭제)과 방향 전환은 실패가 아니다 — 조직도에 붉은
-      // "실패 · 확인 필요"로 남기지 않는다(2026-09-26 실측: Goal 삭제 직후 좌석이 실패로 표시).
+
+
       const stopped = isNonFailureInvocationStop(receipt);
       const failed = !stopped && (receipt.status === "failed" || receipt.status === "interrupted");
       const creditBlocked = receipt.errorCode === "insufficient_credits" || /insufficient[_ -]?credits/i.test(receipt.errorMessage || "");
@@ -7679,15 +7693,15 @@ export class InvocationService {
   }
 
   /**
-   * A queued direction whose start hit a locked store is started again with backoff instead of failing (R-067).
-   * Production 1.3.67, 2026-10-18T02:44:23Z, Yotube room: the Film Production Director's completion report
-   * (dispatch-1f9ca888) waited behind the leader's run; when the run ended its start threw "database is locked", the drain
-   * marked it failed and never ran it, and the leader never read the report. The 1.3.54 store_busy retry covers only the
-   * model-call path. A lock is transient, and this start is retried only while it provably sent nothing: a lock in the
-   * drain claim (the CAS rolled back), or a start that refused before dispatch (start() marks it). A start that had
-   * already recorded its planned run leaves that id spent and the retry starts a new run. Bounded by
-   * STEER_DRAIN_STORE_BUSY_DELAYS_MS; the head keeps its place in the queue meanwhile.
-   */
+
+
+
+
+
+
+
+
+ */
   private retryQueuedSteerOnLockedStore(chatId: string, next: QueuedSteer, drainedRunId: string,
     phase: "claim" | "start", error: unknown): "scheduled" | "exhausted" | "not-retryable" {
     if (innermostTypedCode(error) !== STORE_BUSY_CODE) return "not-retryable";
@@ -7743,9 +7757,9 @@ export class InvocationService {
   private failQueuedSteerStart(chatId: string, next: QueuedSteer, drainedRunId: string, error: unknown, storeBusyExhausted: boolean): void {
     this.steerDrainBackoff.delete(next.id);
     const code = refusalCode(error);
-    // A waiting Goal refuses a system turn and parks its relay with this run id; the Goal's next turn carries it as
-    // context. That is a hand-off, not a lost report (Yotube 2026-10-17T17:36:21Z steer c9bd1c58: "failed", yet its
-    // relay was parked and delivered at 19:44).
+    
+
+
     if (code === "goal_waiting_system_start_refused" && (relayParkedForRun(drainedRunId) || this.parkRefusedQueuedRelay(chatId, next, drainedRunId))) {
       this.settleQueuedSteerDurably(next.id, "cancelled", "parked-for-waiting-goal");
       console.info(`[invocation] queued steer parked for the waiting Goal steer=${next.id} chat=${chatId} cause=parked-for-waiting-goal code=${code}`);
@@ -7754,9 +7768,9 @@ export class InvocationService {
     const cause: DurableQueuedSteerTerminalCause = storeBusyExhausted ? "drain-store-busy-exhausted" : code ? "drain-start-refused" : "drain-start-error";
     this.settleQueuedSteerDurably(next.id, "failed", cause);
     const message = error instanceof Error ? error.message : String(error);
-    // The queued direction was never a chat message (start() persists it), so a failed start used
-    // to erase the owner's sentence and leave no trace of why (Youtube room, 2026-10-10 08:55).
-    // Log the cause marker with the typed code, keep the sentence as the owner's own turn, and say so briefly.
+    
+
+
     console.warn(`[invocation] queued steer failed to start steer=${next.id} chat=${chatId} cause=${cause} code=${code ?? "none"} `
       + `detail=${redactSecrets(message).replace(/\s+/g, " ").slice(0, 400)}`);
     try {
@@ -7811,15 +7825,15 @@ export class InvocationService {
   }
 
   /**
-   * The owner takes a held direction back into the composer (invoke:returnSteeringRecovery). Its text is returned and
-   * the held row retired in ONE transaction, so the composer holds the only copy. Owner 2026-10-18: a held follow-up
-   * stayed listed forever because only host-written held rows were ever retired; One now puts the text back once
-   * (renderer 38f5892d) and this retires the row. Both held forms One lists are accepted: a queued direction held at
-   * restart (invocation_steers) and an owner text a native turn could not confirm (`native-owner:<intent>`). It runs on
-   * the shared store whichever process owns the chat's run: a held row is in no process's live queue
-   * (recoverQueuedSteers never queues one, the drain CAS refuses it) and an uncertain current-turn row is never
-   * dispatched again. Owner text only, idempotent, never starts a turn.
-   */
+
+
+
+
+
+
+
+
+ */
   returnSteeringRecovery(id: string, expectedChatId?: string): InvocationSteerRecoveryReturn {
     if (typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(id)) throw new Error("steer_recovery_invalid_id");
     if (expectedChatId !== undefined && (typeof expectedChatId !== "string" || !expectedChatId)) throw new Error("steer_recovery_invalid_chat_id");

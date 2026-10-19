@@ -639,11 +639,11 @@ interface CodexRunResult {
 }
 
 /**
- * An exec run that exited non-zero without emitting a single event (no thread.started, no turn event, no text): codex
- * stopped before it created or resumed the session, so the turn never reached the model. That is a refusal before
- * dispatch (RuntimeTurnDelivery "not-dispatched", runner.ts) with the CLI's own words, never an unsettled turn: no
- * continuation re-sends it and a graph step fails typed instead of being held as a possible side effect (docs 31 W1;
- * W7 acceptance S-graph-two-steps, 2026-10-16: a refused turn/start, then a refused exec, ended MUTATION_UNVERIFIED).
+
+
+
+
+
  */
 /**
  * The settlement of an exec turn that exited 0 with a completed turn and no failure: the shared normal-end rule (R-065,
@@ -1711,11 +1711,11 @@ export function codexNativeItemMayOutliveTurn(item: any): boolean {
 }
 
 /**
- * Native turns and child threads that earlier runner turns of one resident app-server owned (flow audit 2026-10-18 AD-10).
- * A reused process can still stream an earlier turn's late frames (its background terminal's output, a sub-agent thread it
- * spawned); they used to make the next turn's effect boundary uncertain (native-child-or-other-turn-uncovered with
- * native-frame-uncovered, about 75 boundaries 10-02..10-10). Such a frame belongs to the earlier turn, whose boundary has
- * already closed. Only a frame proven to be that residue is set aside; an unknown thread or turn stays uncovered.
+
+
+
+
+
  */
 export interface CodexPriorTurnOwnership { turnIds: Set<string>; threadIds: Set<string>; }
 const codexPriorTurnOwnership = new WeakMap<object, CodexPriorTurnOwnership>();
@@ -1810,14 +1810,14 @@ async function runCodexResidentTurn(input: {
   // Native compaction at 80% of the model's own window (session-generation.ts), Science included; unknown window keeps Codex's default.
   const compactLimit = nativeCompactionLimit(KIND, req.model);
   const pool = codexSessionPool();
-  /*
-   * Process identity. The invocation's MCP servers ride thread config on a resident keyed by the grant (the server
-   * names; codex-session.ts codexMcpThreadConfig), so an owner's follow-up reuses the warm process and rebinds its own
-   * servers before turn/start. Spawn arguments used to carry them, and every invocation mints new launch handles and
-   * capability files, so every turn got a new key (production 10-13..16: 374 spawns, 4 reuses). A turn-scoped process
-   * (its grant dies with it) and a Workforce observation (which proves its exact argv) keep the spawn-argument form, as
-   * does an executable that refused thread/unsubscribe.
-   */
+  
+
+
+
+
+
+
+
   const residentIdentity = () => {
     const mcpThread = !turnScoped && !req.workforceRuntimeToolGrant && codexThreadMcpRebindSupported()
       ? codexMcpThreadConfig(mcpArgs, env) : null;
@@ -2392,8 +2392,8 @@ async function runCodexResidentTurn(input: {
         break;
       }
       case "mcpServer/startupStatus/updated": {
-        // An MCP server Codex could not start leaves this turn without its tools. Say which one and the typed reason (no
-        // provider prose): before, the turn only failed later as a run failure (production audit 2026-10-18, M2).
+        
+
         if (fromOtherThread(params)) break;
         const name = typeof params?.name === "string" && /^[A-Za-z0-9_.@-]{1,80}$/.test(params.name) ? params.name : "";
         if (name && (params?.status === "failed" || params?.status === "cancelled")) {
@@ -2894,15 +2894,15 @@ async function runCodexResidentTurn(input: {
         req.locale,
       )
       : buildResidentInitialTurnPrompt({ ...req, turnContext: resumeContext.text });
-    /*
-     * Host continuation turns in the SAME thread (owner rule 2026-10-13: never end a turn on the output cap; production
-     * 1.3.49 run 5d37e4cc: a teammate cut at 128,000 output tokens after 62 minutes failed the whole owner turn).
-     *   output limit      one host turn with the registered continuation module (output-limit-continuation.ts), at most
-     *                     OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS in a row, exactly as the API lanes do;
-     *   context overflow  one thread/compact/start, then one host turn with the run-recovery line (plan R-007).
-     * Both keep the thread's history (the cut reply is in it); the owner's request is never sent again. A Workforce turn
-     * keeps its single-turn observation contract and surfaces the typed failure instead.
-     */
+    
+
+
+
+
+
+
+
+
     let hostTurn: { kind: LedgerHostTurn; text: string } | null = null;
     let outputLimitRounds = 0;
     let contextOverflowRecovered = false;
@@ -3252,21 +3252,21 @@ async function runCodexResidentTurn(input: {
 }
 
 /**
- * Codex features switched off for a Main-issued effect observation. `-c features.<name>=false` (not `--disable`) so a
- * name a newer/older CLI does not know is ignored instead of failing the run. Each removes tool schemas or context the
- * look does not need (measured 2026-09-25, codex 0.156.1).
+
+
+
  */
 const OBSERVATION_DISABLED_CODEX_FEATURES = ["apps", "browser_use", "browser_use_external", "computer_use", "image_generation",
   "goals", "in_app_browser", "chronicle", "multi_agent", "memories", "plugins", "skill_search", "tool_suggest", "sleep_tool",
   "workspace_dependencies", "worktrees", "view_image", "realtime_conversation", "mentions_v2"] as const;
 
 /**
- * One read-only look for a Main-issued effect observation on codex (routed 2026-09-25): production goals pinned to codex
- * paid ~1.17M input tokens per look (the One prompt, history and the resumed chat thread) — 28 looks ~33M tokens in 72h.
- * Here: a fresh ephemeral exec in a private CODEX_HOME that holds only a link to the account's auth (no user AGENTS.md,
- * config, plugins, memories or skills), the observation's own short instructions as the model instructions, the
- * project doc off, read-only sandbox, only Main's browser MCP server when the look needs it, and no session resume or
- * persistence. Measured: ~22k input tokens for a two-step file look (vs ~44k for a bare exec with the user's setup).
+
+
+
+
+
+
  */
 async function runCodexMinimalObservation(bin: string, req: RunnerRequest, events: RunnerEvents,
   observeNativeFile: ReturnType<typeof bindNativeFileProofObserver>): Promise<RunnerResult> {
@@ -3329,10 +3329,10 @@ export const runCodex: Runner = async (
   // Validate before adding internal account/cwd transport fields. These fields
   // cannot turn a copied JSON request into the host's opaque Alive admission.
   const aliveAdmission = aliveDecisionProfileForRequest(req) ? req : null;
-  // Judgment's gateway replaces all model input and runs with --ignore-user-config. It runs from the isolated product
-  // mirror (sign-in linked, empty config) so its one-off threads land in the product store, not in the person's Codex
-  // app (owner 2026-10-12: about 100 AGI judgments a day were listed there). A home that cannot be mirrored (keyring
-  // sign-in) keeps the account home, as before.
+  
+
+
+
   const requestEnv = req.env ?? process.env;
   req = { ...req, env: req.untrustedNoTools && req.judgmentOnly
     ? withCodexProductHome({ ...requestEnv, CODEX_HOME: accountCodexHome(requestEnv.CODEX_HOME) }, { isolated: true })
@@ -3353,18 +3353,18 @@ export const runCodex: Runner = async (
         : "Codex CLI isolation is verified only with no external tools. This run's MCP grant cannot be admitted.",
     );
   }
-  // Codex CLI 0.144.4 still exposes collaboration/delegation authority, and
-  // the same measured failure remained on 0.144.5 (2026-07-17): even with
-  // `--disable multi_agent` and every other configurable tool feature disabled,
-  // the runtime still emitted a collaboration tool call. Read-only filesystem
-  // sandboxing does not revoke that delegation authority. Until Codex exposes a
-  // release-verified switch that removes the collaboration surface, borrowed
-  // packages, Agent Apps, and Workforce turns must stop before CLI discovery or
-  // process spawn rather than minting a false no-authority receipt.
-  // Resident judgment calls are Main-authored, tool-free classification turns.
-  // They do not receive MCP/config grants or a workspace and must be allowed to
-  // use the connected Codex model even though ordinary untrusted Agent App /
-  // Workforce turns remain blocked by the collaboration surface.
+  
+
+
+
+
+
+
+
+
+
+
+
   if (req.untrustedNoTools && !req.judgmentOnly) {
     // 표식을 단다 — 이 거절은 시간이 지나도 풀리지 않는다. codex 만 설치한 사용자는
     // 판정이 필요한 자동화를 하나도 끝낼 수 없으므로, 화면이 "다시 눌러 보세요" 대신
@@ -3622,13 +3622,13 @@ export const runCodex: Runner = async (
    * A startup failure before dispatch may use exec. A dispatched turn without
    * a terminal receipt stays uncertain and must not be replayed automatically.
    */
-  /*
-   * A per-turn grant (an isolated MCP config such as a browser turn, or an ephemeral tool grant) must not outlive its
-   * turn in a resident process. It still resumes the thread through app-server, in a process of its own that is closed
-   * when the turn ends: measured 2026-10-12 on codex-cli 0.162.1, a new app-server process boots and resumes a thread
-   * in 0.9 s with 99% of the input cached, where `codex exec resume` sent 2.3x the input with 43% cached. Room turns
-   * with the browser took the exec path on every turn (production procmon, 6 exec spawns in 15 minutes).
-   */
+  
+
+
+
+
+
+
   const turnScopedProcess = runReq.isolatedMcpConfig === true || runReq.ephemeralToolGrant === true;
   // app-server has no --ignore-user-config: an isolated run may use it only from the isolated mirror. A home Main did
   // not mirror (a custom CODEX_HOME, keyring sign-in) keeps the one-shot exec, which passes the flag.
@@ -3666,12 +3666,12 @@ export const runCodex: Runner = async (
         turnScopedProcess,
       });
     } catch (err) {
-      // thread/resume is refused before any turn starts. An unattended run
-      // continues in a fresh one-shot session instead of stopping for a human.
-      // An owner's turn does too when another writer holds the thread: Desktop and
-      // the background service each keep a resident Codex, and one cannot retire
-      // the other's (production 1.2.93, 2026-10-11 03:54Z, "already has an active writer"),
-      // and when the thread's rollout is gone (rule 4: refusing repeated the error on every later turn).
+      
+
+
+
+
+
       if (runReq.signal?.aborted || !(err instanceof CodexSessionContinuityError)) throw err;
       const refusal = err.code === "resume_failed" ? classifyCodexResumeFailure(err.message) : "writer_busy";
       if (!runReq.unattended && refusal !== "writer_busy" && !attendedTurnStartsFresh(refusal, conversationCarried())) throw err;
@@ -3837,10 +3837,10 @@ export const runCodex: Runner = async (
       releaseWriter?.();
     }
     r = await continueExecCut(r);
-    // `codex exec resume` refused before any turn: exit 1, no event, and Codex's thread/resume protocol phrase on stderr
-    // (codex-cli 0.163.0, measured 2026-10-16 for a gone rollout: "thread/resume failed: no rollout found for thread id …";
-    // a held writer is the same shape). Only those typed refusals qualify, as on the thread/resume path above; any other
-    // failed exec may already have acted. Nothing started, so the turn continues fresh (CREATE below).
+    
+
+
+
     const execRefusal = !runReq.signal?.aborted && r.code !== 0 && !r.turnStarted && !r.terminalObserved && !r.threadId && !r.text.trim()
       ? classifyCodexResumeFailure(r.stderr) : null;
     if (execRefusal && execRefusal !== "resume_failed_before_turn"
@@ -3902,8 +3902,8 @@ export const runCodex: Runner = async (
     ) {
       throw new Error(`codex CLI exit ${r.code}${r.stderr ? `\n${r.stderr.slice(0, 500)}` : ""}`);
     }
-    // Say why the child exited: without this a resume that died after minutes of silence (Yotube room, 2026-10-12 16:16)
-    // left only "exit=1" and the cause could not be told from a writer lock, a bad config or a network error.
+    
+
     const stderrLast = String(r.stderr ?? "").split("\n").map((line) => line.trim()).filter(Boolean).pop() ?? "";
     const stderrReason = stderrLast.replace(/[A-Za-z0-9_\-]{32,}/g, "<redacted>").slice(0, 200);
     events.onStatus(`[runtime-session] resume_failed kind=${KIND} exit=${r.code}${stderrReason ? ` reason=${JSON.stringify(stderrReason)}` : ""}`);
@@ -3976,9 +3976,9 @@ export const runCodex: Runner = async (
       ...execCutDelivery(created),
     };
   }
-  // The stream may already have said *why* (turn.failed: "You've hit your
-  // usage limit…"). That typed marker is the failure; a generic "exit 1" that
-  // drops it left the person a red "실패" with no reason (measured 2026-08-16).
+  
+
+
   if (created.failure) {
     return {
       text: created.text.trim(),

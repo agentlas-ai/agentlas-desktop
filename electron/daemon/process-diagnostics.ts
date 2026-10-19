@@ -1,19 +1,19 @@
 import { redactOperationalSecrets } from "../invocation/event-secret-redaction";
 
 /**
- * The background service's own console output and uncaught errors, kept as typed codes (flow audit 2026-10-18, I-D1).
- *
- * Desktop spawns the service with stdio ignored (daemon/app-launcher.ts), and the service had no uncaughtException or
- * unhandledRejection listener: Node's default ended the process on the first one, so every daemon-owned run (Yotube
- * daemon turns, Hope, Alive, local models, Science) died with no stack and no code (W7 2026-10-17: an EPIPE ended the
- * service and Main only saw "child exited reason=error"). The 10-11..10-13 "database is locked" failures could not be
- * traced for the same reason: agentlasd.log held lifecycle lines only.
- *
- * Main logs and keeps running (logging.ts installMainProcessErrorSink); the service now does the same. What reaches
- * disk is never the raw text: a line keeps its bracket tag, its level and the typed codes in it (snake_case reason
- * codes, Node errno codes, ERR_* and SQLITE_*), after secrets are redacted and paths, URLs and quoted values are
- * dropped. An error keeps its name, its code and the names of the functions on its stack, never file paths or
- * arguments. Electron-free: the service runs as plain Node (ELECTRON_RUN_AS_NODE).
+
+
+
+
+
+
+
+
+
+
+
+
+
  */
 
 export type DaemonConsoleLevel = "log" | "info" | "warn" | "error";

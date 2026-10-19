@@ -90,15 +90,15 @@ export function installStdioErrorGuard(): void {
 }
 
 /**
- * An uncaught error in Main is logged, never shown as a modal.
- *
- * Without a listener, Electron's own handler calls dialog.showErrorBox, which on macOS runs NSAlert
- * runModal on the Main thread: every timer, IPC reply and run — and the quit's own 30 s cleanup
- * deadline — stops until a person clicks OK. Production 2026-10-05 15:13 UTC: the updater quit closed
- * the store, a timer threw, and the app sat in that box (sampled: uv__run_timers → microtask →
- * NSAlert runModal) with the downloaded 1.2.61 uninstalled until it was killed; nobody was at the Mac.
- * Electron skips its handler once another listener exists, and the app keeps running as it did after
- * the box was dismissed. Unhandled rejections would otherwise escalate to the same handler.
+
+
+
+
+
+
+
+
+
  */
 let mainErrorSinkInstalled = false;
 export function installMainProcessErrorSink(): void {

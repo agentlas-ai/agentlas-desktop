@@ -186,9 +186,9 @@ function mobileBridgeChatImages(urls: readonly string[] | undefined): MobileBrid
     const attachmentId = CHAT_ATTACHMENT_URL_RE.exec(url.trim())?.[1]?.toLowerCase();
     if (!attachmentId || seen.has(attachmentId)) continue;
     seen.add(attachmentId);
-    // Exactly { attachmentId }: phones up to Mobile 1.1.46 (build 109) drop an image DTO with any other key
-    // (exact-key check, relaxed in mobile ada1d0f). Measured: that build's real decoder passes 11/12 against
-    // Desktop HEAD and fails only an extra image key. Keep the shape until those builds are below the support floor.
+    
+
+
     images.push({ attachmentId });
     if (images.length >= 8) break;
   }

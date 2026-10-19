@@ -1,14 +1,14 @@
 /**
- * Deterministic source-surface marker for memory: is this chat an unattended
- * automation's execution ledger?
- *
- * The answer comes from `automation_sessions.ledger_chat_id` (a host-written
- * row), never from the chat title or the memory text. Measured 2026-09-24:
- * hourly runs of one automation wrote their own tactical holds ("hold posting
- * until the peak window", "follow quota met, pause follows") as durable
- * agent_repo procedures with empty evidence; recall then fed them to the next
- * run, which held again. Knowing the surface lets the curator keep a run's own
- * choices in its session and lets recall label them as heuristics.
+
+
+
+
+
+
+
+
+
+
  */
 import { getDb } from "../store/db";
 

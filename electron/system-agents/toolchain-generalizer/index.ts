@@ -62,8 +62,8 @@ export const TOOLCHAIN_GENERALIZATION_OUTPUT_SCHEMA = {
     contract: { anyOf: [contractSchema, { type: "null" }] },
     blueprint: { anyOf: [toolchainBlueprintSchema, { type: "null" }] },
     outputStep: { anyOf: [{ type: "integer", minimum: 0, maximum: 31 }, { type: "null" }] },
-    // Nullable as anyOf, like the members above: Gemini (agy --json-schema) rejects a null enum member (API 400 "enum[2]:
-    // cannot be empty", Q1 A/B 2026-10-16).
+    
+
     outputFormat: { anyOf: [{ enum: ["json", "text"] }, { type: "null" }] },
   },
   required: ["schemaVersion", "decision", "toolchainId", "capabilityKey", "rationale", "version", "contract", "blueprint", "outputStep", "outputFormat"],
@@ -81,14 +81,14 @@ export const TOOLCHAIN_GENERALIZATION_OUTPUT_SCHEMA = {
 export const TOOLCHAIN_GENERALIZATION_ENVELOPE_KEY = "proposal";
 
 /**
- * What the provider receives: the decision schema, under one object member. A native structured-output lane
- * takes an object schema with no combinator at its root (Claude `--json-schema` answers API 400 "input_schema does not
- * support oneOf, allOf, or anyOf at the top level", NH07 A/B 2026-10-15), so the decision's top-level `oneOf` cannot be
- * the root. The host unwraps the member and validates the full decision schema (toolchains/generalizer.ts parseDecision).
- *
- * The member is the provider copy of that schema (shared/provider-output-schema.ts): no list or text cap reaches a
- * strict decoder, where a full whenToUse or steps list leaves the model writing in the last open string. Every bound
- * (whenToUse 20, steps 20, text lengths) stays in the host Ajv validator, which refuses overflow as a typed result.
+
+
+
+
+
+
+
+
  */
 export const TOOLCHAIN_GENERALIZATION_PROVIDER_SCHEMA = {
   type: "object", additionalProperties: false,

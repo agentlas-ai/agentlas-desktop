@@ -32,6 +32,8 @@ export interface AgentMailMailbox {
   /** Public projection of a typed provider failure; absent on older servers. */
   provisioningFailure?: { code: "agent_mail_provision_failed"; failedAt: string } | null;
   provider: string;
+  scope?: { kind: "organization"; organizationId: string; principalId: string };
+  transport?: "internal";
   createdAt: string;
   /** From name. null = address only. Absent = server does not support it yet. */
   displayName?: string | null;
@@ -582,4 +584,12 @@ export function agentMailDisplayName(value: string): string {
   const match = /^\s*"?([^"<]*?)"?\s*<[^>]+>\s*$/.exec(value);
   const name = match?.[1]?.trim();
   return name || agentMailBareAddress(value);
+}
+
+/** Main-only transport supplied by the owned company browser. No cookie/token
+ * material or arbitrary URL/header crosses this boundary. */
+export interface OrganizationMailTransport {
+  current(): { key: string; organizationId: string; principalId: string; expiresAt: string } | null;
+  request(input: { method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; path: string;
+    body?: unknown; timeoutMs: number; idempotencyKey?: string }): Promise<{ status: number; body: unknown } | null>;
 }

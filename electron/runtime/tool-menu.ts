@@ -54,8 +54,8 @@ const MENU_TOOLS = [
 
 /** Stable provider schemas work with adapters that snapshot their wire menu once.
  * Workforce uses its exact eager broker inventory until it supports menu handles. */
-/** Smaller sets used to ship every schema eagerly. Measured 2026-10-11: 12 browser tools cost ~2.4k tokens on every request
- * of every step; the menu plus its server index costs well under half of that and a single prepare round trip. */
+/**
+ */
 const LAZY_MIN_TOOLS = 8;
 const LAZY_MIN_SCHEMA_BYTES = 6_144;
 const INDEX_NAMES_PER_SERVER = 12;
@@ -77,17 +77,17 @@ export function toolMenuServerIndex(tools: OpenAiToolDef[], byName: Map<string, 
   }).join("; ");
 }
 
-/** The harness entry is how a run reaches the app's own operations (automations, media.listen, documents). CLI runtimes
- * list these names directly; behind the menu an API-lane team worker never opened it (dev 2026-10-18 O6: Haiku workers
- * used only file/shell built-ins and wrote a launchd template, while codex workers registered the automation). */
+/**
+
+ */
 const DIRECT_ENTRY_TOOLS = new Set(["harness_search", "harness_describe", "harness_call"]);
 export function isDirectEntryTool(resolved: ResolvedTool | undefined): boolean {
   return resolved?.kind === "mcp" && resolved.server.catalogId === "agentlas-turn" && DIRECT_ENTRY_TOOLS.has(resolved.serverToolName);
 }
 
-/** `earlyDeferral`: API-class models (Agentlas serving, BYOK) defer a mid-size MCP set too. Small local models keep the old
- * thresholds on purpose: measured 2026-09 they went wrong behind an indirect surface (5 agentlas_code calls, never reaching
- * the browser) and were exact when handed the tools directly. The harness entry always stays direct. */
+/**
+
+ */
 export function installLazyToolMenu(tools: OpenAiToolDef[], byName: Map<string, ResolvedTool>, enabled: boolean, oversizedOnly = false, earlyDeferral = false): OpenAiToolDef[] {
   const descriptors = new Map(tools.filter(tool => byName.get(tool.function.name)?.kind === "mcp"
     && !isDirectEntryTool(byName.get(tool.function.name))

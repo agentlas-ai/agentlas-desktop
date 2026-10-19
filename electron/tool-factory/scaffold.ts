@@ -291,8 +291,8 @@ function commentLiteral(value: string): string {
 }
 
 function mcpServer(tool: JsonObject, legacyHeaderName?: string): string {
-  // Review 2026-10-16 (desktop-b-06): the name went raw into this comment, so a newline in a model-authored tool name
-  // made the next line executable code in the generated server.
+  
+
   const header = legacyHeaderName ?? commentLiteral(stringValue(tool.name) || "Agentlas Tool");
   return `#!/usr/bin/env node
 // Generated local MCP adapter for ${header}.

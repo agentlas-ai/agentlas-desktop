@@ -1,33 +1,33 @@
 /**
- * Outward effect — did this run change something outside the agent's own workspace toward its goal?
- *
- * Why this is a separate question from "could this tool call have changed the outside world"
- * (shared/tool-activity.ts): that predicate answers replay safety, where "unknown" must mean
- * "maybe changed" (conservative = do not replay). Used as a *progress* signal the same "unknown"
- * became success. Measured 2026-09-24 on the owner's Threads automation (f7a61706): runs
- * 18:00–23:00Z posted nothing, yet every run showed acting calls — apply_patch/bash on the agent's
- * own playbook file in userData/agent-cwd, and browser_click on activity-filter tabs. So
- * actionCalls > 0, no self_hold, no replan, six hours of holds counted as work.
- *
- * Progress counts only outcomes (the OKR "outcome, not activity" rule; tau-bench grades the end
- * state, not the trajectory). Local ledger edits, shell, navigation and filter clicks are activity.
- *
- * The rules reuse existing classifiers instead of new name lists:
- *  - browser: the shipped browser approval classifier (BROWSER_APPROVAL_CLASSIFIER_SOURCE), typed: a click's declared
- *    effect (send/publish/delete/payment, i.e. the model said the click finalizes it), a submit key or type+submit. An
- *    undeclared click is not proof of an outcome and stays activity. No label words (native-harness notyet NH25).
- *  - files: shared/tool-taxonomy "file" actions. A write inside the host's own scratch cwd
- *    (userData/agent-cwd — where the agent works when the owner declared no folder) is the agent's
- *    notebook; a write anywhere else (project folder, chat working folder, any declared path) is a
- *    deliverable.
- *  - one-click social engagement (follow/like/repost/subscribe) counts only from the launcher's
- *    post-click state receipt (browser_action_logs "social-engage" / "changed"), never from intent.
- *  - shell: only a command that clearly sends outward — curl/wget/httpie with a write method or a
- *    request body, to a non-loopback URL (shellSendsOutward). Other shell never counts.
- *  - host builtins that are read-only by construction (system time) and host preflight/supervisor
- *    notices never count; read/search/fetch/delegate never count on their own.
- *  - anything else keeps the existing couldHaveChangedTheOutsideWorld answer (external MCP writes).
- *  - a call whose receipt failed did nothing.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
  */
 import path from "node:path";
 import fs from "node:fs";

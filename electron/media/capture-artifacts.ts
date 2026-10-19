@@ -1,22 +1,22 @@
-// 캡처 정본 저장소 — 채팅에 보이는 캡처는 반드시 디스크에 실물이 있어야 한다.
-//
-// 배경(2026-08-18 오너 제보): 채팅의 화면 캡처가 "빈 이미지"로 렌더되고 원본 파일이
-// 아예 없었다. 원인은 캡처 파이프라인 어디에도 파일을 남기는 곳이 없었기 때문이다:
-//  - computer-use get_screen 은 base64 인라인만 반환(정본 0개),
-//  - playwright/agentlas-browser 스크린샷은 os.tmpdir() 기본 출력 폴더(리핑됨 + 서빙 불가).
-// 모델이 답변에 캡처 경로를 참조하는 순간 agentlas://localfile 이 404를 내고
-// 렌더러는 빈 박스를 그렸다.
-//
-// 이 모듈이 그 정본의 단일 홈이다: ~/.agentlas/captures/{screen,browser-saved}.
-// agentlas://localfile 의 허용 루트(fs/access.ts)에 이 루트가 포함되어
-// One·Work 두 채팅 표면 모두 같은 절대경로로 렌더할 수 있다.
-// 정본은 자동으로 지우지 않는다(오너 D13 영구 보관, docs native-harness 21 G6): 예전의 300개 상한 삭제는
-// 대화에 붙은 옛 캡처를 빈 상자로 만들었다.
-//
-// captures/browser 는 정본 폴더가 아니다. @playwright/mcp 의 --output-dir 이고 --output-max-size
-// 예산이 걸려 Playwright 가 넘칠 때마다 그 폴더 전체(하위 포함)에서 오래된 파일부터 지운다.
-// 2026-10-18 운영에서 유튜브 업로드 하드링크(uploads/, 약 245MB)가 예산을 채워 그 안의
-// 정본 브라우저 캡처 112개가 모두 지워졌다(One 카드 file_missing). 정본은 그 폴더 밖에 둔다.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

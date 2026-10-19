@@ -16,6 +16,8 @@ export const GOAL_STRATEGY_PROPOSAL_SCHEMA =
   "agentlas.goal-strategy-proposal.v1" as const;
 export const GOAL_STRATEGY_REFLECTION_DISPATCH_SCHEMA =
   "agentlas.goal-strategy-reflection-dispatch.v1" as const;
+export const GOAL_STRATEGY_REFLECTION_REFUSAL_SCHEMA =
+  "agentlas.goal-strategy-reflection-refusal.v1" as const;
 
 export type GoalStrategyProposalIntent =
   | "hold"
@@ -223,5 +225,30 @@ export interface GoalStrategyReflectionDispatchReceiptV1 {
     proposalId?: string;
     reason?: string;
   };
+  createdAt: string;
+}
+
+/**
+ * Why a Goal strategy reflection (or the Graph handoff of its proposal) never started, as the machine cause code the
+ * host check threw. Nothing but codes: no model text and no prose, so a refusal that used to leave no trace at all is
+ * readable on the Goal's own ledger. `stage` is where it stopped: `request` before any model call, `automation_handoff`
+ * after a stored proposal, when the exact episode could no longer be read for the Graph strategy cycle.
+ */
+export interface GoalStrategyReflectionRefusalV1 {
+  schemaVersion: typeof GOAL_STRATEGY_REFLECTION_REFUSAL_SCHEMA;
+  eventKind: "goal_strategy_reflection_refusal";
+  stage: "request" | "automation_handoff";
+  /** A GoalStrategyReflectionUnavailableReason code (electron/long-run/goal-strategy-reflection.ts). */
+  reason: string;
+  longRunId: string;
+  goalId: string;
+  goalRevision: number;
+  source: {
+    invocationRunId: string;
+    checkpointId: string | null;
+  };
+  /** The stored proposal whose handoff stopped (stage `automation_handoff` only). */
+  proposalId?: string;
+  authority: "observation-only";
   createdAt: string;
 }

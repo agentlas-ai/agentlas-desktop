@@ -1,10 +1,10 @@
 import { app, session } from "electron";
 
 /**
- * Cache ceiling for every Electron session, including the in-app browser
- * partition (persist:agentlas-browser-default). That partition's HTTP cache
- * reached 1.24 GB on 2026-10-16 with no ceiling. Cookies, Local Storage,
- * IndexedDB and sign-ins are not cache and are never touched here.
+
+
+
+
  */
 export const APP_BROWSER_CACHE_BYTES = 256 * 1024 * 1024;
 

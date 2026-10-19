@@ -101,13 +101,13 @@ export function recoverNativeGuiObservation(enrollment: NativeGuiEnrollment, onE
   operation.then(settled, settled); void operation.catch(() => {}); return operation;
 }
 /**
- * A daemon killed (or a Desktop crashed) before its start boundary leaves a pending reservation that only that
- * dead process could decide, and a pending reservation locks its chat: every later owner turn waited forever on
- * invocation_admission_chat_pending (measured: daemon SIGKILL while a turn waited on Main, respawn, re-attach).
- * The authenticated attach is the proof point. The signed transcript names the one live daemon boot; Electron's
- * exclusive single-instance lock proves every earlier Desktop process ended; this process's own epochs are the ones
- * it reserved under minus the daemon boots it attached to. Every other epoch has terminated. Without the lock (dev
- * multi-instance, headless host) nothing is decided. Lazy electron require: the daemon never calls this.
+
+
+
+
+
+
+
  */
 const attachedDaemonBoots = new Set<string>();
 function settleReservationsOfEndedOwners(liveDaemonBootId: string): void {

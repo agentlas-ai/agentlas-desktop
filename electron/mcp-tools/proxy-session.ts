@@ -642,11 +642,11 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     const deliver = (outgoing: Frame = frame) => {
       if (closed || native.get(wireId) !== pending) return;
       validate();
-      // A lifetime abort (wire closing, run parked) withholds the result. A client's own
-      // notifications/cancelled is not that: its answer is the "cancelled" denial itself.
-      // Throwing here closed the whole bridge (reason=mcp_proxy_call_cancelled), cut every
-      // other call on the wire, and the proxy child told the model to "call the tool again"
-      // for the call it had just cancelled (test-mcp-proxy, 2026-10-04; regressed in 1.2.53).
+      
+
+
+
+
       const abortReason = pending.controller?.signal.reason;
       const clientCancelled = abortReason instanceof Error && abortReason.message === "mcp_proxy_call_cancelled";
       if (!clientCancelled) pending.controller?.signal.throwIfAborted();
@@ -655,15 +655,15 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       // The result is on the wire to the CLI: the stored copy kept for crash replay is acknowledged (effect ledger G12).
       try { pending.onDelivered?.(); } catch { /* never fails the delivery */ }
     };
-    /*
-     * The result-boundary hook refused to release this call's result (a login wall the owner must clear, a run being
-     * stopped, or the hook itself failing: it asks Main over loopback when the run is hosted by the background service).
-     * The result stays withheld either way. What changed is the answer: the wire used to be destroyed, so the proxy child
-     * told the model "temporary connection reset - call the tool again" for a call that had already run, every time, with
-     * nothing logged (service-owned runs, production 1.3.3, 2026-10-12: 26 of 26 browser / computer-use calls). The call
-     * now gets one terminal, machine-readable failure and the wire (and every other call on it) stays. A scope change or
-     * a wire that is already closing is still a revocation and still ends the wire.
-     */
+    
+
+
+
+
+
+
+
+
     const withhold = (error: unknown) => {
       if (closed || lifetime.signal.aborted || error instanceof PreparedMcpScopeChangedError || error instanceof McpProxyCwdChangedError) {
         close(error, "result_boundary"); return;

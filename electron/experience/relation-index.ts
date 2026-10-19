@@ -707,11 +707,11 @@ export function rebuildExperienceRelationIndex(): ExperienceRelationIndexStatus 
       normalizedValue: null,
       payload: { source: "experience_packs", containsBasePackageMaterial: false },
     });
-    // Only the current release "contains" every item it carries. An earlier release "contains" just
-    // the items it added over the one it superseded (payload introduced: true), so any release's items
-    // are one walk along "supersedes". Every release used to link every item it carried, and a release
-    // carries everything before it: edges grew with the square of the promotions (One's pack: 256
-    // releases, 32,896 "contains" edges). Owner decision 2026-10-06: shrink it.
+    
+
+
+
+
     const releases = lineageProjections(pack);
     const itemsByRelease = new Map(releases.map((release) => [release.releaseId, new Set(release.itemIds)]));
     for (const release of releases) {
@@ -924,14 +924,14 @@ export function rebuildExperienceRelationIndex(): ExperienceRelationIndexStatus 
     });
   }
 
-  // Write only the rows that changed. This runs on the Main thread after every promoting turn, and it used to
-  // delete and re-insert the whole index: production 2026-10-05 had 3,066 nodes and 65,137 edges behind five
-  // indexes, so one promotion rewrote ~68k rows (0.9-1.6 s measured on a copy of that database) and stalled
-  // Main for up to 3 s (science-daemon-rpc timerLatenessMs 3053 at 12:48:45 UTC, right after "[experience]
-  // promoted"). A promotion changes a few hundred rows. Changed rows are UPDATEd in place, never deleted and
-  // re-inserted: edges cascade from their nodes, so re-inserting a node would silently drop its unchanged edges.
-  // The per-row source_fingerprint/rebuilt_at therefore record when that row was last written; staleness is
-  // judged by experience_relation_index_state alone.
+  
+
+
+
+
+
+
+
   const transaction = getDb().transaction(() => {
     const db = getDb();
     const nodeColumns = (node: NodeInsert) => [

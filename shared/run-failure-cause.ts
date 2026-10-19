@@ -1,16 +1,16 @@
 import { isTransientSendRefusalCode } from "./transient-send-refusal";
 
 /**
- * Run failure codes whose cause is inside the app: Main's own custody, ledger, process or channel state. The owner has
- * nothing to act on, so such a failure is never written or drawn as a "needs-owner" line (host status "app-failed").
- *
- * Production Yotube, 2026-10-17: run d85e262f failed at 11:51Z with goal_episode_admission_missing (Main lost its own
- * Goal-turn admission record) and the room showed Hope saying "the run failed … check the run history" with a
- * "확인 필요" status — the owner had no action, and the screen called the room broken.
- *
- * Codes are matched exactly or by one documented prefix family; prose is never inspected. An unknown code stays an
- * owner-facing failure (conservative default). The transient send-refusal set (shared/transient-send-refusal.ts) is
- * app-side by definition and is included as a whole.
+
+
+
+
+
+
+
+
+
+
  */
 export interface AppSideRunFailureFamily {
   readonly match: "exact" | "prefix";

@@ -278,10 +278,10 @@ function productionPorts(): RoomChatPorts {
     wakeOne({ roomChatId, notes }) {
       const service = invocation();
       const earlier = pendingWake.get(roomChatId);
-      // One has not read the earlier follow-up yet: the new one holds everything, so a burst is one turn. The earlier one is
-      // withdrawn only after the new one is accepted. Withdrawing it first lost both when the steer was refused (an app
-      // closing, the other host holding the room, a locked store), and recorded the earlier one as superseded by nothing
-      // (D8, flow audit 2026-10-18). Its durable row says whether it still waits (a held row is not merged).
+      
+
+
+
       const state = earlier ? queuedSteerState(earlier.queuedRequestId) : null;
       const waiting = earlier && state?.status === "queued" && !state.recoveryReason ? earlier : null;
       const merged = waiting ? [...waiting.notes, ...notes] : notes;

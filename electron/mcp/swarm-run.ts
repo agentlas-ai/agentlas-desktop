@@ -657,8 +657,8 @@ export async function runSwarmInvocation(
               void text;
             },
             onTool: (name, args, r, id, isError, artifactPaths, imageDataUrl, _origin, toolKind) => {
-              // A successful completion seals what it produced (harness port files included) into the room's Outputs;
-              // before, a swarm worker's outputs never reached the binder (dev O9 2026-10-18 found the same gap in firms).
+              
+
               const oneArtifacts = !isError && (r !== undefined || (id && artifactPaths?.length)) && p.bindOneRuntimeToolArtifacts
                 ? p.bindOneRuntimeToolArtifacts(id ?? "", artifactPaths ?? [], { name, ...(toolKind ? { kind: toolKind } : {}) })
                 : undefined;

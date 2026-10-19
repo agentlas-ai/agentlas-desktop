@@ -94,11 +94,11 @@ export function createAgiDeterministicHandler(executor: AgiActionExecutor, readF
       });
       return acted;
     };
-    // 1b. The same Agentlas capability failing again (this reason code opened twice for the goal in a day, or a second
-    // attempt on the same state) means the Agentlas path itself is broken, and another Agentlas path tends to hit the
-    // same defect (production 2026-10-12: one goal opened browser_unavailable 36 times in a week, each "resolved" by a
-    // browser restart or a new turn and back again). The capability is handed to the runtime's own tools for this goal;
-    // the work turn below then runs with that host notice in its plan context.
+    
+
+
+
+
     const capability = harnessCapability(d);
     if (capability && (attempt >= 2 || executor.incidents.recurrences(input.goalId, d.reasonCode, Date.now() - 24 * 60 * 60_000) >= 2)) {
       run("use_native_harness", { capability, defect: d.reasonCode }, 80);

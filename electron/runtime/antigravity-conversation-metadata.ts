@@ -49,17 +49,17 @@ export function antigravityConversationHome(env: NodeJS.ProcessEnv, platform: No
 }
 
 /**
- * Whether agy no longer holds a conversation, from the filesystem only (never from its output text).
- *
- * agy keeps every conversation in <HOME>/.gemini/antigravity-cli/conversations/<id>.db (the store
- * attestAntigravityMetadataSteps reads). Measured 2026-10-16 on agy 1.4.0 with a scratch product HOME:
- * `--conversation <id>` for an id it has no file for writes a stderr warning, exits 0 and runs the turn in a NEW
- * conversation (another conversation_id from the first `init` event on) that holds none of the earlier turns.
- * The owner's storage policy deletes CLI originals unused for 30 days and agy prunes its own store, so this is routine.
- *
- * Gone means: the store folder exists and holds neither `<id>.db` nor an `<id>` entry. An id of another shape, a
- * missing or unreadable store (a layout this build does not know, a HOME agy never ran in) answers false: the turn
- * then still checks the conversation id agy reports for the run.
+
+
+
+
+
+
+
+
+
+
+
  */
 export function antigravityConversationGone(home: string, conversationId: string): boolean {
   if (!AGY_CONVERSATION_ID_RE.test(conversationId)) return false;

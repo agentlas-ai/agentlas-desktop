@@ -182,7 +182,8 @@ export function OneSplitPane({
 
   // 이 칸이 만든 것들. 옆 칸이 자기 사이드바를 가지려면 자기 대화의 원장을
   // 스스로 읽어야 한다 — 지금 보고 있는 대화의 산출물을 빌려 쓰면 거짓이 된다.
-  // 전체 One 화면과 같은 것을 보인다: 그 대화의 가장 최근 run 하나(OneShell 이 latestReceipt 의 run 을 500개 이벤트로 투영한다).
+  // 전체 One 화면과 같은 것을 보인다: 그 대화의 가장 최근 run 하나(OneShell 이 latestReceipt 의 run 을 500개 이벤트로 투영하고,
+  // 창보다 긴 run 의 뒤쪽 산출물은 runLedger.outputsAfter 로 보탠다 — projectLatestRunArtifacts 가 같은 함수로 한다).
   // 여러 run 의 이벤트를 이어 붙여 한 번에 투영하면 첫 종료 이벤트에서 봉인돼 가장 오래된 run 의 산출물만 남는다.
   useEffect(() => {
     let cancelled = false;
@@ -194,9 +195,11 @@ export function OneSplitPane({
       loading = true;
       void api.runLedger
         .chatTimeline(chatId, { maxRuns: 1, eventsPerRun: 500 })
-        .then((runs: unknown) => {
+        .then(async (runs: unknown) => {
           if (cancelled || chatIdRef.current !== chatId || !Array.isArray(runs)) return;
-          setArtifacts(projectLatestRunArtifacts(runs));
+          const items = await projectLatestRunArtifacts(api, runs);
+          if (cancelled || chatIdRef.current !== chatId) return;
+          setArtifacts(items);
         })
         .catch(() => { if (!cancelled) setArtifacts([]); })
         .finally(() => { loading = false; });

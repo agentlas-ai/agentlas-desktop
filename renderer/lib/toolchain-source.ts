@@ -27,10 +27,10 @@ const MAX_RESULT_CHARS = 64_000;
 const ESCAPES: Record<string, string> = { n: "\n", t: "\t", r: "\r", b: "\b", f: "\f" };
 
 /**
- * The tool's name on the built-in One Team server, or null for any other server. Runners expose
- * `mcp__<configKey>__tool` (Claude/ACP) or `<configKey>.tool` (Codex) with the sealed config key
- * (electron/invocation/tool-origin.ts); a bare suffix match let another MCP server returning a
- * receipt-shaped result claim a Toolchain source (independent review 2026-10-04).
+
+
+
+
  */
 export function oneTeamToolName(name: string | undefined, origin?: { kind?: string; providerName?: string; toolName?: string }): string | null {
   const value = String(name ?? "").trim();

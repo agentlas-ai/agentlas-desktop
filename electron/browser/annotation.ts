@@ -78,12 +78,12 @@ export async function stopBrowserAnnotation(ownerId: number, input: BrowserAnnot
   return { ok: true };
 }
 /**
- * ★An agent drives this guest: the owner's element picker must end first.
- * The picker is a full-page overlay inside the document. While it stayed up,
- * every agent click hit it ("<div> intercepts pointer events") and timed out;
- * that is how a YouTube Studio upload control "timed out on normal clicks" in
- * production (2026-09-28). The overlay is removed before the agent's command
- * runs, and the owner's selection poll reports annotation_agent_active.
+
+
+
+
+
+
  */
 export function browserAnnotationActiveOn(guest: WebContents): boolean {
   for (const entry of sessions.values()) if (entry.guest === guest) return true;

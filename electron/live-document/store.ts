@@ -136,8 +136,8 @@ export async function openLiveDocument(input: { chatId: string; path: string }):
   const format = inferLiveDocumentFormat(target);
   if (!format) throw new LiveDocumentError("format_unsupported", "xlsx, docx, pptx, hwpx or hwp");
   let stat: fs.Stats;
-  // A path with nothing at it is a document to create (dev 2026-10-18 F9 A/B: a brief had the worker open a new
-  // reports/*.docx, the refusal named only the path, and the worker stopped). The mirror of create's file_exists.
+  
+
   try { stat = fs.statSync(target); } catch { throw new LiveDocumentError("file_missing", `${target} does not exist; ${format === "hwp" ? "document.create makes a new Hangul document with the same name as .hwpx" : "document.create makes a new file at this path"}`); }
   if (!stat.isFile()) throw new LiveDocumentError("file_missing", target);
   if (stat.size > MAX_FILE_BYTES) throw new LiveDocumentError("file_too_large", `${stat.size} bytes`);
@@ -206,7 +206,7 @@ export async function liveDocumentDelta(sessionId: string, sinceRevision: number
   return { sessionId, revision, entries: state.entries.slice(sinceRevision) };
 }
 
-/** A slide body placeholder draws its own bullets; a typed "• " in front of each line would show two (real run 2026-10-17). */
+/** */
 function withoutTypedBullets(model: LiveDocumentModel, ops: LiveDocumentOp[]): LiveDocumentOp[] {
   if (model.kind !== "slides") return ops;
   const bodies = new Set(model.slides.flatMap((slide) => slide.shapes.filter((shape) => shape.role === "body").map((shape) => shape.id)));

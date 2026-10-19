@@ -198,8 +198,8 @@ export async function runSemanticMemoryReview(input: {
     const decisions = text ? parseSemanticCurationResponse(text, request.reviewableIndices) : [];
     return decisions.length === request.reviewableIndices.length ? decisions : null;
   };
-  // R-090: a turn runtime whose declared limits refuse this no-tools request is never called (production 2026-10-14..16:
-  // the curator inherited Antigravity and every call was a refusal). The judgment pool takes it directly.
+  
+
   const inheritedKind = pickedRunnerKind(input.runner);
   if (inheritedKind && runtimeRequestRefusal(inheritedKind, { untrustedNoTools: true, permission: "read" })) {
     if (input.signal?.aborted) return { ...binding, semanticAttempted: true, semanticFailed: true };

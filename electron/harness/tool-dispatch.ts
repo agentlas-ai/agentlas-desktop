@@ -178,15 +178,15 @@ export async function findServer(providerRef: string): Promise<InstalledMcpServe
 
 type InventoryTool = { name: string; [key: string]: unknown };
 
-// ── run-scoped built-ins (host channels) ─────────────────────────────────────────────────────────────────────────────
-//
-// A built-in whose plugin manifest declares a host channel (plugins/builtin.ts hostChannelToolIds: one-team, agent-mail,
-// agentlas-turn, workspace-preview, cua-driver, agentlas-browser) gets that channel only when Main prepares a run's MCP
-// config (mcp-config.ts mints the per-run capability and seals the launch, prepared-transport.ts). Launched from the
-// installed row it lists its tools and fails every call: production 2026-10-16, graph run cdf732ca, a worker without
-// One Team described it live through harness_call and both one_team_list and one_team_session_status settled as
-// "One team tools are not connected in this run.". Such a tool is therefore described and called only through the
-// calling run's sealed binding (same launch, same channel env as the run's runtime); a run without one is refused.
+
+
+
+
+
+
+
+
+
 
 export type RunScopedBinding =
   | { ok: true; server: InstalledMcpServer; prepared?: PreparedMcpBinding }

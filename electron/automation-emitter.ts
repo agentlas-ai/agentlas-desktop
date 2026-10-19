@@ -458,10 +458,10 @@ function defaultNodeLabel(type: WorkflowNodeType, step: EmittedStep): string {
 export { synthesizeLegacyGraph } from "../shared/automation-graph-definition";
 
 /**
- * `headlessFence`: the host observed this turn read the registration spec (read_automation_protocol). Then a final ```json
- * block without the heading is a registration only if every entry passes the same validation as a headed block and
- * names a schedule or monitor; anything else stays ordinary text (an example, a draft). Measured 2026-10-17 (dev A/B4):
- * BYOK Haiku read the spec twice and emitted the array without the heading, and the host dropped it in silence.
+
+
+
+
  */
 export function parseAutomations(text: string, options: { headlessFence?: boolean } = {}): ParseAutomationsResult {
   const idx = text.lastIndexOf(AUTOMATION_HEADING);

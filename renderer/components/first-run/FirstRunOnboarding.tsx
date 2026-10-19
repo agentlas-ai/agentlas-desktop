@@ -522,8 +522,8 @@ export function FirstRunOnboarding({
                     onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing && event.keyCode !== 229 && name.trim()) void saveName(); }}
                   />
                 </div>
-                {/* The placeholder "루나" is an example, not a value: with no name typed the
-                    preview used it as if the agent were already called that (QA 2026-09-27). */}
+                {
+}
                 <div className={styles.preview} aria-live="polite" data-empty={name.trim() ? undefined : "true"}>{name.trim() ? copy.namePreview(name.trim()) : copy.namePreviewEmpty}</div>
                 <details className={styles.help}><summary>{ko ? "이름 설정 안내" : "Name details"}</summary><p className={styles.hint}>{copy.nameHint}</p></details>
               </>

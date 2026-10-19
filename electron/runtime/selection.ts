@@ -53,13 +53,13 @@ import { withRemoteCurationRuntime } from "./remote-curation-binding";
 import { withMemorySourceRunner } from "../memory/source-custody";
 
 /**
- * The auth probe is an observation: its result is logged (and refreshes the connect chips' cache), and nothing decides on
- * it. The provider stays authoritative for an auth failure. It used to be awaited before every turn while holding the run
- * slot: `agy models` and `grok models` are network calls, about 3.1 s on average and up to 7.7 s per agy turn
- * (independent review wave 2, desktop-w2-05). It now runs beside the turn, at most once a minute per runtime and source.
- * Not per working folder: a run in another folder or product home never refreshes the chips' cache (probeRuntimeAuthForRun),
- * so its probe only wrote a log line. Production 1.3.57 ran `codex login status` 349 times, 200–1,425 ms each, because every
- * folder had its own minute (performance review 2026-10-17, H6).
+
+
+
+
+
+
+
  */
 const RUNTIME_AUTH_PROBE_INTERVAL_MS = 60_000;
 const runtimeAuthProbeStartedAt = new Map<string, number>();
@@ -227,8 +227,8 @@ const RUNNER_LABEL: Record<string, string> = {
 };
 
 /**
- * The name a person reads for a runtime kind ("Claude Code", not "claude-code").
- * Chat copy used the raw kind (QA 2026-09-27: "claude-code을(를) 사용하도록 선택했습니다").
+
+
  */
 export function runtimeDisplayName(kind: string): string {
   const label = RUNNER_LABEL[kind];

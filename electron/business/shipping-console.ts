@@ -8,6 +8,11 @@ import {
 } from '../../shared/business/console-contracts';
 import { businessOnlyKeys, isBusinessId, isBusinessRevision, isBusinessSession, sameBusinessSession, type BusinessSession } from '../../shared/business/context';
 import { isBusinessEligibility, type BusinessEligibility } from '../../shared/business/eligibility';
+import { bindAgentMailOrganizationTransport } from '../agent-mail/client';
+import type { OrganizationMailTransport } from '../../shared/agent-mail';
+import { organizationMailBrowserRequest, organizationMailBrowserResponse, organizationMailBrowserScript } from './organization-mail-browser';
+import { companyNativeEnrollmentResult, companyNativeEnrollmentScript, type CompanyNativeBrowserPort } from './company-native-browser';
+import { isCompanyNativeEnrollment } from '../../shared/business/company-native';
 
 const ACCOUNT_SCHEMA = 'agentlas.business.desktop-account.v1';
 const AUTH_PARTITION = 'persist:agentlas-auth';
@@ -89,6 +94,8 @@ function browserRequestScript(origin: string, path: string, body: { expectedSess
 
 export interface BusinessShippingConsole extends BusinessRendererBridge {
   readonly account: BusinessAccountPanelPort;
+  /** Main-only enrollment port. This property is never exposed by renderer IPC. */
+  readonly companyNativeIdentity: CompanyNativeBrowserPort;
   /** Closes display generations and pending login; never retries an uncertain mutation. */
   invalidate(): void;
   dispose(): void;
@@ -111,6 +118,7 @@ export function createBusinessShippingConsole(): BusinessShippingConsole {
   let removeCookieListener: (() => void) | null = null;
   let finishLogin: ((account: BusinessAccountSnapshot) => void) | null = null;
   let login: Promise<BusinessAccountSnapshot> | null = null;
+  let organizationMailSelected = false;
   const listeners = new Set<() => void>();
   const closedSessions = new Set<string>();
   const heldMutations = new Map<string, OriginalMutation>();
@@ -122,6 +130,7 @@ export function createBusinessShippingConsole(): BusinessShippingConsole {
   const invalidate = (): void => {
     const displayed = lastAccount !== null || lastEligibility !== null;
     generation++;
+    organizationMailSelected = false;
     lastAccount = null;
     lastEligibility = null;
     if (expiryTimer) clearTimeout(expiryTimer);
@@ -224,6 +233,49 @@ export function createBusinessShippingConsole(): BusinessShippingConsole {
       throw Error('business_current_session_unavailable');
     return current;
   };
+  const mailSession = (): BusinessSession | null => {
+    const session = lastAccount?.session;
+    return organizationMailSelected && !disposed && session && Date.parse(session.expiresAt) > Date.now()
+      && !closedSessions.has(sessionKey(session)) && !heldSession(session) ? session : null;
+  };
+  const organizationMailTransport: OrganizationMailTransport = Object.freeze({
+    current() {
+      const session = mailSession();
+      return session ? { key: sessionKey(session), organizationId: session.organizationId,
+        principalId: session.principalId, expiresAt: session.expiresAt } : null;
+    },
+    async request(raw: Parameters<OrganizationMailTransport['request']>[0]) {
+      const input = organizationMailBrowserRequest(raw), original = mailSession();
+      if (!input || !original) return null;
+      const stamp = generation, current = await readAccount(), window = browser;
+      if (stamp !== generation || !window || !origin || !current.session || !sameBusinessSession(original, current.session)
+        || !mailSession() || !exactPage(window)) return null;
+      try {
+        const value: unknown = await window.webContents.executeJavaScript(organizationMailBrowserScript(origin, original, input), false);
+        const fresh = mailSession();
+        return stamp === generation && fresh && sameBusinessSession(original, fresh) && exactPage(window)
+          && organizationMailBrowserResponse(value) ? value : null;
+      } catch { return null; }
+    },
+  });
+  const selectOrganizationMail = (): void => {
+    organizationMailSelected = true;
+    bindAgentMailOrganizationTransport(organizationMailTransport);
+  };
+  const companyNativeIdentity: CompanyNativeBrowserPort = Object.freeze({
+    async currentSession() { return (await readAccount()).session; },
+    async approve(raw: Parameters<CompanyNativeBrowserPort['approve']>[0], expected: BusinessSession) {
+      if (!isCompanyNativeEnrollment(raw) || !isBusinessSession(expected)) return null;
+      const input = structuredClone(raw), original = structuredClone(expected), stamp = generation;
+      const current = await readAccount(), window = browser;
+      if (stamp !== generation || !current.session || !sameBusinessSession(original, current.session) || !window || !origin || !exactPage(window)) return null;
+      try {
+        const value: unknown = await window.webContents.executeJavaScript(companyNativeEnrollmentScript(origin, input, original), false);
+        return stamp === generation && lastAccount?.session && sameBusinessSession(original, lastAccount.session)
+          && exactPage(window) && companyNativeEnrollmentResult(value) ? Object.freeze({ ...value }) : null;
+      } catch { return null; }
+    },
+  });
   const showDashboard = async (view: BusinessDashboardView): Promise<void> => {
     const window = await ensureBrowser();
     if (!window || !origin) throw Error('business_browser_unavailable');
@@ -240,7 +292,7 @@ export function createBusinessShippingConsole(): BusinessShippingConsole {
     login = (async () => {
       await showDashboard('overview');
       const current = await readAccount();
-      if (current.session) return current;
+      if (current.session) { selectOrganizationMail(); return current; }
       if (disposed || !browser || browser.isDestroyed()) return emptyAccount();
       return await new Promise<BusinessAccountSnapshot>(resolve => {
         let settled = false;
@@ -248,7 +300,8 @@ export function createBusinessShippingConsole(): BusinessShippingConsole {
         timer.unref?.();
         const finish = (value: BusinessAccountSnapshot): void => {
           if (settled) return; settled = true; clearTimeout(timer); finishLogin = null;
-          resolve(value.session && Date.parse(value.session.expiresAt) > Date.now() ? value : emptyAccount());
+          if (value.session && Date.parse(value.session.expiresAt) > Date.now()) { selectOrganizationMail(); resolve(value); }
+          else resolve(emptyAccount());
         };
         finishLogin = finish;
       });
@@ -274,7 +327,7 @@ export function createBusinessShippingConsole(): BusinessShippingConsole {
       if (!isBusinessId(input.organizationId) || !isBusinessId(input.expectedSessionId) || ![input.expectedSessionRevision, input.expectedAuthEpoch].every(isBusinessRevision)) throw Error('business_request_invalid');
       const current = await currentFor(input.expectedSessionId, input.expectedSessionRevision, input.expectedAuthEpoch), originalSession = current.session!;
       if (!current.organizations.some(row => row.id === input.organizationId && row.membership === 'active')) throw Error('business_organization_unavailable');
-      if (input.organizationId === originalSession.organizationId) return current;
+      if (input.organizationId === originalSession.organizationId) { selectOrganizationMail(); return current; }
       const key = mutationKey('select', originalSession, input.organizationId);
       if (heldMutations.has(key) || heldSession(originalSession) || heldMutations.size >= 256
         || !lastAccount?.session || !sameBusinessSession(lastAccount.session, originalSession)) throw Error('business_original_mutation_unknown');
@@ -294,6 +347,7 @@ export function createBusinessShippingConsole(): BusinessShippingConsole {
       const fresh = await readAccount();
       if (!fresh.session || !sameBusinessSession(fresh.session, selected) || Date.parse(fresh.session.expiresAt) <= Date.now()) throw Error('business_original_mutation_unknown');
       closedSessions.add(sessionKey(original.session)); heldMutations.delete(key);
+      selectOrganizationMail();
       return fresh;
     },
     async logout(raw) {
@@ -329,10 +383,10 @@ export function createBusinessShippingConsole(): BusinessShippingConsole {
       if (current.session!.organizationId !== input.organizationId || !current.adminViews.includes(input.view)) throw Error('business_admin_unavailable');
       await showDashboard(input.view === 'tools' ? 'catalog' : input.view);
     },
-    async selectPersonal() { invalidate(); browser?.hide(); },
+    async selectPersonal() { organizationMailSelected = false; bindAgentMailOrganizationTransport(null); invalidate(); browser?.hide(); },
   });
   return Object.freeze({
-    account, history: null, learning: null, organizationExecution: null,
+    account, companyNativeIdentity, history: null, learning: null, organizationExecution: null,
     async readEligibility(): Promise<BusinessEligibility | null> {
       const window = await ensureBrowser();
       if (!window) { invalidate(); return null; }

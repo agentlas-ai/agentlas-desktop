@@ -1,23 +1,23 @@
-/*
- * Agentlas browser fallback ladder — what happens when an agent's browser use fails.
- *
- * Owner 2026-09-29: "agentlas browser 안되면? 만약에 안되면 어캄?" / "agentlas browser면 다 되야" /
- * "유료작업 빼고 다 하셈". Before this module a failed browser call was the end of the road: the agent read a
- * prose error, retried the same broken surface a few times and stopped (measured on the owner's machine,
- * 2026-09-26T21Z..09-29T12Z: 192 failed agentlas-browser calls; 45 calls in 17 runs were a native relay session
- * answering 404 on every reconnect for the rest of the run, 3 calls an unverifiable ownership state, 11 calls a
- * dropped bridge wire, 13 closed targets, 1 tab-limit refusal, 9 login-wall pages).
- *
- * Shape: a bounded state machine. Input is a machine failure code (classifyBrowserFailure reads measured facts
- * and our own fixed markers, never tool prose). Each code has an ordered list of rungs; each rung has an attempt
- * cap and a time cap; the whole ladder has a time budget; every transition is one typed event. The runner takes
- * its hands (reestablish, switch surface, login ladder, connector hand-off, computer use, human-check wait, stop
- * card) as injected deps so the contract can drive every rung with fault injection.
- *
- * Safety (unchanged by this module): no CAPTCHA solving, no bot-detection evasion, no paid actions. A human check
- * (CAPTCHA/anti-bot wall) is not a dead stop: the owner sees one card with the live browser brought forward, the
- * page is watched until the check clears, and the run resumes (reason code human_check_required).
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 export const BROWSER_LADDER_SCHEMA = "agentlas.browser-fallback-ladder.v1" as const;
 /** run_events.kind for every ladder transition (a soak counts these). */

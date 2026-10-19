@@ -28,11 +28,11 @@ export function OneAgentPortrait({
   const customSrc = customAvatarId
     ? `agentlas://one-avatar/${encodeURIComponent(customAvatarId)}`
     : storedAvatarUrl;
-  /*
-   * 직접 넣은 얼굴 파일이 없거나(다른 사본·삭제·권한) 주소가 안 열리면 브라우저의 깨진 그림
-   * 아이콘이 그대로 보인다(Motiondirector 2026-10-10). 로드에 실패한 주소는 기억해 두고
-   * 기본 캐릭터로 되돌린다. 주소가 바뀌면 다시 시도한다.
-   */
+  
+
+
+
+
   const [failedSrc, setFailedSrc] = useState("");
   const useCustom = Boolean(customSrc) && failedSrc !== customSrc;
   const src = useCustom ? customSrc : character.src;

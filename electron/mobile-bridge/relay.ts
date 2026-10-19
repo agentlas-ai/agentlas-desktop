@@ -99,19 +99,19 @@ function upgradeRefusal(response: unknown): string | null {
 /** 재페어링 말고는 회복 경로가 없는 사유 — 터널을 계속 열면 안 된다. */
 const TERMINAL_REFUSALS = new Set(["device_unknown_or_revoked", "device_repair_required"]);
 
-/*
- * 터널이 "relay side closed" 로 닫혔을 때, 닫은 쪽이 폰인지 중계인지 로그만으로 가리는 증거.
- *
- * ★ 왜 (2026-10-16)
- *   오너가 5G 에서 "계속 데탑이 끊긴다"고 했을 때 이 줄에는 코드도 사유도 없어서, 폰이 앱 전환·
- *   네트워크 전환으로 소켓을 놓은 건지 중계가 닫은 건지 가를 수 없었다. 중계(mobile-relay.mjs
- *   closeChannel)는 닫을 때 항상 코드와 사유를 싣는다:
- *     - 1000 "device closed"        폰 쪽 소켓이 닫혔다(앱이 내려가 심박 응답이 끊겨 중계가
- *                                   정리한 경우 포함 — 중계는 25초 심박 두 번 못 받으면 끊는다)
- *     - 1012 "relay restarting"     중계 재배포·재시작
- *     - 1012 "relay unavailable"    채널 시간 초과·반대편 오류
- *   코드는 서버가 정한 고정 어휘이고 사용자 데이터가 아니다.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
 export type RelayCloseSide = "phone" | "relay-restart" | "relay-other" | "unknown";
 
 export function relayCloseSide(code: unknown, reason: unknown): RelayCloseSide {

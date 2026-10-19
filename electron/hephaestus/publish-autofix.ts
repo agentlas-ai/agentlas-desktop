@@ -302,17 +302,17 @@ function copyClean(src: string, dest: string, extraExclude: Set<string>): string
       if (entry.isDirectory()) {
         walk(abs);
       } else if (entry.isFile()) {
-        // ★ A FILE THAT DID NOT COPY MUST NOT VANISH QUIETLY.
-        //
-        //   `entry.isFile()` is what readdir saw a moment ago. By the time the
-        //   copy runs the path may be something else — the swap-a-regular-file-
-        //   for-a-FIFO race is the sharp version, and a copy that blocks or
-        //   throws left the file out of the package with nothing recorded.
-        //   Measured 2026-08-18: the FIFO case ended `verdict: "pass"`, zero
-        //   findings, empty remediation, and `fifo.md` simply not there.
-        //
-        //   Re-check the type without following links, copy, and treat any
-        //   failure as an exclusion the caller will report by name.
+        
+
+
+
+
+
+
+
+
+
+
         const target = path.join(dest, rel);
         try {
           const current = fs.lstatSync(abs);

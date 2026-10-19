@@ -443,12 +443,12 @@ async function runKimiTurn(req: RunnerRequest, events: RunnerEvents, dispatch: {
   const storedSessionId = saved && fingerprint && saved.fingerprint === fingerprint ? saved.sessionId : null;
   // The same folder the spawn below uses (its product mirror), read for the session store.
   const runEnv = withForeignCliContext("kimi", runReq.env ?? process.env, selectionFor(runReq.agentId, undefined, runReq.chatId));
-  /*
-   * A session Kimi no longer holds (no session directory in its store: kimi-journal.ts; measured on Kimi Code 0.28.0,
-   * whose `--session <missing>` exits 1 before any turn) failed this turn and every later turn of the chat. It continues
-   * once in a fresh session that carries the chat history (unattended-session-turns.ts rules 2 and 4). An attended
-   * caller-managed session id carries no history, so it keeps its refusal.
-   */
+  
+
+
+
+
+
   const candidateResume = runReq.runtimeSessionId ?? storedSessionId;
   const goneFresh = Boolean(candidateResume && kimiSessionGone(realCliHome("kimi", runEnv), candidateResume)
     && (runReq.unattended || attendedTurnStartsFresh("session_not_found", !runReq.runtimeSessionId)));

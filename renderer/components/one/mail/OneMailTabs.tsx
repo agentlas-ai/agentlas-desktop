@@ -22,8 +22,8 @@ function Tabs<T extends OneEditTab>({ locale, items, value, onChange, label }: {
   onChange: (tab: T) => void;
   label: string;
 }) {
-  // Roving tabindex (WAI-ARIA tabs): one Tab stop for the row, arrows/Home/End move
-  // and select (QA 2026-09-27: arrows did nothing and Tab walked every tab).
+  
+
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     const index = items.indexOf(value);
     let next = -1;
