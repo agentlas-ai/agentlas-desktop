@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { takeOrgSheetRequest } from "@/lib/one-org-sheet-request";
-import type { HubAgentBookmark, InstalledAgent, InstalledMcpServer, MarketplaceListing, McpServerStatus, McpToolCatalogEntry } from "@shared/types";
+import type { InstalledAgent, InstalledMcpServer, McpServerStatus, McpToolCatalogEntry } from "@shared/types";
+import { isCallOnlyHubAgent } from "@shared/call-only-agent";
 import type { OneOrgCollaborationStyle, OneOrgMember, OneOrgState } from "@shared/one-org";
 import { OneAgentPortrait } from "./OneAgentPortrait";
 import { OneAgentChoicePicker } from "./OneAgentChoicePicker";
@@ -69,12 +70,6 @@ function memberKind(member: OneOrgMember, installedAgents: InstalledAgent[], loc
   return locale === "ko" ? "단일" : "Single";
 }
 
-type PendingHubAdd = {
-  listing: MarketplaceListing;
-  leasedUntil: string | null;
-  installed?: InstalledAgent;
-};
-
 function AgentInventoryLoading({ locale }: { locale: string }) {
   return <div className={styles.inventoryLoading} role="status" aria-live="polite">
     <span className={styles.inventorySpinner} aria-hidden="true" />
@@ -85,17 +80,13 @@ function AgentInventoryLoading({ locale }: { locale: string }) {
 export function OneOrgChart({
   state,
   installedAgents,
-  cloudListings,
-  hubBookmarks,
   inventoryLoading = false,
-  accountSignedIn = null,
   locale,
   onAdd,
   onAddExistingComplete,
   onCreateAgent,
   addRequest,
   onAddRequestTaken,
-  onMaterializeSource,
   onRename,
   onUpdate,
   onReplace,
@@ -120,7 +111,7 @@ export function OneOrgChart({
   pluginStatuses = [],
   onSetAutoSelect,
   onConnectTool,
-  onBrowseSource,
+  onBrowseMoreAgents,
   conversationResults = [],
   historyResults = [],
   onOpenConversation,
@@ -128,20 +119,16 @@ export function OneOrgChart({
 }: {
   state: OneOrgState | null;
   installedAgents: InstalledAgent[];
-  cloudListings: MarketplaceListing[];
-  hubBookmarks: HubAgentBookmark[];
   inventoryLoading?: boolean;
-  /** null = 세션 미확인 — 그때는 로그인 안내 대신 기존 빈 상태 문구를 쓴다(D-10). */
-  accountSignedIn?: boolean | null;
   locale: string;
   onAdd: (installedAgentId: string, displayName?: string, leaseExpiresAt?: string | null, characterId?: string) => Promise<void>;
   /** Close the preserved New Agent context only after an explicit picker confirmation succeeds. */
   onAddExistingComplete?: () => void;
   onCreateAgent?: () => void;
+  /** `source` 는 옛 요청 모양과의 호환용이다 — 추가 창은 이제 로컬 에이전트만 보여준다. */
   addRequest?: { token: number; source: "my" | "cloud" | "hub" };
   /** Spent like sheetRequest: cleared by its owner, so returning to the Agents tab does not reopen the picker. */
   onAddRequestTaken?: (token: number) => void;
-  onMaterializeSource: (source: "cloud" | "hub", listing: MarketplaceListing) => Promise<InstalledAgent>;
   onRename: (member: OneOrgMember, displayName: string) => Promise<void>;
   onUpdate?: (member: OneOrgMember, displayName: string, collaborationStyle: OneOrgCollaborationStyle) => Promise<void>;
   onReplace: (member: OneOrgMember, installedAgentId: string, handoverNote?: string) => Promise<void>;
@@ -176,7 +163,8 @@ export function OneOrgChart({
   pluginStatuses?: McpServerStatus[];
   onSetAutoSelect?: (member: OneOrgMember, enabled: boolean) => Promise<void>;
   onConnectTool?: (member: OneOrgMember, serverId?: string) => void;
-  onBrowseSource?: (source: "cloud" | "hub") => void;
+  /** 좌석에는 로컬에 등록된 에이전트만 앉힌다. 더 필요하면 Hub 메뉴에서 내려받는다. */
+  onBrowseMoreAgents?: () => void;
   conversationResults?: OneOrgSearchItem[];
   historyResults?: OneOrgSearchItem[];
   onOpenConversation?: (id: string) => void;
@@ -185,12 +173,10 @@ export function OneOrgChart({
   const onePersonaName = useOnePersonaName();
   const ko = locale === "ko";
   const [addOpen, setAddOpen] = useState(false);
-  const [addTab, setAddTab] = useState<"my" | "cloud" | "hub">("my");
   const [addSearch, setAddSearch] = useState("");
   const [selectedAgent, setSelectedAgent] = useState("");
   const [busy, setBusy] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
-  const [pendingHubAdd, setPendingHubAdd] = useState<PendingHubAdd | null>(null);
   const [editName, setEditName] = useState("");
   const [editorMember, setEditorMember] = useState<OneOrgMember | null>(null);
   /*
@@ -215,12 +201,10 @@ export function OneOrgChart({
   const authEpochRef = useRef(0);
   useEffect(() => {
     const onAuthChanged = () => {
-      // Hub purchase/install state is account-owned. Drop the in-memory picker
-      // and receipt when the account changes so an old result cannot be seated
-      // into the newly selected account; the dialog's durable request key stays
-      // scoped for a later retry under its original account.
+      // Installed agents are account-owned. Drop the in-memory picker when the
+      // account changes so an old selection cannot be seated into the newly
+      // selected account.
       authEpochRef.current += 1;
-      setPendingHubAdd(null);
       setBusy(false);
       setSelectedAgent("");
       setAddSearch("");
@@ -235,7 +219,6 @@ export function OneOrgChart({
     if (!addRequest?.token || addRequest.token === handledAddToken.current) return;
     handledAddToken.current = addRequest.token;
     onAddRequestTaken?.(addRequest.token);
-    setAddTab(addRequest.source);
     setSelectedAgent("");
     setAddSearch("");
     setAddError(null);
@@ -284,21 +267,22 @@ export function OneOrgChart({
   const active = state?.members.filter((member) => !member.archivedAt) || [];
   const archived = state?.members.filter((member) => Boolean(member.archivedAt)) || [];
   const usedIds = useMemo(() => new Set(active.map((member) => member.installedAgentId)), [active]);
-  const usedSlugs = useMemo(() => new Set(active
-    .map((member) => installedAgents.find((agent) => agent.id === member.installedAgentId)?.slug.toLocaleLowerCase())
-    .filter((slug): slug is string => Boolean(slug))), [active, installedAgents]);
   const roleTerms: Record<string, string[]> = {
     engineering: ["개발", "dev", "engineer", "code", "software", "build"],
     marketing: ["마케팅", "marketing", "growth", "sales", "content"],
     research: ["리서치", "research", "analysis", "analyst", "조사"],
   };
   // A replacement must itself be able to work: never offer an agent whose source folder is gone or that is hidden.
+  // A call-only Hub agent has no local instructions, so it cannot be a local replacement either.
   const replacementCandidates = installedAgents.filter((agent) => !usedIds.has(agent.id) && !agent.parentTeamId
+    && !isCallOnlyHubAgent(agent)
     && !agent.sourceMissingSince && agent.visibility !== "background" && agent.visibility !== "private");
   const addSearchValue = addSearch.trim().toLocaleLowerCase();
   const candidates = installedAgents.filter((agent) => {
     if (usedIds.has(agent.id)) return false;
-    if (agent.assetSource === "agent-cloud" || agent.assetSource === "hub") return false;
+    // 좌석에는 이 Mac에 등록된 에이전트만 앉힌다. Hub·Cloud 에서 내려받은 사본은 로컬 에이전트다 —
+    // 소스 지시문이 없는 호출 전용 Hub 항목만 뺀다(오너 결정 2026-10-19).
+    if (isCallOnlyHubAgent(agent)) return false;
     // 팀 패키지의 내부 역할(Orchestrator·Memory Curator 등)은 앉힐 수 있는 사람이 아니다.
     // 팀은 팀으로 앉힌다 — 실측 2026-08-23: 팀 4개가 구성원 25명으로 풀려 목록을 뒤덮었다.
     if (agent.parentTeamId) return false;
@@ -307,13 +291,6 @@ export function OneOrgChart({
     return (roleTerms[roleFilter] || []).some((term) => haystack.includes(term));
   }).filter((agent) => !addSearchValue || `${agent.name} ${agent.nameEn} ${agent.tagline} ${agent.taglineEn} ${agent.slug}`.toLocaleLowerCase().includes(addSearchValue));
   const taskForce = (activeTaskForceIds || []).map((id) => installedAgents.find((agent) => agent.id === id)).filter(Boolean);
-  const hubBookmarkListings = hubBookmarks
-    .filter((bookmark) => bookmark.bookmarked !== false)
-    .map((bookmark) => ({ ...bookmark.listing, slug: bookmark.slug || bookmark.listing.slug }))
-    .filter((listing) => listing.entityKind !== "plugin" && listing.source !== "hub-plugin");
-  const remoteCandidates = (addTab === "cloud" ? cloudListings : addTab === "hub" ? hubBookmarkListings : [])
-    .filter((listing) => !usedSlugs.has(listing.slug.toLocaleLowerCase()))
-    .filter((listing) => !addSearchValue || `${listing.name} ${listing.nameEn} ${listing.tagline} ${listing.taglineEn} ${listing.slug}`.toLocaleLowerCase().includes(addSearchValue));
   const searchValue = searchQuery.trim().toLocaleLowerCase();
   const peopleResults = active.filter((member) => !searchValue || `${member.displayName} ${member.nameEn} ${member.statusLine} ${member.statusLineEn}`.toLocaleLowerCase().includes(searchValue));
   const matchingConversations = conversationResults.filter((item) => !searchValue || `${item.title} ${item.detail}`.toLocaleLowerCase().includes(searchValue)).slice(0, 4);
@@ -328,7 +305,6 @@ export function OneOrgChart({
     noPeople: "No staff members match.", noConversations: "No conversations match.", noHistory: "No history matches.",
   };
   const addCopy = ko ? {
-    sourceAria: "에이전트 출처",
     myAgents: "내 에이전트", installed: "로컬 에이전트", choose: "에이전트를 선택하세요", search: "에이전트 검색",
     matchingRole: (role: string) => `${role} 역할에 맞는 에이전트`, noMatch: "설치된 에이전트 중 일치하는 역할이 없습니다.", showAll: "전체 목록 보기",
     permanent: "상주 · 만료 없음",
@@ -336,14 +312,9 @@ export function OneOrgChart({
     identityNote: "원본의 이름과 캐릭터 그대로 앉습니다. 바꾸려면 앉힌 뒤 조직도에서 편집하세요.",
     team: "팀", single: "단일", add: "이 에이전트 추가", cancel: "취소 / 뒤로",
     localNote: "이 Mac에 설치된 에이전트입니다. 조직에 상주 직원으로 추가됩니다.",
-    cloudNote: "내 Agent Cloud에 저장된 에이전트가 바로 표시됩니다. 조직에 상주 직원으로 추가됩니다.",
-    hubNote: "Hub에서 북마크한 에이전트만 표시됩니다. 팀원으로 무료로 추가할 수 있습니다.",
-    cloudEmpty: "Agent Cloud에 저장된 에이전트가 없습니다.",
-    hubEmpty: "북마크한 Hub 에이전트가 없습니다.", cloudBrowse: "Agent Cloud 관리", hubBrowse: "Hub에서 북마크하기",
-    cloudSignedOut: "Agentlas 로그인이 필요합니다. 로그인하면 Agent Cloud에 저장한 에이전트가 여기 표시됩니다.",
-    hubSignedOut: "Agentlas 로그인이 필요합니다. 로그인하면 Hub에서 북마크한 에이전트가 여기 표시됩니다.",
+    browseMore: "더 많은 에이전트 보러가기",
+    browseMoreNote: "여기에는 이 Mac에 등록된 에이전트만 보입니다. 공개 에이전트나 내 Agent Cloud 에이전트는 Hub 메뉴에서 내려받으면 여기 나타납니다.",
   } : {
-    sourceAria: "Agent source",
     myAgents: "My agents", installed: "Local agent", choose: "Choose an agent", search: "Search agents",
     matchingRole: (role: string) => `Agents matching ${role}`, noMatch: "No installed agent matches this role.", showAll: "View all agents",
     permanent: "Standing · No expiry",
@@ -351,12 +322,8 @@ export function OneOrgChart({
     identityNote: "Joins with the name and character it already has. To change them, edit it in the organisation chart after it joins.",
     team: "Team", single: "Single", add: "Add this agent", cancel: "Cancel / Back",
     localNote: "These agents are installed on this Mac. They join your organisation as standing staff.",
-    cloudNote: "Agents saved in your Agent Cloud appear immediately. They join your organisation as standing staff.",
-    hubNote: "Only agents you bookmarked in Hub appear here. Add one as a teammate for free when ready.",
-    cloudEmpty: "No agents are saved in Agent Cloud.",
-    hubEmpty: "No Hub agents are bookmarked.", cloudBrowse: "Manage Agent Cloud", hubBrowse: "Bookmark in Hub",
-    cloudSignedOut: "Sign in to Agentlas to see the agents saved in your Agent Cloud.",
-    hubSignedOut: "Sign in to Agentlas to see the Hub agents you bookmarked.",
+    browseMore: "Browse more agents",
+    browseMoreNote: "Only agents registered on this Mac are listed here. Download a public or Agent Cloud agent from the Hub menu and it appears here.",
   };
   const editorCopy = ko ? {
     edit: "편집", defaultTitle: "조직원 편집", basic: "기본 정보", orgName: "이 조직에서 부를 이름", original: "원본 담당", originalFallback: "설치된 에이전트의 역할 정의를 사용합니다.",
@@ -396,8 +363,7 @@ export function OneOrgChart({
     permissionNote: "Plugins and MCP are separate lists, but both use the same permission approval at run time.",
   };
   const selectedInstalled = toolsMember ? installedAgents.find((agent) => agent.id === toolsMember.installedAgentId) : undefined;
-  const selectedCandidate = addTab === "my" && selectedAgent ? installedAgents.find((agent) => agent.id === selectedAgent) : undefined;
-  const selectedListing = addTab !== "my" && selectedAgent ? remoteCandidates.find((listing) => listing.slug === selectedAgent) : undefined;
+  const selectedCandidate = selectedAgent ? installedAgents.find((agent) => agent.id === selectedAgent) : undefined;
   const editorInstalled = editorMember ? installedAgents.find((agent) => agent.id === editorMember.installedAgentId) : undefined;
   const assignedTools = (selectedInstalled?.mcpServers ?? []).map((serverId) => {
     const installed = installedPlugins.find((server) => server.id === serverId || server.catalogId === serverId);
@@ -419,85 +385,22 @@ export function OneOrgChart({
   });
   const visibleAssignedTools = assignedTools.filter((tool) => toolsTab === "plugins" ? tool.source === "plugin" : tool.source === "custom");
 
-  const completeHubAdd = async (request: PendingHubAdd) => {
-    const requestAuthEpoch = authEpochRef.current;
-    const isCurrentRequest = () => authEpochRef.current === requestAuthEpoch;
-    if (!isCurrentRequest()) return;
-    if (!state) {
-      setAddError(ko ? "팀원 정보를 아직 불러오지 못했습니다." : "The teammate roster has not loaded yet.");
-      setPendingHubAdd(request);
-      return;
-    }
-    setBusy(true);
-    setAddError(null);
-    let installed = request.installed;
-    try {
-      // Preserve the exact Hub selection across install and seat retries.
-      installed = installed ?? await onMaterializeSource("hub", request.listing);
-      if (!isCurrentRequest()) return;
-      if (!installed) throw new Error(ko ? "에이전트를 찾을 수 없습니다." : "The selected agent could not be found.");
-      setPendingHubAdd({ ...request, installed });
-      /*
-       * 이름·캐릭터를 보내지 않는다 = 원본 패키지의 이름과 얼굴 그대로 앉는다.
-       * org.ts validates the installed Hub source before seating.
-       */
-      if (!isCurrentRequest()) return;
-      await onAdd(installed.id, undefined, request.leasedUntil, undefined);
-      if (!isCurrentRequest()) return;
-      setPendingHubAdd(null);
-      setSelectedAgent(""); setAddSearch(""); setRoleFilter(null); setAddOpen(false);
-      // The seat mutation has committed at this point. A picker cleanup callback
-      // must not turn that success into a retryable receipt if it throws.
-      try { onAddExistingComplete?.(); } catch { /* preserve the committed seat */ }
-    } catch (cause) {
-      if (!isCurrentRequest()) return;
-      setPendingHubAdd({ ...request, ...(installed ? { installed } : {}) });
-      // Keep the retryable Hub selection visible after install or seat failure.
-      // Retry the same source without repeating materialization if it succeeded.
-      setAddTab("hub");
-      setSelectedAgent(request.listing.slug);
-      setAddOpen(true);
-      setAddError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      if (isCurrentRequest()) setBusy(false);
-    }
-  };
-
   const submitAdd = async () => {
     if (!selectedAgent || busy || !state) return;
-    if (addTab !== "my" && !selectedListing) return;
     const requestAuthEpoch = authEpochRef.current;
     const isCurrentRequest = () => authEpochRef.current === requestAuthEpoch;
-
-    if (addTab === "hub") {
-      const listing = selectedListing;
-      if (!listing) return;
-      const preserved = pendingHubAdd?.listing.slug === listing.slug ? pendingHubAdd : null;
-      if (preserved) {
-        await completeHubAdd(preserved);
-        return;
-      }
-
-      // Hub staff now joins without a paid lease. Materialization and seating
-      // still run through the existing exact-source verification path.
-      await completeHubAdd({ listing, leasedUntil: null });
-      return;
-    }
 
     setBusy(true);
     setAddError(null);
     try {
-      const installed = addTab === "my"
-        ? selectedCandidate
-        : await onMaterializeSource(addTab, selectedListing!);
+      const installed = selectedCandidate;
       if (!isCurrentRequest()) return;
       if (!installed) throw new Error(ko ? "에이전트를 찾을 수 없습니다." : "The selected agent could not be found.");
       const leaseExpiresAt: string | null = null;
       /*
        * 이름·캐릭터를 보내지 않는다 = 원본 패키지의 이름과 얼굴 그대로 앉는다.
-       * Cloud와 로컬은 장기대여 없이 기존 상주 좌석 흐름을 유지한다.
+       * 로컬 에이전트는 장기대여 없이 상주 좌석 흐름으로 앉는다.
        */
-      if (!isCurrentRequest()) return;
       await onAdd(installed.id, undefined, leaseExpiresAt, undefined);
       if (!isCurrentRequest()) return;
       setSelectedAgent(""); setAddSearch(""); setRoleFilter(null); setAddOpen(false);
@@ -591,7 +494,7 @@ export function OneOrgChart({
         {active.length === 0 && <>
           <div className={styles.empty}>{locale === "ko" ? "아직 상주 스태프가 없습니다. 아래 역할을 골라 시작하세요." : "No standing staff yet. Pick a role to get started."}</div>
           <div className={styles.ghosts} aria-label={locale === "ko" ? "추천 역할" : "Suggested roles"}>
-          {ghostRoles.map((role) => <button key={role.id} type="button" className={styles.ghost} onClick={() => { setRoleFilter(role.id); setAddTab("my"); setAddOpen(true); }} disabled={!state}><span><IconPlus size={14} /></span><strong>{role.label}</strong><small>{locale === "ko" ? "아직 없음" : "Not assigned"}</small></button>)}
+          {ghostRoles.map((role) => <button key={role.id} type="button" className={styles.ghost} onClick={() => { setRoleFilter(role.id); setAddOpen(true); }} disabled={!state}><span><IconPlus size={14} /></span><strong>{role.label}</strong><small>{locale === "ko" ? "아직 없음" : "Not assigned"}</small></button>)}
           </div>
         </>}
         {active.map((member) => (
@@ -782,8 +685,7 @@ export function OneOrgChart({
         icon={<IconPlus size={20} />}
       >
         <div className={styles.addSheet}>
-          <details className={styles.popupDetails}><summary>{ko ? "가져오기 안내" : "Import details"}</summary><p>{addTab === "my" ? addCopy.localNote : addTab === "cloud" ? addCopy.cloudNote : addCopy.hubNote}</p></details>
-          <div className={styles.tabs} role="tablist" aria-label={addCopy.sourceAria}>{([['my', addCopy.myAgents], ['cloud', 'Cloud'], ['hub', 'Hub']] as const).map(([key, label]) => <button key={key} type="button" role="tab" aria-selected={addTab === key} data-active={addTab === key} onClick={() => { setAddTab(key); setSelectedAgent(""); setAddError(null); }}>{label}</button>)}</div>
+          <details className={styles.popupDetails}><summary>{ko ? "가져오기 안내" : "Import details"}</summary><p>{addCopy.localNote} {addCopy.browseMoreNote}</p></details>
           <label className={styles.addSearch}><IconSearch size={15} /><input value={addSearch} onChange={(event) => setAddSearch(event.target.value)} placeholder={addCopy.search} aria-label={addCopy.search} />{addSearch && <button type="button" onClick={() => setAddSearch("")} aria-label={locale === "ko" ? "검색 지우기" : "Clear search"}><IconClose size={14} /></button>}</label>
           {/*
             출처 안내는 시트 머리말(description)이 이미 같은 문장을 찍는다. 여기 한 번 더
@@ -791,7 +693,7 @@ export function OneOrgChart({
           */}
           {/* "새 에이전트 만들기 또는 추가" 라벨로 들어온 시트에 '만들기' 경로가
               없었다 (U-D-2) — 검색 결과와 무관하게 만들기 진입점을 상시 제공한다. */}
-          {addTab === "my" && onCreateAgent && (
+          {onCreateAgent && (
             <button
               type="button"
               className={styles.secondaryAction}
@@ -799,19 +701,12 @@ export function OneOrgChart({
             ><IconPlus size={13} />{ko ? "새 에이전트 만들기" : "Create a new agent"}</button>
           )}
 
-          {addTab === "my" ? (
-            inventoryLoading && candidates.length === 0 ? <AgentInventoryLoading locale={locale} />
-              : candidates.length > 0 ? <div className={styles.candidateGrid} role="list" aria-label={addCopy.installed}>{candidates.map((agent) => <button type="button" role="listitem" key={agent.id} data-active={selectedAgent === agent.id ? "true" : "false"} onClick={() => { setSelectedAgent(agent.id); setAddError(null); }}><span><strong>{agent.localDisplayName || (ko ? agent.name : agent.nameEn) || agent.name}</strong><small>{agent.kind === "team" ? addCopy.team : addCopy.single} · {ko ? "로컬" : "Local"}</small><em>{(ko ? agent.tagline : agent.taglineEn) || agent.tagline || agent.taglineEn}</em></span>{selectedAgent === agent.id && <IconCheck size={15} />}</button>)}</div>
-              : <div className={styles.sheetEmpty}>{roleFilter ? addCopy.noMatch : (ko ? "사용 가능한 로컬 에이전트가 없습니다." : "No local agents are available.")}{roleFilter && <button type="button" className={styles.inlineLink} onClick={() => setRoleFilter(null)}>{addCopy.showAll}</button>}{onCreateAgent && <button type="button" className={styles.inlineLink} onClick={() => { setSelectedAgent(""); setAddSearch(""); setAddError(null); setRoleFilter(null); setAddOpen(false); onCreateAgent(); }}>{ko ? "새 에이전트 만들기" : "Create a new agent"}</button>}</div>
-          ) : inventoryLoading && remoteCandidates.length === 0 ? <AgentInventoryLoading locale={locale} /> : remoteCandidates.length > 0 ? (
-            <div className={styles.candidateGrid} role="list" aria-label={addTab === "cloud" ? "Cloud" : "Hub"}>{remoteCandidates.map((listing) => <button type="button" role="listitem" key={`${addTab}:${listing.entityKind || "agent"}:${listing.slug}`} data-active={selectedAgent === listing.slug ? "true" : "false"} onClick={() => { setSelectedAgent(listing.slug); setAddError(null); }}><span><strong>{(ko ? listing.name : listing.nameEn) || listing.name || listing.slug}</strong><small>{listing.entityKind === "team" || (listing.agentCount ?? 0) > 1 ? addCopy.team : addCopy.single} · {addTab === "cloud" ? "Cloud" : "Hub"}</small><em>{(ko ? listing.tagline : listing.taglineEn) || listing.tagline || listing.taglineEn}</em></span>{selectedAgent === listing.slug && <IconCheck size={15} />}</button>)}</div>
-          ) : <div className={styles.sheetEmpty}><span>{accountSignedIn === false
-            /* 미로그인을 빈 계정처럼 보이게 하지 않는다(D-10) — signedIn===false 로 확인된 때만 로그인 안내. */
-            ? (addTab === "cloud" ? addCopy.cloudSignedOut : addCopy.hubSignedOut)
-            : (addTab === "cloud" ? addCopy.cloudEmpty : addCopy.hubEmpty)}</span>{onBrowseSource && <button type="button" onClick={() => onBrowseSource(addTab)}>{addTab === "cloud" ? addCopy.cloudBrowse : addCopy.hubBrowse}</button>}</div>}
+          {inventoryLoading && candidates.length === 0 ? <AgentInventoryLoading locale={locale} />
+            : candidates.length > 0 ? <div className={styles.candidateGrid} role="list" aria-label={addCopy.installed}>{candidates.map((agent) => <button type="button" role="listitem" key={agent.id} data-active={selectedAgent === agent.id ? "true" : "false"} onClick={() => { setSelectedAgent(agent.id); setAddError(null); }}><span><strong>{agent.localDisplayName || (ko ? agent.name : agent.nameEn) || agent.name}</strong><small>{agent.kind === "team" ? addCopy.team : addCopy.single} · {ko ? "로컬" : "Local"}</small><em>{(ko ? agent.tagline : agent.taglineEn) || agent.tagline || agent.taglineEn}</em></span>{selectedAgent === agent.id && <IconCheck size={15} />}</button>)}</div>
+            : <div className={styles.sheetEmpty}>{roleFilter ? addCopy.noMatch : (ko ? "사용 가능한 로컬 에이전트가 없습니다." : "No local agents are available.")}{roleFilter && <button type="button" className={styles.inlineLink} onClick={() => setRoleFilter(null)}>{addCopy.showAll}</button>}{onCreateAgent && <button type="button" className={styles.inlineLink} onClick={() => { setSelectedAgent(""); setAddSearch(""); setAddError(null); setRoleFilter(null); setAddOpen(false); onCreateAgent(); }}>{ko ? "새 에이전트 만들기" : "Create a new agent"}</button>}</div>}
+          {onBrowseMoreAgents && <button type="button" className={styles.secondaryAction} onClick={() => { setSelectedAgent(""); setAddSearch(""); setAddError(null); setRoleFilter(null); setAddOpen(false); onBrowseMoreAgents(); }}>{addCopy.browseMore}</button>}
 
-          {/* Hub agents join the standing roster without a paid lease. */}
-          {(selectedCandidate || selectedListing) && <section className={styles.selectedAgentPanel}>
+          {selectedCandidate && <section className={styles.selectedAgentPanel}>
             <div className={styles.modelPolicy}><IconSparkles size={15} /><div><strong>{addCopy.modelAuto}</strong><span>{selectedCandidate?.preferredBackend ? addCopy.modelPreferred(selectedCandidate.preferredBackend) : addCopy.modelDefault}</span></div></div>
             <p className={styles.note}>{addCopy.identityNote}</p>
           </section>}

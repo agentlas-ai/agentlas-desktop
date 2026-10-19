@@ -3460,18 +3460,6 @@ function OneSessionsShell() {
       ...(characterId ? { avatar: { kind: "preset" as const, characterId } } : {}),
     });
   }, true), [mutateOneOrg]);
-  const materializeOneOrgSource = useCallback(async (source: "cloud" | "hub", listing: MarketplaceListing) => {
-    const api = ipc();
-    if (!api) throw new Error("Desktop bridge unavailable");
-    const installed = source === "cloud"
-      ? await api.team.installMine(listing.slug)
-      : await api.team.install(listing.slug);
-    setAvailableAgents((current) => visibleAgents([
-      ...current.filter((agent) => agent.id !== installed.id),
-      installed,
-    ], { includeTeams: true }));
-    return installed;
-  }, []);
   const renameOneOrg = useCallback((member: OneOrgMember, displayName: string) => mutateOneOrg(() => {
     const api = ipc();
     if (!api) return Promise.reject(new Error("Desktop bridge unavailable"));
@@ -9590,10 +9578,7 @@ function OneSessionsShell() {
               oneAvatarIcon={oneAvatarTone}
               state={oneOrgState ?? (!ipc() ? oneOrgBrowserPreviewState() : null)}
               installedAgents={availableAgents}
-              cloudListings={cloudListings}
-              hubBookmarks={hubBookmarks}
               inventoryLoading={inventoryLoading}
-              accountSignedIn={accountSignedIn}
               locale={appLocale}
               addRequest={agentPickerRequest}
               onAddRequestTaken={(token) => setAgentPickerRequest((current) => current?.token === token ? undefined : current)}
@@ -9603,7 +9588,6 @@ function OneSessionsShell() {
                 setCreateAgentSeed(null);
               }}
               onCreateAgent={() => openCreateAgentDialog()}
-              onMaterializeSource={materializeOneOrgSource}
               onRename={renameOneOrg}
               onUpdate={updateOneOrg}
               onReplace={replaceOneOrg}
@@ -9652,7 +9636,7 @@ function OneSessionsShell() {
               onSetAutoSelect={setOneOrgAutoSelect}
               onConnectTool={() => { setSettingsSheet("mcp"); }}
               onBrowseTools={() => { setSettingsSheet("plugins"); }}
-              onBrowseSource={(source) => router.push(source === "cloud" ? "/library/agents?tab=cloud" : "/marketplace")}
+              onBrowseMoreAgents={() => router.push("/marketplace")}
               conversationResults={oneOrgConversationResults}
               historyResults={oneOrgHistoryResults}
               onOpenConversation={openConversation}
