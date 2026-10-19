@@ -187,6 +187,19 @@ export function readAgentContext(capability: AgentContextCapability): AgentConte
 export function readPendingAgentContext(capability:AgentContextCapability):AgentContextPendingDelivery|null {
   return store.readPendingDelivery(current(capability).identity);
 }
+/**
+ * One run event when a one-to-one seat conversation was given its seat's journal (session-scope.ts): the context refs of the
+ * journal it continues and of the others that stay, never a conversation id. Evidence, not a control.
+ */
+export function recordAgentContextScopeAdoption(turnId: string, identity: AgentContextIdentity,
+  assignment: { outcome: "adopted" | "fresh"; scopeKind: string; retainedDomains: readonly string[] }): void {
+  const ref = (domain: string): string => contextRef(agentContextKey({ ...identity, visibilityDomain: domain }));
+  recordAgentContextRunEvent(turnId, identity.agentId, AGENT_CONTEXT_ADOPTION_EVENT_KIND, {
+    schemaVersion: "agentlas.agent-context-adoption.v1", contextRef: contextRef(agentContextKey(identity)),
+    outcome: assignment.outcome === "adopted" ? "scope_adopted" : "scope_fresh", scopeKind: assignment.scopeKind,
+    retainedRefs: assignment.retainedDomains.slice(0, 32).map(ref), retainedCount: assignment.retainedDomains.length,
+  }, `agent-context-scope:${contextRef(agentContextKey(identity))}:${assignment.outcome}`);
+}
 export function agentContextSessionKey(capability: AgentContextCapability): string {
   return agentContextKey(current(capability).identity);
 }

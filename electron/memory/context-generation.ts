@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { getDb } from "../store/db";
 import { findCanonicalTaskForChat } from "../store/tasks";
 import { agentContextKey } from "../store/agent-context";
+import { resolveSessionScope } from "../runtime/session-scope";
 import { currentModelCallScope } from "../runtime/model-call-ledger";
 import { getMemoryStoreInfo } from "./database";
 import { currentMemorySourceCustody, memorySourceSnapshot } from "./source-custody";
@@ -38,11 +39,13 @@ export function captureMemoryContextGeneration(input: {
     const chat = db.prepare("SELECT kind,parent_chat_id,archived_at,origin_surface,project_id FROM chats WHERE id=?").get(chatId) as
       { kind: string | null; parent_chat_id: string | null; archived_at: string | null; origin_surface: string | null; project_id: string | null } | undefined;
     if (!chat || chat.archived_at) return { generation: null, reason: "host-chat-boundary-unavailable" };
-    const domain = input.visibilityDomain ?? (chat.kind === "division" && chat.parent_chat_id
-      ? `one-team:${chat.parent_chat_id}:session:${chatId}` : `chat:${chatId}`);
     // Same native journal owner derivation as actual invocation admission. It
     // is resolved locally, never copied from model/renderer JSON.
     const owner = (require("../runtime/agent-context-admission") as typeof import("../runtime/agent-context-admission")).agentContextOwnerBinding();
+    // The same domain as invocation admission, from the same resolver (runtime/session-scope.ts): the recall pack is bound to
+    // the journal identity, so a pack made for another domain than the session's would be refused at the wire. Read only.
+    const domain = input.visibilityDomain ?? resolveSessionScope(db, { chatId, agentId: input.agentId, kind: chat.kind, parentChatId: chat.parent_chat_id, aliveController: false,
+        ownerScope: owner.ownerScope, persist: false }).visibilityDomain;
     const identity = { ...owner, agentId: input.agentId, visibilityDomain: domain };
     const contextKey = agentContextKey(identity);
     const head = db.prepare("SELECT 1 FROM agent_context_heads WHERE context_key=?").get(contextKey);

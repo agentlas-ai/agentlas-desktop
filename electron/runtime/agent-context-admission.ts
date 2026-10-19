@@ -9,8 +9,9 @@ import { createDaemonAgentContextHost } from "../daemon/agent-context-host";
 import { getDb } from "../store/db";
 import { invocationProcessOwner, invocationRunOwners, assertInvocationRunOwner } from "../store/invocation-run-owners";
 import { createAgentContextCapability, agentContextHostBinding, bootstrapAgentContextHistory, markAgentContextHostAuthored, copyAgentContextHostAuthored,
-  reconcileInterruptedAgentContext, nextAgentContextTurnOrdinal, type AgentContextCapability } from "./agent-context";
+  reconcileInterruptedAgentContext, nextAgentContextTurnOrdinal, recordAgentContextScopeAdoption, type AgentContextCapability } from "./agent-context";
 import { markRefusedBeforeDispatch, type Runner, type RunnerRequest } from "./runner";
+import { resolveSessionScope } from "./session-scope";
 
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 function fail(code: string): never { throw Object.assign(new Error(code), { code }); }
@@ -32,31 +33,42 @@ export function bindInvocationAgentContext(request: RunnerRequest, input: {
   if (!Number.isSafeInteger(input.attempt) || input.attempt < 1) fail("agent_context_attempt_identity_required");
   const owner = invocationRunOwners.getRunOwner(input.chatId, input.runId), processOwner = invocationProcessOwner();
   if (!owner || owner.ownerId !== processOwner.ownerId || owner.ownerKind !== processOwner.ownerKind) fail("agent_context_original_invocation_owner_required");
-  const row = getDb().prepare("SELECT agent_id,kind,parent_chat_id,archived_at,origin_surface AS origin FROM chats WHERE id=?").get(input.chatId) as
-    { agent_id: string; kind: string | null; parent_chat_id: string | null; archived_at:string|null; origin:string|null } | undefined;
+  const row = getDb().prepare("SELECT agent_id,kind,parent_chat_id,archived_at,origin_surface AS origin,seat_id,seat_kind FROM chats WHERE id=?").get(input.chatId) as
+    { agent_id: string; kind: string | null; parent_chat_id: string | null; archived_at:string|null; origin:string|null; seat_id: string | null; seat_kind: string | null } | undefined;
   if (!row || row.agent_id !== input.agentId || row.archived_at) fail("agent_context_original_agent_required");
   const identity = agentContextOwnerBinding();
-  const visibilityDomain = input.aliveController ? `alive-controller:${input.chatId}`
-    : row.kind === "division" && row.parent_chat_id ? `one-team:${row.parent_chat_id}:session:${input.chatId}` : `chat:${input.chatId}`;
+  // Which journal this conversation's turns belong to (session-scope.ts): its own, as before, except a one-to-one seat
+  // conversation, which continues its seat's journal of this agent. Any failure there returns the old formula.
+  const scope = resolveSessionScope(getDb(), { chatId: input.chatId, agentId: input.agentId, kind: row.kind, parentChatId: row.parent_chat_id,
+    aliveController: input.aliveController, ownerScope: identity.ownerScope, persist: true });
+  const visibilityDomain = scope.visibilityDomain;
   const assertCurrent = () => {
     request.signal?.throwIfAborted(); input.assertCurrent(); assertInvocationRunOwner(owner);
     const latest = agentContextOwnerBinding();
     if (latest.ownerScope !== identity.ownerScope || latest.serviceIdentity !== identity.serviceIdentity) fail("agent_context_owner_binding_changed");
-    const current = getDb().prepare("SELECT agent_id,kind,parent_chat_id,archived_at,origin_surface AS origin FROM chats WHERE id=?").get(input.chatId) as typeof row;
+    const current = getDb().prepare("SELECT agent_id,kind,parent_chat_id,archived_at,origin_surface AS origin,seat_id,seat_kind FROM chats WHERE id=?").get(input.chatId) as typeof row;
     if (!current || current.agent_id !== row.agent_id || current.kind !== row.kind || current.parent_chat_id !== row.parent_chat_id || current.origin !== row.origin || current.archived_at) fail("agent_context_visibility_changed");
+    // The seat is part of a seat scope's identity; for every other conversation it is not looked at (as before).
+    if (scope.seat && (current.seat_id !== scope.seat.seatId || current.seat_kind !== scope.seat.seatKind)) fail("agent_context_visibility_changed");
   };
   const contextIdentity = { ...identity, agentId: input.agentId, visibilityDomain };
   // One run may invoke this chat's agent more than once (graph agent steps on their automation chat): each invocation's
   // attempt counter restarts at 1, so the turn ordinal continues after every turn of this run the journal already holds.
   const ordinal = nextAgentContextTurnOrdinal(contextIdentity, input.chatId, input.runId, input.attempt);
-  const capability = createAgentContextCapability(contextIdentity,
-    { turnId: `agent-context-turn:${JSON.stringify([input.chatId, input.runId, ordinal])}`, assertCurrent });
+  const turnId = `agent-context-turn:${JSON.stringify([input.chatId, input.runId, ordinal])}`;
+  const capability = createAgentContextCapability(contextIdentity, { turnId, assertCurrent });
+  if (scope.shared) sharedSessionCapabilities.add(capability);
+  if (scope.assignment?.created && scope.assignment.outcome !== "existing") recordAgentContextScopeAdoption(turnId, contextIdentity,
+    { outcome: scope.assignment.outcome, scopeKind: scope.kind, retainedDomains: scope.assignment.retainedDomains });
   // Initial migration belongs to this exact authorized chat only. The journal
   // becomes authoritative afterwards; chat projections are not imported again.
   bootstrapAgentContextHistory(capability, request.history);
   markAgentContextHostAuthored(capability, input.hostAuthored);
   return carryRunnerTurnContext(request, { ...request, agentContext: capability });
 }
+/** Capabilities whose journal is shared by several conversations (a seat scope): their turns run one after the other. */
+const sharedSessionCapabilities = new WeakSet<object>();
+export function isSharedSessionCapability(value: unknown): boolean { return !!value && typeof value === "object" && sharedSessionCapabilities.has(value); }
 function assertPreviousTurnTerminal(turnId: string): void {
   if (!turnId.startsWith("agent-context-turn:")) fail("agent_context_prior_turn_unsettled");
   let source: unknown;
