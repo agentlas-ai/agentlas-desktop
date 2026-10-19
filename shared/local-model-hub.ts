@@ -1,5 +1,14 @@
 export const LOCAL_MODEL_HUB_SCHEMA_VERSION = 1 as const;
 
+/**
+ * The context window range the host serves from its own llama-server. The smallest is what an engine can be asked for; the largest is
+ * the bound every consumer agrees on: the load request, the IPC check, the fit estimate and the per-turn exact measurement
+ * (measureLocalContext) all read these two numbers. An engine that reports more than the largest (auto mode on a model trained at
+ * 262144) is started again with the largest instead of being left resident for turns that cannot be measured.
+ */
+export const LOCAL_MODEL_MIN_CONTEXT_TOKENS = 512;
+export const LOCAL_MODEL_MAX_CONTEXT_TOKENS = 131_072;
+
 export type LocalModelPlatform = "darwin" | "win32" | "linux";
 export type LocalModelArch = "arm64" | "x64";
 export type LocalModelAccelerator = "metal" | "cpu" | "cuda" | "rocm" | "vulkan" | "openvino";
@@ -337,7 +346,7 @@ export interface LocalModelHubAPI {
   importModel: (payload: { packageId: string }) => Promise<LocalModelInstallationReceipt | null>;
   installEngine: (payload: { packageId: string }) => Promise<LocalEngineInstallationReceipt>;
   installDownloadedModel: (payload: { packageId: string }) => Promise<LocalModelInstallationReceipt>;
-  /** contextTokens 0 = auto (the engine uses the model's trained context, shrunk to fit device memory); the receipt reports the actual value. */
+  /** contextTokens 0 = auto (the engine uses the model's trained context, shrunk to fit device memory, and never above LOCAL_MODEL_MAX_CONTEXT_TOKENS); the receipt reports the actual value. */
   loadModel: (payload: { installationId: string; contextTokens: number; operationId: string }) => Promise<LocalModelLoadReceipt>;
   unload: (payload: { processEpoch: string; cancelActiveRuns: boolean }) => Promise<void>;
   testCapabilities: (payload: {

@@ -17,7 +17,7 @@ import type {
   LocalPackageDownloadReceipt,
   LocalPackageProgress,
 } from "../../shared/local-model-hub";
-import { assertLocalModelPackageIdentity, localModelProjectorIdentity, LOCAL_MODEL_HUB_SCHEMA_VERSION } from "../../shared/local-model-hub";
+import { assertLocalModelPackageIdentity, localModelProjectorIdentity, LOCAL_MODEL_HUB_SCHEMA_VERSION, LOCAL_MODEL_MAX_CONTEXT_TOKENS, LOCAL_MODEL_MIN_CONTEXT_TOKENS } from "../../shared/local-model-hub";
 import {
   compatibleEnginePackage,
   localEngineCatalog,
@@ -810,8 +810,9 @@ export class LocalModelHubManager {
   ): Promise<LocalModelLoadReceipt> {
     await this.readyForMutation();
     // 0 = 자동: 엔진이 모델의 학습 문맥(n_ctx_train)을 쓰되 장치 메모리에 맞춰 줄인다(--fit on 기본).
+    // 호스트가 다루는 한도(LOCAL_MODEL_MAX_CONTEXT_TOKENS)보다 크게 잡히면 아래에서 그 한도로 한 번 더 시작한다.
 
-    if (!Number.isSafeInteger(contextTokens) || (contextTokens !== 0 && (contextTokens < 512 || contextTokens > 131_072))) {
+    if (!Number.isSafeInteger(contextTokens) || (contextTokens !== 0 && (contextTokens < LOCAL_MODEL_MIN_CONTEXT_TOKENS || contextTokens > LOCAL_MODEL_MAX_CONTEXT_TOKENS))) {
       throw new Error("invalid_local_model_context_tokens");
     }
     const installation = this.state.modelInstallations.find((item) => item.installationId === installationId);
@@ -839,23 +840,30 @@ export class LocalModelHubManager {
     if (this.activeInference.size > 0) throw hubError("local_model_runs_active");
     await this.terminateResidentProcess();
     const startedAt = new Date().toISOString();
-    const processEpoch = randomUUID();
-    const port = await freeLoopbackPort();
-    const endpoint = `http://127.0.0.1:${port}`;
-    const authToken = randomBytes(32).toString("base64url");
-    const receiptBase = {
-      schemaVersion: LOCAL_MODEL_HUB_SCHEMA_VERSION,
-      receiptId: randomUUID(),
-      processEpoch,
-      installationId,
-      enginePackageId: compatible.item.packageId,
-      engineExecutableSha256: engineReceipt.executableSha256,
-      endpoint,
-      contextTokens,
-      startedAt,
-    } as const;
-    let reasonCode: string | null = null;
-    try {
+    const enginePackageId = compatible.item.packageId;
+    // Every engine start has its own port, token and process epoch, so a start that is replaced below leaves nothing behind that the
+    // next one could be confused with. The receipt's contextTokens is the REQUEST (0 = auto), see recoverAfterEngineExit.
+    const newAttempt = async () => {
+      const processEpoch = randomUUID();
+      const port = await freeLoopbackPort();
+      const endpoint = `http://127.0.0.1:${port}`;
+      const authToken = randomBytes(32).toString("base64url");
+      const receiptBase = {
+        schemaVersion: LOCAL_MODEL_HUB_SCHEMA_VERSION,
+        receiptId: randomUUID(),
+        processEpoch,
+        installationId,
+        enginePackageId,
+        engineExecutableSha256: engineReceipt.executableSha256,
+        endpoint,
+        contextTokens,
+        startedAt,
+      } as const;
+      return { processEpoch, port, endpoint, authToken, receiptBase };
+    };
+    /** Starts llama-server once with `engineContext` as --ctx-size and returns it healthy, with the n_ctx it reports. */
+    const launchEngine = async (attempt: Awaited<ReturnType<typeof newAttempt>>, engineContext: number) => {
+      const { processEpoch, port, endpoint, authToken } = attempt;
       if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
       if (generation !== this.loadGeneration) throw new Error("model_load_obsolete");
       // Machine-readable log at trace level: this is where llama.cpp prints which
@@ -867,7 +875,7 @@ export class LocalModelHubManager {
         ...(projectorPath ? ["--mmproj", projectorPath] : []),
         "--host", "127.0.0.1",
         "--port", String(port),
-        "--ctx-size", String(contextTokens),
+        "--ctx-size", String(engineContext),
         "--parallel", "1",
         // KV prefix reuse across turns even when a small edit shifts the tail (llama-server default is off).
         "--cache-reuse", "256",
@@ -927,10 +935,32 @@ export class LocalModelHubManager {
       // The receipt carries the context the server actually allocated (auto mode asks the engine).
       const properties = await this.fetchImpl(`${endpoint}/props`, { headers: { authorization: `Bearer ${authToken}` }, signal }).then(response => response.ok ? response.json() : null).catch(() => null) as { default_generation_settings?: { n_ctx?: unknown } } | null;
       const actualContext = properties?.default_generation_settings?.n_ctx;
-      if (!Number.isSafeInteger(actualContext) || (actualContext as number) < 512) throw new Error("engine_context_unreadable");
+      if (!Number.isSafeInteger(actualContext) || (actualContext as number) < LOCAL_MODEL_MIN_CONTEXT_TOKENS) throw new Error("engine_context_unreadable");
+      return { child, engineLog, actualContext: actualContext as number };
+    };
+    let attempt = await newAttempt();
+    let receiptBase = attempt.receiptBase;
+    let reasonCode: string | null = null;
+    try {
+      let started = await launchEngine(attempt, contextTokens);
+      if (started.actualContext > LOCAL_MODEL_MAX_CONTEXT_TOKENS) {
+        // Auto mode (0) lets llama-server use the model's trained context, shrunk only as far as device memory forces it. A model trained
+        // at 262144 on a machine with room for it comes back above what this host serves: measureLocalContext refuses a window over the
+        // bound, so every turn on that engine would fail, and the cache would be a RAM bill nobody asked for. An explicit --ctx-size is
+        // not shrunk to fit memory, so the host does not guess a number from the model file: it keeps what auto proved fits (anything
+        // up to this size fits in the memory the larger allocation just used) and starts the engine once more at the bound.
+        if (contextTokens !== 0) throw new Error("engine_context_above_host_limit");
+        console.warn(`[local-model-hub] the engine allocated an automatic context of ${started.actualContext} tokens, above the ${LOCAL_MODEL_MAX_CONTEXT_TOKENS} this app serves; starting it again with ${LOCAL_MODEL_MAX_CONTEXT_TOKENS}`);
+        await this.terminateResidentProcess();
+        attempt = await newAttempt();
+        receiptBase = attempt.receiptBase;
+        started = await launchEngine(attempt, LOCAL_MODEL_MAX_CONTEXT_TOKENS);
+        if (started.actualContext > LOCAL_MODEL_MAX_CONTEXT_TOKENS) throw new Error("engine_context_above_host_limit");
+      }
+      const { child, engineLog, actualContext } = started;
       const receipt: LocalModelLoadReceipt = {
         ...receiptBase,
-        contextTokens: actualContext as number,
+        contextTokens: actualContext,
         state: "resident",
         finishedAt: new Date().toISOString(),
         reasonCode: null,

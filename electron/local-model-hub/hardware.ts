@@ -8,7 +8,7 @@ import type {
   LocalModelFitAssessment,
   LocalModelPackageIdentity,
 } from "../../shared/local-model-hub";
-import { LOCAL_MODEL_HUB_SCHEMA_VERSION } from "../../shared/local-model-hub";
+import { LOCAL_MODEL_HUB_SCHEMA_VERSION, LOCAL_MODEL_MAX_CONTEXT_TOKENS, LOCAL_MODEL_MIN_CONTEXT_TOKENS } from "../../shared/local-model-hub";
 
 function digest(parts: readonly (string | number)[]): string {
   return createHash("sha256").update(parts.join("\0")).digest("hex");
@@ -90,7 +90,7 @@ export function estimateLocalModelFit(
   model: LocalModelPackageIdentity,
   contextTokens = 8_192,
 ): LocalModelFitAssessment {
-  if (!Number.isSafeInteger(contextTokens) || contextTokens < 512 || contextTokens > 131_072) {
+  if (!Number.isSafeInteger(contextTokens) || contextTokens < LOCAL_MODEL_MIN_CONTEXT_TOKENS || contextTokens > LOCAL_MODEL_MAX_CONTEXT_TOKENS) {
     throw new TypeError("invalid_local_model_context_tokens");
   }
   const runtimeReserve = Math.max(1_073_741_824, Math.ceil(hardware.totalMemoryBytes * 0.15));

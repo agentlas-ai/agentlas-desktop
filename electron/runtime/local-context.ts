@@ -1,3 +1,4 @@
+import { LOCAL_MODEL_MAX_CONTEXT_TOKENS, LOCAL_MODEL_MIN_CONTEXT_TOKENS } from "../../shared/local-model-hub";
 import type { RunnerFailure } from "./runner";
 
 export type LocalContextCode = "local_context_limit_exceeded" | "local_context_measurement_unavailable" | "local_output_limit_exceeded";
@@ -34,7 +35,7 @@ export function localHttpFailureClass(text: string, status?: number): "context" 
 export async function measureLocalContext(input: {
   host: string; headers?: Record<string,string>; signal?: AbortSignal; contextWindow: number; body: Record<string,unknown>;
 }): Promise<{ inputTokens: number; reserveTokens: number; maxOutputTokens: number; fits: boolean }> {
-  if (!Number.isSafeInteger(input.contextWindow) || input.contextWindow < 512 || input.contextWindow > 131072) throw new Error("local_context_measurement_unavailable");
+  if (!Number.isSafeInteger(input.contextWindow) || input.contextWindow < LOCAL_MODEL_MIN_CONTEXT_TOKENS || input.contextWindow > LOCAL_MODEL_MAX_CONTEXT_TOKENS) throw new Error("local_context_measurement_unavailable");
   const signal = input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000);
   const post = async (route: string, body: unknown): Promise<any> => {
     const response = await fetch(`${input.host}${route}`, {method:"POST",headers:{"content-type":"application/json",...input.headers},body:JSON.stringify(body),signal});

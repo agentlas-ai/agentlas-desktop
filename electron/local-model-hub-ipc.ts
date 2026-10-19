@@ -1,5 +1,5 @@
 import type { BrowserWindow, IpcMain, IpcMainInvokeEvent } from "electron";
-import { validLocalPackageId } from "../shared/local-model-hub";
+import { LOCAL_MODEL_MAX_CONTEXT_TOKENS, LOCAL_MODEL_MIN_CONTEXT_TOKENS, validLocalPackageId } from "../shared/local-model-hub";
 import type { LocalModelOperationView } from "../shared/local-model-hub";
 import type { LocalModelHubControlPort } from "./local-model-hub/ports";
 
@@ -170,7 +170,7 @@ export function registerLocalModelHubIpc(deps: {
   handle("loadModel", (event, input) => {
     const id = identifier(input.installationId, "installation_id");
     const context = input.contextTokens;
-    if (typeof context !== "number" || !Number.isSafeInteger(context) || (context !== 0 && (context < 512 || context > 131072))) {
+    if (typeof context !== "number" || !Number.isSafeInteger(context) || (context !== 0 && (context < LOCAL_MODEL_MIN_CONTEXT_TOKENS || context > LOCAL_MODEL_MAX_CONTEXT_TOKENS))) {
       throw new TypeError("invalid_local_model_context_tokens");
     }
     return operate(event, input, ["loadModel", id, context], (signal) => deps.manager.loadModel(id, context, signal));
