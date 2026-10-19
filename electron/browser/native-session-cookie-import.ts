@@ -18,8 +18,8 @@ import {
 import { NATIVE_BROWSER_PARTITION } from "../work-live-view";
 import { browserCredentialConsentRevision } from "./credential-sync";
 import { googleSessionTraceRecord, withAgentlasCookieWrite } from "./google-session-trace";
-import { decideNativeCookieWrite, persistentCookieExpiry, planSessionGroupFeed } from "./cookie-merge";
-import { sessionCookieGroupOf, sessionCookieNamesFor } from "./login-wall";
+import { decideNativeCookieWrite, groupFreshnessLogCounts, persistentCookieExpiry, planSessionGroupFeed } from "./cookie-merge";
+import { sessionCookieGroupOf, sessionCookieIdentityNamesFor, sessionCookieNamesFor } from "./login-wall";
 import { listBrowserSites } from "../store/browser-vault";
 import { getMeta, setMeta } from "../store/meta";
 import { getDb } from "../store/db";
@@ -396,24 +396,35 @@ export async function writeNativeBrowserCookies(
    * Freshness: a cookie, or a whole login group, the source expires later than the partition's copy is
    * refreshed; never one the partition holds fresher. The partition used to keep every cookie it already
    * had, so the everyday browser's rotated login never reached it (cookie-merge.ts isSourceCookieFresher,
-   * the same rule the dedicated-browser CDP feed and the SQL store use).
+   * the same rule the dedicated-browser CDP feed and the SQL store use). A complete group is refreshed only when
+   * it is the SAME login (the fixed sign-in cookies hold equal values, cookie-merge.ts compareSessionGroupIdentity):
+   * a later expiry alone would let the everyday browser's account replace one the owner signed into here.
+   * A partition that cannot be read is unknown, not empty: nothing is written (destinationUnreadable below).
    */
   let groupFeed: Set<CdpCookie> | null = null;
+  let destinationUnreadable = false;
   if (connect && connect.explicitImport !== true) {
     const text = (value: unknown) => typeof value === "string" ? value : "";
-    const existing = (connect.groupExisting ?? await destination.cookies.get({}).catch(() => [])).map((item) => ({
-      domain: item.domain ?? "", name: item.name, path: item.path ?? "/",
+    let snapshot: readonly Cookie[] | null = connect.groupExisting ?? null;
+    if (!snapshot) {
+      try { snapshot = await destination.cookies.get({}); } catch { snapshot = null; }
+    }
+    if (!snapshot) destinationUnreadable = true;
+    const existing = (snapshot ?? []).map((item) => ({
+      domain: item.domain ?? "", name: item.name, path: item.path ?? "/", value: item.value,
       expires: item.session === true ? null : persistentCookieExpiry(item.expirationDate) }));
     const describe = (cookie: CdpCookie) => ({ cookie, domain: text(cookie.domain), name: text(cookie.name), path: text(cookie.path) || "/",
+      value: text(cookie.value),
       expires: cookie.session === true ? null : persistentCookieExpiry(Number(cookie.expires)) });
     const incoming = cookies.map(describe);
-    const plan = planSessionGroupFeed({
+    const plan = destinationUnreadable ? null : planSessionGroupFeed({
       explicitImport: false,
       incoming,
       freshnessContext: connect.groupContext ? connect.groupContext.map(describe) : undefined,
       existing,
       groupOf: sessionCookieGroupOf,
       sessionNamesFor: sessionCookieNamesFor,
+      identityNamesFor: sessionCookieIdentityNamesFor,
       perCookie: (row) => {
         const host = (value: string) => value.replace(/^\./u, "").toLowerCase();
         const matches = existing.filter((item) => host(item.domain) === host(row.domain) && item.name === row.name && item.path === row.path);
@@ -427,19 +438,22 @@ export async function writeNativeBrowserCookies(
         }) === "write" ? "feed" : "keep";
       },
     });
-    groupFeed = new Set(plan.feed.map((row) => row.cookie));
-    if (plan.refreshedGroups.length > 0 || plan.conflictGroups.length > 0) {
+    if (plan) {
+      groupFeed = new Set(plan.feed.map((row) => row.cookie));
+      const logCounts = groupFreshnessLogCounts(plan);
       // Counts only: no domains, cookie names, or values reach the main log.
-      console.info("[browser-native-session] login group freshness", JSON.stringify({
-        refreshedGroups: plan.refreshedGroups.length,
-        conflictKeptGroups: plan.conflictGroups.length,
-      }));
+      if (logCounts) console.info("[browser-native-session] login group freshness", JSON.stringify(logCounts));
     }
   }
   for (const cookie of cookies) {
     const converted = nativeCookieDetails(cookie, nowSeconds);
     if (converted.kind === "skip") {
       counts.skipped[converted.reason] += 1;
+      continue;
+    }
+    if (destinationUnreadable) {
+      // Unknown is not empty: without the partition's own cookies no verdict is possible, so this one is not written.
+      counts.skipped.writeFailed += 1;
       continue;
     }
     let replacing = false;
@@ -477,6 +491,8 @@ export async function writeNativeBrowserCookies(
     }
   }
   if (connect && !(await connect.isCurrent())) throw new CookieImportError("authorization-required", counts);
+  // Count only: how many cookies were left unwritten because the partition could not be read.
+  if (destinationUnreadable) console.info("[browser-native-session] partition cookies unreadable, nothing written", JSON.stringify({ skippedCookies: counts.skipped.writeFailed }));
   if (counts.imported > 0) {
     try { await destination.flushStorageData(); }
     catch { counts.skipped.writeFailed += 1; }

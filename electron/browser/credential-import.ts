@@ -51,14 +51,15 @@ import {
 } from "../mcp-tools/browser-cdp-launcher";
 import { resolveAgentlasBrowserRuntime } from "./runtime";
 import {
-  cookieFreshness,
   cookieIdentityColumns,
+  cookieStoreExpiry,
   decideCookieWrite,
   decideRuntimeCookieFeed,
+  groupFreshnessLogCounts,
   planSessionGroupFeed,
   resolveCookieStoreLayout,
 } from "./cookie-merge";
-import { sessionCookieGroupOf, sessionCookieNamesFor } from "./login-wall";
+import { sessionCookieGroupOf, sessionCookieIdentityNamesFor, sessionCookieNamesFor } from "./login-wall";
 import { currentUiLocale } from "../ui-locale";
 import { reportSystemPermissionIssue } from "../os-permission-guidance";
 
@@ -963,19 +964,26 @@ async function importMacCookiesThroughDedicatedRuntime(
     for (const cookie of runtimeCookies) {
       runtimeExpires.set(`${cookie.domain}\u0000${cookie.name}\u0000${cookie.path}`, cookie.expires);
     }
-    // A login is fed or kept as one group, never mixed line by line (cookie-merge.ts planSessionGroupFeed).
-    const { feed } = planSessionGroupFeed({
+    // A login is fed or kept as one group, never mixed line by line (cookie-merge.ts planSessionGroupFeed). A complete
+    // group is refreshed only when it is the same login: the dedicated browser may hold another account the owner
+    // signed into there (cookie-merge.ts compareSessionGroupIdentity).
+    const plan = planSessionGroupFeed({
       explicitImport,
       incoming: cookies,
       existing: runtimeCookies,
       groupOf: sessionCookieGroupOf,
       sessionNamesFor: sessionCookieNamesFor,
+      identityNamesFor: sessionCookieIdentityNamesFor,
       perCookie: (cookie) => decideRuntimeCookieFeed({
         explicitImport,
         existingExpires: runtimeExpires.get(`${cookie.domain}\u0000${cookie.name}\u0000${cookie.path}`) ?? null,
         incomingExpires: cookie.expires,
       }),
     });
+    const logCounts = groupFreshnessLogCounts(plan);
+    // Counts only: no domain, cookie name or value reaches the log.
+    if (logCounts) console.info("[browser-credentials] login group freshness (dedicated browser)", JSON.stringify(logCounts));
+    const feed = plan.feed;
     if (feed.length > 0) await context.addCookies(feed);
     const observed = await context.cookies(jobs.map((job) => `https://${job.domain}/`));
     const acceptedDomains = new Set<string>();
@@ -1204,10 +1212,12 @@ export async function importBrowserCredentials(
     const identityOf = (row: Record<string, unknown>): Array<unknown> =>
       identityColumns.map((column) => (column === "path" ? String(row.path ?? "/") : row[column] ?? null));
     const existingStmt = dest.prepare(
-      `SELECT expires_utc AS expires_utc, last_update_utc AS last_update_utc, encrypted_value AS encryptedValue, value AS plainValue FROM cookies WHERE ${identityWhere} LIMIT 1`,
+      `SELECT expires_utc AS expires_utc, encrypted_value AS encryptedValue, value AS plainValue FROM cookies WHERE ${identityWhere} LIMIT 1`,
     );
     const deleteStmt = dest.prepare(`DELETE FROM cookies WHERE ${identityWhere}`);
-    const hasFreshnessColumns = destColumns.has("expires_utc") || destColumns.has("last_update_utc");
+    // The only freshness input is the expiry (cookie-merge.ts cookieStoreExpiry): without expires_utc on both sides
+    // nothing can be ordered and an existing row is kept.
+    const hasFreshnessColumns = shared.includes("expires_utc");
 
     let added = 0;
     let refreshed = 0;
@@ -1231,8 +1241,8 @@ export async function importBrowserCredentials(
             hasExisting: Boolean(already),
             destinationReadable,
             hasFreshnessColumns,
-            incomingFreshness: cookieFreshness(row),
-            existingFreshness: cookieFreshness(already),
+            incomingExpires: cookieStoreExpiry(row),
+            existingExpires: cookieStoreExpiry(already),
           });
           if (action === "keep") {
             preserved += 1;

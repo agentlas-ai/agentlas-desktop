@@ -31,44 +31,79 @@ export function cookieIdentityColumns(sharedColumns: readonly string[]): string[
   return COOKIE_IDENTITY_COLUMNS.filter((column) => sharedColumns.includes(column));
 }
 
-/** Chrome 은 만료·갱신 시각을 마이크로초 정수로 둔다. 있는 것 중 큰 값이 신선도다. */
-export function cookieFreshness(row: Record<string, unknown> | null | undefined): number {
-  if (!row) return 0;
-  const expires = Number(row.expires_utc ?? (row as { expiresUtc?: unknown }).expiresUtc ?? 0);
-  const updated = Number(row.last_update_utc ?? (row as { updatedUtc?: unknown }).updatedUtc ?? 0);
-  return Math.max(Number.isFinite(expires) ? expires : 0, Number.isFinite(updated) ? updated : 0);
+/** A persistent expiry (any unit). Session cookies (none, 0, negative) and unreadable values are null: nothing to compare. */
+export function persistentCookieExpiry(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
 }
 
 /**
+ * The expiry of a Chromium cookie-store row, in the store's own unit (Chrome-epoch microseconds); null for a session
+ * cookie. This is the ONLY freshness input the SQL store gives the comparison, exactly as the partition and the
+ * dedicated-browser feed give their `expirationDate` / `expires`. The old input was max(expires_utc, last_update_utc):
+ * a destination session cookie updated an hour ago (expires_utc 0, last_update_utc "now") then lost to a source
+ * persistent cookie that was set ten days ago, while the other two paths kept it. last_update_utc says when a row was
+ * written, not how long the login lives, so it no longer takes part.
+ */
+export function cookieStoreExpiry(row: Record<string, unknown> | null | undefined): number | null {
+  if (!row) return null;
+  return persistentCookieExpiry(Number(row.expires_utc ?? (row as { expiresUtc?: unknown }).expiresUtc));
+}
 
-
-
-
-
-
-
-
-
-
-
-
-
+/**
+ * May the source refresh the destination's copy of the same cookie? The cookie freshness comparison, written once.
+ *
+ * Cookies move along three paths (the Electron partition, the dedicated browser over CDP, the SQL store) and a
+ * comparison written per path drifts apart: the partition path once kept anything it held and so refreshed least,
+ * and the SQL path ordered by a different number than the other two. Every path asks this function, through
+ * decideCookieRefresh, with the cookie's expiry.
+ *
+ *  - True only when the source expires STRICTLY later. The same expiry or a fresher destination is false: the
+ *    destination may have rotated a live token since, and an older copy must not roll it back.
+ *  - A session cookie (no expiry), a missing value or a broken one on EITHER side cannot be ordered, so the answer is
+ *    false. Without this guard a persistent source "beat" a destination session cookie, because a missing expiry read
+ *    as 0.
+ *  - The unit is the caller's (seconds or microseconds); gap is in the same unit. It keeps the rounding of one move
+ *    (microsecond integer <-> float seconds) from reading as "fresher": COOKIE_EXPIRY_TOLERANCE_SECONDS, or
+ *    COOKIE_STORE_EXPIRY_TOLERANCE for the store's microseconds.
  */
 export function isSourceCookieFresher(
   incoming: number | null | undefined,
   existing: number | null | undefined,
   gap = 0,
 ): boolean {
-  const known = (value: number | null | undefined) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0);
-  return known(incoming) > known(existing) + gap;
+  const source = persistentCookieExpiry(incoming);
+  const destination = persistentCookieExpiry(existing);
+  if (source === null || destination === null) return false;
+  return source > destination + gap;
 }
 
-/** 초 단위로 읽은 만료 시각을 "다르다"고 보는 최소 차이. 같은 쿠키의 옮김 반올림을 갱신으로 읽지 않는다. */
+/** The smallest difference, read in seconds, that counts as "a different expiry". */
 export const COOKIE_EXPIRY_TOLERANCE_SECONDS = 1;
 
-/** 초 단위 만료 시각. 세션 쿠키(없음·0·음수)와 깨진 값은 null — 신선도를 비교할 수 없다. */
-export function persistentCookieExpiry(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+/** The same tolerance in the cookie store's microseconds, so the SQL path is judged by the same second as the others. */
+export const COOKIE_STORE_EXPIRY_TOLERANCE = COOKIE_EXPIRY_TOLERANCE_SECONDS * 1_000_000;
+
+export type CookieRefreshDecision = "add" | "refresh" | "keep";
+
+/**
+ * What to do with one cookie row, whichever path carries it. decideCookieWrite (SQL store), decideNativeCookieWrite
+ * (partition) and decideRuntimeCookieFeed (dedicated browser) only translate their own words and unit into this
+ * and back; none of them compares anything itself.
+ *   - nothing in the destination: add
+ *   - the user just pressed import: the source wins (refresh)
+ *   - otherwise refresh only when the source is strictly fresher (isSourceCookieFresher), else keep
+ */
+export function decideCookieRefresh(input: {
+  hasExisting: boolean;
+  explicitImport?: boolean;
+  incomingExpires: number | null | undefined;
+  existingExpires: number | null | undefined;
+  /** Tolerance in the unit of the two expiries. */
+  gap: number;
+}): CookieRefreshDecision {
+  if (!input.hasExisting) return "add";
+  if (input.explicitImport === true) return "refresh";
+  return isSourceCookieFresher(input.incomingExpires, input.existingExpires, input.gap) ? "refresh" : "keep";
 }
 
 /**
@@ -77,20 +112,29 @@ export function persistentCookieExpiry(value: unknown): number | null {
  *  - 목적지에 없으면 넣는다(insert) — 다른 사이트·다른 이름의 쿠키는 서로를 지우지 않는다.
  *  - 목적지 암호문을 전용 런타임이 못 읽으면 교체한다(replace) — 못 읽는 줄을 "이미 있음"으로
  *    남기면 화면은 "연결됨"인데 로그인은 안 되는 상태가 영원히 굳는다.
- *  - 신선도를 비교할 칸이 아예 없는 저장소 형식이면 건드리지 않는다(keep).
- *  - 원본이 더 새것일 때만 교체한다(replace). 로그인 쿠키는 회전하므로 갱신이 곧 이전이다.
+ *  - 신선도를 비교할 칸(expires_utc)이 아예 없는 저장소 형식이면 건드리지 않는다(keep).
+ *  - 원본이 만료를 **엄격히** 더 늦게 가질 때만 교체한다(replace). 로그인 쿠키는 회전하므로 갱신이 곧 이전이다.
+ *    비교는 decideCookieRefresh 한 곳이고(세 길이 같은 규칙), 입력은 cookieStoreExpiry — 세션 쿠키는 null 이라 비교하지 않는다.
+ * Expiries are the store's microseconds; the tolerance is the same one second the other two paths use.
  */
 export function decideCookieWrite(input: {
   hasExisting: boolean;
   destinationReadable: boolean;
   hasFreshnessColumns: boolean;
-  incomingFreshness: number;
-  existingFreshness: number;
+  /** cookieStoreExpiry of the source row (microseconds), null for a session cookie. */
+  incomingExpires: number | null;
+  /** cookieStoreExpiry of the destination row (microseconds), null for a session cookie. */
+  existingExpires: number | null;
 }): CookieWriteAction {
   if (!input.hasExisting) return "insert";
   if (!input.destinationReadable) return "replace";
   if (!input.hasFreshnessColumns) return "keep";
-  return isSourceCookieFresher(input.incomingFreshness, input.existingFreshness) ? "replace" : "keep";
+  return decideCookieRefresh({
+    hasExisting: true,
+    incomingExpires: input.incomingExpires,
+    existingExpires: input.existingExpires,
+    gap: COOKIE_STORE_EXPIRY_TOLERANCE,
+  }) === "refresh" ? "replace" : "keep";
 }
 
 export type CookieStoreLayout = "legacy" | "network";
@@ -130,7 +174,7 @@ export function resolveCookieStoreLayout(input: {
  * 자동 갱신은 이미 살아 있는 세션을 함부로 덮지 않는다(사용자가 그 창에서 직접 로그인했을 수 있다).
  * 그러나 **원본이 더 늦게 만료되는**(더 새로 발급된) 쿠키는 갱신한다 — 예전에는 "있으면 보존"만 봐서
  * 평소 크롬이 회전시킨 로그인 쿠키가 파티션에 영영 닿지 않았다. 신선도 비교는 전용 브라우저(CDP)·SQL 길과
- * 같은 isSourceCookieFresher 하나로 한다. 목적지가 같거나 더 새것이면 절대 덮지 않는다.
+ * 같은 decideCookieRefresh 하나로 한다. 목적지가 같거나 더 새것이면 절대 덮지 않는다.
  * 어느 한쪽이 세션 쿠키(만료 없음)면 신선도를 비교할 수 없으므로 보존한다.
  * **사용자가 방금 "가져오기"를 누른 경우**에는 가져온 값이 이겨야 한다 — 그러지 않으면
  * 낡은 쿠키가 남아 "가져왔는데 여전히 로그아웃"이 된다.
@@ -143,12 +187,13 @@ export function decideNativeCookieWrite(input: {
   /** 파티션에 이미 있는 같은 쿠키의 만료(초). 세션 쿠키·모르면 null/undefined — 비교하지 않는다. */
   existingExpires?: number | null;
 }): "write" | "preserve" {
-  if (!input.hasExisting) return "write";
-  if (input.explicitImport) return "write";
-  const incoming = persistentCookieExpiry(input.incomingExpires);
-  const existing = persistentCookieExpiry(input.existingExpires);
-  if (incoming === null || existing === null) return "preserve";
-  return isSourceCookieFresher(incoming, existing, COOKIE_EXPIRY_TOLERANCE_SECONDS) ? "write" : "preserve";
+  return decideCookieRefresh({
+    hasExisting: input.hasExisting,
+    explicitImport: input.explicitImport,
+    incomingExpires: input.incomingExpires,
+    existingExpires: input.existingExpires,
+    gap: COOKIE_EXPIRY_TOLERANCE_SECONDS,
+  }) === "keep" ? "preserve" : "write";
 }
 
 /**
@@ -169,40 +214,51 @@ export function decideRuntimeCookieFeed(input: {
   existingExpires: number | null;
   incomingExpires: number | undefined;
 }): "feed" | "keep" {
-  if (input.explicitImport) return "feed";
-  if (input.existingExpires === null) return "feed";
-  // An existing session/unknown expiry cannot be ordered against a persistent source.
-  const incoming = persistentCookieExpiry(input.incomingExpires);
-  const existing = persistentCookieExpiry(input.existingExpires);
-  if (incoming === null || existing === null) return "keep";
-  return isSourceCookieFresher(incoming, existing, COOKIE_EXPIRY_TOLERANCE_SECONDS) ? "feed" : "keep";
+  // existingExpires === null means the runtime holds no such cookie; a session cookie there arrives as -1.
+  return decideCookieRefresh({
+    hasExisting: input.existingExpires !== null,
+    explicitImport: input.explicitImport,
+    incomingExpires: input.incomingExpires,
+    existingExpires: input.existingExpires,
+    gap: COOKIE_EXPIRY_TOLERANCE_SECONDS,
+  }) === "keep" ? "keep" : "feed";
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * 한 번에 넣을 쿠키를 **로그인 묶음 단위로** 고른다(자동 갱신 전용 판정, 사용자가 누른 가져오기는
+ * 원본이 전부 이긴다).
+ *
+ * ★오너 신고 "왜 자꾸 로그아웃되냐" (09-27~) — 실측 2026-09-29(오너 기기, 이름·도메인·시각만):
+ *   전용 크롬의 .youtube.com 에는 __Secure-3PSID·3PAPISID·1PSIDTS·3PSIDTS·3PSIDCC 만 있고
+ *   SID·HSID·SSID·APISID·SAPISID·__Secure-1PSID·1PAPISID·LOGIN_INFO 가 **없었다**. 평소 크롬(원본)에는
+ *   전부 있다. 같은 저장소의 .google.com 은 __Secure-1PSID 가 21:27:30 발급, SID·HSID·PSIDTS 는
+ *   21:45:18 투입 — 한 로그인의 쿠키가 두 세대로 섞여 있다. 자동화가 선 로그인 벽 9건은 전부
+ *   youtube.com/signin → accounts.google.com accountchooser 였다(run_events 09-27~29).
+ *   원인은 쿠키 **한 줄씩** 내리던 판정(decideRuntimeCookieFeed·decideNativeCookieWrite): 목적지에
+ *   묶음 일부만 남아 있으면 "있는 줄은 지키고 없는 줄만 넣기" 가 되어 두 세션을 섞거나, 반쪽 묶음을
+ *   "살아 있는 세션"으로 여겨 영영 채우지 않는다. 섞인·반쪽 로그인은 사이트가 로그인으로 받지 않는다.
+ *
+ * 규칙(로그인 쿠키 이름을 아는 묶음만; 모르는 사이트는 perCookie 그대로):
+ *   - 원본에 그 묶음의 로그인 쿠키가 없으면 → 줄 단위 판정(옮길 로그인이 없다).
+ *   - 목적지가 원본이 가진 로그인 쿠키 이름을 **모두** 갖고 있으면 → 묶음 전체를 지킨다(아무것도
+ *     넣지 않는다). 목적지 쪽이 그 사이 회전한 살아 있는 세션일 수 있다 — 섞지 않는다.
+ *   - 하나라도 빠졌으면(반쪽·없음) → 원본의 그 묶음 쿠키를 **전부** 넣는다(한 세대로 맞춘다).
+ *   - 온전히 있어도 **원본이 더 새것이면** 묶음 전체를 갱신한다(compareSessionGroupFreshness): 묶음 안에서
+ *     양쪽에 모두 만료가 있는 같은 쿠키를 견줘, 원본이 더 늦게 만료하는 줄이 있고 목적지가 더 늦은 줄은
+ *     하나도 없을 때만이다. 일부 줄만 바꾸지 않고 묶음을 통째로 넣는 원칙은 그대로다(부분 교체는 두 세대를
+ *     섞는다). 목적지가 더 새것인 줄이 하나라도 있으면(원본 일부만 새것인 경합 포함) 지킨다 — 목적지가 그
+ *     사이 회전시킨 세션을 되돌리지 않는다. 세션 쿠키(만료 없음)는 비교하지 않는다.
+ *   - Refresh only the SAME login (compareSessionGroupIdentity). A later expiry means "issued more recently", not "the
+ *     same account": if the owner signed into account B directly in the partition while the everyday browser holds
+ *     account A, A's rotated cookies (PSIDTS ...) make A's group expire later everywhere and B's whole login would be
+ *     replaced by A's. So the group is refreshed only when the cookies whose value is fixed per sign-in
+ *     (login-wall.ts sessionCookieIdentityNamesFor: SID, __Secure-1PSID ..., never a rotating token) hold EQUAL values
+ *     in the source and the destination. A different value is another login, and no evidence (the site's fixed
+ *     cookies are unknown, or absent on one side) is unproven; both keep the destination.
+ *     Trade-off: a genuine re-login in the everyday browser changes those fixed values too and reads as "another
+ *     login", so the partition keeps its still-valid older login until the login-wall re-import (the targeted
+ *     re-import of that site's domains) fires.
+ * 묶음 = 로그인을 함께 발급하는 등록 가능 도메인들(youtube.com + google.com 은 한 묶음).
  */
 export interface SessionGroupCookie {
   domain: string;
@@ -210,6 +266,11 @@ export interface SessionGroupCookie {
   path: string;
   /** 만료(초). 세션 쿠키·모르면 없음(null/undefined/≤0) — 묶음 신선도 비교에서 빠진다. */
   expires?: number | null;
+  /**
+   * The value, read only to tell whether two copies are the same login (compareSessionGroupIdentity). It is compared in
+   * memory and never logged, returned or stored by this module. Absent/empty = no evidence.
+   */
+  value?: string | null;
 }
 
 export type SessionGroupFreshness = "source-fresher" | "destination-fresher" | "conflict" | "same-or-unknown";
@@ -247,6 +308,71 @@ export function compareSessionGroupFreshness(
   return sourceFresher > 0 ? "source-fresher" : "same-or-unknown";
 }
 
+export type SessionGroupIdentity = "same" | "different" | "unproven";
+
+/**
+ * Do the source and the destination hold the SAME sign-in of one login group? incoming and existing are the group's
+ * cookies on each side. Only the cookies whose value is fixed per sign-in count (identityNamesFor, login-wall.ts);
+ * a rotating token never takes part, because a rotated value is expected to differ.
+ *   - same: at least one such cookie sits on both sides (same host, name, path) and EVERY one that does holds the
+ *     same value. This is the evidence that the source is a later copy of the destination's own login.
+ *   - different: a fixed cookie held on both sides has another value. Another sign-in (another account, or a fresh
+ *     login), whatever the expiry says.
+ *   - unproven: no fixed cookie is held on both sides (unknown site, absent, or no value), so nothing says it is the
+ *     same login.
+ * Values are compared in memory only; nothing is returned, logged or stored.
+ */
+export function compareSessionGroupIdentity(
+  incoming: readonly SessionGroupCookie[],
+  existing: readonly SessionGroupCookie[],
+  identityNamesFor: (host: string) => readonly string[] | null,
+): SessionGroupIdentity {
+  const host = (value: string) => value.replace(/^\./u, "").toLowerCase();
+  const key = (cookie: SessionGroupCookie) => `${host(cookie.domain)}\u0000${cookie.name}\u0000${cookie.path}`;
+  // A host-only and a domain cookie of one name may both exist; a pair is the same only when the value sets are equal.
+  const valuesOf = (cookies: readonly SessionGroupCookie[]) => {
+    const byKey = new Map<string, Set<string>>();
+    for (const cookie of cookies) {
+      if (!identityNamesFor(host(cookie.domain))?.includes(cookie.name)) continue;
+      if (typeof cookie.value !== "string" || cookie.value === "") continue;
+      const values = byKey.get(key(cookie)) ?? new Set<string>();
+      values.add(cookie.value);
+      byKey.set(key(cookie), values);
+    }
+    return byKey;
+  };
+  const destination = valuesOf(existing);
+  let same = 0;
+  let different = 0;
+  for (const [cookieKey, sourceValues] of valuesOf(incoming)) {
+    const held = destination.get(cookieKey);
+    if (!held) continue;
+    if (held.size === sourceValues.size && [...sourceValues].every((value) => held.has(value))) same += 1;
+    else different += 1;
+  }
+  if (different > 0) return "different";
+  return same > 0 ? "same" : "unproven";
+}
+
+/**
+ * The counts of one plan's freshness verdicts for a log line, or null when the plan decided nothing worth a line.
+ * Counts only: a group, domain, cookie name or value never reaches a log through here.
+ */
+export function groupFreshnessLogCounts(plan: {
+  refreshedGroups: readonly string[];
+  conflictGroups: readonly string[];
+  otherLoginGroups: readonly string[];
+  unprovenLoginGroups: readonly string[];
+}): { refreshedGroups: number; conflictKeptGroups: number; otherLoginKeptGroups: number; unprovenLoginKeptGroups: number } | null {
+  const counts = {
+    refreshedGroups: plan.refreshedGroups.length,
+    conflictKeptGroups: plan.conflictGroups.length,
+    otherLoginKeptGroups: plan.otherLoginGroups.length,
+    unprovenLoginKeptGroups: plan.unprovenLoginGroups.length,
+  };
+  return Object.values(counts).some((count) => count > 0) ? counts : null;
+}
+
 export function planSessionGroupFeed<T extends SessionGroupCookie>(input: {
   explicitImport: boolean;
   incoming: readonly T[];
@@ -264,8 +390,22 @@ export function planSessionGroupFeed<T extends SessionGroupCookie>(input: {
    * 도메인 줄까지 함께 보고 한 번에 판정한다. 없으면 incoming 만 본다. 무엇을 넣을지는 여전히 incoming 만이다.
    */
   freshnessContext?: readonly SessionGroupCookie[];
-}): { feed: T[]; keptGroups: string[]; replacedGroups: string[]; refreshedGroups: string[]; conflictGroups: string[] } {
-  if (input.explicitImport) return { feed: [...input.incoming], keptGroups: [], replacedGroups: [], refreshedGroups: [], conflictGroups: [] };
+  /**
+   * Host -> the names of that site's cookies whose value is fixed per sign-in (login-wall.ts sessionCookieIdentityNamesFor),
+   * null when unknown. A complete group is refreshed only when these hold the same values on both sides. Left out, no
+   * site has any, so no complete group is ever refreshed: leaving it out can only suppress a refresh, never swap a login.
+   */
+  identityNamesFor?: (host: string) => readonly string[] | null;
+}): {
+  feed: T[]; keptGroups: string[]; replacedGroups: string[]; refreshedGroups: string[]; conflictGroups: string[];
+  /** Groups whose refresh was refused because the fixed sign-in cookies hold other values (another login). */
+  otherLoginGroups: string[];
+  /** Groups whose refresh was refused because nothing evidences the same login. */
+  unprovenLoginGroups: string[];
+} {
+  if (input.explicitImport) {
+    return { feed: [...input.incoming], keptGroups: [], replacedGroups: [], refreshedGroups: [], conflictGroups: [], otherLoginGroups: [], unprovenLoginGroups: [] };
+  }
   const host = (value: string) => value.replace(/^\./u, "").toLowerCase();
   const loginNames = (cookies: readonly SessionGroupCookie[], group: string) => {
     const names = new Set<string>();
@@ -281,6 +421,9 @@ export function planSessionGroupFeed<T extends SessionGroupCookie>(input: {
   const inGroup = (cookies: readonly SessionGroupCookie[], group: string) => cookies.filter((cookie) => input.groupOf(host(cookie.domain))?.group === group);
   const decision = new Map<string, "keep-group" | "replace-group" | "refresh-group" | "per-cookie">();
   const conflicts = new Set<string>();
+  const otherLogin = new Set<string>();
+  const unprovenLogin = new Set<string>();
+  const identityNamesFor = input.identityNamesFor ?? (() => null);
   for (const cookie of input.incoming) {
     const group = input.groupOf(host(cookie.domain))?.group;
     if (!group || decision.has(group)) continue;
@@ -288,10 +431,17 @@ export function planSessionGroupFeed<T extends SessionGroupCookie>(input: {
     if (source.size === 0) { decision.set(group, "per-cookie"); continue; }
     const destination = loginNames(input.existing, group);
     if (![...source].every((name) => destination.has(name))) { decision.set(group, "replace-group"); continue; }
-    // 온전한 묶음도 원본이 더 새것이면 통째로 갱신한다. 목적지가 더 새것인 줄이 있으면 지킨다.
-    const freshness = compareSessionGroupFreshness(inGroup(input.freshnessContext ?? input.incoming, group), inGroup(input.existing, group));
+    // A complete group is refreshed whole when the source is fresher AND is the same login; the destination is
+    // kept when it is fresher on any row or when the source may be another sign-in.
+    const scope = inGroup(input.freshnessContext ?? input.incoming, group);
+    const held = inGroup(input.existing, group);
+    const freshness = compareSessionGroupFreshness(scope, held);
     if (freshness === "conflict") conflicts.add(group);
-    decision.set(group, freshness === "source-fresher" ? "refresh-group" : "keep-group");
+    if (freshness !== "source-fresher") { decision.set(group, "keep-group"); continue; }
+    const identity = compareSessionGroupIdentity(scope, held, identityNamesFor);
+    if (identity === "same") { decision.set(group, "refresh-group"); continue; }
+    (identity === "different" ? otherLogin : unprovenLogin).add(group);
+    decision.set(group, "keep-group");
   }
   const feed: T[] = [];
   for (const cookie of input.incoming) {
@@ -308,5 +458,7 @@ export function planSessionGroupFeed<T extends SessionGroupCookie>(input: {
     replacedGroups: groups("replace-group"),
     refreshedGroups: groups("refresh-group"),
     conflictGroups: [...conflicts].sort(),
+    otherLoginGroups: [...otherLogin].sort(),
+    unprovenLoginGroups: [...unprovenLogin].sort(),
   };
 }

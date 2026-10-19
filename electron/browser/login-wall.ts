@@ -131,6 +131,36 @@ export function sessionCookieNamesFor(domain: string): readonly string[] | null 
   return SESSION_COOKIE_NAMES[registrableDomain(domain)] ?? null;
 }
 
+/**
+ * Which cookies say WHOSE sign-in a login is: their value is set when the account signs in, differs for every
+ * sign-in, and is not re-issued with a new value while that sign-in lasts. cookie-merge.ts compares these between a
+ * source and a destination to tell "the same login, rotated" from "another account" (planSessionGroupFeed). Names
+ * only, like the table above, and a subset of it: the short-lived rotation cookies (PSIDTS, PSIDCC ...) are left
+ * out on purpose because their value is supposed to change.
+ *
+ * Conservative by construction. A site that is not listed, or a name that is listed but that the provider does
+ * re-issue, only makes the comparison say "different" or "unproven", and the destination's login is then kept
+ * (the login-wall re-import recovers it); a wrong entry cannot make two different accounts look the same, because
+ * two accounts never share the value of a per-sign-in secret. Add a site only for a cookie that holds the
+ * account's own sign-in secret or id. Google/YouTube follow the sign-in vs rotation split google-session-trace.ts
+ * already records; the others are taken from how the providers use the cookie and have not been measured here.
+ */
+const SESSION_IDENTITY_COOKIE_NAMES: Record<string, readonly string[]> = {
+  "google.com": ["SID", "__Secure-1PSID", "__Secure-3PSID", "SAPISID"],
+  "youtube.com": ["SID", "__Secure-1PSID", "__Secure-3PSID"],
+  "x.com": ["auth_token"],
+  "twitter.com": ["auth_token"],
+  "instagram.com": ["sessionid"],
+  "threads.com": ["sessionid"],
+  "threads.net": ["sessionid"],
+  "facebook.com": ["c_user"],
+  "linkedin.com": ["li_at"],
+};
+
+export function sessionCookieIdentityNamesFor(domain: string): readonly string[] | null {
+  return SESSION_IDENTITY_COOKIE_NAMES[registrableDomain(domain)] ?? null;
+}
+
 export function identityDomainsFor(site: string): string[] {
   const root = registrableDomain(site);
   return [...(SITE_IDENTITY_DOMAINS[root] ?? [])];
