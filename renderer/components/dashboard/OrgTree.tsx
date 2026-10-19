@@ -364,6 +364,25 @@ export function OrgTree() {
     }
   }
 
+  // 서버에만 있는 Cloud 에이전트를 이 Mac 에 내려받는다. 내려받은 사본은 로컬 에이전트라 위쪽 로컬 목록과
+  // 조직도 '에이전트 추가'에 나타난다(오너 결정 2026-10-19). 같은 slug 가 이미 있으면 이 줄 자체가 없다.
+  async function installCloudListing(listing: MarketplaceListing) {
+    const api = ipc();
+    if (!api || busy) return;
+    const name = ko ? listing.name : listing.nameEn || listing.name;
+    setBusy(true);
+    setImportMessage(null);
+    try {
+      await api.team.installMine(listing.slug);
+      setImportMessage({ tone: "ok", text: ko ? `${name}을(를) 이 Mac에 내려받았습니다.` : `Downloaded ${name} to this Mac.` });
+    } catch (err) {
+      setImportMessage({ tone: "error", text: String(err instanceof Error ? err.message : err).replace(/^Error invoking remote method '[^']+':\s*Error:\s*/, "") });
+    } finally {
+      await load(true);
+      setBusy(false);
+    }
+  }
+
   async function removeCloudListing(listing: MarketplaceListing) {
     const api = ipc();
     if (!api || busy) return;
@@ -571,15 +590,28 @@ export function OrgTree() {
                       <span className="dashboard-org-label">{ko ? m.name : m.nameEn || m.name}</span>
                       <span className="dashboard-org-count">{entityClassShortLabel(entityClass, locale)}</span>
                     </button>
-                    <button
-                      type="button"
-                      className="dashboard-org-remove"
-                      title={ko ? "Agent Cloud 원본 삭제" : "Delete Agent Cloud source"}
-                      aria-label={ko ? "Agent Cloud 원본 삭제" : "Delete Agent Cloud source"}
-                      onClick={() => void removeCloudListing(m)}
-                    >
-                      ×
-                    </button>
+                    <span className="dashboard-org-actions">
+                      <button
+                        type="button"
+                        className="dashboard-org-remove dashboard-org-remove-group dashboard-org-install"
+                        data-testid="org-cloud-install"
+                        title={ko ? "이 Mac에 내려받아 로컬 에이전트로 쓰기" : "Download to this Mac as a local agent"}
+                        aria-label={ko ? `${m.name} 내려받기` : `Download ${m.nameEn || m.name}`}
+                        disabled={busy}
+                        onClick={() => void installCloudListing(m)}
+                      >
+                        {ko ? "내려받기" : "Download"}
+                      </button>
+                      <button
+                        type="button"
+                        className="dashboard-org-remove"
+                        title={ko ? "Agent Cloud 원본 삭제" : "Delete Agent Cloud source"}
+                        aria-label={ko ? "Agent Cloud 원본 삭제" : "Delete Agent Cloud source"}
+                        onClick={() => void removeCloudListing(m)}
+                      >
+                        ×
+                      </button>
+                    </span>
                   </div>
                   );
                 })}

@@ -22,6 +22,8 @@ import { installedServerMatchesPluginSlug, normalizePluginSlug } from "@shared/p
 import { PluginLogo } from "@/components/PluginLogo";
 import { EntityKindIcon } from "@/components/EntityKindIcon";
 import { IconAlertTriangle } from "@/components/Icon";
+import { CloudAgentsPanel } from "./CloudAgentsPanel";
+import { isCallOnlyHubAgent } from "@shared/call-only-agent";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import type {
   HephaestusCommandResult,
@@ -199,6 +201,11 @@ function MarketplacePage() {
   const [page, setPage] = useState(1);
   const PAGE_SIZE = 12;
   const [category, setCategory] = useState<HubCategory>("all");
+  // "공개 Hub" 와 "내 Cloud" 는 같은 메뉴의 두 탭이다(오너 결정 2026-10-19). ?tab=cloud 로 바로 들어올 수 있다.
+  const [source, setSource] = useState<"hub" | "cloud">(() => searchParams.get("tab") === "cloud" ? "cloud" : "hub");
+  useEffect(() => {
+    setSource(searchParams.get("tab") === "cloud" ? "cloud" : "hub");
+  }, [searchParams]);
 
   const [importNotice, setImportNotice] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const [listings, setListings] = useState<MarketplaceListing[]>([]);
@@ -543,6 +550,33 @@ function MarketplacePage() {
             </div>
             <main className="rd-page hub-web-content">
               <div className="hub-page-root">
+          <div className="hub-market-filters hub-source-tabs" role="tablist" aria-label={ko ? "에이전트 출처" : "Agent source"} data-testid="hub-source-tabs">
+            {(([
+              ["hub", ko ? "공개 Hub" : "Public Hub"],
+              ["cloud", ko ? "내 Cloud" : "My Cloud"],
+            ] satisfies Array<["hub" | "cloud", string]>)).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                role="tab"
+                className="hub-market-filter"
+                data-active={source === value}
+                aria-selected={source === value}
+                onClick={() => setSource(value)}
+              >
+                <span>{label}</span>
+              </button>
+            ))}
+          </div>
+          {source === "cloud" ? (
+            <CloudAgentsPanel
+              locale={locale}
+              signedIn={signedIn}
+              installedSlugs={installedAgentSlugs}
+              onSignIn={ensureSignedIn}
+              onInstalled={() => void refresh()}
+            />
+          ) : (<>
           <div
             className="card portal-search-panel rd-card-cream"
             data-tour-id="hub.search"
@@ -787,6 +821,7 @@ function MarketplacePage() {
                         && (listing.slug || "").toLowerCase() === deepLinkInstallSlug
                       }
                       onBookmark={() => void bookmarkOne(listing)}
+                      onDownloaded={() => void refresh()}
                       onCopyCall={() => void copyHubCall(listing.slug)}
                       onOpenProfile={() => router.push(
                         `/marketplace/profile?slug=${encodeURIComponent(listing.slug)}`
@@ -876,6 +911,7 @@ function MarketplacePage() {
               <button type="button" className="hub-pager-btn" disabled={safePage >= totalPages} onClick={() => setPage(Math.min(totalPages, safePage + 1))}>{ko ? "다음" : "Next"}</button>
             </nav>
           )}
+          </>)}
               </div>
             </main>
           </div>
@@ -963,6 +999,7 @@ function AgentCard({
   bookmarking,
   autoOpenInstall = false,
   onBookmark,
+  onDownloaded,
   onCopyCall,
   onOpenProfile,
 }: {
@@ -976,6 +1013,8 @@ function AgentCard({
   bookmarked: boolean;
   bookmarking: boolean;
   onBookmark: () => void;
+  /** 내려받기가 끝나면 이 Mac 의 설치 목록을 다시 읽게 한다. */
+  onDownloaded?: () => void;
   onCopyCall: () => void;
   /** 허브의 공개 소개 페이지를 앱 안에 띄운다. 데스크탑 전용 도구에는 소개가 없다. */
   onOpenProfile: () => void;
@@ -988,6 +1027,14 @@ function AgentCard({
   // 카드의 주 행동은 [그래프 설치] 하나 — Agentlas Graph의 설치 배선을 그대로 쓴다.
   const graph = entityKind === "graph";
   const [graphInstall, setGraphInstall] = useState<
+    | { phase: "idle" }
+    | { phase: "installing" }
+    | { phase: "done"; message: string }
+    | { phase: "error"; message: string }
+  >({ phase: "idle" });
+  // 에이전트·팀 내려받기 — 이 Mac 에 로컬 에이전트로 등록한다. 호출 전용 카드(소스를 내려받게 허용하지 않은
+  // 에이전트)는 내려받을 소스가 없으므로 누를 수 없고, 이유를 카드에 적는다.
+  const [download, setDownload] = useState<
     | { phase: "idle" }
     | { phase: "installing" }
     | { phase: "done"; message: string }
@@ -1213,6 +1260,16 @@ function AgentCard({
           {/* "호출 불가"는 결함 배지다 — 애초에 호출이 없는 그래프에 붙이면
               멀쩡한 도면이 고장난 에이전트처럼 읽힌다. */}
           {!callable && !graph ? <RdTag dashed>{ko ? "Hub 호출 불가" : "Hub call unavailable"}</RdTag> : null}
+          {callable ? (
+            <RdTag
+              dashed
+              title={ko
+                ? "만든 사람이 소스를 내려받게 허용하지 않은 에이전트입니다. 대화에서 호출해 쓸 수 있습니다."
+                : "The author has not allowed downloading the source. You can still call it from a conversation."}
+            >
+              {ko ? "호출 전용 · 내려받기 불가" : "Call-only · no download"}
+            </RdTag>
+          ) : null}
         </div>
       )}
       {plugin && install.phase === "confirm" ? (
@@ -1323,6 +1380,14 @@ function AgentCard({
           {install.message}
         </div>
       ) : null}
+      {!plugin && !graph && (download.phase === "done" || download.phase === "error") ? (
+        <div
+          className="hub-plugin-approval-note"
+          data-tone={download.phase === "error" ? "error" : "ok"}
+        >
+          {download.message}
+        </div>
+      ) : null}
       {graph && (graphInstall.phase === "done" || graphInstall.phase === "error") ? (
         <div
           className="hub-plugin-approval-note"
@@ -1430,6 +1495,50 @@ function AgentCard({
                 ? (ko ? "북마크됨" : "Bookmarked")
                 : (ko ? "북마크" : "Bookmark")}
         </button>
+        {!plugin && !graph ? (
+          <button
+            type="button"
+            className={"btn sm hub-card-action-btn" + (!callable && !sameSlugInstalled && download.phase === "idle" ? " primary" : "")}
+            data-testid="hub-card-download"
+            disabled={callable || sameSlugInstalled || download.phase === "installing" || download.phase === "done"}
+            title={callable
+              ? (ko ? "만든 사람이 소스를 내려받게 허용하지 않은 에이전트입니다. 대화에서 호출해 쓸 수 있습니다." : "The author has not allowed downloading the source. You can still call it from a conversation.")
+              : undefined}
+            onClick={() => {
+              if (callable || sameSlugInstalled || download.phase === "installing" || download.phase === "done") return;
+              setDownload({ phase: "installing" });
+              void window.agentlas.team
+                .install(listing.slug)
+                .then((installed) => {
+                  onDownloaded?.();
+                  setDownload({
+                    phase: "done",
+                    message: isCallOnlyHubAgent(installed)
+                      ? (ko
+                        ? `"${loc.name}"은(는) 소스가 없어 호출용으로만 등록했습니다. 조직도에는 앉힐 수 없고 대화에서 부를 수 있습니다.`
+                        : `"${loc.name}" has no source, so it was registered for calls only. It cannot be seated in the organisation chart; call it from a conversation.`)
+                      : (ko
+                        ? `"${loc.name}"을(를) 이 Mac에 내려받았습니다. 조직도의 '에이전트 추가'에서 앉힐 수 있습니다.`
+                        : `Downloaded "${loc.name}" to this Mac. Add it to your organisation from "Add agent".`),
+                  });
+                })
+                .catch((error: unknown) => {
+                  setDownload({
+                    phase: "error",
+                    message: error instanceof Error
+                      ? error.message.replace(/^Error invoking remote method '[^']+':\s*Error:\s*/, "")
+                      : String(error),
+                  });
+                });
+            }}
+          >
+            {download.phase === "installing"
+              ? (ko ? "내려받는 중…" : "Downloading…")
+              : sameSlugInstalled || download.phase === "done"
+                ? (ko ? "내려받음" : "Downloaded")
+                : (ko ? "내려받기" : "Download")}
+          </button>
+        ) : null}
         {plugin && websiteUrl ? (
           <button
             type="button"

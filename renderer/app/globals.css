@@ -1781,6 +1781,15 @@ button[data-dashboard-import="true"]:disabled {
 .dashboard-org-remove:hover {
   color: var(--white);
 }
+/* 서버에만 있는 Cloud 에이전트 줄: 내려받기 + 삭제를 한 칸에 둔다. 내려받기는 마우스를 올리지 않아도 보인다. */
+.dashboard-org-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.dashboard-org-remove.dashboard-org-install {
+  opacity: 1;
+}
 .dashboard-org-remove-group {
   font-size: 11px;
   font-weight: 700;
