@@ -22,6 +22,7 @@ import {
 import { currentUiLocale } from "../ui-locale";
 import { checkComputerUseWindowScope } from "./window-scope";
 import { supervisorDock } from "./supervisor-dock";
+import { invalidValueMessage } from "../../shared/did-you-mean";
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_AUDIT_ROWS = 200;
@@ -376,7 +377,7 @@ async function runAction(body: Record<string, unknown>): Promise<NativeInputResu
       if (prefixCandidate === null) return { ok: false, error: "invalid-arguments", message: "prefix was rejected." };
       if (suffixCandidate === null) return { ok: false, error: "invalid-arguments", message: "suffix was rejected." };
       if (selectionType !== undefined && selectionType !== "text" && selectionType !== "cursor_before" && selectionType !== "cursor_after") {
-        return { ok: false, error: "invalid-arguments", message: "selectionType was rejected." };
+        return { ok: false, error: "invalid-arguments", message: invalidValueMessage("selectionType", selectionType, ["text", "cursor_before", "cursor_after"]) };
       }
       request = {
         action: "elementAction",
@@ -420,6 +421,10 @@ async function runAction(body: Record<string, unknown>): Promise<NativeInputResu
         error: "screen-not-measured",
         message: "Capture the screen first: frame coordinates only mean something after get_screen, which measures this display.",
       };
+    }
+    // A mouse button outside left/right/middle is the one enum a click or drag takes: name it and the closest.
+    if ((action === "click" || action === "drag") && body.button !== undefined && body.button !== "left" && body.button !== "right" && body.button !== "middle") {
+      return { ok: false, error: "invalid-arguments", message: invalidValueMessage("button", body.button, ["left", "right", "middle"]) };
     }
     return { ok: false, error: "invalid-arguments", message: "Computer Use action arguments were rejected." };
   }

@@ -3,6 +3,7 @@ import { preparedMcpTransport } from "../mcp-tools/prepared-transport";
 import { mcpToolSchemaDigest } from "../mcp-tools/tool-schema";
 import { toolSchemaVariants, type ToolSchemaVariant } from "./tool-schema-selection";
 import { closestToolNames, resolveToolNameAlias } from "./tool-name-alias";
+import { closestNames } from "../../shared/did-you-mean";
 import type { OpenAiToolDef, ResolvedTool } from "./local-tool-loop";
 
 const LIST = "agentlas_tools_list";
@@ -116,12 +117,15 @@ export function invalidateToolMenu(byName: Map<string, ResolvedTool>): void {
 }
 function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 type NextAction = { tool: string; arguments: Record<string, unknown> };
-function invalidArguments(invalidFields: string[], nextAction: NextAction, code = "tool_menu_arguments_invalid"): never {
-  throw Object.assign(new Error(JSON.stringify({ code, invalidFields, nextAction })), { code });
+function invalidArguments(invalidFields: string[], nextAction: NextAction, code = "tool_menu_arguments_invalid", didYouMean?: Record<string, string[]>): never {
+  throw Object.assign(new Error(JSON.stringify({ code, invalidFields, ...(didYouMean ? { didYouMean } : {}), nextAction })), { code });
 }
 function keys(args: Record<string, unknown>, allowed: string[], nextAction: NextAction): void {
   const invalidFields = Object.keys(args).filter(key => !allowed.includes(key));
-  if (invalidFields.length) invalidArguments(invalidFields, nextAction);
+  if (!invalidFields.length) return;
+  // An argument the menu tool does not take names the closest one it does (hint only; the call is refused either way).
+  const near = Object.fromEntries(invalidFields.flatMap(key => { const names = closestNames(key, allowed); return names.length ? [[key, names]] : []; }));
+  invalidArguments(invalidFields, nextAction, undefined, Object.keys(near).length ? near : undefined);
 }
 export type MenuResolution = { kind: "result"; content: string } | { kind: "call"; toolName: string; arguments: string } | null;
 /** Main-only request-scoped resolution. Tokens never grant authority; the

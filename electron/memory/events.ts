@@ -8,6 +8,7 @@ import {
   type MemoryKind,
   type MemoryScope,
 } from "../architecture/manifest";
+import { didYouMean, invalidValueMessage } from "../../shared/did-you-mean";
 import type { RequestContext } from "./store";
 import type { MemoryEmitterStatus } from "./tickets";
 
@@ -132,11 +133,11 @@ export function memoryNoteToEvent(args: unknown): { ok: true; event: RawMemoryEv
   const o = args as Record<string, unknown>;
   const allowed = ["content", "content_native", "memory_kind", "suggested_scope", "confidence", "evidence", "supersedes", "request_context"];
   const unknown = Object.keys(o).find((key) => !allowed.includes(key));
-  if (unknown) return { ok: false, error: `memory_note_unknown_field: ${unknown}` };
+  if (unknown) return { ok: false, error: `memory_note_unknown_field: ${unknown}.${didYouMean(unknown, allowed)}` };
   if (typeof o.content !== "string" || !o.content.trim()) return { ok: false, error: "memory_note_invalid: content is required" };
-  if (!MEMORY_KINDS.includes(o.memory_kind as MemoryKind)) return { ok: false, error: `memory_note_invalid: memory_kind must be one of ${MEMORY_KINDS.join(", ")}` };
+  if (!MEMORY_KINDS.includes(o.memory_kind as MemoryKind)) return { ok: false, error: `memory_note_invalid: ${invalidValueMessage("memory_kind", o.memory_kind, MEMORY_KINDS)}` };
   if (o.suggested_scope === "agent_team" || !MEMORY_SCOPES.includes(o.suggested_scope as MemoryScope)) {
-    return { ok: false, error: `memory_note_invalid: suggested_scope must be one of ${MEMORY_SCOPES.filter((scope) => scope !== "agent_team").join(", ")}` };
+    return { ok: false, error: `memory_note_invalid: ${invalidValueMessage("suggested_scope", o.suggested_scope, MEMORY_SCOPES.filter((scope) => scope !== "agent_team"))}` };
   }
   if (o.confidence !== undefined && o.confidence !== "high" && o.confidence !== "medium" && o.confidence !== "low") return { ok: false, error: "memory_note_invalid: confidence must be high, medium or low" };
   if (o.evidence !== undefined && !Array.isArray(o.evidence)) return { ok: false, error: "memory_note_invalid: evidence must be an array of strings" };

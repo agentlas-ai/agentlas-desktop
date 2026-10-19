@@ -8,6 +8,7 @@ import { APP_CONTROL_ARGUMENT_SCHEMAS, APP_UI_PREFERENCE_VALUE_SCHEMAS } from ".
 import { describeCatalogOperation, describeHostOperation, type OperationDescriptor } from "./operation-descriptors";
 import type { AppControlRendererOperation, AppControlRendererReply } from "../../shared/app-control";
 import { appUiPreferenceDefinitions, isAppUiPreferenceName, normalizeAppUiPreference } from "../../shared/app-ui-preferences";
+import { closestNames, invalidValueMessage, nameSimilarity, schemaArgumentHints, unknownArgumentMessage } from "../../shared/did-you-mean";
 import { decodeAppControlArguments } from "./argument-codec";
 import { remoteAppControlCall, remoteAppControlOperations } from "./daemon-remote";
 import { saveObservationCaptureArtifact } from "../media/capture-artifacts";
@@ -474,6 +475,53 @@ function errorCode(error: unknown): string {
   return error instanceof AppControlError ? error.code : error && typeof error === "object" && "code" in error && typeof (error as { code: unknown }).code === "string" ? (error as { code: string }).code : "operation-failed";
 }
 
+// A refusal for a wrong name or value says what is accepted and which accepted name is closest (shared/did-you-mean.ts). The
+// hint is text only: the call that was refused is never run with the near match.
+
+/**
+ * A name the operation does not take may be a field of one of its object arguments (models flatten `input`): say where it
+ * goes, with the call shape. "takes input" alone left a model putting `input` next to `operation`, which harness app.call
+ * reads as the container of ALL arguments (its `input` alias for `args`); with the shape written out, 7 of 8 Haiku runs
+ * sent the filter inside args.input, against 0 of 8 without the hint.
+ */
+function nestedFieldHint(path: string, unknown: readonly string[]): string {
+  const properties = APP_CONTROL_ARGUMENT_SCHEMAS[path]?.properties;
+  if (!properties || typeof properties !== "object") return "";
+  const parts = Object.entries(properties as Record<string, unknown>).flatMap(([param, node]) => {
+    const fields = node && typeof node === "object" ? (node as { properties?: unknown }).properties : undefined;
+    const inside = fields && typeof fields === "object" ? unknown.filter((key) => Object.hasOwn(fields, key)) : [];
+    return inside.length ? [`${inside.join(", ")} ${inside.length > 1 ? "belong" : "belongs"} inside ${param}: pass args {"${param}":{${inside.map((key) => `"${key}":…`).join(",")}}}.`] : [];
+  });
+  return parts.length ? ` ${parts.join(" ")}` : "";
+}
+
+/**
+ * A value the host operations take from a fixed set is judged against the enum of their own declared input schema
+ * (HOST_ARGUMENT_SCHEMAS, the one the model reads as input_schema), so the allowed values are listed from that single place.
+ */
+function hostEnumRefusal(path: string, named: Record<string, unknown>): string | null {
+  const schema = HOST_ARGUMENT_SCHEMAS[path];
+  const fields = schema?.properties;
+  if (!fields || typeof fields !== "object") return null;
+  for (const [field, node] of Object.entries(fields as Record<string, { enum?: unknown }>)) {
+    const allowed = Array.isArray(node?.enum) ? node.enum.filter((item): item is string => typeof item === "string") : [];
+    if (!allowed.length) continue;
+    if (named[field] === undefined && !(Array.isArray(schema.required) && schema.required.includes(field))) continue;
+    if (typeof named[field] !== "string" || !allowed.includes(named[field] as string)) {
+      return invalidValueMessage(field, named[field], allowed, { listAll: allowed.length <= 8, readAt: "app.getUiPreferences" });
+    }
+  }
+  return null;
+}
+
+/** A handler that threw on an argument outside its declared schema also says which field and the closest declared value. */
+function withArgumentHints(error: unknown, path: string, args: unknown): unknown {
+  if (!(error instanceof Error)) return error;
+  const hints = schemaArgumentHints(APP_CONTROL_ARGUMENT_SCHEMAS[path], args);
+  if (hints.length) { try { error.message = `${error.message} ${hints.join(" ")}`; } catch { /* a frozen error keeps its own text */ } }
+  return error;
+}
+
 export async function appControlCallLocal(caller: AppControlCaller, input: { operation?: unknown; args?: unknown }): Promise<Record<string, unknown>> {
   const path = typeof input.operation === "string" ? input.operation.trim() : "";
   const named = input.args === undefined || input.args === null ? {}
@@ -487,19 +535,24 @@ export async function appControlCallLocal(caller: AppControlCaller, input: { ope
   const operation = operations().find((candidate) => candidate.path === path);
   if (!operation) {
     if (catalogEntry?.surface === "science") throw new AppControlError("science-not-installed", "Agentlas Science is not installed or not active.");
-    
-
-
-    const closest = path ? (appControlOperationsLocal({ query: path, limit: 8 }).operations ?? []).map((item) => String(item.operation)) : [];
+    // The refusal names the closest catalog operations (the same deterministic search). Dev 2026-10-18 run11: Haiku guessed
+    // automations.runs.list, automations.history and automations.executions for automations.listRuns, and the hint named
+    // one_app_operations, a tool the harness path does not have (it was tried as an operation name).
+    const searched = path ? (appControlOperationsLocal({ query: path, limit: 8 }).operations ?? []).map((item) => String(item.operation)) : [];
+    // A misspelled path ("automatons.list") shares few whole words with the catalog's search. A path the shared typo matcher
+    // finds almost identical leads; the search results keep their order after it; looser typo matches come last.
+    const typo = path ? closestNames(path, operations().map((candidate) => candidate.path), 3) : [];
+    const near = typo.filter((name) => nameSimilarity(path, name) >= 0.85);
+    const closest = [...near, ...searched.filter((name) => !near.includes(name)), ...typo.filter((name) => !near.includes(name) && !searched.includes(name))].slice(0, 8);
     throw new AppControlError("operation-unknown", `Unknown operation ${path || "(empty)"}.${closest.length ? ` Closest: ${closest.join(", ")}.` : ""} Search the catalog with one_app_operations (in harness_call: app.operations).`);
   }
   if (appControlEffectNeedsOwnerTurn(operation.effect) && !caller.ownerTurn) {
     throw new AppControlError("owner-turn-required", `${path} ${operation.effect === "destructive" ? "deletes or stops something" : "needs the owner's say-so"}; only a message the owner wrote can ask for it. Tell the owner what you would do.`);
   }
   const unknown = Object.keys(named).filter((key) => !operation.params.includes(key));
-  if (unknown.length) throw new AppControlError("invalid-arguments", `Unknown argument ${unknown.join(", ")}; ${path} takes ${operation.params.length ? operation.params.join(", ") : "no arguments"}.`);
-  
-
+  if (unknown.length) throw new AppControlError("invalid-arguments", `${unknownArgumentMessage(path, unknown, operation.params)}${nestedFieldHint(path, unknown)}`);
+  // A required argument that is missing is refused, never sent as undefined: automations.listRuns without its id answered
+  // 0 runs as if that were the history (dev 2026-10-17 run8), and the agent reported "no runs last week".
   const requiredKeys = APP_CONTROL_ARGUMENT_SCHEMAS[path]?.required;
   const missing = Array.isArray(requiredKeys) ? requiredKeys.filter((key) => typeof key === "string" && named[key] === undefined) : [];
   if (missing.length) throw new AppControlError("invalid-arguments", `${path} needs ${missing.join(", ")}; pass them in args.`);
@@ -520,14 +573,14 @@ export async function appControlCallLocal(caller: AppControlCaller, input: { ope
         status: result.ok ? "ok" : "refused", ...(result.ok ? {} : { code: result.code }), ownerTurn: caller.ownerTurn }) };
     }
     if (!window || window.isDestroyed()) throw new AppControlError("app-window-closed", "The Agentlas interaction window is closed.");
-    if (path === "app.setLanguage" && (typeof named.locale !== "string" || !["ko", "en", "system"].includes(named.locale))) throw new AppControlError("invalid-arguments", "locale must be ko, en or system.");
-    if (path === "app.setTheme" && (typeof named.theme !== "string" || !["light", "dark", "system"].includes(named.theme))) throw new AppControlError("invalid-arguments", "theme must be light, dark or system.");
+    const enumRefusal = hostEnumRefusal(path, named);
+    if (enumRefusal) throw new AppControlError("invalid-arguments", enumRefusal);
     if (path === "app.setSidebar" && (named.collapsed === undefined && named.width === undefined
       || named.collapsed !== undefined && typeof named.collapsed !== "boolean"
       || named.width !== undefined && (typeof named.width !== "number" || !Number.isFinite(named.width)))) throw new AppControlError("invalid-arguments", "Provide collapsed (boolean) or width (number).");
-    if (path === "app.setMediaDisplay" && (typeof named.kind !== "string" || !["image", "video", "audio"].includes(named.kind) || typeof named.visible !== "boolean")) throw new AppControlError("invalid-arguments", "Provide kind (image, video, audio) and visible (boolean).");
+    if (path === "app.setMediaDisplay" && typeof named.visible !== "boolean") throw new AppControlError("invalid-arguments", "visible must be a JSON boolean, true or false.");
     if (path === "app.setUiPreference") {
-      if (!isAppUiPreferenceName(named.name)) throw new AppControlError("invalid-arguments", "Unknown UI preference; read app.getUiPreferences.");
+      if (!isAppUiPreferenceName(named.name)) throw new AppControlError("invalid-arguments", invalidValueMessage("name", named.name, Object.keys(appUiPreferenceDefinitions), { listAll: false, readAt: "app.getUiPreferences" }));
       try { named.value = normalizeAppUiPreference(named.name, named.value); }
       catch (error) { throw new AppControlError("invalid-arguments", error instanceof Error ? error.message : "Invalid UI preference."); }
     }
@@ -550,7 +603,7 @@ export async function appControlCallLocal(caller: AppControlCaller, input: { ope
   const args = entry.invokeArgs.map((arg) => build(arg, decoded));
   let value: unknown;
   try { value = await invokeAppControlIpc({ window, channel: entry.channel, args, operation: path, ownerInteraction: caller.ownerTurn }); }
-  catch (error) { await recordAppCallReceipt({ operation: path, effect: operation.effect, named: decoded, status: "failed", code: errorCode(error), ownerTurn: caller.ownerTurn }); throw error; }
+  catch (error) { await recordAppCallReceipt({ operation: path, effect: operation.effect, named: decoded, status: "failed", code: errorCode(error), ownerTurn: caller.ownerTurn }); throw withArgumentHints(error, path, decoded); }
   // The experience maps carry owner-local titles for the owner's renderer; an agent's copy drops them (safeLabel stays).
   if (OWNER_LOCAL_MAP_OPERATIONS.has(path)) value = (await import("../experience/relation-index")).withoutOwnerLocalLabels(value);
   const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;

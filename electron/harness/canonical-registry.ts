@@ -8,6 +8,7 @@ import { BUILTIN_TOOLS } from "../../shared/builtin-tools";
 import { AGENTLAS_TURN_TOOLS } from "../turn-tools/mcp-server";
 import { UI_PRESENT_INPUT_SCHEMA } from "../../shared/inline-ui-presentation";
 import { RETAINED_RESULT_READ_SCHEMA } from "../../shared/retained-result-schema";
+import { missingArgumentsMessage } from "../../shared/did-you-mean";
 import type { HarnessCallContext } from "./capability-ports";
 
 /*
@@ -646,7 +647,7 @@ export const CANONICAL_PORT_HANDLERS: Record<string, (args: Record<string, unkno
     if (backing.kind === "tool") return { status: "refused", reason: "call_tool_directly", next: backing.name, data: { server: backing.server, tool: backing.name } };
     // Permission and schema problems are answered as such, never as unknown_tool.
     const missing = missingRequired(resolved.inputSchema, callArgs);
-    if (missing.length) return { status: "refused", reason: "arguments_missing", next: `required: ${missing.join(", ")}` };
+    if (missing.length) return { status: "refused", reason: "arguments_missing", next: missingArgumentsMessage(missing, Object.keys(callArgs), inputNames(resolved.inputSchema)) };
     const { callHarnessPort } = await import("./capability-ports");
     const result = await callHarnessPort(backing.operationId, callArgs, ctx);
     return result.status === "ok"

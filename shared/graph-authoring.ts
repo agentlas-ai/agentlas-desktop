@@ -1,6 +1,7 @@
 import { BLUEPRINT_SCHEMA, CONDITION_OPS } from "./graph-blueprint";
 import { CAPABILITIES, PROVIDER_CATALOG } from "./graph-tool-binding";
 import { providerOutputSchema } from "./provider-output-schema";
+import { closestNames, valueChoiceMessage } from "./did-you-mean";
 
 // Wire shape only. All topology/data-flow semantics still belong to the
 // canonical blueprint validator/compiler; the host never compiles model ids.
@@ -119,9 +120,18 @@ export function isGraphControlTool(catalogId: unknown, toolName: unknown): boole
  * validators (which deliberately accept already typed blueprint objects). */
 export function graphAuthoringShapeProblems(value: unknown, shape: Shape, at = "input"): string[] {
   const fail = (why: string) => [`${at}: ${why}`];
-  if (shape.anyOf) return shape.anyOf.some(option => !graphAuthoringShapeProblems(value, option, at).length) ? [] : fail("invalid value type");
+  // A string outside a string enum says the allowed values and the closest one (shared/did-you-mean.ts); a long set names
+  // only how many it has and the closest. Text only: the value is refused either way.
+  const choice = (allowed: readonly unknown[]) => {
+    const names = allowed.filter((item): item is string => typeof item === "string");
+    return typeof value === "string" && names.length && names.length === allowed.length ? `; ${valueChoiceMessage(value, names, { listAll: names.length <= 12 })}` : "";
+  };
+  if (shape.anyOf) {
+    if (shape.anyOf.some(option => !graphAuthoringShapeProblems(value, option, at).length)) return [];
+    return fail(`invalid value type${choice(shape.anyOf.flatMap(option => option.enum ?? []).filter(item => item !== null))}`);
+  }
   if (shape.const !== undefined && value !== shape.const) return fail("unsupported schema");
-  if (shape.enum && !shape.enum.includes(value)) return fail("unsupported value");
+  if (shape.enum && !shape.enum.includes(value)) return fail(`unsupported value${choice(shape.enum)}`);
   if (shape.type === "string") {
     if (typeof value !== "string") return fail("expected string");
     if ((shape.minLength && value.trim().length < shape.minLength) || (shape.maxLength && value.length > shape.maxLength)) return fail("invalid length");
@@ -140,7 +150,10 @@ export function graphAuthoringShapeProblems(value: unknown, shape: Shape, at = "
     const data = value as Record<string, unknown>;
     const properties = shape.properties ?? {};
     const errors = (shape.required ?? []).filter(key => data[key] === undefined).map(key => `${at}.${key}: required`);
-    if (shape.additionalProperties === false) errors.push(...Object.keys(data).filter(key => !Object.hasOwn(properties, key)).map(key => `${at}.${key}: unknown field`));
+    if (shape.additionalProperties === false) errors.push(...Object.keys(data).filter(key => !Object.hasOwn(properties, key)).map(key => {
+      const near = closestNames(key, Object.keys(properties));
+      return `${at}.${key}: unknown field${near.length ? `; did you mean ${near.join(" or ")}?` : ""}`;
+    }));
     for (const [key, field] of Object.entries(properties)) if (Object.hasOwn(data, key)) errors.push(...graphAuthoringShapeProblems(data[key], field, `${at}.${key}`));
     return errors;
   }

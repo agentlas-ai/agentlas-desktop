@@ -6,6 +6,7 @@ import type { InstalledMcpServer } from "../../shared/types";
 import type { PreparedMcpBinding } from "../mcp-tools/prepared-transport";
 import { redactSecrets } from "../../shared/secret-patterns";
 import { redactToolJson, redactToolText } from "./tool-result-store";
+import { didYouMean } from "../../shared/did-you-mean";
 
 /*
  * Harness tool dispatch ports (docs/2026-10-13-native-harness/15 §7-8):
@@ -337,7 +338,11 @@ export async function toolCall(args: Args, ctx: HarnessCallContext): Promise<Por
   if (!inventory.ok) return refused(inventory.code, inventory.next);
   const toolName = toolRef.replace(/^tool:/, "").replace(new RegExp(`^${providerRef.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[:/]`), "");
   const tool = inventory.tools.find((item) => item.name === toolName);
-  if (!tool) return refused("stale-binding", `the connector no longer lists ${toolName}; tool.describe for the current tools`);
+  if (!tool) {
+    // A misspelled tool name names the closest one the connector lists now (names tool.describe shows); it is never called instead.
+    const near = didYouMean(toolName, inventory.tools.map((item) => item.name));
+    return refused("stale-binding", `the connector no longer lists ${toolName}; tool.describe for the current tools${near ? `.${near}` : ""}`);
+  }
   if (tool.schemaDigest !== schemaDigest) return refused("stale-schema", `current schemaDigest is ${tool.schemaDigest}; re-read the schema before calling`);
 
   const callId = `tc_${randomUUID()}`;

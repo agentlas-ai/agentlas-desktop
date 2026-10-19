@@ -18,6 +18,7 @@ import type { OneTeamCaller } from "./team-dispatch";
 import type { GraphOriginBinding } from "./graph-origin";
 import type { BlueprintBranch, BlueprintCheck, BlueprintStep, BlueprintTrigger, GraphBlueprint } from "../../shared/graph-blueprint";
 import { BLUEPRINT_SCHEMA, CONDITION_OPS } from "../../shared/graph-blueprint";
+import { didYouMean } from "../../shared/did-you-mean";
 
 export const GRAPH_DRAFT_SCHEMA = "agentlas.graph-draft.v1" as const;
 const MAX_STEPS = 32;
@@ -169,6 +170,10 @@ function placeStep(draft: GraphDraft, step: DraftStep, op: Record<string, unknow
   else draft.steps.push(step);
 }
 
+/** The operation names applyOne handles (one per `case`); used only to name the closest one when an operation is unknown. */
+export const GRAPH_DRAFT_OPERATIONS = ["draft.set", "trigger.set", "node.create", "node.update", "node.move", "node.remove", "edge.connect",
+  "edge.disconnect", "branch.set", "repeat.set", "branch.remove", "check.add", "check.remove"] as const;
+
 function applyOne(draft: GraphDraft, op: Record<string, unknown>): void {
   switch (op.op) {
     case "draft.set": {
@@ -286,7 +291,10 @@ function applyOne(draft: GraphDraft, op: Record<string, unknown>): void {
       draft.checks = draft.checks.filter((c) => c.id !== id);
       return;
     }
-    default: fail("graph_draft_operation_unknown", String(op.op));
+    default: {
+      const near = didYouMean(String(op.op), GRAPH_DRAFT_OPERATIONS);
+      return fail("graph_draft_operation_unknown", `${String(op.op)}${near ? `.${near}` : ""}`);
+    }
   }
 }
 

@@ -27,6 +27,7 @@ import { inflateSync } from "node:zlib";
 import { classifyLaunchEscape, launchEscapeDenialReason } from "./write-sandbox-launch-guard";
 import { PERMISSION_ESCALATION_MARKER } from "./permission-escalation";
 import type { RuntimeToolKind } from "./runtime-tool-kind";
+import { closestNames, didYouMean, unknownArgumentMessage } from "./did-you-mean";
 
 export type ToolPermission = "read" | "write" | "full";
 
@@ -170,10 +171,33 @@ function lexicalPath(root: string, input: unknown): string {
   return candidate;
 }
 
+/**
+ * A missing file names the closest entries of the folder it was looked for in, so a misspelled name can be corrected without
+ * another list_dir. Safe by construction: only inside the working folder (the folder is resolved through symlinks and
+ * must be contained, exactly what list_dir may read at the same permission), only entry names, never contents, and
+ * only text added to the error: the missing path is not opened under a near name.
+ */
+function nearEntriesHint(root: string, candidate: string): string {
+  try {
+    const folder = fs.realpathSync(path.dirname(candidate));
+    if (!contained(root, folder)) return "";
+    const near = closestNames(path.basename(candidate), fs.readdirSync(folder).slice(0, 400));
+    return near.length ? ` Did you mean ${near.map((name) => path.relative(root, path.join(folder, name)).split(path.sep).join("/")).join(", ")}?` : "";
+  } catch {
+    return "";
+  }
+}
+
 function resolveExistingIn(cwd: string, input: unknown): string {
   const root = getWorkspaceRoot(cwd);
   const candidate = lexicalPath(root, input);
-  const real = fs.realpathSync(candidate);
+  let real: string;
+  try {
+    real = fs.realpathSync(candidate);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT" && error instanceof Error) error.message += nearEntriesHint(root, candidate);
+    throw error;
+  }
   if (!contained(root, real)) pathDenied("symbolic link leaves the working folder");
   return real;
 }
@@ -916,6 +940,23 @@ export function builtinToolsAsAnthropic(permission: ToolPermission, opts: { canA
 }
 
 /**
+ * A failed call that also sent a name the tool does not take (read_file {file_path}) says what the tool takes and which
+ * declared name is closest. Added to the failure only; the call is never retried with the near name. Silent when the
+ * tool takes the argument or the failure cannot come from a wrong name (extra keys are otherwise harmless).
+ */
+function builtinArgumentHint(tool: BuiltinTool, args: Record<string, unknown>): string {
+  const properties = tool.parameters.properties;
+  if (!properties || typeof properties !== "object") return "";
+  const declared = Object.keys(properties);
+  const unknown = Object.keys(args).filter((key) => !declared.includes(key) && !key.startsWith("_agentlas"));
+  if (!unknown.length) return "";
+  const required = Array.isArray(tool.parameters.required) ? tool.parameters.required as string[] : [];
+  const missing = required.some((key) => args[key] === undefined);
+  if (!missing && !unknown.some((key) => closestNames(key, declared).length)) return "";
+  return ` ${unknownArgumentMessage(tool.name, unknown, declared)}`;
+}
+
+/**
  * 도구 하나를 실행한다. 권한 부족·알 수 없는 도구·실행 오류는 **던지지 않고**
  * `ok:false` 로 돌려준다 — 모델이 그 문장을 읽고 다른 길을 찾을 수 있어야 하고,
  * 도구 실패가 실행 전체를 죽이면 안 된다.
@@ -926,7 +967,7 @@ export async function runBuiltinTool(
   ctx: BuiltinToolContext,
 ): Promise<BuiltinToolRunResult & { ok: boolean }> {
   const tool = BY_NAME.get(name);
-  if (!tool) return { ok: false, content: `unknown tool: ${name}` };
+  if (!tool) { const near = didYouMean(name, BY_NAME.keys()); return { ok: false, content: `unknown tool: ${name}${near ? `.${near}` : ""}` }; }
   if (PERM_RANK[tool.minPerm] > (PERM_RANK[ctx.permission] ?? 0) && !confinedShellAllowed(name, ctx.permission, !!ctx.confineShell)) {
     return {
       ok: false,
@@ -947,6 +988,6 @@ export async function runBuiltinTool(
     }
     return { ok: true, content: String(value) };
   } catch (error) {
-    return { ok: false, content: `${name} error: ${error instanceof Error ? error.message : String(error)}` };
+    return { ok: false, content: `${name} error: ${error instanceof Error ? error.message : String(error)}${builtinArgumentHint(tool, args ?? {})}` };
   }
 }

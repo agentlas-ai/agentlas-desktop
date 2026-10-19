@@ -24,6 +24,7 @@ import { SURFACE_TRUST_REGISTRY, lintSurfaceTrust } from "./surface-trust";
 // (2026-08-12 사용자 제보: followups + surface 동시 노출).
 export { AGENT_SURFACE_OPEN as SURFACE_OPEN_FENCE, AGENT_SURFACE_CLOSE as SURFACE_CLOSE_FENCE } from "../shared/agent-control-blocks";
 import { AGENT_SURFACE_OPEN, AGENT_SURFACE_CLOSE } from "../shared/agent-control-blocks";
+import { didYouMean } from "../shared/did-you-mean";
 import {
   AGENTLAS_OS_FALLBACK_LADDER,
   SURFACE_AUTONOMY_ALLOWED_WITHOUT_PROMPT,
@@ -527,7 +528,7 @@ function validateSurfaceManifest(raw: unknown): {
       makeDiagnostic(
         "unsupported-layout",
         "$.layout",
-        `Surface layout must be one of: ${[...ALLOWED_LAYOUTS].join(", ")}.`,
+        `Surface layout must be one of: ${[...ALLOWED_LAYOUTS].join(", ")}.${typeof raw.layout === "string" ? didYouMean(raw.layout, ALLOWED_LAYOUTS) : ""}`,
         "Pick the closest layout from the injected Surface Manifest catalog.",
       ),
     );
@@ -618,7 +619,7 @@ function validateDataSets(raw: unknown, diagnostics: SurfaceManifestDiagnostic[]
           "unsupported-data-type",
           `$.data.${key}.type`,
           `Data set "${key}" uses unsupported type "${String(normalized.type)}".`,
-          `Use one of: ${[...ALLOWED_DATA_TYPES].join(", ")}.`,
+          `Use one of: ${[...ALLOWED_DATA_TYPES].join(", ")}.${typeof normalized.type === "string" ? didYouMean(normalized.type, ALLOWED_DATA_TYPES) : ""}`,
         ),
       );
       continue;
@@ -952,7 +953,7 @@ function canonicalCatalogValue(
       `unsupported-${label.replace(/\s+/g, "-")}`,
       path,
       `Surface ${label} "${value}" is not in the trusted catalog.`,
-      `Use one of: ${[...allowed].join(", ")}.`,
+      `Use one of: ${[...allowed].join(", ")}.${didYouMean(value, allowed)}`,
     ),
   );
   return undefined;

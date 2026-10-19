@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { registerNativeApprovalChildSignal } from "./native-approval-provenance";
+import { unknownArgumentMessage } from "../../shared/did-you-mean";
 import type { RunnerEvents } from "./runner";
 import type { LocalToolApprovalContext, MainToolDispatchCall, MainToolDispatchResult, OpenAiToolDef, ResolvedTool } from "./local-tool-loop";
 
@@ -48,7 +49,8 @@ export async function runMainCodeMode(byName: Map<string, ResolvedTool>, input: 
   const args: unknown = JSON.parse(input);
   if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("code_mode_arguments_invalid");
   const data = args as Record<string, unknown>;
-  if (typeof data.code !== "string" || Object.keys(data).some(key => !["code", "timeoutMs"].includes(key))) throw new Error("code_mode_arguments_invalid");
+  const unknownKeys = Object.keys(data).filter(key => !["code", "timeoutMs"].includes(key));
+  if (typeof data.code !== "string" || unknownKeys.length) throw new Error(`code_mode_arguments_invalid${unknownKeys.length ? `: ${unknownArgumentMessage(CODE_MODE_TOOL, unknownKeys, ["code", "timeoutMs"])}` : ""}`);
   const timeoutMs = data.timeoutMs ?? 5000;
   if (!Number.isInteger(timeoutMs) || (timeoutMs as number) < 10 || (timeoutMs as number) > 30000) throw new Error("code_mode_timeout_invalid");
   approval.signal?.throwIfAborted();

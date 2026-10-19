@@ -6,6 +6,7 @@ import { recordRunProducedFiles } from "./run-produced-files";
 import { composeFinanceSkillContent, FINANCE_PORTS } from "../finance/tools";
 import type { FinanceReceiptReference } from "../finance/receipts";
 import { composeDeclaredPrompt, registerDeclaredPromptModule } from "../runtime/prompt-order";
+import { didYouMean, missingArgumentsMessage } from "../../shared/did-you-mean";
 
 /*
  * Agentlas harness capability ports (docs/2026-10-13-native-harness/15 §8, contracts/harness-capability-ports.json).
@@ -1037,7 +1038,8 @@ const PORTS: PortDefinition[] = [
         return ok(result);
       } catch (error) {
         const code = error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : "operation_failed";
-        return refused(code, error instanceof Error ? error.message.slice(0, 300) : undefined);
+        // 600, not 300: the handler's own text can lead and the argument hint (service.ts withArgumentHints) follows it.
+        return refused(code, error instanceof Error ? error.message.slice(0, 600) : undefined);
       }
     },
   },
@@ -1200,13 +1202,29 @@ function withRequiredIdAliases(required: readonly string[], args: Record<string,
   return out;
 }
 
+/**
+ * `. Did you mean x?` (or nothing) for a refused operation id; hint text only, the refused id is never run as the near one.
+ * An id that is exactly an app operation (automations.listRuns) is a call to app.call, not a port: say so.
+ */
+async function nearOperations(id: string): Promise<string> {
+  const near = didYouMean(id, PORT_BY_ID.keys());
+  let app = "";
+  try {
+    const { APP_CONTROL_CATALOG } = await import("../app-control/catalog.generated");
+    if (APP_CONTROL_CATALOG.some((entry) => entry.path === id)) app = ` ${id} is an app operation: run harness_call app.call with args {"operation":"${id}","args":{…}}.`;
+  } catch { /* the catalog is a plain generated module; without it only the id hint is given */ }
+  return `${near ? `.${near}` : ""}${app}`;
+}
+
 export async function callHarnessPort(operationId: string, rawArgs: Record<string, unknown>, ctx: HarnessCallContext): Promise<HarnessPortResult> {
   const port = PORT_BY_ID.get(operationId);
   const base = { schemaVersion: "agentlas.harness-result.v1" as const, operationId };
-  if (!port) return { ...base, status: "refused", reason: "operation_unknown", next: "harness_search with kind \"operation\" lists them", receiptId: `hr_${randomUUID()}` };
+  // A misspelled id names the closest operation ids; the refused id is never run as one of them.
+  if (!port) return { ...base, status: "refused", reason: "operation_unknown", next: `harness_search with kind "operation" lists them${await nearOperations(operationId)}`, receiptId: `hr_${randomUUID()}` };
   const args = withRequiredIdAliases(port.required, rawArgs);
   const missing = port.required.filter((key) => args[key] === undefined || args[key] === null || (typeof args[key] === "string" && !(args[key] as string).trim()));
-  if (missing.length) return { ...base, status: "refused", reason: "arguments_missing", next: `required: ${missing.join(", ")}`, receiptId: `hr_${randomUUID()}` };
+  // An argument sent under a wrong name is the usual cause: name the missing field it is closest to.
+  if (missing.length) return { ...base, status: "refused", reason: "arguments_missing", next: missingArgumentsMessage(missing, Object.keys(rawArgs), [...port.required, ...Object.keys((port.inputSchema?.properties ?? {}) as object)]), receiptId: `hr_${randomUUID()}` };
   if (!port.handler) return { ...base, status: "unavailable", reason: port.unavailable!.reason, next: port.unavailable!.next, receiptId: `hr_${randomUUID()}` };
   let outcome: PortOutcome;
   try {
@@ -1293,5 +1311,5 @@ export async function describeHarness(id: string, ctx: HarnessCallContext): Prom
   if (ref.startsWith("connector:")) return callHarnessPort("connector.describe", { connectorId: ref }, ctx);
   if (ref.startsWith("tool:")) return callHarnessPort("tool.describe", { toolId: ref }, ctx);
   if (ref.startsWith("agentlas.") || ref.startsWith("check.")) return callHarnessPort("tool.canonical.describe", { canonicalId: ref }, ctx);
-  return { schemaVersion: "agentlas.harness-result.v1", operationId: "describe", status: "refused", reason: "id_unknown", next: "use an id returned by harness_search", receiptId: `hr_${randomUUID()}` };
+  return { schemaVersion: "agentlas.harness-result.v1", operationId: "describe", status: "refused", reason: "id_unknown", next: `use an id returned by harness_search${await nearOperations(ref)}`, receiptId: `hr_${randomUUID()}` };
 }
