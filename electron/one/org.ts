@@ -42,6 +42,7 @@ import { couldHaveChangedTheOutsideWorld, isHostPreflightTool } from "../../shar
 import { redactSecrets } from "../../shared/secret-patterns";
 import { getAgentRuntimeOverride, removeAgentRuntimeOverride, setAgentRuntimeOverride } from "../store/agent-runtime-overrides";
 import { seatFailureVerdictInDb } from "../store/seat-failure-evidence";
+import { isCallOnlyHubAgent } from "../../shared/call-only-agent";
 
 type Row = {
   id: string;
@@ -291,10 +292,18 @@ export function cacheOneOrgCompletionSummary(input: {
   `).run(input.installedAgentId, input.runId, JSON.stringify({ produced, pending: [] }), new Date().toISOString());
 }
 
+/**
+ * Where a teammate runs from. A Hub or cloud agent that is installed on this computer runs from its own local copy, so it is a
+ * local teammate (group conversations take local teammates only); where it came from stays on the agent (assetSource). Only a
+ * call-only Hub agent, which has no local instructions and can only be called, stays a Hub seat.
+ */
 function sourceFor(agent: InstalledAgent): OneOrgSource {
-  if (agent.assetSource === "hub") return "hub";
-  if (agent.assetSource === "agent-cloud") return "cloud";
-  return "local";
+  return isCallOnlyHubAgent(agent) ? "hub" : "local";
+}
+
+/** A seat's stored source can predate that rule (a Hub or cloud copy seated while it still read as hub or cloud): the agent's own state decides. */
+function currentSource(stored: OneOrgSource, installed: InstalledAgent | undefined): OneOrgSource {
+  return installed ? sourceFor(installed) : stored;
 }
 
 function assertText(value: unknown, label: string, max = 160): string {
@@ -633,7 +642,7 @@ function toMember(row: Row, now = Date.now()): OneOrgMember {
     displayName: row.display_name || installed?.localDisplayName || installed?.name || row.agent_slug,
     nameEn: installed?.nameEn || installed?.name || row.agent_slug,
     icon: row.icon || "one-puppy",
-    source: row.source,
+    source: currentSource(row.source, installed),
     sortOrder: row.sort_order,
     leaseExpiresAt: row.lease_expires_at,
     addedAt: row.added_at,
@@ -773,6 +782,9 @@ export function ensureOneGroupLocalStaff(agentIds: string[], seatMissing = true,
       if (prior.status_kind === "locked" && prior.source !== "hub") refuse("seat_locked");
       if (prior.source !== "hub" && (isExpired(prior.lease_expires_at)
         || (prior.lease_expires_at !== null && !Number.isFinite(Date.parse(prior.lease_expires_at))))) refuse("seat_lease_invalid");
+      // Bring a seat made before an installed copy counted as local up to date, so the stored source agrees with what is shown.
+      const current = sourceFor(agent);
+      if (prior.source !== current) db.prepare("UPDATE one_org_members SET source = ?, updated_at = ? WHERE id = ?").run(current, new Date().toISOString(), prior.id);
       continue;
     }
     if (sourceFor(agent) !== "local") throw new Error("one_group_member_seating_required");

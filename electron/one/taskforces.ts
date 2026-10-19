@@ -316,14 +316,15 @@ export function composeOneTaskforceForChat(input: { chatId: string; memberAgentI
       && db.prepare("SELECT 1 FROM one_seats WHERE id = ? AND dissolved_at IS NOT NULL").get(id))) throw new Error("one-team-group-chat-unavailable");
     const requested = normalizeMemberIds(input.memberAgentIds, { allowUnavailable: false });
     if (!requested.length) throw new Error("one-team-group-invalid-members");
+    // Named, plain-language refusal first (source gone, hidden, archived, locked...); the generic one is the fallback. It also
+    // brings a seat's stored source up to date (an installed Hub or cloud copy is local), so it runs before the source check.
+    ensureOneGroupLocalStaff(requested, false, { allowPriorTaskFailure: true });
     // Require a pre-existing local org identity, then reuse its package/lease checks.
     const placeholders = requested.map(() => "?").join(",");
     const local = db.prepare(`SELECT installed_agent_id FROM one_org_members
       WHERE archived_at IS NULL AND source = 'local' AND status_kind != 'locked'
       AND installed_agent_id IN (${placeholders})`).all(...requested) as Array<{ installed_agent_id: string }>;
     const localIds = new Set(local.map(row => row.installed_agent_id));
-    // Named, plain-language refusal first (source gone, hidden, archived, locked...); the generic one is the fallback.
-    ensureOneGroupLocalStaff(requested, false, { allowPriorTaskFailure: true });
     if (requested.some(id => !localIds.has(id))) throw new Error("one-team-group-member-unavailable");
     let prior: string[] = [];
     if (existing) {
