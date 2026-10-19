@@ -1691,6 +1691,12 @@ function isOneTeamComposeGroupInput(input: unknown): input is OneTeamComposeGrou
     && new Set(value.members).size === value.members.length;
 }
 
+/** Why a Hub or cloud teammate cannot be seated in a group conversation, and what to do instead (both owner and model read it). */
+const GROUP_NOT_LOCAL_REASON = {
+  en: "Hub and cloud teammates cannot join a group conversation. Give this teammate work as its own session (one_team_start_session), or create a local teammate with the same role (one_team_create_member) and add that one to the group.",
+  ko: "허브·클라우드 팀원은 그룹 대화에 들어올 수 없어요. 이 팀원에게는 개별 작업(one_team_start_session)으로 일을 맡기거나, 같은 역할의 로컬 팀원을 새로 만들어(one_team_create_member) 그룹에 넣어 주세요.",
+} as const;
+
 export function oneTeamComposeGroup(caller: OneTeamCaller, input: unknown) {
   const chatId = assertCaller(caller.chatId);
   assertGroupMutationAllowed(chatId);
@@ -1707,7 +1713,12 @@ export function oneTeamComposeGroup(caller: OneTeamCaller, input: unknown) {
       // Name the teammate and say why in plain words (both languages); the machine code is only in the prefix.
       throw new Error(`one-team-group-member-unavailable: "${member.displayName}" cannot join this group. ${member.unavailable.reason.en} / ${member.unavailable.reason.ko} The group is unchanged.`);
     }
-    if (!member || member.source !== "local" || member.statusKind === "locked") {
+    if (member && member.source !== "local") {
+      // A Hub or cloud teammate runs as its own session, never inside a group conversation. Say what works instead, in both
+      // languages: with only "local members only" the model stops and asks the owner instead of staffing the group.
+      throw new Error(`one-team-group-member-unavailable: "${member.displayName}" cannot join this group. ${GROUP_NOT_LOCAL_REASON.en} / ${GROUP_NOT_LOCAL_REASON.ko} The group is unchanged.`);
+    }
+    if (!member || member.statusKind === "locked") {
       throw new Error("one-team-group-member-unavailable: only existing active local One members can compose this group; the group is unchanged.");
     }
     return member;
