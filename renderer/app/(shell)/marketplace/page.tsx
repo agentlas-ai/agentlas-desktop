@@ -201,7 +201,7 @@ function MarketplacePage() {
   const [page, setPage] = useState(1);
   const PAGE_SIZE = 12;
   const [category, setCategory] = useState<HubCategory>("all");
-  // "공개 Hub" 와 "내 Cloud" 는 같은 메뉴의 두 탭이다(오너 결정 2026-10-19). ?tab=cloud 로 바로 들어올 수 있다.
+  // "공개 Hub" 와 "내 Cloud" 는 같은 메뉴의 두 탭이다. ?tab=cloud 로 바로 들어올 수 있다.
   const [source, setSource] = useState<"hub" | "cloud">(() => searchParams.get("tab") === "cloud" ? "cloud" : "hub");
   useEffect(() => {
     setSource(searchParams.get("tab") === "cloud" ? "cloud" : "hub");

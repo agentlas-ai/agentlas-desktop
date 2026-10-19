@@ -228,15 +228,9 @@ export function decideRuntimeCookieFeed(input: {
  * 한 번에 넣을 쿠키를 **로그인 묶음 단위로** 고른다(자동 갱신 전용 판정, 사용자가 누른 가져오기는
  * 원본이 전부 이긴다).
  *
- * ★오너 신고 "왜 자꾸 로그아웃되냐" (09-27~) — 실측 2026-09-29(오너 기기, 이름·도메인·시각만):
- *   전용 크롬의 .youtube.com 에는 __Secure-3PSID·3PAPISID·1PSIDTS·3PSIDTS·3PSIDCC 만 있고
- *   SID·HSID·SSID·APISID·SAPISID·__Secure-1PSID·1PAPISID·LOGIN_INFO 가 **없었다**. 평소 크롬(원본)에는
- *   전부 있다. 같은 저장소의 .google.com 은 __Secure-1PSID 가 21:27:30 발급, SID·HSID·PSIDTS 는
- *   21:45:18 투입 — 한 로그인의 쿠키가 두 세대로 섞여 있다. 자동화가 선 로그인 벽 9건은 전부
- *   youtube.com/signin → accounts.google.com accountchooser 였다(run_events 09-27~29).
- *   원인은 쿠키 **한 줄씩** 내리던 판정(decideRuntimeCookieFeed·decideNativeCookieWrite): 목적지에
- *   묶음 일부만 남아 있으면 "있는 줄은 지키고 없는 줄만 넣기" 가 되어 두 세션을 섞거나, 반쪽 묶음을
- *   "살아 있는 세션"으로 여겨 영영 채우지 않는다. 섞인·반쪽 로그인은 사이트가 로그인으로 받지 않는다.
+ * 왜 묶음 단위인가: 쿠키를 **한 줄씩** 판정하면(decideRuntimeCookieFeed·decideNativeCookieWrite) 목적지에 묶음 일부만 남아
+ *   있을 때 "있는 줄은 지키고 없는 줄만 넣기" 가 되어 두 로그인 세대가 섞이거나, 반쪽 묶음을 "살아 있는 세션"으로 여겨 영영
+ *   채우지 않는다. 섞인·반쪽 로그인은 사이트가 로그인으로 받지 않는다.
  *
  * 규칙(로그인 쿠키 이름을 아는 묶음만; 모르는 사이트는 perCookie 그대로):
  *   - 원본에 그 묶음의 로그인 쿠키가 없으면 → 줄 단위 판정(옮길 로그인이 없다).

@@ -1060,14 +1060,13 @@ export interface ClaudeResultUsage {
 }
 
 /**
- * What a runner turn's own CLI results add up to, in the two scopes the model-call ledger requires to agree (flow audit
- * 2026-10-18 AD-7; ledger: usage.inputTokens must equal rawInputTokens + cachedInputTokens + cacheCreationInputTokens).
+ * What a runner turn's own CLI results add up to, in the two scopes the model-call ledger requires to agree (ledger:
+ * usage.inputTokens must equal rawInputTokens + cachedInputTokens + cacheCreationInputTokens).
  *
  * Usage contract (CLI 2.1.302):
  *  - A result's `usage` is the ROOT agent's own model requests of that one CLI turn, "a per-turn main-loop usage" (the
- *    SDK type's wording). It is not a running total: two production passes (35f7ec1f, 2026-10-18) recorded exactly the sum
- *    of their root transcript's per-message usage (38,575,896 / 83,415 and 741,142 / 4,311 input / output tokens) and none
- *    of the 25-31 M tokens their subagents spent. total_cost_usd, duration_api_ms and modelUsage ARE session running
+ *    SDK type's wording). It is not a running total: it is exactly the sum of the root transcript's per-message usage
+ *    and none of the tokens the subagents spent. total_cost_usd, duration_api_ms and modelUsage ARE session running
  *    totals ("read the latest result rather than summing") and are never added here.
  *  - So a runner turn's receipt is the sum of `usage` over the results it took as its own (one per CLI turn it ran: its
  *    prompt, a steered direction that ran as the next turn). The same sum covers all four counters, so the total can

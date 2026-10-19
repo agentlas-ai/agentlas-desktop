@@ -1019,7 +1019,7 @@ export class LocalModelHubManager {
    * An engine that dies on its own (an unload, an idle reap and a shutdown clear ownership first, so they never get here) is started
    * again with the same model and the context the owner asked for (`contextTokens` is the REQUEST, 0 = auto; never the n_ctx the
    * engine measured). Runs in flight at the exit are aborted with LocalEngineExitedError as their reason. Without it a crash
-   * (llama-server SIGBUS in its output parser, measured 2026-10-19) left every later turn on "no model" until the owner reloaded it
+   * (for example a llama-server crash in its output parser) left every later turn on "no model" until the owner reloaded it
    * by hand. This never sets unavailableReason: that latch blocks every mutation, including the owner's own reload.
    */
   private recoverAfterEngineExit(installationId: string, contextTokens: number, exited?: { endpoint: string; reasonCode: string }): void {

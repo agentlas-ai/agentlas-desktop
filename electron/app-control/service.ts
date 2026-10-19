@@ -481,8 +481,8 @@ function errorCode(error: unknown): string {
 /**
  * A name the operation does not take may be a field of one of its object arguments (models flatten `input`): say where it
  * goes, with the call shape. "takes input" alone left a model putting `input` next to `operation`, which harness app.call
- * reads as the container of ALL arguments (its `input` alias for `args`); with the shape written out, 7 of 8 Haiku runs
- * sent the filter inside args.input, against 0 of 8 without the hint.
+ * reads as the container of ALL arguments (its `input` alias for `args`); with the shape written out, a model sends the
+ * filter inside args.input.
  */
 function nestedFieldHint(path: string, unknown: readonly string[]): string {
   const properties = APP_CONTROL_ARGUMENT_SCHEMAS[path]?.properties;
@@ -535,9 +535,8 @@ export async function appControlCallLocal(caller: AppControlCaller, input: { ope
   const operation = operations().find((candidate) => candidate.path === path);
   if (!operation) {
     if (catalogEntry?.surface === "science") throw new AppControlError("science-not-installed", "Agentlas Science is not installed or not active.");
-    // The refusal names the closest catalog operations (the same deterministic search). Dev 2026-10-18 run11: Haiku guessed
-    // automations.runs.list, automations.history and automations.executions for automations.listRuns, and the hint named
-    // one_app_operations, a tool the harness path does not have (it was tried as an operation name).
+    // The refusal names the closest catalog operations (the same deterministic search), so a guessed name such as
+    // automations.runs.list leads to the real one (automations.listRuns).
     const searched = path ? (appControlOperationsLocal({ query: path, limit: 8 }).operations ?? []).map((item) => String(item.operation)) : [];
     // A misspelled path ("automatons.list") shares few whole words with the catalog's search. A path the shared typo matcher
     // finds almost identical leads; the search results keep their order after it; looser typo matches come last.
@@ -552,7 +551,7 @@ export async function appControlCallLocal(caller: AppControlCaller, input: { ope
   const unknown = Object.keys(named).filter((key) => !operation.params.includes(key));
   if (unknown.length) throw new AppControlError("invalid-arguments", `${unknownArgumentMessage(path, unknown, operation.params)}${nestedFieldHint(path, unknown)}`);
   // A required argument that is missing is refused, never sent as undefined: automations.listRuns without its id answered
-  // 0 runs as if that were the history (dev 2026-10-17 run8), and the agent reported "no runs last week".
+  // 0 runs as if that were the history.
   const requiredKeys = APP_CONTROL_ARGUMENT_SCHEMAS[path]?.required;
   const missing = Array.isArray(requiredKeys) ? requiredKeys.filter((key) => typeof key === "string" && named[key] === undefined) : [];
   if (missing.length) throw new AppControlError("invalid-arguments", `${path} needs ${missing.join(", ")}; pass them in args.`);

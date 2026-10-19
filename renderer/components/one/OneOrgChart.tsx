@@ -281,7 +281,7 @@ export function OneOrgChart({
   const candidates = installedAgents.filter((agent) => {
     if (usedIds.has(agent.id)) return false;
     // 좌석에는 이 Mac에 등록된 에이전트만 앉힌다. Hub·Cloud 에서 내려받은 사본은 로컬 에이전트다 —
-    // 소스 지시문이 없는 호출 전용 Hub 항목만 뺀다(오너 결정 2026-10-19).
+    // 소스 지시문이 없는 호출 전용 Hub 항목만 뺀다.
     if (isCallOnlyHubAgent(agent)) return false;
     // 팀 패키지의 내부 역할(Orchestrator·Memory Curator 등)은 앉힐 수 있는 사람이 아니다.
     // 팀은 팀으로 앉힌다 — 실측 2026-08-23: 팀 4개가 구성원 25명으로 풀려 목록을 뒤덮었다.
