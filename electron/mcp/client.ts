@@ -395,6 +395,9 @@ const OBSERVATION_READ_TOOL_CAPABLE = (kind: string): boolean => kind !== "antig
  * "unknown"; we accept only a machine-shaped message, a Node/SQLite `code`, or the error
  * class name — never free-form prose, paths or values.
  */
+/** Host-authored sentence, safe to show: the logged-in Agentlas Browser host is not ready for a run that needs it. */
+const AGENTLAS_BROWSER_HOST_UNAVAILABLE = "agentlas-browser-host-unavailable";
+
 function mcpConfigFailureCode(err: unknown): string | null {
   const machine = /^[a-z][a-z0-9_-]{2,80}$/;
   if (err instanceof Error && machine.test(err.message)) return err.message;
@@ -3972,11 +3975,13 @@ async function runMcpInvocationInContext(
         selectedContext.effectiveToolMode === "browser" &&
         !selectedTools.some((tool) => tool.id === "agentlas-browser" && tool.state === "ready")
       ) {
-        throw new Error(
+        // A typed code, so the owner is told what to do (this sentence) and the run record names the cause, instead of an
+        // internal class name behind a generic "check the tool connection".
+        throw Object.assign(new Error(
           locale === "ko"
             ? "로그인된 Agentlas Browser 호스트를 확인할 수 없어 자동화를 실행하지 않았습니다. Agentlas Browser를 다시 연결한 뒤 재시도하세요."
             : "The authenticated Agentlas Browser host is unavailable. The automation was blocked before model execution; reconnect Agentlas Browser and retry.",
-        );
+        ), { code: AGENTLAS_BROWSER_HOST_UNAVAILABLE });
       }
       if (installedTools.length > 0) {
         sink({
@@ -4269,11 +4274,15 @@ async function runMcpInvocationInContext(
         payload: { schemaVersion: 1, code, stage: diagnostic.stage, reasonCode: diagnostic.code } });
 
       if (process.env.AGENTLAS_MCP_CONFIG_DEBUG === "1") console.error("[mcp] config failure detail:", err instanceof Error ? `${err.name}: ${err.message}\n${err.stack ?? ""}` : String(err));
+      // An internal class name ("error-class:Error") tells the owner nothing: the cause is in the run record, not on screen.
+      const shownCode = diagnostic.code.startsWith("error-class:") ? "" : ` (${diagnostic.code})`;
       sink({ kind: "error", error: {
         code,
-        message: locale === "ko"
-          ? `이번 실행의 도구 연결을 준비하지 못했습니다. 도구 연결을 확인한 뒤 다시 시도해 주세요. (${diagnostic.code})`
-          : `Could not prepare this run's tool connections. Check the tool connection and retry. (${diagnostic.code})`,
+        message: thrownCode === AGENTLAS_BROWSER_HOST_UNAVAILABLE && err instanceof Error
+          ? err.message
+          : locale === "ko"
+            ? `이번 실행의 도구 연결을 준비하지 못했습니다. 도구 연결을 확인한 뒤 다시 시도해 주세요.${shownCode}`
+            : `Could not prepare this run's tool connections. Check the tool connection and retry.${shownCode}`,
       } });
       return earlyResult();
     }
