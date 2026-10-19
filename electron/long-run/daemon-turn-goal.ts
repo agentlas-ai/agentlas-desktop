@@ -53,12 +53,28 @@ function sourceDaemonRun(run: LongRunRecord): { runId: string; ended: boolean } 
   return { runId: marker.run_id, ended: owner.state === "released" };
 }
 
-/** True when Main admitted `goalId` for the service run `runId`: the forwarded intake's completed marker names both. Such a
- * Goal follows the run (followDaemonTurnGoal), so the run itself holds no producer custody and is never refused for lacking it. */
+/** The user message a service run answers: the row it bound as its prompt or, for a retry or recovery that appends none, the
+ * latest user row it started from. A new owner message always binds its own row first, so it is never mistaken for a retry. */
+function promptMessageOfRun(runId: string): string | null {
+  const db = getDb();
+  const bound = db.prepare(`SELECT json_extract(payload_json, '$.promptMessageId') AS id FROM run_events
+      WHERE run_id = ? AND kind = 'invoke_prompt_bound' ORDER BY seq LIMIT 1`).get(runId) as { id: string | null } | undefined;
+  if (bound?.id) return bound.id;
+  const started = db.prepare(`SELECT json_extract(payload_json, '$.latestUserMessageRowId') AS row FROM run_events
+      WHERE run_id = ? AND kind = 'invoke_started' ORDER BY seq LIMIT 1`).get(runId) as { row: number | null } | undefined;
+  if (typeof started?.row !== "number") return null;
+  const message = db.prepare("SELECT id FROM chat_messages WHERE rowid = ? AND role = 'user'").get(started.row) as { id: string } | undefined;
+  return message?.id ?? null;
+}
+
+/** True when Main admitted `goalId` for the user message the service run `runId` answers. Such a Goal follows every service run
+ * of that message (the first one, and the host's retries and recoveries of it, followDaemonTurnGoal), so none of them holds
+ * producer custody or is refused for lacking it. A Goal admitted for another message is not covered. */
 export function goalAdmittedForServiceRun(runId: string, goalId: string): boolean {
-  return getDb().prepare(`SELECT 1 FROM run_events WHERE run_id = ? AND kind = 'automatic_goal_intake_completed'
+  if (!goalId.startsWith(AUTO_GOAL_PREFIX) || promptMessageOfRun(runId) !== goalId.slice(AUTO_GOAL_PREFIX.length)) return false;
+  return getDb().prepare(`SELECT 1 FROM run_events WHERE kind = 'automatic_goal_intake_completed'
       AND json_extract(payload_json, '$.goalId') = ? AND json_extract(payload_json, '$.outcome') = 'admitted' LIMIT 1`)
-    .get(runId, goalId) !== undefined;
+    .get(goalId) !== undefined;
 }
 
 /** A turn of the same chat that started after the service run and is still live: it owns the room now. */
