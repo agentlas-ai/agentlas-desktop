@@ -57,7 +57,7 @@ async function runCompanyWorkInvocationInner(req:McpInvocationRequest,cap:object
   const events={onPartial:(chunk:string)=>recordCompanyWorkContent('partial',{text:chunk}),onStatus:(text:string)=>recordCompanyWorkContent('status',{text}),onTool:(name:string,args?:string,result?:string,id?:string,isError?:boolean)=>{recordCompanyWorkContent('tool',{name,args,result,id,isError});sink({kind:'tool-use',tool:{name,id,isError}})}};
   const result=await withCompanyProvider(grant.providerCapability,async()=>host.runtime.kind==='claude-code'
    ? runCompanyClaude(request,events,await companyClaudePin(grant.providerCapability),[
-    ...mailTools.map(name=>'mcp__'+configKey+'__'+name),...fileTools.map(name=>'mcp__company-files__'+name)],path.join(directory,'claude-config'))
+    ...mailTools.map(name=>'mcp__'+configKey+'__'+name),...fileTools.map(name=>'mcp__company-files__'+name)],path.join(directory,'claude-config'),job.policy.expiresAt)
    : runners[host.runtime.backend!](request,events));
   signal?.throwIfAborted();await refreshCompanyWorkGrant(cap);
   if(result.failure)throw Object.assign(Error('company_work_provider_failed'),{code:'company_work_provider_failed',failure:result.failure});

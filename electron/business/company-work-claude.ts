@@ -11,6 +11,12 @@ import type {RunnerRequest,RunnerEvents,RunnerResult} from '../runtime/runner';
 
 const digest=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const own=(value:unknown):value is Record<string,unknown>=>!!value&&typeof value==='object'&&!Array.isArray(value);
+/** Company-only wall clock bound; a current Root policy may expire sooner. */
+export function companyClaudeTimeBudget(policyExpiresAt:string,now=Date.now()):{milliseconds:number;reason:'company_work_claude_timeout'|'company_work_policy_expired'}{
+ const remaining=Date.parse(policyExpiresAt)-now;
+ if(!Number.isFinite(remaining)||remaining<=0)throw Error('company_work_policy_expired');
+ return remaining<=600000?{milliseconds:remaining,reason:'company_work_policy_expired'}:{milliseconds:600000,reason:'company_work_claude_timeout'};
+}
 type Auth={loggedIn:true;authMethod:'claude.ai';apiProvider:'firstParty';subscriptionType:string;accountDigest:string;accountMetadataPresent:boolean;accountMetadataAbsent:boolean};
 export type CompanyClaudePin={source:string;fingerprint:string;binarySha256:string;auth:Auth;credentialSourceContractDigest:string|null;configurationDigest:string};
 // The installed macOS CLI embeds this exact secure-storage key derivation and
@@ -97,7 +103,7 @@ export async function assertCompanyClaudePin(pin:CompanyClaudePin,signal?:AbortS
  * exactly the two prepared company servers' finite tool names before any
  * model/tool event is accepted. No personal config, session or built-in tool
  * can be selected by a model or renderer. */
-export async function runCompanyClaude(req:RunnerRequest,events:RunnerEvents,pin:CompanyClaudePin,allowedTools:readonly string[],configDir:string):Promise<RunnerResult>{
+export async function runCompanyClaude(req:RunnerRequest,events:RunnerEvents,pin:CompanyClaudePin,allowedTools:readonly string[],configDir:string,policyExpiresAt:string):Promise<RunnerResult>{
  if(!req.mcpConfigPath||!req.cwd||!allowedTools.length||new Set(allowedTools).size!==allowedTools.length||allowedTools.some(name=>!/^mcp__(?:company-agent-mail|company-files)__(?:agent_mail_(?:thread|read|reply|draft)|company_file_(?:read|write))$/.test(name)))throw Error('company_work_claude_tools_invalid');
  await assertCompanyClaudePin(pin,req.signal,true);fs.mkdirSync(configDir,{recursive:true,mode:0o700});
  const env=companyCliEnv(pin.source,configDir),args=['-p','--input-format','text','--system-prompt',req.systemPrompt,'--output-format','stream-json','--verbose','--no-session-persistence',
@@ -105,10 +111,11 @@ export async function runCompanyClaude(req:RunnerRequest,events:RunnerEvents,pin
   '--permission-prompts','none','--allowedTools',allowedTools.join(','),'--mcp-config',req.mcpConfigPath];
  if(req.model)args.push('--model',req.model);if(req.effort)args.push('--effort',req.effort);
  if(Buffer.byteLength(req.systemPrompt)+Buffer.byteLength(req.userPrompt)>150000)throw Error('company_work_claude_prompt_too_large');
+ const timeBudget=companyClaudeTimeBudget(policyExpiresAt);
  return new Promise<RunnerResult>((resolve,reject)=>{const child=crossSpawn(pin.source,args,{cwd:configDir,env,stdio:['pipe','pipe','pipe'],windowsHide:true,...detachedSpawnOpts()});
   const pending=new Map<string,{name:string;args:string}>();let buffer='',outputBytes=0,stderrBytes=0,init=false,terminal:Record<string,unknown>|null=null,settled=false,fatal:Error|null=null;
   const violation=(code:string)=>{if(fatal)return;fatal=Error(code);killCliTree(child)};
-  const deadline=setTimeout(()=>violation('company_work_claude_timeout'),180000),abort=()=>violation('company_work_claude_cancelled');req.signal?.addEventListener('abort',abort,{once:true});if(req.signal?.aborted)abort();
+  const deadline=setTimeout(()=>violation(timeBudget.reason),timeBudget.milliseconds),abort=()=>violation('company_work_claude_cancelled');req.signal?.addEventListener('abort',abort,{once:true});if(req.signal?.aborted)abort();
   const finish=(error?:Error,result?:RunnerResult)=>{if(settled)return;settled=true;clearTimeout(deadline);req.signal?.removeEventListener('abort',abort);if(error)reject(error);else resolve(result!)};
   const parse=(line:string)=>{if(fatal||!line.trim())return;let item:unknown;try{item=JSON.parse(line)}catch{return violation('company_work_claude_protocol_invalid')}
    if(!own(item))return violation('company_work_claude_protocol_invalid');
