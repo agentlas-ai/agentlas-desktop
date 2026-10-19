@@ -1267,23 +1267,26 @@ export async function searchHarness(query: string, kind?: HarnessItemKind): Prom
     for (const feature of FEATURE_MODULES) if (matches(query, feature.featureId, ...feature.surfaces)) out.push({ id: `feature:${feature.featureId}`, kind: "feature", name: feature.featureId, description: `surfaces: ${feature.surfaces.join(", ") || "-"}` });
   }
   if (want("operation")) for (const port of PORTS) if (matches(query, port.operationId, port.purpose)) out.push({ id: port.operationId, kind: "operation", name: port.operationId, description: `${port.purpose}${port.handler ? "" : " (unavailable)"}` });
-
-
-
-
-
-
+  // The app's own operations answer through app.operations / app.call, whose purpose names no domain. The catalog paths
+  // that answer the query rank those two entries, and they lead the candidates so a tie goes to the app (dev 2026-10-18 O6:
+  // "automation run log schedule" returned skills and science tools, never automations.*, and the Light-lane worker gave up
+  // "no registration tool"). The two entries are shown, with the matching paths named in their description, whenever the catalog
+  // answers the query: also under a kind filter, because a worker that narrows to plugin/skill/connector/tool/feature (Haiku in
+  // the O17 retests, every time) otherwise never sees the app's own operations, where Hub search (marketplace.search) lives, and
+  // reports "no such tool". Nothing else is added to what the query found.
   const appPaths = await appOperationPaths(query);
+  const { hasHangul } = await import("./search-rank");
   if (appPaths.length) for (const id of ["app.call", "app.operations"]) {
     const port = PORT_BY_ID.get(id);
     if (!port) continue;
     const at = out.findIndex((item) => item.id === id);
     if (at >= 0) out.splice(at, 1);
-
-
-
-
-    out.unshift({ id: port.operationId, kind: "operation", name: port.operationId, description: `${port.purpose}${port.handler ? "" : " (unavailable)"} Operations matching this search: ${appPaths.slice(0, 8).join(", ")}.`, rankTerms: /[^\x00-\x7f]/.test(query) ? [...appPaths, query.toLowerCase()] : appPaths });
+    // A Hangul query shares no word with the English port text and would drop the entry: its own words rank it (other queries unchanged;
+    // text that only has accents or other non-ASCII letters is not Korean).
+    // The entry names the app operations that answered this query: dev 2026-10-18 O17 (Haiku) saw app.operations / app.call on top
+    // for "hub search agents public marketplace" and still opened catalog entries instead, because their purpose lines name no
+    // domain. Naming marketplace.search here is what ties the generic entry to the request.
+    out.unshift({ id: port.operationId, kind: "operation", name: port.operationId, description: `${port.purpose}${port.handler ? "" : " (unavailable)"} Operations matching this search: ${appPaths.slice(0, 8).join(", ")}.`, rankTerms: hasHangul(query) ? [...appPaths, query.toLowerCase()] : appPaths });
   }
   // Best match first across every kind (search-rank.ts); the fixed kind order cut the answering operation off (r07).
   const { rankHarnessItems } = await import("./search-rank");

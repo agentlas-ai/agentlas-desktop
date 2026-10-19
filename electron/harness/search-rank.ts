@@ -15,6 +15,23 @@ export interface RankableHarnessItem {
   rankTerms?: readonly string[];
 }
 
+/** True when the text contains Hangul: a Korean query, as opposed to any text that merely has accents or other non-ASCII letters. */
+export function hasHangul(text: string): boolean {
+  return /[\u3131-\u318e\uac00-\ud7a3]/u.test(text);
+}
+
+/*
+ * A Korean noun standing alone ("폰", "골"), not the start or end of a longer word ("골프", "폰트", "마이크로폰"). JavaScript's \b
+ * is ASCII-only: between two Hangul syllables there is never a boundary, so \b폰\b and 골\b matched nothing. Instead it must not
+ * follow a letter or digit, and must be followed by the end, a non-letter, or a case particle that is itself followed by one
+ * ("폰에서 보고 싶어", "골을 만들어줘"). No match inside a word, so "골프" and "폰트" stay out.
+ */
+const KOREAN_CASE_PARTICLES = "에서|에게|으로|부터|까지|처럼|에|을|를|이|가|은|는|도|로|의|과|와|만";
+function koreanNounAlone(noun: string): string {
+  return `(?<![\\p{L}\\p{N}])${noun}(?=$|[^\\p{L}\\p{N}]|(?:${KOREAN_CASE_PARTICLES})(?:$|[^\\p{L}\\p{N}]))`;
+}
+const koreanPattern = (source: string): RegExp => new RegExp(source, "u");
+
 /*
  * The app's operation catalog is English. Map Korean feature nouns to the catalog's English terms for app-operation
  * lookup only (capability-ports.ts appOperationPaths). Other ranking keeps the original query.
@@ -35,9 +52,9 @@ const KOREAN_APP_TERMS: ReadonlyArray<readonly [RegExp, string]> = [
   [/문서|워드|엑셀|스프레드시트|슬라이드|발표|한글\s*문서/u, "document liveDocument"],
   [/브라우저|웹\s*페이지|웹사이트/u, "browser"],
   [/커넥터|연동|연결/u, "mcpTools connectors"],
-  [/모바일|휴대폰|\b폰\b|스마트폰/u, "mobileBridge mobile"],
+  [koreanPattern(`모바일|휴대폰|스마트폰|${koreanNounAlone("폰")}`), "mobileBridge mobile"],
   [/기억|메모리/u, "oneMemory memory"],
-  [/목표|골\b/u, "goalPanel goal"],
+  [koreanPattern(`목표|${koreanNounAlone("골")}`), "goalPanel goal"],
   [/텔레그램/u, "telegram"],
   [/메일|이메일|편지/u, "agentMail mail"],
   [/업데이트|새\s*버전/u, "updater"],
@@ -48,7 +65,7 @@ const KOREAN_APP_TERMS: ReadonlyArray<readonly [RegExp, string]> = [
 
 /** English catalog words for the Korean feature nouns in a query; "" when there are none (or the query is already English). */
 export function englishAppTerms(query: string): string {
-  if (!/[\u3131-\u318e\uac00-\ud7a3]/u.test(query)) return "";
+  if (!hasHangul(query)) return "";
   const lower = query.toLowerCase();
   return [...new Set(KOREAN_APP_TERMS.filter(([pattern]) => pattern.test(lower)).flatMap(([, english]) => english.split(" ")))].join(" ");
 }
