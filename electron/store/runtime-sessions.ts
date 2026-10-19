@@ -39,9 +39,31 @@ const normalizeAgentId = (agentId?: string | null): string => agentId ?? "";
 // key>`, and one native session: whichever conversation took the last turn holds the newest row for it. The runners look the
 // row up under the calling conversation, so that conversation reads the newest row of the owner (see sharedOwnerRow).
 const SHARED_OWNER_PREFIX = "agent-context:";
-// When a conversation cleared its own row of such an owner (its session is gone, or its fingerprint changed), only a row
-// written after that moment may bring a session back; another conversation's older row names the same lost session.
-const clearedAt = new Map<string, string>();
+// When a conversation cleared its own row of such an owner (its session is gone, or its fingerprint changed) or all of its rows
+// (/clear), only a row written after that moment may bring a session back; another conversation's older row names the same
+// lost session. The moment is kept in the store (meta), not in this process: the window process and the background service
+// are two readers of one database, and a restart must not forget it either.
+const CLEARED_PREFIX = "runtime-session.cleared:";
+const clearedChatKey = (chatId: string): string => `${CLEARED_PREFIX}${chatId}`;
+const clearedOwnerKey = (chatId: string, kind: string, agent: string): string => `${CLEARED_PREFIX}${chatId}|${kind}|${agent}`;
+
+/** The later of the moments the calling conversation cleared all of its sessions or this owner's. "" when it never did. */
+function clearedSince(chatId: string, kind: string, agent: string): string {
+  const rows = getDb().prepare("SELECT value FROM meta WHERE key IN (?, ?)").all(clearedChatKey(chatId), clearedOwnerKey(chatId, kind, agent)) as Array<{ value: string }>;
+  return rows.reduce((latest, row) => (typeof row.value === "string" && row.value > latest ? row.value : latest), "");
+}
+
+/**
+ * Record, durably and for every process, that a conversation's session pointers were cleared at this moment: no pointer written
+ * before it may be copied back onto the conversation (sharedOwnerRow). `scope` names one owner's pointer (a runner discarding
+ * its session); without it the mark covers every pointer of the conversation (/clear, a changed controller). The caller passes the
+ * handle it deletes with, so the mark and the delete can share one transaction.
+ */
+export function recordRuntimeSessionsCleared(db: { prepare(sql: string): { run(...args: unknown[]): unknown } }, chatId: string,
+  scope?: { kind: string; agentId: string }): void {
+  db.prepare("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)")
+    .run(scope ? clearedOwnerKey(chatId, scope.kind, scope.agentId) : clearedChatKey(chatId), new Date().toISOString());
+}
 
 type SessionRow = {
   session_id: string;
@@ -63,30 +85,53 @@ function toSession(row: SessionRow): RuntimeSession {
   };
 }
 
+const SESSION_COLUMNS = "session_id, fingerprint, updated_at, reported_output_tokens, reported_input_tokens, reported_cached_input_tokens";
+
 /**
- * The newest row of one shared owner on ANOTHER conversation, when it is newer than the calling conversation's own (or the
- * calling conversation has none), copied onto the calling conversation. The antigravity runner only resumes a handle that its
- * own row names, codex measures token usage from its row's counters, and claude/ACP compare its fingerprint: a row that is
- * missing or older than the shared session's newest turn would make them start cold or count another turn's tokens twice.
- * Only the calling conversation's row is written; no other row is changed or removed. An owner string that belongs to one
- * conversation (every journal that is not shared) has no other conversation's row: nothing changes for it.
+ * The row the calling conversation should resume for one shared owner. The antigravity runner only resumes a handle that its own
+ * row names, codex measures token usage from its row's counters, and claude/ACP compare its fingerprint: a row that is missing or
+ * older than the shared session's newest turn would make them start cold or count another turn's tokens twice. So the newest of
+ *   - this process's memory of the conversation's row,
+ *   - the row the database holds for it NOW (the other process may have written a fresher one than this process remembers), and
+ *   - the newest row of the same owner on ANOTHER conversation, copied onto the calling conversation
+ * wins. A read never overwrites a fresher row of the conversation: the copy is one compare-and-set statement that replaces the
+ * stored row only when the copied row is strictly newer. A conversation that cleared its pointer takes back only a row written
+ * after the clear. Only the calling conversation's row is written; no other row is changed or removed. An owner string that
+ * belongs to one conversation (every journal that is not shared) has no other conversation's row: nothing changes for it.
+ * Returns null when the memory is already the answer.
  */
 function sharedOwnerRow(chatId: string, kind: string, agent: string, own: RuntimeSession | null): RuntimeSession | null {
-  const other = getDb().prepare(
-    "SELECT session_id, fingerprint, updated_at, reported_output_tokens, reported_input_tokens, reported_cached_input_tokens FROM chat_runtime_sessions WHERE kind = ? AND agent_id = ? AND chat_id <> ? ORDER BY COALESCE(updated_at, '') DESC LIMIT 1",
+  const db = getDb(), key = memKey(chatId, kind, agent);
+  let best = own;
+  const stored = db.prepare(`SELECT ${SESSION_COLUMNS} FROM chat_runtime_sessions WHERE chat_id = ? AND kind = ? AND agent_id = ?`).get(chatId, kind, agent) as SessionRow | undefined;
+  if (stored && (stored.updated_at ?? "") > (best?.updatedAt ?? "")) best = toSession(stored);
+  const other = db.prepare(
+    `SELECT ${SESSION_COLUMNS} FROM chat_runtime_sessions WHERE kind = ? AND agent_id = ? AND chat_id <> ? ORDER BY COALESCE(updated_at, '') DESC LIMIT 1`,
   ).get(kind, agent, chatId) as SessionRow | undefined;
-  if (!other) return null;
-  const otherAt = other.updated_at ?? "";
-  if (otherAt <= (own?.updatedAt ?? "") || otherAt <= (clearedAt.get(memKey(chatId, kind, agent)) ?? "")) return null;
-  const copied = toSession(other);
-  try {
-    getDb().prepare(
-      `INSERT OR REPLACE INTO chat_runtime_sessions(chat_id, kind, agent_id, session_id, fingerprint, updated_at, reported_output_tokens, reported_input_tokens, reported_cached_input_tokens)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(chatId, kind, agent, copied.sessionId, copied.fingerprint, copied.updatedAt, copied.reportedOutputTokens, copied.reportedInputTokens, copied.reportedCachedInputTokens);
-  } catch { /* The copy only caches the newest row: this read still returns it. */ }
-  memSessions.set(memKey(chatId, kind, agent), copied);
-  return copied;
+  const otherAt = other?.updated_at ?? "";
+  if (other && otherAt > (best?.updatedAt ?? "") && otherAt > clearedSince(chatId, kind, agent)) {
+    try {
+      // One statement decides: the stored row changes only if the copy is strictly newer than what the database holds right now.
+      db.prepare(
+        `INSERT INTO chat_runtime_sessions(chat_id, kind, agent_id, session_id, fingerprint, updated_at, reported_output_tokens, reported_input_tokens, reported_cached_input_tokens)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(chat_id, kind, agent_id) DO UPDATE SET session_id = excluded.session_id, fingerprint = excluded.fingerprint,
+           updated_at = excluded.updated_at, reported_output_tokens = excluded.reported_output_tokens,
+           reported_input_tokens = excluded.reported_input_tokens, reported_cached_input_tokens = excluded.reported_cached_input_tokens
+         WHERE excluded.updated_at > COALESCE(chat_runtime_sessions.updated_at, '')`,
+      ).run(chatId, kind, agent, other.session_id, other.fingerprint, otherAt, other.reported_output_tokens ?? null,
+        other.reported_input_tokens ?? null, other.reported_cached_input_tokens ?? null);
+      // What the database holds now: the copy, or the fresher row a concurrent writer put in between.
+      const now = db.prepare(`SELECT ${SESSION_COLUMNS} FROM chat_runtime_sessions WHERE chat_id = ? AND kind = ? AND agent_id = ?`).get(chatId, kind, agent) as SessionRow | undefined;
+      if (now && (now.updated_at ?? "") >= (best?.updatedAt ?? "")) best = toSession(now);
+    } catch {
+      /* The copy only caches the newest row: this read still returns it. */
+      if (otherAt > (best?.updatedAt ?? "")) best = toSession(other);
+    }
+  }
+  if (!best || best === own) return null;
+  memSessions.set(key, best);
+  return best;
 }
 
 export function getRuntimeSession(
@@ -220,9 +265,9 @@ export function clearRuntimeSession(
 ): void {
   const agent = normalizeAgentId(agentId);
   memSessions.delete(memKey(chatId, kind, agent));
+  // The mark comes first: if the delete below fails the pointer stays, and a mark with no delete behind it only blocks a copy.
   if (agent.startsWith(SHARED_OWNER_PREFIX)) {
-    clearedAt.set(memKey(chatId, kind, agent), new Date().toISOString());
-    if (clearedAt.size > 512) clearedAt.delete(clearedAt.keys().next().value as string);
+    try { recordRuntimeSessionsCleared(getDb(), chatId, { kind, agentId: agent }); } catch { /* the delete below still removes this conversation's row */ }
   }
   try {
     // 정확한 키와 레거시 '' 행을 함께 지운다 — "이 chat×kind 세션을 버려라"는 의도다.

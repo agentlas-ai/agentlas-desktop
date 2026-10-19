@@ -14,7 +14,7 @@ import { parseGoalResult, type GoalResultPresentation } from "../../shared/goal-
 import { repairAskOpenMarkers } from "../../shared/agent-control-blocks";
 import { emitDesktopStoreChange, emitTaskStoreChange } from "./change-bus";
 import { getFirm } from "./firms";
-import { evictRuntimeSessionsForChat } from "./runtime-sessions";
+import { evictRuntimeSessionsForChat, recordRuntimeSessionsCleared } from "./runtime-sessions";
 import { touchProject } from "./projects";
 import {
   listChatMessageImageUrls,
@@ -378,6 +378,8 @@ export function repairRootChatSurfaceController(chat: Chat): Chat {
                  WHERE id = ? AND agent_id = ?`)
       .run(controller.id, chat.id, chat.agentId);
     if (result.changes > 0) {
+      // Same transaction as the delete: another conversation's older pointer of a shared journal must not come back (runtime-sessions.ts).
+      recordRuntimeSessionsCleared(db, chat.id);
       db.prepare("DELETE FROM chat_runtime_sessions WHERE chat_id = ?").run(chat.id);
     }
     return result.changes;
@@ -1599,6 +1601,9 @@ export function clearChatMessages(chatId: string): void {
 export function clearChatContext(chatId: string): void {
   const db = getDb();
   const clear = db.transaction((targetChatId: string) => {
+    // The mark is part of the clear: a conversation whose journal other conversations share would otherwise take the newest
+    // pointer of a sibling back at its next turn, and the CLI session this clear removed would be resumed.
+    recordRuntimeSessionsCleared(db, targetChatId);
     db.prepare("DELETE FROM chat_runtime_sessions WHERE chat_id = ?").run(targetChatId);
     db.prepare("DELETE FROM chat_messages WHERE chat_id = ?").run(targetChatId);
     db.prepare("UPDATE chats SET last_viewed_at = ? WHERE id = ?").run(new Date().toISOString(), targetChatId);
