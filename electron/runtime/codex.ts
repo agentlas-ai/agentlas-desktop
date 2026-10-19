@@ -1850,6 +1850,8 @@ async function runCodexResidentTurn(input: {
           agentId: req.agentId ?? null,
           nodeId: req.orchestrationAgentId ?? req.agentId ?? null,
           chatId,
+          // The same journal key the pool key above holds: the registry releases a shared session by it (agent-residency.ts).
+          ...(canonicalContextKey && !turnScoped ? { sessionScopeKey: canonicalContextKey } : {}),
           projectId: req.workProjectId ?? null,
           runtimeKind: KIND,
           source: resolveAgentResidencySource(req.agentId),

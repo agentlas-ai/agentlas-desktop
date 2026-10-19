@@ -56,6 +56,14 @@ export interface AgentResidencyEntry {
   agentId: string | null;
   nodeId: string | null;
   chatId: string | null;
+  /**
+   * The journal-backed session this process serves (the agent-context key), when several conversations may share it
+   * (session-scope.ts: the one-to-one conversations of a seat's agent). Null for an entry keyed by its own conversation:
+   * those match a conversation by `chatId` alone, exactly as before the key existed.
+   */
+  sessionScopeKey: string | null;
+  /** Conversations that took a turn on a scoped entry, the newest last (bounded). Always empty without a scope key. */
+  chatIds: readonly string[];
   /** Main-owned Work project partition. Never used as the conversation/pool key. */
   projectId: string | null;
   runtimeKind: string;
@@ -421,11 +429,22 @@ export function isResidencyExemptAgent(agentId: string | null | undefined): bool
 
 /* ──────────────────────────── 등록/갱신 ──────────────────────────── */
 
+/** More conversations than this on one shared session is not a case worth a longer list: the oldest drop out (kept, not released, on a handover ask). */
+const MAX_SCOPED_CHATS = 64;
+function rememberChat(known: readonly string[], chatId: string | null | undefined): readonly string[] {
+  if (!chatId) return known;
+  const rest = known.filter(id => id !== chatId);
+  rest.push(chatId);
+  return rest.length > MAX_SCOPED_CHATS ? rest.slice(rest.length - MAX_SCOPED_CHATS) : rest;
+}
+
 export interface RegisterAgentResidencyInput {
   key: string;
   agentId?: string | null;
   nodeId?: string | null;
   chatId?: string | null;
+  /** The shared session's key (see AgentResidencyEntry.sessionScopeKey); omitted for an entry owned by one conversation. */
+  sessionScopeKey?: string | null;
   /** Main-owned Work project partition; omitted for One/legacy non-Work activity. */
   projectId?: string | null;
   runtimeKind: string;
@@ -450,11 +469,14 @@ export function registerAgentResidency(input: RegisterAgentResidencyInput): Agen
   const agentId = input.agentId ?? null;
   const existing = entries.get(input.key);
   if (existing?.closing) residencyFailure("agent_residency_closing");
+  const sessionScopeKey = input.sessionScopeKey && input.sessionScopeKey.trim() ? input.sessionScopeKey : null;
   const entry: AgentResidencyEntry = {
     key: input.key,
     agentId,
     nodeId: input.nodeId ?? agentId,
     chatId: input.chatId ?? null,
+    sessionScopeKey,
+    chatIds: sessionScopeKey ? rememberChat(existing?.sessionScopeKey === sessionScopeKey ? existing.chatIds : [], input.chatId) : [],
     projectId: input.projectId ?? existing?.projectId ?? null,
     runtimeKind: input.runtimeKind,
     source: input.source ?? resolveAgentResidencySource(agentId),
@@ -494,7 +516,10 @@ export function touchAgentResidency(key: string, patch?: { inUse?: boolean; now?
   if (!entry || entry.closing) return;
   entry.lastActivityAt = patch?.now ?? Date.now();
   if (patch?.inUse !== undefined) entry.inUse = patch.inUse;
-  if (patch?.chatId !== undefined) entry.chatId = patch.chatId;
+  if (patch?.chatId !== undefined) {
+    entry.chatId = patch.chatId;
+    if (entry.sessionScopeKey) entry.chatIds = rememberChat(entry.chatIds, patch.chatId);
+  }
   if (entry.holdsSession && patch?.inUse !== undefined) {
     emitAgentResidencyChange(
       entry,
@@ -658,15 +683,29 @@ export function releaseIdleAgentResidency(): { released: number; active: number;
  * is running here: nothing is touched and the caller reports busy. Sessions already closing are waited for too.
  * `completions` settle when the physical processes are gone (rejections are swallowed: a failed close is reported as
  * `failed`, and the seat stays quarantined by the registry as before).
+ *
+ * A session several conversations share (an entry with a `sessionScopeKey`, session-scope.ts) is this conversation's
+ * too when the conversation took a turn on it, whichever conversation took the last one: the thread belongs to the
+ * session, not to the conversation that happened to use it last. Releasing it follows the same rule as everything
+ * here: an idle one is released; one that is running a turn is never touched. A turn of THIS conversation running here
+ * is busy, as before. A turn of ANOTHER conversation on the shared session is not this conversation's to stop and not
+ * a reason to refuse it either (that turn settles by itself; the new host waits for it in the session's line), so the
+ * entry is kept (`kept`) and the answer is not busy. An entry without a scope key matches by `chatId` alone, exactly as
+ * it did before scope keys existed.
  */
-export function releaseIdleAgentResidencyForChat(chatId: string): { busy: boolean; released: number; failed: number; completions: Promise<void>[] } {
-  const rows = [...entries.values()].filter(entry => entry.holdsSession && entry.chatId === chatId);
-  if (rows.some(entry => !entry.closing && (entry.inUse || (entry.awakeAdmission && activeContextTurns.has(entry.awakeAdmission))))) {
-    return { busy: true, released: 0, failed: 0, completions: [] };
+export function releaseIdleAgentResidencyForChat(chatId: string): { busy: boolean; released: number; failed: number; kept: number; completions: Promise<void>[] } {
+  const own = (entry: AgentResidencyEntry): boolean => entry.chatId === chatId;
+  const shared = (entry: AgentResidencyEntry): boolean => !own(entry) && entry.sessionScopeKey !== null && entry.chatIds.includes(chatId);
+  const working = (entry: AgentResidencyEntry): boolean => !entry.closing
+    && (entry.inUse || (!!entry.awakeAdmission && activeContextTurns.has(entry.awakeAdmission)));
+  const rows = [...entries.values()].filter(entry => entry.holdsSession && (own(entry) || shared(entry)));
+  if (rows.some(entry => own(entry) && working(entry))) {
+    return { busy: true, released: 0, failed: 0, kept: 0, completions: [] };
   }
-  let released = 0, failed = 0;
+  let released = 0, failed = 0, kept = 0;
   const completions: Promise<void>[] = [];
   for (const entry of rows) {
+    if (shared(entry) && working(entry)) { kept += 1; continue; }
     if (!entry.closing) {
       dropAgentResidency(entry.key, { close: true, reason: "shutdown" });
       released += 1;
@@ -674,7 +713,7 @@ export function releaseIdleAgentResidencyForChat(chatId: string): { busy: boolea
     if (entry.closeFailed) failed += 1;
     if (entry.closeCompletion) completions.push(entry.closeCompletion.catch(() => { failed += 1; }));
   }
-  return { busy: false, released, failed, completions };
+  return { busy: false, released, failed, kept, completions };
 }
 
 export function disposeAgentResidency(): void {

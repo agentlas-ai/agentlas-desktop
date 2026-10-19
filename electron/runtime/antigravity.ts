@@ -50,7 +50,7 @@ import {
   invalidateStableTurnContext,
   renderConversationContext,
 } from "./continuity";
-import { agentContextColdBootstrapForRequest, agentContextDeliveryForRequest } from "./agent-context";
+import { agentContextColdBootstrapForRequest, agentContextDeliveryForRequest, agentContextSessionKey } from "./agent-context";
 import { waitForRetiredCliExit } from "./retired-cli-exit";
 import { tStatus } from "./status-i18n";
 import { selectionFor } from "../capabilities/one-capabilities";
@@ -2611,8 +2611,14 @@ async function runPreparedAntigravityAttempt(
       ? antigravityBrowserResidentScope(runReq.mcpConfigPath)
       : null;
     let residentLease: AcpSessionLease<AntigravityResidentSession> | null = null;
+    // A journal-backed turn keys its resident process by the journal, as codex, claude-code and the ACP runners do: the
+    // conversations of one seat's agent share a journal and so one conversation in agy (session-scope.ts), and two resident
+    // processes holding it would each keep a transcript the other's turns never reached. Everything else keys by its conversation.
+    const residentSessionKey = commonContext && runReq.agentContext && !runReq.minimalObservation && !runReq.untrustedNoTools
+      && !runReq.scienceRecoveryCapability && !runReq.restrictedReadBoundary && !runReq.judgmentOnly
+      ? agentContextSessionKey(runReq.agentContext) : undefined;
     const residentBaseOwner: AntigravityResidentOwner = {
-      chatId: runReq.chatId ?? "",
+      chatId: residentSessionKey ?? runReq.chatId ?? "",
       sessionOwnerId: runtimeSessionOwnerId ?? null,
       isolateOwner: isolateRuntimeSessionOwner,
       generation: executableGeneration,
@@ -2646,7 +2652,7 @@ async function runPreparedAntigravityAttempt(
     if (residencyEligible && runReq.chatId && agyFingerprint) {
       const pool = antigravitySessionPool();
       const key = antigravityPoolKey({
-        chatId: runReq.chatId,
+        chatId: residentSessionKey ?? runReq.chatId,
         fingerprint: agyFingerprint,
         sessionOwnerId: runtimeSessionOwnerId ?? null,
         isolateOwner: isolateRuntimeSessionOwner,
@@ -2681,6 +2687,7 @@ async function runPreparedAntigravityAttempt(
             agentId: runReq.agentId ?? null,
             nodeId: runReq.orchestrationAgentId ?? runReq.agentId ?? null,
             chatId: runReq.chatId ?? null,
+            ...(residentSessionKey ? { sessionScopeKey: residentSessionKey } : {}),
             projectId: runReq.workProjectId ?? null,
             runtimeKind: ANTIGRAVITY_KIND,
             source: resolveAgentResidencySource(runReq.agentId),

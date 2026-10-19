@@ -1320,6 +1320,8 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
           agentId: req.agentId ?? null,
           nodeId: req.orchestrationAgentId ?? req.agentId ?? null,
           chatId: req.chatId ?? null,
+          // The same journal key the pool key holds: the registry releases a shared session by it (agent-residency.ts).
+          ...(canonicalContextKey ? { sessionScopeKey: canonicalContextKey } : {}),
           projectId: req.workProjectId ?? null,
           runtimeKind: spec.id,
           source: resolveAgentResidencySource(req.agentId),

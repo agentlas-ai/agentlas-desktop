@@ -44,6 +44,12 @@ export interface AcpPoolMeta {
   agentId?: string | null;
   nodeId?: string | null;
   chatId?: string | null;
+  /**
+   * The journal-backed session this process serves, when several conversations may share it (the agent-context key a
+   * runner already keys the pool with). The registry then matches a handover ask by it too: a conversation that took a
+   * turn here is released with the session, not only the one that took the last turn. Omitted: matched by `chatId` alone.
+   */
+  sessionScopeKey?: string | null;
   /** Main-owned Work project partition; never used as the conversation key. */
   projectId?: string | null;
   runtimeKind: string;
@@ -248,6 +254,7 @@ export class AcpSessionPool<S> {
         agentId: meta.agentId ?? null,
         nodeId: meta.nodeId ?? meta.agentId ?? null,
         chatId: meta.chatId ?? null,
+        ...(meta.sessionScopeKey ? { sessionScopeKey: meta.sessionScopeKey } : {}),
         projectId: entry.projectId,
         runtimeKind: meta.runtimeKind,
         ...(meta.source ? { source: meta.source } : {}),

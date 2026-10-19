@@ -1799,6 +1799,8 @@ const runClaudeTurn = async (
           agentId: runReq.agentId ?? null,
           nodeId: runReq.orchestrationAgentId ?? runReq.agentId ?? null,
           chatId: runReq.chatId ?? null,
+          // The same journal key the pool key holds: the registry releases a shared session by it (agent-residency.ts).
+          ...(canonicalContextKey && !aliveProfile && !turnScopedResidency ? { sessionScopeKey: canonicalContextKey } : {}),
           projectId: runReq.workProjectId ?? null,
           runtimeKind: KIND,
           source: resolveAgentResidencySource(runReq.agentId),
