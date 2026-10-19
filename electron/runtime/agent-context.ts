@@ -187,6 +187,10 @@ export function readAgentContext(capability: AgentContextCapability): AgentConte
 export function readPendingAgentContext(capability:AgentContextCapability):AgentContextPendingDelivery|null {
   return store.readPendingDelivery(current(capability).identity);
 }
+/** The turn that holds this journal right now (its open delivery), or null. Read-only: a wait for a shared session polls this. */
+export function openAgentContextTurnId(capability: AgentContextCapability): string | null {
+  return store.openDeliveryTurnId(current(capability).identity);
+}
 /**
  * One run event when a one-to-one seat conversation was given its seat's journal (session-scope.ts): the context refs of the
  * journal it continues and of the others that stay, never a conversation id. Evidence, not a control.
@@ -232,6 +236,42 @@ export function bootstrapAgentContextHistory(capability: AgentContextCapability,
     ...(row.imageDataUrls?{imageDataUrls:row.imageDataUrls}:{}),
   }});
   return true;
+}
+/** What a conversation brings into a shared journal it joins late (importSharedChatHistory): the newest rows of its own history, bounded like the host's other replays. */
+export const SHARED_IMPORT_MAX_ROWS = 80;
+export const SHARED_IMPORT_MAX_CHARS = 60_000;
+/**
+ * A conversation that joins a journal shared with other conversations (runtime/session-scope.ts) after that journal has begun was
+ * never bootstrapped into it: bootstrapAgentContextHistory seeds an EMPTY journal only, so the first conversation's history is in
+ * and the later ones' is not. Without this a one-to-one conversation the owner reopens (its text is on the seat's screen) would
+ * continue a session that has never read it. Its recent messages go in once, with the ids the bootstrap uses, as recorded context
+ * the journal's session reads like any other entry it did not produce; a conversation that has taken a turn here, or was imported
+ * before, adds nothing. Call it while no other turn holds the journal: appended rows are never part of that turn's own observations.
+ */
+export function importSharedChatHistory(capability: AgentContextCapability, chatId: string, history: readonly ChatHistoryEntry[]): number {
+  const value = current(capability), marker = `scope-import:${chatId}`;
+  if (!history.length || store.readHead(value.identity).throughSeq === 0) return 0;
+  if (store.hasEvent(value.identity, marker) || store.chatTookTurn(value.identity, chatId)) return 0;
+  const rows: ChatHistoryEntry[] = [];
+  let chars = 0;
+  for (let index = history.length - 1; index >= 0 && rows.length < SHARED_IMPORT_MAX_ROWS; index -= 1) {
+    const row = history[index];
+    if (typeof row.text !== "string" || !row.text) continue;
+    if (rows.length && chars + row.text.length > SHARED_IMPORT_MAX_CHARS) break;
+    chars += row.text.length; rows.unshift(row);
+  }
+  let imported = 0;
+  for (const row of rows) {
+    try {
+      appendAgentContextEvent(capability, { eventId: `message:${row.durableMessageId ?? row.id}`, kind: "message", payload: {
+        role: row.role, text: row.text, createdAt: row.createdAt, ...(row.speakerAgentId ? { speakerAgentId: row.speakerAgentId } : {}),
+        ...(row.hostNotice?.purpose ? { hostAuthored: row.hostNotice.purpose } : {}),
+        ...(row.imageDataUrls ? { imageDataUrls: row.imageDataUrls } : {}) } });
+      imported += 1;
+    } catch { /* A row already in the journal (same id) or one the journal refuses is skipped; the rest still go in. */ }
+  }
+  if (imported) appendAgentContextEvent(capability, { eventId: marker, kind: "system", payload: { text: "", scopeImport: true, rows: imported } });
+  return imported;
 }
 export function appendAgentContextEvent(capability: AgentContextCapability, event: AgentContextEvent, expectedRevision?: number) {
   return store.append(current(capability).identity,sanitizeEvent(event),expectedRevision);

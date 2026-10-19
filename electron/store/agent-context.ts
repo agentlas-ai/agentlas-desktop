@@ -276,6 +276,25 @@ export function createAgentContextStore(getDb: () => Database.Database) {
       WHERE h.context_key=? AND d.status='pending'`).get(key) as DeliveryRow|undefined;
     return pendingDelivery(key,row);
   }
+  /** Whether this journal holds an event with this id (an index read; the journal's own ids are unique per head). */
+  function hasEvent(identity:AgentContextIdentity,eventId:string):boolean {
+    nonempty(eventId);
+    return !!getDb().prepare("SELECT 1 FROM agent_context_entries WHERE context_key=? AND event_id=?").get(agentContextKey(identity),eventId);
+  }
+  /** Whether a turn of this conversation (any run) has been prepared on this journal: its deliveries, or the events it appends before one opens. */
+  function chatTookTurn(identity:AgentContextIdentity,chatId:string):boolean {
+    nonempty(chatId);
+    const key=agentContextKey(identity),db=getDb(),prefix=`agent-context-turn:${JSON.stringify([chatId]).slice(0,-1)},`,upper=`${prefix.slice(0,-1)}-`;
+    return !!db.prepare("SELECT 1 FROM agent_context_deliveries WHERE context_key=? AND turn_id>=? AND turn_id<? LIMIT 1").get(key,prefix,upper)
+      || !!db.prepare("SELECT 1 FROM agent_context_entries WHERE context_key=? AND event_id>=? AND event_id<? LIMIT 1").get(key,`turn:${prefix}`,`turn:${upper}`);
+  }
+  /** The turn id of the delivery that holds this journal right now, without loading its entries; null when none is open. */
+  function openDeliveryTurnId(identity:AgentContextIdentity):string|null {
+    const row=getDb().prepare(`SELECT d.turn_id FROM agent_context_heads h JOIN agent_context_deliveries d
+      ON d.delivery_id=h.open_delivery_id AND d.context_key=h.context_key
+      WHERE h.context_key=? AND d.status='pending'`).get(agentContextKey(identity)) as {turn_id:string}|undefined;
+    return row?.turn_id??null;
+  }
   function exactDelivery(identity: AgentContextIdentity, delivery: AgentContextDelivery): DeliveryRow {
     if (agentContextKey(identity) !== delivery.contextKey) fail("agent_context_delivery_binding_changed");
     const row = getDb().prepare("SELECT * FROM agent_context_deliveries WHERE delivery_id=? AND context_key=?").get(delivery.deliveryId,delivery.contextKey) as DeliveryRow | undefined;
@@ -362,5 +381,5 @@ export function createAgentContextStore(getDb: () => Database.Database) {
     }
     return max;
   }
-  return {adoptPriorHead,adoptPriorHeadReport,read,readRange,readSource,readHead,acknowledgedStableBlockHashes,append,beginDelivery,readPendingDelivery,readOpenPendingDelivery,acknowledgeDelivery,markDeliveryUncertain,invalidateProvider,maxTurnOrdinal};
+  return {adoptPriorHead,adoptPriorHeadReport,read,readRange,readSource,readHead,acknowledgedStableBlockHashes,append,beginDelivery,readPendingDelivery,readOpenPendingDelivery,openDeliveryTurnId,hasEvent,chatTookTurn,acknowledgeDelivery,markDeliveryUncertain,invalidateProvider,maxTurnOrdinal};
 }

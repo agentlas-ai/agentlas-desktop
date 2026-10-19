@@ -9,9 +9,12 @@ import { createDaemonAgentContextHost } from "../daemon/agent-context-host";
 import { getDb } from "../store/db";
 import { invocationProcessOwner, invocationRunOwners, assertInvocationRunOwner } from "../store/invocation-run-owners";
 import { createAgentContextCapability, agentContextHostBinding, bootstrapAgentContextHistory, markAgentContextHostAuthored, copyAgentContextHostAuthored,
-  reconcileInterruptedAgentContext, nextAgentContextTurnOrdinal, recordAgentContextScopeAdoption, type AgentContextCapability } from "./agent-context";
-import { markRefusedBeforeDispatch, type Runner, type RunnerRequest } from "./runner";
+  reconcileInterruptedAgentContext, nextAgentContextTurnOrdinal, openAgentContextTurnId, recordAgentContextScopeAdoption, importSharedChatHistory, type AgentContextCapability } from "./agent-context";
+import { markRefusedBeforeDispatch, type Runner, type RunnerEvents, type RunnerRequest } from "./runner";
 import { resolveSessionScope } from "./session-scope";
+import { acquireAgentContextTurnSlot, type AgentContextTurnSlot } from "./agent-context-turn-order";
+import { agentContextKey } from "../store/agent-context";
+import { tStatus } from "./status-i18n";
 
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 function fail(code: string): never { throw Object.assign(new Error(code), { code }); }
@@ -69,6 +72,16 @@ export function bindInvocationAgentContext(request: RunnerRequest, input: {
 /** Capabilities whose journal is shared by several conversations (a seat scope): their turns run one after the other. */
 const sharedSessionCapabilities = new WeakSet<object>();
 export function isSharedSessionCapability(value: unknown): boolean { return !!value && typeof value === "object" && sharedSessionCapabilities.has(value); }
+/** The open delivery's turn belongs to a run of ANOTHER conversation that is still going: its turn will settle by itself. */
+function otherConversationTurnIsLive(turnId: string, ownChatId: string): boolean {
+  try {
+    if (!turnId.startsWith("agent-context-turn:")) return false;
+    const source: unknown = JSON.parse(turnId.slice("agent-context-turn:".length));
+    if (!Array.isArray(source) || typeof source[0] !== "string" || typeof source[1] !== "string" || source[0] === ownChatId) return false;
+    const owner = invocationRunOwners.getRunOwner(source[0], source[1]);
+    return !!owner && owner.state !== "released";
+  } catch { return false; }
+}
 function assertPreviousTurnTerminal(turnId: string): void {
   if (!turnId.startsWith("agent-context-turn:")) fail("agent_context_prior_turn_unsettled");
   let source: unknown;
@@ -115,8 +128,35 @@ export function daemonAgentContextSnapshot(){reconcileDaemonContexts();return da
  * under their original controls and remain visible to the registry. */
 export function releaseIdleDaemonAgentContexts(){reconcileDaemonContexts();return daemon?.host.releaseIdle()??{releasedActors:0,activeActors:0};}
 /** The selection seam routes the actual runner through the daemon's actor.
- * Desktop compatibility calls retain context without claiming daemon residency. */
+ * Desktop compatibility calls retain context without claiming daemon residency.
+ * A turn on a shared session (several conversations of a seat's agent) first waits for the turn that holds it. */
 export function withDaemonAgentContext(runner: Runner, provider: { kind: string; backend?: string; configurationIdentity?: string }): Runner {
+  const routed = routeAgentContextRunner(runner, provider);
+  return (request, events) => {
+    if (!isSharedSessionCapability(request.agentContext) || aliveDecisionProfileForRequest(request)) return routed(request, events);
+    return (async () => {
+      const slot = await waitForSharedSession(request, events);
+      try {
+        // Now no turn of this process holds the journal (and none of another): a conversation joining it late brings its own messages.
+        try { if (request.chatId) importSharedChatHistory(request.agentContext as AgentContextCapability, request.chatId, request.history ?? []); }
+        catch (error) { console.warn(`[session-scope] earlier messages of the conversation were not added to the shared journal: ${error instanceof Error ? error.message : String(error)}`); }
+        return await routed(request, events);
+      } finally { slot.release(); }
+    })();
+  };
+}
+async function waitForSharedSession(request: RunnerRequest, events: RunnerEvents): Promise<AgentContextTurnSlot> {
+  try {
+    const capability = request.agentContext as AgentContextCapability, held = agentContextHostBinding(capability);
+    const ownChatId = (() => { try { const ref: unknown = JSON.parse(held.turnId.slice("agent-context-turn:".length)); return Array.isArray(ref) && typeof ref[0] === "string" ? ref[0] : ""; } catch { return ""; } })();
+    return await acquireAgentContextTurnSlot(agentContextKey(held.identity), {
+      signal: request.signal,
+      blocked() { const open = openAgentContextTurnId(capability); return open !== null && open !== held.turnId && otherConversationTurnIsLive(open, ownChatId); },
+      onWait() { events.onStatus?.(tStatus(request.locale === "ko" ? "ko" : "en", "agentContextTurnWait")); },
+    });
+  } catch (error) { throw markRefusedBeforeDispatch(error); }
+}
+function routeAgentContextRunner(runner: Runner, provider: { kind: string; backend?: string; configurationIdentity?: string }): Runner {
   return async (request, events) => {
     if (!request.agentContext) return runner(request, events);
     if(aliveDecisionProfileForRequest(request))return runner(request,events);

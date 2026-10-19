@@ -27,6 +27,7 @@ const DICT = {
   ko: {
     thinking: "{agent}가 생각 중...",
     sending: "전송 중...",
+    agentContextTurnWait: "같은 에이전트가 다른 대화에서 일하는 중이라, 그 일이 끝나면 이어서 시작합니다...",
     callingBackend: "{backend} 호출 중...",
     schemaInPromptOnly: "이 실행 경로는 출력 형식을 강제할 수 없어 지시문으로만 요청합니다.",
     cliImageReady: "첨부 이미지 {count}개를 파일로 준비했습니다 — {backend}가 해당 경로를 읽습니다",
@@ -88,6 +89,7 @@ const DICT = {
   en: {
     thinking: "{agent} is thinking...",
     sending: "Sending...",
+    agentContextTurnWait: "This agent is still working in another conversation; this turn starts when that one finishes...",
     callingBackend: "Calling {backend}...",
     schemaInPromptOnly: "This runtime path cannot enforce the output schema — asking for it in the prompt instead.",
     cliImageReady: "Prepared {count} attached image file(s) — {backend} will read those paths",
