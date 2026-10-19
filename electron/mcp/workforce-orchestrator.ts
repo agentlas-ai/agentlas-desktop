@@ -2417,6 +2417,27 @@ export function validateSelectionReceipt(
   return validation;
 }
 
+/**
+ * Agentlas-OS lifts `unmetRequirementCount` and a `notice` beside the Core federated-selection wrapper at its MCP surface when a
+ * chosen release misses a requirement the WorkOrder asked for (`_with_unmet_requirement_notice`). Neither is part of the Core wrapper or
+ * of its digest, so the pinned exact-key and digest checks would reject a valid reply. The count is read against the receipt it
+ * restates, then both are dropped: what remains is exactly what Core sealed.
+ */
+const SELECTION_SURFACE_KEYS: ReadonlySet<string> = new Set(["unmetRequirementCount", "notice"]);
+function withoutSelectionSurfaceKeys(received: JsonObject): JsonObject {
+  if (![...SELECTION_SURFACE_KEYS].some((key) => Object.prototype.hasOwnProperty.call(received, key))) return received;
+  const receipt = received.selectionValidation;
+  const receiptCount = receipt && typeof receipt === "object" && !Array.isArray(receipt)
+    ? (receipt as JsonObject).unmetRequirementCount : undefined;
+  if (Object.prototype.hasOwnProperty.call(received, "unmetRequirementCount") && received.unmetRequirementCount !== receiptCount) {
+    throw new Error("Hub federated-selection surface count does not match its selection validation.");
+  }
+  if (Object.prototype.hasOwnProperty.call(received, "notice") && typeof received.notice !== "string") {
+    throw new Error("Hub federated-selection notice must be text.");
+  }
+  return Object.fromEntries(Object.entries(received).filter(([key]) => !SELECTION_SURFACE_KEYS.has(key)));
+}
+
 export function validateFederatedSelectionResult(
   value: unknown,
   workOrder: JsonObject,
@@ -2425,7 +2446,7 @@ export function validateFederatedSelectionResult(
   federationResult: JsonObject,
   sourcePolicy: WorkforceSourcePolicy = "network",
 ): { federatedSelection: JsonObject; validation: JsonObject } {
-  const federatedSelection = objectValue(value, "federated workforce selection");
+  const federatedSelection = withoutSelectionSurfaceKeys(objectValue(value, "federated workforce selection"));
   assertExactHubKeys(
     federatedSelection,
     FEDERATED_SELECTION_KEYS,
@@ -2700,6 +2721,12 @@ export function validateExecutionPreparation(
     if (localContextSliceStatus != null && localContextSliceStatus !== "unavailable") {
       throw new Error("Federated preparation has an unsupported local context status.");
     }
+    // The engine says why the slice is unavailable (an empty or umbrella folder, a missing map). It is a reason, never an authority.
+    const sliceCode = receivedWrapper.localContextSliceCode;
+    if (sliceCode != null && (localContextSliceStatus !== "unavailable" || typeof sliceCode !== "string" ||
+        !/^[A-Za-z][A-Za-z0-9_.:-]{0,119}$/.test(sliceCode))) {
+      throw new Error("Federated preparation has an unsupported local context code.");
+    }
   }
   const wrapper = Object.fromEntries(
     Object.entries(receivedWrapper).filter(([key]) => !PREPARATION_LOCAL_EXTENSION_KEYS.has(key)),
@@ -2719,10 +2746,13 @@ export function validateExecutionPreparation(
     wrapper.federatedPreparationDigest,
     "federatedPreparationDigest",
   );
-  const computedWrapperDigest = sha256Json(Object.fromEntries(
-    Object.entries(wrapper).filter(([key]) => key !== "federatedPreparationDigest"),
+  // Core seals the wrapper without the local grounding (older engines) or, since Agentlas OS re-seals after it has read the project
+  // slice, with it. goalBinding is bound after either seal. Either seal proves the Hub-sealed content is intact.
+  const sealedWithout = (omitted: ReadonlySet<string>): string => sha256Json(Object.fromEntries(
+    Object.entries(receivedWrapper).filter(([key]) => key !== "federatedPreparationDigest" && !omitted.has(key)),
   ));
-  if (!equalSha256(declaredWrapperDigest, computedWrapperDigest)) {
+  if (!equalSha256(declaredWrapperDigest, sealedWithout(PREPARATION_LOCAL_EXTENSION_KEYS)) &&
+      !equalSha256(declaredWrapperDigest, sealedWithout(new Set(["goalBinding"])))) {
     throw new Error("Federated preparation wrapper digest mismatch.");
   }
   const selectedPins = requireArray(

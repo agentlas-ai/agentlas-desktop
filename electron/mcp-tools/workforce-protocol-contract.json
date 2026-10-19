@@ -118,7 +118,8 @@
       "goalBinding",
       "localContextSlice",
       "localContextBoundary",
-      "localContextSliceStatus"
+      "localContextSliceStatus",
+      "localContextSliceCode"
     ]
   },
   "sourceFailureCodes": [
