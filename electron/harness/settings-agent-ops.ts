@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { userDataPath } from "../runtime-paths";
 import { persistUiLocaleCore, readUiLocaleCore, type UiLocaleCore, type UiLocalePref } from "../ui-locale";
 import type { RosterRemovalResult } from "../../shared/types";
+import { invalidValueMessage } from "../../shared/did-you-mean";
 
 /*
  * First two domain operations of the SDK/harness (docs/2026-10-13-native-harness/14 §5-§7):
@@ -121,7 +122,7 @@ async function languageGet(): Promise<SettingsAgentOutcome> {
 
 async function languageSet(args: Args, ctx: Ctx): Promise<SettingsAgentOutcome> {
   const pref = str(args.locale);
-  if (pref !== "ko" && pref !== "en" && pref !== "system") return refused("invalid_locale", "locale must be ko, en or system.");
+  if (pref !== "ko" && pref !== "en" && pref !== "system") return refused("invalid_locale", invalidValueMessage("locale", args.locale, ["ko", "en", "system"]));
   const expected = args.expectedRevision;
   if (expected !== undefined && !(typeof expected === "number" && Number.isInteger(expected) && expected >= 0)) return refused("invalid_expected_revision");
   const before = readUiLocaleCore();
@@ -200,7 +201,7 @@ async function agentUninstall(args: Args, ctx: Ctx): Promise<SettingsAgentOutcom
   const agentId = str(args.agentId);
   if (!agentId) return refused("agent_id_required");
   const policy = args.sourcePolicy === undefined ? "retain" : str(args.sourcePolicy);
-  if (policy !== "retain" && policy !== "trash") return refused("invalid_source_policy", "sourcePolicy is retain or trash.");
+  if (policy !== "retain" && policy !== "trash") return refused("invalid_source_policy", invalidValueMessage("sourcePolicy", args.sourcePolicy, ["retain", "trash"]));
   if (args.expectedRevision !== undefined && typeof args.expectedRevision !== "string") return refused("invalid_expected_revision");
   let state: Awaited<ReturnType<typeof agentRevision>>;
   try { state = await agentRevision(agentId); } catch (error) {

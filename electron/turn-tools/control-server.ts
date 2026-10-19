@@ -16,6 +16,7 @@ import { extractAgentStrategyMarkers } from "../../shared/agent-strategy";
 import { stripGoalCompleteMarker } from "../hephaestus/loop-engineering";
 import { goalCompleteMarkerText } from "./goal-signals";
 import { GOAL_PLAN_TOOL_MARKERS, TURN_TOOLS_BASE } from "./mcp-server";
+import { didYouMean, invalidValueMessage } from "../../shared/did-you-mean";
 
 // Main-side handler for the inline agentlas-turn MCP child. Loopback only, one random server token, one capability per
 // run config. The capability pins the chat and run; the child can name neither, so a note can only land in the turn
@@ -76,6 +77,9 @@ const defaultGoalResolver: TurnGoalResolver = async (chatId, nowMs) => {
 let goalResolver: TurnGoalResolver = defaultGoalResolver;
 /** Test seam: the gate injects a Goal without a database. */
 export function setTurnGoalResolver(resolver: TurnGoalResolver | null): void { goalResolver = resolver ?? defaultGoalResolver; }
+
+/** The kinds harness_search takes (the tool schema's enum; capability-ports HarnessItemKind). */
+const HARNESS_ITEM_KINDS = ["plugin", "skill", "connector", "tool", "operation", "feature"] as const;
 
 /** What the model can do about each refusal; the code before the colon is the same reason the parser/registration uses. */
 const GOAL_WAIT_HINTS: Record<string, string> = {
@@ -224,12 +228,12 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       if (!a) return refuse("goal_wait_request_invalid");
       const allowed = ["subject_kind", "condition", "invocation_run_id", "chat_id", "artifact_id", "automation_id", "not_before", "next_action", "deadline"];
       const unknown = Object.keys(a).find((key) => !allowed.includes(key));
-      if (unknown) throw new Error(`goal_wait_unknown_field: ${unknown}`);
+      if (unknown) throw new Error(`goal_wait_unknown_field: ${unknown}.${didYouMean(unknown, allowed)}`);
       // Only the fields of the chosen subject kind may be present: the parser refuses unknown subject keys.
       const subjectFields: Record<string, string[]> = { invocation: ["invocation_run_id", "chat_id"], artifact: ["artifact_id"], automation: ["automation_id"], timer: ["not_before"] };
       const kind = typeof a.subject_kind === "string" ? a.subject_kind : "";
       const own = subjectFields[kind];
-      if (!own) return refuse("goal_wait_subject_unsupported");
+      if (!own) throw new Error(`goal_wait_subject_unsupported: ${invalidValueMessage("subject_kind", a.subject_kind, Object.keys(subjectFields))} ${GOAL_WAIT_HINTS.goal_wait_subject_unsupported}`);
       const stray = ["invocation_run_id", "chat_id", "artifact_id", "automation_id", "not_before"].find((key) => a[key] !== undefined && !own.includes(key));
       if (stray) throw new Error(`goal_wait_subject_field_mismatch: ${stray} does not belong to subject_kind ${kind}. ${GOAL_WAIT_HINTS.goal_wait_subject_unsupported}`);
       const subject: Record<string, unknown> = { kind };
@@ -257,7 +261,7 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       const a = request.args && typeof request.args === "object" && !Array.isArray(request.args) ? request.args as Record<string, unknown> : null;
       if (!a) throw new Error("goal_complete_invalid: arguments must be an object");
       const unknown = Object.keys(a).find((key) => key !== "evidence" && key !== "summary");
-      if (unknown) throw new Error(`goal_complete_unknown_field: ${unknown}`);
+      if (unknown) throw new Error(`goal_complete_unknown_field: ${unknown}.${didYouMean(unknown, ["evidence", "summary"])}`);
       for (const key of ["evidence", "summary"]) if (a[key] !== undefined && typeof a[key] !== "string") throw new Error(`goal_complete_invalid: ${key} must be a string`);
       if (binding.dryRun) return { recorded: false, reason: "dry_run" };
       const goal = await goalResolver(binding.chatId, Date.now());
@@ -293,7 +297,7 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       const a = request.args && typeof request.args === "object" && !Array.isArray(request.args) ? request.args as Record<string, unknown> : null;
       if (!a) throw new Error("ask_form_invalid: arguments must be an object");
       const unknownField = Object.keys(a).find((key) => key !== "questions");
-      if (unknownField) throw new Error(`ask_form_unknown_field: ${unknownField}`);
+      if (unknownField) throw new Error(`ask_form_unknown_field: ${unknownField}.${didYouMean(unknownField, ["questions"])}`);
       if (!Array.isArray(a.questions) || a.questions.length < 1 || a.questions.length > TURN_ASK_LIMIT) throw new Error(`ask_form_invalid: questions must hold 1-${TURN_ASK_LIMIT} items`);
       // Same parser the text block goes through (limits, template rejection); one bad question refuses the whole call.
       const asks: AgentlasAskQuestion[] = [];
@@ -330,7 +334,11 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
         ...(binding.mcpConfigPath ? { mcpConfigPath: binding.mcpConfigPath } : {}) };
       if (operation === "harness_search") {
         const kind = typeof a.kind === "string" ? a.kind as Parameters<typeof harness.searchHarness>[1] : undefined;
-        return { items: await harness.searchHarness(typeof a.query === "string" ? a.query.slice(0, 500) : "", kind) };
+        const items = await harness.searchHarness(typeof a.query === "string" ? a.query.slice(0, 500) : "", kind);
+        // A kind outside the list matches nothing of that kind; say so and name the closest kind, and still answer as before
+        // (the search is not re-run with a guessed kind).
+        const badKind = typeof a.kind === "string" && a.kind !== "" && !(HARNESS_ITEM_KINDS as readonly string[]).includes(a.kind);
+        return badKind ? { items, note: `${invalidValueMessage("kind", a.kind, HARNESS_ITEM_KINDS)} No item of that kind was searched.` } : { items };
       }
       
 
