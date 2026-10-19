@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.80 — 2026-10-19
+
+- Choosing an agent for a seat lists only agents registered on this computer. A Hub or Agent Cloud agent you downloaded counts as local. The Hub menu has a Download button on agents and teams whose author allows it, and a My Cloud tab; Agent Cloud agents that are not on this computer have a Download button in the organisation tree too.
+- A Hub or cloud teammate that cannot join a group conversation is refused with what to do instead.
+- Hub staffing accepts the extra fields the Agentlas OS engine really answers, and a run blocked for lack of a signed-in Agentlas Browser tells you how to continue.
+- A Goal admitted for a message or a service run follows the host's retries and recoveries of that run. Local models keep their tool approvals, restart by themselves after an unexpected engine exit with the context you asked for, and a run the exit interrupts says why. Automatic local context never exceeds what the app can serve.
+- A one-to-one conversation with a seat continues that seat's journal; turns on a shared session wait for each other in a durable line and say plainly when a wait cannot end well.
+- App tools name the closest valid tool, argument or value when a call is wrong, refuse a top-level key they do not read, and find the app's own operations from Korean nouns. Image generation refuses what it can before the paid generation. Korean words in patterns get their own word edges.
+- Browser login cookies refresh as one login bundle, only for the same sign-in, so the dedicated browser keeps a working session.
+- A finished run longer than 400 ledger events is drawn settled, and company Claude execution is bounded by the approved policy expiry.
+- This release binds Agentlas OS v1.2.66 at c0acd99be22114569e20bca94bed4540ba046eb4; public runtime asset `hephaestus-runtime-v1.2.66.tar.gz` is pinned at SHA-256 `20019d3ba4df1c540d0ef549c07a82188bd40fe12dafb2f8a6c75cc4bdcc89f7`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.79 — 2026-10-19
 
 - Company agents use organization-scoped mail, reviewed work grants and isolated transfer custody, with retryable setup before an external work effect.
