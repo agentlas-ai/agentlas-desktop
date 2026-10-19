@@ -126,6 +126,26 @@ export type GoalStrategyAutomationHandoffStatus =
   | "held"
   | "unavailable";
 
+/**
+ * Why a Goal strategy reflection (or the Graph handoff of its stored proposal) was refused, as the machine cause code the host check
+ * threw. The closed list is the one the host produces (electron/long-run/goal-strategy-reflection.ts maps anything else to
+ * goal_strategy_failed), so a ledger reader can switch on it.
+ */
+export const GOAL_STRATEGY_REFLECTION_UNAVAILABLE_REASONS = [
+  "goal_strategy_goal_missing",
+  "goal_strategy_goal_not_ongoing",
+  "goal_strategy_goal_revision_stale",
+  "goal_strategy_checkpoint_missing",
+  "goal_strategy_effect_unsettled",
+  "goal_strategy_input_too_large",
+  "goal_strategy_judgment_pool_unavailable",
+  "goal_strategy_runtime_unavailable",
+  "goal_strategy_invalid_output",
+  "goal_strategy_stale_after_reflection",
+  "goal_strategy_failed",
+] as const;
+export type GoalStrategyReflectionUnavailableReason = (typeof GOAL_STRATEGY_REFLECTION_UNAVAILABLE_REASONS)[number];
+
 export type GoalStrategyAutomationHandoffReason =
   | "automation_strategy_cycle_already_recorded"
   | "goal_strategy_automation_no_terminal_receipt"
@@ -238,8 +258,7 @@ export interface GoalStrategyReflectionRefusalV1 {
   schemaVersion: typeof GOAL_STRATEGY_REFLECTION_REFUSAL_SCHEMA;
   eventKind: "goal_strategy_reflection_refusal";
   stage: "request" | "automation_handoff";
-  /** A GoalStrategyReflectionUnavailableReason code (electron/long-run/goal-strategy-reflection.ts). */
-  reason: string;
+  reason: GoalStrategyReflectionUnavailableReason;
   longRunId: string;
   goalId: string;
   goalRevision: number;

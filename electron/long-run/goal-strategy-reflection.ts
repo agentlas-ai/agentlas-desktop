@@ -2,6 +2,7 @@ import type { GoalRevision } from "../../shared/auto-goal";
 import { graphExecutionDigest, sha256Value } from "../../shared/graph-execution-digest";
 import type { CheckpointCriterion, GoalVerificationDisposition, LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
 import {
+  GOAL_STRATEGY_REFLECTION_UNAVAILABLE_REASONS,
   GOAL_STRATEGY_PROPOSAL_DRAFT_SCHEMA,
   GOAL_STRATEGY_PROPOSAL_SCHEMA,
   GOAL_STRATEGY_REFLECTION_DISPATCH_SCHEMA,
@@ -19,6 +20,7 @@ import {
   type GoalStrategyAutomationHandoffV1,
   type GoalStrategyReflectionDispatchReceiptV1,
   type GoalStrategyReflectionRefusalV1,
+  type GoalStrategyReflectionUnavailableReason,
   type GoalStrategySettledBoundaryV1,
   type GoalStrategyStrategyDraftV1,
 } from "../../shared/goal-strategy";
@@ -53,25 +55,10 @@ const MAX_DRAFT_CHARS = 12_000;
 const REFLECTION_TIMEOUT_MS = 300_000;
 const reflectionControllers = new Set<AbortController>();
 
-export type GoalStrategyReflectionUnavailableReason =
-  | "goal_strategy_goal_missing"
-  | "goal_strategy_goal_not_ongoing"
-  | "goal_strategy_goal_revision_stale"
-  | "goal_strategy_checkpoint_missing"
-  | "goal_strategy_effect_unsettled"
-  | "goal_strategy_input_too_large"
-  | "goal_strategy_judgment_pool_unavailable"
-  | "goal_strategy_runtime_unavailable"
-  | "goal_strategy_invalid_output"
-  | "goal_strategy_stale_after_reflection"
-  | "goal_strategy_failed";
+// The closed list of cause codes lives in shared/goal-strategy.ts (the refusal receipt types its reason with it).
+export type { GoalStrategyReflectionUnavailableReason };
 
-const KNOWN_UNAVAILABLE_REASONS: ReadonlySet<string> = new Set<GoalStrategyReflectionUnavailableReason>([
-  "goal_strategy_goal_missing", "goal_strategy_goal_not_ongoing", "goal_strategy_goal_revision_stale",
-  "goal_strategy_checkpoint_missing", "goal_strategy_effect_unsettled", "goal_strategy_input_too_large",
-  "goal_strategy_judgment_pool_unavailable", "goal_strategy_runtime_unavailable", "goal_strategy_invalid_output",
-  "goal_strategy_stale_after_reflection", "goal_strategy_failed",
-]);
+const KNOWN_UNAVAILABLE_REASONS: ReadonlySet<string> = new Set<string>(GOAL_STRATEGY_REFLECTION_UNAVAILABLE_REASONS);
 
 /** Keep the machine code a host check threw; only an unknown error becomes goal_strategy_failed. */
 function unavailableReason(error: unknown): GoalStrategyReflectionUnavailableReason {
@@ -579,9 +566,17 @@ function readSettledEpisode(input: GoalStrategyReflectionInput): SettledEpisodeE
  * Leave the cause of a reflection (or of its Graph handoff) that never started on the Goal's own ledger, as the
  * machine code the host check threw (GoalStrategyReflectionUnavailableReason; no new vocabulary, no prose). Append-only
  * and best effort: the verification or stored proposal it follows is already settled, so a ledger failure here is
- * logged with the same code and never thrown into that path. Not refusals, so nothing is recorded: a Goal that is not
- * ongoing (a finite Goal never reflects; a finished one has nothing left to reflect on), and a handoff of a proposal
- * that observed no Graph automation (there was nothing to hand off).
+ * logged with the same code and never thrown into that path.
+ *
+ * What is NOT recorded:
+ *  - at the `request` stage, a Goal that is not ongoing (a finite Goal never reflects; a finished one has nothing left to
+ *    reflect on), whether the host check threw goal_strategy_goal_not_ongoing or the Goal's revision is no longer ongoing;
+ *  - at the `automation_handoff` stage, a hold proposal and a proposal that observed no Graph automation: there was
+ *    nothing to hand off (dispatchGoalStrategyAutomation returns early for a hold, and its `refuse` skips this call
+ *    when the proposal has no automation observations).
+ * What IS recorded at the `automation_handoff` stage: a Goal that stopped being ongoing after the proposal was stored is
+ * recorded as goal_strategy_goal_not_ongoing, because that proposal had observed Graph automation and its handoff did not
+ * happen.
  */
 function recordGoalStrategyReflectionRefusal(input: {
   stage: GoalStrategyReflectionRefusalV1["stage"];

@@ -1060,21 +1060,26 @@ export interface ClaudeResultUsage {
 }
 
 /**
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ * What a runner turn's own CLI results add up to, in the two scopes the model-call ledger requires to agree (flow audit
+ * 2026-10-18 AD-7; ledger: usage.inputTokens must equal rawInputTokens + cachedInputTokens + cacheCreationInputTokens).
+ *
+ * Usage contract (CLI 2.1.302):
+ *  - A result's `usage` is the ROOT agent's own model requests of that one CLI turn, "a per-turn main-loop usage" (the
+ *    SDK type's wording). It is not a running total: two production passes (35f7ec1f, 2026-10-18) recorded exactly the sum
+ *    of their root transcript's per-message usage (38,575,896 / 83,415 and 741,142 / 4,311 input / output tokens) and none
+ *    of the 25-31 M tokens their subagents spent. total_cost_usd, duration_api_ms and modelUsage ARE session running
+ *    totals ("read the latest result rather than summing") and are never added here.
+ *  - So a runner turn's receipt is the sum of `usage` over the results it took as its own (one per CLI turn it ran: its
+ *    prompt, a steered direction that ran as the next turn). The same sum covers all four counters, so the total can
+ *    never disagree with its parts.
+ *  - `observed.inputTokens` counts everything the model took in: fresh input + cache reads + cache writes. Fresh input alone
+ *    under-reports the real context size (measured 2 vs 52,518); the ledger's single integer cannot carry the three prices,
+ *    so it carries the true size and `detail` keeps the split.
+ *  - Never in it: subagent usage (absent from `usage`; a sidechain-tagged result is not the root's), and the results of
+ *    CLI turns raised by background work, which are not this runner turn's (noted, not added: result_usage_unattributed).
+ *
+ * Returns `prior` unchanged for a block that is not an exact, non-negative integer count (or whose sum would stop being
+ * one): an impossible report never poisons the receipt.
  */
 export function addClaudeResultUsage(prior: ClaudeUsageReceipt | undefined, usage: ClaudeResultUsage | null | undefined): ClaudeUsageReceipt | undefined {
   if (!usage) return prior;
@@ -2100,9 +2105,16 @@ const runClaudeTurn = async (
     let usageReceipt: ClaudeUsageReceipt | undefined;
     /** Usage of results this runner turn did not take as its own (background-attributed turns, sidechains): counted, never added. */
     const unattributedUsage = { results: 0, inputTokens: 0, outputTokens: 0 };
+    /** Results that carried a `usage` block addClaudeResultUsage could not read (not exact non-negative integers): their spend is unknown, never added, and counted. */
+    const unreadableUsage = { results: 0 };
+    const noteUnreadableResultUsage = (): void => { unreadableUsage.results += 1; };
     const noteUnattributedResultUsage = (ev: Record<string, unknown>): void => {
       const usage = addClaudeResultUsage(undefined, ev.usage as ClaudeResultUsage | undefined)?.observed;
-      if (!usage || !Number.isSafeInteger(unattributedUsage.inputTokens + usage.inputTokens)
+      if (!usage) {
+        if (ev.usage) noteUnreadableResultUsage();
+        return;
+      }
+      if (!Number.isSafeInteger(unattributedUsage.inputTokens + usage.inputTokens)
         || !Number.isSafeInteger(unattributedUsage.outputTokens + usage.outputTokens)) return;
       unattributedUsage.results += 1;
       unattributedUsage.inputTokens += usage.inputTokens;
@@ -2123,6 +2135,7 @@ const runClaudeTurn = async (
           events.onStatus(`[runtime-session] result_usage_unattributed kind=${KIND} results=${unattributedUsage.results}`
             + ` input=${unattributedUsage.inputTokens} output=${unattributedUsage.outputTokens}`);
         }
+        if (unreadableUsage.results > 0) events.onStatus(`[runtime-session] result_usage_unreadable kind=${KIND} results=${unreadableUsage.results}`);
         if (!usageReceipt) return;
         events.onTerminalObservedUsage?.(usageReceipt.observed, runtimeAttemptId);
         events.onModelUsageDetail?.(runtimeAttemptId, usageReceipt.detail);
@@ -2896,14 +2909,12 @@ const runClaudeTurn = async (
         // (addClaudeResultUsage states the contract). A subagent-tagged result is not the root's own usage: counted aside.
         if (!ev.parent_tool_use_id && ev.isSidechain !== true) {
           if (ev.usage?.output_tokens != null) tokens = (tokens ?? 0) + ev.usage.output_tokens;
-
-
-
-
-
-
-
+          // The receipt is reported once, when the turn ends (settleUsage): the usage collectors take a second, different
+          // total for one attempt as a conflict and drop the turn's usage. A block it cannot read (addClaudeResultUsage hands the
+          // prior receipt back unchanged) is counted, not dropped silently, so the unknown spend stays visible.
+          const receiptBefore = usageReceipt;
           usageReceipt = addClaudeResultUsage(usageReceipt, ev.usage);
+          if (ev.usage && usageReceipt === receiptBefore) noteUnreadableResultUsage();
           observedUsage = usageReceipt?.observed;
         } else noteUnattributedResultUsage(ev);
         // ★모든 is_error가 표식이다 — 예전에는 로그인 만료 한 케이스만 집고 나머지를
