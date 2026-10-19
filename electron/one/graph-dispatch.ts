@@ -24,6 +24,8 @@ import { graphMcpEffectProblems, inspectGraphMcpTools } from "../workflow/mcp-ca
 import { recordOneGraphAuthority } from "./graph-ownership";
 import { oneTeamDispatchOwnerChat, type OneTeamCaller } from "./team-dispatch";
 import { searchToolchainAssets } from "../toolchains/search";
+import { recordToolchainSearchMiss } from "../toolchains/detector-observations";
+import { grantToolchainTrial, toolchainTrialGranted } from "../toolchains/trial";
 import { callableContractFor } from "../toolchains/interface";
 import { getToolchainAsset, listToolchainAssets, publishToolchainVersion } from "../toolchains/assets";
 import { callToolchain, getToolchainCall, listToolchainCalls } from "../toolchains/calls";
@@ -225,6 +227,12 @@ function assetManifest(asset: ToolchainAsset, version = asset.stableVersion ?? a
     usage: toolchainAssetUsage(asset.id) };
 }
 
+function trialManifest(asset: ToolchainAsset, version: number) {
+  const manifest = assetManifest(asset, version);
+  return { ...manifest, status: "callable", stage: "trial", validation: { ...manifest.validation, state: "trial" },
+    versions: manifest.versions.map(item => item.version === version ? { ...item, validation: "trial" } : item) };
+}
+
 function toolchainPublicationSummary(asset: ToolchainAsset, version: number, before: ToolchainAsset) {
   const tested = asset.versions.find(v => v.version === version)?.coldStart;
   const prior = before.versions.find(v => v.version === version)?.coldStart;
@@ -271,9 +279,16 @@ function callManifest(call: ToolchainCallReceipt) {
 async function dispatchToolchain(caller: OneTeamCaller, name: string, input: Record<string, unknown>): Promise<unknown> {
   const chat = owner(caller);
   if (name === "toolchain_search") {
-    const selected = searchToolchainAssets(String(input.task), listToolchainAssets(), input.limit as number | undefined);
+    const assets = listToolchainAssets();
+    const selected = searchToolchainAssets(String(input.task), assets, input.limit as number | undefined);
     recordToolchainAssetDiscovery(selected);
-    return { schemaVersion: "agentlas.toolchain-search.v2", toolchains: selected.map(asset => assetManifest(asset)) };
+    if (selected.length) return { schemaVersion: "agentlas.toolchain-search.v2", toolchains: selected.map(asset => assetManifest(asset)) };
+    // An empty search is One saying "I am about to redo this": the repeated-work detector's evidence (toolchains/detector.ts).
+    recordToolchainSearchMiss({ task: input.task, chatId: caller.chatId });
+    // A detector draft earns callability in real use (toolchains/trial.ts): at most one, marked as a trial. It is shown
+    // as callable for this conversation because the host granted this exact trial version.
+    const trial = grantToolchainTrial(String(input.task), caller.chatId, assets);
+    return { schemaVersion: "agentlas.toolchain-search.v2", toolchains: trial ? [trialManifest(trial.asset, trial.version)] : [] };
   }
   if (name === "toolchain_inspect") {
     const asset = getToolchainAsset(String(input.toolchain_id));
@@ -306,6 +321,7 @@ async function dispatchToolchain(caller: OneTeamCaller, name: string, input: Rec
     const pending = callToolchain({ toolchainId: String(input.toolchain_id), version: Number(input.version), args: input.args as Record<string, unknown> },
       { callerChatId: original.chatId, parentRunId: original.runId, signal: execution.signal,
         requestId: String(input.request_id), permission: caller.permission === "read" ? "read" : "write", dryRun: input.dry_run === true,
+        trial: toolchainTrialGranted(original.chatId, String(input.toolchain_id), Number(input.version)),
         beforeExecution: call => native.registerCall(call).then(() => undefined),
         afterSettlement: call => native.registerCall(call).then(() => undefined),
         withExecution: (call, body) => execution.run(call, body) });
@@ -511,8 +527,8 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
           next: "Leave the Toolchain as it is. The owner can allow another change by speaking in this conversation." };
         updateAutomationGraph(current.id, graph, { note: "One structured blueprint" });
         recordToolchainRepair(current.id, chat.id);
-        // The monitor lives inside the trigger document: replacing the trigger without it dropped the origin binding,
-        // so every revision of a saved graph failed its own scope check (measured 2026-10-04, QA app, real model).
+
+
         saved = updateAutomation(current.id, { name: bp.name, goal: bp.goal, promptTemplate: bp.goal,
           scheduleHuman: schedule, scheduleJson: null, triggerType, trigger: { kind: triggerType },
           // A later editor cannot establish the original command of an unbound graph.

@@ -164,7 +164,10 @@ interface BindingRow {
 
 interface TokenRecord {
   token: string;
+  /** The binding the renderer asked for; revoking and the logs name it. */
   request: OneArtifactBindingRequestV1;
+  /** The binding whose bytes this capability serves: `request`, or the newest save of its path in the chat. */
+  target: OneArtifactBindingRequestV1;
   expiresAtMs: number;
 }
 
@@ -813,6 +816,50 @@ function verifiedFile(input: unknown): VerifiedFile | null {
   return verdict.ok ? verdict.value : null;
 }
 
+/**
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ */
+export function latestOneArtifactBindingOfPath(input: unknown): OneArtifactBindingRequestV1 | null {
+  if (!isOneArtifactBindingRequestV1(input)) return null;
+  const requested = bindingVerdict(input);
+  if (!requested.ok) return null;
+  const row = requested.value;
+  const latest = getDb().prepare(
+    `SELECT task_id, bound_task_version, chat_id, run_id, manifest_id, artifact_ref
+       FROM one_artifact_bindings
+      WHERE chat_id = ? AND source_path = ?
+      ORDER BY rowid DESC
+      LIMIT 1`,
+  ).get(row.chat_id, row.source_path) as {
+    task_id: string; bound_task_version: number; chat_id: string; run_id: string; manifest_id: string; artifact_ref: string;
+  } | undefined;
+  if (!latest) return null;
+  if (latest.task_id === row.task_id && latest.run_id === row.run_id
+    && latest.manifest_id === row.manifest_id && latest.artifact_ref === row.artifact_ref) return null;
+  const followed = {
+    taskId: latest.task_id,
+    taskVersion: latest.bound_task_version,
+    chatId: latest.chat_id,
+    runId: latest.run_id,
+    manifestId: latest.manifest_id,
+    artifactRef: latest.artifact_ref,
+  };
+  return isOneArtifactBindingRequestV1(followed) ? followed : null;
+}
+
 /** A short, value-free handle for a binding in logs: never a path, a title, or a token. */
 function bindingLogRef(input: unknown): string {
   if (!isOneArtifactBindingRequestV1(input)) return "invalid";
@@ -957,7 +1004,9 @@ export function issueOneArtifactPreviewCapability(
   nowMs = Date.now(),
 ): OneArtifactPreviewCapabilityV1 | OneArtifactPreviewRefusalV1 {
   if (!Number.isFinite(nowMs)) return refusal("request_invalid");
-  const verdict = fileVerdict(input);
+  // An entry of an earlier run whose file a later run wrote again opens the newest save of that path.
+  const followed = latestOneArtifactBindingOfPath(input);
+  const verdict = fileVerdict(followed ?? input);
   if (!verdict.ok || !isOneArtifactBindingRequestV1(input)) {
     const code = verdict.ok ? "request_invalid" : verdict.code;
     if (verdict.ok) fs.closeSync(verdict.value.fd);
@@ -970,7 +1019,7 @@ export function issueOneArtifactPreviewCapability(
   let token = "";
   do token = randomBytes(32).toString("hex"); while (tokens.has(token));
   const expiresAtMs = nowMs + ONE_ARTIFACT_PREVIEW_TTL_MS;
-  tokens.set(token, { token, request: { ...input }, expiresAtMs });
+  tokens.set(token, { token, request: { ...input }, target: followed ?? { ...input }, expiresAtMs });
   return {
     capabilityUrl: `agentlas://one-artifact/${token}`,
     mimeType: verified.row.mime_type,
@@ -1075,7 +1124,9 @@ export function backfillDurableOneArtifactChatImages(limit = 128): {
 
 /** Main-only Office source read, under the existing exact task/run binding. */
 export function readOneArtifactOfficeSource(input: unknown, expectedSha256: string): { name: string; mediaType: string; bytes: Buffer; sha256: string } | null {
-  const verified = verifiedFile(input);
+  // The viewer opened the newest save of the path (issueOneArtifactPreviewCapability) and pinned that save's SHA-256;
+  // the pin below refuses any other bytes.
+  const verified = verifiedFile(latestOneArtifactBindingOfPath(input) ?? input);
   if (!verified) return null;
   try {
     const row = verified.row;
@@ -1301,7 +1352,7 @@ export function serveOneArtifactProtocolRequest(
     logPreviewRefusal("serve", code, record ? bindingLogRef(record.request) : "token", nowMs);
     return safeError(404, code);
   }
-  const verdict = fileVerdict(record.request);
+  const verdict = fileVerdict(record.target);
   if (!verdict.ok) {
     tokens.delete(token);
     logPreviewRefusal("serve", verdict.code, bindingLogRef(record.request), nowMs);

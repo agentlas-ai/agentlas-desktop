@@ -7,10 +7,12 @@ import { queryPublicCommunity, queryFedNews, queryIsharesHoldings, queryIsharesN
 import { ISHARES_FUNDS, findIsharesFund, searchIsharesCatalog } from './providers/ishares-catalog';
 import { financeProviderKey as providerKey } from './provider-credentials';
 import { queryFinanceNews } from './dashboard-feeds';
-import { searchYahooFinanceAssets, queryYahooFinanceData, refreshYahooFinanceQuotes } from './providers/yahoo-market';
+import { searchYahooFinanceAssets, queryYahooFinanceData, refreshYahooFinanceQuotes, queryYahooFinanceNews } from './providers/yahoo-market';
+import { resolveFinanceDataSource, type FinanceDataSelection } from '../../shared/finance-data-routing';
+import type { FinanceFeedId } from '../../shared/finance-feeds';
 
 /** Host-selected owner preference, not accepted as a caller URL, credential or executable. */
-export interface FinanceDataRoute { sourceId: string; signal?: AbortSignal; assertCurrent?:()=>void }
+export interface FinanceDataRoute extends FinanceDataSelection { signal?: AbortSignal; assertCurrent?:()=>void }
 
 const AV_DOC = 'https://www.alphavantage.co/documentation/';
 const SEC_INDEX = 'https://www.sec.gov/files/company_tickers_exchange.json';
@@ -58,6 +60,7 @@ async function secAssets(): Promise<FinanceAsset[]> {
   secCache = { at: Date.now(), assets }; return assets;
 }
 export async function searchFinanceAssets(query: string, route?: FinanceDataRoute): Promise<FinanceSearchResult> {
+  if(route)route={...route,sourceId:resolveFinanceDataSource(route,'market')};
   route?.assertCurrent?.();const normalized = query.trim(); if (!normalized || normalized.length > 200) throw new Error('finance_query_invalid');
   if(route?.sourceId.startsWith('toolchain:')){const {searchFinanceAdapter}=await import('./source-adapters');return searchFinanceAdapter(route.sourceId,normalized,route.signal,route.assertCurrent);}
   if(route?.sourceId==='finance-yfinance'){
@@ -100,7 +103,7 @@ async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAss
   try {
     // Global feeds are explicitly independent of a selected security.
     if (metric === 'social' || metric === 'social_search') return await queryPublicCommunity(input.query, metric === 'social_search', input.period, route?.signal);
-    if (metric === 'macro_news') return await queryFedNews();
+    if (metric === 'macro_news') {if(input.query.trim())return route?.sourceId==='finance-yfinance'?await queryYahooFinanceNews(input.query,{signal:route.signal}):{...result,warnings:['finance_global_news_source_unsupported']};return await queryFedNews();}
     if (metric === 'treasury_yields') return await queryTreasury(input.period);
     if (input.assetIds.length !== 1) return { ...result, warnings: ['Select exactly one asset for this source query. Global social, macro_news and treasury_yields do not require an asset.'] };
     const asset = assets.find(item => item.id === input.assetIds[0]);
@@ -175,6 +178,13 @@ async function queryFinanceDataRaw(input: FinanceDataRequest, assets: FinanceAss
 /** Every result carries an explicit provider/coverage/rights status, including failures. */
 export async function queryFinanceData(input: FinanceDataRequest, assets: FinanceAsset[], route?: FinanceDataRoute): Promise<FinanceDataResult> {
   route?.assertCurrent?.();
+  if(route){
+    const unavailable=(reason:string):FinanceDataResult=>({status:'unconnected',sourceUrls:[],asOf:null,retrievedAt:new Date().toISOString(),columns:[],rows:[],warnings:[reason]});
+    const feeds:Record<string,FinanceFeedId>={news:'finance-news',filings:'finance-sec',company_facts:'finance-sec',economic_calendar:'finance-economy',earnings:'finance-earnings'},enabled=route.enabledFeedIds;
+    if(enabled&&input.metrics.some(metric=>Object.hasOwn(feeds,metric)&&!enabled.includes(feeds[metric])))return unavailable('finance_data_source_disabled');
+    try{route={...route,sourceId:resolveFinanceDataSource(route,input.metrics)};}
+    catch(error){if(error instanceof Error&&error.message==='finance_data_route_mixed_sources')return unavailable(error.message);throw error;}
+  }
   if(route?.sourceId.startsWith('toolchain:')){const {queryFinanceAdapter}=await import('./source-adapters');return queryFinanceAdapter(route.sourceId,input,assets,route.signal,route.assertCurrent);}
   if(route?.signal?.aborted)throw new Error('finance_yahoo_cancelled');
   if(route?.sourceId==='finance-yfinance'&&['price','price_history'].includes(input.metrics[0])){const result=await queryYahooFinanceData(input,assets,{signal:route.signal});route.assertCurrent?.();return result;}
@@ -185,7 +195,7 @@ export async function queryFinanceData(input: FinanceDataRequest, assets: Financ
   let id = '', label = '', coverage = '', rights = '';
   if(metric==='news'&&route?.sourceId==='finance-yfinance'){
     id='yahoo-finance-rss';label='Yahoo Finance RSS';coverage='Selected-symbol headline/link metadata, latest 40 at most; provider-defined relevance, no period completeness or issuer-identity guarantee.';rights='Headline/link metadata only; publisher rights apply. Public read access is not a blanket article or redistribution license.';
-  } else if (result.sourceUrls.some(url => url === 'https://www.federalreserve.gov/feeds/press_all.xml') || metric === 'macro_news') {
+  } else if (result.sourceUrls.some(url => url === 'https://www.federalreserve.gov/feeds/press_all.xml') || metric === 'macro_news'&&!input.query.trim()) {
     id = 'federal-reserve-rss'; label = 'Federal Reserve Board RSS'; coverage = 'Latest 40 official macro announcements; one publisher, independent of selected securities.';
     rights = 'RSS headline/link metadata. No license to republish third-party material or linked full articles is established.';
   } else if ((metric === 'social' || metric === 'social_search') && !result.providers?.length) {
@@ -217,11 +227,12 @@ export async function queryFinanceData(input: FinanceDataRequest, assets: Financ
 
 /** Source-derived proposals share the same renderer CAS path; no AI supplies these numbers. */
 export async function refreshFinanceQuotes(workspace: FinanceWorkspace, route?: FinanceDataRoute): Promise<FinanceAIResult> {
+  if(route)route={...route,sourceId:resolveFinanceDataSource(route,'market')};
   if(route?.sourceId==='finance-yfinance')return refreshYahooFinanceQuotes(workspace,{signal:route.signal});
   if(route?.sourceId.startsWith('toolchain:')){
     const operations:FinanceOperation[]=[],warnings:string[]=[];
     for(const asset of workspace.watchlist.slice(0,5)){
-      route.signal?.throwIfAborted();const result=await queryFinanceData({query:asset.symbol,assetIds:[asset.id],metrics:['price'],period:'1M'},workspace.watchlist,route);
+      route.signal?.throwIfAborted();const result=await queryFinanceData({query:asset.symbol,assetIds:[asset.id],metrics:['price'],period:'current'},workspace.watchlist,route);
       const row=result.rows[0],column=(name:string)=>result.columns.indexOf(name),price=row?.[column('Price')],currency=row?.[column('Currency')],asOf=row?.[column('Observed at')];
       if(!['ok','partial'].includes(result.status)||result.rows.length!==1||row?.[column('Symbol')]!==asset.symbol||typeof price!=='number'||price<0||currency!==asset.currency||typeof asOf!=='string'||!/^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d\d:\d\d)$/.test(asOf)||!Number.isFinite(Date.parse(asOf))||!result.sourceUrls.length){warnings.push(`${asset.symbol}: finance_adapter_quote_schema_unsupported`);continue;}
       const sourceId=`adapter-quote:${encodeURIComponent(asset.id)}`.slice(0,200);operations.push({type:'source.upsert',source:{id:sourceId,name:'선택한 데이터 도구',kind:'provider',status:'connected',asOf,retrievedAt:result.retrievedAt,url:result.sourceUrls[0],note:result.sourceUrls.join('\n')}},{type:'quotes.import',quotes:[{assetId:asset.id,price,currency:asset.currency,asOf,sourceId,priceBasis:'price'}]});

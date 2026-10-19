@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { FinanceDataConnectionRequest, FinanceDataConnectionResult } from '@shared/finance';
 import { navigate } from '@/lib/navigation';
+import { ipc } from '@/lib/ipc';
 import { FinanceMessage } from './FinanceMessage';
 import styles from './FinanceWorkspace.module.css';
 
@@ -16,6 +17,9 @@ export function FinanceDataConnections({ ko, onInspect, onConnect }: {
   const [key, setKey] = useState('');
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
+  const [request, setRequest] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [creationError, setCreationError] = useState('');
   const epoch = useRef(0);
   const mounted = useRef(true);
   const inspect = async (action: FinanceDataConnectionRequest['action']) => {
@@ -41,6 +45,21 @@ export function FinanceDataConnections({ ko, onInspect, onConnect }: {
   return <section className={styles.importPanel} aria-label={l('데이터 도구', 'Data tools')}>
     <div className={styles.cardHead}><h3>{l('데이터 도구', 'Data tools')}</h3><button type="button" className={styles.button} onClick={() => navigate('/library/toolchains')}>{l('도구 관리', 'Manage tools')}</button></div>
     <p className={styles.muted}>{l('사용할 도구와 플러그인을 관리하세요.', 'Manage the tools and plugins you want to use.')}</p>
+    <details style={{marginTop:16}}><summary>{l('데이터 도구 만들기', 'Create a data tool')}</summary>
+      <form onSubmit={event=>{
+        event.preventDefault();const tools=ipc()?.toolchains;if(!request.trim()||creating||!tools)return;
+        setCreating(true);setCreationError('');
+        void tools.generateAsset({request:request.trim(),requestId:crypto.randomUUID(),purpose:'finance-source'}).then(generated=>{
+          if(!mounted.current)return;
+          navigate(`/library/toolchains?asset=${encodeURIComponent(generated.asset.id)}&version=${generated.version}`);
+        }).catch(()=>{if(mounted.current)setCreationError(l('도구 초안을 만들지 못했습니다. 요청과 앱 연결을 확인한 뒤 다시 시도하세요.', 'Could not create the tool draft. Check your request and app connection, then retry.'));}).finally(()=>{if(mounted.current)setCreating(false);});
+      }}>
+        <label className={styles.label}>{l('필요한 자료와 출처', 'Data and source you need')}<textarea className={`${styles.input} ${styles.textarea}`} rows={3} maxLength={8000} value={request} disabled={creating} placeholder={l('예: 관심 종목의 가격·이력을 무료 공개 소스에서 가져오는 로컬 도구', 'Example: a local tool for watchlist prices and history from a free public source')} onChange={event=>setRequest(event.target.value)}/></label>
+        <p className={styles.muted}>{l('생성 후 도구 화면에서 계약을 검토하고 검증·게시하세요.', 'After creation, review the contract and validate and publish it in Tools.')}</p>
+        <button type="submit" className={styles.button} disabled={creating||!request.trim()||!ipc()?.toolchains}>{creating?l('도구 초안을 만드는 중…', 'Creating tool draft…'):l('AI로 도구 만들기', 'Create tool with AI')}</button>
+        {creationError&&<p className={styles.muted} role="alert">{creationError}</p>}
+      </form>
+    </details>
     {(onInspect || onConnect) && <details style={{ marginTop: 16 }}><summary>{l('추가 연결', 'Additional connections')}</summary>
     <div className={styles.cardHead}><h4>Alpha Vantage</h4></div>
     <div className={styles.evidenceChips} role="status" aria-live="polite"><span className={styles.badge}>{presence}</span><span className={styles.badge}>{access}</span></div>

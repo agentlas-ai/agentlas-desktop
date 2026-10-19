@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { session as electronSession } from "electron";
-import type { CookiesSetDetails, Session } from "electron";
+import type { Cookie, CookiesSetDetails, Session } from "electron";
 import type { BrowserCdpHostFailureDiagnostic } from "../../shared/types";
 import {
   acquireBrowserCdpLease,
@@ -18,7 +18,7 @@ import {
 import { NATIVE_BROWSER_PARTITION } from "../work-live-view";
 import { browserCredentialConsentRevision } from "./credential-sync";
 import { googleSessionTraceRecord, withAgentlasCookieWrite } from "./google-session-trace";
-import { decideNativeCookieWrite, planSessionGroupFeed } from "./cookie-merge";
+import { decideNativeCookieWrite, persistentCookieExpiry, planSessionGroupFeed } from "./cookie-merge";
 import { sessionCookieGroupOf, sessionCookieNamesFor } from "./login-wall";
 import { listBrowserSites } from "../store/browser-vault";
 import { getMeta, setMeta } from "../store/meta";
@@ -375,6 +375,14 @@ export async function writeNativeBrowserCookies(
     beginMigration?: () => void;
     /** 사용자가 방금 "가져오기"를 눌렀는가. 그때는 가져온 값이 낡은 세션을 이긴다. */
     explicitImport?: boolean;
+    /**
+     * 호출자가 도메인별로 나눠 부르더라도 같은 로그인 묶음(google.com + youtube.com)의 신선도는 한 번에
+     * 판정하도록, 이번 가져오기 전체 원본 쿠키를 준다. 쓰는 줄은 여전히 이 호출의 cookies 뿐이며,
+     * 여기 든 쿠키는 cookies 와 **같은 객체**여야 한다.
+     */
+    groupContext?: readonly CdpCookie[];
+    /** Destination snapshot shared by all domain slices of one import batch. */
+    groupExisting?: readonly Cookie[];
   },
 ): Promise<CookieWriteSummary> {
   const counts = emptyCounts();
@@ -385,26 +393,48 @@ export async function writeNativeBrowserCookies(
    * kept whole, a partial or missing one is written whole (cookie-merge.ts planSessionGroupFeed).
    * Line-by-line "keep what exists, add what is missing" stitched the dedicated browser's tokens into
    * the owner's own partition login.
+   * Freshness: a cookie, or a whole login group, the source expires later than the partition's copy is
+   * refreshed; never one the partition holds fresher. The partition used to keep every cookie it already
+   * had, so the everyday browser's rotated login never reached it (cookie-merge.ts isSourceCookieFresher,
+   * the same rule the dedicated-browser CDP feed and the SQL store use).
    */
   let groupFeed: Set<CdpCookie> | null = null;
   if (connect && connect.explicitImport !== true) {
     const text = (value: unknown) => typeof value === "string" ? value : "";
-    const existing = (await destination.cookies.get({}).catch(() => [])).map((item) => ({
-      domain: item.domain ?? "", name: item.name, path: item.path ?? "/" }));
-    const incoming = cookies.map((cookie) => ({ cookie, domain: text(cookie.domain), name: text(cookie.name), path: text(cookie.path) || "/" }));
+    const existing = (connect.groupExisting ?? await destination.cookies.get({}).catch(() => [])).map((item) => ({
+      domain: item.domain ?? "", name: item.name, path: item.path ?? "/",
+      expires: item.session === true ? null : persistentCookieExpiry(item.expirationDate) }));
+    const describe = (cookie: CdpCookie) => ({ cookie, domain: text(cookie.domain), name: text(cookie.name), path: text(cookie.path) || "/",
+      expires: cookie.session === true ? null : persistentCookieExpiry(Number(cookie.expires)) });
+    const incoming = cookies.map(describe);
     const plan = planSessionGroupFeed({
       explicitImport: false,
       incoming,
+      freshnessContext: connect.groupContext ? connect.groupContext.map(describe) : undefined,
       existing,
       groupOf: sessionCookieGroupOf,
       sessionNamesFor: sessionCookieNamesFor,
       perCookie: (row) => {
         const host = (value: string) => value.replace(/^\./u, "").toLowerCase();
-        const hasExisting = existing.some((item) => host(item.domain) === host(row.domain) && item.name === row.name && item.path === row.path);
-        return decideNativeCookieWrite({ hasExisting, explicitImport: false }) === "write" ? "feed" : "keep";
+        const matches = existing.filter((item) => host(item.domain) === host(row.domain) && item.name === row.name && item.path === row.path);
+        // 같은 줄이 둘이면 더 늦은 만료로 견준다. 한쪽이라도 세션 쿠키면 신선도를 비교하지 않는다.
+        const comparable = matches.length > 0 && matches.every((item) => item.expires !== null);
+        return decideNativeCookieWrite({
+          hasExisting: matches.length > 0,
+          explicitImport: false,
+          incomingExpires: row.expires,
+          existingExpires: comparable ? Math.max(...matches.map((item) => item.expires as number)) : null,
+        }) === "write" ? "feed" : "keep";
       },
     });
     groupFeed = new Set(plan.feed.map((row) => row.cookie));
+    if (plan.refreshedGroups.length > 0 || plan.conflictGroups.length > 0) {
+      // Counts only: no domains, cookie names, or values reach the main log.
+      console.info("[browser-native-session] login group freshness", JSON.stringify({
+        refreshedGroups: plan.refreshedGroups.length,
+        conflictKeptGroups: plan.conflictGroups.length,
+      }));
+    }
   }
   for (const cookie of cookies) {
     const converted = nativeCookieDetails(cookie, nowSeconds);

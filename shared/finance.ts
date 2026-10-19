@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { FinanceAnalystDraftSchema, FinanceAnalystRefSchema } from "./finance-analysts";
 /** Shared service and MCP transport bound; a transport must outlive the service's terminal receipt. */
 export const FINANCE_MONITOR_RUN_TIMEOUT_MS = 180000;
 
@@ -71,7 +72,17 @@ const WorkspaceSchema = z.object({
 export type FinanceWorkspace = z.infer<typeof WorkspaceSchema>;
 
 export interface FinanceSearchResult { assets: FinanceAsset[]; provider: string; asOf: string | null; warnings: string[] }
-export interface FinanceAIResult { message: string; operations?: FinanceOperation[]; baseRevision: number; status?: "ok" | "unavailable" | "invalid_output" | "cancelled" | "conflict"; requestId?: string; runtime?: { kind: string; model?: string; execution: string }; artifacts?:{reportId:string;title:string;kind:'chart'|'report'|'newsletter'}[];toolRuns?:{tool:string;status:'ok'|'failed';startedAt:string;errorCode?:string}[] }
+export interface FinanceAIResult { message: string; operations?: FinanceOperation[]; baseRevision: number; status?: "ok" | "unavailable" | "invalid_output" | "cancelled" | "conflict"; requestId?: string; runtime?: { kind: string; model?: string; execution: string }; artifacts?:{reportId:string;title:string;kind:'chart'|'report'|'newsletter'}[];toolRuns?:{tool:string;status:'ok'|'failed';startedAt:string;errorCode?:string}[]; analystDraft?:import('./finance-analysts').FinanceAnalystDraft }
+export const FinanceAskRequestSchema = z.object({
+  request: z.string().min(1).max(20000).refine(value => !!value.trim()), screenContext: z.string().max(2000),
+  baseRevision: z.number().int().nonnegative(), requestId: id.optional(),
+  analystRefs: z.array(FinanceAnalystRefSchema).max(3).refine(items => new Set(items.map(item => item.id)).size === items.length).optional(),
+  analystAuthoring: z.boolean().optional(), analystDraft: FinanceAnalystDraftSchema.optional(),
+  analystHistory: z.array(z.object({role:z.enum(['user','assistant']),content:z.string().max(20000)}).strict()).max(6).optional(),
+}).strict().refine(value => !value.analystDraft || value.analystAuthoring === true)
+  .refine(value => !value.analystHistory || value.analystAuthoring === true)
+  .refine(value => !value.analystAuthoring || !value.analystRefs?.length);
+export type FinanceAskRequest = z.infer<typeof FinanceAskRequestSchema>;
 export interface FinanceExportResult { ok: boolean; path?: string; error?: string; sha256?: string; bytes?: number; savedAt?: string; cancelled?: boolean }
 export interface FinanceDataRequest { query: string; assetIds: string[]; metrics: string[]; period: string }
 export interface FinanceDataConnectionRequest { action: "status" | "test" }
@@ -125,13 +136,16 @@ export interface FinanceMonitorRunsResult {
   indexStatus?: "ready" | "building"; indexedCount?: number;
 }
 export interface FinanceAPI {
+  planning?(input: import('./finance-planning').FinancePlanningRequest): Promise<import('./finance-planning').FinancePlanningResult>;
+  portfolio?(input: import('./finance-portfolio').FinancePortfolioRequest): Promise<import('./finance-portfolio').FinancePortfolioResult>;
+  analysts?(input: import('./finance-analysts').FinanceAnalystRequest): Promise<import('./finance-analysts').FinanceAnalystResult>;
   experience?(input: import('./finance-experience').FinanceExperienceRequest): Promise<import('./finance-experience').FinanceExperienceState>;
   worldMarkets?(): Promise<import('./finance-experience').FinanceWorldMarketsResult>;
   dashboardFeeds?(): Promise<import('./finance-feeds').FinanceDashboardFeedsResult>;
   load(): Promise<FinanceWorkspace>;
   save(input: { workspace: FinanceWorkspace; expectedRevision: number }): Promise<FinanceWorkspace>;
   search?(input: { query: string }): Promise<FinanceSearchResult>;
-  ask?(input: { request: string; screenContext: string; baseRevision: number; requestId?: string }): Promise<FinanceAIResult>;
+  ask?(input: FinanceAskRequest): Promise<FinanceAIResult>;
   cancelAsk?(input: { requestId: string }): Promise<{ cancelled: boolean }>;
   queryData?(input: FinanceDataRequest): Promise<FinanceDataResult>;
   dataConnection?(input: FinanceDataConnectionRequest): Promise<FinanceDataConnectionResult>;

@@ -67,6 +67,14 @@ export async function queryBluesky(query: string, search: boolean, signal?:Abort
  }catch(error){if(signal?.aborted)throw new Error('finance_source_cancelled');return{...base([url.href,actor?'https://docs.bsky.app/docs/api/app-bsky-feed-get-author-feed':'https://docs.bsky.app/docs/api/app-bsky-feed-search-posts']),status:'error',warnings:[error instanceof Error&&/^finance_[a-z0-9_]+$/.test(error.message)?error.message:'finance_source_unavailable','No alternate author, platform or invented posts were substituted.']};}
 }
 
+export const FINANCE_SOCIAL_PERIOD_DAYS:Readonly<Record<string,number|null>>=Object.freeze({'1D':1,'1W':7,'7d':7,'1M':31,'3M':93,'1Y':366,'5Y':1830,all:null});
+export const FINANCE_SOCIAL_SUPPORTED_PERIODS=Object.freeze(Object.keys(FINANCE_SOCIAL_PERIOD_DAYS));
+/** One rolling seconds window is used by the request and returned-row validation. */
+export function financeSocialWindow(period:string,through=Math.floor(Date.now()/1000)):{from:number|null;through:number}{
+ if(!Object.prototype.hasOwnProperty.call(FINANCE_SOCIAL_PERIOD_DAYS,period))throw new Error('finance_social_period_invalid');
+ if(!Number.isSafeInteger(through)||through<0)throw new Error('finance_social_window_invalid');
+ const days=FINANCE_SOCIAL_PERIOD_DAYS[period];return {from:days===null?null:Math.max(0,through-days*86400),through};
+}
 const HN_DOCS='https://hn.algolia.com/api';
 const COMMUNITY_COLUMNS=['Provider','Author','Author ID','Post time','Short claim','Original post','Linked URL','Evidence status'];
 const COMMUNITY_RIGHTS='Public read access is not a blanket redistribution license. Only attributed short post/headline metadata and original links; no article body, media, or linked page is copied.';
@@ -74,6 +82,7 @@ function communityProvider(id:string,label:string,result:FinanceDataResult,cover
 function communityError(error:unknown,urls:string[]):FinanceDataResult{return{...base(urls),status:'error',warnings:[error instanceof Error&&/^finance_[a-z0-9_]+$/.test(error.message)?error.message:'finance_source_unavailable']};}
 /** Algolia's HN index supplies submitted story metadata, never issuer facts or market sentiment. */
 export function parseHackerNews(value:unknown,sourceUrl:string,query:string,from:number|null,through:number):FinanceDataResult{
+ if(!Number.isSafeInteger(through)||through<0||from!==null&&(!Number.isSafeInteger(from)||from<0||from>through))throw new Error('finance_social_window_invalid');
  const data=obj(value),result=base([sourceUrl,HN_DOCS]);
  if(!Array.isArray(data.hits)||data.query!==query)throw new Error('finance_source_shape');
  const seen=new Set<string>();let omitted=0;
@@ -94,10 +103,8 @@ export function parseHackerNews(value:unknown,sourceUrl:string,query:string,from
  if(data.hits.length>20)result.warnings.push('Provider returned more than requested; first 20 examined only.');
  return result;
 }
-async function queryHackerNews(query:string,period:string,signal?:AbortSignal):Promise<FinanceDataResult>{
- const days:Record<string,number|null>={'1M':31,'3M':93,'1Y':366,'5Y':1830,all:null};
- if(!Object.prototype.hasOwnProperty.call(days,period))throw new Error('finance_social_period_invalid');
- const through=Math.floor(Date.now()/1000),from=days[period]===null?null:Math.max(0,through-days[period]!*86400);
+async function queryHackerNews(query:string,window:{from:number|null;through:number},signal?:AbortSignal):Promise<FinanceDataResult>{
+ const {from,through}=window;
  const url=new URL('https://hn.algolia.com/api/v1/search_by_date');url.searchParams.set('query',query);url.searchParams.set('tags','story');url.searchParams.set('hitsPerPage','20');url.searchParams.set('numericFilters',`${from===null?'':`created_at_i>=${from},`}created_at_i<=${through}`);
  try{
   signal?.throwIfAborted();const fetcher:typeof fetch=(input,init)=>fetch(input,{...init,signal:signal?AbortSignal.any([signal,...(init?.signal?[init.signal]:[])]):init?.signal});
@@ -110,9 +117,9 @@ export async function queryPublicCommunity(query:string,search:boolean,period:st
  const q=query.trim();if(!q||q.length>300||/[\u0000-\u001f\u007f]/.test(q))throw new Error('finance_social_query_invalid');
  const explicit=/(?:^|\s)@((?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,63})(?=\s|$)/.test(q);
  if(q.includes('@')&&!explicit)throw new Error('finance_social_actor_invalid');
- if(explicit){const result=await queryBluesky(q,false,signal);result.providers=[communityProvider('bluesky-public','Bluesky public API',result,'One explicitly requested @handle author feed, latest 20; no other community or ticker relevance inferred.')];return result;}
- if(!['1M','3M','1Y','5Y','all'].includes(period))throw new Error('finance_social_period_invalid');
- const [bluesky,hn]=await Promise.all([queryBluesky(q,search,signal),queryHackerNews(q,period,signal)]);if(signal?.aborted)throw new Error('finance_source_cancelled');
+ const window=financeSocialWindow(period);
+ if(explicit){const result=await queryBluesky(q,false,signal);result.warnings.push('Requested period is not enforced by this author-feed endpoint.');result.providers=[communityProvider('bluesky-public','Bluesky public API',result,'One explicitly requested @handle author feed, latest 20; requested period is not enforced; no other community or ticker relevance inferred.')];return result;}
+ const [bluesky,hn]=await Promise.all([queryBluesky(q,search,signal),queryHackerNews(q,window,signal)]);if(signal?.aborted)throw new Error('finance_source_cancelled');
  const result=base([...new Set([...bluesky.sourceUrls,...hn.sourceUrls])]);result.columns=[...COMMUNITY_COLUMNS];
  result.providers=[communityProvider('bluesky-public','Bluesky public API',bluesky,'Actual keyword search, latest20 if public endpoint permits. Requested period is not enforced by this endpoint; no account, issuer identity, or completeness inferred.'),communityProvider('hacker-news-algolia','Hacker News via Algolia',hn,'Latest20 story submissions by the unchanged keyword, requested rolling-day posting window; not comments, X, Reddit, issuer news, or market consensus.')];
  const rows:Row[]=[...bluesky.rows.map(row=>['Bluesky',row[0],row[1],row[3],typeof row[2]==='string'?row[2].slice(0,500):null,row[5],null,row[6]]),...hn.rows];

@@ -1,6 +1,7 @@
 const { access, chmod, lstat, readFile, readdir, readlink, realpath, rm, writeFile } = require("node:fs/promises");
 const { createHash } = require("node:crypto");
 const path = require("node:path");
+const asar = require("@electron/asar");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const embeddedCoreContract = require("./embedded-core-contract.cjs");
@@ -993,10 +994,21 @@ function verifyBundledProductExtensionSigningPolicy(context) {
 
 exports.verifyBundledProductExtensionSigningPolicy = verifyBundledProductExtensionSigningPolicy;
 
+// Inspect the actual archive before signing. A build input cleanup or glob
+// can drift; neither a successful builder invocation nor a source YAML rule
+// proves the public ASAR omitted the maps.
+function verifyNoPackagedSourceMaps(archive) {
+  const maps = asar.listPackage(archive).filter((name) => /\.map$/i.test(name));
+  if (maps.length) throw new Error(`[afterPack] public app.asar contains ${maps.length} source maps`);
+  return { sourceMaps: 0 };
+}
+exports.verifyNoPackagedSourceMaps = verifyNoPackagedSourceMaps;
+
 exports.default = async function afterPackClean(context) {
   const studioResources = context.electronPlatformName === "darwin"
     ? path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`, "Contents", "Resources")
     : path.join(context.appOutDir, "resources");
+  verifyNoPackagedSourceMaps(path.join(studioResources, "app.asar"));
   const sciencePackage = verifyScienceRuntimePackage(
     path.join(studioResources, "app.asar"),
     context.electronPlatformName,

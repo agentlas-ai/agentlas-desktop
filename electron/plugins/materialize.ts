@@ -27,9 +27,9 @@ function bundledPluginsRoot(): string {
   // dist/electron/dist/plugins does not exist -- so no dev app ever materialized a bundled plugin
   // ("bundled packages unreadable", persona apps 2026-09-14) and the Research Director pin drifted.
   if (path.basename(appPath) === "electron" && path.basename(path.dirname(appPath)) === "dist") {
-    // dist/plugins is a build product nobody refreshes on a source bump, so every service pin bump
-    // bricked every dev/QA app on the machine until someone rebuilt (rounds 3·5·6, 2026-09-14). A dev
-    // launch reads the source tree, which is what the Science service constant was written against.
+
+
+
     const repositoryRoot = path.dirname(path.dirname(appPath));
     const sourcePlugins = path.join(repositoryRoot, "plugins");
     if (fs.existsSync(path.join(sourcePlugins, RESEARCH_DIRECTOR_PLUGIN_SLUG, "plugin.json"))) return sourcePlugins;
@@ -41,18 +41,18 @@ function bundledPluginsRoot(): string {
 const RESEARCH_DIRECTOR_PLUGIN_SLUG = "agentlas-science-research-director";
 
 /**
- * Official packaged apps share the machine root. Local candidates and dev/QA apps
- * keep their own root under userData: two
- * desktop builds on one machine pin different Research Director versions, and whichever
- * materialized last would break the other's Science binding (production 1.2.6 vs a dev app
- * bundling 1.24.5, 2026-09-14). Science reads the same root through its env override.
+
+
+
+
+
  */
-export function installedPluginsRoot(): string {
+export function installedPluginsRoot(options: { configureScience?: boolean } = {}): string {
   if (!isPackagedRuntime() || process.env.AGENTLAS_QA_USER_DATA_DIR
     || configuredIdentity()?.channel === "local-candidate"
     || configuredIdentity()?.channel === "managed-cloud") {
     const root = userDataPath("plugins");
-    if (!process.env.AGENTLAS_SCIENCE_RESEARCH_DIRECTOR_PLUGIN_ROOT) {
+    if (options.configureScience !== false && !process.env.AGENTLAS_SCIENCE_RESEARCH_DIRECTOR_PLUGIN_ROOT) {
       process.env.AGENTLAS_SCIENCE_RESEARCH_DIRECTOR_PLUGIN_ROOT = path.join(root, RESEARCH_DIRECTOR_PLUGIN_SLUG);
     }
     return root;
@@ -335,24 +335,33 @@ export type VerifiedInstalledPluginRelease = {
   directory: string;
 };
 
+/** Read an app-bundled release without installing it or accepting a caller path. */
+export function bundledPluginRelease(slug: string): VerifiedInstalledPluginRelease {
+  if (!validSlug(slug)) throw new Error("plugin bundled slug invalid");
+  const directory = path.join(bundledPluginsRoot(), slug);
+  const identity = readManifestIdentity(directory);
+  if (identity.slug !== slug) throw new Error("plugin bundled identity mismatch");
+  return { ...identity, digest: releaseDigest(directory), directory };
+}
+
 /**
  * Recomputes the exact installed release before another subsystem trusts files
  * from it. `.install.json` is only a receipt; matching its stored digest to the
  * current real, symlink-free tree is the admission check.
  */
 const releaseVerificationCache = new Map<string, { signature: string; release: VerifiedInstalledPluginRelease }>();
-export function verifiedInstalledPluginRelease(destination: string): VerifiedInstalledPluginRelease | null {
+export function verifiedInstalledPluginRelease(destination: string, options: { configureScience?: boolean } = {}): VerifiedInstalledPluginRelease | null {
   // 트리 메타데이터가 마지막 성공 검증과 같으면 내용도 같다 — 매 실행 전 파일 sha256 을 다시 내지 않는다(tree-signature.ts).
   const signature = pluginTreeSignature(path.resolve(destination), isHostOwned);
   const cached = signature ? releaseVerificationCache.get(path.resolve(destination)) : undefined;
   if (cached && cached.signature === signature) return cached.release;
-  const release = computeVerifiedInstalledPluginRelease(destination);
+  const release = computeVerifiedInstalledPluginRelease(destination, options);
   if (release && signature) releaseVerificationCache.set(path.resolve(destination), { signature, release });
   return release;
 }
-function computeVerifiedInstalledPluginRelease(destination: string): VerifiedInstalledPluginRelease | null {
+function computeVerifiedInstalledPluginRelease(destination: string, options: { configureScience?: boolean }): VerifiedInstalledPluginRelease | null {
   try {
-    const root = path.resolve(installedPluginsRoot());
+    const root = path.resolve(installedPluginsRoot(options));
     const directory = path.resolve(destination);
     if (path.dirname(directory) !== root) return null;
     return verifyReleaseTree(directory);
@@ -653,7 +662,9 @@ export function materializeBuiltinPlugins(): MaterializeReceipt[] {
     assertRealDirectory(source, "bundled plugins root");
     slugs = fs
       .readdirSync(source, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && validSlug(entry.name))
+      // Finance is activated from its owner consent flow, never global startup.
+      // Already-installed editions are retained; this only defers new materialization.
+      .filter((entry) => entry.isDirectory() && validSlug(entry.name) && entry.name !== "finance")
       .map((entry) => entry.name)
       .sort();
   } catch (error) {

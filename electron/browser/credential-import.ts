@@ -1,26 +1,26 @@
 import { developmentEffectsSuppressed, assertDevelopmentEffectAllowed } from "../development-effect-policy";
-// 평소 쓰는 Chrome 계열 브라우저의 로그인 세션을 Agentlas 전용 CDP 프로필로 가져온다.
-//
-// 왜: 전용 프로필은 빈 상태로 태어나므로 사용자가 Connect에서 사이트를 하나씩 손으로 적고
-// 전용 창에서 다시 로그인해야 했다. 평소 브라우저에는 이미 그 로그인이 다 있다.
-//
-// 경계 (이 파일이 지키는 것):
-//  1) **값을 노출하지 않는다.** Windows/Linux는 OS가 감싼 프로필 키를 이어받는다. macOS는
-//     원본과 번들 런타임의 실제 제품 ID에 맞는 Safe Storage 항목을 선택하고, 서로 다를 때만
-//     사용자가 고른 사이트 쿠키를 메모리에서 변환한다. 평문은 파일/로그/응답에 쓰지 않고 키
-//     버퍼도 변환 직후 지운다.
-//  2) **비밀번호와 결제수단은 만지지 않는다.** `Login Data`·`Web Data`는 읽지도 복사하지도 않는다.
-//     이유는 보안 위생이 아니라 손익이다: (a) 로그인 성공률에 거의 기여하지 않는다(로그인은
-//     쿠키 + `Local State` 암호화 키로 된다) (b) `Login Data`+`Local State` 동시 접근은
-//     인포스틸러 시그니처라 백신·EDR 에 걸려 배포가 막힐 수 있다 (c) 마켓플레이스 플러그인이
-//     그 폴더를 읽으면 피해가 "세션 탈취"에서 "전부"로 커진다.
-//     Agentlas-OS 레일도 같은 원칙을 따라야 한다 — 비밀번호/결제 저장소는 가져오지 않는다.
-//  3) **원본 DB에 연결하지 않는다.** 실행 중인 브라우저가 mmap 한 SQLite에 외부 연결을 붙이면
-//     그 브라우저가 SIGBUS 로 죽을 수 있다(2026-08-19 Agentlas 앱에서 2회 실측). 그래서
-//     파일을 먼저 복사하고 **사본만** 연다. 사본은 무결성 검사를 통과해야 쓰인다 — 깨졌으면
-//     빈 결과로 조용히 진행하지 않고 실패를 말한다.
-//  4) **덮어쓰지 않는다(merge).** 전용 프로필에 이미 있는 쿠키 행은 건드리지 않고, 없는 것만 넣는다.
-//     에이전트가 전용 창에서 새로 만든 세션을 평소 브라우저 상태가 지우면 안 된다.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import Database from "better-sqlite3";
 import { AUTOMATION_PROFILE_FLAGS } from "./automation-profile-flags";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
@@ -62,7 +62,7 @@ import { sessionCookieGroupOf, sessionCookieNamesFor } from "./login-wall";
 import { currentUiLocale } from "../ui-locale";
 import { reportSystemPermissionIssue } from "../os-permission-guidance";
 
-/** 가져오기 거절·오류 문구는 화면 언어로 — 영어 화면에 한국어가 새지 않게(오너 2026-09-14). */
+/** */
 function importCopy(ko: string, en: string): string {
   return currentUiLocale() === "ko" ? ko : en;
 }
@@ -248,12 +248,12 @@ export function removeBrowserProfileImportWorkDir(dir: string): void {
 }
 
 /**
- * host_key → **사이트 한 줄**(등록 가능 도메인).
- *
- * ★앞의 점만 떼면 안 된다(2026-08-20 실측): `.mongodb.com`(쿠키 19, 로그인 후보 0)과
- * `auth.mongodb.com`(4, 4)이 다른 줄로 남으면, 로그인 쿠키 필터가 **쿠키를 제일 많이 가진
- * 줄을 떨어뜨리고** 엉뚱한 서브도메인만 남긴다. 그걸 고르면 4개만 복사돼 로그인이 깨진다.
- * `.railway.com`/`backboard.railway.com`, `.google.com`/`play.google.com` 도 같은 모양.
+
+
+
+
+
+
  */
 function normalizeHostKey(hostKey: string): string {
   return registrableDomain(hostKey);
@@ -441,12 +441,12 @@ function countCookieRows(file: string): number | null {
 }
 
 /**
- * 전용 프로필의 쿠키 저장소 경로.
- *
- * ★원본의 배치(Network/ 유무)를 그대로 따라가면 안 된다(오너 신고 2026-09-14). 신형 배치
- *   브라우저와 구형 배치 브라우저에서 각각 가져오면 같은 전용 프로필 안의 서로 다른 파일에
- *   나뉘어 쌓이고, 전용 브라우저는 한쪽만 읽어 "방금 가져온 쿠키가 없어진다". 이미 쿠키가
- *   들어 있는 목적지 파일이 있으면 그 파일에 계속 누적한다.
+
+
+
+
+
+
  */
 function destinationCookieStore(sourceStore: string): string {
   const dedicated = ensureBrowserCdpProfilePrivate();
@@ -1060,9 +1060,9 @@ export async function importBrowserCredentials(
 ): Promise<BrowserCredentialImportResult> {
   if (developmentEffectsSuppressed()) return { ok: false, cookiesAdded: 0, linkedSites: [], skipped: [], error: "development_effect_policy_disabled", suppressionReason: "development_effect_policy_disabled" };
   const skipped: Array<{ domain: string; reason: string }> = [];
-  // 목록의 한 줄과 같은 단위(등록 가능 도메인)로 접는다. 예전 승인 기록이 서브도메인을
-  // 담고 있어도 여기서 사이트 단위로 넓어진다 — 좁게 복사해 반쯤 깨진 로그인을 만드느니
-  // 그 사이트 쿠키를 전부 옮기는 쪽이 옳다(오너 결정 2026-08-20).
+
+
+
   const wanted = [...new Set(domains.map((d) => registrableDomain(d)).filter(Boolean))];
   if (wanted.length === 0) {
     return { ok: false, cookiesAdded: 0, linkedSites: [], skipped, error: importCopy("가져올 도메인을 하나 이상 골라 주세요.", "Choose at least one domain to import.") };
@@ -1185,20 +1185,20 @@ export async function importBrowserCredentials(
     const placeholders = shared.map(() => "?").join(", ");
     // merge: 없는 줄만 넣는다. 목적지에 이미 있는 줄은 아래 판정이 정한다.
     const insert = dest.prepare(`INSERT OR IGNORE INTO cookies (${quoted}) VALUES (${placeholders})`);
-    /*
-     * ★ 왜 "있으면 건드리지 않는다" 를 버렸나 (오너 신고 2026-08-24, 실측으로 확인):
-     *   같은 (host_key, name, path) 를 그냥 건너뛰면, 전용 프로필에 한 번이라도 그 쿠키가
-     *   들어간 뒤로는 **낡은 값이 영원히 남는다.** 실제로 돌려 보니 사이트 3개를 고르고
-     *   `cookiesAdded: 0` 인데 `ok: true` 였다 — 목록에는 "연결됨" 으로 올라가고 로그인은
-     *   되지 않는, 정확히 신고된 상태다. 로그인 쿠키는 회전한다. 원본이 더 새것이면
-     *   갱신해야 옮긴 것이 된다.
-     */
-    /*
-     * ★교체는 **그 줄 하나만** 지워야 한다(오너 신고 2026-09-14 "가져올 때마다 초기화").
-     *   예전 키는 (host_key, name, path) 뿐이라, 파티션(top_frame_site_key)·스킴·포트만 다른
-     *   형제 줄까지 한꺼번에 지우고 한 줄만 다시 넣었다 — 한 사이트를 가져오는 것이 이미
-     *   있던 다른 쿠키를 지우는 길이었다. 저장소의 실제 UNIQUE 조합을 키로 쓴다.
-     */
+    
+
+
+
+
+
+
+
+    
+
+
+
+
+
     const identityColumns = cookieIdentityColumns(shared);
     const identityWhere = identityColumns.map((column) => `"${column}" IS ?`).join(" AND ");
     const identityOf = (row: Record<string, unknown>): Array<unknown> =>
@@ -1348,12 +1348,12 @@ export async function importBrowserCredentials(
      * refresh retry on every launch and showed an error after a successful
      * earlier import. Only fail when no importable or interactive site exists.
      */
-    /*
-     * ★숫자는 "이번에 실제로 쓴 줄"이어야 한다. 예전에는 macOS 에서 `runtimeImported.accepted`
-     *   (= 전용 브라우저가 그 사이트에 **갖고 있는** 쿠키 수)를 그대로 보고해, 아무것도 옮기지
-     *   않은 15분 주기 갱신이 로그에 "+29 cookies"를 영원히 찍었다(실측 로그). 추가/갱신/유지를
-     *   나눠 정직하게 돌려준다 — 유지(preserved)는 "이미 누적돼 있다"는 뜻이지 실패가 아니다.
-     */
+    
+
+
+
+
+
     const moved = added + refreshed;
     if (moved === 0
       && preserved === 0
@@ -1424,15 +1424,22 @@ export async function importSourceCookiesIntoNativeSession(
     observed = source.observed - source.cookies.length;
     const linkedSites: string[] = [];
     const wanted = [...new Set(domains.map(registrableDomain).filter(Boolean))];
+    // The write is split per registrable domain, but one login (google.com + youtube.com) is judged as one
+    // group: every slice sees the whole batch for the freshness verdict (cookie-merge.ts planSessionGroupFeed).
+    const batch = source.cookies.map(cookie => ({ registrable: registrableDomain(cookie.domain),
+      cookie: { name: cookie.name, value: cookie.value, domain: cookie.domain, path: cookie.path,
+        expires: cookie.expires ?? -1, session: cookie.expires === undefined,
+        httpOnly: cookie.httpOnly, secure: cookie.secure, sameSite: cookie.sameSite } }))
+      .filter(entry => wanted.includes(entry.registrable));
+    const groupContext = batch.map(entry => entry.cookie);
+    if (!isCurrent()) throw new Error("browser-import-consent-changed");
+    const groupExisting = automatic && groupContext.length > 0 ? await destination.cookies.get({}) : undefined;
     for (const domain of wanted) {
       if (!isCurrent()) throw new Error("browser-import-consent-changed");
-      const cookies = source.cookies.filter(cookie => registrableDomain(cookie.domain) === domain)
-        .map(cookie => ({ name: cookie.name, value: cookie.value, domain: cookie.domain, path: cookie.path,
-          expires: cookie.expires ?? -1, session: cookie.expires === undefined,
-          httpOnly: cookie.httpOnly, secure: cookie.secure, sameSite: cookie.sameSite }));
+      const cookies = batch.filter(entry => entry.registrable === domain).map(entry => entry.cookie);
       if (!cookies.length) { skipped.push({ domain, reason: "no-transferable-cookies" }); continue; }
       const counts = await writeNativeBrowserCookies(cookies, destination, Date.now() / 1_000,
-        { isCurrent, explicitImport: !automatic });
+        { isCurrent, explicitImport: !automatic, groupContext, groupExisting });
       added += counts.added ?? 0; updated += counts.updated ?? 0; preserved += counts.preserved ?? 0;
       observed += counts.observed; imported += counts.imported;
       for (const key of Object.keys(omissions) as Array<keyof typeof omissions>) omissions[key] += counts.skipped[key];

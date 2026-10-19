@@ -7,6 +7,7 @@ import { financeStore } from "@/lib/finance-store";
 import { useT } from "@/lib/i18n";
 import { FinanceWorkspace, type FinanceAIContext } from "./FinanceWorkspace";
 import type { FinanceAPI } from "@shared/finance";
+import type { FinanceAnalystRequest } from "@shared/finance-analysts";
 import type { FinanceExperienceRequest } from "@shared/finance-experience";
 
 function assertNotCancelled(signal: AbortSignal): void {
@@ -81,10 +82,25 @@ export function FinanceConnectedWorkspace() {
     if (!api?.dashboardFeeds) throw new Error('finance_dashboard_feeds_unavailable');
     return api.dashboardFeeds();
   }, [api]);
+  const analysts = useCallback(async (request:FinanceAnalystRequest) => {
+    if(!api?.analysts)throw new Error("finance_analysts_unavailable");
+    return api.analysts(request);
+  },[api]);
   if (!ready) return <main role="status" style={{ padding: 32 }}>{locale === "ko" ? "Agentlas Finance를 여는 중…" : "Opening Agentlas Finance…"}</main>;
 
   return <FinanceWorkspace
     experienceRefreshVersion={experienceRefreshVersion}
+    onPlanning={api?.planning?async(request,signal)=>{assertNotCancelled(signal);const result=await api.planning!(request);assertNotCancelled(signal);return result;}:undefined}
+    onPortfolio={api?.portfolio?async(request,signal)=>{
+      assertNotCancelled(signal);
+      const cancel=()=>{if(request.action==="extract")void api.cancelAsk?.({requestId:request.requestId}).catch(()=>undefined);};
+      signal.addEventListener("abort",cancel,{once:true});
+      try{
+        if(request.action==="save")return await financeStore.runHostMutation(()=>api.portfolio!(request));
+        const result=await api.portfolio!(request);assertNotCancelled(signal);return result;
+      }finally{signal.removeEventListener("abort",cancel);}
+    }:undefined}
+    onAnalysts={api?.analysts?analysts:undefined}
     onExperience={api?.experience ? experience : undefined}
     onWorldMarkets={api?.worldMarkets ? worldMarkets : undefined}
     onDashboardFeeds={api?.dashboardFeeds ? dashboardFeeds : undefined}
@@ -126,7 +142,8 @@ export function FinanceConnectedWorkspace() {
       context.signal.addEventListener("abort", cancel, { once: true });
       try {
         const response = await api.ask!({ request, baseRevision: context.revision, requestId: context.requestId,
-          screenContext: financeScreenContext(context) });
+          screenContext: financeScreenContext(context), ...(api.analysts?{analystRefs:context.analystAuthoring?[]:context.analystRefs,
+          analystAuthoring:context.analystAuthoring, ...(context.analystAuthoring?{analystHistory:context.history?.slice(-6)}:{}), ...(context.analystAuthoring&&context.analystDraft?{analystDraft:context.analystDraft}:{})}:{}) });
         assertNotCancelled(context.signal);
         return response;
       } finally { context.signal.removeEventListener("abort", cancel); }

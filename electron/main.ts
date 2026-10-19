@@ -361,11 +361,11 @@ import {
 
 export { currentUiLocale } from "./ui-locale";
 
-/*
- * ★가장 먼저 — 죽은 stdout/stderr 파이프가 앱을 죽이지 못하게 한다.
- * 파일 로깅은 app ready 이후에야 시작되는데, 그 전에도 console 로 쓰는 줄이 있다.
- * 실측(2026-09-07): 그 구간에서 EPIPE 가 uncaughtException 으로 올라와 앱이 죽었다.
- */
+
+
+
+
+
 installStdioErrorGuard();
 // An uncaught error is logged instead of opening Electron's modal error box, which blocks Main (see logging.ts).
 installMainProcessErrorSink();
@@ -859,17 +859,17 @@ function checkOneBriefingDesktopNotification(): void {
  * durable settlement is the event boundary, so no polling or duplicate timer
  * can emit the same notification twice in this process.
  */
-/*
- * 실행이 끝나면 알린다 — 소리·앱 흔들기 (오너 2026-09-07).
- *
- * 이 자리를 고른 이유: onSettled 는 One 과 Work 가 **같이 지나는 단 하나의 종료 지점**이다
- * (invocation/service.ts publishSettled). 표면마다 따로 달면 한쪽만 울리고 그 차이는
- * 화면에 안 보인다.
- *
- * 위 One 팀 브리지와는 다른 기능이다: 저쪽은 로그인한 사용자의 팀 알림이고 5분 이상
- * 걸린 실행만 본다. 이쪽은 설정으로 켜고 끄는 개인 알람이라 문턱도 사용자가 정한다.
- * 둘 다 켜져 있으면 알림이 두 번 뜰 수 있어, 저쪽이 이미 보낸 실행은 건너뛴다.
- */
+
+
+
+
+
+
+
+
+
+
+
 let disposeRunAlertBridge: (() => void) | null = null;
 function supervisorQuietRunInStore(runId: string): boolean {
   try { return supervisorQuietRun(getDb(), runId); } catch { return false; }
@@ -1319,8 +1319,8 @@ async function createWindow(options: { startupPlaceholder?: boolean; initialRout
       sandbox: true,
       // Renderer가 외부 https만 띄울 수 있게
       webSecurity: true,
-      // The renderer console holds the owner's whole window.agentlas bridge. Product agents opened it through
-      // System Events and typed calls into it, landing keystrokes in the owner's composer (2026-10-14).
+
+
       devTools: mainWindowDevToolsAllowed({ packaged: app.isPackaged }),
     },
   });
@@ -1335,8 +1335,8 @@ async function createWindow(options: { startupPlaceholder?: boolean; initialRout
   // headless app the user cannot reach.
   const revealMainWindow = (): void => {
     if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isVisible()) return;
-    // A quit into background mode hid the window on purpose; the startup reveal
-    // fallback must not bring it back (measured: fired after the hide, ended the mode).
+
+
     if (backgroundHoldActive()) return;
     mainWindow.show();
   };
@@ -2146,7 +2146,7 @@ app.whenReady().then(async () => {
   };
   // Product sessions older installs wrote into the person's Codex/Claude/Copilot homes move to the product stores, once.
   if (!developmentEffectsSuppressed()) scheduleLegacyProductSessionMove();
-  // Records every change to the Agentlas browser's Google sign-in cookies (names and causes only) — owner 2026-10-13.
+
   installGoogleSessionTrace("persist:agentlas-browser-default");
   void trimOversizedSessionCaches(["persist:agentlas-browser-default"]);
   // 4-tier model catalog (PRD 2026-08-15 D-4): wire the context-window resolver
@@ -2160,12 +2160,12 @@ app.whenReady().then(async () => {
   } catch (err) {
     console.warn("[model-catalog] resolver not installed:", err instanceof Error ? err.message : String(err));
   }
-  // The official runtime seal below runs `codesign --verify --deep --strict`
-  // and `spctl` over the whole bundle: 3.4–5.8s measured on 1.2.44
-  // (2026-09-27), twice after an update. Nothing was on screen for that time,
-  // so the app looked dead. The placeholder is a read-only data: page with no
-  // IPC surface and starts no runtime, so it may appear before the seal. Only
-  // GUI launches get it; headless entries below never open a window.
+
+
+
+
+
+
   const headlessEntry = process.argv.includes("--graph-surface") || process.argv.includes("--headless-automations");
   let startupPlaceholderShown = false;
   if (!headlessEntry && !oneOnlyLaunch) {
@@ -2309,7 +2309,7 @@ app.whenReady().then(async () => {
   if (!developmentEffectsSuppressed()) {
     const { initializeVideoJobs } = await import("./multimodal/video");
     initializeVideoJobs();
-    // Storage budget for every user (owner 2026-10-16): intermediates, run detail, CLI transcripts, low-disk notice.
+
     startStorageMaintenance({
       notifyLowDisk: ({ freeBytes, footprintBytes, freedBytes }) => {
         if (!Notification.isSupported()) return;
@@ -2330,10 +2330,10 @@ app.whenReady().then(async () => {
   } catch (error) {
     console.error("[security] legacy run-event scrub failed:", error);
   }
-  // Quit can arrive while the store is still opening (measured 2026-09-24T12:46Z: Quit 2 s after
-  // launch). Its cleanup already ran against an unopened store and closed the runtime coordinator,
-  // so the next registration threw app_runtime_shutdown_in_progress and startup "failed". Starting
-  // services now would only run them past cleanup: stop here, close what we opened, let Quit finish.
+
+
+
+
   if (quitCleanupPromise) throw new StartupAbandonedForQuit();
   const longRunStartup = developmentEffectsSuppressed() ? null : initializeAppRuntimeCoordinator();
   if (developmentEffectsSuppressed()) {
@@ -2446,11 +2446,11 @@ app.whenReady().then(async () => {
       if (rebound.length) console.info("[startup] rebound chats to their live goals", rebound.map((row) => ({ chatId: row.chatId, goalId: row.goalId, reason: row.reason })));
     } catch (error) { console.error("[startup] goal binding repair failed", error); }
   }
-  /*
-   * ★부팅 시점의 running Task는 전부 고아다 — 실행 권위인 activeRuns 맵이 방금 비어서
-   * 시작했다. 정산하지 않으면 화면이 영원히 "진행 중"을 말한다(실측: 나흘째 running).
-   * 조용히 completed로 덮지 않고 failed로 적어, 이어서 할지 다시 할지는 사용자가 정한다.
-   */
+  
+
+
+
+
   try {
     const interrupted = settleInterruptedTasksOnBoot();
     if (interrupted.settled > 0) {
@@ -2575,9 +2575,9 @@ app.whenReady().then(async () => {
   nativeHistoryWorkOwner=await createNativeHistoryWorkOwner({source:nativeHistorySourceOwner,locale:()=>currentUiLocale()==='ko'?'ko':'en'});
   if(nativePersonalShutdown.signal.aborted||nativePersonalCleanupUnknown){nativeHistoryWorkOwner.close();throw Error('history_work_owner_changed')}
   configureOnePersonalIntegrationPolicy({gmail:nativeGmailPolicy,history:nativeHistoryWorkOwner.history,historyToolReference:nativeHistoryWorkOwner.toolReference,historyToolResources:nativeHistoryWorkOwner.toolResources,historyWorkTools:nativeHistoryWorkOwner.tools});
-  // Adaptive Toolchain native owner of this personal install (toolchain-personal-owner.ts). Its only binder was the
-  // organization startup, which a personal install never runs (production 10-08..18: 0 assets, create refused with
-  // toolchain_native_shipping_owner_ports_unbound). agentlasd binds its own copy for daemon-owned turns.
+
+
+
   try {
     installPersonalToolchainNativeOwner({host:"main",isOwnerIpcSender:event=>{
       try{const window=assertTrustedSitePublishIpcSender(event as Electron.IpcMainInvokeEvent);return window===mainWindow||window===getOneWindow();}catch{return false;}
@@ -3025,8 +3025,8 @@ app.whenReady().then(async () => {
     if (error) throw new Error("science-project-folder-open-failed");
     return { opened: true };
   });
-  // Owner request 2026-09-24: a Data Table opens in the person's own spreadsheet app (Excel, Numbers, LibreOffice),
-  // not only in the in-app grid. The exact current version is written as a UTF-8 (BOM) CSV copy and handed to the OS.
+
+
   ipcMain.handle("science:artifacts:openTableExternally", async (event, envelope: unknown) => {
     const documentId = assertScienceProjectDocument(event, envelope);
     const active = await event.sender.executeJavaScriptInIsolatedWorld(1007, [{ code: "navigator.userActivation.isActive === true" }]);
@@ -3310,14 +3310,14 @@ app.whenReady().then(async () => {
     }
     return scienceStore().getSourceForProject(projectId, sourceId);
   });
-  /*
-   * 화면이 목록을 받은 뒤 **한 건씩** 다시 읽어 확인하던 자리. 확인 자체는 옳다 — 목록 행은
-   * 투영이고, 프로젝트 범위 단건 읽기라야 그 출처가 지금 판으로도 이 프로젝트에 붙어 있음이
-   * 증명된다. 문제는 그 증명을 오가는 횟수였다.
-   *
-   * 실측(출처 188건): 목록 한 번 92ms, 그 뒤 단건 읽기 188번 47,134ms. 확인은 여기 안에서
-   * 그대로 하고, 오가는 것만 한 번으로 줄인다. 하는 일과 판정은 전과 같다.
-   */
+  
+
+
+
+
+
+
+
   ipcMain.handle("science:sources:getMany", (event, input: unknown) => {
     assertScienceSender(event, input);
     const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
@@ -4651,10 +4651,10 @@ app.whenReady().then(async () => {
   // 미룬다(runDeferredLegacyLearningReconciliation). 멱등이라 이번 실행에서
   // 못 돌면 다음 실행이 이어받는다.
   const runDeferredLegacyLearningReconciliation = async (signal: AbortSignal) => {
-    // ★ 단계마다 따로 감싼다. 예전에는 전부 한 try 안이었고 catch 가 삼켰다 — 앞 단계
-    //   하나가 던지면 그 뒤가 통째로 안 돌았다. 특히 `migrateRegisteredAgents` 는 업데이트가
-    //   등록된 모든 에이전트에 도달하는 유일한 통로라, 조용히 죽으면 새 아키텍처가 영영
-    //   닿지 않는다(실측 2026-08-26). 한 단계의 실패가 나머지를 막지 않아야 한다.
+
+
+
+
     const step = async <T,>(name: string, run: () => T | Promise<T>): Promise<T | null> => {
       signal.throwIfAborted();
       try {
@@ -4672,13 +4672,13 @@ app.whenReady().then(async () => {
         ?? { groups: 0, merged: 0 };
       const experience = await step("experience-reconcile", () => reconcileExistingCuratedMemoryCandidatesAtStartup(2_000, { signal }))
         ?? { scanned: 0, candidateCreated: 0, blocked: 0, skipped: 0, deferred: 0 };
-      /*
-       * 등록된 모든 에이전트를 현재 아키텍처로 올린다.
-       *
-       * 업데이트는 새 아키텍처를 가져오지만 이미 등록된 에이전트는 옛 상태로 남는다 — 그래서
-       * 오래 쓴 에이전트일수록 새 기능이 비어 있었다(실측: 913회 실행에 경험 칩 0). 원장이
-       * (에이전트 × 단계)라 새 단계는 설치 시점과 무관하게 전원에게 한 번씩 돈다.
-       */
+      
+
+
+
+
+
+
       const migrated = await step("architecture-migrations", migrateRegisteredAgents) ?? { stepsRun: 0 };
       if (migrated.stepsRun > 0) {
         console.log("[architecture] migrated registered agents", migrated);
@@ -4773,6 +4773,12 @@ app.whenReady().then(async () => {
       }))
       .catch((error) => console.warn("[toolchains] icon drawing not started:", error instanceof Error ? error.message : error));
   }, 90_000).unref?.();
+  // Repeated-work detector (electron/toolchains/detector.ts): one model judgment a day at most, Main only, real app only.
+  if (!developmentEffectsSuppressed()) {
+    void import("./toolchains/detector")
+      .then((detector) => detector.startToolchainDetector(() => Boolean(quitServicesStopPromise)))
+      .catch((error) => console.warn("[toolchain-detector] not started:", error instanceof Error ? error.message : error));
+  }
   /*
    * Establish the daemon before choosing the physical Mobile Bridge owner.
    * Previously Desktop opened its listener first and `ensureDaemonRunning`
@@ -5195,8 +5201,8 @@ app.whenReady().then(async () => {
     }
   }
   startAutomationScheduler(); // 자동화 스케줄러 — 60초마다 due 자동화를 백그라운드로 실행
-  // A sign-in made outside Agentlas (terminal, the vendor's app) re-reads that provider's usage within 30 s instead of
-  // whenever a usage screen is next opened (owner 2026-10-16), and screens holding the old figures re-read too.
+
+
   void import("./usage")
     .then(({ startUsageAccountWatch }) => startUsageAccountWatch(() => {
       clearDetectCache();
@@ -5212,8 +5218,8 @@ app.whenReady().then(async () => {
   // 유휴 드리밍 큐레이션 — 옵트인(기본 OFF). 5분마다 조건만 확인(유휴/슬롯/쿨다운), 발화는 드묾.
   try {
     const { startDreamingScheduler, ensureDreamingDefault } = await import("./memory/dreaming");
-    // Measured 2026-08-11: default-OFF opt-in meant decay never ran anywhere.
-    // Recover installs that never chose; an explicit user choice is untouched.
+
+
     ensureDreamingDefault();
     startDreamingScheduler();
   } catch (err) {
@@ -5255,8 +5261,8 @@ app.whenReady().then(async () => {
     const { runOneImportInBackground, startOneImportScheduler, stopOneImportScheduler } =
       await import("./memory/one-import");
     stopOneImport = stopOneImportScheduler;
-    // Boot-only import measured a 73-block backlog while the app stayed open —
-    // re-import when the soul file actually changes (cheap mtime watch).
+
+
     startOneImportScheduler();
     const daemonSettled = Promise.race([
       daemonStartupPromise.then(() => undefined, () => undefined),

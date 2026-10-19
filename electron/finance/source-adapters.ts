@@ -4,15 +4,14 @@ import type { FinanceAsset, FinanceDataRequest, FinanceDataResult, FinanceSearch
 import type { FinanceDataSourceOption } from '../../shared/finance-experience';
 import { requiredExecutionPermission } from '../../shared/graph-node-protocol';
 
-export const FINANCE_SOURCE_CAPABILITY='finance.data-source.v1';
+import { isFinanceSourceCapability } from '../../shared/finance-source-contract';
+export { FINANCE_SOURCE_CAPABILITY, isFinanceSourceCapability } from '../../shared/finance-source-contract';
 const sourceId=(id:string,version:number,hash:string)=>`toolchain:${id}:${version}:${hash.replace(/^sha256:/,'')}`;
 /** Opt-in adapters use the existing published, validated, immutable toolchain registry. */
 export async function financeToolchainSources():Promise<FinanceDataSourceOption[]>{
  const {listToolchainAssets}=await import('../toolchains/assets');
- return listToolchainAssets().filter(asset=>asset.capabilityKey===FINANCE_SOURCE_CAPABILITY).flatMap(asset=>{
-  const version=asset.versions.find(version=>version.version===asset.stableVersion);
-  if(!version)return[];
-  return[{id:sourceId(asset.id,version.version,version.contentHash),name:asset.name,kind:'toolchain' as const,version:String(version.version),available:asset.status==='callable'&&version.validation.state==='passed'&&requiredExecutionPermission(version.implementation.snapshot.graph)==='read'}];
+ return listToolchainAssets().filter(asset=>isFinanceSourceCapability(asset.capabilityKey)).flatMap(asset=>{
+  return asset.versions.filter(version=>version.validation.state==='passed'&&requiredExecutionPermission(version.implementation.snapshot.graph)==='read').map(version=>({id:sourceId(asset.id,version.version,version.contentHash),name:asset.name,kind:'toolchain' as const,version:String(version.version),available:asset.status==='callable'}));
  });
 }
 const https=z.string().max(2000).url().refine(value=>{const u=new URL(value);return u.protocol==='https:'&&!u.username&&!u.password;});
@@ -25,7 +24,7 @@ async function invoke(source:string,args:Record<string,unknown>,signal?:AbortSig
  const match=/^toolchain:([A-Za-z0-9_-]{1,100}):([1-9]\d*):([a-f0-9]{64})$/.exec(source);if(!match)throw new Error('finance_source_adapter_invalid');
  signal?.throwIfAborted();assertCurrent?.();const [{getToolchainAsset},{callToolchain}]=await Promise.all([import('../toolchains/assets'),import('../toolchains/calls')]);assertCurrent?.();
  const asset=getToolchainAsset(match[1]),version=asset?.versions.find(version=>version.version===Number(match[2]));
- if(!asset||asset.capabilityKey!==FINANCE_SOURCE_CAPABILITY||asset.status!=='callable'||!version||sourceId(asset.id,version.version,version.contentHash)!==source||version.validation.state!=='passed'||requiredExecutionPermission(version.implementation.snapshot.graph)!=='read')throw new Error('finance_source_adapter_unavailable');
+ if(!asset||!isFinanceSourceCapability(asset.capabilityKey)||asset.status!=='callable'||!version||sourceId(asset.id,version.version,version.contentHash)!==source||version.validation.state!=='passed'||requiredExecutionPermission(version.implementation.snapshot.graph)!=='read')throw new Error('finance_source_adapter_unavailable');
  const receipt=await callToolchain({toolchainId:asset.id,version:version.version,args},{requestId:`finance-source:${randomUUID()}`,permission:'read',signal,assertCurrent});
  signal?.throwIfAborted();assertCurrent?.();if(!receipt.ok||receipt.status!=='succeeded'||receipt.contentHash!==version.contentHash)throw new Error('finance_source_adapter_failed');
  if(Buffer.byteLength(JSON.stringify(receipt.result??null))>4*1024*1024)throw new Error('finance_source_adapter_output_too_large');return receipt.result;

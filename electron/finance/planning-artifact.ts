@@ -1,0 +1,29 @@
+import { FinanceReportLanguageSchema, createFinanceWidget, financeId, type FinanceWorkspace, type FinanceOperation, type FinanceReport, type FinanceReportSection } from '../../shared/finance';
+import type { FinancePlanningResult } from '../../shared/finance-planning';
+import type { FinanceArtifactDraft } from './artifacts';
+const PLANNING_COPY={
+ en:{title:'Financial plan',charts:{cashflow:'Projected balance',income_goal:'Monthly income',rebalance:'Target holding values'},income:{'Investment income':'Investment income','Other income':'Other income','Income target':'Income target'},tradeTitle:'Suggested trades',tradeColumns:['Instrument','Action','Amount','Estimated fee'],tradeActions:{buy:'Buy',sell:'Sell',hold:'Hold'}},
+ ko:{title:'자산 계획',charts:{cashflow:'예상 잔액',income_goal:'월 소득',rebalance:'목표 보유 금액'},income:{'Investment income':'투자소득','Other income':'기타 소득','Income target':'소득 목표'},tradeTitle:'리밸런싱 계획',tradeColumns:['상품','구분','금액','예상 수수료'],tradeActions:{buy:'매수',sell:'매도',hold:'유지'}},
+ ja:{title:'資産計画',charts:{cashflow:'予想残高',income_goal:'月間収入',rebalance:'目標保有額'},income:{'Investment income':'投資収入','Other income':'その他の収入','Income target':'目標収入'},tradeTitle:'リバランス計画',tradeColumns:['商品','売買区分','金額','予想手数料'],tradeActions:{buy:'買付',sell:'売却',hold:'維持'}},
+ zh:{title:'资产规划',charts:{cashflow:'预计余额',income_goal:'月度收入',rebalance:'目标持仓金额'},income:{'Investment income':'投资收入','Other income':'其他收入','Income target':'收入目标'},tradeTitle:'再平衡计划',tradeColumns:['产品','操作','金额','预计费用'],tradeActions:{buy:'买入',sell:'卖出',hold:'持有'}},
+} as const;
+/** Freeze the literal scenario result; source metadata remains supporting rather than reader boilerplate. */
+export function financePlanningArtifact(result:FinancePlanningResult,workspace:FinanceWorkspace,presentation:{title?:string;language?:string;narrative?:string;chartTitle?:string;tradeTitle?:string;tradeColumns?:string[];tradeActions?:{buy:string;sell:string;hold:string};chartLabels?:Record<string,string>}={}):FinanceArtifactDraft{
+ if(presentation.tradeColumns&&presentation.tradeColumns.length!==4)throw new Error('finance_planning_display_columns_invalid');
+ const language=presentation.language?FinanceReportLanguageSchema.parse(presentation.language):undefined,base=language?.split('-')[0].toLowerCase(),copy=base&&Object.hasOwn(PLANNING_COPY,base)?PLANNING_COPY[base as keyof typeof PLANNING_COPY]:language?undefined:PLANNING_COPY.en,title=(presentation.title??copy?.title??'Financial plan').slice(0,300),now=new Date().toISOString(),sourceId=financeId('source'),reportId=financeId('report');
+ if(!result.charts.length||!result.charts[0].points.length)throw new Error('finance_planning_artifact_no_visual');
+ const chart=result.charts[0],chartTitle=presentation.chartTitle??copy?.charts[result.kind]??presentation.title??chart.label,widget=createFinanceWidget('chart',chartTitle);widget.width='full';widget.chartType=chart.type;widget.metric=`planning:${result.kind}`;widget.notes=result.currency;
+ const chartLabels:Record<string,string>={...(result.kind==='income_goal'?copy?.income:{}),...presentation.chartLabels};
+ const displayRows=chart.points.map(point=>[typeof point.x==='string'&&Object.hasOwn(chartLabels,point.x)?chartLabels[point.x]:point.x,point.y]);
+ if(new Set(displayRows.map(row=>row[0])).size!==displayRows.length)throw new Error('finance_planning_display_labels_ambiguous');
+ const sections:FinanceReportSection[]=[];
+ if(presentation.narrative?.trim())sections.push({id:financeId('section'),title,kind:'summary',presentation:'narrative',narrative:presentation.narrative.slice(0,20000),widget:null,projection:null});
+ sections.push({id:financeId('section'),title:chartTitle,kind:'widget',presentation:'chart',narrative:'',widget,projection:{columns:['period','value'],rows:displayRows,status:result.status==='ok'?'ready':'partial',warnings:[...result.warnings,...result.errors.map(e=>e.code)].slice(0,100),asOf:result.asOf,sourceIds:[sourceId]}});
+ if(result.kind==='rebalance'&&result.status==='ok'&&result.trades.some(t=>t.side!=='hold'))sections.push({id:financeId('section'),title:presentation.tradeTitle?.trim()?presentation.tradeTitle:copy?.tradeTitle??'Suggested trades',kind:'widget',presentation:'comparison',narrative:'',widget:null,projection:{columns:presentation.tradeColumns??[...(copy?.tradeColumns??['Instrument','Action','Amount','Estimated fee'])],rows:result.trades.filter(t=>t.side!=='hold').map(t=>[t.label,presentation.tradeActions?.[t.side]??copy?.tradeActions[t.side]??t.side,t.amount,t.estimatedFee]),status:'ready',warnings:[],asOf:result.asOf,sourceIds:[sourceId]}});
+ // Full assumptions and exact decimal results are retained for reproducibility without duplicating charts in normal reading.
+ const supporting=JSON.stringify({inputSha256:result.inputSha256,engineVersion:result.engineVersion,request:result.request,metrics:result.metrics,assumptions:result.assumptions,warnings:result.warnings,errors:result.errors,presentation});
+ sections.push({id:financeId('section'),title:'Scenario assumptions',kind:'sources',presentation:'supporting',narrative:'',widget:null,projection:{columns:['Part','Scenario record'],rows:Array.from({length:Math.ceil(supporting.length/16000)},(_,i)=>[i+1,supporting.slice(i*16000,(i+1)*16000)]),status:'ready',warnings:[],asOf:result.asOf,sourceIds:[sourceId]}});
+ const report:FinanceReport={id:reportId,...(language?{language}:{}),title,createdAt:now,sourceRevision:workspace.revision,reviewPending:true,sections,dashboardSnapshot:null,parentReportId:null};
+ const operations:FinanceOperation[]=[{type:'source.upsert',source:{id:sourceId,name:'Explicit planning scenario',kind:'manual',status:'imported',asOf:result.asOf,retrievedAt:now,url:null,note:JSON.stringify({engineVersion:result.engineVersion,inputSha256:result.inputSha256,kind:result.kind,assumptionOrigin:result.request.assumptionOrigin})}},{type:'report.add',report}];
+ return{operations,reportId,title,kind:'chart'};
+}

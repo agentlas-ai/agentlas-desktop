@@ -8,7 +8,7 @@ import { inspectJudgmentCapability } from "../system-agents/judgment-capability"
 import { callConnectedModelDetailed, configuredOrchestratorJudgmentPolicy, judgmentPoolAvailability,
   type JudgmentRuntimeAttempt } from "../system-agents/judgment";
 
-export type ToolchainPreparationPurpose = "generalization" | "fresh-session-evaluation";
+export type ToolchainPreparationPurpose = "generalization" | "fresh-session-evaluation" | "repeated-work-detection";
 /** Main-only callbacks bound to the original One producer and current resource,
  * source/audience, runtime, effect and budget authority. Never serialized.
  * Discovery/capability are observations, not grants. Missing callbacks deny. */
@@ -81,7 +81,7 @@ export function callToolchainPreparation(input: ToolchainPreparationInput,
   return runNativePreparation(() => prepare(bound, ports));
 }
 async function prepare(input: ToolchainPreparationInput, ports: ToolchainPreparationRuntimePorts): Promise<Result> {
-  if (!["generalization", "fresh-session-evaluation"].includes(input.purpose)) denied("toolchain_preparation_purpose_invalid");
+  if (!["generalization", "fresh-session-evaluation", "repeated-work-detection"].includes(input.purpose)) denied("toolchain_preparation_purpose_invalid");
   checkpoint(input, ports);
   const snapshot = ports.pool();
   if (snapshot.state === "unavailable") denied("toolchain_preparation_pool_unavailable");

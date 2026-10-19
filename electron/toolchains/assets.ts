@@ -13,10 +13,10 @@ const PREFIX = "toolchain.asset.v1:";
 const KEY_PREFIX = "toolchain.capability-key.v1:";
 const DEFINITION_PREFIX = "toolchain.definition.v1:";
 const IMPLEMENTATION_PREFIX = "toolchain.implementation-fingerprint.v1:";
-// Version-local schemas may retain the same $id across releases without polluting
-// a global schema registry. Unknown formats fail compilation instead of being ignored.
-// A union type (`type: ["number","string"]`) is valid JSON Schema that models write for mixed inputs; strict mode
-// stays on for everything else (NH07 A/B 2026-10-15: all 19 of 36 rejected proposals were union types).
+
+
+
+
 const ajv = new Ajv({ allErrors: true, strict: true, allowUnionTypes: true, addUsedSchema: false });
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 export function toolchainSchemaProblems(schema: ToolchainJsonSchema, value: unknown): string[] {
@@ -236,6 +236,21 @@ export function withdrawToolchainAsset(id: string): ToolchainAsset {
     const asset = getToolchainAsset(id);
     if (!asset) throw new Error("toolchain_not_found");
     return save({ ...asset, status: "withdrawn" });
+  }).immediate();
+}
+/** Host verdict only (toolchains/trial.ts): a detector draft that worked in real tasks becomes callable with those
+ * real call receipts as its validation. Never reachable from IPC or a model tool. */
+export function promoteToolchainVersionFromTrial(id: string, version: number, contentHash: string, receipts: string[], chatId: string | null): ToolchainAsset {
+  return getDb().transaction(() => {
+    const asset = getToolchainAsset(id);
+    const release = asset?.versions.find(item => item.version === version);
+    if (!asset || !release || release.contentHash !== contentHash) throw new Error("toolchain_trial_release_changed");
+    if (asset.status === "withdrawn") throw new Error("toolchain_withdrawn");
+    const at = new Date().toISOString();
+    return save({ ...asset, status: "callable", stableVersion: version, name: release.contract.name,
+      versions: asset.versions.map(item => item.version === version ? { ...item,
+        exposedBy: { kind: "one" as const, chatId, at, authorityRevision: `trial:${receipts.join(",")}` },
+        validation: { state: "passed" as const, at, receipts, problems: [] } } : item) });
   }).immediate();
 }
 const publishing = new Map<string, Map<object, Promise<ToolchainAsset>>>();

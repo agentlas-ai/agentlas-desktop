@@ -65,7 +65,7 @@ import { ensureOneExperienceReuseReceipt } from "../one/experience-reuse";
 import { sealOneMemoryCandidateProvenance } from "../one/memory-candidates";
 import { tryProduceAcceptedResultSuggestion } from "../one/completion-suggestion-producer";
 import { tryProduceOneImprovementProofForTask } from "../one/improvement-proof-producer";
-import { readOneArtifactImagePreview } from "../one/artifact-preview";
+import { latestOneArtifactBindingOfPath, readOneArtifactImagePreview } from "../one/artifact-preview";
 import { MobileChatAttachmentUploads } from "./chat-attachment-upload";
 import { chatFilePrompt, chatFileImages, validateChatAttachmentSelection, readBoundChatMessageAttachment } from "../store/chat-message-attachments";
 import { performOneMobileSuggestionAction } from "../one/mobile-suggestions";
@@ -1639,16 +1639,16 @@ function cleanToolDisplayValue(value: string | undefined, maxBytes: number): str
 }
 
 /**
- * 도구 행의 **의미**를 폰으로 넘긴다.
- *
- * 판별은 shared/tool-call-detail.ts 한 벌이 소유한다 — 폰이 러너별 도구 이름을
- * 보고 다시 추측하면 두 표면이 갈라진다(2026-08-08 실측 사고: 렌더러가 Claude Code
- * 도구명만 알아 codex/antigravity/ollama/MCP를 전부 "기타"로 그렸고, bash는 실제 명령을
- * 버렸다).
- *
- * 이름과 사실(`exit 0`, `+23 −1`, `8 files · 31 matches`)은 집계값이라 늘 안전하다.
- * 식별값(summary)은 cleanToolDisplayValue 를 통과한다. args·result 본문은
- * 별도 소유자 전용 본문 투영에서 자격 증명과 로컬 경로를 마스킹한다.
+
+
+
+
+
+
+
+
+
+
  */
 function projectToolCallDisplay(
   tool: NonNullable<McpInvocationEvent["tool"]>,
@@ -1763,9 +1763,9 @@ function isPersonalOneConversation(chatId: string): boolean {
 }
 
 /**
- * What the phone shows in its notification bar when One left the owner a message (owner 2026-10-05: "주인에게 줄
- * 메세지있으면 폰에 알람떠야하는데 알림표시줄에"). Only a saved root answer counts: a quiet check-in or review saves
- * nothing, so it carries no durable message id and never reaches the phone as a message.
+
+
+
  */
 export function projectOneMessageForPhone(
   event: Pick<McpInvocationEvent, "kind" | "agentId" | "durableMessageId" | "text">,
@@ -2133,10 +2133,10 @@ function projectMobileBridgeOneArtifacts(
     const projectedSha256 = typeof candidate.contentSha256 === "string" && /^[a-f0-9]{64}$/u.test(candidate.contentSha256)
       ? candidate.contentSha256
       : undefined;
-    // Dev O8/O9 2026-10-18: a run that saves the same file again binds it again (new ref, new bytes). The desktop rail
-    // merges both into one entry that opens the newest bytes; the phone keys rows by binding, keeps the first it gets and
-    // cannot drop a row it already holds. So a later save of an output is sent as that output's first binding in the run
-    // (the row the phone holds or gets once), and one.artifact.imagePreview follows that binding to the newest save.
+
+
+
+
     const first = outputsOf(runId).first({ taskId, chatId, type, label });
     const replaced = first && oneArtifactIdentityKey(first.artifact) !== oneArtifactIdentityKey({
       taskId, taskVersion: Number(taskVersion), chatId, runId, manifestId, artifactRef,
@@ -3439,7 +3439,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         };
         // The phone holds an output's first binding in the run (projectMobileBridgeOneArtifacts); the desktop rail opens
         // its newest save. Follow to that binding, which readOneArtifactImagePreview verifies in full like any other.
-        const preview = readOneArtifactImagePreview(latestOneArtifactBindingInRun(requested) ?? requested);
+        // An earlier run's entry whose file a later run wrote again follows on to the newest save of that path in this
+        // chat, the same binding the desktop opens (latestOneArtifactBindingOfPath). Nothing on the wire changes.
+        const held = latestOneArtifactBindingInRun(requested) ?? requested;
+        const preview = readOneArtifactImagePreview(latestOneArtifactBindingOfPath(held) ?? held);
         return preview ? asJsonValue(preview, request.method) : null;
       }
       case "one.artifacts.recent": {
@@ -4245,9 +4248,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
             // Detailed scheduler errors can contain local paths. Desktop owns
             // the full run log; Mobile receives only a stable failure marker.
             error: run.error ? "automation_failed" : null,
-            // "그래프가 끝까지 돌았는가"(status)와 "나온 결과가 쓸 만한가"(outcome)는
-            // 다른 질문이다. outcome 을 빼고 보내면 폰은 실패한 실행 옆에 이유를
-            // 하나도 못 보여준다 — 실측 스크린샷 5번이 그 상태였다.
+
+
+
             outcome: run.outcome ?? null,
             // A graph can fail before result judgment, leaving outcomeReason
             // empty while run.error contains the only actionable explanation.
@@ -4524,19 +4527,19 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const option = this.registeredUploadOptionForAgent(agentLocalId);
         const sessionRefusal = this.cloudSessionRefusal();
         if (sessionRefusal) return asJsonValue({ refusal: sessionRefusal }, request.method);
-        // ★ A REFUSAL MUST NOT LEAVE HERE AS AN EXCEPTION. Measured 2026-08-17.
-        //
-        //   Registration throws on a server refusal, and nothing caught it, so
-        //   the server's every "no" arrived at the phone as the bridge's fixed
-        //   "Desktop rejected the request". That generic string is correct
-        //   redaction for an unexpected crash and completely wrong for a
-        //   decision: a full seat plan and a forked package each have one thing
-        //   for the person to do, and neither of them was ever said.
-        //
-        //   Only typed refusals are converted — `cloudRefusalOf` returns null
-        //   for anything else, and that still rethrows into the generic path,
-        //   so an unexpected error cannot smuggle a local path out through this
-        //   branch. Same shape the delete case below already used.
+
+
+
+
+
+
+
+
+
+
+
+
+
         let result: Awaited<ReturnType<typeof this.cloudAgentActions.saveRegisteredPrivate>>;
         try {
           result = await this.cloudAgentActions.saveRegisteredPrivate(

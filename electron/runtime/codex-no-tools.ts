@@ -87,8 +87,8 @@ export function validateCodexNoToolsResponse(body: string): string {
   const normalized = body.replace(/\r\n/g, "\n");
   if (!normalized.endsWith("\n\n")) throw new CodexNoToolsProviderError(failure("codex_no_tools_terminal_missing", "unavailable"));
   let terminal: Record<string, any> | null = null;
-  // The provider sometimes closes with `response.completed` carrying `output: []` while the answer already arrived in
-  // a validated `response.output_item.done` message frame (measured 2026-10-12: 2-4 of 10 runs, effort high + output schema).
+
+
   const completedMessages: any[] = [];
   for (const block of normalized.split("\n\n").filter(value => value.trim())) {
     if (block.split("\n").every(line => !line || line.startsWith(":"))) continue;
@@ -207,7 +207,10 @@ export async function runCodexNoTools(
       // exact instructions and evidence reach the model. ResponsesLite embeds
       // its native menu in additional_tools input frames as well as tools.
       payload.instructions = composeCodexHostInstructions(req);
-      payload.input = [{ type: "message", role: "user", content: [{ type: "input_text", text: req.userPrompt }] }];
+      payload.input = [{ type: "message", role: "user", content: [
+        { type: "input_text", text: req.userPrompt },
+        ...(req.images ?? []).map(image => ({ type: "input_image", image_url: `data:${image.mediaType};base64,${image.data}`, detail: "auto" })),
+      ] }];
       delete payload.previous_response_id;
       delete payload.access_programs;
       payload.tools = [];

@@ -69,6 +69,8 @@ export interface ToolchainAssetCreateInput {
 }
 export interface ToolchainGenerationInput {
   request: string;
+  /** Host integration contract; omitted preserves the generic authoring path. */
+  purpose?: 'finance-source';
   toolchainId?: string;
   projectId?: string;
   requestId: string;

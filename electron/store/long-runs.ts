@@ -32,6 +32,7 @@ import {
 } from "../../shared/long-run";
 import { desktopStoreTransaction, emitDesktopStoreChange } from "./change-bus";
 import { getDb } from "./db";
+import { invocationProcessOwner } from "./invocation-run-owners";
 import { getChatGoalContract, getChatGoalRevision } from "./chat-goals";
 import { agentRunCwd } from "../runtime/exec";
 
@@ -679,22 +680,22 @@ export function upsertLongRunDomainBinding(input: {
   return binding;
 }
 
-/*
- * ★Owner stop is a boundary (owner 2026-09-25). A goal the owner/user paused stays paused until the owner
- * resumes it. Before this, a pause landed as a ledger fact only: pausing a `blocked` goal changed nothing,
- * and the blocked-goal sweep, the effect-observation resume and the app-closed restart path resumed it —
- * isolated live run 2026-09-25 (run_80dc1968 / run_8df1afec) kept spending after two user pauses.
- *
- * The hold is read from the ledger, not from status alone, so a later host re-park (app_closed pause,
- * retry wait) cannot launder it: the latest user pause is held until a later owner resume
- * (user_control resume_with_message / command resume, or a user-actor transition back to queued/running).
- */
+
+
+
+
+
+
+
+
+
+
 export const LONG_RUN_OWNER_HOLD_CODE = "long_run_owner_paused";
 
 /**
- * The room's Goal is stopped until its owner lifts it: an owner pause, an unreleased owner hold, or a budget stop.
- * Owner decision 2026-10-06: a paused room also stops the agent graphs (Toolchains) it made — on 2026-10-05 the
- * paused X Marketing room's schedules kept running and drafting.
+
+
+
  */
 export function chatGoalStoppedByOwner(chatId: string): boolean {
   const row = getDb().prepare(`SELECT id, status, pause_reason FROM long_runs WHERE root_chat_id = ?
@@ -718,10 +719,10 @@ export function longRunOwnerHold(runId: string): boolean {
 }
 
 /**
- * Host settlement of a system-admitted Goal at its retry cap (owner 2026-09-25). Two exits only:
- *  - "settled_with_evidence": every current criterion passed in the latest authorized verifier round,
- *    with resolvable host references. Completion revalidates that exact proof set atomically.
- *  - "owner_review_required": historical compatibility outcome; keeps independent work queued.
+
+
+
+
  */
 export const AUTO_GOAL_SETTLED_WITH_EVIDENCE = "auto_goal_settled_with_evidence";
 export const AUTO_GOAL_OWNER_REVIEW_REQUIRED = "auto_goal_owner_review_required";
@@ -847,10 +848,10 @@ export function transitionLongRun(input: {
 }
 
 /**
- * A cancelled or failed run owns no open work. Measured 2026-09-27: 11 cancelled runs still held
- * tasks in todo/doing/verifying (run_6d24b328 'doing' since 09-15) because every cancel path — user
- * delete, blocked-goal sweep, MCP cancelRun — changed only long_runs. Nothing read them yet, but any
- * count of open work across runs would have seen phantom work. Callers run inside their transaction.
+
+
+
+
  */
 function closeOpenTasksOfEndedRun(runId: string, now: string): void {
   const db = getDb();
@@ -891,7 +892,7 @@ export function blockHostPausedClaimedGoalWait(runId: string, expectedVersion: n
   return blocked;
 }
 
-/** Ledger kind of the host's "no Goal stays blocked" sweep (owner 2026-09-23). */
+/** */
 export const BLOCKED_GOAL_SWEEP_EVENT_KIND = "run.blocked_sweep";
 export const BLOCKED_GOAL_SWEEP_SCHEMA = "agentlas.blocked-goal-sweep.v1";
 
@@ -907,10 +908,10 @@ export interface BlockedGoalRetry {
 }
 
 /**
- * Follow-ups scheduled after Goal turns for the same reason since the owner last spoke (`ownerSince`) or used a
- * Goal control. Each one is a turn that ended without starting new work. Measured on the owner's DB 2026-10-04
- * (Thread Marketing): a fixed 30-second follow-up after every refused wait re-ran a ~247k-token turn 39 times
- * in one hour, all with the same answer ("972 to go, next check 15:11").
+
+
+
+
  */
 export function consecutiveGoalTurnFollowUps(runId: string, reason: string, ownerSince: string | null, now = Date.now(),
   options: { sinceCompletedTurn?: boolean } = {}): number {
@@ -965,14 +966,14 @@ export function pendingBlockedGoalRetry(runId: string): BlockedGoalRetry | null 
 }
 
 /**
- * 막힌 목표를 '자동 재시도 예약'으로 옮긴다 — 오너 지시 2026-09-23 "블락되는거 전부다 치워라",
- * 정정 "눌러서 이어가는게 결국 멈춘거 아닌가".
- *
- * 앱이 지금 당장 확인(효과 관찰)도 재개도 못 할 때(런타임 없음·사용 한도·관찰 모름) 사람을 기다리지 않고
- * 스스로 다시 할 시각을 원장에 적는다. 상태는 'waiting_tool'(앱이 기다리는 중)이고, 그 시각이 되면
- * 스윕이 원래 사유로 되돌려(reopenDueBlockedGoalRetry) 같은 판단을 다시 한다. 이 쓰기는 어떤 실행도
- * 허가하지 않는다 — 불확실한 효과는 여전히 읽기 전용 관찰만 풀 수 있다. blocked→waiting_tool 은
- * 일반 전이표에 없으므로 여기서만 CAS 로 쓴다.
+
+
+
+
+
+
+
+
  */
 export function scheduleBlockedGoalRetry(input: {
   runId: string;
@@ -1024,15 +1025,15 @@ export function scheduleBlockedGoalRetry(input: {
  * update), so one prompt look is owed. Later failures of the same launch back off normally. */
 export const BLOCKED_GOAL_STARTUP_RETRY_MS = 30_000;
 
-/** Backoff for the next automatic retry: 5 min doubling, capped at 6 h. It counts only the failures this run
- * has had since its last success (a settled completed turn or an owner control) within 24 h. A resume that
- * worked is not a failure: counting it made every healthy Goal that resumes every few minutes sit at the 6 h
- * cap after a single restart (measured 2026-10-03: retryIndex 70 on a 37-cycle Goal, 751 on a spinning one).
- * Carried copies of an existing retry never count either — they re-write the same schedule.
- * The owner's authority being (re)established also starts a fresh count: an adopted grant (run.goal_revision_bound) or
- * a status change the owner made (Resume/Start). Retries before it stood on a host cause that is now gone; counting them
- * put the Yotube Goal's next retry 5 h 20 min out right after 1.3.64 resumed it (2026-10-17: six goal_owner_grant_unrecorded
- * retries before the grant was adopted at 14:39Z; a W7 copy then failed once and was scheduled at retryIndex 6). */
+/**
+
+
+
+
+
+
+
+ */
 export function nextBlockedGoalRetrySlot(runId: string, now = Date.now(),
   options: { startup?: boolean } = {}): { retryIndex: number; nextAt: string } {
   const since = new Date(now - 24 * 60 * 60_000).toISOString();
@@ -2139,9 +2140,9 @@ export function recordLongRunInferenceStarted(input: {
       AND json_extract(payload_json,'$.runtimeEvidence.sourceEventId')=? LIMIT 1`)
       .get(input.invocationRunId, `${input.sourceId}:started`) as { ts: string; payload_json: string } | undefined;
     const payload = source ? JSON.parse(source.payload_json) : null;
-    // Which check failed, so the next occurrence names its cause (production 1.3.57, 2026-10-17 05:40:15: one goal-wake
-    // tool selection threw this once; the stored copy of its source id had been masked as a Telegram token, now kept exact
-    // by run-events.ts canonicalInferenceSourceId).
+
+
+
     const failed = !run ? "long_run_missing" : !payload ? "usage_start_row_missing"
       : payload.schemaVersion !== "agentlas.inference-accounting.v1" || payload.attribution !== "goal" ? "usage_start_shape"
       : payload.goalId !== input.goalId || payload.sourceId !== input.sourceId || payload.scopeAnchorId !== input.scopeAnchorId
@@ -2427,7 +2428,56 @@ export function recoverInterruptedDesktopLongRunsAtStartup(appInstanceId: string
   const db = getDb();
   return desktopStoreTransaction(db, () => {
     assertExclusive();
+    const processOwner = invocationProcessOwner();
+    if (processOwner.ownerKind !== "desktop") throw new Error("desktop_startup_custody_not_exclusive");
     const recovered = pauseDesktopRuns("startup-recovery", appInstanceId, assertExclusive);
+    // A paused Goal can still contain an attempt whose Desktop died before
+    // settlement. Only an exact released lease proves that attempt is no
+    // longer live; a dormant Goal or elapsed time alone proves nothing.
+    const stranded = db.prepare(`SELECT id, version, status, app_instance_id, root_chat_id FROM long_runs
+      WHERE execution_location='desktop-local' AND host_owner_kind='desktop'
+        AND surface IN ('one','work') AND status IN ('paused','blocked')
+        AND app_instance_id IS NOT NULL AND app_instance_id <> ?`)
+      .all(appInstanceId) as Array<{ id: string; version: number; status: string; app_instance_id: string; root_chat_id: string | null }>;
+    for (const row of stranded) {
+      const attempts = db.prepare(`SELECT a.id, a.worker_id, a.attempt, a.invocation_run_id, o.owner_id, o.lease_id
+        FROM long_run_worker_attempts a JOIN invocation_run_owners o
+          ON o.run_id=a.invocation_run_id AND o.chat_id=?
+        WHERE a.run_id=? AND a.state='running' AND a.app_instance_id=?
+          AND o.owner_kind='desktop' AND o.state='released' AND o.owner_id<>?`)
+        .all(row.root_chat_id, row.id, row.app_instance_id, processOwner.ownerId) as Array<{
+          id: string; worker_id: string; attempt: number; invocation_run_id: string; owner_id: string; lease_id: string;
+        }>;
+      if (!attempts.length) continue;
+      const now = new Date().toISOString();
+      for (const attempt of attempts) {
+        assertExclusive();
+        const currentOwner = invocationProcessOwner();
+        if (currentOwner.ownerKind !== processOwner.ownerKind || currentOwner.ownerId !== processOwner.ownerId) {
+          throw new Error("long_run_startup_custody_changed");
+        }
+        const changed = db.prepare(`UPDATE long_run_worker_attempts
+          SET state='interrupted',error_code='host_restarted',
+            error_message='Previous Desktop host ended before settlement',updated_at=?,completed_at=?
+          WHERE id=? AND run_id=? AND state='running' AND app_instance_id=? AND invocation_run_id=?
+            AND EXISTS (SELECT 1 FROM invocation_run_owners o WHERE o.run_id=? AND o.chat_id=?
+              AND o.owner_kind='desktop' AND o.state='released' AND o.owner_id=? AND o.lease_id=?)
+            AND EXISTS (SELECT 1 FROM long_runs r WHERE r.id=? AND r.version=? AND r.status=?
+              AND r.app_instance_id=? AND r.root_chat_id=?
+              AND r.execution_location='desktop-local' AND r.host_owner_kind='desktop')`)
+          .run(now, now, attempt.id, row.id, row.app_instance_id, attempt.invocation_run_id,
+            attempt.invocation_run_id, row.root_chat_id, attempt.owner_id, attempt.lease_id,
+            row.id, row.version, row.status, row.app_instance_id, row.root_chat_id);
+        if (changed.changes !== 1) throw new Error("long_run_startup_custody_changed");
+        db.prepare(`UPDATE long_run_workers SET state='interrupted',updated_at=?
+          WHERE id=? AND run_id=? AND current_attempt=? AND state IN ('provisioning','idle','running','waiting')`)
+          .run(now, attempt.worker_id, row.id, attempt.attempt);
+      }
+      // Preserve the user's pause, task outcomes and every external-effect
+      // receipt. This is interrupted execution, never completed work or replay.
+      appendLongRunEvent({ runId: row.id, kind: "run.orphaned_attempts_interrupted", actorKind: "host",
+        payload: { attemptIds: attempts.map(attempt => attempt.id), reason: "host_restarted", automaticResume: false } });
+    }
     // Clean shutdown and blocked Goals are already dormant and absent from
     // ACTIVE. Transfer their ledger custody without resuming them or rewriting
     // a historical attempt, wait claim, user hold, or uncertain external effect.

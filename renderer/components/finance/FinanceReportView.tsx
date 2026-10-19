@@ -3,7 +3,7 @@ import { Fragment, type ReactNode } from "react";
 import type { FinanceDataResult, FinanceReport, FinanceReportSection } from "@shared/finance";
 import { financeComputeSpec } from "./FinanceComputeView";
 import { financeDataVisual, financeMetricForColumns } from "./FinanceDataResultView";
-import { financeReportLocale, financeReportDirection, financeReportSectionTitle, financeReportTitle, selectFinanceReportSections, financeReportHtml, financeReportNumber, financeReportProseBlocks, financeReportSectionHeading } from "@shared/finance-report-presentation";
+import { financeReportFinancialData, financeReportLocale, financeReportDirection, financeReportSectionTitle, financeReportTitle, selectFinanceReportSections, financeReportHtml, financeReportNumber, financeReportProseBlocks, financeReportSectionHeading } from "@shared/finance-report-presentation";
 import { sanitizeChartSpec } from "@/lib/chart-spec";
 import { ChartBlock } from "@/components/ChartBlock";
 import styles from "./FinanceReportView.module.css";
@@ -24,6 +24,7 @@ export function FinanceReportProse({value}:{value:string}) {
 }
 function data(section:FinanceReportSection):FinanceDataResult|null {const p=section.projection;return p?{status:p.status==="ready"?"ok":p.status==="partial"?"partial":"unconnected",columns:p.columns,rows:p.rows,warnings:p.warnings,asOf:p.asOf,retrievedAt:"",sourceUrls:[]}:null;}
 export function financeReportChartSpec(section:FinanceReportSection):Record<string,unknown>|null {
+ const plan=financeReportFinancialData(section);if(plan)return {data:{values:plan.rows},mark:plan.kind==='cashflow'?{type:'line',filled:false,interpolate:'linear'}:{type:'bar'},encoding:{x:{field:'period',type:plan.kind==='cashflow'?'quantitative':'nominal',title:null,axis:{labelOverlap:true}},y:{field:'value',type:'quantitative',title:plan.currency,scale:{zero:plan.kind!=='cashflow'}},tooltip:[{field:'period',title:null},{field:'value',type:'quantitative',title:plan.currency,format:'.2f'}]}};
  const computed=financeComputeSpec(section,false);if(computed)return computed;
  if(section.widget?.chartType==="table")return null;
  const result=data(section),metric=result?financeMetricForColumns(result.columns):undefined,visual=result&&metric?financeDataVisual(result,metric):null;

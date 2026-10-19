@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.78 — 2026-10-19
+
+- Agentlas Finance activates bundled workflows after explicit owner consent, supports reviewed portfolio imports and retirement planning, and keeps scenario assumptions visible.
+- Computed Finance reports must add an interpretation before reporting completion; incomplete writing preserves the computed chart and identifies the remaining work.
+- Repeated work can become a Toolchain draft under model judgment. Exact conversation-scoped trials earn callability through successful use, and withdrawing a draft stops an awaiting trial.
+- Supported image inputs reach their selected runtime; unsupported image runtimes return an explicit refusal. Local model tool calls retain their native approval lineage.
+- Split panes use the available answer space, and output entries open the latest save of the same file on Desktop and the phone.
+- Finance plugin builds retain identical runtime bytes across dependency symlink locations.
+- This release binds Agentlas OS v1.2.66 at c0acd99be22114569e20bca94bed4540ba046eb4; public runtime asset `hephaestus-runtime-v1.2.66.tar.gz` is pinned at SHA-256 `20019d3ba4df1c540d0ef549c07a82188bd40fe12dafb2f8a6c75cc4bdcc89f7`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.77 — 2026-10-19
 
 - Carries forward the Finance, document, Goal, Science and empty-panel improvements from the 1.3.75 and 1.3.76 source releases. Neither version published installers.
@@ -500,9 +510,9 @@
 
 ## 1.3.16 — 2026-10-12
 
-- When an Agentlas browser or tool keeps failing for a Goal, the Goal no longer waits on it. After the same failure twice in a day, the Goal's turns do those steps with the runtime's own tools: shell commands, direct API calls with your saved keys, local programs and the runtime's own web access. Agentlas records the results. A step that truly needs you (a sign-in, a payment, a consent) is asked once. Before, AGI kept restarting the browser or starting another turn: one Goal hit the same browser failure 36 times in a week.
-- AGI no longer treats a Goal that is waiting for you as failing. While a Goal waits for your answer or a scheduled retry, the app refuses other system turns on purpose; AGI read those refusals as unknown failures (43 of 60 such incidents) and answered each with another turn that was refused the same way. AGI now also reads the real cause behind the app's generic start and runner failures.
-- AGI files the same app defect once. It used to file a new report each time it re-described the same problem (138 reports for a handful of defects).
+- When an Agentlas browser or tool keeps failing for a Goal, the Goal no longer waits on it. After the same failure twice in a day, the Goal's turns do those steps with the runtime's own tools: shell commands, direct API calls with your saved keys, local programs and the runtime's own web access. Agentlas records the results. A step that truly needs you (a sign-in, a payment, a consent) is asked once. Before, AGI kept restarting the browser or starting another turn.
+- AGI no longer treats a Goal that is waiting for you as failing. While a Goal waits for your answer or a scheduled retry, the app refuses other system turns on purpose; AGI read those refusals as unknown failures and answered each with another turn that was refused the same way. AGI now also reads the real cause behind the app's generic start and runner failures.
+- AGI files the same app defect once. It used to file a new report each time it re-described the same problem.
 - AGI now knows which step of a Goal is blocked. The marker it read was never written, so its choices ignored which step had failed.
 - AGI no longer posts its actions in the room (for example, handing a step to a teammate). Only a question you must answer, or a request to restart the app, appears in the chat; the actions stay on the Goal panel.
 - When a step's outside effect is unknown (for example, an upload that returned no answer), the agent checks for itself and does the step again if it is missing, instead of waiting for a reviewer indefinitely.
@@ -1840,7 +1850,7 @@ This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b
 
 ## 1.2.5 — 2026-09-14
 
-- Science 서비스: 저널 프로파일을 챗에서 만들 수 있게 합니다. 승인 정책이 저널 정체성을 자율 범위로 두고도 그 영수증을 만드는 도구가 없어 화면의 "투고 저널 설정" 단추로만 됐습니다(페르소나 루프 라운드 3). 새 도구가 자율 정책이면 바로 발급하고, 확인 정책이면 화면 경로를 오류에 적습니다. 프로파일 목록에 영수증을 함께 돌려줍니다.
+- Science 서비스: 저널 프로파일을 챗에서 만들 수 있게 합니다. 승인 정책이 저널 정체성을 자율 범위로 두고도 그 영수증을 만드는 도구가 없어 화면의 "투고 저널 설정" 단추로만 됐습니다. 새 도구가 자율 정책이면 바로 발급하고, 확인 정책이면 화면 경로를 오류에 적습니다. 프로파일 목록에 영수증을 함께 돌려줍니다.
 - Science 서비스: 원고에 그림이 들어가는 길(아티팩트 검증 → 결속 → `{{figure:…}}` 표식)과 원고 마크다운 문법이 소스 주석에만 있어 연구 디렉터가 "캡처 미지원"으로 판단해 그림 0장으로 조판하던 문제를 도구 설명에 적어 고칩니다.
 - Science 설치 안내의 "분자 시각화"에 도킹·동역학 시뮬레이션은 지원하지 않는다고 적습니다(연구자가 도킹까지 되는 줄 알았던 오해).
 - 대시보드 역할 풀: 모델 목록이 비어 있을 때 그 이유를 적습니다. 코덱스는 로그인 전이라 모델 캐시가 없으면 목록이 아무 말 없이 비었습니다("gpt 6.0 안 보임"). 이제 "codex login 을 마치면 채워집니다"라고 알립니다.
@@ -1850,18 +1860,18 @@ This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b
 ## 1.2.4 — 2026-09-14
 
 - Science 챗의 작업 블록이 도구 이름만 반복하던 문제를 고칩니다. 실행 기록에 "무엇에 썼는가" 한 줄(비밀 마스킹, 160자)을 함께 보내고 Science 화면이 그것을 씁니다. 인자 원문과 결과는 여전히 보내지 않습니다.
-- 로컬 모델 도구 사용을 여러 번 반복해도 오류가 나지 않게 합니다. 파일 같은 로컬 MCP 서버의 연결 확인 제한을 3초에서 12초로 늘려 두 번째 실행부터 후보에서 빠지던 문제, 화면을 못 보는 모델이 브라우저 스크린샷을 반복하던 문제, 그런 실행에 캡처 산출을 요구해 정직한 답을 실패로 찍던 문제를 고쳤습니다. 격리 앱 실측: 4과제 3회 연속 12/12 완주, 오류 0.
-- Work: 앱 재시작 뒤 목표 실행이 영구 막다른 길에 빠지던 문제, 쓰기 모드 샌드박스 거부 오진, 승인 문구, 이미지 역할 미반영, 기억 줄 영어 노출, 대시보드 역할 후보 단추 라벨을 고칩니다(페르소나 루프 라운드 1).
+- 로컬 모델 도구 사용을 여러 번 반복해도 오류가 나지 않게 합니다. 파일 같은 로컬 MCP 서버의 연결 확인 제한을 3초에서 12초로 늘려 두 번째 실행부터 후보에서 빠지던 문제, 화면을 못 보는 모델이 브라우저 스크린샷을 반복하던 문제, 그런 실행에 캡처 산출을 요구해 정직한 답을 실패로 찍던 문제를 고쳤습니다.
+- Work: 앱 재시작 뒤 목표 실행이 영구 막다른 길에 빠지던 문제, 쓰기 모드 샌드박스 거부 오진, 승인 문구, 이미지 역할 미반영, 기억 줄 영어 노출, 대시보드 역할 후보 단추 라벨을 고칩니다.
 - Science 서비스: 가설을 기각하면 이후 모든 턴이 실패하던 막다른 길, 원고 조판 기본(두 단 10pt), 한글 PDF 글꼴, 재시작 복구를 고칩니다.
 - Science 서비스: 주장 원장을 새 원고 판으로 다시 봉인할 때 옛 인용 목록을 물려받아 영원히 거부되던 문제(초안 워터마크가 안 벗겨짐), 한글·그리스 문자 소제목을 거부하던 검사, 저널 언어 요건(원고 언어가 저널과 다르면 제출 점검에서 알림)을 고칩니다.
-- Work 페르소나 라운드 2: 재개 때 판 번호를 잃던 문제, 샌드박스 종료를 권한 경계로 표시, 기억 줄을 읽을 때 현지화합니다.
+- Work: 재개 때 판 번호를 잃던 문제, 샌드박스 종료를 권한 경계로 표시, 기억 줄을 읽을 때 현지화합니다.
 - Work 쓰기 모드에서 open·osascript 같은 OS 런처로 샌드박스 밖 실행이 되던 것을 막고 승격 질문으로 돌립니다.
 
 This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d. Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
 
 ## 1.2.3 — 2026-09-13
 
-- 로컬 비전 모델을 멀티모달로 등록합니다. Hugging Face 저장소에 비전 프로젝터(mmproj) 파일이 있으면 모델과 함께 받아 검증하고 llama-server에 붙입니다. 프로젝터가 붙은 모델만 이미지 입력·컴퓨터 유즈 스크린샷을 받고, 대시보드 멀티모달 자리에 올 수 있습니다. 능력 검사는 실제 이미지를 보내 답을 확인합니다. 격리 앱 실측(SmolVLM 256M): 이미지 입력 검증됨, 멀티모달 역할 등록 확인.
+- 로컬 비전 모델을 멀티모달로 등록합니다. Hugging Face 저장소에 비전 프로젝터(mmproj) 파일이 있으면 모델과 함께 받아 검증하고 llama-server에 붙입니다. 프로젝터가 붙은 모델만 이미지 입력·컴퓨터 유즈 스크린샷을 받고, 대시보드 멀티모달 자리에 올 수 있습니다. 능력 검사는 실제 이미지를 보내 답을 확인합니다.
 - 로컬 모델 탐색 화면을 카드 대신 필터 있는 표로 바꾸고, 검색 중 깜빡임을 없애고, 추천을 원활·주의·위험 세 단계로 표시합니다.
 - Science 원고의 기본 조판을 학회 논문 모양으로 바꿉니다(두 단 10pt, 절 제목 위계, 회색 초안 표식, 표 폭 맞춤). 저널 프로파일을 고르면 그 규칙이 우선합니다.
 
@@ -1870,10 +1880,10 @@ This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b
 ## 1.2.2 — 2026-09-13
 
 - Science 연구 서비스(0.1.20)를 싣습니다. 서비스 코드는 이 앱 안에 묶여 나가므로 Science 확장만 갱신해서는 닿지 않던 수리들입니다: "연구 중지" 뒤 "연구 계속"이 영원히 거절되던 막다른 길, 자율 승인 정책이 결과 검토·후속 분석 계획·재시작 뒤 재개까지 덮음(사람이 누를 승인 없이 진행), 원고 청사진이 비교 논문 1편부터 만들어지고 서술적 종설도 비교 논문으로 인정, 후속 분석 계획으로 실행 단계 전환, 소스 구조 도구가 바이트 범위를 줘 인용 실패를 줄임, 옛 프로젝트 폴더 결속 자가 수리.
-- 자동 도구 모드에서 요청이 URL·도메인·"브라우저로"를 직접 말하면 판정 없이 Agentlas 브라우저를 붙입니다. 작은 로컬 모델(Qwen3-4B)이 판정기일 때 브라우저 대신 시간 도구를 골라 헛돌던 실측 결함입니다. 격리 앱 실측: 브라우저·컴퓨터 유즈·파일 과제 4종 완주, 오류 0.
+- 자동 도구 모드에서 요청이 URL·도메인·"브라우저로"를 직접 말하면 판정 없이 Agentlas 브라우저를 붙입니다.
 - Work 실행이 파일을 만들었다고 말할 때 그 파일이 실제로 있는지 확인하고, 없으면 복구를 명시적으로 다시 요청합니다(Claude Code·Codex 런타임 둘 다).
-- Science 원고 조립 관문이 비교논문이 한 편일 때 "정확히 그 단어 수"를 요구해 7개 절이 모두 준비된 원고를 거절하던 문제를 고칩니다(바닥은 코퍼스 하한의 절반, 얇은 코퍼스는 ±30% 범위). 격리 앱 실측: 거절되던 세션이 조립되어 원고 v1이 생겼습니다.
-- Science 원고 PDF에서 한글이 전부 빠지던 문제를 고칩니다. LaTeX 조판(tectonic)에 한글·한자·가나가 있으면 시스템 CJK 글꼴을 붙이고 띄어쓰기를 지킵니다. 격리 앱 실측: 한국어 원고 8쪽 PDF, 빠진 글자 0.
+- Science 원고 조립 관문이 비교논문이 한 편일 때 "정확히 그 단어 수"를 요구해 7개 절이 모두 준비된 원고를 거절하던 문제를 고칩니다(바닥은 코퍼스 하한의 절반, 얇은 코퍼스는 ±30% 범위).
+- Science 원고 PDF에서 한글이 전부 빠지던 문제를 고칩니다. LaTeX 조판(tectonic)에 한글·한자·가나가 있으면 시스템 CJK 글꼴을 붙이고 띄어쓰기를 지킵니다.
 - Science 앱을 다시 켠 뒤 이전 실행이 영원히 "취소 중"에 남아 새 요청이 막히던 문제를 고칩니다. 부팅 복구가 옛 배달 하나에서 멈추던 원인이었습니다.
 - Science 원고 본문에서 `render_table_as_vega` 같은 밑줄 이름이 기울임으로 쪼개지던 문제와, 한글 기울임이 경고를 내던 문제를 고칩니다.
 
@@ -1881,7 +1891,7 @@ This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b
 
 ## 1.2.1 — 2026-09-13
 
-- Antigravity(agy)에 사용자가 직접 등록한 MCP 서버와 같은 이름의 도구가 있으면 Agentlas가 agy 실행 전체를 거절하고 다른 런타임으로 넘어가던 문제를 고칩니다. 1.2.0 프로덕션 실측에서 `opencrab` 하나 때문에 모든 Work 실행이 agy 대신 Codex로 돌았습니다. 이제 사용자 항목은 그대로 두고 그 이름의 Agentlas 항목만 빼고 실행하며, 뺀 항목은 실행 상태에 적습니다.
+- Antigravity(agy)에 사용자가 직접 등록한 MCP 서버와 같은 이름의 도구가 있으면 Agentlas가 agy 실행 전체를 거절하고 다른 런타임으로 넘어가던 문제를 고칩니다. 이제 사용자 항목은 그대로 두고 그 이름의 Agentlas 항목만 빼고 실행하며, 뺀 항목은 실행 상태에 적습니다.
 - 모델 선택의 "엔진 설정 사용" 행이 무슨 모델인지 스스로 말합니다. "Claude Code 기본값 · Opus"처럼 CLI가 자기 설정 파일에 적어 둔 기본 모델을 붙이고, 한 번이라도 돌린 뒤에는 실제로 쓰인 모델 id(예: claude-opus-5)까지 보입니다. Claude Code는 모델 목록 명령이 없어 별칭(Opus·Fable)만 보낼 수 있고, 세대 번호는 실행 결과에서만 읽습니다.
 - 작업공간 첫 화면을 1.2.0 이전의 프로젝트 목록 화면으로 되돌립니다. 1.2.0의 "문장을 적으면 프로젝트와 대화가 함께 준비되는" 흐름은 보낼 때마다 문장을 이름으로 한 새 프로젝트를 만들어 대시보드를 어지럽혔습니다(오너 결정 2026-09-13). 프로젝트를 먼저 고르거나 연결한 뒤 대화를 시작합니다.
 - 프로젝트 만들기 화면의 "프로젝트 도구 · 제거" 버튼이 눌리지 않던 것을 고칩니다. 도구 행이 드래그용으로 포인터를 잡아 두어 버튼 클릭이 행에 삼켜졌습니다. 프로젝트 상세에서 도구를 저장한 직후 숨겨진 배경 칸이 카드로 되살아나던 것도 함께 고칩니다.
@@ -3048,10 +3058,7 @@ Bundled runtime: Agentlas OS v1.2.12 (2b075361f07f25577994f0ce87f46f33ac41ec64).
   value — a first version rejected its own repair and the builder gave up after
   four tries, leaving no automation at all.
 - "No runtime here can grade" is answered differently from "try again in a
-  minute". Measured across every runtime installed here: claude-code,
-  antigravity, grok and ollama return a verdict; codex refuses before spawning,
-  so a codex-only person cannot finish an automation that has a check and was
-  being told to retry, which will never work.
+  minute".
 
 Source readiness does not prove a public installer or update feed; the
 Releases page stays the authority.
@@ -4936,10 +4943,9 @@ This release binds Agentlas OS v1.1.91 at
 Passing the source gates does not prove a GitHub release or installer; the
 Releases page stays the authority for what is actually downloadable.
 
-- **Desktop embeds the exact Agentlas OS release that passed current Codex
-  testing.** Real installed-plugin QA caught and corrected oversized
-  `context.impact` and `context.slice` receipts; the visible working set now
-  stays below the 16 KB UX bound with explicit omission counts.
+- **Desktop embeds the exact Agentlas OS release.** The visible working set
+  returned by `context.impact` and `context.slice` stays below the 16 KB UX
+  bound with explicit omission counts.
 - **The One and Build UX fixes remain unchanged.** Dialog sequencing, tour
   scroll restoration, localized starter briefs, correlated Cloud-save
   progress, and customer-safe runtime presentation continue from 0.9.32.
@@ -5056,8 +5062,7 @@ stays the authority for what is actually downloadable.
 - **Bundled engine moves to v1.1.76.** A credential is now identified by where it
   lives rather than by a word in its filename, so a package stops being blocked
   for shipping its own design tokens, and upload widens `allowRead` to the
-  context its agent cards declare as required — measured across 143 live
-  packages, 82 card-declared files had been unreachable.
+  context its agent cards declare as required.
 - **Carries v1.1.75 as well:** upload corrects an entity type its package
   contradicts, so a team is no longer published and billed as a single agent, and
   Codex regains an upload entrypoint through the `hephaestus-upload` skill.
@@ -5098,8 +5103,7 @@ release.
 - **A cloned repository's `.env` can no longer redirect a child CLI's provider
   endpoint.** The Terminal fix from 2026-07-27 had never been ported here.
 - Settings shows which Agentlas OS is attached and can update it; the bundled
-  engine advances to v1.1.73 and `npm run bump:engine` keeps its five hand-copied
-  pins in step.
+  engine advances to v1.1.73.
 - `targetSchemaVersion` catches up to migration target 81. Shipping 81 while
   declaring 79 would have blocked every update after first launch.
 
@@ -6680,10 +6684,6 @@ release.
   their matching `agentId`, `firmId`, or `groupId`; Cloud and Hub Agent/Team
   targets must carry a non-empty slug. A malformed or stale IPC response can no
   longer crash the renderer while reading `entityKind`.
-- **The macOS chat-routing QA and shared renderer bridge now implement the same
-  required target contract as production.** Korean and English UI runs prove
-  that an auto-routed local Agent reaches `invoke:run` as the exact
-  `local/agent/agentId` temporary-TF member.
 
 ### Boundaries and edge cases
 
@@ -6923,19 +6923,12 @@ release.
 - **Release UI checks now follow the language actually rendered by Desktop.**
   Team search, team selection, and hired-agent assertions cover both English
   and Korean instead of assuming a Korean first-run locale.
-- **Provider-health visual QA now pins its intended locale explicitly.** Korean
-  and English dashboard copy, recovery, provider actions, and retry behavior are
-  each exercised in an isolated browser context after English became the
-  product default.
 - **Mobile relay pairing metadata is covered by the release contract.** The
   authenticated exchange must return the advertised relay endpoint and secret
   without weakening the existing local pairing boundary.
 - **The Build Cloud consent contract is now a required release gate.** Signed
   macOS and cross-platform packaging verify that Cloud upload remains explicit,
   private, single-flight, and safely local-only when dismissed.
-- **Build roster release QA now completes the new portability decision.** It
-  explicitly keeps the verified package local before navigating to Dashboard
-  and Agent Cloud, so the modal is tested without masking live roster updates.
 - **The embedded runtime boundary remains Agentlas OS v1.1.28.** Canonical
   first-contact still completes before agent work starts, and workload routing
   still introduces no vendor model alias or guessed model table.
@@ -7415,25 +7408,16 @@ release.
 
 ### Fixed
 
-- **Chat routing QA is locale-independent.** Stable mode, stop-state, gate, and
-  destination-page contracts now verify Find agent and cancellation flows in
-  Korean and English without relying on translated button text.
 
 ## 0.7.42 — 2026-07-12
 
 ### Fixed
 
-- **Chat routing QA matches clean-device inventory.** Keyboard-to-pointer
-  autocomplete selection is verified with the agents actually present, rather
-  than depending on an unrelated third local item.
 
 ## 0.7.41 — 2026-07-12
 
 ### Fixed
 
-- **Prompts retry QA waits for the destination document.** The retained-prompt
-  assertion now waits for the new chat execution context, removing a clean-mac
-  navigation race without weakening the product contract.
 
 ## 0.7.40 — 2026-07-12
 
@@ -7442,8 +7426,6 @@ release.
 - **Cross-platform release gates follow Electron 43's install contract.** Linux
   CI installs the lazy Electron platform binary before configuring the SUID
   sandbox helper, and fails closed instead of bypassing Chromium's sandbox.
-- **Startup Studio UI QA is locale-independent.** The new-idea handoff is
-  verified on clean English CI runners as well as Korean dogfood machines.
 
 ## 0.7.39 — 2026-07-11
 
@@ -7907,11 +7889,6 @@ release.
   best-effort and non-blocking; reading is fully guarded, so a missing or partial
   map never affects a run. The zero-dependency generator is bundled with the app
   (`electron/memory/code-map-gen.mjs`).
-- Added a focused Electron QA harness for the chat agent-call surface, covering
-  `@` autocomplete keyboard/mouse stability, explicit-agent routing, recommendation
-  retry, plain execution payloads, and stop-button cancellation.
-- Added an Agentlas Desktop UI/UX stabilization playbook documenting the design
-  system and failure patterns that caused recent surface regressions.
 
 ### Changed
 
@@ -7973,8 +7950,7 @@ release.
   user selects read-write or full access, the borrowed task force receives the
   matching runtime permission and MCP/tool bridge for that run while the host
   policy still blocks secret exfiltration and permission escalation.
-- Reworded Marketplace docs and QA references around Hub-only catalog behavior:
-  Desktop no longer presents an offline in-memory marketplace fallback, and
+- Desktop no longer presents an offline in-memory marketplace fallback, and
   offline Hub failures should remain visible as empty/error states.
 - Localized the top navigation dropdowns and Library headers so the new Agent
   group path renders cleanly in both Korean and English.

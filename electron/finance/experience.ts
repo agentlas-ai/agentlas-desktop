@@ -1,10 +1,13 @@
 import fs from 'node:fs';
+import { financeBuiltinPlugin } from './builtin-plugin';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { FINANCE_NOTICE_VERSION, type FinanceDataSourceOption, type FinanceExperienceRequest, type FinanceExperienceState } from '../../shared/finance-experience';
 import type { FinanceScope } from './store';
 import { financeHash, financePrivateDirectory, financeScopeHash } from './archive';
+import { FINANCE_DATA_CATEGORIES, resolveFinanceDataSource, type FinanceDataSelection } from '../../shared/finance-data-routing';
+import { readFinanceSourceRouting, writeFinanceSourceRouting } from './source-routing';
 import { userDataPath } from '../runtime-paths';
 import { prepareFinanceDailyCheckin,registerFinanceDailyCheckin,revokeFinanceDailyCheckin,observeFinanceDailyCheckin,type FinanceDailyBinding } from './daily-briefing';
 
@@ -14,8 +17,10 @@ const feedId=z.enum(['finance-news','finance-sec','finance-economy','finance-ear
 const defaultFeeds=feedId.options;
 const requestSchema=z.discriminatedUnion('action',[
   z.object({action:z.literal('read')}).strict(),
+  z.object({action:z.literal('plugins.prepare')}).strict(),
   z.object({action:z.literal('accept'),version:z.literal(FINANCE_NOTICE_VERSION),dataNotice:z.literal(true),aiNotice:z.literal(true)}).strict(),
   z.object({action:z.literal('source'),sourceId:id}).strict(),
+  z.object({action:z.literal('source.binding'),category:z.enum(FINANCE_DATA_CATEGORIES),sourceId:id.nullable()}).strict(),
   z.object({action:z.literal('feed'),feedId,enabled:z.boolean()}).strict(),
   z.object({action:z.literal('customize'),customized:z.boolean()}).strict(),
   z.object({action:z.literal('monitoring'),enabled:z.boolean(),localTime:time.optional()}).strict(),
@@ -64,54 +69,86 @@ export class FinanceExperience {
     scope.assertCurrent();const checked=storedSchema.parse({...value,revision:value.revision+1});if(checked.ownerScope!==financeScopeHash(scope))throw new Error('finance_owner_scope_mismatch');
     const temporary=path.join(directory,`.settings-${randomUUID()}.tmp`),fd=fs.openSync(temporary,'wx',0o600);
     try{fs.writeFileSync(fd,JSON.stringify(checked));fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
-    scope.assertCurrent();fs.renameSync(temporary,path.join(directory,'settings.json'));value.revision=checked.revision;
+    scope.assertCurrent();fs.renameSync(temporary,path.join(directory,'settings.json'));if(process.platform!=='win32'){const directoryFd=fs.openSync(directory,'r');try{fs.fsyncSync(directoryFd);}finally{fs.closeSync(directoryFd);}}value.revision=checked.revision;
   }
   private async locked<T>(scope:FinanceScope,body:(value:Preferences,save:()=>void,sources:FinanceDataSourceOption[])=>Promise<T>,loadSources=true):Promise<T>{
-    scope.assertCurrent();const sources=loadSources?await this.ports.sources():[];scope.assertCurrent();const directory=path.join(this.root,financeScopeHash(scope));await financePrivateDirectory(directory);scope.assertCurrent();
+    scope.assertCurrent();let sources:FinanceDataSourceOption[]=[];if(loadSources){try{sources=await this.ports.sources();}catch{scope.assertCurrent();}}scope.assertCurrent();const directory=path.join(this.root,financeScopeHash(scope));await financePrivateDirectory(directory);scope.assertCurrent();
     const release=await lockfile.lock(directory,{realpath:false,stale:60000,update:10000,retries:{retries:20,minTimeout:25,maxTimeout:250}});
     try{scope.assertCurrent();const value=this.read(scope,directory,sources);return await body(value,()=>this.write(scope,directory,value),sources);}finally{await release();scope.assertCurrent();}
   }
-  private projection(value:Preferences,sources:FinanceDataSourceOption[],access:Access):FinanceExperienceState {
-    return {consent:value.consent,sourceId:value.sourceId,dashboardCustomized:value.dashboardCustomized,sources,enabledFeedIds:[...value.enabledFeedIds],
+  private selection(scope:FinanceScope,value:Preferences):FinanceDataSelection {
+    return {...readFinanceSourceRouting(scope,path.join(this.root,financeScopeHash(scope)),value.sourceId),enabledFeedIds:[...value.enabledFeedIds]};
+  }
+  private publishSelection(scope:FinanceScope,value:Preferences,selection:FinanceDataSelection):void {
+    value.sourceId=writeFinanceSourceRouting(scope,path.join(this.root,financeScopeHash(scope)),selection);
+  }
+  private dailySourcesAvailable(scope:FinanceScope,value:Preferences,sources:FinanceDataSourceOption[]):boolean {
+    let selection:FinanceDataSelection;try{selection=this.selection(scope,value);}catch{scope.assertCurrent();return false;}
+    return (['news','filings','social'] as const).every(category=>sources.some(source=>source.id===resolveFinanceDataSource(selection,category)&&source.available));
+  }
+  private async projection(scope:FinanceScope,value:Preferences,sources:FinanceDataSourceOption[],access:Access,inspectBuiltins=true):Promise<FinanceExperienceState> {
+    let selection:FinanceDataSelection={sourceId:value.sourceId},sourceRoutingStatus:'ready'|'unavailable'='ready';
+    try{selection=this.selection(scope,value);}catch{scope.assertCurrent();sourceRoutingStatus='unavailable';}
+    const builtins=inspectBuiltins?await financeBuiltinPlugin().status(scope,FINANCE_NOTICE_VERSION):undefined;scope.assertCurrent();
+    return {consent:value.consent,...(builtins?{builtins}:{}),...selection,sourceRoutingStatus,dashboardCustomized:value.dashboardCustomized,sources,enabledFeedIds:[...value.enabledFeedIds],
       monitoring:{enabled:value.monitoring.enabled,localTime:value.monitoring.localTime,timezone:value.monitoring.timezone,lastSentAt:value.monitoring.lastSentAt,nextRunAt:value.monitoring.enabled?value.monitoring.nextRunAt:null},access};
   }
   private async stop(scope:FinanceScope,value:Preferences,save:()=>void):Promise<void>{value.monitoring.enabled=false;value.monitoring.nextRunAt=null;try{save();}finally{await this.ports.revoke(scope,value.monitoring);}scope.assertCurrent();}
   async request(scope:FinanceScope,raw:FinanceExperienceRequest):Promise<FinanceExperienceState>{
     const request=requestSchema.parse(raw);scope.assertCurrent();
     // Stop is independent of server/network access. It does not query billing first.
-    const access:Access=request.action==='monitoring'&&!request.enabled?{plan:null,monitoringAllowed:false,status:'unavailable'}:await this.ports.access(scope);scope.assertCurrent();
+    const terminal=request.action==='monitoring'&&!request.enabled,local=request.action==='customize';
+    let access:Access={plan:null,monitoringAllowed:false,status:'unavailable'};
+    if(!terminal&&!local){try{access=await this.ports.access(scope);}catch{scope.assertCurrent();}}scope.assertCurrent();
     return this.locked(scope,async(value,save,sources)=>{
-      if(request.action==='accept'){value.consent={version:FINANCE_NOTICE_VERSION,acceptedAt:this.ports.now().toISOString()};save();}
+      if(request.action==='accept'){const prepared=await financeBuiltinPlugin().prepare(scope,FINANCE_NOTICE_VERSION);scope.assertCurrent();if(!prepared.ready)throw new Error('finance_plugin_activation_required');value.consent={version:FINANCE_NOTICE_VERSION,acceptedAt:this.ports.now().toISOString()};save();}
+      if(request.action==='plugins.prepare'){if(value.consent?.version!==FINANCE_NOTICE_VERSION)throw new Error('finance_consent_required');const prepared=await financeBuiltinPlugin().prepare(scope,FINANCE_NOTICE_VERSION);scope.assertCurrent();if(!prepared.ready)throw new Error('finance_plugin_activation_required');}
       if(request.action==='customize'){value.dashboardCustomized=request.customized;save();}
       if(request.action==='feed'){value.enabledFeedIds=request.enabled?[...new Set([...value.enabledFeedIds,request.feedId])]:value.enabledFeedIds.filter(id=>id!==request.feedId);save();}
-      if(request.action==='source'){if(!sources.some(source=>source.id===request.sourceId&&source.available))throw new Error('finance_source_unavailable');value.sourceId=request.sourceId;save();}
+      if(request.action==='source'){
+        if(!sources.some(source=>source.id===request.sourceId&&source.available)||request.sourceId.startsWith('finance-routes:'))throw new Error('finance_source_unavailable');
+        if(value.sourceId.startsWith('finance-routes:')){
+          let previous:FinanceDataSelection|undefined;try{previous=this.selection(scope,value);}catch{scope.assertCurrent();}
+          // Explicit base-source selection repairs an unreadable routing edition; never infer lost bindings.
+          if(previous)this.publishSelection(scope,value,{...previous,sourceId:request.sourceId});else value.sourceId=request.sourceId;
+        }else value.sourceId=request.sourceId;
+        save();
+      }
+      if(request.action==='source.binding'){
+        if(request.sourceId!==null&&(!sources.some(source=>source.id===request.sourceId&&source.available)||request.sourceId.startsWith('finance-routes:')))throw new Error('finance_source_unavailable');
+        const previous=this.selection(scope,value),sourceBindings={...previous.sourceBindings};
+        if(request.sourceId===null)delete sourceBindings[request.category];else sourceBindings[request.category]=request.sourceId;
+        this.publishSelection(scope,value,{...previous,sourceBindings});save();
+      }
       if(request.action==='monitoring'){
-        if(!request.enabled){await this.stop(scope,value,save);return this.projection(value,sources,access);}
+        if(!request.enabled){await this.stop(scope,value,save);return this.projection(scope,value,sources,access,false);}
         if(value.consent?.version!==FINANCE_NOTICE_VERSION)throw new Error('finance_consent_required');
+        if(!(await financeBuiltinPlugin().status(scope,FINANCE_NOTICE_VERSION)).ready)throw new Error('finance_plugin_activation_required');scope.assertCurrent();
         if(!access.monitoringAllowed)throw new Error(access.status==='verified'?'finance_monitoring_pro_required':'finance_monitoring_access_unavailable');
-        if(!sources.some(source=>source.id===value.sourceId&&source.available))throw new Error('finance_source_unavailable');
+        if(!this.dailySourcesAvailable(scope,value,sources))throw new Error('finance_source_unavailable');
         const localTime=request.localTime??value.monitoring.localTime,observed=await this.ports.observe(scope,value.monitoring);scope.assertCurrent();
-        if(value.monitoring.enabled&&observed.active&&value.monitoring.localTime===localTime){value.monitoring.nextRunAt=observed.nextRunAt;save();return this.projection(value,sources,access);}
+        if(value.monitoring.enabled&&observed.active&&value.monitoring.localTime===localTime){value.monitoring.nextRunAt=observed.nextRunAt;save();return this.projection(scope,value,sources,access);}
         await this.stop(scope,value,save);value.monitoring.generation++;
         const commandId=`finance-daily:${financeHash([value.ownerScope,value.monitoring.generation].join(':')).slice(0,48)}`;
         const binding=await this.ports.prepare(scope,commandId);scope.assertCurrent();
         Object.assign(value.monitoring,binding,{enabled:true,localTime,timezone:this.ports.timezone(),nextRunAt:null});save();
         try{const registered=await this.ports.register(scope,binding,localTime);scope.assertCurrent();value.monitoring.nextRunAt=registered.nextRunAt;save();}
         catch(error){value.monitoring.enabled=false;value.monitoring.nextRunAt=null;try{save();}finally{await this.ports.revoke({...scope,assertCurrent(){}},binding);}throw error;}
-      } else if(value.monitoring.enabled&&!access.monitoringAllowed){await this.stop(scope,value,save);}
+      } else if(!local&&value.monitoring.enabled&&!access.monitoringAllowed){await this.stop(scope,value,save);}
       const observed=await this.ports.observe(scope,value.monitoring);scope.assertCurrent();
       if(value.monitoring.enabled&&!observed.active){value.monitoring.enabled=false;value.monitoring.nextRunAt=null;save();}
       const next=value.monitoring.enabled?observed.nextRunAt:null,last=observed.lastSentAt??value.monitoring.lastSentAt;
       if(next!==value.monitoring.nextRunAt||last!==value.monitoring.lastSentAt){value.monitoring.nextRunAt=next;value.monitoring.lastSentAt=last;save();}
-      return this.projection(value,sources,access);
-    },!(request.action==='monitoring'&&!request.enabled));
+      return this.projection(scope,value,sources,access);
+    },!terminal&&!local);
   }
   async admit(scope:FinanceScope,binding:FinanceDailyBinding,runId:string):Promise<void>{
     await this.locked(scope,async(value,save,sources)=>{
       const current=value.monitoring;
       if(!current.enabled||current.oneId!==binding.oneId||current.checkinId!==binding.checkinId||current.commandId!==binding.commandId)throw new Error('finance_daily_registration_inactive');
       if(value.consent?.version!==FINANCE_NOTICE_VERSION)throw new Error('finance_consent_required');
-      if(!sources.some(source=>source.id===value.sourceId&&source.available))throw new Error('finance_source_unavailable');
+      if(!(await financeBuiltinPlugin().status(scope,FINANCE_NOTICE_VERSION)).ready)throw new Error('finance_plugin_activation_required');scope.assertCurrent();
+      if(!this.dailySourcesAvailable(scope,value,sources))throw new Error('finance_source_unavailable');
       const access=await this.ports.access(scope);scope.assertCurrent();
       if(!access.monitoringAllowed)throw new Error(access.status==='verified'?'finance_monitoring_pro_required':'finance_monitoring_access_unavailable');
       const now=this.ports.now(),day=new Intl.DateTimeFormat('en-CA',{timeZone:this.ports.timezone(),year:'numeric',month:'2-digit',day:'2-digit'}).format(now);
@@ -123,14 +160,14 @@ export class FinanceExperience {
   async markDashboardCustomized(scope:FinanceScope):Promise<void>{
     await this.locked(scope,async(value,save)=>{if(!value.dashboardCustomized){value.dashboardCustomized=true;save();}},false);
   }
-  async selectedSource(scope:FinanceScope):Promise<{sourceId:string}>{
-    return this.locked(scope,async(value,_save,sources)=>{if(!sources.some(source=>source.id===value.sourceId&&source.available))throw new Error('finance_source_unavailable');return {sourceId:value.sourceId};});
+  async selectedSource(scope:FinanceScope):Promise<FinanceDataSelection>{
+    return this.locked(scope,async(value)=>this.selection(scope,value),false);
   }
   async feeds(scope:FinanceScope):Promise<import('../../shared/finance-feeds').FinanceFeedId[]>{
-    return this.locked(scope,async(value)=>{if(value.consent?.version!==FINANCE_NOTICE_VERSION)throw new Error('finance_consent_required');return [...value.enabledFeedIds];},false);
+    return this.locked(scope,async(value)=>{if(value.consent?.version!==FINANCE_NOTICE_VERSION)throw new Error('finance_consent_required');if(!(await financeBuiltinPlugin().status(scope,FINANCE_NOTICE_VERSION)).ready)throw new Error('finance_plugin_activation_required');scope.assertCurrent();return [...value.enabledFeedIds];},false);
   }
-  async consent(scope:FinanceScope):Promise<{sourceId:string}>{
-    return this.locked(scope,async(value)=>{if(value.consent?.version!==FINANCE_NOTICE_VERSION)throw new Error('finance_consent_required');return {sourceId:value.sourceId};},false);
+  async consent(scope:FinanceScope):Promise<FinanceDataSelection>{
+    return this.locked(scope,async(value)=>{if(value.consent?.version!==FINANCE_NOTICE_VERSION)throw new Error('finance_consent_required');if(!(await financeBuiltinPlugin().status(scope,FINANCE_NOTICE_VERSION)).ready)throw new Error('finance_plugin_activation_required');scope.assertCurrent();return this.selection(scope,value);},false);
   }
   async guard(scope:FinanceScope):Promise<FinanceDailyBinding|null>{
     return this.locked(scope,async(value,save,sources)=>{
@@ -139,7 +176,7 @@ export class FinanceExperience {
       const observed=await this.ports.observe(scope,value.monitoring);scope.assertCurrent();
       if(!observed.active){value.monitoring.enabled=false;value.monitoring.nextRunAt=null;save();return null;}
       const due=observed.pending||observed.nextRunAt!==null&&Date.parse(observed.nextRunAt)<=this.ports.now().getTime();
-      if(due){const access=await this.ports.access(scope);scope.assertCurrent();if(!access.monitoringAllowed||value.consent?.version!==FINANCE_NOTICE_VERSION||!sources.some(source=>source.id===value.sourceId&&source.available)){await this.stop(scope,value,save);return null;}}
+      if(due){const access=await this.ports.access(scope);scope.assertCurrent();if(!access.monitoringAllowed||value.consent?.version!==FINANCE_NOTICE_VERSION||!this.dailySourcesAvailable(scope,value,sources)||!(await financeBuiltinPlugin().status(scope,FINANCE_NOTICE_VERSION)).ready){await this.stop(scope,value,save);return null;}}
       const last=observed.lastSentAt??value.monitoring.lastSentAt;
       if(observed.nextRunAt!==value.monitoring.nextRunAt||last!==value.monitoring.lastSentAt){value.monitoring.nextRunAt=observed.nextRunAt;value.monitoring.lastSentAt=last;save();}
       return {oneId:value.monitoring.oneId,checkinId:value.monitoring.checkinId,commandId:value.monitoring.commandId};
@@ -151,6 +188,6 @@ function experience(){return singleton??=new FinanceExperience(userDataPath('fin
 export function financeExperience(scope:FinanceScope,request:FinanceExperienceRequest):Promise<FinanceExperienceState>{return experience().request(scope,request);}
 export function guardFinanceDailyBriefing(scope:FinanceScope):Promise<FinanceDailyBinding|null>{return experience().guard(scope);}
 
-export function requireFinanceConsent(scope:FinanceScope):Promise<{sourceId:string}>{return experience().consent(scope);}
-export function financeSelectedDataSource(scope:FinanceScope):Promise<{sourceId:string}>{return experience().selectedSource(scope);}
+export function requireFinanceConsent(scope:FinanceScope):Promise<FinanceDataSelection>{return experience().consent(scope);}
+export function financeSelectedDataSource(scope:FinanceScope):Promise<FinanceDataSelection>{return experience().selectedSource(scope);}
 export function admitFinanceDailyBriefing(scope:FinanceScope,binding:FinanceDailyBinding,runId:string):Promise<void>{return experience().admit(scope,binding,runId);}

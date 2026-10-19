@@ -1,6 +1,6 @@
 .report{width:min(100%,960px);margin:0 auto;padding:40px clamp(20px,5vw,56px) 56px;border:1px solid var(--paper-edge);border-radius:12px;background:var(--paper);color:var(--ink);min-width:0;-webkit-font-smoothing:antialiased}
 .header{padding:26px 0;border-top:3px solid var(--accent);border-bottom:1px solid var(--paper-edge);margin-bottom:32px}
-.header h1{font-size:clamp(28px,3.5vw,40px);font-weight:600;letter-spacing:-.035em;line-height:1.35;margin:0;max-width:100%;text-wrap:balance;overflow-wrap:break-word}
+.header h1{font-size:clamp(28px,3.5vw,40px);font-weight:600;letter-spacing:-.035em;line-height:1.35;margin:0;max-width:100%;text-wrap:balance;overflow-wrap:break-word;word-break:auto-phrase}
 .body{display:grid;gap:36px;min-width:0}
 .section,.chartSection{min-width:0}
 .section h2,.chartSection h2{font-size:20px;font-weight:600;line-height:1.4;margin:0 0 18px;letter-spacing:-.015em;text-wrap:balance;overflow-wrap:break-word}

@@ -3,6 +3,8 @@ name: workspace
 description: Edit Finance dashboards and report prose using revision-checked typed operations.
 ---
 
+Inside Agentlas Finance, use the corresponding short tool names from the current menu. Outside Finance, describe and call the namespaced `finance.*` harness operations below. The host validates the same account and source boundaries.
+
 # Dashboard and report workflow
 
 Read `finance.load`, then describe `finance.apply` for the complete operation schema. Resolve IDs from the workspace, construct only the requested canonical operations, and pass its `expectedRevision`. Direct controls and these operations share the same persisted workspace. On a revision conflict reload and reconcile the intended change before retrying.

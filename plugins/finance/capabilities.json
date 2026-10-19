@@ -1,0 +1,65 @@
+{
+  "schema": "agentlas.finance.capabilities/v1",
+  "plugin": "finance",
+  "apiVersion": 1,
+  "native": {
+    "apiVersion": 1,
+    "entry": "runtime/index.cjs",
+    "modules": [
+      "research",
+      "portfolio",
+      "planning",
+      "report"
+    ]
+  },
+  "pureActions": [
+    "planning",
+    "valuation",
+    "planning.artifact",
+    "portfolio.artifact",
+    "compute",
+    "compute.artifact"
+  ],
+  "stdioTools": [
+    "finance_plan",
+    "finance_valuation",
+    "finance_compute"
+  ],
+  "hostBoundModules": [
+    "research",
+    "portfolio",
+    "report"
+  ],
+  "hostBoundCapabilities": [
+    "authenticated-source-access",
+    "vision-extraction",
+    "workspace-storage",
+    "monitoring"
+  ],
+  "boundaries": {
+    "network": false,
+    "fileWrites": false,
+    "trading": false,
+    "credentials": false,
+    "requestBytes": 4194304,
+    "resultBytes": 8388608
+  },
+  "valuation": {
+    "input": "supplied workspace and compatible provider refresh observations",
+    "implicitFX": false,
+    "costBasisFallback": false
+  },
+  "planning": {
+    "assumptions": "explicit input",
+    "guaranteedReturns": false
+  },
+  "compute": {
+    "standaloneProvenance": "scenario",
+    "verifiedObservedInput": "native host only",
+    "algorithms": [
+      "allocation",
+      "forecast",
+      "option"
+    ]
+  }
+}

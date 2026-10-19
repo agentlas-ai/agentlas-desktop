@@ -866,8 +866,8 @@ const PORTS: PortDefinition[] = [
       const known = new Set(items.map((item) => item.id));
       const unknown = [...attach, ...revoke].filter((id) => !known.has(id));
       if (unknown.length) return refused("capability_ref_unknown", `unknown: ${unknown.slice(0, 5).join(", ")}`);
-      // Owner 2026-10-14: product runs use only Agentlas's own skills, plugins and connectors; a runtime's personal items
-      // are never switched on. Refuse them by name instead of letting the switch throw.
+
+
       const personal = items.filter((item) => item.source !== "agentlas" && [...attach, ...revoke].includes(item.id)).map((item) => item.id);
       if (personal.length) return refused("personal_runtime", `personal runtime items are not used by Agentlas runs: ${personal.slice(0, 5).join(", ")}`);
       if (ctx.dryRun) return refused("dry_run");
@@ -1030,8 +1030,8 @@ const PORTS: PortDefinition[] = [
     handler: async (args, ctx) => {
       if (ctx.dryRun) return refused("dry_run");
       try {
-        // The operation's input arrives as `args` (exact key wins) or `input`, the word its input_schema reads as. Dev
-        // 2026-10-17 run8 (Haiku automation): {operation:"automations.listRuns", input:{id}} ran with no id and answered 0 runs.
+
+
         const appArgs = args.args !== undefined ? args.args : args.input;
         const result = await (await import("../app-control/service")).appControlCall({ ownerTurn: await harnessOwnerTurn(ctx) }, { operation: args.operation, args: appArgs });
         return ok(result);
@@ -1181,11 +1181,11 @@ async function harnessOwnerTurn(ctx: HarnessCallContext): Promise<boolean> {
 }
 
 /**
- * A required "<x>Id" also arrives as "<x>", or as "id" when it is the operation's only required id. Production 2026-10-17
- * (Yotube room, 1.3.61): skill.read {skill:"motion-explainer-video-producer"} and tool.describe {id:"provider.request"} were
- * refused as arguments_missing although the value was right there, and each refusal cost the model another turn. The
- * same alias rule as the operation key itself (turn-tools/control-server.ts harnessId). An exact key always wins, and only
- * a non-empty string is carried over.
+
+
+
+
+
  */
 function withRequiredIdAliases(required: readonly string[], args: Record<string, unknown>): Record<string, unknown> {
   const text = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
@@ -1215,8 +1215,8 @@ export async function callHarnessPort(operationId: string, rawArgs: Record<strin
     outcome = refused("operation_failed", error instanceof Error ? error.message.slice(0, 200) : "unknown error");
   }
   const receiptId = port.kind === "query" ? `hr_${randomUUID()}` : await appendReceipt({ operationId, status: outcome.status, chatId: ctx.chatId, runId: ctx.runId });
-  // A file this call wrote waits for the run's invocation, which seals it into One Outputs at its next tool completion
-  // (A/B 2026-10-18: document.save and media.image.generate paths never reached the rail). The result keeps its shape.
+
+
   if (outcome.status === "ok" && outcome.produced?.length && !ctx.dryRun) recordRunProducedFiles(ctx.runId, operationId, outcome.produced);
   return outcome.status === "ok"
     ? { ...base, status: "ok", ...(outcome.financeReceipt ? { financeReceipt: outcome.financeReceipt } : {}), data: outcome.data, receiptId }
@@ -1249,18 +1249,23 @@ export async function searchHarness(query: string, kind?: HarnessItemKind): Prom
     for (const feature of FEATURE_MODULES) if (matches(query, feature.featureId, ...feature.surfaces)) out.push({ id: `feature:${feature.featureId}`, kind: "feature", name: feature.featureId, description: `surfaces: ${feature.surfaces.join(", ") || "-"}` });
   }
   if (want("operation")) for (const port of PORTS) if (matches(query, port.operationId, port.purpose)) out.push({ id: port.operationId, kind: "operation", name: port.operationId, description: `${port.purpose}${port.handler ? "" : " (unavailable)"}` });
-  // The app's own operations answer through app.operations / app.call, whose purpose names no domain. The catalog paths
-  // that answer the query rank those two entries, and they lead the candidates so a tie goes to the app; nothing new is
-  // shown (dev 2026-10-18 O6: "automation run log schedule" returned skills and science tools, never automations.*, and
-  // the Light-lane worker gave up "no registration tool").
-  const appPaths = want("operation") ? await appOperationPaths(query) : [];
+
+
+
+
+
+
+  const appPaths = await appOperationPaths(query);
   if (appPaths.length) for (const id of ["app.call", "app.operations"]) {
     const port = PORT_BY_ID.get(id);
     if (!port) continue;
     const at = out.findIndex((item) => item.id === id);
     if (at >= 0) out.splice(at, 1);
-    // A Korean query shares no word with the English port text and would drop the entry: its own words rank it (English queries unchanged).
-    out.unshift({ id: port.operationId, kind: "operation", name: port.operationId, description: `${port.purpose}${port.handler ? "" : " (unavailable)"}`, rankTerms: /[^\x00-\x7f]/.test(query) ? [...appPaths, query.toLowerCase()] : appPaths });
+
+
+
+
+    out.unshift({ id: port.operationId, kind: "operation", name: port.operationId, description: `${port.purpose}${port.handler ? "" : " (unavailable)"} Operations matching this search: ${appPaths.slice(0, 8).join(", ")}.`, rankTerms: /[^\x00-\x7f]/.test(query) ? [...appPaths, query.toLowerCase()] : appPaths });
   }
   // Best match first across every kind (search-rank.ts); the fixed kind order cut the answering operation off (r07).
   const { rankHarnessItems } = await import("./search-rank");

@@ -58,10 +58,10 @@ export function initializeAppRuntimeCoordinator(): { appInstanceId: string; reco
   let exclusive = false;
   try { assertExclusive(); exclusive = true; }
   catch { /* A non-exclusive host may own new work, but cannot adopt old work. */ }
-  if (exclusive) recoveredRunIds = recoverInterruptedDesktopLongRunsAtStartup(appInstanceId, assertExclusive);
   if (exclusive) {
     // The same lock proves the Desktop that held these run leases is gone. Left in place they refuse every later
-    // turn of their chat (invocation_cleanup_pending), including the Goal resumes recovered just above.
+    // turn of their chat (invocation_cleanup_pending). Release before recovery so dormant runs can settle
+    // attempts only when their exact previous Desktop invocation has durably relinquished custody.
     try {
       const released = invocationRunOwners.releaseAbandoned("desktop", invocationProcessOwner().ownerId);
       if (released.length > 0) {
@@ -71,6 +71,7 @@ export function initializeAppRuntimeCoordinator(): { appInstanceId: string; reco
       console.error("[invocation] abandoned run lease release failed", error);
     }
   }
+  if (exclusive) recoveredRunIds = recoverInterruptedDesktopLongRunsAtStartup(appInstanceId, assertExclusive);
   initialized = true;
   admissionOpen = true;
   /*

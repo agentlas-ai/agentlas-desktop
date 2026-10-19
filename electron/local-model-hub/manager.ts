@@ -30,6 +30,7 @@ import { LocalEngineInstaller } from "./engine-installer";
 import { observeLocalProcessIdentity, matchesLocalProcessIdentity, terminateMatchedLocalProcess } from "./platform";
 import { estimateLocalModelFit, observeLocalHardware } from "./hardware";
 import { parseEngineLoadLog } from "./acceleration";
+import { registerApprovalLineageIfLive } from "../runtime/linked-abort";
 
 interface PersistedHubState {
   schemaVersion: 1;
@@ -1153,6 +1154,8 @@ export class LocalModelHubManager {
   private beginActiveInference(parentSignal?: AbortSignal): { signal: AbortSignal; finish: () => void } {
     const activeId = randomUUID();
     const controller = new AbortController();
+    // The runner receives this child, not the caller's signal: it carries the same native approval lineage.
+    registerApprovalLineageIfLive(parentSignal, controller.signal);
     let finishDone!: () => void;
     const done = new Promise<void>((resolveDone) => { finishDone = resolveDone; });
     const abortFromParent = () => controller.abort();
@@ -1246,9 +1249,9 @@ export class LocalModelHubManager {
       if (strictJson === "failed") reasonCodes.push("strict_json_probe_failed");
     }
     if (selection.toolUse) {
-      // 강제(tool_choice)로 한 도구를 부르게 하면 0.6B 도 "확인됨"이 된다 — 실측 2026-09-13 에서 그 모델은
-      // 실제 과제 4개 중 2개에서 엉뚱한 도구를 골랐다(4B 는 4/4). 그래서 강제 없이 도구 여러 개를 주고
-      // 과제에 맞는 도구를 올바른 인자로 고르는지 본다. 이것이 채팅에서 실제로 겪는 일이다.
+
+
+
       try {
         const passed = await Promise.all(TOOL_USE_PROBES.map(async (probe) => {
           const response = await complete({

@@ -10,7 +10,7 @@ import { readOneChatHistoryPage, mergeOneChatHistory, oneChatHistoryCursor } fro
 import { isInterruptedPartial } from "@shared/interrupted-partial";
 import { oneHistoryWindowStart, revealOneHistoryPage } from "@/lib/one-history-window";
 import { parseChatFileMessage } from "@/lib/chat-files";
-import { projectOneActivityFromLedger } from "@/lib/one-activity";
+import { projectLatestRunArtifacts } from "@/lib/one-chat-outputs";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import type { OneActivityArtifact } from "@/lib/one-activity";
 import { TaskSidePanel } from "../workspace/TaskSidePanel";
@@ -61,6 +61,12 @@ export function OneSplitPane({
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [railOpen, setRailOpen] = useState(false);
+  // The panel reports an open state with nothing to draw (no view, file or worker); the column is then not reserved
+  // (the same rule as the full One view's outputRailTakesSpace).
+  const [railEmpty, setRailEmpty] = useState(false);
+  // Counts the person's presses that open the panel; a panel with nothing to show answers with its activity view
+  // (TaskSidePanel openRequest), the same as the full One view's Outputs button.
+  const [railOpenRequest, setRailOpenRequest] = useState(0);
   const [artifacts, setArtifacts] = useState<OneActivityArtifact[]>([]);
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const chatIdRef = useRef(chatId);
@@ -96,7 +102,7 @@ export function OneSplitPane({
     scrollAnchorRef.current = null;
     setMessages(null); setOldestVisibleId(null); setOlderCursor(null); setHasOlder(false);
     setLoadingOlder(false); setHistoryError(false); setDraft(""); setSending(false);
-    setRailOpen(false); setArtifacts([]);
+    setRailOpen(false); setRailEmpty(false); setArtifacts([]);
   }, [chatId]);
 
   useEffect(() => {
@@ -127,11 +133,11 @@ export function OneSplitPane({
         }).finally(() => { loading = false; });
     };
     load();
-    /*
-     * 옆 칸에서 답이 자라는 동안에만 자주 본다. 칸 셋이 1.5초마다 기록 전체를
-     * 다시 읽어 화면이 눈에 띄게 굼떴다(오너 지적 2026-08-24). 조용한 칸은
-     * 거의 묻지 않고, 창이 뒤로 가 있으면 아예 묻지 않는다.
-     */
+    
+
+
+
+
     const tick = () => {
       if (document.visibilityState === "hidden") return;
       load();
@@ -176,31 +182,30 @@ export function OneSplitPane({
 
   // 이 칸이 만든 것들. 옆 칸이 자기 사이드바를 가지려면 자기 대화의 원장을
   // 스스로 읽어야 한다 — 지금 보고 있는 대화의 산출물을 빌려 쓰면 거짓이 된다.
+  // 전체 One 화면과 같은 것을 보인다: 그 대화의 가장 최근 run 하나(OneShell 이 latestReceipt 의 run 을 500개 이벤트로 투영한다).
+  // 여러 run 의 이벤트를 이어 붙여 한 번에 투영하면 첫 종료 이벤트에서 봉인돼 가장 오래된 run 의 산출물만 남는다.
   useEffect(() => {
     let cancelled = false;
     const api = ipc();
-    // 접혀 있는 사이드바 때문에 원장을 읽지 않는다. 열 때 처음 읽는다.
-    if (!api || !railOpen) return;
+    if (!api) return;
     let loading = false;
     const load = () => {
       if (cancelled || loading) return;
       loading = true;
       void api.runLedger
-        .chatTimeline(chatId, { maxRuns: 4, eventsPerRun: 200 })
+        .chatTimeline(chatId, { maxRuns: 1, eventsPerRun: 500 })
         .then((runs: unknown) => {
           if (cancelled || chatIdRef.current !== chatId || !Array.isArray(runs)) return;
-          const events = runs.flatMap((run: { events?: unknown }) => (Array.isArray(run?.events) ? run.events : []));
-          if (events.length === 0) { setArtifacts([]); return; }
-          try {
-            setArtifacts(projectOneActivityFromLedger(events as never).artifacts);
-          } catch {
-            setArtifacts([]);
-          }
+          setArtifacts(projectLatestRunArtifacts(runs));
         })
         .catch(() => { if (!cancelled) setArtifacts([]); })
         .finally(() => { loading = false; });
     };
     load();
+    // A folded panel reads once, not on a timer. The panel must already know whether this chat has outputs when the
+    // person presses Outputs: only a pane with nothing to show answers with its activity view (TaskSidePanel
+    // openRequest), as the full One view does with the outputs it already holds.
+    if (!railOpen) return () => { cancelled = true; };
     const timer = window.setInterval(() => {
       if (document.visibilityState !== "hidden") load();
     }, running ? 8000 : 60000);
@@ -268,7 +273,10 @@ export function OneSplitPane({
           data-on={railOpen ? "true" : "false"}
           aria-pressed={railOpen}
           aria-label={locale === "ko" ? "이 칸의 산출물" : "Outputs of this pane"}
-          onClick={() => setRailOpen((value) => !value)}
+          onClick={() => {
+            if (!railOpen) setRailOpenRequest((request) => request + 1);
+            setRailOpen((value) => !value);
+          }}
         >
           {locale === "ko" ? "결과" : "Outputs"}
           {artifacts.length > 0 && <span className={styles.splitPaneRailCount}>{artifacts.length}</span>}
@@ -310,8 +318,8 @@ export function OneSplitPane({
           if (isHousekeepingHostNotice(normalizeChatHostNotice(message.role, message.hostNotice))) return null;
           if (message.role === "system") {
             const notice = normalizeChatHostNotice(message.role, message.hostNotice);
-            // A system row without a typed notice is a host-written harness request (Goal resume, continuation): it is
-            // not drawn, like in the full One view. Interrupted answers below are internal states too (owner 2026-10-14).
+
+
             return notice ? <HostContinuationNotice key={message.id} text={text} locale={locale === "ko" ? "ko" : "en"} notice={notice} /> : null;
           }
           if (message.role === "assistant" && isInterruptedPartial(message.text ?? "")) return null;
@@ -330,13 +338,15 @@ export function OneSplitPane({
           );
         })}
       </div>
-        <div className={railOpen ? styles.splitPaneRail : undefined}>
+        <div className={railOpen && !railEmpty ? styles.splitPaneRail : undefined}>
           <TaskSidePanel
             items={artifacts}
             locale={locale}
             visible={railOpen}
             onClose={() => setRailOpen(false)}
             onRequestOpen={() => setRailOpen(true)}
+            onEmptyChange={setRailEmpty}
+            openRequest={railOpenRequest}
             screenChatId={chatId}
             browserScopeKey={chatId}
           />

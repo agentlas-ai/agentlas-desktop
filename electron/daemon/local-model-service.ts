@@ -1,6 +1,7 @@
 import path from "node:path";
 import { LocalModelHubManager, type LocalModelHubManagerOptions } from "../local-model-hub/manager";
 import type { LocalModelHubControlPort, LocalModelHubRuntimePort } from "../local-model-hub/ports";
+import { registerApprovalLineageIfLive } from "../runtime/linked-abort";
 import type { Runner } from "../runtime/runner";
 
 export interface DaemonLocalModelStatus {
@@ -155,7 +156,11 @@ export function createDaemonLocalModelService(options: {
       runnerPromise ??= import("../local-model-hub/runner").then(module => module.createManagedLocalModelRunner(owner));
       const runner = await runnerPromise;
       assertAdmission();
-      return runner({ ...request, signal: signal(request.signal) }, events);
+      // The composite is a new signal object, and native approval lineage follows signal identity: without this the run's
+      // tool asks are refused native_approval_signal_unregistered (agentlas-local, daemon-owned turns).
+      const runSignal = signal(request.signal);
+      registerApprovalLineageIfLive(request.signal, runSignal);
+      return runner({ ...request, signal: runSignal }, events);
     }),
   };
 

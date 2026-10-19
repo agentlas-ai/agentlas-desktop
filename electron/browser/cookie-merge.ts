@@ -1,12 +1,12 @@
-/*
- * 쿠키 가져오기의 "누적" 규칙 — 순수 판정만 모아 둔 곳.
- *
- * 왜 따로 떼었나 (오너 신고 2026-09-14: "가져올 때마다 초기화해서 덮어쓴다"):
- * 가져오기는 **합치기**여야 한다. 같은 쿠키를 두 번 가져오면 한 줄, 다른 쿠키를 가져오면
- * 둘 다 남아야 한다. 그런데 이 판정이 SQL 문자열 사이에 흩어져 있으면 아무도 값으로
- * 확인할 수 없고, 문장 대조 게이트는 제품이 나아질 때 거짓말을 한다. 그래서 결정만
- * 여기로 꺼내고, DB 쪽은 그 결정을 실행만 한다. 이 파일은 아무것도 import 하지 않는다.
- */
+
+
+
+
+
+
+
+
+
 
 /** Chromium 쿠키 행의 진짜 고유키 후보 — 이 조합이 저장소의 UNIQUE 제약이다. */
 export const COOKIE_IDENTITY_COLUMNS = [
@@ -40,6 +40,38 @@ export function cookieFreshness(row: Record<string, unknown> | null | undefined)
 }
 
 /**
+
+
+
+
+
+
+
+
+
+
+
+
+
+ */
+export function isSourceCookieFresher(
+  incoming: number | null | undefined,
+  existing: number | null | undefined,
+  gap = 0,
+): boolean {
+  const known = (value: number | null | undefined) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0);
+  return known(incoming) > known(existing) + gap;
+}
+
+/** 초 단위로 읽은 만료 시각을 "다르다"고 보는 최소 차이. 같은 쿠키의 옮김 반올림을 갱신으로 읽지 않는다. */
+export const COOKIE_EXPIRY_TOLERANCE_SECONDS = 1;
+
+/** 초 단위 만료 시각. 세션 쿠키(없음·0·음수)와 깨진 값은 null — 신선도를 비교할 수 없다. */
+export function persistentCookieExpiry(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
  * 한 쿠키 줄을 어떻게 쓸 것인가.
  *
  *  - 목적지에 없으면 넣는다(insert) — 다른 사이트·다른 이름의 쿠키는 서로를 지우지 않는다.
@@ -58,7 +90,7 @@ export function decideCookieWrite(input: {
   if (!input.hasExisting) return "insert";
   if (!input.destinationReadable) return "replace";
   if (!input.hasFreshnessColumns) return "keep";
-  return input.incomingFreshness > input.existingFreshness ? "replace" : "keep";
+  return isSourceCookieFresher(input.incomingFreshness, input.existingFreshness) ? "replace" : "keep";
 }
 
 export type CookieStoreLayout = "legacy" | "network";
@@ -95,29 +127,41 @@ export function resolveCookieStoreLayout(input: {
 /**
  * One/Work 세션(Electron 파티션)으로 옮길 때의 판정.
  *
- * 자동 갱신은 이미 살아 있는 세션을 덮지 않는다(사용자가 그 창에서 직접 로그인했을 수 있다).
- * 그러나 **사용자가 방금 "가져오기"를 누른 경우**에는 가져온 값이 이겨야 한다 — 그러지 않으면
+ * 자동 갱신은 이미 살아 있는 세션을 함부로 덮지 않는다(사용자가 그 창에서 직접 로그인했을 수 있다).
+ * 그러나 **원본이 더 늦게 만료되는**(더 새로 발급된) 쿠키는 갱신한다 — 예전에는 "있으면 보존"만 봐서
+ * 평소 크롬이 회전시킨 로그인 쿠키가 파티션에 영영 닿지 않았다. 신선도 비교는 전용 브라우저(CDP)·SQL 길과
+ * 같은 isSourceCookieFresher 하나로 한다. 목적지가 같거나 더 새것이면 절대 덮지 않는다.
+ * 어느 한쪽이 세션 쿠키(만료 없음)면 신선도를 비교할 수 없으므로 보존한다.
+ * **사용자가 방금 "가져오기"를 누른 경우**에는 가져온 값이 이겨야 한다 — 그러지 않으면
  * 낡은 쿠키가 남아 "가져왔는데 여전히 로그아웃"이 된다.
  */
 export function decideNativeCookieWrite(input: {
   hasExisting: boolean;
   explicitImport: boolean;
+  /** 원본 쿠키의 만료(초). 세션 쿠키·모르면 null/undefined — 비교하지 않는다. */
+  incomingExpires?: number | null;
+  /** 파티션에 이미 있는 같은 쿠키의 만료(초). 세션 쿠키·모르면 null/undefined — 비교하지 않는다. */
+  existingExpires?: number | null;
 }): "write" | "preserve" {
   if (!input.hasExisting) return "write";
-  return input.explicitImport ? "write" : "preserve";
+  if (input.explicitImport) return "write";
+  const incoming = persistentCookieExpiry(input.incomingExpires);
+  const existing = persistentCookieExpiry(input.existingExpires);
+  if (incoming === null || existing === null) return "preserve";
+  return isSourceCookieFresher(incoming, existing, COOKIE_EXPIRY_TOLERANCE_SECONDS) ? "write" : "preserve";
 }
 
 /**
- * 자동 갱신이 전용 브라우저(CDP)에 쿠키를 **다시 넣을지** 판정한다.
- *
- * ★오너 신고 2026-09-28 "왜 자꾸 로그아웃되냐 — 크롬 본판이나 브라우저나 다".
- *   macOS 경로는 SQL 병합 판정(decideCookieWrite)을 거친 뒤에도 CDP `addCookies` 로 원본의
- *   **모든** 쿠키를 무조건 덮었다. 전용 브라우저가 그 사이 회전시킨 로그인 토큰(구글 PSIDTS 등)이
- *   평소 크롬의 낡은 값으로 되돌아가고, 같은 세션이 두 브라우저에서 엇갈린 토큰으로 쓰인다 —
- *   사이트의 세션 도용 방어가 반응할 수 있는 모양이다(사이트 쪽 판정은 미확인). 자동 갱신은 전용 브라우저에 **없거나**, 원본이
- *   **더 늦게 만료되는**(더 새로 발급된) 쿠키만 넣는다. 사용자가 방금 누른 가져오기는 원본이 이긴다.
- *
- * 만료 값은 초 단위이며 세션 쿠키는 없음(undefined) 또는 음수다.
+
+
+
+
+
+
+
+
+
+
  */
 export function decideRuntimeCookieFeed(input: {
   explicitImport: boolean;
@@ -127,37 +171,80 @@ export function decideRuntimeCookieFeed(input: {
 }): "feed" | "keep" {
   if (input.explicitImport) return "feed";
   if (input.existingExpires === null) return "feed";
-  const incoming = typeof input.incomingExpires === "number" && input.incomingExpires > 0 ? input.incomingExpires : 0;
-  const existing = input.existingExpires > 0 ? input.existingExpires : 0;
-  // 세션 쿠키(0)끼리이거나 전용 쪽이 같거나 더 새것이면 살아 있는 쪽을 지킨다.
-  return incoming > existing ? "feed" : "keep";
+  // An existing session/unknown expiry cannot be ordered against a persistent source.
+  const incoming = persistentCookieExpiry(input.incomingExpires);
+  const existing = persistentCookieExpiry(input.existingExpires);
+  if (incoming === null || existing === null) return "keep";
+  return isSourceCookieFresher(incoming, existing, COOKIE_EXPIRY_TOLERANCE_SECONDS) ? "feed" : "keep";
 }
 
 /**
- * 한 번에 넣을 쿠키를 **로그인 묶음 단위로** 고른다(자동 갱신 전용 판정, 사용자가 누른 가져오기는
- * 원본이 전부 이긴다).
- *
- * ★오너 신고 "왜 자꾸 로그아웃되냐" (09-27~) — 실측 2026-09-29(오너 기기, 이름·도메인·시각만):
- *   전용 크롬의 .youtube.com 에는 __Secure-3PSID·3PAPISID·1PSIDTS·3PSIDTS·3PSIDCC 만 있고
- *   SID·HSID·SSID·APISID·SAPISID·__Secure-1PSID·1PAPISID·LOGIN_INFO 가 **없었다**. 평소 크롬(원본)에는
- *   전부 있다. 같은 저장소의 .google.com 은 __Secure-1PSID 가 21:27:30 발급, SID·HSID·PSIDTS 는
- *   21:45:18 투입 — 한 로그인의 쿠키가 두 세대로 섞여 있다. 자동화가 선 로그인 벽 9건은 전부
- *   youtube.com/signin → accounts.google.com accountchooser 였다(run_events 09-27~29).
- *   원인은 쿠키 **한 줄씩** 내리던 판정(decideRuntimeCookieFeed·decideNativeCookieWrite): 목적지에
- *   묶음 일부만 남아 있으면 "있는 줄은 지키고 없는 줄만 넣기" 가 되어 두 세션을 섞거나, 반쪽 묶음을
- *   "살아 있는 세션"으로 여겨 영영 채우지 않는다. 섞인·반쪽 로그인은 사이트가 로그인으로 받지 않는다.
- *
- * 규칙(로그인 쿠키 이름을 아는 묶음만; 모르는 사이트는 perCookie 그대로):
- *   - 원본에 그 묶음의 로그인 쿠키가 없으면 → 줄 단위 판정(옮길 로그인이 없다).
- *   - 목적지가 원본이 가진 로그인 쿠키 이름을 **모두** 갖고 있으면 → 묶음 전체를 지킨다(아무것도
- *     넣지 않는다). 목적지 쪽이 그 사이 회전한 살아 있는 세션일 수 있다 — 섞지 않는다.
- *   - 하나라도 빠졌으면(반쪽·없음) → 원본의 그 묶음 쿠키를 **전부** 넣는다(한 세대로 맞춘다).
- * 묶음 = 로그인을 함께 발급하는 등록 가능 도메인들(youtube.com + google.com 은 한 묶음).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
  */
 export interface SessionGroupCookie {
   domain: string;
   name: string;
   path: string;
+  /** 만료(초). 세션 쿠키·모르면 없음(null/undefined/≤0) — 묶음 신선도 비교에서 빠진다. */
+  expires?: number | null;
+}
+
+export type SessionGroupFreshness = "source-fresher" | "destination-fresher" | "conflict" | "same-or-unknown";
+
+/**
+ * 로그인 묶음 하나의 신선도. incoming 은 그 묶음에 속한 원본 쿠키만 준다.
+ * 같은 (호스트, 이름, 경로)를 양쪽에서 찾아 만료가 모두 있는 것만 견준다(isSourceCookieFresher 와 같은 규칙).
+ *   - source-fresher: 원본이 더 늦은 줄이 있고, 목적지가 더 늦은 줄은 없다 → 묶음 갱신.
+ *   - destination-fresher / conflict: 목적지가 더 늦은 줄이 있다(원본도 더 늦은 줄이 있으면 conflict) → 지킨다.
+ *   - same-or-unknown: 같거나 비교할 줄이 없다 → 지킨다.
+ */
+export function compareSessionGroupFreshness(
+  incoming: readonly SessionGroupCookie[],
+  existing: readonly SessionGroupCookie[],
+): SessionGroupFreshness {
+  const host = (value: string) => value.replace(/^\./u, "").toLowerCase();
+  const key = (cookie: SessionGroupCookie) => `${host(cookie.domain)}\u0000${cookie.name}\u0000${cookie.path}`;
+  // 목적지에 같은 줄이 둘이면(호스트 전용/도메인 쿠키) 더 늦은 쪽으로 견줘 되돌림을 막는다.
+  const destination = new Map<string, number>();
+  for (const cookie of existing) {
+    const expires = persistentCookieExpiry(cookie.expires);
+    if (expires === null) continue;
+    destination.set(key(cookie), Math.max(destination.get(key(cookie)) ?? 0, expires));
+  }
+  let sourceFresher = 0;
+  let destinationFresher = 0;
+  for (const cookie of incoming) {
+    const incomingExpires = persistentCookieExpiry(cookie.expires);
+    const existingExpires = destination.get(key(cookie));
+    if (incomingExpires === null || existingExpires === undefined) continue;
+    if (isSourceCookieFresher(incomingExpires, existingExpires, COOKIE_EXPIRY_TOLERANCE_SECONDS)) sourceFresher += 1;
+    else if (isSourceCookieFresher(existingExpires, incomingExpires, COOKIE_EXPIRY_TOLERANCE_SECONDS)) destinationFresher += 1;
+  }
+  if (destinationFresher > 0) return sourceFresher > 0 ? "conflict" : "destination-fresher";
+  return sourceFresher > 0 ? "source-fresher" : "same-or-unknown";
 }
 
 export function planSessionGroupFeed<T extends SessionGroupCookie>(input: {
@@ -171,8 +258,14 @@ export function planSessionGroupFeed<T extends SessionGroupCookie>(input: {
   sessionNamesFor: (host: string) => readonly string[] | null;
   /** 묶음 밖(모르는 사이트)이거나 원본에 로그인이 없는 묶음의 줄 단위 판정. */
   perCookie: (cookie: T) => "feed" | "keep";
-}): { feed: T[]; keptGroups: string[]; replacedGroups: string[] } {
-  if (input.explicitImport) return { feed: [...input.incoming], keptGroups: [], replacedGroups: [] };
+  /**
+   * 묶음 신선도를 견줄 때 쓸 원본 쿠키 전체. 호출이 등록 가능 도메인별로 쪼개져 들어오면(google.com 한 번,
+   * youtube.com 한 번) 한 묶음이 도메인마다 따로 판정돼 한쪽만 갱신되는 두 세대가 생긴다 — 같은 묶음의 다른
+   * 도메인 줄까지 함께 보고 한 번에 판정한다. 없으면 incoming 만 본다. 무엇을 넣을지는 여전히 incoming 만이다.
+   */
+  freshnessContext?: readonly SessionGroupCookie[];
+}): { feed: T[]; keptGroups: string[]; replacedGroups: string[]; refreshedGroups: string[]; conflictGroups: string[] } {
+  if (input.explicitImport) return { feed: [...input.incoming], keptGroups: [], replacedGroups: [], refreshedGroups: [], conflictGroups: [] };
   const host = (value: string) => value.replace(/^\./u, "").toLowerCase();
   const loginNames = (cookies: readonly SessionGroupCookie[], group: string) => {
     const names = new Set<string>();
@@ -185,23 +278,35 @@ export function planSessionGroupFeed<T extends SessionGroupCookie>(input: {
     }
     return names;
   };
-  const decision = new Map<string, "keep-group" | "replace-group" | "per-cookie">();
+  const inGroup = (cookies: readonly SessionGroupCookie[], group: string) => cookies.filter((cookie) => input.groupOf(host(cookie.domain))?.group === group);
+  const decision = new Map<string, "keep-group" | "replace-group" | "refresh-group" | "per-cookie">();
+  const conflicts = new Set<string>();
   for (const cookie of input.incoming) {
     const group = input.groupOf(host(cookie.domain))?.group;
     if (!group || decision.has(group)) continue;
-    const source = loginNames(input.incoming, group);
+    const source = loginNames(input.freshnessContext ?? input.incoming, group);
     if (source.size === 0) { decision.set(group, "per-cookie"); continue; }
     const destination = loginNames(input.existing, group);
-    decision.set(group, [...source].every((name) => destination.has(name)) ? "keep-group" : "replace-group");
+    if (![...source].every((name) => destination.has(name))) { decision.set(group, "replace-group"); continue; }
+    // 온전한 묶음도 원본이 더 새것이면 통째로 갱신한다. 목적지가 더 새것인 줄이 있으면 지킨다.
+    const freshness = compareSessionGroupFreshness(inGroup(input.freshnessContext ?? input.incoming, group), inGroup(input.existing, group));
+    if (freshness === "conflict") conflicts.add(group);
+    decision.set(group, freshness === "source-fresher" ? "refresh-group" : "keep-group");
   }
   const feed: T[] = [];
   for (const cookie of input.incoming) {
     const group = input.groupOf(host(cookie.domain))?.group;
     const verdict = group ? decision.get(group) : undefined;
     if (verdict === "keep-group") continue;
-    if (verdict === "replace-group") { feed.push(cookie); continue; }
+    if (verdict === "replace-group" || verdict === "refresh-group") { feed.push(cookie); continue; }
     if (input.perCookie(cookie) === "feed") feed.push(cookie);
   }
   const groups = (wanted: string) => [...decision].filter(([, verdict]) => verdict === wanted).map(([group]) => group).sort();
-  return { feed, keptGroups: groups("keep-group"), replacedGroups: groups("replace-group") };
+  return {
+    feed,
+    keptGroups: groups("keep-group"),
+    replacedGroups: groups("replace-group"),
+    refreshedGroups: groups("refresh-group"),
+    conflictGroups: [...conflicts].sort(),
+  };
 }

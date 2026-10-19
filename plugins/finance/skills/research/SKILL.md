@@ -3,6 +3,8 @@ name: research
 description: Search verified asset metadata and retrieve source evidence into Finance.
 ---
 
+Inside Agentlas Finance, use the corresponding short tool names from the current menu. Outside Finance, describe and call the namespaced `finance.*` harness operations below. The host validates the same account and source boundaries.
+
 # Research workflow
 
 1. `finance.search` resolves the requested company, stock or ETF. Use the returned identity, region and coverage; similar tickers may be distinct assets. `finance.asset.add` revalidates a query and optional exact symbol before saving one unambiguous asset.

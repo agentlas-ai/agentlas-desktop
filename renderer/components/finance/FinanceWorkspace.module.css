@@ -161,3 +161,5 @@
 .chatArtifacts{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(220px,100%),1fr));gap:8px;margin-top:16px}.chatArtifacts button{padding:14px 16px;text-align:left;background:var(--paper);border:1px solid var(--paper-edge);border-radius:12px;min-width:0;color:var(--ink)}.chatArtifacts span{display:block;font-size:10px;color:var(--ink-soft);margin-bottom:5px}.chatArtifacts strong{font-size:13px;font-weight:500;line-height:20px;word-break:normal;overflow-wrap:break-word}
 
 .tabs{overflow-x:auto;overflow-y:hidden;height:54px;box-sizing:border-box;padding-bottom:0;align-items:stretch}
+.analystAuthoring{display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid var(--paper-edge);padding:8px 0;font-size:13px;color:var(--ink-soft)}
+.composerForm>div:first-child{grid-column:1/-1;grid-row:1;min-width:0}

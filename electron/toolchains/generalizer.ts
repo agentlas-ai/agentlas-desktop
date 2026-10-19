@@ -1,5 +1,7 @@
 import { composeDeclaredPrompt, registerDeclaredPromptModule, type DeclaredPromptPart } from "../runtime/prompt-order";
+import { FINANCE_SOURCE_INTEGRATION_CONTRACT, assertFinanceSourceContract, financeSourceProposalSchema, materializeFinanceSourceContract, type FinanceSourceSemanticContract } from '../../shared/finance-source-contract';
 import { randomUUID } from "node:crypto";
+import { providerOutputSchema } from "../../shared/provider-output-schema";
 import Ajv from "ajv";
 import { sha256Value } from "../../shared/graph-execution-digest";
 import { buildGraphFromBlueprint } from "../../shared/graph-blueprint";
@@ -21,7 +23,12 @@ import { currentUiLocale } from "../ui-locale";
 import { addToolchainVersion, createToolchainAsset, getToolchainAsset, listToolchainAssets, matchingToolchainVersion, toolchainSchemaProblems } from "./assets";
 
 const PREFIX = "toolchain.generalization.v1:";
+registerDeclaredPromptModule({id:"toolchains.generalizer.user.finance-source-integration",revision:4,stability:"versioned-content",changeTriggers:["release"],order:-10});
 const validateDecision = new Ajv({ strict: true, allErrors: true }).compile<ToolchainGeneralizationDecision>(TOOLCHAIN_GENERALIZATION_OUTPUT_SCHEMA);
+registerDeclaredPromptModule({id:"toolchains.generalizer.finance-source.response-schema",revision:2,stability:"versioned-content",changeTriggers:["release"],order:0});
+const financeDecisionSchema=financeSourceProposalSchema(TOOLCHAIN_GENERALIZATION_OUTPUT_SCHEMA);
+const validateFinanceDecision=new Ajv({strict:true,allErrors:true}).compile<Record<string,unknown>>(financeDecisionSchema);
+const financeProviderSchema={type:'object',additionalProperties:false,properties:{[TOOLCHAIN_GENERALIZATION_ENVELOPE_KEY]:providerOutputSchema(financeDecisionSchema)},required:[TOOLCHAIN_GENERALIZATION_ENVELOPE_KEY]};
 const pending = new Map<string, { inputHash: string; promise: Promise<ToolchainGenerationResult> }>();
 export interface ToolchainPreparedProposal {
   schema: "agentlas.toolchain-prepared-proposal.v1";
@@ -74,15 +81,20 @@ function readResult(key: string, inputHash: string): ToolchainGenerationResult |
   const { assetId: _assetId, ...result } = record.result;
   return { ...result, asset };
 }
-function parseDecision(text: string): ToolchainGeneralizationDecision {
+function parseDecision(text: string, purpose?:ToolchainGenerationInput["purpose"]): ToolchainGeneralizationDecision {
   const parsed: unknown = JSON.parse(text.trim());
   // The provider schema carries the decision under one member (TOOLCHAIN_GENERALIZATION_PROVIDER_SCHEMA). A runtime that only
   // read the schema in its prompt may answer the bare decision; the full decision schema decides either shape.
   const value: unknown = parsed && typeof parsed === "object" && !Array.isArray(parsed) && Object.keys(parsed).length === 1
     && Object.hasOwn(parsed, TOOLCHAIN_GENERALIZATION_ENVELOPE_KEY)
     ? (parsed as Record<string, unknown>)[TOOLCHAIN_GENERALIZATION_ENVELOPE_KEY] : parsed;
-  if (!validateDecision(value)) throw new Error(`toolchain_generalization_shape_invalid:${JSON.stringify(validateDecision.errors)}`);
-  return value;
+  let effective:unknown=value;
+  if(purpose==='finance-source'){
+    if(!validateFinanceDecision(value))throw new Error(`finance_source_proposal_invalid:${JSON.stringify(validateFinanceDecision.errors)}`);
+    if(value.decision!=='reuse')effective={...value,contract:materializeFinanceSourceContract(value.contract as FinanceSourceSemanticContract)};
+  }
+  if (!validateDecision(effective)) throw new Error(`toolchain_generalization_shape_invalid:${JSON.stringify(validateDecision.errors)}`);
+  return effective;
 }
 function catalogContext(assets: ToolchainAsset[]) {
   // Inspect every asset, including drafts and withdrawn capabilities. Search only
@@ -148,6 +160,7 @@ function generalizerContext(input: ToolchainGenerationInput, requested: Toolchai
   // The installed connector/tool list is versioned inventory (above locale); the requested asset's graph is chosen by
   // this task's toolchainId (task-context). Member bytes are unchanged; JSON member order carries no meaning.
   return "{" + composeDeclaredPrompt([
+        ...(input.purpose==="finance-source"?[{id:"toolchains.generalizer.user.finance-source-integration",revision:4,stability:"versioned-content" as const,changeTriggers:["release" as const],order:-10,text:'"integrationContract":'+JSON.stringify(FINANCE_SOURCE_INTEGRATION_CONTRACT)}]:[]),
         { id: "toolchains.generalizer.user.catalog", revision: 1, stability: "versioned-content", changeTriggers: ["skill-package", "plan-revision"], order: 0, text: '"catalog":' + JSON.stringify(catalogContext(assets)) },
         { id: "toolchains.generalizer.user.tool-inventory", revision: 2, stability: "versioned-content", changeTriggers: ["plugin-inventory", "connector-inventory", "tool-grant"], order: 10, text: '"installedProviders":' + JSON.stringify(installedProviders) },
         { id: "toolchains.generalizer.user.locale", revision: 1, stability: "configuration", changeTriggers: ["locale"], order: 0, text: '"productLanguage":' + JSON.stringify(currentUiLocale()) },
@@ -158,17 +171,23 @@ function generalizerContext(input: ToolchainGenerationInput, requested: Toolchai
       ], ",") + "}";
 }
 
+function checkFinanceRelease(asset:ToolchainAsset,version:number):void {
+ const release=asset.versions.find(item=>item.version===version);if(!release)throw new Error('toolchain_version_not_found');
+ assertFinanceSourceContract({capabilityKey:asset.capabilityKey,contract:release.contract,graph:release.implementation.snapshot.graph!,outputFormat:release.implementation.outputBinding.format});
+}
+
 /** Future authoring only: no task graph scan, no migration and no example effects. */
 export function generateToolchain(input: ToolchainGenerationInput, actor: GenerationActor = {}): Promise<ToolchainGenerationResult> {
   if (!input || typeof input.request !== "string" || !input.request.trim() || input.request.length > 8000
+    || input.purpose!==undefined&&input.purpose!=="finance-source"
     || typeof input.requestId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(input.requestId))
     return Promise.reject(new Error("toolchain_generation_input_invalid"));
-  const normalized = { request: input.request.trim(), toolchainId: input.toolchainId ?? null, projectId: input.projectId ?? null };
+  const normalized = { request: input.request.trim(), toolchainId: input.toolchainId ?? null, projectId: input.projectId ?? null, ...(input.purpose?{purpose:input.purpose}:{}) };
   const inputHash = sha256Value(normalized);
   const key = `${PREFIX}${sha256Value({ callerChatId: actor.callerChatId ?? null, requestId: input.requestId })}`;
   actor.assertCurrent?.(); actor.signal?.throwIfAborted();
   const previous = readResult(key, inputHash);
-  if (previous) return Promise.resolve(previous);
+  if (previous) {if(input.purpose==="finance-source")checkFinanceRelease(previous.asset,previous.version);return Promise.resolve(previous);}
   const running = pending.get(key);
   if (running) return running.inputHash === inputHash ? running.promise : Promise.reject(new Error("toolchain_generation_request_conflict"));
   const promise = prepare(input, actor, key, inputHash).finally(() => pending.delete(key));
@@ -213,7 +232,7 @@ async function prepare(input: ToolchainGenerationInput, actor: GenerationActor, 
       if (Buffer.byteLength(context) > 1024 * 1024) throw new Error("toolchain_catalog_context_too_large");
       const detailed = await callToolchainPreparation({ purpose: "generalization",
         systemPrompt: TOOLCHAIN_GENERALIZER_AGENT.core, input: context,
-        outputSchema: { name: "agentlas_toolchain_generalization", schema: TOOLCHAIN_GENERALIZATION_PROVIDER_SCHEMA },
+        outputSchema: input.purpose==='finance-source'?{name:"agentlas_finance_source_generalization",schema:financeProviderSchema}:{ name: "agentlas_toolchain_generalization", schema: TOOLCHAIN_GENERALIZATION_PROVIDER_SCHEMA },
         producer: actor.preparationProducer, signal, deadlineAt: deadline });
       signal.throwIfAborted(); actor.assertCurrent?.();
       if (!detailed.text && detailed.failure?.kind === "refused" && detailed.failure.source === "marker"
@@ -225,7 +244,7 @@ async function prepare(input: ToolchainGenerationInput, actor: GenerationActor, 
       if (catalogRevision() !== revision) { feedback = "retry: catalog changed; compare the fresh complete catalog"; continue; }
       let nativeCommitAttempted = false;
       try {
-        const decision = parseDecision(detailed.text);
+        const decision = parseDecision(detailed.text,input.purpose);
         const target = decision.toolchainId ? assets.find(asset => asset.id === decision.toolchainId) : null;
         if (input.toolchainId && decision.toolchainId !== input.toolchainId) throw new Error("toolchain_requested_identity_mismatch");
         if (decision.decision !== "new_asset" && !target) throw new Error("toolchain_not_found");
@@ -234,6 +253,10 @@ async function prepare(input: ToolchainGenerationInput, actor: GenerationActor, 
         if (decision.decision === "new_asset" && assets.some(asset => asset.capabilityKey === decision.capabilityKey))
           throw new Error("toolchain_existing_capability_requires_reuse_or_version");
         const graph = decision.decision === "reuse" ? null : compileDecision(decision);
+        if(input.purpose==='finance-source'){
+          if(decision.decision==='reuse'){const release=target!.versions.find(item=>item.version===decision.version);if(target!.status!=='callable'||release?.validation.state!=='passed')throw new Error('toolchain_version_not_callable');checkFinanceRelease(target!,decision.version);}
+          else assertFinanceSourceContract({capabilityKey:decision.capabilityKey,contract:decision.contract,graph:graph!,outputFormat:decision.outputFormat});
+        }
         if (!detailed.runtimeReceipt) throw new Error("toolchain_preparation_receipt_invalid");
         const proposal = immutablePreparedProposal({ schema: "agentlas.toolchain-prepared-proposal.v1",
           requestId: input.requestId, inputHash, catalogRevision: revision, decision: decision.decision,
@@ -253,13 +276,14 @@ async function prepare(input: ToolchainGenerationInput, actor: GenerationActor, 
             signal.throwIfAborted(); actor.assertCurrent?.();
             if (catalogRevision() !== revision) throw new Error("toolchain_catalog_changed");
             const replay = readResult(key, inputHash);
-            if (replay) return replay;
+            if (replay) {if(input.purpose==="finance-source")checkFinanceRelease(replay.asset,replay.version);return replay;}
             let asset: ToolchainAsset;
             let version: number;
             let outcome: ToolchainGenerationResult["decision"] = decision.decision;
             if (decision.decision === "reuse") {
               const release = target!.versions.find(release => release.version === decision.version);
               if (target!.status !== "callable" || release?.validation.state !== "passed") throw new Error("toolchain_version_not_callable");
+              if(input.purpose==="finance-source")checkFinanceRelease(target!,release.version);
               asset = target!; version = release.version;
             } else {
               const runtime = detailed.runtimeReceipt?.selection;
@@ -283,6 +307,7 @@ async function prepare(input: ToolchainGenerationInput, actor: GenerationActor, 
               if (assets.some(prior => prior.id === asset.id && prior.versions.some(release => release.version === version))) outcome = "reuse";
               removeAutomation(source.id);
             }
+            if(input.purpose==="finance-source")checkFinanceRelease(asset,version);
             const result: ToolchainGenerationResult = { asset, version, decision: outcome, rationale: decision.rationale, generalizationId: `tcg_${randomUUID()}` };
             const { asset: _asset, ...withoutAsset } = result;
             const record: GenerationRecord = { inputHash, result: { ...withoutAsset, assetId: asset.id },

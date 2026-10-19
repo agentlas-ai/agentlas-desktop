@@ -8,6 +8,7 @@ import { getAutomation } from "../store/automations";
 import type { RunGraphOptions } from "../workflow/run-graph";
 import { getToolchainAsset, toolchainSchemaProblems } from "./assets";
 import { currentAssetPublicationValidation } from "./asset-cold-start";
+import { recordToolchainTrialOutcome } from "./trial";
 
 const PREFIX = "toolchain.call.v1:";
 export interface ToolchainCallInput { toolchainId: string; version: number; args: Record<string, unknown> }
@@ -22,6 +23,8 @@ export interface ToolchainCallOptions {
   depth?: number;
   callChain?: string[];
   dryRun?: boolean;
+  /** Host-only: this conversation holds a live trial grant for this exact draft version (toolchains/trial.ts). */
+  trial?: boolean;
   sink?: RunGraphOptions["sink"];
   /** Main-only producer hooks. Neither is accepted from an IPC/MCP DTO. The
    * exact persisted running/terminal receipt is supplied by this executor. */
@@ -74,7 +77,7 @@ async function invoke(input: ToolchainCallInput, options: ToolchainCallOptions, 
     const release = asset?.versions.find(item => item.version === input.version);
     if (!asset || !release) throw new Error("toolchain_version_not_found");
     if (asset.status === "withdrawn" && !publication?.ownerReregister) throw new Error("toolchain_withdrawn");
-    if (!validation && (asset.status !== "callable" || release.validation.state !== "passed")) throw new Error("toolchain_version_not_callable");
+    if (!validation && !options.trial && (asset.status !== "callable" || release.validation.state !== "passed")) throw new Error("toolchain_version_not_callable");
     const problems = toolchainSchemaProblems(release.contract.inputSchema, input.args);
     if (problems.length) throw new Error(`toolchain_input_invalid:${problems.join(",")}`);
     if (Buffer.byteLength(JSON.stringify(input.args)) > 256 * 1024) throw new Error("toolchain_input_too_large");
@@ -122,7 +125,8 @@ async function invoke(input: ToolchainCallInput, options: ToolchainCallOptions, 
         const carrier = getAutomation(release.implementation.automationId);
         if (!current || current.id !== receipt.id || current.runId !== receipt.runId || current.inputHash !== inputHash
           || current.status !== "running" || !version || version.contentHash !== receipt.contentHash
-          || (!validation && (asset?.status !== "callable" || version.validation.state !== "passed"))
+          || (asset?.status === "withdrawn" && !publication?.ownerReregister)
+          || (!validation && !options.trial && (asset?.status !== "callable" || version.validation.state !== "passed"))
           || !carrier?.graph || graphExecutionDigest(carrier, carrier.graph) !== graphDigest) throw new Error("graph_occurrence_custody_changed");
       };
       const result = await withGraphOccurrenceCustody({ automationId: release.implementation.snapshot.id, occurrenceId, graphDigest },
@@ -151,6 +155,7 @@ async function invoke(input: ToolchainCallInput, options: ToolchainCallOptions, 
         error: error instanceof Error ? error.message : "toolchain_execution_failed", completedAt: new Date().toISOString() };
     }
     write(key, completed);
+    if (options.trial) recordToolchainTrialOutcome(completed);
     // A lost native response/registration never rewrites the genuine execution
     // result or authorizes replay. The persisted terminal receipt is reconciled.
     await options.afterSettlement?.(Object.freeze(structuredClone(completed)));

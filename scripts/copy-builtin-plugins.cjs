@@ -39,7 +39,7 @@ const RELEASE_TOP_LEVEL = Object.freeze({
   design: ["README.md", "assets", "plugin.json", "references", "skills"],
   "flint-chart": ["plugin.json", "skills"],
   "office": ["plugin.json", "skills"],
-  "finance": ["plugin.json", "skills", "data-sources"],
+  "finance": ["plugin.json", "skills", "data-sources", "runtime", "bin", "capabilities.json"],
   "plugin-make": ["README.md", "assets", "plugin.json", "skills"],
 });
 
@@ -318,12 +318,17 @@ for (const plugin of sourcePlugins) {
   }
   const destination = path.join(to, plugin.name);
   fs.mkdirSync(destination, { recursive: true });
+  if (plugin.name === "finance") {
+    // Build only the dist destination. Ordinary application builds never mutate canonical plugin bytes.
+    require("node:child_process").execFileSync(process.execPath, [path.join(__dirname, "build-finance-plugin.cjs"), "--out", path.join(destination, "runtime", "index.cjs")], { stdio: "inherit" });
+  }
   for (const name of allowed) {
     const source = path.join(from, plugin.name, name);
     if (!fs.existsSync(source)) throw new Error(`[copy-builtin-plugins] allowlisted entry missing: ${plugin.name}/${name}`);
     const stat = fs.lstatSync(source);
     if (stat.isSymbolicLink()) throw new Error(`[copy-builtin-plugins] symlink forbidden: ${plugin.name}/${name}`);
     const target = path.join(destination, name);
+    if (plugin.name === "finance" && name === "runtime") { count += 1; continue; }
     if (stat.isDirectory()) count += copyTree(source, target);
     else if (stat.isFile()) { fs.copyFileSync(source, target); count += 1; }
     else throw new Error(`[copy-builtin-plugins] unsupported entry: ${plugin.name}/${name}`);

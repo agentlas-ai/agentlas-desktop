@@ -4,9 +4,9 @@ import { calculateFinance } from './compute';
 import { z } from 'zod';
 
 /** Only this boundary supplies observed numerical input. A model selects assets and a method. */
-export async function calculateFromFinanceSources(raw:unknown,assets:FinanceAsset[],query:(asset:FinanceAsset)=>Promise<FinanceDataResult>,signal:AbortSignal):Promise<FinanceComputeArtifact & {inputEvidence?:FinanceDataResult[];requestSnapshot?:FinanceComputeRequest}>{
+export async function calculateFromFinanceSources(raw:unknown,assets:FinanceAsset[],query:(asset:FinanceAsset)=>Promise<FinanceDataResult>,signal:AbortSignal,compute:typeof calculateFinance=calculateFinance):Promise<FinanceComputeArtifact & {inputEvidence?:FinanceDataResult[];requestSnapshot?:FinanceComputeRequest}>{
  const request=FinanceComputeRequestSchema.parse(raw);signal.throwIfAborted();
- if(request.kind==='option')return {...calculateFinance(request,{histories:[],provenance:{kind:'scenario',origin:'model_assumption',label:'대화에서 설정한 옵션 가격 가정',declaredAt:new Date().toISOString()}}),requestSnapshot:request};
+ if(request.kind==='option')return {...compute(request,{histories:[],provenance:{kind:'scenario',origin:'model_assumption',label:'대화에서 설정한 옵션 가격 가정',declaredAt:new Date().toISOString()}}),requestSnapshot:request};
  const selected=request.assetIds.map(id=>assets.find(asset=>asset.id===id)??(()=>{throw new Error('finance_compute_asset_not_found');})());
  const histories:FinanceComputeHistory[]=[],sourceUrls:string[]=[],warnings:string[]=[],inputEvidence:FinanceDataResult[]=[];
  let retrievedAt='';
@@ -33,7 +33,7 @@ export async function calculateFromFinanceSources(raw:unknown,assets:FinanceAsse
  // Intersect actual dates; do not forward-fill or fabricate closed-market observations.
  const common=histories[0].prices.filter(point=>histories.every(history=>history.prices.some(other=>other.date===point.date))).map(point=>point.date),days=new Set(common);
  for(const history of histories){if(history.prices.length!==days.size)warnings.push(`${history.symbol}: 모든 자산에 관측된 공통 ${days.size}개 날짜만 사용했습니다.`);history.prices=history.prices.filter(point=>days.has(point.date));}
- const artifact=calculateFinance(request,{histories,provenance:{kind:'observed',sourceUrls:[...new Set(sourceUrls)].slice(0,100),retrievedAt}});
+ const artifact=compute(request,{histories,provenance:{kind:'observed',sourceUrls:[...new Set(sourceUrls)].slice(0,100),retrievedAt}});
  artifact.warnings=[...new Set([...artifact.warnings,...warnings])].slice(0,100);
  return {...artifact,requestSnapshot:request,inputEvidence:histories.map((history,index)=>({...inputEvidence[index],columns:['Observation date','Symbol','Currency','Close'],rows:history.prices.map(point=>[point.date,history.symbol,history.currency,point.close]),asOf:history.prices.at(-1)?.date??null}))};
 }

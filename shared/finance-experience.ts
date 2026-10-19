@@ -1,8 +1,13 @@
-export const FINANCE_NOTICE_VERSION = '2026-10-18';
+import type { FinanceDataCategory, FinanceDataSelection } from './finance-data-routing';
+export type { FinanceDataCategory, FinanceDataSelection } from './finance-data-routing';
+export const FINANCE_NOTICE_VERSION = '2026-10-19';
 export interface FinanceDataSourceOption { id:string; name:string; kind:'builtin'|'toolchain'|'plugin'; available:boolean; version?:string }
 export interface FinanceExperienceState {
   consent:{version:string;acceptedAt:string}|null;
+  builtins?:{ready:boolean;phase:'ready'|'missing'|'error';items:Array<{id:string;name:string;ready:boolean}>;errorCode?:string};
   sourceId:string;
+  sourceBindings?:FinanceDataSelection['sourceBindings'];
+  sourceRoutingStatus?:'ready'|'unavailable';
   dashboardCustomized:boolean;
   sources:FinanceDataSourceOption[];
   enabledFeedIds?:import('./finance-feeds').FinanceFeedId[];
@@ -10,8 +15,10 @@ export interface FinanceExperienceState {
   access:{plan:string|null;monitoringAllowed:boolean;status:'verified'|'unavailable'|'signed-out'};
 }
 export type FinanceExperienceRequest = {action:'read'}
+  | {action:'plugins.prepare'}
   | {action:'accept';version:string;dataNotice:true;aiNotice:true}
   | {action:'source';sourceId:string}
+  | {action:'source.binding';category:FinanceDataCategory;sourceId:string|null}
   | {action:'customize';customized:boolean}
   | {action:'feed';feedId:import('./finance-feeds').FinanceFeedId;enabled:boolean}
   | {action:'monitoring';enabled:boolean;localTime?:string};

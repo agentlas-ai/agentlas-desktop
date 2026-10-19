@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { FinanceAsset, FinanceDataResult } from '../../shared/finance';
+import { FINANCE_DATA_CATEGORIES, resolveFinanceDataSource, type FinanceDataSelection } from '../../shared/finance-data-routing';
 import { FINANCE_FEED_IDS, type FinanceFeedId, type FinanceDashboardFeedItem, type FinanceDashboardFeedSection, type FinanceDashboardFeedsResult } from '../../shared/finance-feeds';
 import type { FinanceScope } from './store';
 import { queryFinanceAdapter } from './source-adapters';
@@ -122,6 +123,56 @@ async function filings(assets:FinanceAsset[],signal:AbortSignal):Promise<Finance
   }
   out.items.sort((a,b)=>(b.publishedAt||'').localeCompare(a.publishedAt||''));out.status=out.items.length?'partial':failures?'error':'unavailable';if(!out.items.length)out.errorCode='finance_feed_filings_unavailable';return out;
 }
+/** A selected tool's links are display-only provenance, never new transport targets. */
+function adapterColumns(result:FinanceDataResult,required:readonly string[],optional:readonly string[]=[]):Record<string,number> {
+  if(!Array.isArray(result.columns)||!Array.isArray(result.rows)||result.rows.length>10000||new Set(result.columns).size!==result.columns.length||result.columns.some(column=>![...required,...optional].includes(column))||required.some(column=>!result.columns.includes(column))||result.rows.some(row=>!Array.isArray(row)||row.length!==result.columns.length))throw new Error('finance_feed_adapter_shape');
+  return Object.fromEntries(result.columns.map((column,index)=>[column,index]));
+}
+function adapterText(value:unknown,max=1000):string {if(typeof value!=='string'||!value.trim()||value.length>max)throw new Error('finance_feed_adapter_shape');const clean=text(value,max);if(!clean)throw new Error('finance_feed_adapter_shape');return clean;}
+function adapterLink(value:unknown):string {const link=typeof value==='string'?safeLink(value):null;if(!link)throw new Error('finance_feed_adapter_shape');return link;}
+function adapterDate(value:unknown):string {const date=day(value)||(typeof value==='string'&&day(value.slice(0,10))?instant(value):null);if(!date)throw new Error('finance_feed_adapter_shape');return date;}
+async function selectedToolFeed(feedId:'finance-news'|'finance-sec'|'finance-economy',assets:FinanceAsset[],sourceId:string,scope:FinanceScope,signal:AbortSignal):Promise<FinanceDashboardFeedSection> {
+  const out=section(feedId),calendar=feedId==='finance-economy',metric=calendar?'economic_calendar':feedId==='finance-news'?'news':'filings';
+  out.warnings=['Selected data tool metadata only; coverage, relevance and publisher rights are provider-defined. No built-in source is used as fallback.'];
+  if(!calendar&&!assets.length){out.errorCode='finance_feed_watchlist_required';return out;}
+  if(assets.length>MAX_ASSETS&&!calendar)out.warnings.push('Coverage limited to the first five watchlist assets.');
+  let failures=0,unavailable=0;const now=Date.now();
+  const selections:Array<FinanceAsset|undefined>=calendar?[undefined]:assets.slice(0,MAX_ASSETS);
+  // Sequential selected-tool calls bound the provider workload and retain one exact asset identity per result.
+  for(const asset of selections){
+    check(signal);scope.assertCurrent();
+    try {
+      const selected=asset?[asset]:[],result=await queryFinanceAdapter(sourceId,{query:asset?.symbol??'',assetIds:selected.map(a=>a.id),metrics:[metric],period:calendar?'3M':'current'},selected,signal,()=>scope.assertCurrent());
+      check(signal);scope.assertCurrent();
+      if(!Array.isArray(result.sourceUrls)||result.sourceUrls.length>100||!Array.isArray(result.warnings))throw new Error('finance_feed_adapter_shape');
+      out.sourceUrls.push(...result.sourceUrls.map(adapterLink));out.warnings.push(...result.warnings.slice(0,20).map(value=>text(String(value),2000)));
+      if(!['ok','partial'].includes(result.status)){if(result.status==='error')failures++;else if(result.status==='unconnected')unavailable++;else throw new Error('finance_feed_adapter_shape');out.warnings.push((asset?.symbol??metric)+': finance_feed_adapter_'+(result.status==='error'?'error':'unavailable'));continue;}
+      const columns=feedId==='finance-news'?adapterColumns(result,['Title','Publisher','Published','URL'],['Symbol','Evidence type']):feedId==='finance-sec'?adapterColumns(result,['Form','Filed','Accession','Document']):adapterColumns(result,['Event','Starts at','URL','Publisher','Date precision']);
+      if(!result.rows.length){unavailable++;out.warnings.push((asset?.symbol??metric)+': finance_feed_no_records');continue;}
+      const items:FinanceDashboardFeedItem[]=[];
+      for(const row of result.rows){
+        if(feedId==='finance-news'){
+          if(columns.Symbol!==undefined&&row[columns.Symbol]!==asset!.symbol)throw new Error('finance_feed_identity_mismatch');
+          const title=adapterText(row[columns.Title]),publisher=adapterText(row[columns.Publisher],300),url=adapterLink(row[columns.URL]),publishedAt=row[columns.Published]===null?null:adapterDate(row[columns.Published]);
+          if(columns['Evidence type']!==undefined&&typeof row[columns['Evidence type']]!=='string')throw new Error('finance_feed_adapter_shape');
+          if(items.length<8)items.push(item(feedId,'article',title,url,{publisher,publishedAt,assetSymbol:asset!.symbol,...(publishedAt?{datePrecision:publishedAt.length===10?'day' as const:'instant' as const}:{})}));
+        }else if(feedId==='finance-sec'){
+          const form=adapterText(row[columns.Form],100),publishedAt=adapterDate(row[columns.Filed]),url=adapterLink(row[columns.Document]);adapterText(row[columns.Accession],100);
+          if(items.length<8)items.push(item(feedId,'filing',asset!.symbol+' · '+form,url,{publishedAt,assetSymbol:asset!.symbol,datePrecision:publishedAt.length===10?'day':'instant',publisher:'Selected data tool'}));
+        }else{
+          const title=adapterText(row[columns.Event]),startsAt=adapterDate(row[columns['Starts at']]),url=adapterLink(row[columns.URL]),publisher=adapterText(row[columns.Publisher],300),precision=row[columns['Date precision']];
+          if(precision!==(startsAt.length===10?'day':'instant'))throw new Error('finance_feed_adapter_shape');
+          if(items.length<80&&future(startsAt,now))items.push(item(feedId,'event',title,url,{startsAt,publisher,datePrecision:startsAt.length===10?'day':'instant',assetSymbol:null}));
+        }
+      }
+      out.items.push(...items);
+    }catch(e){check(signal);scope.assertCurrent();failures++;out.warnings.push((asset?.symbol??metric)+': '+(e instanceof Error&&e.name==='ZodError'?'finance_feed_adapter_shape':errorCode(e)));}
+  }
+  out.items=Array.from(new Map(out.items.map(row=>[row.id,row])).values()).sort((a,b)=>calendar?(a.startsAt??'').localeCompare(b.startsAt??''):(b.publishedAt??'').localeCompare(a.publishedAt??'')).slice(0,calendar?80:40);
+  out.sourceUrls=[...new Set(out.sourceUrls)].slice(0,100);out.warnings=out.warnings.slice(0,100);
+  out.status=out.items.length?'partial':failures?'error':'unavailable';if(!out.items.length)out.errorCode=failures?'finance_feed_adapter_error':unavailable?'finance_feed_adapter_unavailable':'finance_feed_no_records';
+  return out;
+}
 /** Resolve only the timezone explicitly declared in the official ICS, including DST. */
 function eastern(value:string):string|null {
   if(!/^\d{8}T\d{6}$/.test(value))return null;const iso=`${value.slice(0,4)}-${value.slice(4,6)}-${value.slice(6,8)}T${value.slice(9,11)}:${value.slice(11,13)}:${value.slice(13,15)}Z`,base=Date.parse(iso);if(!Number.isFinite(base)||new Date(base).toISOString().slice(0,19)!==iso.slice(0,19))return null;
@@ -204,20 +255,24 @@ async function earnings(assets:FinanceAsset[],sourceId:string,scope:FinanceScope
 /** Clear is unconditional: a previous account authority may clear its cache after logout. */
 export function clearFinanceDashboardFeedCache(scope?:Pick<FinanceScope,'workspaceId'|'userId'>):void {if(scope){const id=owner(scope);cache.delete(id);pending.get(id)?.abort();pending.delete(id);}else{cache.clear();for(const controller of pending.values())controller.abort();pending.clear();}}
 /** Host consent and feed enable settings are enforced by the caller before entering this network-only adapter. */
-export async function getFinanceDashboardFeeds(input:{scope:FinanceScope;watchlist:readonly FinanceAsset[];enabledFeedIds?:readonly FinanceFeedId[];sourceId?:string;signal?:AbortSignal}):Promise<FinanceDashboardFeedsResult> {
+export async function getFinanceDashboardFeeds(input:{scope:FinanceScope;watchlist:readonly FinanceAsset[];enabledFeedIds?:readonly FinanceFeedId[];sourceId?:string;sourceBindings?:FinanceDataSelection['sourceBindings'];signal?:AbortSignal}):Promise<FinanceDashboardFeedsResult> {
   const {scope}=input;scope.assertCurrent();if(!scope.workspaceId||!scope.userId)throw new Error('finance_sign_in_required');if(input.signal?.aborted)throw new Error('finance_feed_cancelled');
   if(!Array.isArray(input.watchlist)||input.watchlist.length>10000||input.watchlist.some(a=>!a||typeof a.id!=='string'||a.id.length>200||typeof a.symbol!=='string'||a.symbol.length>80))throw new Error('finance_feed_watchlist_invalid');
   const enabled=input.enabledFeedIds===undefined?[...FINANCE_FEED_IDS]:[...input.enabledFeedIds];if(enabled.length>4||new Set(enabled).size!==enabled.length||enabled.some(id=>!FINANCE_FEED_IDS.includes(id)))throw new Error('finance_feed_selection_invalid');
-  const sourceId=input.sourceId??'finance-yfinance';if(sourceId!=='finance-yfinance'&&!/^toolchain:[A-Za-z0-9_-]{1,100}:[1-9]\d*:[a-f0-9]{64}$/.test(sourceId))throw new Error('finance_feed_source_invalid');
+  const sourceId=input.sourceId??'finance-yfinance',selection:FinanceDataSelection={sourceId,sourceBindings:input.sourceBindings};
+  const validSource=(value:string)=>typeof value==='string'&&(value==='finance-yfinance'||/^toolchain:[A-Za-z0-9_-]{1,100}:[1-9]\d*:[a-f0-9]{64}$/.test(value));
+  if(!validSource(sourceId)||input.sourceBindings&&Object.keys(input.sourceBindings).some(category=>!FINANCE_DATA_CATEGORIES.includes(category as typeof FINANCE_DATA_CATEGORIES[number])))throw new Error('finance_feed_source_invalid');
+  const effective=Object.fromEntries(FINANCE_DATA_CATEGORIES.map(category=>[category,resolveFinanceDataSource(selection,category)]));if(Object.values(effective).some(value=>!validSource(value)))throw new Error('finance_feed_source_invalid');
   const assets=input.watchlist.map(asset=>({...asset}));
-  const id=owner(scope),key=JSON.stringify([sourceId,assets.map(a=>[a.id,a.symbol,a.name,a.exchange,a.currency,a.kind]),[...enabled].sort()]),saved=cache.get(id);
+  const id=owner(scope),key=JSON.stringify([sourceId,effective,assets.map(a=>[a.id,a.symbol,a.name,a.exchange,a.currency,a.kind]),[...enabled].sort()]),saved=cache.get(id);
   if(saved&&saved.key===key&&Date.parse(saved.result.expiresAt)>Date.now()){scope.assertCurrent();return clone(saved.result);}
   if(pending.has(id)||pending.size>=MAX_OWNERS)throw new Error('finance_feed_busy');
   const controller=new AbortController(),cancel=()=>controller.abort();pending.set(id,controller);input.signal?.addEventListener('abort',cancel,{once:true});if(input.signal?.aborted)controller.abort();
   const fetchedAt=new Date().toISOString();let expired=false;const deadline=setTimeout(()=>{expired=true;controller.abort();},45000);
   try {const sections=await Promise.all(FINANCE_FEED_IDS.map(async feedId=>{
     if(!enabled.includes(feedId))return{...section(feedId),status:'disabled' as const};
-    try{return await(feedId==='finance-news'?news(assets,controller.signal):feedId==='finance-sec'?filings(assets,controller.signal):feedId==='finance-earnings'?earnings(assets,sourceId,scope,controller.signal):economy(controller.signal));}
+    try{const selectedSource=feedId==='finance-news'?effective.news:feedId==='finance-sec'?effective.filings:effective.calendar;
+      return await(feedId==='finance-earnings'?earnings(assets,selectedSource,scope,controller.signal):selectedSource!=='finance-yfinance'?selectedToolFeed(feedId,assets,selectedSource,scope,controller.signal):feedId==='finance-news'?news(assets,controller.signal):feedId==='finance-sec'?filings(assets,controller.signal):economy(controller.signal));}
     catch(e){check(controller.signal);return{...section(feedId),status:'error' as const,errorCode:errorCode(e)};}
   }));if(expired)throw new Error('finance_feed_timeout');check(controller.signal);scope.assertCurrent();const result={fetchedAt,expiresAt:new Date(Date.now()+TTL).toISOString(),sections};cache.delete(id);cache.set(id,{key,result:clone(result)});while(cache.size>MAX_OWNERS)cache.delete(cache.keys().next().value!);return result;
   }catch(e){if(expired)throw new Error('finance_feed_timeout');throw e;}finally{clearTimeout(deadline);input.signal?.removeEventListener('abort',cancel);if(pending.get(id)===controller)pending.delete(id);}

@@ -2,8 +2,8 @@
   "schema": "agentlas.plugin/v2",
   "slug": "finance",
   "name": "Agentlas Finance",
-  "version": "0.1.0",
-  "builtin": true,
+  "version": "0.2.0",
+  "builtin": false,
   "publisher": {
     "name": "Agentlas",
     "url": "https://agentlas.cloud"
@@ -25,7 +25,7 @@
   },
   "invocation": {
     "mention": "@finance",
-    "implicit": "router",
+    "implicit": "never",
     "standalone": true
   },
   "provides": {
@@ -33,13 +33,44 @@
       "router": "skills/index/SKILL.md",
       "workflows": [
         "research",
+        "portfolio",
+        "planning",
+        "report",
         "workspace",
-        "monitor"
+        "monitor",
+        "analyst"
       ]
-    }
+    },
+    "tools": [
+      {
+        "id": "finance",
+        "capability": "data",
+        "kind": "stdio",
+        "command": "${node}",
+        "args": [
+          "${pluginDir}/bin/finance-server.cjs"
+        ],
+        "envKeys": [],
+        "timeoutMs": 30000,
+        "surface": {
+          "name": "Finance 계산",
+          "nameEn": "Finance calculations",
+          "description": "명시한 가정의 재무 계획과 공급자 관측 기반 포트폴리오 계산",
+          "descriptionEn": "Explicit planning scenarios and portfolio valuation from supplied provider observations",
+          "category": "data",
+          "brandColor": "#0F766E",
+          "mark": "F"
+        }
+      }
+    ]
   },
   "requires": {
-    "prereq": [],
+    "prereq": [
+      {
+        "id": "node",
+        "provided-by": "app"
+      }
+    ],
     "os": [
       "darwin",
       "win32",
@@ -54,5 +85,80 @@
   "state": {
     "files": [],
     "assets": false
+  },
+  "native": {
+    "apiVersion": 1,
+    "entry": "runtime/index.cjs",
+    "modules": [
+      "research",
+      "portfolio",
+      "planning",
+      "report"
+    ]
+  },
+  "integrity": {
+    "algo": "sha256",
+    "files": [
+      {
+        "path": "bin/finance-server.cjs",
+        "sha256": "3b0dcc0cbba3279d66ca36bd84aa6b7353247faf0ae83c45cea0f00f0861ec71",
+        "bytes": 3300
+      },
+      {
+        "path": "capabilities.json",
+        "sha256": "a3cffc044edddb842200d7be69c11da62741763e8efdaa0c25df4bfc62a55d40",
+        "bytes": 1316
+      },
+      {
+        "path": "data-sources/finance-yfinance.json",
+        "sha256": "48c9130cce6b18b0066f4671c13890a0dd90c83585d845081e1ad15c2418e680",
+        "bytes": 6600
+      },
+      {
+        "path": "runtime/index.cjs",
+        "sha256": "d560f07d063a1adbaf21fd7bfb4d1ac80fa7ae6f34280ccb8b17ac091d44816d",
+        "bytes": 363198
+      },
+      {
+        "path": "skills/analyst/SKILL.md",
+        "sha256": "55d0b5a7d9552eda997d337c2ab6ab4080bfccd64e7358aa4c12af4d0e4c0021",
+        "bytes": 918
+      },
+      {
+        "path": "skills/index/SKILL.md",
+        "sha256": "779501b1fa98338f05d2771f68ce3a3ed5d2b9826419f1b6914375ec80795767",
+        "bytes": 1477
+      },
+      {
+        "path": "skills/monitor/SKILL.md",
+        "sha256": "1d0d3429b8765c17d159a5bcf85436f9fd72db66da10487e26e0df6c5210210a",
+        "bytes": 2693
+      },
+      {
+        "path": "skills/planning/SKILL.md",
+        "sha256": "48c817a5ff9ad2389766f7df0bb5331006199281871bb5a23488ecd8f1556ff1",
+        "bytes": 772
+      },
+      {
+        "path": "skills/portfolio/SKILL.md",
+        "sha256": "2e607a15b27e80a54907600673095e140fc1912864b7da28c47fdb8413f7f7f6",
+        "bytes": 1653
+      },
+      {
+        "path": "skills/report/SKILL.md",
+        "sha256": "2db67a711fc2b2c67798051ed8551c6a76a4f7a4340e2cfb755be6a2f70b3640",
+        "bytes": 1681
+      },
+      {
+        "path": "skills/research/SKILL.md",
+        "sha256": "7db8cac1b04d79d72a68874e64ebbd2ea06e4e05bfce7e6fa0dfdbde05dd212c",
+        "bytes": 3771
+      },
+      {
+        "path": "skills/workspace/SKILL.md",
+        "sha256": "00569010dc3492fffc4e17159f55b557f0d1c784cacc1f0b93291b52bc2570d3",
+        "bytes": 3813
+      }
+    ]
   }
 }

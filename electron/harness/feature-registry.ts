@@ -171,13 +171,13 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
     domain: {
       version: "1", dependencies: ["store", "invocation"],
       // No periodic clock: one-shot logo enablement after startup and a debounced learner refresh after a graph run.
-      lifecycle: { host: "main", start: ["enableToolchainLogos"], clocks: ["logo enable one-shot 90s", "learner refresh debounce 5s"] },
+      lifecycle: { host: "main", start: ["enableToolchainLogos", "startToolchainDetector"], clocks: ["logo enable one-shot 90s", "learner refresh debounce 5s", "repeated-work detector check 10m then 6h, pass at most once per 24h"] },
       operations: {
         appControl: ["toolchains.overview", "toolchains.listAssets", "toolchains.getAsset", "toolchains.runAsset", "toolchains.decide", "toolchains.publishVersion", "toolchains.withdraw"],
         ipc: ["toolchains:overview", "toolchains:assets-list", "toolchains:assets-run", "toolchains:decide"],
         teamTools: ["toolchain_create", "toolchain_publish", "toolchain_search", "toolchain_inspect", "toolchain_run", "toolchain_result", "toolchain_report"],
       },
-      persistence: { metaPrefixes: ["toolchain.implementation.v1:"], files: ["toolchain-icons"] },
+      persistence: { metaPrefixes: ["toolchain.implementation.v1:", "toolchain.detector.miss.v1:", "toolchain.detector.verdict.v1:", "toolchain.detector.state.v1"], files: ["toolchain-icons"] },
       events: ["toolchain_node_digest", "toolchain_shadow_compare", "toolchain_fallback", "toolchain_repair_budget_reached"],
       acceptance: [
         { gate: "test-toolchain-core.cjs", evidence: "fake" }, { gate: "test-toolchain-overlay.cjs", evidence: "fake" },

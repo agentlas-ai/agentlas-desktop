@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { validateFinanceWorkspace, FinanceDataSaveRequestSchema, type FinanceWorkspace } from '../../shared/finance';
+import { validateFinanceWorkspace, FinanceDataSaveRequestSchema, FinanceAskRequestSchema, type FinanceWorkspace } from '../../shared/finance';
 import { getAuthenticatedSessionBinding, onAuthSessionOwnershipChanged } from '../auth';
 import { userDataPath } from '../runtime-paths';
 import { createWorkStart } from '../work-start';
@@ -19,7 +19,14 @@ import { financeDataConnection } from './connections';
 import { financeExperience, requireFinanceConsent } from './experience';
 import { clearFinanceWorldMarketsCache, getFinanceWorldMarkets } from './world-markets';
 import { clearFinanceDashboardFeedCache } from './dashboard-feeds';
+import { resolveFinanceDataSource } from '../../shared/finance-data-routing';
 import { pauseFinanceMonitor, readFinanceMonitor, rollbackFinanceMonitor, scheduleFinanceMonitor } from './monitor';
+import { FinancePortfolioRequestSchema } from '../../shared/finance-portfolio';
+import { extractFinancePortfolio, saveFinancePortfolio } from './portfolio';
+import { financeBuiltinPlugin } from './builtin-plugin';
+import { FINANCE_NOTICE_VERSION } from '../../shared/finance-experience';
+import type { FinancePlanningResult } from '../../shared/finance-planning';
+import { FinancePlanningReviews } from './planning-review';
 
 const boundedId = z.string().min(1).max(200);
 function captureScope(): FinanceScope {
@@ -33,14 +40,28 @@ function captureScope(): FinanceScope {
 export function registerFinanceIpc(input: { ipc: Pick<IpcMain, 'handle'>; assertTrustedSender(event: IpcMainInvokeEvent): void }): void {
   const service = getFinanceService();
   const store = service.store;
+  const planningReviews=new FinancePlanningReviews();
   const running = new Map<string, { controller: AbortController; senderId: number }>();
   onAuthSessionOwnershipChanged(() => { for (const item of running.values()) item.controller.abort(); running.clear(); clearFinanceWorldMarketsCache(); clearFinanceDashboardFeedCache(); });
   const load = (scope: FinanceScope) => service.load(scope);
   const handle = (name: string, fn: (event: IpcMainInvokeEvent, raw: unknown, scope: FinanceScope) => unknown) => input.ipc.handle(`finance:${name}`, (event, raw) => { input.assertTrustedSender(event); return fn(event, raw, captureScope()); });
   handle('load', (_event, _raw, scope) => load(scope));
+  handle('planning', async(_event, raw, scope) => { await requireFinanceConsent(scope);scope.assertCurrent();const plugin=await financeBuiltinPlugin().runtime(scope,FINANCE_NOTICE_VERSION);scope.assertCurrent();const result=plugin.callPureTool('planning',raw) as FinancePlanningResult;scope.assertCurrent();planningReviews.record(scope,raw);return result; });
+  handle('analysts', (_event, raw, scope) => service.analysts(scope, raw as import('../../shared/finance-analysts').FinanceAnalystRequest));
+  handle('portfolio', async(event, raw, scope) => {
+    const request=FinancePortfolioRequestSchema.parse(raw);
+    if(request.action==='save'){await requireFinanceConsent(scope);scope.assertCurrent();return saveFinancePortfolio(store,scope,request);}
+    const key=`${event.sender.id}:${request.requestId}`;
+    if(running.has(key)||[...running.values()].filter(item=>item.senderId===event.sender.id).length>=2)throw new Error('finance_request_busy');
+    const controller=new AbortController();running.set(key,{controller,senderId:event.sender.id});
+    const onDestroyed=()=>controller.abort();event.sender.once('destroyed',onDestroyed);
+    try{await requireFinanceConsent(scope);scope.assertCurrent();controller.signal.throwIfAborted();const workflow=await financeBuiltinPlugin().workflow(scope,FINANCE_NOTICE_VERSION,'portfolio');scope.assertCurrent();controller.signal.throwIfAborted();return await extractFinancePortfolio(request,controller.signal,()=>scope.assertCurrent(),undefined,workflow);}
+    finally{event.sender.removeListener('destroyed',onDestroyed);running.delete(key);}
+  });
   handle('experience', (_event, raw, scope) => financeExperience(scope, raw as import('../../shared/finance-experience').FinanceExperienceRequest));
   handle('worldMarkets', async (_event, _raw, scope) => {
-    const {sourceId} = await requireFinanceConsent(scope); scope.assertCurrent();
+    const selection = await requireFinanceConsent(scope); scope.assertCurrent();
+    const sourceId=resolveFinanceDataSource(selection,'market');
     return getFinanceWorldMarkets({scope,sourceId});
   });
   handle('dashboardFeeds', (_event, _raw, scope) => service.dashboardFeeds(scope));
@@ -72,18 +93,19 @@ export function registerFinanceIpc(input: { ipc: Pick<IpcMain, 'handle'>; assert
     return result;
   });
   handle('ask', async(event, raw, scope) => {
-    await requireFinanceConsent(scope);
-    const arg = z.object({ request: z.string().min(1).max(20000), screenContext: z.string().max(2000), baseRevision: z.number().int().nonnegative(), requestId: boundedId.optional() }).strict().parse(raw);
+    const arg = FinanceAskRequestSchema.parse(raw);
     const requestId = arg.requestId ?? randomUUID(); const key = `${event.sender.id}:${requestId}`;
     if (running.has(key) || [...running.values()].filter(item => item.senderId === event.sender.id).length >= 2) throw new Error('finance_request_busy');
     const controller = new AbortController(); running.set(key, { controller, senderId: event.sender.id });
     const onDestroyed = () => controller.abort(); event.sender.once('destroyed', onDestroyed);
     try {
+      await requireFinanceConsent(scope);
+      controller.signal.throwIfAborted();scope.assertCurrent();
       const workspace = await store.load(scope); scope.assertCurrent();
       const result = await service.ask(scope, { ...arg, requestId }, controller.signal);
       scope.assertCurrent();
       if (controller.signal.aborted) return { baseRevision: arg.baseRevision, requestId, status: 'cancelled', message: 'Request cancelled.' };
-      if ((await store.load(scope)).revision !== arg.baseRevision) return { baseRevision: arg.baseRevision, requestId, status: 'conflict', message: 'The workspace changed while the model was responding. Nothing was applied.' };
+      if (!arg.analystAuthoring && (await store.load(scope)).revision !== arg.baseRevision) return { baseRevision: arg.baseRevision, requestId, status: 'conflict', message: 'The workspace changed while the model was responding. Nothing was applied.' };
       scope.assertCurrent(); return result;
     } finally { event.sender.removeListener('destroyed', onDestroyed); running.delete(key); }
   });

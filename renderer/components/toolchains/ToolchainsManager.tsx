@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ToolchainsApi } from "@shared/toolchain";
+import { isFinanceSourceCapability } from "@shared/finance-source-contract";
 import { requiredExecutionPermission } from "@shared/graph-node-protocol";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import { navigate } from "@/lib/navigation";
@@ -58,7 +59,7 @@ export function ToolchainsManager({ api, locale, focusAssetId = null, focusVersi
   const generate = async () => {
     if (!api || form === null || !form.trim()) return;
     await act(async () => {
-      const generated = await api.generateAsset({ request: form.trim(), requestId: crypto.randomUUID(), ...(revisionOf ? { toolchainId: revisionOf } : {}) });
+      const generated = await api.generateAsset({ request: form.trim(), requestId: crypto.randomUUID(), ...(revisionOf ? { toolchainId: revisionOf } : {}), ...(revisionOf && isFinanceSourceCapability(assets.find(asset => asset.id === revisionOf)?.capabilityKey) ? { purpose: "finance-source" as const } : {}) });
       setGeneration(generated);
       setOpenId(generated.asset.id);
       setVersionNumber(generated.version);

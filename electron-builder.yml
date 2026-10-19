@@ -26,7 +26,7 @@ directories:
 
 beforePack: build-resources/before-pack-prepare.cjs
 afterExtract: build-resources/after-extract-native.cjs
-afterPack: build-resources/after-pack-clean.cjs
+afterPack: build-resources/after-pack-runtime.cjs
 # The helper verifies the official bundle against
 # build-resources/macos-release-signing-policy.json before it can leave a macOS build.
 afterSign: build-resources/after-sign-trust.cjs
