@@ -384,8 +384,11 @@ jobs:
               insteadOf = ssh://git@github.com/agentlas-ai/agentlas-science.git
               insteadOf = git+ssh://git@github.com/agentlas-ai/agentlas-science.git
               insteadOf = git@github.com:agentlas-ai/agentlas-science.git
+              insteadOf = https://github.com/agentlas-ai/agentlas-science.git
+          [credential]
+              helper =
           EOF
-          GIT_CONFIG_GLOBAL="$git_config" npm ci --no-audit
+          GIT_CONFIG_GLOBAL="$git_config" GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never npm ci --no-audit
 
       # Verify that the release tag, pinned Core, schema version, README, and
       # CHANGELOG agree before building and signing the production sources.
@@ -825,8 +828,11 @@ jobs:
               insteadOf = ssh://git@github.com/agentlas-ai/agentlas-science.git
               insteadOf = git+ssh://git@github.com/agentlas-ai/agentlas-science.git
               insteadOf = git@github.com:agentlas-ai/agentlas-science.git
+              insteadOf = https://github.com/agentlas-ai/agentlas-science.git
+          [credential]
+              helper =
           EOF
-          GIT_CONFIG_GLOBAL="$git_config" npm ci --no-audit
+          GIT_CONFIG_GLOBAL="$git_config" GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never npm ci --no-audit
           AGENTLAS_PRIVATE_STAGE
 
       - name: Restore mac signing certificate
@@ -963,8 +969,11 @@ jobs:
               insteadOf = ssh://git@github.com/agentlas-ai/agentlas-science.git
               insteadOf = git+ssh://git@github.com/agentlas-ai/agentlas-science.git
               insteadOf = git@github.com:agentlas-ai/agentlas-science.git
+              insteadOf = https://github.com/agentlas-ai/agentlas-science.git
+          [credential]
+              helper =
           EOF
-          GIT_CONFIG_GLOBAL="$git_config" npm ci --no-audit
+          GIT_CONFIG_GLOBAL="$git_config" GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never npm ci --no-audit
 
       - name: Download every signed Mac architecture
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -1216,8 +1225,11 @@ jobs:
               insteadOf = ssh://git@github.com/agentlas-ai/agentlas-science.git
               insteadOf = git+ssh://git@github.com/agentlas-ai/agentlas-science.git
               insteadOf = git@github.com:agentlas-ai/agentlas-science.git
+              insteadOf = https://github.com/agentlas-ai/agentlas-science.git
+          [credential]
+              helper =
           EOF
-          GIT_CONFIG_GLOBAL="$git_config" npm ci --ignore-scripts --no-audit
+          GIT_CONFIG_GLOBAL="$git_config" GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never npm ci --ignore-scripts --no-audit
 
       - name: Download every barrier-approved OS artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

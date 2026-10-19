@@ -64,8 +64,9 @@ function verifyScienceRuntimePackage(archive, platform, arch) {
       throw new Error(`science-package-sharp-libvips-missing:${platform}-${arch}`);
     }
   }
-  const canvas = JSON.parse(asar.extractFile(archive, "node_modules/@napi-rs/canvas/package.json").toString());
-  const bindingManifest = JSON.parse(asar.extractFile(archive, `node_modules/${target.canvasPackage}/package.json`).toString());
+  // ASAR lookups use the build host's path separator, including cross-target packages.
+  const canvas = JSON.parse(asar.extractFile(archive, path.normalize("node_modules/@napi-rs/canvas/package.json")).toString());
+  const bindingManifest = JSON.parse(asar.extractFile(archive, path.normalize(`node_modules/${target.canvasPackage}/package.json`)).toString());
   if (canvas.name !== "@napi-rs/canvas" || !canvas.version
     || bindingManifest.name !== target.canvasPackage || bindingManifest.version !== canvas.version
     || canvas.optionalDependencies?.[target.canvasPackage] !== bindingManifest.version
@@ -75,7 +76,7 @@ function verifyScienceRuntimePackage(archive, platform, arch) {
   const canvasFile = `node_modules/${target.canvasPackage}/${target.canvasBinding}`;
   if (!files.has(canvasFile)) throw new Error(`science-package-canvas-native-missing:${platform}-${arch}`);
   const unpackedCanvas = path.join(`${archive}.unpacked`, canvasFile);
-  if (!asar.statFile(archive, canvasFile, false).unpacked || !fs.existsSync(unpackedCanvas)
+  if (!asar.statFile(archive, path.normalize(canvasFile), false).unpacked || !fs.existsSync(unpackedCanvas)
     || !fs.lstatSync(unpackedCanvas).isFile() || fs.lstatSync(unpackedCanvas).isSymbolicLink()) {
     throw new Error(`science-package-canvas-native-not-unpacked:${canvasFile}`);
   }

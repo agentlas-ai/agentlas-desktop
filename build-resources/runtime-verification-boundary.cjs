@@ -106,7 +106,7 @@ function verifyPackagedVerificationBoundary(resourcesDir) {
   const metadata = JSON.parse(asar.extractFile(archive, "package.json").toString("utf8"));
   if (metadata.scripts && Object.keys(metadata.scripts).length) throw new Error("Packaged metadata contains source-only npm scripts");
   const excluded = asar.listPackage(archive)
-    .filter((entry) => isAsarVerificationPath(entry) && !asar.statFile(archive, entry.replace(/^\//, "")).files);
+    .filter((entry) => isAsarVerificationPath(entry) && !asar.statFile(archive, path.normalize(entry.replace(/^[\\/]+/, ""))).files);
   const pythonRoot = path.join(resourcesDir, "python-runtime");
   excluded.push(...findPythonNonruntimeArtifacts(pythonRoot).map((entry) => path.relative(resourcesDir, entry)));
   const pythonLibraries = [path.join(pythonRoot, "Lib")];

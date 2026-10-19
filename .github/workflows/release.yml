@@ -193,8 +193,11 @@ jobs:
               insteadOf = ssh://git@github.com/agentlas-ai/agentlas-science.git
               insteadOf = git+ssh://git@github.com/agentlas-ai/agentlas-science.git
               insteadOf = git@github.com:agentlas-ai/agentlas-science.git
+              insteadOf = https://github.com/agentlas-ai/agentlas-science.git
+          [credential]
+              helper =
           EOF
-          GIT_CONFIG_GLOBAL="$git_config" npm ci --no-audit
+          GIT_CONFIG_GLOBAL="$git_config" GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never npm ci --no-audit
 
       - name: Fetch SHA-256-pinned standalone Python for the package
         shell: bash
@@ -274,8 +277,10 @@ jobs:
       - name: Package verified Actions artifacts only
         shell: bash
         run: |
-          node scripts/run-private-release-gate.cjs PORTABLE_PACKAGE -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
+          node scripts/run-private-release-gate.cjs PORTABLE_PACKAGE_BUILDER -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           npx electron-builder ${{ matrix.builder_args }} --publish never
+          AGENTLAS_PRIVATE_STAGE
+          node scripts/run-private-release-gate.cjs PORTABLE_PACKAGE_STAMP -- bash -e -o pipefail -s <<'AGENTLAS_PRIVATE_STAGE'
           node scripts/stamp-update-feeds.mjs --release-dir=release --require
           AGENTLAS_PRIVATE_STAGE
 
@@ -410,8 +415,11 @@ jobs:
               insteadOf = ssh://git@github.com/agentlas-ai/agentlas-science.git
               insteadOf = git+ssh://git@github.com/agentlas-ai/agentlas-science.git
               insteadOf = git@github.com:agentlas-ai/agentlas-science.git
+              insteadOf = https://github.com/agentlas-ai/agentlas-science.git
+          [credential]
+              helper =
           EOF
-          GIT_CONFIG_GLOBAL="$git_config" npm ci --no-audit
+          GIT_CONFIG_GLOBAL="$git_config" GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never npm ci --no-audit
 
       - name: Configure Linux updater relaunch sandbox
         if: runner.os == 'Linux'
