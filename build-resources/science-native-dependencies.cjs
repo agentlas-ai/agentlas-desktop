@@ -4,17 +4,14 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { createHash } = require("node:crypto");
 const tar = require("tar");
+const { scienceNativeTarget } = require("./science-runtime-package.cjs");
 
 // npm ci installs optional dependencies for its host CPU. A second architecture
-// packaged from the same checkout needs its own Sharp binary and libvips too.
+// packaged from the same checkout needs its own Sharp, libvips and Canvas bindings.
 // Fetch only the exact lockfile artifacts; never resolve or rewrite dependencies.
 async function prepareScienceNativeDependencies(projectDir, platform, arch) {
-  if (!["darwin:arm64", "darwin:x64", "linux:x64", "win32:x64", "win32:arm64"].includes(`${platform}:${arch}`)) {
-    throw new Error(`science-native-target-unsupported:${platform}:${arch}`);
-  }
+  const { dependencies: names } = scienceNativeTarget(platform, arch);
   const lock = JSON.parse(await fs.readFile(path.join(projectDir, "package-lock.json"), "utf8"));
-  const names = [`@img/sharp-${platform}-${arch}`];
-  if (platform !== "win32") names.push(`@img/sharp-libvips-${platform}-${arch}`);
   const prepared = [];
   for (const name of names) {
     const record = lock.packages?.[`node_modules/${name}`];

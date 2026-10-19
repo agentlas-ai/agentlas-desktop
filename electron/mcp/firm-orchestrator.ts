@@ -1885,8 +1885,8 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
   const isVerificationResult = (result: FirmStageResult) => stageByNode.get(result.node.id) === "verification";
   /*
    * ★ A plan turn is read-only control plane by design, so the read-only prompt tells it to end with the escalation
-   *   marker when work needs writing. A CEO that did that instead of delegating (A/B2 room fc53939f: "the target is
-   *   outside the allowed folder; current permission is read-only" + [[NEEDS-FULL-ACCESS]], no Delegate block) asked
+   *   marker when work needs writing. A CEO that returns that marker instead of a delegation has asked
+   *   for access rather than completing its packet. The request may be
    *   for something this firm's own grant already allows. Nobody above a worker seat answers that marker; the firm host
    *   lifts it the way it lifts a stalled plan: the CEO continues as a direct execution under the firm's grant.
    */

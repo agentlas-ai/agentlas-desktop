@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.81 — 2026-10-19
+
+- Omits npm source maps from the bundled Node runtime while preserving pinned executable and runtime integrity checks.
+- Science PDF page previews now include the native Canvas package for each supported desktop architecture.
+
+This release binds Agentlas OS v1.2.66 at c0acd99be22114569e20bca94bed4540ba046eb4; public runtime asset `hephaestus-runtime-v1.2.66.tar.gz` is pinned at SHA-256 `20019d3ba4df1c540d0ef549c07a82188bd40fe12dafb2f8a6c75cc4bdcc89f7`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.80 — 2026-10-19
 
 - Choosing an agent for a seat lists only agents registered on this computer. A Hub or Agent Cloud agent you downloaded counts as local. The Hub menu has a Download button on agents and teams whose author allows it, and a My Cloud tab; Agent Cloud agents that are not on this computer have a Download button in the organisation tree too.

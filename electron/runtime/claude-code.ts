@@ -1072,7 +1072,7 @@ export interface ClaudeResultUsage {
  *    prompt, a steered direction that ran as the next turn). The same sum covers all four counters, so the total can
  *    never disagree with its parts.
  *  - `observed.inputTokens` counts everything the model took in: fresh input + cache reads + cache writes. Fresh input alone
- *    under-reports the real context size (measured 2 vs 52,518); the ledger's single integer cannot carry the three prices,
+ *    under-reports the real context size; the ledger's single integer cannot carry the three prices,
  *    so it carries the true size and `detail` keeps the split.
  *  - Never in it: subagent usage (absent from `usage`; a sidechain-tagged result is not the root's), and the results of
  *    CLI turns raised by background work, which are not this runner turn's (noted, not added: result_usage_unattributed).
@@ -1504,8 +1504,8 @@ const runClaudeTurn = async (
       ]
     : [];
   // A Main-issued effect observation looks only: read built-ins, the Main-selected MCP config and
-  // nothing from the user's CLI setup (settings, plugins, CLAUDE.md). ~6k tokens per look instead of
-  // the full conversation context (isolated measurement 2026-09-24).
+  // nothing from the user's CLI setup (settings, plugins, CLAUDE.md).
+  // Each observation uses isolated context rather than resuming the conversation history.
   const minimalObservationArgs = runReq.minimalObservation && !runReq.untrustedNoTools
     ? ["--setting-sources", "", "--strict-mcp-config", "--tools", "Read,Glob,Grep,LS",
         "--disable-slash-commands", "--no-session-persistence"]

@@ -120,6 +120,7 @@ asarUnpack:
   - "**/node_modules/keytar/**/*"
   # Science image rendering needs the native addon and its adjacent libvips libraries.
   - "**/node_modules/@img/sharp-*/**/*"
+  - "**/node_modules/@napi-rs/canvas-*/**/*"
   # node-pty loads its native addon and spawn-helper at runtime. electron-builder currently
   # auto-unpacks it as a detected native module, but the base config states this explicitly
   # and this duplicate must not depend on that autodetection staying true.

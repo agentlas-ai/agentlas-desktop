@@ -1352,10 +1352,10 @@ const RUN_SETTLE_ROWS_MAX = 16;
  * The rows that settle a run, after the event window the screen read.
  *
  * runLedger:events and runLedger:chatTimeline answer the first rows of a run (400 or 500), and the screens project a run from
- * them. A run longer than the window has its terminal rows past it, so its projection never saw the run end. On a copy of a real
- * profile every one of the 30 runs that filled the 400-row window had its ending past it: Work drew 23 of them as a row of
- * its own instead of on their answer (the anchor, `mcp_final.durableMessageId`, is the ending), tool rows whose result lies
- * past the window read as still running on finished runs, and the tokens and the failure reason were missing. These are the
+ * them. A run longer than the window can have its terminal rows past it. A window-only projection can
+ * draw work without its answer anchor, leave tool rows open, or omit the run's tokens and failure reason.
+ * The answer anchor is `mcp_final.durableMessageId`; replay reads the later typed terminal or stop events.
+ * These are the
  * rows the activity reducer reads as a run ending, as ledger rows the same projector replays after the window
  * (renderer/lib/one-activity.ts ledgerWithSettleRows).
  *

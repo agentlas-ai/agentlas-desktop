@@ -2960,7 +2960,7 @@ async function runMcpInvocationInContext(
     throwIfInvocationAborted(signal, locale);
   }
   // A pinned runtime missing from the cached inventory is re-probed once before the run fails: one slow probe under
-  // load dropped codex and failed a Science turn with science-runtime-unavailable (dev app, 2026-09-27 00:23Z).
+  // load can omit a pinned runtime from the cached inventory.
   if (req.runtimeSelection && !runtimes.some((runtime) => runtime.kind === req.runtimeSelection!.kind)) {
     runtimes = await detectRuntimes(true);
   }
@@ -5561,7 +5561,7 @@ async function runMcpInvocationInContext(
 
 
   if (req.oneMode && !req.agentAppMode) {
-    // The owner's global AGENTS.md asks for "사용 스킬: …" openers; they do not belong in One.
+    // One replies start with the requested content rather than skill-routing banners.
     turnContextParts.push("display: no \"Skills used:\" / \"사용 스킬:\" openers; start with what the user needs");
     keepLastTurnContext("reply.display", "fixed-policy", ["release"]);
   }
@@ -6126,8 +6126,8 @@ async function runMcpInvocationInContext(
       // covers the period before a Goal checkpoint can carry that state.
       history: scienceCollectionCurrent || isAliveControllerRun || (activeGoalId && goalCheckpoint) ? [] : history,
       // A Main-issued effect observation is one look, not a turn of this conversation. Resuming the
-      // chat's native session carried its whole accumulated context into every look (measured
-      // 2026-09-24: 79k-500k input tokens per observation, growing with each retry). Its own isolated
+      // chat's native session would carry accumulated context into every look. An observation uses
+      // a separate session instead. Its own isolated
       // session owner starts fresh and never replaces the conversation's stored session.
       ...(effectObservationRun && req.runId ? { runtimeSessionOwnerId: `effect-observation:${req.runId}` } : {}),
       // Alive decisions continue this controller's context. Work/run identity
@@ -6938,8 +6938,8 @@ async function runMcpInvocationInContext(
         return result;
       };
       /*
-       * A store write refused this attempt before dispatch because another connection held the lock (R-067: production
-       * "database is locked" ×5 became runner-failed). Nothing reached the provider and another runtime would meet the
+       * A store write can refuse an attempt before dispatch while another connection holds the lock.
+       * Nothing reached the provider and another runtime would meet the
        * same store, so the settlement's short bounded retry runs the same request on the same runtime, on every lane
        * whose runtime choice is pinned too (a retry changes nothing about the choice). A graph worker attempt is left to
        * its graph, which retries the step itself. An Alive wake is left as it was: each attempt opens a provider-usage

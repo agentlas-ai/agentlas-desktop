@@ -3470,7 +3470,7 @@ function taskForcePeerResultPromptParts(peerResults: BorrowedAgentResult[]): Dec
 /**
  * A team worker has no owner channel (274ed968), so a detail the owner could choose is the worker's to settle when a safe,
  * reversible default exists; it records the choice in the typed `ownerChoices` instead of holding its packet open with a
- * blocker or an ask the room can only answer with "계속해줘" (A/B3 room a1ab9a72). Whether the room applies it or asks the
+ * blocker or an owner ask that the worker cannot settle. Whether the room applies the choice or asks the
  * owner is the host's decision from the choice's typed fields (settleTaskForceOwnerChoices), never the worker's.
  */
 const TASK_FORCE_OWNER_CHOICES_LINE = "ownerChoices: nobody answers questions mid-task; a detail the owner could choose that has a safe reversible default → apply it, finish, record {question, applied, external:false}, never a blocker or question; no safe default → blockingRemaining; publish/send/pay/delete beyond the workspace → don't, record external:true";
@@ -4391,7 +4391,7 @@ function synthesisPromptParts(input: {
   return [
     { id: "taskforce.synthesis.user.artifact-policy", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 0, text: "Artifact claims require this host evidence; model prose proves no saved file. Retain permanent artifacts." },
     { id: "taskforce.synthesis.user.delivery", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 10, text: "Write the final user-facing answer now." },
-    // Only when a step carries a typed failure note: without it the model echoed the machine codes to the owner (A/B P25, 2/2).
+    // A failure policy is included only when a step supplies a typed failure note.
     { id: "taskforce.synthesis.user.failure-policy", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 20, text: input.results.some((result) => result && !result.ok && result.stepFailure) ? "failure: host-typed facts of a step that did not finish; name it in plain words, no codes; never present its work as done." : null },
     { id: "taskforce.synthesis.user.validated-packets", revision: 1, stability: "task-context", changeTriggers: ["plan-revision"], order: 0, text: "Validated dispatch packets (authoritative plan projection):\n" + JSON.stringify(input.packets) },
     { id: "taskforce.synthesis.user.output-evidence", revision: 1, stability: "turn-context", changeTriggers: ["attachments"], order: 0, text: "Host-verified One Outputs evidence:\n" + JSON.stringify({ count: input.artifacts.length, artifacts: input.artifacts.map(artifact => ({ label: artifact.label, type: artifact.type, sizeBytes: artifact.sizeBytes })) }) },
@@ -4947,11 +4947,11 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         signal: link.signal,
         emitFinal: false,
       });
-      // An installed team borrowed as a worker answers its packet, not the owner. A question it ended with (A/B T1: the
-      // HQ plan turn wrote only <<agentlas-ask>>, runFirmInvocation returned ok) is an open owner decision, not a done packet.
+      // An installed team borrowed as a worker answers its packet, not the owner. An outstanding owner question
+      // is an open decision rather than a completed packet.
       const firmDecisions = taskForceOwnerAskQuestions(teamResult.text);
       // The team answers its packet with the same typed outcome envelope a direct worker writes. A PARTIAL/FAILED team
-      // packet is not a done packet (A/B2 room fc53939f: "Vibecoder 팀 완료" for a PARTIAL lead that built nothing), and
+      // packet is not a done packet, and
       // an access request is lifted by the room, never handed to the owner. Its typed owner choices settle as a direct
       // worker's do.
       // A CEO that answered in the typed handoff JSON is read like a direct worker's handoff (same envelope).
@@ -5642,8 +5642,8 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       const teamAccessNeeded = workerResults.some((item) => item.accessNeeded) || hasPermissionEscalationMarker(managerSynthesis.text);
       // ★ The manager's synthesis is the team's own handoff. Its typed PARTIAL/FAILED was never read here: the verdict came
       //   only from the nested workers' runner success and asks, so a team that reported PARTIAL counted done and the room
-      //   ended on "계속해줘" for work the team itself said was unfinished (the dead-end class of A/B2 room fc53939f, "팀
-      //   PARTIAL을 완료로 셈"). A firm seat already reads its CEO's typed outcome; this seat now reads its manager's.
+      //   treated an unfinished team result as complete. A firm seat already reads its CEO's typed outcome;
+      //   this seat reads its manager's typed outcome by the same rule.
       const managerOutcome = managerChoices.outcome;
       const teamTypedIncomplete = (managerOutcome.completionStatus === "partial" || managerOutcome.completionStatus === "failed")
         && !managerOutcome.reviewComplete;
@@ -6829,7 +6829,7 @@ function otherRoomWorkingFolders(chatId: string): string[] {
 }
 
 /**
- * The planner's typed `requestedWorkspace`, granted for this run only (A/B2 room fc53939f). Returns the params every
+ * The planner's typed `requestedWorkspace` is granted for this run only. Returns the params every
  * later stage uses: the lead, the teammates and the synthesis then run with that folder as cwd and write scope. The room's
  * saved working folder is never changed.
  */
@@ -7942,7 +7942,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       ? `child_withheld:${release}:${stepIds[index]}:blocked_by:${result.withheldBy.join(",")}`
       : `child_failed:${release}`);
   });
-  // A step with nothing produced and nothing delegated is named, never folded into a pass (D1, A/B3 room fc53939f).
+  // A step with nothing produced and nothing delegated is named, never folded into a pass.
   results.forEach((result, index) => { if (result?.nothingProduced) verifierIssues.push(`nothing_produced:${stepIds[index]}`); });
   // A completed review is allowed to find blockers so repair packets can run.
   // The whole task force is not clean until a later successful review that
