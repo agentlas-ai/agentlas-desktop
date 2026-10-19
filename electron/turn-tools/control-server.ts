@@ -16,7 +16,7 @@ import { extractAgentStrategyMarkers } from "../../shared/agent-strategy";
 import { stripGoalCompleteMarker } from "../hephaestus/loop-engineering";
 import { goalCompleteMarkerText } from "./goal-signals";
 import { GOAL_PLAN_TOOL_MARKERS, TURN_TOOLS_BASE } from "./mcp-server";
-import { didYouMean, invalidValueMessage } from "../../shared/did-you-mean";
+import { closestNames, didYouMean, invalidValueMessage, unknownArgumentMessage } from "../../shared/did-you-mean";
 
 // Main-side handler for the inline agentlas-turn MCP child. Loopback only, one random server token, one capability per
 // run config. The capability pins the chat and run; the child can name neither, so a note can only land in the turn
@@ -149,18 +149,98 @@ export function harnessId(a: Record<string, unknown>, keys: readonly string[]): 
   return "";
 }
 
+/** One arguments container (args / input / arguments) read the way harness_call reads it: an object, or a JSON object string. */
+function readHarnessArgs(value: unknown): Record<string, unknown> | null {
+  let read = value;
+  if (typeof read === "string") { try { read = JSON.parse(read); } catch { return null; } }
+  return read && typeof read === "object" && !Array.isArray(read) ? read as Record<string, unknown> : null;
+}
+
 /** harness_call arguments under args (or input/arguments), as an object or a JSON object string. */
 export function harnessArgs(a: Record<string, unknown>): Record<string, unknown> {
   for (const key of ["args", "input", "arguments"]) {
-    let value = a[key];
-    if (typeof value === "string") { try { value = JSON.parse(value); } catch { continue; } }
-    if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+    const read = readHarnessArgs(a[key]);
+    if (read) return read;
   }
   return {};
 }
 
+/**
+ * The top-level keys each harness tool reads. `declared` are the ones its schema lists (turn-tools/mcp-server.ts); `ids` are
+ * the keys that carry the operation or item id, in the order harnessId reads them, and `containers` the keys that carry the
+ * operation's arguments, in the order harnessArgs reads them: the declared ones first, then the other names a model has used
+ * for the same value. The MCP child does not validate the schema (additionalProperties: false is only a declaration), so any
+ * other key used to be dropped without a word: harness_call {operation:"app.operations", query:"agentMail"} answered ok with
+ * all 711 operations instead of the 183 that match, and the model took the list for a filtered one. An operation without a
+ * required argument never complains about a missing one, so that wrong answer was silent. One rule here serves every runtime:
+ * they all reach this handler through the same child.
+ */
+const HARNESS_TOOL_KEYS: ReadonlyMap<string, { operationId: string; declared: readonly string[]; ids: readonly string[]; containers: readonly string[] }> = new Map([
+  ["harness_search", { operationId: "search", declared: ["query", "kind"], ids: [], containers: [] }],
+  ["harness_describe", { operationId: "describe", declared: ["id"], ids: ["id", "operationId", "operation", "name"], containers: [] }],
+  ["harness_call", { operationId: "", declared: ["operation", "args"], ids: ["operation", "operationId", "id", "name"], containers: ["args", "input", "arguments"] }],
+]);
+/** Most unknown names a refusal spells out, and the longest one; a request can carry thousands of keys of any length. */
+const HARNESS_UNKNOWN_SHOWN = 5;
+const HARNESS_UNKNOWN_NAME_MAX = 40;
+
+/** Why an arguments container cannot be read, or null when it holds nothing (null, "", [], "[]") or an object. */
+function unreadableHarnessArgs(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  let parsed: unknown = value;
+  if (typeof value === "string") {
+    if (!value.trim()) return null;
+    try { parsed = JSON.parse(value); } catch { return "text that is not a JSON object"; }
+    if (parsed === null) return null;
+    if (typeof parsed !== "object") return "text that is not a JSON object";
+  }
+  if (Array.isArray(parsed)) return parsed.length ? "an array" : null;
+  return typeof parsed === "object" ? null : `a ${typeof parsed}`;
+}
+
+/**
+ * The refusal for a harness tool call whose keys would not all reach the operation, or null when every key and every
+ * arguments container is read. Hint only: a refused call never runs, and a near name is never run in place of the sent one.
+ * `arguments_misplaced`: a top-level key the tool does not read, or a second name for the id or the arguments that says
+ * something else than the one that is used (harnessId and harnessArgs read the first and drop the rest). The closest declared
+ * key is named, and a key that is no typo of one is told to go inside args. `arguments_invalid`: an arguments container with
+ * content harnessArgs cannot read (an array, a number, text that is not a JSON object), which it would have dropped as {}.
+ * A null, an empty string or an empty array carries nothing and is let through, and so is a second name that repeats the first.
+ */
+export function harnessArgumentsRefusal(tool: string, a: Record<string, unknown>): Record<string, unknown> | null {
+  const keys = HARNESS_TOOL_KEYS.get(tool);
+  if (!keys) return null;
+  const refuse = (reason: string, next: string): Record<string, unknown> => ({
+    schemaVersion: "agentlas.harness-result.v1",
+    operationId: tool === "harness_call" ? harnessId(a, keys.ids) : keys.operationId,
+    status: "refused", reason, next, receiptId: `hr_${randomUUID()}`,
+  });
+  const known = new Set([...keys.declared, ...keys.ids, ...keys.containers]);
+  const unknown = Object.keys(a).filter((key) => !known.has(key));
+  const usedId = harnessId(a, keys.ids);
+  for (const key of keys.ids) if (typeof a[key] === "string" && (a[key] as string).trim() && (a[key] as string).trim() !== usedId) unknown.push(key);
+  let usedArgs: string | null = null;
+  for (const key of keys.containers) {
+    const read = readHarnessArgs(a[key]);
+    if (!read) continue;
+    const text = JSON.stringify(read);
+    if (usedArgs === null) usedArgs = text;
+    else if (Object.keys(read).length > 0 && text !== usedArgs) unknown.push(key);
+  }
+  if (unknown.length) {
+    const shown = unknown.slice(0, HARNESS_UNKNOWN_SHOWN).map((key) => key.length > HARNESS_UNKNOWN_NAME_MAX ? `${key.slice(0, HARNESS_UNKNOWN_NAME_MAX)}…` : key);
+    const inside = tool === "harness_call" ? shown.filter((key) => closestNames(key, keys.declared).length === 0) : [];
+    return refuse("arguments_misplaced", `${unknownArgumentMessage(tool, shown, keys.declared)}${unknown.length > shown.length ? ` ${unknown.length - shown.length} more not shown.` : ""}${inside.length ? ` Put ${inside.join(", ")} inside args.` : ""}`);
+  }
+  for (const key of keys.containers) {
+    const problem = unreadableHarnessArgs(a[key]);
+    if (problem) return refuse("arguments_invalid", `${key} must be an object (got ${problem}). Put the operation's arguments inside args as an object.`);
+  }
+  return null;
+}
+
 export function harnessCallFailureCode(operation: unknown, result: unknown): string | null {
-  if (operation !== "harness_call" && operation !== "harness_describe") return null;
+  if (operation !== "harness_call" && operation !== "harness_describe" && operation !== "harness_search") return null;
   if (!result || typeof result !== "object") return null;
   const r = result as { status?: unknown; reason?: unknown; operationId?: unknown; data?: unknown };
   if (r.status === "refused" || r.status === "unavailable") return typeof r.reason === "string" && r.reason ? r.reason : r.status;
@@ -325,6 +405,9 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       const operation = request.operation;
       if (!binding.tools?.includes(operation)) throw new Error("turn-tools-operation-invalid");
       const a = request.args && typeof request.args === "object" && !Array.isArray(request.args) ? request.args as Record<string, unknown> : {};
+      // A key the tool does not read (or arguments it cannot read) is refused before anything runs, never dropped silently.
+      const misplaced = harnessArgumentsRefusal(operation, a);
+      if (misplaced) return misplaced;
       const harness = await import("../harness/capability-ports");
       if (capabilities.get(binding.capabilityId) !== binding) throw new Error("turn-tools-capability-invalid");
       const ctx = { chatId: binding.chatId, runId: binding.runId, dryRun: binding.dryRun === true,
