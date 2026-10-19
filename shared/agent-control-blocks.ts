@@ -27,6 +27,7 @@
  */
 
 import { mapInlineVisualProse } from "./inline-visual";
+import { KOREAN_WORD_START } from "./korean-boundary";
 
 export const AGENT_CONTROL_HEADINGS = [
   "## Memory Events",
@@ -425,7 +426,8 @@ function trimIncompleteTail(value: string, tokens: readonly string[]): string {
  * 라우터 공지의 짝인 "Reason:"/"이유:"가 있을 때만 지운다.
  */
 const ROUTING_BANNER_LINE = /^[ \t]*(?:\*\*)?(?:(?:사용|적용)\s*(?:에이전트|스킬)|Agents used|Skills used)(?:\*\*)?[ \t]*:[^\n]*(?:\n[ \t]*)*/gim;
-const ROUTING_BANNER_WITH_REASON = /^[ \t]*(?:\*\*)?(?:Skills|Agents)(?:\*\*)?[ \t]*:[^\n]*\b(?:Reason|이유)[ \t]*:[^\n]*(?:\n[ \t]*)*/gim;
+// "이유" has no \b before it (\b never sits next to a Hangul syllable): it starts a word when the previous character is not a letter.
+const ROUTING_BANNER_WITH_REASON = new RegExp(String.raw`^[ \t]*(?:\*\*)?(?:Skills|Agents)(?:\*\*)?[ \t]*:[^\n]*(?:\bReason|${KOREAN_WORD_START}이유)[ \t]*:[^\n]*(?:\n[ \t]*)*`, "gimu");
 
 export function stripAgentRoutingBanners(value: string): string {
   return mapInlineVisualProse(value, prose => prose.replace(ROUTING_BANNER_LINE, "").replace(ROUTING_BANNER_WITH_REASON, ""));

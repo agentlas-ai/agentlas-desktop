@@ -159,7 +159,9 @@ export function automationToolFamily(toolName: string): AutomationToolFamily {
 
 // ESTIMATE ONLY (owner rule 2026-10-13): a click label guess is never an outward count; it feeds `outwardEstimate`.
 // Browser click labels. A reply/post needs a submit verb so "답글 필터" (a filter tab) is not a reply.
-const NOT_OUTWARD_LABEL = /필터|filter|탭\b|\btab\b|메뉴|menu|더\s*보기|see more|more options|닫기|close|검색|search|알림|notification|정렬|sort/i;
+// "탭" is matched as a word of its own, written out as shared/korean-boundary.ts START + 탭 + END (kept a literal so the word-judgment
+// ratchet still sees it): \b never sits next to a Hangul syllable, so the old `탭\b` matched nothing.
+const NOT_OUTWARD_LABEL = /필터|filter|(?<![\p{L}\p{N}])탭(?=$|[^\p{L}\p{N}]|(?:에서|에게|으로|부터|까지|처럼|에|을|를|이|가|은|는|도|로|의|과|와|만)(?:$|[^\p{L}\p{N}]))|\btab\b|메뉴|menu|더\s*보기|see more|more options|닫기|close|검색|search|알림|notification|정렬|sort/iu;
 const SUBMIT_VERB = /게시|올리기|보내기|전송|등록|\bpost\b|\bsend\b|\bsubmit\b|\bpublish\b/i;
 const OUTWARD_LABEL_RULES: Array<[AutomationOutwardKind, (label: string) => boolean]> = [
   ["repost", (label) => /리포스트|재게시|\brepost\b|\bretweet\b/i.test(label)],

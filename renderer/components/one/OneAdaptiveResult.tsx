@@ -543,7 +543,7 @@ function friendlySurfaceSummary(value: string, locale: "ko" | "en"): string {
 function friendlySurfaceTitle(surface: OneSurfaceManifestV1, locale: "ko" | "en"): string {
   const title = displayValue(surface.title);
   const looksLikePrompt = title.length > 88
-    || /\[local path\]|\b(?:task|작업)\s*[:：]/i.test(title)
+    || /\[local path\]|(?:\btask|(?<![\p{L}\p{N}])작업)\s*[:：]/iu.test(title)
     || /\b\d+\s*\/\s*\d+\b/.test(title);
   if (!looksLikePrompt) return title;
   const firstUsefulBlock = surface.blocks.find((block) => DEDICATED_RESULT_BLOCK_TYPES.has(block.type));

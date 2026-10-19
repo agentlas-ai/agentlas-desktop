@@ -74,9 +74,12 @@ export function redactForReport(text: string, home = homedir()): { text: string;
     const parts = out.split(home);
     redactions += parts.length - 1;
     out = parts.join("~");
-    const user = home.split("/").filter(Boolean).pop();
+    // Both separators: a Windows home (C:\Users\<name>) has no "/", so the whole path used to be taken for the user name.
+    const user = home.split(/[\\/]+/).filter(Boolean).pop();
     if (user && user.length >= 3) {
-      const re = new RegExp(`\\b${user.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "g");
+      // \b never sits next to a Hangul syllable, so a Korean account name ("홍길동") was never redacted by name. The edges are
+      // ASCII word characters on both sides, which is exactly what \b meant for an ASCII name ("mason" is still kept out of "masonry").
+      const re = new RegExp(`(?<![A-Za-z0-9_])${user.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_])`, "g");
       out = out.replace(re, () => { redactions += 1; return "[user]"; });
     }
   }

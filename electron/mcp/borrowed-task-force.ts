@@ -149,6 +149,7 @@ import { maskPrivateKeyBlocks } from "../../shared/secret-patterns";
 import { linkAbort } from "../runtime/linked-abort";
 import os from "node:os";
 import path from "node:path";
+import { KOREAN_WORD_END, KOREAN_WORD_START } from "../../shared/korean-boundary";
 import {
   hasPermissionEscalationMarker,
   PERMISSION_ESCALATION_TOOL,
@@ -170,6 +171,11 @@ import {
 } from "./run-workspace-grant";
 
 type EventSink = (ev: McpInvocationEvent) => void;
+
+// Handoff facts read from a worker report (taskForceHandoffFacts). \b never sits next to a Hangul syllable, so the Korean words get their
+// own edges (shared/korean-boundary.ts) and the English words keep \b.
+const TASK_FORCE_HANDOFF_PORT = new RegExp(`(?:\\bport|${KOREAN_WORD_START}포트)\\s*[:=]?\\s*(\\d{2,5})\\b`, "giu");
+const TASK_FORCE_HANDOFF_STATUS = new RegExp(`(?:\\bSTATUS|${KOREAN_WORD_START}상태)\\s*[:=]?\\s*(COMPLETED|PARTIAL|FAILED|완료|부분 완료|실패)(?:\\b|${KOREAN_WORD_END})`, "giu");
 
 function mainOneProfileContext(req: McpInvocationRequest): string {
   const value = (req as McpInvocationRequest & { oneProfileContext?: unknown }).oneProfileContext;
@@ -1780,10 +1786,10 @@ function taskForceHandoffFacts(compact: string): string {
   for (const match of compact.matchAll(/https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d{2,5})?(?:\/[^\s<>{}\[\]]*)?/giu)) {
     add(match[0]);
   }
-  for (const match of compact.matchAll(/\b(?:port|포트)\s*[:=]?\s*(\d{2,5})\b/giu)) {
+  for (const match of compact.matchAll(TASK_FORCE_HANDOFF_PORT)) {
     add(`port ${match[1]}`);
   }
-  for (const match of compact.matchAll(/\b(?:STATUS|상태)\s*[:=]?\s*(COMPLETED|PARTIAL|FAILED|완료|부분 완료|실패)\b/giu)) {
+  for (const match of compact.matchAll(TASK_FORCE_HANDOFF_STATUS)) {
     add(`STATUS ${match[1]}`);
   }
   return facts.slice(0, 8).join(" · ");
