@@ -13,6 +13,7 @@ import { createAgentContextCapability, agentContextHostBinding, bootstrapAgentCo
 import { markRefusedBeforeDispatch, type Runner, type RunnerEvents, type RunnerRequest } from "./runner";
 import { resolveSessionScope } from "./session-scope";
 import { acquireAgentContextTurnSlot, type AgentContextTurnSlot } from "./agent-context-turn-order";
+import { CHAT_BUSY_OTHER_HOST_CODE, ensureChatHostHandover } from "./chat-host-handover";
 import { agentContextKey } from "../store/agent-context";
 import { tStatus } from "./status-i18n";
 
@@ -137,6 +138,8 @@ export function withDaemonAgentContext(runner: Runner, provider: { kind: string;
     return (async () => {
       const slot = await waitForSharedSession(request, events);
       try {
+        // The process that ran the session's last turn may still hold its idle resident process on the provider thread.
+        await handOverSharedSessionHost(request);
         // Now no turn of this process holds the journal (and none of another): a conversation joining it late brings its own messages.
         try { if (request.chatId) importSharedChatHistory(request.agentContext as AgentContextCapability, request.chatId, request.history ?? []); }
         catch (error) { console.warn(`[session-scope] earlier messages of the conversation were not added to the shared journal: ${error instanceof Error ? error.message : String(error)}`); }
@@ -144,6 +147,67 @@ export function withDaemonAgentContext(runner: Runner, provider: { kind: string;
       } finally { slot.release(); }
     })();
   };
+}
+/** `agent-context-turn:["<chat id>","<run id>",<ordinal>]` → the conversation and the run it names. */
+function turnRunRef(turnId: string): { chatId: string; runId: string } | null {
+  try {
+    if (!turnId.startsWith("agent-context-turn:")) return null;
+    const source: unknown = JSON.parse(turnId.slice("agent-context-turn:".length));
+    return Array.isArray(source) && typeof source[0] === "string" && typeof source[1] === "string" ? { chatId: source[0], runId: source[1] } : null;
+  } catch { return null; }
+}
+/** `work` unless the turn is stopped first: a Stop ends the wait at once (the work itself is bounded and finishes on its own). */
+const untilAborted = <T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> => new Promise<T>((resolve, reject) => {
+  const onAbort = (): void => reject(signal?.reason ?? new Error("agent_context_handover_cancelled"));
+  if (signal?.aborted) { onAbort(); return; }
+  signal?.addEventListener("abort", onAbort, { once: true });
+  work.then(resolve, reject).finally(() => signal?.removeEventListener("abort", onAbort));
+});
+const pause = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms); });
+/**
+ * A provider allows one writer per thread (Codex: "already has an active writer"), and a resident runtime session of the
+ * other process keeps the thread after its turn. The host handover (chat-host-handover.ts) frees it for a conversation's own
+ * next turn in the other process, because the owner table names that conversation's previous run. A shared session is also
+ * held by the turns of ANOTHER conversation, so the same ask is made for the conversation whose turn was the journal's last:
+ * its idle resident process is released and this turn resumes the same thread.
+ *
+ * It decides nothing else. Only a turn of the other process (window process <-> background service) is asked about; the ask
+ * is bounded and an unreachable or refusing peer changes nothing, so the runner's own writer handling answers as it did before.
+ * A peer that still has the previous conversation's lease for a moment is asked again a few times (its run lease and its
+ * resident process are put back one after the other), never refused for.
+ */
+async function handOverSharedSessionHost(request: RunnerRequest): Promise<void> {
+  try {
+    const capability = request.agentContext as AgentContextCapability, held = agentContextHostBinding(capability);
+    const own = turnRunRef(held.turnId), local = invocationProcessOwner().ownerKind;
+    if (!own || (local !== "desktop" && local !== "daemon")) return;
+    const last = getDb().prepare("SELECT turn_id FROM agent_context_deliveries WHERE context_key=? AND turn_id<>? ORDER BY rowid DESC LIMIT 1")
+      .get(agentContextKey(held.identity), held.turnId) as { turn_id: string } | undefined;
+    const prior = last ? turnRunRef(last.turn_id) : null;
+    // The same conversation's own previous turn is the host handover's business (invocation/service.ts handOverChatHost).
+    if (!prior || prior.chatId === own.chatId) return;
+    const previous = invocationRunOwners.getRunOwner(prior.chatId, prior.runId);
+    if (!previous || previous.ownerKind === local) return;
+    for (let attempt = 0; ; attempt += 1) {
+      request.signal?.throwIfAborted();
+      try {
+        await untilAborted(ensureChatHostHandover({
+          chatId: prior.chatId, runId: own.runId, localKind: local, previous: { ownerKind: previous.ownerKind },
+          record(line, fields) {
+            try {
+              const { tryRecordRunEvent } = require("../store/run-events") as typeof import("../store/run-events");
+              tryRecordRunEvent({ runId: own.runId, chatId: own.chatId, kind: "runtime_session_handover", payload: { line, ...fields } });
+            } catch { /* the line below is the record */ }
+            console.info(line);
+          },
+        }), request.signal);
+        return;
+      } catch (error) {
+        if ((error as { code?: unknown } | null)?.code !== CHAT_BUSY_OTHER_HOST_CODE || attempt >= 6) return;
+        await untilAborted(pause(500), request.signal);
+      }
+    }
+  } catch { /* nothing here may refuse a turn: the runner's own handling of a held thread stays as it was */ }
 }
 async function waitForSharedSession(request: RunnerRequest, events: RunnerEvents): Promise<AgentContextTurnSlot> {
   try {
