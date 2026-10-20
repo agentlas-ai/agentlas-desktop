@@ -18,11 +18,12 @@ export interface AgentWorkspaceMemoryCandidate {
   kind: string;
   scope: string;
   evidence: string[];
-  state: "eligible" | "scope_review" | "needs_evidence" | "proposed" | "applied";
-  /** records: evidence lines about it; absorbed: earlier learnings merged into it; runs: distinct runs it came from;
-   * machine: host-recorded observations (tool errors, failed invocations, owner corrections) behind it;
-   * narrated: evidence the model wrote (ticket ids and similar). Absent on older cores. */
-  support?: { records: number; absorbed: number; runs?: number; machine?: number; narrated?: number };
+  /** watching: a lesson that has not yet come back from enough distinct runs (AGENT_LEARNING_POLICY.minRuns). */
+  state: "eligible" | "scope_review" | "needs_evidence" | "proposed" | "applied" | "watching";
+  /** records: evidence lines about it; absorbed: earlier learnings merged into it. */
+  support?: { records: number; absorbed: number };
+  /** The lesson this learning belongs to (the same for every member of a group), resolved by the host. Absent on older cores. */
+  promotion?: { runs: number; needRuns: number; ownerCorrections: number; failures: number };
   /** Near-duplicate learnings share a groupId (the newest member's id); absent on older cores. */
   groupId?: string;
   groupSize?: number;
@@ -54,6 +55,15 @@ export interface AgentWorkspaceRevision {
 export interface AgentWorkspaceRevisionOutcome { runs: number; completed: number; failed: number; errors: number; steering: number; attempts: number; }
 /** situation: when it applies; observed: what the records show happened; before/after: behaviour without and with the change; limits: when not to apply. */
 export interface AgentWorkspaceLearningCard { situation: string; observed: string; before: string; after: string; limits: string; }
+/** One line per changed file for the owner: what kind of change and how big, without reading the diff. */
+export interface AgentWorkspaceChangeSummary {
+  path: string;
+  operation: "create" | "modify" | "delete";
+  addedLines: number;
+  removedLines: number;
+  /** Name and description when the file is a skill. */
+  skill?: { name: string; description: string };
+}
 export interface AgentWorkspaceProposal {
   id: string;
   agentId: string;
@@ -69,6 +79,8 @@ export interface AgentWorkspaceProposal {
   alwaysOn?: AlwaysOnInstructionChange;
   /** Owner-facing before/after explanation of a learning change, written from the cited memories. */
   card?: AgentWorkspaceLearningCard;
+  /** Files changed, counted by the host. Absent on proposals made before this field existed. */
+  changeSummary?: AgentWorkspaceChangeSummary[];
   createdAt: string;
   appliedAt?: string;
   appliedRevisionId?: string;

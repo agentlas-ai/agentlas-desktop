@@ -28,7 +28,6 @@ import { aliveGoalContinuationRefusal, continueGoalForAlive } from "../long-run/
 import { hostGoalWake } from "../long-run/wake-arbiter";
 import { invocationService } from "../invocation/service";
 import { oneTeamCreateMember, oneTeamInvite, oneTeamList, oneTeamStartSession } from "../one/team-dispatch";
-import { findAutomationByGoalId } from "../store/automations";
 import { listInstalledServers } from "../mcp-tools/registry";
 import { detectRuntimes } from "../runtime/detect";
 import { pickRunner, runtimeForOwnerSelection } from "../runtime/selection";
@@ -44,7 +43,7 @@ import { currentUiLocale } from "../ui-locale";
 import { PERSISTENCE_DECISION_SCHEMA, type FailureCauseKind } from "../../shared/persistence-policy";
 import { AgiActionExecutor, type AgiExecutorDeps, type AgiGoalView, type AgiLoginRecoveryOutcome, type AgiLoginRecoveryControl, type AgiLoginRecoveryResult, type AgiPlanView, type AgiStrategyBatch } from "./actions";
 import { createAgiDeterministicHandler, type AgiUnblockHandlerWithModel } from "./unblock-handler";
-import { goalControllerAttempt, type AgiTurnReceipt } from "./goal-facts";
+import { goalControllerAttempt, goalRuntimeSwitchTarget, type AgiTurnReceipt } from "./goal-facts";
 
 export { AGI_ACTION_NOTICE_AUTOMATION_ID } from "../../shared/chat-host-notice";
 import { AGI_ACTION_NOTICE_AUTOMATION_ID } from "../../shared/chat-host-notice";
@@ -145,7 +144,8 @@ export function createAgiExecutor(): AgiActionExecutor {
       },
       dispatch: (chatId, permission, input) => {
         // A teammate session the AGI starts is a host start for the Goal: the wake budget answers first (owner first, 48 a day).
-        const start = () => oneTeamStartSession({ chatId, permission }, { member: input.member, brief: input.brief }) as
+        // The session runs at the cap the executor passes (write), never at One's full delegation default (team-dispatch.ts).
+        const start = () => oneTeamStartSession({ chatId, permission }, { member: input.member, brief: input.brief }, { delegationPermission: input.delegationPermission }) as
           { session_id: string; teammate?: string; already_started?: boolean };
         const session = input.runId
           ? hostGoalWake({ runId: input.runId, chatId, source: "agi", cause: `teammate:${input.member}` }, start, (made) => made.already_started !== true)
@@ -174,6 +174,7 @@ export function createAgiExecutor(): AgiActionExecutor {
           payload: { actor: "agi-unblocker", ops } });
       },
     },
+    canSwitchRuntime: (goalId) => { const target = goalRuntimeSwitchTarget(getDb(), goalId); return target === undefined ? undefined : target !== null; },
     recordMove: (goalId, runId, move, detail) => recordAgiMove(goalId, runId, move, detail),
     installedPaths: () => agiInstalledPaths(),
     runLoginRecovery: (input, control) => loginSeam ? loginSeam(input, control) : "unavailable",
@@ -213,11 +214,12 @@ export function agiInstalledPaths(): string[] {
 
 /**
  * switch_runtime / switch_tool must change what the NEXT turn does (not just be written down):
- *  - switch_runtime is recorded exactly as the scheduler's own persistence decision on the goal's continuation
- *    automation (surface automation, ownerLayer scheduler, sourceRunId = its latest run_history row), which
+ *  - switch_runtime is recorded exactly as the scheduler's own persistence decision on a live automation of the goal
+ *    (surface automation, ownerLayer scheduler, sourceRunId = its latest run_history row), which
  *    planAutomationRuntimeForRun → persistenceSwitchFor already reads and turns into a handoff to the next pool
- *    member. A goal without a continuation automation has no next scheduled turn to switch: refused, so the model
- *    picks another path instead of believing a no-op worked.
+ *    member. A Goal's own next turn is woken by the host and no continuation row exists (the legacy rows
+ *    are retired history, never a target), so for a Goal there is normally nothing to switch: refused with a typed code,
+ *    and the classifier does not propose it (goal-facts goalRuntimeSwitchTarget → continuationAutomation false).
  *  - switch_tool writes the chosen installed path into the tactic's guidance, which buildGoalPlanTurnContext puts in
  *    the next turn's plan context ("use <path> for this tactic now").
  */
@@ -244,12 +246,13 @@ export function recordAgiMove(goalId: string, runId: string, move: "switch_runti
       payload: { tacticId: detail.nodeId, status: "switch_tool", path: detail.path ?? null, actor: "agi-unblocker", runId } });
     return { ok: true };
   }
-  const automation = findAutomationByGoalId(goalId);
-  const latest = automation ? getDb().prepare("SELECT id FROM run_history WHERE automation_id = ? ORDER BY ran_at DESC, rowid DESC LIMIT 1")
-    .get(automation.id) as { id: string } | undefined : undefined;
-  if (!automation || !latest) return { ok: false, code: "agi.move.no-continuation-automation" };
-  recordPersistenceDecisionEvent({ runId: `agi-move:${randomUUID()}`, automationId: automation.id, chatId: run?.rootChatId ?? null, payload: {
-    schemaVersion: PERSISTENCE_DECISION_SCHEMA, surface: "automation", sourceRunId: latest.id,
+  // The only thing a switch_runtime can move is a live (non-retired) automation of the Goal with a recorded run. A Goal's
+  // own next turn is woken by the host and its runtime comes from the runner's cooldown plus the goal-pass-stop
+  // persistence decision, neither of which reads an AGI move: there is no target, so the move is refused, typed.
+  const target = goalRuntimeSwitchTarget(getDb(), goalId);
+  if (!target) return { ok: false, code: "agi.move.no-continuation-automation" };
+  recordPersistenceDecisionEvent({ runId: `agi-move:${randomUUID()}`, automationId: target.automationId, chatId: run?.rootChatId ?? null, payload: {
+    schemaVersion: PERSISTENCE_DECISION_SCHEMA, surface: "automation", sourceRunId: target.latestRunId,
     cause: "runtime_unavailable" as FailureCauseKind, causeBoundary: null, causeRetryAfterAt: null,
     move: "switch_runtime", moveAt: null, moveBoundary: null, moveReason: `agi:${String(detail.incidentId ?? "")}`.slice(0, 160),
     reasonCode: "ladder", sameMoveCount: 1, ladderStep: -1, ownerLayer: "scheduler" } });

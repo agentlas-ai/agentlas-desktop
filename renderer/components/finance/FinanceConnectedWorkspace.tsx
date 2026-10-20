@@ -6,6 +6,8 @@ import { navigate } from "@/lib/navigation";
 import { financeStore } from "@/lib/finance-store";
 import { useT } from "@/lib/i18n";
 import { FinanceWorkspace, type FinanceAIContext } from "./FinanceWorkspace";
+import { FinanceWorkChat } from "./FinanceWorkChat";
+import { WorkChatDraftContext, type WorkChatDraftRequest } from "@/components/TaskCockpit";
 import type { FinanceAPI } from "@shared/finance";
 import type { FinanceAnalystRequest } from "@shared/finance-analysts";
 import type { FinanceExperienceRequest } from "@shared/finance-experience";
@@ -16,6 +18,7 @@ function assertNotCancelled(signal: AbortSignal): void {
 export function financeScreenContext(context:FinanceAIContext):string {
   const selection={dashboardId:context.dashboardId,selectedWidgetId:context.selectedWidgetId,
     reportId:context.reportId??null,selectedSectionId:context.selectedSectionId??null,
+    ...(context.selectedSeries!==undefined?{selectedSeries:context.selectedSeries}:{}),
     history:context.history?.slice(-6).map(item=>({role:item.role,content:item.content.slice(0,180)}))??[]};
   // Bound the serialized packet, including JSON escapes, to the host's exact IPC limit.
   while(JSON.stringify(selection).length>2000&&selection.history.length)selection.history.shift();
@@ -29,6 +32,7 @@ export function FinanceConnectedWorkspace() {
   const { locale } = useT();
   const [api, setApi] = useState<FinanceAPI | null>(null);
   const [ready, setReady] = useState(false);
+  const [workDraft, setWorkDraft] = useState<{ ownerScope: string; draft: WorkChatDraftRequest } | null>(null);
   const [experienceRefreshVersion,setExperienceRefreshVersion]=useState(0);
   useEffect(() => {
     let mounted = true, generation = 0;
@@ -86,9 +90,21 @@ export function FinanceConnectedWorkspace() {
     if(!api?.analysts)throw new Error("finance_analysts_unavailable");
     return api.analysts(request);
   },[api]);
+  const workProject = useCallback(async () => {
+    if (!api?.workProject) throw new Error("finance_work_project_unavailable");
+    return api.workProject();
+  }, [api]);
   if (!ready) return <main role="status" style={{ padding: 32 }}>{locale === "ko" ? "Agentlas Finance를 여는 중…" : "Opening Agentlas Finance…"}</main>;
 
-  return <FinanceWorkspace
+  const currentOwnerScope = financeStore.getSnapshot().workspace.ownerScope;
+  return <WorkChatDraftContext.Provider value={workDraft?.ownerScope === currentOwnerScope ? workDraft.draft : null}><FinanceWorkspace
+    onWorkDraft={text=>{
+      const ownerScope = financeStore.getSnapshot().workspace.ownerScope;
+      if (!ownerScope || !text.trim()) return;
+      const id = crypto.randomUUID();
+      setWorkDraft({ ownerScope, draft: { id, text, onConsumed: () => setWorkDraft(current => current?.draft.id === id ? null : current) } });
+    }}
+    workChat={<FinanceWorkChat key={financeStore.getSnapshot().workspace.ownerScope ?? "unbound"} ownerScope={financeStore.getSnapshot().workspace.ownerScope} provisionProject={workProject}/>}
     experienceRefreshVersion={experienceRefreshVersion}
     onPlanning={api?.planning?async(request,signal)=>{assertNotCancelled(signal);const result=await api.planning!(request);assertNotCancelled(signal);return result;}:undefined}
     onPortfolio={api?.portfolio?async(request,signal)=>{
@@ -136,18 +152,6 @@ export function FinanceConnectedWorkspace() {
       assertNotCancelled(signal);
       return result;
     } : undefined}
-    onAIRequest={api?.ask ? async (request, context) => {
-      assertNotCancelled(context.signal);
-      const cancel = () => { void api.cancelAsk?.({ requestId: context.requestId }).catch(() => undefined); };
-      context.signal.addEventListener("abort", cancel, { once: true });
-      try {
-        const response = await api.ask!({ request, baseRevision: context.revision, requestId: context.requestId,
-          selectedAssetIds: context.analystAuthoring?[]:context.selectedAssetIds, screenContext: financeScreenContext(context), ...(api.analysts?{analystRefs:context.analystAuthoring?[]:context.analystRefs,
-          analystAuthoring:context.analystAuthoring, ...(context.analystAuthoring?{analystHistory:context.history?.slice(-6)}:{}), ...(context.analystAuthoring&&context.analystDraft?{analystDraft:context.analystDraft}:{})}:{}) });
-        assertNotCancelled(context.signal);
-        return response;
-      } finally { context.signal.removeEventListener("abort", cancel); }
-    } : undefined}
     onQueryData={api?.queryData ? async (request, signal) => {
       assertNotCancelled(signal);
       const result = await api.queryData!(request);
@@ -180,5 +184,5 @@ export function FinanceConnectedWorkspace() {
       if (receipt.status !== "paused") throw new Error("finance_monitor_pause_unconfirmed");
       await financeStore.reload();
     } : undefined}
-  />;
+  /></WorkChatDraftContext.Provider>;
 }

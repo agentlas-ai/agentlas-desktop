@@ -5,6 +5,7 @@ import { LIVE_DOCUMENT_PORT_SCHEMAS as LIVE_DOCUMENT_SCHEMAS } from "../live-doc
 import { recordRunProducedFiles } from "./run-produced-files";
 import { composeFinanceSkillContent, FINANCE_PORTS } from "../finance/tools";
 import type { FinanceReceiptReference } from "../finance/receipts";
+import type { FinanceNativePresentation } from "../../shared/finance-native-ui";
 import { composeDeclaredPrompt, registerDeclaredPromptModule } from "../runtime/prompt-order";
 import { didYouMean, missingArgumentsMessage } from "../../shared/did-you-mean";
 
@@ -48,6 +49,7 @@ export interface HarnessPortResult {
   operationId: string;
   status: "ok" | "refused" | "unavailable";
   financeReceipt?: FinanceReceiptReference;
+  nativeUi?: FinanceNativePresentation;
   data?: unknown;
   /** Machine-readable cause for refused/unavailable. */
   reason?: string;
@@ -72,7 +74,7 @@ interface PortDefinition {
 
 type PortOutcome =
   /** produced: absolute paths of files this call wrote. Host-only (harness/run-produced-files.ts); never in the result. */
-  | { status: "ok"; data: unknown; financeReceipt?: FinanceReceiptReference; produced?: readonly string[] }
+  | { status: "ok"; data: unknown; financeReceipt?: FinanceReceiptReference; nativeUi?: FinanceNativePresentation; produced?: readonly string[] }
   | { status: "refused" | "unavailable"; reason: string; next?: string; data?: unknown };
 
 const ok = (data: unknown): PortOutcome => ({ status: "ok", data });
@@ -1237,7 +1239,7 @@ export async function callHarnessPort(operationId: string, rawArgs: Record<strin
 
   if (outcome.status === "ok" && outcome.produced?.length && !ctx.dryRun) recordRunProducedFiles(ctx.runId, operationId, outcome.produced);
   return outcome.status === "ok"
-    ? { ...base, status: "ok", ...(outcome.financeReceipt ? { financeReceipt: outcome.financeReceipt } : {}), data: outcome.data, receiptId }
+    ? { ...base, status: "ok", ...(outcome.financeReceipt ? { financeReceipt: outcome.financeReceipt } : {}), ...(outcome.nativeUi ? { nativeUi: outcome.nativeUi } : {}), data: outcome.data, receiptId }
     : { ...base, status: outcome.status, reason: outcome.reason, ...(outcome.next ? { next: outcome.next } : {}), ...(outcome.data !== undefined ? { data: outcome.data } : {}), receiptId };
 }
 

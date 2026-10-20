@@ -14,6 +14,7 @@ import {
   BLOCKED_GOAL_SWEEP_EVENT_KIND, BLOCKED_GOAL_SWEEP_SCHEMA, type LongRunRecord,
   type BlockedGoalRetry,
   longRunOwnerHold, LONG_RUN_OWNER_HOLD_CODE,
+  goalOwnerAnswerHold, goalOwnerAnswerPendingSince, releaseGoalOwnerAnswerHold, GOAL_OWNER_ANSWER_PENDING_CODE,
 } from "../store/long-runs";
 import { automaticGoalReplayBlockerCode, automaticGoalResumeRequest } from "../invocation/automatic-goal";
 import {
@@ -25,7 +26,8 @@ import { settleDaemonTurnGoals } from "./daemon-turn-goal";
 import { type EffectObservationDispatcher } from "./effect-observation-tickets";
 import { currentUiLocale } from "../ui-locale";
 import { holdingAgentResidency } from "../runtime/agent-residency";
-import { decideGoalWake, recordGoalWake, type GoalWakeSource } from "./wake-arbiter";
+import { decideGoalWake, ownerRequestWaiting, recordGoalWake, type GoalWakeSource } from "./wake-arbiter";
+import { GOAL_OWNER_ANSWER_REQUIRED } from "../../shared/goal-display-state";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 
 export type BlockedGoalSweepAction = "observation_dispatched" | "resumed" | "retry_scheduled" | "cancelled" | "deferred";
@@ -291,6 +293,31 @@ function closeGoalOfDeletedChat(run: LongRunRecord, trigger: string): BlockedGoa
   return { runId: run.id, fromReason: run.blockedReason, action: "cancelled", detail };
 }
 
+/**
+ * A Goal held for the owner's answer (store/long-runs.ts holdGoalForOwnerAnswer) is woken by nobody. It leaves the hold
+ * when the owner answers: the desktop composer reopens it itself (stoppedGoalMessageReopens), but a message that arrives with
+ * a workspace binding or execution context (the phone, Telegram) is not a local owner turn and cannot reopen a Goal, so the
+ * Goal would rest for ever. This is the one place that notices: the owner wrote in the Goal's chat after it asked. A live turn
+ * in the chat, or an owner request about to start, is the owner's own path and is left to finish first.
+ */
+function releaseAnsweredOwnerHold(run: LongRunRecord, dispatcher: EffectObservationDispatcher): LongRunRecord | null {
+  const chatId = run.rootChatId;
+  if (!chatId) return null;
+  if (dispatcher.activeChatIds().includes(chatId) || ownerRequestWaiting(chatId, dispatcher)) return null;
+  const since = goalOwnerAnswerPendingSince(run.id);
+  if (!since) return null;
+  const spoke = getDb().prepare("SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'user' AND created_at > ? LIMIT 1").get(chatId, since);
+  if (!spoke) return null;
+  try {
+    return releaseGoalOwnerAnswerHold({ runId: run.id, expectedVersion: run.version, reason: "owner-answered-outside-the-composer",
+      appInstanceId: desktopAppInstanceId() });
+  } catch (error) {
+    const code = errorCode(error, "goal_owner_answer_release_unavailable");
+    if (code !== "goal_owner_answer_release_state_changed") logSweepFailureCause("owner-answer-release", run.id, code, error);
+    return null;
+  }
+}
+
 function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher, trigger: string,
   budget: { dispatches: number }): BlockedGoalSweepResult | null {
   let run = input;
@@ -321,6 +348,14 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
       if (!latest) return defer("owner_amendment_readback_failed");
       run = latest;
     }
+  }
+
+  // A Goal that asked the owner a question rests until the owner answers. Nothing here wakes it: no model
+  // start, no retry, no notice. The owner's answer reopens it; an answer given where a Goal cannot reopen ends the hold below.
+  if (goalOwnerAnswerHold(run.id)) {
+    const released = releaseAnsweredOwnerHold(run, dispatcher);
+    if (!released) return defer(GOAL_OWNER_ANSWER_PENDING_CODE);
+    run = released;
   }
 
   if (run.status !== "blocked") {
@@ -396,6 +431,7 @@ export function aliveGoalContinuationRefusal(runId: string, expectedVersion: num
   if (!run || run.version !== expectedVersion || (run.surface !== "one" && run.surface !== "work")
     || run.executionLocation !== "desktop-local" || run.hostOwnerKind !== "desktop") return "alive_goal_state_changed";
   if (longRunOwnerHold(run.id)) return LONG_RUN_OWNER_HOLD_CODE;
+  if (goalOwnerAnswerHold(run.id)) return GOAL_OWNER_ANSWER_PENDING_CODE;
   if (run.status === "blocked") return null;
   // A host-scheduled retry owns the next step and its spacing. Letting the orchestrator bring a pending
   // effect-observation retry forward turned the sweep's growing backoff into a tight loop of inconclusive
@@ -464,8 +500,9 @@ export function sweepBlockedGoals(dispatcher: EffectObservationDispatcher, trigg
       AND surface IN ('one','work') AND execution_location = 'desktop-local' AND host_owner_kind = 'desktop'
       AND (status IN ('blocked','queued')
         OR (status = 'paused' AND pause_reason IN ('runtime_unavailable','app_closed','crash_recovery'))
+        OR (status = 'waiting_tool' AND blocked_reason = ?)
         OR (status IN ('waiting_tool','running') AND EXISTS (SELECT 1 FROM long_run_events e WHERE e.run_id = long_runs.id AND e.kind IN (?, ?))))
-      ORDER BY id LIMIT 100`).all(afterId, BLOCKED_GOAL_SWEEP_EVENT_KIND, OWNER_GOAL_AMENDMENT_PENDING_KIND) as Array<{ id: string; updatedAt: string }>;
+      ORDER BY id LIMIT 100`).all(afterId, GOAL_OWNER_ANSWER_REQUIRED, BLOCKED_GOAL_SWEEP_EVENT_KIND, OWNER_GOAL_AMENDMENT_PENDING_KIND) as Array<{ id: string; updatedAt: string }>;
     if (!rows.length) break;
     candidates.push(...rows);
     afterId = rows[rows.length - 1].id;

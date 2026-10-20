@@ -4,6 +4,7 @@ import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "r
 import type { UiActionView, UiInstanceView } from "@shared/ui-instances";
 import { mergeInlineUiTranscript } from "@shared/inline-ui-transcript";
 import { validateInlineUiPresentationContent } from "@shared/inline-ui-presentation";
+import { FINANCE_NATIVE_VIEW, FinanceNativeResultSchema } from "@shared/finance-native-ui";
 import { IntellectUiActions } from "@/lib/intellect-ui-actions";
 import { readUiResult } from "@/lib/ui-result-read";
 import { VisualChatScope } from "@/lib/visual-artifacts";
@@ -12,12 +13,14 @@ import {
   wrapAppHtml, MCP_APP_SANDBOX, type BridgeEffect, type BridgeState,
 } from "@/lib/mcp-app-bridge";
 import { McpResultPreview } from "./McpResultPreview";
+import { FinanceNativeResult } from "./finance/FinanceNativeResult";
 import { IntellectUI } from "./IntellectUI";
 import { ChartBlock } from "./ChartBlock";
 import { HtmlVisualBlock } from "./HtmlVisualBlock";
 import { IconAlertTriangle, IconBolt, IconCheck, IconClose, IconEdit, IconExpand, IconSend } from "./Icon";
 import styles from "./UiInstances.module.css";
 
+type AuthEvents = { onSessionChanged?: (handler: () => void) => () => void };
 type HarnessApi = {
   call: (operation: string, args?: Record<string, unknown>) => Promise<{ status: string; data?: unknown; reason?: string }>;
   uiList: (chatId: string) => Promise<UiInstanceView[]>;
@@ -77,20 +80,49 @@ function UiInstanceCard({ instance, locale }: { instance: UiInstanceView; locale
   const [busy, setBusy] = useState<string | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   const [structured, setStructured] = useState<string | null>(null);
+  const [resultFailed, setResultFailed] = useState(false);
+  const [structuredBinding, setStructuredBinding] = useState("");
+  const [accountGeneration, setAccountGeneration] = useState(0);
+  const resultBinding = JSON.stringify([instance.chatId, instance.resultRef, instance.structuredResultRef, instance.revision, accountGeneration]);
+  const currentStructured = structuredBinding === resultBinding ? structured : null;
+  useEffect(() => {
+    const auth = (window as unknown as { agentlas?: { auth?: AuthEvents } }).agentlas?.auth;
+    return auth?.onSessionChanged?.(() => { setStructured(null); setStructuredBinding(""); setAccountGeneration(value => value + 1); });
+  }, []);
+  const finance = useMemo(() => {
+    if (instance.presentation.viewId !== FINANCE_NATIVE_VIEW || !currentStructured) return null;
+    try { const checked = FinanceNativeResultSchema.safeParse(JSON.parse(currentStructured)); return checked.success ? checked.data : null; } catch { return null; }
+  }, [instance.presentation.viewId, currentStructured]);
   const mcpApp = instance.presentation.kind === "mcp-app" ? parseMcpAppViewId(instance.presentation.viewId) : null;
   const inline = useMemo(() => instance.content ? validateInlineUiPresentationContent(instance.content) : null, [instance.content]);
 
   useEffect(() => {
     const api = harnessApi();
     setStructured(null);
+    setResultFailed(false);
     if (!api || mcpApp || instance.content) return;
     let alive = true;
-    readUiResult((operation, args) => api.call(operation, { ...args, chatId: instance.chatId }), instance.structuredResultRef ?? instance.resultRef, () => alive).then((original) => {
+    let nativeBinding: { ownerScope: string; operationId: string } | null = null;
+    readUiResult(async (operation, args) => {
+      const outcome = await api.call(operation, { ...args, chatId: instance.chatId });
+      if (instance.presentation.viewId === FINANCE_NATIVE_VIEW && outcome.status === "ok") {
+        const binding = (outcome.data as { nativeBinding?: { kind?: string; chatId?: string; runId?: string; callId?: string; ownerScope?: string; operationId?: string } })?.nativeBinding;
+        if (!binding || binding.kind !== "native-port" || binding.chatId !== instance.chatId || binding.runId !== instance.turnId || binding.callId !== instance.callId || typeof binding.ownerScope !== "string" || typeof binding.operationId !== "string") throw new Error("finance_native_binding_invalid");
+        if (nativeBinding && (nativeBinding.ownerScope !== binding.ownerScope || nativeBinding.operationId !== binding.operationId)) throw new Error("finance_native_binding_changed");
+        nativeBinding = { ownerScope: binding.ownerScope, operationId: binding.operationId };
+      }
+      return outcome;
+    }, instance.structuredResultRef ?? instance.resultRef, () => alive).then((original) => {
       if (!alive || original == null) return;
+      if (instance.presentation.viewId === FINANCE_NATIVE_VIEW) {
+        const checked = FinanceNativeResultSchema.safeParse(original);
+        if (!checked.success || !nativeBinding || checked.data.ownerScope !== nativeBinding.ownerScope || checked.data.operationId !== nativeBinding.operationId) throw new Error("finance_native_binding_invalid");
+      }
       setStructured(typeof original === "string" ? original : JSON.stringify(original));
-    }).catch(() => undefined);
+      setStructuredBinding(resultBinding);
+    }).catch(() => { if (alive) setResultFailed(true); });
     return () => { alive = false; };
-  }, [instance.structuredResultRef, instance.resultRef, instance.revision, mcpApp?.connectorId, mcpApp?.uri, instance.content]);
+  }, [resultBinding, instance.chatId, instance.callId, instance.turnId, instance.presentation.viewId, mcpApp?.connectorId, mcpApp?.uri, instance.content]);
 
   const act = useCallback(async (action: UiActionView) => {
     if (busy) return;
@@ -110,6 +142,11 @@ function UiInstanceCard({ instance, locale }: { instance: UiInstanceView; locale
   }, [busy, composer, instance]);
 
   const close = useCallback(() => { void harnessApi()?.call("ui.close", { chatId: instance.chatId, instanceId: instance.instanceId }); }, [instance.chatId, instance.instanceId]);
+  // A card that waited for the owner leaves its awaiting-input state once the owner has acted on it (same dispatcher as every other UI update).
+  // The owner's save has already happened, so the transition does not depend on the revision this render saw.
+  const settle = useCallback(async (settlement: { state: "ready"; fallbackText: string }) => harnessApi()?.call("ui.update", {
+    chatId: instance.chatId, instanceId: instance.instanceId, reason: "result", ...settlement,
+  }), [instance.chatId, instance.instanceId]);
   const visibleActions = instance.actions.filter((action) => action.intent !== "local-state");
   const closeLabel = locale === "ko" ? "닫기" : "Close";
   const blockId = `ui-instance:${instance.instanceId}:${instance.revision}`;
@@ -134,8 +171,12 @@ function UiInstanceCard({ instance, locale }: { instance: UiInstanceView; locale
             ? <ChartBlock code={JSON.stringify(content.spec)} blockId={blockId} fallback={fallback} />
             : mcpApp
         ? <McpAppFrame instance={instance} connectorId={mcpApp.connectorId} uri={mcpApp.uri} />
-        : (structured
-          ? <McpResultPreview result={structured} locale={locale} compact />
+        : instance.presentation.viewId === FINANCE_NATIVE_VIEW
+          ? finance ? <FinanceNativeResult result={finance} instanceId={instance.instanceId} revision={instance.revision} resultRef={instance.resultRef} locale={locale}
+              instanceState={instance.state} fallbackText={instance.presentation.fallbackText} onSettle={settle}/>
+            : <p className={styles.text} role="status">{resultFailed || currentStructured ? (locale === "ko" ? "저장 결과를 표시할 수 없습니다." : "The saved result cannot be displayed.") : (locale === "ko" ? "저장 결과를 불러오는 중…" : "Loading saved result…")}</p>
+        : (currentStructured
+          ? <McpResultPreview result={currentStructured} locale={locale} compact />
           : fallback)}
       </VisualChatScope.Provider>
       {!mcpApp && visibleActions.length > 0 && (

@@ -48,6 +48,12 @@ export interface ToolchainAssetVersion {
 export interface ToolchainAsset {
   /** Host observation only; never persisted or interpreted as admission. */
   testInProgress?: boolean;
+  /**
+   * Host observation only (electron/toolchains/health.ts): how its stable version did in real calls. "pulled_back" means it failed
+   * often enough to leave search and calls until a repaired version takes its place; "degraded" is the same reading for a
+   * Toolchain the host does not pull back on its own.
+   */
+  health?: { state: "healthy" | "degraded" | "pulled_back"; counted: number; failures: number };
   schemaVersion: "agentlas.toolchain-asset.v1";
   id: string;
   name: string;

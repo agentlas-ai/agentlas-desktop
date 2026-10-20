@@ -17,22 +17,14 @@ import { TRIAL_GRANT_WINDOW_MS, trialEligible, trialVerdict, trialVersion, type 
 export type { TrialLedger } from "../../shared/toolchain-detector";
 import { getToolchainAsset, promoteToolchainVersionFromTrial } from "./assets";
 import { rankToolchainAssetCandidates } from "./search";
+import { allTrialLedgers, isToolchainPulledBack, readTrialLedger, writeTrialLedger } from "./trial-ledger";
 
-const TRIAL = "toolchain.trial.v1:";
 const AUTHORED = "toolchain.detector.verdict.v1:";
 
-const key = (id: string, version: number) => `${TRIAL}${id}@${version}`;
-function read(id: string, version: number): TrialLedger | null {
-  const row = getDb().prepare("SELECT value FROM meta WHERE key=?").get(key(id, version)) as { value: string } | undefined;
-  try { return row ? JSON.parse(row.value) as TrialLedger : null; } catch { return null; }
-}
-function write(ledger: TrialLedger): void {
-  getDb().prepare("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)").run(key(ledger.toolchainId, ledger.version),
-    JSON.stringify({ ...ledger, updatedAt: new Date().toISOString() }));
-}
+const read = readTrialLedger, write = writeTrialLedger;
 
-/** Draft ids the repeated-work detector authored (its verdict rows); owner-made drafts keep the owner's own flow. */
-function detectorAuthored(): Set<string> {
+/** Asset ids the repeated-work detector authored (its verdict rows); owner-made assets keep the owner's own flow. */
+export function detectorAuthoredToolchainIds(): Set<string> {
   const rows = getDb().prepare("SELECT value FROM meta WHERE key >= ? AND key < ?").all(AUTHORED, `${AUTHORED}￿`) as Array<{ value: string }>;
   const ids = new Set<string>();
   for (const row of rows) {
@@ -46,10 +38,11 @@ function detectorAuthored(): Set<string> {
 export function grantToolchainTrial(task: string, chatId: string | null, assets: ToolchainAsset[], now = Date.now()): { asset: ToolchainAsset; version: number } | null {
   try {
     if (!chatId || !task.trim()) return null;
-    const authored = detectorAuthored();
+    const authored = detectorAuthoredToolchainIds();
     const candidates = assets.flatMap(asset => {
-      const release = authored.has(asset.id) ? trialVersion(asset) : null;
-      return release && trialEligible(asset, read(asset.id, release.version), chatId, now) ? [{ id: asset.id, release }] : [];
+      const pulledBack = isToolchainPulledBack(asset);
+      const release = authored.has(asset.id) ? trialVersion(asset, pulledBack) : null;
+      return release && trialEligible(asset, read(asset.id, release.version), chatId, now, pulledBack) ? [{ id: asset.id, release }] : [];
     });
     const [hit] = rankToolchainAssetCandidates(task, candidates, 1);
     if (!hit) return null;
@@ -69,7 +62,7 @@ export function grantToolchainTrial(task: string, chatId: string | null, assets:
 export function toolchainTrialGranted(chatId: string | null, toolchainId: string, version: number, now = Date.now()): boolean {
   if (!chatId) return false;
   const ledger = read(toolchainId, version), asset = getToolchainAsset(toolchainId);
-  const release = asset ? trialVersion(asset) : null;
+  const release = asset ? trialVersion(asset, isToolchainPulledBack(asset)) : null;
   return Boolean(ledger && ledger.state === "trial" && release && release.version === version && release.contentHash === ledger.contentHash
     && ledger.grants.some(grant => grant.chatId === chatId && now - Date.parse(grant.at) < TRIAL_GRANT_WINDOW_MS));
 }
@@ -128,8 +121,7 @@ export function recordToolchainTrialOutcome(receipt: Readonly<ToolchainCallRecei
 
 /** Retired trials whose failures the detector should send back to the generalizer as a repair request. */
 export function retiredToolchainTrials(): TrialLedger[] {
-  const rows = getDb().prepare("SELECT value FROM meta WHERE key >= ? AND key < ?").all(TRIAL, `${TRIAL}￿`) as Array<{ value: string }>;
-  return rows.flatMap(row => { try { const ledger = JSON.parse(row.value) as TrialLedger; return ledger.state === "retired" ? [ledger] : []; } catch { return []; } });
+  return allTrialLedgers().filter(ledger => ledger.state === "retired");
 }
 
 export function markToolchainTrialRepairRequested(toolchainId: string, version: number): void {

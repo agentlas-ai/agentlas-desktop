@@ -9,6 +9,8 @@ import type { RunGraphOptions } from "../workflow/run-graph";
 import { getToolchainAsset, toolchainSchemaProblems } from "./assets";
 import { currentAssetPublicationValidation } from "./asset-cold-start";
 import { recordToolchainTrialOutcome } from "./trial";
+import { recordToolchainHealthOutcome } from "./health";
+import { isToolchainPulledBack } from "./trial-ledger";
 
 const PREFIX = "toolchain.call.v1:";
 export interface ToolchainCallInput { toolchainId: string; version: number; args: Record<string, unknown> }
@@ -78,6 +80,8 @@ async function invoke(input: ToolchainCallInput, options: ToolchainCallOptions, 
     if (!asset || !release) throw new Error("toolchain_version_not_found");
     if (asset.status === "withdrawn" && !publication?.ownerReregister) throw new Error("toolchain_withdrawn");
     if (!validation && !options.trial && (asset.status !== "callable" || release.validation.state !== "passed")) throw new Error("toolchain_version_not_callable");
+    // A stable version that failed in real use was pulled back (health.ts); a repaired version takes its place through trial.
+    if (!validation && !options.trial && isToolchainPulledBack(asset)) throw new Error("toolchain_pulled_back_for_repair");
     const problems = toolchainSchemaProblems(release.contract.inputSchema, input.args);
     if (problems.length) throw new Error(`toolchain_input_invalid:${problems.join(",")}`);
     if (Buffer.byteLength(JSON.stringify(input.args)) > 256 * 1024) throw new Error("toolchain_input_too_large");
@@ -156,6 +160,7 @@ async function invoke(input: ToolchainCallInput, options: ToolchainCallOptions, 
     }
     write(key, completed);
     if (options.trial) recordToolchainTrialOutcome(completed);
+    else if (!validation) recordToolchainHealthOutcome(completed);
     // A lost native response/registration never rewrites the genuine execution
     // result or authorizes replay. The persisted terminal receipt is reconciled.
     await options.afterSettlement?.(Object.freeze(structuredClone(completed)));

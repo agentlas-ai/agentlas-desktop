@@ -69,6 +69,15 @@ export class FinanceSearchCatalog {
   resolve(scope: FinanceScope, lease: FinanceSearchLease, ids: readonly string[], watchlist: readonly FinanceAsset[], signal?: AbortSignal): FinanceAsset[] {
     return this.resolveSelection(scope, lease, ids, watchlist, signal).assets;
   }
+  /** Live search results for IDs the watchlist does not hold; an unknown or expired ID is left out, so the query reports it itself. */
+  liveAssets(scope: FinanceScope, lease: FinanceSearchLease, ids: readonly string[], watchlist: readonly FinanceAsset[], signal?: AbortSignal): FinanceAsset[] {
+    const bucket = this.bucket(scope, lease, signal);
+    return ids.flatMap(id => {
+      if (watchlist.some(asset => asset.id === id)) return [];
+      const entry = bucket.assets.get(id);
+      return entry && entry.expiresAt > this.now() ? [{ ...entry.asset }] : [];
+    });
+  }
   resolveSelection(scope: FinanceScope, lease: FinanceSearchLease, ids: readonly string[], watchlist: readonly FinanceAsset[], signal?: AbortSignal): { assets: FinanceAsset[]; identities: FinanceSecurityIdentity[] } {
     const bucket = this.bucket(scope, lease, signal);
     const selected = ids.map(id => {

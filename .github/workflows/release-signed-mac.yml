@@ -90,10 +90,10 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.58,v0.8.65"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.66
-      HEPHAESTUS_COMMIT: c0acd99be22114569e20bca94bed4540ba046eb4
-      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.66.tar.gz
-      HEPHAESTUS_ASSET_SHA256: 20019d3ba4df1c540d0ef549c07a82188bd40fe12dafb2f8a6c75cc4bdcc89f7
+      HEPHAESTUS_REF: v1.2.67
+      HEPHAESTUS_COMMIT: 704ce1ead2a5bac712cf835b290bde12053a5db1
+      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.67.tar.gz
+      HEPHAESTUS_ASSET_SHA256: c5ae6a2c8502c1eaee09f079e860e7f17886b9ef7d1880577c1655e6553a94a1
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -294,7 +294,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== 'ea1ba80fd4cb04da05da0758e78b16ed2a74d267204e60f29b3bf8c9cf5be5b6') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '57031a0c29b85c97338d5f1c61590953ec296846fc1ef05622acea28cc2b0ff9') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -322,7 +322,7 @@ jobs:
             "scripts/test-build-session-contracts.cjs": "62b4b62a609647d43864e3b32d51cef0c7d1414711aacb941a6c021a43c146c8",
             "scripts/test-chat-ux-contracts.cjs": "d52c4fad3a3cee2e4de4290f34d8629403727d2b160cd8d5392843da9970c83c",
             "scripts/test-experience-i18n-contract.cjs": "b25f1d7740febc868cace13690e358e0e08ac764dddc325e27294827d0d32398",
-            "scripts/test-experience-p0.cjs": "0fe34102eb241e0c97602a0756dda368176f6d3e01d09cb863fbcb80f8e264d7",
+            "scripts/test-experience-p0.cjs": "1f05ef2ed8a42448a3ee76b62acac2286f0d901c2eaaa7890562dffa4e44eb02",
             "scripts/test-first-run-roles-from-onboarding.cjs": "a482380530cca91ff82807844cf04878e9d08c847ef9a4106c12abab0b696317",
             "scripts/test-hub-bookmark-ux.cjs": "782386b1d2687fdd5e90f64bf239009410f55d0f419bac7d0d5482274bf22121",
             "scripts/test-mobile-ontology-bridge.cjs": "84b5ffdfed2e3d03a3f5146bd1ae7de312bfbf8595e34bbae7c67cabfd010734",
@@ -585,10 +585,10 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.58,v0.8.65"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.66
-      HEPHAESTUS_COMMIT: c0acd99be22114569e20bca94bed4540ba046eb4
-      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.66.tar.gz
-      HEPHAESTUS_ASSET_SHA256: 20019d3ba4df1c540d0ef549c07a82188bd40fe12dafb2f8a6c75cc4bdcc89f7
+      HEPHAESTUS_REF: v1.2.67
+      HEPHAESTUS_COMMIT: 704ce1ead2a5bac712cf835b290bde12053a5db1
+      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.67.tar.gz
+      HEPHAESTUS_ASSET_SHA256: c5ae6a2c8502c1eaee09f079e860e7f17886b9ef7d1880577c1655e6553a94a1
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -736,7 +736,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== 'ea1ba80fd4cb04da05da0758e78b16ed2a74d267204e60f29b3bf8c9cf5be5b6') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '57031a0c29b85c97338d5f1c61590953ec296846fc1ef05622acea28cc2b0ff9') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -764,7 +764,7 @@ jobs:
             "scripts/test-build-session-contracts.cjs": "62b4b62a609647d43864e3b32d51cef0c7d1414711aacb941a6c021a43c146c8",
             "scripts/test-chat-ux-contracts.cjs": "d52c4fad3a3cee2e4de4290f34d8629403727d2b160cd8d5392843da9970c83c",
             "scripts/test-experience-i18n-contract.cjs": "b25f1d7740febc868cace13690e358e0e08ac764dddc325e27294827d0d32398",
-            "scripts/test-experience-p0.cjs": "0fe34102eb241e0c97602a0756dda368176f6d3e01d09cb863fbcb80f8e264d7",
+            "scripts/test-experience-p0.cjs": "1f05ef2ed8a42448a3ee76b62acac2286f0d901c2eaaa7890562dffa4e44eb02",
             "scripts/test-first-run-roles-from-onboarding.cjs": "a482380530cca91ff82807844cf04878e9d08c847ef9a4106c12abab0b696317",
             "scripts/test-hub-bookmark-ux.cjs": "782386b1d2687fdd5e90f64bf239009410f55d0f419bac7d0d5482274bf22121",
             "scripts/test-mobile-ontology-bridge.cjs": "84b5ffdfed2e3d03a3f5146bd1ae7de312bfbf8595e34bbae7c67cabfd010734",
@@ -1022,10 +1022,10 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.58,v0.8.65"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.66
-      HEPHAESTUS_COMMIT: c0acd99be22114569e20bca94bed4540ba046eb4
-      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.66.tar.gz
-      HEPHAESTUS_ASSET_SHA256: 20019d3ba4df1c540d0ef549c07a82188bd40fe12dafb2f8a6c75cc4bdcc89f7
+      HEPHAESTUS_REF: v1.2.67
+      HEPHAESTUS_COMMIT: 704ce1ead2a5bac712cf835b290bde12053a5db1
+      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.67.tar.gz
+      HEPHAESTUS_ASSET_SHA256: c5ae6a2c8502c1eaee09f079e860e7f17886b9ef7d1880577c1655e6553a94a1
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1135,7 +1135,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== 'ea1ba80fd4cb04da05da0758e78b16ed2a74d267204e60f29b3bf8c9cf5be5b6') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '57031a0c29b85c97338d5f1c61590953ec296846fc1ef05622acea28cc2b0ff9') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -1163,7 +1163,7 @@ jobs:
             "scripts/test-build-session-contracts.cjs": "62b4b62a609647d43864e3b32d51cef0c7d1414711aacb941a6c021a43c146c8",
             "scripts/test-chat-ux-contracts.cjs": "d52c4fad3a3cee2e4de4290f34d8629403727d2b160cd8d5392843da9970c83c",
             "scripts/test-experience-i18n-contract.cjs": "b25f1d7740febc868cace13690e358e0e08ac764dddc325e27294827d0d32398",
-            "scripts/test-experience-p0.cjs": "0fe34102eb241e0c97602a0756dda368176f6d3e01d09cb863fbcb80f8e264d7",
+            "scripts/test-experience-p0.cjs": "1f05ef2ed8a42448a3ee76b62acac2286f0d901c2eaaa7890562dffa4e44eb02",
             "scripts/test-first-run-roles-from-onboarding.cjs": "a482380530cca91ff82807844cf04878e9d08c847ef9a4106c12abab0b696317",
             "scripts/test-hub-bookmark-ux.cjs": "782386b1d2687fdd5e90f64bf239009410f55d0f419bac7d0d5482274bf22121",
             "scripts/test-mobile-ontology-bridge.cjs": "84b5ffdfed2e3d03a3f5146bd1ae7de312bfbf8595e34bbae7c67cabfd010734",

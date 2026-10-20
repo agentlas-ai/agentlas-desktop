@@ -28,7 +28,7 @@ import {
   type MemoryEntry,
 } from "./store";
 import { MemoryRevokedError } from "./revocations";
-import { hostObservationRefs } from "./machine-observations";
+import { runEvidenceRefs } from "./run-evidence";
 import {
   agentNestExperienceOwnership,
   reconcileAgentNestExperienceConsolidation,
@@ -440,7 +440,7 @@ async function dreamOnce(): Promise<{ completed: boolean; failure?: DreamingFail
               `dreaming: consolidated ${own.length}/${entries.length} entries`,
               ...own.map((entry) => `supersedes:${entry.id}`),
               // The replaced entries' host references move to the rule, so consolidating does not erase what backed them.
-              ...[...new Set(own.flatMap((entry) => hostObservationRefs(entry.evidence ?? [])))],
+              ...[...new Set(own.flatMap((entry) => runEvidenceRefs(entry.evidence ?? [])))],
             ],
           });
         });

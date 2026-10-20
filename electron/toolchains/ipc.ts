@@ -20,6 +20,7 @@ import type { ToolchainAssetCreateInput } from "../../shared/toolchain-asset";
 import { resolveNativeAssetPublicationAuthority } from "./asset-cold-start";
 import { getToolchainAsset, listToolchainAssets, publishToolchainVersion, toolchainAssetTestInProgress, withdrawToolchainAsset } from "./assets";
 import { callToolchain, listToolchainCalls } from "./calls";
+import { toolchainHealthView } from "./health";
 import { generateToolchain } from "./generalizer";
 import type { ToolchainGenerationInput } from "../../shared/toolchain-asset";
 import { sha256Value } from "../../shared/graph-execution-digest";
@@ -66,7 +67,7 @@ function automationIdOf(value: unknown): string {
 }
 
 export function registerToolchainIpc(ipc: Pick<IpcMain, "handle">): void {
-  ipc.handle("toolchains:assets-list", () => listToolchainAssets().map(asset => ({ ...asset, testInProgress: toolchainAssetTestInProgress(asset.id) })));
+  ipc.handle("toolchains:assets-list", () => listToolchainAssets().map(asset => ({ ...asset, testInProgress: toolchainAssetTestInProgress(asset.id), ...toolchainHealthView(asset) })));
   ipc.handle("toolchains:assets-get", (_event, id: string) => getToolchainAsset(id));
   // An owner-authored release is the owner's own production: register it with the personal native owner so a One
   // turn can run it once it is published (the canonical registry is what toolchain_run resolves).

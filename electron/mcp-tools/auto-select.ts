@@ -570,6 +570,12 @@ export async function autoSelectMcpTools(input: {
  */
   groupRoom?: boolean;
   /**
+   * The conversation is Agentlas Finance: a Work chat of the signed-in owner's Finance project. The Finance plugin is a baseline
+   * capability there, so its router rides every turn without an @finance mention (an ordinary question otherwise never reaches
+   * the finance.* operations). Main-derived from the stored project binding (assertFinanceWorkChatOwner), never from renderer input.
+   */
+  financeChat?: boolean;
+  /**
    * The run is a teammate working on a hand-off from a group room (Main-derived from the dispatch row). It carries
    * One Team's room_say tool only: no router text is inlined, and the control capability offers nothing else.
    */
@@ -636,7 +642,7 @@ export async function autoSelectMcpTools(input: {
   const conversationId = typeof input.conversationId === "string" ? input.conversationId.trim() : "";
   const structuralKeyFor = (fingerprint: string): string => conversationId
     ? [conversationId, input.toolMode ?? "auto", input.hubMode ?? "auto", runtimeCapabilities.nativeBrowser,
-      input.runtimeOutsideBrowser === true ? "outside-browser" : "", input.groupRoom === true ? "group-room" : "", input.roomMember === true ? "room-member" : "", fingerprint, [...(input.requiredToolCatalogIds ?? [])].sort().join(","), pluginFingerprint].join("\u0000")
+      input.runtimeOutsideBrowser === true ? "outside-browser" : "", input.groupRoom === true ? "group-room" : "", input.financeChat === true ? "finance-chat" : "", input.roomMember === true ? "room-member" : "", fingerprint, [...(input.requiredToolCatalogIds ?? [])].sort().join(","), pluginFingerprint].join("\u0000")
     : "";
   const structuralKey = structuralKeyFor(installedFingerprint);
   const goalScopeKeyFor = (fingerprint: string): string => activeGoalScope && structuralKey
@@ -926,6 +932,7 @@ export async function autoSelectMcpTools(input: {
   for (const plugin of pluginCandidates) {
     if (mentionedPlugin(plugin)) routePlugin(plugin.slug, "requested", `explicit ${plugin.mention} mention`);
   }
+  if (input.financeChat === true) routePlugin("finance", "baseline", "baseline capability: Agentlas Finance conversation");
   if (automaticHostDecision) {
     const choseBrowser = neededIds.has("agentlas-browser");
     const choseComputerUse = neededIds.has("cua-driver");

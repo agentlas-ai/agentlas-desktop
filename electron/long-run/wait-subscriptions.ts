@@ -8,7 +8,7 @@ import { getDb } from "../store/db";
 import { getChat, getChatWorkingFolder } from "../store/chats";
 import { getAgentSurface } from "../store/agent-surfaces";
 import { getChatGoalRevision } from "../store/chat-goals";
-import { addLongRunTask, appendLongRunEvent, getLongRun, getLongRunByGoalId, getLongRunGoalRevisionBinding, listLongRunTasks, transitionLongRun, nextBlockedGoalRetrySlot, pendingBlockedGoalRetry, scheduleBlockedGoalRetry, longRunOwnerHold, liveLongRunAttemptCount } from "../store/long-runs";
+import { addLongRunTask, appendLongRunEvent, getLongRun, getLongRunByGoalId, getLongRunGoalRevisionBinding, listLongRunTasks, transitionLongRun, nextBlockedGoalRetrySlot, pendingBlockedGoalRetry, scheduleBlockedGoalRetry, longRunOwnerHold, liveLongRunAttemptCount, goalOwnerAnswerHold } from "../store/long-runs";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import { invocationRunOwners } from "../store/invocation-run-owners";
 import { assertDesktopLongRunAdmissionOpen, desktopAppInstanceId } from "./app-runtime-coordinator";
@@ -147,7 +147,7 @@ export function restoreGoalWaitAfterUndispatchedStart(superseded: SupersededGoal
  * instead of replaying the old successor. */
 function scheduleFreshGoalWaitContinuation(wait: Pick<GoalWaitSubscription, "runId">, reason: string, now = Date.now()): void {
   const run = getLongRun(wait.runId);
-  if (!run || longRunOwnerHold(run.id) || ["pausing", "cancelling", "cancelled", "completed"].includes(run.status)
+  if (!run || longRunOwnerHold(run.id) || goalOwnerAnswerHold(run.id) || ["pausing", "cancelling", "cancelled", "completed"].includes(run.status)
     || (run.status === "paused" && !["app_closed", "crash_recovery", "runtime_unavailable"].includes(run.pauseReason ?? ""))) return;
   // The blocked-goal sweep owns an existing retry, including one already due.
   // Replacing it on each wait poll would move its deadline forward forever.

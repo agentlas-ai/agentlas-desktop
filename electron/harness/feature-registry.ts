@@ -171,7 +171,7 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
     domain: {
       version: "1", dependencies: ["store", "invocation"],
       // No periodic clock: one-shot logo enablement after startup and a debounced learner refresh after a graph run.
-      lifecycle: { host: "main", start: ["enableToolchainLogos", "startToolchainDetector"], clocks: ["logo enable one-shot 90s", "learner refresh debounce 5s", "repeated-work detector check 10m then 6h, pass at most once per 24h"] },
+      lifecycle: { host: "main", start: ["enableToolchainLogos", "startToolchainDetector"], clocks: ["logo enable one-shot 90s", "learner refresh debounce 5s", "repeated-work detector check 10m then 6h, a pass that calls a model at most once per 24h"] },
       operations: {
         appControl: ["toolchains.overview", "toolchains.listAssets", "toolchains.getAsset", "toolchains.runAsset", "toolchains.decide", "toolchains.publishVersion", "toolchains.withdraw"],
         ipc: ["toolchains:overview", "toolchains:assets-list", "toolchains:assets-run", "toolchains:decide"],

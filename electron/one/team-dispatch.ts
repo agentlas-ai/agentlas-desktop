@@ -83,6 +83,8 @@ export interface OneDispatchRow {
   report_attempts?: number;
   /** "<runId>#<nodeId>" of the graph step that dispatched (or adopted) this session; host-written from the grant. */
   graph_owner?: string | null;
+  /** "write" for a session the AGI unblocker started (never full); null = the One delegation default (full). Host-written. */
+  delegation_permission?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -139,6 +141,8 @@ function ensureTable(): void {
   // A graph step owns the sessions it dispatched and is woken by them (graph-team-step.ts).
   if (!columns.has("graph_owner")) getDb().exec("ALTER TABLE one_team_dispatches ADD COLUMN graph_owner TEXT");
   getDb().exec("CREATE INDEX IF NOT EXISTS idx_one_team_dispatches_graph_owner ON one_team_dispatches(graph_owner)");
+  // The permission a session was started with when it is lower than the One delegation default (AGI-started sessions: write).
+  if (!columns.has("delegation_permission")) getDb().exec("ALTER TABLE one_team_dispatches ADD COLUMN delegation_permission TEXT");
   const resultColumns = new Set((getDb().prepare("PRAGMA table_info(one_team_dispatch_results)").all() as Array<{name:string}>).map(column=>column.name));
   for (const name of ["owner_scope","brief","parent_run_id"]) {
     if (!resultColumns.has(name)) getDb().exec(`ALTER TABLE one_team_dispatch_results ADD COLUMN ${name} TEXT`);
@@ -1147,7 +1151,17 @@ export function roomRuntimeSelectionForTeammate(parentChatId: string, member: On
 /** Owner 2026-10-04: "one이 다른곳에 시키는건 무조건 전체권한에 항상허용". */
 export const ONE_DELEGATION_PERMISSION = "full" as const;
 
-export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unknown; brief?: unknown; newSession?: unknown }) {
+/**
+ * The permission a teammate session runs with. One's own delegation is full. A session the AGI unblocker starts
+ * from a model-written brief is capped at write (the brief used to run with the Goal's permission, full included, and could
+ * carry text taken from chat, tool and run-event content). Only the host passes the cap; a model argument never reaches it.
+ */
+export function teamDelegationPermission(cap: unknown): "write" | typeof ONE_DELEGATION_PERMISSION {
+  return cap === "write" ? "write" : ONE_DELEGATION_PERMISSION;
+}
+
+export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unknown; brief?: unknown; newSession?: unknown },
+  host?: { delegationPermission?: "write" }) {
   const parentChatId = assertCaller(caller.chatId);
   const viaContinuation = parentChatId !== caller.chatId;
   const brief = typeof input.brief === "string" ? input.brief.trim() : "";
@@ -1225,10 +1239,12 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
   const graphOwner = graphOwnerOf(caller);
   const parentRunId = dispatchParentRunId(caller);
   if (blocker || reusedBusy) {
-    return enqueueDispatch({ parentChatId, member, brief, hash, blocker, chatId: reused && !parked && !fresh ? reused.id : null, graphOwner, parentRunId });
+    return enqueueDispatch({ parentChatId, member, brief, hash, blocker, chatId: reused && !parked && !fresh ? reused.id : null, graphOwner, parentRunId,
+      delegationPermission: host?.delegationPermission });
   }
   const continuing = parked ? null : reused;
-  const { created, createdHere } = launchDispatch({ parentChatId, member, brief, hash, title, continuing, graphOwner, parentRunId });
+  const { created, createdHere } = launchDispatch({ parentChatId, member, brief, hash, title, continuing, graphOwner, parentRunId,
+    delegationPermission: host?.delegationPermission });
   return {
     ...view(created),
     confirmed: true,
@@ -1259,8 +1275,9 @@ function seatBlocker(parentChatId: string, member: OneOrgMember): OneDispatchRow
 function launchDispatch(input: { parentChatId: string; member: OneOrgMember; brief: string; hash: string; title: string;
   continuing: import("../../shared/types").Chat | null; queuedId?: string; graphOwner?: string | null;
   /** dispatchParentRunId(caller); a queued row keeps the one it was accepted with. */
-  parentRunId?: string | null }): { created: OneDispatchRow; createdHere: boolean } {
+  parentRunId?: string | null; delegationPermission?: string | null }): { created: OneDispatchRow; createdHere: boolean } {
   const { parentChatId, member, brief, hash, title, continuing } = input;
+  const delegation = teamDelegationPermission(input.delegationPermission);
   const ownerScope = teamDispatchOwnerScope();
   if (input.queuedId) assertDispatchReceiver(row(input.queuedId)!);
   const { chats, invocationService } = runtime();
@@ -1278,10 +1295,10 @@ function launchDispatch(input: { parentChatId: string; member: OneOrgMember; bri
   } else {
     getDb().prepare(`
       INSERT INTO one_team_dispatches (id, parent_chat_id, parent_run_id, member_id, member_agent_id, member_name,
-        child_chat_id, child_run_id, brief, brief_hash, status, result_text, reported_at, created_at, updated_at, owner_scope, graph_owner)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', NULL, NULL, ?, ?, ?, ?)
+        child_chat_id, child_run_id, brief, brief_hash, status, result_text, reported_at, created_at, updated_at, owner_scope, graph_owner, delegation_permission)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', NULL, NULL, ?, ?, ?, ?, ?)
     `).run(id, parentChatId, parentRunId, member.id, member.installedAgentId, member.displayName,
-      chat.id, runId, brief, hash, now, now,ownerScope, input.graphOwner ?? null);
+      chat.id, runId, brief, hash, now, now,ownerScope, input.graphOwner ?? null, delegation === "write" ? "write" : null);
   }
   try {
     // Owner 2026-10-04: what One hands to a teammate runs with full access and Always allow, so the teammate never
@@ -1298,11 +1315,11 @@ function launchDispatch(input: { parentChatId: string; member: OneOrgMember; bri
       userPrompt: withRoomParagraph(brief, parentChatId, member),
       promptOrigin: "system",
       locale: currentUiLocale(),
-      permissions: ONE_DELEGATION_PERMISSION,
+      permissions: delegation,
       // A One-owned invocation takes its permission from onePermissionMode only;
       // without it, a "conversation" turn resolves to read and the teammate
       // could not write what the caller could (soak 1.2.50: t5/t7 ran read).
-      onePermissionMode: ONE_DELEGATION_PERMISSION,
+      onePermissionMode: delegation,
       taskIntent: "conversation",
       oneMode: true,
       ...((): { runtimeSelection?: import("../../shared/types").RuntimeSelection } => {
@@ -1332,7 +1349,7 @@ function launchDispatch(input: { parentChatId: string; member: OneOrgMember; bri
  * Accept work for a teammate whose seat is busy. Nothing runs yet; the row is `queued` and the model gets an immediate,
  * non-error "queued behind <session>" answer. `chatId` is the session to continue (null = a new session when it starts).
  */
-function enqueueDispatch(input: { parentChatId: string; member: OneOrgMember; brief: string; hash: string; blocker: OneDispatchRow | null; chatId: string | null; graphOwner?: string | null; parentRunId?: string | null }) {
+function enqueueDispatch(input: { parentChatId: string; member: OneOrgMember; brief: string; hash: string; blocker: OneDispatchRow | null; chatId: string | null; graphOwner?: string | null; parentRunId?: string | null; delegationPermission?: string | null }) {
   const { parentChatId, member, brief, hash, blocker } = input;
   const id = `dispatch-${randomUUID()}`;
   const now = new Date().toISOString();
@@ -1340,10 +1357,11 @@ function enqueueDispatch(input: { parentChatId: string; member: OneOrgMember; br
   const ownerScope = teamDispatchOwnerScope();
   getDb().prepare(`
     INSERT INTO one_team_dispatches (id, parent_chat_id, parent_run_id, member_id, member_agent_id, member_name,
-      child_chat_id, child_run_id, brief, brief_hash, status, result_text, reported_at, created_at, updated_at, owner_scope, graph_owner)
-    VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, 'queued', NULL, NULL, ?, ?, ?, ?)
+      child_chat_id, child_run_id, brief, brief_hash, status, result_text, reported_at, created_at, updated_at, owner_scope, graph_owner, delegation_permission)
+    VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, 'queued', NULL, NULL, ?, ?, ?, ?, ?)
   `).run(id, parentChatId, parentRunId, member.id, member.installedAgentId, member.displayName,
-    input.chatId ?? `${QUEUED_CHAT_PREFIX}${id}`, brief, hash, now, now,ownerScope, input.graphOwner ?? null);
+    input.chatId ?? `${QUEUED_CHAT_PREFIX}${id}`, brief, hash, now, now,ownerScope, input.graphOwner ?? null,
+    teamDelegationPermission(input.delegationPermission) === "write" ? "write" : null);
   installSettleListener();
   const queued = row(id)!;
   const ahead = (getDb().prepare(
@@ -1400,7 +1418,7 @@ export function startQueuedDispatches(): void {
       }
       try {
         launchDispatch({ parentChatId: item.parent_chat_id, member, brief: item.brief, hash: item.brief_hash,
-          title: item.brief.split(/\r?\n/, 1)[0]!.slice(0, 120), continuing, queuedId: item.id });
+          title: item.brief.split(/\r?\n/, 1)[0]!.slice(0, 120), continuing, queuedId: item.id, delegationPermission: item.delegation_permission });
       } catch (error) {
         console.warn("[one-team] queued dispatch not started yet:", error instanceof Error ? error.message : error);
       }
@@ -1466,8 +1484,9 @@ export function oneTeamSteer(caller: OneTeamCaller, input: { sessionId?: unknown
     userPrompt: message,
     promptOrigin: "system",
     locale: currentUiLocale(),
-    permissions: ONE_DELEGATION_PERMISSION,
-    onePermissionMode: ONE_DELEGATION_PERMISSION,
+    // A session the AGI started stays capped when One steers it (the cap is the session's, not the sender's).
+    permissions: teamDelegationPermission(dispatch.delegation_permission),
+    onePermissionMode: teamDelegationPermission(dispatch.delegation_permission),
     taskIntent: "conversation",
     oneMode: true,
   });

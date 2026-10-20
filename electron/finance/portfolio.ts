@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { applyFinanceOperations, type FinanceAsset, type FinanceOperation, type FinanceWorkspace } from '../../shared/finance';
-import { FinancePortfolioDraftSchema, FinancePortfolioRequestSchema, type FinancePortfolioRequest, type FinancePortfolioResult } from '../../shared/finance-portfolio';
+import { FinancePortfolioDraftSchema, FinancePortfolioRequestSchema, financePortfolioMatchingAssets, type FinancePortfolioRequest, type FinancePortfolioResult } from '../../shared/finance-portfolio';
 import { composeDeclaredPrompt, registerDeclaredPromptModule } from '../runtime/prompt-order';
 import { callConnectedModelDetailed } from '../system-agents/judgment';
 import type { FinanceScope, FinanceStore } from './store';
@@ -60,7 +60,7 @@ export function financePortfolioOperations(workspace:FinanceWorkspace,raw:Financ
   for(const row of request.rows){
     if(!row.symbol?.trim()||!row.currency||row.currency==='XXX'||row.quantity===null)throw new Error('finance_portfolio_review_required');
     const symbol=row.symbol.trim(),exchange=row.exchange?.trim()??'';
-    const matches=workspace.watchlist.filter(asset=>asset.symbol===symbol&&asset.currency===row.currency&&(!exchange||asset.exchange===exchange));
+    const matches=financePortfolioMatchingAssets(workspace.watchlist,row);
     if(matches.length>1)throw new Error('finance_portfolio_identity_ambiguous');
     const asset=matches[0]??{id:`manual:${createHash('sha256').update(JSON.stringify([symbol,exchange,row.currency])).digest('hex').slice(0,32)}`,symbol,name:row.name.trim()||symbol,exchange,currency:row.currency,kind:'other' as const};
     if(seen.has(asset.id))throw new Error('finance_portfolio_duplicate_asset');seen.add(asset.id);

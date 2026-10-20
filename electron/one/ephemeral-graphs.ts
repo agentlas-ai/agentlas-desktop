@@ -1,8 +1,11 @@
 // One-off graphs One saves for a piece of work end with that work; they never stay on as standing automations.
 //
-// Design: work done once runs and ends; work of the same kind that keeps coming back becomes a Toolchain
-// (toolchains/detector.ts), not a pile of saved graphs. Input-triggered graphs saved by a Goal's turns
-// (one-team.one_graph_save, renamed per episode) used to stay on with no end, no Goal and no run limit — the store's end
+// Design: work done once runs and ends. Work that comes back with different inputs (find topics, then let the
+// team discuss; monitor performance) is a graph that stays; a graph that has served three different inputs has proven that and is
+// never switched off here. A Toolchain is something else: a deterministic tool for an app or page the agents keep operating by
+// hand (toolchains/detector.ts). Before this existed:
+// input-triggered graphs were saved again and again by one room's Goal turns
+// (one-team.one_graph_save, renamed per episode), still on, with no end, Goal or run limit — the store's end
 // conditions (markAutomationRun) only finish schedules.
 //
 // Lifetime of an input-triggered graph One saves (one/graph-dispatch.ts marks it here):
@@ -11,22 +14,20 @@
 // Nothing is deleted. The row, its runs and this marker (with the reason and time it was switched off) stay. A graph
 // switched off here that One saves again unchanged, or switches on, starts a fresh lifetime; a graph the owner switches
 // back on by hand is left on. The first sweep also classifies graphs saved before this existed (same rules, the Goal
-// that was open when each was created) and records their structure for the repeated-work detector.
+// that was open when each was created).
 
 import { getDb } from "../store/db";
 import { getAutomation, hasDurableActiveAutomationExecution, hasGraphLoginWait, isToolchainImplementationAutomation,
   listAutomations, toggleAutomation } from "../store/automations";
 import { readToolchainState } from "../toolchains/store";
-import { recordGraphStructureObservation } from "../toolchains/detector-observations";
-import { resolveAutomationGraph } from "../../shared/automation-graph-definition";
-import { graphStructure } from "../../shared/graph-structure";
-import type { Automation, WorkflowGraph } from "../../shared/types";
+import type { Automation } from "../../shared/types";
 
 const MARKER = "automation.ephemeral-graph.v1:";
 const MIGRATION = "migration:ephemeral-command-graphs:v1";
 const SWEEP_INTERVAL_MS = 3_600_000;
-const OBSERVATION_WINDOW_DAYS = 30;
 export const EPHEMERAL_GRAPH_IDLE_DAYS = 3;
+/** Completed runs with this many different inputs make a graph recurring work, not an occasion. */
+export const RECURRING_GRAPH_DISTINCT_INPUTS = 3;
 
 export interface EphemeralGraphMarker {
   schemaVersion: "agentlas.ephemeral-graph.v1";
@@ -40,7 +41,7 @@ export interface EphemeralGraphMarker {
 }
 
 export interface EphemeralSweepResult {
-  migrated: { marked: number; observed: number } | null;
+  migrated: { marked: number } | null;
   disabled: Array<{ automationId: string; reason: "goal_ended" | "idle" }>;
   /** Due but left on this round: running, waiting for a login, queued, or a step of an enabled graph. */
   held: Array<{ automationId: string; reason: string }>;
@@ -85,24 +86,30 @@ export function ephemeralGraphSweptOff(automation: Automation): boolean {
   return !automation.enabled && Boolean(readEphemeralGraphMarker(automation.id)?.disabledAt);
 }
 
-/** Purpose sentence + structure for the repeated-work detector; names never take part (shared/graph-structure.ts). */
-export function recordOneGraphStructure(automation: Pick<Automation, "id" | "name" | "goal">, graph: WorkflowGraph,
-  chatId: string | null, at: string): boolean {
-  const { fingerprint, steps } = graphStructure(graph);
-  return recordGraphStructureObservation({ graphId: automation.id, task: (automation.goal || automation.name || "").trim(),
-    chatId, at, fingerprint, steps });
+/** Whether completed runs of this graph carried at least RECURRING_GRAPH_DISTINCT_INPUTS different inputs (dry runs do not count). */
+export function reusedWithDifferentInputs(automationId: string): boolean {
+  const rows = getDb().prepare(`SELECT payload_json FROM automation_trigger_events WHERE automation_id=? AND trigger_kind='command'
+    AND run_outcome IN ('ok','partial') ORDER BY created_at DESC LIMIT 60`).all(automationId) as Array<{ payload_json: string }>;
+  const inputs = new Set<string>();
+  for (const row of rows) {
+    try {
+      const payload = JSON.parse(row.payload_json) as { input?: unknown; dryRun?: unknown };
+      if (payload.dryRun === true) continue;
+      inputs.add(JSON.stringify(payload.input ?? {}));
+    } catch { /* an unreadable event is no evidence */ }
+  }
+  return inputs.size >= RECURRING_GRAPH_DISTINCT_INPUTS;
 }
 
 interface CandidateRow { id: string; created_at: string; trigger_json: string | null }
 
-/** Once per store: graphs One saved before lifetimes existed get one, and their structure is recorded. */
+/** Once per store: graphs One saved before lifetimes existed get one. */
 function migrateExistingGraphs(now: Date): EphemeralSweepResult["migrated"] {
   const db = getDb();
   if (db.prepare("SELECT 1 FROM meta WHERE key=?").get(MIGRATION)) return null;
   const rows = db.prepare(`SELECT id, created_at, trigger_json FROM automations
     WHERE trigger_type='command' AND created_by='agent' AND graph_json IS NOT NULL ORDER BY created_at`).all() as CandidateRow[];
-  const windowStart = now.getTime() - OBSERVATION_WINDOW_DAYS * 86_400_000;
-  let marked = 0, observed = 0;
+  let marked = 0;
   const graphIds: string[] = [];
   db.transaction(() => {
     for (const row of rows) {
@@ -118,13 +125,11 @@ function migrateExistingGraphs(now: Date): EphemeralSweepResult["migrated"] {
           markedAt: row.created_at, source: "migration", disabledAt: null, disabledReason: null });
         marked++;
       }
-      if (Date.parse(row.created_at) >= windowStart
-        && recordOneGraphStructure(automation, resolveAutomationGraph(automation), originChatId, row.created_at)) observed++;
     }
     db.prepare("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)").run(MIGRATION,
-      JSON.stringify({ at: now.toISOString(), idleDays: EPHEMERAL_GRAPH_IDLE_DAYS, inputGraphs: graphIds.length, marked, observed }));
+      JSON.stringify({ at: now.toISOString(), idleDays: EPHEMERAL_GRAPH_IDLE_DAYS, inputGraphs: graphIds.length, marked }));
   })();
-  return { marked, observed };
+  return { marked };
 }
 
 /** A step of an enabled graph keeps the graph it calls on: switching it off would break the parent. */
@@ -174,6 +179,7 @@ export function sweepEphemeralGraphs(now = new Date()): EphemeralSweepResult {
     const hold = isToolchainImplementationAutomation(automationId) ? "toolchain_implementation"
       : readToolchainState(automationId).interface ? "toolchain_interface"
       : called.has(automationId) ? "called_by_enabled_graph"
+      : reusedWithDifferentInputs(automationId) ? "recurring_work"
       : hasDurableActiveAutomationExecution(automationId, now) || hasGraphLoginWait(automationId) ? "running"
       : db.prepare("SELECT 1 FROM automation_trigger_events WHERE automation_id=? AND status IN ('pending','claimed') LIMIT 1").get(automationId) ? "queued"
       : null;
@@ -193,7 +199,7 @@ export function maybeSweepEphemeralGraphs(now = new Date()): EphemeralSweepResul
   try {
     const result = sweepEphemeralGraphs(now);
     if (result.migrated || result.disabled.length) {
-      console.info(`[automation] one-off graphs: ${result.migrated ? `classified ${result.migrated.marked}, structures ${result.migrated.observed}; ` : ""}`
+      console.info(`[automation] one-off graphs: ${result.migrated ? `classified ${result.migrated.marked}; ` : ""}`
         + `switched off ${result.disabled.length}${result.disabled.length ? ` (${result.disabled.map(item => `${item.automationId.slice(0, 8)}:${item.reason}`).join(", ")})` : ""}`
         + `${result.held.length ? `; held ${result.held.length}` : ""}`);
     }

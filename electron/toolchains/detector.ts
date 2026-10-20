@@ -1,15 +1,21 @@
 // Repeated-work detector: finds work One keeps redoing and lets a model decide whether it is a reusable Toolchain.
 //
 // Toolchains are made automatically from recurring behavior and shared tool-step evidence under model judgment.
-// Pipeline, all in Main, at most one model judgment per day:
-//   1. observation — every empty toolchain_search records its sentence (any host, any runtime: the host dispatch
-//      writes it, not the runtime's event stream, because claude-code events carry no tool arguments);
-//   2. evidence — the tool steps that followed in the same run, classed runtime-independently (shared/toolchain.ts);
-//   3. host gate — sentence cluster × agreeing tool flow × enough distinct runs and sentences (shared/toolchain-detector.ts), minus signals
-//      already judged;
-//   4. judgment — the toolchain-scout system agent: capability / not_common / covered, with a request for the generalizer;
-//   5. authoring — the existing generalizer compares the full catalog (reuse / new_version / new_asset) and saves a draft.
-// A draft becomes callable through host-controlled example validation or successful real-use trials.
+// A Toolchain is a deterministic, MCP-shaped tool for something the owner keeps operating by hand: an app with no MCP (Blender),
+// a web page worked through the browser (posting to Threads). It is not a recurring workflow (that is a Graph) and not one-off
+// work. Two kinds of evidence reach the judgment:
+//   · tool-use episodes (detector-episodes.ts, shared/tool-use-signals.ts) — the operation itself: a site, an app's command line
+//     or a script, with the steps that stay the same from run to run. This is the main source;
+//   · empty toolchain_search sentences — the request itself, for work whose tool use the episodes cannot see.
+// Pipeline, all in Main; the model is asked at most a few judgments and one authoring per day:
+//   1. observation — episodes are harvested from the chat runs' tool events (the 3-day trim would delete them), and every empty
+//      toolchain_search records its sentence (the host dispatch writes it, because a runtime's event stream is not enough);
+//   2. host gate — a count of distinct runs with a stable structure that agrees as a flow (shared/tool-use-signals.ts), or a sentence
+//      cluster with an agreeing tool flow (shared/toolchain-detector.ts), minus signals already judged;
+//   3. judgment — the toolchain-scout system agent: capability / not_common / covered, with a request for the generalizer;
+//   4. authoring — the existing generalizer compares the full catalog (reuse / new_version / new_asset) and saves a draft.
+// A draft becomes callable through successful real-use trials (trial.ts); a callable Toolchain that starts failing is pulled back and
+// repaired (health.ts).
 
 import Ajv from "ajv";
 import { composeDeclaredPrompt } from "../runtime/prompt-order";
@@ -26,9 +32,12 @@ import { generateToolchain } from "./generalizer";
 import { listToolchainAssets, withdrawToolchainAsset } from "./assets";
 import type { ToolchainAsset, ToolchainGenerationResult } from "../../shared/toolchain-asset";
 import { markToolchainTrialRepairRequested, retiredToolchainTrials } from "./trial";
-import { pairGraphObservations, readGraphStructureObservations, readToolchainSearchMisses,
-  type ToolchainSearchMiss } from "./detector-observations";
-import { detectGraphStructureSignals, type GraphStructureMember } from "../../shared/graph-structure-signals";
+import { allTrialLedgers } from "./trial-ledger";
+import { TOOLCHAIN_HEALTH_POLICY } from "../../shared/toolchain-health";
+import { readToolchainSearchMisses, type ToolchainSearchMiss } from "./detector-observations";
+import { harvestToolUseEpisodes, readToolUseEpisodes } from "./detector-episodes";
+import { detectToolUseSignals } from "../../shared/tool-use-signals";
+import { surfaceKind } from "../../shared/tool-use-episodes";
 
 export { recordToolchainSearchMiss } from "./detector-observations";
 
@@ -36,6 +45,8 @@ const VERDICT = "toolchain.detector.verdict.v1:";
 const STATE = "toolchain.detector.state.v1";
 const PASS_INTERVAL_MS = 24 * 3_600_000;
 const JUDGMENT_TIMEOUT_MS = 180_000;
+/** Judgments are cheap and a signal that is not a capability costs the owner nothing; authoring is one per pass. */
+const MAX_JUDGMENTS_PER_PASS = 3;
 const validateScout = new Ajv({ strict: true, allErrors: true }).compile<ToolchainScoutDecision>(TOOLCHAIN_SCOUT_OUTPUT_SCHEMA);
 
 export interface DetectorVerdict extends DetectorVerdictRef {
@@ -116,9 +127,13 @@ function judgmentInput(signal: RepeatSignal, assets: ToolchainAsset[], feedback:
       text: '"catalog":' + JSON.stringify(catalogForJudgment(assets)) },
     { id: "toolchains.scout.user.locale", revision: 1, stability: "configuration", changeTriggers: ["locale"], order: 0,
       text: '"productLanguage":' + JSON.stringify(currentUiLocale()) },
-    { id: "toolchains.scout.user.signal", revision: 1, stability: "turn-context", changeTriggers: ["retrieval"], order: 0,
-      text: '"repeatedWork":' + JSON.stringify({ occurrences: signal.members.length, separateDays: signal.days, separateRuns: signal.runs,
-        sharedToolSteps: signal.commonSteps, varyingDetails: signal.varyingDetails, sentences: representativeTasks(signal) }) },
+    { id: "toolchains.scout.user.signal", revision: 2, stability: "turn-context", changeTriggers: ["retrieval"], order: 0,
+      text: '"repeatedWork":' + JSON.stringify(signal.kind === "episodes"
+        // The operation itself: where it happens, the steps that stay the same, and a few real runs of it (values masked).
+        ? { kind: "tool-use", surface: signal.surface, surfaceKind: surfaceKind(signal.surface ?? ""), occurrences: signal.members.length,
+          separateDays: signal.days, separateRuns: signal.runs, stableSteps: signal.coreSteps, exampleRuns: signal.exemplars }
+        : { occurrences: signal.members.length, separateDays: signal.days, separateRuns: signal.runs,
+          sharedToolSteps: signal.commonSteps, varyingDetails: signal.varyingDetails, sentences: representativeTasks(signal) }) },
     { id: "toolchains.scout.user.feedback", revision: 1, stability: "turn-context", changeTriggers: ["validation-result"], order: 10,
       text: '"feedback":' + JSON.stringify(feedback) },
   ], ",") + "}";
@@ -142,6 +157,13 @@ async function registerDetectorRelease(result: ToolchainGenerationResult): Promi
 async function repairRetiredTrial(signal?: AbortSignal): Promise<Partial<DetectorPassReport> | null> {
   const ledger = retiredToolchainTrials().find(item => !item.repairRequestedAt);
   if (!ledger) return null;
+  // A repair that did not hold is asked again only so many times; after that the asset is retired and the work stays with the agent.
+  const repairsAsked = allTrialLedgers().filter(item => item.toolchainId === ledger.toolchainId && item.repairRequestedAt).length;
+  if (repairsAsked >= TOOLCHAIN_HEALTH_POLICY.maxRepairs) {
+    withdrawToolchainAsset(ledger.toolchainId);
+    markToolchainTrialRepairRequested(ledger.toolchainId, ledger.version);
+    return { outcome: "judged", decision: "retired:repair_budget", toolchainId: ledger.toolchainId };
+  }
   const verdict = readVerdicts().find(item => item.generation?.toolchainId === ledger.toolchainId);
   const failures = ledger.outcomes.filter(outcome => outcome.status !== "succeeded").map(outcome => outcome.error ?? outcome.status).slice(-5);
   let outcome: Partial<DetectorPassReport>;
@@ -179,50 +201,67 @@ async function pass(options: { now?: Date; force?: boolean; signal?: AbortSignal
       + `${result.decision ? ` decision=${result.decision}` : ""}${result.toolchainId ? ` toolchain=${result.toolchainId}` : ""}`);
     return result;
   };
+  // Episodes are kept from the tool events of recent chat runs on every tick: the 3-day detail trim would delete them, and
+  // reading them costs no model call. They are read before the daily spacing below.
+  harvestToolUseEpisodes(now);
   const previous = toolchainDetectorState();
   // The daily spacing limits model calls (judgment, generation, repair). A pass that asked no model (too few observations,
   // nothing new to judge, no meaning embedding) costs nothing and must not hold the next one off: the first pass runs ten
   // minutes after launch, before a fresh install has any observations, and used to block the whole next day.
   const spentDay = previous !== null && (previous.outcome === "judged" || previous.outcome === "failed");
   if (!options.force && previous && spentDay && now.getTime() - Date.parse(previous.at) < PASS_INTERVAL_MS) return { ...report, reason: "interval" };
-  // A draft that failed its real-use trials is repaired before any new signal: one generalizer call, then done.
+  // A draft that failed its real-use trials, or a callable Toolchain pulled back for failing, is repaired before any new signal:
+  // one generalizer call, then done.
   const repaired = await repairRetiredTrial(options.signal);
   if (repaired) return finish(repaired);
   const since = new Date(now.getTime() - TOOLCHAIN_DETECTOR_POLICY.windowDays * 86_400_000).toISOString();
-  // Graphs One saved for one piece of work are observations too (one/ephemeral-graphs.ts): purpose sentence plus
-  // structure, never the name. A search miss the same occurrence left just before is folded into its graph.
-  const { misses, graphs } = pairGraphObservations(readToolchainSearchMisses(since, TOOLCHAIN_DETECTOR_POLICY.maxObservations),
-    readGraphStructureObservations(since, TOOLCHAIN_DETECTOR_POLICY.maxObservations));
-  report.observations = misses.length + graphs.length;
-  if (report.observations < TOOLCHAIN_DETECTOR_POLICY.minMembers) return finish({ outcome: "no_signal", reason: "too_few_observations" });
-  const probe = autoLocalEmbedding((misses[0] ?? graphs[0]).task);
-  // The hashing fallback has no meaning similarity; clustering on it would invent or hide repeats.
-  if (probe.degraded) return finish({ outcome: "skipped", reason: "semantic_embedding_unavailable" });
-  const observations: DetectorObservation[] = misses.map(miss => ({ id: miss.id, task: miss.task, chatId: miss.chatId, at: miss.at,
-    ...traceAfter(miss), vector: autoLocalEmbedding(miss.task).vector }));
-  // Graphs are grouped by structure, not by sentence (shared/graph-structure-signals.ts): their purposes name the item
-  // they were made for, and their trace is their steps rather than the tool calls that followed a search.
-  const graphMembers: GraphStructureMember[] = graphs.map(graph => ({ id: graph.id, task: graph.task, chatId: graph.chatId, at: graph.at,
-    runId: null, trace: graph.steps.slice(0, TOOLCHAIN_DETECTOR_POLICY.traceLength), vector: autoLocalEmbedding(graph.task).vector,
-    fingerprint: graph.fingerprint }));
+  const misses = readToolchainSearchMisses(since, TOOLCHAIN_DETECTOR_POLICY.maxObservations);
+  const episodes = readToolUseEpisodes(since);
+  report.observations = misses.length + episodes.length;
+  // Sentence evidence needs enough searches and a meaning embedding; the hashing fallback has no meaning similarity, and
+  // clustering on it would invent or hide repeats. Episode evidence needs neither.
+  let sentenceReason: string | null = null;
+  let sentenceSignals: RepeatSignal[] = [];
+  if (misses.length < TOOLCHAIN_DETECTOR_POLICY.minMembers) sentenceReason = "too_few_observations";
+  else if (autoLocalEmbedding(misses[0].task).degraded) sentenceReason = "semantic_embedding_unavailable";
+  else {
+    const observations: DetectorObservation[] = misses.map(miss => ({ id: miss.id, task: miss.task, chatId: miss.chatId, at: miss.at,
+      ...traceAfter(miss), vector: autoLocalEmbedding(miss.task).vector }));
+    sentenceSignals = detectRepeatSignals(observations);
+  }
   const verdicts = readVerdicts();
-  const signals = [...detectRepeatSignals(observations), ...detectGraphStructureSignals(graphMembers)]
+  const signals = [...sentenceSignals, ...detectToolUseSignals(episodes)]
     .sort((a, b) => b.runs - a.runs || b.flowCohesion - a.flowCohesion)
     .filter(signal => !signalAlreadyJudged(signal, verdicts, now.getTime()));
   report.signals = signals.length;
-  const signal = signals[0];
-  if (!signal) return finish({ outcome: "no_signal", reason: null });
-  report.judgedKey = signal.key;
+  if (!signals.length) {
+    return finish(!episodes.length && sentenceReason
+      ? { outcome: sentenceReason === "semantic_embedding_unavailable" ? "skipped" : "no_signal", reason: sentenceReason }
+      : { outcome: "no_signal", reason: null });
+  }
+  let last: Partial<DetectorPassReport> = {};
+  for (const signal of signals.slice(0, MAX_JUDGMENTS_PER_PASS)) {
+    options.signal?.throwIfAborted();
+    const step = await judgeAndAuthor(signal, now, options.signal);
+    last = { ...step.report, judgedKey: signal.key };
+    // A capability was authored, or the model could not be asked: the pass is spent either way.
+    if (step.stop) return finish(last);
+  }
+  return finish(last);
+}
+
+/** One signal: the scout's judgment, and for a capability the generalizer's draft. `stop` ends the pass. */
+async function judgeAndAuthor(signal: RepeatSignal, now: Date, abort?: AbortSignal): Promise<{ stop: boolean; report: Partial<DetectorPassReport> }> {
   const deadlineAt = Date.now() + JUDGMENT_TIMEOUT_MS;
   let feedback = "", refusal: string | null = null, decision: ToolchainScoutDecision | null = null;
   try {
     for (let round = 0; round < 2; round++) {
-      options.signal?.throwIfAborted();
+      abort?.throwIfAborted();
       const assets = listToolchainAssets();
       const result = await callToolchainPreparation({ purpose: "repeated-work-detection", systemPrompt: TOOLCHAIN_SCOUT_AGENT.core,
-        input: judgmentInput(signal, assets, feedback), deadlineAt, signal: options.signal,
+        input: judgmentInput(signal, assets, feedback), deadlineAt, signal: abort,
         outputSchema: { name: "agentlas_toolchain_scout", schema: TOOLCHAIN_SCOUT_PROVIDER_SCHEMA } });
-      if (!result.text) return finish({ outcome: "failed", reason: `judgment_unavailable:${result.failure?.kind ?? "empty"}` });
+      if (!result.text) return { stop: true, report: { outcome: "failed", reason: `judgment_unavailable:${result.failure?.kind ?? "empty"}` } };
       try { decision = parseScout(result.text); } catch (error) {
         refusal = error instanceof Error ? error.message.slice(0, 200) : "toolchain_scout_shape_invalid";
         decision = null; feedback = `Host rejected the answer: ${refusal}. Answer again in the schema.`; continue;
@@ -234,38 +273,40 @@ async function pass(options: { now?: Date; force?: boolean; signal?: AbortSignal
     }
   } catch (error) {
     // Pool not configured, no verified runtime, budget: nothing was decided, so the signal stays unjudged.
-    return finish({ outcome: "failed", reason: error instanceof Error ? error.message.slice(0, 200) : "judgment_failed" });
+    return { stop: true, report: { outcome: "failed", reason: error instanceof Error ? error.message.slice(0, 200) : "judgment_failed" } };
   }
   const verdict: DetectorVerdict = { key: signal.key, at: now.toISOString(), decision: decision?.decision ?? "refused",
     centroid: signal.centroid, memberIds: signal.memberIds, rationale: decision?.rationale ?? "",
     capabilityName: decision?.capabilityName ?? null, coveredToolchainId: decision?.coveredToolchainId ?? null,
     capabilityRequest: decision?.capabilityRequest ?? null,
     memberRunIds: [...new Set(signal.members.flatMap(member => member.runId ? [member.runId] : []))],
+    ...(signal.surface ? { surface: signal.surface, coreTokens: signal.commonSteps } : {}),
     generation: null, refusal: decision ? null : refusal };
   if (decision?.decision !== "capability") {
     writeVerdict(verdict);
-    return finish({ outcome: "judged", decision: verdict.decision, toolchainId: verdict.coveredToolchainId });
+    // Not a capability costs the owner nothing: the next signal may be asked in the same pass.
+    return { stop: false, report: { outcome: "judged", decision: verdict.decision, toolchainId: verdict.coveredToolchainId } };
   }
   try {
     const generated = await generateToolchain({ request: decision.capabilityRequest!, requestId: `detector-${signal.key}` },
-      { callerChatId: signal.dominantChatId, signal: options.signal });
+      { callerChatId: signal.dominantChatId, signal: abort });
     const contractName = generated.asset.versions.find(version => version.version === generated.version)?.contract.name ?? generated.asset.name;
     const leaked = generated.decision === "reuse" ? [] : leakedInstanceDetails(contractName, signal.varyingDetails);
     if (leaked.length && generated.decision === "new_asset") {
       // The generalizer named the asset after one occurrence: the copy problem this detector exists to stop.
       withdrawToolchainAsset(generated.asset.id);
       writeVerdict({ ...verdict, decision: "refused", refusal: `generated_name_contains_instance_details:${leaked.join(",")}` });
-      return finish({ outcome: "judged", decision: "refused", reason: "generated_name_contains_instance_details", toolchainId: generated.asset.id });
+      return { stop: true, report: { outcome: "judged", decision: "refused", reason: "generated_name_contains_instance_details", toolchainId: generated.asset.id } };
     }
     await registerDetectorRelease(generated);
     writeVerdict({ ...verdict, generation: { decision: generated.decision, toolchainId: generated.asset.id, version: generated.version } });
-    return finish({ outcome: "judged", decision: `capability:${generated.decision}`, toolchainId: generated.asset.id });
+    return { stop: true, report: { outcome: "judged", decision: `capability:${generated.decision}`, toolchainId: generated.asset.id } };
   } catch (error) {
     // Generation failed after a capability judgment. The verdict cools down like a refusal so a generalizer that keeps
     // failing on this signal is not asked again every day.
     const reason = error instanceof Error ? error.message.slice(0, 200) : "generation_failed";
     writeVerdict({ ...verdict, decision: "generation_failed", refusal: reason });
-    return finish({ outcome: "failed", decision: "capability", reason });
+    return { stop: true, report: { outcome: "failed", decision: "capability", reason } };
   }
 }
 

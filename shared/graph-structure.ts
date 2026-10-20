@@ -26,6 +26,7 @@ export function graphStepToken(node: WorkflowNode): string {
   }
   const mcp = config.mcpCall as Record<string, unknown> | undefined;
   if (mcp && typeof mcp === "object") return `mcp:${text(mcp.catalogId) || "?"}/${text(mcp.toolName) || "?"}:${effect}`;
+  // judgment-exempt: 효과·권한을 판정하지 않는다 — 반복 감지용 구조 지문에 노드 종류를 토큰으로 적을 뿐이다.
   if (node.type === "agent" || node.type === "action") {
     const needs = Array.isArray(config.needs)
       ? config.needs.map(need => text((need as Record<string, unknown>)?.capability)).filter(Boolean).sort() : [];

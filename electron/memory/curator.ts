@@ -27,7 +27,7 @@ import type { MemoryKind, MemoryScope } from "../architecture/manifest";
 import { tryRecordRunEvent } from "../store/run-events";
 import { currentUiLocale } from "../ui-locale";
 import { policyTurnSummary } from "./policy-turn-summary";
-import { machineObservationRefs } from "./machine-observations";
+import { runEvidenceRef } from "./run-evidence";
 
 // Secret/credential detection — events matching these are dropped, never stored.
 // Shared with every other write boundary; this file used to carry its own shorter list that
@@ -378,8 +378,8 @@ function evidenceWithSourceProvenance(ev: RawMemoryEvent, ctx: CurationContext):
   // legacy integrations may omit evidence_refs; preserve the former empty-list behavior.
   const evidence = (ev.evidence_refs ?? []).slice();
   if (ctx.sourceProvenance) evidence.push(`source:${ctx.sourceProvenance}`);
-  // Host-recorded references for the run this came from (machine-observations.ts); never model text.
-  evidence.push(...machineObservationRefs(ctx.runId));
+  // The run this came from, so the lesson's recurrence can be counted (run-evidence.ts); never model text.
+  evidence.push(...runEvidenceRef(ctx.runId));
   return [...new Set(evidence)];
 }
 

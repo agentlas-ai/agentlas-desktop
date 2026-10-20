@@ -118,6 +118,8 @@ export function classifyGoalSurfaceStatus(input: GoalSurfaceStatusInput): GoalSu
     return { ...fallback, state: "blocked" };
   }
   if (status === "waiting_user") return { ...fallback, state: "needs_owner" };
+  // A Goal held for the owner's answer to its own question (waiting_tool + the question code) is waiting for the owner, not operating.
+  if (display === "needs_owner") return { ...fallback, state: "needs_owner" };
   // Waiting for the next scheduled cycle, a watched result, a worker or a host-owned retry is the goal operating.
   if (wait?.state === "pending") return { ...fallback, state: "active_idle" };
   if (status === "waiting_worker" || status === "waiting_tool") return { ...fallback, state: "active_idle" };

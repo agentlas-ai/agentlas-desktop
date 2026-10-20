@@ -493,6 +493,8 @@ export async function uiUpdate(args: Record<string, unknown>, ctx: UiCallContext
     const prevPresentation = previous.presentation;
     const next: UiInstanceRevision = {
       ...previous,
+      // A native view that shows the latest of several calls (a report built over many steps) moves to the call that produced it.
+      ...(str(args.callId) && previous.presentation.kind !== "mcp-app" ? { callId: str(args.callId) } : {}),
       resultRef: content ? `ui-content:${contentDigest(content)}` : str(args.resultRef) || previous.resultRef,
       revision,
       state: (["running", "ready", "awaiting-input", "failed", "cancelled"] as const).find((s) => s === args.state) ?? previous.state,

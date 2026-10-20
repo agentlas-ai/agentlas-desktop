@@ -20,14 +20,28 @@ export type GoalDisplayState = "running" | "paused" | "needs_owner" | "blocked" 
 export const GOAL_HOST_PAUSE_REASONS: ReadonlySet<string> = new Set(["app_closed", "crash_recovery", "runtime_unavailable", "agent_paused"]);
 /** Pauses that need the owner's consent or grant. */
 export const GOAL_OWNER_NEEDED_PAUSE_REASONS: ReadonlySet<string> = new Set(["approval_required", "budget"]);
+/** The typed code of a Goal that asked the owner a question (blocked reason, hold marker and ledger event payload). */
+export const GOAL_OWNER_ANSWER_REQUIRED = "goal_owner_answer_required";
 /** Blocked reasons that are a question to the owner. */
-export const GOAL_OWNER_QUESTION_REASONS: ReadonlySet<string> = new Set(["goal_owner_answer_required"]);
+export const GOAL_OWNER_QUESTION_REASONS: ReadonlySet<string> = new Set([GOAL_OWNER_ANSWER_REQUIRED]);
 
 /** A host review has no implied pending question. */
 export const GOAL_OWNER_REVIEW_REASONS: ReadonlySet<string> = new Set(["auto_goal_owner_review_required"]);
+
+/**
+ * A Goal held for the owner's answer to its own question.
+ * The host never lets a Goal rest as `blocked` or `waiting_user` (store/long-runs.ts resolveNonBlockingGoalStatus), so the
+ * hold is the allowed resting status `waiting_tool` carrying the question code in blocked_reason. Every status transition
+ * rewrites blocked_reason, so the hold cannot outlive the state it describes. Nothing wakes a held Goal on its own; the
+ * owner's next message, or the sweep noticing that the owner spoke through a channel that cannot reopen a Goal, ends it.
+ */
+export function goalHeldForOwnerAnswer(goal: { status: string | null | undefined; blockedReason?: string | null }): boolean {
+  return goal.status === "waiting_tool" && GOAL_OWNER_QUESTION_REASONS.has(goal.blockedReason ?? "");
+}
+
 export type GoalOwnerAttention = "question" | "review" | "approval" | "budget";
 export function goalOwnerAttention(input: { status: string | null | undefined; pauseReason?: string | null; blockedReason?: string | null }): GoalOwnerAttention | null {
-  if (input.status === "waiting_user") return "question";
+  if (input.status === "waiting_user" || goalHeldForOwnerAnswer(input)) return "question";
   if (input.status === "blocked") {
     if (GOAL_OWNER_QUESTION_REASONS.has(input.blockedReason ?? "")) return "question";
     if (GOAL_OWNER_REVIEW_REASONS.has(input.blockedReason ?? "")) return "review";
@@ -53,7 +67,7 @@ export function goalDisplayState(input: { status: string | null | undefined; pau
     return status === "pausing" && pauseReason !== "user" ? "running" : "paused";
   }
   if (status === "blocked") return goalOwnerAttention(input) ? "needs_owner" : "blocked";
-  if (status === "waiting_user") return "needs_owner";
+  if (status === "waiting_user" || goalHeldForOwnerAnswer(input)) return "needs_owner";
   if (RUNNING_STATUSES.has(status)) return "running";
   return "none";
 }
@@ -70,6 +84,8 @@ export const GOAL_SPINNING_STATUSES = ["queued", "running", "waiting_worker", "w
 export function stoppedGoalMessageReopens(goal: { status: string; blockedReason?: string | null },
   taskIntent: string | undefined): { reopens: boolean; ownerAnswer: boolean } {
   if (goal.status !== "blocked" && goal.status !== "paused" && goal.status !== "waiting_tool") return { reopens: false, ownerAnswer: false };
-  const ownerAnswer = goal.status === "blocked" && GOAL_OWNER_QUESTION_REASONS.has(goal.blockedReason ?? "");
+  // Any reply to a Goal's own question is the answer, however short ("승인" once left a Goal waiting for a manual resume).
+  // A held Goal (waiting_tool + question code) is the same situation.
+  const ownerAnswer = (goal.status === "blocked" || goal.status === "waiting_tool") && GOAL_OWNER_QUESTION_REASONS.has(goal.blockedReason ?? "");
   return { reopens: taskIntent !== "conversation" || ownerAnswer, ownerAnswer };
 }

@@ -69,7 +69,8 @@ export async function searchYahooFinanceAssets(query:string,options:YahooMarketO
       let asset:FinanceAsset={id:`yahoo:${encodeURIComponent(symbol)}`,symbol,name:text(hit.longname)||text(hit.shortname)||symbol,exchange:text(hit.exchange,80),currency:'XXX',kind:kind(hit.quoteType)};
       try{const {meta}=parseChart(await fetchJson(chartUrl(symbol,'5d'),options),symbol);const exchange=text(meta.exchangeName,80);if(exchange!==asset.exchange||kind(meta.instrumentType)!==asset.kind)throw new Error('finance_yahoo_identity_mismatch');asset={...asset,currency:currency(meta.currency)??'XXX'};}catch(error){abort(options.signal);warnings.push(`${symbol}: ${failure(error)}`);}
       assets.push(asset);
-    }return{assets,provider:'Free market data · Yahoo chart',asOf:null,warnings};
+    }if(!assets.length&&/[^\u0000-\u024f]/.test(normalized))warnings.push('finance_yahoo_search_latin_script_only: the provider matches Latin-script company names and tickers; search again with the English name or the ticker.');
+    return{assets,provider:'Free market data · Yahoo chart',asOf:null,warnings};
   }catch(error){abort(options.signal);return{assets:[],provider:'Free market data · Yahoo chart',asOf:null,warnings:[...warnings,failure(error)]};}
 }
 export async function queryYahooFinanceData(input:FinanceDataRequest,assets:FinanceAsset[],options:YahooMarketOptions={}):Promise<FinanceDataResult>{

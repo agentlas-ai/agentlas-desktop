@@ -19,7 +19,8 @@ import { latestRuntimePlan } from "./plan";
 import { restoreExactDesktopRuntimeSelection } from "./exact-runtime-binding";
 import { listAgentSurfaces } from "../store/agent-surfaces";
 import { appendLongRunEvent, getLongRun, getLongRunAttemptGoalRevision, getLongRunGoalRevisionBinding, transitionLongRun,
-  listLongRunTasks, pendingBlockedGoalRetry, recordLongRunCycle, scheduleBlockedGoalRetry, nextBlockedGoalRetrySlot, longRunOwnerHold } from "../store/long-runs";
+  listLongRunTasks, pendingBlockedGoalRetry, recordLongRunCycle, scheduleBlockedGoalRetry, nextBlockedGoalRetrySlot, longRunOwnerHold,
+  goalOwnerAnswerHold } from "../store/long-runs";
 import { desktopAppInstanceId, assertDesktopLongRunAdmissionOpen } from "./app-runtime-coordinator";
 import { latestTaskCheckpoint, recordTaskCheckpoint } from "./checkpoint";
 import { reconcileHostPausedLongRuns } from "./startup-reconciler";
@@ -40,7 +41,7 @@ export interface CheckpointStartupResult {
 
 function scheduleStartupContinuation(runId: string, reason: string): boolean {
   const run = getLongRun(runId);
-  if (!run || longRunOwnerHold(runId) || !["blocked", "queued", "running", "paused", "waiting_tool"].includes(run.status)
+  if (!run || longRunOwnerHold(runId) || goalOwnerAnswerHold(runId) || !["blocked", "queued", "running", "paused", "waiting_tool"].includes(run.status)
     || (run.status === "paused" && !["app_closed", "crash_recovery", "runtime_unavailable"].includes(run.pauseReason ?? ""))) return false;
   const slot = nextBlockedGoalRetrySlot(runId, Date.now(), { startup: true });
   scheduleBlockedGoalRetry({ runId, expectedVersion: run.version, kind: "resume", fromReason: reason,

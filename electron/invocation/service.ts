@@ -6,6 +6,7 @@ import type { NativeOwnerTextBinding, NativeOwnerTextInput, NativeOwnerTextRecei
 import { withNativeApprovalExecution } from "../runtime/native-approval-provenance";
 import { invocationRunPriority, withRunPriority } from "../runtime/run-priority";
 import { getAuthenticatedActorIds, onAuthSessionOwnershipChanged, onAuthSessionRestored } from "../auth";
+import { assertFinanceWorkChatOwner } from "../finance/work-project";
 import { agentContextOwnerBinding } from "../runtime/agent-context-admission";
 import { buildTeamSessionHandoff, teamDispatchReceiverCurrent } from "../one/session-handoff";
 import { takeNativeInvocationIngressSource, validateNativeIngressRequest, type NativeInvocationIngressSource, type NativeIngressBinding, type NativeIngressPrepared } from "./native-ingress-source";
@@ -79,7 +80,7 @@ import {
   settleLongRunWorkerAttempt,
   startLongRunWorkerAttempt,
   transitionLongRun, liveLongRunAttemptCount,
-  longRunOwnerHold, scheduleBlockedGoalRetry, pendingBlockedGoalRetry, consecutiveGoalTurnFollowUps, goalTurnFollowUpPlan } from "../store/long-runs";
+  longRunOwnerHold, goalOwnerAnswerHold, holdGoalForOwnerAnswer, scheduleBlockedGoalRetry, pendingBlockedGoalRetry, consecutiveGoalTurnFollowUps, goalTurnFollowUpPlan } from "../store/long-runs";
 import { armChatGoalContract, completeChatGoalContract, defineChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapshot, migrateLegacyGoalLifecycle } from "../store/chat-goals";
 import { automaticGoalReplayBlockerCode, prepareInvocationAutomaticGoal } from "./automatic-goal";
 import { classifyAndHandGoalIntakeToMain } from "./goal-intake-forward";
@@ -165,6 +166,7 @@ import { ownerVisiblePrompt } from "../one/owner-prompt";
 import { claimDeferredSystemRelays, deferSystemRelay, peekDeferredSystemRelays, releaseDeferredSystemRelays } from "./deferred-system-relays";
 import { chatFilePrompt, chatFileImages, validateChatAttachmentSelection, listChatFileSnapshot } from "../store/chat-message-attachments";
 import { findAutomationByGoalId, toggleAutomation } from "../store/automations";
+import { GOAL_CONTINUATION_HOST_WAKE } from "../store/goal-continuation-rows";
 import { acknowledgeGoalExecutionResume, captureNativeGoalStopOwner, currentAutomationGoalExecutionOwnerMatches, nativeGoalStopOwnerMatches, snapshotAutomationGoalRunStops,
   stopKnownAutomationGoalRuns, type NativeGoalStopOwner } from "../automation-execution-control";
 import { stopWorkspacePreviewsForTaskScope } from "../workspace-preview/control-server";
@@ -2923,6 +2925,7 @@ export class InvocationService {
     oneTeamReportCustody?: QueuedTeamReportCustody,
   ): Generator<NativeOneStartCheckpoint, InvocationStartResult, unknown> {
     const nativePreparation = nativeController ? this.nativePreparing.get(req.runId!) : undefined;
+    assertFinanceWorkChatOwner(req.chatId, getAuthenticatedActorIds());
     mainAdmission = takeMainInvocationAdmission(mainAdmission);
     assertDesktopOneRecoveryStart(req);
     if(req.oneTeamReportTurn===true && !queuedTeamReportCurrent(oneTeamReportCustody,req))throw new Error("one_team_report_owner_unbound");
@@ -5701,19 +5704,25 @@ export class InvocationService {
           const current = getLongRunByGoalId(turnGoalId);
           if (current && current.surface !== "science" && current.status === "running" && !longRunOwnerHold(current.id)) {
             if (record.pendingQuestion) {
-              // The turn asked the owner; the question card is the way out and answering resumes the Goal.
-              appendLongRunEvent({ runId: current.id, kind: "run.owner_answer_pending", actorKind: "host", payload: { reason: "goal_owner_answer_required" } });
-              this.scheduleGoalContinuation(current.goalId, record, "goal_owner_answer_required");
-            } else if (!result.goalEpisodeYield && findAutomationByGoalId(turnGoalId)?.enabled) {
-
-
-
-
-
-              const armed = Boolean(findAutomationByGoalId(turnGoalId)?.nextRunAt);
-              transitionLongRun({ runId: current.id, to: "waiting_tool", actorKind: "host",
-                reason: armed ? "goal_continuation_scheduled" : "goal_continuation_unarmed" });
-              if (!armed) this.scheduleGoalContinuation(current.goalId, record, "goal_continuation_unarmed");
+              // The turn asked the owner: this Goal waits for the answer (other work goes on
+              // meanwhile). It is held, not scheduled: nothing wakes it to ask the same card again, and its Work project's
+              // provider stays free for the owner's other conversations. The answer (any owner message here) reopens it, and the
+              // blocked-goal sweep releases it when the owner answered where a Goal cannot reopen (the phone, Telegram).
+              try {
+                holdGoalForOwnerAnswer({ runId: current.id, invocationRunId: runId, appInstanceId: desktopAppInstanceId() });
+              } catch (error) {
+                // A hold that cannot be written must never leave the Goal "running" with no attempt: use the spaced follow-up.
+                console.warn("[long-run] owner-answer hold unavailable; scheduling the spaced follow-up instead:", error);
+                appendLongRunEvent({ runId: current.id, kind: "run.owner_answer_pending", actorKind: "host", payload: { reason: "goal_owner_answer_required", held: false } });
+                this.scheduleGoalContinuation(current.goalId, record, "goal_owner_answer_required");
+              }
+            } else if (!result.goalEpisodeYield && result.goalHostWakeRequested?.goalId === turnGoalId) {
+              // The turn ended with safe work left on this finite Goal: the host wakes the next episode itself (spaced
+              // follow-up → blocked-goal sweep). No automation owns it any more (a Goal continuation is
+              // not a graph). An enabled "Goal continuation" row used to own this step; such rows
+              // could have next_run_at NULL and wake nobody.
+              transitionLongRun({ runId: current.id, to: "waiting_tool", actorKind: "host", reason: GOAL_CONTINUATION_HOST_WAKE });
+              this.scheduleGoalContinuation(current.goalId, record, GOAL_CONTINUATION_HOST_WAKE);
             } else {
               completionClaim = { claimed: true, goalId: turnGoalId,
                 evidence: "Goal turn ended without a completion claim: verify the durable terminal result against all criteria." };
@@ -6307,6 +6316,8 @@ export class InvocationService {
       const run = getLongRunByGoalId(goalId);
       if (!run || run.surface === "science" || LONG_RUN_TERMINAL_STATUSES.has(run.status)
         || longRunOwnerHold(run.id) || getChat(record.chatId)?.goalId !== goalId) return;
+      // A Goal held for the owner's answer is woken by nobody; the turn-end calls that follow the question must not undo that.
+      if (goalOwnerAnswerHold(run.id)) return;
       if (automaticGoalReplayBlockerCode(run.id)) return;
       const wait = latestGoalWaitSubscription(goalId);
       if (wait && ["pending", "claimed"].includes(wait.state)) return;

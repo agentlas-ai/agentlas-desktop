@@ -121,8 +121,9 @@ export interface AgiBlockerFacts {
   /** Evidence refs the fact reader already resolved (long_run_events seq, run ids, log line ids). */
   evidenceRefs?: readonly string[];
   /**
-   * The goal has a continuation automation with a recorded run, the only thing switch_runtime can move
-   * (electron/agi/wiring.ts recordAgiMove). false = that move is structurally refused. Absent = unknown, not refused.
+   * The goal has a live (not a retired Goal continuation row) automation with a recorded run, the only thing switch_runtime
+   * can move (goal-facts.ts goalRuntimeSwitchTarget, used by electron/agi/wiring.ts recordAgiMove). A Goal's own wake is the
+   * host's, so this is false for every Goal today: that move is structurally refused and not proposed. Absent = unknown, not refused.
    */
   continuationAutomation?: boolean;
 }
@@ -158,6 +159,12 @@ export interface AgiBlockerDiagnosis {
   evidenceRefs: string[];
   /** Why the class was chosen, a finite vocabulary. */
   reasonCode: string;
+  /**
+   * The machine code of the primary signal (a failed run's receipt code, a browser ladder stop `browser_ladder:<code>`, a tool crash code).
+   * Host-only, never projected to the model. use_native_harness is decided from it (agiHarnessCapability); absent on an incident opened
+   * before it existed, and absent means "unknown", which never hands anything to the runtime's own tools.
+   */
+  signalCode?: string;
   /**
    * Present only when a signal's code is one an app restart actually clears (AGI_APP_RESTART_CAUSES). The executor
    * refuses request_app_restart without it (agi.app-restart.not-indicated). Host-only: never projected to the model.
@@ -279,11 +286,39 @@ export function agiEligibleTactics(tactics: readonly AgiTacticFact[] | undefined
 
 
  */
-export function agiHarnessCapability(d: Pick<AgiBlockerDiagnosis, "primarySignal" | "causeKind">): "browser" | "tool" | null {
-  if (d.primarySignal === "browser_unavailable") return "browser";
-  if (d.primarySignal === "tool_crash") return "tool";
-  if (d.primarySignal === "run_failed" && (d.causeKind === "tool_refused" || d.causeKind === "tool_missing")) return "tool";
-  return null;
+export function agiHarnessCapability(d: Pick<AgiBlockerDiagnosis, "primarySignal" | "causeKind"> & Partial<Pick<AgiBlockerDiagnosis, "signalCode" | "defects">>): "browser" | "tool" | null {
+  const capability = d.primarySignal === "browser_unavailable" ? "browser"
+    : d.primarySignal === "tool_crash" ? "tool"
+      : d.primarySignal === "run_failed" && (d.causeKind === "tool_refused" || d.causeKind === "tool_missing") ? "tool" : null;
+  if (!capability) return null;
+  // A browser incident opened before signalCode existed still names its code in the typed defect it filed.
+  const code = d.signalCode ?? d.defects?.find((defect) => defect.code.startsWith("browser_unavailable:"))?.code.slice("browser_unavailable:".length);
+  return agiHarnessBypassAllowed(capability, code) ? capability : null;
+}
+
+/**
+ * Browser ladder stops (electron/browser/fallback-ladder.ts BROWSER_FAILURE_CODES) that mean the Agentlas browser TOOL broke: a cut
+ * bridge, a browser that would not start or died, the in-app guest or session gone, a refused tab, the MCP not attached, a failed
+ * native call. Only these may be answered with the runtime's own tools. Not here, on purpose: ownership-unverifiable (the host could not
+ * prove whose browser it is) and port-foreign (a browser outside the Agentlas profile is never driven) are safety verdicts, login-wall
+ * and human-check-required are the owner's, and page-load-failed is the site, not the tool.
+ */
+export const AGI_HARNESS_TOOL_BREAKAGE_LADDER_CODES: ReadonlySet<string> = new Set([
+  "bridge-wire-dropped", "chrome-launch-failed", "chrome-crashed", "native-session-ended", "native-tab-limit", "native-guest-destroyed",
+  "browser-mcp-not-attached", "native-tool-failed",
+]);
+/** A code that names an ownership, consent, approval, credential, security or human-check verdict: never a tool breakage. */
+const HARNESS_VERDICT_CODE = /ownership|unverifiable|consent|approv|denied|forbidden|not[_-]?allowed|permission|security|foreign|human[_-]?check|captcha|login|sign[_-]?in|auth|credential|payment|wall/i;
+
+/**
+ * May the runtime's own tools (shell, direct API, built-in web) answer this failure? Only a tool that BROKE (a crash, a missing
+ * tool, a plain refusal by the Agentlas tool itself, a dead browser bridge); a verdict the host or the owner made is never bypassed
+ * (the old rule handed every stop over, ownership-unverifiable included). An unknown code is not allowed.
+ */
+export function agiHarnessBypassAllowed(capability: "browser" | "tool", code: string | null | undefined): boolean {
+  if (!code) return false;
+  if (capability === "browser" && code.startsWith("browser_ladder:")) return AGI_HARNESS_TOOL_BREAKAGE_LADDER_CODES.has(code.slice("browser_ladder:".length));
+  return !HARNESS_VERDICT_CODE.test(code);
 }
 
 /** Failed-run receipt codes → cause (typed families only; unknown codes stay unknown). */
@@ -326,6 +361,7 @@ export function classifyAgiBlocker(facts: AgiBlockerFacts): AgiBlockerDiagnosis 
     const { signal, ...rest } = partial;
     // our_defect requires evidence (plan §3.6); every defect finding is filed.
     const evidenceRefs = refsOf(facts, signal);
+    const signalCode = signal && "code" in signal && typeof signal.code === "string" ? signal.code : undefined;
     let ownerClass = rest.ownerClass;
     let boundary = rest.boundary;
     // human_only requires a named boundary; otherwise it is agent-resolvable (same rule as stall-replan.ts).
@@ -333,13 +369,18 @@ export function classifyAgiBlocker(facts: AgiBlockerFacts): AgiBlockerDiagnosis 
     if (ownerClass === "our_defect" && !evidenceRefs.length) ownerClass = "agent_resolvable";
     if (ownerClass !== "human_only") boundary = null;
     // G1: an ask is admissible only after at least one alternative path; the classifier never lists it first.
-    let altPaths = rest.altPaths.filter((action, index, list) => list.indexOf(action) === index);
+    // A path the host refuses by this goal's structure every time is not proposed (switch_runtime without a live automation to move:
+    // the host wakes a Goal itself now, so there is nothing to switch). Unknown facts keep it (pathAdmissible).
+    let altPaths = rest.altPaths.filter((action, index, list) => list.indexOf(action) === index
+      && (action !== "switch_runtime" || pathAdmissible(action, facts, eligibleTactics)));
     if (altPaths[0] === "ask_owner_once") altPaths = [...altPaths.slice(1), "ask_owner_once"];
     if (altPaths.includes("ask_owner_once") && !altPaths.some((action) => !AGI_NON_ALTERNATIVE_ACTIONS.has(action))) {
       altPaths = eligibleTactics.length && goalContinuationAdmissible(facts.status, facts.pauseReason)
         ? ["start_work_turn", ...altPaths] : ["replan_tree", ...altPaths];
     }
     if ((ownerClass === "our_defect" || defects.length) && !altPaths.includes("file_defect")) altPaths.push("file_defect");
+    // A boundary the owner must cross is not a place to start model-briefed teammate work (executor: agi.team.human-only-incident).
+    if (ownerClass === "human_only") altPaths = altPaths.filter((action) => action !== "dispatch_teammate" && action !== "create_teammate");
     // An unresolved action is an incident, not a stop for the whole Goal.
     // The work controller can pick another tactic while this incident is repaired.
     // Offer a work turn only when the host can continue the Goal now (shared/goal-continuation.ts); otherwise the
@@ -353,11 +394,12 @@ export function classifyAgiBlocker(facts: AgiBlockerFacts): AgiBlockerDiagnosis 
       && boundary !== "owner_stop"
       && altPaths.filter((action) => !AGI_NON_ALTERNATIVE_ACTIONS.has(action)).every((action) => STRUCTURAL_PATHS.has(action) && !pathAdmissible(action, facts, eligibleTactics))) {
       return { schemaVersion: AGI_BLOCKER_SCHEMA, goalId: facts.goalId, stateDigest, eligibleTactics, branchReadiness: facts.planReadiness?.branches.map(({ evidenceRefs: _refs, ...branch }) => branch), defects, evidenceRefs,
-        ...rest, display: "needs_owner", attemptDue: false, ownerClass, boundary, altPaths: [], reasonCode: AGI_NO_ADMISSIBLE_PATH, ...appRestart };
+        ...rest, display: "needs_owner", attemptDue: false, ownerClass, boundary, altPaths: [], reasonCode: AGI_NO_ADMISSIBLE_PATH, ...appRestart,
+        ...(signalCode ? { signalCode } : {}) };
     }
     return { schemaVersion: AGI_BLOCKER_SCHEMA, goalId: facts.goalId, stateDigest, eligibleTactics, branchReadiness: facts.planReadiness?.branches.map(({ evidenceRefs: _refs, ...branch }) => branch), defects, evidenceRefs,
       ...rest, display: rest.attemptDue && boundary !== "owner_stop" ? "running" : rest.display,
-      ownerClass, boundary, altPaths, ...appRestart };
+      ownerClass, boundary, altPaths, ...appRestart, ...(signalCode ? { signalCode } : {}) };
   };
   const branchWork: AgiActionKind[] = eligibleTactics.length ? ["start_work_turn", "dispatch_teammate", "create_teammate"] : [];
 

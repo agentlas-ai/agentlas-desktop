@@ -29,6 +29,7 @@ export function financeCalculationArtifact(artifact:FinanceComputeArtifact & {in
 }
 export function financeConversationArtifact(results:FinanceDataResult[],workspace:FinanceWorkspace,title:string,kind:'chart'|'report'|'newsletter',narrative:string,presentation:FinanceArtifactPresentation={}):FinanceArtifactDraft{
  const language=presentation.language?FinanceReportLanguageSchema.parse(presentation.language):undefined;
+ const narrativeOnly=results.length===0&&kind==='report'&&!!narrative.trim();
  const now=new Date().toISOString(),operations:FinanceOperation[]=[],sections:FinanceReportSection[]=[];
  if(narrative.trim())sections.push({id:financeId('section'),title:title.slice(0,300),kind:'summary',presentation:'narrative',narrative:narrative.slice(0,20000),widget:null,projection:null});
  for(const [resultIndex,result] of results.entries()){
@@ -39,7 +40,7 @@ export function financeConversationArtifact(results:FinanceDataResult[],workspac
   const chart=widget.chartType!=='table',comparison=presentation.comparisonIndexes?.includes(resultIndex)??false;
   sections.push({id:financeId('section'),title,kind:chart||comparison?'widget':'sources',presentation:chart?'chart':comparison?'comparison':'supporting',narrative:'',widget,projection:{columns:result.columns,rows:result.rows,status:result.status==='ok'?'ready':'partial',warnings:result.warnings,asOf:result.asOf,sourceIds:[sourceId]}});
  }
- if(!sections.some(section=>section.projection?.rows.length))throw new Error('finance_artifact_evidence_required');
+ if(!narrativeOnly&&!sections.some(section=>section.projection?.rows.length))throw new Error('finance_artifact_evidence_required');
  if(!sections.some(section=>section.presentation!=='supporting'))throw new Error('finance_artifact_visual_or_narrative_required');
  const report:FinanceReport={id:financeId('report'),...(language?{language}:{}),title:title.slice(0,300),createdAt:now,sourceRevision:workspace.revision,reviewPending:true,sections,dashboardSnapshot:null,parentReportId:null};
  operations.push({type:'report.add',report});return{operations,reportId:report.id,title:report.title,kind};

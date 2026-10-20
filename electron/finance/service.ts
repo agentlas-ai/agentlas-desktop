@@ -19,9 +19,9 @@ import { FinancePlanningReviews } from './planning-review';
 import { financeBuiltinPlugin } from './builtin-plugin';
 import { FINANCE_NOTICE_VERSION } from '../../shared/finance-experience';
 import type { FinancePlanningResult } from '../../shared/finance-planning';
-import type { FinancePortfolioValuation } from './portfolio-valuation';
+import type { FinancePortfolioValuation, FinancePortfolioValuationPresentation } from './portfolio-valuation';
 import { discoverFinanceAssets } from './discovery';
-import { FinanceAskRequestSchema, type FinanceAskRequest } from '../../shared/finance';
+import { FinanceAskRequestSchema, type FinanceAsset, type FinanceAskRequest } from '../../shared/finance';
 import type { FinanceAnalystRequest, FinanceAnalystRef } from '../../shared/finance-analysts';
 import { FinanceAnalystLibrary } from './analysts';
 import { calculateFromFinanceSources } from './calculation-service';
@@ -167,7 +167,11 @@ export class FinanceService {
     if(financeSearchRouteKey(current)!==lease.route)throw new Error('finance_search_selection_stale');
     this.searchCatalog.register(scope,lease,result);return result;
   }
-  async query(scope: FinanceScope,input:FinanceDataRequest) { const workspace=await this.store.load(scope);const route={...await this.experience.consent(scope),assertCurrent:()=>scope.assertCurrent()};scope.assertCurrent();const result=await queryFinanceData(input,workspace.watchlist,route);scope.assertCurrent();return result; }
+  /** Saved assets and this owner's live search results (host memory, 15 minutes): looking an asset up never has to save it. */
+  private queryAssets(scope:FinanceScope,route:FinanceDataSelection,watchlist:FinanceAsset[],ids:readonly string[]):FinanceAsset[]{
+    return [...watchlist,...this.searchCatalog.liveAssets(scope,this.searchCatalog.begin(scope,route),ids,watchlist)];
+  }
+  async query(scope: FinanceScope,input:FinanceDataRequest) { const workspace=await this.store.load(scope);const route={...await this.experience.consent(scope),assertCurrent:()=>scope.assertCurrent()};scope.assertCurrent();const result=await queryFinanceData(input,this.queryAssets(scope,route,workspace.watchlist,input.assetIds),route);scope.assertCurrent();return result; }
   async queryAndSave(scope:FinanceScope,input:FinanceDataSaveRequest,signal?:AbortSignal):Promise<FinanceDataSaveResult> {
     const parsed=FinanceDataSaveRequestSchema.safeParse(input);if(!parsed.success)throw new Error("finance_arguments_invalid");input=parsed.data;
     const savingScope:FinanceScope={...scope,assertCurrent(){scope.assertCurrent();if(signal?.aborted)throw new Error("finance_query_cancelled");}};
@@ -177,7 +181,7 @@ export class FinanceService {
     if(input.reportId!==undefined&&!target)throw new Error("finance_report_not_found");
     const route={...await this.experience.consent(savingScope),signal,assertCurrent:()=>savingScope.assertCurrent()};savingScope.assertCurrent();
     const request:FinanceDataRequest={query:input.query,assetIds:input.assetIds,metrics:input.metrics,period:input.period};
-    const result=await queryFinanceData(request,before.watchlist,route);savingScope.assertCurrent();
+    const result=await queryFinanceData(request,this.queryAssets(savingScope,route,before.watchlist,request.assetIds),route);savingScope.assertCurrent();
     const batch=dataOperations(result,before,target?.title||input.title||input.query||"Finance 자료",input.mode==="report");
     if(target){
       const observed=batch.operations.find(operation=>operation.type==="report.add");if(observed?.type!=="report.add")throw new Error("finance_data_not_available");
@@ -227,7 +231,7 @@ export class FinanceService {
       workflow:name=>financeBuiltinPlugin().workflow(scope,FINANCE_NOTICE_VERSION,name),
       pure:(action,payload)=>plugin.callPureTool(action,payload),
       plan:request=>new FinancePlanningReviews().calculate(scope,request,request=>plugin.callPureTool('planning',request) as FinancePlanningResult),
-      portfolio:async()=>{if(!route)throw new Error('finance_analyst_authoring_tool_denied');scope.assertCurrent();const owned=new Set(workspace.holdings.map(holding=>holding.assetId));const refreshed=await refreshFinanceQuotes({...workspace,watchlist:workspace.watchlist.filter(asset=>owned.has(asset.id))},route);scope.assertCurrent();signal.throwIfAborted();return plugin.callPureTool('valuation',{workspace,refreshResult:refreshed}) as FinancePortfolioValuation;},
+      portfolio:async()=>{if(!route)throw new Error('finance_analyst_authoring_tool_denied');return this.observedPortfolio(scope,workspace,route,signal,payload=>plugin.callPureTool('valuation',payload) as FinancePortfolioValuation);},
       discover:async preset=>{if(!route)throw new Error('finance_analyst_authoring_tool_denied');await assertRoute();const result=await discoverFinanceAssets(preset,route);await assertRoute();return result;},
       assertCurrent:()=>scope.assertCurrent(),
       search:async(query)=>{scope.assertCurrent();if(!route)throw new Error('finance_analyst_authoring_tool_denied');await assertRoute();const result=financeSearchResult(await searchFinanceAssets(query,route));await assertRoute();return result;},
@@ -247,6 +251,32 @@ export class FinanceService {
     const draft=plugin.callPureTool('compute.artifact',{result:artifact,workspace:before,title:input.title,presentation:Object.fromEntries(Object.entries(input).filter(([key])=>!['request','period','title'].includes(key)))}) as import('./artifacts').FinanceArtifactDraft;
     const workspace=await this.apply({...scope,assertCurrent(){scope.assertCurrent();signal.throwIfAborted();}},{operations:draft.operations,expectedRevision:before.revision});
     return {workspace,reportId:draft.reportId,artifact};
+  }
+  private async observedPortfolio(scope:FinanceScope,workspace:FinanceWorkspace,route:FinanceDataSelection & {signal?:AbortSignal;assertCurrent:()=>void},signal:AbortSignal,value:(payload:{workspace:FinanceWorkspace;refreshResult:FinanceAIResult})=>FinancePortfolioValuation):Promise<FinancePortfolioValuation>{
+    scope.assertCurrent();signal.throwIfAborted();
+    const owned=new Set(workspace.holdings.map(holding=>holding.assetId));
+    const refreshed=await refreshFinanceQuotes({...workspace,watchlist:workspace.watchlist.filter(asset=>owned.has(asset.id))},route);
+    scope.assertCurrent();signal.throwIfAborted();return value({workspace,refreshResult:refreshed});
+  }
+  /** Refresh observed holding prices once, then freeze only complete positive currency groups with CAS. */
+  async valuePortfolio(scope:FinanceScope,input:FinancePortfolioValuationPresentation & {expectedRevision?:number},signal:AbortSignal=AbortSignal.timeout(180000)){
+    const guarded:FinanceScope={...scope,assertCurrent(){scope.assertCurrent();signal.throwIfAborted();}};
+    guarded.assertCurrent();const before=await this.store.load(guarded);guarded.assertCurrent();
+    if(input.expectedRevision!==undefined&&input.expectedRevision!==before.revision)throw new Error('finance_revision_conflict');
+    const route={...await this.experience.consent(guarded),signal,assertCurrent:()=>guarded.assertCurrent()};guarded.assertCurrent();
+    const plugin=await financeBuiltinPlugin().runtime(guarded,FINANCE_NOTICE_VERSION);guarded.assertCurrent();
+    const computed=await this.observedPortfolio(guarded,before,route,signal,payload=>plugin.callPureTool('valuation',payload) as FinancePortfolioValuation);
+    if(!computed.groups.some(group=>group.complete&&group.totalValue!==null&&group.totalValue>0))return {computed,workspace:before};
+    const {expectedRevision:_,...presentation}=input;
+    const draft=plugin.callPureTool('portfolio.artifact',{result:computed,workspace:before,presentation}) as import('./artifacts').FinanceArtifactDraft;
+    guarded.assertCurrent();const workspace=await this.apply(guarded,{operations:draft.operations,expectedRevision:before.revision});guarded.assertCurrent();
+    return {computed,workspace,reportId:draft.reportId};
+  }
+  /** Check holdings the assistant read for the owner's review against the saved portfolio. Reads only; the owner's Save is the single write. */
+  async proposePortfolio(scope:FinanceScope,input:unknown):Promise<import('./portfolio-proposal').FinancePortfolioProposal>{
+    const workspace=await this.store.load(scope);scope.assertCurrent();
+    const {financePortfolioProposal}=await import('./portfolio-proposal');
+    const proposal=financePortfolioProposal(workspace,input);scope.assertCurrent();return proposal;
   }
   async dashboardFeeds(scope:FinanceScope,signal?:AbortSignal):Promise<import('../../shared/finance-feeds').FinanceDashboardFeedsResult>{
     const selection=await this.experience.consent(scope);scope.assertCurrent();

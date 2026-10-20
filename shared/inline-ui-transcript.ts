@@ -1,4 +1,4 @@
-import { validateInlineUiPresentationContent } from './inline-ui-presentation';
+import { validateInlineUiPresentationContent, type InlineUiPresentationContent } from './inline-ui-presentation';
 import { inlineVisualRanges } from './inline-visual';
 import { parseIntellectUiFence } from './intellect-ui';
 import type { UiInstanceView } from './ui-instances';
@@ -55,6 +55,7 @@ export function mergeInlineUiTranscript(
   chatId: string,
   history: readonly ChatHistoryEntry[],
   instances: readonly UiInstanceView[],
+  resolvedContents?: ReadonlyMap<string, readonly InlineUiPresentationContent[]>,
 ): InlineUiTranscriptProjection {
   const merged = [...history];
   const fallbackByMessageId = new Map<string, string>();
@@ -62,17 +63,22 @@ export function mergeInlineUiTranscript(
   const fences = existingContentFences(history);
   for (const instance of instances) {
     if (instance.chatId !== chatId || instance.state === 'closed' || instance.closedAt
-      || !instance.content || !/^[A-Za-z0-9_.:-]{1,244}$/.test(instance.instanceId)
+      || !/^[A-Za-z0-9_.:-]{1,244}$/.test(instance.instanceId)
       || !Number.isFinite(Date.parse(instance.createdAt))) continue;
     const id = `ui-instance:${instance.instanceId}`;
     if (ids.has(id)) continue;
-    const fence = inlineUiContentFence(instance.content);
-    if (!fence || fences.has(fence)) continue;
+    const contents = instance.content ? [instance.content] : resolvedContents?.get(instance.instanceId) ?? [];
+    if (!contents.length || contents.length > 16) continue;
+    const validated = contents.map(inlineUiContentFence);
+    if (validated.some(fence => !fence)) continue;
+    const fresh = [...new Set(validated as string[])].filter(fence => !fences.has(fence));
+    if (!fresh.length) continue;
+    const fence = fresh.join('\n\n');
     const fallback = instance.presentation.fallbackText?.trim() || instance.presentation.title?.trim() || 'Interactive result';
     merged.push({ id, role: 'assistant', text: `${fallback}\n\n${fence}`, createdAt: instance.createdAt });
     fallbackByMessageId.set(id, fallback);
     ids.add(id);
-    fences.add(fence);
+    fresh.forEach(value => fences.add(value));
   }
   merged.sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
   return { history: merged, fallbackByMessageId };

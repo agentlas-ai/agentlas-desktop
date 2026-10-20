@@ -34,8 +34,7 @@ import { peekProviderQuotaExhausted } from "../usage";
 import { getOneProfile } from "../store/one-profile";
 import { applyAutomationLifecycle, automationLifecycleContext, automationLifecycleRefusalText, automationRegistrationReasonCode, automationRegistrationRefusalText } from "../automation-lifecycle";
 import { recordAutomationPinProvenance } from "../automation-runtime-provenance";
-import { AutomationWorkspaceError, bindCreatedGoalContinuationWorkspace } from "../automation-workspace";
-import { assertFiniteGoalLifecycleCurrent, currentAutomationGoalExecutionOwnerMatches, isGoalDispatchRefusal } from "../automation-execution-control";
+import { assertFiniteGoalLifecycleCurrent, isGoalDispatchRefusal } from "../automation-execution-control";
 import { selectionForRuntime } from "../../shared/runtime-selection";
 import { roomChipRuntimeSelection } from "../runtime/room-chip-runtime";
 import { officeTaskContextForInvocation } from "../office-task-context";
@@ -76,7 +75,6 @@ import { careerGraphIngest, hepCall, routeOnly, stormbreakerHarness } from "../h
 import { normalizeRecommendation } from "../hephaestus/recommendation";
 import {
   buildGoalDrivenContinuationPrompt,
-  buildStormbreakerLongRunPrompt,
   goalCompletionProtocol,
   goalCompletionVerdict,
   stripGoalCompleteMarker,
@@ -85,8 +83,6 @@ import {
   STORMBREAKER_MAX_IDENTICAL_PASSES,
   idleGoalPassStep,
   finiteGoalContinuationIsParked,
-  goalContinuationSchedule,
-  STORMBREAKER_LONG_RUN_SCHEDULE,
   STORMBREAKER_LOOP_PROTOCOL,
   STORMBREAKER_MAX_EXECUTION_PASSES,
   stripStormbreakerContinueMarker,
@@ -157,7 +153,8 @@ import { isUserFacingProjectAgent } from "../../shared/project-agent-pool";
 import { oneConfirmedRosterTargetsAreExact, oneTeamWorkforceHubMode, oneTeamUsesNativeStaffing, type OneTeamStaffingAuthority } from "../../shared/one-team-preflight";
 import { projectRosterSpecs } from "../../shared/project-roster-specs";
 import { getCargoSource } from "../marketplace";
-import { getSessionCookieHeader, webBaseUrl } from "../auth";
+import { getAuthenticatedActorIds, getSessionCookieHeader, webBaseUrl } from "../auth";
+import { assertFinanceWorkChatOwner } from "../finance/work-project";
 import { ExperienceCloudHttpClient } from "../experience/cloud";
 import { prepareProjectCloudRoster, ProjectCloudRosterError } from "./project-cloud-roster";
 import { classifyTurnEscalation, decideProjectRosterTaskForce, describeTurnEscalation } from "../../shared/turn-escalation";
@@ -224,7 +221,6 @@ import { scienceAliveMemory, scienceAliveMemoryGuard } from "../memory/science-a
 import { bindAppMemoryRequest, appRunMemory, appMemoryRunGuard } from "../memory/agent-app-memory";
 import { invocationMemoryScope } from "../memory/invocation-scope";
 import { queryWorkingFolderOntologyContext } from "../ontology/project-runtime";
-import { writeEvolutionProposalsForProject, evolutionSessionContextLine } from "../agents/evolution-hep";
 import {
   curateReply,
   recordTerminalMemoryTurn,
@@ -257,7 +253,7 @@ import { resolveToolInvocationOrigin } from "../invocation/tool-origin";
 import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
 import type { RuntimeToolKind } from "../../shared/runtime-tool-kind";
 import { automationRegistrationMonitoring, hasAutomationRegistrationHandoff, resolveAutomationRegistrationTarget } from "../automation-registration";
-import { createAutomation, findAutomationByGoalId, getAutomation, listAutomations, toggleAutomation, updateAutomation, updateAutomationGraph } from "../store/automations";
+import { createAutomation, getAutomation, listAutomations, updateAutomation, updateAutomationGraph } from "../store/automations";
 import { graphTeamGrantCurrent, type GraphTeamGrant } from "../one/graph-team-grant";
 import { isCompletedToolEvent, previousTurnObservation, projectContextKey, recordContextSourceMarker, recordRunEvent, tryRecordRunEvent } from "../store/run-events";
 import { RUNTIME_TURN_ATTEMPT_EVENT, RUNTIME_TURN_PLACED_EVENT } from "../invocation/turn-placement";
@@ -1759,6 +1755,8 @@ export interface McpInvocationResult {
   goalWaitRequest?: ParsedGoalWait;
   /** Main must settle this episode before deciding the next Goal turn. */
   goalEpisodeYield?: NativeGoalEpisodeBinding;
+  /** A finite Goal turn ended with safe work left: Main wakes the Goal's next episode (no automation is created). */
+  goalHostWakeRequested?: { goalId: string };
   goalCompletionClaim?: { claimed: boolean; evidence: string | null; goalId: string | null };
   /** A failed goal pass stopped the loop with the goal still open (typed; see long-run/goal-pass-stop.ts). */
   goalPassStop?: GoalPassStop;
@@ -2145,6 +2143,7 @@ async function runMcpInvocationInContext(
   ownerControlInbox?: RunnerRequest["ownerControlInbox"],
 ): Promise<McpInvocationResult> {
   assertInvocationWorkspaceSourceContext(workspaceBinding, executionContext?.source);
+  const financeWorkBinding = assertFinanceWorkChatOwner(req.chatId, getAuthenticatedActorIds());
   const historyNative = await import('../one/personal-integrations-runtime');
   const historyRun = await historyNative.bindOneHistoryNativeRun({ runId: req.runId!, chatId: req.chatId });
   let nativeBrowserGrant: NativeBrowserRelayGrant | undefined;
@@ -2502,6 +2501,7 @@ async function runMcpInvocationInContext(
     };
   }
   const storedChat = getChat(req.chatId);
+  assertFinanceWorkChatOwner(req.chatId, getAuthenticatedActorIds(), financeWorkBinding);
   const chat = storedChat ? repairRootChatSurfaceController(storedChat) : null;
   if (!chat) {
     sink({ kind: "error", error: { code: "no-chat", message: tStatus(locale, "errChatNotFound") } });
@@ -3552,6 +3552,7 @@ async function runMcpInvocationInContext(
   let mcpGoalSelectionIsCurrent: (() => boolean) | undefined;
   let mcpGoalSelectionInvalidated = false;
   const assertMcpGoalSelectionCurrent = (): void => {
+    assertFinanceWorkChatOwner(req.chatId, getAuthenticatedActorIds(), financeWorkBinding);
     (require('../one/personal-data-runtime') as typeof import('../one/personal-data-runtime')).assertOnePersonalDataRunCurrent(req.runId);
     historyNative.assertOneHistoryRunCurrent({ runId: req.runId!, chatId: req.chatId });
     assertGraphWorkerAttempt(executionContext?.graphWorkerAttempt);
@@ -3780,6 +3781,8 @@ async function runMcpInvocationInContext(
         ...(oneRoomMemberRun ? { roomMember: true as const } : {}),
         // A One group room is a team by definition: One Team rides every turn (goal passes too).
         ...(chat.originSurface === "one" && chat.seatKind === "group" && !oneMemberToolPolicy ? { groupRoom: true as const } : {}),
+        // An Agentlas Finance conversation carries the Finance plugin on every turn (Main-derived from the stored project binding).
+        ...(financeWorkBinding ? { financeChat: true as const } : {}),
         // An installed plugin the agent looked up or opened mid-turn in this
         // conversation's previous run is attached now (never a Hub install).
         requestedPluginSlugs: readMidTurnPluginRequests(chat.id, req.runId),
@@ -5614,6 +5617,12 @@ async function runMcpInvocationInContext(
     || RUNTIME_MCP_SUPPORT[active.kind]?.delivery === "in-process-loop")) {
     turnContextParts.push(SURFACE_PROTOCOL); keepLastTurnContext("surface.protocol.execution", "fixed-policy", ["release"]);
   }
+  // An Agentlas Finance conversation: its finance.* operations are reachable only through harness_call, so without this line a model
+  // answers market questions from memory or web search. Main-derived from the stored project binding, never from renderer input.
+  if (financeWorkBinding) {
+    turnContextParts.push("finance: Agentlas Finance chat; answer asset, price, filing, news, macro, portfolio and scenario requests from harness_call finance.* results (plugin:finance/index maps them), not from memory or web search first; a written report is a saved Finance report (finance.query.save mode report, then finance.apply), not a file or chat text");
+    keepLastTurnContext("finance.chat", "fixed-policy", ["release"]);
+  }
   // An installed agent's entry file names its own docs by relative path; the run works in the owner's project.
   {
     const agentFolder = agentPromptFolder(agent.id);
@@ -5850,17 +5859,6 @@ async function runMcpInvocationInContext(
       });
       // Recall text, rank and scope pass through unchanged; only its lifetime is declared.
       if (memoryContext) { turnContextParts.push(memoryContext); declareLastTurnContext("memory.recall", "turn-context", ["retrieval"]); }
-      // hep 발화 표면 — 프로젝트 작업 폴더에 대기 중 성장 제안 요약 파일을 쓰고(호스트가
-      // 읽게), 고위험 대기분이 있으면 세션 컨텍스트에 한 줄 주입. 실패-무해.
-      if (workingFolder && canWrite && !projectReadOnlyBoundary && executionContext?.source !== "science") {
-        try {
-          const growth = writeEvolutionProposalsForProject(workingFolder);
-          const line = evolutionSessionContextLine(growth.pending, locale === "ko" ? "ko" : "en");
-          if (line) { turnContextParts.push(line); declareLastTurnContext("evolution.pending", "turn-context", ["agent-instructions"]); }
-        } catch (err) {
-          console.warn("[evolution-hep] proposals file/context deferred:", err);
-        }
-      }
       if (memoryReadPath) {
         // A writable turn's query also refreshes the folder's DB in the background for the next turn (it never waits for
         // it); both end with this turn's Stop.
@@ -7960,161 +7958,66 @@ async function runMcpInvocationInContext(
       });
     }
     // continuousMode는 안전 상한(20,000턴)이 사실상 안 걸리므로 정상적으론 이 분기에 안 들어온다.
-    // 혹시라도 상한에 닿았는데 아직 할 일이 있다고 하면(진짜 폭주 등) 작업을 잃지 않도록 기존
-    // 백그라운드 자동화로 안전하게 이어받는다. persistent goal 채팅은 goal 미달이기만 해도
-    // (마커 없이) 여기로 들어와 앱 재시작·크래시 뒤에도 목표가 계속 돈다.
+    // A finite Goal turn that ends with safe work left (wall-clock pass budget, idle yield with the ledger unmet, the
+    // pass cap) is continued by the host, never by an automation.
+    // Until then this wrote a hidden "Goal continuation · <chat>" prompt
+    // automation and the host treated an enabled one as owning the Goal's next step;
+    // such rows could be enabled with next_run_at NULL and wake nobody, and a chat could have two. The turn now returns a
+    // typed request and Main's turn end schedules the Goal's own spaced follow-up (InvocationService
+    // .scheduleGoalContinuation → blocked-goal sweep → the Goal's resume turn in its own chat). Legacy rows are retired
+    // at boot (store/goal-continuation-rows.ts). An ongoing Goal keeps its own wait cycle (registerOngoingGoalCycle).
+    let goalHostWakeRequested: { goalId: string } | null = null;
     if (!req.agentAppMode && stormbreakerContinueRequested && chat.kind !== "division" && canWrite
       && (!activeGoalId || getChatGoalRevision(activeGoalId)?.lifecycle !== "ongoing")) {
-      const assertContinuationGoalCurrent = (): void => {
-        throwIfInvocationAborted(signal, locale);
-        if (!activeGoalId) return;
-        if (activeGoalRevision == null) {
-          throw new AutomationWorkspaceError("automation_workspace_creation_source_unverified");
-        }
-        assertFiniteGoalLifecycleCurrent({ goalId: activeGoalId, rootChatId: chat.id,
-          expectedRevision: activeGoalRevision });
-      };
-      try {
-        assertContinuationGoalCurrent();
-        const marker = `Source chat: ${chat.id}`;
-        // goal_id 1급 조회가 먼저다 — 프롬프트 마커 문자열 검색은 goal_id 없는 레거시
-        // 연속실행의 폴백으로만 남는다. goal당 연속실행은 정확히 한 행이다.
-        const goalContinuation = activeGoalId ? findAutomationByGoalId(activeGoalId) : null;
-        const foundContinuation = goalContinuation
-          ?? listAutomations().find(
-            (automation) => automation.enabled && automation.promptTemplate.includes(marker),
-          );
-        
-
-
-
-
-
-
-
-        const sameGoalContinuation = activeGoalId && foundContinuation?.goalId === activeGoalId ? foundContinuation : undefined;
-        const ownedByThisGoal = (automation: { id: string }): boolean => {
-          try {
-            const goalRun = getLongRunByGoalId(activeGoalId!);
-            return Boolean(goalRun && currentAutomationGoalExecutionOwnerMatches(automation.id, activeGoalId!, chat.id, goalRun.id));
-          } catch { return false; }
-        };
-        const continuationWake = !sameGoalContinuation ? "ok"
-          : !ownedByThisGoal(sameGoalContinuation) ? "unowned"
-            : (await import("../store/graph-reconciliation")).graphScheduleWakeState(sameGoalContinuation);
-        const existingContinuation = !activeGoalId ? foundContinuation
-          : continuationWake === "ok" || continuationWake === "unarmed" ? sameGoalContinuation : undefined;
-        const replacedContinuation = continuationWake === "held" || continuationWake === "unowned"
-          ? sameGoalContinuation ?? null : null;
-        // A hidden continuation is a new invocation, not a trusted continuation
-        // of the current process. Pin an explicit single Hub hire as a Hub target
-        // so the scheduler performs a fresh authoritative hepCall on every run.
-        const continuationHubSlug = borrowedAgentSlugs.length === 1 ? borrowedAgentSlugs[0] : null;
-        const continuationHubVersion = continuationHubSlug
-          ? explicitBorrowSpecs.find((spec) => spec.slug === continuationHubSlug)?.packageHash
-          : undefined;
-        if (continuationHubSlug && !continuationHubVersion) {
-          throw Object.assign(new Error("automation_hub_release_pin_missing"), {
-            code: "automation_hub_release_pin_missing",
-          });
-        }
-        if (existingContinuation) {
-          getDb().transaction(() => {
-            assertContinuationGoalCurrent();
-            if (continuationHubSlug &&
-              (existingContinuation.targetType !== "hub" || existingContinuation.targetId !== continuationHubSlug
-                || existingContinuation.targetVersion !== continuationHubVersion)) {
-              // A changed definition still requires its normal execution-owner
-              // review; this update never issues an ownership receipt.
-              updateAutomation(existingContinuation.id, {
-                targetType: "hub",
-                targetId: continuationHubSlug,
-                ...(continuationHubVersion ? { targetVersion: continuationHubVersion } : {}),
-              });
-            }
-            if (activeGoalId && (!existingContinuation.enabled || continuationWake === "unarmed")) {
-              toggleAutomation(existingContinuation.id, true);
-            }
-          })();
-        }
-        if (!existingContinuation) {
-          const continuationSchedule = activeGoalId
-            ? goalContinuationSchedule(latestGoalDecision)
-            : STORMBREAKER_LONG_RUN_SCHEDULE;
-          getDb().transaction(() => {
-            assertContinuationGoalCurrent();
-            if (activeGoalId && !req.runId) {
-              throw new AutomationWorkspaceError("automation_workspace_creation_source_unverified");
-            }
-            const continuation = createAutomation({
-              name: activeGoalId
-                ? `Goal continuation · ${chat.title || agent.name}`
-                : `Stormbreaker continuation · ${chat.title || agent.name}`,
-              scheduleHuman: continuationSchedule,
-              targetType: continuationHubSlug ? "hub" : chat.firmId ? "firm" : "agent",
-              targetId: continuationHubSlug ?? chat.firmId ?? chat.agentId,
-              // Main recovery may have selected another connected engine. Copy
-              // that final validated engine before sealing the creation receipt.
-              runtimeSelection: selectionForRuntime(active, {
-                longContext: active.longContextEnabled ?? undefined,
-              }),
-              ...(continuationHubVersion ? { targetVersion: continuationHubVersion } : {}),
-              promptTemplate: buildStormbreakerLongRunPrompt({
-                sourceChatId: chat.id,
-                previousOutput: result.text,
-                userPrompt: req.userPrompt,
-                workingFolder,
-              }),
-              createdBy: "agent",
-              ...(activeGoalId ? { goalId: activeGoalId } : {}),
-            });
-            if (activeGoalId) bindCreatedGoalContinuationWorkspace({
-              automationId: continuation.id,
-              goalId: activeGoalId,
-              sourceChatId: chat.id,
-              invocationRunId: req.runId!,
-            });
-            if (replacedContinuation) {
-              // A held row this Goal owns could wake beside the new one once its effects are reconciled: only its clock
-              // stops (history and uncertain-effect record stay). A row whose receipt names another Goal can never run
-              // under this one and is left exactly as it is (its cleanup is the owner's call).
-              const retired = continuationWake === "held" && replacedContinuation.enabled;
-              if (retired) toggleAutomation(replacedContinuation.id, false);
-              tryRecordRunEvent({ runId: req.runId!, chatId: chat.id, automationId: replacedContinuation.id,
-                kind: "goal_continuation_replaced", payload: { goalId: activeGoalId,
-                  reasonCode: continuationWake === "held" ? "goal_continuation_schedule_held" : "goal_continuation_owner_unverified",
-                  replacementAutomationId: continuation.id, retired } });
-            }
-          })();
+      if (activeGoalId) {
+        try {
+          throwIfInvocationAborted(signal, locale);
+          // The lifecycle barrier: a Goal stopped, superseded or not in queued/running (e.g. still verifying its
+          // effects) takes no further dispatch from this turn. A turn not bound to the Goal's revision asks for none.
+          if (activeGoalRevision == null) {
+            throw Object.assign(new Error("goal_continuation_revision_unbound"), { code: "goal_continuation_revision_unbound" });
+          }
+          assertFiniteGoalLifecycleCurrent({ goalId: activeGoalId, rootChatId: chat.id, expectedRevision: activeGoalRevision });
+          goalHostWakeRequested = { goalId: activeGoalId };
           sink({
             kind: "tool-use",
             tool: {
-              name: activeGoalId ? "Goal Loop · long-run" : "Stormbreaker Loop · long-run",
-              result: activeGoalId
-                ? `The goal is not achieved yet. Queued a hidden ${continuationSchedule} goal continuation that keeps running until the goal ledger reports completion, budget exhaustion, or an explicit end.`
-                : `More safe work remains after ${STORMBREAKER_MAX_EXECUTION_PASSES} immediate passes. Queued a hidden ${STORMBREAKER_LONG_RUN_SCHEDULE} continuation that reuses its own durable session and disables itself when the marker stops.`,
+              name: "Goal Loop · long-run",
+              result: locale === "ko"
+                ? "목표가 아직 끝나지 않았습니다. 앱이 이 대화에서 다음 회차를 직접 이어갑니다(자동화는 만들지 않습니다). 목표 원장이 완료·정지·명시적 종료를 알릴 때까지 계속합니다."
+                : "The goal is not achieved yet. The app continues the next episode in this conversation itself (no automation is created) until the goal ledger reports completion, a stop, or an explicit end.",
+            },
+          });
+        } catch (error) {
+          /*
+           * The lifecycle barrier refused a further dispatch (the long run was still
+           * `verifying` its last effects). That refusal is about the NEXT pass; this turn's answer is already complete
+           * and must not be failed by it. No wake is requested and Main's turn end verifies the Goal as for any turn
+           * that asked for nothing. Every other error still throws.
+           */
+          const code = (error as { code?: unknown } | null)?.code;
+          if (!isGoalDispatchRefusal(error) && code !== "goal_continuation_revision_unbound") throw error;
+          sink({
+            kind: "tool-use",
+            tool: {
+              name: "Goal Loop · continuation withheld",
+              result: locale === "ko"
+                ? `목표가 지금은 다음 실행을 받을 수 없는 상태라 이어가기를 요청하지 않았습니다 (${String(code)}). 이번 답변은 그대로 완료됩니다.`
+                : `The goal cannot take another run right now, so no continuation was requested (${String(code)}). This answer stands as completed.`,
             },
           });
         }
-      } catch (error) {
-        
-
-
-
-
-
-
-
-
-
-        if (!isGoalDispatchRefusal(error) && !(error instanceof AutomationWorkspaceError)) throw error;
+      } else {
+        // No Goal: there is no host ledger, stop control or budget to continue under, and the host never invents a
+        // Goal's authority. A hidden every-30m automation is the same "a conversation is not a graph"
+        // mistake, so the turn ends here and says how to keep going.
         sink({
           kind: "tool-use",
           tool: {
-            name: "Goal Loop · continuation withheld",
+            name: "Stormbreaker Loop · paused",
             result: locale === "ko"
-              ? `목표가 지금은 다음 실행을 받을 수 없는 상태라 이어받기를 예약하지 않았습니다 (${error.code}). 이번 답변은 그대로 완료됩니다.`
-              : `The goal cannot take another run right now, so no continuation was queued (${error.code}). This answer stands as completed.`,
+              ? `즉시 실행 ${STORMBREAKER_MAX_EXECUTION_PASSES}회를 마쳤고 안전하게 할 일이 더 남았습니다. 자동화는 만들지 않았습니다 — 이어가려면 "계속"이라고 보내거나 목표를 켜세요.`
+              : `More safe work remains after ${STORMBREAKER_MAX_EXECUTION_PASSES} immediate passes. No automation was created: send "continue" or turn on a Goal to keep going.`,
           },
         });
       }
@@ -8886,6 +8789,7 @@ async function runMcpInvocationInContext(
         tokens: result.tokens,
         observedUsage: invocationObservedUsage,
         stormbreakerContinueRequested,
+        ...(goalHostWakeRequested ? { goalHostWakeRequested } : {}),
         ...(goalWaitRequest ? { goalWaitRequest } : {}),
       ...(goalEpisodeYield ? { goalEpisodeYield } : {}),
         goalCompletionClaim: {
@@ -8922,6 +8826,7 @@ async function runMcpInvocationInContext(
       tokens: result.tokens,
       observedUsage: invocationObservedUsage,
       stormbreakerContinueRequested,
+      ...(goalHostWakeRequested ? { goalHostWakeRequested } : {}),
       ...(goalWaitRequest ? { goalWaitRequest } : {}),
       ...(goalEpisodeYield ? { goalEpisodeYield } : {}),
       goalCompletionClaim: {

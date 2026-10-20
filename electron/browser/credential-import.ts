@@ -60,6 +60,7 @@ import {
   resolveCookieStoreLayout,
 } from "./cookie-merge";
 import { sessionCookieGroupOf, sessionCookieIdentityNamesFor, sessionCookieNamesFor } from "./login-wall";
+import { planSqlStoreGroupVerdicts, windowsDpapiUnprotect } from "./chromium-cookie-identity";
 import { currentUiLocale } from "../ui-locale";
 import { reportSystemPermissionIssue } from "../os-permission-guidance";
 
@@ -1227,6 +1228,8 @@ export async function importBrowserCredentials(
       `SELECT ${quoted} FROM cookies WHERE host_key = ? OR host_key = ? OR host_key LIKE ?`,
     );
 
+    // Automatic refresh on Windows: the group verdicts. Set once the jobs are known (below), read by runAll.
+    let groupVerdict: ((hostKey: string) => "keep" | "force" | "row") | null = null;
     const runAll = dest.transaction((jobs: Array<{ domain: string; rows: Record<string, unknown>[] }>) => {
       for (const job of jobs) {
         for (const row of job.rows) {
@@ -1237,13 +1240,21 @@ export async function importBrowserCredentials(
             encrypted_value: already.encryptedValue,
             value: already.plainValue,
           });
-          const action = decideCookieWrite({
-            hasExisting: Boolean(already),
-            destinationReadable,
-            hasFreshnessColumns,
-            incomingExpires: cookieStoreExpiry(row),
-            existingExpires: cookieStoreExpiry(already),
-          });
+          // An automatic refresh decides a login group as a whole (chromium-cookie-identity.ts): kept whole, or written whole.
+          const verdict = groupVerdict?.(String(row.host_key ?? "")) ?? "row";
+          if (verdict === "keep") {
+            preserved += 1;
+            continue;
+          }
+          const action = verdict === "force" && (!already || destinationReadable)
+            ? (already ? "replace" : "insert")
+            : decideCookieWrite({
+              hasExisting: Boolean(already),
+              destinationReadable,
+              hasFreshnessColumns,
+              incomingExpires: cookieStoreExpiry(row),
+              existingExpires: cookieStoreExpiry(already),
+            });
           if (action === "keep") {
             preserved += 1;
             continue;
@@ -1278,6 +1289,18 @@ export async function importBrowserCredentials(
         continue;
       }
       jobs.push({ domain, rows });
+    }
+    if (options.automatic === true && process.platform === "win32" && jobs.length > 0) {
+      try {
+        let localStateText: string | null = null;
+        try { localStateText = fs.readFileSync(path.join(path.dirname(profile.path), "Local State"), "utf8"); } catch { localStateText = null; }
+        groupVerdict = await planSqlStoreGroupVerdicts({ jobs, dest, localStateText, schemaVersion, unprotect: windowsDpapiUnprotect });
+      } catch (error) {
+        console.warn("[browser-credentials] sql store group plan failed, nothing is refreshed this time:", error instanceof Error ? error.name : "unknown");
+        // The plan only ever keeps a group: when it cannot be made, a site with known login cookies stays as the destination has
+        // it, and every other cookie keeps the per-row rule, so a failure here never stops an unrelated import.
+        groupVerdict = (hostKey) => (sessionCookieGroupOf(hostKey.replace(/^\./u, "").toLowerCase()) ? "keep" : "row");
+      }
     }
     try {
       runAll(jobs);

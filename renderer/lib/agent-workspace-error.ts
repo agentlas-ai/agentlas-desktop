@@ -32,6 +32,7 @@ const KO: Record<string, string> = {
   journal_root_changed: "복구하기 전에 원래 폴더를 다시 연결해 주세요.",
   memory_changed: "그 사이 기억이 바뀌었습니다. 다시 검토해 주세요.",
   memory_ineligible: "이 기억은 적용 범위나 근거를 더 확인해야 에이전트에 반영할 수 있습니다.",
+  learning_not_recurring: "이 학습은 아직 서로 다른 실행에서 충분히 반복되지 않았습니다. 더 쌓이면 변경 후보가 됩니다. 그때까지는 기억으로만 남습니다.",
   instruction_growth: "배운 것으로는 매번 읽히는 지침을 늘릴 수 없습니다. 새 절차는 스킬로 옮기거나 기존 문장을 줄여 합쳐 주세요.",
   instruction_limit: "이 변경으로 지침이 일부 실행기가 읽는 한도(32KiB)를 넘습니다. 상황별 절차는 스킬로 옮겨 주세요.",
   memory_private: "이 기억은 에이전트 파일에 넣을 수 없습니다.",

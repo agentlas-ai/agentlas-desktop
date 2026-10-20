@@ -24,6 +24,7 @@ import { resolveAutomationToolMode } from "../../shared/automation-tool-policy";
 import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 import { evaluateCondition } from "../triggers/condition";
 import { currentUiLocale } from "../ui-locale";
+import { GOAL_CONTINUATION_RETIRED_CODE, goalContinuationRowSql, isGoalContinuationAutomation } from "./goal-continuation-rows";
 
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 import type {
@@ -311,8 +312,10 @@ function assertMutableAutomation(id: string): void {
 }
 
 export function listAutomations(): Automation[] {
+  // A Goal's continuation is not an automation (store/goal-continuation-rows.ts): legacy rows stay as history only.
   const rows = getDb()
-    .prepare("SELECT a.* FROM automations a WHERE NOT EXISTS (SELECT 1 FROM meta m WHERE m.key=? || a.id) ORDER BY a.created_at DESC")
+    .prepare(`SELECT a.* FROM automations a WHERE NOT EXISTS (SELECT 1 FROM meta m WHERE m.key=? || a.id)
+      AND NOT ${goalContinuationRowSql("a")} ORDER BY a.created_at DESC`)
     .all(TOOLCHAIN_IMPLEMENTATION_PREFIX) as AutomationRow[];
   return rows.map(toAutomation);
 }
@@ -323,13 +326,14 @@ export function getAutomation(id: string): Automation | null {
 }
 
 /**
- * persistent goal 축으로 연속실행 자동화를 찾는다 — 프롬프트 안 마커 문자열 검색의
- * 1급 대체. 한 goal에 연속실행은 최대 하나라는 불변식의 조회면이다.
+ * An automation carrying this Goal's id that is not a retired Goal continuation. The host now wakes a
+ * Goal itself and no continuation row is created; the legacy rows are history (store/goal-continuation-rows.ts), so
+ * none of them may own a Goal's next step, park it for the owner or be offered for review.
  */
 export function findAutomationByGoalId(goalId: string): Automation | null {
   if (!goalId.trim()) return null;
   const row = getDb()
-    .prepare("SELECT * FROM automations WHERE goal_id = ? ORDER BY created_at DESC LIMIT 1")
+    .prepare(`SELECT * FROM automations WHERE goal_id = ? AND NOT ${goalContinuationRowSql()} ORDER BY created_at DESC LIMIT 1`)
     .get(goalId) as AutomationRow | undefined;
   return row ? toAutomation(row) : null;
 }
@@ -694,6 +698,8 @@ export function toggleAutomation(id: string, enabled: boolean): Automation {
     if (enabled) throw new Error("toolchain_implementation_immutable");
     return existing;
   }
+  // A legacy Goal continuation is history: the host owns the Goal's wake, so it is never switched back on.
+  if (enabled && isGoalContinuationAutomation(existing)) throw new Error(GOAL_CONTINUATION_RETIRED_CODE);
   // 다시 켤 때는 과거 시각으로 즉시 발화하지 않도록 next_run_at을 지금 기준으로 재계산.
   // 단 시간 트리거일 때만 — 이벤트 트리거(fs/chain/poll/webhook)는 시계가 없어 next_run_at을
   // null로 유지해야 한다(그러지 않으면 재활성화 즉시 daily 시계로 승격되는 버그).
@@ -2064,7 +2070,8 @@ export function markAutomationRun(
 // enabled이고 next_run_at이 지난(due) 자동화들.
 export function dueAutomations(now: Date = new Date()): Automation[] {
   const rows = getDb()
-    .prepare("SELECT * FROM automations WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at ASC")
+    .prepare(`SELECT * FROM automations WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
+      AND NOT ${goalContinuationRowSql()} ORDER BY next_run_at ASC`)
     .all(now.toISOString()) as AutomationRow[];
   return rows.map(toAutomation);
 }

@@ -50,7 +50,6 @@ const READ_TTL_MS: Record<string, number> = {
   "billing.getCredits": 60_000,
   "app.getVersion": 3_600_000,
   "updater.getState": 30_000,
-  "agentEvolution.listGrowth": 15_000,
   "quests.list": 30_000,
   "automations.list": 15_000,
   "appFactory.listApps": 15_000,

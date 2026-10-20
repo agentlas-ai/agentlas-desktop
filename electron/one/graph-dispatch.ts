@@ -39,7 +39,9 @@ import { recordToolchainAssetDiscovery, toolchainAssetUsage } from "../toolchain
 import { currentOneToolchainNativeInvocation } from "./toolchain-native-runtime";
 import { resolveNativeAssetPublicationAuthority } from "../toolchains/asset-cold-start";
 import { resolveGraphOriginMessage, type GraphOriginBinding } from "./graph-origin";
-import { ephemeralGraphSweptOff, markOneGraphEphemeral, recordOneGraphStructure } from "./ephemeral-graphs";
+import { ephemeralGraphSweptOff, markOneGraphEphemeral } from "./ephemeral-graphs";
+import { graphStructure } from "../../shared/graph-structure";
+import { occasionMarkers, sameWorkName } from "../../shared/graph-instance-advice";
 
 /** A Work task's capability (team-control-server scope "toolchain-consumer"). */
 /**
@@ -525,6 +527,14 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
         }
         throw new Error("one_graph_name_conflict_use_exact_id");
       }
+      // Graphs of the same structure already saved here: the same work for another item is one graph run with a new input, not another
+      // copy. A copy is refused only when its name differs by nothing but a date or number; any other look-alike is told to the author.
+      const fingerprint = graphStructure(graph).fingerprint;
+      const lookAlikes = existing ? [] : scoped(caller).filter(a => a.graph?.nodes?.length && graphStructure(resolveAutomationGraph(a)).fingerprint === fingerprint);
+      const sameWork = lookAlikes.find(a => sameWorkName(a.name, bp.name));
+      if (sameWork) return { ok: false, code: "one_graph_same_work_exists", graph_id: sameWork.id, name: sameWork.name, definition_revision: automationDefinitionDigest(sameWork),
+        enabled: sameWork.enabled,
+        next: "This work is already saved as a graph; a graph is for work that comes back with different inputs. Run it with the new input (one_graph_run), or change that graph (one_graph_save with its graph_id and current revision) so the date or item is an input. Do not save another copy." };
       let saved: Automation;
       if (existing) {
         const current = exact(caller, existing.id); fresh(current, input.expected_revision);
@@ -553,11 +563,16 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
         graphJson: graph, enabled: enable, createdBy: "agent", scheduleHuman: schedule, scheduleJson: null,
         triggerType, monitor: { schemaVersion: "agentlas.automation-monitor.v1", originChatId: chat.id,
           originMessageId: ownerOriginMessage(chat.id, caller), notificationPolicy: "meaningful_changes", deadline: null } });
-      // An input-triggered graph is work One does now, not a standing automation: it ends with the Goal it was made for
-      // or after idle days, and its structure feeds the repeated-work detector so a recurring kind becomes a Toolchain.
-      if (markOneGraphEphemeral(saved, chat.id) && !existing) recordOneGraphStructure(saved, graph, chat.id, saved.createdAt);
+      // An input-triggered graph is work One does now until it proves it comes back: it ends with the Goal it was made for or
+      // after idle days, unless it has served three different inputs (one/ephemeral-graphs.ts).
+      markOneGraphEphemeral(saved, chat.id);
       recordOneGraphAuthority(saved, chat.id);
-      return receipt(saved, { ok: true, action: existing ? "updated" : "created", ...(connections && !enable ? { activation: connections.activation } : {}) });
+      const markers = existing ? [] : occasionMarkers(bp.name);
+      return receipt(saved, { ok: true, action: existing ? "updated" : "created", ...(connections && !enable ? { activation: connections.activation } : {}),
+        ...(markers.length ? { advice: [{ code: "graph_name_names_one_occasion", markers,
+          next: "A graph is for work that comes back with different inputs. This name carries a date or number; if the graph is only for this occasion, switch it off when done and do such work directly next time. If it will recur, rename it for the recurring work (one_graph_save with graph_id) and pass the date or item as its input." }] } : {}),
+        ...(lookAlikes.length ? { similar_graphs: lookAlikes.slice(0, 3).map(a => ({ graph_id: a.id, name: a.name, enabled: a.enabled })),
+          similar_graphs_next: "These graphs have the same structure. If this is the same kind of work for another item, run one of them with the new input (one_graph_run) instead of saving more copies." } : {}) });
     }).immediate();
   }
   // A lost tool response can be retried after the host pinned a runtime or the

@@ -222,9 +222,7 @@ import { listAgentFiles, readAgentFile, readAgentPromptSource, writeAgentFile } 
 import {
   approveAndApplyAgentEvolutionProposal,
   createAgentEvolutionProposal,
-  deleteAgentGrowthProposalSession,
   listAgentEvolutionProposals,
-  listPendingGrowthProposals,
   markAgentEvolutionProposalMeasured,
   rejectAgentEvolutionProposal,
   rollbackAgentEvolutionProposal,
@@ -3672,13 +3670,6 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
   );
   registerAppControlDomainIpc(ipcMain, "agentEvolution:rollback", (proposalId: string) =>
     rollbackAgentEvolutionProposal(proposalId),
-  );
-  // 4표면 발화 UX — 에이전트 무관 전역 "성장 제안"(고위험 pending + 저위험 자동적용분).
-  registerAppControlDomainIpc(ipcMain, "agentEvolution:listGrowth", (limit?: number) =>
-    listPendingGrowthProposals(limit),
-  );
-  registerAppControlDomainIpc(ipcMain, "agentEvolution:deleteGrowthSession", (proposalId: string) =>
-    deleteAgentGrowthProposalSession(proposalId),
   );
 
 

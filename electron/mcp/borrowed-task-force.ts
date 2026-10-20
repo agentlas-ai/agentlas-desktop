@@ -1,4 +1,7 @@
 import { composeDeclaredPrompt, registerDeclaredPromptModule, type DeclaredPromptPart } from "../runtime/prompt-order";
+import { getMeta } from "../store/meta";
+import { borrowedSessionMode, borrowedWorkerSessionIsShared, borrowedWorkerSessionOwnerId, claimBorrowedWorkerSession, placeWorkerTurnContext, runClaimedWorkerTurn, splitWorkerSystemParts } from "./borrowed-worker-session";
+import { dropOwnerNativeSession } from "../runtime/shared-session-drop";
 import { toolObservationDigest } from "../automation-progress-guard";
 import { selectTaskForceConversationContext } from "./task-force-history";
 import { runObservedRunner, observedRunnerUsage, observedRunnerUsageEvidence, ObservedRunnerFailureError, copyObservedRunnerEvidence } from "../runtime/observed-runner";
@@ -1514,17 +1517,31 @@ function taskForcePermissionLabel(permission: RunnerRequest["permission"]): stri
 }
 
 /** Apply after package/capability spreads, immediately before provider dispatch. */
-function taskForceRunnerRequest(p: BorrowedTaskForceParams, request: RunnerRequest): RunnerRequest {
+function taskForceRunnerRequest(p: BorrowedTaskForceParams, request: RunnerRequest, options: { sharedSession?: boolean; runtimeKind?: string } = {}): RunnerRequest {
   if(p.req.agentAppMode)assertAppMemoryRun(p.req.runId,p.chat.id);
   const { [TASK_FORCE_SYSTEM_PARTS]: systemParts, ...plainRequest } = request as TaskForcePromptRequest;
   request = plainRequest;
   if (systemParts && request.systemPrompt !== composeDeclaredPrompt(systemParts, "\n")) throw new Error("taskforce-system-parts-mismatch");
   const context = !request.untrustedNoTools && request.cwd ? mainWorkAttachmentContext(p.req, request.cwd) : "";
+  let finalParts = systemParts;
   if (context) {
     if (!systemParts) throw new Error("taskforce-system-parts-required");
-    request = { ...request, systemPrompt: composeDeclaredPrompt([...systemParts,
+    finalParts = [...systemParts,
       { id: "taskforce.shared.system.work-attachments", revision: 1, stability: "turn-context", changeTriggers: ["attachments", "task"], order: 120, text: context },
-    ], "\n") };
+    ];
+    request = { ...request, systemPrompt: composeDeclaredPrompt(finalParts, "\n") };
+  }
+  // A borrowed agent that continues its session (borrowed-worker-session.ts): what changes per stage rides as the turn's own context,
+  // so the system prompt and its fingerprint stay equal from one stage to the next.
+  if (options.sharedSession && finalParts) {
+    const split = splitWorkerSystemParts(finalParts);
+    if (split) {
+      const { turnContext: placedContext, ...placed } = placeWorkerTurnContext({ runtimeKind: options.runtimeKind ?? "", systemPrompt: split.systemPrompt,
+        userPrompt: request.userPrompt, turnContext: split.turnContext, locale: request.locale });
+      // A prompt that now carries the framed context keeps its plain form for the scans that read the surface text (the plugin-router pointer).
+      request = { ...request, ...placed, ...(placedContext !== undefined ? { turnContext: placedContext } : {}),
+        ...(placed.userPrompt !== request.userPrompt ? { surfaceUserPrompt: request.surfaceUserPrompt ?? request.userPrompt } : {}) };
+    }
   }
   const workProjectId = p.chat.originSurface === "work" && p.chat.projectId ? p.chat.projectId : null;
   if (request.workProjectId !== workProjectId) request = { ...request, workProjectId };
@@ -1540,9 +1557,9 @@ function taskForceRunnerRequest(p: BorrowedTaskForceParams, request: RunnerReque
 
 
  */
-function taskForceWorkerRunnerRequest(p: BorrowedTaskForceParams, request: RunnerRequest): RunnerRequest {
+function taskForceWorkerRunnerRequest(p: BorrowedTaskForceParams, request: RunnerRequest, options: { sharedSession?: boolean; runtimeKind?: string } = {}): RunnerRequest {
   // Marked before taskForceRunnerRequest: its App-memory binding is keyed by the final request object.
-  return taskForceRunnerRequest(p, { ...request, unattendedNoAsk: true });
+  return taskForceRunnerRequest(p, { ...request, unattendedNoAsk: true }, options);
 }
 
 function taskForceRunnerBase(
@@ -5741,13 +5758,27 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       observedDirectPicked = role === "worker" ? picked : orchestratorDefaultRunner;
       observedDirectResolution = role === "worker" ? workloadResolution : escalationBaseResolution;
       observedDirectInvocationId = `${invocationId}:${role}:${attempt}`;
+      // The agent's own turns continue one session across stages and attempts (borrowed-worker-session.ts); a review step, an escalation
+      // to the orchestrator and a runtime without a per-turn context keep a session of their own as before.
+      const sharedCandidate = borrowedWorkerSessionIsShared({
+        mode: borrowedSessionMode(getMeta), role, review: taskForcePacketIsReview(packet),
+        runtimeKind: observedDirectRuntime.kind, agentAppMode: p.req.agentAppMode === true,
+      });
+      // One session takes one turn at a time: a second ready packet of the same agent keeps a session of its own (borrowed-worker-session.ts).
+      const sharedSessionBase = taskForceSessionId(p, `borrow:${spec.slug}`);
+      const sharedSessionOwner = borrowedWorkerSessionOwnerId(sharedSessionBase, role, attempt, true);
+      const sharedSessionClaim = sharedCandidate ? claimBorrowedWorkerSession(sharedSessionOwner) : null;
+      const sharedWorkerSession = sharedCandidate && sharedSessionClaim !== null;
       if (role === "orchestrator") {
         observedDirectReasonCodes = ["escalated-after-failure"];
         observedDirectEscalatedFromRole = "worker";
         observedDirectFailureCount = 2;
         observedDirectEscalationAttempt = 1;
       }
-      const attemptResult = await workerCapabilityRunner(p.prepareWorkerCapabilities, {
+      // A failed or stopped shared turn leaves a session in an unknown state: drop it so the agent's next stage starts clean.
+      const claimedRuntimeKind = observedDirectRuntime.kind;
+      const dropSharedSession = () => dropOwnerNativeSession({ chatId: p.chat.id, kind: claimedRuntimeKind, ownerId: sharedSessionOwner });
+      const attemptResult = await runClaimedWorkerTurn(sharedSessionClaim, dropSharedSession, () => workerCapabilityRunner(p.prepareWorkerCapabilities, {
         workerId: id, attemptId: observedDirectInvocationId, agentId: installedAgent?.id ?? p.chat.agentId ?? undefined,
         agentName: spec.name, task: capabilityTask, runtime: observedDirectRuntime, ceiling: capabilityCeiling,
       }, (request, events) => observeTaskForceModelCall(p, {
@@ -5756,7 +5787,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         attempt,
         agentId: installedAgent?.id ?? p.chat.agentId,
         runtime: observedDirectRuntime,
-      }, () => runSettledTaskForceStep(p, id, observedDirectPicked.runner, taskForceWorkerRunnerRequest(p, request), events, true)).then(result => { result.text = taskForceWorkerOwnerAskText(result.text, taskForceWorkerHandoffText(result.text)); return result; }), capabilityEvidence(id, observedDirectInvocationId))(
+      }, () => runSettledTaskForceStep(p, id, observedDirectPicked.runner, taskForceWorkerRunnerRequest(p, request, { sharedSession: sharedWorkerSession, runtimeKind: observedDirectRuntime.kind }), events, true)).then(result => { result.text = taskForceWorkerOwnerAskText(result.text, taskForceWorkerHandoffText(result.text)); return result; }), capabilityEvidence(id, observedDirectInvocationId))(
         {
           ...taskForceSystemRequest([
 ...borrowedAgentSystemPromptParts(spec, packagePermission, materializedWorkerMcpTools),
@@ -5786,7 +5817,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
             ? p.workingFolder ?? undefined
             : taskForceStageCwd(p, "direct-worker", packageBoundary.mcpAllowedTools ?? []),
           chatId: p.chat.id,
-          runtimeSessionOwnerId: `${taskForceSessionId(p, `borrow:${spec.slug}`)}:${role}:${attempt}`,
+          runtimeSessionOwnerId: borrowedWorkerSessionOwnerId(sharedSessionBase, role, attempt, sharedWorkerSession, sharedCandidate && !sharedWorkerSession ? invocationId : undefined),
           agentId: installedAgent?.id ?? p.chat.agentId,
           locale: p.locale,
         },
@@ -5808,7 +5839,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
             }));
           },
         },
-      );
+      ));
       observedDirectResult = attemptResult;
       return requireTaskForceRunnerSuccess(attemptResult, observedDirectRuntime);
     });

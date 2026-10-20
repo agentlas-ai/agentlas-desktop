@@ -73,7 +73,7 @@ export type FinanceWorkspace = z.infer<typeof WorkspaceSchema>;
 
 export type { FinanceSecurityIdentity } from './finance-search';
 export interface FinanceSearchResult { assets: FinanceAsset[]; provider: string; asOf: string | null; warnings: string[]; identities?: import('./finance-search').FinanceSecurityIdentity[] }
-export interface FinanceAIResult { assetSearches?: { query: string; result: FinanceSearchResult }[]; message: string; operations?: FinanceOperation[]; baseRevision: number; status?: "ok" | "unavailable" | "invalid_output" | "cancelled" | "conflict"; requestId?: string; runtime?: { kind: string; model?: string; execution: string }; artifacts?:{reportId:string;title:string;kind:'chart'|'report'|'newsletter'}[];toolRuns?:{tool:string;status:'ok'|'failed';startedAt:string;errorCode?:string}[]; analystDraft?:import('./finance-analysts').FinanceAnalystDraft }
+export interface FinanceAIResult { assetSearches?: { query: string; result: FinanceSearchResult }[]; dataResults?: FinanceConversationDataResult[]; message: string; operations?: FinanceOperation[]; baseRevision: number; status?: "ok" | "unavailable" | "invalid_output" | "cancelled" | "conflict"; requestId?: string; runtime?: { kind: string; model?: string; execution: string }; artifacts?:{reportId:string;title:string;kind:'chart'|'report'|'newsletter'}[];toolRuns?:{tool:string;status:'ok'|'failed';startedAt:string;errorCode?:string}[]; analystDraft?:import('./finance-analysts').FinanceAnalystDraft }
 export const FinanceAskRequestSchema = z.object({
   request: z.string().min(1).max(20000).refine(value => !!value.trim()), screenContext: z.string().max(2000),
   baseRevision: z.number().int().nonnegative(), requestId: id.optional(),
@@ -102,6 +102,15 @@ export interface FinanceDataResult {
   sourceUrls: string[]; asOf: string | null; retrievedAt: string;
   columns: string[]; rows: (string | number | null)[][]; warnings: string[];
   providers?: { id: string; label: string; status: "ok" | "partial" | "unavailable" | "error"; coverage: string; rights: string; sourceUrls: string[] }[];
+}
+/** Actual host-returned observations, scoped to one conversation response; never model-authored values. */
+export interface FinanceConversationDataResult {
+  datasetId: string; kind: "query" | "feeds" | "discovery";
+  request: FinanceDataRequest | null; assets: FinanceAsset[]; result: FinanceDataResult;
+  /** A model-chosen view over original rows; source observations are never rewritten. */
+  presentation?: { rowIndices: number[]; title?: string };
+  /** Reports created from this exact dataset, for avoiding duplicate inline presentations after commit. */
+  reportIds?: string[];
 }
 export interface FinanceMonitorRun {
   id: string; monitorId: string; status: "running" | "succeeded" | "partial" | "failed" | "cancelled";
@@ -138,7 +147,13 @@ export interface FinanceMonitorRunsResult {
   runs: FinanceMonitorRun[]; nextCursor?: string | null; snapshotSequence?: number;
   indexStatus?: "ready" | "building"; indexedCount?: number;
 }
+/** Finance uses ordinary Work projects and chats; this is not a second session store. */
+export interface FinanceWorkProjectBinding {
+  ownerScope: string;
+  projectId: string;
+}
 export interface FinanceAPI {
+  workProject?(): Promise<FinanceWorkProjectBinding>;
   planning?(input: import('./finance-planning').FinancePlanningRequest): Promise<import('./finance-planning').FinancePlanningResult>;
   portfolio?(input: import('./finance-portfolio').FinancePortfolioRequest): Promise<import('./finance-portfolio').FinancePortfolioResult>;
   analysts?(input: import('./finance-analysts').FinanceAnalystRequest): Promise<import('./finance-analysts').FinanceAnalystResult>;

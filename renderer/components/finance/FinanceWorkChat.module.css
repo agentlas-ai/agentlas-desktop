@@ -1,0 +1,11 @@
+.root{min-width:0;max-width:100%;color:var(--ink)}
+.toolbar{display:flex;align-items:center;gap:8px;min-width:0;margin:0 0 12px}
+.selector{flex:1;min-width:0;max-width:400px}.selector select{display:block;width:100%;min-width:0;min-height:40px;padding:8px 30px 8px 12px;border:1px solid var(--paper-edge);border-radius:8px;color:var(--ink);background:var(--paper);font:inherit;font-size:13px;text-overflow:ellipsis}
+.icon,.newChat{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:40px;flex-shrink:0;border:1px solid var(--paper-edge);border-radius:8px;background:var(--paper);color:var(--ink);cursor:pointer;font:inherit;font-size:12px}.icon{width:40px;padding:8px}.newChat{padding:8px 12px;white-space:nowrap}
+.root button:disabled,.selector select:disabled{opacity:.5;cursor:default}.root :focus-visible{outline:2px solid var(--attention,var(--accent));outline-offset:2px}
+.surface{display:flex;min-width:0;min-height:460px;height:min(900px,calc(100dvh - 220px));overflow:hidden;border:1px solid var(--paper-edge);border-radius:12px;background:var(--paper)}
+.surface :global(.task-cockpit-header-danger){display:none}.surface :global(.task-cockpit-project-eyebrow){display:none}.surface :global(.task-cockpit-header [data-work-dashboard-return]){display:none}
+.status{padding:32px 16px;margin:0;font-size:13px;color:var(--ink-soft)}.error{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 12px;padding:12px;border:1px solid var(--paper-edge);border-radius:8px;color:var(--ink-soft);font-size:12px;line-height:1.6}.error button{padding:5px 9px;border:1px solid var(--paper-edge);border-radius:6px;background:var(--paper);color:var(--ink);font:inherit;cursor:pointer}
+.srOnly{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+@media(max-width:480px){.toolbar{gap:6px}.newChat{padding:8px}.surface{min-height:500px;height:calc(100dvh - 215px);border-radius:8px}.selector{max-width:none}}
+@media(pointer:coarse){.icon,.newChat,.selector select{min-height:44px}.icon{width:44px}}

@@ -12,7 +12,8 @@ import { FinanceStore, type FinanceScope } from './store';
 import { interpretFinance } from './model';
 import { queryFinanceData, refreshFinanceQuotes } from './data';
 import { financeResearchPrompt } from './prompts';
-import { getFinanceService } from './service';
+import { captureFinanceScope, getFinanceService } from './service';
+import { financeWorkProject } from './work-project';
 import { onFinanceWorkspaceChange } from './events';
 import { FinanceArchiveRequestSchema } from './archive';
 import { financeDataConnection } from './connections';
@@ -46,6 +47,14 @@ export function registerFinanceIpc(input: { ipc: Pick<IpcMain, 'handle'>; assert
   const load = (scope: FinanceScope) => service.load(scope);
   const handle = (name: string, fn: (event: IpcMainInvokeEvent, raw: unknown, scope: FinanceScope) => unknown) => input.ipc.handle(`finance:${name}`, (event, raw) => { input.assertTrustedSender(event); return fn(event, raw, captureScope()); });
   handle('load', (_event, _raw, scope) => load(scope));
+  handle('workProject', async(_event, raw, originalScope) => {
+    z.union([z.undefined(), z.object({}).strict()]).parse(raw);
+    originalScope.assertCurrent();
+    const scope = await captureFinanceScope();
+    originalScope.assertCurrent();
+    await requireFinanceConsent(scope); scope.assertCurrent();
+    const result = financeWorkProject(scope); scope.assertCurrent(); return result;
+  });
   handle('planning', async(_event, raw, scope) => { await requireFinanceConsent(scope);scope.assertCurrent();const plugin=await financeBuiltinPlugin().runtime(scope,FINANCE_NOTICE_VERSION);scope.assertCurrent();const result=plugin.callPureTool('planning',raw) as FinancePlanningResult;scope.assertCurrent();planningReviews.record(scope,raw);return result; });
   handle('analysts', (_event, raw, scope) => service.analysts(scope, raw as import('../../shared/finance-analysts').FinanceAnalystRequest));
   handle('portfolio', async(event, raw, scope) => {

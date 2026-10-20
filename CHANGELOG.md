@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.3.84 — 2026-10-20
+
+- A Goal that asked you a question is held until you answer instead of being woken again and again, and a Goal's next turn is now woken by the app itself: no hidden "Goal continuation" automation is written any more, and the old ones are switched off once and kept as history.
+- AGI: the native-harness bypass is limited to tools that are actually broken, a teammate the AGI starts runs with write permission at most, an owner question counts as asked only after it reached your room, and a retired Goal-continuation row no longer counts as a continuation.
+- Automatic cookie refresh no longer replaces one account's sign-in with another's: on Windows it decides per login group from the fixed sign-in cookies, keeps another account's complete sign-in on every path, ignores expired rows, and unwraps the browser key without blocking the app.
+- A borrowed agent's own team turns continue one session instead of starting cold at every stage; parallel packets of one agent no longer share a session, and a failed or stopped stage forgets its session on every runtime.
+- A learning becomes a change candidate only after it comes back from separate runs, a proposed change shows what it does to each file, and an idle background proposer prepares at most one proposal per agent per day; applying a change still needs your approval of the diff. The unused agent growth-proposal cards are removed.
+- A Toolchain is now an MCP-shaped tool for an app or page, found from how agents used tools; once promoted its health is watched, one whose real calls keep failing is pulled back and repaired, graph copies saved for a single occasion are refused, and Windows program and script paths are recognized as the same program as their POSIX spelling.
+- Finance: results, saved notes and data views now render inside the conversation, a Finance chat runs on the ordinary Work project and chat, dashboard feeds are bounded, and the phone shows the retained result cards in its history.
+- Finance chat: ordinary requests reach the finance operations, the Finance plugin accepts the metadata Claude Code attaches to every tool call (planning, compute and valuation no longer fail with invalid parameters), holdings read from a photo or pasted text appear as an editable card and only your Save stores them, and a Work conversation's plan stays a Finance report. If you had the Finance plugin enabled, prepare its tools once more after updating.
+- The bundled Agentlas OS runtime is v1.2.67: Hub search results carry their own descriptions, and the code map includes the verification files that CI workflows and test commands name.
+
+This release binds Agentlas OS v1.2.67 at 704ce1ead2a5bac712cf835b290bde12053a5db1; public runtime asset `hephaestus-runtime-v1.2.67.tar.gz` is pinned at SHA-256 `c5ae6a2c8502c1eaee09f079e860e7f17886b9ef7d1880577c1655e6553a94a1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.83 — 2026-10-20
 
 - Strategy approvals: a proposal that cannot be applied no longer opens an approval pop-up, a Goal contract change waits in the strategy panel instead of interrupting you, the approval sheet sits with the composer, proposals that need your decision are marked as such, and a model's own call can no longer approve a strategy for you. Command automations no longer produce generic post-run strategy drafts.

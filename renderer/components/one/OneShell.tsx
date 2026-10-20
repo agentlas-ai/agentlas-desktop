@@ -230,7 +230,6 @@ import { OneMemoryCandidateCard } from "./OneMemoryCandidateCard";
 import { OneProfileSheet } from "./OneProfileSheet";
 import { OneSuggestionCard } from "./OneSuggestionCard";
 import { OneFirstRequestCards, OneNewSessionButton, OneSeatAttachLink, oneFirstRequestCardsEntry, oneFirstRequestSuggestionCards, type OneSuggestionCard as OneFirstRequestSuggestion } from "./OneFirstRequestCards";
-import { OneGrowthCard } from "./OneGrowthCard";
 import { TaskSidePanel, taskBrowserUrl, type OneLiveAppPreview } from "../workspace/TaskSidePanel";
 import { OneOrgChart, type OneOrgSearchItem } from "./OneOrgChart";
 import { OneAgentPortrait } from "./OneAgentPortrait";

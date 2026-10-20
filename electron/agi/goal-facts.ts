@@ -15,6 +15,7 @@ import { readEpisodeQuietBaseline } from "../long-run/episode-disposition";
 import { getDb } from "../store/db";
 import { getInvocationRunReceipt } from "../store/run-events";
 import { readGoalPlan } from "../store/goal-plans";
+import { goalContinuationRowSql } from "../store/goal-continuation-rows";
 import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import { isGoalObserving } from "../long-run/effect-observation-tickets";
@@ -140,7 +141,8 @@ function tactics(db: Database.Database, goalId: string, nowMs: number): { tactic
 
 function missedDueRun(db: Database.Database, goalId: string, nowMs: number): string | null {
   if (!tableExists(db, "automations")) return null;
-  const automation = db.prepare("SELECT id, enabled, next_run_at FROM automations WHERE goal_id = ? ORDER BY created_at DESC LIMIT 1")
+  // A retired Goal continuation (store/goal-continuation-rows.ts) owns no run and is never due; same predicate as findAutomationByGoalId.
+  const automation = db.prepare(`SELECT id, enabled, next_run_at FROM automations WHERE goal_id = ? AND NOT ${goalContinuationRowSql()} ORDER BY created_at DESC LIMIT 1`)
     .get(goalId) as { id: string; enabled: number; next_run_at: string | null } | undefined;
   if (!automation || automation.enabled !== 1 || !automation.next_run_at) return null;
   const dueMs = Date.parse(automation.next_run_at);
@@ -400,12 +402,25 @@ export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): Agi
     blockedNodeId: plan.blockedNodeId, evidenceRefs: refs, continuationAutomation: hasContinuationAutomation(db, goalId) };
 }
 
-/** The same lookup recordAgiMove uses for switch_runtime: the newest automation of the goal and its latest recorded run. */
-function hasContinuationAutomation(db: Database.Database, goalId: string): boolean | undefined {
+/**
+ * What switch_runtime can move, if anything: the newest automation of the Goal that is not a retired Goal continuation, and
+ * its latest recorded run. The host now wakes a Goal itself and writes no continuation row, and the legacy rows
+ * (goal_id + long-run marker, switched off at boot, meta automation.goal-continuation-retired:<id>) are history: they own
+ * no next turn, so they are never a target. The predicate is the one findAutomationByGoalId uses.
+ * null = no target; undefined = tables absent, unknown (not refused). recordAgiMove and the classifier fact share this.
+ */
+export function goalRuntimeSwitchTarget(db: Database.Database, goalId: string): { automationId: string; latestRunId: string } | null | undefined {
   if (!tableExists(db, "automations") || !tableExists(db, "run_history")) return undefined;
-  const automation = db.prepare("SELECT id FROM automations WHERE goal_id = ? ORDER BY created_at DESC LIMIT 1").get(goalId) as { id: string } | undefined;
-  if (!automation) return false;
-  return Boolean(db.prepare("SELECT 1 FROM run_history WHERE automation_id = ? LIMIT 1").get(automation.id));
+  const automation = db.prepare(`SELECT id FROM automations WHERE goal_id = ? AND NOT ${goalContinuationRowSql()} ORDER BY created_at DESC LIMIT 1`)
+    .get(goalId) as { id: string } | undefined;
+  if (!automation) return null;
+  const latest = db.prepare("SELECT id FROM run_history WHERE automation_id = ? ORDER BY ran_at DESC, rowid DESC LIMIT 1").get(automation.id) as { id: string } | undefined;
+  return latest ? { automationId: automation.id, latestRunId: latest.id } : null;
+}
+
+function hasContinuationAutomation(db: Database.Database, goalId: string): boolean | undefined {
+  const target = goalRuntimeSwitchTarget(db, goalId);
+  return target === undefined ? undefined : target !== null;
 }
 
 function episodeFactSignature(db: Database.Database, longRunId: string | null, chatId: string | null, signals: readonly AgiBlockerSignal[], refs: readonly string[],

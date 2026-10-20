@@ -72,6 +72,13 @@ export interface RepeatSignal {
   /** Null when there were too few unrelated pairs to measure a baseline. */
   flowLift: number | null;
   centroid: number[];
+  /** Where the signal came from: sentences of empty searches, or tool-use episodes on one surface (shared/tool-use-signals.ts). */
+  kind?: "sentences" | "episodes";
+  /** Episode signals: the site, app command line or script the repeated work happens on. */
+  surface?: string;
+  /** Episode signals: the stable steps in readable form, and a few real runs of them (values masked, secrets dropped). */
+  coreSteps?: string[];
+  exemplars?: Array<{ runId: string; at: string; steps: string[] }>;
   /** Tool steps present in at least half of the members. */
   commonSteps: string[];
   /** Digit-bearing details that vary between members (dates, episode/version ids): inputs, never identity. */
@@ -84,6 +91,9 @@ export interface DetectorVerdictRef {
   decision: string;
   centroid: readonly number[];
   memberIds: readonly string[];
+  /** Set on verdicts of episode signals: the surface and the stable steps that made the question. */
+  surface?: string;
+  coreTokens?: readonly string[];
 }
 
 function norm(vector: readonly number[]): number[] {
@@ -99,11 +109,15 @@ export function cosine(left: readonly number[], right: readonly number[]): numbe
 
 /** Average-linkage agglomerative clustering on cosine similarity (Lance-Williams update). Returns member index lists. */
 export function clusterByAverageLinkage(vectors: readonly (readonly number[])[], distance: number): number[][] {
-  const n = vectors.length;
   const unit = vectors.map(norm);
-  const sim: number[][] = unit.map(left => unit.map(right => cosine(left, right)));
-  const clusters: Array<number[] | null> = unit.map((_, index) => [index]);
-  const floor = 1 - distance;
+  return clusterBySimilarity(unit.map(left => unit.map(right => cosine(left, right))), 1 - distance);
+}
+
+/** The same clustering on a precomputed symmetric similarity matrix; clusters merge while their average similarity is at least `floor`. */
+export function clusterBySimilarity(similarity: readonly (readonly number[])[], floor: number): number[][] {
+  const n = similarity.length;
+  const sim: number[][] = similarity.map(row => [...row]);
+  const clusters: Array<number[] | null> = Array.from({ length: n }, (_, index) => [index]);
   for (;;) {
     let best = -Infinity, bi = -1, bj = -1;
     for (let i = 0; i < n; i++) {
@@ -139,7 +153,7 @@ function compressSteps(trace: readonly string[]): string[] {
   return out;
 }
 
-type FlowVector = Map<string, number>;
+export type FlowVector = Map<string, number>;
 
 /**
  * Tool flow as an IDF-weighted bag of steps and consecutive step pairs, unit length.
@@ -174,7 +188,7 @@ export function flowVectors(observations: readonly Pick<DetectorObservation, "tr
   });
 }
 
-function flowCosine(left: FlowVector, right: FlowVector): number {
+export function flowCosine(left: FlowVector, right: FlowVector): number {
   const [small, large] = left.size <= right.size ? [left, right] : [right, left];
   let dot = 0;
   for (const [key, weight] of small) dot += weight * (large.get(key) ?? 0);
@@ -288,6 +302,13 @@ export function signalAlreadyJudged(signal: RepeatSignal, verdicts: readonly Det
   policy: ToolchainDetectorPolicy = TOOLCHAIN_DETECTOR_POLICY): DetectorVerdictRef | null {
   const fresh = (verdict: DetectorVerdictRef) => verdict.decision === "capability" || verdict.decision === "covered"
     || now - Date.parse(verdict.at) < policy.cooldownDays * 86_400_000;
+  // An episode signal asks "should this operation on this surface have a tool". The same operation is the same stable steps on the
+  // same surface, or the same runs; one site can hold several operations, each its own question.
+  if (signal.surface) {
+    const core = new Set(signal.commonSteps);
+    return verdicts.find(verdict => verdict.surface === signal.surface && fresh(verdict) && (signal.memberIds.every(id => verdict.memberIds.includes(id))
+      || (verdict.coreTokens ?? []).filter(token => core.has(token)).length / Math.max(1, new Set([...core, ...(verdict.coreTokens ?? [])]).size) >= 0.5)) ?? null;
+  }
   return verdicts.find(verdict => fresh(verdict) && (cosine(signal.centroid, verdict.centroid) >= policy.sameSignalSimilarity
     || signal.memberIds.every(id => verdict.memberIds.includes(id)))) ?? null;
 }
@@ -349,16 +370,20 @@ export interface TrialLedger {
   updatedAt: string;
 }
 
-/** The draft version a trial runs: the latest, never validated, of a draft asset. */
-export function trialVersion(asset: ToolchainAsset) {
-  if (asset.status !== "draft") return null;
+/**
+ * The version a trial runs: the latest, never validated, of a draft asset; or, for a callable asset that was pulled back for
+ * failing, a repaired version newer than the stable one.
+ */
+export function trialVersion(asset: ToolchainAsset, pulledBack = false) {
+  if (asset.status !== "draft" && !(pulledBack && asset.status === "callable")) return null;
   const release = asset.versions.at(-1);
+  if (pulledBack && release && release.version <= (asset.stableVersion ?? 0)) return null;
   return release && release.validation.state === "untested" ? release : null;
 }
 
 /** Eligible for this conversation now: a trial draft, its ledger (if any) still trialling this exact content, no grant today. */
-export function trialEligible(asset: ToolchainAsset, ledger: TrialLedger | null, chatId: string, now: number): boolean {
-  const release = trialVersion(asset);
+export function trialEligible(asset: ToolchainAsset, ledger: TrialLedger | null, chatId: string, now: number, pulledBack = false): boolean {
+  const release = trialVersion(asset, pulledBack);
   if (!release || ledger && (ledger.state !== "trial" || ledger.contentHash !== release.contentHash)) return false;
   return !ledger?.grants.some(grant => grant.chatId === chatId && now - Date.parse(grant.at) < TRIAL_GRANT_WINDOW_MS);
 }

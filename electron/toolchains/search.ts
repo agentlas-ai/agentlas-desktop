@@ -16,6 +16,7 @@ import {
 } from "../../shared/toolchain";
 import { autoLocalEmbedding, LOCAL_HASHING_DIMENSIONS, rankHybridLocal } from "../memory/local-embedding";
 import type { ToolchainAsset, ToolchainAssetVersion } from "../../shared/toolchain-asset";
+import { isToolchainPulledBack } from "./trial-ledger";
 
 const MAX_CACHED = 256;
 const embeddings = new Map<string, readonly number[]>();
@@ -69,7 +70,8 @@ export function rankToolchainAssetCandidates(task: string, candidates: Array<{ i
 export function searchToolchainAssets(task: string, assets: ToolchainAsset[], limit = 5): ToolchainAsset[] {
   const candidates = assets.flatMap(asset => {
     const version = asset.versions.find(item => item.version === asset.stableVersion);
-    if (asset.status !== "callable" || version?.validation.state !== "passed") return [];
+    // A Toolchain pulled back for failing in real use stays out of search until its repaired version is the stable one.
+    if (asset.status !== "callable" || version?.validation.state !== "passed" || isToolchainPulledBack(asset)) return [];
     return [{ id: asset.id, release: version }];
   });
   return rankToolchainAssetCandidates(task, candidates, limit).flatMap(hit => {

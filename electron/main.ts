@@ -5253,6 +5253,13 @@ app.whenReady().then(async () => {
   } catch (err) {
     console.error("[dreaming] scheduler start failed:", err);
   }
+  // 다시 나타난 학습의 변경안을 유휴 때 미리 만들어 둔다. 반영은 오너가 diff를 보고 승인할 때만.
+  try {
+    const { startLearningProposer } = await import("./agents/learning-proposer");
+    startLearningProposer();
+  } catch (err) {
+    console.error("[learning-proposer] start failed:", err);
+  }
   // 전면 영어 마이그레이션(기획 2026-09-23 데스크탑 절) — 한 번 큐를 채우고 유휴에서 끝까지 번역한다.
   // dreaming 설정과 무관(별도 1회 작업), 하드 옵트아웃 meta 만 존중. 부팅 경로 밖(지연·유휴 타이머).
   try {

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { MobileBridgeChatHistoryPageDto } from "../../shared/mobile-bridge";
 import { listChatMessagesPage, listChatMessagesBeforeUiAnchor } from "../store/chats";
 import { listUiInstances } from "../harness/ui-instances";
-import { mergeInlineUiTranscript } from "../../shared/inline-ui-transcript";
+import { mergeMobileInlineUiTranscript } from "./finance-ui-transcript";
 import { projectMobileBridgeHistory, type MobileBridgeHistoryConsumption } from "./projector";
 import { mobileBridgeJsonBytes, MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES } from "./sanitize";
 
@@ -58,7 +58,7 @@ export async function readMobileBridgeHistoryPage(
   const isBefore = (row: { id: string; createdAt: string }) => !before
     || row.createdAt < before.createdAt || (row.createdAt === before.createdAt && virtualAnchor === true && row.id < before.id);
   const lower = page.hasOlder ? page.messages[0] : undefined;
-  const inline = mergeInlineUiTranscript(chatId, page.messages, instances.filter(instance => {
+  const inline = await mergeMobileInlineUiTranscript(chatId, page.messages, instances.filter(instance => {
     const row = { id: `ui-instance:${instance.instanceId}`, createdAt: instance.createdAt };
     return isBefore(row) && (!lower || row.createdAt >= lower.createdAt);
   }));

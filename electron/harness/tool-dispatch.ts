@@ -65,9 +65,11 @@ interface CallRecord {
   chatId: string;
   runId: string;
   toolId: string;
-  providerRef: string;
-  serverId: string;
-  schemaDigest: string;
+  /** Absent on genuine native-port results; legacy MCP records retain their existing fields. */
+  providerRef?: string;
+  serverId?: string;
+  schemaDigest?: string;
+  origin?: { kind: "native-port"; operationId: string; ownerScope: string };
   argumentsDigest: string;
   argumentKeys: string[];
   state: ToolCallState;
@@ -93,7 +95,7 @@ interface CallRecord {
 interface LiveCall { record: CallRecord; controller: AbortController; done: Promise<void> }
 const live = new Map<string, LiveCall>();
 
-const CALL_ID = /^tc_[0-9a-f-]{36}$/;
+const CALL_ID = /^(?:tc|np)_[0-9a-f-]{36}$/;
 const refToCallId = (ref: string): string | null => {
   const id = ref.startsWith("result:") ? ref.slice(7) : "";
   return CALL_ID.test(id) ? id : null;
@@ -120,13 +122,16 @@ async function pushEvent(record: CallRecord, type: string, detail?: Record<strin
 }
 
 /** A record found "running" with no live runner belongs to a dead process: honest outcome is unsettled, not a retry. */
-async function loadRecord(callId: string, ownerChatId: string): Promise<CallRecord | null> {
+async function loadRecord(callId: string, ownerChatId: string, ctx: HarnessCallContext): Promise<CallRecord | null> {
   const active = live.get(callId);
   if (active) return active.record.chatId === ownerChatId ? active.record : null;
   let record: CallRecord;
   try { record = JSON.parse(fs.readFileSync(path.join(await storeDir(), `${callId}.json`), "utf8")) as CallRecord; } catch { return null; }
   // Refuse before reconciling a dead process: a foreign read may neither see nor mutate its call.
   if (record.chatId !== ownerChatId) return null;
+  if (record.origin?.kind === "native-port") {
+    try { if (await nativePortOwnerScope(ctx) !== record.origin.ownerScope) return null; } catch { return null; }
+  }
   if (!TERMINAL.has(record.state)) {
     record.state = "dispatch-unsettled";
     record.settledAt = new Date().toISOString();
@@ -161,6 +166,35 @@ function retainedCallOwner(args: Args, ctx: HarnessCallContext): { chatId: strin
   if (!str(ctx.chatId)) return { reason: "owner_chat_required" };
   if (args.chatId !== undefined && args.chatId !== ctx.chatId) return { reason: "owner_chat_mismatch" };
   return { chatId: ctx.chatId };
+}
+
+/** Host authority only. A renderer may read its current account, while a run must carry its sealed binding. */
+export async function nativePortOwnerScope(ctx: HarnessCallContext): Promise<string> {
+  const { getAuthenticatedSessionBinding } = await import("../auth");
+  const current = getAuthenticatedSessionBinding();
+  const expected = ctx.hostAccountBinding;
+  if (!current || (!expected && ctx.chatId !== "ui") || (expected && (expected.workspaceId !== current.workspaceId || expected.userId !== current.userId || expected.sessionId !== current.sessionId))) throw new Error("native_result_owner_changed");
+  return sha(JSON.stringify([current.workspaceId, current.userId]));
+}
+
+/** Retain an actual completed native operation; no MCP server, transport or model-authored reference is invented. */
+export async function retainNativePortResult(ctx: HarnessCallContext, operationId: string, args: Args, original: Record<string, unknown>, ownerScope: string): Promise<{ callId: string; resultRef: string }> {
+  if (ctx.dryRun || !str(ctx.chatId) || ctx.chatId === "ui" || !str(ctx.runId) || !/^[a-z][a-z0-9_.-]+$/.test(operationId)) throw new Error("native_result_binding_invalid");
+  ctx.signal?.throwIfAborted();
+  if (await nativePortOwnerScope(ctx) !== ownerScope) throw new Error("native_result_owner_changed");
+  const callId = `np_${randomUUID()}`, at = new Date().toISOString();
+  const received = JSON.stringify(original), raw = redactToolJson(original), stored = JSON.stringify(raw);
+  const record: CallRecord = {
+    schemaVersion: "agentlas.tool-call-record.v1", callId, resultRef: `result:${callId}`, chatId: ctx.chatId, runId: ctx.runId,
+    toolId: operationId, origin: { kind: "native-port", operationId, ownerScope }, argumentsDigest: sha(JSON.stringify(args)), argumentKeys: Object.keys(args).slice(0, 64),
+    state: "succeeded", startedAt: at, settledAt: at, cancelRequested: false, error: null,
+    events: [{ sequence: 1, at, type: "settled", detail: { state: "succeeded", operationId } }],
+    result: { isError: false, text: "", original: raw, artifacts: [], originalSha256: sha(received), storedSha256: sha(stored), redacted: received !== stored },
+  };
+  ctx.signal?.throwIfAborted();
+  if (await nativePortOwnerScope(ctx) !== ownerScope) throw new Error("native_result_owner_changed");
+  await persist(record);
+  return { callId, resultRef: record.resultRef };
 }
 
 // ── inventory (current schema of one connector) ──────────────────────────────────────────────────────────────────────
@@ -387,7 +421,7 @@ export async function toolResult(args: Args, ctx: HarnessCallContext): Promise<P
   if (!CALL_ID.test(callId)) return refused("invalid-input", "callId comes from tool.call");
   const owner = retainedCallOwner(args, ctx);
   if ("reason" in owner) return refused(owner.reason);
-  const record = await loadRecord(callId, owner.chatId);
+  const record = await loadRecord(callId, owner.chatId, ctx);
   return record ? ok(view(record)) : refused("not-found", "no such call on this machine");
 }
 
@@ -399,7 +433,7 @@ export async function toolCancel(args: Args, ctx: HarnessCallContext): Promise<P
   if ("reason" in owner) return refused(owner.reason);
   const active = live.get(callId);
   if (!active) {
-    const record = await loadRecord(callId, owner.chatId);
+    const record = await loadRecord(callId, owner.chatId, ctx);
     return record ? ok({ ...view(record), alreadySettled: true }) : refused("not-found", "no such call on this machine");
   }
   if (active.record.chatId !== owner.chatId) return refused("not-found", "no such call on this machine");
@@ -420,7 +454,7 @@ export async function toolSubscribe(args: Args, ctx: HarnessCallContext): Promis
   if (!CALL_ID.test(callId) || !Number.isInteger(after) || after < 0) return refused("invalid-input", "callId and afterSequence (integer >= 0)");
   const owner = retainedCallOwner(args, ctx);
   if ("reason" in owner) return refused(owner.reason);
-  const record = await loadRecord(callId, owner.chatId);
+  const record = await loadRecord(callId, owner.chatId, ctx);
   if (!record) return refused("not-found", "no such call on this machine");
   const events = record.events.filter((event) => event.sequence > after);
   return ok({ callId, state: record.state, terminal: TERMINAL.has(record.state), events, nextSequence: record.events.length });
@@ -446,7 +480,7 @@ export async function resultRead(args: Args, ctx: HarnessCallContext): Promise<P
   if (!callId || !["original", "structured", "artifact", "summary"].includes(part)) return refused("invalid-input", "resultRef from tool.call; part: original|structured|artifact|summary");
   const owner = retainedCallOwner(args, ctx);
   if ("reason" in owner) return refused(owner.reason);
-  const record = await loadRecord(callId, owner.chatId);
+  const record = await loadRecord(callId, owner.chatId, ctx);
   if (!record) return refused("not-found", "no such result on this machine");
   if (!record.result) return refused("result-not-ready", `call state is ${record.state}; tool.result shows progress`);
   const cursor = str(args.cursor);
@@ -472,7 +506,7 @@ export async function resultRead(args: Args, ctx: HarnessCallContext): Promise<P
       selected = content[index];
     }
     const page = pageText(JSON.stringify(selected), cursor, limit);
-    return page ? ok({ part, redacted: result.redacted === true, ...(index !== null ? { index } : { originalSha256: result.originalSha256, storedSha256: result.storedSha256, partCount: content.length }), ...page }) : refused("invalid-input", "cursor out of range");
+    return page ? ok({ part, redacted: result.redacted === true, ...(record.origin?.kind === "native-port" ? { nativeBinding: { ...record.origin, chatId: record.chatId, runId: record.runId, callId: record.callId } } : {}), ...(index !== null ? { index } : { originalSha256: result.originalSha256, storedSha256: result.storedSha256, partCount: content.length }), ...page }) : refused("invalid-input", "cursor out of range");
   }
   // artifact: list, or one binary part paged by byte offset (base64).
   if (index === null) return ok({ part, artifacts: result.artifacts.map(({ index: i, mimeType, bytes, sha256 }) => ({ index: i, mimeType, bytes, sha256 })) });

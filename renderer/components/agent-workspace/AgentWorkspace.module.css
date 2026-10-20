@@ -182,6 +182,9 @@
 .learningCard > div { display: grid; grid-template-columns: 112px 1fr; gap: 10px; padding: 8px 10px; border: 1px solid var(--paper-edge); border-radius: 6px; }
 .learningCard dt { color: var(--muted-deep); font-size: 11px; }
 .learningCard dd { margin: 0; color: var(--ink); font-size: 12px; line-height: 1.5; }
+.changeSummary { margin: 8px 0 12px; }
+.changeSummary h3 { margin: 0 0 6px; font-size: 12px; color: var(--muted-deep); }
+.changeSummary ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 12px; line-height: 1.5; color: var(--ink); }
 .outcomeTable { border-collapse: collapse; margin: 0 0 12px; font-size: 12px; }
 .outcomeTable th, .outcomeTable td { border: 1px solid var(--paper-edge); padding: 5px 10px; text-align: left; color: var(--ink); }
 .outcomeTable thead th, .outcomeTable tbody th { color: var(--muted-deep); font-weight: 500; }

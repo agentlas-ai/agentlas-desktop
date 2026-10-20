@@ -21,6 +21,7 @@ import { digestAutomationRun, type AutomationLedgerToolEvent, type AutomationRun
 import type { AutomationChatActivityAutomation, AutomationChatActivityRunPage, AutomationChatActivitySnapshot } from "../../shared/automation-activity-ipc";
 import { getDb } from "./db";
 import { getAutomation, getAutomationLiveRunState } from "./automations";
+import { goalContinuationRowSql } from "./goal-continuation-rows";
 
 export type { AutomationChatActivityAutomation, AutomationChatActivityRunPage, AutomationChatActivitySnapshot };
 
@@ -43,7 +44,9 @@ export function linkedAutomationsForChat(chatId: string, options: { includeProje
   ).all(chatId) as Array<{ id: string }>;
   for (const row of origin) out.set(row.id, "origin");
   if (chat.goal_id) {
-    const goal = db.prepare("SELECT id FROM automations WHERE goal_id = ? ORDER BY created_at").all(chat.goal_id) as Array<{ id: string }>;
+    // A retired Goal continuation is history, not an automation this conversation owns (store/goal-continuation-rows.ts).
+    const goal = db.prepare(`SELECT id FROM automations WHERE goal_id = ? AND NOT ${goalContinuationRowSql()} ORDER BY created_at`)
+      .all(chat.goal_id) as Array<{ id: string }>;
     for (const row of goal) if (!out.has(row.id)) out.set(row.id, "goal");
   }
   const includeProject = options.includeProject ?? chat.origin_surface === "work";

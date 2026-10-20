@@ -6757,6 +6757,7 @@ function financeCalculationArtifact(artifact, workspace, title = artifact.title,
 }
 function financeConversationArtifact(results, workspace, title, kind, narrative, presentation = {}) {
     const language = presentation.language ? finance_1.FinanceReportLanguageSchema.parse(presentation.language) : undefined;
+    const narrativeOnly = results.length === 0 && kind === 'report' && !!narrative.trim();
     const now = new Date().toISOString(), operations = [], sections = [];
     if (narrative.trim())
         sections.push({ id: (0, finance_1.financeId)('section'), title: title.slice(0, 300), kind: 'summary', presentation: 'narrative', narrative: narrative.slice(0, 20000), widget: null, projection: null });
@@ -6780,7 +6781,7 @@ function financeConversationArtifact(results, workspace, title, kind, narrative,
         const chart = widget.chartType !== 'table', comparison = presentation.comparisonIndexes?.includes(resultIndex) ?? false;
         sections.push({ id: (0, finance_1.financeId)('section'), title, kind: chart || comparison ? 'widget' : 'sources', presentation: chart ? 'chart' : comparison ? 'comparison' : 'supporting', narrative: '', widget, projection: { columns: result.columns, rows: result.rows, status: result.status === 'ok' ? 'ready' : 'partial', warnings: result.warnings, asOf: result.asOf, sourceIds: [sourceId] } });
     }
-    if (!sections.some(section => section.projection?.rows.length))
+    if (!narrativeOnly && !sections.some(section => section.projection?.rows.length))
         throw new Error('finance_artifact_evidence_required');
     if (!sections.some(section => section.presentation !== 'supporting'))
         throw new Error('finance_artifact_visual_or_narrative_required');

@@ -123,7 +123,7 @@ export interface ParseAutomationsResult {
 /** Native One needs stable tool guidance, not the entire text-emission grammar.
  * The detailed fallback can be fetched on demand for typed monitor sources. */
 export const ONE_GRAPH_PROTOCOL =
-  "Repeatable work: save and run it with the one_graph_* tools; search toolchain_search before repeating work. A queued or pending request is not a completed result.";
+  "Save a graph only for work that comes back with different inputs or on a schedule; one occasion is done directly, and a recurring graph takes the date or item as an input, never in its name. Search toolchain_search before repeating work. A queued or pending request is not a completed result.";
 
 /** A Work task that may use saved Toolchains but owns no graphs (electron/toolchains/consumer.ts). */
 export const TOOLCHAIN_CONSUMER_PROTOCOL =

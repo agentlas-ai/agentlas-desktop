@@ -424,7 +424,27 @@ export function planSessionGroupFeed<T extends SessionGroupCookie>(input: {
     const source = loginNames(input.freshnessContext ?? input.incoming, group);
     if (source.size === 0) { decision.set(group, "per-cookie"); continue; }
     const destination = loginNames(input.existing, group);
-    if (![...source].every((name) => destination.has(name))) { decision.set(group, "replace-group"); continue; }
+    if (![...source].every((name) => destination.has(name))) {
+      // The destination lacks some of the site's login cookie names. That is a broken login (a leftover piece) when it also lacks the cookies
+      // that are fixed per sign-in, and then the source fills it. But a destination that holds ALL of the source's fixed sign-in cookies, only
+      // without one of the site's other session cookies (youtube.com LOGIN_INFO), is a whole sign-in of its own: when those values differ it is
+      // ANOTHER login and stays.
+      const scopeAll = inGroup(input.freshnessContext ?? input.incoming, group), heldAll = inGroup(input.existing, group);
+      const fixedOf = (cookies: readonly SessionGroupCookie[]) => {
+        const keys = new Set<string>();
+        for (const cookie of cookies) {
+          const h = host(cookie.domain);
+          if (identityNamesFor(h)?.includes(cookie.name)) keys.add(`${input.groupOf(h)?.site ?? h}\u0000${cookie.name}`);
+        }
+        return keys;
+      };
+      const sourceFixed = fixedOf(scopeAll), heldFixed = fixedOf(heldAll);
+      const holdsEveryFixedCookie = sourceFixed.size > 0 && [...sourceFixed].every((key) => heldFixed.has(key));
+      if (holdsEveryFixedCookie && compareSessionGroupIdentity(scopeAll, heldAll, identityNamesFor) === "different") {
+        otherLogin.add(group); decision.set(group, "keep-group"); continue;
+      }
+      decision.set(group, "replace-group"); continue;
+    }
     // A complete group is refreshed whole when the source is fresher AND is the same login; the destination is
     // kept when it is fresher on any row or when the source may be another sign-in.
     const scope = inGroup(input.freshnessContext ?? input.incoming, group);

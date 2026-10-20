@@ -30,8 +30,6 @@ export type {
   AgentEvolutionProposalUi,
   AgentlasIpc,
   AskUserRequestEvent,
-  GrowthProposalCardCopy,
-  GrowthProposalInbox,
   AgentUsageSummaryRow,
   BorrowedAgentProfile,
   BorrowedAgentRuntimeSnapshot,

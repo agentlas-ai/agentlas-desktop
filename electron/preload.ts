@@ -128,6 +128,7 @@ const api: AgentlasIpc = {
     experience: input => ipcRenderer.invoke("finance:experience", input),
     worldMarkets: () => ipcRenderer.invoke("finance:worldMarkets"),
     dashboardFeeds: () => ipcRenderer.invoke("finance:dashboardFeeds"),
+    workProject: () => ipcRenderer.invoke("finance:workProject"),
     load: () => ipcRenderer.invoke("finance:load"),
     save: input => ipcRenderer.invoke("finance:save", input),
     search: input => ipcRenderer.invoke("finance:search", input),
@@ -711,10 +712,6 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("agentEvolution:markMeasured", proposalId, note),
     rollback: (proposalId: string) =>
       ipcRenderer.invoke("agentEvolution:rollback", proposalId),
-    listGrowth: (limit?: number) =>
-      ipcRenderer.invoke("agentEvolution:listGrowth", limit),
-    deleteGrowthSession: (proposalId: string) =>
-      ipcRenderer.invoke("agentEvolution:deleteGrowthSession", proposalId),
   },
   // 엔진 텍스트 자산(스킬·훅·어댑터 매니페스트) 직접 편집.
   runtimeFiles: {

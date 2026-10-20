@@ -30,6 +30,7 @@ import {
   type LongRunWorkerState,
   type LongRunWorkspaceBinding,
 } from "../../shared/long-run";
+import { GOAL_OWNER_ANSWER_REQUIRED, goalHeldForOwnerAnswer } from "../../shared/goal-display-state";
 import { desktopStoreTransaction, emitDesktopStoreChange } from "./change-bus";
 import { getDb } from "./db";
 import { invocationProcessOwner } from "./invocation-run-owners";
@@ -988,6 +989,8 @@ export function scheduleBlockedGoalRetry(input: {
   requestedBy?: "model" | "host";
 }): LongRunRecord {
   if (longRunOwnerHold(input.runId)) throw new Error(LONG_RUN_OWNER_HOLD_CODE);
+  // A Goal held for the owner's answer is woken by nobody: no scheduler may put a retry under it (it would rewrite the hold).
+  if (goalOwnerAnswerHold(input.runId)) throw new Error(GOAL_OWNER_ANSWER_PENDING_CODE);
   const db = getDb();
   db.transaction(() => {
     const current = getLongRun(input.runId);
@@ -1018,6 +1021,82 @@ export function scheduleBlockedGoalRetry(input: {
   emitDesktopStoreChange({ entity: "long-run", id: input.runId });
   const next = getLongRun(input.runId);
   if (!next) throw new Error("blocked_goal_retry_readback_failed");
+  return next;
+}
+
+/**
+ * A Goal that asked the owner a question rests until the owner answers.
+ * The hold is the row itself: status waiting_tool with the question code in blocked_reason (the host never
+ * rests a Goal as blocked/waiting_user, see resolveNonBlockingGoalStatus). Every transition rewrites blocked_reason, so it ends
+ * with the state it describes. No retry is scheduled and nothing wakes a held Goal on its own, so it neither re-asks the same
+ * card on every wake nor keeps a Work project's provider busy for the owner's other conversations (the spaced follow-up it
+ * replaces did both: each wake is a full model turn, and a turn of the project's other chats is refused while one runs).
+ */
+export const GOAL_OWNER_ANSWER_PENDING_CODE = "goal_owner_answer_pending";
+
+export function goalOwnerAnswerHold(runId: string): boolean {
+  const row = getDb().prepare("SELECT status, blocked_reason AS blockedReason FROM long_runs WHERE id = ?")
+    .get(runId) as { status: string; blockedReason: string | null } | undefined;
+  return Boolean(row && goalHeldForOwnerAnswer(row));
+}
+
+/** When the Goal last asked its question (newest run.owner_answer_pending); null if it never did. */
+export function goalOwnerAnswerPendingSince(runId: string): string | null {
+  const row = getDb().prepare("SELECT occurred_at AS at FROM long_run_events WHERE run_id = ? AND kind = 'run.owner_answer_pending' ORDER BY seq DESC LIMIT 1")
+    .get(runId) as { at: string } | undefined;
+  return row?.at ?? null;
+}
+
+/** running -> waiting_tool holding for the owner's answer. A Goal the owner stopped is never moved (that hold is the owner's). */
+export function holdGoalForOwnerAnswer(input: { runId: string; expectedVersion?: number; invocationRunId?: string | null; appInstanceId?: string | null }): LongRunRecord {
+  const db = getDb();
+  db.transaction(() => {
+    const current = getLongRun(input.runId);
+    if (!current || current.surface === "science" || current.status !== "running"
+      || (input.expectedVersion != null && current.version !== input.expectedVersion)) throw new Error("goal_owner_answer_hold_state_changed");
+    if (longRunOwnerHold(input.runId)) throw new Error(LONG_RUN_OWNER_HOLD_CODE);
+    if (liveLongRunAttemptCount(input.runId)) throw new Error("goal_owner_answer_hold_controller_live");
+    const now = new Date().toISOString();
+    const changed = db.prepare(`UPDATE long_runs SET status='waiting_tool', pause_reason=NULL, blocked_reason=?, paused_at=NULL,
+      app_instance_id=COALESCE(?, app_instance_id), updated_at=?, version=version+1 WHERE id=? AND status='running' AND version=?`)
+      .run(GOAL_OWNER_ANSWER_REQUIRED, input.appInstanceId ?? null, now, current.id, current.version);
+    if (changed.changes !== 1) throw new Error("goal_owner_answer_hold_state_changed");
+    appendEventInDb({ runId: current.id, kind: "run.status_changed", actorKind: "host",
+      payload: { from: "running", to: "waiting_tool", reason: GOAL_OWNER_ANSWER_REQUIRED }, at: now });
+    appendEventInDb({ runId: current.id, kind: "run.owner_answer_pending", actorKind: "host",
+      payload: { reason: GOAL_OWNER_ANSWER_REQUIRED, ...(input.invocationRunId ? { invocationRunId: input.invocationRunId } : {}) }, at: now });
+  })();
+  emitDesktopStoreChange({ entity: "long-run", id: input.runId });
+  const next = getLongRun(input.runId);
+  if (!next) throw new Error("goal_owner_answer_hold_readback_failed");
+  return next;
+}
+
+/**
+ * The owner spoke in the Goal's chat through a channel that cannot reopen a Goal (the phone, Telegram, the background
+ * service: a turn that carries a workspace binding or execution context is not a local owner turn). The hold ends and the
+ * Goal is queued for its ordinary resume. The desktop composer never reaches this: its message reopens the Goal itself
+ * (stoppedGoalMessageReopens), and the sweep leaves a chat with a live turn or a waiting owner request alone.
+ */
+export function releaseGoalOwnerAnswerHold(input: { runId: string; expectedVersion: number; reason: string; appInstanceId?: string | null }): LongRunRecord {
+  const db = getDb();
+  db.transaction(() => {
+    const current = getLongRun(input.runId);
+    if (!current || current.version !== input.expectedVersion || !goalHeldForOwnerAnswer(current)) throw new Error("goal_owner_answer_release_state_changed");
+    if (liveLongRunAttemptCount(input.runId)) throw new Error("goal_owner_answer_release_controller_live");
+    const now = new Date().toISOString();
+    // The row keeps the app instance that held it. resume() asks for queued -> queued under this instance, and a status
+    // no-op is refused for any other one (long_run_transition_owner_conflict), so a hold from before a restart is re-owned here.
+    const changed = db.prepare(`UPDATE long_runs SET status='queued', pause_reason=NULL, blocked_reason=NULL, paused_at=NULL,
+      app_instance_id=COALESCE(?, app_instance_id), updated_at=?, version=version+1 WHERE id=? AND status='waiting_tool' AND version=?`)
+      .run(input.appInstanceId ?? null, now, current.id, current.version);
+    if (changed.changes !== 1) throw new Error("goal_owner_answer_release_state_changed");
+    appendEventInDb({ runId: current.id, kind: "run.status_changed", actorKind: "host",
+      payload: { from: "waiting_tool", to: "queued", reason: input.reason.slice(0, 120) }, at: now });
+  })();
+  emitDesktopStoreChange({ entity: "long-run", id: input.runId });
+  const next = getLongRun(input.runId);
+  if (!next) throw new Error("goal_owner_answer_release_readback_failed");
   return next;
 }
 
@@ -2352,10 +2431,13 @@ function pauseDesktopRuns(reason: "app-quit" | "startup-recovery", appInstanceId
     // neither app quit nor restart is evidence that its process has ended.
     // Hold the write lock from selection through settlement so a concurrent
     // owner change cannot slip between the filter and worker/event updates.
+    // A Goal held for the owner's answer has no turn to interrupt and nothing to resume: pausing it would turn it into a
+    // host pause that startup resumes (a wake that only re-asks the question), so it stays as it is across quit and restart.
     const ownedRows = db.prepare(
       `SELECT id, status FROM long_runs
        WHERE execution_location = 'desktop-local' AND host_owner_kind = 'desktop'
          AND surface <> 'science' AND status IN (${placeholders})
+         AND NOT (status = 'waiting_tool' AND IFNULL(blocked_reason, '') = '${GOAL_OWNER_ANSWER_REQUIRED}')
          AND (? <> 'app-quit' OR ? IS NULL OR app_instance_id = ?)`,
     ).all(...LONG_RUN_ACTIVE_STATUSES, reason, appInstanceId ?? null, appInstanceId ?? null) as Array<{ id: string; status: LongRunStatus }>;
     for (const row of ownedRows) {

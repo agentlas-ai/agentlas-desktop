@@ -12,7 +12,7 @@ import { ipc } from "@/lib/ipc";
 import { agentWorkspaceFailure } from "@/lib/agent-workspace-error";
 import type { AgentRuntimeOverride, InstalledAgent, InstalledAgentExactBinding, InstalledFirm, MemoryImportPreviewUi, ResolvedOrg, RuntimeStatus } from "@shared/types";
 import type {
-  AgentWorkspaceComparison, AgentWorkspaceDiff as WorkspaceDiff, AgentWorkspaceFile, AgentWorkspaceLearningCard, AgentWorkspaceMemoryCandidate, AgentWorkspaceRevisionOutcome,
+  AgentWorkspaceComparison, AgentWorkspaceDiff as WorkspaceDiff, AgentWorkspaceChangeSummary, AgentWorkspaceFile, AgentWorkspaceLearningCard, AgentWorkspaceMemoryCandidate, AgentWorkspaceRevisionOutcome,
   AgentWorkspaceProposal, AgentWorkspaceReadFile, AgentWorkspaceRecovery, AgentWorkspaceSnapshot,
 } from "@shared/agent-workspace";
 import { AgentWorkspaceDiff } from "./AgentWorkspaceDiff";
@@ -28,13 +28,13 @@ import { Select } from "@/components/Select";
 export type AgentWorkspaceView = "files" | "memory" | "changes" | "sync" | "history";
 
 const KO_STATE: Record<string, string> = {
-  eligible: "반영 가능", scope_review: "범위 확인 필요", needs_evidence: "근거 부족", proposed: "변경안 있음", applied: "반영됨",
+  eligible: "반영 가능", watching: "지켜보는 중", scope_review: "범위 확인 필요", needs_evidence: "근거 부족", proposed: "변경안 있음", applied: "반영됨",
   review_ready: "검토 대기", applying: "적용 중", rejected: "거절됨", stale: "원본 변경됨", recovery_required: "복구 필요",
   in_sync: "동일 리비전", content_equal: "내용 동일", local_ahead: "로컬 변경", cloud_ahead: "원격 변경",
   diverged: "양쪽 변경", unrelated: "기준 없음", unknown: "알 수 없음", unavailable: "연결 불가",
 };
 const EN_STATE: Record<string, string> = {
-  eligible: "Ready for review", scope_review: "Check scope", needs_evidence: "Needs evidence", proposed: "Proposed", applied: "Applied",
+  eligible: "Ready for review", watching: "Watching", scope_review: "Check scope", needs_evidence: "Needs evidence", proposed: "Proposed", applied: "Applied",
   review_ready: "Review ready", applying: "Applying", rejected: "Rejected", stale: "Stale", recovery_required: "Recovery required",
   in_sync: "Same revision", content_equal: "Same content", local_ahead: "Local changes", cloud_ahead: "Remote changes",
   diverged: "Both changed", unrelated: "No common base", unknown: "Unknown", unavailable: "Unavailable",
@@ -332,7 +332,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
   const lineCount = Math.max(1, content.split("\n").length);
   const instructionFiles = files.filter((file) => file.kind === "file" && ["instruction", "skill", "knowledge"].includes(file.role));
   const pendingCount = snapshot?.proposals.filter((proposal) => proposal.status === "review_ready").length ?? 0;
-  const eligibleCount = new Set((snapshot?.memoryCandidates ?? []).filter((candidate) => candidate.state === "eligible").map((candidate) => candidate.groupId ?? candidate.id)).size;
+  const eligibleCount = new Set((snapshot?.memoryCandidates ?? []).filter((candidate) => candidate.state === "eligible" || candidate.state === "proposed").map((candidate) => candidate.groupId ?? candidate.id)).size;
   const toggleDirectory = async (entry: TreeEntry) => {
     const isExpanded = expanded.has(entry.path);
     setExpanded((previous) => { const next = new Set(previous); if (isExpanded) next.delete(entry.path); else next.add(entry.path); return next; });
@@ -351,7 +351,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
     <aside className={styles.listPane}>
       <div className={styles.paneHeader}><IconBrain size={14} /><strong>{ko ? "배운 것" : "Learned"}</strong><span title={ko ? `기록 ${snapshot?.memoryCandidates.length ?? 0}건` : `${snapshot?.memoryCandidates.length ?? 0} records`}>{new Set((snapshot?.memoryCandidates ?? []).map((candidate) => candidate.groupId ?? candidate.id)).size}</span><button className={styles.iconButton} disabled={Boolean(busy)} aria-label={ko ? "기존 메모리 가져오기" : "Import existing memory"} title={ko ? "기존 메모리 가져오기" : "Import existing memory"} onClick={() => void run("memory-import-preview", async () => { const memory = ipc()?.agentMemory; if (!memory) throw new Error(ko ? "메모리 브리지를 사용할 수 없습니다." : "Memory bridge unavailable."); setMemoryImportPreview(await memory.importPreview(agent.id)); })}><IconFileUp size={13} /></button></div>
       <div className={styles.search}><IconSearch size={13} /><input aria-label={ko ? "메모리 검색" : "Search memories"} placeholder={ko ? "메모리 검색" : "Search memories"} value={memoryQuery} onChange={(event) => setMemoryQuery(event.target.value)} /></div>
-      <div className={styles.rosterFilters}><Select aria-label={ko ? "반영 상태" : "Status"} value={memoryState} onChange={(event) => setMemoryState(event.target.value)} className={styles.button}><option value="all">{ko ? "전체" : "All"}</option>{["eligible", "scope_review", "needs_evidence", "proposed", "applied"].map((state) => <option value={state} key={state}>{stateLabel(state, ko)}</option>)}</Select></div>
+      <div className={styles.rosterFilters}><Select aria-label={ko ? "반영 상태" : "Status"} value={memoryState} onChange={(event) => setMemoryState(event.target.value)} className={styles.button}><option value="all">{ko ? "전체" : "All"}</option>{["eligible", "watching", "scope_review", "needs_evidence", "proposed", "applied"].map((state) => <option value={state} key={state}>{stateLabel(state, ko)}</option>)}</Select></div>
       <div className={styles.listRows}>
         {memoryGroups.map((group) => { const lead = group[0], key = lead.groupId ?? lead.id, eligible = group.filter((member) => member.state === "eligible"), open = openGroups.has(key);
           const picked = eligible.length > 0 && eligible.every((member) => memorySelection.has(member.id));
@@ -383,6 +383,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
       {review.status === "stale" && <div className={styles.banner}><span>{ko ? "원본이 바뀌었습니다. 새 원본에서 변경안을 다시 만들어야 합니다." : "The source changed. Prepare a new proposal against the current files."}</span>{review.memoryEntryIds.length > 0 && <button className={styles.button} disabled={Boolean(busy) || dirty} onClick={() => void run("reprepare-memory", async () => { const next = await api().prepareFromMemory({ agentId: agent.id, memoryEntryIds: review.memoryEntryIds }); await refresh(); await openReview(next.id); })}>{ko ? "다시 만들기" : "Prepare again"}</button>}</div>}
       {alwaysOnSentence(review.alwaysOn, ko) && <div className={`${styles.banner} ${review.alwaysOn?.overHard ? styles.error : ""}`}>{alwaysOnSentence(review.alwaysOn, ko)}</div>}
       {review.card && <LearningCardView card={review.card} ko={ko} />}
+      <ChangeSummaryView changes={review.changeSummary} ko={ko} />
       {review.status === "applied" && <OutcomeComparison before={snapshot?.history.find((revision) => revision.id === review.baseRevisionId)?.outcome} after={snapshot?.history.find((revision) => revision.id === review.appliedRevisionId)?.outcome} ko={ko} />}
       <AgentWorkspaceDiff files={review.changes} locale={locale} activePath={reviewPath} onPathChange={setReviewPath} />
       <div className={styles.reviewFooter}><span>{ko ? "전체 파일 변경 · 다음 실행부터 적용" : "Whole file changes · Used from the next run"}</span>
@@ -487,6 +488,21 @@ function LearningCardView({ card, ko }: { card: AgentWorkspaceLearningCard; ko: 
   ];
   return <dl className={styles.learningCard}>{rows.map(([label, text]) => <div key={label}><dt>{label}</dt><dd>{text}</dd></div>)}</dl>;
 }
+/** What each changed file is, in a line, so the owner knows what the diff below contains before reading it. */
+function changeLine(change: AgentWorkspaceChangeSummary, ko: boolean): string {
+  const size = ko ? `+${change.addedLines}줄 −${change.removedLines}줄` : `+${change.addedLines} −${change.removedLines} lines`;
+  if (change.skill) {
+    const what = change.operation === "create" ? (ko ? "새 스킬" : "New skill") : (ko ? "스킬 수정" : "Skill edited");
+    return `${what} “${change.skill.name}” — ${change.skill.description}`;
+  }
+  if (change.operation === "create") return ko ? `새 파일 ${change.path} (${size})` : `New file ${change.path} (${size})`;
+  if (change.operation === "delete") return ko ? `파일 삭제 ${change.path}` : `Deleted ${change.path}`;
+  return ko ? `${change.path} 수정 (${size})` : `${change.path} edited (${size})`;
+}
+function ChangeSummaryView({ changes, ko }: { changes: AgentWorkspaceChangeSummary[] | undefined; ko: boolean }) {
+  if (!changes?.length) return null;
+  return <div className={styles.changeSummary}><h3>{ko ? "바뀌는 것" : "What changes"}</h3><ul>{changes.map((change) => <li key={change.path}><code>{change.path}</code> · {changeLine(change, ko)}</li>)}</ul></div>;
+}
 function outcomeSentence(outcome: AgentWorkspaceRevisionOutcome | undefined, ko: boolean): string | null {
   if (!outcome?.runs) return null;
   return ko ? `실행 ${outcome.runs}회 · 완료 ${outcome.completed} · 실패 ${outcome.failed} · 도구 오류 ${outcome.errors} · 중간 정정 ${outcome.steering}`
@@ -512,15 +528,14 @@ function alwaysOnSentence(change: AgentWorkspaceProposal["alwaysOn"], ko: boolea
   return head + warn;
 }
 function supportSentence(group: AgentWorkspaceMemoryCandidate[], ko: boolean): string {
-  const sum = (pick: (support: NonNullable<AgentWorkspaceMemoryCandidate["support"]>) => number | undefined) => group.reduce((total, member) => total + (member.support ? pick(member.support) ?? 0 : 0), 0);
+  const sum = (pick: (support: NonNullable<AgentWorkspaceMemoryCandidate["support"]>) => number) => group.reduce((total, member) => total + (member.support ? pick(member.support) : 0), 0);
   const records = sum((support) => support.records), absorbed = sum((support) => support.absorbed);
-  const runs = sum((support) => support.runs), machine = sum((support) => support.machine);
-  const known = group.some((member) => member.support?.runs !== undefined);
+  const promotion = group.find((member) => member.promotion)?.promotion;
   const parts = ko
-    ? [group.length > 1 ? `비슷한 기록 ${group.length}건이 이 교훈으로 묶였습니다.` : "", records ? `근거 기록 ${records}건.` : "", absorbed ? `이전에 합쳐진 학습 ${absorbed}건 포함.` : "",
-      known ? (machine ? `실행 ${runs}회에서, 도구 오류·실패·중간 정정 같은 앱이 직접 기록한 관측 ${machine}건이 뒷받침합니다.` : "앱이 직접 기록한 오류·실패 관측은 없고, 에이전트가 쓴 설명만 있습니다. 반영 전에 더 지켜보는 편이 좋습니다.") : ""]
-    : [group.length > 1 ? `${group.length} similar records are grouped as this lesson.` : "", records ? `${records} evidence records.` : "", absorbed ? `Includes ${absorbed} earlier learnings merged into it.` : "",
-      known ? (machine ? `Backed by ${machine} observations the app recorded itself (tool errors, failures, owner corrections) across ${runs} runs.` : "No observation recorded by the app backs it, only what the agent wrote. It is better to wait for more before adding it.") : ""];
+    ? [promotion ? `서로 다른 실행 ${promotion.runs}회에서 나왔습니다.` : "", group.length > 1 ? `비슷한 기록 ${group.length}건이 이 교훈으로 묶였습니다.` : "", records ? `근거 기록 ${records}건.` : "", absorbed ? `이전에 합쳐진 학습 ${absorbed}건 포함.` : "",
+      promotion?.ownerCorrections ? `그 실행들에서 사용자가 일하는 도중 방향을 바로잡은 적이 ${promotion.ownerCorrections}번 있습니다.` : "", promotion?.failures ? `같은 실행들에서 도구 오류·실패가 ${promotion.failures}건 기록됐습니다(이 교훈 때문이라는 뜻은 아닙니다).` : ""]
+    : [promotion ? `Came from ${promotion.runs} separate runs.` : "", group.length > 1 ? `${group.length} similar records are grouped as this lesson.` : "", records ? `${records} evidence records.` : "", absorbed ? `Includes ${absorbed} earlier learnings merged into it.` : "",
+      promotion?.ownerCorrections ? `You corrected course ${promotion.ownerCorrections} time(s) while those runs worked.` : "", promotion?.failures ? `${promotion.failures} tool errors or failures were recorded in the same runs (not necessarily because of this lesson).` : ""];
   return parts.filter(Boolean).join(" ");
 }
 function MemoryDetail({ candidate, group, locale, agentName, agentRole, proposal, onOpenProposal }: { candidate: AgentWorkspaceMemoryCandidate; group: AgentWorkspaceMemoryCandidate[]; locale: string; agentName: string; agentRole?: string; proposal?: AgentWorkspaceProposal; onOpenProposal: (id: string) => void }) {
@@ -532,6 +547,7 @@ function MemoryDetail({ candidate, group, locale, agentName, agentRole, proposal
   const role = (agentRole ?? "").trim();
   return <article className={styles.detail}><h2>{plainMemoryTitle(candidate.contentNative || candidate.content || candidate.title, ko, 90)}</h2><div className={styles.meta}><State value={candidate.state} ko={ko} /><span>{memoryKindLabel(candidate.kind, ko)}</span></div>
     {candidate.state === "scope_review" && <div className={styles.banner} style={{ marginTop: 16 }}>{ko ? "특정 프로젝트에서 얻은 내용입니다. 다른 일에도 써도 되는지 먼저 확인하세요." : "This came from one project. Check that it is safe to reuse elsewhere first."}</div>}
+    {candidate.state === "watching" && candidate.promotion && <div className={styles.banner} style={{ marginTop: 16 }}>{ko ? `같은 교훈이 서로 다른 실행 ${candidate.promotion.runs}회에서 나왔습니다. ${candidate.promotion.needRuns}회가 되면 변경안을 만듭니다. 한 번의 일에서 나온 메모를 지침으로 올리지 않기 위해서입니다.` : `This lesson has come from ${candidate.promotion.runs} separate runs. A change is prepared at ${candidate.promotion.needRuns}, so one task's note is not promoted into instructions.`}</div>}
     {candidate.state === "needs_evidence" && <div className={styles.banner} style={{ marginTop: 16 }}>{ko ? "뒷받침하는 기록이 부족해 아직 반영할 수 없습니다." : "There is not enough supporting record to add this yet."}</div>}
     <h3>{ko ? "이 에이전트는 원래" : "What this agent does"}</h3>
     <p className={styles.detailContent}>{role && role !== "One Team teammate" ? `${agentName} — ${role}` : agentName}</p>

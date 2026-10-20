@@ -32,7 +32,7 @@ import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { navigate } from "@/lib/navigation";
 import { isPlaceholderTaskTitle, taskTitleForDisplay } from "@/lib/task-title";
 import { detailForUser, failureCode, failureMessage, isChatBusyFailure, knownStartFailureHuman, looksLikeMachineText } from "@/lib/invocation-failure";
-import { Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo, type CSSProperties, type Dispatch, type SetStateAction } from "react";
+import { createContext, useContext, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo, type CSSProperties, type Dispatch, type SetStateAction } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { grantForPastedImage, ipc, ipcEvents } from "@/lib/ipc";
 import { readOneFollowupOutbox, saveOneFollowupIntent, removeOneFollowupIntent, pauseOneFollowupOutbox, resumeOneFollowupIntent, type OneFollowupIntent } from "@/lib/one-followup-outbox";
@@ -2274,6 +2274,9 @@ function asList<T>(value: T[] | null | undefined): T[] {
   return Array.isArray(value) ? value : [];
 }
 
+export interface WorkChatDraftRequest { id: string; text: string; onConsumed: () => void }
+export const WorkChatDraftContext = createContext<WorkChatDraftRequest | null>(null);
+
 export default function ChatPageWrapper() {
   // useSearchParams는 Suspense boundary를 요구함 (Next 15)
   return (
@@ -2283,9 +2286,22 @@ export default function ChatPageWrapper() {
   );
 }
 
-function ChatPage() {
-  const searchParams = useSearchParams();
-  const queryChatId = searchParams.get("id") ?? "";
+export interface WorkChatSurfaceProps {
+  chatId: string;
+  embedded?: boolean;
+  onNewSession?: () => void | Promise<void>;
+}
+
+/** The same Work harness, admission, history and composer with an explicit owning chat. */
+export function WorkChatSurface({ chatId, embedded = false, onNewSession }: WorkChatSurfaceProps) {
+  return <Suspense fallback={null}><ChatPage key={chatId} externalChatId={chatId} embedded={embedded} onNewSession={onNewSession}/></Suspense>;
+}
+
+function ChatPage({ externalChatId, embedded = false, onNewSession }: { externalChatId?: string; embedded?: boolean; onNewSession?: () => void | Promise<void> } = {}) {
+  const routeSearchParams = useSearchParams();
+  // An embedded surface owns its identity. Finance URL parameters cannot start or retarget a Work turn.
+  const searchParams = useMemo(() => externalChatId === undefined ? routeSearchParams : new URLSearchParams(), [externalChatId, routeSearchParams]);
+  const queryChatId = externalChatId ?? searchParams.get("id") ?? "";
   const requestedFocusMessageId = searchParams.get("focus")?.trim() || null;
   const requestedTaskId = searchParams.get("task") ?? "";
   const [validatedTaskTarget, setValidatedTaskTarget] = useState<{
@@ -2309,7 +2325,9 @@ function ChatPage() {
   );
   const router = useRouter();
   const { t, locale } = useT();
+  const draftRequest = useContext(WorkChatDraftContext);
   const [chat, setChat] = useState<Chat | null>(null);
+  const [embeddedLoadFailed, setEmbeddedLoadFailed] = useState(false);
   const [goalContext, setGoalContext] = useState<ChatGoalContext | null>(null);
   const [goalContextStale, setGoalContextStale] = useState(false);
   const [agent, setAgent] = useState<InstalledAgent | null>(null);
@@ -2524,6 +2542,15 @@ function ChatPage() {
   const [messageReply, setMessageReply] = useState<MessageReply | null>(null);
   useEffect(() => setMessageReply(null), [chatId]);
   const [composerPrefill, setComposerPrefill] = useState<string | null>(null);
+  const consumedWorkDraftIds = useRef(new Set<string>());
+  useEffect(() => {
+    if (chat?.id !== chatId || !agent
+      || !draftRequest?.text.trim() || consumedWorkDraftIds.current.has(draftRequest.id)) return;
+    consumedWorkDraftIds.current.add(draftRequest.id);
+    // Reuse ChatInput's append-only draft port: preserve typed text, never start a turn.
+    setBrowserDraftRequest({ id: `work-draft:${draftRequest.id}`, chatId, text: draftRequest.text });
+    draftRequest.onConsumed();
+  }, [chatId, chat?.id, agent, draftRequest]);
   // 델타 partial 누적 버퍼 — main이 증분만 보내므로 여기서 전문을 재조립한다.
   // 리셋 지점: 채팅 전환 / 새 실행 시작 / final·error / 전문(text) 이벤트 수신.
   const partialTextRef = useRef("");
@@ -4241,14 +4268,14 @@ function ChatPage() {
   // 메타데이터 로드
   useEffect(() => {
     const api = ipc();
-    if (!api || !chatId) return;
+    if (!api || !chatId) { if (embedded) setEmbeddedLoadFailed(true); return; }
     let cancelled = false;
     void (async () => {
       const bookmarkGeneration = ++hubBookmarkGenerationRef.current;
       const rosterGeneration = ++agentRosterGenerationRef.current;
       const c = await api.chats.get(chatId);
       if (cancelled || !c) {
-        if (!c) router.replace("/");
+        if (!c) { if (embedded) setEmbeddedLoadFailed(true); else router.replace("/"); }
         return;
       }
       if (c.originSurface === "one" && !c.projectId) {
@@ -4258,6 +4285,7 @@ function ChatPage() {
           : `/one?chat=${encodeURIComponent(c.id)}`);
         return;
       }
+      if (embedded) setEmbeddedLoadFailed(false);
       setChat(c);
       setTitleDraft(c.title);
       // The local agent roster is the only metadata that gates composing a
@@ -4506,6 +4534,7 @@ function ChatPage() {
     })().catch((error) => {
       if (cancelled) return;
       console.error("[chat] critical metadata load failed", error);
+      if (embedded) setEmbeddedLoadFailed(true);
       setSessionNotice(
         locale === "ko"
           ? "로컬 에이전트 목록을 불러오지 못했습니다. 새로고침 후 다시 시도하세요."
@@ -6333,6 +6362,11 @@ function ChatPage() {
           setSessionNotice(locale === "ko" ? "세션 기록을 비우지 못했습니다." : "The session history was not cleared.");
         });
       } else {
+        if (externalChatId !== undefined) {
+          if (!onNewSession) { setSessionNotice(locale === "ko" ? "새 대화를 여는 경로가 연결되지 않았습니다." : "The new conversation action is unavailable."); return; }
+          void Promise.resolve().then(onNewSession).catch(() => { if (isCurrentChat()) setSessionNotice(locale === "ko" ? "새 대화를 만들지 못했습니다. 현재 대화는 유지됩니다." : "Could not create a conversation. This conversation is unchanged."); });
+          return;
+        }
         void api.chats
           .create({ agentId: chat.agentId, projectId: chat.projectId, firmId: chat.firmId, continueFromChatId: chat.id })
           .then((created) => {
@@ -6355,7 +6389,7 @@ function ChatPage() {
           });
       }
     },
-    [busy, chat, locale, router],
+    [busy, chat, locale, router, externalChatId, onNewSession, isCurrentChat],
   );
 
   // A linked prompt may prefill or start a task, but product actions never ride in chat text.
@@ -7163,6 +7197,7 @@ function ChatPage() {
   // until B's metadata arrives instead of rendering A's title/composer beside
   // B's transcript and result state.
   if (!chat || (chatId && chat.id !== chatId)) {
+    if (embeddedLoadFailed) return <div role="alert" style={{ padding: 24, color: "var(--ink-soft)" }}>{locale === "ko" ? "이 대화를 불러오지 못했습니다. 대화 목록에서 다시 선택해 주세요." : "Could not load this conversation. Select it again from the conversation list."}</div>;
     if (chatId) {
       
 
@@ -7207,6 +7242,8 @@ function ChatPage() {
   return (
     <div
       className={`task-cockpit-shell ${oneActivityStyles.taskCockpitShell}`}
+      data-work-embedded={embedded ? "true" : undefined}
+      data-work-chat-id={chatId}
       data-output-flow={rightPanelOpen ? "true" : "false"}
       style={{
         position: "relative",
@@ -7232,7 +7269,7 @@ function ChatPage() {
           ["--chat-stream-padding" as string]: `24px clamp(8px, calc((100% - ${WORK_COMPOSER_WIDTH_PX + 32}px) / 2 + 8px), 32px)` }}
       >
       <header
-        className="task-cockpit-header titlebar-drag"
+        className={`task-cockpit-header${embedded ? "" : " titlebar-drag"}`}
         style={{
           display: "flex",
           alignItems: "center",

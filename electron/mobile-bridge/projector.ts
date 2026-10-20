@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { listUiInstances } from "../harness/ui-instances";
-import { mergeInlineUiTranscript, fitInlineUiTranscriptText } from "../../shared/inline-ui-transcript";
+import { fitInlineUiTranscriptText } from "../../shared/inline-ui-transcript";
+import { mergeMobileInlineUiTranscript } from "./finance-ui-transcript";
 import { withoutArchivedAgents } from "../archive/auto-archive";
 import { isHousekeepingHostNotice, normalizeChatHostNotice } from "../../shared/chat-host-notice";
 import { oneDispatchRoomUpdatedAt } from "../one/dispatch-presentation";
@@ -1090,7 +1091,7 @@ async function messagesDto(
   let usedBytes = 2;
   let entries = 0;
   for (const chatId of ids) {
-    const inline = mergeInlineUiTranscript(chatId,
+    const inline = await mergeMobileInlineUiTranscript(chatId,
       listChatMessages(chatId, maxMessagesPerChat), await listUiInstances(chatId));
     const projected = projectMobileBridgeHistory(
       inline.history,

@@ -101,8 +101,8 @@
     "files": [
       {
         "path": "bin/finance-server.cjs",
-        "sha256": "3b0dcc0cbba3279d66ca36bd84aa6b7353247faf0ae83c45cea0f00f0861ec71",
-        "bytes": 3300
+        "sha256": "02f22235632378d6f069d868711ca427f0162a6c528bbeada8f3af5c3a3a64b6",
+        "bytes": 4300
       },
       {
         "path": "capabilities.json",
@@ -116,8 +116,8 @@
       },
       {
         "path": "runtime/index.cjs",
-        "sha256": "c2c1b84a868cdb67596f616058fc54ca748a3a2e2d99bf25ff869dd704338dfa",
-        "bytes": 363541
+        "sha256": "432b21d8c1e87f231b81102a8e50634ad352d3e9d42e00730209b94d54f689e8",
+        "bytes": 363650
       },
       {
         "path": "skills/analyst/SKILL.md",
@@ -126,8 +126,8 @@
       },
       {
         "path": "skills/index/SKILL.md",
-        "sha256": "779501b1fa98338f05d2771f68ce3a3ed5d2b9826419f1b6914375ec80795767",
-        "bytes": 1477
+        "sha256": "88428e5efbda1753d5ac2066ce6bd5a208e09cde06fb7b715bf76152946bd41f",
+        "bytes": 2805
       },
       {
         "path": "skills/monitor/SKILL.md",
@@ -136,8 +136,8 @@
       },
       {
         "path": "skills/planning/SKILL.md",
-        "sha256": "07f3623470b897dea47b65f75d7134cf7d172e9fdad06055488dd792dee4b2db",
-        "bytes": 910
+        "sha256": "1f4838697febeda4462df921cb97792ee80d8b3e256bb0e0fe7d059e48b1ee6d",
+        "bytes": 1190
       },
       {
         "path": "skills/portfolio/SKILL.md",
@@ -151,8 +151,8 @@
       },
       {
         "path": "skills/research/SKILL.md",
-        "sha256": "0f0906de52d9140d214e9f29db6b62435ea1561d4c58b2db1c3d6cfd5558219f",
-        "bytes": 4558
+        "sha256": "ac9400490d5bd4c923a9958af86d29d6ad2dcec6f06d9429441ecbfa647934ba",
+        "bytes": 5333
       },
       {
         "path": "skills/workspace/SKILL.md",
