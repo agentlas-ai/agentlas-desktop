@@ -279,6 +279,7 @@ import { runtimeCooldownForSelection } from "./runtime/runtime-cooldown";
 import { automationServesOngoingGoal, declaredGoalForAutomation } from "./automation-declared-goal";
 import { goalExecutionDirectivePromptBlock } from "./long-run/goal-execution-context";
 import { redactOperationalSecrets } from "./invocation/event-secret-redaction";
+import { maybeSweepEphemeralGraphs } from "./one/ephemeral-graphs";
 import type {
   TriggerDeliveryHooks,
   TriggerDispatchResult,
@@ -2237,7 +2238,10 @@ async function runOne(
     }
   }
   return { accepted: true, automationId: a.id, runId: currentRunId, status: runStatus, error: runError, output,
-    ...(automaticRetryStopped ? { automaticRetry: false as const } : {}) };
+    ...(automaticRetryStopped ? { automaticRetry: false as const } : {}),
+    // The same typed boundary graph_effect_check_pending records above; the trigger outbox parks on it.
+    ...(runStatus !== "ok" && runStatus !== "skipped" && requiresGraphReconciliation(machineError ?? runError)
+      ? { effectsUnconfirmed: true as const } : {}) };
 }
 
 export async function runDueAutomationsNow(now: Date = new Date()): Promise<void> {
@@ -2534,6 +2538,8 @@ function tick(): void {
   } catch (err) {
     console.error("[automation] effect observation sweep failed:", err);
   }
+  // One-off graphs One saved end with their Goal or after idle days (one/ephemeral-graphs.ts); hourly, never throws.
+  maybeSweepEphemeralGraphs();
   void runDueAutomations(new Date(), withMainScheduledRoot)
     .catch(error => console.error("[automation] scheduled dispatch failed:", error));
   // Goal subscriptions have their own ledger and the Main invocation dispatcher.

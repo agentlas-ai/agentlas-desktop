@@ -199,6 +199,8 @@ export const AUTOMATION_PROTOCOL = [
   "or an action step whose prompt names the concrete surface (browser, file, shell). A mutation with",
   "no named tool cannot be enforced or verified and will be judged unsupported.",
   "Registering is idempotent within its origin chat; use the exact automationId from the receipt when refining a job.",
+  "THE BLOCK IS REGISTERED AFTER YOUR REPLY ENDS: you cannot list, read back or change the job in the same reply. When the user wants it confirmed or changed in this same reply, create, list and update it with the app's automation operations (harness_search \"automation\") instead of this block.",
+  "Otherwise register the FINAL state they asked for in one block and say what you registered; the host reports the saved name, schedule and on/off state right after your reply. Never promise to check or edit it later in this conversation.",
   "Keep its name when refining the same job; do not register a duplicate under a new name.",
   // ★말로만 받아들이면 자동화는 옛 프롬프트로 계속 돈다. 실측 2026-09-16: 오너가
   //   팔로우/게시/리플 하한을 새로 지시했는데 두 자동화 프롬프트 어느 쪽에도 반영되지

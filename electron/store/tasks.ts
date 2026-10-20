@@ -306,6 +306,78 @@ function upsertParticipant(
     );
 }
 
+function reconciledTaskStatus(root: TaskChatRow, prior: TaskRow | undefined): CanonicalTaskStatus {
+  return root.archived_at ? "archived" : prior?.status === "archived" ? "open" : normalizeStatus(prior?.status ?? "open");
+}
+
+function taskCoreNeedsReconcile(root: TaskChatRow, prior: TaskRow | undefined): boolean {
+  return !prior || prior.title !== root.title || prior.project_id !== root.project_id
+    || prior.firm_id !== root.firm_id || normalizeStatus(prior.status) !== reconciledTaskStatus(root, prior)
+    || prior.archived_at !== root.archived_at || prior.origin_chat_id !== root.id;
+}
+
+/** List projections need only Task identity. Batch the unchanged root-chat
+ * checks, keeping the same reconciliation path for dirty and division rows.
+ * Never promote an ordinary One conversation merely because it was listed. */
+export function existingCanonicalTaskIdsForChats(chatIds: readonly string[]): Map<string, string> {
+  const ids = new Map<string, string>();
+  if (!chatIds.length || !tableExists("tasks") || !tableExists("chats")) return ids;
+  const db = getDb();
+  for (let start = 0; start < chatIds.length; start += 200) {
+    const chunk = chatIds.slice(start, start + 200);
+    const placeholders = chunk.map(() => "?").join(",");
+    const chats = db.prepare(`SELECT id, title, project_id, firm_id, agent_id, kind, parent_chat_id,
+      archived_at, created_at, updated_at FROM chats WHERE id IN (${placeholders})`).all(...chunk) as TaskChatRow[];
+    const roots = chats.filter(chat => chat.kind !== "division");
+    const taskIds = roots.map(chat => taskIdForRootChat(chat.id));
+    const tasks = new Map<string, TaskRow>();
+    const participants = new Map<string, ParticipantRow>();
+    const slugs = new Map<string, string>();
+    if (taskIds.length) {
+      const slots = taskIds.map(() => "?").join(",");
+      for (const row of db.prepare(`SELECT * FROM tasks WHERE id IN (${slots})`).all(...taskIds) as TaskRow[]) tasks.set(row.id, row);
+      if (tableExists("task_agent_participants")) {
+        for (const row of db.prepare(`SELECT task_id, agent_id, agent_slug, role, first_seen_at, last_seen_at
+          FROM task_agent_participants WHERE task_id IN (${slots})`).all(...taskIds) as ParticipantRow[]) {
+          participants.set(JSON.stringify([row.task_id, row.agent_slug]), row);
+        }
+      }
+      const agents = [...new Set(roots.flatMap(chat => chat.agent_id ? [chat.agent_id] : []))];
+      if (agents.length && tableExists("installed_agents")) {
+        for (const row of db.prepare(`SELECT id, slug FROM installed_agents WHERE id IN (${agents.map(() => "?").join(",")})`)
+          .all(...agents) as Array<{ id: string; slug: string | null }>) slugs.set(row.id, row.slug?.trim() || `agent:${row.id}`);
+      }
+    }
+    const chatsById = new Map(chats.map(chat => [chat.id, chat]));
+    const reconciledTaskIds = new Set<string>();
+    for (const chatId of chunk) {
+      const chat = chatsById.get(chatId);
+      if (!chat) continue;
+      if (chat.kind === "division") {
+        if (findCanonicalTaskForChat(chat.id)) {
+          const task = ensureCanonicalTaskForChat(chat.id);
+          if (task) { ids.set(chat.id, task.id); reconciledTaskIds.add(task.id); }
+        }
+        continue;
+      }
+      const taskId = taskIdForRootChat(chat.id);
+      const prior = tasks.get(taskId);
+      if (!prior) continue;
+      const slug = chat.agent_id ? slugs.get(chat.agent_id) ?? `agent:${chat.agent_id}` : null;
+      const participant = slug ? participants.get(JSON.stringify([taskId, slug])) : null;
+      const participantChanged = !!chat.agent_id && tableExists("task_agent_participants")
+        && (!participant || participant.agent_id !== chat.agent_id || participant.role !== "owner" || chat.updated_at > participant.last_seen_at);
+      // A preceding division may have changed this root's participant role.
+      // Re-read through the canonical reconciler instead of trusting this batch's snapshot.
+      if (reconciledTaskIds.has(taskId) || taskCoreNeedsReconcile(chat, prior) || participantChanged) {
+        const task = ensureCanonicalTaskForChat(chat.id);
+        if (task) { ids.set(chat.id, task.id); reconciledTaskIds.add(task.id); }
+      } else ids.set(chat.id, prior.id);
+    }
+  }
+  return ids;
+}
+
 /**
  * Materialize the durable Task for a user chat, or attach a division chat to
  * its root Task. This is deliberately idempotent so chat creation, projection,
@@ -342,19 +414,8 @@ export function ensureCanonicalTaskForChat(chatId: string): CanonicalTask | null
   const prior = db
     .prepare("SELECT * FROM tasks WHERE id = ? LIMIT 1")
     .get(taskId) as TaskRow | undefined;
-  const status: CanonicalTaskStatus = root.archived_at
-    ? "archived"
-    : prior?.status === "archived"
-      ? "open"
-      : normalizeStatus(prior?.status ?? "open");
-  const coreChanged =
-    !prior ||
-    prior.title !== root.title ||
-    prior.project_id !== root.project_id ||
-    prior.firm_id !== root.firm_id ||
-    normalizeStatus(prior.status) !== status ||
-    prior.archived_at !== root.archived_at ||
-    prior.origin_chat_id !== root.id;
+  const status = reconciledTaskStatus(root, prior);
+  const coreChanged = taskCoreNeedsReconcile(root, prior);
   const participantsChanged =
     Boolean(prior) && desiredParticipants.some((input) => participantNeedsUpsert(taskId, input));
   if (prior && !coreChanged && !participantsChanged) return toTask(prior);
@@ -410,11 +471,7 @@ function reconcileAllUserChats(): void {
   const rows = getDb()
     .prepare("SELECT id FROM chats WHERE kind <> 'division' ORDER BY updated_at DESC LIMIT 200")
     .all() as Array<{ id: string }>;
-  for (const row of rows) {
-    // New Work chats materialize at creation. General One conversations are
-    // intentionally absent and a list/read must never promote them.
-    if (findCanonicalTaskForChat(row.id)) ensureCanonicalTaskForChat(row.id);
-  }
+  existingCanonicalTaskIdsForChats(rows.map(row => row.id));
 }
 
 function reconcileProjectUserChats(projectId: string): void {
@@ -426,9 +483,7 @@ function reconcileProjectUserChats(projectId: string): void {
   const rows = getDb()
     .prepare("SELECT id FROM chats WHERE project_id = ? AND kind <> 'division' ORDER BY updated_at DESC LIMIT 200")
     .all(projectId) as Array<{ id: string }>;
-  for (const row of rows) {
-    if (findCanonicalTaskForChat(row.id)) ensureCanonicalTaskForChat(row.id);
-  }
+  existingCanonicalTaskIdsForChats(rows.map(row => row.id));
 }
 
 export function listCanonicalTasks(input: {

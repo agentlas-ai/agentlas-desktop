@@ -321,6 +321,7 @@ function messageDomId(messageId: string): string {
 }
 
 const CHAT_HISTORY_PAGE_SIZE = 24;
+const NO_MEDIA_BASE_PATHS: string[] = [];
 const CHAT_OUTLINE_PAGE_SIZE = 24;
 
 export function ChatStream({
@@ -337,7 +338,7 @@ export function ChatStream({
   onOpenMultimodalSetup,
   onInspectWorker,
   artifactChatId,
-  mediaBasePaths = [],
+  mediaBasePaths = NO_MEDIA_BASE_PATHS,
   workspaceRoot,
   focusMessageId,
   onReply,
@@ -379,7 +380,7 @@ export function ChatStream({
     artifactChatId ?? "work:preview", sourceMessages, {
       key: message => message.intellectUiMessageId ?? message.durableMessageId ?? message.id,
       role: message => message.role === "agent" ? "assistant" : message.role,
-      text: message => message.role === "agent" ? userFacingAssistantText(message.text, Boolean(message.streaming)) : message.text,
+      text: message => message.role === "agent" ? userFacingAssistantMessageText(message) : message.text,
       active: message => Boolean(message.busy || message.streaming),
       createdAt: message => message.createdAt ?? (message.startedAt ? new Date(message.startedAt).toISOString() : undefined),
       run: message => message.runId,
@@ -730,7 +731,7 @@ export function ChatStream({
           {locale === "ko" ? "이전 대화 접기 · 최신 보기" : "Hide earlier messages · Latest"}
         </button>}
         {visibleMessages.map((m, index) => (
-          <MessageActions key={m.continuation ? m.id : m.intellectUiMessageId ?? m.id} messageId={m.continuationSourceMessageId ?? m.id} author={m.role === "user" ? (locale === "ko" ? "나" : "You") : agentName} text={displayMessageReply(m.role === "user" ? m.text : userFacingAssistantText(m.text, Boolean(m.streaming)), locale)} locale={locale} onReply={onReply}>
+          <MessageActions key={m.continuation ? m.id : m.intellectUiMessageId ?? m.id} messageId={m.continuationSourceMessageId ?? m.id} author={m.role === "user" ? (locale === "ko" ? "나" : "You") : agentName} text={displayMessageReply(m.role === "user" ? m.text : userFacingAssistantMessageText(m), locale)} locale={locale} onReply={onReply}>
           <div
             id={messageDomId(m.id)}
             tabIndex={-1}
@@ -1298,7 +1299,7 @@ const Bubble = memo(function Bubble({
   // agent — Markdown 렌더링.
   // 단일 실행은 기본적으로 영상형 인터리브 본문을 쓰되, 런타임이 공개한 reasoning
   // summary가 있으면 One과 같은 투명 활동 타임라인으로 남긴다.
-  const displayText = message.continuationMarkdownText ?? userFacingAssistantText(message.text, Boolean(message.streaming));
+  const displayText = message.continuationMarkdownText ?? userFacingAssistantMessageText(message);
   const hasInlineUi = hasIntellectUiFence(displayText);
   const displayMessage = displayText === message.text ? message : { ...message, text: displayText };
   const hasCanonicalActivity = workActivities.some(({ state }) => (
@@ -2238,6 +2239,20 @@ function isInternalSystemNote(text: string) {
 
 function isInternalRuntimeStatus(text: string): boolean {
   return /가\s*생각\s*중|is\s+thinking|(?:^|\s)codex:\s|\[runtime-session\]|sessionend hook|skill descriptions were shortened|agentlas plugins|career graph (?:색인 갱신|refreshed):?\s*nodes=|\/Users\/[^\s]+\/(?:\.codex|\.claude|Library\/Application Support)|(?:^|\s)(?:mcp__|automation_graph_|hep-network|stormbreaker[_-])|\b(?:bash|collab_tool_call|mcp_tool_call|write|read|edit|glob|grep|websearch|webfetch)\b|\b(?:codex|claude code|gemini|kimi|grok)\s+cli\b/i.test(text);
+}
+
+// History is projected on every live delta, including rows outside the visible
+// page. Avoid running protocol/path/visual-fence parsing over settled text each
+// time. Weak keys release old conversations; validate values too because older
+// transcript callers can update a message object in place.
+const assistantTextCache = new WeakMap<StreamMessage, { source: string; streaming: boolean; text: string }>();
+function userFacingAssistantMessageText(message: StreamMessage): string {
+  const streaming = Boolean(message.streaming);
+  const cached = assistantTextCache.get(message);
+  if (cached?.source === message.text && cached.streaming === streaming) return cached.text;
+  const text = userFacingAssistantText(message.text, Boolean(message.streaming));
+  assistantTextCache.set(message, { source: message.text, streaming, text });
+  return text;
 }
 
 function userFacingAssistantText(text: string, streaming = false): string {

@@ -316,25 +316,14 @@ function safeText(value: unknown, field: string): string {
 }
 
 /**
- * Payment is a hard human boundary. The model can explicitly elevate it, and
- * Main also catches common payment language so a provider cannot accidentally
- * downgrade a checkout/charge proposal to autonomous execution.
+ * A payment approval request is a typed boundary, not a keyword classification.
+ * Strategy prose can describe free access or prohibit purchases without asking
+ * for payment authority. Applying a strategy never grants execution permission.
  */
 function paymentApprovalRequired(input: {
   explicit?: boolean;
-  rationale: string;
-  strategy: AutomationStrategyV1 | null;
-  graphPatch: GraphPatch | null;
-  schedulePatch: AutomationStrategySchedulePatch | null;
 }): boolean {
-  if (input.explicit === true) return true;
-  const evidence = JSON.stringify({
-    rationale: input.rationale,
-    strategy: input.strategy,
-    graphPatch: input.graphPatch,
-    schedulePatch: input.schedulePatch,
-  }).toLowerCase();
-  return /payment|checkout|charge|billing|subscription|credit.?card|purchase|결제|구매|구독|청구|카드/.test(evidence);
+  return input.explicit === true;
 }
 
 function parseJudgmentRuntimeReceipt(value: unknown): JudgmentRuntimeReceipt | null {
@@ -1129,10 +1118,6 @@ export function createAutomationStrategyProposal(input: AutomationStrategyPropos
   if (input.intent === "keep" && (strategy || graphPatch || schedulePatch)) throw new AutomationStrategyProposalError("proposal_keep_has_patch");
   const requiresPaymentApproval = paymentApprovalRequired({
     explicit: input.requiresPaymentApproval,
-    rationale,
-    strategy,
-    graphPatch,
-    schedulePatch,
   });
   const source = sourceRun(automationId, sourceRunId);
   const automation = getAutomation(automationId);
@@ -1777,6 +1762,11 @@ export function getAutomationStrategyProposalApplicability(
   if (!hasExecutableChange(proposal)) {
     return { canApply: false, unavailableReason: "no_executable_change" };
   }
+  // Advisory drafts and unavailable judgments have no independent review to
+  // apply. The view exposes their review state without inventing authority.
+  if (proposal.adjudication.status !== "judged") {
+    return { canApply: false, unavailableReason: null };
+  }
   // A monitor origin is useful for reconciliation, but it is not proof that
   // the person granted this automation Goal authority. A model's
   // `within_scope` verdict cannot silently adopt that legacy automation; the
@@ -1792,14 +1782,14 @@ export function getAutomationStrategyProposalApplicability(
   }
   try {
     const boundary = readStrategyReviewBoundary(proposal);
+    if (!safeExecutableChange(boundary.automation, proposal)) {
+      return { canApply: false, unavailableReason: "no_executable_change" };
+    }
     if (proposal.goalBound && proposal.conflict !== "within_scope") {
       if (proposal.adjudication.authorization === "user_approval") {
         return { canApply: true, unavailableReason: null };
       }
       return { canApply: false, unavailableReason: "goal_amendment_required" };
-    }
-    if (!safeExecutableChange(boundary.automation, proposal)) {
-      return { canApply: false, unavailableReason: "no_executable_change" };
     }
     return { canApply: true, unavailableReason: null };
   } catch {

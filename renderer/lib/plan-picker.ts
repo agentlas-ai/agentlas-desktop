@@ -7,6 +7,10 @@
 // this event. Before the host mounts (or outside the app shell) the caller
 // falls back to the web pricing page so a click never does nothing.
 
+export const PRICING_PAGE_URL = "https://agentlas.cloud/pricing";
+/** Fired after confirmed checkout so plan-gated surfaces re-read. */
+export const PLAN_CHANGED_EVENT = "agentlas:plan-changed";
+
 export const PLAN_PICKER_OPEN_EVENT = "agentlas:plan-picker:open";
 const HOST_FLAG = "__agentlasPlanPickerHost";
 

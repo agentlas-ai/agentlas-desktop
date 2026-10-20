@@ -385,6 +385,28 @@ export { ALIVE_CONTINUABLE_PAUSE_REASONS } from "../../shared/goal-continuation"
 import { ALIVE_CONTINUABLE_PAUSE_REASONS } from "../../shared/goal-continuation";
 
 /**
+ * Why continueGoalForAlive would defer this Goal before trying anything (null = it would try now). A pure read, so a caller
+ * can skip asking: the AGI unblocker started a work turn on every attempt and the host deferred nearly all of them
+ * (alive_goal_not_continuable, retry_owns_next_step). A null answer is not a promise:
+ * sweepOne and resume keep their own guards.
+ */
+export function aliveGoalContinuationRefusal(runId: string, expectedVersion: number): string | null {
+  try { assertDesktopLongRunAdmissionOpen(); } catch { return "desktop_long_run_admission_closed"; }
+  const run = getLongRun(runId);
+  if (!run || run.version !== expectedVersion || (run.surface !== "one" && run.surface !== "work")
+    || run.executionLocation !== "desktop-local" || run.hostOwnerKind !== "desktop") return "alive_goal_state_changed";
+  if (longRunOwnerHold(run.id)) return LONG_RUN_OWNER_HOLD_CODE;
+  if (run.status === "blocked") return null;
+  // A host-scheduled retry owns the next step and its spacing. Letting the orchestrator bring a pending
+  // effect-observation retry forward turned the sweep's growing backoff into a tight loop of inconclusive
+  // observation runs. A historical receipt-only host hold is obsolete; actual retry spacing remains owned here.
+  const pendingRetry = pendingBlockedGoalRetry(run.id);
+  if (pendingRetry) return receiptOnlyRetry(run.id, pendingRetry) ? null : "retry_owns_next_step";
+  if (run.status !== "paused" || !ALIVE_CONTINUABLE_PAUSE_REASONS.has(run.pauseReason ?? "")) return "alive_goal_not_continuable";
+  return null;
+}
+
+/**
  * The Alive One/Work orchestrator's `goal.continue` — the same continuation path this sweep uses, for one Goal,
  * now, instead of waiting for the next periodic pass. It adds no new way to resume:
  *  - a blocked Goal goes through sweepOne (QA/workspace end rules, owner amendments, effect observation before
@@ -396,25 +418,12 @@ import { ALIVE_CONTINUABLE_PAUSE_REASONS } from "../../shared/goal-continuation"
 export function continueGoalForAlive(runId: string, expectedVersion: number, dispatcher: EffectObservationDispatcher): BlockedGoalSweepResult {
   const deferred = (detail: string, fromReason: string | null = null): BlockedGoalSweepResult =>
     ({ runId, fromReason, action: "deferred", detail });
-  try { assertDesktopLongRunAdmissionOpen(); } catch { return deferred("desktop_long_run_admission_closed"); }
-  const run = getLongRun(runId);
-  if (!run || run.version !== expectedVersion || (run.surface !== "one" && run.surface !== "work")
-    || run.executionLocation !== "desktop-local" || run.hostOwnerKind !== "desktop") return deferred("alive_goal_state_changed", run?.blockedReason ?? null);
-  if (longRunOwnerHold(run.id)) return deferred(LONG_RUN_OWNER_HOLD_CODE, run.blockedReason);
+  const refusal = aliveGoalContinuationRefusal(runId, expectedVersion);
+  if (refusal) return deferred(refusal, refusal === "desktop_long_run_admission_closed" ? null : getLongRun(runId)?.blockedReason ?? null);
+  const run = getLongRun(runId)!;
   const budget = { dispatches: 0 };
   if (run.status === "blocked") return sweepOne(run, dispatcher, "alive", budget) ?? deferred("alive_goal_not_continuable", run.blockedReason);
-  // A host-scheduled retry owns the next step and its spacing. Isolated live run 2026-09-24: letting the
-  // orchestrator bring a pending effect-observation retry forward turned the sweep's growing backoff into a
-  // ~30s loop (21 observation runs in 10 minutes, each inconclusive). A historical
-  // receipt-only host hold is obsolete; actual retry spacing remains owned here.
-  const pendingRetry = pendingBlockedGoalRetry(run.id);
-  if (pendingRetry) {
-    if (!receiptOnlyRetry(run.id, pendingRetry)) return deferred("retry_owns_next_step", run.blockedReason);
-    return sweepOne(run, dispatcher, "alive", budget) ?? deferred("alive_goal_not_continuable", run.blockedReason);
-  }
-  if (run.status !== "paused" || !ALIVE_CONTINUABLE_PAUSE_REASONS.has(run.pauseReason ?? "")) {
-    return deferred("alive_goal_not_continuable", run.blockedReason);
-  }
+  if (pendingBlockedGoalRetry(run.id)) return sweepOne(run, dispatcher, "alive", budget) ?? deferred("alive_goal_not_continuable", run.blockedReason);
   // A host pause the sweep already owns (runtime_unavailable → scheduled retry, refused startup pause) goes its way.
   const swept = sweepOne(run, dispatcher, "alive", budget);
   if (swept) return swept;

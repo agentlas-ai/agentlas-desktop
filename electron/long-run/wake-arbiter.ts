@@ -31,7 +31,8 @@ const DAY_MS = 24 * 60 * 60_000;
 /** A pending owner admission older than this belongs to a process that died; it must not hold a Goal back. */
 const OWNER_REQUEST_FRESH_MS = 120_000;
 
-export type GoalWakeSource = "sweep" | "alive" | "project-released" | "startup" | "observation" | "wait";
+/** "agi": a teammate session the AGI unblocker starts for the Goal (agi/wiring.ts through hostGoalWake below). */
+export type GoalWakeSource = "sweep" | "alive" | "project-released" | "startup" | "observation" | "wait" | "agi";
 
 export interface GoalWakeGate {
   activeChatIds?(): string[];
@@ -106,6 +107,21 @@ export function decideGoalWake(input: {
     return { start: false, reason: "wake_budget_reached", retryAt };
   }
   return { start: true };
+}
+
+/**
+ * A host path that starts model work for a Goal outside the paths above (the AGI unblocker handing a tactic to a teammate) goes
+ * through the same answer: refused with a typed code (goal_wake_budget_reached | goal_wake_owner_request_queued |
+ * goal_wake_chat_busy) before anything starts, and recorded once when it did start new work. Such dispatches used to start
+ * work without counting against the Goal's wakes.
+ */
+export function hostGoalWake<T>(input: { runId: string; chatId: string; source: GoalWakeSource; cause?: string | null; now?: number },
+  start: () => T, startedNew: (result: T) => boolean): T {
+  const verdict = decideGoalWake({ runId: input.runId, chatId: input.chatId, source: input.source, now: input.now });
+  if (!verdict.start) throw new Error(verdict.reason === "wake_budget_reached" ? "goal_wake_budget_reached" : `goal_wake_${verdict.reason}`);
+  const result = start();
+  if (startedNew(result)) recordGoalWake({ runId: input.runId, chatId: input.chatId, source: input.source, cause: input.cause ?? null });
+  return result;
 }
 
 /** One record per model turn a host path started for a Goal (counted by the budget, shown as "wakes today"). */

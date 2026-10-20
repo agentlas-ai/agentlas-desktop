@@ -10,7 +10,7 @@ import { I18nProvider } from "@/lib/i18n";
 import { ThemeProvider } from "@/lib/theme";
 import { AuthGate } from "@/components/AuthGate";
 import { OneRecoveryPlane } from "@/components/OneRecoveryPlane";
-import { PlanPickerHost } from "@/components/billing/PlanPickerModal";
+import { PlanPickerHost } from "@/components/billing/PlanPickerHost";
 import { AttentionHost } from "@/components/AttentionHost";
 import { OsPermissionHost } from "@/components/OsPermissionHost";
 import { TooltipHost } from "@/components/TooltipHost";

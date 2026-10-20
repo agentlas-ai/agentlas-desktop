@@ -50,7 +50,8 @@ async function read(binding: NativeAuthBinding, kind: "gui-private" | "daemon-pr
 }
 async function write(binding: NativeAuthBinding, kind: "gui-private" | "daemon-private" | "registry", value: string): Promise<void> {
   const service = state(binding).service, name = account(binding, kind);
-  await keychainSet(service, name, value, () => keytar().setPassword(service, name, value));
+  // Automatic bootstrap is not a fresh user permission decision.
+  await keychainSet(service, name, value, () => keytar().setPassword(service, name, value), false);
   if (await read(binding, kind) !== value) deny("native_auth_write_unconfirmed");
 }
 function json(value: string | null): unknown { if (value === null) return null; if (Buffer.byteLength(value) > 16_384) deny("native_auth_credential_too_large"); try { return JSON.parse(value); } catch { return deny("native_auth_credential_invalid"); } }

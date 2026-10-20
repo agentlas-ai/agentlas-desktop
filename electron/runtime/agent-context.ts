@@ -1,5 +1,7 @@
 import { carryRunnerTurnContext, finalizeRunnerTurnContext, renderRunnerTurnContext, runnerTurnContextSource } from "./runner-turn-context-binding";
 import type { DeclaredPromptPart } from "./prompt-order";
+import type { SessionChannel } from "./session-scope";
+import { renderChannelLine, sessionChannelTag } from "./session-channel";
 import { createHash } from "node:crypto";
 import { UNKNOWN_CONTEXT_WINDOW } from "../../shared/models";
 import { getDb } from "../store/db";
@@ -196,13 +198,23 @@ export function openAgentContextTurnId(capability: AgentContextCapability): stri
  * journal it continues and of the others that stay, never a conversation id. Evidence, not a control.
  */
 export function recordAgentContextScopeAdoption(turnId: string, identity: AgentContextIdentity,
-  assignment: { outcome: "adopted" | "fresh"; scopeKind: string; retainedDomains: readonly string[] }): void {
+  assignment: { outcome: "adopted" | "fresh" | "healed"; scopeKind: string; retainedDomains: readonly string[] }): void {
   const ref = (domain: string): string => contextRef(agentContextKey({ ...identity, visibilityDomain: domain }));
   recordAgentContextRunEvent(turnId, identity.agentId, AGENT_CONTEXT_ADOPTION_EVENT_KIND, {
     schemaVersion: "agentlas.agent-context-adoption.v1", contextRef: contextRef(agentContextKey(identity)),
-    outcome: assignment.outcome === "adopted" ? "scope_adopted" : "scope_fresh", scopeKind: assignment.scopeKind,
+    outcome: assignment.outcome === "adopted" ? "scope_adopted" : assignment.outcome === "healed" ? "scope_healed" : "scope_fresh", scopeKind: assignment.scopeKind,
     retainedRefs: assignment.retainedDomains.slice(0, 32).map(ref), retainedCount: assignment.retainedDomains.length,
   }, `agent-context-scope:${contextRef(agentContextKey(identity))}:${assignment.outcome}`);
+}
+/**
+ * One run event when the seat's journal could not be resolved for a turn and the turn was refused (session-scope.ts, "unavailable"):
+ * the machine cause only (a SQLite code or this layer's own), no conversation id and no text. Evidence for whoever asks why a seat
+ * conversation did not start; the owner sees a plain sentence instead.
+ */
+export function recordAgentContextScopeFailure(turnId: string, agentId: string, failure: { scopeKind: string; causeCode: string }): void {
+  recordAgentContextRunEvent(turnId, agentId, AGENT_CONTEXT_ADOPTION_EVENT_KIND, {
+    schemaVersion: "agentlas.agent-context-adoption.v1", outcome: "scope_unavailable", scopeKind: failure.scopeKind, causeCode: failure.causeCode,
+    refused: true }, `agent-context-scope-unavailable:${createHash("sha256").update(turnId).digest("hex").slice(0, 16)}`);
 }
 export function agentContextSessionKey(capability: AgentContextCapability): string {
   return agentContextKey(current(capability).identity);
@@ -233,11 +245,16 @@ export function bootstrapAgentContextHistory(capability: AgentContextCapability,
   for(const row of history)appendAgentContextEvent(capability,{eventId:`message:${row.durableMessageId??row.id}`,kind:"message",payload:{
     role:row.role,text:row.text,createdAt:row.createdAt,...(row.speakerAgentId?{speakerAgentId:row.speakerAgentId}:{}),
     ...(row.hostNotice?.purpose?{hostAuthored:row.hostNotice.purpose}:{}),
-    ...(row.imageDataUrls?{imageDataUrls:row.imageDataUrls}:{}),
+    ...(row.imageDataUrls?{imageDataUrls:row.imageDataUrls}:{}),...channelPayload(capability),
   }});
   return true;
 }
-/** What a conversation brings into a shared journal it joins late (importSharedChatHistory): the newest rows of its own history, bounded like the host's other replays. */
+/**
+ * What a conversation brings into a shared journal it joins late (importSharedChatHistory): the newest rows of its own history,
+ * bounded like the host's other replays. The character bound counts everything a row puts into the journal: its text AND the
+ * data URLs of its images (a late joiner with eighty rows of one-megabyte pictures used to add eighty megabytes). A row whose
+ * pictures do not fit comes in without them; the newest row's text always comes in.
+ */
 export const SHARED_IMPORT_MAX_ROWS = 80;
 export const SHARED_IMPORT_MAX_CHARS = 60_000;
 /**
@@ -247,28 +264,35 @@ export const SHARED_IMPORT_MAX_CHARS = 60_000;
  * continue a session that has never read it. Its recent messages go in once, with the ids the bootstrap uses, as recorded context
  * the journal's session reads like any other entry it did not produce; a conversation that has taken a turn here, or was imported
  * before, adds nothing. Call it while no other turn holds the journal: appended rows are never part of that turn's own observations.
+ * The count and the marker say what this call put in: a row the journal already holds (the first conversation's own bootstrap, a
+ * partly finished import) is not counted, and a call that added nothing writes no marker.
  */
 export function importSharedChatHistory(capability: AgentContextCapability, chatId: string, history: readonly ChatHistoryEntry[]): number {
   const value = current(capability), marker = `scope-import:${chatId}`;
   if (!history.length || store.readHead(value.identity).throughSeq === 0) return 0;
   if (store.hasEvent(value.identity, marker) || store.chatTookTurn(value.identity, chatId)) return 0;
-  const rows: ChatHistoryEntry[] = [];
+  const rows: Array<{ row: ChatHistoryEntry; images: readonly string[] | undefined }> = [];
   let chars = 0;
   for (let index = history.length - 1; index >= 0 && rows.length < SHARED_IMPORT_MAX_ROWS; index -= 1) {
     const row = history[index];
     if (typeof row.text !== "string" || !row.text) continue;
     if (rows.length && chars + row.text.length > SHARED_IMPORT_MAX_CHARS) break;
-    chars += row.text.length; rows.unshift(row);
+    const imageChars = (row.imageDataUrls ?? []).reduce((sum, url) => sum + (typeof url === "string" ? url.length : 0), 0);
+    const withImages = !!row.imageDataUrls?.length && chars + row.text.length + imageChars <= SHARED_IMPORT_MAX_CHARS;
+    chars += row.text.length + (withImages ? imageChars : 0);
+    rows.unshift({ row, images: withImages ? row.imageDataUrls : undefined });
   }
   let imported = 0;
-  for (const row of rows) {
+  for (const { row, images } of rows) {
+    const eventId = `message:${row.durableMessageId ?? row.id}`;
     try {
-      appendAgentContextEvent(capability, { eventId: `message:${row.durableMessageId ?? row.id}`, kind: "message", payload: {
+      if (store.hasEvent(value.identity, eventId)) continue;
+      appendAgentContextEvent(capability, { eventId, kind: "message", payload: {
         role: row.role, text: row.text, createdAt: row.createdAt, ...(row.speakerAgentId ? { speakerAgentId: row.speakerAgentId } : {}),
         ...(row.hostNotice?.purpose ? { hostAuthored: row.hostNotice.purpose } : {}),
-        ...(row.imageDataUrls ? { imageDataUrls: row.imageDataUrls } : {}) } });
+        ...(images ? { imageDataUrls: images } : {}), ...channelPayload(capability) } });
       imported += 1;
-    } catch { /* A row already in the journal (same id) or one the journal refuses is skipped; the rest still go in. */ }
+    } catch { /* A row the journal refuses is skipped; the rest still go in. */ }
   }
   if (imported) appendAgentContextEvent(capability, { eventId: marker, kind: "system", payload: { text: "", scopeImport: true, rows: imported } });
   return imported;
@@ -343,6 +367,27 @@ export function copyAgentContextHostAuthored(from: AgentContextCapability, to: A
   markAgentContextHostAuthored(to, hostAuthoredTurns.get(from));
 }
 /*
+ * Where a shared session is being spoken to on this turn (session-scope.ts names the channel from the conversation's row,
+ * session-channel.ts words it). Admission marks only a turn whose journal several conversations share; every other turn has no
+ * entry, so its prompt and its journal rows are exactly what they were. The mark does three things, all host-side data: the
+ * `agent-context.channel` line of the turn context (withAgentContext), a `channel` tag on every journal event of the turn (what a
+ * host-side filter would read; readers that do not know the key skip it), and nothing else: it grants no tool, owner or session.
+ */
+const channelOfTurn = new WeakMap<object, { tag: string; line: string }>();
+export function markAgentContextChannel(capability: AgentContextCapability, channel: SessionChannel | null): void {
+  const tag = channel ? sessionChannelTag(channel) : null, line = channel ? renderChannelLine(channel) : null;
+  if (tag && line) channelOfTurn.set(capability, { tag, line }); else channelOfTurn.delete(capability);
+}
+/** The mark belongs to the turn, not to one capability object: the daemon creates its own capability for the same turn. */
+export function copyAgentContextChannel(from: AgentContextCapability, to: AgentContextCapability): void {
+  const held = channelOfTurn.get(from);
+  if (held) channelOfTurn.set(to, held); else channelOfTurn.delete(to);
+}
+const channelPayload = (capability: object | undefined): { channel?: string } => {
+  const held = capability ? channelOfTurn.get(capability) : undefined;
+  return held ? { channel: held.tag } : {};
+};
+/*
  * Same-session continuation of a turn that ended without its terminal receipt (mcp/client.ts invokeCurrentRuntime).
  *
  * Custody semantics, so the guarantees stay as they were:
@@ -415,8 +460,8 @@ function contextEvents(req: RunnerRequest, turnId: string, bindingKey: string, s
   const events:AgentContextEvent[]=[{eventId:`system:${digest(req.systemPrompt)}`,kind:"system",payload:{text:req.systemPrompt}}];
   if(req.turnContext || stableBlocks.length)events.push({eventId:`turn:${turnId}:context`,kind:"turn-context",producerBinding:bindingKey,payload:{text:req.turnContext??"",stableBlocks:[...stableBlocks]}});
   events.push({eventId:`turn:${turnId}:input`,kind:"message",producerBinding:bindingKey,payload:{role:"user",text:req.userPrompt,createdAt:new Date().toISOString(),turnId,
-    ...(req.agentContext&&hostAuthoredTurns.get(req.agentContext)?{hostAuthored:hostAuthoredTurns.get(req.agentContext)}:{})}});
-  for(const [index,image]of(req.images??[]).entries())events.push({eventId:`turn:${turnId}:image:${index}`,kind:"attachment",producerBinding:bindingKey,payload:{turnId,mediaType:image.mediaType,data:image.data,...(image.name?{name:image.name}:{})}});
+    ...(req.agentContext&&hostAuthoredTurns.get(req.agentContext)?{hostAuthored:hostAuthoredTurns.get(req.agentContext)}:{}),...channelPayload(req.agentContext)}});
+  for(const [index,image]of(req.images??[]).entries())events.push({eventId:`turn:${turnId}:image:${index}`,kind:"attachment",producerBinding:bindingKey,payload:{turnId,mediaType:image.mediaType,data:image.data,...(image.name?{name:image.name}:{}),...channelPayload(req.agentContext)}});
   return events;
 }
 /** Provider-neutral semantic transcript. Tool observations remain quoted data;
@@ -575,9 +620,9 @@ export async function agentContextColdBootstrapForRequest(req: RunnerRequest): P
 }
 /** A cold packet's turn context as declared parts (the fresh-turn declarations), kept beside the frozen packet. */
 const bootstrapParts = new WeakMap<object, readonly DeclaredPromptPart[]>();
-function coldBootstrapPart(id: "agent-context.host-facts" | "agent-context.checkpoint-replay",
-  changeTriggers: DeclaredPromptPart["changeTriggers"], text: string): DeclaredPromptPart {
-  return { id, revision: 1, stability: "turn-context", changeTriggers, text };
+function coldBootstrapPart(id: "agent-context.host-facts" | "agent-context.checkpoint-replay" | "agent-context.channel",
+  changeTriggers: DeclaredPromptPart["changeTriggers"], text: string, order?: number): DeclaredPromptPart {
+  return { id, revision: 1, stability: "turn-context", changeTriggers, ...(order === undefined ? {} : { order }), text };
 }
 /*
  * Host facts for a native session that starts from host history (native-harness NH13, docs 05:76,83, 07 G11): a new
@@ -990,7 +1035,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
         const clean = replayVisibleAssistantText(text);
         if (clean) store.append(value.identity, sanitizeEvent({ eventId: `turn:${turnId}:partial-output`, kind: "message",
           producerBinding: delivery.bindingKey, payload: { role: "assistant", text: clean, turnId, partial: true,
-            representation: "observed-partial-extract", createdAt: new Date().toISOString() } }));
+            representation: "observed-partial-extract", createdAt: new Date().toISOString(), ...channelPayload(capability) } }));
         store.append(value.identity, sanitizeEvent({ eventId: `turn:${turnId}:terminal-observation`, kind: "checkpoint-reference",
           producerBinding: delivery.bindingKey, payload: { turnId, continuationOutcome: outcome, providerAcknowledged: false,
             ...(failureCode ? { failureCode } : {}) } }));
@@ -1002,7 +1047,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
       // Actual adapter emissions, retained as context data with canonical host
       // references when supplied. Tool effect authority remains in its ledger.
       appendAgentContextEvent(capability,{eventId:`turn:${turnId}:tool:${toolIndex++}`,kind:"tool",producerBinding:delivery.bindingKey,
-        payload:{name,createdAt:new Date().toISOString(),...(args!==undefined?{arguments:args}:{}),...(result!==undefined?{result}:{}),...(id?{callId:id}:{}),...(isError!==undefined?{isError}:{}),...(artifactPaths?{artifactPaths:[...artifactPaths]}:{}),...(imageDataUrl?{imageDataUrl}:{}),...(origin?{origin}:{})}});
+        payload:{name,createdAt:new Date().toISOString(),...(args!==undefined?{arguments:args}:{}),...(result!==undefined?{result}:{}),...(id?{callId:id}:{}),...(isError!==undefined?{isError}:{}),...(artifactPaths?{artifactPaths:[...artifactPaths]}:{}),...(imageDataUrl?{imageDataUrl}:{}),...(origin?{origin}:{}),...channelPayload(capability)}});
       events.onTool?.(name,args,result,id,isError,artifactPaths,imageDataUrl,origin,toolKind);
       if (result !== undefined) {
         toolBoundaryTokens += estimateTransportTokens(typeof result === "string" ? result : JSON.stringify(result));
@@ -1029,6 +1074,8 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
         catch { /* The journal is authoritative; a missing/damaged projection never blocks a turn. */ }
       }
       const originalPrompt=req.userPrompt,originalContext=req.turnContext??"",originalLocale=req.locale;
+      // Where this turn is spoken, for a session several conversations share; absent for every other turn (channelOfTurn).
+      const channelLine = capability ? channelOfTurn.get(capability)?.line : undefined;
       // The original turn context as declared parts: the exact bound Main parts when they render this text, else one
       // opaque tail (bytes kept). A cold packet composes them like the fresh turn below, never by string prepend.
       const originalSource=runnerTurnContextSource(req);
@@ -1043,7 +1090,8 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
           try { bootstrapReplay = sessionCheckpointStore.restore(value.identity, full, materializeAgentContextHistory(full, turnId), taskBoundary); }
           catch { /* Missing native state still falls back to the authoritative journal. */ }
         }
-        const coldParts = [...(bootstrapReplay?.block ? [coldBootstrapPart("agent-context.checkpoint-replay", ["checkpoint", "goal-revision"], bootstrapReplay.block)] : []), ...originalParts];
+        const coldParts = [...(channelLine ? [coldBootstrapPart("agent-context.channel", ["task", "owner-input"], channelLine, -1)] : []),
+          ...(bootstrapReplay?.block ? [coldBootstrapPart("agent-context.checkpoint-replay", ["checkpoint", "goal-revision"], bootstrapReplay.block)] : []), ...originalParts];
         const packet = Object.freeze({
         history: Object.freeze((bootstrapReplay?.history ?? materializeAgentContextHistory(full, turnId)).map(row => Object.freeze({ ...row,
           ...(row.imageDataUrls ? { imageDataUrls: Object.freeze([...row.imageDataUrls]) as unknown as string[] } : {}) }))),
@@ -1097,6 +1145,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
       // A native session seeded from host history reads the host facts ahead of the checkpoint summary (NH13).
       const hostFactsBlock=!decision && stateful && !resume && history.length ? await installHostFacts(capability,req,provider.kind,delivery,history) : null;
       const contextParts = ([
+        { id: "agent-context.channel", revision: 1, stability: "turn-context", changeTriggers: ["task", "owner-input"], order: -1, text: channelLine },
         { id: "agent-context.instructions", revision: 1, stability: "task-context", changeTriggers: ["runtime", "agent-instructions", "permission", "locale", "task"], text: instructions?.block },
         { id: "agent-context.retained-packet", revision: 1, stability: "task-context", changeTriggers: ["runtime", "task", "checkpoint"], text: packetBackground },
         { id: "agent-context.host-facts", revision: 1, stability: "turn-context", changeTriggers: ["checkpoint", "retrieval"], text: hostFactsBlock },
@@ -1163,7 +1212,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
       const turnSummary = parseMemoryEvents(result.text).turnSummary;
       appendAgentContextEvent(capability,{eventId:`turn:${turnId}:output`,kind:"message",producerBinding:delivery.bindingKey,
         payload:{role:"assistant",text:replayVisibleAssistantText(result.text),createdAt:new Date().toISOString(),turnId,speakerAgentId:value.identity.agentId,
-          ...(turnSummary ? { turnSummary, turnSummarySource: "emitter" } : {})}});
+          ...(turnSummary ? { turnSummary, turnSummarySource: "emitter" } : {}),...channelPayload(capability)}});
       // This is the validated runner's completed response receipt. It is not
       // an admission ACK or a claim that a stateless provider stores context.
       const observed=store.readRange(current(capability).identity,{after:delivery.throughSeq});

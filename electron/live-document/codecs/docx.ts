@@ -70,7 +70,11 @@ function pageOf(body: XmlElement): LivePage | undefined {
   const size = sectPr ? firstElement(sectPr, "w:pgSz") : undefined;
   if (!size) return undefined;
   const margin = sectPr ? firstElement(sectPr, "w:pgMar") : undefined;
-  const mm = (node: XmlElement | undefined, key: string, fallback: number) => Math.round((Number(node ? attr(node, key) : NaN) || fallback) * TWIP_MM * 10) / 10;
+  // A size or margin that is not a positive number (Word writes none of those) is the default, as a missing one always was.
+  const mm = (node: XmlElement | undefined, key: string, fallback: number) => {
+    const raw = Number(node ? attr(node, key) : NaN);
+    return Math.round((Number.isFinite(raw) && raw > 0 ? raw : fallback) * TWIP_MM * 10) / 10;
+  };
   return {
     width: mm(size, "w:w", 11906), height: mm(size, "w:h", 16838),
     margin: { top: mm(margin, "w:top", 1440), right: mm(margin, "w:right", 1440), bottom: mm(margin, "w:bottom", 1440), left: mm(margin, "w:left", 1440) },

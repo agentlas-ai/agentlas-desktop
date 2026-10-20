@@ -50,10 +50,7 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
 
   // 초기 1회 refresh는 유지. 주기 폴링(60s)은 useVisibleInterval이 담당 —
   // 기존 visibilitychange가 interval을 멈추지 않던 버그(숨김 중에도 계속 폴링)를 훅이 해결한다.
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-  useVisibleInterval(() => void refresh(true), POLL_MS);
+  useVisibleInterval(() => refresh(true), POLL_MS, { initial: refresh });
 
   // 로그인/로그아웃 직후(AccountChip 브로드캐스트) 즉시 동기화 — 60초 폴링을 기다리며
   // "로그아웃했는데 크레딧이 그대로" 같은 불일치가 보이지 않게 한다.

@@ -34,7 +34,7 @@ import { useT } from "@/lib/i18n";
 import type { AuthSession, HubCreditBalance, OneProfile, RuntimeStatus } from "@/lib/types";
 import type { AgentMailStatus } from "@shared/agent-mail";
 import { openPricing } from "@/components/UpgradeCta";
-import { PLAN_CHANGED_EVENT } from "@/components/billing/PlanPickerModal";
+import { PLAN_CHANGED_EVENT } from "@/lib/plan-picker";
 import { agentMailOffer } from "@shared/agent-mail-offer";
 import { FIRST_RUN_LOCAL_MODEL_KINDS, agentlasServingReady } from "@shared/runtime-connect";
 import { CredentialImportDialog } from "@/components/connect/CredentialImportDialog";

@@ -37,6 +37,12 @@ export const AGI_MODEL_ATTEMPT_SCHEMA = "agentlas.agi-unblock-decision.v1" as co
 export const AGI_MAX_EXTRA_READS = 4;
 export const AGI_MODEL_OUTPUT_TOKENS = 4_000;
 export const AGI_MODEL_TIME_LIMIT_MS = 5 * 60_000;
+/**
+ * A 'running' attempt row older than this that no model attempt in this process holds is not running: its process died or its
+ * attempt threw before settling. Without a bound such a row turned the Goal's AGI off for good, across restarts (isRunning reads
+ * it). Far above any real attempt (each runner call is capped at AGI_MODEL_TIME_LIMIT_MS, two rounds).
+ */
+export const AGI_MODEL_RUNNING_TTL_MS = 60 * 60_000;
 /** Candidate failover does not prove that the prior provider charged zero. */
 const NEXT_CANDIDATE_FAILURES = new Set(["quota", "auth", "unsupported"]);
 
@@ -235,8 +241,17 @@ function agiUnblockUserPrompt(factsJson: string, evidence: string, ownerLanguage
 
 export class AgiModelAttempt {
   isRunning(goalId: string): boolean {
-    return activeRepairs.get(this.deps.db)?.has(goalId) === true || Boolean(this.deps.db.prepare(
-      "SELECT 1 FROM agi_model_attempts WHERE goal_id=? AND status='running' LIMIT 1").get(goalId));
+    if (activeRepairs.get(this.deps.db)?.has(goalId) === true) return true;
+    this.reclaimStaleRunning(goalId);
+    return Boolean(this.deps.db.prepare("SELECT 1 FROM agi_model_attempts WHERE goal_id=? AND status='running' LIMIT 1").get(goalId));
+  }
+
+  /** Settle 'running' rows of this Goal past AGI_MODEL_RUNNING_TTL_MS that no attempt in this process holds (failed, typed code). */
+  private reclaimStaleRunning(goalId: string): void {
+    if (activeRepairs.get(this.deps.db)?.has(goalId) === true) return;
+    const now = this.deps.now();
+    this.deps.db.prepare(`UPDATE agi_model_attempts SET status='failed', code='agi.model.running-expired', settled_at_ms=?
+      WHERE goal_id=? AND status='running' AND created_at_ms <= ?`).run(now, goalId, now - AGI_MODEL_RUNNING_TTL_MS);
   }
 
   async run(input: AgiUnblockInput, preActions: Array<{ action: string; result: string }> = []): Promise<AgiUnblockResult & { attemptId: string }> {
@@ -244,7 +259,17 @@ export class AgiModelAttempt {
     const active = activeRepairs.get(this.deps.db) ?? new Set<string>();
     activeRepairs.set(this.deps.db, active);
     active.add(input.goalId);
+    const startedAt = this.deps.now();
     try { return await this.runAttempt(input, preActions); }
+    catch {
+      // runAttempt settles its own row on every path it knows; an exception it did not expect must not leave the row 'running'
+      // (isRunning would hold this Goal's AGI off for good). Only this run's row can be running for the Goal here (one per goal).
+      try {
+        this.deps.db.prepare(`UPDATE agi_model_attempts SET status='failed', code='agi.model.attempt-threw', settled_at_ms=?
+          WHERE goal_id=? AND status='running' AND created_at_ms >= ?`).run(this.deps.now(), input.goalId, startedAt);
+      } catch { /* the store may be closing; the TTL reclaims it */ }
+      return { attemptId: "", outcome: "failed", code: "agi.model.attempt-threw" };
+    }
     finally { active.delete(input.goalId); }
   }
 
@@ -254,7 +279,8 @@ export class AgiModelAttempt {
     return reads.map(({ tool, args }) => {
       const refusal = controlRefusal();
       if (refusal) return JSON.stringify({ refused: refusal });
-      const result = this.deps.read(goalId, tool, args);
+      let result: AgiReadResult;
+      try { result = this.deps.read(goalId, tool, args); } catch { result = { ok: false, tool, code: "agi.read.failed" }; }
       return `### ${tool}${Object.keys(args).length ? ` ${JSON.stringify(args)}` : ""}\n${result.ok ? result.text : JSON.stringify({ refused: result.code })}`;
     }).join("\n\n");
   }
@@ -271,6 +297,7 @@ export class AgiModelAttempt {
     const claim = d.db.transaction(() => {
       const existing = d.db.prepare("SELECT status FROM agi_model_attempts WHERE id=?").get(attemptId);
       if (existing) return "agi.model.attempt-already-ran";
+      this.reclaimStaleRunning(input.goalId);
       if (d.db.prepare("SELECT 1 FROM agi_model_attempts WHERE goal_id=? AND status='running' LIMIT 1").get(input.goalId)) return "agi.model.in-flight";
       d.db.prepare("INSERT INTO agi_model_attempts(id,goal_id,incident_id,state_digest,status,created_at_ms) VALUES (?,?,?,?,'running',?)")
         .run(attemptId, input.goalId, input.incidentId, input.stateDigest, d.now());

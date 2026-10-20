@@ -456,6 +456,7 @@ import {
   listFailureEvents,
   listRunEvents,
   listRunOutputEventsAfter,
+  listEarlierOneOutputs,
   listRunSettleRowsAfter,
   listChatRunTimeline,
   ownerDirectionAfterInvocationRun,
@@ -5082,6 +5083,7 @@ export function registerIpcHandlers(): { businessShipping: ReturnType<typeof reg
   ipcMain.handle("oneArtifacts:revokePreview", (_e, input: OneArtifactPreviewRevokeV1) => ({
     revoked: revokeOneArtifactPreview(input),
   }));
+  registerAppControlDomainIpc(ipcMain, "oneArtifacts:listEarlier", (input: unknown) => listEarlierOneOutputs(input));
   registerAppControlDomainIpc(ipcMain, "oneProfile:get", () => getOneProfile());
   registerAppControlDomainIpc(ipcMain, "oneProfile:origin", () => getOneProfileOrigin());
   registerAppControlDomainIpc(ipcMain, "oneProfile:update", (input: OneProfileUpdateInput) => updateOneProfile(input));

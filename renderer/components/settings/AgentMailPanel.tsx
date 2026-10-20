@@ -11,7 +11,7 @@ import { tFor, type Locale } from "@/lib/i18n";
 import type { AgentMailEntitlement, AgentMailMailbox, AgentMailStatus } from "@shared/agent-mail";
 import { agentMailOffer } from "@shared/agent-mail-offer";
 import { AgentMailOfferCard } from "@/components/one/mail/AgentMailOfferCard";
-import { PLAN_CHANGED_EVENT } from "@/components/billing/PlanPickerModal";
+import { PLAN_CHANGED_EVENT } from "@/lib/plan-picker";
 import { OneMailSettingsTabs } from "@/components/one/mail/OneMailTabs";
 import { mailErrorText } from "@/components/one/mail/mailErrorText";
 import { useOnePersonaName } from "@/lib/one-persona-name";

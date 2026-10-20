@@ -1,4 +1,4 @@
-import { LIVE_DOCUMENT_OPS_BY_FORMAT, liveDocumentOutline } from "../../shared/live-document";
+import { LIVE_DOCUMENT_OPS_BY_FORMAT, LIVE_DOCUMENT_RENDER_MAX_PAGES, liveDocumentOutline } from "../../shared/live-document";
 
 /*
  * Harness ports for live documents (document.*). The model edits an open office file through the same journal the
@@ -62,7 +62,11 @@ export const LIVE_DOCUMENT_PORT_SCHEMAS = {
   read: { type: "object", required: ["sessionId"], properties: { sessionId: { type: "string" }, maxChars: { type: "integer", minimum: 1000, maximum: 200000 } } },
   apply: { type: "object", required: ["sessionId", "ops"], properties: { sessionId: { type: "string" }, baseRevision: { type: "integer", minimum: 0 }, ops: { type: "array", minItems: 1, maxItems: 400, items: OP_SCHEMA } } },
   save: { type: "object", required: ["sessionId"], properties: { sessionId: { type: "string" } } },
-  render: { type: "object", required: ["sessionId"], properties: { sessionId: { type: "string" } } },
+  render: { type: "object", required: ["sessionId"], properties: {
+    sessionId: { type: "string" },
+    from: { type: "integer", minimum: 1, description: "1-based slide, page or sheet to start at (default 1); the reply's next says where to continue" },
+    count: { type: "integer", minimum: 1, maximum: LIVE_DOCUMENT_RENDER_MAX_PAGES, description: `how many to photograph (default and most: ${LIVE_DOCUMENT_RENDER_MAX_PAGES})` },
+  } },
 } as const;
 
 async function store() {
@@ -117,7 +121,11 @@ export async function documentCreate(args: Record<string, unknown>, ctx: Ctx): P
  * document.render: the document's slides, pages or sheets as images, for a reviewer checking the layout. The window that
  * photographs them lives in Main (live-document/render.ts); this port asks it through app.call liveDocument.render, which
  * the daemon carries over the device bridge. The images come back as observation captures that the harness hands to
- * models that read images (app-control/service.ts saveResultImages, turn-tools/control-server.ts).
+ * models that read images (app-control/service.ts saveResultImages, turn-tools/control-server.ts). A call photographs at
+ * most LIVE_DOCUMENT_RENDER_MAX_PAGES from `from`; the reply's total and next walk a longer document.
+ *
+ * The chat check is here and in Main: the operation answers only a call that carries this conversation as its scope
+ * (app-control/service.ts CHAT_SCOPED_OPERATIONS), so app.call cannot reach it with another chat's session.
  */
 export async function documentRender(args: Record<string, unknown>, ctx: Ctx): Promise<Outcome> {
   const sessionId = str(args.sessionId);
@@ -125,8 +133,10 @@ export async function documentRender(args: Record<string, unknown>, ctx: Ctx): P
     const snapshot = await (await store()).liveDocumentSnapshot(sessionId);
     if (snapshot.meta.chatId !== ctx.chatId) return refused("session_not_in_this_chat", "document.list shows this conversation's sessions");
   } catch (error) { return errorOutcome(error); }
+  const range = { ...(Number.isSafeInteger(args.from) ? { from: Number(args.from) } : {}), ...(Number.isSafeInteger(args.count) ? { count: Number(args.count) } : {}) };
   try {
-    const reply = await (await import("../app-control/service")).appControlCall({ ownerTurn: false }, { operation: "liveDocument.render", args: { sessionId } }) as Record<string, unknown>;
+    const reply = await (await import("../app-control/service")).appControlCall({ ownerTurn: false },
+      { operation: "liveDocument.render", args: { sessionId, ...range }, scope: { chatId: ctx.chatId } }) as Record<string, unknown>;
     if (reply.ok === false) {
       const result = reply.result as { message?: unknown } | undefined;
       return refused(typeof reply.code === "string" ? reply.code : "render_failed", typeof result?.message === "string" ? result.message : undefined);

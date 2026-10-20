@@ -2,8 +2,12 @@
 //
 // The detector finds work One keeps doing again and hands one well-evidenced signal to a model, which decides whether it
 // is a reusable capability (a Toolchain works like a plugin or connector: one stable behavior, typed inputs). This file
-// only decides which signals deserve that model call. Sentence similarity, shared tool steps, and recurrence on
-// separate days jointly distinguish reusable behavior from unrelated work and retries.
+// only decides which signals deserve that model call. Recurrence is a COUNT of distinct executions, not a span of days:
+// work done twelve times in one day is as repeated as work done once a week. What keeps retries and look-alike sentences
+// out is the evidence, not the calendar:
+//   · retries of one item are collapsed (near-identical sentence, same conversation, minutes apart) before counting;
+//   · sentences must cluster by meaning, and the tool flow after each search must agree (see flowCohesion);
+//   · the occurrences must be distinct runs with distinct sentences.
 // The thresholds are policy inputs; they do not independently prove that a reusable capability exists.
 
 import { createHash } from "node:crypto";
@@ -12,12 +16,25 @@ import type { ToolchainAsset, ToolchainCallReceipt } from "./toolchain-asset";
 export const TOOLCHAIN_DETECTOR_POLICY = Object.freeze({
   /** Average-linkage cosine distance; members of one cluster average ≥ 0.6 similarity. */
   clusterDistance: 0.4,
-  minMembers: 3,
-  /** Recurrence: a burst inside one day (one Goal retrying one item) is not a recurring behavior. */
-  minDays: 3,
-  minRuns: 3,
-  /** Mean pairwise Jaccard of runtime-independent tool steps after each sentence. */
-  minTraceSimilarity: 0.45,
+  /** Occurrences after retries are collapsed. */
+  minMembers: 5,
+  /** Distinct executions (run ids). */
+  minRuns: 5,
+  /** Distinct sentences: five copies of one sentence are one item repeated, not a behavior with varying inputs. */
+  minDistinctTasks: 3,
+  /**
+   * Tool-flow agreement, see flowCohesion. The floor is absolute; the lift is relative to how alike two UNRELATED observations
+   * of one user look (a user whose every run is shell-heavy has a high baseline). The values separate coherent clusters from
+   * clusters that only share wording.
+   */
+  minFlowCohesion: 0.2,
+  minFlowLift: 2.2,
+  /** Sentence cosine at or below which two observations count as unrelated, and how many such pairs the baseline needs. */
+  unrelatedSimilarity: 0.4,
+  minUnrelatedPairs: 20,
+  /** A search that repeats an earlier one in the same conversation this closely and this soon is a retry, not a recurrence. */
+  retrySimilarity: 0.92,
+  retryWindowMinutes: 30,
   windowDays: 21,
   maxObservations: 400,
   maxRepresentatives: 8,
@@ -45,9 +62,15 @@ export interface RepeatSignal {
   key: string;
   memberIds: string[];
   members: DetectorObservation[];
+  /** Calendar days the occurrences fall on. Information for the judgment; never a gate. */
   days: number;
   runs: number;
-  traceSimilarity: number;
+  /** Retries folded away across the whole corpus this signal came from (context for the judgment, not part of this cluster). */
+  collapsedRetries: number;
+  /** Mean pairwise tool-flow agreement of the members, and how many times the baseline of unrelated pairs it is. */
+  flowCohesion: number;
+  /** Null when there were too few unrelated pairs to measure a baseline. */
+  flowLift: number | null;
   centroid: number[];
   /** Tool steps present in at least half of the members. */
   commonSteps: string[];
@@ -109,12 +132,92 @@ export function traceJaccard(left: readonly string[], right: readonly string[]):
   return shared / union.size;
 }
 
-function meanPairwise(members: readonly DetectorObservation[]): number {
+/** Consecutive repeats of one step (ten shell calls in a row) are one step of the flow. */
+function compressSteps(trace: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const step of trace) if (out[out.length - 1] !== step) out.push(step);
+  return out;
+}
+
+type FlowVector = Map<string, number>;
+
+/**
+ * Tool flow as an IDF-weighted bag of steps and consecutive step pairs, unit length.
+ *
+ * Set overlap of tool classes cannot tell two runs apart when nearly every run uses shell and file reads: unrelated pairs
+ * and coherent clusters scored alike, so the two overlapped. Weighting a step by how rare it is among all
+ * observed runs lets the distinctive steps (browser reads, graph runs, goal waits) carry the comparison, and step pairs
+ * keep some order (read-then-write is not write-then-read). Weights come from the observations given, so they follow this
+ * owner's own tool mix.
+ */
+export function flowVectors(observations: readonly Pick<DetectorObservation, "trace">[]): FlowVector[] {
+  const features = observations.map(observation => {
+    const steps = compressSteps(observation.trace);
+    const counts = new Map<string, number>();
+    for (const step of steps) counts.set(step, (counts.get(step) ?? 0) + 1);
+    for (let i = 0; i + 1 < steps.length; i++) { const pair = `${steps[i]}>${steps[i + 1]}`; counts.set(pair, (counts.get(pair) ?? 0) + 1); }
+    return counts;
+  });
+  const documentFrequency = new Map<string, number>();
+  for (const counts of features) for (const key of counts.keys()) documentFrequency.set(key, (documentFrequency.get(key) ?? 0) + 1);
+  const total = observations.length;
+  return features.map(counts => {
+    const vector: FlowVector = new Map();
+    let length = 0;
+    for (const [key, count] of counts) {
+      const weight = (1 + Math.log(count)) * Math.log(1 + total / (documentFrequency.get(key) ?? 1));
+      vector.set(key, weight); length += weight * weight;
+    }
+    length = Math.sqrt(length);
+    if (length > 0) for (const [key, weight] of vector) vector.set(key, weight / length);
+    return vector;
+  });
+}
+
+function flowCosine(left: FlowVector, right: FlowVector): number {
+  const [small, large] = left.size <= right.size ? [left, right] : [right, left];
+  let dot = 0;
+  for (const [key, weight] of small) dot += weight * (large.get(key) ?? 0);
+  return dot;
+}
+
+/**
+ * How alike two UNRELATED observations look in tool flow: the mean agreement of pairs whose sentences share little meaning.
+ * Null when there are too few such pairs to say (an owner whose searches are all one behavior has no unrelated pairs; the
+ * absolute floor then stands alone).
+ */
+function unrelatedFlowBaseline(vectors: readonly (readonly number[])[], flows: readonly FlowVector[], policy: ToolchainDetectorPolicy): number | null {
   let total = 0, pairs = 0;
-  for (let i = 0; i < members.length; i++) for (let j = i + 1; j < members.length; j++) {
-    total += traceJaccard(members[i].trace, members[j].trace); pairs++;
+  for (let i = 0; i < flows.length; i++) for (let j = i + 1; j < flows.length; j++) {
+    if (cosine(vectors[i], vectors[j]) > policy.unrelatedSimilarity) continue;
+    total += flowCosine(flows[i], flows[j]); pairs++;
   }
+  return pairs >= policy.minUnrelatedPairs ? total / pairs : null;
+}
+
+/** Mean flow agreement between all pairs of the given vectors (0 when fewer than two). */
+function meanFlowAgreement(vectors: readonly FlowVector[]): number {
+  let total = 0, pairs = 0;
+  for (let i = 0; i < vectors.length; i++) for (let j = i + 1; j < vectors.length; j++) { total += flowCosine(vectors[i], vectors[j]); pairs++; }
   return pairs ? total / pairs : 0;
+}
+
+/**
+ * Drops searches that repeat an earlier one in the same conversation closely and soon after (retries of one item). The
+ * earlier one stays; the count of dropped ones is returned so the judgment can see them.
+ */
+export function collapseRetries(observations: readonly DetectorObservation[], policy: ToolchainDetectorPolicy = TOOLCHAIN_DETECTOR_POLICY):
+  { kept: DetectorObservation[]; collapsed: number } {
+  const ordered = [...observations].sort((a, b) => a.at.localeCompare(b.at));
+  const window = policy.retryWindowMinutes * 60_000;
+  const kept: DetectorObservation[] = [];
+  let collapsed = 0;
+  for (const item of ordered) {
+    const duplicate = item.chatId !== null && kept.some(earlier => earlier.chatId === item.chatId
+      && Date.parse(item.at) - Date.parse(earlier.at) <= window && cosine(earlier.vector, item.vector) >= policy.retrySimilarity);
+    if (duplicate) collapsed++; else kept.push(item);
+  }
+  return { kept, collapsed };
 }
 
 const TOKEN = /[\p{L}\p{N}][\p{L}\p{N}_.:/-]*/gu;
@@ -141,19 +244,30 @@ function signalKey(memberIds: readonly string[]): string {
   return createHash("sha256").update([...memberIds].sort().join("\n"), "utf8").digest("hex").slice(0, 24);
 }
 
-/** Clusters that pass all three keys, strongest first. Vectors from a non-semantic (hash) embedder must not reach here. */
+function normalizedTask(task: string): string { return task.toLocaleLowerCase().replace(/\s+/gu, " ").trim(); }
+
+/**
+ * Clusters that recur often enough, as distinct executions with distinct sentences, and whose tool flow agrees, strongest
+ * first. Vectors from a non-semantic (hash) embedder must not reach here.
+ */
 export function detectRepeatSignals(observations: readonly DetectorObservation[], policy: ToolchainDetectorPolicy = TOOLCHAIN_DETECTOR_POLICY): RepeatSignal[] {
   const recent = [...observations].sort((a, b) => b.at.localeCompare(a.at)).slice(0, policy.maxObservations);
-  const groups = clusterByAverageLinkage(recent.map(item => item.vector), policy.clusterDistance);
+  const { kept, collapsed: collapsedTotal } = collapseRetries(recent, policy);
+  if (kept.length < policy.minMembers) return [];
+  const flows = flowVectors(kept);
+  const baseline = unrelatedFlowBaseline(kept.map(item => item.vector), flows, policy);
+  const groups = clusterByAverageLinkage(kept.map(item => item.vector), policy.clusterDistance);
   const signals: RepeatSignal[] = [];
   for (const group of groups) {
     if (group.length < policy.minMembers) continue;
-    const members = group.map(index => recent[index]).sort((a, b) => a.at.localeCompare(b.at));
-    const days = new Set(members.map(member => dayOf(member.at))).size;
+    const members = group.map(index => kept[index]).sort((a, b) => a.at.localeCompare(b.at));
     const runs = new Set(members.map(member => member.runId ?? member.id)).size;
-    if (days < policy.minDays || runs < policy.minRuns) continue;
-    const traceSimilarity = meanPairwise(members);
-    if (traceSimilarity < policy.minTraceSimilarity) continue;
+    if (runs < policy.minRuns) continue;
+    if (new Set(members.map(member => normalizedTask(member.task))).size < policy.minDistinctTasks) continue;
+    const flowCohesion = meanFlowAgreement(group.map(index => flows[index]));
+    const flowLift = baseline !== null && baseline > 0 ? flowCohesion / baseline : null;
+    if (flowCohesion < policy.minFlowCohesion || (flowLift !== null && flowLift < policy.minFlowLift)) continue;
+    const days = new Set(members.map(member => dayOf(member.at))).size;
     const dimensions = members[0].vector.length;
     const centroid = norm(Array.from({ length: dimensions }, (_, d) => members.reduce((sum, member) => sum + (member.vector[d] ?? 0), 0) / members.length));
     const stepCounts = new Map<string, number>();
@@ -161,12 +275,12 @@ export function detectRepeatSignals(observations: readonly DetectorObservation[]
     const chats = new Map<string, number>();
     for (const member of members) if (member.chatId) chats.set(member.chatId, (chats.get(member.chatId) ?? 0) + 1);
     const memberIds = members.map(member => member.id);
-    signals.push({ key: signalKey(memberIds), memberIds, members, days, runs, traceSimilarity, centroid,
+    signals.push({ key: signalKey(memberIds), memberIds, members, days, runs, collapsedRetries: collapsedTotal, flowCohesion, flowLift, centroid,
       commonSteps: [...stepCounts.entries()].filter(([, count]) => count >= members.length / 2).sort((a, b) => b[1] - a[1]).map(([step]) => step),
       varyingDetails: varyingInstanceDetails(members.map(member => member.task)),
       dominantChatId: [...chats.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null });
   }
-  return signals.sort((a, b) => b.days - a.days || b.members.length - a.members.length || b.traceSimilarity - a.traceSimilarity);
+  return signals.sort((a, b) => b.runs - a.runs || b.flowCohesion - a.flowCohesion);
 }
 
 /** A signal already judged stays judged until its cooldown passes; a created capability stays answered. */

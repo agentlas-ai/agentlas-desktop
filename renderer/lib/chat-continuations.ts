@@ -69,9 +69,25 @@ export class ChatContinuationProjector {
     sourceKeys.forEach(key => counts.set(key, (counts.get(key) ?? 0) + 1));
     const keys = sourceKeys.map((key, index) => counts.get(key)! > 1 ? `${key}:source:${messages[index].id}` : key);
     const present = new Set(keys);
+    // A room can contain thousands of historical rows. Index once rather than
+    // searching the full transcript/reply history for every assistant on each
+    // streamed update. Preserve indexOf's first-match behavior for older data.
+    const keyIndices = new Map<string, number>();
+    keys.forEach((key, index) => { if (!keyIndices.has(key)) keyIndices.set(key, index); });
+    const repliesByAlias = new Map<string, Reply>();
+    const absentActiveReplies: Reply[] = [];
+    for (const reply of new Set(conversation.replies.values())) {
+      for (const alias of reply.aliases) if (!repliesByAlias.has(alias)) repliesByAlias.set(alias, reply);
+      if (reply.active && reply.cuts.length > 0 && reply.text.length > 0
+        && ![...reply.aliases].some(alias => present.has(alias))
+        && reply.cuts.some(cut => present.has(cut.userKey))) absentActiveReplies.push(reply);
+    }
     const users = messages.flatMap((message, index) => adapter.role(message) === "user"
       ? [{ key: keys[index], index, createdAt: adapter.createdAt?.(message) }] : []);
     const newlyVisibleUsers = users.filter(user => !conversation!.users.has(user.key));
+    const latestUser = users.at(-1);
+    const latestNewUser = newlyVisibleUsers.at(-1);
+    let precedingUser = -1;
     const at = new Map<string, ChatContinuationRow<T>[]>();
     const before = new Map<string, ChatContinuationRow<T>[]>();
     const after = new Map<string, ChatContinuationRow<T>[]>();
@@ -82,6 +98,7 @@ export class ChatContinuationProjector {
     };
 
     messages.forEach((message, index) => {
+      while (precedingUser + 1 < users.length && users[precedingUser + 1].index < index) precedingUser++;
       const key = keys[index];
       const text = adapter.text(message);
       const createdAt = adapter.createdAt?.(message);
@@ -92,25 +109,22 @@ export class ChatContinuationProjector {
         return;
       }
       let reply = conversation!.replies.get(key);
-      if (!reply) reply = [...conversation!.replies.values()].find(candidate => candidate.aliases.has(key));
+      if (!reply) reply = repliesByAlias.get(key);
       if (!reply) {
         // A live row can be renamed by its durable receipt. Bind only a unique
         // absent source with exact observed text and a surviving cut.
-        const candidates = [...new Set(conversation!.replies.values())].filter(candidate =>
-          candidate.active && candidate.cuts.length > 0 && candidate.text.length > 0
+        const candidates = absentActiveReplies.filter(candidate => text === candidate.text
           && ![...candidate.aliases].some(alias => present.has(alias))
-          && text === candidate.text
-          && (!adapter.run?.(message) || !candidate.run || adapter.run(message) === candidate.run)
-          && candidate.cuts.some(cut => present.has(cut.userKey)));
+          && (!adapter.run?.(message) || !candidate.run || adapter.run(message) === candidate.run));
         if (candidates.length === 1) reply = candidates[0];
       }
       const active = adapter.active(message);
       if (!reply) {
         reply = { key, aliases: new Set([key]), text, active, createdAt, run: adapter.run?.(message),
-          initialUser: users.filter(user => user.index < index).at(-1)?.key, cuts: [] };
+          initialUser: users[precedingUser]?.key, cuts: [] };
         // On attaching to an already-running room, freeze what is visible now;
         // only subsequent output goes after its latest follow-up.
-        const later = active ? users.filter(user => user.index > index).at(-1) : undefined;
+        const later = active && latestUser && latestUser.index > index ? latestUser : undefined;
         if (later) reply.cuts.push({ offset: text.length, userKey: later.key, createdAt: later.createdAt });
       } else {
         if (!text.startsWith(reply.text)) {
@@ -118,14 +132,14 @@ export class ChatContinuationProjector {
           // Keep the complete replacement below the latest observed follow-up,
           // including clients whose durable answer stays beside its first user.
           const anchor = reply.cuts.at(-1) ?? ((reply.active || active)
-            ? users.filter(user => user.index > index).at(-1) : undefined);
+            && latestUser && latestUser.index > index ? latestUser : undefined);
           reply.cuts = anchor ? [{ offset: 0, userKey: "userKey" in anchor ? anchor.userKey : anchor.key,
             createdAt: anchor.createdAt }] : [];
         } else if (reply.active || active) {
-          const initialIndex = reply.initialUser ? keys.indexOf(reply.initialUser) : -1;
-          const lastCutIndex = reply.cuts.length ? keys.indexOf(reply.cuts.at(-1)!.userKey) : -1;
-          const boundary = newlyVisibleUsers.filter(user => user.index > Math.max(initialIndex, lastCutIndex)
-            && (user.index > index || initialIndex >= 0 || lastCutIndex >= 0)).at(-1);
+          const initialIndex = reply.initialUser ? keyIndices.get(reply.initialUser) ?? -1 : -1;
+          const lastCutIndex = reply.cuts.length ? keyIndices.get(reply.cuts.at(-1)!.userKey) ?? -1 : -1;
+          const boundary = latestNewUser && latestNewUser.index > Math.max(initialIndex, lastCutIndex)
+            && (latestNewUser.index > index || initialIndex >= 0 || lastCutIndex >= 0) ? latestNewUser : undefined;
           if (boundary) {
             const cut = { offset: reply.text.length, userKey: boundary.key, createdAt: boundary.createdAt };
             if (reply.cuts.at(-1)?.offset === cut.offset) reply.cuts[reply.cuts.length - 1] = cut;
@@ -137,6 +151,7 @@ export class ChatContinuationProjector {
         reply.aliases.add(key);
       }
       conversation!.replies.set(reply.key, reply);
+      for (const alias of reply.aliases) if (!repliesByAlias.has(alias)) repliesByAlias.set(alias, reply);
       // Only apply boundaries whose user remains in the canonical snapshot.
       // Missing anchors (pagination/history replacement) must not hide text.
       const cuts = reply.cuts.filter(cut => present.has(cut.userKey) && cut.offset <= text.length);
@@ -170,7 +185,7 @@ export class ChatContinuationProjector {
         row.markdownText = renderMarkdownRange(text, row.textStart, row.textStart + row.text.length, ranges);
         if (!row.continuation) {
           const firstUser = cuts[0].userKey;
-          if (keys.indexOf(firstUser) < index) insert(before, firstUser, row);
+          if ((keyIndices.get(firstUser) ?? -1) < index) insert(before, firstUser, row);
           else insert(at, key, row);
         } else {
           const cut = cuts.find(candidate => `chat-continuation:${reply!.key}:${candidate.userKey}` === row.id)!;

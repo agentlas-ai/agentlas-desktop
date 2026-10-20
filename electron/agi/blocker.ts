@@ -93,9 +93,15 @@ export interface AgiBlockerFacts {
   goalId: string;
   /** Host-only wake identity; no message or tool payload is included. */
   chatId?: string | null;
-  progress?: { ownerInputId: string | null; completedToolId: string | null; authority?: string; checkpoint?: string | null };
+  /** Accepted Goal sources only (owner input/control, plan and policy authority). A completed tool id is not progress. */
+  progress?: { ownerInputId: string | null; authority?: string; checkpoint?: string | null };
   /** An admitted provider, observer, or worker already owns this goal's work. */
   repairInFlight?: boolean;
+  /**
+   * Why nothing is due right now although the Goal is not clear: its room or a teammate chat has a turn in flight (chat_busy), or
+   * the host scheduler holds a registered wake for it (host_wait). An open incident is held across this, not closed and reopened.
+   */
+  heldBy?: "chat_busy" | "host_wait";
   /** Exact host schedule transition; not idle time or a retry of an effect. */
   nextWakeAtMs?: number;
   /** Strict action rebase boundary, separate from cost/wake identity. */

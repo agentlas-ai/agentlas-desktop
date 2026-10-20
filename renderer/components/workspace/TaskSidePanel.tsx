@@ -79,6 +79,8 @@ import styles from "./TaskSidePanel.module.css";
 import { AUTOMATION_TAB_OPEN_EVENT, AutomationRailPanel, AutomationTabLiveDot, automationTabRunning, useAutomationChatActivity } from "../automation/AutomationChatActivity";
 import { GOAL_PANEL_OPEN_EVENT, GoalRailPanel, useGoalPanel } from "../goal/GoalPanel";
 import { ArtifactsRailPanel, artifactsRailCount, useArtifactsRail } from "./ArtifactsRailPanel";
+import { EarlierOutputsSection } from "./EarlierOutputsSection";
+import type { OneEarlierOutputsView } from "@/lib/one-earlier-outputs";
 import { LiveDocumentRailPanel, useLiveDocuments } from "../live-document/LiveDocumentRailPanel";
 import { WorkbookView } from "./WorkbookView";
 
@@ -840,6 +842,11 @@ export type TaskSidePanelProps = {
   workerRun?: OneWorkerPanelRun | null;
   onCloseWorker?: () => void;
   items: OneActivityArtifact[];
+  /**
+   * The outputs earlier runs of this conversation saved, drawn as a collapsed "Earlier outputs" section under `items` (the
+   * newest run's own list, which it never changes). Absent for a screen that has none to offer.
+   */
+  earlierOutputs?: OneEarlierOutputsView | null;
   activity?: OneActivityState;
   locale: "ko" | "en";
   visible?: boolean;
@@ -900,6 +907,7 @@ export function TaskSidePanel(props: TaskSidePanelProps) {
 
 function TaskSidePanelContent({
   items,
+  earlierOutputs,
   activity,
   locale,
   visible = items.length > 0,
@@ -1810,6 +1818,7 @@ function TaskSidePanelContent({
             {fileArtifacts.length === 0 && <p className={styles.artifactEmpty}>{locale === "ko" ? "만든 파일 또는 사이트가 여기에 표시됩니다" : "Files or sites you create appear here"}</p>}
             {fileArtifacts.map((item) => <ArtifactPreviewCard key={item.id} item={item} locale={locale} wide={(width ?? defaultWidth) >= 560} />)}
           </OutputDisclosure>
+          {earlierOutputs && <EarlierOutputsSection view={earlierOutputs} locale={locale} />}
           {mcpResults.length > 0 && <OutputDisclosure section="mcp" label={locale === "ko" ? "MCP 결과" : "MCP results"} count={mcpResults.length} expanded={sectionExpanded("mcp")} onToggle={toggleSection}>
             {mcpResults.map((item) => (
               <McpResultPreview
@@ -1849,7 +1858,7 @@ function TaskSidePanelContent({
         {railView === "automation" && <AutomationRailPanel snapshot={automationSnapshot} locale={locale} />}
         {railView === "goal" && <GoalRailPanel view={goalPanel.view} locale={locale} onView={goalPanel.replace} />}
         {railView === "document" && <LiveDocumentRailPanel chatId={screenChatId ?? null} locale={locale} focusSessionId={liveDocumentFocus} />}
-        {railView === "artifacts" && <ArtifactsRailPanel chatId={screenChatId ?? null} locale={locale} items={items} files={artifactsRail.files} visuals={artifactsRail.visuals}
+        {railView === "artifacts" && <ArtifactsRailPanel chatId={screenChatId ?? null} locale={locale} items={items} earlier={earlierOutputs} files={artifactsRail.files} visuals={artifactsRail.visuals}
           opened={artifactsRail.opened} onOpenVisual={artifactsRail.setOpened} onBack={() => artifactsRail.setOpened(null)} />}
         {railView === "screen" && (
           <RailAgentScreen

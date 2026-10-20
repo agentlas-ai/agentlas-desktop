@@ -101,6 +101,7 @@ export function automationStrategyProposalView(proposal: AutomationStrategyPropo
     rationale: proposal.rationale,
     requiresPaymentApproval: proposal.requiresPaymentApproval,
     reviewState: proposal.adjudication.status,
+    reviewAuthorization: proposal.adjudication.status === "judged" ? proposal.adjudication.authorization : null,
     reviewReason: proposal.adjudication.status === "judged" ? proposal.adjudication.reason : null,
     changes,
     ...applicability,

@@ -15,6 +15,7 @@ import {
   type TriggerEventRecord,
   type TriggerEventPayload,
 } from "../store/trigger-events";
+import { requiresGraphReconciliation as effectsNeedReconciliation } from "../automation-strategy-cycle";
 
 export type TriggerEventRunFn = (
   automationId: string,
@@ -28,9 +29,11 @@ const IDLE_PUMP_MS = 30_000;
 const BUSY_RETRY_MS = 5_000;
 const MAX_DRAIN_BATCH = 32;
 
+// One matcher with the scheduler. This file kept its own copy without the kernel's MUTATION_UNVERIFIED, so a
+// held command occurrence was redelivered again and again instead of parked: every redelivery added a judgment, a
+// reflection and a doctor run, while only the owner's choice could release it.
 function requiresGraphReconciliation(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error ?? "");
-  return /automation_(?:ambiguous_side_effect|partial_reconciliation_required|partial_graph_changed)/i.test(message);
+  return effectsNeedReconciliation(error instanceof Error ? error.message : String(error ?? ""));
 }
 
 let runFn: TriggerEventRunFn | null = null;
@@ -122,7 +125,7 @@ async function deliverClaimedEvent(event: TriggerEventRecord, run: TriggerEventR
       }
       return;
     }
-    if (requiresGraphReconciliation(result.error)) {
+    if (result.effectsUnconfirmed === true || requiresGraphReconciliation(result.error)) {
       if (!parkTriggerEventClaim(
         event.id,
         OWNER,

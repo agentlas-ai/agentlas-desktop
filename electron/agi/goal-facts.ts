@@ -44,6 +44,12 @@ export interface AgiGoalFactsDeps {
   runReceipt?(runId: string): AgiTurnReceipt | null;
   /** The chat has a turn in flight right now: the goal owns its step. */
   chatBusy?(chatId: string): boolean;
+  /**
+   * Chats a room's teammates work in (child conversations whose parent is the room). A Goal whose teammates are working is
+   * not stalled even while its own chat is idle; without this the stall detector read their work as `self_hold` and the AGI
+   * kept starting model attempts on a room that was waiting for its team.
+   */
+  childChatIds?(chatId: string): readonly string[];
   /** goal-continuation-hold parked the continuation row on needs_input. */
   continuationParkedForOwner?(goalId: string): boolean;
   /** A pending tool approval in the goal chat (an owner consent, surfaced by its own card). */
@@ -208,27 +214,17 @@ function receiptSignal(code: string, runId: string | null): AgiBlockerSignal {
   return { kind: "run_failed", code, runId };
 }
 
-/** Only accepted Goal sources and in-scope host receipts wake a spent incident. Role=user and chat-wide
- * tool history are not provenance. Version, heartbeat, diagnostic notices and retry timestamps are excluded. */
+/** Only accepted Goal sources (owner input, owner control, plan/policy authority) wake a spent incident. Role=user and chat-wide
+ * tool history are not provenance. Version, heartbeat, diagnostic notices, retry timestamps and completed tool calls are excluded:
+ * the id of the newest completed worker tool used to be part of the progress key, so every tool a teammate finished was a "new
+ * blocked state" with no retry history (one Goal opened a new incident for each of them). Whether the work moved is the host stall
+ * detector's call (stall_streak), not a tool id. */
 function wakeState(db: Database.Database, run: AgiGoalRow, nowMs: number): Pick<AgiBlockerFacts, "progress" | "nextWakeAtMs" | "fenceState"> {
   const revision = tableExists(db, "chat_goal_revisions") ? db.prepare(
     "SELECT revision,source_message_id,payload_json,created_at FROM chat_goal_revisions WHERE goal_id=? ORDER BY revision DESC LIMIT 1")
     .get(run.goalId) as { revision: number; source_message_id: string; payload_json: string; created_at: string } | undefined : undefined;
   const control = db.prepare("SELECT seq FROM long_run_events WHERE run_id=? AND kind='run.user_control' AND actor_kind='user' ORDER BY seq DESC LIMIT 1")
     .get(run.id) as { seq: number } | undefined;
-  // Newest completed worker effect since the revision. Read per kind so each walks
-  // idx_run_events_chat_kind_ts backwards and stops at the first match; the IN-list form
-  // sorted every tool event of the room (28k in Youtube launch) on each monitor tick.
-  const completedEffect = (kind: string, extra: string) => db.prepare(`SELECT e.id, e.ts, e.seq FROM run_events e
-    WHERE e.chat_id=? AND e.kind=? AND e.ts>=? ${extra}
-    AND EXISTS(SELECT 1 FROM long_run_worker_attempts a WHERE a.run_id=? AND a.invocation_run_id=e.run_id)
-    ORDER BY e.ts DESC,e.seq DESC LIMIT 1`).get(run.rootChatId, kind, revision?.created_at ?? "", run.id) as { id: string; ts: string; seq: number } | undefined;
-  const complete = tableExists(db, "run_events") && tableExists(db, "long_run_worker_attempts") ? (() => {
-    const boundary = completedEffect("runtime_effect_boundary", "");
-    const tool = completedEffect("mcp_tool-use", "AND json_extract(e.payload_json,'$.toolCompleted')=1");
-    if (!boundary || !tool) return boundary ?? tool;
-    return tool.ts > boundary.ts || tool.ts === boundary.ts && tool.seq > boundary.seq ? tool : boundary;
-  })() : undefined;
   // Column selection permits older schema fixtures without treating a timestamp as a policy change.
   const row = (table: string, names: string[], where: string, args: unknown[]) => {
     if (!tableExists(db, table)) return [];
@@ -270,10 +266,34 @@ function wakeState(db: Database.Database, run: AgiGoalRow, nowMs: number): Pick<
     cost_used_usd: _cost, host_owner_kind: _host, ...policy }) => policy);
   const authority = createHash("sha256").update(JSON.stringify({ revision: revision?.payload_json ?? null, planHead, owner: ownerPolicy, chat, pool,
     schedules: schedules.map(({ id, enabled }) => ({ id, enabled })) })).digest("hex");
-  return { progress: { ownerInputId: `${revision?.source_message_id ?? ""}:${control?.seq ?? ""}`,
-    completedToolId: complete?.id ?? null, checkpoint: null, authority },
+  return { progress: { ownerInputId: `${revision?.source_message_id ?? ""}:${control?.seq ?? ""}`, checkpoint: null, authority },
     fenceState: String(boundaryEvent?.seq ?? ""),
     nextWakeAtMs: Math.min(...[...dates, retryAt].filter(at => Number.isFinite(at) && at > nowMs)) };
+}
+
+/**
+ * The Goal's newest wait subscription when it is a live wake the host scheduler owns: pending or claimed, for this Goal, run, room and
+ * the current Goal revision (recoveryMode = the host's own stall recovery, wait-subscriptions.ts registerOngoingGoalCycle). Malformed or
+ * superseded rows are not a registered wake.
+ */
+function registeredHostWait(db: Database.Database, run: AgiGoalRow, goalRevision?: number | null): { waitId: string; recoveryMode: string | null } | null {
+  let current = goalRevision;
+  if (current === undefined) {
+    if (!tableExists(db, "chat_goal_revisions")) return null;
+    current = (db.prepare("SELECT MAX(revision) revision FROM chat_goal_revisions WHERE goal_id=?").get(run.goalId) as { revision: number | null }).revision;
+  }
+  if (current === null || current === undefined) return null;
+  const wait = db.prepare("SELECT payload_json FROM long_run_events WHERE run_id=? AND kind='run.wait_subscription' ORDER BY seq DESC LIMIT 1")
+    .get(run.id) as { payload_json: string } | undefined;
+  if (!wait) return null;
+  try {
+    const subscription = JSON.parse(wait.payload_json)?.subscription;
+    if (subscription?.goalId === run.goalId && subscription.runId === run.id && subscription.chatId === run.rootChatId
+      && subscription.goalRevision === current && ["pending", "claimed"].includes(subscription.state)) {
+      return { waitId: String(subscription.waitId ?? ""), recoveryMode: typeof subscription.recoveryMode === "string" ? subscription.recoveryMode : null };
+    }
+  } catch { /* malformed is not a registered wake */ }
+  return null;
 }
 
 /** A typed unscheduled result is a current condition, even when the host's
@@ -294,13 +314,7 @@ function currentUnscheduledRest(db: Database.Database, run: AgiGoalRow): { code:
   const revision = db.prepare("SELECT MAX(revision) revision FROM chat_goal_revisions WHERE goal_id=?")
     .get(run.goalId) as { revision: number | null };
   if (!bound?.revision || bound.revision !== revision.revision) return null;
-  const wait = db.prepare("SELECT payload_json FROM long_run_events WHERE run_id=? AND kind='run.wait_subscription' ORDER BY seq DESC LIMIT 1")
-    .get(run.id) as { payload_json: string } | undefined;
-  if (wait) { try {
-    const subscription = JSON.parse(wait.payload_json)?.subscription;
-    if (subscription?.goalId === run.goalId && subscription.runId === run.id && subscription.chatId === run.rootChatId
-      && subscription.goalRevision === revision.revision && ["pending", "claimed"].includes(subscription.state)) return null;
-  } catch { /* malformed is not a registered wake */ } }
+  if (registeredHostWait(db, run, revision.revision)) return null;
   const event = db.prepare(`SELECT id,kind,payload_json FROM run_events WHERE run_id=? AND chat_id=?
     AND kind IN ('goal_wait_refused','goal_wait_registered') ORDER BY seq DESC LIMIT 1`)
     .get(worker.invocationRunId, run.rootChatId) as { id: string; kind: string; payload_json: string } | undefined;
@@ -320,7 +334,9 @@ export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): Agi
   const signals: AgiBlockerSignal[] = [];
   const refs: string[] = [];
   const heldByOwner = (run.status === "paused" && run.pauseReason === "user") || ownerHold(db, run.id);
-  const busy = run.rootChatId ? deps.chatBusy?.(run.rootChatId) === true : false;
+  const busy = run.rootChatId
+    ? deps.chatBusy?.(run.rootChatId) === true || (deps.childChatIds?.(run.rootChatId) ?? []).some((child) => deps.chatBusy?.(child) === true)
+    : false;
   const terminal = ["completed", "failed", "cancelled", "cancelling"].includes(run.status);
   const latest = goalTurnReceipt(deps, run.id, run.rootChatId);
   if (heldByOwner && !terminal) signals.push({ kind: "owner_pause" });
@@ -367,13 +383,20 @@ export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): Agi
   const quiet = !terminal && !heldByOwner && run.status === "waiting_tool" && quietBaseline !== null
     && !signals.some(signal => ["owner_pause", "boundary", "needs_input", "host_pause"].includes(signal.kind))
     && quietBaseline === episodeFactSignature(deps.db, run.id, run.rootChatId, signals, refs, latest ?? null);
-  return { goalId, chatId: run.rootChatId, ...wake,
+  // One owner for a stall. While the host scheduler holds a registered wake for this Goal (its own stall recovery wait, or the episode
+  // wait the Goal registered), the next step and its spacing are the host's: continueGoalForAlive defers a work turn with
+  // wait_owns_next_step, and an AGI model attempt on top of it only re-dispatches the same tactic.
+  // The stall stays a host fact; it is not an AGI incident. Applied after the quiet baseline so that comparison is unchanged.
+  const hostWait = !terminal && !heldByOwner && !busy && signals.some(signal => signal.kind === "stall_detected") ? registeredHostWait(db, run) : null;
+  const current = quiet ? [] : hostWait ? signals.filter(signal => signal.kind !== "stall_detected") : signals;
+  const heldBy: AgiBlockerFacts["heldBy"] = terminal || heldByOwner ? undefined : busy ? "chat_busy" : hostWait ? "host_wait" : undefined;
+  return { goalId, chatId: run.rootChatId, ...wake, ...(heldBy ? { heldBy } : {}),
     fenceState: JSON.stringify([wake.fenceState, latest?.runId ?? null, latest?.status ?? null, plan.readiness?.mutationIdentity ?? null]),
     repairInFlight: busy || isGoalObserving(goalId), runId: run.id, runVersion: run.version, status: busy && !terminal && !heldByOwner ? "running" : run.status,
     pauseReason: run.pauseReason, blockedReason: run.blockedReason,
     // Audit rows and evidence refs remain intact. Only baseline blockers already
     // superseded by this exact registered wait leave the current diagnosis.
-    signals: quiet ? [] : signals, tactics: plan.tactics, planReadiness: plan.readiness,
+    signals: current, tactics: plan.tactics, planReadiness: plan.readiness,
     blockedNodeId: plan.blockedNodeId, evidenceRefs: refs, continuationAutomation: hasContinuationAutomation(db, goalId) };
 }
 

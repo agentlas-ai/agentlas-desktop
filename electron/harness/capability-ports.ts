@@ -235,14 +235,14 @@ async function skillRows(): Promise<SkillRow[]> {
 const MAX_SKILL_READ_BYTES = 512 * 1024;
 
 for (const workflow of ["document", "sheet", "slides"]) registerDeclaredPromptModule({
-  id: `plugin.office.skill.${workflow}`, revision: 1, stability: "versioned-content", changeTriggers: ["release", "skill-package"], order: 0,
+  id: `plugin.office.skill.${workflow}`, revision: 2, stability: "versioned-content", changeTriggers: ["release", "skill-package"], order: 0,
 });
 
 function composeInstalledSkillContent(skillId: string, content: string): string {
   const workflow = ["document", "sheet", "slides"].find((name) => skillId === `plugin:office/${name}`);
   if (!workflow) return composeFinanceSkillContent(skillId, content);
   if (!content.trim()) return content;
-  return composeDeclaredPrompt([{ id: `plugin.office.skill.${workflow}`, revision: 1,
+  return composeDeclaredPrompt([{ id: `plugin.office.skill.${workflow}`, revision: 2,
     stability: "versioned-content", changeTriggers: ["release", "skill-package"], order: 0, text: content }]);
 }
 
@@ -1141,7 +1141,7 @@ const PORTS: PortDefinition[] = [
     inputSchema: LIVE_DOCUMENT_SCHEMAS.read, handler: async (args, ctx) => (await import("../live-document/ports")).documentRead(args, ctx) },
   { operationId: "document.apply", kind: "command", purpose: "Edit a live document in its original format, all-or-nothing: set_cell, add_sheet, rename_sheet, delete_sheet, set_number_format, add_chart, set_text, insert_text, insert_paragraph, insert_table (docx/hwpx, or on a pptx slide: after = the slide id), delete_block, add_slide, delete_slide, set_notes (pptx speaker notes), set_format (bold/italic/underline/size/color/align/fill, heading), insert_table widths; the owner sees each edit typed.", required: ["sessionId", "ops"],
     inputSchema: LIVE_DOCUMENT_SCHEMAS.apply, handler: async (args, ctx) => (await import("../live-document/ports")).documentApply(args, ctx) },
-  { operationId: "document.render", kind: "query", purpose: "Photograph an open document's slides, pages or sheets as PNG images to check its layout: text running out of its box, overlapping boxes, a table off the page. Returns each image (shown to you where your runtime reads images) and the boxes that overflow. Agentlas's own layout of the saved document, not Office's.", required: ["sessionId"],
+  { operationId: "document.render", kind: "query", purpose: "Photograph an open document's slides, pages or sheets as PNG images to check its layout: text running out of its box, overlapping boxes, a table off the page. At most 4 per call (from/count; the reply's next says where to continue). Returns each image (shown to you where your runtime reads images) and the boxes that overflow. Agentlas's own layout of the document's current working state, unsaved edits included, not Office's.", required: ["sessionId"],
     inputSchema: LIVE_DOCUMENT_SCHEMAS.render, handler: async (args, ctx) => (await import("../live-document/ports")).documentRender(args, ctx) },
   { operationId: "document.save", kind: "command", purpose: "Write a live document back to its file in the original format (refused if the file changed on disk meanwhile).", required: ["sessionId"],
     inputSchema: LIVE_DOCUMENT_SCHEMAS.save, handler: async (args, ctx) => (await import("../live-document/ports")).documentSave(args, ctx) },

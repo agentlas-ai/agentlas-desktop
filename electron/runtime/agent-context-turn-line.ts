@@ -164,7 +164,12 @@ export function createTurnLine(ports: TurnLinePorts) {
     function write(): void {
       if (released) return;
       writtenAt = now(); writtenParked = parked ? parked.kind : null;
-      try { ports.db().prepare("UPDATE meta SET value = ? WHERE key = ?").run(JSON.stringify(place()), key); } catch { /* the next tick writes it again */ }
+      try {
+        const wrote = ports.db().prepare("UPDATE meta SET value = ? WHERE key = ?").run(JSON.stringify(place()), key);
+        // The place is gone: an observer read a long gap in this holder's beat (a suspended machine, failing writes) as a death and
+        // removed it while the turn is still running. Take a place again, at the end of the line, so the next waiter sees this turn.
+        if (wrote.changes === 0) key = insert();
+      } catch { /* the next tick writes it again */ }
     }
     function tick(): void {
       if (released) return;

@@ -108,8 +108,10 @@ function agiSuggestions(goalId: string): GoalPanelSuggestion[] {
 
 function openIncident(goalId: string): { attempts: number } | null {
   if (!tableExists("agi_incidents")) return null;
-  const row = getDb().prepare("SELECT attempts FROM agi_incidents WHERE goal_id = ? AND status = 'open' ORDER BY updated_at_ms DESC LIMIT 1")
-    .get(goalId) as { attempts: number } | undefined;
+  // A held incident (the Goal's own work or the host scheduler has the next step, electron/agi/monitor.ts) is not AGI working now.
+  const held = (getDb().prepare("PRAGMA table_info(agi_incidents)").all() as Array<{ name: string }>).some((column) => column.name === "held_reason");
+  const row = getDb().prepare(`SELECT attempts FROM agi_incidents WHERE goal_id = ? AND status = 'open' ${held ? "AND held_reason IS NULL" : ""}
+    ORDER BY updated_at_ms DESC LIMIT 1`).get(goalId) as { attempts: number } | undefined;
   return row ? { attempts: row.attempts } : null;
 }
 

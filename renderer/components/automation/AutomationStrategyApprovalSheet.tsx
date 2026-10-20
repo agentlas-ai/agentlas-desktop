@@ -209,7 +209,7 @@ export function AutomationStrategyApprovalSheet({ chatId = null }: { chatId?: st
   async function review(row: AutomationStrategyProposalView, decision: "apply" | "reject", draft?: GoalAmendmentDraft) {
     const api = ipc();
     if (!api || busy) return;
-    if (decision === "apply" && !row.canApply && !row.goalAmendmentRequired) {
+    if (decision === "apply" && !requiresAutomationStrategyReview(row)) {
       setError(unavailableReason(row, ko) ?? (ko ? "현재는 적용할 수 없는 제안입니다." : "This proposal is not currently applicable."));
       return;
     }
@@ -261,19 +261,29 @@ export function AutomationStrategyApprovalSheet({ chatId = null }: { chatId?: st
     }
   }
 
-  if (!candidate) return null;
+  if (!candidate || !requiresAutomationStrategyReview(candidate)) return null;
   const draft = amendmentFor(candidate);
   const reason = unavailableReason(candidate, ko);
   const hasNext = pendingRows.some((row) => row.id !== candidate.id);
+  const payment = candidate.requiresPaymentApproval;
+  const originDelegation = candidate.goalOwnershipUnverified && !candidate.originAdoptionRecorded;
+  const approvalLabel = payment
+    ? (ko ? "결제 승인 필요" : "Payment approval needed")
+    : originDelegation ? (ko ? "전략 위임 확인 필요" : "Strategy delegation confirmation needed")
+      : (ko ? "전략 변경 승인 필요" : "Strategy change approval needed");
+  const approvalTitle = payment
+    ? (ko ? "결제가 필요한 전략 변경" : "A strategy change needs payment approval")
+    : originDelegation ? (ko ? "전략 변경을 위임하고 적용" : "Delegate and apply strategy revisions")
+      : (ko ? "전략 변경을 확인해 주세요" : "Review this strategy change");
 
   return (
     <ComposerDecisionPortal enabled>
-      <div className={styles.wrap} data-testid="automation-strategy-approval-sheet" role="alertdialog" aria-live="assertive" aria-label={ko ? "전략 변경 승인 필요" : "Strategy change approval needed"}>
+      <div className={styles.wrap} data-composer-decision-card="true" data-testid="automation-strategy-approval-sheet" role="alertdialog" aria-live="assertive" aria-label={approvalLabel}>
         <section className={styles.sheet}>
           <div className={styles.head}>
             <div className={styles.headCopy}>
-              <span className={styles.kicker}><IconCircleDollar size={14} />{ko ? "결제 승인 필요" : "Payment approval needed"}</span>
-              <h2>{ko ? "결제가 필요한 전략 변경" : "A strategy change needs payment approval"}</h2>
+              <span className={styles.kicker}>{payment ? <IconCircleDollar size={14} /> : <IconLayers size={14} />}{approvalLabel}</span>
+              <h2>{approvalTitle}</h2>
               <p>{candidate.automationName || (ko ? "자동화" : "Automation")}{hasNext && ` · ${ko ? `대기 ${pendingRows.length}건` : `${pendingRows.length} waiting`}`}</p>
             </div>
             <button type="button" className={styles.close} onClick={() => dismiss()} aria-label={ko ? "나중에 확인" : "Review later"}>×</button>

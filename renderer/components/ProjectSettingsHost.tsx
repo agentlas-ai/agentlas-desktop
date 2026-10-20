@@ -4,8 +4,10 @@ import { useEffect, useState } from "react";
 import { PROJECT_SETTINGS_EVENT, type ProjectSettingsRequest } from "@/lib/project-settings";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
-import { ProjectSettingsModal } from "./ProjectSettingsModal";
+import dynamic from "next/dynamic";
 import styles from "./ProjectSettingsModal.module.css";
+
+const ProjectSettingsModal = dynamic(() => import("./ProjectSettingsModal").then((module) => module.ProjectSettingsModal), { ssr: false });
 
 export function ProjectSettingsHost() {
   const { locale } = useT();

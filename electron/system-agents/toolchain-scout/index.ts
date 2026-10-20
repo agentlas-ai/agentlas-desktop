@@ -42,7 +42,7 @@ export const TOOLCHAIN_SCOUT_PROVIDER_SCHEMA = {
 
 /**
  * Background judgment for the repeated-work detector (electron/toolchains/detector.ts). The host has already proven
- * recurrence (sentence cluster, shared tool steps, separate days); the model decides only meaning: is this one reusable
+ * recurrence (sentence cluster, agreeing tool flow, enough distinct runs and sentences); the model decides only meaning: is this one reusable
  * behavior, and if so how to ask the generalizer for it. Varying topics and dates remain inputs rather than
  * becoming the identity of separate saved capabilities.
  */

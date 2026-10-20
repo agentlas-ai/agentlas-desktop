@@ -6,6 +6,7 @@ import {
   type AutomationStrategyGoalAmendmentInput,
 } from "./store/automation-strategy-proposals";
 import { reviewAutomationStrategyProposal } from "./automation-strategy-review";
+import { AppControlError, isAppControlEvent } from "./app-control/ipc-registry";
 
 function parseGoalAmendment(value: unknown): AutomationStrategyGoalAmendmentInput | undefined | null {
   if (value === undefined) return undefined;
@@ -54,6 +55,11 @@ export function registerAutomationStrategyIpc(deps: {
     const goalAmendment = parseGoalAmendment(value.goalAmendment);
     if (goalAmendment === null || (value.decision === "reject" && goalAmendment !== undefined)) {
       return { ok: false, code: "not_applicable" };
+    }
+    // A model's app.call reuses a trusted renderer event, but it cannot supply
+    // the person's explicit strategy approval, even on an owner-authored turn.
+    if (value.decision === "apply" && isAppControlEvent(event)) {
+      throw new AppControlError("needs-owner-approval", "Applying this strategy requires approval in the Agentlas review surface.");
     }
     try {
       const proposal = await reviewAutomationStrategyProposal({

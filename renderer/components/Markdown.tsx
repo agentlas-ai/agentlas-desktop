@@ -740,7 +740,12 @@ const CODE_KEYWORDS = new Set(
 );
 const CODE_TOKEN =
   /(\/\/[^\n]*|#[^\n]*|\/\*[\s\S]*?\*\/)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|(\b\d[\w.]*)|([A-Za-z_$][\w$]*)/g;
+// Large generated files can produce tens of thousands of syntax spans on each
+// delta. Keep their complete selectable/copyable text in one node; normal
+// snippets retain live coloring, including while their fence is unfinished.
+const MAX_INLINE_HIGHLIGHT_LENGTH = 24_000;
 function highlightCode(code: string): React.ReactNode[] {
+  if (code.length > MAX_INLINE_HIGHLIGHT_LENGTH) return [code];
   const out: React.ReactNode[] = [];
   let last = 0;
   let m: RegExpExecArray | null;
@@ -775,6 +780,7 @@ function CodeBlock({
   t?: ReturnType<typeof useT>["t"];
 }) {
   const linesCount = block.code.split("\n").length;
+  const highlightedCode = useMemo(() => highlightCode(block.code), [block.code]);
   const label = (key: Parameters<NonNullable<typeof t>>[0], vars?: Record<string, string | number>) =>
     t ? t(key, vars) : String(vars?.count ?? "");
   /*
@@ -903,7 +909,7 @@ function CodeBlock({
             minWidth: 0,
           }}
         >
-          {highlightCode(block.code)}
+          {highlightedCode}
         </pre>
       </div>
     </div>

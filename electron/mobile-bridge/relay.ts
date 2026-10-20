@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -134,6 +134,7 @@ interface RelaySocketOptions {
   perMessageDeflate?: boolean;
   ca?: string;
   rejectUnauthorized?: boolean;
+  checkServerIdentity?: (host: string, presented: { raw?: Buffer }) => Error | undefined;
 }
 
 interface RelaySocketConstructor {
@@ -294,6 +295,20 @@ function relayUrl(endpoint: string, params: Record<string, string>): string {
 function certificatePem(certificateDer: string): string {
   const lines = certificateDer.match(/.{1,64}/g)?.join("\n") ?? certificateDer;
   return `-----BEGIN CERTIFICATE-----\n${lines}\n-----END CERTIFICATE-----\n`;
+}
+
+/**
+ * The local hop talks to this Desktop's own bridge, so it trusts exactly one certificate. That certificate's
+ * names are frozen when it is created, while a DHCP lease can move the LAN address the bridge listens on, which
+ * made the name check fail for every tunnel. Identity is the pinned certificate itself: the chain check still
+ * runs against `ca`, and this replaces only the name check with an exact SHA-256 match of the presented certificate.
+ */
+function pinnedCertificateIdentity(certificateDer: string) {
+  const expected = createHash("sha256").update(Buffer.from(certificateDer, "base64")).digest("hex");
+  return (_host: string, presented: { raw?: Buffer }): Error | undefined => {
+    const actual = presented?.raw ? createHash("sha256").update(presented.raw).digest("hex") : null;
+    return actual === expected ? undefined : new Error("local hop certificate does not match the pinned Desktop certificate");
+  };
 }
 
 function rawBytes(data: unknown): number {
@@ -731,6 +746,7 @@ export class MobileBridgeCloudRelay {
         perMessageDeflate: false,
         ca: certificatePem(this.options.certificateDer),
         rejectUnauthorized: true,
+        checkServerIdentity: pinnedCertificateIdentity(this.options.certificateDer),
       });
       local.on("open", () => {
         for (const frame of pending) local?.send(frame.data, { binary: frame.binary });

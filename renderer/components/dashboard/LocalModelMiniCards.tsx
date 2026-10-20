@@ -20,8 +20,8 @@ export function useLocalModelSnapshot(): { snapshot: LocalModelHubSnapshot | nul
     try { const value = await ipc()?.localModelHub.snapshot(); if (mounted.current && value) setSnapshot(value); }
     catch { /* 읽기 실패는 "모델 없음"이 아니다 — 이전 표시를 유지한다 */ }
   }, []);
-  useEffect(() => { mounted.current = true; void refresh(); return () => { mounted.current = false; }; }, [refresh]);
-  useVisibleInterval(() => void refresh(), 15_000);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, [refresh]);
+  useVisibleInterval(() => refresh(), 15_000, { initial: refresh });
   return { snapshot, refresh };
 }
 

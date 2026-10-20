@@ -1,6 +1,8 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc, ipcEvents } from "@/lib/ipc";
+import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
+import { createStoreChangeThrottle } from "@/lib/store-change-policy";
 import { ONE_CHECKIN_LIMITS, type OneCheckin, type SupervisorCheckinInput } from "@shared/one-supervisor";
 import { OneBottomSheet } from "./OneBottomSheet";
 import styles from "./PersonalOneCapabilities.module.css";
@@ -43,7 +45,15 @@ export function PersonalOneCheckins({open,oneId,locale,onClose,onRefresh}:{open:
       }
     }catch{if(generation===current.current)setStatus(copy("현재 감시 상태를 확인하지 못했습니다. 마지막 관측을 표시합니다.","Current monitoring state could not be confirmed. Showing the last observation."));}
   },[oneId,storageKey,locale]);
-  useEffect(()=>{if(!open)return;void load();const off=ipcEvents()?.onStoreChanged?.(()=>void load());return()=>{++current.current;off?.();};},[open,load]);
+  useEffect(()=>{
+    if(!open)return;
+    const reads=createCoalescedRefresh<void>(load,()=>undefined);
+    const refresh=()=>{if(document.visibilityState!=="hidden")void reads.request(undefined);};
+    const changes=createStoreChangeThrottle({immediate:()=>false,throttleMs:1_000,run:refresh});
+    refresh();const off=ipcEvents()?.onStoreChanged?.(change=>changes.notify(change));
+    document.addEventListener("visibilitychange",refresh);
+    return()=>{++current.current;changes.dispose();reads.dispose();off?.();document.removeEventListener("visibilitychange",refresh);};
+  },[open,load]);
   const submit=async(input:Omit<SupervisorCheckinInput,"commandId">|SupervisorCheckinInput)=>{
     if((busy&&input.action!=="cancel")||!oneId||!storageKey)return;
     const request:SupervisorCheckinInput="commandId" in input?input:{...input,oneId,commandId:crypto.randomUUID()};

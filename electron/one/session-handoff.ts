@@ -71,6 +71,19 @@ export function teamDispatchReceiverCurrent(source: { roomChatId: string; parent
     return authorized && sameOwner(owner);
   } catch { return false; }
 }
+/**
+ * The journals a dispatch child's turns went to: its own two old domains, and the domain its member's seat scope assigned (a roster
+ * member's dispatch child writes to the member's session, which may carry another conversation's domain string; runtime/session-scope.ts).
+ * Reading only. The scope module is read when needed, like this file's other collaborators; without it (or when it cannot read) the
+ * answer is the two old domains, which is what this lookup always used.
+ */
+function childJournalDomains(db: ReturnType<typeof getDb>, ownerScope: string, roomChatId: string, childChatId: string, memberAgentId: string): string[] {
+  const own = [`one-team:${roomChatId}:session:${childChatId}`, `chat:${childChatId}`];
+  try {
+    const { journalDomainsOfConversation } = require("../runtime/session-scope") as typeof import("../runtime/session-scope");
+    return [...new Set([...own, ...journalDomainsOfConversation(db, { ownerScope, agentId: memberAgentId, chatId: childChatId, kind: "division", parentChatId: roomChatId })])];
+  } catch { return own; }
+}
 type ReadResult = { allowed: true; digest: TurnDigest | null; brief: string }
   | { allowed: false; reason: NonNullable<TeamSessionHandoff["withheldReason"]> };
 function readRecordedTurnDigest(source: TeamHandoffSource): ReadResult {
@@ -104,11 +117,12 @@ function readRecordedTurnDigest(source: TeamHandoffSource): ReadResult {
     // Query custody metadata before selecting any summary. A known foreign
     // source can never fall back to the retained body under a different owner.
     const hasJournal = !!db.prepare("SELECT 1 FROM sqlite_master WHERE name='agent_context_heads'").get();
+    const domains = childJournalDomains(db, owner.ownerScope, source.roomChatId, recorded.child_chat_id, recorded.member_agent_id);
+    const marks = domains.map(() => "?").join(",");
     const owners = hasJournal ? db.prepare(`SELECT DISTINCT json_extract(h.identity_json,'$.ownerScope') AS owner
       FROM agent_context_heads h JOIN agent_context_deliveries d ON d.context_key=h.context_key
-      WHERE json_extract(h.identity_json,'$.agentId')=? AND json_extract(h.identity_json,'$.visibilityDomain') IN (?,?)
-        AND ${runWhere}`).all(recorded.member_agent_id,`one-team:${source.roomChatId}:session:${recorded.child_chat_id}`,
-          `chat:${recorded.child_chat_id}`,...runArgs) as Array<{owner:unknown}> : [];
+      WHERE json_extract(h.identity_json,'$.agentId')=? AND json_extract(h.identity_json,'$.visibilityDomain') IN (${marks})
+        AND ${runWhere}`).all(recorded.member_agent_id,...domains,...runArgs) as Array<{owner:unknown}> : [];
     if (owners.some(row => row.owner !== owner.ownerScope)) return {allowed:false,reason:"owner_mismatch"};
     const receiverBound = recorded.owner_scope === owner.ownerScope || legacyReceiverBound(source.roomChatId,recorded.parent_run_id);
     if (!receiverBound) return {allowed:false,reason:"receiver_unbound"};
@@ -119,12 +133,11 @@ function readRecordedTurnDigest(source: TeamHandoffSource): ReadResult {
         JOIN agent_context_deliveries d ON d.context_key=e.context_key AND e.producer_binding=d.binding_key
           AND e.event_id='turn:'||d.turn_id||':output'
         WHERE e.kind='message' AND json_extract(h.identity_json,'$.ownerScope')=?
-          AND json_extract(h.identity_json,'$.agentId')=? AND json_extract(h.identity_json,'$.visibilityDomain') IN (?,?)
+          AND json_extract(h.identity_json,'$.agentId')=? AND json_extract(h.identity_json,'$.visibilityDomain') IN (${marks})
           AND json_extract(e.payload_json,'$.turnSummarySource')='emitter'
           AND json_extract(e.payload_json,'$.role')='assistant' AND json_extract(e.payload_json,'$.turnId')=d.turn_id
           AND d.status='acknowledged' AND d.receipt_id='completed:'||d.turn_id AND ${runWhere}
-        ORDER BY h.updated_at DESC,e.seq DESC LIMIT 8`).all(owner.ownerScope,recorded.member_agent_id,
-          `one-team:${source.roomChatId}:session:${recorded.child_chat_id}`,`chat:${recorded.child_chat_id}`,...runArgs) as
+        ORDER BY h.updated_at DESC,e.seq DESC LIMIT 8`).all(owner.ownerScope,recorded.member_agent_id,...domains,...runArgs) as
           Array<{event_id:string;summary:unknown;turn_id:string}>;
       for (const row of rows) {
         if (typeof row.summary === "string" && row.summary.trim() && jsonBytes(row.summary) <= 1024

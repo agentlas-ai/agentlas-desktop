@@ -143,7 +143,16 @@ export function getRuntimeSession(
   const own = readOwnRuntimeSession(chatId, kind, agentId, options);
   const agent = normalizeAgentId(agentId);
   if (!agent.startsWith(SHARED_OWNER_PREFIX)) return own;
-  try { return sharedOwnerRow(chatId, kind, agent, own) ?? own; } catch { return own; }
+  try {
+    const row = sharedOwnerRow(chatId, kind, agent, own) ?? own;
+    // The other process may have cleared this conversation's pointer (a failed resume, /clear) while this process still remembers the
+    // old session. A row written at or before the clear is not resumed, whichever memory it comes from.
+    if (row && (row.updatedAt ?? "") <= clearedSince(chatId, kind, agent)) {
+      memSessions.delete(memKey(chatId, kind, agent));
+      return null;
+    }
+    return row;
+  } catch { return own; }
 }
 
 function readOwnRuntimeSession(

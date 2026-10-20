@@ -2,7 +2,7 @@
 // 기획안 비평 5번(통제의 대가): 키 사망은 가장 흔한 실패인데 화면에서 미설계였다. 이 컴포넌트가
 // usage.snapshot() 실측에서 상태를 도출해 정상은 헤더 pill, 한도임박/오류는 배너로 책임진다.
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
@@ -43,10 +43,7 @@ export function KeyStatusBanner({
   }, []);
 
   // 초기 1회 load는 유지, 주기 폴링(60s)은 탭 보일 때만 — useVisibleInterval이 hidden 시 정지.
-  useEffect(() => {
-    void load();
-  }, [load]);
-  useVisibleInterval(() => void load(), REFRESH_MS);
+  useVisibleInterval(() => load(), REFRESH_MS, { initial: load });
 
   const status = deriveKeyStatus(snapshot, relevantRuntime === undefined
     ? undefined

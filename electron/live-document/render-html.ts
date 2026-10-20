@@ -1,4 +1,4 @@
-import { cellAddress, parseCellAddress, type LiveDocumentModel, type LiveFlowBlock, type LiveFormat, type LivePage, type LiveShape, type LiveSlide } from "../../shared/live-document";
+import { cellAddress, LIVE_DOCUMENT_RENDER_LIMITS, parseCellAddress, type LiveDocumentModel, type LiveFlowBlock, type LiveFormat, type LivePage, type LiveShape, type LiveSlide } from "../../shared/live-document";
 
 /*
  * Standalone HTML for each page of a live document, laid out the way the Document tab lays it out (the same shape boxes,
@@ -17,6 +17,39 @@ const MM = 96 / 25.4;
 const A4: LivePage = { width: 210, height: 297, margin: { top: 25.4, right: 25.4, bottom: 25.4, left: 25.4 } };
 const SHEET_MAX_ROWS = 60;
 const SHEET_MAX_COLS = 20;
+
+/**
+ * A page this layout cannot draw: a size or margins outside LIVE_DOCUMENT_RENDER_LIMITS. The reason is the typed refusal
+ * document.render answers with and the detail is the plain-words explanation; render.ts reads both off any error that has them.
+ */
+export class RenderGeometryError extends Error {
+  readonly reason = "render_page_size_invalid";
+  constructor(readonly detail: string) { super(`render_page_size_invalid: ${detail}`); }
+}
+
+const FILE_ADVICE = "Fix the page size in the file; document.read still shows its text.";
+const mmText = (value: number): string => String(Number(value.toFixed(1)));
+
+/** A flow document's paper and margins must leave a page to draw on. */
+export function assertFlowPage(page: LivePage): void {
+  const { minPageMm, maxPageMm } = LIVE_DOCUMENT_RENDER_LIMITS;
+  const sane = (value: number) => Number.isFinite(value) && value >= minPageMm && value <= maxPageMm;
+  if (!sane(page.width) || !sane(page.height)) {
+    throw new RenderGeometryError(`This document's page is ${mmText(page.width)} x ${mmText(page.height)} mm, which cannot be drawn (each side must be ${minPageMm}-${maxPageMm} mm). ${FILE_ADVICE}`);
+  }
+  const { top, right, bottom, left } = page.margin;
+  if (![top, right, bottom, left].every((value) => Number.isFinite(value) && value >= 0) || page.height - top - bottom < 10 || page.width - left - right < 10) {
+    throw new RenderGeometryError(`This document's margins (top ${mmText(top)}, bottom ${mmText(bottom)}, left ${mmText(left)}, right ${mmText(right)} mm) leave no room to write on a ${mmText(page.width)} x ${mmText(page.height)} mm page. ${FILE_ADVICE}`);
+  }
+}
+
+/** A deck's slide shape (width : height) must be one a slide can have. */
+export function assertSlideAspect(aspect: number): void {
+  const { minAspect, maxAspect } = LIVE_DOCUMENT_RENDER_LIMITS;
+  if (!Number.isFinite(aspect) || aspect < minAspect || aspect > maxAspect) {
+    throw new RenderGeometryError(`This deck's slides are ${Number.isFinite(aspect) ? `${Number(aspect.toPrecision(3))}:1` : "not a number"} (width to height), which cannot be drawn (between ${1 / maxAspect}:1 and ${maxAspect}:1). Fix the slide size in the file; document.read still shows its text.`);
+  }
+}
 
 export interface RenderPageHtml {
   label: string;
@@ -92,7 +125,9 @@ function slideHtml(slide: LiveSlide, aspect: number): RenderPageHtml & { boxes: 
 
 /** One page per slide. */
 export function slidePagesHtml(model: Extract<LiveDocumentModel, { kind: "slides" }>): Array<RenderPageHtml & { slideId: string; boxes: string[] }> {
-  return model.slides.map((slide, index) => ({ ...slideHtml(slide, model.aspect || 16 / 9), label: `slide ${index + 1}`, slideId: slide.id }));
+  const aspect = model.aspect || 16 / 9;
+  assertSlideAspect(aspect);
+  return model.slides.map((slide, index) => ({ ...slideHtml(slide, aspect), label: `slide ${index + 1}`, slideId: slide.id }));
 }
 
 function flowBlockHtml(block: LiveFlowBlock): string {
@@ -111,6 +146,7 @@ function flowBlockHtml(block: LiveFlowBlock): string {
 /** The whole flow document as one column of page width; render.ts moves blocks to the next page and photographs each page. */
 export function flowHtml(model: Extract<LiveDocumentModel, { kind: "flow" }>): RenderFlowHtml {
   const page = model.page ?? A4;
+  assertFlowPage(page);
   const width = Math.round(page.width * MM);
   const pageHeight = Math.round(page.height * MM);
   const m = page.margin;

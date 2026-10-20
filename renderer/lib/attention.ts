@@ -31,6 +31,7 @@ import { subscribeToolApprovals, toolApprovalsSnapshot } from "@/lib/tool-approv
 import type { BrowserApprovalRequestEvent, PendingConfirmation } from "@/lib/types";
 import type { OneOrgMember } from "@shared/one-org";
 import { isPendingConfirmationSnoozed } from "@shared/one-decision";
+import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
 
 export type AttentionSurface = "one" | "work" | "science";
 export type AttentionKind = "approval" | "result";
@@ -70,8 +71,9 @@ let orphansRevealed = false;
 const listeners = new Set<() => void>();
 let started = false;
 let version = 0;
-let snapshot: { version: number; items: AttentionItem[]; visible: ReadonlySet<string>; orphansRevealed: boolean } = {
-  version: 0, items: [], visible: new Set(), orphansRevealed: false,
+type AttentionCounts = { approvals: number; results: number };
+let snapshot: { version: number; items: AttentionItem[]; visible: ReadonlySet<string>; orphansRevealed: boolean; byChat: ReadonlyMap<string, AttentionCounts>; pendingConfirmations: number } = {
+  version: 0, items: [], visible: new Set(), orphansRevealed: false, byChat: new Map(), pendingConfirmations: 0,
 };
 
 function rebuild(): void {
@@ -102,12 +104,36 @@ function rebuild(): void {
     items.push({ key: `org:${member.id}`, kind: "result", chatId: null, surface: "one", href: "/one", label: member.displayName });
   }
   if (buildDone) items.push({ key: "build:done", kind: "result", chatId: null, surface: "work", href: "/build", label: buildDone.name });
-  version += 1;
-  snapshot = { version, items, visible: tool.visible, orphansRevealed };
   if (orphansRevealed && !items.some((item) => item.kind === "approval" && !item.chatId && !item.href)) {
     orphansRevealed = false;
-    snapshot = { ...snapshot, orphansRevealed };
   }
+  const sameVisible = tool.visible.size === snapshot.visible.size
+    && [...tool.visible].every((chatId) => snapshot.visible.has(chatId));
+  const sameItems = items.length === snapshot.items.length && items.every((item, index) => {
+    const previous = snapshot.items[index];
+    return item.key === previous.key && item.kind === previous.kind && item.chatId === previous.chatId
+      && item.surface === previous.surface && item.href === previous.href && item.label === previous.label;
+  });
+  // Active-chat broadcasts and approval action phases often leave every dot
+  // unchanged. Preserve the snapshot so all routes and sidebar rows stay idle.
+  if (sameVisible && sameItems && orphansRevealed === snapshot.orphansRevealed) return;
+  const byChat = new Map<string, AttentionCounts>();
+  let pendingConfirmations = 0;
+  for (const item of items) {
+    if (item.chatId && tool.visible.has(item.chatId)) continue;
+    if (item.key.startsWith("confirm:")) pendingConfirmations += 1;
+    if (!item.chatId) continue;
+    const counts = byChat.get(item.chatId) ?? { approvals: 0, results: 0 };
+    if (item.kind === "approval") counts.approvals += 1;
+    else counts.results += 1;
+    byChat.set(item.chatId, counts);
+  }
+  for (const [chatId, counts] of byChat) {
+    const previous = snapshot.byChat.get(chatId);
+    if (previous?.approvals === counts.approvals && previous.results === counts.results) byChat.set(chatId, previous);
+  }
+  version += 1;
+  snapshot = { version, items, visible: tool.visible, orphansRevealed, byChat, pendingConfirmations };
   for (const listener of listeners) listener();
 }
 
@@ -191,6 +217,11 @@ async function pollSlow(): Promise<void> {
   } catch { /* keep last */ }
 }
 
+// Timer, focus, visibility and answer events can arrive during the same slow
+// IPC read. Keep one read and one fresh trailing batch instead of racing them.
+const slowRefresh = createCoalescedRefresh<void>(pollSlow, () => undefined);
+const refreshSlow = () => { void slowRefresh.request(undefined); };
+
 function start(): void {
   if (started || typeof window === "undefined") return;
   const api = ipc();
@@ -211,20 +242,20 @@ function start(): void {
   void api.invoke?.activeChats?.().then((ids) => { if (!activeChats) applyActive(ids); }).catch(() => {});
   ipcEvents()?.onActiveChats?.(applyActive);
   void pollConfirmations();
-  void pollSlow();
+  refreshSlow();
   let fast = window.setInterval(() => void pollConfirmations(), POLL_MS);
-  let slow = window.setInterval(() => void pollSlow(), SLOW_POLL_MS);
+  let slow = window.setInterval(() => refreshSlow(), SLOW_POLL_MS);
   // 승인 대기(독 배지)는 앱을 내려놓은 사이에도 떠야 하므로 숨김 중에도 돈다 — 간격만 늘린다.
   document.addEventListener("visibilitychange", () => {
     window.clearInterval(fast);
     window.clearInterval(slow);
     const hidden = document.visibilityState === "hidden";
     fast = window.setInterval(() => void pollConfirmations(), hidden ? POLL_HIDDEN_MS : POLL_MS);
-    slow = window.setInterval(() => void pollSlow(), hidden ? SLOW_POLL_HIDDEN_MS : SLOW_POLL_MS);
-    if (!hidden) { void pollConfirmations(); void pollSlow(); }
+    slow = window.setInterval(() => refreshSlow(), hidden ? SLOW_POLL_HIDDEN_MS : SLOW_POLL_MS);
+    if (!hidden) { void pollConfirmations(); refreshSlow(); }
   });
-  window.addEventListener("agentlas:attention-refresh", () => { void pollConfirmations(); void pollSlow(); });
-  window.addEventListener("focus", () => void pollSlow());
+  window.addEventListener("agentlas:attention-refresh", () => { void pollConfirmations(); refreshSlow(); });
+  window.addEventListener("focus", () => refreshSlow());
   rebuild();
 }
 
@@ -233,7 +264,7 @@ function subscribe(listener: () => void): () => void {
   start();
   return () => { listeners.delete(listener); };
 }
-const SERVER = { version: 0, items: [] as AttentionItem[], visible: new Set<string>() as ReadonlySet<string>, orphansRevealed: false };
+const SERVER = { version: 0, items: [] as AttentionItem[], visible: new Set<string>() as ReadonlySet<string>, orphansRevealed: false, byChat: new Map<string, AttentionCounts>(), pendingConfirmations: 0 };
 
 /** 앱 루트에서 한 번 부른다 — 전환기가 없는 화면에서도 폴링·독 배지가 멈추지 않게. */
 export function ensureAttention(): void {
@@ -337,17 +368,16 @@ export function useAttention(pathname: string): AttentionView {
 
 /** 대화 목록 행(세션 목록·프로젝트 사이드바)에 찍을 점 — 그 대화가 기다리는 것. */
 export function useChatAttention(chatId: string | null | undefined): { approvals: number; results: number } | null {
-  const state = useSyncExternalStore(subscribe, () => snapshot, () => SERVER);
-  return useMemo(() => {
-    if (!chatId || state.visible.has(chatId)) return null;
-    let approvals = 0;
-    let results = 0;
-    for (const item of state.items) {
-      if (item.chatId !== chatId) continue;
-      if (item.kind === "approval") approvals += 1; else results += 1;
-    }
-    return approvals + results > 0 ? { approvals, results } : null;
-  }, [chatId, state]);
+  return useSyncExternalStore(
+    subscribe,
+    () => chatId ? snapshot.byChat.get(chatId) ?? null : null,
+    () => null,
+  );
+}
+
+/** The shared shell only needs this count; unrelated results must not render its entire tree. */
+export function usePendingConfirmationCount(): number {
+  return useSyncExternalStore(subscribe, () => snapshot.pendingConfirmations, () => 0);
 }
 
 /** 점의 읽는 이름 — "승인 대기 2건", "새 결과 1건". */

@@ -87,6 +87,7 @@ export function createAgiDeterministicHandler(executor: AgiActionExecutor, readF
       let acted = false;
       d.altPaths.forEach((action, index) => {
         if (acted || AGI_NON_ALTERNATIVE_ACTIONS.has(action)) return;
+        if (action === "start_work_turn" && !executor.canContinueGoal(input.goalId)) return;
         const args = deterministicArgs(action, input, facts);
         if (!args) return;
         const receipt = run(action, args, 100 + index, runFence);
@@ -104,10 +105,11 @@ export function createAgiDeterministicHandler(executor: AgiActionExecutor, readF
       run("use_native_harness", { capability, defect: d.reasonCode }, 80);
     }
     // Start independent work before advisory model checks; repair may time out
-    // or ask for a missing credential without holding the original controller.
+    // or ask for a missing credential without holding the original controller. Only when the host would continue the Goal now:
+    // asked anyway, the host deferred nearly all such turns (a running Goal, or a scheduled retry that owns the next step).
     const initialVersion = executor.currentVersion(input.goalId);
-    const work = initialVersion === null ? null : run("start_work_turn", { nodeId: d.eligibleTactics[0] ?? null }, 90,
-      { ...fence, runVersion: initialVersion });
+    const work = initialVersion === null || !executor.canContinueGoal(input.goalId) ? null
+      : run("start_work_turn", { nodeId: d.eligibleTactics[0] ?? null }, 90, { ...fence, runVersion: initialVersion });
     const workStarted = work?.ok === true;
     if (workStarted) return { outcome: "acted", code: "agi.work-continued", actions: done };
     if (model) {

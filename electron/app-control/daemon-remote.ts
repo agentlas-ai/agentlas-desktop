@@ -27,10 +27,12 @@ export async function remoteAppControlOperations<T extends object>(input: Record
   }
 }
 
-export async function remoteAppControlCall(caller: { ownerTurn: boolean }, input: { operation?: unknown; args?: unknown }, bridge: AppBridge = daemonDeviceBridge()): Promise<Record<string, unknown>> {
+export async function remoteAppControlCall(caller: { ownerTurn: boolean }, input: { operation?: unknown; args?: unknown; scope?: { chatId?: unknown } }, bridge: AppBridge = daemonDeviceBridge()): Promise<Record<string, unknown>> {
   let answer;
-  
-  const request = { operation: input.operation, ...(input.args !== undefined ? { args: input.args } : {}) };
+  // An absent args stays absent: { args: undefined } is not a wire value.
+  // A scope (the conversation a harness port checked) travels in the same input object; an absent one stays absent.
+  const request = { operation: input.operation, ...(input.args !== undefined ? { args: input.args } : {}),
+    ...(typeof input.scope?.chatId === "string" ? { scope: { chatId: input.scope.chatId } } : {}) };
   try { answer = await bridge.appControl({ kind: "call", ownerTurn: caller.ownerTurn === true, input: request }); }
   catch (error) { const { code, message } = unavailable(error); throw new AppControlError(code, message); }
   if (answer.outcome === "value") return answer.value as Record<string, unknown>;

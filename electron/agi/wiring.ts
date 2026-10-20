@@ -24,7 +24,8 @@ import { getLongRunByGoalId } from "../store/long-runs";
 import { readGoalPlan, updateGoalPlanNode, insertGoalPlanNode, recordGoalPlanDecision } from "../store/goal-plans";
 import { activeNativeHarness } from "../long-run/goal-shaping";
 import { recordPersistenceDecisionEvent } from "../store/run-events";
-import { continueGoalForAlive } from "../long-run/blocked-goal-sweep";
+import { aliveGoalContinuationRefusal, continueGoalForAlive } from "../long-run/blocked-goal-sweep";
+import { hostGoalWake } from "../long-run/wake-arbiter";
 import { invocationService } from "../invocation/service";
 import { oneTeamCreateMember, oneTeamInvite, oneTeamList, oneTeamStartSession } from "../one/team-dispatch";
 import { findAutomationByGoalId } from "../store/automations";
@@ -132,6 +133,7 @@ export function createAgiExecutor(): AgiActionExecutor {
         chatId: run.rootChatId, permission: goalPermission(goalId) } : null;
     },
     continueGoal: (runId, version) => continueGoalForAlive(runId, version, invocationService),
+    continuationRefusal: (runId, version) => aliveGoalContinuationRefusal(runId, version),
     team: {
       create: (chatId, permission, input) => {
         const made = oneTeamCreateMember({ chatId, permission }, { ...input, invite: true }) as { member_id: string; created?: boolean };
@@ -142,7 +144,12 @@ export function createAgiExecutor(): AgiActionExecutor {
         return { memberId: joined.member_id, joined: joined.already_member !== true, ...(joined.name ? { memberName: joined.name } : {}) };
       },
       dispatch: (chatId, permission, input) => {
-        const session = oneTeamStartSession({ chatId, permission }, { member: input.member, brief: input.brief }) as { session_id: string; teammate?: string };
+        // A teammate session the AGI starts is a host start for the Goal: the wake budget answers first (owner first, 48 a day).
+        const start = () => oneTeamStartSession({ chatId, permission }, { member: input.member, brief: input.brief }) as
+          { session_id: string; teammate?: string; already_started?: boolean };
+        const session = input.runId
+          ? hostGoalWake({ runId: input.runId, chatId, source: "agi", cause: `teammate:${input.member}` }, start, (made) => made.already_started !== true)
+          : start();
         return { sessionId: session.session_id, ...(session.teammate ? { memberName: session.teammate } : {}) };
       },
     },

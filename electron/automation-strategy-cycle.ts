@@ -210,6 +210,14 @@ function outputObservation(input: AutomationStrategyCycleInput, metrics: ReturnT
 export async function runAutomationStrategyCycle(input: AutomationStrategyCycleInput): Promise<void> {
   const current = () => !input.signal?.aborted && (!input.isCurrent || input.isCurrent());
   if (!current()) { unavailable(input, "reflection_source_changed"); return; }
+  // A command automation is an on-demand work step that a chat or a Goal run invokes; it has no cadence or standing
+  // prompt to tune, so the generic post-run reflection only produces drafts nobody reviews. Only the generic post-run
+  // loop is skipped; a Goal-recommended cycle and an episode preparation still run.
+  if (!input.goalRecommendation && !input.episodePreparation
+    && getAutomation(input.automationId)?.triggerType === "command") {
+    unavailable(input, "strategy_reflection_skipped_command_trigger");
+    return;
+  }
   let strategyRunEvents: AutomationStrategyRunEventLike[] = [];
   let strategyActivity = { callCount: 0, toolNames: [] as string[] };
   let eventWindowCoverage: StrategyEventCoverage = "unavailable";

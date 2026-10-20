@@ -66,7 +66,10 @@ export async function loadViewData<T>(
 }
 
 export function invalidateViewData(prefix: string): void {
-  invalidationEpoch += 1;
+  // A prefix eviction already detaches matching promises from the map. Do
+  // not invalidate every other pending route snapshot during a streaming chat.
+  // Only an explicit full flush needs the global epoch.
+  if (prefix === "") invalidationEpoch += 1;
   for (const key of entries.keys()) if (key.startsWith(prefix)) entries.delete(key);
 }
 

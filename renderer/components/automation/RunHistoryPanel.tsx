@@ -209,10 +209,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
     }
   }, [automation.graph, automation.id, compact, ko]);
 
-  useEffect(() => {
-    void load();
-  }, [load]);
-  useVisibleInterval(() => void load(), POLL_MS);
+  useVisibleInterval(() => load(), POLL_MS, { initial: load });
   useEffect(() => {
     const onRefresh = (event: Event) => {
       const detail = (event as CustomEvent<{ automationId?: unknown }>).detail;

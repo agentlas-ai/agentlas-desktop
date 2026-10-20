@@ -39,6 +39,7 @@ import { recordToolchainAssetDiscovery, toolchainAssetUsage } from "../toolchain
 import { currentOneToolchainNativeInvocation } from "./toolchain-native-runtime";
 import { resolveNativeAssetPublicationAuthority } from "../toolchains/asset-cold-start";
 import { resolveGraphOriginMessage, type GraphOriginBinding } from "./graph-origin";
+import { ephemeralGraphSweptOff, markOneGraphEphemeral, recordOneGraphStructure } from "./ephemeral-graphs";
 
 /** A Work task's capability (team-control-server scope "toolchain-consumer"). */
 /**
@@ -505,12 +506,22 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
     }
     const connections = input.enabled === false ? null : await reportGraphConnections(graph, currentUiLocale());
     const enable = input.enabled !== false && connections?.activation.canActivate === true;
+    // A one-off graph switched off when its Goal ended or it sat idle (one/ephemeral-graphs.ts) is wanted again when
+    // One saves it unchanged: switch it back on for a fresh lifetime. A graph the owner switched off stays off.
+    const revive = (a: Automation): Automation => {
+      if (!enable || !ephemeralGraphSweptOff(a)) return a;
+      const resumed = applyAutomationLifecycle({ parsed: { action: "resume", automationId: a.id, expectedDefinitionDigest: automationDefinitionDigest(a),
+        name: a.name, prompt: "", schedule: "", scheduleEmitted: false }, chatId: chat.id, canWrite: true }).automation;
+      markOneGraphEphemeral(resumed, chat.id);
+      return resumed;
+    };
     return desktopStoreTransaction(getDb(), () => {
       const matches = scoped(caller).filter(a => a.name.normalize("NFKC").toLowerCase() === bp.name.normalize("NFKC").toLowerCase());
       if (!existing && matches.length) {
         if (matches.length === 1 && graphSame(matches[0], graph, bp, schedule, triggerType)) {
-          recordOneGraphAuthority(matches[0], chat.id);
-          return receipt(matches[0], { ok: true, action: "already_saved" });
+          const same = revive(matches[0]);
+          recordOneGraphAuthority(same, chat.id);
+          return receipt(same, { ok: true, action: "already_saved" });
         }
         throw new Error("one_graph_name_conflict_use_exact_id");
       }
@@ -518,8 +529,9 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
       if (existing) {
         const current = exact(caller, existing.id); fresh(current, input.expected_revision);
         if (graphSame(current, graph, bp, schedule, triggerType)) {
-          recordOneGraphAuthority(current, chat.id);
-          return receipt(current, { ok: true, action: "unchanged" });
+          const same = revive(current);
+          recordOneGraphAuthority(same, chat.id);
+          return receipt(same, { ok: true, action: "unchanged" });
         }
         editable(current, changedGraphNodes(resolveAutomationGraph(current), graph));
         const repair = toolchainRepairVerdict(current, chat.id);
@@ -541,6 +553,9 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
         graphJson: graph, enabled: enable, createdBy: "agent", scheduleHuman: schedule, scheduleJson: null,
         triggerType, monitor: { schemaVersion: "agentlas.automation-monitor.v1", originChatId: chat.id,
           originMessageId: ownerOriginMessage(chat.id, caller), notificationPolicy: "meaningful_changes", deadline: null } });
+      // An input-triggered graph is work One does now, not a standing automation: it ends with the Goal it was made for
+      // or after idle days, and its structure feeds the repeated-work detector so a recurring kind becomes a Toolchain.
+      if (markOneGraphEphemeral(saved, chat.id) && !existing) recordOneGraphStructure(saved, graph, chat.id, saved.createdAt);
       recordOneGraphAuthority(saved, chat.id);
       return receipt(saved, { ok: true, action: existing ? "updated" : "created", ...(connections && !enable ? { activation: connections.activation } : {}) });
     }).immediate();
@@ -606,6 +621,7 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
     editable(a, []); await connected(caller, a);
     const result = applyAutomationLifecycle({ parsed: { action: "resume", automationId: a.id, expectedDefinitionDigest: input.expected_revision as string,
       name: a.name, prompt: "", schedule: "", scheduleEmitted: false }, chatId: chat.id, canWrite: true });
+    markOneGraphEphemeral(result.automation, chat.id);
     return receipt(result.automation, { ok: true, action: result.action });
   }
   if (name === "one_graph_run") {

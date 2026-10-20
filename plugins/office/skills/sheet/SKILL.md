@@ -9,7 +9,7 @@ description: Edit an xlsx workbook live in the Document tab (cells, formulas, sh
 2. The `outline` lists `# sheet <name>`, then `A1<TAB>value` lines. Formulas appear as `=SUM(B2:B3)`, followed by the cached value. A `{…}` tag shows the cell's format.
 3. Edit with `document.apply` using `sessionId` and `ops`. Write a row or a block at a time.
 4. Save with `document.save`.
-5. To check how a sheet looks, call `harness_call {"operation":"document.render","args":{"sessionId":"…"}}`. It returns each sheet's used range as an image.
+5. To check how a sheet looks, call `harness_call {"operation":"document.render","args":{"sessionId":"…"}}`. It returns up to 4 sheets' used ranges as images, as the workbook is now (saved or not). When the reply has `next`, call again with its `from` until every sheet has been seen.
 
 # Ops
 

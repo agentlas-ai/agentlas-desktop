@@ -71,10 +71,8 @@ export function FleetSummaryStrip() {
   }, []);
 
   // 폴링(10s)으로 도는 loadPending+loadKey만 useVisibleInterval로(탭 숨김 시 정지).
-  useVisibleInterval(() => {
-    void loadPending(false);
-    void loadKey(true);
-  }, POLL_MS);
+  const initialLoad = useCallback(() => Promise.all([loadPending(), loadKey()]), [loadPending, loadKey]);
+  useVisibleInterval(() => Promise.all([loadPending(false), loadKey(true)]), POLL_MS, { initial: initialLoad });
 
   useEffect(() => {
     let alive = true;
@@ -98,9 +96,7 @@ export function FleetSummaryStrip() {
       }
     };
     // 초기 1회 load는 유지(loadOwned는 마운트 1회만 — 폴링 대상 아님).
-    void loadPending();
     void loadOwned();
-    void loadKey();
     void ipc()?.invoke.activeChats().then((ids) => {
       if (!alive) return;
       writeViewData("dashboard.active-chats", ids);

@@ -84,6 +84,9 @@ export interface TriggerDispatchResult {
   output?: string;
   /** The run's failure is typed as one a resume cannot change; the event is not redelivered automatically. */
   automaticRetry?: false;
+  /** The run holds a step whose outside effect is unconfirmed (MUTATION_UNVERIFIED). Only the owner's node
+   *  reconciliation releases it, so the event is parked for that choice instead of being redelivered. */
+  effectsUnconfirmed?: true;
 }
 
 function parsePayload(raw: string): { payload: TriggerEventPayload; valid: boolean } {

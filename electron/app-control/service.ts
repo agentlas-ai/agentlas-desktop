@@ -28,6 +28,16 @@ export interface AppControlCaller {
   ownerTurn: boolean;
 }
 
+/**
+ * What a call carries. `scope` is set by a harness port that already checked a conversation (document.render), never by the
+ * model: app.call and one_app_call build their input from the operation and args fields only.
+ */
+export interface AppControlCallInput {
+  operation?: unknown;
+  args?: unknown;
+  scope?: { chatId?: unknown };
+}
+
 interface Operation {
   path: string;
   surface: "desktop" | "science" | "app";
@@ -193,7 +203,7 @@ export type AppControlOperationsResult = {
 export function appControlOperations(input: OperationsInput): AppControlOperationsResult | Promise<AppControlOperationsResult> {
   return host ? appControlOperationsLocal(input) : remoteAppControlOperations(input, appControlOperationsLocal);
 }
-export async function appControlCall(caller: AppControlCaller, input: { operation?: unknown; args?: unknown }): Promise<Record<string, unknown>> {
+export async function appControlCall(caller: AppControlCaller, input: AppControlCallInput): Promise<Record<string, unknown>> {
   return host ? appControlCallLocal(caller, input) : remoteAppControlCall(caller, input);
 }
 
@@ -320,9 +330,25 @@ function build(arg: AppControlInvokeArg, named: Record<string, unknown>): unknow
 
 const OWNER_LOCAL_MAP_OPERATIONS: ReadonlySet<string> = new Set(["experience.ontologyGraph", "agents.borrowedOntologyGraph"]);
 
+// Operations that show what belongs to one conversation. A call through app.call or one_app_call has no conversation of its
+// own, so these answer only a harness port that checked the conversation first and passed it as input.scope.chatId (the
+// ports build the input from fixed fields, so a model cannot supply a scope). Each check refuses by code; an unknown id is
+// left to the operation, which says so itself.
+const CHAT_SCOPED_OPERATIONS: Readonly<Record<string, (named: Record<string, unknown>, chatId: string) => Promise<void>>> = {
+  "liveDocument.render": async (named, chatId) => {
+    if (!chatId) throw new AppControlError("chat-scope-required", "liveDocument.render answers only through harness document.render, which checks that the document belongs to this conversation.");
+    let owner: string;
+    try { owner = (await (await import("../live-document/store")).liveDocumentSnapshot(typeof named.sessionId === "string" ? named.sessionId.slice(0, 64) : "")).meta.chatId; }
+    catch { return; }
+    if (owner !== chatId) throw new AppControlError("session_not_in_this_chat", "document.list shows this conversation's sessions.");
+  },
+};
+
 export type AppResultImage = { path: string; file: string; mediaType: "image/png" | "image/jpeg"; bytes: number };
 const MAX_RESULT_IMAGES = 8;
 const IMAGE_DATA_URL = /^data:image\/(png|jpeg);base64,/;
+const IMAGE_OVER_CAP = `[image left out: a result keeps only its first ${MAX_RESULT_IMAGES} images as files]`;
+const IMAGE_NOT_SAVED = "[image left out: it could not be saved as a file]";
 
 
 
@@ -337,14 +363,18 @@ function saveResultImages(value: unknown): { value: unknown; images?: AppResultI
   if (!text.includes("data:image/")) return { value };
   const box: Record<string, unknown> = { $: JSON.parse(text) };
   const images: AppResultImage[] = [];
+  let changed = false;
   const walk = (holder: Record<string | number, unknown>, key: string | number, at: string) => {
     const node = holder[key];
     if (typeof node === "string") {
       const match = IMAGE_DATA_URL.exec(node);
-      if (!match || images.length >= MAX_RESULT_IMAGES) return;
-      const file = saveObservationCaptureArtifact(node);
-      if (!file) return;
+      if (!match) return;
+      // An image over the cap, or one that could not be saved, is named as left out. A raw data URL left in the result would
+      // only be cut by clipResult into a few thousand characters of base64 that no model can read.
+      const file = images.length >= MAX_RESULT_IMAGES ? null : saveObservationCaptureArtifact(node);
+      if (!file) { holder[key] = images.length >= MAX_RESULT_IMAGES ? IMAGE_OVER_CAP : IMAGE_NOT_SAVED; changed = true; return; }
       holder[key] = file;
+      changed = true;
       images.push({ path: at, file, mediaType: match[1] === "png" ? "image/png" : "image/jpeg", bytes: fs.statSync(file).size });
     } else if (Array.isArray(node)) node.forEach((_, index) => walk(node as unknown as Record<number, unknown>, index, `${at}[${index}]`));
     else if (node && typeof node === "object") {
@@ -352,7 +382,8 @@ function saveResultImages(value: unknown): { value: unknown; images?: AppResultI
     }
   };
   walk(box, "$", "$");
-  return images.length ? { value: box.$, images: images.map((image) => ({ ...image, path: image.path.replace(/^\$/, "$.result") })) } : { value };
+  if (!changed) return { value };
+  return images.length ? { value: box.$, images: images.map((image) => ({ ...image, path: image.path.replace(/^\$/, "$.result") })) } : { value: box.$ };
 }
 
 type ResultCut = { path: string; kind: "array" | "string"; total: number; returned: number; stubbed?: number };
@@ -522,7 +553,7 @@ function withArgumentHints(error: unknown, path: string, args: unknown): unknown
   return error;
 }
 
-export async function appControlCallLocal(caller: AppControlCaller, input: { operation?: unknown; args?: unknown }): Promise<Record<string, unknown>> {
+export async function appControlCallLocal(caller: AppControlCaller, input: AppControlCallInput): Promise<Record<string, unknown>> {
   const path = typeof input.operation === "string" ? input.operation.trim() : "";
   const named = input.args === undefined || input.args === null ? {}
     : typeof input.args === "object" && !Array.isArray(input.args) ? input.args as Record<string, unknown> : null;
@@ -555,6 +586,8 @@ export async function appControlCallLocal(caller: AppControlCaller, input: { ope
   const requiredKeys = APP_CONTROL_ARGUMENT_SCHEMAS[path]?.required;
   const missing = Array.isArray(requiredKeys) ? requiredKeys.filter((key) => typeof key === "string" && named[key] === undefined) : [];
   if (missing.length) throw new AppControlError("invalid-arguments", `${path} needs ${missing.join(", ")}; pass them in args.`);
+  const chatScope = CHAT_SCOPED_OPERATIONS[path];
+  if (chatScope) await chatScope(named, typeof input.scope?.chatId === "string" ? input.scope.chatId : "");
   const window = host?.interactionWindow?.() ?? host?.mainWindow() ?? null;
 
   if (operation.surface === "app") {

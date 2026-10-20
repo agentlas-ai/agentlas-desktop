@@ -1,5 +1,7 @@
 import { bindRunnerTurnContext, carryRunnerTurnContext, renderRunnerTurnContext, replaceRunnerUserPrompt, runnerTurnContextSource } from "../runtime/runner-turn-context-binding";
 import { composeTracedPrompt } from "../runtime/prompt-composition-trace";
+import { CHANNEL_PRIVACY_RULE } from "../runtime/session-channel";
+import { BUILTIN_ONE_AGENT_ID } from "../../shared/builtin-agent-ids";
 import { fixedPurposePrompt, purposePrompt } from "../runtime/purpose-prompts";
 import { captureNativeOsCuratorRun } from "../runtime/os-memory-curator-binding";
 import { placeTurnContextForRuntime } from "../runtime/serving-prefix";
@@ -61,7 +63,7 @@ import { isCallOnlyHubAgent } from "../../shared/call-only-agent";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { createToolObservationNovelty } from "./tool-observation-novelty";
-import { bindInvocationAgentContext } from "../runtime/agent-context-admission";
+import { bindInvocationAgentContext, conversationSharesSession } from "../runtime/agent-context-admission";
 import { invokeWithUnsettledContinuation, unsettledContinuationCarriesRequest, unsettledContinuationPrompt } from "../runtime/unsettled-continuation";
 import { agentContextHostBinding, agentContextUnsettledTurn, markAgentContextContinuationHandle, type AgentContextCapability } from "../runtime/agent-context";
 import { createMainHostControlSink, createMainHostOperationBridge, withAdapterEffectChildDispatch } from "../invocation/adapter-effect-context";
@@ -5598,11 +5600,14 @@ async function runMcpInvocationInContext(
     // Same text every turn: a resumed native session already has it (runner dedupe, continuity.ts).
     keepLastTurnContext("reply.document", "fixed-policy", ["release"]);
   }
-  
-
-
-
-
+  // What the owner tells a seat or team-member agent in a one-to-one conversation is not repeated in a group room on its own: the
+  // agent's journal and native session are shared by the conversations of its seat, so one fixed rule says what may cross
+  // (runtime/session-channel.ts; the turn-by-turn channel line is the agent-context.channel module). Model-obeyed, not host-enforced.
+  // A resumed session is given a changed rule once, as a new stable block. The One agent keeps its own conversations and is not given it,
+  // and neither is a conversation whose journal is its own (the switch is `chat`, or it is not a seat/roster conversation): its prompt bytes stay as they were.
+  if (req.oneMode && !req.agentAppMode && persistentAgentContext && agent.id !== BUILTIN_ONE_AGENT_ID && conversationSharesSession(chat.id, agent.id)) {
+    turnContextParts.push(CHANNEL_PRIVACY_RULE); keepLastTurnContext("reply.channels", "fixed-policy", ["release"]);
+  }
   // One output needs the exact contract even if this run cannot discover a reader.
   // In-process providers have lazy menus/unprobed tool capability; never rely on a nonexistent reader.
   if (oneTeamExecutionPolicy && (!mcpIncludedServers.some(row => row.catalogId === AGENTLAS_UI_CATALOG_ID)

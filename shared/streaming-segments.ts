@@ -10,6 +10,9 @@ export interface SegmentCache {
   closed: string[];
   /** 미완결 tail의 시작 오프셋. 이 지점의 펜스 상태는 항상 "밖"이다. */
   tailStart: number;
+  /** Resume after the last complete line, even inside a long unfinished fence. */
+  scanStart?: number;
+  fence?: { marker: string; length: number } | null;
 }
 
 export function splitStreamingSegments(
@@ -18,7 +21,8 @@ export function splitStreamingSegments(
 ): { segments: string[]; cache: SegmentCache } {
   let closed: string[];
   let segStart: number;
-  if (cache && text.length >= cache.source.length && text.startsWith(cache.source)) {
+  const appendOnly = cache && text.length >= cache.source.length && text.startsWith(cache.source);
+  if (appendOnly) {
     closed = cache.closed;
     segStart = cache.tailStart;
   } else {
@@ -27,10 +31,18 @@ export function splitStreamingSegments(
   }
   // tail 구간만 라인 단위 스캔 — 펜스 밖의 빈 줄에서 자른다. 마지막 미완 라인은 판단 보류.
   let appended: string[] | null = null;
-  let fence: { marker: string; length: number } | null = null;
-  let lineStart = segStart;
+  // A blank-line segment can remain open for thousands of lines (code, tables,
+  // lists, visual JSON). Previously every token rescanned all those lines from
+  // tailStart. Keep the scanner's fence state and resume at the incomplete line.
+  // Older in-memory caches have no cursor and safely take the original scan.
+  let fence = appendOnly && cache.scanStart != null ? cache.fence ?? null : null;
+  let lineStart = appendOnly && cache.scanStart != null ? cache.scanStart : segStart;
+  // There was no newline in the previous unfinished line. Search only the
+  // appended suffix; a single very long JSON/code line must not be searched
+  // from its beginning for every chunk. Parse the full line once it completes.
+  let searchStart = appendOnly && cache.scanStart != null ? cache.source.length : lineStart;
   while (lineStart < text.length) {
-    const nl = text.indexOf("\n", lineStart);
+    const nl = text.indexOf("\n", searchStart);
     if (nl < 0) break;
     const line = text.slice(lineStart, nl);
     const fenceLine = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
@@ -48,11 +60,12 @@ export function splitStreamingSegments(
       }
     }
     lineStart = nl + 1;
+    searchStart = lineStart;
   }
   const nextClosed = appended ? closed.concat(appended) : closed;
   const tail = text.slice(segStart);
   const segments = tail.trim() !== "" ? nextClosed.concat(tail) : nextClosed.slice();
-  return { segments, cache: { source: text, closed: nextClosed, tailStart: segStart } };
+  return { segments, cache: { source: text, closed: nextClosed, tailStart: segStart, scanStart: lineStart, fence } };
 }
 
 /** A tool row can never split the data inside a code or native UI fence. */

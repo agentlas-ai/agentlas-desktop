@@ -9,9 +9,9 @@ import { createDaemonAgentContextHost } from "../daemon/agent-context-host";
 import { getDb } from "../store/db";
 import { invocationProcessOwner, invocationRunOwners, assertInvocationRunOwner } from "../store/invocation-run-owners";
 import { createAgentContextCapability, agentContextHostBinding, bootstrapAgentContextHistory, markAgentContextHostAuthored, copyAgentContextHostAuthored,
-  reconcileInterruptedAgentContext, nextAgentContextTurnOrdinal, openAgentContextTurnId, recordAgentContextScopeAdoption, importSharedChatHistory, type AgentContextCapability } from "./agent-context";
+  markAgentContextChannel, copyAgentContextChannel, reconcileInterruptedAgentContext, nextAgentContextTurnOrdinal, openAgentContextTurnId, recordAgentContextScopeAdoption, recordAgentContextScopeFailure, importSharedChatHistory, type AgentContextCapability } from "./agent-context";
 import { markRefusedBeforeDispatch, type Runner, type RunnerEvents, type RunnerRequest } from "./runner";
-import { resolveSessionScope } from "./session-scope";
+import { resolveSessionScope, rosterSessionIsCurrent } from "./session-scope";
 import { acquireAgentContextTurnSlot, AgentContextTurnWaitError, type AgentContextTurnSlot } from "./agent-context-turn-order";
 import { createTurnLine, type TurnLineDb } from "./agent-context-turn-line";
 import { listPendingToolApprovals } from "./tool-approval";
@@ -45,9 +45,18 @@ export function bindInvocationAgentContext(request: RunnerRequest, input: {
   if (!row || row.agent_id !== input.agentId || row.archived_at) fail("agent_context_original_agent_required");
   const identity = agentContextOwnerBinding();
   // Which journal this conversation's turns belong to (session-scope.ts): its own, as before, except a one-to-one seat
-  // conversation, which continues its seat's journal of this agent. Any failure there returns the old formula.
+  // conversation, which continues its seat's journal of this agent, and the dispatch child of a roster member, which is the same
+  // session. A failure there returns the old formula, except for those two kinds, whose turn is refused instead.
   const scope = resolveSessionScope(getDb(), { chatId: input.chatId, agentId: input.agentId, kind: row.kind, parentChatId: row.parent_chat_id,
-    aliveController: input.aliveController, ownerScope: identity.ownerScope, persist: true });
+    aliveController: input.aliveController, ownerScope: identity.ownerScope, persist: true,
+    chat: { agentId: row.agent_id, kind: row.kind, origin: row.origin, seatId: row.seat_id, seatKind: row.seat_kind } });
+  if (scope.unavailable) {
+    // A seat conversation or a member's dispatch child whose journal could not be resolved is not started on a journal of its own:
+    // that turn would be missing from the shared session for good. The cause is a run event; the owner reads a plain sentence and sends again.
+    recordAgentContextScopeFailure(`agent-context-turn:${JSON.stringify([input.chatId, input.runId, input.attempt])}`, input.agentId,
+      { scopeKind: row.kind === "division" ? "roster" : "seat", causeCode: scope.failure?.causeCode ?? "session_scope_resolve_failed" });
+    throw markRefusedBeforeDispatch(Object.assign(new Error(tStatus(request.locale === "ko" ? "ko" : "en", "sessionScopeUnavailable")), { code: "session_scope_unavailable" }));
+  }
   const visibilityDomain = scope.visibilityDomain;
   const assertCurrent = () => {
     request.signal?.throwIfAborted(); input.assertCurrent(); assertInvocationRunOwner(owner);
@@ -65,6 +74,8 @@ export function bindInvocationAgentContext(request: RunnerRequest, input: {
   const turnId = `agent-context-turn:${JSON.stringify([input.chatId, input.runId, ordinal])}`;
   const capability = createAgentContextCapability(contextIdentity, { turnId, assertCurrent });
   if (scope.shared) sharedSessionCapabilities.add(capability);
+  // A session several conversations share is told where this turn is spoken (runtime/session-channel.ts); no other turn is.
+  markAgentContextChannel(capability, scope.shared ? scope.channel : null);
   if (scope.assignment?.created && scope.assignment.outcome !== "existing") recordAgentContextScopeAdoption(turnId, contextIdentity,
     { outcome: scope.assignment.outcome, scopeKind: scope.kind, retainedDomains: scope.assignment.retainedDomains });
   // Initial migration belongs to this exact authorized chat only. The journal
@@ -72,6 +83,20 @@ export function bindInvocationAgentContext(request: RunnerRequest, input: {
   bootstrapAgentContextHistory(capability, request.history);
   markAgentContextHostAuthored(capability, input.hostAuthored);
   return carryRunnerTurnContext(request, { ...request, agentContext: capability });
+}
+/**
+ * Whether this conversation's turns will run on a journal several conversations share (read only; admission stores the assignment).
+ * For prompt text that must exist only for such a session. Any failure answers false: the same failure refuses the turn at admission.
+ */
+export function conversationSharesSession(chatId: string, agentId: string): boolean {
+  try {
+    const row = getDb().prepare("SELECT agent_id,kind,parent_chat_id,origin_surface AS origin,seat_id,seat_kind FROM chats WHERE id=?").get(chatId) as
+      { agent_id: string; kind: string | null; parent_chat_id: string | null; origin: string | null; seat_id: string | null; seat_kind: string | null } | undefined;
+    if (!row || row.agent_id !== agentId) return false;
+    return resolveSessionScope(getDb(), { chatId, agentId, kind: row.kind, parentChatId: row.parent_chat_id, aliveController: false,
+      ownerScope: agentContextOwnerBinding().ownerScope, persist: false,
+      chat: { agentId: row.agent_id, kind: row.kind, origin: row.origin, seatId: row.seat_id, seatKind: row.seat_kind } }).shared;
+  } catch { return false; }
 }
 /** Capabilities whose journal is shared by several conversations (a seat scope): their turns run one after the other. */
 const sharedSessionCapabilities = new WeakSet<object>();
@@ -98,15 +123,24 @@ function assertPreviousTurnTerminal(turnId: string): void {
 }
 let daemon: { key: string; host: ReturnType<typeof createDaemonAgentContextHost> } | null = null;
 const awakeIdentities=new Map<string,ReturnType<typeof agentContextHostBinding>["identity"]>();
+/**
+ * Whether the background service keeps this journal's resident process awake: the journal is a roster member's. Two shapes:
+ * the member's own dispatch child (`one-team:<room>:session:<child>`, as before), or the member's seat session as the seat scope
+ * assigned it (session-scope.ts: the one-to-one conversations and the dispatch children share it, whatever domain string it has).
+ * Either needs the member to be on the roster now; the fence is read again at every admission.
+ */
 function awakeLifetime(identity:ReturnType<typeof agentContextHostBinding>["identity"]):{assertCurrent():void}|null {
   const match=/^one-team:([^:]+):session:(.+)$/.exec(identity.visibilityDomain);
-  if(!match)return null;
-  const [parent,chat]=match.slice(1);
-  const active=()=>!!getDb().prepare(`SELECT 1 FROM chats c WHERE c.id=? AND c.parent_chat_id=?
-    AND c.agent_id=? AND c.kind='division' AND c.origin_surface='one' AND c.archived_at IS NULL
-    AND EXISTS(SELECT 1 FROM one_team_dispatches d JOIN one_org_members m ON m.id=d.member_id
-      WHERE d.child_chat_id=c.id AND d.parent_chat_id=c.parent_chat_id
-      AND m.installed_agent_id=c.agent_id AND m.archived_at IS NULL)`).get(chat,parent,identity.agentId);
+  const childActive=()=>{
+    if(!match)return false;
+    const [parent,chat]=match.slice(1);
+    return !!getDb().prepare(`SELECT 1 FROM chats c WHERE c.id=? AND c.parent_chat_id=?
+      AND c.agent_id=? AND c.kind='division' AND c.origin_surface='one' AND c.archived_at IS NULL
+      AND EXISTS(SELECT 1 FROM one_team_dispatches d JOIN one_org_members m ON m.id=d.member_id
+        WHERE d.child_chat_id=c.id AND d.parent_chat_id=c.parent_chat_id
+        AND m.installed_agent_id=c.agent_id AND m.archived_at IS NULL)`).get(chat,parent,identity.agentId);
+  };
+  const active=()=>childActive()||rosterSessionIsCurrent(getDb(),identity);
   if(!active())return null;
   awakeIdentities.set(digest(identity),identity);
   return {assertCurrent(){if(!active())fail("agent_context_roster_lifetime_changed");}};
@@ -287,6 +321,7 @@ function routeAgentContextRunner(runner: Runner, provider: { kind: string; backe
         catch (error) { throw markRefusedBeforeDispatch(error); }
         // The daemon admits the same turn under its own capability; the host-authored marker follows the turn.
         copyAgentContextHostAuthored(request.agentContext as AgentContextCapability, capability);
+        copyAgentContextChannel(request.agentContext as AgentContextCapability, capability);
         return runner(carrySurfaceMemoryRequest(request, carryRunnerTurnContext(request, { ...request, agentContext: capability, signal })), events);
       });
   };

@@ -79,14 +79,8 @@ export function DashboardActivity() {
   }, [ko]);
 
   // 초기 1회 load는 유지, 주기 폴링(8s)은 탭 보일 때만 — useVisibleInterval이 hidden 시 정지.
-  useEffect(() => {
-    void loadRecent();
-    void loadActive();
-  }, [loadActive, loadRecent]);
-  useVisibleInterval(() => {
-    void loadActive(true);
-    void loadRecent(true);
-  }, POLL_MS);
+  const initialLoad = useCallback(() => Promise.all([loadActive(), loadRecent()]), [loadActive, loadRecent]);
+  useVisibleInterval(() => Promise.all([loadActive(true), loadRecent(true)]), POLL_MS, { initial: initialLoad });
 
   const runningCount = recent.filter((task) => task.originChatId && active.has(task.originChatId)).length;
   const pageCount = Math.max(1, Math.ceil(recent.length / PAGE_SIZE));

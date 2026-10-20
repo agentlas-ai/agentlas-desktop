@@ -54,7 +54,7 @@ import { createDegenerateOutputDetector, degenerateOutputReceipt, WORKER_OUTPUT_
 import { graphEffectItemsHeldSummary, graphEffectItemsPromptBlock } from "../one/graph-effect-items";
 import { claimInvocationRunOwner, invocationRunOwners } from "../store/invocation-run-owners";
 import { sameMethodAttemptLimit, MAX_SAME_METHOD_STARTS, type WorkUnit } from "../../shared/work-recovery";
-import { GraphWorkRecovery, type GraphWorkRecoveryScope } from "./work-recovery";
+import { GraphWorkRecovery, WorkRecoveryRefused, type GraphWorkRecoveryScope } from "./work-recovery";
 import { hostRunChildrenEnded } from "../runtime/spawn-registry";
 import { listAutomationGraphReconciliations } from "../store/graph-reconciliation";
 import { runGraphMcpCall, projectGraphMcpArguments } from "./mcp-call";
@@ -1189,8 +1189,9 @@ const EVAL_REWORK_STOP_REASONS = [
   "eval_rework_unrecorded",
 ] as const;
 export type EvalReworkStopReason = (typeof EVAL_REWORK_STOP_REASONS)[number];
-/** Why a failed run must not be retried automatically: a check that cannot change, or an interrupted effect. */
-export type GraphRetryStopReason = EvalReworkStopReason | "run_interrupted_effect";
+/** Why a failed run must not be retried automatically: a check that cannot change, an interrupted effect, or a code
+ * step whose recovery refused it on this occurrence's durable work unit. */
+export type GraphRetryStopReason = EvalReworkStopReason | "run_interrupted_effect" | "work_recovery_refused";
 export type EvalReworkPlan = {
   /** Steps on every path from what the check reads back to the check, in graph order. */
   reworkNodeIds: string[];
@@ -4449,7 +4450,8 @@ export async function runGraph(
         }
         let previousCodeRun: Awaited<ReturnType<typeof runCodeStep>> | undefined;
         let codeRecoveryBlocked = false;
-        const admitCodeStart = (previous?: Awaited<ReturnType<typeof runCodeStep>>) => {
+        let inheritedCodeRefusal: WorkRecoveryRefused | null = null;
+        const admitCodeStart = (previous?:Awaited<ReturnType<typeof runCodeStep>>) => {
           assertFiniteCurrent();
           if (dryRun) return;
           const scope = commonScopes.get(node.id) ?? codeScope;
@@ -4468,7 +4470,12 @@ export async function runGraph(
             commonUnits.set(node.id, unit);
             if (verdict.action !== "retry") { codeRecoveryBlocked = true; throw new Error(`work_recovery_${verdict.reason}`); }
           }
-          commonUnits.set(node.id, commonRecovery.begin(unit, commonFacts(node)));
+          try { commonUnits.set(node.id, commonRecovery.begin(unit, commonFacts(node))); }
+          catch (error) {
+            // A unit an earlier run of this occurrence left behind: every redelivery or resume reads the same one.
+            if (error instanceof WorkRecoveryRefused && unit.state !== "ready" && unit.ownerEpoch !== runId) inheritedCodeRefusal = error;
+            throw error;
+          }
         };
         const runOnce = (script: string) => { assertFiniteCurrent(); return runCodeStep({
           code: script, lang,
@@ -4501,6 +4508,16 @@ export async function runGraph(
           catch (error) {
             if (!codeRecoveryBlocked && !(error instanceof Error && error.message.startsWith("work_recovery_"))) throw error;
             codeRecoveryBlocked = true;
+            /*
+             * The refusal read only the work unit an earlier run of this occurrence left and its last observation; the next
+             * redelivery or resume reads the same ones and is refused the same way (failed unit, no observation of its last
+             * attempt), and each redelivery would add a strategy reflection. Not typed when a stop
+             * or this run's budget took part in the decision: those can change.
+             */
+            if (inheritedCodeRefusal && !runSignal.aborted && budgetGuard(node) === null) {
+              automaticRetryStop ??= { nodeId: node.id, reasonCode: "work_recovery_refused",
+                fingerprint: inheritedCodeRefusal.decision.reason };
+            }
             return { ok: false, isolation: previousCodeRun?.isolation ?? "process-isolated",
               reason: L("이 단계의 같은 방법 실행 한도에 도달했거나 앞선 결과를 아직 확인하지 못했습니다.",
                 "This step reached its method limit or its earlier outcome is still unconfirmed.") } as Awaited<ReturnType<typeof runCodeStep>>;

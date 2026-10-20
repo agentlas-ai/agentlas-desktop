@@ -6,6 +6,7 @@ import {
   LiveDocumentError, openLiveDocument, saveLiveDocument,
 } from "./store";
 import { renderLiveDocument } from "./render";
+import { registerAppControlDomainIpc } from "../app-control/ipc-registry";
 
 /*
  * Main-side bridge for the Document rail tab. The renderer never names a path: a file reaches a session only through
@@ -51,6 +52,19 @@ async function startWatching(): Promise<void> {
   }
 }
 
+/**
+ * liveDocument:render is a read that has to work without an owner window: a background or unattended review (window closed,
+ * hidden, or never loaded) still needs the pictures, and only Main can take them. It is registered as an app-control domain
+ * handler, so app.call (and the daemon's request over the device bridge) reaches it without a live interaction window, while
+ * the renderer's own invoke keeps the trusted-sender check. Production registers it here and the gate uses this same function.
+ */
+export function registerLiveDocumentRenderIpc(input: { ipc: Pick<IpcMain, "handle">; assertTrustedSender(event: IpcMainInvokeEvent): void }): void {
+  const { ipc, assertTrustedSender } = input;
+  const trusted: Pick<IpcMain, "handle"> = { handle: (channel, listener) => ipc.handle(channel, (event, ...args) => { assertTrustedSender(event); return listener(event, ...args); }) };
+  registerAppControlDomainIpc(trusted, "liveDocument:render", (sessionId: unknown, from?: unknown, count?: unknown) =>
+    renderLiveDocument(id(sessionId), { from: Number.isSafeInteger(from) ? from : undefined, count: Number.isSafeInteger(count) ? count : undefined }));
+}
+
 export function registerLiveDocumentIpc(input: { ipc: Pick<IpcMain, "handle">; assertTrustedSender(event: IpcMainInvokeEvent): void }): void {
   const { ipc, assertTrustedSender } = input;
   void startWatching();
@@ -74,10 +88,7 @@ export function registerLiveDocumentIpc(input: { ipc: Pick<IpcMain, "handle">; a
       throw error;
     }
   });
-  ipc.handle("liveDocument:render", async (event, sessionId: unknown) => {
-    assertTrustedSender(event);
-    return renderLiveDocument(id(sessionId));
-  });
+  registerLiveDocumentRenderIpc({ ipc, assertTrustedSender });
   ipc.handle("liveDocument:snapshot", async (event, sessionId: unknown) => {
     assertTrustedSender(event);
     try { return await liveDocumentSnapshot(id(sessionId)); } catch (error) { if (error instanceof LiveDocumentError) return null; throw error; }

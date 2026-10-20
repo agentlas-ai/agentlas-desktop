@@ -64,10 +64,10 @@ async function syncDirectoryBestEffort(directory: string): Promise<void> {
 
 async function atomicJson(file: string, value: unknown): Promise<void> {
   const temporary = `${file}.${randomUUID()}.tmp`;
-  const handle = await fs.open(temporary, "wx", 0o600);
-  try { await handle.writeFile(JSON.stringify(value), "utf8"); await handle.sync(); }
-  finally { await handle.close(); }
   try {
+    const handle = await fs.open(temporary, "wx", 0o600);
+    try { await handle.writeFile(JSON.stringify(value), "utf8"); await handle.sync(); }
+    finally { await handle.close(); }
     await fs.rename(temporary, file);
     await syncDirectoryBestEffort(path.dirname(file));
   } finally { await fs.unlink(temporary).catch((error) => { if (!isMissing(error)) throw error; }); }
@@ -75,6 +75,85 @@ async function atomicJson(file: string, value: unknown): Promise<void> {
 
 async function readJson(file: string): Promise<unknown> {
   return JSON.parse(await fs.readFile(file, "utf8"));
+}
+
+// A denied/unavailable native access pauses automatic work for the whole
+// configured service while any failing process lives. Each process owns its
+// own marker, so another failing host cannot replace a still-live owner.
+// Explicit exact-resource retry bypasses this check only for its own call.
+const pausedKeychainServices = new Set<string>();
+type ServicePause = { schemaVersion: 1; serviceHash: string; state: "paused"; pid: number; instanceId: string };
+
+function servicePauseLocation(service: string): string {
+  if (requireConfiguredInstallIdentity().keychainService !== service) throw invalid();
+  return userDataPath("credential-recovery-v1", hash(service), "service-pauses-v1");
+}
+
+async function servicePauseActive(directory: string, service: string): Promise<boolean> {
+  try {
+    const stat = await fs.lstat(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw invalid();
+    const names = await fs.readdir(directory);
+    let active = false;
+    for (const name of names) {
+      const temporary = /^(.+)\.json\.(.+)\.tmp$/.exec(name);
+      if (temporary && UUID.test(temporary[1]) && UUID.test(temporary[2])) {
+        // An atomicJson writer may still be filling this exact temporary file.
+        // Ignore only regular owned temp names, never links or arbitrary files.
+        try {
+          const entry = await fs.lstat(path.join(directory, name));
+          if (!entry.isFile() || entry.isSymbolicLink()) throw invalid();
+        } catch (error) { if (!isMissing(error)) throw error; }
+        continue;
+      }
+      const owner = /^(.+)\.json$/.exec(name);
+      if (!owner || !UUID.test(owner[1])) throw invalid();
+      const file = path.join(directory, name);
+      const entry = await fs.lstat(file).catch(() => { throw invalid(); });
+      if (!entry.isFile() || entry.isSymbolicLink()) throw invalid();
+      const row = await readJson(file).catch(() => { throw invalid(); }) as ServicePause;
+      if (!row || Object.keys(row).sort().join(",") !== "instanceId,pid,schemaVersion,serviceHash,state"
+        || row.schemaVersion !== 1 || row.serviceHash !== hash(service) || row.state !== "paused"
+        || !Number.isSafeInteger(row.pid) || row.pid <= 0 || row.instanceId !== owner[1]) throw invalid();
+      // PID reuse or an inaccessible owner is uncertain, so keep the pause.
+      // Only ESRCH proves death; do not infer it from age or delete its marker.
+      try { process.kill(row.pid, 0); active = true; }
+      catch (error) { if ((error as { code?: string })?.code !== "ESRCH") active = true; }
+    }
+    return active;
+  } catch (error) {
+    if (isMissing(error)) return false;
+    throw invalid();
+  }
+}
+
+/** Check at actual native dispatch, including requests queued before failure.
+ * Explicit means a deliberate retry of this one resource, never a service reset. */
+export async function assertKeychainServiceAvailable(service: string, explicit = false): Promise<void> {
+  let directory: string;
+  try { directory = servicePauseLocation(service); } catch { throw invalid(); }
+  if (pausedKeychainServices.has(directory) && !explicit) throw new CredentialRecoveryStateError("keychain_unavailable");
+  let paused: boolean;
+  try { paused = await servicePauseActive(directory, service); }
+  catch (error) { pausedKeychainServices.add(directory); throw error; }
+  // Observing another host's valid pause must not make our local latch sticky.
+  if (!explicit && (paused || pausedKeychainServices.has(directory))) throw new CredentialRecoveryStateError("keychain_unavailable");
+}
+
+/** Call only after a native rejection/timeout, never for missing credentials or
+ * a recovery-lock conflict. Latch before I/O so persistence failure still stops
+ * this process. Markers contain process metadata, never account names or values. */
+export async function recordKeychainServiceFailure(service: string): Promise<void> {
+  let directory: string;
+  try { directory = servicePauseLocation(service); } catch { throw invalid(); }
+  pausedKeychainServices.add(directory);
+  try {
+    await servicePauseActive(directory, service); // Preserve malformed evidence rather than overwriting it.
+    await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    await atomicJson(path.join(directory, `${instanceId}.json`), {
+      schemaVersion: 1, serviceHash: hash(service), state: "paused", pid: process.pid, instanceId,
+    } satisfies ServicePause);
+  } catch { throw invalid(); }
 }
 
 function validOwner(value: unknown): value is Owner {

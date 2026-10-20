@@ -62,7 +62,8 @@ export interface SessionCompactionInput {
   previous: SessionCheckpoint | null;
   task: SessionTaskBoundary | null;
   rows: ChatHistoryEntry[];
-  sourceEvents: Array<{ eventId: string; seq: number; role: string; text: string; turnSummary?: string }>;
+  /** `channel` is where the event was spoken in a shared session (agent-context.ts payload `channel`): provenance for a host-side filter, never model input. */
+  sourceEvents: Array<{ eventId: string; seq: number; role: string; text: string; turnSummary?: string; channel?: string }>;
   /** Exact host-selected brain adapter; this does not grant execution tools. */
   runtimeSelection?: RuntimeSelection;
   signal?: AbortSignal;
@@ -77,7 +78,7 @@ async function defaultCompactor(input: SessionCompactionInput): Promise<SessionC
   const data = JSON.stringify({ task: input.task, previous: input.previous ? {
     state: input.previous.state, exactConstraints: input.previous.exactConstraints,
     artifactRefs: input.previous.artifactRefs, unresolvedToolRefs: input.previous.unresolvedToolRefs,
-  } : null, sourceEvents: input.sourceEvents.map(source => ({ ...source,
+  } : null, sourceEvents: input.sourceEvents.map(({ channel: _channel, ...source }) => ({ ...source,
     text: source.role === "user" ? source.text : source.turnSummary ?? excerpt(source.text),
     ...(source.role === "user" ? {} : { representation: source.turnSummary ? "model-turn-summary" : "historical-output-excerpt" }) })),
     rows: input.rows.filter(row => !input.sourceEvents.some(source => source.eventId === (row.durableMessageId ?? row.id)))
@@ -132,7 +133,8 @@ function sourceRows(snapshot: AgentContextSnapshot) {
   return snapshot.entries.flatMap(entry => entry.kind === "message" && typeof entry.payload.text === "string"
     && typeof entry.payload.role === "string" && !entry.payload.hostAuthored
     ? [{ eventId: entry.eventId, seq: entry.seq, role: entry.payload.role, text: entry.payload.text,
-      ...(typeof entry.payload.turnSummary === "string" ? { turnSummary: entry.payload.turnSummary } : {}) }] : []);
+      ...(typeof entry.payload.turnSummary === "string" ? { turnSummary: entry.payload.turnSummary } : {}),
+      ...(typeof entry.payload.channel === "string" ? { channel: entry.payload.channel } : {}) }] : []);
 }
 const compactCheckpoint = (cp: SessionCheckpoint | null): cp is SessionCheckpoint => Boolean(cp && cp.mode !== "verbatim");
 function validState(value: SessionContinuationState, ids: Set<string>, ownerIds: Set<string>): boolean {

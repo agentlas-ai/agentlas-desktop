@@ -5,7 +5,7 @@
 //   1. observation — every empty toolchain_search records its sentence (any host, any runtime: the host dispatch
 //      writes it, not the runtime's event stream, because claude-code events carry no tool arguments);
 //   2. evidence — the tool steps that followed in the same run, classed runtime-independently (shared/toolchain.ts);
-//   3. host gate — sentence cluster × shared steps × separate days (shared/toolchain-detector.ts), minus signals
+//   3. host gate — sentence cluster × agreeing tool flow × enough distinct runs and sentences (shared/toolchain-detector.ts), minus signals
 //      already judged;
 //   4. judgment — the toolchain-scout system agent: capability / not_common / covered, with a request for the generalizer;
 //   5. authoring — the existing generalizer compares the full catalog (reuse / new_version / new_asset) and saves a draft.
@@ -26,7 +26,9 @@ import { generateToolchain } from "./generalizer";
 import { listToolchainAssets, withdrawToolchainAsset } from "./assets";
 import type { ToolchainAsset, ToolchainGenerationResult } from "../../shared/toolchain-asset";
 import { markToolchainTrialRepairRequested, retiredToolchainTrials } from "./trial";
-import { readToolchainSearchMisses, type ToolchainSearchMiss } from "./detector-observations";
+import { pairGraphObservations, readGraphStructureObservations, readToolchainSearchMisses,
+  type ToolchainSearchMiss } from "./detector-observations";
+import { detectGraphStructureSignals, type GraphStructureMember } from "../../shared/graph-structure-signals";
 
 export { recordToolchainSearchMiss } from "./detector-observations";
 
@@ -178,21 +180,35 @@ async function pass(options: { now?: Date; force?: boolean; signal?: AbortSignal
     return result;
   };
   const previous = toolchainDetectorState();
-  if (!options.force && previous && now.getTime() - Date.parse(previous.at) < PASS_INTERVAL_MS) return { ...report, reason: "interval" };
+  // The daily spacing limits model calls (judgment, generation, repair). A pass that asked no model (too few observations,
+  // nothing new to judge, no meaning embedding) costs nothing and must not hold the next one off: the first pass runs ten
+  // minutes after launch, before a fresh install has any observations, and used to block the whole next day.
+  const spentDay = previous !== null && (previous.outcome === "judged" || previous.outcome === "failed");
+  if (!options.force && previous && spentDay && now.getTime() - Date.parse(previous.at) < PASS_INTERVAL_MS) return { ...report, reason: "interval" };
   // A draft that failed its real-use trials is repaired before any new signal: one generalizer call, then done.
   const repaired = await repairRetiredTrial(options.signal);
   if (repaired) return finish(repaired);
   const since = new Date(now.getTime() - TOOLCHAIN_DETECTOR_POLICY.windowDays * 86_400_000).toISOString();
-  const misses = readToolchainSearchMisses(since, TOOLCHAIN_DETECTOR_POLICY.maxObservations);
-  report.observations = misses.length;
-  if (misses.length < TOOLCHAIN_DETECTOR_POLICY.minMembers) return finish({ outcome: "no_signal", reason: "too_few_observations" });
-  const probe = autoLocalEmbedding(misses[0].task);
+  // Graphs One saved for one piece of work are observations too (one/ephemeral-graphs.ts): purpose sentence plus
+  // structure, never the name. A search miss the same occurrence left just before is folded into its graph.
+  const { misses, graphs } = pairGraphObservations(readToolchainSearchMisses(since, TOOLCHAIN_DETECTOR_POLICY.maxObservations),
+    readGraphStructureObservations(since, TOOLCHAIN_DETECTOR_POLICY.maxObservations));
+  report.observations = misses.length + graphs.length;
+  if (report.observations < TOOLCHAIN_DETECTOR_POLICY.minMembers) return finish({ outcome: "no_signal", reason: "too_few_observations" });
+  const probe = autoLocalEmbedding((misses[0] ?? graphs[0]).task);
   // The hashing fallback has no meaning similarity; clustering on it would invent or hide repeats.
   if (probe.degraded) return finish({ outcome: "skipped", reason: "semantic_embedding_unavailable" });
   const observations: DetectorObservation[] = misses.map(miss => ({ id: miss.id, task: miss.task, chatId: miss.chatId, at: miss.at,
     ...traceAfter(miss), vector: autoLocalEmbedding(miss.task).vector }));
+  // Graphs are grouped by structure, not by sentence (shared/graph-structure-signals.ts): their purposes name the item
+  // they were made for, and their trace is their steps rather than the tool calls that followed a search.
+  const graphMembers: GraphStructureMember[] = graphs.map(graph => ({ id: graph.id, task: graph.task, chatId: graph.chatId, at: graph.at,
+    runId: null, trace: graph.steps.slice(0, TOOLCHAIN_DETECTOR_POLICY.traceLength), vector: autoLocalEmbedding(graph.task).vector,
+    fingerprint: graph.fingerprint }));
   const verdicts = readVerdicts();
-  const signals = detectRepeatSignals(observations).filter(signal => !signalAlreadyJudged(signal, verdicts, now.getTime()));
+  const signals = [...detectRepeatSignals(observations), ...detectGraphStructureSignals(graphMembers)]
+    .sort((a, b) => b.runs - a.runs || b.flowCohesion - a.flowCohesion)
+    .filter(signal => !signalAlreadyJudged(signal, verdicts, now.getTime()));
   report.signals = signals.length;
   const signal = signals[0];
   if (!signal) return finish({ outcome: "no_signal", reason: null });
@@ -254,7 +270,7 @@ async function pass(options: { now?: Date; force?: boolean; signal?: AbortSignal
 }
 
 let started = false;
-/** Main only. First pass 10 minutes after start, then checked every 6 hours; a pass runs at most once a day. */
+/** Main only. First pass 10 minutes after start, then checked every 6 hours; a pass that calls a model runs at most once a day. */
 export function startToolchainDetector(isStopping: () => boolean): void {
   if (started) return;
   started = true;

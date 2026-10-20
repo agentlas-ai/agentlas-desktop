@@ -1,58 +1,77 @@
-// 탭이 보일 때만 도는 폴링 훅 — 숨김(hidden) 동안 setInterval을 멈춰 백그라운드 폴링 폭풍을 막는다.
-// 시맨틱: visible이면 주기적으로 fn() 실행, hidden이면 정지, visible 복귀 시 즉시 1회 실행 후 재시작.
-// 초기 load는 호출부가 따로 하므로(중복 실행 방지) 마운트 시점엔 tick하지 않고 start만 한다.
+// Visible-only polling. Each async read settles before its next interval starts.
+// An optional initial read shares the same ownership as timer and visibility refreshes.
 "use client";
 import { useEffect, useRef } from "react";
 
 export function useVisibleInterval(
-  fn: () => void,
+  fn: () => void | Promise<unknown>,
   ms: number,
-  opts?: { immediate?: boolean },
+  opts?: { immediate?: boolean; enabled?: boolean; initial?: () => void | Promise<unknown> },
 ): void {
-  // fn을 ref로 최신화해 stale closure를 막는다(deps는 [ms]만 두기 위함).
   const fnRef = useRef(fn);
   fnRef.current = fn;
-
-  // immediate도 ref로 잡아 deps에서 제외(주기/리스너 재설치를 ms 변경에만 묶는다).
   const immediateRef = useRef(opts?.immediate);
   immediateRef.current = opts?.immediate;
+  // Begun reads are not cancelled: callers still fence their async state updates.
+  // Preserve ownership across an interval change while an older read settles.
+  const inFlight = useRef<Promise<unknown> | null>(null);
 
+  const enabled = opts?.enabled !== false;
+  const initial = opts?.initial;
+  const initialOwner = useRef(initial);
   useEffect(() => {
-    if (typeof document === "undefined") return;
-
+    // A new data owner must not wait for an old owner's unresponsive bridge.
+    // A period/visibility change keeps ownership of the same ongoing read.
+    if (initialOwner.current !== initial) {
+      initialOwner.current = initial;
+      inFlight.current = null;
+    }
+    if (!enabled || typeof document === "undefined" || !Number.isFinite(ms) || ms <= 0) return;
     let timer: number | null = null;
-
+    let disposed = false;
+    let waiting = false;
+    const visible = () => !disposed && document.visibilityState !== "hidden";
     const stop = () => {
-      if (timer !== null) {
-        window.clearInterval(timer);
-        timer = null;
+      if (timer !== null) window.clearTimeout(timer);
+      timer = null;
+    };
+    const schedule = () => {
+      stop();
+      if (visible()) timer = window.setTimeout(() => { timer = null; void tick(); }, ms);
+    };
+    const tick = async (callback?: () => void | Promise<unknown>) => {
+      if (!visible()) return;
+      stop();
+      if (inFlight.current) {
+        // Focus/visibility bursts collapse into one read after the current one.
+        if (!waiting) {
+          waiting = true;
+          const resume = () => { waiting = false; if (visible()) void tick(callback); };
+          void inFlight.current.then(resume, resume);
+        }
+        return;
+      }
+      const pending = Promise.resolve().then(() => visible() ? (callback ?? fnRef.current)() : undefined);
+      inFlight.current = pending;
+      try { await pending; }
+      catch { /* The caller owns its error presentation; the next visible tick retries. */ }
+      finally {
+        if (inFlight.current === pending) inFlight.current = null;
+        if (visible()) schedule();
       }
     };
-
-    const start = () => {
-      stop();
-      timer = window.setInterval(() => fnRef.current(), ms);
-    };
-
     const onVisibility = () => {
-      if (document.visibilityState === "hidden") {
-        // 숨김: 타이머 정지(틱 폭주 차단).
-        stop();
-      } else {
-        // 복귀: immediate가 false가 아니면 즉시 1회 실행 후 재시작.
-        if (immediateRef.current !== false) fnRef.current();
-        start();
-      }
+      if (!visible()) stop();
+      else if (immediateRef.current !== false) void tick();
+      else schedule();
     };
-
     document.addEventListener("visibilitychange", onVisibility);
-
-    // 마운트 시 visible이면 start만(초기 load는 호출부 담당 → 여기서 tick하지 않음).
-    if (document.visibilityState !== "hidden") start();
-
+    if (initial) void tick(initial);
+    else schedule();
     return () => {
-      document.removeEventListener("visibilitychange", onVisibility);
+      disposed = true;
       stop();
+      document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [ms]);
+  }, [ms, enabled, initial]);
 }

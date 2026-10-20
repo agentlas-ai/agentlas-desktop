@@ -557,7 +557,7 @@ export function computeAgentPackageHash(agentId: string, requestedTarget: string
 
 
  */
-const AGENT_SKILL_ROOTS = ["skills", ".claude/skills", ".codex/skills", ".gemini/skills", ".agents/skills"];
+export const AGENT_SKILL_ROOTS = ["skills", ".claude/skills", ".codex/skills", ".gemini/skills", ".agents/skills"];
 
 /**
  * The package's skills, one entry per skill name, first root wins.

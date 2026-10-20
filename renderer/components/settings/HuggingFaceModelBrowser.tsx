@@ -95,12 +95,16 @@ export function HuggingFaceModelBrowser({ ko, onInstalled, onOperationStarted }:
   useEffect(() => {
     if (!operation) return;
     let disposed = false;
+    let pending = false;
     const refresh = async () => {
+      if (pending || document.visibilityState === "hidden") return;
+      pending = true;
       try {
         const snapshot = await ipc()?.localModelHub.snapshot();
         const row = snapshot?.modelProgress.find(item => item.packageId === operation.packageId);
         if (!disposed && row) setProgress({ downloaded: row.downloadedBytes, total: row.totalBytes, state: row.state });
       } catch { /* Download result retains the authoritative outcome. */ }
+      finally { pending = false; }
     };
     void refresh(); const timer = window.setInterval(() => void refresh(), 600);
     return () => { disposed = true; window.clearInterval(timer); };

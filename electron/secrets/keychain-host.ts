@@ -20,7 +20,7 @@
 // release callers. A timed-out native worker retains its slot until it really ends.
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
-import { runWithCredentialRecovery } from "./recovery-state";
+import { assertKeychainServiceAvailable, recordKeychainServiceFailure, runWithCredentialRecovery } from "./recovery-state";
 
 export type KeychainCredential = { account: string };
 
@@ -32,6 +32,40 @@ const MAX_TIMEOUT_MS = 120_000;
 // Successful reads are cached by vault; this layer only coalesces native work.
 const nativeRequests = new Map<string, Promise<unknown>>();
 const failedRequests = new Set<string>();
+const failedServices = new Set<string>();
+const serviceFailures = new Map<string, Promise<void>>();
+const recoveredResources = new Set<string>();
+function recoveryPermitKey(service: string, operation: NativeOperation, account: string | null): string {
+  return JSON.stringify([service, operation === "list" ? "list" : "credential", account]);
+}
+const NATIVE_KEYCHAIN_DISABLED_FOR_TEST = process.env.AGENTLAS_E2E === "1" && process.env.AGENTLAS_E2E_KEYCHAIN !== "1";
+type NativeOperation = "read" | "list" | "write" | "delete";
+
+function assertNativeKeychainEnabled(operation: NativeOperation, account: string | null): void {
+  // Native Auth uses this broker directly rather than the auth/vault memory
+  // adapters. A default E2E run must not reach the OS through that sibling path.
+  if (NATIVE_KEYCHAIN_DISABLED_FOR_TEST) throw new KeychainUnavailableError(operation, account, "native keychain disabled for isolated test", true);
+}
+async function assertServiceAvailable(service: string, operation: NativeOperation, account: string | null, explicit: boolean): Promise<void> {
+  const permitted = explicit || recoveredResources.has(recoveryPermitKey(service, operation, account));
+  if (failedServices.has(service) && !permitted) throw new KeychainUnavailableError(operation, account, "automatic service access paused", true);
+  await assertKeychainServiceAvailable(service, permitted);
+}
+function pauseService(service: string): Promise<void> {
+  failedServices.add(service);
+  let pending = serviceFailures.get(service);
+  if (!pending) {
+    // Even a disk failure retains the in-process pause. Keep the native error
+    // as the request result rather than starting another credential attempt.
+    pending = recordKeychainServiceFailure(service).catch(() => undefined);
+    serviceFailures.set(service, pending);
+  }
+  return pending;
+}
+function nativeBindingUnavailable(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return code === "MODULE_NOT_FOUND" || code === "ERR_MODULE_NOT_FOUND" || code === "ERR_DLOPEN_FAILED";
+}
 
 
 
@@ -47,8 +81,17 @@ const failedRequests = new Set<string>();
 
 
 let nativeSlot: Promise<unknown> = Promise.resolve();
-function inProcessNative<T>(direct: () => Promise<T>): Promise<T> {
-  const run = nativeSlot.then(direct, direct);
+function inProcessNative<T>(service: string, operation: NativeOperation, account: string | null, direct: () => Promise<T>, explicit: boolean, expired: () => boolean = () => false): Promise<T> {
+  const dispatch = async () => {
+    if (expired()) throw new NativeObservationTimeout(operation, account);
+    // Recheck at dispatch: requests for other accounts were often already
+    // queued when the owner denied the first native prompt.
+    await assertServiceAvailable(service, operation, account, explicit);
+    if (expired()) throw new NativeObservationTimeout(operation, account);
+    try { return await direct(); }
+    catch (error) { recoveredResources.delete(recoveryPermitKey(service, operation, account)); await pauseService(service); throw error; }
+  };
+  const run = nativeSlot.then(dispatch, dispatch);
   nativeSlot = run.then(() => undefined, () => undefined);
   return run;
 }
@@ -57,22 +100,21 @@ function inProcessNative<T>(direct: () => Promise<T>): Promise<T> {
  * Security.framework. Keep the real worker in nativeSlot, discard late values,
  * and never dispatch a queued lookup after its caller's deadline expired. */
 async function observeInProcessNative<T>(
-  operation: "read" | "list",
+  operation: NativeOperation,
   account: string | null,
-  direct: () => Promise<T>,
+  direct: (expired: () => boolean) => Promise<T>,
+  service: string,
+  explicit: boolean,
 ): Promise<T> {
   let expired = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const failure = new NativeObservationTimeout(operation, account);
-  const native = inProcessNative(() => {
-    if (expired) throw failure;
-    return direct();
-  });
+  const native = inProcessNative(service, operation, account, () => direct(() => expired), explicit, () => expired);
   try {
     return await Promise.race([
       native,
       new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => { expired = true; reject(failure); }, keychainCallTimeoutMs());
+        timer = setTimeout(() => { expired = true; recoveredResources.delete(recoveryPermitKey(service, operation, account)); void pauseService(service); reject(failure); }, keychainCallTimeoutMs());
       }),
     ]);
   } finally {
@@ -85,6 +127,7 @@ function requestKey(operation: string, service: string, account: string): string
 }
 
 function sharedNativeRequest<T>(operation: "read" | "list", service: string, account: string, run: () => Promise<T>, explicit = false): Promise<T> {
+  assertNativeKeychainEnabled(operation, account || null);
   const key = requestKey(operation, service, account);
   const current = nativeRequests.get(key);
   if (current) return current as Promise<T>;
@@ -97,7 +140,10 @@ function sharedNativeRequest<T>(operation: "read" | "list", service: string, acc
   ));
   nativeRequests.set(key, started);
   void started.then(
-    () => { failedRequests.delete(key); if (nativeRequests.get(key) === started) nativeRequests.delete(key); },
+    () => {
+      if (explicit) recoveredResources.add(recoveryPermitKey(service, operation, account || null));
+      failedRequests.delete(key); if (nativeRequests.get(key) === started) nativeRequests.delete(key);
+    },
     () => {
       failedRequests.add(key);
       if (nativeRequests.get(key) === started) nativeRequests.delete(key);
@@ -143,7 +189,7 @@ export class KeychainUnavailableError extends Error {
 }
 
 class NativeObservationTimeout extends KeychainUnavailableError {
-  constructor(operation: "read" | "list", account: string | null) {
+  constructor(operation: NativeOperation, account: string | null) {
     super(operation, account, "native observation timed out", true);
   }
 }
@@ -258,25 +304,25 @@ export async function keychainGet(
   direct: () => Promise<string | null>,
   explicit = false,
 ): Promise<string | null> {
+  assertNativeKeychainEnabled("read", account);
   return sharedNativeRequest("read", service, account, async () => {
+    const readChild = async () => {
+      const result = await runKeychainChild("get", service, account, null);
+      if (result.error) throw new KeychainUnavailableError("read", account, result.error);
+      return result.value ?? null;
+    };
     if (keychainPromptsAreAnswerable()) {
-      try { return await observeInProcessNative("read", account, direct); }
-      catch (error) {
-        // The native call is still owned by its slot. Starting a fallback here
-        // would duplicate the blocked access and bypass its recovery marker.
-        if (error instanceof NativeObservationTimeout) throw error;
-        // A signed GUI build can still lose the in-process keytar binding after
-        // an update while the same signed executable succeeds in isolated Node
-        // mode. Keep the ordinary prompt-capable path first, then use the
-        // already bounded child boundary before latching this resource failed.
-        const fallback = await runKeychainChild("get", service, account, null);
-        if (!fallback.error) return fallback.value ?? null;
-        throw new KeychainUnavailableError("read", account, `native request rejected; isolated fallback: ${fallback.error}`);
-      }
+      return observeInProcessNative("read", account, async (isExpired) => {
+        try { return await direct(); }
+        catch (error) {
+          // An unknown native rejection can be a denied OS prompt. A second
+          // executable is not a permission retry. Only loader codes may fall back.
+          if (!isExpired() && nativeBindingUnavailable(error)) return readChild();
+          throw new KeychainUnavailableError("read", account, "native access rejected");
+        }
+      }, service, explicit);
     }
-    const result = await runKeychainChild("get", service, account, null);
-    if (result.error) throw new KeychainUnavailableError("read", account, result.error);
-    return result.value ?? null;
+    return observeInProcessNative("read", account, readChild, service, explicit);
   }, explicit);
 }
 
@@ -297,15 +343,25 @@ export async function keychainSet(
   account: string,
   value: string,
   direct: () => Promise<void>,
+  explicit = false,
 ): Promise<void> {
-  await runWithCredentialRecovery({ operation: "read", service, account }, true, async () => {
+  assertNativeKeychainEnabled("write", account);
+  await runWithCredentialRecovery({ operation: "read", service, account }, explicit, async () => {
+    const writeChild = async () => {
+      const result = await runKeychainChild("set", service, account, value);
+      if (result.error) throw new KeychainUnavailableError("write", account, result.error);
+    };
     if (keychainPromptsAreAnswerable()) {
-      try { await inProcessNative(direct); return; }
-      catch { /* use the bounded isolated fallback below */ }
-    }
-    const result = await runKeychainChild("set", service, account, value);
-    if (result.error) throw new KeychainUnavailableError("write", account, result.error);
+      await observeInProcessNative("write", account, async (isExpired) => {
+        try { await direct(); }
+        catch (error) {
+          if (!isExpired() && nativeBindingUnavailable(error)) return writeChild();
+          throw new KeychainUnavailableError("write", account, "native access rejected");
+        }
+      }, service, explicit);
+    } else await observeInProcessNative("write", account, writeChild, service, explicit);
   });
+  if (explicit) recoveredResources.add(recoveryPermitKey(service, "read", account));
   failedRequests.delete(requestKey("read", service, account));
 }
 
@@ -313,37 +369,51 @@ export async function keychainDelete(
   service: string,
   account: string,
   direct: () => Promise<void>,
+  explicit = false,
 ): Promise<void> {
-  await runWithCredentialRecovery({ operation: "read", service, account }, true, async () => {
+  assertNativeKeychainEnabled("delete", account);
+  await runWithCredentialRecovery({ operation: "read", service, account }, explicit, async () => {
+    const deleteChild = async () => {
+      const result = await runKeychainChild("delete", service, account, null);
+      if (result.error) throw new KeychainUnavailableError("delete", account, result.error);
+    };
     if (keychainPromptsAreAnswerable()) {
-      try { await inProcessNative(direct); return; }
-      catch { /* use the bounded isolated fallback below */ }
-    }
-    const result = await runKeychainChild("delete", service, account, null);
-    if (result.error) throw new KeychainUnavailableError("delete", account, result.error);
+      await observeInProcessNative("delete", account, async (isExpired) => {
+        try { await direct(); }
+        catch (error) {
+          if (!isExpired() && nativeBindingUnavailable(error)) return deleteChild();
+          throw new KeychainUnavailableError("delete", account, "native access rejected");
+        }
+      }, service, explicit);
+    } else await observeInProcessNative("delete", account, deleteChild, service, explicit);
   });
+  if (explicit) recoveredResources.add(recoveryPermitKey(service, "read", account));
   failedRequests.delete(requestKey("read", service, account));
 }
 
-/** 계정 목록. 비밀 값은 자식이 아예 돌려주지 않는다 — 필요한 건 이름뿐이다. */
+/** Listing can access protected native values too; it shares the same pause. */
 export async function keychainListAccounts(
   service: string,
   direct: () => Promise<string[]>,
   explicit = false,
 ): Promise<string[]> {
+  assertNativeKeychainEnabled("list", null);
   return sharedNativeRequest("list", service, "", async () => {
+    const listChild = async () => {
+      const result = await runKeychainChild("find", service, "", null);
+      if (result.error) throw new KeychainUnavailableError("list", null, result.error);
+      return result.accounts ?? [];
+    };
     if (keychainPromptsAreAnswerable()) {
-      try { return await observeInProcessNative("list", null, direct); }
-      catch (error) {
-        if (error instanceof NativeObservationTimeout) throw error;
-        const fallback = await runKeychainChild("find", service, "", null);
-        if (!fallback.error) return fallback.accounts ?? [];
-        throw new KeychainUnavailableError("list", null, `native request rejected; isolated fallback: ${fallback.error}`);
-      }
+      return observeInProcessNative("list", null, async (isExpired) => {
+        try { return await direct(); }
+        catch (error) {
+          if (!isExpired() && nativeBindingUnavailable(error)) return listChild();
+          throw new KeychainUnavailableError("list", null, "native access rejected");
+        }
+      }, service, explicit);
     }
-    const result = await runKeychainChild("find", service, "", null);
-    if (result.error) throw new KeychainUnavailableError("list", null, result.error);
-    return result.accounts ?? [];
+    return observeInProcessNative("list", null, listChild, service, explicit);
   }, explicit);
 }
 

@@ -11,6 +11,7 @@ import { isInterruptedPartial } from "@shared/interrupted-partial";
 import { oneHistoryWindowStart, revealOneHistoryPage } from "@/lib/one-history-window";
 import { parseChatFileMessage } from "@/lib/chat-files";
 import { projectLatestRunArtifacts } from "@/lib/one-chat-outputs";
+import { newestTimelineRunId, useEarlierOutputs } from "@/lib/one-earlier-outputs";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import type { OneActivityArtifact } from "@/lib/one-activity";
 import { TaskSidePanel } from "../workspace/TaskSidePanel";
@@ -68,6 +69,9 @@ export function OneSplitPane({
   // (TaskSidePanel openRequest), the same as the full One view's Outputs button.
   const [railOpenRequest, setRailOpenRequest] = useState(0);
   const [artifacts, setArtifacts] = useState<OneActivityArtifact[]>([]);
+  // The run those outputs belong to: the earlier runs' outputs are everything else (the full view's "Earlier outputs").
+  const [newestRunId, setNewestRunId] = useState<string | null>(null);
+  const earlierOutputs = useEarlierOutputs({ chatId, newestRunId, newestItems: artifacts, enabled: railOpen });
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const chatIdRef = useRef(chatId);
   chatIdRef.current = chatId;
@@ -102,7 +106,7 @@ export function OneSplitPane({
     scrollAnchorRef.current = null;
     setMessages(null); setOldestVisibleId(null); setOlderCursor(null); setHasOlder(false);
     setLoadingOlder(false); setHistoryError(false); setDraft(""); setSending(false);
-    setRailOpen(false); setRailEmpty(false); setArtifacts([]);
+    setRailOpen(false); setRailEmpty(false); setArtifacts([]); setNewestRunId(null);
   }, [chatId]);
 
   useEffect(() => {
@@ -200,8 +204,9 @@ export function OneSplitPane({
           const items = await projectLatestRunArtifacts(api, runs);
           if (cancelled || chatIdRef.current !== chatId) return;
           setArtifacts(items);
+          setNewestRunId(newestTimelineRunId(runs));
         })
-        .catch(() => { if (!cancelled) setArtifacts([]); })
+        .catch(() => { if (!cancelled) { setArtifacts([]); setNewestRunId(null); } })
         .finally(() => { loading = false; });
     };
     load();
@@ -344,6 +349,7 @@ export function OneSplitPane({
         <div className={railOpen && !railEmpty ? styles.splitPaneRail : undefined}>
           <TaskSidePanel
             items={artifacts}
+            earlierOutputs={earlierOutputs}
             locale={locale}
             visible={railOpen}
             onClose={() => setRailOpen(false)}

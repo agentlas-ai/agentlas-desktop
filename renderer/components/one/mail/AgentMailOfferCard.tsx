@@ -21,7 +21,7 @@ import type { Locale } from "@/lib/i18n";
 import type { AgentMailStatus, AgentMailWaitlistReceipt } from "@shared/agent-mail";
 import { agentMailOffer, type AgentMailOffer } from "@shared/agent-mail-offer";
 import { openPricing } from "@/components/UpgradeCta";
-import { PLAN_CHANGED_EVENT } from "@/components/billing/PlanPickerModal";
+import { PLAN_CHANGED_EVENT } from "@/lib/plan-picker";
 import { OneMailIdentityPicker } from "./OneMailIdentityPicker";
 import { mailErrorText } from "./mailErrorText";
 import styles from "./AgentMailOfferCard.module.css";

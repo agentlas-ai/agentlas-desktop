@@ -228,7 +228,10 @@ export function callAgiReadTool(deps: AgiReadDeps, ctx: AgiReadContext, tool: st
       const path = deps.mainLogPath;
       if (!path || !agiReadPathAllowed(path) || basename(path) !== "main.log") return { ok: false, tool, code: "agi.read.log-unavailable" };
       const since = typeof args.since === "string" && Number.isFinite(Date.parse(args.since)) ? Date.parse(args.since) : 0;
-      const lines = readTail(path, 2 * 1024 * 1024).split(/\r?\n/);
+      let tail: string;
+      // A rotated, missing or unreadable log is an unavailable read, never an exception out of the model attempt.
+      try { tail = readTail(path, 2 * 1024 * 1024); } catch { return { ok: false, tool, code: "agi.read.log-unavailable" }; }
+      const lines = tail.split(/\r?\n/);
       const pattern = AGI_LOG_FAMILIES[family]!;
       const rows: Array<{ line: string }> = [];
       for (const line of lines) {

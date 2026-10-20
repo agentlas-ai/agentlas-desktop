@@ -3,19 +3,18 @@
 // + Electron 메뉴 → 라우터 브릿지.
 // + 자동 업데이트 배너 (downloading/downloaded 상태에서만 노출).
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { ProjectSidebar } from "./ProjectSidebar";
 import { ProjectSettingsHost } from "./ProjectSettingsHost";
 import { MenuBridge } from "./MenuBridge";
-import { ImportAgentsModal } from "./ImportAgentsModal";
-import TelegramOneDialog from "./connect/TelegramOneDialog";
 import { ipc, ipcEvents, updaterEvents } from "@/lib/ipc";
 import { SideNav } from "./SideNav";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { usePathname } from "next/navigation";
 import { registerRouter } from "@/lib/navigation";
-import { useAttention } from "@/lib/attention";
+import { usePendingConfirmationCount } from "@/lib/attention";
 import { AttentionCoveredSwitcherDot } from "./AttentionDot";
 import { useT } from "@/lib/i18n";
 import { IconLayers, IconBug, IconCheck } from "./Icon";
@@ -29,7 +28,6 @@ import { ScienceInstallExperience } from "./ScienceInstallExperience";
 import { SCIENCE_INSTALL_DISCOVERY_ENABLED } from "@/lib/science-install-entry";
 import { announceHubBookmarkChange } from "@/lib/hub-bookmark-events";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
-import { AgiBugReportDialog } from "./agi/AgiBugReport";
 import {
   isMultimodalJobActive,
   startMultimodalJobMonitor,
@@ -37,6 +35,33 @@ import {
   visibleMultimodalJobs,
   type MultimodalJob,
 } from "@/lib/multimodal/jobs";
+
+import {
+  getTelegramOneDialogSnapshot,
+  getTelegramOneDialogServerSnapshot,
+  subscribeTelegramOneDialog,
+} from "@/lib/telegram-one-dialog";
+
+const ImportAgentsModal = dynamic(() => import("./ImportAgentsModal").then((module) => module.ImportAgentsModal), { ssr: false });
+const TelegramOneDialog = dynamic(() => import("./connect/TelegramOneDialog"), { ssr: false });
+const AgiBugReportDialog = dynamic(() => import("./agi/AgiBugReport").then((module) => module.AgiBugReportDialog), { ssr: false });
+
+// Load optional dialogs on their first request and retain them after closing:
+// a background connection or an unfinished report must keep its existing state.
+function useHasOpened(open: boolean): boolean {
+  const [requested, setRequested] = useState(open);
+  useEffect(() => { if (open) setRequested(true); }, [open]);
+  return open || requested;
+}
+
+function TelegramDialogHost() {
+  const open = useSyncExternalStore(
+    subscribeTelegramOneDialog,
+    () => getTelegramOneDialogSnapshot().open,
+    () => getTelegramOneDialogServerSnapshot().open,
+  );
+  return useHasOpened(open) ? <TelegramOneDialog /> : null;
+}
 
 /**
  * 오너가 부르지 않은 창(페이지 투어·Science 소개·에이전트 가져오기)을 저절로 여는가.
@@ -63,6 +88,7 @@ function sameJobList(prev: MultimodalJob[], next: MultimodalJob[]): boolean {
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [importOpen, setImportOpen] = useState(false);
+  const importRequested = useHasOpened(importOpen);
   const [activeChatCount, setActiveChatCount] = useState<number | null>(null);
   const [multimodalJobs, setMultimodalJobs] = useState<MultimodalJob[]>([]);
   const [appUpdateBusy, setAppUpdateBusy] = useState(true);
@@ -73,7 +99,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const { locale } = useT();
   // 승인 대기 수는 전역 주의 저장소가 센다(폴링·독 배지 포함 — 라우트 트리와 무관하게 돈다).
   // 대시보드 항목의 알림 수는 예전 그대로 "대화 질문(승인 인박스)"만 센다.
-  const pendingConfirmations = useAttention(pathname).items.filter((item) => item.key.startsWith("confirm:")).length;
+  const pendingConfirmations = usePendingConfirmationCount();
 
   // navigate() 헬퍼가 hard navigation(window.location) 대신 soft navigation을
   // 쓰도록 App Router 인스턴스를 등록한다. static export 셸에서 hard navigation은
@@ -274,7 +300,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         locale={locale}
         onOpen={() => router.push("/dashboard")}
       />
-      <ImportAgentsModal
+      {importRequested && <ImportAgentsModal
         open={importOpen}
         onClose={() => setImportOpen(false)}
         onImported={() => {
@@ -285,10 +311,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             // ignore
           }
         }}
-      />
+      />}
       {/* 커넥트 ▸ 텔레그램은 페이지가 아니라 팝업이다. 사이드바에서만 열리므로
           셸 안에 한 번만 마운트한다. */}
-      <TelegramOneDialog />
+      <TelegramDialogHost />
       <GuideFab
         avoidComposer={pathname.startsWith("/workspace/task")}
         onReplayTour={replayCurrentPageTour}
@@ -400,6 +426,7 @@ function GuideFab({
   const [open, setOpen] = useState(false);
   const [hidden, setHidden] = useState(false);
   const [bugOpen, setBugOpen] = useState(false);
+  const bugRequested = useHasOpened(bugOpen);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const composerLift = useComposerLift(Boolean(avoidComposer) && !hidden);
@@ -503,7 +530,7 @@ function GuideFab({
         </div>
       )}
       {/* "결함 보고" (owner D5): the same preview-then-send path as the AGI chip; nothing leaves without Send. */}
-      <AgiBugReportDialog open={bugOpen} onClose={() => setBugOpen(false)} draft={null} locale={ko ? "ko" : "en"} />
+      {bugRequested && <AgiBugReportDialog open={bugOpen} onClose={() => setBugOpen(false)} draft={null} locale={ko ? "ko" : "en"} />}
       <div style={{ position: "relative", width: 46, height: 46 }}>
         <button
           ref={triggerRef}

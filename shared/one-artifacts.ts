@@ -73,6 +73,43 @@ export function isOneArtifactPreviewRefusalV1(value: unknown): value is OneArtif
     && isOneArtifactPreviewRefusalCode(value.code);
 }
 
+/**
+ * One output an earlier run of a conversation saved, as the Outputs rail's "Earlier outputs" section lists it.
+ *
+ * It carries what the rail already consumes for an output (the exact binding identity, the name, the kind, the size) and
+ * when it was saved. The name is the base name of the sealed file. It never carries a path, a hash or file content: opening an
+ * entry goes through the same exact-binding preview check as every other output (`oneArtifacts.issuePreview`).
+ */
+export interface OneEarlierOutputV1 extends OneArtifactBindingRequestV1 {
+  label: string;
+  type: "document" | "spreadsheet" | "image" | "video" | "audio" | "archive" | "data" | "other";
+  sizeBytes: number;
+  /** When this save was sealed (ISO time), when the binding carries a readable time. */
+  savedAt?: string;
+}
+
+/** Which earlier outputs of a conversation to read: the newest run is the one the rail already lists, so it is left out. */
+export interface OneEarlierOutputsRequestV1 {
+  chatId: string;
+  /** The run whose outputs the rail lists. Its entries, and any earlier save of the same entry, are not repeated. */
+  newestRunId: string;
+  /** Entries already received, in the order Main answers (newest first). */
+  offset?: number;
+  /** At most this many entries (1..200, default 100). */
+  limit?: number;
+}
+
+export interface OneEarlierOutputsPageV1 {
+  /** Newest save first; one entry per rail entry (kind, Task, chat, name), holding its newest save outside the newest run. */
+  items: OneEarlierOutputV1[];
+  /** Every entry Main found, not only this page. A floor when `truncated`. */
+  total: number;
+  /** The offset to ask for next, or null when this page holds the last entry. */
+  nextOffset: number | null;
+  /** The read stopped at its row or entry bound: older outputs may exist that are not counted. */
+  truncated: boolean;
+}
+
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/;
 const CAPABILITY_URL_RE = /^agentlas:\/\/one-artifact\/[a-f0-9]{64}$/;
 

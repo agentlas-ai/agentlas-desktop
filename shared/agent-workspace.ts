@@ -1,3 +1,5 @@
+import type { AlwaysOnInstructionChange } from "./agent-instruction-limits";
+
 export type AgentWorkspaceFileRole = "instruction" | "skill" | "knowledge" | "manifest" | "tool" | "asset";
 export interface AgentWorkspaceFile {
   path: string;
@@ -17,6 +19,13 @@ export interface AgentWorkspaceMemoryCandidate {
   scope: string;
   evidence: string[];
   state: "eligible" | "scope_review" | "needs_evidence" | "proposed" | "applied";
+  /** records: evidence lines about it; absorbed: earlier learnings merged into it; runs: distinct runs it came from;
+   * machine: host-recorded observations (tool errors, failed invocations, owner corrections) behind it;
+   * narrated: evidence the model wrote (ticket ids and similar). Absent on older cores. */
+  support?: { records: number; absorbed: number; runs?: number; machine?: number; narrated?: number };
+  /** Near-duplicate learnings share a groupId (the newest member's id); absent on older cores. */
+  groupId?: string;
+  groupSize?: number;
 }
 export interface AgentWorkspaceChange {
   path: string;
@@ -37,7 +46,14 @@ export interface AgentWorkspaceRevision {
   operation: "baseline" | "external_edit" | "apply" | "sync" | "rollback";
   proposalId?: string;
   summary: string;
+  /** Runs on this revision and how they ended (electron/agents/revision-outcomes.ts); absent when none were recorded. */
+  outcome?: AgentWorkspaceRevisionOutcome;
 }
+/** runs: runs on the revision; completed/failed: how they ended; errors: tool errors; steering: owner messages mid-run;
+ * attempts: model turn attempts (retries included). */
+export interface AgentWorkspaceRevisionOutcome { runs: number; completed: number; failed: number; errors: number; steering: number; attempts: number; }
+/** situation: when it applies; observed: what the records show happened; before/after: behaviour without and with the change; limits: when not to apply. */
+export interface AgentWorkspaceLearningCard { situation: string; observed: string; before: string; after: string; limits: string; }
 export interface AgentWorkspaceProposal {
   id: string;
   agentId: string;
@@ -49,6 +65,10 @@ export interface AgentWorkspaceProposal {
   proposalDigest: string;
   changes: AgentWorkspaceChange[];
   memoryEntryIds: string[];
+  /** Size of the always-on entry file before and after, against host limits. Absent on proposals made before this field existed. */
+  alwaysOn?: AlwaysOnInstructionChange;
+  /** Owner-facing before/after explanation of a learning change, written from the cited memories. */
+  card?: AgentWorkspaceLearningCard;
   createdAt: string;
   appliedAt?: string;
   appliedRevisionId?: string;

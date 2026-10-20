@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { AutomationStrategyProposalView } from "@shared/automation-strategy-review";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
-import { requiresAutomationStrategyReview } from "./automation-strategy-review-surface";
+import { canApplyAutomationStrategyReview, canRejectAutomationStrategyReview, requiresAutomationStrategyReview } from "./automation-strategy-review-surface";
 import styles from "./AutomationStrategyPanel.module.css";
 
 type GoalAmendmentDraft = {
@@ -113,6 +113,10 @@ export function AutomationStrategyPanel({ automationId, locale }: { automationId
   async function review(row: AutomationStrategyProposalView, decision: "apply" | "reject", draft?: GoalAmendmentDraft) {
     const api = ipc();
     if (!api || busyId) return;
+    if (decision === "apply" && !canApplyAutomationStrategyReview(row)) {
+      setError(ko ? "이 변경안은 현재 적용할 수 없습니다." : "This proposal cannot be applied right now.");
+      return;
+    }
     if (decision === "apply" && row.goalAmendmentRequired) {
       if (!draft?.text.trim() || !draft.objective.trim() || !row.goalRevision || row.goalRunVersion === null
         || draft.acceptanceCriteria.length === 0 || draft.acceptanceCriteria.some((criterion) => !criterion.id.trim() || !criterion.text.trim())) {
@@ -161,6 +165,12 @@ export function AutomationStrategyPanel({ automationId, locale }: { automationId
     if (row.status === "rejected") return ko ? "적용하지 않음" : "Not applied";
     if (row.unavailableReason === "episode_reserved") return ko ? "준비 기록" : "Preparation record";
     if (row.unavailableReason === "stale") return ko ? "이전 계획의 제안" : "Proposal for an older plan";
+    if (row.reviewState === "pending") return ko ? "독립 검토 대기 중" : "Independent review pending";
+    if (row.reviewState === "unavailable") return ko ? "독립 검토 확인 불가" : "Independent review unavailable";
+    if (requiresAutomationStrategyReview(row) && row.goalOwnershipUnverified && !row.originAdoptionRecorded) {
+      return ko ? "전략 위임 확인 필요" : "Strategy delegation confirmation needed";
+    }
+    if (requiresAutomationStrategyReview(row)) return ko ? "사용자 판단 필요" : "Your decision needed";
     if (!row.requiresPaymentApproval && row.goalAmendmentRequired) return ko ? "Goal 계약 변경 보류" : "Goal contract change held";
     if (!row.requiresPaymentApproval && (row.status === "pending" || row.status === "approved")) {
       if (!row.canApply) return ko ? "변경 기록" : "Change record";
@@ -206,14 +216,14 @@ export function AutomationStrategyPanel({ automationId, locale }: { automationId
             ? "This automation is delegated for AI-applied, same-scope strategy revisions. Approving this proposal will not rebind it to the Goal."
             : "This approval delegates future same-scope strategy revisions for this automation to AI-applied changes. It does not rebind the automation to the Goal; only allowlisted surfaces such as prompt and cadence are eligible.")}</span>}
         {requiresAutomationStrategyReview(row) && row.canApply && <button type="button" disabled={busyId !== null} onClick={() => void review(row, "apply")}>{busyId === row.id ? (ko ? "처리 중…" : "Working…") : (row.goalOwnershipUnverified && !row.originAdoptionRecorded ? (ko ? "위임 후 이 변경 적용" : "Delegate future revisions and apply") : (ko ? "이 변경 적용" : "Apply this change"))}</button>}
-        {requiresAutomationStrategyReview(row) && <button type="button" disabled={busyId !== null} onClick={() => void review(row, "reject")}>{ko ? "적용하지 않기" : "Do not apply"}</button>}
+        {canRejectAutomationStrategyReview(row) && <button type="button" disabled={busyId !== null} onClick={() => void review(row, "reject")}>{ko ? "적용하지 않기" : "Do not apply"}</button>}
         {!requiresAutomationStrategyReview(row) && row.goalAmendmentRequired && <span>{ko ? "전략만으로는 Goal 계약을 바꾸지 않습니다. Goal 변경은 이 기록에서 명시적으로 확인할 수 있습니다." : "The agent will not change the Goal contract as a strategy side effect. Goal amendments remain explicit in this history."}</span>}
         {row.unavailableReason === "no_executable_change" && <span>{ko ? "구체적인 변경 계획이 필요합니다." : "A concrete change plan is needed."}</span>}
         {row.unavailableReason === "ownership_unverified" && <span>{ko
           ? "이 자동화가 Goal에서 만들어졌을 가능성이 있지만 정확한 바인딩 증거가 없습니다. 재연결 확인 전에는 전략을 적용하지 않습니다."
           : "This automation may originate from a Goal, but its exact binding proof is missing. Strategy changes stay held until it is reconciled."}</span>}
       </div>}
-      {row.goalAmendmentRequired && (row.status === "pending" || row.status === "approved") && row.goalObjective !== null && <div className={styles.amendment}>
+      {row.goalAmendmentRequired && canApplyAutomationStrategyReview(row) && <div className={styles.amendment}>
         <strong>{ko ? "Goal 변경과 함께 승인" : "Approve with a Goal amendment"}</strong>
         <p>{ko
           ? "이 전략은 Goal 계약 변경 여부를 확인해야 합니다. 아래 승인 문장과 적용할 목표·기준을 직접 확인하고, 변경이 필요하면 충돌한 목표 또는 기준을 수정해야 합니다. 원문 요청은 그대로 보존됩니다."

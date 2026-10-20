@@ -101,6 +101,8 @@ import type {
   OneArtifactPreviewCapabilityV1,
   OneArtifactPreviewRefusalV1,
   OneArtifactPreviewRevokeV1,
+  OneEarlierOutputsPageV1,
+  OneEarlierOutputsRequestV1,
 } from "./one-artifacts";
 import type {
   DeleteOneMemoryAssetInput,
@@ -8251,6 +8253,11 @@ export interface AgentlasIpc {
     /** A capability, or the code of the one check that refused it (shared/one-artifacts.ts). */
     issuePreview: (input: OneArtifactBindingRequestV1) => Promise<OneArtifactPreviewCapabilityV1 | OneArtifactPreviewRefusalV1>;
     revokePreview: (input: OneArtifactPreviewRevokeV1) => Promise<{ revoked: boolean }>;
+    /**
+     * The outputs earlier runs of a conversation saved (everything sealed for the chat that the newest run's own list does not
+     * hold), newest save first, one entry per output name, paged. Ids, names, kinds and sizes only: no path, no file content.
+     */
+    listEarlier: (input: OneEarlierOutputsRequestV1) => Promise<OneEarlierOutputsPageV1>;
   };
   /** Persistent One identity and user-approved operating principles. */
   oneSupervisor: OneSupervisorAPI;

@@ -9,7 +9,7 @@ description: Edit a pptx deck live in the Document tab (shape text, new or remov
 2. The `outline` lists `# slide N (id s2)`, then `[s2.sh1] title: …` and `[s2.sh2] body: …` lines. `{…}` shows a shape's text format. A table shows as `[id] (table 3x4)` with its rows; `notes: …` is the slide's speaker notes.
 3. Edit with `document.apply` using `sessionId` and `ops`. Edit one slide per call.
 4. Save with `document.save`.
-5. To check the layout, call `harness_call {"operation":"document.render","args":{"sessionId":"…"}}`. It returns each slide as an image and lists the boxes whose text overflows.
+5. To check the layout, call `harness_call {"operation":"document.render","args":{"sessionId":"…"}}`. It returns up to 4 slides as images, as the deck is now (saved or not), and lists the boxes whose text overflows. When the reply has `next`, call again with its `from` until every slide has been seen.
 
 # Ops
 

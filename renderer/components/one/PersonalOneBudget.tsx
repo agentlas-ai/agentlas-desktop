@@ -2,6 +2,7 @@
 import {useCallback,useEffect,useRef,useState} from "react";
 import {ipc,ipcEvents} from "@/lib/ipc";
 import {createCoalescedRefresh} from "@/lib/one-refresh-coordinator";
+import {createStoreChangeThrottle,sameSnapshotIgnoring} from "@/lib/store-change-policy";
 import {ONE_BUDGET_REJECTION_CODES,type OneBudgetConfigureInput,type OneBudgetSnapshot} from "@shared/one-budget";
 import {OneBottomSheet} from "./OneBottomSheet";
 import styles from "./PersonalOneBudget.module.css";
@@ -10,9 +11,18 @@ import { Select } from "@/components/Select";
 export function usePersonalOneBudgets(oneId?:string) {
   const [items,setItems]=useState<OneBudgetSnapshot[]>([]);const [unconfirmed,setUnconfirmed]=useState(false);
   const current=useRef(0);const reader=useRef<ReturnType<typeof createCoalescedRefresh<void>>|null>(null);
-  const read=useCallback(async()=>{if(!oneId)return;const ticket=++current.current;try{const api=ipc()?.oneSupervisor;if(!api?.budgets)throw Error("budget_bridge_unavailable");const value=await api.budgets({oneId});if(!Array.isArray(value)||value.some(item=>item.oneId!==oneId))throw Error("budget_scope_unconfirmed");if(ticket===current.current){setItems(value);setUnconfirmed(false);}}catch{if(ticket===current.current)setUnconfirmed(true);}},[oneId]);
+  const read=useCallback(async()=>{if(!oneId)return;const ticket=++current.current;try{const api=ipc()?.oneSupervisor;if(!api?.budgets)throw Error("budget_bridge_unavailable");const value=await api.budgets({oneId});if(!Array.isArray(value)||value.some(item=>item.oneId!==oneId))throw Error("budget_scope_unconfirmed");if(ticket===current.current){setItems(previous=>sameSnapshotIgnoring(previous,value,[])?previous:value);setUnconfirmed(false);}}catch{if(ticket===current.current)setUnconfirmed(true);}},[oneId]);
   const refresh=useCallback(()=>reader.current?.request(undefined) ?? Promise.resolve(),[]);
-  useEffect(()=>{setItems([]);setUnconfirmed(false);if(!oneId)return;const owner=createCoalescedRefresh<void>(read,()=>undefined);reader.current=owner;void refresh();const off=ipcEvents()?.onStoreChanged?.(()=>void refresh());const focus=()=>void refresh();window.addEventListener("focus",focus);const timer=window.setInterval(()=>{if(document.visibilityState!=="hidden")void refresh();},15_000);return()=>{++current.current;owner.dispose();if(reader.current===owner)reader.current=null;off?.();window.removeEventListener("focus",focus);window.clearInterval(timer);};},[oneId,read,refresh]);
+  useEffect(()=>{
+    setItems([]);setUnconfirmed(false);if(!oneId)return;
+    const owner=createCoalescedRefresh<void>(read,()=>undefined);reader.current=owner;
+    const visibleRefresh=()=>{if(document.visibilityState!=="hidden")void refresh();};
+    const changes=createStoreChangeThrottle({immediate:()=>false,throttleMs:1_000,run:visibleRefresh});
+    visibleRefresh();const off=ipcEvents()?.onStoreChanged?.(change=>changes.notify(change));
+    window.addEventListener("focus",visibleRefresh);document.addEventListener("visibilitychange",visibleRefresh);
+    const timer=window.setInterval(visibleRefresh,15_000);
+    return()=>{++current.current;changes.dispose();owner.dispose();if(reader.current===owner)reader.current=null;off?.();window.removeEventListener("focus",visibleRefresh);document.removeEventListener("visibilitychange",visibleRefresh);window.clearInterval(timer);};
+  },[oneId,read,refresh]);
   return {items,unconfirmed,refresh};
 }
 const dollars=(amount:number)=>new Intl.NumberFormat("en-US",{style:"currency",currency:"USD",minimumFractionDigits:2,maximumFractionDigits:6}).format(amount);

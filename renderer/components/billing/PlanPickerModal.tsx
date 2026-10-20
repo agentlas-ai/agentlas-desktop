@@ -17,12 +17,10 @@ import { ipc } from "@/lib/ipc";
 import { invalidateIpcCache } from "@/lib/ipc-cache";
 import { useT } from "@/lib/i18n";
 import type { BillingCheckoutReadiness, BillingPlanOffer } from "@/lib/types";
-import { markPlanPickerHost, PLAN_PICKER_OPEN_EVENT, type PlanPickerRequest, type PlanPickerSource } from "@/lib/plan-picker";
+import { PRICING_PAGE_URL, PLAN_CHANGED_EVENT, type PlanPickerSource } from "@/lib/plan-picker";
+export { PRICING_PAGE_URL, PLAN_CHANGED_EVENT } from "@/lib/plan-picker";
 import styles from "./PlanPickerModal.module.css";
 
-export const PRICING_PAGE_URL = "https://agentlas.cloud/pricing";
-/** Fired after a checkout is confirmed so plan-gated surfaces (mail, credits) re-read. */
-export const PLAN_CHANGED_EVENT = "agentlas:plan-changed";
 
 type Cycle = "monthly" | "annual";
 type CardCheckout =
@@ -350,23 +348,4 @@ export function PlanPickerModal({ open, source, onClose }: { open: boolean; sour
       </div>
     </div>
   );
-}
-
-/** Mounted once (root layout). Opens on PLAN_PICKER_OPEN_EVENT from any entry point. */
-export function PlanPickerHost() {
-  const [request, setRequest] = useState<PlanPickerRequest | null>(null);
-  useEffect(() => {
-    const onOpen = (event: Event) => {
-      const detail = (event as CustomEvent<PlanPickerRequest>).detail;
-      setRequest({ source: detail?.source ?? "other" });
-    };
-    window.addEventListener(PLAN_PICKER_OPEN_EVENT, onOpen);
-    markPlanPickerHost(true);
-    return () => {
-      window.removeEventListener(PLAN_PICKER_OPEN_EVENT, onOpen);
-      markPlanPickerHost(false);
-    };
-  }, []);
-  const close = useCallback(() => setRequest(null), []);
-  return <PlanPickerModal open={request !== null} source={request?.source ?? "other"} onClose={close} />;
 }

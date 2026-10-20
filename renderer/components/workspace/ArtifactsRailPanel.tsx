@@ -8,6 +8,8 @@ import { HtmlVisualBlock } from "@/components/HtmlVisualBlock";
 import { formatChatFileSize, isChatFileItem, requestChatFileOpen, viewerKindForChatFile, type ChatFileItem } from "@/lib/chat-files";
 import { requestOneArtifactOpen } from "@/lib/one-artifact-open";
 import type { OneActivityArtifact } from "@/lib/one-activity";
+import type { OneEarlierOutputsView } from "@/lib/one-earlier-outputs";
+import { EarlierOutputsSection } from "./EarlierOutputsSection";
 import {
   CHAT_FILES_SEEN_EVENT,
   VISUAL_OPEN_EVENT,
@@ -154,6 +156,7 @@ export function ArtifactsRailPanel({
   chatId = null,
   locale,
   items,
+  earlier,
   files,
   visuals,
   opened,
@@ -163,6 +166,8 @@ export function ArtifactsRailPanel({
   chatId?: string | null;
   locale: Locale;
   items: OneActivityArtifact[];
+  /** Earlier runs' outputs, a collapsed section under the newest run's own list. */
+  earlier?: OneEarlierOutputsView | null;
   files: ChatFileItem[];
   visuals: VisualArtifact[];
   opened: VisualArtifact | null;
@@ -226,6 +231,7 @@ export function ArtifactsRailPanel({
           </button>;
         })}
       </div>}
+      {earlier && <EarlierOutputsSection view={earlier} locale={locale} />}
       {(visuals.length > 0 || files.some((file) => file.kind === "file")) && <>
         <h3 className={styles.groupTitle}>{ko ? "콘텐츠" : "Content"}</h3>
         <div className={styles.grid}>

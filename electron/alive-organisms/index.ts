@@ -277,6 +277,21 @@ function hostHandle(created: AliveOrganismHost) {
 }
 
 /**
+ * Another process (the daemon) may hold the chat's run lease. A lease has no heartbeat and is released only by its owner or at that
+ * owner's next boot, so a crashed owner leaves one behind; counting it forever would silence the AGI on a Goal that really stalled.
+ * A lease older than this is not evidence of work. A chat id the owner store rejects is not busy either (it must not break the beat).
+ */
+const AGI_LEASE_FRESH_MS = 3 * 60 * 60_000;
+function agiLeaseHoldsChat(chatId: string): boolean {
+  try {
+    const lease = invocationRunOwners.getActiveOwner(chatId);
+    if (!lease) return false;
+    const since = Date.parse(lease.updatedAt);
+    return Number.isFinite(since) ? Date.now() - since < AGI_LEASE_FRESH_MS : true;
+  } catch { return false; }
+}
+
+/**
  * App ready, after DB migration and after the long-run coordinator opened admission. Idempotent.
  * Main always runs the AGI monitor (it owns Goal custody) and takes the organism host only when no background
  * service holds the Alive domain.
@@ -295,7 +310,9 @@ export function startAliveOrganisms(): AliveOrganismHost | null {
         const receipt = invocationService.receipt(runId);
         return receipt ? { status: receipt.status, errorCode: receipt.errorCode ?? null, runId: receipt.runId ?? null, errorMessage: receipt.errorMessage ?? null } : null;
       },
-      chatBusy: (chatId) => invocationService.activeChatIds().includes(chatId),
+      chatBusy: (chatId) => invocationService.activeChatIds().includes(chatId) || agiLeaseHoldsChat(chatId),
+      // A room's teammates run in child chats (parent = the room); the cap keeps one huge room from making each beat expensive.
+      childChatIds: (chatId) => (getDb().prepare("SELECT id FROM chats WHERE parent_chat_id = ? ORDER BY updated_at DESC LIMIT 200").all(chatId) as Array<{ id: string }>).map((row) => row.id),
       continuationParkedForOwner,
       pendingApproval: (chatId) => listPendingToolApprovals().some((request) => request.chatId === chatId),
     }, goalId),

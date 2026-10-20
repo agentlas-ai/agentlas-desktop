@@ -432,6 +432,8 @@ export function SideNav({
         </form>
       )}
 
+      {/* Static-export links prefetch whole sibling routes on visibility. Keep
+          the rail cheap while a task streams; local route assets load on click. */}
       <nav className="sidenav-scroll titlebar-nodrag">
         {/* 1차 메뉴 */}
         <div className="sidenav-list">
@@ -447,6 +449,7 @@ export function SideNav({
               <Link
                 key={it.href}
                 href={it.href}
+                prefetch={false}
                 className="sidenav-item"
                 data-active={active ? "true" : "false"}
                 data-alert={alertCount > 0 ? "true" : "false"}
@@ -476,7 +479,7 @@ export function SideNav({
             if (collapsed) {
               // 접힘: 그룹 대표 아이콘만 — 클릭 시 기본 경로로 이동, hover 툴팁.
               return (
-                <Link key={g.id} href={g.href} className="sidenav-item" data-active={active ? "true" : "false"}>
+                <Link key={g.id} href={g.href} prefetch={false} className="sidenav-item" data-active={active ? "true" : "false"}>
                   <span className="sidenav-ic"><Icon size={18} /></span>
                   <span className="sidenav-tooltip">{g.label}</span>
                 </Link>
@@ -521,6 +524,7 @@ export function SideNav({
                         <Link
                           key={sub.href}
                           href={sub.href}
+                          prefetch={false}
                           className="sidenav-subitem"
                           data-active={active2 ? "true" : "false"}
                         >
@@ -585,6 +589,7 @@ export function SideNav({
         <UpdateBanner collapsed={collapsed} />
         <Link
           href="/settings"
+          prefetch={false}
           className="sidenav-item"
           data-active={pathname === "/settings" ? "true" : "false"}
         >

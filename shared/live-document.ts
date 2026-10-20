@@ -213,11 +213,31 @@ export type LiveDocumentApplyResult =
   | { ok: true; revision: number; created: string[] }
   | { ok: false; reason: string; detail?: string; revision?: number };
 
+/**
+ * document.render pages through a document: at most this many images per call, and `from` picks where the next call starts.
+ * It is the number of images a model is actually shown: the harness hands the model at most four images of one result as image
+ * blocks (turn-tools/control-server.ts RESULT_IMAGE_LIMIT) and app-control saves at most eight as files (app-control/service.ts
+ * MAX_RESULT_IMAGES), so an image past the smaller of the two would be saved and listed but never seen.
+ */
+export const LIVE_DOCUMENT_RENDER_MAX_PAGES = 4;
+
+/**
+ * What a page can be and still be photographed. A page outside these (a Word file with a 0.03 mm page, a deck whose slide is
+ * 1:1000000) has no layout to show: render refuses it with render_page_size_invalid instead of opening a window of that size.
+ */
+export const LIVE_DOCUMENT_RENDER_LIMITS = { minPageMm: 50, maxPageMm: 1500, minAspect: 0.2, maxAspect: 5 } as const;
+
 /** document.render's photographs (electron/live-document/render.ts): one PNG per slide, page or sheet, and the boxes that overflow. */
 export type LiveDocumentRenderReply =
   | { ok: true; format: string; renderer: "agentlas-layout"; note: string;
+      /** How many slides, pages or sheets the document has, and the 1-based number of the first one in `pages`. */
+      total: number; from: number;
       pages: Array<{ index: number; label: string; width: number; height: number; dataUrl: string }>;
-      overflow: Array<{ page: number; box: string; kind: "text_overflows_box" | "outside_page" }>; truncated?: string }
+      overflow: Array<{ page: number; box: string; kind: "text_overflows_box" | "outside_page" }>; truncated?: string;
+      /** Present when slides, pages or sheets after these remain: the call that shows them. */
+      next?: string;
+      /** The render ran out of time after the pages listed; `next` says where to continue. */
+      stopped?: "deadline" }
   | { ok: false; code: string; message?: string };
 
 export interface LiveDocumentAPI {
@@ -231,8 +251,8 @@ export interface LiveDocumentAPI {
   save: (sessionId: string) => Promise<{ ok: true; revision: number; sha256: string } | { ok: false; reason: string }>;
   close: (sessionId: string) => Promise<boolean>;
   reveal: (sessionId: string) => Promise<boolean>;
-  /** Photographs each slide, page or sheet (document.render). */
-  render: (sessionId: string) => Promise<LiveDocumentRenderReply>;
+  /** Photographs slides, pages or sheets (document.render): at most LIVE_DOCUMENT_RENDER_MAX_PAGES from the 1-based `from`. */
+  render: (sessionId: string, from?: number, count?: number) => Promise<LiveDocumentRenderReply>;
   onChanged: (callback: (event: { sessionId: string; chatId: string }) => void) => () => void;
 }
 

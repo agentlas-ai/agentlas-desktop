@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.3.83 — 2026-10-20
+
+- Strategy approvals: a proposal that cannot be applied no longer opens an approval pop-up, a Goal contract change waits in the strategy panel instead of interrupting you, the approval sheet sits with the composer, proposals that need your decision are marked as such, and a model's own call can no longer approve a strategy for you. Command automations no longer produce generic post-run strategy drafts.
+- The app does less work in the background: global rendering and usage collection are bounded, refreshes run one at a time, and opening a chat loads less.
+- Native keychain requests are not repeated after a denied or unavailable authorization; automatic access stays paused until you retry.
+- Shared agent sessions are told whether a turn is spoken one-to-one or in a group room, and a fixed rule keeps one-to-one talk out of group rooms. A seat conversation whose journal cannot be found is refused in plain words, and a roster member's dispatched work shares that member's session.
+- The Outputs rail lists what earlier runs of a conversation made in a collapsed section, and the phone's list of past outputs keeps files older than three days.
+- document.render pages through long documents, stops at a deadline and works without an owner window.
+- A held command occurrence, or one whose code step recovery refused it, is parked for the owner's choice instead of being redelivered again and again. AGI waits longer between attempts at the same cause and no longer reads a room's working teammates as a stalled Goal.
+- Agent learning: always-on instructions stay within host limits and learning cannot lengthen them, near-duplicate learnings show as one lesson, learning becomes skills with a grounded before/after card, revisions show how their runs ended, and dreaming keeps facts apart from procedure and host-recorded observations apart from model text.
+- Mobile remote access keeps working when the Mac's LAN address changes: the relay's local hop now trusts the pinned Desktop certificate by its fingerprint instead of the names frozen into it, and any other certificate is still refused.
+- Toolchain detection recognizes repeated work by how often it happened (five or more occurrences in five separate runs, three or more different wordings and a matching tool flow) instead of waiting for three calendar days, and a pass that finds too few observations no longer postpones the next evaluation by a day.
+- Graphs One saves for a single piece of work end with it: they are switched off when their Goal ends or after three days without a run (nothing is deleted), and work of the same kind that keeps coming back goes to the Toolchain path.
+- AGI opens one incident per stall instead of one per teammate tool, hands the same tactic to a teammate at most three times a day, counts its teammate starts against a Goal's wake budget, and a thrown attempt no longer turns a Goal's AGI off.
+
+This release binds Agentlas OS v1.2.66 at c0acd99be22114569e20bca94bed4540ba046eb4; public runtime asset `hephaestus-runtime-v1.2.66.tar.gz` is pinned at SHA-256 `20019d3ba4df1c540d0ef549c07a82188bd40fe12dafb2f8a6c75cc4bdcc89f7`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.82 — 2026-10-20
 
 - Improves release preparation reliability and access to the pinned Science dependency.

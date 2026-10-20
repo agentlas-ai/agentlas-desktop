@@ -28,6 +28,7 @@ import {
   type MemoryEntry,
 } from "./store";
 import { MemoryRevokedError } from "./revocations";
+import { hostObservationRefs } from "./machine-observations";
 import {
   agentNestExperienceOwnership,
   reconcileAgentNestExperienceConsolidation,
@@ -383,8 +384,9 @@ async function dreamOnce(): Promise<{ completed: boolean; failure?: DreamingFail
       const call = withModelCallScope({ role: "curator", phase: "dreaming" }, () => withRunnerSettlementObserver(observeReturned, () => callConnectedModelDetailed({
           systemPrompt: [
             "judgment: merge redundant or fragmentary memory entries into a few durable rules",
-            'output: ONLY valid JSON {"rules": ["..."], "absorbed": [1,2,...]}, no fences, no prose',
-            "rules: max 5 actionable, entries' language, keep concrete specifics (paths, flags, names)",
+            'output: ONLY valid JSON {"rules": [{"text": "...", "kind": "procedure|fact|risk|preference|decision", "absorbed": [1,2]}], "absorbed": [1,2,...]}, no fences, no prose',
+            "rules: max 5, one idea each, entries' language; procedure and risk rules state what holds for this agent's other work; one task's facts (counts, versions, file names, dates, run state) go in their own kind fact rule, never inside a procedure",
+            "rule absorbed: the entry numbers that rule replaces; top-level absorbed: all of them",
             // The owner reads these rules in the agent's Learned panel. Internal run identifiers mean nothing to them.
             "rule text: owner-readable plain sentences (what the agent does, what to do next time); no internal ids (attempt/run/task ids, UUIDs, hashes, step tags such as t4); say \"an earlier attempt\" instead",
             "absorbed: entry numbers fully covered by the rules; never absorb an entry whose specifics are not preserved",
@@ -412,32 +414,36 @@ async function dreamOnce(): Promise<{ completed: boolean; failure?: DreamingFail
           .run(JSON.stringify({ rules: [], absorbed: [] }), new Date().toISOString(), scope, inputDigest, origin.revocationEpoch, lease); }).immediate();
         completed = true; continue;
       }
-      const absorbedEntries = absorbed.map((n) => entries[n - 1]);
-      const strictestSensitivity = strictestMemorySensitivity(absorbedEntries);
+      const absorbedEntries = [...new Set(absorbed)].map((n) => entries[n - 1]);
       // Supersede keeps the pointer, not just the count. The AMGB governed
       // reference (governance 1.000) deprecates with a retained value id —
       // "deprecate, never silent overwrite" — and a bare "consolidated 5/8"
       // sentence loses exactly that: nothing could ever answer which entries
       // this rule replaced. The ids are the provenance edge.
-      const supersedePointers = absorbedEntries.map((entry) => `supersedes:${entry.id}`);
       const consolidated = db.transaction(() => {
         assertLease();
-        const consolidated = rules.slice(0, 5).map((rule) =>
-        insertMemoryEntry({
-          scope: "agent_repo",
-          kind: "procedure",
-          content: rule.trim(),
-          agentId: target.agentId,
-          confidence: "medium",
-          sensitivity: strictestSensitivity,
-          intakeEpoch,
-          curationActor: "model_curated", policyVersion: DREAM_POLICY,
-          originRefs: absorbedEntries.map(entry => ({ kind: "source" as const, id: entry.id, revision: digest(entry) })),
-          evidence: [
-            `dreaming: consolidated ${absorbed.length}/${entries.length} entries`,
-            ...supersedePointers,
-          ],
-        }));
+        // Each rule keeps its own kind and the entries it replaces when the judgment names them (a fact stays a fact; a
+        // rule's provenance is its own sources, not the whole pass). Older string-only answers keep the pass-wide pointers.
+        const consolidated = rules.slice(0, 5).map((rule) => {
+          const own = rule.absorbed?.length ? [...new Set(rule.absorbed)].map((n) => entries[n - 1]) : absorbedEntries;
+          return insertMemoryEntry({
+            scope: "agent_repo",
+            kind: rule.kind ?? "procedure",
+            content: rule.text.trim(),
+            agentId: target.agentId,
+            confidence: "medium",
+            sensitivity: strictestMemorySensitivity(own),
+            intakeEpoch,
+            curationActor: "model_curated", policyVersion: DREAM_POLICY,
+            originRefs: own.map(entry => ({ kind: "source" as const, id: entry.id, revision: digest(entry) })),
+            evidence: [
+              `dreaming: consolidated ${own.length}/${entries.length} entries`,
+              ...own.map((entry) => `supersedes:${entry.id}`),
+              // The replaced entries' host references move to the rule, so consolidating does not erase what backed them.
+              ...[...new Set(own.flatMap((entry) => hostObservationRefs(entry.evidence ?? [])))],
+            ],
+          });
+        });
         supersedeMemoryEntries(absorbedEntries.map(entry => entry.id));
         db.prepare("UPDATE memory_dreaming_sources SET state='completed',result_json=?,completed_at=?,lease_token=NULL,lease_expires_at=NULL WHERE scope_key=? AND input_digest=? AND intake_epoch=? AND lease_token=?")
           .run(JSON.stringify({ memoryIds: consolidated.map(entry => entry.id), absorbedIds: absorbedEntries.map(entry => entry.id) }), new Date().toISOString(), scope, inputDigest, origin.revocationEpoch, lease);
@@ -481,14 +487,36 @@ async function dreamOnce(): Promise<{ completed: boolean; failure?: DreamingFail
   return { completed };
 }
 
-/** One validity rule for both the judgment's accept() and the write below. */
-function parseDreamingResult(text: string, entryCount: number): { rules: string[]; absorbed: number[] } | null {
+type DreamingRuleKind = "procedure" | "fact" | "risk" | "preference" | "decision";
+const DREAMING_RULE_KINDS = new Set<DreamingRuleKind>(["procedure", "fact", "risk", "preference", "decision"]);
+interface DreamingRule { text: string; kind?: DreamingRuleKind; absorbed?: number[] }
+/** One validity rule for both the judgment's accept() and the write below. A rule is a string (older answers) or
+ * {text, kind, absorbed}; a rule's own absorbed numbers must also be in the top-level list. */
+function parseDreamingResult(text: string, entryCount: number): { rules: DreamingRule[]; absorbed: number[] } | null {
   const parsed = extractJson(text);
-  if (!parsed || !Array.isArray(parsed.rules) || !Array.isArray(parsed.absorbed)
-    || parsed.rules.length > 5 || !parsed.rules.every(rule => typeof rule === "string" && rule.trim() && rule.length <= 4_000)
-    || !parsed.absorbed.every(n => Number.isInteger(n) && Number(n) >= 1 && Number(n) <= entryCount)) return null;
-  const rules = parsed.rules.filter((r): r is string => typeof r === "string" && r.trim().length > 0);
-  const absorbed = parsed.absorbed.map((n) => Number(n)).filter((n) => Number.isInteger(n) && n >= 1 && n <= entryCount);
+  if (!parsed || !Array.isArray(parsed.rules) || parsed.rules.length > 5) return null;
+  const inRange = (n: unknown) => Number.isInteger(n) && Number(n) >= 1 && Number(n) <= entryCount;
+  // The top-level list is the union of the rules' own lists; when a model gives only the per-rule lists the host
+  // derives it.
+  const ruleLists = parsed.rules.map((rule) => rule && typeof rule === "object" && !Array.isArray(rule) ? (rule as Record<string, unknown>).absorbed : undefined);
+  const topLevel = Array.isArray(parsed.absorbed) ? parsed.absorbed
+    : parsed.absorbed === undefined && ruleLists.every(Array.isArray) ? [...new Set(ruleLists.flatMap((list) => list as unknown[]))] : null;
+  if (!topLevel || !topLevel.every(inRange)) return null;
+  const absorbed = topLevel.map((n) => Number(n));
+  const rules: DreamingRule[] = [];
+  for (const raw of parsed.rules) {
+    const rule = typeof raw === "string" ? { text: raw } : raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
+    if (!rule || typeof rule.text !== "string" || rule.text.length > 4_000) return null;
+    if (!rule.text.trim()) continue;
+    if (rule.kind !== undefined && !DREAMING_RULE_KINDS.has(rule.kind as DreamingRuleKind)) return null;
+    if (rule.absorbed !== undefined && (!Array.isArray(rule.absorbed) || !rule.absorbed.every((n) => inRange(n) && absorbed.includes(Number(n))))) return null;
+    rules.push({ text: rule.text, ...(rule.kind ? { kind: rule.kind as DreamingRuleKind } : {}),
+      ...(Array.isArray(rule.absorbed) && rule.absorbed.length ? { absorbed: rule.absorbed.map((n) => Number(n)) } : {}) });
+  }
+  // Every retired source needs a successor. Rules without their own source
+  // list retain the legacy pass-wide provenance used by the writer.
+  const covered = new Set(rules.flatMap((rule) => rule.absorbed?.length ? rule.absorbed : absorbed));
+  if (absorbed.some((n) => !covered.has(n))) return null;
   if ((rules.length === 0) !== (absorbed.length === 0)) return null;
   return { rules, absorbed };
 }

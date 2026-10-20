@@ -311,6 +311,7 @@ import {
   type OneActivityState,
 } from "@/lib/one-activity";
 import { readRunLateRowsAfterWindow, withLateRunRows } from "@/lib/one-chat-outputs";
+import { useEarlierOutputs } from "@/lib/one-earlier-outputs";
 import styles from "./OneShell.module.css";
 import roomWorkStyles from "./SeatRoomWork.module.css";
 import { PersonalOneWorkspace } from "./PersonalOneWorkspace";
@@ -4964,6 +4965,14 @@ function OneSessionsShell() {
   // Counts deliberate opens from the toolbar toggle; an empty rail answers with its activity view (TaskSidePanel).
   const [outputRailOpenRequest, setOutputRailOpenRequest] = useState(0);
   const outputRailTakesSpace = outputRailVisible && !outputRailEmpty;
+  // What earlier runs of this conversation saved, under the newest run's list (the run the Activity speaks for). Read only
+  // while the rail is open; the split pane draws the same section through the same hook.
+  const earlierOutputs = useEarlierOutputs({
+    chatId: outputRailChatId,
+    newestRunId: outputStateIsCurrent ? activityStateRunId : null,
+    newestItems: runtimeArtifacts,
+    enabled: outputRailVisible,
+  });
   // The open bit is persisted for convenience, but it is not conversation
   // state. Reset it at each thread boundary so an empty mobile conversation
   // cannot inherit an open, full-screen output rail from the previous thread.
@@ -11362,6 +11371,7 @@ function OneSessionsShell() {
         )}
         <TaskSidePanel
           items={outputStateIsCurrent ? runtimeArtifacts : []}
+          earlierOutputs={earlierOutputs}
           onRequestOpen={presentRichOutputRail}
           activity={outputStateIsCurrent ? activity : undefined}
           locale={appLocale}

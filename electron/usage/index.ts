@@ -25,7 +25,7 @@ import { currentClaudeUsageAccountFingerprint, getClaudeUsage } from "./claude";
 import { currentCodexUsageAccountFingerprint, getCodexUsage } from "./codex";
 import { getGrokUsage } from "./grok";
 import { currentKimiUsageCredentialFingerprint, getKimiUsage } from "./kimi";
-import { localTokensFor } from "./local-logs";
+import { localTokensForAsync } from "./local-logs";
 import { readProviderHealth } from "./provider-health";
 import { UsageRetryGate } from "./retry-policy";
 import { userDataPath } from "../runtime-paths";
@@ -105,7 +105,11 @@ export function modelRoleUsageSnapshot(now: number): ModelRoleUsageSnapshot {
     model: string | null;
     effort: string | null;
   };
-  const selectionRows: SelectionRow[] = [];
+  // Partition by the exact run/node/role boundary before joining. A profile with
+  // many runs must not scan the whole week's selections for every invocation.
+  const selectionsByScope = new Map<string, SelectionRow[]>();
+  const selectionScope = (runId: string, nodeId: string | null, role: string | null) =>
+    JSON.stringify([runId, nodeId, role]);
   const parseObject = (value: unknown): Record<string, unknown> | null => (
     value && typeof value === "object" && !Array.isArray(value)
       ? value as Record<string, unknown>
@@ -123,19 +127,24 @@ export function modelRoleUsageSnapshot(now: number): ModelRoleUsageSnapshot {
     ts: string,
     seq: number,
   ): { provider: string | null; model: string | null; effort: string | null } => {
-    const candidates = selectionRows.filter((row) =>
-      row.run_id === runId
-      && (row.ts < ts || (row.ts === ts && row.seq <= seq))
-      && row.role === role
-      // A null invocation node is not evidence for an arbitrary worker node.
-      // Legacy rows may still be node-less, but they can only join a node-less
-      // selection; otherwise the exact effort remains unknown instead of being
-      // borrowed from a different branch.
-      && row.node_id === nodeId
-      && (model == null || row.model === model)
-      && (provider == null || row.provider === provider),
-    );
-    const hit = candidates.at(-1);
+    const rows = selectionsByScope.get(selectionScope(runId, nodeId, role)) ?? [];
+    // Rows are in (ts, seq) order. Find the last eligible time by binary search,
+    // then walk backwards only inside this scope to match optional model/provider.
+    let low = 0, high = rows.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      const row = rows[middle]!;
+      if (row.ts < ts || (row.ts === ts && row.seq <= seq)) low = middle + 1;
+      else high = middle;
+    }
+    let hit: SelectionRow | undefined;
+    for (let index = low - 1; index >= 0; index -= 1) {
+      const row = rows[index]!;
+      if ((model == null || row.model === model) && (provider == null || row.provider === provider)) {
+        hit = row;
+        break;
+      }
+    }
     return hit
       ? { provider: hit.provider, model: hit.model, effort: hit.effort }
       : { provider: null, model: null, effort: null };
@@ -189,7 +198,7 @@ export function modelRoleUsageSnapshot(now: number): ModelRoleUsageSnapshot {
       let payload: Record<string, unknown> | null = null;
       try { payload = parseObject(JSON.parse(row.payload_json)); } catch { /* malformed legacy row */ }
       const role = textOrNull(payload?.runtimeRole);
-      selectionRows.push({
+      const selection: SelectionRow = {
         run_id: row.run_id,
         node_id: row.node_id ?? null,
         seq: Number(row.seq) || 0,
@@ -198,7 +207,11 @@ export function modelRoleUsageSnapshot(now: number): ModelRoleUsageSnapshot {
         provider: textOrNull(payload?.runtimeBackend),
         model: textOrNull(payload?.runtimeModel),
         effort: textOrNull(payload?.runtimeEffort),
-      });
+      };
+      const key = selectionScope(selection.run_id, selection.node_id, selection.role);
+      const scoped = selectionsByScope.get(key);
+      if (scoped) scoped.push(selection);
+      else selectionsByScope.set(key, [selection]);
     }
 
     const rawInvocations = db.prepare(
@@ -333,8 +346,8 @@ const ADAPTERS: Array<{ id: UsageRetryProviderId; fn: () => Promise<ProviderUsag
 ];
 
 /** 로컬 로그는 토큰 절대량만 안다. 구독 사용률을 추정하거나 옛 서버 %를 복사하지 않는다. */
-function localFallback(id: string, base: ProviderUsage | null, now: number): ProviderUsage | null {
-  const local = localTokensFor(id);
+async function localFallback(id: string, base: ProviderUsage | null, now: number): Promise<ProviderUsage | null> {
+  const local = await localTokensForAsync(id);
   if (!local || local.lastActivity == null || (local.fiveHour === 0 && local.sevenDay === 0)) return null;
   const mk = (kind: UsageWindow["kind"], label: string, tokens: number): UsageWindow => ({
     id: `${id}-local-${kind}`,
@@ -592,7 +605,10 @@ async function fetchProvider(
         return staleUsage;
       }
       // last-good도 없다 — 로컬 로그로라도 표시(빈 "조회 실패" 방지). 로컬조차 없으면 원래 에러.
-      const fb = localFallback(id, sameAccount ? good?.usage ?? null : null, now);
+      const fb = await localFallback(id, sameAccount ? good?.usage ?? null : null, now);
+      // The asynchronous log scan may outlive an account switch. Recheck the
+      // adapter's identity before publishing its fallback observation.
+      if (id === "claude-code" && usage.accountFingerprint && !claudeAccountMatches(usage)) return null;
       if (fb) {
         lastResult.set(id, { usage: fb, at: now });
         return fb;

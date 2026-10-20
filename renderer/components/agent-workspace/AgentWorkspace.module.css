@@ -177,6 +177,15 @@
 .checkRow { display: flex; align-items: flex-start; gap: 6px; }
 .checkRow input { margin: 12px 0 0 7px; accent-color: var(--attention); flex: 0 0 13px; }
 .checkRow .listItem { flex: 1; min-width: 0; }
+.groupCount { border: 1px solid var(--paper-edge); border-radius: 4px; padding: 2px 5px; white-space: nowrap; color: var(--ink-soft); }
+.learningCard { display: grid; gap: 8px; margin: 8px 0 12px; }
+.learningCard > div { display: grid; grid-template-columns: 112px 1fr; gap: 10px; padding: 8px 10px; border: 1px solid var(--paper-edge); border-radius: 6px; }
+.learningCard dt { color: var(--muted-deep); font-size: 11px; }
+.learningCard dd { margin: 0; color: var(--ink); font-size: 12px; line-height: 1.5; }
+.outcomeTable { border-collapse: collapse; margin: 0 0 12px; font-size: 12px; }
+.outcomeTable th, .outcomeTable td { border: 1px solid var(--paper-edge); padding: 5px 10px; text-align: left; color: var(--ink); }
+.outcomeTable thead th, .outcomeTable tbody th { color: var(--muted-deep); font-weight: 500; }
+.groupMember { margin-left: 26px; width: calc(100% - 26px); }
 .toast { position: absolute; bottom: 38px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 36px); padding: 9px 13px; background: var(--ink); color: var(--paper); box-shadow: 0 4px 18px rgba(0,0,0,.13); border-radius: 6px; font-size: 12px; z-index: 40; }
 @media (max-width: 1440px) { .inspector { position: absolute; right: 0; top: 0; bottom: 0; box-shadow: -8px 0 30px rgba(0,0,0,.12); } .inspectorScrim { display: block; } }
 @media (max-width: 1100px) { .roster { position: absolute; left: 0; top: 0; bottom: 0; box-shadow: 8px 0 30px rgba(0,0,0,.12); } .rosterCollapsed { position: static; box-shadow: none; } .rosterScrim { display: block; } .tree { width: 180px; flex-basis: 180px; } .locations { display: none; } .toolbar { gap: 4px; } }

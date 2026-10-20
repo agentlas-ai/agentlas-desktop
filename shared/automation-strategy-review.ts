@@ -21,9 +21,11 @@ export interface AutomationStrategyProposalView {
   conflict: "within_scope" | "needs_user_approval" | "uncertain";
   summary: string;
   rationale: string;
-  /** Human attention is reserved for a real payment/checkout boundary. */
+  /** Whether this proposal requires payment or checkout approval. */
   requiresPaymentApproval: boolean;
   reviewState: "pending" | "judged" | "unavailable";
+  /** Main's typed judgment authorization; optional for older producers. */
+  reviewAuthorization?: "within_scope" | "user_approval" | "goal_amendment" | null;
   reviewReason: string | null;
   changes: Array<{ label: string; before: string | null; after: string }>;
   canApply: boolean;

@@ -12,6 +12,14 @@ export interface GraphWorkRecoveryScope {
   ownerEpoch: string;
 }
 
+/** A recovery decision that refused a dispatch. Same message as before (`work_recovery_<reason>`); the decision is typed. */
+export class WorkRecoveryRefused extends Error {
+  constructor(readonly decision: WorkRecoveryDecision) {
+    super(`work_recovery_${decision.reason}`);
+    this.name = "WorkRecoveryRefused";
+  }
+}
+
 /** Thin Graph adapter: existing checkpoint and Worker receipts own result/effect verification. */
 export class GraphWorkRecovery {
   private readonly journal: DesktopWorkRecoveryJournal;
@@ -61,7 +69,7 @@ export class GraphWorkRecovery {
       const result = decideWorkRecovery(unit, { ...facts, policyVersion: WORK_RECOVERY_POLICY_VERSION,
         worker: observation?.remoteExecutionEnded ? "terminated" : "unknown", alternateAvailable: false,
         requiresUser: false, methodRefused: false, questionCount: 0, lastAskedAt: null, now: Date.now() }, this.expected(unit), observation);
-      if (result.action !== "retry") throw new Error(`work_recovery_${result.reason}`);
+      if (result.action !== "retry") throw new WorkRecoveryRefused(result);
     } else if (facts.userStopped || !facts.authorized || !facts.budgetAvailable || !facts.scopeCurrent) {
       throw new Error("work_recovery_dispatch_not_admitted");
     }

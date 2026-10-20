@@ -291,8 +291,10 @@ function load(bytes: Uint8Array): PresentationInfo {
   const relDoc = parseXml(relsXml);
   const targets = new Map(elements(relDoc.root).map((rel) => [attr(rel, "Id") ?? "", resolvePartPath(PRESENTATION, attr(rel, "Target") ?? "")]));
   const size = findDeep(presentation.root, "sldSz");
-  const cx = Number(size ? attr(size, "cx") : 12192000) || 12192000;
-  const cy = Number(size ? attr(size, "cy") : 6858000) || 6858000;
+  // The slide size is a positive number of EMU; anything else is the default 16:9, as a missing size always was.
+  const extent = (key: string, fallback: number): number => { const raw = Number(size ? attr(size, key) : fallback); return Number.isFinite(raw) && raw > 0 ? raw : fallback; };
+  const cx = extent("cx", 12192000);
+  const cy = extent("cy", 6858000);
   const list = findDeep(presentation.root, "sldIdLst");
   const sldIds = list ? elements(list).filter((el) => localName(el) === "sldId") : [];
   const firstPart = sldIds.length ? targets.get(attr(sldIds[0], "r:id") ?? "") : undefined;

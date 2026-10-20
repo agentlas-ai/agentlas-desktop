@@ -34,6 +34,8 @@ const READ_TTL_MS: Record<string, number> = {
   "env.list": 15_000,
   "mcpTools.listInstalled": 15_000,
   "mcpTools.catalog": 60_000,
+  // Main returns the bundled static catalog directly (mcpTools:listCatalog).
+  "mcpTools.listCatalog": 60_000,
   "marketplace.bookmarks": 15_000,
   "marketplace.listMine": 60_000,
   // Hub 검색은 코드 주석 기준 10초+ 걸리는 네트워크 호출인데 /marketplace 진입마다
@@ -72,6 +74,7 @@ const READ_TTL_MS: Record<string, number> = {
   "runLedger.events": 0,
   "runLedger.chatTimeline": 0,
   "runLedger.outputsAfter": 0,
+  "oneArtifacts.listEarlier": 0,
   "runLedger.settleRowsAfter": 0,
   "automations.latestRun": 0,
   "automations.listStrategyProposals": 0,
@@ -79,9 +82,13 @@ const READ_TTL_MS: Record<string, number> = {
   "automations.chatActivity": 0,
   "chats.getContinuitySnapshot": 0,
   "oneSupervisor.snapshot": 0,
-  
-
-
+  "oneSupervisor.budgets": 0,
+  "oneOrg.get": 0,
+  "browser.listPendingApprovals": 0,
+  "localModelHub.snapshot": 0,
+  "localModelHub.operations": 0,
+  // Pure reads (handlers checked in electron/ipc.ts). Unlisted, each call wiped its namespace as if it wrote.
+  // chats.get is not here: its handler may repair the chat's controller row.
   "chats.listRecentOne": 0,
   "tasks.findForChat": 0,
   "tasks.get": 0,
@@ -137,12 +144,15 @@ function evictIfOverfull(): void {
 
 /** 네임스페이스(예: "team") 또는 전체(인자 없음) 캐시를 비운다. */
 export function invalidateIpcCache(namespace?: string): void {
-  invalidationEpoch += 1;
   if (!namespace) {
+    invalidationEpoch += 1;
     valueCache.clear();
     inFlight.clear();
     return;
   }
+  // Selective invalidation detaches only this namespace's flights. Their
+  // identity check below rejects late replies without discarding unrelated
+  // reads that are still in progress (chat writes can arrive every frame).
   const prefix = `${namespace}.`;
   for (const key of valueCache.keys()) {
     if (key.startsWith(prefix)) valueCache.delete(key);

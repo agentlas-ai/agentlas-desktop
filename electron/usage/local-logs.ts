@@ -226,3 +226,124 @@ export function localTokensFor(provider: string): LocalWindowTokens | null {
   // 서버 usage 조회가 안정적이라 폴백 필요가 낮다 — 후속에 Codex 로컬을 정밀화할 수 있다.
   return null;
 }
+
+const asyncLocalReads = new Map<string, Promise<LocalWindowTokens>>();
+
+/** UI/IPC collection yields between filesystem work and parsing batches. The
+ * synchronous exports remain available to callers that explicitly need them. */
+async function recentJsonlFilesAsync(roots: string[], now: number): Promise<string[]> {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const root of roots) {
+    const stack = [root];
+    let count = 0, guard = 0;
+    while (stack.length && count < 400 && guard < 20_000) {
+      guard += 1;
+      const dir = stack.pop()!;
+      let entries: fs.Dirent[];
+      try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { continue; }
+      for (const entry of entries) {
+        const file = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (entry.name !== "node_modules" && !entry.name.startsWith(".")) stack.push(file);
+        } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+          try {
+            const st = await fs.promises.stat(file);
+            if (now - st.mtimeMs > FILE_MTIME_WINDOW_MS) continue;
+            count += 1;
+            const real = await fs.promises.realpath(file).catch(() => path.resolve(file));
+            if (!seen.has(real)) { seen.add(real); out.push(file); }
+          } catch { /* disappearing CLI log */ }
+        }
+      }
+    }
+  }
+  return out;
+}
+
+async function fileUsageHitsAsync(key: string, file: string, extract: Extract): Promise<Float64Array | null> {
+  let st: fs.Stats;
+  try { st = await fs.promises.stat(file); } catch { return null; }
+  const known = fileHits.get(key);
+  if (known && known.size === st.size && known.mtimeMs === st.mtimeMs) return known.hits;
+  const flat: number[] = [];
+  const consume = (line: string) => {
+    if (!line || !line.includes(USAGE_HINT) || !line.includes(OUTPUT_HINT)) return;
+    try {
+      const hit = extract(JSON.parse(line));
+      if (hit && Number.isFinite(hit.ts) && hit.tokens > 0) flat.push(hit.ts, hit.tokens);
+    } catch { /* malformed or partially written final line */ }
+  };
+  const stream = fs.createReadStream(file, { encoding: "utf8", highWaterMark: 64 * 1024 });
+  let pending = "";
+  let yieldAt = performance.now() + 4;
+  try {
+    for await (const chunk of stream) {
+      pending += chunk;
+      let start = 0;
+      for (let end = pending.indexOf("\n", start); end !== -1; end = pending.indexOf("\n", start)) {
+        consume(pending.slice(start, end));
+        start = end + 1;
+        if (performance.now() >= yieldAt) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          yieldAt = performance.now() + 4;
+        }
+      }
+      pending = pending.slice(start);
+    }
+    consume(pending);
+  } catch { return null; }
+  finally { stream.destroy(); }
+  const hits = Float64Array.from(flat);
+  fileHits.set(key, { size: st.size, mtimeMs: st.mtimeMs, hits });
+  return hits;
+}
+
+/** Nonblocking counterpart for the subscription meter's only local fallback.
+ * Concurrent consumers share both the scan and the completed token windows. */
+export async function localTokensForAsync(provider: string): Promise<LocalWindowTokens | null> {
+  if (provider !== "claude-code") return null;
+  const kind = "claude";
+  const now = Date.now();
+  const hit = cache.get(kind);
+  if (hit && now - hit.at < TTL_MS) return hit.value;
+  const running = asyncLocalReads.get(kind);
+  if (running) return running;
+  const task = (async () => {
+    const roots = logRoots([path.join(realClaudeConfigDir(), "projects")], () => [userDataPath("claude-product-home", "projects")]);
+    const files = await recentJsonlFilesAsync(roots, now);
+    const acc: LocalWindowTokens = { fiveHour: 0, sevenDay: 0, lastActivity: null };
+    const seen = new Set<string>();
+    for (const file of files) {
+      const key = `${kind}\0${file}`;
+      seen.add(key);
+      const hits = await fileUsageHitsAsync(key, file, (obj) => {
+        const msg = (obj.message ?? null) as Record<string, unknown> | null;
+        const usage = (msg?.usage ?? null) as Record<string, unknown> | null;
+        if (!usage || typeof obj.timestamp !== "string") return null;
+        const ts = Date.parse(obj.timestamp);
+        return Number.isNaN(ts) ? null : { ts, tokens: sumTokens(usage) };
+      });
+      if (!hits) continue;
+      let yieldAt = performance.now() + 4;
+      for (let index = 0; index < hits.length; index += 2) {
+        if (index % 2048 === 0 && performance.now() >= yieldAt) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          yieldAt = performance.now() + 4;
+        }
+        const ts = hits[index]!, tokens = hits[index + 1]!;
+        const age = now - ts;
+        if (age < 0 || age > SEVEN_DAY_MS) continue;
+        acc.sevenDay += tokens;
+        if (age <= FIVE_HOUR_MS) acc.fiveHour += tokens;
+        if (acc.lastActivity == null || ts > acc.lastActivity) acc.lastActivity = ts;
+      }
+    }
+    for (const key of fileHits.keys()) if (key.startsWith(`${kind}\0`) && !seen.has(key)) fileHits.delete(key);
+    cache.set(kind, { value: acc, at: now });
+    return acc;
+  })();
+  asyncLocalReads.set(kind, task);
+  try { return await task; }
+  finally { if (asyncLocalReads.get(kind) === task) asyncLocalReads.delete(kind); }
+}

@@ -4,6 +4,7 @@ import { parseEffectMetadata, type MainHostControlObservation } from "../invocat
 import { decodeRuntimeEvidence, runtimeEvidenceForRow, runtimeEvidencePhase, type RuntimeCorrelation, type RuntimeEvidencePhase } from "../../shared/runtime-evidence";
 import { WORKER_REPORT_MAX_BYTES, isWorkerReportScope, parseWorkerReport, type WorkerReportScope, type WorkerReport } from "../../shared/worker-report";
 import { createHash, randomUUID } from "node:crypto";
+import { basename } from "node:path";
 import { externalToolNames } from "../../shared/tool-activity";
 import { invocationHostStopCause, isOwnerGoalStopCause } from "../../shared/invocation-host-stop";
 import { normalizeToolCall } from "../../shared/tool-call-detail";
@@ -43,7 +44,13 @@ import type {
   MobileBridgeOneArtifactsPageDto,
   MobileBridgeInvocationArtifactDto,
 } from "../../shared/mobile-bridge";
-import { oneArtifactRailMergeKey, type OneArtifactBindingRequestV1 } from "../../shared/one-artifacts";
+import {
+  isOneArtifactBindingRequestV1,
+  oneArtifactRailMergeKey,
+  type OneArtifactBindingRequestV1,
+  type OneEarlierOutputsPageV1,
+  type OneEarlierOutputV1,
+} from "../../shared/one-artifacts";
 
 interface RunEventRow {
   id: string;
@@ -1013,15 +1020,23 @@ const MOBILE_ONE_ARTIFACT_TYPES = new Set<MobileBridgeInvocationArtifactDto["typ
 ]);
 const MOBILE_ONE_ARTIFACT_CURSOR_RE = /^[A-Za-z0-9_-]{1,512}$/;
 
+/** Where the next recent-output page starts: the rowid (seal order) of the first sealed binding it reads. */
 interface MobileOneArtifactCursor {
   rowId: number;
-  itemIndex: number;
 }
 
-interface MobileOneArtifactEventRow {
-  event_rowid: number;
-  event_ts: string;
-  payload_json: string;
+/** A sealed binding as the recent-output page reads it. */
+interface MobileOneArtifactBindingRow {
+  binding_rowid: number;
+  task_id: string;
+  bound_task_version: number;
+  run_id: string;
+  manifest_id: string;
+  artifact_ref: string;
+  source_path: string;
+  kind: string;
+  size_bytes: number;
+  created_at: string;
 }
 
 /**
@@ -1047,17 +1062,21 @@ function mobileOneArtifactCursorChatDigest(chatId: string): string {
   return createHash("sha256").update(chatId, "utf8").digest("hex").slice(0, 24);
 }
 
+/**
+ * The cursor is opaque to the phone (it only checks its characters and that it does not repeat). Version 2 names a rowid of
+ * one_artifact_bindings; version 1 named a rowid of the run ledger, so a cursor from before this change is refused instead of
+ * being read as a binding position.
+ */
 function encodeMobileOneArtifactCursor(chatId: string, cursor: MobileOneArtifactCursor): string {
   return Buffer.from(JSON.stringify({
-    v: 1,
+    v: 2,
     h: mobileOneArtifactCursorChatDigest(chatId),
     r: cursor.rowId,
-    i: cursor.itemIndex,
   }), "utf8").toString("base64url");
 }
 
 function decodeMobileOneArtifactCursor(chatId: string, value: string | null | undefined): MobileOneArtifactCursor {
-  if (value == null) return { rowId: 0, itemIndex: 0 };
+  if (value == null) return { rowId: 0 };
   if (!MOBILE_ONE_ARTIFACT_CURSOR_RE.test(value)) throw new TypeError("Invalid recent One artifact cursor");
   try {
     const json = Buffer.from(value, "base64url").toString("utf8");
@@ -1067,16 +1086,13 @@ function decodeMobileOneArtifactCursor(chatId: string, value: string | null | un
     }
     const record = parsed as Record<string, unknown>;
     if (
-      Object.keys(record).length !== 4
-      || record.v !== 1
+      Object.keys(record).length !== 3
+      || record.v !== 2
       || record.h !== mobileOneArtifactCursorChatDigest(chatId)
       || !Number.isSafeInteger(record.r)
       || Number(record.r) < 1
-      || !Number.isSafeInteger(record.i)
-      || Number(record.i) < 0
-      || Number(record.i) > 10_000
     ) throw new TypeError("Invalid recent One artifact cursor");
-    const cursor = { rowId: Number(record.r), itemIndex: Number(record.i) };
+    const cursor = { rowId: Number(record.r) };
     if (encodeMobileOneArtifactCursor(chatId, cursor) !== value) {
       throw new TypeError("Invalid recent One artifact cursor");
     }
@@ -1330,6 +1346,136 @@ export function listRunOutputEventsAfter(runId: string, afterSeq: number): RunEv
   }
 }
 
+/** Most sealed bindings of one conversation one call reads. Bindings past it are not read. */
+const EARLIER_OUTPUT_MAX_BINDINGS_SCANNED = 20_000;
+/** Most ledger rows of the newest run one call reads for the rail's own list (rows that name an output). */
+const EARLIER_OUTPUT_MAX_RUN_ROWS = 5_000;
+/** Most distinct entries one call keeps. Entries past it are not counted. */
+const EARLIER_OUTPUT_MAX_ENTRIES = 2_000;
+const EARLIER_OUTPUT_PAGE_DEFAULT = 100;
+const EARLIER_OUTPUT_PAGE_MAX = 200;
+
+/**
+ * The outputs earlier runs of a conversation saved: what the Outputs rail's "Earlier outputs" section lists under the newest
+ * run's own list.
+ *
+ * The rail lists one run's outputs (the newest run; renderer/lib/one-activity.ts beginOneActivityState). The sealed bindings are
+ * the truth of what a conversation made and what the rail can open (one_artifact_bindings, kept 90 days), so this reads them
+ * rather than the ledger (the phone's list, listRecentOneArtifactsForMobile, reads them too): the ledger rows that name a run's
+ * outputs (mcp_tool-use, mcp_notice) are trimmed from settled chat runs after 3 days (storage/run-detail-retention.ts), and a
+ * ledger-driven list reaches back 3 days where the bindings reach back 90. It also costs one indexed read of the conversation's
+ * bindings instead of reading its ledger payloads.
+ *
+ * - Everything sealed for the chat that the newest run's own list does not hold, newest save first. An entry is named by the file
+ *   name its binding was sealed for (bindOneRuntimeToolArtifacts labels an output with the base name of its sealed path, which is
+ *   what the rail's ledger rows carry too).
+ * - One entry per rail entry (oneArtifactRailMergeKey: kind, Task, chat, name), holding its NEWEST save: a file several runs saved
+ *   is one entry, and opening it follows the newest save of its path in the conversation (one/artifact-preview.ts
+ *   latestOneArtifactBindingOfPath). "The newest run's own list" is what the rail projects from that run's ledger rows (the only
+ *   ledger read here, of that one run): an output of the newest run whose rows were trimmed (a room left for 3 days) is not on the
+ *   rail, so it is an earlier output; one the rail lists is not repeated.
+ * - Paged by `offset` (entries already received) with the exact `total` of entries Main found.
+ * - Read-only and bounded: EARLIER_OUTPUT_MAX_BINDINGS_SCANNED bindings and EARLIER_OUTPUT_MAX_ENTRIES entries; `truncated` says when
+ *   a bound stopped the read. Only the base name of a sealed path leaves here (redacted like every label), never a path, a hash or
+ *   a byte of a file; previews go through the exact binding check.
+ */
+export function listEarlierOneOutputs(input: unknown): OneEarlierOutputsPageV1 {
+  const empty: OneEarlierOutputsPageV1 = { items: [], total: 0, nextOffset: null, truncated: false };
+  const request = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : null;
+  const identifier = (value: unknown): string | null => (
+    typeof value === "string" && value.length >= 1 && value.length <= 256 && !/[\u0000-\u001f]/.test(value) ? value : null
+  );
+  const chatId = identifier(request?.chatId);
+  const newestRunId = identifier(request?.newestRunId);
+  const offset = request?.offset === undefined ? 0 : request.offset;
+  const limit = request?.limit === undefined ? EARLIER_OUTPUT_PAGE_DEFAULT : request.limit;
+  if (
+    !chatId || !newestRunId
+    || typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 || offset > EARLIER_OUTPUT_MAX_ENTRIES
+    || typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1
+  ) return empty;
+  const pageSize = Math.min(EARLIER_OUTPUT_PAGE_MAX, limit);
+  let rows: Array<{
+    task_id: string; bound_task_version: number; run_id: string; manifest_id: string; artifact_ref: string;
+    source_path: string; kind: string; size_bytes: number; created_at: string;
+  }>;
+  try {
+    // Newest save first: rowid is the order the bindings were sealed in. (chat_id, created_at) is the index that finds the chat's rows.
+    rows = getDb().prepare(
+      `SELECT task_id, bound_task_version, run_id, manifest_id, artifact_ref, source_path, kind, size_bytes, created_at
+         FROM one_artifact_bindings
+        WHERE chat_id = ?
+        ORDER BY rowid DESC
+        LIMIT ?`,
+    ).all(chatId, EARLIER_OUTPUT_MAX_BINDINGS_SCANNED) as typeof rows;
+  } catch {
+    // A store from before the binding table has no sealed outputs to list.
+    return empty;
+  }
+  let truncated = rows.length >= EARLIER_OUTPUT_MAX_BINDINGS_SCANNED;
+  const candidates: Array<{ mergeKey: string; output: OneEarlierOutputV1 }> = [];
+  for (const row of rows) {
+    if (!MOBILE_ONE_ARTIFACT_TYPES.has(row.kind as MobileBridgeInvocationArtifactDto["type"])) continue;
+    if (!Number.isSafeInteger(row.size_bytes) || row.size_bytes < 0) continue;
+    const rawLabel = basename(row.source_path);
+    const label = truncate(redactOperationalSecrets(rawLabel), 512);
+    if (!label || /[\u0000-\u001f]/.test(label)) continue;
+    const identity: OneArtifactBindingRequestV1 = {
+      taskId: row.task_id,
+      taskVersion: row.bound_task_version,
+      chatId,
+      runId: row.run_id,
+      manifestId: row.manifest_id,
+      artifactRef: row.artifact_ref,
+    };
+    // The same check a preview request passes: an identity the rail could not open is not an entry.
+    if (!isOneArtifactBindingRequestV1(identity)) continue;
+    const savedAt = Number.isFinite(Date.parse(row.created_at)) ? new Date(row.created_at).toISOString() : undefined;
+    candidates.push({
+      mergeKey: oneArtifactRailMergeKey({ taskId: row.task_id, chatId, type: row.kind, label: rawLabel }),
+      output: { ...identity, label, type: row.kind as OneEarlierOutputV1["type"], sizeBytes: row.size_bytes, ...(savedAt ? { savedAt } : {}) },
+    });
+  }
+  // What the newest run's own list holds: the rail projects that run's outputs from its ledger rows (the ledger rows are read for
+  // this one run, whole), so an entry of that list is not repeated, and an output of that run the rail cannot list is an earlier one.
+  const onRail = new Set<string>();
+  try {
+    const bindingLookup = mobileOneArtifactBindingLookup();
+    const ledgerRows = getDb().prepare(
+      `SELECT payload_json
+         FROM run_events
+        WHERE run_id = ? AND chat_id = ? AND instr(payload_json, '"oneArtifacts"') > 0
+        ORDER BY rowid ASC
+        LIMIT ?`,
+    ).all(newestRunId, chatId, EARLIER_OUTPUT_MAX_RUN_ROWS) as Array<{ payload_json: string }>;
+    for (const ledgerRow of ledgerRows) {
+      const payload = parseMobileOneArtifactPayload(ledgerRow.payload_json);
+      if (!Array.isArray(payload.oneArtifacts)) continue;
+      for (const value of payload.oneArtifacts) {
+        const item = mobileOneArtifactLedgerItem(value, chatId, bindingLookup);
+        if (item) onRail.add(oneArtifactRailMergeKey({ ...item.artifact, label: item.rawLabel }));
+      }
+    }
+  } catch {
+    // No readable ledger for the run: the rail holds nothing of it either.
+  }
+  const seen = new Set<string>();
+  const entries: OneEarlierOutputV1[] = [];
+  for (const candidate of candidates) {
+    if (onRail.has(candidate.mergeKey) || seen.has(candidate.mergeKey)) continue;
+    seen.add(candidate.mergeKey);
+    if (entries.length >= EARLIER_OUTPUT_MAX_ENTRIES) { truncated = true; break; }
+    entries.push(candidate.output);
+  }
+  const items = entries.slice(offset, offset + pageSize);
+  return {
+    items,
+    total: entries.length,
+    nextOffset: offset + items.length < entries.length ? offset + items.length : null,
+    truncated,
+  };
+}
+
 /**
  * The ledger rows that settle a run: the terminal rows and the cancel request that comes before a stop. Exactly the kinds the
  * activity reducer reads as a run ending (renderer/lib/one-activity.ts replayLedger) plus that cancel request; the reducer keeps
@@ -1386,10 +1532,64 @@ export function listRunSettleRowsAfter(runId: string, afterSeq: number): RunEven
   }
 }
 
+/** Sealed bindings one recent-output query reads at a time. */
+const MOBILE_RECENT_OUTPUT_BATCH = 500;
 /**
- * Conversation-wide, cursor-paged artifact identities for Mobile reconnect.
- * Each row is re-authorized against the exact Main binding table before it is
- * projected; no filesystem path or preview capability is returned here.
+ * Sealed bindings one page request reads before it hands back what it has and a cursor to go on from (the phone walks the
+ * cursor to the end, so nothing is hidden by this). A page is 100 entries at most and the entries it skips are a run's later
+ * saves of a name, so this is reached only by a conversation of tens of thousands of saves. Until a page holds an entry the
+ * read does not stop: the shipped phone refuses an empty page that has a cursor.
+ */
+const MOBILE_RECENT_OUTPUT_SCAN_MAX = 20_000;
+/** Most characters of a label the shipped phone admits (web_socket_desktop_transport.dart _safeOneArtifacts); a longer one drops the row and, with it, the whole page. */
+const MOBILE_RECENT_OUTPUT_LABEL_MAX = 512;
+
+/** A sealed binding as the one check that guards the phone's rows reads it (mobileOneArtifactLedgerItem), named by the file it was sealed for. */
+function mobileOneArtifactBindingItem(
+  row: MobileOneArtifactBindingRow,
+  chatId: string,
+  bindingLookup: MobileOneArtifactBindingLookup,
+): OneArtifactRunOutput | null {
+  const item = mobileOneArtifactLedgerItem({
+    taskId: row.task_id,
+    taskVersion: row.bound_task_version,
+    chatId,
+    runId: row.run_id,
+    manifestId: row.manifest_id,
+    artifactRef: row.artifact_ref,
+    label: basename(row.source_path),
+    type: row.kind,
+    sizeBytes: row.size_bytes,
+  }, chatId, bindingLookup);
+  if (!item) return null;
+  return item.artifact.label.length > MOBILE_RECENT_OUTPUT_LABEL_MAX
+    ? { ...item, artifact: { ...item.artifact, label: item.artifact.label.slice(0, MOBILE_RECENT_OUTPUT_LABEL_MAX) } }
+    : item;
+}
+
+/**
+ * Conversation-wide, cursor-paged artifact identities for Mobile reconnect, read from the SEALED BINDINGS
+ * (one_artifact_bindings: the exact Main-side record of an output, kept 90 days).
+ *
+ * This used to read the run ledger, whose rows that name an output (mcp_tool-use, mcp_notice) are trimmed from a settled chat
+ * run after 3 days (storage/run-detail-retention.ts), so outputs older than that were missing from the list (the desktop lists
+ * them with listEarlierOneOutputs). It also read every ledger payload of the conversation.
+ *
+ * What a page is, unchanged for the phone:
+ * - rows in seal order (oldest first, the order the ledger gave), at most `limit` (1..100) per page, `nextCursor` null on the
+ *   last page; a cursor names the first binding of the next page, so bindings sealed between two page requests land after it
+ *   and the walk neither skips nor repeats one;
+ * - a row is the binding's identity (Task version, Task, chat, run, manifest, artifact) plus label, type, size, and (for a
+ *   desktop that negotiates them) content hash and time; the bridge sends only the keys the shipped phone admits
+ *   (authority.ts mobileRecentOneArtifactRow). The label is the base name of the file the binding was sealed for, which is what
+ *   bindOneRuntimeToolArtifacts labels an output with and so what the ledger rows carried;
+ *   a Surface artifact's manifest label can differ from its file name and then the phone shows the file name;
+ * - every row passes the check the phone's preview path relies on (mobileOneArtifactLedgerItem): opaque exact identifiers of
+ *   this chat, and a binding that is still sealed with the Task version, kind and size the row names;
+ * - a later save of the same output in the same run is the same rail entry as the first (oneArtifactRailMergeKey), so only the
+ *   first binding of it is a row, as the live stream offers it; the entry opens the newest bytes at preview;
+ * - never two rows of one runId+artifactRef in a page (the shipped phone refuses a page whose rows it drops).
+ * No path and no preview capability leaves here. Read-only.
  */
 export function listRecentOneArtifactsForMobile(input: {
   chatId: string;
@@ -1402,67 +1602,88 @@ export function listRecentOneArtifactsForMobile(input: {
     || input.chatId.length > 256
     || /[\u0000-\u001f]/.test(input.chatId)
   ) throw new TypeError("Invalid chat id");
+  const chatId = input.chatId;
   const limit = Math.max(1, Math.min(100, Math.floor(Number(input.limit ?? 100))));
-  const start = decodeMobileOneArtifactCursor(input.chatId, input.cursor);
-  const eventRows = getDb().prepare(
-    `SELECT rowid AS event_rowid, ts AS event_ts, payload_json
-       FROM run_events
-      WHERE chat_id = ? AND rowid >= ? AND instr(payload_json, '"oneArtifacts"') > 0
-      ORDER BY rowid ASC
-      LIMIT ?`,
-  );
-  const bindingLookup = mobileOneArtifactBindingLookup();
-  const runOutputs = new Map<string, OneArtifactRunOutputs>();
-  const candidates: Array<{
-    artifact: MobileBridgeInvocationArtifactDto;
-    cursor: MobileOneArtifactCursor;
-  }> = [];
+  const start = decodeMobileOneArtifactCursor(chatId, input.cursor);
+  const emptyPage: MobileBridgeOneArtifactsPageDto = { schemaVersion: 1, items: [], nextCursor: null };
+  const columns = `rowid AS binding_rowid, task_id, bound_task_version, run_id, manifest_id, artifact_ref, source_path, kind, size_bytes, created_at`;
+  let readRows: { all(chatId: string, fromRowId: number, count: number): unknown[] };
+  let readRunRows: { all(taskId: string, chatId: string, runId: string): unknown[] };
+  let bindingLookup: MobileOneArtifactBindingLookup;
+  try {
+    const db = getDb();
+    readRows = db.prepare(
+      `SELECT ${columns}
+         FROM one_artifact_bindings
+        WHERE chat_id = ? AND rowid >= ?
+        ORDER BY rowid ASC
+        LIMIT ?`,
+    );
+    // The exact-binding index starts with (task_id, chat_id, run_id): one run's bindings are an index range.
+    readRunRows = db.prepare(
+      `SELECT ${columns}
+         FROM one_artifact_bindings
+        WHERE task_id = ? AND chat_id = ? AND run_id = ?
+        ORDER BY rowid ASC`,
+    );
+    bindingLookup = mobileOneArtifactBindingLookup();
+  } catch {
+    // A store from before the binding table has no sealed outputs to list.
+    return emptyPage;
+  }
+  // The first listable binding of each rail entry of a run, read once per run: the entry's later saves are not rows.
+  const firstOfEntry = new Map<string, Map<string, number>>();
+  const firstBindingsOfRun = (taskId: string, runId: string): Map<string, number> => {
+    const key = `${taskId}\u0000${runId}`;
+    let firsts = firstOfEntry.get(key);
+    if (!firsts) {
+      firsts = new Map();
+      for (const runRow of readRunRows.all(taskId, chatId, runId) as MobileOneArtifactBindingRow[]) {
+        const runItem = mobileOneArtifactBindingItem(runRow, chatId, bindingLookup);
+        if (!runItem) continue;
+        const entry = oneArtifactRailMergeKey({ ...runItem.artifact, label: runItem.rawLabel });
+        if (!firsts.has(entry)) firsts.set(entry, runRow.binding_rowid);
+      }
+      firstOfEntry.set(key, firsts);
+    }
+    return firsts;
+  };
+  const candidates: Array<{ artifact: MobileBridgeInvocationArtifactDto; rowId: number }> = [];
   const seen = new Set<string>();
-  let scanRowId = Math.max(1, start.rowId);
-  let firstItemIndex = start.itemIndex;
-  const batchSize = 256;
-  for (let batch = 0; batch < 512 && candidates.length <= limit; batch += 1) {
-    const rows = eventRows.all(input.chatId, scanRowId, batchSize) as MobileOneArtifactEventRow[];
+  let scanFrom = Math.max(1, start.rowId);
+  let scanned = 0;
+  // Set when the read stops short of the end with entries in hand: the page is what was read and the cursor goes on from there.
+  let resumeAt: number | null = null;
+  while (candidates.length <= limit) {
+    const rows = readRows.all(chatId, scanFrom, MOBILE_RECENT_OUTPUT_BATCH) as MobileOneArtifactBindingRow[];
     if (rows.length === 0) break;
     for (const row of rows) {
-      const occurredAt = typeof row.event_ts === "string" && Number.isFinite(Date.parse(row.event_ts))
-        ? new Date(row.event_ts).toISOString()
+      scanned += 1;
+      const item = mobileOneArtifactBindingItem(row, chatId, bindingLookup);
+      if (!item) continue;
+      const { artifact } = item;
+      const entry = oneArtifactRailMergeKey({ ...artifact, label: item.rawLabel });
+      if (firstBindingsOfRun(artifact.taskId, artifact.runId).get(entry) !== row.binding_rowid) continue;
+      const bindingKey = `${artifact.runId}\u0000${artifact.artifactRef}`;
+      if (!seen.add(bindingKey)) continue;
+      const occurredAt = typeof row.created_at === "string" && Number.isFinite(Date.parse(row.created_at))
+        ? new Date(row.created_at).toISOString()
         : null;
-      const payload = parseMobileOneArtifactPayload(row.payload_json);
-      const artifacts = Array.isArray(payload.oneArtifacts) ? payload.oneArtifacts : [];
-      const itemStart = row.event_rowid === start.rowId ? firstItemIndex : 0;
-      for (let itemIndex = itemStart; itemIndex < artifacts.length; itemIndex += 1) {
-        const item = mobileOneArtifactLedgerItem(artifacts[itemIndex], input.chatId, bindingLookup);
-        if (!item) continue;
-        const { artifact } = item;
-        // A later save of the same output in the same run is the same rail entry. The phone keeps the first binding
-        // (live events project later saves onto it), and that entry's preview opens the newest bytes.
-        let outputs = runOutputs.get(artifact.runId);
-        if (!outputs) {
-          outputs = readOneArtifactRunOutputs(input.chatId, artifact.runId);
-          runOutputs.set(artifact.runId, outputs);
-        }
-        const first = outputs.first({ ...artifact, label: item.rawLabel });
-        if (first && oneArtifactIdentityKey(first.artifact) !== oneArtifactIdentityKey(artifact)) continue;
-        const bindingKey = `${artifact.runId}\u0000${artifact.artifactRef}`;
-        if (!seen.add(bindingKey)) continue;
-        candidates.push({
-          artifact: { ...artifact, ...(occurredAt ? { occurredAt } : {}) },
-          cursor: { rowId: row.event_rowid, itemIndex },
-        });
-        if (candidates.length > limit) break;
-      }
+      candidates.push({ artifact: { ...artifact, ...(occurredAt ? { occurredAt } : {}) }, rowId: row.binding_rowid });
       if (candidates.length > limit) break;
     }
-    if (candidates.length > limit || rows.length < batchSize) break;
-    scanRowId = rows[rows.length - 1].event_rowid + 1;
-    firstItemIndex = 0;
+    if (candidates.length > limit || rows.length < MOBILE_RECENT_OUTPUT_BATCH) break;
+    scanFrom = rows[rows.length - 1].binding_rowid + 1;
+    if (scanned >= MOBILE_RECENT_OUTPUT_SCAN_MAX && candidates.length > 0) {
+      resumeAt = scanFrom;
+      break;
+    }
   }
-  const next = candidates.length > limit ? candidates[limit] : null;
+  const next = candidates.length > limit ? candidates[limit].rowId : resumeAt;
   return {
     schemaVersion: 1,
     items: candidates.slice(0, limit).map((candidate) => candidate.artifact),
-    nextCursor: next ? encodeMobileOneArtifactCursor(input.chatId, next.cursor) : null,
+    nextCursor: next == null ? null : encodeMobileOneArtifactCursor(chatId, { rowId: next }),
   };
 }
 

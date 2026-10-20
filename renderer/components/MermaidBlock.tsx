@@ -34,6 +34,9 @@ export function MermaidBlock({ code, fallback }: { code: string; fallback: React
           import("beautiful-mermaid"),
           import("dompurify"),
         ]);
+        // A lazy import can settle after many streamed replacements or after
+        // navigation. Do not synchronously lay out superseded diagrams.
+        if (cancelled) return;
         const raw = renderMermaidSVG(source, { theme: prefersDark() ? "dark" : "light" } as never);
         if (cancelled) return;
         const clean = purify.default.sanitize(raw, {

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentlasIpc } from "@/lib/types";
 import { ipc } from "@/lib/ipc";
+import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { IconBolt, IconCode, IconCpu, IconImage, IconMoreHorizontal, IconPower, IconRefresh, IconSearch } from "@/components/Icon";
 import type { LocalEngineDevice, LocalModelAccelerationEvidence, LocalModelHubSnapshot } from "@shared/local-model-hub";
 import menu from "@/components/PanelPopover.module.css";
@@ -68,7 +69,7 @@ export function LocalModelHubPanel({ locale, standalone = false, selectedPackage
   }, [bridge, ko]);
   useEffect(() => { mounted.current = true; void refresh(); return () => { mounted.current = false; refreshEpoch.current++; }; }, [refresh]);
   useEffect(() => { lastRequestedPackage.current = selectedPackageId; if (selectedPackageId) { setSelectedModelId(selectedPackageId); setQuery(""); void refresh(); } }, [selectedPackageId, refresh]);
-  useEffect(() => { if (!busy) return; const timer = window.setInterval(() => void refresh(), 750); return () => window.clearInterval(timer); }, [busy, refresh]);
+  useVisibleInterval(refresh, 750, { enabled: Boolean(busy) });
   const closeMenu = useCallback(() => { setPanel(null); menuButton.current?.focus(); }, []);
   useEffect(() => {
     if (!panel) return;

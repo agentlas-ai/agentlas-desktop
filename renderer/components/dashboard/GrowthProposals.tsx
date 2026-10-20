@@ -55,12 +55,11 @@ export function GrowthProposals() {
   }, []);
 
   useEffect(() => {
-    void load();
     const refresh = () => void load(true);
     window.addEventListener("agentlas:attention-refresh", refresh);
     return () => window.removeEventListener("agentlas:attention-refresh", refresh);
   }, [load]);
-  useVisibleInterval(() => void load(true), POLL_MS);
+  useVisibleInterval(() => load(true), POLL_MS, { initial: load });
 
   const act = useCallback(
     async (id: string, action: "apply" | "reject" | "rollback" | "delete") => {

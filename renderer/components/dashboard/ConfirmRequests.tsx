@@ -57,13 +57,12 @@ export function ConfirmRequests() {
   // 초기 1회 load는 유지, 주기 폴링(10s)은 탭 보일 때만 — useVisibleInterval이 hidden 시 정지.
   // 답변 확정 직후에는 폴링을 기다리지 않고 즉시 목록을 갱신한다(AppShell 배지와 동일 신호).
   useEffect(() => {
-    void load();
     const refresh = () => void load(true);
     window.addEventListener("agentlas:attention-refresh", refresh);
     return () => window.removeEventListener("agentlas:attention-refresh", refresh);
   }, [load]);
   // 주기 폴링은 캐시 신선도(10s)에 맡긴다 — force 는 명시적 새로고침 이벤트에만(같은 페이지의 다른 폴러와 왕복이 겹쳤다).
-  useVisibleInterval(() => void load(false), POLL_MS);
+  useVisibleInterval(() => load(false), POLL_MS, { initial: load });
 
   // 행마다 그 질문이 있는 정확한 대화로 — 상단 배너와 같은 단일 경로(open-pending-confirmation).
   const openConfirmation = useCallback((item: PendingConfirmation) => openPendingConfirmation(item), []);

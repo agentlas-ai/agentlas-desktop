@@ -29,6 +29,7 @@
  *  - budget (D1): ≤4 executed actions per attempt; the unblocker's model calls are admitted in model-attempt.ts.
  */
 import { createHash } from "node:crypto";
+import { redactSecrets } from "../../shared/secret-patterns";
 import { desktopStoreTransaction } from "../store/change-bus";
 import type { GoalEpisodeDisposition } from "../long-run/episode-disposition";
 import type Database from "better-sqlite3";
@@ -46,6 +47,19 @@ export const AGI_ACTION_SCHEMA = "agentlas.agi-unblock.v1" as const;
  * executed in the same attempt is refused with this code. Distinct actions are unlimited.
  */
 export const AGI_REPEAT_IN_ATTEMPT_CODE = "agi.action.repeat-in-attempt";
+
+/**
+ * The same tactic is handed to a teammate at most this many times per Goal in any 24 hours. Re-briefing the same work again and
+ * again does not move it; other tactics, other moves and the next day stay open, so this is not a dead end.
+ */
+export const AGI_TACTIC_DISPATCHES_PER_DAY = 3;
+/** An action whose product path threw something that is not a typed code. */
+export const AGI_ACTION_THREW_CODE = "agi.action.threw";
+function untypedReason(error: unknown): string {
+  const raw = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  return redactSecrets(raw).replace(/(?:\/Users|\/home|[A-Za-z]:\\Users)[\\/][^\\/\s]+/g, "~").replace(/\s+/g, " ").trim().slice(0, 120);
+}
+export const AGI_TACTIC_DAILY_LIMIT_CODE = "agi.team.tactic-daily-limit";
 
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
@@ -151,10 +165,16 @@ export interface AgiExecutorDeps {
   goal(goalId: string): AgiGoalView | null;
   /** continueGoalForAlive (blocked-goal-sweep.ts) — the existing continuation path. */
   continueGoal(runId: string, expectedVersion: number): { action: string; detail: string };
+  /**
+   * Why continueGoal would defer this Goal before trying anything (aliveGoalContinuationRefusal), null = it would try. Absent: unknown,
+   * the work turn is asked as before.
+   */
+  continuationRefusal?(runId: string, expectedVersion: number): string | null;
   team?: {
     create(chatId: string, permission: AgiGoalView["permission"], input: { name: string; role?: string; personality?: string }): { memberId: string; created: boolean };
     invite(chatId: string, permission: AgiGoalView["permission"], member: string): { memberId: string; joined: boolean; memberName?: string };
-    dispatch(chatId: string, permission: AgiGoalView["permission"], input: { member: string; brief: string }): { sessionId: string; memberName?: string };
+    /** runId: the Goal's long run; the host start goes through its wake budget (wake-arbiter, source "agi"). */
+    dispatch(chatId: string, permission: AgiGoalView["permission"], input: { member: string; brief: string; runId?: string }): { sessionId: string; memberName?: string };
   };
   plan?: {
     read(goalId: string): AgiPlanView | null;
@@ -226,6 +246,13 @@ export class AgiActionExecutor {
 
   /** The goal ledger's version now (the model attempt refreshes its fence after its own accepted effects). */
   currentVersion(goalId: string): number | null { return this.deps.goal(goalId)?.version ?? null; }
+
+  /** The host would try to continue this Goal now (blocked-goal-sweep.ts aliveGoalContinuationRefusal). Unknown counts as yes. */
+  canContinueGoal(goalId: string): boolean {
+    const goal = this.deps.goal(goalId);
+    if (!goal) return false;
+    try { return (this.deps.continuationRefusal?.(goal.runId, goal.version) ?? null) === null; } catch { return true; }
+  }
 
   receipt(actionId: string): AgiActionReceipt | null {
     const row = this.deps.db.prepare("SELECT status, result_json FROM agi_action_receipts WHERE action_id = ?").get(actionId) as { status: string; result_json: string | null } | undefined;
@@ -432,8 +459,12 @@ export class AgiActionExecutor {
     try {
       result = this.run(request, goal, incident.id, decision);
     } catch (error) {
-      const code = error instanceof Error && /^[a-z][a-z0-9._:-]{2,120}$/.test(error.message) ? error.message : "agi.action.failed";
-      result = { actionId: request.actionId, action: request.action, ok: false, code };
+      // A typed code thrown by a product path is kept. Anything else is an untyped exception: its reason stays in the receipt
+      // (redacted, 120 chars) instead of vanishing into a generic code, and its code (agi.action.threw) is neither "failed" for the
+      // ruled-out rule below nor an executed move for repeat escalation, so a reason nobody knows does not pick the next move.
+      const typed = error instanceof Error && /^[a-z][a-z0-9._:-]{2,120}$/.test(error.message) ? error.message : null;
+      result = typed ? { actionId: request.actionId, action: request.action, ok: false, code: typed }
+        : { actionId: request.actionId, action: request.action, ok: false, code: AGI_ACTION_THREW_CODE, detail: { reason: untypedReason(error) } };
     }
     if (typeof request.args?.escalatedFrom === "string") result = { ...result, detail: { ...(result.detail ?? {}), escalatedFrom: request.args.escalatedFrom } };
     result = { ...result, detail: { ...(result.detail ?? {}), repeatDigest } };
@@ -515,7 +546,17 @@ export class AgiActionExecutor {
         if (!member || !brief || !nodeId) return no("agi.team.dispatch-args-required");
         const plan = this.deps.plan?.read(goal.goalId) ?? null;
         if (!plan?.tactics.some((tactic) => tactic.id === nodeId && tactic.status === "active")) return no("agi.team.node-not-active");
-        const session = this.deps.team.dispatch(goal.chatId, goal.permission, { member, brief: `[${nodeId}] ${brief}` });
+        const dayAgo = this.deps.now() - 24 * 60 * 60_000;
+        const recent = (this.deps.db.prepare(`SELECT settled_at_ms AS at FROM agi_action_receipts
+          WHERE goal_id = ? AND action = 'dispatch_teammate' AND status = 'settled' AND ok = 1
+            AND json_extract(result_json, '$.detail.nodeId') = ? AND settled_at_ms > ? ORDER BY settled_at_ms DESC`)
+          .all(goal.goalId, nodeId, dayAgo) as Array<{ at: number }>).map((row) => row.at);
+        if (recent.length >= AGI_TACTIC_DISPATCHES_PER_DAY) {
+          // Allowed again once the oldest of the newest `limit` dispatches is a day old.
+          return no(AGI_TACTIC_DAILY_LIMIT_CODE, { nodeId, dispatched: recent.length, limit: AGI_TACTIC_DISPATCHES_PER_DAY,
+            nextAllowedAt: new Date(recent[AGI_TACTIC_DISPATCHES_PER_DAY - 1]! + 24 * 60 * 60_000).toISOString() });
+        }
+        const session = this.deps.team.dispatch(goal.chatId, goal.permission, { member, brief: `[${nodeId}] ${brief}`, runId: goal.runId });
         return ok("agi.team.dispatched", { sessionId: session.sessionId, member, nodeId,
           ...(session.memberName ? { memberName: session.memberName } : {}) });
       }

@@ -375,9 +375,8 @@ export function EngineUsage() {
 
   // 초기 1회 load(usage+connections)는 유지, 주기 폴링(60s)은 loadUsage만 탭 보일 때 — useVisibleInterval이 hidden 시 정지.
   useEffect(() => {
-    void loadUsage();
     void loadConnections();
-  }, [loadUsage, loadConnections]);
+  }, [loadConnections]);
 
   useEffect(() => {
     const events = ipcEvents();
@@ -389,7 +388,7 @@ export function EngineUsage() {
       }
     });
   }, [loadConnections, refreshAuth]);
-  useVisibleInterval(() => void loadUsage(), POLL_MS);
+  useVisibleInterval(() => loadUsage(), POLL_MS, { initial: loadUsage });
   // 로컬 묶음은 엔진 카드가 아니라 설치된 모델 카드(한 행 두 장)를 그린다 — 2026-09-13.
   const localModels = useLocalModelSnapshot();
 

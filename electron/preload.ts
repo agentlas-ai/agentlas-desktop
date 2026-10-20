@@ -1013,6 +1013,7 @@ const api: AgentlasIpc = {
   oneArtifacts: {
     issuePreview: (input) => ipcRenderer.invoke("oneArtifacts:issuePreview", input),
     revokePreview: (input) => ipcRenderer.invoke("oneArtifacts:revokePreview", input),
+    listEarlier: (input) => ipcRenderer.invoke("oneArtifacts:listEarlier", input),
   },
   oneProfile: {
     get: () => ipcRenderer.invoke("oneProfile:get"),
@@ -1554,7 +1555,7 @@ const api: AgentlasIpc = {
     save: (sessionId: string) => ipcRenderer.invoke("liveDocument:save", sessionId),
     close: (sessionId: string) => ipcRenderer.invoke("liveDocument:close", sessionId),
     reveal: (sessionId: string) => ipcRenderer.invoke("liveDocument:reveal", sessionId),
-    render: (sessionId: string) => ipcRenderer.invoke("liveDocument:render", sessionId),
+    render: (sessionId: string, from?: number, count?: number) => ipcRenderer.invoke("liveDocument:render", sessionId, from, count),
     onChanged: (callback) => {
       const listener = (_event: unknown, value: { sessionId: string; chatId: string }) => callback(value);
       ipcRenderer.on("liveDocument:changed", listener);

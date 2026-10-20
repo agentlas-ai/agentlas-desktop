@@ -47,6 +47,9 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   // The Document tab is the owner's own hand: an app.call here would journal an AI edit as the owner's. The AI edits,
   // saves and opens live documents through the harness document.* ports (actor ai, run permission checked).
   [/^liveDocument\.(apply|save|close|pickAndOpen|reveal)$/, "the Document tab is the owner's hand; edit, open and save through harness document.*", "write"],
+  // The tab's own reads answer for any session id or chat id, with no conversation to check it against (app.call has none).
+  // One reads a conversation's documents through harness document.list / document.read, which check the conversation.
+  [/^liveDocument\.(snapshot|entries|list)$/, "the Document tab's own read of a session by id; read this conversation's documents through harness document.list / document.read", "write"],
   // The Finance workspace's bridges (f8c5c351, aba1eea1) are its screen's own calls. One reaches Finance through the harness
   // finance.* ports (finance/tools.ts FINANCE_PORTS, writes are harness commands under the run's permission); an app.call here
   // would act as the owner's screen. Whether any of these is exposed as well is the Finance owner's decision.
@@ -54,6 +57,9 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   // The One Outputs rail's own ledger read (rows past the event window of a long run). One reads a run's ledger through
   // runLedger.events / runLedger.chatTimeline; this one has no use outside that screen.
   [/^runLedger\.outputsAfter$/, "the Outputs rail's own read of a long run's later outputs; read a run's ledger through runLedger.events", "write"],
+  // The rail's "Earlier outputs" section: the conversation's earlier runs' outputs as ids. One reads a run's outputs through
+  // runLedger.events and opens a file through the harness; this list has no use outside that screen.
+  [/^oneArtifacts\.listEarlier$/, "the Outputs rail's own list of earlier runs' outputs; read a run's outputs through runLedger.events", "write"],
   // The screens' own read of the rows that settle a run longer than their event window (the answer anchor, the end of the run).
   [/^runLedger\.settleRowsAfter$/, "the screens' own read of a long run's settling rows; read a run's ledger through runLedger.events", "write"],
   // App lifecycle: it would end this very turn.
@@ -210,7 +216,8 @@ const DENIED_READ_PATHS: ReadonlySet<string> = new Set([
   "onePersonalData.connectorCatalog", "onePersonalData.gmailCatalog", "onePersonalData.gmailSourceSettings", "onePersonalData.historySnapshot",
   "onePersonalData.historyWorkStatus", "onePersonalData.listTargets", "onePersonalData.snapshot", "oneProvider.bootstrap", "oneProvider.status",
   "oneSupervisor.budgets", "oneSupervisor.journal", "oneSupervisor.receipt", "oneSupervisor.snapshot", "oneVault.recoverableOperations",
-  "oneWindow.getState", "workStart.get", "science.researchCapabilities.catalog", "runLedger.outputsAfter", "runLedger.settleRowsAfter",
+  "oneWindow.getState", "workStart.get", "science.researchCapabilities.catalog", "runLedger.outputsAfter", "oneArtifacts.listEarlier", "runLedger.settleRowsAfter",
+  "liveDocument.snapshot", "liveDocument.entries", "liveDocument.list",
 ]);
 const DENIED_DESTRUCTIVE_PATHS: ReadonlySet<string> = new Set([
   "oneMemory.inspector.forget", "liveDocument.close",
@@ -258,8 +265,9 @@ export function classifyAppControlPolicy(entry: Pick<AppControlCatalogEntry, "pa
   if (entry.path === "env.inventory") return explicit("read");
   // One SELECT … GROUP BY over the run history (store countRunHistory); added after the policy baseline.
   if (entry.path === "automations.runCounts") return explicit("read");
-  // Photographs an open live document (live-document/render.ts); the harness document.render port checks the chat first and
-  // reaches it through app.call, because only Main can open the window. It changes nothing.
+  // Photographs an open live document (live-document/render.ts); only Main can open the window, so the harness document.render
+  // port reaches it through app.call. It changes nothing. A direct app.call has no conversation: the operation itself refuses
+  // a call that does not carry the port's checked chat (service.ts CHAT_SCOPED_OPERATIONS).
   if (entry.path === "liveDocument.render") return explicit("read");
   if (entry.path === "env.rename") return explicit("consent");
   // The screen's own ownership checks still bind these operations to a real task and view. One can observe or

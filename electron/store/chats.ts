@@ -33,6 +33,7 @@ import { currentUiLocale } from "../ui-locale";
 import { applySeatSnapshotToChats, ensureSoloSeatForAgent } from "./seats";
 import {
   ensureCanonicalTaskForChat,
+  existingCanonicalTaskIdsForChats,
   findCanonicalTaskForChat,
   removeCanonicalTaskForOriginChat,
 } from "./tasks";
@@ -143,14 +144,14 @@ function parseChatRuntimeSelection(raw: string | null): RuntimeSelection | null 
   }
 }
 
-function toChat(row: ChatRow): Chat {
+function toChat(row: ChatRow, resolvedTaskId?: string | null): Chat {
   // A general One conversation deliberately has no Task until execution
   // signals promote it. Existing Work/Task chats are reconciled on read.
-  const existingTask = findCanonicalTaskForChat(row.id);
-  const task = existingTask ? ensureCanonicalTaskForChat(row.id) : null;
+  const taskId = resolvedTaskId !== undefined ? resolvedTaskId
+    : existingCanonicalTaskIdsForChats([row.id]).get(row.id) ?? null;
   return {
     id: row.id,
-    ...(task ? { taskId: task.id } : {}),
+    ...(taskId ? { taskId } : {}),
     projectId: row.project_id,
     firmId: row.firm_id,
     agentId: row.agent_id,
@@ -174,6 +175,11 @@ function toChat(row: ChatRow): Chat {
     seatKind: row.seat_kind === "solo" || row.seat_kind === "group" ? row.seat_kind : null,
     participants: parseChatParticipants(row.participants_json),
   };
+}
+
+function toChats(rows: ChatRow[]): Chat[] {
+  const taskIds = existingCanonicalTaskIdsForChats(rows.map(row => row.id));
+  return rows.map(row => toChat(row, taskIds.get(row.id) ?? null));
 }
 
 function parseChatParticipants(raw: string | null): Chat["participants"] {
@@ -210,7 +216,7 @@ export function listRecentChats(limit = 50): Chat[] {
        LIMIT ?`,
     )
     .all(limit) as ChatRow[];
-  return rows.map(toChat);
+  return toChats(rows);
 }
 
 /**
@@ -257,7 +263,7 @@ export function listRecentOneChats(limit = 50): Chat[] {
        LIMIT ?`,
     )
     .all(limit) as ChatRow[];
-  return rows.map(toChat);
+  return toChats(rows);
 }
 
 /**
@@ -283,7 +289,7 @@ export function listArchivedChats(): Chat[] {
       "SELECT * FROM chats WHERE archived_at IS NOT NULL ORDER BY archived_at DESC",
     )
     .all() as ChatRow[];
-  return rows.map(toChat);
+  return toChats(rows);
 }
 
 export function listChatsByProject(projectId: string): Chat[] {
@@ -297,7 +303,7 @@ export function listChatsByProject(projectId: string): Chat[] {
        ORDER BY updated_at DESC`,
     )
     .all(projectId) as ChatRow[];
-  return rows.map(toChat);
+  return toChats(rows);
 }
 
 export function listChatsByFirm(firmId: string): Chat[] {
@@ -311,7 +317,7 @@ export function listChatsByFirm(firmId: string): Chat[] {
        ORDER BY updated_at DESC`,
     )
     .all(firmId) as ChatRow[];
-  return rows.map(toChat);
+  return toChats(rows);
 }
 
 /** 가벼운 표면 판별 — Task 재조정(toChat) 없이 origin_surface만 읽는다. */

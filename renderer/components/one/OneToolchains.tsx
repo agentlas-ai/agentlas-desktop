@@ -1,3 +1,4 @@
+import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   OwnerDecision,
@@ -69,7 +70,7 @@ export function OneToolchains({ api, locale }: { api: ToolchainsApi | null | und
     if (list.status === "fulfilled") { setAssets(list.value); setError(null); } else setError(toolchainErrorText(list.reason, copy));
     if (learning.status === "fulfilled") setOverview(learning.value);
   }, [api, copy]);
-  useEffect(() => { void load(); const timer = setInterval(() => void load(), 60_000); return () => clearInterval(timer); }, [load]);
+  useVisibleInterval(load, 60_000, { initial: load });
   const run = async (action: () => Promise<ToolchainOverview>) => {
     setBusy(true); setError(null);
     try { setOverview(await action()); }

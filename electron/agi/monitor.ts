@@ -21,6 +21,8 @@ import { AgiIncidentStore, type AgiIncident } from "./incident-store";
 
 export const AGI_MONITOR_INTERVAL_MS = 60_000;
 /** Retry the same typed incident at 5, 10, 20, 40, then 60 minute intervals; new evidence has its own digest. */
+/** How far back attempts of one cause count toward the per-goal backoff. */
+const GOAL_CAUSE_WINDOW_MS = 6 * 60 * 60_000;
 export function agiRetryDelayMs(attempts: number): number {
   return Math.min(60 * 60_000, 5 * 60_000 * 2 ** Math.min(4, Math.max(0, attempts - 1)));
 }
@@ -116,6 +118,15 @@ export function ensureAgiAttemptSchema(db: Database.Database): void {
     PRIMARY KEY(goal_id, state_digest))`);
 }
 
+/**
+ * The incident group: one impediment is (goal, cause, tactic). The tactic is the node the ledger names as blocked, else the first
+ * tactic the classifier offers. The digest still moves with the facts; the group keeps it one incident.
+ */
+export function agiIncidentGroupKey(diagnosis: Pick<AgiBlockerDiagnosis, "reasonCode" | "eligibleTactics">,
+  facts: Pick<AgiBlockerFacts, "blockedNodeId">): string {
+  return JSON.stringify([diagnosis.reasonCode, facts.blockedNodeId ?? diagnosis.eligibleTactics[0] ?? null]);
+}
+
 export class AgiGoalMonitor {
   readonly incidents: AgiIncidentStore;
   private readonly states = new Map<string, AgiGoalMonitorState>();
@@ -180,7 +191,17 @@ export class AgiGoalMonitor {
         if (result.attempted) attempts += 1;
       } catch (error) { console.warn("[agi-monitor] goal reconcile failed:", goalId, error); }
     }
+    // A Goal that left the monitored list (finished, cancelled, deleted, moved off this desktop) leaves nothing behind: its wake timer
+    // and its open incidents are closed too. Only its in-memory state was dropped before, so a cancelled Goal's incident stayed open
+    // indefinitely and its due timer could still fire a reconcile.
     for (const goalId of [...this.states.keys()]) if (!seen.has(goalId)) { this.states.delete(goalId); this.sources.delete(goalId); }
+    for (const [goalId, timer] of [...this.dueTimers]) if (!seen.has(goalId)) { clearTimeout(timer); this.dueTimers.delete(goalId); }
+    const nowMs = this.deps.now();
+    const open = this.deps.db.prepare("SELECT DISTINCT goal_id FROM agi_incidents WHERE status = 'open'").all() as Array<{ goal_id: string }>;
+    for (const { goal_id: goalId } of open) {
+      if (seen.has(goalId)) continue;
+      if (this.incidents.resolveGoal(goalId, "goal_gone", nowMs) > 0) { try { this.deps.onChanged?.(goalId); } catch { /* refresh only */ } }
+    }
     return { goals: seen.size, attempts, diagnoses };
   }
 
@@ -211,12 +232,17 @@ export class AgiGoalMonitor {
     const diagnosis = classifyAgiBlocker(facts);
     const before = this.states.get(goalId);
     let incident: AgiIncident | null = null;
-    if (!diagnosis.attemptDue) {
+    if (!diagnosis.attemptDue && facts.heldBy && diagnosis.display === "running" && diagnosis.reasonCode !== AGI_NO_ADMISSIBLE_PATH) {
+      // The Goal's own work (a room or teammate turn in flight) or the host scheduler (a registered wake) holds it. Nothing is due, but
+      // the impediment is not gone either: keep its incident open and held, so it carries on with its retry history when the hold
+      // ends. Closing it "running" here and opening a new one a minute later is what made every teammate turn a new incident.
+      this.incidents.hold(goalId, facts.heldBy, nowMs);
+    } else if (!diagnosis.attemptDue) {
       // Running, finished, or an explicit owner stop: nothing is an impediment AGI owns.
       this.incidents.resolveGoal(goalId, diagnosis.display === "terminal" ? "goal_terminal"
         : diagnosis.display === "paused" ? "owner_stop" : diagnosis.reasonCode === AGI_NO_ADMISSIBLE_PATH ? AGI_NO_ADMISSIBLE_PATH : "running", nowMs);
     } else {
-      incident = this.incidents.open(diagnosis, facts.runId, nowMs).incident;
+      incident = this.incidents.open(diagnosis, facts.runId, nowMs, agiIncidentGroupKey(diagnosis, facts)).incident;
     }
     let attempted = false;
     let result: AgiUnblockResult | null = null;
@@ -256,6 +282,10 @@ export class AgiGoalMonitor {
             .run(nowMs, goalId, diagnosis.stateDigest);
           prior.at_ms = nowMs;
         }
+        // A goal that flips between stalled and running opens a new digest each time, so the per-digest retry delay below never
+        // applies. Back off per goal and cause instead: the streak of recent attempts for the same reason
+        // code, restarted by an attempt that changed state, waits the same doubling delay a repeated digest would.
+        if (!prior && this.goalCauseBackoff(goalId, incident!.reasonCode, incident!.id, nowMs)) return false;
         const retryable = prior && ["failed", "rested", "needs-human"].includes(prior.outcome)
           && prior.code !== "agi.model-attempt-dispatched" && nowMs - prior.at_ms >= agiRetryDelayMs(current.attempts);
         // A clock or timeout cannot prove an unfinished action/provider claim is dead.
@@ -305,7 +335,7 @@ export class AgiGoalMonitor {
 
     const next: AgiGoalMonitorState = {
       goalId, display: diagnosis.display, defects: diagnosis.defects,
-      incident: incident && incident.status === "open" ? { id: incident.id, ownerClass: incident.ownerClass, causeKind: incident.causeKind,
+      incident: incident && incident.status === "open" && !incident.heldReason ? { id: incident.id, ownerClass: incident.ownerClass, causeKind: incident.causeKind,
         reasonCode: incident.reasonCode, attempts: incident.attempts, openedAtMs: incident.openedAtMs } : null,
     };
     this.states.set(goalId, next);
@@ -315,6 +345,23 @@ export class AgiGoalMonitor {
     return { diagnosis, attempted, result };
   }
 
+  /**
+   * true = hold this attempt. Counts the goal's attempts of the same cause since the last one that changed state (within a
+   * window), and requires the doubling retry delay for that streak since the newest of them.
+   */
+  private goalCauseBackoff(goalId: string, reasonCode: string, incidentId: string, nowMs: number): boolean {
+    // Every real attempt of this cause in the window counts, including the attempts this same incident made under an earlier digest
+    // (an incident carries on across digests, incident-store.ts open). No code resets the streak: "agi.action.state-changed" is the
+    // refusal of an attempt whose fence moved (nothing was done), and an "acted" attempt is exactly what a flapping goal
+    // repeats without getting anywhere. The window is what lets the delay shrink again.
+    const rows = this.deps.db.prepare(`SELECT a.at_ms AS at_ms FROM agi_unblock_attempts a
+      JOIN agi_incidents i ON i.id = a.incident_id
+      WHERE a.goal_id = ? AND (i.reason_code = ? OR a.incident_id = ?) AND a.at_ms > ? AND a.at_ms <= ?
+        AND COALESCE(a.code, '') NOT IN ('agi.no-handler', 'agi.attempt-claimed')
+      ORDER BY a.at_ms DESC LIMIT 12`).all(goalId, reasonCode, incidentId, nowMs - GOAL_CAUSE_WINDOW_MS, nowMs) as Array<{ at_ms: number }>;
+    if (rows.length === 0) return false;
+    return nowMs - rows[0]!.at_ms < agiRetryDelayMs(rows.length);
+  }
   private record(goalId: string, digest: string, incidentId: string, trigger: string, result: AgiUnblockResult, nowMs: number, outcome: string): void {
     this.deps.db.prepare(`INSERT INTO agi_unblock_attempts(goal_id,state_digest,incident_id,trigger,outcome,code,result_json,at_ms)
       VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(goal_id,state_digest) DO UPDATE SET outcome=excluded.outcome, code=excluded.code,

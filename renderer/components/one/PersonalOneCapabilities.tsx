@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc, ipcEvents } from "@/lib/ipc";
+import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
+import { createStoreChangeThrottle } from "@/lib/store-change-policy";
 import type { Automation, InstalledMcpServer, McpToolCatalogEntry } from "@/lib/types";
 import type { OneToolReadiness } from "@shared/one-harness";
 import { DescribeAutomation } from "@/components/automation/DescribeAutomation";
@@ -51,9 +53,13 @@ export function PersonalOneCapabilities({ open, locale, chatId, oneId, onClose, 
   }, [open, locale, oneId]);
   useEffect(() => {
     if (!open) return;
-    void load();
-    const off = ipcEvents()?.onStoreChanged?.(() => { void load(); });
-    return () => { ++revision.current; off?.(); abort.current?.abort(); };
+    const reads = createCoalescedRefresh<void>(load, () => undefined);
+    const refresh = () => { if (document.visibilityState !== "hidden") void reads.request(undefined); };
+    const changes = createStoreChangeThrottle({ immediate: () => false, throttleMs: 1_000, run: refresh });
+    refresh();
+    const off = ipcEvents()?.onStoreChanged?.((change) => changes.notify(change));
+    document.addEventListener("visibilitychange", refresh);
+    return () => { ++revision.current; changes.dispose(); reads.dispose(); off?.(); abort.current?.abort(); document.removeEventListener("visibilitychange", refresh); };
   }, [open, load]);
   useEffect(() => { setConfigure(null); setInstall(null); setError(null); setOauthMessage(null);setManualUrl(null); }, [open]);
   const perform = async (id: string, action: () => Promise<unknown>) => {
